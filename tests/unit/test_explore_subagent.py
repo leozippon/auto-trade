@@ -373,6 +373,7 @@ def test_fold_explore_tools_are_writable_shell_contract(tmp_path: Path) -> None:
         "edit_file",
         "shell",
         "validate_strategy",
+        "todo",
         "modification_check",
     ]
     by_name = {tool.spec.name: tool for tool in tools}

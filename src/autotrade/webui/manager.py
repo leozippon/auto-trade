@@ -20,7 +20,13 @@ from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.runtime import chmod_tree, utc_now_iso, write_json_atomic
 from autotrade.environment.strategy import StrategySchedule
 from autotrade.pipelines import DailyStrategyPipeline, StrategyExperimentConfig
+from autotrade.pipelines.agent_inbox import (
+    INBOX_NAME,
+    InboxError,
+    enqueue_inbox_message,
+)
 from autotrade.pipelines.hitl_state import (
+    LIVE_RUN_STATES,
     WEB_CLOSED_PARAMS,
     WEB_CREATE_DEFAULTS,
     WEB_INTERNAL_PARAMS,
@@ -67,6 +73,7 @@ _ACTIONS = {
     "reveal_test_results",
     "restart",
     "terminate",
+    "inject_message",
 }
 # Every control operation that could restart or steer learning after the
 # Test/Held-out numbers are on screen. `resume` and `restart` belong here:
@@ -89,6 +96,7 @@ _SEALED_BLOCKED_ACTIONS = frozenset(
         "cancel_skip_to_heldout",
         "rollback_fold",
         "rerun_fold",
+        "inject_message",
     }
 )
 
@@ -605,6 +613,8 @@ class ExperimentManager:
         step_index: object = None,
         directive: str | None = None,
         mode: str | None = None,
+        text: object = None,
+        interrupt: object = False,
     ) -> dict[str, object]:
         if action not in _ACTIONS:
             raise ManagerError(f"unknown control action: {action!r}")
@@ -626,6 +636,13 @@ class ExperimentManager:
                 return self._terminate(experiment_id, directory)
             if action == "restart":
                 return self._restart(experiment_id, directory)
+            if action == "inject_message":
+                return self._inject_message(
+                    directory,
+                    session_key=session_key,
+                    text=text,
+                    interrupt=interrupt,
+                )
             with control_lock(path):
                 control = read_control(path)
                 self._apply_control_action(
@@ -648,6 +665,50 @@ class ExperimentManager:
                 ):
                     return {**response, **self.start_worker(experiment_id)}
             return response
+
+    def _inject_message(
+        self,
+        directory: Path,
+        *,
+        session_key: str | None,
+        text: object,
+        interrupt: object,
+    ) -> dict[str, object]:
+        if not isinstance(session_key, str) or not session_key.strip():
+            raise ManagerError("inject_message requires session_key")
+        session_key = session_key.strip()
+        if interrupt is None:
+            interrupt_flag = False
+        elif isinstance(interrupt, bool):
+            interrupt_flag = interrupt
+        else:
+            raise ManagerError("inject_message interrupt must be a boolean")
+        state = experiment_state(directory)
+        if not state.get("worker_alive"):
+            raise ManagerError("inject_message requires a live worker")
+        status = state.get("status")
+        status_map = status if isinstance(status, Mapping) else {}
+        run_state = str(status_map.get("state") or "")
+        current = str(status_map.get("session_key") or "")
+        if run_state not in LIVE_RUN_STATES or not current:
+            raise ManagerError(
+                "cannot inject_message into a finished or failed session"
+            )
+        if current != session_key:
+            raise ManagerError(
+                "inject_message session_key must match the current Agent session"
+            )
+        if isinstance(text, str):
+            _reject_calendar_text(text)
+        try:
+            return enqueue_inbox_message(
+                directory / "hitl" / INBOX_NAME,
+                session_key=session_key,
+                text=text,
+                interrupt=interrupt_flag,
+            )
+        except InboxError as exc:
+            raise ManagerError(str(exc)) from exc
 
     def _apply_control_action(
         self,

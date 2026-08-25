@@ -564,12 +564,18 @@ def test_llm_worker_runs_real_meta_fold_validation_and_heldout(
     assert {"write_taste", "finish_meta"}.issubset(meta_tool_names)
     # The Meta session may regularize the working copy, so it holds the typed
     # writers and modification_check — but it stays offline and never backtests.
-    assert {"write_file", "edit_file", "modification_check"}.issubset(meta_tool_names)
+    assert {"write_file", "edit_file", "modification_check", "todo"}.issubset(
+        meta_tool_names
+    )
     assert {"shell", "daily_backtest", "step_rollback"}.isdisjoint(meta_tool_names)
     fold_tool_names = {item["function"]["name"] for item in llm.calls[1]["tools"]}
-    assert {"ask_user", "daily_backtest", "finish_fold", "step_rollback"}.issubset(
-        fold_tool_names
-    )
+    assert {
+        "ask_user",
+        "daily_backtest",
+        "finish_fold",
+        "step_rollback",
+        "todo",
+    }.issubset(fold_tool_names)
     assert all(
         "test_period" not in (message.content or "")
         for call in llm.calls

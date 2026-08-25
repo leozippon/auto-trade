@@ -57,6 +57,7 @@ from .config import (
     StepResult,
     StrategyExperimentConfig,
 )
+from .agent_inbox import expire_experiment_session_inbox
 from .folds import FoldSpec, build_fold_schedule, heldout_periods
 from .hitl_state import fold_session_key
 from .ledger import ExperimentLedger, latest_fold_records
@@ -257,6 +258,10 @@ class RollingExperimentPipeline:
                             "user_question_hook",
                         ),
                         progress_hook=progress,
+                        session_key=str(
+                            context.get("session_key")
+                            or fold_session_key(epoch_id, fold.fold_id)
+                        ),
                     )
                 )
             except AgentSessionDeadlineExceeded as exc:
@@ -397,6 +402,11 @@ class RollingExperimentPipeline:
                 **_session_timing(context, run_started),
             }
             self.ledger.append(record)
+            expire_experiment_session_inbox(
+                self.config.experiment_dir,
+                str(record["session_key"]),
+                expired_by=run_id,
+            )
             retained_artifact_id = frozen.artifact_id if frozen is not None else None
             return FoldOutcome(
                 fold.fold_id, run_id, status, frozen, validation, test_summary
@@ -549,6 +559,10 @@ class RollingExperimentPipeline:
                             "user_question_hook",
                         ),
                         "progress_hook": progress,
+                        "session_key": str(
+                            context.get("session_key")
+                            or meta_session_key(epoch_id, completed_folds)
+                        ),
                         "network": "disabled",
                     }
                 )
@@ -644,6 +658,11 @@ class RollingExperimentPipeline:
                     "review_window": history.get("review_window"),
                     **_session_timing(context, run_started),
                 }
+            )
+            expire_experiment_session_inbox(
+                self.config.experiment_dir,
+                meta_session_key(epoch_id, completed_folds),
+                expired_by=run_id,
             )
             return taste, frozen
         except Exception as exc:

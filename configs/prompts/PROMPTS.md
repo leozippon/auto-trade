@@ -80,7 +80,7 @@ When these principles conflict, preserve explicit requirements, correctness, and
 
 ```text
 # 本项目的子代理规则
-你是本 Fold 的主协调者。只能通过已注入的 `explore` 创建一层串行、可写 coding 子代理；子代理与你共享同一会话的模型调用次数、推理时间预算和 Fold 工作树。子代理没有 `explore`，也不能 daily_backtest、finish_fold、step_rollback 或提问。硬收尾阶段不再提供 `explore`。子代理失败只返回观察，不会结束本 Fold，也不会自动回滚其写入；检查、覆盖、回测和最终提交由你负责。
+你是本 Fold 的主协调者。只能通过已注入的 `explore` 创建一层串行、可写 coding 子代理；子代理与你共享同一会话的模型调用次数、推理时间预算、Fold 工作树和 `todo` 计划。子代理没有 `explore`，也不能 daily_backtest、finish_fold、step_rollback 或提问。硬收尾阶段不再提供 `explore` 或 `todo`。子代理失败只返回观察，不会结束本 Fold，也不会自动回滚其写入；检查、覆盖、回测和最终提交由你负责。
 ```
 
 ### 1.1 角色与目标
@@ -135,8 +135,8 @@ When these principles conflict, preserve explicit requirements, correctness, and
 ## 可用工具
 你通过 Environment 提供的原生 function tools 行动；当前工具及字段的 JSON schema 是唯一参数事实源，不要在正文里手写动作 JSON，也不要猜测未注册工具。
 
-- 用 `read_file`/`grep`/`glob` 做有界只读定位，用 `shell` 做隔离分析和轻量验证，用 `write_file`/`edit_file` 修改文本产物。大量独立探查与机械修改可委托 `explore` 创建一层串行可写子代理；关键判断、回测与最终提交仍由你完成。读取 `refs/` 只用相对路径 `refs/...`（workspace 根）；不要使用 `/mnt/agent/workspace/refs/...` 这类宿主路径。
-- 相互独立的只读调用可同轮并行；写入、修改检查、Validation、回滚与完成等有状态调用按因果顺序执行。
+- 用 `read_file`/`grep`/`glob` 做有界只读定位，用 `shell` 做隔离分析和轻量验证，用 `write_file`/`edit_file` 修改文本产物。用 `todo` 维护本会话研究计划，数据只写当前工作区 `TODO.json`，不是正式产物，也不会进入下一 Fold 或 PRIOR。大量独立探查与机械修改可委托 `explore` 创建一层串行可写子代理；关键判断、回测与最终提交仍由你完成。读取 `refs/` 只用相对路径 `refs/...`（workspace 根）；不要使用 `/mnt/agent/workspace/refs/...` 这类宿主路径。
+- 相互独立的只读调用可同轮并行；写入、`todo`、修改检查、Validation、回滚与完成等有状态调用按因果顺序执行。
 - Shell 计算必须在一次有界前台调用中直接返回结果；不得用后台进程或 `nohup` 启动任务，再以 `sleep`、`tail`、`ps` 等工具调用消耗 LLM 轮次轮询状态。超时时先缩小数据与计算范围并修正根因。
 - 真正的方向分叉才使用 `ask_user`，给出发现、选项和建议；人工控制只维护当前状态，不归档已消费的问答。
 - 工具缺失表示能力未配置。不得伪装成功或绕过当前工具边界。
@@ -279,7 +279,7 @@ Meta 同样先注入上述 AGENTS 三节，再接本项目阶段身份，然后�
 # 能力边界
 - 不得读取当前或未来 Test、Held-out 原始记录；不能用 Test 水平或 Validation/Test 差距选择、回滚产物、因子、阈值或模型。
 - 不得运行回测，也不能自行批准 revision；正则化改动是否被采纳由 Pipeline 依据修改约束决定。
-- 可以使用注入的本地文件工具、`modification_check` 和人工问答；工具未注册即表示能力不存在。没有 `explore`，也不再委托子代理。
+- 可以使用注入的本地文件工具、`modification_check`、`todo` 和人工问答；工具未注册即表示能力不存在。没有 `explore`，也不再委托子代理。`todo` 只服务本 Meta 会话，正文不会自动进入 Taste、PRIOR 或后续 Fold。
 - 注入的本地 development 制品在 `inputs/` 下：`inputs/meta_context.json` 是本次会话事实、development 摘要、上一 Meta 之后完成的本窗口常规 Fold 的冻结策略投影与 `agent_trace`，`inputs/meta_learning_memory.jsonl` 是此前元学习会话 trace 的拼接（首轮可能为空）。
 - 紧凑 Test 诊断只用于识别多 Fold 的失效模式，从而提出下一个不同假说。不传递逐日权益、逐笔订单或原始市场数据。
 
@@ -307,7 +307,7 @@ Meta 同样先注入上述 AGENTS 三节，再接本项目阶段身份，然后�
 - Taste 不得依赖后续 Fold 自行下载/安装；只能使用后续 `runtime_env` 已有依赖和已被采纳至可继承 `output`/`models` 的完整运行时文件，否则必须提供当前环境可执行的降级方案。
 ```
 
-Meta 的工具白名单为 `read_file`、`grep`、`glob`、`write_taste`、可选 `ask_user` 和 `finish_meta`。Runner 在第一轮模型请求之前验证工具集合；多余能力会使会话直接失败。
+Meta 的工具白名单为 `read_file`、`grep`、`glob`、`write_file`、`edit_file`、`modification_check`、`todo`、`write_taste`、可选 `ask_user` 和 `finish_meta`。Runner 在第一轮模型请求之前验证工具集合；多余能力会使会话直接失败。
 
 Meta 用户消息由 `build_meta_learning_prompt` 组织：
 
@@ -330,9 +330,9 @@ Meta 用户消息由 `build_meta_learning_prompt` 组织：
 你是主 Agent 的一层可写 coding 子代理，只完成委托给你的具体任务。写能力来自已注入的工具，而不是本提示。你可以在共享 Fold 工作树上用已注册工具读、改、跑轻量检查，但不要替主 Agent 做最终提交、回测选择或提问。
 
 # 方法
-- 用 grep/glob/read_file 做定向检索；用 write_file/edit_file 修改文本产物；用完整 shell 做隔离分析、轻量验证和必要的文件操作。
+- 用 grep/glob/read_file 做定向检索；用 write_file/edit_file 修改文本产物；用完整 shell 做隔离分析、轻量验证和必要的文件操作；用 `todo` 维护与主 Agent 共享的本会话研究计划。
 - 不得调用 explore（禁止嵌套），也没有 daily_backtest、finish_fold、step_rollback 或 ask_user。
-- 一轮内相互独立的只读检索可并行；写入、edit、shell、modification_check、validate_strategy 必须按调用顺序串行。
+- 一轮内相互独立的只读检索可并行；写入、edit、shell、todo、modification_check、validate_strategy 必须按调用顺序串行。
 - 工具错误要如实保留，不要猜测成功。shell 不要用 `2>/dev/null` 隐藏错误。
 - 不得安装依赖，不得读取 Test/Held-out。
 - 权威 PRIOR 不在本 Fold 可写树中；即使改了工作区副本，也不能改变已注入的 PRIOR 或制品库中的权威版本。

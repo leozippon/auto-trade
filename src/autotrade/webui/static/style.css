@@ -860,6 +860,24 @@ textarea.directive {
  background: var(--input-bg);
  color: var(--text);
 }
+textarea.directive.inject-input {
+ min-height: 5.5rem;
+}
+.inject-meta {
+ display: flex;
+ justify-content: flex-end;
+ align-items: center;
+ margin-top: 0.4rem;
+}
+.inject-count,
+.inject-queue {
+ font-size: 0.8rem;
+ color: var(--muted);
+ word-break: break-all;
+}
+.inject-queue {
+ margin-top: 0.45rem;
+}
 .modal.prompt-modal textarea.prompt-editor {
  height: 70vh;
  min-height: 70vh;

@@ -73,6 +73,7 @@ from autotrade.environment.tools.search import (
 from autotrade.environment.tools.shell import SandboxShellTool
 from autotrade.environment.tools.step_rollback import StepRollbackTool
 from autotrade.environment.tools.strategy_validation import StrategyValidationTool
+from autotrade.environment.tools.todo import TodoTool
 from autotrade.environment.tools.workspace import SafeWorkspace
 
 from .agent_views import compact_fold_history
@@ -597,6 +598,7 @@ def build_fold_explore_tools(
         EditFileTool(workspace),
         SandboxShellTool(workspace, command_runner),
         StrategyValidationTool(workspace),
+        TodoTool(workspace),
         modification,
     ]
 
@@ -662,6 +664,7 @@ class LLMFoldDeveloper:
         from autotrade.agent.explore import ExploreSubAgentConfig, ExploreSubAgentEngine
         from autotrade.agent.prompts import build_system_prompt
         from autotrade.agent.runner import AgentSessionConfig, AgentSessionRunner
+        from autotrade.pipelines.agent_inbox import bind_session_inbox
 
         root = self.runtime_root / request.run_id
         if root.exists():
@@ -706,6 +709,7 @@ class LLMFoldDeveloper:
                 # break correlation with the step tree and the data summary.
                 "fold_id": request.fold.fold_id,
                 "run_id": request.run_id,
+                "session_key": request.session_key,
                 "kind": "fold",
                 "llm": {
                     "provider": str(getattr(self.llm, "provider", "")),
@@ -886,6 +890,7 @@ class LLMFoldDeveloper:
                 EditFileTool(safe),
                 SandboxShellTool(safe, command_runner),
                 StrategyValidationTool(safe),
+                TodoTool(safe),
                 modification,
                 backtest,
             ]
@@ -958,6 +963,11 @@ class LLMFoldDeveloper:
                 time_budget=time_budget,
                 event_sink=_agent_event_sink(
                     trace, request.progress_hook, request.run_id
+                ),
+                inbox=bind_session_inbox(
+                    self.experiment_dir,
+                    session_key=request.session_key,
+                    run_id=request.run_id,
                 ),
             )
             result = runner.run(self._fold_instruction(request))
@@ -1202,6 +1212,7 @@ class LLMMetaLearner:
             TasteFinishTool,
             visible_window_dates,
         )
+        from autotrade.pipelines.agent_inbox import bind_session_inbox
 
         run_id = str(facts.get("run_id") or f"meta_{uuid.uuid4().hex}")
         root = self.runtime_root / run_id
@@ -1265,7 +1276,12 @@ class LLMMetaLearner:
             key: value
             for key, value in facts.items()
             if key
-            not in {"user_question_hook", "progress_hook", "meta_learning_memory"}
+            not in {
+                "user_question_hook",
+                "progress_hook",
+                "meta_learning_memory",
+                "session_key",
+            }
         }
         if parent_id:
             public["parent_artifact_id"] = agent_visible_ref(
@@ -1297,6 +1313,7 @@ class LLMMetaLearner:
                 # agent_visible_ref themselves.
                 "fold_id": session_id,
                 "run_id": run_id,
+                "session_key": str(facts.get("session_key") or ""),
                 "kind": "meta_learning",
                 "llm": {
                     "provider": str(getattr(self.llm, "provider", "")),
@@ -1379,6 +1396,7 @@ class LLMMetaLearner:
             WriteFileTool(safe),
             EditFileTool(safe),
             WriteTasteTool(safe),
+            TodoTool(safe),
             modification,
         ]
         hook = facts.get("user_question_hook")
@@ -1429,6 +1447,11 @@ class LLMMetaLearner:
                 progress_hook,
                 run_id,
                 include_content=False,
+            ),
+            inbox=bind_session_inbox(
+                self.experiment_dir,
+                session_key=str(facts.get("session_key") or ""),
+                run_id=run_id,
             ),
         )
         try:
@@ -1637,6 +1660,20 @@ def _safe_meta_trace_payload(
         "tool_call_started": {"tool", "tool_call_id", "status"},
         "tool_call": {"call_index", "tool_call_id", "tool"},
         "session_end": {"status", "llm_calls", "steps_used"},
+        "user_message": {
+            "message_id",
+            "interrupt",
+            "applied_at",
+            "safe_point",
+            "content",
+        },
+        "tool_skipped": {
+            "tool_call_id",
+            "tool",
+            "reason",
+            "message_id",
+            "safe_point",
+        },
     }.get(event_type, {"status", "error"})
     return {key: value for key, value in payload.items() if key in allowed}
 

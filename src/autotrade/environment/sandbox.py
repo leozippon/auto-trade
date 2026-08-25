@@ -573,6 +573,7 @@ _COLLECT_IGNORE = shutil.ignore_patterns(
     ".venv",
     ".conda",
     ".npm",
+    "TODO.json",
 )
 
 

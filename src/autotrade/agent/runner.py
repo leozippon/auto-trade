@@ -21,10 +21,11 @@ from __future__ import annotations
 import json
 import re
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Protocol
 
 from autotrade.environment.llm import (
     ChatMessage,
@@ -34,7 +35,7 @@ from autotrade.environment.llm import (
     context_request_fits,
     is_context_overflow_error,
 )
-from autotrade.environment.runtime import sanitize_for_log
+from autotrade.environment.runtime import sanitize_for_log, utc_now_iso
 from autotrade.environment.time_budget import (
     InferenceTimeBudget,
     SessionTimeBudgetAware,
@@ -113,6 +114,7 @@ _FOLD_TOOLS = frozenset(
         "read_file",
         "shell",
         "step_rollback",
+        "todo",
         "validate_strategy",
         "write_file",
     }
@@ -126,6 +128,7 @@ _META_TOOLS = frozenset(
         "grep",
         "modification_check",
         "read_file",
+        "todo",
         "write_file",
         "write_taste",
     }
@@ -137,6 +140,30 @@ _CLEARED_TOOL_RESULT = json.dumps(
     },
     ensure_ascii=False,
 )
+INBOX_SAFE_BEFORE_LLM = "before_llm"
+INBOX_SAFE_AFTER_LLM_BEFORE_TOOLS = "after_llm_before_tools"
+INBOX_SAFE_BETWEEN_SERIAL_TOOLS = "between_serial_tools"
+INBOX_SAFE_AFTER_PARALLEL_READONLY = "after_parallel_readonly"
+INBOX_SAFE_AFTER_TOOLS_BEFORE_LLM = "after_tools_before_llm"
+_INBOX_TRACE_CHARS = 400
+_INTERRUPTED_BY_USER = "interrupted_by_user"
+
+
+class AgentInboxHook(Protocol):
+    """Current-session unconsumed notices; consume is atomic per run."""
+
+    def pending(self) -> Sequence[object]: ...
+
+    def consume(self, message_id: str) -> str: ...
+
+
+def _inbox_trace_text(text: str) -> str:
+    redacted = sanitize_for_log(text)
+    if not isinstance(redacted, str):
+        redacted = str(redacted)
+    if len(redacted) > _INBOX_TRACE_CHARS:
+        return redacted[:_INBOX_TRACE_CHARS]
+    return redacted
 
 
 @dataclass(frozen=True)
@@ -217,6 +244,7 @@ class AgentSessionRunner:
         time_budget: InferenceTimeBudget | None = None,
         conversation_id: str | None = None,
         event_sink: Callable[[str, dict[str, object]], None] | None = None,
+        inbox: AgentInboxHook | None = None,
     ) -> None:
         self.llm = llm
         self.tools = tools
@@ -243,6 +271,7 @@ class AgentSessionRunner:
         )
         self.conversation_id = conversation_id or f"conversation_{uuid.uuid4().hex}"
         self.event_sink = event_sink
+        self.inbox = inbox
         self._observation_summaries: list[dict[str, object]] = []
         self._complete_validation_nodes: list[dict[str, object]] = []
         self._hard_finalization = False
@@ -313,6 +342,9 @@ class AgentSessionRunner:
             messages = self._clear_stale_tool_results(messages)
             messages = self._trim(messages)
             provider_tools = self._provider_tools()
+            messages = self._apply_inbox(
+                messages, safe_point=INBOX_SAFE_BEFORE_LLM
+            )
 
             try:
                 messages = self._prepare_context_request(
@@ -431,9 +463,28 @@ class AgentSessionRunner:
                     ChatMessage("user", json.dumps(nudge, ensure_ascii=False))
                 )
                 self._remember_observation("llm_call", nudge)
+                messages = self._apply_inbox(
+                    messages, safe_point=INBOX_SAFE_AFTER_LLM_BEFORE_TOOLS
+                )
                 continue
 
-            results = self._dispatch_tool_calls(response.tool_calls, time_budget)
+            if self._inbox_interrupt_pending():
+                results = self._skip_tool_calls(
+                    response.tool_calls,
+                    safe_point=INBOX_SAFE_AFTER_LLM_BEFORE_TOOLS,
+                )
+                apply_point = INBOX_SAFE_AFTER_LLM_BEFORE_TOOLS
+            else:
+                parallel = self._is_parallel_readonly_batch(response.tool_calls)
+                results, skipped_at = self._dispatch_tool_calls(
+                    response.tool_calls, time_budget
+                )
+                if skipped_at:
+                    apply_point = skipped_at
+                elif parallel:
+                    apply_point = INBOX_SAFE_AFTER_PARALLEL_READONLY
+                else:
+                    apply_point = INBOX_SAFE_AFTER_TOOLS_BEFORE_LLM
             first_new_tool_index = len(messages)
             for call, record in results:
                 messages.append(
@@ -502,6 +553,7 @@ class AgentSessionRunner:
                     ),
                     steps_used=accepted_steps,
                 )
+            messages = self._apply_inbox(messages, safe_point=apply_point)
             if (
                 self.config.mode == "fold"
                 and accepted_steps >= self.config.max_steps
@@ -697,7 +749,7 @@ class AgentSessionRunner:
 
     def _dispatch_tool_calls(
         self, calls: tuple[ToolCall, ...], time_budget: InferenceTimeBudget
-    ) -> list[tuple[ToolCall, dict[str, object]]]:
+    ) -> tuple[list[tuple[ToolCall, dict[str, object]]], str | None]:
         def run_one(index: int) -> tuple[ToolCall, dict[str, object]]:
             call = calls[index]
             self._emit(
@@ -724,14 +776,8 @@ class AgentSessionRunner:
                 self._activate_hard_finalization_if_ready(time_budget.remaining())
             return call, record
 
-        can_parallel = len(calls) > 1 and all(
-            call.name in _PARALLEL_READ_TOOLS
-            and (self.tools.spec(call.name) is not None)
-            and not bool(self.tools.spec(call.name).mutating)  # type: ignore[union-attr]
-            for call in calls
-        )
-        if can_parallel:
-            results: list[tuple[ToolCall, dict[str, object]] | None] = [None] * len(
+        if self._is_parallel_readonly_batch(calls):
+            slots: list[tuple[ToolCall, dict[str, object]] | None] = [None] * len(
                 calls
             )
             with ThreadPoolExecutor(max_workers=min(len(calls), 4)) as executor:
@@ -740,12 +786,20 @@ class AgentSessionRunner:
                     for index in range(len(calls))
                 }
                 for future in as_completed(futures):
-                    results[futures[future]] = future.result()
-            return [item for item in results if item is not None]
+                    slots[futures[future]] = future.result()
+            return [item for item in slots if item is not None], None
 
         results: list[tuple[ToolCall, dict[str, object]]] = []
         terminal_seen = False
         for index, call in enumerate(calls):
+            if index > 0 and self._inbox_interrupt_pending():
+                results.extend(
+                    self._skip_tool_calls(
+                        calls[index:],
+                        safe_point=INBOX_SAFE_BETWEEN_SERIAL_TOOLS,
+                    )
+                )
+                return results, INBOX_SAFE_BETWEEN_SERIAL_TOOLS
             if terminal_seen:
                 results.append(
                     (
@@ -760,7 +814,71 @@ class AgentSessionRunner:
             results.append(run_one(index))
             if call.name in _TERMINAL_TOOLS and self.tools.finished:
                 terminal_seen = True
-        return results
+        return results, None
+
+    def _is_parallel_readonly_batch(self, calls: tuple[ToolCall, ...]) -> bool:
+        return len(calls) > 1 and all(
+            call.name in _PARALLEL_READ_TOOLS
+            and (self.tools.spec(call.name) is not None)
+            and not bool(self.tools.spec(call.name).mutating)  # type: ignore[union-attr]
+            for call in calls
+        )
+
+    def _inbox_interrupt_pending(self) -> bool:
+        if self.inbox is None:
+            return False
+        return any(bool(getattr(item, "interrupt", False)) for item in self.inbox.pending())
+
+    def _skip_tool_calls(
+        self, calls: tuple[ToolCall, ...], *, safe_point: str
+    ) -> list[tuple[ToolCall, dict[str, object]]]:
+        skipped: list[tuple[ToolCall, dict[str, object]]] = []
+        record = {
+            "ok": False,
+            "observation": _INTERRUPTED_BY_USER,
+            "error": _INTERRUPTED_BY_USER,
+        }
+        for call in calls:
+            skipped.append((call, dict(record)))
+            self._emit(
+                "tool_skipped",
+                {
+                    "tool_call_id": call.id,
+                    "tool": call.name,
+                    "reason": _INTERRUPTED_BY_USER,
+                    "safe_point": safe_point,
+                },
+            )
+        return skipped
+
+    def _apply_inbox(
+        self, messages: list[ChatMessage], *, safe_point: str
+    ) -> list[ChatMessage]:
+        if self.inbox is None:
+            return messages
+        pending = tuple(self.inbox.pending())
+        if not pending:
+            return messages
+        applied_at = utc_now_iso()
+        for item in pending:
+            message_id = str(getattr(item, "message_id", "") or "").strip()
+            text = str(getattr(item, "text", "") or "")
+            if not message_id or not text.strip():
+                raise RuntimeError("inbox hook returned an invalid notice")
+            interrupt = bool(getattr(item, "interrupt", False))
+            messages.append(ChatMessage("user", text))
+            self._emit(
+                "user_message",
+                {
+                    "message_id": message_id,
+                    "interrupt": interrupt,
+                    "applied_at": applied_at,
+                    "safe_point": safe_point,
+                    "content": _inbox_trace_text(text),
+                },
+            )
+            self.inbox.consume(message_id)
+        return messages
 
     def _dispatch_explore(self, call: ToolCall) -> dict[str, object]:
         if self.explore is None:

@@ -68,19 +68,31 @@ const RESUMABLE_STATES = [
   "terminated",
   "created",
 ];
-const ACTIVE_SESSION_STATES = new Set([
+const LIVE_RUN_STATES = new Set([
   "running_session",
   "waiting_step_user",
   "waiting_user_reply",
 ]);
+const ACTIVE_SESSION_STATES = LIVE_RUN_STATES;
 const RESEARCHER_WAIT_STATES = new Set([
   "waiting_step_user",
   "waiting_user_reply",
+]);
+const INJECT_MESSAGE_MAX_CHARS = 8192;
+const INJECT_MESSAGE_QUEUED_NOTE = "已排队，将在 Agent 下一安全点生效";
+const TERMINAL_INJECT_STATES = new Set([
+  "completed",
+  "stopped",
+  "failed",
+  "interrupted",
+  "terminated",
+  "development_complete",
 ]);
 
 let pollTimer = null;
 let liveTimers = [];
 let liveSources = [];
+const injectDrafts = new Map();
 
 /* ---------------- theme ---------------- */
 
@@ -2740,6 +2752,12 @@ function sessionDetailPanel(detail, selectedKey) {
       stepGatePanel(detail, session),
       liveTracePanel(detail, session),
     );
+  if (
+    session.kind === "fold" ||
+    session.kind === "meta_learning" ||
+    session.kind === "heldout"
+  )
+    panel.append(injectMessagePanel(detail, session));
   if (session.kind === "fold" && done) {
     const resultPanel = foldResultPanel(detail, session);
     // The ledger can appear while post-Fold analysis is still running, briefly
@@ -3228,8 +3246,10 @@ async function sendControlAction(
     // leaving the page head (seal badge) and other panels stale.
     if (reload) route();
     else refreshDetail();
+    return true;
   } catch (error) {
     toast(error.message, true);
+    return false;
   }
 }
 
@@ -3765,6 +3785,145 @@ function statsChipsRow(stats) {
     );
   }
   return chips;
+}
+
+function injectDraftKey(experimentId, sessionKey) {
+  return `${experimentId}\0${sessionKey}`;
+}
+
+function injectMessageEnabled(detail, session) {
+  const status = (detail && detail.status) || {};
+  const kind = session && session.kind;
+  const sessionKey = session && session.key;
+  return Boolean(
+    (kind === "fold" || kind === "meta_learning") &&
+      LIVE_RUN_STATES.has(detail && detail.state) &&
+      sessionKey &&
+      status.session_key === sessionKey &&
+      detail &&
+      detail.worker_alive,
+  );
+}
+
+function injectMessageDisableReason(detail, session) {
+  if (injectMessageEnabled(detail, session)) return "";
+  const state = (detail && detail.state) || "";
+  if (state === "paused") return "实验已暂停。请先恢复运行后再发送。";
+  if (TERMINAL_INJECT_STATES.has(state))
+    return "会话已结束，无法发送。";
+  return "当前没有可接收消息的 Agent 会话。";
+}
+
+function buildInjectMessagePayload(sessionKey, text, interrupt) {
+  return {
+    action: "inject_message",
+    session_key: sessionKey,
+    text,
+    interrupt: Boolean(interrupt),
+  };
+}
+
+function validateInjectMessageText(text) {
+  const value = String(text ?? "");
+  if (!value.trim()) return { ok: false, error: "消息不能为空" };
+  if ([...value].length > INJECT_MESSAGE_MAX_CHARS)
+    return {
+      ok: false,
+      error: `消息不能超过 ${INJECT_MESSAGE_MAX_CHARS} 个字符`,
+    };
+  return { ok: true, text: value };
+}
+
+function inboxQueueSummary(inbox) {
+  const pending = Number((inbox && inbox.pending_count) || 0);
+  const ids = Array.isArray(inbox && inbox.queued_ids)
+    ? inbox.queued_ids.map(String)
+    : [];
+  return { pending_count: pending, queued_ids: ids };
+}
+
+function injectMessagePanel(detail, session) {
+  const enabled = injectMessageEnabled(detail, session);
+  const reason = injectMessageDisableReason(detail, session);
+  const draftKey = injectDraftKey(detail.experiment_id, session.key);
+  const queue = inboxQueueSummary(detail.inbox);
+  const textarea = el("textarea", {
+    class: "directive inject-input",
+    maxlength: String(INJECT_MESSAGE_MAX_CHARS),
+    placeholder: "写入给当前 Agent 的消息……",
+  });
+  if (injectDrafts.has(draftKey)) textarea.value = injectDrafts.get(draftKey);
+  const count = el("span", { class: "inject-count" });
+  const updateCount = () => {
+    count.textContent = `${[...textarea.value].length} / ${INJECT_MESSAGE_MAX_CHARS}`;
+    injectDrafts.set(draftKey, textarea.value);
+  };
+  textarea.addEventListener("input", updateCount);
+  updateCount();
+  const sendBtn = el(
+    "button",
+    { type: "button", class: "btn primary" },
+    "发送",
+  );
+  const interruptBtn = el(
+    "button",
+    { type: "button", class: "btn" },
+    "发送并打断",
+  );
+  const setBusy = (busy) => {
+    const locked = busy || !enabled;
+    textarea.disabled = locked;
+    sendBtn.disabled = locked;
+    interruptBtn.disabled = locked;
+  };
+  setBusy(false);
+  const submit = async (interrupt) => {
+    const checked = validateInjectMessageText(textarea.value);
+    if (!checked.ok) {
+      toast(checked.error, true);
+      return;
+    }
+    const previous = textarea.value;
+    setBusy(true);
+    injectDrafts.delete(draftKey);
+    const ok = await sendControlAction(
+      detail.experiment_id,
+      buildInjectMessagePayload(session.key, checked.text, interrupt),
+      INJECT_MESSAGE_QUEUED_NOTE,
+    );
+    if (!ok) {
+      injectDrafts.set(draftKey, previous);
+      if (textarea.isConnected) {
+        textarea.value = previous;
+        updateCount();
+        setBusy(false);
+      }
+    }
+  };
+  sendBtn.addEventListener("click", () => submit(false));
+  interruptBtn.addEventListener("click", () => submit(true));
+  const queueLine =
+    queue.pending_count > 0
+      ? `排队 ${queue.pending_count} 条${
+          queue.queued_ids.length ? `：${queue.queued_ids.join(", ")}` : ""
+        }`
+      : "当前没有排队消息";
+  return el(
+    "div",
+    { class: "panel inject-message section-gap" },
+    el("h4", {}, "发给当前 Agent"),
+    el(
+      "div",
+      { class: enabled ? "hint" : "hint warn" },
+      enabled
+        ? "消息在 Agent 下一安全点生效。「发送并打断」只请求跳过尚未开跑的工具，不会取消已在途的模型调用或已开始的工具。"
+        : reason,
+    ),
+    el("div", { class: "inject-queue" }, queueLine),
+    textarea,
+    el("div", { class: "inject-meta" }, count),
+    el("div", { class: "control-bar" }, sendBtn, interruptBtn),
+  );
 }
 
 function liveTracePanel(detail, session) {

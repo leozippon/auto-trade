@@ -373,6 +373,7 @@ class FoldSessionRequest:
         repr=False,
         compare=False,
     )
+    session_key: str = ""
 
 
 @dataclass(frozen=True)

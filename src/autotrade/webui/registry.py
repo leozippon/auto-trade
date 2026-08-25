@@ -18,6 +18,7 @@ from io import StringIO
 from pathlib import Path
 
 from autotrade.environment.replay.style import STYLE_ARTIFACT_NAME, STYLE_SCHEMA_VERSION
+from autotrade.pipelines.agent_inbox import INBOX_NAME, inbox_public_view
 from autotrade.pipelines.fold_analysis import analysis_paths
 from autotrade.pipelines.hitl_state import (
     ANALYSIS_DIR_NAME,
@@ -487,6 +488,7 @@ def experiment_detail(root: Path, experiment_id: str) -> dict[str, object]:
             "test_revealed": False,
             "heldout_records": [],
             "ledger": [],
+            "inbox": {"pending_count": 0, "queued_ids": []},
         }
     records = read_ledger_records(directory)
     folds = latest_fold_records(records)
@@ -532,10 +534,15 @@ def experiment_detail(root: Path, experiment_id: str) -> dict[str, object]:
             entry["records"] = [_public_heldout_view(row, revealed) for row in heldout]
         sessions.append(entry)
     control = read_control(hitl / "control.json")
+    current_session = detail.get("current_session")
+    inbox_session = (
+        str(current_session) if isinstance(current_session, str) and current_session else None
+    )
     return {
         **detail,
         "params": _public_params(params),
         "control": control.to_record(),
+        "inbox": inbox_public_view(hitl / INBOX_NAME, session_key=inbox_session),
         # Effective reveal state (manual reveal OR held-out completed); the
         # UI must key on this, not on the raw control flag.
         "test_revealed": revealed,

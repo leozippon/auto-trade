@@ -209,7 +209,7 @@ def render() -> str:
         "",
         _block(META_SYSTEM_PROMPT),
         "",
-        "Meta 的工具白名单为 `read_file`、`grep`、`glob`、`write_taste`、可选 `ask_user` 和 `finish_meta`。Runner 在第一轮模型请求之前验证工具集合；多余能力会使会话直接失败。",
+        "Meta 的工具白名单为 `read_file`、`grep`、`glob`、`write_file`、`edit_file`、`modification_check`、`todo`、`write_taste`、可选 `ask_user` 和 `finish_meta`。Runner 在第一轮模型请求之前验证工具集合；多余能力会使会话直接失败。",
         "",
         "Meta 用户消息由 `build_meta_learning_prompt` 组织：",
         "",

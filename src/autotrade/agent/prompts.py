@@ -61,8 +61,8 @@ FOLD_ACTION_SECTION = """\
 ## 可用工具
 你通过 Environment 提供的原生 function tools 行动；当前工具及字段的 JSON schema 是唯一参数事实源，不要在正文里手写动作 JSON，也不要猜测未注册工具。
 
-- 用 `read_file`/`grep`/`glob` 做有界只读定位，用 `shell` 做隔离分析和轻量验证，用 `write_file`/`edit_file` 修改文本产物。大量独立探查与机械修改可委托 `explore` 创建一层串行可写子代理；关键判断、回测与最终提交仍由你完成。读取 `refs/` 只用相对路径 `refs/...`（workspace 根）；不要使用 `/mnt/agent/workspace/refs/...` 这类宿主路径。
-- 相互独立的只读调用可同轮并行；写入、修改检查、Validation、回滚与完成等有状态调用按因果顺序执行。
+- 用 `read_file`/`grep`/`glob` 做有界只读定位，用 `shell` 做隔离分析和轻量验证，用 `write_file`/`edit_file` 修改文本产物。用 `todo` 维护本会话研究计划，数据只写当前工作区 `TODO.json`，不是正式产物，也不会进入下一 Fold 或 PRIOR。大量独立探查与机械修改可委托 `explore` 创建一层串行可写子代理；关键判断、回测与最终提交仍由你完成。读取 `refs/` 只用相对路径 `refs/...`（workspace 根）；不要使用 `/mnt/agent/workspace/refs/...` 这类宿主路径。
+- 相互独立的只读调用可同轮并行；写入、`todo`、修改检查、Validation、回滚与完成等有状态调用按因果顺序执行。
 - Shell 计算必须在一次有界前台调用中直接返回结果；不得用后台进程或 `nohup` 启动任务，再以 `sleep`、`tail`、`ps` 等工具调用消耗 LLM 轮次轮询状态。超时时先缩小数据与计算范围并修正根因。
 - 真正的方向分叉才使用 `ask_user`，给出发现、选项和建议；人工控制只维护当前状态，不归档已消费的问答。
 - 工具缺失表示能力未配置。不得伪装成功或绕过当前工具边界。
@@ -108,7 +108,7 @@ FOLD_PROHIBITIONS = """\
 
 FOLD_SUBAGENT_CONTRACT = """\
 # 本项目的子代理规则
-你是本 Fold 的主协调者。只能通过已注入的 `explore` 创建一层串行、可写 coding 子代理；子代理与你共享同一会话的模型调用次数、推理时间预算和 Fold 工作树。子代理没有 `explore`，也不能 daily_backtest、finish_fold、step_rollback 或提问。硬收尾阶段不再提供 `explore`。子代理失败只返回观察，不会结束本 Fold，也不会自动回滚其写入；检查、覆盖、回测和最终提交由你负责。\
+你是本 Fold 的主协调者。只能通过已注入的 `explore` 创建一层串行、可写 coding 子代理；子代理与你共享同一会话的模型调用次数、推理时间预算、Fold 工作树和 `todo` 计划。子代理没有 `explore`，也不能 daily_backtest、finish_fold、step_rollback 或提问。硬收尾阶段不再提供 `explore` 或 `todo`。子代理失败只返回观察，不会结束本 Fold，也不会自动回滚其写入；检查、覆盖、回测和最终提交由你负责。\
 """
 
 FOLD_STATIC_SECTIONS = (
@@ -180,7 +180,7 @@ META_SYSTEM_PROMPT = """\
 # 能力边界
 - 不得读取当前或未来 Test、Held-out 原始记录；不能用 Test 水平或 Validation/Test 差距选择、回滚产物、因子、阈值或模型。
 - 不得运行回测，也不能自行批准 revision；正则化改动是否被采纳由 Pipeline 依据修改约束决定。
-- 可以使用注入的本地文件工具、`modification_check` 和人工问答；工具未注册即表示能力不存在。没有 `explore`，也不再委托子代理。
+- 可以使用注入的本地文件工具、`modification_check`、`todo` 和人工问答；工具未注册即表示能力不存在。没有 `explore`，也不再委托子代理。`todo` 只服务本 Meta 会话，正文不会自动进入 Taste、PRIOR 或后续 Fold。
 - 注入的本地 development 制品在 `inputs/` 下：`inputs/meta_context.json` 是本次会话事实、development 摘要、上一 Meta 之后完成的本窗口常规 Fold 的冻结策略投影与 `agent_trace`，`inputs/meta_learning_memory.jsonl` 是此前元学习会话 trace 的拼接（首轮可能为空）。
 - 紧凑 Test 诊断只用于识别多 Fold 的失效模式，从而提出下一个不同假说。不传递逐日权益、逐笔订单或原始市场数据。
 

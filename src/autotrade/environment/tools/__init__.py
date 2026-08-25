@@ -25,6 +25,7 @@ from .search import SEARCH_ROOTS, GlobTool, GrepTool, ReadFileTool, SearchRoots
 from .shell import ReadOnlyShellTool, SandboxShellTool
 from .step_rollback import StepRollbackTool
 from .strategy_validation import StrategyValidationTool
+from .todo import TodoTool
 from .workspace import SafeWorkspace
 
 __all__ = [
@@ -46,6 +47,7 @@ __all__ = [
     "SessionInterrupt",
     "StepRollbackTool",
     "StrategyValidationTool",
+    "TodoTool",
     "Tool",
     "ToolError",
     "ToolRegistry",

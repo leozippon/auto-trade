@@ -31,6 +31,7 @@ from autotrade.agent.runner import AgentSessionDeadlineExceeded
 from autotrade.environment.runtime import AgentTraceWriter
 from autotrade.environment.tools.base import SessionInterrupt
 
+from .agent_inbox import expire_experiment_session_inbox
 from .hitl_state import (
     DevelopmentSession,
     StatusReporter,
@@ -120,6 +121,7 @@ class InteractiveExperimentRunner:
                     # the inherited frozen chain with a validated step-tree node.
                     "parent_override": control.parent_overrides.get(session.session_key, ""),
                     "rerun_id": rerun_id or "",
+                    "session_key": session.session_key,
                 }
                 self._begin_session(session)
                 record = self._execute_with_retries(session, context)
@@ -135,6 +137,20 @@ class InteractiveExperimentRunner:
                 consume_session_controls(
                     self.control_path,
                     session.session_key,
+                )
+                latest = next(
+                    (
+                        row
+                        for row in reversed(self.ledger.read())
+                        if row.get("session_key") == session.session_key
+                        and row.get("record_type") in ("fold", "meta_learning")
+                    ),
+                    None,
+                )
+                expire_experiment_session_inbox(
+                    Path(self.control_path).resolve().parent.parent,
+                    session.session_key,
+                    expired_by=str((latest or {}).get("run_id") or session.session_key),
                 )
                 completed.add(session.session_key)
                 ran += 1

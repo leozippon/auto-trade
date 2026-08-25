@@ -23,6 +23,7 @@ _AGENT_TRACE_EVENT_TYPES = frozenset(
         "session_start",
         "tool_call",
         "trace_limit_reached",
+        "user_message",
         "wrap_up_started",
     }
 )
@@ -35,10 +36,12 @@ _BODY_KEYS = frozenset(
     {
         "body",
         "content",
+        "description",
         "input",
         "new_text",
         "old_text",
         "source",
+        "subject",
         "text",
     }
 )
@@ -229,6 +232,13 @@ def _compact_agent_event(event: Mapping[str, object]) -> dict[str, object]:
         if args:
             item["args"] = args
         _attach_result_status(item, event.get("result"), event)
+    elif event_type == "user_message":
+        if event.get("content"):
+            item["content"] = _redact_text(event.get("content"), limit=_SUMMARY_CHARS)
+        if event.get("interrupt") is not None:
+            item["interrupt"] = event.get("interrupt")
+        if event.get("safe_point"):
+            item["safe_point"] = event.get("safe_point")
     elif event_type == "session_start":
         item["mode"] = event.get("mode")
     elif event_type == "session_end":

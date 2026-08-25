@@ -468,10 +468,11 @@ def test_non_exempt_llm_and_concurrent_read_tools_consume_effective_time() -> No
         system_prompt="read",
         time_budget=budget,
     )
-    records = runner._dispatch_tool_calls(
+    records, skipped = runner._dispatch_tool_calls(
         (ToolCall("a", "glob", {}), ToolCall("b", "grep", {})), budget
     )
 
+    assert skipped is None
     assert all(record[1]["ok"] for record in records)
     assert budget.remaining() == pytest.approx(6.5)
 
