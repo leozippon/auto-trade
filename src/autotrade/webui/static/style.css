@@ -1093,26 +1093,46 @@ textarea.directive {
  gap: 0.45rem;
  padding: 4px 2px;
 }
-.trace-event {
+.trace-event,
+.trace-block {
  border: 1px solid var(--border);
  border-radius: 10px;
  padding: 0.5rem 0.75rem;
  background: var(--panel-2);
  font-size: 0.905rem;
 }
-.trace-event .head {
+.trace-event .head,
+.trace-block .head {
  display: flex;
  gap: 0.6rem;
  align-items: baseline;
  color: var(--muted);
  flex-wrap: wrap;
 }
-.trace-event .type {
+.trace-event .type,
+.trace-block .type {
  font-weight: 700;
  color: var(--text);
 }
-.trace-event .type.llm_call {
+.trace-event .type.llm_call,
+.trace-block .type.agent_output {
  color: var(--accent);
+}
+.trace-block .type.tool_group {
+ color: var(--muted);
+}
+.trace-block .type.subagent {
+ color: var(--run);
+}
+.trace-block .type.subagent.completed {
+ color: var(--ok);
+}
+.trace-block .type.subagent.timeout,
+.trace-block .type.subagent.error {
+ color: var(--bad);
+}
+.trace-block .type.user {
+ color: var(--text);
 }
 .trace-event .type.session_end {
  color: var(--ok);
@@ -1120,7 +1140,8 @@ textarea.directive {
 .trace-event .type.session_error {
  color: var(--bad);
 }
-.trace-event pre {
+.trace-event pre,
+.trace-block pre {
  margin: 0.45rem 0 2px;
  white-space: pre-wrap;
  word-break: break-word;
@@ -1129,7 +1150,8 @@ textarea.directive {
  max-height: 19rem;
  overflow: auto;
 }
-.trace-event .llm-content {
+.trace-event .llm-content,
+.trace-block .llm-content {
  margin: 0.45rem 0 2px;
  white-space: pre-wrap;
  word-break: break-word;
@@ -1137,16 +1159,25 @@ textarea.directive {
  line-height: 1.55;
  color: var(--text);
 }
-.trace-event .tool-brief {
+.trace-event .tool-brief,
+.trace-block .tool-brief {
  font-family: var(--mono);
  font-size: 0.78rem;
  color: var(--muted);
  word-break: break-all;
 }
-.trace-event details summary {
+.trace-event details summary,
+.trace-block details summary {
  cursor: pointer;
  color: var(--muted);
  font-size: 0.845rem;
+}
+.trace-tool-list,
+.trace-subagent-detail {
+ display: flex;
+ flex-direction: column;
+ gap: 0.35rem;
+ margin-top: 0.4rem;
 }
 .trace-tools {
  display: flex;

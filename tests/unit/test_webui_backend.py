@@ -2398,6 +2398,7 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertEqual(stats["llm_total_tokens"], 3000)
         self.assertEqual(stats["llm_prompt_tokens"], 2300)
         self.assertEqual(stats["llm_completion_tokens"], 700)
+        self.assertEqual(stats["subagent_tasks"], 0)
 
     def test_trace_download_serves_raw_jsonl(self) -> None:
         response = self.client.get(

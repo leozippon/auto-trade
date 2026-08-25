@@ -223,6 +223,21 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
     ) -> dict[str, object]:
         return traces.trace_stats(trace_path(experiment_id, run_id))
 
+    @app.get("/api/experiments/{experiment_id}/trace/blocks")
+    def get_trace_blocks(
+        experiment_id: str,
+        run_id: str | None = Query(None),
+        offset: int = Query(0, ge=0),
+        max_bytes: int | None = Query(None, ge=1, le=traces.MAX_BLOCK_READ_BYTES),
+        tail_events: int | None = Query(None, ge=1, le=500),
+    ) -> dict[str, object]:
+        return traces.read_trace_blocks(
+            trace_path(experiment_id, run_id),
+            offset=offset,
+            max_bytes=max_bytes,
+            tail_events=tail_events,
+        )
+
     @app.get("/api/experiments/{experiment_id}/trace/stream")
     def get_trace_stream(
         request: Request,

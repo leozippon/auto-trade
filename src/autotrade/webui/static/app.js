@@ -3724,10 +3724,15 @@ function statsChipsRow(stats) {
   const counts = { ...(stats.counts || {}), ...(stats.tool_counts || {}) };
   const chips = el("div", { class: "stats-chips" });
   const labelled = new Set();
+  const subagentTasks = Number(stats.subagent_tasks) || 0;
   for (const [key, label] of STAT_CHIPS) {
     labelled.add(key);
-    if (!counts[key]) continue;
-    chips.append(el("span", { class: "stat-chip" }, `${label} ${counts[key]}`));
+    if (counts[key])
+      chips.append(el("span", { class: "stat-chip" }, `${label} ${counts[key]}`));
+    if (key === "llm_call" && subagentTasks)
+      chips.append(
+        el("span", { class: "stat-chip" }, `🧩 子代理 ${subagentTasks}`),
+      );
   }
   for (const [tool, count] of Object.entries(stats.tool_counts || {})) {
     if (!labelled.has(tool))
@@ -3762,11 +3767,6 @@ function statsChipsRow(stats) {
   return chips;
 }
 
-/* Events backfilled by the REST tail before the SSE stream opens; the stream
-   then resumes from the byte offset that tail returned, so history is never
-   replayed one message at a time. */
-const LIVE_TRACE_TAIL_EVENTS = 200;
-
 function liveTracePanel(detail, session) {
   const panel = el(
     "div",
@@ -3797,53 +3797,51 @@ function liveTracePanel(detail, session) {
   const experimentId = encodeURIComponent(detail.experiment_id);
   const runId = String((detail.status || {}).run_id || "");
   const query = runId ? `?run_id=${encodeURIComponent(runId)}` : "";
-  const appendEvents = (events) => {
-    if (!events.length) return;
-    const fragment = document.createDocumentFragment();
-    for (const event of events) fragment.append(traceEventNode(event));
-    box.append(fragment);
-    while (box.children.length > 400) box.firstChild.remove();
-    if (auto.checked) box.scrollTop = box.scrollHeight;
+  // Claim before the first await so the initial refreshBlocks and
+  // pollStats→refreshBlocks cannot both construct an EventSource.
+  let streamOpening = false;
+  let streamDone = false;
+  let lastBlocks = "";
+  let refreshTimer = 0;
+  const refreshBlocks = async () => {
+    const claimStream = !streamOpening;
+    if (claimStream) streamOpening = true;
+    try {
+      const page = await api(
+        `/api/experiments/${experimentId}/trace/blocks${query}`,
+      );
+      lastBlocks = renderTraceBlocks(box, page.blocks || [], {
+        truncated: Boolean(page.history_truncated),
+        eof: streamDone,
+        previous: lastBlocks,
+      });
+      if (auto.checked) box.scrollTop = box.scrollHeight;
+      if (claimStream) openStream(Number(page.next_offset) || 0);
+    } catch {
+      if (claimStream) openStream(0);
+    }
   };
-
+  const scheduleRefresh = () => {
+    if (refreshTimer) return;
+    refreshTimer = window.setTimeout(() => {
+      refreshTimer = 0;
+      refreshBlocks();
+    }, 400);
+  };
   const openStream = (offset) => {
     const separator = query ? "&" : "?";
     const source = new EventSource(
       `/api/experiments/${experimentId}/trace/stream${query}${separator}offset=${offset}`,
     );
     liveSources.push(source);
-    source.onmessage = (message) => {
-      try {
-        appendEvents([JSON.parse(message.data)]);
-      } catch {
-        /* malformed events are ignored */
-      }
-    };
+    source.onmessage = () => scheduleRefresh();
     source.addEventListener("eof", () => {
-      box.append(el("div", { class: "hint" }, "—— trace 结束 ——"));
+      streamDone = true;
+      refreshBlocks();
       source.close();
     });
   };
-
-  // One REST call backfills the tail instantly; without it a long trace would
-  // stream every historical event through SSE before reaching "live".
-  api(
-    `/api/experiments/${experimentId}/trace${query}${query ? "&" : "?"}tail_events=${LIVE_TRACE_TAIL_EVENTS}`,
-  )
-    .then((page) => {
-      if (page.history_truncated) {
-        box.append(
-          el(
-            "div",
-            { class: "hint" },
-            `仅显示最近 ${LIVE_TRACE_TAIL_EVENTS} 条事件；完整记录可在运行结束后回放或下载。`,
-          ),
-        );
-      }
-      appendEvents(page.events || []);
-      openStream(Number(page.next_offset) || 0);
-    })
-    .catch(() => openStream(0)); // trace not written yet: tail live from the start
+  refreshBlocks();
 
   let currentStatus = detail.status || {};
   const update = () => {
@@ -3887,6 +3885,7 @@ function liveTracePanel(detail, session) {
     } catch {
       /* trace may not exist during PIT/Sandbox preparation */
     }
+    await refreshBlocks();
   };
   // Two cadences, as the console has always had: the elapsed readout ticks
   // every second, the network polls stay at five.
@@ -3895,8 +3894,7 @@ function liveTracePanel(detail, session) {
   return panel;
 }
 
-/* Replay loader: batched pages, collapsible, with a raw .jsonl download so the
-   browser never has to hold a 20MB trace as DOM just to archive it. */
+/* Replay loader: one backend projection, plus raw .jsonl download. */
 function traceReplayNode(experimentId, runId) {
   const box = el("div", { class: "trace-box" });
   const info = el("span", { class: "hint", style: "margin:0" }, "");
@@ -3905,32 +3903,34 @@ function traceReplayNode(experimentId, runId) {
     { type: "button", class: "btn small", style: "display:none" },
     "继续加载",
   );
-  let offset = 0,
-    loadedEvents = 0,
+  let loadedBlocks = 0,
     eof = false,
-    loading = false;
+    loading = false,
+    windowBytes = 0;
   function syncMore() {
     moreButton.disabled = loading;
-    moreButton.style.display = eof || !loadedEvents ? "none" : "";
+    moreButton.style.display = eof || !loadedBlocks ? "none" : "";
   }
   async function loadBatch() {
     if (loading || eof) return;
     loading = true;
     syncMore();
     try {
-      // ~2MB / batch keeps even huge traces incremental.
-      for (let page = 0; page < 4 && !eof; page += 1) {
-        const data = await api(
-          `/api/experiments/${encodeURIComponent(experimentId)}/trace?run_id=${encodeURIComponent(runId)}&offset=${offset}`,
-        );
-        for (const event of data.events || [])
-          box.append(traceEventNode(event));
-        loadedEvents += (data.events || []).length;
-        offset = Number(data.next_offset) || offset;
-        eof = Boolean(data.eof);
-      }
-      info.textContent = `已加载 ${loadedEvents} 个事件${eof ? "（全部）" : ""}`;
-      if (eof) box.append(el("div", { class: "hint" }, "—— trace 结束 ——"));
+      const extra = windowBytes
+        ? `&offset=0&max_bytes=${windowBytes}`
+        : "";
+      const data = await api(
+        `/api/experiments/${encodeURIComponent(experimentId)}/trace/blocks?run_id=${encodeURIComponent(runId)}${extra}`,
+      );
+      const blocks = data.blocks || [];
+      renderTraceBlocks(box, blocks, {
+        truncated: Boolean(data.history_truncated),
+        eof: Boolean(data.eof),
+      });
+      loadedBlocks = blocks.length;
+      windowBytes = (Number(data.next_offset) || 0) + 512 * 1024;
+      eof = Boolean(data.eof);
+      info.textContent = `已加载 ${loadedBlocks} 个展示块${eof ? "（全部）" : ""}`;
     } catch (error) {
       info.textContent = `加载失败：${error.message}`;
     } finally {
@@ -3968,15 +3968,14 @@ function traceReplayNode(experimentId, runId) {
     event.stopPropagation();
     const open = wrap.classList.toggle("open");
     body.hidden = !open;
-    if (open && !loadedEvents && !loading) loadBatch();
+    if (open && !loadedBlocks && !loading) loadBatch();
   });
   return wrap;
 }
 
-/* Build the body only when the <details> is first opened: a long trace holds
-   hundreds of events and every one carries a full JSON dump. */
-function lazyDetails(summaryText, build) {
+function lazyDetails(summaryText, build, key) {
   const details = el("details", {}, el("summary", {}, summaryText));
+  if (key) details.dataset.key = key;
   details.addEventListener("toggle", () => {
     if (details.open && !details.__filled) {
       details.__filled = true;
@@ -3986,76 +3985,183 @@ function lazyDetails(summaryText, build) {
   return details;
 }
 
-const TOOL_BRIEF_KEYS = [
-  "action",
-  "tool",
-  "cmd",
-  "command",
-  "pattern",
-  "path",
-  "query",
-  "mode",
-  "result_name",
-  "exit_code",
-  "duration_seconds",
-  "reason",
-  "error_type",
-  "name",
-  "trade_date",
-  "stage",
-  "call_index",
-];
+const SUBAGENT_STATUS_LABELS = {
+  started: "已启动",
+  running: "进行中",
+  completed: "已完成",
+  timeout: "超时",
+  error: "失败",
+  cancelled: "已取消",
+};
 
-function traceEventNode(event) {
-  const type = String(event.event_type || "event");
-  const node = el("div", { class: "trace-event" });
-  const head = el(
-    "div",
-    { class: "head" },
-    el("span", { class: `type ${type}` }, type),
-    el("span", {}, fmtTsTime(event.ts)),
-    event.step_id ? el("span", {}, event.step_id) : null,
-    event.phase ? el("span", {}, event.phase) : null,
-    event.status ? el("span", {}, String(event.status)) : null,
+function renderTraceBlocks(box, blocks, { truncated, eof, previous } = {}) {
+  const serialized = JSON.stringify({
+    blocks: blocks || [],
+    truncated: Boolean(truncated),
+    eof: Boolean(eof),
+  });
+  if (previous && serialized === previous) return previous;
+  const open = new Set(
+    [...box.querySelectorAll("details[open]")]
+      .map((node) => node.dataset.key)
+      .filter(Boolean),
   );
-  node.append(head);
-  if (type === "llm_call" || type === "explore_llm_call") {
-    const toolCalls = (event.tool_calls || [])
-      .map((call) => call.function && call.function.name)
-      .filter(Boolean);
-    if (toolCalls.length)
-      head.append(el("span", {}, `→ ${toolCalls.join(", ")}`));
-    const reasoning = String(event.reasoning_content || "");
-    if (reasoning) {
-      node.append(
-        lazyDetails(
-          `推理过程（${(reasoning.length / 1000).toFixed(1)}k 字符）`,
-          () => el("pre", {}, reasoning),
-        ),
-      );
-    }
-    const content = String(event.content || "").trim();
-    if (content) node.append(el("div", { class: "llm-content" }, content));
-  } else if (event.raw) {
-    node.append(el("pre", {}, String(event.raw).slice(0, 400)));
-  } else {
-    const brief = TOOL_BRIEF_KEYS.filter(
-      (key) =>
-        event[key] !== undefined && event[key] !== null && event[key] !== "",
-    )
-      .map(
-        (key) =>
-          `${key}=${String(typeof event[key] === "object" ? JSON.stringify(event[key]) : event[key]).slice(0, 120)}`,
-      )
-      .join("  ");
-    if (brief) head.append(el("span", { class: "tool-brief" }, brief));
+  const fragment = document.createDocumentFragment();
+  if (truncated) {
+    fragment.append(
+      el(
+        "div",
+        { class: "hint" },
+        "仅显示当前窗口的展示投影；完整记录请下载原始 JSONL。",
+      ),
+    );
   }
+  (blocks || []).forEach((block, index) => {
+    const node = traceBlockNode(block, index);
+    for (const details of node.querySelectorAll("details[data-key]")) {
+      if (open.has(details.dataset.key)) details.open = true;
+    }
+    fragment.append(node);
+  });
+  if (eof) fragment.append(el("div", { class: "hint" }, "—— trace 结束 ——"));
+  box.replaceChildren(fragment);
+  return serialized;
+}
+
+function traceBlockNode(block, index) {
+  const kind = String((block && block.kind) || "");
+  const node = el("div", { class: `trace-block ${kind}` });
+  try {
+    if (kind === "agent_output") renderAgentOutputBlock(node, block);
+    else if (kind === "tool_group") renderToolGroupBlock(node, block, index);
+    else if (kind === "subagent") renderSubagentBlock(node, block);
+    else if (kind === "user") renderUserBlock(node, block);
+    else node.append(el("div", { class: "hint" }, "未知展示块"));
+  } catch {
+    node.append(el("div", { class: "hint" }, "该展示块无法渲染"));
+  }
+  return node;
+}
+
+function renderAgentOutputBlock(node, block) {
   node.append(
-    lazyDetails("完整事件 JSON", () =>
-      el("pre", {}, JSON.stringify(event, null, 2)),
+    el(
+      "div",
+      { class: "head" },
+      el("span", { class: "type agent_output" }, "Agent"),
+      block.ts ? el("span", {}, fmtTsTime(block.ts)) : null,
     ),
   );
-  return node;
+  const text = String(block.text || "");
+  if (text) node.append(el("div", { class: "llm-content" }, text));
+  const reasoningChars = Number(block.reasoning_chars) || 0;
+  if (reasoningChars) {
+    node.append(
+      el(
+        "div",
+        { class: "hint" },
+        `推理过程已折叠（${(reasoningChars / 1000).toFixed(1)}k 字符）`,
+      ),
+    );
+  }
+}
+
+function renderToolGroupBlock(node, block, index) {
+  const key = `tools:${index}`;
+  const details = lazyDetails(
+    toolGroupTitle(block),
+    () => toolRowsNode(block.tools),
+    key,
+  );
+  node.append(
+    el(
+      "div",
+      { class: "head" },
+      el("span", { class: "type tool_group" }, "工具"),
+      block.ts ? el("span", {}, fmtTsTime(block.ts)) : null,
+    ),
+    details,
+  );
+}
+
+function renderSubagentBlock(node, block) {
+  const status = String(block.status || block.phase || "started");
+  const phase = String(block.phase || "");
+  const label =
+    phase === "ended" ||
+    status === "completed" ||
+    status === "timeout" ||
+    status === "error" ||
+    status === "cancelled"
+      ? `🧩 子代理 ${SUBAGENT_STATUS_LABELS[status] || status}`
+      : `🧩 子代理 ${SUBAGENT_STATUS_LABELS[status] || "已启动"}`;
+  const key = `sub:${block.task_id || ""}:${phase || status}`;
+  node.append(
+    el(
+      "div",
+      { class: "head" },
+      el("span", { class: `type subagent ${status}` }, label),
+      block.task_id ? el("span", {}, String(block.task_id)) : null,
+      block.ts ? el("span", {}, fmtTsTime(block.ts)) : null,
+    ),
+    lazyDetails("详情", () => subagentDetailNode(block), key),
+  );
+}
+
+function renderUserBlock(node, block) {
+  node.append(
+    el(
+      "div",
+      { class: "head" },
+      el("span", { class: "type user" }, "用户"),
+      block.ts ? el("span", {}, fmtTsTime(block.ts)) : null,
+    ),
+  );
+  const text = String(block.text || "");
+  if (text) node.append(el("div", { class: "llm-content" }, text));
+}
+
+function toolGroupTitle(block) {
+  const tools = Array.isArray(block.tools) ? block.tools : [];
+  const names = tools
+    .map((row) => `${row.name} ×${Number(row.count) || 0}`)
+    .join(", ");
+  const failed = Number(block.failed) || 0;
+  const running = Number(block.running) || 0;
+  const bits = [names || "工具"];
+  if (failed) bits.push(`${failed} 失败`);
+  if (running) bits.push(`${running} 进行中`);
+  return bits.join(" · ");
+}
+
+function toolRowsNode(tools) {
+  const list = el("div", { class: "trace-tool-list" });
+  for (const row of tools || []) {
+    const parts = [`${row.name} ×${Number(row.count) || 0}`];
+    if (row.ok) parts.push(`成功 ${row.ok}`);
+    if (row.failed) parts.push(`失败 ${row.failed}`);
+    if (row.running) parts.push(`进行中 ${row.running}`);
+    const line = el("div", { class: "tool-brief" }, parts.join("  "));
+    if (row.summary)
+      line.append(el("span", {}, `  ${String(row.summary).slice(0, 160)}`));
+    list.append(line);
+  }
+  if (!list.childNodes.length) list.append(el("div", { class: "hint" }, "无工具"));
+  return list;
+}
+
+function subagentDetailNode(block) {
+  const body = el("div", { class: "trace-subagent-detail" });
+  if (block.task)
+    body.append(el("div", {}, `任务：${String(block.task).slice(0, 400)}`));
+  if (block.digest)
+    body.append(el("div", {}, `摘要：${String(block.digest).slice(0, 400)}`));
+  if (block.error)
+    body.append(el("div", { class: "hint warn" }, `错误：${String(block.error).slice(0, 240)}`));
+  if (Array.isArray(block.tools) && block.tools.length)
+    body.append(toolRowsNode(block.tools));
+  if (!body.childNodes.length) body.append(el("div", { class: "hint" }, "无更多详情"));
+  return body;
 }
 
 function analysisPanel(experimentId, epochId, foldId) {
