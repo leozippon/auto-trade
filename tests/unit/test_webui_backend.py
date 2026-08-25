@@ -204,6 +204,24 @@ def test_local_webui_health_schema_and_brand(tmp_path: Path):
     assert logo.headers["content-type"] == "image/png"
 
 
+def test_site_footer_shows_icp_and_public_security_filings(tmp_path: Path):
+    client = TestClient(create_app(tmp_path))
+    page = client.get("/").text
+    assert "津ICP备2024017854号-2" in page
+    assert 'href="https://beian.miit.gov.cn/"' in page
+    assert "津公网安备12010402002613号" in page
+    assert (
+        'href="https://beian.mps.gov.cn/#/query/webSearch?code=12010402002613"'
+        in page
+    )
+    assert 'src="/static/gongan.png"' in page
+    assert "hugo-next" not in page
+    gongan = client.get("/static/gongan.png")
+    assert gongan.status_code == 200
+    assert gongan.headers["content-type"] == "image/png"
+    assert gongan.content[:8] == b"\x89PNG\r\n\x1a\n"
+
+
 def test_cli_exposes_distinct_fold_and_meta_model_choices() -> None:
     from scripts.experiments._cli import add_model_arguments
 

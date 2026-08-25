@@ -95,6 +95,8 @@ body {
  overflow: hidden;
 }
 body {
+ display: flex;
+ flex-direction: column;
  overscroll-behavior: none;
  background: var(--bg);
  color: var(--text);
@@ -120,12 +122,45 @@ a:hover {
 
 #app {
  min-width: 0;
- height: 100%;
+ flex: 1;
+ min-height: 0;
  overflow-x: hidden;
  overflow-y: auto;
  -webkit-overflow-scrolling: touch;
  overscroll-behavior: none;
  padding-top: var(--topbar-h);
+}
+.site-footer {
+ flex-shrink: 0;
+ display: flex;
+ flex-wrap: wrap;
+ justify-content: center;
+ align-items: center;
+ gap: 0.35rem 1.1rem;
+ text-align: center;
+ font-size: 0.75rem;
+ line-height: 1.4;
+ color: var(--muted);
+ padding: 0.55rem 1rem 0.7rem;
+ border-top: 1px solid var(--border);
+ background: var(--panel);
+}
+.site-footer a {
+ color: var(--muted);
+ display: inline-flex;
+ align-items: center;
+ gap: 0.3rem;
+}
+.site-footer a:hover {
+ color: var(--text);
+}
+.site-footer img {
+ display: block;
+ width: 18px;
+ height: 18px;
+ flex-shrink: 0;
+ border: 0;
+ background: transparent;
 }
 .topbar {
  display: flex;
