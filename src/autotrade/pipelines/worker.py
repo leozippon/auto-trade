@@ -39,6 +39,7 @@ from .config import AcceptanceRules, FrozenArtifact, RollingExperimentConfig
 from .experiment import RollingExperimentPipeline
 from .folds import build_fold_schedule, heldout_periods, load_sse_trading_days
 from .hitl_state import (
+    WEB_CREATE_DEFAULTS,
     WEB_INTERNAL_PARAMS,
     StatusReporter,
     build_session_plan,
@@ -289,7 +290,7 @@ class InteractiveWorkerOptions:
     snapshot_config: SnapshotConfig = field(default_factory=SnapshotConfig)
     nl_config: NLConfig = field(default_factory=NLConfig)
     max_intraday_row_group_rows: int = 2_000_000
-    analysis_enabled: bool = True
+    analysis_enabled: bool = False
     analysis_model: str = LOCAL_QWEN_MODEL
     analysis_max_tokens: int = 6_000
     llm: LLMWorkerSettings | None = None
@@ -595,7 +596,8 @@ def resolve_worker_options(
             min_region_trade_days=rolling.min_region_trade_days,
         )
     analysis_enabled = _strict_bool(
-        params.get("analysis_enabled", True), "analysis_enabled"
+        params.get("analysis_enabled", WEB_CREATE_DEFAULTS["analysis_enabled"]),
+        "analysis_enabled",
     )
     analysis_model = str(params.get("analysis_model") or LOCAL_QWEN_MODEL)
     analysis_max_tokens = _positive_int(

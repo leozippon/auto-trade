@@ -83,6 +83,19 @@ def _experiment(
     return repo, experiment
 
 
+def test_analysis_enabled_defaults_off_and_can_be_enabled(tmp_path: Path):
+    repo, experiment = _experiment(tmp_path)
+    options = load_worker_options(experiment, repo_root=repo)
+    assert options.analysis_enabled is False
+
+    path = experiment / "hitl/params.json"
+    params = json.loads(path.read_text(encoding="utf-8"))
+    params["analysis_enabled"] = True
+    path.write_text(json.dumps(params), encoding="utf-8")
+    options = load_worker_options(experiment, repo_root=repo)
+    assert options.analysis_enabled is True
+
+
 def test_local_worker_runs_real_baseline_valid_test_and_heldout(tmp_path: Path):
     repo, experiment = _experiment(tmp_path)
     options = load_worker_options(experiment, repo_root=repo)

@@ -53,7 +53,7 @@ WEB_CREATE_DEFAULTS: dict[str, object] = {
     "strategy_period": "day",
     "inference_time": "08:30",
     "initial_control_mode": "auto",
-    "analysis_enabled": True,
+    "analysis_enabled": False,
     "analysis_model": MODEL_CHOICES[0],
     "analysis_max_tokens": 6000,
     "window_months": 21,
