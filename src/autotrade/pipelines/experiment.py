@@ -37,7 +37,7 @@ from .agent_views import (
     agent_visible_ledger_record as _agent_visible_ledger_record,
     compact_fold_history as _compact_fold_history,
 )
-from .meta_inputs import build_meta_fold_reviews
+from .meta_inputs import build_meta_fold_reviews, select_meta_review_folds
 from .prior import ExperimentPriorStore, PRIOR_MAX_CHARS, latest_prior_text
 from autotrade.agent.runner import AgentSessionDeadlineExceeded
 from .config import (
@@ -538,6 +538,7 @@ class RollingExperimentPipeline:
                         "previous_taste": previous_taste,
                         "previous_prior": previous_prior,
                         "development_history": history,
+                        "review_window": history.get("review_window"),
                         "meta_learning_memory": self._prior_meta_learning_logs(
                             session_id
                         ),
@@ -640,6 +641,7 @@ class RollingExperimentPipeline:
                         else None
                     ),
                     "agent_trace_ref": str(trace_ref) if trace_ref.exists() else None,
+                    "review_window": history.get("review_window"),
                     **_session_timing(context, run_started),
                 }
             )
@@ -869,12 +871,14 @@ def _development_history(
     Every field crosses the Agent boundary, so it is built exclusively from
     ``agent_views``: raw fold ids become opaque refs and Test evidence is
     limited to the compact frozen-test metric whitelist of already-completed
-    Folds. Held-out never appears. ``fold_reviews`` additionally carries frozen
-    strategy source and a bounded Explore trace; those originals never enter
-    ordinary Fold prompts.
+    Folds. Held-out never appears. ``fold_reviews`` and
+    ``fold_backtest_summaries`` only cover regular Folds completed after the
+    previous Meta; older Folds are already absorbed into PRIOR/Taste.
+    ``fold_reviews`` additionally carries frozen strategy source and a bounded
+    Agent Trace; those originals never enter ordinary Fold prompts.
     """
 
-    folds = list(latest_fold_records(records).values())
+    folds, review_window = select_meta_review_folds(records)
     return {
         "evaluation_contract": {
             "validation": "Fold selection and iteration evidence",
@@ -888,6 +892,7 @@ def _development_history(
         "fold_reviews": build_meta_fold_reviews(
             folds, artifacts_root=artifacts_root
         ),
+        "review_window": review_window,
         "meta_learning": [
             _agent_visible_ledger_record(record, include_frozen_test_metrics=True)
             for record in records

@@ -1,10 +1,11 @@
-"""Read-only data-exploration Sub Agent (Claude-Code "Explore" pattern).
+"""One-level writable coding Sub Agent for a regular Fold (tool name ``explore``).
 
-The Fold/meta-learning Agent delegates a concrete read-only investigation to a
-cheaper-model sub-agent that may call ``shell``/``grep``/``glob`` over the
-visible sandbox. It returns a compact evidence digest, so the expensive main
-context stays small and routine probing runs on the cheaper model. It never
-writes formal artifacts.
+The Fold Agent delegates a concrete coding or inspection task to a cheaper-model
+sub-agent that may read and write the shared Fold workspace. Write capability
+comes from the registered tools, not from the prompt. Depth is one: the
+sub-agent cannot spawn another ``explore``. It shares the parent SafeWorkspace,
+sandbox runner, SessionBudgetLLM calls, and inference time budget. Failures
+return a structured observation; they do not finish the Fold or roll back writes.
 """
 
 from __future__ import annotations
@@ -31,47 +32,41 @@ from .compact import fit_tool_results_to_context, safe_error_summary
 
 EXPLORE_SYSTEM_PROMPT = """\
 # 角色
-你是主 Agent 的只读调查员，只回答委托给你的具体问题。你可以用被注入的只读工具读取与统计可见的 PIT 数据、策略产物、Validation 结果和 Step 记录，但不要修改任何文件，不要写正式产物，不要替主 Agent 作最终决策。
+你是主 Agent 的一层可写 coding 子代理，只完成委托给你的具体任务。写能力来自已注入的工具，而不是本提示。你可以在共享 Fold 工作树上用已注册工具读、改、跑轻量检查，但不要替主 Agent 做最终提交、回测选择或提问。
 
 # 方法
-- 优先用 grep/glob 做定向搜索，用 shell 做目录、metadata、head/count/limit、轻量 Python/DuckDB 只读抽样；不要全量读取大表。
-- shell 是轻量合同 guard，不是只读 Bash 解析器；不要写文件、不要重定向到文件、不要隐藏错误。只读约定由本提示约束，硬隔离和产物校验兜底。
-- 一轮可并行发起多个相互独立的只读检索；工具错误要如实保留，不要猜测成功。
-- shell 命令不要用 `2>/dev/null` 隐藏错误。
+- 用 grep/glob/read_file 做定向检索；用 write_file/edit_file 修改文本产物；用完整 shell 做隔离分析、轻量验证和必要的文件操作。
+- 不得调用 explore（禁止嵌套），也没有 daily_backtest、finish_fold、step_rollback 或 ask_user。
+- 一轮内相互独立的只读检索可并行；写入、edit、shell、modification_check、validate_strategy 必须按调用顺序串行。
+- 工具错误要如实保留，不要猜测成功。shell 不要用 `2>/dev/null` 隐藏错误。
 - 不得安装依赖，不得读取 Test/Held-out。
+- 权威 PRIOR 不在本 Fold 可写树中；即使改了工作区副本，也不能改变已注入的 PRIOR 或制品库中的权威版本。
 - 历史分钟和竞价仅是日级推断时点之前的研究证据，不是执行时钟。
 
 # 交付
-信息足够后停止调用工具，直接用简洁中文返回四部分：结论、证据、风险与限制、建议主 Agent 下一步。证据包含关键路径、字段、数字或覆盖范围，不罗列原始长输出。\
+任务完成后停止调用工具，直接用简洁中文返回四部分：结论、已做修改、证据、风险与限制、建议主 Agent 下一步。证据包含关键路径、字段、数字或覆盖范围，不罗列原始长输出。\
 """
 
-_READ_ONLY_TOOLS = frozenset(
+_ALLOWED_TOOLS = frozenset(
     {
+        "edit_file",
         "glob",
         "grep",
+        "modification_check",
         "read_file",
         "shell",
         "validate_strategy",
+        "write_file",
     }
 )
 _PARALLEL_READ_TOOLS = frozenset({"glob", "grep", "read_file"})
-_READ_ONLY_SHELL_COMMANDS = frozenset(
+_FORBIDDEN_TOOLS = frozenset(
     {
-        "cat",
-        "cut",
-        "du",
-        "grep",
-        "head",
-        "ls",
-        "pwd",
-        "readlink",
-        "realpath",
-        "rg",
-        "stat",
-        "tail",
-        "tr",
-        "uniq",
-        "wc",
+        "ask_user",
+        "daily_backtest",
+        "explore",
+        "finish_fold",
+        "step_rollback",
     }
 )
 
@@ -96,7 +91,7 @@ class ExploreSubAgentConfig:
 
 
 class ExploreSubAgentEngine(SessionTimeBudgetAware):
-    """Bounded native-tool exploration loop over read-only tools."""
+    """Bounded native-tool coding loop over the shared Fold workspace."""
 
     def __init__(
         self,
@@ -248,7 +243,7 @@ class ExploreSubAgentEngine(SessionTimeBudgetAware):
                 messages.append(
                     ChatMessage(
                         "user",
-                        "请立即按“结论 / 证据 / 风险与限制 / 建议主 Agent 下一步”四部分给出简洁中文摘要，不要再调用工具。",
+                        "请立即按“结论 / 已做修改 / 证据 / 风险与限制 / 建议主 Agent 下一步”给出简洁中文摘要，不要再调用工具。",
                     )
                 )
                 provider_tools = self.tools.provider_tools()
@@ -337,12 +332,8 @@ class ExploreSubAgentEngine(SessionTimeBudgetAware):
 
     def _validate_tools(self) -> None:
         for spec in self.tools.specs():
-            if spec.mutating:
-                raise ValueError(f"Explore tool must be non-mutating: {spec.name}")
-            if spec.name not in _READ_ONLY_TOOLS:
-                raise ValueError(
-                    f"Explore tool is not on the read-only whitelist: {spec.name}"
-                )
+            if spec.name not in _ALLOWED_TOOLS or spec.name in _FORBIDDEN_TOOLS:
+                raise ValueError(f"Explore tool is not allowed: {spec.name}")
 
     def _emit(self, event: str, payload: dict[str, object]) -> None:
         if self.event_sink is not None:
@@ -359,28 +350,9 @@ def _add_usage(total: dict[str, int], usage: object) -> None:
 
 
 def _reject_tool_call(spec: ToolSpec | None, arguments: object) -> str:
+    del arguments
     if spec is None:
         return "unknown Explore tool"
-    if spec.mutating or spec.name not in _READ_ONLY_TOOLS:
-        return f"Explore tool is not read-only: {spec.name}"
-    if spec.name != "shell":
-        return ""
-    if not isinstance(arguments, dict):
-        return "Explore shell arguments must be an object"
-    argv = arguments.get("argv")
-    if (
-        not isinstance(argv, list)
-        or not argv
-        or any(not isinstance(item, str) for item in argv)
-    ):
-        return "Explore shell argv must be a non-empty string array"
-    command = argv[0]
-    if command not in _READ_ONLY_SHELL_COMMANDS:
-        return f"Explore shell command is not on the read-only whitelist: {command}"
-    if command == "rg" and any(
-        argument in {"--pre", "--hostname-bin"}
-        or argument.startswith(("--pre=", "--hostname-bin="))
-        for argument in argv[1:]
-    ):
-        return "Explore shell command may not execute helper programs"
+    if spec.name not in _ALLOWED_TOOLS or spec.name in _FORBIDDEN_TOOLS:
+        return f"Explore tool is not allowed: {spec.name}"
     return ""

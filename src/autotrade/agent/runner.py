@@ -548,7 +548,7 @@ class AgentSessionRunner:
                     "type": "function",
                     "function": {
                         "name": "explore",
-                        "description": "Delegate one concrete read-only investigation and return a compact evidence summary.",
+                        "description": "Delegate one concrete coding task to a one-level writable sub-agent sharing this Fold workspace, then return a compact summary.",
                         "parameters": {
                             "type": "object",
                             "properties": {

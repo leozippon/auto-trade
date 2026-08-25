@@ -369,15 +369,15 @@ def test_terminal_tool_cancels_later_mutation_in_same_turn(tmp_path: Path):
     )
 
 
-def test_explore_rejects_mutating_tool_specs(tmp_path: Path):
-    with pytest.raises(ValueError, match="non-mutating"):
-        ExploreSubAgentEngine(
-            llm=ScriptedLLM([]),
-            tools=ToolRegistry([WriteFileTool(SafeWorkspace(tmp_path))]),
-        )
+def test_explore_accepts_write_file_tool(tmp_path: Path):
+    engine = ExploreSubAgentEngine(
+        llm=ScriptedLLM([]),
+        tools=ToolRegistry([WriteFileTool(SafeWorkspace(tmp_path))]),
+    )
+    assert {spec.name for spec in engine.tools.specs()} == {"write_file"}
 
 
-def test_explore_rejects_shell_commands_outside_read_only_whitelist():
+def test_explore_dispatches_full_shell_commands():
     shell = DeclaredReadOnlyShell()
     llm = ScriptedLLM(
         [
@@ -388,16 +388,19 @@ def test_explore_rejects_shell_commands_outside_read_only_whitelist():
             ProviderResponse(
                 tool_calls=(ToolCall("r", "shell", {"argv": ["rg", "needle", "."]}),)
             ),
-            ProviderResponse(content="blocked safely"),
+            ProviderResponse(content="ran full shell"),
         ]
     )
     result = ExploreSubAgentEngine(
         llm=llm,
         tools=ToolRegistry([shell]),
     ).run("inspect")
-    assert result["digest"] == "blocked safely"
-    assert shell.calls == [{"argv": ["rg", "needle", "."]}]
-    assert result["tool_calls"] == 1
+    assert result["digest"] == "ran full shell"
+    assert shell.calls == [
+        {"argv": ["python", "-V"]},
+        {"argv": ["rg", "needle", "."]},
+    ]
+    assert result["tool_calls"] == 2
     first_assistant = next(
         message for message in llm.calls[1]["messages"] if message.role == "assistant"
     )

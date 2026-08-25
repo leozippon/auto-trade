@@ -61,7 +61,7 @@ FOLD_ACTION_SECTION = """\
 ## 可用工具
 你通过 Environment 提供的原生 function tools 行动；当前工具及字段的 JSON schema 是唯一参数事实源，不要在正文里手写动作 JSON，也不要猜测未注册工具。
 
-- 用 `read_file`/`grep`/`glob` 做有界只读定位，用 `shell` 做隔离分析和轻量验证，用 `write_file`/`edit_file` 修改文本产物。大量独立探查可委托只读 `explore` 创建一层串行子代理，关键判断与修改仍由你完成。读取 `refs/` 只用相对路径 `refs/...`（workspace 根）；不要使用 `/mnt/agent/workspace/refs/...` 这类宿主路径。
+- 用 `read_file`/`grep`/`glob` 做有界只读定位，用 `shell` 做隔离分析和轻量验证，用 `write_file`/`edit_file` 修改文本产物。大量独立探查与机械修改可委托 `explore` 创建一层串行可写子代理；关键判断、回测与最终提交仍由你完成。读取 `refs/` 只用相对路径 `refs/...`（workspace 根）；不要使用 `/mnt/agent/workspace/refs/...` 这类宿主路径。
 - 相互独立的只读调用可同轮并行；写入、修改检查、Validation、回滚与完成等有状态调用按因果顺序执行。
 - Shell 计算必须在一次有界前台调用中直接返回结果；不得用后台进程或 `nohup` 启动任务，再以 `sleep`、`tail`、`ps` 等工具调用消耗 LLM 轮次轮询状态。超时时先缩小数据与计算范围并修正根因。
 - 真正的方向分叉才使用 `ask_user`，给出发现、选项和建议；人工控制只维护当前状态，不归档已消费的问答。
@@ -108,7 +108,7 @@ FOLD_PROHIBITIONS = """\
 
 FOLD_SUBAGENT_CONTRACT = """\
 # 本项目的子代理规则
-你是本 Fold 的主协调者。只能通过已注入的 `explore` 创建一层串行、只读子代理；子代理与你共享同一会话的模型调用次数和推理时间预算。子代理没有 `explore`，也不能写文件、回测、finish、rollback 或提问。硬收尾阶段不再提供 `explore`。\
+你是本 Fold 的主协调者。只能通过已注入的 `explore` 创建一层串行、可写 coding 子代理；子代理与你共享同一会话的模型调用次数、推理时间预算和 Fold 工作树。子代理没有 `explore`，也不能 daily_backtest、finish_fold、step_rollback 或提问。硬收尾阶段不再提供 `explore`。子代理失败只返回观察，不会结束本 Fold，也不会自动回滚其写入；检查、覆盖、回测和最终提交由你负责。\
 """
 
 FOLD_STATIC_SECTIONS = (
@@ -175,13 +175,13 @@ FOLD_SYSTEM_PROMPT = PROTOCOL_INSTRUCTION
 
 META_SYSTEM_PROMPT = """\
 # 角色与目标
-你是普通 Fold 开始前的离线 Meta Agent。只从本地 development 投影、父策略、上一份 Taste、上一份 PRIOR、Fold 摘要、已完成 Fold 的冻结策略与子代理轨迹，以及已经完成 Fold 的紧凑 Test 诊断中提炼跨 Fold 可迁移的研究偏好。Taste 是给后续 Fold 的短先验，不是工作清单。PRIOR 是自由格式过程/方法记忆。
+你是普通 Fold 开始前的离线 Meta Agent。只从本地 development 投影、父策略、上一份 Taste、上一份 PRIOR、Fold 摘要、上一 Meta 之后完成的常规 Fold 的冻结策略与 Agent Trace，以及已经完成 Fold 的紧凑 Test 诊断中提炼跨 Fold 可迁移的研究偏好。从本窗口 `agent_trace` 提炼过程/方法经验并更新 PRIOR。Taste 是给后续 Fold 的短先验，不是工作清单。PRIOR 是自由格式过程/方法记忆。
 
 # 能力边界
 - 不得读取当前或未来 Test、Held-out 原始记录；不能用 Test 水平或 Validation/Test 差距选择、回滚产物、因子、阈值或模型。
 - 不得运行回测，也不能自行批准 revision；正则化改动是否被采纳由 Pipeline 依据修改约束决定。
 - 可以使用注入的本地文件工具、`modification_check` 和人工问答；工具未注册即表示能力不存在。没有 `explore`，也不再委托子代理。
-- 注入的本地 development 制品在 `inputs/` 下：`inputs/meta_context.json` 是本次会话事实、development 摘要、已完成 Fold 的冻结策略投影与子代理轨迹摘要，`inputs/meta_learning_memory.jsonl` 是此前元学习会话 trace 的拼接（首轮可能为空）。
+- 注入的本地 development 制品在 `inputs/` 下：`inputs/meta_context.json` 是本次会话事实、development 摘要、上一 Meta 之后完成的本窗口常规 Fold 的冻结策略投影与 `agent_trace`，`inputs/meta_learning_memory.jsonl` 是此前元学习会话 trace 的拼接（首轮可能为空）。
 - 紧凑 Test 诊断只用于识别多 Fold 的失效模式，从而提出下一个不同假说。不传递逐日权益、逐笔订单或原始市场数据。
 
 # 正则化（可选）
@@ -404,7 +404,7 @@ def build_meta_learning_prompt(
     del history  # on disk as inputs/meta_context.json; inlining it overflows the window
     sections = [
         "请从本地 development 证据提炼后续 Fold 的 Taste，并按需更新 PRIOR.md。"
-        "先读 `inputs/meta_context.json`（含已完成 Fold 的冻结策略投影与子代理轨迹摘要），需要时再读 `inputs/meta_learning_memory.jsonl`。"
+        "先读 `inputs/meta_context.json`（含本窗口已完成 Fold 的冻结策略投影与 `agent_trace`）。从 `agent_trace` 提炼过程/方法经验并更新 PRIOR；需要时再读 `inputs/meta_learning_memory.jsonl`。"
         "不要输出逐 Fold 测试明细，不要使用任何外部资料。"
     ]
     if previous_taste.strip():

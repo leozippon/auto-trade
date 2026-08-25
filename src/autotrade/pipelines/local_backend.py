@@ -70,7 +70,7 @@ from autotrade.environment.tools.search import (
     ReadFileTool,
     SearchRoots,
 )
-from autotrade.environment.tools.shell import ReadOnlyShellTool, SandboxShellTool
+from autotrade.environment.tools.shell import SandboxShellTool
 from autotrade.environment.tools.step_rollback import StepRollbackTool
 from autotrade.environment.tools.strategy_validation import StrategyValidationTool
 from autotrade.environment.tools.workspace import SafeWorkspace
@@ -582,6 +582,25 @@ class WriteTasteTool:
         return ToolResult(True, value={"path": "taste.md"})
 
 
+def build_fold_explore_tools(
+    search_roots: SearchRoots,
+    workspace: SafeWorkspace,
+    command_runner: CommandRunner,
+    modification: ModificationCheckTool,
+) -> list[Tool]:
+    """Tools handed to Fold ``ExploreSubAgentEngine``: writable shell, no backtest."""
+    return [
+        ReadFileTool(search_roots),
+        GrepTool(search_roots),
+        GlobTool(search_roots),
+        WriteFileTool(workspace),
+        EditFileTool(workspace),
+        SandboxShellTool(workspace, command_runner),
+        StrategyValidationTool(workspace),
+        modification,
+    ]
+
+
 class LLMFoldDeveloper:
     """Adapter from the native Agent loop to ``FoldDeveloper``."""
 
@@ -896,13 +915,9 @@ class LLMFoldDeveloper:
                 else None
             )
             explore_tools = ToolRegistry(
-                [
-                    ReadFileTool(search_roots),
-                    GrepTool(search_roots),
-                    GlobTool(search_roots),
-                    ReadOnlyShellTool(safe, command_runner),
-                    StrategyValidationTool(safe),
-                ]
+                build_fold_explore_tools(
+                    search_roots, safe, command_runner, modification
+                )
             )
             explore = ExploreSubAgentEngine(
                 llm=explore_budgeted,
@@ -1318,6 +1333,15 @@ class LLMMetaLearner:
                 ).to_record(),
                 "meta_learning_directive": self.meta_learning_directive.strip(),
                 "fold_exploration_directive": self.fold_exploration_directive.strip(),
+                "review_window": (
+                    dict(public["review_window"])
+                    if isinstance(public.get("review_window"), dict)
+                    else {
+                        "previous_meta_ref": None,
+                        "fold_run_refs": [],
+                        "fold_count": 0,
+                    }
+                ),
                 "budgets": {
                     "max_llm_calls": self.max_llm_calls,
                     "deadline_seconds": self.deadline_seconds,

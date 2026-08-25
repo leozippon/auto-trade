@@ -215,7 +215,7 @@ def render() -> str:
         "",
         _block(
             "请从本地 development 证据提炼后续 Fold 的 Taste，并按需更新 PRIOR.md。"
-            "先读 `inputs/meta_context.json`（含已完成 Fold 的冻结策略投影与子代理轨迹摘要），需要时再读 `inputs/meta_learning_memory.jsonl`。"
+            "先读 `inputs/meta_context.json`（含本窗口已完成 Fold 的冻结策略投影与 `agent_trace`）。从 `agent_trace` 提炼过程/方法经验并更新 PRIOR；需要时再读 `inputs/meta_learning_memory.jsonl`。"
             "不要输出逐 Fold 测试明细，不要使用任何外部资料。\n"
             "{previous_taste, development}\n\n"
             "[可选：实验级默认 Fold 探索方向]\n"
@@ -230,7 +230,7 @@ def render() -> str:
         "",
         _block(EXPLORE_SYSTEM_PROMPT),
         "",
-        "Explore 只运行在只读工具集合上。Shell 命令另受非执行型白名单约束；独立文件读取最多四路并行。达到轮次或 deadline 而没有总结时，会再请求一次无工具摘要。",
+        "Explore 是一层可写 coding 子代理，与主 Fold 共享工作树和预算；禁止嵌套。只读检索可并行，写入、edit、shell 与 check 按调用顺序串行。达到轮次或 deadline 而没有总结时，会再请求一次无工具摘要。",
         "",
         "## 6. Context Compaction 系统提示词",
         "",

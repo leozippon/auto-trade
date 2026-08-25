@@ -378,6 +378,7 @@ def _agent_visible_manifest(data: dict[str, object]) -> dict[str, object]:
             "prior_output",
             "meta_learning_directive",
             "fold_exploration_directive",
+            "review_window",
             "created_at",
         )
         if key in record

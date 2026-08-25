@@ -122,6 +122,19 @@ def test_meta_session_retains_only_the_authorized_test_diagnostic(tmp_path: Path
     ledger = ExperimentLedger(config.ledger_path)
     ledger.append(
         {
+            "record_type": "meta_learning",
+            "experiment_id": "experiment_a",
+            "epoch_id": "epoch_001",
+            "fold_id": "epoch_001",
+            "run_id": "run_meta0",
+            "session_key": "epoch_001/meta_learning",
+            "meta_learning_id": "epoch_001",
+            "taste": "initial",
+            "status": "taste_only",
+        }
+    )
+    ledger.append(
+        {
             "record_type": "fold",
             "experiment_id": "experiment_a",
             "epoch_id": "epoch_001",
@@ -179,7 +192,7 @@ def test_meta_session_retains_only_the_authorized_test_diagnostic(tmp_path: Path
     # run_meta_session returns (taste, next_parent): a regularized artifact
     # becomes the next Fold's parent, and taste-only leaves it unchanged.
     assert taste == ("prefer robust signals", None)
-    meta_record = ledger.read("meta_learning")[0]
+    meta_record = ledger.read("meta_learning")[-1]
     assert meta_record["run_wall_seconds"] == 12.3
     assert meta_record["researcher_wait_seconds"] == 1.3
     history = captured["development_history"]
@@ -188,8 +201,15 @@ def test_meta_session_retains_only_the_authorized_test_diagnostic(tmp_path: Path
         "evaluation_contract",
         "fold_backtest_summaries",
         "fold_reviews",
+        "review_window",
         "meta_learning",
     }
+    window = history["review_window"]
+    assert isinstance(window, dict)
+    assert window["fold_count"] == 1
+    assert "fold_2025Q4" not in str(window)
+    assert captured.get("review_window") == window
+    assert meta_record["review_window"] == window
     reviews = history["fold_reviews"]
     assert isinstance(reviews, list)
     assert reviews[0]["test_result"] == {
@@ -209,6 +229,148 @@ def test_meta_session_retains_only_the_authorized_test_diagnostic(tmp_path: Path
     assert summaries[0]["fold_id"].startswith("fold_ref_")
     assert "2025Q4" not in str(history)
     assert "private_detail" not in str(history)
+
+
+def _meta_only_pipeline(tmp_path: Path, ledger: ExperimentLedger, captured: dict[str, object]):
+    revision_dir = tmp_path / "revision"
+    revision_dir.mkdir()
+    (revision_dir / "main.py").write_text(
+        "def generate_orders(context):\n    return []\n", encoding="utf-8"
+    )
+    revision = ArtifactRevision("revision_1", revision_dir)
+    config = RollingExperimentConfig(
+        "experiment_a",
+        tmp_path / "experiments",
+        "2026Q1",
+        "2026Q1",
+        "2026Q2",
+        "2026Q2",
+        epochs=1,
+    )
+    pipeline = RollingExperimentPipeline(
+        config,
+        snapshots=Snapshots(),
+        artifacts=Artifacts(revision, tmp_path / "frozen"),
+        evaluator=Evaluator(),
+        developer=lambda _request: None,
+        meta_learner=lambda facts: (captured.update(facts) or MetaSessionResult(taste="next")),
+        ledger=ledger,
+    )
+    days = [
+        stamp.strftime("%Y%m%d")
+        for stamp in pd.bdate_range("2025-09-29", "2026-06-30")
+    ]
+    return pipeline, build_fold_schedule("2026Q1", "2026Q1", days)[0]
+
+
+def test_first_meta_session_has_empty_review_window(tmp_path: Path):
+    config = RollingExperimentConfig(
+        "experiment_a",
+        tmp_path / "experiments",
+        "2026Q1",
+        "2026Q1",
+        "2026Q2",
+        "2026Q2",
+        epochs=1,
+    )
+    ledger = ExperimentLedger(config.ledger_path)
+    ledger.append(
+        {
+            "record_type": "fold",
+            "experiment_id": "experiment_a",
+            "epoch_id": "epoch_001",
+            "fold_id": "fold_2025Q4",
+            "run_id": "run_prior",
+            "fold_status": "frozen",
+            "validation_result": {"total_return": 0.03},
+        }
+    )
+    captured: dict[str, object] = {}
+    pipeline, visible_fold = _meta_only_pipeline(tmp_path, ledger, captured)
+    pipeline.run_meta_session("epoch_001", 0, visible_fold, parent=None, previous_taste="")
+    history = captured["development_history"]
+    assert isinstance(history, dict)
+    assert history["fold_reviews"] == []
+    assert history["fold_backtest_summaries"] == []
+    window = history["review_window"]
+    assert window == {
+        "previous_meta_ref": None,
+        "fold_run_refs": [],
+        "fold_count": 0,
+    }
+    assert ledger.read("meta_learning")[-1]["review_window"] == window
+
+
+def test_meta_session_window_skips_folds_before_previous_meta(tmp_path: Path):
+    config = RollingExperimentConfig(
+        "experiment_a",
+        tmp_path / "experiments",
+        "2026Q1",
+        "2026Q1",
+        "2026Q2",
+        "2026Q2",
+        epochs=1,
+    )
+    ledger = ExperimentLedger(config.ledger_path)
+    ledger.append(
+        {
+            "record_type": "meta_learning",
+            "experiment_id": "experiment_a",
+            "epoch_id": "epoch_001",
+            "fold_id": "epoch_001",
+            "run_id": "run_meta0",
+            "meta_learning_id": "epoch_001",
+            "status": "taste_only",
+        }
+    )
+    ledger.append(
+        {
+            "record_type": "fold",
+            "experiment_id": "experiment_a",
+            "epoch_id": "epoch_001",
+            "fold_id": "fold_old",
+            "run_id": "run_old",
+            "fold_status": "frozen",
+            "validation_result": {"total_return": 0.01},
+        }
+    )
+    ledger.append(
+        {
+            "record_type": "meta_learning",
+            "experiment_id": "experiment_a",
+            "epoch_id": "epoch_001",
+            "fold_id": "epoch_001_after_fold_001",
+            "run_id": "run_meta1",
+            "meta_learning_id": "epoch_001_after_fold_001",
+            "status": "taste_only",
+        }
+    )
+    ledger.append(
+        {
+            "record_type": "fold",
+            "experiment_id": "experiment_a",
+            "epoch_id": "epoch_001",
+            "fold_id": "fold_new",
+            "run_id": "run_new",
+            "fold_status": "frozen",
+            "validation_result": {"total_return": 0.04},
+        }
+    )
+    captured: dict[str, object] = {}
+    pipeline, visible_fold = _meta_only_pipeline(tmp_path, ledger, captured)
+    pipeline.run_meta_session("epoch_001", 2, visible_fold, parent=None, previous_taste="")
+    history = captured["development_history"]
+    assert isinstance(history, dict)
+    window = history["review_window"]
+    assert isinstance(window, dict)
+    assert window["fold_count"] == 1
+    assert "fold_old" not in str(window)
+    assert "fold_new" not in str(window)
+    reviews = history["fold_reviews"]
+    summaries = history["fold_backtest_summaries"]
+    assert isinstance(reviews, list) and len(reviews) == 1
+    assert isinstance(summaries, list) and len(summaries) == 1
+    assert summaries[0]["validation_result"]["total_return"] == 0.04
 
 
 def _pipeline_capturing_fold_requests(tmp_path: Path, captured: list):

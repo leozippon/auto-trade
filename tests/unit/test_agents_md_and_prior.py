@@ -16,7 +16,13 @@ from autotrade.agent.runner import (
 from autotrade.environment.tools import SafeWorkspace, ToolRegistry, WriteFileTool
 from autotrade.pipelines.config import MetaSessionResult
 from autotrade.pipelines.ledger import ExperimentLedger
-from autotrade.pipelines.meta_inputs import build_meta_fold_reviews, compact_explore_trace
+from autotrade.environment.identity import agent_visible_ref
+from autotrade.pipelines.experiment import _development_history
+from autotrade.pipelines.meta_inputs import (
+    build_meta_fold_reviews,
+    compact_agent_trace,
+    select_meta_review_folds,
+)
 from autotrade.pipelines.prior import ExperimentPriorStore, latest_prior_text
 from autotrade.pipelines.worker import _restore_prior_store
 
@@ -52,8 +58,10 @@ def test_required_agents_sections_are_injected_into_fold_and_meta(tmp_path: Path
         assert f"## {title}" in meta
     assert "只能通过已注入的 `explore`" in fold
     assert "共享同一会话" in fold
+    assert "可写 coding 子代理" in fold
     assert "Meta 子代理/阶段" in meta
     assert "不要再委托子代理" in meta
+    assert "agent_trace" in meta
     assert extracted.sha256
     assert extracted.version == extracted.sha256[:12]
 
@@ -267,7 +275,7 @@ def test_restore_prior_store_fails_if_generation_is_missing(tmp_path: Path) -> N
         _restore_prior_store(experiment, ledger)
 
 
-def test_meta_fold_reviews_include_strategy_and_explore_not_heldout(tmp_path: Path) -> None:
+def test_meta_fold_reviews_include_strategy_and_agent_trace_not_heldout(tmp_path: Path) -> None:
     strategy = tmp_path / "frozen" / "output"
     strategy.mkdir(parents=True)
     (strategy / "main.py").write_text(
@@ -306,17 +314,19 @@ def test_meta_fold_reviews_include_strategy_and_explore_not_heldout(tmp_path: Pa
             "task": "inspect daily schema",
             "digest": "daily has trade_date",
         },
-        {"event_type": "llm_call", "content": "should not appear as explore"},
+        {"event_type": "llm_call", "content": "planning the next edit", "status": "ok"},
     ]
-    compact = compact_explore_trace(events)
+    compact = compact_agent_trace(events)
     assert [item["event_type"] for item in compact] == [
         "explore_task",
         "explore_llm",
         "explore_tool",
         "explore",
+        "llm_call",
     ]
     assert compact[0]["task"] == "inspect daily schema"
     assert compact[2]["ok"] is True
+    assert compact[-1]["content"] == "planning the next edit"
     trace.write_text(
         "\n".join(
             __import__("json").dumps(event, ensure_ascii=False) for event in events
@@ -344,18 +354,24 @@ def test_meta_fold_reviews_include_strategy_and_explore_not_heldout(tmp_path: Pa
     reviews = build_meta_fold_reviews([fold, heldout])
     assert len(reviews) == 1
     review = reviews[0]
-    assert review["strategy_files"][0]["path"] == "main.py"
-    assert "generate_orders" in str(review["strategy_files"][0]["content"])
-    assert review["explore_trace"][0]["task"] == "inspect daily schema"
-    assert review["validation_result"]["total_return"] == 0.02
-    assert "per_stock" not in review["validation_result"]
-    assert review["test_result"]["sharpe"] == 0.4
-    assert "weekly_returns" not in review["test_result"]
+    strategy_files = review["strategy_files"]
+    validation = review["validation_result"]
+    test_result = review["test_result"]
+    agent_trace = review["agent_trace"]
+    assert isinstance(strategy_files, list)
+    assert strategy_files[0]["path"] == "main.py"
+    assert "generate_orders" in str(strategy_files[0]["content"])
+    assert isinstance(agent_trace, list)
+    assert agent_trace[0]["task"] == "inspect daily schema"
+    assert isinstance(validation, dict)
+    assert validation["total_return"] == 0.02
+    assert "per_stock" not in validation
+    assert isinstance(test_result, dict)
+    assert test_result["sharpe"] == 0.4
+    assert "weekly_returns" not in test_result
     rendered = str(reviews)
     assert "heldout_2026Q1" not in rendered
-    assert 0.99 not in (
-        review["test_result"].values() if review["test_result"] else []
-    )
+    assert 0.99 not in test_result.values()
 
 
 def test_meta_fold_reviews_resolve_trace_from_artifacts_root(tmp_path: Path) -> None:
@@ -379,11 +395,13 @@ def test_meta_fold_reviews_resolve_trace_from_artifacts_root(tmp_path: Path) -> 
         ],
         artifacts_root=artifacts,
     )
-    assert reviews[0]["explore_trace"][0]["task"] == "count rows"
-    assert reviews[0]["explore_trace"][0]["parent_call_id"] == "call_9"
+    agent_trace = reviews[0]["agent_trace"]
+    assert isinstance(agent_trace, list)
+    assert agent_trace[0]["task"] == "count rows"
+    assert agent_trace[0]["parent_call_id"] == "call_9"
 
 
-def test_compact_explore_trace_keeps_recent_complete_tasks() -> None:
+def test_compact_agent_trace_keeps_recent_complete_tasks() -> None:
     early = [
         {
             "event_type": "explore_task",
@@ -434,19 +452,21 @@ def test_compact_explore_trace_keeps_recent_complete_tasks() -> None:
         {"event_type": "llm_call", "content": "main dialogue"},
         {"event_type": "heldout", "task": "should not appear"},
     ]
-    compact = compact_explore_trace(early + late + noise)
+    compact = compact_agent_trace(early + late + noise)
     assert [item["event_type"] for item in compact] == [
         "explore_task",
         "explore_tool",
         "explore",
+        "llm_call",
     ]
-    assert all(item["task_id"] == "explore_new" for item in compact)
     assert compact[0]["task"] == "later rows"
     assert compact[0]["parent_call_id"] == "call_late"
     assert compact[2]["digest"] == "new digest"
+    assert compact[3]["content"] == "main dialogue"
+    assert all("heldout" not in str(item) for item in compact)
 
 
-def test_compact_explore_trace_keeps_multiple_recent_tasks_in_order() -> None:
+def test_compact_agent_trace_keeps_multiple_recent_tasks_in_order() -> None:
     events: list[dict[str, object]] = []
     for name in ("a", "b", "c"):
         events.extend(
@@ -465,7 +485,7 @@ def test_compact_explore_trace_keeps_multiple_recent_tasks_in_order() -> None:
                 },
             ]
         )
-    compact = compact_explore_trace(events, max_events=4)
+    compact = compact_agent_trace(events, max_events=4)
     assert [item["task_id"] for item in compact] == ["b", "b", "c", "c"]
     assert [item["event_type"] for item in compact] == [
         "explore_task",
@@ -475,7 +495,7 @@ def test_compact_explore_trace_keeps_multiple_recent_tasks_in_order() -> None:
     ]
 
 
-def test_compact_explore_trace_oversized_latest_task_keeps_trailing_events() -> None:
+def test_compact_agent_trace_oversized_latest_task_keeps_trailing_events() -> None:
     events = [
         {
             "event_type": "explore_llm",
@@ -485,7 +505,258 @@ def test_compact_explore_trace_oversized_latest_task_keeps_trailing_events() -> 
         }
         for index in range(1, 100)
     ]
-    compact = compact_explore_trace(events, max_events=80)
+    compact = compact_agent_trace(events, max_events=80)
     assert len(compact) == 80
     assert compact[0]["round"] == 20
     assert compact[-1]["round"] == 99
+
+
+def test_compact_agent_trace_keeps_main_and_subagent_without_forbidden_content() -> None:
+    body = "def generate_orders(context):\n    return []\n" + ("x" * 200)
+    events = [
+        {
+            "event_type": "session_start",
+            "mode": "fold",
+            "system_prompt": "FULL SYSTEM PROMPT SECRET",
+            "instruction": "USER INSTRUCTION FULL TEXT",
+        },
+        {
+            "event_type": "llm_call",
+            "status": "ok",
+            "model": "test",
+            "tool_names": ["explore", "write_file"],
+            "content": "delegate then edit",
+        },
+        {
+            "event_type": "tool_call",
+            "tool": "explore",
+            "parent_call_id": "call_1",
+            "arguments": {"task": "edit strategy"},
+            "result": {"ok": True},
+        },
+        {
+            "event_type": "explore_task",
+            "task_id": "explore_abc",
+            "parent_call_id": "call_1",
+            "task": "edit strategy",
+            "status": "started",
+        },
+        {
+            "event_type": "explore_tool",
+            "task_id": "explore_abc",
+            "parent_call_id": "call_1",
+            "tool": "write_file",
+            "result": {"ok": True},
+        },
+        {
+            "event_type": "explore",
+            "task_id": "explore_abc",
+            "parent_call_id": "call_1",
+            "status": "completed",
+            "digest": "wrote main.py",
+        },
+        {
+            "event_type": "tool_call",
+            "tool": "write_file",
+            "arguments": {
+                "path": "/Data2/lzp/ADMCubeQuant/experiments/x/output/main.py",
+                "content": body,
+            },
+            "result": {"ok": True, "value": {"path": "output/main.py"}},
+        },
+        {"event_type": "wrap_up_started", "remaining_seconds": 12.0},
+        {"event_type": "trace_limit_reached", "max_bytes": 32},
+        {"event_type": "session_end", "status": "finished", "llm_calls": 4},
+        {"event_type": "heldout", "result": {"total_return": 0.99}},
+    ]
+    compact = compact_agent_trace(events)
+    types = [item["event_type"] for item in compact]
+    assert types == [
+        "session_start",
+        "llm_call",
+        "tool_call",
+        "explore_task",
+        "explore_tool",
+        "explore",
+        "tool_call",
+        "wrap_up_started",
+        "trace_limit_reached",
+        "session_end",
+    ]
+    rendered = str(compact)
+    assert "FULL SYSTEM PROMPT SECRET" not in rendered
+    assert "USER INSTRUCTION FULL TEXT" not in rendered
+    assert body not in rendered
+    assert "/Data2/" not in rendered
+    assert "heldout" not in rendered
+    write_event = compact[6]
+    args = write_event["args"]
+    assert isinstance(args, dict)
+    assert args["path"] == "[host_path]"
+    assert args["content"] == {"omitted": True, "chars": len(body)}
+    assert compact[3]["parent_call_id"] == "call_1"
+    assert compact[5]["digest"] == "wrote main.py"
+
+
+def test_compact_agent_trace_redacts_embedded_host_paths_not_sandbox() -> None:
+    body = "def generate_orders(context):\n    return []\n" + ("x" * 200)
+    events = [
+        {
+            "event_type": "llm_call",
+            "content": (
+                "failed reading /Data2/lzp/secret; keep /mnt/agent/workspace/main.py "
+                + ("n" * 500)
+            ),
+        },
+        {
+            "event_type": "explore_task",
+            "task": (
+                "inspect (/home/lzp/hidden) and '/tmp/cache' "
+                "then /mnt/agent/output/main.py"
+            ),
+        },
+        {
+            "event_type": "explore",
+            "digest": "ratio 3/4 json 1.5 and a / b stay; host /var/tmp/x goes",
+            "error": "boom at /tmp/foo",
+        },
+        {
+            "event_type": "tool_call",
+            "tool": "write_file",
+            "arguments": {"path": "output/main.py", "content": body},
+            "result": {"ok": False, "error": "cannot write (/Data2/lzp/out)"},
+        },
+    ]
+    compact = compact_agent_trace(events)
+    rendered = str(compact)
+    assert "/Data2/" not in rendered
+    assert "/home/" not in rendered
+    assert "/tmp/" not in rendered
+    assert "/var/" not in rendered
+    content = compact[0]["content"]
+    original = events[0]["content"]
+    assert isinstance(content, str)
+    assert isinstance(original, str)
+    assert content.startswith(
+        "failed reading [host_path]; keep /mnt/agent/workspace/main.py "
+    )
+    assert "/mnt/agent/workspace/main.py" in content
+    assert len(content) < len(original)
+    assert compact[1]["task"] == (
+        "inspect ([host_path]) and '[host_path]' then /mnt/agent/output/main.py"
+    )
+    assert compact[2]["digest"] == (
+        "ratio 3/4 json 1.5 and a / b stay; host [host_path] goes"
+    )
+    assert compact[2]["error"] == "boom at [host_path]"
+    args = compact[3]["args"]
+    assert isinstance(args, dict)
+    assert args["content"] == {"omitted": True, "chars": len(body)}
+    assert compact[3]["error"] == "cannot write ([host_path])"
+    assert body not in rendered
+
+
+def _fold_record(fold_id: str, run_id: str, *, status: str = "frozen") -> dict[str, object]:
+    return {
+        "record_type": "fold",
+        "epoch_id": "epoch_001",
+        "fold_id": fold_id,
+        "run_id": run_id,
+        "fold_status": status,
+    }
+
+
+def _meta_record(run_id: str, meta_id: str = "epoch_001") -> dict[str, object]:
+    return {
+        "record_type": "meta_learning",
+        "epoch_id": "epoch_001",
+        "fold_id": meta_id,
+        "run_id": run_id,
+        "meta_learning_id": meta_id,
+    }
+
+
+def test_first_meta_review_window_is_empty() -> None:
+    folds, window = select_meta_review_folds([_fold_record("fold_2024Q1", "run_a")])
+    assert folds == []
+    assert window["fold_count"] == 0
+    assert window["fold_run_refs"] == []
+    assert window["previous_meta_ref"] is None
+
+
+def test_meta_review_window_only_includes_folds_after_previous_meta() -> None:
+    records = [
+        _meta_record("run_m1", "epoch_001"),
+        _fold_record("fold_old", "run_old"),
+        _meta_record("run_m2", "epoch_001_after_fold_001"),
+        _fold_record("fold_new", "run_new"),
+    ]
+    folds, window = select_meta_review_folds(records)
+    assert [record["run_id"] for record in folds] == ["run_new"]
+    assert window["fold_count"] == 1
+    assert window["previous_meta_ref"] == agent_visible_ref(
+        "epoch_001_after_fold_001", prefix="meta_ref"
+    )
+    assert window["fold_run_refs"] == [
+        agent_visible_ref("run_new", prefix="run_ref")
+    ]
+    assert "fold_old" not in str(window)
+    assert "fold_new" not in str(window)
+
+
+def test_meta_review_window_dedupes_and_excludes_heldout_failed_in_progress() -> None:
+    records = [
+        _meta_record("run_m1"),
+        _fold_record("fold_a", "run_a1"),
+        _fold_record("fold_a", "run_a2"),
+        {
+            "record_type": "heldout",
+            "epoch_id": "epoch_001",
+            "fold_id": "heldout_2026Q1",
+            "run_id": "run_h",
+        },
+        {
+            "record_type": "attempt_failed",
+            "epoch_id": "epoch_001",
+            "fold_id": "fold_b",
+            "run_id": "run_fail",
+            "phase": "fold",
+        },
+        _fold_record("fold_c", "run_c", status="in_progress"),
+        _fold_record("fold_d", "run_d"),
+    ]
+    folds, window = select_meta_review_folds(records)
+    assert [record["run_id"] for record in folds] == ["run_a2", "run_d"]
+    assert window["fold_count"] == 2
+    rendered = str(window)
+    assert "fold_a" not in rendered
+    assert "heldout_2026Q1" not in rendered
+    assert "run_fail" not in rendered
+
+
+def test_meta_review_window_rollback_and_resume_recompute_deterministically() -> None:
+    full = [
+        _meta_record("run_m1"),
+        _fold_record("fold_a", "run_a"),
+        _fold_record("fold_b", "run_b"),
+        _meta_record("run_m2", "epoch_001_after_fold_002"),
+        _fold_record("fold_c", "run_c"),
+    ]
+    first = select_meta_review_folds(full)
+    assert [record["run_id"] for record in first[0]] == ["run_c"]
+    assert select_meta_review_folds(full) == first
+    rewound = full[:3]
+    second = select_meta_review_folds(rewound)
+    assert [record["run_id"] for record in second[0]] == ["run_a", "run_b"]
+    assert select_meta_review_folds(rewound) == second
+    history = _development_history(rewound)
+    summaries = history["fold_backtest_summaries"]
+    reviews = history["fold_reviews"]
+    assert history["review_window"] == second[1]
+    assert isinstance(summaries, list)
+    assert isinstance(reviews, list)
+    assert [row["fold_id"] for row in summaries] == [
+        agent_visible_ref("fold_a", prefix="fold_ref"),
+        agent_visible_ref("fold_b", prefix="fold_ref"),
+    ]
+    assert len(reviews) == 2
