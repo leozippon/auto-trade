@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import time
 import uuid
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -46,11 +47,8 @@ EXPLORE_SYSTEM_PROMPT = """\
 
 _READ_ONLY_TOOLS = frozenset(
     {
-        "daily_backtest",
         "glob",
         "grep",
-        "modification_check",
-        "nl_query",
         "read_file",
         "shell",
         "validate_strategy",
@@ -108,11 +106,13 @@ class ExploreSubAgentEngine(SessionTimeBudgetAware):
         config: ExploreSubAgentConfig | None = None,
         deadline_at: datetime | None = None,
         time_budget: InferenceTimeBudget | None = None,
+        event_sink: Callable[[str, dict[str, object]], None] | None = None,
     ) -> None:
         self.llm = llm
         self.tools = tools
         self.config = config or ExploreSubAgentConfig()
         self.deadline_at = deadline_at
+        self.event_sink = event_sink
         bindings = (
             (TimeBudgetBinding("explore_llm", llm.session_time_budget),)
             if isinstance(llm, SessionTimeBudgetAware)
@@ -146,6 +146,15 @@ class ExploreSubAgentEngine(SessionTimeBudgetAware):
         deadline = min(
             time.monotonic() + self.config.deadline_seconds,
             self._deadline_monotonic(),
+        )
+        self._emit(
+            "explore_task",
+            {
+                "task_id": task_id,
+                "task": task.strip()[:8_000],
+                "parent_call_id": parent_call_id,
+                "status": "started",
+            },
         )
         messages = [
             ChatMessage("system", EXPLORE_SYSTEM_PROMPT),
@@ -336,7 +345,8 @@ class ExploreSubAgentEngine(SessionTimeBudgetAware):
                 )
 
     def _emit(self, event: str, payload: dict[str, object]) -> None:
-        del event, payload
+        if self.event_sink is not None:
+            self.event_sink(event, dict(payload))
 
 
 def _add_usage(total: dict[str, int], usage: object) -> None:

@@ -501,7 +501,7 @@ def test_prompt_and_facts_encode_daily_json_and_offline_meta_boundaries():
         "注入的本地 development 制品在 `inputs/` 下",
         "`modification_check`",
         "sandbox_environment.json",
-        "Taste 里不能出现任何日历日期或年份",
+        "Taste 里不能出现焊接的日历日期",
     ):
         assert rule in META_SYSTEM_PROMPT
 

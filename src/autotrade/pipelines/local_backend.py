@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 import pandas as pd
 
+from autotrade.agent.agents_md import load_required_agents_md_sections
 from autotrade.agent.compact import ContextCompactionConfig
 from autotrade.agent.experiment_facts import build_experiment_facts
 from autotrade.environment.artifacts import (
@@ -330,23 +331,16 @@ class SessionBudgetLLM(SessionTimeBudgetAware):
             budget = SessionCallBudget(max_calls=max_calls, deadline=deadline)
         self.delegate = delegate
         self.budget = budget
+        self.provider = str(getattr(delegate, "provider", ""))
+        self.model = str(getattr(delegate, "model", ""))
+        window = getattr(delegate, "context_window_tokens", None)
+        self.context_window_tokens = (
+            window if isinstance(window, int) and not isinstance(window, bool) else None
+        )
 
     @property
     def calls(self) -> int:
         return self.budget.calls
-
-    @property
-    def provider(self) -> str:
-        return str(getattr(self.delegate, "provider", ""))
-
-    @property
-    def model(self) -> str:
-        return str(getattr(self.delegate, "model", ""))
-
-    @property
-    def context_window_tokens(self) -> int | None:
-        value = getattr(self.delegate, "context_window_tokens", None)
-        return value if isinstance(value, int) and not isinstance(value, bool) else None
 
     @property
     def time_budget(self) -> InferenceTimeBudget:
@@ -737,6 +731,8 @@ class LLMFoldDeveloper:
                 "finalize_before_deadline_seconds": request.finalize_before_deadline_seconds,
                 "sandbox_spec": sandbox_spec.to_record(),
                 "taste_prompt": request.taste,
+                "prior_prompt": request.prior,
+                "agents_md_sections_sha256": load_required_agents_md_sections().sha256,
                 "fold_exploration_directive": self.fold_exploration_directive.strip(),
                 "budgets": {
                     "max_steps": request.max_steps,
@@ -810,6 +806,10 @@ class LLMFoldDeveloper:
                 command_runner = PersistentCommandRunner(sandbox)
             # Built once, after the runtime env and the data summary exist, so
             # the prompt and the workspace copy state the same facts.
+            if request.prior.strip():
+                (inputs_dir / "PRIOR.md").write_text(
+                    request.prior.strip() + "\n", encoding="utf-8"
+                )
             facts = self._fold_facts(
                 request,
                 history,
@@ -920,6 +920,7 @@ class LLMFoldDeveloper:
                     phase=request.phase,
                     step_tree_enabled=self.step_tree_enabled,
                     taste_prompt=request.taste,
+                    prior_prompt=request.prior,
                     fold_exploration_directive=self.fold_exploration_directive,
                     fold_directive=request.directive,
                 ),
@@ -1305,8 +1306,13 @@ class LLMMetaLearner:
                     "previous_taste": bool(
                         str(public.get("previous_taste") or "").strip()
                     ),
+                    "previous_prior": bool(
+                        str(public.get("previous_prior") or "").strip()
+                    ),
                 },
                 "taste_output": "/mnt/agent/workspace/taste.md",
+                "prior_output": "/mnt/agent/workspace/PRIOR.md",
+                "agents_md_sections_sha256": load_required_agents_md_sections().sha256,
                 "modification_constraints": replace(
                     self.regularization_constraints, is_initial_artifact=not parent_id
                 ).to_record(),
@@ -1380,6 +1386,7 @@ class LLMMetaLearner:
             system_prompt=build_system_prompt(
                 mode="meta",
                 experiment_facts=build_experiment_facts(manifest=manifest.data),
+                prior_prompt=str(public.get("previous_prior") or ""),
             ),
             config=AgentSessionConfig(
                 mode="meta",
@@ -1454,6 +1461,7 @@ class LLMMetaLearner:
                 revision_id=revision_id,
                 modification_check=check,
                 allowed=allowed,
+                prior=str(result.get("prior") or ""),
             )
         except Exception as exc:
             trace.emit(

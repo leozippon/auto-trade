@@ -2943,6 +2943,197 @@ class HitlControlActionTest(unittest.TestCase):
         self.assertEqual(control.parent_overrides, {})
         self.assertTrue(node_id)
 
+    def test_rollback_fold_restores_prior_current_immediately(self) -> None:
+        from autotrade.pipelines.prior import ExperimentPriorStore
+
+        write_json_atomic(
+            self.directory / "hitl/schedule.json",
+            {
+                "schema_version": 1,
+                "epochs": 1,
+                "sessions": [
+                    {
+                        "key": "epoch_001/meta_learning",
+                        "kind": "meta",
+                        "epoch_id": "epoch_001",
+                    },
+                    {
+                        "key": "epoch_001/fold_2022Q1",
+                        "kind": "fold",
+                        "epoch_id": "epoch_001",
+                        "fold_id": "fold_2022Q1",
+                    },
+                    {
+                        "key": "epoch_001/meta_learning_after_fold_001",
+                        "kind": "meta",
+                        "epoch_id": "epoch_001",
+                    },
+                    {
+                        "key": "epoch_001/fold_2022Q2",
+                        "kind": "fold",
+                        "epoch_id": "epoch_001",
+                        "fold_id": "fold_2022Q2",
+                    },
+                    {
+                        "key": "heldout",
+                        "kind": "heldout",
+                        "epoch_id": "epoch_001",
+                        "periods": [{"label": "2023Q1"}, {"label": "2023Q2"}],
+                    },
+                ],
+            },
+        )
+        store = ExperimentPriorStore(self.directory)
+        store.publish("first workflow", generation_id="gen_1")
+        store.publish("second workflow", generation_id="gen_2")
+        ledger = ExperimentLedger(self.directory / "ledgers/experiment_ledger.jsonl")
+        ledger.append(
+            {
+                "record_type": "meta_learning",
+                "experiment_id": "exp_ctl",
+                "epoch_id": "epoch_001",
+                "fold_id": "epoch_001_meta_learning",
+                "run_id": "run_meta_0",
+                "session_key": "epoch_001/meta_learning",
+                "prior": "first workflow",
+                "prior_generation_id": "gen_1",
+            }
+        )
+        ledger.append(
+            {
+                "record_type": "meta_learning",
+                "experiment_id": "exp_ctl",
+                "epoch_id": "epoch_001",
+                "fold_id": "epoch_001_after_fold_001",
+                "run_id": "run_meta_1",
+                "session_key": "epoch_001/meta_learning_after_fold_001",
+                "prior": "second workflow",
+                "prior_generation_id": "gen_2",
+            }
+        )
+        self.assertEqual(store.current_generation_id(), "gen_2")
+        response = self._post(
+            action="rollback_fold", session_key="epoch_001/fold_2022Q1"
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        remaining = ExperimentLedger(
+            self.directory / "ledgers/experiment_ledger.jsonl"
+        ).read()
+        self.assertEqual(
+            [record["record_type"] for record in remaining],
+            ["fold", "meta_learning"],
+        )
+        self.assertEqual(remaining[-1]["prior_generation_id"], "gen_1")
+        self.assertEqual(store.current_generation_id(), "gen_1")
+        self.assertEqual(store.current_text().strip(), "first workflow")
+        self.assertEqual(
+            (store.root / "generations" / "gen_2" / "PRIOR.md")
+            .read_text(encoding="utf-8")
+            .strip(),
+            "second workflow",
+        )
+
+    def test_rollback_fold_clears_prior_current_when_no_generation_remains(self) -> None:
+        from autotrade.pipelines.prior import ExperimentPriorStore
+
+        store = ExperimentPriorStore(self.directory)
+        store.publish("later workflow", generation_id="gen_2")
+        ledger = ExperimentLedger(self.directory / "ledgers/experiment_ledger.jsonl")
+        ledger.append(
+            {
+                "record_type": "heldout",
+                "experiment_id": "exp_ctl",
+                "epoch_id": "epoch_001",
+                "fold_id": "heldout_2023Q1",
+                "run_id": "run_heldout",
+                "session_key": "heldout",
+                "period": "2023Q1",
+                "result": {"total_return": 0.01},
+            }
+        )
+        response = self._post(
+            action="rollback_fold", session_key="epoch_001/fold_2022Q1"
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(store.current_generation_id(), "")
+        self.assertEqual(store.current_text(), "")
+        self.assertFalse(store.current_path.exists())
+        self.assertEqual(
+            (store.root / "generations" / "gen_2" / "PRIOR.md")
+            .read_text(encoding="utf-8")
+            .strip(),
+            "later workflow",
+        )
+
+    def test_rollback_fold_fails_if_remaining_prior_generation_is_missing(self) -> None:
+        from autotrade.pipelines.prior import ExperimentPriorStore
+
+        write_json_atomic(
+            self.directory / "hitl/schedule.json",
+            {
+                "schema_version": 1,
+                "epochs": 1,
+                "sessions": [
+                    {
+                        "key": "epoch_001/meta_learning",
+                        "kind": "meta",
+                        "epoch_id": "epoch_001",
+                    },
+                    {
+                        "key": "epoch_001/fold_2022Q1",
+                        "kind": "fold",
+                        "epoch_id": "epoch_001",
+                        "fold_id": "fold_2022Q1",
+                    },
+                    {
+                        "key": "epoch_001/fold_2022Q2",
+                        "kind": "fold",
+                        "epoch_id": "epoch_001",
+                        "fold_id": "fold_2022Q2",
+                    },
+                    {
+                        "key": "heldout",
+                        "kind": "heldout",
+                        "epoch_id": "epoch_001",
+                        "periods": [{"label": "2023Q1"}, {"label": "2023Q2"}],
+                    },
+                ],
+            },
+        )
+        store = ExperimentPriorStore(self.directory)
+        store.publish("later workflow", generation_id="gen_2")
+        ledger = ExperimentLedger(self.directory / "ledgers/experiment_ledger.jsonl")
+        ledger.append(
+            {
+                "record_type": "meta_learning",
+                "experiment_id": "exp_ctl",
+                "epoch_id": "epoch_001",
+                "fold_id": "epoch_001_meta_learning",
+                "run_id": "run_meta_ghost",
+                "session_key": "epoch_001/meta_learning",
+                "prior": "gone",
+                "prior_generation_id": "ghost",
+            }
+        )
+        ledger.append(
+            {
+                "record_type": "heldout",
+                "experiment_id": "exp_ctl",
+                "epoch_id": "epoch_001",
+                "fold_id": "heldout_2023Q1",
+                "run_id": "run_heldout",
+                "session_key": "heldout",
+                "period": "2023Q1",
+                "result": {"total_return": 0.01},
+            }
+        )
+        refused = self._post(
+            action="rollback_fold", session_key="epoch_001/fold_2022Q1"
+        )
+        self.assertEqual(refused.status_code, 400, refused.text)
+        self.assertIn("ghost", refused.json()["detail"])
+        self.assertEqual(store.current_generation_id(), "gen_2")
+
     def test_rollback_fold_is_refused_while_a_worker_is_alive(self) -> None:
         write_json_atomic(
             self.directory / "hitl/status.json",

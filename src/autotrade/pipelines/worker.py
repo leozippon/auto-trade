@@ -49,6 +49,7 @@ from .hitl_state import (
 )
 from .interactive import InteractiveExperimentRunner
 from .ledger import ExperimentLedger
+from .prior import latest_prior_text, restore_current_from_records
 from .local_backend import (
     DeterministicBaselineDeveloper,
     LLMFoldDeveloper,
@@ -839,10 +840,12 @@ def run_local_interactive_worker(
     # Inherited seed (from another experiment's frozen output) replaces the
     # blank template as the first fold's parent; a resumed experiment takes its
     # parent from its own ledger instead.
+    _restore_prior_store(options.experiment_dir, ledger)
     state = {
         "parent": _latest_artifact(ledger, store)
         or _load_inherited_parent(options.experiment_dir),
         "taste": _latest_taste(ledger),
+        "prior": _latest_prior(ledger),
     }
 
     def execute(session, context):
@@ -857,8 +860,10 @@ def run_local_interactive_worker(
                 session.fold,
                 parent=state["parent"],
                 previous_taste=str(state["taste"]),
+                previous_prior=str(state["prior"]),
                 session_context=context,
             )
+            state["prior"] = _latest_prior(ledger)
             return
         if session.kind != "fold":
             raise RuntimeError(f"unsupported local session kind: {session.kind}")
@@ -875,6 +880,7 @@ def run_local_interactive_worker(
             session.fold,
             parent=session_parent,
             taste=str(state["taste"]),
+            prior=str(state["prior"]),
             session_context=context,
         )
         state["parent"] = outcome.frozen
@@ -1163,6 +1169,15 @@ def _build_post_fold_hook(
 def _latest_taste(ledger: ExperimentLedger) -> str:
     records = ledger.read("meta_learning")
     return str(records[-1].get("taste") or "") if records else ""
+
+
+def _latest_prior(ledger: ExperimentLedger) -> str:
+    return latest_prior_text(ledger.read("meta_learning"))
+
+
+def _restore_prior_store(experiment_dir: Path, ledger: ExperimentLedger) -> None:
+    """Align CURRENT with the last remaining Meta generation after resume/rollback."""
+    restore_current_from_records(experiment_dir, ledger.read("meta_learning"))
 
 
 def _repo_file(repo_root: Path, value: object, label: str) -> Path:

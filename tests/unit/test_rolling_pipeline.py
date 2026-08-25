@@ -184,7 +184,20 @@ def test_meta_session_retains_only_the_authorized_test_diagnostic(tmp_path: Path
     assert meta_record["researcher_wait_seconds"] == 1.3
     history = captured["development_history"]
     assert isinstance(history, dict)
-    assert set(history) == {"evaluation_contract", "fold_backtest_summaries", "meta_learning"}
+    assert set(history) == {
+        "evaluation_contract",
+        "fold_backtest_summaries",
+        "fold_reviews",
+        "meta_learning",
+    }
+    reviews = history["fold_reviews"]
+    assert isinstance(reviews, list)
+    assert reviews[0]["test_result"] == {
+        "total_return": -0.02,
+        "sharpe": -0.5,
+        "max_drawdown": -0.08,
+    }
+    assert "private_detail" not in str(reviews)
     summaries = history["fold_backtest_summaries"]
     assert isinstance(summaries, list)
     # Only the compact frozen-test metric whitelist crosses into Meta.

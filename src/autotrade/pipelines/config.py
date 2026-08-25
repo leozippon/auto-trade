@@ -337,6 +337,7 @@ class FoldSessionRequest:
     max_llm_calls: int
     deadline_seconds: float
     directive: str = ""
+    prior: str = ""
     prompt_override: str = ""
     # Per-session HITL override of the experiment's default sandbox GPU count;
     # None keeps the experiment default. The "auto" selector still picks which
@@ -399,6 +400,7 @@ class MetaSessionResult:
     revision_id: str = ""
     modification_check: Mapping[str, object] = field(default_factory=dict)
     allowed: bool = True
+    prior: str = ""
 
 
 FoldDeveloper = Callable[[FoldSessionRequest], FoldSessionResult]

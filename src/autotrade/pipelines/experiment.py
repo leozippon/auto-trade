@@ -37,6 +37,8 @@ from .agent_views import (
     agent_visible_ledger_record as _agent_visible_ledger_record,
     compact_fold_history as _compact_fold_history,
 )
+from .meta_inputs import build_meta_fold_reviews
+from .prior import ExperimentPriorStore, PRIOR_MAX_CHARS, latest_prior_text
 from autotrade.agent.runner import AgentSessionDeadlineExceeded
 from .config import (
     ArtifactRevision,
@@ -152,6 +154,7 @@ class RollingExperimentPipeline:
         )
         parent: FrozenArtifact | None = None
         taste = ""
+        prior = ""
         final_epoch = ""
         for epoch_index in range(1, self.config.epochs + 1):
             epoch_id = f"epoch_{epoch_index:03d}"
@@ -164,9 +167,12 @@ class RollingExperimentPipeline:
             for fold_index, fold in enumerate(folds):
                 if self.meta_learner is not None and fold_index in triggers:
                     taste, parent = self._run_meta(
-                        epoch_id, fold_index, fold, parent, taste
+                        epoch_id, fold_index, fold, parent, taste, previous_prior=prior
                     )
-                outcome = self.run_fold(epoch_id, fold, parent=parent, taste=taste)
+                    prior = latest_prior_text(self.ledger.read("meta_learning"))
+                outcome = self.run_fold(
+                    epoch_id, fold, parent=parent, taste=taste, prior=prior
+                )
                 parent = outcome.frozen
         # Fail-fast path: only reachable when every Fold ended with no freezable
         # artifact at all (integrity failures); acceptance shortfalls alone never
@@ -186,6 +192,7 @@ class RollingExperimentPipeline:
         *,
         parent: FrozenArtifact | None,
         taste: str,
+        prior: str = "",
         session_context: dict[str, object] | None = None,
     ) -> FoldOutcome:
         run_started = time.monotonic()
@@ -214,6 +221,7 @@ class RollingExperimentPipeline:
                         run_id=run_id,
                         parent=parent,
                         taste=taste,
+                        prior=prior,
                         snapshot=valid_snapshot,
                         max_steps=budgets["max_steps"],
                         max_backtests=budgets["max_backtests"],
@@ -368,6 +376,13 @@ class RollingExperimentPipeline:
                 "test_result": test_summary,
                 "test_result_ref": test_result_ref,
                 "run_manifest_ref": session.run_manifest_ref,
+                "agent_trace_ref": str(
+                    agent_trace_path(self.config.experiment_dir / "artifacts", run_id)
+                )
+                if agent_trace_path(
+                    self.config.experiment_dir / "artifacts", run_id
+                ).exists()
+                else None,
                 # HITL re-run tag and the step-node parent override that started
                 # this session: recorded for audit and for the runner's
                 # "this rerun request is absorbed" check.
@@ -485,6 +500,7 @@ class RollingExperimentPipeline:
         parent: FrozenArtifact | None,
         previous_taste: str,
         session_context: dict[str, object] | None = None,
+        previous_prior: str = "",
     ) -> tuple[str, FrozenArtifact | None]:
         if self.meta_learner is None:
             return previous_taste, parent
@@ -496,7 +512,10 @@ class RollingExperimentPipeline:
             context = dict(session_context or {})
             progress = _optional_hook(context.get("progress_hook"), "progress_hook")
             _publish_progress(progress, "pit_snapshot", run_id=run_id, phase="meta")
-            history = _development_history(self.ledger.read())
+            history = _development_history(
+                self.ledger.read(),
+                artifacts_root=self.config.experiment_dir / "artifacts",
+            )
             meta_snapshot = self.snapshots.prepare(
                 fold=visible_fold,
                 phase="meta",
@@ -517,6 +536,7 @@ class RollingExperimentPipeline:
                         "data_summary_ref": meta_snapshot.data_summary_ref,
                         "parent_artifact_id": parent.artifact_id if parent else None,
                         "previous_taste": previous_taste,
+                        "previous_prior": previous_prior,
                         "development_history": history,
                         "meta_learning_memory": self._prior_meta_learning_logs(
                             session_id
@@ -538,9 +558,18 @@ class RollingExperimentPipeline:
                 session = MetaSessionResult(
                     taste=previous_taste,
                     conversation_id=exc.conversation_id,
+                    prior=previous_prior,
                 )
                 deadline_exceeded = True
             taste = str(session.taste).strip()
+            prior_text, prior_published, prior_ref, prior_generation_id = (
+                self._publish_or_keep_prior(
+                    session,
+                    previous_prior=previous_prior,
+                    generation_id=f"{session_id}_{run_id}",
+                    deadline_exceeded=deadline_exceeded,
+                )
+            )
             # Candidate selection and the freeze are the Pipeline's, exactly as
             # for a Fold's selected Step: the Meta session only nominates, and
             # adoption is decided here on the modification check's own verdict
@@ -593,6 +622,11 @@ class RollingExperimentPipeline:
                     "meta_learning_id": session_id,
                     "trigger_after_folds": completed_folds,
                     "taste": taste,
+                    "prior": prior_text,
+                    "prior_published": prior_published,
+                    "prior_ref": prior_ref or None,
+                    "prior_generation_id": prior_generation_id or None,
+                    "prior_chars": len(prior_text),
                     "status": status,
                     "modification_check": dict(session.modification_check),
                     "frozen_strategy_artifact_id": (
@@ -708,6 +742,7 @@ class RollingExperimentPipeline:
         *,
         parent: FrozenArtifact | None,
         previous_taste: str,
+        previous_prior: str = "",
         session_context: dict[str, object] | None = None,
     ) -> tuple[str, FrozenArtifact | None]:
         """Run one scheduled Meta session through the canonical ledger path.
@@ -723,6 +758,28 @@ class RollingExperimentPipeline:
             parent,
             previous_taste,
             session_context,
+            previous_prior=previous_prior,
+        )
+
+    def _publish_or_keep_prior(
+        self,
+        session: MetaSessionResult,
+        *,
+        previous_prior: str,
+        generation_id: str,
+        deadline_exceeded: bool,
+    ) -> tuple[str, bool, str, str]:
+        """Publish a non-empty new PRIOR.md, otherwise keep the previous version."""
+        store = ExperimentPriorStore(self.config.experiment_dir)
+        candidate = "" if deadline_exceeded else str(session.prior or "").strip()
+        if candidate and len(candidate) <= PRIOR_MAX_CHARS:
+            published = store.publish(candidate, generation_id=generation_id)
+            return published.text, True, published.prior_ref, published.generation_id
+        return (
+            previous_prior.strip(),
+            False,
+            store.current_ref(),
+            store.current_generation_id(),
         )
 
 
@@ -802,13 +859,19 @@ def _frozen_revision(artifact: FrozenArtifact) -> ArtifactRevision:
     return ArtifactRevision(artifact.artifact_id, artifact.path, artifact.model_path)
 
 
-def _development_history(records: list[dict[str, object]]) -> dict[str, object]:
+def _development_history(
+    records: list[dict[str, object]],
+    *,
+    artifacts_root: str | Path | None = None,
+) -> dict[str, object]:
     """Meta-visible development history: whitelisted Fold and Meta projections.
 
     Every field crosses the Agent boundary, so it is built exclusively from
     ``agent_views``: raw fold ids become opaque refs and Test evidence is
     limited to the compact frozen-test metric whitelist of already-completed
-    Folds. Held-out never appears.
+    Folds. Held-out never appears. ``fold_reviews`` additionally carries frozen
+    strategy source and a bounded Explore trace; those originals never enter
+    ordinary Fold prompts.
     """
 
     folds = list(latest_fold_records(records).values())
@@ -822,6 +885,9 @@ def _development_history(records: list[dict[str, object]]) -> dict[str, object]:
             _compact_fold_history(record, include_frozen_test_metrics=True)
             for record in folds
         ],
+        "fold_reviews": build_meta_fold_reviews(
+            folds, artifacts_root=artifacts_root
+        ),
         "meta_learning": [
             _agent_visible_ledger_record(record, include_frozen_test_metrics=True)
             for record in records

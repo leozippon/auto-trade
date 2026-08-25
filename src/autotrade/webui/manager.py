@@ -932,6 +932,21 @@ class ExperimentManager:
         tmp.write_text("".join(f"{line}\n" for line in kept_lines), encoding="utf-8")
         os.replace(tmp, ledger_path)
 
+        from autotrade.pipelines.prior import restore_current_from_records
+
+        kept_records: list[dict[str, object]] = []
+        for line in kept_lines:
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, dict):
+                kept_records.append(payload)
+        try:
+            restore_current_from_records(directory, kept_records)
+        except (FileNotFoundError, ValueError) as exc:
+            raise ManagerError(str(exc)) from exc
+
         dropped_session_keys = dropped_fold_keys | dropped_meta_keys | {"heldout"}
         control.approved_sessions = tuple(
             key for key in control.approved_sessions if key not in dropped_session_keys

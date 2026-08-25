@@ -224,10 +224,14 @@ class AgentSessionRunner:
         self.config = config or AgentSessionConfig()
         self.compactor = compactor
         self.explore = explore
+        if self.config.mode in {"meta", "meta_learning"} and explore is not None:
+            raise ValueError("Meta session cannot provide explore sub-agents")
+        if self.explore is not None and self.explore.event_sink is None:
+            self.explore.event_sink = event_sink
         bindings: list[TimeBudgetBinding] = []
         if isinstance(llm, SessionTimeBudgetAware):
             bindings.append(TimeBudgetBinding("main_llm", llm.session_time_budget))
-        if explore is not None:
+        if explore is not None and explore.session_time_budget is not None:
             bindings.append(TimeBudgetBinding("explore", explore.session_time_budget))
         if compactor is not None:
             bindings.append(
@@ -455,7 +459,8 @@ class AgentSessionRunner:
                         "result": sanitize_for_log(record),
                     },
                 )
-                if call.name == "explore" and isinstance(record.get("value"), dict):
+                explore_value = record.get("value")
+                if call.name == "explore" and isinstance(explore_value, dict):
                     if explore_totals is None:
                         explore_totals = {
                             "llm_calls": 0,
@@ -463,7 +468,7 @@ class AgentSessionRunner:
                             "completion_tokens": 0,
                             "total_tokens": 0,
                         }
-                    _accumulate_explore_usage(explore_totals, record["value"])
+                    _accumulate_explore_usage(explore_totals, explore_value)
             accepted_steps = len(self._complete_validation_nodes)
             messages = self._clear_stale_tool_results(
                 messages, protect_from_index=first_new_tool_index
@@ -761,13 +766,14 @@ class AgentSessionRunner:
         if self.explore is None:
             return {"ok": False, "error": "Explore is not configured"}
         task = call.arguments.get("task")
-        max_rounds = call.arguments.get("max_rounds")
+        raw_rounds = call.arguments.get("max_rounds")
         if not isinstance(task, str) or not task.strip():
             return {"ok": False, "error": "explore.task must be a non-empty string"}
-        if max_rounds is not None and (
-            not isinstance(max_rounds, int) or isinstance(max_rounds, bool)
-        ):
-            return {"ok": False, "error": "explore.max_rounds must be an integer"}
+        max_rounds: int | None = None
+        if raw_rounds is not None:
+            if not isinstance(raw_rounds, int) or isinstance(raw_rounds, bool):
+                return {"ok": False, "error": "explore.max_rounds must be an integer"}
+            max_rounds = raw_rounds
         result = self.explore.run(
             task,
             max_rounds=max_rounds,
@@ -1089,7 +1095,15 @@ class MetaLearningAgent:
         taste = path.read_text(encoding="utf-8").strip()
         if not taste:
             raise RuntimeError("taste.md cannot be empty")
-        return {"taste": taste, "conversation_id": result.conversation_id}
+        prior_path = self.workspace / "PRIOR.md"
+        prior = ""
+        if prior_path.is_file():
+            prior = prior_path.read_text(encoding="utf-8").strip()
+        return {
+            "taste": taste,
+            "prior": prior,
+            "conversation_id": result.conversation_id,
+        }
 
 
 # A bare 4-digit number followed by one of these is a count/threshold, not a
@@ -1107,6 +1121,8 @@ _DATE_EXPR = re.compile(
 
 # Taste is injected into every later Fold prompt. Keep a short prior.
 TASTE_MAX_CHARS = 4000
+# PRIOR is free-format process memory published by Meta. Resource bound, not a schema.
+PRIOR_MAX_CHARS = 16_000
 
 
 def visible_window_dates(manifest: Mapping[str, object]) -> set[str]:
@@ -1188,6 +1204,25 @@ def taste_policy_violation(taste_path: Path, *, window_dates: set[str]) -> str:
     return ""
 
 
+def prior_policy_violation(prior_path: Path) -> str:
+    """Why an existing PRIOR.md may not be finished, or empty when it is acceptable.
+
+    Missing or blank PRIOR.md means this Meta round keeps the previous version.
+    """
+    if not prior_path.exists():
+        return ""
+    text = prior_path.read_text(encoding="utf-8", errors="replace")
+    if not text.strip():
+        return ""
+    nchars = len(text.strip())
+    if nchars > PRIOR_MAX_CHARS:
+        return (
+            f"PRIOR.md is {nchars} characters; keep it to {PRIOR_MAX_CHARS} "
+            "as process memory, then call finish_meta again"
+        )
+    return ""
+
+
 class TasteFinishTool:
     spec = ToolSpec(
         "finish_meta",
@@ -1222,6 +1257,9 @@ class TasteFinishTool:
         violation = taste_policy_violation(path, window_dates=self.window_dates)
         if violation:
             raise ToolError(violation, error_type="taste_policy")
+        prior_violation = prior_policy_violation(self.workspace.root / "PRIOR.md")
+        if prior_violation:
+            raise ToolError(prior_violation, error_type="prior_policy")
         return ToolResult(
             True,
             # Pipeline adopts a Taste only on an explicit done: the status is

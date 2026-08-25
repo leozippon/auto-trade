@@ -299,6 +299,7 @@ def _meta_learning_facts(manifest: Mapping[str, object]) -> dict[str, object]:
     return compact_mapping(
         {
             "taste_output_path": manifest.get("taste_output") or "/mnt/agent/workspace/taste.md",
+            "prior_output_path": manifest.get("prior_output") or "/mnt/agent/workspace/PRIOR.md",
             "taste_injected_scope": "subsequent_fold_prompts_until_next_meta_trigger",
             "development_inputs": {
                 key: value
@@ -306,6 +307,7 @@ def _meta_learning_facts(manifest: Mapping[str, object]) -> dict[str, object]:
                 if key in {"development_history", "experiment_ledger_full", "meta_learning_memory"}
             },
             "previous_taste_available": bool(development_inputs.get("previous_taste")),
+            "previous_prior_available": bool(development_inputs.get("previous_prior")),
             "history_available": bool(development_inputs),
             "sample_window_only": True,
             "backtest_allowed": False,

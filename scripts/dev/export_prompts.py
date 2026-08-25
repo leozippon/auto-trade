@@ -10,6 +10,7 @@ caught by ``--check``.
 Every fenced block is imported from the module that ships it; no prompt text is
 retyped here.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -26,6 +27,7 @@ add_repo_src(__file__)
 
 from autotrade.agent.compact import COMPACT_SYSTEM_PROMPT
 from autotrade.agent.explore import EXPLORE_SYSTEM_PROMPT
+from autotrade.agent.agents_md import load_required_agents_md_sections
 from autotrade.agent.prompts import (
     CONVERGENCE_PHASE_PROMPT,
     DEFAULT_ANTI_OVERFIT_PROMPT,
@@ -38,13 +40,16 @@ from autotrade.agent.prompts import (
     FOLD_PROHIBITIONS,
     FOLD_ROLE_SECTION,
     FOLD_STATIC_SECTIONS,
+    FOLD_SUBAGENT_CONTRACT,
     FOLD_SUBMIT_CONTRACT,
     HARD_FINALIZATION_SYSTEM_PROMPT,
+    META_PHASE_CONTRACT,
     META_SYSTEM_PROMPT,
     RUNTIME_SYSTEM_PROMPT,
     STEP_TREE_SECTION,
     STEP_WRAP_UP_PROMPT,
     WRAP_UP_PROMPT,
+    build_prior_section,
 )
 from autotrade.environment.nl.engine import (
     FINAL_AFTER_TOOL_BUDGET,
@@ -96,7 +101,19 @@ def render() -> str:
         "",
         "## 1. Fold Agent 系统提示词",
         "",
-        "`FOLD_SYSTEM_PROMPT` 与 `PROTOCOL_INSTRUCTION` 由六个稳定区块按顺序组成。",
+        "运行时系统提示词先注入仓库根 `AGENTS.md` 的三个完整 section，再接本项目 Fold 子代理合同，然后是六个稳定区块。",
+        "",
+        "### 1.0 仓库 AGENTS 三节",
+        "",
+        "运行时从仓库根 `AGENTS.md` 抽取，代码不复制正文。当前抽取如下：",
+        "",
+        _block(load_required_agents_md_sections().text),
+        "",
+        "### 1.0b Fold 子代理合同",
+        "",
+        "`FOLD_SUBAGENT_CONTRACT`：",
+        "",
+        _block(FOLD_SUBAGENT_CONTRACT),
         "",
         "### 1.1 角色与目标",
         "",
@@ -170,7 +187,9 @@ def render() -> str:
         "",
         "`DEFAULT_CONVERGENCE_PROMPT` 与 `CONVERGENCE_PHASE_PROMPT` 依次注入：",
         "",
-        _block(f"{DEFAULT_CONVERGENCE_PROMPT.strip()}\n\n{CONVERGENCE_PHASE_PROMPT.strip()}"),
+        _block(
+            f"{DEFAULT_CONVERGENCE_PROMPT.strip()}\n\n{CONVERGENCE_PHASE_PROMPT.strip()}"
+        ),
         "",
         "### 3.4 Step 产物树",
         "",
@@ -179,6 +198,12 @@ def render() -> str:
         _block(STEP_TREE_SECTION),
         "",
         "## 4. 离线 Meta Agent 系统提示词",
+        "",
+        "Meta 同样先注入上述 AGENTS 三节，再接本项目阶段身份，然后是 `META_SYSTEM_PROMPT`。",
+        "",
+        "`META_PHASE_CONTRACT`：",
+        "",
+        _block(META_PHASE_CONTRACT),
         "",
         "`META_SYSTEM_PROMPT`：",
         "",
@@ -189,7 +214,9 @@ def render() -> str:
         "Meta 用户消息由 `build_meta_learning_prompt` 组织：",
         "",
         _block(
-            "请从下列本地 development 证据提炼后续 Fold 的 Taste。不要输出逐 Fold 测试明细，不要使用任何外部资料。\n"
+            "请从本地 development 证据提炼后续 Fold 的 Taste，并按需更新 PRIOR.md。"
+            "先读 `inputs/meta_context.json`（含已完成 Fold 的冻结策略投影与子代理轨迹摘要），需要时再读 `inputs/meta_learning_memory.jsonl`。"
+            "不要输出逐 Fold 测试明细，不要使用任何外部资料。\n"
             "{previous_taste, development}\n\n"
             "[可选：实验级默认 Fold 探索方向]\n"
             "[可选：实验级探索方向]"
@@ -237,6 +264,7 @@ def render() -> str:
             '{"period": "day|month|quarter|year", "inference_time": "HH:MM"}\n\n'
             "## Step 产物树\n"
             "[启用时注入]\n\n"
+            f"{build_prior_section('{PRIOR.md 全文}', role='fold')}\n\n"
             "## 本 Epoch 的 Taste（元学习注入）\n"
             "[存在时注入]\n\n"
             "## 实验级默认 Fold 探索方向（用户注入）\n"
@@ -270,11 +298,18 @@ def render() -> str:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=DOC_PATH)
-    parser.add_argument("--check", action="store_true", help="Fail when the committed snapshot is stale.")
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Fail when the committed snapshot is stale.",
+    )
     args = parser.parse_args()
     rendered = render()
     if args.check:
-        if not args.output.exists() or args.output.read_text(encoding="utf-8") != rendered:
+        if (
+            not args.output.exists()
+            or args.output.read_text(encoding="utf-8") != rendered
+        ):
             print(
                 "configs/prompts/PROMPTS.md is stale; run scripts/dev/export_prompts.py",
                 file=sys.stderr,

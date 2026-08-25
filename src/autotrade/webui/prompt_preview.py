@@ -52,19 +52,29 @@ def build_prompt_preview(
         inference_time=str(params.get("inference_time") or "08:30"),
     )
     records = read_ledger_records(experiment_dir)
+    previous_taste = next(
+        (
+            str(row.get("taste") or "")
+            for row in reversed(records)
+            if row.get("record_type") == "meta_learning"
+        ),
+        "",
+    )
+    previous_prior = next(
+        (
+            str(row.get("prior") or "")
+            for row in reversed(records)
+            if row.get("record_type") == "meta_learning"
+        ),
+        "",
+    )
     if kind in {"meta", "meta_learning"}:
-        previous = next(
-            (
-                str(row.get("taste") or "")
-                for row in reversed(records)
-                if row.get("record_type") == "meta_learning"
-            ),
-            "",
-        )
         prompt = "\n\n".join(
             [
-                build_system_prompt(timing, mode="meta"),
-                build_meta_learning_prompt(None, previous),
+                build_system_prompt(
+                    timing, mode="meta", prior_prompt=previous_prior
+                ),
+                build_meta_learning_prompt(None, previous_taste),
                 f"研究者指令：{directive.strip()}"
                 if directive.strip()
                 else "研究者指令：无额外指令。",
@@ -88,7 +98,9 @@ def build_prompt_preview(
             "deadline_seconds": int(params.get("max_fold_minutes", 240)) * 60,  # type: ignore[arg-type]
         }
     )
-    prompt = build_system_prompt(timing, mode="fold", experiment_facts=facts)
+    prompt = build_system_prompt(
+        timing, mode="fold", experiment_facts=facts, prior_prompt=previous_prior
+    )
     prompt += (
         f"\n\n研究者本 Fold 指令：{directive.strip()}"
         if directive.strip()
