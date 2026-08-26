@@ -14,7 +14,11 @@ import json
 import threading
 from pathlib import Path
 
-from autotrade.environment.llm import LOCAL_QWEN_MODEL, model_profile
+from autotrade.environment.llm import (
+    LOCAL_QWEN_MODEL,
+    canonicalize_model_name,
+    model_profile,
+)
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.runtime import utc_now_iso
 from autotrade.environment.step_tree import StepTree
@@ -127,7 +131,9 @@ class AnalysisService:
                 experiments_root, experiment_id, epoch_id, fold_id
             )
             params = read_json(experiment_dir / HITL_DIR_NAME / PARAMS_NAME)
-            model = str(params.get("analysis_model") or LOCAL_QWEN_MODEL)
+            model = canonicalize_model_name(
+                str(params.get("analysis_model") or LOCAL_QWEN_MODEL)
+            )
             provider = model_profile(model).provider
             max_tokens = int(params.get("analysis_max_tokens") or 6000)
             model_dir = record.get("frozen_model_artifact_path")
@@ -187,7 +193,9 @@ class AnalysisService:
                 raise ManagerError("current Step has no strategy snapshot on disk")
             model_dir = Path(node_dir) / "models"
             params = read_json(Path(experiment_dir) / HITL_DIR_NAME / PARAMS_NAME)
-            model = str(params.get("analysis_model") or LOCAL_QWEN_MODEL)
+            model = canonicalize_model_name(
+                str(params.get("analysis_model") or LOCAL_QWEN_MODEL)
+            )
             provider = model_profile(model).provider
             max_tokens = int(params.get("analysis_max_tokens") or 6000)
             node = StepTree(Path(node_dir).parent).get_node(node_id)

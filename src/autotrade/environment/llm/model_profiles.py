@@ -16,8 +16,17 @@ from .deepseek import (
 )
 from .proxy import LLMProxy
 
-LOCAL_QWEN_MODEL = "qwen3.8-27b-local"
+LOCAL_QWEN_MODEL = "qwen-3.8-27b-fp8"
+LEGACY_LOCAL_QWEN_MODEL = "qwen3.8-27b-local"
 MODEL_CHOICES = (LOCAL_QWEN_MODEL, *_deepseek.MODEL_CHOICES)
+
+
+def canonicalize_model_name(model: str) -> str:
+    """Map read-compatible legacy aliases to the current catalog name."""
+
+    if model == LEGACY_LOCAL_QWEN_MODEL:
+        return LOCAL_QWEN_MODEL
+    return model
 
 
 @dataclass(frozen=True)
@@ -75,6 +84,7 @@ def _gateway_api_key(env_file: str | Path, *, required: bool) -> str:
 
 
 def model_profile(model: str) -> ModelProfile:
+    model = canonicalize_model_name(model)
     if model in _deepseek.SUPPORTED_MODELS:
         return _DEEPSEEK_PROFILE
     if model == LOCAL_QWEN_MODEL:
@@ -112,6 +122,7 @@ def build_model_gateway(
     trusted model profile; neither can be supplied by experiment parameters.
     """
 
+    model = canonicalize_model_name(model)
     profile = model_profile(model)
     effective_max_tokens = effective_max_output_tokens(model, max_tokens)
     if profile.provider == "deepseek":
@@ -178,10 +189,12 @@ def build_model_gateway(
 
 
 __all__ = [
+    "LEGACY_LOCAL_QWEN_MODEL",
     "LOCAL_QWEN_MODEL",
     "MODEL_CHOICES",
     "ModelProfile",
     "build_model_gateway",
+    "canonicalize_model_name",
     "effective_max_output_tokens",
     "model_profile",
 ]

@@ -196,6 +196,8 @@ a:hover {
  width: 1.7rem;
  height: 1.7rem;
  object-fit: contain;
+ border: 0;
+ background: transparent;
 }
 .brand:hover {
  text-decoration: none;
@@ -1671,17 +1673,7 @@ details.advanced .form-grid {
 }
 .gpu-bar {
  flex: 1;
- height: 0.6rem;
- border-radius: 999px;
- background: var(--chip-bg);
- overflow: hidden;
-}
-.gpu-bar > span {
- display: block;
- height: 100%;
- border-radius: 999px;
- background: var(--accent);
- opacity: 0.75;
+ width: auto;
 }
 .gpu-row .gpu-meta {
  flex: none;

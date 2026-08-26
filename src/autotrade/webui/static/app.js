@@ -3140,7 +3140,8 @@ function gpuAllocationRow(detail, session, send) {
   let gpuCache = null;
   const renderGpus = (gpus) => {
     gpuCache = gpus;
-    const count = Number(select.value) || experimentDefault;
+    const count =
+      select.value === "" ? experimentDefault : Number(select.value);
     const grid = el("div", { class: "gpu-grid" });
     [...gpus]
       .sort(
@@ -3170,14 +3171,12 @@ function gpuAllocationRow(detail, session, send) {
               { class: "gpu-name" },
               `GPU ${gpu.index} · ${gpu.name.replace(/^NVIDIA\s+/, "")}`,
             ),
-            el(
-              "span",
-              {
-                class: "gpu-bar",
-                title: `显存剩余 ${freePct}%（${freeGib}G / ${totalGib}G）`,
-              },
-              el("span", { style: `width:${freePct}%` }),
-            ),
+            el("progress", {
+              class: "progress gpu-bar",
+              value: gpu.memory_free_mib,
+              max: gpu.memory_total_mib,
+              title: `显存剩余 ${freePct}%（${freeGib}G / ${totalGib}G）`,
+            }),
             picked ? el("span", { class: "gpu-pick-badge" }, "将分配") : null,
             el(
               "span",

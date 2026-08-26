@@ -747,6 +747,13 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         @app.get("/", response_class=HTMLResponse)
         def index() -> HTMLResponse:
             return HTMLResponse((STATIC_DIR / "index.html").read_text(encoding="utf-8"))
+
+        @app.get("/favicon.ico", include_in_schema=False)
+        def favicon() -> FileResponse:
+            logo = STATIC_DIR / "logo.png"
+            if not logo.is_file():
+                raise HTTPException(status_code=404, detail="favicon missing")
+            return FileResponse(logo, media_type="image/png")
     return app
 
 

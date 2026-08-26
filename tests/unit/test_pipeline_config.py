@@ -8,8 +8,10 @@ console and another on the command line.
 
 from __future__ import annotations
 
+import argparse
 import json
 import math
+import re
 import unittest
 from dataclasses import MISSING, fields
 from pathlib import Path
@@ -17,29 +19,43 @@ from unittest.mock import patch
 
 from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.strategy import StrategySchedule
+from autotrade.environment.llm import LOCAL_QWEN_MODEL
 from autotrade.pipelines.config import AcceptanceRules, RollingExperimentConfig
 from autotrade.pipelines.hitl_state import WEB_CREATE_DEFAULTS
 
-#: The console create form is seeded from a real launch configuration rather
-#: than from the library fallbacks. These sixteen keys are where the two differ.
+#: The console create form is seeded from the pinned explore profile so a
+#: new experiment hardlinks the PIT view seed. Period, screen, compact, and
+#: loop knobs that a researcher gets without touching the form live here.
 _CONSOLE_CREATE_PRESET: dict[str, object] = {
     "compact_keep_recent_messages": 10,
     "compact_max_calls": 10,
     "compact_max_tokens": 10_000,
     "compact_token_threshold": 200_000,
-    "first_test_period": "2024Q2",
-    "last_test_period": "2025Q4",
+    "epochs": 3,
+    "first_test_period": "2022Q1",
+    "fold_period": "quarter",
+    "gpu_count": 1,
     "heldout_first_period": "2026Q1",
     "heldout_last_period": "2026Q2",
-    "initial_cash": 100_000,
+    "include_events": True,
+    "include_intraday": True,
+    "include_text": True,
+    "inference_time": "08:30",
+    "initial_cash": 1_000_000.0,
     "initial_control_mode": "auto",
-    "max_steps_per_fold": 20,
-    "meta_learning_fold_interval": 1,
-    "meta_model": "qwen3.8-27b-local",
-    "model": "qwen3.8-27b-local",
+    "analysis_enabled": False,
+    "last_test_period": "2025Q4",
+    "max_backtests_per_fold": 15,
+    "max_fold_minutes": 240,
+    "max_llm_calls": 400,
+    "max_steps_per_fold": 10,
+    "meta_learning_fold_interval": 2,
+    "meta_model": LOCAL_QWEN_MODEL,
+    "model": LOCAL_QWEN_MODEL,
     "screen_boards": ("main",),
     "screen_exclude_new_listed_days": 180,
     "screen_exclude_st": True,
+    "strategy_period": "day",
 }
 
 PERIODS = {
@@ -58,6 +74,20 @@ def make_config(root: Path, **overrides: object) -> RollingExperimentConfig:
     }
     values.update(overrides)
     return RollingExperimentConfig(**values)
+
+
+def test_screen_exclude_st_cli_alias_and_help() -> None:
+    from scripts.experiments._cli import add_snapshot_window_arguments
+
+    parser = argparse.ArgumentParser()
+    add_snapshot_window_arguments(parser, verbose_help=True)
+
+    assert parser.parse_args([]).screen_exclude_st is True
+    assert parser.parse_args(["--screen-exclude-st"]).screen_exclude_st is True
+    assert parser.parse_args(["--no-screen-exclude-st"]).screen_exclude_st is False
+    assert not re.search(
+        r"(?m)^\s*--screen-exclude-st(?:[ =]|$)", parser.format_help()
+    )
 
 
 class AcceptanceRulesTest(unittest.TestCase):
@@ -137,7 +167,7 @@ class RollingExperimentConfigValidationTest(unittest.TestCase):
     def test_valid_defaults_pass(self) -> None:
         config = make_config(Path("/tmp"))
         self.assertEqual(config.first_test_period, "2022Q1")
-        self.assertEqual(config.meta_learning_fold_interval, 0)
+        self.assertEqual(config.meta_learning_fold_interval, 2)
         self.assertEqual(config.fold_exploration_directive, "")
         self.assertEqual(config.max_fold_minutes, 240)
         self.assertEqual(config.experiment_dir, Path("/tmp/experiments/exp"))
@@ -192,21 +222,7 @@ class RollingExperimentConfigValidationTest(unittest.TestCase):
 
 
 class DefaultsDriftTest(unittest.TestCase):
-    """The console defaults, the domain dataclasses and the CLI must agree.
-
-    Three keys are a deliberate exception: the console create form seeds the
-    research preset the owner launches from, while the dataclass and the
-    headless CLI keep the conservative library fallback. They are pinned on
-    BOTH sides below rather than skipped, so a further drift — in either
-    direction, on any of the three — still fails.
-    """
-
-    #: key -> (console create default, domain-dataclass default)
-    CONSOLE_PRESET_DIVERGENCE = {
-        "max_steps_per_fold": (20, 10),
-        "meta_learning_fold_interval": (1, 0),
-        "initial_cash": (100_000, 1_000_000.0),
-    }
+    """The console defaults, the domain dataclasses and the CLI must agree."""
 
     def test_console_defaults_match_the_domain_dataclasses(self) -> None:
         for field_obj in fields(RollingExperimentConfig):
@@ -215,26 +231,12 @@ class DefaultsDriftTest(unittest.TestCase):
                 or field_obj.default is MISSING
             ):
                 continue
-            if field_obj.name in self.CONSOLE_PRESET_DIVERGENCE:
-                self.assertEqual(
-                    (WEB_CREATE_DEFAULTS[field_obj.name], field_obj.default),
-                    self.CONSOLE_PRESET_DIVERGENCE[field_obj.name],
-                    field_obj.name,
-                )
-                continue
             self.assertEqual(
                 WEB_CREATE_DEFAULTS[field_obj.name], field_obj.default, field_obj.name
             )
         profile = BrokerProfile()
         for key in ("initial_cash", "commission_bps", "slippage_bps"):
             if key not in WEB_CREATE_DEFAULTS:
-                continue
-            if key in self.CONSOLE_PRESET_DIVERGENCE:
-                self.assertEqual(
-                    (WEB_CREATE_DEFAULTS[key], getattr(profile, key)),
-                    self.CONSOLE_PRESET_DIVERGENCE[key],
-                    key,
-                )
                 continue
             self.assertEqual(WEB_CREATE_DEFAULTS[key], getattr(profile, key), key)
         rules = AcceptanceRules()
@@ -370,9 +372,7 @@ class DefaultsDriftTest(unittest.TestCase):
             expected = tuple(expected) if isinstance(expected, list) else expected
             if cli_default != expected:
                 mismatches[action.dest] = (cli_default, expected)
-        # `initial_cash` is the one console-preset divergence that also has a
-        # CLI flag; pinned with both values so a new drift still fails here.
-        self.assertEqual(mismatches, {"initial_cash": (1_000_000.0, 100_000)})
+        self.assertEqual(mismatches, {})
 
 
 if __name__ == "__main__":

@@ -8,9 +8,11 @@ from .deepseek import (
 )
 from .extraction import ExtractionError, extract_json_object
 from .model_profiles import (
+    LEGACY_LOCAL_QWEN_MODEL,
     LOCAL_QWEN_MODEL,
     MODEL_CHOICES,
     build_model_gateway,
+    canonicalize_model_name,
     effective_max_output_tokens,
     model_profile,
 )
@@ -31,6 +33,7 @@ from .proxy import (
 )
 
 __all__ = [
+    "LEGACY_LOCAL_QWEN_MODEL",
     "LOCAL_QWEN_MODEL",
     "MODEL_CHOICES",
     "ChatMessage",
@@ -46,6 +49,7 @@ __all__ = [
     "ToolCall",
     "CONTEXT_OUTPUT_TOKEN_MARGIN",
     "build_model_gateway",
+    "canonicalize_model_name",
     "clamp_requested_max_tokens",
     "context_overflow_error",
     "context_request_fits",

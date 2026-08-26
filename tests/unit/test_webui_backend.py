@@ -21,6 +21,7 @@ import pandas as pd
 from fastapi.testclient import TestClient
 
 from autotrade.environment.identity import AgentRefStore
+from autotrade.environment.llm import LOCAL_QWEN_MODEL, MODEL_CHOICES
 from autotrade.environment.runtime import AgentTraceWriter, write_json_atomic
 from autotrade.pipelines.hitl_state import (
     WEB_CREATE_DEFAULTS,
@@ -97,7 +98,7 @@ def test_local_webui_health_schema_and_brand(tmp_path: Path):
     assert health["status"] == "ok"
     assert "experiments_root" not in health
     assert str(tmp_path) not in json.dumps(health)
-    assert health["max_running_experiments"] == 5
+    assert health["max_running_experiments"] == MAX_RUNNING_EXPERIMENTS
     assert health["running"] == []
     assert health["unreadable_experiments"] == []
     assert health["raw_generation"] == {"state": "absent"}
@@ -159,16 +160,12 @@ def test_local_webui_health_schema_and_brand(tmp_path: Path):
         "compact_max_tokens",
         "compact_max_calls",
     ]
-    assert fields["model"]["choices"] == [
-        "qwen3.8-27b-local",
-        "deepseek-v4-pro",
-        "deepseek-v4-flash",
-    ]
+    assert fields["model"]["choices"] == list(MODEL_CHOICES)
     assert fields["meta_model"]["choices"] == fields["model"]["choices"]
-    assert fields["model"]["default"] == "qwen3.8-27b-local"
-    assert fields["meta_model"]["default"] == "qwen3.8-27b-local"
-    assert fields["nl_model"]["default"] == "qwen3.8-27b-local"
-    assert fields["compact_model"]["default"] == "qwen3.8-27b-local"
+    assert fields["model"]["default"] == LOCAL_QWEN_MODEL
+    assert fields["meta_model"]["default"] == LOCAL_QWEN_MODEL
+    assert fields["nl_model"]["default"] == LOCAL_QWEN_MODEL
+    assert fields["compact_model"]["default"] == LOCAL_QWEN_MODEL
     assert fields["reasoning_effort"]["default"] == "max"
     assert fields["compact_token_threshold"]["default"] == 200_000
     assert fields["compact_keep_recent_messages"]["default"] == 10
@@ -199,6 +196,10 @@ def test_local_webui_health_schema_and_brand(tmp_path: Path):
     assert "ADM-Cube" in page.text
     assert "no-store" in page.headers["cache-control"]
     assert '<img class="logo" src="/static/logo.png"' in page.text
+    assert 'rel="icon" href="/static/logo.png"' in page.text
+    favicon = client.get("/favicon.ico")
+    assert favicon.status_code == 200
+    assert favicon.headers["content-type"] == "image/png"
     # The nav strip carries a frontend-only 实盘交易 entry on its own #/qmt
     # route. What must stay absent is the live-trading console itself: no
     # backend, no communication, no execution path behind it.
@@ -233,17 +234,17 @@ def test_cli_exposes_distinct_fold_and_meta_model_choices() -> None:
     parser = argparse.ArgumentParser()
     add_model_arguments(parser, verbose_help=True)
     defaults = parser.parse_args([])
-    assert defaults.model == defaults.meta_model == "qwen3.8-27b-local"
+    assert defaults.model == defaults.meta_model == LOCAL_QWEN_MODEL
     mixed = parser.parse_args(
         [
             "--model",
             "deepseek-v4-flash",
             "--meta-model",
-            "qwen3.8-27b-local",
+            LOCAL_QWEN_MODEL,
         ]
     )
     assert mixed.model == "deepseek-v4-flash"
-    assert mixed.meta_model == "qwen3.8-27b-local"
+    assert mixed.meta_model == LOCAL_QWEN_MODEL
 
 
 def test_agent_trace_is_redacted_bounded_and_private(tmp_path: Path):
@@ -1079,6 +1080,21 @@ def test_home_progress_uses_csp_compatible_native_control(tmp_path: Path):
         assert selector in stylesheet
 
 
+def test_gpu_allocation_bar_uses_csp_compatible_native_control(tmp_path: Path):
+    client = TestClient(create_app(tmp_path))
+    script = client.get("/static/app.js").text
+    stylesheet = client.get("/static/style.css").text
+    source = script.split("function gpuAllocationRow(", 1)[1].split(
+        "async function sendControlAction(", 1
+    )[0]
+    assert re.search(r'el\(\s*"progress",', source)
+    assert "value: gpu.memory_free_mib" in source
+    assert "max: gpu.memory_total_mib" in source
+    assert "style:" not in source.split("const renderGpus", 1)[1]
+    assert ".gpu-bar > span" not in stylesheet
+    assert 'select.value === "" ? experimentDefault' in source
+
+
 def test_style_api_rejects_result_reference_outside_experiment(tmp_path: Path):
     directory = _persistent_experiment(tmp_path)
     ledger = ExperimentLedger(directory / "ledgers/experiment_ledger.jsonl")
@@ -1462,7 +1478,10 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertEqual(fields["first_test_period"]["type"], "string")
         # Filled per-epoch on the detail page instead of at creation.
         self.assertNotIn("meta_learning_directive", fields)
-        self.assertEqual(fields["meta_learning_fold_interval"]["default"], 1)
+        self.assertEqual(
+            fields["meta_learning_fold_interval"]["default"],
+            WEB_CREATE_DEFAULTS["meta_learning_fold_interval"],
+        )
         self.assertEqual(fields["meta_learning_fold_interval"]["min"], 0)
         self.assertEqual(fields["fold_exploration_directive"]["type"], "text")
         self.assertEqual(fields["fold_exploration_directive"]["default"], "")
@@ -1519,7 +1538,7 @@ class WebuiBackendTest(unittest.TestCase):
 
         labels = [f"{year}Q{quarter}" for year in range(2022, 2027) for quarter in range(1, 5)]
         defaults = suggest_period_defaults({"quarter": labels})["quarter"]
-        self.assertEqual(defaults["first_test_period"], "2024Q2")
+        self.assertEqual(defaults["first_test_period"], "2022Q1")
         self.assertEqual(defaults["last_test_period"], "2025Q4")
         self.assertEqual(defaults["heldout_first_period"], "2026Q1")
         self.assertEqual(defaults["heldout_last_period"], "2026Q2")
@@ -2606,7 +2625,7 @@ class WebuiBackendTest(unittest.TestCase):
         )
         self.assertEqual(created.status_code, 200, created.text)
 
-    def test_running_cap_allows_fifth_and_blocks_sixth(self) -> None:
+    def test_running_cap_allows_last_slot_and_blocks_overflow(self) -> None:
         manager = ExperimentManager(self.repo_root, self.experiments_root)
         running = [f"running_{index}" for index in range(MAX_RUNNING_EXPERIMENTS - 1)]
         with (
@@ -2616,32 +2635,33 @@ class WebuiBackendTest(unittest.TestCase):
         ):
             created = manager.create_experiment(
                 {
-                    "experiment_id": "exp_fifth",
+                    "experiment_id": "exp_last_slot",
                     "first_test_period": "2024Q1",
                     "last_test_period": "2024Q1",
                     "heldout_first_period": "2024Q2",
                     "heldout_last_period": "2024Q2",
                 }
             )
-        self.assertEqual(created["experiment_id"], "exp_fifth")
+        self.assertEqual(created["experiment_id"], "exp_last_slot")
 
-        running.append("exp_fifth")
+        running.append("exp_last_slot")
         with (
             patch.object(manager, "running_experiments", return_value=running),
             self.assertRaisesRegex(
-                ManagerError, r"parallel experiment cap reached \(5\)"
+                ManagerError,
+                rf"parallel experiment cap reached \({MAX_RUNNING_EXPERIMENTS}\)",
             ),
         ):
             manager.create_experiment(
                 {
-                    "experiment_id": "exp_sixth",
+                    "experiment_id": "exp_overflow",
                     "first_test_period": "2024Q1",
                     "last_test_period": "2024Q1",
                     "heldout_first_period": "2024Q2",
                     "heldout_last_period": "2024Q2",
                 }
             )
-        self.assertFalse((self.experiments_root / "exp_sixth").exists())
+        self.assertFalse((self.experiments_root / "exp_overflow").exists())
 
     def test_running_cap_also_guards_worker_restart(self) -> None:
         manager = ExperimentManager(self.repo_root, self.experiments_root)
@@ -2649,7 +2669,8 @@ class WebuiBackendTest(unittest.TestCase):
         with (
             patch.object(manager, "running_experiments", return_value=running),
             self.assertRaisesRegex(
-                ManagerError, r"parallel experiment cap reached \(5\)"
+                ManagerError,
+                rf"parallel experiment cap reached \({MAX_RUNNING_EXPERIMENTS}\)",
             ),
         ):
             manager.start_worker("exp_hitl")

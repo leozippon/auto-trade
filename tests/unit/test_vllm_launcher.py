@@ -112,7 +112,7 @@ def test_launcher_keeps_key_out_of_argv_and_binds_loopback(
     ]
     assert argv[argv.index("--host") + 1] == "127.0.0.1"
     assert argv[argv.index("--port") + 1] == "8010"
-    assert argv[argv.index("--served-model-name") + 1] == "qwen3.8-27b-local"
+    assert argv[argv.index("--served-model-name") + 1] == run_vllm.LOCAL_QWEN_MODEL
     assert argv[argv.index("--model") + 1] == str(model_dir)
     assert argv[argv.index("--tensor-parallel-size") + 1] == "1"
     assert argv[argv.index("--max-model-len") + 1] == "262144"

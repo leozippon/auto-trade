@@ -10,6 +10,8 @@ from fastapi.testclient import TestClient
 
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.llm import (
+    LEGACY_LOCAL_QWEN_MODEL,
+    LOCAL_QWEN_MODEL,
     DeepSeekProxy,
     OpenAICompatibleProxy,
     ProviderResponse,
@@ -177,6 +179,41 @@ def test_worker_maps_model_context_params_to_role_gateways_and_compactor(
     assert settings.compaction.max_calls == 4
 
 
+def test_worker_canonicalizes_all_legacy_model_roles_without_rewriting_params(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo, experiment = _experiment(tmp_path, developer_mode="llm")
+    path = experiment / "hitl/params.json"
+    params = json.loads(path.read_text(encoding="utf-8"))
+    params.update(
+        {
+            "model": LEGACY_LOCAL_QWEN_MODEL,
+            "meta_model": LEGACY_LOCAL_QWEN_MODEL,
+            "nl_model": LEGACY_LOCAL_QWEN_MODEL,
+            "compact_model": LEGACY_LOCAL_QWEN_MODEL,
+            "analysis_model": LEGACY_LOCAL_QWEN_MODEL,
+            "analysis_enabled": True,
+            "compact_token_threshold": 20_000,
+        }
+    )
+    path.write_text(json.dumps(params), encoding="utf-8")
+    persisted = path.read_bytes()
+    monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
+
+    options = load_worker_options(experiment, repo_root=repo)
+
+    assert options.llm is not None
+    assert (
+        options.llm.model,
+        options.llm.meta_model,
+        options.llm.nl_model,
+        options.llm.compact_model,
+        options.analysis_model,
+    ) == (LOCAL_QWEN_MODEL,) * 5
+    assert path.read_bytes() == persisted
+
+
 def test_worker_ignores_historical_endpoint_param_and_uses_trusted_env(
     tmp_path: Path,
     monkeypatch,
@@ -210,11 +247,11 @@ def test_worker_resolves_mixed_local_and_deepseek_roles_with_real_timeout(
     params = json.loads(path.read_text(encoding="utf-8"))
     params.update(
         {
-            "model": "qwen3.8-27b-local",
+            "model": LOCAL_QWEN_MODEL,
             "meta_model": "deepseek-v4-pro",
             "nl_model": "deepseek-v4-flash",
             "compact_model": "deepseek-v4-flash",
-            "analysis_model": "qwen3.8-27b-local",
+            "analysis_model": LOCAL_QWEN_MODEL,
             "compact_token_threshold": 20_000,
             "per_call_timeout_seconds": 120,
         }
@@ -255,11 +292,11 @@ def test_worker_applies_local_output_cap_to_each_role_budget(
     params = json.loads(path.read_text(encoding="utf-8"))
     params.update(
         {
-            "model": "qwen3.8-27b-local",
-            "meta_model": "qwen3.8-27b-local",
-            "nl_model": "qwen3.8-27b-local",
-            "compact_model": "qwen3.8-27b-local",
-            "analysis_model": "qwen3.8-27b-local",
+            "model": LOCAL_QWEN_MODEL,
+            "meta_model": LOCAL_QWEN_MODEL,
+            "nl_model": LOCAL_QWEN_MODEL,
+            "compact_model": LOCAL_QWEN_MODEL,
+            "analysis_model": LOCAL_QWEN_MODEL,
             "compact_token_threshold": 20_000,
             "compact_max_tokens": 20_000,
             "analysis_max_tokens": 6_000,
@@ -293,7 +330,7 @@ def test_worker_rejects_local_context_threshold_before_launch(
     repo, experiment = _experiment(tmp_path, developer_mode="llm")
     path = experiment / "hitl/params.json"
     params = json.loads(path.read_text(encoding="utf-8"))
-    params["model"] = "qwen3.8-27b-local"
+    params["model"] = LOCAL_QWEN_MODEL
     params["compact_token_threshold"] = 300_000
     path.write_text(json.dumps(params), encoding="utf-8")
     monkeypatch.setenv("DEEPSEEK_API_KEY", "deepseek-test-key")

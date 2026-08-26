@@ -56,9 +56,11 @@ from autotrade.pipelines import (
     build_fold_schedule,
 )
 from autotrade.pipelines.local_backend import LLMFoldDeveloper, LLMMetaLearner
+from autotrade.pipelines.pit_views_seed import DEFAULT_PIT_VIEWS_SEED
 from autotrade.pipelines.worker import _parent_from_step_node
 
-QUARTER_DEFAULT_HELDOUT_PERIOD = "2026Q1"
+QUARTER_DEFAULT_HELDOUT_FIRST_PERIOD = "2026Q1"
+QUARTER_DEFAULT_HELDOUT_LAST_PERIOD = "2026Q2"
 
 
 def main() -> int:
@@ -73,7 +75,7 @@ def main() -> int:
     parser.add_argument("--first-test-period", help="default 2022Q1 for quarter folds; required otherwise")
     parser.add_argument("--last-test-period", help="default 2025Q4 for quarter folds; required otherwise")
     parser.add_argument("--heldout-first-period", help="default 2026Q1 for quarter folds; required otherwise")
-    parser.add_argument("--heldout-last-period", help="default 2026Q1 for quarter folds; required otherwise")
+    parser.add_argument("--heldout-last-period", help="default 2026Q2 for quarter folds; required otherwise")
     add_schedule_arguments(parser, verbose_help=False)
     add_snapshot_window_arguments(parser, verbose_help=False)
     parser.add_argument("--max-fold-minutes", type=int, default=20)
@@ -117,8 +119,12 @@ def main() -> int:
     if args.fold_period == "quarter":
         args.first_test_period = args.first_test_period or QUARTER_DEFAULT_FIRST_TEST_PERIOD
         args.last_test_period = args.last_test_period or QUARTER_DEFAULT_LAST_TEST_PERIOD
-        args.heldout_first_period = args.heldout_first_period or QUARTER_DEFAULT_HELDOUT_PERIOD
-        args.heldout_last_period = args.heldout_last_period or QUARTER_DEFAULT_HELDOUT_PERIOD
+        args.heldout_first_period = (
+            args.heldout_first_period or QUARTER_DEFAULT_HELDOUT_FIRST_PERIOD
+        )
+        args.heldout_last_period = (
+            args.heldout_last_period or QUARTER_DEFAULT_HELDOUT_LAST_PERIOD
+        )
     if args.parent_artifact_id and args.parent_step_node:
         parser.error("pass only one of --parent-artifact-id or --parent-step-node")
     if args.parent_artifact_root and not args.parent_artifact_id:
@@ -232,6 +238,7 @@ def _build_pipeline(options) -> tuple[RollingExperimentPipeline, list[str]]:
             fundamental_events_status=options.fundamental_events_status,
             config=options.snapshot_config,
             cache_root=options.pit_cache_root,
+            pit_views_seed=options.repo_root / DEFAULT_PIT_VIEWS_SEED,
         )
         evaluator = PITDailyEvaluationBackend(
             options.experiment_dir / "artifacts" / "results",
@@ -273,6 +280,7 @@ def _build_pipeline(options) -> tuple[RollingExperimentPipeline, list[str]]:
     )
     meta_learner = LLMMetaLearner(
         llm=meta_gateway,
+        explore_llm=nl_gateway,
         compact_llm=compact_gateway,
         context_compaction=options.llm.compaction,
         baseline_strategy=options.baseline_strategy,

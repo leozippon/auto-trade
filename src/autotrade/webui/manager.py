@@ -50,7 +50,7 @@ from autotrade.pipelines.meta_schedule import meta_record_session_key
 from .public_identity import PublicIdentity
 from .registry import experiment_state, heldout_complete, test_results_revealed
 
-MAX_RUNNING_EXPERIMENTS = 5
+MAX_RUNNING_EXPERIMENTS = 4
 _ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$")
 _TERMINAL_RESUMABLE_STATES = (
     "stopped",

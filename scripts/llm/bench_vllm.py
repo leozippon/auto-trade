@@ -2,7 +2,7 @@
 """Benchmark a vLLM OpenAI-compatible endpoint: TTFT / decode speed / concurrency.
 
 Usage:
-  bench_vllm.py --base-url http://127.0.0.1:8010 --model qwen3.8-27b-local \
+  bench_vllm.py --base-url http://127.0.0.1:8010 --model qwen-3.8-27b-fp8 \
       [--api-key $VLLM_API_KEY] [--prompt-tokens 512] [--output-tokens 128] \
       [--concurrency 1,4,8,16] [--long-context-tokens 30000]
 """

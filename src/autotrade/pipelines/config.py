@@ -128,7 +128,7 @@ class RollingExperimentConfig:
     window_months: int = 21
     min_region_trade_days: int = 2
     max_steps_per_fold: int = 10
-    max_backtests_per_fold: int = 30
+    max_backtests_per_fold: int = 15
     max_llm_calls: int = 400
     session_max_attempts: int = 3
     max_fold_minutes: int = 240
@@ -140,7 +140,7 @@ class RollingExperimentConfig:
     # field per request.
     deadline_grace_minutes: int = 10
     finalize_before_deadline_seconds: int = 300
-    per_call_timeout_seconds: int = 600
+    per_call_timeout_seconds: int = 3600
     # Individual NL Sub Agent failures return audited error results by default
     # so Agent code can decide whether to ignore, retry, or fail closed.
     nl_failure_policy: str = "return_error_with_audit"
@@ -149,8 +149,8 @@ class RollingExperimentConfig:
     convergence_start_epoch: int = 3
     # Preserve the Epoch-start Meta session. A positive value additionally
     # triggers Meta after every N completed Folds, before the next Fold; 0
-    # disables the within-Epoch triggers.
-    meta_learning_fold_interval: int = 0
+    # disables the within-Epoch triggers. Default 2 on a quarterly calendar.
+    meta_learning_fold_interval: int = 2
     # Raw prior meta-learning traces handed to the next meta session are bounded
     # to the most recent N epochs (0 disables raw memory). Unbounded concatenation
     # grows O(epochs^2); older sessions persist via PRIOR and compact fold history.

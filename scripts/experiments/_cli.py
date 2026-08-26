@@ -18,7 +18,7 @@ from pathlib import Path
 
 from autotrade.environment.data.snapshot import SnapshotConfig
 from autotrade.environment.runtime import write_json_atomic
-from autotrade.pipelines.hitl_state import MODEL_CHOICES
+from autotrade.pipelines.hitl_state import MODEL_CHOICES, WEB_CREATE_DEFAULTS
 from autotrade.pipelines.worker import (
     NON_PERSISTABLE_PARAMS,
     InteractiveWorkerOptions,
@@ -205,15 +205,25 @@ def add_snapshot_window_arguments(
                 verbose_help,
             ),
         )
+    parser.set_defaults(
+        screen_exclude_st=bool(WEB_CREATE_DEFAULTS["screen_exclude_st"])
+    )
+    parser.add_argument(
+        "--no-screen-exclude-st",
+        dest="screen_exclude_st",
+        action="store_false",
+        help="Universe screen: keep ST names at the decision anchor.",
+    )
     parser.add_argument(
         "--screen-exclude-st",
+        dest="screen_exclude_st",
         action="store_true",
-        help="Universe screen: exclude names carrying ST at the decision anchor.",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--screen-exclude-new-listed-days",
         type=int,
-        default=0,
+        default=int(WEB_CREATE_DEFAULTS["screen_exclude_new_listed_days"]),
         help="Universe screen: exclude stocks listed within N days of the anchor (0=off).",
     )
     parser.add_argument(
@@ -244,7 +254,7 @@ def add_snapshot_window_arguments(
         "--screen-boards",
         nargs="+",
         choices=["main", "gem", "star", "bj"],
-        default=[],
+        default=list(WEB_CREATE_DEFAULTS["screen_boards"]),
         help="Universe screen: restrict to these boards (empty = all).",
     )
 
@@ -267,7 +277,7 @@ def add_model_arguments(parser: argparse.ArgumentParser, *, verbose_help: bool) 
         default=DEFAULT_NL_MODEL,
         choices=MODEL_CHOICES,
         help=_opt_help(
-            "NL Sub Agent model; defaults to qwen3.8-27b-local (independent interface).",
+            f"NL Sub Agent model; defaults to {DEFAULT_NL_MODEL} (independent interface).",
             verbose_help,
         ),
     )
@@ -276,7 +286,7 @@ def add_model_arguments(parser: argparse.ArgumentParser, *, verbose_help: bool) 
         default=DEFAULT_COMPACT_MODEL,
         choices=MODEL_CHOICES,
         help=_opt_help(
-            "Context compaction model; defaults to qwen3.8-27b-local with thinking disabled.",
+            f"Context compaction model; defaults to {DEFAULT_COMPACT_MODEL} with thinking disabled.",
             verbose_help,
         ),
     )
@@ -307,7 +317,7 @@ def add_model_arguments(parser: argparse.ArgumentParser, *, verbose_help: bool) 
     parser.add_argument(
         "--compact-keep-recent-messages",
         type=int,
-        default=12,
+        default=int(WEB_CREATE_DEFAULTS["compact_keep_recent_messages"]),
         help=_opt_help(
             "Raw non-summary messages preserved after semantic compaction.",
             verbose_help,
@@ -316,7 +326,7 @@ def add_model_arguments(parser: argparse.ArgumentParser, *, verbose_help: bool) 
     parser.add_argument(
         "--compact-max-tokens",
         type=int,
-        default=1600,
+        default=int(WEB_CREATE_DEFAULTS["compact_max_tokens"]),
         help=_opt_help(
             "Maximum output tokens for one compaction summary.", verbose_help
         ),
@@ -324,7 +334,7 @@ def add_model_arguments(parser: argparse.ArgumentParser, *, verbose_help: bool) 
     parser.add_argument(
         "--compact-max-calls",
         type=int,
-        default=8,
+        default=int(WEB_CREATE_DEFAULTS["compact_max_calls"]),
         help=_opt_help(
             "Maximum semantic compaction provider calls per Agent session.",
             verbose_help,

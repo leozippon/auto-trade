@@ -76,8 +76,8 @@ def build_prompt_preview(
     facts.update(
         {
             "max_steps": params.get("max_steps_per_fold", 10),
-            "max_backtests": params.get("max_backtests_per_fold", 30),
-            "max_llm_calls": params.get("max_llm_calls", 200),
+            "max_backtests": params.get("max_backtests_per_fold", 15),
+            "max_llm_calls": params.get("max_llm_calls", 400),
             "deadline_seconds": int(params.get("max_fold_minutes", 240)) * 60,  # type: ignore[arg-type]
         }
     )

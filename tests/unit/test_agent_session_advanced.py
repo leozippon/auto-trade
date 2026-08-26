@@ -22,6 +22,7 @@ from autotrade.agent.prompts import (
 from autotrade.environment.artifacts import new_revision_id
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.llm import (
+    LOCAL_QWEN_MODEL,
     ChatMessage,
     LLMProxyError,
     ProviderResponse,
@@ -332,7 +333,7 @@ def test_fold_session_recovers_one_provider_context_overflow_without_blind_repea
 
     class AlwaysOverflowAfterTool:
         provider = "vllm"
-        model = "qwen3.8-27b-local"
+        model = LOCAL_QWEN_MODEL
         context_window_tokens = None
 
         def __init__(self):

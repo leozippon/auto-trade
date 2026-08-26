@@ -14,6 +14,9 @@ import pytest
 
 from autotrade.environment.llm import (
     CONTEXT_OUTPUT_TOKEN_MARGIN,
+    LEGACY_LOCAL_QWEN_MODEL,
+    LOCAL_QWEN_MODEL,
+    MODEL_CHOICES,
     ChatMessage,
     DeepSeekConfig,
     DeepSeekProxy,
@@ -543,7 +546,7 @@ def _loopback_proxy(base_url: str, *, timeout: float) -> OpenAICompatibleProxy:
         OpenAICompatibleConfig(
             api_key="local-test-key",
             provider="vllm",
-            model="qwen3.8-27b-local",
+            model=LOCAL_QWEN_MODEL,
             base_url=base_url,
             timeout_seconds=timeout,
             max_retries=0,
@@ -601,7 +604,7 @@ def test_http_error_redacts_long_credential_before_final_truncation():
             OpenAICompatibleConfig(
                 api_key=credential,
                 provider="vllm",
-                model="qwen3.8-27b-local",
+                model=LOCAL_QWEN_MODEL,
                 base_url=f"{root}/credential-boundary/v1",
                 max_retries=2,
                 conversation_log_dir=None,
@@ -626,7 +629,7 @@ def test_http_error_redacts_long_endpoint_before_final_truncation():
             OpenAICompatibleConfig(
                 api_key="local-test-key",
                 provider="vllm",
-                model="qwen3.8-27b-local",
+                model=LOCAL_QWEN_MODEL,
                 base_url=base_url,
                 max_retries=2,
                 conversation_log_dir=None,
@@ -659,7 +662,7 @@ def test_local_context_preflight_rejects_without_transport_or_retry(tmp_path: Pa
         OpenAICompatibleConfig(
             api_key="local-secret",
             provider="vllm",
-            model="qwen3.8-27b-local",
+            model=LOCAL_QWEN_MODEL,
             base_url="http://127.0.0.1:8010/v1",
             request_dialect="vllm-qwen",
             context_window_tokens=32_768,
@@ -691,7 +694,7 @@ def test_local_context_preflight_rejects_fixed_seed_high_entropy_ascii():
         OpenAICompatibleConfig(
             api_key="local-secret",
             provider="vllm",
-            model="qwen3.8-27b-local",
+            model=LOCAL_QWEN_MODEL,
             base_url="http://127.0.0.1:8010/v1",
             request_dialect="vllm-qwen",
             context_window_tokens=32_768,
@@ -724,7 +727,7 @@ def test_local_context_preflight_rejects_wrapped_high_entropy_ascii(separator):
         OpenAICompatibleConfig(
             api_key="local-secret",
             provider="vllm",
-            model="qwen3.8-27b-local",
+            model=LOCAL_QWEN_MODEL,
             base_url="http://127.0.0.1:8010/v1",
             request_dialect="vllm-qwen",
             context_window_tokens=32_768,
@@ -750,7 +753,7 @@ def test_local_context_estimate_keeps_long_ordinary_ascii_prompt_usable():
         OpenAICompatibleConfig(
             api_key="local-secret",
             provider="vllm",
-            model="qwen3.8-27b-local",
+            model=LOCAL_QWEN_MODEL,
             base_url="http://127.0.0.1:8010/v1",
             request_dialect="vllm-qwen",
             context_window_tokens=32_768,
@@ -769,7 +772,7 @@ def test_gateway_clamps_output_when_estimate_exactly_fills_the_window():
         OpenAICompatibleConfig(
             api_key="local-secret",
             provider="vllm",
-            model="qwen3.8-27b-local",
+            model=LOCAL_QWEN_MODEL,
             base_url="http://127.0.0.1:8010/v1",
             request_dialect="vllm-qwen",
             context_window_tokens=32_768,
@@ -807,7 +810,7 @@ def test_gateway_halves_output_when_provider_overflow_is_tautological():
         OpenAICompatibleConfig(
             api_key="local-secret",
             provider="vllm",
-            model="qwen3.8-27b-local",
+            model=LOCAL_QWEN_MODEL,
             base_url="http://127.0.0.1:8010/v1",
             request_dialect="vllm-qwen",
             context_window_tokens=262_144,
@@ -838,7 +841,7 @@ def test_gateway_keeps_halving_output_on_repeated_tautological_overflow():
         OpenAICompatibleConfig(
             api_key="local-secret",
             provider="vllm",
-            model="qwen3.8-27b-local",
+            model=LOCAL_QWEN_MODEL,
             base_url="http://127.0.0.1:8010/v1",
             request_dialect="vllm-qwen",
             context_window_tokens=262_144,
@@ -880,7 +883,7 @@ def test_local_context_estimate_keeps_structured_json_prompts_usable():
         OpenAICompatibleConfig(
             api_key="local-secret",
             provider="vllm",
-            model="qwen3.8-27b-local",
+            model=LOCAL_QWEN_MODEL,
             base_url="http://127.0.0.1:8010/v1",
             request_dialect="vllm-qwen",
             context_window_tokens=32_768,
@@ -1300,7 +1303,7 @@ def test_configured_provider_url_never_enters_persistent_audit(tmp_path: Path):
         OpenAICompatibleConfig(
             api_key="local-secret",
             provider="vllm",
-            model="qwen3.8-27b-local",
+            model=LOCAL_QWEN_MODEL,
             base_url=custom_url,
             conversation_log_dir=tmp_path,
         ),
@@ -1320,7 +1323,7 @@ def test_local_vllm_uses_shared_stream_parser_without_deepseek_fields():
         [
             _stream_response(
                 {
-                    "model": "qwen3.8-27b-local",
+                    "model": LOCAL_QWEN_MODEL,
                     "choices": [
                         {
                             "delta": {
@@ -1346,7 +1349,7 @@ def test_local_vllm_uses_shared_stream_parser_without_deepseek_fields():
         OpenAICompatibleConfig(
             api_key="local-secret",
             provider="vllm",
-            model="qwen3.8-27b-local",
+            model=LOCAL_QWEN_MODEL,
             base_url="http://127.0.0.1:8010/v1",
             request_dialect="vllm-qwen",
             thinking_enabled=True,
@@ -1380,7 +1383,7 @@ def test_local_vllm_rejects_public_plain_http():
         OpenAICompatibleConfig(
             api_key="secret",
             provider="vllm",
-            model="qwen3.8-27b-local",
+            model=LOCAL_QWEN_MODEL,
             base_url="http://8.8.8.8:8010/v1",
             request_dialect="vllm-qwen",
         )
@@ -1391,7 +1394,7 @@ def test_openai_compatible_config_rejects_invalid_output_cap():
         OpenAICompatibleConfig(
             api_key="secret",
             provider="vllm",
-            model="qwen3.8-27b-local",
+            model=LOCAL_QWEN_MODEL,
             base_url="http://127.0.0.1:8010/v1",
             max_output_tokens=0,
         )
@@ -1414,13 +1417,13 @@ def test_model_factory_reads_local_endpoint_and_key_from_export_env(tmp_path: Pa
         "export VLLM_BASE_URL='http://127.0.0.1:8011/v1'\n",
         encoding="utf-8",
     )
-    proxy = build_model_gateway("qwen3.8-27b-local", env_file=path, max_tokens=8_000)
+    proxy = build_model_gateway(LOCAL_QWEN_MODEL, env_file=path, max_tokens=8_000)
     assert isinstance(proxy, OpenAICompatibleProxy)
     assert proxy.provider == "vllm"
-    assert proxy.model == "qwen3.8-27b-local"
+    assert proxy.model == LOCAL_QWEN_MODEL
     assert proxy.config.base_url == "http://127.0.0.1:8011/v1"
     assert proxy.context_window_tokens == 262_144
-    assert model_profile("qwen3.8-27b-local").max_output_tokens == 262_144
+    assert model_profile(LOCAL_QWEN_MODEL).max_output_tokens == 262_144
     assert proxy.config.max_tokens == 8_000
     assert proxy.config.max_output_tokens == 262_144
     assert "local-secret" not in repr(proxy.config)
@@ -1434,6 +1437,25 @@ def test_model_factory_reads_local_endpoint_and_key_from_export_env(tmp_path: Pa
         == "bounded"
     )
     assert transport.requests[0][2]["max_tokens"] == 8_000
+
+
+def test_legacy_local_model_alias_builds_canonical_gateway(tmp_path: Path):
+    path = tmp_path / ".env"
+    path.write_text("VLLM_API_KEY=local-secret\n", encoding="utf-8")
+
+    proxy = build_model_gateway(
+        LEGACY_LOCAL_QWEN_MODEL,
+        env_file=path,
+        conversation_log_dir=tmp_path / "logs",
+    )
+
+    assert LEGACY_LOCAL_QWEN_MODEL not in MODEL_CHOICES
+    assert model_profile(LEGACY_LOCAL_QWEN_MODEL) == model_profile(LOCAL_QWEN_MODEL)
+    assert proxy.model == LOCAL_QWEN_MODEL
+    assert proxy.config.model == LOCAL_QWEN_MODEL
+    assert proxy._conversation_log_path("2026-08-27T00:00:00+00:00").parent == (
+        tmp_path / "logs" / "vllm" / LOCAL_QWEN_MODEL
+    )
 
 
 def test_model_factory_reads_deepseek_endpoint_from_fixed_env_key(tmp_path: Path):
@@ -1455,7 +1477,7 @@ def test_local_conversation_log_uses_truthful_provider_path(tmp_path: Path):
         OpenAICompatibleConfig(
             api_key="local-secret",
             provider="vllm",
-            model="qwen3.8-27b-local",
+            model=LOCAL_QWEN_MODEL,
             base_url="http://127.0.0.1:8010/v1",
             request_dialect="vllm-qwen",
             conversation_log_dir=tmp_path,
@@ -1463,7 +1485,7 @@ def test_local_conversation_log_uses_truthful_provider_path(tmp_path: Path):
         transport=FakeTransport([_response({"content": "ok"})]),
     )
     proxy.complete([ChatMessage("user", "hello")])
-    files = list((tmp_path / "vllm/qwen3.8-27b-local").glob("*.jsonl"))
+    files = list((tmp_path / f"vllm/{LOCAL_QWEN_MODEL}").glob("*.jsonl"))
     assert len(files) == 1
     records = [json.loads(line) for line in files[0].read_text().splitlines()]
     assert {record["provider"] for record in records} == {"vllm"}

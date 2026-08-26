@@ -27,6 +27,7 @@ from autotrade.environment.llm import (
     LOCAL_QWEN_MODEL,
     LLMProxy,
     build_model_gateway,
+    canonicalize_model_name,
     effective_max_output_tokens,
     model_profile,
 )
@@ -64,6 +65,7 @@ from .pit_backend import (
     ResearchPITSnapshotProvider,
     required_release_raw_datasets,
 )
+from .pit_views_seed import DEFAULT_PIT_VIEWS_SEED
 from .prior import latest_prior_text, restore_current_from_records
 from .skills import latest_skills_snapshot
 
@@ -510,7 +512,7 @@ def resolve_worker_options(
             params.get("max_steps_per_fold", 10), "max_steps_per_fold"
         ),
         max_backtests_per_fold=_positive_int(
-            params.get("max_backtests_per_fold", 30), "max_backtests_per_fold"
+            params.get("max_backtests_per_fold", 15), "max_backtests_per_fold"
         ),
         max_llm_calls=_positive_int(params.get("max_llm_calls", 400), "max_llm_calls"),
         session_max_attempts=_positive_int(
@@ -551,7 +553,7 @@ def resolve_worker_options(
             "finalize_before_deadline_seconds",
         ),
         per_call_timeout_seconds=_positive_int(
-            params.get("per_call_timeout_seconds", 600), "per_call_timeout_seconds"
+            params.get("per_call_timeout_seconds", 3600), "per_call_timeout_seconds"
         ),
         meta_sandbox_rebuild_enabled=not _strict_bool(
             params.get("disable_meta_sandbox_rebuild", False),
@@ -602,7 +604,9 @@ def resolve_worker_options(
         params.get("analysis_enabled", WEB_CREATE_DEFAULTS["analysis_enabled"]),
         "analysis_enabled",
     )
-    analysis_model = str(params.get("analysis_model") or LOCAL_QWEN_MODEL)
+    analysis_model = canonicalize_model_name(
+        str(params.get("analysis_model") or LOCAL_QWEN_MODEL)
+    )
     analysis_max_tokens = _positive_int(
         params.get("analysis_max_tokens", 6_000), "analysis_max_tokens"
     )
@@ -751,6 +755,7 @@ def run_local_interactive_worker(
             fundamental_events_status=options.fundamental_events_status,
             config=options.snapshot_config,
             cache_root=options.pit_cache_root,
+            pit_views_seed=options.repo_root / DEFAULT_PIT_VIEWS_SEED,
         )
         evaluator = PITDailyEvaluationBackend(
             options.experiment_dir / "artifacts" / "results",
@@ -1415,8 +1420,16 @@ def _llm_settings(
     )
     if repository != env_file and repository not in env_file.parents:
         raise ValueError("llm_env_file must stay inside the repository")
-    fold_model = str(params.get("model") or params.get("llm_model") or LOCAL_QWEN_MODEL)
-    compact_model = str(params.get("compact_model") or LOCAL_QWEN_MODEL)
+    fold_model = canonicalize_model_name(
+        str(params.get("model") or params.get("llm_model") or LOCAL_QWEN_MODEL)
+    )
+    meta_model = canonicalize_model_name(str(params.get("meta_model") or fold_model))
+    nl_model = canonicalize_model_name(
+        str(params.get("nl_model") or LOCAL_QWEN_MODEL)
+    )
+    compact_model = canonicalize_model_name(
+        str(params.get("compact_model") or LOCAL_QWEN_MODEL)
+    )
     compact_max_tokens = _positive_int(
         params.get("compact_max_tokens", 1_600),
         "compact_max_tokens",
@@ -1442,13 +1455,13 @@ def _llm_settings(
         api_key_env=api_key_env,
         env_file=env_file,
         model=fold_model,
-        meta_model=str(params.get("meta_model") or fold_model),
-        nl_model=str(params.get("nl_model") or LOCAL_QWEN_MODEL),
+        meta_model=meta_model,
+        nl_model=nl_model,
         compact_model=compact_model,
         timeout_seconds=_positive_float(
             params.get(
                 "llm_timeout_seconds",
-                params.get("per_call_timeout_seconds", 600),
+                params.get("per_call_timeout_seconds", 3600),
             ),
             "llm_timeout_seconds",
         ),
