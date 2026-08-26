@@ -419,7 +419,7 @@ class AgentSessionRunner:
                     raise RuntimeError(
                         "Agent language model unavailable after consecutive failures"
                     ) from exc
-                observation = {
+                observation: dict[str, object] = {
                     "observation": "llm_error",
                     "error": error,
                     "retry_hint": "Proceed with a different bounded action; do not repeat the same failing request verbatim.",
@@ -455,7 +455,7 @@ class AgentSessionRunner:
                 },
             )
             if not response.tool_calls:
-                nudge = {
+                nudge: dict[str, object] = {
                     "observation": "no_tool_call",
                     "retry_hint": "Use an injected tool to advance the session; text alone does not finish it.",
                 }
@@ -1080,6 +1080,9 @@ class AgentSessionRunner:
             None,
         )
         summary = self._context_summary_payload()
+        summary_items = summary.get("items")
+        if not isinstance(summary_items, list):
+            raise TypeError("context summary items must be a list")
         summary_message = ChatMessage(
             "user",
             json.dumps(summary, ensure_ascii=False, default=str, allow_nan=False),
@@ -1101,7 +1104,7 @@ class AgentSessionRunner:
         self._emit(
             "context_summary",
             {
-                "summary_items": len(summary["items"]),
+                "summary_items": len(summary_items),
                 "kept_llm_compaction": kept_llm_compaction,
                 "kept_messages": len(trimmed),
                 "dropped_messages": max(len(messages) - len(trimmed), 0),
