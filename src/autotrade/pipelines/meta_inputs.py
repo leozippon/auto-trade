@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
@@ -52,13 +51,6 @@ _BODY_KEYS = frozenset(
         "text",
     }
 )
-_FULL_OMIT_KEYS = _BODY_KEYS | {
-    "content_preview",
-    "new",
-    "old",
-    "question",
-    "reply",
-}
 _DROP_EVENT_KEYS = frozenset(
     {
         "instruction",
@@ -73,7 +65,6 @@ _LEAK_KEYS = frozenset(
         "weekly_returns",
     }
 )
-_SUMMARY_CONTENT_EVENT_TYPES = frozenset({"explore", "explore_llm", "llm_call"})
 _COMPLETED_FOLD_STATUSES = frozenset(
     {
         "baseline_missing",
@@ -87,7 +78,6 @@ _SANDBOX_PREFIXES = ("/mnt/agent", "/mnt/artifacts")
 _HOST_PATH_RE = re.compile(
     r"(?<![\w./])/(?!mnt\b)[A-Za-z_.][\w.-]*(?:/[\w.-]*)*"
 )
-AGENT_TRACE_FULL_CONTENT_CHARS = 8 * 1024
 AGENT_TRACE_FULL_MAX_FILE_BYTES = 8 * 1024 * 1024
 AGENT_TRACE_FULL_MAX_WINDOW_BYTES = 16 * 1024 * 1024
 AGENT_TRACE_FULL_RELATIVE_DIR = "inputs/agent_traces"
@@ -99,11 +89,10 @@ class AgentTraceSourceError(ValueError):
 
 @dataclass(frozen=True)
 class AgentTraceFullSidecar:
-    """Internal full safe-projection payload for one review Fold."""
+    """Internal byte-exact raw AgentTraceWriter JSONL for one review Fold."""
 
     fold_ref: str
     relative_path: str
-    sha256: str
     events: int
     bytes: int
     source_truncated: bool
@@ -113,11 +102,12 @@ class AgentTraceFullSidecar:
     def metadata(self) -> dict[str, object]:
         return {
             "path": self.relative_path if self.available else None,
-            "sha256": self.sha256 or None,
             "events": self.events,
             "bytes": self.bytes,
             "source_truncated": self.source_truncated,
             "available": self.available,
+            "raw_jsonl": True,
+            "byte_exact": True,
         }
 
 
@@ -186,70 +176,11 @@ def compact_agent_trace(
     ]
 
 
-def project_full_agent_trace(
-    events: Sequence[Mapping[str, object]],
-    *,
-    content_chars: int = AGENT_TRACE_FULL_CONTENT_CHARS,
-) -> list[dict[str, object]]:
-    """Safe projection of every source event, in original order.
-
-    Unknown event types are included. System prompts, leak keys, and tool or
-    ask_user bodies are stripped; LLM/explore summary content is kept with a
-    per-event character cap.
-    """
-
-    return [
-        project_full_agent_event(event, content_chars=content_chars) for event in events
-    ]
-
-
-def project_full_agent_event(
-    event: Mapping[str, object],
-    *,
-    content_chars: int = AGENT_TRACE_FULL_CONTENT_CHARS,
-) -> dict[str, object]:
-    event_type = str(event.get("event_type") or "")
-    projected = _project_full_value(
-        event,
-        event_type=event_type,
-        at_root=True,
-        content_chars=content_chars,
-    )
-    if not isinstance(projected, dict):
-        projected = {"event_type": event_type}
-    sanitized = sanitize_for_log(projected)
-    result: dict[str, object]
-    if isinstance(sanitized, dict):
-        result = {str(key): item for key, item in sanitized.items()}
-    else:
-        result = {str(key): item for key, item in projected.items()}
-    return result
-
-
-def serialize_full_agent_trace(events: Sequence[Mapping[str, object]]) -> bytes:
-    """Canonical JSONL bytes for a full safe-projection sidecar."""
-
-    lines = [
-        json.dumps(
-            dict(event),
-            ensure_ascii=False,
-            sort_keys=True,
-            default=str,
-            allow_nan=False,
-        )
-        for event in events
-    ]
-    text = "\n".join(lines)
-    if lines:
-        text += "\n"
-    return text.encode("utf-8")
-
-
 def write_meta_agent_trace_sidecars(
     workspace: str | Path,
     sidecars: Sequence[AgentTraceFullSidecar],
 ) -> None:
-    """Write available full projections under ``inputs/agent_traces/``."""
+    """Write available byte-exact raw JSONL under ``inputs/agent_traces/``."""
 
     root = Path(workspace) / "inputs" / "agent_traces"
     root.mkdir(parents=True, exist_ok=True)
@@ -448,59 +379,6 @@ def _summarize_args(arguments: object) -> dict[str, object] | None:
     return summary or None
 
 
-def _project_full_value(
-    value: object,
-    *,
-    event_type: str,
-    at_root: bool,
-    content_chars: int,
-) -> object:
-    if isinstance(value, Mapping):
-        projected: dict[str, object] = {}
-        for key, item in value.items():
-            name = str(key)
-            if name in _DROP_EVENT_KEYS or name in _LEAK_KEYS:
-                continue
-            if name == "content" and event_type == "user_message" and at_root:
-                continue
-            if (
-                name in {"content", "digest"}
-                and at_root
-                and event_type in _SUMMARY_CONTENT_EVENT_TYPES
-            ):
-                projected[name] = _redact_text(item, limit=content_chars)
-                continue
-            if name == "summary" and event_type == "context_compaction":
-                projected[name] = _redact_text(item, limit=content_chars)
-                continue
-            if name == "summary":
-                projected[name] = {"omitted": True, "chars": len(str(item))}
-                continue
-            if name in _FULL_OMIT_KEYS:
-                projected[name] = {"omitted": True, "chars": len(str(item))}
-                continue
-            projected[name] = _project_full_value(
-                item,
-                event_type=event_type,
-                at_root=False,
-                content_chars=content_chars,
-            )
-        return projected
-    if isinstance(value, (list, tuple)):
-        return [
-            _project_full_value(
-                item,
-                event_type=event_type,
-                at_root=False,
-                content_chars=content_chars,
-            )
-            for item in value
-        ]
-    if isinstance(value, str):
-        return _redact_host_paths(value)
-    return value
-
-
 def _redact_host_paths(value: object) -> str:
     text = str(value or "")
     stripped = text.strip()
@@ -630,9 +508,8 @@ def build_meta_fold_review_bundle(
     artifacts_root: str | Path | None = None,
     max_file_bytes: int = AGENT_TRACE_FULL_MAX_FILE_BYTES,
     max_window_bytes: int = AGENT_TRACE_FULL_MAX_WINDOW_BYTES,
-    content_chars: int = AGENT_TRACE_FULL_CONTENT_CHARS,
 ) -> tuple[list[dict[str, object]], list[AgentTraceFullSidecar]]:
-    """Public fold reviews plus internal full safe-projection sidecars."""
+    """Public Fold indexes plus internal byte-exact raw trace sidecars."""
 
     reviews: list[dict[str, object]] = []
     sidecars: list[AgentTraceFullSidecar] = []
@@ -650,8 +527,8 @@ def build_meta_fold_review_bundle(
             strategy_dir = Path(path)
             if strategy_dir.is_dir():
                 strategy_files = read_strategy_files(strategy_dir)
-        source_events, available, source_truncated = load_fold_agent_trace_source(
-            record, artifacts_root=artifacts_root
+        source_events, source_payload, available, source_truncated = (
+            load_fold_agent_trace_source(record, artifacts_root=artifacts_root)
         )
         agent_trace = compact_agent_trace(source_events)
         fold_ref = agent_visible_ref(record.get("fold_id"), prefix="fold_ref")
@@ -663,9 +540,9 @@ def build_meta_fold_review_bundle(
             fold_ref=fold_ref,
             sidecar_ref=sidecar_ref,
             source_events=source_events,
+            source_payload=source_payload,
             available=available,
             source_truncated=source_truncated,
-            content_chars=content_chars,
         )
         reviews.append(
             {
@@ -704,33 +581,31 @@ def _build_full_sidecar(
     fold_ref: str,
     sidecar_ref: str,
     source_events: Sequence[Mapping[str, object]],
+    source_payload: bytes | None,
     available: bool,
     source_truncated: bool,
-    content_chars: int,
 ) -> AgentTraceFullSidecar:
     relative_path = f"{AGENT_TRACE_FULL_RELATIVE_DIR}/{sidecar_ref}.jsonl"
     if not available:
         return AgentTraceFullSidecar(
             fold_ref=fold_ref,
             relative_path=relative_path,
-            sha256="",
             events=0,
             bytes=0,
             source_truncated=False,
             available=False,
             payload=None,
         )
-    projected = project_full_agent_trace(source_events, content_chars=content_chars)
-    payload = serialize_full_agent_trace(projected)
+    if source_payload is None:
+        raise AgentTraceSourceError("available agent_trace_ref has no source bytes")
     return AgentTraceFullSidecar(
         fold_ref=fold_ref,
         relative_path=relative_path,
-        sha256=hashlib.sha256(payload).hexdigest(),
-        events=len(projected),
-        bytes=len(payload),
+        events=len(source_events),
+        bytes=len(source_payload),
         source_truncated=source_truncated,
         available=True,
-        payload=payload,
+        payload=source_payload,
     )
 
 
@@ -764,17 +639,18 @@ def load_fold_agent_trace_source(
     record: Mapping[str, object],
     *,
     artifacts_root: str | Path | None = None,
-) -> tuple[list[Mapping[str, object]], bool, bool]:
-    """Load one Fold Agent Trace. Missing ref means no Agent, not an error."""
+) -> tuple[list[Mapping[str, object]], bytes | None, bool, bool]:
+    """Validate one raw Fold Agent Trace while retaining its exact bytes."""
 
     ref = record.get("agent_trace_ref")
     if ref is None or ref == "":
-        return [], False, False
+        return [], None, False, False
     if not isinstance(ref, str):
         raise AgentTraceSourceError("agent_trace_ref must be a string path")
     path = _resolve_existing_trace_path(ref, artifacts_root=artifacts_root)
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        raw_jsonl = path.read_bytes()
+        lines = raw_jsonl.decode("utf-8").splitlines()
     except (OSError, UnicodeError) as exc:
         raise AgentTraceSourceError("agent_trace_ref cannot be read as UTF-8") from exc
     events: list[Mapping[str, object]] = []
@@ -795,7 +671,7 @@ def load_fold_agent_trace_source(
         events.append(payload)
         if payload.get("event_type") == "trace_limit_reached":
             source_truncated = True
-    return events, True, source_truncated
+    return events, raw_jsonl, True, source_truncated
 
 
 def _resolve_existing_trace_path(

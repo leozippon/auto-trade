@@ -93,7 +93,7 @@ def test_required_agents_sections_are_injected_into_fold_and_meta(tmp_path: Path
     assert "agent_trace" in meta
     assert "agent_process_summary" in meta
     assert "agent_trace_full" in meta
-    assert "完整 sidecar" in meta
+    assert "原始 Fold Agent Trace sidecar" in meta
     assert "当前可迁移过程/方法快照" in meta
     assert extracted.sha256
     assert extracted.version == extracted.sha256[:12]
@@ -433,7 +433,9 @@ def test_meta_fold_reviews_include_strategy_and_agent_trace_not_heldout(tmp_path
     assert full["source_truncated"] is False
     assert str(full["path"]).startswith("inputs/agent_traces/")
     assert str(full["path"]).endswith(".jsonl")
-    assert isinstance(full["sha256"], str) and len(full["sha256"]) == 64
+    assert full["raw_jsonl"] is True
+    assert full["byte_exact"] is True
+    assert "sha256" not in full
 
 
 def test_meta_fold_reviews_without_trace_ref_are_explicitly_unavailable(

@@ -914,10 +914,11 @@ def _development_inputs(
     Folds. Held-out never appears. ``fold_reviews`` and
     ``fold_backtest_summaries`` only cover regular Folds completed after the
     previous Meta; older Folds are already absorbed into PRIOR/Taste.
-    ``fold_reviews`` carries frozen strategy source, a bounded Agent Trace,
-    ``agent_process_summary``, and ``agent_trace_full`` sidecar metadata. The
-    full safe projection stays in the sidecar list and never enters ordinary
-    Fold prompts or ``meta_context``.
+    ``fold_reviews`` carries frozen strategy source, a bounded Agent Trace
+    index, ``agent_process_summary``, and ``agent_trace_full`` sidecar metadata.
+    Each sidecar is a byte-exact copy of the raw Fold AgentTraceWriter JSONL; its
+    bytes stay in the internal sidecar list and never enter ordinary Fold
+    prompts or ``meta_context``.
     """
 
     folds, review_window = select_meta_review_folds(records)
