@@ -1505,13 +1505,25 @@ class SnapshotBuilder:
         if not delta.empty and "available_at" in delta.columns:
             delta_at = to_cn_timestamps(delta["available_at"])
             delta = delta[delta_at > prior_time].reset_index(drop=True)
-        frames = [frame.dropna(axis=1, how="all") for frame in (kept, delta) if not frame.empty]
-        merged = (
-            pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
-        )
+        # Do not drop all-NA columns: they are schema contributed by empty
+        # datasets in this slice. Stripping them made dataset_columns declare
+        # fields that the written parquet no longer had.
+        frames = [frame for frame in (kept, delta) if not frame.empty]
+        merged = concat_rows(frames) if frames else pd.DataFrame()
         if not merged.empty:
             merged = merged.drop_duplicates(ignore_index=True)
             merged = self._apply_screen(merged, screen)
+        physical = set(merged.columns)
+        dataset_columns = meta.get("dataset_columns")
+        if isinstance(dataset_columns, dict):
+            meta = {
+                **meta,
+                "dataset_columns": {
+                    dataset: [column for column in columns if column in physical]
+                    for dataset, columns in dataset_columns.items()
+                    if isinstance(columns, list)
+                },
+            }
         return merged, {
             **meta,
             "incremental": True,
@@ -1639,6 +1651,14 @@ class SnapshotBuilder:
                 schema_only[dataset] = item["schema"]
         merged = concat_rows(frames) if frames else pd.DataFrame()
         merged = _pad_union_schema(merged, schema_only)
+        # Manifest attribution must match the frame that will be written.
+        # Empty-window datasets still contribute footer columns via padding;
+        # if a footer field never lands in `merged`, do not declare it.
+        physical = set(merged.columns)
+        dataset_columns = {
+            dataset: [column for column in columns if column in physical]
+            for dataset, columns in dataset_columns.items()
+        }
         # units="source": heterogeneous unions keep TuShare per-source units —
         # the daily-domain unit contract does NOT extend to same-named fields
         # here (env docs §1.4; raw unit table in data docs §1.2).
@@ -2334,7 +2354,8 @@ def _dataset_footer_schema(dataset_dir: Path):
 
 def _write(path: Path, frame: pd.DataFrame) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
-    frame.to_parquet(tmp, index=False)
+    table = pa.Table.from_pandas(frame, preserve_index=False)
+    pq.write_table(table, tmp)
     tmp.replace(path)
 
 

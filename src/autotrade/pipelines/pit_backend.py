@@ -54,6 +54,7 @@ from .config import (
     StrategyExperimentConfig,
 )
 from .experiment import DailyStrategyPipeline
+from .pit_views_seed import pit_cache_provider_record, seed_pit_views
 
 _PHASES = frozenset({"meta", "valid", "frozen_test", "heldout", "paper"})
 _CORE_RAW_DATASETS = ("daily", "daily_basic", "adj_factor", "stk_limit", "suspend_d")
@@ -94,6 +95,8 @@ class ResearchPITSnapshotProvider:
         fundamental_events_status: str | Path,
         config: SnapshotConfig | None = None,
         cache_root: str | Path | None = None,
+        pit_views_seed: str | Path | None = None,
+        pit_views_seed_required: bool = False,
     ) -> None:
         self.experiment_dir = Path(experiment_dir).resolve()
         self.config = config or SnapshotConfig()
@@ -107,7 +110,14 @@ class ResearchPITSnapshotProvider:
         self.cache_root = Path(cache_root).resolve() if cache_root is not None else self.experiment_dir / "pit_views"
         self.cache_root.mkdir(parents=True, exist_ok=True)
         self._replay_frame_cache: _ReplayFrameCache = {}
-        self._bind_cache_contract()
+        record = self._bind_cache_contract()
+        if pit_views_seed is not None:
+            seed_pit_views(
+                self.cache_root,
+                Path(pit_views_seed),
+                expected_provider=record,
+                required=pit_views_seed_required,
+            )
         self.builder = SnapshotBuilder(
             self.release.raw_dir,
             self.release.fundamental_events_root,
@@ -164,16 +174,15 @@ class ResearchPITSnapshotProvider:
             generation_id=self.release.generation_id,
         )
 
-    def _bind_cache_contract(self) -> None:
+    def _bind_cache_contract(self) -> dict[str, object]:
         path = self.cache_root / "provider.json"
-        record = {
-            # The cache-format version is part of the binding contract: a view
-            # built under an older on-disk contract is refused, never reused.
-            "schema_version": SNAPSHOT_CACHE_FORMAT_VERSION,
-            "generation_id": self.release.generation_id,
-            "release_raw_dir": str(self.release.raw_dir),
-            "snapshot_config": self.config.to_record(),
-        }
+        # The cache-format version is part of the binding contract: a view
+        # built under an older on-disk contract is refused, never reused.
+        record = pit_cache_provider_record(
+            generation_id=self.release.generation_id,
+            release_raw_dir=self.release.raw_dir,
+            snapshot_config=self.config,
+        )
         with _exclusive_lock(self.cache_root / ".provider.lock"):
             if path.exists():
                 existing = _read_json(path)
@@ -181,6 +190,7 @@ class ResearchPITSnapshotProvider:
                     raise RuntimeError("PIT view cache is already bound to a different release or configuration")
             else:
                 write_json_atomic(path, record)
+        return record
 
     def _decision_view(self, target: Path, decision: datetime) -> dict[str, object]:
         with _exclusive_lock(target.with_suffix(".lock")):
@@ -1025,4 +1035,5 @@ __all__ = [
     "PITDailyEvaluationBackend",
     "PaperPITData",
     "ResearchPITSnapshotProvider",
+    "required_release_raw_datasets",
 ]
