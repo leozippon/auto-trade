@@ -32,9 +32,6 @@ from .compact import fit_tool_results_to_context, safe_error_summary
 
 EXPLORE_MODES = frozenset({"fold", "meta"})
 EXPLORE_ROLES = ("auditor", "developer", "general-purpose", "Explore")
-OPTIONAL_EXPLORE_ROLES = frozenset({"general-purpose", "Explore"})
-FOLD_REQUIRED_EXPLORE_ROLES = ("auditor", "developer")
-META_REQUIRED_EXPLORE_ROLES = ("auditor",)
 
 _FOLD_AUDIT_TOOLS = frozenset({"glob", "grep", "read_file", "shell", "todo"})
 _FOLD_READ_TOOLS = frozenset({"glob", "grep", "read_file", "todo"})
@@ -144,8 +141,8 @@ _FOLD_ROLE_MISSIONS = {
         "必要时可多次"
     ),
     "developer": "主 Fold Agent 的一层可写 coding 子代理，只完成委托给你的真实代码开发任务",
-    "general-purpose": "可选通用可写同事；只处理跨域有界任务，不能替代 auditor 或 developer",
-    "Explore": "只读探索未知位置、资料或接口；不能替代 auditor 或 developer",
+    "general-purpose": "可选通用可写同事；适合处理跨域有界任务",
+    "Explore": "可选只读同事；适合探索未知位置、资料或接口",
 }
 _META_ROLE_MISSIONS = {
     "auditor": (
@@ -157,8 +154,8 @@ _META_ROLE_MISSIONS = {
         "但不得改变 PIT/Test/Held-out 边界或把原始 trace 文本堆进 PRIOR"
     ),
     "developer": "只读，仅能提出候选改进，不能写 PRIOR、Taste 或策略",
-    "general-purpose": "可选只读跨域有界任务，不能替代 auditor",
-    "Explore": "只读探索未知位置、资料或接口，不能替代 auditor",
+    "general-purpose": "可选只读同事；适合跨域有界任务",
+    "Explore": "可选只读同事；适合探索未知位置、资料或接口",
 }
 EXPLORE_SYSTEM_PROMPT = _FOLD_WRITE_PROMPT.format(
     role="developer",
@@ -172,12 +169,6 @@ def _explore_mode(mode: str) -> str:
     if mode == "fold":
         return "fold"
     raise ValueError("Explore mode must be fold or meta")
-
-
-def session_explore_roles(mode: str) -> tuple[str, ...]:
-    if _explore_mode(mode) == "meta":
-        return META_REQUIRED_EXPLORE_ROLES
-    return FOLD_REQUIRED_EXPLORE_ROLES
 
 
 def allowed_explore_tools(mode: str, role: str | None = None) -> frozenset[str]:

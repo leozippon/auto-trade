@@ -15,7 +15,6 @@ from autotrade.environment.llm import (
     ScriptedLLM,
     ToolCall,
 )
-from autotrade.agent.explore import FOLD_REQUIRED_EXPLORE_ROLES
 from autotrade.environment.tools import CommandResult
 from autotrade.pipelines.agent_views import compact_fold_history
 from autotrade.pipelines.hitl_state import (
@@ -31,6 +30,8 @@ from autotrade.pipelines.local_backend import SessionBudgetLLM, SessionCallBudge
 from autotrade.pipelines.worker import load_worker_options, run_local_interactive_worker
 from autotrade.webui.manager import ExperimentManager
 from autotrade.webui.server import create_app
+
+_FOLD_DELEGATION_ROLES = ("auditor", "developer")
 
 
 def _experiment(
@@ -490,7 +491,7 @@ def test_llm_worker_runs_real_meta_fold_validation_and_heldout(
                 ToolCall("check", "modification_check", {}),
                 ToolCall("valid", "daily_backtest", {}),
                 ToolCall("finish_fold", "finish_fold", {}),
-                roles=FOLD_REQUIRED_EXPLORE_ROLES,
+                roles=_FOLD_DELEGATION_ROLES,
                 implement={"path": "output/main.py", "content": source},
             ),
         ]
@@ -638,7 +639,7 @@ def test_second_llm_fold_prompt_excludes_prior_test_diagnostic(
             ToolCall("check", "modification_check", {}),
             ToolCall("valid", "daily_backtest", {}),
             ToolCall("finish_fold", "finish_fold", {}),
-            roles=FOLD_REQUIRED_EXPLORE_ROLES,
+            roles=_FOLD_DELEGATION_ROLES,
             implement={"path": "output/main.py", "content": source},
         )
 
@@ -880,7 +881,7 @@ def test_console_gpu_allocation_reaches_the_run_manifests_sandbox_spec(
                 ToolCall("check", "modification_check", {}),
                 ToolCall("valid", "daily_backtest", {}),
                 ToolCall("finish_fold", "finish_fold", {}),
-                roles=FOLD_REQUIRED_EXPLORE_ROLES,
+                roles=_FOLD_DELEGATION_ROLES,
                 implement={"path": "output/main.py", "content": source},
             ),
         ]
@@ -906,9 +907,9 @@ def test_console_gpu_allocation_reaches_the_run_manifests_sandbox_spec(
     fold_configs = [config for config in assembled_configs if config.mode == "fold"]
     assert len(fold_configs) == 1
     assert fold_configs[0].finalize_before_deadline_seconds == 600
-    assert fold_configs[0].required_explore_roles == FOLD_REQUIRED_EXPLORE_ROLES
+    assert not hasattr(fold_configs[0], "required_explore_roles")
     meta_configs = [config for config in assembled_configs if config.mode == "meta"]
-    assert meta_configs[0].required_explore_roles == ("auditor",)
+    assert not hasattr(meta_configs[0], "required_explore_roles")
     # One-shot, like every other per-session control.
     assert read_control(experiment / "hitl/control.json").gpu_counts == {}
 

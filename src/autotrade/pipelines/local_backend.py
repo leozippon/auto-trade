@@ -677,7 +677,6 @@ class LLMFoldDeveloper:
         from autotrade.agent.explore import (
             ExploreSubAgentConfig,
             ExploreSubAgentEngine,
-            session_explore_roles,
         )
         from autotrade.agent.prompts import build_system_prompt
         from autotrade.agent.runner import AgentSessionConfig, AgentSessionRunner
@@ -968,7 +967,6 @@ class LLMFoldDeveloper:
                     max_steps=request.max_steps,
                     deadline_seconds=request.deadline_seconds,
                     max_response_tokens=self.max_response_tokens,
-                    required_explore_roles=session_explore_roles("fold"),
                 ),
                 compactor=(
                     ContextCompactor(compact_budgeted, self.context_compaction)
@@ -1224,7 +1222,6 @@ class LLMMetaLearner:
         from autotrade.agent.explore import (
             ExploreSubAgentConfig,
             ExploreSubAgentEngine,
-            session_explore_roles,
         )
         from autotrade.agent.prompts import (
             build_meta_learning_prompt,
@@ -1503,7 +1500,6 @@ class LLMMetaLearner:
                 max_llm_calls=self.max_llm_calls,
                 deadline_seconds=self.deadline_seconds,
                 max_response_tokens=self.max_response_tokens,
-                required_explore_roles=session_explore_roles("meta"),
             ),
             compactor=(
                 ContextCompactor(compact_budgeted, self.context_compaction)

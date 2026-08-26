@@ -35,8 +35,12 @@ from autotrade.pipelines.ledger import ExperimentLedger
 from autotrade.pipelines.local_backend import LLMMetaLearner
 from autotrade.pipelines.worker import load_worker_options, run_local_interactive_worker
 
-from autotrade.agent.explore import FOLD_REQUIRED_EXPLORE_ROLES
-from .test_interactive_worker_local import _NoShellRunner, _explore_then, _experiment
+from .test_interactive_worker_local import (
+    _FOLD_DELEGATION_ROLES,
+    _NoShellRunner,
+    _experiment,
+    _explore_then,
+)
 
 TEST_LABEL = "2026Q1"
 RAW_FOLD_ID = f"fold_{TEST_LABEL}"
@@ -139,7 +143,7 @@ def fold_session(tmp_path_factory, provider_key):
                 ToolCall("check", "modification_check", {}),
                 ToolCall("valid", "daily_backtest", {}),
                 ToolCall("finish", "finish_fold", {}),
-                roles=FOLD_REQUIRED_EXPLORE_ROLES,
+                roles=_FOLD_DELEGATION_ROLES,
                 implement={"path": "output/main.py", "content": SOURCE},
             ),
         ],

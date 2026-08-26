@@ -11,14 +11,10 @@ import pytest
 from autotrade.agent.explore import (
     EXPLORE_ROLES,
     EXPLORE_SYSTEM_PROMPT,
-    FOLD_REQUIRED_EXPLORE_ROLES,
     META_EXPLORE_SYSTEM_PROMPT,
-    META_REQUIRED_EXPLORE_ROLES,
-    OPTIONAL_EXPLORE_ROLES,
     allowed_explore_tools,
     ExploreSubAgentEngine,
     explore_system_prompt,
-    session_explore_roles,
 )
 from autotrade.agent.prompts import build_system_prompt
 from autotrade.agent.runner import AgentSessionConfig, AgentSessionRunner
@@ -46,22 +42,12 @@ from autotrade.pipelines.local_backend import (
 _STRATEGY = "def generate_orders(context):\n    return []\n"
 
 
-def _fold_config(*roles: str, **kwargs: object) -> AgentSessionConfig:
-    chosen = roles or ("auditor",)
-    return AgentSessionConfig(
-        mode="fold",
-        required_explore_roles=chosen,
-        **kwargs,  # type: ignore[arg-type]
-    )
+def _fold_config(**kwargs: object) -> AgentSessionConfig:
+    return AgentSessionConfig(mode="fold", **kwargs)  # type: ignore[arg-type]
 
 
-def _meta_config(*roles: str, **kwargs: object) -> AgentSessionConfig:
-    chosen = roles or META_REQUIRED_EXPLORE_ROLES
-    return AgentSessionConfig(
-        mode="meta",
-        required_explore_roles=chosen,
-        **kwargs,  # type: ignore[arg-type]
-    )
+def _meta_config(**kwargs: object) -> AgentSessionConfig:
+    return AgentSessionConfig(mode="meta", **kwargs)  # type: ignore[arg-type]
 
 
 def _function_name(record: object) -> str:
@@ -289,7 +275,7 @@ def test_explore_write_failure_does_not_finish_parent(tmp_path: Path) -> None:
         llm=ScriptedLLM([]),
         tools=ToolRegistry(),
         system_prompt="fold",
-        config=_fold_config("developer"),
+        config=_fold_config(),
         explore=explore,
     )
     dispatched = runner._dispatch_explore(
@@ -381,7 +367,7 @@ def test_runner_attaches_explore_events_to_its_sink() -> None:
         llm=ScriptedLLM([]),
         tools=ToolRegistry(),
         system_prompt="fold",
-        config=_fold_config("auditor"),
+        config=_fold_config(),
         explore=explore,
         event_sink=lambda event, _payload: events.append(event),
     )
@@ -473,77 +459,33 @@ class _FinishStub:
         return ToolResult(True, value={"status": "done"}, finish=True)
 
 
-def test_finish_fold_rejected_until_required_roles_attempted() -> None:
+def test_finish_fold_allows_zero_explore_and_emits_empty_trace_stats() -> None:
     finish = _FinishStub("finish_fold")
-    explore = ExploreSubAgentEngine(
-        llm=ScriptedLLM(
-            [ProviderResponse(content="digest"), ProviderResponse(content="digest")]
-        ),
-        tools=ToolRegistry([DeclaredReadOnlyShell()]),
-    )
     events: list[tuple[str, dict[str, object]]] = []
     runner = AgentSessionRunner(
         llm=ScriptedLLM(
-            [
-                ProviderResponse(tool_calls=(ToolCall("f1", "finish_fold", {}),)),
-                ProviderResponse(
-                    tool_calls=(ToolCall("e0", "explore", {"task": "  "}),)
-                ),
-                ProviderResponse(tool_calls=(ToolCall("f2", "finish_fold", {}),)),
-                ProviderResponse(
-                    tool_calls=(
-                        ToolCall(
-                            "e1",
-                            "explore",
-                            {"role": "auditor", "task": "check data"},
-                        ),
-                    )
-                ),
-                ProviderResponse(tool_calls=(ToolCall("f3", "finish_fold", {}),)),
-                ProviderResponse(
-                    tool_calls=(
-                        ToolCall(
-                            "e2",
-                            "explore",
-                            {"role": "developer", "task": "check strategy"},
-                        ),
-                    )
-                ),
-                ProviderResponse(tool_calls=(ToolCall("f4", "finish_fold", {}),)),
-            ]
+            [ProviderResponse(tool_calls=(ToolCall("f1", "finish_fold", {}),))]
         ),
         tools=ToolRegistry([finish]),
         system_prompt="fold",
-        config=_fold_config("auditor", "developer"),
-        explore=explore,
+        config=_fold_config(),
+        explore=ExploreSubAgentEngine(
+            llm=ScriptedLLM([]),
+            tools=ToolRegistry([DeclaredReadOnlyShell()]),
+        ),
         event_sink=lambda event, payload: events.append((event, payload)),
     )
-    result = runner.run("must cover both roles")
+
+    result = runner.run("finish without delegation")
+
     assert result.status == "finished"
     assert finish.invoked == 1
-    assert runner._explore_attempts == 2
-    assert runner._explored_roles == {"auditor", "developer"}
-    attempt_events = [payload for event, payload in events if event == "explore_attempt"]
-    assert attempt_events[0]["ok"] is False
-    assert "task" not in attempt_events[0]
-    assert attempt_events[1]["role"] == "auditor"
-    assert attempt_events[2]["role"] == "developer"
+    assert runner._explore_attempts == 0
+    assert runner._explored_roles == set()
+    assert not [payload for event, payload in events if event == "explore_attempt"]
     ended = next(payload for event, payload in events if event == "session_end")
-    assert ended["explore_attempts"] == 2
-    assert ended["explored_roles"] == ["auditor", "developer"]
-    assert "task" not in ended
-    finish_errors = []
-    for event, payload in events:
-        result = payload.get("result")
-        if (
-            event == "tool_call"
-            and payload.get("tool") == "finish_fold"
-            and isinstance(result, dict)
-            and result.get("ok") is False
-        ):
-            finish_errors.append(str(result.get("error") or ""))
-    assert any("auditor" in error and "developer" in error for error in finish_errors)
-    assert any("missing roles: developer" in error for error in finish_errors)
+    assert ended["explore_attempts"] == 0
+    assert ended["explored_roles"] == []
 
 
 def test_failed_explore_attempt_counts_for_its_role() -> None:
@@ -581,10 +523,10 @@ def test_failed_explore_attempt_counts_for_its_role() -> None:
         ),
         tools=ToolRegistry([finish]),
         system_prompt="fold",
-        config=_fold_config("developer"),
+        config=_fold_config(),
         explore=explore,
     )
-    assert runner.run("failed attempt still counts").status == "finished"
+    assert runner.run("failed explore is still traced").status == "finished"
     assert runner._explore_attempts == 1
     assert runner._explored_roles == {"developer"}
     assert finish.invoked == 1
@@ -607,14 +549,13 @@ def test_explore_attempt_counter_resets_on_new_run() -> None:
     )
     runner._explore_attempts = 4
     runner._explored_roles = {"auditor"}
-    with pytest.raises(RuntimeError, match="call budget"):
-        runner.run("new session without explore")
-    assert finish.invoked == 0
+    assert runner.run("new session without explore").status == "finished"
+    assert finish.invoked == 1
     assert runner._explore_attempts == 0
     assert runner._explored_roles == set()
 
 
-def test_missing_roles_do_not_enter_hard_finalization() -> None:
+def test_zero_explore_enters_hard_finalization() -> None:
     explore = ExploreSubAgentEngine(
         llm=ScriptedLLM([ProviderResponse(content="digest")]),
         tools=ToolRegistry([DeclaredReadOnlyShell()]),
@@ -624,8 +565,6 @@ def test_missing_roles_do_not_enter_hard_finalization() -> None:
         tools=ToolRegistry([_FinishStub("finish_fold")]),
         system_prompt="fold",
         config=_fold_config(
-            "auditor",
-            "developer",
             finalize_before_deadline_seconds=300.0,
             deadline_grace_seconds=0.0,
         ),
@@ -634,11 +573,8 @@ def test_missing_roles_do_not_enter_hard_finalization() -> None:
     runner._complete_validation_nodes = [
         {"node_id": "node_a", "revision_id": "rev_a"}
     ]
-    assert runner._activate_hard_finalization_if_ready(10.0) is False
-    runner._explore_attempts = 1
-    runner._explored_roles = {"auditor"}
-    assert runner._activate_hard_finalization_if_ready(10.0) is False
-    runner._explored_roles = {"auditor", "developer"}
+    assert runner._explore_attempts == 0
+    assert runner._explored_roles == set()
     assert runner._activate_hard_finalization_if_ready(10.0) is True
 
 
@@ -699,7 +635,7 @@ def test_meta_explore_is_readonly_and_cannot_nest(tmp_path: Path) -> None:
         )
 
 
-def test_meta_runner_accepts_meta_mode_explore_and_gates_finish_meta() -> None:
+def test_meta_runner_allows_finish_without_explore_attempt() -> None:
     finish = _FinishStub("finish_meta")
     explore = ExploreSubAgentEngine(
         llm=ScriptedLLM([ProviderResponse(content="trace reviewed")]),
@@ -708,28 +644,18 @@ def test_meta_runner_accepts_meta_mode_explore_and_gates_finish_meta() -> None:
     )
     runner = AgentSessionRunner(
         llm=ScriptedLLM(
-            [
-                ProviderResponse(tool_calls=(ToolCall("f1", "finish_meta", {}),)),
-                ProviderResponse(
-                    tool_calls=(
-                        ToolCall(
-                            "e1",
-                            "explore",
-                            {"role": "auditor", "task": "review traces"},
-                        ),
-                    )
-                ),
-                ProviderResponse(tool_calls=(ToolCall("f2", "finish_meta", {}),)),
-            ]
+            [ProviderResponse(tool_calls=(ToolCall("f1", "finish_meta", {}),))]
         ),
         tools=ToolRegistry([finish]),
         system_prompt="meta",
         config=_meta_config(),
         explore=explore,
     )
-    result = runner.run("meta must explore")
+    result = runner.run("meta can finish directly")
     assert result.status == "finished"
     assert finish.invoked == 1
+    assert runner._explore_attempts == 0
+    assert runner._explored_roles == set()
 
 
 def test_fold_and_explore_prompts_name_pyright_meta_does_not() -> None:
@@ -749,7 +675,9 @@ def test_fold_and_explore_prompts_name_pyright_meta_does_not() -> None:
     assert "`developer`" in fold
     assert "`general-purpose`" in fold
     assert "`Explore`" in fold
-    assert "不能替代" in fold
+    assert "通常优先" in fold
+    assert "无需委托" in fold
+    assert "finish_fold` 与硬收尾不以角色或尝试次数为条件" in fold
     assert "至少一个具体" not in fold
     assert "`auditor`" in meta
     assert "`Explore`" in meta
@@ -774,7 +702,7 @@ def test_explore_schema_uses_session_role_enum() -> None:
         llm=ScriptedLLM([]),
         tools=ToolRegistry(),
         system_prompt="fold",
-        config=_fold_config(*FOLD_REQUIRED_EXPLORE_ROLES),
+        config=_fold_config(),
         explore=explore,
     )
     schema = next(
@@ -795,7 +723,7 @@ def test_explore_schema_uses_session_role_enum() -> None:
         llm=ScriptedLLM([]),
         tools=ToolRegistry(),
         system_prompt="meta",
-        config=_meta_config(*META_REQUIRED_EXPLORE_ROLES),
+        config=_meta_config(),
         explore=ExploreSubAgentEngine(
             llm=ScriptedLLM([]),
             tools=ToolRegistry([_NamedTool("read_file")]),
@@ -816,27 +744,10 @@ def test_explore_schema_uses_session_role_enum() -> None:
     assert meta_role["enum"] == list(EXPLORE_ROLES)
 
 
-def test_session_explore_roles_are_stable_required_sets() -> None:
-    assert session_explore_roles("fold") == FOLD_REQUIRED_EXPLORE_ROLES
-    assert session_explore_roles("meta") == META_REQUIRED_EXPLORE_ROLES
-    assert session_explore_roles("meta_learning") == META_REQUIRED_EXPLORE_ROLES
-    assert OPTIONAL_EXPLORE_ROLES.isdisjoint(session_explore_roles("fold"))
-    assert OPTIONAL_EXPLORE_ROLES.isdisjoint(session_explore_roles("meta"))
-    with pytest.raises(ValueError, match="cannot be a required"):
-        AgentSessionConfig(
-            mode="fold",
-            required_explore_roles=(*FOLD_REQUIRED_EXPLORE_ROLES, "general-purpose"),
-        )
-    with pytest.raises(ValueError, match="cannot be a required"):
-        AgentSessionConfig(
-            mode="fold",
-            required_explore_roles=("auditor", "Explore"),
-        )
-    with pytest.raises(ValueError, match="unknown explore role for meta"):
-        AgentSessionConfig(
-            mode="meta",
-            required_explore_roles=("developer",),
-        )
+def test_session_config_has_no_required_explore_role_gate() -> None:
+    config = AgentSessionConfig(mode="fold")
+    assert not hasattr(config, "required_explore_roles")
+    assert "required_explore_roles" not in AgentSessionConfig.__dataclass_fields__
 
 
 def test_role_tool_visibility_hides_writes_from_audits(tmp_path: Path) -> None:
@@ -863,10 +774,18 @@ def test_role_tool_visibility_hides_writes_from_audits(tmp_path: Path) -> None:
         _function_name(record)
         for record in engine._provider_tools(allowed_explore_tools("fold", "auditor"))
     }
-    assert {"write_file", "edit_file", "shell", "todo"} <= impl
-    assert {"read_file", "grep", "glob", "shell", "todo"} <= audit
-    assert "write_file" not in audit
-    assert "edit_file" not in audit
+    assert impl == {
+        "edit_file",
+        "glob",
+        "grep",
+        "modification_check",
+        "read_file",
+        "shell",
+        "todo",
+        "validate_strategy",
+        "write_file",
+    }
+    assert audit == {"glob", "grep", "read_file", "shell", "todo"}
     fold_general = {
         _function_name(record)
         for record in engine._provider_tools(
@@ -919,7 +838,7 @@ def test_role_tool_visibility_hides_writes_from_audits(tmp_path: Path) -> None:
     assert "edit_file" not in meta_general
 
 
-def test_only_general_cannot_finish_required_roles() -> None:
+def test_explore_calls_still_track_attempts_and_roles() -> None:
     finish = _FinishStub("finish_fold")
     explore = ExploreSubAgentEngine(
         llm=ScriptedLLM(
@@ -942,20 +861,11 @@ def test_only_general_cannot_finish_required_roles() -> None:
                             "explore",
                             {"role": "general-purpose", "task": "cross-cut"},
                         ),
-                    )
-                ),
-                ProviderResponse(tool_calls=(ToolCall("f1", "finish_fold", {}),)),
-                ProviderResponse(
-                    tool_calls=(
                         ToolCall(
                             "e1",
                             "explore",
                             {"role": "auditor", "task": "check data"},
                         ),
-                    )
-                ),
-                ProviderResponse(
-                    tool_calls=(
                         ToolCall(
                             "e2",
                             "explore",
@@ -963,16 +873,18 @@ def test_only_general_cannot_finish_required_roles() -> None:
                         ),
                     )
                 ),
-                ProviderResponse(tool_calls=(ToolCall("f2", "finish_fold", {}),)),
+                ProviderResponse(tool_calls=(ToolCall("f1", "finish_fold", {}),)),
             ]
         ),
         tools=ToolRegistry([finish]),
         system_prompt="fold",
-        config=_fold_config("auditor", "developer"),
+        config=_fold_config(),
         explore=explore,
         event_sink=lambda event, payload: events.append((event, payload)),
     )
-    result = runner.run("general is optional")
+
+    result = runner.run("delegate when useful")
+
     assert result.status == "finished"
     assert finish.invoked == 1
     assert runner._explore_attempts == 3
@@ -981,21 +893,15 @@ def test_only_general_cannot_finish_required_roles() -> None:
         "auditor",
         "developer",
     }
-    finish_errors = []
-    for event, payload in events:
-        record = payload.get("result")
-        if (
-            event == "tool_call"
-            and payload.get("tool") == "finish_fold"
-            and isinstance(record, dict)
-            and record.get("ok") is False
-        ):
-            finish_errors.append(str(record.get("error") or ""))
-    assert any("missing roles: auditor, developer" in error for error in finish_errors)
     attempt_events = [payload for event, payload in events if event == "explore_attempt"]
-    assert attempt_events[0]["role"] == "general-purpose"
-    assert "task" not in attempt_events[0]
+    assert [payload["role"] for payload in attempt_events] == [
+        "general-purpose",
+        "auditor",
+        "developer",
+    ]
+    assert all("task" not in payload for payload in attempt_events)
     ended = next(payload for event, payload in events if event == "session_end")
+    assert ended["explore_attempts"] == 3
     assert ended["explored_roles"] == [
         "auditor",
         "developer",
@@ -1004,7 +910,7 @@ def test_only_general_cannot_finish_required_roles() -> None:
     assert "task" not in ended
 
 
-def test_required_roles_can_finish_without_general() -> None:
+def test_single_explore_role_can_finish() -> None:
     finish = _FinishStub("finish_fold")
     explore = ExploreSubAgentEngine(
         llm=ScriptedLLM([ProviderResponse(content="digest")]),
@@ -1027,10 +933,10 @@ def test_required_roles_can_finish_without_general() -> None:
         ),
         tools=ToolRegistry([finish]),
         system_prompt="fold",
-        config=_fold_config("auditor"),
+        config=_fold_config(),
         explore=explore,
     )
-    assert runner.run("specialized roles suffice").status == "finished"
+    assert runner.run("one delegated review is enough").status == "finished"
     assert finish.invoked == 1
     assert runner._explored_roles == {"auditor"}
 
@@ -1040,7 +946,7 @@ def test_general_prompts_explain_mode_and_role() -> None:
     meta = explore_system_prompt("meta", "general-purpose")
     assert "角色 general-purpose" in fold
     assert "write_file/edit_file" in fold
-    assert "不能替代 auditor 或 developer" in fold
+    assert "适合处理跨域有界任务" in fold
     assert "`general-purpose`" in meta
     assert "只读" in meta
     assert "write_file" in meta

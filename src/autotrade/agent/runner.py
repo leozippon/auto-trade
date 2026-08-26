@@ -60,12 +60,7 @@ from .compact import (
     is_llm_compaction_message,
     safe_error_summary,
 )
-from .explore import (
-    EXPLORE_ROLES,
-    OPTIONAL_EXPLORE_ROLES,
-    ExploreSubAgentEngine,
-    session_explore_roles,
-)
+from .explore import EXPLORE_ROLES, ExploreSubAgentEngine
 from .prompts import (
     HARD_FINALIZATION_SYSTEM_PROMPT,
     STEP_WRAP_UP_PROMPT,
@@ -190,25 +185,10 @@ class AgentSessionConfig:
     tool_result_keep_recent: int = 8
     tool_result_clear_min_chars: int = 4_000
     tool_result_clear_token_threshold: int = 40_000
-    required_explore_roles: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.mode not in ("fold", "meta", "meta_learning"):
             raise ValueError("Agent session mode must be fold, meta, or meta_learning")
-        seen: set[str] = set()
-        allowed_required = set(session_explore_roles(self.mode))
-        for role in self.required_explore_roles:
-            if not isinstance(role, str) or not role.strip():
-                raise ValueError("required_explore_roles must be non-empty strings")
-            if role in seen:
-                raise ValueError(f"duplicate required explore role: {role}")
-            if role in OPTIONAL_EXPLORE_ROLES:
-                raise ValueError(f"{role} cannot be a required explore role")
-            if role not in allowed_required:
-                raise ValueError(
-                    f"unknown explore role for {self.mode} session: {role}"
-                )
-            seen.add(role)
         for name in (
             "max_llm_calls",
             "max_steps",
@@ -270,11 +250,6 @@ class AgentSessionRunner:
         self.config = config or AgentSessionConfig()
         self.compactor = compactor
         self.explore = explore
-        roles = self.config.required_explore_roles
-        if self.explore is None and roles:
-            raise ValueError("required_explore_roles requires an explore engine")
-        if self.explore is not None and not roles:
-            raise ValueError("Explore session requires required_explore_roles")
         if self.explore is not None:
             explore_mode = getattr(self.explore, "mode", "fold")
             if self.config.mode in {"meta", "meta_learning"}:
@@ -633,22 +608,20 @@ class AgentSessionRunner:
             roles = list(EXPLORE_ROLES)
             if self.config.mode in {"meta", "meta_learning"}:
                 description = (
-                    "Delegate one first-level read-only role. Pass role from the "
-                    "unified enum auditor/developer/general-purpose/Explore. Required "
-                    "auditor must be attempted; optional general-purpose and Explore "
-                    "cannot replace it. Every Meta sub-role, including developer, is "
-                    "read-only and may only propose candidates. Nested explore is "
-                    "forbidden."
+                    "Optionally delegate one first-level read-only role from the "
+                    "unified enum auditor/developer/general-purpose/Explore. Auditor "
+                    "is usually the best fit for process review. Every Meta sub-role, "
+                    "including developer, is read-only and may only propose candidates. "
+                    "Nested explore is forbidden; the parent may finish without delegation."
                 )
             else:
                 description = (
-                    "Delegate one first-level Fold role. Pass role from the "
-                    "unified enum auditor/developer/general-purpose/Explore. Required "
-                    "auditor and developer must each be attempted; optional "
-                    "general-purpose and Explore cannot replace them. Explore is a "
-                    "read-only discovery role; the tool name remains explore. Only "
+                    "Optionally delegate one first-level Fold role from the unified "
+                    "enum auditor/developer/general-purpose/Explore. Usually prefer "
+                    "auditor for review before developer for implementation. Explore "
+                    "is a read-only discovery role; the tool name remains explore. Only "
                     "developer and general-purpose may write strategy code. Nested "
-                    "explore is forbidden."
+                    "explore is forbidden; the parent may finish without delegation."
                 )
             tools.append(
                 {
@@ -760,7 +733,6 @@ class AgentSessionRunner:
             or self.config.mode != "fold"
             or self._wrap_up_sent
             or not self._complete_validation_nodes
-            or (self.explore is not None and self._missing_explore_roles())
         ):
             return False
         main_remaining = remaining - self.config.deadline_grace_seconds
@@ -824,9 +796,6 @@ class AgentSessionRunner:
                     "ok": False,
                     "error": "Agent session deadline reached before tool dispatch",
                 }
-            blocked = self._explore_required_error(call.name)
-            if blocked is not None:
-                return call, blocked
             if call.name == "explore":
                 return call, self._dispatch_explore(call)
             record = self.tools.invoke(
@@ -942,28 +911,6 @@ class AgentSessionRunner:
             )
             self.inbox.consume(message_id)
         return messages
-
-    def _missing_explore_roles(self) -> tuple[str, ...]:
-        return tuple(
-            role
-            for role in self.config.required_explore_roles
-            if role not in self._explored_roles
-        )
-
-    def _explore_required_error(self, tool_name: str) -> dict[str, object] | None:
-        if tool_name not in _TERMINAL_TOOLS or self.explore is None:
-            return None
-        missing = self._missing_explore_roles()
-        if not missing:
-            return None
-        return {
-            "ok": False,
-            "observation": "explore_required",
-            "error": (
-                f"{tool_name} requires explore attempts for missing roles: "
-                + ", ".join(missing)
-            ),
-        }
 
     def _dispatch_explore(self, call: ToolCall) -> dict[str, object]:
         if self.explore is None:

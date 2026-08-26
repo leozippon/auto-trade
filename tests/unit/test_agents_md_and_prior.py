@@ -45,18 +45,20 @@ def _agents_md(root: Path, *, missing: str | None = None) -> Path:
     return path
 
 
-def test_root_agents_md_requires_a_first_level_subagent() -> None:
+def test_root_agents_md_recommends_first_level_subagents() -> None:
     text = Path(__file__).resolve().parents[2].joinpath("AGENTS.md").read_text(
         encoding="utf-8"
     )
-    assert "Every main-agent task must start at least one first-level sub-agent" in text
-    assert "There is no simple-task exemption" in text
-    assert "Unless the task is very simple" not in text
+    assert "Main agents should use a first-level sub-agent" in text
+    assert "a bounded task may proceed directly" in text
+    assert "Every main-agent task must start" not in text
     assert "`auditor`" in text
     assert "`developer`" in text
     assert "`Explore`" in text
     assert "`general-purpose`" in text
-    assert "cannot replace a required role" in text
+    assert "A Fold may finish without calling `explore`" in text
+    assert "Meta may also finish without delegation" in text
+    assert "required role" not in text
     assert "Do not change PRIOR" in text
     for stale in (
         "data_audit",

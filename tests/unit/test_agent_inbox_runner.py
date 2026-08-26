@@ -364,9 +364,7 @@ def test_explore_does_not_consume_inbox_until_parent_returns(tmp_path: Path) -> 
         llm=parent_llm,
         tools=ToolRegistry([finish]),
         system_prompt="daily JSON only",
-        config=AgentSessionConfig(
-            max_llm_calls=3, required_explore_roles=("auditor",)
-        ),
+        config=AgentSessionConfig(max_llm_calls=3),
         explore=ExploreSubAgentEngine(llm=explore_llm, tools=ToolRegistry([shell])),
         inbox=inbox,
     )

@@ -27,9 +27,7 @@ add_repo_src(__file__)
 
 from autotrade.agent.compact import COMPACT_SYSTEM_PROMPT
 from autotrade.agent.explore import (
-    FOLD_REQUIRED_EXPLORE_ROLES,
     META_EXPLORE_SYSTEM_PROMPT,
-    META_REQUIRED_EXPLORE_ROLES,
     explore_system_prompt,
 )
 from autotrade.agent.agents_md import load_required_agents_md_sections
@@ -172,7 +170,7 @@ def render() -> str:
         "",
         _block(HARD_FINALIZATION_SYSTEM_PROMPT),
         "",
-        "用户消息由 Runner 确定性生成，只包含候选节点、revision 和有界 Validation 指标。工具面只保留 `finish_fold` 与已配置时的 `step_rollback`；模型仍自行选择候选，Runner 不排名或自动提交。尚无完整节点时不会进入该状态。配置了 `explore` 的会话在缺任一 required role 时不会进入硬收尾，保持全工具面直至角色齐备或 deadline 诚实失败。",
+        "用户消息由 Runner 确定性生成，只包含候选节点、revision 和有界 Validation 指标。工具面只保留 `finish_fold` 与已配置时的 `step_rollback`；模型仍自行选择候选，Runner 不排名或自动提交。尚无完整节点时不会进入该状态。是否调用过 `explore` 不影响进入硬收尾。",
         "",
         "## 3. 阶段与防过拟合构件",
         "",
@@ -220,7 +218,7 @@ def render() -> str:
         "",
         _block(
             "请从本地 development 证据提炼后续 Fold 的 Taste，并按需更新 PRIOR.md。"
-            "委托 explore：必需 auditor（非空窗口先读 process summary 与 compact `agent_trace` 作索引，再逐个读取每个 available 原始 Fold Agent Trace sidecar，并审冻结策略与 Train/Validation 及允许的紧凑 Test；空窗口审 Taste/PRIOR/边界，必要时多次）。可选 general-purpose 与 Explore 不能替代。全部子角色只读，只能提出候选；只由你改写 Taste/PRIOR 与可选正则化。无明确流程优化时不要改 PRIOR。"
+            "需要独立复盘时可委托 explore auditor（非空窗口先读 process summary 与 compact `agent_trace` 作索引，再逐个读取每个 available 原始 Fold Agent Trace sidecar，并审冻结策略与 Train/Validation 及允许的紧凑 Test；空窗口审 Taste/PRIOR/边界，必要时可多次）；无需委托时可以直接完成。全部子角色只读，只能提出候选；只由你改写 Taste/PRIOR 与可选正则化。无明确流程优化时不要改 PRIOR。"
             "先读 `inputs/meta_context.json`（含本窗口已完成 Fold 的冻结策略投影、compact `agent_trace`、`agent_process_summary` 与 `agent_trace_full` 元数据）。再逐个按 metadata 路径读取每个 available 的原始 Fold Agent Trace sidecar 以检查全流程；它是 AgentTraceWriter 原始 JSONL 的逐字节副本，可从全部原始信息提炼经验，但不要把原始 trace 文本堆进 PRIOR，也不要改变 PIT/Test/Held-out 边界。把 PRIOR 当当前快照维护；无明确流程优化时不要改 PRIOR。需要时再读 `inputs/meta_learning_memory.jsonl`。"
             "不要输出逐 Fold 测试明细，不要使用任何外部资料。\n"
             "{previous_taste, development}\n\n"
@@ -244,9 +242,7 @@ def render() -> str:
         "",
         _block(explore_system_prompt("fold", "auditor")),
         "",
-        "Fold 父会话必须委托 "
-        + "、".join(FOLD_REQUIRED_EXPLORE_ROLES)
-        + "。只有 `developer` 与可选 `general-purpose` 可写；`auditor` 可见 `read_file`/`grep`/`glob`/`shell`/`todo`，shell 只读；`Explore` 可见 `read_file`/`grep`/`glob`/`todo`，无 shell。禁止嵌套。可选角色不能替代必需角色。",
+        "Fold 父会话通常优先用 `auditor` 审计，再用 `developer` 实现；无需委托时也可直接完成。只有 `developer` 与 `general-purpose` 可写；`auditor` 可见 `read_file`/`grep`/`glob`/`shell`/`todo`，shell 只读；`Explore` 可见 `read_file`/`grep`/`glob`/`todo`，无 shell。禁止嵌套。",
         "",
         "### 5.3 Fold general-purpose / Explore",
         "",
@@ -264,9 +260,7 @@ def render() -> str:
         "",
         _block(explore_system_prompt("meta", "auditor")),
         "",
-        "Meta 必需角色为 "
-        + "、".join(META_REQUIRED_EXPLORE_ROLES)
-        + "。统一枚举还含 `developer`、`general-purpose`、`Explore`，全部只读，只能提出候选。共享 `META_EXPLORE_SYSTEM_PROMPT` 主体，工具面仅 `read_file`/`grep`/`glob`/`todo`。",
+        "Meta 需要独立复盘时可用 `auditor`；无需委托时也可直接完成。统一枚举还含 `developer`、`general-purpose`、`Explore`，全部只读，只能提出候选。共享 `META_EXPLORE_SYSTEM_PROMPT` 主体，工具面仅 `read_file`/`grep`/`glob`/`todo`。",
         "",
         _block(META_EXPLORE_SYSTEM_PROMPT),
         "",

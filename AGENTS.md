@@ -61,7 +61,7 @@ free -h
 
 *If your task prompt identifies you as a sub-agent, ignore the remaining rules in this section and do not spawn sub-agents of your own.*
 
-*Every main-agent task must start at least one first-level sub-agent. There is no simple-task exemption.*
+*Main agents should use a first-level sub-agent when independent review or implementation would materially help; a bounded task may proceed directly when delegation adds little value.*
 
 - Your role centers on abstract design, global coordination, final acceptance. Direct, exhaustive reading and modification are required only when necessary.
 - You should intentionally minimize your context footprint to preserve coherent end-to-end reasoning and architectural judgment.
@@ -84,10 +84,10 @@ free -h
 
 This subsection is the AutoTrade session contract. The whole Multi-Agent section is injected into regular Fold and Meta prompts. Parent agents accept; first-level sub-agents do not nest.
 
-- Regular Fold must use two first-level `explore` roles, each at least once: `auditor` inspects PIT-visible data, units, and availability plus the parent strategy, historical artifacts, and existing results before development, and may run more than once; `developer` writes real strategy code.
-- Optional first-level `general-purpose` may cover one bounded cross-domain task; Fold `general-purpose` is writable. Optional first-level `Explore` is read-only discovery of unknown locations, interfaces, or materials: `explore(role="Explore", task=...)`. Optional roles cannot replace a required role and do not count as one. Sub-agents may not nest, finish, backtest, or change PRIOR/Taste. The parent accepts.
+- Regular Fold should usually prefer two first-level `explore` roles in sequence: `auditor` inspects PIT-visible data, units, and availability plus the parent strategy, historical artifacts, and existing results before development, and may run more than once; `developer` writes real strategy code. A Fold may finish without calling `explore` when delegation is unnecessary.
+- First-level `general-purpose` may cover one bounded cross-domain task; Fold `general-purpose` is writable. First-level `Explore` is read-only discovery of unknown locations, interfaces, or materials: `explore(role="Explore", task=...)`. Sub-agents may not nest, finish, backtest, or change PRIOR/Taste. The parent accepts.
 - The Fold parent only designs, coordinates, runs official validation/backtest, accepts, and finishes. It must not write or edit strategy files itself, and must not use shell to modify strategy artifacts.
-- Meta requires only `auditor`. A non-empty review window first reads each Fold's process summary and compact `agent_trace` as an index, then reads every available byte-exact raw Fold Agent Trace sidecar to inspect the complete main and sub-agent process. The sidecar is the original AgentTraceWriter JSONL and retains every recorded field; Meta may derive experience from all raw information but must not dump original trace text into PRIOR. It also inspects frozen strategies, Train/Validation, and allowed compact Test feedback, and must not leak Held-out or per-Fold Test numbers. An empty window inspects current Taste, PRIOR, and input boundaries. Call `auditor` more than once when needed.
+- Meta may use `auditor` for independent review. A non-empty review window first reads each Fold's process summary and compact `agent_trace` as an index, then reads every available byte-exact raw Fold Agent Trace sidecar to inspect the complete main and sub-agent process. The sidecar is the original AgentTraceWriter JSONL and retains every recorded field; Meta may derive experience from all raw information but must not dump original trace text into PRIOR. It also inspects frozen strategies, Train/Validation, and allowed compact Test feedback, and must not leak Held-out or per-Fold Test numbers. An empty window inspects current Taste, PRIOR, and input boundaries. Use `auditor` more than once when useful; Meta may also finish without delegation.
 - Every Meta sub-role (`auditor`, `developer`, `general-purpose`, `Explore`) is read-only and may only propose candidates. The Meta parent uniquely synthesizes, edits Taste/PRIOR and optional strategy regularization, and finishes. Do not change PRIOR when there is no valid process improvement.
 
 
