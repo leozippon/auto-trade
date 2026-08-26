@@ -945,6 +945,9 @@ class LLMFoldDeveloper:
                     tree,
                     fold_id=fold_ref,
                     run_id=run_ref,
+                    parent_main_py=(
+                        (source / "main.py") if request.parent is not None else None
+                    ),
                 )
             )
             budgeted = SessionBudgetLLM(self.llm, budget=shared_budget)
