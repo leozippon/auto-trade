@@ -732,11 +732,9 @@ class RollingExperimentPipeline:
         """Refuse to fall back to a meta-regularized parent this Fold never validated.
 
         A meta-regularized artifact enters the Fold without a backtest. Falling
-        back to it silently would ship an unvalidated strategy. Closed matches
-        the parent to a complete Validation by artifact hash; item 5 removed
-        hashes, so identity is established by comparing the trees directly —
-        a Step whose revision differs from the parent in no file validated
-        something else, not this parent.
+        back to it silently would ship an unvalidated strategy. Identity is
+        established by comparing the trees directly: a Step whose revision has
+        no changed strategy or model file performed Validation on this parent.
         """
         for step in steps:
             if not step.validation.complete:

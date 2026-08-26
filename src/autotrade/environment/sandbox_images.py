@@ -93,7 +93,7 @@ def _load_image_state(path: Path, *, experiment_id: str) -> dict[str, object]:
         raise RuntimeError("persisted sandbox image belongs to another experiment")
     if not isinstance(image_ref, str) or not isinstance(generation_id, str):
         raise RuntimeError(  # noqa: TRY004
-            "persisted sandbox image lacks non-hash identity fields"
+            "persisted sandbox image lacks required identity fields"
         )
     try:
         generation = uuid.UUID(generation_id)

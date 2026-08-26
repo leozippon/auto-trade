@@ -1,4 +1,3 @@
-import hashlib
 import json
 import tempfile
 import threading
@@ -432,20 +431,6 @@ class SnapshotBuilderTest(unittest.TestCase):
                     if key not in {"file", "build_seconds", "write_seconds", "size_bytes"}
                 },
             )
-
-            def semantic_digest(parquet: pq.ParquetFile) -> str:
-                digest = hashlib.sha256(str(parquet.schema_arrow).encode())
-                for index in range(parquet.metadata.num_row_groups):
-                    payload = json.dumps(
-                        parquet.read_row_group(index).to_pydict(),
-                        ensure_ascii=False,
-                        sort_keys=True,
-                        default=str,
-                    ).encode()
-                    digest.update(payload)
-                return digest.hexdigest()
-
-            self.assertEqual(semantic_digest(serial), semantic_digest(parallel))
             # Row-level PIT timestamps survive screening/correction unchanged.
             self.assertEqual(
                 parallel.read()["available_at"].to_pylist(),

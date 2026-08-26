@@ -46,7 +46,7 @@ def _fold_ref_map(
     store = AgentRefStore.existing(experiment_dir)
     if store is None:
         # Hash-era experiments have no host mapping. Their persisted opaque
-        # tree remains readable, but the console must not guess old hashes.
+        # tree remains readable, but the console must not guess legacy identities.
         return {}
     refs: dict[str, str] = {}
     for node in nodes:

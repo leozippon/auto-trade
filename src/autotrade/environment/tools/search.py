@@ -8,7 +8,7 @@ Deliberately retained although upstream agent CLIs moved to shell-only search
 (Codex never shipped model-facing file-search tools; Claude Code has since
 deprecated its Glob/Grep tools while keeping Read): under this framework's
 ~128k-token main-conversation budget they are load-bearing — bounded paginated
-observations, locator digests that survive tool-result clearing, and the only
+observations, locator summaries that survive tool-result clearing, and the only
 concurrency-safe calls the runner may parallelize within a turn (shell is
 serialized by design). Shell `rg` stays available for pipelines; the overlap
 is a budget/parallelism boundary, not redundancy.

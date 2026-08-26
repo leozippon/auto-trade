@@ -15,8 +15,8 @@ from autotrade.agent.compact import ContextCompactionConfig
 from autotrade.agent.explore import ExploreSubAgentConfig
 from autotrade.environment.artifacts import (
     FilesystemArtifactStore,
-    # Single source of the frozen-artifact immutability rule (item-5 identity
-    # model): a read-only tree is what stands in for a stored digest.
+    # Single source of the frozen-artifact immutability rule: enforce the
+    # read-only tree directly whenever a frozen artifact is consumed.
     _assert_readonly_tree,
 )
 from autotrade.environment.broker import BrokerProfile
