@@ -13,7 +13,7 @@ from autotrade.agent.explore import ExploreSubAgentEngine
 from autotrade.agent.runner import AgentSessionConfig, AgentSessionRunner
 from autotrade.environment.artifacts import FilesystemArtifactStore
 from autotrade.environment.broker import BrokerProfile
-from autotrade.environment.identity import agent_visible_ref
+from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.llm import (
     ChatMessage,
     ProviderResponse,
@@ -144,6 +144,9 @@ def test_backtest_failure_past_wall_deadline_keeps_llm_repair_budget(
         "def generate_orders(context):\n    return []\n", encoding="utf-8"
     )
     tree = StepTree(tmp_path / "steps")
+    ref_store = AgentRefStore(tmp_path / "experiment")
+    fold_ref = ref_store.get_or_create("fold", request.fold.fold_id)
+    run_ref = ref_store.get_or_create("run", request.run_id)
 
     class FailThenPassEvaluator:
         calls = 0
@@ -172,6 +175,7 @@ def test_backtest_failure_past_wall_deadline_keeps_llm_repair_budget(
         broker_profile=BrokerProfile(),
         time_budget=time_budget,
         formal_guard=nullcontext,
+        ref_store=ref_store,
     )
     scripted = ScriptedLLM(
         [
@@ -185,8 +189,8 @@ def test_backtest_failure_past_wall_deadline_keeps_llm_repair_budget(
                         {
                             "node_id": (
                                 "epoch_001__"
-                                f"{agent_visible_ref(request.fold.fold_id, prefix='fold_ref')}__"
-                                "run_budget__valid_002"
+                                f"{fold_ref}__"
+                                f"{run_ref}__valid_002"
                             )
                         },
                     ),
@@ -203,8 +207,8 @@ def test_backtest_failure_past_wall_deadline_keeps_llm_repair_budget(
                 backtest,
                 FinishFoldTool(
                     tree,
-                    fold_id=agent_visible_ref(request.fold.fold_id, prefix="fold_ref"),
-                    run_id=request.run_id,
+                    fold_id=fold_ref,
+                    run_id=run_ref,
                 ),
             ]
         ),
@@ -605,6 +609,7 @@ def test_runner_rejects_mismatched_backtest_budget(tmp_path: Path) -> None:
         broker_profile=BrokerProfile(),
         time_budget=backtest_budget,
         formal_guard=nullcontext,
+        ref_store=AgentRefStore(tmp_path / "experiment"),
     )
     main = SessionBudgetLLM(
         ScriptedLLM([]),

@@ -14,6 +14,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
+from autotrade.environment.identity import AgentRefStore
 from autotrade.pipelines.fold_analysis import (
     DEFAULT_MAX_TOKENS,
     analysis_key,
@@ -57,8 +58,13 @@ class ExplodingProxy(FakeProxy):
 
 
 class FoldAnalysisTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._refs_tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._refs_tmp.cleanup)
+        self.ref_store = AgentRefStore(Path(self._refs_tmp.name) / "experiment")
+
     def test_guarded_view_excludes_test_evidence(self) -> None:
-        view = guarded_record_view(RECORD)
+        view = guarded_record_view(RECORD, ref_store=self.ref_store)
         self.assertNotIn("test_result", view)
         self.assertNotIn("test_period", view)
         self.assertNotIn("test_result_ref", view)
@@ -67,7 +73,9 @@ class FoldAnalysisTest(unittest.TestCase):
 
     def test_prompt_never_carries_the_test_number_or_window(self) -> None:
         messages = build_fold_analysis_messages(
-            RECORD, [{"path": "main.py", "content": "print(1)", "truncated": False}]
+            RECORD,
+            [{"path": "main.py", "content": "print(1)", "truncated": False}],
+            ref_store=self.ref_store,
         )
         user = messages[1].content
         self.assertNotIn("0.09", user)
@@ -87,7 +95,12 @@ class FoldAnalysisTest(unittest.TestCase):
             out_dir = Path(tmp) / "analysis"
             proxy = FakeProxy()
             md_path = analyze_fold(
-                proxy, ledger_record=RECORD, strategy_dir=strategy, model_dir=None, out_dir=out_dir
+                proxy,
+                ledger_record=RECORD,
+                ref_store=self.ref_store,
+                strategy_dir=strategy,
+                model_dir=None,
+                out_dir=out_dir
             )
             self.assertIn("看多动量", md_path.read_text(encoding="utf-8"))
             self.assertEqual(md_path.name, "epoch_001__fold_2022Q1.md")
@@ -111,8 +124,8 @@ class FoldAnalysisTest(unittest.TestCase):
             out_dir = Path(tmp) / "analysis"
             with self.assertRaisesRegex(RuntimeError, "provider unavailable"):
                 analyze_fold(
-                    ExplodingProxy(), ledger_record=RECORD, strategy_dir=strategy,
-                    model_dir=None, out_dir=out_dir,
+                    ExplodingProxy(), ledger_record=RECORD, ref_store=self.ref_store,
+                    strategy_dir=strategy, model_dir=None, out_dir=out_dir,
                 )
             meta = json.loads((out_dir / "epoch_001__fold_2022Q1.json").read_text(encoding="utf-8"))
             self.assertEqual(meta["status"], "error")
@@ -127,8 +140,8 @@ class FoldAnalysisTest(unittest.TestCase):
             out_dir = Path(tmp) / "analysis"
             with self.assertRaisesRegex(RuntimeError, "empty"):
                 analyze_fold(
-                    FakeProxy(content="   \n"), ledger_record=RECORD, strategy_dir=strategy,
-                    model_dir=None, out_dir=out_dir,
+                    FakeProxy(content="   \n"), ledger_record=RECORD, ref_store=self.ref_store,
+                    strategy_dir=strategy, model_dir=None, out_dir=out_dir,
                 )
             meta = json.loads((out_dir / "epoch_001__fold_2022Q1.json").read_text(encoding="utf-8"))
             self.assertEqual(meta["status"], "error")
@@ -146,6 +159,7 @@ class FoldAnalysisTest(unittest.TestCase):
                 proxy,
                 step_record={"epoch_id": "epoch_001", "fold_id": "fold_2022Q1",
                              "validation_result": {"total_return": 0.01}},
+                ref_store=self.ref_store,
                 strategy_dir=strategy,
                 model_dir=None,
                 out_dir=out_dir,

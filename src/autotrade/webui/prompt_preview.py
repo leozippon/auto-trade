@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from autotrade.agent.prompts import build_meta_learning_prompt, build_system_prompt
-from autotrade.environment.identity import agent_visible_ref
+from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.strategy import StrategySchedule
 from autotrade.pipelines.hitl_state import (
     HITL_DIR_NAME,
@@ -26,11 +26,8 @@ def build_prompt_preview(
     """Raises KeyError for an unknown session and ValueError for held-out keys."""
     hitl = Path(experiment_dir) / HITL_DIR_NAME
     schedule_plan = read_json(hitl / SCHEDULE_NAME)
-    sessions = (
-        schedule_plan.get("sessions")
-        if isinstance(schedule_plan.get("sessions"), list)
-        else []
-    )
+    raw_sessions = schedule_plan.get("sessions")
+    sessions: list[object] = raw_sessions if isinstance(raw_sessions, list) else []
     entry = next(
         (
             item
@@ -73,7 +70,9 @@ def build_prompt_preview(
         if entry.get(key) is not None
     }
     if "fold_id" in facts:
-        facts["fold_id"] = agent_visible_ref(facts["fold_id"], prefix="fold_ref")
+        facts["fold_id"] = AgentRefStore(experiment_dir).get_or_create(
+            "fold", str(facts["fold_id"])
+        )
     facts.update(
         {
             "max_steps": params.get("max_steps_per_fold", 10),

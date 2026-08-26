@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
-from autotrade.environment.identity import agent_visible_ref as _agent_visible_ref
+from autotrade.environment.identity import AgentRefStore
 
 SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"(?i)bearer\s+[A-Za-z0-9._~+/=-]+"), "Bearer [redacted]"),
@@ -254,12 +254,24 @@ class RunManifest:
     path: Path
     data: dict[str, object] = field(default_factory=dict)
     host_path: Path | None = None
+    ref_store: AgentRefStore | None = field(default=None, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     @classmethod
-    def create(cls, path: str | Path, initial: dict[str, object]) -> "RunManifest":
+    def create(
+        cls,
+        path: str | Path,
+        initial: dict[str, object],
+        *,
+        ref_store: AgentRefStore,
+    ) -> "RunManifest":
         path = Path(path)
-        manifest = cls(path=path, host_path=_default_host_manifest_path(path), data=dict(initial))
+        manifest = cls(
+            path=path,
+            host_path=_default_host_manifest_path(path),
+            data=dict(initial),
+            ref_store=ref_store,
+        )
         manifest.data.setdefault("created_at", utc_now_iso())
         manifest.data.setdefault("backtest_summaries", [])
         manifest.save()
@@ -268,7 +280,9 @@ class RunManifest:
     def save(self) -> None:
         if self.host_path is not None:
             write_json_atomic(self.host_path, sanitize_for_log(self.data))
-        write_json_atomic(self.path, _agent_visible_manifest(self.data))
+        if self.ref_store is None:
+            raise RuntimeError("RunManifest requires an experiment AgentRefStore")
+        write_json_atomic(self.path, _agent_visible_manifest(self.data, self.ref_store))
 
     def update(self, **fields: object) -> None:
         with self._lock:
@@ -317,7 +331,9 @@ def write_json_atomic(path: Path, payload: object) -> None:
         tmp.unlink(missing_ok=True)
 
 
-def _agent_visible_manifest(data: dict[str, object]) -> dict[str, object]:
+def _agent_visible_manifest(
+    data: dict[str, object], ref_store: AgentRefStore
+) -> dict[str, object]:
     """Return the public manifest view mounted at /mnt/artifacts.
 
     The in-memory and host audit manifest keep the full schedule and frozen
@@ -337,7 +353,6 @@ def _agent_visible_manifest(data: dict[str, object]) -> dict[str, object]:
             "meta_learning_id",
             "trigger_after_folds",
             "run_id",
-            "conversation_id",
             "kind",
             "runtime_env_ref",
             "data_summary_ref",
@@ -385,19 +400,27 @@ def _agent_visible_manifest(data: dict[str, object]) -> dict[str, object]:
         public["sandbox_image_update"] = _agent_visible_sandbox_image_update(
             record["sandbox_image_update"]
         )
-    if "fold_id" in record:
-        public["fold_id"] = _agent_visible_ref(record.get("fold_id"), prefix="fold_ref")
+    kind = str(record.get("kind") or "fold")
+    if record.get("run_id"):
+        public["run_id"] = ref_store.get_or_create("run", str(record["run_id"]))
+    if record.get("meta_learning_id"):
+        public["meta_learning_id"] = ref_store.get_or_create(
+            "meta", str(record["meta_learning_id"])
+        )
+    if record.get("fold_id"):
+        namespace = "meta" if kind == "meta_learning" else "fold"
+        public["fold_id"] = ref_store.get_or_create(namespace, str(record["fold_id"]))
     # Artifact ids embed the raw fold label (strategy_<epoch>_fold_<period>), so they
     # must be projected exactly like the ledger view does.
     if public.get("parent_strategy_artifact_id"):
-        public["parent_strategy_artifact_id"] = _agent_visible_ref(
-            public["parent_strategy_artifact_id"], prefix="strategy_ref"
+        public["parent_strategy_artifact_id"] = ref_store.get_or_create(
+            "strategy", str(public["parent_strategy_artifact_id"])
         )
     if isinstance(record.get("fold"), dict):
-        public["fold"] = _agent_visible_fold_record(record["fold"])
+        public["fold"] = _agent_visible_fold_record(record["fold"], ref_store)
     if isinstance(record.get("meta_learning_visible_fold"), dict):
         public["meta_learning_visible_fold"] = _agent_visible_fold_record(
-            record["meta_learning_visible_fold"]
+            record["meta_learning_visible_fold"], ref_store
         )
     if isinstance(record.get("snapshots"), dict):
         public["snapshots"] = _agent_visible_snapshots(record["snapshots"])
@@ -436,14 +459,18 @@ def _agent_visible_sandbox_image_update(record: dict[str, object]) -> dict[str, 
     }
 
 
-def _agent_visible_fold_record(record: dict[str, object]) -> dict[str, object]:
+def _agent_visible_fold_record(
+    record: dict[str, object], ref_store: AgentRefStore
+) -> dict[str, object]:
     public = {
         key: record[key]
         for key in ("input_window", "validation_period", "valid_decision_time")
         if key in record
     }
-    if "fold_id" in record:
-        public["fold_id"] = _agent_visible_ref(record.get("fold_id"), prefix="fold_ref")
+    if record.get("fold_id"):
+        public["fold_id"] = ref_store.get_or_create(
+            "fold", str(record["fold_id"])
+        )
     return public
 
 
@@ -500,7 +527,6 @@ def _agent_visible_backtest_summary(record: dict[str, object]) -> dict[str, obje
             "benchmark",
             "model_artifact_files",
             "model_artifact_bytes",
-            "result_path",
             "started_at",
             "finished_at",
             "replay_wall_seconds",

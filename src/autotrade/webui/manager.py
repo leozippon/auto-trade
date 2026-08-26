@@ -17,6 +17,7 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 
 from autotrade.environment.broker import BrokerProfile
+from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.runtime import chmod_tree, utc_now_iso, write_json_atomic
 from autotrade.environment.strategy import StrategySchedule
 from autotrade.pipelines import DailyStrategyPipeline, StrategyExperimentConfig
@@ -302,6 +303,13 @@ class ManagerDeleteError(ManagerError):
     """A terminal experiment could not be fully removed from local storage."""
 
 
+def _modern_ref_store(directory: Path) -> AgentRefStore:
+    try:
+        return AgentRefStore(directory)
+    except ValueError as exc:
+        raise ManagerError(str(exc)) from exc
+
+
 class ExperimentManager:
     def __init__(
         self,
@@ -397,6 +405,7 @@ class ExperimentManager:
                 }
             )
             self._preflight(merged, directory)
+            _modern_ref_store(directory)
             hitl = directory / "hitl"
             hitl.mkdir(parents=True)
             inherit_from = str(merged.get("inherit_from") or "").strip()
@@ -553,6 +562,7 @@ class ExperimentManager:
     def start_worker(self, experiment_id: str) -> dict[str, object]:
         with self._mutate:
             directory = self._experiment_dir(experiment_id)
+            _modern_ref_store(directory)
             status_path = directory / "hitl/status.json"
             status = _read_json(status_path)
             if _worker_live(status):
@@ -620,6 +630,7 @@ class ExperimentManager:
             raise ManagerError(f"unknown control action: {action!r}")
         with self._mutate:
             directory = self._experiment_dir(experiment_id)
+            _modern_ref_store(directory)
             path = directory / "hitl/control.json"
             # Effective seal: manual reveal OR held-out completed
             # (auto-reveal). Reading only the control flag left every
@@ -1044,22 +1055,22 @@ class ExperimentManager:
         so leaving them in place would hand the re-run Agent future-validated
         strategies. Dropped nodes (plus descendants) move into the rollback
         archive next to the frozen artifacts; tree.json is backed up there too."""
-        from autotrade.environment.identity import agent_visible_ref
         from autotrade.environment.step_tree import TREE_FILE, StepTree
 
         steps_root = directory / "steps"
         if not (steps_root / TREE_FILE).exists():
             return 0
-        dropped_pairs = set()
-        for key in dropped_fold_keys:
-            epoch_id, _, fold_id = key.partition("/")
-            dropped_pairs.add((epoch_id, agent_visible_ref(fold_id, prefix="fold_ref")))
+        ref_store = _modern_ref_store(directory)
         tree = StepTree(steps_root)
-        dropped_ids = {
-            str(node["node_id"])
-            for node in tree.nodes()
-            if (str(node.get("epoch_id")), str(node.get("fold_id"))) in dropped_pairs
-        }
+        dropped_ids: set[str] = set()
+        for node in tree.nodes():
+            fold_ref = str(node.get("fold_id") or "")
+            try:
+                raw_fold = ref_store.resolve("fold", fold_ref)
+            except KeyError as exc:
+                raise ManagerError("step tree contains an unknown fold reference") from exc
+            if f"{node.get('epoch_id')}/{raw_fold}" in dropped_fold_keys:
+                dropped_ids.add(str(node["node_id"]))
         if not dropped_ids:
             return 0
         changed = True
@@ -1156,7 +1167,12 @@ class ExperimentManager:
             raise ManagerError(str(exc)) from exc
         node = StepTree(directory / "steps").get_node(node_id)
         try:
-            assert_node_not_from_later_fold(node, session_key, fold_keys)
+            assert_node_not_from_later_fold(
+                node,
+                session_key,
+                fold_keys,
+                ref_store=_modern_ref_store(directory),
+            )
         except ValueError as exc:
             raise ManagerError(str(exc)) from exc
 
@@ -1317,6 +1333,7 @@ class ExperimentManager:
     def delete_experiment(self, experiment_id: str) -> dict[str, object]:
         with self._mutate:
             directory = self._experiment_dir(experiment_id)
+            _modern_ref_store(directory)
             state = experiment_state(directory)
             if state.get("worker_alive") or state.get("state") == "launching":
                 raise ManagerError(

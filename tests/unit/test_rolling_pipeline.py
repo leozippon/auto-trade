@@ -6,6 +6,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from autotrade.environment.identity import AgentRefStore
 from autotrade.pipelines import (
     ArtifactRevision,
     EvaluationResult,
@@ -201,6 +202,7 @@ def test_meta_session_retains_only_the_authorized_test_diagnostic(tmp_path: Path
         "2026Q2",
         epochs=1,
     )
+    AgentRefStore(config.experiment_dir)
     ledger = ExperimentLedger(config.ledger_path)
     ledger.append(
         {
@@ -355,6 +357,7 @@ def test_first_meta_session_has_empty_review_window(tmp_path: Path):
         "2026Q2",
         epochs=1,
     )
+    AgentRefStore(config.experiment_dir)
     ledger = ExperimentLedger(config.ledger_path)
     ledger.append(
         {
@@ -393,6 +396,7 @@ def test_meta_session_window_skips_folds_before_previous_meta(tmp_path: Path):
         "2026Q2",
         epochs=1,
     )
+    AgentRefStore(config.experiment_dir)
     ledger = ExperimentLedger(config.ledger_path)
     ledger.append(
         {

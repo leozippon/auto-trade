@@ -15,6 +15,7 @@ import threading
 from pathlib import Path
 
 from autotrade.environment.llm import LOCAL_QWEN_MODEL, model_profile
+from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.runtime import utc_now_iso
 from autotrade.environment.step_tree import StepTree
 from autotrade.pipelines.fold_analysis import (
@@ -121,6 +122,7 @@ class AnalysisService:
             experiment_dir = registry.resolve_experiment_dir(
                 experiments_root, experiment_id
             )
+            ref_store = AgentRefStore(experiment_dir)
             detail = registry.fold_detail(
                 experiments_root, experiment_id, epoch_id, fold_id
             )
@@ -152,6 +154,7 @@ class AnalysisService:
             analyze_fold(
                 proxy,
                 ledger_record=record,
+                ref_store=ref_store,
                 strategy_dir=Path(str(strategy_dir)),
                 model_dir=Path(str(model_dir)) if model_dir else None,
                 out_dir=out_dir,
@@ -181,6 +184,7 @@ class AnalysisService:
                 raise ManagerError("analysis for this Step is already being generated")
             self._pending.add(key)
         try:
+            ref_store = AgentRefStore(experiment_dir)
             strategy_dir = Path(node_dir) / "output"
             if not strategy_dir.is_dir():
                 raise ManagerError("current Step has no strategy snapshot on disk")
@@ -221,6 +225,7 @@ class AnalysisService:
             analyze_step(
                 proxy,
                 step_record=step_record,
+                ref_store=ref_store,
                 strategy_dir=strategy_dir,
                 model_dir=model_dir if model_dir.is_dir() else None,
                 out_dir=out_dir,

@@ -20,6 +20,7 @@ from unittest.mock import patch
 import pandas as pd
 from fastapi.testclient import TestClient
 
+from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.runtime import AgentTraceWriter, write_json_atomic
 from autotrade.pipelines.hitl_state import (
     WEB_CREATE_DEFAULTS,
@@ -359,6 +360,7 @@ def test_experiment_endpoint_creates_only_persistent_sandbox_research(tmp_path: 
 
 def _persistent_experiment(tmp_path: Path) -> Path:
     directory = tmp_path / "experiments/demo"
+    AgentRefStore(directory)
     hitl = directory / "hitl"
     hitl.mkdir(parents=True)
     write_control(hitl / "control.json", ControlState(mode="manual"))
@@ -1105,6 +1107,7 @@ class WebuiBackendTest(unittest.TestCase):
     # ---- fixtures ------------------------------------------------------------
     def _build_hitl_experiment(self, experiment_id: str) -> Path:
         experiment_dir = self.experiments_root / experiment_id
+        AgentRefStore(experiment_dir)
         hitl = experiment_dir / "hitl"
         hitl.mkdir(parents=True)
         write_json_atomic(
@@ -2679,13 +2682,6 @@ class InheritFromTest(unittest.TestCase):
         self.assertNotIn("exp_bare", choices)
 
 
-_FOLD_Q1_NODE = "epoch_001__{}__run_001__valid_000".format(
-    __import__(
-        "autotrade.environment.identity", fromlist=["agent_visible_ref"]
-    ).agent_visible_ref("fold_2022Q1", prefix="fold_ref")
-)
-
-
 class HitlControlActionTest(unittest.TestCase):
     """Positive paths for the seven learning-control actions.
 
@@ -2705,6 +2701,12 @@ class HitlControlActionTest(unittest.TestCase):
 
     def _build(self, experiment_id: str) -> Path:
         directory = self.experiments_root / experiment_id
+        ref_store = AgentRefStore(directory)
+        fold_ref = ref_store.get_or_create("fold", "fold_2022Q1")
+        run_ref = ref_store.get_or_create("run", "run_001")
+        self.fold_q1_node = (
+            f"epoch_001__{fold_ref}__{run_ref}__valid_000"
+        )
         hitl = directory / "hitl"
         hitl.mkdir(parents=True)
         write_json_atomic(hitl / "params.json", {"experiment_id": experiment_id})
@@ -2762,9 +2764,9 @@ class HitlControlActionTest(unittest.TestCase):
                     "frozen_strategy_artifact_id": "strategy_epoch_001_fold_2022Q1",
                     "frozen_strategy_artifact_path": str(frozen),
                     "validation_result": {"total_return": 0.1},
-                    "selected_step_id": _FOLD_Q1_NODE,
+                    "selected_step_id": self.fold_q1_node,
                     "steps": [
-                        {"step_id": _FOLD_Q1_NODE, "revision_id": "revision_001"}
+                        {"step_id": self.fold_q1_node, "revision_id": "revision_001"}
                     ],
                 },
             ],
@@ -2781,12 +2783,13 @@ class HitlControlActionTest(unittest.TestCase):
         self, *, fold_id: str = "fold_2022Q1", run_id: str = "run_001"
     ) -> str:
         from autotrade.environment.artifacts import new_revision_id
-        from autotrade.environment.identity import agent_visible_ref
         from autotrade.environment.step_tree import StepTree
 
-        # The step tree stores the opaque ref, and the console de-opaques it
-        # through the ledger — a synthetic name would not resolve.
-        fold_ref = agent_visible_ref(fold_id, prefix="fold_ref")
+        # The step tree stores opaque refs, and the console resolves them only
+        # through the experiment's host mapping.
+        ref_store = AgentRefStore(self.directory)
+        fold_ref = ref_store.get_or_create("fold", fold_id)
+        run_ref = ref_store.get_or_create("run", run_id)
         output = (
             self.directory
             / "artifacts/strategy/frozen/strategy_epoch_001_fold_2022Q1/output"
@@ -2796,7 +2799,7 @@ class HitlControlActionTest(unittest.TestCase):
             output,
             epoch_id="epoch_001",
             fold_id=fold_ref,
-            run_id=run_id,
+            run_id=run_ref,
             result_name="valid_000",
             revision_id=new_revision_id("revision"),
             metrics={"total_return": 0.1},

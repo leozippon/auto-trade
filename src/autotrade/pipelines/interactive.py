@@ -28,6 +28,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from autotrade.agent.runner import AgentSessionDeadlineExceeded
+from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.runtime import AgentTraceWriter
 from autotrade.environment.tools.base import SessionInterrupt
 
@@ -41,6 +42,7 @@ from .hitl_state import (
     read_control,
 )
 from .ledger import ExperimentLedger
+from .meta_schedule import meta_learning_id
 
 
 class ExperimentStopped(SessionInterrupt):
@@ -64,6 +66,7 @@ class InteractiveExperimentRunner:
         ledger: ExperimentLedger,
         control_path: str | Path,
         status_path: str | Path,
+        ref_store: AgentRefStore | None = None,
         poll_seconds: float = 2.0,
         post_fold_hook: Callable[[dict[str, object]], None] | None = None,
         session_max_attempts: int = 3,
@@ -80,6 +83,7 @@ class InteractiveExperimentRunner:
         self.ledger = ledger
         self.control_path = Path(control_path)
         self.status = StatusReporter(status_path)
+        self.ref_store = ref_store
         self.poll_seconds = poll_seconds
         self._session_started_monotonic: float | None = None
         self._session_started_at: str | None = None
@@ -332,6 +336,16 @@ class InteractiveExperimentRunner:
                 run_id = progress.get("run_id")
                 if isinstance(run_id, str) and run_id:
                     values["run_id"] = run_id
+                    if self.ref_store is None:
+                        raise RuntimeError("interactive trace publishing requires AgentRefStore")
+                    raw_session_id = (
+                        meta_learning_id(session.epoch_id, session.fold_index)
+                        if session.kind == "meta"
+                        else session.fold.fold_id
+                        if session.fold is not None
+                        else session.session_key
+                    )
+                    identity_namespace = "meta" if session.kind == "meta" else "fold"
                     trace = AgentTraceWriter(
                         self.status.path.parent.parent
                         / "artifacts/traces"
@@ -339,8 +353,10 @@ class InteractiveExperimentRunner:
                         ids={
                             "experiment_id": self.experiment_id,
                             "epoch_id": session.epoch_id,
-                            "fold_id": session.fold.fold_id if session.fold else session.session_key,
-                            "run_id": run_id,
+                            "fold_id": self.ref_store.get_or_create(
+                                identity_namespace, raw_session_id
+                            ),
+                            "run_id": self.ref_store.get_or_create("run", run_id),
                             "session_kind": "meta_learning" if session.kind == "meta" else session.kind,
                         },
                     )

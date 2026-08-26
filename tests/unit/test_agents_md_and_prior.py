@@ -18,7 +18,7 @@ from autotrade.agent.runner import (
 from autotrade.environment.tools import SafeWorkspace, ToolRegistry, WriteFileTool
 from autotrade.pipelines.config import MetaSessionResult
 from autotrade.pipelines.ledger import ExperimentLedger
-from autotrade.environment.identity import agent_visible_ref
+from autotrade.environment.identity import AgentRefStore
 from autotrade.pipelines.experiment import _development_history
 from autotrade.pipelines.meta_inputs import (
     build_agent_process_summary,
@@ -516,7 +516,9 @@ def test_meta_fold_reviews_include_strategy_and_agent_trace_not_heldout(tmp_path
         "result": {"total_return": 0.99},
         "frozen_strategy_artifact_path": str(strategy),
     }
-    reviews = build_meta_fold_reviews([fold, heldout])
+    reviews = build_meta_fold_reviews(
+        [fold, heldout], ref_store=AgentRefStore(tmp_path / "experiment")
+    )
     assert len(reviews) == 1
     review = reviews[0]
     strategy_files = review["strategy_files"]
@@ -578,6 +580,7 @@ def test_meta_fold_reviews_without_trace_ref_are_explicitly_unavailable(
                 "fold_status": "frozen",
             }
         ],
+        ref_store=AgentRefStore(tmp_path / "experiment"),
         artifacts_root=artifacts,
     )
     assert reviews[0]["agent_trace"] == []
@@ -610,6 +613,7 @@ def test_meta_fold_reviews_resolve_relative_trace_ref(tmp_path: Path) -> None:
                 "agent_trace_ref": "traces/run_fold.jsonl",
             }
         ],
+        ref_store=AgentRefStore(tmp_path / "experiment"),
         artifacts_root=artifacts,
     )
     agent_trace = reviews[0]["agent_trace"]
@@ -904,35 +908,44 @@ def _meta_record(run_id: str, meta_id: str = "epoch_001") -> dict[str, object]:
     }
 
 
-def test_first_meta_review_window_is_empty() -> None:
-    folds, window = select_meta_review_folds([_fold_record("fold_2024Q1", "run_a")])
+def test_first_meta_review_window_is_empty(tmp_path: Path) -> None:
+    ref_store = AgentRefStore(tmp_path / "experiment")
+    folds, window = select_meta_review_folds(
+        [_fold_record("fold_2024Q1", "run_a")], ref_store=ref_store
+    )
     assert folds == []
     assert window["fold_count"] == 0
     assert window["fold_run_refs"] == []
     assert window["previous_meta_ref"] is None
 
 
-def test_meta_review_window_only_includes_folds_after_previous_meta() -> None:
+def test_meta_review_window_only_includes_folds_after_previous_meta(
+    tmp_path: Path,
+) -> None:
+    ref_store = AgentRefStore(tmp_path / "experiment")
     records = [
         _meta_record("run_m1", "epoch_001"),
         _fold_record("fold_old", "run_old"),
         _meta_record("run_m2", "epoch_001_after_fold_001"),
         _fold_record("fold_new", "run_new"),
     ]
-    folds, window = select_meta_review_folds(records)
+    folds, window = select_meta_review_folds(records, ref_store=ref_store)
     assert [record["run_id"] for record in folds] == ["run_new"]
     assert window["fold_count"] == 1
-    assert window["previous_meta_ref"] == agent_visible_ref(
-        "epoch_001_after_fold_001", prefix="meta_ref"
+    assert window["previous_meta_ref"] == ref_store.get_or_create(
+        "meta", "epoch_001_after_fold_001"
     )
     assert window["fold_run_refs"] == [
-        agent_visible_ref("run_new", prefix="run_ref")
+        ref_store.get_or_create("run", "run_new")
     ]
     assert "fold_old" not in str(window)
     assert "fold_new" not in str(window)
 
 
-def test_meta_review_window_dedupes_and_excludes_heldout_failed_in_progress() -> None:
+def test_meta_review_window_dedupes_and_excludes_heldout_failed_in_progress(
+    tmp_path: Path,
+) -> None:
+    ref_store = AgentRefStore(tmp_path / "experiment")
     records = [
         _meta_record("run_m1"),
         _fold_record("fold_a", "run_a1"),
@@ -953,7 +966,7 @@ def test_meta_review_window_dedupes_and_excludes_heldout_failed_in_progress() ->
         _fold_record("fold_c", "run_c", status="in_progress"),
         _fold_record("fold_d", "run_d"),
     ]
-    folds, window = select_meta_review_folds(records)
+    folds, window = select_meta_review_folds(records, ref_store=ref_store)
     assert [record["run_id"] for record in folds] == ["run_a2", "run_d"]
     assert window["fold_count"] == 2
     rendered = str(window)
@@ -962,7 +975,10 @@ def test_meta_review_window_dedupes_and_excludes_heldout_failed_in_progress() ->
     assert "run_fail" not in rendered
 
 
-def test_meta_review_window_rollback_and_resume_recompute_deterministically() -> None:
+def test_meta_review_window_rollback_and_resume_recompute_deterministically(
+    tmp_path: Path,
+) -> None:
+    ref_store = AgentRefStore(tmp_path / "experiment")
     full = [
         _meta_record("run_m1"),
         _fold_record("fold_a", "run_a"),
@@ -970,22 +986,22 @@ def test_meta_review_window_rollback_and_resume_recompute_deterministically() ->
         _meta_record("run_m2", "epoch_001_after_fold_002"),
         _fold_record("fold_c", "run_c"),
     ]
-    first = select_meta_review_folds(full)
+    first = select_meta_review_folds(full, ref_store=ref_store)
     assert [record["run_id"] for record in first[0]] == ["run_c"]
-    assert select_meta_review_folds(full) == first
+    assert select_meta_review_folds(full, ref_store=ref_store) == first
     rewound = full[:3]
-    second = select_meta_review_folds(rewound)
+    second = select_meta_review_folds(rewound, ref_store=ref_store)
     assert [record["run_id"] for record in second[0]] == ["run_a", "run_b"]
-    assert select_meta_review_folds(rewound) == second
-    history = _development_history(rewound)
+    assert select_meta_review_folds(rewound, ref_store=ref_store) == second
+    history = _development_history(rewound, ref_store=ref_store)
     summaries = history["fold_backtest_summaries"]
     reviews = history["fold_reviews"]
     assert history["review_window"] == second[1]
     assert isinstance(summaries, list)
     assert isinstance(reviews, list)
     assert [row["fold_id"] for row in summaries] == [
-        agent_visible_ref("fold_a", prefix="fold_ref"),
-        agent_visible_ref("fold_b", prefix="fold_ref"),
+        ref_store.get_or_create("fold", "fold_a"),
+        ref_store.get_or_create("fold", "fold_b"),
     ]
     assert len(reviews) == 2
 

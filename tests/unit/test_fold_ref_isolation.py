@@ -5,7 +5,7 @@ Folds are named after their **test** period on the host side
 is itself hidden-schedule evidence: an Agent that learns its Fold is
 ``fold_2026Q1`` learns exactly which quarter it will be graded on, and can
 shape the strategy around it. The boundary is defended by one projection —
-``environment.identity.agent_visible_ref`` — applied at every agent-readable
+the experiment's persistent UUID4 reference store applied at every agent-readable
 surface.
 
 This test drives a real fold session and sweeps every surface the Agent can
@@ -25,7 +25,7 @@ import pytest
 
 from autotrade.agent.experiment_facts import build_experiment_facts
 from autotrade.environment.artifacts import FilesystemArtifactStore
-from autotrade.environment.identity import agent_visible_ref
+from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.llm import ScriptedLLM, ToolCall
 from autotrade.pipelines.agent_views import (
     agent_visible_ledger_record,
@@ -44,7 +44,6 @@ from .test_interactive_worker_local import (
 
 TEST_LABEL = "2026Q1"
 RAW_FOLD_ID = f"fold_{TEST_LABEL}"
-FOLD_REF = agent_visible_ref(RAW_FOLD_ID, prefix="fold_ref")
 SOURCE = "def generate_orders(context):\n    return []\n"
 
 
@@ -161,6 +160,8 @@ def fold_session(tmp_path_factory, provider_key):
         "records": records,
         "fold": next(record for record in records if record["record_type"] == "fold"),
         "experiment": experiment,
+        "ref_store": AgentRefStore(experiment),
+        "fold_ref": AgentRefStore(experiment).get_or_create("fold", RAW_FOLD_ID),
     }
 
 
@@ -170,8 +171,9 @@ def test_fold_id_is_named_after_the_hidden_test_period(fold_session):
     assert fold["fold_id"] == RAW_FOLD_ID
     # 2026Q1 == 20260101..20260331: the label IS the hidden test window.
     assert fold["test_period"] == "20260101..20260331"
-    assert FOLD_REF.startswith("fold_ref_")
-    assert RAW_FOLD_ID not in FOLD_REF
+    fold_ref = fold_session["fold_ref"]
+    assert fold_ref.startswith("fold_ref_")
+    assert RAW_FOLD_ID not in fold_ref
 
 
 def _call_has_tool(call, name: str) -> bool:
@@ -187,7 +189,7 @@ def test_fold_system_prompt_and_user_messages_carry_only_the_opaque_ref(fold_ses
     prompt = _prompt_text(fold_call)
     assert RAW_FOLD_ID not in prompt
     assert TEST_LABEL not in prompt
-    assert FOLD_REF in prompt
+    assert fold_session["fold_ref"] in prompt
 
 
 def test_no_message_of_any_session_carries_the_raw_fold_id(fold_session):
@@ -212,14 +214,16 @@ def test_sandbox_input_tree_never_materializes_the_raw_fold_id(fold_session):
     }
     assert offenders == {}, f"raw fold id reached the sandbox: {sorted(offenders)}"
     # And the surfaces that name the fold at all use the opaque ref.
-    named = [name for name, text in captured.items() if FOLD_REF in text]
-    assert named, f"no captured sandbox file carried {FOLD_REF}: {sorted(captured)}"
+    fold_ref = fold_session["fold_ref"]
+    named = [name for name, text in captured.items() if fold_ref in text]
+    assert named, f"no captured sandbox file carried {fold_ref}: {sorted(captured)}"
 
 
 def test_agent_readable_file_names_never_encode_the_raw_fold_id(fold_session):
     for name in fold_session["llm"].sandbox_files:
         assert RAW_FOLD_ID not in name
         assert TEST_LABEL not in name
+        assert ".host" not in name
 
 
 def test_step_tree_node_ids_the_agent_reads_back_are_opaque(fold_session):
@@ -231,10 +235,44 @@ def test_step_tree_node_ids_the_agent_reads_back_are_opaque(fold_session):
     for step_id in [*step_ids, str(fold["selected_step_id"])]:
         assert RAW_FOLD_ID not in step_id
         assert TEST_LABEL not in step_id
-        assert FOLD_REF in step_id
+        assert fold_session["fold_ref"] in step_id
+        assert str(fold["run_id"]) not in step_id
+        assert fold_session["ref_store"].get_or_create(
+            "run", str(fold["run_id"])
+        ) in step_id
+    tree = json.loads(
+        (fold_session["experiment"] / "steps/tree.json").read_text(encoding="utf-8")
+    )
+    assert tree["nodes"][0]["revision_id"].startswith("strategy_ref_")
+    assert fold["steps"][0]["revision_id"] != tree["nodes"][0]["revision_id"]
 
 
-def test_compact_fold_history_keeps_metrics_and_drops_per_stock_series():
+def test_manifest_and_trace_use_run_uuid_refs_but_host_manifest_stays_raw(
+    fold_session,
+):
+    fold = fold_session["fold"]
+    run_id = str(fold["run_id"])
+    run_ref = fold_session["ref_store"].get_or_create("run", run_id)
+    manifest = json.loads(Path(str(fold["run_manifest_ref"])).read_text(encoding="utf-8"))
+    host = json.loads(
+        Path(str(fold["run_manifest_ref"]))
+        .with_name("host_run_manifest.json")
+        .read_text(encoding="utf-8")
+    )
+    assert manifest["run_id"] == run_ref
+    assert run_id not in json.dumps(manifest, ensure_ascii=False)
+    assert host["run_id"] == run_id
+
+    trace_path = fold_session["experiment"] / "artifacts/traces" / f"{run_id}.jsonl"
+    events = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
+    assert events
+    assert all(event["run_id"] == run_ref for event in events)
+    assert all(event["fold_id"] == fold_session["fold_ref"] for event in events)
+
+
+def test_compact_fold_history_keeps_metrics_and_drops_per_stock_series(
+    tmp_path: Path,
+):
     compact = compact_fold_history(
         {
             "epoch_id": "epoch_001",
@@ -247,7 +285,8 @@ def test_compact_fold_history_keeps_metrics_and_drops_per_stock_series():
                 "per_stock": {"000001.SZ": [0.1] * 80},
                 "weekly_returns": [0.01] * 40,
             },
-        }
+        },
+        ref_store=AgentRefStore(tmp_path / "experiment"),
     )
     metrics = compact["validation_result"]
     assert isinstance(metrics, dict)
@@ -279,18 +318,24 @@ def test_meta_learning_prompt_does_not_inline_development_history():
 
 def test_meta_visible_projections_opaque_the_fold_id(fold_session):
     fold = fold_session["fold"]
-    compact = compact_fold_history(fold, include_frozen_test_metrics=True)
-    projected = agent_visible_ledger_record(fold, include_frozen_test_metrics=True)
+    ref_store = fold_session["ref_store"]
+    compact = compact_fold_history(
+        fold, ref_store=ref_store, include_frozen_test_metrics=True
+    )
+    projected = agent_visible_ledger_record(
+        fold, ref_store=ref_store, include_frozen_test_metrics=True
+    )
     for view in (compact, projected):
         rendered = json.dumps(view, ensure_ascii=False, sort_keys=True, default=str)
         assert RAW_FOLD_ID not in rendered
         assert TEST_LABEL not in rendered
-        assert FOLD_REF in rendered
+        assert fold_session["fold_ref"] in rendered
 
 
 def test_experiment_facts_opaque_the_fold_id_for_every_session_kind(fold_session):
     for kind in ("fold", "meta_learning"):
         facts = build_experiment_facts(
+            ref_store=fold_session["ref_store"],
             manifest={
                 "experiment_id": "smoke",
                 "run_id": "run_x",
@@ -305,17 +350,12 @@ def test_experiment_facts_opaque_the_fold_id_for_every_session_kind(fold_session
         assert TEST_LABEL not in rendered, kind
 
 
-def test_agent_visible_ref_is_stable_and_not_reversible_by_prefix_collision():
-    assert agent_visible_ref(RAW_FOLD_ID, prefix="fold_ref") == FOLD_REF
-    assert agent_visible_ref("fold_2026Q2", prefix="fold_ref") != FOLD_REF
-    # A different namespace never collides with the fold namespace.
-    assert agent_visible_ref(RAW_FOLD_ID, prefix="strategy_ref") != FOLD_REF
-    # An absent id still projects to a ref, never to the raw value: a
-    # passthrough would be exactly the leak this helper exists to prevent.
-    assert agent_visible_ref("", prefix="fold_ref").startswith("fold_ref_")
-    assert agent_visible_ref(None, prefix="fold_ref") == agent_visible_ref(
-        "", prefix="fold_ref"
-    )
+def test_agent_refs_are_stable_and_namespace_isolated(tmp_path: Path):
+    store = AgentRefStore(tmp_path / "experiment")
+    fold_ref = store.get_or_create("fold", RAW_FOLD_ID)
+    assert store.get_or_create("fold", RAW_FOLD_ID) == fold_ref
+    assert store.get_or_create("fold", "fold_2026Q2") != fold_ref
+    assert store.get_or_create("strategy", RAW_FOLD_ID) != fold_ref
 
 
 def test_meta_with_existing_prior_can_finish_without_rewriting_it(tmp_path: Path):
@@ -456,7 +496,9 @@ def test_meta_context_parent_artifact_id_is_an_opaque_strategy_ref(tmp_path: Pat
             "parent_artifact_id": parent_id,
         }
     )
-    expected = agent_visible_ref(parent_id, prefix="strategy_ref")
+    expected = AgentRefStore(tmp_path / "experiment").get_or_create(
+        "strategy", parent_id
+    )
     public = json.loads(
         (tmp_path / "run_meta" / "workspace" / "inputs" / "meta_context.json").read_text(
             encoding="utf-8"

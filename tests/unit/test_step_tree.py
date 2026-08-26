@@ -6,6 +6,7 @@ from pathlib import Path
 from autotrade.agent.experiment_facts import build_experiment_facts
 from autotrade.agent.prompts import build_system_prompt
 from autotrade.environment.artifacts import new_revision_id
+from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.runtime import RunManifest
 from autotrade.environment.step_tree import StepTree
 
@@ -223,6 +224,11 @@ class StepTreeTest(unittest.TestCase):
 
 
 class PhasePromptTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._refs_tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._refs_tmp.cleanup)
+        self.ref_store = AgentRefStore(Path(self._refs_tmp.name) / "experiment")
+
     def test_experiment_facts_replace_raw_fold_schedule(self):
         manifest = {
             "experiment_id": "exp",
@@ -252,6 +258,7 @@ class PhasePromptTest(unittest.TestCase):
         }
         facts = build_experiment_facts(
             manifest=manifest,
+            ref_store=self.ref_store,
             runtime_env={"python": {"version": "3.11"}, "tools": {"rg": {"available": True}}},
             data_summary={"views": {"snapshot": {"mount_path": "/mnt/snapshot", "files": []}}},
             max_llm_calls=10,
@@ -284,9 +291,11 @@ class PhasePromptTest(unittest.TestCase):
         }
         fold_facts = build_experiment_facts(
             manifest={"kind": "fold", "fold_id": "fold_x"},
+            ref_store=self.ref_store,
             data_summary={"unit_contract": unit_contract},
         )
         meta_facts = build_experiment_facts(
+            ref_store=self.ref_store,
             manifest={
                 "kind": "meta_learning",
                 "epoch_id": "epoch_001",
@@ -306,7 +315,10 @@ class PhasePromptTest(unittest.TestCase):
         self.assertTrue(meta_facts["visibility_policy"]["historical_frozen_test_metrics_visible"])
         self.assertFalse(meta_facts["visibility_policy"]["test_visible"])
         self.assertFalse(meta_facts["visibility_policy"]["heldout_visible"])
-        self.assertEqual(meta_facts["identity"]["meta_learning_id"], "epoch_001_after_fold_003")
+        self.assertEqual(
+            meta_facts["identity"]["meta_learning_id"],
+            self.ref_store.get_or_create("meta", "epoch_001_after_fold_003"),
+        )
         self.assertEqual(meta_facts["identity"]["trigger_after_folds"], 3)
         self.assertTrue(meta_facts["meta_learning"]["fold_exploration_directive_present"])
 
@@ -314,6 +326,7 @@ class PhasePromptTest(unittest.TestCase):
         # Frozen artifact ids embed the raw fold label of the fold that produced
         # them (strategy_<epoch>_fold_<period>), so the facts must project them.
         facts = build_experiment_facts(
+            ref_store=self.ref_store,
             manifest={
                 "experiment_id": "exp",
                 "run_id": "run_2",
@@ -363,7 +376,9 @@ class PhasePromptTest(unittest.TestCase):
             }
         }
 
-        facts = build_experiment_facts(manifest=manifest, data_summary=data_summary)
+        facts = build_experiment_facts(
+            manifest=manifest, ref_store=self.ref_store, data_summary=data_summary
+        )
         rendered = json.dumps(facts, ensure_ascii=False, sort_keys=True)
 
         self.assertIn("sample_window_only", rendered)
@@ -406,6 +421,7 @@ class PhasePromptTest(unittest.TestCase):
                         {"mode": "frozen_test", "total_return": 0.2},
                     ],
                 },
+                ref_store=AgentRefStore(Path(tmp) / "experiment"),
             )
 
             public = json.loads(public_path.read_text(encoding="utf-8"))

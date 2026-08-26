@@ -20,6 +20,7 @@ from autotrade.agent.prompts import (
     build_system_prompt,
 )
 from autotrade.environment.artifacts import new_revision_id
+from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.llm import (
     ChatMessage,
     LLMProxyError,
@@ -510,7 +511,9 @@ def test_sessions_reject_tools_outside_their_positive_contracts():
         )
 
 
-def test_prompt_and_facts_encode_daily_json_and_offline_meta_boundaries():
+def test_prompt_and_facts_encode_daily_json_and_offline_meta_boundaries(
+    tmp_path: Path,
+):
     prompt = build_system_prompt(mode="fold", experiment_facts={"fold": "visible"})
     assert "generate_orders(context)" in prompt
     assert "严格 JSON 订单数组" in prompt
@@ -543,6 +546,7 @@ def test_prompt_and_facts_encode_daily_json_and_offline_meta_boundaries():
 
     facts = build_experiment_facts(
         manifest={"kind": "meta_learning", "experiment_id": "exp"},
+        ref_store=AgentRefStore(tmp_path / "experiment"),
         runtime_env={"sandbox_spec": {"network": "none"}},
     )
     assert facts["visibility_policy"]["test_visible"] is False

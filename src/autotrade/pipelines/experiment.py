@@ -22,7 +22,7 @@ from autotrade.environment.executor import (
     TrustedStrategyExecutor,
 )
 from autotrade.environment.artifacts import model_artifact_delta, modification_delta
-from autotrade.environment.identity import agent_visible_ref as _agent_visible_ref
+from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.runtime import agent_trace_path
 from autotrade.environment.replay import (
     ContextDataProvider,
@@ -146,6 +146,7 @@ class RollingExperimentPipeline:
         ledger: ExperimentLedger | None = None,
     ) -> None:
         self.config = config
+        self.ref_store = AgentRefStore(config.experiment_dir)
         self.snapshots = snapshots
         self.artifacts = artifacts
         self.evaluator = evaluator
@@ -549,6 +550,7 @@ class RollingExperimentPipeline:
             _publish_progress(progress, "pit_snapshot", run_id=run_id, phase="meta")
             history, agent_trace_sidecars = _development_inputs(
                 self.ledger.read(),
+                ref_store=self.ref_store,
                 artifacts_root=self.config.experiment_dir / "artifacts",
             )
             meta_snapshot = self.snapshots.prepare(
@@ -566,7 +568,12 @@ class RollingExperimentPipeline:
                         "run_id": run_id,
                         "meta_learning_id": session_id,
                         "trigger_after_folds": completed_folds,
-                        "visible_fold": _agent_visible_fold(visible_fold),
+                        "visible_fold": _agent_visible_fold(
+                            visible_fold, ref_store=self.ref_store
+                        ),
+                        # Host-only raw identity for the audit manifest. The Meta
+                        # learner removes it before writing Agent-visible facts.
+                        "host_visible_fold": visible_fold.to_record(),
                         "snapshot_id": meta_snapshot.snapshot_id,
                         "data_summary_ref": meta_snapshot.data_summary_ref,
                         "parent_artifact_id": parent.artifact_id if parent else None,
@@ -952,10 +959,11 @@ def _frozen_revision(artifact: FrozenArtifact) -> ArtifactRevision:
 def _development_history(
     records: list[dict[str, object]],
     *,
+    ref_store: AgentRefStore,
     artifacts_root: str | Path | None = None,
 ) -> dict[str, object]:
     history, _sidecars = _development_inputs(
-        records, artifacts_root=artifacts_root
+        records, ref_store=ref_store, artifacts_root=artifacts_root
     )
     return history
 
@@ -963,6 +971,7 @@ def _development_history(
 def _development_inputs(
     records: list[dict[str, object]],
     *,
+    ref_store: AgentRefStore,
     artifacts_root: str | Path | None = None,
 ) -> tuple[dict[str, object], list[AgentTraceFullSidecar]]:
     """Meta-visible development history plus internal full-trace sidecars.
@@ -980,9 +989,11 @@ def _development_inputs(
     prompts or ``meta_context``.
     """
 
-    folds, review_window = select_meta_review_folds(records)
+    folds, review_window = select_meta_review_folds(
+        records, ref_store=ref_store
+    )
     reviews, sidecars = build_meta_fold_review_bundle(
-        folds, artifacts_root=artifacts_root
+        folds, ref_store=ref_store, artifacts_root=artifacts_root
     )
     return {
         "evaluation_contract": {
@@ -991,13 +1002,21 @@ def _development_inputs(
             "heldout": "never visible; sole final untouched evaluation",
         },
         "fold_backtest_summaries": [
-            _compact_fold_history(record, include_frozen_test_metrics=True)
+            _compact_fold_history(
+                record,
+                ref_store=ref_store,
+                include_frozen_test_metrics=True,
+            )
             for record in folds
         ],
         "fold_reviews": reviews,
         "review_window": review_window,
         "meta_learning": [
-            _agent_visible_ledger_record(record, include_frozen_test_metrics=True)
+            _agent_visible_ledger_record(
+                record,
+                ref_store=ref_store,
+                include_frozen_test_metrics=True,
+            )
             for record in records
             if record.get("record_type") == "meta_learning"
         ],
@@ -1040,11 +1059,13 @@ def _session_timing(
     }
 
 
-def _agent_visible_fold(fold: FoldSpec) -> dict[str, object]:
+def _agent_visible_fold(
+    fold: FoldSpec, *, ref_store: AgentRefStore
+) -> dict[str, object]:
     # The raw fold id encodes the held-out test period, so the Meta session
     # sees the same opaque ref every other agent-visible surface projects.
     return {
-        "fold_id": _agent_visible_ref(fold.fold_id, prefix="fold_ref"),
+        "fold_id": ref_store.get_or_create("fold", fold.fold_id),
         "input_window": f"{fold.input_window_start}..{fold.input_window_end}",
         "validation_period": f"{fold.validation_start}..{fold.validation_end}",
         "valid_decision_time": fold.valid_decision_time.isoformat(),

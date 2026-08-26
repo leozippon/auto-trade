@@ -17,7 +17,7 @@ import json
 from collections.abc import Mapping
 from pathlib import Path
 
-from autotrade.environment.identity import agent_visible_ref
+from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.llm import ChatMessage
 from autotrade.environment.runtime import utc_now_iso
 from autotrade.pipelines.agent_views import agent_visible_metrics
@@ -35,6 +35,7 @@ _TEXT_SUFFIXES = {".py", ".md", ".txt", ".json", ".yaml", ".yml", ".toml", ".cfg
 _RECORD_FIELDS = (
     "epoch_id",
     "fold_id",
+    "run_id",
     "input_window",
     "validation_period",
     "fold_status",
@@ -105,14 +106,24 @@ def analysis_paths(out_dir: Path, epoch_id: str, fold_id: str) -> tuple[Path, Pa
     return out_dir / f"{key}.md", out_dir / f"{key}.json"
 
 
-def guarded_record_view(record: Mapping[str, object]) -> dict[str, object]:
+def guarded_record_view(
+    record: Mapping[str, object], *, ref_store: AgentRefStore
+) -> dict[str, object]:
     """Project a fold ledger record down to validation-only evidence."""
     view = {
         key: record.get(key) for key in _RECORD_FIELDS if record.get(key) is not None
     }
     fold_id = view.get("fold_id")
     if isinstance(fold_id, str) and fold_id:
-        view["fold_id"] = agent_visible_ref(fold_id, prefix="fold_ref")
+        view["fold_id"] = ref_store.get_or_create("fold", fold_id)
+    run_id = view.get("run_id")
+    if isinstance(run_id, str) and run_id:
+        view["run_id"] = ref_store.get_or_create("run", run_id)
+    artifact_id = view.get("frozen_strategy_artifact_id")
+    if isinstance(artifact_id, str) and artifact_id:
+        view["frozen_strategy_artifact_id"] = ref_store.get_or_create(
+            "strategy", artifact_id
+        )
     validation = view.get("validation_result")
     if isinstance(validation, dict):
         compact = agent_visible_metrics(validation)
@@ -166,9 +177,10 @@ def build_fold_analysis_messages(
     record: Mapping[str, object],
     strategy_files: list[dict[str, object]],
     *,
+    ref_store: AgentRefStore,
     model_files: list[str] | None = None,
 ) -> list[ChatMessage]:
-    guarded = guarded_record_view(record)
+    guarded = guarded_record_view(record, ref_store=ref_store)
     parts = [
         "# Fold 元信息与验证证据（JSON）",
         json.dumps(guarded, ensure_ascii=False, indent=2, sort_keys=True, default=str),
@@ -195,6 +207,7 @@ def analyze_fold(
     proxy,
     *,
     ledger_record: Mapping[str, object],
+    ref_store: AgentRefStore,
     strategy_dir: Path,
     model_dir: Path | None,
     out_dir: Path,
@@ -220,7 +233,12 @@ def analyze_fold(
         if model_dir is not None and Path(model_dir).is_dir()
         else []
     )
-    messages = build_fold_analysis_messages(ledger_record, strategy_files, model_files=model_files)
+    messages = build_fold_analysis_messages(
+        ledger_record,
+        strategy_files,
+        ref_store=ref_store,
+        model_files=model_files,
+    )
     messages[0] = ChatMessage("system", system_prompt)
     meta: dict[str, object] = {
         "schema_version": ANALYSIS_SCHEMA_VERSION,
@@ -258,6 +276,7 @@ def analyze_step(
     proxy,
     *,
     step_record: Mapping[str, object],
+    ref_store: AgentRefStore,
     strategy_dir: Path,
     model_dir: Path | None,
     out_dir: Path,
@@ -268,6 +287,7 @@ def analyze_step(
     return analyze_fold(
         proxy,
         ledger_record=step_record,
+        ref_store=ref_store,
         strategy_dir=strategy_dir,
         model_dir=model_dir,
         out_dir=out_dir,

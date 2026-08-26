@@ -14,6 +14,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.runtime import RunManifest, SandboxPaths
 from autotrade.environment.sandbox import DEFAULT_IMAGE, SandboxSpec
 from autotrade.environment.sandbox_images import (
@@ -28,7 +29,9 @@ REQUEST_REF = f"/mnt/agent/workspace/{SANDBOX_ENVIRONMENT_REQUEST_NAME}"
 class SandboxEnvironmentRequestTest(unittest.TestCase):
     def _manifest(self, root: Path) -> RunManifest:
         return RunManifest.create(
-            SandboxPaths(root).run_manifest, {"kind": "meta_learning", "experiment_id": "exp"}
+            SandboxPaths(root).run_manifest,
+            {"kind": "meta_learning", "experiment_id": "exp"},
+            ref_store=AgentRefStore(root / "experiment"),
         )
 
     def _rebuild(self, root: Path, request: object | None, **overrides):

@@ -25,7 +25,7 @@ from autotrade.environment.artifacts import (
 )
 from autotrade.environment.data.summary import write_agent_data_summary
 from autotrade.environment.executor import PersistentCommandRunner
-from autotrade.environment.identity import agent_visible_ref
+from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.replay.style import replay_style_analysis, write_style_rollup
 from autotrade.environment.runtime import (
     AgentTraceWriter,
@@ -232,8 +232,10 @@ class DeterministicBaselineDeveloper:
         evaluator: EvaluationBackend,
         schedule,
         broker_profile,
+        ref_store: AgentRefStore,
     ) -> None:
         self.baseline_strategy = Path(baseline_strategy).resolve(strict=True)
+        self.ref_store = ref_store
         self.artifact_store = artifact_store
         self.evaluator = evaluator
         self.schedule = schedule
@@ -281,7 +283,8 @@ class DeterministicBaselineDeveloper:
         # Step ids reach the Agent through the ledger's steps[] projection, so
         # they carry the same opaque fold ref every agent-visible surface uses.
         step_id = (
-            f"baseline_{agent_visible_ref(request.fold.fold_id, prefix='fold_ref')}"
+            f"baseline_{self.ref_store.get_or_create('fold', request.fold.fold_id)}__"
+            f"{self.ref_store.get_or_create('run', request.run_id)}"
         )
         return FoldSessionResult(
             conversation_id=f"deterministic_baseline_{request.run_id}",
@@ -412,6 +415,7 @@ class FoldBacktestTool(SessionTimeBudgetAware):
         broker_profile,
         time_budget: InferenceTimeBudget,
         formal_guard: Callable[[], object],
+        ref_store: AgentRefStore,
         manifest: RunManifest | None = None,
     ) -> None:
         self.request = request
@@ -425,6 +429,7 @@ class FoldBacktestTool(SessionTimeBudgetAware):
         self.broker_profile = broker_profile
         self.time_budget = time_budget
         self.formal_guard = formal_guard
+        self.ref_store = ref_store
         self.manifest = manifest
         self.backtests = 0
         self.steps: list[StepResult] = []
@@ -487,18 +492,19 @@ class FoldBacktestTool(SessionTimeBudgetAware):
                     )
                 )
                 self._check_deadline()
+                revision_ref = self.ref_store.get_or_create("strategy", revision_id)
                 node_id = self.tree.record_step(
                     typed.output_path,
                     epoch_id=self.request.epoch_id,
                     # Opaque the fold id so the step-tree node names the Agent
                     # reads (steps/tree.txt|tree.json) never leak the held-out
                     # calendar period.
-                    fold_id=agent_visible_ref(
-                        self.request.fold.fold_id, prefix="fold_ref"
+                    fold_id=self.ref_store.get_or_create(
+                        "fold", self.request.fold.fold_id
                     ),
-                    run_id=self.request.run_id,
+                    run_id=self.ref_store.get_or_create("run", self.request.run_id),
                     result_name=result_name,
-                    revision_id=revision_id,
+                    revision_id=revision_ref,
                     metrics=evaluation.summary,
                     complete_validation=evaluation.complete,
                     models_root=typed.models_path,
@@ -509,13 +515,21 @@ class FoldBacktestTool(SessionTimeBudgetAware):
                 if self.request.record_failed_attempts:
                     self.tree.record_failed_attempt(
                         epoch_id=self.request.epoch_id,
-                        fold_id=agent_visible_ref(
-                            self.request.fold.fold_id, prefix="fold_ref"
+                        fold_id=self.ref_store.get_or_create(
+                            "fold", self.request.fold.fold_id
                         ),
-                        run_id=self.request.run_id,
+                        run_id=self.ref_store.get_or_create("run", self.request.run_id),
                         result_name=result_name,
                         error=f"{type(exc).__name__}: {exc}",
-                        metrics={"revision_id": revision_id} if revision_id else None,
+                        metrics=(
+                            {
+                                "revision_id": self.ref_store.get_or_create(
+                                    "strategy", revision_id
+                                )
+                            }
+                            if revision_id
+                            else None
+                        ),
                     )
                 self._append_manifest_summary(
                     {
@@ -546,9 +560,9 @@ class FoldBacktestTool(SessionTimeBudgetAware):
             }
         )
         summary = {
-            "run_id": self.request.run_id,
+            "run_id": self.ref_store.get_or_create("run", self.request.run_id),
             "node_id": node_id,
-            "revision_id": revision_id,
+            "revision_id": self.ref_store.get_or_create("strategy", revision_id),
             "complete": evaluation.complete,
             "stats": evaluation.summary,
         }
@@ -643,6 +657,7 @@ class LLMFoldDeveloper:
         self.baseline_strategy = Path(baseline_strategy).resolve(strict=True)
         self.artifact_store = artifact_store
         self.experiment_dir = Path(experiment_dir).resolve()
+        self.ref_store = AgentRefStore(self.experiment_dir)
         self.evaluator = evaluator
         self.schedule = schedule
         self.broker_profile = broker_profile
@@ -678,14 +693,15 @@ class LLMFoldDeveloper:
         root = self.runtime_root / request.run_id
         if root.exists():
             raise FileExistsError(f"Fold runtime already exists: {request.run_id}")
+        fold_ref = self.ref_store.get_or_create("fold", request.fold.fold_id)
+        run_ref = self.ref_store.get_or_create("run", request.run_id)
         trace = AgentTraceWriter(
             agent_trace_path(self.artifact_store.root.parent, request.run_id),
             ids={
                 "experiment_id": request.experiment_id,
                 "epoch_id": request.epoch_id,
-                # Stamped on every agent_trace event (agent-readable); opaque it.
-                "fold_id": agent_visible_ref(request.fold.fold_id, prefix="fold_ref"),
-                "run_id": request.run_id,
+                "fold_id": fold_ref,
+                "run_id": run_ref,
                 "session_kind": "fold",
             },
         )
@@ -713,9 +729,9 @@ class LLMFoldDeveloper:
                 "experiment_id": request.experiment_id,
                 "epoch_id": request.epoch_id,
                 # Raw on the host manifest; RunManifest's Agent-visible view and
-                # build_experiment_facts both project it through
-                # agent_visible_ref, so projecting here would double-hash it and
-                # break correlation with the step tree and the data summary.
+                # build_experiment_facts both project it through the experiment
+                # reference store; projecting here would lose the raw host audit
+                # identity and break correlation with the other host artifacts.
                 "fold_id": request.fold.fold_id,
                 "run_id": request.run_id,
                 "session_key": request.session_key,
@@ -771,6 +787,7 @@ class LLMFoldDeveloper:
                     "deadline_seconds": request.deadline_seconds,
                 },
             },
+            ref_store=self.ref_store,
         )
         workspace_root = paths.workspace
         output_dir = workspace_root / "output"
@@ -813,7 +830,7 @@ class LLMFoldDeveloper:
         # Fold sessions never see frozen Test metrics: only the meta session is
         # allowed that adaptive feedback (docs/pipeline-design.md §3.2).
         history = [
-            compact_fold_history(record)
+            compact_fold_history(record, ref_store=self.ref_store)
             for record in latest_fold_records(self.ledger.read()).values()
         ]
         _environment_phase(request.progress_hook, "pit_view", request.run_id)
@@ -900,6 +917,7 @@ class LLMFoldDeveloper:
                 broker_profile=self.broker_profile,
                 time_budget=time_budget,
                 formal_guard=formal_guard,
+                ref_store=self.ref_store,
                 manifest=manifest,
             )
             tools: list[Tool] = [
@@ -925,8 +943,8 @@ class LLMFoldDeveloper:
             tools.append(
                 FinishFoldTool(
                     tree,
-                    fold_id=agent_visible_ref(request.fold.fold_id, prefix="fold_ref"),
-                    run_id=request.run_id,
+                    fold_id=fold_ref,
+                    run_id=run_ref,
                 )
             )
             budgeted = SessionBudgetLLM(self.llm, budget=shared_budget)
@@ -1004,9 +1022,14 @@ class LLMFoldDeveloper:
                 }
             )
             selected_node = str(result.finish_value.get("node_id") or "")
-            selected_revision = str(result.finish_value.get("revision_id") or "")
-            if not selected_node or not selected_revision:
+            selected_revision_ref = str(
+                result.finish_value.get("revision_id") or ""
+            )
+            if not selected_node or not selected_revision_ref:
                 raise RuntimeError("Fold Agent did not select a validated revision")
+            selected_revision = self.ref_store.resolve(
+                "strategy", selected_revision_ref
+            )
             steps = tuple(
                 StepResult(
                     step.step_id,
@@ -1110,7 +1133,7 @@ class LLMFoldDeveloper:
             # Agent-visible: opaque the fold id so the calendar period (e.g.
             # 2022Q1) cannot leak through data_summary.json. Host correlation
             # uses run_id. Same projection as the ledger and step-tree views.
-            fold_id=agent_visible_ref(request.fold.fold_id, prefix="fold_ref"),
+            fold_id=self.ref_store.get_or_create("fold", request.fold.fold_id),
             views={"snapshot": (target, "/mnt/snapshot")},
         )
         local.paths.data_summary.chmod(0o444)
@@ -1128,13 +1151,14 @@ class LLMFoldDeveloper:
 
         ``build_experiment_facts`` is the single visibility contract: it reads
         the run manifest, the runtime env and the data summary and projects the
-        raw fold id through ``agent_visible_ref``. The Fold-side development
+        raw fold id through the experiment reference store. The Fold-side development
         history rides alongside it — the only cross-fold evidence a Fold
         session gets besides the step tree.
         """
         return {
             **build_experiment_facts(
                 manifest=dict(manifest.data),
+                ref_store=self.ref_store,
                 runtime_env=_read_json_if_exists(paths.runtime_env),
                 data_summary=_read_json_if_exists(paths.data_summary),
                 max_llm_calls=request.max_llm_calls,
@@ -1212,6 +1236,7 @@ class LLMMetaLearner:
         self.baseline_strategy = Path(baseline_strategy).resolve(strict=True)
         self.artifact_store = artifact_store
         self.experiment_dir = Path(experiment_dir).resolve()
+        self.ref_store = AgentRefStore(self.experiment_dir)
         self.runtime_root = Path(runtime_root).resolve()
         self.max_llm_calls = max_llm_calls
         self.deadline_seconds = deadline_seconds
@@ -1265,13 +1290,15 @@ class LLMMetaLearner:
         progress_hook = facts.get("progress_hook")
         if progress_hook is not None and not callable(progress_hook):
             raise TypeError("progress_hook must be callable")
+        meta_ref = self.ref_store.get_or_create("meta", session_id)
+        run_ref = self.ref_store.get_or_create("run", run_id)
         trace = AgentTraceWriter(
             agent_trace_path(self.artifact_store.root.parent, run_id),
             ids={
                 "experiment_id": experiment_id,
                 "epoch_id": epoch_id,
-                "fold_id": agent_visible_ref(session_id, prefix="fold_ref"),
-                "run_id": run_id,
+                "fold_id": meta_ref,
+                "run_id": run_ref,
                 "session_kind": "meta_learning",
             },
         )
@@ -1337,11 +1364,14 @@ class LLMMetaLearner:
                 "session_key",
                 "agent_trace_sidecars",
                 "skills_source_ref",
+                "host_visible_fold",
             }
         }
+        public["run_id"] = run_ref
+        public["meta_learning_id"] = meta_ref
         if parent_id:
-            public["parent_artifact_id"] = agent_visible_ref(
-                parent_id, prefix="strategy_ref"
+            public["parent_artifact_id"] = self.ref_store.get_or_create(
+                "strategy", parent_id
             )
         from autotrade.pipelines.meta_inputs import (
             AgentTraceFullSidecar,
@@ -1377,6 +1407,11 @@ class LLMMetaLearner:
             if isinstance(public.get("visible_fold"), dict)
             else {}
         )
+        host_visible_fold = (
+            facts.get("host_visible_fold")
+            if isinstance(facts.get("host_visible_fold"), dict)
+            else {}
+        )
         manifest = RunManifest.create(
             paths.run_manifest,
             {
@@ -1384,8 +1419,8 @@ class LLMMetaLearner:
                 "epoch_id": epoch_id,
                 "meta_learning_id": session_id,
                 "trigger_after_folds": facts.get("trigger_after_folds"),
-                # Raw on the host manifest; both Agent-visible projections apply
-                # agent_visible_ref themselves.
+                # Raw on the host manifest; both Agent-visible projections use
+                # the experiment reference store themselves.
                 "fold_id": session_id,
                 "run_id": run_id,
                 "session_key": str(facts.get("session_key") or ""),
@@ -1396,8 +1431,8 @@ class LLMMetaLearner:
                 },
                 "runtime_env_ref": "/mnt/artifacts/runtime_env.json",
                 "data_summary_ref": "/mnt/artifacts/data_summary.json",
-                "meta_learning_visible_fold": dict(visible_fold),
-                "valid_decision_time": visible_fold.get("valid_decision_time"),
+                "meta_learning_visible_fold": dict(host_visible_fold),
+                "valid_decision_time": host_visible_fold.get("valid_decision_time"),
                 "snapshots": {
                     "valid_decision_input": {"snapshot_id": facts.get("snapshot_id")},
                 },
@@ -1453,6 +1488,7 @@ class LLMMetaLearner:
                     "deadline_seconds": self.deadline_seconds,
                 },
             },
+            ref_store=self.ref_store,
         )
         time_budget = InferenceTimeBudget(duration_seconds=self.deadline_seconds)
         shared_budget = SessionCallBudget(
@@ -1520,7 +1556,9 @@ class LLMMetaLearner:
             tools=ToolRegistry(tools),
             system_prompt=build_system_prompt(
                 mode="meta",
-                experiment_facts=build_experiment_facts(manifest=manifest.data),
+                experiment_facts=build_experiment_facts(
+                    manifest=manifest.data, ref_store=self.ref_store
+                ),
             ),
             config=AgentSessionConfig(
                 mode="meta",

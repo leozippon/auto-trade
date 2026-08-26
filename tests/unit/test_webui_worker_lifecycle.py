@@ -34,6 +34,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 import autotrade
+from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.runtime import write_json_atomic
 from autotrade.pipelines.hitl_state import (
     ControlState,
@@ -109,6 +110,7 @@ class WorkerLifecycleTest(unittest.TestCase):
         self.repo_root = Path(self._tmp.name)
         self.experiments_root = self.repo_root / "experiments"
         self.directory = self.experiments_root / "exp_ctl"
+        AgentRefStore(self.directory)
         self.hitl = self.directory / "hitl"
         self.hitl.mkdir(parents=True)
         self.control_path = self.hitl / "control.json"

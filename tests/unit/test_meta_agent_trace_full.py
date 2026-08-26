@@ -12,7 +12,7 @@ import pytest
 
 from autotrade.agent.prompts import META_PHASE_CONTRACT, build_meta_learning_prompt
 from autotrade.environment.artifacts import FilesystemArtifactStore
-from autotrade.environment.identity import agent_visible_ref
+from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.llm import ScriptedLLM, ToolCall
 from autotrade.pipelines.experiment import _development_inputs
 from autotrade.pipelines.local_backend import LLMMetaLearner
@@ -82,7 +82,10 @@ def test_raw_sidecar_is_byte_exact_and_retains_every_recorded_field(
     record, source = _fold(tmp_path)
     assert source is not None
 
-    reviews, sidecars = build_meta_fold_review_bundle([record])
+    ref_store = AgentRefStore(tmp_path / "experiment")
+    reviews, sidecars = build_meta_fold_review_bundle(
+        [record], ref_store=ref_store
+    )
     sidecar = sidecars[0]
     metadata = _as_map(reviews[0]["agent_trace_full"])
 
@@ -115,10 +118,8 @@ def test_raw_sidecar_is_byte_exact_and_retains_every_recorded_field(
     assert "TOOL RESULT BODY" not in public
     assert "payload" not in metadata
 
-    fold_ref = agent_visible_ref("fold_2024Q1", prefix="fold_ref")
-    trace_ref = agent_visible_ref(
-        "epoch_001:fold_2024Q1", prefix="trace_ref"
-    )
+    fold_ref = ref_store.get_or_create("fold", "fold_2024Q1")
+    trace_ref = ref_store.get_or_create("trace", "epoch_001:fold_2024Q1")
     assert reviews[0]["fold_id"] == fold_ref
     assert sidecar.relative_path == f"{AGENT_TRACE_FULL_RELATIVE_DIR}/{trace_ref}.jsonl"
 
@@ -133,14 +134,15 @@ def test_raw_sidecar_is_byte_exact_and_retains_every_recorded_field(
 def test_changing_one_source_byte_changes_the_sidecar(tmp_path: Path) -> None:
     record, source = _fold(tmp_path)
     assert source is not None
-    _reviews, first = build_meta_fold_review_bundle([record])
+    ref_store = AgentRefStore(tmp_path / "experiment")
+    _reviews, first = build_meta_fold_review_bundle([record], ref_store=ref_store)
     first_payload = cast(bytes, first[0].payload)
 
     changed = bytearray(source.read_bytes())
     offset = changed.index(b"TOOL ARGUMENT BODY A") + len(b"TOOL ARGUMENT BODY ")
     changed[offset] = ord("B")
     source.write_bytes(changed)
-    _reviews, second = build_meta_fold_review_bundle([record])
+    _reviews, second = build_meta_fold_review_bundle([record], ref_store=ref_store)
 
     assert first_payload != second[0].payload
     assert second[0].payload == source.read_bytes()
@@ -151,7 +153,9 @@ def test_missing_ref_is_unavailable_but_referenced_bad_sources_fail(
     tmp_path: Path,
 ) -> None:
     no_ref, _source = _fold(tmp_path, with_ref=False)
-    reviews, sidecars = build_meta_fold_review_bundle([no_ref])
+    reviews, sidecars = build_meta_fold_review_bundle(
+        [no_ref], ref_store=AgentRefStore(tmp_path / "experiment")
+    )
     metadata = _as_map(reviews[0]["agent_trace_full"])
     assert metadata == {
         "path": None,
@@ -166,11 +170,15 @@ def test_missing_ref_is_unavailable_but_referenced_bad_sources_fail(
 
     missing = dict(no_ref, agent_trace_ref=str(tmp_path / "absent.jsonl"))
     with pytest.raises(AgentTraceSourceError, match="missing"):
-        build_meta_fold_review_bundle([missing])
+        build_meta_fold_review_bundle(
+            [missing], ref_store=AgentRefStore(tmp_path / "experiment")
+        )
 
     invalid_ref = dict(no_ref, agent_trace_ref=123)
     with pytest.raises(AgentTraceSourceError, match="string path"):
-        build_meta_fold_review_bundle([invalid_ref])
+        build_meta_fold_review_bundle(
+            [invalid_ref], ref_store=AgentRefStore(tmp_path / "experiment")
+        )
 
 
 @pytest.mark.parametrize(
@@ -186,7 +194,9 @@ def test_corrupt_trace_source_fails_fast(
 ) -> None:
     record, _source = _fold(tmp_path, payload)
     with pytest.raises(AgentTraceSourceError, match=message):
-        build_meta_fold_review_bundle([record])
+        build_meta_fold_review_bundle(
+            [record], ref_store=AgentRefStore(tmp_path / "experiment")
+        )
 
 
 def test_event_count_and_trace_limit_are_validated_without_reserializing(
@@ -200,7 +210,9 @@ def test_event_count_and_trace_limit_are_validated_without_reserializing(
     )
     record, source = _fold(tmp_path, payload)
     assert source is not None
-    reviews, sidecars = build_meta_fold_review_bundle([record])
+    reviews, sidecars = build_meta_fold_review_bundle(
+        [record], ref_store=AgentRefStore(tmp_path / "experiment")
+    )
     metadata = _as_map(reviews[0]["agent_trace_full"])
 
     assert metadata["events"] == 3
@@ -218,7 +230,9 @@ def test_raw_sidecar_budgets_fail_instead_of_truncating(tmp_path: Path) -> None:
     assert first_source is not None
     with pytest.raises(ValueError, match="sidecar exceeds"):
         build_meta_fold_review_bundle(
-            [first], max_file_bytes=len(first_source.read_bytes()) - 1
+            [first],
+            ref_store=AgentRefStore(tmp_path / "experiment"),
+            max_file_bytes=len(first_source.read_bytes()) - 1
         )
 
     second, second_source = _fold(
@@ -231,7 +245,9 @@ def test_raw_sidecar_budgets_fail_instead_of_truncating(tmp_path: Path) -> None:
     total = len(first_source.read_bytes()) + len(second_source.read_bytes())
     with pytest.raises(ValueError, match="window exceeds"):
         build_meta_fold_review_bundle(
-            [first, second], max_window_bytes=total - 1
+            [first, second],
+            ref_store=AgentRefStore(tmp_path / "experiment"),
+            max_window_bytes=total - 1
         )
 
 
@@ -286,10 +302,11 @@ def test_review_window_keeps_regular_completed_folds_isolated(tmp_path: Path) ->
         heldout,
     ]
 
-    selected, window = select_meta_review_folds(records)
+    ref_store = AgentRefStore(tmp_path / "experiment")
+    selected, window = select_meta_review_folds(records, ref_store=ref_store)
     assert [record["run_id"] for record in selected] == ["run_current"]
     assert window["fold_count"] == 1
-    history, sidecars = _development_inputs(records)
+    history, sidecars = _development_inputs(records, ref_store=ref_store)
     reviews = cast(list[object], history["fold_reviews"])
     review = _as_map(reviews[0])
     assert len(sidecars) == 1
@@ -299,7 +316,9 @@ def test_review_window_keeps_regular_completed_folds_isolated(tmp_path: Path) ->
     assert _as_map(review["test_result"]) == {"sharpe": 0.4}
     assert _as_map(history["review_window"])["fold_count"] == 1
 
-    no_previous_meta, empty_window = select_meta_review_folds([current])
+    no_previous_meta, empty_window = select_meta_review_folds(
+        [current], ref_store=ref_store
+    )
     assert no_previous_meta == []
     assert empty_window["fold_count"] == 0
 
@@ -311,7 +330,9 @@ def test_atomic_tmp_fsync_replace_and_cleanup(
 
     record, source = _fold(tmp_path)
     assert source is not None
-    _reviews, sidecars = build_meta_fold_review_bundle([record])
+    _reviews, sidecars = build_meta_fold_review_bundle(
+        [record], ref_store=AgentRefStore(tmp_path / "experiment")
+    )
     calls: list[str] = []
     real_fsync = os.fsync
     real_replace = Path.replace
@@ -357,7 +378,9 @@ def test_llm_meta_publishes_raw_sidecar_before_context(
         fold_id="fold_2025Q2",
     )
     assert source is not None
-    reviews, sidecars = build_meta_fold_review_bundle([record])
+    reviews, sidecars = build_meta_fold_review_bundle(
+        [record], ref_store=AgentRefStore(tmp_path / "experiment")
+    )
     baseline = tmp_path / "baseline" / "main.py"
     baseline.parent.mkdir()
     baseline.write_text("def generate_orders(context):\n    return []\n", encoding="utf-8")

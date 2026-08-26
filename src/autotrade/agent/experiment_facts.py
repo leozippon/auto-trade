@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from autotrade.environment.identity import agent_visible_ref
+from autotrade.environment.identity import AgentRefStore
 
 EXPERIMENT_FACTS_SCHEMA_VERSION = 1
 
@@ -18,6 +18,7 @@ EXPERIMENT_FACTS_SCHEMA_VERSION = 1
 def build_experiment_facts(
     *,
     manifest: Mapping[str, object],
+    ref_store: AgentRefStore,
     runtime_env: Mapping[str, object] | None = None,
     data_summary: Mapping[str, object] | None = None,
     max_llm_calls: int | None = None,
@@ -48,12 +49,22 @@ def build_experiment_facts(
             {
                 "facts_schema_version": EXPERIMENT_FACTS_SCHEMA_VERSION,
                 "experiment_id": manifest.get("experiment_id"),
-                "run_id": manifest.get("run_id"),
+                "run_id": (
+                    ref_store.get_or_create("run", str(manifest["run_id"]))
+                    if manifest.get("run_id")
+                    else None
+                ),
                 "epoch_id": manifest.get("epoch_id"),
-                "meta_learning_id": manifest.get("meta_learning_id") if is_meta else None,
+                "meta_learning_id": (
+                    ref_store.get_or_create("meta", str(manifest["meta_learning_id"]))
+                    if is_meta and manifest.get("meta_learning_id")
+                    else None
+                ),
                 "trigger_after_folds": manifest.get("trigger_after_folds") if is_meta else None,
                 "session_kind": kind,
-                "fold_sequence_or_opaque_id": _opaque_fold_ref(manifest.get("fold_id")),
+                "fold_sequence_or_opaque_id": _opaque_fold_ref(
+                    manifest.get("fold_id"), ref_store=ref_store, is_meta=is_meta
+                ),
                 "phase": None if is_meta else manifest.get("phase"),
             }
         ),
@@ -91,7 +102,10 @@ def build_experiment_facts(
         # the fixed mount layout) — building always-dropped sections was shaping
         # work with no reader.
         "artifact_contract": _artifact_contract_facts(
-            manifest, model_artifacts_empty=model_artifacts_empty, is_meta=is_meta
+            manifest,
+            ref_store=ref_store,
+            model_artifacts_empty=model_artifacts_empty,
+            is_meta=is_meta,
         ),
         "broker_replay": _broker_replay_facts(manifest),
         "runtime_tools": _runtime_tool_facts(runtime_env, manifest=manifest, is_meta=is_meta),
@@ -187,6 +201,7 @@ def _budget_facts(
 def _artifact_contract_facts(
     manifest: Mapping[str, object],
     *,
+    ref_store: AgentRefStore,
     model_artifacts_empty: bool | None,
     is_meta: bool,
 ) -> dict[str, object]:
@@ -196,7 +211,9 @@ def _artifact_contract_facts(
         "kind": "initial_template" if is_initial else "frozen_artifact",
         # Artifact ids embed the raw fold label (strategy_<epoch>_fold_<period>);
         # project them like every other agent-visible surface.
-        "id": agent_visible_ref(parent_id, prefix="strategy_ref") if parent_id else None,
+        "id": (
+            ref_store.get_or_create("strategy", str(parent_id)) if parent_id else None
+        ),
         "model_artifacts_empty": model_artifacts_empty,
     }
     return compact_mapping(
@@ -338,10 +355,13 @@ def _visible_file_names(data_summary: Mapping[str, object]) -> set[str]:
     return names
 
 
-def _opaque_fold_ref(value: object) -> str | None:
+def _opaque_fold_ref(
+    value: object, *, ref_store: AgentRefStore, is_meta: bool
+) -> str | None:
     if value is None or str(value) == "":
         return None
-    return agent_visible_ref(value, prefix="fold_ref")
+    namespace = "meta" if is_meta else "fold"
+    return ref_store.get_or_create(namespace, str(value))
 
 
 def _as_mapping(value: object) -> dict[str, object]:

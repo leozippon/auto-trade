@@ -10,7 +10,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from autotrade.environment.identity import agent_visible_ref
+from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.runtime import sanitize_for_log
 from autotrade.pipelines.agent_views import agent_visible_metrics
 from autotrade.pipelines.fold_analysis import read_strategy_files
@@ -112,6 +112,8 @@ class AgentTraceFullSidecar:
 
 def select_meta_review_folds(
     records: Sequence[Mapping[str, object]],
+    *,
+    ref_store: AgentRefStore,
 ) -> tuple[list[dict[str, object]], dict[str, object]]:
     """Completed regular Folds after the latest ``meta_learning`` ledger record.
 
@@ -146,10 +148,10 @@ def select_meta_review_folds(
         )
     return folds, {
         "previous_meta_ref": (
-            agent_visible_ref(identity, prefix="meta_ref") if identity else None
+            ref_store.get_or_create("meta", identity) if identity else None
         ),
         "fold_run_refs": [
-            agent_visible_ref(record.get("run_id"), prefix="run_ref")
+            ref_store.get_or_create("run", str(record["run_id"]))
             for record in folds
             if record.get("run_id")
         ],
@@ -491,12 +493,13 @@ def build_agent_process_summary(
 def build_meta_fold_reviews(
     records: Sequence[Mapping[str, object]],
     *,
+    ref_store: AgentRefStore,
     artifacts_root: str | Path | None = None,
 ) -> list[dict[str, object]]:
     """Per already-selected Fold: frozen artifact/ref, strategy source, Agent Trace."""
 
     reviews, _sidecars = build_meta_fold_review_bundle(
-        records, artifacts_root=artifacts_root
+        records, ref_store=ref_store, artifacts_root=artifacts_root
     )
     return reviews
 
@@ -504,6 +507,7 @@ def build_meta_fold_reviews(
 def build_meta_fold_review_bundle(
     records: Sequence[Mapping[str, object]],
     *,
+    ref_store: AgentRefStore,
     artifacts_root: str | Path | None = None,
     max_file_bytes: int = AGENT_TRACE_FULL_MAX_FILE_BYTES,
     max_window_bytes: int = AGENT_TRACE_FULL_MAX_WINDOW_BYTES,
@@ -530,10 +534,9 @@ def build_meta_fold_review_bundle(
             load_fold_agent_trace_source(record, artifacts_root=artifacts_root)
         )
         agent_trace = compact_agent_trace(source_events)
-        fold_ref = agent_visible_ref(record.get("fold_id"), prefix="fold_ref")
-        sidecar_ref = agent_visible_ref(
-            f"{record.get('epoch_id')}:{record.get('fold_id')}",
-            prefix="trace_ref",
+        fold_ref = ref_store.get_or_create("fold", str(record.get("fold_id")))
+        sidecar_ref = ref_store.get_or_create(
+            "trace", f"{record.get('epoch_id')}:{record.get('fold_id')}"
         )
         sidecar = _build_full_sidecar(
             fold_ref=fold_ref,
@@ -549,7 +552,7 @@ def build_meta_fold_review_bundle(
                 "fold_id": fold_ref,
                 "fold_status": record.get("fold_status"),
                 "frozen_strategy_artifact_id": (
-                    agent_visible_ref(artifact_id, prefix="strategy_ref")
+                    ref_store.get_or_create("strategy", str(artifact_id))
                     if artifact_id
                     else None
                 ),

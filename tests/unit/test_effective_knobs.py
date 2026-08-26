@@ -21,6 +21,7 @@ from autotrade.environment.artifacts import (
     copy_artifact,
     new_revision_id,
 )
+from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.runtime import agent_trace_path
 from autotrade.environment.step_tree import StepTree
 from autotrade.environment.tools import ModificationCheckTool, ToolRegistry
@@ -178,6 +179,7 @@ class RecordFailedAttemptsTest(unittest.TestCase):
                 broker_profile=BrokerProfile(),
                 time_budget=InferenceTimeBudget(duration_seconds=300),
                 formal_guard=nullcontext,
+                ref_store=AgentRefStore(root / "experiment"),
             ),
             tree,
         )
@@ -279,6 +281,7 @@ class RecordFailedAttemptsTest(unittest.TestCase):
                 broker_profile=BrokerProfile(),
                 time_budget=InferenceTimeBudget(duration_seconds=300),
                 formal_guard=exploding_teardown,
+                ref_store=AgentRefStore(root / "experiment"),
             )
             result = tool.invoke({})
             self.assertTrue(result.ok, result.error)
@@ -309,6 +312,7 @@ class MetaMemoryBoundTest(unittest.TestCase):
             "exp", root / "experiments", "2022Q1", "2022Q1", "2023Q1", "2023Q1",
             meta_memory_max_epochs=keep,
         )
+        AgentRefStore(config.experiment_dir)
         ledger = ExperimentLedger(config.ledger_path)
         artifacts_root = config.experiment_dir / "artifacts"
         for index, epoch in enumerate(("epoch_001", "epoch_002", "epoch_003"), start=1):

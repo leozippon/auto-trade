@@ -8,6 +8,7 @@ import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
 
+from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.llm import (
     DeepSeekProxy,
     OpenAICompatibleProxy,
@@ -387,6 +388,7 @@ def test_interactive_runner_publishes_current_session_timing(tmp_path: Path):
         ledger=ledger,
         control_path=control_path,
         status_path=status_path,
+        ref_store=AgentRefStore(tmp_path / "experiment"),
         poll_seconds=0.01,
     )
     assert runner.run()["status"] == "complete"
@@ -539,7 +541,9 @@ def test_llm_worker_runs_real_meta_fold_validation_and_heldout(
         "model": "scripted",
     }
     # The property the path assertion was only ever a proxy for.
-    summaries = compact_fold_history(fold)["backtest_summaries"]
+    summaries = compact_fold_history(
+        fold, ref_store=AgentRefStore(experiment)
+    )["backtest_summaries"]
     assert summaries, (
         "Meta history has no backtest summaries: the manifest did not survive"
     )

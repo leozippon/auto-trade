@@ -22,6 +22,7 @@ from autotrade.environment.artifacts import (
 from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.data.research_release import pin_research_release
 from autotrade.environment.data.snapshot import SnapshotConfig
+from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.llm import (
     LOCAL_QWEN_MODEL,
     LLMProxy,
@@ -687,6 +688,7 @@ def run_local_interactive_worker(
     command_runner_factory: Callable[[Path], CommandRunner] | None = None,
     poll_seconds: float = 2.0,
 ) -> dict[str, object]:
+    ref_store = AgentRefStore(options.experiment_dir)
     hitl = options.experiment_dir / "hitl"
     ledger = ExperimentLedger(options.rolling.ledger_path)
     store = FilesystemArtifactStore(options.experiment_dir / "artifacts" / "strategy")
@@ -848,6 +850,7 @@ def run_local_interactive_worker(
             evaluator=evaluator,
             schedule=options.rolling.schedule,
             broker_profile=options.rolling.broker_profile,
+            ref_store=ref_store,
         )
         meta_learner = None
         meta_enabled = False
@@ -945,6 +948,7 @@ def run_local_interactive_worker(
         ledger=ledger,
         control_path=hitl / "control.json",
         status_path=hitl / "status.json",
+        ref_store=ref_store,
         poll_seconds=poll_seconds,
         post_fold_hook=_build_post_fold_hook(options, hitl / "analysis"),
         session_max_attempts=options.rolling.session_max_attempts,
@@ -1163,7 +1167,12 @@ def _parent_from_step_node(
         for item in sessions
         if isinstance(item, dict) and item.get("kind") == "fold"
     ]
-    assert_node_not_from_later_fold(node, session_key, fold_keys)
+    assert_node_not_from_later_fold(
+        node,
+        session_key,
+        fold_keys,
+        ref_store=AgentRefStore(experiment_dir),
+    )
     output_dir = steps_root / node_id / NODE_OUTPUT_DIR
     if not output_dir.is_dir():
         raise RuntimeError(
@@ -1200,6 +1209,7 @@ def _build_post_fold_hook(
         model=options.analysis_model,
         max_tokens=effective_analysis_max_tokens,
     )
+    ref_store = AgentRefStore(options.experiment_dir)
 
     def post_fold_hook(record: dict[str, object]) -> None:
         strategy_dir = record.get("frozen_strategy_artifact_path")
@@ -1209,6 +1219,7 @@ def _build_post_fold_hook(
         analyze_fold(
             proxy,
             ledger_record=record,
+            ref_store=ref_store,
             strategy_dir=Path(str(strategy_dir)),
             model_dir=Path(str(model_dir)) if model_dir else None,
             out_dir=out_dir,

@@ -15,6 +15,7 @@ from pathlib import Path
 
 from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.data.snapshot import SnapshotConfig
+from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.llm.model_profiles import MODEL_CHOICES
 from autotrade.environment.sandbox import SandboxSpec
 
@@ -542,22 +543,21 @@ def proc_start_ticks(pid: int) -> int | None:
 
 
 def assert_node_not_from_later_fold(
-    node: dict[str, object], session_key: str, fold_keys: list[str]
+    node: dict[str, object],
+    session_key: str,
+    fold_keys: list[str],
+    *,
+    ref_store: AgentRefStore,
 ) -> None:
     """Reject a step-tree parent override recorded by a LATER fold session.
 
     Shared by the console manager (at set time) and the worker (at consume
     time): a node validated on a later period embodies future-fitted strategy
     content, so both writers of the decision must enforce the same wall."""
-    from autotrade.environment.identity import agent_visible_ref
-
-    ref_to_fold = {
-        agent_visible_ref(key.partition("/")[2], prefix="fold_ref"): key.partition("/")[
-            2
-        ]
-        for key in fold_keys
-    }
-    node_fold = ref_to_fold.get(str(node.get("fold_id")))
+    try:
+        node_fold = ref_store.resolve("fold", str(node.get("fold_id") or ""))
+    except (KeyError, ValueError):
+        node_fold = None
     node_key = f"{node.get('epoch_id')}/{node_fold}" if node_fold else None
     if node_key not in fold_keys:
         raise ValueError(

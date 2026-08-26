@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from autotrade.environment.identity import agent_visible_ref as _agent_visible_ref
+from autotrade.environment.identity import AgentRefStore
 
 
 def metrics(summary: dict[str, object] | None) -> dict[str, object] | None:
@@ -94,7 +94,10 @@ def agent_visible_metrics(summary: dict[str, object] | None) -> dict[str, object
 
 
 def compact_fold_history(
-    record: dict[str, object], *, include_frozen_test_metrics: bool = False
+    record: dict[str, object],
+    *,
+    ref_store: AgentRefStore,
+    include_frozen_test_metrics: bool = False,
 ) -> dict[str, object]:
     manifest = _read_json(Path(str(record.get("run_manifest_ref", ""))))
     backtests = []
@@ -136,7 +139,12 @@ def compact_fold_history(
             )
     compact = {
         "epoch_id": record.get("epoch_id"),
-        "fold_id": _agent_visible_ref(record.get("fold_id"), prefix="fold_ref"),
+        "fold_id": ref_store.get_or_create("fold", str(record.get("fold_id"))),
+        "run_id": (
+            ref_store.get_or_create("run", str(record["run_id"]))
+            if record.get("run_id")
+            else None
+        ),
         "fold_status": record.get("fold_status"),
         "finish_reason": record.get("finish_reason"),
         "validation_result": _visible_metrics(record.get("validation_result")),
@@ -150,7 +158,10 @@ def compact_fold_history(
 
 
 def agent_visible_ledger_record(
-    record: dict[str, object], *, include_frozen_test_metrics: bool = False
+    record: dict[str, object],
+    *,
+    ref_store: AgentRefStore,
+    include_frozen_test_metrics: bool = False,
 ) -> dict[str, object]:
     public = json.loads(json.dumps(record, ensure_ascii=False, default=str))
     if not isinstance(public, dict):
@@ -190,11 +201,20 @@ def agent_visible_ledger_record(
         public["validation_result"] = _visible_metrics(public.get("validation_result"))
     if include_frozen_test_metrics and record.get("record_type") == "fold":
         public["test_result"] = _visible_metrics(record.get("test_result"))
-    if "fold_id" in record:
-        public["fold_id"] = _agent_visible_ref(record.get("fold_id"), prefix="fold_ref")
+    if record.get("fold_id"):
+        namespace = "meta" if record.get("record_type") == "meta_learning" else "fold"
+        public["fold_id"] = ref_store.get_or_create(
+            namespace, str(record["fold_id"])
+        )
+    if public.get("run_id"):
+        public["run_id"] = ref_store.get_or_create("run", str(public["run_id"]))
+    if public.get("meta_learning_id"):
+        public["meta_learning_id"] = ref_store.get_or_create(
+            "meta", str(public["meta_learning_id"])
+        )
     for key in ("parent_strategy_artifact_id", "frozen_strategy_artifact_id"):
         if public.get(key):
-            public[key] = _agent_visible_ref(public[key], prefix="strategy_ref")
+            public[key] = ref_store.get_or_create("strategy", str(public[key]))
     steps = public.get("steps")
     if isinstance(steps, list):
         public["steps"] = [agent_visible_step_record(step) for step in steps if isinstance(step, dict)]
