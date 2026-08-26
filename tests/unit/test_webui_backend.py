@@ -1542,12 +1542,23 @@ class WebuiBackendTest(unittest.TestCase):
             "llm_env_file",
             "llm_base_url",
         )
+        sealed_periods = {
+            "first_test_period": "2024Q1",
+            "last_test_period": "2024Q4",
+            "heldout_first_period": "2025Q1",
+            "heldout_last_period": "2025Q4",
+        }
         params = {
             "model": "deepseek-v4-pro",
+            **sealed_periods,
             **{key: f"secret-{key}" for key in operator_only},
         }
-        public = _public_params(params)
+        public = _public_params(params, test_revealed=False)
         self.assertEqual(public, {"model": "deepseek-v4-pro"})
+        self.assertEqual(
+            _public_params(params, test_revealed=True),
+            {"model": "deepseek-v4-pro", **sealed_periods},
+        )
 
     def test_historical_endpoint_is_absent_from_list_and_detail_api(self) -> None:
         params_path = self.experiments_root / "exp_hitl/hitl/params.json"
@@ -1968,6 +1979,24 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertNotIn("record", sessions[q2_key])
         self.assertTrue(sessions[q1_key]["analysis_available"])
         self.assertEqual(detail["control"]["mode"], "manual")
+        sealed_period_fields = {
+            "first_test_period",
+            "last_test_period",
+            "heldout_first_period",
+            "heldout_last_period",
+        }
+        self.assertTrue(sealed_period_fields.isdisjoint(detail["params"]))
+        self._reveal()
+        revealed = self.client.get("/api/experiments/exp_hitl").json()
+        self.assertEqual(
+            {key: revealed["params"][key] for key in sealed_period_fields},
+            {
+                "first_test_period": "2022Q1",
+                "last_test_period": "2022Q2",
+                "heldout_first_period": "2023Q1",
+                "heldout_last_period": "2023Q1",
+            },
+        )
         self.assertEqual(self.client.get("/api/experiments/nope").status_code, 404)
 
     def test_modern_public_api_exposes_only_opaque_identities(self) -> None:
@@ -2063,6 +2092,29 @@ class WebuiBackendTest(unittest.TestCase):
             ).status_code,
             400,
         )
+
+        embedded_host_path = "/var/lib/private/result.json"
+        public_status = identity.public_status(
+            {
+                "state": "failed",
+                "error": f"failed opening {embedded_host_path}",
+                "final_strategy_artifact": "strategy_secret_raw",
+            }
+        )
+        self.assertNotIn(embedded_host_path, json.dumps(public_status))
+        self.assertNotIn("strategy_secret_raw", json.dumps(public_status))
+        self.assertTrue(
+            str(public_status["final_strategy_ref"]).startswith("strategy_ref_")
+        )
+        public_event = identity.public_record(
+            {
+                "event_type": "tool_call",
+                "run_id": "run_001",
+                "error": f"failed opening {embedded_host_path}",
+            },
+            heldout_revealed=False,
+        )
+        self.assertNotIn(embedded_host_path, json.dumps(public_event))
 
     def test_corrupt_identity_store_fails_closed_without_host_paths(self) -> None:
         directory = self._build_hitl_experiment("exp_bad_refs")

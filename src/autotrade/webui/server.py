@@ -273,7 +273,10 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         directory, identity = _public_identity(experiment_id)
         state = registry.experiment_state(directory)
         raw_status = state.get("status")
-        public = {key: value for key, value in state.items() if key != "status"}
+        public = identity.public_record(
+            {key: value for key, value in state.items() if key != "status"},
+            heldout_revealed=False,
+        )
         if isinstance(raw_status, dict):
             public["status"] = identity.public_status(raw_status)
         return public
@@ -492,7 +495,7 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
 
     @app.get("/api/experiments/{experiment_id}/steps/{node_id}/source.zip")
     def get_step_node_zip(experiment_id: str, node_id: str) -> FileResponse:
-        directory = _experiment_dir(experiment_id)
+        directory, _identity = _public_identity(experiment_id)
         try:
             node_dir = steps.node_export_dir(directory, node_id)
         except ValueError as exc:
@@ -520,10 +523,10 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
 
     @app.get("/api/experiments/{experiment_id}/current-step")
     def get_current_step(experiment_id: str) -> dict[str, object]:
+        _directory, identity = _public_identity(experiment_id)
         try:
-            directory, _status, node, _node_dir = current_step(experiment_id)
-            identity = PublicIdentity(directory)
-        except (OSError, ValueError) as exc:
+            _directory, _status, node, _node_dir = current_step(experiment_id)
+        except (OSError, ValueError):
             return {"available": False, "reason": "current Step is unavailable"}
         return {
             "available": True,
@@ -532,6 +535,7 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
 
     @app.get("/api/experiments/{experiment_id}/current-step/source.zip")
     def get_current_step_source(experiment_id: str) -> FileResponse:
+        _public_identity(experiment_id)
         try:
             _directory, _status, node, node_dir = current_step(experiment_id)
         except (OSError, ValueError) as exc:
@@ -563,6 +567,7 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
 
     @app.post("/api/experiments/{experiment_id}/current-step/analysis")
     def post_current_step_analysis(experiment_id: str) -> dict[str, object]:
+        _public_identity(experiment_id)
         try:
             directory, status, node, node_dir = current_step(experiment_id)
             analysis_service.regenerate_step(

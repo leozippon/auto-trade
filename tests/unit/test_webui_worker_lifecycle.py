@@ -240,7 +240,12 @@ class WorkerLifecycleTest(unittest.TestCase):
         process = self._spawn(_COOPERATIVE)
         self._publish(process, session_key="epoch_001/fold_2022Q2")
         body = self._post(action="terminate").json()
-        self.assertEqual(body["approval_revoked_session"], "epoch_001/fold_2022Q2")
+        expected_public_session = (
+            "epoch_001/"
+            + AgentRefStore(self.directory).get_or_create("fold", "fold_2022Q2")
+        )
+        self.assertEqual(body["approval_revoked_session"], expected_public_session)
+        self.assertNotIn("fold_2022Q2", str(body))
         control = read_control(self.control_path)
         self.assertEqual(control.approved_sessions, ())
         # Without the auto -> manual flip the revocation is meaningless: auto

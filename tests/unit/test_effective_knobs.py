@@ -158,7 +158,7 @@ class RecordFailedAttemptsTest(unittest.TestCase):
 
         class ExplodingEvaluator:
             def evaluate(self, _request):
-                raise RuntimeError("validation blew up")
+                raise RuntimeError(f"validation blew up at {root / 'private/result.json'}")
 
         class PassingCheck:
             def invoke(self, _arguments):
@@ -197,7 +197,10 @@ class RecordFailedAttemptsTest(unittest.TestCase):
                 on_tool.invoke({})
             nodes = on_tree.nodes()
             self.assertEqual([node["status"] for node in nodes], ["failed"])
-            self.assertIn("validation blew up", nodes[0]["error"])
+            self.assertEqual(
+                nodes[0]["error"], "daily Validation failed: RuntimeError"
+            )
+            self.assertNotIn(str(root), json.dumps(nodes))
             # The dead end never becomes the working position.
             self.assertIsNone(on_tree.current_node_id)
 

@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from typing import cast
 
 import pytest
+from fastapi.testclient import TestClient
 
 from autotrade.environment.identity import (
     LEGACY_EXPERIMENT_MESSAGE,
@@ -18,11 +19,12 @@ from autotrade.environment.identity import (
     LegacyExperimentError,
 )
 from autotrade.environment.runtime import SandboxPaths, write_json_atomic
-from autotrade.environment.step_tree import StepTree
+from autotrade.environment.step_tree import NODE_OUTPUT_DIR, StepTree
 from autotrade.pipelines.hitl_state import ControlState, write_control
 from autotrade.pipelines.worker import InteractiveWorkerOptions, run_local_interactive_worker
 from autotrade.webui.manager import ExperimentManager, ManagerError
 from autotrade.webui.prompt_preview import build_prompt_preview
+from autotrade.webui.server import create_app
 from autotrade.webui.steps import step_tree_view
 
 
@@ -215,6 +217,17 @@ def test_legacy_web_audit_remains_readable_but_mutations_and_preview_fail(
     assert audit["nodes"][0]["fold_ref"] == "fold_ref_deadbeef00"
     assert "fold_id" not in audit["nodes"][0]
     assert "fold_2024Q1" not in str(audit)
+
+    node_id = str(audit["nodes"][0]["node_id"])
+    output = experiment / "steps" / node_id / NODE_OUTPUT_DIR
+    output.mkdir(parents=True)
+    (output / "main.py").write_text("pass\n", encoding="utf-8")
+    source = TestClient(create_app(tmp_path)).get(
+        f"/api/experiments/legacy/steps/{node_id}/source.zip"
+    )
+    assert source.status_code == 409
+    assert "identity state" in source.json()["detail"]
+
     with pytest.raises(LegacyExperimentError, match=LEGACY_EXPERIMENT_MESSAGE):
         build_prompt_preview(experiment, "epoch_001/fold_2024Q1", "")
     with pytest.raises(ManagerError, match=LEGACY_EXPERIMENT_MESSAGE):

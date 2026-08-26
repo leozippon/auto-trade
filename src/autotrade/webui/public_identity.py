@@ -8,6 +8,7 @@ operations.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -43,7 +44,25 @@ _STRATEGY_ID_KEYS = frozenset(
         "parent_strategy_artifact_id",
         "revision_id",
         "source_artifact_id",
+        "strategy_artifact_id",
+        "final_strategy_artifact",
     }
+)
+_ALLOWED_PUBLIC_PATH_PREFIXES = (
+    "/api",
+    "/mnt/agent",
+    "/mnt/artifacts",
+    "/mnt/snapshot",
+    "/mnt/snapshots",
+)
+_FILE_URI = re.compile(r"file:///(?:[^\s\"'`<>])+", re.IGNORECASE)
+_POSIX_PATH = re.compile(
+    r"(?<![A-Za-z0-9_:/])/(?:[^/\s\"'`<>|()\[\]{},;]+/)+"
+    r"[^/\s\"'`<>|()\[\]{},;]*"
+)
+_WINDOWS_PATH = re.compile(
+    r"(?<![A-Za-z0-9_])(?:[A-Za-z]:[\\/]|\\\\)"
+    r"[^\s\"'`<>|()\[\]{},;]+"
 )
 
 
@@ -221,6 +240,9 @@ class PublicIdentity:
         for key, value in status.items():
             if key in {"run_id", "fold_id", "session_key", "question_key"}:
                 continue
+            if key in _STRATEGY_ID_KEYS and isinstance(value, str) and value:
+                out[_strategy_ref_key(key)] = self.strategy_ref(value)
+                continue
             out[key] = self._safe_value(value)
         if isinstance(raw_run, str) and raw_run:
             out["run_ref"] = self.run_ref(raw_run)
@@ -300,8 +322,7 @@ class PublicIdentity:
             if key in {"run_id", "fold_id", "session_key", "meta_learning_id"}:
                 continue
             if key in _STRATEGY_ID_KEYS and isinstance(value, str) and value:
-                public_key = "strategy_ref" if key in {"artifact_id", "revision_id"} else key.replace("_id", "_ref")
-                out[public_key] = self.strategy_ref(value)
+                out[_strategy_ref_key(key)] = self.strategy_ref(value)
                 continue
             out[key] = self._safe_value(value)
         if isinstance(raw_fold, str) and raw_fold:
@@ -381,8 +402,11 @@ class PublicIdentity:
                     out["session_key"] = self.public_session_key(item)
                     continue
                 if name in _STRATEGY_ID_KEYS and isinstance(item, str) and item:
-                    public_key = "strategy_ref" if name in {"artifact_id", "revision_id"} else name.replace("_id", "_ref")
-                    out[public_key] = item if item.startswith("strategy_ref_") else self.strategy_ref(item)
+                    out[_strategy_ref_key(name)] = (
+                        item
+                        if item.startswith("strategy_ref_")
+                        else self.strategy_ref(item)
+                    )
                     continue
                 out[name] = self._safe_value(item)
             return out
@@ -391,9 +415,7 @@ class PublicIdentity:
         if isinstance(value, tuple):
             return [self._safe_value(item) for item in value]
         if isinstance(value, str):
-            if Path(value).is_absolute() and not value.startswith(
-                ("/mnt/agent", "/mnt/artifacts", "/mnt/snapshot", "/mnt/snapshots")
-            ):
+            if _is_host_absolute_path(value):
                 return "[host path omitted]"
             safe = value
             for raw, public in sorted(
@@ -403,8 +425,38 @@ class PublicIdentity:
             for root in self._host_roots:
                 if root and root != "/":
                     safe = safe.replace(root, "[host]")
-            return safe
+            safe = _FILE_URI.sub("[host path omitted]", safe)
+            safe = _WINDOWS_PATH.sub("[host path omitted]", safe)
+            return _POSIX_PATH.sub(_redact_posix_path, safe)
         return value
+
+
+def _strategy_ref_key(name: str) -> str:
+    if name in {"artifact_id", "revision_id"}:
+        return "strategy_ref"
+    if name == "final_strategy_artifact":
+        return "final_strategy_ref"
+    return name.replace("_id", "_ref")
+
+
+def _allowed_public_path(value: str) -> bool:
+    return any(
+        value == prefix or value.startswith(f"{prefix}/")
+        for prefix in _ALLOWED_PUBLIC_PATH_PREFIXES
+    )
+
+
+def _is_host_absolute_path(value: str) -> bool:
+    if _allowed_public_path(value):
+        return False
+    return Path(value).is_absolute() or bool(
+        re.match(r"^(?:[A-Za-z]:[\\/]|\\\\)", value)
+    )
+
+
+def _redact_posix_path(match: re.Match[str]) -> str:
+    value = match.group(0)
+    return value if _allowed_public_path(value) else "[host path omitted]"
 
 
 def _required_text(value: object, label: str) -> str:

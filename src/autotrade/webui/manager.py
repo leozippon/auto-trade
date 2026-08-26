@@ -659,7 +659,13 @@ class ExperimentManager:
             # its own session controls under that lock, and blocking it there
             # would turn a graceful shutdown into a forced kill.
             if action == "terminate":
-                return self._terminate(experiment_id, directory)
+                result = self._terminate(experiment_id, directory)
+                revoked = result.get("approval_revoked_session")
+                if isinstance(revoked, str) and revoked:
+                    result["approval_revoked_session"] = (
+                        identity.public_session_key(revoked)
+                    )
+                return result
             if action == "restart":
                 return self._restart(experiment_id, directory)
             if action == "inject_message":

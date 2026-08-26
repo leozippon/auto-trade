@@ -513,6 +513,7 @@ class FoldBacktestTool(SessionTimeBudgetAware):
                 )
         except Exception as exc:
             if node_id is None or evaluation is None:
+                public_error = f"daily Validation failed: {type(exc).__name__}"
                 if self.request.record_failed_attempts:
                     self.tree.record_failed_attempt(
                         epoch_id=self.request.epoch_id,
@@ -521,7 +522,7 @@ class FoldBacktestTool(SessionTimeBudgetAware):
                         ),
                         run_id=self.ref_store.get_or_create("run", self.request.run_id),
                         result_name=result_name,
-                        error=f"{type(exc).__name__}: {exc}",
+                        error=public_error,
                         metrics=(
                             {
                                 "revision_id": self.ref_store.get_or_create(
@@ -538,14 +539,12 @@ class FoldBacktestTool(SessionTimeBudgetAware):
                         "mode": "valid",
                         "status": "failed",
                         "complete_validation": False,
-                        "error": f"{type(exc).__name__}: {exc}",
+                        "error": public_error,
                     }
                 )
-                if isinstance(exc, (ToolError, TimeoutError)):
-                    raise
-                raise ToolError(
-                    f"daily Validation failed: {type(exc).__name__}"
-                ) from exc
+                if isinstance(exc, TimeoutError):
+                    raise TimeoutError(public_error) from exc
+                raise ToolError(public_error) from exc
         assert node_id is not None and evaluation is not None and check is not None
         step = StepResult(node_id, revision_id, evaluation)
         self.steps.append(step)

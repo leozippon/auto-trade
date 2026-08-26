@@ -118,6 +118,12 @@ _PRIVATE_PARAMS = {
     "llm_env_file",
     "llm_base_url",
 }
+_SEALED_PERIOD_PARAMS = {
+    "first_test_period",
+    "last_test_period",
+    "heldout_first_period",
+    "heldout_last_period",
+}
 
 
 def read_ledger_records(experiment_dir: Path) -> list[dict[str, object]]:
@@ -333,13 +339,18 @@ def _public_meta_view(
     return unified_meta_record(record, current_prior=current_prior)
 
 
-def _public_params(params: Mapping[str, object]) -> dict[str, object]:
+def _public_params(
+    params: Mapping[str, object], *, test_revealed: bool
+) -> dict[str, object]:
     # params.json is also a worker-side ops channel where manager-owned roots
-    # legitimately exist — never echo them back out through the read model.
+    # and the sealed Test/Held-out calendar legitimately exist. Neither may be
+    # echoed before its public release boundary.
     return {
         key: value
         for key, value in params.items()
-        if not key.startswith("_") and key not in _PRIVATE_PARAMS
+        if not key.startswith("_")
+        and key not in _PRIVATE_PARAMS
+        and (test_revealed or key not in _SEALED_PERIOD_PARAMS)
     }
 
 
@@ -364,7 +375,10 @@ def summarize_experiment(directory: Path) -> dict[str, object]:
         completed_sessions, total_sessions = _durable_session_progress(sessions, records)
         raw_status = state.get("status")
         status = identity.public_status(raw_status) if isinstance(raw_status, Mapping) else {}
-        public_state = {key: value for key, value in state.items() if key != "status"}
+        public_state = identity.public_record(
+            {key: value for key, value in state.items() if key != "status"},
+            heldout_revealed=False,
+        )
         if raw_status is not None:
             public_state["status"] = status
         summary.update(public_state)
@@ -547,7 +561,7 @@ def experiment_detail(root: Path, experiment_id: str) -> dict[str, object]:
     raw_current = raw_status.get("session_key") if isinstance(raw_status, Mapping) else None
     return {
         **detail,
-        "params": _public_params(params),
+        "params": _public_params(params, test_revealed=revealed),
         "control": identity.public_control(control.to_record()),
         "inbox": inbox_public_view(
             hitl / INBOX_NAME,
