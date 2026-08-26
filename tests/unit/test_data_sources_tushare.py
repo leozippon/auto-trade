@@ -4343,8 +4343,8 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             client, self.raw_dir, common.EVENT_FLOW_SPECS["margin_secs"], ["20260601"], False, None
         )
         self.assertEqual(client.calls, [])
-        # A hash-mismatched pair (bytes replaced behind the sidecar) is also
-        # re-attempted, not trusted.
+        # A replaced Parquet from an interrupted publish is also re-attempted:
+        # its footer and row count no longer match the committed sidecar.
         pd.read_parquet(orphan).iloc[:2].to_parquet(orphan, index=False)
         self.assertFalse(common.committed_partition_intact(orphan))
 
@@ -5820,9 +5820,7 @@ class FundamentalAuditTest(unittest.TestCase):
 
 
 class UuidCommitIdentityTest(unittest.TestCase):
-    """The UUID write-id commit contract that replaced the content-hash
-    sidecar mechanism: one identity shared by the Parquet footer and its
-    sidecar, and no hash key may ever come back."""
+    """One UUID identity shared by a Parquet footer and its sidecar."""
 
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
@@ -5841,31 +5839,57 @@ class UuidCommitIdentityTest(unittest.TestCase):
             fields=["trade_date", "close"],
         )
         self.assertTrue(tushare_io.committed_partition_intact(path))
-        self.assertTrue(meta["write_id"])
+        self.assertEqual(tushare_io.parquet_write_id(path), meta["write_id"])
         self.assertEqual(meta["row_count"], 1)
 
+    def test_commit_integrity_rejects_interrupted_mixed_and_wrong_count_pairs(self) -> None:
+        path = self.root / "daily" / "trade_date=20240102.parquet"
+        tushare_io.write_parquet(
+            path,
+            pd.DataFrame({"trade_date": ["20240102"], "close": [10.0]}),
+            api_name="daily",
+            params={},
+            fields=["trade_date", "close"],
+        )
         sidecar = path.with_suffix(".parquet.meta.json")
-        changed = json.loads(sidecar.read_text(encoding="utf-8"))
-        changed["write_id"] = "different-write"
-        sidecar.write_text(json.dumps(changed), encoding="utf-8")
+        original_sidecar = sidecar.read_text(encoding="utf-8")
+
+        sidecar.unlink()
+        self.assertFalse(tushare_io.committed_partition_intact(path))
+        sidecar.write_text(original_sidecar, encoding="utf-8")
+
+        other = self.root / "daily" / "trade_date=20240103.parquet"
+        tushare_io.write_parquet(
+            other,
+            pd.DataFrame({"trade_date": ["20240103"], "close": [11.0]}),
+            api_name="daily",
+            params={},
+            fields=["trade_date", "close"],
+        )
+        sidecar.write_text(
+            other.with_suffix(".parquet.meta.json").read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
         self.assertFalse(tushare_io.committed_partition_intact(path))
 
-    def test_write_parquet_rejects_nested_non_uuid_identity_metadata_before_publish(self) -> None:
-        cases = (
-            ("params", {"filters": [{"content_hash": "derived"}]}),
-            ("extra_metadata", {"availability": {"evidence": [{"source_hash": "derived"}]}}),
+        wrong_count = json.loads(original_sidecar)
+        wrong_count["row_count"] = 2
+        sidecar.write_text(json.dumps(wrong_count), encoding="utf-8")
+        self.assertFalse(tushare_io.committed_partition_intact(path))
+
+    def test_write_parquet_has_no_metadata_field_name_policy(self) -> None:
+        path = self.root / "daily" / "trade_date=20240102.parquet"
+        meta = tushare_io.write_parquet(
+            path,
+            pd.DataFrame({"trade_date": ["20240102"]}),
+            api_name="daily",
+            params={"filters": [{"opaque_marker": "source-value"}]},
+            fields=["trade_date"],
+            extra_metadata={"source_context": {"opaque_marker": "landing-value"}},
         )
-        for argument, metadata in cases:
-            with self.subTest(argument=argument):
-                path = self.root / argument / "trade_date=20240102.parquet"
-                kwargs = {"api_name": "daily", "params": {}, "fields": ["trade_date"]}
-                kwargs[argument] = metadata
-                with self.assertRaisesRegex(ValueError, "UUID commit identity"):
-                    tushare_io.write_parquet(
-                        path, pd.DataFrame({"trade_date": ["20240102"]}), **kwargs
-                    )
-                self.assertFalse(path.exists())
-                self.assertFalse(path.with_suffix(".parquet.meta.json").exists())
+        self.assertTrue(tushare_io.committed_partition_intact(path))
+        self.assertEqual(meta["params"]["filters"][0]["opaque_marker"], "source-value")
+        self.assertEqual(meta["source_context"]["opaque_marker"], "landing-value")
 
     def test_legacy_migration_reads_one_file_below_hive_style_directory(self) -> None:
         path = self.root / "country=CN" / "month=202601.parquet"
@@ -5876,10 +5900,12 @@ class UuidCommitIdentityTest(unittest.TestCase):
             encoding="utf-8",
         )
         tushare_io.migrate_partition_identity(path)
+        migrated = tushare_io.parquet_meta(path)
         self.assertTrue(tushare_io.committed_partition_intact(path))
+        self.assertNotIn("legacy_marker", migrated)
         self.assertEqual(pd.read_parquet(path)["country"].tolist(), ["CN"])
 
-    def test_legacy_migration_recursively_removes_forbidden_sidecar_keys(self) -> None:
+    def test_legacy_migration_only_copies_supported_sidecar_schema(self) -> None:
         path = self.root / "stk_auction" / "trade_date=20240102.parquet"
         meta = tushare_io.write_parquet(
             path,
@@ -5889,27 +5915,27 @@ class UuidCommitIdentityTest(unittest.TestCase):
             fields=["trade_date", "price"],
         )
         sidecar = path.with_suffix(".parquet.meta.json")
+        meta["unknown_top_level"] = {"nested": "old-value"}
         meta["availability"] = {
             "available_at": "2024-01-02T09:29:00+08:00",
-            "evidence": [
-                {"content_hash": "legacy-content"},
-                {"nested": {"source_hash": "legacy-source"}},
-            ],
-            "parquet_sha256": "legacy-parquet",
             "rule": "observed:test",
+            "unknown_availability_field": {"nested": "old-value"},
         }
         sidecar.write_text(json.dumps(meta), encoding="utf-8")
 
-        self.assertFalse(tushare_io.committed_partition_intact(path))
+        self.assertTrue(tushare_io.committed_partition_intact(path))
         tushare_io.migrate_partition_identity(path)
 
         migrated = json.loads(sidecar.read_text(encoding="utf-8"))
         self.assertTrue(tushare_io.committed_partition_intact(path))
-        self.assertEqual(migrated["availability"]["available_at"], "2024-01-02T09:29:00+08:00")
-        self.assertEqual(migrated["availability"]["rule"], "observed:test")
-        encoded = json.dumps(migrated)
-        for forbidden in ("content_hash", "source_hash", "parquet_sha256"):
-            self.assertNotIn(forbidden, encoded)
+        self.assertNotIn("unknown_top_level", migrated)
+        self.assertEqual(
+            migrated["availability"],
+            {
+                "available_at": "2024-01-02T09:29:00+08:00",
+                "rule": "observed:test",
+            },
+        )
         self.assertEqual(pd.read_parquet(path)["price"].tolist(), [10.0])
 
 

@@ -22,32 +22,8 @@ from autotrade.environment.data.pit import CorruptSidecarError, concat_rows, par
 _unique_jsonl_lock = threading.Lock()
 _unique_jsonl_state: dict[tuple[Path, str], tuple[int, int, int, set[str]]] = {}
 WRITE_ID_METADATA_KEY = b"autotrade.write_id"
-FORBIDDEN_SIDECAR_KEYS = frozenset({"content_hash", "source_hash", "parquet_sha256"})
-
-
-def _contains_forbidden_sidecar_key(value: Any) -> bool:
-    if isinstance(value, dict):
-        return any(
-            str(key) in FORBIDDEN_SIDECAR_KEYS or _contains_forbidden_sidecar_key(item)
-            for key, item in value.items()
-        )
-    if isinstance(value, (list, tuple)):
-        return any(_contains_forbidden_sidecar_key(item) for item in value)
-    return False
-
-
-def _strip_forbidden_sidecar_keys(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {
-            key: _strip_forbidden_sidecar_keys(item)
-            for key, item in value.items()
-            if str(key) not in FORBIDDEN_SIDECAR_KEYS
-        }
-    if isinstance(value, list):
-        return [_strip_forbidden_sidecar_keys(item) for item in value]
-    if isinstance(value, tuple):
-        return tuple(_strip_forbidden_sidecar_keys(item) for item in value)
-    return value
+MIGRATION_SIDECAR_FIELDS = ("api_name", "params", "fields", "fetched_at", "format")
+MIGRATION_AVAILABILITY_FIELDS = ("matched_at", "available_at", "rule", "landing_job", "row_count")
 
 
 def parquet_write_id(path: Path) -> str:
@@ -88,9 +64,9 @@ def frames_content_equal(old_df: pd.DataFrame, new_df: pd.DataFrame) -> bool:
 def _published_frame_equals(path: Path, df: pd.DataFrame) -> bool:
     """Whether the already-published partition holds exactly this payload.
 
-    Item 5 leaves no stored digest to compare, so the decision is made on the
-    content itself. Only called when there is landing evidence to preserve, so
-    the extra read stays off the bulk download path."""
+    The decision is made on the full content itself. Only called when there is
+    landing evidence to preserve, so the extra read stays off the bulk download
+    path."""
     if not path.exists():
         return False
     try:
@@ -109,8 +85,6 @@ def write_parquet(
     extra_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Atomically publish one Parquet/sidecar pair with a shared UUID identity."""
-    if _contains_forbidden_sidecar_key(params) or _contains_forbidden_sidecar_key(extra_metadata):
-        raise ValueError("sidecar metadata must use the UUID commit identity")
     path.parent.mkdir(parents=True, exist_ok=True)
     meta_path = path.with_suffix(path.suffix + ".meta.json")
     previous_meta: dict[str, Any] = {}
@@ -238,15 +212,20 @@ def committed_partition_intact(path: Path) -> bool:
         meta = parquet_meta(path)
     except CorruptSidecarError:
         return False
-    if (
-        not meta
-        or not isinstance(meta.get("row_count"), int)
-        or _contains_forbidden_sidecar_key(meta)
-    ):
+    if not meta or type(meta.get("row_count")) is not int:
         return False
     footer_id = parquet_write_id(path)
     sidecar_id = str(meta.get("write_id") or "")
-    return bool(footer_id and sidecar_id == footer_id and int(meta["row_count"]) == parquet_rows(path))
+    try:
+        footer_uuid = uuid.UUID(footer_id)
+        row_count = parquet_rows(path)
+    except (ValueError, AttributeError, OSError, pa.ArrowException):
+        return False
+    return bool(
+        str(footer_uuid) == footer_id
+        and sidecar_id == footer_id
+        and meta["row_count"] == row_count
+    )
 
 
 def migrate_partition_identity(path: Path) -> str:
@@ -260,11 +239,20 @@ def migrate_partition_identity(path: Path) -> str:
     table = table.replace_schema_metadata(schema_metadata)
     tmp = path.with_name(f".{path.name}.{write_id}.tmp")
     pq.write_table(table, tmp)
-    preserved = _strip_forbidden_sidecar_keys({
+    preserved = {
         key: old_meta[key]
-        for key in ("api_name", "params", "fields", "fetched_at", "format", "availability")
+        for key in MIGRATION_SIDECAR_FIELDS
         if key in old_meta
-    })
+    }
+    old_availability = old_meta.get("availability")
+    if isinstance(old_availability, dict):
+        availability = {
+            key: old_availability[key]
+            for key in MIGRATION_AVAILABILITY_FIELDS
+            if key in old_availability
+        }
+        if availability:
+            preserved["availability"] = availability
     preserved.update(write_id=write_id, row_count=int(table.num_rows), format="parquet")
     sidecar = path.with_suffix(path.suffix + ".meta.json")
     sidecar_tmp = sidecar.with_name(f".{sidecar.name}.{write_id}.tmp")
