@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from collections.abc import Mapping
 from pathlib import Path
@@ -288,6 +289,10 @@ def test_explore_write_failure_does_not_finish_parent(tmp_path: Path) -> None:
             {"role": "developer", "task": "write then fail"},
         )
     )
+    assert dispatched.get("status") == "started"
+    finished = runner._wait_explore_jobs()
+    assert finished
+    dispatched = finished[-1]
     value = dispatched["value"]
     assert dispatched["ok"] is False
     assert isinstance(value, dict)
@@ -377,7 +382,9 @@ def test_runner_attaches_explore_events_to_its_sink() -> None:
     dispatched = runner._dispatch_explore(
         ToolCall("e1", "explore", {"role": "auditor", "task": "read schema"})
     )
-    assert dispatched.get("ok") is True
+    assert dispatched.get("status") == "started"
+    finished = runner._wait_explore_jobs()
+    assert finished and finished[-1]["ok"] is True
     assert "explore_task" in events
     assert "explore" in events
 
@@ -1072,3 +1079,68 @@ def test_explore_thinking_only_reply_does_not_finish_the_child() -> None:
     assert result["status"] == "completed"
     assert result["summary"] == "done after thinking"
     assert result["llm_calls"] == 2
+
+
+class _GateLLM:
+    model = "child"
+    provider = "test"
+    context_window_tokens = 128000
+
+    def __init__(self, started: threading.Event, release: threading.Event) -> None:
+        self.started = started
+        self.release = release
+
+    def complete(self, messages, **kwargs):
+        self.started.set()
+        if not self.release.wait(3):
+            raise TimeoutError("explore gate")
+        return ProviderResponse(content="child done")
+
+
+def test_parent_session_continues_before_explore_finishes() -> None:
+    started = threading.Event()
+    release = threading.Event()
+    finish = _FinishStub("finish_fold")
+    inner = ScriptedLLM(
+        [
+            ProviderResponse(
+                tool_calls=(
+                    ToolCall(
+                        "e1",
+                        "explore",
+                        {"role": "auditor", "task": "slow look"},
+                    ),
+                )
+            ),
+            ProviderResponse(tool_calls=(ToolCall("f1", "finish_fold", {}),)),
+        ]
+    )
+    parent_calls = {"n": 0}
+
+    class _ParentLLM:
+        model = "parent"
+        provider = "test"
+        context_window_tokens = 128000
+
+        def complete(self, messages, **kwargs):
+            parent_calls["n"] += 1
+            if parent_calls["n"] == 2:
+                assert started.wait(3)
+                assert not release.is_set()
+                release.set()
+            return inner.complete(messages, **kwargs)
+
+    runner = AgentSessionRunner(
+        llm=_ParentLLM(),
+        tools=ToolRegistry([finish]),
+        system_prompt="fold",
+        config=_fold_config(),
+        explore=ExploreSubAgentEngine(
+            llm=_GateLLM(started, release),
+            tools=ToolRegistry([DeclaredReadOnlyShell()]),
+        ),
+    )
+    result = runner.run("go")
+    assert result.status == "finished"
+    assert finish.invoked == 1
+    assert parent_calls["n"] == 2

@@ -32,14 +32,30 @@ const KIND_LABELS = {
 };
 
 function sessionDisplayKey(session) {
-  return (
-    (session && (session.display_key || session.label || session.key)) || ""
-  );
+  if (!session) return "";
+  if (session.kind === "fold") {
+    const period = String(session.label || "").trim();
+    const epoch = String(session.epoch_id || "");
+    if (period && epoch) return `${epoch}/${period}`;
+    if (period) return period;
+    const display = String(session.display_key || "");
+    if (display && !display.includes("fold_ref_")) return display;
+    return "Fold";
+  }
+  if (session.kind === "meta_learning") {
+    const epoch = String(session.epoch_id || "");
+    return epoch ? `${epoch}/元学习` : "元学习";
+  }
+  if (session.kind === "heldout") return "Held-out";
+  const display = String(session.display_key || session.label || "");
+  return display.includes("fold_ref_") || display.includes("meta_ref_")
+    ? ""
+    : display;
 }
 
 function sessionListLabel(session) {
   if (session.kind === "fold")
-    return String(session.label || session.fold_ref || "Fold");
+    return String(session.label || "Fold");
   if (
     session.kind === "meta_learning" &&
     Number(session.trigger_after_folds || 0) > 0
@@ -52,7 +68,7 @@ function foldPeriodLabel(detail, foldRef) {
   const hit = ((detail && detail.sessions) || []).find(
     (session) => session.fold_ref === foldRef,
   );
-  return (hit && hit.label) || foldRef || "—";
+  return (hit && hit.label) || "—";
 }
 const ENVIRONMENT_STAGE_LABELS = {
   preparing_session: "准备会话",
@@ -1397,7 +1413,9 @@ function experimentCard(item) {
       "div",
       { class: "meta-line" },
       `创建 ${fmtTs(item.created_at)}`,
-      item.current_session ? ` ｜ 当前 ${item.current_session}` : "",
+      item.current_session_label || item.current_session
+        ? ` ｜ 当前 ${item.current_session_label || item.current_session}`
+        : "",
       item.error ? ` ｜ ${item.error}` : "",
     ),
   );
@@ -3761,12 +3779,11 @@ function fmtTokens(count) {
   return `${n} tokens`;
 }
 
-function statsChipsRow(stats, detail) {
+function statsChipsRow(stats, _detail) {
   const counts = { ...(stats.counts || {}), ...(stats.tool_counts || {}) };
   const chips = el("div", { class: "stats-chips" });
   const labelled = new Set();
   const subagentTasks = Number(stats.subagent_tasks) || 0;
-  const params = (detail && detail.params) || {};
   for (const [key, label] of STAT_CHIPS) {
     labelled.add(key);
     if (counts[key])
@@ -3777,13 +3794,9 @@ function statsChipsRow(stats, detail) {
       );
   }
   for (const [tool, count] of Object.entries(stats.tool_counts || {})) {
-    if (!labelled.has(tool))
+    if (!labelled.has(tool) && tool !== "explore" && tool !== "todo")
       chips.append(el("span", { class: "stat-chip" }, `${tool} ${count}`));
   }
-  if (stats.active_tool)
-    chips.append(
-      el("span", { class: "stat-chip" }, `执行中 ${stats.active_tool}`),
-    );
   if (stats.llm_prompt_tokens || stats.llm_completion_tokens) {
     chips.append(
       el(
@@ -3821,14 +3834,6 @@ function statsChipsRow(stats, detail) {
       ),
     );
   }
-  const effort =
-    params.no_thinking || stats.no_thinking
-      ? "off"
-      : params.reasoning_effort || stats.reasoning_effort;
-  if (effort)
-    chips.append(
-      el("span", { class: "stat-chip" }, `推理 ${effort}`),
-    );
   return chips;
 }
 
@@ -4018,6 +4023,7 @@ function liveTracePanel(detail, session) {
         truncated: Boolean(page.history_truncated),
         eof: streamDone,
         previous: lastBlocks,
+        detail,
       });
       if (auto.checked) box.scrollTop = box.scrollHeight;
       if (claimStream) openStream(Number(page.next_offset) || 0);
@@ -4198,7 +4204,24 @@ const SUBAGENT_STATUS_LABELS = {
   cancelled: "已取消",
 };
 
-function renderTraceBlocks(box, blocks, { truncated, eof, previous } = {}) {
+function isRunningSubagent(block) {
+  if (!block || block.kind !== "subagent") return false;
+  if (String(block.phase || "") === "ended") return false;
+  const status = String(block.status || "");
+  return !{"completed":1,"timeout":1,"error":1,"cancelled":1}[status];
+}
+
+function orderTraceBlocks(blocks) {
+  const rest = [];
+  const running = [];
+  for (const block of blocks || []) {
+    if (isRunningSubagent(block)) running.push(block);
+    else rest.push(block);
+  }
+  return { rest, running };
+}
+
+function renderTraceBlocks(box, blocks, { truncated, eof, previous, detail } = {}) {
   const serialized = JSON.stringify({
     blocks: blocks || [],
     truncated: Boolean(truncated),
@@ -4220,25 +4243,31 @@ function renderTraceBlocks(box, blocks, { truncated, eof, previous } = {}) {
       ),
     );
   }
-  (blocks || []).forEach((block, index) => {
-    const node = traceBlockNode(block, index);
+  const ordered = orderTraceBlocks(blocks);
+  const appendNode = (block, index, docked) => {
+    const node = traceBlockNode(block, index, detail);
+    if (docked) node.classList.add("docked");
     for (const details of node.querySelectorAll("details[data-key]")) {
       if (open.has(details.dataset.key)) details.open = true;
     }
     fragment.append(node);
-  });
+  };
+  ordered.rest.forEach((block, index) => appendNode(block, index, false));
   if (eof) fragment.append(el("div", { class: "hint" }, "—— trace 结束 ——"));
+  ordered.running.forEach((block, index) =>
+    appendNode(block, ordered.rest.length + index, true),
+  );
   box.replaceChildren(fragment);
   return serialized;
 }
 
-function traceBlockNode(block, index) {
+function traceBlockNode(block, index, detail) {
   const kind = String((block && block.kind) || "");
   const node = el("div", { class: `trace-block ${kind}` });
   try {
-    if (kind === "agent_output") renderAgentOutputBlock(node, block);
+    if (kind === "agent_output") renderAgentOutputBlock(node, block, detail);
     else if (kind === "tool_group") renderToolGroupBlock(node, block, index);
-    else if (kind === "subagent") renderSubagentBlock(node, block);
+    else if (kind === "subagent") renderSubagentBlock(node, block, detail);
     else if (kind === "user") renderUserBlock(node, block);
     else node.append(el("div", { class: "hint" }, "未知展示块"));
   } catch {
@@ -4247,12 +4276,23 @@ function traceBlockNode(block, index) {
   return node;
 }
 
-function renderAgentOutputBlock(node, block) {
+function parentReasoningLabel(detail) {
+  const params = (detail && detail.params) || {};
+  if (params.no_thinking) return "off";
+  return params.reasoning_effort || "";
+}
+
+function renderAgentOutputBlock(node, block, detail) {
+  const effort = parentReasoningLabel(detail);
   node.append(
     el(
       "div",
       { class: "head" },
-      el("span", { class: "type agent_output" }, "Agent"),
+      el(
+        "span",
+        { class: "type agent_output" },
+        effort ? `Agent · 推理 ${effort}` : "Agent",
+      ),
       block.ts ? el("span", {}, fmtTsTime(block.ts)) : null,
     ),
   );
@@ -4286,6 +4326,15 @@ function renderToolGroupBlock(node, block, index) {
     ),
     details,
   );
+  const todos = Array.isArray(block.todos) ? block.todos : [];
+  if (todos.length)
+    node.append(
+      lazyDetails(
+        `TODO ${todos.length} 项`,
+        () => todoListNode(todos),
+        `todo:${index}`,
+      ),
+    );
 }
 
 function subagentMetaLine(block) {
@@ -4298,30 +4347,36 @@ function subagentMetaLine(block) {
   return parts.join(" · ");
 }
 
-function renderSubagentBlock(node, block) {
+function renderSubagentBlock(node, block, detail) {
   const status = String(block.status || block.phase || "started");
   const phase = String(block.phase || "");
-  const label =
+  const statusLabel =
     phase === "ended" ||
     status === "completed" ||
     status === "timeout" ||
     status === "error" ||
     status === "cancelled"
-      ? `🧩 子代理 ${SUBAGENT_STATUS_LABELS[status] || status}`
-      : `🧩 子代理 ${SUBAGENT_STATUS_LABELS[status] || "已启动"}`;
+      ? SUBAGENT_STATUS_LABELS[status] || status
+      : SUBAGENT_STATUS_LABELS[status] || "进行中";
+  const thinking =
+    block.thinking && block.thinking !== "inherit"
+      ? block.thinking
+      : parentReasoningLabel(detail);
+  const title = ["🧩 子代理", block.role, block.model, thinking, statusLabel]
+    .filter(Boolean)
+    .join(" ");
   const key = `sub:${block.task_id || ""}:${phase || status}`;
-  const meta = subagentMetaLine(block);
   node.append(
     el(
       "div",
       { class: "head" },
-      el("span", { class: `type subagent ${status}` }, label),
-      block.description
-        ? el("span", {}, String(block.description))
-        : block.task_id
-          ? el("span", {}, String(block.task_id))
+      el("span", { class: `type subagent ${status}` }, title),
+      block.description ? el("span", {}, String(block.description)) : null,
+      block.inherit_context === true
+        ? el("span", { class: "hint" }, "继承上下文")
+        : block.inherit_context === false
+          ? el("span", { class: "hint" }, "独立上下文")
           : null,
-      meta ? el("span", { class: "hint" }, meta) : null,
       block.ts ? el("span", {}, fmtTsTime(block.ts)) : null,
     ),
     lazyDetails("详情", () => subagentDetailNode(block), key),
@@ -4354,6 +4409,38 @@ function toolGroupTitle(block) {
   return bits.join(" · ");
 }
 
+const TODO_STATUS_LABELS = {
+  pending: "待办",
+  in_progress: "进行中",
+  completed: "完成",
+  deleted: "已删",
+};
+
+function todoListNode(todos) {
+  const list = el("div", { class: "trace-todo-list" });
+  for (const item of todos || []) {
+    const status = String(item.status || "pending");
+    list.append(
+      el(
+        "div",
+        { class: `todo-item ${status}` },
+        el(
+          "span",
+          { class: "todo-status" },
+          TODO_STATUS_LABELS[status] || status,
+        ),
+        el("span", {}, `#${item.id} ${item.subject || ""}`),
+        item.description
+          ? el("div", { class: "hint" }, String(item.description))
+          : null,
+      ),
+    );
+  }
+  if (!list.childNodes.length)
+    list.append(el("div", { class: "hint" }, "暂无 TODO"));
+  return list;
+}
+
 function toolRowsNode(tools) {
   const list = el("div", { class: "trace-tool-list" });
   for (const row of tools || []) {
@@ -4382,6 +4469,8 @@ function subagentDetailNode(block) {
     body.append(el("div", { class: "hint warn" }, `错误：${String(block.error).slice(0, 240)}`));
   if (Array.isArray(block.tools) && block.tools.length)
     body.append(toolRowsNode(block.tools));
+  if (Array.isArray(block.todos) && block.todos.length)
+    body.append(todoListNode(block.todos));
   if (!body.childNodes.length) body.append(el("div", { class: "hint" }, "无更多详情"));
   return body;
 }

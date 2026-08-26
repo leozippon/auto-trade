@@ -386,6 +386,7 @@ def summarize_experiment(directory: Path) -> dict[str, object]:
             {
                 "created_at": _created_at(directory, params),
                 "current_session": status.get("session_key"),
+                "current_session_label": status.get("session_label"),
                 "session_started_at": status.get("session_started_at"),
                 "environment_stage": status.get("environment_stage"),
                 "environment_stage_started_at": status.get("environment_stage_started_at"),

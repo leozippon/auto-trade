@@ -165,6 +165,19 @@ class PublicIdentity:
             raise KeyError("unknown session key")
         return public + suffix
 
+    def session_display_key(self, raw_key: object) -> str:
+        text = _required_text(raw_key, "session key")
+        base, suffix = _split_suffix(text)
+        raw = self._public_to_raw.get(base, base)
+        if raw not in self._raw_to_public:
+            raise KeyError("unknown session key")
+        entry = next(item for item in self.sessions if item.get("_raw_key") == raw)
+        projected = self.public_session(entry, heldout_revealed=True)
+        display = str(projected.get("display_key") or projected.get("label") or "")
+        if not display:
+            raise KeyError("session has no display key")
+        return display + suffix
+
     def raw_session_key(self, public_key: object) -> str:
         text = _required_text(public_key, "public session key")
         base, suffix = _split_suffix(text)
@@ -263,6 +276,10 @@ class PublicIdentity:
         session_key = status.get("session_key")
         if isinstance(session_key, str) and session_key:
             out["session_key"] = self.public_session_key(session_key)
+            try:
+                out["session_label"] = self.session_display_key(session_key)
+            except (KeyError, ValueError):
+                pass
         question_key = status.get("question_key")
         if isinstance(question_key, str) and question_key:
             out["question_key"] = self.public_session_key(question_key)

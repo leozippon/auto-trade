@@ -356,6 +356,7 @@ class ExploreSubAgentEngine(SessionTimeBudgetAware):
         inherit_context: bool = False,
         parent_messages: Sequence[ChatMessage] | None = None,
         description: str = "",
+        task_id: str | None = None,
     ) -> dict[str, object]:
         if not task.strip():
             raise ValueError("Explore task cannot be empty")
@@ -366,7 +367,7 @@ class ExploreSubAgentEngine(SessionTimeBudgetAware):
             if isinstance(max_rounds, int) and max_rounds > 0
             else self.config.max_rounds
         )
-        task_id = f"explore_{uuid.uuid4().hex[:12]}"
+        task_id = task_id or f"explore_{uuid.uuid4().hex[:12]}"
         child_cap = (
             time.monotonic() + self.config.deadline_seconds
             if self.config.deadline_seconds is not None

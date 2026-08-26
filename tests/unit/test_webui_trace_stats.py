@@ -188,14 +188,17 @@ def test_trace_stats_last_main_llm_prompt_ignores_explore_calls(
 
 def test_subagent_trace_card_shows_model_thinking_and_context() -> None:
     script = APP_JS.read_text(encoding="utf-8")
-    source = script.split("function subagentMetaLine(block)", 1)[1].split(
+    source = script.split("function renderSubagentBlock(", 1)[1].split(
         "\nfunction ", 1
     )[0]
-    assert "思考" in source
+    assert "🧩 子代理" in source
+    assert "block.role" in source
+    assert "block.model" in source
+    assert "parentReasoningLabel" in source
     assert "继承上下文" in source
     assert "独立上下文" in source
-    assert "block.model" in source
-    assert "block.role" in source
+    assert "orderTraceBlocks" in script
+    assert "docked" in source or "docked" in script
 
 
 def test_stats_chips_show_subagent_near_llm_only_when_positive() -> None:
@@ -205,7 +208,8 @@ def test_stats_chips_show_subagent_near_llm_only_when_positive() -> None:
     assert "🧩 子代理" in source
     assert 'key === "llm_call" && subagentTasks' in source
     assert "上下文" in source
-    assert "推理" in source
+    assert "推理" not in source
+    assert "执行中" not in source
     assert "last_llm_prompt_tokens" in source
     assert "instruction" not in source
     assert ".task " not in source
@@ -456,6 +460,50 @@ def test_project_subagent_exposes_model_thinking_and_inherit_context() -> None:
     assert started["thinking"] == "low"
     assert started["inherit_context"] is True
     assert started["description"] == "schema audit"
+
+
+def test_project_todo_tools_attach_foldable_items() -> None:
+    blocks = project_trace_blocks(
+        [
+            {"event_type": "llm_call", "content": "plan"},
+            {
+                "event_type": "tool_call",
+                "tool": "todo",
+                "result": {
+                    "ok": True,
+                    "value": {
+                        "item": {
+                            "id": 1,
+                            "subject": "check PIT",
+                            "status": "in_progress",
+                            "description": "units",
+                        }
+                    },
+                },
+            },
+            {
+                "event_type": "tool_call",
+                "tool": "todo",
+                "result": {
+                    "ok": True,
+                    "value": {
+                        "items": [
+                            {"id": 1, "subject": "check PIT", "status": "completed"},
+                            {"id": 2, "subject": "write factor", "status": "pending"},
+                        ]
+                    },
+                },
+            },
+        ]
+    )
+    group = next(block for block in blocks if block.get("kind") == "tool_group")
+    assert group["todos"] == [
+        {"id": 1, "subject": "check PIT", "status": "completed"},
+        {"id": 2, "subject": "write factor", "status": "pending"},
+    ]
+    script = APP_JS.read_text(encoding="utf-8")
+    assert "function todoListNode(" in script
+    assert "TODO" in script
 
 
 def test_project_legacy_subagent_digest_is_ignored() -> None:

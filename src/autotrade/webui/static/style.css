@@ -1151,6 +1151,28 @@ textarea.directive.inject-input {
 .trace-block .type.subagent.error {
  color: var(--bad);
 }
+.trace-block.subagent.docked {
+ position: sticky;
+ bottom: 0;
+ z-index: 3;
+ box-shadow: 0 -6px 16px color-mix(in srgb, var(--bg) 70%, transparent);
+}
+.trace-todo-list {
+ display: flex;
+ flex-direction: column;
+ gap: 0.3rem;
+ margin-top: 0.4rem;
+}
+.todo-item {
+ display: flex;
+ flex-wrap: wrap;
+ gap: 0.4rem;
+ align-items: baseline;
+}
+.todo-status {
+ font-size: 0.78rem;
+ color: var(--muted);
+}
 .trace-block .type.user {
  color: var(--text);
 }

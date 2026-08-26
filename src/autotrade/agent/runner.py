@@ -23,7 +23,7 @@ import re
 import threading
 import uuid
 from collections.abc import Callable, Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
@@ -66,6 +66,7 @@ from .explore import (
     EXPLORE_ROLES,
     EXPLORE_THINKING_LEVELS,
     ExploreSubAgentEngine,
+    _copy_chat_message,
     normalize_explore_thinking,
 )
 from .prompts import (
@@ -224,6 +225,16 @@ class AgentSessionConfig:
             )
 
 
+@dataclass
+class _ExploreJob:
+    task_id: str
+    call_id: str
+    role: str
+    attempt: int
+    future: Future
+    record: dict[str, object] | None = None
+
+
 @dataclass(frozen=True)
 class AgentSessionResult:
     conversation_id: str
@@ -293,6 +304,8 @@ class AgentSessionRunner:
         self._wrap_up_sent = False
         self._explore_attempts = 0
         self._explored_roles: set[str] = set()
+        self._explore_jobs: list[_ExploreJob] = []
+        self._explore_pool: ThreadPoolExecutor | None = None
         self._validate_capability_boundary()
 
     def run(self, instruction: str) -> AgentSessionResult:
@@ -330,9 +343,9 @@ class AgentSessionRunner:
         while llm_calls < self.config.max_llm_calls:
             remaining = time_budget.remaining()
             if remaining <= 0:
-                self._emit(
-                    "session_end",
+                self._close_session(
                     {"status": "deadline_exceeded", "llm_calls": llm_calls},
+                    explore_totals=explore_totals,
                 )
                 raise AgentSessionDeadlineExceeded(
                     conversation_id=self.conversation_id, llm_calls=llm_calls
@@ -360,6 +373,9 @@ class AgentSessionRunner:
             messages = self._clear_stale_tool_results(messages)
             messages = self._trim(messages)
             provider_tools = self._provider_tools()
+            messages, explore_totals = self._append_explore_observations(
+                messages, explore_totals
+            )
             messages = self._apply_inbox(
                 messages, safe_point=INBOX_SAFE_BEFORE_LLM
             )
@@ -414,25 +430,25 @@ class AgentSessionRunner:
                             context_overflow_recovery_used = True
                             llm_failure_streak = 0
                             continue
-                    self._emit(
-                        "session_end",
+                    self._close_session(
                         {"status": "context_window_exceeded", "llm_calls": llm_calls},
+                        explore_totals=explore_totals,
                     )
                     raise RuntimeError(
                         "Agent context window cannot be reduced safely"
                     ) from exc
                 if isinstance(exc, TimeoutError) or time_budget.remaining() <= 0:
-                    self._emit(
-                        "session_end",
+                    self._close_session(
                         {"status": "deadline_exceeded", "llm_calls": llm_calls},
+                        explore_totals=explore_totals,
                     )
                     raise AgentSessionDeadlineExceeded(
                         conversation_id=self.conversation_id, llm_calls=llm_calls
                     ) from exc
                 if llm_failure_streak >= _LLM_FAILURE_CIRCUIT:
-                    self._emit(
-                        "session_end",
+                    self._close_session(
                         {"status": "llm_unavailable", "llm_calls": llm_calls},
+                        explore_totals=explore_totals,
                     )
                     raise RuntimeError(
                         "Agent language model unavailable after consecutive failures"
@@ -548,19 +564,20 @@ class AgentSessionRunner:
             )
 
             if self.tools.finished:
+                _, explore_totals = self._append_explore_observations(
+                    messages, explore_totals, wait=True
+                )
                 finish = dict(self.tools.finish_value or {})
                 token_usage = _token_usage_summary(usage, explore_totals)
-                self._emit(
-                    "session_end",
+                self._close_session(
                     {
                         "status": "finished",
                         "llm_calls": llm_calls,
                         "steps_used": accepted_steps,
                         "finish": finish,
-                        # Cache-hit ratio and the Explore roll-up are the levers
-                        # for tuning trimming/compaction and for costing a run.
                         "token_usage": token_usage,
                     },
+                    explore_totals=explore_totals,
                 )
                 return AgentSessionResult(
                     conversation_id=self.conversation_id,
@@ -584,13 +601,13 @@ class AgentSessionRunner:
                 messages.append(ChatMessage("user", STEP_WRAP_UP_PROMPT))
                 step_wrap_up_sent = True
 
-        self._emit(
-            "session_end",
+        self._close_session(
             {
                 "status": "call_budget_exhausted",
                 "llm_calls": self.config.max_llm_calls,
                 "steps_used": accepted_steps,
             },
+            explore_totals=explore_totals,
         )
         raise RuntimeError("Agent exceeded the session call budget")
 
@@ -838,6 +855,8 @@ class AgentSessionRunner:
                 }
             if call.name == "explore":
                 return call, self._dispatch_explore(call)
+            if call.name in _TERMINAL_TOOLS:
+                self._wait_explore_jobs()
             record = self.tools.invoke(
                 call.name,
                 call.arguments,
@@ -848,18 +867,11 @@ class AgentSessionRunner:
                 self._activate_hard_finalization_if_ready(time_budget.remaining())
             return call, record
 
-        if self._is_parallel_explore_batch(calls) or self._is_parallel_readonly_batch(
-            calls
-        ):
-            workers = (
-                self._explore_concurrency(len(calls))
-                if self._is_parallel_explore_batch(calls)
-                else min(len(calls), 4)
-            )
+        if self._is_parallel_readonly_batch(calls):
             slots: list[tuple[ToolCall, dict[str, object]] | None] = [None] * len(
                 calls
             )
-            with ThreadPoolExecutor(max_workers=workers) as executor:
+            with ThreadPoolExecutor(max_workers=min(len(calls), 4)) as executor:
                 futures = {
                     executor.submit(run_one, index): index
                     for index in range(len(calls))
@@ -894,15 +906,6 @@ class AgentSessionRunner:
             if call.name in _TERMINAL_TOOLS and self.tools.finished:
                 terminal_seen = True
         return results, None
-
-    def _is_parallel_explore_batch(self, calls: tuple[ToolCall, ...]) -> bool:
-        return len(calls) > 1 and all(call.name == "explore" for call in calls)
-
-    def _explore_concurrency(self, count: int) -> int:
-        cap = DEFAULT_EXPLORE_MAX_CONCURRENT
-        if self.explore is not None:
-            cap = self.explore.config.max_concurrent
-        return max(1, min(count, cap))
 
     def _is_parallel_readonly_batch(self, calls: tuple[ToolCall, ...]) -> bool:
         return len(calls) > 1 and all(
@@ -1040,31 +1043,160 @@ class AgentSessionRunner:
             }
             self._emit("explore_attempt", {"ok": False, "error": record["error"]})
             return record
+        live = [job for job in self._explore_jobs if job.record is None]
+        cap = (
+            self.explore.config.max_concurrent
+            if self.explore is not None
+            else DEFAULT_EXPLORE_MAX_CONCURRENT
+        )
+        if len(live) >= cap:
+            record = {
+                "ok": False,
+                "error": f"explore concurrency limit ({cap})",
+            }
+            self._emit("explore_attempt", {"ok": False, "error": record["error"]})
+            return record
         with self._event_lock:
             self._explore_attempts += 1
             self._explored_roles.add(raw_role)
             attempt = self._explore_attempts
-        result = self.explore.run(
+        task_id = f"explore_{uuid.uuid4().hex[:12]}"
+        parent_messages = None
+        if inherit_raw:
+            live_messages = getattr(self, "_live_messages", None)
+            if live_messages:
+                parent_messages = tuple(
+                    _copy_chat_message(message) for message in live_messages
+                )
+        if self._explore_pool is None:
+            self._explore_pool = ThreadPoolExecutor(
+                max_workers=max(1, cap),
+                thread_name_prefix="explore",
+            )
+        future = self._explore_pool.submit(
+            self.explore.run,
             task,
             role=raw_role,
             max_rounds=max_rounds,
             parent_call_id=call.id,
             thinking=thinking,
             inherit_context=bool(inherit_raw),
-            parent_messages=getattr(self, "_live_messages", None),
+            parent_messages=parent_messages,
             description=description.strip(),
+            task_id=task_id,
         )
-        ok = result.get("status") == "completed"
-        self._emit(
-            "explore_attempt",
-            {
-                "attempt": attempt,
-                "role": raw_role,
+        self._explore_jobs.append(
+            _ExploreJob(
+                task_id=task_id,
+                call_id=call.id,
+                role=raw_role,
+                attempt=attempt,
+                future=future,
+            )
+        )
+        return {
+            "ok": True,
+            "status": "started",
+            "background": True,
+            "task_id": task_id,
+            "role": raw_role,
+            "attempt": attempt,
+        }
+
+    def _append_explore_observations(
+        self,
+        messages: list[ChatMessage],
+        explore_totals: dict[str, int] | None,
+        *,
+        wait: bool = False,
+    ) -> tuple[list[ChatMessage], dict[str, int] | None]:
+        for record in self._collect_finished_explores(wait=wait):
+            value = record.get("value")
+            payload = {
+                "observation": "explore_completed",
+                "ok": record.get("ok"),
+                "status": record.get("status"),
+                "task_id": record.get("task_id"),
+                "role": record.get("role"),
+            }
+            if isinstance(value, dict):
+                payload["summary"] = value.get("summary") or ""
+                if value.get("error"):
+                    payload["error"] = value.get("error")
+                if explore_totals is None:
+                    explore_totals = {
+                        "llm_calls": 0,
+                        "prompt_tokens": 0,
+                        "completion_tokens": 0,
+                        "total_tokens": 0,
+                    }
+                _accumulate_explore_usage(explore_totals, value)
+            messages.append(
+                ChatMessage(
+                    "user",
+                    json.dumps(payload, ensure_ascii=False, default=str),
+                )
+            )
+            self._remember_observation("explore", record)
+        return messages, explore_totals
+
+    def _wait_explore_jobs(self) -> list[dict[str, object]]:
+        return self._collect_finished_explores(wait=True)
+
+    def _collect_finished_explores(
+        self, *, wait: bool = False
+    ) -> list[dict[str, object]]:
+        finished: list[dict[str, object]] = []
+        for job in self._explore_jobs:
+            if job.record is not None:
+                continue
+            if not wait and not job.future.done():
+                continue
+            try:
+                result = job.future.result()
+            except Exception as exc:  # noqa: BLE001 - child failure stays an observation
+                result = {
+                    "task_id": job.task_id,
+                    "status": "error",
+                    "error": safe_error_summary(exc),
+                    "role": job.role,
+                }
+            ok = result.get("status") == "completed" if isinstance(result, dict) else False
+            record = {
                 "ok": ok,
-                "status": result.get("status"),
-            },
-        )
-        return {"ok": ok, "value": result}
+                "status": result.get("status") if isinstance(result, dict) else "error",
+                "task_id": job.task_id,
+                "role": job.role,
+                "value": result,
+            }
+            job.record = record
+            self._emit(
+                "explore_attempt",
+                {
+                    "attempt": job.attempt,
+                    "role": job.role,
+                    "ok": ok,
+                    "status": record["status"],
+                    "task_id": job.task_id,
+                },
+            )
+            finished.append(record)
+        return finished
+
+    def _close_session(
+        self,
+        payload: dict[str, object],
+        *,
+        explore_totals: dict[str, int] | None = None,
+    ) -> None:
+        self._wait_explore_jobs()
+        if explore_totals is not None and "token_usage" not in payload:
+            payload = dict(payload)
+        self._emit("session_end", payload)
+        pool = self._explore_pool
+        self._explore_pool = None
+        if pool is not None:
+            pool.shutdown(wait=True)
 
     def _compact_if_needed(
         self,

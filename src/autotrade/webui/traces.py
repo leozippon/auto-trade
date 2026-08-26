@@ -179,6 +179,7 @@ def project_trace_blocks(events: object) -> list[dict[str, object]]:
     blocks: list[dict[str, object]] = []
     interval = _Interval()
     subagents: dict[str, _SubagentState] = {}
+    todo_state: dict[int, dict[str, object]] = {}
     seq = 0
     for item in events:
         seq += 1
@@ -187,7 +188,7 @@ def project_trace_blocks(events: object) -> list[dict[str, object]]:
         event: dict[str, object] = item
         kind = str(event.get("event_type") or "")
         if kind == "user_message":
-            blocks.extend(interval.flush())
+            blocks.extend(interval.flush(todo_state))
             blocks.append(
                 {
                     "kind": "user",
@@ -201,7 +202,7 @@ def project_trace_blocks(events: object) -> list[dict[str, object]]:
             continue
         output = _agent_output_text(event)
         if output is not None:
-            blocks.extend(interval.flush())
+            blocks.extend(interval.flush(todo_state))
             blocks.append(
                 {
                     "kind": "agent_output",
@@ -213,14 +214,16 @@ def project_trace_blocks(events: object) -> list[dict[str, object]]:
             continue
         task_id = _explore_event_task_id(event)
         if task_id is not None:
-            _observe_subagent(interval, subagents, event, task_id, seq)
+            _observe_subagent(interval, subagents, event, task_id, seq, todo_state)
             if kind in {"explore_tool", "explore_tool_started"}:
                 subagents[task_id].tools.add(event, seq)
-                _sync_subagent_fields(subagents[task_id])
+                _absorb_todo(todo_state, event)
+                _sync_subagent_fields(subagents[task_id], todo_state)
             continue
         if kind in {"tool_call_started", "tool_call"}:
             interval.tools.add(event, seq)
-    blocks.extend(interval.flush())
+            _absorb_todo(todo_state, event)
+    blocks.extend(interval.flush(todo_state))
     return blocks
 
 
@@ -536,10 +539,17 @@ class _Interval:
     def add_extra(self, event: dict[str, object], seq: int, block: dict[str, object]) -> None:
         self.extras.append((_event_ts(event), seq, block))
 
-    def flush(self) -> list[dict[str, object]]:
+    def flush(
+        self, todo_state: dict[int, dict[str, object]] | None = None
+    ) -> list[dict[str, object]]:
         items = list(self.extras)
         if self.tools:
-            items.append((self.tools.first_ts, self.tools.first_seq, self.tools.to_block()))
+            block = self.tools.to_block()
+            if todo_state is not None and any(
+                row.get("name") == "todo" for row in block["tools"]
+            ):
+                block["todos"] = _public_todos(todo_state)
+            items.append((self.tools.first_ts, self.tools.first_seq, block))
         items.sort(key=_interval_sort_key)
         self.tools = _ToolAcc()
         self.extras = []
@@ -568,6 +578,7 @@ def _observe_subagent(
     event: dict[str, object],
     task_id: str,
     seq: int,
+    todo_state: dict[int, dict[str, object]] | None = None,
 ) -> None:
     state = subagents.get(task_id)
     if state is None:
@@ -587,7 +598,7 @@ def _observe_subagent(
         state.ended_block = ended
         state.ended = True
         interval.add_extra(event, seq, ended)
-    _sync_subagent_fields(state)
+    _sync_subagent_fields(state, todo_state)
 
 
 def _subagent_block(
@@ -647,8 +658,16 @@ def _absorb_subagent_text(state: _SubagentState, event: dict[str, object]) -> No
         state.description = description.strip()[:80]
 
 
-def _sync_subagent_fields(state: _SubagentState) -> None:
+def _sync_subagent_fields(
+    state: _SubagentState,
+    todo_state: dict[int, dict[str, object]] | None = None,
+) -> None:
     rows = state.tools.as_rows()
+    todos = (
+        _public_todos(todo_state)
+        if todo_state is not None and any(row.get("name") == "todo" for row in rows)
+        else []
+    )
     for block in (state.started_block, state.ended_block):
         if block is None:
             continue
@@ -656,6 +675,8 @@ def _sync_subagent_fields(state: _SubagentState) -> None:
         block["summary"] = state.summary
         block["error"] = state.error
         block["tools"] = rows
+        if todos:
+            block["todos"] = todos
         if state.role:
             block["role"] = state.role
         if state.model:
@@ -773,4 +794,59 @@ def _interval_sort_key(item: tuple[object, int, dict[str, object]]) -> tuple[int
     if isinstance(ts, str) and ts:
         return (0, ts, seq)
     return (1, "", seq)
+
+
+def _absorb_todo(state: dict[int, dict[str, object]], event: dict[str, object]) -> None:
+    if _tool_name(event) != "todo":
+        return
+    result = event.get("result")
+    if not isinstance(result, dict):
+        return
+    value = result.get("value")
+    payload = value if isinstance(value, dict) else result
+    items = payload.get("items")
+    if isinstance(items, list):
+        state.clear()
+        for item in items:
+            row = _todo_row(item)
+            if row is not None:
+                ident = row["id"]
+                if isinstance(ident, int) and not isinstance(ident, bool):
+                    state[ident] = row
+        return
+    row = _todo_row(payload.get("item"))
+    if row is None:
+        return
+    ident = row["id"]
+    if not isinstance(ident, int) or isinstance(ident, bool):
+        return
+    if row.get("status") == "deleted":
+        state.pop(ident, None)
+        return
+    state[ident] = row
+
+
+def _todo_row(item: object) -> dict[str, object] | None:
+    if not isinstance(item, dict):
+        return None
+    raw_id = item.get("id")
+    if not isinstance(raw_id, int) or isinstance(raw_id, bool) or raw_id < 1:
+        return None
+    subject = _clip(item.get("subject"), 200)
+    if not subject:
+        return None
+    status = str(item.get("status") or "pending")
+    row: dict[str, object] = {"id": raw_id, "subject": subject, "status": status}
+    description = _clip(item.get("description"), 240)
+    if description:
+        row["description"] = description
+    return row
+
+
+def _public_todos(state: dict[int, dict[str, object]]) -> list[dict[str, object]]:
+    return [
+        dict(state[key])
+        for key in sorted(state)
+        if str(state[key].get("status") or "") != "deleted"
+    ]
 
