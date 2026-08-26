@@ -1,10 +1,13 @@
 """Per-tick Timeview: node-gated six-domain rolling, write-once parts, versioning."""
 
+import json
 import tempfile
 import unittest
 import warnings
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from pathlib import Path
+from threading import Barrier
 from unittest import mock
 from zoneinfo import ZoneInfo
 
@@ -366,6 +369,56 @@ class TimeviewTest(unittest.TestCase):
             daily = pd.read_parquet(Path(asof) / "daily")
             # 20220104 appears exactly once even after repeated refreshes.
             self.assertEqual(list(daily["trade_date"].astype(str)).count("20220104"), 1)
+
+    def test_stash_requires_a_validated_contract_before_reuse(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            stash = root / "stash"
+            stash.mkdir()
+            with self.assertRaisesRegex(RuntimeError, "no validated semantic contract"):
+                Timeview(
+                    host_dir=root / "asof",
+                    snapshot_dir=_frozen_snapshot(root),
+                    replay_frames=_replay_frames(),
+                    stash_dir=stash,
+                )
+
+    def test_concurrent_stash_part_publication_is_complete(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshot = _frozen_snapshot(root)
+            stash = root / "stash"
+            stash.mkdir()
+            # PIT backend validates and publishes this contract before Timeview
+            # receives the directory; this test isolates concurrent part I/O.
+            (stash / "contract.json").write_text(
+                json.dumps({"validated": True}), encoding="utf-8"
+            )
+            barrier = Barrier(2)
+
+            def build(index: int) -> pd.DataFrame:
+                view = Timeview(
+                    host_dir=root / f"asof_{index}",
+                    executor=FakeExecutor(),
+                    snapshot_dir=snapshot,
+                    replay_frames=_replay_frames(),
+                    stash_dir=stash,
+                )
+                barrier.wait()
+                asof, _ = view.refresh(_when("2022-01-05 09:10:00"))
+                return pd.read_parquet(Path(asof) / "daily")
+
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                frames = list(pool.map(build, range(2)))
+
+            for frame in frames:
+                self.assertEqual(
+                    set(frame["trade_date"].astype(str)), {"20211231", "20220104"}
+                )
+            published = stash / "daily" / "part_0001.parquet"
+            self.assertTrue(published.is_file())
+            self.assertEqual(len(pd.read_parquet(published)), 1)
+            self.assertEqual(list(stash.rglob("*.tmp")), [])
 
     def test_auction_rolls_at_observed_row_time_not_evening_node(self):
         with tempfile.TemporaryDirectory() as tmp:

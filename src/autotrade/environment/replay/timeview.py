@@ -22,16 +22,22 @@ narrower dependency key so minute updates do not invalidate unrelated work.
 Text bodies live under ``ctx.asof_dir/text_library``. Frozen snapshot body shards
 are hardlinked at start; replay body shards are copied only for newly visible
 ``text_index`` rows, so direct text processing has the same PIT wall as ``ctx.nl``.
+Durable part reuse is enabled only after the PIT backend directly validates the
+stash contract for the exact release, snapshot, replay slot, configuration, and
+schedule. Each part is then published under its own process lock.
 """
 
 from __future__ import annotations
 
+import fcntl
 import os
 import shutil
+import uuid
 import warnings
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
 import numpy as np
 import pandas as pd
@@ -170,6 +176,11 @@ class Timeview:
         # multiple Path.resolve() calls), so it is computed once, lazily.
         self._mapped_dir: str | None = None
         self._domains: dict[str, _DomainView] = {}
+        stash_root = Path(stash_dir) if stash_dir is not None else None
+        if stash_root is not None and not (stash_root / "contract.json").is_file():
+            raise RuntimeError(
+                f"Timeview stash has no validated semantic contract: {stash_root}"
+            )
         incremental = frozenset(incremental_domains or ())
         for name, filename, cutoff_key in _DOMAINS:
             replay = replay_frames.get(name)
@@ -180,7 +191,7 @@ class Timeview:
                 frozen_file=self.snapshot_dir / filename,
                 replay=replay if replay is not None else pd.DataFrame(),
                 incremental=name in incremental,
-                stash_dir=(Path(stash_dir) / name) if stash_dir is not None else None,
+                stash_dir=(stash_root / name) if stash_root is not None else None,
             )
         self._text = _TextView(
             out_index_dir=self.host_dir / "text_index",
@@ -442,32 +453,38 @@ class _DomainView:
     def _write_part(self, row_count: int, build: Callable[[], pd.DataFrame]) -> None:
         """Write the next part, reusing the run-level stash when one is present.
 
-        Within one run the part sequence is deterministic (fixed frozen
-        snapshot, replay frames and refresh-node schedule), and a shorter
-        ``replay_window`` replay is a strict prefix of the full one — so a
-        stashed part written by an earlier backtest is byte-identical and can
-        be hardlinked instead of sliced and re-encoded. The footer row count
-        is still compared against the newly-visible count: any mismatch means
-        the stash does not belong to this replay's inputs and the backtest
-        must fail rather than expose a wrong visibility slice.
+        The PIT backend has already bound the stash to the exact semantic
+        contract. For that fixed snapshot, replay slot, configuration, and
+        refresh schedule, a part written by an earlier backtest is identical
+        and can be hardlinked instead of sliced and re-encoded. The footer row
+        count is still compared against the newly-visible count: any mismatch
+        must fail rather than expose a wrong visibility slice. Publication and
+        reuse are serialized per part so concurrent evaluations never observe
+        a partial parquet file.
         """
         name = f"part_{self._part_seq:04d}.parquet"
         out = self.out_dir / name
         stash = self._stash_dir / name if self._stash_dir is not None else None
-        if stash is not None and stash.exists():
-            stashed_rows = int(pq.ParquetFile(stash).metadata.num_rows)
-            if stashed_rows != row_count:
-                raise RuntimeError(
-                    f"Timeview stash mismatch for domain {self.name!r} {name}: stashed "
-                    f"{stashed_rows} rows, expected {row_count}"
-                )
-            os.link(stash, out)
-        elif stash is not None:
-            self._stash_dir.mkdir(parents=True, exist_ok=True)
-            tmp = self._stash_dir / f".{name}.{os.getpid()}.tmp"
-            build().to_parquet(tmp, index=False)
-            os.replace(tmp, stash)
-            os.link(stash, out)
+        if stash is not None:
+            stash.parent.mkdir(parents=True, exist_ok=True)
+            lock = stash.parent / f".{name}.lock"
+            with _exclusive_part_lock(lock):
+                if stash.exists():
+                    stashed_rows = int(pq.ParquetFile(stash).metadata.num_rows)
+                    if stashed_rows != row_count:
+                        raise RuntimeError(
+                            f"Timeview stash mismatch for domain {self.name!r} {name}: stashed "
+                            f"{stashed_rows} rows, expected {row_count}"
+                        )
+                else:
+                    tmp = stash.parent / f".{name}.{uuid.uuid4().hex}.tmp"
+                    try:
+                        build().to_parquet(tmp, index=False)
+                        os.replace(tmp, stash)
+                    finally:
+                        if tmp.exists():
+                            tmp.unlink()
+                os.link(stash, out)
         else:
             build().to_parquet(out, index=False)
         self._part_seq += 1
@@ -642,6 +659,18 @@ class _TextView:
             if body.empty or "text_id" not in body.columns:
                 return pd.DataFrame(columns=["text_id", "body"])
             return body.loc[body["text_id"].astype(str).isin(text_ids)]
+
+
+@contextmanager
+def _exclusive_part_lock(path: Path) -> Iterator[None]:
+    """Serialize publication and validation of one shared stash part."""
+
+    with path.open("a+") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def _link_or_copy(src: Path, dst: Path) -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import stat
 from datetime import datetime
 from pathlib import Path
@@ -17,6 +18,7 @@ from autotrade.environment.nl import NLConfig
 from autotrade.environment.runtime import chmod_tree
 from autotrade.environment.strategy import StrategySchedule
 from autotrade.pipelines.config import (
+    SNAPSHOT_CACHE_FORMAT_VERSION,
     ArtifactRevision,
     EvaluationRequest,
     SnapshotBundle,
@@ -26,6 +28,7 @@ from autotrade.pipelines.pit_backend import (
     PITDailyEvaluationBackend,
     ResearchPITSnapshotProvider,
     _asof_stash_dir,
+    _bind_asof_stash_contract,
     _load_replay_frames,
 )
 
@@ -34,17 +37,25 @@ from autotrade.pipelines.pit_backend import (
 def test_real_sandbox_daily_evaluation_reads_parquet_with_default_limits(
     tmp_path: Path,
 ) -> None:
-    snapshot = tmp_path / "snapshot"
-    replay = tmp_path / "replay"
+    snapshot, replay = _pit_slot_paths(
+        tmp_path,
+        decision="sandbox",
+        replay="sandbox",
+        generation_id="generation_sandbox",
+    )
     revision = tmp_path / "revision"
-    snapshot.mkdir()
-    replay.mkdir()
     revision.mkdir()
     (snapshot / "text_library").mkdir()
     (replay / "text_library").mkdir()
     _write_domains(snapshot, replay)
     (snapshot / "manifest.json").write_text(
-        json.dumps({"snapshot_id": "snap_sandbox", "kind": "decision_input"}),
+        json.dumps(
+            {
+                "snapshot_id": "snap_sandbox",
+                "kind": "decision_input",
+                "raw_generation": {"generation_id": "generation_sandbox"},
+            }
+        ),
         encoding="utf-8",
     )
     (replay / "manifest.json").write_text(
@@ -52,9 +63,11 @@ def test_real_sandbox_daily_evaluation_reads_parquet_with_default_limits(
             {
                 "snapshot_id": "replay_sandbox",
                 "kind": "replay_slot",
+                "label": "valid",
                 "period_start": "20240102",
                 "period_end": "20240103",
                 "available_from": "2024-01-01T23:59:59+08:00",
+                "raw_generation": {"generation_id": "generation_sandbox"},
             }
         ),
         encoding="utf-8",
@@ -103,16 +116,24 @@ def generate_orders(context):
 def test_pit_daily_evaluation_rolls_all_domains_once_without_loading_future_minutes(
     tmp_path: Path,
 ) -> None:
-    snapshot = tmp_path / "snapshot"
-    replay = tmp_path / "replay"
-    snapshot.mkdir()
-    replay.mkdir()
+    snapshot, replay = _pit_slot_paths(
+        tmp_path,
+        decision="test",
+        replay="test",
+        generation_id="generation_test",
+    )
     (snapshot / "text_library").mkdir()
     (replay / "text_library").mkdir()
 
     _write_domains(snapshot, replay)
     (snapshot / "manifest.json").write_text(
-        json.dumps({"snapshot_id": "snap_test", "kind": "decision_input"}),
+        json.dumps(
+            {
+                "snapshot_id": "snap_test",
+                "kind": "decision_input",
+                "raw_generation": {"generation_id": "generation_test"},
+            }
+        ),
         encoding="utf-8",
     )
     (replay / "manifest.json").write_text(
@@ -120,9 +141,11 @@ def test_pit_daily_evaluation_rolls_all_domains_once_without_loading_future_minu
             {
                 "snapshot_id": "replay_test",
                 "kind": "replay_slot",
+                "label": "valid",
                 "period_start": "20240102",
                 "period_end": "20240103",
                 "available_from": "2024-01-01T23:59:59+08:00",
+                "raw_generation": {"generation_id": "generation_test"},
             }
         ),
         encoding="utf-8",
@@ -228,11 +251,13 @@ def generate_orders(context):
 def test_first_month_inference_can_have_empty_bars_with_long_pit_daily_history(
     tmp_path: Path,
 ) -> None:
-    snapshot = tmp_path / "snapshot"
-    replay = tmp_path / "replay"
+    snapshot, replay = _pit_slot_paths(
+        tmp_path,
+        decision="history",
+        replay="history",
+        generation_id="generation_history",
+    )
     revision = tmp_path / "revision"
-    snapshot.mkdir()
-    replay.mkdir()
     revision.mkdir()
 
     history_days = pd.bdate_range(end="2024-01-31", periods=141)
@@ -260,7 +285,13 @@ def test_first_month_inference_can_have_empty_bars_with_long_pit_daily_history(
         }
     ).to_parquet(replay / "daily.parquet", index=False)
     (snapshot / "manifest.json").write_text(
-        json.dumps({"snapshot_id": "snap_history", "kind": "decision_input"}),
+        json.dumps(
+            {
+                "snapshot_id": "snap_history",
+                "kind": "decision_input",
+                "raw_generation": {"generation_id": "generation_history"},
+            }
+        ),
         encoding="utf-8",
     )
     (replay / "manifest.json").write_text(
@@ -268,9 +299,11 @@ def test_first_month_inference_can_have_empty_bars_with_long_pit_daily_history(
             {
                 "snapshot_id": "replay_history",
                 "kind": "replay_slot",
+                "label": "valid",
                 "period_start": "20240201",
                 "period_end": "20240202",
                 "available_from": "2024-01-31T23:59:59+08:00",
+                "raw_generation": {"generation_id": "generation_history"},
             }
         ),
         encoding="utf-8",
@@ -380,7 +413,7 @@ def test_research_pit_provider_reuses_completed_semantic_views(tmp_path: Path) -
             return manifest
 
         def build_replay_slot(self, start, end, output, *, label, config, available_from):
-            del label, config
+            del config
             self.calls.append("replay")
             output = Path(output)
             output.mkdir(parents=True)
@@ -388,6 +421,7 @@ def test_research_pit_provider_reuses_completed_semantic_views(tmp_path: Path) -
             manifest = {
                 "snapshot_id": "replay_stable",
                 "kind": "replay_slot",
+                "label": label,
                 "period_start": start,
                 "period_end": end,
                 "available_from": available_from.isoformat(),
@@ -413,7 +447,77 @@ def test_research_pit_provider_reuses_completed_semantic_views(tmp_path: Path) -
         decision_time=decision,
     )
     assert first == second
-    assert fake.calls == ["decision", "replay"]
+    frozen = provider.prepare(
+        fold=None,
+        phase="frozen_test",
+        start="20240102",
+        end="20240103",
+        decision_time=decision,
+    )
+    heldout = provider.prepare(
+        fold=None,
+        phase="heldout",
+        start="20240102",
+        end="20240103",
+        decision_time=decision,
+    )
+    assert len({first.replay_ref, frozen.replay_ref, heldout.replay_ref}) == 3
+    assert first.decision_ref == frozen.decision_ref == heldout.decision_ref
+    assert json.loads(Path(first.replay_ref, "manifest.json").read_text(encoding="utf-8"))[
+        "label"
+    ] == "valid"
+    assert json.loads(Path(frozen.replay_ref, "manifest.json").read_text(encoding="utf-8"))[
+        "label"
+    ] == "frozen_test"
+    assert json.loads(Path(heldout.replay_ref, "manifest.json").read_text(encoding="utf-8"))[
+        "label"
+    ] == "heldout"
+    assert fake.calls == ["decision", "replay", "replay", "replay"]
+
+
+def test_evaluation_rejects_replay_from_another_phase(tmp_path: Path) -> None:
+    snapshot, replay = _pit_slot_paths(
+        tmp_path,
+        decision="phase",
+        replay="phase",
+        generation_id="generation_phase",
+        phase="valid",
+    )
+    decision_manifest, replay_manifest = _stash_manifests(
+        "generation_phase", phase="valid"
+    )
+    (snapshot / "manifest.json").write_text(
+        json.dumps(decision_manifest), encoding="utf-8"
+    )
+    (replay / "manifest.json").write_text(
+        json.dumps(replay_manifest), encoding="utf-8"
+    )
+    request = EvaluationRequest(
+        ArtifactRevision("revision_phase", tmp_path / "revision"),
+        SnapshotBundle(
+            "snapshot_one",
+            str(snapshot),
+            str(replay),
+            generation_id="generation_phase",
+        ),
+        "heldout",
+        "20240102",
+        "20240103",
+        StrategySchedule("day", "08:30"),
+        BrokerProfile(initial_cash=100_000),
+    )
+    with pytest.raises(ValueError, match="mode does not match"):
+        PITDailyEvaluationBackend._validate_bundle(request, snapshot, replay)
+    with pytest.raises(RuntimeError, match="phase"):
+        _bind_asof_stash_contract(
+            snapshot_dir=snapshot,
+            replay_dir=replay,
+            schedule=request.schedule,
+            phase=request.mode,
+            generation_id="generation_phase",
+            decision_manifest=decision_manifest,
+            replay_manifest=replay_manifest,
+        )
 
 
 def test_historical_minutes_resolve_only_the_exact_pit_price(tmp_path: Path) -> None:
@@ -447,14 +551,23 @@ def test_historical_minutes_resolve_only_the_exact_pit_price(tmp_path: Path) -> 
     ) is None
 
 
-def test_load_replay_frames_reuses_cached_parquets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_load_replay_frames_reuses_cached_parquets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     replay = tmp_path / "replay"
     replay.mkdir()
     pd.DataFrame({"trade_date": ["20240102"], "close": [1.0]}).to_parquet(
         replay / "daily.parquet", index=False
     )
-    pd.DataFrame({"trade_date": ["20240102"]}).to_parquet(replay / "events.parquet", index=False)
-
+    pd.DataFrame({"trade_date": ["20240102"]}).to_parquet(
+        replay / "events.parquet", index=False
+    )
+    manifest = {
+        "snapshot_id": "replay_one",
+        "kind": "replay_slot",
+        "raw_generation": {"generation_id": "generation_one"},
+    }
+    cache = {}
     calls = {"n": 0}
     real_read = pd.read_parquet
 
@@ -463,22 +576,265 @@ def test_load_replay_frames_reuses_cached_parquets(tmp_path: Path, monkeypatch: 
         return real_read(path, *args, **kwargs)
 
     monkeypatch.setattr(pd, "read_parquet", counting_read_parquet)
-    first = _load_replay_frames(replay)
+    first = _load_replay_frames(
+        replay,
+        generation_id="generation_one",
+        replay_manifest=manifest,
+        cache=cache,
+    )
     first_reads = calls["n"]
     assert first_reads >= 1
     first["daily"].loc[:, "close"] = 99.0
-    second = _load_replay_frames(replay)
+    second = _load_replay_frames(
+        replay,
+        generation_id="generation_one",
+        replay_manifest=manifest,
+        cache=cache,
+    )
     assert calls["n"] == first_reads
     assert second["daily"] is not first["daily"]
     assert list(second["daily"]["close"]) == [1.0]
     assert second["events"] is first["events"]
 
 
-def test_asof_stash_dir_nests_under_cache_root(tmp_path: Path) -> None:
-    snapshot = tmp_path / "decision" / "20240101T235959+0800"
-    replay = tmp_path / "replay" / "20240102_20240103_20240101T235959+0800"
-    assert _asof_stash_dir(snapshot, replay, "paper") == tmp_path / "asof_stash" / (
-        "20240101T235959+0800__20240102_20240103_20240101T235959+0800__paper"
+def test_replay_frame_cache_reloads_rebuilt_path_for_new_generation(tmp_path: Path) -> None:
+    replay = tmp_path / "replay"
+    replay.mkdir()
+    pd.DataFrame({"trade_date": ["20240102"], "close": [1.0]}).to_parquet(
+        replay / "daily.parquet", index=False
+    )
+    cache = {}
+    first = _load_replay_frames(
+        replay,
+        generation_id="generation_one",
+        replay_manifest={"raw_generation": {"generation_id": "generation_one"}},
+        cache=cache,
+    )
+    assert first["daily"]["close"].tolist() == [1.0]
+
+    shutil.rmtree(replay)
+    replay.mkdir()
+    pd.DataFrame({"trade_date": ["20240102"], "close": [2.0]}).to_parquet(
+        replay / "daily.parquet", index=False
+    )
+    second = _load_replay_frames(
+        replay,
+        generation_id="generation_two",
+        replay_manifest={"raw_generation": {"generation_id": "generation_two"}},
+        cache=cache,
+    )
+    assert second["daily"]["close"].tolist() == [2.0]
+
+
+def test_asof_stash_uses_complete_schedule_hierarchy(tmp_path: Path) -> None:
+    snapshot, replay = _pit_slot_paths(
+        tmp_path,
+        decision="20240101T235959+0800",
+        replay="20240102_20240103_20240101T235959+0800",
+        generation_id="generation_one",
+    )
+    target = _asof_stash_dir(
+        snapshot, replay, StrategySchedule("day", "08:30"), "valid"
+    )
+    assert target == (
+        tmp_path
+        / "pit_views"
+        / "asof_stash"
+        / "decision"
+        / snapshot.name
+        / "replay"
+        / replay.name
+        / "phase"
+        / "valid"
+        / "schedule"
+        / "period=day"
+        / "inference_time"
+        / "hour=08"
+        / "minute=30"
+    )
+
+
+def test_different_schedules_never_share_a_stash(tmp_path: Path) -> None:
+    snapshot, replay = _pit_slot_paths(
+        tmp_path,
+        decision="decision_one",
+        replay="replay_one",
+        generation_id="generation_one",
+    )
+    decision_manifest, replay_manifest = _stash_manifests("generation_one")
+    daily = _bind_asof_stash_contract(
+        snapshot_dir=snapshot,
+        replay_dir=replay,
+        schedule=StrategySchedule("day", "08:30"),
+        phase="valid",
+        generation_id="generation_one",
+        decision_manifest=decision_manifest,
+        replay_manifest=replay_manifest,
+    )
+    monthly = _bind_asof_stash_contract(
+        snapshot_dir=snapshot,
+        replay_dir=replay,
+        schedule=StrategySchedule("month", "08:30"),
+        phase="valid",
+        generation_id="generation_one",
+        decision_manifest=decision_manifest,
+        replay_manifest=replay_manifest,
+    )
+    assert daily != monthly
+    assert json.loads((daily / "contract.json").read_text(encoding="utf-8"))["schedule"] == {
+        "period": "day",
+        "inference_time": "08:30",
+    }
+    assert json.loads((monthly / "contract.json").read_text(encoding="utf-8"))["schedule"] == {
+        "period": "month",
+        "inference_time": "08:30",
+    }
+
+
+def test_stash_contract_refuses_changed_config_or_generation(tmp_path: Path) -> None:
+    snapshot, replay = _pit_slot_paths(
+        tmp_path,
+        decision="decision_one",
+        replay="replay_one",
+        generation_id="generation_one",
+    )
+    decision_manifest, replay_manifest = _stash_manifests("generation_one")
+    schedule = StrategySchedule("day", "08:30")
+    _bind_asof_stash_contract(
+        snapshot_dir=snapshot,
+        replay_dir=replay,
+        schedule=schedule,
+        phase="valid",
+        generation_id="generation_one",
+        decision_manifest=decision_manifest,
+        replay_manifest=replay_manifest,
+    )
+
+    changed_config = SnapshotConfig(text_body_chars=123).to_record()
+    _write_provider_contract(
+        snapshot.parent.parent,
+        generation_id="generation_one",
+        config=changed_config,
+    )
+    with pytest.raises(RuntimeError, match="conflicts with requested semantics"):
+        _bind_asof_stash_contract(
+            snapshot_dir=snapshot,
+            replay_dir=replay,
+            schedule=schedule,
+            phase="valid",
+            generation_id="generation_one",
+            decision_manifest=decision_manifest,
+            replay_manifest=replay_manifest,
+        )
+
+    _write_provider_contract(snapshot.parent.parent, generation_id="generation_two")
+    changed_decision, changed_replay = _stash_manifests("generation_two")
+    with pytest.raises(RuntimeError, match="conflicts with requested semantics"):
+        _bind_asof_stash_contract(
+            snapshot_dir=snapshot,
+            replay_dir=replay,
+            schedule=schedule,
+            phase="valid",
+            generation_id="generation_two",
+            decision_manifest=changed_decision,
+            replay_manifest=changed_replay,
+        )
+
+
+def test_stash_contract_corruption_or_mismatch_fails(tmp_path: Path) -> None:
+    snapshot, replay = _pit_slot_paths(
+        tmp_path,
+        decision="decision_one",
+        replay="replay_one",
+        generation_id="generation_one",
+    )
+    decision_manifest, replay_manifest = _stash_manifests("generation_one")
+    kwargs = {
+        "snapshot_dir": snapshot,
+        "replay_dir": replay,
+        "schedule": StrategySchedule("day", "08:30"),
+        "phase": "valid",
+        "generation_id": "generation_one",
+        "decision_manifest": decision_manifest,
+        "replay_manifest": replay_manifest,
+    }
+    stash = _bind_asof_stash_contract(**kwargs)
+    contract = stash / "contract.json"
+    contract.write_text("{broken", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="invalid PIT cache record"):
+        _bind_asof_stash_contract(**kwargs)
+
+    contract.write_text(json.dumps({"schema_version": 1}), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="conflicts with requested semantics"):
+        _bind_asof_stash_contract(**kwargs)
+
+
+def test_asof_stash_rejects_slots_outside_one_cache_root(tmp_path: Path) -> None:
+    with pytest.raises(RuntimeError, match="decision/replay slots"):
+        _asof_stash_dir(
+            tmp_path / "one" / "decision" / "slot",
+            tmp_path / "two" / "replay" / "valid" / "slot",
+            StrategySchedule(),
+            "valid",
+        )
+
+
+def _pit_slot_paths(
+    root: Path,
+    *,
+    decision: str,
+    replay: str,
+    generation_id: str,
+    phase: str = "valid",
+) -> tuple[Path, Path]:
+    cache_root = root / "pit_views"
+    snapshot = cache_root / "decision" / decision
+    replay_slot = cache_root / "replay" / phase / replay
+    snapshot.mkdir(parents=True)
+    replay_slot.mkdir(parents=True)
+    _write_provider_contract(cache_root, generation_id=generation_id)
+    return snapshot, replay_slot
+
+
+def _write_provider_contract(
+    cache_root: Path,
+    *,
+    generation_id: str,
+    config: dict[str, object] | None = None,
+) -> None:
+    (cache_root / "provider.json").write_text(
+        json.dumps(
+            {
+                "schema_version": SNAPSHOT_CACHE_FORMAT_VERSION,
+                "generation_id": generation_id,
+                "release_raw_dir": str(cache_root / "release" / generation_id / "raw"),
+                "snapshot_config": config or SnapshotConfig().to_record(),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _stash_manifests(
+    generation_id: str, *, phase: str = "valid"
+) -> tuple[dict[str, object], dict[str, object]]:
+    raw_generation = {"generation_id": generation_id}
+    return (
+        {
+            "snapshot_id": "snapshot_one",
+            "kind": "decision_input",
+            "decision_time": "2024-01-01T23:59:59+08:00",
+            "raw_generation": raw_generation,
+        },
+        {
+            "snapshot_id": "replay_one",
+            "kind": "replay_slot",
+            "label": phase,
+            "period_start": "20240102",
+            "period_end": "20240103",
+            "available_from": "2024-01-01T23:59:59+08:00",
+            "raw_generation": raw_generation,
+        },
     )
 
 

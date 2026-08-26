@@ -9,7 +9,6 @@ use creates strategy ticks or a minute-driven environment loop.
 from __future__ import annotations
 
 import fcntl
-import hashlib
 import json
 import math
 import os
@@ -44,7 +43,7 @@ from autotrade.environment.replay.style import replay_style_analysis, write_styl
 from autotrade.environment.replay.timeview import Timeview
 from autotrade.environment.runtime import chmod_tree, write_json_atomic
 from autotrade.environment.sandbox import SandboxConfig
-from autotrade.environment.strategy import CN_TZ
+from autotrade.environment.strategy import CN_TZ, StrategySchedule
 from autotrade.environment.strategy_loader import validate_strategy_source
 
 from .config import (
@@ -107,6 +106,7 @@ class ResearchPITSnapshotProvider:
         )
         self.cache_root = Path(cache_root).resolve() if cache_root is not None else self.experiment_dir / "pit_views"
         self.cache_root.mkdir(parents=True, exist_ok=True)
+        self._replay_frame_cache: _ReplayFrameCache = {}
         self._bind_cache_contract()
         self.builder = SnapshotBuilder(
             self.release.raw_dir,
@@ -136,7 +136,12 @@ class ResearchPITSnapshotProvider:
             raise ValueError("PIT snapshot phase start cannot be after end")
         decision_key = decision.strftime("%Y%m%dT%H%M%S%z")
         decision_dir = self.cache_root / "decision" / decision_key
-        replay_dir = self.cache_root / "replay" / f"{start_key}_{end_key}_{decision_key}"
+        replay_dir = (
+            self.cache_root
+            / "replay"
+            / phase
+            / f"{start_key}_{end_key}_{decision_key}"
+        )
         decision_manifest = self._decision_view(decision_dir, decision)
         self._replay_view(replay_dir, start_key, end_key, decision, phase)
         summary_dir = self.cache_root / "bundles" / phase / f"{start_key}_{end_key}_{decision_key}"
@@ -247,6 +252,7 @@ class ResearchPITSnapshotProvider:
                     or str(manifest.get("period_start")) != start
                     or str(manifest.get("period_end")) != end
                     or _optional_cn_datetime(manifest.get("available_from")) != decision
+                    or str(manifest.get("label") or "") != phase
                 ):
                     raise RuntimeError(f"conflicting cached replay slot: {target}")
                 return manifest
@@ -438,6 +444,7 @@ class PITDailyEvaluationBackend:
         self.nl_config = nl_config or NLConfig()
         self.nl_failure_policy = nl_failure_policy
         self.max_intraday_row_group_rows = int(max_intraday_row_group_rows)
+        self._replay_frame_cache: _ReplayFrameCache = {}
 
     def evaluate(self, request: EvaluationRequest) -> EvaluationResult:
         if request.mode not in {"valid", "frozen_test", "heldout"}:
@@ -448,15 +455,31 @@ class PITDailyEvaluationBackend:
         validate_strategy_source(strategy_path.read_text(encoding="utf-8"), filename="main.py")
         snapshot_dir = Path(request.snapshot.decision_ref).resolve(strict=True)
         replay_dir = Path(request.snapshot.replay_ref).resolve(strict=True)
-        self._validate_bundle(request, snapshot_dir, replay_dir)
+        decision_manifest, replay_manifest = self._validate_bundle(
+            request, snapshot_dir, replay_dir
+        )
         _require_read_only_tree(snapshot_dir)
+        stash_dir = _bind_asof_stash_contract(
+            snapshot_dir=snapshot_dir,
+            replay_dir=replay_dir,
+            schedule=request.schedule,
+            phase=request.mode,
+            generation_id=request.snapshot.generation_id,
+            decision_manifest=decision_manifest,
+            replay_manifest=replay_manifest,
+        )
 
         result_id = f"{request.mode}_{uuid.uuid4().hex}"
         result_dir = self.results_root / result_id
         result_dir.mkdir(parents=True, exist_ok=False)
         asof_dir = result_dir / "asof"
         keep_result_dir = False
-        frames = _load_replay_frames(replay_dir)
+        frames = _load_replay_frames(
+            replay_dir,
+            generation_id=request.snapshot.generation_id,
+            replay_manifest=replay_manifest,
+            cache=self._replay_frame_cache,
+        )
         daily = frames["daily"]
         daily = daily[
             (daily["trade_date"].map(_date_key) >= _date_key(request.start))
@@ -480,13 +503,7 @@ class PITDailyEvaluationBackend:
             replay_frames={key: value for key, value in frames.items() if key != "daily"} | {"daily": daily},
             replay_text_library_dir=(replay_dir / "text_library"),
             incremental_domains={"intraday_1min"} if minute_source is not None else None,
-            stash_dir=_asof_stash_dir(
-                snapshot_dir,
-                replay_dir,
-                hashlib.sha256(
-                    json.dumps(request.schedule.to_record(), sort_keys=True, default=str).encode()
-                ).hexdigest()[:12],
-            ),
+            stash_dir=stash_dir,
         )
         lock = _AsOfReadOnlyView(asof_dir)
         lock.lock()
@@ -576,7 +593,9 @@ class PITDailyEvaluationBackend:
                 shutil.rmtree(result_dir, ignore_errors=True)
 
     @staticmethod
-    def _validate_bundle(request: EvaluationRequest, snapshot_dir: Path, replay_dir: Path) -> None:
+    def _validate_bundle(
+        request: EvaluationRequest, snapshot_dir: Path, replay_dir: Path
+    ) -> tuple[dict[str, object], dict[str, object]]:
         decision = load_snapshot_manifest(snapshot_dir)
         replay = load_snapshot_manifest(replay_dir)
         if decision.get("kind") != "decision_input":
@@ -587,9 +606,12 @@ class PITDailyEvaluationBackend:
             replay.get("period_end")
         ) != _date_key(request.end):
             raise ValueError("EvaluationRequest range does not match its immutable replay slot")
+        if str(replay.get("label") or "") != request.mode:
+            raise ValueError("EvaluationRequest mode does not match its immutable replay slot")
         snapshot_id = str(decision.get("snapshot_id") or "")
         if snapshot_id != request.snapshot.snapshot_id:
             raise ValueError("EvaluationRequest snapshot_id does not match decision manifest")
+        return decision, replay
 
 
 class PaperPITData:
@@ -622,7 +644,13 @@ class PaperPITData:
         self.snapshot_dir = Path(self.bundle.decision_ref).resolve(strict=True)
         self.replay_dir = Path(self.bundle.replay_ref).resolve(strict=True)
         _require_read_only_tree(self.snapshot_dir)
-        frames = _load_replay_frames(self.replay_dir)
+        replay_manifest = load_snapshot_manifest(self.replay_dir)
+        frames = _load_replay_frames(
+            self.replay_dir,
+            generation_id=self.bundle.generation_id,
+            replay_manifest=replay_manifest,
+            cache=provider._replay_frame_cache,
+        )
         self.daily = frames["daily"]
         self.daily = self.daily[self.daily["trade_date"].map(_date_key) == day].copy()
         if self.daily.empty:
@@ -646,7 +674,10 @@ class PaperPITData:
             | {"daily": self.daily},
             replay_text_library_dir=self.replay_dir / "text_library",
             incremental_domains={"intraday_1min"} if self.minute_source is not None else None,
-            stash_dir=_asof_stash_dir(self.snapshot_dir, self.replay_dir, "paper"),
+            # Paper inference timestamps are supplied by the live caller rather
+            # than one frozen StrategySchedule, so no schedule-bound part stash
+            # can be reused safely here.
+            stash_dir=None,
         )
         self._lock = _AsOfReadOnlyView(self.asof_dir)
         self._lock.lock()
@@ -714,18 +745,198 @@ class _AsOfReadOnlyView:
         chmod_tree(self.root, file_mode=0o444, dir_mode=0o555)
 
 
-def _asof_stash_dir(snapshot_dir: Path, replay_dir: Path, schedule_stamp: str) -> Path:
-    return snapshot_dir.parent.parent / "asof_stash" / (
-        f"{snapshot_dir.name}__{replay_dir.name}__{schedule_stamp}"
+_STASH_CONTRACT_SCHEMA_VERSION = 1
+_ReplayFrameCache = dict[
+    str, tuple[dict[str, object], dict[str, pd.DataFrame]]
+]
+
+
+def _asof_stash_dir(
+    snapshot_dir: Path,
+    replay_dir: Path,
+    schedule: StrategySchedule,
+    phase: str,
+) -> Path:
+    """Return the complete semantic stash hierarchy for one scheduled replay."""
+
+    snapshot = Path(snapshot_dir).resolve()
+    replay = Path(replay_dir).resolve()
+    if (
+        snapshot.parent.name != "decision"
+        or replay.parent.parent.name != "replay"
+        or snapshot.parent.parent != replay.parent.parent.parent
+    ):
+        raise RuntimeError(
+            "PIT stash inputs must be decision/replay slots under one cache root"
+        )
+    if phase not in _PHASES:
+        raise ValueError(f"unsupported PIT stash phase: {phase}")
+    safe_phase = _safe_path_component(phase, label="evaluation phase")
+    if replay.parent.name != safe_phase:
+        raise RuntimeError("PIT replay slot phase does not match the evaluation phase")
+    decision_slot = _safe_path_component(snapshot.name, label="decision slot")
+    replay_slot = _safe_path_component(replay.name, label="replay slot")
+    schedule_record = schedule.to_record()
+    period = _safe_path_component(schedule_record["period"], label="schedule period")
+    try:
+        hour, minute = schedule_record["inference_time"].split(":")
+    except ValueError as exc:
+        raise RuntimeError("invalid StrategySchedule inference_time") from exc
+    hour = _safe_path_component(hour, label="inference hour")
+    minute = _safe_path_component(minute, label="inference minute")
+    root = snapshot.parent.parent / "asof_stash"
+    target = (
+        root
+        / "decision"
+        / decision_slot
+        / "replay"
+        / replay_slot
+        / "phase"
+        / safe_phase
+        / "schedule"
+        / f"period={period}"
+        / "inference_time"
+        / f"hour={hour}"
+        / f"minute={minute}"
     )
+    if not target.resolve().is_relative_to(root.resolve()):
+        raise RuntimeError(f"PIT stash path escapes its cache root: {target}")
+    return target
 
 
-_REPLAY_FRAME_CACHE: dict[str, dict[str, pd.DataFrame]] = {}
+def _bind_asof_stash_contract(
+    *,
+    snapshot_dir: Path,
+    replay_dir: Path,
+    schedule: StrategySchedule,
+    phase: str,
+    generation_id: str,
+    decision_manifest: dict[str, object],
+    replay_manifest: dict[str, object],
+) -> Path:
+    """Bind a part stash to complete, directly-comparable PIT semantics."""
+
+    stash_dir = _asof_stash_dir(snapshot_dir, replay_dir, schedule, phase)
+    cache_root = Path(snapshot_dir).resolve().parent.parent
+    provider_record = _read_json(cache_root / "provider.json")
+    expected_provider_keys = {
+        "schema_version",
+        "generation_id",
+        "release_raw_dir",
+        "snapshot_config",
+    }
+    if set(provider_record) != expected_provider_keys:
+        raise RuntimeError(
+            "PIT provider contract has missing or unknown fields: "
+            f"{sorted(set(provider_record) ^ expected_provider_keys)}"
+        )
+    if provider_record.get("schema_version") != SNAPSHOT_CACHE_FORMAT_VERSION:
+        raise RuntimeError("PIT provider contract has an incompatible cache schema")
+    configured_generation = str(provider_record.get("generation_id") or "")
+    if not generation_id or configured_generation != generation_id:
+        raise RuntimeError("PIT stash generation does not match the provider contract")
+    snapshot_config = provider_record.get("snapshot_config")
+    if not isinstance(snapshot_config, dict):
+        raise TypeError("PIT provider contract has no SnapshotConfig record")
+    _require_record_shape(
+        snapshot_config,
+        SnapshotConfig().to_record(),
+        label="PIT provider SnapshotConfig",
+    )
+    safe_phase = _safe_path_component(phase, label="evaluation phase")
+    if str(replay_manifest.get("label") or "") != safe_phase:
+        raise RuntimeError("PIT replay manifest phase does not match the evaluation phase")
+    for label, manifest in (
+        ("decision", decision_manifest),
+        ("replay", replay_manifest),
+    ):
+        raw_generation = manifest.get("raw_generation")
+        if not isinstance(raw_generation, dict):
+            raise TypeError(f"PIT {label} manifest has no raw generation record")
+        manifest_generation = str(raw_generation.get("generation_id") or "")
+        if manifest_generation != generation_id:
+            raise RuntimeError(
+                f"PIT {label} raw generation does not match the requested release"
+            )
+    contract: dict[str, object] = {
+        "schema_version": _STASH_CONTRACT_SCHEMA_VERSION,
+        "snapshot_cache_schema_version": SNAPSHOT_CACHE_FORMAT_VERSION,
+        "generation_id": generation_id,
+        "release_raw_dir": provider_record["release_raw_dir"],
+        "snapshot_config": snapshot_config,
+        "phase": safe_phase,
+        "schedule": schedule.to_record(),
+        "decision_slot": {
+            "path": str(Path(snapshot_dir).resolve()),
+            "manifest": decision_manifest,
+        },
+        "replay_slot": {
+            "path": str(Path(replay_dir).resolve()),
+            "manifest": replay_manifest,
+        },
+    }
+    contract_path = stash_dir / "contract.json"
+    lock_path = stash_dir.parent / f".{stash_dir.name}.contract.lock"
+    with _exclusive_lock(lock_path):
+        if stash_dir.exists():
+            if not stash_dir.is_dir():
+                raise RuntimeError(f"PIT stash path is not a directory: {stash_dir}")
+            existing = _read_json(contract_path)
+            if existing != contract:
+                raise RuntimeError(
+                    f"PIT stash contract conflicts with requested semantics: {contract_path}"
+                )
+        else:
+            stash_dir.mkdir(parents=True)
+            write_json_atomic(contract_path, contract)
+    return stash_dir
 
 
-def _load_replay_frames(replay_dir: Path) -> dict[str, pd.DataFrame]:
+def _safe_path_component(value: object, *, label: str) -> str:
+    component = str(value)
+    if (
+        not component
+        or component in {".", ".."}
+        or Path(component).name != component
+        or os.sep in component
+        or (os.altsep is not None and os.altsep in component)
+        or "\x00" in component
+    ):
+        raise RuntimeError(f"unsafe {label} in PIT stash path: {component!r}")
+    return component
+
+
+def _require_record_shape(
+    record: dict[str, object], template: dict[str, object], *, label: str
+) -> None:
+    if set(record) != set(template):
+        raise RuntimeError(
+            f"{label} has missing or unknown fields: {sorted(set(record) ^ set(template))}"
+        )
+    for key, expected in template.items():
+        actual = record[key]
+        if isinstance(expected, dict):
+            if not isinstance(actual, dict):
+                raise TypeError(f"{label}.{key} must be an object")
+            _require_record_shape(actual, expected, label=f"{label}.{key}")
+        elif isinstance(expected, list) and not isinstance(actual, list):
+            raise TypeError(f"{label}.{key} must be an array")
+
+
+def _load_replay_frames(
+    replay_dir: Path,
+    *,
+    generation_id: str,
+    replay_manifest: dict[str, object],
+    cache: _ReplayFrameCache,
+) -> dict[str, pd.DataFrame]:
     key = str(replay_dir.resolve())
-    cached = _REPLAY_FRAME_CACHE.get(key)
+    identity: dict[str, object] = {
+        "generation_id": generation_id,
+        "replay_manifest": replay_manifest,
+    }
+    entry = cache.get(key)
+    cached = entry[1] if entry is not None and entry[0] == identity else None
     if cached is None:
         frames: dict[str, pd.DataFrame] = {}
         for name, filename in (
@@ -743,7 +954,7 @@ def _load_replay_frames(replay_dir: Path) -> dict[str, pd.DataFrame]:
                 raise FileNotFoundError(f"replay slot has no daily.parquet: {replay_dir}")
             else:
                 frames[name] = pd.DataFrame()
-        _REPLAY_FRAME_CACHE[key] = frames
+        cache[key] = (identity, frames)
         cached = frames
     frames = dict(cached)
     frames["daily"] = cached["daily"].copy()
