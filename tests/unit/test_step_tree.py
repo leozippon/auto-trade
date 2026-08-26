@@ -498,7 +498,7 @@ class PromptCompositionTest(unittest.TestCase):
             fold_info={"fold_id": "first"},
             acceptance_rules={"min_return": 0.0},
             experiment_facts={"identity": {"run_id": "run_1"}},
-            taste_prompt="方向 A",
+            prior_prompt="方向 A",
             fold_exploration_directive="长期假设 A",
             fold_directive="当前假设 A",
         )
@@ -507,7 +507,7 @@ class PromptCompositionTest(unittest.TestCase):
             acceptance_rules={"min_return": 0.1},
             experiment_facts={"identity": {"run_id": "run_2"}},
             phase="convergence",
-            taste_prompt="方向 B",
+            prior_prompt="方向 B",
             fold_exploration_directive="长期假设 B",
             fold_directive="当前假设 B",
         )
@@ -527,8 +527,8 @@ class PromptCompositionTest(unittest.TestCase):
         ]
         self.assertEqual(order, sorted(order))
 
-    def test_the_taste_rides_in_its_own_section_not_in_the_facts_blob(self) -> None:
-        prompt = build_system_prompt(**self.BASE, taste_prompt="偏好小步修改")
+    def test_the_prior_rides_in_its_own_section_not_in_the_facts_blob(self) -> None:
+        prompt = build_system_prompt(**self.BASE, prior_prompt="偏好小步修改")
         self.assertIn("偏好小步修改", prompt)
         dynamic = prompt.split("# 本 Fold 动态上下文", 1)[1]
         self.assertIn("偏好小步修改", dynamic)

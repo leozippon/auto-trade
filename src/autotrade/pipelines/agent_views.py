@@ -175,7 +175,6 @@ def agent_visible_ledger_record(
         "snapshot_ids",
         "status",
         "modification_check",
-        "taste_chars",
         "prior_chars",
         "prior_published",
         "prior_generation_id",

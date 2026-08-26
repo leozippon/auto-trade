@@ -37,6 +37,7 @@ from autotrade.pipelines.ledger import (
     latest_fold_records,
     latest_heldout_records,
 )
+from autotrade.pipelines.prior import latest_prior_text, unified_meta_record
 
 _ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$")
 # Datasets whose partition coverage bounds the selectable backtest periods: the
@@ -314,12 +315,10 @@ def guarded_fold_view(record: Mapping[str, object]) -> dict[str, object]:
     return {key: value for key, value in record.items() if key not in hidden}
 
 
-def _public_meta_view(record: Mapping[str, object]) -> dict[str, object]:
-    view = dict(record)
-    taste_path = record.get("taste_path")
-    if taste_path and Path(str(taste_path)).exists():
-        view["taste"] = Path(str(taste_path)).read_text(encoding="utf-8")
-    return view
+def _public_meta_view(
+    record: Mapping[str, object], *, current_prior: str | None = None
+) -> dict[str, object]:
+    return unified_meta_record(record, current_prior=current_prior)
 
 
 def _public_heldout_view(record: Mapping[str, object], revealed: bool) -> dict[str, object]:
@@ -493,6 +492,11 @@ def experiment_detail(root: Path, experiment_id: str) -> dict[str, object]:
     records = read_ledger_records(directory)
     folds = latest_fold_records(records)
     heldout = latest_heldout_records(records)
+    meta_records = [
+        row for row in records if row.get("record_type") == "meta_learning"
+    ]
+    latest_meta = meta_records[-1] if meta_records else None
+    current_prior = latest_prior_text(records, experiment_dir=directory)
     # A fully recorded held-out means the terminal evaluation finished, so
     # results auto-reveal (mirrors test_results_revealed, reusing the records
     # already in hand).
@@ -529,7 +533,10 @@ def experiment_detail(root: Path, experiment_id: str) -> dict[str, object]:
                 None,
             )
             if record is not None:
-                entry["record"] = _public_meta_view(record)
+                entry["record"] = _public_meta_view(
+                    record,
+                    current_prior=current_prior if record is latest_meta else None,
+                )
         elif kind == "heldout" and heldout:
             entry["records"] = [_public_heldout_view(row, revealed) for row in heldout]
         sessions.append(entry)
@@ -552,6 +559,10 @@ def experiment_detail(root: Path, experiment_id: str) -> dict[str, object]:
         "ledger": [
             guarded_fold_view(row) if row.get("record_type") == "fold"
             else _public_heldout_view(row, revealed) if row.get("record_type") == "heldout"
+            else _public_meta_view(
+                row,
+                current_prior=current_prior if row is latest_meta else None,
+            ) if row.get("record_type") == "meta_learning"
             else dict(row)
             for row in records
         ],

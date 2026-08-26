@@ -1138,9 +1138,7 @@ class WebuiBackendTest(unittest.TestCase):
         (strategy_dir / "main.py").write_text(
             "def generate_orders(context):\n    return []\n", encoding="utf-8"
         )
-        taste_path = experiment_dir / "meta_learning" / "epoch_001" / "taste.md"
-        taste_path.parent.mkdir(parents=True)
-        taste_path.write_text("fixture-taste\n", encoding="utf-8")
+        prior_text = "fixture PRIOR\n"
         valid_result = (
             experiment_dir
             / "artifacts"
@@ -1176,7 +1174,7 @@ class WebuiBackendTest(unittest.TestCase):
                     "fold_id": "epoch_001_meta_learning",
                     "run_id": "run_meta",
                     "session_key": "epoch_001/meta_learning",
-                    "taste_path": str(taste_path),
+                    "prior": prior_text,
                 },
                 {
                     "record_type": "fold",

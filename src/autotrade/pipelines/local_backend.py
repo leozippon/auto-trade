@@ -559,30 +559,6 @@ class FoldBacktestTool(SessionTimeBudgetAware):
             raise TimeoutError("Fold deadline exceeded") from exc
 
 
-class WriteTasteTool:
-    spec = ToolSpec(
-        "write_taste",
-        "Write the sole Meta output as taste.md.",
-        {
-            "type": "object",
-            "properties": {
-                "taste": {"type": "string", "minLength": 1, "maxLength": 20_000}
-            },
-            "required": ["taste"],
-            "additionalProperties": False,
-        },
-        mutating=True,
-    )
-
-    def __init__(self, workspace: SafeWorkspace) -> None:
-        self.workspace = workspace
-
-    def invoke(self, arguments: Mapping[str, object]) -> ToolResult:
-        path = self.workspace.resolve("taste.md")
-        path.write_text(str(arguments["taste"]).strip() + "\n", encoding="utf-8")
-        return ToolResult(True, value={"path": "taste.md"})
-
-
 def build_fold_explore_tools(
     search_roots: SearchRoots,
     workspace: SafeWorkspace,
@@ -769,7 +745,6 @@ class LLMFoldDeveloper:
                 "deadline_seconds": request.deadline_seconds,
                 "finalize_before_deadline_seconds": request.finalize_before_deadline_seconds,
                 "sandbox_spec": sandbox_spec.to_record(),
-                "taste_prompt": request.taste,
                 "prior_prompt": request.prior,
                 "agents_md_sections_sha256": load_required_agents_md_sections().sha256,
                 "fold_exploration_directive": self.fold_exploration_directive.strip(),
@@ -953,7 +928,6 @@ class LLMFoldDeveloper:
                     experiment_facts=facts,
                     phase=request.phase,
                     step_tree_enabled=self.step_tree_enabled,
-                    taste_prompt=request.taste,
                     prior_prompt=request.prior,
                     fold_exploration_directive=self.fold_exploration_directive,
                     fold_directive=request.directive,
@@ -1230,8 +1204,8 @@ class LLMMetaLearner:
         from autotrade.agent.runner import (
             AgentSessionConfig,
             AgentSessionRunner,
+            FinishMetaTool,
             MetaLearningAgent,
-            TasteFinishTool,
             visible_window_dates,
         )
         from autotrade.pipelines.agent_inbox import bind_session_inbox
@@ -1294,6 +1268,13 @@ class LLMMetaLearner:
         copy_artifact(parent, output_dir)
         copy_model_artifacts(parent_models, models_dir)
         restore_working_artifacts_writable(output_dir, models_dir)
+        previous_prior = str(facts.get("previous_prior") or "").strip()
+        # PRIOR.md is the sole writable Meta direction/memory channel. Seed the
+        # current published body before the Agent starts; the first session gets
+        # an empty file and must make it non-empty before finish_meta succeeds.
+        (paths.workspace / "PRIOR.md").write_text(
+            previous_prior + ("\n" if previous_prior else ""), encoding="utf-8"
+        )
         public = {
             key: value
             for key, value in facts.items()
@@ -1302,6 +1283,7 @@ class LLMMetaLearner:
                 "user_question_hook",
                 "progress_hook",
                 "meta_learning_memory",
+                "previous_prior",
                 "session_key",
                 "agent_trace_sidecars",
             }
@@ -1392,14 +1374,8 @@ class LLMMetaLearner:
                     },
                     "strategy_working_copy": "/mnt/agent/workspace/output",
                     "model_working_copy": "/mnt/agent/workspace/models",
-                    "previous_taste": bool(
-                        str(public.get("previous_taste") or "").strip()
-                    ),
-                    "previous_prior": bool(
-                        str(public.get("previous_prior") or "").strip()
-                    ),
+                    "previous_prior": bool(previous_prior),
                 },
-                "taste_output": "/mnt/agent/workspace/taste.md",
                 "prior_output": "/mnt/agent/workspace/PRIOR.md",
                 "agents_md_sections_sha256": load_required_agents_md_sections().sha256,
                 "modification_constraints": replace(
@@ -1454,13 +1430,10 @@ class LLMMetaLearner:
             ReadFileTool(search_roots),
             GrepTool(search_roots),
             GlobTool(search_roots),
-            # The Meta session's writable surface: the strategy/model working
-            # copy it may regularize, the Taste, and the optional
-            # sandbox_environment.json dependency request the Pipeline builds
-            # into the image later Folds inherit.
+            # The Meta session's writable surface: PRIOR.md, the strategy/model
+            # copy it may regularize, and the optional sandbox dependency request.
             WriteFileTool(safe),
             EditFileTool(safe),
-            WriteTasteTool(safe),
             TodoTool(safe),
             modification,
         ]
@@ -1469,10 +1442,8 @@ class LLMMetaLearner:
             if not callable(hook):
                 raise TypeError("user_question_hook must be callable")
             tools.append(AskUserTool(hook, time_budget=time_budget))
-        # The Taste is injected into every later Fold prompt, so it must not
-        # carry the visible window's calendar dates forward.
         tools.append(
-            TasteFinishTool(safe, window_dates=visible_window_dates(manifest.data))
+            FinishMetaTool(safe, window_dates=visible_window_dates(manifest.data))
         )
         instruction = str(
             public.get("prompt_override") or ""
@@ -1480,7 +1451,6 @@ class LLMMetaLearner:
             public.get("development_history")
             if isinstance(public.get("development_history"), dict)
             else {},
-            str(public.get("previous_taste") or ""),
             experiment_directive=self.meta_learning_directive,
             fold_exploration_directive=self.fold_exploration_directive,
         )
@@ -1493,7 +1463,6 @@ class LLMMetaLearner:
             system_prompt=build_system_prompt(
                 mode="meta",
                 experiment_facts=build_experiment_facts(manifest=manifest.data),
-                prior_prompt=str(public.get("previous_prior") or ""),
             ),
             config=AgentSessionConfig(
                 mode="meta",
@@ -1563,18 +1532,17 @@ class LLMMetaLearner:
                     and self.sandbox_spec_sink is not None
                 ):
                     self.sandbox_spec_sink(active_spec)
-            # Collect first, then fail: the Taste and the rebuild record must
+            # Collect first, then fail: PRIOR and the rebuild record must
             # survive a rebuild failure.
             local.collect_artifacts(self.artifact_store.root.parent / run_id)
             if rebuild_error is not None:
                 raise rebuild_error
             return MetaSessionResult(
-                taste=str(result["taste"]),
+                prior=str(result["prior"]),
                 conversation_id=str(result.get("conversation_id") or ""),
                 revision_id=revision_id,
                 modification_check=check,
                 allowed=allowed,
-                prior=str(result.get("prior") or ""),
             )
         except Exception as exc:
             trace.emit(
@@ -1750,7 +1718,7 @@ def _finalize_modification_check(
     """Run the post-session check, turning a refusal into an audited verdict.
 
     A Meta session that leaves the artifact outside its constraints must not
-    fail the whole session — the Taste is still valid — but its edits must be
+    fail the whole session — PRIOR is still valid — but its edits must be
     rejected rather than frozen, so the refusal is recorded and reported.
     """
     try:

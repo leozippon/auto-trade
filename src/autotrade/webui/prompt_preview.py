@@ -13,6 +13,7 @@ from autotrade.pipelines.hitl_state import (
     SCHEDULE_NAME,
     read_json,
 )
+from autotrade.pipelines.prior import latest_prior_text
 
 from .registry import read_ledger_records
 
@@ -52,29 +53,12 @@ def build_prompt_preview(
         inference_time=str(params.get("inference_time") or "08:30"),
     )
     records = read_ledger_records(experiment_dir)
-    previous_taste = next(
-        (
-            str(row.get("taste") or "")
-            for row in reversed(records)
-            if row.get("record_type") == "meta_learning"
-        ),
-        "",
-    )
-    previous_prior = next(
-        (
-            str(row.get("prior") or "")
-            for row in reversed(records)
-            if row.get("record_type") == "meta_learning"
-        ),
-        "",
-    )
+    previous_prior = latest_prior_text(records, experiment_dir=experiment_dir)
     if kind in {"meta", "meta_learning"}:
         prompt = "\n\n".join(
             [
-                build_system_prompt(
-                    timing, mode="meta", prior_prompt=previous_prior
-                ),
-                build_meta_learning_prompt(None, previous_taste),
+                build_system_prompt(timing, mode="meta"),
+                build_meta_learning_prompt(None),
                 f"研究者指令：{directive.strip()}"
                 if directive.strip()
                 else "研究者指令：无额外指令。",

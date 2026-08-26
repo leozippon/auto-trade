@@ -10,7 +10,7 @@ from autotrade.agent.agents_md import AgentsMdError, load_required_agents_md_sec
 from autotrade.agent.prompts import build_system_prompt
 from autotrade.agent.runner import (
     PRIOR_MAX_CHARS,
-    TasteFinishTool,
+    FinishMetaTool,
     prior_content_violation,
     prior_policy_violation,
 )
@@ -96,7 +96,8 @@ def test_required_agents_sections_are_injected_into_fold_and_meta(tmp_path: Path
     assert "agent_process_summary" in meta
     assert "agent_trace_full" in meta
     assert "原始 Fold Agent Trace sidecar" in meta
-    assert "当前可迁移过程/方法快照" in meta
+    assert "策略探索方向" in meta
+    assert "累积经验" in meta
     assert extracted.sha256
     assert extracted.version == extracted.sha256[:12]
 
@@ -118,16 +119,13 @@ def test_fold_system_prompt_injects_prior_full_text(tmp_path: Path) -> None:
         mode="fold",
         agents_md_path=path,
         prior_prompt=prior,
-        taste_prompt="prefer simple signals",
     )
     assert prior in prompt
-    assert "只读且不得修改" in prompt
-    assert "prefer simple signals" in prompt
-    meta = build_system_prompt(
-        mode="meta", agents_md_path=path, prior_prompt=prior
-    )
-    assert prior in meta
-    assert "上一份已发布 PRIOR.md 的全文" in meta
+    assert "权威 PRIOR 不在本 Fold 可写树中" in prompt
+    assert "策略探索方向" in prompt
+    meta = build_system_prompt(mode="meta", agents_md_path=path)
+    assert prior not in meta
+    assert "工作区根的 `PRIOR.md`" in meta
 
 
 def test_fold_write_tools_cannot_overwrite_authoritative_prior(tmp_path: Path) -> None:
@@ -154,7 +152,7 @@ def test_meta_publishes_keeps_and_rejects_overlong_prior(tmp_path: Path) -> None
     pipeline.config = type("Cfg", (), {"experiment_dir": experiment})()
 
     published = pipeline._publish_or_keep_prior(
-        MetaSessionResult(taste="keep short", prior="updated workflow notes"),
+        MetaSessionResult(prior="updated workflow notes"),
         previous_prior=first.text,
         generation_id="gen_2",
         deadline_exceeded=False,
@@ -164,7 +162,7 @@ def test_meta_publishes_keeps_and_rejects_overlong_prior(tmp_path: Path) -> None
     assert Path(published[2]).is_file()
 
     kept = pipeline._publish_or_keep_prior(
-        MetaSessionResult(taste="keep short", prior=""),
+        MetaSessionResult(prior=""),
         previous_prior="updated workflow notes",
         generation_id="gen_3",
         deadline_exceeded=False,
@@ -174,7 +172,7 @@ def test_meta_publishes_keeps_and_rejects_overlong_prior(tmp_path: Path) -> None
     assert store.current_text().strip() == "updated workflow notes"
 
     unchanged = pipeline._publish_or_keep_prior(
-        MetaSessionResult(taste="keep short", prior="updated workflow notes\n"),
+        MetaSessionResult(prior="updated workflow notes\n"),
         previous_prior="updated workflow notes",
         generation_id="gen_same",
         deadline_exceeded=False,
@@ -184,7 +182,7 @@ def test_meta_publishes_keeps_and_rejects_overlong_prior(tmp_path: Path) -> None
     assert store.current_generation_id() == "gen_2"
 
     deadline = pipeline._publish_or_keep_prior(
-        MetaSessionResult(taste="keep short", prior="should not publish"),
+        MetaSessionResult(prior="should not publish"),
         previous_prior="updated workflow notes",
         generation_id="gen_4",
         deadline_exceeded=True,
@@ -195,30 +193,44 @@ def test_meta_publishes_keeps_and_rejects_overlong_prior(tmp_path: Path) -> None
     overlong = tmp_path / "PRIOR.md"
     overlong.write_text("x" * (PRIOR_MAX_CHARS + 1), encoding="utf-8")
     assert "characters" in prior_policy_violation(overlong)
+    with pytest.raises(ValueError, match="characters"):
+        pipeline._publish_or_keep_prior(
+            MetaSessionResult(prior="x" * (PRIOR_MAX_CHARS + 1)),
+            previous_prior="updated workflow notes",
+            generation_id="gen_overlong",
+            deadline_exceeded=False,
+        )
+
+    empty_pipeline = RollingExperimentPipeline.__new__(RollingExperimentPipeline)
+    empty_pipeline.config = type("Cfg", (), {"experiment_dir": tmp_path / "empty"})()
+    with pytest.raises(ValueError, match="first Meta session"):
+        empty_pipeline._publish_or_keep_prior(
+            MetaSessionResult(prior=""),
+            previous_prior="",
+            generation_id="gen_first",
+            deadline_exceeded=False,
+        )
 
     with pytest.raises(FileExistsError):
         pipeline._publish_or_keep_prior(
-            MetaSessionResult(taste="keep short", prior="collision"),
+            MetaSessionResult(prior="collision"),
             previous_prior="updated workflow notes",
             generation_id="gen_2",
             deadline_exceeded=False,
         )
 
 
-def test_finish_meta_refuses_overlong_prior_but_taste_still_required(
-    tmp_path: Path,
-) -> None:
-    (tmp_path / "taste.md").write_text("prefer simple signals\n", encoding="utf-8")
+def test_finish_meta_requires_a_bounded_nonempty_prior(tmp_path: Path) -> None:
+    registry = ToolRegistry([FinishMetaTool(SafeWorkspace(tmp_path))])
+    missing = registry.invoke("finish_meta", {})
+    assert missing.ok is False
+    assert missing.value["error_type"] == "prior_policy"
     (tmp_path / "PRIOR.md").write_text("y" * (PRIOR_MAX_CHARS + 8), encoding="utf-8")
-    result = ToolRegistry([TasteFinishTool(SafeWorkspace(tmp_path))]).invoke(
-        "finish_meta", {"taste_path": "taste.md"}
-    )
-    assert result.ok is False
-    assert result.value["error_type"] == "prior_policy"
+    overlong = registry.invoke("finish_meta", {})
+    assert overlong.ok is False
+    assert overlong.value["error_type"] == "prior_policy"
     (tmp_path / "PRIOR.md").write_text("keep grep first\n", encoding="utf-8")
-    accepted = ToolRegistry([TasteFinishTool(SafeWorkspace(tmp_path))]).invoke(
-        "finish_meta", {"taste_path": "taste.md"}
-    )
+    accepted = registry.invoke("finish_meta", {})
     assert accepted.ok is True
     assert accepted.value["status"] == "meta_learning_done"
 
@@ -232,6 +244,64 @@ def test_latest_prior_resume_reads_last_meta_record() -> None:
     assert latest_prior_text(records) == "second"
     assert latest_prior_text([]) == ""
     assert latest_prior_text([{"record_type": "fold", "prior": "ignored"}]) == ""
+
+
+def test_latest_prior_migrates_inline_legacy_taste_only_in_memory() -> None:
+    records = [
+        {"record_type": "meta_learning", "taste": "prefer simpler signals"}
+    ]
+    merged = latest_prior_text(records)
+    assert merged == "## 策略探索方向\n\nprefer simpler signals"
+    assert "prior" not in records[0]
+
+
+@pytest.mark.parametrize("absolute", [False, True])
+def test_latest_prior_reads_only_experiment_local_legacy_taste_path(
+    tmp_path: Path, absolute: bool
+) -> None:
+    experiment = tmp_path / "experiment"
+    legacy = experiment / "meta_learning" / "epoch_001" / "taste.md"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("prefer bounded turnover\n", encoding="utf-8")
+    raw_path = str(legacy if absolute else legacy.relative_to(experiment))
+    records = [
+        {"record_type": "meta_learning", "taste_path": raw_path}
+    ]
+    assert "prefer bounded turnover" in latest_prior_text(
+        records, experiment_dir=experiment
+    )
+
+
+@pytest.mark.parametrize("raw_path", ["../outside.md", "ABSOLUTE"])
+def test_latest_prior_rejects_legacy_taste_path_outside_experiment(
+    tmp_path: Path, raw_path: str
+) -> None:
+    experiment = tmp_path / "experiment"
+    experiment.mkdir()
+    outside = tmp_path / "outside.md"
+    outside.write_text("must not leak\n", encoding="utf-8")
+    selected = str(outside) if raw_path == "ABSOLUTE" else raw_path
+    records = [
+        {"record_type": "meta_learning", "taste_path": selected}
+    ]
+    assert latest_prior_text(records, experiment_dir=experiment) == ""
+
+
+def test_legacy_taste_and_prior_merge_once_without_rewriting_ledger() -> None:
+    legacy = {
+        "record_type": "meta_learning",
+        "prior": "## 累积经验\n\nUse bounded reads.",
+        "taste": "Prefer a different falsifiable mechanism.",
+    }
+    merged = latest_prior_text([legacy])
+    assert merged.count("Prefer a different falsifiable mechanism.") == 1
+    assert merged.count("Use bounded reads.") == 1
+    assert legacy["prior"] == "## 累积经验\n\nUse bounded reads."
+    unified = [legacy, {"record_type": "meta_learning", "prior": merged}]
+    assert latest_prior_text(unified) == merged
+    assert latest_prior_text(unified).count(
+        "Prefer a different falsifiable mechanism."
+    ) == 1
 
 
 def test_prior_store_restore_points_current_at_earlier_generation(
@@ -934,42 +1004,6 @@ def test_agent_process_summary_caps_repeated_failures() -> None:
     summary = build_agent_process_summary(events)
     assert summary["tool_failures"] == 24
     assert len(summary["repeated_failures"]) == 8
-
-
-def test_prior_policy_rejects_duplicate_agent_process_headings(tmp_path: Path) -> None:
-    prior = tmp_path / "PRIOR.md"
-    prior.write_text("keep grep first\n", encoding="utf-8")
-    assert prior_policy_violation(prior) == ""
-    prior.write_text(
-        "## Agent Process\nfirst\n\n## Agent Process\nsecond\n",
-        encoding="utf-8",
-    )
-    assert "duplicate ## Agent Process" in prior_policy_violation(prior)
-    prior.write_text(
-        "# Notes\n\n## Agent Process\nDelegate schema reads.\n",
-        encoding="utf-8",
-    )
-    assert prior_policy_violation(prior) == ""
-    missing = tmp_path / "absent.md"
-    assert prior_policy_violation(missing) == ""
-
-
-def test_finish_meta_rejects_duplicate_agent_process_headings(tmp_path: Path) -> None:
-    (tmp_path / "taste.md").write_text("prefer simple signals\n", encoding="utf-8")
-    (tmp_path / "PRIOR.md").write_text(
-        "## Agent Process\none\n\n## Agent Process\ntwo\n",
-        encoding="utf-8",
-    )
-    registry = ToolRegistry([TasteFinishTool(SafeWorkspace(tmp_path))])
-    refused = registry.invoke("finish_meta", {"taste_path": "taste.md"})
-    assert refused.ok is False
-    assert refused.value["error_type"] == "prior_policy"
-    (tmp_path / "PRIOR.md").write_text(
-        "## Agent Process\nUse explore for schema reads.\n",
-        encoding="utf-8",
-    )
-    accepted = registry.invoke("finish_meta", {"taste_path": "taste.md"})
-    assert accepted.ok is True
 
 
 def test_prior_content_allows_boundary_sentences_and_rejects_leaks() -> None:

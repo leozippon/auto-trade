@@ -121,7 +121,7 @@ _FIELDS: list[dict[str, object]] = [
         "label": "元学习 Fold 间隔",
         "type": "int",
         "min": 0,
-        "help": "0=仅每个 Epoch 开始运行一次；N>0=每完成 N 个 Fold 且仍有下一 Fold 时，再运行一次元学习并更新后续 Taste。",
+        "help": "0=仅每个 Epoch 开始运行一次；N>0=每完成 N 个 Fold 且仍有下一 Fold 时，再运行一次元学习并更新后续 PRIOR。",
     },
     {"key": "inherit_from", "group": "基本与排程", "label": "继承已有实验的 Agent Output", "type": "choice",
      "optional": True,
@@ -132,7 +132,7 @@ _FIELDS: list[dict[str, object]] = [
      "help": "拼接给下一次元学习的最近 Epoch 完整对话数（0 关闭原始记忆）。"},
     {"key": "fold_exploration_directive", "group": "基本与排程", "label": "默认 Fold 探索方向", "type": "text",
      "optional": True, "wide": True,
-     "help": "可选。作为实验级待检验主线注入 Meta 与每个普通 Fold；Meta 据此形成 Taste，详情页仍可追加单会话假设。"},
+     "help": "可选。作为实验级待检验主线注入 Meta 与每个普通 Fold；Meta 据此维护 PRIOR，详情页仍可追加单会话假设。"},
     # meta_learning_directive 有意不进创建表单：进入实验详情页后在元学习会话
     # 的指令面板填写（逐 Epoch 可覆盖），避免创建时与详情页两处重复输入。
     {

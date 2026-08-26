@@ -128,7 +128,6 @@ _META_TOOLS = frozenset(
         "read_file",
         "todo",
         "write_file",
-        "write_taste",
     }
 )
 _CLEARED_TOOL_RESULT = json.dumps(
@@ -1275,7 +1274,7 @@ class AgentSessionRunner:
 
 
 class MetaLearningAgent:
-    """Validate the small, local-only output contract of a Meta session."""
+    """Validate the fixed, local-only PRIOR.md output contract of a Meta session."""
 
     def __init__(self, runner: AgentSessionRunner, workspace: str | Path) -> None:
         if runner.config.mode not in {"meta", "meta_learning"}:
@@ -1285,29 +1284,17 @@ class MetaLearningAgent:
 
     def learn(self, instruction: str) -> dict[str, object]:
         result = self.runner.run(instruction)
-        # A Taste is adopted only on an explicit meta_learning_done; a session
-        # that stopped any other way must not have its Taste carried forward.
         if result.finish_value.get("status") != "meta_learning_done":
             raise RuntimeError(
                 f"meta-learning did not finish with done: {result.finish_value.get('status')}"
             )
-        relative = result.finish_value.get("taste_path")
-        if not isinstance(relative, str) or not relative:
-            raise RuntimeError("Meta Agent did not nominate taste_path")
-        path = (self.workspace / relative).resolve()
-        if self.workspace not in path.parents or not path.is_file():
-            raise RuntimeError(
-                "Meta Agent taste_path is outside the workspace or missing"
-            )
-        taste = path.read_text(encoding="utf-8").strip()
-        if not taste:
-            raise RuntimeError("taste.md cannot be empty")
         prior_path = self.workspace / "PRIOR.md"
-        prior = ""
-        if prior_path.is_file():
-            prior = prior_path.read_text(encoding="utf-8").strip()
+        if not prior_path.is_file():
+            raise RuntimeError("Meta Agent did not produce PRIOR.md")
+        prior = prior_path.read_text(encoding="utf-8").strip()
+        if not prior:
+            raise RuntimeError("PRIOR.md cannot be empty")
         return {
-            "taste": taste,
             "prior": prior,
             "conversation_id": result.conversation_id,
         }
@@ -1326,9 +1313,8 @@ _DATE_EXPR = re.compile(
     r"|[Qq][1-4]\s*(?:19|20)\d{2}"
 )
 
-# Taste is injected into every later Fold prompt. Keep a short prior.
-TASTE_MAX_CHARS = 4000
-# PRIOR is free-format process memory published by Meta. Resource bound, not a schema.
+# PRIOR is free-format strategy direction and process memory published by Meta.
+# This is a resource bound, not a schema.
 PRIOR_MAX_CHARS = 16_000
 
 
@@ -1383,35 +1369,6 @@ def calendar_policy_violation(
     return ""
 
 
-def taste_policy_violation(taste_path: Path, *, window_dates: set[str]) -> str:
-    """Why this taste.md may not be accepted, or "" when it is acceptable.
-
-    The Taste is injected into every later Fold prompt, so a calendar date in
-    it carries hidden-schedule evidence forward, and a long process ledger
-    drowns the Fold contract. Empty/overlong files are rejected here; dates go
-    through calendar_policy_violation.
-    """
-    if not taste_path.exists():
-        return "write taste.md before finishing"
-    text = taste_path.read_text(encoding="utf-8", errors="replace")
-    if not text.strip():
-        return "taste.md must be non-empty before finishing"
-    nchars = len(text.strip())
-    if nchars > TASTE_MAX_CHARS:
-        return (
-            f"taste.md is {nchars} characters; keep it to {TASTE_MAX_CHARS} "
-            "as a short directional prior, then call finish_meta again"
-        )
-    violation = calendar_policy_violation(text, window_dates=window_dates)
-    if violation:
-        return (
-            f"taste.md {violation}; state it qualitatively (e.g. 样本交易日不足、按季度轮动) "
-            "with no year or window date, then call finish_meta again"
-        )
-    return ""
-
-
-_AGENT_PROCESS_HEADING = re.compile(r"(?m)^##[ \t]+Agent Process[ \t]*$")
 _PRIOR_BOUNDARY_RE = re.compile(
     r"不得|不要|禁止|不可见|不能用于|不得按|不得用|不得读取|不得使用|不得写入|"
     r"永远不可见|排除|不进入|不读取|不挂载"
@@ -1453,43 +1410,42 @@ def prior_content_violation(text: str) -> str:
     return ""
 
 
-def prior_policy_violation(prior_path: Path) -> str:
-    """Why an existing PRIOR.md may not be finished, or empty when it is acceptable.
-
-    Missing or blank PRIOR.md means this Meta round keeps the previous version.
-    """
+def prior_policy_violation(
+    prior_path: Path, *, window_dates: set[str] | None = None
+) -> str:
+    """Why the fixed PRIOR.md cannot be accepted, or "" when it is acceptable."""
     if not prior_path.exists():
-        return ""
+        return "write PRIOR.md before finishing"
     text = prior_path.read_text(encoding="utf-8", errors="replace")
     if not text.strip():
-        return ""
+        return "PRIOR.md must be non-empty before finishing"
     nchars = len(text.strip())
     if nchars > PRIOR_MAX_CHARS:
         return (
             f"PRIOR.md is {nchars} characters; keep it to {PRIOR_MAX_CHARS} "
-            "as process memory, then call finish_meta again"
+            "as transferable direction and memory, then call finish_meta again"
         )
-    if len(_AGENT_PROCESS_HEADING.findall(text)) > 1:
+    calendar_leak = calendar_policy_violation(
+        text, window_dates=set(window_dates or ())
+    )
+    if calendar_leak:
         return (
-            "PRIOR.md has duplicate ## Agent Process headings; "
-            "keep a single current snapshot"
+            f"PRIOR.md {calendar_leak}; state it qualitatively "
+            "with no year or visible-window date, then call finish_meta again"
         )
-    leak = prior_content_violation(text)
-    if leak:
-        return f"PRIOR.md {leak}"
+    content_leak = prior_content_violation(text)
+    if content_leak:
+        return f"PRIOR.md {content_leak}"
     return ""
 
 
-class TasteFinishTool:
+class FinishMetaTool:
     spec = ToolSpec(
         "finish_meta",
-        "Finish local Meta learning and nominate taste.md.",
+        "Finish local Meta learning after maintaining the fixed PRIOR.md.",
         {
             "type": "object",
-            "properties": {
-                "taste_path": {"type": "string", "minLength": 1, "maxLength": 500}
-            },
-            "required": ["taste_path"],
+            "properties": {},
             "additionalProperties": False,
         },
     )
@@ -1508,23 +1464,15 @@ class TasteFinishTool:
         self.window_dates = set(window_dates or ())
 
     def invoke(self, arguments) -> ToolResult:
-        path = self.workspace.resolve(
-            str(arguments["taste_path"]), must_exist=True, directory=False
+        del arguments
+        violation = prior_policy_violation(
+            self.workspace.root / "PRIOR.md", window_dates=self.window_dates
         )
-        violation = taste_policy_violation(path, window_dates=self.window_dates)
         if violation:
-            raise ToolError(violation, error_type="taste_policy")
-        prior_violation = prior_policy_violation(self.workspace.root / "PRIOR.md")
-        if prior_violation:
-            raise ToolError(prior_violation, error_type="prior_policy")
+            raise ToolError(violation, error_type="prior_policy")
         return ToolResult(
             True,
-            # Pipeline adopts a Taste only on an explicit done: the status is
-            # the Runner's evidence that the session actually finished.
-            value={
-                "taste_path": self.workspace.relative(path),
-                "status": "meta_learning_done",
-            },
+            value={"status": "meta_learning_done"},
             finish=True,
         )
 

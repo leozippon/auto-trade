@@ -42,7 +42,7 @@ from .meta_inputs import (
     build_meta_fold_review_bundle,
     select_meta_review_folds,
 )
-from .prior import ExperimentPriorStore, PRIOR_MAX_CHARS, latest_prior_text
+from .prior import ExperimentPriorStore, PRIOR_MAX_CHARS
 from autotrade.agent.runner import AgentSessionDeadlineExceeded
 from .config import (
     ArtifactRevision,
@@ -158,7 +158,6 @@ class RollingExperimentPipeline:
             min_region_trade_days=self.config.min_region_trade_days,
         )
         parent: FrozenArtifact | None = None
-        taste = ""
         prior = ""
         final_epoch = ""
         for epoch_index in range(1, self.config.epochs + 1):
@@ -171,13 +170,10 @@ class RollingExperimentPipeline:
             )
             for fold_index, fold in enumerate(folds):
                 if self.meta_learner is not None and fold_index in triggers:
-                    taste, parent = self._run_meta(
-                        epoch_id, fold_index, fold, parent, taste, previous_prior=prior
+                    prior, parent = self._run_meta(
+                        epoch_id, fold_index, fold, parent, previous_prior=prior
                     )
-                    prior = latest_prior_text(self.ledger.read("meta_learning"))
-                outcome = self.run_fold(
-                    epoch_id, fold, parent=parent, taste=taste, prior=prior
-                )
+                outcome = self.run_fold(epoch_id, fold, parent=parent, prior=prior)
                 parent = outcome.frozen
         # Fail-fast path: only reachable when every Fold ended with no freezable
         # artifact at all (integrity failures); acceptance shortfalls alone never
@@ -196,7 +192,6 @@ class RollingExperimentPipeline:
         fold: FoldSpec,
         *,
         parent: FrozenArtifact | None,
-        taste: str,
         prior: str = "",
         session_context: dict[str, object] | None = None,
     ) -> FoldOutcome:
@@ -225,7 +220,6 @@ class RollingExperimentPipeline:
                         fold=fold,
                         run_id=run_id,
                         parent=parent,
-                        taste=taste,
                         prior=prior,
                         snapshot=valid_snapshot,
                         max_steps=budgets["max_steps"],
@@ -512,12 +506,11 @@ class RollingExperimentPipeline:
         completed_folds: int,
         visible_fold: FoldSpec,
         parent: FrozenArtifact | None,
-        previous_taste: str,
         session_context: dict[str, object] | None = None,
         previous_prior: str = "",
     ) -> tuple[str, FrozenArtifact | None]:
         if self.meta_learner is None:
-            return previous_taste, parent
+            return previous_prior, parent
         run_started = time.monotonic()
         run_id = f"run_{uuid.uuid4().hex}"
         session_id = meta_learning_id(epoch_id, completed_folds)
@@ -549,7 +542,6 @@ class RollingExperimentPipeline:
                         "snapshot_id": meta_snapshot.snapshot_id,
                         "data_summary_ref": meta_snapshot.data_summary_ref,
                         "parent_artifact_id": parent.artifact_id if parent else None,
-                        "previous_taste": previous_taste,
                         "previous_prior": previous_prior,
                         "development_history": history,
                         "review_window": history.get("review_window"),
@@ -573,15 +565,13 @@ class RollingExperimentPipeline:
                 )
             except AgentSessionDeadlineExceeded as exc:
                 # Expected control flow: the meta session closed gracefully at
-                # its deadline. Keep the previous Taste and parent, record the
+                # its deadline. Keep the previous PRIOR and parent, record the
                 # outcome, and let the run continue with the next session.
                 session = MetaSessionResult(
-                    taste=previous_taste,
-                    conversation_id=exc.conversation_id,
                     prior=previous_prior,
+                    conversation_id=exc.conversation_id,
                 )
                 deadline_exceeded = True
-            taste = str(session.taste).strip()
             prior_text, prior_published, prior_ref, prior_generation_id = (
                 self._publish_or_keep_prior(
                     session,
@@ -596,7 +586,7 @@ class RollingExperimentPipeline:
             # (`session.allowed`), never on the nomination alone. A learner that
             # offers a revision the check refused must not have it adopted --
             # a meta-regularized artifact becomes the next Fold's parent.
-            status = "taste_only"
+            status = "prior_only"
             frozen = parent
             if deadline_exceeded:
                 status = "deadline_exceeded_kept_previous"
@@ -624,7 +614,7 @@ class RollingExperimentPipeline:
                 )
                 status = "meta_regularized"
             elif parent is not None and session.allowed:
-                status = "taste_only_kept_parent"
+                status = "prior_only_kept_parent"
             elif parent is not None:
                 status = "rejected_kept_parent"
             _publish_progress(progress, "publishing", run_id=run_id)
@@ -641,7 +631,6 @@ class RollingExperimentPipeline:
                     "session_key": meta_session_key(epoch_id, completed_folds),
                     "meta_learning_id": session_id,
                     "trigger_after_folds": completed_folds,
-                    "taste": taste,
                     "prior": prior_text,
                     "prior_published": prior_published,
                     "prior_ref": prior_ref or None,
@@ -669,7 +658,7 @@ class RollingExperimentPipeline:
                 meta_session_key(epoch_id, completed_folds),
                 expired_by=run_id,
             )
-            return taste, frozen
+            return prior_text, frozen
         except Exception as exc:
             self.ledger.append(
                 {
@@ -767,14 +756,12 @@ class RollingExperimentPipeline:
         visible_fold: FoldSpec,
         *,
         parent: FrozenArtifact | None,
-        previous_taste: str,
         previous_prior: str = "",
         session_context: dict[str, object] | None = None,
     ) -> tuple[str, FrozenArtifact | None]:
         """Run one scheduled Meta session through the canonical ledger path.
 
-        Returns the Taste and the parent the next Fold must start from — the
-        meta-regularized artifact when the session produced one.
+        Returns the current PRIOR and the parent the next Fold must start from.
         """
 
         return self._run_meta(
@@ -782,7 +769,6 @@ class RollingExperimentPipeline:
             completed_folds,
             visible_fold,
             parent,
-            previous_taste,
             session_context,
             previous_prior=previous_prior,
         )
@@ -799,11 +785,13 @@ class RollingExperimentPipeline:
         store = ExperimentPriorStore(self.config.experiment_dir)
         candidate = "" if deadline_exceeded else str(session.prior or "").strip()
         previous = previous_prior.strip()
-        if (
-            candidate
-            and len(candidate) <= PRIOR_MAX_CHARS
-            and candidate != previous
-        ):
+        if candidate and len(candidate) > PRIOR_MAX_CHARS:
+            raise ValueError(
+                f"PRIOR.md is {len(candidate)} characters; keep it to {PRIOR_MAX_CHARS}"
+            )
+        if not candidate and not previous and not deadline_exceeded:
+            raise ValueError("the first Meta session must produce a non-empty PRIOR.md")
+        if candidate and candidate != previous:
             published = store.publish(candidate, generation_id=generation_id)
             return published.text, True, published.prior_ref, published.generation_id
         return (
@@ -913,7 +901,7 @@ def _development_inputs(
     limited to the compact frozen-test metric whitelist of already-completed
     Folds. Held-out never appears. ``fold_reviews`` and
     ``fold_backtest_summaries`` only cover regular Folds completed after the
-    previous Meta; older Folds are already absorbed into PRIOR/Taste.
+    previous Meta; older Folds are already absorbed into PRIOR.
     ``fold_reviews`` carries frozen strategy source, a bounded Agent Trace
     index, ``agent_process_summary``, and ``agent_trace_full`` sidecar metadata.
     Each sidecar is a byte-exact copy of the raw Fold AgentTraceWriter JSONL; its

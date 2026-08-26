@@ -506,7 +506,7 @@ def test_prompt_and_facts_encode_daily_json_and_offline_meta_boundaries():
         "注入的本地 development 制品在 `inputs/` 下",
         "`modification_check`",
         "sandbox_environment.json",
-        "Taste 里不能出现焊接的日历日期",
+        "不能出现焊接的日历日期",
     ):
         assert rule in META_SYSTEM_PROMPT
 
@@ -518,7 +518,7 @@ def test_prompt_and_facts_encode_daily_json_and_offline_meta_boundaries():
     assert facts["visibility_policy"]["heldout_visible"] is False
     assert facts["meta_learning"]["backtest_allowed"] is False
     assert facts["meta_learning"]["sample_window_only"] is True
-    assert facts["meta_learning"]["taste_output_path"].endswith("taste.md")
+    assert facts["meta_learning"]["prior_output_path"].endswith("PRIOR.md")
 
 
 def test_fold_prompt_and_strategy_reference_encode_the_performance_contract():
@@ -601,19 +601,17 @@ def _all_registrable_tool_names() -> set[str]:
     import tempfile
 
     import autotrade.environment.tools as tools_pkg
-    from autotrade.agent.runner import TasteFinishTool
+    from autotrade.agent.runner import FinishMetaTool
     from autotrade.environment.nl.engine import TEXT_RETRIEVE_TOOL
     from autotrade.environment.tools import SafeWorkspace, SearchRoots
     from autotrade.environment.tools.search import GlobTool, GrepTool, ReadFileTool
-    from autotrade.pipelines.local_backend import WriteTasteTool
-
     # The backtest tool is constructed per fold in local_backend, so its name
     # is named here rather than discovered.
     names = {TEXT_RETRIEVE_TOOL, "daily_backtest"}
     with tempfile.TemporaryDirectory() as tmp:
         roots = SearchRoots(SafeWorkspace(Path(tmp)))
         instances = [GlobTool(roots), GrepTool(roots), ReadFileTool(roots)]
-    candidates = [*instances, WriteTasteTool, TasteFinishTool]
+    candidates = [*instances, FinishMetaTool]
     candidates.extend(getattr(tools_pkg, name, None) for name in dir(tools_pkg))
     for candidate in candidates:
         spec = getattr(candidate, "spec", None)
@@ -657,11 +655,11 @@ def test_the_prompt_tool_check_fails_on_a_tool_the_session_cannot_register():
     from autotrade.agent.runner import _FOLD_TOOLS
 
     registrable = _all_registrable_tool_names()
-    # `write_taste` exists, but only a Meta session may register it.
-    assert "write_taste" in registrable
+    # `finish_meta` exists, but only a Meta session may register it.
+    assert "finish_meta" in registrable
     mutated = (
         build_system_prompt(mode="fold", experiment_facts={})
-        + "\n- 用 `write_taste` 写下偏好。"
+        + "\n- 用 `finish_meta` 结束本 Fold。"
     )
     referenced = _prompt_tool_tokens(mutated) & registrable
-    assert sorted(referenced - set(_FOLD_TOOLS)) == ["write_taste"]
+    assert sorted(referenced - set(_FOLD_TOOLS)) == ["finish_meta"]

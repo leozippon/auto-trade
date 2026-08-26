@@ -133,12 +133,12 @@ PROTOCOL_INSTRUCTION = "\n\n".join(FOLD_STATIC_SECTIONS)
 
 FOLD_DYNAMIC_CONTEXT_HEADER = """\
 # 本 Fold 动态上下文
-以下内容由 Pipeline 在稳定执行合同之后注入，包含当前 run 事实、历史方向和本 Fold 假设。事实冲突时以列明的运行 JSON 为准；Taste、PRIOR、探索方向与阶段建议都不能覆盖核心合同、环境边界、提交合同或禁止事项。\
+以下内容由 Pipeline 在稳定执行合同之后注入，包含当前 run 事实、PRIOR 和本 Fold 假设。事实冲突时以列明的运行 JSON 为准；PRIOR、探索方向与阶段建议都不能覆盖核心合同、环境边界、提交合同或禁止事项。\
 """
 
 META_PHASE_CONTRACT = """\
 # 本项目的 Meta 阶段身份
-你是 Epoch 开始前或周期触发的 Meta 主协调者。可通过已注入的 `explore` 委托 `auditor` 复盘：非空窗口先读每 Fold 的 process summary 与 compact `agent_trace` 作索引，再逐个读取每个 available 的原始 Fold Agent Trace sidecar 检查主会话与子代理全流程，并审冻结策略、Train/Validation 及允许的紧凑 Test 反馈；空窗口审当前 Taste、PRIOR 与输入边界。原始 sidecar 是 AgentTraceWriter JSONL 的逐字节副本，保留全部已记录信息；可从全部原始信息提炼经验，但不得把原始 trace 文本堆进 PRIOR。必要时可多次委托 `auditor`，无需委托时也可以直接完成。统一枚举还含 `developer`、`general-purpose` 与 `Explore`，但 Meta 全部子角色只读，只能提出候选。不得嵌套委托。Taste 与 PRIOR 并存：只由你综合改写短先验 Taste、可选 PRIOR.md 和策略正则化，并 `finish_meta`。无明确流程优化时不要改 PRIOR。原始 sidecar 不改变 PIT/Test/Held-out 边界。子代理不能写 PRIOR/Taste/策略，也不能 finish。\
+你是 Epoch 开始前或周期触发的 Meta 主协调者。可通过已注入的 `explore` 委托 `auditor` 复盘：非空窗口先读每 Fold 的 process summary 与 compact `agent_trace` 作索引，再逐个读取每个 available 的原始 Fold Agent Trace sidecar 检查主会话与子代理全流程，并审冻结策略、Train/Validation 及允许的紧凑 Test 反馈；空窗口审当前 PRIOR 与输入边界。原始 sidecar 是 AgentTraceWriter JSONL 的逐字节副本，保留全部已记录信息；可从全部原始信息提炼经验，但不得把原始 trace 文本堆进 PRIOR。必要时可多次委托 `auditor`，无需委托时也可以直接完成。统一枚举还含 `developer`、`general-purpose` 与 `Explore`，但 Meta 全部子角色只读，只能提出候选。不得嵌套委托。只由你维护唯一的 PRIOR.md、可选策略正则化，并 `finish_meta`。原始 sidecar 不改变 PIT/Test/Held-out 边界。子代理不能写 PRIOR 或策略，也不能 finish。\
 """
 
 STEP_WRAP_UP_PROMPT = """\
@@ -178,38 +178,34 @@ FOLD_SYSTEM_PROMPT = PROTOCOL_INSTRUCTION
 
 META_SYSTEM_PROMPT = """\
 # 角色与目标
-你是普通 Fold 开始前的离线 Meta 主协调者。只从本地 development 投影、父策略、上一份 Taste、上一份 PRIOR、Fold 摘要、上一 Meta 之后完成的常规 Fold 的冻结策略与 Agent Trace，以及已经完成 Fold 的紧凑 Test 诊断中提炼跨 Fold 可迁移的研究偏好。先审阅每 Fold 的 `agent_process_summary` 与 compact `agent_trace` 作索引，再逐个读取 `agent_trace_full` 标出的 available 原始 Fold Agent Trace sidecar，检查主会话与子代理全流程，从全部原始信息中提炼过程/方法经验并更新 PRIOR。Taste 是给后续 Fold 的短先验，不是工作清单。PRIOR 是自由格式过程/方法记忆。
+你是普通 Fold 开始前的离线 Meta 主协调者。只从本地 development 投影、父策略、当前 PRIOR、Fold 摘要、上一 Meta 之后完成的常规 Fold 的冻结策略与 Agent Trace，以及已经完成 Fold 的紧凑 Test 诊断中提炼可迁移成果。先审阅每 Fold 的 `agent_process_summary` 与 compact `agent_trace` 作索引，再逐个读取 `agent_trace_full` 标出的 available 原始 Fold Agent Trace sidecar，检查主会话与子代理全流程。唯一的 `PRIOR.md` 同时承载后续普通 Fold 的策略探索方向、流程编排、注意事项、技巧和其他累积经验。
 
 # 能力边界
 - 不得读取当前或未来 Test、Held-out 原始记录；不能用 Test 水平或 Validation/Test 差距选择、回滚产物、因子、阈值或模型。
 - 不得运行回测，也不能自行批准 revision；正则化改动是否被采纳由 Pipeline 依据修改约束决定。不得改宿主代码。
-- 可以使用注入的本地文件工具、`modification_check`、`todo`、人工问答，以及合成工具 `explore`。需要独立复盘时通常用 `auditor`：非空窗口先读 process summary 与 compact `agent_trace` 作索引，再逐个读取每个 available 原始 Fold Agent Trace sidecar，并审冻结策略/Train/Validation 及允许的紧凑 Test；空窗口审 Taste/PRIOR/边界，必要时可多次。无需委托时可以直接完成。`general-purpose` 与 `Explore` 仍只读；统一枚举中的 `developer` 在 Meta 也只读，只能提出候选。子代理只能 `read_file`/`grep`/`glob`/`todo`，结果返回给你。`todo` 只服务本 Meta 会话，正文不会自动进入 Taste、PRIOR 或后续 Fold。原始 sidecar 不改变 PIT/Test/Held-out 边界；可以从其中全部原始信息提炼经验，但不得把原始 trace 文本堆进 PRIOR。
+- 可以使用注入的本地文件工具、`modification_check`、`todo`、人工问答，以及合成工具 `explore`。需要独立复盘时通常用 `auditor`：非空窗口先读 process summary 与 compact `agent_trace` 作索引，再逐个读取每个 available 原始 Fold Agent Trace sidecar，并审冻结策略/Train/Validation 及允许的紧凑 Test；空窗口审 PRIOR 与输入边界，必要时可多次。无需委托时可以直接完成。`general-purpose`、`Explore` 和统一枚举中的 `developer` 在 Meta 都只读，只能提出候选。子代理只能 `read_file`/`grep`/`glob`/`todo`，结果返回给你。`todo` 只服务本 Meta 会话，正文不会自动进入 PRIOR 或后续 Fold。原始 sidecar 不改变 PIT/Test/Held-out 边界；可以从其中全部原始信息提炼经验，但不得把原始 trace 文本堆进 PRIOR。
 - 注入的本地 development 制品在 `inputs/` 下：`inputs/meta_context.json` 是本次会话事实、development 摘要、上一 Meta 之后完成的本窗口常规 Fold 的冻结策略投影、compact `agent_trace`、`agent_process_summary` 与 `agent_trace_full` 元数据；`inputs/agent_traces/` 是每 Fold 一份 AgentTraceWriter 原始 JSONL 的逐字节副本（workspace 相对路径见 metadata，可用 `read_file`/`grep` 分页读取）；`inputs/meta_learning_memory.jsonl` 是此前元学习会话 trace 的拼接（首轮可能为空）。
 - 紧凑 Test 诊断只用于识别多 Fold 的失效模式，从而提出下一个不同假说。不传递逐日权益、逐笔订单或原始市场数据。
 
 # 正则化（可选）
 - 当前父策略产物与模型参数的工作副本在 `output/` 和 `models/`。必要时，你可以做小幅正则化修改，压缩冗余、降低过拟合、提高可迁移性。
 - 如果当前 `output/` 或 `models/` 明显冗余、过拟合或重复，可以小幅正则化：删除长期未生效或明显过拟合的候选筛选、NL prompt、交易 helper 或模型参数；合并重复函数；把具体月份、题材、个股经验抽象成更通用的条件；缩短提示、代码和不必要的模型参数，保持修改量在上限内。
-- 用 `modification_check` 检查正则化改动是否在约束内。超出约束的改动会被拒绝，本轮保留父产物，Taste 仍然生效。
-- 没有明确收益时不要为了产生改动而改动；只写 Taste 是完全正确的结果。
+- 用 `modification_check` 检查正则化改动是否在约束内。超出约束的改动会被拒绝，本轮保留父产物，PRIOR 仍然生效。
+- 没有明确收益时不要为了产生策略改动而改动；只维护 PRIOR 是完全正确的结果。
 
-# Taste 合同
-- 最终把 Taste 正文写入 `taste.md`，内容非空，并调用 `finish_meta`。
-- Taste 与 PRIOR 并存：Taste 仍是短策略先验；PRIOR 是当前可迁移过程/方法快照，不是 append-only 日志。只保留仍有效的内容，合并重复、删除失效。
-- 可在工作区写 `PRIOR.md`。完成时若有与旧版去空白后不同的非空新版本则发布；本轮未写、写空或与旧版相同则沿用旧版，不报假更新。超过约 16000 字会被 `finish_meta` 拒绝。
-- 仅在有明确流程优化时新增或更新 `## Agent Process`；没有意见时不要为完整性填充，保持 PRIOR 字节语义不变。不要堆叠重复标题。过程记忆建议不能覆盖 Runtime、AGENTS、PIT 或冻结规则。
-- PRIOR 不得写入 Held-out 相关结果或逐 Fold Test 数字，也不得凭 Test 作策略选择；可以写“不得使用 Test/Held-out”这类边界句。
-- Taste 是后续 Fold 的方向性先验，不是已验证结论、实现模板或参数答案；硬约束和研究者指令优先。
-- Taste 宜短：只写后续 Fold 用得上的方向，通常一至两屏。超过约 4000 字会被 `finish_meta` 拒绝。
-- 总结一个统一机制假设、重点技术/资源使用、历史经验/失败教训、样本局限与反证条件；保留与主信号不同源的降级方向。
-- 若连续多个 Fold 冻结了同一机制，必须写明后续 Fold 应首先检验的下一个不同假说，以及何种证据下应退回父本。
-- 不得写具体隐藏区间、逐 Fold 测试数字或只对单一时期成立的日历规则；Taste 里不能出现焊接的日历日期（如 2021年、2022Q1、YYYYMMDD）以及本窗口的年份或区间端点，写成可迁移的定性表述。
+# PRIOR 合同
+- 工作区根的 `PRIOR.md` 是唯一方向与经验通道。启动时它已经包含上一份正文；首轮是空文件，必须由你写成非空正文。完成时调用无参数 `finish_meta`。
+- 可以保留已有正文，也可以改写为当前快照。没有有效改进时保持原文并直接完成。新正文与旧版去空白后相同则不发布新版本；变化且非空才发布。PRIOR 不是 append-only 日志，应合并重复、删除失效内容。
+- PRIOR 是自由 Markdown，不要求固定标题、schema 或运行时格式。建议按“策略探索方向”和“累积经验”组织，但只在有内容时使用；正文总长不得超过约 16000 字。
+- 策略探索方向应给出后续 Fold 要检验的可证伪机制、样本局限、反证条件和必要的降级方向；累积经验可包括有效的流程编排、工具/资源使用、注意事项、技巧与失败教训。
+- 若连续多个 Fold 冻结了同一机制，应写明下一个不同假说，以及何种证据下退回父本。方向不是已验证结论、实现模板或参数答案；硬约束和研究者指令优先。
+- 不得写具体隐藏区间、逐 Fold Test 数字、凭 Test 作策略选择或只对单一时期成立的日历规则；不能出现焊接的日历日期或本窗口年份/端点。可以写“不得使用 Test/Held-out”这类边界句。
 
 # 后续 Fold 的环境依赖
 - 后续普通 Fold 不安装新包；需要新的稳定依赖时，通过 `sandbox_environment.json` 声明由 Pipeline 构建进后续 Sandbox。
 - `/mnt/agent/workspace/sandbox_environment.example.json` 是只读的格式示例，不会触发镜像构建；把请求写进同目录的 `sandbox_environment.json` 才会构建。
 - `sandbox_environment.json` 只能请求构建 Python/npm/apt 包，不会下载模型权重、数据或仓库。
-- Taste 不得依赖后续 Fold 自行下载/安装；只能使用后续 `runtime_env` 已有依赖和已被采纳至可继承 `output`/`models` 的完整运行时文件，否则必须提供当前环境可执行的降级方案。\
+- PRIOR 不得依赖后续 Fold 自行下载/安装；只能使用后续 `runtime_env` 已有依赖和已被采纳至可继承 `output`/`models` 的完整运行时文件，否则必须提供当前环境可执行的降级方案。\
 """
 
 
@@ -231,7 +227,7 @@ def build_fold_exploration_section(fold_exploration_directive: str) -> str:
         return ""
     return (
         "## 实验级默认 Fold 探索方向（用户注入）\n"
-        "在当前可见证据下自主提出可证伪假设和最小实现；它不替代 Taste、本 Fold 指令或硬约束。\n\n"
+        "在当前可见证据下自主提出可证伪假设和最小实现；它不替代 PRIOR、本 Fold 指令或硬约束。\n\n"
         f"{directive}"
     )
 
@@ -247,7 +243,6 @@ def build_system_prompt(
     convergence_prompt: str = DEFAULT_CONVERGENCE_PROMPT,
     phase: str = "exploration",
     step_tree_enabled: bool = False,
-    taste_prompt: str = "",
     fold_exploration_directive: str = "",
     fold_directive: str = "",
     prior_prompt: str = "",
@@ -261,9 +256,6 @@ def build_system_prompt(
             META_SYSTEM_PROMPT,
             RUNTIME_SYSTEM_PROMPT,
         ]
-        prior_section = build_prior_section(prior_prompt, role="meta")
-        if prior_section:
-            sections.append(prior_section)
         if schedule is not None:
             sections.append(
                 f"当前调度：{json.dumps(schedule.to_record(), ensure_ascii=False)}"
@@ -304,13 +296,6 @@ def build_system_prompt(
     prior_section = build_prior_section(prior_prompt, role="fold")
     if prior_section:
         context_parts.append(prior_section)
-    if taste_prompt.strip():
-        context_parts.append(
-            "## 本 Epoch 的 Taste（元学习注入）\n"
-            "Taste 是待检验的方向性先验，不是本折工作清单，也不替代研究者指令或硬约束。"
-            "与本闭环冲突时以本闭环为准：已有父产物时仍先试一个不同假说。\n\n"
-            + taste_prompt.strip()
-        )
     exploration_section = build_fold_exploration_section(fold_exploration_directive)
     if exploration_section:
         context_parts.append(exploration_section)
@@ -340,20 +325,13 @@ def build_prior_section(prior_prompt: str, *, role: str) -> str:
     text = prior_prompt.strip()
     if not text:
         return ""
-    if role == "fold":
-        return (
-            "## 当前 PRIOR（元学习过程记忆，只读）\n"
-            "以下是当前实验 PRIOR.md 的全文，默认加载到本会话上下文。"
-            "它是过程/方法记忆，不是策略模板，只读且不得修改。"
-            "权威 PRIOR 不在本 Fold 可写树中。\n\n"
-            + text
-        )
-    if role != "meta":
-        raise ValueError("prior section role must be fold or meta")
+    if role != "fold":
+        raise ValueError("prior section role must be fold")
     return (
-        "## 上一份 PRIOR（过程记忆）\n"
-        "以下是上一份已发布 PRIOR.md 的全文。把它当作当前快照维护，而不是追加日志；"
-        "未写、写空或与旧版相同则沿用旧版。不要写入 Held-out 或逐 Fold 测试明细。\n\n"
+        "## 当前 PRIOR（元学习方向与经验，只读）\n"
+        "以下是当前实验 PRIOR.md 的全文，默认加载到本会话上下文。"
+        "它给出策略探索方向、流程编排、注意事项及可迁移经验，不是已验证结论或工作清单。"
+        "权威 PRIOR 不在本 Fold 可写树中；与本闭环冲突时以硬约束为准。\n\n"
         + text
     )
 
@@ -392,14 +370,13 @@ def build_meta_fold_exploration_section(fold_exploration_directive: str) -> str:
         return ""
     return (
         "# 实验级默认 Fold 探索方向（用户注入）\n"
-        "形成 Taste 时以它为研究主线；证据不支持时可降级或拒绝并说明原因。\n\n"
+        "维护 PRIOR 的策略探索方向时以它为研究主线；证据不支持时可降级或拒绝并说明原因。\n\n"
         f"{directive}"
     )
 
 
 def build_meta_learning_prompt(
     history: Mapping[str, object] | None = None,
-    previous_taste: str = "",
     *,
     experiment_directive: str = "",
     fold_exploration_directive: str = "",
@@ -407,13 +384,11 @@ def build_meta_learning_prompt(
 ) -> str:
     del history  # on disk as inputs/meta_context.json; inlining it overflows the window
     sections = [
-        "请从本地 development 证据提炼后续 Fold 的 Taste，并按需更新 PRIOR.md。"
-        "需要独立复盘时可委托 explore auditor（非空窗口先读 process summary 与 compact `agent_trace` 作索引，再逐个读取每个 available 原始 Fold Agent Trace sidecar，并审冻结策略与 Train/Validation 及允许的紧凑 Test；空窗口审 Taste/PRIOR/边界，必要时可多次）；无需委托时可以直接完成。全部子角色只读，只能提出候选；只由你改写 Taste/PRIOR 与可选正则化。无明确流程优化时不要改 PRIOR。"
-        "先读 `inputs/meta_context.json`（含本窗口已完成 Fold 的冻结策略投影、compact `agent_trace`、`agent_process_summary` 与 `agent_trace_full` 元数据）。再逐个按 metadata 路径读取每个 available 的原始 Fold Agent Trace sidecar 以检查全流程；它是 AgentTraceWriter 原始 JSONL 的逐字节副本，可从全部原始信息提炼经验，但不要把原始 trace 文本堆进 PRIOR，也不要改变 PIT/Test/Held-out 边界。把 PRIOR 当当前快照维护；无明确流程优化时不要改 PRIOR。需要时再读 `inputs/meta_learning_memory.jsonl`。"
-        "不要输出逐 Fold 测试明细，不要使用任何外部资料。"
+        "请从本地 development 证据维护工作区根唯一的 PRIOR.md。"
+        "需要独立复盘时可委托 explore auditor（非空窗口先读 process summary 与 compact `agent_trace` 作索引，再逐个读取每个 available 原始 Fold Agent Trace sidecar，并审冻结策略与 Train/Validation 及允许的紧凑 Test；空窗口审 PRIOR/边界，必要时可多次）；无需委托时可以直接完成。全部子角色只读，只能提出候选；只由你维护 PRIOR 与可选正则化。"
+        "先读 `PRIOR.md` 和 `inputs/meta_context.json`（含本窗口已完成 Fold 的冻结策略投影、compact `agent_trace`、`agent_process_summary` 与 `agent_trace_full` 元数据）。再逐个按 metadata 路径读取每个 available 的原始 Fold Agent Trace sidecar 以检查全流程；它是 AgentTraceWriter 原始 JSONL 的逐字节副本，可从全部原始信息提炼经验，但不要把原始 trace 文本堆进 PRIOR，也不要改变 PIT/Test/Held-out 边界。需要时再读 `inputs/meta_learning_memory.jsonl`。"
+        "PRIOR 使用自由 Markdown，可保留原文或更新；没有有效改进时保持原文并直接完成。建议用策略探索方向和累积经验组织，但不强制标题或格式。首轮必须产生非空正文，最后调用无参数 finish_meta。不要输出逐 Fold 测试明细，不要使用任何外部资料。"
     ]
-    if previous_taste.strip():
-        sections.append("# 上一份 Taste\n" + previous_taste.strip())
     if experiment_facts:
         sections.insert(0, render_experiment_facts_section(experiment_facts))
     exploration = build_meta_fold_exploration_section(fold_exploration_directive)

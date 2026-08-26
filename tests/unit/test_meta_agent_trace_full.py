@@ -366,8 +366,12 @@ def test_llm_meta_publishes_raw_sidecar_before_context(
         llm=ScriptedLLM(
             [
                 *_explore_then(
-                    ToolCall("taste", "write_taste", {"taste": "prefer simple signals"}),
-                    ToolCall("finish_meta", "finish_meta", {"taste_path": "taste.md"}),
+                    ToolCall(
+                        "prior",
+                        "write_file",
+                        {"path": "PRIOR.md", "content": "prefer simple signals"},
+                    ),
+                    ToolCall("finish_meta", "finish_meta", {}),
                 )
             ]
         ),

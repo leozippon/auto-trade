@@ -5753,14 +5753,10 @@ function metaResultPanel(detail, session) {
         : null,
     ),
   );
-  if (record.taste) {
+  if (record.prior) {
     panel.append(
-      el(
-        "h4",
-        { class: "section-gap" },
-        "Taste（注入后续 Fold，直到下一次元学习）",
-      ),
-      renderMarkdown(record.taste),
+      el("h4", { class: "section-gap" }, "PRIOR（后续 Fold 的方向与经验）"),
+      renderMarkdown(record.prior),
     );
   }
   return panel;

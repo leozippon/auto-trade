@@ -146,7 +146,7 @@ class RecordFailedAttemptsTest(unittest.TestCase):
             fold=fold,
             run_id="run_x",
             parent=None,
-            taste="",
+            prior="",
             snapshot=SnapshotBundle("snap", "decision", "replay"),
             max_steps=10,
             max_backtests=30,
@@ -238,7 +238,7 @@ class RecordFailedAttemptsTest(unittest.TestCase):
                 fold=fold,
                 run_id="run_keep",
                 parent=None,
-                taste="",
+                prior="",
                 snapshot=SnapshotBundle("snap", "decision", "replay"),
                 max_steps=10,
                 max_backtests=30,
@@ -325,7 +325,7 @@ class MetaMemoryBoundTest(unittest.TestCase):
                     "meta_learning_id": epoch,
                     "run_id": run_id,
                     "agent_trace_ref": str(trace),
-                    "taste": f"taste {index}",
+                    "prior": f"prior {index}",
                 }
             )
         pipeline = RollingExperimentPipeline(

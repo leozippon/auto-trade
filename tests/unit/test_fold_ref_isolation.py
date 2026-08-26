@@ -135,9 +135,11 @@ def fold_session(tmp_path_factory, provider_key):
         [
             *_explore_then(
                 ToolCall(
-                    "taste", "write_taste", {"taste": "prefer simple signals"}
+                    "prior",
+                    "write_file",
+                    {"path": "PRIOR.md", "content": "prefer simple signals"},
                 ),
-                ToolCall("finish_meta", "finish_meta", {"taste_path": "taste.md"}),
+                ToolCall("finish_meta", "finish_meta", {}),
             ),
             *_explore_then(
                 ToolCall("check", "modification_check", {}),
@@ -267,11 +269,10 @@ def test_meta_learning_prompt_does_not_inline_development_history():
                     "validation_result": {"per_stock": {"000001.SZ": [0.1] * 80}},
                 }
             ]
-        },
-        previous_taste="keep the daily floor",
+        }
     )
     assert "inputs/meta_context.json" in prompt
-    assert "keep the daily floor" in prompt
+    assert "PRIOR.md" in prompt
     assert "per_stock" not in prompt
     assert "fold_backtest_summaries" not in prompt
 
@@ -317,6 +318,41 @@ def test_agent_visible_ref_is_stable_and_not_reversible_by_prefix_collision():
     )
 
 
+def test_meta_with_existing_prior_can_finish_without_rewriting_it(tmp_path: Path):
+    baseline = tmp_path / "baseline" / "main.py"
+    baseline.parent.mkdir()
+    baseline.write_text(
+        "def generate_orders(context):\n    return []\n", encoding="utf-8"
+    )
+    learner = LLMMetaLearner(
+        llm=ScriptedLLM(
+            [
+                *_explore_then(
+                    ToolCall("finish_meta", "finish_meta", {}), roles=()
+                )
+            ]
+        ),
+        baseline_strategy=baseline,
+        artifact_store=FilesystemArtifactStore(tmp_path / "artifacts"),
+        experiment_dir=tmp_path / "experiment",
+        runtime_root=tmp_path / "runtime",
+        max_llm_calls=2,
+        deadline_seconds=30.0,
+        use_docker=False,
+        rebuild_enabled=False,
+    )
+    result = learner(
+        {
+            "run_id": "run_keep_prior",
+            "experiment_id": "exp",
+            "epoch_id": "epoch_002",
+            "meta_learning_id": "epoch_002",
+            "previous_prior": "keep the current transferable direction",
+        }
+    )
+    assert result.prior == "keep the current transferable direction"
+
+
 def test_meta_context_parent_artifact_id_is_an_opaque_strategy_ref(tmp_path: Path):
     parent_id = "strategy_epoch_002_fold_2025Q2_59852cdf4fb8"
     baseline = tmp_path / "baseline" / "main.py"
@@ -330,9 +366,11 @@ def test_meta_context_parent_artifact_id_is_an_opaque_strategy_ref(tmp_path: Pat
         [
             *_explore_then(
                 ToolCall(
-                    "taste", "write_taste", {"taste": "prefer simple signals"}
+                    "prior",
+                    "write_file",
+                    {"path": "PRIOR.md", "content": "prefer simple signals"},
                 ),
-                ToolCall("finish_meta", "finish_meta", {"taste_path": "taste.md"}),
+                ToolCall("finish_meta", "finish_meta", {}),
             )
         ]
     )

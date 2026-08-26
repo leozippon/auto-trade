@@ -212,16 +212,15 @@ def render() -> str:
         "",
         _block(META_SYSTEM_PROMPT),
         "",
-        "Meta 的注册工具白名单为 `read_file`、`grep`、`glob`、`write_file`、`edit_file`、`modification_check`、`todo`、`write_taste`、可选 `ask_user` 和 `finish_meta`。Runner 另外注入合成工具 `explore`，用于一层只读审计/分析子代理。Runner 在第一轮模型请求之前验证注册工具集合；多余能力会使会话直接失败。",
+        "Meta 的注册工具白名单为 `read_file`、`grep`、`glob`、`write_file`、`edit_file`、`modification_check`、`todo`、可选 `ask_user` 和 `finish_meta`。Runner 另外注入合成工具 `explore`，用于一层只读审计/分析子代理。Runner 在第一轮模型请求之前验证注册工具集合；多余能力会使会话直接失败。",
         "",
         "Meta 用户消息由 `build_meta_learning_prompt` 组织：",
         "",
         _block(
-            "请从本地 development 证据提炼后续 Fold 的 Taste，并按需更新 PRIOR.md。"
-            "需要独立复盘时可委托 explore auditor（非空窗口先读 process summary 与 compact `agent_trace` 作索引，再逐个读取每个 available 原始 Fold Agent Trace sidecar，并审冻结策略与 Train/Validation 及允许的紧凑 Test；空窗口审 Taste/PRIOR/边界，必要时可多次）；无需委托时可以直接完成。全部子角色只读，只能提出候选；只由你改写 Taste/PRIOR 与可选正则化。无明确流程优化时不要改 PRIOR。"
-            "先读 `inputs/meta_context.json`（含本窗口已完成 Fold 的冻结策略投影、compact `agent_trace`、`agent_process_summary` 与 `agent_trace_full` 元数据）。再逐个按 metadata 路径读取每个 available 的原始 Fold Agent Trace sidecar 以检查全流程；它是 AgentTraceWriter 原始 JSONL 的逐字节副本，可从全部原始信息提炼经验，但不要把原始 trace 文本堆进 PRIOR，也不要改变 PIT/Test/Held-out 边界。把 PRIOR 当当前快照维护；无明确流程优化时不要改 PRIOR。需要时再读 `inputs/meta_learning_memory.jsonl`。"
-            "不要输出逐 Fold 测试明细，不要使用任何外部资料。\n"
-            "{previous_taste, development}\n\n"
+            "请从本地 development 证据维护工作区根唯一的 PRIOR.md。"
+            "需要独立复盘时可委托 explore auditor（非空窗口先读 process summary 与 compact `agent_trace` 作索引，再逐个读取每个 available 原始 Fold Agent Trace sidecar，并审冻结策略与 Train/Validation 及允许的紧凑 Test；空窗口审 PRIOR/边界，必要时可多次）；无需委托时可以直接完成。全部子角色只读，只能提出候选；只由你维护 PRIOR 与可选正则化。"
+            "先读 `PRIOR.md` 和 `inputs/meta_context.json`（含本窗口已完成 Fold 的冻结策略投影、compact `agent_trace`、`agent_process_summary` 与 `agent_trace_full` 元数据）。再逐个按 metadata 路径读取每个 available 的原始 Fold Agent Trace sidecar 以检查全流程；它是 AgentTraceWriter 原始 JSONL 的逐字节副本，可从全部原始信息提炼经验，但不要把原始 trace 文本堆进 PRIOR，也不要改变 PIT/Test/Held-out 边界。需要时再读 `inputs/meta_learning_memory.jsonl`。"
+            "PRIOR 使用自由 Markdown，可保留原文或更新；没有有效改进时保持原文并直接完成。建议用策略探索方向和累积经验组织，但不强制标题或格式。首轮必须产生非空正文，最后调用无参数 finish_meta。不要输出逐 Fold 测试明细，不要使用任何外部资料。\n"
             "[可选：实验级默认 Fold 探索方向]\n"
             "[可选：实验级探索方向]"
         ),
@@ -297,8 +296,6 @@ def render() -> str:
             "## Step 产物树\n"
             "[启用时注入]\n\n"
             f"{build_prior_section('{PRIOR.md 全文}', role='fold')}\n\n"
-            "## 本 Epoch 的 Taste（元学习注入）\n"
-            "[存在时注入]\n\n"
             "## 实验级默认 Fold 探索方向（用户注入）\n"
             "[存在时注入]\n\n"
             "## 研究者本 Fold 指令（用户注入）\n"
@@ -319,7 +316,7 @@ def render() -> str:
         "| `artifact_contract` | 必需入口、订单返回合同、修改约束、Step 和验收语义 |",
         "| `broker_replay` | 资金、费用、手数、T+1、调度与精确执行价格来源 |",
         "| `runtime_tools` | Python、已装依赖、可用本地工具、网络模式和安装策略 |",
-        "| `meta_learning` | 仅 Meta：本地 development 输入、Taste 输出和能力禁用状态 |",
+        "| `meta_learning` | 仅 Meta：本地 development 输入、PRIOR 输出和能力禁用状态 |",
         "",
         "动态事实只作为常用索引。Agent 不能把其中的日期、period、Fold 标识或资源元数据用作交易信号，也不能据此推断隐藏阶段。",
         "",

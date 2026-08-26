@@ -19,8 +19,8 @@ from .runner import (
     AgentSessionConfig,
     AgentSessionResult,
     AgentSessionRunner,
+    FinishMetaTool,
     MetaLearningAgent,
-    TasteFinishTool,
 )
 
 __all__ = [
@@ -34,9 +34,9 @@ __all__ = [
     "ContextCompactor",
     "ExploreSubAgentConfig",
     "ExploreSubAgentEngine",
+    "FinishMetaTool",
     "MetaLearningAgent",
     "StrategyLoadError",
-    "TasteFinishTool",
     "build_meta_learning_prompt",
     "build_system_prompt",
     "load_strategy",

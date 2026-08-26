@@ -153,8 +153,7 @@ class RollingExperimentConfig:
     meta_learning_fold_interval: int = 0
     # Raw prior meta-learning traces handed to the next meta session are bounded
     # to the most recent N epochs (0 disables raw memory). Unbounded concatenation
-    # grows O(epochs^2); older sessions persist via the Taste chain and the
-    # compact fold history instead.
+    # grows O(epochs^2); older sessions persist via PRIOR and compact fold history.
     meta_memory_max_epochs: int = 3
     # Optional experiment-level research direction injected only into the
     # active meta-learning prompt.
@@ -330,7 +329,6 @@ class FoldSessionRequest:
     fold: FoldSpec
     run_id: str
     parent: FrozenArtifact | None
-    taste: str
     snapshot: SnapshotBundle
     max_steps: int
     max_backtests: int
@@ -396,12 +394,11 @@ class MetaSessionResult:
     freeze, exactly as it does for a Fold's selected Step.
     """
 
-    taste: str
+    prior: str
     conversation_id: str = ""
     revision_id: str = ""
     modification_check: Mapping[str, object] = field(default_factory=dict)
     allowed: bool = True
-    prior: str = ""
 
 
 FoldDeveloper = Callable[[FoldSessionRequest], FoldSessionResult]

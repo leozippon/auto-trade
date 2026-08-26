@@ -64,7 +64,6 @@ _FORBIDDEN_TOOLS = frozenset(
         "finish_fold",
         "finish_meta",
         "step_rollback",
-        "write_taste",
     }
 )
 _ALLOWED_TOOLS = _FOLD_WRITE_TOOLS
@@ -106,11 +105,11 @@ _FOLD_AUDIT_PROMPT = """\
 
 META_EXPLORE_SYSTEM_PROMPT = """\
 # 角色
-你是 sub-agent：Meta 主协调者的一层只读审计/分析子代理，只完成委托给你的具体独立任务，禁止再嵌套子代理。你与父 Meta 共享同一 SafeWorkspace、总预算、deadline 和 Trace。结果只返回父 Meta；你不能发布 PRIOR、Taste 或结束本会话。
+你是 sub-agent：Meta 主协调者的一层只读审计/分析子代理，只完成委托给你的具体独立任务，禁止再嵌套子代理。你与父 Meta 共享同一 SafeWorkspace、总预算、deadline 和 Trace。结果只返回父 Meta；你不能发布 PRIOR 或结束本会话。
 
 # 方法
-- 只用 read_file/grep/glob 做有界只读定位；用 `todo` 维护本会话研究计划。todo 可以写会话计划，但不得改 PRIOR、Taste 或策略产物。
-- 不得调用 explore（禁止嵌套）。没有 write_file、edit_file、shell、daily_backtest、write_taste、finish_meta、modification_check 或提问。
+- 只用 read_file/grep/glob 做有界只读定位；用 `todo` 维护本会话研究计划。todo 可以写会话计划，但不得改 PRIOR 或策略产物。
+- 不得调用 explore（禁止嵌套）。没有 write_file、edit_file、shell、daily_backtest、finish_meta、modification_check 或提问。
 - 一轮内相互独立的只读检索可并行；todo 必须按调用顺序串行。
 - 工具错误要如实保留，不要猜测成功。
 - 不得读取 Test/Held-out 原始记录，不得改宿主代码。
@@ -149,11 +148,11 @@ _META_ROLE_MISSIONS = {
         "非空窗口先读 process summary 与 compact agent_trace 作索引，"
         "再逐个读取每个 available 原始 Fold Agent Trace sidecar 检查主会话与子代理全流程，"
         "并检查冻结策略、Train/Validation 及允许的紧凑 Test 反馈；"
-        "空窗口检查 Taste、PRIOR 与输入边界；必要时可多次。"
+        "空窗口检查 PRIOR 与输入边界；必要时可多次。"
         "原始 sidecar 是 AgentTraceWriter JSONL 的逐字节副本，可从全部原始信息提炼经验，"
         "但不得改变 PIT/Test/Held-out 边界或把原始 trace 文本堆进 PRIOR"
     ),
-    "developer": "只读，仅能提出候选改进，不能写 PRIOR、Taste 或策略",
+    "developer": "只读，仅能提出候选改进，不能写 PRIOR 或策略",
     "general-purpose": "可选只读同事；适合跨域有界任务",
     "Explore": "可选只读同事；适合探索未知位置、资料或接口",
 }

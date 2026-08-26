@@ -101,7 +101,7 @@ def _parent(artifacts: Artifacts, body: str = MAIN) -> FrozenArtifact:
 
 
 class MetaSessionStatusTest(unittest.TestCase):
-    """Closed's three outcomes, each recorded on the ledger row."""
+    """The three Meta outcomes are each recorded on the ledger row."""
 
     def _run(self, root: Path, session: MetaSessionResult, artifacts_body: str | None = None):
         pipeline, artifacts, config = _pipeline(root, meta_learner=lambda facts: session)
@@ -109,19 +109,19 @@ class MetaSessionStatusTest(unittest.TestCase):
         if session.revision_id:
             artifacts.add_revision(session.revision_id, artifacts_body or (MAIN + "# regularized\n"))
         fold = build_fold_schedule("2026Q1", "2026Q1", DAYS)[0]
-        taste, next_parent = pipeline.run_meta_session(
-            "epoch_001", 1, fold, parent=parent, previous_taste=""
+        prior, next_parent = pipeline.run_meta_session(
+            "epoch_001", 1, fold, parent=parent, previous_prior=""
         )
         record = ExperimentLedger(config.ledger_path).read("meta_learning")[-1]
-        return taste, next_parent, record
+        return prior, next_parent, record
 
     def test_an_allowed_edit_is_frozen_and_becomes_the_next_parent(self) -> None:
         with TemporaryDirectory() as tmp:
-            taste, next_parent, record = self._run(
+            prior, next_parent, record = self._run(
                 Path(tmp),
-                MetaSessionResult(taste="prefer simple", revision_id="revision_meta", allowed=True),
+                MetaSessionResult(prior="prefer simple", revision_id="revision_meta", allowed=True),
             )
-            self.assertEqual(taste, "prefer simple")
+            self.assertEqual(prior, "prefer simple")
             self.assertEqual(record["status"], "meta_regularized")
             self.assertEqual(record["frozen_strategy_artifact_id"], next_parent.artifact_id)
             self.assertTrue(record["frozen_strategy_artifact_path"])
@@ -129,47 +129,44 @@ class MetaSessionStatusTest(unittest.TestCase):
             # Never backtested: the next Fold must validate it before falling back.
             self.assertTrue(next_parent.requires_validation)
 
-    def test_a_taste_only_session_keeps_the_parent(self) -> None:
+    def test_a_prior_only_session_keeps_the_parent(self) -> None:
         with TemporaryDirectory() as tmp:
-            taste, next_parent, record = self._run(
-                Path(tmp), MetaSessionResult(taste="prefer robust", allowed=True)
+            prior, next_parent, record = self._run(
+                Path(tmp), MetaSessionResult(prior="prefer robust", allowed=True)
             )
-            self.assertEqual(taste, "prefer robust")
-            self.assertEqual(record["status"], "taste_only_kept_parent")
+            self.assertEqual(prior, "prefer robust")
+            self.assertEqual(record["status"], "prior_only_kept_parent")
             self.assertEqual(next_parent.artifact_id, "strategy_parent")
             self.assertIsNone(record["frozen_strategy_artifact_id"])
             self.assertFalse(next_parent.requires_validation)
 
-    def test_a_refused_edit_keeps_the_parent_and_the_taste_still_stands(self) -> None:
+    def test_a_refused_edit_keeps_the_parent_and_prior(self) -> None:
         with TemporaryDirectory() as tmp:
             # A refused check makes the learner withhold the revision, exactly
             # as LLMMetaLearner does (`if parent_id and allowed and changed`).
-            taste, next_parent, record = self._run(
+            prior, next_parent, record = self._run(
                 Path(tmp),
                 MetaSessionResult(
-                    taste="prefer robust",
+                    prior="prefer robust",
                     allowed=False,
                     modification_check={"allowed_to_backtest": False,
                                         "reasons": ["diff lines 50 > 5"]},
                 ),
             )
-            # A refused regularization is an audited verdict, not a lost Taste.
-            self.assertEqual(taste, "prefer robust")
+            # A refused regularization is an audited verdict, not lost PRIOR.
+            self.assertEqual(prior, "prefer robust")
             self.assertEqual(record["status"], "rejected_kept_parent")
             self.assertEqual(next_parent.artifact_id, "strategy_parent")
             self.assertEqual(record["modification_check"]["reasons"], ["diff lines 50 > 5"])
 
     def test_the_pipeline_refuses_to_freeze_a_revision_the_check_disallowed(self) -> None:
-        """Defence in depth: closed gates the freeze on the check's verdict in
-        the PIPELINE (`experiment.py:934`, `allowed_to_backtest and changed`),
-        not in the learner. `MetaSessionResult.allowed` exists to carry that
-        verdict, and the open freeze branch does not consult it — so a learner
-        that nominates a revision the check refused has it adopted."""
+        """Defence in depth: the Pipeline gates the freeze on the check verdict,
+        not only on the learner's nomination."""
         with TemporaryDirectory() as tmp:
-            _taste, next_parent, record = self._run(
+            _prior, next_parent, record = self._run(
                 Path(tmp),
                 MetaSessionResult(
-                    taste="t", revision_id="revision_meta", allowed=False,
+                    prior="candidate", revision_id="revision_meta", allowed=False,
                     modification_check={"allowed_to_backtest": False},
                 ),
             )
@@ -178,9 +175,9 @@ class MetaSessionStatusTest(unittest.TestCase):
 
     def test_the_learner_nominates_and_the_pipeline_freezes(self) -> None:
         with TemporaryDirectory() as tmp:
-            _taste, next_parent, _record = self._run(
+            _prior, next_parent, _record = self._run(
                 Path(tmp),
-                MetaSessionResult(taste="t", revision_id="revision_meta", allowed=True),
+                MetaSessionResult(prior="candidate", revision_id="revision_meta", allowed=True),
             )
             # The frozen artifact is a Pipeline-owned copy, not the learner's
             # working revision directory.

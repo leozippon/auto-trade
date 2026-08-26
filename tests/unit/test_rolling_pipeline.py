@@ -88,7 +88,7 @@ def test_rolling_pipeline_runs_meta_fold_test_and_heldout(tmp_path: Path):
         artifacts=Artifacts(revision, tmp_path / "frozen"),
         evaluator=Evaluator(),
         developer=developer,
-        meta_learner=lambda facts: MetaSessionResult(taste="prefer simple daily signals"),
+        meta_learner=lambda facts: MetaSessionResult(prior="prefer simple daily signals"),
         ledger=ledger,
     )
     days = [stamp.strftime("%Y%m%d") for stamp in pd.bdate_range("2025-09-29", "2026-06-30")]
@@ -129,8 +129,8 @@ def test_meta_session_retains_only_the_authorized_test_diagnostic(tmp_path: Path
             "run_id": "run_meta0",
             "session_key": "epoch_001/meta_learning",
             "meta_learning_id": "epoch_001",
-            "taste": "initial",
-            "status": "taste_only",
+            "prior": "initial",
+            "status": "prior_only",
         }
     )
     ledger.append(
@@ -158,7 +158,7 @@ def test_meta_session_retains_only_the_authorized_test_diagnostic(tmp_path: Path
 
     def meta_learner(facts):
         captured.update(facts)
-        return MetaSessionResult(taste="prefer robust signals")
+        return MetaSessionResult(prior="prefer robust signals")
 
     pipeline = RollingExperimentPipeline(
         config,
@@ -175,12 +175,12 @@ def test_meta_session_retains_only_the_authorized_test_diagnostic(tmp_path: Path
     ]
     visible_fold = build_fold_schedule("2026Q1", "2026Q1", days)[0]
 
-    taste = pipeline.run_meta_session(
+    prior = pipeline.run_meta_session(
         "epoch_001",
         1,
         visible_fold,
         parent=None,
-        previous_taste="",
+        previous_prior="initial",
         session_context={
             "session_timing": lambda: {
                 "run_wall_seconds": 12.34,
@@ -189,9 +189,9 @@ def test_meta_session_retains_only_the_authorized_test_diagnostic(tmp_path: Path
         },
     )
 
-    # run_meta_session returns (taste, next_parent): a regularized artifact
-    # becomes the next Fold's parent, and taste-only leaves it unchanged.
-    assert taste == ("prefer robust signals", None)
+    # run_meta_session returns (PRIOR, next_parent): a regularized artifact
+    # becomes the next Fold's parent, and a PRIOR-only session leaves it unchanged.
+    assert prior == ("prefer robust signals", None)
     meta_record = ledger.read("meta_learning")[-1]
     assert meta_record["run_wall_seconds"] == 12.3
     assert meta_record["researcher_wait_seconds"] == 1.3
@@ -253,7 +253,7 @@ def _meta_only_pipeline(tmp_path: Path, ledger: ExperimentLedger, captured: dict
         artifacts=Artifacts(revision, tmp_path / "frozen"),
         evaluator=Evaluator(),
         developer=lambda _request: None,
-        meta_learner=lambda facts: (captured.update(facts) or MetaSessionResult(taste="next")),
+        meta_learner=lambda facts: (captured.update(facts) or MetaSessionResult(prior="next")),
         ledger=ledger,
     )
     days = [
@@ -287,7 +287,7 @@ def test_first_meta_session_has_empty_review_window(tmp_path: Path):
     )
     captured: dict[str, object] = {}
     pipeline, visible_fold = _meta_only_pipeline(tmp_path, ledger, captured)
-    pipeline.run_meta_session("epoch_001", 0, visible_fold, parent=None, previous_taste="")
+    pipeline.run_meta_session("epoch_001", 0, visible_fold, parent=None, previous_prior="")
     history = captured["development_history"]
     assert isinstance(history, dict)
     assert history["fold_reviews"] == []
@@ -320,7 +320,7 @@ def test_meta_session_window_skips_folds_before_previous_meta(tmp_path: Path):
             "fold_id": "epoch_001",
             "run_id": "run_meta0",
             "meta_learning_id": "epoch_001",
-            "status": "taste_only",
+            "status": "prior_only",
         }
     )
     ledger.append(
@@ -342,7 +342,7 @@ def test_meta_session_window_skips_folds_before_previous_meta(tmp_path: Path):
             "fold_id": "epoch_001_after_fold_001",
             "run_id": "run_meta1",
             "meta_learning_id": "epoch_001_after_fold_001",
-            "status": "taste_only",
+            "status": "prior_only",
         }
     )
     ledger.append(
@@ -358,7 +358,7 @@ def test_meta_session_window_skips_folds_before_previous_meta(tmp_path: Path):
     )
     captured: dict[str, object] = {}
     pipeline, visible_fold = _meta_only_pipeline(tmp_path, ledger, captured)
-    pipeline.run_meta_session("epoch_001", 2, visible_fold, parent=None, previous_taste="")
+    pipeline.run_meta_session("epoch_001", 2, visible_fold, parent=None, previous_prior="")
     history = captured["development_history"]
     assert isinstance(history, dict)
     window = history["review_window"]
@@ -405,7 +405,7 @@ def _pipeline_capturing_fold_requests(tmp_path: Path, captured: list):
         artifacts=Artifacts(revision, tmp_path / "frozen"),
         evaluator=Evaluator(),
         developer=developer,
-        meta_learner=lambda facts: MetaSessionResult(taste=""),
+        meta_learner=lambda facts: MetaSessionResult(prior="unused"),
         ledger=ExperimentLedger(config.ledger_path),
     )
     days = [stamp.strftime("%Y%m%d") for stamp in pd.bdate_range("2025-09-29", "2026-06-30")]
@@ -421,10 +421,10 @@ def test_run_fold_forwards_the_consoles_gpu_allocation_to_the_session_request(tm
     captured: list = []
     pipeline, fold = _pipeline_capturing_fold_requests(tmp_path, captured)
     pipeline.run_fold(
-        "epoch_001", fold, parent=None, taste="", session_context={"sandbox_gpu_count": 3}
+        "epoch_001", fold, parent=None, prior="", session_context={"sandbox_gpu_count": 3}
     )
     assert captured[-1].sandbox_gpu_count == 3
-    pipeline.run_fold("epoch_001", fold, parent=None, taste="", session_context={})
+    pipeline.run_fold("epoch_001", fold, parent=None, prior="", session_context={})
     assert captured[-1].sandbox_gpu_count is None
 
 
@@ -434,10 +434,10 @@ def test_run_fold_refuses_a_gpu_override_that_is_not_in_0_to_4(tmp_path: Path):
     for bogus in (-1, True, "2", 2.0, 5):
         with pytest.raises(ValueError, match="0..4"):
             pipeline.run_fold(
-                "epoch_001", fold, parent=None, taste="",
+                "epoch_001", fold, parent=None, prior="",
                 session_context={"sandbox_gpu_count": bogus},
             )
     pipeline.run_fold(
-        "epoch_001", fold, parent=None, taste="", session_context={"sandbox_gpu_count": 0}
+        "epoch_001", fold, parent=None, prior="", session_context={"sandbox_gpu_count": 0}
     )
     assert captured[-1].sandbox_gpu_count == 0

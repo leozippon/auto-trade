@@ -120,7 +120,7 @@ def _fold_request() -> FoldSessionRequest:
         ),
         run_id="run_budget",
         parent=None,
-        taste="",
+        prior="",
         snapshot=SnapshotBundle("snapshot", "decision", "replay"),
         max_steps=3,
         max_backtests=3,

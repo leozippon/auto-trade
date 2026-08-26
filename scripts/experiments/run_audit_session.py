@@ -84,9 +84,9 @@ def main() -> int:
     add_meta_directive_arguments(parser, verbose_help=False)
     add_fold_exploration_directive_arguments(parser, verbose_help=False)
     parser.add_argument(
-        "--taste-file",
+        "--prior-file",
         type=Path,
-        help="Optional Taste text injected into an ordinary Fold; ignored in meta-learning mode.",
+        help="Optional PRIOR.md seed for Meta or read-only PRIOR text for an ordinary Fold.",
     )
     parser.add_argument(
         "--fold-directive-file",
@@ -123,8 +123,6 @@ def main() -> int:
         parser.error("pass only one of --parent-artifact-id or --parent-step-node")
     if args.parent_artifact_root and not args.parent_artifact_id:
         parser.error("--parent-artifact-root requires --parent-artifact-id")
-    if args.mode == "meta-learning" and args.taste_file:
-        parser.error("--taste-file is only meaningful with --mode fold")
     if args.mode == "meta-learning" and args.fold_directive_file:
         parser.error("--fold-directive-file is only meaningful with --mode fold")
     image = args.sandbox_image or DEFAULT_IMAGE
@@ -133,7 +131,7 @@ def main() -> int:
 
     meta_learning_directive = resolve_meta_learning_directive(parser, args)
     fold_exploration_directive = resolve_fold_exploration_directive(parser, args)
-    taste_prompt = args.taste_file.read_text(encoding="utf-8") if args.taste_file else ""
+    prior_prompt = args.prior_file.read_text(encoding="utf-8") if args.prior_file else ""
     fold_directive = args.fold_directive_file.read_text(encoding="utf-8") if args.fold_directive_file else ""
 
     # One audited session, never a multi-epoch schedule: an explicit override of
@@ -164,12 +162,12 @@ def main() -> int:
     parent = _parent_artifact(args, options)
 
     if args.mode == "meta-learning":
-        taste, meta_parent = pipeline.run_meta_session(
+        prior, meta_parent = pipeline.run_meta_session(
             args.epoch_id,
             args.fold_index,
             fold,
             parent=parent,
-            previous_taste="",
+            previous_prior=prior_prompt,
         )
         result: dict[str, object] = {
             "status": "ok",
@@ -177,7 +175,7 @@ def main() -> int:
             "experiment_id": args.experiment_id,
             "epoch_id": args.epoch_id,
             "visible_fold": fold.to_record(),
-            "taste_chars": len(taste),
+            "prior_chars": len(prior),
             # The session may regularize the parent; report which artifact the
             # next Fold would start from so an audit run shows the real handoff.
             "next_parent_artifact_id": meta_parent.artifact_id if meta_parent else None,
@@ -188,8 +186,8 @@ def main() -> int:
             args.epoch_id,
             fold,
             parent=parent,
-            taste=taste_prompt,
-            session_context={"fold_directive": fold_directive} if fold_directive else None,
+            prior=prior_prompt,
+            session_context={"directive": fold_directive} if fold_directive else None,
         )
         result = {
             "status": "ok",

@@ -850,8 +850,7 @@ def run_local_interactive_worker(
     state = {
         "parent": _latest_artifact(ledger, store)
         or _load_inherited_parent(options.experiment_dir),
-        "taste": _latest_taste(ledger),
-        "prior": _latest_prior(ledger),
+        "prior": _latest_prior(ledger, options.experiment_dir),
     }
 
     def execute(session, context):
@@ -860,16 +859,14 @@ def run_local_interactive_worker(
         if session.kind == "meta":
             # A Meta session may regularize the artifact; the next Fold then
             # starts from the regularized parent, not the pre-Meta one.
-            state["taste"], state["parent"] = pipeline.run_meta_session(
+            state["prior"], state["parent"] = pipeline.run_meta_session(
                 session.epoch_id,
                 session.fold_index,
                 session.fold,
                 parent=state["parent"],
-                previous_taste=str(state["taste"]),
                 previous_prior=str(state["prior"]),
                 session_context=context,
             )
-            state["prior"] = _latest_prior(ledger)
             return
         if session.kind != "fold":
             raise RuntimeError(f"unsupported local session kind: {session.kind}")
@@ -885,7 +882,6 @@ def run_local_interactive_worker(
             session.epoch_id,
             session.fold,
             parent=session_parent,
-            taste=str(state["taste"]),
             prior=str(state["prior"]),
             session_context=context,
         )
@@ -1172,13 +1168,10 @@ def _build_post_fold_hook(
     return post_fold_hook
 
 
-def _latest_taste(ledger: ExperimentLedger) -> str:
-    records = ledger.read("meta_learning")
-    return str(records[-1].get("taste") or "") if records else ""
-
-
-def _latest_prior(ledger: ExperimentLedger) -> str:
-    return latest_prior_text(ledger.read("meta_learning"))
+def _latest_prior(ledger: ExperimentLedger, experiment_dir: Path) -> str:
+    return latest_prior_text(
+        ledger.read("meta_learning"), experiment_dir=experiment_dir
+    )
 
 
 def _restore_prior_store(experiment_dir: Path, ledger: ExperimentLedger) -> None:

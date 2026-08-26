@@ -478,9 +478,11 @@ def test_llm_worker_runs_real_meta_fold_validation_and_heldout(
         [
             *_explore_then(
                 ToolCall(
-                    "taste", "write_taste", {"taste": "prefer small daily changes"}
+                    "prior",
+                    "write_file",
+                    {"path": "PRIOR.md", "content": "prefer small daily changes"},
                 ),
-                ToolCall("finish_meta", "finish_meta", {"taste_path": "taste.md"}),
+                ToolCall("finish_meta", "finish_meta", {}),
             ),
             *_explore_then(
                 ToolCall(
@@ -510,7 +512,7 @@ def test_llm_worker_runs_real_meta_fold_validation_and_heldout(
         "heldout",
     ]
     meta, fold, heldout = records
-    assert meta["taste"] == "prefer small daily changes"
+    assert meta["prior"] == "prefer small daily changes"
     assert fold["steps"][0]["revision_id"].startswith("revision_")
     # The manifest the Agent and later Meta sessions read is the COLLECTED
     # copy under experiments/<id>/artifacts/<run_id>/, not the sandbox's
@@ -582,7 +584,7 @@ def test_llm_worker_runs_real_meta_fold_validation_and_heldout(
     assert len(frozen) == 1 and frozen[0].name == fold["frozen_strategy_artifact_id"]
     assert len(llm.calls) == 6
     meta_tool_names = {item["function"]["name"] for item in llm.calls[0]["tools"]}
-    assert {"write_taste", "finish_meta", "explore"}.issubset(meta_tool_names)
+    assert {"write_file", "finish_meta", "explore"}.issubset(meta_tool_names)
     # The Meta session may regularize the working copy, so it holds the typed
     # writers and modification_check — but it stays offline and never backtests.
     assert {"write_file", "edit_file", "modification_check", "todo"}.issubset(
@@ -647,9 +649,11 @@ def test_second_llm_fold_prompt_excludes_prior_test_diagnostic(
         [
             *_explore_then(
                 ToolCall(
-                    "taste", "write_taste", {"taste": "prefer simple signals"}
+                    "prior",
+                    "write_file",
+                    {"path": "PRIOR.md", "content": "prefer simple signals"},
                 ),
-                ToolCall("finish_meta", "finish_meta", {"taste_path": "taste.md"}),
+                ToolCall("finish_meta", "finish_meta", {}),
             ),
             *_fold_script("def generate_orders(context):\n    return []\n"),
             *_fold_script(
@@ -873,9 +877,11 @@ def test_console_gpu_allocation_reaches_the_run_manifests_sandbox_spec(
         [
             *_explore_then(
                 ToolCall(
-                    "taste", "write_taste", {"taste": "prefer small daily changes"}
+                    "prior",
+                    "write_file",
+                    {"path": "PRIOR.md", "content": "prefer small daily changes"},
                 ),
-                ToolCall("finish_meta", "finish_meta", {"taste_path": "taste.md"}),
+                ToolCall("finish_meta", "finish_meta", {}),
             ),
             *_explore_then(
                 ToolCall("check", "modification_check", {}),

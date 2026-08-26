@@ -191,8 +191,8 @@ def test_latest_artifact_uses_meta_regularized_parent(tmp_path: Path) -> None:
     _append_meta(
         ledger,
         session_key="epoch_001/meta_learning_after_fold_001",
-        status="taste_only_kept_parent",
-        run_id="run_meta_taste",
+        status="prior_only_kept_parent",
+        run_id="run_meta_prior",
         fold_id="epoch_001_after_fold_001",
     )
     _append_meta(
