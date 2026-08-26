@@ -1179,13 +1179,7 @@ class LLMFoldDeveloper:
                 ),
             ),
             "development_history": history,
-            "workspace": {
-                "strategy": "output/main.py",
-                "models": "models/",
-                "fold_context": "inputs/fold_context.json",
-                "data_summary": "/mnt/artifacts/data_summary.json",
-                "snapshot_in_sandbox": "/mnt/snapshot",
-            },
+            "workspace": fold_workspace_map(paths.workspace),
             "forbidden": [
                 "current_test",
                 "future_data",
@@ -1544,7 +1538,10 @@ class LLMMetaLearner:
                 raise TypeError("user_question_hook must be callable")
             tools.append(AskUserTool(hook, time_budget=time_budget))
         tools.append(
-            FinishMetaTool(safe, window_dates=visible_window_dates(manifest.data))
+            FinishMetaTool(
+                safe,
+                window_dates=visible_window_dates(manifest.data),
+            )
         )
         instruction = str(
             public.get("prompt_override") or ""
@@ -1674,6 +1671,22 @@ class LLMMetaLearner:
 _WORKSPACE_REFS_DIR = "refs"
 _REFERENCE_SKIP_NAMES = frozenset({".git", "__pycache__", "node_modules", ".venv"})
 _REFERENCE_PDF_MAX_BYTES = 256 * 1024
+
+
+def fold_workspace_map(workspace: str | Path) -> dict[str, str]:
+    """Agent-visible workspace index. ``refs`` is omitted when the directory is absent."""
+    mapping = {
+        "strategy": "output/main.py",
+        "models": "models/",
+        "fold_context": "inputs/fold_context.json",
+        "data_summary": "/mnt/artifacts/data_summary.json",
+        "snapshot_in_sandbox": "/mnt/snapshot",
+    }
+    if (Path(workspace) / _WORKSPACE_REFS_DIR).is_dir():
+        mapping["refs"] = "refs/"
+    if (Path(workspace) / "inputs" / "PRIOR.md").is_file():
+        mapping["prior"] = "inputs/PRIOR.md"
+    return mapping
 
 
 def install_workspace_reference(
@@ -1902,6 +1915,7 @@ def _date_key(value: object) -> str:
 __all__ = [
     "DeterministicBaselineDeveloper",
     "FilesystemArtifactStore",
+    "fold_workspace_map",
     "LLMFoldDeveloper",
     "LLMMetaLearner",
     "LocalDailyEvaluationBackend",
