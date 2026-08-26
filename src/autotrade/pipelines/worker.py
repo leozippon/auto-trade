@@ -12,7 +12,6 @@ from pathlib import Path
 import pandas as pd
 
 from autotrade.agent.compact import ContextCompactionConfig
-from autotrade.agent.explore import ExploreSubAgentConfig
 from autotrade.environment.artifacts import (
     FilesystemArtifactStore,
     # Single source of the frozen-artifact immutability rule: enforce the
@@ -273,6 +272,15 @@ class LLMWorkerSettings:
             ),
             require_credentials=require_credentials,
         )
+
+
+def _explore_native_max_tokens(settings: LLMWorkerSettings, role: str) -> int:
+    """Give Explore the model's native output ceiling, not the NL/child stub."""
+
+    model = settings.model if role == "main" else settings.meta_model
+    window = model_profile(model).context_window_tokens
+    requested = window or settings.max_response_tokens
+    return settings.max_tokens_for(role, requested=requested)
 
 
 @dataclass(frozen=True)
@@ -790,7 +798,7 @@ def run_local_interactive_worker(
         runtime_root = options.work_root / options.experiment_id
         developer = LLMFoldDeveloper(
             llm=fold_gateway,
-            explore_llm=nl_gateway,
+            explore_llm=fold_gateway,
             compact_llm=compact_gateway,
             context_compaction=options.llm.compaction,
             baseline_strategy=options.baseline_strategy,
@@ -804,9 +812,7 @@ def run_local_interactive_worker(
             sandbox_spec=options.agent_sandbox,
             command_runner_factory=command_runner_factory,
             max_response_tokens=options.llm.max_tokens_for("main"),
-            explore_max_tokens=options.llm.max_tokens_for(
-                "nl", requested=ExploreSubAgentConfig().max_tokens
-            ),
+            explore_max_tokens=_explore_native_max_tokens(options.llm, "main"),
             step_tree_enabled=options.rolling.step_tree_enabled,
             fold_exploration_directive=options.rolling.fold_exploration_directive,
             workspace_reference=options.rolling.workspace_reference,
@@ -814,7 +820,7 @@ def run_local_interactive_worker(
         )
         meta_learner = LLMMetaLearner(
             llm=meta_gateway,
-            explore_llm=nl_gateway,
+            explore_llm=meta_gateway,
             compact_llm=compact_gateway,
             context_compaction=options.llm.compaction,
             baseline_strategy=options.baseline_strategy,
@@ -824,9 +830,7 @@ def run_local_interactive_worker(
             max_llm_calls=options.rolling.max_llm_calls,
             deadline_seconds=options.rolling.max_fold_minutes * 60,
             max_response_tokens=options.llm.max_tokens_for("meta"),
-            explore_max_tokens=options.llm.max_tokens_for(
-                "nl", requested=ExploreSubAgentConfig().max_tokens
-            ),
+            explore_max_tokens=_explore_native_max_tokens(options.llm, "meta"),
             meta_learning_directive=options.rolling.meta_learning_directive,
             fold_exploration_directive=options.rolling.fold_exploration_directive,
             workspace_reference=options.rolling.workspace_reference,

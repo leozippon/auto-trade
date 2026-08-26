@@ -7,7 +7,6 @@
 /reports/
 /.runtime/
 /experiments/
-/MacroQuantCore/
 CLAUDE.md
 
 # Python bytecode and caches

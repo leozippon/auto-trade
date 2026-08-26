@@ -1490,3 +1490,19 @@ def test_local_conversation_log_uses_truthful_provider_path(tmp_path: Path):
     records = [json.loads(line) for line in files[0].read_text().splitlines()]
     assert {record["provider"] for record in records} == {"vllm"}
     assert "local-secret" not in json.dumps(records)
+
+
+def test_reasoning_only_response_is_accepted_without_retry() -> None:
+    from autotrade.environment.llm.proxy import ProviderResponse
+
+    response = ProviderResponse(content="", reasoning_content="internal plan")
+    assert response.content == ""
+    assert response.reasoning_content == "internal plan"
+    transport = FakeTransport(
+        [_response({"content": "", "reasoning_content": "internal plan"})]
+    )
+    proxy = DeepSeekProxy(make_config(max_retries=0), transport=transport)
+    parsed = proxy.complete([ChatMessage("user", "hello")])
+    assert parsed.content == ""
+    assert parsed.reasoning_content == "internal plan"
+    assert len(transport.requests) == 1

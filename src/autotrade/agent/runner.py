@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -60,7 +61,13 @@ from .compact import (
     is_llm_compaction_message,
     safe_error_summary,
 )
-from .explore import EXPLORE_ROLES, ExploreSubAgentEngine
+from .explore import (
+    DEFAULT_EXPLORE_MAX_CONCURRENT,
+    EXPLORE_ROLES,
+    EXPLORE_THINKING_LEVELS,
+    ExploreSubAgentEngine,
+    normalize_explore_thinking,
+)
 from .prompts import (
     HARD_FINALIZATION_SYSTEM_PROMPT,
     STEP_WRAP_UP_PROMPT,
@@ -100,7 +107,7 @@ class AgentSessionDeadlineExceeded(SessionInterrupt):
 _TERMINAL_TOOLS = frozenset({"finish_fold", "finish_meta"})
 _FOLD_FINALIZATION_TOOLS = frozenset({"finish_fold", "step_rollback"})
 _PARALLEL_READ_TOOLS = frozenset(
-    {"glob", "grep", "modification_check", "nl_query", "read_file", "validate_strategy"}
+    {"glob", "grep", "modification_check", "read_file", "validate_strategy"}
 )
 _FOLD_TOOLS = frozenset(
     {
@@ -260,8 +267,9 @@ class AgentSessionRunner:
                     raise ValueError("Meta session explore sub-agent must use mode='meta'")
             elif explore_mode != "fold":
                 raise ValueError("Fold session explore sub-agent must use mode='fold'")
+        self._event_lock = threading.Lock()
         if self.explore is not None and self.explore.event_sink is None:
-            self.explore.event_sink = event_sink
+            self.explore.event_sink = self._locked_event_sink
         bindings: list[TimeBudgetBinding] = []
         if isinstance(llm, SessionTimeBudgetAware):
             bindings.append(TimeBudgetBinding("main_llm", llm.session_time_budget))
@@ -447,7 +455,7 @@ class AgentSessionRunner:
             messages.append(
                 ChatMessage(
                     "assistant",
-                    response.content or None,
+                    response.content or None if response.tool_calls else response.content,
                     response.tool_calls,
                     reasoning_content=response.reasoning_content,
                 )
@@ -486,6 +494,7 @@ class AgentSessionRunner:
                 apply_point = INBOX_SAFE_AFTER_LLM_BEFORE_TOOLS
             else:
                 parallel = self._is_parallel_readonly_batch(response.tool_calls)
+                self._live_messages = messages
                 results, skipped_at = self._dispatch_tool_calls(
                     response.tool_calls, time_budget
                 )
@@ -642,12 +651,40 @@ class AgentSessionRunner:
                                 "task": {
                                     "type": "string",
                                     "minLength": 1,
-                                    "maxLength": 8_000,
+                                },
+                                "max_turns": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "description": (
+                                        "Maximum child LLM turns. Omit for unlimited until "
+                                        "the parent session deadline."
+                                    ),
                                 },
                                 "max_rounds": {
                                     "type": "integer",
                                     "minimum": 1,
-                                    "maximum": 20,
+                                    "description": "Alias of max_turns.",
+                                },
+                                "thinking": {
+                                    "type": "string",
+                                    "enum": list(EXPLORE_THINKING_LEVELS),
+                                    "description": (
+                                        "Optional child thinking level. Omit to inherit "
+                                        "the parent session. off disables extended thinking."
+                                    ),
+                                },
+                                "inherit_context": {
+                                    "type": "boolean",
+                                    "description": (
+                                        "If true, fork the parent conversation into the child "
+                                        "(Pi inherit_context). Default false: fresh context."
+                                    ),
+                                },
+                                "description": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 80,
+                                    "description": "Optional short label shown on the Trace subagent chip.",
                                 },
                             },
                             "required": ["role", "task"],
@@ -811,11 +848,18 @@ class AgentSessionRunner:
                 self._activate_hard_finalization_if_ready(time_budget.remaining())
             return call, record
 
-        if self._is_parallel_readonly_batch(calls):
+        if self._is_parallel_explore_batch(calls) or self._is_parallel_readonly_batch(
+            calls
+        ):
+            workers = (
+                self._explore_concurrency(len(calls))
+                if self._is_parallel_explore_batch(calls)
+                else min(len(calls), 4)
+            )
             slots: list[tuple[ToolCall, dict[str, object]] | None] = [None] * len(
                 calls
             )
-            with ThreadPoolExecutor(max_workers=min(len(calls), 4)) as executor:
+            with ThreadPoolExecutor(max_workers=workers) as executor:
                 futures = {
                     executor.submit(run_one, index): index
                     for index in range(len(calls))
@@ -850,6 +894,15 @@ class AgentSessionRunner:
             if call.name in _TERMINAL_TOOLS and self.tools.finished:
                 terminal_seen = True
         return results, None
+
+    def _is_parallel_explore_batch(self, calls: tuple[ToolCall, ...]) -> bool:
+        return len(calls) > 1 and all(call.name == "explore" for call in calls)
+
+    def _explore_concurrency(self, count: int) -> int:
+        cap = DEFAULT_EXPLORE_MAX_CONCURRENT
+        if self.explore is not None:
+            cap = self.explore.config.max_concurrent
+        return max(1, min(count, cap))
 
     def _is_parallel_readonly_batch(self, calls: tuple[ToolCall, ...]) -> bool:
         return len(calls) > 1 and all(
@@ -939,7 +992,7 @@ class AgentSessionRunner:
             )
             return record
         task = call.arguments.get("task")
-        raw_rounds = call.arguments.get("max_rounds")
+        raw_rounds = call.arguments.get("max_turns", call.arguments.get("max_rounds"))
         if not isinstance(task, str) or not task.strip():
             record = {
                 "ok": False,
@@ -955,7 +1008,7 @@ class AgentSessionRunner:
             if not isinstance(raw_rounds, int) or isinstance(raw_rounds, bool):
                 record = {
                     "ok": False,
-                    "error": "explore.max_rounds must be an integer",
+                    "error": "explore.max_turns must be an integer",
                 }
                 self._emit(
                     "explore_attempt",
@@ -963,14 +1016,43 @@ class AgentSessionRunner:
                 )
                 return record
             max_rounds = raw_rounds
-        self._explore_attempts += 1
-        self._explored_roles.add(raw_role)
-        attempt = self._explore_attempts
+        try:
+            thinking = normalize_explore_thinking(call.arguments.get("thinking"))
+        except ValueError as exc:
+            record = {"ok": False, "error": str(exc)}
+            self._emit("explore_attempt", {"ok": False, "error": record["error"]})
+            return record
+        inherit_raw = call.arguments.get("inherit_context", False)
+        if inherit_raw not in {True, False}:
+            record = {
+                "ok": False,
+                "error": "explore.inherit_context must be a boolean",
+            }
+            self._emit("explore_attempt", {"ok": False, "error": record["error"]})
+            return record
+        description = call.arguments.get("description", "")
+        if description in {None, ""}:
+            description = ""
+        elif not isinstance(description, str) or len(description) > 80:
+            record = {
+                "ok": False,
+                "error": "explore.description must be a string of at most 80 characters",
+            }
+            self._emit("explore_attempt", {"ok": False, "error": record["error"]})
+            return record
+        with self._event_lock:
+            self._explore_attempts += 1
+            self._explored_roles.add(raw_role)
+            attempt = self._explore_attempts
         result = self.explore.run(
             task,
             role=raw_role,
             max_rounds=max_rounds,
             parent_call_id=call.id,
+            thinking=thinking,
+            inherit_context=bool(inherit_raw),
+            parent_messages=getattr(self, "_live_messages", None),
+            description=description.strip(),
         )
         ok = result.get("status") == "completed"
         self._emit(
@@ -1268,13 +1350,17 @@ class AgentSessionRunner:
                     "Fold session with daily_backtest requires finish_fold"
                 )
 
+    def _locked_event_sink(self, event: str, payload: dict[str, object]) -> None:
+        with self._event_lock:
+            if self.event_sink is not None:
+                self.event_sink(event, payload)
+
     def _emit(self, event: str, payload: dict[str, object]) -> None:
         record = dict(payload)
         if event == "session_end" and self.explore is not None:
             record["explore_attempts"] = self._explore_attempts
             record["explored_roles"] = sorted(self._explored_roles)
-        if self.event_sink is not None:
-            self.event_sink(event, record)
+        self._locked_event_sink(event, record)
 
 
 class MetaLearningAgent:

@@ -283,24 +283,16 @@ class LocalSandbox:
                 _copy_path(source, dest_dir / name)
         if self.paths.host_run_manifest.exists():
             _copy_path(self.paths.host_run_manifest, dest_dir / "host_run_manifest.json")
-        # Collect official output/ and models/ FIRST so an uncollectable file
-        # later in the adversarial workspace tree cannot displace them.
-        # Prefer workspace/<name> when that directory has any file (the pipeline
-        # working copy); otherwise fall back to the /mnt/agent sibling.
+        # Collect official output/ and models/ from the /mnt/agent siblings
+        # FIRST so an uncollectable file later in the adversarial workspace
+        # tree cannot displace them. Workspace copies never win.
         # ``workspace`` is collected LAST and best-effort — a single
         # unreadable/special file there is skipped and logged instead of
         # aborting the whole collection.
         for name in AGENT_TOP_LEVEL:
             if name == _AGENT_WORKSPACE:
                 continue
-            workspace_copy = self.paths.workspace / name
-            sibling = self.paths.agent / name
-            source = (
-                workspace_copy
-                if workspace_copy.is_dir()
-                and any(path.is_file() for path in workspace_copy.rglob("*"))
-                else sibling
-            )
+            source = self.paths.agent / name
             if source.exists():
                 _copy_path(source, dest_dir / name)
         workspace_source = self.paths.agent / _AGENT_WORKSPACE

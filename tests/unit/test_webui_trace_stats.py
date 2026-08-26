@@ -70,6 +70,7 @@ def test_trace_stats_counts_unique_explore_tasks_not_calls(tmp_path: Path) -> No
     assert stats["llm_total_tokens"] == 9
     assert stats["llm_prompt_tokens"] == 6
     assert stats["llm_completion_tokens"] == 3
+    assert stats["last_llm_prompt_tokens"] == 0
 
 
 def test_trace_stats_old_trace_without_start_still_counts_unique_task(
@@ -151,12 +152,61 @@ def test_trace_stats_recomputes_when_cached_summary_lacks_subagent_field(
         traces._STATS_CACHE.pop(key, None)
 
 
+def test_trace_stats_last_main_llm_prompt_ignores_explore_calls(
+    tmp_path: Path,
+) -> None:
+    path = _write_trace(
+        tmp_path / "main.jsonl",
+        [
+            {
+                "event_type": "llm_call",
+                "task_id": "explore_a",
+                "usage": {"prompt_tokens": 6, "completion_tokens": 1, "total_tokens": 7},
+            },
+            {
+                "event_type": "llm_call",
+                "usage": {
+                    "prompt_tokens": 12000,
+                    "completion_tokens": 20,
+                    "total_tokens": 12020,
+                },
+            },
+            {
+                "event_type": "llm_call",
+                "usage": {
+                    "prompt_tokens": 8000,
+                    "completion_tokens": 10,
+                    "total_tokens": 8010,
+                },
+            },
+        ],
+    )
+    stats = trace_stats(path)
+    assert stats["last_llm_prompt_tokens"] == 8000
+    assert stats["llm_prompt_tokens"] == 20006
+
+
+def test_subagent_trace_card_shows_model_thinking_and_context() -> None:
+    script = APP_JS.read_text(encoding="utf-8")
+    source = script.split("function subagentMetaLine(block)", 1)[1].split(
+        "\nfunction ", 1
+    )[0]
+    assert "思考" in source
+    assert "继承上下文" in source
+    assert "独立上下文" in source
+    assert "block.model" in source
+    assert "block.role" in source
+
+
 def test_stats_chips_show_subagent_near_llm_only_when_positive() -> None:
     script = APP_JS.read_text(encoding="utf-8")
-    source = script.split("function statsChipsRow(stats)", 1)[1].split("\nfunction ", 1)[0]
+    source = script.split("function statsChipsRow(", 1)[1].split("\nfunction ", 1)[0]
     assert "Number(stats.subagent_tasks) || 0" in source
     assert "🧩 子代理" in source
     assert 'key === "llm_call" && subagentTasks' in source
+    assert "上下文" in source
+    assert "推理" in source
+    assert "last_llm_prompt_tokens" in source
     assert "instruction" not in source
     assert ".task " not in source
 
@@ -368,6 +418,44 @@ def test_project_subagent_new_and_old_events_aggregate_by_task_id() -> None:
             "summary": "",
         }
     ]
+
+
+def test_project_subagent_exposes_model_thinking_and_inherit_context() -> None:
+    blocks = project_trace_blocks(
+        [
+            {
+                "event_type": "explore_task",
+                "task_id": "explore_meta",
+                "status": "started",
+                "role": "auditor",
+                "model": "qwen-3.8-27b-fp8",
+                "thinking": "low",
+                "inherit_context": True,
+                "description": "schema audit",
+                "task": "inspect PIT",
+            },
+            {
+                "event_type": "explore",
+                "task_id": "explore_meta",
+                "status": "completed",
+                "summary": "ok",
+                "role": "auditor",
+                "model": "qwen-3.8-27b-fp8",
+                "thinking": "low",
+                "inherit_context": True,
+            },
+        ]
+    )
+    started = next(
+        block
+        for block in _subagent_blocks(blocks)
+        if block["phase"] == "started"
+    )
+    assert started["role"] == "auditor"
+    assert started["model"] == "qwen-3.8-27b-fp8"
+    assert started["thinking"] == "low"
+    assert started["inherit_context"] is True
+    assert started["description"] == "schema audit"
 
 
 def test_project_legacy_subagent_digest_is_ignored() -> None:

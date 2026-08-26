@@ -272,9 +272,7 @@ def test_hard_finalization_does_not_expose_todo(tmp_path: Path) -> None:
 def test_collect_artifacts_excludes_todo_json(tmp_path: Path) -> None:
     local = LocalSandbox(tmp_path / "session")
     paths = local.prepare_layout()
-    work_output = paths.workspace / "output"
-    work_output.mkdir(parents=True, exist_ok=True)
-    (work_output / "main.py").write_text(
+    (paths.agent_output / "main.py").write_text(
         "def generate_orders(context):\n    return []\n", encoding="utf-8"
     )
     assert _registry(paths.workspace).invoke(

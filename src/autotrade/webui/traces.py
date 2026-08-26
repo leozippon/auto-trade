@@ -240,6 +240,7 @@ def trace_stats(path: Path) -> dict[str, object]:
             cached is None
             or size < _as_int(cached.get("offset"))
             or "subagent_task_ids" not in cached
+            or "last_main_prompt_tokens" not in cached
         ):
             cached = {
                 "offset": 0,
@@ -248,6 +249,7 @@ def trace_stats(path: Path) -> dict[str, object]:
                 "llm_total_tokens": 0,
                 "prompt_tokens": 0,
                 "completion_tokens": 0,
+                "last_main_prompt_tokens": 0,
                 "active_tool": None,
                 "last_event_ts": None,
                 "subagent_task_ids": set(),
@@ -262,6 +264,7 @@ def trace_stats(path: Path) -> dict[str, object]:
         total = _as_int(cached.get("llm_total_tokens"))
         prompt = _as_int(cached.get("prompt_tokens"))
         completion = _as_int(cached.get("completion_tokens"))
+        last_main_prompt = _as_int(cached.get("last_main_prompt_tokens"))
         active_tool = cached.get("active_tool")
         last_ts = cached.get("last_event_ts")
         task_ids = set(_as_str_list(cached.get("subagent_task_ids")))
@@ -285,6 +288,8 @@ def trace_stats(path: Path) -> dict[str, object]:
                     total += _as_int(usage.get("total_tokens"))
                     prompt += _as_int(usage.get("prompt_tokens"))
                     completion += _as_int(usage.get("completion_tokens"))
+                    if _is_main_agent_llm_call(event):
+                        last_main_prompt = _as_int(usage.get("prompt_tokens"))
         cached = {
             "offset": offset + tail,
             "counts": counts,
@@ -292,6 +297,7 @@ def trace_stats(path: Path) -> dict[str, object]:
             "llm_total_tokens": total,
             "prompt_tokens": prompt,
             "completion_tokens": completion,
+            "last_main_prompt_tokens": last_main_prompt,
             "active_tool": active_tool,
             "last_event_ts": last_ts,
             "subagent_task_ids": task_ids,
@@ -306,6 +312,7 @@ def trace_stats(path: Path) -> dict[str, object]:
             "llm_total_tokens": total,
             "llm_prompt_tokens": prompt,
             "llm_completion_tokens": completion,
+            "last_llm_prompt_tokens": last_main_prompt,
             "active_tool": active_tool,
             "last_event_ts": last_ts,
             "trace_bytes": size,
@@ -363,6 +370,17 @@ def _decode_event(raw: bytes) -> dict[str, object]:
     except json.JSONDecodeError:
         return {"raw": text}
     return value if isinstance(value, dict) else {"raw": text}
+
+
+def _is_main_agent_llm_call(event: dict[str, object]) -> bool:
+    """Parent-session ``llm_call`` rows; Explore child calls carry a task id."""
+
+    if str(event.get("event_type") or "") != "llm_call":
+        return False
+    if _explore_event_task_id(event) is not None:
+        return False
+    task_id = event.get("task_id")
+    return not (isinstance(task_id, str) and task_id.strip())
 
 
 def _explore_event_task_id(event: dict[str, object]) -> str | None:
@@ -537,6 +555,11 @@ class _SubagentState:
         self.task = ""
         self.summary = ""
         self.error = ""
+        self.role = ""
+        self.model = ""
+        self.thinking = ""
+        self.inherit_context: bool | None = None
+        self.description = ""
 
 
 def _observe_subagent(
@@ -574,7 +597,7 @@ def _subagent_block(
     event: dict[str, object],
     state: _SubagentState,
 ) -> dict[str, object]:
-    return {
+    block: dict[str, object] = {
         "kind": "subagent",
         "ts": _event_ts(event),
         "task_id": task_id,
@@ -585,6 +608,17 @@ def _subagent_block(
         "error": state.error,
         "tools": state.tools.as_rows(),
     }
+    if state.role:
+        block["role"] = state.role
+    if state.model:
+        block["model"] = state.model
+    if state.thinking:
+        block["thinking"] = state.thinking
+    if state.inherit_context is not None:
+        block["inherit_context"] = state.inherit_context
+    if state.description:
+        block["description"] = state.description
+    return block
 
 
 def _absorb_subagent_text(state: _SubagentState, event: dict[str, object]) -> None:
@@ -597,6 +631,20 @@ def _absorb_subagent_text(state: _SubagentState, event: dict[str, object]) -> No
     error = _clip(event.get("error"), _BLOCK_ERROR_CHARS)
     if error:
         state.error = error
+    role = event.get("role")
+    if isinstance(role, str) and role.strip():
+        state.role = role.strip()
+    model = event.get("model")
+    if isinstance(model, str) and model.strip():
+        state.model = model.strip()
+    thinking = event.get("thinking")
+    if isinstance(thinking, str) and thinking.strip():
+        state.thinking = thinking.strip()
+    if "inherit_context" in event:
+        state.inherit_context = bool(event.get("inherit_context"))
+    description = event.get("description")
+    if isinstance(description, str) and description.strip():
+        state.description = description.strip()[:80]
 
 
 def _sync_subagent_fields(state: _SubagentState) -> None:
@@ -608,6 +656,16 @@ def _sync_subagent_fields(state: _SubagentState) -> None:
         block["summary"] = state.summary
         block["error"] = state.error
         block["tools"] = rows
+        if state.role:
+            block["role"] = state.role
+        if state.model:
+            block["model"] = state.model
+        if state.thinking:
+            block["thinking"] = state.thinking
+        if state.inherit_context is not None:
+            block["inherit_context"] = state.inherit_context
+        if state.description:
+            block["description"] = state.description
 
 
 def _subagent_phase(event: dict[str, object]) -> str:

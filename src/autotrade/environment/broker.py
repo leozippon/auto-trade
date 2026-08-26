@@ -30,7 +30,7 @@ class BrokerProfile:
     max_total_holdings: int | None = None
     max_single_name_weight: float | None = None
     profile_id: str = "gjzq_cash"
-    source: str = "docs/environment-design.md §3.2"
+    source: str = "docs/environment-design.md §3.4"
 
     def __post_init__(self) -> None:
         if isinstance(self.initial_cash, bool) or not math.isfinite(self.initial_cash) or self.initial_cash <= 0:

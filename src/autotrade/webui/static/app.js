@@ -30,6 +30,30 @@ const KIND_LABELS = {
   meta_learning: "元学习",
   heldout: "Held-out",
 };
+
+function sessionDisplayKey(session) {
+  return (
+    (session && (session.display_key || session.label || session.key)) || ""
+  );
+}
+
+function sessionListLabel(session) {
+  if (session.kind === "fold")
+    return String(session.label || session.fold_ref || "Fold");
+  if (
+    session.kind === "meta_learning" &&
+    Number(session.trigger_after_folds || 0) > 0
+  )
+    return `元学习（${session.trigger_after_folds} Fold 后）`;
+  return KIND_LABELS[session.kind] || session.kind;
+}
+
+function foldPeriodLabel(detail, foldRef) {
+  const hit = ((detail && detail.sessions) || []).find(
+    (session) => session.fold_ref === foldRef,
+  );
+  return (hit && hit.label) || foldRef || "—";
+}
 const ENVIRONMENT_STAGE_LABELS = {
   preparing_session: "准备会话",
   pit_snapshot: "准备 PIT 快照",
@@ -2693,12 +2717,7 @@ function sessionListPanel(detail, selectedKey) {
       el(
         "span",
         { class: "label" },
-        session.kind === "fold"
-          ? String(session.fold_ref || "Fold")
-          : session.kind === "meta_learning" &&
-              Number(session.trigger_after_folds || 0) > 0
-            ? `元学习（${session.trigger_after_folds} Fold 后）`
-            : KIND_LABELS[session.kind] || session.kind,
+        sessionListLabel(session),
       ),
       ret,
     );
@@ -2826,7 +2845,7 @@ function sessionDetailPanel(detail, selectedKey) {
         const stats = await api(
           `/api/experiments/${encodeURIComponent(detail.experiment_id)}/trace/stats?run_id=${encodeURIComponent(session.record.run_ref)}`,
         );
-        statsHost.append(statsChipsRow(stats));
+        statsHost.append(statsChipsRow(stats, detail));
       } catch {
         /* trace may be absent for legacy runs */
       }
@@ -3331,7 +3350,7 @@ function openPromptEditor(detail, session) {
     ),
   );
   showModal(
-    `编辑额外用户指令 — ${session.key}`,
+    `编辑额外用户指令 — ${sessionDisplayKey(session)}`,
     el(
       "div",
       {},
@@ -3388,7 +3407,7 @@ async function openPromptPreview(
     );
   }
   showModal(
-    `系统提示词预览 — ${session.key}`,
+    `系统提示词预览 — ${sessionDisplayKey(session)}`,
     el(
       "div",
       {},
@@ -3439,7 +3458,7 @@ async function openInitialPrompt(detail, session) {
     ),
   );
   showModal(
-    `初始 Prompt（实际运行）— ${session.key}`,
+    `初始 Prompt（实际运行）— ${sessionDisplayKey(session)}`,
     el(
       "div",
       {},
@@ -3742,11 +3761,12 @@ function fmtTokens(count) {
   return `${n} tokens`;
 }
 
-function statsChipsRow(stats) {
+function statsChipsRow(stats, detail) {
   const counts = { ...(stats.counts || {}), ...(stats.tool_counts || {}) };
   const chips = el("div", { class: "stats-chips" });
   const labelled = new Set();
   const subagentTasks = Number(stats.subagent_tasks) || 0;
+  const params = (detail && detail.params) || {};
   for (const [key, label] of STAT_CHIPS) {
     labelled.add(key);
     if (counts[key])
@@ -3786,6 +3806,29 @@ function statsChipsRow(stats) {
       ),
     );
   }
+  const used = Number(stats.last_llm_prompt_tokens) || 0;
+  const window = Number(stats.context_window_tokens) || 0;
+  if (used > 0 && window > 0) {
+    const pct = Math.min(100, Math.round((100 * used) / window));
+    chips.append(
+      el(
+        "span",
+        {
+          class: "stat-chip",
+          title: `${fmtTokens(used)} / ${fmtTokens(window)}`,
+        },
+        `上下文 ${pct}%`,
+      ),
+    );
+  }
+  const effort =
+    params.no_thinking || stats.no_thinking
+      ? "off"
+      : params.reasoning_effort || stats.reasoning_effort;
+  if (effort)
+    chips.append(
+      el("span", { class: "stat-chip" }, `推理 ${effort}`),
+    );
   return chips;
 }
 
@@ -3932,7 +3975,7 @@ function liveTracePanel(detail, session) {
   const panel = el(
     "div",
     { class: "panel section-gap" },
-    el("h4", {}, `实时 Agent Trace — ${session.key}`),
+    el("h4", {}, `实时 Agent Trace — ${sessionDisplayKey(session)}`),
   );
   const statusLine = el(
     "div",
@@ -4042,7 +4085,7 @@ function liveTracePanel(detail, session) {
       const stats = await api(
         `/api/experiments/${experimentId}/trace/stats${query}`,
       );
-      statsHost.replaceChildren(statsChipsRow(stats));
+      statsHost.replaceChildren(statsChipsRow(stats, detail));
     } catch {
       /* trace may not exist during PIT/Sandbox preparation */
     }
@@ -4245,6 +4288,16 @@ function renderToolGroupBlock(node, block, index) {
   );
 }
 
+function subagentMetaLine(block) {
+  const parts = [];
+  if (block.role) parts.push(String(block.role));
+  if (block.model) parts.push(String(block.model));
+  if (block.thinking) parts.push(`思考 ${block.thinking}`);
+  if (block.inherit_context === true) parts.push("继承上下文");
+  else if (block.inherit_context === false) parts.push("独立上下文");
+  return parts.join(" · ");
+}
+
 function renderSubagentBlock(node, block) {
   const status = String(block.status || block.phase || "started");
   const phase = String(block.phase || "");
@@ -4257,12 +4310,18 @@ function renderSubagentBlock(node, block) {
       ? `🧩 子代理 ${SUBAGENT_STATUS_LABELS[status] || status}`
       : `🧩 子代理 ${SUBAGENT_STATUS_LABELS[status] || "已启动"}`;
   const key = `sub:${block.task_id || ""}:${phase || status}`;
+  const meta = subagentMetaLine(block);
   node.append(
     el(
       "div",
       { class: "head" },
       el("span", { class: `type subagent ${status}` }, label),
-      block.task_id ? el("span", {}, String(block.task_id)) : null,
+      block.description
+        ? el("span", {}, String(block.description))
+        : block.task_id
+          ? el("span", {}, String(block.task_id))
+          : null,
+      meta ? el("span", { class: "hint" }, meta) : null,
       block.ts ? el("span", {}, fmtTsTime(block.ts)) : null,
     ),
     lazyDetails("详情", () => subagentDetailNode(block), key),
@@ -4313,6 +4372,8 @@ function toolRowsNode(tools) {
 
 function subagentDetailNode(block) {
   const body = el("div", { class: "trace-subagent-detail" });
+  const meta = subagentMetaLine(block);
+  if (meta) body.append(el("div", {}, meta));
   if (block.task)
     body.append(el("div", {}, `任务：${String(block.task).slice(0, 400)}`));
   if (block.summary)
@@ -4440,7 +4501,7 @@ function rerunPanel(detail, session) {
                 el(
                   "p",
                   {},
-                  `将重跑 ${session.key}，并使现有 Held-out 结果过期（重跑完成后自动重放 Held-out）。`,
+                  `将重跑 ${sessionDisplayKey(session)}，并使现有 Held-out 结果过期（重跑完成后自动重放 Held-out）。`,
                 ),
                 el(
                   "p",
@@ -4527,7 +4588,7 @@ function rollbackPanel(detail, session) {
                 el(
                   "p",
                   {},
-                  `将把实验回退到 ${session.key} 完成时点，丢弃其后全部账本记录（含 Held-out）。`,
+                  `将把实验回退到 ${sessionDisplayKey(session)} 完成时点，丢弃其后全部账本记录（含 Held-out）。`,
                 ),
                 el(
                   "p",
@@ -4850,7 +4911,7 @@ function stepTreeRow(
     el(
       "span",
       { class: "step-label" },
-      `${node.fold_ref || "?"} · ${node.result_name || node.node_id}`,
+      `${foldPeriodLabel(detail, node.fold_ref)} · ${node.result_name || node.node_id}`,
     ),
     collapsed ? el("span", { class: "step-chip" }, `+${childCount}`) : null,
     Number.isFinite(metrics.total_return)
@@ -4896,7 +4957,7 @@ function showStepTip(node, row) {
     el("div", { class: "step-tip-title" }, node.node_id),
     line(
       "Fold",
-      `${node.epoch_id || "—"} / ${node.fold_ref || "—"}`,
+      `${node.epoch_id || "—"} / ${foldPeriodLabel(detail, node.fold_ref)}`,
     ),
     line("验证收益", fmtPct(m.total_return)),
     line("多头收益", fmtPct(m.long_return)),
@@ -4941,7 +5002,7 @@ function openStepNodeModal(detail, payload, node) {
       kvRow("节点", node.node_id),
       kvRow(
         "Fold",
-        `${node.epoch_id || "—"} / ${node.fold_ref || "—"}`,
+        `${node.epoch_id || "—"} / ${foldPeriodLabel(detail, node.fold_ref)}`,
       ),
       kvRow(
         "验证收益",
@@ -5006,7 +5067,7 @@ function openStepParentOverrideModal(detail, payload, node) {
     "select",
     { class: "input" },
     ...sessions.map((session) =>
-      el("option", { value: session.key }, session.key),
+      el("option", { value: session.key }, sessionDisplayKey(session)),
     ),
   );
   const own = sessions.find(
@@ -5111,7 +5172,7 @@ function foldResultPanel(detail, session) {
       el(
         "h4",
         { style: "margin:0" },
-        `Fold 结果 — ${session.fold_ref || record.fold_ref}`,
+        `Fold 结果 — ${sessionDisplayKey(session)}`,
       ),
       el(
         "span",

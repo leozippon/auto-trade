@@ -11,14 +11,17 @@ import pytest
 from autotrade.agent.explore import (
     EXPLORE_ROLES,
     EXPLORE_SYSTEM_PROMPT,
+    EXPLORE_THINKING_LEVELS,
     META_EXPLORE_SYSTEM_PROMPT,
     allowed_explore_tools,
     ExploreSubAgentEngine,
     explore_system_prompt,
+    normalize_explore_thinking,
+    parent_context_digest,
 )
 from autotrade.agent.prompts import build_system_prompt
 from autotrade.agent.runner import AgentSessionConfig, AgentSessionRunner
-from autotrade.environment.llm import ProviderResponse, ScriptedLLM, ToolCall
+from autotrade.environment.llm import ChatMessage, ProviderResponse, ScriptedLLM, ToolCall
 from autotrade.environment.tools import (
     CommandResult,
     EditFileTool,
@@ -739,6 +742,13 @@ def test_explore_schema_uses_session_role_enum() -> None:
     assert isinstance(role_schema, dict)
     assert role_schema["enum"] == list(EXPLORE_ROLES)
     assert role_schema["enum"] == ["auditor", "developer", "general-purpose", "Explore"]
+    thinking_schema = properties["thinking"]
+    assert isinstance(thinking_schema, dict)
+    assert thinking_schema["enum"] == list(EXPLORE_THINKING_LEVELS)
+    assert properties["inherit_context"]["type"] == "boolean"
+    assert properties["max_turns"]["type"] == "integer"
+    assert "maximum" not in properties["max_turns"]
+    assert "maxLength" not in properties["task"]
     meta_runner = AgentSessionRunner(
         llm=ScriptedLLM([]),
         tools=ToolRegistry(),
@@ -973,3 +983,92 @@ def test_general_prompts_explain_mode_and_role() -> None:
     assert "只读" in meta
     assert "write_file" in meta
     assert "没有 write_file" in meta
+
+
+def test_normalize_explore_thinking_accepts_aliases() -> None:
+    assert normalize_explore_thinking(None) is None
+    assert normalize_explore_thinking("inherit") is None
+    assert normalize_explore_thinking("minimal") == "low"
+    assert normalize_explore_thinking("xhigh") == "high"
+    assert normalize_explore_thinking("max") == "max"
+    with pytest.raises(ValueError, match="explore.thinking"):
+        normalize_explore_thinking("turbo")
+
+
+def test_parent_context_digest_skips_system_and_keeps_recent() -> None:
+    digest = parent_context_digest(
+        [
+            ChatMessage("system", "hidden contract"),
+            ChatMessage("user", "look at daily schema"),
+            ChatMessage("assistant", "I will delegate"),
+        ]
+    )
+    assert "父会话摘录" in digest
+    assert "look at daily schema" in digest
+    assert "I will delegate" in digest
+    assert "hidden contract" not in digest
+
+
+def test_explore_inherit_context_prepends_parent_digest() -> None:
+    llm = ScriptedLLM([ProviderResponse(content="used parent excerpt")])
+    result = ExploreSubAgentEngine(
+        llm=llm,
+        tools=ToolRegistry([DeclaredReadOnlyShell()]),
+    ).run(
+        "summarize",
+        role="auditor",
+        inherit_context=True,
+        parent_messages=[
+            ChatMessage("system", "secret"),
+            ChatMessage("user", "visible parent note"),
+        ],
+        thinking="low",
+        description="schema audit",
+    )
+    assert result["status"] == "completed"
+    assert result["thinking"] == "low"
+    assert result["inherit_context"] is True
+    assert llm.calls
+    first = llm.calls[0]
+    assert isinstance(first, dict)
+    recorded = first["messages"]
+    assert isinstance(recorded, tuple)
+    contents = [str(msg.content) for msg in recorded]
+    assert any("visible parent note" in text for text in contents)
+    assert all("secret" not in text for text in contents)
+    assert any(msg.role == "user" for msg in recorded)
+
+
+def test_dispatch_explore_rejects_bad_thinking() -> None:
+    explore = ExploreSubAgentEngine(
+        llm=ScriptedLLM([ProviderResponse(content="ok")]),
+        tools=ToolRegistry([DeclaredReadOnlyShell()]),
+    )
+    runner = AgentSessionRunner(
+        llm=ScriptedLLM([]),
+        tools=ToolRegistry(),
+        system_prompt="fold",
+        config=_fold_config(),
+        explore=explore,
+    )
+    record = runner._dispatch_explore(
+        ToolCall("e1", "explore", {"role": "auditor", "task": "x", "thinking": "turbo"})
+    )
+    assert record["ok"] is False
+    assert "thinking" in str(record["error"])
+
+
+def test_explore_thinking_only_reply_does_not_finish_the_child() -> None:
+    llm = ScriptedLLM(
+        [
+            ProviderResponse(content="", reasoning_content="internal plan"),
+            ProviderResponse(content="done after thinking"),
+        ]
+    )
+    result = ExploreSubAgentEngine(
+        llm=llm,
+        tools=ToolRegistry([DeclaredReadOnlyShell()]),
+    ).run("summarize", role="auditor")
+    assert result["status"] == "completed"
+    assert result["summary"] == "done after thinking"
+    assert result["llm_calls"] == 2

@@ -15,7 +15,7 @@ from pathlib import Path
 from autotrade.environment.identity import LegacyExperimentError
 from autotrade.environment.step_tree import NODE_OUTPUT_DIR, StepTree
 
-from .public_identity import PublicIdentity
+from .public_identity import PublicIdentity, schedule_period_label
 from .registry import latest_fold_records, read_ledger_records
 
 
@@ -72,7 +72,7 @@ def step_tree_view(experiment_dir: Path) -> dict[str, object]:
             selected = record.get("selected_step_id")
             if selected:
                 frozen_for.setdefault(str(selected), []).append(
-                    f"{epoch_id}/{identity.fold_ref(fold_id)}"
+                    f"{epoch_id}/{schedule_period_label(fold_id)}"
                 )
 
     nodes: list[dict[str, object]] = []

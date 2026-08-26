@@ -1996,6 +1996,10 @@ class WebuiBackendTest(unittest.TestCase):
         q2_key = self._session_ref("epoch_001/fold_2022Q2")
         self.assertIn("record", sessions[q1_key])
         self.assertNotIn("record", sessions[q2_key])
+        self.assertEqual(sessions[q1_key]["label"], "2022Q1")
+        self.assertEqual(sessions[q1_key]["display_key"], "epoch_001/2022Q1")
+        self.assertTrue(str(sessions[q1_key]["fold_ref"]).startswith("fold_ref_"))
+        self.assertNotEqual(sessions[q1_key]["key"], "epoch_001/fold_2022Q1")
         self.assertTrue(sessions[q1_key]["analysis_available"])
         self.assertEqual(detail["control"]["mode"], "manual")
         sealed_period_fields = {

@@ -185,7 +185,10 @@ class ProviderResponse:
         ):
             raise TypeError("reasoning content must be a string")
         if not self.content and not self.tool_calls:
-            raise ValueError("provider response must contain content or tool calls")
+            if isinstance(self.reasoning_content, str) and self.reasoning_content.strip():
+                object.__setattr__(self, "content", "")
+            else:
+                raise ValueError("provider response must contain content or tool calls")
 
 
 class LLMProxy(Protocol):

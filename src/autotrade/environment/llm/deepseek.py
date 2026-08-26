@@ -844,8 +844,13 @@ def _parse_response(raw: bytes, *, expected_model: str) -> ProviderResponse:
                 retryable=False,
             )
         )
+    _reasoning_present, reasoning_content = _parse_reasoning_content(message)
     if "content" not in message:
-        if not calls:
+        if not calls and not (
+            _reasoning_present
+            and isinstance(reasoning_content, str)
+            and reasoning_content.strip()
+        ):
             raise LLMProxyError(
                 "provider returned invalid message content", retryable=False
             )
@@ -858,7 +863,6 @@ def _parse_response(raw: bytes, *, expected_model: str) -> ProviderResponse:
         )
     else:
         content = message["content"]
-    _reasoning_present, reasoning_content = _parse_reasoning_content(message)
     model = payload.get("model") or expected_model
     usage = payload.get("usage") or {}
     if not isinstance(usage, dict):

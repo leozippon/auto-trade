@@ -149,13 +149,17 @@ def read_strategy_files(
 ) -> list[dict[str, object]]:
     """Read the frozen strategy files with per-file and total char budgets.
 
-    main.py always comes first; the freeze manifest.json is metadata, not
-    strategy content, and is skipped. Non-text or over-budget content degrades
-    to an explicit marker instead of silently vanishing.
+    main.py always comes first; freeze metadata ``revision.json`` and the
+    compat ``manifest.json`` are skipped. Non-text or over-budget content
+    degrades to an explicit marker instead of silently vanishing.
     """
     strategy_dir = Path(strategy_dir)
     files = sorted(
-        (path for path in strategy_dir.rglob("*") if path.is_file() and path.name != "manifest.json"),
+        (
+            path
+            for path in strategy_dir.rglob("*")
+            if path.is_file() and path.name not in {"revision.json", "manifest.json"}
+        ),
         key=lambda path: (path.relative_to(strategy_dir) != Path("main.py"), str(path.relative_to(strategy_dir))),
     )
     entries: list[dict[str, object]] = []

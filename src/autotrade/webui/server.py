@@ -26,11 +26,13 @@ from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
 
 from autotrade.environment.data.contracts import RAW_GENERATION_FILENAME
+from autotrade.environment.llm.model_profiles import model_profile
 from autotrade.environment.step_tree import StepTree
 from autotrade.pipelines.fold_analysis import analysis_paths
 from autotrade.pipelines.hitl_state import (
     ANALYSIS_DIR_NAME,
     HITL_DIR_NAME,
+    PARAMS_NAME,
     read_json,
     read_status,
 )
@@ -302,7 +304,22 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         run_id: str | None = Query(None),
     ) -> dict[str, object]:
         path, _raw_run_id, trace_ref, _identity = _trace_target(experiment_id, run_id)
-        return {**traces.trace_stats(path), "trace_ref": trace_ref}
+        payload: dict[str, object] = {**traces.trace_stats(path), "trace_ref": trace_ref}
+        params = read_json(_experiment_dir(experiment_id) / HITL_DIR_NAME / PARAMS_NAME)
+        model = str(params.get("model") or "")
+        if model:
+            try:
+                window = model_profile(model).context_window_tokens
+            except ValueError:
+                window = None
+            if isinstance(window, int) and window > 0:
+                payload["context_window_tokens"] = window
+        effort = params.get("reasoning_effort")
+        if isinstance(effort, str) and effort.strip():
+            payload["reasoning_effort"] = effort.strip()
+        if params.get("no_thinking") is True:
+            payload["no_thinking"] = True
+        return payload
 
     @app.get("/api/experiments/{experiment_id}/trace/blocks")
     def get_trace_blocks(

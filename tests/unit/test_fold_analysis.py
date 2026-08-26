@@ -207,11 +207,15 @@ class FoldAnalysisTest(unittest.TestCase):
             strategy.mkdir()
             (strategy / "main.py").write_text("x" * 5_000, encoding="utf-8")
             (strategy / "notes.md").write_text("small\n", encoding="utf-8")
+            (strategy / "revision.json").write_text("{}", encoding="utf-8")
+            (strategy / "manifest.json").write_text("{}", encoding="utf-8")
             files = read_strategy_files(strategy, max_file_chars=100, max_total_chars=1_000)
             by_path = {item["path"]: item for item in files}
             self.assertTrue(by_path["main.py"]["truncated"])
             self.assertLessEqual(len(by_path["main.py"]["content"]), 100)
             self.assertFalse(by_path["notes.md"]["truncated"])
+            self.assertNotIn("revision.json", by_path)
+            self.assertNotIn("manifest.json", by_path)
 
 
 if __name__ == "__main__":

@@ -262,7 +262,7 @@ def _build_pipeline(options) -> tuple[RollingExperimentPipeline, list[str]]:
     runtime_root = options.work_root / options.experiment_id
     developer = LLMFoldDeveloper(
         llm=fold_gateway,
-        explore_llm=nl_gateway,
+        explore_llm=fold_gateway,
         compact_llm=compact_gateway,
         context_compaction=options.llm.compaction,
         baseline_strategy=options.baseline_strategy,
@@ -280,7 +280,7 @@ def _build_pipeline(options) -> tuple[RollingExperimentPipeline, list[str]]:
     )
     meta_learner = LLMMetaLearner(
         llm=meta_gateway,
-        explore_llm=nl_gateway,
+        explore_llm=meta_gateway,
         compact_llm=compact_gateway,
         context_compaction=options.llm.compaction,
         baseline_strategy=options.baseline_strategy,

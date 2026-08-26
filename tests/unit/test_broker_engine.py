@@ -367,4 +367,4 @@ class PositionCapTest(unittest.TestCase):
         self.assertEqual(record["max_single_name_weight"], 0.2)
         # The Agent is told which cost profile it is authored against.
         self.assertEqual(record["profile_id"], "gjzq_cash")
-        self.assertIn("environment-design", str(record["source"]))
+        self.assertEqual(record["source"], "docs/environment-design.md §3.4")

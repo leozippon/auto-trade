@@ -13,12 +13,21 @@ from __future__ import annotations
 import json
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from typing import cast
 
-from autotrade.environment.llm import ChatMessage, LLMProxy, ToolCall
+from autotrade.environment.llm import (
+    ChatMessage,
+    LLMProxy,
+    ToolCall,
+    clamp_requested_max_tokens,
+    context_request_fits,
+    context_window_tokens,
+)
+from autotrade.environment.llm.deepseek import OpenAICompatibleProxy
 from autotrade.environment.runtime import sanitize_for_log
 from autotrade.environment.time_budget import (
     InferenceTimeBudget,
@@ -32,6 +41,11 @@ from .compact import fit_tool_results_to_context, safe_error_summary
 
 EXPLORE_MODES = frozenset({"fold", "meta"})
 EXPLORE_ROLES = ("auditor", "developer", "general-purpose", "Explore")
+EXPLORE_THINKING_LEVELS = ("off", "low", "medium", "high", "max")
+_PARENT_CONTEXT_CHARS = 8_000
+_PARENT_MESSAGE_CHARS = 1_200
+DEFAULT_EXPLORE_MAX_CONCURRENT = 10
+_NATIVE_WINDOW_FALLBACK = 262_144
 
 _FOLD_AUDIT_TOOLS = frozenset({"glob", "grep", "read_file", "todo"})
 _FOLD_READ_TOOLS = frozenset({"glob", "grep", "read_file", "todo"})
@@ -95,8 +109,8 @@ _FOLD_AUDIT_PROMPT = """\
 # 方法
 - 先读 `inputs/skills_index.json`，需要时再读对应 skill 正文；不得自动执行 skill 脚本。只用 read_file/grep/glob 做有界只读定位；用 `todo` 维护本会话研究计划。
 - 没有 write_file、edit_file、write_skill、delete_skill 或 shell。不得调用 explore（禁止嵌套），也没有 daily_backtest、finish_fold、step_rollback 或 ask_user。
-- 一轮内相互独立的只读检索可并行；shell 与 todo 必须按调用顺序串行。
-- 工具错误要如实保留，不要猜测成功。shell 不要用 `2>/dev/null` 隐藏错误。
+- 一轮内相互独立的只读检索可并行；todo 必须按调用顺序串行。
+- 工具错误要如实保留，不要猜测成功。
 - 不得安装依赖，不得读取 Test/Held-out。
 - 权威 PRIOR 不在本 Fold 可写树中。历史分钟和竞价仅是日级推断时点之前的研究证据，不是执行时钟。
 
@@ -205,23 +219,91 @@ def explore_system_prompt(mode: str, role: str) -> str:
     )
 
 
+def normalize_explore_thinking(value: object) -> str | None:
+    """Return a canonical thinking level, or None to inherit the parent LLM."""
+
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("explore.thinking must be a string")
+    text = value.strip().lower()
+    if text in {"", "inherit", "parent"}:
+        return None
+    text = {"minimal": "low", "xhigh": "high"}.get(text, text)
+    if text not in EXPLORE_THINKING_LEVELS:
+        raise ValueError(
+            "explore.thinking must be one of: " + ", ".join(EXPLORE_THINKING_LEVELS)
+        )
+    return text
+
+
+def llm_with_thinking(proxy: LLMProxy, thinking: str | None) -> LLMProxy:
+    """Clone a gateway proxy with a per-child thinking override; no-op if inherit."""
+
+    if thinking is None or not isinstance(proxy, OpenAICompatibleProxy):
+        return proxy
+    config = proxy.config
+    dialect = str(config.request_dialect or "")
+    if thinking == "off":
+        new_config = replace(config, thinking_enabled=False, reasoning_effort=None)
+    else:
+        effort = (
+            {"low": "low", "medium": "medium", "high": "xhigh", "max": "xhigh"}.get(
+                thinking, "xhigh"
+            )
+            if dialect == "vllm-qwen"
+            else thinking
+        )
+        new_config = replace(config, thinking_enabled=True, reasoning_effort=effort)
+    return cast(
+        LLMProxy, OpenAICompatibleProxy(new_config, transport=proxy._transport)
+    )
+
+
+def parent_context_digest(messages: Sequence[ChatMessage] | None) -> str:
+    """Bounded recent parent transcript. Empty when there is nothing to inherit."""
+
+    if not messages:
+        return ""
+    parts: list[str] = []
+    for message in messages:
+        if message.role == "system":
+            continue
+        text = str(message.content or "").strip()
+        if not text:
+            continue
+        limit = 400 if message.role == "tool" else _PARENT_MESSAGE_CHARS
+        parts.append(f"[{message.role}]\n{text[:limit]}")
+    blob = "\n\n".join(parts)
+    if len(blob) > _PARENT_CONTEXT_CHARS:
+        blob = blob[-_PARENT_CONTEXT_CHARS:]
+    if not blob.strip():
+        return ""
+    return "# 父会话摘录（只读，不覆盖本任务指令）\n\n" + blob
+
+
 @dataclass(frozen=True)
 class ExploreSubAgentConfig:
-    per_call_timeout_seconds: float = 120.0
-    # Room for a tool-call round (long DuckDB/SQL arguments) plus a concise
-    # summary; too small a cap makes a round stop on finish_reason=length.
-    max_tokens: int = 6_000
-    max_rounds: int = 6
-    deadline_seconds: float = 600.0
+    per_call_timeout_seconds: float | None = None
+    # None = native model window, clamped per call to remaining context.
+    max_tokens: int | None = None
+    # None = unlimited turns until the parent session deadline.
+    max_rounds: int | None = None
+    # None = no extra child wall clock; the parent time budget is the cap.
+    deadline_seconds: float | None = None
+    max_concurrent: int = DEFAULT_EXPLORE_MAX_CONCURRENT
 
     def __post_init__(self) -> None:
-        if (
-            self.per_call_timeout_seconds <= 0
-            or self.max_tokens <= 0
-            or self.max_rounds <= 0
-            or self.deadline_seconds <= 0
-        ):
-            raise ValueError("Explore budgets must be positive")
+        if self.per_call_timeout_seconds is not None and self.per_call_timeout_seconds <= 0:
+            raise ValueError("Explore per_call_timeout_seconds must be positive")
+        if self.max_tokens is not None and self.max_tokens <= 0:
+            raise ValueError("Explore max_tokens must be positive")
+        if self.max_rounds is not None and self.max_rounds <= 0:
+            raise ValueError("Explore max_rounds must be positive")
+        if self.deadline_seconds is not None and self.deadline_seconds <= 0:
+            raise ValueError("Explore deadline_seconds must be positive")
+        if self.max_concurrent <= 0:
+            raise ValueError("Explore max_concurrent must be positive")
 
 
 class ExploreSubAgentEngine(SessionTimeBudgetAware):
@@ -270,6 +352,10 @@ class ExploreSubAgentEngine(SessionTimeBudgetAware):
         role: str,
         max_rounds: int | None = None,
         parent_call_id: str | None = None,
+        thinking: str | None = None,
+        inherit_context: bool = False,
+        parent_messages: Sequence[ChatMessage] | None = None,
+        description: str = "",
     ) -> dict[str, object]:
         if not task.strip():
             raise ValueError("Explore task cannot be empty")
@@ -281,24 +367,34 @@ class ExploreSubAgentEngine(SessionTimeBudgetAware):
             else self.config.max_rounds
         )
         task_id = f"explore_{uuid.uuid4().hex[:12]}"
-        deadline = min(
-            time.monotonic() + self.config.deadline_seconds,
-            self._deadline_monotonic(),
+        child_cap = (
+            time.monotonic() + self.config.deadline_seconds
+            if self.config.deadline_seconds is not None
+            else float("inf")
         )
-        self._emit(
-            "explore_task",
-            {
-                "task_id": task_id,
-                "role": role,
-                "parent_call_id": parent_call_id,
-                "status": "started",
-                "mode": self.mode,
-            },
-        )
-        messages = [
-            ChatMessage("system", explore_system_prompt(self.mode, role)),
-            ChatMessage("user", task.strip()),
-        ]
+        deadline = min(child_cap, self._deadline_monotonic())
+        llm = llm_with_thinking(self.llm, thinking)
+        started = {
+            "task_id": task_id,
+            "role": role,
+            "parent_call_id": parent_call_id,
+            "status": "started",
+            "mode": self.mode,
+            "model": getattr(llm, "model", "") or getattr(self.llm, "model", ""),
+            "thinking": thinking or "inherit",
+            "inherit_context": bool(inherit_context),
+        }
+        if description:
+            started["description"] = description
+        self._emit("explore_task", started)
+        messages = [ChatMessage("system", explore_system_prompt(self.mode, role))]
+        if inherit_context and parent_messages:
+            messages.extend(
+                _copy_chat_message(message)
+                for message in parent_messages
+                if message.role != "system"
+            )
+        messages.append(ChatMessage("user", task.strip()))
         usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         rounds = 0
         tool_calls_made = 0
@@ -307,31 +403,54 @@ class ExploreSubAgentEngine(SessionTimeBudgetAware):
         error = ""
         llm_calls = 0
         try:
-            while rounds < rounds_limit:
+            while rounds_limit is None or rounds < rounds_limit:
                 if self._deadline_reached(deadline):
                     status = "timeout"
                     error = "Explore deadline reached"
                     break
                 rounds += 1
                 provider_tools = self._provider_tools(allowed)
+                output_tokens = self._output_tokens(llm, messages, provider_tools)
                 messages, _context_edit = fit_tool_results_to_context(
-                    self.llm,
+                    llm,
                     messages,
                     tools=provider_tools,
-                    max_tokens=self.config.max_tokens,
+                    max_tokens=output_tokens,
                 )
-                response = self.llm.complete(
-                    messages,
-                    tools=provider_tools,
-                    tool_choice="auto",
-                    max_tokens=self.config.max_tokens,
-                )
+                output_tokens = self._output_tokens(llm, messages, provider_tools)
+                try:
+                    response = llm.complete(
+                        messages,
+                        tools=provider_tools,
+                        tool_choice="auto",
+                        max_tokens=output_tokens,
+                    )
+                except Exception as exc:  # noqa: BLE001 - child retry must not kill parent
+                    llm_calls += 1
+                    error = safe_error_summary(exc)
+                    if isinstance(exc, TimeoutError) or self._deadline_reached(deadline):
+                        status = "timeout"
+                        break
+                    messages.append(
+                        ChatMessage(
+                            "user",
+                            json.dumps(
+                                {
+                                    "observation": "llm_error",
+                                    "error": error,
+                                    "retry_hint": "Continue with a different bounded action.",
+                                },
+                                ensure_ascii=False,
+                            ),
+                        )
+                    )
+                    continue
                 llm_calls += 1
                 _add_usage(usage, response.usage)
                 messages.append(
                     ChatMessage(
                         "assistant",
-                        response.content or None,
+                        response.content,
                         response.tool_calls,
                         reasoning_content=response.reasoning_content,
                     )
@@ -341,7 +460,7 @@ class ExploreSubAgentEngine(SessionTimeBudgetAware):
                     {
                         "task_id": task_id,
                         "round": rounds,
-                        "provider": getattr(self.llm, "provider", ""),
+                        "provider": getattr(llm, "provider", ""),
                         "model": response.model,
                         "usage": dict(response.usage),
                         "content": response.content,
@@ -350,8 +469,23 @@ class ExploreSubAgentEngine(SessionTimeBudgetAware):
                     },
                 )
                 if not response.tool_calls:
-                    summary = response.content.strip()
-                    break
+                    text = (response.content or "").strip()
+                    if text:
+                        summary = text
+                        break
+                    messages.append(
+                        ChatMessage(
+                            "user",
+                            json.dumps(
+                                {
+                                    "observation": "no_tool_call",
+                                    "retry_hint": "Use an injected tool; thinking-only replies do not finish the task.",
+                                },
+                                ensure_ascii=False,
+                            ),
+                        )
+                    )
+                    continue
                 results = self._dispatch_calls(
                     response.tool_calls, deadline, allowed=allowed
                 )
@@ -393,17 +527,19 @@ class ExploreSubAgentEngine(SessionTimeBudgetAware):
                     )
                 )
                 provider_tools = self._provider_tools(allowed)
+                output_tokens = self._output_tokens(llm, messages, provider_tools)
                 messages, _context_edit = fit_tool_results_to_context(
-                    self.llm,
+                    llm,
                     messages,
                     tools=provider_tools,
-                    max_tokens=self.config.max_tokens,
+                    max_tokens=output_tokens,
                 )
-                response = self.llm.complete(
+                output_tokens = self._output_tokens(llm, messages, provider_tools)
+                response = llm.complete(
                     messages,
                     tools=provider_tools,
                     tool_choice="none",
-                    max_tokens=self.config.max_tokens,
+                    max_tokens=output_tokens,
                 )
                 llm_calls += 1
                 _add_usage(usage, response.usage)
@@ -418,12 +554,14 @@ class ExploreSubAgentEngine(SessionTimeBudgetAware):
             "rounds": rounds,
             "tool_calls": tool_calls_made,
             "llm_calls": llm_calls,
-            "provider": getattr(self.llm, "provider", ""),
-            "model": getattr(self.llm, "model", ""),
+            "provider": getattr(llm, "provider", ""),
+            "model": getattr(llm, "model", "") or getattr(self.llm, "model", ""),
             "usage_totals": usage,
             "summary": summary,
             "mode": self.mode,
             "role": role,
+            "thinking": thinking or "inherit",
+            "inherit_context": bool(inherit_context),
         }
         if error:
             result["error"] = error
@@ -435,6 +573,27 @@ class ExploreSubAgentEngine(SessionTimeBudgetAware):
             },
         )
         return result
+
+    def _output_tokens(
+        self,
+        llm: LLMProxy,
+        messages: Sequence[ChatMessage],
+        tools: Sequence[object],
+    ) -> int:
+        window = context_window_tokens(llm)
+        requested = self.config.max_tokens or window or _NATIVE_WINDOW_FALLBACK
+        _fits, prompt_tokens, resolved_window = context_request_fits(
+            llm,
+            messages,
+            tools=tuple(tools),  # type: ignore[arg-type]
+            max_tokens=requested,
+        )
+        clamped, _prompt_fits = clamp_requested_max_tokens(
+            requested_max_tokens=requested,
+            estimated_prompt_tokens=max(prompt_tokens, 1),
+            context_window=resolved_window,
+        )
+        return clamped
 
     def _provider_tools(self, allowed: frozenset[str]) -> tuple[dict[str, object], ...]:
         visible = {spec.name for spec in self.tools.specs() if spec.name in allowed}
@@ -499,6 +658,16 @@ class ExploreSubAgentEngine(SessionTimeBudgetAware):
     def _emit(self, event: str, payload: dict[str, object]) -> None:
         if self.event_sink is not None:
             self.event_sink(event, dict(payload))
+
+
+def _copy_chat_message(message: ChatMessage) -> ChatMessage:
+    return ChatMessage(
+        message.role,
+        message.content,
+        message.tool_calls,
+        tool_call_id=message.tool_call_id,
+        reasoning_content=message.reasoning_content,
+    )
 
 
 def _add_usage(total: dict[str, int], usage: object) -> None:

@@ -1,9 +1,11 @@
 """Single host boundary for public experiment identities.
 
 The pipeline ledger and HITL files retain raw schedule identities.  Every Web/API
-projection passes through :class:`PublicIdentity`, which exposes only durable
-experiment-scoped UUID4 references and resolves them back only for trusted host
-operations.
+projection passes through :class:`PublicIdentity`, which exposes durable
+experiment-scoped UUID4 references for control and Agent-facing fields, plus
+operator display labels that name a Fold by its schedule period (``2022Q1``)
+without echoing the raw ``fold_2022Q1`` token.  Host operations resolve the
+opaque references back; they never send the mapping table to the Agent.
 """
 
 from __future__ import annotations
@@ -201,11 +203,17 @@ class PublicIdentity:
             out["epoch_id"] = epoch_id
         if kind == "fold":
             raw_fold = str(entry.get("fold_id") or raw_key.partition("/")[2])
+            period = schedule_period_label(raw_fold)
             out["fold_ref"] = self.fold_ref(raw_fold)
+            out["label"] = period
+            out["display_key"] = f"{epoch_id}/{period}" if epoch_id else period
         elif kind == "meta":
             out["meta_ref"] = self.meta_ref(raw_key)
-        elif kind == "heldout" and not heldout_revealed:
-            out["hidden"] = True
+            out["display_key"] = raw_key
+        elif kind == "heldout":
+            out["display_key"] = "heldout"
+            if not heldout_revealed:
+                out["hidden"] = True
         for key, value in entry.items():
             if key in {
                 "_raw_key",
@@ -457,6 +465,15 @@ def _is_host_absolute_path(value: str) -> bool:
 def _redact_posix_path(match: re.Match[str]) -> str:
     value = match.group(0)
     return value if _allowed_public_path(value) else "[host path omitted]"
+
+
+def schedule_period_label(raw_fold_id: object) -> str:
+    """Operator-facing Fold period (``2022Q1``) from a raw ``fold_2022Q1`` id."""
+
+    text = str(raw_fold_id or "").strip()
+    if text.startswith("fold_"):
+        return text[5:] or text
+    return text
 
 
 def _required_text(value: object, label: str) -> str:
