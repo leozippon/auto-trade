@@ -4316,8 +4316,8 @@ function subagentDetailNode(block) {
   const body = el("div", { class: "trace-subagent-detail" });
   if (block.task)
     body.append(el("div", {}, `任务：${String(block.task).slice(0, 400)}`));
-  if (block.digest)
-    body.append(el("div", {}, `摘要：${String(block.digest).slice(0, 400)}`));
+  if (block.summary)
+    body.append(el("div", {}, `摘要：${String(block.summary).slice(0, 400)}`));
   if (block.error)
     body.append(el("div", { class: "hint warn" }, `错误：${String(block.error).slice(0, 240)}`));
   if (Array.isArray(block.tools) && block.tools.length)

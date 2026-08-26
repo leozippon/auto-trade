@@ -209,7 +209,7 @@ def explore_system_prompt(mode: str, role: str) -> str:
 class ExploreSubAgentConfig:
     per_call_timeout_seconds: float = 120.0
     # Room for a tool-call round (long DuckDB/SQL arguments) plus a concise
-    # digest; too small a cap makes a round stop on finish_reason=length.
+    # summary; too small a cap makes a round stop on finish_reason=length.
     max_tokens: int = 6_000
     max_rounds: int = 6
     deadline_seconds: float = 600.0
@@ -302,7 +302,7 @@ class ExploreSubAgentEngine(SessionTimeBudgetAware):
         usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         rounds = 0
         tool_calls_made = 0
-        digest = ""
+        summary = ""
         status = "completed"
         error = ""
         llm_calls = 0
@@ -350,7 +350,7 @@ class ExploreSubAgentEngine(SessionTimeBudgetAware):
                     },
                 )
                 if not response.tool_calls:
-                    digest = response.content.strip()
+                    summary = response.content.strip()
                     break
                 results = self._dispatch_calls(
                     response.tool_calls, deadline, allowed=allowed
@@ -379,11 +379,11 @@ class ExploreSubAgentEngine(SessionTimeBudgetAware):
                             "parent_call_id": parent_call_id,
                         },
                     )
-            # Force a concise final digest when the loop ended without one
+            # Force a concise final summary when the loop ended without one
             # (rounds exhausted, or a round was cut off by output length).
             if (
                 status == "completed"
-                and not digest
+                and not summary
                 and not self._deadline_reached(deadline)
             ):
                 messages.append(
@@ -407,7 +407,7 @@ class ExploreSubAgentEngine(SessionTimeBudgetAware):
                 )
                 llm_calls += 1
                 _add_usage(usage, response.usage)
-                digest = response.content.strip()
+                summary = response.content.strip()
         except Exception as exc:  # noqa: BLE001 - a sub-agent failure must not kill the parent
             status = "timeout" if isinstance(exc, TimeoutError) else "error"
             error = safe_error_summary(exc)
@@ -421,7 +421,7 @@ class ExploreSubAgentEngine(SessionTimeBudgetAware):
             "provider": getattr(self.llm, "provider", ""),
             "model": getattr(self.llm, "model", ""),
             "usage_totals": usage,
-            "digest": digest,
+            "summary": summary,
             "mode": self.mode,
             "role": role,
         }

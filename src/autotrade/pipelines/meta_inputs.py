@@ -34,7 +34,6 @@ _AGENT_TRACE_EVENT_TYPES = frozenset(
 _SUMMARY_FAILURE_LIMIT = 8
 _SUMMARY_ERROR_CHARS = 80
 _AGENT_TRACE_MAX_EVENTS = 80
-_DIGEST_CHARS = 400
 _SUMMARY_CHARS = 400
 _ARG_CHARS = 120
 _BODY_KEYS = frozenset(
@@ -271,8 +270,8 @@ def _compact_agent_event(event: Mapping[str, object]) -> dict[str, object]:
     if event_type in {"explore_task", "explore"}:
         if event.get("role"):
             item["role"] = event.get("role")
-        if event.get("digest"):
-            item["digest"] = _redact_text(event.get("digest"), limit=_DIGEST_CHARS)
+        if event.get("summary"):
+            item["summary"] = _redact_text(event.get("summary"), limit=_SUMMARY_CHARS)
         for key in ("rounds", "tool_calls", "llm_calls"):
             if event.get(key) is not None:
                 item[key] = event.get(key)

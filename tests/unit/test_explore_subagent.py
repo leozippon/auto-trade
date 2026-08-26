@@ -324,7 +324,7 @@ def test_explore_readonly_write_failure_stays_an_observation(tmp_path: Path) -> 
 def test_explore_and_main_share_one_session_call_budget() -> None:
     scripted = ScriptedLLM(
         [
-            ProviderResponse(content="sub digest"),
+            ProviderResponse(content="sub summary"),
             ProviderResponse(content="must remain unused"),
         ]
     )
@@ -360,7 +360,7 @@ def test_meta_runner_rejects_fold_mode_explore() -> None:
 def test_runner_attaches_explore_events_to_its_sink() -> None:
     events: list[str] = []
     explore = ExploreSubAgentEngine(
-        llm=ScriptedLLM([ProviderResponse(content="digest")]),
+        llm=ScriptedLLM([ProviderResponse(content="summary")]),
         tools=ToolRegistry([DeclaredReadOnlyShell()]),
     )
     runner = AgentSessionRunner(
@@ -392,7 +392,7 @@ def test_fold_auditor_cannot_invoke_the_registered_shell() -> None:
         tools=ToolRegistry([shell]),
     ).run("inspect without shell", role="auditor")
     assert result["status"] == "completed"
-    assert result["digest"] == "shell blocked"
+    assert result["summary"] == "shell blocked"
     assert shell.calls == []
     assert result["tool_calls"] == 0
 
@@ -412,7 +412,7 @@ def test_explore_unknown_tool_call_is_rejected_without_invoke() -> None:
         tools=ToolRegistry([shell]),
     ).run("do not backtest", role="auditor")
     assert result["status"] == "completed"
-    assert result["digest"] == "unknown tool blocked"
+    assert result["summary"] == "unknown tool blocked"
     assert shell.calls == []
     assert result["tool_calls"] == 0
 
@@ -577,7 +577,7 @@ def test_explore_attempt_counter_resets_on_new_run() -> None:
 
 def test_zero_explore_enters_hard_finalization() -> None:
     explore = ExploreSubAgentEngine(
-        llm=ScriptedLLM([ProviderResponse(content="digest")]),
+        llm=ScriptedLLM([ProviderResponse(content="summary")]),
         tools=ToolRegistry([DeclaredReadOnlyShell()]),
     )
     runner = AgentSessionRunner(
@@ -865,9 +865,9 @@ def test_explore_calls_still_track_attempts_and_roles() -> None:
     explore = ExploreSubAgentEngine(
         llm=ScriptedLLM(
             [
-                ProviderResponse(content="general digest"),
-                ProviderResponse(content="data digest"),
-                ProviderResponse(content="strategy digest"),
+                ProviderResponse(content="general summary"),
+                ProviderResponse(content="data summary"),
+                ProviderResponse(content="strategy summary"),
             ]
         ),
         tools=ToolRegistry([DeclaredReadOnlyShell()]),
@@ -935,7 +935,7 @@ def test_explore_calls_still_track_attempts_and_roles() -> None:
 def test_single_explore_role_can_finish() -> None:
     finish = _FinishStub("finish_fold")
     explore = ExploreSubAgentEngine(
-        llm=ScriptedLLM([ProviderResponse(content="digest")]),
+        llm=ScriptedLLM([ProviderResponse(content="summary")]),
         tools=ToolRegistry([DeclaredReadOnlyShell()]),
     )
     runner = AgentSessionRunner(

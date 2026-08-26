@@ -156,7 +156,21 @@ def test_compactor_bounds_one_huge_recent_tool_result_before_local_request():
     assert result is not None and result.event["status"] == "ok"
     assert result.event["request_context_edit"]["summarized_tool_results"] == 1
     request = llm.calls[0]["messages"]
-    assert "context_tool_result_summary" in (request[1].content or "")
+    compact_input = json.loads(request[1].content or "{}")
+    recent = compact_input["messages_since_previous_summary"]
+    summarized_record = next(record for record in recent if record["role"] == "tool")
+    tool_summary = json.loads(summarized_record["content"])
+    assert tool_summary["observation"] == "context_tool_result_summary"
+    assert tool_summary["source_omitted"] is True
+    assert "Re-run a narrower paginated query" in tool_summary["note"]
+    assert set(tool_summary) == {
+        "observation",
+        "note",
+        "original_chars",
+        "source_omitted",
+        "head",
+        "tail",
+    }
     fits, _, _ = context_request_fits(llm, request, max_tokens=500)
     assert fits is True
 
@@ -285,8 +299,24 @@ def test_fold_session_edits_huge_recent_tool_result_below_min_message_count(
     assert assistant.tool_calls[0].id == tool_message.tool_call_id
     summary = json.loads(tool_message.content or "{}")
     assert summary["observation"] == "context_tool_result_summary"
+    assert "Re-run a narrower paginated query" in summary["note"]
     assert summary["original_chars"] > 40_000
-    assert len(summary["sha256"]) == 64
+    assert summary["source_omitted"] is True
+    assert "sha256" not in summary
+    assert {"head", "tail", "retained_fields"} <= summary.keys()
+    assert summary["retained_fields"] == {
+        "value.timed_out": False,
+        "value.command_kind": "read",
+    }
+    assert set(summary) == {
+        "observation",
+        "note",
+        "original_chars",
+        "source_omitted",
+        "head",
+        "tail",
+        "retained_fields",
+    }
     assert any(
         event == "context_edit" and payload["summarized_tool_results"] == 1
         for event, payload in events
@@ -337,9 +367,10 @@ def test_fold_session_recovers_one_provider_context_overflow_without_blind_repea
         message.content or "" for message in llm.calls[1] if message.role == "tool"
     )
     assert "row\nrow" in json.loads(raw_tool)["value"]["stdout"]
-    assert "context_tool_result_summary" in next(
+    compacted_tool = next(
         message.content or "" for message in llm.calls[2] if message.role == "tool"
     )
+    assert json.loads(compacted_tool)["source_omitted"] is True
 
 
 def test_terminal_tool_cancels_later_mutation_in_same_turn(tmp_path: Path):
@@ -397,7 +428,7 @@ def test_explore_dispatches_full_shell_commands():
         llm=llm,
         tools=ToolRegistry([shell]),
     ).run("inspect", role="developer")
-    assert result["digest"] == "ran full shell"
+    assert result["summary"] == "ran full shell"
     assert shell.calls == [
         {"argv": ["python", "-V"]},
         {"argv": ["rg", "needle", "."]},

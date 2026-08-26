@@ -26,7 +26,7 @@
 
 ### 1.0 仓库 AGENTS 三节
 
-运行时从仓库根 `AGENTS.md` 抽取，代码不复制正文。当前抽取如下：
+运行时从仓库根 `AGENTS.md` 抽取，代码不复制正文，也不在 manifest 另存内容指纹；精确 Prompt 证据由原始 Agent Trace 承担。当前抽取如下：
 
 ```text
 ## Rules for Multi-Agent Cooperation
@@ -470,7 +470,7 @@ Meta 需要独立复盘时可用 `auditor`；无需委托时也可直接完成�
 You are an anchored context compaction sub-agent. Return exactly one JSON object matching the requested schema. Do not call tools. Do not use markdown or commentary. Preserve exact file paths, commands, error strings, artifact ids, user constraints, and next steps. Avoid vague phrases and omit obsolete details. Do not mention that messages were compacted.
 ```
 
-压缩输入包含上一份结构化摘要与其后的新增消息。输出至少需要包含所请求的继续执行字段之一；非法 JSON、空摘要或模型错误不会替换原会话。主 Runner 仍保存最近完整轮次，并可使用确定性工具观察摘要继续控制上下文规模。
+压缩输入包含上一份结构化摘要与其后的新增消息。输出至少需要包含所请求的继续执行字段之一；非法 JSON、空摘要或模型错误不会替换原会话。主 Runner 仍保存最近完整轮次，并可使用确定性工具观察摘要继续控制上下文规模。确定性工具结果缩写保留省略说明、`original_chars`、`head`、`tail`和可用的`retained_fields`，并明确标记`source_omitted=true`；不生成内容指纹。
 
 ## 7. NL Sub Agent 系统提示词
 

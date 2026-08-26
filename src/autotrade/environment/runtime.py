@@ -372,7 +372,6 @@ def _agent_visible_manifest(data: dict[str, object]) -> dict[str, object]:
             "sandbox_runtime",
             "prior_prompt",
             "skills",
-            "agents_md_sections_sha256",
             "development_inputs",
             "prior_output",
             "meta_learning_directive",

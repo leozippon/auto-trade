@@ -441,7 +441,7 @@ class _NoShellRunner:
 def _explore_then(
     *tool_calls: ToolCall,
     roles: tuple[str, ...] = ("auditor",),
-    digest: str = "委托完成",
+    summary: str = "委托完成",
     implement: dict[str, object] | None = None,
 ) -> tuple[ProviderResponse, ...]:
     explores = tuple(
@@ -460,7 +460,7 @@ def _explore_then(
                     )
                 )
             )
-        responses.append(ProviderResponse(content=digest))
+        responses.append(ProviderResponse(content=summary))
     return tuple(responses)
 
 

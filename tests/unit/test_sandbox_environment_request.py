@@ -121,6 +121,7 @@ class SandboxEnvironmentRequestTest(unittest.TestCase):
             _result, _spec, manifest = self._rebuild(
                 root, {"python_packages": ["scipy==1.14.0"]}, use_docker=False
             )
+            manifest.update(agents_md_sections_sha256="ignored legacy field")
             public = json.loads(SandboxPaths(root).run_manifest.read_text(encoding="utf-8"))
             update = public["sandbox_image_update"]
             self.assertEqual(update["status"], "skipped_local_dev")
@@ -130,6 +131,7 @@ class SandboxEnvironmentRequestTest(unittest.TestCase):
                              "stdout_tail", "stderr_tail"):
                 self.assertNotIn(withheld, update)
             self.assertNotIn(str(root), json.dumps(public))
+            self.assertNotIn("agents_md_sections_sha256", public)
             # The host copy keeps everything for the audit.
             host = json.loads(SandboxPaths(root).host_run_manifest.read_text(encoding="utf-8"))
             self.assertEqual(host["sandbox_image_update"], manifest.data["sandbox_image_update"])

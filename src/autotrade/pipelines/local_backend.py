@@ -14,7 +14,6 @@ from typing import TYPE_CHECKING
 
 import pandas as pd
 
-from autotrade.agent.agents_md import load_required_agents_md_sections
 from autotrade.agent.compact import ContextCompactionConfig
 from autotrade.agent.experiment_facts import build_experiment_facts
 from autotrade.environment.artifacts import (
@@ -760,7 +759,6 @@ class LLMFoldDeveloper:
                 "finalize_before_deadline_seconds": request.finalize_before_deadline_seconds,
                 "sandbox_spec": sandbox_spec.to_record(),
                 "prior_prompt": request.prior,
-                "agents_md_sections_sha256": load_required_agents_md_sections().sha256,
                 "fold_exploration_directive": self.fold_exploration_directive.strip(),
                 "budgets": {
                     "max_steps": request.max_steps,
@@ -1432,7 +1430,6 @@ class LLMMetaLearner:
                     "files": skills_stats.files,
                     "bytes": skills_stats.bytes,
                 },
-                "agents_md_sections_sha256": load_required_agents_md_sections().sha256,
                 "modification_constraints": replace(
                     self.regularization_constraints, is_initial_artifact=not parent_id
                 ).to_record(),

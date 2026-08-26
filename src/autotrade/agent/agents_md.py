@@ -6,7 +6,6 @@ This module extracts them at runtime; it does not copy the prose into Python.
 
 from __future__ import annotations
 
-import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -24,12 +23,6 @@ class AgentsMdError(ValueError):
 @dataclass(frozen=True)
 class AgentsMdSections:
     text: str
-    sha256: str
-    path: Path
-
-    @property
-    def version(self) -> str:
-        return self.sha256[:12]
 
 
 def default_agents_md_path() -> Path:
@@ -53,8 +46,7 @@ def load_required_agents_md_sections(
         raise AgentsMdError(f"AGENTS.md cannot be read: {source}") from exc
     extracted = [_extract_section(body, title, source) for title in REQUIRED_AGENTS_MD_SECTIONS]
     text = "\n\n".join(extracted).strip()
-    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
-    return AgentsMdSections(text=text, sha256=digest, path=source.resolve())
+    return AgentsMdSections(text=text)
 
 
 def _extract_section(body: str, title: str, source: Path) -> str:

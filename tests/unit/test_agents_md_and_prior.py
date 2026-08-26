@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -107,8 +108,8 @@ def test_required_agents_sections_are_injected_into_fold_and_meta(tmp_path: Path
         assert "delete_skill" in prompt
         assert "不得自动执行" in prompt
     assert "全部 Meta 子角色只读" in fold
-    assert extracted.sha256
-    assert extracted.version == extracted.sha256[:12]
+    assert extracted.text
+    assert tuple(extracted.__dataclass_fields__) == ("text",)
 
 
 def test_missing_agents_section_fails_explicitly(tmp_path: Path) -> None:
@@ -140,6 +141,9 @@ def test_fold_system_prompt_injects_prior_full_text(tmp_path: Path) -> None:
 def test_fold_write_tools_cannot_overwrite_authoritative_prior(tmp_path: Path) -> None:
     experiment = tmp_path / "experiment"
     store = ExperimentPriorStore(experiment)
+    store.root.mkdir(parents=True)
+    legacy_current = store.root / "CURRENT.md"
+    legacy_current.write_text("stale duplicate\n", encoding="utf-8")
     published = store.publish("sample then count", generation_id="meta_001_run_a")
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -148,7 +152,9 @@ def test_fold_write_tools_cannot_overwrite_authoritative_prior(tmp_path: Path) -
     )
     assert (workspace / "PRIOR.md").read_text(encoding="utf-8") == "tampered workspace copy"
     assert store.current_text().strip() == "sample then count"
+    assert legacy_current.read_text(encoding="utf-8") == "stale duplicate\n"
     assert Path(published.prior_ref).read_text(encoding="utf-8").strip() == "sample then count"
+    assert not hasattr(published, "sha256")
 
 
 def test_meta_publishes_keeps_and_rejects_overlong_prior(tmp_path: Path) -> None:
@@ -248,7 +254,12 @@ def test_latest_prior_resume_reads_last_meta_record() -> None:
     records = [
         {"record_type": "fold", "prior": "ignored"},
         {"record_type": "meta_learning", "prior": "first"},
-        {"record_type": "meta_learning", "prior": "second", "prior_published": False},
+        {
+            "record_type": "meta_learning",
+            "prior": "second",
+            "prior_published": False,
+            "sha256": "ignored legacy field",
+        },
     ]
     assert latest_prior_text(records) == "second"
     assert latest_prior_text([]) == ""
@@ -332,6 +343,31 @@ def test_prior_store_restore_points_current_at_earlier_generation(
     )
 
 
+def test_prior_store_rejects_malformed_or_dangling_current_ref(tmp_path: Path) -> None:
+    store = ExperimentPriorStore(tmp_path / "experiment")
+    store.root.mkdir(parents=True)
+    store.current_pointer_path.write_text("../outside\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="generation_id"):
+        store.current_text()
+    store.current_pointer_path.write_text("missing\n", encoding="utf-8")
+    with pytest.raises(FileNotFoundError, match="missing"):
+        store.current_text()
+
+
+def test_prior_store_serializes_concurrent_publications(tmp_path: Path) -> None:
+    store = ExperimentPriorStore(tmp_path / "experiment")
+    publications = (("first", "gen_1"), ("second", "gen_2"))
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(
+            pool.map(lambda item: store.publish(item[0], generation_id=item[1]), publications)
+        )
+    current_generation = store.current_generation_id()
+    assert current_generation in {"gen_1", "gen_2"}
+    expected = {result.generation_id: result.text for result in results}
+    assert store.current_text().strip() == expected[current_generation]
+    assert all(Path(result.prior_ref).is_file() for result in results)
+
+
 def _append_meta(
     ledger: ExperimentLedger,
     *,
@@ -378,11 +414,13 @@ def test_restore_prior_store_clears_current_when_no_generation_remains(
     experiment = tmp_path / "experiment"
     store = ExperimentPriorStore(experiment)
     store.publish("later workflow", generation_id="gen_2")
+    legacy_current = store.root / "CURRENT.md"
+    legacy_current.write_text("ignored legacy copy\n", encoding="utf-8")
     ledger = ExperimentLedger(experiment / "ledgers" / "experiment_ledger.jsonl")
     _restore_prior_store(experiment, ledger)
     assert store.current_generation_id() == ""
     assert store.current_text() == ""
-    assert not store.current_path.exists()
+    assert legacy_current.read_text(encoding="utf-8") == "ignored legacy copy\n"
     assert (
         Path(store.root / "generations" / "gen_2" / "PRIOR.md")
         .read_text(encoding="utf-8")
@@ -438,7 +476,7 @@ def test_meta_fold_reviews_include_strategy_and_agent_trace_not_heldout(tmp_path
             "status": "completed",
             "role": "auditor",
             "task": "inspect daily schema",
-            "digest": "daily has trade_date",
+            "summary": "daily has trade_date",
         },
         {"event_type": "llm_call", "content": "planning the next edit", "status": "ok"},
     ]
@@ -607,7 +645,7 @@ def test_compact_agent_trace_keeps_recent_complete_tasks() -> None:
             "task_id": "explore_old",
             "task": "early schema",
             "status": "completed",
-            "digest": "old digest",
+            "summary": "old summary",
         },
     ]
     late = [
@@ -629,7 +667,7 @@ def test_compact_agent_trace_keeps_recent_complete_tasks() -> None:
             "task_id": "explore_new",
             "task": "later rows",
             "status": "completed",
-            "digest": "new digest",
+            "summary": "new summary",
         },
     ]
     noise = [
@@ -645,9 +683,17 @@ def test_compact_agent_trace_keeps_recent_complete_tasks() -> None:
     ]
     assert "task" not in compact[0]
     assert compact[0]["parent_call_id"] == "call_late"
-    assert compact[2]["digest"] == "new digest"
+    assert compact[2]["summary"] == "new summary"
     assert compact[3]["content"] == "main dialogue"
     assert all("heldout" not in str(item) for item in compact)
+
+
+def test_compact_agent_trace_ignores_legacy_digest() -> None:
+    compact = compact_agent_trace(
+        [{"event_type": "explore", "task_id": "legacy", "digest": "do not migrate"}]
+    )
+    assert "digest" not in compact[0]
+    assert "summary" not in compact[0]
 
 
 def test_compact_agent_trace_keeps_multiple_recent_tasks_in_order() -> None:
@@ -737,7 +783,7 @@ def test_compact_agent_trace_keeps_main_and_subagent_without_forbidden_content()
             "task_id": "explore_abc",
             "parent_call_id": "call_1",
             "status": "completed",
-            "digest": "wrote main.py",
+            "summary": "wrote main.py",
         },
         {
             "event_type": "tool_call",
@@ -779,7 +825,7 @@ def test_compact_agent_trace_keeps_main_and_subagent_without_forbidden_content()
     assert args["path"] == "[host_path]"
     assert args["content"] == {"omitted": True, "chars": len(body)}
     assert compact[3]["parent_call_id"] == "call_1"
-    assert compact[5]["digest"] == "wrote main.py"
+    assert compact[5]["summary"] == "wrote main.py"
 
 
 def test_compact_agent_trace_redacts_embedded_host_paths_not_sandbox() -> None:
@@ -801,7 +847,7 @@ def test_compact_agent_trace_redacts_embedded_host_paths_not_sandbox() -> None:
         },
         {
             "event_type": "explore",
-            "digest": "ratio 3/4 json 1.5 and a / b stay; host /var/tmp/x goes",
+            "summary": "ratio 3/4 json 1.5 and a / b stay; host /var/tmp/x goes",
             "error": "boom at /tmp/foo",
         },
         {
@@ -827,7 +873,7 @@ def test_compact_agent_trace_redacts_embedded_host_paths_not_sandbox() -> None:
     assert "/mnt/agent/workspace/main.py" in content
     assert len(content) < len(original)
     assert "task" not in compact[1]
-    assert compact[2]["digest"] == (
+    assert compact[2]["summary"] == (
         "ratio 3/4 json 1.5 and a / b stay; host [host_path] goes"
     )
     assert compact[2]["error"] == "boom at [host_path]"

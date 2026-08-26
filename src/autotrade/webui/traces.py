@@ -20,7 +20,7 @@ _RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 _BLOCK_TEXT_CHARS = 4_000
 _BLOCK_SUMMARY_CHARS = 160
 _BLOCK_TASK_CHARS = 400
-_BLOCK_DIGEST_CHARS = 400
+_BLOCK_SUBAGENT_SUMMARY_CHARS = 400
 _BLOCK_ERROR_CHARS = 240
 _TERMINAL_SUBAGENT = frozenset({"completed", "timeout", "error", "cancelled"})
 
@@ -531,7 +531,7 @@ class _SubagentState:
         self.ended = False
         self.tools = _ToolAcc()
         self.task = ""
-        self.digest = ""
+        self.summary = ""
         self.error = ""
 
 
@@ -577,7 +577,7 @@ def _subagent_block(
         "phase": phase,
         "status": status,
         "task": state.task,
-        "digest": state.digest,
+        "summary": state.summary,
         "error": state.error,
         "tools": state.tools.as_rows(),
     }
@@ -587,9 +587,9 @@ def _absorb_subagent_text(state: _SubagentState, event: dict[str, object]) -> No
     task = _clip(event.get("task"), _BLOCK_TASK_CHARS)
     if task:
         state.task = task
-    digest = _clip(event.get("digest"), _BLOCK_DIGEST_CHARS)
-    if digest:
-        state.digest = digest
+    summary = _clip(event.get("summary"), _BLOCK_SUBAGENT_SUMMARY_CHARS)
+    if summary:
+        state.summary = summary
     error = _clip(event.get("error"), _BLOCK_ERROR_CHARS)
     if error:
         state.error = error
@@ -601,7 +601,7 @@ def _sync_subagent_fields(state: _SubagentState) -> None:
         if block is None:
             continue
         block["task"] = state.task
-        block["digest"] = state.digest
+        block["summary"] = state.summary
         block["error"] = state.error
         block["tools"] = rows
 

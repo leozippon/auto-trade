@@ -3110,7 +3110,7 @@ class HitlControlActionTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(store.current_generation_id(), "")
         self.assertEqual(store.current_text(), "")
-        self.assertFalse(store.current_path.exists())
+        self.assertFalse(store.current_pointer_path.exists())
         self.assertEqual(
             (store.root / "generations" / "gen_2" / "PRIOR.md")
             .read_text(encoding="utf-8")

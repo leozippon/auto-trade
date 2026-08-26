@@ -303,7 +303,7 @@ def test_project_subagent_new_and_old_events_aggregate_by_task_id() -> None:
                 "event_type": "explore_task",
                 "task_id": "explore_new",
                 "status": "completed",
-                "digest": "has trade_date",
+                "summary": "has trade_date",
             },
             {"event_type": "explore_llm", "task_id": "explore_old"},
             {
@@ -316,7 +316,7 @@ def test_project_subagent_new_and_old_events_aggregate_by_task_id() -> None:
                 "event_type": "explore",
                 "task_id": "explore_old",
                 "task": "old inspect",
-                "digest": "old digest",
+                "summary": "old summary",
             },
         ]
     )
@@ -338,7 +338,7 @@ def test_project_subagent_new_and_old_events_aggregate_by_task_id() -> None:
         if block["task_id"] == "explore_old" and block["phase"] == "ended"
     )
     assert new_ended["task"] == "inspect schema"
-    assert new_ended["digest"] == "has trade_date"
+    assert new_ended["summary"] == "has trade_date"
     assert new_ended["tools"] == [
         {
             "name": "grep",
@@ -350,7 +350,7 @@ def test_project_subagent_new_and_old_events_aggregate_by_task_id() -> None:
         }
     ]
     assert old_ended["task"] == "old inspect"
-    assert old_ended["digest"] == "old digest"
+    assert old_ended["summary"] == "old summary"
     assert old_ended["tools"] == [
         {
             "name": "read_file",
@@ -361,6 +361,22 @@ def test_project_subagent_new_and_old_events_aggregate_by_task_id() -> None:
             "summary": "",
         }
     ]
+
+
+def test_project_legacy_subagent_digest_is_ignored() -> None:
+    blocks = project_trace_blocks(
+        [
+            {
+                "event_type": "explore",
+                "task_id": "legacy",
+                "status": "completed",
+                "digest": "must not migrate",
+            }
+        ]
+    )
+    ended = next(block for block in _subagent_blocks(blocks) if block["phase"] == "ended")
+    assert ended["summary"] == ""
+    assert "digest" not in ended
 
 
 def test_project_explore_internal_tools_stay_on_subagent_card() -> None:
@@ -399,7 +415,7 @@ def test_project_explore_internal_tools_stay_on_subagent_card() -> None:
             {
                 "event_type": "explore",
                 "task_id": "explore_a",
-                "digest": "done",
+                "summary": "done",
             },
             {
                 "event_type": "tool_call",
@@ -503,7 +519,7 @@ def test_project_unknown_bad_payload_and_clips_long_text() -> None:
     assert project_trace_blocks([None, 1, "x", {"event_type": "mystery"}]) == []
     long_text = "字" * (traces._BLOCK_TEXT_CHARS + 50)
     long_task = "任" * (traces._BLOCK_TASK_CHARS + 20)
-    long_digest = "摘" * (traces._BLOCK_DIGEST_CHARS + 20)
+    long_subagent_summary = "摘" * (traces._BLOCK_SUBAGENT_SUMMARY_CHARS + 20)
     long_error = "错" * (traces._BLOCK_ERROR_CHARS + 20)
     long_summary = "e" * (traces._BLOCK_SUMMARY_CHARS + 20)
     blocks = project_trace_blocks(
@@ -519,7 +535,7 @@ def test_project_unknown_bad_payload_and_clips_long_text() -> None:
                 "event_type": "explore",
                 "task_id": "t1",
                 "task": long_task,
-                "digest": long_digest,
+                "summary": long_subagent_summary,
                 "error": long_error,
                 "status": "error",
             },
@@ -537,7 +553,7 @@ def test_project_unknown_bad_payload_and_clips_long_text() -> None:
         if block["phase"] == "ended"
     )
     assert len(str(ended["task"])) == traces._BLOCK_TASK_CHARS
-    assert len(str(ended["digest"])) == traces._BLOCK_DIGEST_CHARS
+    assert len(str(ended["summary"])) == traces._BLOCK_SUBAGENT_SUMMARY_CHARS
     assert len(str(ended["error"])) == traces._BLOCK_ERROR_CHARS
 
 

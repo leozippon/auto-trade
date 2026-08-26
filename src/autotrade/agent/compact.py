@@ -15,7 +15,6 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from hashlib import sha256
 from typing import Any
 
 from autotrade.environment.llm import (
@@ -345,8 +344,8 @@ def fit_tool_results_to_context(
 
     Assistant tool calls and tool message ids remain untouched, so the native
     function-call protocol stays valid.  The deterministic replacement keeps
-    provenance, bounded evidence excerpts, and a digest that identifies the
-    exact omitted result. ``force`` guarantees one edit when possible and is
+    provenance and bounded evidence excerpts while explicitly marking that the
+    source was omitted. ``force`` guarantees one edit when possible and is
     used only for recovery after an authoritative provider overflow.
     """
 
@@ -408,7 +407,7 @@ def summarize_tool_result_for_context(message: ChatMessage) -> ChatMessage:
             "model window. Re-run a narrower paginated query when more detail is needed."
         ),
         "original_chars": len(content),
-        "sha256": sha256(content.encode("utf-8")).hexdigest(),
+        "source_omitted": True,
         "head": content[:_TOOL_CONTEXT_EXCERPT_CHARS],
         "tail": content[-_TOOL_CONTEXT_EXCERPT_CHARS:],
     }

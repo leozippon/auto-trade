@@ -1,12 +1,13 @@
-"""Experiment-level versioned PRIOR.md (process memory, not a repo-root file)."""
+"""Experiment-level immutable PRIOR generations selected only by CURRENT.ref."""
 
 from __future__ import annotations
 
-import hashlib
+import fcntl
 import os
 import re
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -20,41 +21,47 @@ _LEGACY_DIRECTION_FIELDS = frozenset({"taste", "taste_path"})
 class PriorPublication:
     generation_id: str
     prior_ref: str
-    sha256: str
     chars: int
     text: str
 
 
 class ExperimentPriorStore:
-    """Authoritative current PRIOR plus one immutable file per published Meta generation."""
+    """One immutable PRIOR file per Meta generation and one atomic current pointer."""
 
     def __init__(self, experiment_dir: str | Path) -> None:
-        self.root = Path(experiment_dir).resolve() / "artifacts" / "prior"
-
-    @property
-    def current_path(self) -> Path:
-        return self.root / "CURRENT.md"
+        self.experiment_dir = Path(experiment_dir).resolve()
+        self.root = self.experiment_dir / "artifacts" / "prior"
 
     @property
     def current_pointer_path(self) -> Path:
         return self.root / "CURRENT.ref"
 
+    @property
+    def lock_path(self) -> Path:
+        return self.experiment_dir / ".prior.lock"
+
     def current_text(self) -> str:
-        if not self.current_path.is_file():
-            return ""
-        return self.current_path.read_text(encoding="utf-8")
+        generation = self.current_generation_id()
+        return self.load_generation(generation) if generation else ""
 
     def current_generation_id(self) -> str:
         if not self.current_pointer_path.is_file():
             return ""
-        return self.current_pointer_path.read_text(encoding="utf-8").strip()
+        raw = self.current_pointer_path.read_text(encoding="utf-8")
+        generation = raw.strip()
+        if not generation or raw != generation + "\n":
+            raise ValueError("PRIOR CURRENT.ref is malformed")
+        self._generation_path(generation)
+        return generation
 
     def current_ref(self) -> str:
         generation = self.current_generation_id()
         if not generation:
             return ""
         path = self._generation_path(generation)
-        return str(path) if path.is_file() else ""
+        if not path.is_file():
+            raise FileNotFoundError(f"PRIOR generation is missing: {generation}")
+        return str(path)
 
     def load_generation(self, generation_id: str) -> str:
         path = self._generation_path(generation_id)
@@ -73,20 +80,19 @@ class ExperimentPriorStore:
             )
         if not generation_id.strip():
             raise ValueError("PRIOR generation_id is required")
-        dest = self._generation_path(generation_id.strip())
-        if dest.exists():
-            raise FileExistsError(f"PRIOR generation already exists: {generation_id}")
-        dest.parent.mkdir(parents=True, exist_ok=True)
+        generation = generation_id.strip()
+        dest = self._generation_path(generation)
         payload = body + "\n"
-        _write_text_atomic(dest, payload)
-        dest.chmod(0o444)
-        _write_text_atomic(self.current_path, payload)
-        _write_text_atomic(self.current_pointer_path, generation_id.strip() + "\n")
-        digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        with _exclusive_flock(self.lock_path):
+            if dest.exists():
+                raise FileExistsError(f"PRIOR generation already exists: {generation_id}")
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            _write_text_atomic(dest, payload)
+            dest.chmod(0o444)
+            _write_text_atomic(self.current_pointer_path, generation + "\n")
         return PriorPublication(
-            generation_id=generation_id.strip(),
+            generation_id=generation,
             prior_ref=str(dest),
-            sha256=digest,
             chars=nchars,
             text=body,
         )
@@ -95,28 +101,26 @@ class ExperimentPriorStore:
         """Point CURRENT at an existing immutable generation without rewriting it."""
         if not generation_id.strip():
             raise ValueError("PRIOR generation_id is required")
-        dest = self._generation_path(generation_id.strip())
-        if not dest.is_file():
-            raise FileNotFoundError(f"PRIOR generation is missing: {generation_id}")
-        body = dest.read_text(encoding="utf-8").strip()
-        if not body:
-            raise ValueError(f"PRIOR generation is empty: {generation_id}")
-        payload = body + "\n"
-        _write_text_atomic(self.current_path, payload)
-        _write_text_atomic(self.current_pointer_path, generation_id.strip() + "\n")
-        digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        generation = generation_id.strip()
+        dest = self._generation_path(generation)
+        with _exclusive_flock(self.lock_path):
+            if not dest.is_file():
+                raise FileNotFoundError(f"PRIOR generation is missing: {generation_id}")
+            body = dest.read_text(encoding="utf-8").strip()
+            if not body:
+                raise ValueError(f"PRIOR generation is empty: {generation_id}")
+            _write_text_atomic(self.current_pointer_path, generation + "\n")
         return PriorPublication(
-            generation_id=generation_id.strip(),
+            generation_id=generation,
             prior_ref=str(dest),
-            sha256=digest,
             chars=len(body),
             text=body,
         )
 
     def clear_current(self) -> None:
-        """Drop CURRENT after rollback past every published generation."""
-        self.current_path.unlink(missing_ok=True)
-        self.current_pointer_path.unlink(missing_ok=True)
+        """Drop the current pointer after rollback past every published generation."""
+        with _exclusive_flock(self.lock_path):
+            self.current_pointer_path.unlink(missing_ok=True)
 
     def _generation_path(self, generation_id: str) -> Path:
         if Path(generation_id).name != generation_id or generation_id.startswith("."):
@@ -231,9 +235,24 @@ def restore_current_from_records(
     if not generation:
         store.clear_current()
         return
-    if store.current_generation_id() == generation:
-        return
+    try:
+        if store.current_generation_id() == generation:
+            store.current_ref()
+            return
+    except (OSError, ValueError):
+        pass
     store.restore(generation)
+
+
+@contextmanager
+def _exclusive_flock(path: Path) -> Iterator[None]:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+b") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def _write_text_atomic(path: Path, text: str) -> None:
