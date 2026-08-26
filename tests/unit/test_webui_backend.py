@@ -2093,16 +2093,27 @@ class WebuiBackendTest(unittest.TestCase):
             400,
         )
 
-        embedded_host_path = "/var/lib/private/result.json"
+        embedded_host_paths = (
+            "/var/lib/private/result.json",
+            "/secret",
+            "path:/secret",
+            "path:/var/lib/private/result.json",
+            "file:///tmp/private/result.json",
+            "file://server/share/private.txt",
+            r"C:\Users\private\result.json",
+        )
+        error = "failed opening " + " and ".join(embedded_host_paths)
         public_status = identity.public_status(
             {
                 "state": "failed",
-                "error": f"failed opening {embedded_host_path}",
+                "error": error,
                 "final_strategy_artifact": "strategy_secret_raw",
             }
         )
-        self.assertNotIn(embedded_host_path, json.dumps(public_status))
-        self.assertNotIn("strategy_secret_raw", json.dumps(public_status))
+        public_status_text = json.dumps(public_status)
+        for embedded_host_path in embedded_host_paths:
+            self.assertNotIn(embedded_host_path, public_status_text)
+        self.assertNotIn("strategy_secret_raw", public_status_text)
         self.assertTrue(
             str(public_status["final_strategy_ref"]).startswith("strategy_ref_")
         )
@@ -2110,11 +2121,20 @@ class WebuiBackendTest(unittest.TestCase):
             {
                 "event_type": "tool_call",
                 "run_id": "run_001",
-                "error": f"failed opening {embedded_host_path}",
+                "error": error,
+                "safe_paths": (
+                    "GET /api/experiments/x; read /mnt/agent/workspace/main.py; "
+                    "see https://example.test/docs/path"
+                ),
             },
             heldout_revealed=False,
         )
-        self.assertNotIn(embedded_host_path, json.dumps(public_event))
+        public_event_text = json.dumps(public_event)
+        for embedded_host_path in embedded_host_paths:
+            self.assertNotIn(embedded_host_path, public_event_text)
+        self.assertIn("/api/experiments/x", public_event_text)
+        self.assertIn("/mnt/agent/workspace/main.py", public_event_text)
+        self.assertIn("https://example.test/docs/path", public_event_text)
 
     def test_corrupt_identity_store_fails_closed_without_host_paths(self) -> None:
         directory = self._build_hitl_experiment("exp_bad_refs")

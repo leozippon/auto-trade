@@ -55,10 +55,10 @@ _ALLOWED_PUBLIC_PATH_PREFIXES = (
     "/mnt/snapshot",
     "/mnt/snapshots",
 )
-_FILE_URI = re.compile(r"file:///(?:[^\s\"'`<>])+", re.IGNORECASE)
+_FILE_URI = re.compile(r"file://(?:[^\s\"'`<>])+", re.IGNORECASE)
 _POSIX_PATH = re.compile(
-    r"(?<![A-Za-z0-9_:/])/(?:[^/\s\"'`<>|()\[\]{},;]+/)+"
-    r"[^/\s\"'`<>|()\[\]{},;]*"
+    r"(?<![A-Za-z0-9_/])/[^/\s\"'`<>|()\[\]{},;]+"
+    r"(?:/[^/\s\"'`<>|()\[\]{},;]+)*"
 )
 _WINDOWS_PATH = re.compile(
     r"(?<![A-Za-z0-9_])(?:[A-Za-z]:[\\/]|\\\\)"
