@@ -76,8 +76,8 @@ class AnalysisService:
         ``key[1:]`` is the sidecar identity for both kinds — (epoch, fold)
         for folds and ("step", node_id) for steps.
         """
-        _experiment_id, epoch_id, fold_id = key
-        _md_path, meta_path = analysis_paths(Path(out_dir), epoch_id, fold_id)
+        _experiment_id, epoch_id, output_ref = key
+        _md_path, meta_path = analysis_paths(Path(out_dir), epoch_id, output_ref)
         try:
             before = meta_path.stat().st_mtime_ns if meta_path.exists() else None
             try:
@@ -91,7 +91,7 @@ class AnalysisService:
                             {
                                 "schema_version": ANALYSIS_SCHEMA_VERSION,
                                 "epoch_id": epoch_id,
-                                "fold_id": fold_id,
+                                "output_ref": output_ref,
                                 "provider": provider,
                                 "model": model,
                                 "created_at": utc_now_iso(),
@@ -119,21 +119,17 @@ class AnalysisService:
                 raise ManagerError("analysis for this fold is already being generated")
             self._pending.add(key)
         try:
-            experiment_dir = registry.resolve_experiment_dir(
-                experiments_root, experiment_id
-            )
-            ref_store = AgentRefStore(experiment_dir)
-            detail = registry.fold_detail(
+            experiment_dir, identity, _records, record = registry.resolve_fold_record(
                 experiments_root, experiment_id, epoch_id, fold_id
             )
-            strategy_dir = detail.get("strategy_dir")
-            if not strategy_dir or not Path(str(strategy_dir)).is_dir():
-                raise ManagerError("fold has no frozen strategy artifact on disk")
+            ref_store = identity.store
+            strategy_dir = registry.fold_strategy_dir(
+                experiments_root, experiment_id, epoch_id, fold_id
+            )
             params = read_json(experiment_dir / HITL_DIR_NAME / PARAMS_NAME)
             model = str(params.get("analysis_model") or LOCAL_QWEN_MODEL)
             provider = model_profile(model).provider
             max_tokens = int(params.get("analysis_max_tokens") or 6000)
-            record = dict(detail["record"])
             model_dir = record.get("frozen_model_artifact_path")
             out_dir = experiment_dir / HITL_DIR_NAME / ANALYSIS_DIR_NAME
         except Exception:
@@ -155,10 +151,11 @@ class AnalysisService:
                 proxy,
                 ledger_record=record,
                 ref_store=ref_store,
-                strategy_dir=Path(str(strategy_dir)),
+                strategy_dir=strategy_dir,
                 model_dir=Path(str(model_dir)) if model_dir else None,
                 out_dir=out_dir,
                 max_tokens=max_tokens,
+                output_identity=(epoch_id, fold_id),
             )
 
         threading.Thread(

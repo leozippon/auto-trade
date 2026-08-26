@@ -7,7 +7,9 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+from autotrade.environment.identity import AgentRefStore
 from autotrade.webui import traces
+from autotrade.webui.public_identity import PublicIdentity
 from autotrade.webui.server import create_app
 from autotrade.webui.traces import (
     DEFAULT_PAGE_BYTES,
@@ -189,16 +191,21 @@ def _experiment_with_trace(
     *,
     experiment_id: str = "demo",
     run_id: str = "run_001",
-) -> None:
+) -> PublicIdentity:
     root = tmp_path / "experiments" / experiment_id
+    AgentRefStore(root)
     (root / "hitl").mkdir(parents=True)
     (root / "hitl" / "status.json").write_text(
         json.dumps({"schema_version": 1, "state": "created"}),
         encoding="utf-8",
     )
+    (root / "hitl" / "schedule.json").write_text(
+        json.dumps({"schema_version": 1, "sessions": []}), encoding="utf-8"
+    )
     traces_dir = root / "artifacts" / "traces"
     traces_dir.mkdir(parents=True)
     _write_trace(traces_dir / f"{run_id}.jsonl", events)
+    return PublicIdentity(root)
 
 
 def test_project_main_tool_started_and_completed_counts_once() -> None:
@@ -599,9 +606,11 @@ def test_trace_blocks_api_projects_whole_trace_without_paging_groups(
         {"event_type": "user_message", "content": "ok?"},
         {"event_type": "llm_call", "content": "done"},
     ]
-    _experiment_with_trace(tmp_path, events)
+    identity = _experiment_with_trace(tmp_path, events)
     client = TestClient(create_app(tmp_path))
-    raw = client.get("/api/experiments/demo/trace", params={"run_id": "run_001"})
+    run_ref = identity.run_ref("run_001")
+    trace_ref = identity.trace_ref("run_001")
+    raw = client.get("/api/experiments/demo/trace", params={"run_id": run_ref})
     assert raw.status_code == 200
     raw_payload = raw.json()
     assert "blocks" not in raw_payload
@@ -613,7 +622,7 @@ def test_trace_blocks_api_projects_whole_trace_without_paging_groups(
     assert raw_payload["eof"] is False
 
     response = client.get(
-        "/api/experiments/demo/trace/blocks", params={"run_id": "run_001"}
+        "/api/experiments/demo/trace/blocks", params={"run_id": trace_ref}
     )
     assert response.status_code == 200
     payload = response.json()
@@ -632,7 +641,9 @@ def test_trace_blocks_api_projects_whole_trace_without_paging_groups(
 
 
 def test_trace_blocks_api_guards_invalid_experiment_and_run(tmp_path: Path) -> None:
-    _experiment_with_trace(tmp_path, [{"event_type": "llm_call", "content": "x"}])
+    identity = _experiment_with_trace(
+        tmp_path, [{"event_type": "llm_call", "content": "x"}]
+    )
     client = TestClient(create_app(tmp_path))
     missing = client.get(
         "/api/experiments/nope/trace/blocks", params={"run_id": "run_001"}
@@ -650,20 +661,25 @@ def test_trace_blocks_api_guards_invalid_experiment_and_run(tmp_path: Path) -> N
         assert response.status_code in {400, 404}, run_id
         assert "etc" not in response.text
     missing_run = client.get(
-        "/api/experiments/demo/trace/blocks", params={"run_id": "run_missing"}
+        "/api/experiments/demo/trace/blocks",
+        params={"run_id": identity.run_ref("run_missing")},
     )
     assert missing_run.status_code == 404
 
 
-def test_raw_trace_endpoint_still_returns_unprojected_events(tmp_path: Path) -> None:
+def test_trace_endpoint_returns_public_events_without_block_projection(tmp_path: Path) -> None:
     events = [
         {"event_type": "session_start", "system_prompt": "sys", "instruction": "go"},
         {"event_type": "llm_call", "content": "hi"},
         {"event_type": "tool_call", "tool": "shell", "result": {"ok": True}},
     ]
-    _experiment_with_trace(tmp_path, events)
+    identity = _experiment_with_trace(tmp_path, events)
     client = TestClient(create_app(tmp_path))
-    raw = client.get("/api/experiments/demo/trace", params={"run_id": "run_001"}).json()
+    run_ref = identity.run_ref("run_001")
+    trace_ref = identity.trace_ref("run_001")
+    raw = client.get(
+        "/api/experiments/demo/trace", params={"run_id": run_ref}
+    ).json()
     assert "blocks" not in raw
     assert [event.get("event_type") for event in raw["events"]] == [
         "session_start",
@@ -673,7 +689,7 @@ def test_raw_trace_endpoint_still_returns_unprojected_events(tmp_path: Path) -> 
     assert raw["events"][1]["content"] == "hi"
     assert raw["eof"] is True
     blocks = client.get(
-        "/api/experiments/demo/trace/blocks", params={"run_id": "run_001"}
+        "/api/experiments/demo/trace/blocks", params={"run_id": trace_ref}
     ).json()
     assert "events" not in blocks
     assert [block["kind"] for block in blocks["blocks"]] == [

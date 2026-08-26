@@ -37,8 +37,11 @@ from autotrade.pipelines.ledger import (
     latest_fold_records,
     latest_heldout_records,
 )
+from autotrade.pipelines.meta_schedule import meta_record_session_key
 from autotrade.pipelines.prior import latest_prior_text, unified_meta_record
 from autotrade.pipelines.skills import latest_skills_snapshot
+
+from .public_identity import PublicIdentity
 
 _ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$")
 # Datasets whose partition coverage bounds the selectable backtest periods: the
@@ -330,22 +333,6 @@ def _public_meta_view(
     return unified_meta_record(record, current_prior=current_prior)
 
 
-def _public_heldout_view(record: Mapping[str, object], revealed: bool) -> dict[str, object]:
-    # ``revealed`` is deliberately required: a reveal-defaulting default on a
-    # reveal-gated projection would fail open at any future call site. A
-    # held-out record IS test-period evidence, so only its identifying header
-    # survives the guarded view.
-    if revealed:
-        return dict(record)
-    return {
-        "record_type": "heldout",
-        "epoch_id": record.get("epoch_id"),
-        "fold_id": record.get("fold_id"),
-        "period": record.get("period"),
-        "hidden": True,
-    }
-
-
 def _public_params(params: Mapping[str, object]) -> dict[str, object]:
     # params.json is also a worker-side ops channel where manager-owned roots
     # legitimately exist — never echo them back out through the read model.
@@ -360,6 +347,7 @@ def summarize_experiment(directory: Path) -> dict[str, object]:
     directory = Path(directory)
     summary: dict[str, object] = {"experiment_id": directory.name}
     try:
+        identity = PublicIdentity(directory)
         state = experiment_state(directory)
         records = read_ledger_records(directory)
         folds = list(latest_fold_records(records).values())
@@ -374,25 +362,24 @@ def summarize_experiment(directory: Path) -> dict[str, object]:
         epochs = sorted({str(row.get("epoch_id")) for row in folds if row.get("epoch_id")})
         latest_epoch = epochs[-1] if epochs else None
         completed_sessions, total_sessions = _durable_session_progress(sessions, records)
-        status = state.get("status") or {}
-        summary.update(state)
+        raw_status = state.get("status")
+        status = identity.public_status(raw_status) if isinstance(raw_status, Mapping) else {}
+        public_state = {key: value for key, value in state.items() if key != "status"}
+        if raw_status is not None:
+            public_state["status"] = status
+        summary.update(public_state)
         summary.update(
             {
                 "created_at": _created_at(directory, params),
-                "current_session": status.get("session_key") if isinstance(status, Mapping) else None,
-                "session_started_at": status.get("session_started_at") if isinstance(status, Mapping) else None,
-                "environment_stage": status.get("environment_stage") if isinstance(status, Mapping) else None,
-                "environment_stage_started_at": (
-                    status.get("environment_stage_started_at") if isinstance(status, Mapping) else None
-                ),
-                "environment_progress": (
-                    status.get("environment_progress") if isinstance(status, Mapping) else None
-                ),
+                "current_session": status.get("session_key"),
+                "session_started_at": status.get("session_started_at"),
+                "environment_stage": status.get("environment_stage"),
+                "environment_stage_started_at": status.get("environment_stage_started_at"),
+                "environment_progress": status.get("environment_progress"),
                 "folds_recorded": len(folds),
                 "meta_recorded": len(meta),
                 "heldout_recorded": len(heldout),
                 "skills": {
-                    "generation_id": skills_snapshot.generation_id or None,
                     "count": skills_snapshot.stats.count,
                     "files": skills_snapshot.stats.files,
                     "bytes": skills_snapshot.stats.bytes,
@@ -400,10 +387,6 @@ def summarize_experiment(directory: Path) -> dict[str, object]:
                 "completed_sessions": completed_sessions,
                 "total_sessions": total_sessions,
                 "test_revealed": revealed,
-                # Epochs re-run the same fold calendar, so cumulative metrics
-                # must never mix epochs (that compounds each quarter once per
-                # epoch). Headline = the latest epoch; earlier epochs stay
-                # comparable side by side in metrics_by_epoch.
                 "metrics": {
                     "epoch_id": latest_epoch,
                     "cum_valid_return": _compound(
@@ -439,11 +422,10 @@ def summarize_experiment(directory: Path) -> dict[str, object]:
                 "fold_returns": [
                     {
                         "epoch_id": record.get("epoch_id"),
-                        "fold_id": record.get("fold_id"),
+                        "fold_ref": identity.fold_ref(record.get("fold_id")),
                         "fold_status": record.get("fold_status"),
                         "valid_return": _metric(record, "validation_result", "total_return"),
                         "test_return": _metric(record, "test_result", "total_return") if revealed else None,
-                        # Long-leg P&L return as recorded by the replay summary.
                         "valid_long": _metric(record, "validation_result", "long_return"),
                         "test_long": _metric(record, "test_result", "long_return") if revealed else None,
                     }
@@ -451,7 +433,7 @@ def summarize_experiment(directory: Path) -> dict[str, object]:
                 ],
                 "heldout_returns": [
                     {
-                        "label": str(record.get("fold_id", "")).removeprefix("heldout_"),
+                        "fold_ref": identity.fold_ref(record.get("fold_id")),
                         "return": _metric(record, "result", "total_return"),
                     }
                     for record in sorted(heldout, key=lambda row: str(row.get("fold_id")))
@@ -459,7 +441,13 @@ def summarize_experiment(directory: Path) -> dict[str, object]:
             }
         )
     except Exception as exc:  # noqa: BLE001 - broken experiments remain inspectable and deletable
-        summary.update({"state": "unreadable", "worker_alive": False, "error": f"{type(exc).__name__}: {exc}"})
+        summary.update(
+            {
+                "state": "unreadable",
+                "worker_alive": False,
+                "error": f"{type(exc).__name__}: experiment state is unreadable",
+            }
+        )
     return summary
 
 
@@ -491,9 +479,6 @@ def experiment_detail(root: Path, experiment_id: str) -> dict[str, object]:
     directory = resolve_experiment_dir(root, experiment_id)
     detail = summarize_experiment(directory)
     if detail.get("state") == "unreadable":
-        # Same isolation as the homepage list: a broken experiment renders as
-        # a structured error detail (state + error), never a 500 — it stays
-        # inspectable and deletable from the console.
         return {
             **detail,
             "params": {},
@@ -505,131 +490,169 @@ def experiment_detail(root: Path, experiment_id: str) -> dict[str, object]:
             "ledger": [],
             "inbox": {"pending_count": 0, "queued_ids": []},
         }
+    identity = PublicIdentity(directory)
     records = read_ledger_records(directory)
     folds = latest_fold_records(records)
     heldout = latest_heldout_records(records)
-    meta_records = [
-        row for row in records if row.get("record_type") == "meta_learning"
-    ]
+    meta_records = [row for row in records if row.get("record_type") == "meta_learning"]
     latest_meta = meta_records[-1] if meta_records else None
     current_prior = latest_prior_text(records, experiment_dir=directory)
-    # A fully recorded held-out means the terminal evaluation finished, so
-    # results auto-reveal (mirrors test_results_revealed, reusing the records
-    # already in hand).
     revealed = test_results_revealed(directory, records)
-    hitl = directory / "hitl"
-    params = read_json(hitl / "params.json")
-    schedule = read_json(hitl / "schedule.json")
-    plan = schedule.get("sessions") if isinstance(schedule.get("sessions"), list) else []
+    hitl = directory / HITL_DIR_NAME
+    params = read_json(hitl / PARAMS_NAME)
     sessions: list[dict[str, object]] = []
-    for planned in plan:
-        if not isinstance(planned, dict):
-            continue
-        entry = dict(planned)
-        entry.setdefault("key", entry.get("session_key"))
-        kind = str(entry.get("kind") or "")
-        if kind == "meta":
-            entry["kind"] = "meta_learning"
-            kind = "meta_learning"
+    for planned in identity.sessions:
+        entry = identity.public_session(planned, heldout_revealed=revealed)
+        kind = str(planned.get("kind") or "")
+        raw_key = str(planned.get("_raw_key") or "")
         if kind == "fold":
-            record = folds.get((str(entry.get("epoch_id")), str(entry.get("fold_id"))))
+            raw_fold = str(planned.get("fold_id") or raw_key.partition("/")[2])
+            record = folds.get((str(planned.get("epoch_id")), raw_fold))
             if record is not None:
-                entry["record"] = guarded_fold_view(record)
-                entry["analysis_available"] = analysis_available(
-                    hitl, str(entry.get("epoch_id")), str(entry.get("fold_id"))
+                entry["record"] = identity.public_record(
+                    guarded_fold_view(record), heldout_revealed=revealed
                 )
-        elif kind == "meta_learning":
+                entry["analysis_available"] = analysis_available(
+                    hitl,
+                    str(planned.get("epoch_id")),
+                    identity.fold_ref(raw_fold),
+                )
+        elif kind == "meta":
             record = next(
                 (
                     row
                     for row in reversed(records)
                     if row.get("record_type") == "meta_learning"
-                    and (row.get("session_key") == entry.get("session_key") or row.get("fold_id") == entry.get("fold_id"))
+                    and meta_record_session_key(row) == raw_key
                 ),
                 None,
             )
             if record is not None:
-                entry["record"] = _public_meta_view(
+                public_meta = _public_meta_view(
                     record,
                     current_prior=current_prior if record is latest_meta else None,
                 )
+                entry["record"] = identity.public_record(
+                    public_meta, heldout_revealed=revealed
+                )
         elif kind == "heldout" and heldout:
-            entry["records"] = [_public_heldout_view(row, revealed) for row in heldout]
+            entry["records"] = [
+                identity.public_record(row, heldout_revealed=revealed)
+                for row in heldout
+            ]
         sessions.append(entry)
-    control = read_control(hitl / "control.json")
-    current_session = detail.get("current_session")
-    inbox_session = (
-        str(current_session) if isinstance(current_session, str) and current_session else None
-    )
+    control = read_control(hitl / CONTROL_NAME)
+    raw_state = experiment_state(directory)
+    raw_status = raw_state.get("status")
+    raw_current = raw_status.get("session_key") if isinstance(raw_status, Mapping) else None
     return {
         **detail,
         "params": _public_params(params),
-        "control": control.to_record(),
-        "inbox": inbox_public_view(hitl / INBOX_NAME, session_key=inbox_session),
-        # Effective reveal state (manual reveal OR held-out completed); the
-        # UI must key on this, not on the raw control flag.
+        "control": identity.public_control(control.to_record()),
+        "inbox": inbox_public_view(
+            hitl / INBOX_NAME,
+            session_key=str(raw_current) if isinstance(raw_current, str) and raw_current else None,
+        ),
         "test_revealed": revealed,
-        "schedule": schedule,
+        "schedule": identity.public_schedule(heldout_revealed=revealed),
         "sessions": sessions,
-        "heldout_records": [_public_heldout_view(row, revealed) for row in heldout],
+        "heldout_records": [
+            identity.public_record(row, heldout_revealed=revealed) for row in heldout
+        ],
         "ledger": [
-            guarded_fold_view(row) if row.get("record_type") == "fold"
-            else _public_heldout_view(row, revealed) if row.get("record_type") == "heldout"
-            else _public_meta_view(
-                row,
-                current_prior=current_prior if row is latest_meta else None,
-            ) if row.get("record_type") == "meta_learning"
-            else dict(row)
+            identity.public_record(
+                guarded_fold_view(row) if row.get("record_type") == "fold"
+                else _public_meta_view(
+                    row,
+                    current_prior=current_prior if row is latest_meta else None,
+                ) if row.get("record_type") == "meta_learning"
+                else row,
+                heldout_revealed=revealed,
+            )
             for row in records
         ],
     }
 
 
-def fold_detail(root: Path, experiment_id: str, epoch_id: str, fold_id: str) -> dict[str, object]:
+def resolve_fold_record(
+    root: Path, experiment_id: str, epoch_id: str, fold_ref: str
+) -> tuple[Path, PublicIdentity, list[dict[str, object]], dict[str, object]]:
+    """Resolve one public fold reference to its trusted host ledger record."""
+
     directory = resolve_experiment_dir(root, experiment_id)
+    identity = PublicIdentity(directory)
+    raw_fold_id = identity.raw_fold_id(epoch_id, fold_ref)
     records = read_ledger_records(directory)
-    record = latest_fold_records(records).get((epoch_id, fold_id))
+    record = latest_fold_records(records).get((epoch_id, raw_fold_id))
     if record is None:
-        raise KeyError(f"no fold record for {epoch_id}/{fold_id}")
+        raise KeyError(f"no fold record for {epoch_id}/{fold_ref}")
+    return directory, identity, records, record
+
+
+def fold_strategy_dir(
+    root: Path, experiment_id: str, epoch_id: str, fold_ref: str
+) -> Path:
+    directory, _identity, _records, record = resolve_fold_record(
+        root, experiment_id, epoch_id, fold_ref
+    )
+    value = record.get("frozen_strategy_artifact_path")
+    if not isinstance(value, str) or not value:
+        raise KeyError("fold has no frozen strategy artifact on disk")
+    raw = Path(value)
+    strategy_dir = raw.resolve() if raw.is_absolute() else (directory / raw).resolve()
+    if not strategy_dir.is_relative_to(directory.resolve()) or not strategy_dir.is_dir():
+        raise KeyError("fold has no frozen strategy artifact on disk")
+    return strategy_dir
+
+
+def fold_detail(root: Path, experiment_id: str, epoch_id: str, fold_ref: str) -> dict[str, object]:
+    directory, identity, records, record = resolve_fold_record(
+        root, experiment_id, epoch_id, fold_ref
+    )
     hitl_dir = directory / HITL_DIR_NAME
-    strategy_dir = record.get("frozen_strategy_artifact_path")
-    md_path, meta_path = analysis_paths(hitl_dir / ANALYSIS_DIR_NAME, epoch_id, fold_id)
+    md_path, meta_path = analysis_paths(hitl_dir / ANALYSIS_DIR_NAME, epoch_id, fold_ref)
+    revealed = test_results_revealed(directory, records)
+    analysis_meta = read_json(meta_path) if meta_path.exists() else None
     return {
         "experiment_id": experiment_id,
         "epoch_id": epoch_id,
-        "fold_id": fold_id,
-        "record": guarded_fold_view(record),
-        # Guarded test view: hidden entirely until the researcher reveals (and
-        # thereby seals) the experiment; then shown collapsed with a warning.
-        "test_audit": (
-            {field: record.get(field) for field in TEST_FIELDS}
-            if test_results_revealed(directory, records) else {"hidden": True}
+        "fold_ref": fold_ref,
+        "record": identity.public_record(
+            guarded_fold_view(record), heldout_revealed=revealed
         ),
-        # Frozen artifacts are downloaded as ONE zip package (strategy.zip);
-        # the console deliberately offers no per-file listing/download.
-        "strategy_dir": str(strategy_dir) if strategy_dir else None,
+        "test_audit": (
+            identity.public_record(
+                {"record_type": "fold", **{field: record.get(field) for field in TEST_FIELDS}},
+                heldout_revealed=True,
+            )
+            if revealed else {"hidden": True}
+        ),
+        "strategy_available": bool(record.get("frozen_strategy_artifact_path")),
         "analysis": {
             "available": md_path.exists(),
-            "meta": read_json(meta_path) if meta_path.exists() else None,
+            "meta": identity.public_analysis_meta(analysis_meta)
+            if isinstance(analysis_meta, Mapping)
+            else None,
         },
-        "run_id": record.get("run_id"),
+        "run_ref": identity.run_ref(record.get("run_id")) if record.get("run_id") else None,
+        "trace_ref": identity.trace_ref(record.get("run_id")) if record.get("run_id") else None,
     }
 
 
-def analysis_available(hitl_dir: Path, epoch_id: str, fold_id: str) -> bool:
-    md_path, _meta = analysis_paths(hitl_dir / ANALYSIS_DIR_NAME, epoch_id, fold_id)
+def analysis_available(hitl_dir: Path, epoch_id: str, fold_ref: str) -> bool:
+    md_path, _meta = analysis_paths(hitl_dir / ANALYSIS_DIR_NAME, epoch_id, fold_ref)
     return md_path.exists()
 
 
-def fold_run_id(root: Path, experiment_id: str, epoch_id: str, fold_id: str) -> str:
-    """Resolve a Fold run from the append-only ledger."""
+def fold_run_id(root: Path, experiment_id: str, epoch_id: str, fold_ref: str) -> str:
+    """Resolve a public Fold reference to the raw host run identity."""
 
-    directory = resolve_experiment_dir(root, experiment_id)
-    records = read_ledger_records(directory)
-    record = latest_fold_records(records).get((epoch_id, fold_id))
-    run_id = str(record.get("run_id") or "") if isinstance(record, Mapping) else ""
+    _directory, _identity, _records, record = resolve_fold_record(
+        root, experiment_id, epoch_id, fold_ref
+    )
+    run_id = str(record.get("run_id") or "")
     if not _ID.fullmatch(run_id):
-        raise KeyError(f"no fold record for {epoch_id}/{fold_id}")
+        raise KeyError(f"no fold record for {epoch_id}/{fold_ref}")
     return run_id
 
 
@@ -654,16 +677,19 @@ def style_payload(
     root: Path,
     experiment_id: str,
     *,
-    run_id: str,
+    run_ref: str,
     prefix: str,
 ) -> dict[str, object]:
-    """Read the canonical style sidecar selected by the trusted ledger."""
+    """Read the canonical style sidecar selected by one public run reference."""
 
-    if not _ID.fullmatch(run_id):
-        raise ValueError("invalid run_id")
     if prefix not in {"valid", "test", "heldout"}:
         raise ValueError("prefix must be valid|test|heldout")
     experiment_dir = resolve_experiment_dir(root, experiment_id)
+    identity = PublicIdentity(experiment_dir)
+    try:
+        run_id = identity.raw_run_id(run_ref)
+    except (KeyError, ValueError) as exc:
+        raise ValueError("invalid run reference") from exc
     # Reveal gate: pre-reveal, sealed prefixes answer exactly like a missing
     # rollup so test/held-out existence never leaks.
     if prefix.startswith(sealed_result_prefixes(experiment_dir)):
@@ -787,11 +813,9 @@ def fold_orders(
     stats always describe the whole stream — and ``None`` returns every row
     (the CSV export).
     """
-    experiment_dir = resolve_experiment_dir(root, experiment_id)
-    records = read_ledger_records(experiment_dir)
-    record = latest_fold_records(records).get((epoch_id, fold_id))
-    if record is None:
-        raise KeyError(f"no fold record for {epoch_id}/{fold_id}")
+    experiment_dir, _identity, records, record = resolve_fold_record(
+        root, experiment_id, epoch_id, fold_id
+    )
     files = _fold_result_files(
         experiment_dir, record, revealed=test_results_revealed(experiment_dir, records)
     )

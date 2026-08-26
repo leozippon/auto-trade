@@ -1223,6 +1223,10 @@ def _build_post_fold_hook(
             model_dir=Path(str(model_dir)) if model_dir else None,
             out_dir=out_dir,
             max_tokens=effective_analysis_max_tokens,
+            output_identity=(
+                str(record.get("epoch_id") or "epoch_unknown"),
+                ref_store.get_or_create("fold", str(record.get("fold_id") or "fold_unknown")),
+            ),
         )
 
     return post_fold_hook

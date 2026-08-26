@@ -46,6 +46,7 @@ from .manager import (
 )
 from .params_schema import parameter_schema
 from .prompt_preview import build_prompt_preview
+from .public_identity import PublicIdentity
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
@@ -116,6 +117,80 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    def _public_identity(experiment_id: str) -> tuple[Path, PublicIdentity]:
+        directory = _experiment_dir(experiment_id)
+        try:
+            return directory, PublicIdentity(directory)
+        except (OSError, ValueError) as exc:
+            raise HTTPException(
+                status_code=409, detail="experiment identity state is unreadable"
+            ) from exc
+
+    def _trace_target(
+        experiment_id: str, public_ref: str | None
+    ) -> tuple[Path, str, str, PublicIdentity]:
+        directory, identity = _public_identity(experiment_id)
+        if public_ref is None:
+            status = read_status(directory / "hitl/status.json")
+            raw_run_id = str(status.get("run_id") or "")
+            if not raw_run_id:
+                raise HTTPException(status_code=404, detail="no trace available for this run")
+        else:
+            try:
+                raw_run_id = identity.raw_run_id(public_ref)
+            except (KeyError, ValueError) as exc:
+                raise HTTPException(status_code=404, detail="unknown run or trace reference") from exc
+        path = traces.resolve_trace_path(directory, raw_run_id)
+        if path is None:
+            raise HTTPException(status_code=404, detail="no trace available for this run")
+        return path, raw_run_id, identity.trace_ref(raw_run_id), identity
+
+    def _public_trace_payload(
+        payload: dict[str, object], identity: PublicIdentity
+    ) -> dict[str, object]:
+        public = dict(payload)
+        events = public.get("events")
+        if isinstance(events, list):
+            public["events"] = [
+                identity.public_record(event, heldout_revealed=False)
+                for event in events
+                if isinstance(event, dict)
+            ]
+        blocks = public.get("blocks")
+        if isinstance(blocks, list):
+            public["blocks"] = [
+                identity.public_record(block, heldout_revealed=False)
+                for block in blocks
+                if isinstance(block, dict)
+            ]
+        return public
+
+    def _public_trace_download(path: Path, identity: PublicIdentity) -> Path:
+        """Materialize a public JSONL copy without exposing the host trace file."""
+
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", suffix=".jsonl", delete=False
+        ) as handle:
+            output = Path(handle.name)
+            try:
+                with path.open("r", encoding="utf-8") as source:
+                    for line in source:
+                        if not line.strip():
+                            continue
+                        event = json.loads(line)
+                        if not isinstance(event, dict):
+                            raise ValueError("trace event is not an object")
+                        public = identity.public_record(
+                            event, heldout_revealed=False
+                        )
+                        handle.write(
+                            json.dumps(public, ensure_ascii=False, default=str) + "\n"
+                        )
+            except Exception:
+                output.unlink(missing_ok=True)
+                raise
+        return output
+
     @app.get("/api/health")
     def health() -> dict[str, object]:
         unreadable = manager.unreadable_experiments()
@@ -126,7 +201,6 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         healthy = raw_generation["state"] in ("committed", "absent") and not unreadable
         return {
             "status": "ok" if healthy else "degraded",
-            "experiments_root": str(manager.experiments_root),
             "max_running_experiments": MAX_RUNNING_EXPERIMENTS,
             "running": manager.running_experiments(),
             "unreadable_experiments": unreadable,
@@ -187,20 +261,22 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
     @app.get("/api/experiments/{experiment_id}")
     def get_experiment(experiment_id: str) -> dict[str, object]:
         _experiment_dir(experiment_id)
-        return registry.experiment_detail(experiment_root, experiment_id)
+        try:
+            return registry.experiment_detail(experiment_root, experiment_id)
+        except (OSError, ValueError, KeyError) as exc:
+            raise HTTPException(
+                status_code=409, detail="experiment identity state is unreadable"
+            ) from exc
 
     @app.get("/api/experiments/{experiment_id}/status")
     def get_status(experiment_id: str) -> dict[str, object]:
-        directory = _experiment_dir(experiment_id)
+        directory, identity = _public_identity(experiment_id)
         state = registry.experiment_state(directory)
-        return {**state, "raw_status": state.get("status")}
-
-    def trace_path(experiment_id: str, run_id: str | None) -> Path:
-        directory = _experiment_dir(experiment_id)
-        path = traces.resolve_trace_path(directory, run_id)
-        if path is None:
-            raise HTTPException(status_code=404, detail="no trace available for this run")
-        return path
+        raw_status = state.get("status")
+        public = {key: value for key, value in state.items() if key != "status"}
+        if isinstance(raw_status, dict):
+            public["status"] = identity.public_status(raw_status)
+        return public
 
     @app.get("/api/experiments/{experiment_id}/trace")
     def get_trace(
@@ -209,19 +285,21 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         offset: int = Query(0, ge=0),
         tail_events: int | None = Query(None, ge=1, le=500),
     ) -> dict[str, object]:
-        path = trace_path(experiment_id, run_id)
-        return (
+        path, _raw_run_id, trace_ref, identity = _trace_target(experiment_id, run_id)
+        page = (
             traces.read_trace_tail(path, max_events=tail_events)
             if tail_events is not None
             else traces.read_trace_page(path, offset=offset)
         )
+        return {**_public_trace_payload(page, identity), "trace_ref": trace_ref}
 
     @app.get("/api/experiments/{experiment_id}/trace/stats")
     def get_trace_stats(
         experiment_id: str,
         run_id: str | None = Query(None),
     ) -> dict[str, object]:
-        return traces.trace_stats(trace_path(experiment_id, run_id))
+        path, _raw_run_id, trace_ref, _identity = _trace_target(experiment_id, run_id)
+        return {**traces.trace_stats(path), "trace_ref": trace_ref}
 
     @app.get("/api/experiments/{experiment_id}/trace/blocks")
     def get_trace_blocks(
@@ -231,12 +309,14 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         max_bytes: int | None = Query(None, ge=1, le=traces.MAX_BLOCK_READ_BYTES),
         tail_events: int | None = Query(None, ge=1, le=500),
     ) -> dict[str, object]:
-        return traces.read_trace_blocks(
-            trace_path(experiment_id, run_id),
+        path, _raw_run_id, trace_ref, identity = _trace_target(experiment_id, run_id)
+        blocks = traces.read_trace_blocks(
+            path,
             offset=offset,
             max_bytes=max_bytes,
             tail_events=tail_events,
         )
+        return {**_public_trace_payload(blocks, identity), "trace_ref": trace_ref}
 
     @app.get("/api/experiments/{experiment_id}/trace/stream")
     def get_trace_stream(
@@ -245,12 +325,20 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         run_id: str | None = Query(None),
         offset: int = Query(0, ge=0),
     ) -> StreamingResponse:
-        directory = _experiment_dir(experiment_id)
+        directory, _unused_identity = _public_identity(experiment_id)
+        _path, raw_run_id, _trace_ref, identity = _trace_target(experiment_id, run_id)
         resume = request.headers.get("last-event-id")
         if resume is not None and resume.isdigit():
             offset = max(offset, int(resume))
         return StreamingResponse(
-            traces.stream_trace(directory, run_id, offset=offset),
+            traces.stream_trace(
+                directory,
+                raw_run_id,
+                offset=offset,
+                project_event=lambda event: identity.public_record(
+                    event, heldout_revealed=False
+                ),
+            ),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
@@ -260,11 +348,16 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         experiment_id: str,
         run_id: str | None = Query(None),
     ) -> FileResponse:
-        path = trace_path(experiment_id, run_id)
+        path, _raw_run_id, trace_ref, identity = _trace_target(experiment_id, run_id)
+        try:
+            public_path = _public_trace_download(path, identity)
+        except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
+            raise HTTPException(status_code=409, detail="trace is unreadable") from exc
         return FileResponse(
-            path,
+            public_path,
             media_type="application/x-ndjson",
-            filename=f"{experiment_id}__{path.stem}__agent-trace.jsonl",
+            filename=f"{experiment_id}__{trace_ref}__agent-trace.jsonl",
+            background=BackgroundTask(public_path.unlink, missing_ok=True),
         )
 
     @app.delete("/api/experiments/{experiment_id}")
@@ -334,8 +427,12 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         try:
             detail = registry.fold_detail(experiment_root, experiment_id, epoch_id, fold_id)
         except (KeyError, ValueError) as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-        detail["analysis"]["pending"] = analysis_service.pending(experiment_id, epoch_id, fold_id)
+            raise HTTPException(status_code=404, detail="unknown fold reference") from exc
+        analysis = detail.get("analysis")
+        if isinstance(analysis, dict):
+            analysis["pending"] = analysis_service.pending(
+                experiment_id, epoch_id, fold_id
+            )
         return detail
 
     @app.get("/api/experiments/{experiment_id}/folds/{epoch_id}/{fold_id}/initial-prompt")
@@ -344,38 +441,54 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         epoch_id: str,
         fold_id: str,
     ) -> dict[str, object]:
-        directory = _experiment_dir(experiment_id)
+        directory, identity = _public_identity(experiment_id)
         try:
-            run_id = registry.fold_run_id(
+            raw_run_id = registry.fold_run_id(
                 experiment_root,
                 experiment_id,
                 epoch_id,
                 fold_id,
             )
-            path = traces.resolve_trace_path(directory, run_id)
+            path = traces.resolve_trace_path(directory, raw_run_id)
             if path is None:
                 raise KeyError("no agent trace recorded for this fold")
             prompt = traces.read_initial_prompt(path)
-        except KeyError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-        return {"experiment_id": experiment_id, "epoch_id": epoch_id, "fold_id": fold_id, **prompt}
+        except (KeyError, ValueError) as exc:
+            raise HTTPException(status_code=404, detail="unknown fold reference") from exc
+        public_prompt = identity.public_record(
+            prompt, heldout_revealed=False
+        )
+        public_prompt.pop("run_ref", None)
+        return {
+            "experiment_id": experiment_id,
+            "epoch_id": epoch_id,
+            "fold_ref": fold_id,
+            "run_ref": identity.run_ref(raw_run_id),
+            "trace_ref": identity.trace_ref(raw_run_id),
+            **public_prompt,
+        }
 
     @app.get("/api/experiments/{experiment_id}/folds/{epoch_id}/{fold_id}/strategy.zip")
     def get_fold_strategy(experiment_id: str, epoch_id: str, fold_id: str) -> FileResponse:
-        directory = _experiment_dir(experiment_id)
-        detail = get_fold(experiment_id, epoch_id, fold_id)
-        strategy_value = detail.get("strategy_dir")
-        if not isinstance(strategy_value, str) or not strategy_value:
-            raise HTTPException(status_code=404, detail="fold has no frozen strategy artifact on disk")
-        strategy_dir = Path(strategy_value).resolve()
-        if not strategy_dir.is_relative_to(directory) or not strategy_dir.is_dir():
-            raise HTTPException(status_code=404, detail="fold has no frozen strategy artifact on disk")
-        return _strategy_zip_response(strategy_dir, f"{experiment_id}__{epoch_id}__{fold_id}.zip")
+        try:
+            strategy_dir = registry.fold_strategy_dir(
+                experiment_root, experiment_id, epoch_id, fold_id
+            )
+        except (KeyError, ValueError) as exc:
+            raise HTTPException(status_code=404, detail="unknown fold reference") from exc
+        return _strategy_zip_response(
+            strategy_dir, f"{experiment_id}__{epoch_id}__{fold_id}.zip"
+        )
 
     # ---- step tree ---------------------------------------------------------------
     @app.get("/api/experiments/{experiment_id}/steps")
     def get_step_tree(experiment_id: str) -> dict[str, object]:
-        return steps.step_tree_view(_experiment_dir(experiment_id))
+        try:
+            return steps.step_tree_view(_experiment_dir(experiment_id))
+        except (OSError, ValueError) as exc:
+            raise HTTPException(
+                status_code=409, detail="experiment identity state is unreadable"
+            ) from exc
 
     @app.get("/api/experiments/{experiment_id}/steps/{node_id}/source.zip")
     def get_step_node_zip(experiment_id: str, node_id: str) -> FileResponse:
@@ -408,10 +521,14 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
     @app.get("/api/experiments/{experiment_id}/current-step")
     def get_current_step(experiment_id: str) -> dict[str, object]:
         try:
-            _directory, _status, node, _node_dir = current_step(experiment_id)
+            directory, _status, node, _node_dir = current_step(experiment_id)
+            identity = PublicIdentity(directory)
         except (OSError, ValueError) as exc:
-            return {"available": False, "reason": str(exc)}
-        return {"available": True, "node": node}
+            return {"available": False, "reason": "current Step is unavailable"}
+        return {
+            "available": True,
+            "node": steps.public_step_node(node, identity=identity),
+        }
 
     @app.get("/api/experiments/{experiment_id}/current-step/source.zip")
     def get_current_step_source(experiment_id: str) -> FileResponse:
@@ -427,16 +544,21 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
     @app.get("/api/experiments/{experiment_id}/current-step/analysis")
     def get_current_step_analysis(experiment_id: str) -> dict[str, object]:
         try:
-            directory, _status, node, _node_dir = current_step(experiment_id)
+            directory, status, node, _node_dir = current_step(experiment_id)
         except (OSError, ValueError) as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         node_id = str(node["node_id"])
         md_path, meta_path = analysis_paths(directory / HITL_DIR_NAME / ANALYSIS_DIR_NAME, "step", node_id)
+        meta = read_json(meta_path) if meta_path.exists() else None
+        _unused_directory, identity = _public_identity(experiment_id)
+        identity.public_status(status)
         return {
             "available": md_path.exists(),
             "pending": analysis_service.pending(experiment_id, "step", node_id),
-            "content": md_path.read_text(encoding="utf-8") if md_path.exists() else None,
-            "meta": read_json(meta_path) if meta_path.exists() else None,
+            "content": identity.public_text(md_path.read_text(encoding="utf-8"))
+            if md_path.exists()
+            else None,
+            "meta": identity.public_analysis_meta(meta) if isinstance(meta, dict) else None,
         }
 
     @app.post("/api/experiments/{experiment_id}/current-step/analysis")
@@ -467,8 +589,8 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         _experiment_dir(experiment_id)
         try:
             return equity.fold_equity_payload(experiment_root, experiment_id, epoch_id, fold_id)
-        except KeyError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except (KeyError, ValueError) as exc:
+            raise HTTPException(status_code=404, detail="unknown fold reference") from exc
 
     @app.get("/api/experiments/{experiment_id}/style")
     def get_style(experiment_id: str, run_id: str = Query(...), prefix: str = Query(...)) -> dict[str, object]:
@@ -477,7 +599,7 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
             return registry.style_payload(
                 experiment_root,
                 experiment_id,
-                run_id=run_id,
+                run_ref=run_id,
                 prefix=prefix,
             )
         except ValueError as exc:
@@ -495,8 +617,8 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         _experiment_dir(experiment_id)
         try:
             return registry.fold_orders(experiment_root, experiment_id, epoch_id, fold_id, result=result)
-        except KeyError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except (KeyError, ValueError) as exc:
+            raise HTTPException(status_code=404, detail="unknown fold reference") from exc
 
     @app.get("/api/experiments/{experiment_id}/folds/{epoch_id}/{fold_id}/orders.csv")
     def get_fold_orders_csv(
@@ -514,8 +636,8 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
                 fold_id,
                 result=result,
             )
-        except KeyError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except (KeyError, ValueError) as exc:
+            raise HTTPException(status_code=404, detail="unknown fold reference") from exc
         return PlainTextResponse(
             content,
             media_type="text/csv; charset=utf-8",
@@ -525,13 +647,28 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
     # ---- analysis -----------------------------------------------------------------
     @app.get("/api/experiments/{experiment_id}/analysis/{epoch_id}/{fold_id}")
     def get_analysis(experiment_id: str, epoch_id: str, fold_id: str) -> dict[str, object]:
-        directory = _experiment_dir(experiment_id)
-        md_path, meta_path = analysis_paths(directory / HITL_DIR_NAME / ANALYSIS_DIR_NAME, epoch_id, fold_id)
+        # Resolve first so an arbitrary UUID-shaped token cannot probe sidecar names.
+        directory, identity = _public_identity(experiment_id)
+        try:
+            raw_fold_id = identity.raw_fold_id(epoch_id, fold_id)
+        except (KeyError, ValueError) as exc:
+            raise HTTPException(status_code=404, detail="unknown fold reference") from exc
+        record = latest_fold_records(registry.read_ledger_records(directory)).get(
+            (epoch_id, raw_fold_id)
+        )
+        if record is not None:
+            identity.public_record(record, heldout_revealed=False)
+        md_path, meta_path = analysis_paths(
+            directory / HITL_DIR_NAME / ANALYSIS_DIR_NAME, epoch_id, fold_id
+        )
+        meta = read_json(meta_path) if meta_path.exists() else None
         return {
             "available": md_path.exists(),
             "pending": analysis_service.pending(experiment_id, epoch_id, fold_id),
-            "content": md_path.read_text(encoding="utf-8") if md_path.exists() else None,
-            "meta": read_json(meta_path) if meta_path.exists() else None,
+            "content": identity.public_text(md_path.read_text(encoding="utf-8"))
+            if md_path.exists()
+            else None,
+            "meta": identity.public_analysis_meta(meta) if isinstance(meta, dict) else None,
         }
 
     @app.post("/api/experiments/{experiment_id}/analysis/{epoch_id}/{fold_id}")
@@ -539,19 +676,27 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         _experiment_dir(experiment_id)
         try:
             analysis_service.regenerate(manager.experiments_root, experiment_id, epoch_id, fold_id)
-        except (ManagerError, KeyError) as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except (ManagerError, KeyError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail="analysis request was rejected") from exc
         return {"status": "started"}
 
     @app.post("/api/experiments/{experiment_id}/prompt-preview")
     def post_prompt_preview(experiment_id: str, payload: dict = Body(...)) -> dict[str, object]:
-        directory = _experiment_dir(experiment_id)
+        directory, identity = _public_identity(experiment_id)
         try:
-            return build_prompt_preview(
+            raw_session_key = identity.raw_session_key(
+                str(payload.get("session_key") or "")
+            )
+            preview = build_prompt_preview(
                 directory,
-                str(payload.get("session_key") or ""),
+                raw_session_key,
                 str(payload.get("directive") or ""),
             )
+            return {
+                **preview,
+                "prompt": identity.public_text(str(preview.get("prompt") or "")),
+                "session_key": identity.public_session_key(raw_session_key),
+            }
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc.args[0] if exc.args else exc)) from exc
         except ValueError as exc:

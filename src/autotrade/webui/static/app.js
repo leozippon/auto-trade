@@ -2277,7 +2277,7 @@ async function renderDetailPage(experimentId, selectedKey) {
         `/api/experiments/${encodeURIComponent(experimentId)}/status`,
       );
       const freshState = fresh.state;
-      const raw = fresh.raw_status || {};
+      const raw = fresh.status || {};
       const badge = document.querySelector(".page-head .badge");
       if (badge && !badge.className.includes(`state-${freshState}`))
         route(true); // fetch fresh detail on state change
@@ -2286,7 +2286,7 @@ async function renderDetailPage(experimentId, selectedKey) {
         raw.session_key !== (status.session_key || null)
       )
         route(true);
-      else if (String(raw.run_id || "") !== String(status.run_id || ""))
+      else if (String(raw.run_ref || "") !== String(status.run_ref || ""))
         route(true);
       else if (
         String(raw.question_key || "") !== String(status.question_key || "")
@@ -2694,7 +2694,7 @@ function sessionListPanel(detail, selectedKey) {
         "span",
         { class: "label" },
         session.kind === "fold"
-          ? String(session.fold_id || "").replace("fold_", "Fold ")
+          ? String(session.fold_ref || "Fold")
           : session.kind === "meta_learning" &&
               Number(session.trigger_after_folds || 0) > 0
             ? `元学习（${session.trigger_after_folds} Fold 后）`
@@ -2773,7 +2773,7 @@ function sessionDetailPanel(detail, selectedKey) {
       analysisPanel(
         detail.experiment_id,
         session.epoch_id,
-        session.fold_id || (session.record || {}).fold_id,
+        session.fold_ref || (session.record || {}).fold_ref,
       ),
     );
     const recordedFolds = (detail.sessions || []).filter(
@@ -2797,7 +2797,7 @@ function sessionDetailPanel(detail, selectedKey) {
     panel.append(metaResultPanel(detail, session));
   if (session.kind === "heldout" && done)
     panel.append(heldoutPanel(detail, session));
-  if (done && session.record && session.record.run_id) {
+  if (done && session.record && session.record.run_ref) {
     const statsHost = el("div", {});
     panel.append(
       el(
@@ -2818,13 +2818,13 @@ function sessionDetailPanel(detail, selectedKey) {
             )
           : null,
         statsHost,
-        traceReplayNode(detail.experiment_id, session.record.run_id),
+        traceReplayNode(detail.experiment_id, session.record.run_ref),
       ),
     );
     (async () => {
       try {
         const stats = await api(
-          `/api/experiments/${encodeURIComponent(detail.experiment_id)}/trace/stats?run_id=${encodeURIComponent(session.record.run_id)}`,
+          `/api/experiments/${encodeURIComponent(detail.experiment_id)}/trace/stats?run_id=${encodeURIComponent(session.record.run_ref)}`,
         );
         statsHost.append(statsChipsRow(stats));
       } catch {
@@ -2882,7 +2882,7 @@ function environmentStagePanel(detail) {
       const fresh = await api(
         `/api/experiments/${encodeURIComponent(detail.experiment_id)}/status`,
       );
-      status = fresh.raw_status || status;
+      status = fresh.status || status;
       if (value.isConnected) update();
     } catch {
       /* preserve last confirmed phase */
@@ -3420,7 +3420,7 @@ async function openInitialPrompt(detail, session) {
   try {
     data = await api(
       `/api/experiments/${encodeURIComponent(detail.experiment_id)}` +
-        `/folds/${encodeURIComponent(session.epoch_id)}/${encodeURIComponent(session.fold_id)}/initial-prompt`,
+        `/folds/${encodeURIComponent(session.epoch_id)}/${encodeURIComponent(session.fold_ref)}/initial-prompt`,
     );
   } catch (error) {
     toast(`加载失败：${error.message}`, true);
@@ -3447,7 +3447,7 @@ async function openInitialPrompt(detail, session) {
       el(
         "div",
         { class: "hint" },
-        `来自本 Fold 运行 trace 的会话起始事件 ｜ run ${data.run_id || "?"}`,
+        `来自本 Fold 运行 trace 的会话起始事件 ｜ run ${data.run_ref || "?"}`,
       ),
       ...blocks,
     ),
@@ -3957,7 +3957,7 @@ function liveTracePanel(detail, session) {
   );
 
   const experimentId = encodeURIComponent(detail.experiment_id);
-  const runId = String((detail.status || {}).run_id || "");
+  const runId = String((detail.status || {}).run_ref || "");
   const query = runId ? `?run_id=${encodeURIComponent(runId)}` : "";
   // Claim before the first await so the initial refreshBlocks and
   // pollStats→refreshBlocks cannot both construct an EventSource.
@@ -4034,7 +4034,7 @@ function liveTracePanel(detail, session) {
   const pollStats = async () => {
     try {
       const fresh = await api(`/api/experiments/${experimentId}/status`);
-      currentStatus = fresh.raw_status || currentStatus;
+      currentStatus = fresh.status || currentStatus;
       update();
     } catch {
       /* preserve the last truthful state */
@@ -4616,7 +4616,6 @@ function stepTreeSection(detail, payload) {
   const haystack = (node) =>
     [
       node.node_id,
-      node.fold_id,
       node.fold_ref,
       node.result_name,
       node.epoch_id,
@@ -4852,7 +4851,7 @@ function stepTreeRow(
     el(
       "span",
       { class: "step-label" },
-      `${node.fold_id || node.fold_ref || "?"} · ${node.result_name || node.node_id}`,
+      `${node.fold_ref || "?"} · ${node.result_name || node.node_id}`,
     ),
     collapsed ? el("span", { class: "step-chip" }, `+${childCount}`) : null,
     Number.isFinite(metrics.total_return)
@@ -4898,7 +4897,7 @@ function showStepTip(node, row) {
     el("div", { class: "step-tip-title" }, node.node_id),
     line(
       "Fold",
-      `${node.epoch_id || "—"} / ${node.fold_id || node.fold_ref || "—"}`,
+      `${node.epoch_id || "—"} / ${node.fold_ref || "—"}`,
     ),
     line("验证收益", fmtPct(m.total_return)),
     line("多头收益", fmtPct(m.long_return)),
@@ -4943,7 +4942,7 @@ function openStepNodeModal(detail, payload, node) {
       kvRow("节点", node.node_id),
       kvRow(
         "Fold",
-        `${node.epoch_id || "—"} / ${node.fold_id || node.fold_ref || "—"}`,
+        `${node.epoch_id || "—"} / ${node.fold_ref || "—"}`,
       ),
       kvRow(
         "验证收益",
@@ -4963,7 +4962,7 @@ function openStepNodeModal(detail, payload, node) {
         : null,
       node.status === "failed" ? kvRow("失败原因", node.error || "—") : null,
       kvRow("附件", (node.attachments || []).join("、") || "—"),
-      kvRow("revision", el("code", {}, String(node.revision_id || "—"))),
+      kvRow("revision", el("code", {}, String(node.strategy_ref || "—"))),
     ),
     node.has_snapshot
       ? el(
@@ -5013,7 +5012,7 @@ function openStepParentOverrideModal(detail, payload, node) {
   );
   const own = sessions.find(
     (session) =>
-      session.epoch_id === node.epoch_id && session.fold_id === node.fold_id,
+      session.epoch_id === node.epoch_id && session.fold_ref === node.fold_ref,
   );
   if (own) select.value = own.key;
   const send = (action, sessionKey, directive) =>
@@ -5113,7 +5112,7 @@ function foldResultPanel(detail, session) {
       el(
         "h4",
         { style: "margin:0" },
-        `Fold 结果 — ${session.fold_id || record.fold_id}`,
+        `Fold 结果 — ${session.fold_ref || record.fold_ref}`,
       ),
       el(
         "span",
@@ -5174,7 +5173,7 @@ function foldResultPanel(detail, session) {
       record.run_wall_seconds
         ? kvRow("总耗时", fmtDuration(record.run_wall_seconds))
         : null,
-      kvRow("冻结产物", record.frozen_strategy_artifact_id || "—"),
+      kvRow("冻结产物", record.frozen_strategy_artifact_ref || "—"),
       (record.accept_reasons || []).length
         ? kvRow("未接受原因", (record.accept_reasons || []).join("；"))
         : null,
@@ -5190,7 +5189,7 @@ function foldResultPanel(detail, session) {
         : null,
     ),
   );
-  if (record.run_id) {
+  if (record.run_ref) {
     panel.append(
       el(
         "div",
@@ -5203,21 +5202,21 @@ function foldResultPanel(detail, session) {
         foldEquityHost(
           detail.experiment_id,
           session.epoch_id,
-          session.fold_id || record.fold_id,
-          record.run_id,
+          session.fold_ref || record.fold_ref,
+          record.run_ref,
           "valid",
           { width: 860, height: 210, ddH: 76 },
         ),
       ),
     );
-    panel.append(styleCard(detail.experiment_id, record.run_id, "valid"));
+    panel.append(styleCard(detail.experiment_id, record.run_ref, "valid"));
   }
   // Guarded test audit block (collapsed, clearly labelled).
   panel.append(
     loadFoldExtras(
       detail.experiment_id,
       session.epoch_id,
-      session.fold_id || record.fold_id,
+      session.fold_ref || record.fold_ref,
     ),
   );
   return panel;
@@ -5484,13 +5483,13 @@ function loadFoldExtras(experimentId, epochId, foldId) {
               experimentId,
               epochId,
               foldId,
-              (fold.record || {}).run_id,
+              (fold.record || {}).run_ref,
               "test",
               { width: 760, height: 190, ddH: 64 },
             ),
           ),
-          (fold.record || {}).run_id
-            ? styleCard(experimentId, fold.record.run_id, "test")
+          (fold.record || {}).run_ref
+            ? styleCard(experimentId, fold.record.run_ref, "test")
             : null,
           el(
             "div",
@@ -5848,7 +5847,7 @@ function heldoutPanel(detail, session) {
       ),
     );
     const lastRun =
-      records[records.length - 1] && records[records.length - 1].run_id;
+      records[records.length - 1] && records[records.length - 1].run_ref;
     if (lastRun)
       panel.append(
         styleCard(detailView.experimentId, String(lastRun), "heldout"),
@@ -5881,7 +5880,7 @@ function heldoutPanel(detail, session) {
           el(
             "td",
             {},
-            String(record.fold_id || "").replace("heldout_", "") || "—",
+            String(record.fold_ref || "—"),
           ),
           el(
             "td",

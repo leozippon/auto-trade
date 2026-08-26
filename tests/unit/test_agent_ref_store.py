@@ -210,8 +210,11 @@ def test_legacy_web_audit_remains_readable_but_mutations_and_preview_fail(
     )
 
     audit = step_tree_view(experiment)
+    assert audit["identity_status"] == "legacy_read_only"
+    assert audit["fold_sessions"] == []
     assert audit["nodes"][0]["fold_ref"] == "fold_ref_deadbeef00"
-    assert audit["nodes"][0]["fold_id"] is None
+    assert "fold_id" not in audit["nodes"][0]
+    assert "fold_2024Q1" not in str(audit)
     with pytest.raises(LegacyExperimentError, match=LEGACY_EXPERIMENT_MESSAGE):
         build_prompt_preview(experiment, "epoch_001/fold_2024Q1", "")
     with pytest.raises(ManagerError, match=LEGACY_EXPERIMENT_MESSAGE):

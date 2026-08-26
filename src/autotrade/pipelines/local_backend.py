@@ -464,6 +464,7 @@ class FoldBacktestTool(SessionTimeBudgetAware):
         revision_id = ""
         node_id = None
         evaluation = None
+        check: ToolResult | None = None
         try:
             with self.formal_guard():
                 check = self.modification_check.invoke({})
@@ -542,8 +543,10 @@ class FoldBacktestTool(SessionTimeBudgetAware):
                 )
                 if isinstance(exc, (ToolError, TimeoutError)):
                     raise
-                raise ToolError(f"daily Validation failed: {exc}") from exc
-        assert node_id is not None and evaluation is not None
+                raise ToolError(
+                    f"daily Validation failed: {type(exc).__name__}"
+                ) from exc
+        assert node_id is not None and evaluation is not None and check is not None
         step = StepResult(node_id, revision_id, evaluation)
         self.steps.append(step)
         self._append_manifest_summary(
@@ -569,11 +572,13 @@ class FoldBacktestTool(SessionTimeBudgetAware):
         directive = ""
         if self.request.step_gate_hook is not None:
             directive = self.request.step_gate_hook(len(self.steps), summary)
+        result_path = Path(evaluation.result_ref)
+        public_result_ref = f"results/{result_name}/{result_path.name}"
         return ToolResult(
             True,
             value={
                 **summary,
-                "result_ref": evaluation.result_ref,
+                "result_ref": public_result_ref,
                 "modification_check": dict(check.value),
                 "step_directive": str(directive),
                 "backtests_used": self.backtests,

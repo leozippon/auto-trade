@@ -566,7 +566,12 @@ def test_llm_worker_runs_real_meta_fold_validation_and_heldout(
     assert heldout_style["schema_version"] == 1 and heldout_style["mode"] == "heldout"
     api_style = TestClient(create_app(repo)).get(
         "/api/experiments/smoke/style",
-        params={"run_id": fold["run_id"], "prefix": "valid"},
+        params={
+            "run_id": AgentRefStore(experiment).get_or_create(
+                "run", str(fold["run_id"])
+            ),
+            "prefix": "valid",
+        },
     )
     assert api_style.status_code == 200
     assert api_style.json() == style

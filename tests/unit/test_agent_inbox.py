@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.runtime import write_json_atomic
 from autotrade.pipelines.agent_inbox import (
     ALREADY_CONSUMED,
@@ -36,6 +37,7 @@ from autotrade.pipelines.hitl_state import (
     read_control,
     write_control,
 )
+from autotrade.webui.public_identity import PublicIdentity
 from autotrade.webui.server import create_app
 
 SESSION_A = "epoch_001/fold_2022Q2"
@@ -72,7 +74,12 @@ def _write_inbox_experiment(root: Path, experiment_id: str = "exp_in") -> Path:
             ],
         },
     )
+    AgentRefStore(directory)
     return directory
+
+
+def _public_session(directory: Path, raw_session: str) -> str:
+    return PublicIdentity(directory).public_session_key(raw_session)
 
 
 def _mark_live(
@@ -250,6 +257,7 @@ def test_public_view_omits_bodies(tmp_path: Path) -> None:
 
 def test_old_control_schema_is_unchanged_by_inject(tmp_path: Path) -> None:
     directory = _write_inbox_experiment(tmp_path)
+    public_session = _public_session(directory, SESSION_A)
     control_path = directory / "hitl/control.json"
     control_path.write_text(
         json.dumps(
@@ -273,7 +281,7 @@ def test_old_control_schema_is_unchanged_by_inject(tmp_path: Path) -> None:
         "/api/experiments/exp_in/control",
         json={
             "action": "inject_message",
-            "session_key": SESSION_A,
+            "session_key": public_session,
             "text": "继续验证父策略",
         },
     )
@@ -286,6 +294,7 @@ def test_api_queues_without_claiming_interrupt_and_hides_bodies(
     tmp_path: Path,
 ) -> None:
     directory = _write_inbox_experiment(tmp_path)
+    public_session = _public_session(directory, SESSION_A)
     _mark_live(directory, session_key=SESSION_A)
     client = TestClient(create_app(tmp_path))
     secret = "unique-inbox-secret-body"
@@ -293,7 +302,7 @@ def test_api_queues_without_claiming_interrupt_and_hides_bodies(
         "/api/experiments/exp_in/control",
         json={
             "action": "inject_message",
-            "session_key": SESSION_A,
+            "session_key": public_session,
             "text": secret,
             "interrupt": True,
         },
@@ -302,7 +311,7 @@ def test_api_queues_without_claiming_interrupt_and_hides_bodies(
     body = response.json()
     assert body["status"] == "queued"
     assert body["interrupt"] is True
-    assert body["session_key"] == SESSION_A
+    assert body["session_key"] == public_session
     assert "text" not in body
     assert secret not in response.text
     assert "interrupted" not in response.text
@@ -324,12 +333,14 @@ def test_api_refuses_empty_text_bad_id_dead_worker_and_stale_session(
     tmp_path: Path,
 ) -> None:
     directory = _write_inbox_experiment(tmp_path)
+    public_a = _public_session(directory, SESSION_A)
+    public_b = _public_session(directory, SESSION_B)
     client = TestClient(create_app(tmp_path))
     dead = client.post(
         "/api/experiments/exp_in/control",
         json={
             "action": "inject_message",
-            "session_key": SESSION_A,
+            "session_key": public_a,
             "text": "hello",
         },
     )
@@ -339,14 +350,14 @@ def test_api_refuses_empty_text_bad_id_dead_worker_and_stale_session(
     _mark_live(directory, session_key=SESSION_A)
     empty = client.post(
         "/api/experiments/exp_in/control",
-        json={"action": "inject_message", "session_key": SESSION_A, "text": ""},
+        json={"action": "inject_message", "session_key": public_a, "text": ""},
     )
     assert empty.status_code == 400
     oversized = client.post(
         "/api/experiments/exp_in/control",
         json={
             "action": "inject_message",
-            "session_key": SESSION_A,
+            "session_key": public_a,
             "text": "x" * (INBOX_MAX_TEXT_CHARS + 1),
         },
     )
@@ -355,7 +366,7 @@ def test_api_refuses_empty_text_bad_id_dead_worker_and_stale_session(
         "/api/experiments/exp_in/control",
         json={
             "action": "inject_message",
-            "session_key": SESSION_A,
+            "session_key": public_a,
             "text": "在 2022Q1 减仓",
         },
     )
@@ -365,7 +376,7 @@ def test_api_refuses_empty_text_bad_id_dead_worker_and_stale_session(
         "/api/experiments/exp_in/control",
         json={
             "action": "inject_message",
-            "session_key": SESSION_B,
+            "session_key": public_b,
             "text": "hello",
         },
     )
@@ -377,7 +388,7 @@ def test_api_refuses_empty_text_bad_id_dead_worker_and_stale_session(
         "/api/experiments/exp_in/control",
         json={
             "action": "inject_message",
-            "session_key": SESSION_A,
+            "session_key": public_a,
             "text": "hello",
         },
     )
@@ -389,7 +400,7 @@ def test_api_refuses_empty_text_bad_id_dead_worker_and_stale_session(
         "/api/experiments/exp_in/control",
         json={
             "action": "inject_message",
-            "session_key": SESSION_A,
+            "session_key": public_a,
             "text": "hello",
         },
     )
@@ -399,7 +410,7 @@ def test_api_refuses_empty_text_bad_id_dead_worker_and_stale_session(
         "/api/experiments/inv@lid/control",
         json={
             "action": "inject_message",
-            "session_key": SESSION_A,
+            "session_key": public_a,
             "text": "hello",
         },
     )
@@ -408,7 +419,7 @@ def test_api_refuses_empty_text_bad_id_dead_worker_and_stale_session(
         "/api/experiments/missing_exp/control",
         json={
             "action": "inject_message",
-            "session_key": SESSION_A,
+            "session_key": public_a,
             "text": "hello",
         },
     )
@@ -588,6 +599,7 @@ def test_api_refuses_inject_after_expire_while_status_still_live(
     tmp_path: Path,
 ) -> None:
     directory = _write_inbox_experiment(tmp_path)
+    public_session = _public_session(directory, SESSION_A)
     _mark_live(directory, session_key=SESSION_A)
     expire_session_inbox(inbox_path(directory), SESSION_A, expired_by="run_done")
     client = TestClient(create_app(tmp_path))
@@ -595,7 +607,7 @@ def test_api_refuses_inject_after_expire_while_status_still_live(
         "/api/experiments/exp_in/control",
         json={
             "action": "inject_message",
-            "session_key": SESSION_A,
+            "session_key": public_session,
             "text": "迟到注入",
         },
     )

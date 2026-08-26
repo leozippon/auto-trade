@@ -17,7 +17,11 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 
 from autotrade.environment.broker import BrokerProfile
-from autotrade.environment.identity import AgentRefStore
+from autotrade.environment.identity import (
+    LEGACY_EXPERIMENT_MESSAGE,
+    AgentRefStore,
+    LegacyExperimentError,
+)
 from autotrade.environment.runtime import chmod_tree, utc_now_iso, write_json_atomic
 from autotrade.environment.strategy import StrategySchedule
 from autotrade.pipelines import DailyStrategyPipeline, StrategyExperimentConfig
@@ -43,6 +47,7 @@ from autotrade.pipelines.hitl_state import (
 from autotrade.pipelines.ledger import ExperimentLedger, latest_fold_records
 from autotrade.pipelines.meta_schedule import meta_record_session_key
 
+from .public_identity import PublicIdentity
 from .registry import experiment_state, heldout_complete, test_results_revealed
 
 MAX_RUNNING_EXPERIMENTS = 5
@@ -306,8 +311,10 @@ class ManagerDeleteError(ManagerError):
 def _modern_ref_store(directory: Path) -> AgentRefStore:
     try:
         return AgentRefStore(directory)
+    except LegacyExperimentError as exc:
+        raise ManagerError(LEGACY_EXPERIMENT_MESSAGE) from exc
     except ValueError as exc:
-        raise ManagerError(str(exc)) from exc
+        raise ManagerError("experiment identity state is unreadable") from exc
 
 
 class ExperimentManager:
@@ -433,11 +440,7 @@ class ExperimentManager:
                 if self.worker_script.is_file()
                 else {"spawned": False}
             )
-            return {
-                "experiment_id": experiment_id,
-                "experiment_dir": str(directory),
-                **spawn,
-            }
+            return {"experiment_id": experiment_id, **spawn}
 
     def _preflight(self, merged: dict[str, object], directory: Path) -> None:
         """Reject a bad create in the browser, not minutes later on disk.
@@ -631,6 +634,18 @@ class ExperimentManager:
         with self._mutate:
             directory = self._experiment_dir(experiment_id)
             _modern_ref_store(directory)
+            try:
+                identity = PublicIdentity(directory)
+            except (OSError, ValueError) as exc:
+                raise ManagerError("experiment identity state is unreadable") from exc
+            try:
+                raw_session_key = (
+                    identity.raw_session_key(session_key)
+                    if isinstance(session_key, str) and session_key
+                    else None
+                )
+            except (KeyError, ValueError) as exc:
+                raise ManagerError(str(exc)) from exc
             path = directory / "hitl/control.json"
             # Effective seal: manual reveal OR held-out completed
             # (auto-reveal). Reading only the control flag left every
@@ -648,25 +663,31 @@ class ExperimentManager:
             if action == "restart":
                 return self._restart(experiment_id, directory)
             if action == "inject_message":
-                return self._inject_message(
+                receipt = self._inject_message(
                     directory,
-                    session_key=session_key,
+                    session_key=raw_session_key,
                     text=text,
                     interrupt=interrupt,
                 )
+                queued_session = receipt.get("session_key")
+                if isinstance(queued_session, str) and queued_session:
+                    receipt["session_key"] = identity.public_session_key(queued_session)
+                return receipt
             with control_lock(path):
                 control = read_control(path)
                 self._apply_control_action(
                     directory,
                     control,
                     action=action,
-                    session_key=session_key,
+                    session_key=raw_session_key,
                     step_index=step_index,
                     directive=directive,
                     mode=mode,
                 )
                 write_control(path, control)
-                response = {"control": control.to_record()}
+                response: dict[str, object] = {
+                    "control": identity.public_control(control.to_record())
+                }
             if action in {"resume", "rollback_fold", "rerun_fold"}:
                 state = experiment_state(directory)
                 if (

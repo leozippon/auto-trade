@@ -41,6 +41,7 @@ from autotrade.webui.manager import (
     ExperimentManager,
     ManagerError,
 )
+from autotrade.webui.public_identity import PublicIdentity
 from autotrade.webui.server import create_app, is_loopback_host
 
 #: Every control action blocked once Test/Held-out numbers are on screen —
@@ -94,7 +95,8 @@ def test_local_webui_health_schema_and_brand(tmp_path: Path):
     # this version does not have.
     health = client.get("/api/health").json()
     assert health["status"] == "ok"
-    assert health["experiments_root"] == str(tmp_path / "experiments")
+    assert "experiments_root" not in health
+    assert str(tmp_path) not in json.dumps(health)
     assert health["max_running_experiments"] == 5
     assert health["running"] == []
     assert health["unreadable_experiments"] == []
@@ -358,6 +360,18 @@ def test_experiment_endpoint_creates_only_persistent_sandbox_research(tmp_path: 
     assert params["compact_token_threshold"] == 90_000
 
 
+def _fold_ref(experiment_dir: Path, raw_fold_id: str) -> str:
+    return PublicIdentity(experiment_dir).fold_ref(raw_fold_id)
+
+
+def _run_ref(experiment_dir: Path, raw_run_id: str) -> str:
+    return PublicIdentity(experiment_dir).run_ref(raw_run_id)
+
+
+def _session_ref(experiment_dir: Path, raw_session_key: str) -> str:
+    return PublicIdentity(experiment_dir).public_session_key(raw_session_key)
+
+
 def _persistent_experiment(tmp_path: Path) -> Path:
     directory = tmp_path / "experiments/demo"
     AgentRefStore(directory)
@@ -415,8 +429,8 @@ def _persistent_experiment(tmp_path: Path) -> Path:
         "session_start",
         {
             "mode": "fold",
-            "system_prompt": "遵守 PIT 合同",
-            "instruction": "改进当前策略",
+            "system_prompt": "遵守 PIT 合同；不要暴露 fold_2026Q1",
+            "instruction": "改进 fold_2026Q1 当前策略",
         },
     )
     trace_writer.emit(
@@ -548,14 +562,16 @@ def _persistent_experiment(tmp_path: Path) -> Path:
 def test_active_experiment_api_hides_historical_steps_analysis_and_reports(
     tmp_path: Path,
 ):
-    _persistent_experiment(tmp_path)
+    directory = _persistent_experiment(tmp_path)
+    fold_ref = _fold_ref(directory, "fold_2026Q1")
+    run_ref = _run_ref(directory, "run_001")
+    session_ref = _session_ref(directory, "epoch_001/fold_2026Q1")
     client = TestClient(create_app(tmp_path))
 
     home = client.get("/api/experiments").json()["experiments"][0]
     assert home["experiment_id"] == "demo"
     assert (home["completed_sessions"], home["total_sessions"]) == (1, 2)
     assert home["skills"] == {
-        "generation_id": "epoch_001_fold_2026Q1_run_001",
         "count": 2,
         "files": 3,
         "bytes": 512,
@@ -577,7 +593,7 @@ def test_active_experiment_api_hides_historical_steps_analysis_and_reports(
     assert curve["series"][0]["key"] == "valid"
     assert curve["series"][0]["dates"] == ["20260102", "20260105"]
     fold_curve = client.get(
-        "/api/experiments/demo/folds/epoch_001/fold_2026Q1/equity"
+        f"/api/experiments/demo/folds/epoch_001/{fold_ref}/equity"
     ).json()
     assert fold_curve["series"][0]["key"] == "valid"
     assert fold_curve["series"][0]["dates"] == ["20260102", "20260105"]
@@ -585,19 +601,19 @@ def test_active_experiment_api_hides_historical_steps_analysis_and_reports(
     assert fold_curve["benchmark"]["dates"] == ["20260102", "20260105"]
     assert curve["benchmark"]["label"] == "沪深300"
     orders = client.get(
-        "/api/experiments/demo/folds/epoch_001/fold_2026Q1/orders"
+        f"/api/experiments/demo/folds/epoch_001/{fold_ref}/orders"
     ).json()
     assert orders["rows"][0]["symbol"] == "000001.SZ"
     assert (
         client.get(
-            "/api/experiments/demo/folds/epoch_001/fold_2026Q1/orders.csv",
+            f"/api/experiments/demo/folds/epoch_001/{fold_ref}/orders.csv",
             params={"result": orders["result"]},
         )
         .headers["content-type"]
         .startswith("text/csv")
     )
     style = client.get(
-        "/api/experiments/demo/style", params={"run_id": "run_001", "prefix": "valid"}
+        "/api/experiments/demo/style", params={"run_id": run_ref, "prefix": "valid"}
     ).json()
     assert style["schema_version"] == 1
     assert style["benchmark_regression"]["beta"] == 0.8
@@ -611,46 +627,49 @@ def test_active_experiment_api_hides_historical_steps_analysis_and_reports(
     assert (
         client.get(
             "/api/experiments/demo/style",
-            params={"run_id": "run_001", "prefix": "test"},
+            params={"run_id": run_ref, "prefix": "test"},
         ).status_code
         == 404
     )
 
     preview = client.post(
         "/api/experiments/demo/prompt-preview",
-        json={"session_key": "epoch_001/fold_2026Q1", "directive": "控制回撤"},
+        json={"session_key": session_ref, "directive": "控制回撤"},
     ).json()
     assert preview["kind"] == "fold"
     assert "控制回撤" in preview["prompt"]
 
-    analysis = client.get("/api/experiments/demo/analysis/epoch_001/fold_2026Q1")
+    analysis = client.get(f"/api/experiments/demo/analysis/epoch_001/{fold_ref}")
     assert analysis.status_code == 200
     assert analysis.json()["available"] is False
 
-    trace = client.get("/api/experiments/demo/trace?run_id=run_001").json()
+    trace = client.get(f"/api/experiments/demo/trace?run_id={run_ref}").json()
     assert [event["event_type"] for event in trace["events"]] == [
         "session_start",
         "llm_call",
     ]
     assert (
-        client.get("/api/experiments/demo/trace/stats?run_id=run_001").json()[
+        client.get(f"/api/experiments/demo/trace/stats?run_id={run_ref}").json()[
             "llm_total_tokens"
         ]
         == 12
     )
     assert (
-        client.get("/api/experiments/demo/trace/download?run_id=run_001").status_code
+        client.get(f"/api/experiments/demo/trace/download?run_id={run_ref}").status_code
         == 200
     )
     assert (
-        client.get("/api/experiments/demo/trace/stream?run_id=run_001").status_code
+        client.get(f"/api/experiments/demo/trace/stream?run_id={run_ref}").status_code
         == 200
     )
     prompt = client.get(
-        "/api/experiments/demo/folds/epoch_001/fold_2026Q1/initial-prompt"
+        f"/api/experiments/demo/folds/epoch_001/{fold_ref}/initial-prompt"
     ).json()
     assert [message["role"] for message in prompt["messages"]] == ["system", "user"]
-    assert prompt["messages"][0]["content"] == "遵守 PIT 合同"
+    rendered_prompt = json.dumps(prompt, ensure_ascii=False)
+    assert "遵守 PIT 合同" in rendered_prompt
+    assert fold_ref in rendered_prompt
+    assert "fold_2026Q1" not in rendered_prompt
 
     assert client.post("/api/experiments/demo/reports").status_code == 404
     assert client.get("/api/experiments/demo/reports").status_code == 404
@@ -659,6 +678,7 @@ def test_active_experiment_api_hides_historical_steps_analysis_and_reports(
 
 def test_revealed_equity_includes_test_and_heldout_csi300(tmp_path: Path):
     directory = _persistent_experiment(tmp_path)
+    fold_ref = _fold_ref(directory, "fold_2026Q1")
     test_dir = directory / "artifacts/results/frozen_test_001"
     test_dir.mkdir()
     test_dir.joinpath("result.json").write_text(
@@ -731,7 +751,7 @@ def test_revealed_equity_includes_test_and_heldout_csi300(tmp_path: Path):
     curve = client.get("/api/experiments/demo/equity").json()
     assert set(curve["benchmark"]["dates"]) == {"20260102", "20260105", "20260202", "20260504"}
     fold_curve = client.get(
-        "/api/experiments/demo/folds/epoch_001/fold_2026Q1/equity"
+        f"/api/experiments/demo/folds/epoch_001/{fold_ref}/equity"
     ).json()
     assert set(fold_curve["benchmark"]["dates"]) == {"20260102", "20260105", "20260202"}
     assert {series["key"] for series in curve["series"]} >= {"valid", "test", "heldout"}
@@ -821,6 +841,8 @@ def test_current_question_and_step_controls_use_exact_one_shot_keys(tmp_path: Pa
     client = TestClient(create_app(tmp_path))
     session_key = "epoch_001/fold_2026Q1"
     question_key = f"{session_key}#q1"
+    public_session_key = _session_ref(directory, session_key)
+    public_question_key = f"{public_session_key}#q1"
     status_path = directory / "hitl/status.json"
     status_path.write_text(
         json.dumps(
@@ -837,17 +859,25 @@ def test_current_question_and_step_controls_use_exact_one_shot_keys(tmp_path: Pa
 
     wrong_question = client.post(
         "/api/experiments/demo/control",
-        json={"action": "reply_question", "session_key": session_key, "directive": ""},
+        json={
+            "action": "reply_question",
+            "session_key": public_session_key,
+            "directive": "",
+        },
     )
     assert wrong_question.status_code == 400
     assert "current question key" in wrong_question.json()["detail"]
 
     replied = client.post(
         "/api/experiments/demo/control",
-        json={"action": "reply_question", "session_key": question_key, "directive": ""},
+        json={
+            "action": "reply_question",
+            "session_key": public_question_key,
+            "directive": "",
+        },
     )
     assert replied.status_code == 200
-    assert replied.json()["control"]["user_replies"] == {question_key: ""}
+    assert replied.json()["control"]["user_replies"] == {public_question_key: ""}
     assert consume_user_reply(directory / "hitl/control.json", question_key) == (
         True,
         "",
@@ -869,7 +899,7 @@ def test_current_question_and_step_controls_use_exact_one_shot_keys(tmp_path: Pa
         "/api/experiments/demo/control",
         json={
             "action": "approve_step",
-            "session_key": session_key,
+            "session_key": public_session_key,
             "step_index": 1,
             "directive": "继续控制回撤",
         },
@@ -880,7 +910,7 @@ def test_current_question_and_step_controls_use_exact_one_shot_keys(tmp_path: Pa
         "/api/experiments/demo/control",
         json={
             "action": "approve_step",
-            "session_key": session_key,
+            "session_key": public_session_key,
             "step_index": 2,
             "directive": {"text": "继续"},
         },
@@ -892,15 +922,17 @@ def test_current_question_and_step_controls_use_exact_one_shot_keys(tmp_path: Pa
         "/api/experiments/demo/control",
         json={
             "action": "approve_step",
-            "session_key": session_key,
+            "session_key": public_session_key,
             "step_index": 2,
             "directive": "继续控制回撤",
         },
     )
     assert approved.status_code == 200
     control = approved.json()["control"]
-    assert control["step_go"] == {session_key: 2}
-    assert control["step_directives"] == {f"{session_key}#2": "继续控制回撤"}
+    assert control["step_go"] == {public_session_key: 2}
+    assert control["step_directives"] == {
+        f"{public_session_key}#2": "继续控制回撤"
+    }
     assert consume_step_approval(directory / "hitl/control.json", session_key, 2) == (
         True,
         "继续控制回撤",
@@ -1061,7 +1093,8 @@ def test_style_api_rejects_result_reference_outside_experiment(tmp_path: Path):
     ledger.rewrite([record])
 
     response = TestClient(create_app(tmp_path)).get(
-        "/api/experiments/demo/style", params={"run_id": "run_001", "prefix": "valid"}
+        "/api/experiments/demo/style",
+        params={"run_id": _run_ref(directory, "run_001"), "prefix": "valid"},
     )
     assert response.status_code == 404
 
@@ -1103,6 +1136,20 @@ class WebuiBackendTest(unittest.TestCase):
         self._build_hitl_experiment("exp_hitl")
         self.app = create_app(self.repo_root, self.experiments_root)
         self.client = TestClient(self.app)
+
+    def _identity(self, experiment_id: str = "exp_hitl") -> PublicIdentity:
+        return PublicIdentity(self.experiments_root / experiment_id)
+
+    def _fold_ref(self, raw_fold_id: str, experiment_id: str = "exp_hitl") -> str:
+        return self._identity(experiment_id).fold_ref(raw_fold_id)
+
+    def _run_ref(self, raw_run_id: str, experiment_id: str = "exp_hitl") -> str:
+        return self._identity(experiment_id).run_ref(raw_run_id)
+
+    def _session_ref(
+        self, raw_session_key: str, experiment_id: str = "exp_hitl"
+    ) -> str:
+        return self._identity(experiment_id).public_session_key(raw_session_key)
 
     # ---- fixtures ------------------------------------------------------------
     def _build_hitl_experiment(self, experiment_id: str) -> Path:
@@ -1318,6 +1365,11 @@ class WebuiBackendTest(unittest.TestCase):
             {
                 "event_type": "llm_call",
                 "seq": 0,
+                "run_id": "run_001",
+                "fold_id": "fold_2022Q1",
+                "content": (
+                    f"run_001 inspected fold_2022Q1 under {experiment_dir}"
+                ),
                 "usage": {
                     "total_tokens": 1000,
                     "prompt_tokens": 800,
@@ -1327,6 +1379,7 @@ class WebuiBackendTest(unittest.TestCase):
             {
                 "event_type": "llm_call",
                 "seq": 1,
+                "content": "/mnt/agent/output uses run_001",
                 "usage": {
                     "total_tokens": 2000,
                     "prompt_tokens": 1500,
@@ -1340,8 +1393,10 @@ class WebuiBackendTest(unittest.TestCase):
         )
         analysis_dir = hitl / "analysis"
         analysis_dir.mkdir()
-        (analysis_dir / "epoch_001__fold_2022Q1.md").write_text(
-            "## 策略逻辑概述\nok\n", encoding="utf-8"
+        fold_ref = PublicIdentity(experiment_dir).fold_ref("fold_2022Q1")
+        (analysis_dir / f"epoch_001__{fold_ref}.md").write_text(
+            "## 策略逻辑概述\nfold_2022Q1 / run_001\n",
+            encoding="utf-8",
         )
         return experiment_dir
 
@@ -1517,7 +1572,8 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertEqual(hitl["state"], "interrupted")  # recorded pid is not alive
         self.assertFalse(hitl["test_revealed"])
         self.assertEqual(
-            [row["fold_id"] for row in hitl["fold_returns"]], ["fold_2022Q1"]
+            [row["fold_ref"] for row in hitl["fold_returns"]],
+            [self._fold_ref("fold_2022Q1")],
         )
         self.assertIsNone(hitl["environment_stage"])
         self.assertIsNone(hitl["metrics"]["cum_heldout_return"])
@@ -1619,7 +1675,7 @@ class WebuiBackendTest(unittest.TestCase):
                 "/api/experiments/exp_hitl/control",
                 json={
                     "action": action,
-                    "session_key": "epoch_001/fold_2022Q2",
+                    "session_key": self._session_ref("epoch_001/fold_2022Q2"),
                     "directive": "x",
                 },
             )
@@ -1632,15 +1688,16 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertEqual(ok.status_code, 200)
 
     def test_fold_detail_separates_test_audit_from_record(self) -> None:
+        fold_ref = self._fold_ref("fold_2022Q1")
         detail = self.client.get(
-            "/api/experiments/exp_hitl/folds/epoch_001/fold_2022Q1"
+            f"/api/experiments/exp_hitl/folds/epoch_001/{fold_ref}"
         ).json()
         self.assertNotIn("test_result", detail["record"])
         # Hidden until revealed; revealing seals the experiment.
         self.assertEqual(detail["test_audit"], {"hidden": True})
         self._reveal()
         detail = self.client.get(
-            "/api/experiments/exp_hitl/folds/epoch_001/fold_2022Q1"
+            f"/api/experiments/exp_hitl/folds/epoch_001/{fold_ref}"
         ).json()
         self.assertEqual(detail["test_audit"]["test_result"]["total_return"], 0.20)
         # Downloads are ZIP-only: no per-file listing or file endpoint.
@@ -1648,6 +1705,8 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertTrue(detail["analysis"]["available"])
 
     def test_style_route_gated_until_reveal(self) -> None:
+        run_ref = self._run_ref("run_001")
+        missing_run_ref = self._run_ref("run_missing")
         results = (
             self.experiments_root / "exp_hitl" / "artifacts" / "run_001" / "results"
         )
@@ -1674,18 +1733,18 @@ class WebuiBackendTest(unittest.TestCase):
             "".join(json.dumps(record) + "\n" for record in records), encoding="utf-8"
         )
         url = "/api/experiments/exp_hitl/style"
-        valid = self.client.get(url, params={"run_id": "run_001", "prefix": "valid"})
+        valid = self.client.get(url, params={"run_id": run_ref, "prefix": "valid"})
         self.assertEqual(valid.status_code, 200, valid.text)
         self.assertEqual(valid.json()["mode"], "valid")
-        hidden = self.client.get(url, params={"run_id": "run_001", "prefix": "test"})
+        hidden = self.client.get(url, params={"run_id": run_ref, "prefix": "test"})
         self.assertEqual(hidden.status_code, 404)
         # Indistinguishable from a run without a rollup: existence must not leak.
         absent = self.client.get(
-            url, params={"run_id": "run_missing", "prefix": "valid"}
+            url, params={"run_id": missing_run_ref, "prefix": "valid"}
         )
         self.assertEqual(hidden.json()["detail"], absent.json()["detail"])
         self._reveal()
-        revealed = self.client.get(url, params={"run_id": "run_001", "prefix": "test"})
+        revealed = self.client.get(url, params={"run_id": run_ref, "prefix": "test"})
         self.assertEqual(revealed.status_code, 200, revealed.text)
         self.assertEqual(revealed.json()["mode"], "frozen_test")
 
@@ -1712,7 +1771,8 @@ class WebuiBackendTest(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        url = "/api/experiments/exp_hitl/folds/epoch_001/fold_2022Q1/orders"
+        fold_ref = self._fold_ref("fold_2022Q1")
+        url = f"/api/experiments/exp_hitl/folds/epoch_001/{fold_ref}/orders"
         hidden = self.client.get(url, params={"result": "test_000"})
         self.assertEqual(hidden.status_code, 404)
         listing = self.client.get(url).json()
@@ -1778,8 +1838,9 @@ class WebuiBackendTest(unittest.TestCase):
             ),
             encoding="utf-8",
         )
+        fold_ref = self._fold_ref("fold_2022Q1")
         data = self.client.get(
-            "/api/experiments/exp_hitl/folds/epoch_001/fold_2022Q1/orders"
+            f"/api/experiments/exp_hitl/folds/epoch_001/{fold_ref}/orders"
         ).json()
         self.assertEqual(data["result"], "valid_000")
         self.assertEqual(data["row_count"], 3)
@@ -1788,7 +1849,7 @@ class WebuiBackendTest(unittest.TestCase):
         )
         self.assertEqual(data["rows"][2]["reason"], "limit_up_blocked_buy")
         csv_response = self.client.get(
-            "/api/experiments/exp_hitl/folds/epoch_001/fold_2022Q1/orders.csv",
+            f"/api/experiments/exp_hitl/folds/epoch_001/{fold_ref}/orders.csv",
             params={"result": "valid_000"},
         )
         self.assertEqual(csv_response.status_code, 200)
@@ -1797,7 +1858,7 @@ class WebuiBackendTest(unittest.TestCase):
             len(csv_response.text.strip().splitlines()), 4
         )  # header + 3 orders
         missing = self.client.get(
-            "/api/experiments/exp_hitl/folds/epoch_001/fold_2022Q1/orders.csv",
+            f"/api/experiments/exp_hitl/folds/epoch_001/{fold_ref}/orders.csv",
             params={"result": "nope"},
         )
         self.assertEqual(missing.status_code, 404)
@@ -1819,7 +1880,8 @@ class WebuiBackendTest(unittest.TestCase):
             "test_results",
             "truncated",
         ]
-        url = "/api/experiments/exp_hitl/folds/epoch_001/fold_2022Q1/orders"
+        fold_ref = self._fold_ref("fold_2022Q1")
+        url = f"/api/experiments/exp_hitl/folds/epoch_001/{fold_ref}/orders"
         payload = self.client.get(url).json()
         self.assertEqual(sorted(payload), expected_keys)
         self.assertEqual(payload["available"], ["valid_000"])
@@ -1868,7 +1930,8 @@ class WebuiBackendTest(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        url = "/api/experiments/exp_hitl/folds/epoch_001/fold_2022Q1/orders"
+        fold_ref = self._fold_ref("fold_2022Q1")
+        url = f"/api/experiments/exp_hitl/folds/epoch_001/{fold_ref}/orders"
         payload = self.client.get(url).json()
         self.assertEqual(len(payload["rows"]), 500)
         self.assertEqual(payload["row_count"], 501)
@@ -1888,7 +1951,8 @@ class WebuiBackendTest(unittest.TestCase):
             e for e in payload["experiments"] if e["experiment_id"] == "exp_hitl"
         )
         self.assertEqual(
-            hitl["heldout_returns"], [{"label": "2023Q1", "return": -0.03}]
+            hitl["heldout_returns"],
+            [{"fold_ref": self._fold_ref("heldout_2023Q1"), "return": -0.03}],
         )
         self.assertAlmostEqual(hitl["metrics"]["cum_heldout_return"], -0.03)
         row = hitl["fold_returns"][0]
@@ -1898,11 +1962,138 @@ class WebuiBackendTest(unittest.TestCase):
     def test_experiment_detail_merges_schedule_and_records(self) -> None:
         detail = self.client.get("/api/experiments/exp_hitl").json()
         sessions = {session["key"]: session for session in detail["sessions"]}
-        self.assertIn("record", sessions["epoch_001/fold_2022Q1"])
-        self.assertNotIn("record", sessions["epoch_001/fold_2022Q2"])
-        self.assertTrue(sessions["epoch_001/fold_2022Q1"]["analysis_available"])
+        q1_key = self._session_ref("epoch_001/fold_2022Q1")
+        q2_key = self._session_ref("epoch_001/fold_2022Q2")
+        self.assertIn("record", sessions[q1_key])
+        self.assertNotIn("record", sessions[q2_key])
+        self.assertTrue(sessions[q1_key]["analysis_available"])
         self.assertEqual(detail["control"]["mode"], "manual")
         self.assertEqual(self.client.get("/api/experiments/nope").status_code, 404)
+
+    def test_modern_public_api_exposes_only_opaque_identities(self) -> None:
+        identity = self._identity()
+        fold_ref = identity.fold_ref("fold_2022Q1")
+        run_ref = identity.run_ref("run_001")
+        trace_ref = identity.trace_ref("run_001")
+        session_ref = identity.public_session_key("epoch_001/fold_2022Q2")
+        forbidden = (
+            "fold_2022Q1",
+            "fold_2022Q2",
+            "run_001",
+            "run_meta",
+            "run_heldout",
+            str(self.repo_root),
+            str(self.experiments_root),
+        )
+
+        json_responses = [
+            self.client.get("/api/experiments"),
+            self.client.get("/api/experiments/exp_hitl"),
+            self.client.get("/api/experiments/exp_hitl/status"),
+            self.client.get(
+                f"/api/experiments/exp_hitl/folds/epoch_001/{fold_ref}"
+            ),
+            self.client.get("/api/experiments/exp_hitl/steps"),
+            self.client.get(
+                "/api/experiments/exp_hitl/trace", params={"run_id": run_ref}
+            ),
+            self.client.get(
+                "/api/experiments/exp_hitl/trace/stats",
+                params={"run_id": run_ref},
+            ),
+            self.client.get(
+                "/api/experiments/exp_hitl/trace/blocks",
+                params={"run_id": trace_ref},
+            ),
+            self.client.get(
+                f"/api/experiments/exp_hitl/analysis/epoch_001/{fold_ref}"
+            ),
+            self.client.post(
+                "/api/experiments/exp_hitl/prompt-preview",
+                json={"session_key": session_ref, "directive": "控制回撤"},
+            ),
+        ]
+        for response in json_responses:
+            self.assertEqual(response.status_code, 200, response.text)
+            public_text = json.dumps(response.json(), ensure_ascii=False)
+            for marker in forbidden:
+                self.assertNotIn(marker, public_text)
+
+        trace_download = self.client.get(
+            "/api/experiments/exp_hitl/trace/download",
+            params={"run_id": trace_ref},
+        )
+        self.assertEqual(trace_download.status_code, 200, trace_download.text)
+        strategy_download = self.client.get(
+            f"/api/experiments/exp_hitl/folds/epoch_001/{fold_ref}/strategy.zip"
+        )
+        self.assertEqual(strategy_download.status_code, 200)
+        orders_download = self.client.get(
+            f"/api/experiments/exp_hitl/folds/epoch_001/{fold_ref}/orders.csv",
+            params={"result": "valid_000"},
+        )
+        self.assertEqual(orders_download.status_code, 200)
+        for response in (trace_download, strategy_download, orders_download):
+            disposition = response.headers.get("content-disposition", "")
+            for marker in forbidden:
+                self.assertNotIn(marker, disposition)
+        for marker in forbidden:
+            self.assertNotIn(marker, trace_download.text)
+
+        self.assertEqual(
+            self.client.get(
+                "/api/experiments/exp_hitl/folds/epoch_001/fold_2022Q1"
+            ).status_code,
+            404,
+        )
+        self.assertEqual(
+            self.client.get(
+                "/api/experiments/exp_hitl/trace", params={"run_id": "run_001"}
+            ).status_code,
+            404,
+        )
+        self.assertEqual(
+            self.client.post(
+                "/api/experiments/exp_hitl/control",
+                json={
+                    "action": "set_gpu_count",
+                    "session_key": "epoch_001/fold_2022Q2",
+                    "directive": "1",
+                },
+            ).status_code,
+            400,
+        )
+
+    def test_corrupt_identity_store_fails_closed_without_host_paths(self) -> None:
+        directory = self._build_hitl_experiment("exp_bad_refs")
+        store_path = directory / ".host/agent-refs.json"
+        store_path.write_text("{broken", encoding="utf-8")
+
+        responses = [
+            self.client.get("/api/experiments"),
+            self.client.get("/api/experiments/exp_bad_refs"),
+            self.client.get("/api/experiments/exp_bad_refs/status"),
+            self.client.get("/api/experiments/exp_bad_refs/steps"),
+            self.client.post(
+                "/api/experiments/exp_bad_refs/control", json={"action": "pause"}
+            ),
+        ]
+        self.assertEqual(responses[0].status_code, 200)
+        bad_summary = next(
+            row
+            for row in responses[0].json()["experiments"]
+            if row["experiment_id"] == "exp_bad_refs"
+        )
+        self.assertEqual(bad_summary["state"], "unreadable")
+        self.assertEqual(responses[1].json()["state"], "unreadable")
+        self.assertEqual(responses[2].status_code, 409)
+        self.assertEqual(responses[3].status_code, 409)
+        self.assertEqual(responses[4].status_code, 400)
+        for response in responses:
+            public_text = response.text
+            self.assertNotIn(str(self.repo_root), public_text)
+            self.assertNotIn(str(directory), public_text)
+        self.assertEqual(store_path.read_text(encoding="utf-8"), "{broken")
 
     def test_dead_question_wait_degrades_to_interrupted(self) -> None:
         write_json_atomic(
@@ -1917,11 +2108,16 @@ class WebuiBackendTest(unittest.TestCase):
         status = self.client.get("/api/experiments/exp_hitl/status").json()
         self.assertEqual(status["state"], "interrupted")
         self.assertFalse(status["worker_alive"])
-        self.assertEqual(status["raw_status"]["state"], "waiting_user_reply")
+        self.assertEqual(status["status"]["state"], "waiting_user_reply")
+        self.assertEqual(
+            status["status"]["session_key"],
+            self._session_ref("epoch_001/fold_2022Q2"),
+        )
 
     def test_strategy_zip_contains_output_tree(self) -> None:
+        fold_ref = self._fold_ref("fold_2022Q1")
         response = self.client.get(
-            "/api/experiments/exp_hitl/folds/epoch_001/fold_2022Q1/strategy.zip"
+            f"/api/experiments/exp_hitl/folds/epoch_001/{fold_ref}/strategy.zip"
         )
         self.assertEqual(response.status_code, 200)
         archive = zipfile.ZipFile(io.BytesIO(response.content))
@@ -2209,12 +2405,12 @@ class WebuiBackendTest(unittest.TestCase):
 
     def test_analysis_endpoint_serves_existing_markdown(self) -> None:
         payload = self.client.get(
-            "/api/experiments/exp_hitl/analysis/epoch_001/fold_2022Q1"
+            f"/api/experiments/exp_hitl/analysis/epoch_001/{self._fold_ref('fold_2022Q1')}"
         ).json()
         self.assertTrue(payload["available"])
         self.assertIn("策略逻辑概述", payload["content"])
         missing = self.client.get(
-            "/api/experiments/exp_hitl/analysis/epoch_001/fold_2022Q2"
+            f"/api/experiments/exp_hitl/analysis/epoch_001/{self._fold_ref('fold_2022Q2')}"
         ).json()
         self.assertFalse(missing["available"])
 
@@ -2388,14 +2584,15 @@ class WebuiBackendTest(unittest.TestCase):
 
     # ---- traces ----------------------------------------------------------------
     def test_trace_pagination_and_partial_tail(self) -> None:
+        run_ref = self._run_ref("run_001")
         first = self.client.get(
-            "/api/experiments/exp_hitl/trace", params={"run_id": "run_001"}
+            "/api/experiments/exp_hitl/trace", params={"run_id": run_ref}
         ).json()
         self.assertEqual(len(first["events"]), 3)
         self.assertTrue(first["eof"])
         again = self.client.get(
             "/api/experiments/exp_hitl/trace",
-            params={"run_id": "run_001", "offset": first["next_offset"]},
+            params={"run_id": run_ref, "offset": first["next_offset"]},
         ).json()
         self.assertEqual(again["events"], [])
         self.assertEqual(again["next_offset"], first["next_offset"])
@@ -2420,14 +2617,15 @@ class WebuiBackendTest(unittest.TestCase):
     def test_trace_tail_returns_recent_events_and_stream_offset(self) -> None:
         tail = self.client.get(
             "/api/experiments/exp_hitl/trace",
-            params={"run_id": "run_001", "tail_events": 2},
+            params={"run_id": self._run_ref("run_001"), "tail_events": 2},
         ).json()
         self.assertEqual([event["seq"] for event in tail["events"]], [1, 2])
         self.assertTrue(tail["next_offset"] > 0)
 
     def test_trace_stats_counts_tokens_and_tool_calls(self) -> None:
         stats = self.client.get(
-            "/api/experiments/exp_hitl/trace/stats", params={"run_id": "run_001"}
+            "/api/experiments/exp_hitl/trace/stats",
+            params={"run_id": self._run_ref("run_001")},
         ).json()
         self.assertEqual(stats["counts"]["llm_call"], 2)
         self.assertEqual(stats["total_events"], 3)
@@ -2437,17 +2635,24 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertEqual(stats["llm_completion_tokens"], 700)
         self.assertEqual(stats["subagent_tasks"], 0)
 
-    def test_trace_download_serves_raw_jsonl(self) -> None:
+    def test_trace_download_serves_public_jsonl(self) -> None:
+        trace_ref = self._identity().trace_ref("run_001")
         response = self.client.get(
-            "/api/experiments/exp_hitl/trace/download", params={"run_id": "run_001"}
+            "/api/experiments/exp_hitl/trace/download",
+            params={"run_id": trace_ref},
         )
         self.assertEqual(response.status_code, 200)
         self.assertEqual(len(response.text.strip().splitlines()), 3)
+        self.assertIn(trace_ref, response.headers["content-disposition"])
+        self.assertNotIn("run_001", response.headers["content-disposition"])
 
     def test_prompt_preview_embeds_directive_and_guards_heldout(self) -> None:
         preview = self.client.post(
             "/api/experiments/exp_hitl/prompt-preview",
-            json={"session_key": "epoch_001/fold_2022Q2", "directive": "控制回撤"},
+            json={
+                "session_key": self._session_ref("epoch_001/fold_2022Q2"),
+                "directive": "控制回撤",
+            },
         )
         self.assertEqual(preview.status_code, 200, preview.text)
         payload = preview.json()
@@ -2777,6 +2982,13 @@ class HitlControlActionTest(unittest.TestCase):
         return read_control(self.directory / "hitl/control.json")
 
     def _post(self, **payload):
+        session_key = payload.get("session_key")
+        if isinstance(session_key, str) and session_key:
+            from autotrade.webui.public_identity import PublicIdentity
+
+            payload["session_key"] = PublicIdentity(self.directory).public_session_key(
+                session_key
+            )
         return self.client.post("/api/experiments/exp_ctl/control", json=payload)
 
     def _step_tree(
@@ -3221,16 +3433,19 @@ class HitlControlActionTest(unittest.TestCase):
         actually holds the range, so it is asserted here rather than assumed.
         """
         key = "epoch_001/fold_2022Q2"
+        public_key = PublicIdentity(self.directory).public_session_key(key)
         allocated = self._post(action="set_gpu_count", session_key=key, directive="2")
         self.assertEqual(allocated.status_code, 200, allocated.text)
-        self.assertEqual(allocated.json()["control"]["gpu_counts"], {key: 2})
+        self.assertEqual(
+            allocated.json()["control"]["gpu_counts"], {public_key: 2}
+        )
         self.assertEqual(self._control().gpu_counts, {key: 2})
         cleared = self._post(action="set_gpu_count", session_key=key, directive="")
         self.assertEqual(cleared.json()["control"]["gpu_counts"], {})
         self.assertEqual(self._control().gpu_counts, {})
         zero = self._post(action="set_gpu_count", session_key=key, directive="0")
         self.assertEqual(zero.status_code, 200, zero.text)
-        self.assertEqual(zero.json()["control"]["gpu_counts"], {key: 0})
+        self.assertEqual(zero.json()["control"]["gpu_counts"], {public_key: 0})
         cleared = self._post(action="set_gpu_count", session_key=key, directive="")
         self.assertEqual(cleared.json()["control"]["gpu_counts"], {})
         for directive, fragment in (("5", "0..4"), ("abc", "整数")):
@@ -3243,11 +3458,16 @@ class HitlControlActionTest(unittest.TestCase):
         missing = self._post(action="set_gpu_count", directive="2")
         self.assertEqual(missing.status_code, 400)
         self.assertIn("set_gpu_count requires session_key", missing.json()["detail"])
-        unplanned = self._post(
-            action="set_gpu_count", session_key="epoch_009/fold_x", directive="2"
+        unplanned = self.client.post(
+            "/api/experiments/exp_ctl/control",
+            json={
+                "action": "set_gpu_count",
+                "session_key": "epoch_009/fold_ref_00000000-0000-4000-8000-000000000001",
+                "directive": "2",
+            },
         )
         self.assertEqual(unplanned.status_code, 400)
-        self.assertIn("unknown session", unplanned.json()["detail"])
+        self.assertIn("unknown public session", unplanned.json()["detail"])
         self.assertEqual(
             self._control().gpu_counts, {}, "a refused request must persist nothing"
         )

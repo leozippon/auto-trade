@@ -491,7 +491,7 @@ class CreatePreflightTest(unittest.TestCase):
         self.assertIs(body["spawned"], True)
         self.addCleanup(self._kill_pid, int(body["spawned_pid"]))
         directory = self.experiments_root / "preflight_demo"
-        self.assertEqual(Path(body["experiment_dir"]), directory)
+        self.assertNotIn("experiment_dir", body)
         for name in ("params.json", "control.json", "status.json"):
             self.assertTrue((directory / "hitl" / name).is_file(), name)
         params = json.loads((directory / "hitl/params.json").read_text(encoding="utf-8"))
@@ -550,7 +550,8 @@ class CreatePreflightTest(unittest.TestCase):
         }
         with patch.object(manager, "start_worker", lambda experiment_id: {"spawned": False}):
             created = manager.create_experiment(dict(payload))
-        directory = Path(created["experiment_dir"])
+        self.assertEqual(created, {"experiment_id": "shared_body", "spawned": False})
+        directory = self.experiments_root / "shared_body"
         # Baseline: what the console persisted survives the worker's stricter pass.
         worker_module.load_worker_options(directory, repo_root=repository)
 

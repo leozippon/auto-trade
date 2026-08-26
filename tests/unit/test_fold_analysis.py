@@ -62,6 +62,7 @@ class FoldAnalysisTest(unittest.TestCase):
         self._refs_tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._refs_tmp.cleanup)
         self.ref_store = AgentRefStore(Path(self._refs_tmp.name) / "experiment")
+        self.fold_ref = self.ref_store.get_or_create("fold", "fold_2022Q1")
 
     def test_guarded_view_excludes_test_evidence(self) -> None:
         view = guarded_record_view(RECORD, ref_store=self.ref_store)
@@ -100,16 +101,25 @@ class FoldAnalysisTest(unittest.TestCase):
                 ref_store=self.ref_store,
                 strategy_dir=strategy,
                 model_dir=None,
-                out_dir=out_dir
+                out_dir=out_dir,
+                output_identity=("epoch_001", self.fold_ref),
             )
             self.assertIn("看多动量", md_path.read_text(encoding="utf-8"))
-            self.assertEqual(md_path.name, "epoch_001__fold_2022Q1.md")
-            meta = json.loads((out_dir / "epoch_001__fold_2022Q1.json").read_text(encoding="utf-8"))
+            self.assertEqual(md_path.name, f"epoch_001__{self.fold_ref}.md")
+            meta = json.loads(
+                (out_dir / f"epoch_001__{self.fold_ref}.json").read_text(
+                    encoding="utf-8"
+                )
+            )
             self.assertEqual(meta["status"], "ok")
             self.assertEqual(meta["guarded_view"], "validation_only")
             self.assertEqual(meta["analysis_kind"], "fold")
             self.assertEqual((meta["provider"], meta["model"]), ("fake", "fake-model"))
             self.assertEqual(meta["usage"], {"total_tokens": 10})
+            self.assertEqual(meta["fold_ref"], self.fold_ref)
+            self.assertEqual(meta["output_ref"], self.fold_ref)
+            self.assertEqual(meta["analysis_path"], md_path.name)
+            self.assertFalse(Path(meta["analysis_path"]).is_absolute())
             # The analysis call is text-only: no tool surface is offered.
             self.assertEqual(proxy.calls[0]["tools"], ())
             self.assertEqual(proxy.calls[0]["tool_choice"], "none")
@@ -126,11 +136,16 @@ class FoldAnalysisTest(unittest.TestCase):
                 analyze_fold(
                     ExplodingProxy(), ledger_record=RECORD, ref_store=self.ref_store,
                     strategy_dir=strategy, model_dir=None, out_dir=out_dir,
+                    output_identity=("epoch_001", self.fold_ref),
                 )
-            meta = json.loads((out_dir / "epoch_001__fold_2022Q1.json").read_text(encoding="utf-8"))
+            meta = json.loads(
+                (out_dir / f"epoch_001__{self.fold_ref}.json").read_text(
+                    encoding="utf-8"
+                )
+            )
             self.assertEqual(meta["status"], "error")
             self.assertIn("provider unavailable", meta["error"])
-            self.assertFalse((out_dir / "epoch_001__fold_2022Q1.md").exists())
+            self.assertFalse((out_dir / f"epoch_001__{self.fold_ref}.md").exists())
 
     def test_empty_analysis_content_is_a_failure_not_an_empty_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -142,10 +157,15 @@ class FoldAnalysisTest(unittest.TestCase):
                 analyze_fold(
                     FakeProxy(content="   \n"), ledger_record=RECORD, ref_store=self.ref_store,
                     strategy_dir=strategy, model_dir=None, out_dir=out_dir,
+                    output_identity=("epoch_001", self.fold_ref),
                 )
-            meta = json.loads((out_dir / "epoch_001__fold_2022Q1.json").read_text(encoding="utf-8"))
+            meta = json.loads(
+                (out_dir / f"epoch_001__{self.fold_ref}.json").read_text(
+                    encoding="utf-8"
+                )
+            )
             self.assertEqual(meta["status"], "error")
-            self.assertFalse((out_dir / "epoch_001__fold_2022Q1.md").exists())
+            self.assertFalse((out_dir / f"epoch_001__{self.fold_ref}.md").exists())
 
     def test_analyze_step_writes_under_its_node_identity(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -168,9 +188,12 @@ class FoldAnalysisTest(unittest.TestCase):
             self.assertEqual(md_path.name, f"step__{node_id}.md")
             meta = json.loads(md_path.with_suffix(".json").read_text(encoding="utf-8"))
             self.assertEqual(meta["analysis_kind"], "step")
-            # The record identity is preserved for correlation even though the
-            # output is keyed by the node.
-            self.assertEqual((meta["epoch_id"], meta["fold_id"]), ("epoch_001", "fold_2022Q1"))
+            # Only public record identities survive in the sidecar; the output
+            # itself is keyed by the immutable Step node.
+            self.assertEqual(meta["epoch_id"], "step")
+            self.assertEqual(meta["fold_ref"], self.fold_ref)
+            self.assertEqual(meta["output_ref"], node_id)
+            self.assertNotIn("fold_id", meta)
 
     def test_analysis_paths_are_derived_from_one_key(self) -> None:
         self.assertEqual(analysis_key("epoch_001", "fold_2022Q1"), "epoch_001__fold_2022Q1")

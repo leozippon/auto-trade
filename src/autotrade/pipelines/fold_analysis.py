@@ -97,8 +97,17 @@ STEP_ANALYSIS_SYSTEM_PROMPT = f"""\
 """
 
 
-def analysis_key(epoch_id: str, fold_id: str) -> str:
-    return f"{str(epoch_id)}__{str(fold_id)}"
+def analysis_key(epoch_id: str, output_ref: str) -> str:
+    epoch = _identity_component(epoch_id)
+    reference = _identity_component(output_ref)
+    return f"{epoch}__{reference}"
+
+
+def _identity_component(value: object) -> str:
+    text = str(value or "")
+    if not text or Path(text).name != text or text.startswith("."):
+        raise ValueError("analysis output identity must be one local path component")
+    return text
 
 
 def analysis_paths(out_dir: Path, epoch_id: str, fold_id: str) -> tuple[Path, Path]:
@@ -212,7 +221,7 @@ def analyze_fold(
     model_dir: Path | None,
     out_dir: Path,
     max_tokens: int = DEFAULT_MAX_TOKENS,
-    output_identity: tuple[str, str] | None = None,
+    output_identity: tuple[str, str],
     system_prompt: str = FOLD_ANALYSIS_SYSTEM_PROMPT,
     analysis_kind: str = "fold",
 ) -> Path:
@@ -222,10 +231,9 @@ def analyze_fold(
     provider failure writes an error sidecar and re-raises so the caller can
     record it (the interactive runner treats analysis as advisory).
     """
-    epoch_id = str(ledger_record.get("epoch_id") or "epoch_unknown")
-    fold_id = str(ledger_record.get("fold_id") or "fold_unknown")
-    output_epoch_id, output_fold_id = output_identity or (epoch_id, fold_id)
-    md_path, meta_path = analysis_paths(Path(out_dir), output_epoch_id, output_fold_id)
+    guarded = guarded_record_view(ledger_record, ref_store=ref_store)
+    output_epoch_id, output_fold_ref = output_identity
+    md_path, meta_path = analysis_paths(Path(out_dir), output_epoch_id, output_fold_ref)
     md_path.parent.mkdir(parents=True, exist_ok=True)
     strategy_files = read_strategy_files(Path(strategy_dir))
     model_files = (
@@ -242,8 +250,10 @@ def analyze_fold(
     messages[0] = ChatMessage("system", system_prompt)
     meta: dict[str, object] = {
         "schema_version": ANALYSIS_SCHEMA_VERSION,
-        "epoch_id": epoch_id,
-        "fold_id": fold_id,
+        "epoch_id": output_epoch_id,
+        "fold_ref": guarded.get("fold_id"),
+        "run_ref": guarded.get("run_id"),
+        "output_ref": output_fold_ref,
         "provider": getattr(proxy, "provider", "unknown"),
         "model": getattr(proxy, "model", "unknown"),
         "created_at": utc_now_iso(),
@@ -267,7 +277,7 @@ def analyze_fold(
         meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
         raise RuntimeError("fold analysis returned empty content")
     md_path.write_text(content + "\n", encoding="utf-8")
-    meta.update(status="ok", usage=dict(response.usage or {}), analysis_path=str(md_path))
+    meta.update(status="ok", usage=dict(response.usage or {}), analysis_path=md_path.name)
     meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
     return md_path
 

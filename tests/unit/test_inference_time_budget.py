@@ -20,6 +20,7 @@ from autotrade.environment.llm import (
     ScriptedLLM,
     ToolCall,
 )
+from autotrade.environment.runtime import AgentTraceWriter
 from autotrade.environment.step_tree import StepTree
 from autotrade.environment.strategy import StrategySchedule
 from autotrade.environment.time_budget import InferenceTimeBudget
@@ -200,6 +201,7 @@ def test_backtest_failure_past_wall_deadline_keeps_llm_repair_budget(
     )
     call_budget = SessionCallBudget(max_calls=3, time_budget=time_budget)
     llm = SessionBudgetLLM(TimedLLM(scripted, clock, 0.5), budget=call_budget)
+    trace_path = tmp_path / "agent-trace.jsonl"
     runner = AgentSessionRunner(
         llm=llm,
         tools=ToolRegistry(
@@ -219,6 +221,9 @@ def test_backtest_failure_past_wall_deadline_keeps_llm_repair_budget(
             finalize_before_deadline_seconds=1.0,
         ),
         time_budget=time_budget,
+        event_sink=AgentTraceWriter(
+            trace_path, ids={"run_ref": run_ref, "fold_ref": fold_ref}
+        ).emit,
     )
     assert runner.time_budget is backtest.time_budget is llm.time_budget is time_budget
 
@@ -227,10 +232,29 @@ def test_backtest_failure_past_wall_deadline_keeps_llm_repair_budget(
     assert result.status == "finished"
     assert evaluator.calls == 2
     assert len(scripted.calls) == 3
-    assert "repairable validation failure" in "".join(
+    repair_context = "".join(
         message.content or "" for message in scripted.calls[1]["messages"]
     )
+    assert "daily Validation failed: RuntimeError" in repair_context
+    assert str(tmp_path) not in repair_context
     assert time_budget.remaining() == pytest.approx(0.5)
+    # The host keeps the real EvaluationResult path for ledger/freeze work, but
+    # neither the Agent observation nor its audit Trace may expose that path.
+    host_result_ref = backtest.steps[-1].validation.result_ref
+    assert Path(host_result_ref).is_absolute()
+    trace_text = trace_path.read_text(encoding="utf-8")
+    assert host_result_ref not in trace_text
+    events = [json.loads(line) for line in trace_text.splitlines()]
+    successful = next(
+        event
+        for event in events
+        if event.get("event_type") == "tool_call"
+        and event.get("tool") == "daily_backtest"
+        and event["result"]["ok"]
+    )
+    assert successful["result"]["value"]["result_ref"] == (
+        "results/valid_002/result.json"
+    )
 
 
 def test_complete_node_enters_hard_finalization_without_compaction_or_research(

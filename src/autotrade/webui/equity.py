@@ -300,12 +300,10 @@ def _finite(value: object) -> float | None:
     return number if math.isfinite(number) else None
 
 
-def fold_equity_payload(root: Path, experiment_id: str, epoch_id: str, fold_id: str) -> dict[str, object]:
-    experiment_dir = registry.resolve_experiment_dir(root, experiment_id)
-    records = registry.read_ledger_records(experiment_dir)
-    record = latest_fold_records(records).get((epoch_id, fold_id))
-    if record is None:
-        raise KeyError(f"fold {epoch_id}/{fold_id} has no ledger record")
+def fold_equity_payload(root: Path, experiment_id: str, epoch_id: str, fold_ref: str) -> dict[str, object]:
+    experiment_dir, _identity, records, record = registry.resolve_fold_record(
+        root, experiment_id, epoch_id, fold_ref
+    )
     validation_ref = _selected_validation_ref(record)
     valid_rows = _returns(experiment_dir, validation_ref)
     bench_parts = [_benchmark_returns(experiment_dir, validation_ref)]
@@ -334,7 +332,7 @@ def fold_equity_payload(root: Path, experiment_id: str, epoch_id: str, fold_id: 
     return {
         "experiment_id": experiment_id,
         "epoch_id": epoch_id,
-        "fold_id": fold_id,
+        "fold_ref": fold_ref,
         "series": series,
         "benchmark": _curve_entry("benchmark", benchmark) if benchmark else None,
         # Daily position weight (EOD gross market value / equity) per series,

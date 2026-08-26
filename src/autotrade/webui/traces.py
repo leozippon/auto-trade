@@ -6,7 +6,7 @@ import asyncio
 import json
 import re
 import threading
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from pathlib import Path
 
 from autotrade.pipelines.hitl_state import read_status, status_pid_alive
@@ -318,6 +318,7 @@ async def stream_trace(
     run_id: str | None,
     *,
     offset: int = 0,
+    project_event: Callable[[dict[str, object]], dict[str, object]] | None = None,
 ) -> AsyncIterator[str]:
     """Replay then tail a trace over SSE without retaining a server-side history."""
 
@@ -329,12 +330,15 @@ async def stream_trace(
         path = resolve_trace_path(directory, run_id)
         if path is not None:
             page = read_trace_page(path, offset=position)
-            events = page["events"]
+            raw_events = page.get("events")
+            events = [event for event in raw_events if isinstance(event, dict)] if isinstance(raw_events, list) else []
             if events:
-                position = int(page["next_offset"])
-                for event in events[:-1]:
+                next_offset = page.get("next_offset")
+                position = int(next_offset) if isinstance(next_offset, int) else position
+                projected = [project_event(event) for event in events] if project_event else events
+                for event in projected[:-1]:
                     yield f"data: {json.dumps(event, ensure_ascii=False, default=str)}\n\n"
-                yield f"id: {position}\ndata: {json.dumps(events[-1], ensure_ascii=False, default=str)}\n\n"
+                yield f"id: {position}\ndata: {json.dumps(projected[-1], ensure_ascii=False, default=str)}\n\n"
                 idle = 0
                 continue
         status = read_status(directory / "hitl/status.json")
