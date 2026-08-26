@@ -793,11 +793,16 @@ class RollingExperimentPipeline:
         """Publish a non-empty new PRIOR.md, otherwise keep the previous version."""
         store = ExperimentPriorStore(self.config.experiment_dir)
         candidate = "" if deadline_exceeded else str(session.prior or "").strip()
-        if candidate and len(candidate) <= PRIOR_MAX_CHARS:
+        previous = previous_prior.strip()
+        if (
+            candidate
+            and len(candidate) <= PRIOR_MAX_CHARS
+            and candidate != previous
+        ):
             published = store.publish(candidate, generation_id=generation_id)
             return published.text, True, published.prior_ref, published.generation_id
         return (
-            previous_prior.strip(),
+            previous,
             False,
             store.current_ref(),
             store.current_generation_id(),
@@ -893,8 +898,9 @@ def _development_history(
     Folds. Held-out never appears. ``fold_reviews`` and
     ``fold_backtest_summaries`` only cover regular Folds completed after the
     previous Meta; older Folds are already absorbed into PRIOR/Taste.
-    ``fold_reviews`` additionally carries frozen strategy source and a bounded
-    Agent Trace; those originals never enter ordinary Fold prompts.
+    ``fold_reviews`` additionally carries frozen strategy source, a bounded
+    Agent Trace, and ``agent_process_summary``; those originals never enter
+    ordinary Fold prompts.
     """
 
     folds, review_window = select_meta_review_folds(records)

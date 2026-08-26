@@ -26,7 +26,12 @@ from _bootstrap import add_repo_src
 add_repo_src(__file__)
 
 from autotrade.agent.compact import COMPACT_SYSTEM_PROMPT
-from autotrade.agent.explore import EXPLORE_SYSTEM_PROMPT
+from autotrade.agent.explore import (
+    FOLD_REQUIRED_EXPLORE_ROLES,
+    META_EXPLORE_SYSTEM_PROMPT,
+    META_REQUIRED_EXPLORE_ROLES,
+    explore_system_prompt,
+)
 from autotrade.agent.agents_md import load_required_agents_md_sections
 from autotrade.agent.prompts import (
     CONVERGENCE_PHASE_PROMPT,
@@ -167,7 +172,7 @@ def render() -> str:
         "",
         _block(HARD_FINALIZATION_SYSTEM_PROMPT),
         "",
-        "用户消息由 Runner 确定性生成，只包含候选节点、revision 和有界 Validation 指标。工具面只保留 `finish_fold` 与已配置时的 `step_rollback`；模型仍自行选择候选，Runner 不排名或自动提交。尚无完整节点时不会进入该状态。",
+        "用户消息由 Runner 确定性生成，只包含候选节点、revision 和有界 Validation 指标。工具面只保留 `finish_fold` 与已配置时的 `step_rollback`；模型仍自行选择候选，Runner 不排名或自动提交。尚无完整节点时不会进入该状态。配置了 `explore` 的会话在缺任一 required role 时不会进入硬收尾，保持全工具面直至角色齐备或 deadline 诚实失败。",
         "",
         "## 3. 阶段与防过拟合构件",
         "",
@@ -209,13 +214,14 @@ def render() -> str:
         "",
         _block(META_SYSTEM_PROMPT),
         "",
-        "Meta 的工具白名单为 `read_file`、`grep`、`glob`、`write_file`、`edit_file`、`modification_check`、`todo`、`write_taste`、可选 `ask_user` 和 `finish_meta`。Runner 在第一轮模型请求之前验证工具集合；多余能力会使会话直接失败。",
+        "Meta 的注册工具白名单为 `read_file`、`grep`、`glob`、`write_file`、`edit_file`、`modification_check`、`todo`、`write_taste`、可选 `ask_user` 和 `finish_meta`。Runner 另外注入合成工具 `explore`，用于一层只读审计/分析子代理。Runner 在第一轮模型请求之前验证注册工具集合；多余能力会使会话直接失败。",
         "",
         "Meta 用户消息由 `build_meta_learning_prompt` 组织：",
         "",
         _block(
             "请从本地 development 证据提炼后续 Fold 的 Taste，并按需更新 PRIOR.md。"
-            "先读 `inputs/meta_context.json`（含本窗口已完成 Fold 的冻结策略投影与 `agent_trace`）。从 `agent_trace` 提炼过程/方法经验并更新 PRIOR；需要时再读 `inputs/meta_learning_memory.jsonl`。"
+            "委托 explore：必需 auditor（非空窗口审常规 Fold Trace、process summary、冻结策略与 Train/Validation 及允许的紧凑 Test；空窗口审 Taste/PRIOR/边界，必要时多次）。可选 general-purpose 与 Explore 不能替代。全部子角色只读，只能提出候选；只由你改写 Taste/PRIOR 与可选正则化。无明确流程优化时不要改 PRIOR。"
+            "先读 `inputs/meta_context.json`（含本窗口已完成 Fold 的冻结策略投影、`agent_trace` 与 `agent_process_summary`）。把 PRIOR 当当前快照维护；无明确流程优化时不要改 PRIOR。需要时再读 `inputs/meta_learning_memory.jsonl`。"
             "不要输出逐 Fold 测试明细，不要使用任何外部资料。\n"
             "{previous_taste, development}\n\n"
             "[可选：实验级默认 Fold 探索方向]\n"
@@ -226,11 +232,43 @@ def render() -> str:
         "",
         "## 5. Explore Agent 系统提示词",
         "",
-        "`EXPLORE_SYSTEM_PROMPT`：",
+        "### 5.1 Fold developer",
         "",
-        _block(EXPLORE_SYSTEM_PROMPT),
+        "`explore_system_prompt('fold', 'developer')`：",
         "",
-        "Explore 是一层可写 coding 子代理，与主 Fold 共享工作树和预算；禁止嵌套。只读检索可并行，写入、edit、shell 与 check 按调用顺序串行。达到轮次或 deadline 而没有总结时，会再请求一次无工具摘要。",
+        _block(explore_system_prompt("fold", "developer")),
+        "",
+        "### 5.2 Fold auditor",
+        "",
+        "`explore_system_prompt('fold', 'auditor')`：",
+        "",
+        _block(explore_system_prompt("fold", "auditor")),
+        "",
+        "Fold 父会话必须委托 "
+        + "、".join(FOLD_REQUIRED_EXPLORE_ROLES)
+        + "。只有 `developer` 与可选 `general-purpose` 可写；`auditor` 可见 `read_file`/`grep`/`glob`/`shell`/`todo`，shell 只读；`Explore` 可见 `read_file`/`grep`/`glob`/`todo`，无 shell。禁止嵌套。可选角色不能替代必需角色。",
+        "",
+        "### 5.3 Fold general-purpose / Explore",
+        "",
+        "`explore_system_prompt('fold', 'general-purpose')`：",
+        "",
+        _block(explore_system_prompt("fold", "general-purpose")),
+        "",
+        "`explore_system_prompt('fold', 'Explore')`：",
+        "",
+        _block(explore_system_prompt("fold", "Explore")),
+        "",
+        "### 5.4 Meta Explore",
+        "",
+        "`explore_system_prompt('meta', 'auditor')`：",
+        "",
+        _block(explore_system_prompt("meta", "auditor")),
+        "",
+        "Meta 必需角色为 "
+        + "、".join(META_REQUIRED_EXPLORE_ROLES)
+        + "。统一枚举还含 `developer`、`general-purpose`、`Explore`，全部只读，只能提出候选。共享 `META_EXPLORE_SYSTEM_PROMPT` 主体，工具面仅 `read_file`/`grep`/`glob`/`todo`。",
+        "",
+        _block(META_EXPLORE_SYSTEM_PROMPT),
         "",
         "## 6. Context Compaction 系统提示词",
         "",

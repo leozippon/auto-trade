@@ -61,7 +61,7 @@ free -h
 
 *If your task prompt identifies you as a sub-agent, ignore the remaining rules in this section and do not spawn sub-agents of your own.*
 
-*Unless the task is very simple, start multi-agent collaboration.*
+*Every main-agent task must start at least one first-level sub-agent. There is no simple-task exemption.*
 
 - Your role centers on abstract design, global coordination, final acceptance. Direct, exhaustive reading and modification are required only when necessary.
 - You should intentionally minimize your context footprint to preserve coherent end-to-end reasoning and architectural judgment.
@@ -79,6 +79,16 @@ free -h
 - If a sub-agent's task must wait, instruct that sub-agent to Sleep; otherwise it will yield and drop out while waiting on a timer.
 - Carry settled decisions into later reviews rather than reopening them.
 - Do not conduct iterative audits unless necessary; they easily fall into endless iteration.
+
+### AutoTrade Fold and Meta sessions
+
+This subsection is the AutoTrade session contract. The whole Multi-Agent section is injected into regular Fold and Meta prompts. Parent agents accept; first-level sub-agents do not nest.
+
+- Regular Fold must use two first-level `explore` roles, each at least once: `auditor` inspects PIT-visible data, units, and availability plus the parent strategy, historical artifacts, and existing results before development, and may run more than once; `developer` writes real strategy code.
+- Optional first-level `general-purpose` may cover one bounded cross-domain task; Fold `general-purpose` is writable. Optional first-level `Explore` is read-only discovery of unknown locations, interfaces, or materials: `explore(role="Explore", task=...)`. Optional roles cannot replace a required role and do not count as one. Sub-agents may not nest, finish, backtest, or change PRIOR/Taste. The parent accepts.
+- The Fold parent only designs, coordinates, runs official validation/backtest, accepts, and finishes. It must not write or edit strategy files itself, and must not use shell to modify strategy artifacts.
+- Meta requires only `auditor`. A non-empty review window inspects regular Fold Trace, process summary, frozen strategies, Train/Validation, and allowed compact Test feedback, and must not leak Held-out or per-Fold Test numbers. An empty window inspects current Taste, PRIOR, and input boundaries. Call `auditor` more than once when needed.
+- Every Meta sub-role (`auditor`, `developer`, `general-purpose`, `Explore`) is read-only and may only propose candidates. The Meta parent uniquely synthesizes, edits Taste/PRIOR and optional strategy regularization, and finishes. Do not change PRIOR when there is no valid process improvement.
 
 
 ## Development Principles

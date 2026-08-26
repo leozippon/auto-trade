@@ -1,0 +1,16 @@
+{
+  "pythonVersion": "3.11",
+  "pythonPlatform": "Linux",
+  "typeCheckingMode": "basic",
+  "exclude": [
+    "**/snapshots",
+    "**/artifacts",
+    "**/node_modules",
+    "**/cache",
+    "**/.cache"
+  ],
+  "extraPaths": [
+    "/opt/autotrade"
+  ],
+  "reportMissingImports": "warning"
+}

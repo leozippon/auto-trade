@@ -148,7 +148,7 @@ def test_before_llm_applies_guidance_without_system_or_manifest(tmp_path: Path) 
 
 def test_interrupt_after_llm_skips_unstarted_tools_with_pairing(tmp_path: Path) -> None:
     finish, node_id = _finish_tool(tmp_path)
-    write = RecordingTool("write_file", mutating=True)
+    write = RecordingTool("todo", mutating=True)
     inbox = FakeInbox()
     events: list[tuple[str, dict[str, object]]] = []
 
@@ -162,7 +162,7 @@ def test_interrupt_after_llm_skips_unstarted_tools_with_pairing(tmp_path: Path) 
         [
             ProviderResponse(
                 tool_calls=(
-                    ToolCall("w", "write_file", {"path": "output/main.py"}),
+                    ToolCall("w", "todo", {"path": "output/main.py"}),
                     ToolCall("f", "finish_fold", {"node_id": node_id}),
                 )
             ),
@@ -191,7 +191,7 @@ def test_interrupt_after_llm_skips_unstarted_tools_with_pairing(tmp_path: Path) 
         assert payload["observation"] == "interrupted_by_user"
         assert payload["error"] == "interrupted_by_user"
     skipped = [payload for event, payload in events if event == "tool_skipped"]
-    assert [item["tool"] for item in skipped] == ["write_file", "finish_fold"]
+    assert [item["tool"] for item in skipped] == ["todo", "finish_fold"]
     assert all(item["reason"] == "interrupted_by_user" for item in skipped)
     assert all(item["safe_point"] == INBOX_SAFE_AFTER_LLM_BEFORE_TOOLS for item in skipped)
     user_events = [payload for event, payload in events if event == "user_message"]
@@ -211,7 +211,7 @@ def test_started_mutating_tool_is_not_killed(tmp_path: Path) -> None:
         started.set()
         assert release.wait(timeout=2)
 
-    write = RecordingTool("write_file", mutating=True, on_invoke=_write)
+    write = RecordingTool("todo", mutating=True, on_invoke=_write)
 
     def _pump() -> None:
         assert started.wait(timeout=2)
@@ -224,7 +224,7 @@ def test_started_mutating_tool_is_not_killed(tmp_path: Path) -> None:
         [
             ProviderResponse(
                 tool_calls=(
-                    ToolCall("w", "write_file", {}),
+                    ToolCall("w", "todo", {}),
                     ToolCall("g", "grep", {}),
                     ToolCall("f", "finish_fold", {"node_id": node_id}),
                 )
@@ -347,7 +347,13 @@ def test_explore_does_not_consume_inbox_until_parent_returns(tmp_path: Path) -> 
     parent_llm = ScriptedLLM(
         [
             ProviderResponse(
-                tool_calls=(ToolCall("e", "explore", {"task": "inspect workspace"}),)
+                tool_calls=(
+                    ToolCall(
+                        "e",
+                        "explore",
+                        {"role": "auditor", "task": "inspect workspace"},
+                    ),
+                )
             ),
             ProviderResponse(
                 tool_calls=(ToolCall("f", "finish_fold", {"node_id": node_id}),)
@@ -358,7 +364,9 @@ def test_explore_does_not_consume_inbox_until_parent_returns(tmp_path: Path) -> 
         llm=parent_llm,
         tools=ToolRegistry([finish]),
         system_prompt="daily JSON only",
-        config=AgentSessionConfig(max_llm_calls=3),
+        config=AgentSessionConfig(
+            max_llm_calls=3, required_explore_roles=("auditor",)
+        ),
         explore=ExploreSubAgentEngine(llm=explore_llm, tools=ToolRegistry([shell])),
         inbox=inbox,
     )

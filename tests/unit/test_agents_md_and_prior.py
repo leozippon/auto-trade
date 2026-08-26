@@ -11,6 +11,7 @@ from autotrade.agent.prompts import build_system_prompt
 from autotrade.agent.runner import (
     PRIOR_MAX_CHARS,
     TasteFinishTool,
+    prior_content_violation,
     prior_policy_violation,
 )
 from autotrade.environment.tools import SafeWorkspace, ToolRegistry, WriteFileTool
@@ -19,6 +20,7 @@ from autotrade.pipelines.ledger import ExperimentLedger
 from autotrade.environment.identity import agent_visible_ref
 from autotrade.pipelines.experiment import _development_history
 from autotrade.pipelines.meta_inputs import (
+    build_agent_process_summary,
     build_meta_fold_reviews,
     compact_agent_trace,
     select_meta_review_folds,
@@ -43,6 +45,29 @@ def _agents_md(root: Path, *, missing: str | None = None) -> Path:
     return path
 
 
+def test_root_agents_md_requires_a_first_level_subagent() -> None:
+    text = Path(__file__).resolve().parents[2].joinpath("AGENTS.md").read_text(
+        encoding="utf-8"
+    )
+    assert "Every main-agent task must start at least one first-level sub-agent" in text
+    assert "There is no simple-task exemption" in text
+    assert "Unless the task is very simple" not in text
+    assert "`auditor`" in text
+    assert "`developer`" in text
+    assert "`Explore`" in text
+    assert "`general-purpose`" in text
+    assert "cannot replace a required role" in text
+    assert "Do not change PRIOR" in text
+    for stale in (
+        "data_audit",
+        "strategy_audit",
+        "trace_audit",
+        "strategy_performance_audit",
+        "context_audit",
+    ):
+        assert stale not in text
+
+
 def test_required_agents_sections_are_injected_into_fold_and_meta(tmp_path: Path) -> None:
     path = _agents_md(tmp_path)
     extracted = load_required_agents_md_sections(path)
@@ -56,12 +81,18 @@ def test_required_agents_sections_are_injected_into_fold_and_meta(tmp_path: Path
         assert f"## {title}" in extracted.text
         assert f"## {title}" in fold
         assert f"## {title}" in meta
-    assert "只能通过已注入的 `explore`" in fold
+    assert "`auditor`" in fold
+    assert "`developer`" in fold
+    assert "`general-purpose`" in fold
     assert "共享同一会话" in fold
-    assert "可写 coding 子代理" in fold
-    assert "Meta 子代理/阶段" in meta
-    assert "不要再委托子代理" in meta
+    assert "真实代码开发" in fold
+    assert "Meta 主协调者" in meta
+    assert "`auditor`" in meta
+    assert "`Explore`" in meta
+    assert "`general-purpose`" in meta
     assert "agent_trace" in meta
+    assert "agent_process_summary" in meta
+    assert "当前可迁移过程/方法快照" in meta
     assert extracted.sha256
     assert extracted.version == extracted.sha256[:12]
 
@@ -137,6 +168,16 @@ def test_meta_publishes_keeps_and_rejects_overlong_prior(tmp_path: Path) -> None
     assert kept[0] == "updated workflow notes"
     assert kept[1] is False
     assert store.current_text().strip() == "updated workflow notes"
+
+    unchanged = pipeline._publish_or_keep_prior(
+        MetaSessionResult(taste="keep short", prior="updated workflow notes\n"),
+        previous_prior="updated workflow notes",
+        generation_id="gen_same",
+        deadline_exceeded=False,
+    )
+    assert unchanged[1] is False
+    assert unchanged[3] == "gen_2"
+    assert store.current_generation_id() == "gen_2"
 
     deadline = pipeline._publish_or_keep_prior(
         MetaSessionResult(taste="keep short", prior="should not publish"),
@@ -288,6 +329,7 @@ def test_meta_fold_reviews_include_strategy_and_agent_trace_not_heldout(tmp_path
             "event_type": "explore_task",
             "task_id": "explore_abc",
             "parent_call_id": "call_1",
+            "role": "auditor",
             "task": "inspect daily schema",
             "status": "started",
         },
@@ -311,6 +353,7 @@ def test_meta_fold_reviews_include_strategy_and_agent_trace_not_heldout(tmp_path
             "task_id": "explore_abc",
             "parent_call_id": "call_1",
             "status": "completed",
+            "role": "auditor",
             "task": "inspect daily schema",
             "digest": "daily has trade_date",
         },
@@ -324,7 +367,8 @@ def test_meta_fold_reviews_include_strategy_and_agent_trace_not_heldout(tmp_path
         "explore",
         "llm_call",
     ]
-    assert compact[0]["task"] == "inspect daily schema"
+    assert compact[0]["role"] == "auditor"
+    assert "task" not in compact[0]
     assert compact[2]["ok"] is True
     assert compact[-1]["content"] == "planning the next edit"
     trace.write_text(
@@ -362,7 +406,8 @@ def test_meta_fold_reviews_include_strategy_and_agent_trace_not_heldout(tmp_path
     assert strategy_files[0]["path"] == "main.py"
     assert "generate_orders" in str(strategy_files[0]["content"])
     assert isinstance(agent_trace, list)
-    assert agent_trace[0]["task"] == "inspect daily schema"
+    assert agent_trace[0]["role"] == "auditor"
+    assert "task" not in agent_trace[0]
     assert isinstance(validation, dict)
     assert validation["total_return"] == 0.02
     assert "per_stock" not in validation
@@ -372,6 +417,13 @@ def test_meta_fold_reviews_include_strategy_and_agent_trace_not_heldout(tmp_path
     rendered = str(reviews)
     assert "heldout_2026Q1" not in rendered
     assert 0.99 not in test_result.values()
+    summary = review["agent_process_summary"]
+    assert isinstance(summary, dict)
+    assert summary["llm_calls"] == 1
+    assert summary["explore"] == {"attempts": 1, "completed": 1, "failed": 0}
+    assert summary["daily_backtest"] == 0
+    assert "heldout" not in str(summary).lower()
+    assert "0.4" not in str(summary)
 
 
 def test_meta_fold_reviews_resolve_trace_from_artifacts_root(tmp_path: Path) -> None:
@@ -380,7 +432,7 @@ def test_meta_fold_reviews_resolve_trace_from_artifacts_root(tmp_path: Path) -> 
     trace.parent.mkdir(parents=True)
     trace.write_text(
         '{"event_type": "explore_task", "task_id": "explore_xyz", '
-        '"parent_call_id": "call_9", "task": "count rows", "status": "started"}\n',
+        '"parent_call_id": "call_9", "role": "auditor", "task": "count rows", "status": "started"}\n',
         encoding="utf-8",
     )
     reviews = build_meta_fold_reviews(
@@ -397,7 +449,8 @@ def test_meta_fold_reviews_resolve_trace_from_artifacts_root(tmp_path: Path) -> 
     )
     agent_trace = reviews[0]["agent_trace"]
     assert isinstance(agent_trace, list)
-    assert agent_trace[0]["task"] == "count rows"
+    assert agent_trace[0]["role"] == "auditor"
+    assert "task" not in agent_trace[0]
     assert agent_trace[0]["parent_call_id"] == "call_9"
 
 
@@ -459,7 +512,7 @@ def test_compact_agent_trace_keeps_recent_complete_tasks() -> None:
         "explore",
         "llm_call",
     ]
-    assert compact[0]["task"] == "later rows"
+    assert "task" not in compact[0]
     assert compact[0]["parent_call_id"] == "call_late"
     assert compact[2]["digest"] == "new digest"
     assert compact[3]["content"] == "main dialogue"
@@ -642,9 +695,7 @@ def test_compact_agent_trace_redacts_embedded_host_paths_not_sandbox() -> None:
     )
     assert "/mnt/agent/workspace/main.py" in content
     assert len(content) < len(original)
-    assert compact[1]["task"] == (
-        "inspect ([host_path]) and '[host_path]' then /mnt/agent/output/main.py"
-    )
+    assert "task" not in compact[1]
     assert compact[2]["digest"] == (
         "ratio 3/4 json 1.5 and a / b stay; host [host_path] goes"
     )
@@ -760,3 +811,123 @@ def test_meta_review_window_rollback_and_resume_recompute_deterministically() ->
         agent_visible_ref("fold_b", prefix="fold_ref"),
     ]
     assert len(reviews) == 2
+
+
+def test_agent_process_summary_counts_are_bounded_and_redacted() -> None:
+    events = [
+        {"event_type": "session_end", "llm_calls": 7, "explore_attempts": 2},
+        {
+            "event_type": "explore",
+            "status": "completed",
+        },
+        {
+            "event_type": "explore",
+            "status": "error",
+        },
+        {
+            "event_type": "tool_call",
+            "tool": "todo",
+            "args": {"action": "update", "status": "completed"},
+            "ok": True,
+        },
+        {
+            "event_type": "tool_call",
+            "tool": "daily_backtest",
+            "ok": True,
+        },
+        {
+            "event_type": "tool_call",
+            "tool": "grep",
+            "ok": False,
+            "error": "boom at /Data2/lzp/secret",
+        },
+        {
+            "event_type": "tool_call",
+            "tool": "grep",
+            "ok": False,
+            "error": "boom at /Data2/lzp/secret",
+        },
+        {
+            "event_type": "tool_call",
+            "tool": "read_file",
+            "ok": False,
+            "error": "missing",
+        },
+    ]
+    summary = build_agent_process_summary(events)
+    assert summary["llm_calls"] == 7
+    assert summary["explore"] == {"attempts": 2, "completed": 1, "failed": 1}
+    assert summary["todo"] == {"calls": 1, "completed": 1}
+    assert summary["daily_backtest"] == 1
+    assert summary["tool_failures"] == 3
+    assert summary["repeated_failures"] == [
+        {"tool": "grep", "count": 2, "error": "boom at [host_path]"}
+    ]
+    rendered = str(summary)
+    assert "/Data2/" not in rendered
+    assert "inspect daily schema" not in rendered
+
+
+def test_agent_process_summary_caps_repeated_failures() -> None:
+    events = [
+        {
+            "event_type": "tool_call",
+            "tool": f"tool_{index}",
+            "ok": False,
+            "error": f"fail-{index}",
+        }
+        for index in range(12)
+        for _repeat in range(2)
+    ]
+    summary = build_agent_process_summary(events)
+    assert summary["tool_failures"] == 24
+    assert len(summary["repeated_failures"]) == 8
+
+
+def test_prior_policy_rejects_duplicate_agent_process_headings(tmp_path: Path) -> None:
+    prior = tmp_path / "PRIOR.md"
+    prior.write_text("keep grep first\n", encoding="utf-8")
+    assert prior_policy_violation(prior) == ""
+    prior.write_text(
+        "## Agent Process\nfirst\n\n## Agent Process\nsecond\n",
+        encoding="utf-8",
+    )
+    assert "duplicate ## Agent Process" in prior_policy_violation(prior)
+    prior.write_text(
+        "# Notes\n\n## Agent Process\nDelegate schema reads.\n",
+        encoding="utf-8",
+    )
+    assert prior_policy_violation(prior) == ""
+    missing = tmp_path / "absent.md"
+    assert prior_policy_violation(missing) == ""
+
+
+def test_finish_meta_rejects_duplicate_agent_process_headings(tmp_path: Path) -> None:
+    (tmp_path / "taste.md").write_text("prefer simple signals\n", encoding="utf-8")
+    (tmp_path / "PRIOR.md").write_text(
+        "## Agent Process\none\n\n## Agent Process\ntwo\n",
+        encoding="utf-8",
+    )
+    registry = ToolRegistry([TasteFinishTool(SafeWorkspace(tmp_path))])
+    refused = registry.invoke("finish_meta", {"taste_path": "taste.md"})
+    assert refused.ok is False
+    assert refused.value["error_type"] == "prior_policy"
+    (tmp_path / "PRIOR.md").write_text(
+        "## Agent Process\nUse explore for schema reads.\n",
+        encoding="utf-8",
+    )
+    accepted = registry.invoke("finish_meta", {"taste_path": "taste.md"})
+    assert accepted.ok is True
+
+
+def test_prior_content_allows_boundary_sentences_and_rejects_leaks() -> None:
+    assert prior_content_violation("不得使用 Test/Held-out。\n") == ""
+    assert prior_content_violation("Test 与 Held-out 不可见。\n") == ""
+    assert prior_content_violation("不要用 Test 水平做选择。\n") == ""
+    assert prior_content_violation("审查窗口排除 Held-out。\n") == ""
+    assert "Held-out" in prior_content_violation("Held-out sharpe 1.2\n")
+    assert "Test figure" in prior_content_violation("Fold1 Test 收益 0.31\n")
+    assert "choose a strategy" in prior_content_violation("根据Test选择动量因子\n")
+    assert "choose a strategy" in prior_content_violation(
+        "Test上动量更稳所以保留该方向\n"
+    )

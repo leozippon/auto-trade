@@ -60,7 +60,12 @@ from .compact import (
     is_llm_compaction_message,
     safe_error_summary,
 )
-from .explore import ExploreSubAgentEngine
+from .explore import (
+    EXPLORE_ROLES,
+    OPTIONAL_EXPLORE_ROLES,
+    ExploreSubAgentEngine,
+    session_explore_roles,
+)
 from .prompts import (
     HARD_FINALIZATION_SYSTEM_PROMPT,
     STEP_WRAP_UP_PROMPT,
@@ -106,7 +111,6 @@ _FOLD_TOOLS = frozenset(
     {
         "ask_user",
         "daily_backtest",
-        "edit_file",
         "finish_fold",
         "glob",
         "grep",
@@ -116,7 +120,6 @@ _FOLD_TOOLS = frozenset(
         "step_rollback",
         "todo",
         "validate_strategy",
-        "write_file",
     }
 )
 _META_TOOLS = frozenset(
@@ -187,10 +190,25 @@ class AgentSessionConfig:
     tool_result_keep_recent: int = 8
     tool_result_clear_min_chars: int = 4_000
     tool_result_clear_token_threshold: int = 40_000
+    required_explore_roles: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.mode not in ("fold", "meta", "meta_learning"):
             raise ValueError("Agent session mode must be fold, meta, or meta_learning")
+        seen: set[str] = set()
+        allowed_required = set(session_explore_roles(self.mode))
+        for role in self.required_explore_roles:
+            if not isinstance(role, str) or not role.strip():
+                raise ValueError("required_explore_roles must be non-empty strings")
+            if role in seen:
+                raise ValueError(f"duplicate required explore role: {role}")
+            if role in OPTIONAL_EXPLORE_ROLES:
+                raise ValueError(f"{role} cannot be a required explore role")
+            if role not in allowed_required:
+                raise ValueError(
+                    f"unknown explore role for {self.mode} session: {role}"
+                )
+            seen.add(role)
         for name in (
             "max_llm_calls",
             "max_steps",
@@ -252,8 +270,18 @@ class AgentSessionRunner:
         self.config = config or AgentSessionConfig()
         self.compactor = compactor
         self.explore = explore
-        if self.config.mode in {"meta", "meta_learning"} and explore is not None:
-            raise ValueError("Meta session cannot provide explore sub-agents")
+        roles = self.config.required_explore_roles
+        if self.explore is None and roles:
+            raise ValueError("required_explore_roles requires an explore engine")
+        if self.explore is not None and not roles:
+            raise ValueError("Explore session requires required_explore_roles")
+        if self.explore is not None:
+            explore_mode = getattr(self.explore, "mode", "fold")
+            if self.config.mode in {"meta", "meta_learning"}:
+                if explore_mode != "meta":
+                    raise ValueError("Meta session explore sub-agent must use mode='meta'")
+            elif explore_mode != "fold":
+                raise ValueError("Fold session explore sub-agent must use mode='fold'")
         if self.explore is not None and self.explore.event_sink is None:
             self.explore.event_sink = event_sink
         bindings: list[TimeBudgetBinding] = []
@@ -277,6 +305,8 @@ class AgentSessionRunner:
         self._hard_finalization = False
         self._hard_finalization_context_initialized = False
         self._wrap_up_sent = False
+        self._explore_attempts = 0
+        self._explored_roles: set[str] = set()
         self._validate_capability_boundary()
 
     def run(self, instruction: str) -> AgentSessionResult:
@@ -300,6 +330,8 @@ class AgentSessionRunner:
         self._hard_finalization = False
         self._hard_finalization_context_initialized = False
         self._wrap_up_sent = False
+        self._explore_attempts = 0
+        self._explored_roles = set()
         self._emit(
             "session_start",
             {
@@ -500,13 +532,16 @@ class AgentSessionRunner:
                     )
                 )
                 self._remember_observation(call.name, record)
+                traced_arguments = dict(call.arguments)
+                if call.name == "explore":
+                    traced_arguments.pop("task", None)
                 self._emit(
                     "tool_call",
                     {
                         "call_index": llm_calls,
                         "tool_call_id": call.id,
                         "tool": call.name,
-                        "arguments": sanitize_for_log(dict(call.arguments)),
+                        "arguments": sanitize_for_log(traced_arguments),
                         "result": sanitize_for_log(record),
                     },
                 )
@@ -595,15 +630,39 @@ class AgentSessionRunner:
             return tuple(records)
         tools = list(self.tools.provider_tools())
         if self.explore is not None:
+            roles = list(EXPLORE_ROLES)
+            if self.config.mode in {"meta", "meta_learning"}:
+                description = (
+                    "Delegate one first-level read-only role. Pass role from the "
+                    "unified enum auditor/developer/general-purpose/Explore. Required "
+                    "auditor must be attempted; optional general-purpose and Explore "
+                    "cannot replace it. Every Meta sub-role, including developer, is "
+                    "read-only and may only propose candidates. Nested explore is "
+                    "forbidden."
+                )
+            else:
+                description = (
+                    "Delegate one first-level Fold role. Pass role from the "
+                    "unified enum auditor/developer/general-purpose/Explore. Required "
+                    "auditor and developer must each be attempted; optional "
+                    "general-purpose and Explore cannot replace them. Explore is a "
+                    "read-only discovery role; the tool name remains explore. Only "
+                    "developer and general-purpose may write strategy code. Nested "
+                    "explore is forbidden."
+                )
             tools.append(
                 {
                     "type": "function",
                     "function": {
                         "name": "explore",
-                        "description": "Delegate one concrete coding task to a one-level writable sub-agent sharing this Fold workspace, then return a compact summary.",
+                        "description": description,
                         "parameters": {
                             "type": "object",
                             "properties": {
+                                "role": {
+                                    "type": "string",
+                                    "enum": roles,
+                                },
                                 "task": {
                                     "type": "string",
                                     "minLength": 1,
@@ -615,7 +674,7 @@ class AgentSessionRunner:
                                     "maximum": 20,
                                 },
                             },
-                            "required": ["task"],
+                            "required": ["role", "task"],
                             "additionalProperties": False,
                         },
                     },
@@ -701,6 +760,7 @@ class AgentSessionRunner:
             or self.config.mode != "fold"
             or self._wrap_up_sent
             or not self._complete_validation_nodes
+            or (self.explore is not None and self._missing_explore_roles())
         ):
             return False
         main_remaining = remaining - self.config.deadline_grace_seconds
@@ -764,6 +824,9 @@ class AgentSessionRunner:
                     "ok": False,
                     "error": "Agent session deadline reached before tool dispatch",
                 }
+            blocked = self._explore_required_error(call.name)
+            if blocked is not None:
+                return call, blocked
             if call.name == "explore":
                 return call, self._dispatch_explore(call)
             record = self.tools.invoke(
@@ -880,24 +943,96 @@ class AgentSessionRunner:
             self.inbox.consume(message_id)
         return messages
 
+    def _missing_explore_roles(self) -> tuple[str, ...]:
+        return tuple(
+            role
+            for role in self.config.required_explore_roles
+            if role not in self._explored_roles
+        )
+
+    def _explore_required_error(self, tool_name: str) -> dict[str, object] | None:
+        if tool_name not in _TERMINAL_TOOLS or self.explore is None:
+            return None
+        missing = self._missing_explore_roles()
+        if not missing:
+            return None
+        return {
+            "ok": False,
+            "observation": "explore_required",
+            "error": (
+                f"{tool_name} requires explore attempts for missing roles: "
+                + ", ".join(missing)
+            ),
+        }
+
     def _dispatch_explore(self, call: ToolCall) -> dict[str, object]:
         if self.explore is None:
-            return {"ok": False, "error": "Explore is not configured"}
+            record: dict[str, object] = {
+                "ok": False,
+                "error": "Explore is not configured",
+            }
+            self._emit(
+                "explore_attempt",
+                {"ok": False, "error": record["error"]},
+            )
+            return record
+        allowed = EXPLORE_ROLES
+        raw_role = call.arguments.get("role")
+        if not isinstance(raw_role, str) or raw_role not in allowed:
+            record = {
+                "ok": False,
+                "error": "explore.role must be one of: " + ", ".join(allowed),
+            }
+            self._emit(
+                "explore_attempt",
+                {"ok": False, "error": record["error"]},
+            )
+            return record
         task = call.arguments.get("task")
         raw_rounds = call.arguments.get("max_rounds")
         if not isinstance(task, str) or not task.strip():
-            return {"ok": False, "error": "explore.task must be a non-empty string"}
+            record = {
+                "ok": False,
+                "error": "explore.task must be a non-empty string",
+            }
+            self._emit(
+                "explore_attempt",
+                {"ok": False, "error": record["error"]},
+            )
+            return record
         max_rounds: int | None = None
         if raw_rounds is not None:
             if not isinstance(raw_rounds, int) or isinstance(raw_rounds, bool):
-                return {"ok": False, "error": "explore.max_rounds must be an integer"}
+                record = {
+                    "ok": False,
+                    "error": "explore.max_rounds must be an integer",
+                }
+                self._emit(
+                    "explore_attempt",
+                    {"ok": False, "error": record["error"]},
+                )
+                return record
             max_rounds = raw_rounds
+        self._explore_attempts += 1
+        self._explored_roles.add(raw_role)
+        attempt = self._explore_attempts
         result = self.explore.run(
             task,
+            role=raw_role,
             max_rounds=max_rounds,
             parent_call_id=call.id,
         )
-        return {"ok": result.get("status") == "completed", "value": result}
+        ok = result.get("status") == "completed"
+        self._emit(
+            "explore_attempt",
+            {
+                "attempt": attempt,
+                "role": raw_role,
+                "ok": ok,
+                "status": result.get("status"),
+            },
+        )
+        return {"ok": ok, "value": result}
 
     def _compact_if_needed(
         self,
@@ -1184,8 +1319,12 @@ class AgentSessionRunner:
                 )
 
     def _emit(self, event: str, payload: dict[str, object]) -> None:
+        record = dict(payload)
+        if event == "session_end" and self.explore is not None:
+            record["explore_attempts"] = self._explore_attempts
+            record["explored_roles"] = sorted(self._explored_roles)
         if self.event_sink is not None:
-            self.event_sink(event, dict(payload))
+            self.event_sink(event, record)
 
 
 class MetaLearningAgent:
@@ -1325,6 +1464,48 @@ def taste_policy_violation(taste_path: Path, *, window_dates: set[str]) -> str:
     return ""
 
 
+_AGENT_PROCESS_HEADING = re.compile(r"(?m)^##[ \t]+Agent Process[ \t]*$")
+_PRIOR_BOUNDARY_RE = re.compile(
+    r"不得|不要|禁止|不可见|不能用于|不得按|不得用|不得读取|不得使用|不得写入|"
+    r"永远不可见|排除|不进入|不读取|不挂载"
+)
+_HELDOUT_MENTION_RE = re.compile(r"held-?out|holdout|持有期外|隐藏区间", re.I)
+_TEST_NUMBER_RE = re.compile(
+    r"(?:逐\s*fold|每个\s*fold|fold[_\s-]?(?:ref)?\s*\d*).{0,48}(?:test|测试).{0,40}\d|"
+    r"(?:test|测试).{0,24}(?:sharpe|收益|回撤|夏普|total_return|超额).{0,16}\d",
+    re.I,
+)
+_TEST_SELECTION_RE = re.compile(
+    r"(根据|按照|基于|凭).{0,20}(?:test|测试).{0,20}(选|选择|保留|淘汰|采用)|"
+    r"(?:test|测试).{0,20}(更好|更差|更优|更稳).{0,16}(所以|因此|于是|选择|保留)",
+    re.I,
+)
+
+
+def prior_content_violation(text: str) -> str:
+    """Held-out leaks, per-Fold Test figures, or Test-based selection."""
+    for lineno, line in enumerate(text.splitlines(), start=1):
+        stripped = line.strip()
+        if not stripped or _PRIOR_BOUNDARY_RE.search(stripped):
+            continue
+        if _HELDOUT_MENTION_RE.search(stripped):
+            return (
+                f"line {lineno} leaks Held-out into PRIOR; "
+                "use a boundary sentence such as 不得使用 Test/Held-out"
+            )
+        if _TEST_NUMBER_RE.search(stripped):
+            return (
+                f"line {lineno} contains a per-Fold Test figure; "
+                "remove Test numbers then call finish_meta again"
+            )
+        if _TEST_SELECTION_RE.search(stripped):
+            return (
+                f"line {lineno} uses Test to choose a strategy; "
+                "state a transferable process rule instead"
+            )
+    return ""
+
+
 def prior_policy_violation(prior_path: Path) -> str:
     """Why an existing PRIOR.md may not be finished, or empty when it is acceptable.
 
@@ -1341,6 +1522,14 @@ def prior_policy_violation(prior_path: Path) -> str:
             f"PRIOR.md is {nchars} characters; keep it to {PRIOR_MAX_CHARS} "
             "as process memory, then call finish_meta again"
         )
+    if len(_AGENT_PROCESS_HEADING.findall(text)) > 1:
+        return (
+            "PRIOR.md has duplicate ## Agent Process headings; "
+            "keep a single current snapshot"
+        )
+    leak = prior_content_violation(text)
+    if leak:
+        return f"PRIOR.md {leak}"
     return ""
 
 

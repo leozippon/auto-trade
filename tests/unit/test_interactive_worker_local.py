@@ -15,6 +15,7 @@ from autotrade.environment.llm import (
     ScriptedLLM,
     ToolCall,
 )
+from autotrade.agent.explore import FOLD_REQUIRED_EXPLORE_ROLES
 from autotrade.environment.tools import CommandResult
 from autotrade.pipelines.agent_views import compact_fold_history
 from autotrade.pipelines.hitl_state import (
@@ -436,6 +437,32 @@ class _NoShellRunner:
         return CommandResult(126, stderr="shell is disabled in this test")
 
 
+def _explore_then(
+    *tool_calls: ToolCall,
+    roles: tuple[str, ...] = ("auditor",),
+    digest: str = "委托完成",
+    implement: dict[str, object] | None = None,
+) -> tuple[ProviderResponse, ...]:
+    explores = tuple(
+        ToolCall(f"ex_{role}", "explore", {"role": role, "task": f"review {role}"})
+        for role in roles
+    )
+    responses: list[ProviderResponse] = [
+        ProviderResponse(tool_calls=(*explores, *tool_calls))
+    ]
+    for role in roles:
+        if implement is not None and role == "developer":
+            responses.append(
+                ProviderResponse(
+                    tool_calls=(
+                        ToolCall("w", "write_file", dict(implement)),
+                    )
+                )
+            )
+        responses.append(ProviderResponse(content=digest))
+    return tuple(responses)
+
+
 def test_llm_worker_runs_real_meta_fold_validation_and_heldout(
     tmp_path: Path,
     monkeypatch,
@@ -448,30 +475,23 @@ def test_llm_worker_runs_real_meta_fold_validation_and_heldout(
     source = "def generate_orders(context):\n    return []\n"
     llm = ScriptedLLM(
         [
-            ProviderResponse(
-                tool_calls=(
-                    ToolCall(
-                        "taste", "write_taste", {"taste": "prefer small daily changes"}
-                    ),
-                    ToolCall("finish_meta", "finish_meta", {"taste_path": "taste.md"}),
-                )
+            *_explore_then(
+                ToolCall(
+                    "taste", "write_taste", {"taste": "prefer small daily changes"}
+                ),
+                ToolCall("finish_meta", "finish_meta", {"taste_path": "taste.md"}),
             ),
-            ProviderResponse(
-                tool_calls=(
-                    ToolCall(
-                        "write",
-                        "write_file",
-                        {"path": "output/main.py", "content": source},
-                    ),
-                    ToolCall(
-                        "ask",
-                        "ask_user",
-                        {"question": "Continue with the bounded validation?"},
-                    ),
-                    ToolCall("check", "modification_check", {}),
-                    ToolCall("valid", "daily_backtest", {}),
-                    ToolCall("finish_fold", "finish_fold", {}),
-                )
+            *_explore_then(
+                ToolCall(
+                    "ask",
+                    "ask_user",
+                    {"question": "Continue with the bounded validation?"},
+                ),
+                ToolCall("check", "modification_check", {}),
+                ToolCall("valid", "daily_backtest", {}),
+                ToolCall("finish_fold", "finish_fold", {}),
+                roles=FOLD_REQUIRED_EXPLORE_ROLES,
+                implement={"path": "output/main.py", "content": source},
             ),
         ]
     )
@@ -559,23 +579,26 @@ def test_llm_worker_runs_real_meta_fold_validation_and_heldout(
     assert not any((experiment / "artifacts/strategy/revisions").iterdir())
     frozen = list((experiment / "artifacts/strategy/frozen").iterdir())
     assert len(frozen) == 1 and frozen[0].name == fold["frozen_strategy_artifact_id"]
-    assert len(llm.calls) == 2
+    assert len(llm.calls) == 6
     meta_tool_names = {item["function"]["name"] for item in llm.calls[0]["tools"]}
-    assert {"write_taste", "finish_meta"}.issubset(meta_tool_names)
+    assert {"write_taste", "finish_meta", "explore"}.issubset(meta_tool_names)
     # The Meta session may regularize the working copy, so it holds the typed
     # writers and modification_check — but it stays offline and never backtests.
     assert {"write_file", "edit_file", "modification_check", "todo"}.issubset(
         meta_tool_names
     )
     assert {"shell", "daily_backtest", "step_rollback"}.isdisjoint(meta_tool_names)
-    fold_tool_names = {item["function"]["name"] for item in llm.calls[1]["tools"]}
+    fold_tool_names = {item["function"]["name"] for item in llm.calls[2]["tools"]}
     assert {
         "ask_user",
         "daily_backtest",
+        "explore",
         "finish_fold",
+        "shell",
         "step_rollback",
         "todo",
     }.issubset(fold_tool_names)
+    assert {"write_file", "edit_file"}.isdisjoint(fold_tool_names)
     assert all(
         "test_period" not in (message.content or "")
         for call in llm.calls
@@ -589,7 +612,7 @@ def test_llm_worker_runs_real_meta_fold_validation_and_heldout(
     )
     assert resumed["heldout_runs"] == 0
     assert len(ExperimentLedger(options.rolling.ledger_path).read()) == 3
-    assert len(llm.calls) == 2
+    assert len(llm.calls) == 6
 
 
 def test_second_llm_fold_prompt_excludes_prior_test_diagnostic(
@@ -609,29 +632,28 @@ def test_second_llm_fold_prompt_excludes_prior_test_diagnostic(
     )
     params_path.write_text(json.dumps(params), encoding="utf-8")
     monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
-    source = "def generate_orders(context):\n    return []\n"
-    fold_response = ProviderResponse(
-        tool_calls=(
-            ToolCall(
-                "write", "write_file", {"path": "output/main.py", "content": source}
-            ),
+
+    def _fold_script(source: str) -> tuple[ProviderResponse, ...]:
+        return _explore_then(
             ToolCall("check", "modification_check", {}),
             ToolCall("valid", "daily_backtest", {}),
             ToolCall("finish_fold", "finish_fold", {}),
+            roles=FOLD_REQUIRED_EXPLORE_ROLES,
+            implement={"path": "output/main.py", "content": source},
         )
-    )
+
     llm = ScriptedLLM(
         [
-            ProviderResponse(
-                tool_calls=(
-                    ToolCall(
-                        "taste", "write_taste", {"taste": "prefer simple signals"}
-                    ),
-                    ToolCall("finish_meta", "finish_meta", {"taste_path": "taste.md"}),
-                )
+            *_explore_then(
+                ToolCall(
+                    "taste", "write_taste", {"taste": "prefer simple signals"}
+                ),
+                ToolCall("finish_meta", "finish_meta", {"taste_path": "taste.md"}),
             ),
-            fold_response,
-            fold_response,
+            *_fold_script("def generate_orders(context):\n    return []\n"),
+            *_fold_script(
+                "def generate_orders(context):\n    _ = context.inference_at\n    return []\n"
+            ),
         ]
     )
 
@@ -642,10 +664,10 @@ def test_second_llm_fold_prompt_excludes_prior_test_diagnostic(
     )
 
     assert result["state"] == "completed"
-    assert len(llm.calls) == 3
+    assert len(llm.calls) == 10
     second_fold_context = "\n".join(
         message.content or ""
-        for message in llm.calls[2]["messages"]
+        for message in llm.calls[6]["messages"]
         if message.role in {"system", "user"}
     )
     assert '"development_history"' in second_fold_context
@@ -848,25 +870,18 @@ def test_console_gpu_allocation_reaches_the_run_manifests_sandbox_spec(
     source = "def generate_orders(context):\n    return []\n"
     llm = ScriptedLLM(
         [
-            ProviderResponse(
-                tool_calls=(
-                    ToolCall(
-                        "taste", "write_taste", {"taste": "prefer small daily changes"}
-                    ),
-                    ToolCall("finish_meta", "finish_meta", {"taste_path": "taste.md"}),
-                )
+            *_explore_then(
+                ToolCall(
+                    "taste", "write_taste", {"taste": "prefer small daily changes"}
+                ),
+                ToolCall("finish_meta", "finish_meta", {"taste_path": "taste.md"}),
             ),
-            ProviderResponse(
-                tool_calls=(
-                    ToolCall(
-                        "write",
-                        "write_file",
-                        {"path": "output/main.py", "content": source},
-                    ),
-                    ToolCall("check", "modification_check", {}),
-                    ToolCall("valid", "daily_backtest", {}),
-                    ToolCall("finish_fold", "finish_fold", {}),
-                )
+            *_explore_then(
+                ToolCall("check", "modification_check", {}),
+                ToolCall("valid", "daily_backtest", {}),
+                ToolCall("finish_fold", "finish_fold", {}),
+                roles=FOLD_REQUIRED_EXPLORE_ROLES,
+                implement={"path": "output/main.py", "content": source},
             ),
         ]
     )
@@ -891,6 +906,9 @@ def test_console_gpu_allocation_reaches_the_run_manifests_sandbox_spec(
     fold_configs = [config for config in assembled_configs if config.mode == "fold"]
     assert len(fold_configs) == 1
     assert fold_configs[0].finalize_before_deadline_seconds == 600
+    assert fold_configs[0].required_explore_roles == FOLD_REQUIRED_EXPLORE_ROLES
+    meta_configs = [config for config in assembled_configs if config.mode == "meta"]
+    assert meta_configs[0].required_explore_roles == ("auditor",)
     # One-shot, like every other per-session control.
     assert read_control(experiment / "hitl/control.json").gpu_counts == {}
 

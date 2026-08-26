@@ -302,7 +302,19 @@ def test_derived_sandbox_image_records_tag_and_build_uuid(tmp_path: Path):
     completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="built\n", stderr="")
     manifest = Mock()
     with (
-        patch("autotrade.environment.sandbox_images.subprocess.run", return_value=completed),
+        patch.dict(
+            os.environ,
+            {
+                "HTTP_PROXY": "http://127.0.0.1:54202",
+                "HTTPS_PROXY": "http://127.0.0.1:54202",
+                "NO_PROXY": "127.0.0.1,localhost",
+            },
+            clear=True,
+        ),
+        patch(
+            "autotrade.environment.sandbox_images.subprocess.run",
+            return_value=completed,
+        ) as run,
         patch(
             "autotrade.environment.sandbox_images.inspect_local_image_tags",
             side_effect=lambda tag, **_: [tag],
@@ -320,6 +332,23 @@ def test_derived_sandbox_image_records_tag_and_build_uuid(tmp_path: Path):
             timeout_seconds=120,
         )
     assert result is not None
+    build_commands = [
+        call.args[0]
+        for call in run.call_args_list
+        if len(call.args[0]) >= 2 and call.args[0][1] == "build"
+    ]
+    assert len(build_commands) == 1
+    command = build_commands[0]
+    assert command[:3] == ["docker", "build", "--network=host"]
+    assert command.count("--build-arg") == 3
+    assert "HTTP_PROXY" in command
+    assert "HTTPS_PROXY" in command
+    assert "NO_PROXY" in command
+    assert all("http://" not in item for item in command)
+    dockerfile = Path(str(result["dockerfile_ref"])).read_text(encoding="utf-8")
+    assert "PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple" in dockerfile
+    assert "NPM_CONFIG_REGISTRY=https://registry.npmmirror.com" in dockerfile
+    assert "DEBIAN_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/debian" in dockerfile
     assert result["build_id"] in result["image"]
     assert result["image_tags"] == [result["image"]]
     assert spec.image == result["image"]

@@ -529,6 +529,7 @@ def test_runner_rejects_mismatched_explore_budget() -> None:
             llm=main,
             tools=ToolRegistry(),
             system_prompt="mismatch",
+            config=AgentSessionConfig(required_explore_roles=("auditor",)),
             explore=explore,
             time_budget=main_budget,
         )

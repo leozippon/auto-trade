@@ -15,6 +15,7 @@ from autotrade.pipelines.fold_analysis import read_strategy_files
 _AGENT_TRACE_EVENT_TYPES = frozenset(
     {
         "explore",
+        "explore_attempt",
         "explore_llm",
         "explore_task",
         "explore_tool",
@@ -27,8 +28,9 @@ _AGENT_TRACE_EVENT_TYPES = frozenset(
         "wrap_up_started",
     }
 )
+_SUMMARY_FAILURE_LIMIT = 8
+_SUMMARY_ERROR_CHARS = 80
 _AGENT_TRACE_MAX_EVENTS = 80
-_TASK_CHARS = 500
 _DIGEST_CHARS = 400
 _SUMMARY_CHARS = 400
 _ARG_CHARS = 120
@@ -42,6 +44,7 @@ _BODY_KEYS = frozenset(
         "old_text",
         "source",
         "subject",
+        "task",
         "text",
     }
 )
@@ -201,7 +204,8 @@ def _compact_agent_event(event: Mapping[str, object]) -> dict[str, object]:
         "model": event.get("model"),
     }
     if event_type in {"explore_task", "explore"}:
-        item["task"] = _redact_text(event.get("task"), limit=_TASK_CHARS)
+        if event.get("role"):
+            item["role"] = event.get("role")
         if event.get("digest"):
             item["digest"] = _redact_text(event.get("digest"), limit=_DIGEST_CHARS)
         for key in ("rounds", "tool_calls", "llm_calls"):
@@ -217,6 +221,13 @@ def _compact_agent_event(event: Mapping[str, object]) -> dict[str, object]:
             }
     elif event_type == "explore_tool":
         _attach_result_status(item, event.get("result"), event)
+    elif event_type == "explore_attempt":
+        if event.get("attempt") is not None:
+            item["attempt"] = event.get("attempt")
+        if event.get("role"):
+            item["role"] = event.get("role")
+        if event.get("ok") is not None:
+            item["ok"] = event.get("ok")
     elif event_type == "llm_call":
         if event.get("content"):
             item["content"] = _redact_text(event.get("content"), limit=_SUMMARY_CHARS)
@@ -244,6 +255,10 @@ def _compact_agent_event(event: Mapping[str, object]) -> dict[str, object]:
     elif event_type == "session_end":
         if event.get("llm_calls") is not None:
             item["llm_calls"] = event.get("llm_calls")
+        if event.get("explore_attempts") is not None:
+            item["explore_attempts"] = event.get("explore_attempts")
+        if event.get("explored_roles"):
+            item["explored_roles"] = event.get("explored_roles")
     elif event_type == "wrap_up_started":
         if event.get("remaining_seconds") is not None:
             item["remaining_seconds"] = event.get("remaining_seconds")
@@ -307,6 +322,104 @@ def _redact_text(value: object, *, limit: int) -> str:
     return _HOST_PATH_RE.sub("[host_path]", text)[:limit]
 
 
+def build_agent_process_summary(
+    events: Sequence[Mapping[str, object]],
+) -> dict[str, object]:
+    """Bounded deterministic process counts from a compact Agent Trace.
+
+    Counts only; no task body, paths, Test, or Held-out values.
+    """
+    llm_calls = 0
+    explore_attempts = 0
+    explore_completed = 0
+    explore_failed = 0
+    todo_calls = 0
+    todo_completed = 0
+    daily_backtest = 0
+    tool_failures = 0
+    failure_counts: dict[tuple[str, str], int] = {}
+
+    def add_failure(tool: str, error: object) -> None:
+        nonlocal tool_failures
+        tool_failures += 1
+        key = (tool or "unknown", _redact_text(error, limit=_SUMMARY_ERROR_CHARS))
+        failure_counts[key] = failure_counts.get(key, 0) + 1
+
+    session_end_attempts: int | None = None
+    session_end_llm: int | None = None
+    attempt_events = 0
+    task_events = 0
+    tool_explore = 0
+    for event in events:
+        event_type = str(event.get("event_type") or "")
+        if event_type == "llm_call":
+            llm_calls += 1
+        elif event_type == "session_end":
+            raw_calls = event.get("llm_calls")
+            if isinstance(raw_calls, int) and not isinstance(raw_calls, bool):
+                session_end_llm = raw_calls
+            raw_attempts = event.get("explore_attempts")
+            if isinstance(raw_attempts, int) and not isinstance(raw_attempts, bool):
+                session_end_attempts = raw_attempts
+        elif event_type == "explore_attempt":
+            attempt_events += 1
+            if event.get("ok") == False and not event.get("status"):
+                explore_failed += 1
+        elif event_type == "explore_task":
+            task_events += 1
+        elif event_type == "explore":
+            status = str(event.get("status") or "")
+            if status == "completed":
+                explore_completed += 1
+            elif status in {"error", "timeout"}:
+                explore_failed += 1
+        elif event_type == "tool_call":
+            tool = str(event.get("tool") or "")
+            if tool == "explore":
+                tool_explore += 1
+            if tool == "todo":
+                todo_calls += 1
+                args = event.get("args")
+                if isinstance(args, Mapping) and args.get("status") == "completed":
+                    todo_completed += 1
+            elif tool == "daily_backtest":
+                daily_backtest += 1
+            if event.get("ok") == False:
+                add_failure(tool, event.get("error"))
+        elif event_type == "explore_tool" and event.get("ok") == False:
+            add_failure(str(event.get("tool") or "explore"), event.get("error"))
+
+    if session_end_llm is not None:
+        llm_calls = session_end_llm
+    if session_end_attempts is not None:
+        explore_attempts = session_end_attempts
+    elif attempt_events:
+        explore_attempts = attempt_events
+    elif task_events:
+        explore_attempts = task_events
+    else:
+        explore_attempts = tool_explore
+    repeated = [
+        {"tool": tool, "count": count, "error": error}
+        for (tool, error), count in sorted(
+            failure_counts.items(), key=lambda item: (-item[1], item[0][0], item[0][1])
+        )[:_SUMMARY_FAILURE_LIMIT]
+        if count > 1
+    ]
+    return {
+        "llm_calls": llm_calls,
+        "explore": {
+            "attempts": explore_attempts,
+            "completed": explore_completed,
+            "failed": explore_failed,
+        },
+        "todo": {"calls": todo_calls, "completed": todo_completed},
+        "tool_failures": tool_failures,
+        "daily_backtest": daily_backtest,
+        "repeated_failures": repeated,
+    }
+
+
 def build_meta_fold_reviews(
     records: Sequence[Mapping[str, object]],
     *,
@@ -327,6 +440,9 @@ def build_meta_fold_reviews(
             strategy_dir = Path(path)
             if strategy_dir.is_dir():
                 strategy_files = read_strategy_files(strategy_dir)
+        agent_trace = compact_agent_trace(
+            _read_trace_events(record, artifacts_root=artifacts_root)
+        )
         reviews.append(
             {
                 "epoch_id": record.get("epoch_id"),
@@ -344,9 +460,8 @@ def build_meta_fold_reviews(
                     test_result if isinstance(test_result, dict) else None
                 ),
                 "strategy_files": strategy_files,
-                "agent_trace": compact_agent_trace(
-                    _read_trace_events(record, artifacts_root=artifacts_root)
-                ),
+                "agent_trace": agent_trace,
+                "agent_process_summary": build_agent_process_summary(agent_trace),
             }
         )
     return reviews

@@ -765,6 +765,7 @@ def run_local_interactive_worker(
         )
         meta_learner = LLMMetaLearner(
             llm=meta_gateway,
+            explore_llm=nl_gateway,
             compact_llm=compact_gateway,
             context_compaction=options.llm.compaction,
             baseline_strategy=options.baseline_strategy,
@@ -774,6 +775,9 @@ def run_local_interactive_worker(
             max_llm_calls=options.rolling.max_llm_calls,
             deadline_seconds=options.rolling.max_fold_minutes * 60,
             max_response_tokens=options.llm.max_tokens_for("meta"),
+            explore_max_tokens=options.llm.max_tokens_for(
+                "nl", requested=ExploreSubAgentConfig().max_tokens
+            ),
             meta_learning_directive=options.rolling.meta_learning_directive,
             fold_exploration_directive=options.rolling.fold_exploration_directive,
             workspace_reference=options.rolling.workspace_reference,

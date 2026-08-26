@@ -603,6 +603,19 @@ def build_fold_explore_tools(
     ]
 
 
+def build_meta_explore_tools(
+    search_roots: SearchRoots,
+    workspace: SafeWorkspace,
+) -> list[Tool]:
+    """Tools handed to Meta ``ExploreSubAgentEngine``: read-only audit, shared todo."""
+    return [
+        ReadFileTool(search_roots),
+        GrepTool(search_roots),
+        GlobTool(search_roots),
+        TodoTool(workspace),
+    ]
+
+
 class LLMFoldDeveloper:
     """Adapter from the native Agent loop to ``FoldDeveloper``."""
 
@@ -661,7 +674,11 @@ class LLMFoldDeveloper:
 
     def __call__(self, request: FoldSessionRequest) -> FoldSessionResult:
         from autotrade.agent.compact import ContextCompactor
-        from autotrade.agent.explore import ExploreSubAgentConfig, ExploreSubAgentEngine
+        from autotrade.agent.explore import (
+            ExploreSubAgentConfig,
+            ExploreSubAgentEngine,
+            session_explore_roles,
+        )
         from autotrade.agent.prompts import build_system_prompt
         from autotrade.agent.runner import AgentSessionConfig, AgentSessionRunner
         from autotrade.pipelines.agent_inbox import bind_session_inbox
@@ -886,8 +903,6 @@ class LLMFoldDeveloper:
                 ReadFileTool(search_roots),
                 GrepTool(search_roots),
                 GlobTool(search_roots),
-                WriteFileTool(safe),
-                EditFileTool(safe),
                 SandboxShellTool(safe, command_runner),
                 StrategyValidationTool(safe),
                 TodoTool(safe),
@@ -953,6 +968,7 @@ class LLMFoldDeveloper:
                     max_steps=request.max_steps,
                     deadline_seconds=request.deadline_seconds,
                     max_response_tokens=self.max_response_tokens,
+                    required_explore_roles=session_explore_roles("fold"),
                 ),
                 compactor=(
                     ContextCompactor(compact_budgeted, self.context_compaction)
@@ -1149,6 +1165,7 @@ class LLMMetaLearner:
         self,
         *,
         llm: LLMProxy,
+        explore_llm: LLMProxy | None = None,
         compact_llm: LLMProxy | None = None,
         context_compaction: ContextCompactionConfig | None = None,
         baseline_strategy: str | Path,
@@ -1158,6 +1175,7 @@ class LLMMetaLearner:
         max_llm_calls: int,
         deadline_seconds: float,
         max_response_tokens: int = 8_000,
+        explore_max_tokens: int = 6_000,
         meta_learning_directive: str = "",
         fold_exploration_directive: str = "",
         workspace_reference: str = "",
@@ -1171,6 +1189,7 @@ class LLMMetaLearner:
         sandbox_spec_sink: Callable[[SandboxSpec], None] | None = None,
     ) -> None:
         self.llm = llm
+        self.explore_llm = explore_llm or llm
         self.compact_llm = compact_llm
         self.context_compaction = context_compaction or ContextCompactionConfig()
         self.baseline_strategy = Path(baseline_strategy).resolve(strict=True)
@@ -1189,6 +1208,7 @@ class LLMMetaLearner:
         self.image_keep = image_keep
         self.sandbox_spec_sink = sandbox_spec_sink
         self.max_response_tokens = max_response_tokens
+        self.explore_max_tokens = explore_max_tokens
         self.meta_learning_directive = meta_learning_directive
         self.fold_exploration_directive = fold_exploration_directive
         self.workspace_reference = workspace_reference
@@ -1201,6 +1221,11 @@ class LLMMetaLearner:
 
     def __call__(self, facts: dict[str, object]) -> MetaSessionResult:
         from autotrade.agent.compact import ContextCompactor
+        from autotrade.agent.explore import (
+            ExploreSubAgentConfig,
+            ExploreSubAgentEngine,
+            session_explore_roles,
+        )
         from autotrade.agent.prompts import (
             build_meta_learning_prompt,
             build_system_prompt,
@@ -1376,6 +1401,14 @@ class LLMMetaLearner:
             if self.compact_llm is not None
             else None
         )
+        explore_budgeted = SessionBudgetLLM(self.explore_llm, budget=shared_budget)
+        explore = ExploreSubAgentEngine(
+            llm=explore_budgeted,
+            tools=ToolRegistry(build_meta_explore_tools(search_roots, safe)),
+            config=ExploreSubAgentConfig(max_tokens=self.explore_max_tokens),
+            time_budget=time_budget,
+            mode="meta",
+        )
         modification = ModificationCheckTool(
             output_dir,
             parent_dir=parent,
@@ -1435,12 +1468,14 @@ class LLMMetaLearner:
                 max_llm_calls=self.max_llm_calls,
                 deadline_seconds=self.deadline_seconds,
                 max_response_tokens=self.max_response_tokens,
+                required_explore_roles=session_explore_roles("meta"),
             ),
             compactor=(
                 ContextCompactor(compact_budgeted, self.context_compaction)
                 if compact_budgeted is not None
                 else None
             ),
+            explore=explore,
             time_budget=time_budget,
             event_sink=_agent_event_sink(
                 trace,

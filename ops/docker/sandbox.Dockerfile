@@ -1,15 +1,21 @@
 # AutoTrade Agent sandbox image (docs/environment-design.md 3.1/3.3).
 # Build (context is the repo root so the trusted runtime modules can be copied in):
-#   docker build -t autotrade-sandbox:latest -f ops/docker/sandbox.Dockerfile .
-# Behind restricted networks pre-pull the base via a registry mirror, pass
-# --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple, and add
-# --network=host so the build's curl (DuckDB CLI release) uses the host network.
+#   docker build --network=host --build-arg HTTP_PROXY --build-arg HTTPS_PROXY \
+#     --build-arg ALL_PROXY --build-arg NO_PROXY \
+#     -t autotrade-sandbox:latest -f ops/docker/sandbox.Dockerfile .
+# Package and release downloads default to mirrors. Proxy build args without an
+# explicit value forward the current process environment without baking proxy
+# credentials into the image; --network=host is required for loopback proxies.
 # The base is pinned by digest so the same Dockerfile always builds from the
 # same bits (a floating tag can silently change between builds). To bump:
 #   docker pull python:3.11-slim && docker image inspect python:3.11-slim --format '{{join .RepoDigests ","}}'
 FROM python:3.11-slim@sha256:b27df5841f3355e9473f9a516d38a6783b6c8dfeacaf2d14a240f443b368ddb6
 
-ARG PIP_INDEX_URL=https://pypi.org/simple
+ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+ARG NPM_CONFIG_REGISTRY=https://registry.npmmirror.com
+ARG DEBIAN_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/debian
+ARG DEBIAN_SECURITY_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/debian-security
+ARG DUCKDB_CLI_URL=https://ghfast.top/https://github.com/duckdb/duckdb/releases/download/v1.1.3/duckdb_cli-linux-amd64.zip
 
 # The strategy container runs read-only with a /tmp tmpfs, so every cache the
 # interpreter and its libraries may touch is redirected there. PYTHONPATH makes
@@ -28,7 +34,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # No Debian python3-dev: source builds compile against the base image's own
 # /usr/local/include/python3.11 headers; the distro package would only drag in
 # an unusable second interpreter's (3.13) headers and runtime.
-RUN apt-get update \
+RUN sed -i \
+        -e "s|http://deb.debian.org/debian-security|${DEBIAN_SECURITY_MIRROR}|g" \
+        -e "s|http://deb.debian.org/debian|${DEBIAN_MIRROR}|g" \
+        /etc/apt/sources.list.d/debian.sources \
+    && apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
@@ -71,7 +81,7 @@ RUN pip install --no-cache-dir -i ${PIP_INDEX_URL} \
 # Agent wastes turns falling back. (curl is already installed; release zip extracted
 # with the bundled Python to avoid an extra apt dependency. Host is x86_64.)
 RUN curl -fL --retry 8 --retry-all-errors --retry-delay 3 --connect-timeout 30 --max-time 600 \
-        https://github.com/duckdb/duckdb/releases/download/v1.1.3/duckdb_cli-linux-amd64.zip \
+        "${DUCKDB_CLI_URL}" \
         -o /tmp/duckdb_cli.zip \
     && echo "efd0fccdb1a28d9ec7a6ebfcde59900068b8ba43a846c9b553c0fd2bbe4acf43  /tmp/duckdb_cli.zip" | sha256sum -c - \
     && python -c "import zipfile; zipfile.ZipFile('/tmp/duckdb_cli.zip').extractall('/usr/local/bin')" \
@@ -150,6 +160,7 @@ COPY src/autotrade/environment/__init__.py /opt/autotrade/autotrade/environment/
 COPY src/autotrade/environment/strategy.py /opt/autotrade/autotrade/environment/strategy.py
 COPY src/autotrade/environment/strategy_loader.py /opt/autotrade/autotrade/environment/strategy_loader.py
 COPY src/autotrade/environment/strategy_worker.py /opt/autotrade/autotrade/environment/strategy_worker.py
+COPY ops/docker/pyrightconfig.json /opt/autotrade/pyrightconfig.json
 # COPY preserves the source mode (0600 on the host), so make the trusted modules
 # world-readable for the non-root `agent` user that runs them.
 RUN chmod -R a+rX /opt/autotrade
@@ -170,3 +181,8 @@ RUN mkdir -p /mnt/snapshots/train /mnt/snapshots/valid /mnt/snapshot \
 # Image default user stays root (the build never switches away); the executor
 # selects the non-root agent user per-process at docker run time.
 WORKDIR /mnt/agent
+
+# Fold/Explore static-check advisor. Runtime is offline, so pin globally here.
+# Same layer verifies the binary; do not install via pip or at session start.
+RUN npm install -g --no-fund --no-audit --registry "${NPM_CONFIG_REGISTRY}" pyright@1.1.411 \
+    && pyright --version

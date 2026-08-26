@@ -26,7 +26,7 @@ import pytest
 from autotrade.agent.experiment_facts import build_experiment_facts
 from autotrade.environment.artifacts import FilesystemArtifactStore
 from autotrade.environment.identity import agent_visible_ref
-from autotrade.environment.llm import ProviderResponse, ScriptedLLM, ToolCall
+from autotrade.environment.llm import ScriptedLLM, ToolCall
 from autotrade.pipelines.agent_views import (
     agent_visible_ledger_record,
     compact_fold_history,
@@ -35,7 +35,8 @@ from autotrade.pipelines.ledger import ExperimentLedger
 from autotrade.pipelines.local_backend import LLMMetaLearner
 from autotrade.pipelines.worker import load_worker_options, run_local_interactive_worker
 
-from .test_interactive_worker_local import _NoShellRunner, _experiment
+from autotrade.agent.explore import FOLD_REQUIRED_EXPLORE_ROLES
+from .test_interactive_worker_local import _NoShellRunner, _explore_then, _experiment
 
 TEST_LABEL = "2026Q1"
 RAW_FOLD_ID = f"fold_{TEST_LABEL}"
@@ -128,25 +129,18 @@ def fold_session(tmp_path_factory, provider_key):
     options = load_worker_options(experiment, repo_root=repo)
     llm = _SandboxCapturingLLM(
         [
-            ProviderResponse(
-                tool_calls=(
-                    ToolCall(
-                        "taste", "write_taste", {"taste": "prefer simple signals"}
-                    ),
-                    ToolCall("finish_meta", "finish_meta", {"taste_path": "taste.md"}),
-                )
+            *_explore_then(
+                ToolCall(
+                    "taste", "write_taste", {"taste": "prefer simple signals"}
+                ),
+                ToolCall("finish_meta", "finish_meta", {"taste_path": "taste.md"}),
             ),
-            ProviderResponse(
-                tool_calls=(
-                    ToolCall(
-                        "write",
-                        "write_file",
-                        {"path": "output/main.py", "content": SOURCE},
-                    ),
-                    ToolCall("check", "modification_check", {}),
-                    ToolCall("valid", "daily_backtest", {}),
-                    ToolCall("finish", "finish_fold", {}),
-                )
+            *_explore_then(
+                ToolCall("check", "modification_check", {}),
+                ToolCall("valid", "daily_backtest", {}),
+                ToolCall("finish", "finish_fold", {}),
+                roles=FOLD_REQUIRED_EXPLORE_ROLES,
+                implement={"path": "output/main.py", "content": SOURCE},
             ),
         ],
         work_root=options.work_root / options.experiment_id,
@@ -174,8 +168,16 @@ def test_fold_id_is_named_after_the_hidden_test_period(fold_session):
     assert RAW_FOLD_ID not in FOLD_REF
 
 
+def _call_has_tool(call, name: str) -> bool:
+    return any(item["function"]["name"] == name for item in call["tools"])
+
+
 def test_fold_system_prompt_and_user_messages_carry_only_the_opaque_ref(fold_session):
-    fold_call = fold_session["llm"].calls[-1]
+    fold_call = next(
+        call
+        for call in reversed(fold_session["llm"].calls)
+        if _call_has_tool(call, "finish_fold")
+    )
     prompt = _prompt_text(fold_call)
     assert RAW_FOLD_ID not in prompt
     assert TEST_LABEL not in prompt
@@ -322,13 +324,11 @@ def test_meta_context_parent_artifact_id_is_an_opaque_strategy_ref(tmp_path: Pat
     (parent_output / "main.py").write_text(baseline.read_text(encoding="utf-8"), encoding="utf-8")
     llm = ScriptedLLM(
         [
-            ProviderResponse(
-                tool_calls=(
-                    ToolCall(
-                        "taste", "write_taste", {"taste": "prefer simple signals"}
-                    ),
-                    ToolCall("finish_meta", "finish_meta", {"taste_path": "taste.md"}),
-                )
+            *_explore_then(
+                ToolCall(
+                    "taste", "write_taste", {"taste": "prefer simple signals"}
+                ),
+                ToolCall("finish_meta", "finish_meta", {"taste_path": "taste.md"}),
             )
         ]
     )

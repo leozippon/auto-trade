@@ -34,6 +34,7 @@ from autotrade.environment.tools import (
     SafeWorkspace,
     ToolRegistry,
     ToolResult,
+    TodoTool,
     ToolSpec,
     WriteFileTool,
 )
@@ -350,9 +351,9 @@ def test_terminal_tool_cancels_later_mutation_in_same_turn(tmp_path: Path):
                 tool_calls=(
                     ToolCall("f", "finish_fold", {"node_id": node_id}),
                     ToolCall(
-                        "write",
-                        "write_file",
-                        {"path": "output/main.py", "content": "raise RuntimeError"},
+                        "todo",
+                        "todo",
+                        {"action": "create", "subject": "should not persist"},
                     ),
                 )
             )
@@ -360,13 +361,14 @@ def test_terminal_tool_cancels_later_mutation_in_same_turn(tmp_path: Path):
     )
     runner = AgentSessionRunner(
         llm=llm,
-        tools=ToolRegistry([finish, WriteFileTool(workspace)]),
+        tools=ToolRegistry([finish, TodoTool(workspace)]),
         system_prompt="daily JSON only",
     )
     runner.run("finish")
     assert "generate_orders" in (tmp_path / "output/main.py").read_text(
         encoding="utf-8"
     )
+    assert not (tmp_path / "TODO.json").exists()
 
 
 def test_explore_accepts_write_file_tool(tmp_path: Path):
@@ -394,7 +396,7 @@ def test_explore_dispatches_full_shell_commands():
     result = ExploreSubAgentEngine(
         llm=llm,
         tools=ToolRegistry([shell]),
-    ).run("inspect")
+    ).run("inspect", role="auditor")
     assert result["digest"] == "ran full shell"
     assert shell.calls == [
         {"argv": ["python", "-V"]},
@@ -495,7 +497,7 @@ def test_prompt_and_facts_encode_daily_json_and_offline_meta_boundaries():
         "伪造工具结果",
     ):
         assert rule in prohibitions
-    assert "离线 Meta Agent" in META_SYSTEM_PROMPT
+    assert "离线 Meta 主协调者" in META_SYSTEM_PROMPT
     # The Meta session is offline and evidence-bounded, may regularize under
     # the modification constraints, and may declare its own image dependencies.
     for rule in (
