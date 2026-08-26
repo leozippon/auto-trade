@@ -229,13 +229,13 @@ def read_control(path: str | Path) -> ControlState:
     if mode not in CONTROL_MODES:
         mode = "manual"
     request = payload.get("request")
+    raw_approved = payload.get("approved_sessions")
+    approved_sessions = raw_approved if isinstance(raw_approved, list) else []
     return ControlState(
         mode=mode,
         request=str(request) if request in ("pause", "stop") else None,
         approved_sessions=tuple(
-            str(item)
-            for item in payload.get("approved_sessions", [])
-            if isinstance(item, str)
+            str(item) for item in approved_sessions if isinstance(item, str)
         ),
         directives=_string_map(payload.get("directives")),
         prompt_overrides=_string_map(payload.get("prompt_overrides")),

@@ -295,7 +295,8 @@ class RunManifest:
 
     def append_backtest_summary(self, summary: dict[str, object]) -> None:
         with self._lock:
-            summaries = list(self.data.get("backtest_summaries", []))
+            raw_summaries = self.data.get("backtest_summaries")
+            summaries = list(raw_summaries) if isinstance(raw_summaries, list) else []
             summaries.append(summary)
             self.data["backtest_summaries"] = summaries
             self.save()
@@ -579,8 +580,11 @@ class AgentTraceWriter:
         self._full = False
 
     def emit(self, event_type: str, payload: dict[str, object]) -> dict[str, object]:
+        sanitized = sanitize_for_log(payload)
+        if not isinstance(sanitized, dict):
+            raise TypeError("trace payload must sanitize to an object")
         record = {
-            **dict(sanitize_for_log(payload)),
+            **sanitized,
             "event_type": str(event_type),
             "ts": utc_now_iso(),
             "event_id": new_id("event"),

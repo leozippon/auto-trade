@@ -101,8 +101,9 @@ def compact_fold_history(
 ) -> dict[str, object]:
     manifest = _read_json(Path(str(record.get("run_manifest_ref", ""))))
     backtests = []
-    if isinstance(manifest.get("backtest_summaries"), list):
-        for summary in manifest["backtest_summaries"]:
+    raw_backtests = manifest.get("backtest_summaries")
+    if isinstance(raw_backtests, list):
+        for summary in raw_backtests:
             if not isinstance(summary, dict):
                 continue
             backtests.append(

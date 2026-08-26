@@ -1159,9 +1159,8 @@ def _parent_from_step_node(
             f"parent override {node_id} is not a validated node with a snapshot"
         )
     schedule = read_json(Path(experiment_dir) / "hitl/schedule.json")
-    sessions = (
-        schedule.get("sessions") if isinstance(schedule.get("sessions"), list) else []
-    )
+    raw_sessions = schedule.get("sessions")
+    sessions: list[object] = raw_sessions if isinstance(raw_sessions, list) else []
     fold_keys = [
         str(item.get("session_key") or item.get("key") or "")
         for item in sessions
