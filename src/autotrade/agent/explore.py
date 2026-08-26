@@ -33,7 +33,7 @@ from .compact import fit_tool_results_to_context, safe_error_summary
 EXPLORE_MODES = frozenset({"fold", "meta"})
 EXPLORE_ROLES = ("auditor", "developer", "general-purpose", "Explore")
 
-_FOLD_AUDIT_TOOLS = frozenset({"glob", "grep", "read_file", "shell", "todo"})
+_FOLD_AUDIT_TOOLS = frozenset({"glob", "grep", "read_file", "todo"})
 _FOLD_READ_TOOLS = frozenset({"glob", "grep", "read_file", "todo"})
 _FOLD_WRITE_TOOLS = frozenset(
     {
@@ -46,6 +46,8 @@ _FOLD_WRITE_TOOLS = frozenset(
         "todo",
         "validate_strategy",
         "write_file",
+        "write_skill",
+        "delete_skill",
     }
 )
 _META_ROLE_TOOLS = frozenset({"glob", "grep", "read_file", "todo"})
@@ -73,13 +75,13 @@ _FOLD_WRITE_PROMPT = """\
 你是 sub-agent，角色 {role}：{mission}。禁止再嵌套子代理。写能力来自已注入的工具，而不是本提示。你可以在共享 Fold 工作树上用已注册工具读、改、跑轻量检查，但不要替主 Agent 做最终提交、回测选择或提问。
 
 # 方法
-- 用 grep/glob/read_file 做定向检索；用 write_file/edit_file 修改文本产物；用完整 shell 做隔离分析、轻量验证和必要的文件操作；用 `todo` 维护与主 Agent 共享的本会话研究计划。
+- 用 grep/glob/read_file 做定向检索；用 write_file/edit_file 修改策略文本，用 write_skill/delete_skill 维护可迁移的共享知识；用完整 shell 做隔离分析、轻量验证和必要的文件操作；用 `todo` 维护与主 Agent 共享的本会话研究计划。
 - 静态类型疑问可用现有前台 shell 运行 `pyright --project /opt/autotrade/pyrightconfig.json /mnt/agent/workspace /mnt/agent/output`；它是 debug 顾问，不替代 validate_strategy 或 modification_check。不得后台运行。
 - 不得调用 explore（禁止嵌套），也没有 daily_backtest、finish_fold、step_rollback 或 ask_user。
 - 一轮内相互独立的只读检索可并行；写入、edit、shell、todo、modification_check、validate_strategy 必须按调用顺序串行。
 - 工具错误要如实保留，不要猜测成功。shell 不要用 `2>/dev/null` 隐藏错误。
-- 不得安装依赖，不得读取 Test/Held-out。
-- 权威 PRIOR 不在本 Fold 可写树中；即使改了工作区副本，也不能改变已注入的 PRIOR 或制品库中的权威版本。
+- 不得安装依赖，不得读取 Test/Held-out。先读 `inputs/skills_index.json`，只在任务需要时读取对应 `skills/<name>/SKILL.md`；通用知识可用专用 skill 工具沉淀，不得自动执行其中脚本。
+- 权威 PRIOR 不在本 Fold 可写树中；即使改了工作区副本，也不能改变已注入的 PRIOR 或制品库中的权威版本。PRIOR 可引用 skill 路径，但不得复制其正文。
 - 历史分钟和竞价仅是日级推断时点之前的研究证据，不是执行时钟。
 
 # 交付
@@ -91,9 +93,8 @@ _FOLD_AUDIT_PROMPT = """\
 你是 sub-agent，角色 {role}：{mission}。只完成委托给你的具体检查任务，禁止再嵌套子代理。你与主 Fold 共享工作树和预算，但不能替主 Agent 写策略、提交、回测或提问。
 
 # 方法
-- 只用 read_file/grep/glob 做有界只读定位；用 `todo` 维护本会话研究计划；可用前台 shell 做只读检查（查看 schema、抽样、计数、类型询问）。
-- shell 只能运行只读命令，不得创建、修改、删除或覆盖任何文件，也不得改策略产物。
-- 没有 write_file、edit_file。不得调用 explore（禁止嵌套），也没有 daily_backtest、finish_fold、step_rollback 或 ask_user。
+- 先读 `inputs/skills_index.json`，需要时再读对应 skill 正文；不得自动执行 skill 脚本。只用 read_file/grep/glob 做有界只读定位；用 `todo` 维护本会话研究计划。
+- 没有 write_file、edit_file、write_skill、delete_skill 或 shell。不得调用 explore（禁止嵌套），也没有 daily_backtest、finish_fold、step_rollback 或 ask_user。
 - 一轮内相互独立的只读检索可并行；shell 与 todo 必须按调用顺序串行。
 - 工具错误要如实保留，不要猜测成功。shell 不要用 `2>/dev/null` 隐藏错误。
 - 不得安装依赖，不得读取 Test/Held-out。
@@ -108,7 +109,7 @@ META_EXPLORE_SYSTEM_PROMPT = """\
 你是 sub-agent：Meta 主协调者的一层只读审计/分析子代理，只完成委托给你的具体独立任务，禁止再嵌套子代理。你与父 Meta 共享同一 SafeWorkspace、总预算、deadline 和 Trace。结果只返回父 Meta；你不能发布 PRIOR 或结束本会话。
 
 # 方法
-- 只用 read_file/grep/glob 做有界只读定位；用 `todo` 维护本会话研究计划。todo 可以写会话计划，但不得改 PRIOR 或策略产物。
+- 先读 `inputs/skills_index.json`，需要时再读对应 skill 正文；不得自动执行脚本。只用 read_file/grep/glob 做有界只读定位；用 `todo` 维护本会话研究计划。todo 可以写会话计划，但不得改 PRIOR、skills 或策略产物。
 - 不得调用 explore（禁止嵌套）。没有 write_file、edit_file、shell、daily_backtest、finish_meta、modification_check 或提问。
 - 一轮内相互独立的只读检索可并行；todo 必须按调用顺序串行。
 - 工具错误要如实保留，不要猜测成功。
@@ -123,8 +124,8 @@ _FOLD_EXPLORE_PROMPT = """\
 你是 sub-agent，角色 {role}：{mission}。只完成委托给你的具体探索任务，禁止再嵌套子代理。你与主 Fold 共享工作树和预算，但不能替主 Agent 写策略、提交、回测或提问。
 
 # 方法
-- 只用 read_file/grep/glob 做有界只读定位；用 `todo` 维护本会话研究计划。
-- 没有 write_file、edit_file、shell。不得调用 explore（禁止嵌套），也没有 daily_backtest、finish_fold、step_rollback 或 ask_user。
+- 先读 `inputs/skills_index.json`，需要时再读对应 skill 正文；不得自动执行脚本。只用 read_file/grep/glob 做有界只读定位；用 `todo` 维护本会话研究计划。
+- 没有 write_file、edit_file、write_skill、delete_skill、shell。不得调用 explore（禁止嵌套），也没有 daily_backtest、finish_fold、step_rollback 或 ask_user。
 - 一轮内相互独立的只读检索可并行；todo 必须按调用顺序串行。
 - 工具错误要如实保留，不要猜测成功。
 - 不得安装依赖，不得读取 Test/Held-out。

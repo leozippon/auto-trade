@@ -372,6 +372,10 @@ class FoldSessionRequest:
         compare=False,
     )
     session_key: str = ""
+    # Trusted host source for the current experiment-level skills snapshot.
+    # The sandbox adapter copies it to workspace/skills but never exposes this
+    # host path through Agent-visible facts or manifests.
+    skills_source_ref: str = ""
 
 
 @dataclass(frozen=True)
@@ -383,6 +387,8 @@ class FoldSessionResult:
     # Host path of this run's manifest. The fold ledger record carries it so a
     # later Meta session can read the run's backtest summaries back out.
     run_manifest_ref: str = ""
+    # Trusted host path to this run's collected workspace/skills audit copy.
+    skills_source_ref: str = ""
 
 
 @dataclass(frozen=True)
@@ -399,6 +405,8 @@ class MetaSessionResult:
     revision_id: str = ""
     modification_check: Mapping[str, object] = field(default_factory=dict)
     allowed: bool = True
+    # Trusted host path to this run's collected workspace/skills audit copy.
+    skills_source_ref: str = ""
 
 
 FoldDeveloper = Callable[[FoldSessionRequest], FoldSessionResult]

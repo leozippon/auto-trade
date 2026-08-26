@@ -55,10 +55,20 @@ __all__ = [
     "ToolSchemaError",
     "ToolSpec",
     "WriteFileTool",
+    "WriteSkillTool",
+    "DeleteSkillTool",
 ]
 
 
+def __dir__() -> list[str]:
+    return sorted({*globals(), "BacktestTool", "WriteSkillTool", "DeleteSkillTool"})
+
+
 def __getattr__(name: str):
+    if name in {"WriteSkillTool", "DeleteSkillTool"}:
+        from autotrade.pipelines.skills import DeleteSkillTool, WriteSkillTool
+
+        return {"WriteSkillTool": WriteSkillTool, "DeleteSkillTool": DeleteSkillTool}[name]
     if name == "BacktestTool":
         from .backtest import BacktestTool
 

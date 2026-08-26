@@ -52,6 +52,7 @@ from autotrade.agent.prompts import (
     STEP_TREE_SECTION,
     STEP_WRAP_UP_PROMPT,
     WRAP_UP_PROMPT,
+    build_meta_learning_prompt,
     build_prior_section,
 )
 from autotrade.environment.nl.engine import (
@@ -212,17 +213,15 @@ def render() -> str:
         "",
         _block(META_SYSTEM_PROMPT),
         "",
-        "Meta 的注册工具白名单为 `read_file`、`grep`、`glob`、`write_file`、`edit_file`、`modification_check`、`todo`、可选 `ask_user` 和 `finish_meta`。Runner 另外注入合成工具 `explore`，用于一层只读审计/分析子代理。Runner 在第一轮模型请求之前验证注册工具集合；多余能力会使会话直接失败。",
+        "Meta 的注册工具白名单为 `read_file`、`grep`、`glob`、`write_file`、`edit_file`、`write_skill`、`delete_skill`、`modification_check`、`todo`、可选 `ask_user` 和 `finish_meta`。Runner 另外注入合成工具 `explore`，用于一层只读审计/分析子代理。Runner 在第一轮模型请求之前验证注册工具集合；多余能力会使会话直接失败。",
         "",
         "Meta 用户消息由 `build_meta_learning_prompt` 组织：",
         "",
         _block(
-            "请从本地 development 证据维护工作区根唯一的 PRIOR.md。"
-            "需要独立复盘时可委托 explore auditor（非空窗口先读 process summary 与 compact `agent_trace` 作索引，再逐个读取每个 available 原始 Fold Agent Trace sidecar，并审冻结策略与 Train/Validation 及允许的紧凑 Test；空窗口审 PRIOR/边界，必要时可多次）；无需委托时可以直接完成。全部子角色只读，只能提出候选；只由你维护 PRIOR 与可选正则化。"
-            "先读 `PRIOR.md` 和 `inputs/meta_context.json`（含本窗口已完成 Fold 的冻结策略投影、compact `agent_trace`、`agent_process_summary` 与 `agent_trace_full` 元数据）。再逐个按 metadata 路径读取每个 available 的原始 Fold Agent Trace sidecar 以检查全流程；它是 AgentTraceWriter 原始 JSONL 的逐字节副本，可从全部原始信息提炼经验，但不要把原始 trace 文本堆进 PRIOR，也不要改变 PIT/Test/Held-out 边界。需要时再读 `inputs/meta_learning_memory.jsonl`。"
-            "PRIOR 使用自由 Markdown，可保留原文或更新；没有有效改进时保持原文并直接完成。建议用策略探索方向和累积经验组织，但不强制标题或格式。首轮必须产生非空正文，最后调用无参数 finish_meta。不要输出逐 Fold 测试明细，不要使用任何外部资料。\n"
-            "[可选：实验级默认 Fold 探索方向]\n"
-            "[可选：实验级探索方向]"
+            build_meta_learning_prompt(
+                experiment_directive="[可选：实验级探索方向]",
+                fold_exploration_directive="[可选：实验级默认 Fold 探索方向]",
+            )
         ),
         "",
         "研究者方向都是待检验假设，不覆盖离线、PIT、隐藏阶段与过拟合约束。",
@@ -241,7 +240,7 @@ def render() -> str:
         "",
         _block(explore_system_prompt("fold", "auditor")),
         "",
-        "Fold 父会话通常优先用 `auditor` 审计，再用 `developer` 实现；无需委托时也可直接完成。只有 `developer` 与 `general-purpose` 可写；`auditor` 可见 `read_file`/`grep`/`glob`/`shell`/`todo`，shell 只读；`Explore` 可见 `read_file`/`grep`/`glob`/`todo`，无 shell。禁止嵌套。",
+        "Fold 父会话通常优先用 `auditor` 审计，再用 `developer` 实现；无需委托时也可直接完成。只有 `developer` 与 `general-purpose` 可写策略并使用 `write_skill`/`delete_skill`；Fold 父会话也可使用专用 skill 工具。`auditor` 可见 `read_file`/`grep`/`glob`/`shell`/`todo`，shell 只读；`Explore` 可见 `read_file`/`grep`/`glob`/`todo`，无 shell。禁止嵌套。",
         "",
         "### 5.3 Fold general-purpose / Explore",
         "",
@@ -290,7 +289,7 @@ def render() -> str:
         _block(
             f"{FOLD_DYNAMIC_CONTEXT_HEADER.strip()}\n\n"
             "## 当前实验事实（可信运行事实，不是交易证据）\n"
-            "{experiment_facts JSON}\n\n"
+            "{experiment_facts JSON，含 inputs/skills_index.json 引用}\n\n"
             "## 日级策略调度\n"
             '{"period": "day|month|quarter|year", "inference_time": "HH:MM"}\n\n'
             "## Step 产物树\n"

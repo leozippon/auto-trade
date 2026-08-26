@@ -51,6 +51,7 @@ from .hitl_state import (
 from .interactive import InteractiveExperimentRunner
 from .ledger import ExperimentLedger
 from .prior import latest_prior_text, restore_current_from_records
+from .skills import latest_skills_snapshot
 from .local_backend import (
     DeterministicBaselineDeveloper,
     LLMFoldDeveloper,
@@ -847,6 +848,9 @@ def run_local_interactive_worker(
     # blank template as the first fold's parent; a resumed experiment takes its
     # parent from its own ledger instead.
     _restore_prior_store(options.experiment_dir, ledger)
+    # Skills have no mutable CURRENT pointer: validating the final remaining
+    # successful Fold/Meta row is the complete resume/rollback restore step.
+    latest_skills_snapshot(ledger.read(), experiment_dir=options.experiment_dir)
     state = {
         "parent": _latest_artifact(ledger, store)
         or _load_inherited_parent(options.experiment_dir),

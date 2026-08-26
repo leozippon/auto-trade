@@ -18,6 +18,7 @@ from autotrade.pipelines import (
 from autotrade.pipelines.config import MetaSessionResult
 from autotrade.pipelines.folds import build_fold_schedule
 from autotrade.pipelines.ledger import ExperimentLedger
+from autotrade.pipelines.skills import install_workspace_skills
 
 
 class Snapshots:
@@ -100,6 +101,87 @@ def test_rolling_pipeline_runs_meta_fold_test_and_heldout(tmp_path: Path):
     heldout = records[-1]
     assert heldout["result"]["total_return"] == 0.02
     assert heldout["strategy_artifact_id"] == result["final_strategy_artifact"]
+
+
+def test_successful_fold_publishes_skills_and_next_fold_noops_by_bytes(
+    tmp_path: Path,
+):
+    revision_dir = tmp_path / "revision"
+    revision_dir.mkdir()
+    (revision_dir / "main.py").write_text(
+        "def generate_orders(context):\n    return []\n", encoding="utf-8"
+    )
+    revision = ArtifactRevision("revision_1", revision_dir)
+    config = RollingExperimentConfig(
+        "experiment_a",
+        tmp_path / "experiments",
+        "2026Q1",
+        "2026Q1",
+        "2026Q2",
+        "2026Q2",
+        epochs=1,
+    )
+    seen_sources: list[str] = []
+
+    def developer(request):
+        seen_sources.append(request.skills_source_ref)
+        workspace = config.experiment_dir / "artifacts" / request.run_id / "workspace"
+        workspace.mkdir(parents=True)
+        install_workspace_skills(request.skills_source_ref or None, workspace)
+        if not request.skills_source_ref:
+            item = workspace / "skills" / "schema-notes"
+            item.mkdir()
+            (item / "SKILL.md").write_text(
+                "# Schema Notes\n\nRead schema before selecting columns.\n",
+                encoding="utf-8",
+            )
+        return FoldSessionResult(
+            "conversation_1",
+            (
+                StepResult(
+                    "step_1",
+                    revision.revision_id,
+                    EvaluationResult(
+                        {"total_return": 0.05, "max_drawdown": -0.02},
+                        "result/valid",
+                    ),
+                    True,
+                ),
+            ),
+            "step_1",
+            skills_source_ref=str(workspace / "skills"),
+        )
+
+    ledger = ExperimentLedger(config.ledger_path)
+    pipeline = RollingExperimentPipeline(
+        config,
+        snapshots=Snapshots(),
+        artifacts=Artifacts(revision, tmp_path / "frozen"),
+        evaluator=Evaluator(),
+        developer=developer,
+        ledger=ledger,
+    )
+    days = [
+        stamp.strftime("%Y%m%d")
+        for stamp in pd.bdate_range("2025-09-29", "2026-06-30")
+    ]
+    fold = build_fold_schedule("2026Q1", "2026Q1", days)[0]
+    first = pipeline.run_fold("epoch_001", fold, parent=None)
+    second = pipeline.run_fold("epoch_001", fold, parent=first.frozen)
+
+    records = ledger.read("fold")
+    assert records[0]["skills_published"] is True
+    assert records[0]["skills_count"] == 1
+    assert records[0]["skills_files"] == 1
+    assert str(records[0]["skills_ref"]).startswith(
+        "artifacts/skills/generations/"
+    )
+    assert records[1]["skills_published"] is False
+    assert records[1]["skills_ref"] == records[0]["skills_ref"]
+    assert records[1]["skills_generation_id"] == records[0]["skills_generation_id"]
+    assert seen_sources[0] == ""
+    assert Path(seen_sources[1]) == config.experiment_dir / str(records[0]["skills_ref"])
+    assert second.frozen is not None
 
 
 def test_meta_session_retains_only_the_authorized_test_diagnostic(tmp_path: Path):

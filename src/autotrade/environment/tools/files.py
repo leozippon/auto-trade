@@ -33,6 +33,12 @@ class _WorkspaceWriteTool:
     def _resolve(self, path: str, *, must_exist: bool = False) -> Path:
         target = self.workspace.resolve(path, must_exist=must_exist, directory=False if must_exist else None)
         relative = self.workspace.relative(target)
+        if relative == "skills" or relative.startswith("skills/"):
+            raise ToolError(
+                "skills/ may only be changed with write_skill or delete_skill",
+                error_type="readonly",
+                blocked_target=str(path),
+            )
         if relative in READONLY_FILES or relative.removeprefix("output/") in READONLY_FILES:
             # Compare the RESOLVED relative path: './output/README.md' and
             # friends must get the documented typed error, not a raw

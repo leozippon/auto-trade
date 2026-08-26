@@ -38,6 +38,7 @@ from autotrade.pipelines.ledger import (
     latest_heldout_records,
 )
 from autotrade.pipelines.prior import latest_prior_text, unified_meta_record
+from autotrade.pipelines.skills import latest_skills_snapshot
 
 _ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$")
 # Datasets whose partition coverage bounds the selectable backtest periods: the
@@ -176,6 +177,14 @@ def _number(value: object) -> float | None:
         return None
     result = float(value)
     return result if math.isfinite(result) else None
+
+
+def _nonnegative_count(value: object) -> int:
+    return (
+        value
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0
+        else 0
+    )
 
 
 def _metric(record: Mapping[str, object], result_key: str, key: str) -> float | None:
@@ -357,6 +366,7 @@ def summarize_experiment(directory: Path) -> dict[str, object]:
         folds.sort(key=lambda row: (str(row.get("epoch_id")), str(row.get("test_period") or row.get("fold_id"))))
         heldout = latest_heldout_records(records)
         meta = [row for row in records if row.get("record_type") == "meta_learning"]
+        skills_snapshot = latest_skills_snapshot(records, experiment_dir=directory)
         params = read_json(directory / HITL_DIR_NAME / PARAMS_NAME)
         schedule = read_json(directory / HITL_DIR_NAME / SCHEDULE_NAME)
         sessions = schedule.get("sessions") if isinstance(schedule.get("sessions"), list) else None
@@ -381,6 +391,12 @@ def summarize_experiment(directory: Path) -> dict[str, object]:
                 "folds_recorded": len(folds),
                 "meta_recorded": len(meta),
                 "heldout_recorded": len(heldout),
+                "skills": {
+                    "generation_id": skills_snapshot.generation_id or None,
+                    "count": skills_snapshot.stats.count,
+                    "files": skills_snapshot.stats.files,
+                    "bytes": skills_snapshot.stats.bytes,
+                },
                 "completed_sessions": completed_sessions,
                 "total_sessions": total_sessions,
                 "test_revealed": revealed,

@@ -60,6 +60,9 @@ def test_root_agents_md_recommends_first_level_subagents() -> None:
     assert "Meta may also finish without delegation" in text
     assert "required role" not in text
     assert "Do not change PRIOR" in text
+    assert "inputs/skills_index.json" in text
+    assert "skills/<kebab-name>/SKILL.md" in text
+    assert "dedicated skill tools" in text
     for stale in (
         "data_audit",
         "strategy_audit",
@@ -98,6 +101,12 @@ def test_required_agents_sections_are_injected_into_fold_and_meta(tmp_path: Path
     assert "原始 Fold Agent Trace sidecar" in meta
     assert "策略探索方向" in meta
     assert "累积经验" in meta
+    for prompt in (fold, meta):
+        assert "inputs/skills_index.json" in prompt
+        assert "write_skill" in prompt
+        assert "delete_skill" in prompt
+        assert "不得自动执行" in prompt
+    assert "全部 Meta 子角色只读" in fold
     assert extracted.sha256
     assert extracted.version == extracted.sha256[:12]
 

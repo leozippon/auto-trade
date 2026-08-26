@@ -39,6 +39,14 @@ from .pit_backend import (
     PITDailyEvaluationBackend,
     ResearchPITSnapshotProvider,
 )
+from .skills import (
+    DeleteSkillTool,
+    ExperimentSkillsStore,
+    SkillsSnapshot,
+    SkillsStats,
+    WriteSkillTool,
+    latest_skills_snapshot,
+)
 from .worker import (
     InteractiveWorkerOptions,
     load_worker_options,
@@ -53,6 +61,7 @@ __all__ = [
     "EvaluationRequest",
     "EvaluationResult",
     "ExecutionMode",
+    "ExperimentSkillsStore",
     "ExperimentConfig",
     "ExperimentLedger",
     "ExperimentPipeline",
@@ -69,6 +78,8 @@ __all__ = [
     "PITDailyEvaluationBackend",
     "PaperPITData",
     "ResearchPITSnapshotProvider",
+    "SkillsSnapshot",
+    "SkillsStats",
     "RollingExperimentConfig",
     "RollingExperimentPipeline",
     "StepResult",
@@ -80,4 +91,7 @@ __all__ = [
     "period_bounds",
     "period_range",
     "run_local_interactive_worker",
+    "latest_skills_snapshot",
+    "WriteSkillTool",
+    "DeleteSkillTool",
 ]

@@ -61,6 +61,10 @@ def build_experiment_facts(
             "run_manifest_ref": "/mnt/artifacts/run_manifest.json",
             "runtime_env_ref": str(manifest.get("runtime_env_ref") or "/mnt/artifacts/runtime_env.json"),
             "data_summary_ref": str(manifest.get("data_summary_ref") or "/mnt/artifacts/data_summary.json"),
+            "skills_index_ref": str(
+                _as_mapping(manifest.get("skills")).get("index_path")
+                or "inputs/skills_index.json"
+            ),
         },
         "visibility_policy": {
             "train_visible": True,

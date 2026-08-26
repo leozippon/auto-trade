@@ -353,6 +353,68 @@ def test_meta_with_existing_prior_can_finish_without_rewriting_it(tmp_path: Path
     assert result.prior == "keep the current transferable direction"
 
 
+def test_meta_installs_skills_without_exposing_the_host_source(tmp_path: Path):
+    baseline = tmp_path / "baseline" / "main.py"
+    baseline.parent.mkdir()
+    baseline.write_text(
+        "def generate_orders(context):\n    return []\n", encoding="utf-8"
+    )
+    source = tmp_path / "experiment" / "artifacts" / "skills" / "generations" / "gen-1" / "skills"
+    item = source / "schema-notes"
+    item.mkdir(parents=True)
+    (item / "SKILL.md").write_text(
+        "# Schema Notes\n\nRead schema before selecting columns.\n",
+        encoding="utf-8",
+    )
+    learner = LLMMetaLearner(
+        llm=ScriptedLLM(
+            [*_explore_then(ToolCall("finish_meta", "finish_meta", {}), roles=())]
+        ),
+        baseline_strategy=baseline,
+        artifact_store=FilesystemArtifactStore(tmp_path / "artifacts"),
+        experiment_dir=tmp_path / "experiment",
+        runtime_root=tmp_path / "runtime",
+        max_llm_calls=2,
+        deadline_seconds=30.0,
+        use_docker=False,
+        rebuild_enabled=False,
+    )
+    result = learner(
+        {
+            "run_id": "run_skills",
+            "experiment_id": "exp",
+            "epoch_id": "epoch_002",
+            "meta_learning_id": "epoch_002",
+            "previous_prior": "keep the current transferable direction",
+            "skills_source_ref": str(source),
+        }
+    )
+
+    collected = tmp_path / "run_skills" / "workspace"
+    assert Path(result.skills_source_ref) == collected / "skills"
+    assert (collected / "skills" / "schema-notes" / "SKILL.md").read_bytes() == (
+        item / "SKILL.md"
+    ).read_bytes()
+    index = json.loads(
+        (collected / "inputs" / "skills_index.json").read_text(encoding="utf-8")
+    )
+    assert index["count"] == 1
+    public_text = (collected / "inputs" / "meta_context.json").read_text(
+        encoding="utf-8"
+    )
+    assert "skills_source_ref" not in public_text
+    assert str(source) not in public_text
+    manifest = json.loads(
+        (tmp_path / "run_skills" / "run_manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["skills"] == {
+        "index_path": "inputs/skills_index.json",
+        "count": 1,
+        "files": 1,
+        "bytes": len((item / "SKILL.md").read_bytes()),
+    }
+
+
 def test_meta_context_parent_artifact_id_is_an_opaque_strategy_ref(tmp_path: Path):
     parent_id = "strategy_epoch_002_fold_2025Q2_59852cdf4fb8"
     baseline = tmp_path / "baseline" / "main.py"

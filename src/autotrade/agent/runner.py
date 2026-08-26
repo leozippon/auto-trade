@@ -115,6 +115,8 @@ _FOLD_TOOLS = frozenset(
         "step_rollback",
         "todo",
         "validate_strategy",
+        "write_skill",
+        "delete_skill",
     }
 )
 _META_TOOLS = frozenset(
@@ -128,6 +130,8 @@ _META_TOOLS = frozenset(
         "read_file",
         "todo",
         "write_file",
+        "write_skill",
+        "delete_skill",
     }
 )
 _CLEARED_TOOL_RESULT = json.dumps(
@@ -1381,9 +1385,41 @@ _TEST_NUMBER_RE = re.compile(
 )
 _TEST_SELECTION_RE = re.compile(
     r"(根据|按照|基于|凭).{0,20}(?:test|测试).{0,20}(选|选择|保留|淘汰|采用)|"
-    r"(?:test|测试).{0,20}(更好|更差|更优|更稳).{0,16}(所以|因此|于是|选择|保留)",
+    r"(?:test|测试).{0,20}(更好|更差|更优|更稳).{0,16}(所以|因此|于是|选择|保留)|"
+    r"(?:based on|according to).{0,20}test.{0,20}(?:select|choose|retain|reject|adopt)|"
+    r"test.{0,20}(?:better|worse|superior|stable).{0,16}(?:so|therefore|select|retain)",
     re.I,
 )
+_STRICT_TEST_NUMBER_RE = re.compile(
+    r"(?:test|测试).{0,48}\d|\d.{0,48}(?:test|测试)", re.I
+)
+_STRICT_BOUNDARY_LINE_RE = re.compile(
+    r"^(?:[-*]\s*)?(?:"
+    r"(?:不得|严禁|禁止)(?:读取|使用|依赖|写入|泄露)?\s*"
+    r"(?:test\s*/\s*held-?out|held-?out\s*/\s*test)"
+    r"(?:\s*(?:数据|结果|指标|原始记录))?|"
+    r"(?:do not|must not|never)\s+(?:read|use|rely on|write|leak)\s+"
+    r"(?:test\s*/\s*held-?out|held-?out\s*/\s*test)"
+    r"(?:\s*(?:data|results?|metrics?))?"
+    r")[。.!！]?$",
+    re.I,
+)
+
+
+def strict_transferable_content_violation(text: str) -> str:
+    """Fail closed on hidden-stage content while allowing a pure boundary rule."""
+
+    for lineno, line in enumerate(text.splitlines(), start=1):
+        stripped = line.strip()
+        if not stripped or _STRICT_BOUNDARY_LINE_RE.fullmatch(stripped):
+            continue
+        if _HELDOUT_MENTION_RE.search(stripped):
+            return f"line {lineno} leaks Held-out into shared skills"
+        if _STRICT_TEST_NUMBER_RE.search(stripped):
+            return f"line {lineno} contains a Test figure in shared skills"
+        if _TEST_SELECTION_RE.search(stripped):
+            return f"line {lineno} uses Test to choose shared skill content"
+    return ""
 
 
 def prior_content_violation(text: str) -> str:

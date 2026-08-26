@@ -43,6 +43,13 @@ from .meta_inputs import (
     select_meta_review_folds,
 )
 from .prior import ExperimentPriorStore, PRIOR_MAX_CHARS
+from .skills import (
+    ExperimentSkillsStore,
+    SkillsPublication,
+    SkillsSnapshot,
+    latest_skills_snapshot,
+    resolve_collected_skills_source,
+)
 from autotrade.agent.runner import AgentSessionDeadlineExceeded
 from .config import (
     ArtifactRevision,
@@ -200,6 +207,9 @@ class RollingExperimentPipeline:
         context = dict(session_context or {})
         progress = _optional_hook(context.get("progress_hook"), "progress_hook")
         budgets = _session_budgets(self.config, context.get("resource_override"))
+        current_skills = latest_skills_snapshot(
+            self.ledger.read(), experiment_dir=self.config.experiment_dir
+        )
         retained_artifact_id = parent.artifact_id if parent is not None else None
         try:
             _publish_progress(
@@ -259,6 +269,11 @@ class RollingExperimentPipeline:
                         session_key=str(
                             context.get("session_key")
                             or fold_session_key(epoch_id, fold.fold_id)
+                        ),
+                        skills_source_ref=(
+                            str(current_skills.root)
+                            if current_skills.root is not None
+                            else ""
                         ),
                     )
                 )
@@ -353,6 +368,12 @@ class RollingExperimentPipeline:
                 test_snapshot = None
                 test_summary = {"status": "skipped_no_frozen_artifact"}
             _publish_progress(progress, "publishing", run_id=run_id)
+            skills = self._publish_or_keep_skills(
+                session.skills_source_ref,
+                current=current_skills,
+                generation_id=f"{epoch_id}_{fold.fold_id}_{run_id}",
+                run_id=run_id,
+            )
             record = {
                 "record_type": "fold",
                 "experiment_id": self.config.experiment_id,
@@ -379,6 +400,10 @@ class RollingExperimentPipeline:
                 "test_result": test_summary,
                 "test_result_ref": test_result_ref,
                 "run_manifest_ref": session.run_manifest_ref,
+                "skills_ref": skills.skills_ref or None,
+                "skills_generation_id": skills.generation_id or None,
+                **skills.stats.ledger_fields(),
+                "skills_published": skills.published,
                 "agent_trace_ref": str(
                     agent_trace_path(self.config.experiment_dir / "artifacts", run_id)
                 )
@@ -517,6 +542,9 @@ class RollingExperimentPipeline:
         deadline_exceeded = False
         try:
             context = dict(session_context or {})
+            current_skills = latest_skills_snapshot(
+                self.ledger.read(), experiment_dir=self.config.experiment_dir
+            )
             progress = _optional_hook(context.get("progress_hook"), "progress_hook")
             _publish_progress(progress, "pit_snapshot", run_id=run_id, phase="meta")
             history, agent_trace_sidecars = _development_inputs(
@@ -543,6 +571,13 @@ class RollingExperimentPipeline:
                         "data_summary_ref": meta_snapshot.data_summary_ref,
                         "parent_artifact_id": parent.artifact_id if parent else None,
                         "previous_prior": previous_prior,
+                        # Internal host source; LLMMetaLearner removes it before
+                        # writing Agent-visible meta_context or manifests.
+                        "skills_source_ref": (
+                            str(current_skills.root)
+                            if current_skills.root is not None
+                            else ""
+                        ),
                         "development_history": history,
                         "review_window": history.get("review_window"),
                         "agent_trace_sidecars": agent_trace_sidecars,
@@ -618,6 +653,12 @@ class RollingExperimentPipeline:
             elif parent is not None:
                 status = "rejected_kept_parent"
             _publish_progress(progress, "publishing", run_id=run_id)
+            skills = self._publish_or_keep_skills(
+                session.skills_source_ref,
+                current=current_skills,
+                generation_id=f"{session_id}_{run_id}",
+                run_id=run_id,
+            )
             trace_ref = agent_trace_path(
                 self.config.experiment_dir / "artifacts", run_id
             )
@@ -636,6 +677,10 @@ class RollingExperimentPipeline:
                     "prior_ref": prior_ref or None,
                     "prior_generation_id": prior_generation_id or None,
                     "prior_chars": len(prior_text),
+                    "skills_ref": skills.skills_ref or None,
+                    "skills_generation_id": skills.generation_id or None,
+                    **skills.stats.ledger_fields(),
+                    "skills_published": skills.published,
                     "status": status,
                     "modification_check": dict(session.modification_check),
                     "frozen_strategy_artifact_id": (
@@ -771,6 +816,32 @@ class RollingExperimentPipeline:
             parent,
             session_context,
             previous_prior=previous_prior,
+        )
+
+    def _publish_or_keep_skills(
+        self,
+        source_ref: str,
+        *,
+        current: SkillsSnapshot,
+        generation_id: str,
+        run_id: str,
+    ) -> SkillsPublication:
+        """Publish a validated collected workspace, or retain the ledger head."""
+
+        if not str(source_ref).strip():
+            return SkillsPublication(
+                current.skills_ref,
+                current.generation_id,
+                current.stats,
+                False,
+            )
+        source = resolve_collected_skills_source(
+            self.config.experiment_dir, run_id, source_ref
+        )
+        return ExperimentSkillsStore(self.config.experiment_dir).publish(
+            source,
+            generation_id=generation_id,
+            previous=current,
         )
 
     def _publish_or_keep_prior(

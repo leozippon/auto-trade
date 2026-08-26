@@ -396,7 +396,7 @@ def test_explore_dispatches_full_shell_commands():
     result = ExploreSubAgentEngine(
         llm=llm,
         tools=ToolRegistry([shell]),
-    ).run("inspect", role="auditor")
+    ).run("inspect", role="developer")
     assert result["digest"] == "ran full shell"
     assert shell.calls == [
         {"argv": ["python", "-V"]},

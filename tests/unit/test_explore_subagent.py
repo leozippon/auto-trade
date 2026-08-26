@@ -142,7 +142,7 @@ def test_explore_events_land_on_the_parent_fold_trace() -> None:
         event_sink=lambda event, payload: events.append((event, payload)),
     ).run(
         "inspect snapshot schema",
-        role="auditor",
+        role="developer",
         parent_call_id="call_parent",
     )
     types = [event for event, _payload in events]
@@ -151,10 +151,10 @@ def test_explore_events_land_on_the_parent_fold_trace() -> None:
     assert "explore_tool" in types
     assert types[-1] == "explore"
     assert events[0][1]["parent_call_id"] == "call_parent"
-    assert events[0][1]["role"] == "auditor"
+    assert events[0][1]["role"] == "developer"
     assert "task" not in events[0][1]
     assert events[0][1]["task_id"] == result["task_id"]
-    assert result["role"] == "auditor"
+    assert result["role"] == "developer"
     tool_event = next(payload for event, payload in events if event == "explore_tool")
     assert tool_event["tool"] == "shell"
     assert tool_event["parent_call_id"] == "call_parent"
@@ -379,6 +379,24 @@ def test_runner_attaches_explore_events_to_its_sink() -> None:
     assert "explore" in events
 
 
+def test_fold_auditor_cannot_invoke_the_registered_shell() -> None:
+    shell = DeclaredReadOnlyShell()
+    llm = ScriptedLLM(
+        [
+            ProviderResponse(tool_calls=(ToolCall("s", "shell", {"argv": ["ls"]}),)),
+            ProviderResponse(content="shell blocked"),
+        ]
+    )
+    result = ExploreSubAgentEngine(
+        llm=llm,
+        tools=ToolRegistry([shell]),
+    ).run("inspect without shell", role="auditor")
+    assert result["status"] == "completed"
+    assert result["digest"] == "shell blocked"
+    assert shell.calls == []
+    assert result["tool_calls"] == 0
+
+
 def test_explore_unknown_tool_call_is_rejected_without_invoke() -> None:
     shell = DeclaredReadOnlyShell()
     llm = ScriptedLLM(
@@ -419,6 +437,8 @@ def test_fold_explore_tools_are_writable_shell_contract(tmp_path: Path) -> None:
         "read_file",
         "grep",
         "glob",
+        "write_skill",
+        "delete_skill",
         "write_file",
         "edit_file",
         "shell",
@@ -775,6 +795,7 @@ def test_role_tool_visibility_hides_writes_from_audits(tmp_path: Path) -> None:
         for record in engine._provider_tools(allowed_explore_tools("fold", "auditor"))
     }
     assert impl == {
+        "delete_skill",
         "edit_file",
         "glob",
         "grep",
@@ -784,8 +805,9 @@ def test_role_tool_visibility_hides_writes_from_audits(tmp_path: Path) -> None:
         "todo",
         "validate_strategy",
         "write_file",
+        "write_skill",
     }
-    assert audit == {"glob", "grep", "read_file", "shell", "todo"}
+    assert audit == {"glob", "grep", "read_file", "todo"}
     fold_general = {
         _function_name(record)
         for record in engine._provider_tools(

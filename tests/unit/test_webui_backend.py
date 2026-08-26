@@ -34,6 +34,7 @@ from autotrade.pipelines.hitl_state import (
     write_control,
 )
 from autotrade.pipelines.ledger import ExperimentLedger
+from autotrade.pipelines.skills import ExperimentSkillsStore
 from autotrade.webui.manager import (
     MAX_RUNNING_EXPERIMENTS,
     ExperimentManager,
@@ -450,6 +451,28 @@ def _persistent_experiment(tmp_path: Path) -> Path:
         ),
         encoding="utf-8",
     )
+    skills_source = tmp_path / "skills-source"
+    first_skill = skills_source / "schema-notes"
+    second_skill = skills_source / "workflow-notes"
+    first_skill.mkdir(parents=True)
+    second_skill.mkdir(parents=True)
+    (first_skill / "SKILL.md").write_text(
+        "# Schema Notes\n\nRead schema first.\n", encoding="utf-8"
+    )
+    (second_skill / "SKILL.md").write_text(
+        "# Workflow Notes\n\nKeep checks bounded.\n", encoding="utf-8"
+    )
+    references = first_skill / "references"
+    references.mkdir()
+    used_bytes = sum(
+        path.stat().st_size for path in skills_source.rglob("*") if path.is_file()
+    )
+    (references / "detail.txt").write_text(
+        "x" * (512 - used_bytes), encoding="utf-8"
+    )
+    skills = ExperimentSkillsStore(directory).publish(
+        skills_source, generation_id="epoch_001_fold_2026Q1_run_001"
+    )
     ExperimentLedger(directory / "ledgers/experiment_ledger.jsonl").append(
         {
             "record_type": "fold",
@@ -459,6 +482,12 @@ def _persistent_experiment(tmp_path: Path) -> Path:
             "run_id": "run_001",
             "session_key": "epoch_001/fold_2026Q1",
             "fold_status": "frozen",
+            "skills_ref": skills.skills_ref,
+            "skills_generation_id": skills.generation_id,
+            "skills_count": skills.stats.count,
+            "skills_files": skills.stats.files,
+            "skills_bytes": skills.stats.bytes,
+            "skills_published": True,
             "run_wall_seconds": 12.5,
             "selected_step_id": "step_001",
             "steps": [
@@ -523,6 +552,12 @@ def test_active_experiment_api_hides_historical_steps_analysis_and_reports(
     home = client.get("/api/experiments").json()["experiments"][0]
     assert home["experiment_id"] == "demo"
     assert (home["completed_sessions"], home["total_sessions"]) == (1, 2)
+    assert home["skills"] == {
+        "generation_id": "epoch_001_fold_2026Q1_run_001",
+        "count": 2,
+        "files": 3,
+        "bytes": 512,
+    }
 
     detail = client.get("/api/experiments/demo").json()
     assert detail["sessions"][0]["record"]["fold_status"] == "frozen"

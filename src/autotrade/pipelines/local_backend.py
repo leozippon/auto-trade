@@ -91,6 +91,13 @@ from .config import (
 )
 from .experiment import DailyStrategyPipeline
 from .ledger import ExperimentLedger, latest_fold_records
+from .skills import (
+    SKILLS_INDEX_PATH,
+    DeleteSkillTool,
+    WriteSkillTool,
+    install_workspace_skills,
+    write_skills_index,
+)
 
 if TYPE_CHECKING:
     from autotrade.environment.llm import ChatMessage, LLMProxy, ProviderResponse
@@ -241,6 +248,10 @@ class DeterministicBaselineDeveloper:
     def __call__(self, request: FoldSessionRequest) -> FoldSessionResult:
         source = (
             request.parent.path if request.parent is not None else self.baseline_root
+        )
+        _assert_skills_absent_from_formal(
+            source,
+            request.parent.model_path if request.parent is not None else None,
         )
         revision = self.artifact_store.create_revision(
             source,
@@ -448,6 +459,7 @@ class FoldBacktestTool(SessionTimeBudgetAware):
         try:
             with self.formal_guard():
                 check = self.modification_check.invoke({})
+                _assert_skills_absent_from_formal(self.output_dir, self.models_dir)
                 revision = self.artifact_store.create_revision(
                     self.output_dir,
                     models_path=self.models_dir,
@@ -570,6 +582,8 @@ def build_fold_explore_tools(
         ReadFileTool(search_roots),
         GrepTool(search_roots),
         GlobTool(search_roots),
+        WriteSkillTool(workspace),
+        DeleteSkillTool(workspace),
         WriteFileTool(workspace),
         EditFileTool(workspace),
         SandboxShellTool(workspace, command_runner),
@@ -776,6 +790,19 @@ class LLMFoldDeveloper:
         copy_model_artifacts(source_models, models_dir)
         restore_working_artifacts_writable(output_dir, models_dir)
         inputs_dir.mkdir()
+        skills_stats = install_workspace_skills(
+            request.skills_source_ref or None,
+            workspace_root,
+            index_path=inputs_dir / "skills_index.json",
+        )
+        manifest.update(
+            skills={
+                "index_path": SKILLS_INDEX_PATH,
+                "count": skills_stats.count,
+                "files": skills_stats.files,
+                "bytes": skills_stats.bytes,
+            }
+        )
         install_workspace_reference(
             workspace_root,
             self.workspace_reference,
@@ -880,6 +907,8 @@ class LLMFoldDeveloper:
                 SandboxShellTool(safe, command_runner),
                 StrategyValidationTool(safe),
                 TodoTool(safe),
+                WriteSkillTool(safe),
+                DeleteSkillTool(safe),
                 modification,
                 backtest,
             ]
@@ -959,6 +988,19 @@ class LLMFoldDeveloper:
                 ),
             )
             result = runner.run(self._fold_instruction(request))
+            chmod_tree(inputs_dir, file_mode=0o644, dir_mode=0o755)
+            final_skills = write_skills_index(
+                workspace_root / "skills", inputs_dir / "skills_index.json"
+            )
+            chmod_tree(inputs_dir, file_mode=0o444, dir_mode=0o555)
+            manifest.update(
+                skills={
+                    "index_path": SKILLS_INDEX_PATH,
+                    "count": final_skills.count,
+                    "files": final_skills.files,
+                    "bytes": final_skills.bytes,
+                }
+            )
             selected_node = str(result.finish_value.get("node_id") or "")
             selected_revision = str(result.finish_value.get("revision_id") or "")
             if not selected_node or not selected_revision:
@@ -993,6 +1035,7 @@ class LLMFoldDeveloper:
                 # record carries it so a later Meta session can still read this
                 # run's backtest summaries after the sandbox is cleaned up.
                 run_manifest_ref=str(collected / "run_manifest.json"),
+                skills_source_ref=str(collected / "workspace" / "skills"),
             )
         except Exception as exc:
             trace.emit(
@@ -1245,6 +1288,11 @@ class LLMMetaLearner:
         search_roots = SearchRoots(safe, paths=paths)
         inputs = paths.workspace / "inputs"
         inputs.mkdir()
+        skills_stats = install_workspace_skills(
+            str(facts.get("skills_source_ref") or "") or None,
+            paths.workspace,
+            index_path=inputs / "skills_index.json",
+        )
         parent_id = str(facts.get("parent_artifact_id") or "")
         if parent_id:
             if Path(parent_id).name != parent_id or parent_id.startswith("."):
@@ -1286,6 +1334,7 @@ class LLMMetaLearner:
                 "previous_prior",
                 "session_key",
                 "agent_trace_sidecars",
+                "skills_source_ref",
             }
         }
         if parent_id:
@@ -1377,6 +1426,12 @@ class LLMMetaLearner:
                     "previous_prior": bool(previous_prior),
                 },
                 "prior_output": "/mnt/agent/workspace/PRIOR.md",
+                "skills": {
+                    "index_path": SKILLS_INDEX_PATH,
+                    "count": skills_stats.count,
+                    "files": skills_stats.files,
+                    "bytes": skills_stats.bytes,
+                },
                 "agents_md_sections_sha256": load_required_agents_md_sections().sha256,
                 "modification_constraints": replace(
                     self.regularization_constraints, is_initial_artifact=not parent_id
@@ -1434,6 +1489,8 @@ class LLMMetaLearner:
             # copy it may regularize, and the optional sandbox dependency request.
             WriteFileTool(safe),
             EditFileTool(safe),
+            WriteSkillTool(safe),
+            DeleteSkillTool(safe),
             TodoTool(safe),
             modification,
         ]
@@ -1491,7 +1548,20 @@ class LLMMetaLearner:
         )
         try:
             result = MetaLearningAgent(runner, paths.workspace).learn(instruction)
-            manifest.update(conversation_id=result.get("conversation_id"))
+            chmod_tree(inputs, file_mode=0o644, dir_mode=0o755)
+            final_skills = write_skills_index(
+                paths.workspace / "skills", inputs / "skills_index.json"
+            )
+            chmod_tree(inputs, file_mode=0o444, dir_mode=0o555)
+            manifest.update(
+                conversation_id=result.get("conversation_id"),
+                skills={
+                    "index_path": SKILLS_INDEX_PATH,
+                    "count": final_skills.count,
+                    "files": final_skills.files,
+                    "bytes": final_skills.bytes,
+                },
+            )
             # Runs after the session returns, so it is Pipeline finalization
             # rather than an Agent action: whatever the Meta left in output/ and
             # models/ must satisfy the regularization constraints before it can
@@ -1501,6 +1571,7 @@ class LLMMetaLearner:
             manifest.update(last_modification_check=check)
             revision_id = ""
             if parent_id and allowed and _check_has_changes(check):
+                _assert_skills_absent_from_formal(output_dir, models_dir)
                 validate_strategy_source(
                     (output_dir / "main.py").read_text(encoding="utf-8"),
                     filename="main.py",
@@ -1534,7 +1605,9 @@ class LLMMetaLearner:
                     self.sandbox_spec_sink(active_spec)
             # Collect first, then fail: PRIOR and the rebuild record must
             # survive a rebuild failure.
-            local.collect_artifacts(self.artifact_store.root.parent / run_id)
+            collected = local.collect_artifacts(
+                self.artifact_store.root.parent / run_id
+            )
             if rebuild_error is not None:
                 raise rebuild_error
             return MetaSessionResult(
@@ -1543,6 +1616,7 @@ class LLMMetaLearner:
                 revision_id=revision_id,
                 modification_check=check,
                 allowed=allowed,
+                skills_source_ref=str(collected / "workspace" / "skills"),
             )
         except Exception as exc:
             trace.emit(
@@ -1631,6 +1705,27 @@ def _copy_workspace_reference_tree(
         if resolved != seed_root and seed_root not in resolved.parents:
             continue
         shutil.copy2(child, dest / child.name, follow_symlinks=False)
+
+
+def _assert_skills_absent_from_formal(
+    output_dir: str | Path, models_dir: str | Path | None = None
+) -> None:
+    """Keep the shared knowledge tree out of every formal strategy revision."""
+
+    roots = (("output", Path(output_dir)),)
+    if models_dir is not None:
+        roots += (("models", Path(models_dir)),)
+    for label, root in roots:
+        if not root.exists():
+            continue
+        for path in root.rglob("*"):
+            if (path.is_dir() and path.name == "skills") or (
+                path.is_file() and path.name == "SKILL.md"
+            ):
+                relative = path.relative_to(root).as_posix()
+                raise ValueError(
+                    f"shared skills cannot enter formal {label}: {label}/{relative}"
+                )
 
 
 def _environment_phase(
