@@ -43,8 +43,9 @@ Thumbs.db
 # Vendored references (not part of the repo)
 /external_references/
 
-# Local agent workspace and worktrees
+# Local agent workspace, evaluations, and worktrees
 /.pi/
+/agent_capability_eval/
 /.worktrees/
 
 # Docs and logbook stay local
