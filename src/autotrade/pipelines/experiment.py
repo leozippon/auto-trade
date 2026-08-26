@@ -37,7 +37,11 @@ from .agent_views import (
     agent_visible_ledger_record as _agent_visible_ledger_record,
     compact_fold_history as _compact_fold_history,
 )
-from .meta_inputs import build_meta_fold_reviews, select_meta_review_folds
+from .meta_inputs import (
+    AgentTraceFullSidecar,
+    build_meta_fold_review_bundle,
+    select_meta_review_folds,
+)
 from .prior import ExperimentPriorStore, PRIOR_MAX_CHARS, latest_prior_text
 from autotrade.agent.runner import AgentSessionDeadlineExceeded
 from .config import (
@@ -522,7 +526,7 @@ class RollingExperimentPipeline:
             context = dict(session_context or {})
             progress = _optional_hook(context.get("progress_hook"), "progress_hook")
             _publish_progress(progress, "pit_snapshot", run_id=run_id, phase="meta")
-            history = _development_history(
+            history, agent_trace_sidecars = _development_inputs(
                 self.ledger.read(),
                 artifacts_root=self.config.experiment_dir / "artifacts",
             )
@@ -549,6 +553,7 @@ class RollingExperimentPipeline:
                         "previous_prior": previous_prior,
                         "development_history": history,
                         "review_window": history.get("review_window"),
+                        "agent_trace_sidecars": agent_trace_sidecars,
                         "meta_learning_memory": self._prior_meta_learning_logs(
                             session_id
                         ),
@@ -890,20 +895,35 @@ def _development_history(
     *,
     artifacts_root: str | Path | None = None,
 ) -> dict[str, object]:
-    """Meta-visible development history: whitelisted Fold and Meta projections.
+    history, _sidecars = _development_inputs(
+        records, artifacts_root=artifacts_root
+    )
+    return history
 
-    Every field crosses the Agent boundary, so it is built exclusively from
-    ``agent_views``: raw fold ids become opaque refs and Test evidence is
+
+def _development_inputs(
+    records: list[dict[str, object]],
+    *,
+    artifacts_root: str | Path | None = None,
+) -> tuple[dict[str, object], list[AgentTraceFullSidecar]]:
+    """Meta-visible development history plus internal full-trace sidecars.
+
+    Every public field crosses the Agent boundary, so it is built exclusively
+    from ``agent_views``: raw fold ids become opaque refs and Test evidence is
     limited to the compact frozen-test metric whitelist of already-completed
     Folds. Held-out never appears. ``fold_reviews`` and
     ``fold_backtest_summaries`` only cover regular Folds completed after the
     previous Meta; older Folds are already absorbed into PRIOR/Taste.
-    ``fold_reviews`` additionally carries frozen strategy source, a bounded
-    Agent Trace, and ``agent_process_summary``; those originals never enter
-    ordinary Fold prompts.
+    ``fold_reviews`` carries frozen strategy source, a bounded Agent Trace,
+    ``agent_process_summary``, and ``agent_trace_full`` sidecar metadata. The
+    full safe projection stays in the sidecar list and never enters ordinary
+    Fold prompts or ``meta_context``.
     """
 
     folds, review_window = select_meta_review_folds(records)
+    reviews, sidecars = build_meta_fold_review_bundle(
+        folds, artifacts_root=artifacts_root
+    )
     return {
         "evaluation_contract": {
             "validation": "Fold selection and iteration evidence",
@@ -914,16 +934,14 @@ def _development_history(
             _compact_fold_history(record, include_frozen_test_metrics=True)
             for record in folds
         ],
-        "fold_reviews": build_meta_fold_reviews(
-            folds, artifacts_root=artifacts_root
-        ),
+        "fold_reviews": reviews,
         "review_window": review_window,
         "meta_learning": [
             _agent_visible_ledger_record(record, include_frozen_test_metrics=True)
             for record in records
             if record.get("record_type") == "meta_learning"
         ],
-    }
+    }, sidecars
 
 
 def _optional_hook(value: object, name: str):

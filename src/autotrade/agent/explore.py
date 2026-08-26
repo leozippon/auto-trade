@@ -149,9 +149,11 @@ _FOLD_ROLE_MISSIONS = {
 }
 _META_ROLE_MISSIONS = {
     "auditor": (
-        "非空窗口检查常规 Fold Trace、process summary、冻结策略、"
-        "Train/Validation 及允许的紧凑 Test 反馈；空窗口检查 Taste、PRIOR 与输入边界；"
-        "必要时可多次"
+        "非空窗口先读 process summary 与 compact agent_trace 作索引，"
+        "再读取每个 available 完整 sidecar 检查主会话与子代理全流程，"
+        "并检查冻结策略、Train/Validation 及允许的紧凑 Test 反馈；"
+        "空窗口检查 Taste、PRIOR 与输入边界；必要时可多次。"
+        "完整 sidecar 不改变 PIT/Test/Held-out 边界，不得把原文堆进 PRIOR"
     ),
     "developer": "只读，仅能提出候选改进，不能写 PRIOR、Taste 或策略",
     "general-purpose": "可选只读跨域有界任务，不能替代 auditor",

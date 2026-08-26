@@ -304,7 +304,14 @@ def _meta_learning_facts(manifest: Mapping[str, object]) -> dict[str, object]:
             "development_inputs": {
                 key: value
                 for key, value in development_inputs.items()
-                if key in {"development_history", "experiment_ledger_full", "meta_learning_memory"}
+                if key
+                in {
+                    "agent_trace_full",
+                    "agent_traces",
+                    "development_history",
+                    "experiment_ledger_full",
+                    "meta_learning_memory",
+                }
             },
             "previous_taste_available": bool(development_inputs.get("previous_taste")),
             "previous_prior_available": bool(development_inputs.get("previous_prior")),

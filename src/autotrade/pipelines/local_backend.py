@@ -1306,12 +1306,32 @@ class LLMMetaLearner:
                 "progress_hook",
                 "meta_learning_memory",
                 "session_key",
+                "agent_trace_sidecars",
             }
         }
         if parent_id:
             public["parent_artifact_id"] = agent_visible_ref(
                 parent_id, prefix="strategy_ref"
             )
+        from autotrade.pipelines.meta_inputs import (
+            AgentTraceFullSidecar,
+            write_meta_agent_trace_sidecars,
+        )
+
+        raw_sidecars = facts.get("agent_trace_sidecars") or ()
+        if not isinstance(raw_sidecars, (list, tuple)):
+            raise TypeError("agent_trace_sidecars must be a sequence")
+        sidecars: list[AgentTraceFullSidecar] = []
+        for item in raw_sidecars:
+            if not isinstance(item, AgentTraceFullSidecar):
+                raise TypeError(
+                    "agent_trace_sidecars must be AgentTraceFullSidecar values"
+                )
+            sidecars.append(item)
+        # Materialize and fsync the referenced sidecars before publishing the
+        # atomic context index, so a crash cannot leave metadata pointing at a
+        # missing or partially-written file.
+        write_meta_agent_trace_sidecars(paths.workspace, sidecars)
         write_json_atomic(inputs / "meta_context.json", public)
         # Raw prior Meta traces, bounded by meta_memory_max_epochs: a JSONL file
         # rather than a prompt field, because it is line-oriented and can be
@@ -1358,6 +1378,21 @@ class LLMMetaLearner:
                 "development_inputs": {
                     "meta_context": "/mnt/agent/workspace/inputs/meta_context.json",
                     "meta_learning_memory": "/mnt/agent/workspace/inputs/meta_learning_memory.jsonl",
+                    "agent_traces": "/mnt/agent/workspace/inputs/agent_traces",
+                    "agent_trace_full": {
+                        "directory": "/mnt/agent/workspace/inputs/agent_traces",
+                        "available": sum(
+                            1 for item in sidecars if item.available
+                        ),
+                        "fold_count": len(sidecars),
+                        "refs": [
+                            {
+                                "path": item.relative_path,
+                                "available": item.available,
+                            }
+                            for item in sidecars
+                        ],
+                    },
                     "strategy_working_copy": "/mnt/agent/workspace/output",
                     "model_working_copy": "/mnt/agent/workspace/models",
                     "previous_taste": bool(

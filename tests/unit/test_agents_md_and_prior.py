@@ -92,6 +92,8 @@ def test_required_agents_sections_are_injected_into_fold_and_meta(tmp_path: Path
     assert "`general-purpose`" in meta
     assert "agent_trace" in meta
     assert "agent_process_summary" in meta
+    assert "agent_trace_full" in meta
+    assert "完整 sidecar" in meta
     assert "当前可迁移过程/方法快照" in meta
     assert extracted.sha256
     assert extracted.version == extracted.sha256[:12]
@@ -424,9 +426,19 @@ def test_meta_fold_reviews_include_strategy_and_agent_trace_not_heldout(tmp_path
     assert summary["daily_backtest"] == 0
     assert "heldout" not in str(summary).lower()
     assert "0.4" not in str(summary)
+    full = review["agent_trace_full"]
+    assert isinstance(full, dict)
+    assert full["available"] is True
+    assert full["events"] == 5
+    assert full["source_truncated"] is False
+    assert str(full["path"]).startswith("inputs/agent_traces/")
+    assert str(full["path"]).endswith(".jsonl")
+    assert isinstance(full["sha256"], str) and len(full["sha256"]) == 64
 
 
-def test_meta_fold_reviews_resolve_trace_from_artifacts_root(tmp_path: Path) -> None:
+def test_meta_fold_reviews_without_trace_ref_are_explicitly_unavailable(
+    tmp_path: Path,
+) -> None:
     artifacts = tmp_path / "artifacts"
     trace = artifacts / "traces" / "run_fold.jsonl"
     trace.parent.mkdir(parents=True)
@@ -447,11 +459,47 @@ def test_meta_fold_reviews_resolve_trace_from_artifacts_root(tmp_path: Path) -> 
         ],
         artifacts_root=artifacts,
     )
+    assert reviews[0]["agent_trace"] == []
+    full = reviews[0]["agent_trace_full"]
+    assert isinstance(full, dict)
+    assert full["available"] is False
+    assert full["events"] == 0
+    assert full["bytes"] == 0
+    assert full["source_truncated"] is False
+    assert full["path"] is None
+
+
+def test_meta_fold_reviews_resolve_relative_trace_ref(tmp_path: Path) -> None:
+    artifacts = tmp_path / "artifacts"
+    trace = artifacts / "traces" / "run_fold.jsonl"
+    trace.parent.mkdir(parents=True)
+    trace.write_text(
+        '{"event_type": "explore_task", "task_id": "explore_xyz", '
+        '"parent_call_id": "call_9", "role": "auditor", "task": "count rows", "status": "started"}\n',
+        encoding="utf-8",
+    )
+    reviews = build_meta_fold_reviews(
+        [
+            {
+                "record_type": "fold",
+                "epoch_id": "epoch_001",
+                "fold_id": "fold_2024Q1",
+                "run_id": "run_fold",
+                "fold_status": "frozen",
+                "agent_trace_ref": "traces/run_fold.jsonl",
+            }
+        ],
+        artifacts_root=artifacts,
+    )
     agent_trace = reviews[0]["agent_trace"]
     assert isinstance(agent_trace, list)
     assert agent_trace[0]["role"] == "auditor"
     assert "task" not in agent_trace[0]
     assert agent_trace[0]["parent_call_id"] == "call_9"
+    full = reviews[0]["agent_trace_full"]
+    assert isinstance(full, dict)
+    assert full["available"] is True
+    assert full["events"] == 1
 
 
 def test_compact_agent_trace_keeps_recent_complete_tasks() -> None:

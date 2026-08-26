@@ -220,8 +220,8 @@ def render() -> str:
         "",
         _block(
             "请从本地 development 证据提炼后续 Fold 的 Taste，并按需更新 PRIOR.md。"
-            "委托 explore：必需 auditor（非空窗口审常规 Fold Trace、process summary、冻结策略与 Train/Validation 及允许的紧凑 Test；空窗口审 Taste/PRIOR/边界，必要时多次）。可选 general-purpose 与 Explore 不能替代。全部子角色只读，只能提出候选；只由你改写 Taste/PRIOR 与可选正则化。无明确流程优化时不要改 PRIOR。"
-            "先读 `inputs/meta_context.json`（含本窗口已完成 Fold 的冻结策略投影、`agent_trace` 与 `agent_process_summary`）。把 PRIOR 当当前快照维护；无明确流程优化时不要改 PRIOR。需要时再读 `inputs/meta_learning_memory.jsonl`。"
+            "委托 explore：必需 auditor（非空窗口先读 process summary 与 compact `agent_trace`，再读每个 available 完整 sidecar，并审冻结策略与 Train/Validation 及允许的紧凑 Test；空窗口审 Taste/PRIOR/边界，必要时多次）。可选 general-purpose 与 Explore 不能替代。全部子角色只读，只能提出候选；只由你改写 Taste/PRIOR 与可选正则化。无明确流程优化时不要改 PRIOR。"
+            "先读 `inputs/meta_context.json`（含本窗口已完成 Fold 的冻结策略投影、compact `agent_trace`、`agent_process_summary` 与 `agent_trace_full` 元数据）。对每个 available sidecar，按 metadata 路径读取完整安全投影以检查全流程；不要把原文堆进 PRIOR，也不要改变 PIT/Test/Held-out 边界。把 PRIOR 当当前快照维护；无明确流程优化时不要改 PRIOR。需要时再读 `inputs/meta_learning_memory.jsonl`。"
             "不要输出逐 Fold 测试明细，不要使用任何外部资料。\n"
             "{previous_taste, development}\n\n"
             "[可选：实验级默认 Fold 探索方向]\n"

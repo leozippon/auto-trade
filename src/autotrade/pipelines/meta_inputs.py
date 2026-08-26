@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import re
+import uuid
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 from autotrade.environment.identity import agent_visible_ref
-from autotrade.environment.runtime import agent_trace_path, sanitize_for_log
+from autotrade.environment.runtime import sanitize_for_log
 from autotrade.pipelines.agent_views import agent_visible_metrics
 from autotrade.pipelines.fold_analysis import read_strategy_files
 
@@ -48,6 +52,13 @@ _BODY_KEYS = frozenset(
         "text",
     }
 )
+_FULL_OMIT_KEYS = _BODY_KEYS | {
+    "content_preview",
+    "new",
+    "old",
+    "question",
+    "reply",
+}
 _DROP_EVENT_KEYS = frozenset(
     {
         "instruction",
@@ -62,6 +73,7 @@ _LEAK_KEYS = frozenset(
         "weekly_returns",
     }
 )
+_SUMMARY_CONTENT_EVENT_TYPES = frozenset({"explore", "explore_llm", "llm_call"})
 _COMPLETED_FOLD_STATUSES = frozenset(
     {
         "baseline_missing",
@@ -75,6 +87,38 @@ _SANDBOX_PREFIXES = ("/mnt/agent", "/mnt/artifacts")
 _HOST_PATH_RE = re.compile(
     r"(?<![\w./])/(?!mnt\b)[A-Za-z_.][\w.-]*(?:/[\w.-]*)*"
 )
+AGENT_TRACE_FULL_CONTENT_CHARS = 8 * 1024
+AGENT_TRACE_FULL_MAX_FILE_BYTES = 8 * 1024 * 1024
+AGENT_TRACE_FULL_MAX_WINDOW_BYTES = 16 * 1024 * 1024
+AGENT_TRACE_FULL_RELATIVE_DIR = "inputs/agent_traces"
+
+
+class AgentTraceSourceError(ValueError):
+    """Fold Agent Trace source is required but missing or corrupt."""
+
+
+@dataclass(frozen=True)
+class AgentTraceFullSidecar:
+    """Internal full safe-projection payload for one review Fold."""
+
+    fold_ref: str
+    relative_path: str
+    sha256: str
+    events: int
+    bytes: int
+    source_truncated: bool
+    available: bool
+    payload: bytes | None
+
+    def metadata(self) -> dict[str, object]:
+        return {
+            "path": self.relative_path if self.available else None,
+            "sha256": self.sha256 or None,
+            "events": self.events,
+            "bytes": self.bytes,
+            "source_truncated": self.source_truncated,
+            "available": self.available,
+        }
 
 
 def select_meta_review_folds(
@@ -140,6 +184,96 @@ def compact_agent_trace(
         _compact_agent_event(event)
         for event in _recent_complete_trace_groups(selected, max_events=max_events)
     ]
+
+
+def project_full_agent_trace(
+    events: Sequence[Mapping[str, object]],
+    *,
+    content_chars: int = AGENT_TRACE_FULL_CONTENT_CHARS,
+) -> list[dict[str, object]]:
+    """Safe projection of every source event, in original order.
+
+    Unknown event types are included. System prompts, leak keys, and tool or
+    ask_user bodies are stripped; LLM/explore summary content is kept with a
+    per-event character cap.
+    """
+
+    return [
+        project_full_agent_event(event, content_chars=content_chars) for event in events
+    ]
+
+
+def project_full_agent_event(
+    event: Mapping[str, object],
+    *,
+    content_chars: int = AGENT_TRACE_FULL_CONTENT_CHARS,
+) -> dict[str, object]:
+    event_type = str(event.get("event_type") or "")
+    projected = _project_full_value(
+        event,
+        event_type=event_type,
+        at_root=True,
+        content_chars=content_chars,
+    )
+    if not isinstance(projected, dict):
+        projected = {"event_type": event_type}
+    sanitized = sanitize_for_log(projected)
+    result: dict[str, object]
+    if isinstance(sanitized, dict):
+        result = {str(key): item for key, item in sanitized.items()}
+    else:
+        result = {str(key): item for key, item in projected.items()}
+    return result
+
+
+def serialize_full_agent_trace(events: Sequence[Mapping[str, object]]) -> bytes:
+    """Canonical JSONL bytes for a full safe-projection sidecar."""
+
+    lines = [
+        json.dumps(
+            dict(event),
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+            allow_nan=False,
+        )
+        for event in events
+    ]
+    text = "\n".join(lines)
+    if lines:
+        text += "\n"
+    return text.encode("utf-8")
+
+
+def write_meta_agent_trace_sidecars(
+    workspace: str | Path,
+    sidecars: Sequence[AgentTraceFullSidecar],
+) -> None:
+    """Write available full projections under ``inputs/agent_traces/``."""
+
+    root = Path(workspace) / "inputs" / "agent_traces"
+    root.mkdir(parents=True, exist_ok=True)
+    written: set[str] = set()
+    for sidecar in sidecars:
+        if not sidecar.available or sidecar.payload is None:
+            continue
+        dest = (Path(workspace) / sidecar.relative_path).resolve()
+        if dest.parent != root.resolve():
+            raise ValueError("full agent-trace sidecar escaped inputs/agent_traces")
+        if dest.name in written or dest.exists():
+            raise ValueError("duplicate opaque fold_ref for agent-trace sidecar")
+        temp = dest.with_name(f".{dest.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
+        try:
+            with temp.open("xb") as handle:
+                handle.write(sidecar.payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            temp.chmod(0o444)
+            temp.replace(dest)
+        except Exception:
+            temp.unlink(missing_ok=True)
+            raise
+        written.add(dest.name)
 
 
 def _recent_complete_trace_groups(
@@ -314,12 +448,69 @@ def _summarize_args(arguments: object) -> dict[str, object] | None:
     return summary or None
 
 
-def _redact_text(value: object, *, limit: int) -> str:
+def _project_full_value(
+    value: object,
+    *,
+    event_type: str,
+    at_root: bool,
+    content_chars: int,
+) -> object:
+    if isinstance(value, Mapping):
+        projected: dict[str, object] = {}
+        for key, item in value.items():
+            name = str(key)
+            if name in _DROP_EVENT_KEYS or name in _LEAK_KEYS:
+                continue
+            if name == "content" and event_type == "user_message" and at_root:
+                continue
+            if (
+                name in {"content", "digest"}
+                and at_root
+                and event_type in _SUMMARY_CONTENT_EVENT_TYPES
+            ):
+                projected[name] = _redact_text(item, limit=content_chars)
+                continue
+            if name == "summary" and event_type == "context_compaction":
+                projected[name] = _redact_text(item, limit=content_chars)
+                continue
+            if name == "summary":
+                projected[name] = {"omitted": True, "chars": len(str(item))}
+                continue
+            if name in _FULL_OMIT_KEYS:
+                projected[name] = {"omitted": True, "chars": len(str(item))}
+                continue
+            projected[name] = _project_full_value(
+                item,
+                event_type=event_type,
+                at_root=False,
+                content_chars=content_chars,
+            )
+        return projected
+    if isinstance(value, (list, tuple)):
+        return [
+            _project_full_value(
+                item,
+                event_type=event_type,
+                at_root=False,
+                content_chars=content_chars,
+            )
+            for item in value
+        ]
+    if isinstance(value, str):
+        return _redact_host_paths(value)
+    return value
+
+
+def _redact_host_paths(value: object) -> str:
     text = str(value or "")
     stripped = text.strip()
     if stripped.startswith("/") and not stripped.startswith(_SANDBOX_PREFIXES):
         return "[host_path]"
-    return _HOST_PATH_RE.sub("[host_path]", text)[:limit]
+    return _HOST_PATH_RE.sub("[host_path]", text)
+
+
+def _redact_text(value: object, *, limit: int) -> str:
+    return _redact_host_paths(value)[:limit]
 
 
 def build_agent_process_summary(
@@ -427,10 +618,29 @@ def build_meta_fold_reviews(
 ) -> list[dict[str, object]]:
     """Per already-selected Fold: frozen artifact/ref, strategy source, Agent Trace."""
 
+    reviews, _sidecars = build_meta_fold_review_bundle(
+        records, artifacts_root=artifacts_root
+    )
+    return reviews
+
+
+def build_meta_fold_review_bundle(
+    records: Sequence[Mapping[str, object]],
+    *,
+    artifacts_root: str | Path | None = None,
+    max_file_bytes: int = AGENT_TRACE_FULL_MAX_FILE_BYTES,
+    max_window_bytes: int = AGENT_TRACE_FULL_MAX_WINDOW_BYTES,
+    content_chars: int = AGENT_TRACE_FULL_CONTENT_CHARS,
+) -> tuple[list[dict[str, object]], list[AgentTraceFullSidecar]]:
+    """Public fold reviews plus internal full safe-projection sidecars."""
+
     reviews: list[dict[str, object]] = []
+    sidecars: list[AgentTraceFullSidecar] = []
+    fold_count = 0
     for record in records:
         if record.get("record_type") not in {None, "fold"}:
             continue
+        fold_count += 1
         path = record.get("frozen_strategy_artifact_path")
         artifact_id = record.get("frozen_strategy_artifact_id")
         validation = record.get("validation_result")
@@ -440,13 +650,27 @@ def build_meta_fold_reviews(
             strategy_dir = Path(path)
             if strategy_dir.is_dir():
                 strategy_files = read_strategy_files(strategy_dir)
-        agent_trace = compact_agent_trace(
-            _read_trace_events(record, artifacts_root=artifacts_root)
+        source_events, available, source_truncated = load_fold_agent_trace_source(
+            record, artifacts_root=artifacts_root
+        )
+        agent_trace = compact_agent_trace(source_events)
+        fold_ref = agent_visible_ref(record.get("fold_id"), prefix="fold_ref")
+        sidecar_ref = agent_visible_ref(
+            f"{record.get('epoch_id')}:{record.get('fold_id')}",
+            prefix="trace_ref",
+        )
+        sidecar = _build_full_sidecar(
+            fold_ref=fold_ref,
+            sidecar_ref=sidecar_ref,
+            source_events=source_events,
+            available=available,
+            source_truncated=source_truncated,
+            content_chars=content_chars,
         )
         reviews.append(
             {
                 "epoch_id": record.get("epoch_id"),
-                "fold_id": agent_visible_ref(record.get("fold_id"), prefix="fold_ref"),
+                "fold_id": fold_ref,
                 "fold_status": record.get("fold_status"),
                 "frozen_strategy_artifact_id": (
                     agent_visible_ref(artifact_id, prefix="strategy_ref")
@@ -462,52 +686,128 @@ def build_meta_fold_reviews(
                 "strategy_files": strategy_files,
                 "agent_trace": agent_trace,
                 "agent_process_summary": build_agent_process_summary(agent_trace),
+                "agent_trace_full": sidecar.metadata(),
             }
         )
-    return reviews
+        sidecars.append(sidecar)
+    _assert_sidecar_budget(
+        sidecars,
+        fold_count=fold_count,
+        max_file_bytes=max_file_bytes,
+        max_window_bytes=max_window_bytes,
+    )
+    return reviews, sidecars
 
 
-def _read_trace_events(
+def _build_full_sidecar(
+    *,
+    fold_ref: str,
+    sidecar_ref: str,
+    source_events: Sequence[Mapping[str, object]],
+    available: bool,
+    source_truncated: bool,
+    content_chars: int,
+) -> AgentTraceFullSidecar:
+    relative_path = f"{AGENT_TRACE_FULL_RELATIVE_DIR}/{sidecar_ref}.jsonl"
+    if not available:
+        return AgentTraceFullSidecar(
+            fold_ref=fold_ref,
+            relative_path=relative_path,
+            sha256="",
+            events=0,
+            bytes=0,
+            source_truncated=False,
+            available=False,
+            payload=None,
+        )
+    projected = project_full_agent_trace(source_events, content_chars=content_chars)
+    payload = serialize_full_agent_trace(projected)
+    return AgentTraceFullSidecar(
+        fold_ref=fold_ref,
+        relative_path=relative_path,
+        sha256=hashlib.sha256(payload).hexdigest(),
+        events=len(projected),
+        bytes=len(payload),
+        source_truncated=source_truncated,
+        available=True,
+        payload=payload,
+    )
+
+
+def _assert_sidecar_budget(
+    sidecars: Sequence[AgentTraceFullSidecar],
+    *,
+    fold_count: int,
+    max_file_bytes: int,
+    max_window_bytes: int,
+) -> None:
+    written = [sidecar for sidecar in sidecars if sidecar.available]
+    if len(written) > fold_count:
+        raise ValueError(
+            "full agent-trace sidecar count "
+            f"{len(written)} exceeds review fold_count {fold_count}"
+        )
+    total = 0
+    for sidecar in written:
+        if sidecar.bytes > max_file_bytes:
+            raise ValueError(
+                f"full agent-trace sidecar exceeds {max_file_bytes} bytes"
+            )
+        total += sidecar.bytes
+    if total > max_window_bytes:
+        raise ValueError(
+            f"full agent-trace sidecar window exceeds {max_window_bytes} bytes"
+        )
+
+
+def load_fold_agent_trace_source(
     record: Mapping[str, object],
     *,
     artifacts_root: str | Path | None = None,
-) -> list[Mapping[str, object]]:
-    path = _resolve_trace_path(record, artifacts_root=artifacts_root)
-    if path is None:
-        return []
+) -> tuple[list[Mapping[str, object]], bool, bool]:
+    """Load one Fold Agent Trace. Missing ref means no Agent, not an error."""
+
+    ref = record.get("agent_trace_ref")
+    if ref is None or ref == "":
+        return [], False, False
+    if not isinstance(ref, str):
+        raise AgentTraceSourceError("agent_trace_ref must be a string path")
+    path = _resolve_existing_trace_path(ref, artifacts_root=artifacts_root)
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return []
+    except (OSError, UnicodeError) as exc:
+        raise AgentTraceSourceError("agent_trace_ref cannot be read as UTF-8") from exc
     events: list[Mapping[str, object]] = []
-    for line in lines:
+    source_truncated = False
+    for index, line in enumerate(lines, start=1):
         if not line.strip():
             continue
         try:
             payload = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(payload, dict):
-            events.append(payload)
-    return events
+        except json.JSONDecodeError as exc:
+            raise AgentTraceSourceError(
+                f"agent_trace_ref has invalid JSON at line {index}"
+            ) from exc
+        if not isinstance(payload, dict):
+            raise AgentTraceSourceError(
+                f"agent_trace_ref line {index} is not a JSON object"
+            )
+        events.append(payload)
+        if payload.get("event_type") == "trace_limit_reached":
+            source_truncated = True
+    return events, True, source_truncated
 
 
-def _resolve_trace_path(
-    record: Mapping[str, object],
+def _resolve_existing_trace_path(
+    ref: str,
     *,
     artifacts_root: str | Path | None = None,
-) -> Path | None:
-    ref = record.get("agent_trace_ref")
-    if isinstance(ref, str) and ref:
-        candidate = Path(ref)
-        if candidate.is_file():
-            return candidate
-        if artifacts_root is not None:
-            nested = Path(artifacts_root) / ref
-            if nested.is_file():
-                return nested
-    if artifacts_root is not None and record.get("run_id"):
-        candidate = agent_trace_path(artifacts_root, str(record.get("run_id")))
-        if candidate.is_file():
-            return candidate
-    return None
+) -> Path:
+    candidate = Path(ref)
+    if candidate.is_file():
+        return candidate
+    if artifacts_root is not None:
+        nested = Path(artifacts_root) / ref
+        if nested.is_file():
+            return nested
+    raise AgentTraceSourceError("agent_trace_ref is missing on disk")
