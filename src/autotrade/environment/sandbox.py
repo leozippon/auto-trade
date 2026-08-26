@@ -9,6 +9,7 @@ import re
 import shutil
 import stat
 import subprocess
+import uuid
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -90,6 +91,7 @@ class SandboxSpec:
     """Resource and capability boundary for one persistent Agent session."""
 
     image: str = DEFAULT_IMAGE
+    build_generation_id: str = ""
     user: str = "61000:61000"
     network: str = "none"
     cpus: float = 4.0
@@ -105,6 +107,13 @@ class SandboxSpec:
 
     def __post_init__(self) -> None:
         _validate_explicit_image_tag(self.image)
+        if self.build_generation_id:
+            try:
+                generation = uuid.UUID(self.build_generation_id)
+            except ValueError as exc:
+                raise ValueError("sandbox build_generation_id must be UUID4") from exc
+            if generation.version != 4 or str(generation) != self.build_generation_id:
+                raise ValueError("sandbox build_generation_id must be canonical UUID4")
         if not self.user.strip() or not self.docker_executable.strip():
             raise ValueError("sandbox user and Docker executable must be non-empty")
         if self.network != "none":
@@ -136,13 +145,20 @@ class SandboxSpec:
         with Path("/proc/meminfo").open(encoding="ascii") as stream:
             total_kib = int(next(line for line in stream if line.startswith("MemTotal:")).split()[1])
         memory = f"{max(1, int(total_kib / 1024 / 1024 * fraction))}g"
-        return cls(cpus=cpus, memory=memory, **overrides)
+        return cls(cpus=cpus, memory=memory, **overrides)  # pyright: ignore[reportArgumentType]
 
     def to_record(self) -> dict[str, object]:
         return {
-            "image": self.image, "user": self.user, "network": self.network,
-            "cpus": self.cpus, "memory": self.memory, "pids_limit": self.pids_limit,
-            "tmpfs_size": self.tmpfs_size, "gpu": self.gpu, "gpu_count": self.gpu_count,
+            "image_ref": self.image,
+            "build_generation_id": self.build_generation_id or None,
+            "user": self.user,
+            "network": self.network,
+            "cpus": self.cpus,
+            "memory": self.memory,
+            "pids_limit": self.pids_limit,
+            "tmpfs_size": self.tmpfs_size,
+            "gpu": self.gpu,
+            "gpu_count": self.gpu_count,
             "gpu_name_filter": self.gpu_name_filter,
         }
 
@@ -312,40 +328,6 @@ def probe_image_runtime(image: str, *, docker_executable: str = "docker", timeou
     return value
 
 
-def inspect_local_image_tags(image: str, *, docker_executable: str = "docker") -> list[str]:
-    _validate_explicit_image_tag(image)
-    completed = subprocess.run(
-        [docker_executable, "image", "inspect", "--format", "{{json .RepoTags}}", image],
-        capture_output=True, text=True, timeout=30, check=False,
-    )
-    if completed.returncode != 0:
-        raise RuntimeError(f"Docker image is unavailable locally: {image}")
-    try:
-        tags = json.loads(completed.stdout)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(f"Docker returned invalid tags for image {image}") from exc
-    if not isinstance(tags, list) or not tags or not all(isinstance(tag, str) and tag for tag in tags):
-        raise RuntimeError(f"Docker returned no explicit tags for image {image}")
-    return tags
-
-
-def resolve_image_identity(image: str, *, docker_executable: str = "docker") -> tuple[str, list[str]]:
-    """(image id, repo digests) for a tag — the identity of the bits that
-    actually run. Fails fast: an uninspectable image right after a successful
-    run/build is an environment inconsistency worth surfacing."""
-    completed = subprocess.run(
-        [docker_executable, "image", "inspect", "--format", "{{.Id}}|{{join .RepoDigests \",\"}}", image],
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=False,
-    )
-    if completed.returncode != 0:
-        raise RuntimeError(f"docker image inspect failed for {image!r}: {completed.stderr.strip()}")
-    image_id, _, digests = completed.stdout.strip().partition("|")
-    return image_id, [digest for digest in digests.split(",") if digest]
-
-
 class DockerSandbox:
     """One persistent, network-disabled container for an Agent session."""
 
@@ -355,10 +337,7 @@ class DockerSandbox:
         self.labels = {"adm.role": "agent-session", **dict(labels or {})}
         self.container = new_id("admsbx")
         self.session_id = new_id("sandbox_session")
-        self.image_tags: list[str] = []
         self.image_runtime: dict[str, object] = {}
-        self.image_id = ""
-        self.image_repo_digests: list[str] = []
         self.gpu_indices: list[int] = []
         self._started = False
 
@@ -404,10 +383,6 @@ class DockerSandbox:
                 self.gpu_indices = [int(item) for item in self.spec.gpu.split(",") if item.strip()]
             else:
                 self.gpu_indices = [int(item) for item in self.spec.gpu]
-        self.image_tags = inspect_local_image_tags(
-            self.spec.image,
-            docker_executable=self.spec.docker_executable,
-        )
         self.image_runtime = probe_image_runtime(
             self.spec.image,
             docker_executable=self.spec.docker_executable,
@@ -418,14 +393,12 @@ class DockerSandbox:
         if completed.returncode != 0:
             raise RuntimeError(f"failed to start persistent sandbox: {completed.stderr.strip()}")
         self._started = True
-        self.image_id, self.image_repo_digests = resolve_image_identity(
-            self.spec.image, docker_executable=self.spec.docker_executable
-        )
         self.local.write_runtime_env(
-            mode="docker", sandbox_spec=self.spec,
+            mode="docker",
+            sandbox_spec=self.spec,
             image_probe={
-                "tag": self.spec.image,
-                "available_tags": self.image_tags,
+                "image_ref": self.spec.image,
+                "build_generation_id": self.spec.build_generation_id or None,
                 "session_id": self.session_id,
                 "runtime": self.image_runtime,
             },
@@ -493,13 +466,10 @@ class DockerSandbox:
 
     def allocation_record(self) -> dict[str, object]:
         return {
-            "container": self.container, "session_id": self.session_id,
-            "image": self.spec.image, "image_tags": list(self.image_tags),
-            # Identity of what actually ran: a tag is mutable, so the manifest
-            # also records the resolved image id and any repo digests (empty
-            # for local-only builds).
-            "image_id": self.image_id, "image_repo_digests": list(self.image_repo_digests),
-            "image_runtime": dict(self.image_runtime), "allocated_gpu_indices": list(self.gpu_indices),
+            "container": self.container,
+            "session_id": self.session_id,
+            "image_runtime": dict(self.image_runtime),
+            "allocated_gpu_indices": list(self.gpu_indices),
             **self.spec.to_record(),
         }
 
@@ -636,5 +606,5 @@ def _validate_explicit_image_tag(image: str) -> None:
 __all__ = [
     "DEFAULT_HOST_FRACTION", "DEFAULT_IMAGE", "DockerSandbox",
     "LocalSandbox", "SandboxConfig", "SandboxLimits", "SandboxSpec", "hide_snapshot_slots_from_agent",
-    "inspect_local_image_tags", "link_copytree", "probe_image_runtime", "resolve_image_identity",
+    "link_copytree", "probe_image_runtime",
 ]

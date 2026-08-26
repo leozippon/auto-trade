@@ -37,6 +37,7 @@ from autotrade.environment.runtime import (
 from autotrade.environment.sandbox import (
     DockerSandbox,
     LocalSandbox,
+    SandboxConfig,
     SandboxSpec,
     link_copytree,
 )
@@ -140,6 +141,7 @@ class LocalDailyEvaluationBackend:
         results_root: str | Path,
         *,
         execution_mode: str,
+        sandbox: SandboxConfig | None = None,
         executor_factory=None,
     ) -> None:
         if execution_mode not in {"sandbox", "trusted"}:
@@ -147,6 +149,7 @@ class LocalDailyEvaluationBackend:
         self.daily_path = Path(daily_path).resolve(strict=True)
         self.results_root = Path(results_root).resolve()
         self.execution_mode = execution_mode
+        self.sandbox = sandbox or SandboxConfig()
         self.executor_factory = executor_factory
         self._daily = pd.read_parquet(self.daily_path)
         if "trade_date" not in self._daily.columns:
@@ -185,6 +188,7 @@ class LocalDailyEvaluationBackend:
             schedule=request.schedule,
             broker_profile=request.broker_profile,
             execution_mode=self.execution_mode,  # type: ignore[arg-type]
+            sandbox=self.sandbox,
         )
         replay = DailyStrategyPipeline(
             config,
@@ -1595,11 +1599,10 @@ class LLMMetaLearner:
             except RuntimeError as exc:
                 rebuild_error = exc
             else:
-                if (
-                    active_spec is not self.sandbox_spec
-                    and self.sandbox_spec_sink is not None
-                ):
-                    self.sandbox_spec_sink(active_spec)
+                if active_spec is not self.sandbox_spec:
+                    self.sandbox_spec = active_spec
+                    if self.sandbox_spec_sink is not None:
+                        self.sandbox_spec_sink(active_spec)
             # Collect first, then fail: PRIOR and the rebuild record must
             # survive a rebuild failure.
             collected = local.collect_artifacts(

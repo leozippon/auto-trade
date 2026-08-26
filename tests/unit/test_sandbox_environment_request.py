@@ -121,20 +121,59 @@ class SandboxEnvironmentRequestTest(unittest.TestCase):
             _result, _spec, manifest = self._rebuild(
                 root, {"python_packages": ["scipy==1.14.0"]}, use_docker=False
             )
-            manifest.update(agents_md_sections_sha256="ignored legacy field")
+            manifest.update(
+                agents_md_sections_sha256="ignored legacy field",
+                image_id="ignored legacy field",
+                image_repo_digests=["ignored legacy field"],
+            )
             public = json.loads(SandboxPaths(root).run_manifest.read_text(encoding="utf-8"))
             update = public["sandbox_image_update"]
             self.assertEqual(update["status"], "skipped_local_dev")
             self.assertEqual(update["request_ref"], REQUEST_REF)
             # Host build coordinates stay out of the Agent-visible copy.
-            for withheld in ("build_dir", "dockerfile_ref", "host_request_ref", "build_id",
-                             "stdout_tail", "stderr_tail"):
+            for withheld in (
+                "build_dir",
+                "dockerfile_ref",
+                "host_request_ref",
+                "build_id",
+                "stdout_tail",
+                "stderr_tail",
+                "image_id",
+                "image_repo_digests",
+            ):
                 self.assertNotIn(withheld, update)
             self.assertNotIn(str(root), json.dumps(public))
             self.assertNotIn("agents_md_sections_sha256", public)
+            self.assertNotIn("image_id", public)
+            self.assertNotIn("image_repo_digests", public)
             # The host copy keeps everything for the audit.
             host = json.loads(SandboxPaths(root).host_run_manifest.read_text(encoding="utf-8"))
             self.assertEqual(host["sandbox_image_update"], manifest.data["sandbox_image_update"])
+
+    def test_public_rebuild_record_uses_only_uuid_generation_and_image_refs(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = self._manifest(root)
+            manifest.update(
+                sandbox_image_update={
+                    "status": "ok",
+                    "base_image_ref": "autotrade-sandbox:exp-base-uuid",
+                    "image_ref": "autotrade-sandbox:exp-derived-uuid",
+                    "build_generation_id": "123e4567-e89b-42d3-a456-426614174000",
+                    "image_id": "ignored legacy value",
+                    "image_repo_digests": ["ignored legacy value"],
+                }
+            )
+            public = json.loads(
+                SandboxPaths(root).run_manifest.read_text(encoding="utf-8")
+            )["sandbox_image_update"]
+            self.assertEqual(public["image_ref"], "autotrade-sandbox:exp-derived-uuid")
+            self.assertEqual(
+                public["build_generation_id"],
+                "123e4567-e89b-42d3-a456-426614174000",
+            )
+            self.assertNotIn("image_id", public)
+            self.assertNotIn("image_repo_digests", public)
 
     def test_the_knobs_that_drive_it_are_real_config_fields(self) -> None:
         from autotrade.pipelines.config import RollingExperimentConfig

@@ -6,7 +6,7 @@ import math
 import os
 import re
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import pandas as pd
@@ -23,15 +23,16 @@ from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.data.research_release import pin_research_release
 from autotrade.environment.data.snapshot import SnapshotConfig
 from autotrade.environment.llm import (
-    LLMProxy,
     LOCAL_QWEN_MODEL,
+    LLMProxy,
     build_model_gateway,
     effective_max_output_tokens,
     model_profile,
 )
 from autotrade.environment.nl import NLConfig
 from autotrade.environment.runtime import utc_now_iso, write_json_atomic
-from autotrade.environment.sandbox import DEFAULT_IMAGE, SandboxSpec
+from autotrade.environment.sandbox import DEFAULT_IMAGE, SandboxConfig, SandboxSpec
+from autotrade.environment.sandbox_images import prepare_experiment_sandbox_image
 from autotrade.environment.strategy import StrategySchedule
 from autotrade.environment.tools.base import CommandRunner
 
@@ -50,8 +51,6 @@ from .hitl_state import (
 )
 from .interactive import InteractiveExperimentRunner
 from .ledger import ExperimentLedger
-from .prior import latest_prior_text, restore_current_from_records
-from .skills import latest_skills_snapshot
 from .local_backend import (
     DeterministicBaselineDeveloper,
     LLMFoldDeveloper,
@@ -64,6 +63,8 @@ from .pit_backend import (
     ResearchPITSnapshotProvider,
     required_release_raw_datasets,
 )
+from .prior import latest_prior_text, restore_current_from_records
+from .skills import latest_skills_snapshot
 
 _ALLOWED_PARAMS = {
     "experiment_id",
@@ -654,6 +655,31 @@ def resolve_worker_options(
     )
 
 
+def _strategy_sandbox_from_spec(spec: SandboxSpec | None) -> SandboxConfig:
+    if spec is None:
+        return SandboxConfig(image=DEFAULT_IMAGE)
+    return SandboxConfig(
+        image=spec.image,
+        docker_executable=spec.docker_executable,
+    )
+
+
+def _activate_experiment_sandbox(
+    spec: SandboxSpec,
+    *,
+    developer: LLMFoldDeveloper,
+    evaluator: PITDailyEvaluationBackend | LocalDailyEvaluationBackend,
+) -> None:
+    """Publish one active image to both Agent and formal evaluation paths."""
+
+    developer.set_sandbox_spec(spec)
+    evaluator.sandbox = replace(
+        evaluator.sandbox,
+        image=spec.image,
+        docker_executable=spec.docker_executable,
+    )
+
+
 def run_local_interactive_worker(
     options: InteractiveWorkerOptions,
     *,
@@ -674,6 +700,18 @@ def run_local_interactive_worker(
         payload = _terminal_status(completed)
         write_json_atomic(hitl / "status.json", payload)
         return payload
+    if (
+        command_runner_factory is None
+        and (options.execution_mode == "sandbox" or options.developer_mode == "llm")
+    ):
+        options = replace(
+            options,
+            agent_sandbox=prepare_experiment_sandbox_image(
+                options.agent_sandbox or SandboxSpec(gpu=None),
+                experiment_id=options.experiment_id,
+                experiment_dir=options.experiment_dir,
+            ),
+        )
     fold_gateway = llm or (
         options.llm.build_gateway("main")
         if options.developer_mode == "llm" and options.llm
@@ -696,6 +734,7 @@ def run_local_interactive_worker(
         and options.llm.compact_enabled
         else None
     )
+    strategy_sandbox = _strategy_sandbox_from_spec(options.agent_sandbox)
     if options.data_backend == "pit":
         if (
             options.raw_dir is None
@@ -718,6 +757,7 @@ def run_local_interactive_worker(
             nl_config=options.nl_config,
             nl_failure_policy=options.rolling.nl_failure_policy,
             max_intraday_row_group_rows=options.max_intraday_row_group_rows,
+            sandbox=strategy_sandbox,
         )
         trading_days = snapshots.trading_days
     else:
@@ -728,6 +768,7 @@ def run_local_interactive_worker(
             options.daily_path,
             options.experiment_dir / "artifacts" / "results",
             execution_mode=options.execution_mode,
+            sandbox=strategy_sandbox,
         )
         trading_days = evaluator.trading_days
     if options.developer_mode == "llm":
@@ -790,8 +831,13 @@ def run_local_interactive_worker(
             rebuild_enabled=options.rolling.meta_sandbox_rebuild_enabled,
             rebuild_timeout_seconds=options.rolling.meta_sandbox_rebuild_timeout_seconds,
             image_keep=options.rolling.meta_sandbox_image_keep,
-            # A derived image built here becomes the image every later Fold runs.
-            sandbox_spec_sink=developer.set_sandbox_spec,
+            # A derived image becomes the single image for both later Fold
+            # Agent sessions and every formal evaluation mode.
+            sandbox_spec_sink=lambda spec: _activate_experiment_sandbox(
+                spec,
+                developer=developer,
+                evaluator=evaluator,
+            ),
         )
         meta_enabled = True
         developer_label = "llm_fold_meta_agent"

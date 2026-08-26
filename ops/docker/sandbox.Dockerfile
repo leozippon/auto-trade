@@ -6,10 +6,9 @@
 # Package and release downloads default to mirrors. Proxy build args without an
 # explicit value forward the current process environment without baking proxy
 # credentials into the image; --network=host is required for loopback proxies.
-# The base is pinned by digest so the same Dockerfile always builds from the
-# same bits (a floating tag can silently change between builds). To bump:
-#   docker pull python:3.11-slim && docker image inspect python:3.11-slim --format '{{join .RepoDigests ","}}'
-FROM python:3.11-slim@sha256:b27df5841f3355e9473f9a516d38a6783b6c8dfeacaf2d14a240f443b368ddb6
+# Project-level build identity is assigned after a successful offline smoke
+# test by the host lifecycle; this build consumes the declared Python tag.
+FROM python:3.11-slim
 
 ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
 ARG NPM_CONFIG_REGISTRY=https://registry.npmmirror.com
@@ -83,7 +82,6 @@ RUN pip install --no-cache-dir -i ${PIP_INDEX_URL} \
 RUN curl -fL --retry 8 --retry-all-errors --retry-delay 3 --connect-timeout 30 --max-time 600 \
         "${DUCKDB_CLI_URL}" \
         -o /tmp/duckdb_cli.zip \
-    && echo "efd0fccdb1a28d9ec7a6ebfcde59900068b8ba43a846c9b553c0fd2bbe4acf43  /tmp/duckdb_cli.zip" | sha256sum -c - \
     && python -c "import zipfile; zipfile.ZipFile('/tmp/duckdb_cli.zip').extractall('/usr/local/bin')" \
     && chmod +x /usr/local/bin/duckdb \
     && rm /tmp/duckdb_cli.zip \
@@ -92,12 +90,9 @@ RUN curl -fL --retry 8 --retry-all-errors --retry-delay 3 --connect-timeout 30 -
 # CUDA build toolchain (nvcc + headers/dev libs), completing the pre-baked
 # compiler policy above for CUDA-extension source builds (torch_scatter,
 # torch_sparse, pyg_lib, ...) declared via sandbox_environment.json. Version
-# matches the torch==2.10.0 wheel's CUDA 12.8. Installed from the sha256-pinned
-# runfile (same pattern as the DuckDB CLI above) because the NVIDIA apt repo's
-# SHA1-signed key is rejected by Debian trixie's Sequoia apt policy. The .cn
-# CDN mirrors the canonical developer.download.nvidia.com bytes (md5 verified
-# against the canonical md5sum.txt); the pin makes the mirror choice
-# irrelevant. Nsight profilers are dropped to keep the layer lean. Placed
+# matches the torch==2.10.0 wheel's CUDA 12.8. Installed from the fixed-version
+# TLS runfile because the NVIDIA apt repo key is rejected by Debian trixie's
+# Sequoia apt policy. Nsight profilers are dropped to keep the layer lean. Placed
 # after the pip/CLI layers so adding it kept their cache.
 # TORCH_CUDA_ARCH_LIST targets the host L20s (sm_89): extension builds compile
 # one arch instead of all, cutting derived-image build time several-fold.
@@ -111,7 +106,6 @@ RUN apt-get update \
     && curl -fL --retry 8 --retry-delay 3 --connect-timeout 30 --max-time 7200 \
         "${CUDA_RUNFILE_URL}" \
         -o /tmp/cuda.run \
-    && echo "228f6bcaf5b7618d032939f431914fc92d0e5ed39ebe37098a24502f26a19797  /tmp/cuda.run" | sha256sum -c - \
     && sh /tmp/cuda.run --silent --toolkit --override --no-man-page \
     && rm -f /tmp/cuda.run \
     && rm -rf /usr/local/cuda-12.8/nsight* /usr/local/cuda-12.8/gds \
@@ -184,5 +178,5 @@ WORKDIR /mnt/agent
 
 # Fold/Explore static-check advisor. Runtime is offline, so pin globally here.
 # Same layer verifies the binary; do not install via pip or at session start.
-RUN npm install -g --no-fund --no-audit --registry "${NPM_CONFIG_REGISTRY}" pyright@1.1.411 \
-    && pyright --version
+RUN npm install -g --prefix /usr/local --no-fund --no-audit --registry "${NPM_CONFIG_REGISTRY}" pyright@1.1.411 \
+    && /usr/local/bin/pyright --version

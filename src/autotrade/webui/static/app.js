@@ -5694,12 +5694,12 @@ function sandboxImageNode(update) {
       (Date.parse(update.finished_at || "") -
         Date.parse(update.started_at || "")) /
       1000;
-    const pruned = Array.isArray(update.pruned_images)
-      ? update.pruned_images.length
+    const pruned = Array.isArray(update.pruned_image_refs)
+      ? update.pruned_image_refs.length
       : 0;
     return [
       "构建成功",
-      update.image,
+      update.image_ref,
       Number.isFinite(secs) ? `${secs.toFixed(1)}s` : null,
       pruned ? `清理旧镜像 ${pruned} 个` : null,
     ]
@@ -5712,16 +5712,14 @@ function sandboxImageNode(update) {
     disabled: "派生镜像构建已禁用（沿用基础镜像）",
   };
   if (notes[status]) return notes[status];
-  const tail = String(
-    update.reason || update.stderr_tail || update.stdout_tail || "",
-  ).trim();
+  const tail = String(update.reason || "").trim();
   return el(
     "div",
     {},
     el(
       "div",
       { class: "form-error" },
-      `构建未成功（${status}）${update.image ? `：${update.image}` : ""}`,
+      `构建未成功（${status}）${update.image_ref ? `：${update.image_ref}` : ""}`,
     ),
     tail ? el("pre", { class: "code-view" }, tail.slice(-2000)) : null,
   );

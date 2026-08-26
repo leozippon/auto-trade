@@ -38,9 +38,12 @@ from autotrade.environment.sandbox import (
     SandboxConfig,
     SandboxLimits,
     SandboxSpec,
-    inspect_local_image_tags,
 )
-from autotrade.environment.sandbox_images import maybe_rebuild_sandbox_image
+from autotrade.environment.sandbox_images import (
+    _gc_owned_sandbox_images,
+    maybe_rebuild_sandbox_image,
+    prepare_experiment_sandbox_image,
+)
 from autotrade.environment.strategy import (
     CN_TZ,
     AccountSnapshot,
@@ -52,6 +55,7 @@ from autotrade.environment.strategy_loader import StrategyLoadError
 from autotrade.environment.strategy_worker import BarStream, WorkerProtocolError
 from autotrade.environment.tools.base import CommandResult
 from autotrade.pipelines import DailyStrategyPipeline, StrategyExperimentConfig
+from autotrade.pipelines.worker import _activate_experiment_sandbox
 
 
 def _strategy(tmp_path: Path, source: str = "def generate_orders(context):\n    return []\n") -> Path:
@@ -160,32 +164,20 @@ def test_local_executor_bounds_streamed_output_without_communicate_buffer(tmp_pa
     assert len(result.stderr) == 64 and result.stderr_truncated
 
 
-def test_local_image_inspection_reads_only_explicit_tags():
-    completed = subprocess.CompletedProcess(
-        args=[],
-        returncode=0,
-        stdout='["autotrade-sandbox:latest"]\n',
-        stderr="",
-    )
-    with patch("autotrade.environment.sandbox.subprocess.run", return_value=completed) as run:
-        tags = inspect_local_image_tags("autotrade-sandbox:latest")
-    assert tags == ["autotrade-sandbox:latest"]
-    assert run.call_args.args[0] == [
-        "docker", "image", "inspect", "--format", "{{json .RepoTags}}",
-        "autotrade-sandbox:latest",
-    ]
-
-
 def test_persistent_sandbox_start_records_tag_session_and_runtime_probe(tmp_path: Path):
     local = LocalSandbox(tmp_path / "session")
     paths = local.prepare_layout()
-    sandbox = DockerSandbox(local, SandboxSpec(gpu=None))
+    generation_id = "123e4567-e89b-42d3-a456-426614174000"
+    sandbox = DockerSandbox(
+        local,
+        SandboxSpec(
+            image="autotrade-sandbox:exp-base-123e4567-e89b-42d3-a456-426614174000",
+            build_generation_id=generation_id,
+            gpu=None,
+        ),
+    )
     completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="container\n", stderr="")
     with (
-        patch(
-            "autotrade.environment.sandbox.inspect_local_image_tags",
-            return_value=["autotrade-sandbox:latest"],
-        ),
         patch(
             "autotrade.environment.sandbox.probe_image_runtime",
             return_value={"python_version": "3.11.13"},
@@ -195,14 +187,17 @@ def test_persistent_sandbox_start_records_tag_session_and_runtime_probe(tmp_path
         sandbox.start()
     payload = json.loads(paths.runtime_env.read_text(encoding="utf-8"))
     assert payload["image"] == {
-        "tag": "autotrade-sandbox:latest",
-        "available_tags": ["autotrade-sandbox:latest"],
+        "image_ref": sandbox.spec.image,
+        "build_generation_id": generation_id,
         "session_id": sandbox.session_id,
         "runtime": {"python_version": "3.11.13"},
     }
     allocation = sandbox.allocation_record()
     assert allocation["session_id"] == sandbox.session_id
-    assert allocation["image"] == "autotrade-sandbox:latest"
+    assert allocation["image_ref"] == sandbox.spec.image
+    assert allocation["build_generation_id"] == generation_id
+    assert "image_id" not in allocation
+    assert "image_repo_digests" not in allocation
 
 
 def test_persistent_command_timeout_keeps_sandbox_for_followup_work():
@@ -296,6 +291,103 @@ def test_real_persistent_timeout_kills_command_only_and_preserves_session(tmp_pa
         sandbox.stop()
 
 
+def test_experiment_image_prepare_is_atomic_and_resume_uses_the_same_uuid4_tag(
+    tmp_path: Path,
+):
+    experiment_dir = tmp_path / "experiment"
+    completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+
+    def docker(command, **_kwargs):
+        if command[1:3] == ["image", "inspect"]:
+            return subprocess.CompletedProcess(command, 1, "", "missing")
+        return completed
+
+    results: list[SandboxSpec] = []
+    errors: list[BaseException] = []
+
+    def prepare() -> None:
+        try:
+            results.append(
+                prepare_experiment_sandbox_image(
+                    SandboxSpec(image="autotrade-sandbox:latest", gpu=None),
+                    experiment_id="experiment_001",
+                    experiment_dir=experiment_dir,
+                )
+            )
+        except BaseException as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    with (
+        patch(
+            "autotrade.environment.sandbox_images.subprocess.run",
+            side_effect=docker,
+        ) as run,
+        patch(
+            "autotrade.environment.sandbox_images.probe_image_runtime",
+            return_value={"python_version": "3.11.13"},
+        ) as probe,
+    ):
+        threads = [threading.Thread(target=prepare) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=5)
+        assert all(not thread.is_alive() for thread in threads)
+        resumed = prepare_experiment_sandbox_image(
+            SandboxSpec(image="operator-retargeted:ignored", gpu=None),
+            experiment_id="experiment_001",
+            experiment_dir=experiment_dir,
+        )
+
+    assert errors == []
+    assert len(results) == 2
+    assert results[0].image == results[1].image == resumed.image
+    assert results[0].build_generation_id == results[1].build_generation_id
+    assert results[0].image != "autotrade-sandbox:latest"
+    assert len([call for call in run.call_args_list if call.args[0][1] == "tag"]) == 1
+    probe.assert_called_once()
+    state = json.loads(
+        (experiment_dir / "hitl/sandbox_image.json").read_text(encoding="utf-8")
+    )
+    assert state["image_ref"] == resumed.image
+    assert state["build_generation_id"] == resumed.build_generation_id
+    assert state["owned_image_refs"] == [resumed.image]
+    assert state["kind"] == "base_clone"
+    assert "operator-retargeted:ignored" not in json.dumps(state)
+    assert "image_id" not in state and "image_repo_digests" not in state
+
+
+def test_experiment_image_smoke_failure_does_not_publish_state(tmp_path: Path):
+    experiment_dir = tmp_path / "experiment"
+
+    def docker(command, **_kwargs):
+        return subprocess.CompletedProcess(
+            command,
+            1 if command[1:3] == ["image", "inspect"] else 0,
+            "",
+            "",
+        )
+
+    with (
+        patch(
+            "autotrade.environment.sandbox_images.subprocess.run",
+            side_effect=docker,
+        ) as run,
+        patch(
+            "autotrade.environment.sandbox_images.probe_image_runtime",
+            side_effect=RuntimeError("offline smoke failed"),
+        ),
+        pytest.raises(RuntimeError, match="offline smoke failed"),
+    ):
+        prepare_experiment_sandbox_image(
+            SandboxSpec(gpu=None),
+            experiment_id="experiment_001",
+            experiment_dir=experiment_dir,
+        )
+    assert not (experiment_dir / "hitl/sandbox_image.json").exists()
+    assert any(call.args[0][1:3] == ["image", "rm"] for call in run.call_args_list)
+
+
 def test_derived_sandbox_image_records_tag_and_build_uuid(tmp_path: Path):
     request_path = tmp_path / "sandbox_environment.json"
     request_path.write_text('{"python_packages":["numpy==2.4.2"]}\n', encoding="utf-8")
@@ -313,11 +405,15 @@ def test_derived_sandbox_image_records_tag_and_build_uuid(tmp_path: Path):
         ),
         patch(
             "autotrade.environment.sandbox_images.subprocess.run",
-            return_value=completed,
+            side_effect=lambda command, **_: (
+                subprocess.CompletedProcess(command, 1, "", "missing")
+                if command[1:3] == ["image", "inspect"]
+                else completed
+            ),
         ) as run,
         patch(
-            "autotrade.environment.sandbox_images.inspect_local_image_tags",
-            side_effect=lambda tag, **_: [tag],
+            "autotrade.environment.sandbox_images.probe_image_runtime",
+            return_value={"python_version": "3.11.13"},
         ),
     ):
         result, spec = maybe_rebuild_sandbox_image(
@@ -349,10 +445,249 @@ def test_derived_sandbox_image_records_tag_and_build_uuid(tmp_path: Path):
     assert "PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple" in dockerfile
     assert "NPM_CONFIG_REGISTRY=https://registry.npmmirror.com" in dockerfile
     assert "DEBIAN_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/debian" in dockerfile
-    assert result["build_id"] in result["image"]
-    assert result["image_tags"] == [result["image"]]
-    assert spec.image == result["image"]
+    assert str(result["build_generation_id"]) in str(result["image_ref"])
+    assert result["runtime"] == {"python_version": "3.11.13"}
+    assert spec.image == result["image_ref"]
+    assert spec.build_generation_id == result["build_generation_id"]
+    persisted = json.loads(
+        (tmp_path / "experiment/hitl/sandbox_image.json").read_text(encoding="utf-8")
+    )
+    assert persisted["image_ref"] == result["image_ref"]
+    assert persisted["owned_image_refs"] == [result["image_ref"]]
+    assert "image_id" not in persisted
+    assert "image_repo_digests" not in persisted
     manifest.update.assert_called_once_with(sandbox_image_update=result)
+
+
+def test_derived_image_build_failure_keeps_active_state_unpublished(tmp_path: Path):
+    request_path = tmp_path / "sandbox_environment.json"
+    request_path.write_text('{"python_packages":["numpy==2.4.2"]}\n', encoding="utf-8")
+    manifest = Mock()
+    state_path = tmp_path / "experiment/hitl/sandbox_image.json"
+    state_path.parent.mkdir(parents=True)
+    previous_state = {
+        "schema_version": 1,
+        "experiment_id": "experiment_001",
+        "image_ref": "autotrade-sandbox:experiment_001-base-existing",
+        "build_generation_id": "123e4567-e89b-42d3-a456-426614174000",
+        "base_image_ref": "autotrade-sandbox:latest",
+        "kind": "base_clone",
+    }
+    state_path.write_text(json.dumps(previous_state), encoding="utf-8")
+
+    def docker(command, **_kwargs):
+        if command[1:3] == ["image", "inspect"]:
+            return subprocess.CompletedProcess(command, 1, "", "missing")
+        if command[1] == "build":
+            return subprocess.CompletedProcess(command, 17, "", "private failure")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    with (
+        patch.dict(
+            os.environ,
+            {"HTTPS_PROXY": "http://operator:secret@127.0.0.1:54202"},
+            clear=True,
+        ),
+        patch(
+            "autotrade.environment.sandbox_images.subprocess.run", side_effect=docker
+        ) as run,
+        patch(
+            "autotrade.environment.sandbox_images.probe_image_runtime"
+        ) as probe,
+        pytest.raises(RuntimeError, match="rebuild failed"),
+    ):
+        maybe_rebuild_sandbox_image(
+            request_path,
+            base_spec=SandboxSpec(
+                image=str(previous_state["image_ref"]),
+                build_generation_id=str(previous_state["build_generation_id"]),
+                gpu=None,
+            ),
+            experiment_id="experiment_001",
+            epoch_id="epoch_001",
+            experiment_dir=tmp_path / "experiment",
+            manifest=manifest,
+            use_docker=True,
+            rebuild_enabled=True,
+            timeout_seconds=120,
+        )
+    probe.assert_not_called()
+    assert json.loads(state_path.read_text(encoding="utf-8")) == previous_state
+    result = manifest.update.call_args.kwargs["sandbox_image_update"]
+    assert result["status"] == "failed"
+    assert "secret" not in json.dumps(result)
+    build = next(call.args[0] for call in run.call_args_list if call.args[0][1] == "build")
+    assert "HTTPS_PROXY" in build
+    assert all("secret" not in part for part in build)
+
+
+def test_derived_image_smoke_failure_removes_tag_without_publishing(tmp_path: Path):
+    request_path = tmp_path / "sandbox_environment.json"
+    request_path.write_text('{"python_packages":["numpy==2.4.2"]}\n', encoding="utf-8")
+    manifest = Mock()
+
+    def docker(command, **_kwargs):
+        return subprocess.CompletedProcess(
+            command,
+            1 if command[1:3] == ["image", "inspect"] else 0,
+            "",
+            "",
+        )
+
+    with (
+        patch(
+            "autotrade.environment.sandbox_images.subprocess.run", side_effect=docker
+        ) as run,
+        patch(
+            "autotrade.environment.sandbox_images.probe_image_runtime",
+            side_effect=RuntimeError("probe broke"),
+        ),
+        pytest.raises(RuntimeError, match="smoke failed"),
+    ):
+        maybe_rebuild_sandbox_image(
+            request_path,
+            base_spec=SandboxSpec(gpu=None),
+            experiment_id="experiment_001",
+            epoch_id="epoch_001",
+            experiment_dir=tmp_path / "experiment",
+            manifest=manifest,
+            use_docker=True,
+            rebuild_enabled=True,
+            timeout_seconds=120,
+        )
+    assert not (tmp_path / "experiment/hitl/sandbox_image.json").exists()
+    assert any(call.args[0][1:3] == ["image", "rm"] for call in run.call_args_list)
+    result = manifest.update.call_args.kwargs["sandbox_image_update"]
+    assert result["status"] == "smoke_failed"
+    assert result["reason"] == "RuntimeError: sandbox runtime smoke failed"
+
+
+def test_concurrent_derived_builds_use_distinct_immutable_tags(tmp_path: Path):
+    request_path = tmp_path / "sandbox_environment.json"
+    request_path.write_text('{"python_packages":["numpy==2.4.2"]}\n', encoding="utf-8")
+    experiment_dir = tmp_path / "experiment"
+    results: list[dict[str, object]] = []
+    errors: list[BaseException] = []
+
+    def docker(command, **_kwargs):
+        if command[1:3] == ["image", "inspect"]:
+            return subprocess.CompletedProcess(command, 1, "", "missing")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    def build(epoch_id: str) -> None:
+        try:
+            result, _spec = maybe_rebuild_sandbox_image(
+                request_path,
+                base_spec=SandboxSpec(gpu=None),
+                experiment_id="experiment_001",
+                epoch_id=epoch_id,
+                experiment_dir=experiment_dir,
+                manifest=Mock(),
+                use_docker=True,
+                rebuild_enabled=True,
+                timeout_seconds=120,
+            )
+            assert result is not None
+            results.append(result)
+        except BaseException as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    with (
+        patch(
+            "autotrade.environment.sandbox_images.subprocess.run", side_effect=docker
+        ) as run,
+        patch(
+            "autotrade.environment.sandbox_images.probe_image_runtime",
+            return_value={"python_version": "3.11.13"},
+        ),
+    ):
+        threads = [
+            threading.Thread(target=build, args=(f"epoch_{index}",))
+            for index in range(2)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=5)
+        assert all(not thread.is_alive() for thread in threads)
+
+    assert errors == []
+    assert len(results) == 2
+    refs = {str(result["image_ref"]) for result in results}
+    assert len(refs) == 2
+    build_commands = [
+        call.args[0] for call in run.call_args_list if call.args[0][1] == "build"
+    ]
+    assert len(build_commands) == 2
+    built_refs = [command[command.index("--tag") + 1] for command in build_commands]
+    assert len(set(built_refs)) == 2
+    second_result = next(
+        result for result in results if result["image_ref"] == built_refs[1]
+    )
+    second_dockerfile = Path(str(second_result["dockerfile_ref"])).read_text(
+        encoding="utf-8"
+    )
+    assert f"\nFROM {built_refs[0]}\n" in second_dockerfile
+    state = json.loads(
+        (experiment_dir / "hitl/sandbox_image.json").read_text(encoding="utf-8")
+    )
+    assert state["image_ref"] == built_refs[1]
+    assert state["owned_image_refs"] == built_refs
+
+
+def test_image_gc_removes_only_exact_persisted_ownership_refs() -> None:
+    owned = [
+        "autotrade-sandbox:expa-base-11111111-1111-4111-8111-111111111111",
+        "autotrade-sandbox:expa-epoch-22222222-2222-4222-8222-222222222222",
+    ]
+    other_experiment = (
+        "autotrade-sandbox:expa-base-33333333-3333-4333-8333-333333333333"
+    )
+    completed = subprocess.CompletedProcess([], 0, "", "")
+    with patch(
+        "autotrade.environment.sandbox_images.subprocess.run", return_value=completed
+    ) as run:
+        pruned, retained = _gc_owned_sandbox_images(
+            owned,
+            keep=1,
+            keep_image=owned[-1],
+        )
+    assert pruned == [owned[0]]
+    assert retained == [owned[-1]]
+    removed_refs = [call.args[0][-1] for call in run.call_args_list]
+    assert removed_refs == [owned[0]]
+    assert other_experiment not in removed_refs
+
+
+def test_active_sandbox_update_reaches_agent_and_formal_evaluator() -> None:
+    class Developer:
+        sandbox_spec: SandboxSpec | None = None
+
+        def set_sandbox_spec(self, spec: SandboxSpec) -> None:
+            self.sandbox_spec = spec
+
+    class Evaluator:
+        sandbox = SandboxConfig(
+            image="autotrade-sandbox:experiment-base",
+            docker_executable="docker-old",
+        )
+
+    developer = Developer()
+    evaluator = Evaluator()
+    active = SandboxSpec(
+        image="autotrade-sandbox:experiment-derived",
+        build_generation_id="123e4567-e89b-42d3-a456-426614174000",
+        docker_executable="docker-new",
+        gpu=None,
+    )
+    _activate_experiment_sandbox(
+        active,
+        developer=developer,  # type: ignore[arg-type]
+        evaluator=evaluator,  # type: ignore[arg-type]
+    )
+    assert developer.sandbox_spec is active
+    assert evaluator.sandbox.image == active.image
+    assert evaluator.sandbox.docker_executable == active.docker_executable
 
 
 def test_filesystem_artifact_store_freezes_explicit_revision_identity(tmp_path: Path):
@@ -627,10 +962,6 @@ def test_persistent_sandbox_run_args_forbid_pull_network_and_privilege_escalatio
     sandbox = DockerSandbox(local, SandboxSpec(gpu=None))
     completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="container\n", stderr="")
     with (
-        patch(
-            "autotrade.environment.sandbox.inspect_local_image_tags",
-            return_value=["autotrade-sandbox:latest"],
-        ),
         patch("autotrade.environment.sandbox.probe_image_runtime", return_value={}),
         patch("autotrade.environment.sandbox.subprocess.run", return_value=completed) as run,
     ):
@@ -1160,6 +1491,9 @@ def test_the_default_sandbox_spec_allocates_the_freest_matching_gpus():
     spec = SandboxSpec()
     assert (spec.gpu, spec.gpu_count, spec.gpu_name_filter) == ("auto", 1, "L20")
     record = spec.to_record()
+    assert record["image_ref"] == "autotrade-sandbox:latest"
+    assert record["build_generation_id"] is None
+    assert "image" not in record
     assert record["gpu"] == "auto" and record["gpu_count"] == 1
     assert record["gpu_name_filter"] == "L20"
 
@@ -1187,16 +1521,11 @@ def test_persistent_sandbox_start_pins_the_selected_gpus_on_the_container(tmp_pa
     completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="container\n", stderr="")
     with (
         patch("autotrade.environment.gpu.list_gpus", return_value=_GPU_ROSTER),
-        patch(
-            "autotrade.environment.sandbox.inspect_local_image_tags",
-            return_value=["autotrade-sandbox:latest"],
-        ),
         patch("autotrade.environment.sandbox.probe_image_runtime", return_value={}),
         patch("autotrade.environment.sandbox.subprocess.run", return_value=completed) as run,
     ):
         sandbox.start()
     assert sandbox.gpu_indices == [1, 5]
-    # call 0 is the `docker run`; later calls resolve the image identity.
     command = run.call_args_list[0][0][0]
     assert command[command.index("--gpus") + 1] == "device=1,5"
     assert sandbox.allocation_record()["allocated_gpu_indices"] == [1, 5]
@@ -1209,10 +1538,6 @@ def test_a_cpu_only_sandbox_never_consults_the_gpu_selector(tmp_path: Path):
     completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="container\n", stderr="")
     with (
         patch("autotrade.environment.gpu.list_gpus", side_effect=AssertionError("selector ran")),
-        patch(
-            "autotrade.environment.sandbox.inspect_local_image_tags",
-            return_value=["autotrade-sandbox:latest"],
-        ),
         patch("autotrade.environment.sandbox.probe_image_runtime", return_value={}),
         patch("autotrade.environment.sandbox.subprocess.run", return_value=completed) as run,
     ):
