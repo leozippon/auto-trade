@@ -572,11 +572,10 @@ def test_active_experiment_api_hides_historical_steps_analysis_and_reports(
     home = client.get("/api/experiments").json()["experiments"][0]
     assert home["experiment_id"] == "demo"
     assert (home["completed_sessions"], home["total_sessions"]) == (1, 2)
-    assert home["skills"] == {
-        "count": 2,
-        "files": 3,
-        "bytes": 512,
-    }
+    assert home["skills"]["count"] == 2
+    assert home["skills"]["files"] == 3
+    assert home["skills"]["bytes"] == 512
+    assert "generation_id" in home["skills"]
 
     detail = client.get("/api/experiments/demo").json()
     assert detail["sessions"][0]["record"]["fold_status"] == "frozen"

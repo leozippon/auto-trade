@@ -2189,8 +2189,8 @@ async function renderDetailPage(experimentId, selectedKey) {
       "div",
       { class: "sub" },
       `进度 ${detail.completed_sessions ?? 0}/${detail.total_sessions ?? "?"}`,
-      detail.skills && detail.skills.generation_id
-        ? ` ｜ Skills ${detail.skills.generation_id}（${detail.skills.count ?? 0} 项）`
+      Number(detail.skills && detail.skills.count) > 0
+        ? ` ｜ Skills ${detail.skills.generation_id || ""}（${detail.skills.count} 项）`
         : " ｜ Skills 0 项",
       detail.state === "unreadable" && detail.error
         ? ` ｜ ${detail.error}`

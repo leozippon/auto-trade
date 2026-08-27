@@ -398,6 +398,7 @@ def summarize_experiment(directory: Path) -> dict[str, object]:
                     "count": skills_snapshot.stats.count,
                     "files": skills_snapshot.stats.files,
                     "bytes": skills_snapshot.stats.bytes,
+                    "generation_id": skills_snapshot.generation_id or None,
                 },
                 "completed_sessions": completed_sessions,
                 "total_sessions": total_sessions,
