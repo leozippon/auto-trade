@@ -702,8 +702,7 @@ def test_fold_and_explore_prompts_keep_roles_without_pyright_how_to() -> None:
     for role in ("`auditor`", "`developer`", "`general-purpose`", "`Explore`"):
         assert role in fold
         assert role in meta
-    assert "按任务自由委托 `explore`" in fold
-    assert "`explore` 可选" in fold
+    assert "必须 `explore(role=\"developer\")`" in fold
     assert "`finish_fold`" in fold
     assert "`finish_meta`" in meta
     assert "通常优先" not in fold

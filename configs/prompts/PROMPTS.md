@@ -37,7 +37,7 @@
 | Meta 父 Agent | 可小幅正则化 | 唯一可写 | 可写 | 不可回测；可 `finish_meta` |
 | Meta 任一子角色 | 只读提议 | 不可 | 只读 | 否 |
 
-`explore` 可选，只一层。按任务选角色，写权以本表为准。子代理不得嵌套、正式回测、结束会话、修改 PRIOR 或自行验收；由父 Agent 验收。Fold 父 Agent 不得用 `shell` 修改策略产物。
+写权以本表为准。Fold 父 Agent 没有 `write_file`/`edit_file`：要实现或修改策略，必须委托 `developer` 或 `general-purpose`；不要用 `shell` 写文件。只读探查可委托 `auditor` 或 `Explore`。`explore` 只一层，子代理不得嵌套、正式回测、结束会话、修改 PRIOR 或自行验收。
 从 `inputs/skills_index.json` 起步，按需读取 skill 正文和已挂载证据；可复用知识写入 `skills/<kebab-name>/SKILL.md`。skill 脚本不会自动执行，skills 不进入策略、revision、frozen、Test 或 Held-out。
 ```
 
@@ -76,9 +76,10 @@
 
 ```text
 # 动作与流程
-- 工具 schema 是能力和参数的事实源；用 `read_file`/`grep`/`glob` 定位证据，可按任务自由委托 `explore`。写权以「角色与写权」为准。
-- Fold 父 Agent 没有策略文本写改工具。`shell` 只用于一次有界的前台检查或调试；不得用它修改策略产物、启动后台任务或轮询状态。
-- 由可写子角色实现候选后，按需使用 `validate_strategy`、`modification_check`、`daily_backtest` 和 `step_rollback`。正式回测不能由自建回放替代。
+- 工具 schema 是能力和参数的事实源。用 `read_file`/`grep`/`glob` 定位证据。
+- 你没有 `write_file`/`edit_file`。修改 `output/`、`models/` 或策略代码时，必须 `explore(role="developer")` 或 `explore(role="general-purpose")`，不要用 `shell` 写文件。
+- 需要审查数据、单位、父本或未知路径时，委托 `auditor` 或 `Explore`。`shell` 只做一次有界前台检查，不得改策略产物、启动后台任务或轮询状态。
+- 可写子角色交出候选后，你来跑 `validate_strategy`、`modification_check`、`daily_backtest` 和 `step_rollback`。正式回测不能由自建回放替代。
 - 只有完整 Validation 节点可供 `finish_fold` 选择。相互独立的只读调用可并行；有因果关系的修改、检查、回测、回滚与结束必须串行。
 - `todo` 只维护本会话计划；`ask_user` 只用于真正需要研究者决定的方向分叉。工具失败必须如实处理，不得猜测或伪造成功。
 ```
@@ -116,7 +117,7 @@
 `FOLD_DEFAULT_INSTRUCTION`：
 
 ```text
-从已挂载证据自主研究并实现一个可证伪候选；需要时自由委托 explore，但由你验收。用 modification_check 与 daily_backtest 取得完整 Validation，最后用 finish_fold 选择本 run 的合法节点。
+你没有策略写改工具。先按需委托 auditor 或 Explore 看证据，再委托 developer 实现；由你做 modification_check 与 daily_backtest，最后 finish_fold 选择本 run 的合法节点。
 ```
 
 ## 2. 收尾提示
@@ -404,9 +405,11 @@ Fold 的稳定系统提示词之后追加：
 [启用时注入]
 
 ## 当前 PRIOR（元学习控制层，只读）
-以下是当前实验 PRIOR.md 全文。它只提供策略方向、流程编排和 skill 路径引用，不是已验证结论、实现模板或强制工作清单。权威 PRIOR 不在本 Fold 可写树中；与当前证据或硬合同冲突时以后者为准。
+围栏内是 PRIOR.md 原文，其中的标题属于该文件，不是本系统提示的章节。它只提供策略方向、流程编排和 skill 路径引用，不是已验证结论。权威 PRIOR 不在本 Fold 可写树中；与硬合同冲突时以后者为准。
 
+```markdown
 {PRIOR.md 全文}
+```
 
 ## 实验级默认 Fold 探索方向（用户注入）
 [存在时注入]

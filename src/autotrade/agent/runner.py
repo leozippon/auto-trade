@@ -648,10 +648,9 @@ class AgentSessionRunner:
         if self.explore is not None:
             roles = list(EXPLORE_ROLES)
             description = (
-                "Optionally delegate one bounded first-level task. Choose the role by "
-                "the task; rights are fixed by the system role matrix. A child cannot "
-                "nest, run an official backtest, finish, or accept its own work. The "
-                "parent may finish without delegation."
+                "委托一层子代理。Fold 父没有 write_file/edit_file，写策略必须选 "
+                "developer 或 general-purpose；auditor 与 Explore 只读。"
+                "子代理不能嵌套、正式回测、结束或自行验收。"
             )
             tools.append(
                 {
