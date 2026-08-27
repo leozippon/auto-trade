@@ -31,16 +31,21 @@ from autotrade.pipelines.worker import _restore_prior_store
 
 
 def _agents_md(root: Path, *, missing: str | None = None) -> Path:
-    sections = {
-        "Rules for Multi-Agent Cooperation": "Coordinate; identify sub-agents.",
-        "Development Principles": "Smallest complete solution.",
-        "Operational Guardrails": "Read enough before writing.",
-    }
-    parts = ["# Global Guidelines"]
-    for title, body in sections.items():
-        if title == missing:
-            continue
-        parts.append(f"## {title}\n{body}")
+    parts = [
+        "# Global Guidelines",
+        "## Rules for Multi-Agent Cooperation\nHOST_ONLY_COOPERATION",
+    ]
+    if missing != "AutoTrade Fold and Meta sessions":
+        parts.append(
+            "### AutoTrade Fold and Meta sessions\n"
+            "AUTO_ONLY_CONTRACT\n\n"
+            "| Actor | Strategy | PRIOR | Skills | Backtest/finish |\n"
+            "| --- | --- | --- | --- | --- |\n"
+            "| Fold parent | No writes | Read-only | May write | Yes |\n"
+            "| Meta parent | Optional regularization | Sole writer | May write | Finish only |\n\n"
+            "Start from inputs/skills_index.json and mounted evidence; reusable knowledge belongs in "
+            "skills/<kebab-name>/SKILL.md."
+        )
     path = root / "AGENTS.md"
     path.write_text("\n\n".join(parts) + "\n", encoding="utf-8")
     return path
@@ -57,13 +62,14 @@ def test_root_agents_md_recommends_first_level_subagents() -> None:
     assert "`developer`" in text
     assert "`Explore`" in text
     assert "`general-purpose`" in text
-    assert "A Fold may finish without calling `explore`" in text
-    assert "Meta may also finish without delegation" in text
-    assert "required role" not in text
-    assert "Do not change PRIOR" in text
+    assert "`explore` is optional and limited to one level" in text
+    assert "sub-agents cannot nest" in text
+    assert "Keep the existing PRIOR" in text
+    assert "Only this subsection is injected" in text
+    assert "surrounding host-agent cooperation rules are not injected" in text
     assert "inputs/skills_index.json" in text
     assert "skills/<kebab-name>/SKILL.md" in text
-    assert "dedicated skill tools" in text
+    assert "Writable roles should put durable, transferable knowledge" in text
     for stale in (
         "data_audit",
         "strategy_audit",
@@ -74,49 +80,34 @@ def test_root_agents_md_recommends_first_level_subagents() -> None:
         assert stale not in text
 
 
-def test_required_agents_sections_are_injected_into_fold_and_meta(tmp_path: Path) -> None:
+def test_required_agents_section_is_injected_into_fold_and_meta(tmp_path: Path) -> None:
     path = _agents_md(tmp_path)
     extracted = load_required_agents_md_sections(path)
     fold = build_system_prompt(mode="fold", agents_md_path=path)
     meta = build_system_prompt(mode="meta", agents_md_path=path)
-    for title in (
-        "Rules for Multi-Agent Cooperation",
-        "Development Principles",
-        "Operational Guardrails",
-    ):
-        assert f"## {title}" in extracted.text
-        assert f"## {title}" in fold
-        assert f"## {title}" in meta
-    assert "`auditor`" in fold
-    assert "`developer`" in fold
-    assert "`general-purpose`" in fold
-    assert "共享同一会话" in fold
-    assert "真实代码开发" in fold
+    for prompt in (extracted.text, fold, meta):
+        assert "### AutoTrade Fold and Meta sessions" in prompt
+        assert "AUTO_ONLY_CONTRACT" in prompt
+        assert "HOST_ONLY_COOPERATION" not in prompt
+    assert "Fold parent" in fold
+    assert "Meta parent" in meta
     assert "Meta 主协调者" in meta
-    assert "`auditor`" in meta
-    assert "`Explore`" in meta
-    assert "`general-purpose`" in meta
-    assert "agent_trace" in meta
-    assert "agent_process_summary" in meta
-    assert "agent_trace_full" in meta
-    assert "原始 Fold Agent Trace sidecar" in meta
-    assert "策略探索方向" in meta
-    assert "累积经验" in meta
-    for prompt in (fold, meta):
-        assert "inputs/skills_index.json" in prompt
-        assert "write_skill" in prompt
-        assert "delete_skill" in prompt
-        assert "不得自动执行" in prompt
-    assert "全部 Meta 子角色只读" in fold
+    assert "inputs/meta_context.json" in meta
+    assert "策略方向" in meta
+    assert "流程编排" in meta
+    assert "inputs/skills_index.json" in fold
+    assert "inputs/skills_index.json" in meta
+    assert "skills/<kebab-name>/SKILL.md" in fold
+    assert "skills/<kebab-name>/SKILL.md" in meta
     assert extracted.text
     assert tuple(extracted.__dataclass_fields__) == ("text",)
 
 
 def test_missing_agents_section_fails_explicitly(tmp_path: Path) -> None:
-    path = _agents_md(tmp_path, missing="Operational Guardrails")
-    with pytest.raises(AgentsMdError, match="Operational Guardrails"):
+    path = _agents_md(tmp_path, missing="AutoTrade Fold and Meta sessions")
+    with pytest.raises(AgentsMdError, match="AutoTrade Fold and Meta sessions"):
         load_required_agents_md_sections(path)
-    with pytest.raises(AgentsMdError, match="Operational Guardrails"):
+    with pytest.raises(AgentsMdError, match="AutoTrade Fold and Meta sessions"):
         build_system_prompt(mode="fold", agents_md_path=path)
     with pytest.raises(AgentsMdError, match="missing"):
         load_required_agents_md_sections(tmp_path / "absent.md")
@@ -132,7 +123,7 @@ def test_fold_system_prompt_injects_prior_full_text(tmp_path: Path) -> None:
     )
     assert prior in prompt
     assert "权威 PRIOR 不在本 Fold 可写树中" in prompt
-    assert "策略探索方向" in prompt
+    assert "策略方向" in prompt
     meta = build_system_prompt(mode="meta", agents_md_path=path)
     assert prior not in meta
     assert "工作区根的 `PRIOR.md`" in meta

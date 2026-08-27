@@ -688,30 +688,25 @@ def test_meta_runner_allows_finish_without_explore_attempt() -> None:
     assert runner._explored_roles == set()
 
 
-def test_fold_and_explore_prompts_name_pyright_meta_does_not() -> None:
+def test_fold_and_explore_prompts_keep_roles_without_pyright_how_to() -> None:
     fold = build_system_prompt(mode="fold", experiment_facts={})
     meta = build_system_prompt(mode="meta", experiment_facts={})
     command = (
         "pyright --project /opt/autotrade/pyrightconfig.json "
         "/mnt/agent/workspace /mnt/agent/output"
     )
-    assert command in fold
-    assert command in EXPLORE_SYSTEM_PROMPT
-    assert "debug 顾问" in fold
-    assert command not in meta
+    assert command not in fold
+    assert command not in EXPLORE_SYSTEM_PROMPT
     assert "pyright" not in meta
     assert command not in META_EXPLORE_SYSTEM_PROMPT
-    assert "`auditor`" in fold
-    assert "`developer`" in fold
-    assert "`general-purpose`" in fold
-    assert "`Explore`" in fold
-    assert "通常优先" in fold
-    assert "无需委托" in fold
-    assert "finish_fold` 与硬收尾不以角色或尝试次数为条件" in fold
-    assert "至少一个具体" not in fold
-    assert "`auditor`" in meta
-    assert "`Explore`" in meta
-    assert "`general-purpose`" in meta
+    for role in ("`auditor`", "`developer`", "`general-purpose`", "`Explore`"):
+        assert role in fold
+        assert role in meta
+    assert "按任务自由委托 `explore`" in fold
+    assert "explore` is optional" in fold
+    assert "finish gates" in fold
+    assert "通常优先" not in fold
+    assert "逐个读取" not in meta
     for stale in (
         "data_audit",
         "strategy_audit",
@@ -983,13 +978,12 @@ def test_single_explore_role_can_finish() -> None:
 def test_general_prompts_explain_mode_and_role() -> None:
     fold = explore_system_prompt("fold", "general-purpose")
     meta = explore_system_prompt("meta", "general-purpose")
-    assert "角色 general-purpose" in fold
-    assert "write_file/edit_file" in fold
-    assert "适合处理跨域有界任务" in fold
+    assert "一级 `general-purpose`" in fold
+    assert "修改共享策略、模型或 skills" in fold
+    assert "有界的跨域实现任务" in fold
     assert "`general-purpose`" in meta
     assert "只读" in meta
-    assert "write_file" in meta
-    assert "没有 write_file" in meta
+    assert "不能写策略、models、skills 或 PRIOR" in meta
 
 
 def test_normalize_explore_thinking_accepts_aliases() -> None:

@@ -68,16 +68,16 @@ def test_pyrightconfig_is_basic_and_excludes_pit_roots() -> None:
     assert "stubPath" not in config
 
 
-def test_fold_and_explore_prompts_name_foreground_pyright_meta_does_not() -> None:
+def test_agent_prompts_leave_pyright_how_to_out_of_system_text() -> None:
     fold = build_system_prompt(mode="fold", experiment_facts={})
     meta = build_system_prompt(mode="meta", experiment_facts={})
-    assert COMMAND in fold
-    assert COMMAND in EXPLORE_SYSTEM_PROMPT
-    assert "debug 顾问" in fold
-    assert "不得后台" in fold
+    assert COMMAND not in fold
+    assert COMMAND not in EXPLORE_SYSTEM_PROMPT
     assert COMMAND not in meta
-    assert "pyright" not in meta
     assert COMMAND not in META_EXPLORE_SYSTEM_PROMPT
+    assert "pyright" not in fold
+    assert "pyright" not in EXPLORE_SYSTEM_PROMPT
+    assert "pyright" not in meta
     assert "pi-lens" not in fold
     assert "pi-lens" not in EXPLORE_SYSTEM_PROMPT
     assert "pi-lens" not in meta

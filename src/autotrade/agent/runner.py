@@ -647,23 +647,12 @@ class AgentSessionRunner:
         tools = list(self.tools.provider_tools())
         if self.explore is not None:
             roles = list(EXPLORE_ROLES)
-            if self.config.mode in {"meta", "meta_learning"}:
-                description = (
-                    "Optionally delegate one first-level read-only role from the "
-                    "unified enum auditor/developer/general-purpose/Explore. Auditor "
-                    "is usually the best fit for process review. Every Meta sub-role, "
-                    "including developer, is read-only and may only propose candidates. "
-                    "Nested explore is forbidden; the parent may finish without delegation."
-                )
-            else:
-                description = (
-                    "Optionally delegate one first-level Fold role from the unified "
-                    "enum auditor/developer/general-purpose/Explore. Usually prefer "
-                    "auditor for review before developer for implementation. Explore "
-                    "is a read-only discovery role; the tool name remains explore. Only "
-                    "developer and general-purpose may write strategy code. Nested "
-                    "explore is forbidden; the parent may finish without delegation."
-                )
+            description = (
+                "Optionally delegate one bounded first-level task. Choose the role by "
+                "the task; rights are fixed by the system role matrix. A child cannot "
+                "nest, run an official backtest, finish, or accept its own work. The "
+                "parent may finish without delegation."
+            )
             tools.append(
                 {
                     "type": "function",

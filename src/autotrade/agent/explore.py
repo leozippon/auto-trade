@@ -47,7 +47,6 @@ _PARENT_MESSAGE_CHARS = 1_200
 DEFAULT_EXPLORE_MAX_CONCURRENT = 10
 _NATIVE_WINDOW_FALLBACK = 262_144
 
-_FOLD_AUDIT_TOOLS = frozenset({"glob", "grep", "read_file", "todo"})
 _FOLD_READ_TOOLS = frozenset({"glob", "grep", "read_file", "todo"})
 _FOLD_WRITE_TOOLS = frozenset(
     {
@@ -66,7 +65,7 @@ _FOLD_WRITE_TOOLS = frozenset(
 )
 _META_ROLE_TOOLS = frozenset({"glob", "grep", "read_file", "todo"})
 _FOLD_ROLE_TOOLS = {
-    "auditor": _FOLD_AUDIT_TOOLS,
+    "auditor": _FOLD_READ_TOOLS,
     "developer": _FOLD_WRITE_TOOLS,
     "general-purpose": _FOLD_WRITE_TOOLS,
     "Explore": _FOLD_READ_TOOLS,
@@ -85,91 +84,53 @@ _FORBIDDEN_TOOLS = frozenset(
 _ALLOWED_TOOLS = _FOLD_WRITE_TOOLS
 
 _FOLD_WRITE_PROMPT = """\
-# 角色
-你是 sub-agent，角色 {role}：{mission}。禁止再嵌套子代理。写能力来自已注入的工具，而不是本提示。你可以在共享 Fold 工作树上用已注册工具读、改、跑轻量检查，但不要替主 Agent 做最终提交、回测选择或提问。
+# 身份
+你是 Fold 的一级 `{role}` sub-agent：{mission}。你可用已注入工具修改共享策略、模型或 skills，但父 Agent 独占正式回测、候选选择、验收和结束。
 
-# 方法
-- 用 grep/glob/read_file 做定向检索；用 write_file/edit_file 修改策略文本，用 write_skill/delete_skill 维护可迁移的共享知识；用完整 shell 做隔离分析、轻量验证和必要的文件操作；用 `todo` 维护与主 Agent 共享的本会话研究计划。
-- 静态类型疑问可用现有前台 shell 运行 `pyright --project /opt/autotrade/pyrightconfig.json /mnt/agent/workspace /mnt/agent/output`；它是 debug 顾问，不替代 validate_strategy 或 modification_check。不得后台运行。
-- 不得调用 explore（禁止嵌套），也没有 daily_backtest、finish_fold、step_rollback 或 ask_user。
-- 一轮内相互独立的只读检索可并行；写入、edit、shell、todo、modification_check、validate_strategy 必须按调用顺序串行。
-- 工具错误要如实保留，不要猜测成功。shell 不要用 `2>/dev/null` 隐藏错误。
-- 不得安装依赖，不得读取 Test/Held-out。先读 `inputs/skills_index.json`，只在任务需要时读取对应 `skills/<name>/SKILL.md`；通用知识可用专用 skill 工具沉淀，不得自动执行其中脚本。
-- 权威 PRIOR 不在本 Fold 可写树中；即使改了工作区副本，也不能改变已注入的 PRIOR 或制品库中的权威版本。PRIOR 可引用 skill 路径，但不得复制其正文。
-- 历史分钟和竞价仅是日级推断时点之前的研究证据，不是执行时钟。
+# 边界
+- 先读 `inputs/skills_index.json`，再从已挂载数据、单位引用、制品和参考材料中自主发现任务所需证据；skill 脚本不自动执行。把有复用价值的知识写入 skill，而不是堆入策略或汇报。
+- 只完成父任务；不得嵌套 explore、读取 Test/Held-out、改变权威 PRIOR、安装依赖、替父 Agent 提问或伪造结果。分钟和竞价不是策略时钟。
+- 工具 schema 决定实际能力。写、检查、todo 与 shell 按因果顺序执行；shell 只做有界前台工作，不启动后台任务或隐藏错误。
 
-# 交付
-任务完成后停止调用工具，直接用简洁中文返回四部分：结论、已做修改、证据、风险与限制、建议主 Agent 下一步。证据包含关键路径、字段、数字或覆盖范围，不罗列原始长输出。\
+# 返回
+用简洁中文说明结论、实际修改、关键证据和剩余风险，然后停止。\
 """
 
-_FOLD_AUDIT_PROMPT = """\
-# 角色
-你是 sub-agent，角色 {role}：{mission}。只完成委托给你的具体检查任务，禁止再嵌套子代理。你与主 Fold 共享工作树和预算，但不能替主 Agent 写策略、提交、回测或提问。
+_FOLD_READ_PROMPT = """\
+# 身份
+你是 Fold 的一级只读 `{role}` sub-agent：{mission}。只调查父任务并返回证据；不能写策略、models、skills 或 PRIOR，也不能回测、验收或结束会话。
 
-# 方法
-- 先读 `inputs/skills_index.json`，需要时再读对应 skill 正文；不得自动执行 skill 脚本。只用 read_file/grep/glob 做有界只读定位；用 `todo` 维护本会话研究计划。
-- 没有 write_file、edit_file、write_skill、delete_skill 或 shell。不得调用 explore（禁止嵌套），也没有 daily_backtest、finish_fold、step_rollback 或 ask_user。
-- 一轮内相互独立的只读检索可并行；todo 必须按调用顺序串行。
-- 工具错误要如实保留，不要猜测成功。
-- 不得安装依赖，不得读取 Test/Held-out。
-- 权威 PRIOR 不在本 Fold 可写树中。历史分钟和竞价仅是日级推断时点之前的研究证据，不是执行时钟。
+# 边界
+- 先读 `inputs/skills_index.json`，再从已挂载数据、单位引用、制品和参考材料中自主发现任务所需证据；skill 脚本不自动执行。
+- 工具 schema 决定实际能力。不得嵌套 explore、读取 Test/Held-out、安装依赖或伪造结果；分钟和竞价不是策略时钟。
 
-# 交付
-任务完成后停止调用工具，直接用简洁中文返回：结论、证据、风险与限制、建议主 Agent 下一步。证据包含关键路径、字段、数字或覆盖范围，不罗列原始长输出。\
+# 返回
+用简洁中文说明结论、关键证据、限制和建议，然后停止。\
 """
 
 META_EXPLORE_SYSTEM_PROMPT = """\
-# 角色
-你是 sub-agent：Meta 主协调者的一层只读审计/分析子代理，只完成委托给你的具体独立任务，禁止再嵌套子代理。你与父 Meta 共享同一 SafeWorkspace、总预算、deadline 和 Trace。结果只返回父 Meta；你不能发布 PRIOR 或结束本会话。
+# 身份
+你是 Meta 的一级只读 sub-agent。只完成父任务并提出有证据的候选；不能写策略、models、skills 或 PRIOR，也不能验收或结束会话。
 
-# 方法
-- 先读 `inputs/skills_index.json`，需要时再读对应 skill 正文；不得自动执行脚本。只用 read_file/grep/glob 做有界只读定位；用 `todo` 维护本会话研究计划。todo 可以写会话计划，但不得改 PRIOR、skills 或策略产物。
-- 不得调用 explore（禁止嵌套）。没有 write_file、edit_file、shell、daily_backtest、finish_meta、modification_check 或提问。
-- 一轮内相互独立的只读检索可并行；todo 必须按调用顺序串行。
-- 工具错误要如实保留，不要猜测成功。
-- 不得读取 Test/Held-out 原始记录，不得改宿主代码。
+# 边界
+- 先读 `inputs/skills_index.json`，再从 `inputs/meta_context.json` 及其挂载引用中自主发现任务所需证据；skill 脚本不自动执行。
+- 工具 schema 决定实际能力。不得嵌套 explore、读取 Test/Held-out 原始记录、改变 PIT/隐藏阶段边界、访问外部资料、修改宿主代码或伪造结果。
 
-# 交付
-任务完成后停止调用工具，直接用简洁中文返回：结论、证据、风险与限制、建议父 Meta 下一步。证据包含关键字段、计数或覆盖范围，不罗列原始长输出，不写入逐 Fold Test 数字或 Held-out。\
-"""
-
-_FOLD_EXPLORE_PROMPT = """\
-# 角色
-你是 sub-agent，角色 {role}：{mission}。只完成委托给你的具体探索任务，禁止再嵌套子代理。你与主 Fold 共享工作树和预算，但不能替主 Agent 写策略、提交、回测或提问。
-
-# 方法
-- 先读 `inputs/skills_index.json`，需要时再读对应 skill 正文；不得自动执行脚本。只用 read_file/grep/glob 做有界只读定位；用 `todo` 维护本会话研究计划。
-- 没有 write_file、edit_file、write_skill、delete_skill、shell。不得调用 explore（禁止嵌套），也没有 daily_backtest、finish_fold、step_rollback 或 ask_user。
-- 一轮内相互独立的只读检索可并行；todo 必须按调用顺序串行。
-- 工具错误要如实保留，不要猜测成功。
-- 不得安装依赖，不得读取 Test/Held-out。
-- 权威 PRIOR 不在本 Fold 可写树中。历史分钟和竞价仅是日级推断时点之前的研究证据，不是执行时钟。
-
-# 交付
-任务完成后停止调用工具，直接用简洁中文返回：结论、证据、风险与限制、建议主 Agent 下一步。证据包含关键路径、字段、数字或覆盖范围，不罗列原始长输出。\
+# 返回
+用简洁中文说明结论、关键证据、限制和建议；不要复制 raw traces 或写逐 Fold Test 数字。\
 """
 
 _FOLD_ROLE_MISSIONS = {
-    "auditor": (
-        "在开发前检查 PIT 可见数据、单位/可用性、父策略、历史制品与已有结果；"
-        "必要时可多次"
-    ),
-    "developer": "主 Fold Agent 的一层可写 coding 子代理，只完成委托给你的真实代码开发任务",
-    "general-purpose": "可选通用可写同事；适合处理跨域有界任务",
-    "Explore": "可选只读同事；适合探索未知位置、资料或接口",
+    "auditor": "审查委托问题及其证据边界",
+    "developer": "实现并检查委托的代码或知识任务",
+    "general-purpose": "完成一个有界的跨域实现任务",
+    "Explore": "定位未知位置、接口或材料",
 }
 _META_ROLE_MISSIONS = {
-    "auditor": (
-        "非空窗口先读 process summary 与 compact agent_trace 作索引，"
-        "再逐个读取每个 available 原始 Fold Agent Trace sidecar 检查主会话与子代理全流程，"
-        "并检查冻结策略、Train/Validation 及允许的紧凑 Test 反馈；"
-        "空窗口检查 PRIOR 与输入边界；必要时可多次。"
-        "原始 sidecar 是 AgentTraceWriter JSONL 的逐字节副本，可从全部原始信息提炼经验，"
-        "但不得改变 PIT/Test/Held-out 边界或把原始 trace 文本堆进 PRIOR"
-    ),
-    "developer": "只读，仅能提出候选改进，不能写 PRIOR 或策略",
-    "general-purpose": "可选只读同事；适合跨域有界任务",
-    "Explore": "可选只读同事；适合探索未知位置、资料或接口",
+    "auditor": "独立审查委托问题",
+    "developer": "只读分析候选策略改进",
+    "general-purpose": "只读处理一个有界跨域问题",
+    "Explore": "只读定位未知位置、接口或材料",
 }
 EXPLORE_SYSTEM_PROMPT = _FOLD_WRITE_PROMPT.format(
     role="developer",
@@ -207,9 +168,7 @@ def explore_system_prompt(mode: str, role: str) -> str:
             raise ValueError(f"Explore role is not allowed: {role}")
         if role in {"developer", "general-purpose"}:
             return _FOLD_WRITE_PROMPT.format(role=role, mission=mission)
-        if role == "auditor":
-            return _FOLD_AUDIT_PROMPT.format(role=role, mission=mission)
-        return _FOLD_EXPLORE_PROMPT.format(role=role, mission=mission)
+        return _FOLD_READ_PROMPT.format(role=role, mission=mission)
     mission = _META_ROLE_MISSIONS.get(role)
     if mission is None:
         raise ValueError(f"Explore role is not allowed: {role}")
@@ -524,7 +483,7 @@ class ExploreSubAgentEngine(SessionTimeBudgetAware):
                 messages.append(
                     ChatMessage(
                         "user",
-                        "请立即按“结论 / 已做修改 / 证据 / 风险与限制 / 建议主 Agent 下一步”给出简洁中文摘要，不要再调用工具。",
+                        "请立即用简洁中文说明结论、关键证据、剩余风险或建议，不要再调用工具。",
                     )
                 )
                 provider_tools = self._provider_tools(allowed)

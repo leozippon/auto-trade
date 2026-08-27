@@ -517,11 +517,10 @@ def test_prompt_and_facts_encode_daily_json_and_offline_meta_boundaries(
 ):
     prompt = build_system_prompt(mode="fold", experiment_facts={"fold": "visible"})
     assert "generate_orders(context)" in prompt
-    assert "严格 JSON 订单数组" in prompt
+    assert "严格 JSON 往返的订单数组" in prompt
     assert "分钟策略时钟" in prompt
-    assert "context.bars` 只包含当前评估区间" in prompt
-    assert 'context.asof_dir + "/daily"' in prompt
-    assert "没有真实候选时返回 `[]`" in prompt
+    assert "不能假定 `context.bars` 含完整历史" in prompt
+    assert "实际挂载清单、schema、单位引用" in prompt
     assert "Test" in prompt and "Held-out" in prompt
     # The prohibition list carries the item-6 execution-model rules.
     prohibitions = prompt[prompt.index("# 禁止事项") :]
@@ -532,16 +531,20 @@ def test_prompt_and_facts_encode_daily_json_and_offline_meta_boundaries(
         "伪造工具结果",
     ):
         assert rule in prohibitions
+    meta_prompt = build_system_prompt(mode="meta", experiment_facts={})
     assert "离线 Meta 主协调者" in META_SYSTEM_PROMPT
+    assert "# 核心执行合同" not in meta_prompt
+    assert "`buy`/`sell` action" in meta_prompt
+    assert "不早于 `context.inference_at`" in meta_prompt
     # The Meta session is offline and evidence-bounded, may regularize under
     # the modification constraints, and may declare its own image dependencies.
     for rule in (
         "不得读取当前或未来 Test、Held-out 原始记录",
         "不得运行回测",
-        "注入的本地 development 制品在 `inputs/` 下",
+        "`inputs/meta_context.json`",
         "`modification_check`",
         "sandbox_environment.json",
-        "不能出现焊接的日历日期",
+        "焊接的日历日期",
     ):
         assert rule in META_SYSTEM_PROMPT
 
@@ -557,17 +560,18 @@ def test_prompt_and_facts_encode_daily_json_and_offline_meta_boundaries(
     assert facts["meta_learning"]["prior_output_path"].endswith("PRIOR.md")
 
 
-def test_fold_prompt_and_strategy_reference_encode_the_performance_contract():
+def test_fold_prompt_keeps_hard_boundaries_and_leaves_how_tos_mounted():
     prompt = build_system_prompt(mode="fold", experiment_facts={})
     for rule in (
-        "尽早调用 `daily_backtest`",
-        "不要用 `workspace/` 里的自建回放代替 `daily_backtest`",
-        "一次有界前台调用",
-        "不得用后台进程",
-        "每次调用先核对 `context.asof_version`",
-        "不要在每个日频调用中全量重读",
+        "自由检查已挂载的事实",
+        "不得从名称、日期或路径推断隐藏区间",
+        "正式回测不能由自建回放替代",
+        "不得用它修改策略产物、启动后台任务或轮询状态",
     ):
         assert rule in prompt
+    assert "pyright --project" not in prompt
+    assert "pandas.read_parquet" not in prompt
+    assert 'context.asof_dir + "/daily"' not in prompt
 
     reference = Path("configs/agent_output_template/README.md").read_text(
         encoding="utf-8"

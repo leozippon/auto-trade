@@ -1,7 +1,8 @@
-"""Load the three AGENTS.md sections Fold/Meta system prompts must include.
+"""Load the AGENTS.md AutoTrade contract Fold/Meta system prompts must include.
 
-The repository-root ``AGENTS.md`` is the only source for those section bodies.
-This module extracts them at runtime; it does not copy the prose into Python.
+The repository-root ``AGENTS.md`` is the only source for that section body.
+Host Multi-Agent Cooperation rules (Sleep, inherit_context, AGENTS.md handoff)
+are for this coding agent, not for Fold/Meta sessions.
 """
 
 from __future__ import annotations
@@ -9,11 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-REQUIRED_AGENTS_MD_SECTIONS = (
-    "Rules for Multi-Agent Cooperation",
-    "Development Principles",
-    "Operational Guardrails",
-)
+REQUIRED_AGENTS_MD_SECTIONS = ("AutoTrade Fold and Meta sessions",)
 
 
 class AgentsMdError(ValueError):
@@ -32,9 +29,9 @@ def default_agents_md_path() -> Path:
 def load_required_agents_md_sections(
     path: str | Path | None = None,
 ) -> AgentsMdSections:
-    """Return the three required sections joined in documented order.
+    """Return the AutoTrade Fold/Meta contract section.
 
-    Missing file or missing any named ``##`` section is an explicit failure.
+    Missing file or missing the named heading is an explicit failure.
     """
 
     source = Path(path) if path is not None else default_agents_md_path()
@@ -49,18 +46,40 @@ def load_required_agents_md_sections(
     return AgentsMdSections(text=text)
 
 
+def _heading_level(line: str) -> int | None:
+    stripped = line.strip()
+    if not stripped.startswith("#"):
+        return None
+    hashes = len(stripped) - len(stripped.lstrip("#"))
+    if hashes < 1 or hashes > 6:
+        return None
+    if len(stripped) <= hashes or stripped[hashes] != " ":
+        return None
+    return hashes
+
+
 def _extract_section(body: str, title: str, source: Path) -> str:
-    heading = f"## {title}"
     lines = body.splitlines()
-    start = next((index for index, line in enumerate(lines) if line.strip() == heading), -1)
+    start = -1
+    level = 0
+    for index, line in enumerate(lines):
+        level_here = _heading_level(line)
+        if level_here is None:
+            continue
+        heading_title = line.strip().lstrip("#").strip()
+        if heading_title == title and level_here in {2, 3}:
+            start = index
+            level = level_here
+            break
     if start < 0:
         raise AgentsMdError(f"AGENTS.md is missing required section {title!r}: {source}")
     end = start + 1
     while end < len(lines):
-        current = lines[end]
-        if current.startswith("## ") and not current.startswith("### "):
+        next_level = _heading_level(lines[end])
+        if next_level is not None and next_level <= level:
             break
         end += 1
+    heading = lines[start].strip()
     section = "\n".join(lines[start:end]).strip()
     if not section[len(heading) :].strip():
         raise AgentsMdError(f"AGENTS.md section {title!r} is empty: {source}")

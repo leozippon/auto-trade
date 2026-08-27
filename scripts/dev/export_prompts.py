@@ -25,12 +25,9 @@ from _bootstrap import add_repo_src
 
 add_repo_src(__file__)
 
-from autotrade.agent.compact import COMPACT_SYSTEM_PROMPT
-from autotrade.agent.explore import (
-    META_EXPLORE_SYSTEM_PROMPT,
-    explore_system_prompt,
-)
 from autotrade.agent.agents_md import load_required_agents_md_sections
+from autotrade.agent.compact import COMPACT_SYSTEM_PROMPT
+from autotrade.agent.explore import explore_system_prompt
 from autotrade.agent.prompts import (
     CONVERGENCE_PHASE_PROMPT,
     DEFAULT_ANTI_OVERFIT_PROMPT,
@@ -43,10 +40,8 @@ from autotrade.agent.prompts import (
     FOLD_PROHIBITIONS,
     FOLD_ROLE_SECTION,
     FOLD_STATIC_SECTIONS,
-    FOLD_SUBAGENT_CONTRACT,
     FOLD_SUBMIT_CONTRACT,
     HARD_FINALIZATION_SYSTEM_PROMPT,
-    META_PHASE_CONTRACT,
     META_SYSTEM_PROMPT,
     RUNTIME_SYSTEM_PROMPT,
     STEP_TREE_SECTION,
@@ -105,19 +100,13 @@ def render() -> str:
         "",
         "## 1. Fold Agent 系统提示词",
         "",
-        "运行时系统提示词先注入仓库根 `AGENTS.md` 的三个完整 section，再接本项目 Fold 子代理合同，然后是六个稳定区块。",
+        "运行时系统提示词先注入仓库根 `AGENTS.md` 的 `AutoTrade Fold and Meta sessions` subsection，再接六个稳定 Fold 区块。",
         "",
-        "### 1.0 仓库 AGENTS 三节",
+        "### 1.0 仓库 AutoTrade 合同",
         "",
-        "运行时从仓库根 `AGENTS.md` 抽取，代码不复制正文，也不在 manifest 另存内容指纹；精确 Prompt 证据由原始 Agent Trace 承担。当前抽取如下：",
+        "运行时只抽取这一 subsection；代码不复制正文，精确 Prompt 证据由原始 Agent Trace 承担。当前抽取如下：",
         "",
         _block(load_required_agents_md_sections().text),
-        "",
-        "### 1.0b Fold 子代理合同",
-        "",
-        "`FOLD_SUBAGENT_CONTRACT`：",
-        "",
-        _block(FOLD_SUBAGENT_CONTRACT),
         "",
         "### 1.1 角色与目标",
         "",
@@ -203,11 +192,7 @@ def render() -> str:
         "",
         "## 4. 离线 Meta Agent 系统提示词",
         "",
-        "Meta 同样先注入上述 AGENTS 三节，再接本项目阶段身份，然后是 `META_SYSTEM_PROMPT`。",
-        "",
-        "`META_PHASE_CONTRACT`：",
-        "",
-        _block(META_PHASE_CONTRACT),
+        "Meta 同样先注入上述 AGENTS AutoTrade subsection，再接 `META_SYSTEM_PROMPT`；不会附加完整 Fold runtime essay。",
         "",
         "`META_SYSTEM_PROMPT`：",
         "",
@@ -240,7 +225,7 @@ def render() -> str:
         "",
         _block(explore_system_prompt("fold", "auditor")),
         "",
-        "Fold 父会话通常优先用 `auditor` 审计，再用 `developer` 实现；无需委托时也可直接完成。只有 `developer` 与 `general-purpose` 可写策略并使用 `write_skill`/`delete_skill`；Fold 父会话也可使用专用 skill 工具。`auditor` 可见 `read_file`/`grep`/`glob`/`shell`/`todo`，shell 只读；`Explore` 可见 `read_file`/`grep`/`glob`/`todo`，无 shell。禁止嵌套。",
+        "父会话可按任务自由选择或省略委托。只有 `developer` 与 `general-purpose` 可写策略和 skills；`auditor` 与 `Explore` 只有只读定位及 `todo`，无 shell。所有角色禁止嵌套。",
         "",
         "### 5.3 Fold general-purpose / Explore",
         "",
@@ -258,9 +243,7 @@ def render() -> str:
         "",
         _block(explore_system_prompt("meta", "auditor")),
         "",
-        "Meta 需要独立复盘时可用 `auditor`；无需委托时也可直接完成。统一枚举还含 `developer`、`general-purpose`、`Explore`，全部只读，只能提出候选。共享 `META_EXPLORE_SYSTEM_PROMPT` 主体，工具面仅 `read_file`/`grep`/`glob`/`todo`。",
-        "",
-        _block(META_EXPLORE_SYSTEM_PROMPT),
+        "Meta 四个角色全部只读，只能提出候选，工具面仅 `read_file`/`grep`/`glob`/`todo`。",
         "",
         "## 6. Context Compaction 系统提示词",
         "",

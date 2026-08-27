@@ -10,7 +10,7 @@ from typing import cast
 
 import pytest
 
-from autotrade.agent.prompts import META_PHASE_CONTRACT, build_meta_learning_prompt
+from autotrade.agent.prompts import META_SYSTEM_PROMPT, build_meta_learning_prompt
 from autotrade.environment.artifacts import FilesystemArtifactStore
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.llm import ScriptedLLM, ToolCall
@@ -469,21 +469,17 @@ def test_llm_meta_publishes_raw_sidecar_before_context(
     assert not (collected / "output" / "agent_traces").exists()
 
 
-def test_prompt_contract_reads_indexes_then_each_raw_sidecar() -> None:
+def test_prompt_contract_leaves_sidecar_exploration_to_meta() -> None:
     prompt = build_meta_learning_prompt({"fold_reviews": [{"agent_trace": ["raw"]}]})
     assert "inputs/meta_context.json" in prompt
-    assert "agent_trace_full" in prompt
-    assert "process summary" in prompt
-    assert "原始 Fold Agent Trace sidecar" in prompt
-    assert "AgentTraceWriter 原始 JSONL 的逐字节副本" in prompt
-    assert "全部原始信息提炼经验" in prompt
-    assert "不要把原始 trace 文本堆进 PRIOR" in prompt
-    assert "PIT/Test/Held-out" in prompt
+    assert "自主选择" in prompt
     assert "fold_reviews" not in prompt
-    assert prompt.index("process summary") < prompt.index("原始 Fold Agent Trace sidecar")
-    assert "原始 Fold Agent Trace sidecar" in META_PHASE_CONTRACT
-    assert "安全投影" not in META_PHASE_CONTRACT
-    assert "脱敏" not in META_PHASE_CONTRACT
+    assert "逐个读取" not in prompt
+    assert "process summary" not in prompt
+    assert "raw traces" in prompt
+    assert "sidecar 引用" in META_SYSTEM_PROMPT
+    assert "原始 sidecar 不改变 PIT/Test/Held-out 边界" in META_SYSTEM_PROMPT
+    assert "逐个读取" not in META_SYSTEM_PROMPT
 
 
 def _stat_mode(path: Path) -> int:

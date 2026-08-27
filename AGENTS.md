@@ -82,13 +82,20 @@ free -h
 
 ### AutoTrade Fold and Meta sessions
 
-This subsection is the AutoTrade session contract. The whole Multi-Agent section is injected into regular Fold and Meta prompts. Parent agents accept; first-level sub-agents do not nest.
+Only this subsection is injected into regular Fold and Meta system prompts. It defines the single role and write-right matrix; the surrounding host-agent cooperation rules are not injected.
 
-- Regular Fold should usually prefer two first-level `explore` roles in sequence: `auditor` inspects PIT-visible data, units, and availability plus the parent strategy, historical artifacts, and existing results before development, and may run more than once; `developer` writes real strategy code. A Fold may finish without calling `explore` when delegation is unnecessary.
-- First-level `general-purpose` may cover one bounded cross-domain task; Fold `general-purpose` is writable. First-level `Explore` is read-only discovery of unknown locations, interfaces, or materials: `explore(role="Explore", task=...)`. Sub-agents may not nest, finish, backtest, or change PRIOR. Fold `developer` and `general-purpose` may use the dedicated skill tools to maintain shared knowledge. The parent accepts.
-- The Fold parent only designs, coordinates, runs official validation/backtest, accepts, and finishes. It must not write or edit strategy files itself, and must not use shell to modify strategy artifacts. It may use the dedicated skill tools for transferable knowledge.
-- Meta may use `auditor` for independent review. A non-empty review window first reads each Fold's process summary and compact `agent_trace` as an index, then reads every available byte-exact raw Fold Agent Trace sidecar to inspect the complete main and sub-agent process. The sidecar is the original AgentTraceWriter JSONL and retains every recorded field; Meta may derive experience from all raw information but must not dump original trace text into PRIOR. It also inspects frozen strategies, Train/Validation, and allowed compact Test feedback, and must not leak Held-out or per-Fold Test numbers. An empty window inspects current PRIOR and input boundaries. Use `auditor` more than once when useful; Meta may also finish without delegation.
-- Every Meta sub-role (`auditor`, `developer`, `general-purpose`, `Explore`) is read-only and may only propose candidates. The Meta parent uniquely synthesizes and edits PRIOR plus optional strategy regularization, and may use the dedicated skill tools, then finishes. PRIOR is the Meta-maintained control layer for subsequent Fold strategy direction and orchestration, and may retain concise cross-cutting techniques or other transferable outcomes. Do not change PRIOR when there is no valid process improvement. The lowercase top-level `skills/` tree is the shared Fold/Meta knowledge layer: each `skills/<kebab-name>/SKILL.md` item may have `scripts/` and `references/`, and both regular Fold and Meta may revise it. Every regular Fold and Meta first reads `inputs/skills_index.json`, then reads only needed skill bodies. Skill scripts are never automatic actions, skill bodies are not inlined into prompts or PRIOR (PRIOR may reference a skill path), and skills never enter formal strategy artifacts.
+| Actor | Strategy or models | PRIOR | Shared skills | Official backtest and finish |
+| --- | --- | --- | --- | --- |
+| Fold parent | No writes; designs, coordinates, validates, accepts | Read-only | May write | Yes |
+| Fold `developer` / `general-purpose` | May write | No | May write | No |
+| Fold `auditor` / `Explore` | Read-only | No | Read-only | No |
+| Meta parent | Optional regularization | Sole writer | May write | No backtest; may finish |
+| Any Meta sub-role | Read-only proposals | No | Read-only | No |
+
+- `explore` is optional and limited to one level. Parents may delegate any bounded discovery, audit, implementation, or cross-domain task that fits the matrix; sub-agents cannot nest, run official backtests, finish a session, change PRIOR, or accept their own work. The parent accepts. A Fold parent must not use shell to modify strategy artifacts.
+- Every Fold and Meta session starts from `inputs/skills_index.json`, then discovers the needed skill bodies, PIT-visible data, unit references, artifacts, and how-tos through its mounted inputs and delegated exploration. Writable roles should put durable, transferable knowledge in `skills/<kebab-name>/SKILL.md` rather than in prompts or PRIOR. Skill scripts never run automatically, and skills never enter strategy, revision, frozen, Test, or Held-out artifacts.
+- PRIOR is Meta-owned and Fold-readable. It contains concise strategy direction, orchestration, and path references to skills; it must not duplicate skill bodies, catalogs, how-tos, or raw traces. Keep the existing PRIOR when there is no valid process improvement. The first version must be non-empty and every version stays within the enforced size, calendar, Test, and Held-out leak rules.
+- PIT `available_at`, Test/Held-out isolation, the `generate_orders(context)` JSON ABI, write boundaries, finish gates, and opaque Agent-visible references remain fail-closed. Historical minute or auction records are evidence and exact-price sources, not a strategy clock. Never fabricate tool, validation, or completion results.
 
 
 ## Development Principles
