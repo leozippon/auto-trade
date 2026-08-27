@@ -24,6 +24,16 @@ def executable_source_structure(source: str) -> str:
     return ast.dump(tree, annotate_fields=True, include_attributes=False)
 
 
+def _tree_bytes(root: Path | None) -> dict[str, bytes]:
+    if root is None or not root.is_dir():
+        return {}
+    files: dict[str, bytes] = {}
+    for path in sorted(root.rglob("*")):
+        if path.is_file():
+            files[path.relative_to(root).as_posix()] = path.read_bytes()
+    return files
+
+
 def _strip_docstrings(tree: ast.AST) -> None:
     for node in ast.walk(tree):
         if not isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -57,10 +67,14 @@ class FinishFoldTool:
         fold_id: str,
         run_id: str,
         parent_main_py: str | Path | None = None,
+        current_output: str | Path | None = None,
+        current_models: str | Path | None = None,
     ) -> None:
         self.tree = tree
         self.fold_id = fold_id
         self.run_id = run_id
+        self._current_output = Path(current_output) if current_output is not None else None
+        self._current_models = Path(current_models) if current_models is not None else None
         self._parent_structure: str | None = None
         if parent_main_py is not None:
             path = Path(parent_main_py)
@@ -86,6 +100,7 @@ class FinishFoldTool:
         nominated_structure = self._node_structure(node_id)
         if self._parent_structure is not None:
             self._require_different_hypothesis(node_id, nominated_structure)
+        self._require_current_matches_revision(node_id)
         self.tree.set_position(node_id)
         return ToolResult(
             True,
@@ -146,6 +161,25 @@ class FinishFoldTool:
             except (OSError, SyntaxError):
                 continue
         return found
+
+    def _require_current_matches_revision(self, node_id: str) -> None:
+        if self._current_output is None:
+            return
+        nominated = self.tree.node_output_dir(node_id)
+        if _tree_bytes(nominated) != _tree_bytes(self._current_output):
+            raise ToolError(
+                "finish_fold requires the current output to match the selected "
+                "Validation revision; restore that Step or run a new complete "
+                "daily_backtest"
+            )
+        nominated_models = self.tree.node_models_dir(node_id)
+        current_models = self._current_models
+        if _tree_bytes(nominated_models) != _tree_bytes(current_models):
+            raise ToolError(
+                "finish_fold requires the current models to match the selected "
+                "Validation revision; restore that Step or run a new complete "
+                "daily_backtest"
+            )
 
     def _node_structure(self, node_id: str) -> str:
         main_py = self.tree.node_output_dir(node_id) / "main.py"

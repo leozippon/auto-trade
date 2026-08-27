@@ -15,7 +15,7 @@ import os
 import shutil
 import stat
 import uuid
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, time
@@ -153,7 +153,7 @@ class ResearchPITSnapshotProvider:
             / f"{start_key}_{end_key}_{decision_key}"
         )
         decision_manifest = self._decision_view(decision_dir, decision)
-        self._replay_view(replay_dir, start_key, end_key, decision, phase)
+        replay_dir = self._replay_view(replay_dir, start_key, end_key, decision, phase)
         summary_dir = self.cache_root / "bundles" / phase / f"{start_key}_{end_key}_{decision_key}"
         summary_path = summary_dir / "data_summary.json"
         with _exclusive_lock(summary_dir.with_suffix(".lock")):
@@ -253,22 +253,28 @@ class ResearchPITSnapshotProvider:
         end: str,
         decision: datetime,
         phase: str,
-    ) -> dict[str, object]:
+    ) -> Path:
         with _exclusive_lock(target.with_suffix(".lock")):
             if target.exists():
                 manifest = load_snapshot_manifest(target)
-                if (
-                    manifest.get("kind") != "replay_slot"
-                    or str(manifest.get("period_start")) != start
-                    or str(manifest.get("period_end")) != end
-                    or _optional_cn_datetime(manifest.get("available_from")) != decision
-                    or str(manifest.get("label") or "") != phase
+                if not _replay_manifest_matches(
+                    manifest, start=start, end=end, decision=decision, phase=phase
                 ):
                     raise RuntimeError(f"conflicting cached replay slot: {target}")
-                return manifest
+                return target
+            unphased = self.cache_root / "replay" / target.name
+            if unphased.exists() and unphased.resolve() != target.resolve():
+                try:
+                    alt = load_snapshot_manifest(unphased)
+                except (OSError, TypeError, ValueError):
+                    alt = {}
+                if _replay_manifest_matches(
+                    alt, start=start, end=end, decision=decision, phase=phase
+                ):
+                    return unphased
             staging = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
             try:
-                manifest = self.builder.build_replay_slot(
+                self.builder.build_replay_slot(
                     start,
                     end,
                     staging,
@@ -279,7 +285,7 @@ class ResearchPITSnapshotProvider:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 os.replace(staging, target)
                 chmod_tree(target, file_mode=0o444, dir_mode=0o555)
-                return manifest
+                return target
             finally:
                 if staging.exists():
                     shutil.rmtree(staging)
@@ -996,6 +1002,23 @@ def _optional_cn_datetime(value: object) -> datetime | None:
     if value in (None, ""):
         return None
     return _cn_datetime(datetime.fromisoformat(str(value)))
+
+
+def _replay_manifest_matches(
+    manifest: Mapping[str, object],
+    *,
+    start: str,
+    end: str,
+    decision: datetime,
+    phase: str,
+) -> bool:
+    return (
+        manifest.get("kind") == "replay_slot"
+        and str(manifest.get("period_start")) == start
+        and str(manifest.get("period_end")) == end
+        and _optional_cn_datetime(manifest.get("available_from")) == decision
+        and str(manifest.get("label") or "") == phase
+    )
 
 
 def _cn_timestamp(value: object) -> pd.Timestamp:

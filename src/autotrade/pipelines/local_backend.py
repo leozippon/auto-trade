@@ -952,6 +952,8 @@ class LLMFoldDeveloper:
                     parent_main_py=(
                         (source / "main.py") if request.parent is not None else None
                     ),
+                    current_output=output_dir,
+                    current_models=models_dir,
                 )
             )
             budgeted = SessionBudgetLLM(self.llm, budget=shared_budget)

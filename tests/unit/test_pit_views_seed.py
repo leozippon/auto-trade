@@ -208,3 +208,33 @@ def test_explore_plan_jobs_cover_2021_lookback_and_heldout() -> None:
         for phase, start, _end, _decision in jobs
     )
     assert len(jobs) == 16 * 3 + 2
+
+
+def test_replay_manifest_matches_requires_phase_label():
+    from datetime import datetime
+
+    from autotrade.environment.data.contracts import CN_TZ
+    from autotrade.pipelines.pit_backend import _replay_manifest_matches
+
+    decision = datetime(2021, 12, 31, 23, 59, 59, tzinfo=CN_TZ)
+    manifest = {
+        "kind": "replay_slot",
+        "period_start": "20220101",
+        "period_end": "20220331",
+        "available_from": decision.isoformat(),
+        "label": "frozen_test",
+    }
+    assert _replay_manifest_matches(
+        manifest,
+        start="20220101",
+        end="20220331",
+        decision=decision,
+        phase="frozen_test",
+    )
+    assert not _replay_manifest_matches(
+        manifest,
+        start="20220101",
+        end="20220331",
+        decision=decision,
+        phase="valid",
+    )
