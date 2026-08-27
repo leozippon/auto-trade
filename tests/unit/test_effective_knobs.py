@@ -345,9 +345,7 @@ class RecordFailedAttemptsTest(unittest.TestCase):
 
             class PassingEvaluator:
                 def evaluate(self, _request):
-                    return EvaluationResult(
-                        {"total_return": 0.01}, str(result_path), True
-                    )
+                    return EvaluationResult({"total_return": 0.01}, str(result_path))
 
             class PassingCheck:
                 def invoke(self, _arguments):
@@ -514,7 +512,6 @@ class StepTreeAblationTest(unittest.TestCase):
                 result_name="valid_000",
                 revision_id=revision,
                 metrics={},
-                complete_validation=True,
             )
             # The item-5 replacement for closed's position_for_hash: a frozen
             # artifact records its source step, so the branch point is a lookup.

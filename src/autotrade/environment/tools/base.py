@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import traceback
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Protocol
@@ -16,9 +17,9 @@ from autotrade.environment.time_budget import (
 class SessionInterrupt(Exception):
     """Control-flow signal (researcher stop at a gate): the session must abort.
 
-    The Agent runner's per-action catch-all converts unexpected tool failures
-    into error observations so an action can never kill the fold — this class
-    is the deliberate exception: it re-raises through the dispatch so the
+    ``ToolRegistry.invoke`` converts every other exception a tool raises into
+    an error observation so an action can never kill the fold — this class is
+    the deliberate exception: it re-raises through the dispatch so the
     worker's session loop can honor the stop immediately."""
 
 
@@ -160,6 +161,24 @@ class Tool(Protocol):
     def invoke(self, arguments: Mapping[str, object]) -> ToolResult: ...
 
 
+# Tools whose calls must run in order even though their spec is not mutating:
+# they finish the session or wait for a human.
+SEQUENTIAL_TOOL_NAMES = frozenset({"ask_user", "finish_fold", "finish_meta"})
+
+
+def is_sequential_tool(spec: ToolSpec | None) -> bool:
+    """Whether a call must run in order rather than concurrently with its batch.
+
+    Every tool call in one assistant turn is dispatched concurrently unless
+    the batch contains a sequential tool: a mutating tool (writes, edits,
+    shell, skills, the Step-committing backtest, rollback), a finish gate, a
+    human wait, or an unregistered name (its rejection keeps the batch order).
+    Then the whole batch runs in order.
+    """
+
+    return spec is None or spec.mutating or spec.name in SEQUENTIAL_TOOL_NAMES
+
+
 class ToolRegistry:
     def __init__(self, tools: Sequence[Tool] = ()) -> None:
         self._tools: dict[str, Tool] = {}
@@ -238,10 +257,28 @@ class ToolRegistry:
             return ToolResult(False, value=exc.to_record(), error=str(exc))
         except (OSError, ValueError) as exc:
             return ToolResult(False, error=str(exc))
+        except SessionInterrupt:
+            raise
+        except Exception as exc:  # noqa: BLE001 - a tool bug fails the call, not the fold
+            return ToolResult(
+                False,
+                value={
+                    "error_type": "tool_exception",
+                    "traceback": _traceback_tail(exc),
+                },
+                error=f"{type(exc).__name__}: {exc}"[:500],
+            )
         if result.finish:
             self._finished = True
             self._finish_value = dict(result.value)
         return result
+
+
+def _traceback_tail(exc: BaseException, limit: int = 4) -> str:
+    """The innermost frames of a tool failure, bounded for an observation."""
+
+    frames = traceback.format_exception(type(exc), exc, exc.__traceback__)
+    return "".join(frames[-limit:])[-1_500:]
 
 
 def validate_arguments(
@@ -263,12 +300,19 @@ def validate_arguments(
     for name, value in normalized.items():
         field_schema = properties.get(name)
         if isinstance(field_schema, Mapping):
-            _validate_value(str(name), value, field_schema)
+            normalized[name] = _validate_value(str(name), value, field_schema)
     return normalized
 
 
-def _validate_value(name: str, value: object, schema: Mapping[str, object]) -> None:
+def _validate_value(name: str, value: object, schema: Mapping[str, object]) -> object:
     expected = schema.get("type")
+    if (
+        expected == "integer"
+        and isinstance(value, float)
+        and value.is_integer()
+    ):
+        # JSON has one number type; an integral float (5.0) is an integer.
+        value = int(value)
     valid = {
         "string": isinstance(value, str),
         "integer": isinstance(value, int) and not isinstance(value, bool),
@@ -293,7 +337,8 @@ def _validate_value(name: str, value: object, schema: Mapping[str, object]) -> N
             raise ToolSchemaError(f"{name} is above its maximum")
     if isinstance(value, list) and isinstance(schema.get("items"), Mapping):
         for index, item in enumerate(value):
-            _validate_value(f"{name}[{index}]", item, schema["items"])  # type: ignore[arg-type]
+            value[index] = _validate_value(f"{name}[{index}]", item, schema["items"])  # type: ignore[arg-type]
+    return value
 
 
 def _json_object(value: Mapping[str, object], *, name: str) -> dict[str, object]:
@@ -307,6 +352,7 @@ def _json_object(value: Mapping[str, object], *, name: str) -> dict[str, object]
 
 
 __all__ = [
+    "SEQUENTIAL_TOOL_NAMES",
     "CommandResult",
     "CommandRunner",
     "SessionInterrupt",
@@ -316,5 +362,6 @@ __all__ = [
     "ToolResult",
     "ToolSchemaError",
     "ToolSpec",
+    "is_sequential_tool",
     "validate_arguments",
 ]

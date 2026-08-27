@@ -612,7 +612,6 @@ class TerminalToolWriteLockTest(unittest.TestCase):
             result_name="valid_000",
             revision_id=new_revision_id("revision"),
             metrics={},
-            complete_validation=True,
         )
         finish = FinishFoldTool(tree, fold_id="fold_ref_ab", run_id="run_x")
         return workspace, roots, finish, node_id
@@ -696,3 +695,38 @@ class StrategyOrderContractTest(unittest.TestCase):
 
         with self.assertRaises(BacktestError):
             run_daily_replay(daily=daily, strategy=rogue, schedule=StrategySchedule("day", "08:30"))
+
+
+class SequentialDispatchClassificationTest(unittest.TestCase):
+    """A batch runs concurrently only when no call in it must be ordered.
+
+    ``daily_backtest`` commits a Step, so it declares ``mutating`` on its own
+    spec rather than relying on the name list; the list is left holding only
+    the tools that genuinely have no flag."""
+
+    def test_daily_backtest_is_sequential_through_its_spec_flag(self) -> None:
+        from autotrade.environment.tools import (
+            SEQUENTIAL_TOOL_NAMES,
+            is_sequential_tool,
+        )
+        from autotrade.pipelines.local_backend import FoldBacktestTool
+
+        self.assertTrue(FoldBacktestTool.spec.mutating)
+        self.assertTrue(is_sequential_tool(FoldBacktestTool.spec))
+        self.assertNotIn("daily_backtest", SEQUENTIAL_TOOL_NAMES)
+
+    def test_read_only_specs_are_concurrent_and_unknown_names_are_not(self) -> None:
+        from autotrade.environment.tools import (
+            SEQUENTIAL_TOOL_NAMES,
+            ToolSpec,
+            is_sequential_tool,
+        )
+
+        read_only = ToolSpec("read_file", "read", {"type": "object", "properties": {}})
+        self.assertFalse(is_sequential_tool(read_only))
+        # An unregistered name has no spec: its rejection keeps the batch order.
+        self.assertTrue(is_sequential_tool(None))
+        for name in SEQUENTIAL_TOOL_NAMES:
+            spec = ToolSpec(name, "gate", {"type": "object", "properties": {}})
+            self.assertFalse(spec.mutating, name)
+            self.assertTrue(is_sequential_tool(spec), name)

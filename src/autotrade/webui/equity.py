@@ -169,12 +169,6 @@ def _benchmark_from_replay_slot(
     return [(day, bench[day]) for day in wanted if day in bench]
 
 
-def _selected_validation_ref(record: Mapping[str, object]) -> object:
-    steps = [item for item in record.get("steps", []) if isinstance(item, dict) and item.get("validation_result_ref")]
-    selected = str(record.get("selected_step_id") or "")
-    return next((item["validation_result_ref"] for item in steps if str(item.get("step_id")) == selected), steps[-1]["validation_result_ref"] if steps else None)
-
-
 def _run_result_ref(experiment_dir: Path, record: Mapping[str, object], prefix: str) -> object:
     explicit = record.get(f"{prefix}_result_ref")
     if explicit:
@@ -304,7 +298,7 @@ def fold_equity_payload(root: Path, experiment_id: str, epoch_id: str, fold_ref:
     experiment_dir, _identity, records, record = registry.resolve_fold_record(
         root, experiment_id, epoch_id, fold_ref
     )
-    validation_ref = _selected_validation_ref(record)
+    validation_ref = registry.selected_validation_ref(record)
     valid_rows = _returns(experiment_dir, validation_ref)
     bench_parts = [_benchmark_returns(experiment_dir, validation_ref)]
     series = [_curve_entry("valid", valid_rows)] if valid_rows else []
@@ -351,7 +345,7 @@ def experiment_equity_payload(root: Path, experiment_id: str, *, epoch_id: str |
         raise KeyError(f"unknown epoch: {selected_epoch}")
     ordered_folds = sorted(folds, key=lambda row: str(row.get("recorded_at") or row.get("fold_id") or ""))
     selected = [record for record in ordered_folds if str(record.get("epoch_id")) == selected_epoch]
-    validation_refs = [_selected_validation_ref(record) for record in selected]
+    validation_refs = [registry.selected_validation_ref(record) for record in selected]
     valid_rows = _chain([_returns(experiment_dir, reference) for reference in validation_refs])
     bench_parts = [_benchmark_returns(experiment_dir, reference) for reference in validation_refs]
     rows_by_key: dict[str, list[tuple[str, float]]] = {"valid": valid_rows}

@@ -27,12 +27,19 @@ from autotrade.environment.artifacts import (
 from autotrade.environment.data.summary import HOST_PATH_RE, write_agent_data_summary
 from autotrade.environment.executor import PersistentCommandRunner
 from autotrade.environment.identity import AgentRefStore
-from autotrade.environment.replay.style import replay_style_analysis, write_style_rollup
+from autotrade.environment.replay.stats import PhaseTimer, finalize_summary_timing
+from autotrade.environment.replay.style import (
+    benchmark_summary_block,
+    replay_style_analysis,
+    write_style_rollup,
+)
 from autotrade.environment.runtime import (
+    AGENT_VISIBLE_BACKTEST_SUMMARY_KEYS,
     AgentTraceWriter,
     RunManifest,
     agent_trace_path,
     chmod_tree,
+    utc_now_iso,
     write_json_atomic,
 )
 from autotrade.environment.sandbox import (
@@ -73,8 +80,6 @@ from autotrade.environment.tools.search import (
 )
 from autotrade.environment.tools.shell import SandboxShellTool
 from autotrade.environment.tools.step_rollback import StepRollbackTool
-from autotrade.environment.tools.strategy_validation import StrategyValidationTool
-from autotrade.environment.tools.todo import TodoTool
 from autotrade.environment.tools.workspace import SafeWorkspace
 
 from .agent_views import compact_fold_history
@@ -179,7 +184,10 @@ class LocalDailyEvaluationBackend:
         validate_strategy_source(
             strategy_path.read_text(encoding="utf-8"), filename="main.py"
         )
-        frame = self.frame_between(request.start, request.end)
+        started_at = utc_now_iso()
+        timer = PhaseTimer()
+        with timer.phase("replay_frames"):
+            frame = self.frame_between(request.start, request.end)
         if frame.empty:
             raise ValueError(
                 f"daily replay is empty for {request.start}..{request.end}"
@@ -196,6 +204,23 @@ class LocalDailyEvaluationBackend:
             executor_factory=self.executor_factory,
         ).run(frame)
         record = replay.to_record()
+        with timer.phase("style_analysis"):
+            style = replay_style_analysis(
+                replay,
+                frame,
+                replay_dir=None,
+                snapshot_dir=None,
+                mode=request.mode,
+            )
+        summary = record.get("stats")
+        if not isinstance(summary, dict):
+            raise TypeError("daily replay omitted stats")
+        benchmark = benchmark_summary_block(style)
+        if benchmark is not None:
+            summary["benchmark"] = benchmark
+        finalize_summary_timing(
+            summary, started_at=started_at, setup_phases=timer.to_record()
+        )
         result_id = f"{request.mode}_{uuid.uuid4().hex}"
         target = self.results_root / result_id / "result.json"
         target.parent.mkdir(parents=True, exist_ok=False)
@@ -206,20 +231,8 @@ class LocalDailyEvaluationBackend:
             + "\n",
             encoding="utf-8",
         )
-        write_style_rollup(
-            target.parent,
-            replay_style_analysis(
-                replay,
-                frame,
-                replay_dir=None,
-                snapshot_dir=None,
-                mode=request.mode,
-            ),
-        )
-        summary = record.get("stats")
-        if not isinstance(summary, dict):
-            raise TypeError("daily replay omitted stats")
-        return EvaluationResult(dict(summary), str(target), complete=True)
+        write_style_rollup(target.parent, style)
+        return EvaluationResult(dict(summary), str(target))
 
 
 class DeterministicBaselineDeveloper:
@@ -473,6 +486,7 @@ class FoldBacktestTool(SessionTimeBudgetAware):
             "required": [],
             "additionalProperties": False,
         },
+        mutating=True,
     )
 
     def __init__(
@@ -581,7 +595,6 @@ class FoldBacktestTool(SessionTimeBudgetAware):
                     result_name=result_name,
                     revision_id=revision_ref,
                     metrics=evaluation.summary,
-                    complete_validation=evaluation.complete,
                     models_root=typed.models_path,
                     attachments={"validation/result.json": evaluation.result_ref},
                 )
@@ -635,24 +648,33 @@ class FoldBacktestTool(SessionTimeBudgetAware):
                 "result_name": result_name,
                 "mode": "valid",
                 "status": "ok",
-                "complete_validation": bool(evaluation.complete),
+                "complete_validation": True,
+                # Scalars are cheap enough to keep wholesale for host audit;
+                # structured values only earn their place in the manifest when
+                # the Agent-visible projection actually carries them.
                 **{
                     key: value
                     for key, value in evaluation.summary.items()
                     if not isinstance(value, (dict, list))
+                    or key in AGENT_VISIBLE_BACKTEST_SUMMARY_KEYS
                 },
             }
         )
+        # A returned EvaluationResult is by construction a full-window replay;
+        # a partial one raises above and never reaches here, so a successful
+        # result with node_id and revision_id is the complete Validation.
         summary = {
             "run_id": self.ref_store.get_or_create("run", self.request.run_id),
             "node_id": node_id,
             "revision_id": self.ref_store.get_or_create("strategy", revision_id),
-            "complete": evaluation.complete,
             "stats": evaluation.summary,
         }
         directive = ""
         if self.request.step_gate_hook is not None:
-            directive = self.request.step_gate_hook(len(self.steps), summary)
+            # The console step gate still renders a `complete` flag.
+            directive = self.request.step_gate_hook(
+                len(self.steps), {**summary, "complete": True}
+            )
         result_path = Path(evaluation.result_ref)
         public_result_ref = f"results/{result_name}/{result_path.name}"
         return ToolResult(
@@ -690,22 +712,16 @@ def build_fold_explore_tools(
         WriteFileTool(workspace),
         EditFileTool(workspace),
         SandboxShellTool(workspace, command_runner),
-        StrategyValidationTool(workspace),
-        TodoTool(workspace),
         modification,
     ]
 
 
-def build_meta_explore_tools(
-    search_roots: SearchRoots,
-    workspace: SafeWorkspace,
-) -> list[Tool]:
-    """Tools handed to Meta ``ExploreSubAgentEngine``: read-only audit, shared todo."""
+def build_meta_explore_tools(search_roots: SearchRoots) -> list[Tool]:
+    """Tools handed to Meta ``ExploreSubAgentEngine``: read-only audit."""
     return [
         ReadFileTool(search_roots),
         GrepTool(search_roots),
         GlobTool(search_roots),
-        TodoTool(workspace),
     ]
 
 
@@ -1013,8 +1029,6 @@ class LLMFoldDeveloper:
                 WriteFileTool(safe),
                 EditFileTool(safe),
                 SandboxShellTool(safe, command_runner),
-                StrategyValidationTool(safe),
-                TodoTool(safe),
                 WriteSkillTool(safe),
                 DeleteSkillTool(safe),
                 modification,
@@ -1365,10 +1379,10 @@ class LLMMetaLearner:
         from autotrade.agent.runner import (
             AgentSessionConfig,
             AgentSessionRunner,
-            FinishMetaTool,
             MetaLearningAgent,
-            visible_window_dates,
         )
+        from autotrade.environment.tools.finish_meta import FinishMetaTool
+        from autotrade.environment.tools.prior_policy import visible_window_dates
         from autotrade.pipelines.agent_inbox import bind_session_inbox
 
         run_id = str(facts.get("run_id") or f"meta_{uuid.uuid4().hex}")
@@ -1493,11 +1507,6 @@ class LLMMetaLearner:
             str(facts.get("meta_learning_memory") or ""), encoding="utf-8"
         )
         chmod_tree(inputs, file_mode=0o444, dir_mode=0o555)
-        visible_fold = (
-            public.get("visible_fold")
-            if isinstance(public.get("visible_fold"), dict)
-            else {}
-        )
         host_visible_fold = (
             facts.get("host_visible_fold")
             if isinstance(facts.get("host_visible_fold"), dict)
@@ -1597,7 +1606,7 @@ class LLMMetaLearner:
         )
         explore = ExploreSubAgentEngine(
             llm=explore_budgeted,
-            tools=ToolRegistry(build_meta_explore_tools(search_roots, safe)),
+            tools=ToolRegistry(build_meta_explore_tools(search_roots)),
             config=ExploreSubAgentConfig(max_tokens=self.explore_max_tokens),
             time_budget=time_budget,
             mode="meta",
@@ -1621,7 +1630,6 @@ class LLMMetaLearner:
             EditFileTool(safe),
             WriteSkillTool(safe),
             DeleteSkillTool(safe),
-            TodoTool(safe),
             modification,
         ]
         hook = facts.get("user_question_hook")

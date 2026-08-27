@@ -194,7 +194,7 @@ class UnvalidatedParentFallbackTest(unittest.TestCase):
         parent = replace(_parent(artifacts, parent_body), requires_validation=True)
         return pipeline, artifacts, parent, steps
 
-    def _step(self, artifacts: Artifacts, revision_id: str, body: str, *, complete=True, summary=None):
+    def _step(self, artifacts: Artifacts, revision_id: str, body: str, *, summary=None):
         artifacts.add_revision(revision_id, body)
         return StepResult(
             f"step_{revision_id}",
@@ -202,7 +202,6 @@ class UnvalidatedParentFallbackTest(unittest.TestCase):
             EvaluationResult(
                 summary or {"total_return": 0.02, "max_drawdown": 0.03},
                 "result/valid",
-                complete=complete,
             ),
         )
 
@@ -222,13 +221,6 @@ class UnvalidatedParentFallbackTest(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             pipeline, artifacts, parent, _ = self._guard(Path(tmp), steps=())
             step = self._step(artifacts, "revision_other", MAIN + "# different\n")
-            with self.assertRaisesRegex(RuntimeError, "refusing unvalidated fallback"):
-                pipeline._assert_parent_validated_in_fold(parent, (step,))
-
-    def test_an_incomplete_validation_does_not_count(self) -> None:
-        with TemporaryDirectory() as tmp:
-            pipeline, artifacts, parent, _ = self._guard(Path(tmp), steps=())
-            step = self._step(artifacts, "revision_same", MAIN, complete=False)
             with self.assertRaisesRegex(RuntimeError, "refusing unvalidated fallback"):
                 pipeline._assert_parent_validated_in_fold(parent, (step,))
 

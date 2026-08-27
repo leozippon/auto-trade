@@ -20,7 +20,12 @@ from .engine import (
     run_daily_replay,
 )
 from .market import DailyMarketData
-from .stats import ReplayResult, compute_return_stats
+from .stats import (
+    PhaseTimer,
+    ReplayResult,
+    compute_return_stats,
+    finalize_summary_timing,
+)
 
 __all__ = [
     "BacktestError",
@@ -29,9 +34,11 @@ __all__ = [
     "DailyOrderInbox",
     "DailyReplayEngine",
     "ExecutionPriceProvider",
+    "PhaseTimer",
     "ReplayResult",
     "StrategyDataView",
     "compute_return_stats",
+    "finalize_summary_timing",
     "run_daily_replay",
     "resolve_execution_price",
 ]

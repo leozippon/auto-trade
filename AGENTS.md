@@ -82,7 +82,7 @@ free -h
 
 ### AutoTrade Fold and Meta sessions
 
-This subsection is the host-facing AutoTrade contract. Fold and Meta system prompts include a Chinese rendering of the host Multi-Agent, Development Principles, and Operational Guardrails sections, plus a Chinese role matrix. This English AutoTrade subsection is not injected.
+This subsection is the host-facing AutoTrade contract. Fold and Meta system prompts are short Chinese prompts of their own: identity and mission, the tool list, working rules (concurrent tool dispatch, background `explore` sub-agents, context compaction), this contract rendered as a Chinese role matrix plus the PIT, isolation, ABI, and finish-gate rules, a condensed statement of the applicable Development Principles, and the per-run dynamic facts last. The host Multi-Agent, Development Principles, and Operational Guardrails sections are not injected; this English subsection is presence-checked and not injected.
 
 | Actor | Strategy or models | PRIOR | Shared skills | Official backtest and finish |
 | --- | --- | --- | --- | --- |
@@ -92,7 +92,7 @@ This subsection is the host-facing AutoTrade contract. Fold and Meta system prom
 | Meta parent | Optional regularization | Sole writer | May write | No backtest; may finish |
 | Any Meta sub-role | Read-only proposals | No | Read-only | No |
 
-- `explore` is optional and limited to one level. Unless the task is very simple, the parent should delegate. Sub-agents cannot nest, run official backtests, finish a session, change PRIOR, or accept their own work. The parent accepts. A Fold parent must not use shell to modify strategy artifacts.
+- `explore` is optional and limited to one level. It is a registered tool that starts a background child and returns at once; several may be launched in one turn (default concurrency 4, further launches queue), results arrive as `explore_completed` messages, and the parent yields only when it has no other work. The parent delegates reading, exploration, and implementation to keep its own context small. Sub-agents cannot nest, run official backtests, finish a session, change PRIOR, or accept their own work. The parent accepts. A Fold parent must not use shell to modify strategy artifacts.
 - Every Fold and Meta session starts from `inputs/skills_index.json`, then discovers the needed skill bodies, PIT-visible data, unit references, artifacts, and how-tos through its mounted inputs and delegated exploration. Writable roles should put durable, transferable knowledge in `skills/<kebab-name>/SKILL.md` rather than in prompts or PRIOR. Skill scripts never run automatically, and skills never enter strategy, revision, frozen, Test, or Held-out artifacts.
 - PRIOR is Meta-owned and Fold-readable. It contains concise strategy direction, orchestration, and path references to skills; it must not duplicate skill bodies, catalogs, how-tos, or raw traces. Keep the existing PRIOR when there is no valid process improvement. The first version must be non-empty and every version stays within the enforced size, calendar, Test, and Held-out leak rules.
 - PIT `available_at`, Test/Held-out isolation, the `generate_orders(context)` JSON ABI, write boundaries, finish gates, and opaque Agent-visible references remain fail-closed. Historical minute or auction records are evidence and exact-price sources, not a strategy clock. Never fabricate tool, validation, or completion results.

@@ -102,4 +102,4 @@ score = rank(EP) + rank(-abnormal_turnover)
 - China four-factor reproduction, commit `fc90168b6bac41eacc709c859b45069c154e8ef5`, no license found: <https://github.com/yaoqi1018/Reproduction-of-the-Four-Factor-Model-in-China/tree/fc90168b6bac41eacc709c859b45069c154e8ef5>
 - Vortex Quant forecast-drift archive, no license found: <https://github.com/zyukyunman/vortex_quant/blob/main/docs/%E5%9B%A0%E5%AD%90%E7%A0%94%E7%A9%B6/%E5%AE%9E%E9%AA%8C%E6%A1%A3%E6%A1%88/%E4%B8%9A%E7%BB%A9%E9%A2%84%E5%91%8A%E6%BC%82%E7%A7%BB%E5%9B%A0%E5%AD%90.md>
 
-The old local pack remains read-only at `configs/workspace_refs/github_strategies/`; no file from it is copied into this pack.
+The superseded `github_strategies` pack has been retired; no file from it is copied into this pack.

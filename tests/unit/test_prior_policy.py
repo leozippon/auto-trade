@@ -6,13 +6,15 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from autotrade.agent.runner import (
+from autotrade.environment.tools import FinishMetaTool, SafeWorkspace, ToolRegistry
+from autotrade.environment.tools.finish_meta import FinishMetaTool as _FinishMetaToolModule
+from autotrade.environment.tools.prior_policy import (
     PRIOR_MAX_CHARS,
-    FinishMetaTool,
     prior_policy_violation,
     visible_window_dates,
 )
-from autotrade.environment.tools import SafeWorkspace, ToolRegistry
+
+assert FinishMetaTool is _FinishMetaToolModule
 
 MANIFEST_2021 = {
     "meta_learning_visible_fold": {

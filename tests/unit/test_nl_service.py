@@ -17,6 +17,7 @@ import pytest
 
 from autotrade.environment.llm import ProviderResponse, ScriptedLLM, ToolCall
 from autotrade.environment.nl import NLConfig, NLService
+from autotrade.environment.nl.service import DEFAULT_MAX_TOTAL_CALLS
 
 NOW = datetime(2026, 1, 2, tzinfo=UTC)
 INDEX_COLUMNS = [
@@ -525,11 +526,113 @@ def test_nl_call_budget_is_per_decision_and_total(tmp_path: Path):
         "ok",
         "no_evidence",
     }
-    with pytest.raises(RuntimeError, match="decision"):
+    with pytest.raises(RuntimeError, match="nl_max_calls_per_decision"):
         service.query({"query": "利润"}, inference_at=NOW)
     service.query({"query": "利润"}, inference_at=later)
-    with pytest.raises(RuntimeError, match="total"):
+    # An exhausted per-backtest budget is an explicit error naming the knob,
+    # never a silently skipped call that reads as "no evidence".
+    with pytest.raises(RuntimeError, match="nl_max_total_calls=2"):
         service.query({"query": "利润"}, inference_at=datetime(2026, 1, 4, tzinfo=UTC))
+    counters = service.counters()
+    assert counters["nl_calls"] == 2
+    assert counters["nl_max_total_calls"] == 2
+    # Both refusals are recorded, so a strategy that swallows the exception
+    # still leaves the exhausted budget visible in the backtest summary.
+    assert counters["nl_budget_rejected_calls"] == 2
+    service.close()
+
+
+def test_nl_total_call_budget_defaults_to_a_real_ceiling():
+    # NL is the only real LLM inference inside a backtest's wall clock, so the
+    # shipped default must bound it rather than leave it open-ended.
+    assert NLConfig().max_total_calls == DEFAULT_MAX_TOTAL_CALLS
+    assert isinstance(DEFAULT_MAX_TOTAL_CALLS, int) and DEFAULT_MAX_TOTAL_CALLS > 0
+
+
+def test_nl_counters_separate_gated_calls_from_calls_that_reached_the_model(
+    tmp_path: Path,
+):
+    llm = ScriptedLLM([ProviderResponse(content="减持")])
+    service = NLService.from_snapshot(stock_snapshot(tmp_path / "snap"), llm=llm)
+    gated = service.query(
+        {
+            "query": "有减持吗",
+            "mode": "answer",
+            "ts_code": "000001.SZ",
+            "event_filter": {"patterns": ["从未出现的事件"], "lookback_days": 30},
+        },
+        inference_at=NOW,
+    )
+    assert gated["status"] == "no_matching_evidence"
+    answered = service.query(
+        {"query": "减持规模", "mode": "answer", "ts_code": "000001.SZ"},
+        inference_at=NOW,
+    )
+    assert answered["status"] == "ok"
+
+    counters = service.counters()
+    assert counters["nl_calls"] == 2
+    assert counters["nl_event_filter_calls"] == 1
+    assert counters["nl_evidence_gated_calls"] == 1
+    # Only the ungated call reached the Sub Agent, and it cost one LLM round.
+    assert counters["nl_executed_calls"] == 1
+    assert counters["nl_llm_calls"] == 1
+    assert counters["nl_wall_seconds"] >= 0.0
+    service.close()
+
+
+def test_every_charged_nl_call_lands_in_exactly_one_outcome_bucket(tmp_path: Path):
+    """``nl_calls`` must be explained, not just counted.
+
+    An unexplained residue is what makes the summary unreadable: a rejected
+    request that still charged the budget, or a retrieval-only call no bucket
+    mentions, both make the arithmetic silently wrong.
+    """
+    llm = ScriptedLLM([ProviderResponse(content="减持")])
+    service = NLService.from_snapshot(stock_snapshot(tmp_path / "snap"), llm=llm)
+
+    # Invalid request: refused before the budget is charged, so it leaves nothing.
+    with pytest.raises(ValueError, match="mode"):
+        service.query({"query": "利润", "mode": "trade"}, inference_at=NOW)
+    assert service.counters()["nl_calls"] == 0
+
+    service.query({"query": "利润", "mode": "search"}, inference_at=NOW)
+    service.query({"query": "不存在的词", "mode": "search"}, inference_at=NOW)
+    service.query(
+        {
+            "query": "有减持吗",
+            "mode": "answer",
+            "ts_code": "000001.SZ",
+            "event_filter": {"patterns": ["从未出现的事件"], "lookback_days": 30},
+        },
+        inference_at=NOW,
+    )
+    service.query(
+        {"query": "减持规模", "mode": "answer", "ts_code": "000001.SZ"},
+        inference_at=NOW,
+    )
+
+    counters = service.counters()
+    # A search hit and a search miss are both retrieval-only outcomes.
+    assert counters["nl_search_calls"] == 2
+    assert counters["nl_evidence_gated_calls"] == 1
+    assert counters["nl_executed_calls"] == 1
+    assert counters["nl_calls"] == 4
+    assert counters["nl_calls"] == (
+        counters["nl_executed_calls"]
+        + counters["nl_search_calls"]
+        + counters["nl_evidence_gated_calls"]
+    )
+    service.close()
+
+
+def test_answer_without_a_configured_model_counts_as_retrieval_only(tmp_path: Path):
+    service = NLService.from_snapshot(stock_snapshot(tmp_path / "snap"))
+    service.query({"query": "利润", "mode": "answer"}, inference_at=NOW)
+    counters = service.counters()
+    assert counters["nl_executed_calls"] == 0
+    assert counters["nl_search_calls"] == 1
+    assert counters["nl_calls"] == 1
     service.close()
 
 

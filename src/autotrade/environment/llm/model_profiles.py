@@ -46,6 +46,9 @@ _DEEPSEEK_PROFILE = ModelProfile(
     base_url_env="DEEPSEEK_BASE_URL",
     default_base_url="https://api.deepseek.com",
     request_dialect="deepseek",
+    # DeepSeek chat/reasoner models serve a 128K context; the per-generation
+    # output ceiling stays with the provider.
+    context_window_tokens=128_000,
 )
 _VLLM_PROFILE = ModelProfile(
     provider="vllm",
@@ -156,6 +159,7 @@ def build_model_gateway(
                     thinking_enabled=thinking_enabled,
                     reasoning_effort=reasoning_effort,
                     conversation_log_dir=conversation_log_dir,
+                    context_window_tokens=profile.context_window_tokens,
                 )
             ),
         )

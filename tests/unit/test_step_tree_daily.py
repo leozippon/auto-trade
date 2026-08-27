@@ -4,11 +4,7 @@ import stat
 from pathlib import Path
 
 from autotrade.environment.step_tree import StepTree
-from autotrade.environment.tools import (
-    SafeWorkspace,
-    StrategyValidationTool,
-    ToolRegistry,
-)
+from autotrade.environment.tools import ToolRegistry
 from autotrade.environment.tools.finish_fold import FinishFoldTool
 from autotrade.environment.tools.modification_check import ModificationCheckTool
 from autotrade.environment.tools.step_rollback import StepRollbackTool
@@ -30,7 +26,6 @@ def test_step_revision_can_be_selected_and_restored(tmp_path: Path):
         result_name="valid_000",
         revision_id="revision_a",
         metrics={"total_return": 0.1},
-        complete_validation=True,
         models_root=revision_models,
     )
     work = tmp_path / "work"
@@ -74,20 +69,11 @@ def test_strategy_path_violation_is_repairable_at_agent_tool_boundary(tmp_path: 
         "    return []\n",
         encoding="utf-8",
     )
-    registry = ToolRegistry(
-        [
-            StrategyValidationTool(SafeWorkspace(tmp_path)),
-            ModificationCheckTool(output),
-        ]
-    )
+    registry = ToolRegistry([ModificationCheckTool(output)])
 
-    for tool_name, arguments in (
-        ("validate_strategy", {"path": "output/main.py"}),
-        ("modification_check", {}),
-    ):
-        result = registry.invoke(tool_name, arguments)
-        assert not result.ok
-        assert "only below context.snapshot_dir or context.asof_dir" in result.error
+    result = registry.invoke("modification_check", {})
+    assert not result.ok
+    assert "only below context.snapshot_dir or context.asof_dir" in result.error
 
     strategy.write_text(
         "import pandas as pd\n"
@@ -96,5 +82,4 @@ def test_strategy_path_violation_is_repairable_at_agent_tool_boundary(tmp_path: 
         "    return []\n",
         encoding="utf-8",
     )
-    assert registry.invoke("validate_strategy", {"path": "output/main.py"}).ok
     assert registry.invoke("modification_check", {}).ok

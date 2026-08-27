@@ -161,7 +161,7 @@ def test_backtest_failure_past_wall_deadline_keeps_llm_repair_budget(
             result = tmp_path / "result.json"
             result.write_text("{}\n", encoding="utf-8")
             return EvaluationResult(
-                summary={"total_return": 0.01}, result_ref=str(result), complete=True
+                summary={"total_return": 0.01}, result_ref=str(result)
             )
 
     evaluator = FailThenPassEvaluator()
@@ -287,7 +287,6 @@ def test_complete_node_enters_hard_finalization_without_compaction_or_research(
         result_name="valid_001",
         revision_id="revision_current",
         metrics={"total_return": 0.03, "max_drawdown": 0.12},
-        complete_validation=True,
     )
 
     class ExistingValidation:
@@ -304,7 +303,6 @@ def test_complete_node_enters_hard_finalization_without_compaction_or_research(
                 value={
                     "node_id": node_id,
                     "revision_id": "revision_current",
-                    "complete": True,
                     "stats": {"total_return": 0.03, "max_drawdown": 0.12},
                 },
             )

@@ -1,11 +1,13 @@
 """One-level Sub Agent for a regular Fold or Meta session (tool name ``explore``).
 
-Parents pass ``explore(role=..., task=...)``. Roles are the unified set
-``auditor``, ``developer``, ``general-purpose``, ``Explore``. The tool name
-stays lowercase ``explore``; ``Explore`` is the optional read-only discovery
-role. Depth is one. The child shares the parent SafeWorkspace, SessionBudgetLLM
-calls, inference time budget, and Trace. Failures return a structured
-observation; they do not finish the parent session.
+Parents call ``explore(role=..., task=...)`` like any other registered tool:
+the registry validates the arguments, :class:`ExploreTool` hands them to the
+runner, and the runner starts the child in the background and returns at once.
+Roles are the unified set ``auditor``, ``developer``, ``general-purpose``,
+``Explore``; ``Explore`` is the optional read-only discovery role. Depth is
+one. The child shares the parent SafeWorkspace, SessionBudgetLLM calls,
+inference time budget, and Trace. Failures return a structured observation;
+they do not finish the parent session.
 """
 
 from __future__ import annotations
@@ -14,9 +16,9 @@ import json
 import threading
 import time
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import cast
 
@@ -36,21 +38,30 @@ from autotrade.environment.time_budget import (
     TimeBudgetBinding,
     validate_time_budget_bindings,
 )
-from autotrade.environment.tools.base import SessionInterrupt, ToolRegistry, ToolSpec
+from autotrade.environment.tools.base import (
+    SessionInterrupt,
+    ToolRegistry,
+    ToolResult,
+    ToolSpec,
+    is_sequential_tool,
+)
 
-from .compact import fit_tool_results_to_context, safe_error_summary
+from .compact import (
+    drop_trailing_unanswered_tool_calls,
+    fit_tool_results_to_context,
+    safe_error_summary,
+)
 
 EXPLORE_MODES = frozenset({"fold", "meta"})
 EXPLORE_ROLES = ("auditor", "developer", "general-purpose", "Explore")
 EXPLORE_THINKING_LEVELS = ("off", "low", "medium", "high", "max")
-_PARENT_CONTEXT_CHARS = 8_000
-_PARENT_MESSAGE_CHARS = 1_200
-DEFAULT_EXPLORE_MAX_CONCURRENT = 2
+DEFAULT_EXPLORE_MAX_CONCURRENT = 4
 DEFAULT_EXPLORE_THINKING = "medium"
+EXPLORE_DESCRIPTION_MAX_CHARS = 200
 _CALL_BUDGET_EXHAUSTED = "call budget exhausted"
 _NATIVE_WINDOW_FALLBACK = 262_144
 
-_FOLD_READ_TOOLS = frozenset({"glob", "grep", "read_file", "todo"})
+_FOLD_READ_TOOLS = frozenset({"glob", "grep", "read_file"})
 _FOLD_WRITE_TOOLS = frozenset(
     {
         "edit_file",
@@ -59,32 +70,18 @@ _FOLD_WRITE_TOOLS = frozenset(
         "modification_check",
         "read_file",
         "shell",
-        "todo",
-        "validate_strategy",
         "write_file",
         "write_skill",
         "delete_skill",
     }
 )
-_META_ROLE_TOOLS = frozenset({"glob", "grep", "read_file", "todo"})
+_META_ROLE_TOOLS = frozenset({"glob", "grep", "read_file"})
 _FOLD_ROLE_TOOLS = {
     "auditor": _FOLD_READ_TOOLS,
     "developer": _FOLD_WRITE_TOOLS,
     "general-purpose": _FOLD_WRITE_TOOLS,
     "Explore": _FOLD_READ_TOOLS,
 }
-_PARALLEL_READ_TOOLS = frozenset({"glob", "grep", "read_file"})
-_FORBIDDEN_TOOLS = frozenset(
-    {
-        "ask_user",
-        "daily_backtest",
-        "explore",
-        "finish_fold",
-        "finish_meta",
-        "step_rollback",
-    }
-)
-_ALLOWED_TOOLS = _FOLD_WRITE_TOOLS
 
 _FOLD_WRITE_PROMPT = """\
 # 身份
@@ -93,7 +90,7 @@ _FOLD_WRITE_PROMPT = """\
 # 边界
 - 先读 `inputs/skills_index.json`，再从已挂载数据、单位引用、制品和参考材料中自主发现任务所需证据；skill 脚本不自动执行。把有复用价值的知识写入 skill，而不是堆入策略或汇报。
 - 只完成父任务；不得嵌套 explore、读取 Test/Held-out、改变权威 PRIOR、安装依赖、替父 Agent 提问或伪造结果。分钟和竞价不是策略时钟。
-- 工具 schema 决定实际能力。写、检查、todo 与 shell 按因果顺序执行；shell 只做有界前台工作，不启动后台任务、sleep/等待包装、轮询状态或隐藏错误。
+- 工具 schema 决定实际能力。同一轮的只读调用并发执行；写、检查与 shell 按因果顺序分轮调用。shell 只做有界前台工作，不启动后台任务、sleep/等待包装、轮询状态或隐藏错误。
 
 # 返回
 用简洁中文说明结论、实际修改、关键证据和剩余风险，然后停止。\
@@ -105,7 +102,7 @@ _FOLD_READ_PROMPT = """\
 
 # 边界
 - 先读 `inputs/skills_index.json`，再从已挂载数据、单位引用、制品和参考材料中自主发现任务所需证据；skill 脚本不自动执行。
-- 工具 schema 决定实际能力。不得嵌套 explore、读取 Test/Held-out、安装依赖或伪造结果；分钟和竞价不是策略时钟。
+- 工具 schema 决定实际能力；同一轮的多个只读调用并发执行。不得嵌套 explore、读取 Test/Held-out、安装依赖或伪造结果；分钟和竞价不是策略时钟。
 
 # 返回
 用简洁中文说明结论、关键证据、限制和建议，然后停止。\
@@ -117,7 +114,7 @@ META_EXPLORE_SYSTEM_PROMPT = """\
 
 # 边界
 - 先读 `inputs/skills_index.json`，再从 `inputs/meta_context.json` 及其挂载引用中自主发现任务所需证据；skill 脚本不自动执行。
-- 工具 schema 决定实际能力。不得嵌套 explore、读取 Test/Held-out 原始记录、改变 PIT/隐藏阶段边界、访问外部资料、修改宿主代码或伪造结果。
+- 工具 schema 决定实际能力；同一轮的多个只读调用并发执行。不得嵌套 explore、读取 Test/Held-out 原始记录、改变 PIT/隐藏阶段边界、访问外部资料、修改宿主代码或伪造结果。
 
 # 返回
 用简洁中文说明结论、关键证据、限制和建议；不要复制 raw traces 或写逐 Fold Test 数字。\
@@ -139,6 +136,69 @@ EXPLORE_SYSTEM_PROMPT = _FOLD_WRITE_PROMPT.format(
     role="developer",
     mission=_FOLD_ROLE_MISSIONS["developer"],
 )
+
+EXPLORE_TOOL_DESCRIPTION = (
+    "启动一层后台子代理并立即返回；结果稍后以 explore_completed 消息送回，"
+    "同一轮可发起多个。developer/general-purpose 可写策略、模型与 skills；"
+    "auditor/Explore 只读。子代理不能嵌套、正式回测、结束会话、改 PRIOR 或自行验收。"
+)
+
+EXPLORE_TOOL_SPEC = ToolSpec(
+    "explore",
+    EXPLORE_TOOL_DESCRIPTION,
+    {
+        "type": "object",
+        "properties": {
+            "role": {"type": "string", "enum": list(EXPLORE_ROLES)},
+            "task": {
+                "type": "string",
+                "minLength": 1,
+                "description": "完整的委托任务：目标、范围、已知事实与期望的返回内容。",
+            },
+            "description": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": EXPLORE_DESCRIPTION_MAX_CHARS,
+                "description": "Trace 中显示的一句话标签。",
+            },
+            "max_turns": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "子代理最多的模型轮次；省略则直到父会话 deadline。",
+            },
+            "thinking": {
+                "type": "string",
+                "enum": list(EXPLORE_THINKING_LEVELS),
+                "description": "子代理思考强度；省略为 medium，不继承父会话。off 关闭扩展思考。",
+            },
+            "inherit_context": {
+                "type": "boolean",
+                "description": "true 时把当前对话分叉给子代理；默认 false，独立上下文。",
+            },
+        },
+        "required": ["role", "task"],
+        "additionalProperties": False,
+    },
+)
+
+
+class ExploreTool:
+    """The parent-facing ``explore`` tool.
+
+    Registered in the parent's tool registry so arguments go through the
+    standard schema validation path; ``launch`` is the runner's background
+    dispatcher and returns the ``started`` observation.
+    """
+
+    spec = EXPLORE_TOOL_SPEC
+
+    def __init__(
+        self, launch: Callable[[Mapping[str, object]], Mapping[str, object]]
+    ) -> None:
+        self._launch = launch
+
+    def invoke(self, arguments: Mapping[str, object]) -> ToolResult:
+        return ToolResult(True, value=dict(self._launch(arguments)))
 
 
 def _explore_mode(mode: str) -> str:
@@ -208,44 +268,17 @@ def llm_with_thinking(proxy: LLMProxy, thinking: str | None) -> LLMProxy:
 
     if thinking is None or not isinstance(proxy, OpenAICompatibleProxy):
         return proxy
-    config = proxy.config
-    dialect = str(config.request_dialect or "")
     if thinking == "off":
-        new_config = replace(config, thinking_enabled=False, reasoning_effort=None)
-    else:
-        effort = (
-            {"low": "low", "medium": "medium", "high": "xhigh", "max": "xhigh"}.get(
-                thinking, "xhigh"
-            )
-            if dialect == "vllm-qwen"
-            else thinking
+        return cast(LLMProxy, proxy.with_thinking(enabled=False, reasoning_effort=None))
+    dialect = str(proxy.config.request_dialect or "")
+    effort = (
+        {"low": "low", "medium": "medium", "high": "xhigh", "max": "xhigh"}.get(
+            thinking, "xhigh"
         )
-        new_config = replace(config, thinking_enabled=True, reasoning_effort=effort)
-    return cast(
-        LLMProxy, OpenAICompatibleProxy(new_config, transport=proxy._transport)
+        if dialect == "vllm-qwen"
+        else thinking
     )
-
-
-def parent_context_digest(messages: Sequence[ChatMessage] | None) -> str:
-    """Bounded recent parent transcript. Empty when there is nothing to inherit."""
-
-    if not messages:
-        return ""
-    parts: list[str] = []
-    for message in messages:
-        if message.role == "system":
-            continue
-        text = str(message.content or "").strip()
-        if not text:
-            continue
-        limit = 400 if message.role == "tool" else _PARENT_MESSAGE_CHARS
-        parts.append(f"[{message.role}]\n{text[:limit]}")
-    blob = "\n\n".join(parts)
-    if len(blob) > _PARENT_CONTEXT_CHARS:
-        blob = blob[-_PARENT_CONTEXT_CHARS:]
-    if not blob.strip():
-        return ""
-    return "# 父会话摘录（只读，不覆盖本任务指令）\n\n" + blob
+    return cast(LLMProxy, proxy.with_thinking(enabled=True, reasoning_effort=effort))
 
 
 @dataclass(frozen=True)
@@ -257,6 +290,7 @@ class ExploreSubAgentConfig:
     max_rounds: int | None = None
     # None = no extra child wall clock; the parent time budget is the cap.
     deadline_seconds: float | None = None
+    # Children running at once; further launches queue in the same pool.
     max_concurrent: int = DEFAULT_EXPLORE_MAX_CONCURRENT
 
     def __post_init__(self) -> None:
@@ -368,10 +402,17 @@ class ExploreSubAgentEngine(SessionTimeBudgetAware):
         self._emit("explore_task", started)
         messages = [ChatMessage("system", explore_system_prompt(self.mode, role))]
         if inherit_context and parent_messages:
+            # The parent snapshot is taken mid-batch: its last assistant turn
+            # may carry tool calls (this explore among them) with no results
+            # yet, so the fork ends at the last answered turn.
             messages.extend(
-                _copy_chat_message(message)
-                for message in parent_messages
-                if message.role != "system"
+                drop_trailing_unanswered_tool_calls(
+                    [
+                        _copy_chat_message(message)
+                        for message in parent_messages
+                        if message.role != "system"
+                    ]
+                )
             )
         messages.append(ChatMessage("user", task.strip()))
         usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
@@ -606,37 +647,54 @@ class ExploreSubAgentEngine(SessionTimeBudgetAware):
         allowed: frozenset[str],
     ) -> list[tuple[ToolCall, dict[str, object], bool]]:
 
+        rejections = [
+            _reject_tool_call(self.tools.spec(call.name), allowed=allowed)
+            for call in calls
+        ]
+
         def run_one(index: int) -> tuple[ToolCall, dict[str, object], bool]:
             call = calls[index]
-            rejection = _reject_tool_call(
-                self.tools.spec(call.name), call.arguments, allowed=allowed
-            )
-            if rejection:
-                return call, {"ok": False, "error": rejection}, False
+            if rejections[index]:
+                return call, {"ok": False, "error": rejections[index]}, False
             if self._cancelled():
                 return call, {"ok": False, "error": "Explore cancelled"}, False
             if self._deadline_reached(deadline):
                 return call, {"ok": False, "error": "Explore deadline reached"}, False
             return call, self.tools.invoke(call.name, call.arguments).to_record(), True
 
-        can_parallel = len(calls) > 1 and all(
-            call.name in _PARALLEL_READ_TOOLS
-            and not _reject_tool_call(
-                self.tools.spec(call.name), call.arguments, allowed=allowed
+        # Same rule as the parent runner: the whole batch runs concurrently
+        # unless one call is sequential (mutating, gate, or rejected).
+        can_parallel = (
+            len(calls) > 1
+            and not any(rejections)
+            and all(
+                not is_sequential_tool(self.tools.spec(call.name)) for call in calls
             )
-            for call in calls
         )
         if not can_parallel:
             return [run_one(index) for index in range(len(calls))]
         results: list[tuple[ToolCall, dict[str, object], bool] | None] = [None] * len(
             calls
         )
-        with ThreadPoolExecutor(max_workers=min(len(calls), 4)) as executor:
+        interrupt: SessionInterrupt | None = None
+        with ThreadPoolExecutor(max_workers=min(len(calls), 8)) as executor:
             futures = {
                 executor.submit(run_one, index): index for index in range(len(calls))
             }
             for future in as_completed(futures):
-                results[futures[future]] = future.result()
+                index = futures[future]
+                try:
+                    results[index] = future.result()
+                except SessionInterrupt as exc:
+                    interrupt = exc
+                except Exception as exc:  # noqa: BLE001 - one call must not drop its siblings
+                    results[index] = (
+                        calls[index],
+                        {"ok": False, "error": safe_error_summary(exc)},
+                        True,
+                    )
+        if interrupt is not None:
+            raise interrupt
         return [item for item in results if item is not None]
 
     def _deadline_monotonic(self) -> float:
@@ -651,9 +709,11 @@ class ExploreSubAgentEngine(SessionTimeBudgetAware):
         )
 
     def _validate_tools(self) -> None:
+        # The role tables are the single allowlist: nesting, backtest, finish,
+        # rollback, and ask_user are absent from every role by construction.
         allowed = allowed_explore_tools(self.mode)
         for spec in self.tools.specs():
-            if spec.name not in allowed or spec.name in _FORBIDDEN_TOOLS:
+            if spec.name not in allowed:
                 raise ValueError(f"Explore tool is not allowed: {spec.name}")
 
     def _emit(self, event: str, payload: dict[str, object]) -> None:
@@ -687,15 +747,9 @@ def _add_usage(total: dict[str, int], usage: object) -> None:
             total[key] += value
 
 
-def _reject_tool_call(
-    spec: ToolSpec | None,
-    arguments: object,
-    *,
-    allowed: frozenset[str] = _ALLOWED_TOOLS,
-) -> str:
-    del arguments
+def _reject_tool_call(spec: ToolSpec | None, *, allowed: frozenset[str]) -> str:
     if spec is None:
         return "unknown Explore tool"
-    if spec.name not in allowed or spec.name in _FORBIDDEN_TOOLS:
+    if spec.name not in allowed:
         return f"Explore tool is not allowed: {spec.name}"
     return ""

@@ -119,7 +119,8 @@ If the exact price source is absent or invalid, including when the required dail
 
 `DailyBroker` is a deterministic long-only A-share account:
 
-- Buys and sells use share quantities; buy quantities must be multiples of 100.
+- Buys and sells use share quantities. A buy declares whole 100-share lots, except on the STAR board (`688`/`689.SH`), where it declares at least 200 shares and then any 1-share increment, and on the BSE, where it declares at least 100 shares and then any 1-share increment.
+- A sell declares whole lots, or one declaration carrying the entire odd-lot tail a corporate action left behind (a STAR/BSE position below its minimum declaration is likewise exitable only in full).
 - A position bought today becomes sellable on the next trading day's `open_day` transition.
 - Commission applies on both sides with a minimum fee, and a transfer fee (过户费) applies on both sides with no minimum. Stamp duty applies on sells only, at a rate that depends on the execution date. Directional slippage adjusts the event price.
 - Suspension, `missing_execution_price`, daily price limits, insufficient cash, insufficient sellable quantity, and invalid buy lots reject the whole order. Missing or non-finite direction-related limit-up/limit-down prices reject the whole order as `missing_daily_price_limit`.

@@ -21,6 +21,7 @@ from autotrade.environment.llm import (
     LLMProxy,
     ProviderResponse,
     context_request_fits,
+    estimate_chat_request_tokens,
 )
 from autotrade.environment.llm.extraction import ExtractionError, extract_json_object
 from autotrade.environment.runtime import sanitize_for_log
@@ -96,6 +97,7 @@ class ContextCompactor(SessionTimeBudgetAware):
         self,
         messages: Sequence[ChatMessage],
         *,
+        tools: Sequence[Mapping[str, object]] = (),
         remaining_seconds: float = float("inf"),
         force: bool = False,
     ) -> tuple[bool, dict[str, object]]:
@@ -105,7 +107,9 @@ class ContextCompactor(SessionTimeBudgetAware):
         failure/call circuits remain active.
         """
 
-        estimated_tokens = estimate_messages_tokens(messages)
+        # The request the provider will see: messages plus the tool schemas,
+        # estimated by the same bounded estimator as the send-time fit check.
+        estimated_tokens = estimate_chat_request_tokens(messages, tools=tools)
         non_summary_count = len(
             [message for message in messages[1:] if not is_compaction_message(message)]
         )
@@ -145,12 +149,13 @@ class ContextCompactor(SessionTimeBudgetAware):
         self,
         messages: Sequence[ChatMessage],
         *,
+        tools: Sequence[Mapping[str, object]] = (),
         remaining_seconds: float = float("inf"),
         step_id: str | None = None,
         force: bool = False,
     ) -> ContextCompactionResult | None:
         should_compact, decision = self.should_compact(
-            messages, remaining_seconds=remaining_seconds, force=force
+            messages, tools=tools, remaining_seconds=remaining_seconds, force=force
         )
         if not should_compact:
             return None
@@ -311,24 +316,18 @@ def drop_leading_orphan_tools(seq: Sequence[ChatMessage]) -> list[ChatMessage]:
     return list(seq[index:])
 
 
-def estimate_messages_tokens(messages: Sequence[ChatMessage]) -> int:
-    """Conservative rough token estimate based on serialized message content."""
+def drop_trailing_unanswered_tool_calls(seq: Sequence[ChatMessage]) -> list[ChatMessage]:
+    """Drop a trailing ``assistant`` turn whose tool calls have no results yet.
 
-    total_chars = 0
-    for message in messages:
-        total_chars += len(message.role)
-        total_chars += len(message.content or "")
-        total_chars += len(message.reasoning_content or "")
-        if message.tool_calls:
-            total_chars += len(
-                json.dumps(
-                    [call.to_record() for call in message.tool_calls],
-                    ensure_ascii=False,
-                    default=str,
-                )
-            )
-        total_chars += 8
-    return max(1, int((total_chars / 4.0) * (4.0 / 3.0)))
+    A conversation snapshot taken while a batch is still running ends with the
+    assistant's tool calls; forking it verbatim would hand a child a protocol
+    invalid history. Tool results that follow their assistant turn are kept.
+    """
+
+    kept = list(seq)
+    while kept and kept[-1].role == "assistant" and kept[-1].tool_calls:
+        kept.pop()
+    return kept
 
 
 def fit_tool_results_to_context(
@@ -429,7 +428,6 @@ def _retained_tool_fields(content: str) -> dict[str, object]:
     retained: dict[str, object] = {}
     allowed = {
         "command_kind",
-        "complete",
         "error",
         "node_id",
         "offset",

@@ -140,54 +140,6 @@ class SandboxShellTool:
         return ToolResult(True, value=record)
 
 
-class ReadOnlyShellTool(SandboxShellTool):
-    """Shell surface for Explore with a small non-executing command allowlist."""
-
-    spec = ToolSpec(
-        "shell",
-        "Run one allowlisted read-only command in the network-disabled sandbox.",
-        _shell_input_schema(DEFAULT_SHELL_TIMEOUT_SECONDS),
-    )
-    _COMMANDS = frozenset(
-        {"cat", "cut", "du", "grep", "head", "ls", "pwd", "readlink", "realpath", "rg", "stat", "tail", "tr", "uniq", "wc"}
-    )
-
-    def __init__(
-        self,
-        workspace: SafeWorkspace,
-        runner: CommandRunner,
-        *,
-        timeout_seconds: float = DEFAULT_SHELL_TIMEOUT_SECONDS,
-        max_output_chars: int = 40_000,
-    ) -> None:
-        super().__init__(
-            workspace,
-            runner,
-            timeout_seconds=timeout_seconds,
-            max_output_chars=max_output_chars,
-        )
-        self.spec = ToolSpec(
-            "shell",
-            "Run one allowlisted read-only command in the network-disabled sandbox.",
-            self.spec.input_schema,
-        )
-
-    def invoke(self, arguments: Mapping[str, object]) -> ToolResult:
-        raw_argv = arguments.get("argv")
-        if not isinstance(raw_argv, list) or not raw_argv:
-            raise ToolError("argv must contain at least one argument")
-        command = str(raw_argv[0])
-        if command not in self._COMMANDS:
-            raise ToolError(f"read-only shell command is not allowed: {command}")
-        if command == "rg" and any(
-            argument in {"--pre", "--hostname-bin"}
-            or argument.startswith(("--pre=", "--hostname-bin="))
-            for argument in map(str, raw_argv[1:])
-        ):
-            raise ToolError("read-only rg cannot execute helper programs")
-        return super().invoke(arguments)
-
-
 def reject_forbidden_wait(argv: Sequence[str]) -> None:
     """Refuse sleep/usleep and a small set of wait wrappers before execution."""
 
@@ -360,7 +312,6 @@ def _basename(token: str) -> str:
 __all__ = [
     "DEFAULT_SHELL_TIMEOUT_SECONDS",
     "FORBIDDEN_WAIT",
-    "ReadOnlyShellTool",
     "SandboxShellTool",
     "argv_is_forbidden_wait",
     "reject_forbidden_wait",

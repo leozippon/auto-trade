@@ -11,7 +11,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-from autotrade.agent.runner import PRIOR_MAX_CHARS
+from autotrade.environment.tools.prior_policy import PRIOR_MAX_CHARS
 
 PRIOR_FILENAME = "PRIOR.md"
 _LEGACY_DIRECTION_FIELDS = frozenset({"taste", "taste_path"})

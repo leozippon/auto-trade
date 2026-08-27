@@ -18,6 +18,8 @@ from autotrade.environment.llm import (
     ScriptedLLM,
     ToolCall,
 )
+from autotrade.environment.nl import NLConfig
+from autotrade.environment.nl.service import DEFAULT_MAX_TOTAL_CALLS
 from autotrade.environment.tools import CommandResult
 from autotrade.pipelines.agent_views import compact_fold_history
 from autotrade.pipelines.hitl_state import (
@@ -30,7 +32,11 @@ from autotrade.pipelines.hitl_state import (
 from autotrade.pipelines.interactive import InteractiveExperimentRunner
 from autotrade.pipelines.ledger import ExperimentLedger
 from autotrade.pipelines.local_backend import SessionBudgetLLM, SessionCallBudget
-from autotrade.pipelines.worker import load_worker_options, run_local_interactive_worker
+from autotrade.pipelines.worker import (
+    NL_REASONING_EFFORT,
+    load_worker_options,
+    run_local_interactive_worker,
+)
 from autotrade.webui.manager import ExperimentManager
 from autotrade.webui.server import create_app
 
@@ -169,7 +175,8 @@ def test_worker_maps_model_context_params_to_role_gateways_and_compactor(
         "deepseek-v4-pro",
     )
     assert main.thinking_enabled is False and nl.thinking_enabled is False
-    assert main.reasoning_effort == "high" and nl.reasoning_effort == "high"
+    # Thinking is off, so no role sends a reasoning effort.
+    assert main.reasoning_effort is None and nl.reasoning_effort is None
     assert compact.thinking_enabled is False and compact.reasoning_effort is None
     assert compact.max_tokens == 1_200
     assert settings.compact_enabled is True
@@ -177,6 +184,35 @@ def test_worker_maps_model_context_params_to_role_gateways_and_compactor(
     assert settings.compaction.keep_recent_messages == 10
     assert settings.compaction.max_response_tokens == 1_200
     assert settings.compaction.max_calls == 4
+
+
+def test_nl_cost_controls_reach_the_worker_without_being_configured(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """NL is the only real model inference inside a backtest's wall clock.
+
+    Both of its cost controls have to hold with nothing configured: a real
+    per-backtest call ceiling, and a reasoning tier of its own instead of the
+    strategy-design dialogues' effort.
+    """
+    repo, experiment = _experiment(tmp_path, developer_mode="llm")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-only-key")
+    monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
+
+    options = load_worker_options(experiment, repo_root=repo)
+    assert options.nl_config.max_total_calls == DEFAULT_MAX_TOTAL_CALLS
+    assert options.nl_config.max_calls_per_decision == NLConfig().max_calls_per_decision
+
+    settings = options.llm
+    assert settings is not None
+    assert settings.reasoning_effort == "max"
+    assert settings.thinking_enabled is True
+    # The local Qwen profile maps the shared `max` tier to its native `xhigh`;
+    # NL's own tier is already native and passes through unmapped.
+    assert settings.build_gateway("main").config.reasoning_effort == "xhigh"
+    assert settings.build_gateway("nl").config.reasoning_effort == NL_REASONING_EFFORT
+    assert NL_REASONING_EFFORT == "medium"
 
 
 def test_worker_canonicalizes_all_legacy_model_roles_without_rewriting_params(
@@ -323,7 +359,7 @@ def test_worker_applies_local_output_cap_to_each_role_budget(
     assert options.llm.build_gateway("compact").config.max_tokens == 20_000
 
 
-def test_worker_rejects_local_context_threshold_before_launch(
+def test_worker_clamps_compaction_threshold_to_the_model_context(
     tmp_path: Path,
     monkeypatch,
 ):
@@ -335,8 +371,30 @@ def test_worker_rejects_local_context_threshold_before_launch(
     path.write_text(json.dumps(params), encoding="utf-8")
     monkeypatch.setenv("DEEPSEEK_API_KEY", "deepseek-test-key")
     monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
-    with pytest.raises(ValueError, match="compact_token_threshold must be <= 227328"):
-        load_worker_options(experiment, repo_root=repo)
+    options = load_worker_options(experiment, repo_root=repo)
+    # 262,144 - 32,768 output budget - 2,048 margin.
+    assert options.llm.compaction.token_threshold == 227_328
+
+
+def test_worker_default_threshold_fits_deepseek_and_compaction_can_be_disabled(
+    tmp_path: Path,
+    monkeypatch,
+):
+    repo, experiment = _experiment(tmp_path, developer_mode="llm")
+    path = experiment / "hitl/params.json"
+    params = json.loads(path.read_text(encoding="utf-8"))
+    params["model"] = "deepseek-v4-flash"
+    params.pop("compact_token_threshold", None)
+    path.write_text(json.dumps(params), encoding="utf-8")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "deepseek-test-key")
+    monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
+    options = load_worker_options(experiment, repo_root=repo)
+    # 128,000 - 32,768 output budget - 2,048 margin: shipped defaults launch.
+    assert options.llm.compaction.token_threshold == 93_184
+    params["disable_context_compact"] = True
+    path.write_text(json.dumps(params), encoding="utf-8")
+    disabled = load_worker_options(experiment, repo_root=repo)
+    assert disabled.llm.compact_enabled is False
 
 
 def test_model_roles_share_one_session_call_budget():
@@ -633,7 +691,7 @@ def test_llm_worker_runs_real_meta_fold_validation_and_heldout(
     assert {"write_file", "finish_meta", "explore"}.issubset(meta_tool_names)
     # The Meta session may regularize the working copy, so it holds the typed
     # writers and modification_check — but it stays offline and never backtests.
-    assert {"write_file", "edit_file", "modification_check", "todo"}.issubset(
+    assert {"write_file", "edit_file", "modification_check"}.issubset(
         meta_tool_names
     )
     assert {"shell", "daily_backtest", "step_rollback"}.isdisjoint(meta_tool_names)
@@ -647,7 +705,6 @@ def test_llm_worker_runs_real_meta_fold_validation_and_heldout(
         "finish_fold",
         "shell",
         "step_rollback",
-        "todo",
         "write_file",
     }.issubset(fold_tool_names)
     assert all(

@@ -699,7 +699,9 @@ def fold_run_id(root: Path, experiment_id: str, epoch_id: str, fold_ref: str) ->
     return run_id
 
 
-def _selected_validation_ref(record: Mapping[str, object]) -> object:
+def selected_validation_ref(record: Mapping[str, object]) -> object:
+    """The Validation result the Fold actually selected, else its last one."""
+
     steps = [
         item
         for item in record.get("steps", [])
@@ -750,7 +752,7 @@ def style_payload(
             None,
         )
         if fold is not None:
-            reference = _selected_validation_ref(fold)
+            reference = selected_validation_ref(fold)
     elif prefix == "test":
         fold = next(
             (

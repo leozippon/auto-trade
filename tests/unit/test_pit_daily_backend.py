@@ -18,7 +18,11 @@ from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.data.snapshot import SnapshotConfig
 from autotrade.environment.executor import docker_available
 from autotrade.environment.nl import NLConfig
-from autotrade.environment.runtime import chmod_tree
+from autotrade.environment.runtime import (
+    AGENT_VISIBLE_BACKTEST_SUMMARY_KEYS,
+    _agent_visible_backtest_summary,
+    chmod_tree,
+)
 from autotrade.environment.strategy import StrategySchedule
 from autotrade.pipelines.config import (
     SNAPSHOT_CACHE_FORMAT_VERSION,
@@ -353,6 +357,137 @@ def generate_orders(context):
     assert record["inference_dates"] == ["2024-02-01T08:30:00+08:00"]
     assert record["executions"] == []
     assert record["pending_orders"] == []
+
+
+def test_evaluation_summary_carries_the_whole_agent_visible_field_set(
+    tmp_path: Path,
+) -> None:
+    """A whitelisted summary key must actually arrive.
+
+    The Agent-visible projection is a fixed allowlist; a key nothing populates
+    advertises telemetry that never shows up in a run manifest. This pins the
+    timing and NL cost block the whitelist promises, on a real two-day replay.
+    """
+    snapshot, replay = _pit_slot_paths(
+        tmp_path,
+        decision="timing",
+        replay="timing",
+        generation_id="generation_timing",
+    )
+    (snapshot / "text_library").mkdir()
+    (replay / "text_library").mkdir()
+    _write_domains(snapshot, replay)
+    (snapshot / "manifest.json").write_text(
+        json.dumps(
+            {
+                "snapshot_id": "snap_timing",
+                "kind": "decision_input",
+                "raw_generation": {"generation_id": "generation_timing"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (replay / "manifest.json").write_text(
+        json.dumps(
+            {
+                "snapshot_id": "replay_timing",
+                "kind": "replay_slot",
+                "label": "valid",
+                "period_start": "20240102",
+                "period_end": "20240103",
+                "available_from": "2024-01-01T23:59:59+08:00",
+                "raw_generation": {"generation_id": "generation_timing"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    chmod_tree(snapshot, file_mode=0o444, dir_mode=0o555)
+
+    revision = tmp_path / "revision"
+    revision.mkdir()
+    (revision / "main.py").write_text(
+        """def generate_orders(context):
+    context.nl(query="visibletoken", mode="search")
+    return [{
+        "symbol": "000001.SZ",
+        "action": "buy",
+        "quantity": 100,
+        "execute_at": context.inference_at.replace(hour=15, minute=0).isoformat(),
+    }]
+""",
+        encoding="utf-8",
+    )
+    result = PITDailyEvaluationBackend(
+        tmp_path / "results",
+        execution_mode="trusted",
+        nl_config=NLConfig(max_total_calls=4),
+    ).evaluate(
+        EvaluationRequest(
+            ArtifactRevision("revision_timing", revision),
+            SnapshotBundle(
+                "snap_timing",
+                str(snapshot),
+                str(replay),
+                generation_id="generation_timing",
+            ),
+            "valid",
+            "20240102",
+            "20240103",
+            StrategySchedule("day", "09:28"),
+            BrokerProfile(initial_cash=100_000),
+        )
+    )
+
+    summary = result.summary
+    # result_name/mode/status/complete_validation/error belong to the Fold tool
+    # layer, which adds them when it appends the manifest entry; benchmark
+    # depends on the slot carrying index rows, which this one deliberately does
+    # not (see test_style_analysis for the producer/report round trip).
+    conditional = {
+        "result_name",
+        "mode",
+        "status",
+        "complete_validation",
+        "error",
+        "benchmark",
+    }
+    expected = set(AGENT_VISIBLE_BACKTEST_SUMMARY_KEYS) - conditional
+    assert expected <= set(summary), sorted(expected - set(summary))
+    assert "benchmark" not in summary
+
+    assert summary["replayed_trade_days"] == 2
+    assert summary["decision_calls"] == 2
+    assert summary["started_at"] < summary["finished_at"]
+    assert 0.0 < float(summary["replay_wall_seconds"])
+    phases = summary["phase_seconds"]
+    # Backend setup and replay-loop phases share one breakdown, and the loop
+    # phases cannot exceed the loop they were measured inside.
+    assert {"replay_frames", "timeview_init", "style_analysis"} <= set(phases)
+    assert {"market_build", "data_view", "strategy", "broker", "nl"} <= set(phases)
+    loop = sum(phases[name] for name in ("data_view", "strategy", "broker"))
+    assert loop <= float(summary["replay_wall_seconds"]) + 0.05
+    assert phases["nl"] <= phases["strategy"] + 0.05
+
+    # No LLM is configured, so the calls are counted but none reached a model.
+    assert summary["nl_calls"] == 2
+    assert summary["nl_executed_calls"] == 0
+    assert summary["nl_llm_calls"] == 0
+    assert summary["nl_budget_rejected_calls"] == 0
+    assert summary["nl_max_total_calls"] == 4
+    assert summary["nl_wall_seconds"] >= 0.0
+
+    # The same block reaches the persisted result and the Agent-visible view.
+    record = json.loads(Path(result.result_ref).read_text(encoding="utf-8"))
+    assert record["stats"]["phase_seconds"] == phases
+    assert set(_agent_visible_backtest_summary(dict(summary))) == expected
+
+    # Every charged NL call is explained by exactly one outcome bucket.
+    assert summary["nl_search_calls"] == 2
+    assert summary["nl_calls"] == (
+        summary["nl_executed_calls"]
+        + summary["nl_search_calls"]
+        + summary["nl_evidence_gated_calls"]
+    )
 
 
 def test_research_pit_provider_reuses_completed_semantic_views(tmp_path: Path) -> None:

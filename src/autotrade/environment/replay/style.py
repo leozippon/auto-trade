@@ -341,6 +341,29 @@ def replay_style_analysis(
     }
 
 
+def benchmark_summary_block(analysis: Mapping[str, object]) -> dict[str, object] | None:
+    """The compact benchmark projection an evaluation summary carries.
+
+    The sidecar is the single computation point; this is the same numbers in the
+    shape the ledger, the experiment report and the Meta metric projection read
+    (``label`` + ``benchmark_return`` at minimum). Returns None when the slot had
+    no usable benchmark, so a missing block stays a truthful "not measured"
+    instead of a fabricated zero.
+    """
+
+    compact = analysis.get("compact")
+    if not isinstance(compact, Mapping):
+        return None
+    benchmark_return = compact.get("benchmark_return")
+    if not isinstance(benchmark_return, (int, float)) or isinstance(benchmark_return, bool):
+        return None
+    return {
+        "ts_code": BENCHMARK_TS_CODE,
+        "label": BENCHMARK_LABEL,
+        **{key: value for key, value in compact.items()},
+    }
+
+
 def write_style_rollup(result_dir: Path, payload: Mapping[str, object]) -> Path:
     """Write the one canonical style sidecar for an evaluation result."""
 
@@ -356,6 +379,7 @@ __all__ = [
     "BENCHMARK_TS_CODE",
     "STYLE_ARTIFACT_NAME",
     "STYLE_SCHEMA_VERSION",
+    "benchmark_summary_block",
     "daily_returns_from_curve",
     "replay_style_analysis",
     "write_style_rollup",

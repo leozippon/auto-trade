@@ -191,8 +191,6 @@ def test_trace_stats_recomputes_when_cached_summary_lacks_subagent_field(
         "llm_total_tokens": 0,
         "prompt_tokens": 0,
         "completion_tokens": 0,
-        "active_tool": None,
-        "last_event_ts": None,
     }
     try:
         stats = trace_stats(path)
@@ -245,15 +243,31 @@ def test_subagent_trace_card_shows_model_thinking_and_context() -> None:
     )[0]
     assert "🧩" in source
     assert "block.role" in source
-    assert "block.model" in source
-    assert "parentReasoningLabel" in source
-    assert "继承上下文" in source
-    assert "独立上下文" in source
-    assert "orderTraceBlocks" in script
+    assert "subagentMetaLine" in source
+    assert "subagentClockNode" in source
+    assert "subagentProgressParts" in source
+    assert "subagentLastToolLabel" in source
+    # The dead `task` field is gone from both the projection and the UI.
+    assert "if (block.task)" not in script
+    assert "block.task ||" not in script
+    assert "runningSubagentBlocks" in script
     assert "trace-subagent-dock" in script
     assert "trace-box-scroll" in script
     assert "trace-subagent-chip" in script
     assert "runningSubagentChip" in script
+    # Launch metadata is spelled out once, in subagentMetaLine.
+    meta = script.split("function subagentMetaLine(", 1)[1].split("\nfunction ", 1)[0]
+    assert "block.model" in meta
+    assert "parentReasoningLabel" in meta
+    assert "继承上下文" in meta and "独立上下文" in meta
+    detail_node = script.split("function subagentDetailNode(", 1)[1].split(
+        "\nfunction ", 1
+    )[0]
+    assert "subagentMetaLine" not in detail_node
+    # Clipping is the backend's job; the console renders what it receives.
+    assert ".slice(0, 400)" not in script
+    assert ".slice(0, 240)" not in script
+    assert ".slice(0, 160)" not in script
     assert "isRunningSubagent" in script
 
 
@@ -274,11 +288,16 @@ def test_stats_chips_show_subagent_near_llm_only_when_positive() -> None:
     script = APP_JS.read_text(encoding="utf-8")
     source = script.split("function statsChipsRow(", 1)[1].split("\nfunction ", 1)[0]
     assert "Number(stats.subagent_tasks) || 0" in source
-    assert "🧩 子代理" in source
+    assert "Number(stats.subagent_running) || 0" in source
+    assert "🧩 子代理 ${subagentRunning} 运行 / ${subagentTasks} 累计" in source
     assert 'key === "llm_call" && subagentTasks' in source
-    assert "当前上下文" in source
-    assert "累计输入" in source
-    assert "累计输出" in source
+    assert "主 Agent 上下文" in source
+    assert "主 Agent 累计输入" in source
+    assert "主 Agent 累计输出" in source
+    # Child spend is shown beside the parent totals, never folded into them.
+    assert "🧩 子代理 Σ ${fmtTokens(subagentTokens)}" in source
+    assert "subagent_prompt_tokens" in source
+    assert "subagent_completion_tokens" in source
     assert "`Compact ${Number(stats.compact_ops) || 0}`" in source
     assert "compact_ops" in source
     assert "trim_ops" not in source
@@ -441,13 +460,13 @@ def test_project_failed_running_and_tail_tool_groups() -> None:
     assert tail["ok"] == 1 and tail["count"] == 1
 
 
-def test_project_subagent_new_and_old_events_aggregate_by_task_id() -> None:
+def test_project_subagent_emits_one_card_per_task_id() -> None:
     blocks = project_trace_blocks(
         [
             {
                 "event_type": "explore_task_started",
                 "task_id": "explore_new",
-                "task": "inspect schema",
+                "description": "inspect schema",
             },
             {"event_type": "explore_llm", "task_id": "explore_new"},
             {
@@ -479,29 +498,19 @@ def test_project_subagent_new_and_old_events_aggregate_by_task_id() -> None:
             {
                 "event_type": "explore",
                 "task_id": "explore_old",
-                "task": "old inspect",
                 "summary": "old summary",
             },
         ]
     )
     sub = _subagent_blocks(blocks)
+    # One card per task, updated in place: a finished report renders once.
     assert [(block["task_id"], block["phase"], block["status"]) for block in sub] == [
-        ("explore_new", "started", "running"),
         ("explore_new", "ended", "completed"),
-        ("explore_old", "started", "running"),
         ("explore_old", "ended", "completed"),
     ]
-    new_ended = next(
-        block
-        for block in sub
-        if block["task_id"] == "explore_new" and block["phase"] == "ended"
-    )
-    old_ended = next(
-        block
-        for block in sub
-        if block["task_id"] == "explore_old" and block["phase"] == "ended"
-    )
-    assert new_ended["task"] == "inspect schema"
+    new_ended, old_ended = sub
+    assert new_ended["description"] == "inspect schema"
+    assert "task" not in new_ended
     assert new_ended["summary"] == "has trade_date"
     assert new_ended["tools"] == [
         {
@@ -513,7 +522,6 @@ def test_project_subagent_new_and_old_events_aggregate_by_task_id() -> None:
             "summary": "",
         }
     ]
-    assert old_ended["task"] == "old inspect"
     assert old_ended["summary"] == "old summary"
     assert old_ended["tools"] == [
         {
@@ -573,7 +581,6 @@ def test_project_subagent_exposes_model_thinking_and_inherit_context() -> None:
                 "thinking": "low",
                 "inherit_context": True,
                 "description": "schema audit",
-                "task": "inspect PIT",
             },
             {
                 "event_type": "explore",
@@ -587,60 +594,13 @@ def test_project_subagent_exposes_model_thinking_and_inherit_context() -> None:
             },
         ]
     )
-    started = next(
-        block
-        for block in _subagent_blocks(blocks)
-        if block["phase"] == "started"
-    )
-    assert started["role"] == "auditor"
-    assert started["model"] == "qwen-3.8-27b-fp8"
-    assert started["thinking"] == "low"
-    assert started["inherit_context"] is True
-    assert started["description"] == "schema audit"
-
-
-def test_project_todo_tools_attach_foldable_items() -> None:
-    blocks = project_trace_blocks(
-        [
-            {"event_type": "llm_call", "content": "plan"},
-            {
-                "event_type": "tool_call",
-                "tool": "todo",
-                "result": {
-                    "ok": True,
-                    "value": {
-                        "item": {
-                            "id": 1,
-                            "subject": "check PIT",
-                            "status": "in_progress",
-                            "description": "units",
-                        }
-                    },
-                },
-            },
-            {
-                "event_type": "tool_call",
-                "tool": "todo",
-                "result": {
-                    "ok": True,
-                    "value": {
-                        "items": [
-                            {"id": 1, "subject": "check PIT", "status": "completed"},
-                            {"id": 2, "subject": "write factor", "status": "pending"},
-                        ]
-                    },
-                },
-            },
-        ]
-    )
-    group = next(block for block in blocks if block.get("kind") == "tool_group")
-    assert group["todos"] == [
-        {"id": 1, "subject": "check PIT", "status": "completed"},
-        {"id": 2, "subject": "write factor", "status": "pending"},
-    ]
-    script = APP_JS.read_text(encoding="utf-8")
-    assert "function todoListNode(" in script
-    assert "TODO" in script
+    (card,) = _subagent_blocks(blocks)
+    assert card["phase"] == "ended"
+    assert card["role"] == "auditor"
+    assert card["model"] == "qwen-3.8-27b-fp8"
+    assert card["thinking"] == "low"
+    assert card["inherit_context"] is True
+    assert card["description"] == "schema audit"
 
 
 def test_project_legacy_subagent_digest_is_ignored() -> None:
@@ -668,11 +628,7 @@ def test_project_explore_internal_tools_stay_on_subagent_card() -> None:
                 "tool": "explore",
                 "tool_call_id": "e1",
             },
-            {
-                "event_type": "explore_task_started",
-                "task_id": "explore_a",
-                "task": "inspect",
-            },
+            {"event_type": "explore_task_started", "task_id": "explore_a"},
             {
                 "event_type": "explore_tool_started",
                 "task_id": "explore_a",
@@ -798,7 +754,6 @@ def test_project_unknown_bad_payload_and_clips_long_text() -> None:
     assert project_trace_blocks("nope") == []
     assert project_trace_blocks([None, 1, "x", {"event_type": "mystery"}]) == []
     long_text = "字" * (traces._BLOCK_TEXT_CHARS + 50)
-    long_task = "任" * (traces._BLOCK_TASK_CHARS + 20)
     long_subagent_summary = "摘" * (traces._BLOCK_SUBAGENT_SUMMARY_CHARS + 20)
     long_error = "错" * (traces._BLOCK_ERROR_CHARS + 20)
     long_summary = "e" * (traces._BLOCK_SUMMARY_CHARS + 20)
@@ -814,7 +769,6 @@ def test_project_unknown_bad_payload_and_clips_long_text() -> None:
             {
                 "event_type": "explore",
                 "task_id": "t1",
-                "task": long_task,
                 "summary": long_subagent_summary,
                 "error": long_error,
                 "status": "error",
@@ -832,7 +786,6 @@ def test_project_unknown_bad_payload_and_clips_long_text() -> None:
         for block in _subagent_blocks(blocks)
         if block["phase"] == "ended"
     )
-    assert len(str(ended["task"])) == traces._BLOCK_TASK_CHARS
     assert len(str(ended["summary"])) == traces._BLOCK_SUBAGENT_SUMMARY_CHARS
     assert len(str(ended["error"])) == traces._BLOCK_ERROR_CHARS
 
@@ -851,7 +804,6 @@ def test_project_internal_events_emit_no_blocks() -> None:
                 {"event_type": "context_compaction", "summary": "compacted"},
                 {"event_type": "llm_call", "usage": {"total_tokens": 3}},
                 {"event_type": "budget", "remaining": 1},
-                {"raw": "not a typed event"},
             ]
         )
         == []
@@ -881,19 +833,7 @@ def test_trace_blocks_api_projects_whole_trace_without_paging_groups(
     ]
     identity = _experiment_with_trace(tmp_path, events)
     client = TestClient(create_app(tmp_path))
-    run_ref = identity.run_ref("run_001")
     trace_ref = identity.trace_ref("run_001")
-    raw = client.get("/api/experiments/demo/trace", params={"run_id": run_ref})
-    assert raw.status_code == 200
-    raw_payload = raw.json()
-    assert "blocks" not in raw_payload
-    assert [event.get("event_type") for event in raw_payload["events"]] == [
-        "session_start",
-        "llm_call",
-        "tool_call_started",
-    ]
-    assert raw_payload["eof"] is False
-
     response = client.get(
         "/api/experiments/demo/trace/blocks", params={"run_id": trace_ref}
     )
@@ -940,32 +880,310 @@ def test_trace_blocks_api_guards_invalid_experiment_and_run(tmp_path: Path) -> N
     assert missing_run.status_code == 404
 
 
-def test_trace_endpoint_returns_public_events_without_block_projection(tmp_path: Path) -> None:
-    events = [
-        {"event_type": "session_start", "system_prompt": "sys", "instruction": "go"},
-        {"event_type": "llm_call", "content": "hi"},
-        {"event_type": "tool_call", "tool": "shell", "result": {"ok": True}},
-    ]
-    identity = _experiment_with_trace(tmp_path, events)
+def test_project_subagent_running_card_accumulates_progress() -> None:
+    blocks = project_trace_blocks(
+        [
+            {
+                "event_type": "explore_task",
+                "ts": "2026-08-27T10:00:00+00:00",
+                "task_id": "explore_live",
+                "status": "started",
+                "role": "general-purpose",
+                "description": "Value 因子研究",
+            },
+            {
+                "event_type": "explore_llm",
+                "task_id": "explore_live",
+                "round": 1,
+                "usage": {
+                    "prompt_tokens": 1000,
+                    "completion_tokens": 100,
+                    "total_tokens": 1100,
+                },
+            },
+            {
+                "event_type": "explore_tool",
+                "task_id": "explore_live",
+                "tool": "grep",
+                "result": {"ok": True},
+            },
+            {
+                "event_type": "explore_tool_started",
+                "task_id": "explore_live",
+                "tool": "shell",
+                "tool_call_id": "s1",
+            },
+            {
+                "event_type": "explore_llm",
+                "task_id": "explore_live",
+                "round": 2,
+                "usage": {
+                    "prompt_tokens": 2000,
+                    "completion_tokens": 200,
+                    "total_tokens": 2200,
+                },
+            },
+        ]
+    )
+    (card,) = _subagent_blocks(blocks)
+    assert card["phase"] == "started" and card["status"] == "running"
+    assert card["started_at"] == "2026-08-27T10:00:00+00:00"
+    assert "ended_at" not in card
+    assert card["rounds"] == 2 and card["llm_calls"] == 2
+    assert card["tool_calls"] == 2
+    assert card["usage"] == {
+        "prompt_tokens": 3000,
+        "completion_tokens": 300,
+        "total_tokens": 3300,
+    }
+    assert card["last_tool"] == {"name": "shell", "status": "running"}
+
+
+def test_project_subagent_finished_card_prefers_terminal_totals() -> None:
+    """A tail window can miss early rounds, so the terminal event's own
+    totals win over whatever was summed from the visible records."""
+
+    blocks = project_trace_blocks(
+        [
+            {
+                "event_type": "explore_task",
+                "ts": "2026-08-27T10:00:00+00:00",
+                "task_id": "explore_done",
+                "status": "started",
+                "role": "Explore",
+            },
+            {
+                "event_type": "explore_llm",
+                "task_id": "explore_done",
+                "round": 1,
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 1,
+                    "total_tokens": 11,
+                },
+            },
+            {
+                "event_type": "explore",
+                "ts": "2026-08-27T10:30:00+00:00",
+                "task_id": "explore_done",
+                "status": "completed",
+                "summary": "结论",
+                "rounds": 19,
+                "llm_calls": 20,
+                "tool_calls": 143,
+                "usage_totals": {
+                    "prompt_tokens": 1_018_682,
+                    "completion_tokens": 63_802,
+                    "total_tokens": 1_082_484,
+                },
+            },
+        ]
+    )
+    (card,) = _subagent_blocks(blocks)
+    assert card["phase"] == "ended" and card["status"] == "completed"
+    assert card["started_at"] == "2026-08-27T10:00:00+00:00"
+    assert card["ended_at"] == "2026-08-27T10:30:00+00:00"
+    assert card["rounds"] == 19 and card["llm_calls"] == 20
+    assert card["tool_calls"] == 143
+    assert card["usage"]["total_tokens"] == 1_082_484
+    assert card["summary"] == "结论"
+
+
+def test_project_subagent_usage_total_falls_back_to_its_halves() -> None:
+    blocks = project_trace_blocks(
+        [
+            {
+                "event_type": "explore_llm",
+                "task_id": "explore_half",
+                "usage": {"prompt_tokens": 40, "completion_tokens": 2},
+            }
+        ]
+    )
+    (card,) = _subagent_blocks(blocks)
+    assert card["usage"] == {
+        "prompt_tokens": 40,
+        "completion_tokens": 2,
+        "total_tokens": 42,
+    }
+
+
+def test_trace_stats_separates_running_subagents_and_their_tokens(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "run.jsonl"
+    _write_trace(
+        path,
+        [
+            {
+                "event_type": "llm_call",
+                "usage": {
+                    "prompt_tokens": 500,
+                    "completion_tokens": 50,
+                    "total_tokens": 550,
+                },
+            },
+            {"event_type": "explore_task", "task_id": "done", "status": "started"},
+            {
+                "event_type": "explore_llm",
+                "task_id": "done",
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 1,
+                    "total_tokens": 11,
+                },
+            },
+            {
+                "event_type": "explore",
+                "task_id": "done",
+                "status": "completed",
+                "usage_totals": {
+                    "prompt_tokens": 900,
+                    "completion_tokens": 90,
+                    "total_tokens": 990,
+                },
+            },
+            {"event_type": "explore_task", "task_id": "live", "status": "started"},
+            {
+                "event_type": "explore_llm",
+                "task_id": "live",
+                "usage": {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 10,
+                    "total_tokens": 110,
+                },
+            },
+        ],
+    )
+    stats = trace_stats(path)
+    assert stats["subagent_tasks"] == 2
+    assert stats["subagent_running"] == 1
+    # The finished task reports its own totals; the live one is summed so far.
+    assert stats["subagent_prompt_tokens"] == 1000
+    assert stats["subagent_completion_tokens"] == 100
+    assert stats["subagent_total_tokens"] == 1100
+    # Sub-agent spend never leaks into the main-agent figures.
+    assert stats["llm_prompt_tokens"] == 500
+    assert stats["llm_total_tokens"] == 550
+
+
+def test_trace_stats_closes_a_running_subagent_on_append(tmp_path: Path) -> None:
+    path = tmp_path / "append.jsonl"
+    _write_trace(
+        path,
+        [
+            {"event_type": "explore_task", "task_id": "live", "status": "started"},
+            {
+                "event_type": "explore_llm",
+                "task_id": "live",
+                "usage": {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 10,
+                    "total_tokens": 110,
+                },
+            },
+        ],
+    )
+    first = trace_stats(path)
+    assert first["subagent_running"] == 1
+    assert first["subagent_total_tokens"] == 110
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "event_type": "explore",
+                    "task_id": "live",
+                    "status": "completed",
+                    "usage_totals": {
+                        "prompt_tokens": 300,
+                        "completion_tokens": 30,
+                        "total_tokens": 330,
+                    },
+                }
+            )
+            + "\n"
+        )
+    second = trace_stats(path)
+    assert second["subagent_tasks"] == 1
+    assert second["subagent_running"] == 0
+    assert second["subagent_total_tokens"] == 330
+
+
+def test_project_unreadable_lines_stay_visible_as_raw_blocks() -> None:
+    blocks = project_trace_blocks(
+        [
+            {"event_type": "llm_call", "content": "plan"},
+            {"raw": "{not json"},
+            {"raw": "<oversized event skipped: 900000 bytes>"},
+        ]
+    )
+    assert [block["kind"] for block in blocks] == ["agent_output", "raw", "raw"]
+    assert blocks[1]["text"] == "{not json"
+    assert blocks[2]["text"] == "<oversized event skipped: 900000 bytes>"
+
+
+def test_corrupt_line_is_projected_and_marked_in_the_download(
+    tmp_path: Path,
+) -> None:
+    """One bad line must not blank the projection nor fail the whole file,
+    and its unredactable content must never leave the host."""
+
+    identity = _experiment_with_trace(
+        tmp_path, [{"event_type": "llm_call", "content": "hi"}]
+    )
+    trace = tmp_path / "experiments/demo/artifacts/traces/run_001.jsonl"
+    with trace.open("a", encoding="utf-8") as handle:
+        handle.write("{not json\n")
     client = TestClient(create_app(tmp_path))
-    run_ref = identity.run_ref("run_001")
     trace_ref = identity.trace_ref("run_001")
-    raw = client.get(
-        "/api/experiments/demo/trace", params={"run_id": run_ref}
-    ).json()
-    assert "blocks" not in raw
-    assert [event.get("event_type") for event in raw["events"]] == [
-        "session_start",
-        "llm_call",
-        "tool_call",
-    ]
-    assert raw["events"][1]["content"] == "hi"
-    assert raw["eof"] is True
-    blocks = client.get(
+
+    payload = client.get(
         "/api/experiments/demo/trace/blocks", params={"run_id": trace_ref}
     ).json()
-    assert "events" not in blocks
-    assert [block["kind"] for block in blocks["blocks"]] == [
-        "agent_output",
-        "tool_group",
-    ]
+    assert [block["kind"] for block in payload["blocks"]] == ["agent_output", "raw"]
+    assert payload["blocks"][1]["text"] == "{not json"
+
+    download = client.get(
+        "/api/experiments/demo/trace/download", params={"run_id": trace_ref}
+    )
+    assert download.status_code == 200
+    records = [json.loads(line) for line in download.text.strip().splitlines()]
+    assert records[0]["content"] == "hi"
+    assert records[1] == {"event_type": "unreadable_line", "bytes": 10}
+    assert "not json" not in download.text
+
+
+def test_trace_stream_nudges_with_offsets_and_no_event_payload(
+    tmp_path: Path,
+) -> None:
+    identity = _experiment_with_trace(
+        tmp_path, [{"event_type": "llm_call", "content": "secret-content"}]
+    )
+    client = TestClient(create_app(tmp_path))
+    response = client.get(
+        "/api/experiments/demo/trace/stream",
+        params={"run_id": identity.trace_ref("run_001")},
+    )
+    assert response.status_code == 200
+    body = response.text
+    # The console re-reads /trace/blocks; the stream only says "there is more".
+    assert "secret-content" not in body
+    assert '"offset"' in body
+    assert "id: " in body
+    assert "event: eof" in body
+
+
+def test_trace_replay_threads_detail_and_clamps_the_block_window() -> None:
+    script = APP_JS.read_text(encoding="utf-8")
+    assert (
+        "traceReplayNode(detail.experiment_id, session.record.run_ref, detail)"
+        in script
+    )
+    assert "function traceReplayNode(experimentId, runId, detail) {" in script
+    source = script.split("function traceReplayNode(", 1)[1].split("\nfunction ", 1)[0]
+    assert "detail," in source
+    assert "MAX_TRACE_BLOCK_BYTES" in source
+    # The client window must never exceed what the route accepts.
+    assert f"const MAX_TRACE_BLOCK_BYTES = {32 * 1024 * 1024};" in script.replace(
+        "32 * 1024 * 1024", str(32 * 1024 * 1024)
+    )
+    assert traces.MAX_BLOCK_READ_BYTES == 32 * 1024 * 1024

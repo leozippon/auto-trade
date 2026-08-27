@@ -182,6 +182,14 @@ _ALLOWED_PARAMS = {
     "agent_sandbox_tmpfs",
 }
 
+# Single source for the NL budget defaults advertised to experiment parameters.
+NL_DEFAULTS = NLConfig()
+
+# NL Sub Agent reasoning tier. Independent of the experiment's
+# ``reasoning_effort``, which governs the strategy-design dialogues; `medium` is
+# a native Qwen tier and passes through the shared gateway unmapped.
+NL_REASONING_EFFORT = "medium"
+
 # Historical snapshots may contain this former operator override.  It is
 # deliberately ignored rather than interpreted or exposed: provider endpoints
 # now come only from the trusted model profile's fixed environment key.
@@ -267,15 +275,24 @@ class LLMWorkerSettings:
             max_tokens=effective_max_tokens,
             temperature=self.temperature,
             thinking_enabled=self.thinking_enabled if role != "compact" else False,
-            reasoning_effort=(
-                "high"
-                if role == "analysis" and self.thinking_enabled
-                else self.reasoning_effort
-                if role != "compact"
-                else None
-            ),
+            reasoning_effort=self.reasoning_effort_for(role),
             require_credentials=require_credentials,
         )
+
+    def reasoning_effort_for(self, role: str) -> str | None:
+        """The effort a role sends, or None when its thinking is off."""
+
+        if role == "compact" or not self.thinking_enabled:
+            return None
+        if role == "analysis":
+            return "high"
+        if role == "nl":
+            # NL extracts evidence from already-retrieved PIT text and answers
+            # short or enum-bounded questions; it is also the only LLM
+            # inference inside a backtest's wall clock, so it runs at a
+            # deliberately lower effort than the strategy-design dialogues.
+            return NL_REASONING_EFFORT
+        return self.reasoning_effort
 
 
 def _explore_native_max_tokens(settings: LLMWorkerSettings, role: str) -> int:
@@ -646,18 +663,26 @@ def resolve_worker_options(
         fundamental_events_status=events_status,
         pit_cache_root=pit_cache_root,
         snapshot_config=snapshot_config,
+        # NLConfig owns the NL budget defaults; an absent parameter keeps the
+        # shipped default rather than a second copy of it living here.
         nl_config=NLConfig(
             max_results=_positive_int(
-                params.get("nl_max_results", 8), "nl_max_results"
+                params.get("nl_max_results", NL_DEFAULTS.max_results),
+                "nl_max_results",
             ),
             max_calls_per_decision=_positive_int(
-                params.get("nl_max_calls_per_decision", 10), "nl_max_calls_per_decision"
+                params.get(
+                    "nl_max_calls_per_decision", NL_DEFAULTS.max_calls_per_decision
+                ),
+                "nl_max_calls_per_decision",
             ),
             max_total_calls=_optional_positive_int(
-                params.get("nl_max_total_calls"), "nl_max_total_calls"
+                params.get("nl_max_total_calls", NL_DEFAULTS.max_total_calls),
+                "nl_max_total_calls",
             ),
             deadline_seconds=_positive_float(
-                params.get("nl_deadline_seconds", 20), "nl_deadline_seconds"
+                params.get("nl_deadline_seconds", NL_DEFAULTS.deadline_seconds),
+                "nl_deadline_seconds",
             ),
         ),
         analysis_enabled=analysis_enabled,
@@ -1517,7 +1542,7 @@ def _llm_settings(
     # validated at preflight with a non-secret placeholder.
     for role in ("main", "meta", "nl", "compact"):
         settings.build_gateway(role, require_credentials=not preflight)
-    _validate_local_context(settings)
+    settings = _clamp_compaction_threshold(settings)
     gpu_count = _gpu_count(params.get("gpu_count", SandboxSpec().gpu_count))
     sandbox = SandboxSpec(
         image=str(params.get("agent_sandbox_image") or DEFAULT_IMAGE),
@@ -1539,46 +1564,42 @@ def _llm_settings(
     return settings, sandbox
 
 
-def _validate_local_context(settings: LLMWorkerSettings) -> None:
-    """Fail before launch when a local role cannot hold its configured prompt."""
+COMPACTION_SAFETY_MARGIN_TOKENS = 2_048
 
-    safety_margin = 2_048
-    main_limits = (
-        (
-            "main",
-            model_profile(settings.model).context_window_tokens,
-            settings.max_tokens_for("main"),
-        ),
-        (
-            "meta",
-            model_profile(settings.meta_model).context_window_tokens,
-            settings.max_tokens_for("meta"),
-        ),
-    )
-    compact_limit = model_profile(settings.compact_model).context_window_tokens
+
+def _clamp_compaction_threshold(settings: LLMWorkerSettings) -> LLMWorkerSettings:
+    """Bound the compaction threshold by what every model role can hold.
+
+    A profile with a known context window caps the threshold at window minus
+    that role's output budget minus a safety margin; the smallest cap wins and
+    the clamped value is the effective one (it reaches the run facts through
+    the compaction budget). Only a window with no room for the output budget
+    at all is a launch error.
+    """
+
+    roles = [("main", settings.model), ("meta", settings.meta_model)]
+    if settings.compact_enabled:
+        roles.append(("compact", settings.compact_model))
     limits: list[tuple[str, int]] = []
-    for role, main_limit, output_tokens in main_limits:
-        if main_limit is not None and not settings.compact_enabled:
-            raise ValueError(f"local {role} model requires context compaction")
-        if main_limit is not None:
-            limits.append((role, main_limit - output_tokens - safety_margin))
-    if settings.compact_enabled and compact_limit is not None:
-        limits.append(
-            (
-                "compact",
-                compact_limit - settings.max_tokens_for("compact") - safety_margin,
-            )
-        )
-    for role, maximum in limits:
+    for role, model in roles:
+        window = model_profile(model).context_window_tokens
+        if window is None:
+            continue
+        maximum = window - settings.max_tokens_for(role) - COMPACTION_SAFETY_MARGIN_TOKENS
         if maximum <= 0:
             raise ValueError(
-                f"{role} local model output budget leaves no context capacity"
+                f"{role} model output budget leaves no context capacity"
             )
-        if settings.compaction.token_threshold > maximum:
-            raise ValueError(
-                "compact_token_threshold must be <= "
-                f"{maximum} for the {role} local model context"
-            )
+        limits.append((role, maximum))
+    effective = min(
+        [settings.compaction.token_threshold, *(maximum for _, maximum in limits)]
+    )
+    if effective == settings.compaction.token_threshold:
+        return settings
+    return replace(
+        settings,
+        compaction=replace(settings.compaction, token_threshold=effective),
+    )
 
 
 def _optional_workspace_reference(value: object, repo_root: Path) -> str:
@@ -1652,7 +1673,7 @@ def _calendar_free_text(value: object, name: str) -> str:
     text = str(value or "")
     if not text.strip():
         return ""
-    from autotrade.agent.runner import calendar_policy_violation
+    from autotrade.environment.tools.prior_policy import calendar_policy_violation
 
     reason = calendar_policy_violation(text)
     if reason:
@@ -1723,11 +1744,7 @@ def _date_key(value: object) -> str:
     return pd.Timestamp(str(value)).strftime("%Y%m%d")
 
 
-DeepSeekWorkerSettings = LLMWorkerSettings
-
-
 __all__ = [
-    "DeepSeekWorkerSettings",
     "InteractiveWorkerOptions",
     "LLMWorkerSettings",
     "load_worker_options",

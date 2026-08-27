@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time
+from time import perf_counter
 
 from autotrade.environment.broker import BrokerProfile, DailyBroker
 from autotrade.environment.executor import StrategyExecutor
@@ -19,7 +20,7 @@ from autotrade.environment.strategy import (
 )
 
 from .market import DailyMarketData
-from .stats import ReplayResult
+from .stats import PhaseTimer, ReplayResult
 
 MARKET_OPEN = time(9, 30)
 MARKET_CLOSE = time(15, 0)
@@ -78,6 +79,7 @@ class DailyReplayEngine:
         nl_query: NLQuery | None = None,
         context_data: ContextDataProvider | None = None,
         execution_price: ExecutionPriceProvider | None = None,
+        timer: PhaseTimer | None = None,
     ) -> None:
         if not callable(strategy) and not isinstance(strategy, StrategyExecutor):
             raise TypeError("strategy must be callable or implement StrategyExecutor")
@@ -87,6 +89,7 @@ class DailyReplayEngine:
         self.nl_query = nl_query
         self.context_data = context_data
         self.execution_price = execution_price
+        self.timer = timer if timer is not None else PhaseTimer()
         self.inbox = DailyOrderInbox()
 
     def run(self, market: DailyMarketData) -> ReplayResult:
@@ -94,6 +97,7 @@ class DailyReplayEngine:
         inference_dates: list[str] = []
         previous_trade_date: str | None = None
         initial_equity = self.broker.profile.initial_cash
+        started = perf_counter()
         for trade_date in market.trade_dates:
             self.broker.open_day(trade_date)
             day = date.fromisoformat(f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:8]}")
@@ -106,19 +110,22 @@ class DailyReplayEngine:
             # first, so the strategy receives the account that actually existed
             # at its decision time. Newly returned orders can still request that
             # exact timestamp and are handled by the end-of-day pass below.
-            self._match_due(inference_at, market)
+            with self.timer.phase("broker"):
+                self._match_due(inference_at, market)
             if due:
                 self._infer(market, inference_at)
                 inference_dates.append(inference_at.isoformat())
-            self._match_due(day_end, market)
-            self.broker.mark(bars)
+            with self.timer.phase("broker"):
+                self._match_due(day_end, market)
+                self.broker.mark(bars)
+                cash, positions = self.broker.account_snapshot()
+                equity = self.broker.equity()
 
-            cash, positions = self.broker.account_snapshot()
             equity_curve.append(
                 {
                     "trade_date": trade_date,
                     "initial_equity": initial_equity,
-                    "equity": self.broker.equity(),
+                    "equity": equity,
                     "cash": cash,
                     "positions": dict(positions),
                 }
@@ -129,11 +136,18 @@ class DailyReplayEngine:
             executions=tuple(execution.to_record() for execution in self.broker.executions),
             inference_dates=tuple(inference_dates),
             pending_orders=self.inbox.records(),
+            wall_seconds=perf_counter() - started,
+            phase_seconds=self.timer.to_record(),
         )
 
     def _infer(self, market: DailyMarketData, inference_at: datetime) -> None:
         cash, positions = self.broker.account_snapshot()
-        data_view = self.context_data(inference_at) if self.context_data is not None else StrategyDataView()
+        with self.timer.phase("data_view"):
+            data_view = (
+                self.context_data(inference_at)
+                if self.context_data is not None
+                else StrategyDataView()
+            )
         if not isinstance(data_view, StrategyDataView):
             raise BacktestError("context_data must return StrategyDataView")
         context = StrategyContext(
@@ -146,10 +160,13 @@ class DailyReplayEngine:
             _nl_query=self.nl_query,
         )
         try:
-            if isinstance(self.strategy, StrategyExecutor):
-                payload = self.strategy.execute(context)
-            else:
-                payload = self.strategy(context)
+            # Includes the host NL wait: ctx.nl() blocks inside the strategy
+            # call, and phase_seconds["nl"] reports that share separately.
+            with self.timer.phase("strategy"):
+                if isinstance(self.strategy, StrategyExecutor):
+                    payload = self.strategy.execute(context)
+                else:
+                    payload = self.strategy(context)
             self.inbox.submit(payload, inference_at=inference_at)
         except Exception as exc:
             raise BacktestError(f"generate_orders failed at {inference_at.isoformat()}: {exc}") from exc
@@ -209,7 +226,11 @@ def run_daily_replay(
     context_data: ContextDataProvider | None = None,
     execution_price: ExecutionPriceProvider | None = None,
 ) -> ReplayResult:
-    market = daily if isinstance(daily, DailyMarketData) else DailyMarketData(daily)
+    # One timer spans the market build and the replay loop, so a single
+    # phase_seconds breakdown covers the whole call.
+    timer = PhaseTimer()
+    with timer.phase("market_build"):
+        market = daily if isinstance(daily, DailyMarketData) else DailyMarketData(daily)
     return DailyReplayEngine(
         schedule=schedule,
         strategy=strategy,
@@ -217,6 +238,7 @@ def run_daily_replay(
         nl_query=nl_query,
         context_data=context_data,
         execution_price=execution_price,
+        timer=timer,
     ).run(market)
 
 
@@ -226,6 +248,7 @@ __all__ = [
     "DailyOrderInbox",
     "DailyReplayEngine",
     "ExecutionPriceProvider",
+    "PhaseTimer",
     "StrategyDataView",
     "StrategyRunner",
     "resolve_execution_price",

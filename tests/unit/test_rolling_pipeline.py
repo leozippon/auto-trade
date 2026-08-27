@@ -110,14 +110,22 @@ def test_rolling_pipeline_runs_meta_fold_test_and_heldout(tmp_path: Path):
         ledger=ledger,
     )
     days = [stamp.strftime("%Y%m%d") for stamp in pd.bdate_range("2025-09-29", "2026-06-30")]
-    result = pipeline.run(days)
-    assert result["heldout_runs"] == 1
+    fold = build_fold_schedule("2026Q1", "2026Q1", days)[0]
+    # The same call order the interactive worker drives: epoch-start Meta, then
+    # the Fold, then one Held-out pass over the resulting frontier.
+    prior, parent = pipeline.run_meta_session("epoch_001", 0, fold, parent=None)
+    assert prior == "prefer simple daily signals"
+    outcome = pipeline.run_fold("epoch_001", fold, parent=parent, prior=prior)
+    final = outcome.frozen
+    assert final is not None
+    heldout_runs = pipeline.run_heldout("epoch_001", final, days)
+    assert heldout_runs == 1
     records = ledger.read()
     assert [record["record_type"] for record in records] == ["meta_learning", "fold", "heldout"]
-    assert result["final_strategy_artifact"].startswith("strategy_")
+    assert final.artifact_id.startswith("strategy_")
     heldout = records[-1]
     assert heldout["result"]["total_return"] == 0.02
-    assert heldout["strategy_artifact_id"] == result["final_strategy_artifact"]
+    assert heldout["strategy_artifact_id"] == final.artifact_id
     fold_record = next(record for record in records if record["record_type"] == "fold")
     assert "state_changed_during_test" not in fold_record
     assert "state_changed_during_test" not in heldout
@@ -778,11 +786,13 @@ def test_frozen_test_omits_state_changed_when_trees_are_stable(tmp_path: Path):
 
 
 def test_heldout_fails_fast_when_models_change(tmp_path: Path):
-    pipeline, _fold, ledger = _pipeline_with_evaluator(
+    pipeline, fold, ledger = _pipeline_with_evaluator(
         tmp_path, ModeMutatingEvaluator("heldout", "models"), models=True
     )
+    frozen = pipeline.run_fold("epoch_001", fold, parent=None).frozen
+    assert frozen is not None
     with pytest.raises(FrozenArtifactMutated, match="changed during held-out"):
-        pipeline.run(_days())
+        pipeline.run_heldout("epoch_001", frozen, _days())
     records = ledger.read()
     heldout = [record for record in records if record["record_type"] == "heldout"]
     assert len(heldout) == 1
@@ -799,9 +809,10 @@ def test_heldout_fails_fast_when_models_change(tmp_path: Path):
 
 
 def test_heldout_omits_state_changed_when_trees_are_stable(tmp_path: Path):
-    pipeline, _fold, ledger = _pipeline_with_evaluator(tmp_path, Evaluator())
-    result = pipeline.run(_days())
-    assert result["heldout_runs"] == 1
+    pipeline, fold, ledger = _pipeline_with_evaluator(tmp_path, Evaluator())
+    frozen = pipeline.run_fold("epoch_001", fold, parent=None).frozen
+    assert frozen is not None
+    assert pipeline.run_heldout("epoch_001", frozen, _days()) == 1
     heldout = ledger.read("heldout")[0]
     assert "state_changed_during_test" not in heldout
 
@@ -897,39 +908,3 @@ def test_frozen_restore_copy_failure_is_fail_closed(
     assert [row.get("run_id") for row in ledger.read()] == [
         row.get("run_id") for row in records
     ]
-
-
-def test_batch_run_refuses_a_nonempty_ledger(tmp_path: Path):
-    config = RollingExperimentConfig(
-        "experiment_a",
-        tmp_path / "experiments",
-        "2026Q1",
-        "2026Q1",
-        "2026Q2",
-        "2026Q2",
-        epochs=1,
-    )
-    pipeline = RollingExperimentPipeline(
-        config,
-        snapshots=Snapshots(),
-        artifacts=Artifacts(
-            ArtifactRevision("revision_1", tmp_path),
-            tmp_path / "frozen",
-        ),
-        evaluator=Evaluator(),
-        developer=lambda request: FoldSessionResult("unused", ()),
-        ledger=ExperimentLedger(config.ledger_path),
-    )
-    pipeline.ledger.append(
-        {
-            "record_type": "attempt_failed",
-            "experiment_id": "experiment_a",
-            "epoch_id": "epoch_001",
-            "fold_id": "fold_2026Q1",
-            "run_id": "run_old",
-            "phase": "fold",
-            "error": "previous attempt",
-        }
-    )
-    with pytest.raises(RuntimeError, match="empty experiment ledger"):
-        pipeline.run(_days())

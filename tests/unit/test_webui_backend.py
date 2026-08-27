@@ -676,11 +676,8 @@ def test_active_experiment_api_hides_historical_steps_analysis_and_reports(
     assert analysis.status_code == 200
     assert analysis.json()["available"] is False
 
-    trace = client.get(f"/api/experiments/demo/trace?run_id={run_ref}").json()
-    assert [event["event_type"] for event in trace["events"]] == [
-        "session_start",
-        "llm_call",
-    ]
+    trace = client.get(f"/api/experiments/demo/trace/blocks?run_id={run_ref}").json()
+    assert [block["kind"] for block in trace["blocks"]] == ["agent_output"]
     assert (
         client.get(f"/api/experiments/demo/trace/stats?run_id={run_ref}").json()[
             "llm_total_tokens"
@@ -2190,9 +2187,6 @@ class WebuiBackendTest(unittest.TestCase):
             ),
             self.client.get("/api/experiments/exp_hitl/steps"),
             self.client.get(
-                "/api/experiments/exp_hitl/trace", params={"run_id": run_ref}
-            ),
-            self.client.get(
                 "/api/experiments/exp_hitl/trace/stats",
                 params={"run_id": run_ref},
             ),
@@ -2243,7 +2237,7 @@ class WebuiBackendTest(unittest.TestCase):
         )
         self.assertEqual(
             self.client.get(
-                "/api/experiments/exp_hitl/trace", params={"run_id": "run_001"}
+                "/api/experiments/exp_hitl/trace/blocks", params={"run_id": "run_001"}
             ).status_code,
             404,
         )
@@ -2826,21 +2820,21 @@ class WebuiBackendTest(unittest.TestCase):
     def test_trace_pagination_and_partial_tail(self) -> None:
         run_ref = self._run_ref("run_001")
         first = self.client.get(
-            "/api/experiments/exp_hitl/trace", params={"run_id": run_ref}
+            "/api/experiments/exp_hitl/trace/blocks", params={"run_id": run_ref}
         ).json()
-        self.assertEqual(len(first["events"]), 3)
+        self.assertEqual(first["event_count"], 3)
         self.assertTrue(first["eof"])
         again = self.client.get(
-            "/api/experiments/exp_hitl/trace",
+            "/api/experiments/exp_hitl/trace/blocks",
             params={"run_id": run_ref, "offset": first["next_offset"]},
         ).json()
-        self.assertEqual(again["events"], [])
+        self.assertEqual(again["blocks"], [])
         self.assertEqual(again["next_offset"], first["next_offset"])
 
     def test_trace_run_id_traversal_is_rejected(self) -> None:
         for run_id in ("../run_001", "run_001/../..", "/etc/passwd"):
             response = self.client.get(
-                "/api/experiments/exp_hitl/trace", params={"run_id": run_id}
+                "/api/experiments/exp_hitl/trace/blocks", params={"run_id": run_id}
             )
             # Never served, and never distinguishable from an absent trace.
             self.assertIn(response.status_code, (400, 404), run_id)
@@ -2856,10 +2850,14 @@ class WebuiBackendTest(unittest.TestCase):
 
     def test_trace_tail_returns_recent_events_and_stream_offset(self) -> None:
         tail = self.client.get(
-            "/api/experiments/exp_hitl/trace",
+            "/api/experiments/exp_hitl/trace/blocks",
             params={"run_id": self._run_ref("run_001"), "tail_events": 2},
         ).json()
-        self.assertEqual([event["seq"] for event in tail["events"]], [1, 2])
+        self.assertEqual(tail["event_count"], 2)
+        self.assertEqual(
+            [block["kind"] for block in tail["blocks"]],
+            ["agent_output", "tool_group"],
+        )
         self.assertTrue(tail["next_offset"] > 0)
 
     def test_trace_stats_counts_tokens_and_tool_calls(self) -> None:
@@ -2868,7 +2866,6 @@ class WebuiBackendTest(unittest.TestCase):
             params={"run_id": self._run_ref("run_001")},
         ).json()
         self.assertEqual(stats["counts"]["llm_call"], 2)
-        self.assertEqual(stats["total_events"], 3)
         self.assertEqual(stats["tool_counts"], {"shell": 1})
         self.assertEqual(stats["llm_total_tokens"], 3000)
         self.assertEqual(stats["llm_prompt_tokens"], 2300)
@@ -3255,7 +3252,6 @@ class HitlControlActionTest(unittest.TestCase):
             result_name="valid_000",
             revision_id=new_revision_id("revision"),
             metrics={"total_return": 0.1},
-            complete_validation=True,
         )
 
     def test_set_directive_stores_and_clears_a_per_session_directive(self) -> None:

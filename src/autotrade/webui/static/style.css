@@ -1044,6 +1044,10 @@ textarea.directive.inject-input {
  white-space: nowrap;
  font-variant-numeric: tabular-nums;
 }
+.stat-chip.run {
+ color: var(--run);
+ border-color: var(--run);
+}
 .stat-chip.warn {
  color: var(--warn);
  border-color: var(--warn);
@@ -1121,7 +1125,6 @@ textarea.directive.inject-input {
  flex-direction: column;
  gap: 0.45rem;
 }
-.trace-event,
 .trace-block {
  border: 1px solid var(--border);
  border-radius: 10px;
@@ -1129,7 +1132,6 @@ textarea.directive.inject-input {
  background: var(--panel-2);
  font-size: 0.905rem;
 }
-.trace-event .head,
 .trace-block .head {
  display: flex;
  gap: 0.6rem;
@@ -1137,12 +1139,10 @@ textarea.directive.inject-input {
  color: var(--muted);
  flex-wrap: wrap;
 }
-.trace-event .type,
 .trace-block .type {
  font-weight: 700;
  color: var(--text);
 }
-.trace-event .type.llm_call,
 .trace-block .type.agent_output {
  color: var(--accent);
 }
@@ -1191,8 +1191,17 @@ textarea.directive.inject-input {
  cursor: pointer;
 }
 .trace-subagent-chip-title {
+ display: flex;
+ gap: 0.4rem;
+ align-items: baseline;
+ flex-wrap: wrap;
  color: var(--run);
  font-weight: 650;
+}
+.trace-subagent-chip-clock {
+ color: var(--muted);
+ font-weight: 400;
+ font-variant-numeric: tabular-nums;
 }
 .trace-subagent-chip-task {
  color: var(--muted);
@@ -1206,42 +1215,12 @@ textarea.directive.inject-input {
  border-color: var(--accent);
  outline: none;
 }
-.trace-todo-list {
- display: flex;
- flex-direction: column;
- gap: 0.3rem;
- margin-top: 0.4rem;
-}
-.todo-item {
- display: flex;
- flex-wrap: wrap;
- gap: 0.4rem;
- align-items: baseline;
-}
-.todo-status {
- font-size: 0.78rem;
- color: var(--muted);
+.trace-block .type.raw {
+ color: var(--warn);
 }
 .trace-block .type.user {
  color: var(--text);
 }
-.trace-event .type.session_end {
- color: var(--ok);
-}
-.trace-event .type.session_error {
- color: var(--bad);
-}
-.trace-event pre,
-.trace-block pre {
- margin: 0.45rem 0 2px;
- white-space: pre-wrap;
- word-break: break-word;
- font: 0.845rem / 1.5 var(--mono);
- color: var(--code-ink);
- max-height: 19rem;
- overflow: auto;
-}
-.trace-event .llm-content,
 .trace-block .llm-content {
  margin: 0.45rem 0 2px;
  white-space: pre-wrap;
@@ -1250,14 +1229,12 @@ textarea.directive.inject-input {
  line-height: 1.55;
  color: var(--text);
 }
-.trace-event .tool-brief,
 .trace-block .tool-brief {
  font-family: var(--mono);
  font-size: 0.78rem;
  color: var(--muted);
  word-break: break-all;
 }
-.trace-event details summary,
 .trace-block details summary {
  cursor: pointer;
  color: var(--muted);

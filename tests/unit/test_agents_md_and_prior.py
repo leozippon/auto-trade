@@ -9,17 +9,21 @@ import pytest
 
 from autotrade.agent.agents_md import AgentsMdError, load_required_agents_md_sections
 from autotrade.agent.prompts import build_system_prompt
-from autotrade.agent.runner import (
-    PRIOR_MAX_CHARS,
+from autotrade.environment.tools import (
     FinishMetaTool,
+    SafeWorkspace,
+    ToolRegistry,
+    WriteFileTool,
+)
+from autotrade.environment.tools.prior_policy import (
+    PRIOR_MAX_CHARS,
     prior_content_violation,
     prior_policy_violation,
 )
-from autotrade.environment.tools import SafeWorkspace, ToolRegistry, WriteFileTool
 from autotrade.pipelines.config import MetaSessionResult
 from autotrade.pipelines.ledger import ExperimentLedger
 from autotrade.environment.identity import AgentRefStore
-from autotrade.pipelines.experiment import _development_history
+from autotrade.pipelines.experiment import _development_inputs
 from autotrade.pipelines.meta_inputs import (
     build_agent_process_summary,
     build_meta_fold_reviews,
@@ -64,8 +68,9 @@ def test_root_agents_md_recommends_first_level_subagents() -> None:
     assert "`explore` is optional and limited to one level" in text
     assert "Sub-agents cannot nest" in text
     assert "Keep the existing PRIOR" in text
-    assert "Chinese rendering of the host Multi-Agent" in text
-    assert "This English AutoTrade subsection is not injected" in text
+    assert "not injected" in text
+    assert "explore" in text and "background" in text
+    assert "presence-checked and not injected" in text
     assert "May write; designs, implements, coordinates, accepts" in text
     assert "A Fold parent must not use shell to modify strategy artifacts" in text
     assert "inputs/skills_index.json" in text
@@ -93,10 +98,11 @@ def test_required_agents_section_is_presence_checked_not_injected(tmp_path: Path
         assert "### AutoTrade Fold and Meta sessions" not in prompt
         assert "AUTO_ONLY_CONTRACT" not in prompt
         assert "HOST_ONLY_COOPERATION" not in prompt
-        assert "# 多智能体协作" in prompt
-        assert "# 开发原则" in prompt
-        assert "# 操作护栏" in prompt
+        assert "# 多智能体协作" not in prompt
+        assert "# 操作护栏" not in prompt
+        assert "# 原则" in prompt
         assert "# 角色与写权" in prompt
+        assert "explore_completed" in prompt
         assert "Fold 父 Agent" in prompt
         assert "可写；设计、实现、协调、验收" in prompt
         assert "Meta 父 Agent" in prompt
@@ -993,7 +999,7 @@ def test_meta_review_window_rollback_and_resume_recompute_deterministically(
     second = select_meta_review_folds(rewound, ref_store=ref_store)
     assert [record["run_id"] for record in second[0]] == ["run_a", "run_b"]
     assert select_meta_review_folds(rewound, ref_store=ref_store) == second
-    history = _development_history(rewound, ref_store=ref_store)
+    history, _sidecars = _development_inputs(rewound, ref_store=ref_store)
     summaries = history["fold_backtest_summaries"]
     reviews = history["fold_reviews"]
     assert history["review_window"] == second[1]
@@ -1016,12 +1022,6 @@ def test_agent_process_summary_counts_are_bounded_and_redacted() -> None:
         {
             "event_type": "explore",
             "status": "error",
-        },
-        {
-            "event_type": "tool_call",
-            "tool": "todo",
-            "args": {"action": "update", "status": "completed"},
-            "ok": True,
         },
         {
             "event_type": "tool_call",
@@ -1050,7 +1050,6 @@ def test_agent_process_summary_counts_are_bounded_and_redacted() -> None:
     summary = build_agent_process_summary(events)
     assert summary["llm_calls"] == 7
     assert summary["explore"] == {"attempts": 2, "completed": 1, "failed": 1}
-    assert summary["todo"] == {"calls": 1, "completed": 1}
     assert summary["daily_backtest"] == 1
     assert summary["tool_failures"] == 3
     assert summary["repeated_failures"] == [

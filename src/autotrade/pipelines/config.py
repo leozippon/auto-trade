@@ -54,9 +54,9 @@ ExperimentConfig = StrategyExperimentConfig
 
 @dataclass(frozen=True)
 class AcceptanceRules:
-    """Validation acceptance checks (docs/pipeline-design.md §2.2): drawdown,
-    finiteness and completeness are HARD rejects; min_return/min_sharpe are
-    warn-only targets — a shortfall records a warning and never resets the fold."""
+    """Validation acceptance checks (docs/pipeline-design.md §2.2): drawdown and
+    finiteness are HARD rejects; min_return/min_sharpe are warn-only targets — a
+    shortfall records a warning and never resets the fold."""
 
     min_return: float = 0.0
     min_sharpe: float = 0.0
@@ -76,19 +76,17 @@ class AcceptanceRules:
             "max_drawdown": self.max_drawdown,
         }
 
-    def evaluate(
-        self, summary: dict[str, object], *, complete: bool
-    ) -> tuple[list[str], list[str]]:
+    def evaluate(self, summary: dict[str, object]) -> tuple[list[str], list[str]]:
         """(hard_reasons, warnings). Integrity failures are hard rejects:
         non-finite metrics (every IEEE comparison against NaN is False, so a NaN
-        metric would otherwise pass all thresholds) and incomplete validation.
-        The max_drawdown cap stays a hard risk limit. Return/Sharpe shortfalls
-        are WARNINGS only — the fold still freezes its validated update; a weak
-        step recorded with a warning beats silently resetting the fold chain."""
+        metric would otherwise pass all thresholds). The max_drawdown cap stays a
+        hard risk limit. Return/Sharpe shortfalls are WARNINGS only — the fold
+        still freezes its validated update; a weak step recorded with a warning
+        beats silently resetting the fold chain. Only a summary from a completed
+        full-window evaluation reaches here; an aborted replay never produces
+        one."""
         hard: list[str] = []
         warnings: list[str] = []
-        if not complete:
-            hard.append("incomplete_validation")
         values: dict[str, float] = {}
         for key in ("total_return", "max_drawdown"):
             value = summary.get(key)
@@ -313,9 +311,14 @@ class EvaluationRequest:
 
 @dataclass(frozen=True)
 class EvaluationResult:
+    """One completed full-window evaluation.
+
+    A backend either returns this or raises: a partial or aborted replay never
+    produces an EvaluationResult, so there is no "incomplete" variant to carry.
+    """
+
     summary: dict[str, object]
     result_ref: str
-    complete: bool = True
 
 
 class EvaluationBackend(Protocol):

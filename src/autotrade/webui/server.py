@@ -179,17 +179,10 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
             raise HTTPException(status_code=404, detail="no trace available for this run")
         return path, raw_run_id, identity.trace_ref(raw_run_id), identity
 
-    def _public_trace_payload(
+    def _public_trace_blocks(
         payload: dict[str, object], identity: PublicIdentity
     ) -> dict[str, object]:
         public = dict(payload)
-        events = public.get("events")
-        if isinstance(events, list):
-            public["events"] = [
-                identity.public_record(event, heldout_revealed=False)
-                for event in events
-                if isinstance(event, dict)
-            ]
         blocks = public.get("blocks")
         if isinstance(blocks, list):
             public["blocks"] = [
@@ -207,13 +200,28 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         ) as handle:
             output = Path(handle.name)
             try:
-                with path.open("r", encoding="utf-8") as source:
+                with path.open("r", encoding="utf-8", errors="replace") as source:
                     for line in source:
                         if not line.strip():
                             continue
-                        event = json.loads(line)
+                        try:
+                            event = json.loads(line)
+                        except ValueError:
+                            event = None
                         if not isinstance(event, dict):
-                            raise ValueError("trace event is not an object")
+                            # The line itself never leaves the host: it could not
+                            # be parsed, so it could not be redacted either.
+                            handle.write(
+                                json.dumps(
+                                    {
+                                        "event_type": "unreadable_line",
+                                        "bytes": len(line.encode("utf-8")),
+                                    },
+                                    ensure_ascii=False,
+                                )
+                                + "\n"
+                            )
+                            continue
                         public = identity.public_record(
                             event, heldout_revealed=False
                         )
@@ -315,21 +323,6 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
             public["status"] = identity.public_status(raw_status)
         return public
 
-    @app.get("/api/experiments/{experiment_id}/trace")
-    def get_trace(
-        experiment_id: str,
-        run_id: str | None = Query(None),
-        offset: int = Query(0, ge=0),
-        tail_events: int | None = Query(None, ge=1, le=500),
-    ) -> dict[str, object]:
-        path, _raw_run_id, trace_ref, identity = _trace_target(experiment_id, run_id)
-        page = (
-            traces.read_trace_tail(path, max_events=tail_events)
-            if tail_events is not None
-            else traces.read_trace_page(path, offset=offset)
-        )
-        return {**_public_trace_payload(page, identity), "trace_ref": trace_ref}
-
     @app.get("/api/experiments/{experiment_id}/trace/stats")
     def get_trace_stats(
         experiment_id: str,
@@ -346,11 +339,6 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
                 window = None
             if isinstance(window, int) and window > 0:
                 payload["context_window_tokens"] = window
-        effort = params.get("reasoning_effort")
-        if isinstance(effort, str) and effort.strip():
-            payload["reasoning_effort"] = effort.strip()
-        if params.get("no_thinking") is True:
-            payload["no_thinking"] = True
         return payload
 
     @app.get("/api/experiments/{experiment_id}/trace/blocks")
@@ -368,7 +356,7 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
             max_bytes=max_bytes,
             tail_events=tail_events,
         )
-        return {**_public_trace_payload(blocks, identity), "trace_ref": trace_ref}
+        return {**_public_trace_blocks(blocks, identity), "trace_ref": trace_ref}
 
     @app.get("/api/experiments/{experiment_id}/trace/stream")
     def get_trace_stream(
@@ -378,19 +366,12 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         offset: int = Query(0, ge=0),
     ) -> StreamingResponse:
         directory, _unused_identity = _public_identity(experiment_id)
-        _path, raw_run_id, _trace_ref, identity = _trace_target(experiment_id, run_id)
+        _path, raw_run_id, _trace_ref, _identity = _trace_target(experiment_id, run_id)
         resume = request.headers.get("last-event-id")
         if resume is not None and resume.isdigit():
             offset = max(offset, int(resume))
         return StreamingResponse(
-            traces.stream_trace(
-                directory,
-                raw_run_id,
-                offset=offset,
-                project_event=lambda event: identity.public_record(
-                    event, heldout_revealed=False
-                ),
-            ),
+            traces.stream_trace(directory, raw_run_id, offset=offset),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
@@ -403,7 +384,7 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         path, _raw_run_id, trace_ref, identity = _trace_target(experiment_id, run_id)
         try:
             public_path = _public_trace_download(path, identity)
-        except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
+        except (OSError, UnicodeError, ValueError) as exc:
             raise HTTPException(status_code=409, detail="trace is unreadable") from exc
         return FileResponse(
             public_path,

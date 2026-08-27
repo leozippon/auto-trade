@@ -16,9 +16,11 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-from autotrade.agent.runner import strict_transferable_content_violation
 from autotrade.environment.runtime import chmod_tree, write_json_atomic
 from autotrade.environment.tools.base import ToolError, ToolResult, ToolSpec
+from autotrade.environment.tools.prior_policy import (
+    strict_transferable_content_violation,
+)
 from autotrade.environment.tools.workspace import SafeWorkspace
 
 SKILLS_DIRNAME = "skills"

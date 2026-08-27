@@ -67,7 +67,7 @@ from .config import (
     StrategyExperimentConfig,
     fold_session_deadline_seconds,
 )
-from .folds import FoldSpec, build_fold_schedule, heldout_periods
+from .folds import FoldSpec, heldout_periods
 from .hitl_state import fold_session_key
 from .ledger import (
     ExperimentLedger,
@@ -84,7 +84,6 @@ from .meta_inputs import (
 )
 from .meta_schedule import (
     meta_learning_id,
-    meta_learning_trigger_counts,
     meta_record_id,
     meta_session_key,
 )
@@ -170,46 +169,6 @@ class RollingExperimentPipeline:
         self.developer = developer
         self.meta_learner = meta_learner
         self.ledger = ledger or ExperimentLedger(config.ledger_path)
-
-    def run(self, trading_days: list[str]) -> dict[str, object]:
-        if self.ledger.read():
-            raise RuntimeError("batch experiments require an empty experiment ledger")
-        folds = build_fold_schedule(
-            self.config.first_test_period,
-            self.config.last_test_period,
-            trading_days,
-            window_months=self.config.window_months,
-            period=self.config.fold_period,
-            min_region_trade_days=self.config.min_region_trade_days,
-        )
-        parent: FrozenArtifact | None = None
-        prior = ""
-        final_epoch = ""
-        for epoch_index in range(1, self.config.epochs + 1):
-            epoch_id = f"epoch_{epoch_index:03d}"
-            final_epoch = epoch_id
-            triggers = set(
-                meta_learning_trigger_counts(
-                    len(folds), self.config.meta_learning_fold_interval
-                )
-            )
-            for fold_index, fold in enumerate(folds):
-                if self.meta_learner is not None and fold_index in triggers:
-                    prior, parent = self._run_meta(
-                        epoch_id, fold_index, fold, parent, previous_prior=prior
-                    )
-                outcome = self.run_fold(epoch_id, fold, parent=parent, prior=prior)
-                parent = outcome.frozen
-        # Fail-fast path: only reachable when every Fold ended with no freezable
-        # artifact at all (integrity failures); acceptance shortfalls alone never
-        # land here because they still freeze with warnings.
-        if parent is None:
-            raise RuntimeError("experiment produced no frozen strategy")
-        heldout_count = self.run_heldout(final_epoch, parent, trading_days)
-        return {
-            "final_strategy_artifact": parent.artifact_id,
-            "heldout_runs": heldout_count,
-        }
 
     def run_fold(
         self,
@@ -316,8 +275,7 @@ class RollingExperimentPipeline:
             warnings: list[str] = []
             if selected is not None:
                 hard, warnings = self.config.acceptance.evaluate(
-                    selected.validation.summary,
-                    complete=selected.validation.complete,
+                    selected.validation.summary
                 )
             if selected is not None and not hard:
                 artifact_id = (
@@ -829,8 +787,6 @@ class RollingExperimentPipeline:
         no changed strategy or model file performed Validation on this parent.
         """
         for step in steps:
-            if not step.validation.complete:
-                continue
             revision = self.artifacts.revision(step.revision_id)
             if modification_delta(parent.path, revision.output_path).changed_files:
                 continue
@@ -841,9 +797,7 @@ class RollingExperimentPipeline:
                 and model_artifact_delta(parent.model_path, models).changed_files
             ):
                 continue
-            hard, _ = self.config.acceptance.evaluate(
-                step.validation.summary, complete=step.validation.complete
-            )
+            hard, _ = self.config.acceptance.evaluate(step.validation.summary)
             if not hard:
                 return
         raise RuntimeError(
@@ -1009,14 +963,12 @@ def _keep_frozen_artifact_ids(
 def _select_step(
     steps: tuple[StepResult, ...], selected_id: str | None
 ) -> StepResult | None:
-    complete = [step for step in steps if step.validation.complete]
+    # Only completed full-window validations ever become a StepResult.
     if selected_id is None:
-        return complete[-1] if complete else None
+        return steps[-1] if steps else None
     selected = next((step for step in steps if step.step_id == selected_id), None)
     if selected is None:
         raise RuntimeError(f"selected Step is absent: {selected_id}")
-    if not selected.validation.complete:
-        raise RuntimeError("selected Step lacks complete validation")
     return selected
 
 
@@ -1043,7 +995,7 @@ def _step_record(step: StepResult) -> dict[str, object]:
     return {
         "step_id": step.step_id,
         "revision_id": step.revision_id,
-        "complete_validation": step.validation.complete,
+        "complete_validation": True,
         "summary": step.validation.summary,
         "validation_result_ref": step.validation.result_ref,
     }
@@ -1107,18 +1059,6 @@ def _run_guarded_evaluation(
             except Exception as exc:  # noqa: BLE001 - restore failure is worse than the mutation
                 restore_error = exc
         return result, error, changed, restore_error
-
-
-def _development_history(
-    records: list[dict[str, object]],
-    *,
-    ref_store: AgentRefStore,
-    artifacts_root: str | Path | None = None,
-) -> dict[str, object]:
-    history, _sidecars = _development_inputs(
-        records, ref_store=ref_store, artifacts_root=artifacts_root
-    )
-    return history
 
 
 def _development_inputs(

@@ -6,7 +6,7 @@ import asyncio
 import json
 import re
 import threading
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Mapping
 from pathlib import Path
 
 from autotrade.pipelines.hitl_state import read_status, status_pid_alive
@@ -19,8 +19,8 @@ STREAM_IDLE_HEARTBEAT_EVERY = 15
 _RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 _BLOCK_TEXT_CHARS = 4_000
 _BLOCK_SUMMARY_CHARS = 160
-_BLOCK_TASK_CHARS = 400
 _BLOCK_SUBAGENT_SUMMARY_CHARS = 400
+_BLOCK_DESCRIPTION_CHARS = 80
 _BLOCK_ERROR_CHARS = 240
 _TERMINAL_SUBAGENT = frozenset({"completed", "timeout", "error", "cancelled"})
 
@@ -179,7 +179,6 @@ def project_trace_blocks(events: object) -> list[dict[str, object]]:
     blocks: list[dict[str, object]] = []
     interval = _Interval()
     subagents: dict[str, _SubagentState] = {}
-    todo_state: dict[int, dict[str, object]] = {}
     seq = 0
     for item in events:
         seq += 1
@@ -187,8 +186,18 @@ def project_trace_blocks(events: object) -> list[dict[str, object]]:
             continue
         event: dict[str, object] = item
         kind = str(event.get("event_type") or "")
+        if not kind and isinstance(event.get("raw"), str):
+            blocks.extend(interval.flush())
+            blocks.append(
+                {
+                    "kind": "raw",
+                    "ts": _event_ts(event),
+                    "text": _clip(event.get("raw"), _BLOCK_TEXT_CHARS),
+                }
+            )
+            continue
         if kind == "user_message":
-            blocks.extend(interval.flush(todo_state))
+            blocks.extend(interval.flush())
             blocks.append(
                 {
                     "kind": "user",
@@ -202,7 +211,7 @@ def project_trace_blocks(events: object) -> list[dict[str, object]]:
             continue
         output = _agent_output_text(event)
         if output is not None:
-            blocks.extend(interval.flush(todo_state))
+            blocks.extend(interval.flush())
             block: dict[str, object] = {
                 "kind": "agent_output",
                 "ts": _event_ts(event),
@@ -216,16 +225,16 @@ def project_trace_blocks(events: object) -> list[dict[str, object]]:
             continue
         task_id = _explore_event_task_id(event)
         if task_id is not None:
-            _observe_subagent(interval, subagents, event, task_id, seq, todo_state)
+            state = subagents.get(task_id)
+            if state is None:
+                state = subagents[task_id] = _SubagentState()
             if kind in {"explore_tool", "explore_tool_started"}:
-                subagents[task_id].tools.add(event, seq)
-                _absorb_todo(todo_state, event)
-                _sync_subagent_fields(subagents[task_id], todo_state)
+                state.tools.add(event, seq)
+            _observe_subagent(interval, state, event, task_id, seq)
             continue
         if kind in {"tool_call_started", "tool_call"}:
             interval.tools.add(event, seq)
-            _absorb_todo(todo_state, event)
-    blocks.extend(interval.flush(todo_state))
+    blocks.extend(interval.flush())
     return blocks
 
 
@@ -245,6 +254,8 @@ def trace_stats(path: Path) -> dict[str, object]:
             cached is None
             or size < _as_int(cached.get("offset"))
             or "subagent_task_ids" not in cached
+            or "subagent_ended_ids" not in cached
+            or "subagent_usage" not in cached
             or "last_main_prompt_tokens" not in cached
         ):
             cached = {
@@ -255,9 +266,9 @@ def trace_stats(path: Path) -> dict[str, object]:
                 "prompt_tokens": 0,
                 "completion_tokens": 0,
                 "last_main_prompt_tokens": 0,
-                "active_tool": None,
-                "last_event_ts": None,
                 "subagent_task_ids": set(),
+                "subagent_ended_ids": set(),
+                "subagent_usage": {},
             }
         offset = _as_int(cached.get("offset"))
         with path.open("rb") as handle:
@@ -270,23 +281,34 @@ def trace_stats(path: Path) -> dict[str, object]:
         prompt = _as_int(cached.get("prompt_tokens"))
         completion = _as_int(cached.get("completion_tokens"))
         last_main_prompt = _as_int(cached.get("last_main_prompt_tokens"))
-        active_tool = cached.get("active_tool")
-        last_ts = cached.get("last_event_ts")
         task_ids = set(_as_str_list(cached.get("subagent_task_ids")))
+        ended_ids = set(_as_str_list(cached.get("subagent_ended_ids")))
+        subagent_usage = {
+            task: _usage_row(_as_mapping(row))
+            for task, row in _as_mapping(cached.get("subagent_usage")).items()
+        }
         for raw in blob[:tail].splitlines():
             event = _decode_event(raw)
             kind = str(event.get("event_type") or "event")
             counts[kind] = _as_int(counts.get(kind)) + 1
-            last_ts = event.get("ts") or last_ts
             task_id = _explore_event_task_id(event)
             if task_id is not None:
                 task_ids.add(task_id)
-            if kind == "tool_call_started":
-                active_tool = event.get("tool")
-            elif kind == "tool_call":
+                # A finished task reports authoritative totals; a live one is
+                # summed from the per-round records seen so far.
+                if _subagent_phase(event) == "ended":
+                    ended_ids.add(task_id)
+                    totals = _as_mapping(event.get("usage_totals"))
+                    if totals:
+                        subagent_usage[task_id] = _usage_row(totals)
+                elif kind == "explore_llm" and task_id not in ended_ids:
+                    _add_usage(
+                        subagent_usage.setdefault(task_id, _new_usage()),
+                        _as_mapping(event.get("usage")),
+                    )
+            if kind == "tool_call":
                 tool = str(event.get("tool") or "unknown")
                 tool_counts[tool] = _as_int(tool_counts.get(tool)) + 1
-                active_tool = None
             elif kind == "llm_call":
                 usage = _as_mapping(event.get("usage"))
                 if usage:
@@ -303,9 +325,9 @@ def trace_stats(path: Path) -> dict[str, object]:
             "prompt_tokens": prompt,
             "completion_tokens": completion,
             "last_main_prompt_tokens": last_main_prompt,
-            "active_tool": active_tool,
-            "last_event_ts": last_ts,
             "subagent_task_ids": task_ids,
+            "subagent_ended_ids": ended_ids,
+            "subagent_usage": subagent_usage,
         }
         if len(_STATS_CACHE) >= 32 and key not in _STATS_CACHE:
             _STATS_CACHE.pop(next(iter(_STATS_CACHE)))
@@ -313,15 +335,17 @@ def trace_stats(path: Path) -> dict[str, object]:
         return {
             "counts": counts,
             "tool_counts": tool_counts,
-            "total_events": sum(_as_int(value) for value in counts.values()),
             "llm_total_tokens": total,
             "llm_prompt_tokens": prompt,
             "llm_completion_tokens": completion,
             "last_llm_prompt_tokens": last_main_prompt,
-            "active_tool": active_tool,
-            "last_event_ts": last_ts,
-            "trace_bytes": size,
             "subagent_tasks": len(task_ids),
+            "subagent_running": len(task_ids - ended_ids),
+            "subagent_prompt_tokens": _usage_sum(subagent_usage, "prompt_tokens"),
+            "subagent_completion_tokens": _usage_sum(subagent_usage, "completion_tokens"),
+            "subagent_total_tokens": sum(
+                _usage_total(row) for row in subagent_usage.values()
+            ),
             "compact_ops": _as_int(counts.get("context_compaction")),
         }
 
@@ -331,9 +355,13 @@ async def stream_trace(
     run_id: str | None,
     *,
     offset: int = 0,
-    project_event: Callable[[dict[str, object]], dict[str, object]] | None = None,
 ) -> AsyncIterator[str]:
-    """Replay then tail a trace over SSE without retaining a server-side history."""
+    """Tail a trace over SSE as an offset-only nudge.
+
+    The payload carries no event text: the console always re-reads the block
+    projection, so streaming redacted events would duplicate that work and
+    widen the surface that has to stay redacted.
+    """
 
     directory = Path(experiment_dir)
     position = max(0, int(offset))
@@ -342,16 +370,10 @@ async def stream_trace(
     while True:
         path = resolve_trace_path(directory, run_id)
         if path is not None:
-            page = read_trace_page(path, offset=position)
-            raw_events = page.get("events")
-            events = [event for event in raw_events if isinstance(event, dict)] if isinstance(raw_events, list) else []
-            if events:
-                next_offset = page.get("next_offset")
-                position = int(next_offset) if isinstance(next_offset, int) else position
-                projected = [project_event(event) for event in events] if project_event else events
-                for event in projected[:-1]:
-                    yield f"data: {json.dumps(event, ensure_ascii=False, default=str)}\n\n"
-                yield f"id: {position}\ndata: {json.dumps(projected[-1], ensure_ascii=False, default=str)}\n\n"
+            appended = _appended_offset(path, position)
+            if appended > position:
+                position = appended
+                yield f'id: {position}\ndata: {{"offset": {position}}}\n\n'
                 idle = 0
                 continue
         status = read_status(directory / "hitl/status.json")
@@ -365,6 +387,23 @@ async def stream_trace(
         if idle % STREAM_IDLE_HEARTBEAT_EVERY == 0:
             yield ": keep-alive\n\n"
         await asyncio.sleep(STREAM_POLL_SECONDS)
+
+
+def _appended_offset(path: Path, offset: int) -> int:
+    """End of the last complete line at or after ``offset``, without decoding.
+
+    Bounded by one page per pass; the writer caps a single event well below
+    that, so a complete line always fits and the tail cannot stall.
+    """
+
+    size = path.stat().st_size
+    offset = max(0, min(int(offset), size))
+    if size <= offset:
+        return offset
+    with path.open("rb") as handle:
+        handle.seek(offset)
+        chunk = handle.read(DEFAULT_PAGE_BYTES)
+    return offset + chunk.rfind(b"\n") + 1
 
 
 def _decode_event(raw: bytes) -> dict[str, object]:
@@ -419,6 +458,35 @@ def _as_mapping(value: object) -> dict[str, object]:
     return {str(key): item for key, item in value.items()}
 
 
+_USAGE_FIELDS = ("prompt_tokens", "completion_tokens", "total_tokens")
+
+
+def _new_usage() -> dict[str, int]:
+    return dict.fromkeys(_USAGE_FIELDS, 0)
+
+
+def _usage_row(usage: Mapping[str, object]) -> dict[str, int]:
+    return {field: _as_int(usage.get(field)) for field in _USAGE_FIELDS}
+
+
+def _add_usage(target: dict[str, int], usage: Mapping[str, object]) -> None:
+    for field in _USAGE_FIELDS:
+        target[field] += _as_int(usage.get(field))
+
+
+def _usage_sum(usages: Mapping[str, Mapping[str, int]], field: str) -> int:
+    return sum(_as_int(row.get(field)) for row in usages.values())
+
+
+def _usage_total(usage: Mapping[str, int]) -> int:
+    """Providers that report only the two halves still get a truthful total."""
+
+    total = _as_int(usage.get("total_tokens"))
+    return total or _as_int(usage.get("prompt_tokens")) + _as_int(
+        usage.get("completion_tokens")
+    )
+
+
 def _as_str_list(value: object) -> list[str]:
     if isinstance(value, (str, bytes)) or not isinstance(
         value, (list, tuple, set, frozenset)
@@ -443,6 +511,7 @@ class _ToolAcc:
         self.calls: dict[str, _Call] = {}
         self.first_ts: object = None
         self.first_seq = 0
+        self.last_key = ""
         self._serial = 0
 
     def __bool__(self) -> bool:
@@ -479,6 +548,10 @@ class _ToolAcc:
             if call.summary and (not row["summary"] or call.status == "failed"):
                 row["summary"] = call.summary
         return [grouped[name] for name in order]
+
+    def last_call(self) -> dict[str, object] | None:
+        call = self.calls.get(self.last_key)
+        return {"name": call.name, "status": call.status} if call else None
 
     def to_block(self) -> dict[str, object]:
         tools = self.as_rows()
@@ -522,12 +595,14 @@ class _ToolAcc:
             _tool_summary(event),
             _event_ts(event),
         )
+        self.last_key = key
 
     def _complete(self, call: _Call, event: dict[str, object]) -> None:
         call.status = _tool_outcome(event)
         summary = _tool_summary(event)
         if summary:
             call.summary = summary
+        self.last_key = call.key
 
     def _next_serial(self) -> int:
         self._serial += 1
@@ -542,17 +617,12 @@ class _Interval:
     def add_extra(self, event: dict[str, object], seq: int, block: dict[str, object]) -> None:
         self.extras.append((_event_ts(event), seq, block))
 
-    def flush(
-        self, todo_state: dict[int, dict[str, object]] | None = None
-    ) -> list[dict[str, object]]:
+    def flush(self) -> list[dict[str, object]]:
         items = list(self.extras)
         if self.tools:
-            block = self.tools.to_block()
-            if todo_state is not None and any(
-                row.get("name") == "todo" for row in block["tools"]
-            ):
-                block["todos"] = _public_todos(todo_state)
-            items.append((self.tools.first_ts, self.tools.first_seq, block))
+            items.append(
+                (self.tools.first_ts, self.tools.first_seq, self.tools.to_block())
+            )
         items.sort(key=_interval_sort_key)
         self.tools = _ToolAcc()
         self.extras = []
@@ -560,12 +630,12 @@ class _Interval:
 
 
 class _SubagentState:
+    """One card per Explore task: launch facts, live progress, final totals."""
+
     def __init__(self) -> None:
-        self.started_block: dict[str, object] | None = None
-        self.ended_block: dict[str, object] | None = None
+        self.block: dict[str, object] | None = None
         self.ended = False
         self.tools = _ToolAcc()
-        self.task = ""
         self.summary = ""
         self.error = ""
         self.role = ""
@@ -573,72 +643,55 @@ class _SubagentState:
         self.thinking = ""
         self.inherit_context: bool | None = None
         self.description = ""
+        self.started_at: object = None
+        self.ended_at: object = None
+        self.rounds = 0
+        self.llm_calls = 0
+        self.tool_calls = 0
+        self.usage = _new_usage()
 
 
 def _observe_subagent(
     interval: _Interval,
-    subagents: dict[str, _SubagentState],
+    state: _SubagentState,
     event: dict[str, object],
     task_id: str,
     seq: int,
-    todo_state: dict[int, dict[str, object]] | None = None,
 ) -> None:
-    state = subagents.get(task_id)
-    if state is None:
-        state = _SubagentState()
-        subagents[task_id] = state
+    """Fold one Explore event into the task's single display block.
+
+    A task emits exactly one block, created where it was launched and updated
+    in place, so a finished sub-agent's report is rendered once.
+    """
+
     phase = _subagent_phase(event)
     _absorb_subagent_text(state, event)
-    if state.started_block is None:
-        started = _subagent_block(task_id, "started", "started", event, state)
-        state.started_block = started
-        interval.add_extra(event, seq, started)
+    if str(event.get("event_type") or "") == "explore_llm":
+        state.llm_calls += 1
+        state.rounds = max(state.rounds, _as_int(event.get("round")), state.llm_calls)
+        _add_usage(state.usage, _as_mapping(event.get("usage")))
+    if state.block is None:
+        state.started_at = _event_ts(event)
+        state.block = {
+            "kind": "subagent",
+            "ts": state.started_at,
+            "task_id": task_id,
+            "phase": "started",
+            "status": "started",
+        }
+        interval.add_extra(event, seq, state.block)
     elif phase == "progress" and not state.ended:
-        state.started_block["status"] = "running"
+        state.block["status"] = "running"
     if phase == "ended" and not state.ended:
-        status = _terminal_status(event)
-        ended = _subagent_block(task_id, "ended", status, event, state)
-        state.ended_block = ended
+        _absorb_subagent_totals(state, event)
         state.ended = True
-        interval.add_extra(event, seq, ended)
-    _sync_subagent_fields(state, todo_state)
-
-
-def _subagent_block(
-    task_id: str,
-    phase: str,
-    status: str,
-    event: dict[str, object],
-    state: _SubagentState,
-) -> dict[str, object]:
-    block: dict[str, object] = {
-        "kind": "subagent",
-        "ts": _event_ts(event),
-        "task_id": task_id,
-        "phase": phase,
-        "status": status,
-        "task": state.task,
-        "summary": state.summary,
-        "error": state.error,
-        "tools": state.tools.as_rows(),
-    }
-    if state.role:
-        block["role"] = state.role
-    if state.model:
-        block["model"] = state.model
-    if state.thinking:
-        block["thinking"] = state.thinking
-    if state.inherit_context is not None:
-        block["inherit_context"] = state.inherit_context
-    if state.description:
-        block["description"] = state.description
-    return block
+        state.ended_at = _event_ts(event)
+        state.block["phase"] = "ended"
+        state.block["status"] = _terminal_status(event)
+    _refresh_subagent_block(state)
 
 
 def _absorb_subagent_text(state: _SubagentState, event: dict[str, object]) -> None:
-    task = _clip(event.get("task"), _BLOCK_TASK_CHARS)
-    if task:
-        state.task = task
     summary = _clip(event.get("summary"), _BLOCK_SUBAGENT_SUMMARY_CHARS)
     if summary:
         state.summary = summary
@@ -656,40 +709,55 @@ def _absorb_subagent_text(state: _SubagentState, event: dict[str, object]) -> No
         state.thinking = thinking.strip()
     if "inherit_context" in event:
         state.inherit_context = bool(event.get("inherit_context"))
-    description = event.get("description")
-    if isinstance(description, str) and description.strip():
-        state.description = description.strip()[:80]
+    description = _clip(event.get("description"), _BLOCK_DESCRIPTION_CHARS)
+    if description:
+        state.description = description
 
 
-def _sync_subagent_fields(
-    state: _SubagentState,
-    todo_state: dict[int, dict[str, object]] | None = None,
-) -> None:
+def _absorb_subagent_totals(state: _SubagentState, event: dict[str, object]) -> None:
+    """The terminal event's own totals win: they also cover rounds whose
+    events fell outside the read window."""
+
+    for field in ("rounds", "llm_calls", "tool_calls"):
+        value = event.get(field)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            setattr(state, field, value)
+    totals = _as_mapping(event.get("usage_totals"))
+    if totals:
+        state.usage = _usage_row(totals)
+
+
+def _refresh_subagent_block(state: _SubagentState) -> None:
+    block = state.block
+    if block is None:
+        return
     rows = state.tools.as_rows()
-    todos = (
-        _public_todos(todo_state)
-        if todo_state is not None and any(row.get("name") == "todo" for row in rows)
-        else []
+    block["summary"] = state.summary
+    block["error"] = state.error
+    block["tools"] = rows
+    block["tool_calls"] = state.tool_calls or sum(
+        _as_int(row.get("count")) for row in rows
     )
-    for block in (state.started_block, state.ended_block):
-        if block is None:
-            continue
-        block["task"] = state.task
-        block["summary"] = state.summary
-        block["error"] = state.error
-        block["tools"] = rows
-        if todos:
-            block["todos"] = todos
-        if state.role:
-            block["role"] = state.role
-        if state.model:
-            block["model"] = state.model
-        if state.thinking:
-            block["thinking"] = state.thinking
-        if state.inherit_context is not None:
-            block["inherit_context"] = state.inherit_context
-        if state.description:
-            block["description"] = state.description
+    block["rounds"] = state.rounds
+    block["llm_calls"] = state.llm_calls
+    block["usage"] = {**state.usage, "total_tokens": _usage_total(state.usage)}
+    if state.started_at is not None:
+        block["started_at"] = state.started_at
+    if state.ended_at is not None:
+        block["ended_at"] = state.ended_at
+    last_tool = state.tools.last_call()
+    if last_tool is not None:
+        block["last_tool"] = last_tool
+    if state.role:
+        block["role"] = state.role
+    if state.model:
+        block["model"] = state.model
+    if state.thinking:
+        block["thinking"] = state.thinking
+    if state.inherit_context is not None:
+        block["inherit_context"] = state.inherit_context
+    if state.description:
+        block["description"] = state.description
 
 
 def _subagent_phase(event: dict[str, object]) -> str:
@@ -789,12 +857,14 @@ def _first_text(event: dict[str, object], *fields: str) -> object:
 
 
 def _clip(value: object, limit: int) -> str:
+    """Bound a text field once, here; the console renders what it receives."""
+
     if not isinstance(value, str):
         return ""
     text = value.strip()
     if limit <= 0 or len(text) <= limit:
         return text
-    return text[:limit]
+    return f"{text[: limit - 1]}…" if limit > 1 else text[:limit]
 
 
 def _interval_sort_key(item: tuple[object, int, dict[str, object]]) -> tuple[int, str, int]:
@@ -802,59 +872,3 @@ def _interval_sort_key(item: tuple[object, int, dict[str, object]]) -> tuple[int
     if isinstance(ts, str) and ts:
         return (0, ts, seq)
     return (1, "", seq)
-
-
-def _absorb_todo(state: dict[int, dict[str, object]], event: dict[str, object]) -> None:
-    if _tool_name(event) != "todo":
-        return
-    result = event.get("result")
-    if not isinstance(result, dict):
-        return
-    value = result.get("value")
-    payload = value if isinstance(value, dict) else result
-    items = payload.get("items")
-    if isinstance(items, list):
-        state.clear()
-        for item in items:
-            row = _todo_row(item)
-            if row is not None:
-                ident = row["id"]
-                if isinstance(ident, int) and not isinstance(ident, bool):
-                    state[ident] = row
-        return
-    row = _todo_row(payload.get("item"))
-    if row is None:
-        return
-    ident = row["id"]
-    if not isinstance(ident, int) or isinstance(ident, bool):
-        return
-    if row.get("status") == "deleted":
-        state.pop(ident, None)
-        return
-    state[ident] = row
-
-
-def _todo_row(item: object) -> dict[str, object] | None:
-    if not isinstance(item, dict):
-        return None
-    raw_id = item.get("id")
-    if not isinstance(raw_id, int) or isinstance(raw_id, bool) or raw_id < 1:
-        return None
-    subject = _clip(item.get("subject"), 200)
-    if not subject:
-        return None
-    status = str(item.get("status") or "pending")
-    row: dict[str, object] = {"id": raw_id, "subject": subject, "status": status}
-    description = _clip(item.get("description"), 240)
-    if description:
-        row["description"] = description
-    return row
-
-
-def _public_todos(state: dict[int, dict[str, object]]) -> list[dict[str, object]]:
-    return [
-        dict(state[key])
-        for key in sorted(state)
-        if str(state[key].get("status") or "") != "deleted"
-    ]
-

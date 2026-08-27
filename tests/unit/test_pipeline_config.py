@@ -96,51 +96,39 @@ class AcceptanceRulesTest(unittest.TestCase):
         # guard a NaN total_return would pass acceptance outright.
         rules = AcceptanceRules()
         summary = {"total_return": math.nan, "sharpe": 1.0, "max_drawdown": 0.1}
-        hard, warnings = rules.evaluate(summary, complete=True)
+        hard, warnings = rules.evaluate(summary)
         self.assertIn("non_finite_total_return", hard)
         # The finite Sharpe is above target, so nothing may claim otherwise.
         self.assertNotIn("sharpe_below_target", warnings)
         for key in ("sharpe", "max_drawdown"):
             with self.subTest(key=key):
                 broken = {**summary, "total_return": 0.02, key: math.inf}
-                self.assertIn(
-                    f"non_finite_{key}", rules.evaluate(broken, complete=True)[0]
-                )
+                self.assertIn(f"non_finite_{key}", rules.evaluate(broken)[0])
         # A boolean is not a metric, however happily it compares.
         self.assertIn(
             "non_finite_total_return",
-            rules.evaluate({**summary, "total_return": True}, complete=True)[0],
+            rules.evaluate({**summary, "total_return": True})[0],
         )
 
     def test_finite_metrics_keep_threshold_semantics(self) -> None:
         rules = AcceptanceRules()
         ok = {"total_return": 0.02, "sharpe": 0.5, "max_drawdown": 0.1}
-        self.assertEqual(rules.evaluate(ok, complete=True), ([], []))
+        self.assertEqual(rules.evaluate(ok), ([], []))
         # Drawdown breach stays a HARD reject (risk limit), sign-independent.
         for drawdown in (0.30, -0.30):
             with self.subTest(drawdown=drawdown):
-                hard, _ = rules.evaluate(
-                    {**ok, "max_drawdown": drawdown}, complete=True
-                )
+                hard, _ = rules.evaluate({**ok, "max_drawdown": drawdown})
                 self.assertIn("max_drawdown_exceeded", hard)
         # Return/Sharpe shortfalls only WARN: the fold freezes instead of resetting.
         hard, warnings = rules.evaluate(
-            {"total_return": -0.01, "sharpe": -0.2, "max_drawdown": 0.1}, complete=True
+            {"total_return": -0.01, "sharpe": -0.2, "max_drawdown": 0.1}
         )
         self.assertEqual(hard, [])
         self.assertEqual(warnings, ["return_below_target", "sharpe_below_target"])
 
-    def test_incomplete_validation_is_a_hard_reject(self) -> None:
-        rules = AcceptanceRules()
-        ok = {"total_return": 0.02, "sharpe": 0.5, "max_drawdown": 0.1}
-        hard, _ = rules.evaluate(ok, complete=False)
-        self.assertIn("incomplete_validation", hard)
-
     def test_absent_sharpe_is_not_an_integrity_failure(self) -> None:
         rules = AcceptanceRules()
-        hard, warnings = rules.evaluate(
-            {"total_return": 0.02, "max_drawdown": 0.1}, complete=True
-        )
+        hard, warnings = rules.evaluate({"total_return": 0.02, "max_drawdown": 0.1})
         self.assertEqual(hard, [])
         self.assertEqual(warnings, [])
 

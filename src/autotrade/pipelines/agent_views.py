@@ -121,18 +121,20 @@ def compact_fold_history(
                         "order_count",
                         "trade_count",
                         # Exit health + benchmark-relative view: a lineage whose
-                        # every exit is a host liquidation, or whose "gains" trail
-                        # the index, must stay visible to later epochs.
-                        "host_exit_liquidation_count",
+                        # "gains" trail the index must stay visible to later epochs.
                         "strategy_exit_fill_count",
-                        "liquidation_complete",
                         "benchmark",
-                        # Overfitting tells (lzp-test21 post-mortem): structural
-                        # low exposure and turnover cost drove the held-out loss
-                        # while the dev metrics looked healthy — meta-learning
-                        # must see them, not just returns.
-                        "exposure",
+                        # Overfitting tell (lzp-test21 post-mortem): turnover cost
+                        # drove the held-out loss while the dev metrics looked
+                        # healthy — meta-learning must see it, not just returns.
                         "turnover",
+                        # Cost of the Validation itself, so Meta can weigh a
+                        # direction's replay and NL spend against its evidence.
+                        "replay_wall_seconds",
+                        "replayed_trade_days",
+                        "nl_calls",
+                        "nl_llm_calls",
+                        "nl_wall_seconds",
                         "error",
                     )
                     if key in summary

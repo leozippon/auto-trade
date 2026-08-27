@@ -65,6 +65,45 @@ AGENT_TOP_LEVEL = ("workspace", "output", "models")
 # (artifacts._is_runtime_cache).
 RUNTIME_CACHE_DIR_NAMES = ("__pycache__",)
 RUNTIME_CACHE_SUFFIXES = (".pyc", ".pyo")
+# The Agent-visible projection of one ``backtest_summaries`` entry. Every key
+# here is produced end to end: the tool layer writes the record identity and
+# outcome, ``compute_return_stats`` writes the return/order/timing block, and
+# ``NLService.counters`` writes the ``nl_*`` block. A key that nothing populates
+# does not belong in this tuple — it would advertise telemetry that never
+# arrives. The Fold tool layer also uses it to decide which structured (dict)
+# summary values are worth carrying into the run manifest at all.
+AGENT_VISIBLE_BACKTEST_SUMMARY_KEYS = (
+    "result_name",
+    "mode",
+    "status",
+    "complete_validation",
+    "error",
+    "total_return",
+    "long_return",
+    "sharpe",
+    "max_drawdown",
+    "order_count",
+    "order_lifecycle",
+    "reject_counts",
+    "benchmark",
+    "strategy_exit_fill_count",
+    "trade_count",
+    "decision_calls",
+    "started_at",
+    "finished_at",
+    "replay_wall_seconds",
+    "replayed_trade_days",
+    "phase_seconds",
+    "nl_calls",
+    "nl_executed_calls",
+    "nl_search_calls",
+    "nl_llm_calls",
+    "nl_event_filter_calls",
+    "nl_evidence_gated_calls",
+    "nl_budget_rejected_calls",
+    "nl_wall_seconds",
+    "nl_max_total_calls",
+)
 TRACE_MAX_BYTES = 32 * 1024 * 1024
 TRACE_MAX_EVENT_BYTES = 256 * 1024
 _TRACE_LOCKS: dict[str, threading.Lock] = {}
@@ -379,11 +418,6 @@ def _agent_visible_manifest(
             "fold_deadline_at",
             "finalize_before_deadline_seconds",
             "per_call_timeout_seconds",
-            "backtest_max_seconds_per_decision",
-            "backtest_max_seconds_per_trading_day",
-            "rolling_asof_enabled",
-            "nl_max_calls_per_decision_day",
-            "nl_max_calls_per_backtest",
             "sandbox_spec",
             "sandbox_runtime",
             "prior_prompt",
@@ -498,52 +532,7 @@ def _agent_visible_experiment_parameters(record: dict[str, object]) -> dict[str,
 def _agent_visible_backtest_summary(record: dict[str, object]) -> dict[str, object]:
     return {
         key: record[key]
-        for key in (
-            "result_name",
-            "mode",
-            "status",
-            "complete_validation",
-            "total_return",
-            "long_return",
-            "sharpe",
-            "max_drawdown",
-            "order_count",
-            "nl_calls",
-            "nl_executed_calls",
-            "nl_cache_hits",
-            "nl_cache_misses",
-            "nl_outcome_counts",
-            "nl_max_calls_per_backtest",
-            "nl_cost",
-            "unsubmitted_action_count",
-            "unsubmitted_action_reason_counts",
-            "strategy_reject_count",
-            "strategy_reject_category_counts",
-            "host_exit_liquidation_count",
-            "order_lifecycle",
-            "strategy_exit_fill_count",
-            "trade_count",
-            "liquidation_complete",
-            "unliquidated_position_count",
-            "benchmark",
-            "model_artifact_files",
-            "model_artifact_bytes",
-            "started_at",
-            "finished_at",
-            "replay_wall_seconds",
-            "replayed_trade_days",
-            "replayed_exit_days",
-            "runtime_representative",
-            "probe_note",
-            "phase_seconds",
-            "agent_peak_rss_bytes",
-            "diagnostic_warnings",
-            "strategy_advisories",
-            "decision_calls",
-            "strategy_action_count",
-            "error",
-            "modification_delta_summary",
-        )
+        for key in AGENT_VISIBLE_BACKTEST_SUMMARY_KEYS
         if key in record
     }
 

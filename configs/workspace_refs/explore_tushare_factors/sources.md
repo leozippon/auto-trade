@@ -24,7 +24,7 @@
 - `docs/data-documentation.md` 还确认：daily/daily_basic 当日收盘后可见；财务按公告时间；事件/宏观/财务保留源单位；daily、daily_basic 与其他逐日表覆盖不能假定完全一致。
 - `docs/environment-design.md`：长窗口日线来自滚动 `asof_dir/daily`；fundamentals 是公告可见的多版本事件，macro 含宽基指数；parts 随推断时点刷新。
 - `docs/agent-design.md`：正式策略只依赖当前 context 和只读 snapshot/asof 路径，单文件且仅 NumPy/pandas；读取前确认 schema，缓存按 `asof_version` 失效。
-- 旧包 `configs/workspace_refs/tushare_factors/`：已正确识别 202 因子菜单、T-1 和供应商 qfq 风险，但其 202 名索引容易诱导注释收集；本包改成 42 个候选、家族级可证伪流程和明确组合淘汰条件。
+- 已退役的 `tushare_factors` 包：曾正确识别 202 因子菜单、T-1 和供应商 qfq 风险，但其 202 名索引容易诱导注释收集；本包改成 42 个候选、家族级可证伪流程和明确组合淘汰条件。
 
 ## 筛选原则
 

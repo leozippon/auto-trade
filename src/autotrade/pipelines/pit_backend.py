@@ -40,9 +40,19 @@ from autotrade.environment.data.summary import write_agent_data_summary
 from autotrade.environment.executor import DockerStrategyExecutor
 from autotrade.environment.nl import NLConfig, NLService
 from autotrade.environment.replay.engine import StrategyDataView
-from autotrade.environment.replay.style import replay_style_analysis, write_style_rollup
+from autotrade.environment.replay.stats import PhaseTimer, finalize_summary_timing
+from autotrade.environment.replay.style import (
+    benchmark_summary_block,
+    replay_style_analysis,
+    write_style_rollup,
+)
 from autotrade.environment.replay.timeview import Timeview
-from autotrade.environment.runtime import chmod_tree, new_id, write_json_atomic
+from autotrade.environment.runtime import (
+    chmod_tree,
+    new_id,
+    utc_now_iso,
+    write_json_atomic,
+)
 from autotrade.environment.sandbox import SandboxConfig
 from autotrade.environment.strategy import CN_TZ, StrategySchedule
 from autotrade.environment.strategy_loader import validate_strategy_source
@@ -509,6 +519,8 @@ class PITDailyEvaluationBackend:
         self._replay_frame_cache: _ReplayFrameCache = {}
 
     def evaluate(self, request: EvaluationRequest) -> EvaluationResult:
+        started_at = utc_now_iso()
+        timer = PhaseTimer()
         if request.mode not in {"valid", "frozen_test", "heldout"}:
             raise ValueError(f"unsupported PIT evaluation mode: {request.mode}")
         strategy_path = Path(request.revision.output_path) / "main.py"
@@ -536,37 +548,39 @@ class PITDailyEvaluationBackend:
         result_dir.mkdir(parents=True, exist_ok=False)
         asof_dir = result_dir / "asof"
         keep_result_dir = False
-        frames = _load_replay_frames(
-            replay_dir,
-            generation_id=request.snapshot.generation_id,
-            replay_manifest=replay_manifest,
-            cache=self._replay_frame_cache,
-        )
-        daily = frames["daily"]
-        daily = daily[
-            (daily["trade_date"].map(_date_key) >= _date_key(request.start))
-            & (daily["trade_date"].map(_date_key) <= _date_key(request.end))
-        ].copy()
+        with timer.phase("replay_frames"):
+            frames = _load_replay_frames(
+                replay_dir,
+                generation_id=request.snapshot.generation_id,
+                replay_manifest=replay_manifest,
+                cache=self._replay_frame_cache,
+            )
+            daily = frames["daily"]
+            daily = daily[
+                (daily["trade_date"].map(_date_key) >= _date_key(request.start))
+                & (daily["trade_date"].map(_date_key) <= _date_key(request.end))
+            ].copy()
         if daily.empty:
             raise ValueError(f"PIT daily replay is empty for {request.start}..{request.end}")
 
-        minute_path = replay_dir / "intraday_1min.parquet"
-        minute_source = (
-            HistoricalMinuteSource(
-                minute_path,
-                max_row_group_rows=self.max_intraday_row_group_rows,
+        with timer.phase("timeview_init"):
+            minute_path = replay_dir / "intraday_1min.parquet"
+            minute_source = (
+                HistoricalMinuteSource(
+                    minute_path,
+                    max_row_group_rows=self.max_intraday_row_group_rows,
+                )
+                if minute_path.exists() and pq.ParquetFile(minute_path).metadata.num_rows
+                else None
             )
-            if minute_path.exists() and pq.ParquetFile(minute_path).metadata.num_rows
-            else None
-        )
-        timeview = Timeview(
-            host_dir=asof_dir,
-            snapshot_dir=snapshot_dir,
-            replay_frames={key: value for key, value in frames.items() if key != "daily"} | {"daily": daily},
-            replay_text_library_dir=(replay_dir / "text_library"),
-            incremental_domains={"intraday_1min"} if minute_source is not None else None,
-            stash_dir=stash_dir,
-        )
+            timeview = Timeview(
+                host_dir=asof_dir,
+                snapshot_dir=snapshot_dir,
+                replay_frames={key: value for key, value in frames.items() if key != "daily"} | {"daily": daily},
+                replay_text_library_dir=(replay_dir / "text_library"),
+                incremental_domains={"intraday_1min"} if minute_source is not None else None,
+                stash_dir=stash_dir,
+            )
         lock = _AsOfReadOnlyView(asof_dir)
         lock.lock()
         nl_service = NLService.from_snapshot(
@@ -600,12 +614,18 @@ class PITDailyEvaluationBackend:
         )
         executor_factory = None
         if self.execution_mode == "sandbox":
-            executor_factory = lambda cfg: DockerStrategyExecutor(
-                cfg.strategy_path,
-                cfg.sandbox,
-                snapshot_dir=snapshot_dir,
-                asof_dir=asof_dir,
-            )
+
+            def executor_factory(cfg):
+                # Container start is a one-off cost the per-day phases would
+                # otherwise hide inside the first strategy call.
+                with timer.phase("executor_start"):
+                    return DockerStrategyExecutor(
+                        cfg.strategy_path,
+                        cfg.sandbox,
+                        snapshot_dir=snapshot_dir,
+                        asof_dir=asof_dir,
+                    )
+
         try:
             try:
                 replay = DailyStrategyPipeline(
@@ -632,23 +652,31 @@ class PITDailyEvaluationBackend:
                 ),
                 "minute_total_rows": minute_source.total_rows if minute_source is not None else 0,
             }
-            target = result_dir / "result.json"
-            write_json_atomic(target, record)
-            write_style_rollup(
-                result_dir,
-                replay_style_analysis(
+            with timer.phase("style_analysis"):
+                style = replay_style_analysis(
                     replay,
                     daily,
                     replay_dir=replay_dir,
                     snapshot_dir=snapshot_dir,
                     mode=request.mode,
-                ),
-            )
+                )
             summary = record.get("stats")
             if not isinstance(summary, dict):
                 raise TypeError("daily replay omitted stats")
+            benchmark = benchmark_summary_block(style)
+            if benchmark is not None:
+                summary["benchmark"] = benchmark
+            finalize_summary_timing(
+                summary,
+                started_at=started_at,
+                setup_phases=timer.to_record(),
+                nl_counters=nl_service.counters(),
+            )
+            target = result_dir / "result.json"
+            write_json_atomic(target, record)
+            write_style_rollup(result_dir, style)
             keep_result_dir = True
-            return EvaluationResult(dict(summary), str(target), complete=True)
+            return EvaluationResult(dict(summary), str(target))
         finally:
             _discard_ephemeral_asof(asof_dir)
             if not keep_result_dir:

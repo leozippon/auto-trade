@@ -1,7 +1,8 @@
-"""Explore is a one-level writable Fold coding sub-agent on the parent trace and budget."""
+"""Explore is a one-level background sub-agent registered as a normal tool on the parent trace and budget."""
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 from collections.abc import Mapping
@@ -12,6 +13,7 @@ import pytest
 from autotrade.agent.explore import (
     DEFAULT_EXPLORE_MAX_CONCURRENT,
     DEFAULT_EXPLORE_THINKING,
+    EXPLORE_DESCRIPTION_MAX_CHARS,
     EXPLORE_ROLES,
     EXPLORE_SYSTEM_PROMPT,
     EXPLORE_THINKING_LEVELS,
@@ -21,9 +23,8 @@ from autotrade.agent.explore import (
     ExploreSubAgentEngine,
     explore_system_prompt,
     normalize_explore_thinking,
-    parent_context_digest,
 )
-from autotrade.agent.prompts import HOST_GUIDELINES_ZH, build_system_prompt
+from autotrade.agent.prompts import FOLD_WORKFLOW_SECTION, build_system_prompt
 from autotrade.environment.tools.base import SessionInterrupt
 from autotrade.agent.runner import (
     AgentSessionConfig,
@@ -35,11 +36,9 @@ from autotrade.environment.tools import (
     CommandResult,
     EditFileTool,
     ModificationCheckTool,
-    ReadOnlyShellTool,
     SafeWorkspace,
     SandboxShellTool,
     SearchRoots,
-    StrategyValidationTool,
     ToolRegistry,
     ToolResult,
     ToolSpec,
@@ -234,12 +233,7 @@ def test_explore_write_edit_shell_and_checks_persist(tmp_path: Path) -> None:
                 )
             ),
             ProviderResponse(
-                tool_calls=(
-                    ToolCall(
-                        "v", "validate_strategy", {"path": "output/main.py"}
-                    ),
-                    ToolCall("m", "modification_check", {}),
-                )
+                tool_calls=(ToolCall("m", "modification_check", {}),)
             ),
             ProviderResponse(content="结论：已写入并可验证。"),
         ]
@@ -251,7 +245,6 @@ def test_explore_write_edit_shell_and_checks_persist(tmp_path: Path) -> None:
                 WriteFileTool(safe),
                 EditFileTool(safe),
                 SandboxShellTool(safe, runner),
-                StrategyValidationTool(safe),
                 ModificationCheckTool(workspace / "output"),
             ]
         ),
@@ -261,7 +254,7 @@ def test_explore_write_edit_shell_and_checks_persist(tmp_path: Path) -> None:
     assert "return []  # ok" in written
     assert (workspace / "from_shell.txt").read_text(encoding="utf-8") == "from-shell\n"
     assert runner.calls == [["touch", "from_shell.txt"]]
-    assert result["tool_calls"] == 5
+    assert result["tool_calls"] == 4
 
 
 def test_explore_write_failure_does_not_finish_parent(tmp_path: Path) -> None:
@@ -284,6 +277,7 @@ def test_explore_write_failure_does_not_finish_parent(tmp_path: Path) -> None:
         tools=ToolRegistry([BoomWrite()]),
         event_sink=lambda event, _payload: events.append(event),
     )
+    # ScriptedLLM records every request, so the child's view is inspectable.
     runner = AgentSessionRunner(
         llm=ScriptedLLM([]),
         tools=ToolRegistry(),
@@ -291,22 +285,27 @@ def test_explore_write_failure_does_not_finish_parent(tmp_path: Path) -> None:
         config=_fold_config(),
         explore=explore,
     )
-    dispatched = runner._dispatch_explore(
-        ToolCall(
-            "e1",
-            "explore",
-            {"role": "developer", "task": "write then fail"},
-        )
+    dispatched = runner.tools.invoke(
+        "explore", {"role": "developer", "task": "write then fail"}
     )
-    assert dispatched.get("status") == "started"
+    assert dispatched.ok and dispatched.value["status"] == "started"
     finished = runner._wait_explore_jobs()
     assert finished
     dispatched = finished[-1]
     value = dispatched["value"]
-    assert dispatched["ok"] is False
+    # A tool bug fails that call, not the child: the exception rides back as
+    # an error observation and the child continues to its summary.
+    assert dispatched["ok"] is True
     assert isinstance(value, dict)
-    assert value["status"] == "error"
-    assert "disk exploded" in str(value.get("error") or "")
+    assert value["status"] == "completed"
+    assert value["summary"] == "must not run"
+    tool_results = [
+        message.content
+        for message in explore.llm.calls[1]["messages"]
+        if message.role == "tool"
+    ]
+    assert tool_results and "disk exploded" in tool_results[0]
+    assert '"error_type": "tool_exception"' in tool_results[0]
     assert "explore" in events
     assert not (tmp_path / "output" / "main.py").exists()
 
@@ -388,10 +387,10 @@ def test_runner_attaches_explore_events_to_its_sink() -> None:
         explore=explore,
         event_sink=lambda event, _payload: events.append(event),
     )
-    dispatched = runner._dispatch_explore(
-        ToolCall("e1", "explore", {"role": "auditor", "task": "read schema"})
+    dispatched = runner.tools.invoke(
+        "explore", {"role": "auditor", "task": "read schema"}
     )
-    assert dispatched.get("status") == "started"
+    assert dispatched.ok and dispatched.value["status"] == "started"
     finished = runner._wait_explore_jobs()
     assert finished and finished[-1]["ok"] is True
     assert "explore_task" in events
@@ -461,13 +460,10 @@ def test_fold_explore_tools_are_writable_shell_contract(tmp_path: Path) -> None:
         "write_file",
         "edit_file",
         "shell",
-        "validate_strategy",
-        "todo",
         "modification_check",
     ]
     by_name = {tool.spec.name: tool for tool in tools}
     assert type(by_name["shell"]) is SandboxShellTool
-    assert not isinstance(by_name["shell"], ReadOnlyShellTool)
 
 
 class _NamedTool:
@@ -635,8 +631,8 @@ def test_meta_explore_is_readonly_and_cannot_nest(tmp_path: Path) -> None:
     workspace.mkdir()
     (workspace / "PRIOR.md").write_text("keep\n", encoding="utf-8")
     safe = SafeWorkspace(workspace)
-    tools = build_meta_explore_tools(SearchRoots(safe), safe)
-    assert [tool.spec.name for tool in tools] == ["read_file", "grep", "glob", "todo"]
+    tools = build_meta_explore_tools(SearchRoots(safe))
+    assert [tool.spec.name for tool in tools] == ["read_file", "grep", "glob"]
     engine = ExploreSubAgentEngine(
         llm=ScriptedLLM(
             [
@@ -711,7 +707,7 @@ def test_fold_and_explore_prompts_keep_roles_without_pyright_how_to() -> None:
     for role in ("`auditor`", "`developer`", "`general-purpose`", "`Explore`"):
         assert role in fold
         assert role in meta
-    assert "除非任务非常简单" in fold
+    assert "保持自己的上下文精简" in fold
     assert "`write_file`" in fold
     assert "`finish_fold`" in fold
     assert "`finish_meta`" in meta
@@ -824,12 +820,10 @@ def test_role_tool_visibility_hides_writes_from_audits(tmp_path: Path) -> None:
         "modification_check",
         "read_file",
         "shell",
-        "todo",
-        "validate_strategy",
         "write_file",
         "write_skill",
     }
-    assert audit == {"glob", "grep", "read_file", "todo"}
+    assert audit == {"glob", "grep", "read_file"}
     fold_general = {
         _function_name(record)
         for record in engine._provider_tools(
@@ -840,7 +834,7 @@ def test_role_tool_visibility_hides_writes_from_audits(tmp_path: Path) -> None:
     assert fold_general == impl
     meta_engine = ExploreSubAgentEngine(
         llm=ScriptedLLM([]),
-        tools=ToolRegistry(build_meta_explore_tools(SearchRoots(safe), safe)),
+        tools=ToolRegistry(build_meta_explore_tools(SearchRoots(safe))),
         mode="meta",
     )
     meta_names = {
@@ -859,7 +853,7 @@ def test_role_tool_visibility_hides_writes_from_audits(tmp_path: Path) -> None:
         _function_name(record)
         for record in engine._provider_tools(allowed_explore_tools("fold", "Explore"))
     }
-    assert fold_explore == {"read_file", "grep", "glob", "todo"}
+    assert fold_explore == {"read_file", "grep", "glob"}
     assert "shell" not in fold_explore
     assert "write_file" not in fold_explore
     meta_developer = {
@@ -874,7 +868,7 @@ def test_role_tool_visibility_hides_writes_from_audits(tmp_path: Path) -> None:
             allowed_explore_tools("meta", "Explore")
         )
     }
-    assert meta_names == {"read_file", "grep", "glob", "todo"}
+    assert meta_names == {"read_file", "grep", "glob"}
     assert meta_general == meta_names
     assert meta_developer == meta_names
     assert meta_explore == meta_names
@@ -939,10 +933,11 @@ def test_explore_calls_still_track_attempts_and_roles() -> None:
         "developer",
     }
     attempt_events = [payload for event, payload in events if event == "explore_attempt"]
-    assert [payload["role"] for payload in attempt_events] == [
-        "general-purpose",
+    # The three launches ran concurrently, so completion order is not fixed.
+    assert sorted(payload["role"] for payload in attempt_events) == [
         "auditor",
         "developer",
+        "general-purpose",
     ]
     assert all("task" not in payload for payload in attempt_events)
     ended = next(payload for event, payload in events if event == "session_end")
@@ -953,6 +948,9 @@ def test_explore_calls_still_track_attempts_and_roles() -> None:
         "general-purpose",
     ]
     assert "task" not in ended
+    # In-flight children collected at finish still bill the session.
+    assert ended["token_usage"]["explore"]["llm_calls"] == 3
+    assert result.usage["explore"]["llm_calls"] == 3
 
 
 def test_single_explore_role_can_finish() -> None:
@@ -1008,32 +1006,18 @@ def test_normalize_explore_thinking_accepts_aliases() -> None:
         normalize_explore_thinking("turbo")
 
 
-def test_explore_defaults_are_medium_thinking_and_two_concurrent() -> None:
-    assert DEFAULT_EXPLORE_MAX_CONCURRENT == 2
-    assert ExploreSubAgentConfig().max_concurrent == 2
+def test_explore_defaults_are_medium_thinking_and_four_concurrent() -> None:
+    assert DEFAULT_EXPLORE_MAX_CONCURRENT == 4
+    assert ExploreSubAgentConfig().max_concurrent == 4
     result = ExploreSubAgentEngine(
         llm=ScriptedLLM([ProviderResponse(content="ok")]),
         tools=ToolRegistry([DeclaredReadOnlyShell()]),
     ).run("summarize", role="auditor")
     assert result["thinking"] == "medium"
-    assert "没有 Sleep" in HOST_GUIDELINES_ZH
-    assert "应让它 Sleep" not in HOST_GUIDELINES_ZH
-    assert "Runner 会让出" in HOST_GUIDELINES_ZH
-    assert "后台完成由运行时注入" in HOST_GUIDELINES_ZH
-
-
-def test_parent_context_digest_skips_system_and_keeps_recent() -> None:
-    digest = parent_context_digest(
-        [
-            ChatMessage("system", "hidden contract"),
-            ChatMessage("user", "look at daily schema"),
-            ChatMessage("assistant", "I will delegate"),
-        ]
-    )
-    assert "父会话摘录" in digest
-    assert "look at daily schema" in digest
-    assert "I will delegate" in digest
-    assert "hidden contract" not in digest
+    assert "默认并发 4，超出排队" in FOLD_WORKFLOW_SECTION
+    assert "explore_completed" in FOLD_WORKFLOW_SECTION
+    assert "不要用工具轮询" in FOLD_WORKFLOW_SECTION
+    assert "Sleep" not in FOLD_WORKFLOW_SECTION
 
 
 def test_explore_inherit_context_prepends_parent_digest() -> None:
@@ -1066,7 +1050,7 @@ def test_explore_inherit_context_prepends_parent_digest() -> None:
     assert any(msg.role == "user" for msg in recorded)
 
 
-def test_dispatch_explore_rejects_bad_thinking() -> None:
+def test_explore_arguments_are_validated_by_the_registry() -> None:
     explore = ExploreSubAgentEngine(
         llm=ScriptedLLM([ProviderResponse(content="ok")]),
         tools=ToolRegistry([DeclaredReadOnlyShell()]),
@@ -1078,11 +1062,39 @@ def test_dispatch_explore_rejects_bad_thinking() -> None:
         config=_fold_config(),
         explore=explore,
     )
-    record = runner._dispatch_explore(
-        ToolCall("e1", "explore", {"role": "auditor", "task": "x", "thinking": "turbo"})
+    # The runner registered explore like any other tool.
+    assert runner.tools.spec("explore") is not None
+    assert "explore" in {
+        _function_name(tool) for tool in runner._provider_tools()
+    }
+    bad_thinking = runner.tools.invoke(
+        "explore", {"role": "auditor", "task": "x", "thinking": "turbo"}
     )
-    assert record["ok"] is False
-    assert "thinking" in str(record["error"])
+    assert bad_thinking.ok is False
+    assert "thinking" in bad_thinking.error
+    assert bad_thinking.value["error_type"] == "schema_error"
+    bad_role = runner.tools.invoke("explore", {"role": "reader", "task": "x"})
+    assert bad_role.ok is False and "role" in bad_role.error
+    unknown = runner.tools.invoke(
+        "explore", {"role": "auditor", "task": "x", "max_rounds": 3}
+    )
+    assert unknown.ok is False and "max_rounds" in unknown.error
+    too_long = runner.tools.invoke(
+        "explore",
+        {
+            "role": "auditor",
+            "task": "x",
+            "description": "d" * (EXPLORE_DESCRIPTION_MAX_CHARS + 1),
+        },
+    )
+    assert too_long.ok is False and "description" in too_long.error
+    assert runner._explore_attempts == 0
+    # An integral JSON number is accepted as max_turns and the launch starts.
+    started = runner.tools.invoke(
+        "explore", {"role": "auditor", "task": "x", "max_turns": 2.0}
+    )
+    assert started.ok and started.value["status"] == "started"
+    assert runner._wait_explore_jobs()[-1]["ok"] is True
 
 
 def test_explore_thinking_only_reply_does_not_finish_the_child() -> None:
@@ -1375,7 +1387,6 @@ def test_parent_text_only_pending_explore_deadline_does_not_deadlock(
     from autotrade.agent import runner as runner_module
 
     monkeypatch.setattr(runner_module, "EXPLORE_TEARDOWN_WAIT_SECONDS", 0.2)
-    monkeypatch.setattr(runner_module, "EXPLORE_TEARDOWN_WAIT_REMAINDER_SECONDS", 0.05)
     started = threading.Event()
     release = threading.Event()
     finish = _FinishStub("finish_fold")
@@ -1444,10 +1455,10 @@ def test_wait_first_pending_explore_returns_on_cancel() -> None:
             tools=ToolRegistry([DeclaredReadOnlyShell()]),
         ),
     )
-    dispatched = runner._dispatch_explore(
-        ToolCall("e1", "explore", {"role": "auditor", "task": "hang"})
+    dispatched = runner.tools.invoke(
+        "explore", {"role": "auditor", "task": "hang"}
     )
-    assert dispatched.get("status") == "started"
+    assert dispatched.ok and dispatched.value["status"] == "started"
     assert started.wait(3)
     threading.Timer(0.1, runner._cancelled.set).start()
     t0 = time.monotonic()
@@ -1551,7 +1562,6 @@ def test_runner_close_cancels_explore_without_infinite_wait(
     from autotrade.agent import runner as runner_module
 
     monkeypatch.setattr(runner_module, "EXPLORE_TEARDOWN_WAIT_SECONDS", 0.2)
-    monkeypatch.setattr(runner_module, "EXPLORE_TEARDOWN_WAIT_REMAINDER_SECONDS", 0.05)
     started = threading.Event()
     release = threading.Event()
     shell = DeclaredReadOnlyShell()
@@ -1616,3 +1626,331 @@ def test_runner_close_cancels_explore_without_infinite_wait(
     release.set()
     time.sleep(0.2)
     assert shell.calls == []
+
+
+class _OverlapProbe:
+    """Shared record of how many tool calls overlap in time, and their order."""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.active = 0
+        self.max_active = 0
+        self.order: list[str] = []
+        self.max_active_by_turn: list[int] = []
+
+    def new_turn(self) -> None:
+        with self.lock:
+            self.max_active_by_turn.append(0)
+
+    def enter(self, name: str) -> None:
+        with self.lock:
+            self.active += 1
+            self.max_active_by_turn[-1] = max(self.max_active_by_turn[-1], self.active)
+            self.order.append(name)
+
+    def leave(self) -> None:
+        with self.lock:
+            self.active -= 1
+
+
+class _ProbeTool:
+    def __init__(
+        self, name: str, probe: _OverlapProbe, *, mutating: bool = False, hold: float = 0.15
+    ) -> None:
+        self.spec = ToolSpec(
+            name,
+            "overlap probe",
+            {"type": "object", "properties": {}, "required": []},
+            mutating=mutating,
+        )
+        self.probe = probe
+        self.hold = hold
+
+    def invoke(self, arguments: Mapping[str, object]) -> ToolResult:
+        del arguments
+        self.probe.enter(self.spec.name)
+        time.sleep(self.hold)
+        self.probe.leave()
+        return ToolResult(True, value={"tool": self.spec.name})
+
+
+def test_parallel_safe_batch_runs_concurrently_and_mutating_batch_in_order() -> None:
+    probe = _OverlapProbe()
+    read = _ProbeTool("read_file", probe)
+    grep = _ProbeTool("grep", probe)
+    write = _ProbeTool("write_file", probe, mutating=True)
+    finish = _FinishStub("finish_fold")
+    llm = ScriptedLLM(
+        [
+            ProviderResponse(
+                tool_calls=(
+                    ToolCall("r1", "read_file", {}),
+                    ToolCall("g1", "grep", {}),
+                    ToolCall("r2", "read_file", {}),
+                )
+            ),
+            ProviderResponse(
+                tool_calls=(
+                    ToolCall("g2", "grep", {}),
+                    ToolCall("w1", "write_file", {}),
+                    ToolCall("r3", "read_file", {}),
+                )
+            ),
+            ProviderResponse(tool_calls=(ToolCall("f1", "finish_fold", {}),)),
+        ]
+    )
+
+    class _TurnLLM:
+        model = "parent"
+        provider = "test"
+        context_window_tokens = 128000
+
+        def complete(self, messages, **kwargs):
+            probe.new_turn()
+            return llm.complete(messages, **kwargs)
+
+    runner = AgentSessionRunner(
+        llm=_TurnLLM(),
+        tools=ToolRegistry([read, grep, write, finish]),
+        system_prompt="fold",
+        config=_fold_config(),
+    )
+    assert runner.run("go").status == "finished"
+    # Turn 1: three parallel-safe calls overlapped.
+    assert probe.max_active_by_turn[0] >= 2
+    # Turn 2: one mutating call demoted the whole batch to in-order execution.
+    assert probe.max_active_by_turn[1] == 1
+    assert probe.order[3:] == ["grep", "write_file", "read_file"]
+    # Tool results are paired to their calls in call order regardless of finish order.
+    second_turn = llm.calls[1]["messages"]
+    tool_ids = [message.tool_call_id for message in second_turn if message.role == "tool"]
+    assert tool_ids == ["r1", "g1", "r2"]
+
+
+def test_explore_launches_beyond_the_cap_queue_instead_of_failing() -> None:
+    gates = {
+        f"task-{index}": (threading.Event(), threading.Event(), f"summary-{index}")
+        for index in range(3)
+    }
+    finish = _FinishStub("finish_fold")
+    inner = ScriptedLLM(
+        [
+            ProviderResponse(
+                tool_calls=tuple(
+                    ToolCall(f"e{index}", "explore", {"role": "auditor", "task": needle})
+                    for index, needle in enumerate(gates)
+                )
+            ),
+            ProviderResponse(content="waiting"),
+            ProviderResponse(tool_calls=(ToolCall("f1", "finish_fold", {}),)),
+        ]
+    )
+    parent_calls = {"n": 0}
+
+    class _ParentLLM:
+        model = "parent"
+        provider = "test"
+        context_window_tokens = 128000
+
+        def complete(self, messages, **kwargs):
+            parent_calls["n"] += 1
+            n = parent_calls["n"]
+            if n == 2:
+                # Only one child may run at a time; every launch was accepted.
+                tool_records = [
+                    message.content
+                    for message in messages
+                    if message.role == "tool"
+                ]
+                assert len(tool_records) == 3
+                assert all('"status": "started"' in text for text in tool_records)
+                assert sum('"queued": true' in text for text in tool_records) == 2
+                running = [needle for needle, (s, _r, _x) in gates.items() if s.is_set()]
+                assert len(running) == 1
+                for _needle, (_s, release, _x) in gates.items():
+                    release.set()
+            elif n == 3:
+                blob = "\n".join(str(message.content or "") for message in messages)
+                assert blob.count('"observation": "explore_completed"') >= 1
+            return inner.complete(messages, **kwargs)
+
+    runner = AgentSessionRunner(
+        llm=_ParentLLM(),
+        tools=ToolRegistry([finish]),
+        system_prompt="fold",
+        config=_fold_config(),
+        explore=ExploreSubAgentEngine(
+            llm=_TaskGatedLLM(gates),
+            tools=ToolRegistry([DeclaredReadOnlyShell()]),
+            config=ExploreSubAgentConfig(max_concurrent=1),
+        ),
+    )
+    result = runner.run("go")
+    assert result.status == "finished"
+    assert runner._explore_attempts == 3
+    assert all(job.record is not None for job in runner._explore_jobs)
+    assert sorted(
+        str(job.record["value"].get("summary")) for job in runner._explore_jobs
+    ) == ["summary-0", "summary-1", "summary-2"]
+
+
+def test_backtest_gate_keeps_its_batch_in_order_regardless_of_spec() -> None:
+    """A completed Validation may enter hard finalization; the remaining research
+    calls of the same turn must then be refused, which needs an ordered batch."""
+    backtest = _NamedTool("daily_backtest")
+    read = _NamedTool("read_file")
+    runner = AgentSessionRunner(
+        llm=ScriptedLLM([]),
+        tools=ToolRegistry([backtest, read, _FinishStub("finish_fold")]),
+        system_prompt="fold",
+        config=_fold_config(),
+    )
+    assert backtest.spec.mutating is False
+    assert runner._is_parallel_batch(
+        (ToolCall("b", "daily_backtest", {}), ToolCall("r", "read_file", {}))
+    ) is False
+    assert runner._is_parallel_batch(
+        (ToolCall("r1", "read_file", {}), ToolCall("r2", "read_file", {}))
+    ) is True
+
+
+def test_unfinished_session_end_still_reports_token_usage() -> None:
+    runner = AgentSessionRunner(
+        llm=ScriptedLLM([ProviderResponse(content="thinking aloud")]),
+        tools=ToolRegistry([_FinishStub("finish_fold")]),
+        system_prompt="fold",
+        config=_fold_config(max_llm_calls=1),
+    )
+    events: list[tuple[str, dict[str, object]]] = []
+    runner.event_sink = lambda event, payload: events.append((event, payload))
+    with pytest.raises(RuntimeError, match="call budget"):
+        runner.run("go")
+    ended = next(payload for event, payload in events if event == "session_end")
+    assert ended["status"] == "call_budget_exhausted"
+    assert ended["token_usage"]["llm_calls_with_usage"] == 1
+
+
+def test_inherit_context_fork_drops_the_unanswered_tool_calls() -> None:
+    child = ScriptedLLM([ProviderResponse(content="forked")])
+    runner = AgentSessionRunner(
+        llm=ScriptedLLM([]),
+        tools=ToolRegistry(),
+        system_prompt="fold",
+        config=_fold_config(),
+        explore=ExploreSubAgentEngine(
+            llm=child, tools=ToolRegistry([DeclaredReadOnlyShell()])
+        ),
+    )
+    # The realistic snapshot: the batch holding this explore call is running,
+    # so the last assistant turn has no tool results yet.
+    runner._live_messages = [
+        ChatMessage("system", "secret contract"),
+        ChatMessage("user", "look at daily schema"),
+        ChatMessage("assistant", None, (ToolCall("r1", "read_file", {"path": "a"}),)),
+        ChatMessage("tool", '{"ok": true}', tool_call_id="r1"),
+        ChatMessage(
+            "assistant",
+            None,
+            (ToolCall("e1", "explore", {"role": "auditor", "task": "fork"}),),
+        ),
+    ]
+    started = runner.tools.invoke(
+        "explore", {"role": "auditor", "task": "fork", "inherit_context": True}
+    )
+    assert started.ok
+    assert runner._wait_explore_jobs()[-1]["ok"] is True
+    request = child.calls[0]["messages"]
+    assert request[-1].role == "user" and request[-1].content == "fork"
+    assert all("secret contract" not in (m.content or "") for m in request)
+    answered = {m.tool_call_id for m in request if m.role == "tool"}
+    for message in request:
+        if message.role == "assistant":
+            assert {call.id for call in message.tool_calls} <= answered
+    assert any(m.tool_call_id == "r1" for m in request)
+
+
+class _BoomTool:
+    spec = ToolSpec("grep", "raises", {"type": "object", "properties": {}, "required": []})
+
+    def invoke(self, arguments: Mapping[str, object]) -> ToolResult:
+        del arguments
+        raise RuntimeError("regex engine exploded")
+
+
+def test_tool_exception_in_a_parallel_batch_keeps_sibling_results() -> None:
+    finish = _FinishStub("finish_fold")
+    llm = ScriptedLLM(
+        [
+            ProviderResponse(
+                tool_calls=(
+                    ToolCall("g", "grep", {}),
+                    ToolCall("r", "read_file", {}),
+                )
+            ),
+            ProviderResponse(tool_calls=(ToolCall("f1", "finish_fold", {}),)),
+        ]
+    )
+    runner = AgentSessionRunner(
+        llm=llm,
+        tools=ToolRegistry([_BoomTool(), _NamedTool("read_file"), finish]),
+        system_prompt="fold",
+        config=_fold_config(),
+    )
+    assert runner.run("go").status == "finished"
+    second = llm.calls[1]["messages"]
+    results = {m.tool_call_id: json.loads(m.content) for m in second if m.role == "tool"}
+    assert results["r"]["ok"] is True
+    assert results["g"]["ok"] is False
+    assert "RuntimeError" in results["g"]["error"]
+    assert results["g"]["value"]["error_type"] == "tool_exception"
+
+
+def test_daily_backtest_waits_for_running_explore() -> None:
+    class _SlowChild:
+        model = "child"
+        provider = "test"
+        context_window_tokens = 128000
+
+        def complete(self, messages, **kwargs):
+            del messages, kwargs
+            time.sleep(0.3)
+            return ProviderResponse(content="child done")
+
+    seen: dict[str, bool] = {}
+
+    class _Backtest:
+        spec = ToolSpec(
+            "daily_backtest", "gate", {"type": "object", "properties": {}, "required": []}
+        )
+
+        def invoke(self, arguments: Mapping[str, object]) -> ToolResult:
+            del arguments
+            seen["children_done"] = all(
+                job.future.done() for job in runner._explore_jobs
+            )
+            return ToolResult(True, value={"status": "probe"})
+
+    finish = _FinishStub("finish_fold")
+    llm = ScriptedLLM(
+        [
+            ProviderResponse(
+                tool_calls=(ToolCall("e1", "explore", {"role": "developer", "task": "slow"}),)
+            ),
+            ProviderResponse(tool_calls=(ToolCall("b1", "daily_backtest", {}),)),
+            ProviderResponse(tool_calls=(ToolCall("f1", "finish_fold", {}),)),
+        ]
+    )
+    runner = AgentSessionRunner(
+        llm=llm,
+        tools=ToolRegistry([_Backtest(), finish]),
+        system_prompt="fold",
+        config=_fold_config(),
+        explore=ExploreSubAgentEngine(
+            llm=_SlowChild(), tools=ToolRegistry([DeclaredReadOnlyShell()])
+        ),
+    )
+    assert runner.run("go").status == "finished"
+    assert seen["children_done"] is True
+    # The child's result was delivered to the conversation after the barrier.
+    third = llm.calls[2]["messages"]
+    assert any('"observation": "explore_completed"' in (m.content or "") for m in third)

@@ -1,8 +1,9 @@
 """Interactive (human-in-the-loop) session orchestration (docs/pipeline-design.md).
 
-Drives the same ``run_meta`` / ``run_fold`` / ``run_heldout`` primitives as the
-unattended pipeline, but with a researcher gate between sessions, per-session
-directives, durable pause/stop, and ledger-based resume. The runner treats the
+Drives the pipeline's ``run_meta_session`` / ``run_fold`` / ``run_heldout``
+primitives with a researcher gate between sessions, per-session directives,
+durable pause/stop, and ledger-based resume. This is the only orchestration
+entry point; there is no unattended batch driver. The runner treats the
 append-only ledger as the source of truth: completed sessions are skipped and
 the parent artifact chain is reconstructed from their records.
 Integrity-flagged Fold/Held-out rows are not successes: resume refuses them.

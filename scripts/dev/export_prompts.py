@@ -6,9 +6,6 @@ templates so reviewers can read exactly what the models see. Every fenced
 ``text`` block below is imported from the module that ships it — none of the
 prompt text is retyped here — so a prompt edit that skips the snapshot is
 caught by ``--check``.
-
-Every fenced block is imported from the module that ships it; no prompt text is
-retyped here.
 """
 
 from __future__ import annotations
@@ -26,13 +23,12 @@ from _bootstrap import add_repo_src
 add_repo_src(__file__)
 
 from autotrade.agent.compact import COMPACT_SYSTEM_PROMPT
-from autotrade.agent.explore import explore_system_prompt
+from autotrade.agent.explore import EXPLORE_TOOL_DESCRIPTION, explore_system_prompt
 from autotrade.agent.prompts import (
     CONVERGENCE_PHASE_PROMPT,
     DEFAULT_ANTI_OVERFIT_PROMPT,
     DEFAULT_CONVERGENCE_PROMPT,
     EXPLORATION_PHASE_PROMPT,
-    FOLD_ACTION_SECTION,
     FOLD_DEFAULT_INSTRUCTION,
     FOLD_DYNAMIC_CONTEXT_HEADER,
     FOLD_ENV_SECTION,
@@ -40,9 +36,12 @@ from autotrade.agent.prompts import (
     FOLD_ROLE_SECTION,
     FOLD_STATIC_SECTIONS,
     FOLD_SUBMIT_CONTRACT,
+    FOLD_TOOLS_SECTION,
+    FOLD_WORKFLOW_SECTION,
     HARD_FINALIZATION_SYSTEM_PROMPT,
-    HOST_GUIDELINES_ZH,
+    META_STATIC_SECTIONS,
     META_SYSTEM_PROMPT,
+    PRINCIPLES_SECTION,
     ROLE_MATRIX_SECTION,
     RUNTIME_SYSTEM_PROMPT,
     STEP_TREE_SECTION,
@@ -65,16 +64,23 @@ def _block(text: str, language: str = "text") -> str:
 
 
 def render() -> str:
-    role, runtime, environment, action, submit, prohibitions = FOLD_STATIC_SECTIONS
     # Guard the ordering the navigation and the section numbering encode.
-    assert (role, runtime, environment, action, submit, prohibitions) == (
+    assert FOLD_STATIC_SECTIONS == (
         FOLD_ROLE_SECTION,
+        FOLD_TOOLS_SECTION,
+        FOLD_WORKFLOW_SECTION,
+        ROLE_MATRIX_SECTION,
         RUNTIME_SYSTEM_PROMPT,
         FOLD_ENV_SECTION,
-        FOLD_ACTION_SECTION,
         FOLD_SUBMIT_CONTRACT,
         FOLD_PROHIBITIONS,
+        PRINCIPLES_SECTION,
     ), "FOLD_STATIC_SECTIONS order changed; update the snapshot layout"
+    assert META_STATIC_SECTIONS == (
+        META_SYSTEM_PROMPT,
+        ROLE_MATRIX_SECTION,
+        PRINCIPLES_SECTION,
+    ), "META_STATIC_SECTIONS order changed; update the snapshot layout"
 
     parts = [
         "# Prompt 模板审计快照",
@@ -86,7 +92,7 @@ def render() -> str:
         "- `src/autotrade/agent/compact.py`",
         "- `src/autotrade/environment/nl/engine.py`",
         "",
-        "运行时动态上下文由 Pipeline 追加；工具名、参数和可用性由每轮原生 function schema 注入。动态示例只说明结构，不替代当前 run 的事实制品。",
+        "系统提示词先放静态内容，再放本次运行的动态事实，使跨会话的共享前缀字节稳定。工具名、参数和可用性由每轮原生 function schema 注入；动态示例只说明结构，不替代当前 run 的事实制品。宿主 `AGENTS.md` 的多智能体、开发原则和操作护栏不注入；其英文 AutoTrade subsection 只做 presence-check。",
         "",
         "## 导航",
         "",
@@ -94,48 +100,60 @@ def render() -> str:
         "- [2. 收尾提示](#2-收尾提示)",
         "- [3. 阶段与防过拟合构件](#3-阶段与防过拟合构件)",
         "- [4. 离线 Meta Agent 系统提示词](#4-离线-meta-agent-系统提示词)",
-        "- [5. Explore Agent 系统提示词](#5-explore-agent-系统提示词)",
+        "- [5. Explore 工具与子代理系统提示词](#5-explore-工具与子代理系统提示词)",
         "- [6. Context Compaction 系统提示词](#6-context-compaction-系统提示词)",
         "- [7. NL Sub Agent 系统提示词](#7-nl-sub-agent-系统提示词)",
         "- [8. 动态上下文结构](#8-动态上下文结构)",
         "",
         "## 1. Fold Agent 系统提示词",
         "",
-        "运行时系统提示词先给出中文协作规则、开发原则和操作护栏，再接角色与写权表和六个稳定 Fold 区块。仓库根 `AGENTS.md` 的英文 AutoTrade subsection 只作宿主合同，缺文件或缺节会使会话失败，但不注入英文正文。",
+        "九个稳定区块按下列顺序拼接；启用 Step 树时在其后追加 `STEP_TREE_SECTION`（见 §1.10），再接动态上下文。",
         "",
-        "### 1.0 协作规则与原则",
+        "### 1.1 身份与任务",
         "",
-        _block(HOST_GUIDELINES_ZH),
+        _block(FOLD_ROLE_SECTION),
         "",
-        "### 1.0b 角色与写权",
+        "### 1.2 工具",
+        "",
+        _block(FOLD_TOOLS_SECTION),
+        "",
+        "### 1.3 工作方式",
+        "",
+        _block(FOLD_WORKFLOW_SECTION),
+        "",
+        "### 1.4 角色与写权",
         "",
         _block(ROLE_MATRIX_SECTION),
         "",
-        "### 1.1 角色与目标",
+        "### 1.5 核心执行合同",
         "",
-        _block(role),
+        _block(RUNTIME_SYSTEM_PROMPT),
         "",
-        "### 1.2 核心执行合同",
+        "### 1.6 环境与边界",
         "",
-        _block(runtime),
+        _block(FOLD_ENV_SECTION),
         "",
-        "### 1.3 环境与配置",
+        "### 1.7 提交合同",
         "",
-        _block(environment),
+        _block(FOLD_SUBMIT_CONTRACT),
         "",
-        "### 1.4 动作与流程",
+        "### 1.8 禁止事项",
         "",
-        _block(action),
+        _block(FOLD_PROHIBITIONS),
         "",
-        "### 1.5 提交合同",
+        "### 1.9 原则",
         "",
-        _block(submit),
+        "Fold 与 Meta 共用；这是宿主开发原则中真正适用于策略研究的浓缩版。",
         "",
-        "### 1.6 禁止事项",
+        _block(PRINCIPLES_SECTION),
         "",
-        _block(prohibitions),
+        "### 1.10 Step 产物树",
         "",
-        "### 1.7 Fold 默认用户指令",
+        "`step_tree_enabled` 时追加 `STEP_TREE_SECTION`：",
+        "",
+        _block(STEP_TREE_SECTION),
+        "",
+        "### 1.11 Fold 默认用户指令",
         "",
         "`FOLD_DEFAULT_INSTRUCTION`：",
         "",
@@ -187,21 +205,15 @@ def render() -> str:
             f"{DEFAULT_CONVERGENCE_PROMPT.strip()}\n\n{CONVERGENCE_PHASE_PROMPT.strip()}"
         ),
         "",
-        "### 3.4 Step 产物树",
-        "",
-        "启用 Step 树时追加 `STEP_TREE_SECTION`：",
-        "",
-        _block(STEP_TREE_SECTION),
-        "",
         "## 4. 离线 Meta Agent 系统提示词",
         "",
-        "Meta 使用同一中文协作规则与角色写权表，再接 `META_SYSTEM_PROMPT`；不附加完整 Fold runtime essay，也不注入英文 AGENTS 正文。",
+        "`META_SYSTEM_PROMPT` 之后接同一份角色与写权表（§1.4）和原则（§1.9），再接可选调度与实验事实；不附加 Fold 的执行合同，也不注入英文 AGENTS 正文。",
         "",
         "`META_SYSTEM_PROMPT`：",
         "",
         _block(META_SYSTEM_PROMPT),
         "",
-        "Meta 的注册工具白名单为 `read_file`、`grep`、`glob`、`write_file`、`edit_file`、`write_skill`、`delete_skill`、`modification_check`、`todo`、可选 `ask_user` 和 `finish_meta`。Runner 另外注入合成工具 `explore`，用于一层只读审计/分析子代理。Runner 在第一轮模型请求之前验证注册工具集合；多余能力会使会话直接失败。",
+        "Meta 的注册工具白名单为 `read_file`、`grep`、`glob`、`write_file`、`edit_file`、`write_skill`、`delete_skill`、`modification_check`、可选 `ask_user`、`explore` 和 `finish_meta`。Runner 在第一轮模型请求之前验证注册工具集合；多余能力会使会话直接失败。",
         "",
         "Meta 用户消息由 `build_meta_learning_prompt` 组织：",
         "",
@@ -214,7 +226,13 @@ def render() -> str:
         "",
         "研究者方向都是待检验假设，不覆盖离线、PIT、隐藏阶段与过拟合约束。",
         "",
-        "## 5. Explore Agent 系统提示词",
+        "## 5. Explore 工具与子代理系统提示词",
+        "",
+        "### 5.0 `explore` 工具描述",
+        "",
+        "父会话看到的 `explore` function 描述（参数 `role`、`task`、可选 `description`、`max_turns`、`thinking`、`inherit_context` 由 schema 给出）：",
+        "",
+        _block(EXPLORE_TOOL_DESCRIPTION),
         "",
         "### 5.1 Fold developer",
         "",
@@ -228,7 +246,7 @@ def render() -> str:
         "",
         _block(explore_system_prompt("fold", "auditor")),
         "",
-        "父会话可按任务自由选择或省略委托。只有 `developer` 与 `general-purpose` 可写策略和 skills；`auditor` 与 `Explore` 只有只读定位及 `todo`，无 shell。所有角色禁止嵌套。",
+        "父会话可按任务自由选择或省略委托。只有 `developer` 与 `general-purpose` 可写策略和 skills；`auditor` 与 `Explore` 只有只读定位，无 shell。所有角色禁止嵌套。",
         "",
         "### 5.3 Fold general-purpose / Explore",
         "",
@@ -240,13 +258,13 @@ def render() -> str:
         "",
         _block(explore_system_prompt("fold", "Explore")),
         "",
-        "### 5.4 Meta Explore",
+        "### 5.4 Meta 子角色",
         "",
         "`explore_system_prompt('meta', 'auditor')`：",
         "",
         _block(explore_system_prompt("meta", "auditor")),
         "",
-        "Meta 四个角色全部只读，只能提出候选，工具面仅 `read_file`/`grep`/`glob`/`todo`。",
+        "Meta 的 `developer`、`general-purpose` 与 `Explore` 只把首行 `本任务角色` 换成对应角色与使命，正文相同。四个角色全部只读，只能提出候选，工具面仅 `read_file`/`grep`/`glob`。",
         "",
         "## 6. Context Compaction 系统提示词",
         "",
@@ -270,7 +288,7 @@ def render() -> str:
         "",
         "## 8. 动态上下文结构",
         "",
-        "Fold 的稳定系统提示词之后追加：",
+        "Fold 的稳定系统提示词（及可选 Step 产物树区块）之后追加：",
         "",
         _block(
             f"{FOLD_DYNAMIC_CONTEXT_HEADER.strip()}\n\n"
@@ -278,8 +296,6 @@ def render() -> str:
             "{experiment_facts JSON，含 inputs/skills_index.json 引用}\n\n"
             "## 日级策略调度\n"
             '{"period": "day|month|quarter|year", "inference_time": "HH:MM"}\n\n'
-            "## Step 产物树\n"
-            "[启用时注入]\n\n"
             f"{build_prior_section('{PRIOR.md 全文}', role='fold')}\n\n"
             "## 实验级默认 Fold 探索方向（用户注入）\n"
             "[存在时注入]\n\n"

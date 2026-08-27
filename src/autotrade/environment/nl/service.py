@@ -24,6 +24,14 @@ from .retrieval import TextRetriever, validate_pattern
 
 NLMode = Literal["search", "answer"]
 
+# Per-backtest NL call ceiling. NL is the only real LLM inference inside a
+# backtest's wall clock, so an unbounded total budget lets one strategy turn an
+# official backtest into an LLM latency test. Two calls per decision day over a
+# quarterly (~61 trading day) validation window keeps the 10-call per-decision
+# peak usable on the days that need it while bounding worst-case NL wall to
+# roughly 120 x nl_deadline_seconds.
+DEFAULT_MAX_TOTAL_CALLS = 120
+
 
 @dataclass(frozen=True)
 class _EventFilter:
@@ -41,7 +49,9 @@ class NLConfig:
     deadline_seconds: float = 20.0
     max_tokens: int = 1200
     max_calls_per_decision: int = 10
-    max_total_calls: int | None = None
+    # None keeps the per-decision cap as the only bound; the shipped default is
+    # a real ceiling (see DEFAULT_MAX_TOTAL_CALLS).
+    max_total_calls: int | None = DEFAULT_MAX_TOTAL_CALLS
 
     def __post_init__(self) -> None:
         values = (
@@ -137,7 +147,38 @@ class NLService:
         self.calls = 0
         self.event_filter_calls = 0
         self.no_evidence_skips = 0
+        # Cost accounting surfaced in the backtest summary: NL is the only real
+        # LLM inference inside a backtest, so its calls and wall clock are the
+        # first thing a slow backtest has to be explained by.
+        self.executed_calls = 0
+        self.search_calls = 0
+        self.llm_calls = 0
+        self.budget_rejected_calls = 0
+        self.wall_seconds = 0.0
         self._calls_by_decision: dict[str, int] = {}
+
+    def counters(self) -> dict[str, object]:
+        """NL cost accounting for one backtest, merged into its summary.
+
+        Every accepted call lands in exactly one outcome bucket, so
+        ``nl_calls == nl_executed_calls + nl_evidence_gated_calls +
+        nl_search_calls`` for calls that returned. Rejected requests never reach
+        a bucket: an invalid request is refused before the budget is charged, and
+        an exhausted budget is counted only in ``nl_budget_rejected_calls``.
+        ``nl_event_filter_calls`` cuts across the buckets — it counts the calls
+        that declared an evidence predicate, gated or not.
+        """
+        return {
+            "nl_calls": self.calls,
+            "nl_executed_calls": self.executed_calls,
+            "nl_search_calls": self.search_calls,
+            "nl_llm_calls": self.llm_calls,
+            "nl_event_filter_calls": self.event_filter_calls,
+            "nl_evidence_gated_calls": self.no_evidence_skips,
+            "nl_budget_rejected_calls": self.budget_rejected_calls,
+            "nl_wall_seconds": round(self.wall_seconds, 3),
+            "nl_max_total_calls": self.config.max_total_calls,
+        }
 
     @classmethod
     def from_snapshot(
@@ -174,8 +215,22 @@ class NLService:
         *,
         inference_at: datetime,
     ) -> dict[str, object]:
-        self._consume_call_budget(inference_at)
+        started = time.perf_counter()
+        try:
+            return self._query(request, inference_at=inference_at)
+        finally:
+            self.wall_seconds += time.perf_counter() - started
+
+    def _query(
+        self,
+        request: Mapping[str, object],
+        *,
+        inference_at: datetime,
+    ) -> dict[str, object]:
+        # Validate first: an unusable request must not consume a call budget or
+        # leave an accepted-call residue that no outcome bucket explains.
         query, mode, limit, ts_code, choices, event_filter = self._validate_request(request)
+        self._consume_call_budget(inference_at)
         context: dict[str, object] = {}
         terms: list[str] = []
         if ts_code and self.company_context_store is not None:
@@ -226,6 +281,8 @@ class NLService:
         )
         evidence = self._snapshot_evidence(rows)
         if mode == "search" or self.engine is None:
+            # Retrieval-only outcome: no model was called, with or without a hit.
+            self.search_calls += 1
             if not evidence:
                 return NLResult("no_evidence", query, mode, ()).to_record()
             return NLResult("ok", query, mode, evidence).to_record()
@@ -244,15 +301,25 @@ class NLService:
         )
 
     def _consume_call_budget(self, inference_at: datetime) -> None:
+        """Fail closed on an exhausted budget; never downgrade to a silent skip.
+
+        The refusal is counted so a strategy that swallows the error still
+        leaves the exhausted budget visible in the backtest summary.
+        """
         key = inference_at.isoformat()
         used = self._calls_by_decision.get(key, 0)
         if used >= self.config.max_calls_per_decision:
+            self.budget_rejected_calls += 1
             raise RuntimeError(
                 f"NL call budget exhausted for decision {key} "
-                f"(max {self.config.max_calls_per_decision})"
+                f"(nl_max_calls_per_decision={self.config.max_calls_per_decision})"
             )
         if self.config.max_total_calls is not None and self.calls >= self.config.max_total_calls:
-            raise RuntimeError(f"NL total call budget exhausted (max {self.config.max_total_calls})")
+            self.budget_rejected_calls += 1
+            raise RuntimeError(
+                "NL call budget exhausted for this backtest "
+                f"(nl_max_total_calls={self.config.max_total_calls})"
+            )
         self._calls_by_decision[key] = used + 1
         self.calls += 1
 
@@ -358,6 +425,11 @@ class NLService:
             company_context=context or None,
             candidate_terms=terms or None,
         )
+        # Counted together off the returned task: the sub-agent converts its own
+        # failures into an audited result, so a task that never returns leaves
+        # neither counter half-incremented.
+        self.executed_calls += 1
+        self.llm_calls += len(task.llm_calls)
         record = task.to_record()
         if not task.ok:
             if self.failure_policy == "fail":
@@ -429,4 +501,10 @@ def _response_choices(value: object) -> tuple[str, ...]:
     return tuple(str(item).strip() for item in choices)
 
 
-__all__ = ["NLConfig", "NLMode", "NLResult", "NLService"]
+__all__ = [
+    "DEFAULT_MAX_TOTAL_CALLS",
+    "NLConfig",
+    "NLMode",
+    "NLResult",
+    "NLService",
+]

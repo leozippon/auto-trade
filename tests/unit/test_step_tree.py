@@ -12,7 +12,7 @@ from autotrade.environment.step_tree import StepTree
 
 from .test_artifacts import write_artifact
 
-NODE = dict(epoch_id="epoch_001", run_id="run_x", complete_validation=True)
+NODE = dict(epoch_id="epoch_001", run_id="run_x")
 
 
 class StepTreeTest(unittest.TestCase):
@@ -71,7 +71,6 @@ class StepTreeTest(unittest.TestCase):
                 result_name="valid_000",
                 revision_id=new_revision_id("revision"),
                 metrics={},
-                complete_validation=True,
             )
             node1 = tree.record_step(artifact, run_id="run_x", **kwargs)
             node2 = tree.record_step(artifact, run_id="run_y", **kwargs)
@@ -91,7 +90,6 @@ class StepTreeTest(unittest.TestCase):
                 result_name="valid_000",
                 revision_id=new_revision_id("revision"),
                 metrics={},
-                complete_validation=True,
             )
             node1 = tree.record_step(artifact, epoch_id="epoch_001", **kwargs)
             node2 = tree.record_step(artifact, epoch_id="epoch_002", **kwargs)
@@ -533,12 +531,15 @@ class PromptCompositionTest(unittest.TestCase):
         self.assertNotEqual(first_context, second_context)
         # And the fixed half really is the contract, in order.
         order = [
-            first.index("# 角色与目标"),
+            first.index("# 身份与任务"),
+            first.index("# 工具"),
+            first.index("# 工作方式"),
+            first.index("# 角色与写权"),
             first.index("# 核心执行合同"),
-            first.index("# 环境与配置"),
-            first.index("# 动作与流程"),
+            first.index("# 环境与边界"),
             first.index("# 提交合同"),
             first.index("# 禁止事项"),
+            first.index("# 原则"),
             first.index(marker),
         ]
         self.assertEqual(order, sorted(order))

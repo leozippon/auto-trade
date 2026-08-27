@@ -20,6 +20,7 @@ from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.data.snapshot import SnapshotConfig
 from autotrade.environment.llm import MODEL_CHOICES, build_model_gateway
 from autotrade.environment.nl import NLConfig
+from autotrade.environment.nl.service import DEFAULT_MAX_TOTAL_CALLS
 from autotrade.environment.sandbox import DEFAULT_IMAGE, SandboxConfig, SandboxLimits
 from autotrade.environment.strategy import StrategySchedule
 from autotrade.paper import DailyPaperEngine
@@ -84,7 +85,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--nl-env-file", type=Path, default=Path(".env"))
     parser.add_argument("--nl-max-results", type=int, default=8)
     parser.add_argument("--nl-max-calls-per-decision", type=int, default=10)
-    parser.add_argument("--nl-max-total-calls", type=int)
+    parser.add_argument(
+        "--nl-max-total-calls", type=int, default=DEFAULT_MAX_TOTAL_CALLS
+    )
     return parser
 
 

@@ -19,7 +19,6 @@ from .runner import (
     AgentSessionConfig,
     AgentSessionResult,
     AgentSessionRunner,
-    FinishMetaTool,
     MetaLearningAgent,
 )
 
@@ -34,7 +33,6 @@ __all__ = [
     "ContextCompactor",
     "ExploreSubAgentConfig",
     "ExploreSubAgentEngine",
-    "FinishMetaTool",
     "MetaLearningAgent",
     "StrategyLoadError",
     "build_meta_learning_prompt",

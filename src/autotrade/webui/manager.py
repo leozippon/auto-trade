@@ -1469,7 +1469,7 @@ class ExperimentManager:
 def _reject_calendar_text(text: str) -> None:
     if not text.strip():
         return
-    from autotrade.agent.runner import calendar_policy_violation
+    from autotrade.environment.tools.prior_policy import calendar_policy_violation
 
     reason = calendar_policy_violation(text)
     if reason:

@@ -51,7 +51,6 @@ class StepTree:
         result_name: str,
         revision_id: str,
         metrics: dict[str, object],
-        complete_validation: bool,
         models_root: str | Path | None = None,
         attachments: dict[str, str | Path] | None = None,
     ) -> str:
@@ -92,7 +91,9 @@ class StepTree:
                 "run_id": run_id,
                 "result_name": result_name,
                 "revision_id": revision_id,
-                "complete_validation": complete_validation,
+                # A recorded Step is by construction one completed full-window
+                # Validation; record_failed_attempt writes the False rows.
+                "complete_validation": True,
                 "metrics": metrics,
                 "attachments": copied_attachments,
                 "created_at": utc_now_iso(),

@@ -45,7 +45,6 @@ _BODY_KEYS = frozenset(
         "new_text",
         "old_text",
         "source",
-        "subject",
         "task",
         "text",
     }
@@ -403,8 +402,6 @@ def build_agent_process_summary(
     explore_attempts = 0
     explore_completed = 0
     explore_failed = 0
-    todo_calls = 0
-    todo_completed = 0
     daily_backtest = 0
     tool_failures = 0
     failure_counts: dict[tuple[str, str], int] = {}
@@ -447,11 +444,6 @@ def build_agent_process_summary(
             tool = str(event.get("tool") or "")
             if tool == "explore":
                 tool_explore += 1
-            if tool == "todo":
-                todo_calls += 1
-                args = event.get("args")
-                if isinstance(args, Mapping) and args.get("status") == "completed":
-                    todo_completed += 1
             elif tool == "daily_backtest":
                 daily_backtest += 1
             if event.get("ok") == False:
@@ -483,7 +475,6 @@ def build_agent_process_summary(
             "completed": explore_completed,
             "failed": explore_failed,
         },
-        "todo": {"calls": todo_calls, "completed": todo_completed},
         "tool_failures": tool_failures,
         "daily_backtest": daily_backtest,
         "repeated_failures": repeated,

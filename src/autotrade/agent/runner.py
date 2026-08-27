@@ -19,7 +19,6 @@ conversation calls and semantic compactions are logged in agent_trace.jsonl
 from __future__ import annotations
 
 import json
-import re
 import threading
 import time
 import uuid
@@ -44,14 +43,12 @@ from autotrade.environment.time_budget import (
     TimeBudgetBinding,
     validate_time_budget_bindings,
 )
-from autotrade.environment.tools import (
-    SafeWorkspace,
+from autotrade.environment.tools.base import (
+    SessionInterrupt,
     ToolError,
     ToolRegistry,
-    ToolResult,
-    ToolSpec,
+    is_sequential_tool,
 )
-from autotrade.environment.tools.base import SessionInterrupt
 
 from .compact import (
     ContextCompactor,
@@ -59,10 +56,8 @@ from .compact import (
     safe_error_summary,
 )
 from .explore import (
-    DEFAULT_EXPLORE_MAX_CONCURRENT,
-    EXPLORE_ROLES,
-    EXPLORE_THINKING_LEVELS,
     ExploreSubAgentEngine,
+    ExploreTool,
     _copy_chat_message,
     normalize_explore_thinking,
 )
@@ -74,14 +69,12 @@ from .prompts import (
 
 _LLM_FAILURE_CIRCUIT = 3
 EXPLORE_TEARDOWN_WAIT_SECONDS = 30.0
-EXPLORE_TEARDOWN_WAIT_REMAINDER_SECONDS = 0.1
 
 
 def _explore_teardown_timeout(requested: float | None = None) -> float:
-    cap = max(0.0, EXPLORE_TEARDOWN_WAIT_SECONDS - EXPLORE_TEARDOWN_WAIT_REMAINDER_SECONDS)
     if requested is None:
-        return cap
-    return min(max(0.0, requested), cap)
+        return EXPLORE_TEARDOWN_WAIT_SECONDS
+    return min(max(0.0, requested), EXPLORE_TEARDOWN_WAIT_SECONDS)
 
 # Default wrap-up grace shared with RollingExperimentConfig.deadline_grace_minutes:
 # the pipeline hands the session a budget of main deadline + grace and the runner
@@ -113,13 +106,16 @@ class AgentSessionDeadlineExceeded(SessionInterrupt):
 
 _TERMINAL_TOOLS = frozenset({"finish_fold", "finish_meta"})
 _FOLD_FINALIZATION_TOOLS = frozenset({"finish_fold", "step_rollback"})
-_PARALLEL_READ_TOOLS = frozenset(
-    {"glob", "grep", "modification_check", "read_file", "validate_strategy"}
-)
+# A completed Validation can switch the session into hard finalization, and
+# the documented contract is that the remaining research calls of that same
+# turn are then refused. That only holds when the batch runs in order, so the
+# backtest gate is sequential by name regardless of how its spec is declared.
+_PHASE_GATE_TOOLS = frozenset({"daily_backtest"})
 _FOLD_TOOLS = frozenset(
     {
         "ask_user",
         "daily_backtest",
+        "explore",
         "finish_fold",
         "glob",
         "grep",
@@ -127,8 +123,6 @@ _FOLD_TOOLS = frozenset(
         "read_file",
         "shell",
         "step_rollback",
-        "todo",
-        "validate_strategy",
         "write_file",
         "edit_file",
         "write_skill",
@@ -139,12 +133,12 @@ _META_TOOLS = frozenset(
     {
         "ask_user",
         "edit_file",
+        "explore",
         "finish_meta",
         "glob",
         "grep",
         "modification_check",
         "read_file",
-        "todo",
         "write_file",
         "write_skill",
         "delete_skill",
@@ -214,7 +208,10 @@ class _ExploreJob:
     role: str
     attempt: int
     future: Future
+    # Collected result (usage accounted, ``explore_attempt`` emitted).
     record: dict[str, object] | None = None
+    # Whether the ``explore_completed`` observation reached the conversation.
+    delivered: bool = False
 
 
 @dataclass(frozen=True)
@@ -261,8 +258,14 @@ class AgentSessionRunner:
             elif explore_mode != "fold":
                 raise ValueError("Fold session explore sub-agent must use mode='fold'")
         self._event_lock = threading.Lock()
-        if self.explore is not None and self.explore.event_sink is None:
-            self.explore.event_sink = self._locked_event_sink
+        self._explore_lock = threading.Lock()
+        # The tool call id of the invocation running on the current thread;
+        # the explore launch reads it to attribute the child to its call.
+        self._call_context = threading.local()
+        if self.explore is not None:
+            if self.explore.event_sink is None:
+                self.explore.event_sink = self._locked_event_sink
+            self.tools.register(ExploreTool(self._launch_explore))
         bindings: list[TimeBudgetBinding] = []
         if isinstance(llm, SessionTimeBudgetAware):
             bindings.append(TimeBudgetBinding("main_llm", llm.session_time_budget))
@@ -287,6 +290,12 @@ class AgentSessionRunner:
         self._explored_roles: set[str] = set()
         self._explore_jobs: list[_ExploreJob] = []
         self._explore_pool: ThreadPoolExecutor | None = None
+        self._explore_totals: dict[str, int] | None = None
+        self._usage = _new_token_totals()
+        # Snapshot of the conversation at the last tool dispatch; a child with
+        # inherit_context forks from it.
+        self._live_messages: list[ChatMessage] = []
+        # Set only when the session closes; children poll it to stop early.
         self._cancelled = threading.Event()
         if self.explore is not None:
             self.explore.attach_cancel_event(self._cancelled)
@@ -302,8 +311,8 @@ class AgentSessionRunner:
             ChatMessage("system", self.system_prompt),
             ChatMessage("user", instruction.strip()),
         ]
-        usage = _new_token_totals()
-        explore_totals: dict[str, int] | None = None
+        self._usage = _new_token_totals()
+        self._explore_totals = None
         llm_calls = 0
         accepted_steps = 0
         step_wrap_up_sent = False
@@ -316,6 +325,7 @@ class AgentSessionRunner:
         self._explore_attempts = 0
         self._explored_roles = set()
         self._explore_jobs = []
+        self._live_messages = []
         self._cancelled.clear()
         self._emit(
             "session_start",
@@ -327,18 +337,16 @@ class AgentSessionRunner:
         )
 
         while llm_calls < self.config.max_llm_calls:
-            if self._cancelled.is_set():
-                break
             remaining = time_budget.remaining()
             if remaining <= 0:
                 self._close_session(
-                    {"status": "deadline_exceeded", "llm_calls": llm_calls},
-                    explore_totals=explore_totals,
+                    {"status": "deadline_exceeded", "llm_calls": llm_calls}
                 )
                 raise AgentSessionDeadlineExceeded(
                     conversation_id=self.conversation_id, llm_calls=llm_calls
                 )
             self._activate_hard_finalization_if_ready(remaining)
+            provider_tools = self._provider_tools()
             if self._hard_finalization:
                 if not self._hard_finalization_context_initialized:
                     messages = self._hard_finalization_messages(remaining)
@@ -357,11 +365,10 @@ class AgentSessionRunner:
                             "grace_seconds": self.config.deadline_grace_seconds,
                         },
                     )
-                messages, _ = self._compact_if_needed(messages, remaining)
-            provider_tools = self._provider_tools()
-            messages, explore_totals = self._append_explore_observations(
-                messages, explore_totals
-            )
+                messages, _ = self._compact_if_needed(
+                    messages, remaining, provider_tools
+                )
+            messages = self._append_explore_observations(messages)
             messages = self._apply_inbox(
                 messages, safe_point=INBOX_SAFE_BEFORE_LLM
             )
@@ -417,16 +424,14 @@ class AgentSessionRunner:
                             llm_failure_streak = 0
                             continue
                     self._close_session(
-                        {"status": "context_window_exceeded", "llm_calls": llm_calls},
-                        explore_totals=explore_totals,
+                        {"status": "context_window_exceeded", "llm_calls": llm_calls}
                     )
                     raise RuntimeError(
                         "Agent context window cannot be reduced safely"
                     ) from exc
                 if isinstance(exc, TimeoutError) or time_budget.remaining() <= 0:
                     self._close_session(
-                        {"status": "deadline_exceeded", "llm_calls": llm_calls},
-                        explore_totals=explore_totals,
+                        {"status": "deadline_exceeded", "llm_calls": llm_calls}
                     )
                     raise AgentSessionDeadlineExceeded(
                         conversation_id=self.conversation_id, llm_calls=llm_calls
@@ -436,16 +441,14 @@ class AgentSessionRunner:
                         {
                             "status": "call_budget_exhausted",
                             "llm_calls": llm_calls,
-                        },
-                        explore_totals=explore_totals,
+                        }
                     )
                     raise RuntimeError(
                         "Agent exceeded the session call budget"
                     ) from exc
                 if llm_failure_streak >= _LLM_FAILURE_CIRCUIT:
                     self._close_session(
-                        {"status": "llm_unavailable", "llm_calls": llm_calls},
-                        explore_totals=explore_totals,
+                        {"status": "llm_unavailable", "llm_calls": llm_calls}
                     )
                     raise RuntimeError(
                         "Agent language model unavailable after consecutive failures"
@@ -463,7 +466,7 @@ class AgentSessionRunner:
                 )
                 continue
 
-            _accumulate_usage(usage, response.usage)
+            _accumulate_usage(self._usage, response.usage)
             messages.append(
                 ChatMessage(
                     "assistant",
@@ -499,20 +502,14 @@ class AgentSessionRunner:
                 )
                 continue
 
-            if self._cancelled.is_set():
-                results = [
-                    (call, {"ok": False, "error": "session cancelled"})
-                    for call in response.tool_calls
-                ]
-                apply_point = INBOX_SAFE_AFTER_LLM_BEFORE_TOOLS
-            elif self._inbox_interrupt_pending():
+            if self._inbox_interrupt_pending():
                 results = self._skip_tool_calls(
                     response.tool_calls,
                     safe_point=INBOX_SAFE_AFTER_LLM_BEFORE_TOOLS,
                 )
                 apply_point = INBOX_SAFE_AFTER_LLM_BEFORE_TOOLS
             else:
-                parallel = self._is_parallel_readonly_batch(response.tool_calls)
+                parallel = self._is_parallel_batch(response.tool_calls)
                 self._live_messages = messages
                 results, skipped_at = self._dispatch_tool_calls(
                     response.tool_calls, time_budget
@@ -549,24 +546,12 @@ class AgentSessionRunner:
                         "result": sanitize_for_log(record),
                     },
                 )
-                explore_value = record.get("value")
-                if call.name == "explore" and isinstance(explore_value, dict):
-                    if explore_totals is None:
-                        explore_totals = {
-                            "llm_calls": 0,
-                            "prompt_tokens": 0,
-                            "completion_tokens": 0,
-                            "total_tokens": 0,
-                        }
-                    _accumulate_explore_usage(explore_totals, explore_value)
             accepted_steps = len(self._complete_validation_nodes)
 
             if self.tools.finished:
-                _, explore_totals = self._append_explore_observations(
-                    messages, explore_totals, wait=True
-                )
+                self._append_explore_observations(messages, wait=True)
                 finish = dict(self.tools.finish_value or {})
-                token_usage = _token_usage_summary(usage, explore_totals)
+                token_usage = _token_usage_summary(self._usage, self._explore_totals)
                 self._close_session(
                     {
                         "status": "finished",
@@ -574,8 +559,7 @@ class AgentSessionRunner:
                         "steps_used": accepted_steps,
                         "finish": finish,
                         "token_usage": token_usage,
-                    },
-                    explore_totals=explore_totals,
+                    }
                 )
                 return AgentSessionResult(
                     conversation_id=self.conversation_id,
@@ -604,8 +588,7 @@ class AgentSessionRunner:
                 "status": "call_budget_exhausted",
                 "llm_calls": self.config.max_llm_calls,
                 "steps_used": accepted_steps,
-            },
-            explore_totals=explore_totals,
+            }
         )
         raise RuntimeError("Agent exceeded the session call budget")
 
@@ -630,82 +613,12 @@ class AgentSessionRunner:
                 node_schema["enum"] = candidate_ids
                 parameters["required"] = ["node_id"]
             return tuple(records)
-        tools = list(self.tools.provider_tools())
-        if self.explore is not None:
-            roles = list(EXPLORE_ROLES)
-            description = (
-                "委托一层子代理。任务非简单时应用来压缩主上下文。"
-                "写策略可选 developer 或 general-purpose；auditor 与 Explore 只读。"
-                "子代理不能嵌套、正式回测、结束或自行验收。"
-            )
-            tools.append(
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "explore",
-                        "description": description,
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "role": {
-                                    "type": "string",
-                                    "enum": roles,
-                                },
-                                "task": {
-                                    "type": "string",
-                                    "minLength": 1,
-                                },
-                                "max_turns": {
-                                    "type": "integer",
-                                    "minimum": 1,
-                                    "description": (
-                                        "Maximum child LLM turns. Omit for unlimited until "
-                                        "the parent session deadline."
-                                    ),
-                                },
-                                "max_rounds": {
-                                    "type": "integer",
-                                    "minimum": 1,
-                                    "description": "Alias of max_turns.",
-                                },
-                                "thinking": {
-                                    "type": "string",
-                                    "enum": list(EXPLORE_THINKING_LEVELS),
-                                    "description": (
-                                        "Optional child thinking level. Omit for medium; "
-                                        "does not inherit the parent session. off disables "
-                                        "extended thinking."
-                                    ),
-                                },
-                                "inherit_context": {
-                                    "type": "boolean",
-                                    "description": (
-                                        "If true, fork the parent conversation into the child "
-                                        "(Pi inherit_context). Default false: fresh context."
-                                    ),
-                                },
-                                "description": {
-                                    "type": "string",
-                                    "minLength": 1,
-                                    "maxLength": 80,
-                                    "description": "Optional short label shown on the Trace subagent chip.",
-                                },
-                            },
-                            "required": ["role", "task"],
-                            "additionalProperties": False,
-                        },
-                    },
-                }
-            )
-        return tuple(tools)
+        return self.tools.provider_tools()
 
     def _active_tool_names(self) -> frozenset[str]:
         if self._hard_finalization:
             return self._finalization_tool_names()
-        names = {spec.name for spec in self.tools.specs()}
-        if self.explore is not None:
-            names.add("explore")
-        return frozenset(names)
+        return frozenset(spec.name for spec in self.tools.specs())
 
     def _finalization_tool_names(self) -> frozenset[str]:
         registered = {spec.name for spec in self.tools.specs()}
@@ -826,6 +739,13 @@ class AgentSessionRunner:
     def _dispatch_tool_calls(
         self, calls: tuple[ToolCall, ...], time_budget: InferenceTimeBudget
     ) -> tuple[list[tuple[ToolCall, dict[str, object]]], str | None]:
+        """Run one assistant turn's tool calls.
+
+        A batch of parallel-safe calls (reads, checks, explore launches) runs
+        concurrently; a batch containing any sequential tool runs in order,
+        stops after a terminal tool, and honours inbox interrupts between calls.
+        """
+
         def run_one(index: int) -> tuple[ToolCall, dict[str, object]]:
             call = calls[index]
             self._emit(
@@ -835,38 +755,50 @@ class AgentSessionRunner:
             phase_error = self._finalization_call_error(call)
             if phase_error:
                 return call, {"ok": False, "error": phase_error}
-            if self._cancelled.is_set():
-                return call, {"ok": False, "error": "session cancelled"}
             if time_budget.remaining() <= 0:
                 return call, {
                     "ok": False,
                     "error": "Agent session deadline reached before tool dispatch",
                 }
-            if call.name == "explore":
-                return call, self._dispatch_explore(call)
-            if call.name in _TERMINAL_TOOLS:
+            if call.name in _TERMINAL_TOOLS or call.name in _PHASE_GATE_TOOLS:
+                # Barrier: a formal backtest or finish must not overlap a
+                # developer child that may still be writing the workspace.
                 self._wait_explore_jobs()
+            self._call_context.call_id = call.id
             record = self.tools.invoke(
                 call.name,
                 call.arguments,
                 allowed_names=self._active_tool_names(),
             ).to_record()
-            if call.name == "daily_backtest" and _is_complete_validation(record):
+            if call.name == "daily_backtest" and record.get("ok") is True:
+                # A successful backtest result is a complete Validation node.
                 self._record_complete_validation(record)
                 self._activate_hard_finalization_if_ready(time_budget.remaining())
             return call, record
 
-        if self._is_parallel_readonly_batch(calls):
+        if self._is_parallel_batch(calls):
             slots: list[tuple[ToolCall, dict[str, object]] | None] = [None] * len(
                 calls
             )
-            with ThreadPoolExecutor(max_workers=min(len(calls), 4)) as executor:
+            interrupt: SessionInterrupt | None = None
+            with ThreadPoolExecutor(max_workers=min(len(calls), 8)) as executor:
                 futures = {
                     executor.submit(run_one, index): index
                     for index in range(len(calls))
                 }
                 for future in as_completed(futures):
-                    slots[futures[future]] = future.result()
+                    index = futures[future]
+                    try:
+                        slots[index] = future.result()
+                    except SessionInterrupt as exc:
+                        interrupt = exc
+                    except Exception as exc:  # noqa: BLE001 - one call must not drop its siblings
+                        slots[index] = (
+                            calls[index],
+                            {"ok": False, "error": safe_error_summary(exc)},
+                        )
+            if interrupt is not None:
+                raise interrupt
             return [item for item in slots if item is not None], None
 
         results: list[tuple[ToolCall, dict[str, object]]] = []
@@ -896,11 +828,10 @@ class AgentSessionRunner:
                 terminal_seen = True
         return results, None
 
-    def _is_parallel_readonly_batch(self, calls: tuple[ToolCall, ...]) -> bool:
-        return len(calls) > 1 and all(
-            call.name in _PARALLEL_READ_TOOLS
-            and (self.tools.spec(call.name) is not None)
-            and not bool(self.tools.spec(call.name).mutating)  # type: ignore[union-attr]
+    def _is_parallel_batch(self, calls: tuple[ToolCall, ...]) -> bool:
+        return len(calls) > 1 and not any(
+            call.name in _PHASE_GATE_TOOLS
+            or is_sequential_tool(self.tools.spec(call.name))
             for call in calls
         )
 
@@ -960,183 +891,114 @@ class AgentSessionRunner:
             self.inbox.consume(message_id)
         return messages
 
-    def _dispatch_explore(self, call: ToolCall) -> dict[str, object]:
-        if self._cancelled.is_set():
-            record: dict[str, object] = {
-                "ok": False,
-                "error": "Explore cancelled",
-            }
-            self._emit("explore_attempt", {"ok": False, "error": record["error"]})
-            return record
+    def _launch_explore(self, arguments: Mapping[str, object]) -> dict[str, object]:
+        """Start one background child from registry-validated ``explore`` arguments.
+
+        Never blocks the parent turn: the child runs in the explore pool, whose
+        worker count is the concurrency cap, so launches beyond the cap queue
+        until a slot frees. Completion is delivered later as an
+        ``explore_completed`` observation.
+        """
+
         if self.explore is None:
-            record = {
-                "ok": False,
-                "error": "Explore is not configured",
-            }
-            self._emit(
-                "explore_attempt",
-                {"ok": False, "error": record["error"]},
-            )
-            return record
-        allowed = EXPLORE_ROLES
-        raw_role = call.arguments.get("role")
-        if not isinstance(raw_role, str) or raw_role not in allowed:
-            record = {
-                "ok": False,
-                "error": "explore.role must be one of: " + ", ".join(allowed),
-            }
-            self._emit(
-                "explore_attempt",
-                {"ok": False, "error": record["error"]},
-            )
-            return record
-        task = call.arguments.get("task")
-        raw_rounds = call.arguments.get("max_turns", call.arguments.get("max_rounds"))
-        if not isinstance(task, str) or not task.strip():
-            record = {
-                "ok": False,
-                "error": "explore.task must be a non-empty string",
-            }
-            self._emit(
-                "explore_attempt",
-                {"ok": False, "error": record["error"]},
-            )
-            return record
-        max_rounds: int | None = None
-        if raw_rounds is not None:
-            if not isinstance(raw_rounds, int) or isinstance(raw_rounds, bool):
-                record = {
-                    "ok": False,
-                    "error": "explore.max_turns must be an integer",
-                }
-                self._emit(
-                    "explore_attempt",
-                    {"ok": False, "error": record["error"]},
-                )
-                return record
-            max_rounds = raw_rounds
+            raise ToolError("Explore is not configured")
+        role = str(arguments["role"])
+        task = str(arguments["task"])
+        if not task.strip():
+            raise ToolError("explore.task must be a non-empty string")
         try:
-            thinking = normalize_explore_thinking(call.arguments.get("thinking"))
+            thinking = normalize_explore_thinking(arguments.get("thinking"))
         except ValueError as exc:
-            record = {"ok": False, "error": str(exc)}
-            self._emit("explore_attempt", {"ok": False, "error": record["error"]})
-            return record
-        inherit_raw = call.arguments.get("inherit_context", False)
-        if inherit_raw not in {True, False}:
-            record = {
-                "ok": False,
-                "error": "explore.inherit_context must be a boolean",
-            }
-            self._emit("explore_attempt", {"ok": False, "error": record["error"]})
-            return record
-        description = call.arguments.get("description", "")
-        if description in {None, ""}:
-            description = ""
-        elif not isinstance(description, str) or len(description) > 80:
-            record = {
-                "ok": False,
-                "error": "explore.description must be a string of at most 80 characters",
-            }
-            self._emit("explore_attempt", {"ok": False, "error": record["error"]})
-            return record
-        live = [job for job in self._explore_jobs if job.record is None]
-        cap = (
-            self.explore.config.max_concurrent
-            if self.explore is not None
-            else DEFAULT_EXPLORE_MAX_CONCURRENT
+            raise ToolError(str(exc)) from exc
+        inherit = bool(arguments.get("inherit_context", False))
+        max_rounds = arguments.get("max_turns")
+        description = str(arguments.get("description") or "").strip()
+        call_id = getattr(self._call_context, "call_id", None)
+        cap = self.explore.config.max_concurrent
+        parent_messages = (
+            tuple(_copy_chat_message(message) for message in self._live_messages)
+            if inherit and self._live_messages
+            else None
         )
-        if len(live) >= cap:
-            record = {
-                "ok": False,
-                "error": f"explore concurrency limit ({cap})",
-            }
-            self._emit("explore_attempt", {"ok": False, "error": record["error"]})
-            return record
-        with self._event_lock:
+        with self._explore_lock:
+            pending = [
+                job
+                for job in self._explore_jobs
+                if job.record is None and not job.future.done()
+            ]
+            queued = len(pending) >= cap
             self._explore_attempts += 1
-            self._explored_roles.add(raw_role)
+            self._explored_roles.add(role)
             attempt = self._explore_attempts
-        task_id = f"explore_{uuid.uuid4().hex[:12]}"
-        parent_messages = None
-        if inherit_raw:
-            live_messages = getattr(self, "_live_messages", None)
-            if live_messages:
-                parent_messages = tuple(
-                    _copy_chat_message(message) for message in live_messages
+            task_id = f"explore_{uuid.uuid4().hex[:12]}"
+            if self._explore_pool is None:
+                self._explore_pool = ThreadPoolExecutor(
+                    max_workers=max(1, cap),
+                    thread_name_prefix="explore",
                 )
-        if self._explore_pool is None:
-            self._explore_pool = ThreadPoolExecutor(
-                max_workers=max(1, cap),
-                thread_name_prefix="explore",
-            )
-        future = self._explore_pool.submit(
-            self.explore.run,
-            task,
-            role=raw_role,
-            max_rounds=max_rounds,
-            parent_call_id=call.id,
-            thinking=thinking,
-            inherit_context=bool(inherit_raw),
-            parent_messages=parent_messages,
-            description=description.strip(),
-            task_id=task_id,
-        )
-        self._explore_jobs.append(
-            _ExploreJob(
+            future = self._explore_pool.submit(
+                self.explore.run,
+                task,
+                role=role,
+                max_rounds=max_rounds if isinstance(max_rounds, int) else None,
+                parent_call_id=call_id,
+                thinking=thinking,
+                inherit_context=inherit,
+                parent_messages=parent_messages,
+                description=description,
                 task_id=task_id,
-                call_id=call.id,
-                role=raw_role,
-                attempt=attempt,
-                future=future,
             )
-        )
-        return {
-            "ok": True,
+            self._explore_jobs.append(
+                _ExploreJob(
+                    task_id=task_id,
+                    call_id=str(call_id or ""),
+                    role=role,
+                    attempt=attempt,
+                    future=future,
+                )
+            )
+        record: dict[str, object] = {
             "status": "started",
             "background": True,
             "task_id": task_id,
-            "role": raw_role,
+            "role": role,
             "attempt": attempt,
         }
+        if queued:
+            record["queued"] = True
+        return record
 
     def _append_explore_observations(
-        self,
-        messages: list[ChatMessage],
-        explore_totals: dict[str, int] | None,
-        *,
-        wait: bool = False,
-    ) -> tuple[list[ChatMessage], dict[str, int] | None]:
-        for record in self._collect_finished_explores(
-            wait=wait,
-            timeout=_explore_teardown_timeout() if wait else None,
-        ):
-            value = record.get("value")
+        self, messages: list[ChatMessage], *, wait: bool = False
+    ) -> list[ChatMessage]:
+        """Collect finished children and deliver each result once as a message."""
+
+        self._collect_finished_explores(
+            wait=wait, timeout=_explore_teardown_timeout() if wait else None
+        )
+        for job in self._explore_jobs:
+            if job.record is None or job.delivered:
+                continue
+            job.delivered = True
+            value = job.record.get("value")
             payload = {
                 "observation": "explore_completed",
-                "ok": record.get("ok"),
-                "status": record.get("status"),
-                "task_id": record.get("task_id"),
-                "role": record.get("role"),
+                "ok": job.record.get("ok"),
+                "status": job.record.get("status"),
+                "task_id": job.task_id,
+                "role": job.role,
             }
             if isinstance(value, dict):
                 payload["summary"] = value.get("summary") or ""
                 if value.get("error"):
                     payload["error"] = value.get("error")
-                if explore_totals is None:
-                    explore_totals = {
-                        "llm_calls": 0,
-                        "prompt_tokens": 0,
-                        "completion_tokens": 0,
-                        "total_tokens": 0,
-                    }
-                _accumulate_explore_usage(explore_totals, value)
             messages.append(
                 ChatMessage(
                     "user",
                     json.dumps(payload, ensure_ascii=False, default=str),
                 )
             )
-        return messages, explore_totals
+        return messages
 
     def _uncollected_explore_jobs(self) -> list[_ExploreJob]:
         return [job for job in self._explore_jobs if job.record is None]
@@ -1183,6 +1045,9 @@ class AgentSessionRunner:
     def _collect_finished_explores(
         self, *, wait: bool = False, timeout: float | None = None
     ) -> list[dict[str, object]]:
+        """The one place a child's result is taken: usage and Trace here, the
+        conversation observation later via ``_append_explore_observations``."""
+
         finished: list[dict[str, object]] = []
         wait_timeout = _explore_teardown_timeout(timeout) if wait else None
         deadline = (
@@ -1230,6 +1095,15 @@ class AgentSessionRunner:
                 "value": result,
             }
             job.record = record
+            if isinstance(result, dict):
+                if self._explore_totals is None:
+                    self._explore_totals = {
+                        "llm_calls": 0,
+                        "prompt_tokens": 0,
+                        "completion_tokens": 0,
+                        "total_tokens": 0,
+                    }
+                _accumulate_explore_usage(self._explore_totals, result)
             self._emit(
                 "explore_attempt",
                 {
@@ -1273,12 +1147,7 @@ class AgentSessionRunner:
                 },
             )
 
-    def _close_session(
-        self,
-        payload: dict[str, object],
-        *,
-        explore_totals: dict[str, int] | None = None,
-    ) -> None:
+    def _close_session(self, payload: dict[str, object]) -> None:
         self._cancelled.set()
         if self.explore is not None:
             self.explore.cancel()
@@ -1289,8 +1158,10 @@ class AgentSessionRunner:
             wait=True, timeout=_explore_teardown_timeout()
         )
         self._cancel_pending_explores()
-        if explore_totals is not None and "token_usage" not in payload:
-            payload = dict(payload)
+        payload = dict(payload)
+        payload.setdefault(
+            "token_usage", _token_usage_summary(self._usage, self._explore_totals)
+        )
         self._emit("session_end", payload)
         pool = self._explore_pool
         self._explore_pool = None
@@ -1301,6 +1172,7 @@ class AgentSessionRunner:
         self,
         messages: list[ChatMessage],
         remaining: float,
+        provider_tools: tuple[dict[str, object], ...],
         *,
         force: bool = False,
     ) -> tuple[list[ChatMessage], bool]:
@@ -1308,6 +1180,7 @@ class AgentSessionRunner:
             return messages, False
         result = self.compactor.compact(
             messages,
+            tools=provider_tools,
             remaining_seconds=remaining,
             step_id=None,
             force=force,
@@ -1337,7 +1210,9 @@ class AgentSessionRunner:
         if fits:
             return messages
         if allow_semantic_compaction:
-            messages, _ = self._compact_if_needed(messages, remaining, force=True)
+            messages, _ = self._compact_if_needed(
+                messages, remaining, provider_tools, force=True
+            )
             fits, _prompt_tokens, _context_window = context_request_fits(
                 self.llm,
                 messages,
@@ -1386,7 +1261,7 @@ class AgentSessionRunner:
         compacted = False
         if allow_semantic_compaction:
             recovered, compacted = self._compact_if_needed(
-                messages, remaining, force=True
+                messages, remaining, provider_tools, force=True
             )
         recovered, edit = fit_tool_results_to_context(
             self.llm,
@@ -1403,6 +1278,8 @@ class AgentSessionRunner:
         return recovered, compacted or bool(edit)
 
     def _validate_capability_boundary(self) -> None:
+        """Fail closed on any tool outside the session's documented set."""
+
         names = {spec.name for spec in self.tools.specs()}
         if self.config.mode in {"meta", "meta_learning"}:
             unsupported = sorted(names - _META_TOOLS)
@@ -1459,215 +1336,6 @@ class MetaLearningAgent:
             "prior": prior,
             "conversation_id": result.conversation_id,
         }
-
-
-# A bare 4-digit number followed by one of these is a count/threshold, not a
-# date (e.g. "2000 只股票"), so it must not trip the visible-window year check.
-_COUNT_UNITS = "只家个支亿万元点名股条款行列页倍"
-
-# A year welded to date syntax (年 / -MM / .MM / Qn / 季度), an 8-digit YYYYMMDD,
-# or QnYYYY — a calendar date regardless of which year, so it stays correct when
-# the visible fold moves to another year. Bare 4-digit numbers are NOT matched.
-_DATE_EXPR = re.compile(
-    r"(?:19|20)\d{2}\s*(?:年|[/.\-]\s*\d{1,2}|[Qq][1-4]|\s*[一二三四]\s*季度)"
-    r"|(?:19|20)\d{6}"
-    r"|[Qq][1-4]\s*(?:19|20)\d{2}"
-)
-
-# PRIOR is free-format strategy direction and process memory published by Meta.
-# This is a resource bound, not a schema.
-PRIOR_MAX_CHARS = 16_000
-
-
-def visible_window_dates(manifest: Mapping[str, object]) -> set[str]:
-    """Years and YYYYMMDD period bounds of the meta-learning visible fold, read
-    from the manifest so the leak check targets the real window whatever year it
-    is (e.g. ``{"2020", "2021", "20200101", "20210930", ...}``)."""
-    fold = manifest.get("meta_learning_visible_fold") or {}
-    if not isinstance(fold, Mapping):
-        fold = {}
-    blob = " ".join(
-        str(value)
-        for value in (
-            fold.get("input_window"),
-            fold.get("validation_period"),
-            fold.get("valid_decision_time"),
-            manifest.get("valid_decision_time"),
-        )
-        if value
-    )
-    return set(re.findall(r"(?:19|20)\d{6}", blob)) | set(
-        re.findall(r"(?:19|20)\d{2}", blob)
-    )
-
-
-def calendar_policy_violation(
-    text: str, *, window_dates: set[str] | None = None
-) -> str:
-    """Why this text contains a forbidden calendar date, or "" when it does not.
-
-    Welded date expressions (_DATE_EXPR) are always rejected. When window_dates
-    is given, the visible-window years/bounds are also rejected even if written
-    bare. Cadence words (季度/月/周) and plain counts/percentages are unaffected.
-    """
-    dates = set(window_dates or ())
-    bare_window = (
-        re.compile(
-            r"\b(?:"
-            + "|".join(re.escape(token) for token in sorted(dates, key=len, reverse=True))
-            + r")\b"
-            rf"(?!\s*[{_COUNT_UNITS}])"
-        )
-        if dates
-        else None
-    )
-    for lineno, line in enumerate(text.splitlines(), start=1):
-        if _DATE_EXPR.search(line) or (bare_window and bare_window.search(line)):
-            return (
-                f"line {lineno} contains a calendar date (non-transferable): "
-                f"{line.strip()[:80]!r}"
-            )
-    return ""
-
-
-_PRIOR_BOUNDARY_RE = re.compile(
-    r"不得|不要|禁止|不可见|不能用于|不得按|不得用|不得读取|不得使用|不得写入|"
-    r"永远不可见|排除|不进入|不读取|不挂载"
-)
-_HELDOUT_MENTION_RE = re.compile(r"held-?out|holdout|持有期外|隐藏区间", re.I)
-_TEST_NUMBER_RE = re.compile(
-    r"(?:逐\s*fold|每个\s*fold|fold[_\s-]?(?:ref)?\s*\d*).{0,48}(?:test|测试).{0,40}\d|"
-    r"(?:test|测试).{0,24}(?:sharpe|收益|回撤|夏普|total_return|超额).{0,16}\d",
-    re.I,
-)
-_TEST_SELECTION_RE = re.compile(
-    r"(根据|按照|基于|凭).{0,20}(?:test|测试).{0,20}(选|选择|保留|淘汰|采用)|"
-    r"(?:test|测试).{0,20}(更好|更差|更优|更稳).{0,16}(所以|因此|于是|选择|保留)|"
-    r"(?:based on|according to).{0,20}test.{0,20}(?:select|choose|retain|reject|adopt)|"
-    r"test.{0,20}(?:better|worse|superior|stable).{0,16}(?:so|therefore|select|retain)",
-    re.I,
-)
-_STRICT_TEST_NUMBER_RE = re.compile(
-    r"(?:test|测试).{0,48}\d|\d.{0,48}(?:test|测试)", re.I
-)
-_STRICT_BOUNDARY_LINE_RE = re.compile(
-    r"^(?:[-*]\s*)?(?:"
-    r"(?:不得|严禁|禁止)(?:读取|使用|依赖|写入|泄露)?\s*"
-    r"(?:test\s*/\s*held-?out|held-?out\s*/\s*test)"
-    r"(?:\s*(?:数据|结果|指标|原始记录))?|"
-    r"(?:do not|must not|never)\s+(?:read|use|rely on|write|leak)\s+"
-    r"(?:test\s*/\s*held-?out|held-?out\s*/\s*test)"
-    r"(?:\s*(?:data|results?|metrics?))?"
-    r")[。.!！]?$",
-    re.I,
-)
-
-
-def strict_transferable_content_violation(text: str) -> str:
-    """Fail closed on hidden-stage content while allowing a pure boundary rule."""
-
-    for lineno, line in enumerate(text.splitlines(), start=1):
-        stripped = line.strip()
-        if not stripped or _STRICT_BOUNDARY_LINE_RE.fullmatch(stripped):
-            continue
-        if _HELDOUT_MENTION_RE.search(stripped):
-            return f"line {lineno} leaks Held-out into shared skills"
-        if _STRICT_TEST_NUMBER_RE.search(stripped):
-            return f"line {lineno} contains a Test figure in shared skills"
-        if _TEST_SELECTION_RE.search(stripped):
-            return f"line {lineno} uses Test to choose shared skill content"
-    return ""
-
-
-def prior_content_violation(text: str) -> str:
-    """Held-out leaks, per-Fold Test figures, or Test-based selection."""
-    for lineno, line in enumerate(text.splitlines(), start=1):
-        stripped = line.strip()
-        if not stripped or _PRIOR_BOUNDARY_RE.search(stripped):
-            continue
-        if _HELDOUT_MENTION_RE.search(stripped):
-            return (
-                f"line {lineno} leaks Held-out into PRIOR; "
-                "use a boundary sentence such as 不得使用 Test/Held-out"
-            )
-        if _TEST_NUMBER_RE.search(stripped):
-            return (
-                f"line {lineno} contains a per-Fold Test figure; "
-                "remove Test numbers then call finish_meta again"
-            )
-        if _TEST_SELECTION_RE.search(stripped):
-            return (
-                f"line {lineno} uses Test to choose a strategy; "
-                "state a transferable process rule instead"
-            )
-    return ""
-
-
-def prior_policy_violation(
-    prior_path: Path, *, window_dates: set[str] | None = None
-) -> str:
-    """Why the fixed PRIOR.md cannot be accepted, or "" when it is acceptable."""
-    if not prior_path.exists():
-        return "write PRIOR.md before finishing"
-    text = prior_path.read_text(encoding="utf-8", errors="replace")
-    if not text.strip():
-        return "PRIOR.md must be non-empty before finishing"
-    nchars = len(text.strip())
-    if nchars > PRIOR_MAX_CHARS:
-        return (
-            f"PRIOR.md is {nchars} characters; keep it to {PRIOR_MAX_CHARS} "
-            "as transferable direction and memory, then call finish_meta again"
-        )
-    calendar_leak = calendar_policy_violation(
-        text, window_dates=set(window_dates or ())
-    )
-    if calendar_leak:
-        return (
-            f"PRIOR.md {calendar_leak}; state it qualitatively "
-            "with no year or visible-window date, then call finish_meta again"
-        )
-    content_leak = prior_content_violation(text)
-    if content_leak:
-        return f"PRIOR.md {content_leak}"
-    return ""
-
-
-class FinishMetaTool:
-    spec = ToolSpec(
-        "finish_meta",
-        "Finish local Meta learning after maintaining the fixed PRIOR.md.",
-        {
-            "type": "object",
-            "properties": {},
-            "additionalProperties": False,
-        },
-    )
-
-    def __init__(
-        self,
-        workspace: str | Path | SafeWorkspace,
-        *,
-        window_dates: set[str] | None = None,
-    ) -> None:
-        self.workspace = (
-            workspace
-            if isinstance(workspace, SafeWorkspace)
-            else SafeWorkspace(workspace)
-        )
-        self.window_dates = set(window_dates or ())
-
-    def invoke(self, arguments) -> ToolResult:
-        del arguments
-        violation = prior_policy_violation(
-            self.workspace.root / "PRIOR.md", window_dates=self.window_dates
-        )
-        if violation:
-            raise ToolError(violation, error_type="prior_policy")
-        return ToolResult(
-            True,
-            value={"status": "meta_learning_done"},
-            finish=True,
-        )
 
 
 def _new_token_totals() -> dict[str, int]:
@@ -1751,9 +1419,3 @@ def _token_usage_summary(
         ) + int(explore.get("total_tokens", 0))
     return summary
 
-
-def _is_complete_validation(record: dict[str, object]) -> bool:
-    if record.get("ok") is not True:
-        return False
-    value = record.get("value")
-    return isinstance(value, dict) and value.get("complete") is True

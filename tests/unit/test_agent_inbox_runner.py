@@ -100,7 +100,6 @@ def _finish_tool(root: Path) -> tuple[FinishFoldTool, str]:
         result_name="valid_000",
         revision_id=new_revision_id("revision"),
         metrics={"total_return": 0.01},
-        complete_validation=True,
     )
     return FinishFoldTool(tree, fold_id="fold_ref_ab", run_id="run_x"), node_id
 
@@ -148,7 +147,7 @@ def test_before_llm_applies_guidance_without_system_or_manifest(tmp_path: Path) 
 
 def test_interrupt_after_llm_skips_unstarted_tools_with_pairing(tmp_path: Path) -> None:
     finish, node_id = _finish_tool(tmp_path)
-    write = RecordingTool("todo", mutating=True)
+    write = RecordingTool("write_file", mutating=True)
     inbox = FakeInbox()
     events: list[tuple[str, dict[str, object]]] = []
 
@@ -162,7 +161,7 @@ def test_interrupt_after_llm_skips_unstarted_tools_with_pairing(tmp_path: Path) 
         [
             ProviderResponse(
                 tool_calls=(
-                    ToolCall("w", "todo", {"path": "output/main.py"}),
+                    ToolCall("w", "write_file", {"path": "output/main.py"}),
                     ToolCall("f", "finish_fold", {"node_id": node_id}),
                 )
             ),
@@ -191,7 +190,7 @@ def test_interrupt_after_llm_skips_unstarted_tools_with_pairing(tmp_path: Path) 
         assert payload["observation"] == "interrupted_by_user"
         assert payload["error"] == "interrupted_by_user"
     skipped = [payload for event, payload in events if event == "tool_skipped"]
-    assert [item["tool"] for item in skipped] == ["todo", "finish_fold"]
+    assert [item["tool"] for item in skipped] == ["write_file", "finish_fold"]
     assert all(item["reason"] == "interrupted_by_user" for item in skipped)
     assert all(item["safe_point"] == INBOX_SAFE_AFTER_LLM_BEFORE_TOOLS for item in skipped)
     user_events = [payload for event, payload in events if event == "user_message"]
@@ -211,7 +210,7 @@ def test_started_mutating_tool_is_not_killed(tmp_path: Path) -> None:
         started.set()
         assert release.wait(timeout=2)
 
-    write = RecordingTool("todo", mutating=True, on_invoke=_write)
+    write = RecordingTool("write_file", mutating=True, on_invoke=_write)
 
     def _pump() -> None:
         assert started.wait(timeout=2)
@@ -224,7 +223,7 @@ def test_started_mutating_tool_is_not_killed(tmp_path: Path) -> None:
         [
             ProviderResponse(
                 tool_calls=(
-                    ToolCall("w", "todo", {}),
+                    ToolCall("w", "write_file", {}),
                     ToolCall("g", "grep", {}),
                     ToolCall("f", "finish_fold", {"node_id": node_id}),
                 )

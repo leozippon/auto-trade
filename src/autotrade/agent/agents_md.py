@@ -1,11 +1,10 @@
 """Presence-check the AGENTS.md AutoTrade Fold/Meta contract.
 
 The repository-root ``AGENTS.md`` must contain the ``AutoTrade Fold and Meta
-sessions`` subsection. Fold/Meta system prompts inject a hardcoded Chinese
-rendering of host Multi-Agent, Development Principles, Operational Guardrails,
-and the role matrix; the English AutoTrade subsection is not injected. Host
-Multi-Agent Cooperation rules (Sleep, inherit_context, AGENTS.md handoff)
-remain for this coding agent.
+sessions`` subsection. Fold/Meta system prompts render their own Chinese
+contract (role matrix, PIT and isolation rules, finish gates, condensed
+principles); neither this English subsection nor the host Multi-Agent,
+Development Principles, or Operational Guardrails sections are injected.
 """
 
 from __future__ import annotations

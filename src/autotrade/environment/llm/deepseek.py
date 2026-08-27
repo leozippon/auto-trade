@@ -17,6 +17,7 @@ import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from dataclasses import fields as dataclass_fields
 from http.client import HTTPConnection, HTTPSConnection
 from pathlib import Path
 from typing import Any, Protocol, cast
@@ -365,6 +366,27 @@ class OpenAICompatibleProxy:
     @property
     def context_window_tokens(self) -> int | None:
         return self.config.context_window_tokens
+
+    def with_thinking(
+        self, *, enabled: bool, reasoning_effort: str | None
+    ) -> OpenAICompatibleProxy:
+        """Clone this proxy with another thinking setting.
+
+        Shares the transport and clock; the config is rebuilt from its field
+        values so a compatibility facade config (DeepSeekConfig) clones too.
+        """
+
+        values = {
+            field.name: getattr(self.config, field.name)
+            for field in dataclass_fields(self.config)
+            if field.init
+        }
+        values.update(thinking_enabled=enabled, reasoning_effort=reasoning_effort)
+        return OpenAICompatibleProxy(
+            OpenAICompatibleConfig(**values),
+            transport=self._transport,
+            sleep=self._sleep,
+        )
 
     @classmethod
     def from_environment(
@@ -1033,6 +1055,7 @@ class DeepSeekConfig(OpenAICompatibleConfig):
         stream_tool_calls: bool = True,
         user_id: str = "autotrade-hl",
         conversation_log_dir: str | Path | None = "data/llm_conversations",
+        context_window_tokens: int | None = None,
     ) -> None:
         if not str(base_url).startswith("https://"):
             raise ValueError("base_url must use https")
@@ -1054,6 +1077,7 @@ class DeepSeekConfig(OpenAICompatibleConfig):
             stream_tool_calls=stream_tool_calls,
             user_id=user_id,
             conversation_log_dir=conversation_log_dir,
+            context_window_tokens=context_window_tokens,
         )
 
 

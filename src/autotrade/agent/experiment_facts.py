@@ -226,10 +226,11 @@ def _artifact_contract_facts(
             "parent": compact_mapping(parent),
             "modification_constraints": manifest.get("modification_constraints"),
             "acceptance_rules": None if is_meta else manifest.get("acceptance_rules"),
-            # Semantics: max_drawdown + complete validation are HARD gates;
+            # Semantics (AcceptanceRules.evaluate): the max_drawdown cap and
+            # non-finite total_return/max_drawdown/sharpe are HARD rejects;
             # min_return / min_sharpe are targets — shortfalls freeze WITH a
             # recorded warning instead of resetting the fold.
-            "acceptance_semantics": None if is_meta else "drawdown+complete=hard; return/sharpe=warn-only targets",
+            "acceptance_semantics": None if is_meta else "max_drawdown+finite_metrics=hard; return/sharpe=warn-only targets",
             "step_tree_enabled": manifest.get("step_tree_enabled"),
             "record_failed_attempts": manifest.get("record_failed_attempts"),
             "nl_failure_policy": manifest.get("nl_failure_policy"),
@@ -265,8 +266,6 @@ def _broker_replay_facts(manifest: Mapping[str, object]) -> dict[str, object]:
             "decision_frequency": "day_month_quarter_or_year",
             "execution_time": "order_execute_at_exact",
             "missing_exact_price": "reject",
-            "nl_max_calls_per_decision_day": manifest.get("nl_max_calls_per_decision_day"),
-            "nl_max_calls_per_backtest": manifest.get("nl_max_calls_per_backtest"),
         }
     )
 

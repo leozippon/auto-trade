@@ -50,7 +50,6 @@ def _record(
         result_name=result_name,
         revision_id=new_revision_id("revision"),
         metrics={},
-        complete_validation=True,
     )
 
 

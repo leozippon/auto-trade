@@ -1,12 +1,13 @@
 """Agent-facing tool contracts dispatched by the session runner.
 
-Heavy tool modules are imported lazily so internal helpers can reuse
-``tools.base`` without pulling the backtest/NL stack into a circular import.
+The skills tools are imported lazily so internal helpers can reuse
+``tools.base`` without pulling the pipeline package into a circular import.
 """
 
 from __future__ import annotations
 
 from .base import (
+    SEQUENTIAL_TOOL_NAMES,
     CommandResult,
     CommandRunner,
     SessionInterrupt,
@@ -16,38 +17,36 @@ from .base import (
     ToolResult,
     ToolSchemaError,
     ToolSpec,
+    is_sequential_tool,
 )
 from .files import EditFileTool, WriteFileTool
 from .finish_fold import FinishFoldTool
+from .finish_meta import FinishMetaTool
 from .hitl import AskUserTool
 from .modification_check import ModificationCheckTool
 from .search import SEARCH_ROOTS, GlobTool, GrepTool, ReadFileTool, SearchRoots
-from .shell import ReadOnlyShellTool, SandboxShellTool
+from .shell import SandboxShellTool
 from .step_rollback import StepRollbackTool
-from .strategy_validation import StrategyValidationTool
-from .todo import TodoTool
 from .workspace import SafeWorkspace
 
 __all__ = [
     "AskUserTool",
-    "BacktestTool",
     "CommandResult",
     "CommandRunner",
     "EditFileTool",
     "FinishFoldTool",
+    "FinishMetaTool",
     "GlobTool",
     "GrepTool",
     "ModificationCheckTool",
     "ReadFileTool",
-    "ReadOnlyShellTool",
     "SEARCH_ROOTS",
+    "SEQUENTIAL_TOOL_NAMES",
     "SafeWorkspace",
     "SandboxShellTool",
     "SearchRoots",
     "SessionInterrupt",
     "StepRollbackTool",
-    "StrategyValidationTool",
-    "TodoTool",
     "Tool",
     "ToolError",
     "ToolRegistry",
@@ -57,11 +56,12 @@ __all__ = [
     "WriteFileTool",
     "WriteSkillTool",
     "DeleteSkillTool",
+    "is_sequential_tool",
 ]
 
 
 def __dir__() -> list[str]:
-    return sorted({*globals(), "BacktestTool", "WriteSkillTool", "DeleteSkillTool"})
+    return sorted({*globals(), "WriteSkillTool", "DeleteSkillTool"})
 
 
 def __getattr__(name: str):
@@ -69,8 +69,4 @@ def __getattr__(name: str):
         from autotrade.pipelines.skills import DeleteSkillTool, WriteSkillTool
 
         return {"WriteSkillTool": WriteSkillTool, "DeleteSkillTool": DeleteSkillTool}[name]
-    if name == "BacktestTool":
-        from .backtest import BacktestTool
-
-        return BacktestTool
     raise AttributeError(name)

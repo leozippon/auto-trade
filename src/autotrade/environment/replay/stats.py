@@ -8,8 +8,13 @@ reduces it to the ``detailed_return.json`` payload (docs/environment-design.md
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+import time
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 from datetime import date
+
+from autotrade.environment.runtime import utc_now_iso
 
 # A-share trading calendar (~244 sessions/year); style_analysis annualizes with
 # the same constant so detailed_return and the Barra-lite sidecar agree.
@@ -19,12 +24,40 @@ TRADING_DAYS_PER_YEAR = 244
 _EXIT_ACTIONS = frozenset({"sell"})
 
 
+class PhaseTimer:
+    """Wall-clock seconds accumulated per coarse backtest phase.
+
+    A backtest has no other timing instrumentation: this is the whole of it.
+    Phases are named by the caller, added to rather than nested, and reported
+    once at the end, so a phase that never ran simply has no entry.
+    """
+
+    def __init__(self) -> None:
+        self._seconds: dict[str, float] = {}
+
+    @contextmanager
+    def phase(self, name: str) -> Iterator[None]:
+        started = time.perf_counter()
+        try:
+            yield
+        finally:
+            elapsed = time.perf_counter() - started
+            self._seconds[name] = self._seconds.get(name, 0.0) + elapsed
+
+    def to_record(self) -> dict[str, float]:
+        return {name: round(value, 3) for name, value in sorted(self._seconds.items())}
+
+
 @dataclass(frozen=True)
 class ReplayResult:
     equity_curve: tuple[dict[str, object], ...]
     executions: tuple[dict[str, object], ...]
     inference_dates: tuple[str, ...]
     pending_orders: tuple[dict[str, object], ...]
+    # Replay-loop wall clock. Backend setup phases are merged in by the
+    # evaluation backend, which is the only component that sees them.
+    wall_seconds: float = 0.0
+    phase_seconds: Mapping[str, float] = field(default_factory=dict)
 
     def to_record(self) -> dict[str, object]:
         return {
@@ -164,7 +197,41 @@ def compute_return_stats(result: ReplayResult) -> dict[str, object]:
         "stamp_duty_paid": stamp_duty_paid,
         "decision_calls": len(result.inference_dates),
         "per_stock": per_stock,
+        # Timing. ``replay_wall_seconds`` is the replay loop alone; the
+        # evaluation backend adds its own setup phases to ``phase_seconds`` and
+        # brackets the whole evaluation with started_at/finished_at.
+        "replay_wall_seconds": round(float(result.wall_seconds), 3),
+        "replayed_trade_days": len(curve),
+        "phase_seconds": dict(result.phase_seconds),
     }
+
+
+def finalize_summary_timing(
+    summary: dict[str, object],
+    *,
+    started_at: str,
+    setup_phases: Mapping[str, float] | None = None,
+    nl_counters: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    """Close one evaluation's timing block in its summary, in place.
+
+    ``compute_return_stats`` only sees the replay loop. The evaluation backend
+    is the component that knows when the whole evaluation started, what it did
+    before and after the loop, and which NL service served it, so it closes the
+    block here rather than each backend assembling its own field names.
+    """
+    phases = dict(summary.get("phase_seconds") or {})
+    for name, seconds in (setup_phases or {}).items():
+        phases[name] = round(phases.get(name, 0.0) + float(seconds), 3)
+    if nl_counters:
+        nl_wall = nl_counters.get("nl_wall_seconds")
+        if isinstance(nl_wall, (int, float)) and not isinstance(nl_wall, bool):
+            phases["nl"] = round(float(nl_wall), 3)
+        summary.update(nl_counters)
+    summary["phase_seconds"] = {name: phases[name] for name in sorted(phases)}
+    summary["started_at"] = started_at
+    summary["finished_at"] = utc_now_iso()
+    return summary
 
 
 def _weekly_returns(

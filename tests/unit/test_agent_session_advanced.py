@@ -12,7 +12,6 @@ from autotrade.agent import (
     ContextCompactor,
     ExploreSubAgentEngine,
 )
-from autotrade.agent.compact import estimate_messages_tokens
 from autotrade.agent.experiment_facts import build_experiment_facts
 from autotrade.agent.prompts import (
     FOLD_STATIC_SECTIONS,
@@ -29,6 +28,7 @@ from autotrade.environment.llm import (
     ScriptedLLM,
     ToolCall,
     context_request_fits,
+    estimate_chat_request_tokens,
     is_context_overflow_error,
 )
 from autotrade.environment.step_tree import StepTree
@@ -38,7 +38,6 @@ from autotrade.environment.tools import (
     SafeWorkspace,
     ToolRegistry,
     ToolResult,
-    TodoTool,
     ToolSpec,
     WriteFileTool,
 )
@@ -65,7 +64,6 @@ def finish_fold_tool(root: Path) -> tuple[FinishFoldTool, str]:
         result_name="valid_000",
         revision_id=new_revision_id("revision"),
         metrics={"total_return": 0.01},
-        complete_validation=True,
     )
     return FinishFoldTool(tree, fold_id="fold_ref_ab", run_id="run_x"), node_id
 
@@ -183,7 +181,7 @@ def test_context_token_estimate_includes_reasoning_content():
     without_reasoning = [ChatMessage("assistant", "answer")]
     with_reasoning = [ChatMessage("assistant", "answer", reasoning_content="r" * 400)]
 
-    assert estimate_messages_tokens(with_reasoning) > estimate_messages_tokens(
+    assert estimate_chat_request_tokens(with_reasoning) > estimate_chat_request_tokens(
         without_reasoning
     )
 
@@ -546,9 +544,9 @@ def test_terminal_tool_cancels_later_mutation_in_same_turn(tmp_path: Path):
                 tool_calls=(
                     ToolCall("f", "finish_fold", {"node_id": node_id}),
                     ToolCall(
-                        "todo",
-                        "todo",
-                        {"action": "create", "subject": "should not persist"},
+                        "w",
+                        "write_file",
+                        {"path": "notes.md", "content": "should not persist"},
                     ),
                 )
             )
@@ -556,14 +554,14 @@ def test_terminal_tool_cancels_later_mutation_in_same_turn(tmp_path: Path):
     )
     runner = AgentSessionRunner(
         llm=llm,
-        tools=ToolRegistry([finish, TodoTool(workspace)]),
+        tools=ToolRegistry([finish, WriteFileTool(workspace)]),
         system_prompt="daily JSON only",
     )
     runner.run("finish")
     assert "generate_orders" in (tmp_path / "output/main.py").read_text(
         encoding="utf-8"
     )
-    assert not (tmp_path / "TODO.json").exists()
+    assert not (tmp_path / "notes.md").exists()
 
 
 def test_explore_accepts_write_file_tool(tmp_path: Path):
@@ -803,7 +801,7 @@ def _all_registrable_tool_names() -> set[str]:
     import tempfile
 
     import autotrade.environment.tools as tools_pkg
-    from autotrade.agent.runner import FinishMetaTool
+    from autotrade.agent.explore import ExploreTool
     from autotrade.environment.nl.engine import TEXT_RETRIEVE_TOOL
     from autotrade.environment.tools import SafeWorkspace, SearchRoots
     from autotrade.environment.tools.search import GlobTool, GrepTool, ReadFileTool
@@ -813,7 +811,7 @@ def _all_registrable_tool_names() -> set[str]:
     with tempfile.TemporaryDirectory() as tmp:
         roots = SearchRoots(SafeWorkspace(Path(tmp)))
         instances = [GlobTool(roots), GrepTool(roots), ReadFileTool(roots)]
-    candidates = [*instances, FinishMetaTool]
+    candidates = [*instances, ExploreTool]
     candidates.extend(getattr(tools_pkg, name, None) for name in dir(tools_pkg))
     for candidate in candidates:
         spec = getattr(candidate, "spec", None)
@@ -917,3 +915,19 @@ def test_prepare_context_request_rejects_missing_window_without_assert(monkeypat
         runner._prepare_context_request(
             messages, (), 30.0, allow_semantic_compaction=False
         )
+
+
+def test_compaction_trigger_counts_the_provider_tool_schemas():
+    compactor = ContextCompactor(
+        ScriptedLLM([]),
+        ContextCompactionConfig(token_threshold=400, min_messages=2, keep_recent_messages=1),
+    )
+    messages = [ChatMessage("system", "s")] + [
+        ChatMessage("user", f"turn {index} " + "x" * 60) for index in range(6)
+    ]
+    tools = ({"type": "function", "function": {"name": "t", "description": "d" * 3_000}},)
+    without_tools, reason = compactor.should_compact(messages)
+    with_tools, reason_with = compactor.should_compact(messages, tools=tools)
+    assert without_tools is False and reason["skip_reason"] == "below_token_threshold"
+    assert with_tools is True
+    assert reason_with["estimated_tokens"] > reason["estimated_tokens"]
