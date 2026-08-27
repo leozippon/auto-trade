@@ -2336,11 +2336,8 @@ async function renderDetailPage(experimentId, selectedKey) {
         route(true);
       else if (String(raw.step_index || "") !== String(status.step_index || ""))
         route(true);
-      else if (
-        String(raw.environment_stage || "") !==
-        String(status.environment_stage || "")
-      )
-        route(true);
+      // llm_call ↔ tool_call stage flips must not rebuild the page: the live
+      // Trace panel already polls status, and route(true) flashes "加载中…".
     } catch {
       /* transient */
     }

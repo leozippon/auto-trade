@@ -232,6 +232,15 @@ def test_live_trace_panel_claims_stream_before_await() -> None:
     assert "await refreshBlocks();" in source
 
 
+def test_detail_poll_does_not_rebuild_on_environment_stage() -> None:
+    script = APP_JS.read_text(encoding="utf-8")
+    poll = script.split("pollTimer = setInterval", 1)[1].split("}, 4000);", 1)[0]
+    assert "route(true)" in poll
+    assert "environment_stage" not in poll
+    assert "session_key" in poll
+    assert "run_ref" in poll
+
+
 def test_index_html_loads_app_js_without_inlining_trace_chips() -> None:
     html = INDEX_HTML.read_text(encoding="utf-8")
     assert 'src="/static/app.js"' in html
