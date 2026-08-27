@@ -87,6 +87,8 @@ def _assert_login_rewrites_badge_src(blocks: dict[str, str]) -> None:
     login = blocks["= /login"]
     assert "auth_request" not in login
     assert LOGIN_SRC_REWRITE in login
+    assert "sub_filter_once on;" in login
+    assert "sub_filter_types" not in login
     assert 'proxy_set_header Accept-Encoding "";' in login
 
 
