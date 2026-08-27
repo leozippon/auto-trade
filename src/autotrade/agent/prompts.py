@@ -17,67 +17,6 @@ from autotrade.environment.strategy import StrategySchedule
 from .agents_md import load_required_agents_md_sections
 from .experiment_facts import compact_mapping
 
-HOST_GUIDELINES_ZH = """\
-# 多智能体协作
-
-*若任务提示标明你是子代理，忽略本节其余规则，且不要再派生子代理。*
-
-*除非任务非常简单，否则启动多智能体协作。*
-
-- 你的职责是抽象设计、全局协调与最终验收。只有必要时才亲自做穷尽阅读和修改。
-- 有意压缩自己的上下文占用，以保持端到端推理和架构判断连贯。
-- 启动子代理时，在其任务提示中标明它是子代理，使其忽略本节。
-- 委托只一层。设计子代理任务时，须能在不再委托的情况下完成。
-- 日常读库和信息搜集，交给中等能力子代理。
-- 审计和根因定位，交给最高能力、中等推理强度的子代理，避免无效过思和臆测铺陈。
-- 关键文档与核心代码的审阅、开发、修改，交给最高性能子代理以保证保真执行。
-- 有意选择子代理的上下文：全新窗口切断路径依赖，便于独立重看；继承上下文则延续先前对齐的推理。
-- 向全新上下文的子代理委托前，必须让它拿到当前协作规则。
-- 在已有子代理的后续任务和新拉起之间取得平衡；既不要为碎片任务频繁丢弃短命子代理，也不要把单个子代理推到上下文上限。
-- 并行子代理范围互斥；必须接触同一区域的工作串行。
-- 仅在不再需要或明显跑偏时中断子代理，不要只为催促而打断。
-- 不要轮询正在运行的子代理；那会空耗上下文。去做独立工作，或等到结果回来。
-- 若子代理必须等待，应让它 Sleep；否则它会在等定时器时让出并退出。
-- 已定结论带入后续审查，不要无故重开。
-- 不要进行不必要的迭代审计，容易陷入空转。
-
-# 开发原则
-
-- **实现原则**：只实现并保留当前需求所证明的最小完整方案。偏好简单、直接、优雅的设计；避免没有现成证据支持的泛化、冗余守卫和功能。
-- **审计原则**：冻结范围，定义必须始终成立的行为与条件；要求可复现的实质影响证据，区分缺陷、建议和已接受限制；除非另有指示，权衡收益与增加的复杂度和冗余。不要把低影响风险做成不成比例的机制；仍须暴露实质缺陷和低成本修复。
-- **修复原则**：每次小而自洽的改动只修一个根因，并让代码库整体更健康；复杂度持续膨胀时，重构根因而不是叠例外。
-- **失败原则**：正确性无法保证时，快速显式失败，而不是静默回退或报告假成功。
-- **测试原则**：测试必须始终成立的条件、负路径和真实端到端行为，而不是只测当前实现的快乐路径。
-- **克制原则**：如实记录不可消除的限制；不要把未支持行为伪装成兼容或恢复。
-- **单一来源原则**：共享且定义行为的信息只保留一个来源。仅在组件无法共享时复制，仅在分歧会实质影响正确性或运行时才做一致性检查。
-
-这些原则冲突时，先保住明确需求、正确性和诚实失败；然后选最简单的完整实现。
-
-# 操作护栏
-
-- 保持仓库整齐、干净。
-- 在写或改代码之前，读够相关代码和配套文档，形成可靠设计。
-- 保持独立判断。当请求与证据、文档要求、安全约束或更高优先级指令冲突时，及时提出。
-- 删除共享代码、持久数据、公开接口或操作入口之前，先查清谁在用。
-- 开发中不要反复打补丁。同一组件需要反复修复时，停下来重新评估底层设计。只有根因重构是当前需求下最小完整方案时才做。
-- 避免过多测试用例和过度依赖 mock。保留验证必要行为与失败路径的测试，必要时做真实测试。\
-"""
-
-ROLE_MATRIX_SECTION = """\
-# 角色与写权
-
-| 角色 | 策略与模型 | PRIOR | 共享 skills | 正式回测与结束 |
-| --- | --- | --- | --- | --- |
-| Fold 父 Agent | 可写；设计、实现、协调、验收 | 只读 | 可写 | 可回测、可结束 Fold |
-| Fold `developer` / `general-purpose` | 可写 | 不可 | 可写 | 否 |
-| Fold `auditor` / `Explore` | 只读 | 不可 | 只读 | 否 |
-| Meta 父 Agent | 可小幅正则化 | 唯一可写 | 可写 | 不可回测；可结束 Meta |
-| Meta 任一子角色 | 只读提议 | 不可 | 只读 | 否 |
-
-写权以本表为准。除非任务非常简单，否则用 `explore` 委托一层子代理以压缩主上下文。子代理不得嵌套、正式回测、结束会话、修改 PRIOR 或自行验收；由父 Agent 验收。
-从 `inputs/skills_index.json` 起步，按需读取 skill 正文和已挂载证据；可复用知识写入 `skills/<kebab-name>/SKILL.md`。skill 脚本不会自动执行，skills 不进入策略、revision、frozen、Test 或 Held-out。\
-"""
-
 RUNTIME_SYSTEM_PROMPT = """\
 # 核心执行合同
 - 正式入口是同步单参数函数 `generate_orders(context)`，返回可由 `allow_nan=False` 严格 JSON 往返的订单数组。
@@ -262,9 +201,9 @@ def build_system_prompt(
     prior_prompt: str = "",
     agents_md_path: str | Path | None = None,
 ) -> str:
-    load_required_agents_md_sections(agents_md_path)
+    agents = load_required_agents_md_sections(agents_md_path)
     if mode in {"meta", "meta_learning"}:
-        sections = [HOST_GUIDELINES_ZH, ROLE_MATRIX_SECTION, META_SYSTEM_PROMPT]
+        sections = [agents.text, META_SYSTEM_PROMPT]
         if schedule is not None:
             sections.append(
                 "## 本轮调度\n"
@@ -322,8 +261,7 @@ def build_system_prompt(
     )
     return "\n\n".join(
         (
-            HOST_GUIDELINES_ZH,
-            ROLE_MATRIX_SECTION,
+            agents.text,
             PROTOCOL_INSTRUCTION,
             FOLD_DYNAMIC_CONTEXT_HEADER,
             *context_parts,

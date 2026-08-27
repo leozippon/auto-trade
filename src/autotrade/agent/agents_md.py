@@ -1,16 +1,11 @@
-"""Load the AGENTS.md AutoTrade contract Fold/Meta system prompts must include.
-
-The repository-root ``AGENTS.md`` is the only source for that section body.
-Host Multi-Agent Cooperation rules (Sleep, inherit_context, AGENTS.md handoff)
-are for this coding agent, not for Fold/Meta sessions.
-"""
+"""Load the Chinese AGENTS.md sections Fold/Meta system prompts must include."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
 
-REQUIRED_AGENTS_MD_SECTIONS = ("AutoTrade Fold and Meta sessions",)
+REQUIRED_AGENTS_MD_SECTIONS = ("多智能体协作", "开发原则", "操作护栏")
 
 
 class AgentsMdError(ValueError):
@@ -29,9 +24,9 @@ def default_agents_md_path() -> Path:
 def load_required_agents_md_sections(
     path: str | Path | None = None,
 ) -> AgentsMdSections:
-    """Return the AutoTrade Fold/Meta contract section.
+    """Return the Fold/Meta guideline sections, headings promoted for system prompts.
 
-    Missing file or missing the named heading is an explicit failure.
+    Missing file or missing any named heading is an explicit failure.
     """
 
     source = Path(path) if path is not None else default_agents_md_path()
@@ -41,7 +36,10 @@ def load_required_agents_md_sections(
         body = source.read_text(encoding="utf-8")
     except OSError as exc:
         raise AgentsMdError(f"AGENTS.md cannot be read: {source}") from exc
-    extracted = [_extract_section(body, title, source) for title in REQUIRED_AGENTS_MD_SECTIONS]
+    extracted = [
+        _promote_headings(_extract_section(body, title, source))
+        for title in REQUIRED_AGENTS_MD_SECTIONS
+    ]
     text = "\n\n".join(extracted).strip()
     return AgentsMdSections(text=text)
 
@@ -84,3 +82,17 @@ def _extract_section(body: str, title: str, source: Path) -> str:
     if not section[len(heading) :].strip():
         raise AgentsMdError(f"AGENTS.md section {title!r} is empty: {source}")
     return section
+
+
+def _promote_headings(section: str) -> str:
+    """Turn AGENTS.md ``##``/``###`` into system-prompt ``#``/``##``."""
+
+    lines: list[str] = []
+    for line in section.splitlines():
+        level = _heading_level(line)
+        if level is not None and level > 1:
+            title = line.strip().lstrip("#").strip()
+            lines.append("#" * (level - 1) + " " + title)
+        else:
+            lines.append(line)
+    return "\n".join(lines)

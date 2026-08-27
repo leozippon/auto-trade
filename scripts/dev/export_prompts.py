@@ -25,6 +25,7 @@ from _bootstrap import add_repo_src
 
 add_repo_src(__file__)
 
+from autotrade.agent.agents_md import load_required_agents_md_sections
 from autotrade.agent.compact import COMPACT_SYSTEM_PROMPT
 from autotrade.agent.explore import explore_system_prompt
 from autotrade.agent.prompts import (
@@ -41,9 +42,7 @@ from autotrade.agent.prompts import (
     FOLD_STATIC_SECTIONS,
     FOLD_SUBMIT_CONTRACT,
     HARD_FINALIZATION_SYSTEM_PROMPT,
-    HOST_GUIDELINES_ZH,
     META_SYSTEM_PROMPT,
-    ROLE_MATRIX_SECTION,
     RUNTIME_SYSTEM_PROMPT,
     STEP_TREE_SECTION,
     STEP_WRAP_UP_PROMPT,
@@ -101,15 +100,11 @@ def render() -> str:
         "",
         "## 1. Fold Agent 系统提示词",
         "",
-        "运行时系统提示词先给出中文协作规则、开发原则和操作护栏，再接角色与写权表和六个稳定 Fold 区块。仓库根 `AGENTS.md` 的英文 AutoTrade subsection 只作宿主合同，缺文件或缺节会使会话失败，但不注入英文正文。",
+        "运行时系统提示词先注入仓库根 `AGENTS.md` 的「多智能体协作」「开发原则」「操作护栏」（含 AutoTrade 写权表），再接六个稳定 Fold 区块。缺文件或缺节会使会话失败。",
         "",
-        "### 1.0 协作规则与原则",
+        "### 1.0 AGENTS.md 注入（中文）",
         "",
-        _block(HOST_GUIDELINES_ZH),
-        "",
-        "### 1.0b 角色与写权",
-        "",
-        _block(ROLE_MATRIX_SECTION),
+        _block(load_required_agents_md_sections().text),
         "",
         "### 1.1 角色与目标",
         "",
