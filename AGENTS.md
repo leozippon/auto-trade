@@ -55,68 +55,70 @@ free -h
 - Add a new durable document under `docs/` when a new project area becomes important enough that the existing documents would become confusing or overloaded.
 
 
-# 全局准则
+# Global Guidelines
 
-## 多智能体协作
+## Rules for Multi-Agent Cooperation
 
-*若任务提示标明你是子代理，忽略本节其余规则，且不要再派生子代理。*
+*If your task prompt identifies you as a sub-agent, ignore the remaining rules in this section and do not spawn sub-agents of your own.*
 
-*除非任务非常简单，否则启动多智能体协作。*
+*Unless the task is very simple, start multi-agent collaboration.*
 
-- 你的职责是抽象设计、全局协调与最终验收。只有必要时才亲自做穷尽阅读和修改。
-- 有意压缩自己的上下文占用，以保持端到端推理和架构判断连贯。
-- 启动子代理时，在其任务提示中标明它是子代理，使其忽略本节。
-- 委托只一层。设计子代理任务时，须能在不再委托的情况下完成。
-- 日常读库和信息搜集，交给中等能力子代理。
-- 审计和根因定位，交给最高能力、中等推理强度的子代理，避免无效过思和臆测铺陈。
-- 关键文档与核心代码的审阅、开发、修改，交给最高性能子代理以保证保真执行。
-- 有意选择子代理的上下文：全新窗口切断路径依赖，便于独立重看；继承上下文则延续先前对齐的推理。
-- 向全新上下文的子代理委托前，必须让它拿到当前 `AGENTS.md`。
-- 在已有子代理的后续任务和新拉起之间取得平衡；既不要为碎片任务频繁丢弃短命子代理，也不要把单个子代理推到上下文上限。
-- 并行子代理范围互斥；必须接触同一区域的工作串行。
-- 仅在不再需要或明显跑偏时中断子代理，不要只为催促而打断。
-- 不要轮询正在运行的子代理；那会空耗上下文。去做独立工作，或等到结果回来。
-- 若子代理必须等待，应让它 Sleep；否则它会在等定时器时让出并退出。
-- 已定结论带入后续审查，不要无故重开。
-- 不要进行不必要的迭代审计，容易陷入空转。
+- Your role centers on abstract design, global coordination, final acceptance. Direct, exhaustive reading and modification are required only when necessary.
+- You should intentionally minimize your context footprint to preserve coherent end-to-end reasoning and architectural judgment.
+- When launching a sub-agent, identify it as a sub-agent in its task prompt so that it disregards this section.
+- Keep delegation one level deep. Design each sub-agent's task to be completed without further delegation.
+- For routine repository reading and straightforward information gathering, you should delegate to one or more moderate-capability sub-agents.
+- For audit engagements and root-cause issue localization, you should delegate to one or more of the highest-capability sub-agents available at a mid-range reasoning intensity to guard against unproductive overthinking and speculative elaboration.
+- For the review, development, and modification of critical documentation and core code assets, you should delegate to one or more of the highest-performance sub-agents available for high-fidelity execution.
+- When launching a sub-agent, choose its context deliberately. A fully fresh context window breaks path dependency and lets the task be reapproached independently, while inherited context continues coherent, aligned reasoning that builds upon prior work.
+- Before delegating to a fresh-context sub-agent, you must ensure that the sub-agent receives the current contents of `AGENTS.md`.
+- Balance work between follow-up tasks to existing sub-agents and new spawns; avoid both discarding short-lived sub-agents for fragments of one task and driving a single sub-agent to its context window limit.
+- Give concurrent sub-agents disjoint scopes; serialize any work that must touch the same area.
+- Interrupt a sub-agent only when its work is no longer needed or clearly off course, never merely to hurry it.
+- Do not poll a running sub-agent; it spends context without advancing the work. Take up independent work, or yield until the result arrives.
+- If a sub-agent's task must wait, instruct that sub-agent to Sleep; otherwise it will yield and drop out while waiting on a timer.
+- Carry settled decisions into later reviews rather than reopening them.
+- Do not conduct iterative audits unless necessary; they easily fall into endless iteration.
 
-### AutoTrade Fold 与 Meta 会话
+### AutoTrade Fold and Meta sessions
 
-本节与「多智能体协作」「开发原则」「操作护栏」一并注入普通 Fold 和 Meta 的系统提示词。
+This subsection is the host-facing AutoTrade contract. Fold and Meta system prompts include a Chinese rendering of the host Multi-Agent, Development Principles, and Operational Guardrails sections, plus a Chinese role matrix. This English AutoTrade subsection is not injected.
 
-| 角色 | 策略与模型 | PRIOR | 共享 skills | 正式回测与结束 |
+| Actor | Strategy or models | PRIOR | Shared skills | Official backtest and finish |
 | --- | --- | --- | --- | --- |
-| Fold 父 Agent | 可写；设计、实现、协调、验收 | 只读 | 可写 | 可回测、可结束 Fold |
-| Fold `developer` / `general-purpose` | 可写 | 不可 | 可写 | 否 |
-| Fold `auditor` / `Explore` | 只读 | 不可 | 只读 | 否 |
-| Meta 父 Agent | 可小幅正则化 | 唯一可写 | 可写 | 不可回测；可结束 Meta |
-| Meta 任一子角色 | 只读提议 | 不可 | 只读 | 否 |
+| Fold parent | May write; designs, implements, coordinates, accepts | Read-only | May write | Yes |
+| Fold `developer` / `general-purpose` | May write | No | May write | No |
+| Fold `auditor` / `Explore` | Read-only | No | Read-only | No |
+| Meta parent | Optional regularization | Sole writer | May write | No backtest; may finish |
+| Any Meta sub-role | Read-only proposals | No | Read-only | No |
 
-- `explore` 只一层。除非任务非常简单，否则父 Agent 应当委托。子代理不得嵌套、正式回测、结束会话、修改 PRIOR 或自行验收；由父 Agent 验收。Fold 父 Agent 不得用 shell 修改策略产物。
-- 每个 Fold 和 Meta 从 `inputs/skills_index.json` 起步，再按需读取 skill 正文、PIT 可见数据、单位引用、制品和 how-to。可写角色把可迁移知识写入 `skills/<kebab-name>/SKILL.md`，不要堆进提示词或 PRIOR。skill 脚本不会自动执行，skills 不进入策略、revision、frozen、Test 或 Held-out。
-- PRIOR 由 Meta 维护、Fold 只读。只保留简洁的策略方向、编排和 skill 路径引用；不要复制 skill 正文、目录、how-to 或 raw trace。没有有效改进时保持原文。首版必须非空，且遵守长度、日历、Test 与 Held-out 泄漏规则。
-- PIT `available_at`、Test/Held-out 隔离、`generate_orders(context)` JSON ABI、写权、结束门和不透明引用保持 fail-closed。历史分钟和竞价只作证据或精确价格来源，不是策略时钟。不得伪造工具、Validation 或完成结果。
+- `explore` is optional and limited to one level. Unless the task is very simple, the parent should delegate. Sub-agents cannot nest, run official backtests, finish a session, change PRIOR, or accept their own work. The parent accepts. A Fold parent must not use shell to modify strategy artifacts.
+- Every Fold and Meta session starts from `inputs/skills_index.json`, then discovers the needed skill bodies, PIT-visible data, unit references, artifacts, and how-tos through its mounted inputs and delegated exploration. Writable roles should put durable, transferable knowledge in `skills/<kebab-name>/SKILL.md` rather than in prompts or PRIOR. Skill scripts never run automatically, and skills never enter strategy, revision, frozen, Test, or Held-out artifacts.
+- PRIOR is Meta-owned and Fold-readable. It contains concise strategy direction, orchestration, and path references to skills; it must not duplicate skill bodies, catalogs, how-tos, or raw traces. Keep the existing PRIOR when there is no valid process improvement. The first version must be non-empty and every version stays within the enforced size, calendar, Test, and Held-out leak rules.
+- PIT `available_at`, Test/Held-out isolation, the `generate_orders(context)` JSON ABI, write boundaries, finish gates, and opaque Agent-visible references remain fail-closed. Historical minute or auction records are evidence and exact-price sources, not a strategy clock. Never fabricate tool, validation, or completion results.
 
-## 开发原则
 
-- **实现原则**：只实现并保留当前需求所证明的最小完整方案。偏好简单、直接、优雅的设计；避免没有现成证据支持的泛化、冗余守卫和功能。
-- **审计原则**：冻结范围，定义必须始终成立的行为与条件；要求可复现的实质影响证据，区分缺陷、建议和已接受限制；除非另有指示，权衡收益与增加的复杂度和冗余。不要把低影响风险做成不成比例的机制；仍须暴露实质缺陷和低成本修复。
-- **修复原则**：每次小而自洽的改动只修一个根因，并让代码库整体更健康；复杂度持续膨胀时，重构根因而不是叠例外。
-- **失败原则**：正确性无法保证时，快速显式失败，而不是静默回退或报告假成功。
-- **测试原则**：测试必须始终成立的条件、负路径和真实端到端行为，而不是只测当前实现的快乐路径。
-- **克制原则**：如实记录不可消除的限制；不要把未支持行为伪装成兼容或恢复。
-- **单一来源原则**：共享且定义行为的信息只保留一个来源。仅在组件无法共享时复制，仅在分歧会实质影响正确性或运行时才做一致性检查。
+## Development Principles
 
-这些原则冲突时，先保住明确需求、正确性和诚实失败；然后选最简单的完整实现。
+- **Implementation Principle**: Implement and retain the smallest complete solution justified by current requirements. Prefer simple, direct, elegant designs; avoid speculative generality, redundant guards, and features not justified by present evidence.
+- **Audit Principle**: Freeze the scope and define required behavior and conditions that must always hold; require reproducible evidence of material impact, distinguish defects from suggestions and accepted limitations, and, unless instructed otherwise, weigh expected benefit against added complexity and redundancy. Do not turn low-impact risks into disproportionate machinery; still surface material defects and low-cost fixes.
+- **Repair Principle**: Fix one root cause per small, self-contained change and leave the codebase in better overall health; redesign instead of stacking exceptions when complexity keeps growing.
+- **Failure Principle**: Fail fast and explicitly rather than silently falling back or reporting false success when correctness cannot be guaranteed.
+- **Test Principle**: Test conditions that must always hold, negative paths, and realistic end-to-end behavior rather than only the current implementation's happy path.
+- **Restraint Principle**: Record irreducible limitations honestly; do not disguise unsupported behavior as compatibility or recovery.
+- **Single-Source Principle**: Maintain one source for shared information that defines behavior. Duplicate it only when components cannot share it, and check consistency only when divergence would materially affect correctness or operation.
 
-## 操作护栏
+When these principles conflict, preserve explicit requirements, correctness, and truthful failure first; then choose the least complex complete implementation.
 
-- 保持仓库整齐、干净。
-- 在写或改代码之前，读够相关代码和配套文档，形成可靠设计。
-- 保持独立判断。当请求与证据、文档要求、安全约束或更高优先级指令冲突时，及时提出。
-- 删除共享代码、持久数据、公开接口或操作入口之前，先查清谁在用。
-- 开发中不要反复打补丁。同一组件需要反复修复时，停下来重新评估底层设计。只有根因重构是当前需求下最小完整方案时才做。
-- 避免过多测试用例和过度依赖 mock。保留验证必要行为与失败路径的测试，必要时做真实测试。
+
+## Operational Guardrails
+
+- Keep the repository organized, clean, and tidy.
+- Read enough relevant code and supporting documentation to form a sound design before writing or modifying code.
+- Maintain independent judgment. When a request conflicts with evidence, a documented requirement, a safety constraint, or a higher-priority instruction, raise the conflict promptly.
+- Before removing shared code, persisted data, a public interface, or an operational entry point, check where it is used.
+- Do not keep applying ad-hoc patches during development. If the same component requires repeated fixes, stop and reassess the underlying design. Use a root-cause refactor only when it is the smallest complete solution justified by current requirements.
+- Avoid excessive test cases and overreliance on mocks. Retain the tests necessary to verify required behavior and failure paths, and perform real-world tests when necessary.
 
 
 ## Documentation

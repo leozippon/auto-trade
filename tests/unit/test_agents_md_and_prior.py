@@ -31,24 +31,21 @@ from autotrade.pipelines.worker import _restore_prior_store
 
 
 def _agents_md(root: Path, *, missing: str | None = None) -> Path:
-    parts = ["# 全局准则"]
-    if missing != "多智能体协作":
+    parts = [
+        "# Global Guidelines",
+        "## Rules for Multi-Agent Cooperation\nHOST_ONLY_COOPERATION",
+    ]
+    if missing != "AutoTrade Fold and Meta sessions":
         parts.append(
-            "## 多智能体协作\n"
-            "除非任务非常简单，否则启动多智能体协作。\n\n"
-            "### AutoTrade Fold 与 Meta 会话\n"
+            "### AutoTrade Fold and Meta sessions\n"
             "AUTO_ONLY_CONTRACT\n\n"
-            "| 角色 | 策略与模型 | PRIOR | skills | 结束 |\n"
+            "| Actor | Strategy | PRIOR | Skills | Backtest/finish |\n"
             "| --- | --- | --- | --- | --- |\n"
-            "| Fold 父 Agent | 可写 | 只读 | 可写 | 可结束 Fold |\n"
-            "| Meta 父 Agent | 可正则化 | 唯一可写 | 可写 | 可结束 Meta |\n\n"
-            "从 inputs/skills_index.json 起步；可迁移知识写入 "
-            "skills/<kebab-name>/SKILL.md。"
+            "| Fold parent | No writes | Read-only | May write | Yes |\n"
+            "| Meta parent | Optional regularization | Sole writer | May write | Finish only |\n\n"
+            "Start from inputs/skills_index.json and mounted evidence; reusable knowledge belongs in "
+            "skills/<kebab-name>/SKILL.md."
         )
-    if missing != "开发原则":
-        parts.append("## 开发原则\n只保留最小完整方案。")
-    if missing != "操作护栏":
-        parts.append("## 操作护栏\n保持仓库整齐。")
     path = root / "AGENTS.md"
     path.write_text("\n\n".join(parts) + "\n", encoding="utf-8")
     return path
@@ -58,17 +55,20 @@ def test_root_agents_md_recommends_first_level_subagents() -> None:
     text = Path(__file__).resolve().parents[2].joinpath("AGENTS.md").read_text(
         encoding="utf-8"
     )
-    assert "除非任务非常简单，否则启动多智能体协作" in text
+    assert "Unless the task is very simple, start multi-agent collaboration" in text
     assert "Every main-agent task must start" not in text
     assert "`auditor`" in text
     assert "`developer`" in text
     assert "`Explore`" in text
     assert "`general-purpose`" in text
-    assert "`explore` 只一层" in text
-    assert "子代理不得嵌套" in text
-    assert "PRIOR 由 Meta 维护" in text
+    assert "`explore` is optional and limited to one level" in text
+    assert "Sub-agents cannot nest" in text
+    assert "Keep the existing PRIOR" in text
+    assert "Chinese rendering of the host Multi-Agent" in text
+    assert "This English AutoTrade subsection is not injected" in text
     assert "inputs/skills_index.json" in text
     assert "skills/<kebab-name>/SKILL.md" in text
+    assert "Writable roles should put durable, transferable knowledge" in text
     for stale in (
         "data_audit",
         "strategy_audit",
@@ -84,16 +84,16 @@ def test_required_agents_section_is_injected_into_fold_and_meta(tmp_path: Path) 
     extracted = load_required_agents_md_sections(path)
     fold = build_system_prompt(mode="fold", agents_md_path=path)
     meta = build_system_prompt(mode="meta", agents_md_path=path)
-    assert "# 多智能体协作" in extracted.text
+    assert "### AutoTrade Fold and Meta sessions" in extracted.text
     assert "AUTO_ONLY_CONTRACT" in extracted.text
-    assert "# 开发原则" in extracted.text
-    assert "# 操作护栏" in extracted.text
+    assert "HOST_ONLY_COOPERATION" not in extracted.text
     for prompt in (fold, meta):
-        assert "AUTO_ONLY_CONTRACT" in prompt
-        assert "# 多智能体协作" in prompt
+        assert "### AutoTrade Fold and Meta sessions" not in prompt
+        assert "AUTO_ONLY_CONTRACT" not in prompt
+        assert "HOST_ONLY_COOPERATION" not in prompt
+        assert "# 角色与写权" in prompt
         assert "Fold 父 Agent" in prompt
         assert "Meta 父 Agent" in prompt
-        assert "Rules for Multi-Agent" not in prompt
     assert "Meta 主协调者" in meta
     assert "inputs/meta_context.json" in meta
     assert "策略方向" in meta
@@ -107,10 +107,10 @@ def test_required_agents_section_is_injected_into_fold_and_meta(tmp_path: Path) 
 
 
 def test_missing_agents_section_fails_explicitly(tmp_path: Path) -> None:
-    path = _agents_md(tmp_path, missing="多智能体协作")
-    with pytest.raises(AgentsMdError, match="多智能体协作"):
+    path = _agents_md(tmp_path, missing="AutoTrade Fold and Meta sessions")
+    with pytest.raises(AgentsMdError, match="AutoTrade Fold and Meta sessions"):
         load_required_agents_md_sections(path)
-    with pytest.raises(AgentsMdError, match="多智能体协作"):
+    with pytest.raises(AgentsMdError, match="AutoTrade Fold and Meta sessions"):
         build_system_prompt(mode="fold", agents_md_path=path)
     with pytest.raises(AgentsMdError, match="missing"):
         load_required_agents_md_sections(tmp_path / "absent.md")

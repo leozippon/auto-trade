@@ -4245,7 +4245,6 @@ function renderTraceBlocks(box, blocks, { truncated, eof, previous, detail } = {
       ),
     );
   }
-  const ordered = orderTraceBlocks(blocks);
   const appendNode = (host, block, index) => {
     const node = traceBlockNode(block, index, detail);
     for (const details of node.querySelectorAll("details[data-key]")) {
@@ -4253,13 +4252,32 @@ function renderTraceBlocks(box, blocks, { truncated, eof, previous, detail } = {
     }
     host.append(node);
   };
-  ordered.rest.forEach((block, index) => appendNode(fragment, block, index));
+  (blocks || []).forEach((block, index) => appendNode(fragment, block, index));
   if (eof) fragment.append(el("div", { class: "hint" }, "—— trace 结束 ——"));
-  if (ordered.running.length) {
+  const running = orderTraceBlocks(blocks).running;
+  if (running.length) {
     const dock = el("div", { class: "trace-subagent-dock" });
-    ordered.running.forEach((block, index) =>
-      appendNode(dock, block, ordered.rest.length + index),
-    );
+    running.forEach((block) => {
+      const role = String(block.role || "子代理");
+      const taskId = String(block.task_id || "");
+      dock.append(
+        el(
+          "button",
+          {
+            type: "button",
+            class: "trace-subagent-chip",
+            title: String(block.description || role),
+            onclick: () => {
+              const target = taskId
+                ? box.querySelector(`[data-task-id="${CSS.escape(taskId)}"]`)
+                : null;
+              if (target) target.scrollIntoView({ block: "nearest", behavior: "smooth" });
+            },
+          },
+          `🧩 ${role}`,
+        ),
+      );
+    });
     fragment.append(dock);
   }
   box.replaceChildren(fragment);
@@ -4269,6 +4287,8 @@ function renderTraceBlocks(box, blocks, { truncated, eof, previous, detail } = {
 function traceBlockNode(block, index, detail) {
   const kind = String((block && block.kind) || "");
   const node = el("div", { class: `trace-block ${kind}` });
+  if (kind === "subagent" && block && block.task_id)
+    node.dataset.taskId = String(block.task_id);
   try {
     if (kind === "agent_output") renderAgentOutputBlock(node, block, detail);
     else if (kind === "tool_group") renderToolGroupBlock(node, block, index);
