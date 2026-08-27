@@ -10,8 +10,17 @@ DOMAIN_CONF = REPO / "ops/nginx/aliyun/admcubequant-https.conf"
 IP_CONF = REPO / "ops/nginx/aliyun/admcube-https.conf"
 INSTALL_SCRIPT = REPO / "ops/nginx/install-admcubequant.sh"
 INDEX_HTML = REPO / "src/autotrade/webui/static/index.html"
+DOMAIN_FULLCHAIN = "/etc/letsencrypt/live/admcubequant.tj.cn/fullchain.pem"
+DOMAIN_AVAILABLE_CP = "sudo cp ~/admcube-nginx/admcubequant-https.conf /etc/nginx/sites-available/admcubequant-https"
+DOMAIN_ENABLED_LN = "sudo ln -sfn /etc/nginx/sites-available/admcubequant-https /etc/nginx/sites-enabled/admcubequant-https"
 IP_FULLCHAIN = "/etc/letsencrypt/live/admcube-ip/fullchain.pem"
 IP_PRIVKEY = "/etc/letsencrypt/live/admcube-ip/privkey.pem"
+IP_CERT_CHECK = (
+    f"if ! sudo -n test -f {IP_FULLCHAIN} || ! sudo -n test -f {IP_PRIVKEY}; then"
+)
+IP_CERT_REFUSAL = (
+    f'echo "missing {IP_FULLCHAIN} or {IP_PRIVKEY}; refusing to enable IP vhost" >&2'
+)
 IP_AVAILABLE_CP = "sudo cp ~/admcube-nginx/admcube-https.conf /etc/nginx/sites-available/admcube-https"
 IP_ENABLED_LN = "sudo ln -sfn /etc/nginx/sites-available/admcube-https /etc/nginx/sites-enabled/admcube-https"
 
@@ -115,20 +124,42 @@ def test_console_footer_uses_the_same_absolute_badge_url() -> None:
     assert "津公网安备12010402002613号" in page
 
 
+def test_install_script_uses_sudo_to_detect_domain_cert_before_certbot() -> None:
+    text = INSTALL_SCRIPT.read_text(encoding="utf-8")
+    domain_check = f"sudo -n test -f {DOMAIN_FULLCHAIN}"
+    guarded_check = f"if ! {domain_check}; then"
+    check_at = text.index(guarded_check)
+    certbot_at = text.index("sudo certbot certonly")
+    fi_at = text.index("\nfi\n", check_at)
+    cp_at = text.index(DOMAIN_AVAILABLE_CP)
+    ln_at = text.index(DOMAIN_ENABLED_LN)
+    first_reload = text.index("sudo systemctl reload nginx")
+    assert first_reload < check_at < certbot_at < fi_at < cp_at
+    assert fi_at < ln_at
+    assert f"[ ! -f {DOMAIN_FULLCHAIN} ]" not in text
+    assert "sudo certbot" not in text[:check_at]
+    assert "sudo certbot" not in text[fi_at:]
+    assert DOMAIN_AVAILABLE_CP not in text[:check_at]
+    assert DOMAIN_ENABLED_LN not in text[:check_at]
+    assert "-d admcubequant.tj.cn" in text[check_at:fi_at]
+
+
 def test_install_script_checks_ip_certs_before_enabling_ip_vhost() -> None:
     text = INSTALL_SCRIPT.read_text(encoding="utf-8")
-    fullchain_check = text.index(f"[ ! -f {IP_FULLCHAIN} ]")
-    privkey_check = text.index(f"[ ! -f {IP_PRIVKEY} ]")
+    gate_at = text.index(IP_CERT_CHECK)
+    echo_at = text.index(IP_CERT_REFUSAL, gate_at)
+    exit_at = text.index("exit 1", echo_at)
+    fi_at = text.index("\nfi\n", exit_at)
     cp_at = text.index(IP_AVAILABLE_CP)
     ln_at = text.index(IP_ENABLED_LN)
-    assert fullchain_check < cp_at
-    assert privkey_check < cp_at
-    assert fullchain_check < ln_at
-    assert privkey_check < ln_at
-    gate = text[min(fullchain_check, privkey_check) : cp_at]
-    assert "exit 1" in gate
-    assert IP_AVAILABLE_CP not in text[: min(fullchain_check, privkey_check)]
-    assert IP_ENABLED_LN not in text[: min(fullchain_check, privkey_check)]
+    fullchain_check = text.index(f"sudo -n test -f {IP_FULLCHAIN}", gate_at)
+    privkey_check = text.index(f"sudo -n test -f {IP_PRIVKEY}", fullchain_check)
+    assert gate_at <= fullchain_check < privkey_check < echo_at < exit_at < fi_at < cp_at
+    assert fi_at < ln_at
+    assert IP_AVAILABLE_CP not in text[:gate_at]
+    assert IP_ENABLED_LN not in text[:gate_at]
+    assert f"[ ! -f {IP_FULLCHAIN} ]" not in text
+    assert f"[ ! -f {IP_PRIVKEY} ]" not in text
     assert "-d admcube-ip" not in text
     for line in text.splitlines():
         if "certbot" in line:

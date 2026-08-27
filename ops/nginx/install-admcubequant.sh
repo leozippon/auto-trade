@@ -16,13 +16,13 @@ sudo cp ~/admcube-nginx/admcube-http-limits.conf /etc/nginx/conf.d/admcube-http-
 sudo ln -sfn /etc/nginx/sites-available/admcubequant-http /etc/nginx/sites-enabled/admcubequant-http
 sudo nginx -t
 sudo systemctl reload nginx
-if [ ! -f /etc/letsencrypt/live/admcubequant.tj.cn/fullchain.pem ]; then
+if ! sudo -n test -f /etc/letsencrypt/live/admcubequant.tj.cn/fullchain.pem; then
   sudo certbot certonly --webroot -w /var/lib/letsencrypt -d admcubequant.tj.cn \
     --non-interactive --agree-tos --register-unsafely-without-email
 fi
 sudo cp ~/admcube-nginx/admcubequant-https.conf /etc/nginx/sites-available/admcubequant-https
 sudo ln -sfn /etc/nginx/sites-available/admcubequant-https /etc/nginx/sites-enabled/admcubequant-https
-if [ ! -f /etc/letsencrypt/live/admcube-ip/fullchain.pem ] || [ ! -f /etc/letsencrypt/live/admcube-ip/privkey.pem ]; then
+if ! sudo -n test -f /etc/letsencrypt/live/admcube-ip/fullchain.pem || ! sudo -n test -f /etc/letsencrypt/live/admcube-ip/privkey.pem; then
   echo "missing /etc/letsencrypt/live/admcube-ip/fullchain.pem or /etc/letsencrypt/live/admcube-ip/privkey.pem; refusing to enable IP vhost" >&2
   exit 1
 fi
