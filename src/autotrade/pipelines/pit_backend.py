@@ -269,7 +269,12 @@ class ResearchPITSnapshotProvider:
                 except (OSError, TypeError, ValueError):
                     alt = {}
                 if _replay_manifest_matches(
-                    alt, start=start, end=end, decision=decision, phase=phase
+                    alt,
+                    start=start,
+                    end=end,
+                    decision=decision,
+                    phase=phase,
+                    require_label=False,
                 ):
                     return unphased
             staging = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
@@ -1011,14 +1016,18 @@ def _replay_manifest_matches(
     end: str,
     decision: datetime,
     phase: str,
+    require_label: bool = True,
 ) -> bool:
-    return (
-        manifest.get("kind") == "replay_slot"
-        and str(manifest.get("period_start")) == start
-        and str(manifest.get("period_end")) == end
-        and _optional_cn_datetime(manifest.get("available_from")) == decision
-        and str(manifest.get("label") or "") == phase
-    )
+    if (
+        manifest.get("kind") != "replay_slot"
+        or str(manifest.get("period_start")) != start
+        or str(manifest.get("period_end")) != end
+        or _optional_cn_datetime(manifest.get("available_from")) != decision
+    ):
+        return False
+    if require_label and str(manifest.get("label") or "") != phase:
+        return False
+    return True
 
 
 def _cn_timestamp(value: object) -> pd.Timestamp:

@@ -238,3 +238,11 @@ def test_replay_manifest_matches_requires_phase_label():
         decision=decision,
         phase="valid",
     )
+    assert _replay_manifest_matches(
+        manifest,
+        start="20220101",
+        end="20220331",
+        decision=decision,
+        phase="valid",
+        require_label=False,
+    )
