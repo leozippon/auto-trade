@@ -4027,7 +4027,10 @@ function liveTracePanel(detail, session) {
         previous: lastBlocks,
         detail,
       });
-      if (auto.checked) box.scrollTop = box.scrollHeight;
+      if (auto.checked) {
+        const scroller = box.querySelector(".trace-box-scroll") || box;
+        scroller.scrollTop = scroller.scrollHeight;
+      }
       if (claimStream) openStream(Number(page.next_offset) || 0);
     } catch {
       if (claimStream) openStream(0);
@@ -4293,6 +4296,7 @@ function renderTraceBlocks(box, blocks, { truncated, eof, previous, detail } = {
       ),
     );
   }
+  const scroll = el("div", { class: "trace-box-scroll" });
   const appendNode = (host, block, index) => {
     const node = traceBlockNode(block, index, detail);
     for (const details of node.querySelectorAll("details[data-key]")) {
@@ -4300,12 +4304,13 @@ function renderTraceBlocks(box, blocks, { truncated, eof, previous, detail } = {
     }
     host.append(node);
   };
-  (blocks || []).forEach((block, index) => appendNode(fragment, block, index));
-  if (eof) fragment.append(el("div", { class: "hint" }, "—— trace 结束 ——"));
+  (blocks || []).forEach((block, index) => appendNode(scroll, block, index));
+  if (eof) scroll.append(el("div", { class: "hint" }, "—— trace 结束 ——"));
+  fragment.append(scroll);
   const running = orderTraceBlocks(blocks).running;
   if (running.length) {
     const dock = el("div", { class: "trace-subagent-dock" });
-    running.forEach((block) => dock.append(runningSubagentChip(block, box)));
+    running.forEach((block) => dock.append(runningSubagentChip(block, scroll)));
     fragment.append(dock);
   }
   box.replaceChildren(fragment);

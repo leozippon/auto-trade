@@ -199,6 +199,7 @@ def test_subagent_trace_card_shows_model_thinking_and_context() -> None:
     assert "独立上下文" in source
     assert "orderTraceBlocks" in script
     assert "trace-subagent-dock" in script
+    assert "trace-box-scroll" in script
     assert "trace-subagent-chip" in script
     assert "runningSubagentChip" in script
     assert "isRunningSubagent" in script
