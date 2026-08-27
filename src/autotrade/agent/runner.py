@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import re
 import threading
+import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
@@ -444,6 +445,17 @@ class AgentSessionRunner:
                     )
                     raise AgentSessionDeadlineExceeded(
                         conversation_id=self.conversation_id, llm_calls=llm_calls
+                    ) from exc
+                if "LLM call budget exhausted" in error:
+                    self._close_session(
+                        {
+                            "status": "call_budget_exhausted",
+                            "llm_calls": llm_calls,
+                        },
+                        explore_totals=explore_totals,
+                    )
+                    raise RuntimeError(
+                        "Agent exceeded the session call budget"
                     ) from exc
                 if llm_failure_streak >= _LLM_FAILURE_CIRCUIT:
                     self._close_session(
@@ -1140,27 +1152,49 @@ class AgentSessionRunner:
             self._remember_observation("explore", record)
         return messages, explore_totals
 
-    def _wait_explore_jobs(self) -> list[dict[str, object]]:
-        return self._collect_finished_explores(wait=True)
+    def _wait_explore_jobs(self, timeout: float = 30.0) -> list[dict[str, object]]:
+        return self._collect_finished_explores(wait=True, timeout=timeout)
 
     def _collect_finished_explores(
-        self, *, wait: bool = False
+        self, *, wait: bool = False, timeout: float | None = None
     ) -> list[dict[str, object]]:
         finished: list[dict[str, object]] = []
+        deadline = (
+            time.monotonic() + timeout if wait and timeout is not None else None
+        )
         for job in self._explore_jobs:
             if job.record is not None:
                 continue
-            if not wait and not job.future.done():
-                continue
-            try:
-                result = job.future.result()
-            except Exception as exc:  # noqa: BLE001 - child failure stays an observation
-                result = {
-                    "task_id": job.task_id,
-                    "status": "error",
-                    "error": safe_error_summary(exc),
-                    "role": job.role,
-                }
+            result: object
+            if wait:
+                remaining = (
+                    None if deadline is None else max(0.0, deadline - time.monotonic())
+                )
+                if remaining == 0:
+                    continue
+                try:
+                    result = job.future.result(timeout=remaining)
+                except TimeoutError:
+                    continue
+                except Exception as exc:  # noqa: BLE001 - child failure stays an observation
+                    result = {
+                        "task_id": job.task_id,
+                        "status": "error",
+                        "error": safe_error_summary(exc),
+                        "role": job.role,
+                    }
+            else:
+                if not job.future.done():
+                    continue
+                try:
+                    result = job.future.result()
+                except Exception as exc:  # noqa: BLE001 - child failure stays an observation
+                    result = {
+                        "task_id": job.task_id,
+                        "status": "error",
+                        "error": safe_error_summary(exc),
+                        "role": job.role,
+                    }
             ok = result.get("status") == "completed" if isinstance(result, dict) else False
             record = {
                 "ok": ok,
@@ -1189,14 +1223,14 @@ class AgentSessionRunner:
         *,
         explore_totals: dict[str, int] | None = None,
     ) -> None:
-        self._wait_explore_jobs()
+        self._collect_finished_explores(wait=False)
         if explore_totals is not None and "token_usage" not in payload:
             payload = dict(payload)
         self._emit("session_end", payload)
         pool = self._explore_pool
         self._explore_pool = None
         if pool is not None:
-            pool.shutdown(wait=True)
+            pool.shutdown(wait=False, cancel_futures=True)
 
     def _compact_if_needed(
         self,

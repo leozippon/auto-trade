@@ -191,7 +191,7 @@ def test_subagent_trace_card_shows_model_thinking_and_context() -> None:
     source = script.split("function renderSubagentBlock(", 1)[1].split(
         "\nfunction ", 1
     )[0]
-    assert "🧩 子代理" in source
+    assert "🧩" in source
     assert "block.role" in source
     assert "block.model" in source
     assert "parentReasoningLabel" in source

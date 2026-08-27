@@ -4362,21 +4362,28 @@ function renderSubagentBlock(node, block, detail) {
     block.thinking && block.thinking !== "inherit"
       ? block.thinking
       : parentReasoningLabel(detail);
-  const title = ["🧩 子代理", block.role, block.model, thinking, statusLabel]
-    .filter(Boolean)
-    .join(" ");
+  const role = String(block.role || "子代理");
+  const meta = [
+    block.model,
+    thinking ? `推理 ${thinking}` : "",
+    block.inherit_context === true
+      ? "继承上下文"
+      : block.inherit_context === false
+        ? "独立上下文"
+        : "",
+  ].filter(Boolean);
   const key = `sub:${block.task_id || ""}:${phase || status}`;
   node.append(
     el(
       "div",
       { class: "head" },
-      el("span", { class: `type subagent ${status}` }, title),
+      el(
+        "span",
+        { class: `type subagent ${status}` },
+        `🧩 ${role} · ${statusLabel}`,
+      ),
       block.description ? el("span", {}, String(block.description)) : null,
-      block.inherit_context === true
-        ? el("span", { class: "hint" }, "继承上下文")
-        : block.inherit_context === false
-          ? el("span", { class: "hint" }, "独立上下文")
-          : null,
+      meta.length ? el("span", { class: "hint" }, meta.join(" · ")) : null,
       block.ts ? el("span", {}, fmtTsTime(block.ts)) : null,
     ),
     lazyDetails("详情", () => subagentDetailNode(block), key),
