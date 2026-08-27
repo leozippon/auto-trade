@@ -82,7 +82,7 @@ free -h
 
 ### AutoTrade Fold and Meta sessions
 
-Only this subsection is injected into regular Fold and Meta system prompts. It defines the single role and write-right matrix; the surrounding host-agent cooperation rules are not injected.
+This subsection is the host-facing AutoTrade contract. Fold and Meta system prompts render an equivalent Chinese role matrix; they do not inject this English subsection or the surrounding host cooperation rules.
 
 | Actor | Strategy or models | PRIOR | Shared skills | Official backtest and finish |
 | --- | --- | --- | --- | --- |

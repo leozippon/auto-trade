@@ -477,7 +477,7 @@ def test_prompt_contract_leaves_sidecar_exploration_to_meta() -> None:
     assert "逐个读取" not in prompt
     assert "process summary" not in prompt
     assert "raw traces" in prompt
-    assert "sidecar 引用" in META_SYSTEM_PROMPT
+    assert "原始 Trace sidecar" in META_SYSTEM_PROMPT
     assert "原始 sidecar 不改变 PIT/Test/Held-out 边界" in META_SYSTEM_PROMPT
     assert "逐个读取" not in META_SYSTEM_PROMPT
 

@@ -25,7 +25,6 @@ from _bootstrap import add_repo_src
 
 add_repo_src(__file__)
 
-from autotrade.agent.agents_md import load_required_agents_md_sections
 from autotrade.agent.compact import COMPACT_SYSTEM_PROMPT
 from autotrade.agent.explore import explore_system_prompt
 from autotrade.agent.prompts import (
@@ -43,6 +42,7 @@ from autotrade.agent.prompts import (
     FOLD_SUBMIT_CONTRACT,
     HARD_FINALIZATION_SYSTEM_PROMPT,
     META_SYSTEM_PROMPT,
+    ROLE_MATRIX_SECTION,
     RUNTIME_SYSTEM_PROMPT,
     STEP_TREE_SECTION,
     STEP_WRAP_UP_PROMPT,
@@ -100,13 +100,11 @@ def render() -> str:
         "",
         "## 1. Fold Agent 系统提示词",
         "",
-        "运行时系统提示词先注入仓库根 `AGENTS.md` 的 `AutoTrade Fold and Meta sessions` subsection，再接六个稳定 Fold 区块。",
+        "运行时系统提示词先给出中文角色与写权表，再接六个稳定 Fold 区块。仓库根 `AGENTS.md` 的 AutoTrade subsection 只作宿主合同，缺文件或缺节会使会话失败，但不注入英文正文。",
         "",
-        "### 1.0 仓库 AutoTrade 合同",
+        "### 1.0 角色与写权",
         "",
-        "运行时只抽取这一 subsection；代码不复制正文，精确 Prompt 证据由原始 Agent Trace 承担。当前抽取如下：",
-        "",
-        _block(load_required_agents_md_sections().text),
+        _block(ROLE_MATRIX_SECTION),
         "",
         "### 1.1 角色与目标",
         "",
@@ -192,7 +190,7 @@ def render() -> str:
         "",
         "## 4. 离线 Meta Agent 系统提示词",
         "",
-        "Meta 同样先注入上述 AGENTS AutoTrade subsection，再接 `META_SYSTEM_PROMPT`；不会附加完整 Fold runtime essay。",
+        "Meta 使用同一中文角色与写权表，再接 `META_SYSTEM_PROMPT`；不附加完整 Fold runtime essay，也不注入英文 AGENTS 正文。",
         "",
         "`META_SYSTEM_PROMPT`：",
         "",

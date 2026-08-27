@@ -65,8 +65,8 @@ def test_root_agents_md_recommends_first_level_subagents() -> None:
     assert "`explore` is optional and limited to one level" in text
     assert "sub-agents cannot nest" in text
     assert "Keep the existing PRIOR" in text
-    assert "Only this subsection is injected" in text
-    assert "surrounding host-agent cooperation rules are not injected" in text
+    assert "equivalent Chinese role matrix" in text
+    assert "do not inject this English subsection" in text
     assert "inputs/skills_index.json" in text
     assert "skills/<kebab-name>/SKILL.md" in text
     assert "Writable roles should put durable, transferable knowledge" in text
@@ -85,12 +85,16 @@ def test_required_agents_section_is_injected_into_fold_and_meta(tmp_path: Path) 
     extracted = load_required_agents_md_sections(path)
     fold = build_system_prompt(mode="fold", agents_md_path=path)
     meta = build_system_prompt(mode="meta", agents_md_path=path)
-    for prompt in (extracted.text, fold, meta):
-        assert "### AutoTrade Fold and Meta sessions" in prompt
-        assert "AUTO_ONLY_CONTRACT" in prompt
+    assert "### AutoTrade Fold and Meta sessions" in extracted.text
+    assert "AUTO_ONLY_CONTRACT" in extracted.text
+    assert "HOST_ONLY_COOPERATION" not in extracted.text
+    for prompt in (fold, meta):
+        assert "### AutoTrade Fold and Meta sessions" not in prompt
+        assert "AUTO_ONLY_CONTRACT" not in prompt
         assert "HOST_ONLY_COOPERATION" not in prompt
-    assert "Fold parent" in fold
-    assert "Meta parent" in meta
+        assert "# 角色与写权" in prompt
+        assert "Fold 父 Agent" in prompt
+        assert "Meta 父 Agent" in prompt
     assert "Meta 主协调者" in meta
     assert "inputs/meta_context.json" in meta
     assert "策略方向" in meta
