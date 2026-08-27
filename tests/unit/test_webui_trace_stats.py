@@ -71,6 +71,7 @@ def test_trace_stats_counts_unique_explore_tasks_not_calls(tmp_path: Path) -> No
     assert stats["llm_prompt_tokens"] == 6
     assert stats["llm_completion_tokens"] == 3
     assert stats["last_llm_prompt_tokens"] == 0
+    assert stats["compact_ops"] == 0
 
 
 def test_trace_stats_old_trace_without_start_still_counts_unique_task(
@@ -122,6 +123,57 @@ def test_trace_stats_incrementally_dedups_appended_events(tmp_path: Path) -> Non
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps({"event_type": "explore_tool", "task_id": "explore_b"}) + "\n")
     assert trace_stats(path)["subagent_tasks"] == 2
+
+
+def test_trace_stats_counts_compact_ops_without_double_counting(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "live_ops.jsonl"
+    _write_trace(
+        path,
+        [
+            {"event_type": "context_compaction", "status": "ok"},
+            {"event_type": "context_compaction", "status": "error"},
+            {
+                "event_type": "context_edit",
+                "reason": "context_window_budget",
+                "summarized_tool_results": 2,
+            },
+            {
+                "event_type": "context_edit",
+                "reason": "provider_context_overflow_recovery",
+                "summarized_tool_results": 1,
+            },
+            {"event_type": "llm_call"},
+        ],
+    )
+    first = trace_stats(path)
+    assert first["compact_ops"] == 2
+    assert "trim_ops" not in first
+    assert "clear_ops" not in first
+    assert "cleared_tool_results" not in first
+    counts = first["counts"]
+    assert isinstance(counts, dict)
+    assert counts["context_edit"] == 2
+    second = trace_stats(path)
+    assert second["compact_ops"] == 2
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"event_type": "context_compaction"}) + "\n")
+        handle.write(
+            json.dumps(
+                {
+                    "event_type": "context_edit",
+                    "summarized_tool_results": 9,
+                    "reason": "context_window_budget",
+                }
+            )
+            + "\n"
+        )
+    third = trace_stats(path)
+    assert third["compact_ops"] == 3
+    later_counts = third["counts"]
+    assert isinstance(later_counts, dict)
+    assert later_counts["context_edit"] == 3
 
 
 def test_trace_stats_recomputes_when_cached_summary_lacks_subagent_field(
@@ -224,7 +276,19 @@ def test_stats_chips_show_subagent_near_llm_only_when_positive() -> None:
     assert "Number(stats.subagent_tasks) || 0" in source
     assert "🧩 子代理" in source
     assert 'key === "llm_call" && subagentTasks' in source
-    assert "上下文" in source
+    assert "当前上下文" in source
+    assert "累计输入" in source
+    assert "累计输出" in source
+    assert "`Compact ${Number(stats.compact_ops) || 0}`" in source
+    assert "compact_ops" in source
+    assert "trim_ops" not in source
+    assert "clear_ops" not in source
+    assert "`Trim ${" not in source
+    assert "`Clear ${" not in source
+    assert "context_compaction" not in source
+    assert "`输入 ${" not in source
+    assert "`输出 ${" not in source
+    assert "`上下文 ${" not in source
     assert "推理" not in source
     assert "执行中" not in source
     assert "last_llm_prompt_tokens" in source

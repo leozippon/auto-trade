@@ -1,11 +1,10 @@
-"""Conversation compaction for long Agent sessions.
+"""Semantic conversation compaction for long Agent sessions.
 
-The runner keeps deterministic observation summaries as a free fallback, but
-long sessions need a semantic summary before expensive main-model calls.  This
-module provides a small Claude-Code-inspired compaction layer: estimate the
-current context window, call a cheap no-thinking model when the window is large,
-replace old messages with a structured continuation state, and let the runner
-record the audit event.
+The runner does not proactively trim history or clear tool results. When the
+estimated window crosses a threshold, or a request is forced because it does
+not fit, this module calls a cheap no-thinking model, replaces older messages
+with a structured continuation state, and keeps recent raw turns. Emergency
+in-place tool-result fitting is the fail-closed overflow recovery.
 """
 
 from __future__ import annotations
@@ -468,14 +467,6 @@ def _bounded_context_value(value: object) -> object:
 
 def is_compaction_message(message: ChatMessage) -> bool:
     payload = _compaction_payload(message)
-    return payload is not None and payload.get("observation") in {
-        "context_summary",
-        "context_compaction",
-    }
-
-
-def is_llm_compaction_message(message: ChatMessage) -> bool:
-    payload = _compaction_payload(message)
     return payload is not None and payload.get("observation") == "context_compaction"
 
 
@@ -492,10 +483,7 @@ def _compaction_payload(message: ChatMessage) -> dict[str, Any] | None:
 def _latest_compaction_summary(messages: Sequence[ChatMessage]) -> object | None:
     for message in reversed(messages[1:]):
         payload = _compaction_payload(message)
-        if payload is None or payload.get("observation") not in {
-            "context_summary",
-            "context_compaction",
-        }:
+        if payload is None or payload.get("observation") != "context_compaction":
             continue
         return payload.get("summary", payload)
     return None

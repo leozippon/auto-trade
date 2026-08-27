@@ -3756,16 +3756,15 @@ function stepGatePanel(detail, session) {
   return panel;
 }
 
-/* Icon labels for the operations chips. Event-type keys (llm_call,
-   context_compaction) and tool-call names share one map: both arrive as
-   counters in trace/stats. */
+/* Icon labels for the operations chips. Event-type keys (llm_call)
+   and tool-call names share one map: both arrive as counters in
+   trace/stats. Compact uses compact_ops, not the event-type chip map. */
 const STAT_CHIPS = [
   ["llm_call", "🤖 LLM"],
   ["daily_backtest", "📊 回测"],
   ["shell", "🖥 Shell"],
   ["explore", "🧭 Explore"],
   ["read_file", "📄 读取"],
-  ["context_compaction", "🗜 压缩"],
 ];
 
 function fmtTokens(count) {
@@ -3794,17 +3793,24 @@ function statsChipsRow(stats, _detail) {
     if (!labelled.has(tool) && tool !== "explore" && tool !== "todo")
       chips.append(el("span", { class: "stat-chip" }, `${tool} ${count}`));
   }
+  chips.append(
+    el(
+      "span",
+      { class: "stat-chip", title: "语义压缩次数" },
+      `Compact ${Number(stats.compact_ops) || 0}`,
+    ),
+  );
   if (stats.llm_prompt_tokens || stats.llm_completion_tokens) {
     chips.append(
       el(
         "span",
         { class: "stat-chip" },
-        `输入 ${fmtTokens(stats.llm_prompt_tokens)}`,
+        `累计输入 ${fmtTokens(stats.llm_prompt_tokens)}`,
       ),
       el(
         "span",
         { class: "stat-chip" },
-        `输出 ${fmtTokens(stats.llm_completion_tokens)}`,
+        `累计输出 ${fmtTokens(stats.llm_completion_tokens)}`,
       ),
     );
   } else if (stats.llm_total_tokens) {
@@ -3827,7 +3833,7 @@ function statsChipsRow(stats, _detail) {
           class: "stat-chip",
           title: `${fmtTokens(used)} / ${fmtTokens(window)}`,
         },
-        `上下文 ${pct}%`,
+        `当前上下文 ${pct}%`,
       ),
     );
   }

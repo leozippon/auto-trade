@@ -32,6 +32,7 @@ from autotrade.environment.llm import (
     is_context_overflow_error,
 )
 from autotrade.environment.step_tree import StepTree
+from autotrade.environment.time_budget import InferenceTimeBudget
 from autotrade.environment.tools import (
     FinishFoldTool,
     SafeWorkspace,
@@ -41,7 +42,7 @@ from autotrade.environment.tools import (
     ToolSpec,
     WriteFileTool,
 )
-from autotrade.pipelines.local_backend import SessionBudgetLLM
+from autotrade.pipelines.local_backend import SessionBudgetLLM, SessionCallBudget
 
 
 def finish_fold_tool(root: Path) -> tuple[FinishFoldTool, str]:
@@ -374,6 +375,166 @@ def test_fold_session_recovers_one_provider_context_overflow_without_blind_repea
         message.content or "" for message in llm.calls[2] if message.role == "tool"
     )
     assert json.loads(compacted_tool)["source_omitted"] is True
+    assert next(
+        message.tool_call_id for message in llm.calls[2] if message.role == "tool"
+    ) == "shell-1"
+
+
+def test_fold_session_keeps_long_history_without_proactive_clear_or_trim(
+    tmp_path: Path,
+):
+    finish, node_id = finish_fold_tool(tmp_path)
+
+    class MarkedResultShell(DeclaredReadOnlyShell):
+        def invoke(self, arguments):
+            self.calls.append(arguments)
+            marker = str((arguments.get("argv") or ["?"])[-1])
+            return ToolResult(
+                True,
+                value={"stdout": f"{marker}:" + ("row\n" * 2_000), "marker": marker},
+            )
+
+    rounds = 12
+    responses = [
+        ProviderResponse(
+            tool_calls=(ToolCall(f"s{index}", "shell", {"argv": ["echo", str(index)]}),)
+        )
+        for index in range(rounds)
+    ]
+    responses.append(
+        ProviderResponse(
+            tool_calls=(ToolCall("f", "finish_fold", {"node_id": node_id}),)
+        )
+    )
+    llm = ScriptedLLM(responses)
+    events: list[tuple[str, dict[str, object]]] = []
+    runner = AgentSessionRunner(
+        llm=llm,
+        tools=ToolRegistry([MarkedResultShell(), finish]),
+        system_prompt="inspect many times",
+        config=AgentSessionConfig(max_llm_calls=rounds + 2),
+        event_sink=lambda event, payload: events.append((event, payload)),
+    )
+
+    assert runner.run("inspect repeatedly").status == "finished"
+    assert not hasattr(AgentSessionRunner, "_trim")
+    assert not hasattr(AgentSessionRunner, "_clear_stale_tool_results")
+    assert not any(event == "context_summary" for event, _ in events)
+    assert not any(
+        event == "context_edit" and "cleared_tool_results" in payload
+        for event, payload in events
+    )
+    final_messages = llm.calls[-1]["messages"]
+    assert isinstance(final_messages, tuple)
+    tool_payloads = [
+        json.loads(message.content or "{}")
+        for message in final_messages
+        if message.role == "tool"
+    ]
+    assert len(tool_payloads) == rounds
+    assert [payload["value"]["marker"] for payload in tool_payloads] == [
+        str(index) for index in range(rounds)
+    ]
+    assert all("observation" not in payload for payload in tool_payloads)
+    assert len(final_messages) == 2 + rounds * 2
+
+
+def test_fold_session_triggers_semantic_compact_on_threshold(tmp_path: Path):
+    finish, node_id = finish_fold_tool(tmp_path)
+    compact_llm = ScriptedLLM(
+        [
+            ProviderResponse(
+                content=json.dumps({"goal": "continue", "next_steps": ["finish"]})
+            ),
+            ProviderResponse(
+                content=json.dumps({"goal": "finish", "next_steps": ["finish"]})
+            ),
+        ]
+    )
+    llm = ScriptedLLM(
+        [
+            ProviderResponse(
+                tool_calls=(ToolCall("s1", "shell", {"argv": ["rg", "a"]}),)
+            ),
+            ProviderResponse(
+                tool_calls=(ToolCall("s2", "shell", {"argv": ["rg", "b"]}),)
+            ),
+            ProviderResponse(
+                tool_calls=(ToolCall("s3", "shell", {"argv": ["rg", "c"]}),)
+            ),
+            ProviderResponse(
+                tool_calls=(ToolCall("f", "finish_fold", {"node_id": node_id}),)
+            ),
+        ]
+    )
+    events: list[tuple[str, dict[str, object]]] = []
+    time_budget = InferenceTimeBudget(duration_seconds=120.0)
+    shared = SessionCallBudget(max_calls=20, time_budget=time_budget)
+    runner = AgentSessionRunner(
+        llm=SessionBudgetLLM(llm, budget=shared, role="main"),
+        tools=ToolRegistry([DeclaredReadOnlyShell(), finish]),
+        system_prompt="inspect",
+        config=AgentSessionConfig(max_llm_calls=6),
+        compactor=ContextCompactor(
+            SessionBudgetLLM(compact_llm, budget=shared, role="compact"),
+            ContextCompactionConfig(
+                token_threshold=1,
+                min_messages=6,
+                keep_recent_messages=2,
+                min_remaining_seconds=0,
+            ),
+        ),
+        time_budget=time_budget,
+        event_sink=lambda event, payload: events.append((event, payload)),
+    )
+
+    assert runner.run("inspect then finish").status == "finished"
+    compact_events = [
+        payload for event, payload in events if event == "context_compaction"
+    ]
+    assert compact_events and compact_events[0]["status"] == "ok"
+    assert not any(event == "context_summary" for event, _ in events)
+    later = llm.calls[-1]["messages"]
+    assert isinstance(later, tuple)
+    assert any(
+        "context_compaction" in (message.content or "") for message in later
+    )
+    tool_ids = [
+        message.tool_call_id for message in later if message.role == "tool"
+    ]
+    assistant_ids = [
+        call.id
+        for message in later
+        if message.role == "assistant" and message.tool_calls
+        for call in message.tool_calls
+    ]
+    assert tool_ids
+    assert set(tool_ids) <= set(assistant_ids)
+
+
+def test_disabled_compact_fails_closed_without_dropping_history(tmp_path: Path):
+    finish, _node_id = finish_fold_tool(tmp_path)
+    events: list[tuple[str, dict[str, object]]] = []
+    llm = ScriptedLLM([], context_window_tokens=200)
+    runner = AgentSessionRunner(
+        llm=llm,
+        tools=ToolRegistry([finish]),
+        system_prompt="s",
+        config=AgentSessionConfig(max_llm_calls=2, max_response_tokens=50),
+        event_sink=lambda event, payload: events.append((event, payload)),
+    )
+
+    with pytest.raises(RuntimeError, match="cannot be reduced safely"):
+        runner.run("y" * 5_000)
+
+    assert llm.calls == []
+    assert not any(event == "context_summary" for event, _ in events)
+    assert not any(
+        event == "context_edit" and "cleared_tool_results" in payload
+        for event, payload in events
+    )
+    end = next(payload for event, payload in events if event == "session_end")
+    assert end["status"] == "context_window_exceeded"
 
 
 def test_terminal_tool_cancels_later_mutation_in_same_turn(tmp_path: Path):

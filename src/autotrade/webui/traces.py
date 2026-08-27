@@ -322,6 +322,7 @@ def trace_stats(path: Path) -> dict[str, object]:
             "last_event_ts": last_ts,
             "trace_bytes": size,
             "subagent_tasks": len(task_ids),
+            "compact_ops": _as_int(counts.get("context_compaction")),
         }
 
 

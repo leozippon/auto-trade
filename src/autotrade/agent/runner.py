@@ -55,11 +55,7 @@ from autotrade.environment.tools.base import SessionInterrupt
 
 from .compact import (
     ContextCompactor,
-    drop_leading_orphan_tools,
-    estimate_messages_tokens,
     fit_tool_results_to_context,
-    is_compaction_message,
-    is_llm_compaction_message,
     safe_error_summary,
 )
 from .explore import (
@@ -154,13 +150,6 @@ _META_TOOLS = frozenset(
         "delete_skill",
     }
 )
-_CLEARED_TOOL_RESULT = json.dumps(
-    {
-        "observation": "cleared",
-        "note": "旧工具原始结果已清理以节省上下文；必要结论保留在当前会话摘要与结果制品中。",
-    },
-    ensure_ascii=False,
-)
 INBOX_SAFE_BEFORE_LLM = "before_llm"
 INBOX_SAFE_AFTER_LLM_BEFORE_TOOLS = "after_llm_before_tools"
 INBOX_SAFE_BETWEEN_SERIAL_TOOLS = "between_serial_tools"
@@ -199,15 +188,6 @@ class AgentSessionConfig:
     max_steps: int = 10
     deadline_seconds: float = 1_200.0
     max_response_tokens: int = 8_000
-    max_history_messages: int = 150
-    trim_message_headroom: int = 30
-    trim_token_threshold: int = 60_000
-    context_summary_max_items: int = 30
-    context_summary_max_chars: int = 6_000
-    clear_tool_results: bool = True
-    tool_result_keep_recent: int = 8
-    tool_result_clear_min_chars: int = 4_000
-    tool_result_clear_token_threshold: int = 40_000
 
     def __post_init__(self) -> None:
         if self.mode not in ("fold", "meta", "meta_learning"):
@@ -217,24 +197,14 @@ class AgentSessionConfig:
             "max_steps",
             "deadline_seconds",
             "max_response_tokens",
-            "max_history_messages",
-            "trim_token_threshold",
-            "context_summary_max_items",
-            "context_summary_max_chars",
-            "tool_result_clear_min_chars",
-            "tool_result_clear_token_threshold",
         ):
             if getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be positive")
         if (
             self.finalize_before_deadline_seconds < 0
             or self.deadline_grace_seconds < 0
-            or self.trim_message_headroom < 0
-            or self.tool_result_keep_recent < 0
         ):
-            raise ValueError(
-                "session reserve and context editing counts cannot be negative"
-            )
+            raise ValueError("session reserve cannot be negative")
 
 
 @dataclass
@@ -309,7 +279,6 @@ class AgentSessionRunner:
         self.conversation_id = conversation_id or f"conversation_{uuid.uuid4().hex}"
         self.event_sink = event_sink
         self.inbox = inbox
-        self._observation_summaries: list[dict[str, object]] = []
         self._complete_validation_nodes: list[dict[str, object]] = []
         self._hard_finalization = False
         self._hard_finalization_context_initialized = False
@@ -389,8 +358,6 @@ class AgentSessionRunner:
                         },
                     )
                 messages, _ = self._compact_if_needed(messages, remaining)
-            messages = self._clear_stale_tool_results(messages)
-            messages = self._trim(messages)
             provider_tools = self._provider_tools()
             messages, explore_totals = self._append_explore_observations(
                 messages, explore_totals
@@ -494,7 +461,6 @@ class AgentSessionRunner:
                         json.dumps(observation, ensure_ascii=False, allow_nan=False),
                     )
                 )
-                self._remember_observation("llm_call", observation)
                 continue
 
             _accumulate_usage(usage, response.usage)
@@ -528,7 +494,6 @@ class AgentSessionRunner:
                 messages.append(
                     ChatMessage("user", json.dumps(nudge, ensure_ascii=False))
                 )
-                self._remember_observation("llm_call", nudge)
                 messages = self._apply_inbox(
                     messages, safe_point=INBOX_SAFE_AFTER_LLM_BEFORE_TOOLS
                 )
@@ -558,7 +523,6 @@ class AgentSessionRunner:
                     apply_point = INBOX_SAFE_AFTER_PARALLEL_READONLY
                 else:
                     apply_point = INBOX_SAFE_AFTER_TOOLS_BEFORE_LLM
-            first_new_tool_index = len(messages)
             for call, record in results:
                 messages.append(
                     ChatMessage(
@@ -572,7 +536,6 @@ class AgentSessionRunner:
                         tool_call_id=call.id,
                     )
                 )
-                self._remember_observation(call.name, record)
                 traced_arguments = dict(call.arguments)
                 if call.name == "explore":
                     traced_arguments.pop("task", None)
@@ -597,9 +560,6 @@ class AgentSessionRunner:
                         }
                     _accumulate_explore_usage(explore_totals, explore_value)
             accepted_steps = len(self._complete_validation_nodes)
-            messages = self._clear_stale_tool_results(
-                messages, protect_from_index=first_new_tool_index
-            )
 
             if self.tools.finished:
                 _, explore_totals = self._append_explore_observations(
@@ -1176,7 +1136,6 @@ class AgentSessionRunner:
                     json.dumps(payload, ensure_ascii=False, default=str),
                 )
             )
-            self._remember_observation("explore", record)
         return messages, explore_totals
 
     def _uncollected_explore_jobs(self) -> list[_ExploreJob]:
@@ -1442,169 +1401,6 @@ class AgentSessionRunner:
                 {**edit, "reason": "provider_context_overflow_recovery"},
             )
         return recovered, compacted or bool(edit)
-
-    def _clear_stale_tool_results(
-        self,
-        messages: list[ChatMessage],
-        *,
-        protect_from_index: int | None = None,
-    ) -> list[ChatMessage]:
-        if not self.config.clear_tool_results:
-            return messages
-        if (
-            estimate_messages_tokens(messages)
-            < self.config.tool_result_clear_token_threshold
-        ):
-            return messages
-        tool_indices = [
-            index for index, message in enumerate(messages) if message.role == "tool"
-        ]
-        keep_recent = self.config.tool_result_keep_recent
-        protected = set(tool_indices[-keep_recent:]) if keep_recent > 0 else set()
-        if protect_from_index is not None:
-            protected.update(
-                index for index in tool_indices if index >= protect_from_index
-            )
-        cleared = 0
-        chars_freed = 0
-        for index in tool_indices:
-            if index in protected:
-                continue
-            message = messages[index]
-            content = message.content or ""
-            if (
-                len(content) >= self.config.tool_result_clear_min_chars
-                and content != _CLEARED_TOOL_RESULT
-            ):
-                chars_freed += len(content)
-                messages[index] = ChatMessage(
-                    "tool", _CLEARED_TOOL_RESULT, tool_call_id=message.tool_call_id
-                )
-                cleared += 1
-        if cleared:
-            self._emit(
-                "context_edit",
-                {
-                    "cleared_tool_results": cleared,
-                    "chars_freed": chars_freed,
-                    "kept_recent": keep_recent,
-                    "protected_from_index": protect_from_index,
-                },
-            )
-        return messages
-
-    def _trim(self, messages: list[ChatMessage]) -> list[ChatMessage]:
-        if (
-            len(messages) <= self.config.max_history_messages
-            and estimate_messages_tokens(messages) < self.config.trim_token_threshold
-        ):
-            return messages
-        if self.config.max_history_messages <= 2:
-            keep = max(self.config.max_history_messages - 1, 0)
-            tail = drop_leading_orphan_tools(messages[-keep:]) if keep else []
-            return [messages[0], *tail]
-
-        non_summary = [
-            message for message in messages[1:] if not is_compaction_message(message)
-        ]
-        if (
-            self.compactor is not None
-            and len(messages) <= self.config.max_history_messages
-            and len(non_summary) <= max(self.config.max_history_messages - 3, 0)
-        ):
-            return messages
-        latest_llm_summary = next(
-            (
-                message
-                for message in reversed(messages[1:])
-                if is_llm_compaction_message(message)
-            ),
-            None,
-        )
-        summary = self._context_summary_payload()
-        summary_items = summary.get("items")
-        if not isinstance(summary_items, list):
-            raise TypeError("context summary items must be a list")
-        summary_message = ChatMessage(
-            "user",
-            json.dumps(summary, ensure_ascii=False, default=str, allow_nan=False),
-        )
-        kept_llm_compaction = (
-            latest_llm_summary is not None and self.config.max_history_messages >= 4
-        )
-        reserved = 3 if kept_llm_compaction else 2
-        max_tail = max(self.config.max_history_messages - reserved, 0)
-        headroom = min(self.config.trim_message_headroom, max(max_tail - 1, 0))
-        keep = max_tail - headroom
-        if self.compactor is None and keep >= len(non_summary):
-            keep = max(len(non_summary) - max(headroom, 1), 1)
-        tail = drop_leading_orphan_tools(non_summary[-keep:]) if keep else []
-        if kept_llm_compaction:
-            trimmed = [messages[0], latest_llm_summary, summary_message, *tail]
-        else:
-            trimmed = [messages[0], summary_message, *tail]
-        self._emit(
-            "context_summary",
-            {
-                "summary_items": len(summary_items),
-                "kept_llm_compaction": kept_llm_compaction,
-                "kept_messages": len(trimmed),
-                "dropped_messages": max(len(messages) - len(trimmed), 0),
-                "max_history_messages": self.config.max_history_messages,
-                "trim_message_headroom": headroom,
-            },
-        )
-        return trimmed
-
-    def _remember_observation(
-        self, action: str, observation: dict[str, object]
-    ) -> None:
-        value = observation.get("value")
-        details = value if isinstance(value, dict) else observation
-        item: dict[str, object] = {
-            "action": action,
-            "ok": observation.get("ok"),
-        }
-        for key in (
-            "error",
-            "path",
-            "node_id",
-            "revision_id",
-            "complete",
-            "backtests_used",
-            "backtests_remaining",
-            "step_directive",
-            "status",
-        ):
-            candidate = details.get(key)
-            if candidate not in (None, "", {}, []):
-                item[key] = _shorten(candidate, 300)
-        self._observation_summaries.append(item)
-        if len(self._observation_summaries) > 120:
-            self._observation_summaries = self._observation_summaries[-120:]
-
-    def _context_summary_payload(self) -> dict[str, object]:
-        items = self._observation_summaries[-self.config.context_summary_max_items :]
-        payload: dict[str, object] = {
-            "observation": "context_summary",
-            "summary_kind": "deterministic_runner_summary",
-            "note": "Required conclusions remain in the current session summary and result artifacts.",
-            "items": items,
-        }
-        text = json.dumps(payload, ensure_ascii=False, default=str)
-        if len(text) <= self.config.context_summary_max_chars:
-            return payload
-        compact_items: list[dict[str, object]] = []
-        for item in reversed(items):
-            compact_items.insert(0, item)
-            compact_payload = {**payload, "items": compact_items}
-            if (
-                len(json.dumps(compact_payload, ensure_ascii=False, default=str))
-                > self.config.context_summary_max_chars
-            ):
-                compact_items.pop(0)
-                break
-        return {**payload, "items": compact_items, "truncated": True}
 
     def _validate_capability_boundary(self) -> None:
         names = {spec.name for spec in self.tools.specs()}
@@ -1893,9 +1689,8 @@ def _accumulate_usage(total: dict[str, int], usage: object) -> None:
     """Sum prompt/completion/reasoning/cache tokens across main-conversation calls.
 
     Cache hits are only realized while the request prefix (system prompt +
-    tool schemas + early history) stays byte-stable; trimming and compaction
-    rewrite history and reset that prefix, so the session ``cache_hit_ratio``
-    is the lever for tuning how aggressively to trim/compact.
+    tool schemas + early history) stays byte-stable; semantic compaction and
+    emergency tool-result fitting rewrite history and reset that prefix.
     """
     if not isinstance(usage, dict):
         return
@@ -1962,12 +1757,3 @@ def _is_complete_validation(record: dict[str, object]) -> bool:
         return False
     value = record.get("value")
     return isinstance(value, dict) and value.get("complete") is True
-
-
-def _shorten(value: object, max_chars: int) -> str:
-    text = (
-        value
-        if isinstance(value, str)
-        else json.dumps(value, ensure_ascii=False, default=str)
-    )
-    return text if len(text) <= max_chars else text[: max_chars - 3] + "..."
