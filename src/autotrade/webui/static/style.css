@@ -1156,30 +1156,48 @@ textarea.directive.inject-input {
  bottom: 0;
  z-index: 3;
  display: flex;
- flex-wrap: wrap;
+ flex-direction: column;
  gap: 0.35rem;
- padding: 0.35rem 0.15rem;
+ max-height: 28vh;
+ overflow: auto;
+ padding: 0.4rem 0.15rem 0.2rem;
  background: var(--bg);
  box-shadow: 0 -6px 16px color-mix(in srgb, var(--bg) 70%, transparent);
 }
 .trace-subagent-chip {
  appearance: none;
  -webkit-appearance: none;
+ display: flex;
+ flex-direction: column;
+ align-items: flex-start;
+ gap: 0.12rem;
+ width: 100%;
  margin: 0;
  border: 1px solid var(--border);
- border-radius: 999px;
+ border-radius: 10px;
  background: var(--panel);
- color: var(--run);
+ color: var(--text);
  font: inherit;
- font-size: 0.8rem;
- line-height: 1.3;
- padding: 0.2rem 0.55rem;
+ font-size: 0.82rem;
+ line-height: 1.35;
+ padding: 0.4rem 0.65rem;
+ text-align: left;
  cursor: pointer;
+}
+.trace-subagent-chip-title {
+ color: var(--run);
+ font-weight: 650;
+}
+.trace-subagent-chip-task {
+ color: var(--muted);
+ display: -webkit-box;
+ -webkit-line-clamp: 2;
+ -webkit-box-orient: vertical;
+ overflow: hidden;
 }
 .trace-subagent-chip:hover,
 .trace-subagent-chip:focus-visible {
  border-color: var(--accent);
- color: var(--accent);
  outline: none;
 }
 .trace-todo-list {

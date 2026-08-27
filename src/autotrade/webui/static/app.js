@@ -4213,6 +4213,54 @@ function isRunningSubagent(block) {
   return !{"completed":1,"timeout":1,"error":1,"cancelled":1}[status];
 }
 
+function clipTraceText(value, max) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  return text.length <= max ? text : `${text.slice(0, Math.max(1, max - 1))}…`;
+}
+
+function runningSubagentChip(block, box) {
+  const role = String(block.role || "子代理");
+  const taskId = String(block.task_id || "");
+  const status = String(block.status || "running");
+  const statusLabel = SUBAGENT_STATUS_LABELS[status] || "进行中";
+  const task = clipTraceText(block.description || block.task, 96);
+  const tools = Array.isArray(block.tools) ? block.tools : [];
+  const last = tools.length ? tools[tools.length - 1] : null;
+  const lastName = last && last.name ? String(last.name) : "";
+  const lastState =
+    last && Number(last.running) > 0
+      ? "进行中"
+      : last && Number(last.failed) > 0
+        ? "失败"
+        : lastName
+          ? "已调用"
+          : "";
+  const chip = el("button", {
+    type: "button",
+    class: "trace-subagent-chip",
+    onclick: () => {
+      const target = taskId
+        ? box.querySelector(`[data-task-id="${CSS.escape(taskId)}"]`)
+        : null;
+      if (target) target.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    },
+  });
+  chip.append(
+    el(
+      "span",
+      { class: "trace-subagent-chip-title" },
+      `🧩 ${role} · ${statusLabel}`,
+    ),
+  );
+  if (task) chip.append(el("span", { class: "trace-subagent-chip-task" }, task));
+  if (lastName)
+    chip.append(
+      el("span", { class: "hint" }, `${lastName}${lastState ? ` · ${lastState}` : ""}`),
+    );
+  return chip;
+}
+
 function orderTraceBlocks(blocks) {
   const rest = [];
   const running = [];
@@ -4257,27 +4305,7 @@ function renderTraceBlocks(box, blocks, { truncated, eof, previous, detail } = {
   const running = orderTraceBlocks(blocks).running;
   if (running.length) {
     const dock = el("div", { class: "trace-subagent-dock" });
-    running.forEach((block) => {
-      const role = String(block.role || "子代理");
-      const taskId = String(block.task_id || "");
-      dock.append(
-        el(
-          "button",
-          {
-            type: "button",
-            class: "trace-subagent-chip",
-            title: String(block.description || role),
-            onclick: () => {
-              const target = taskId
-                ? box.querySelector(`[data-task-id="${CSS.escape(taskId)}"]`)
-                : null;
-              if (target) target.scrollIntoView({ block: "nearest", behavior: "smooth" });
-            },
-          },
-          `🧩 ${role}`,
-        ),
-      );
-    });
+    running.forEach((block) => dock.append(runningSubagentChip(block, box)));
     fragment.append(dock);
   }
   box.replaceChildren(fragment);
