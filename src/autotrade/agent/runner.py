@@ -77,6 +77,15 @@ from .prompts import (
 )
 
 _LLM_FAILURE_CIRCUIT = 3
+EXPLORE_TEARDOWN_WAIT_SECONDS = 30.0
+EXPLORE_TEARDOWN_WAIT_REMAINDER_SECONDS = 0.1
+
+
+def _explore_teardown_timeout(requested: float | None = None) -> float:
+    cap = max(0.0, EXPLORE_TEARDOWN_WAIT_SECONDS - EXPLORE_TEARDOWN_WAIT_REMAINDER_SECONDS)
+    if requested is None:
+        return cap
+    return min(max(0.0, requested), cap)
 
 # Default wrap-up grace shared with RollingExperimentConfig.deadline_grace_minutes:
 # the pipeline hands the session a budget of main deadline + grace and the runner
@@ -309,6 +318,9 @@ class AgentSessionRunner:
         self._explored_roles: set[str] = set()
         self._explore_jobs: list[_ExploreJob] = []
         self._explore_pool: ThreadPoolExecutor | None = None
+        self._cancelled = threading.Event()
+        if self.explore is not None:
+            self.explore.attach_cancel_event(self._cancelled)
         self._validate_capability_boundary()
 
     def run(self, instruction: str) -> AgentSessionResult:
@@ -334,6 +346,8 @@ class AgentSessionRunner:
         self._wrap_up_sent = False
         self._explore_attempts = 0
         self._explored_roles = set()
+        self._explore_jobs = []
+        self._cancelled.clear()
         self._emit(
             "session_start",
             {
@@ -344,6 +358,8 @@ class AgentSessionRunner:
         )
 
         while llm_calls < self.config.max_llm_calls:
+            if self._cancelled.is_set():
+                break
             remaining = time_budget.remaining()
             if remaining <= 0:
                 self._close_session(
@@ -516,7 +532,13 @@ class AgentSessionRunner:
                 )
                 continue
 
-            if self._inbox_interrupt_pending():
+            if self._cancelled.is_set():
+                results = [
+                    (call, {"ok": False, "error": "session cancelled"})
+                    for call in response.tool_calls
+                ]
+                apply_point = INBOX_SAFE_AFTER_LLM_BEFORE_TOOLS
+            elif self._inbox_interrupt_pending():
                 results = self._skip_tool_calls(
                     response.tool_calls,
                     safe_point=INBOX_SAFE_AFTER_LLM_BEFORE_TOOLS,
@@ -688,8 +710,9 @@ class AgentSessionRunner:
                                     "type": "string",
                                     "enum": list(EXPLORE_THINKING_LEVELS),
                                     "description": (
-                                        "Optional child thinking level. Omit to inherit "
-                                        "the parent session. off disables extended thinking."
+                                        "Optional child thinking level. Omit for medium; "
+                                        "does not inherit the parent session. off disables "
+                                        "extended thinking."
                                     ),
                                 },
                                 "inherit_context": {
@@ -850,6 +873,8 @@ class AgentSessionRunner:
             phase_error = self._finalization_call_error(call)
             if phase_error:
                 return call, {"ok": False, "error": phase_error}
+            if self._cancelled.is_set():
+                return call, {"ok": False, "error": "session cancelled"}
             if time_budget.remaining() <= 0:
                 return call, {
                     "ok": False,
@@ -974,8 +999,15 @@ class AgentSessionRunner:
         return messages
 
     def _dispatch_explore(self, call: ToolCall) -> dict[str, object]:
-        if self.explore is None:
+        if self._cancelled.is_set():
             record: dict[str, object] = {
+                "ok": False,
+                "error": "Explore cancelled",
+            }
+            self._emit("explore_attempt", {"ok": False, "error": record["error"]})
+            return record
+        if self.explore is None:
+            record = {
                 "ok": False,
                 "error": "Explore is not configured",
             }
@@ -1112,7 +1144,10 @@ class AgentSessionRunner:
         *,
         wait: bool = False,
     ) -> tuple[list[ChatMessage], dict[str, int] | None]:
-        for record in self._collect_finished_explores(wait=wait):
+        for record in self._collect_finished_explores(
+            wait=wait,
+            timeout=_explore_teardown_timeout() if wait else None,
+        ):
             value = record.get("value")
             payload = {
                 "observation": "explore_completed",
@@ -1142,15 +1177,20 @@ class AgentSessionRunner:
             self._remember_observation("explore", record)
         return messages, explore_totals
 
-    def _wait_explore_jobs(self, timeout: float = 30.0) -> list[dict[str, object]]:
-        return self._collect_finished_explores(wait=True, timeout=timeout)
+    def _wait_explore_jobs(
+        self, timeout: float = EXPLORE_TEARDOWN_WAIT_SECONDS
+    ) -> list[dict[str, object]]:
+        return self._collect_finished_explores(
+            wait=True, timeout=_explore_teardown_timeout(timeout)
+        )
 
     def _collect_finished_explores(
         self, *, wait: bool = False, timeout: float | None = None
     ) -> list[dict[str, object]]:
         finished: list[dict[str, object]] = []
+        wait_timeout = _explore_teardown_timeout(timeout) if wait else None
         deadline = (
-            time.monotonic() + timeout if wait and timeout is not None else None
+            time.monotonic() + wait_timeout if wait_timeout is not None else None
         )
         for job in self._explore_jobs:
             if job.record is not None:
@@ -1207,13 +1247,52 @@ class AgentSessionRunner:
             finished.append(record)
         return finished
 
+    def _cancel_pending_explores(self) -> None:
+        for job in self._explore_jobs:
+            if job.record is not None or job.future.done():
+                continue
+            if not job.future.cancel():
+                continue
+            record = {
+                "ok": False,
+                "status": "cancelled",
+                "task_id": job.task_id,
+                "role": job.role,
+                "value": {
+                    "task_id": job.task_id,
+                    "status": "cancelled",
+                    "error": "Explore cancelled",
+                    "role": job.role,
+                },
+            }
+            job.record = record
+            self._emit(
+                "explore_attempt",
+                {
+                    "attempt": job.attempt,
+                    "role": job.role,
+                    "ok": False,
+                    "status": "cancelled",
+                    "task_id": job.task_id,
+                },
+            )
+
     def _close_session(
         self,
         payload: dict[str, object],
         *,
         explore_totals: dict[str, int] | None = None,
     ) -> None:
-        self._collect_finished_explores(wait=False)
+        self._cancelled.set()
+        if self.explore is not None:
+            self.explore.cancel()
+        # Bound the wait; do not abort an in-flight LLM or tool invoke.
+        # After an uncancelable LLM returns, Explore checks this event and
+        # exits without dispatching. Pending (not started) jobs are cancelled.
+        self._collect_finished_explores(
+            wait=True, timeout=_explore_teardown_timeout()
+        )
+        self._cancel_pending_explores()
         if explore_totals is not None and "token_usage" not in payload:
             payload = dict(payload)
         self._emit("session_end", payload)
@@ -1287,7 +1366,10 @@ class AgentSessionRunner:
         )
         if fits:
             return messages
-        assert context_window is not None
+        if context_window is None:
+            raise RuntimeError(
+                "context window is unavailable after the request did not fit"
+            )
         raise context_overflow_error(
             estimated_prompt_tokens=prompt_tokens,
             max_tokens=self.config.max_response_tokens,

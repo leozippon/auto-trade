@@ -51,7 +51,11 @@ from .hitl_state import (
     read_status,
 )
 from .interactive import InteractiveExperimentRunner
-from .ledger import ExperimentLedger
+from .ledger import (
+    ExperimentLedger,
+    FrozenArtifactMutated,
+    assert_no_frozen_artifact_mutation,
+)
 from .local_backend import (
     DeterministicBaselineDeveloper,
     LLMFoldDeveloper,
@@ -704,6 +708,19 @@ def run_local_interactive_worker(
     hitl = options.experiment_dir / "hitl"
     ledger = ExperimentLedger(options.rolling.ledger_path)
     store = FilesystemArtifactStore(options.experiment_dir / "artifacts" / "strategy")
+    try:
+        assert_no_frozen_artifact_mutation(ledger.read())
+    except FrozenArtifactMutated as exc:
+        write_json_atomic(
+            hitl / "status.json",
+            {
+                "schema_version": 1,
+                "state": "failed",
+                "pid": os.getpid(),
+                "error": f"{type(exc).__name__}: {exc}",
+            },
+        )
+        raise
     completed = read_status(hitl / "status.json")
     if str(completed.get("state")) == "completed" and not _has_outstanding_work(
         hitl, ledger
@@ -1014,11 +1031,13 @@ def _latest_artifact(
     ledger: ExperimentLedger,
     store: FilesystemArtifactStore,
 ) -> FrozenArtifact | None:
+    records = ledger.read()
+    assert_no_frozen_artifact_mutation(records)
     current_id = ""
     current_path = ""
     current_record: dict[str, object] | None = None
     requires_validation = False
-    for record in ledger.read():
+    for record in records:
         record_type = record.get("record_type")
         if record_type == "fold":
             artifact_id = str(record.get("frozen_strategy_artifact_id") or "")

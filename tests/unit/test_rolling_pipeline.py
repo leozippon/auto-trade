@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import shutil
 from pathlib import Path
 
@@ -16,9 +17,20 @@ from autotrade.pipelines import (
     RollingExperimentPipeline,
     StepResult,
 )
-from autotrade.pipelines.config import MetaSessionResult
+from autotrade.pipelines.config import (
+    DEFAULT_DEADLINE_GRACE_MINUTES,
+    MetaSessionResult,
+    fold_session_deadline_seconds,
+)
+from autotrade.pipelines.experiment import _session_budgets
 from autotrade.pipelines.folds import build_fold_schedule
-from autotrade.pipelines.ledger import ExperimentLedger
+from autotrade.pipelines.ledger import (
+    ExperimentLedger,
+    FrozenArtifactMutated,
+    FrozenArtifactRestoreFailed,
+    latest_fold_records,
+    latest_heldout_records,
+)
 from autotrade.pipelines.skills import install_workspace_skills
 
 
@@ -41,8 +53,12 @@ class Artifacts:
         source = self.revisions[revision_id]
         target = self.root / values["artifact_id"]
         shutil.copytree(source.output_path, target)
+        models = None
+        if source.models_path is not None and Path(source.models_path).is_dir():
+            models = self.root / f"{values['artifact_id']}_models"
+            shutil.copytree(source.models_path, models)
         return FrozenArtifact(
-            values["artifact_id"], target, None, values["run_id"], values["fold_id"], values["step_id"]
+            values["artifact_id"], target, models, values["run_id"], values["fold_id"], values["step_id"]
         )
 
 
@@ -102,6 +118,9 @@ def test_rolling_pipeline_runs_meta_fold_test_and_heldout(tmp_path: Path):
     heldout = records[-1]
     assert heldout["result"]["total_return"] == 0.02
     assert heldout["strategy_artifact_id"] == result["final_strategy_artifact"]
+    fold_record = next(record for record in records if record["record_type"] == "fold")
+    assert "state_changed_during_test" not in fold_record
+    assert "state_changed_during_test" not in heldout
 
 
 def test_successful_fold_publishes_skills_and_next_fold_noops_by_bytes(
@@ -459,9 +478,9 @@ def test_meta_session_window_skips_folds_before_previous_meta(tmp_path: Path):
     assert summaries[0]["validation_result"]["total_return"] == 0.04
 
 
-def _pipeline_capturing_fold_requests(tmp_path: Path, captured: list):
+def _pipeline_capturing_fold_requests(tmp_path: Path, captured: list, **config_overrides):
     revision_dir = tmp_path / "revision"
-    revision_dir.mkdir()
+    revision_dir.mkdir(parents=True)
     (revision_dir / "main.py").write_text(
         "def generate_orders(context):\n    return []\n", encoding="utf-8"
     )
@@ -483,7 +502,14 @@ def _pipeline_capturing_fold_requests(tmp_path: Path, captured: list):
         )
 
     config = RollingExperimentConfig(
-        "experiment_a", tmp_path / "experiments", "2026Q1", "2026Q1", "2026Q2", "2026Q2", epochs=1
+        "experiment_a",
+        tmp_path / "experiments",
+        "2026Q1",
+        "2026Q1",
+        "2026Q2",
+        "2026Q2",
+        epochs=1,
+        **config_overrides,
     )
     pipeline = RollingExperimentPipeline(
         config,
@@ -527,3 +553,383 @@ def test_run_fold_refuses_a_gpu_override_that_is_not_in_0_to_4(tmp_path: Path):
         "epoch_001", fold, parent=None, prior="", session_context={"sandbox_gpu_count": 0}
     )
     assert captured[-1].sandbox_gpu_count == 0
+
+
+class ModeMutatingEvaluator:
+    def __init__(self, mutate_mode: str, target: str = "output") -> None:
+        self.mutate_mode = mutate_mode
+        self.target = target
+
+    def evaluate(self, request):
+        if request.mode == self.mutate_mode:
+            if self.target == "output":
+                main = request.revision.output_path / "main.py"
+                main.write_text(
+                    main.read_text(encoding="utf-8") + "# mutated\n",
+                    encoding="utf-8",
+                )
+            else:
+                models = request.revision.models_path
+                assert models is not None
+                (models / "weights.json").write_text('{"w": 1}\n', encoding="utf-8")
+        return EvaluationResult(
+            {"total_return": 0.02, "max_drawdown": -0.03},
+            f"result/{request.mode}",
+        )
+
+
+class CallbackMutatingEvaluator:
+    def __init__(self, mutate_mode: str, mutate) -> None:
+        self.mutate_mode = mutate_mode
+        self.mutate = mutate
+
+    def evaluate(self, request):
+        if request.mode == self.mutate_mode:
+            self.mutate(request)
+        return EvaluationResult(
+            {"total_return": 0.02, "max_drawdown": -0.03},
+            f"result/{request.mode}",
+        )
+
+
+def _days() -> list[str]:
+    return [
+        stamp.strftime("%Y%m%d")
+        for stamp in pd.bdate_range("2025-09-29", "2026-06-30")
+    ]
+
+
+def _pipeline_with_evaluator(
+    tmp_path: Path,
+    evaluator,
+    *,
+    models: bool = False,
+    extra_file: bool = False,
+    **config_overrides,
+):
+    revision_dir = tmp_path / "revision"
+    revision_dir.mkdir()
+    (revision_dir / "main.py").write_text(
+        "def generate_orders(context):\n    return []\n", encoding="utf-8"
+    )
+    if extra_file:
+        (revision_dir / "notes.txt").write_text("keep\n", encoding="utf-8")
+    models_path = None
+    if models:
+        models_path = tmp_path / "revision_models"
+        models_path.mkdir()
+        (models_path / "weights.json").write_text("{}\n", encoding="utf-8")
+    revision = ArtifactRevision("revision_1", revision_dir, models_path)
+
+    def developer(request):
+        return FoldSessionResult(
+            "conversation_1",
+            (
+                StepResult(
+                    "step_1",
+                    revision.revision_id,
+                    EvaluationResult(
+                        {"total_return": 0.05, "max_drawdown": -0.02}, "result/valid"
+                    ),
+                    True,
+                ),
+            ),
+            "step_1",
+        )
+
+    config = RollingExperimentConfig(
+        "experiment_a",
+        tmp_path / "experiments",
+        "2026Q1",
+        "2026Q1",
+        "2026Q2",
+        "2026Q2",
+        epochs=1,
+        **config_overrides,
+    )
+    ledger = ExperimentLedger(config.ledger_path)
+    pipeline = RollingExperimentPipeline(
+        config,
+        snapshots=Snapshots(),
+        artifacts=Artifacts(revision, tmp_path / "frozen"),
+        evaluator=evaluator,
+        developer=developer,
+        meta_learner=lambda facts: MetaSessionResult(prior="prefer simple daily signals"),
+        ledger=ledger,
+    )
+    fold = build_fold_schedule("2026Q1", "2026Q1", _days())[0]
+    return pipeline, fold, ledger
+
+
+def _assert_frozen_main_restored(
+    tmp_path: Path, original: str = "def generate_orders(context):\n    return []\n"
+) -> None:
+    mains = list((tmp_path / "frozen").rglob("main.py"))
+    assert mains
+    for main in mains:
+        assert main.read_text(encoding="utf-8") == original
+        assert not (main.stat().st_mode & 0o222)
+
+
+def test_session_budgets_honor_nondefault_deadline_grace(tmp_path: Path):
+    for minutes in (0, 20):
+        config = RollingExperimentConfig(
+            "experiment_a",
+            tmp_path / f"grace_{minutes}",
+            "2026Q1",
+            "2026Q1",
+            "2026Q2",
+            "2026Q2",
+            epochs=1,
+            deadline_grace_minutes=minutes,
+        )
+        budgets = _session_budgets(config, None)
+        assert budgets["deadline_grace_seconds"] == minutes * 60
+        assert budgets["deadline_seconds"] == fold_session_deadline_seconds(
+            240, minutes
+        )
+        overridden = _session_budgets(config, {"deadline_seconds": 1200})
+        assert overridden["deadline_seconds"] == 1200 + minutes * 60
+        assert overridden["deadline_grace_seconds"] == minutes * 60
+        with pytest.raises(ValueError, match="unknown resource override"):
+            _session_budgets(config, {"deadline_grace_seconds": 1})
+
+
+def test_fold_session_request_carries_configured_deadline_grace(tmp_path: Path):
+    for minutes in (0, 20):
+        captured: list = []
+        pipeline, fold = _pipeline_capturing_fold_requests(
+            tmp_path / f"req_{minutes}",
+            captured,
+            deadline_grace_minutes=minutes,
+        )
+        pipeline.run_fold("epoch_001", fold, parent=None)
+        request = captured[-1]
+        assert request.deadline_grace_seconds == minutes * 60
+        assert request.deadline_seconds == fold_session_deadline_seconds(240, minutes)
+
+
+def test_prompt_preview_deadline_matches_live_fold_budget(tmp_path: Path):
+    from autotrade.webui.prompt_preview import build_prompt_preview
+
+    cases = (
+        ({}, fold_session_deadline_seconds(240, DEFAULT_DEADLINE_GRACE_MINUTES)),
+        (
+            {"deadline_grace_minutes": 0, "max_fold_minutes": 240},
+            fold_session_deadline_seconds(240, DEFAULT_DEADLINE_GRACE_MINUTES),
+        ),
+        (
+            {"deadline_grace_minutes": 20, "max_fold_minutes": 90},
+            fold_session_deadline_seconds(90, DEFAULT_DEADLINE_GRACE_MINUTES),
+        ),
+    )
+    for index, (extra, expected) in enumerate(cases):
+        experiment = tmp_path / f"preview_{index}"
+        hitl = experiment / "hitl"
+        hitl.mkdir(parents=True)
+        (hitl / "params.json").write_text(
+            json.dumps({"strategy_period": "day", **extra}),
+            encoding="utf-8",
+        )
+        (hitl / "schedule.json").write_text(
+            json.dumps(
+                {
+                    "sessions": [
+                        {
+                            "session_key": "epoch_001/fold_x",
+                            "kind": "fold",
+                            "epoch_id": "epoch_001",
+                            "fold_id": "fold_x",
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        preview = build_prompt_preview(experiment, "epoch_001/fold_x", "")
+        assert f'"deadline_seconds": {int(expected)}' in str(preview["prompt"])
+
+
+def test_frozen_test_fails_fast_when_output_changes(tmp_path: Path):
+    pipeline, fold, ledger = _pipeline_with_evaluator(
+        tmp_path, ModeMutatingEvaluator("frozen_test", "output")
+    )
+    with pytest.raises(FrozenArtifactMutated, match="changed during frozen test"):
+        pipeline.run_fold("epoch_001", fold, parent=None)
+    records = ledger.read()
+    folds = [record for record in records if record["record_type"] == "fold"]
+    assert len(folds) == 1
+    assert folds[0]["state_changed_during_test"] is True
+    assert not any(record["record_type"] == "attempt_failed" for record in records)
+    assert latest_fold_records(records) == {}
+    _assert_frozen_main_restored(tmp_path)
+    with pytest.raises(FrozenArtifactMutated):
+        pipeline.run_fold("epoch_001", fold, parent=None)
+    assert [row.get("run_id") for row in ledger.read()] == [
+        row.get("run_id") for row in records
+    ]
+
+
+def test_frozen_test_omits_state_changed_when_trees_are_stable(tmp_path: Path):
+    pipeline, fold, ledger = _pipeline_with_evaluator(tmp_path, Evaluator())
+    pipeline.run_fold("epoch_001", fold, parent=None)
+    fold_record = ledger.read("fold")[0]
+    assert "state_changed_during_test" not in fold_record
+
+
+def test_heldout_fails_fast_when_models_change(tmp_path: Path):
+    pipeline, _fold, ledger = _pipeline_with_evaluator(
+        tmp_path, ModeMutatingEvaluator("heldout", "models"), models=True
+    )
+    with pytest.raises(FrozenArtifactMutated, match="changed during held-out"):
+        pipeline.run(_days())
+    records = ledger.read()
+    heldout = [record for record in records if record["record_type"] == "heldout"]
+    assert len(heldout) == 1
+    assert heldout[0]["state_changed_during_test"] is True
+    fold_record = next(record for record in records if record["record_type"] == "fold")
+    assert "state_changed_during_test" not in fold_record
+    assert latest_heldout_records(records) == []
+    dummy = FrozenArtifact("x", tmp_path, None, "", "", "")
+    with pytest.raises(FrozenArtifactMutated):
+        pipeline.run_heldout("epoch_001", dummy, _days())
+    assert [row.get("run_id") for row in ledger.read()] == [
+        row.get("run_id") for row in records
+    ]
+
+
+def test_heldout_omits_state_changed_when_trees_are_stable(tmp_path: Path):
+    pipeline, _fold, ledger = _pipeline_with_evaluator(tmp_path, Evaluator())
+    result = pipeline.run(_days())
+    assert result["heldout_runs"] == 1
+    heldout = ledger.read("heldout")[0]
+    assert "state_changed_during_test" not in heldout
+
+
+def _add_output_file(request) -> None:
+    (request.revision.output_path / "extra.py").write_text("x = 1\n", encoding="utf-8")
+
+
+def _delete_output_file(request) -> None:
+    (request.revision.output_path / "notes.txt").unlink()
+
+
+def _delete_models_dir(request) -> None:
+    models = request.revision.models_path
+    assert models is not None
+    shutil.rmtree(models)
+
+
+def _add_models_dir(request) -> None:
+    models = request.revision.output_path.parent / "models"
+    models.mkdir()
+    (models / "weights.json").write_text("{}\n", encoding="utf-8")
+
+
+def _delete_output_dir(request) -> None:
+    shutil.rmtree(request.revision.output_path)
+
+
+@pytest.mark.parametrize(
+    ("mutate", "models", "extra_file"),
+    (
+        (_add_output_file, False, False),
+        (_delete_output_file, False, True),
+        (_delete_models_dir, True, False),
+        (_add_models_dir, False, False),
+        (_delete_output_dir, False, False),
+    ),
+    ids=(
+        "add_file",
+        "delete_file",
+        "missing_models",
+        "new_models",
+        "compare_error",
+    ),
+)
+def test_frozen_test_records_integrity_failure_for_tree_mutations(
+    tmp_path: Path, mutate, models: bool, extra_file: bool
+):
+    pipeline, fold, ledger = _pipeline_with_evaluator(
+        tmp_path,
+        CallbackMutatingEvaluator("frozen_test", mutate),
+        models=models,
+        extra_file=extra_file,
+    )
+    with pytest.raises(FrozenArtifactMutated, match="changed during frozen test"):
+        pipeline.run_fold("epoch_001", fold, parent=None)
+    records = ledger.read()
+    folds = [record for record in records if record["record_type"] == "fold"]
+    assert len(folds) == 1
+    assert folds[0]["state_changed_during_test"] is True
+    assert not any(record["record_type"] == "attempt_failed" for record in records)
+    mains = list((tmp_path / "frozen").rglob("main.py"))
+    assert mains
+    if extra_file:
+        notes = list((tmp_path / "frozen").rglob("notes.txt"))
+        assert notes and notes[0].read_text(encoding="utf-8") == "keep\n"
+    else:
+        _assert_frozen_main_restored(tmp_path)
+
+
+def test_frozen_restore_copy_failure_is_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    import autotrade.pipelines.experiment as experiment
+
+    def boom(**_kwargs):
+        raise OSError("copy failed")
+
+    monkeypatch.setattr(experiment, "restore_frozen_artifact_trees", boom)
+    pipeline, fold, ledger = _pipeline_with_evaluator(
+        tmp_path, ModeMutatingEvaluator("frozen_test", "output")
+    )
+    with pytest.raises(FrozenArtifactRestoreFailed, match="restoring"):
+        pipeline.run_fold("epoch_001", fold, parent=None)
+    records = ledger.read()
+    folds = [record for record in records if record["record_type"] == "fold"]
+    assert len(folds) == 1
+    assert folds[0]["state_changed_during_test"] is True
+    mains = list((tmp_path / "frozen").rglob("main.py"))
+    assert any("# mutated" in path.read_text(encoding="utf-8") for path in mains)
+    with pytest.raises(FrozenArtifactMutated):
+        pipeline.run_fold("epoch_001", fold, parent=None)
+    assert [row.get("run_id") for row in ledger.read()] == [
+        row.get("run_id") for row in records
+    ]
+
+
+def test_batch_run_refuses_a_nonempty_ledger(tmp_path: Path):
+    config = RollingExperimentConfig(
+        "experiment_a",
+        tmp_path / "experiments",
+        "2026Q1",
+        "2026Q1",
+        "2026Q2",
+        "2026Q2",
+        epochs=1,
+    )
+    pipeline = RollingExperimentPipeline(
+        config,
+        snapshots=Snapshots(),
+        artifacts=Artifacts(
+            ArtifactRevision("revision_1", tmp_path),
+            tmp_path / "frozen",
+        ),
+        evaluator=Evaluator(),
+        developer=lambda request: FoldSessionResult("unused", ()),
+        ledger=ExperimentLedger(config.ledger_path),
+    )
+    pipeline.ledger.append(
+        {
+            "record_type": "attempt_failed",
+            "experiment_id": "experiment_a",
+            "epoch_id": "epoch_001",
+            "fold_id": "fold_2026Q1",
+            "run_id": "run_old",
+            "phase": "fold",
+            "error": "previous attempt",
+        }
+    )
+    with pytest.raises(RuntimeError, match="empty experiment ledger"):
+        pipeline.run(_days())

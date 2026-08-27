@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""HITL experiment console server (docs/pipeline-design.md).
+"""HITL experiment console server (docs/deployment-documentation.md).
 
 Serves the web console (homepage + experiment detail SPA) and the JSON control
 API over the interactive experiment pipeline. Run on the workstation that
-hosts the pipeline, data, and Docker. No auth layer: production binds a Unix
-domain socket in a 0700 directory (kernel-enforced single-user access on the
-shared host); loopback TCP is for explicit local debugging only and is
-reachable by every local user. A non-loopback bind is refused outright.
+hosts the pipeline, data, and Docker. No auth layer: the default bind is
+loopback TCP 127.0.0.1:38888 so a public tunnel can reach the console; an
+optional Unix domain socket is same-machine only. A non-loopback bind is
+refused outright.
 
-  ~/miniconda3/envs/quant/bin/python scripts/webui/run_webui.py --uds .runtime/webui/console.sock
+  ~/miniconda3/envs/quant/bin/python scripts/webui/run_webui.py
 """
 from __future__ import annotations
 
@@ -36,8 +36,8 @@ def main(argv: list[str] | None = None) -> int:
         "--uds",
         type=Path,
         default=None,
-        help="Bind a Unix domain socket instead of TCP; access control is the socket "
-        "directory's permissions (production mode; overrides --host/--port).",
+        help="Optional same-machine Unix domain socket instead of TCP; access control "
+        "is the socket directory's permissions (overrides --host/--port).",
     )
     parser.add_argument(
         "--experiments-root",

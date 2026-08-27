@@ -10,7 +10,7 @@ import sys
 import tempfile
 import threading
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -1114,6 +1114,13 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             force=False,
             requested_params={"start_date": "20260501", "end_date": "20260529"},
         ))
+        sidecar = path.with_suffix(path.suffix + ".meta.json")
+        sidecar.unlink()
+        self.assertFalse(download.should_skip_existing_partition(
+            path,
+            force=False,
+            requested_params={"start_date": "20260501", "end_date": "20260528"},
+        ))
 
     def test_sidecar_coverage_normalizes_date_and_datetime_bounds(self):
         path = self.raw_dir / "major_news" / "src=all" / "month=202605.parquet"
@@ -1451,7 +1458,8 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         event = json.loads(ledger.read_text(encoding="utf-8").splitlines()[0])
         self.assertEqual(event["write_action"], "blocked_shrink_overwrite")
 
-        # A proportionate correction (a few keys) still overwrites.
+        # Paths that opt into source retractions still accept a proportionate
+        # correction; the generic daily path does not use this allowance.
         small = original.head(115)
         with redirect_stdout(io.StringIO()):
             did_write = common.write_parquet_revision_aware(
@@ -2267,11 +2275,16 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                 ["600000.SH", day, 2000.0, 8.0, 16000.0, 7.9, 0.2, 1.1, 200000.0],
             ]
 
-        # 20260709 already captured; 20260710 missing (multi-day outage).
+        # 20260709 already captured as an intact commit; 20260710 missing.
         existing = pd.DataFrame(day_rows("20260709"), columns=fields)
         target_dir = self.raw_dir / "stk_auction"
-        target_dir.mkdir(parents=True, exist_ok=True)
-        existing.to_parquet(target_dir / "trade_date=20260709.parquet", index=False)
+        common.write_parquet(
+            target_dir / "trade_date=20260709.parquet",
+            existing,
+            api_name="stk_auction",
+            params={"trade_date": "20260709"},
+            fields=fields,
+        )
 
         queried: list[str] = []
 
@@ -2300,6 +2313,87 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self.assertEqual(queried, ["20260710", "20260713"])
         self.assertTrue((target_dir / "trade_date=20260710.parquet").exists())
         self.assertTrue((target_dir / "trade_date=20260713.parquet").exists())
+
+    def test_stk_auction_recheck_heals_incomplete_earlier_days_in_window(self):
+        cal_path = self.raw_dir / "trade_cal" / "exchange=SSE" / "year=2026.parquet"
+        cal_path.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame({
+            "cal_date": ["20260709", "20260710", "20260713"],
+            "is_open": ["1", "1", "1"],
+        }).to_parquet(cal_path, index=False)
+        fields = common.DAILY_SPECS["stk_auction"].fields.split(",")
+
+        def day_rows(day):
+            return [
+                ["000001.SZ", day, 1000.0, 10.0, 10000.0, 9.9, 0.1, 1.0, 100000.0],
+                ["600000.SH", day, 2000.0, 8.0, 16000.0, 7.9, 0.2, 1.1, 200000.0],
+            ]
+
+        target_dir = self.raw_dir / "stk_auction"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        torn = target_dir / "trade_date=20260709.parquet"
+        pd.DataFrame(day_rows("20260709"), columns=fields).to_parquet(torn, index=False)
+        self.assertFalse(common.committed_partition_intact(torn))
+
+        queried: list[str] = []
+
+        def fake_query(client, api_name, params, fields_, page_limit):
+            day = params["trade_date"]
+            queried.append(day)
+            return common.ApiResult(fields, day_rows(day)), 1
+
+        args = argparse.Namespace(
+            raw_dir=str(self.raw_dir),
+            start_date="20260709",
+            end_date="20260713",
+            page_limit=10000,
+            revision_ledger=str(self.root / "revision_events.jsonl"),
+            min_interval_seconds=0.0,
+            timeout_seconds=1.0,
+        )
+        with (
+            patch.object(download, "load_token", return_value="token"),
+            patch.object(download, "TuShareClient"),
+            patch.object(download, "AUCTION_CAPTURE_MIN_ROWS_FLOOR", 2),
+            patch.object(download, "query_paged", side_effect=fake_query),
+            redirect_stdout(io.StringIO()),
+        ):
+            self.assertEqual(download.recheck_stk_auction(args), 0)
+        self.assertEqual(queried, ["20260709", "20260710", "20260713"])
+        self.assertTrue(common.committed_partition_intact(torn))
+
+    def test_default_daily_download_excludes_stk_auction(self):
+        selected = common.selected_daily_datasets(argparse.Namespace(datasets=None))
+        self.assertEqual(selected, common.DAILY_DOWNLOAD_DATASETS)
+        self.assertNotIn("stk_auction", selected)
+        required = common.selected_daily_datasets(
+            argparse.Namespace(datasets=None),
+            default=common.DAILY_REQUIRED_DATASETS,
+        )
+        self.assertIn("stk_auction", required)
+        self.assertIn("stk_auction", common.DAILY_REQUIRED_DATASETS)
+
+    def test_generic_daily_cli_choices_exclude_stk_auction(self):
+        parser = download.build_parser()
+        rejected = (
+            ["update", "--start-date", "20200102", "--daily-datasets", "stk_auction"],
+            ["update", "--start-date", "20200102", "--refresh-daily-datasets", "stk_auction"],
+            ["download", "--tier", "daily", "--refresh-daily-datasets", "stk_auction"],
+        )
+        for argv in rejected:
+            with self.subTest(argv=argv), self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+                parser.parse_args(argv)
+        parsed = parser.parse_args([
+            "update",
+            "--start-date",
+            "20200102",
+            "--daily-datasets",
+            "daily",
+            "--refresh-daily-datasets",
+            "adj_factor",
+        ])
+        self.assertEqual(parsed.daily_datasets, ["daily"])
+        self.assertEqual(parsed.refresh_daily_datasets, ["adj_factor"])
 
     def test_generic_daily_path_refuses_stk_auction(self):
         self._write_trade_cal("20200102", is_open="1")
@@ -3500,10 +3594,22 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
 
     def test_daily_refresh_datasets_force_only_selected_trade_date_dataset(self):
         self._write_trade_cal("20200102")
-        for dataset in ("daily", "adj_factor"):
-            path = self.raw_dir / dataset / "trade_date=20200102.parquet"
-            path.parent.mkdir(parents=True, exist_ok=True)
-            pd.DataFrame([{"trade_date": "20200102", "ts_code": "999999.SZ"}]).to_parquet(path, index=False)
+        daily_rows = pd.DataFrame([{"trade_date": "20200102", "ts_code": "999999.SZ", "close": 1.0}])
+        adj_rows = pd.DataFrame([{"trade_date": "20200102", "ts_code": "000001.SZ", "adj_factor": 2.0}])
+        common.write_parquet(
+            self.raw_dir / "daily" / "trade_date=20200102.parquet",
+            daily_rows,
+            api_name="daily",
+            params={"trade_date": "20200102"},
+            fields=list(daily_rows.columns),
+        )
+        common.write_parquet(
+            self.raw_dir / "adj_factor" / "trade_date=20200102.parquet",
+            adj_rows,
+            api_name="adj_factor",
+            params={"trade_date": "20200102"},
+            fields=list(adj_rows.columns),
+        )
 
         args = argparse.Namespace(
             raw_dir=str(self.raw_dir),
@@ -3535,6 +3641,40 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self.assertEqual(ledger_event["schema_version"], 2)
         self.assertEqual(ledger_event["write_action"], "overwrite")
         self.assertTrue(ledger_event["write_id"])
+        self.assertEqual(set(pd.read_parquet(self.raw_dir / "daily" / "trade_date=20200102.parquet")["ts_code"]), {"999999.SZ"})
+
+    def test_daily_force_refresh_does_not_drop_existing_keys(self):
+        self._write_trade_cal("20200102")
+        ledger = self.root / "daily_key_removal.jsonl"
+        for dataset in ("daily", "adj_factor"):
+            original = pd.DataFrame([
+                {"trade_date": "20200102", "ts_code": "000001.SZ", "close": 10.0, "adj_factor": 1.0},
+                {"trade_date": "20200102", "ts_code": "000002.SZ", "close": 20.0, "adj_factor": 1.1},
+            ])
+            path = self.raw_dir / dataset / "trade_date=20200102.parquet"
+            common.write_parquet(
+                path,
+                original,
+                api_name=dataset,
+                params={"trade_date": "20200102"},
+                fields=list(original.columns),
+            )
+            output = io.StringIO()
+            with redirect_stdout(output):
+                zero_skipped = download.download_trade_date_dataset(
+                    DailyMarketClient(),
+                    self.raw_dir,
+                    common.DAILY_SPECS[dataset],
+                    ["20200102"],
+                    True,
+                    5000,
+                    ledger,
+                    False,
+                )
+            self.assertEqual(zero_skipped, 1, dataset)
+            self.assertIn("skipped_key_removal_overwrite", output.getvalue())
+            kept = pd.read_parquet(path)
+            self.assertEqual(set(kept["ts_code"]), {"000001.SZ", "000002.SZ"}, dataset)
 
     def test_fundamental_update_refreshes_recent_periods_and_affected_ts_code_snapshots(self):
         stock_basic = self.raw_dir / "stock_basic" / "list_status=L.parquet"
@@ -4347,6 +4487,115 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         # its footer and row count no longer match the committed sidecar.
         pd.read_parquet(orphan).iloc[:2].to_parquet(orphan, index=False)
         self.assertFalse(common.committed_partition_intact(orphan))
+
+    def test_daily_skip_reattempts_partition_without_intact_sidecar(self):
+        path = self.raw_dir / "daily" / "trade_date=20200102.parquet"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame([{"trade_date": "20200102", "ts_code": "000001.SZ"}]).to_parquet(path, index=False)
+        self.assertFalse(common.committed_partition_intact(path))
+        client = DailyMarketClient()
+        ledger = self.root / "daily_skip_heal.jsonl"
+        with redirect_stdout(io.StringIO()):
+            zero_skipped = download.download_trade_date_dataset(
+                client, self.raw_dir, common.DAILY_SPECS["daily"], ["20200102"], False, 5000, ledger, False,
+            )
+        self.assertEqual([api for api, _ in client.calls], ["daily"])
+        self.assertEqual(zero_skipped, 0)
+        self.assertTrue(common.committed_partition_intact(path))
+        client.calls.clear()
+        with redirect_stdout(io.StringIO()):
+            download.download_trade_date_dataset(
+                client, self.raw_dir, common.DAILY_SPECS["daily"], ["20200102"], False, 5000, ledger, False,
+            )
+        self.assertEqual(client.calls, [])
+        sidecar = path.with_suffix(path.suffix + ".meta.json")
+        meta = json.loads(sidecar.read_text(encoding="utf-8"))
+        meta["write_id"] = "00000000-0000-0000-0000-000000000000"
+        sidecar.write_text(json.dumps(meta), encoding="utf-8")
+        self.assertFalse(common.committed_partition_intact(path))
+        client.calls.clear()
+        with redirect_stdout(io.StringIO()):
+            download.download_trade_date_dataset(
+                client, self.raw_dir, common.DAILY_SPECS["daily"], ["20200102"], False, 5000, ledger, False,
+            )
+        self.assertEqual([api for api, _ in client.calls], ["daily"])
+        self.assertTrue(common.committed_partition_intact(path))
+
+    def test_board_skip_reattempts_partition_without_intact_sidecar(self):
+        spec = common.BOARD_TRADING_SPECS["limit_list_d"]
+        path = self.raw_dir / spec.api_name / "trade_date=20200102.parquet"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame([{"trade_date": "20200102", "ts_code": "000001.SZ", "limit": "U"}]).to_parquet(path, index=False)
+        self.assertFalse(download.should_skip_existing_partition(path, force=False))
+
+        class LimitClient(EmptyTradeDateClient):
+            def query(self, api_name, params=None, fields="", retries=5):
+                self.calls.append((api_name, dict(params or {})))
+                columns = fields.split(",") if fields else ["trade_date", "ts_code", "limit"]
+                row = ["20200102" if col == "trade_date" else "000001.SZ" if col == "ts_code" else "U" if col == "limit" else "x" for col in columns]
+                return common.ApiResult(columns, [row])
+
+        client = LimitClient()
+        with redirect_stdout(io.StringIO()):
+            download.download_board_trade_date_dataset(client, self.raw_dir, spec, ["20200102"], False, 5000, None, False)
+        self.assertEqual([api for api, _ in client.calls], ["limit_list_d"])
+        self.assertTrue(common.committed_partition_intact(path))
+        client.calls.clear()
+        with redirect_stdout(io.StringIO()):
+            download.download_board_trade_date_dataset(client, self.raw_dir, spec, ["20200102"], False, 5000, None, False)
+        self.assertEqual(client.calls, [])
+
+    def test_share_float_skip_reattempts_partition_without_intact_sidecar(self):
+        fields = common.SHARE_FLOAT_FIELDS.split(",")
+        path = self.raw_dir / "share_float_ann_date" / "ann_date=20200101.parquet"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        seeded = pd.DataFrame([["000001.SZ", "20200101", "20200102", 1.0, 0.1, "h1", "type"]], columns=fields)
+        seeded.to_parquet(path, index=False)
+        self.assertFalse(common.committed_partition_intact(path))
+
+        class FloatClient(EmptyTradeDateClient):
+            def query(self, api_name, params=None, fields="", retries=5):
+                self.calls.append((api_name, dict(params or {})))
+                columns = fields.split(",") if isinstance(fields, str) else list(fields)
+                return common.ApiResult(columns, [["000001.SZ", "20200101", "20200102", 1.0, 0.1, "h1", "type"]])
+
+        client = FloatClient()
+        with redirect_stdout(io.StringIO()):
+            report = download.query_share_float_to_path(
+                client, self.raw_dir, path, {"ann_date": "20200101"}, "ann_date", False,
+            )
+        self.assertEqual([api for api, _ in client.calls], ["share_float"])
+        self.assertFalse(report["skipped"])
+        self.assertTrue(common.committed_partition_intact(path))
+        client.calls.clear()
+        report = download.query_share_float_to_path(
+            client, self.raw_dir, path, {"ann_date": "20200101"}, "ann_date", False,
+        )
+        self.assertEqual(client.calls, [])
+        self.assertTrue(report["skipped"])
+
+    def test_fundamental_skip_reattempts_partition_without_intact_sidecar(self):
+        spec = common.FUNDAMENTAL_SPECS["income_vip"]
+        keys = list(spec.key_columns)
+        path = self.raw_dir / spec.api_name / "period=20200331.parquet"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame({col: ["x"] for col in keys}).to_parquet(path, index=False)
+        self.assertFalse(common.committed_partition_intact(path))
+
+        class PeriodClient(EmptyTradeDateClient):
+            def query(self, api_name, params=None, fields="", retries=5):
+                self.calls.append((api_name, dict(params or {})))
+                return common.ApiResult(keys, [["000001.SZ", "20200430", "20200430", "20200331", "1", "1", "1"]])
+
+        client = PeriodClient()
+        with redirect_stdout(io.StringIO()):
+            download.download_fundamental_period_dataset(client, self.raw_dir, spec, ["20200331"], False, 5000)
+        self.assertEqual([api for api, _ in client.calls], ["income_vip"])
+        self.assertTrue(common.committed_partition_intact(path))
+        client.calls.clear()
+        with redirect_stdout(io.StringIO()):
+            download.download_fundamental_period_dataset(client, self.raw_dir, spec, ["20200331"], False, 5000)
+        self.assertEqual(client.calls, [])
 
     def test_trade_cal_past_day_revision_is_refused(self):
         path = self.raw_dir / "trade_cal" / "exchange=SSE" / "year=2020.parquet"

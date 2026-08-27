@@ -114,7 +114,13 @@ class RecordFailedAttemptsTest(unittest.TestCase):
     Driven through the real ``FoldBacktestTool``: the gate lives at its
     exception path, and asserting the knob's value would prove nothing."""
 
-    def _tool(self, root: Path, *, record_failed_attempts: bool):
+    def _tool(
+        self,
+        root: Path,
+        *,
+        record_failed_attempts: bool,
+        error: Exception | None = None,
+    ):
         from contextlib import nullcontext
 
         from autotrade.environment.artifacts import FilesystemArtifactStore
@@ -156,9 +162,13 @@ class RecordFailedAttemptsTest(unittest.TestCase):
             record_failed_attempts=record_failed_attempts,
         )
 
+        raised = error or RuntimeError(
+            f"validation blew up at {root / 'private/result.json'}"
+        )
+
         class ExplodingEvaluator:
             def evaluate(self, _request):
-                raise RuntimeError(f"validation blew up at {root / 'private/result.json'}")
+                raise raised
 
         class PassingCheck:
             def invoke(self, _arguments):
@@ -198,11 +208,89 @@ class RecordFailedAttemptsTest(unittest.TestCase):
             nodes = on_tree.nodes()
             self.assertEqual([node["status"] for node in nodes], ["failed"])
             self.assertEqual(
-                nodes[0]["error"], "daily Validation failed: RuntimeError"
+                nodes[0]["error"],
+                "daily Validation failed: RuntimeError: validation blew up at [host_path]",
             )
             self.assertNotIn(str(root), json.dumps(nodes))
+            self.assertNotIn("private/result.json", json.dumps(nodes))
             # The dead end never becomes the working position.
             self.assertIsNone(on_tree.current_node_id)
+
+    def test_failed_validation_exposes_unsupported_os_import(self) -> None:
+        from autotrade.environment.strategy_loader import StrategyLoadError
+        from autotrade.environment.tools.base import ToolError
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tool, tree = self._tool(
+                root,
+                record_failed_attempts=True,
+                error=StrategyLoadError("strategy imports unsupported module: os"),
+            )
+            with self.assertRaises(ToolError) as caught:
+                tool.invoke({})
+            message = str(caught.exception)
+            self.assertEqual(
+                message,
+                "daily Validation failed: StrategyLoadError: strategy imports unsupported module: os",
+            )
+            recorded = str(tree.nodes()[0]["error"])
+            self.assertIn("strategy imports unsupported module: os", recorded)
+            self.assertNotIn(str(root), message)
+
+    def test_failed_validation_exposes_replay_slot_mode_mismatch(self) -> None:
+        from autotrade.environment.tools.base import ToolError
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tool, tree = self._tool(
+                root,
+                record_failed_attempts=True,
+                error=ValueError(
+                    "EvaluationRequest mode does not match its immutable replay slot"
+                ),
+            )
+            with self.assertRaises(ToolError) as caught:
+                tool.invoke({})
+            message = str(caught.exception)
+            self.assertEqual(
+                message,
+                "daily Validation failed: ValueError: EvaluationRequest mode does not match its immutable replay slot",
+            )
+            recorded = str(tree.nodes()[0]["error"])
+            self.assertIn(
+                "EvaluationRequest mode does not match its immutable replay slot",
+                recorded,
+            )
+            self.assertNotIn(str(root), message)
+            self.assertNotIn("fold_2026Q1", message)
+            self.assertNotIn("heldout", message.lower())
+
+    def test_failed_validation_redacts_test_calendar_and_host_paths(self) -> None:
+        from autotrade.environment.tools.base import ToolError
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tool, tree = self._tool(
+                root,
+                record_failed_attempts=True,
+                error=RuntimeError(
+                    f"fold_2026Q1 leaked 20260101..20260331 at {root / 'secret.json'}"
+                ),
+            )
+            with self.assertRaises(ToolError) as caught:
+                tool.invoke({})
+            message = str(caught.exception)
+            recorded = str(tree.nodes()[0]["error"])
+            self.assertTrue(message.startswith("daily Validation failed: RuntimeError:"))
+            self.assertEqual(message, recorded)
+            self.assertNotIn("fold_2026Q1", message)
+            self.assertNotIn("20260101", message)
+            self.assertNotIn("20260331", message)
+            self.assertNotIn(str(root), message)
+            self.assertNotIn("secret.json", message)
+            self.assertIn("[host_path]", message)
+            self.assertIn("[redacted]", message)
 
     def test_a_teardown_failure_after_record_step_still_keeps_the_revision(self) -> None:
         from contextlib import contextmanager

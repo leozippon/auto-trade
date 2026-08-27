@@ -32,6 +32,11 @@ from autotrade.environment.tools import (
     ToolRegistry,
     WriteFileTool,
 )
+from autotrade.environment.tools.shell import (
+    DEFAULT_SHELL_TIMEOUT_SECONDS,
+    FORBIDDEN_WAIT,
+    argv_is_forbidden_wait,
+)
 from autotrade.environment.tools import search as search_module
 
 RG_AVAILABLE = shutil.which("rg") is not None
@@ -118,6 +123,71 @@ class ShellToolTest(unittest.TestCase):
             _, _, workspace = build_sandbox(Path(tmp))
             tool = SandboxShellTool(workspace, FakeRunner())
             self.assertTrue(tool.spec.mutating)
+
+    def test_shell_schema_timeout_maximum_matches_instance_cap(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, _, workspace = build_sandbox(Path(tmp))
+            default = SandboxShellTool(workspace, FakeRunner())
+            custom = SandboxShellTool(workspace, FakeRunner(), timeout_seconds=5)
+            default_schema = json.loads(json.dumps(default.spec.input_schema))
+            custom_schema = json.loads(json.dumps(custom.spec.input_schema))
+            self.assertEqual(default.timeout_seconds, DEFAULT_SHELL_TIMEOUT_SECONDS)
+            self.assertEqual(
+                default_schema["properties"]["timeout_seconds"]["maximum"],
+                DEFAULT_SHELL_TIMEOUT_SECONDS,
+            )
+            self.assertEqual(
+                custom_schema["properties"]["timeout_seconds"]["maximum"], 5
+            )
+            registry = ToolRegistry([default])
+            blocked = registry.invoke(
+                "shell", {"argv": ["echo", "ok"], "timeout_seconds": 120}
+            )
+            self.assertFalse(blocked.ok)
+            self.assertIn("above its maximum", blocked.error)
+
+    def test_shell_rejects_forbidden_wait_and_allows_foreground_commands(self) -> None:
+        rejected = (
+            ["sleep", "5"],
+            ["/bin/sleep", "1"],
+            ["usleep", "1000"],
+            ["env", "sleep", "1"],
+            ["timeout", "5", "sleep", "1"],
+            ["nice", "-n", "10", "sleep", "1"],
+            ["stdbuf", "-oL", "sleep", "1"],
+            ["nohup", "sleep", "1"],
+            ["time", "sleep", "1"],
+            ["bash", "-c", "sleep 5"],
+            ["bash", "-lc", "sleep 1"],
+            ["sh", "-c", "sleep 1"],
+            ["dash", "-c", "env sleep 1"],
+            ["timeout", "5", "env", "sleep", "1"],
+        )
+        allowed = (
+            ["pyright"],
+            ["timeout", "pyright"],
+            ["timeout", "5", "pyright"],
+            ["python", "-c", "import time; time.sleep(1)"],
+            ["grep", "sleep", "file.py"],
+            ["echo", "sleep"],
+            ["bash", "-c", "echo hello"],
+            ["env", "FOO=1", "pyright"],
+        )
+        for argv in rejected:
+            self.assertTrue(argv_is_forbidden_wait(argv), argv)
+        for argv in allowed:
+            self.assertFalse(argv_is_forbidden_wait(argv), argv)
+        with tempfile.TemporaryDirectory() as tmp:
+            _, _, workspace = build_sandbox(Path(tmp))
+            runner = FakeRunner()
+            registry = ToolRegistry([SandboxShellTool(workspace, runner)])
+            result = registry.invoke("shell", {"argv": ["sleep", "5"]})
+            self.assertFalse(result.ok)
+            self.assertEqual(result.value.get("error_type"), FORBIDDEN_WAIT)
+            self.assertEqual(runner.calls, [])
+            ok = registry.invoke("shell", {"argv": ["echo", "hello"]})
+            self.assertTrue(ok.ok)
+            self.assertEqual(len(runner.calls), 1)
 
 
 @unittest.skipUnless(RG_AVAILABLE, "ripgrep is required for the structured search tools")

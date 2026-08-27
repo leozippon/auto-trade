@@ -41,8 +41,8 @@ def _agents_md(root: Path, *, missing: str | None = None) -> Path:
             "AUTO_ONLY_CONTRACT\n\n"
             "| Actor | Strategy | PRIOR | Skills | Backtest/finish |\n"
             "| --- | --- | --- | --- | --- |\n"
-            "| Fold parent | No writes | Read-only | May write | Yes |\n"
-            "| Meta parent | Optional regularization | Sole writer | May write | Finish only |\n\n"
+            "| Fold parent | May write; designs, implements, coordinates, accepts | Read-only | May write | Yes |\n"
+            "| Meta parent | Optional regularization | Sole writer | May write | No backtest; may finish |\n\n"
             "Start from inputs/skills_index.json and mounted evidence; reusable knowledge belongs in "
             "skills/<kebab-name>/SKILL.md."
         )
@@ -66,6 +66,8 @@ def test_root_agents_md_recommends_first_level_subagents() -> None:
     assert "Keep the existing PRIOR" in text
     assert "Chinese rendering of the host Multi-Agent" in text
     assert "This English AutoTrade subsection is not injected" in text
+    assert "May write; designs, implements, coordinates, accepts" in text
+    assert "A Fold parent must not use shell to modify strategy artifacts" in text
     assert "inputs/skills_index.json" in text
     assert "skills/<kebab-name>/SKILL.md" in text
     assert "Writable roles should put durable, transferable knowledge" in text
@@ -79,7 +81,7 @@ def test_root_agents_md_recommends_first_level_subagents() -> None:
         assert stale not in text
 
 
-def test_required_agents_section_is_injected_into_fold_and_meta(tmp_path: Path) -> None:
+def test_required_agents_section_is_presence_checked_not_injected(tmp_path: Path) -> None:
     path = _agents_md(tmp_path)
     extracted = load_required_agents_md_sections(path)
     fold = build_system_prompt(mode="fold", agents_md_path=path)
@@ -91,8 +93,12 @@ def test_required_agents_section_is_injected_into_fold_and_meta(tmp_path: Path) 
         assert "### AutoTrade Fold and Meta sessions" not in prompt
         assert "AUTO_ONLY_CONTRACT" not in prompt
         assert "HOST_ONLY_COOPERATION" not in prompt
+        assert "# 多智能体协作" in prompt
+        assert "# 开发原则" in prompt
+        assert "# 操作护栏" in prompt
         assert "# 角色与写权" in prompt
         assert "Fold 父 Agent" in prompt
+        assert "可写；设计、实现、协调、验收" in prompt
         assert "Meta 父 Agent" in prompt
     assert "Meta 主协调者" in meta
     assert "inputs/meta_context.json" in meta

@@ -87,6 +87,36 @@ def _raw_generation_status(repo_root: Path) -> dict[str, object]:
     return info
 
 
+_UNREADABLE_HITL_HEALTH_ERROR = "HITL control plane is unreadable"
+
+
+def _health_unreadable_experiments(
+    items: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """HTTP-boundary view of broken experiment control planes.
+
+    Health is a pathless contract. ``read_status`` ValueError text embeds the
+    absolute HITL path; keep experiment id and exception category, replace the
+    body with a stable phrase.
+    """
+    public: list[dict[str, object]] = []
+    for item in items:
+        raw = str(item.get("error") or "").strip()
+        category, sep, _detail = raw.partition(": ")
+        error = (
+            f"{category}: {_UNREADABLE_HITL_HEALTH_ERROR}"
+            if sep and category
+            else _UNREADABLE_HITL_HEALTH_ERROR
+        )
+        public.append(
+            {
+                "experiment_id": str(item.get("experiment_id") or ""),
+                "error": error,
+            }
+        )
+    return public
+
+
 def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI:
     root = Path(repo_root).resolve()
     experiment_root = Path(experiments_root or root / "experiments").resolve()
@@ -97,7 +127,9 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
     manager = ExperimentManager(
         root, experiment_root, analysis_pending=analysis_service.pending_for_experiment
     )
-    app = FastAPI(title="ADM-Cube Console", docs_url=None, redoc_url=None)
+    app = FastAPI(
+        title="ADM-Cube Console", docs_url=None, redoc_url=None, openapi_url=None
+    )
     trading_days_cache: dict[str, object] = {}
 
     @app.middleware("http")
@@ -195,7 +227,7 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
 
     @app.get("/api/health")
     def health() -> dict[str, object]:
-        unreadable = manager.unreadable_experiments()
+        unreadable = _health_unreadable_experiments(manager.unreadable_experiments())
         raw_generation = _raw_generation_status(root)
         # Honest status: degraded when the raw lake's last mutation did not
         # commit (absent = dev/test roots without a lake), or when an

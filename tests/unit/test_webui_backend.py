@@ -210,6 +210,34 @@ def test_local_webui_health_schema_and_brand(tmp_path: Path):
     assert logo.headers["content-type"] == "image/png"
 
 
+def test_health_incompatible_hitl_state_does_not_echo_paths(tmp_path: Path):
+    hitl = tmp_path / "experiments" / "exp_incompat" / "hitl"
+    hitl.mkdir(parents=True)
+    (hitl / "status.json").write_text(
+        json.dumps({"schema_version": 99, "state": "created"}),
+        encoding="utf-8",
+    )
+    response = TestClient(create_app(tmp_path)).get("/api/health")
+    assert response.status_code == 200
+    health = response.json()
+    assert health["status"] == "degraded"
+    assert health["unreadable_experiments"] == [
+        {
+            "experiment_id": "exp_incompat",
+            "error": "ValueError: HITL control plane is unreadable",
+        }
+    ]
+    dumped = json.dumps(health)
+    assert str(tmp_path) not in dumped
+    assert str(hitl) not in dumped
+
+
+def test_local_webui_disables_openapi_docs(tmp_path: Path):
+    client = TestClient(create_app(tmp_path))
+    for path in ("/openapi.json", "/docs", "/redoc"):
+        assert client.get(path).status_code == 404
+
+
 def test_site_footer_shows_icp_and_public_security_filings(tmp_path: Path):
     client = TestClient(create_app(tmp_path))
     page = client.get("/").text
@@ -3588,6 +3616,133 @@ class HitlControlActionTest(unittest.TestCase):
             ),
             1,
         )
+
+    def test_rollback_unlocks_a_flagged_first_fold(self) -> None:
+        from autotrade.pipelines.ledger import assert_no_frozen_artifact_mutation
+
+        ledger = ExperimentLedger(self.directory / "ledgers/experiment_ledger.jsonl")
+        records = ledger.read()
+        records[0]["state_changed_during_test"] = True
+        ledger.rewrite(records)
+        frozen = Path(str(records[0]["frozen_strategy_artifact_path"]))
+        self.assertTrue(frozen.is_dir())
+        response = self._post(
+            action="rollback_fold", session_key="epoch_001/fold_2022Q1"
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        remaining = ExperimentLedger(
+            self.directory / "ledgers/experiment_ledger.jsonl"
+        ).read()
+        self.assertEqual(remaining, [])
+        assert_no_frozen_artifact_mutation(remaining)
+        self.assertFalse(frozen.is_dir())
+        self.assertTrue(
+            list((self.directory / "artifacts/strategy/_archive").glob("rollback_*"))
+        )
+
+    def test_flagged_fold_is_not_settled(self) -> None:
+        ledger = ExperimentLedger(self.directory / "ledgers/experiment_ledger.jsonl")
+        records = ledger.read()
+        records[0]["state_changed_during_test"] = True
+        ledger.rewrite(records)
+        manager = ExperimentManager(self.repo_root, self.experiments_root)
+        self.assertFalse(
+            manager._session_is_settled(
+                self.directory, "epoch_001/fold_2022Q1", self._control()
+            )
+        )
+
+    def test_rollback_drops_same_fold_flagged_rerun(self) -> None:
+        from autotrade.pipelines.ledger import assert_no_frozen_artifact_mutation
+
+        ledger = ExperimentLedger(self.directory / "ledgers/experiment_ledger.jsonl")
+        success = ledger.read()[0]
+        flagged_id = "strategy_epoch_001_fold_2022Q1_flagged"
+        flagged_dir = (
+            self.directory / "artifacts/strategy/frozen" / flagged_id / "output"
+        )
+        flagged_dir.mkdir(parents=True)
+        (flagged_dir / "main.py").write_text(
+            "def generate_orders(context):\n    return []\n", encoding="utf-8"
+        )
+        ledger.append(
+            {
+                "record_type": "fold",
+                "experiment_id": "exp_ctl",
+                "epoch_id": "epoch_001",
+                "fold_id": "fold_2022Q1",
+                "run_id": "run_flagged",
+                "session_key": "epoch_001/fold_2022Q1",
+                "fold_status": "frozen",
+                "frozen_strategy_artifact_id": flagged_id,
+                "frozen_strategy_artifact_path": str(flagged_dir),
+                "state_changed_during_test": True,
+            }
+        )
+        response = self._post(
+            action="rollback_fold", session_key="epoch_001/fold_2022Q1"
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        remaining = ledger.read()
+        self.assertEqual([record["run_id"] for record in remaining], ["run_001"])
+        assert_no_frozen_artifact_mutation(remaining)
+        self.assertTrue(Path(str(success["frozen_strategy_artifact_path"])).is_dir())
+        self.assertFalse(flagged_dir.is_dir())
+
+    def test_rollback_heldout_unlocks_a_flagged_heldout(self) -> None:
+        from autotrade.pipelines.ledger import assert_no_frozen_artifact_mutation
+
+        ledger = ExperimentLedger(self.directory / "ledgers/experiment_ledger.jsonl")
+        success = ledger.read()[0]
+        ledger.append(
+            {
+                "record_type": "heldout",
+                "experiment_id": "exp_ctl",
+                "epoch_id": "epoch_001",
+                "fold_id": "heldout_2023Q1",
+                "run_id": "run_heldout_flagged",
+                "session_key": "heldout",
+                "period": "2023Q1",
+                "strategy_artifact_id": success["frozen_strategy_artifact_id"],
+                "state_changed_during_test": True,
+            }
+        )
+        response = self._post(action="rollback_fold", session_key="heldout")
+        self.assertEqual(response.status_code, 200, response.text)
+        remaining = ledger.read()
+        self.assertEqual([record["record_type"] for record in remaining], ["fold"])
+        assert_no_frozen_artifact_mutation(remaining)
+        self.assertTrue(Path(str(success["frozen_strategy_artifact_path"])).is_dir())
+
+    def test_rollback_does_not_archive_shared_no_update_freeze(self) -> None:
+        from autotrade.pipelines.ledger import assert_no_frozen_artifact_mutation
+
+        ledger = ExperimentLedger(self.directory / "ledgers/experiment_ledger.jsonl")
+        success = ledger.read()[0]
+        shared_id = str(success["frozen_strategy_artifact_id"])
+        shared_path = Path(str(success["frozen_strategy_artifact_path"]))
+        ledger.append(
+            {
+                "record_type": "fold",
+                "experiment_id": "exp_ctl",
+                "epoch_id": "epoch_001",
+                "fold_id": "fold_2022Q2",
+                "run_id": "run_no_update",
+                "session_key": "epoch_001/fold_2022Q2",
+                "fold_status": "no_update",
+                "frozen_strategy_artifact_id": shared_id,
+                "frozen_strategy_artifact_path": str(shared_path),
+                "state_changed_during_test": True,
+            }
+        )
+        response = self._post(
+            action="rollback_fold", session_key="epoch_001/fold_2022Q2"
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        remaining = ledger.read()
+        self.assertEqual([record["fold_id"] for record in remaining], ["fold_2022Q1"])
+        assert_no_frozen_artifact_mutation(remaining)
+        self.assertTrue(shared_path.is_dir())
 
     def test_set_gpu_count_round_trips_and_refuses_everything_else(self) -> None:
         """The console's per-session GPU allocation, and its four refusals.

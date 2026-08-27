@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import errno
 import json
+import os
 import shutil
 import stat
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -475,6 +478,226 @@ def test_research_pit_provider_reuses_completed_semantic_views(tmp_path: Path) -
     assert fake.calls == ["decision", "replay", "replay", "replay"]
 
 
+def test_unphased_meta_replay_is_cloned_into_valid_phase(tmp_path: Path) -> None:
+    provider, fake = _provider_with_fake_builder(tmp_path)
+    decision = datetime.fromisoformat("2024-01-01T23:59:59+08:00")
+    slot = "20240102_20240103_20240101T235959+0800"
+    unphased = provider.cache_root / "replay" / slot
+    _write_unphased_replay(
+        unphased,
+        label="meta",
+        start="20240102",
+        end="20240103",
+        available_from=decision,
+        generation_id=provider.release.generation_id,
+    )
+    bundle = provider.prepare(
+        fold=None,
+        phase="valid",
+        start="20240102",
+        end="20240103",
+        decision_time=decision,
+    )
+    replay = Path(bundle.replay_ref)
+    assert replay == provider.cache_root / "replay" / "valid" / slot
+    source_manifest = json.loads(
+        (unphased / "manifest.json").read_text(encoding="utf-8")
+    )
+    manifest = json.loads((replay / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["label"] == "valid"
+    assert manifest["period_start"] == "20240102"
+    assert manifest["snapshot_id"] != source_manifest["snapshot_id"]
+    assert str(manifest["snapshot_id"]).startswith("replay_")
+    assert manifest["raw_generation"] == source_manifest["raw_generation"]
+    assert os.stat(replay / "daily.parquet").st_ino == os.stat(
+        unphased / "daily.parquet"
+    ).st_ino
+    assert source_manifest["label"] == "meta"
+    assert fake.calls == ["decision"]
+    snapshot = Path(bundle.decision_ref)
+    stash = _asof_stash_dir(
+        snapshot, replay, StrategySchedule("day", "08:30"), "valid"
+    )
+    assert "phase" in stash.parts and stash.parts[stash.parts.index("phase") + 1] == "valid"
+    again = provider.prepare(
+        fold=None,
+        phase="valid",
+        start="20240102",
+        end="20240103",
+        decision_time=decision,
+    )
+    assert again.replay_ref == bundle.replay_ref
+    assert fake.calls == ["decision"]
+
+
+def test_concurrent_valid_prepare_from_unphased_is_phase_safe(tmp_path: Path) -> None:
+    provider, fake = _provider_with_fake_builder(tmp_path)
+    decision = datetime.fromisoformat("2024-01-01T23:59:59+08:00")
+    slot = "20240102_20240103_20240101T235959+0800"
+    _write_unphased_replay(
+        provider.cache_root / "replay" / slot,
+        label="frozen_test",
+        start="20240102",
+        end="20240103",
+        available_from=decision,
+        generation_id=provider.release.generation_id,
+    )
+    barrier = threading.Barrier(8)
+    bundles: list[SnapshotBundle] = []
+    errors: list[BaseException] = []
+    guard = threading.Lock()
+
+    def worker() -> None:
+        barrier.wait()
+        try:
+            bundle = provider.prepare(
+                fold=None,
+                phase="valid",
+                start="20240102",
+                end="20240103",
+                decision_time=decision,
+            )
+        except BaseException as exc:
+            with guard:
+                errors.append(exc)
+            return
+        with guard:
+            bundles.append(bundle)
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert errors == []
+    refs = {bundle.replay_ref for bundle in bundles}
+    assert len(refs) == 1
+    replay = Path(next(iter(refs)))
+    assert replay == provider.cache_root / "replay" / "valid" / slot
+    assert json.loads((replay / "manifest.json").read_text(encoding="utf-8"))[
+        "label"
+    ] == "valid"
+    parent = replay.parent
+    assert not list(parent.glob(".*.tmp"))
+    assert fake.calls == ["decision"]
+
+
+def test_failed_unphased_clone_leaves_no_phased_residue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider, fake = _provider_with_fake_builder(tmp_path)
+    decision = datetime.fromisoformat("2024-01-01T23:59:59+08:00")
+    slot = "20240102_20240103_20240101T235959+0800"
+    unphased = provider.cache_root / "replay" / slot
+    _write_unphased_replay(
+        unphased,
+        label="meta",
+        start="20240102",
+        end="20240103",
+        available_from=decision,
+        generation_id=provider.release.generation_id,
+    )
+
+    def boom(src: str, dst: str) -> None:
+        raise OSError(errno.EIO, "injected link failure")
+
+    monkeypatch.setattr(os, "link", boom)
+    with pytest.raises(OSError, match="injected link failure"):
+        provider.prepare(
+            fold=None,
+            phase="valid",
+            start="20240102",
+            end="20240103",
+            decision_time=decision,
+        )
+    target = provider.cache_root / "replay" / "valid" / slot
+    assert not target.exists()
+    parent = target.parent
+    if parent.exists():
+        assert not list(parent.glob(".*.tmp"))
+    assert "replay" not in fake.calls
+
+    monkeypatch.undo()
+    bundle = provider.prepare(
+        fold=None,
+        phase="valid",
+        start="20240102",
+        end="20240103",
+        decision_time=decision,
+    )
+    assert Path(bundle.replay_ref) == target
+    assert json.loads((target / "manifest.json").read_text(encoding="utf-8"))[
+        "label"
+    ] == "valid"
+    assert os.stat(target / "daily.parquet").st_ino == os.stat(
+        unphased / "daily.parquet"
+    ).st_ino
+    assert fake.calls == ["decision"]
+
+
+def test_unphased_replay_with_wrong_identity_is_not_returned(tmp_path: Path) -> None:
+    provider, fake = _provider_with_fake_builder(tmp_path)
+    decision = datetime.fromisoformat("2024-01-01T23:59:59+08:00")
+    slot = "20240102_20240103_20240101T235959+0800"
+    unphased = provider.cache_root / "replay" / slot
+    _write_unphased_replay(
+        unphased,
+        label="meta",
+        start="19990101",
+        end="19990102",
+        available_from=decision,
+        generation_id=provider.release.generation_id,
+    )
+    bundle = provider.prepare(
+        fold=None,
+        phase="valid",
+        start="20240102",
+        end="20240103",
+        decision_time=decision,
+    )
+    replay = Path(bundle.replay_ref)
+    assert replay == provider.cache_root / "replay" / "valid" / slot
+    assert replay.resolve() != unphased.resolve()
+    assert json.loads((replay / "manifest.json").read_text(encoding="utf-8"))[
+        "label"
+    ] == "valid"
+    assert fake.calls == ["decision", "replay"]
+
+
+def test_unphased_clone_refuses_cross_filesystem_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider, fake = _provider_with_fake_builder(tmp_path)
+    decision = datetime.fromisoformat("2024-01-01T23:59:59+08:00")
+    slot = "20240102_20240103_20240101T235959+0800"
+    _write_unphased_replay(
+        provider.cache_root / "replay" / slot,
+        label="meta",
+        start="20240102",
+        end="20240103",
+        available_from=decision,
+        generation_id=provider.release.generation_id,
+    )
+
+    def boom(src: str, dst: str) -> None:
+        raise OSError(errno.EXDEV, "cross-device link")
+
+    monkeypatch.setattr(os, "link", boom)
+    with pytest.raises(RuntimeError, match="different filesystem"):
+        provider.prepare(
+            fold=None,
+            phase="valid",
+            start="20240102",
+            end="20240103",
+            decision_time=decision,
+        )
+    target = provider.cache_root / "replay" / "valid" / slot
+    assert not target.exists()
+    if target.parent.exists():
+        assert not list(target.parent.glob(".*.tmp"))
+    assert "replay" not in fake.calls
+
+
 def test_evaluation_rejects_replay_from_another_phase(tmp_path: Path) -> None:
     snapshot, replay = _pit_slot_paths(
         tmp_path,
@@ -936,3 +1159,120 @@ def _write_simple_domain(
     current["trade_date"] = ["20240102", "20240103"]
     current["available_at"] = [f"2024-01-02T{time}+08:00", f"2024-01-03T{time}+08:00"]
     pd.DataFrame(current).to_parquet(replay / f"{name}.parquet", index=False)
+
+
+class _FakeReplayBuilder:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def build_decision_snapshot(self, decision, output, config, **_kwargs):
+        del config
+        self.calls.append("decision")
+        output = Path(output)
+        output.mkdir(parents=True)
+        pd.DataFrame(
+            {
+                "trade_date": ["20240101"],
+                "ts_code": ["000001.SZ"],
+                "open": [10.0],
+                "close": [10.0],
+                "available_at": ["2024-01-01T17:30:00+08:00"],
+            }
+        ).to_parquet(output / "daily.parquet", index=False)
+        manifest = {
+            "snapshot_id": "snap_stable",
+            "kind": "decision_input",
+            "decision_time": decision.isoformat(),
+            "domains": {"daily": {"rows": 1}},
+        }
+        (output / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        return manifest
+
+    def build_replay_slot(self, start, end, output, *, label, config, available_from):
+        del config
+        self.calls.append("replay")
+        output = Path(output)
+        output.mkdir(parents=True)
+        pd.DataFrame({"trade_date": [start]}).to_parquet(
+            output / "daily.parquet", index=False
+        )
+        manifest = {
+            "snapshot_id": "replay_stable",
+            "kind": "replay_slot",
+            "label": label,
+            "period_start": start,
+            "period_end": end,
+            "available_from": available_from.isoformat(),
+        }
+        (output / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        return manifest
+
+
+def _provider_with_fake_builder(
+    tmp_path: Path,
+) -> tuple[ResearchPITSnapshotProvider, _FakeReplayBuilder]:
+    raw = tmp_path / "data" / "raw"
+    for dataset in ("daily", "daily_basic", "adj_factor", "stk_limit", "suspend_d"):
+        target = raw / dataset / "trade_date=20240102.parquet"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame({"trade_date": ["20240102"], "ts_code": ["000001.SZ"]}).to_parquet(
+            target,
+            index=False,
+        )
+    events = tmp_path / "data" / "pit" / "fundamental_events"
+    events.mkdir(parents=True)
+    status = tmp_path / "results" / "data_quality" / "fundamental_events_status.json"
+    status.parent.mkdir(parents=True)
+    status.write_text("{}", encoding="utf-8")
+    provider = ResearchPITSnapshotProvider(
+        experiment_dir=tmp_path / "experiment",
+        raw_dir=raw,
+        fundamental_events_root=events,
+        fundamental_events_status=status,
+        config=SnapshotConfig(
+            include_intraday=False,
+            events_datasets=(),
+            macro_datasets=(),
+            text_datasets=(),
+            fundamental_datasets=(),
+            replay_include_events=False,
+            replay_include_text=False,
+            replay_include_minutes=False,
+            replay_include_macro=False,
+            replay_include_fundamentals=False,
+        ),
+    )
+    fake = _FakeReplayBuilder()
+    provider.builder = fake  # type: ignore[assignment]
+    return provider, fake
+
+
+def _write_unphased_replay(
+    path: Path,
+    *,
+    label: str,
+    start: str,
+    end: str,
+    available_from: datetime,
+    generation_id: str,
+) -> None:
+    path.mkdir(parents=True)
+    (path / "text_library").mkdir()
+    pd.DataFrame({"trade_date": [start], "close": [10.0]}).to_parquet(
+        path / "daily.parquet", index=False
+    )
+    (path / "text_library" / "news.parquet").write_bytes(b"news")
+    (path / "manifest.json").write_text(
+        json.dumps(
+            {
+                "snapshot_id": "replay_unphased",
+                "kind": "replay_slot",
+                "label": label,
+                "period_start": start,
+                "period_end": end,
+                "available_from": available_from.isoformat(),
+                "raw_generation": {"generation_id": generation_id},
+            }
+        ),
+        encoding="utf-8",
+    )

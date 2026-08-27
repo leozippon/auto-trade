@@ -29,6 +29,7 @@ from autotrade.environment.llm import (
     ScriptedLLM,
     ToolCall,
     context_request_fits,
+    is_context_overflow_error,
 )
 from autotrade.environment.step_tree import StepTree
 from autotrade.environment.tools import (
@@ -566,7 +567,7 @@ def test_fold_prompt_keeps_hard_boundaries_and_leaves_how_tos_mounted():
         "自由检查已挂载的事实",
         "不得从名称、日期或路径推断隐藏区间",
         "正式回测不能由自建回放替代",
-        "不得用它修改策略产物、启动后台任务或轮询状态",
+        "不得用它修改策略产物、启动后台任务、sleep/等待包装或轮询状态",
     ):
         assert rule in prompt
     assert "pyright --project" not in prompt
@@ -703,3 +704,55 @@ def test_the_prompt_tool_check_fails_on_a_tool_the_session_cannot_register():
     )
     referenced = _prompt_tool_tokens(mutated) & registrable
     assert sorted(referenced - set(_FOLD_TOOLS)) == ["finish_meta"]
+
+
+def _context_runner(llm: ScriptedLLM, **config) -> AgentSessionRunner:
+    return AgentSessionRunner(
+        llm=llm,
+        tools=ToolRegistry([]),
+        system_prompt="test",
+        config=AgentSessionConfig(**config),
+    )
+
+
+def test_prepare_context_request_returns_messages_that_fit():
+    runner = _context_runner(ScriptedLLM([], context_window_tokens=100_000))
+    messages = [ChatMessage("user", "short")]
+    assert (
+        runner._prepare_context_request(messages, (), 30.0) is messages
+    )
+
+
+def test_prepare_context_request_passes_when_window_is_unknown():
+    runner = _context_runner(ScriptedLLM([], context_window_tokens=None))
+    messages = [ChatMessage("user", "x" * 8_000)]
+    assert (
+        runner._prepare_context_request(messages, (), 30.0) is messages
+    )
+
+
+def test_prepare_context_request_raises_context_overflow_error():
+    runner = _context_runner(
+        ScriptedLLM([], context_window_tokens=200),
+        max_response_tokens=50,
+    )
+    messages = [ChatMessage("user", "x" * 5_000)]
+    with pytest.raises(LLMProxyError) as excinfo:
+        runner._prepare_context_request(
+            messages, (), 30.0, allow_semantic_compaction=False
+        )
+    assert is_context_overflow_error(excinfo.value)
+    assert "context window 200" in str(excinfo.value)
+
+
+def test_prepare_context_request_rejects_missing_window_without_assert(monkeypatch):
+    runner = _context_runner(ScriptedLLM([], context_window_tokens=200))
+    messages = [ChatMessage("user", "short")]
+    monkeypatch.setattr(
+        "autotrade.agent.runner.context_request_fits",
+        lambda *args, **kwargs: (False, 10, None),
+    )
+    with pytest.raises(RuntimeError, match="context window is unavailable"):
+        runner._prepare_context_request(
+            messages, (), 30.0, allow_semantic_compaction=False
+        )

@@ -1,4 +1,5 @@
 import shutil
+import stat
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,6 +9,8 @@ from unittest.mock import patch
 from autotrade.environment.artifacts import (
     ArtifactError,
     ModificationConstraints,
+    _atomic_replace_copied,
+    _unlock_directory,
     copy_artifact,
     copy_model_artifacts,
     init_from_template,
@@ -16,6 +19,7 @@ from autotrade.environment.artifacts import (
     modification_delta,
     model_artifact_delta,
     new_revision_id,
+    restore_frozen_artifact_trees,
 )
 
 from .fixtures_sandbox import TEMPLATE_DIR
@@ -297,6 +301,116 @@ def generate_orders(context):
             (cache / "x.pyc").write_bytes(b"x")
             with self.assertRaisesRegex(ArtifactError, "runtime cache"):
                 load_model_artifacts(root)
+
+
+class FrozenRestoreReplaceTest(unittest.TestCase):
+    def test_restore_frozen_artifact_trees_replaces_and_relocks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            snapshot_output = write_artifact(tmp_path / "snap_out")
+            snapshot_models = tmp_path / "snap_models"
+            snapshot_models.mkdir()
+            (snapshot_models / "weights.bin").write_bytes(b"snap")
+            live_output = write_artifact(
+                tmp_path / "frozen" / "output",
+                main="def generate_orders(context):\n    return [1]\n",
+            )
+            live_models = tmp_path / "frozen" / "models"
+            live_models.mkdir()
+            (live_models / "old.bin").write_bytes(b"old")
+
+            restore_frozen_artifact_trees(
+                output_path=live_output,
+                snapshot_output=snapshot_output,
+                models_path=live_models,
+                snapshot_models=snapshot_models,
+            )
+
+            self.assertEqual(
+                (live_output / "main.py").read_text(encoding="utf-8"),
+                (snapshot_output / "main.py").read_text(encoding="utf-8"),
+            )
+            self.assertEqual((live_models / "weights.bin").read_bytes(), b"snap")
+            self.assertFalse((live_models / "old.bin").exists())
+            self.assertEqual(
+                stat.S_IMODE((live_output / "main.py").stat().st_mode) & 0o222, 0
+            )
+            self.assertEqual(
+                stat.S_IMODE((live_models / "weights.bin").stat().st_mode) & 0o222, 0
+            )
+
+    def test_unlock_directory_propagates_parent_chmod_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp) / "output"
+            dest.mkdir()
+            parent = dest.parent
+            real_chmod = Path.chmod
+
+            def chmod(self, mode, *args, **kwargs):
+                if Path(self).resolve() == parent.resolve():
+                    raise OSError(1, "chmod denied")
+                return real_chmod(self, mode, *args, **kwargs)
+
+            with patch.object(Path, "chmod", chmod):
+                with self.assertRaises(OSError) as ctx:
+                    _unlock_directory(dest)
+            self.assertIn("chmod denied", str(ctx.exception))
+
+    def test_atomic_replace_restores_backup_then_reraises_original(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = write_artifact(Path(tmp) / "source")
+            dest = write_artifact(Path(tmp) / "dest")
+            (dest / "main.py").write_text(VALID_MAIN + "# live\n", encoding="utf-8")
+            real_rename = Path.rename
+
+            def rename(self, target):
+                if self.name.startswith(f".{dest.name}.restore_"):
+                    raise OSError(1, "staging commit failed")
+                return real_rename(self, target)
+
+            with patch.object(Path, "rename", rename):
+                with self.assertRaises(OSError) as ctx:
+                    _atomic_replace_copied(source, dest, copy_artifact)
+            self.assertIn("staging commit failed", str(ctx.exception))
+            self.assertNotIn("failed to restore", str(ctx.exception))
+            self.assertTrue(dest.is_dir())
+            self.assertIn(
+                "# live", (dest / "main.py").read_text(encoding="utf-8")
+            )
+
+    def test_atomic_replace_propagates_backup_restore_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = write_artifact(Path(tmp) / "source")
+            dest = write_artifact(Path(tmp) / "dest")
+            (dest / "main.py").write_text(VALID_MAIN + "# live\n", encoding="utf-8")
+            real_rename = Path.rename
+
+            def rename(self, target):
+                if self.name.startswith(f".{dest.name}.restore_"):
+                    raise OSError(1, "staging commit failed")
+                if self.name.startswith(f".{dest.name}.backup_"):
+                    raise OSError(1, "backup restore failed")
+                return real_rename(self, target)
+
+            with patch.object(Path, "rename", rename):
+                with self.assertRaisesRegex(OSError, "failed to restore .* after replace failure"):
+                    _atomic_replace_copied(source, dest, copy_artifact)
+            self.assertFalse(dest.exists())
+            backups = [
+                path
+                for path in dest.parent.iterdir()
+                if path.name.startswith(f".{dest.name}.backup_")
+            ]
+            self.assertEqual(len(backups), 1)
+            self.assertIn(
+                "# live", (backups[0] / "main.py").read_text(encoding="utf-8")
+            )
+            self.assertFalse(
+                any(
+                    path.name.startswith(f".{dest.name}.restore_")
+                    for path in dest.parent.iterdir()
+                )
+            )
 
 
 if __name__ == "__main__":

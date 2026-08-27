@@ -7,6 +7,7 @@ ssh -o BatchMode=yes "$remote" 'sudo -n true; mkdir -p ~/admcube-nginx'
 scp -o BatchMode=yes \
   "$repo/ops/nginx/aliyun/admcubequant-http.conf" \
   "$repo/ops/nginx/aliyun/admcubequant-https.conf" \
+  "$repo/ops/nginx/aliyun/admcube-https.conf" \
   "$repo/ops/nginx/aliyun/admcube-http-limits.conf" \
   "$remote:~/admcube-nginx/"
 ssh -o BatchMode=yes "$remote" 'set -e
@@ -21,6 +22,12 @@ if [ ! -f /etc/letsencrypt/live/admcubequant.tj.cn/fullchain.pem ]; then
 fi
 sudo cp ~/admcube-nginx/admcubequant-https.conf /etc/nginx/sites-available/admcubequant-https
 sudo ln -sfn /etc/nginx/sites-available/admcubequant-https /etc/nginx/sites-enabled/admcubequant-https
+if [ ! -f /etc/letsencrypt/live/admcube-ip/fullchain.pem ] || [ ! -f /etc/letsencrypt/live/admcube-ip/privkey.pem ]; then
+  echo "missing /etc/letsencrypt/live/admcube-ip/fullchain.pem or /etc/letsencrypt/live/admcube-ip/privkey.pem; refusing to enable IP vhost" >&2
+  exit 1
+fi
+sudo cp ~/admcube-nginx/admcube-https.conf /etc/nginx/sites-available/admcube-https
+sudo ln -sfn /etc/nginx/sites-available/admcube-https /etc/nginx/sites-enabled/admcube-https
 sudo nginx -t
 sudo systemctl reload nginx
 echo ok

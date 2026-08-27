@@ -809,9 +809,9 @@ def recheck_stk_auction(args: argparse.Namespace) -> int:
     """Validated evening stk_auction reconciliation inside the universal
     update, standardized with the margin family's evening self-heal shape:
     the latest open day is always re-read (late source corrections), and any
-    EARLIER open day in the update window whose partition is missing gets a
-    validated capture attempt — a multi-day capture outage heals itself
-    instead of waiting for a manual backfill. Healed days keep OBSERVED
+    EARLIER open day in the update window whose partition is missing or not an
+    intact commit gets a validated capture attempt — a multi-day capture
+    outage or torn write heals itself instead of waiting for a manual backfill. Healed days keep OBSERVED
     landing timestamps (auction visibility is deliberately not rule-stamped:
     a fixed morning stamp on an evening-healed day would show replay auction
     data at an open the live system provably lacked).
@@ -832,8 +832,8 @@ def recheck_stk_auction(args: argparse.Namespace) -> int:
     exit_code = 0
     for day in open_days:
         path = repo_root / args.raw_dir / "stk_auction" / f"trade_date={day}.parquet"
-        if day != open_days[-1] and path.exists():
-            continue  # only the latest day is re-read for corrections
+        if day != open_days[-1] and committed_partition_intact(path):
+            continue  # latest day is always re-read; incomplete earlier days self-heal
         exit_code = _recheck_stk_auction_day(args, repo_root, raw_dir, day) or exit_code
     return exit_code
 
@@ -864,14 +864,14 @@ def _recheck_stk_auction_day(args: argparse.Namespace, repo_root: Path, raw_dir:
         }, ensure_ascii=False, sort_keys=True))
         return 0
     snapshot = _auction_frame_snapshot(candidate)
-    if existed:
-        if _auction_frame_snapshot(pd.read_parquet(path)) == snapshot:
-            # Unchanged content keeps the first observed availability and the
-            # original file untouched (no rewrite).
-            print(json.dumps({
-                **outcome, "status": "recheck_unchanged", "rows": int(len(candidate)),
-            }, ensure_ascii=False, sort_keys=True))
-            return 0
+    if committed_partition_intact(path) and _auction_frame_snapshot(pd.read_parquet(path)) == snapshot:
+        # Unchanged content on an intact commit keeps the first observed
+        # availability and the original file untouched. A torn pair is rewritten
+        # even when the payload matches, so the commit identity can self-heal.
+        print(json.dumps({
+            **outcome, "status": "recheck_unchanged", "rows": int(len(candidate)),
+        }, ensure_ascii=False, sort_keys=True))
+        return 0
     wrote, landed_at = _publish_auction_frame(
         raw_dir,
         repo_root,
@@ -985,8 +985,10 @@ def download_trade_date_dataset(
     total_rows = 0
     for index, trade_date in enumerate(trade_dates, start=1):
         path = dataset_dir / f"trade_date={trade_date}.parquet"
-        if path.exists() and not force:
-            if spec.zero_rows_ok or parquet_rows(path) > 0:
+        if not force:
+            # A parquet whose sidecar is missing or carries another write ID is
+            # an interrupted write, not a committed partition: re-attempt it.
+            if committed_partition_intact(path) and (spec.zero_rows_ok or parquet_rows(path) > 0):
                 skipped += 1
                 if index % 250 == 0:
                     print(f"{spec.api_name} {index}/{len(trade_dates)} skipped={skipped} written={written}")
@@ -1014,7 +1016,6 @@ def download_trade_date_dataset(
             key_columns=list(spec.key_columns),
             revision_ledger=revision_ledger,
             allow_empty_revision_overwrite=allow_empty_revision_overwrite,
-            allow_key_removal_overwrite=True,
         )
         if did_write:
             total_rows += len(df)
@@ -1881,7 +1882,7 @@ def query_share_float_to_path(
     revision_ledger: Path | str | None = None,
     allow_empty_revision_overwrite: bool = False,
 ) -> dict[str, Any]:
-    if path.exists() and not force:
+    if not force and committed_partition_intact(path):
         rows = parquet_rows(path)
         # Every return of this function carries the same keys: the caller reads
         # guard_retained on each day, so omitting it here turned a plain resume
@@ -2682,7 +2683,7 @@ def download_fundamental_period_dataset(
     blocked: list[str] = []
     for index, period in enumerate(periods, start=1):
         path = raw_dir / spec.api_name / f"period={period}.parquet"
-        if path.exists() and not force and period not in force_periods:
+        if not force and period not in force_periods and committed_partition_intact(path):
             skipped += 1
             continue
         params = {spec.period_param: period}
@@ -2794,7 +2795,7 @@ def download_fundamental_ts_code_dataset(
     blocked: list[str] = []
     for index, ts_code in enumerate(stock_codes, start=1):
         path = raw_dir / spec.api_name / f"ts_code={ts_code}.parquet"
-        if path.exists() and not force and ts_code not in force_codes:
+        if not force and ts_code not in force_codes and committed_partition_intact(path):
             skipped += 1
             if index % 500 == 0:
                 print(f"{spec.api_name} codes {index}/{len(stock_codes)} skipped={skipped} written={written}")
@@ -3421,7 +3422,7 @@ def existing_partition_covers_request(path: Path, requested_params: dict[str, An
     return True
 
 def should_skip_existing_partition(path: Path, *, force: bool, requested_params: dict[str, Any] | None = None) -> bool:
-    return not force and existing_partition_covers_request(path, requested_params)
+    return not force and committed_partition_intact(path) and existing_partition_covers_request(path, requested_params)
 
 def run_update_step(label: str, fn, args: argparse.Namespace, summary: list[dict[str, Any]]) -> None:
     print(f"update step start: {label}")
@@ -3712,7 +3713,7 @@ def add_download_parser(sub: argparse._SubParsersAction) -> None:
     parser.add_argument("--end-date", default=date.today().strftime("%Y%m%d"))
     parser.add_argument("--trade-cal-end-date", help="Optional reference-tier lookahead end date used only for trade_cal coverage.")
     parser.add_argument("--datasets", nargs="+")
-    parser.add_argument("--refresh-daily-datasets", nargs="+", choices=core.DAILY_REQUIRED_DATASETS, default=[])
+    parser.add_argument("--refresh-daily-datasets", nargs="+", choices=core.DAILY_DOWNLOAD_DATASETS, default=[])
     parser.add_argument("--revision-ledger", default=REVISION_EVENTS_PATH)
     parser.add_argument("--allow-empty-revision-overwrite", action="store_true")
     parser.add_argument("--skip-bak-basic", action="store_true")
@@ -3751,11 +3752,11 @@ def add_update_parser(sub: argparse._SubParsersAction) -> None:
         default=7,
         help="Extend reference trade_cal this many calendar days beyond --end-date so pre-open jobs and next-session PIT mapping have calendar coverage.",
     )
-    parser.add_argument("--daily-datasets", nargs="+", choices=core.DAILY_REQUIRED_DATASETS)
+    parser.add_argument("--daily-datasets", nargs="+", choices=core.DAILY_DOWNLOAD_DATASETS)
     parser.add_argument(
         "--refresh-daily-datasets",
         nargs="+",
-        choices=core.DAILY_REQUIRED_DATASETS,
+        choices=core.DAILY_DOWNLOAD_DATASETS,
         default=[],
         help="Daily trade-date datasets to force-refresh within the update window; cron config selects the routine recent-window revision set.",
     )

@@ -13,49 +13,47 @@ import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import replace
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import pandas as pd
 
+from autotrade.agent.runner import AgentSessionDeadlineExceeded
+from autotrade.environment.artifacts import (
+    copy_artifact,
+    copy_model_artifacts,
+    model_artifact_delta,
+    modification_delta,
+    restore_frozen_artifact_trees,
+)
 from autotrade.environment.executor import (
     DockerStrategyExecutor,
     StrategyExecutor,
     TrustedStrategyExecutor,
 )
-from autotrade.environment.artifacts import model_artifact_delta, modification_delta
 from autotrade.environment.identity import AgentRefStore
-from autotrade.environment.runtime import agent_trace_path
 from autotrade.environment.replay import (
     ContextDataProvider,
     ExecutionPriceProvider,
     ReplayResult,
     run_daily_replay,
 )
+from autotrade.environment.runtime import agent_trace_path
 from autotrade.environment.strategy import NLQuery
 from autotrade.environment.strategy_loader import load_strategy
 
+from .agent_inbox import expire_experiment_session_inbox
 from .agent_views import (
     agent_visible_ledger_record as _agent_visible_ledger_record,
+)
+from .agent_views import (
     compact_fold_history as _compact_fold_history,
 )
-from .meta_inputs import (
-    AgentTraceFullSidecar,
-    build_meta_fold_review_bundle,
-    select_meta_review_folds,
-)
-from .prior import ExperimentPriorStore, PRIOR_MAX_CHARS
-from .skills import (
-    ExperimentSkillsStore,
-    SkillsPublication,
-    SkillsSnapshot,
-    latest_skills_snapshot,
-    resolve_collected_skills_source,
-)
-from autotrade.agent.runner import AgentSessionDeadlineExceeded
 from .config import (
     ArtifactRevision,
     ArtifactStore,
     EvaluationBackend,
     EvaluationRequest,
+    EvaluationResult,
     FoldDeveloper,
     FoldOutcome,
     FoldSessionRequest,
@@ -67,18 +65,37 @@ from .config import (
     SnapshotProvider,
     StepResult,
     StrategyExperimentConfig,
+    fold_session_deadline_seconds,
 )
-from .agent_inbox import expire_experiment_session_inbox
 from .folds import FoldSpec, build_fold_schedule, heldout_periods
 from .hitl_state import fold_session_key
-from .ledger import ExperimentLedger, latest_fold_records
+from .ledger import (
+    ExperimentLedger,
+    FrozenArtifactMutated,
+    FrozenArtifactRestoreFailed,
+    assert_no_frozen_artifact_mutation,
+    is_frozen_artifact_mutation,
+    latest_fold_records,
+)
+from .meta_inputs import (
+    AgentTraceFullSidecar,
+    build_meta_fold_review_bundle,
+    select_meta_review_folds,
+)
 from .meta_schedule import (
     meta_learning_id,
     meta_learning_trigger_counts,
     meta_record_id,
     meta_session_key,
 )
-
+from .prior import PRIOR_MAX_CHARS, ExperimentPriorStore
+from .skills import (
+    ExperimentSkillsStore,
+    SkillsPublication,
+    SkillsSnapshot,
+    latest_skills_snapshot,
+    resolve_collected_skills_source,
+)
 
 # A per-session deadline override may raise the fold deadline above the
 # configured maximum, bounded by this hard ceiling in minutes.
@@ -203,6 +220,7 @@ class RollingExperimentPipeline:
         prior: str = "",
         session_context: dict[str, object] | None = None,
     ) -> FoldOutcome:
+        assert_no_frozen_artifact_mutation(self.ledger.read())
         run_started = time.monotonic()
         run_id = f"run_{uuid.uuid4().hex}"
         context = dict(session_context or {})
@@ -212,6 +230,7 @@ class RollingExperimentPipeline:
             self.ledger.read(), experiment_dir=self.config.experiment_dir
         )
         retained_artifact_id = parent.artifact_id if parent is not None else None
+        wrote_business_record = False
         try:
             _publish_progress(
                 progress, "pit_snapshot", run_id=run_id, phase="validation"
@@ -237,6 +256,7 @@ class RollingExperimentPipeline:
                         max_backtests=budgets["max_backtests"],
                         max_llm_calls=budgets["max_llm_calls"],
                         deadline_seconds=budgets["deadline_seconds"],
+                        deadline_grace_seconds=budgets["deadline_grace_seconds"],
                         directive=str(context.get("directive") or ""),
                         prompt_override=str(context.get("prompt_override") or ""),
                         sandbox_gpu_count=_optional_gpu_count(
@@ -334,7 +354,11 @@ class RollingExperimentPipeline:
                 validation = (
                     selected.validation.summary if selected is not None else None
                 )
+            if frozen is not None:
+                retained_artifact_id = frozen.artifact_id
             test_result_ref: str | None = None
+            state_changed_during_test = False
+            restore_error: BaseException | None = None
             if frozen is not None:
                 _publish_progress(progress, "frozen_test", run_id=run_id)
                 test_snapshot = self.snapshots.prepare(
@@ -344,8 +368,9 @@ class RollingExperimentPipeline:
                     end=fold.test_end,
                     decision_time=fold.test_decision_time,
                 )
-                try:
-                    test_result = self.evaluator.evaluate(
+                test_result, test_error, state_changed_during_test, restore_error = (
+                    _run_guarded_evaluation(
+                        self.evaluator,
                         EvaluationRequest(
                             revision=_frozen_revision(frozen),
                             snapshot=test_snapshot,
@@ -354,16 +379,24 @@ class RollingExperimentPipeline:
                             end=fold.test_end,
                             schedule=self.config.schedule,
                             broker_profile=self.config.broker_profile,
-                        )
+                        ),
+                        frozen,
                     )
+                )
+                if test_result is not None:
                     test_summary = test_result.summary
                     test_result_ref = test_result.result_ref
-                except Exception as exc:  # noqa: BLE001 - Frozen Test is diagnostic evidence
-                    # Frozen Test is diagnostic only: it cannot undo an already
-                    # accepted revision, but the failure must remain explicit.
+                else:
+                    # Frozen Test is diagnostic only unless the frozen trees
+                    # themselves changed: then the ledger records the integrity
+                    # failure and the run terminates.
                     test_summary = {
                         "status": "failed",
-                        "error": f"{type(exc).__name__}: {exc}",
+                        "error": (
+                            f"{type(test_error).__name__}: {test_error}"
+                            if test_error is not None
+                            else "frozen_test_failed"
+                        ),
                     }
             else:
                 test_snapshot = None
@@ -425,28 +458,43 @@ class RollingExperimentPipeline:
                 },
                 **_session_timing(context, run_started),
             }
+            if state_changed_during_test:
+                record["state_changed_during_test"] = True
             self.ledger.append(record)
+            wrote_business_record = True
             expire_experiment_session_inbox(
                 self.config.experiment_dir,
                 str(record["session_key"]),
                 expired_by=run_id,
             )
-            retained_artifact_id = frozen.artifact_id if frozen is not None else None
+            if state_changed_during_test:
+                if restore_error is not None:
+                    raise FrozenArtifactRestoreFailed(
+                        "strategy or model artifacts changed during frozen test "
+                        "and restoring the pre-evaluation trees failed: "
+                        f"{restore_error}"
+                    ) from restore_error
+                raise FrozenArtifactMutated(
+                    "strategy or model artifacts changed during frozen test"
+                )
             return FoldOutcome(
                 fold.fold_id, run_id, status, frozen, validation, test_summary
             )
+        except FrozenArtifactMutated:
+            raise
         except Exception as exc:
-            self.ledger.append(
-                {
-                    "record_type": "attempt_failed",
-                    "experiment_id": self.config.experiment_id,
-                    "epoch_id": epoch_id,
-                    "fold_id": fold.fold_id,
-                    "run_id": run_id,
-                    "phase": "fold",
-                    "error": f"{type(exc).__name__}: {exc}",
-                }
-            )
+            if not wrote_business_record:
+                self.ledger.append(
+                    {
+                        "record_type": "attempt_failed",
+                        "experiment_id": self.config.experiment_id,
+                        "epoch_id": epoch_id,
+                        "fold_id": fold.fold_id,
+                        "run_id": run_id,
+                        "phase": "fold",
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                )
             raise
         finally:
             prune = getattr(self.artifacts, "prune_transient", None)
@@ -466,6 +514,7 @@ class RollingExperimentPipeline:
         *,
         replay: bool = False,
     ) -> int:
+        assert_no_frozen_artifact_mutation(self.ledger.read())
         count = 0
         # A re-run fold invalidates every earlier Held-out result: they scored a
         # frontier that no longer exists, so the caller replays them against the
@@ -476,7 +525,7 @@ class RollingExperimentPipeline:
             else {
                 str(record.get("period"))
                 for record in self.ledger.read("heldout")
-                if record.get("period")
+                if record.get("period") and not is_frozen_artifact_mutation(record)
             }
         )
         for period in heldout_periods(
@@ -497,7 +546,8 @@ class RollingExperimentPipeline:
                 end=str(period["end"]),
                 decision_time=period["decision_time"],  # type: ignore[arg-type]
             )
-            result = self.evaluator.evaluate(
+            result, heldout_error, state_changed, restore_error = _run_guarded_evaluation(
+                self.evaluator,
                 EvaluationRequest(
                     revision=_frozen_revision(final),
                     snapshot=snapshot,
@@ -506,8 +556,50 @@ class RollingExperimentPipeline:
                     end=str(period["end"]),
                     schedule=self.config.schedule,
                     broker_profile=self.config.broker_profile,
-                )
+                ),
+                final,
             )
+            if state_changed:
+                self.ledger.append(
+                    {
+                        "record_type": "heldout",
+                        "experiment_id": self.config.experiment_id,
+                        "epoch_id": epoch_id,
+                        "fold_id": f"heldout_{label}",
+                        "run_id": run_id,
+                        "session_key": "heldout",
+                        "period": label,
+                        "strategy_artifact_id": final.artifact_id,
+                        "snapshot_id": snapshot.snapshot_id,
+                        "result": (
+                            result.summary
+                            if result is not None
+                            else {
+                                "status": "failed",
+                                "error": (
+                                    f"{type(heldout_error).__name__}: {heldout_error}"
+                                    if heldout_error is not None
+                                    else "heldout_failed"
+                                ),
+                            }
+                        ),
+                        "result_ref": result.result_ref if result is not None else None,
+                        "state_changed_during_test": True,
+                    }
+                )
+                if restore_error is not None:
+                    raise FrozenArtifactRestoreFailed(
+                        "strategy or model artifacts changed during held-out "
+                        "and restoring the pre-evaluation trees failed: "
+                        f"{restore_error}"
+                    ) from restore_error
+                raise FrozenArtifactMutated(
+                    "strategy or model artifacts changed during held-out"
+                ) from heldout_error
+            if heldout_error is not None:
+                raise heldout_error
+            if result is None:
+                raise RuntimeError("held-out evaluation returned no result")
             self.ledger.append(
                 {
                     "record_type": "heldout",
@@ -891,6 +983,13 @@ def _keep_frozen_artifact_ids(
         artifact_id = str(record.get("frozen_strategy_artifact_id") or "")
         if artifact_id:
             keep.add(artifact_id)
+    for record in records:
+        if not is_frozen_artifact_mutation(record):
+            continue
+        for key in ("frozen_strategy_artifact_id", "strategy_artifact_id"):
+            artifact_id = str(record.get(key) or "")
+            if artifact_id:
+                keep.add(artifact_id)
     latest_meta: dict[str, dict[str, object]] = {}
     for record in records:
         if record.get("record_type") != "meta_learning":
@@ -952,6 +1051,62 @@ def _step_record(step: StepResult) -> dict[str, object]:
 
 def _frozen_revision(artifact: FrozenArtifact) -> ArtifactRevision:
     return ArtifactRevision(artifact.artifact_id, artifact.path, artifact.model_path)
+
+
+def _snapshot_frozen_trees(artifact: FrozenArtifact, dest: Path) -> None:
+    copy_artifact(artifact.path, dest / "output")
+    copy_model_artifacts(artifact.model_path, dest / "models")
+
+
+def _live_models_path(artifact: FrozenArtifact) -> Path:
+    if artifact.model_path is not None:
+        return Path(artifact.model_path)
+    return artifact.path.parent / "models"
+
+
+def _frozen_trees_changed(artifact: FrozenArtifact, snapshot: Path) -> bool:
+    if modification_delta(snapshot / "output", artifact.path).changed_files:
+        return True
+    return bool(
+        model_artifact_delta(snapshot / "models", _live_models_path(artifact)).changed_files
+    )
+
+
+def _run_guarded_evaluation(
+    evaluator: EvaluationBackend,
+    request: EvaluationRequest,
+    artifact: FrozenArtifact,
+) -> tuple[EvaluationResult | None, BaseException | None, bool, BaseException | None]:
+    """Evaluate once, restore frozen trees if they changed, and report both."""
+    with TemporaryDirectory() as raw:
+        root = Path(raw)
+        _snapshot_frozen_trees(artifact, root)
+        result: EvaluationResult | None = None
+        error: BaseException | None = None
+        restore_error: BaseException | None = None
+        try:
+            result = evaluator.evaluate(request)
+        except Exception as exc:  # noqa: BLE001 - caller chooses diagnostic vs fail-fast
+            error = exc
+        try:
+            changed = _frozen_trees_changed(artifact, root)
+        except Exception:  # noqa: BLE001 - comparison failure is an integrity failure
+            changed = True
+        if changed:
+            try:
+                restore_frozen_artifact_trees(
+                    output_path=artifact.path,
+                    snapshot_output=root / "output",
+                    models_path=artifact.model_path,
+                    snapshot_models=root / "models",
+                )
+                if _frozen_trees_changed(artifact, root):
+                    raise RuntimeError(
+                        "frozen trees still differ after restoring pre-evaluation bytes"
+                    )
+            except Exception as exc:  # noqa: BLE001 - restore failure is worse than the mutation
+                restore_error = exc
+        return result, error, changed, restore_error
 
 
 def _development_history(
@@ -1113,12 +1268,13 @@ def _session_budgets(
                     f"{name} override cannot exceed the configured Fold limit"
                 )
             limits[name] = float(value) if name == "deadline_seconds" else int(value)
-    # The budget handed to the session is main deadline plus the trailing
-    # wrap-up grace window; the runner reserves that trailing window for
-    # wrap-up (reaching the main deadline never interrupts the model).
-    limits["deadline_seconds"] = (
-        float(limits["deadline_seconds"]) + config.deadline_grace_minutes * 60
+    # Grace is not a resource_override key: add it after the override check so
+    # the session budget and the runner reservation share one config source.
+    main_minutes = float(limits["deadline_seconds"]) / 60.0
+    limits["deadline_seconds"] = fold_session_deadline_seconds(
+        main_minutes, config.deadline_grace_minutes
     )
+    limits["deadline_grace_seconds"] = float(config.deadline_grace_minutes) * 60.0
     return limits
 
 

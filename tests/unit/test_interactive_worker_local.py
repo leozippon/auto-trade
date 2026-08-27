@@ -638,16 +638,18 @@ def test_llm_worker_runs_real_meta_fold_validation_and_heldout(
     )
     assert {"shell", "daily_backtest", "step_rollback"}.isdisjoint(meta_tool_names)
     fold_tool_names = {item["function"]["name"] for item in llm.calls[2]["tools"]}
+    # Fold parent holds typed writers; shell is debug-only and must not edit strategy.
     assert {
         "ask_user",
         "daily_backtest",
+        "edit_file",
         "explore",
         "finish_fold",
         "shell",
         "step_rollback",
         "todo",
+        "write_file",
     }.issubset(fold_tool_names)
-    assert {"write_file", "edit_file"}.isdisjoint(fold_tool_names)
     assert all(
         "test_period" not in (message.content or "")
         for call in llm.calls

@@ -42,6 +42,7 @@ from autotrade.pipelines.local_backend import (
     FoldBacktestTool,
     SessionBudgetLLM,
     SessionCallBudget,
+    session_role_quotas,
 )
 
 
@@ -235,7 +236,10 @@ def test_backtest_failure_past_wall_deadline_keeps_llm_repair_budget(
     repair_context = "".join(
         message.content or "" for message in scripted.calls[1]["messages"]
     )
-    assert "daily Validation failed: RuntimeError" in repair_context
+    assert (
+        "daily Validation failed: RuntimeError: repairable validation failure"
+        in repair_context
+    )
     assert str(tmp_path) not in repair_context
     assert time_budget.remaining() == pytest.approx(0.5)
     # The host keeps the real EvaluationResult path for ledger/freeze work, but
@@ -649,3 +653,80 @@ def test_runner_rejects_mismatched_backtest_budget(tmp_path: Path) -> None:
             system_prompt="mismatch",
             time_budget=main_budget,
         )
+
+
+def test_session_call_budget_role_quotas_scale_and_keep_explore_usable() -> None:
+    assert session_role_quotas(400) == (200, 50)
+    assert session_role_quotas(2) == (1, 0)
+    assert session_role_quotas(1) == (0, 0)
+    assert session_role_quotas(8) == (4, 1)
+    clock = FakeClock()
+    budget = SessionCallBudget(
+        max_calls=8, time_budget=InferenceTimeBudget(duration_seconds=10.0, clock=clock)
+    )
+    assert budget.explore_cap == 4
+    assert budget.parent_reserve == 1
+    compact = SessionBudgetLLM(
+        ScriptedLLM([ProviderResponse(content="c")] * 8),
+        budget=budget,
+        role="compact",
+    )
+    for _ in range(7):
+        compact.complete([ChatMessage("user", "c")])
+    with pytest.raises(RuntimeError, match="budget exhausted"):
+        compact.complete([ChatMessage("user", "c")])
+    main = SessionBudgetLLM(
+        ScriptedLLM([ProviderResponse(content="m")]),
+        budget=budget,
+        role="main",
+    )
+    main.complete([ChatMessage("user", "m")])
+    assert budget.calls == 8
+    assert budget.main_calls == 1
+
+    small = SessionCallBudget(
+        max_calls=2, time_budget=InferenceTimeBudget(duration_seconds=10.0, clock=clock)
+    )
+    explore = SessionBudgetLLM(
+        ScriptedLLM([ProviderResponse(content="e")] * 2),
+        budget=small,
+        role="explore",
+    )
+    explore.complete([ChatMessage("user", "e")])
+    with pytest.raises(RuntimeError, match="budget exhausted"):
+        explore.complete([ChatMessage("user", "e")])
+    SessionBudgetLLM(
+        ScriptedLLM([ProviderResponse(content="m")]),
+        budget=small,
+        role="main",
+    ).complete([ChatMessage("user", "m")])
+    assert small.calls == 2
+
+
+def test_session_call_budget_claims_are_serialized() -> None:
+    clock = FakeClock()
+    budget = SessionCallBudget(
+        max_calls=20, time_budget=InferenceTimeBudget(duration_seconds=10.0, clock=clock)
+    )
+    errors: list[str] = []
+
+    def claim_many(role: str) -> None:
+        for _ in range(20):
+            try:
+                budget.claim(role)
+            except RuntimeError as exc:
+                errors.append(str(exc))
+
+    workers = [
+        threading.Thread(target=claim_many, args=("explore",)),
+        threading.Thread(target=claim_many, args=("compact",)),
+        threading.Thread(target=claim_many, args=("main",)),
+    ]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join()
+    assert budget.calls == 20
+    assert budget.explore_calls <= budget.explore_cap
+    assert budget.main_calls >= 0
+    assert len(errors) == 40

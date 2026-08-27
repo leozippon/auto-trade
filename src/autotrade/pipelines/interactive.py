@@ -5,6 +5,7 @@ unattended pipeline, but with a researcher gate between sessions, per-session
 directives, durable pause/stop, and ledger-based resume. The runner treats the
 append-only ledger as the source of truth: completed sessions are skipped and
 the parent artifact chain is reconstructed from their records.
+Integrity-flagged Fold/Held-out rows are not successes: resume refuses them.
 
 All control state lives under ``experiments/<id>/hitl/`` as single-writer JSON
 files (atomic replace, no locking needed):
@@ -41,7 +42,12 @@ from .hitl_state import (
     consume_user_reply,
     read_control,
 )
-from .ledger import ExperimentLedger
+from .ledger import (
+    ExperimentLedger,
+    FrozenArtifactMutated,
+    assert_no_frozen_artifact_mutation,
+    is_durable_success_record,
+)
 from .meta_schedule import meta_learning_id
 
 
@@ -101,6 +107,7 @@ class InteractiveExperimentRunner:
             total_sessions=len(self.sessions) + 1,
         )
         try:
+            assert_no_frozen_artifact_mutation(self.ledger.read())
             for session in self.sessions:
                 control = read_control(self.control_path)
                 if control.test_revealed:
@@ -127,7 +134,6 @@ class InteractiveExperimentRunner:
                     "rerun_id": rerun_id or "",
                     "session_key": session.session_key,
                 }
-                self._begin_session(session)
                 record = self._execute_with_retries(session, context)
                 if record is not None:
                     record = {
@@ -184,9 +190,10 @@ class InteractiveExperimentRunner:
     ) -> dict[str, object] | None:
         last_error: Exception | None = None
         for attempt in range(1, self.session_max_attempts + 1):
+            self._begin_session(session)
             try:
                 return self.execute_session(session, context)
-            except (ExperimentStopped, AgentSessionDeadlineExceeded):
+            except (ExperimentStopped, AgentSessionDeadlineExceeded, FrozenArtifactMutated):
                 raise
             except Exception as exc:
                 last_error = exc
@@ -215,6 +222,7 @@ class InteractiveExperimentRunner:
                 row
                 for row in reversed(self.ledger.read("fold"))
                 if row.get("session_key") == session.session_key
+                and is_durable_success_record(row, record_types=("fold",))
             ),
             None,
         )
@@ -317,6 +325,7 @@ class InteractiveExperimentRunner:
             session_key=session.session_key,
             session_kind=session.kind,
             session_started_at=self._session_started_at,
+            run_id=None,
             researcher_wait_seconds=0.0,
             wait_started_at=None,
             environment_stage="preparing_session",
@@ -432,6 +441,7 @@ class InteractiveExperimentRunner:
                 row
                 for row in reversed(self.ledger.read("fold"))
                 if row.get("session_key") == session.session_key
+                and is_durable_success_record(row, record_types=("fold",))
             ),
             None,
         )
@@ -441,7 +451,10 @@ class InteractiveExperimentRunner:
         return {
             str(record["session_key"])
             for record in self.ledger.read()
-            if record.get("record_type") in ("fold", "meta_learning") and record.get("session_key")
+            if is_durable_success_record(
+                record, record_types=("fold", "meta_learning")
+            )
+            and record.get("session_key")
         }
 
     def _require_completed_record(
@@ -453,7 +466,9 @@ class InteractiveExperimentRunner:
         records = [
             row
             for row in self.ledger.read()
-            if row.get("record_type") in ("fold", "meta_learning")
+            if is_durable_success_record(
+                row, record_types=("fold", "meta_learning")
+            )
             and row.get("session_key") == session.session_key
         ]
         if not records:

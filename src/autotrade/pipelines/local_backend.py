@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import threading
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager, nullcontext
@@ -14,7 +15,7 @@ from typing import TYPE_CHECKING
 
 import pandas as pd
 
-from autotrade.agent.compact import ContextCompactionConfig
+from autotrade.agent.compact import ContextCompactionConfig, safe_error_summary
 from autotrade.agent.experiment_facts import build_experiment_facts
 from autotrade.environment.artifacts import (
     FilesystemArtifactStore,
@@ -23,7 +24,7 @@ from autotrade.environment.artifacts import (
     copy_model_artifacts,
     restore_working_artifacts_writable,
 )
-from autotrade.environment.data.summary import write_agent_data_summary
+from autotrade.environment.data.summary import HOST_PATH_RE, write_agent_data_summary
 from autotrade.environment.executor import PersistentCommandRunner
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.replay.style import replay_style_analysis, write_style_rollup
@@ -298,8 +299,38 @@ class DeterministicBaselineDeveloper:
         )
 
 
+SESSION_CALL_BUDGET_REFERENCE_MAX = 400
+SESSION_EXPLORE_CALL_CAP_AT_REFERENCE = 200
+SESSION_PARENT_MAIN_RESERVE_AT_REFERENCE = 50
+SESSION_LLM_CALL_ROLES = ("main", "explore", "compact")
+
+
+def session_role_quotas(max_calls: int) -> tuple[int, int]:
+    """Explore cumulative cap and parent-main reserve for one shared call budget."""
+    if max_calls <= 0:
+        raise ValueError("max_calls must be positive")
+    explore_cap = (
+        max_calls
+        * SESSION_EXPLORE_CALL_CAP_AT_REFERENCE
+        // SESSION_CALL_BUDGET_REFERENCE_MAX
+    )
+    parent_reserve = (
+        max_calls
+        * SESSION_PARENT_MAIN_RESERVE_AT_REFERENCE
+        // SESSION_CALL_BUDGET_REFERENCE_MAX
+    )
+    if max_calls >= 2:
+        explore_cap = max(explore_cap, 1)
+    return explore_cap, parent_reserve
+
+
 class SessionCallBudget:
-    """One counter and deadline shared across all model roles in a session."""
+    """One counter and deadline shared across all model roles in a session.
+
+    The total ``max_calls`` cap is hard. Explore has a cumulative ceiling and
+    compact/explore cannot consume the parent-main reserve. This is not two
+    independent budgets.
+    """
 
     def __init__(
         self,
@@ -313,18 +344,46 @@ class SessionCallBudget:
         if (deadline is None) == (time_budget is None):
             raise ValueError("provide exactly one of deadline or time_budget")
         self.max_calls = max_calls
+        self.explore_cap, self.parent_reserve = session_role_quotas(max_calls)
         self.time_budget = time_budget or InferenceTimeBudget(deadline=deadline)
         self.calls = 0
+        self._explore_calls = 0
+        self._main_calls = 0
+        self._compact_calls = 0
+        self._lock = threading.Lock()
 
     @property
     def deadline(self) -> float:
         return self.time_budget.deadline
 
-    def claim(self) -> None:
-        self.check_deadline()
-        if self.calls >= self.max_calls:
-            raise RuntimeError("Agent session LLM call budget exhausted")
-        self.calls += 1
+    @property
+    def explore_calls(self) -> int:
+        return self._explore_calls
+
+    @property
+    def main_calls(self) -> int:
+        return self._main_calls
+
+    def claim(self, role: str = "main") -> None:
+        if role not in SESSION_LLM_CALL_ROLES:
+            raise ValueError(f"unknown LLM call role: {role}")
+        with self._lock:
+            self.time_budget.check()
+            if self.calls >= self.max_calls:
+                raise RuntimeError("Agent session LLM call budget exhausted")
+            if role == "explore" and self._explore_calls >= self.explore_cap:
+                raise RuntimeError("Agent session LLM call budget exhausted")
+            if role != "main":
+                parent_needed = max(0, self.parent_reserve - self._main_calls)
+                if self.max_calls - self.calls - 1 < parent_needed:
+                    raise RuntimeError("Agent session LLM call budget exhausted")
+            self.calls += 1
+            if role == "explore":
+                self._explore_calls += 1
+            elif role == "main":
+                self._main_calls += 1
+            else:
+                self._compact_calls += 1
 
     def check_deadline(self) -> None:
         self.time_budget.check()
@@ -340,7 +399,10 @@ class SessionBudgetLLM(SessionTimeBudgetAware):
         max_calls: int | None = None,
         deadline: float | None = None,
         budget: SessionCallBudget | None = None,
+        role: str = "main",
     ) -> None:
+        if role not in SESSION_LLM_CALL_ROLES:
+            raise ValueError(f"unknown LLM call role: {role}")
         if budget is None:
             if max_calls is None or deadline is None:
                 raise ValueError(
@@ -349,6 +411,7 @@ class SessionBudgetLLM(SessionTimeBudgetAware):
             budget = SessionCallBudget(max_calls=max_calls, deadline=deadline)
         self.delegate = delegate
         self.budget = budget
+        self.role = role
         self.provider = str(getattr(delegate, "provider", ""))
         self.model = str(getattr(delegate, "model", ""))
         window = getattr(delegate, "context_window_tokens", None)
@@ -376,7 +439,7 @@ class SessionBudgetLLM(SessionTimeBudgetAware):
         tool_choice: str | Mapping[str, object] = "auto",
         max_tokens: int | None = None,
     ) -> ProviderResponse:
-        self.budget.claim()
+        self.budget.claim(self.role)
         response = self.delegate.complete(
             messages,
             tools=tools,
@@ -385,6 +448,17 @@ class SessionBudgetLLM(SessionTimeBudgetAware):
         )
         self.budget.check_deadline()
         return response
+
+
+def _public_validation_error(
+    exc: Exception, *, hidden: Sequence[str] = ()
+) -> str:
+    """Agent-visible Validation failure: type, actionable reason, no host leaks."""
+    summary = safe_error_summary(exc)
+    text = HOST_PATH_RE.sub("[host_path]", summary)
+    for value in sorted({item for item in hidden if item}, key=len, reverse=True):
+        text = text.replace(value, "[redacted]")
+    return f"daily Validation failed: {text}"
 
 
 class FoldBacktestTool(SessionTimeBudgetAware):
@@ -513,7 +587,15 @@ class FoldBacktestTool(SessionTimeBudgetAware):
                 )
         except Exception as exc:
             if node_id is None or evaluation is None:
-                public_error = f"daily Validation failed: {type(exc).__name__}"
+                fold = self.request.fold
+                public_error = _public_validation_error(
+                    exc,
+                    hidden=(
+                        fold.fold_id,
+                        fold.test_start,
+                        fold.test_end,
+                    ),
+                )
                 if self.request.record_failed_attempts:
                     self.tree.record_failed_attempt(
                         epoch_id=self.request.epoch_id,
@@ -958,13 +1040,16 @@ class LLMFoldDeveloper:
                     current_models=models_dir,
                 )
             )
-            budgeted = SessionBudgetLLM(self.llm, budget=shared_budget)
+            budgeted = SessionBudgetLLM(self.llm, budget=shared_budget, role="main")
             explore_budgeted = SessionBudgetLLM(
                 self.explore_llm,
                 budget=shared_budget,
+                role="explore",
             )
             compact_budgeted = (
-                SessionBudgetLLM(self.compact_llm, budget=shared_budget)
+                SessionBudgetLLM(
+                    self.compact_llm, budget=shared_budget, role="compact"
+                )
                 if self.compact_llm is not None
                 else None
             )
@@ -997,6 +1082,7 @@ class LLMFoldDeveloper:
                     finalize_before_deadline_seconds=(
                         request.finalize_before_deadline_seconds
                     ),
+                    deadline_grace_seconds=request.deadline_grace_seconds,
                     max_llm_calls=request.max_llm_calls,
                     max_steps=request.max_steps,
                     deadline_seconds=request.deadline_seconds,
@@ -1500,13 +1586,15 @@ class LLMMetaLearner:
             max_calls=self.max_llm_calls,
             time_budget=time_budget,
         )
-        budgeted = SessionBudgetLLM(self.llm, budget=shared_budget)
+        budgeted = SessionBudgetLLM(self.llm, budget=shared_budget, role="main")
         compact_budgeted = (
-            SessionBudgetLLM(self.compact_llm, budget=shared_budget)
+            SessionBudgetLLM(self.compact_llm, budget=shared_budget, role="compact")
             if self.compact_llm is not None
             else None
         )
-        explore_budgeted = SessionBudgetLLM(self.explore_llm, budget=shared_budget)
+        explore_budgeted = SessionBudgetLLM(
+            self.explore_llm, budget=shared_budget, role="explore"
+        )
         explore = ExploreSubAgentEngine(
             llm=explore_budgeted,
             tools=ToolRegistry(build_meta_explore_tools(search_roots, safe)),
@@ -1924,6 +2012,10 @@ __all__ = [
     "LLMMetaLearner",
     "LocalDailyEvaluationBackend",
     "LocalDailySnapshotProvider",
+    "SESSION_CALL_BUDGET_REFERENCE_MAX",
+    "SESSION_EXPLORE_CALL_CAP_AT_REFERENCE",
+    "SESSION_PARENT_MAIN_RESERVE_AT_REFERENCE",
     "SessionBudgetLLM",
     "SessionCallBudget",
+    "session_role_quotas",
 ]

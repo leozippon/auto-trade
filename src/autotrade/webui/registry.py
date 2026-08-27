@@ -34,6 +34,8 @@ from autotrade.pipelines.hitl_state import (
 )
 from autotrade.pipelines.ledger import (
     ExperimentLedger,
+    is_durable_success_record,
+    is_frozen_artifact_mutation,
     latest_fold_records,
     latest_heldout_records,
 )
@@ -255,7 +257,12 @@ def test_results_revealed(
 def heldout_complete(
     experiment_dir: Path, records: list[dict[str, object]] | None = None
 ) -> bool:
-    """Every held-out period planned in the schedule has a durable ledger record."""
+    """Every planned held-out period has a durable success record.
+
+    Integrity-flagged held-out rows are never completed work and never auto-reveal
+    or seal the experiment. A later or earlier success for the same period cannot
+    wash a remaining ``state_changed_during_test`` row.
+    """
     schedule = read_json(Path(experiment_dir) / HITL_DIR_NAME / SCHEDULE_NAME)
     sessions = schedule.get("sessions") if isinstance(schedule.get("sessions"), list) else []
     planned = _planned_heldout_labels(sessions)
@@ -263,6 +270,12 @@ def heldout_complete(
         return False
     if records is None:
         records = read_ledger_records(experiment_dir)
+    if any(
+        is_frozen_artifact_mutation(record)
+        for record in records
+        if record.get("record_type") == "heldout"
+    ):
+        return False
     return planned <= _completed_heldout_labels(records)
 
 
@@ -276,12 +289,26 @@ def _planned_heldout_labels(sessions: list[object]) -> set[str]:
     }
 
 
+def _heldout_period_label(record: Mapping[str, object]) -> str:
+    fold_id = str(record.get("fold_id") or "")
+    if fold_id.startswith("heldout_"):
+        return fold_id.removeprefix("heldout_")
+    return str(record.get("period") or "")
+
+
 def _completed_heldout_labels(records: list[dict[str, object]]) -> set[str]:
-    return {
-        str(record.get("fold_id") or "").removeprefix("heldout_")
+    tainted = {
+        _heldout_period_label(record)
         for record in records
-        if record.get("record_type") == "heldout"
+        if is_frozen_artifact_mutation(record)
     }
+    tainted.discard("")
+    labels: set[str] = set()
+    for record in latest_heldout_records(records):
+        label = _heldout_period_label(record)
+        if label and label not in tainted:
+            labels.add(label)
+    return labels
 
 
 def _durable_session_progress(
@@ -300,7 +327,7 @@ def _durable_session_progress(
     completed_keys = {
         str(record.get("session_key"))
         for record in records
-        if record.get("record_type") in {"fold", "meta_learning"}
+        if is_durable_success_record(record, record_types=("fold", "meta_learning"))
         and record.get("session_key")
     }
     completed_heldout = _completed_heldout_labels(records)

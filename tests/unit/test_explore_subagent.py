@@ -10,17 +10,21 @@ from pathlib import Path
 import pytest
 
 from autotrade.agent.explore import (
+    DEFAULT_EXPLORE_MAX_CONCURRENT,
+    DEFAULT_EXPLORE_THINKING,
     EXPLORE_ROLES,
     EXPLORE_SYSTEM_PROMPT,
     EXPLORE_THINKING_LEVELS,
     META_EXPLORE_SYSTEM_PROMPT,
+    ExploreSubAgentConfig,
     allowed_explore_tools,
     ExploreSubAgentEngine,
     explore_system_prompt,
     normalize_explore_thinking,
     parent_context_digest,
 )
-from autotrade.agent.prompts import build_system_prompt
+from autotrade.agent.prompts import HOST_GUIDELINES_ZH, build_system_prompt
+from autotrade.environment.tools.base import SessionInterrupt
 from autotrade.agent.runner import AgentSessionConfig, AgentSessionRunner
 from autotrade.environment.llm import ChatMessage, ProviderResponse, ScriptedLLM, ToolCall
 from autotrade.environment.tools import (
@@ -884,6 +888,7 @@ def test_explore_calls_still_track_attempts_and_roles() -> None:
             ]
         ),
         tools=ToolRegistry([DeclaredReadOnlyShell()]),
+        config=ExploreSubAgentConfig(max_concurrent=3),
     )
     events: list[tuple[str, dict[str, object]]] = []
     runner = AgentSessionRunner(
@@ -988,13 +993,26 @@ def test_general_prompts_explain_mode_and_role() -> None:
 
 
 def test_normalize_explore_thinking_accepts_aliases() -> None:
-    assert normalize_explore_thinking(None) is None
-    assert normalize_explore_thinking("inherit") is None
+    assert DEFAULT_EXPLORE_THINKING == "medium"
+    assert normalize_explore_thinking(None) == "medium"
+    assert normalize_explore_thinking("inherit") == "medium"
     assert normalize_explore_thinking("minimal") == "low"
     assert normalize_explore_thinking("xhigh") == "high"
     assert normalize_explore_thinking("max") == "max"
     with pytest.raises(ValueError, match="explore.thinking"):
         normalize_explore_thinking("turbo")
+
+
+def test_explore_defaults_are_medium_thinking_and_two_concurrent() -> None:
+    assert DEFAULT_EXPLORE_MAX_CONCURRENT == 2
+    assert ExploreSubAgentConfig().max_concurrent == 2
+    result = ExploreSubAgentEngine(
+        llm=ScriptedLLM([ProviderResponse(content="ok")]),
+        tools=ToolRegistry([DeclaredReadOnlyShell()]),
+    ).run("summarize", role="auditor")
+    assert result["thinking"] == "medium"
+    assert "没有 Sleep" in HOST_GUIDELINES_ZH
+    assert "应让它 Sleep" not in HOST_GUIDELINES_ZH
 
 
 def test_parent_context_digest_skips_system_and_keeps_recent() -> None:
@@ -1139,3 +1157,163 @@ def test_parent_session_continues_before_explore_finishes() -> None:
     assert result.status == "finished"
     assert finish.invoked == 1
     assert parent_calls["n"] == 2
+
+
+def test_explore_stops_retry_on_call_budget_and_interrupt() -> None:
+    class Exhausted:
+        model = "child"
+        provider = "test"
+        context_window_tokens = 128000
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def complete(self, messages, **kwargs):
+            del messages, kwargs
+            self.calls += 1
+            raise RuntimeError("Agent session LLM call budget exhausted")
+
+    exhausted = Exhausted()
+    result = ExploreSubAgentEngine(
+        llm=exhausted,
+        tools=ToolRegistry([DeclaredReadOnlyShell()]),
+        config=ExploreSubAgentConfig(max_rounds=5),
+    ).run("look", role="auditor")
+    assert result["status"] == "error"
+    assert result["llm_calls"] == 1
+    assert exhausted.calls == 1
+
+    class Interrupted:
+        model = "child"
+        provider = "test"
+        context_window_tokens = 128000
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def complete(self, messages, **kwargs):
+            del messages, kwargs
+            self.calls += 1
+            raise SessionInterrupt("researcher stop")
+
+    interrupted = Interrupted()
+    result = ExploreSubAgentEngine(
+        llm=interrupted,
+        tools=ToolRegistry([DeclaredReadOnlyShell()]),
+        config=ExploreSubAgentConfig(max_rounds=5),
+    ).run("look", role="auditor")
+    assert result["status"] == "error"
+    assert interrupted.calls == 1
+
+
+def test_explore_skips_tools_when_cancelled_after_llm() -> None:
+    started = threading.Event()
+    release = threading.Event()
+    shell = DeclaredReadOnlyShell()
+
+    class LateTools:
+        model = "child"
+        provider = "test"
+        context_window_tokens = 128000
+
+        def complete(self, messages, **kwargs):
+            del messages, kwargs
+            started.set()
+            assert release.wait(3)
+            return ProviderResponse(
+                tool_calls=(
+                    ToolCall("s1", "shell", {"argv": ["echo", "late"]}),
+                )
+            )
+
+    engine = ExploreSubAgentEngine(
+        llm=LateTools(),
+        tools=ToolRegistry([shell]),
+    )
+    outcome: dict[str, object] = {}
+
+    def run() -> None:
+        outcome.update(engine.run("look", role="developer"))
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    assert started.wait(3)
+    engine.cancel()
+    release.set()
+    worker.join(3)
+    assert not worker.is_alive()
+    assert outcome.get("status") == "cancelled"
+    assert shell.calls == []
+
+
+def test_runner_close_cancels_explore_without_infinite_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from autotrade.agent import runner as runner_module
+
+    monkeypatch.setattr(runner_module, "EXPLORE_TEARDOWN_WAIT_SECONDS", 0.2)
+    monkeypatch.setattr(runner_module, "EXPLORE_TEARDOWN_WAIT_REMAINDER_SECONDS", 0.05)
+    started = threading.Event()
+    release = threading.Event()
+    shell = DeclaredReadOnlyShell()
+    finish = _FinishStub("finish_fold")
+
+    class BlockingChild:
+        model = "child"
+        provider = "test"
+        context_window_tokens = 128000
+
+        def complete(self, messages, **kwargs):
+            del messages, kwargs
+            started.set()
+            release.wait(5)
+            return ProviderResponse(
+                tool_calls=(
+                    ToolCall("s1", "shell", {"argv": ["echo", "late"]}),
+                )
+            )
+
+    parent_calls = {"n": 0}
+    inner = ScriptedLLM(
+        [
+            ProviderResponse(
+                tool_calls=(
+                    ToolCall(
+                        "e1",
+                        "explore",
+                        {"role": "developer", "task": "slow"},
+                    ),
+                )
+            ),
+            ProviderResponse(tool_calls=(ToolCall("f1", "finish_fold", {}),)),
+        ]
+    )
+
+    class Parent:
+        model = "parent"
+        provider = "test"
+        context_window_tokens = 128000
+
+        def complete(self, messages, **kwargs):
+            parent_calls["n"] += 1
+            if parent_calls["n"] == 2:
+                assert started.wait(3)
+            return inner.complete(messages, **kwargs)
+
+    t0 = time.monotonic()
+    result = AgentSessionRunner(
+        llm=Parent(),
+        tools=ToolRegistry([finish]),
+        system_prompt="fold",
+        config=_fold_config(),
+        explore=ExploreSubAgentEngine(
+            llm=BlockingChild(),
+            tools=ToolRegistry([shell]),
+        ),
+    ).run("go")
+    elapsed = time.monotonic() - t0
+    assert result.status == "finished"
+    assert elapsed < 2.0
+    release.set()
+    time.sleep(0.2)
+    assert shell.calls == []

@@ -27,6 +27,10 @@ ExecutionMode = Literal["sandbox", "trusted"]
 # v7: the snapshot manifest carries dataset_columns for the unit reference.
 SNAPSHOT_CACHE_FORMAT_VERSION = 7
 
+# Trailing wrap-up grace added to the Fold session budget. Not a console/worker
+# HITL knob; FoldSessionRequest carries the seconds to AgentSessionConfig.
+DEFAULT_DEADLINE_GRACE_MINUTES = 10
+
 
 @dataclass(frozen=True)
 class StrategyExperimentConfig:
@@ -132,13 +136,9 @@ class RollingExperimentConfig:
     max_llm_calls: int = 400
     session_max_attempts: int = 3
     max_fold_minutes: int = 240
-    # Trailing wrap-up grace handed to the Agent session on top of the main
-    # Fold deadline (experiment.py adds it to the session budget; the runner
-    # reserves the trailing window). Keep aligned with the runner's
-    # DEFAULT_DEADLINE_GRACE_SECONDS (10 minutes) — the session-side reservation
-    # is the runner default because the fold backend does not forward this
-    # field per request.
-    deadline_grace_minutes: int = 10
+    # Trailing wrap-up grace added to the Fold session budget and forwarded on
+    # FoldSessionRequest.deadline_grace_seconds. Implementation default only.
+    deadline_grace_minutes: int = DEFAULT_DEADLINE_GRACE_MINUTES
     finalize_before_deadline_seconds: int = 300
     per_call_timeout_seconds: int = 3600
     # Individual NL Sub Agent failures return audited error results by default
@@ -231,6 +231,14 @@ class RollingExperimentConfig:
     @property
     def ledger_path(self) -> Path:
         return self.experiment_dir / "ledgers" / "experiment_ledger.jsonl"
+
+
+def fold_session_deadline_seconds(
+    max_fold_minutes: float,
+    deadline_grace_minutes: float = DEFAULT_DEADLINE_GRACE_MINUTES,
+) -> float:
+    """Total Fold session budget: main deadline plus trailing wrap-up grace."""
+    return float(max_fold_minutes) * 60.0 + float(deadline_grace_minutes) * 60.0
 
 
 @dataclass(frozen=True)
@@ -334,6 +342,9 @@ class FoldSessionRequest:
     max_backtests: int
     max_llm_calls: int
     deadline_seconds: float
+    # Trailing wrap-up grace reserved from deadline_seconds. Live Fold sessions
+    # always set this from RollingExperimentConfig.deadline_grace_minutes.
+    deadline_grace_seconds: float = DEFAULT_DEADLINE_GRACE_MINUTES * 60.0
     directive: str = ""
     prior: str = ""
     prompt_override: str = ""
@@ -427,6 +438,7 @@ class FoldOutcome:
 
 
 __all__ = [
+    "DEFAULT_DEADLINE_GRACE_MINUTES",
     "AcceptanceRules",
     "ArtifactRevision",
     "ArtifactStore",
@@ -447,4 +459,5 @@ __all__ = [
     "SnapshotProvider",
     "StepResult",
     "StrategyExperimentConfig",
+    "fold_session_deadline_seconds",
 ]

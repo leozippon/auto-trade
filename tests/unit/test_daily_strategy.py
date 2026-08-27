@@ -28,8 +28,22 @@ from autotrade.pipelines import DailyStrategyPipeline, StrategyExperimentConfig
 def _daily() -> pd.DataFrame:
     return pd.DataFrame(
         [
-            {"trade_date": "20260102", "symbol": "000001.SZ", "open": 10.0, "close": 11.0},
-            {"trade_date": "20260105", "symbol": "000001.SZ", "open": 12.0, "close": 13.0},
+            {
+                "trade_date": "20260102",
+                "symbol": "000001.SZ",
+                "open": 10.0,
+                "close": 11.0,
+                "up_limit": 12.0,
+                "down_limit": 8.0,
+            },
+            {
+                "trade_date": "20260105",
+                "symbol": "000001.SZ",
+                "open": 12.0,
+                "close": 13.0,
+                "up_limit": 14.4,
+                "down_limit": 9.6,
+            },
         ]
     )
 

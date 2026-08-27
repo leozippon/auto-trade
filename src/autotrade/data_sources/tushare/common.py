@@ -147,7 +147,10 @@ REFERENCE_DATASETS = [
     "index_weight",
 ]
 
-DAILY_REQUIRED_DATASETS = ["daily", "adj_factor", "daily_basic", "stk_limit", "suspend_d", "stk_auction"]
+# Generic daily download/update default. stk_auction remains in the required/audit
+# gate, but it is written only by dedicated capture and evening backfill.
+DAILY_DOWNLOAD_DATASETS = ["daily", "adj_factor", "daily_basic", "stk_limit", "suspend_d"]
+DAILY_REQUIRED_DATASETS = [*DAILY_DOWNLOAD_DATASETS, "stk_auction"]
 
 FUNDAMENTAL_DATASETS = [
     "income_vip",
@@ -2105,8 +2108,13 @@ def select_datasets(
         raise RuntimeError(f"unknown {label} datasets: {invalid}; supported={sorted(allowed)}")
     return datasets
 
-def selected_daily_datasets(args: argparse.Namespace) -> list[str]:
-    return select_datasets(args.datasets, default=DAILY_REQUIRED_DATASETS, allowed=DAILY_SPECS, label="daily market")
+def selected_daily_datasets(args: argparse.Namespace, *, default: Iterable[str] | None = None) -> list[str]:
+    return select_datasets(
+        args.datasets,
+        default=DAILY_DOWNLOAD_DATASETS if default is None else default,
+        allowed=DAILY_SPECS,
+        label="daily market",
+    )
 
 def partition_date(path: Path) -> str:
     return path.stem.split("=", 1)[1] if "=" in path.stem else ""

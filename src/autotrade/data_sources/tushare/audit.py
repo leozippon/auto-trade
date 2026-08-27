@@ -2566,7 +2566,7 @@ def audit_daily_direct(raw_dir: Path, args: argparse.Namespace, add) -> set[str]
     except Exception as exc:
         add("error", "daily_trade_calendar", str(exc))
         return set()
-    for dataset in selected_daily_datasets(args):
+    for dataset in selected_daily_datasets(args, default=DAILY_REQUIRED_DATASETS):
         spec = DAILY_SPECS[dataset]
         expected = {d for d in trade_dates if max(args.start_date, spec.start_date) <= d <= args.end_date}
         audit_trade_date_dataset(raw_dir, spec, expected, add)
@@ -2609,7 +2609,7 @@ def audit_core_market(args: argparse.Namespace) -> int:
     def add(severity: str, check: str, message: str, details: dict[str, Any] | None = None) -> None:
         findings.append({"severity": severity, "check": check, "message": message, "details": details or {}})
 
-    daily_datasets = selected_daily_datasets(args)
+    daily_datasets = selected_daily_datasets(args, default=DAILY_REQUIRED_DATASETS)
     datasets = REFERENCE_DATASETS + daily_datasets
     audit_integrated_filesystem(raw_dir, datasets, add)
 

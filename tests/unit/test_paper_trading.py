@@ -28,7 +28,16 @@ class _TimedExecutor(_Executor):
 def _engine(tmp_path: Path, executor: _Executor) -> DailyPaperEngine:
     strategy = tmp_path / "main.py"
     strategy.write_text("def generate_orders(context):\n    return []\n", encoding="utf-8")
-    daily = pd.DataFrame([{"trade_date": "20260102", "symbol": "000001.SZ", "open": 10.0, "close": 11.0}])
+    daily = pd.DataFrame([
+        {
+            "trade_date": "20260102",
+            "symbol": "000001.SZ",
+            "open": 10.0,
+            "close": 11.0,
+            "up_limit": 12.0,
+            "down_limit": 8.0,
+        }
+    ])
     return DailyPaperEngine(strategy_path=strategy, strategy_revision="revision_1", daily=daily, state_root=tmp_path / "paper", executor_factory=lambda _path, _config: executor)
 
 
@@ -140,7 +149,14 @@ def test_paper_refuses_to_skip_a_fixed_market_day_and_preserves_t_plus_one(tmp_p
     strategy = tmp_path / "main.py"
     strategy.write_text("def generate_orders(context):\n    return []\n", encoding="utf-8")
     daily = pd.DataFrame([
-        {"trade_date": day, "symbol": "000001.SZ", "open": price, "close": price}
+        {
+            "trade_date": day,
+            "symbol": "000001.SZ",
+            "open": price,
+            "close": price,
+            "up_limit": price * 1.2,
+            "down_limit": price * 0.8,
+        }
         for day, price in (("20260102", 10.0), ("20260105", 11.0), ("20260106", 12.0))
     ])
     executor = RebalanceExecutor()

@@ -30,7 +30,7 @@ from autotrade.pipelines.hitl_state import (
     write_control,
 )
 from autotrade.pipelines.interactive import ExperimentStopped, InteractiveExperimentRunner
-from autotrade.pipelines.ledger import ExperimentLedger
+from autotrade.pipelines.ledger import ExperimentLedger, FrozenArtifactMutated
 
 
 def fold_spec(fold_id: str) -> FoldSpec:
@@ -159,6 +159,88 @@ class InteractiveRunnerTest(RunnerTestCase):
         self.assertEqual(result["status"], "complete")
         self.assertEqual(len(executor.calls), 3)
         self.assertEqual(read_status(self.status)["state"], "development_complete")
+
+    def test_each_attempt_refreshes_session_timing(self) -> None:
+        started: list[str] = []
+        walls: list[float] = []
+        stages: list[object] = []
+        run_ids: list[object] = []
+        status_path = self.status
+
+        class Flaky(RecordingExecutor):
+            def __call__(self, session, context):
+                payload = read_status(status_path)
+                started.append(str(payload.get("session_started_at") or ""))
+                stages.append(payload.get("environment_stage"))
+                run_ids.append(payload.get("run_id"))
+                timing_fn = context["session_timing"]
+                timing = timing_fn() if callable(timing_fn) else {}
+                wall = timing.get("run_wall_seconds") if isinstance(timing, dict) else 0.0
+                walls.append(float(wall or 0.0))
+                if len(self.calls) < 1:
+                    self.calls.append((session.session_key, dict(context)))
+                    raise RuntimeError("boom")
+                return super().__call__(session, context)
+
+        executor = Flaky(self.ledger)
+        self.runner(
+            sessions_for("fold_a"), executor, session_max_attempts=3
+        ).run()
+        self.assertEqual(len(started), 2)
+        self.assertTrue(started[0])
+        self.assertTrue(started[1])
+        self.assertNotEqual(started[0], started[1])
+        self.assertEqual(stages, ["preparing_session", "preparing_session"])
+        self.assertEqual(run_ids, [None, None])
+        self.assertGreaterEqual(walls[1], 0.0)
+
+    def test_frozen_artifact_mutation_is_not_retried(self) -> None:
+        class Mutating(RecordingExecutor):
+            def __call__(self, session, context):
+                self.calls.append((session.session_key, dict(context)))
+                self.ledger.append(
+                    {
+                        "record_type": "fold",
+                        "experiment_id": "exp",
+                        "epoch_id": session.epoch_id,
+                        "fold_id": session.fold.fold_id,
+                        "run_id": f"run_{len(self.calls)}",
+                        "session_key": session.session_key,
+                        "state_changed_during_test": True,
+                    }
+                )
+                raise FrozenArtifactMutated(
+                    "strategy or model artifacts changed during frozen test"
+                )
+
+        executor = Mutating(self.ledger, record=False)
+        with self.assertRaises(FrozenArtifactMutated):
+            self.runner(
+                sessions_for("fold_a"), executor, session_max_attempts=3
+            ).run()
+        self.assertEqual(len(executor.calls), 1)
+        self.assertEqual(len(self.ledger.read("fold")), 1)
+        self.assertEqual(read_status(self.status)["state"], "failed")
+
+    def test_resume_refuses_a_flagged_integrity_record_without_new_rows(self) -> None:
+        self.ledger.append(
+            {
+                "record_type": "fold",
+                "experiment_id": "exp",
+                "epoch_id": "epoch_001",
+                "fold_id": "fold_a",
+                "run_id": "run_flagged",
+                "session_key": "epoch_001/fold_a",
+                "state_changed_during_test": True,
+            }
+        )
+        before = [row.get("run_id") for row in self.ledger.read()]
+        executor = RecordingExecutor(self.ledger)
+        with self.assertRaises(FrozenArtifactMutated):
+            self.runner(sessions_for("fold_a", "fold_b"), executor).run()
+        self.assertEqual(executor.keys, [])
+        self.assertEqual([row.get("run_id") for row in self.ledger.read()], before)
+        self.assertEqual(read_status(self.status)["state"], "failed")
 
     def test_a_session_fails_the_experiment_after_the_attempt_budget(self) -> None:
         class AlwaysFail(RecordingExecutor):

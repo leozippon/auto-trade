@@ -189,8 +189,9 @@ class DailyBroker:
         base_price = _price(raw_price)
         assert base_price is not None
         fill_price = self.profile.costs.fill_price(base_price, action=order.action)
-        if _limit_blocked(order.action, fill_price, bar):
-            return self._record(order, matched_at, status="rejected", reason="daily_price_limit")
+        limit_reason = _price_limit_reject(order.action, fill_price, bar)
+        if limit_reason is not None:
+            return self._record(order, matched_at, status="rejected", reason=limit_reason)
         notional = fill_price * order.quantity
         if self._current_day is None:
             raise RuntimeError("open_day must set the trading day before an order is executed")
@@ -325,12 +326,13 @@ def _price(value: object) -> float | None:
     return price if math.isfinite(price) and price > 0 else None
 
 
-def _limit_blocked(action: str, price: float, bar: Mapping[str, object]) -> bool:
+def _price_limit_reject(action: str, price: float, bar: Mapping[str, object]) -> str | None:
     field = "up_limit" if action == "buy" else "down_limit"
     limit = _price(bar.get(field))
     if limit is None:
-        return False
-    return price >= limit if action == "buy" else price <= limit
+        return "missing_daily_price_limit"
+    blocked = price >= limit if action == "buy" else price <= limit
+    return "daily_price_limit" if blocked else None
 
 
 Broker = DailyBroker

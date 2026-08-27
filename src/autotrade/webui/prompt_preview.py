@@ -7,6 +7,10 @@ from pathlib import Path
 from autotrade.agent.prompts import build_meta_learning_prompt, build_system_prompt
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.strategy import StrategySchedule
+from autotrade.pipelines.config import (
+    DEFAULT_DEADLINE_GRACE_MINUTES,
+    fold_session_deadline_seconds,
+)
 from autotrade.pipelines.hitl_state import (
     HITL_DIR_NAME,
     PARAMS_NAME,
@@ -78,7 +82,10 @@ def build_prompt_preview(
             "max_steps": params.get("max_steps_per_fold", 10),
             "max_backtests": params.get("max_backtests_per_fold", 15),
             "max_llm_calls": params.get("max_llm_calls", 400),
-            "deadline_seconds": int(params.get("max_fold_minutes", 240)) * 60,  # type: ignore[arg-type]
+            "deadline_seconds": fold_session_deadline_seconds(
+                int(params.get("max_fold_minutes", 240)),  # type: ignore[arg-type]
+                DEFAULT_DEADLINE_GRACE_MINUTES,
+            ),
         }
     )
     prompt = build_system_prompt(

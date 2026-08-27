@@ -8,6 +8,7 @@ use creates strategy ticks or a minute-driven environment loop.
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import json
 import math
@@ -41,7 +42,7 @@ from autotrade.environment.nl import NLConfig, NLService
 from autotrade.environment.replay.engine import StrategyDataView
 from autotrade.environment.replay.style import replay_style_analysis, write_style_rollup
 from autotrade.environment.replay.timeview import Timeview
-from autotrade.environment.runtime import chmod_tree, write_json_atomic
+from autotrade.environment.runtime import chmod_tree, new_id, write_json_atomic
 from autotrade.environment.sandbox import SandboxConfig
 from autotrade.environment.strategy import CN_TZ, StrategySchedule
 from autotrade.environment.strategy_loader import validate_strategy_source
@@ -262,38 +263,78 @@ class ResearchPITSnapshotProvider:
                 ):
                     raise RuntimeError(f"conflicting cached replay slot: {target}")
                 return target
-            unphased = self.cache_root / "replay" / target.name
-            if unphased.exists() and unphased.resolve() != target.resolve():
-                try:
-                    alt = load_snapshot_manifest(unphased)
-                except (OSError, TypeError, ValueError):
-                    alt = {}
-                if _replay_manifest_matches(
-                    alt,
-                    start=start,
-                    end=end,
-                    decision=decision,
-                    phase=phase,
-                    require_label=False,
-                ):
-                    return unphased
             staging = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
             try:
-                self.builder.build_replay_slot(
-                    start,
-                    end,
-                    staging,
-                    label=phase,
-                    config=self.config,
-                    available_from=decision,
+                source = self._unphased_replay_source(
+                    target, start, end, decision, phase
                 )
+                if source is not None:
+                    _materialize_phased_replay(source, staging, phase=phase)
+                else:
+                    self.builder.build_replay_slot(
+                        start,
+                        end,
+                        staging,
+                        label=phase,
+                        config=self.config,
+                        available_from=decision,
+                    )
                 target.parent.mkdir(parents=True, exist_ok=True)
                 os.replace(staging, target)
-                chmod_tree(target, file_mode=0o444, dir_mode=0o555)
+                try:
+                    chmod_tree(target, file_mode=0o444, dir_mode=0o555)
+                    published = load_snapshot_manifest(target)
+                    if not _replay_manifest_matches(
+                        published,
+                        start=start,
+                        end=end,
+                        decision=decision,
+                        phase=phase,
+                    ):
+                        raise RuntimeError(
+                            f"published replay slot is not phase-safe: {target}"
+                        )
+                except Exception:
+                    if target.exists():
+                        _rmtree_replay_staging(target)
+                    raise
                 return target
             finally:
                 if staging.exists():
-                    shutil.rmtree(staging)
+                    _rmtree_replay_staging(staging)
+
+    def _unphased_replay_source(
+        self,
+        target: Path,
+        start: str,
+        end: str,
+        decision: datetime,
+        phase: str,
+    ) -> Path | None:
+        unphased = self.cache_root / "replay" / target.name
+        try:
+            if unphased.is_symlink() or not unphased.is_dir():
+                return None
+            resolved = unphased.resolve()
+            if resolved == target.resolve():
+                return None
+            if resolved.parent != (self.cache_root / "replay").resolve():
+                return None
+            if not (unphased / "daily.parquet").is_file():
+                return None
+            manifest = load_snapshot_manifest(unphased)
+        except (OSError, TypeError, ValueError):
+            return None
+        if not _replay_source_reusable(
+            manifest,
+            start=start,
+            end=end,
+            decision=decision,
+            phase=phase,
+            generation_id=self.release.generation_id,
+        ):
+            return None
+        return unphased
 
 
 @dataclass(frozen=True)
@@ -1007,6 +1048,85 @@ def _optional_cn_datetime(value: object) -> datetime | None:
     if value in (None, ""):
         return None
     return _cn_datetime(datetime.fromisoformat(str(value)))
+
+
+def _replay_source_reusable(
+    manifest: Mapping[str, object],
+    *,
+    start: str,
+    end: str,
+    decision: datetime,
+    phase: str,
+    generation_id: str,
+) -> bool:
+    if not _replay_manifest_matches(
+        manifest,
+        start=start,
+        end=end,
+        decision=decision,
+        phase=phase,
+        require_label=False,
+    ):
+        return False
+    raw_generation = manifest.get("raw_generation")
+    if not isinstance(raw_generation, dict):
+        return False
+    return str(raw_generation.get("generation_id") or "") == str(generation_id or "")
+
+
+def _materialize_phased_replay(source: Path, staging: Path, *, phase: str) -> None:
+    manifest = load_snapshot_manifest(source)
+    _hardlink_replay_payload(source, staging)
+    published = dict(manifest)
+    published["label"] = phase
+    published["snapshot_id"] = new_id("replay")
+    write_json_atomic(staging / "manifest.json", published)
+
+
+def _hardlink_replay_payload(source: Path, dest: Path) -> None:
+    dest.mkdir(parents=True, exist_ok=False)
+    for child in sorted(source.iterdir()):
+        if (
+            child.name.startswith(".")
+            or child.name.endswith(".lock")
+            or child.name == "manifest.json"
+        ):
+            continue
+        _hardlink_replay_entry(child, dest / child.name)
+
+
+def _hardlink_replay_entry(source: Path, dest: Path) -> None:
+    if source.is_symlink():
+        raise RuntimeError(f"symbolic link is forbidden in a PIT replay slot: {source}")
+    if source.is_dir():
+        dest.mkdir()
+        for child in sorted(source.iterdir()):
+            if child.name.startswith("."):
+                continue
+            _hardlink_replay_entry(child, dest / child.name)
+        return
+    if not source.is_file():
+        raise RuntimeError(f"unsupported PIT replay slot entry: {source}")
+    try:
+        os.link(source, dest)
+    except OSError as exc:
+        if exc.errno == errno.EXDEV:
+            raise RuntimeError(
+                f"PIT replay slot is on a different filesystem than {dest}; "
+                "hardlink is required and copy is refused"
+            ) from exc
+        raise
+
+
+def _rmtree_replay_staging(staging: Path) -> None:
+    # Payload files may be hardlinks of an immutable unphased slot. Only
+    # directories need to be writable so children can be unlinked.
+    for path in [staging, *(item for item in staging.rglob("*") if item.is_dir())]:
+        try:
+            path.chmod(0o755)
+        except OSError:
+            pass
+    shutil.rmtree(staging)
 
 
 def _replay_manifest_matches(

@@ -1,7 +1,8 @@
 """Daily Broker primitives: eligibility gates, lot rules and cost math.
 
 ``configs/agent_output_template/README.md`` promises the Agent that suspension,
-``missing_execution_price``, daily price limits, insufficient cash, insufficient
+``missing_execution_price``, missing or non-finite daily price limits, daily
+price-limit touches, insufficient cash, insufficient
 sellable quantity and invalid buy lots reject the whole order, and that
 commission applies on both sides with a minimum fee while stamp duty applies on
 sells. Those are the numbers every backtest is scored on, so each is pinned here
@@ -98,6 +99,50 @@ class BrokerEligibilityTest(unittest.TestCase):
         )
         self.assertEqual((sell_blocked.status, sell_blocked.reason), ("rejected", "daily_price_limit"))
         self.assertEqual(broker.positions["000001.SZ"].quantity, 100)
+
+    def test_missing_or_non_finite_daily_limit_rejects_the_whole_order(self) -> None:
+        broker = _broker(initial_cash=1_000_000, slippage_bps=0)
+        missing_key = _bar()
+        del missing_key["up_limit"]
+        for label, bar in (
+            ("missing_key", missing_key),
+            ("none", _bar(up_limit=None)),
+            ("nan", _bar(up_limit=float("nan"))),
+            ("inf", _bar(up_limit=float("inf"))),
+        ):
+            with self.subTest(side="buy", limit=label):
+                rejected = broker.execute(_order(), bar, matched_at=MATCHED_AT, raw_price=10.0)
+                self.assertEqual(
+                    (rejected.status, rejected.reason),
+                    ("rejected", "missing_daily_price_limit"),
+                )
+                self.assertEqual(broker.positions, {})
+                self.assertEqual(broker.cash, broker.profile.initial_cash)
+        # Only the buy-side cap is required; a missing down_limit does not block a buy.
+        filled = broker.execute(
+            _order(), _bar(down_limit=None), matched_at=MATCHED_AT, raw_price=10.0
+        )
+        self.assertEqual(filled.status, "filled")
+        broker.open_day("20260106")
+        for label, bar in (
+            ("none", _bar(down_limit=None)),
+            ("nan", _bar(down_limit=float("nan"))),
+            ("inf", _bar(down_limit=float("inf"))),
+        ):
+            with self.subTest(side="sell", limit=label):
+                rejected = broker.execute(
+                    _order("sell"), bar, matched_at=MATCHED_AT, raw_price=10.0
+                )
+                self.assertEqual(
+                    (rejected.status, rejected.reason),
+                    ("rejected", "missing_daily_price_limit"),
+                )
+                self.assertEqual(broker.positions["000001.SZ"].quantity, 100)
+        closed = broker.execute(
+            _order("sell"), _bar(up_limit=None), matched_at=MATCHED_AT, raw_price=10.0
+        )
+        self.assertEqual(closed.status, "filled")
+        self.assertNotIn("000001.SZ", broker.positions)
 
     def test_insufficient_cash_rejects_instead_of_partially_filling(self) -> None:
         broker = _broker(initial_cash=500.0, min_commission_cny=0, slippage_bps=0)

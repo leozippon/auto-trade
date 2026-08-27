@@ -1,8 +1,11 @@
-"""Load the AGENTS.md AutoTrade contract Fold/Meta system prompts must include.
+"""Presence-check the AGENTS.md AutoTrade Fold/Meta contract.
 
-The repository-root ``AGENTS.md`` is the only source for that section body.
-Host Multi-Agent Cooperation rules (Sleep, inherit_context, AGENTS.md handoff)
-are for this coding agent, not for Fold/Meta sessions.
+The repository-root ``AGENTS.md`` must contain the ``AutoTrade Fold and Meta
+sessions`` subsection. Fold/Meta system prompts inject a hardcoded Chinese
+rendering of host Multi-Agent, Development Principles, Operational Guardrails,
+and the role matrix; the English AutoTrade subsection is not injected. Host
+Multi-Agent Cooperation rules (Sleep, inherit_context, AGENTS.md handoff)
+remain for this coding agent.
 """
 
 from __future__ import annotations
@@ -29,9 +32,10 @@ def default_agents_md_path() -> Path:
 def load_required_agents_md_sections(
     path: str | Path | None = None,
 ) -> AgentsMdSections:
-    """Return the AutoTrade Fold/Meta contract section.
+    """Require the AutoTrade Fold/Meta subsection to exist and be non-empty.
 
-    Missing file or missing the named heading is an explicit failure.
+    Missing file, missing heading, or empty body is an explicit failure.
+    The returned English text is for host/audit presence-check, not prompt injection.
     """
 
     source = Path(path) if path is not None else default_agents_md_path()

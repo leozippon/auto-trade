@@ -122,7 +122,7 @@ If the exact price source is absent or invalid, including when the required dail
 - Buys and sells use share quantities; buy quantities must be multiples of 100.
 - A position bought today becomes sellable on the next trading day's `open_day` transition.
 - Commission applies on both sides with a minimum fee, and a transfer fee (过户费) applies on both sides with no minimum. Stamp duty applies on sells only, at a rate that depends on the execution date. Directional slippage adjusts the event price.
-- Suspension, `missing_execution_price`, daily price limits, insufficient cash, insufficient sellable quantity, and invalid buy lots reject the whole order.
+- Suspension, `missing_execution_price`, daily price limits, insufficient cash, insufficient sellable quantity, and invalid buy lots reject the whole order. Missing or non-finite direction-related limit-up/limit-down prices reject the whole order as `missing_daily_price_limit`.
 - Orders are all-or-reject. There is no partial fill, order-book depth, queue position, market impact, or liquidity-capacity model.
 
 Initial cash is an experiment setting, so size from `context.account.cash` instead of assuming a fixed account. The default cost profile uses 1 bp commission with a CNY 5 minimum, a 0.1 bp transfer fee, and 5 bp directional slippage. Sell stamp duty is **10 bp for executions before 2023-08-28 and 5 bp from 2023-08-28 onward** — size pre-cutover windows against the higher rate, because the Broker charges it. Round-trip cost on a pre-cutover sell is therefore about twice the post-cutover figure.

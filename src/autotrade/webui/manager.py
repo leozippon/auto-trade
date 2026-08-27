@@ -16,15 +16,12 @@ import uuid
 from collections.abc import Callable, Mapping
 from pathlib import Path
 
-from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.identity import (
     LEGACY_EXPERIMENT_MESSAGE,
     AgentRefStore,
     LegacyExperimentError,
 )
 from autotrade.environment.runtime import chmod_tree, utc_now_iso, write_json_atomic
-from autotrade.environment.strategy import StrategySchedule
-from autotrade.pipelines import DailyStrategyPipeline, StrategyExperimentConfig
 from autotrade.pipelines.agent_inbox import (
     INBOX_NAME,
     InboxError,
@@ -44,7 +41,14 @@ from autotrade.pipelines.hitl_state import (
     status_pid_alive,
     write_control,
 )
-from autotrade.pipelines.ledger import ExperimentLedger, latest_fold_records
+from autotrade.pipelines.ledger import (
+    ExperimentLedger,
+    FrozenArtifactMutated,
+    assert_no_frozen_artifact_mutation,
+    is_durable_success_record,
+    is_frozen_artifact_mutation,
+    latest_fold_records,
+)
 from autotrade.pipelines.meta_schedule import meta_record_session_key
 
 from .public_identity import PublicIdentity
@@ -300,6 +304,16 @@ def _require_session_reapproval(control: ControlState, session_key: str) -> bool
     return changed
 
 
+def _ledger_frozen_ids(records: list[dict[str, object]]) -> set[str]:
+    ids: set[str] = set()
+    for record in records:
+        for key in ("frozen_strategy_artifact_id", "strategy_artifact_id"):
+            value = str(record.get(key) or "")
+            if value:
+                ids.add(value)
+    return ids
+
+
 class ManagerError(RuntimeError):
     pass
 
@@ -338,39 +352,6 @@ class ExperimentManager:
         # scripts) have no background analyses to guard against.
         self._analysis_pending = analysis_pending
         self._mutate = threading.RLock()
-
-    def run_experiment(self, params: Mapping[str, object]) -> dict[str, object]:
-        """Legacy one-shot endpoint retained for simple daily experiments."""
-        if "period" in params:
-            raise ManagerError(
-                "unknown experiment parameter: period; use strategy_period"
-            )
-        if str(params.get("data_backend") or "daily") != "daily":
-            raise ManagerError("data_backend=pit requires a persistent experiment_id")
-        if str(params.get("developer_mode") or "baseline") != "baseline":
-            raise ManagerError("developer_mode=llm requires a persistent experiment_id")
-        strategy_path = self._local_file(
-            params.get("strategy_path"), label="strategy_path"
-        )
-        daily_path = self._local_file(params.get("daily_path"), label="daily_path")
-        try:
-            schedule = StrategySchedule(
-                period=str(params.get("strategy_period") or "day"),  # type: ignore[arg-type]
-                inference_time=str(params.get("inference_time") or "08:30"),
-            )
-            profile = BrokerProfile(
-                initial_cash=float(params.get("initial_cash", 1_000_000))
-            )
-            config = StrategyExperimentConfig(
-                strategy_path=strategy_path,
-                schedule=schedule,
-                broker_profile=profile,
-                execution_mode=str(params.get("execution_mode") or "sandbox"),  # type: ignore[arg-type]
-            )
-            result = DailyStrategyPipeline(config).run(daily_path)
-        except (TypeError, ValueError, OSError, RuntimeError) as exc:
-            raise ManagerError(str(exc)) from exc
-        return {"schedule": schedule.to_record(), "result": result.to_record()}
 
     def create_experiment(self, params: dict[str, object]) -> dict[str, object]:
         with self._mutate:
@@ -936,126 +917,102 @@ class ExperimentManager:
 
         Drops every ledger record AFTER the target fold (later folds, later
         meta-learning sessions, and ALL held-out records — they reflect the
-        discarded frontier), archives the dropped records' frozen artifact
-        dirs (so resume neither trips the orphan check nor collides in
-        _freeze), and backs up the original ledger next to it. The target
-        fold's own records — including earlier re-runs — are kept verbatim.
+        discarded frontier). Integrity-flagged rows of the target itself are
+        also dropped, including a flagged first Fold or Held-out: this is the
+        only unlock. Successful records of the target fold, including earlier
+        re-runs, stay verbatim. Frozen trees still named by kept records, or
+        used as the restored parent, are not archived.
         """
         sessions = self._planned_sessions(directory)
         fold_keys = [key for key, kind in sessions if kind == "fold"]
-        if session_key not in fold_keys:
-            raise ManagerError(f"{session_key!r} is not a fold session")
-        target_epoch, _, target_fold = session_key.partition("/")
-        records = ExperimentLedger(directory / "ledgers/experiment_ledger.jsonl").read()
-        if (target_epoch, target_fold) not in latest_fold_records(records):
-            raise ManagerError("目标 Fold 还没有账本记录，无法回滚到它")
-        target_position = next(
-            index for index, (key, _kind) in enumerate(sessions) if key == session_key
-        )
-        dropped_planned = sessions[target_position + 1 :]
-        dropped_fold_keys = {key for key, kind in dropped_planned if kind == "fold"}
-        dropped_meta_keys = {key for key, kind in dropped_planned if kind == "meta"}
+        if session_key not in fold_keys and session_key != "heldout":
+            raise ManagerError(f"{session_key!r} is not a fold or held-out session")
+        ledger = ExperimentLedger(directory / "ledgers/experiment_ledger.jsonl")
+        records = ledger.read()
+        dropped_fold_keys: set[str] = set()
+        dropped_meta_keys: set[str] = set()
+        if session_key != "heldout":
+            target_epoch, _, target_fold = session_key.partition("/")
+            has_success = (target_epoch, target_fold) in latest_fold_records(records)
+            has_flagged = any(
+                is_frozen_artifact_mutation(record)
+                and record.get("record_type") == "fold"
+                and str(record.get("epoch_id")) == target_epoch
+                and str(record.get("fold_id")) == target_fold
+                for record in records
+            )
+            if not has_success and not has_flagged:
+                raise ManagerError("目标 Fold 还没有账本记录，无法回滚到它")
+            target_position = next(
+                index
+                for index, (key, _kind) in enumerate(sessions)
+                if key == session_key
+            )
+            dropped_planned = sessions[target_position + 1 :]
+            dropped_fold_keys = {
+                key for key, kind in dropped_planned if kind == "fold"
+            }
+            dropped_meta_keys = {
+                key for key, kind in dropped_planned if kind == "meta"
+            }
 
         def _dropped(record: dict[str, object]) -> bool:
             kind = record.get("record_type")
+            if session_key == "heldout":
+                return kind == "heldout"
             if kind == "fold":
-                return (
-                    f"{record.get('epoch_id')}/{record.get('fold_id')}"
-                    in dropped_fold_keys
-                )
+                key = f"{record.get('epoch_id')}/{record.get('fold_id')}"
+                if key in dropped_fold_keys:
+                    return True
+                return key == session_key and is_frozen_artifact_mutation(record)
             if kind == "meta_learning":
                 return str(record.get("session_key") or "") in dropped_meta_keys
             return kind == "heldout"
 
-        ledger_path = directory / "ledgers/experiment_ledger.jsonl"
-        raw_lines = (
-            ledger_path.read_text(encoding="utf-8").splitlines()
-            if ledger_path.exists()
-            else []
-        )
-        kept_lines: list[str] = []
-        dropped_records: list[dict[str, object]] = []
-        for line in raw_lines:
-            text = line.strip()
-            if not text:
-                continue
-            try:
-                record = json.loads(text)
-            except json.JSONDecodeError:
-                kept_lines.append(
-                    line
-                )  # never silently discard unparseable audit lines
-                continue
-            if isinstance(record, dict) and _dropped(record):
-                dropped_records.append(record)
-            else:
-                kept_lines.append(line)
+        kept_records = [record for record in records if not _dropped(record)]
+        dropped_records = [record for record in records if _dropped(record)]
         if not dropped_records:
             raise ManagerError(
                 "该 Fold 之后没有任何账本记录（Fold/元学习/Held-out），无需回滚"
             )
+        try:
+            assert_no_frozen_artifact_mutation(kept_records)
+        except FrozenArtifactMutated as exc:
+            raise ManagerError(
+                "回滚后仍有完整性失败记录，拒绝落账"
+            ) from exc
 
         stamp = (
             utc_now_iso().replace("-", "").replace(":", "")[:15]
             + f"_{uuid.uuid4().hex[:8]}"
         )
         archive_root = directory / "artifacts/strategy/_archive" / f"rollback_{stamp}"
-        backup = ledger_path.with_name(f"experiment_ledger.rollback_{stamp}.jsonl")
-        shutil.copy2(ledger_path, backup)
-        artifact_root = (directory / "artifacts").resolve()
-        candidates: list[Path] = []
-        for record in dropped_records:
-            for field_name in (
-                "frozen_strategy_artifact_path",
-                "frozen_model_artifact_path",
-            ):
-                raw = record.get(field_name)
-                if raw:
-                    candidates.append(Path(str(raw)))
-        for path in candidates:
-            if not path.is_dir():
-                continue
-            resolved = path.resolve()
-            if resolved == artifact_root or not resolved.is_relative_to(artifact_root):
-                raise ManagerError(
-                    f"账本中的冻结产物路径越出当前实验目录，拒绝回滚：{path}"
-                )
-        archived: list[str] = []
-        for path in candidates:
-            if not path.is_dir():
-                continue
-            archive_root.mkdir(parents=True, exist_ok=True)
-            dest = archive_root / path.name
-            suffix = 1
-            while dest.exists():
-                dest = archive_root / f"{path.name}.{suffix}"
-                suffix += 1
-            chmod_tree(path, file_mode=0o600, dir_mode=0o700)
-            shutil.move(str(path), str(dest))
-            archived.append(str(path))
-
-        self._prune_step_tree(directory, dropped_fold_keys, archive_root)
-
-        tmp = ledger_path.with_name(f".{ledger_path.name}.rollback.tmp")
-        tmp.write_text("".join(f"{line}\n" for line in kept_lines), encoding="utf-8")
-        os.replace(tmp, ledger_path)
+        backup = ledger.path.with_name(f"experiment_ledger.rollback_{stamp}.jsonl")
+        shutil.copy2(ledger.path, backup)
 
         from autotrade.pipelines.prior import restore_current_from_records
 
-        kept_records: list[dict[str, object]] = []
-        for line in kept_lines:
-            try:
-                payload = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(payload, dict):
-                kept_records.append(payload)
         try:
             restore_current_from_records(directory, kept_records)
         except (FileNotFoundError, ValueError) as exc:
             raise ManagerError(str(exc)) from exc
+        ledger.rewrite(kept_records)
 
-        dropped_session_keys = dropped_fold_keys | dropped_meta_keys | {"heldout"}
+        step_prune_keys = set(dropped_fold_keys)
+        if session_key != "heldout":
+            target_epoch, _, target_fold = session_key.partition("/")
+            if (target_epoch, target_fold) not in latest_fold_records(kept_records):
+                step_prune_keys.add(session_key)
+        self._archive_unreferenced_frozen(
+            directory, dropped_records, kept_records, archive_root
+        )
+        self._prune_step_tree(directory, step_prune_keys, archive_root)
+
+        dropped_session_keys = (
+            {"heldout"}
+            if session_key == "heldout"
+            else dropped_fold_keys | dropped_meta_keys | {"heldout"}
+        )
         control.approved_sessions = tuple(
             key for key in control.approved_sessions if key not in dropped_session_keys
         )
@@ -1079,6 +1036,80 @@ class ExperimentManager:
             for key in list(mapping):
                 if key.split("#", 1)[0] in dropped_session_keys:
                     mapping.pop(key, None)
+
+    def _archive_unreferenced_frozen(
+        self,
+        directory: Path,
+        dropped_records: list[dict[str, object]],
+        kept_records: list[dict[str, object]],
+        archive_root: Path,
+    ) -> None:
+        """Move dropped frozen trees that kept records do not still name."""
+        artifact_root = (directory / "artifacts").resolve()
+        kept_ids = _ledger_frozen_ids(kept_records)
+        kept_dirs = []
+        for artifact_id in kept_ids:
+            frozen_dir = artifact_root / "strategy" / "frozen" / artifact_id
+            if frozen_dir.is_dir():
+                kept_dirs.append(frozen_dir.resolve())
+
+        def _referenced(path: Path) -> bool:
+            resolved = path.resolve()
+            for kept in kept_dirs:
+                if resolved == kept or resolved.is_relative_to(kept) or kept.is_relative_to(resolved):
+                    return True
+            return False
+
+        candidates: list[Path] = []
+        for record in dropped_records:
+            for artifact_id in _ledger_frozen_ids([record]):
+                if artifact_id in kept_ids:
+                    continue
+                frozen_dir = artifact_root / "strategy" / "frozen" / artifact_id
+                if frozen_dir.is_dir():
+                    candidates.append(frozen_dir)
+            for field_name in (
+                "frozen_strategy_artifact_path",
+                "frozen_model_artifact_path",
+            ):
+                raw = record.get(field_name)
+                if not raw:
+                    continue
+                path = Path(str(raw))
+                if path.is_dir():
+                    candidates.append(path)
+        roots: list[Path] = []
+        seen: set[Path] = set()
+        for path in candidates:
+            if not path.is_dir():
+                continue
+            resolved = path.resolve()
+            if resolved in seen:
+                continue
+            if resolved == artifact_root or not resolved.is_relative_to(artifact_root):
+                raise ManagerError(
+                    f"账本中的冻结产物路径越出当前实验目录，拒绝回滚：{path}"
+                )
+            if _referenced(resolved):
+                continue
+            seen.add(resolved)
+            roots.append(resolved)
+        roots = [
+            path
+            for path in roots
+            if not any(
+                path != other and path.is_relative_to(other) for other in roots
+            )
+        ]
+        for path in roots:
+            archive_root.mkdir(parents=True, exist_ok=True)
+            dest = archive_root / path.name
+            suffix = 1
+            while dest.exists():
+                dest = archive_root / f"{path.name}.{suffix}"
+                suffix += 1
+            chmod_tree(path, file_mode=0o600, dir_mode=0o700)
+            shutil.move(str(path), str(dest))
 
     def _prune_step_tree(
         self, directory: Path, dropped_fold_keys: set[str], archive_root: Path
@@ -1265,7 +1296,7 @@ class ExperimentManager:
             matching = [
                 record
                 for record in records
-                if record.get("record_type") == "fold"
+                if is_durable_success_record(record, record_types=("fold",))
                 and str(record.get("epoch_id")) == epoch_id
                 and str(record.get("fold_id")) == fold_id
             ]
@@ -1433,24 +1464,6 @@ class ExperimentManager:
         ):
             raise ManagerError(f"unknown experiment: {experiment_id}")
         return directory
-
-    def _local_file(self, raw: object, *, label: str) -> Path:
-        text = str(raw or "").strip()
-        if not text:
-            raise ManagerError(f"{label} is required")
-        candidate = Path(text)
-        path = (
-            (self.repo_root / candidate).resolve()
-            if not candidate.is_absolute()
-            else candidate.resolve()
-        )
-        if not path.is_relative_to(self.repo_root):
-            raise ManagerError(f"{label} must be inside the local repository")
-        if not path.is_file():
-            raise ManagerError(
-                f"{label} does not exist: {path.relative_to(self.repo_root)}"
-            )
-        return path
 
 
 def _reject_calendar_text(text: str) -> None:

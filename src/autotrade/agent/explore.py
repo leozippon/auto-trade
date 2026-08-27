@@ -11,6 +11,7 @@ observation; they do not finish the parent session.
 from __future__ import annotations
 
 import json
+import threading
 import time
 import uuid
 from collections.abc import Callable, Sequence
@@ -35,7 +36,7 @@ from autotrade.environment.time_budget import (
     TimeBudgetBinding,
     validate_time_budget_bindings,
 )
-from autotrade.environment.tools.base import ToolRegistry, ToolSpec
+from autotrade.environment.tools.base import SessionInterrupt, ToolRegistry, ToolSpec
 
 from .compact import fit_tool_results_to_context, safe_error_summary
 
@@ -44,7 +45,9 @@ EXPLORE_ROLES = ("auditor", "developer", "general-purpose", "Explore")
 EXPLORE_THINKING_LEVELS = ("off", "low", "medium", "high", "max")
 _PARENT_CONTEXT_CHARS = 8_000
 _PARENT_MESSAGE_CHARS = 1_200
-DEFAULT_EXPLORE_MAX_CONCURRENT = 10
+DEFAULT_EXPLORE_MAX_CONCURRENT = 2
+DEFAULT_EXPLORE_THINKING = "medium"
+_CALL_BUDGET_EXHAUSTED = "call budget exhausted"
 _NATIVE_WINDOW_FALLBACK = 262_144
 
 _FOLD_READ_TOOLS = frozenset({"glob", "grep", "read_file", "todo"})
@@ -90,7 +93,7 @@ _FOLD_WRITE_PROMPT = """\
 # 边界
 - 先读 `inputs/skills_index.json`，再从已挂载数据、单位引用、制品和参考材料中自主发现任务所需证据；skill 脚本不自动执行。把有复用价值的知识写入 skill，而不是堆入策略或汇报。
 - 只完成父任务；不得嵌套 explore、读取 Test/Held-out、改变权威 PRIOR、安装依赖、替父 Agent 提问或伪造结果。分钟和竞价不是策略时钟。
-- 工具 schema 决定实际能力。写、检查、todo 与 shell 按因果顺序执行；shell 只做有界前台工作，不启动后台任务或隐藏错误。
+- 工具 schema 决定实际能力。写、检查、todo 与 shell 按因果顺序执行；shell 只做有界前台工作，不启动后台任务、sleep/等待包装、轮询状态或隐藏错误。
 
 # 返回
 用简洁中文说明结论、实际修改、关键证据和剩余风险，然后停止。\
@@ -179,15 +182,19 @@ def explore_system_prompt(mode: str, role: str) -> str:
 
 
 def normalize_explore_thinking(value: object) -> str | None:
-    """Return a canonical thinking level, or None to inherit the parent LLM."""
+    """Return a canonical thinking level.
+
+    Omitted, empty, or inherit aliases use ``DEFAULT_EXPLORE_THINKING``
+    (medium) and do not inherit the parent session's reasoning intensity.
+    """
 
     if value is None:
-        return None
+        return DEFAULT_EXPLORE_THINKING
     if not isinstance(value, str):
         raise ValueError("explore.thinking must be a string")
     text = value.strip().lower()
     if text in {"", "inherit", "parent"}:
-        return None
+        return DEFAULT_EXPLORE_THINKING
     text = {"minimal": "low", "xhigh": "high"}.get(text, text)
     if text not in EXPLORE_THINKING_LEVELS:
         raise ValueError(
@@ -278,6 +285,7 @@ class ExploreSubAgentEngine(SessionTimeBudgetAware):
         time_budget: InferenceTimeBudget | None = None,
         event_sink: Callable[[str, dict[str, object]], None] | None = None,
         mode: str = "fold",
+        cancel_event: threading.Event | None = None,
     ) -> None:
         if mode not in EXPLORE_MODES:
             raise ValueError("Explore mode must be fold or meta")
@@ -290,6 +298,7 @@ class ExploreSubAgentEngine(SessionTimeBudgetAware):
         self.config = config or ExploreSubAgentConfig()
         self.deadline_at = deadline_at
         self.event_sink = event_sink
+        self._cancel_event = cancel_event or threading.Event()
         bindings = (
             (TimeBudgetBinding("explore_llm", llm.session_time_budget),)
             if isinstance(llm, SessionTimeBudgetAware)
@@ -303,6 +312,15 @@ class ExploreSubAgentEngine(SessionTimeBudgetAware):
     @property
     def session_time_budget(self) -> InferenceTimeBudget | None:
         return self.time_budget
+
+    def attach_cancel_event(self, event: threading.Event) -> None:
+        self._cancel_event = event
+
+    def cancel(self) -> None:
+        self._cancel_event.set()
+
+    def _cancelled(self) -> bool:
+        return self._cancel_event.is_set()
 
     def run(
         self,
@@ -333,6 +351,7 @@ class ExploreSubAgentEngine(SessionTimeBudgetAware):
             else float("inf")
         )
         deadline = min(child_cap, self._deadline_monotonic())
+        thinking = normalize_explore_thinking(thinking)
         llm = llm_with_thinking(self.llm, thinking)
         started = {
             "task_id": task_id,
@@ -364,6 +383,10 @@ class ExploreSubAgentEngine(SessionTimeBudgetAware):
         llm_calls = 0
         try:
             while rounds_limit is None or rounds < rounds_limit:
+                if self._cancelled():
+                    status = "cancelled"
+                    error = "Explore cancelled"
+                    break
                 if self._deadline_reached(deadline):
                     status = "timeout"
                     error = "Explore deadline reached"
@@ -388,8 +411,19 @@ class ExploreSubAgentEngine(SessionTimeBudgetAware):
                 except Exception as exc:  # noqa: BLE001 - child retry must not kill parent
                     llm_calls += 1
                     error = safe_error_summary(exc)
-                    if isinstance(exc, TimeoutError) or self._deadline_reached(deadline):
-                        status = "timeout"
+                    if self._cancelled():
+                        status = "cancelled"
+                        error = "Explore cancelled"
+                        break
+                    if _is_nonretryable_explore_error(exc) or self._deadline_reached(
+                        deadline
+                    ):
+                        status = (
+                            "timeout"
+                            if isinstance(exc, TimeoutError)
+                            or self._deadline_reached(deadline)
+                            else "error"
+                        )
                         break
                     messages.append(
                         ChatMessage(
@@ -428,6 +462,10 @@ class ExploreSubAgentEngine(SessionTimeBudgetAware):
                         "parent_call_id": parent_call_id,
                     },
                 )
+                if self._cancelled():
+                    status = "cancelled"
+                    error = "Explore cancelled"
+                    break
                 if not response.tool_calls:
                     text = (response.content or "").strip()
                     if text:
@@ -479,6 +517,7 @@ class ExploreSubAgentEngine(SessionTimeBudgetAware):
                 status == "completed"
                 and not summary
                 and not self._deadline_reached(deadline)
+                and not self._cancelled()
             ):
                 messages.append(
                     ChatMessage(
@@ -574,6 +613,8 @@ class ExploreSubAgentEngine(SessionTimeBudgetAware):
             )
             if rejection:
                 return call, {"ok": False, "error": rejection}, False
+            if self._cancelled():
+                return call, {"ok": False, "error": "Explore cancelled"}, False
             if self._deadline_reached(deadline):
                 return call, {"ok": False, "error": "Explore deadline reached"}, False
             return call, self.tools.invoke(call.name, call.arguments).to_record(), True
@@ -618,6 +659,13 @@ class ExploreSubAgentEngine(SessionTimeBudgetAware):
     def _emit(self, event: str, payload: dict[str, object]) -> None:
         if self.event_sink is not None:
             self.event_sink(event, dict(payload))
+
+
+def _is_nonretryable_explore_error(exc: Exception) -> bool:
+    if isinstance(exc, (SessionInterrupt, TimeoutError)):
+        return True
+    text = f"{exc} {safe_error_summary(exc)}"
+    return _CALL_BUDGET_EXHAUSTED in text
 
 
 def _copy_chat_message(message: ChatMessage) -> ChatMessage:

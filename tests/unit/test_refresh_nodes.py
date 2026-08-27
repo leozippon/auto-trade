@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 from autotrade.data_sources.tushare import cron_update
 from autotrade.data_sources.tushare.common import (
     BOARD_TRADING_DEFAULT_DATASETS,
+    DAILY_DOWNLOAD_DATASETS,
     DAILY_REQUIRED_DATASETS,
     EVENT_FLOW_DATASETS,
     FUNDAMENTAL_DATASETS,
@@ -77,9 +78,11 @@ CRONTAB = REPO_ROOT / "ops" / "cron" / "tushare_update.cron"
 
 # Full dataset list a whole-tier download job lands, from the tushare
 # package's canonical tier definitions (single source with the downloader).
+# Daily here is the generic download default; stk_auction stays in the
+# required/audit gate and is written only by dedicated capture/recheck jobs.
 TIER_DATASETS = {
     "reference": REFERENCE_DATASETS,
-    "daily": DAILY_REQUIRED_DATASETS,
+    "daily": DAILY_DOWNLOAD_DATASETS,
     "fundamental": FUNDAMENTAL_DATASETS,
     "intraday": INTRADAY_DATASETS,
     "event_flow": EVENT_FLOW_DATASETS,
@@ -201,6 +204,11 @@ class RefreshNodeDriftGuardTest(unittest.TestCase):
         self.assertTrue(job_lines)
         self.assertTrue(all("--dispatch-log" not in line for line in job_lines))
         self.assertTrue(all(">>" not in line and "2>&1" not in line for line in job_lines))
+
+    def test_daily_download_tier_defaults_exclude_stk_auction(self) -> None:
+        self.assertEqual(TIER_DATASETS["daily"], DAILY_DOWNLOAD_DATASETS)
+        self.assertNotIn("stk_auction", TIER_DATASETS["daily"])
+        self.assertIn("stk_auction", DAILY_REQUIRED_DATASETS)
 
     def test_evening_daily_set_cannot_bypass_dedicated_auction_capture(self) -> None:
         schedule = json.loads(CRON_SCHEDULE.read_text(encoding="utf-8"))

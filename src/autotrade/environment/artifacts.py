@@ -306,6 +306,36 @@ def copy_model_artifacts(source_root: str | Path | None, dest_root: str | Path) 
     _copy_revision(source_root, dest_root, _model_artifact_files(source_root, missing_ok=True))
 
 
+def restore_frozen_artifact_trees(
+    *,
+    output_path: str | Path,
+    snapshot_output: str | Path,
+    models_path: str | Path | None,
+    snapshot_models: str | Path,
+) -> None:
+    """Replace live frozen output/models with snapshot bytes and re-lock them.
+
+    The snapshot must outlive this call. Restore is fail-closed: a copy or
+    re-lock error leaves the caller to treat the trees as unrestored.
+    """
+    live_output = Path(output_path)
+    live_models = (
+        Path(models_path) if models_path is not None else live_output.parent / "models"
+    )
+    _atomic_replace_copied(Path(snapshot_output), live_output, copy_artifact)
+    _atomic_replace_copied(Path(snapshot_models), live_models, copy_model_artifacts)
+    frozen_root = live_output.parent
+    if (frozen_root / "revision.json").is_file():
+        chmod_tree(frozen_root, file_mode=0o444, dir_mode=0o555)
+        _assert_readonly_tree(frozen_root)
+        return
+    chmod_tree(live_output, file_mode=0o444, dir_mode=0o555)
+    _assert_readonly_tree(live_output)
+    if live_models.exists():
+        chmod_tree(live_models, file_mode=0o444, dir_mode=0o555)
+        _assert_readonly_tree(live_models)
+
+
 def make_formal_artifacts_readonly(paths) -> None:
     """Lock the strategy and model artifacts for formal validation/freeze."""
     chmod_tree(paths.agent_output, file_mode=0o444, dir_mode=0o555)
@@ -579,6 +609,47 @@ def _replace_artifact_root(dest_root: Path) -> None:
             shutil.rmtree(child)
         else:
             child.unlink()
+
+
+def _unlock_directory(path: Path) -> None:
+    if path.exists():
+        chmod_tree(path, file_mode=0o600, dir_mode=0o700)
+    if path.parent.exists():
+        path.parent.chmod(0o700)
+
+
+def _discard_replaced_tree(path: Path) -> None:
+    if not path.exists():
+        return
+    chmod_tree(path, file_mode=0o600, dir_mode=0o700)
+    shutil.rmtree(path, ignore_errors=True)
+
+
+def _atomic_replace_copied(source: Path, dest: Path, copier) -> None:
+    """Copy ``source`` onto ``dest`` via a sibling staging directory."""
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    _unlock_directory(dest)
+    token = uuid.uuid4().hex[:8]
+    staging = dest.with_name(f".{dest.name}.restore_{token}")
+    backup = dest.with_name(f".{dest.name}.backup_{token}")
+    try:
+        copier(source, staging)
+        if dest.exists():
+            dest.rename(backup)
+        staging.rename(dest)
+        _discard_replaced_tree(backup)
+    except Exception:
+        if not dest.exists() and backup.exists():
+            try:
+                backup.rename(dest)
+            except OSError as restore_error:
+                _discard_replaced_tree(staging)
+                raise OSError(
+                    f"failed to restore {dest} from backup {backup} after replace failure"
+                ) from restore_error
+        _discard_replaced_tree(staging)
+        raise
 
 
 def _copy_revision(source_root: Path, dest_root: Path, relpaths: set[str]) -> None:
