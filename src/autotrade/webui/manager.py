@@ -748,6 +748,15 @@ class ExperimentManager:
         except InboxError as exc:
             raise ManagerError(str(exc)) from exc
 
+    def _live_worker_status(self, directory: Path, *, action: str) -> Mapping[str, object]:
+        state = experiment_state(directory)
+        if not state.get("worker_alive"):
+            raise ManagerError(f"{action} requires a live worker")
+        status = state.get("status")
+        if not isinstance(status, Mapping):
+            raise ManagerError(f"{action} requires a live worker")
+        return status
+
     def _apply_control_action(
         self,
         directory: Path,
@@ -787,7 +796,7 @@ class ExperimentManager:
             if directive is not None and not isinstance(directive, str):
                 raise ManagerError("approve_step directive must be a string")
             self._require_planned_session(directory, session_key)
-            status = read_json(directory / "hitl/status.json")
+            status = self._live_worker_status(directory, action="approve_step")
             if (
                 status.get("state") != "waiting_step_user"
                 or status.get("session_key") != session_key
@@ -810,7 +819,7 @@ class ExperimentManager:
                 raise ManagerError("reply_question requires session_key")
             if directive is not None and not isinstance(directive, str):
                 raise ManagerError("reply_question directive must be a string")
-            status = read_json(directory / "hitl/status.json")
+            status = self._live_worker_status(directory, action="reply_question")
             if (
                 status.get("state") != "waiting_user_reply"
                 or status.get("question_key") != session_key

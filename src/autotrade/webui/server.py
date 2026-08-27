@@ -528,8 +528,14 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
 
     def current_step(experiment_id: str) -> tuple[Path, dict[str, object], dict[str, object], Path]:
         directory = _experiment_dir(experiment_id)
-        status = read_status(directory / "hitl/status.json")
-        if status.get("state") not in {"waiting_step_user", "waiting_user_reply"}:
+        state = registry.experiment_state(directory)
+        if not state.get("worker_alive"):
+            raise ValueError("current-step requires a live worker")
+        status = state.get("status")
+        if not isinstance(status, dict) or status.get("state") not in {
+            "waiting_step_user",
+            "waiting_user_reply",
+        }:
             raise ValueError("experiment is not waiting for researcher input")
         run_id = str(status.get("run_id") or "")
         if not run_id or Path(run_id).name != run_id or run_id.startswith("."):

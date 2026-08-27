@@ -373,6 +373,11 @@ def _session_ref(experiment_dir: Path, raw_session_key: str) -> str:
     return PublicIdentity(experiment_dir).public_session_key(raw_session_key)
 
 
+def _live_pid_fields() -> dict[str, object]:
+    pid = os.getpid()
+    return {"pid": pid, "pid_start_ticks": proc_start_ticks(pid)}
+
+
 def _persistent_experiment(tmp_path: Path) -> Path:
     directory = tmp_path / "experiments/demo"
     AgentRefStore(directory)
@@ -848,6 +853,7 @@ def test_current_question_and_step_controls_use_exact_one_shot_keys(tmp_path: Pa
         json.dumps(
             {
                 "schema_version": 1,
+                **_live_pid_fields(),
                 "state": "waiting_user_reply",
                 "session_key": session_key,
                 "question_key": question_key,
@@ -888,6 +894,7 @@ def test_current_question_and_step_controls_use_exact_one_shot_keys(tmp_path: Pa
         json.dumps(
             {
                 "schema_version": 1,
+                **_live_pid_fields(),
                 "state": "waiting_step_user",
                 "session_key": session_key,
                 "step_index": 2,
@@ -940,6 +947,66 @@ def test_current_question_and_step_controls_use_exact_one_shot_keys(tmp_path: Pa
     consumed = read_control(directory / "hitl/control.json")
     assert consumed.step_go == {}
     assert consumed.step_directives == {}
+
+
+def test_dead_pid_hitl_wait_actions_fail_closed(tmp_path: Path):
+    directory = _persistent_experiment(tmp_path)
+    client = TestClient(create_app(tmp_path))
+    session_key = "epoch_001/fold_2026Q1"
+    question_key = f"{session_key}#q1"
+    public_session_key = _session_ref(directory, session_key)
+    public_question_key = f"{public_session_key}#q1"
+    status_path = directory / "hitl/status.json"
+    control_path = directory / "hitl/control.json"
+    corpse = {
+        "schema_version": 1,
+        "pid": 999_999_999,
+        "pid_start_ticks": 1,
+        "state": "waiting_step_user",
+        "session_key": session_key,
+        "step_index": 2,
+        "run_id": "run_001",
+    }
+    status_path.write_text(json.dumps(corpse), encoding="utf-8")
+
+    approved = client.post(
+        "/api/experiments/demo/control",
+        json={
+            "action": "approve_step",
+            "session_key": public_session_key,
+            "step_index": 2,
+            "directive": "继续控制回撤",
+        },
+    )
+    assert approved.status_code == 400
+    assert "live worker" in approved.json()["detail"]
+    assert read_control(control_path).step_go == {}
+    assert read_control(control_path).step_directives == {}
+
+    current = client.get("/api/experiments/demo/current-step")
+    assert current.status_code == 200
+    assert current.json()["available"] is False
+    analysis = client.post("/api/experiments/demo/current-step/analysis")
+    assert analysis.status_code == 409
+    assert "live worker" in analysis.json()["detail"]
+    source = client.get("/api/experiments/demo/current-step/source.zip")
+    assert source.status_code == 404
+
+    corpse["state"] = "waiting_user_reply"
+    corpse["question_key"] = question_key
+    corpse["question"] = "继续当前假设吗？"
+    status_path.write_text(json.dumps(corpse), encoding="utf-8")
+    replied = client.post(
+        "/api/experiments/demo/control",
+        json={
+            "action": "reply_question",
+            "session_key": public_question_key,
+            "directive": "",
+        },
+    )
+    assert replied.status_code == 400
+    assert "live worker" in replied.json()["detail"]
+    assert read_control(control_path).user_replies == {}
 
 
 def test_status_reporter_keeps_only_the_current_wait_payload(tmp_path: Path):
