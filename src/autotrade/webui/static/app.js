@@ -2189,9 +2189,7 @@ async function renderDetailPage(experimentId, selectedKey) {
       "div",
       { class: "sub" },
       `进度 ${detail.completed_sessions ?? 0}/${detail.total_sessions ?? "?"}`,
-      Number(detail.skills && detail.skills.count) > 0
-        ? ` ｜ Skills ${detail.skills.generation_id || ""}（${detail.skills.count} 项）`
-        : " ｜ Skills 0 项",
+      ` ｜ Skills ${Number(detail.skills && detail.skills.count) || 0} 项`,
       detail.state === "unreadable" && detail.error
         ? ` ｜ ${detail.error}`
         : "",
@@ -4339,15 +4337,15 @@ function parentReasoningLabel(detail) {
 
 function renderAgentOutputBlock(node, block, detail) {
   const effort = parentReasoningLabel(detail);
+  const model = String((block && block.model) || "").trim();
+  const title = ["Agent", model, effort ? `推理 ${effort}` : ""]
+    .filter(Boolean)
+    .join(" · ");
   node.append(
     el(
       "div",
       { class: "head" },
-      el(
-        "span",
-        { class: "type agent_output" },
-        effort ? `Agent · 推理 ${effort}` : "Agent",
-      ),
+      el("span", { class: "type agent_output" }, title),
       block.ts ? el("span", {}, fmtTsTime(block.ts)) : null,
     ),
   );

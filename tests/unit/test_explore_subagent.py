@@ -25,7 +25,11 @@ from autotrade.agent.explore import (
 )
 from autotrade.agent.prompts import HOST_GUIDELINES_ZH, build_system_prompt
 from autotrade.environment.tools.base import SessionInterrupt
-from autotrade.agent.runner import AgentSessionConfig, AgentSessionRunner
+from autotrade.agent.runner import (
+    AgentSessionConfig,
+    AgentSessionDeadlineExceeded,
+    AgentSessionRunner,
+)
 from autotrade.environment.llm import ChatMessage, ProviderResponse, ScriptedLLM, ToolCall
 from autotrade.environment.tools import (
     CommandResult,
@@ -41,6 +45,7 @@ from autotrade.environment.tools import (
     ToolSpec,
     WriteFileTool,
 )
+from autotrade.environment.time_budget import InferenceTimeBudget
 from autotrade.pipelines.local_backend import (
     SessionBudgetLLM,
     build_fold_explore_tools,
@@ -1013,6 +1018,8 @@ def test_explore_defaults_are_medium_thinking_and_two_concurrent() -> None:
     assert result["thinking"] == "medium"
     assert "没有 Sleep" in HOST_GUIDELINES_ZH
     assert "应让它 Sleep" not in HOST_GUIDELINES_ZH
+    assert "Runner 会让出" in HOST_GUIDELINES_ZH
+    assert "后台完成由运行时注入" in HOST_GUIDELINES_ZH
 
 
 def test_parent_context_digest_skips_system_and_keeps_recent() -> None:
@@ -1110,6 +1117,29 @@ class _GateLLM:
         return ProviderResponse(content="child done")
 
 
+class _TaskGatedLLM:
+    model = "child"
+    provider = "test"
+    context_window_tokens = 128000
+
+    def __init__(
+        self,
+        gates: dict[str, tuple[threading.Event, threading.Event, str]],
+    ) -> None:
+        self.gates = gates
+
+    def complete(self, messages, **kwargs):
+        del kwargs
+        blob = " ".join(str(message.content or "") for message in messages)
+        for needle, (started, release, summary) in self.gates.items():
+            if needle in blob:
+                started.set()
+                if not release.wait(5):
+                    raise TimeoutError(needle)
+                return ProviderResponse(content=summary)
+        raise AssertionError(blob)
+
+
 def test_parent_session_continues_before_explore_finishes() -> None:
     started = threading.Event()
     release = threading.Event()
@@ -1157,6 +1187,275 @@ def test_parent_session_continues_before_explore_finishes() -> None:
     assert result.status == "finished"
     assert finish.invoked == 1
     assert parent_calls["n"] == 2
+
+
+def test_parent_text_only_waits_for_pending_explore_then_resumes() -> None:
+    started = threading.Event()
+    release = threading.Event()
+    call2_returned = threading.Event()
+    finish = _FinishStub("finish_fold")
+    inner = ScriptedLLM(
+        [
+            ProviderResponse(
+                tool_calls=(
+                    ToolCall(
+                        "e1",
+                        "explore",
+                        {"role": "auditor", "task": "slow look"},
+                    ),
+                )
+            ),
+            ProviderResponse(content="waiting for explore"),
+            ProviderResponse(tool_calls=(ToolCall("f1", "finish_fold", {}),)),
+        ]
+    )
+    parent_calls = {"n": 0}
+
+    class _ParentLLM:
+        model = "parent"
+        provider = "test"
+        context_window_tokens = 128000
+
+        def complete(self, messages, **kwargs):
+            parent_calls["n"] += 1
+            n = parent_calls["n"]
+            if n == 2:
+                assert started.wait(3)
+                assert not release.is_set()
+
+                def _release_after_parent_turn() -> None:
+                    assert call2_returned.wait(3)
+                    release.set()
+
+                threading.Thread(
+                    target=_release_after_parent_turn, daemon=True
+                ).start()
+            elif n == 3:
+                assert release.is_set()
+                blob = "\n".join(str(message.content or "") for message in messages)
+                assert '"observation": "explore_completed"' in blob
+                assert '"observation": "no_tool_call"' not in blob
+            try:
+                return inner.complete(messages, **kwargs)
+            finally:
+                if n == 2:
+                    call2_returned.set()
+
+    runner = AgentSessionRunner(
+        llm=_ParentLLM(),
+        tools=ToolRegistry([finish]),
+        system_prompt="fold",
+        config=_fold_config(),
+        explore=ExploreSubAgentEngine(
+            llm=_GateLLM(started, release),
+            tools=ToolRegistry([DeclaredReadOnlyShell()]),
+        ),
+    )
+    result = runner.run("go")
+    assert result.status == "finished"
+    assert finish.invoked == 1
+    assert parent_calls["n"] == 3
+    assert len(inner.calls) == 3
+
+
+def test_parent_text_only_without_pending_explore_still_nudges() -> None:
+    finish = _FinishStub("finish_fold")
+    llm = ScriptedLLM(
+        [
+            ProviderResponse(content="I should act next."),
+            ProviderResponse(tool_calls=(ToolCall("f1", "finish_fold", {}),)),
+        ]
+    )
+    runner = AgentSessionRunner(
+        llm=llm,
+        tools=ToolRegistry([finish]),
+        system_prompt="fold",
+        config=_fold_config(),
+        explore=ExploreSubAgentEngine(
+            llm=ScriptedLLM([ProviderResponse(content="unused")]),
+            tools=ToolRegistry([DeclaredReadOnlyShell()]),
+        ),
+    )
+    result = runner.run("go")
+    assert result.status == "finished"
+    assert result.llm_calls == 2
+    second = llm.calls[1]["messages"]
+    assert isinstance(second, tuple)
+    assert any(
+        '"observation": "no_tool_call"' in (message.content or "") for message in second
+    )
+
+
+def test_parent_text_only_wakes_on_first_completed_explore() -> None:
+    fast_started = threading.Event()
+    fast_release = threading.Event()
+    slow_started = threading.Event()
+    slow_release = threading.Event()
+    call2_returned = threading.Event()
+    finish = _FinishStub("finish_fold")
+    inner = ScriptedLLM(
+        [
+            ProviderResponse(
+                tool_calls=(
+                    ToolCall(
+                        "e1",
+                        "explore",
+                        {"role": "auditor", "task": "fast-task"},
+                    ),
+                    ToolCall(
+                        "e2",
+                        "explore",
+                        {"role": "developer", "task": "slow-task"},
+                    ),
+                )
+            ),
+            ProviderResponse(content="waiting for first explore"),
+            ProviderResponse(tool_calls=(ToolCall("f1", "finish_fold", {}),)),
+        ]
+    )
+    parent_calls = {"n": 0}
+
+    class _ParentLLM:
+        model = "parent"
+        provider = "test"
+        context_window_tokens = 128000
+
+        def complete(self, messages, **kwargs):
+            parent_calls["n"] += 1
+            n = parent_calls["n"]
+            if n == 2:
+                assert fast_started.wait(3)
+                assert slow_started.wait(3)
+                assert not fast_release.is_set()
+                assert not slow_release.is_set()
+
+                def _release_fast() -> None:
+                    assert call2_returned.wait(3)
+                    fast_release.set()
+
+                threading.Thread(target=_release_fast, daemon=True).start()
+            elif n == 3:
+                blob = "\n".join(str(message.content or "") for message in messages)
+                assert blob.count('"observation": "explore_completed"') == 1
+                assert "fast summary" in blob
+                assert "slow summary" not in blob
+                assert '"observation": "no_tool_call"' not in blob
+                slow_release.set()
+            try:
+                return inner.complete(messages, **kwargs)
+            finally:
+                if n == 2:
+                    call2_returned.set()
+
+    runner = AgentSessionRunner(
+        llm=_ParentLLM(),
+        tools=ToolRegistry([finish]),
+        system_prompt="fold",
+        config=_fold_config(),
+        explore=ExploreSubAgentEngine(
+            llm=_TaskGatedLLM(
+                {
+                    "fast-task": (fast_started, fast_release, "fast summary"),
+                    "slow-task": (slow_started, slow_release, "slow summary"),
+                }
+            ),
+            tools=ToolRegistry([DeclaredReadOnlyShell()]),
+            config=ExploreSubAgentConfig(max_concurrent=2),
+        ),
+    )
+    result = runner.run("go")
+    assert result.status == "finished"
+    assert finish.invoked == 1
+    assert parent_calls["n"] == 3
+
+
+def test_parent_text_only_pending_explore_deadline_does_not_deadlock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from autotrade.agent import runner as runner_module
+
+    monkeypatch.setattr(runner_module, "EXPLORE_TEARDOWN_WAIT_SECONDS", 0.2)
+    monkeypatch.setattr(runner_module, "EXPLORE_TEARDOWN_WAIT_REMAINDER_SECONDS", 0.05)
+    started = threading.Event()
+    release = threading.Event()
+    finish = _FinishStub("finish_fold")
+    inner = ScriptedLLM(
+        [
+            ProviderResponse(
+                tool_calls=(
+                    ToolCall(
+                        "e1",
+                        "explore",
+                        {"role": "auditor", "task": "hang"},
+                    ),
+                )
+            ),
+            ProviderResponse(content="waiting for explore"),
+        ]
+    )
+    parent_calls = {"n": 0}
+
+    class _ParentLLM:
+        model = "parent"
+        provider = "test"
+        context_window_tokens = 128000
+
+        def complete(self, messages, **kwargs):
+            parent_calls["n"] += 1
+            if parent_calls["n"] == 2:
+                assert started.wait(3)
+            return inner.complete(messages, **kwargs)
+
+    t0 = time.monotonic()
+    try:
+        with pytest.raises(AgentSessionDeadlineExceeded):
+            AgentSessionRunner(
+                llm=_ParentLLM(),
+                tools=ToolRegistry([finish]),
+                system_prompt="fold",
+                config=_fold_config(
+                    deadline_seconds=0.4,
+                    deadline_grace_seconds=0.0,
+                    finalize_before_deadline_seconds=0.0,
+                ),
+                explore=ExploreSubAgentEngine(
+                    llm=_GateLLM(started, release),
+                    tools=ToolRegistry([DeclaredReadOnlyShell()]),
+                ),
+            ).run("go")
+        elapsed = time.monotonic() - t0
+        assert parent_calls["n"] == 2
+        assert elapsed < 2.5
+    finally:
+        release.set()
+        time.sleep(0.2)
+
+
+def test_wait_first_pending_explore_returns_on_cancel() -> None:
+    started = threading.Event()
+    release = threading.Event()
+    runner = AgentSessionRunner(
+        llm=ScriptedLLM([]),
+        tools=ToolRegistry(),
+        system_prompt="fold",
+        config=_fold_config(),
+        explore=ExploreSubAgentEngine(
+            llm=_GateLLM(started, release),
+            tools=ToolRegistry([DeclaredReadOnlyShell()]),
+        ),
+    )
+    dispatched = runner._dispatch_explore(
+        ToolCall("e1", "explore", {"role": "auditor", "task": "hang"})
+    )
+    assert dispatched.get("status") == "started"
+    assert started.wait(3)
+    threading.Timer(0.1, runner._cancelled.set).start()
+    t0 = time.monotonic()
+    try:
+        runner._wait_first_pending_explore(InferenceTimeBudget(duration_seconds=20))
+        assert time.monotonic() - t0 < 2.0
+    finally:
+        release.set()
 
 
 def test_explore_stops_retry_on_call_budget_and_interrupt() -> None:

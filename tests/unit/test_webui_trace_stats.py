@@ -205,6 +205,19 @@ def test_subagent_trace_card_shows_model_thinking_and_context() -> None:
     assert "isRunningSubagent" in script
 
 
+def test_agent_output_title_includes_trace_model_and_reasoning() -> None:
+    script = APP_JS.read_text(encoding="utf-8")
+    source = script.split("function renderAgentOutputBlock(", 1)[1].split(
+        "\nfunction ", 1
+    )[0]
+    assert "block.model" in source
+    assert "parentReasoningLabel" in source
+    assert "推理 ${effort}" in source
+    assert "params.model" not in source
+    assert "qwen-3.8-27b-fp8" not in source
+    assert "meta_model" not in source
+
+
 def test_stats_chips_show_subagent_near_llm_only_when_positive() -> None:
     script = APP_JS.read_text(encoding="utf-8")
     source = script.split("function statsChipsRow(", 1)[1].split("\nfunction ", 1)[0]
@@ -240,6 +253,18 @@ def test_detail_poll_does_not_rebuild_on_environment_stage() -> None:
     assert "environment_stage" not in poll
     assert "session_key" in poll
     assert "run_ref" in poll
+
+
+def test_experiment_detail_skills_title_omits_generation_id() -> None:
+    script = APP_JS.read_text(encoding="utf-8")
+    source = script.split("async function renderDetailPage(", 1)[1]
+    head = source.split('const container = el("div", {});', 1)[0]
+    assert (
+        "` ｜ Skills ${Number(detail.skills && detail.skills.count) || 0} 项`"
+        in head
+    )
+    assert "generation_id" not in head
+    assert "（${detail.skills.count} 项）" not in head
 
 
 def test_index_html_loads_app_js_without_inlining_trace_chips() -> None:
@@ -436,6 +461,40 @@ def test_project_subagent_new_and_old_events_aggregate_by_task_id() -> None:
             "summary": "",
         }
     ]
+
+
+def test_project_agent_output_exposes_llm_call_model() -> None:
+    blocks = project_trace_blocks(
+        [
+            {
+                "event_type": "llm_call",
+                "content": "plan",
+                "model": "qwen-3.8-27b-fp8",
+            },
+            {"event_type": "llm_call", "content": "done"},
+            {"event_type": "llm_call", "content": "blank", "model": "  "},
+            {
+                "event_type": "explore_task",
+                "task_id": "explore_a",
+                "status": "started",
+                "role": "auditor",
+                "model": "child-model",
+            },
+        ]
+    )
+    outputs = [block for block in blocks if block.get("kind") == "agent_output"]
+    assert [block.get("model") for block in outputs] == [
+        "qwen-3.8-27b-fp8",
+        None,
+        None,
+    ]
+    started = next(
+        block
+        for block in _subagent_blocks(blocks)
+        if block["phase"] == "started"
+    )
+    assert started["model"] == "child-model"
+    assert started["role"] == "auditor"
 
 
 def test_project_subagent_exposes_model_thinking_and_inherit_context() -> None:

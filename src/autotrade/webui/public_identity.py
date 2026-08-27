@@ -59,7 +59,7 @@ _ALLOWED_PUBLIC_PATH_PREFIXES = (
 )
 _FILE_URI = re.compile(r"file://(?:[^\s\"'`<>])+", re.IGNORECASE)
 _POSIX_PATH = re.compile(
-    r"(?<![A-Za-z0-9_/])/[^/\s\"'`<>|()\[\]{},;]+"
+    r"(?<![A-Za-z0-9_/])/[A-Za-z._][^/\s\"'`<>|()\[\]{},;]*"
     r"(?:/[^/\s\"'`<>|()\[\]{},;]+)*"
 )
 _WINDOWS_PATH = re.compile(

@@ -1229,6 +1229,55 @@ def test_worker_liveness_rejects_unstamped_or_recycled_process_ids():
     assert not status_pid_alive({"pid": pid, "pid_start_ticks": ticks + 1})
 
 
+def test_public_identity_keeps_cjk_slash_lists_and_redacts_host_paths(
+    tmp_path: Path,
+) -> None:
+    directory = tmp_path / "experiments/demo"
+    AgentRefStore(directory)
+    hitl = directory / "hitl"
+    hitl.mkdir(parents=True)
+    (hitl / "schedule.json").write_text(
+        json.dumps({"schema_version": 1, "sessions": []}), encoding="utf-8"
+    )
+    identity = PublicIdentity(directory)
+    omitted = "[host path omitted]"
+    chinese_list = (
+        "原型 + 机械测试通过（30买/无churn/卖出路径/冷热同单/严格JSON）。"
+    )
+    buy_sell = "买入路径与卖出路径均保留，冷热同单。"
+    assert identity.public_text(chinese_list) == chinese_list
+    assert identity.public_text(buy_sell) == buy_sell
+    assert identity.public_status({"error": chinese_list})["error"] == chinese_list
+
+    assert identity.public_text("打开/Data2/lzp/secret") == f"打开{omitted}"
+    assert identity.public_text("中文/mnt/private/secret") == f"中文{omitted}"
+    assert identity.public_text("/var/lib/private/result.json") == omitted
+    assert identity.public_text("file:///tmp/private/result.json") == omitted
+    assert identity.public_text("file://server/share/private.txt") == omitted
+    assert identity.public_text(r"C:\Users\private\result.json") == omitted
+    assert identity.public_text("/mnt/private/secret") == omitted
+    assert identity.public_text("/无churn/secret") == omitted
+
+    kept = identity.public_text(
+        "see https://example.test/docs/path and/or 3/4 relative/path; "
+        "GET /api/experiments/x; /mnt/agent/workspace/main.py; "
+        "/mnt/artifacts/a; /mnt/snapshot/s; /mnt/snapshots/t"
+    )
+    for token in (
+        "https://example.test/docs/path",
+        "and/or",
+        "3/4",
+        "relative/path",
+        "/api/experiments/x",
+        "/mnt/agent/workspace/main.py",
+        "/mnt/artifacts/a",
+        "/mnt/snapshot/s",
+        "/mnt/snapshots/t",
+    ):
+        assert token in kept
+    assert omitted not in kept
+
+
 class WebuiBackendTest(unittest.TestCase):
     """HITL console backend: registry read-models, lifecycle guards, API routes.
 

@@ -519,6 +519,8 @@ class AgentSessionRunner:
                 },
             )
             if not response.tool_calls:
+                if self._yield_for_pending_explore(time_budget):
+                    continue
                 nudge: dict[str, object] = {
                     "observation": "no_tool_call",
                     "retry_hint": "Use an injected tool to advance the session; text alone does not finish it.",
@@ -1176,6 +1178,41 @@ class AgentSessionRunner:
             )
             self._remember_observation("explore", record)
         return messages, explore_totals
+
+    def _uncollected_explore_jobs(self) -> list[_ExploreJob]:
+        return [job for job in self._explore_jobs if job.record is None]
+
+    def _yield_for_pending_explore(self, time_budget: InferenceTimeBudget) -> bool:
+        """Skip no_tool_call when an explore is still running; wait for progress."""
+        uncollected = self._uncollected_explore_jobs()
+        if not uncollected:
+            return False
+        if not any(job.future.done() for job in uncollected):
+            self._wait_first_pending_explore(time_budget)
+        return True
+
+    def _wait_first_pending_explore(self, time_budget: InferenceTimeBudget) -> None:
+        completed = threading.Event()
+
+        def _on_done(_future: Future) -> None:
+            completed.set()
+
+        pending = [
+            job.future
+            for job in self._uncollected_explore_jobs()
+            if not job.future.done()
+        ]
+        if not pending:
+            return
+        for future in pending:
+            future.add_done_callback(_on_done)
+            if future.done():
+                return
+        while not completed.is_set() and not self._cancelled.is_set():
+            remaining = time_budget.remaining()
+            if remaining <= 0:
+                return
+            completed.wait(timeout=min(0.05, remaining))
 
     def _wait_explore_jobs(
         self, timeout: float = EXPLORE_TEARDOWN_WAIT_SECONDS

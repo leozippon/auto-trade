@@ -203,14 +203,16 @@ def project_trace_blocks(events: object) -> list[dict[str, object]]:
         output = _agent_output_text(event)
         if output is not None:
             blocks.extend(interval.flush(todo_state))
-            blocks.append(
-                {
-                    "kind": "agent_output",
-                    "ts": _event_ts(event),
-                    "text": _clip(output, _BLOCK_TEXT_CHARS),
-                    "reasoning_chars": _reasoning_chars(event),
-                }
-            )
+            block: dict[str, object] = {
+                "kind": "agent_output",
+                "ts": _event_ts(event),
+                "text": _clip(output, _BLOCK_TEXT_CHARS),
+                "reasoning_chars": _reasoning_chars(event),
+            }
+            model = _event_model(event)
+            if model:
+                block["model"] = model
+            blocks.append(block)
             continue
         task_id = _explore_event_task_id(event)
         if task_id is not None:
@@ -645,9 +647,9 @@ def _absorb_subagent_text(state: _SubagentState, event: dict[str, object]) -> No
     role = event.get("role")
     if isinstance(role, str) and role.strip():
         state.role = role.strip()
-    model = event.get("model")
-    if isinstance(model, str) and model.strip():
-        state.model = model.strip()
+    model = _event_model(event)
+    if model:
+        state.model = model
     thinking = event.get("thinking")
     if isinstance(thinking, str) and thinking.strip():
         state.thinking = thinking.strip()
@@ -719,6 +721,11 @@ def _agent_output_text(event: dict[str, object]) -> str | None:
         if isinstance(preview, str) and preview.strip():
             return preview.strip()
     return None
+
+
+def _event_model(event: dict[str, object]) -> str:
+    model = event.get("model")
+    return model.strip() if isinstance(model, str) and model.strip() else ""
 
 
 def _reasoning_chars(event: dict[str, object]) -> int:
