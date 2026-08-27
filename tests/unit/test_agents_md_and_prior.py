@@ -55,18 +55,17 @@ def test_root_agents_md_recommends_first_level_subagents() -> None:
     text = Path(__file__).resolve().parents[2].joinpath("AGENTS.md").read_text(
         encoding="utf-8"
     )
-    assert "Main agents should use a first-level sub-agent" in text
-    assert "a bounded task may proceed directly" in text
+    assert "Unless the task is very simple, start multi-agent collaboration" in text
     assert "Every main-agent task must start" not in text
     assert "`auditor`" in text
     assert "`developer`" in text
     assert "`Explore`" in text
     assert "`general-purpose`" in text
     assert "`explore` is optional and limited to one level" in text
-    assert "sub-agents cannot nest" in text
+    assert "Sub-agents cannot nest" in text
     assert "Keep the existing PRIOR" in text
-    assert "equivalent Chinese role matrix" in text
-    assert "do not inject this English subsection" in text
+    assert "Chinese rendering of the host Multi-Agent" in text
+    assert "This English AutoTrade subsection is not injected" in text
     assert "inputs/skills_index.json" in text
     assert "skills/<kebab-name>/SKILL.md" in text
     assert "Writable roles should put durable, transferable knowledge" in text

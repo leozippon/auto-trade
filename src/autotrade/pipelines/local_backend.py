@@ -928,6 +928,8 @@ class LLMFoldDeveloper:
                 ReadFileTool(search_roots),
                 GrepTool(search_roots),
                 GlobTool(search_roots),
+                WriteFileTool(safe),
+                EditFileTool(safe),
                 SandboxShellTool(safe, command_runner),
                 StrategyValidationTool(safe),
                 TodoTool(safe),

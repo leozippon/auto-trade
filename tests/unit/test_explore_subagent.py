@@ -702,7 +702,8 @@ def test_fold_and_explore_prompts_keep_roles_without_pyright_how_to() -> None:
     for role in ("`auditor`", "`developer`", "`general-purpose`", "`Explore`"):
         assert role in fold
         assert role in meta
-    assert "必须 `explore(role=\"developer\")`" in fold
+    assert "除非任务非常简单" in fold
+    assert "`write_file`" in fold
     assert "`finish_fold`" in fold
     assert "`finish_meta`" in meta
     assert "通常优先" not in fold
@@ -785,8 +786,8 @@ def test_session_config_has_no_required_explore_role_gate() -> None:
 def test_role_tool_visibility_hides_writes_from_audits(tmp_path: Path) -> None:
     from autotrade.agent.runner import _FOLD_TOOLS
 
-    assert "write_file" not in _FOLD_TOOLS
-    assert "edit_file" not in _FOLD_TOOLS
+    assert "write_file" in _FOLD_TOOLS
+    assert "edit_file" in _FOLD_TOOLS
     workspace = tmp_path / "agent"
     workspace.mkdir()
     (workspace / "output").mkdir()

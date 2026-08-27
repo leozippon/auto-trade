@@ -61,7 +61,7 @@ free -h
 
 *If your task prompt identifies you as a sub-agent, ignore the remaining rules in this section and do not spawn sub-agents of your own.*
 
-*Main agents should use a first-level sub-agent when independent review or implementation would materially help; a bounded task may proceed directly when delegation adds little value.*
+*Unless the task is very simple, start multi-agent collaboration.*
 
 - Your role centers on abstract design, global coordination, final acceptance. Direct, exhaustive reading and modification are required only when necessary.
 - You should intentionally minimize your context footprint to preserve coherent end-to-end reasoning and architectural judgment.
@@ -82,17 +82,17 @@ free -h
 
 ### AutoTrade Fold and Meta sessions
 
-This subsection is the host-facing AutoTrade contract. Fold and Meta system prompts render an equivalent Chinese role matrix; they do not inject this English subsection or the surrounding host cooperation rules.
+This subsection is the host-facing AutoTrade contract. Fold and Meta system prompts include a Chinese rendering of the host Multi-Agent, Development Principles, and Operational Guardrails sections, plus a Chinese role matrix. This English AutoTrade subsection is not injected.
 
 | Actor | Strategy or models | PRIOR | Shared skills | Official backtest and finish |
 | --- | --- | --- | --- | --- |
-| Fold parent | No writes; designs, coordinates, validates, accepts | Read-only | May write | Yes |
+| Fold parent | May write; designs, implements, coordinates, accepts | Read-only | May write | Yes |
 | Fold `developer` / `general-purpose` | May write | No | May write | No |
 | Fold `auditor` / `Explore` | Read-only | No | Read-only | No |
 | Meta parent | Optional regularization | Sole writer | May write | No backtest; may finish |
 | Any Meta sub-role | Read-only proposals | No | Read-only | No |
 
-- `explore` is optional and limited to one level. Parents may delegate any bounded discovery, audit, implementation, or cross-domain task that fits the matrix; sub-agents cannot nest, run official backtests, finish a session, change PRIOR, or accept their own work. The parent accepts. A Fold parent must not use shell to modify strategy artifacts.
+- `explore` is optional and limited to one level. Unless the task is very simple, the parent should delegate. Sub-agents cannot nest, run official backtests, finish a session, change PRIOR, or accept their own work. The parent accepts. A Fold parent must not use shell to modify strategy artifacts.
 - Every Fold and Meta session starts from `inputs/skills_index.json`, then discovers the needed skill bodies, PIT-visible data, unit references, artifacts, and how-tos through its mounted inputs and delegated exploration. Writable roles should put durable, transferable knowledge in `skills/<kebab-name>/SKILL.md` rather than in prompts or PRIOR. Skill scripts never run automatically, and skills never enter strategy, revision, frozen, Test, or Held-out artifacts.
 - PRIOR is Meta-owned and Fold-readable. It contains concise strategy direction, orchestration, and path references to skills; it must not duplicate skill bodies, catalogs, how-tos, or raw traces. Keep the existing PRIOR when there is no valid process improvement. The first version must be non-empty and every version stays within the enforced size, calendar, Test, and Held-out leak rules.
 - PIT `available_at`, Test/Held-out isolation, the `generate_orders(context)` JSON ABI, write boundaries, finish gates, and opaque Agent-visible references remain fail-closed. Historical minute or auction records are evidence and exact-price sources, not a strategy clock. Never fabricate tool, validation, or completion results.

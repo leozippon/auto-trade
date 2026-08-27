@@ -198,7 +198,7 @@ def test_subagent_trace_card_shows_model_thinking_and_context() -> None:
     assert "继承上下文" in source
     assert "独立上下文" in source
     assert "orderTraceBlocks" in script
-    assert "docked" in source or "docked" in script
+    assert "trace-subagent-dock" in script
 
 
 def test_stats_chips_show_subagent_near_llm_only_when_positive() -> None:

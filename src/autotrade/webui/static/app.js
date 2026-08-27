@@ -2998,14 +2998,16 @@ function directivePanel(detail, session, waiting) {
         { class: "hint warn" },
         "指令会注入系统提示词并记入账本。已完成 Fold 的 Test 只由系统向 Meta 投影 compact 指标；请勿人工写入 Test/Held-out 明细或具体日历日期，以免绕过受控反馈边界。",
       ),
-      (detail.control || {}).mode === "auto"
-        ? el(
-            "div",
-            { class: "hint" },
-            "自动模式不会等待批准。点「保存指令」才会写入本会话；须在该会话启动前保存。",
-          )
-        : null,
     );
+    if ((detail.control || {}).mode === "auto") {
+      panel.append(
+        el(
+          "div",
+          { class: "hint" },
+          "自动模式不会等待批准。点「保存指令」才会写入本会话；须在该会话启动前保存。",
+        ),
+      );
+    }
   }
   const buttons = el("div", { class: "control-bar section-gap" });
   const send = (payload, note) =>
@@ -4244,19 +4246,22 @@ function renderTraceBlocks(box, blocks, { truncated, eof, previous, detail } = {
     );
   }
   const ordered = orderTraceBlocks(blocks);
-  const appendNode = (block, index, docked) => {
+  const appendNode = (host, block, index) => {
     const node = traceBlockNode(block, index, detail);
-    if (docked) node.classList.add("docked");
     for (const details of node.querySelectorAll("details[data-key]")) {
       if (open.has(details.dataset.key)) details.open = true;
     }
-    fragment.append(node);
+    host.append(node);
   };
-  ordered.rest.forEach((block, index) => appendNode(block, index, false));
+  ordered.rest.forEach((block, index) => appendNode(fragment, block, index));
   if (eof) fragment.append(el("div", { class: "hint" }, "—— trace 结束 ——"));
-  ordered.running.forEach((block, index) =>
-    appendNode(block, ordered.rest.length + index, true),
-  );
+  if (ordered.running.length) {
+    const dock = el("div", { class: "trace-subagent-dock" });
+    ordered.running.forEach((block, index) =>
+      appendNode(dock, block, ordered.rest.length + index),
+    );
+    fragment.append(dock);
+  }
   box.replaceChildren(fragment);
   return serialized;
 }

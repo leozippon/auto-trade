@@ -124,6 +124,8 @@ _FOLD_TOOLS = frozenset(
         "step_rollback",
         "todo",
         "validate_strategy",
+        "write_file",
+        "edit_file",
         "write_skill",
         "delete_skill",
     }
@@ -648,8 +650,8 @@ class AgentSessionRunner:
         if self.explore is not None:
             roles = list(EXPLORE_ROLES)
             description = (
-                "委托一层子代理。Fold 父没有 write_file/edit_file，写策略必须选 "
-                "developer 或 general-purpose；auditor 与 Explore 只读。"
+                "委托一层子代理。任务非简单时应用来压缩主上下文。"
+                "写策略可选 developer 或 general-purpose；auditor 与 Explore 只读。"
                 "子代理不能嵌套、正式回测、结束或自行验收。"
             )
             tools.append(

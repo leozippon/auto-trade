@@ -1151,10 +1151,15 @@ textarea.directive.inject-input {
 .trace-block .type.subagent.error {
  color: var(--bad);
 }
-.trace-block.subagent.docked {
+.trace-subagent-dock {
  position: sticky;
  bottom: 0;
  z-index: 3;
+ display: flex;
+ flex-direction: column;
+ gap: 0.45rem;
+ padding-top: 0.35rem;
+ background: var(--bg);
  box-shadow: 0 -6px 16px color-mix(in srgb, var(--bg) 70%, transparent);
 }
 .trace-todo-list {
