@@ -7,7 +7,7 @@ import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from autotrade.agent.explore import ExploreSubAgentEngine
+from autotrade.agent.subagent import SubAgentEngine
 from autotrade.agent.runner import (
     AgentSessionConfig,
     AgentSessionRunner,
@@ -332,25 +332,25 @@ def test_after_parallel_readonly_applies_before_next_llm(tmp_path: Path) -> None
     assert user_events[0]["safe_point"] == INBOX_SAFE_AFTER_PARALLEL_READONLY
 
 
-def test_explore_does_not_consume_inbox_until_parent_returns(tmp_path: Path) -> None:
+def test_subagent_does_not_consume_inbox_until_parent_returns(tmp_path: Path) -> None:
     finish, node_id = _finish_tool(tmp_path)
     inbox = FakeInbox()
     shell = RecordingTool("shell")
 
-    class ExploreLLM(ScriptedLLM):
+    class SubAgentLLM(ScriptedLLM):
         def complete(self, messages, **kwargs):
             inbox.push(FakeNotice("from_child", "子代理期间到达"))
             return super().complete(messages, **kwargs)
 
-    explore_llm = ExploreLLM([ProviderResponse(content="探查完成")])
+    subagent_llm = SubAgentLLM([ProviderResponse(content="探查完成")])
     parent_llm = ScriptedLLM(
         [
             ProviderResponse(
                 tool_calls=(
                     ToolCall(
                         "e",
-                        "explore",
-                        {"role": "auditor", "task": "inspect workspace"},
+                        "agent",
+                        {"agent": "auditor", "task": "inspect workspace"},
                     ),
                 )
             ),
@@ -364,12 +364,12 @@ def test_explore_does_not_consume_inbox_until_parent_returns(tmp_path: Path) -> 
         tools=ToolRegistry([finish]),
         system_prompt="daily JSON only",
         config=AgentSessionConfig(max_llm_calls=3),
-        explore=ExploreSubAgentEngine(llm=explore_llm, tools=ToolRegistry([shell])),
+        subagent=SubAgentEngine(llm=subagent_llm, tools=ToolRegistry([shell])),
         inbox=inbox,
     )
     assert runner.run("delegate then finish").status == "finished"
-    explore_seen = _user_texts(explore_llm.calls[0]["messages"])
-    assert all("子代理期间到达" not in text for text in explore_seen)
+    subagent_seen = _user_texts(subagent_llm.calls[0]["messages"])
+    assert all("子代理期间到达" not in text for text in subagent_seen)
     assert "子代理期间到达" in _user_texts(parent_llm.calls[1]["messages"])
     assert inbox.consumed == ["from_child"]
 

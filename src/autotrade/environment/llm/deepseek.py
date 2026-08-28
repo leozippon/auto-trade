@@ -640,7 +640,7 @@ class OpenAICompatibleProxy:
             return
         try:
             _ensure_log_parent(path)
-            # Within one process every caller (Runner, NL/explore host service)
+            # Within one process every caller (Runner, NL/sub-agent host service)
             # drives the provider serially, so per-pid appends never interleave.
             with path.open("a", encoding="utf-8") as handle:
                 safe_record = _redact_audit_details(

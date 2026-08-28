@@ -10,7 +10,7 @@ from autotrade.agent import (
     AgentSessionRunner,
     ContextCompactionConfig,
     ContextCompactor,
-    ExploreSubAgentEngine,
+    SubAgentEngine,
 )
 from autotrade.agent.experiment_facts import build_experiment_facts
 from autotrade.agent.prompts import (
@@ -106,7 +106,7 @@ def test_compactor_replaces_old_messages_and_keeps_recent_tool_turns():
     llm = ScriptedLLM(
         [
             ProviderResponse(
-                content=json.dumps({"goal": "continue", "next_actions": ["validate"]})
+                content="## 目标\ncontinue\n\n## 下一步\n- finish"
             )
         ]
     )
@@ -130,7 +130,7 @@ def test_compactor_replaces_old_messages_and_keeps_recent_tool_turns():
 
 def test_compactor_bounds_one_huge_recent_tool_result_before_local_request():
     llm = ScriptedLLM(
-        [ProviderResponse(content=json.dumps({"goal": "continue", "next_steps": []}))],
+        [ProviderResponse(content="## 目标\ncontinue\n\n## 下一步\n- finish")],
         context_window_tokens=3_000,
     )
     compactor = ContextCompactor(
@@ -158,8 +158,9 @@ def test_compactor_bounds_one_huge_recent_tool_result_before_local_request():
     assert result is not None and result.event["status"] == "ok"
     assert result.event["request_context_edit"]["summarized_tool_results"] == 1
     request = llm.calls[0]["messages"]
-    compact_input = json.loads(request[1].content or "{}")
-    recent = compact_input["messages_since_previous_summary"]
+    body = request[1].content or ""
+    # The compactor request is Markdown; the transcript rides as a JSON block.
+    recent = json.loads(body.split("## 此后的新消息（JSON 记录）\n", 1)[1])
     summarized_record = next(record for record in recent if record["role"] == "tool")
     tool_summary = json.loads(summarized_record["content"])
     assert tool_summary["observation"] == "context_tool_result_summary"
@@ -442,10 +443,10 @@ def test_fold_session_triggers_semantic_compact_on_threshold(tmp_path: Path):
     compact_llm = ScriptedLLM(
         [
             ProviderResponse(
-                content=json.dumps({"goal": "continue", "next_steps": ["finish"]})
+                content="## 目标\ncontinue\n\n## 下一步\n- finish"
             ),
             ProviderResponse(
-                content=json.dumps({"goal": "finish", "next_steps": ["finish"]})
+                content="## 目标\nfinish\n\n## 下一步\n- finish"
             ),
         ]
     )
@@ -564,15 +565,15 @@ def test_terminal_tool_cancels_later_mutation_in_same_turn(tmp_path: Path):
     assert not (tmp_path / "notes.md").exists()
 
 
-def test_explore_accepts_write_file_tool(tmp_path: Path):
-    engine = ExploreSubAgentEngine(
+def test_subagent_accepts_write_file_tool(tmp_path: Path):
+    engine = SubAgentEngine(
         llm=ScriptedLLM([]),
         tools=ToolRegistry([WriteFileTool(SafeWorkspace(tmp_path))]),
     )
     assert {spec.name for spec in engine.tools.specs()} == {"write_file"}
 
 
-def test_explore_dispatches_full_shell_commands():
+def test_subagent_dispatches_full_shell_commands():
     shell = DeclaredReadOnlyShell()
     llm = ScriptedLLM(
         [
@@ -586,7 +587,7 @@ def test_explore_dispatches_full_shell_commands():
             ProviderResponse(content="ran full shell"),
         ]
     )
-    result = ExploreSubAgentEngine(
+    result = SubAgentEngine(
         llm=llm,
         tools=ToolRegistry([shell]),
     ).run("inspect", role="developer")
@@ -801,7 +802,7 @@ def _all_registrable_tool_names() -> set[str]:
     import tempfile
 
     import autotrade.environment.tools as tools_pkg
-    from autotrade.agent.explore import ExploreTool
+    from autotrade.agent.subagent import AgentTool
     from autotrade.environment.nl.engine import TEXT_RETRIEVE_TOOL
     from autotrade.environment.tools import SafeWorkspace, SearchRoots
     from autotrade.environment.tools.search import GlobTool, GrepTool, ReadFileTool
@@ -811,7 +812,7 @@ def _all_registrable_tool_names() -> set[str]:
     with tempfile.TemporaryDirectory() as tmp:
         roots = SearchRoots(SafeWorkspace(Path(tmp)))
         instances = [GlobTool(roots), GrepTool(roots), ReadFileTool(roots)]
-    candidates = [*instances, ExploreTool]
+    candidates = [*instances, AgentTool]
     candidates.extend(getattr(tools_pkg, name, None) for name in dir(tools_pkg))
     for candidate in candidates:
         spec = getattr(candidate, "spec", None)
@@ -931,3 +932,51 @@ def test_compaction_trigger_counts_the_provider_tool_schemas():
     assert without_tools is False and reason["skip_reason"] == "below_token_threshold"
     assert with_tools is True
     assert reason_with["estimated_tokens"] > reason["estimated_tokens"]
+
+
+def test_compactor_keeps_markdown_summary_and_files_trail_across_compactions():
+    llm = ScriptedLLM(
+        [
+            ProviderResponse(content="<think>plan</think>## 目标\nfirst\n\n## 下一步\n- more"),
+            ProviderResponse(content="## 目标\nsecond\n\n## 下一步\n- finish"),
+            ProviderResponse(content="   "),
+        ]
+    )
+    compactor = ContextCompactor(
+        llm, ContextCompactionConfig(token_threshold=1, min_messages=4, keep_recent_messages=1)
+    )
+    messages = [
+        ChatMessage("system", "s"),
+        ChatMessage("user", "go"),
+        ChatMessage(
+            "assistant", None, (ToolCall("r1", "read_file", {"root": "snapshot", "path": "a.parquet"}),)
+        ),
+        ChatMessage("tool", "{}", tool_call_id="r1"),
+        ChatMessage("assistant", None, (ToolCall("w1", "write_file", {"path": "output/main.py", "content": "x"}),)),
+        ChatMessage("tool", "{}", tool_call_id="w1"),
+        ChatMessage("user", "next"),
+    ]
+    first = compactor.compact(messages)
+    assert first is not None and first.event["status"] == "ok"
+    envelope = json.loads(first.messages[1].content or "{}")
+    assert envelope["summary"].startswith("## 目标\nfirst")
+    assert envelope["files"] == {"read": ["snapshot:a.parquet"], "modified": ["output/main.py"]}
+    # The compactor request carried the previous summary as Markdown, not JSON.
+    second_input = list(first.messages) + [
+        ChatMessage("assistant", None, (ToolCall("r2", "grep", {"root": "workspace", "path": "inputs"}),)),
+        ChatMessage("tool", "{}", tool_call_id="r2"),
+        ChatMessage("user", "again"),
+        ChatMessage("user", "and again"),
+    ]
+    second = compactor.compact(second_input)
+    assert second is not None and second.event["status"] == "ok"
+    request = llm.calls[1]["messages"][1].content
+    assert "## 上一份摘要" in request and "## 目标\nfirst" in request
+    envelope = json.loads(second.messages[1].content or "{}")
+    assert envelope["files"]["read"] == ["snapshot:a.parquet", "workspace:inputs"]
+    assert len(second.messages) == 3
+    # An empty reply is one failed attempt: the history is kept untouched.
+    third = compactor.compact(list(second.messages) + [ChatMessage("user", f"m{i}") for i in range(4)])
+    assert third is not None and third.event["status"] == "error"
+    assert "empty" in third.event["error"]
+    assert compactor.compaction_count == 2

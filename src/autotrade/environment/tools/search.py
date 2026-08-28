@@ -66,7 +66,8 @@ GREP_OUTPUT_MODES = ("content", "files", "count")
 # sandbox layout when one is available.
 _LAYOUT_ROOTS = {
     "agent": "agent",
-    "snapshot": "snapshot",
+    # The decision view bound into the container as /mnt/snapshot.
+    "snapshot": "current_snapshot",
     "train": "train",
     "valid": "valid",
     "artifacts": "artifacts",

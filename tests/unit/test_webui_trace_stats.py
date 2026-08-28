@@ -29,36 +29,36 @@ def _write_trace(path: Path, events: list[dict[str, object]]) -> Path:
     return path
 
 
-def test_trace_stats_counts_unique_explore_tasks_not_calls(tmp_path: Path) -> None:
+def test_trace_stats_counts_unique_subagent_tasks_not_calls(tmp_path: Path) -> None:
     path = _write_trace(
         tmp_path / "run.jsonl",
         [
             {
-                "event_type": "explore_task_started",
-                "task_id": "explore_a",
+                "event_type": "subagent_task_started",
+                "task_id": "agent_a",
                 "parent_call_id": "call_1",
             },
             {
-                "event_type": "explore_task",
-                "task_id": "explore_a",
+                "event_type": "subagent_task",
+                "task_id": "agent_a",
                 "status": "started",
             },
-            {"event_type": "explore_llm", "task_id": "explore_a"},
-            {"event_type": "explore_tool", "task_id": "explore_a"},
-            {"event_type": "explore", "task_id": "explore_a"},
-            {"event_type": "explore_task", "task_id": "explore_b", "status": "started"},
-            {"event_type": "explore_llm", "task_id": "explore_b"},
+            {"event_type": "subagent_llm", "task_id": "agent_a"},
+            {"event_type": "subagent_tool", "task_id": "agent_a"},
+            {"event_type": "subagent", "task_id": "agent_a"},
+            {"event_type": "subagent_task", "task_id": "agent_b", "status": "started"},
+            {"event_type": "subagent_llm", "task_id": "agent_b"},
             {
                 "event_type": "llm_call",
-                "task_id": "explore_a",
+                "task_id": "agent_a",
                 "usage": {
                     "total_tokens": 9,
                     "prompt_tokens": 6,
                     "completion_tokens": 3,
                 },
             },
-            {"event_type": "tool_call", "tool": "explore", "task_id": "explore_ignored"},
-            {"event_type": "session_start", "task_id": "not_explore"},
+            {"event_type": "tool_call", "tool": "agent", "task_id": "agent_ignored"},
+            {"event_type": "session_start", "task_id": "not_agent"},
         ],
     )
     stats = trace_stats(path)
@@ -66,7 +66,7 @@ def test_trace_stats_counts_unique_explore_tasks_not_calls(tmp_path: Path) -> No
     assert isinstance(counts, dict)
     assert stats["subagent_tasks"] == 2
     assert counts["llm_call"] == 1
-    assert stats["tool_counts"] == {"explore": 1}
+    assert stats["tool_counts"] == {"agent": 1}
     assert stats["llm_total_tokens"] == 9
     assert stats["llm_prompt_tokens"] == 6
     assert stats["llm_completion_tokens"] == 3
@@ -80,28 +80,28 @@ def test_trace_stats_old_trace_without_start_still_counts_unique_task(
     path = _write_trace(
         tmp_path / "old.jsonl",
         [
-            {"event_type": "explore_llm", "task_id": "explore_old"},
-            {"event_type": "explore_tool", "task_id": "explore_old"},
+            {"event_type": "subagent_llm", "task_id": "agent_old"},
+            {"event_type": "subagent_tool", "task_id": "agent_old"},
             {
-                "event_type": "explore",
-                "task_id": "explore_old",
+                "event_type": "subagent",
+                "task_id": "agent_old",
                 "task": "do not parse this as a task id",
             },
-            {"event_type": "explore_llm", "task_id": "  "},
-            {"event_type": "explore_task_started", "task": "missing id"},
-            {"event_type": "explore", "task_id": 12},
+            {"event_type": "subagent_llm", "task_id": "  "},
+            {"event_type": "subagent_task_started", "task": "missing id"},
+            {"event_type": "subagent", "task_id": 12},
         ],
     )
     assert trace_stats(path)["subagent_tasks"] == 1
 
 
-def test_trace_stats_ignores_non_explore_events(tmp_path: Path) -> None:
+def test_trace_stats_ignores_non_subagent_events(tmp_path: Path) -> None:
     path = _write_trace(
         tmp_path / "plain.jsonl",
         [
-            {"event_type": "llm_call", "task_id": "explore_fake"},
-            {"event_type": "tool_call", "tool": "read_file", "task_id": "explore_fake"},
-            {"event_type": "context_compaction", "task_id": "explore_fake"},
+            {"event_type": "llm_call", "task_id": "agent_fake"},
+            {"event_type": "tool_call", "tool": "read_file", "task_id": "agent_fake"},
+            {"event_type": "context_compaction", "task_id": "agent_fake"},
         ],
     )
     stats = trace_stats(path)
@@ -114,14 +114,14 @@ def test_trace_stats_ignores_non_explore_events(tmp_path: Path) -> None:
 
 def test_trace_stats_incrementally_dedups_appended_events(tmp_path: Path) -> None:
     path = tmp_path / "live.jsonl"
-    _write_trace(path, [{"event_type": "explore_task_started", "task_id": "explore_a"}])
+    _write_trace(path, [{"event_type": "subagent_task_started", "task_id": "agent_a"}])
     assert trace_stats(path)["subagent_tasks"] == 1
     with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps({"event_type": "explore_llm", "task_id": "explore_a"}) + "\n")
-        handle.write(json.dumps({"event_type": "explore", "task_id": "explore_a"}) + "\n")
+        handle.write(json.dumps({"event_type": "subagent_llm", "task_id": "agent_a"}) + "\n")
+        handle.write(json.dumps({"event_type": "subagent", "task_id": "agent_a"}) + "\n")
     assert trace_stats(path)["subagent_tasks"] == 1
     with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps({"event_type": "explore_tool", "task_id": "explore_b"}) + "\n")
+        handle.write(json.dumps({"event_type": "subagent_tool", "task_id": "agent_b"}) + "\n")
     assert trace_stats(path)["subagent_tasks"] == 2
 
 
@@ -181,12 +181,12 @@ def test_trace_stats_recomputes_when_cached_summary_lacks_subagent_field(
 ) -> None:
     path = _write_trace(
         tmp_path / "legacy_cache.jsonl",
-        [{"event_type": "explore_task_started", "task_id": "explore_a"}],
+        [{"event_type": "subagent_task_started", "task_id": "agent_a"}],
     )
     key = str(path.resolve())
     traces._STATS_CACHE[key] = {
         "offset": path.stat().st_size,
-        "counts": {"explore_task_started": 1},
+        "counts": {"subagent_task_started": 1},
         "tool_counts": {},
         "llm_total_tokens": 0,
         "prompt_tokens": 0,
@@ -197,12 +197,12 @@ def test_trace_stats_recomputes_when_cached_summary_lacks_subagent_field(
         counts = stats["counts"]
         assert isinstance(counts, dict)
         assert stats["subagent_tasks"] == 1
-        assert counts["explore_task_started"] == 1
+        assert counts["subagent_task_started"] == 1
     finally:
         traces._STATS_CACHE.pop(key, None)
 
 
-def test_trace_stats_last_main_llm_prompt_ignores_explore_calls(
+def test_trace_stats_last_main_llm_prompt_ignores_subagent_calls(
     tmp_path: Path,
 ) -> None:
     path = _write_trace(
@@ -210,7 +210,7 @@ def test_trace_stats_last_main_llm_prompt_ignores_explore_calls(
         [
             {
                 "event_type": "llm_call",
-                "task_id": "explore_a",
+                "task_id": "agent_a",
                 "usage": {"prompt_tokens": 6, "completion_tokens": 1, "total_tokens": 7},
             },
             {
@@ -464,40 +464,40 @@ def test_project_subagent_emits_one_card_per_task_id() -> None:
     blocks = project_trace_blocks(
         [
             {
-                "event_type": "explore_task_started",
-                "task_id": "explore_new",
+                "event_type": "subagent_task_started",
+                "task_id": "agent_new",
                 "description": "inspect schema",
             },
-            {"event_type": "explore_llm", "task_id": "explore_new"},
+            {"event_type": "subagent_llm", "task_id": "agent_new"},
             {
-                "event_type": "explore_tool_started",
-                "task_id": "explore_new",
+                "event_type": "subagent_tool_started",
+                "task_id": "agent_new",
                 "tool": "grep",
                 "tool_call_id": "g1",
             },
             {
-                "event_type": "explore_tool",
-                "task_id": "explore_new",
+                "event_type": "subagent_tool",
+                "task_id": "agent_new",
                 "tool": "grep",
                 "tool_call_id": "g1",
                 "result": {"ok": True},
             },
             {
-                "event_type": "explore_task",
-                "task_id": "explore_new",
+                "event_type": "subagent_task",
+                "task_id": "agent_new",
                 "status": "completed",
                 "summary": "has trade_date",
             },
-            {"event_type": "explore_llm", "task_id": "explore_old"},
+            {"event_type": "subagent_llm", "task_id": "agent_old"},
             {
-                "event_type": "explore_tool",
-                "task_id": "explore_old",
+                "event_type": "subagent_tool",
+                "task_id": "agent_old",
                 "tool": "read_file",
                 "result": {"ok": True},
             },
             {
-                "event_type": "explore",
-                "task_id": "explore_old",
+                "event_type": "subagent",
+                "task_id": "agent_old",
                 "summary": "old summary",
             },
         ]
@@ -505,8 +505,8 @@ def test_project_subagent_emits_one_card_per_task_id() -> None:
     sub = _subagent_blocks(blocks)
     # One card per task, updated in place: a finished report renders once.
     assert [(block["task_id"], block["phase"], block["status"]) for block in sub] == [
-        ("explore_new", "ended", "completed"),
-        ("explore_old", "ended", "completed"),
+        ("agent_new", "ended", "completed"),
+        ("agent_old", "ended", "completed"),
     ]
     new_ended, old_ended = sub
     assert new_ended["description"] == "inspect schema"
@@ -546,8 +546,8 @@ def test_project_agent_output_exposes_llm_call_model() -> None:
             {"event_type": "llm_call", "content": "done"},
             {"event_type": "llm_call", "content": "blank", "model": "  "},
             {
-                "event_type": "explore_task",
-                "task_id": "explore_a",
+                "event_type": "subagent_task",
+                "task_id": "agent_a",
                 "status": "started",
                 "role": "auditor",
                 "model": "child-model",
@@ -573,8 +573,8 @@ def test_project_subagent_exposes_model_thinking_and_inherit_context() -> None:
     blocks = project_trace_blocks(
         [
             {
-                "event_type": "explore_task",
-                "task_id": "explore_meta",
+                "event_type": "subagent_task",
+                "task_id": "agent_meta",
                 "status": "started",
                 "role": "auditor",
                 "model": "qwen-3.8-27b-fp8",
@@ -583,8 +583,8 @@ def test_project_subagent_exposes_model_thinking_and_inherit_context() -> None:
                 "description": "schema audit",
             },
             {
-                "event_type": "explore",
-                "task_id": "explore_meta",
+                "event_type": "subagent",
+                "task_id": "agent_meta",
                 "status": "completed",
                 "summary": "ok",
                 "role": "auditor",
@@ -607,7 +607,7 @@ def test_project_legacy_subagent_digest_is_ignored() -> None:
     blocks = project_trace_blocks(
         [
             {
-                "event_type": "explore",
+                "event_type": "subagent",
                 "task_id": "legacy",
                 "status": "completed",
                 "digest": "must not migrate",
@@ -619,43 +619,43 @@ def test_project_legacy_subagent_digest_is_ignored() -> None:
     assert "digest" not in ended
 
 
-def test_project_explore_internal_tools_stay_on_subagent_card() -> None:
+def test_project_subagent_internal_tools_stay_on_subagent_card() -> None:
     blocks = project_trace_blocks(
         [
             {"event_type": "llm_call", "content": "delegate"},
             {
                 "event_type": "tool_call_started",
-                "tool": "explore",
+                "tool": "agent",
                 "tool_call_id": "e1",
             },
-            {"event_type": "explore_task_started", "task_id": "explore_a"},
+            {"event_type": "subagent_task_started", "task_id": "agent_a"},
             {
-                "event_type": "explore_tool_started",
-                "task_id": "explore_a",
+                "event_type": "subagent_tool_started",
+                "task_id": "agent_a",
                 "tool": "grep",
                 "tool_call_id": "g1",
             },
             {
-                "event_type": "explore_tool",
-                "task_id": "explore_a",
+                "event_type": "subagent_tool",
+                "task_id": "agent_a",
                 "tool": "grep",
                 "tool_call_id": "g1",
                 "result": {"ok": True},
             },
             {
-                "event_type": "explore_tool",
-                "task_id": "explore_a",
+                "event_type": "subagent_tool",
+                "task_id": "agent_a",
                 "tool": "read_file",
                 "result": {"ok": True},
             },
             {
-                "event_type": "explore",
-                "task_id": "explore_a",
+                "event_type": "subagent",
+                "task_id": "agent_a",
                 "summary": "done",
             },
             {
                 "event_type": "tool_call",
-                "tool": "explore",
+                "tool": "agent",
                 "tool_call_id": "e1",
                 "result": {"ok": True},
             },
@@ -666,7 +666,7 @@ def test_project_explore_internal_tools_stay_on_subagent_card() -> None:
     assert len(groups) == 1
     assert groups[0]["count"] == 1
     assert groups[0]["ok"] == 1
-    assert [row["name"] for row in groups[0]["tools"]] == ["explore"]
+    assert [row["name"] for row in groups[0]["tools"]] == ["agent"]
     ended = next(
         block
         for block in _subagent_blocks(blocks)
@@ -676,12 +676,12 @@ def test_project_explore_internal_tools_stay_on_subagent_card() -> None:
     orphan = project_trace_blocks(
         [
             {
-                "event_type": "explore_tool",
-                "task_id": "explore_b",
+                "event_type": "subagent_tool",
+                "task_id": "agent_b",
                 "tool": "grep",
                 "result": {"ok": True},
             },
-            {"event_type": "explore", "task_id": "explore_b"},
+            {"event_type": "subagent", "task_id": "agent_b"},
         ]
     )
     assert all(block["kind"] != "tool_group" for block in orphan)
@@ -694,16 +694,16 @@ def test_project_explore_internal_tools_stay_on_subagent_card() -> None:
 def test_project_subagent_terminal_statuses() -> None:
     blocks = project_trace_blocks(
         [
-            {"event_type": "explore_task", "task_id": "ok", "status": "completed"},
+            {"event_type": "subagent_task", "task_id": "ok", "status": "completed"},
             {
-                "event_type": "explore_task",
+                "event_type": "subagent_task",
                 "task_id": "err",
                 "status": "error",
                 "error": "nope",
             },
-            {"event_type": "explore_task", "task_id": "to", "status": "timeout"},
+            {"event_type": "subagent_task", "task_id": "to", "status": "timeout"},
             {
-                "event_type": "explore_task",
+                "event_type": "subagent_task",
                 "task_id": "cx",
                 "status": "cancelled",
             },
@@ -767,7 +767,7 @@ def test_project_unknown_bad_payload_and_clips_long_text() -> None:
             },
             {"event_type": "user_message", "message": long_text},
             {
-                "event_type": "explore",
+                "event_type": "subagent",
                 "task_id": "t1",
                 "summary": long_subagent_summary,
                 "error": long_error,
@@ -884,16 +884,16 @@ def test_project_subagent_running_card_accumulates_progress() -> None:
     blocks = project_trace_blocks(
         [
             {
-                "event_type": "explore_task",
+                "event_type": "subagent_task",
                 "ts": "2026-08-27T10:00:00+00:00",
-                "task_id": "explore_live",
+                "task_id": "agent_live",
                 "status": "started",
                 "role": "general-purpose",
                 "description": "Value 因子研究",
             },
             {
-                "event_type": "explore_llm",
-                "task_id": "explore_live",
+                "event_type": "subagent_llm",
+                "task_id": "agent_live",
                 "round": 1,
                 "usage": {
                     "prompt_tokens": 1000,
@@ -902,20 +902,20 @@ def test_project_subagent_running_card_accumulates_progress() -> None:
                 },
             },
             {
-                "event_type": "explore_tool",
-                "task_id": "explore_live",
+                "event_type": "subagent_tool",
+                "task_id": "agent_live",
                 "tool": "grep",
                 "result": {"ok": True},
             },
             {
-                "event_type": "explore_tool_started",
-                "task_id": "explore_live",
+                "event_type": "subagent_tool_started",
+                "task_id": "agent_live",
                 "tool": "shell",
                 "tool_call_id": "s1",
             },
             {
-                "event_type": "explore_llm",
-                "task_id": "explore_live",
+                "event_type": "subagent_llm",
+                "task_id": "agent_live",
                 "round": 2,
                 "usage": {
                     "prompt_tokens": 2000,
@@ -946,15 +946,15 @@ def test_project_subagent_finished_card_prefers_terminal_totals() -> None:
     blocks = project_trace_blocks(
         [
             {
-                "event_type": "explore_task",
+                "event_type": "subagent_task",
                 "ts": "2026-08-27T10:00:00+00:00",
-                "task_id": "explore_done",
+                "task_id": "agent_done",
                 "status": "started",
                 "role": "Explore",
             },
             {
-                "event_type": "explore_llm",
-                "task_id": "explore_done",
+                "event_type": "subagent_llm",
+                "task_id": "agent_done",
                 "round": 1,
                 "usage": {
                     "prompt_tokens": 10,
@@ -963,9 +963,9 @@ def test_project_subagent_finished_card_prefers_terminal_totals() -> None:
                 },
             },
             {
-                "event_type": "explore",
+                "event_type": "subagent",
                 "ts": "2026-08-27T10:30:00+00:00",
-                "task_id": "explore_done",
+                "task_id": "agent_done",
                 "status": "completed",
                 "summary": "结论",
                 "rounds": 19,
@@ -993,8 +993,8 @@ def test_project_subagent_usage_total_falls_back_to_its_halves() -> None:
     blocks = project_trace_blocks(
         [
             {
-                "event_type": "explore_llm",
-                "task_id": "explore_half",
+                "event_type": "subagent_llm",
+                "task_id": "agent_half",
                 "usage": {"prompt_tokens": 40, "completion_tokens": 2},
             }
         ]
@@ -1022,9 +1022,9 @@ def test_trace_stats_separates_running_subagents_and_their_tokens(
                     "total_tokens": 550,
                 },
             },
-            {"event_type": "explore_task", "task_id": "done", "status": "started"},
+            {"event_type": "subagent_task", "task_id": "done", "status": "started"},
             {
-                "event_type": "explore_llm",
+                "event_type": "subagent_llm",
                 "task_id": "done",
                 "usage": {
                     "prompt_tokens": 10,
@@ -1033,7 +1033,7 @@ def test_trace_stats_separates_running_subagents_and_their_tokens(
                 },
             },
             {
-                "event_type": "explore",
+                "event_type": "subagent",
                 "task_id": "done",
                 "status": "completed",
                 "usage_totals": {
@@ -1042,9 +1042,9 @@ def test_trace_stats_separates_running_subagents_and_their_tokens(
                     "total_tokens": 990,
                 },
             },
-            {"event_type": "explore_task", "task_id": "live", "status": "started"},
+            {"event_type": "subagent_task", "task_id": "live", "status": "started"},
             {
-                "event_type": "explore_llm",
+                "event_type": "subagent_llm",
                 "task_id": "live",
                 "usage": {
                     "prompt_tokens": 100,
@@ -1071,9 +1071,9 @@ def test_trace_stats_closes_a_running_subagent_on_append(tmp_path: Path) -> None
     _write_trace(
         path,
         [
-            {"event_type": "explore_task", "task_id": "live", "status": "started"},
+            {"event_type": "subagent_task", "task_id": "live", "status": "started"},
             {
-                "event_type": "explore_llm",
+                "event_type": "subagent_llm",
                 "task_id": "live",
                 "usage": {
                     "prompt_tokens": 100,
@@ -1090,7 +1090,7 @@ def test_trace_stats_closes_a_running_subagent_on_append(tmp_path: Path) -> None
         handle.write(
             json.dumps(
                 {
-                    "event_type": "explore",
+                    "event_type": "subagent",
                     "task_id": "live",
                     "status": "completed",
                     "usage_totals": {

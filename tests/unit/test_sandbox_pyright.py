@@ -1,4 +1,4 @@
-"""Sandbox Pyright pin, config PIT roots, and Fold/Explore prompt contract."""
+"""Sandbox Pyright pin, config PIT roots, and Fold/sub-agent prompt contract."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import json
 import re
 from pathlib import Path
 
-from autotrade.agent.explore import EXPLORE_SYSTEM_PROMPT, META_EXPLORE_SYSTEM_PROMPT
+from autotrade.agent.subagent import SUBAGENT_SYSTEM_PROMPT, META_SUBAGENT_SYSTEM_PROMPT
 from autotrade.agent.prompts import build_system_prompt
 
 REPO = Path(__file__).resolve().parents[2]
@@ -72,12 +72,12 @@ def test_agent_prompts_leave_pyright_how_to_out_of_system_text() -> None:
     fold = build_system_prompt(mode="fold", experiment_facts={})
     meta = build_system_prompt(mode="meta", experiment_facts={})
     assert COMMAND not in fold
-    assert COMMAND not in EXPLORE_SYSTEM_PROMPT
+    assert COMMAND not in SUBAGENT_SYSTEM_PROMPT
     assert COMMAND not in meta
-    assert COMMAND not in META_EXPLORE_SYSTEM_PROMPT
+    assert COMMAND not in META_SUBAGENT_SYSTEM_PROMPT
     assert "pyright" not in fold
-    assert "pyright" not in EXPLORE_SYSTEM_PROMPT
+    assert "pyright" not in SUBAGENT_SYSTEM_PROMPT
     assert "pyright" not in meta
     assert "pi-lens" not in fold
-    assert "pi-lens" not in EXPLORE_SYSTEM_PROMPT
+    assert "pi-lens" not in SUBAGENT_SYSTEM_PROMPT
     assert "pi-lens" not in meta

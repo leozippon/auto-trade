@@ -1,7 +1,7 @@
 """Daily JSON strategy Agent sessions and prompt contracts."""
 
 from .compact import ContextCompactionConfig, ContextCompactor
-from .explore import ExploreSubAgentConfig, ExploreSubAgentEngine
+from .subagent import SubAgentConfig, SubAgentEngine
 from .prompts import (
     FOLD_SYSTEM_PROMPT,
     META_SYSTEM_PROMPT,
@@ -31,8 +31,8 @@ __all__ = [
     "AgentSessionRunner",
     "ContextCompactionConfig",
     "ContextCompactor",
-    "ExploreSubAgentConfig",
-    "ExploreSubAgentEngine",
+    "SubAgentConfig",
+    "SubAgentEngine",
     "MetaLearningAgent",
     "StrategyLoadError",
     "build_meta_learning_prompt",

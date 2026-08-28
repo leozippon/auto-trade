@@ -39,7 +39,7 @@ from .test_interactive_worker_local import (
     _FOLD_DELEGATION_ROLES,
     _NoShellRunner,
     _experiment,
-    _explore_then,
+    _agent_then,
 )
 
 TEST_LABEL = "2026Q1"
@@ -132,7 +132,7 @@ def fold_session(tmp_path_factory, provider_key):
     options = load_worker_options(experiment, repo_root=repo)
     llm = _SandboxCapturingLLM(
         [
-            *_explore_then(
+            *_agent_then(
                 ToolCall(
                     "prior",
                     "write_file",
@@ -140,7 +140,7 @@ def fold_session(tmp_path_factory, provider_key):
                 ),
                 ToolCall("finish_meta", "finish_meta", {}),
             ),
-            *_explore_then(
+            *_agent_then(
                 ToolCall("check", "modification_check", {}),
                 ToolCall("valid", "daily_backtest", {}),
                 ToolCall("finish", "finish_fold", {}),
@@ -367,7 +367,7 @@ def test_meta_with_existing_prior_can_finish_without_rewriting_it(tmp_path: Path
     learner = LLMMetaLearner(
         llm=ScriptedLLM(
             [
-                *_explore_then(
+                *_agent_then(
                     ToolCall("finish_meta", "finish_meta", {}), roles=()
                 )
             ]
@@ -408,7 +408,7 @@ def test_meta_installs_skills_without_exposing_the_host_source(tmp_path: Path):
     )
     learner = LLMMetaLearner(
         llm=ScriptedLLM(
-            [*_explore_then(ToolCall("finish_meta", "finish_meta", {}), roles=())]
+            [*_agent_then(ToolCall("finish_meta", "finish_meta", {}), roles=())]
         ),
         baseline_strategy=baseline,
         artifact_store=FilesystemArtifactStore(tmp_path / "artifacts"),
@@ -466,7 +466,7 @@ def test_meta_context_parent_artifact_id_is_an_opaque_strategy_ref(tmp_path: Pat
     (parent_output / "main.py").write_text(baseline.read_text(encoding="utf-8"), encoding="utf-8")
     llm = ScriptedLLM(
         [
-            *_explore_then(
+            *_agent_then(
                 ToolCall(
                     "prior",
                     "write_file",

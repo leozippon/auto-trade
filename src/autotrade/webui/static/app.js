@@ -3790,7 +3790,7 @@ function statsChipsRow(stats) {
       );
   }
   for (const [tool, count] of Object.entries(stats.tool_counts || {})) {
-    if (!labelled.has(tool) && tool !== "explore")
+    if (!labelled.has(tool) && tool !== "agent")
       chips.append(
         el(
           "span",

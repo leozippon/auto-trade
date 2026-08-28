@@ -25,7 +25,7 @@ from autotrade.pipelines.meta_inputs import (
     select_meta_review_folds,
     write_meta_agent_trace_sidecars,
 )
-from tests.unit.test_interactive_worker_local import _explore_then
+from tests.unit.test_interactive_worker_local import _agent_then
 
 
 def _as_map(value: object) -> dict[str, object]:
@@ -388,7 +388,7 @@ def test_llm_meta_publishes_raw_sidecar_before_context(
     learner = LLMMetaLearner(
         llm=ScriptedLLM(
             [
-                *_explore_then(
+                *_agent_then(
                     ToolCall(
                         "prior",
                         "write_file",

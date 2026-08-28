@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from autotrade.agent.compact import ContextCompactionConfig, ContextCompactor
-from autotrade.agent.explore import ExploreSubAgentEngine
+from autotrade.agent.subagent import SubAgentEngine
 from autotrade.agent.runner import AgentSessionConfig, AgentSessionRunner
 from autotrade.environment.artifacts import FilesystemArtifactStore
 from autotrade.environment.broker import BrokerProfile
@@ -327,7 +327,7 @@ def test_complete_node_enters_hard_finalization_without_compaction_or_research(
         ]
     )
     compact_scripted = ScriptedLLM(
-        [ProviderResponse(content='{"goal":"should not run"}')]
+        [ProviderResponse(content="## 目标\nshould not run")]
     )
     shared = SessionCallBudget(max_calls=6, time_budget=time_budget)
     main = SessionBudgetLLM(
@@ -408,7 +408,7 @@ def test_reserve_without_complete_node_keeps_research_and_compaction_available()
         ]
     )
     compact_scripted = ScriptedLLM(
-        [ProviderResponse(content='{"goal":"continue","next_steps":["research"]}')]
+        [ProviderResponse(content="## 目标\ncontinue\n\n## 下一步\n- research")]
     )
     shared = SessionCallBudget(max_calls=4, time_budget=time_budget)
     main = SessionBudgetLLM(
@@ -514,14 +514,14 @@ def test_all_session_components_hold_one_budget_and_expire_at_boundaries() -> No
     main = SessionBudgetLLM(
         ScriptedLLM([ProviderResponse(content="main")]), budget=calls
     )
-    explore = SessionBudgetLLM(
-        ScriptedLLM([ProviderResponse(content="explore")]), budget=calls
+    subagent = SessionBudgetLLM(
+        ScriptedLLM([ProviderResponse(content="agent")]), budget=calls
     )
     compact = SessionBudgetLLM(
         ScriptedLLM([ProviderResponse(content="compact")]), budget=calls
     )
 
-    assert main.budget is explore.budget is compact.budget is calls
+    assert main.budget is subagent.budget is compact.budget is calls
     assert calls.time_budget is time_budget
     with pytest.raises(ValueError, match="share one inference time budget"):
         AgentSessionRunner(
@@ -536,30 +536,30 @@ def test_all_session_components_hold_one_budget_and_expire_at_boundaries() -> No
     assert calls.calls == 0
 
 
-def test_runner_rejects_mismatched_explore_budget() -> None:
+def test_runner_rejects_mismatched_subagent_budget() -> None:
     clock = FakeClock()
     main_budget = InferenceTimeBudget(duration_seconds=5.0, clock=clock)
-    explore_budget = InferenceTimeBudget(duration_seconds=5.0, clock=clock)
+    subagent_budget = InferenceTimeBudget(duration_seconds=5.0, clock=clock)
     main = SessionBudgetLLM(
         ScriptedLLM([]),
         budget=SessionCallBudget(max_calls=2, time_budget=main_budget),
     )
-    explore_llm = SessionBudgetLLM(
+    subagent_llm = SessionBudgetLLM(
         ScriptedLLM([]),
-        budget=SessionCallBudget(max_calls=2, time_budget=explore_budget),
+        budget=SessionCallBudget(max_calls=2, time_budget=subagent_budget),
     )
-    explore = ExploreSubAgentEngine(
-        llm=explore_llm,
+    subagent = SubAgentEngine(
+        llm=subagent_llm,
         tools=ToolRegistry(),
-        time_budget=explore_budget,
+        time_budget=subagent_budget,
     )
 
-    with pytest.raises(ValueError, match="explore is bound to another budget"):
+    with pytest.raises(ValueError, match="subagent is bound to another budget"):
         AgentSessionRunner(
             llm=main,
             tools=ToolRegistry(),
             system_prompt="mismatch",
-            explore=explore,
+            subagent=subagent,
             time_budget=main_budget,
         )
 
@@ -653,7 +653,7 @@ def test_runner_rejects_mismatched_backtest_budget(tmp_path: Path) -> None:
         )
 
 
-def test_session_call_budget_role_quotas_scale_and_keep_explore_usable() -> None:
+def test_session_call_budget_role_quotas_scale_and_keep_subagent_usable() -> None:
     assert session_role_quotas(400) == (200, 50)
     assert session_role_quotas(2) == (1, 0)
     assert session_role_quotas(1) == (0, 0)
@@ -662,7 +662,7 @@ def test_session_call_budget_role_quotas_scale_and_keep_explore_usable() -> None
     budget = SessionCallBudget(
         max_calls=8, time_budget=InferenceTimeBudget(duration_seconds=10.0, clock=clock)
     )
-    assert budget.explore_cap == 4
+    assert budget.subagent_cap == 4
     assert budget.parent_reserve == 1
     compact = SessionBudgetLLM(
         ScriptedLLM([ProviderResponse(content="c")] * 8),
@@ -685,14 +685,14 @@ def test_session_call_budget_role_quotas_scale_and_keep_explore_usable() -> None
     small = SessionCallBudget(
         max_calls=2, time_budget=InferenceTimeBudget(duration_seconds=10.0, clock=clock)
     )
-    explore = SessionBudgetLLM(
+    subagent = SessionBudgetLLM(
         ScriptedLLM([ProviderResponse(content="e")] * 2),
         budget=small,
-        role="explore",
+        role="subagent",
     )
-    explore.complete([ChatMessage("user", "e")])
+    subagent.complete([ChatMessage("user", "e")])
     with pytest.raises(RuntimeError, match="budget exhausted"):
-        explore.complete([ChatMessage("user", "e")])
+        subagent.complete([ChatMessage("user", "e")])
     SessionBudgetLLM(
         ScriptedLLM([ProviderResponse(content="m")]),
         budget=small,
@@ -716,7 +716,7 @@ def test_session_call_budget_claims_are_serialized() -> None:
                 errors.append(str(exc))
 
     workers = [
-        threading.Thread(target=claim_many, args=("explore",)),
+        threading.Thread(target=claim_many, args=("subagent",)),
         threading.Thread(target=claim_many, args=("compact",)),
         threading.Thread(target=claim_many, args=("main",)),
     ]
@@ -725,6 +725,6 @@ def test_session_call_budget_claims_are_serialized() -> None:
     for worker in workers:
         worker.join()
     assert budget.calls == 20
-    assert budget.explore_calls <= budget.explore_cap
+    assert budget.subagent_calls <= budget.subagent_cap
     assert budget.main_calls >= 0
     assert len(errors) == 40

@@ -49,7 +49,7 @@ def build_sandbox(root: Path) -> tuple[SandboxPaths, SearchRoots, SafeWorkspace]
         paths.workspace,
         paths.agent_output,
         paths.model_artifacts,
-        paths.snapshot,
+        paths.current_snapshot,
         paths.train,
         paths.valid,
         paths.artifacts,
@@ -414,7 +414,7 @@ class StructuredSearchToolTest(unittest.TestCase):
         # and inherited artifacts without shelling out.
         with tempfile.TemporaryDirectory() as tmp:
             paths, roots, registry = self._tools(Path(tmp))
-            (paths.snapshot / "manifest.json").write_text('{"kind": "decision_input"}\n', encoding="utf-8")
+            (paths.current_snapshot / "manifest.json").write_text('{"kind": "decision_input"}\n', encoding="utf-8")
             (paths.parent_output / "main.py").write_text("# parent strategy\n", encoding="utf-8")
             (paths.results / "valid_000.json").write_text('{"total_return": 0.0}\n', encoding="utf-8")
             (paths.steps / "tree.txt").write_text("- epoch_001__fold_ref_ab__run_x__valid_000\n", encoding="utf-8")
@@ -507,7 +507,7 @@ class ArtifactIOToolTest(unittest.TestCase):
                 "write_file", {"path": "output/../../snapshot/x.py", "content": "x"}
             )
             self.assertFalse(escape.ok)
-            self.assertFalse((paths.snapshot / "x.py").exists())
+            self.assertFalse((paths.current_snapshot / "x.py").exists())
             readonly = registry.invoke("write_file", {"path": "output/README.md", "content": "x"})
             self.assertFalse(readonly.ok)
             self.assertEqual(readonly.value["error_type"], "readonly")

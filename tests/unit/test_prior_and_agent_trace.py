@@ -1,4 +1,4 @@
-"""AGENTS.md section injection and experiment-level PRIOR loop."""
+"""Experiment-level PRIOR loop and the Meta-visible agent trace projection."""
 
 from __future__ import annotations
 
@@ -7,7 +7,6 @@ from pathlib import Path
 
 import pytest
 
-from autotrade.agent.agents_md import AgentsMdError, load_required_agents_md_sections
 from autotrade.agent.prompts import build_system_prompt
 from autotrade.environment.tools import (
     FinishMetaTool,
@@ -34,112 +33,16 @@ from autotrade.pipelines.prior import ExperimentPriorStore, latest_prior_text
 from autotrade.pipelines.worker import _restore_prior_store
 
 
-def _agents_md(root: Path, *, missing: str | None = None) -> Path:
-    parts = [
-        "# Global Guidelines",
-        "## Rules for Multi-Agent Cooperation\nHOST_ONLY_COOPERATION",
-    ]
-    if missing != "AutoTrade Fold and Meta sessions":
-        parts.append(
-            "### AutoTrade Fold and Meta sessions\n"
-            "AUTO_ONLY_CONTRACT\n\n"
-            "| Actor | Strategy | PRIOR | Skills | Backtest/finish |\n"
-            "| --- | --- | --- | --- | --- |\n"
-            "| Fold parent | May write; designs, implements, coordinates, accepts | Read-only | May write | Yes |\n"
-            "| Meta parent | Optional regularization | Sole writer | May write | No backtest; may finish |\n\n"
-            "Start from inputs/skills_index.json and mounted evidence; reusable knowledge belongs in "
-            "skills/<kebab-name>/SKILL.md."
-        )
-    path = root / "AGENTS.md"
-    path.write_text("\n\n".join(parts) + "\n", encoding="utf-8")
-    return path
-
-
-def test_root_agents_md_recommends_first_level_subagents() -> None:
-    text = Path(__file__).resolve().parents[2].joinpath("AGENTS.md").read_text(
-        encoding="utf-8"
-    )
-    assert "Unless the task is very simple, start multi-agent collaboration" in text
-    assert "Every main-agent task must start" not in text
-    assert "`auditor`" in text
-    assert "`developer`" in text
-    assert "`Explore`" in text
-    assert "`general-purpose`" in text
-    assert "`explore` is optional and limited to one level" in text
-    assert "Sub-agents cannot nest" in text
-    assert "Keep the existing PRIOR" in text
-    assert "not injected" in text
-    assert "explore" in text and "background" in text
-    assert "presence-checked and not injected" in text
-    assert "May write; designs, implements, coordinates, accepts" in text
-    assert "A Fold parent must not use shell to modify strategy artifacts" in text
-    assert "inputs/skills_index.json" in text
-    assert "skills/<kebab-name>/SKILL.md" in text
-    assert "Writable roles should put durable, transferable knowledge" in text
-    for stale in (
-        "data_audit",
-        "strategy_audit",
-        "trace_audit",
-        "strategy_performance_audit",
-        "context_audit",
-    ):
-        assert stale not in text
-
-
-def test_required_agents_section_is_presence_checked_not_injected(tmp_path: Path) -> None:
-    path = _agents_md(tmp_path)
-    extracted = load_required_agents_md_sections(path)
-    fold = build_system_prompt(mode="fold", agents_md_path=path)
-    meta = build_system_prompt(mode="meta", agents_md_path=path)
-    assert "### AutoTrade Fold and Meta sessions" in extracted.text
-    assert "AUTO_ONLY_CONTRACT" in extracted.text
-    assert "HOST_ONLY_COOPERATION" not in extracted.text
-    for prompt in (fold, meta):
-        assert "### AutoTrade Fold and Meta sessions" not in prompt
-        assert "AUTO_ONLY_CONTRACT" not in prompt
-        assert "HOST_ONLY_COOPERATION" not in prompt
-        assert "# 多智能体协作" not in prompt
-        assert "# 操作护栏" not in prompt
-        assert "# 原则" in prompt
-        assert "# 角色与写权" in prompt
-        assert "explore_completed" in prompt
-        assert "Fold 父 Agent" in prompt
-        assert "可写；设计、实现、协调、验收" in prompt
-        assert "Meta 父 Agent" in prompt
-    assert "Meta 主协调者" in meta
-    assert "inputs/meta_context.json" in meta
-    assert "策略方向" in meta
-    assert "流程编排" in meta
-    assert "inputs/skills_index.json" in fold
-    assert "inputs/skills_index.json" in meta
-    assert "skills/<kebab-name>/SKILL.md" in fold
-    assert "skills/<kebab-name>/SKILL.md" in meta
-    assert extracted.text
-    assert tuple(extracted.__dataclass_fields__) == ("text",)
-
-
-def test_missing_agents_section_fails_explicitly(tmp_path: Path) -> None:
-    path = _agents_md(tmp_path, missing="AutoTrade Fold and Meta sessions")
-    with pytest.raises(AgentsMdError, match="AutoTrade Fold and Meta sessions"):
-        load_required_agents_md_sections(path)
-    with pytest.raises(AgentsMdError, match="AutoTrade Fold and Meta sessions"):
-        build_system_prompt(mode="fold", agents_md_path=path)
-    with pytest.raises(AgentsMdError, match="missing"):
-        load_required_agents_md_sections(tmp_path / "absent.md")
-
-
 def test_fold_system_prompt_injects_prior_full_text(tmp_path: Path) -> None:
-    path = _agents_md(tmp_path)
     prior = "先用 grep 定向，再抽样 parquet。\n不要并行委托。"
     prompt = build_system_prompt(
         mode="fold",
-        agents_md_path=path,
         prior_prompt=prior,
     )
     assert prior in prompt
     assert "权威 PRIOR 不在本 Fold 可写树中" in prompt
     assert "策略方向" in prompt
-    meta = build_system_prompt(mode="meta", agents_md_path=path)
+    meta = build_system_prompt(mode="meta")
     assert prior not in meta
     assert "工作区根的 `PRIOR.md`" in meta
 
@@ -453,31 +356,31 @@ def test_meta_fold_reviews_include_strategy_and_agent_trace_not_heldout(tmp_path
     trace.parent.mkdir()
     events = [
         {
-            "event_type": "explore_task",
-            "task_id": "explore_abc",
+            "event_type": "subagent_task",
+            "task_id": "agent_abc",
             "parent_call_id": "call_1",
             "role": "auditor",
             "task": "inspect daily schema",
             "status": "started",
         },
         {
-            "event_type": "explore_llm",
-            "task_id": "explore_abc",
+            "event_type": "subagent_llm",
+            "task_id": "agent_abc",
             "parent_call_id": "call_1",
             "round": 1,
             "model": "test",
             "tool_names": ["grep"],
         },
         {
-            "event_type": "explore_tool",
-            "task_id": "explore_abc",
+            "event_type": "subagent_tool",
+            "task_id": "agent_abc",
             "parent_call_id": "call_1",
             "tool": "grep",
             "result": {"ok": True},
         },
         {
-            "event_type": "explore",
-            "task_id": "explore_abc",
+            "event_type": "subagent",
+            "task_id": "agent_abc",
             "parent_call_id": "call_1",
             "status": "completed",
             "role": "auditor",
@@ -488,10 +391,10 @@ def test_meta_fold_reviews_include_strategy_and_agent_trace_not_heldout(tmp_path
     ]
     compact = compact_agent_trace(events)
     assert [item["event_type"] for item in compact] == [
-        "explore_task",
-        "explore_llm",
-        "explore_tool",
-        "explore",
+        "subagent_task",
+        "subagent_llm",
+        "subagent_tool",
+        "subagent",
         "llm_call",
     ]
     assert compact[0]["role"] == "auditor"
@@ -549,7 +452,7 @@ def test_meta_fold_reviews_include_strategy_and_agent_trace_not_heldout(tmp_path
     summary = review["agent_process_summary"]
     assert isinstance(summary, dict)
     assert summary["llm_calls"] == 1
-    assert summary["explore"] == {"attempts": 1, "completed": 1, "failed": 0}
+    assert summary["subagent"] == {"attempts": 1, "completed": 1, "failed": 0}
     assert summary["daily_backtest"] == 0
     assert "heldout" not in str(summary).lower()
     assert "0.4" not in str(summary)
@@ -572,7 +475,7 @@ def test_meta_fold_reviews_without_trace_ref_are_explicitly_unavailable(
     trace = artifacts / "traces" / "run_fold.jsonl"
     trace.parent.mkdir(parents=True)
     trace.write_text(
-        '{"event_type": "explore_task", "task_id": "explore_xyz", '
+        '{"event_type": "subagent_task", "task_id": "agent_xyz", '
         '"parent_call_id": "call_9", "role": "auditor", "task": "count rows", "status": "started"}\n',
         encoding="utf-8",
     )
@@ -604,7 +507,7 @@ def test_meta_fold_reviews_resolve_relative_trace_ref(tmp_path: Path) -> None:
     trace = artifacts / "traces" / "run_fold.jsonl"
     trace.parent.mkdir(parents=True)
     trace.write_text(
-        '{"event_type": "explore_task", "task_id": "explore_xyz", '
+        '{"event_type": "subagent_task", "task_id": "agent_xyz", '
         '"parent_call_id": "call_9", "role": "auditor", "task": "count rows", "status": "started"}\n',
         encoding="utf-8",
     )
@@ -636,23 +539,23 @@ def test_meta_fold_reviews_resolve_relative_trace_ref(tmp_path: Path) -> None:
 def test_compact_agent_trace_keeps_recent_complete_tasks() -> None:
     early = [
         {
-            "event_type": "explore_task",
-            "task_id": "explore_old",
+            "event_type": "subagent_task",
+            "task_id": "agent_old",
             "task": "early schema",
             "status": "started",
         },
         *[
             {
-                "event_type": "explore_llm",
-                "task_id": "explore_old",
+                "event_type": "subagent_llm",
+                "task_id": "agent_old",
                 "round": index,
                 "model": "test",
             }
             for index in range(1, 90)
         ],
         {
-            "event_type": "explore",
-            "task_id": "explore_old",
+            "event_type": "subagent",
+            "task_id": "agent_old",
             "task": "early schema",
             "status": "completed",
             "summary": "old summary",
@@ -660,21 +563,21 @@ def test_compact_agent_trace_keeps_recent_complete_tasks() -> None:
     ]
     late = [
         {
-            "event_type": "explore_task",
-            "task_id": "explore_new",
+            "event_type": "subagent_task",
+            "task_id": "agent_new",
             "parent_call_id": "call_late",
             "task": "later rows",
             "status": "started",
         },
         {
-            "event_type": "explore_tool",
-            "task_id": "explore_new",
+            "event_type": "subagent_tool",
+            "task_id": "agent_new",
             "tool": "grep",
             "result": {"ok": True},
         },
         {
-            "event_type": "explore",
-            "task_id": "explore_new",
+            "event_type": "subagent",
+            "task_id": "agent_new",
             "task": "later rows",
             "status": "completed",
             "summary": "new summary",
@@ -686,9 +589,9 @@ def test_compact_agent_trace_keeps_recent_complete_tasks() -> None:
     ]
     compact = compact_agent_trace(early + late + noise)
     assert [item["event_type"] for item in compact] == [
-        "explore_task",
-        "explore_tool",
-        "explore",
+        "subagent_task",
+        "subagent_tool",
+        "subagent",
         "llm_call",
     ]
     assert "task" not in compact[0]
@@ -700,7 +603,7 @@ def test_compact_agent_trace_keeps_recent_complete_tasks() -> None:
 
 def test_compact_agent_trace_ignores_legacy_digest() -> None:
     compact = compact_agent_trace(
-        [{"event_type": "explore", "task_id": "legacy", "digest": "do not migrate"}]
+        [{"event_type": "subagent", "task_id": "legacy", "digest": "do not migrate"}]
     )
     assert "digest" not in compact[0]
     assert "summary" not in compact[0]
@@ -712,13 +615,13 @@ def test_compact_agent_trace_keeps_multiple_recent_tasks_in_order() -> None:
         events.extend(
             [
                 {
-                    "event_type": "explore_task",
+                    "event_type": "subagent_task",
                     "task_id": name,
                     "task": name,
                     "status": "started",
                 },
                 {
-                    "event_type": "explore",
+                    "event_type": "subagent",
                     "task_id": name,
                     "task": name,
                     "status": "completed",
@@ -728,18 +631,18 @@ def test_compact_agent_trace_keeps_multiple_recent_tasks_in_order() -> None:
     compact = compact_agent_trace(events, max_events=4)
     assert [item["task_id"] for item in compact] == ["b", "b", "c", "c"]
     assert [item["event_type"] for item in compact] == [
-        "explore_task",
-        "explore",
-        "explore_task",
-        "explore",
+        "subagent_task",
+        "subagent",
+        "subagent_task",
+        "subagent",
     ]
 
 
 def test_compact_agent_trace_oversized_latest_task_keeps_trailing_events() -> None:
     events = [
         {
-            "event_type": "explore_llm",
-            "task_id": "explore_big",
+            "event_type": "subagent_llm",
+            "task_id": "agent_big",
             "round": index,
             "model": "test",
         }
@@ -764,33 +667,33 @@ def test_compact_agent_trace_keeps_main_and_subagent_without_forbidden_content()
             "event_type": "llm_call",
             "status": "ok",
             "model": "test",
-            "tool_names": ["explore", "write_file"],
+            "tool_names": ["agent", "write_file"],
             "content": "delegate then edit",
         },
         {
             "event_type": "tool_call",
-            "tool": "explore",
+            "tool": "agent",
             "parent_call_id": "call_1",
             "arguments": {"task": "edit strategy"},
             "result": {"ok": True},
         },
         {
-            "event_type": "explore_task",
-            "task_id": "explore_abc",
+            "event_type": "subagent_task",
+            "task_id": "agent_abc",
             "parent_call_id": "call_1",
             "task": "edit strategy",
             "status": "started",
         },
         {
-            "event_type": "explore_tool",
-            "task_id": "explore_abc",
+            "event_type": "subagent_tool",
+            "task_id": "agent_abc",
             "parent_call_id": "call_1",
             "tool": "write_file",
             "result": {"ok": True},
         },
         {
-            "event_type": "explore",
-            "task_id": "explore_abc",
+            "event_type": "subagent",
+            "task_id": "agent_abc",
             "parent_call_id": "call_1",
             "status": "completed",
             "summary": "wrote main.py",
@@ -815,9 +718,9 @@ def test_compact_agent_trace_keeps_main_and_subagent_without_forbidden_content()
         "session_start",
         "llm_call",
         "tool_call",
-        "explore_task",
-        "explore_tool",
-        "explore",
+        "subagent_task",
+        "subagent_tool",
+        "subagent",
         "tool_call",
         "wrap_up_started",
         "trace_limit_reached",
@@ -849,14 +752,14 @@ def test_compact_agent_trace_redacts_embedded_host_paths_not_sandbox() -> None:
             ),
         },
         {
-            "event_type": "explore_task",
+            "event_type": "subagent_task",
             "task": (
                 "inspect (/home/lzp/hidden) and '/tmp/cache' "
                 "then /mnt/agent/output/main.py"
             ),
         },
         {
-            "event_type": "explore",
+            "event_type": "subagent",
             "summary": "ratio 3/4 json 1.5 and a / b stay; host /var/tmp/x goes",
             "error": "boom at /tmp/foo",
         },
@@ -1014,13 +917,13 @@ def test_meta_review_window_rollback_and_resume_recompute_deterministically(
 
 def test_agent_process_summary_counts_are_bounded_and_redacted() -> None:
     events = [
-        {"event_type": "session_end", "llm_calls": 7, "explore_attempts": 2},
+        {"event_type": "session_end", "llm_calls": 7, "subagent_attempts": 2},
         {
-            "event_type": "explore",
+            "event_type": "subagent",
             "status": "completed",
         },
         {
-            "event_type": "explore",
+            "event_type": "subagent",
             "status": "error",
         },
         {
@@ -1049,7 +952,7 @@ def test_agent_process_summary_counts_are_bounded_and_redacted() -> None:
     ]
     summary = build_agent_process_summary(events)
     assert summary["llm_calls"] == 7
-    assert summary["explore"] == {"attempts": 2, "completed": 1, "failed": 1}
+    assert summary["subagent"] == {"attempts": 2, "completed": 1, "failed": 1}
     assert summary["daily_backtest"] == 1
     assert summary["tool_failures"] == 3
     assert summary["repeated_failures"] == [

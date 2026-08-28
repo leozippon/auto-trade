@@ -55,11 +55,11 @@ from .compact import (
     fit_tool_results_to_context,
     safe_error_summary,
 )
-from .explore import (
-    ExploreSubAgentEngine,
-    ExploreTool,
+from .subagent import (
+    SubAgentEngine,
+    AgentTool,
     _copy_chat_message,
-    normalize_explore_thinking,
+    normalize_subagent_thinking,
 )
 from .prompts import (
     HARD_FINALIZATION_SYSTEM_PROMPT,
@@ -68,13 +68,13 @@ from .prompts import (
 )
 
 _LLM_FAILURE_CIRCUIT = 3
-EXPLORE_TEARDOWN_WAIT_SECONDS = 30.0
+SUBAGENT_TEARDOWN_WAIT_SECONDS = 30.0
 
 
-def _explore_teardown_timeout(requested: float | None = None) -> float:
+def _subagent_teardown_timeout(requested: float | None = None) -> float:
     if requested is None:
-        return EXPLORE_TEARDOWN_WAIT_SECONDS
-    return min(max(0.0, requested), EXPLORE_TEARDOWN_WAIT_SECONDS)
+        return SUBAGENT_TEARDOWN_WAIT_SECONDS
+    return min(max(0.0, requested), SUBAGENT_TEARDOWN_WAIT_SECONDS)
 
 # Default wrap-up grace shared with RollingExperimentConfig.deadline_grace_minutes:
 # the pipeline hands the session a budget of main deadline + grace and the runner
@@ -115,7 +115,7 @@ _FOLD_TOOLS = frozenset(
     {
         "ask_user",
         "daily_backtest",
-        "explore",
+        "agent",
         "finish_fold",
         "glob",
         "grep",
@@ -133,7 +133,7 @@ _META_TOOLS = frozenset(
     {
         "ask_user",
         "edit_file",
-        "explore",
+        "agent",
         "finish_meta",
         "glob",
         "grep",
@@ -151,6 +151,10 @@ INBOX_SAFE_AFTER_PARALLEL_READONLY = "after_parallel_readonly"
 INBOX_SAFE_AFTER_TOOLS_BEFORE_LLM = "after_tools_before_llm"
 _INBOX_TRACE_CHARS = 400
 _INTERRUPTED_BY_USER = "interrupted_by_user"
+# Consecutive own read/search/shell calls without any sub-agent launch that
+# trigger the one-time delegation reminder.
+DELEGATION_NUDGE_AFTER_CALLS = 8
+_OWN_WORK_TOOLS = frozenset({"read_file", "grep", "glob", "shell"})
 
 
 class AgentInboxHook(Protocol):
@@ -202,16 +206,18 @@ class AgentSessionConfig:
 
 
 @dataclass
-class _ExploreJob:
+class _SubAgentJob:
     task_id: str
     call_id: str
     role: str
     attempt: int
     future: Future
-    # Collected result (usage accounted, ``explore_attempt`` emitted).
+    # Collected result (usage accounted, ``subagent_attempt`` emitted).
     record: dict[str, object] | None = None
-    # Whether the ``explore_completed`` observation reached the conversation.
+    # Whether the ``subagent_completed`` observation reached the conversation.
     delivered: bool = False
+    # The finished child's own transcript, kept for ``resume``.
+    messages: tuple[ChatMessage, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -221,7 +227,7 @@ class AgentSessionResult:
     finish_value: dict[str, object]
     llm_calls: int
     # Closed's session-summary ``token_usage`` block: the seven per-call totals
-    # plus ``cache_hit_ratio`` and the Explore Sub Agent roll-up.
+    # plus ``cache_hit_ratio`` and the Sub Agent roll-up.
     usage: dict[str, object] = field(default_factory=dict)
     context_compactions: int = 0
     steps_used: int = 0
@@ -238,7 +244,7 @@ class AgentSessionRunner:
         system_prompt: str,
         config: AgentSessionConfig | None = None,
         compactor: ContextCompactor | None = None,
-        explore: ExploreSubAgentEngine | None = None,
+        subagent: SubAgentEngine | None = None,
         time_budget: InferenceTimeBudget | None = None,
         conversation_id: str | None = None,
         event_sink: Callable[[str, dict[str, object]], None] | None = None,
@@ -249,28 +255,28 @@ class AgentSessionRunner:
         self.system_prompt = system_prompt
         self.config = config or AgentSessionConfig()
         self.compactor = compactor
-        self.explore = explore
-        if self.explore is not None:
-            explore_mode = getattr(self.explore, "mode", "fold")
+        self.subagent = subagent
+        if self.subagent is not None:
+            subagent_mode = getattr(self.subagent, "mode", "fold")
             if self.config.mode in {"meta", "meta_learning"}:
-                if explore_mode != "meta":
-                    raise ValueError("Meta session explore sub-agent must use mode='meta'")
-            elif explore_mode != "fold":
-                raise ValueError("Fold session explore sub-agent must use mode='fold'")
+                if subagent_mode != "meta":
+                    raise ValueError("Meta session sub-agent must use mode='meta'")
+            elif subagent_mode != "fold":
+                raise ValueError("Fold session sub-agent must use mode='fold'")
         self._event_lock = threading.Lock()
-        self._explore_lock = threading.Lock()
+        self._subagent_lock = threading.Lock()
         # The tool call id of the invocation running on the current thread;
-        # the explore launch reads it to attribute the child to its call.
+        # the agent launch reads it to attribute the child to its call.
         self._call_context = threading.local()
-        if self.explore is not None:
-            if self.explore.event_sink is None:
-                self.explore.event_sink = self._locked_event_sink
-            self.tools.register(ExploreTool(self._launch_explore))
+        if self.subagent is not None:
+            if self.subagent.event_sink is None:
+                self.subagent.event_sink = self._locked_event_sink
+            self.tools.register(AgentTool(self._launch_subagent))
         bindings: list[TimeBudgetBinding] = []
         if isinstance(llm, SessionTimeBudgetAware):
             bindings.append(TimeBudgetBinding("main_llm", llm.session_time_budget))
-        if explore is not None and explore.session_time_budget is not None:
-            bindings.append(TimeBudgetBinding("explore", explore.session_time_budget))
+        if subagent is not None and subagent.session_time_budget is not None:
+            bindings.append(TimeBudgetBinding("subagent", subagent.session_time_budget))
         if compactor is not None:
             bindings.append(
                 TimeBudgetBinding("compactor", compactor.session_time_budget)
@@ -286,19 +292,19 @@ class AgentSessionRunner:
         self._hard_finalization = False
         self._hard_finalization_context_initialized = False
         self._wrap_up_sent = False
-        self._explore_attempts = 0
-        self._explored_roles: set[str] = set()
-        self._explore_jobs: list[_ExploreJob] = []
-        self._explore_pool: ThreadPoolExecutor | None = None
-        self._explore_totals: dict[str, int] | None = None
+        self._subagent_attempts = 0
+        self._subagent_roles: set[str] = set()
+        self._subagent_jobs: list[_SubAgentJob] = []
+        self._subagent_pool: ThreadPoolExecutor | None = None
+        self._subagent_totals: dict[str, int] | None = None
         self._usage = _new_token_totals()
         # Snapshot of the conversation at the last tool dispatch; a child with
         # inherit_context forks from it.
         self._live_messages: list[ChatMessage] = []
         # Set only when the session closes; children poll it to stop early.
         self._cancelled = threading.Event()
-        if self.explore is not None:
-            self.explore.attach_cancel_event(self._cancelled)
+        if self.subagent is not None:
+            self.subagent.attach_cancel_event(self._cancelled)
         self._validate_capability_boundary()
 
     def run(self, instruction: str) -> AgentSessionResult:
@@ -312,7 +318,7 @@ class AgentSessionRunner:
             ChatMessage("user", instruction.strip()),
         ]
         self._usage = _new_token_totals()
-        self._explore_totals = None
+        self._subagent_totals = None
         llm_calls = 0
         accepted_steps = 0
         step_wrap_up_sent = False
@@ -322,10 +328,12 @@ class AgentSessionRunner:
         self._hard_finalization = False
         self._hard_finalization_context_initialized = False
         self._wrap_up_sent = False
-        self._explore_attempts = 0
-        self._explored_roles = set()
-        self._explore_jobs = []
+        self._subagent_attempts = 0
+        self._subagent_roles = set()
+        self._subagent_jobs = []
         self._live_messages = []
+        own_work_streak = 0
+        delegation_nudged = False
         self._cancelled.clear()
         self._emit(
             "session_start",
@@ -368,7 +376,7 @@ class AgentSessionRunner:
                 messages, _ = self._compact_if_needed(
                     messages, remaining, provider_tools
                 )
-            messages = self._append_explore_observations(messages)
+            messages = self._append_subagent_observations(messages)
             messages = self._apply_inbox(
                 messages, safe_point=INBOX_SAFE_BEFORE_LLM
             )
@@ -488,7 +496,7 @@ class AgentSessionRunner:
                 },
             )
             if not response.tool_calls:
-                if self._yield_for_pending_explore(time_budget):
+                if self._yield_for_pending_subagent(time_budget):
                     continue
                 nudge: dict[str, object] = {
                     "observation": "no_tool_call",
@@ -534,7 +542,7 @@ class AgentSessionRunner:
                     )
                 )
                 traced_arguments = dict(call.arguments)
-                if call.name == "explore":
+                if call.name == "agent":
                     traced_arguments.pop("task", None)
                 self._emit(
                     "tool_call",
@@ -547,11 +555,40 @@ class AgentSessionRunner:
                     },
                 )
             accepted_steps = len(self._complete_validation_nodes)
+            if self.subagent is not None and not delegation_nudged:
+                for call, _record in results:
+                    own_work_streak = (
+                        own_work_streak + 1 if call.name in _OWN_WORK_TOOLS else 0
+                    )
+                if (
+                    own_work_streak >= DELEGATION_NUDGE_AFTER_CALLS
+                    and self._subagent_attempts == 0
+                ):
+                    delegation_nudged = True
+                    messages.append(
+                        ChatMessage(
+                            "user",
+                            json.dumps(
+                                {
+                                    "observation": "delegation_reminder",
+                                    "message": (
+                                        f"已连续 {own_work_streak} 次自行读取/执行而未委托；"
+                                        "除非任务很简单，请把读取与计算委托给 agent 子代理"
+                                        "（同一轮可并行多个，范围互斥）。"
+                                    ),
+                                },
+                                ensure_ascii=False,
+                            ),
+                        )
+                    )
+                    self._emit(
+                        "delegation_reminder", {"own_work_calls": own_work_streak}
+                    )
 
             if self.tools.finished:
-                self._append_explore_observations(messages, wait=True)
+                self._append_subagent_observations(messages, wait=True)
                 finish = dict(self.tools.finish_value or {})
-                token_usage = _token_usage_summary(self._usage, self._explore_totals)
+                token_usage = _token_usage_summary(self._usage, self._subagent_totals)
                 self._close_session(
                     {
                         "status": "finished",
@@ -741,7 +778,7 @@ class AgentSessionRunner:
     ) -> tuple[list[tuple[ToolCall, dict[str, object]]], str | None]:
         """Run one assistant turn's tool calls.
 
-        A batch of parallel-safe calls (reads, checks, explore launches) runs
+        A batch of parallel-safe calls (reads, checks, agent launches) runs
         concurrently; a batch containing any sequential tool runs in order,
         stops after a terminal tool, and honours inbox interrupts between calls.
         """
@@ -763,7 +800,7 @@ class AgentSessionRunner:
             if call.name in _TERMINAL_TOOLS or call.name in _PHASE_GATE_TOOLS:
                 # Barrier: a formal backtest or finish must not overlap a
                 # developer child that may still be writing the workspace.
-                self._wait_explore_jobs()
+                self._wait_subagent_jobs()
             self._call_context.call_id = call.id
             record = self.tools.invoke(
                 call.name,
@@ -891,53 +928,86 @@ class AgentSessionRunner:
             self.inbox.consume(message_id)
         return messages
 
-    def _launch_explore(self, arguments: Mapping[str, object]) -> dict[str, object]:
-        """Start one background child from registry-validated ``explore`` arguments.
+    def _launch_subagent(self, arguments: Mapping[str, object]) -> dict[str, object]:
+        """Start one background child from registry-validated ``agent`` arguments.
 
-        Never blocks the parent turn: the child runs in the explore pool, whose
-        worker count is the concurrency cap, so launches beyond the cap queue
-        until a slot frees. Completion is delivered later as an
-        ``explore_completed`` observation.
+        Never blocks the parent turn: the child runs in the sub-agent pool,
+        whose worker count is the concurrency cap, so launches beyond the cap
+        queue until a slot frees. Completion is delivered later as a
+        ``subagent_completed`` observation. ``resume`` continues a finished
+        child's own transcript with the new task; a running or unknown child
+        is refused.
         """
 
-        if self.explore is None:
-            raise ToolError("Explore is not configured")
-        role = str(arguments["role"])
+        if self.subagent is None:
+            raise ToolError("Sub-agent is not configured")
+        role = str(arguments["agent"])
         task = str(arguments["task"])
         if not task.strip():
-            raise ToolError("explore.task must be a non-empty string")
+            raise ToolError("agent.task must be a non-empty string")
         try:
-            thinking = normalize_explore_thinking(arguments.get("thinking"))
+            thinking = normalize_subagent_thinking(arguments.get("thinking"))
         except ValueError as exc:
             raise ToolError(str(exc)) from exc
         inherit = bool(arguments.get("inherit_context", False))
         max_rounds = arguments.get("max_turns")
         description = str(arguments.get("description") or "").strip()
+        resume = str(arguments.get("resume") or "").strip() or None
         call_id = getattr(self._call_context, "call_id", None)
-        cap = self.explore.config.max_concurrent
+        cap = self.subagent.config.max_concurrent
+        transcript: tuple[ChatMessage, ...] | None = None
+        if resume is not None:
+            with self._subagent_lock:
+                previous = next(
+                    (job for job in self._subagent_jobs if job.task_id == resume), None
+                )
+            if previous is None:
+                raise ToolError(
+                    f"resume: unknown sub-agent task_id {resume}",
+                    error_type="unknown_subagent",
+                )
+            if previous.record is None or not previous.future.done():
+                raise ToolError(
+                    f"resume: sub-agent {resume} is still running; wait for its "
+                    "subagent_completed message",
+                    error_type="subagent_running",
+                )
+            if previous.role != role:
+                raise ToolError(
+                    f"resume: sub-agent {resume} ran as {previous.role}; "
+                    "a follow-up keeps that agent role",
+                    error_type="subagent_role_mismatch",
+                )
+            if not previous.messages:
+                raise ToolError(
+                    f"resume: sub-agent {resume} left no transcript to continue",
+                    error_type="subagent_no_transcript",
+                )
+            transcript = previous.messages
+            inherit = False
         parent_messages = (
             tuple(_copy_chat_message(message) for message in self._live_messages)
             if inherit and self._live_messages
             else None
         )
-        with self._explore_lock:
+        with self._subagent_lock:
             pending = [
                 job
-                for job in self._explore_jobs
+                for job in self._subagent_jobs
                 if job.record is None and not job.future.done()
             ]
             queued = len(pending) >= cap
-            self._explore_attempts += 1
-            self._explored_roles.add(role)
-            attempt = self._explore_attempts
-            task_id = f"explore_{uuid.uuid4().hex[:12]}"
-            if self._explore_pool is None:
-                self._explore_pool = ThreadPoolExecutor(
+            self._subagent_attempts += 1
+            self._subagent_roles.add(role)
+            attempt = self._subagent_attempts
+            task_id = f"agent_{uuid.uuid4().hex[:12]}"
+            if self._subagent_pool is None:
+                self._subagent_pool = ThreadPoolExecutor(
                     max_workers=max(1, cap),
-                    thread_name_prefix="explore",
+                    thread_name_prefix="agent",
                 )
-            future = self._explore_pool.submit(
-                self.explore.run,
+            future = self._subagent_pool.submit(
+                self.subagent.run_with_transcript,
                 task,
                 role=role,
                 max_rounds=max_rounds if isinstance(max_rounds, int) else None,
@@ -945,11 +1015,13 @@ class AgentSessionRunner:
                 thinking=thinking,
                 inherit_context=inherit,
                 parent_messages=parent_messages,
+                transcript=transcript,
+                resumed_from=resume,
                 description=description,
                 task_id=task_id,
             )
-            self._explore_jobs.append(
-                _ExploreJob(
+            self._subagent_jobs.append(
+                _SubAgentJob(
                     task_id=task_id,
                     call_id=str(call_id or ""),
                     role=role,
@@ -964,25 +1036,27 @@ class AgentSessionRunner:
             "role": role,
             "attempt": attempt,
         }
+        if resume is not None:
+            record["resumed_from"] = resume
         if queued:
             record["queued"] = True
         return record
 
-    def _append_explore_observations(
+    def _append_subagent_observations(
         self, messages: list[ChatMessage], *, wait: bool = False
     ) -> list[ChatMessage]:
         """Collect finished children and deliver each result once as a message."""
 
-        self._collect_finished_explores(
-            wait=wait, timeout=_explore_teardown_timeout() if wait else None
+        self._collect_finished_subagents(
+            wait=wait, timeout=_subagent_teardown_timeout() if wait else None
         )
-        for job in self._explore_jobs:
+        for job in self._subagent_jobs:
             if job.record is None or job.delivered:
                 continue
             job.delivered = True
             value = job.record.get("value")
             payload = {
-                "observation": "explore_completed",
+                "observation": "subagent_completed",
                 "ok": job.record.get("ok"),
                 "status": job.record.get("status"),
                 "task_id": job.task_id,
@@ -1000,19 +1074,19 @@ class AgentSessionRunner:
             )
         return messages
 
-    def _uncollected_explore_jobs(self) -> list[_ExploreJob]:
-        return [job for job in self._explore_jobs if job.record is None]
+    def _uncollected_subagent_jobs(self) -> list[_SubAgentJob]:
+        return [job for job in self._subagent_jobs if job.record is None]
 
-    def _yield_for_pending_explore(self, time_budget: InferenceTimeBudget) -> bool:
-        """Skip no_tool_call when an explore is still running; wait for progress."""
-        uncollected = self._uncollected_explore_jobs()
+    def _yield_for_pending_subagent(self, time_budget: InferenceTimeBudget) -> bool:
+        """Skip no_tool_call when a sub-agent is still running; wait for progress."""
+        uncollected = self._uncollected_subagent_jobs()
         if not uncollected:
             return False
         if not any(job.future.done() for job in uncollected):
-            self._wait_first_pending_explore(time_budget)
+            self._wait_first_pending_subagent(time_budget)
         return True
 
-    def _wait_first_pending_explore(self, time_budget: InferenceTimeBudget) -> None:
+    def _wait_first_pending_subagent(self, time_budget: InferenceTimeBudget) -> None:
         completed = threading.Event()
 
         def _on_done(_future: Future) -> None:
@@ -1020,7 +1094,7 @@ class AgentSessionRunner:
 
         pending = [
             job.future
-            for job in self._uncollected_explore_jobs()
+            for job in self._uncollected_subagent_jobs()
             if not job.future.done()
         ]
         if not pending:
@@ -1035,25 +1109,25 @@ class AgentSessionRunner:
                 return
             completed.wait(timeout=min(0.05, remaining))
 
-    def _wait_explore_jobs(
-        self, timeout: float = EXPLORE_TEARDOWN_WAIT_SECONDS
+    def _wait_subagent_jobs(
+        self, timeout: float = SUBAGENT_TEARDOWN_WAIT_SECONDS
     ) -> list[dict[str, object]]:
-        return self._collect_finished_explores(
-            wait=True, timeout=_explore_teardown_timeout(timeout)
+        return self._collect_finished_subagents(
+            wait=True, timeout=_subagent_teardown_timeout(timeout)
         )
 
-    def _collect_finished_explores(
+    def _collect_finished_subagents(
         self, *, wait: bool = False, timeout: float | None = None
     ) -> list[dict[str, object]]:
         """The one place a child's result is taken: usage and Trace here, the
-        conversation observation later via ``_append_explore_observations``."""
+        conversation observation later via ``_append_subagent_observations``."""
 
         finished: list[dict[str, object]] = []
-        wait_timeout = _explore_teardown_timeout(timeout) if wait else None
+        wait_timeout = _subagent_teardown_timeout(timeout) if wait else None
         deadline = (
             time.monotonic() + wait_timeout if wait_timeout is not None else None
         )
-        for job in self._explore_jobs:
+        for job in self._subagent_jobs:
             if job.record is not None:
                 continue
             result: object
@@ -1064,7 +1138,7 @@ class AgentSessionRunner:
                 if remaining == 0:
                     continue
                 try:
-                    result = job.future.result(timeout=remaining)
+                    result, job.messages = job.future.result(timeout=remaining)
                 except TimeoutError:
                     continue
                 except Exception as exc:  # noqa: BLE001 - child failure stays an observation
@@ -1078,7 +1152,7 @@ class AgentSessionRunner:
                 if not job.future.done():
                     continue
                 try:
-                    result = job.future.result()
+                    result, job.messages = job.future.result()
                 except Exception as exc:  # noqa: BLE001 - child failure stays an observation
                     result = {
                         "task_id": job.task_id,
@@ -1096,16 +1170,16 @@ class AgentSessionRunner:
             }
             job.record = record
             if isinstance(result, dict):
-                if self._explore_totals is None:
-                    self._explore_totals = {
+                if self._subagent_totals is None:
+                    self._subagent_totals = {
                         "llm_calls": 0,
                         "prompt_tokens": 0,
                         "completion_tokens": 0,
                         "total_tokens": 0,
                     }
-                _accumulate_explore_usage(self._explore_totals, result)
+                _accumulate_subagent_usage(self._subagent_totals, result)
             self._emit(
-                "explore_attempt",
+                "subagent_attempt",
                 {
                     "attempt": job.attempt,
                     "role": job.role,
@@ -1117,8 +1191,8 @@ class AgentSessionRunner:
             finished.append(record)
         return finished
 
-    def _cancel_pending_explores(self) -> None:
-        for job in self._explore_jobs:
+    def _cancel_pending_subagents(self) -> None:
+        for job in self._subagent_jobs:
             if job.record is not None or job.future.done():
                 continue
             if not job.future.cancel():
@@ -1131,13 +1205,13 @@ class AgentSessionRunner:
                 "value": {
                     "task_id": job.task_id,
                     "status": "cancelled",
-                    "error": "Explore cancelled",
+                    "error": "Sub-agent cancelled",
                     "role": job.role,
                 },
             }
             job.record = record
             self._emit(
-                "explore_attempt",
+                "subagent_attempt",
                 {
                     "attempt": job.attempt,
                     "role": job.role,
@@ -1149,22 +1223,22 @@ class AgentSessionRunner:
 
     def _close_session(self, payload: dict[str, object]) -> None:
         self._cancelled.set()
-        if self.explore is not None:
-            self.explore.cancel()
+        if self.subagent is not None:
+            self.subagent.cancel()
         # Bound the wait; do not abort an in-flight LLM or tool invoke.
-        # After an uncancelable LLM returns, Explore checks this event and
+        # After an uncancelable LLM returns, the child checks this event and
         # exits without dispatching. Pending (not started) jobs are cancelled.
-        self._collect_finished_explores(
-            wait=True, timeout=_explore_teardown_timeout()
+        self._collect_finished_subagents(
+            wait=True, timeout=_subagent_teardown_timeout()
         )
-        self._cancel_pending_explores()
+        self._cancel_pending_subagents()
         payload = dict(payload)
         payload.setdefault(
-            "token_usage", _token_usage_summary(self._usage, self._explore_totals)
+            "token_usage", _token_usage_summary(self._usage, self._subagent_totals)
         )
         self._emit("session_end", payload)
-        pool = self._explore_pool
-        self._explore_pool = None
+        pool = self._subagent_pool
+        self._subagent_pool = None
         if pool is not None:
             pool.shutdown(wait=False, cancel_futures=True)
 
@@ -1305,9 +1379,9 @@ class AgentSessionRunner:
 
     def _emit(self, event: str, payload: dict[str, object]) -> None:
         record = dict(payload)
-        if event == "session_end" and self.explore is not None:
-            record["explore_attempts"] = self._explore_attempts
-            record["explored_roles"] = sorted(self._explored_roles)
+        if event == "session_end" and self.subagent is not None:
+            record["subagent_attempts"] = self._subagent_attempts
+            record["subagent_roles"] = sorted(self._subagent_roles)
         self._locked_event_sink(event, record)
 
 
@@ -1387,10 +1461,10 @@ def _accumulate_usage(total: dict[str, int], usage: object) -> None:
             total["reasoning_tokens"] += int(reasoning)
 
 
-def _accumulate_explore_usage(
+def _accumulate_subagent_usage(
     totals: dict[str, int], result: Mapping[str, object]
 ) -> None:
-    """Explore Sub Agent calls bill the same provider account but bypass
+    """Sub Agent calls bill the same provider account but bypass
     ``_accumulate_usage``; without this the session summary understates real
     cost by up to ~15% in observed sessions."""
     calls = result.get("llm_calls")
@@ -1405,17 +1479,17 @@ def _accumulate_explore_usage(
 
 
 def _token_usage_summary(
-    totals: Mapping[str, int], explore: Mapping[str, int] | None
+    totals: Mapping[str, int], subagent: Mapping[str, int] | None
 ) -> dict[str, object]:
     summary: dict[str, object] = dict(totals)
     prompt = int(totals.get("prompt_tokens", 0))
     summary["cache_hit_ratio"] = (
         round(int(totals.get("cache_hit_tokens", 0)) / prompt, 4) if prompt else 0.0
     )
-    if explore is not None:
-        summary["explore"] = dict(explore)
-        summary["total_tokens_including_explore"] = int(
+    if subagent is not None:
+        summary["subagent"] = dict(subagent)
+        summary["total_tokens_including_subagents"] = int(
             totals.get("total_tokens", 0)
-        ) + int(explore.get("total_tokens", 0))
+        ) + int(subagent.get("total_tokens", 0))
     return summary
 

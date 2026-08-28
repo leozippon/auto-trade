@@ -249,6 +249,7 @@ class LLMWorkerSettings:
         model: str | None = None,
         max_tokens: int | None = None,
         require_credentials: bool = True,
+        max_retries: int | None = None,
     ) -> LLMProxy:
         if role not in {"main", "meta", "nl", "compact", "analysis"}:
             raise ValueError(f"unknown model role: {role}")
@@ -270,7 +271,7 @@ class LLMWorkerSettings:
             env_file=self.env_file,
             deepseek_api_key_env=self.api_key_env,
             timeout_seconds=self.timeout_seconds,
-            max_retries=self.max_retries,
+            max_retries=self.max_retries if max_retries is None else max_retries,
             retry_backoff_seconds=self.retry_backoff_seconds,
             max_tokens=effective_max_tokens,
             temperature=self.temperature,
@@ -295,8 +296,8 @@ class LLMWorkerSettings:
         return self.reasoning_effort
 
 
-def _explore_native_max_tokens(settings: LLMWorkerSettings, role: str) -> int:
-    """Give Explore the model's native output ceiling, not the NL/child stub."""
+def _subagent_native_max_tokens(settings: LLMWorkerSettings, role: str) -> int:
+    """Give sub-agents the model's native output ceiling, not the NL/child stub."""
 
     model = settings.model if role == "main" else settings.meta_model
     window = model_profile(model).context_window_tokens
@@ -783,8 +784,10 @@ def run_local_interactive_worker(
         if options.developer_mode == "llm" and options.llm
         else None
     )
+    # A failed compaction falls through to the emergency fit path by design;
+    # provider retries would only add their full latency to that failure.
     compact_gateway = llm or (
-        options.llm.build_gateway("compact")
+        options.llm.build_gateway("compact", max_retries=0)
         if options.developer_mode == "llm"
         and options.llm
         and options.llm.compact_enabled
@@ -840,7 +843,7 @@ def run_local_interactive_worker(
         runtime_root = options.work_root / options.experiment_id
         developer = LLMFoldDeveloper(
             llm=fold_gateway,
-            explore_llm=fold_gateway,
+            subagent_llm=fold_gateway,
             compact_llm=compact_gateway,
             context_compaction=options.llm.compaction,
             baseline_strategy=options.baseline_strategy,
@@ -854,7 +857,7 @@ def run_local_interactive_worker(
             sandbox_spec=options.agent_sandbox,
             command_runner_factory=command_runner_factory,
             max_response_tokens=options.llm.max_tokens_for("main"),
-            explore_max_tokens=_explore_native_max_tokens(options.llm, "main"),
+            subagent_max_tokens=_subagent_native_max_tokens(options.llm, "main"),
             step_tree_enabled=options.rolling.step_tree_enabled,
             fold_exploration_directive=options.rolling.fold_exploration_directive,
             workspace_reference=options.rolling.workspace_reference,
@@ -862,7 +865,7 @@ def run_local_interactive_worker(
         )
         meta_learner = LLMMetaLearner(
             llm=meta_gateway,
-            explore_llm=meta_gateway,
+            subagent_llm=meta_gateway,
             compact_llm=compact_gateway,
             context_compaction=options.llm.compaction,
             baseline_strategy=options.baseline_strategy,
@@ -872,7 +875,7 @@ def run_local_interactive_worker(
             max_llm_calls=options.rolling.max_llm_calls,
             deadline_seconds=options.rolling.max_fold_minutes * 60,
             max_response_tokens=options.llm.max_tokens_for("meta"),
-            explore_max_tokens=_explore_native_max_tokens(options.llm, "meta"),
+            subagent_max_tokens=_subagent_native_max_tokens(options.llm, "meta"),
             meta_learning_directive=options.rolling.meta_learning_directive,
             fold_exploration_directive=options.rolling.fold_exploration_directive,
             workspace_reference=options.rolling.workspace_reference,

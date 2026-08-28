@@ -395,7 +395,7 @@ _FIELDS: list[dict[str, object]] = [
     {"key": "max_backtests_per_fold", "group": "预算与验收", "label": "单 Fold 回测次数上限", "type": "int",
      "help": "回测独立计时（墙钟回补推理 deadline），该值限制其总次数。"},
     {"key": "max_llm_calls", "group": "预算与验收", "label": "单 Fold 模型调用上限", "type": "int",
-     "help": "每个 Fold 和元学习会话的模型调用总次数上限；主循环、Explore 与上下文压缩共享同一计数。"},
+     "help": "每个 Fold 和元学习会话的模型调用总次数上限；主循环、子代理与上下文压缩共享同一计数。"},
     {"key": "nl_failure_policy", "group": "预算与验收", "label": "NL 失败策略", "type": "choice",
      "choice_labels": {"return_error_with_audit": "返回可审计错误，策略自行降级（推荐）", "fail": "任一 NL 调用失败即终止回测"},
      "choices": ["return_error_with_audit", "fail"],

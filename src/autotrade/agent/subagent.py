@@ -1,13 +1,14 @@
-"""One-level Sub Agent for a regular Fold or Meta session (tool name ``explore``).
+"""One-level Sub Agent for a regular Fold or Meta session (tool name ``agent``).
 
-Parents call ``explore(role=..., task=...)`` like any other registered tool:
-the registry validates the arguments, :class:`ExploreTool` hands them to the
+Parents call ``agent(agent=<role>, task=...)`` like any other registered tool:
+the registry validates the arguments, :class:`AgentTool` hands them to the
 runner, and the runner starts the child in the background and returns at once.
 Roles are the unified set ``auditor``, ``developer``, ``general-purpose``,
 ``Explore``; ``Explore`` is the optional read-only discovery role. Depth is
 one. The child shares the parent SafeWorkspace, SessionBudgetLLM calls,
-inference time budget, and Trace. Failures return a structured observation;
-they do not finish the parent session.
+inference time budget, and Trace. A finished child keeps its transcript for
+the session so ``resume=<task_id>`` can hand it a follow-up task. Failures
+return a structured observation; they do not finish the parent session.
 """
 
 from __future__ import annotations
@@ -52,12 +53,13 @@ from .compact import (
     safe_error_summary,
 )
 
-EXPLORE_MODES = frozenset({"fold", "meta"})
-EXPLORE_ROLES = ("auditor", "developer", "general-purpose", "Explore")
-EXPLORE_THINKING_LEVELS = ("off", "low", "medium", "high", "max")
-DEFAULT_EXPLORE_MAX_CONCURRENT = 4
-DEFAULT_EXPLORE_THINKING = "medium"
-EXPLORE_DESCRIPTION_MAX_CHARS = 200
+SUBAGENT_MODES = frozenset({"fold", "meta"})
+SUBAGENT_ROLES = ("auditor", "developer", "general-purpose", "Explore")
+SUBAGENT_THINKING_LEVELS = ("off", "low", "medium", "high", "max")
+DEFAULT_SUBAGENT_MAX_CONCURRENT = 4
+DEFAULT_SUBAGENT_THINKING = "medium"
+SUBAGENT_DESCRIPTION_MAX_CHARS = 200
+SUBAGENT_TASK_ID_PREFIX = "agent_"
 _CALL_BUDGET_EXHAUSTED = "call budget exhausted"
 _NATIVE_WINDOW_FALLBACK = 262_144
 
@@ -89,7 +91,7 @@ _FOLD_WRITE_PROMPT = """\
 
 # 边界
 - 先读 `inputs/skills_index.json`，再从已挂载数据、单位引用、制品和参考材料中自主发现任务所需证据；skill 脚本不自动执行。把有复用价值的知识写入 skill，而不是堆入策略或汇报。
-- 只完成父任务；不得嵌套 explore、读取 Test/Held-out、改变权威 PRIOR、安装依赖、替父 Agent 提问或伪造结果。分钟和竞价不是策略时钟。
+- 只完成父任务；不得再委托子代理、读取 Test/Held-out、改变权威 PRIOR、安装依赖、替父 Agent 提问或伪造结果。分钟和竞价不是策略时钟。
 - 工具 schema 决定实际能力。同一轮的只读调用并发执行；写、检查与 shell 按因果顺序分轮调用。shell 只做有界前台工作，不启动后台任务、sleep/等待包装、轮询状态或隐藏错误。
 
 # 返回
@@ -102,19 +104,19 @@ _FOLD_READ_PROMPT = """\
 
 # 边界
 - 先读 `inputs/skills_index.json`，再从已挂载数据、单位引用、制品和参考材料中自主发现任务所需证据；skill 脚本不自动执行。
-- 工具 schema 决定实际能力；同一轮的多个只读调用并发执行。不得嵌套 explore、读取 Test/Held-out、安装依赖或伪造结果；分钟和竞价不是策略时钟。
+- 工具 schema 决定实际能力；同一轮的多个只读调用并发执行。不得再委托子代理、读取 Test/Held-out、安装依赖或伪造结果；分钟和竞价不是策略时钟。
 
 # 返回
 用简洁中文说明结论、关键证据、限制和建议，然后停止。\
 """
 
-META_EXPLORE_SYSTEM_PROMPT = """\
+META_SUBAGENT_SYSTEM_PROMPT = """\
 # 身份
 你是 Meta 的一级只读 sub-agent。只完成父任务并提出有证据的候选；不能写策略、models、skills 或 PRIOR，也不能验收或结束会话。
 
 # 边界
 - 先读 `inputs/skills_index.json`，再从 `inputs/meta_context.json` 及其挂载引用中自主发现任务所需证据；skill 脚本不自动执行。
-- 工具 schema 决定实际能力；同一轮的多个只读调用并发执行。不得嵌套 explore、读取 Test/Held-out 原始记录、改变 PIT/隐藏阶段边界、访问外部资料、修改宿主代码或伪造结果。
+- 工具 schema 决定实际能力；同一轮的多个只读调用并发执行。不得再委托子代理、读取 Test/Held-out 原始记录、改变 PIT/隐藏阶段边界、访问外部资料、修改宿主代码或伪造结果。
 
 # 返回
 用简洁中文说明结论、关键证据、限制和建议；不要复制 raw traces 或写逐 Fold Test 数字。\
@@ -132,24 +134,38 @@ _META_ROLE_MISSIONS = {
     "general-purpose": "只读处理一个有界跨域问题",
     "Explore": "只读定位未知位置、接口或材料",
 }
-EXPLORE_SYSTEM_PROMPT = _FOLD_WRITE_PROMPT.format(
+SUBAGENT_SYSTEM_PROMPT = _FOLD_WRITE_PROMPT.format(
     role="developer",
     mission=_FOLD_ROLE_MISSIONS["developer"],
 )
 
-EXPLORE_TOOL_DESCRIPTION = (
-    "启动一层后台子代理并立即返回；结果稍后以 explore_completed 消息送回，"
-    "同一轮可发起多个。developer/general-purpose 可写策略、模型与 skills；"
-    "auditor/Explore 只读。子代理不能嵌套、正式回测、结束会话、改 PRIOR 或自行验收。"
+# The single place the sub-agent mechanism is explained to the model; the
+# system prompt only points here. Modeled on Pi's Agent tool description.
+AGENT_TOOL_DESCRIPTION = (
+    "启动一个后台子代理并立即返回；它完成后结果以 subagent_completed 消息送回，不要轮询。"
+    "用于读库、探索、计算、实现或审计等能独立完成的任务：把大量阅读、计算和实现留在子代理里以保护主上下文；"
+    "目标已知的单个文件直接用 read_file/grep/glob；不要重复子代理正在做的搜索。"
+    "同一轮可发起多个（默认同时运行 4 个，超出排队），并行的子代理范围须互斥。"
+    "角色能力：developer/general-purpose 有 Sandbox shell（可跑 Python 读 PIT parquet、算 IC 表、做冒烟测试）并可写策略、模型与 skills；"
+    "auditor/Explore 只能用 glob/grep/read_file 读文本与代码，不能执行任何命令——任何需要计算的任务用 general-purpose 或 developer；"
+    "Meta 会话中全部角色只读。子代理只看到自己的角色提示和你的 task（inherit_context=true 时另带你的对话），"
+    "所以 task 要写全路径、约束和期望的返回格式。thinking：常规阅读 low/medium，审计与根因 high，关键策略实现 high/max。"
+    "子代理不能嵌套、正式回测、结束会话、改 PRIOR 或自行验收；它的汇报描述意图而非结果，其写入须由你验收。"
+    "resume=<task_id> 让一个已完成的子代理在自己的对话上继续新的 task（保留它读过的上下文，角色须相同）；"
+    "仍在运行或未知的 task_id 会被拒绝。"
 )
 
-EXPLORE_TOOL_SPEC = ToolSpec(
-    "explore",
-    EXPLORE_TOOL_DESCRIPTION,
+AGENT_TOOL_SPEC = ToolSpec(
+    "agent",
+    AGENT_TOOL_DESCRIPTION,
     {
         "type": "object",
         "properties": {
-            "role": {"type": "string", "enum": list(EXPLORE_ROLES)},
+            "agent": {
+                "type": "string",
+                "enum": list(SUBAGENT_ROLES),
+                "description": "developer / general-purpose：有 shell、可执行 Python 与写策略；auditor / Explore：只读文本与代码，不能执行。"
+            },
             "task": {
                 "type": "string",
                 "minLength": 1,
@@ -158,8 +174,8 @@ EXPLORE_TOOL_SPEC = ToolSpec(
             "description": {
                 "type": "string",
                 "minLength": 1,
-                "maxLength": EXPLORE_DESCRIPTION_MAX_CHARS,
-                "description": "Trace 中显示的一句话标签。",
+                "maxLength": SUBAGENT_DESCRIPTION_MAX_CHARS,
+                "description": "控制台显示的一句话标签。",
             },
             "max_turns": {
                 "type": "integer",
@@ -168,29 +184,34 @@ EXPLORE_TOOL_SPEC = ToolSpec(
             },
             "thinking": {
                 "type": "string",
-                "enum": list(EXPLORE_THINKING_LEVELS),
-                "description": "子代理思考强度；省略为 medium，不继承父会话。off 关闭扩展思考。",
+                "enum": list(SUBAGENT_THINKING_LEVELS),
+                "description": "子代理思考强度；省略为 medium，不继承父会话。常规阅读 low/medium，审计与根因 high，关键实现 high/max；off 关闭扩展思考。",
             },
             "inherit_context": {
                 "type": "boolean",
-                "description": "true 时把当前对话分叉给子代理；默认 false，独立上下文。",
+                "description": "true 时把当前对话分叉给子代理；默认 false，独立上下文。resume 时忽略。",
+            },
+            "resume": {
+                "type": "string",
+                "minLength": 1,
+                "description": "本会话中一个已完成子代理的 task_id：在它自己的对话上继续执行新的 task。",
             },
         },
-        "required": ["role", "task"],
+        "required": ["agent", "task"],
         "additionalProperties": False,
     },
 )
 
 
-class ExploreTool:
-    """The parent-facing ``explore`` tool.
+class AgentTool:
+    """The parent-facing ``agent`` tool.
 
     Registered in the parent's tool registry so arguments go through the
     standard schema validation path; ``launch`` is the runner's background
     dispatcher and returns the ``started`` observation.
     """
 
-    spec = EXPLORE_TOOL_SPEC
+    spec = AGENT_TOOL_SPEC
 
     def __init__(
         self, launch: Callable[[Mapping[str, object]], Mapping[str, object]]
@@ -201,18 +222,18 @@ class ExploreTool:
         return ToolResult(True, value=dict(self._launch(arguments)))
 
 
-def _explore_mode(mode: str) -> str:
+def _subagent_mode(mode: str) -> str:
     if mode in {"meta", "meta_learning"}:
         return "meta"
     if mode == "fold":
         return "fold"
-    raise ValueError("Explore mode must be fold or meta")
+    raise ValueError("Sub-agent mode must be fold or meta")
 
 
-def allowed_explore_tools(mode: str, role: str | None = None) -> frozenset[str]:
-    resolved = _explore_mode(mode)
-    if role is not None and role not in EXPLORE_ROLES:
-        raise ValueError(f"Explore role is not allowed: {role}")
+def allowed_subagent_tools(mode: str, role: str | None = None) -> frozenset[str]:
+    resolved = _subagent_mode(mode)
+    if role is not None and role not in SUBAGENT_ROLES:
+        raise ValueError(f"Sub-agent role is not allowed: {role}")
     if resolved == "meta":
         return _META_ROLE_TOOLS
     if role is None:
@@ -223,42 +244,42 @@ def allowed_explore_tools(mode: str, role: str | None = None) -> frozenset[str]:
     return _FOLD_ROLE_TOOLS[role]
 
 
-def explore_system_prompt(mode: str, role: str) -> str:
-    resolved = _explore_mode(mode)
+def subagent_system_prompt(mode: str, role: str) -> str:
+    resolved = _subagent_mode(mode)
     if resolved == "fold":
         mission = _FOLD_ROLE_MISSIONS.get(role)
         if mission is None:
-            raise ValueError(f"Explore role is not allowed: {role}")
+            raise ValueError(f"Sub-agent role is not allowed: {role}")
         if role in {"developer", "general-purpose"}:
             return _FOLD_WRITE_PROMPT.format(role=role, mission=mission)
         return _FOLD_READ_PROMPT.format(role=role, mission=mission)
     mission = _META_ROLE_MISSIONS.get(role)
     if mission is None:
-        raise ValueError(f"Explore role is not allowed: {role}")
+        raise ValueError(f"Sub-agent role is not allowed: {role}")
     return (
         f"# 本任务角色\n你的角色是 `{role}`：{mission}。\n\n"
-        + META_EXPLORE_SYSTEM_PROMPT
+        + META_SUBAGENT_SYSTEM_PROMPT
     )
 
 
-def normalize_explore_thinking(value: object) -> str | None:
+def normalize_subagent_thinking(value: object) -> str | None:
     """Return a canonical thinking level.
 
-    Omitted, empty, or inherit aliases use ``DEFAULT_EXPLORE_THINKING``
+    Omitted, empty, or inherit aliases use ``DEFAULT_SUBAGENT_THINKING``
     (medium) and do not inherit the parent session's reasoning intensity.
     """
 
     if value is None:
-        return DEFAULT_EXPLORE_THINKING
+        return DEFAULT_SUBAGENT_THINKING
     if not isinstance(value, str):
-        raise ValueError("explore.thinking must be a string")
+        raise ValueError("agent.thinking must be a string")
     text = value.strip().lower()
     if text in {"", "inherit", "parent"}:
-        return DEFAULT_EXPLORE_THINKING
+        return DEFAULT_SUBAGENT_THINKING
     text = {"minimal": "low", "xhigh": "high"}.get(text, text)
-    if text not in EXPLORE_THINKING_LEVELS:
+    if text not in SUBAGENT_THINKING_LEVELS:
         raise ValueError(
-            "explore.thinking must be one of: " + ", ".join(EXPLORE_THINKING_LEVELS)
+            "agent.thinking must be one of: " + ", ".join(SUBAGENT_THINKING_LEVELS)
         )
     return text
 
@@ -282,7 +303,7 @@ def llm_with_thinking(proxy: LLMProxy, thinking: str | None) -> LLMProxy:
 
 
 @dataclass(frozen=True)
-class ExploreSubAgentConfig:
+class SubAgentConfig:
     per_call_timeout_seconds: float | None = None
     # None = native model window, clamped per call to remaining context.
     max_tokens: int | None = None
@@ -291,22 +312,22 @@ class ExploreSubAgentConfig:
     # None = no extra child wall clock; the parent time budget is the cap.
     deadline_seconds: float | None = None
     # Children running at once; further launches queue in the same pool.
-    max_concurrent: int = DEFAULT_EXPLORE_MAX_CONCURRENT
+    max_concurrent: int = DEFAULT_SUBAGENT_MAX_CONCURRENT
 
     def __post_init__(self) -> None:
         if self.per_call_timeout_seconds is not None and self.per_call_timeout_seconds <= 0:
-            raise ValueError("Explore per_call_timeout_seconds must be positive")
+            raise ValueError("Sub-agent per_call_timeout_seconds must be positive")
         if self.max_tokens is not None and self.max_tokens <= 0:
-            raise ValueError("Explore max_tokens must be positive")
+            raise ValueError("Sub-agent max_tokens must be positive")
         if self.max_rounds is not None and self.max_rounds <= 0:
-            raise ValueError("Explore max_rounds must be positive")
+            raise ValueError("Sub-agent max_rounds must be positive")
         if self.deadline_seconds is not None and self.deadline_seconds <= 0:
-            raise ValueError("Explore deadline_seconds must be positive")
+            raise ValueError("Sub-agent deadline_seconds must be positive")
         if self.max_concurrent <= 0:
-            raise ValueError("Explore max_concurrent must be positive")
+            raise ValueError("Sub-agent max_concurrent must be positive")
 
 
-class ExploreSubAgentEngine(SessionTimeBudgetAware):
+class SubAgentEngine(SessionTimeBudgetAware):
     """Bounded native-tool loop over the shared parent workspace."""
 
     def __init__(
@@ -314,32 +335,32 @@ class ExploreSubAgentEngine(SessionTimeBudgetAware):
         *,
         llm: LLMProxy,
         tools: ToolRegistry,
-        config: ExploreSubAgentConfig | None = None,
+        config: SubAgentConfig | None = None,
         deadline_at: datetime | None = None,
         time_budget: InferenceTimeBudget | None = None,
         event_sink: Callable[[str, dict[str, object]], None] | None = None,
         mode: str = "fold",
         cancel_event: threading.Event | None = None,
     ) -> None:
-        if mode not in EXPLORE_MODES:
-            raise ValueError("Explore mode must be fold or meta")
+        if mode not in SUBAGENT_MODES:
+            raise ValueError("Sub-agent mode must be fold or meta")
         self.mode = mode
         self.system_prompt = (
-            META_EXPLORE_SYSTEM_PROMPT if mode == "meta" else EXPLORE_SYSTEM_PROMPT
+            META_SUBAGENT_SYSTEM_PROMPT if mode == "meta" else SUBAGENT_SYSTEM_PROMPT
         )
         self.llm = llm
         self.tools = tools
-        self.config = config or ExploreSubAgentConfig()
+        self.config = config or SubAgentConfig()
         self.deadline_at = deadline_at
         self.event_sink = event_sink
         self._cancel_event = cancel_event or threading.Event()
         bindings = (
-            (TimeBudgetBinding("explore_llm", llm.session_time_budget),)
+            (TimeBudgetBinding("subagent_llm", llm.session_time_budget),)
             if isinstance(llm, SessionTimeBudgetAware)
             else ()
         )
         self.time_budget = validate_time_budget_bindings(
-            time_budget, bindings, owner="Explore"
+            time_budget, bindings, owner="Sub-agent"
         )
         self._validate_tools()
 
@@ -356,7 +377,13 @@ class ExploreSubAgentEngine(SessionTimeBudgetAware):
     def _cancelled(self) -> bool:
         return self._cancel_event.is_set()
 
-    def run(
+    def run(self, task: str, **kwargs: object) -> dict[str, object]:
+        """Run one child and return its result record (see ``run_with_transcript``)."""
+
+        result, _transcript = self.run_with_transcript(task, **kwargs)  # type: ignore[arg-type]
+        return result
+
+    def run_with_transcript(
         self,
         task: str,
         *,
@@ -366,26 +393,35 @@ class ExploreSubAgentEngine(SessionTimeBudgetAware):
         thinking: str | None = None,
         inherit_context: bool = False,
         parent_messages: Sequence[ChatMessage] | None = None,
+        transcript: Sequence[ChatMessage] | None = None,
+        resumed_from: str | None = None,
         description: str = "",
         task_id: str | None = None,
-    ) -> dict[str, object]:
+    ) -> tuple[dict[str, object], tuple[ChatMessage, ...]]:
+        """Run one child; return its result record and final transcript.
+
+        ``transcript`` resumes a finished child's own conversation with the
+        new task appended; otherwise the child starts from its role prompt,
+        optionally forked from ``parent_messages``.
+        """
+
         if not task.strip():
-            raise ValueError("Explore task cannot be empty")
-        allowed = allowed_explore_tools(self.mode, role)
+            raise ValueError("Sub-agent task cannot be empty")
+        allowed = allowed_subagent_tools(self.mode, role)
         self._validate_tools()
         rounds_limit = (
             max_rounds
             if isinstance(max_rounds, int) and max_rounds > 0
             else self.config.max_rounds
         )
-        task_id = task_id or f"explore_{uuid.uuid4().hex[:12]}"
+        task_id = task_id or f"{SUBAGENT_TASK_ID_PREFIX}{uuid.uuid4().hex[:12]}"
         child_cap = (
             time.monotonic() + self.config.deadline_seconds
             if self.config.deadline_seconds is not None
             else float("inf")
         )
         deadline = min(child_cap, self._deadline_monotonic())
-        thinking = normalize_explore_thinking(thinking)
+        thinking = normalize_subagent_thinking(thinking)
         llm = llm_with_thinking(self.llm, thinking)
         started = {
             "task_id": task_id,
@@ -399,21 +435,30 @@ class ExploreSubAgentEngine(SessionTimeBudgetAware):
         }
         if description:
             started["description"] = description
-        self._emit("explore_task", started)
-        messages = [ChatMessage("system", explore_system_prompt(self.mode, role))]
-        if inherit_context and parent_messages:
-            # The parent snapshot is taken mid-batch: its last assistant turn
-            # may carry tool calls (this explore among them) with no results
-            # yet, so the fork ends at the last answered turn.
-            messages.extend(
-                drop_trailing_unanswered_tool_calls(
-                    [
-                        _copy_chat_message(message)
-                        for message in parent_messages
-                        if message.role != "system"
-                    ]
-                )
+        if resumed_from:
+            started["resumed_from"] = resumed_from
+        self._emit("subagent_task", started)
+        if transcript:
+            # Resume: the child's own conversation continues; a transcript cut
+            # off mid-batch still ends at its last answered turn.
+            messages = drop_trailing_unanswered_tool_calls(
+                [_copy_chat_message(message) for message in transcript]
             )
+        else:
+            messages = [ChatMessage("system", subagent_system_prompt(self.mode, role))]
+            if inherit_context and parent_messages:
+                # The parent snapshot is taken mid-batch: its last assistant
+                # turn may carry tool calls (this launch among them) with no
+                # results yet, so the fork ends at the last answered turn.
+                messages.extend(
+                    drop_trailing_unanswered_tool_calls(
+                        [
+                            _copy_chat_message(message)
+                            for message in parent_messages
+                            if message.role != "system"
+                        ]
+                    )
+                )
         messages.append(ChatMessage("user", task.strip()))
         usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         rounds = 0
@@ -426,11 +471,11 @@ class ExploreSubAgentEngine(SessionTimeBudgetAware):
             while rounds_limit is None or rounds < rounds_limit:
                 if self._cancelled():
                     status = "cancelled"
-                    error = "Explore cancelled"
+                    error = "Sub-agent cancelled"
                     break
                 if self._deadline_reached(deadline):
                     status = "timeout"
-                    error = "Explore deadline reached"
+                    error = "Sub-agent deadline reached"
                     break
                 rounds += 1
                 provider_tools = self._provider_tools(allowed)
@@ -454,9 +499,9 @@ class ExploreSubAgentEngine(SessionTimeBudgetAware):
                     error = safe_error_summary(exc)
                     if self._cancelled():
                         status = "cancelled"
-                        error = "Explore cancelled"
+                        error = "Sub-agent cancelled"
                         break
-                    if _is_nonretryable_explore_error(exc) or self._deadline_reached(
+                    if _is_nonretryable_subagent_error(exc) or self._deadline_reached(
                         deadline
                     ):
                         status = (
@@ -491,7 +536,7 @@ class ExploreSubAgentEngine(SessionTimeBudgetAware):
                     )
                 )
                 self._emit(
-                    "explore_llm",
+                    "subagent_llm",
                     {
                         "task_id": task_id,
                         "round": rounds,
@@ -505,7 +550,7 @@ class ExploreSubAgentEngine(SessionTimeBudgetAware):
                 )
                 if self._cancelled():
                     status = "cancelled"
-                    error = "Explore cancelled"
+                    error = "Sub-agent cancelled"
                     break
                 if not response.tool_calls:
                     text = (response.content or "").strip()
@@ -543,7 +588,7 @@ class ExploreSubAgentEngine(SessionTimeBudgetAware):
                         )
                     )
                     self._emit(
-                        "explore_tool",
+                        "subagent_tool",
                         {
                             "task_id": task_id,
                             "round": rounds,
@@ -584,6 +629,8 @@ class ExploreSubAgentEngine(SessionTimeBudgetAware):
                 llm_calls += 1
                 _add_usage(usage, response.usage)
                 summary = response.content.strip()
+                if summary:
+                    messages.append(ChatMessage("assistant", summary))
         except Exception as exc:  # noqa: BLE001 - a sub-agent failure must not kill the parent
             status = "timeout" if isinstance(exc, TimeoutError) else "error"
             error = safe_error_summary(exc)
@@ -603,16 +650,18 @@ class ExploreSubAgentEngine(SessionTimeBudgetAware):
             "thinking": thinking or "inherit",
             "inherit_context": bool(inherit_context),
         }
+        if resumed_from:
+            result["resumed_from"] = resumed_from
         if error:
             result["error"] = error
         self._emit(
-            "explore",
+            "subagent",
             {
                 **result,
                 "parent_call_id": parent_call_id,
             },
         )
-        return result
+        return result, tuple(messages)
 
     def _output_tokens(
         self,
@@ -657,9 +706,9 @@ class ExploreSubAgentEngine(SessionTimeBudgetAware):
             if rejections[index]:
                 return call, {"ok": False, "error": rejections[index]}, False
             if self._cancelled():
-                return call, {"ok": False, "error": "Explore cancelled"}, False
+                return call, {"ok": False, "error": "Sub-agent cancelled"}, False
             if self._deadline_reached(deadline):
-                return call, {"ok": False, "error": "Explore deadline reached"}, False
+                return call, {"ok": False, "error": "Sub-agent deadline reached"}, False
             return call, self.tools.invoke(call.name, call.arguments).to_record(), True
 
         # Same rule as the parent runner: the whole batch runs concurrently
@@ -711,17 +760,17 @@ class ExploreSubAgentEngine(SessionTimeBudgetAware):
     def _validate_tools(self) -> None:
         # The role tables are the single allowlist: nesting, backtest, finish,
         # rollback, and ask_user are absent from every role by construction.
-        allowed = allowed_explore_tools(self.mode)
+        allowed = allowed_subagent_tools(self.mode)
         for spec in self.tools.specs():
             if spec.name not in allowed:
-                raise ValueError(f"Explore tool is not allowed: {spec.name}")
+                raise ValueError(f"Sub-agent tool is not allowed: {spec.name}")
 
     def _emit(self, event: str, payload: dict[str, object]) -> None:
         if self.event_sink is not None:
             self.event_sink(event, dict(payload))
 
 
-def _is_nonretryable_explore_error(exc: Exception) -> bool:
+def _is_nonretryable_subagent_error(exc: Exception) -> bool:
     if isinstance(exc, (SessionInterrupt, TimeoutError)):
         return True
     text = f"{exc} {safe_error_summary(exc)}"
@@ -749,7 +798,7 @@ def _add_usage(total: dict[str, int], usage: object) -> None:
 
 def _reject_tool_call(spec: ToolSpec | None, *, allowed: frozenset[str]) -> str:
     if spec is None:
-        return "unknown Explore tool"
+        return "unknown sub-agent tool"
     if spec.name not in allowed:
-        return f"Explore tool is not allowed: {spec.name}"
+        return f"Sub-agent tool is not allowed: {spec.name}"
     return ""

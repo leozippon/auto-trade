@@ -223,12 +223,12 @@ def project_trace_blocks(events: object) -> list[dict[str, object]]:
                 block["model"] = model
             blocks.append(block)
             continue
-        task_id = _explore_event_task_id(event)
+        task_id = _subagent_event_task_id(event)
         if task_id is not None:
             state = subagents.get(task_id)
             if state is None:
                 state = subagents[task_id] = _SubagentState()
-            if kind in {"explore_tool", "explore_tool_started"}:
+            if _event_kind(event) in {"subagent_tool", "subagent_tool_started"}:
                 state.tools.add(event, seq)
             _observe_subagent(interval, state, event, task_id, seq)
             continue
@@ -243,7 +243,7 @@ _STATS_LOCK = threading.Lock()
 
 
 def trace_stats(path: Path) -> dict[str, object]:
-    """Incrementally aggregate event/tool/token counts and unique Explore tasks."""
+    """Incrementally aggregate event/tool/token counts and unique sub-agent tasks."""
 
     with _STATS_LOCK:
         path = Path(path)
@@ -291,7 +291,7 @@ def trace_stats(path: Path) -> dict[str, object]:
             event = _decode_event(raw)
             kind = str(event.get("event_type") or "event")
             counts[kind] = _as_int(counts.get(kind)) + 1
-            task_id = _explore_event_task_id(event)
+            task_id = _subagent_event_task_id(event)
             if task_id is not None:
                 task_ids.add(task_id)
                 # A finished task reports authoritative totals; a live one is
@@ -301,7 +301,7 @@ def trace_stats(path: Path) -> dict[str, object]:
                     totals = _as_mapping(event.get("usage_totals"))
                     if totals:
                         subagent_usage[task_id] = _usage_row(totals)
-                elif kind == "explore_llm" and task_id not in ended_ids:
+                elif _event_kind(event) == "subagent_llm" and task_id not in ended_ids:
                     _add_usage(
                         subagent_usage.setdefault(task_id, _new_usage()),
                         _as_mapping(event.get("usage")),
@@ -418,26 +418,45 @@ def _decode_event(raw: bytes) -> dict[str, object]:
 
 
 def _is_main_agent_llm_call(event: dict[str, object]) -> bool:
-    """Parent-session ``llm_call`` rows; Explore child calls carry a task id."""
+    """Parent-session ``llm_call`` rows; sub-agent child calls carry a task id."""
 
     if str(event.get("event_type") or "") != "llm_call":
         return False
-    if _explore_event_task_id(event) is not None:
+    if _subagent_event_task_id(event) is not None:
         return False
     task_id = event.get("task_id")
     return not (isinstance(task_id, str) and task_id.strip())
 
 
-def _explore_event_task_id(event: dict[str, object]) -> str | None:
-    """Return a unique Explore sub-agent task id, or None.
+_LEGACY_SUBAGENT_KINDS = {
+    "explore": "subagent",
+    "explore_task": "subagent_task",
+    "explore_task_started": "subagent_task_started",
+    "explore_llm": "subagent_llm",
+    "explore_tool": "subagent_tool",
+    "explore_tool_started": "subagent_tool_started",
+    "explore_attempt": "subagent_attempt",
+}
+
+
+def _event_kind(event: dict[str, object]) -> str:
+    """The event type, with the pre-rename ``explore_*`` names of traces
+    written by earlier sessions mapped onto the current ``subagent_*`` names."""
+
+    kind = str(event.get("event_type") or "")
+    return _LEGACY_SUBAGENT_KINDS.get(kind, kind)
+
+
+def _subagent_event_task_id(event: dict[str, object]) -> str | None:
+    """Return a unique sub-agent task id, or None.
 
     The count is launched tasks, not sub-agent LLM or tool calls. Prefer
-    ``explore_task_started`` when present; older traces may omit the start
-    record, so any ``explore`` / ``explore_*`` event with a non-empty
+    ``subagent_task_started`` when present; older traces may omit the start
+    record, so any ``subagent`` / ``subagent_*`` event with a non-empty
     ``task_id`` joins the same set. Prompt text is never parsed.
     """
-    kind = str(event.get("event_type") or "")
-    if kind != "explore" and not kind.startswith("explore_"):
+    kind = _event_kind(event)
+    if kind != "subagent" and not kind.startswith("subagent_"):
         return None
     value = event.get("task_id")
     if not isinstance(value, str):
@@ -630,7 +649,7 @@ class _Interval:
 
 
 class _SubagentState:
-    """One card per Explore task: launch facts, live progress, final totals."""
+    """One card per sub-agent task: launch facts, live progress, final totals."""
 
     def __init__(self) -> None:
         self.block: dict[str, object] | None = None
@@ -658,7 +677,7 @@ def _observe_subagent(
     task_id: str,
     seq: int,
 ) -> None:
-    """Fold one Explore event into the task's single display block.
+    """Fold one sub-agent event into the task's single display block.
 
     A task emits exactly one block, created where it was launched and updated
     in place, so a finished sub-agent's report is rendered once.
@@ -666,7 +685,7 @@ def _observe_subagent(
 
     phase = _subagent_phase(event)
     _absorb_subagent_text(state, event)
-    if str(event.get("event_type") or "") == "explore_llm":
+    if _event_kind(event) == "subagent_llm":
         state.llm_calls += 1
         state.rounds = max(state.rounds, _as_int(event.get("round")), state.llm_calls)
         _add_usage(state.usage, _as_mapping(event.get("usage")))
@@ -761,13 +780,13 @@ def _refresh_subagent_block(state: _SubagentState) -> None:
 
 
 def _subagent_phase(event: dict[str, object]) -> str:
-    kind = str(event.get("event_type") or "")
+    kind = _event_kind(event)
     status = str(event.get("status") or "").strip().lower()
-    if kind == "explore_task_started":
+    if kind == "subagent_task_started":
         return "started"
-    if kind == "explore":
+    if kind == "subagent":
         return "ended"
-    if kind == "explore_task":
+    if kind == "subagent_task":
         return "ended" if status in _TERMINAL_SUBAGENT else "started"
     if status in _TERMINAL_SUBAGENT:
         return "ended"

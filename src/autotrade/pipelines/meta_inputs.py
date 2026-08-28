@@ -17,11 +17,11 @@ from autotrade.pipelines.fold_analysis import read_strategy_files
 
 _AGENT_TRACE_EVENT_TYPES = frozenset(
     {
-        "explore",
-        "explore_attempt",
-        "explore_llm",
-        "explore_task",
-        "explore_tool",
+        "subagent",
+        "subagent_attempt",
+        "subagent_llm",
+        "subagent_task",
+        "subagent_tool",
         "llm_call",
         "session_end",
         "session_start",
@@ -268,7 +268,7 @@ def _compact_agent_event(event: Mapping[str, object]) -> dict[str, object]:
         "call_index": event.get("call_index"),
         "model": event.get("model"),
     }
-    if event_type in {"explore_task", "explore"}:
+    if event_type in {"subagent_task", "subagent"}:
         if event.get("role"):
             item["role"] = event.get("role")
         if event.get("summary"):
@@ -276,7 +276,7 @@ def _compact_agent_event(event: Mapping[str, object]) -> dict[str, object]:
         for key in ("rounds", "tool_calls", "llm_calls"):
             if event.get(key) is not None:
                 item[key] = event.get(key)
-    elif event_type == "explore_llm":
+    elif event_type == "subagent_llm":
         usage = event.get("usage")
         if isinstance(usage, Mapping):
             item["usage"] = {
@@ -284,9 +284,9 @@ def _compact_agent_event(event: Mapping[str, object]) -> dict[str, object]:
                 for key in ("prompt_tokens", "completion_tokens", "total_tokens")
                 if key in usage
             }
-    elif event_type == "explore_tool":
+    elif event_type == "subagent_tool":
         _attach_result_status(item, event.get("result"), event)
-    elif event_type == "explore_attempt":
+    elif event_type == "subagent_attempt":
         if event.get("attempt") is not None:
             item["attempt"] = event.get("attempt")
         if event.get("role"):
@@ -320,10 +320,10 @@ def _compact_agent_event(event: Mapping[str, object]) -> dict[str, object]:
     elif event_type == "session_end":
         if event.get("llm_calls") is not None:
             item["llm_calls"] = event.get("llm_calls")
-        if event.get("explore_attempts") is not None:
-            item["explore_attempts"] = event.get("explore_attempts")
-        if event.get("explored_roles"):
-            item["explored_roles"] = event.get("explored_roles")
+        if event.get("subagent_attempts") is not None:
+            item["subagent_attempts"] = event.get("subagent_attempts")
+        if event.get("subagent_roles"):
+            item["subagent_roles"] = event.get("subagent_roles")
     elif event_type == "wrap_up_started":
         if event.get("remaining_seconds") is not None:
             item["remaining_seconds"] = event.get("remaining_seconds")
@@ -399,9 +399,9 @@ def build_agent_process_summary(
     Counts only; no task body, paths, Test, or Held-out values.
     """
     llm_calls = 0
-    explore_attempts = 0
-    explore_completed = 0
-    explore_failed = 0
+    subagent_attempts = 0
+    subagent_completed = 0
+    subagent_failed = 0
     daily_backtest = 0
     tool_failures = 0
     failure_counts: dict[tuple[str, str], int] = {}
@@ -416,7 +416,7 @@ def build_agent_process_summary(
     session_end_llm: int | None = None
     attempt_events = 0
     task_events = 0
-    tool_explore = 0
+    tool_agent = 0
     for event in events:
         event_type = str(event.get("event_type") or "")
         if event_type == "llm_call":
@@ -425,42 +425,42 @@ def build_agent_process_summary(
             raw_calls = event.get("llm_calls")
             if isinstance(raw_calls, int) and not isinstance(raw_calls, bool):
                 session_end_llm = raw_calls
-            raw_attempts = event.get("explore_attempts")
+            raw_attempts = event.get("subagent_attempts")
             if isinstance(raw_attempts, int) and not isinstance(raw_attempts, bool):
                 session_end_attempts = raw_attempts
-        elif event_type == "explore_attempt":
+        elif event_type == "subagent_attempt":
             attempt_events += 1
             if event.get("ok") == False and not event.get("status"):
-                explore_failed += 1
-        elif event_type == "explore_task":
+                subagent_failed += 1
+        elif event_type == "subagent_task":
             task_events += 1
-        elif event_type == "explore":
+        elif event_type == "subagent":
             status = str(event.get("status") or "")
             if status == "completed":
-                explore_completed += 1
+                subagent_completed += 1
             elif status in {"error", "timeout"}:
-                explore_failed += 1
+                subagent_failed += 1
         elif event_type == "tool_call":
             tool = str(event.get("tool") or "")
-            if tool == "explore":
-                tool_explore += 1
+            if tool == "agent":
+                tool_agent += 1
             elif tool == "daily_backtest":
                 daily_backtest += 1
             if event.get("ok") == False:
                 add_failure(tool, event.get("error"))
-        elif event_type == "explore_tool" and event.get("ok") == False:
-            add_failure(str(event.get("tool") or "explore"), event.get("error"))
+        elif event_type == "subagent_tool" and event.get("ok") == False:
+            add_failure(str(event.get("tool") or "agent"), event.get("error"))
 
     if session_end_llm is not None:
         llm_calls = session_end_llm
     if session_end_attempts is not None:
-        explore_attempts = session_end_attempts
+        subagent_attempts = session_end_attempts
     elif attempt_events:
-        explore_attempts = attempt_events
+        subagent_attempts = attempt_events
     elif task_events:
-        explore_attempts = task_events
+        subagent_attempts = task_events
     else:
-        explore_attempts = tool_explore
+        subagent_attempts = tool_agent
     repeated = [
         {"tool": tool, "count": count, "error": error}
         for (tool, error), count in sorted(
@@ -470,10 +470,10 @@ def build_agent_process_summary(
     ]
     return {
         "llm_calls": llm_calls,
-        "explore": {
-            "attempts": explore_attempts,
-            "completed": explore_completed,
-            "failed": explore_failed,
+        "subagent": {
+            "attempts": subagent_attempts,
+            "completed": subagent_completed,
+            "failed": subagent_failed,
         },
         "tool_failures": tool_failures,
         "daily_backtest": daily_backtest,

@@ -43,6 +43,7 @@ from autotrade.environment.runtime import (
     write_json_atomic,
 )
 from autotrade.environment.sandbox import (
+    SandboxLimits,
     DockerSandbox,
     LocalSandbox,
     SandboxConfig,
@@ -313,18 +314,18 @@ class DeterministicBaselineDeveloper:
 
 
 SESSION_CALL_BUDGET_REFERENCE_MAX = 400
-SESSION_EXPLORE_CALL_CAP_AT_REFERENCE = 200
+SESSION_SUBAGENT_CALL_CAP_AT_REFERENCE = 200
 SESSION_PARENT_MAIN_RESERVE_AT_REFERENCE = 50
-SESSION_LLM_CALL_ROLES = ("main", "explore", "compact")
+SESSION_LLM_CALL_ROLES = ("main", "subagent", "compact")
 
 
 def session_role_quotas(max_calls: int) -> tuple[int, int]:
-    """Explore cumulative cap and parent-main reserve for one shared call budget."""
+    """Sub-agent cumulative cap and parent-main reserve for one shared call budget."""
     if max_calls <= 0:
         raise ValueError("max_calls must be positive")
-    explore_cap = (
+    subagent_cap = (
         max_calls
-        * SESSION_EXPLORE_CALL_CAP_AT_REFERENCE
+        * SESSION_SUBAGENT_CALL_CAP_AT_REFERENCE
         // SESSION_CALL_BUDGET_REFERENCE_MAX
     )
     parent_reserve = (
@@ -333,15 +334,15 @@ def session_role_quotas(max_calls: int) -> tuple[int, int]:
         // SESSION_CALL_BUDGET_REFERENCE_MAX
     )
     if max_calls >= 2:
-        explore_cap = max(explore_cap, 1)
-    return explore_cap, parent_reserve
+        subagent_cap = max(subagent_cap, 1)
+    return subagent_cap, parent_reserve
 
 
 class SessionCallBudget:
     """One counter and deadline shared across all model roles in a session.
 
-    The total ``max_calls`` cap is hard. Explore has a cumulative ceiling and
-    compact/explore cannot consume the parent-main reserve. This is not two
+    The total ``max_calls`` cap is hard. Sub-agents have a cumulative ceiling and
+    compact/subagent cannot consume the parent-main reserve. This is not two
     independent budgets.
     """
 
@@ -357,10 +358,10 @@ class SessionCallBudget:
         if (deadline is None) == (time_budget is None):
             raise ValueError("provide exactly one of deadline or time_budget")
         self.max_calls = max_calls
-        self.explore_cap, self.parent_reserve = session_role_quotas(max_calls)
+        self.subagent_cap, self.parent_reserve = session_role_quotas(max_calls)
         self.time_budget = time_budget or InferenceTimeBudget(deadline=deadline)
         self.calls = 0
-        self._explore_calls = 0
+        self._subagent_calls = 0
         self._main_calls = 0
         self._compact_calls = 0
         self._lock = threading.Lock()
@@ -370,8 +371,8 @@ class SessionCallBudget:
         return self.time_budget.deadline
 
     @property
-    def explore_calls(self) -> int:
-        return self._explore_calls
+    def subagent_calls(self) -> int:
+        return self._subagent_calls
 
     @property
     def main_calls(self) -> int:
@@ -384,15 +385,15 @@ class SessionCallBudget:
             self.time_budget.check()
             if self.calls >= self.max_calls:
                 raise RuntimeError("Agent session LLM call budget exhausted")
-            if role == "explore" and self._explore_calls >= self.explore_cap:
+            if role == "subagent" and self._subagent_calls >= self.subagent_cap:
                 raise RuntimeError("Agent session LLM call budget exhausted")
             if role != "main":
                 parent_needed = max(0, self.parent_reserve - self._main_calls)
                 if self.max_calls - self.calls - 1 < parent_needed:
                     raise RuntimeError("Agent session LLM call budget exhausted")
             self.calls += 1
-            if role == "explore":
-                self._explore_calls += 1
+            if role == "subagent":
+                self._subagent_calls += 1
             elif role == "main":
                 self._main_calls += 1
             else:
@@ -505,7 +506,20 @@ class FoldBacktestTool(SessionTimeBudgetAware):
         formal_guard: Callable[[], object],
         ref_store: AgentRefStore,
         manifest: RunManifest | None = None,
+        decision_timeout_seconds: float = SandboxLimits().timeout_seconds,
     ) -> None:
+        # The executor's per-decision wall clock is the cap the Agent must
+        # design for, so it rides in the tool description under its number.
+        self.decision_timeout_seconds = float(decision_timeout_seconds)
+        self.spec = ToolSpec(
+            self.spec.name,
+            "Commit the current output as an immutable revision and run the Fold "
+            "Validation replay. One trading day's generate_orders inference over "
+            f"{self.decision_timeout_seconds:g}s fails the whole backtest "
+            "(strategy_inference_timeout_seconds); smoke-test timing on a few days first.",
+            self.spec.input_schema,
+            mutating=True,
+        )
         self.request = request
         self.output_dir = output_dir
         self.models_dir = models_dir
@@ -696,13 +710,13 @@ class FoldBacktestTool(SessionTimeBudgetAware):
             raise TimeoutError("Fold deadline exceeded") from exc
 
 
-def build_fold_explore_tools(
+def build_fold_subagent_tools(
     search_roots: SearchRoots,
     workspace: SafeWorkspace,
     command_runner: CommandRunner,
     modification: ModificationCheckTool,
 ) -> list[Tool]:
-    """Tools handed to Fold ``ExploreSubAgentEngine``: writable shell, no backtest."""
+    """Tools handed to Fold ``SubAgentEngine``: writable shell, no backtest."""
     return [
         ReadFileTool(search_roots),
         GrepTool(search_roots),
@@ -716,8 +730,8 @@ def build_fold_explore_tools(
     ]
 
 
-def build_meta_explore_tools(search_roots: SearchRoots) -> list[Tool]:
-    """Tools handed to Meta ``ExploreSubAgentEngine``: read-only audit."""
+def build_meta_subagent_tools(search_roots: SearchRoots) -> list[Tool]:
+    """Tools handed to Meta ``SubAgentEngine``: read-only audit."""
     return [
         ReadFileTool(search_roots),
         GrepTool(search_roots),
@@ -732,7 +746,7 @@ class LLMFoldDeveloper:
         self,
         *,
         llm: LLMProxy,
-        explore_llm: LLMProxy | None = None,
+        subagent_llm: LLMProxy | None = None,
         compact_llm: LLMProxy | None = None,
         context_compaction: ContextCompactionConfig | None = None,
         baseline_strategy: str | Path,
@@ -746,14 +760,14 @@ class LLMFoldDeveloper:
         sandbox_spec: SandboxSpec | None = None,
         command_runner_factory: Callable[[Path], CommandRunner] | None = None,
         max_response_tokens: int = 8_000,
-        explore_max_tokens: int | None = None,
+        subagent_max_tokens: int | None = None,
         step_tree_enabled: bool = True,
         fold_exploration_directive: str = "",
         workspace_reference: str = "",
         repo_root: str | Path | None = None,
     ) -> None:
         self.llm = llm
-        self.explore_llm = explore_llm or llm
+        self.subagent_llm = subagent_llm or llm
         self.compact_llm = compact_llm
         self.context_compaction = context_compaction or ContextCompactionConfig()
         self.baseline_strategy = Path(baseline_strategy).resolve(strict=True)
@@ -768,7 +782,7 @@ class LLMFoldDeveloper:
         self.sandbox_spec = sandbox_spec or SandboxSpec()
         self.command_runner_factory = command_runner_factory
         self.max_response_tokens = max_response_tokens
-        self.explore_max_tokens = explore_max_tokens
+        self.subagent_max_tokens = subagent_max_tokens
         self.step_tree_enabled = step_tree_enabled
         self.fold_exploration_directive = fold_exploration_directive
         self.workspace_reference = workspace_reference
@@ -778,15 +792,23 @@ class LLMFoldDeveloper:
             filename=self.baseline_strategy.name,
         )
 
+    @property
+    def decision_timeout_seconds(self) -> float:
+        """The formal executor's per-decision inference wall clock."""
+
+        sandbox = getattr(self.evaluator, "sandbox", None)
+        limits = getattr(sandbox, "limits", None) or SandboxLimits()
+        return float(limits.timeout_seconds)
+
     def set_sandbox_spec(self, spec: SandboxSpec) -> None:
         """Adopt the derived image a Meta session just built, for later Folds."""
         self.sandbox_spec = spec
 
     def __call__(self, request: FoldSessionRequest) -> FoldSessionResult:
         from autotrade.agent.compact import ContextCompactor
-        from autotrade.agent.explore import (
-            ExploreSubAgentConfig,
-            ExploreSubAgentEngine,
+        from autotrade.agent.subagent import (
+            SubAgentConfig,
+            SubAgentEngine,
         )
         from autotrade.agent.prompts import build_system_prompt
         from autotrade.agent.runner import AgentSessionConfig, AgentSessionRunner
@@ -887,6 +909,7 @@ class LLMFoldDeveloper:
                     "max_backtests": request.max_backtests,
                     "max_llm_calls": request.max_llm_calls,
                     "deadline_seconds": request.deadline_seconds,
+                    "strategy_inference_timeout_seconds": self.decision_timeout_seconds,
                 },
             },
             ref_store=self.ref_store,
@@ -1021,6 +1044,7 @@ class LLMFoldDeveloper:
                 formal_guard=formal_guard,
                 ref_store=self.ref_store,
                 manifest=manifest,
+                decision_timeout_seconds=self.decision_timeout_seconds,
             )
             tools: list[Tool] = [
                 ReadFileTool(search_roots),
@@ -1055,10 +1079,10 @@ class LLMFoldDeveloper:
                 )
             )
             budgeted = SessionBudgetLLM(self.llm, budget=shared_budget, role="main")
-            explore_budgeted = SessionBudgetLLM(
-                self.explore_llm,
+            subagent_budgeted = SessionBudgetLLM(
+                self.subagent_llm,
                 budget=shared_budget,
-                role="explore",
+                role="subagent",
             )
             compact_budgeted = (
                 SessionBudgetLLM(
@@ -1067,15 +1091,15 @@ class LLMFoldDeveloper:
                 if self.compact_llm is not None
                 else None
             )
-            explore_tools = ToolRegistry(
-                build_fold_explore_tools(
+            subagent_tools = ToolRegistry(
+                build_fold_subagent_tools(
                     search_roots, safe, command_runner, modification
                 )
             )
-            explore = ExploreSubAgentEngine(
-                llm=explore_budgeted,
-                tools=explore_tools,
-                config=ExploreSubAgentConfig(max_tokens=self.explore_max_tokens),
+            subagent = SubAgentEngine(
+                llm=subagent_budgeted,
+                tools=subagent_tools,
+                config=SubAgentConfig(max_tokens=self.subagent_max_tokens),
                 time_budget=time_budget,
             )
             runner = AgentSessionRunner(
@@ -1107,7 +1131,7 @@ class LLMFoldDeveloper:
                     if compact_budgeted is not None
                     else None
                 ),
-                explore=explore,
+                subagent=subagent,
                 time_budget=time_budget,
                 event_sink=_agent_event_sink(
                     trace, request.progress_hook, request.run_id
@@ -1311,7 +1335,7 @@ class LLMMetaLearner:
         self,
         *,
         llm: LLMProxy,
-        explore_llm: LLMProxy | None = None,
+        subagent_llm: LLMProxy | None = None,
         compact_llm: LLMProxy | None = None,
         context_compaction: ContextCompactionConfig | None = None,
         baseline_strategy: str | Path,
@@ -1321,7 +1345,7 @@ class LLMMetaLearner:
         max_llm_calls: int,
         deadline_seconds: float,
         max_response_tokens: int = 8_000,
-        explore_max_tokens: int | None = None,
+        subagent_max_tokens: int | None = None,
         meta_learning_directive: str = "",
         fold_exploration_directive: str = "",
         workspace_reference: str = "",
@@ -1335,7 +1359,7 @@ class LLMMetaLearner:
         sandbox_spec_sink: Callable[[SandboxSpec], None] | None = None,
     ) -> None:
         self.llm = llm
-        self.explore_llm = explore_llm or llm
+        self.subagent_llm = subagent_llm or llm
         self.compact_llm = compact_llm
         self.context_compaction = context_compaction or ContextCompactionConfig()
         self.baseline_strategy = Path(baseline_strategy).resolve(strict=True)
@@ -1355,7 +1379,7 @@ class LLMMetaLearner:
         self.image_keep = image_keep
         self.sandbox_spec_sink = sandbox_spec_sink
         self.max_response_tokens = max_response_tokens
-        self.explore_max_tokens = explore_max_tokens
+        self.subagent_max_tokens = subagent_max_tokens
         self.meta_learning_directive = meta_learning_directive
         self.fold_exploration_directive = fold_exploration_directive
         self.workspace_reference = workspace_reference
@@ -1368,9 +1392,9 @@ class LLMMetaLearner:
 
     def __call__(self, facts: dict[str, object]) -> MetaSessionResult:
         from autotrade.agent.compact import ContextCompactor
-        from autotrade.agent.explore import (
-            ExploreSubAgentConfig,
-            ExploreSubAgentEngine,
+        from autotrade.agent.subagent import (
+            SubAgentConfig,
+            SubAgentEngine,
         )
         from autotrade.agent.prompts import (
             build_meta_learning_prompt,
@@ -1601,13 +1625,13 @@ class LLMMetaLearner:
             if self.compact_llm is not None
             else None
         )
-        explore_budgeted = SessionBudgetLLM(
-            self.explore_llm, budget=shared_budget, role="explore"
+        subagent_budgeted = SessionBudgetLLM(
+            self.subagent_llm, budget=shared_budget, role="subagent"
         )
-        explore = ExploreSubAgentEngine(
-            llm=explore_budgeted,
-            tools=ToolRegistry(build_meta_explore_tools(search_roots)),
-            config=ExploreSubAgentConfig(max_tokens=self.explore_max_tokens),
+        subagent = SubAgentEngine(
+            llm=subagent_budgeted,
+            tools=ToolRegistry(build_meta_subagent_tools(search_roots)),
+            config=SubAgentConfig(max_tokens=self.subagent_max_tokens),
             time_budget=time_budget,
             mode="meta",
         )
@@ -1675,7 +1699,7 @@ class LLMMetaLearner:
                 if compact_budgeted is not None
                 else None
             ),
-            explore=explore,
+            subagent=subagent,
             time_budget=time_budget,
             event_sink=_agent_event_sink(
                 trace,
@@ -2021,7 +2045,7 @@ __all__ = [
     "LocalDailyEvaluationBackend",
     "LocalDailySnapshotProvider",
     "SESSION_CALL_BUDGET_REFERENCE_MAX",
-    "SESSION_EXPLORE_CALL_CAP_AT_REFERENCE",
+    "SESSION_SUBAGENT_CALL_CAP_AT_REFERENCE",
     "SESSION_PARENT_MAIN_RESERVE_AT_REFERENCE",
     "SessionBudgetLLM",
     "SessionCallBudget",

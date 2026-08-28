@@ -535,18 +535,18 @@ class _NoShellRunner:
         return CommandResult(126, stderr="shell is disabled in this test")
 
 
-def _explore_then(
+def _agent_then(
     *tool_calls: ToolCall,
     roles: tuple[str, ...] = ("auditor",),
     summary: str = "委托完成",
     implement: dict[str, object] | None = None,
 ) -> tuple[ProviderResponse, ...]:
-    explores = tuple(
-        ToolCall(f"ex_{role}", "explore", {"role": role, "task": f"review {role}"})
+    launches = tuple(
+        ToolCall(f"ex_{role}", "agent", {"agent": role, "task": f"review {role}"})
         for role in roles
     )
     responses: list[ProviderResponse] = [
-        ProviderResponse(tool_calls=(*explores, *tool_calls))
+        ProviderResponse(tool_calls=(*launches, *tool_calls))
     ]
     for role in roles:
         if implement is not None and role == "developer":
@@ -573,7 +573,7 @@ def test_llm_worker_runs_real_meta_fold_validation_and_heldout(
     source = "def generate_orders(context):\n    return []\n"
     llm = ScriptedLLM(
         [
-            *_explore_then(
+            *_agent_then(
                 ToolCall(
                     "prior",
                     "write_file",
@@ -581,7 +581,7 @@ def test_llm_worker_runs_real_meta_fold_validation_and_heldout(
                 ),
                 ToolCall("finish_meta", "finish_meta", {}),
             ),
-            *_explore_then(
+            *_agent_then(
                 ToolCall(
                     "ask",
                     "ask_user",
@@ -688,7 +688,7 @@ def test_llm_worker_runs_real_meta_fold_validation_and_heldout(
     assert len(frozen) == 1 and frozen[0].name == fold["frozen_strategy_artifact_id"]
     assert len(llm.calls) == 6
     meta_tool_names = {item["function"]["name"] for item in llm.calls[0]["tools"]}
-    assert {"write_file", "finish_meta", "explore"}.issubset(meta_tool_names)
+    assert {"write_file", "finish_meta", "agent"}.issubset(meta_tool_names)
     # The Meta session may regularize the working copy, so it holds the typed
     # writers and modification_check — but it stays offline and never backtests.
     assert {"write_file", "edit_file", "modification_check"}.issubset(
@@ -701,7 +701,7 @@ def test_llm_worker_runs_real_meta_fold_validation_and_heldout(
         "ask_user",
         "daily_backtest",
         "edit_file",
-        "explore",
+        "agent",
         "finish_fold",
         "shell",
         "step_rollback",
@@ -742,7 +742,7 @@ def test_second_llm_fold_prompt_excludes_prior_test_diagnostic(
     monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
 
     def _fold_script(source: str) -> tuple[ProviderResponse, ...]:
-        return _explore_then(
+        return _agent_then(
             ToolCall("check", "modification_check", {}),
             ToolCall("valid", "daily_backtest", {}),
             ToolCall("finish_fold", "finish_fold", {}),
@@ -752,7 +752,7 @@ def test_second_llm_fold_prompt_excludes_prior_test_diagnostic(
 
     llm = ScriptedLLM(
         [
-            *_explore_then(
+            *_agent_then(
                 ToolCall(
                     "prior",
                     "write_file",
@@ -980,7 +980,7 @@ def test_console_gpu_allocation_reaches_the_run_manifests_sandbox_spec(
     source = "def generate_orders(context):\n    return []\n"
     llm = ScriptedLLM(
         [
-            *_explore_then(
+            *_agent_then(
                 ToolCall(
                     "prior",
                     "write_file",
@@ -988,7 +988,7 @@ def test_console_gpu_allocation_reaches_the_run_manifests_sandbox_spec(
                 ),
                 ToolCall("finish_meta", "finish_meta", {}),
             ),
-            *_explore_then(
+            *_agent_then(
                 ToolCall("check", "modification_check", {}),
                 ToolCall("valid", "daily_backtest", {}),
                 ToolCall("finish_fold", "finish_fold", {}),
@@ -1018,9 +1018,9 @@ def test_console_gpu_allocation_reaches_the_run_manifests_sandbox_spec(
     fold_configs = [config for config in assembled_configs if config.mode == "fold"]
     assert len(fold_configs) == 1
     assert fold_configs[0].finalize_before_deadline_seconds == 600
-    assert not hasattr(fold_configs[0], "required_explore_roles")
+    assert not hasattr(fold_configs[0], "required_subagent_roles")
     meta_configs = [config for config in assembled_configs if config.mode == "meta"]
-    assert not hasattr(meta_configs[0], "required_explore_roles")
+    assert not hasattr(meta_configs[0], "required_subagent_roles")
     # One-shot, like every other per-session control.
     assert read_control(experiment / "hitl/control.json").gpu_counts == {}
 
@@ -1213,3 +1213,12 @@ def test_preflight_narrows_exactly_three_things_and_nothing_else(
         resolve(True, gpu_count=9)
     with pytest.raises(ValueError, match="epochs must be a positive integer"):
         resolve(True, epochs=-1)
+
+
+def test_compaction_gateway_makes_one_attempt(tmp_path: Path, monkeypatch):
+    repo, experiment = _experiment(tmp_path, developer_mode="llm")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "deepseek-test-key")
+    monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
+    settings = load_worker_options(experiment, repo_root=repo).llm
+    assert settings.build_gateway("compact", max_retries=0).config.max_retries == 0
+    assert settings.build_gateway("main").config.max_retries == settings.max_retries

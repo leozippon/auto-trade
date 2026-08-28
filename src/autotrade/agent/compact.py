@@ -2,9 +2,11 @@
 
 The runner does not proactively trim history or clear tool results. When the
 estimated window crosses a threshold, or a request is forced because it does
-not fit, this module calls a cheap no-thinking model, replaces older messages
-with a structured continuation state, and keeps recent raw turns. Emergency
-in-place tool-result fitting is the fail-closed overflow recovery.
+not fit, this module asks a cheap no-thinking model for a Markdown
+continuation summary (Pi's compaction shape), replaces older messages with it,
+and keeps recent raw turns. One attempt per trigger: a failed compaction is
+recorded and the runner continues with the emergency in-place tool-result
+fitting, which is the fail-closed overflow recovery.
 """
 
 from __future__ import annotations
@@ -23,23 +25,40 @@ from autotrade.environment.llm import (
     context_request_fits,
     estimate_chat_request_tokens,
 )
-from autotrade.environment.llm.extraction import ExtractionError, extract_json_object
 from autotrade.environment.runtime import sanitize_for_log
 from autotrade.environment.time_budget import (
     InferenceTimeBudget,
     SessionTimeBudgetAware,
 )
 
+COMPACT_SUMMARY_HEADINGS = (
+    "## 目标",
+    "## 约束与偏好",
+    "## 进展",
+    "### 已完成",
+    "### 进行中",
+    "### 受阻",
+    "## 关键决定",
+    "## 下一步",
+    "## 关键上下文",
+)
 COMPACT_SYSTEM_PROMPT = (
-    "You are an anchored context compaction sub-agent. Return exactly one JSON "
-    "object matching the requested schema. Do not call tools. Do not use "
-    "markdown or commentary. Preserve exact file paths, commands, error "
-    "strings, artifact ids, user constraints, and next steps. Avoid vague "
-    "phrases and omit obsolete details. Do not mention that messages were "
-    "compacted."
+    "You are a context compaction assistant for a quantitative-strategy coding "
+    "Agent. Write a Markdown continuation summary with exactly these headings, in "
+    "this order: " + " / ".join(COMPACT_SUMMARY_HEADINGS) + ". Keep exact file "
+    "paths, commands, error strings, artifact ids, node ids, user constraints, "
+    "numbers, and next steps; drop obsolete details; do not invent facts. When a "
+    "previous summary is given, update it: keep everything still relevant, move "
+    "finished items under 已完成, and add only what the new messages establish. "
+    "Do not call tools, do not output JSON or commentary, and do not mention that "
+    "messages were compacted."
 )
 _TOOL_CONTEXT_EXCERPT_CHARS = 500
 _TOOL_CONTEXT_MIN_CHARS = 512
+_FILES_TRAIL_LIMIT = 40
+_READ_TOOLS = frozenset({"read_file", "grep", "glob"})
+_WRITE_TOOLS = frozenset({"write_file", "edit_file", "write_skill", "delete_skill"})
+_THINK_BLOCK = re.compile(r"\A\s*<think>.*?</think>\s*", re.DOTALL)
 
 
 @dataclass(frozen=True)
@@ -170,7 +189,7 @@ class ContextCompactor(SessionTimeBudgetAware):
                 tool_choice="none",
                 max_tokens=self.config.max_response_tokens,
             )
-            summary_payload = _extract_summary_payload(response)
+            summary_text = _extract_summary_text(response)
         except Exception as exc:  # noqa: BLE001 - compaction failure must not kill a Fold
             self._consecutive_failures += 1
             event = {
@@ -192,14 +211,17 @@ class ContextCompactor(SessionTimeBudgetAware):
 
         self._consecutive_failures = 0
         self.compaction_count += 1
-        summary_message = _build_compaction_summary_message(
-            summary_payload, self.compaction_count
-        )
         non_summary = [
             message
             for message in compact_messages[1:]
             if not is_compaction_message(message)
         ]
+        files = _merge_touched_files(
+            _latest_compaction_files(compact_messages), _touched_files(non_summary)
+        )
+        summary_message = _build_compaction_summary_message(
+            summary_text, self.compaction_count, files
+        )
         recent_messages = drop_leading_orphan_tools(
             non_summary[-self.config.keep_recent_messages :]
         )
@@ -216,7 +238,8 @@ class ContextCompactor(SessionTimeBudgetAware):
             "messages_after": len(compacted_messages),
             "dropped_messages": max(len(messages) - len(compacted_messages), 0),
             "summary_chars": len(summary_message.content or ""),
-            "summary": summary_payload,
+            "summary": summary_text,
+            "files": files,
             "compaction_index": self.compaction_count,
             "step_id_at_compaction": step_id,
         }
@@ -269,40 +292,22 @@ class ContextCompactor(SessionTimeBudgetAware):
         messages_since_summary = [
             message for message in messages[1:] if not is_compaction_message(message)
         ]
-        compact_input = {
-            "instructions": (
-                "Update the continuation state for a coding/trading Agent. Treat "
-                "previous_summary as the current anchor when present, merge in only "
-                "new information from messages_since_previous_summary, remove stale "
-                "or superseded details, and do not invent facts."
-            ),
-            "previous_summary": sanitize_for_log(previous_summary),
-            "output_schema": {
-                "goal": "string",
-                "constraints_and_preferences": ["string"],
-                "progress": {
-                    "done": ["string"],
-                    "in_progress": ["string"],
-                    "blocked": ["string"],
-                },
-                "key_decisions": ["string"],
-                "errors_and_fixes": ["string"],
-                "next_steps": ["string"],
-                "critical_context": ["string"],
-                "relevant_files": ["string"],
-                "recent_user_feedback": ["string"],
-            },
-            "messages_since_previous_summary": sanitize_for_log(
-                [_message_record(message) for message in messages_since_summary]
-            ),
-        }
+        transcript = json.dumps(
+            sanitize_for_log([message.to_record() for message in messages_since_summary]),
+            ensure_ascii=False,
+            default=str,
+            allow_nan=False,
+        )
+        previous_block = (
+            f"## 上一份摘要\n{sanitize_for_log(previous_summary)}\n\n"
+            if previous_summary
+            else ""
+        )
         return (
             ChatMessage("system", COMPACT_SYSTEM_PROMPT),
             ChatMessage(
                 "user",
-                json.dumps(
-                    compact_input, ensure_ascii=False, default=str, allow_nan=False
-                ),
+                f"{previous_block}## 此后的新消息（JSON 记录）\n{transcript}",
             ),
         )
 
@@ -478,97 +483,90 @@ def _compaction_payload(message: ChatMessage) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
-def _latest_compaction_summary(messages: Sequence[ChatMessage]) -> object | None:
+def _latest_compaction_payload(messages: Sequence[ChatMessage]) -> dict[str, Any] | None:
     for message in reversed(messages[1:]):
         payload = _compaction_payload(message)
-        if payload is None or payload.get("observation") != "context_compaction":
-            continue
-        return payload.get("summary", payload)
+        if payload is not None and payload.get("observation") == "context_compaction":
+            return payload
     return None
 
 
-def _message_record(message: ChatMessage) -> dict[str, object]:
-    return message.to_record()
+def _latest_compaction_summary(messages: Sequence[ChatMessage]) -> str:
+    payload = _latest_compaction_payload(messages)
+    if payload is None:
+        return ""
+    summary = payload.get("summary")
+    return summary if isinstance(summary, str) else json.dumps(summary, ensure_ascii=False)
 
 
-def _extract_summary_payload(response: ProviderResponse) -> dict[str, object]:
-    try:
-        payload = json.loads(response.content)
-    except json.JSONDecodeError:
-        try:
-            payload = extract_json_object(response.content).payload
-        except ExtractionError as exc:
-            raise ValueError("compaction response is not valid JSON") from exc
-    if not isinstance(payload, dict):
-        raise TypeError("compaction response must be a JSON object")
-    return _normalize_summary_payload(payload)
-
-
-def _normalize_summary_payload(payload: dict[str, Any]) -> dict[str, object]:
-    if not any(
-        field in payload
-        for field in (
-            "goal",
-            "progress",
-            "key_decisions",
-            "next_steps",
-            "critical_context",
-        )
-    ):
-        raise ValueError(
-            "compaction response carries none of the requested summary fields"
-        )
-    progress = (
-        payload.get("progress") if isinstance(payload.get("progress"), dict) else {}
-    )
+def _latest_compaction_files(messages: Sequence[ChatMessage]) -> dict[str, list[str]]:
+    payload = _latest_compaction_payload(messages)
+    files = payload.get("files") if payload is not None else None
+    if not isinstance(files, dict):
+        return {"read": [], "modified": []}
     return {
-        "goal": _as_text(payload.get("goal")),
-        "constraints_and_preferences": _as_list(
-            payload.get("constraints_and_preferences")
-        ),
-        "progress": {
-            "done": _as_list(progress.get("done")),
-            "in_progress": _as_list(progress.get("in_progress")),
-            "blocked": _as_list(progress.get("blocked")),
-        },
-        "key_decisions": _as_list(payload.get("key_decisions")),
-        "errors_and_fixes": _as_list(payload.get("errors_and_fixes")),
-        "next_steps": _as_list(payload.get("next_steps")),
-        "critical_context": _as_list(payload.get("critical_context")),
-        "relevant_files": _as_list(payload.get("relevant_files")),
-        "recent_user_feedback": _as_list(payload.get("recent_user_feedback")),
+        key: [str(item) for item in files.get(key, []) if isinstance(item, str)]
+        for key in ("read", "modified")
     }
 
 
+def _touched_files(messages: Sequence[ChatMessage]) -> dict[str, list[str]]:
+    """Files the summarized turns read or modified, from their tool calls.
+
+    Survives across repeated compactions as a deterministic audit trail even
+    though the summarized messages themselves are discarded.
+    """
+
+    read: list[str] = []
+    modified: list[str] = []
+    for message in messages:
+        for call in message.tool_calls:
+            path = call.arguments.get("path")
+            if not isinstance(path, str) or not path:
+                continue
+            root = call.arguments.get("root")
+            label = f"{root}:{path}" if isinstance(root, str) and root else path
+            if call.name in _READ_TOOLS and label not in read:
+                read.append(label)
+            elif call.name in _WRITE_TOOLS and label not in modified:
+                modified.append(label)
+    return {"read": read, "modified": modified}
+
+
+def _merge_touched_files(
+    previous: dict[str, list[str]], current: dict[str, list[str]]
+) -> dict[str, list[str]]:
+    merged: dict[str, list[str]] = {}
+    for key in ("read", "modified"):
+        seen: list[str] = []
+        for item in [*previous.get(key, []), *current.get(key, [])]:
+            if item not in seen:
+                seen.append(item)
+        merged[key] = seen[-_FILES_TRAIL_LIMIT:]
+    return merged
+
+
+def _extract_summary_text(response: ProviderResponse) -> str:
+    text = _THINK_BLOCK.sub("", response.content or "", count=1).strip()
+    if not text:
+        raise ValueError("compaction response is empty")
+    return text
+
+
 def _build_compaction_summary_message(
-    summary_payload: dict[str, object], compaction_index: int
+    summary_text: str, compaction_index: int, files: dict[str, list[str]]
 ) -> ChatMessage:
     payload = {
         "observation": "context_compaction",
-        "summary_kind": "llm_compact_summary",
+        "summary_kind": "markdown",
         "compaction_index": compaction_index,
         "note": "Older raw messages were compacted; the summary is the retained context.",
-        "summary": summary_payload,
+        "summary": summary_text,
+        "files": files,
     }
     return ChatMessage(
         "user", json.dumps(payload, ensure_ascii=False, default=str, allow_nan=False)
     )
-
-
-def _as_text(value: object) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, str):
-        return value
-    return json.dumps(value, ensure_ascii=False, default=str)
-
-
-def _as_list(value: object) -> list[str]:
-    if value is None:
-        return []
-    if isinstance(value, list):
-        return [_as_text(item) for item in value]
-    return [_as_text(value)]
 
 
 def safe_error_summary(exc: Exception, max_chars: int = 500) -> str:
