@@ -60,6 +60,12 @@ from .registry import (
 )
 
 MAX_RUNNING_EXPERIMENTS = 4
+# SIGTERM graces before the worker's process group is SIGKILLed. Terminate is
+# an explicit stop, so it stays short; restart has to outwait the in-flight
+# work a worker cannot interrupt (a model call runs minutes) before forcing it.
+_TERMINATE_GRACE_SECONDS = 10.0
+_RESTART_GRACE_SECONDS = 30.0
+_SIGKILL_EXIT_SECONDS = 5.0
 _ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$")
 _TERMINAL_RESUMABLE_STATES = (
     "stopped",
@@ -285,6 +291,18 @@ def _reclaim_sandbox_containers(experiment_id: str) -> list[str]:
         return containers
     except (OSError, subprocess.SubprocessError):
         return []
+
+
+def _await_worker_exit(status_path: Path, timeout: float) -> bool:
+    """Poll the recorded worker pid until it is gone, or `timeout` elapses."""
+
+    deadline = time.monotonic() + timeout
+    while True:
+        if not status_pid_alive(_read_json(status_path)):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.5)
 
 
 def _signal_worker_group(pid: int, sig: signal.Signals) -> None:
@@ -1366,59 +1384,63 @@ class ExperimentManager:
             _signal_worker_group(pid, signal.SIGTERM)
         except ProcessLookupError as exc:  # exited between check and signal
             raise ManagerError("worker 已退出") from exc
-        deadline = time.monotonic() + 10.0
-        while time.monotonic() < deadline:
-            if not status_pid_alive(_read_json(status_path)):
-                result: dict[str, object] = {
-                    "terminated_pid": pid,
-                    "escalated": False,
-                    "reclaimed_containers": _reclaim_sandbox_containers(experiment_id),
-                }
-                revoked = self._revoke_unsettled_session_approval(
-                    directory, session_key
-                )
-                if revoked is not None:
-                    result["approval_revoked_session"] = revoked
-                return result
-            time.sleep(0.5)
-        _signal_worker_group(pid, signal.SIGKILL)
-        reclaimed = _reclaim_sandbox_containers(experiment_id)
-        # SIGKILL leaves no worker to stamp a terminal state; without this the
-        # page shows a stale running state until pid-liveness kicks in and the
-        # user cannot tell whether termination worked.
-        status = _read_json(status_path)
-        status.update(
-            {"state": "terminated", "error": None, "terminated_at": utc_now_iso()}
-        )
-        write_json_atomic(status_path, status)
-        result = {
+        escalated = not _await_worker_exit(status_path, _TERMINATE_GRACE_SECONDS)
+        if escalated:
+            _signal_worker_group(pid, signal.SIGKILL)
+        result: dict[str, object] = {
             "terminated_pid": pid,
-            "escalated": True,
-            "reclaimed_containers": reclaimed,
+            "escalated": escalated,
+            "reclaimed_containers": _reclaim_sandbox_containers(experiment_id),
         }
+        if escalated:
+            # SIGKILL leaves no worker to stamp a terminal state; without this
+            # the page shows a stale running state until pid-liveness kicks in
+            # and the user cannot tell whether termination worked.
+            status = _read_json(status_path)
+            status.update(
+                {"state": "terminated", "error": None, "terminated_at": utc_now_iso()}
+            )
+            write_json_atomic(status_path, status)
         revoked = self._revoke_unsettled_session_approval(directory, session_key)
         if revoked is not None:
             result["approval_revoked_session"] = revoked
         return result
 
     def _restart(self, experiment_id: str, directory: Path) -> dict[str, object]:
-        """Terminate-and-restart in one step: SIGTERM the live worker, wait for
-        the pid to die (bounded), then resume via the ledger."""
+        """Terminate-and-restart in one step: SIGTERM the live worker, SIGKILL
+        it if it outlives the grace, then resume via the ledger.
+
+        Escalating rather than refusing: a worker that ignores SIGTERM is
+        almost always inside a model call, which routinely outlasts any grace
+        worth blocking a request on, so refusing only handed the researcher the
+        same force-terminate-then-resume by hand. Forcing it is no less safe
+        than that manual path, which has always ended in the same SIGKILL:
+        ledger records are appended under an exclusive lock and fsynced,
+        status and control writes are atomic, and the restarted worker
+        re-derives its position from the ledger, rerunning the interrupted
+        session whole."""
         status_path = directory / "hitl/status.json"
         status = _read_json(status_path)
+        escalated = False
         if status_pid_alive(status):
-            _signal_worker_group(int(status["pid"]), signal.SIGTERM)
-            deadline = time.monotonic() + 30.0
-            while time.monotonic() < deadline and status_pid_alive(
-                _read_json(status_path)
-            ):
-                time.sleep(0.5)
-            if status_pid_alive(_read_json(status_path)):
-                raise ManagerError(
-                    "worker 未在 30s 内退出；请稍后重试或强制终止后手动恢复"
-                )
+            pid = int(status["pid"])
+            _signal_worker_group(pid, signal.SIGTERM)
+            escalated = not _await_worker_exit(status_path, _RESTART_GRACE_SECONDS)
+            if escalated:
+                try:
+                    _signal_worker_group(pid, signal.SIGKILL)
+                except ProcessLookupError:  # exited just after the last poll
+                    pass
+                if not _await_worker_exit(status_path, _SIGKILL_EXIT_SECONDS):
+                    raise ManagerError(
+                        f"worker pid {pid} 未响应 SIGKILL；请先排查该进程再重启"
+                    )
         _reclaim_sandbox_containers(experiment_id)
-        return {"restarted": True, **self.start_worker(experiment_id)}
+        return {
+            "restarted": True,
+            "escalated": escalated,
+            **self.start_worker(experiment_id),
+        }
 
     def delete_experiment(self, experiment_id: str) -> dict[str, object]:
         with self._mutate:

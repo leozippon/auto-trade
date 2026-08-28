@@ -375,6 +375,11 @@ function el(tag, attrs = {}, ...children) {
   const node = document.createElement(tag);
   for (const [key, value] of Object.entries(attrs)) {
     if (key === "class") node.className = value;
+    // Through the CSSOM, never as an attribute: the public site is served
+    // under a CSP whose style-src has no 'unsafe-inline', which refuses every
+    // inline style attribute. A CSSOM write is outside that check, so the
+    // same declaration applies locally and on the deployed site.
+    else if (key === "style") node.style.cssText = value;
     else if (key.startsWith("on") && typeof value === "function")
       node.addEventListener(key.slice(2), value);
     else if (value !== null && value !== undefined)
@@ -575,7 +580,7 @@ function themeInk() {
 let $chartTip = null;
 function chartTipNode() {
   if (!$chartTip) {
-    $chartTip = el("div", { class: "chart-tip", style: "display:none" });
+    $chartTip = el("div", { class: "chart-tip" });
     document.body.append($chartTip);
   }
   return $chartTip;
@@ -2608,7 +2613,7 @@ function controlBar(detail) {
                 el(
                   "p",
                   {},
-                  "终止当前 worker 并立即按账本恢复运行：已完成会话保留，被中断的会话整体重跑。",
+                  "终止当前 worker 并立即按账本恢复运行：已完成会话保留，被中断的会话整体重跑。宽限内没有退出的 worker 会被强制终止。",
                 ),
               ),
               [
@@ -2619,7 +2624,16 @@ function controlBar(detail) {
                     class: "btn primary",
                     onclick: () => {
                       closeModal();
-                      send({ action: "restart" }, "已重启 worker");
+                      // The request blocks through the 30s SIGTERM grace; say so
+                      // up front, then report the actual outcome from the response.
+                      toast("正在重启 worker（优雅退出宽限最长约 30 秒）…");
+                      send(
+                        { action: "restart" },
+                        (result) =>
+                          `已重启 worker（pid ${result.spawned_pid}${
+                            result.escalated ? "；旧 worker 被强制终止" : ""
+                          }）`,
+                      );
                     },
                   },
                   "确认重启",

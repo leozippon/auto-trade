@@ -610,9 +610,6 @@ h4.subsection-title,
  color: var(--text);
  letter-spacing: 0;
 }
-.chart-tip {
- white-space: pre-line;
-}
 .modal.subagent-modal {
  width: min(1180px, 96vw);
  max-height: 94vh;
@@ -1047,6 +1044,11 @@ textarea.directive.inject-input {
  display: inline-block;
 }
 .chart-tip {
+ /* Hidden by default in CSS, shown by bindChartTips through the CSSOM: a
+    cursor-follow overlay must never be able to paint at (0,0) because its
+    hidden state depended on a style the browser refused to apply. */
+ display: none;
+ white-space: pre-line;
  position: fixed;
  z-index: 120;
  pointer-events: none;

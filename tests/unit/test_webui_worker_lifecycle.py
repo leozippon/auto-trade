@@ -83,26 +83,6 @@ time.sleep(300)
 """
 
 
-class _FakeClock:
-    """A monotonic clock that only advances when the code under test sleeps.
-
-    Used for the 30 s restart budget: spending half a minute of wall time to
-    observe one refusal is not worth it, and the branch under test is the
-    deadline arithmetic, not the OS timer. The terminate escalation below is
-    deliberately left on the real clock, because there the elapsed time IS the
-    contract a stuck worker depends on.
-    """
-
-    def __init__(self) -> None:
-        self.now = 0.0
-
-    def monotonic(self) -> float:
-        return self.now
-
-    def sleep(self, seconds: float) -> None:
-        self.now += float(seconds)
-
-
 class WorkerLifecycleTest(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
@@ -310,6 +290,7 @@ class WorkerLifecycleTest(unittest.TestCase):
         body = response.json()
         self.addCleanup(self._kill_pid, int(body["spawned_pid"]))
         self.assertIs(body["restarted"], True)
+        self.assertIs(body["escalated"], False)
         self.assertIs(body["spawned"], True)
         process.wait(timeout=10)
         self.assertEqual(process.returncode, 0)
@@ -368,18 +349,32 @@ class WorkerLifecycleTest(unittest.TestCase):
         self.assertEqual(control.mode, "step")
         self.assertEqual(control.approved_sessions, ("epoch_001/fold_2022Q2",))
 
-    def test_restart_refuses_when_the_worker_outlives_its_thirty_second_budget(self) -> None:
+    def test_restart_sigkills_a_worker_that_outlives_its_grace_and_resumes(self) -> None:
+        """A wedged worker is forced, not left to the researcher.
+
+        The work a worker ignores SIGTERM for is a model call that routinely
+        runs minutes, so refusing turned nearly every restart into a manual
+        force-terminate followed by a resume. The grace is patched down: the
+        branch under test is the escalation, not the length of the wait.
+        """
         self._install_worker_script()
         process = self._spawn(_STUBBORN)
         self._publish(process, session_key="epoch_001/fold_2022Q2")
-        clock = _FakeClock()
-        with patch.object(manager_module, "time", clock):
-            refused = self._post(action="restart")
-        self.assertEqual(refused.status_code, 400)
-        self.assertIn("30s", refused.json()["detail"])
-        self.assertGreaterEqual(clock.now, 30.0, "restart gave up before its budget")
-        self.assertLess(clock.now, 31.0, "restart waited past its budget")
-        self.assertIsNone(process.poll(), "restart must not kill a worker it could not stop")
+        with patch.object(manager_module, "_RESTART_GRACE_SECONDS", 1.0):
+            response = self._post(action="restart")
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.addCleanup(self._kill_pid, int(body["spawned_pid"]))
+        self.assertIs(body["restarted"], True)
+        self.assertIs(body["escalated"], True)
+        process.wait(timeout=10)
+        self.assertEqual(process.returncode, -signal.SIGKILL)
+        self.assertNotEqual(body["spawned_pid"], process.pid)
+        # The replacement worker owns the status file, so the console never
+        # reports the killed pid as live.
+        status = json.loads(self.status_path.read_text(encoding="utf-8"))
+        self.assertEqual(status["pid"], body["spawned_pid"])
+        self.assertEqual(status["state"], "launching")
 
     def _kill_pid(self, pid: int) -> None:
         try:
