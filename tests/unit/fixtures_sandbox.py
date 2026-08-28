@@ -13,41 +13,6 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 TEMPLATE_DIR = REPO_ROOT / "configs" / "agent_output_template"
 TS_CODE = "000001.SZ"
 
-STRATEGY_MAIN = '''
-import pandas as pd
-
-TARGET = "000001.SZ"
-
-
-def _visible_close(context):
-    close = None
-    for row in context.bars:
-        if str(row.get("symbol") or row.get("ts_code") or "").strip() == TARGET:
-            value = row.get("close")
-            if isinstance(value, (int, float)) and not isinstance(value, bool) and float(value) > 0:
-                close = float(value)
-    return close
-
-
-def generate_orders(context):
-    if context.account.positions.get(TARGET):
-        return []
-    if _visible_close(context) is None:
-        return []
-    execute_at = context.inference_at.replace(hour=15, minute=0, second=0, microsecond=0)
-    if execute_at < context.inference_at:
-        return []
-    return [
-        {
-            "symbol": TARGET,
-            "action": "buy",
-            "quantity": 100,
-            "execute_at": execute_at.isoformat(),
-            "reason": "fixture_top",
-        }
-    ]
-'''
-
 # (trade_date, open, close) for the single fixture stock across all periods.
 # The two leading days predate every validation period so the prior-day research
 # snapshot always has an anchor: 20210930 anchors the 2021Q4 quarter validation
@@ -68,11 +33,6 @@ PRICE_ROWS = [
     ("20260106", 14.6, 15.0),
     ("20260331", 15.1, 16.0),
 ]
-TRADING_DAYS = [row[0] for row in PRICE_ROWS]
-
-
-def write_strategy(agent_output: Path) -> None:
-    (agent_output / "main.py").write_text(STRATEGY_MAIN, encoding="utf-8")
 
 
 def make_snapshot_dir(out_dir: Path, *, decision_date: str, kind: str) -> dict[str, object]:

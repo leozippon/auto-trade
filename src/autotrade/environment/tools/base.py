@@ -177,8 +177,8 @@ def is_sequential_tool(spec: ToolSpec | None) -> bool:
 
     Every tool call in one assistant turn is dispatched concurrently unless
     the batch contains a sequential tool: a mutating tool (writes, edits,
-    shell, skills, the Step-committing backtest, rollback), a finish gate, a
-    human wait, or an unregistered name (its rejection keeps the batch order).
+    shell, skills, both backtests, rollback), a finish gate, a human wait, or
+    an unregistered name (its rejection keeps the batch order).
     Then the whole batch runs in order.
     """
 

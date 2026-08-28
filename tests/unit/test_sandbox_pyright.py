@@ -12,10 +12,9 @@ from autotrade.agent.prompts import build_system_prompt
 REPO = Path(__file__).resolve().parents[2]
 DOCKERFILE = REPO / "ops/docker/sandbox.Dockerfile"
 PYRIGHTCONFIG = REPO / "ops/docker/pyrightconfig.json"
-COMMAND = (
-    "pyright --project /opt/autotrade/pyrightconfig.json "
-    "/mnt/agent/workspace /mnt/agent/output"
-)
+# The documented how-to (the working copy is workspace/output, so the
+# workspace target already covers it); it belongs in docs, never in a prompt.
+COMMAND = "pyright --project /opt/autotrade/pyrightconfig.json /mnt/agent/workspace"
 
 
 def test_dockerfile_pins_pyright_with_same_layer_version_check() -> None:

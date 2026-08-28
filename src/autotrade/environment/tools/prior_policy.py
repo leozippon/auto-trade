@@ -21,9 +21,9 @@ _COUNT_UNITS = "只家个支亿万元点名股条款行列页倍"
 # and an 8-digit run inside an ASCII identifier (``factor_cs_20260901``, the
 # experiment id pattern) is a name, not a date; ``截至20210930`` still is one.
 _DATE_EXPR = re.compile(
-    r"(?:19|20)\d{2}\s*(?:年|[/.\-]\s*\d{1,2}|[Qq][1-4]|\s*[一二三四]\s*季度)"
+    r"(?<![A-Za-z0-9_])(?:19|20)\d{2}\s*(?:年|[/.\-]\s*\d{1,2}|[Qq][1-4](?![A-Za-z0-9_])|\s*[一二三四]\s*季度)"
     r"|(?<![A-Za-z0-9_])(?:19|20)\d{6}(?![A-Za-z0-9_])"
-    r"|[Qq][1-4]\s*(?:19|20)\d{2}"
+    r"|(?<![A-Za-z0-9_])[Qq][1-4]\s*(?:19|20)\d{2}(?![A-Za-z0-9_])"
 )
 
 # PRIOR is free-format strategy direction and process memory published by Meta.

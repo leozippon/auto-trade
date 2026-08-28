@@ -1241,11 +1241,6 @@ textarea.directive.inject-input {
  color: var(--run);
  font-weight: 650;
 }
-.trace-subagent-chip-clock {
- color: var(--muted);
- font-weight: 400;
- font-variant-numeric: tabular-nums;
-}
 .trace-subagent-chip-task {
  color: var(--muted);
  display: -webkit-box;

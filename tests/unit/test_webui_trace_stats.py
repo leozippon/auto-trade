@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import json
+import re
+import shutil
+import subprocess
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from autotrade.environment.identity import AgentRefStore
@@ -1422,7 +1426,7 @@ def test_subagent_trace_route_projects_redacts_and_guards(tmp_path: Path) -> Non
     trace_ref = identity.trace_ref("run_001")
 
     payload = client.get(
-        f"/api/experiments/demo/trace/subagents/agent_1",
+        "/api/experiments/demo/trace/subagents/agent_1",
         params={"run_id": trace_ref},
     )
     assert payload.status_code == 200
@@ -1484,3 +1488,118 @@ def test_subagent_drawer_is_wired_to_the_card_and_the_dock_chip() -> None:
     assert '"inherit"' in thinking
     assert "（继承）" in thinking
     assert "parentReasoningLabel" in thinking
+
+
+def _app_js_fragment(script: str, head: str, end: str = "\n}\n") -> str:
+    """One top-level declaration from app.js, by its opening line."""
+
+    start = script.index(head)
+    return script[start : script.index(end, start) + len(end)]
+
+
+def _run_app_js_snippet(tmp_path: Path, body: str, *, heads: tuple[str, ...]) -> str:
+    """Run app.js declarations against a minimal DOM stub under node."""
+
+    node = shutil.which("node")
+    if node is None:  # pragma: no cover - node is present on the dev host
+        pytest.skip("node is required for the DOM-stub render check")
+    script = APP_JS.read_text(encoding="utf-8")
+    stub = """
+const TS_TIME_FMT = new Intl.DateTimeFormat("zh-CN", {
+  timeZone: "Asia/Shanghai", hour12: false, month: "2-digit", day: "2-digit",
+  hour: "2-digit", minute: "2-digit", second: "2-digit",
+});
+const liveTimers = [];
+function el(tag, attrs = {}, ...children) {
+  const node = {
+    tag, attrs, children: [], dataset: {}, textContent: "",
+    append(...items) {
+      for (const item of items.flat())
+        if (item !== null && item !== undefined) this.children.push(item);
+    },
+    get childNodes() { return this.children; },
+  };
+  node.append(...children);
+  return node;
+}
+const nodeText = (node) =>
+  typeof node === "string" ? node : node.textContent || node.children.map(nodeText).join("");
+const tickAll = (node) => {
+  if (node.dataset && node.dataset.elapsedFrom) tickElapsedClocks(node);
+  for (const child of node.children || []) if (typeof child !== "string") tickAll(child);
+};
+"""
+    parts = [
+        _app_js_fragment(script, head, "]);\n")
+        for head in (
+            "const SUBAGENT_STATUS_LABELS = new Map([",
+            "const TERMINAL_SUBAGENT_STATUS = new Set([",
+            "const TOOL_STATUS_LABELS = new Map([",
+        )
+    ]
+    parts = [stub, *parts] + [_app_js_fragment(script, head) for head in heads]
+    source = tmp_path / "render.mjs"
+    source.write_text("\n".join(parts) + "\n" + body, encoding="utf-8")
+    result = subprocess.run(
+        [node, str(source)], capture_output=True, text=True, timeout=60, check=False
+    )
+    assert result.returncode == 0, result.stderr
+    return result.stdout.strip()
+
+
+def test_dock_card_renders_the_same_meta_line_as_the_inline_card(
+    tmp_path: Path,
+) -> None:
+    """The pinned card must carry model · 推理 · 上下文 · ⏱ · 启动时间, one node type."""
+
+    chip = APP_JS.read_text(encoding="utf-8").split(
+        "function runningSubagentChip(", 1
+    )[1].split("\nfunction ", 1)[0]
+    assert "subagentHeadMetaNode(block, detail)" in chip
+    assert "openSubagentTrace(detail, runRef, block)" in chip
+
+    body = """
+const detail = { params: { reasoning_effort: "xhigh" } };
+const started = new Date(Date.now() - 188000).toISOString();
+const block = {
+  kind: "subagent", phase: "started", status: "running", role: "developer",
+  description: "因子实现", model: "qwen-3.8-27b-fp8", thinking: "medium",
+  inherit_context: false, ts: started, started_at: started,
+  rounds: 4, llm_calls: 4, tool_calls: 6,
+  usage: { prompt_tokens: 16414, completion_tokens: 444, total_tokens: 16858 },
+  last_tool: { name: "shell", status: "running" },
+};
+const chip = runningSubagentChip(block, detail, "run_ref_1");
+tickAll(chip);
+console.log(chip.children.map(nodeText).join("\\n"));
+"""
+    lines = _run_app_js_snippet(
+        tmp_path,
+        body,
+        heads=(
+            "function fmtDuration(",
+            "function fmtTokens(",
+            "function fmtTsTime(",
+            "function parentReasoningLabel(",
+            "function isRunningSubagent(",
+            "function elapsedClockNode(",
+            "function tickElapsedClocks(",
+            "function subagentClockNode(",
+            "function subagentThinkingLabel(",
+            "function subagentContextLabel(",
+            "function subagentMetaLine(",
+            "function subagentHeadMetaNode(",
+            "function subagentProgressParts(",
+            "function subagentUsageTitle(",
+            "function subagentLastToolLabel(",
+            "function runningSubagentChip(",
+        ),
+    ).splitlines()
+    assert lines[0] == "🧩 developer · 进行中"
+    assert lines[1] == "因子实现"
+    assert re.fullmatch(
+        r"qwen-3\.8-27b-fp8 · 推理 medium · 独立上下文 ⏱ 3:08 · \d\d-\d\d \d\d:\d\d:\d\d",
+        lines[2],
+    ), lines[2]
+    assert lines[3] == "4 轮 · 模型 4 次 · 工具 6 次 · Σ 17 k tokens"
+    assert lines[4] == "最近工具 shell · 进行中"

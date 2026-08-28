@@ -1317,11 +1317,6 @@ def audit_unit_schema(raw_dir: Path, add) -> None:
 def api_frame(client: TuShareClient, api_name: str, params: dict[str, Any], fields: str) -> pd.DataFrame:
     return frame(client.query(api_name, params, fields))
 
-def numeric_value(df: pd.DataFrame, column: str) -> float | None:
-    if df.empty or column not in df or pd.isna(df[column].iloc[0]):
-        return None
-    return float(df[column].iloc[0])
-
 def audit_stock_universe_semantics(raw_dir: Path, all_codes: dict[str, set[str]], add) -> None:
     stock_basic = read_many(sorted((raw_dir / "stock_basic").glob("list_status=*.parquet")), columns=["ts_code", "name", "market", "exchange", "list_status", "list_date", "delist_date"])
     stock_company = read_many(sorted((raw_dir / "stock_company").glob("exchange=*.parquet")), columns=["ts_code", "exchange", "com_name"])

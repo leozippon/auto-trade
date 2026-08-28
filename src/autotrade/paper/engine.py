@@ -46,7 +46,6 @@ PAPER_STATE_SCHEMA_VERSION = 3
 PAPER_STATE_NAME = ".paper_state.json"
 PAPER_LOCK_NAME = ".paper_engine.lock"
 SNAPSHOT_NAME = "account_snapshot.json"
-PHASES = ("before_inference", "inference", "after_inference", "finalize", "done")
 
 
 class PaperEngineError(RuntimeError):

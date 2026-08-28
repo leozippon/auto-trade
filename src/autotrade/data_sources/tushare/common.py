@@ -2453,32 +2453,6 @@ def augment_event_frame(
         out.loc[mask, "available_at_rule"] = f"fallback_conservative_from:{spec.fallback_date_column}"
     return out
 
-def write_event_result(
-    path: Path,
-    result: ApiResult,
-    spec: EventDataset,
-    params: dict[str, Any],
-    revision_ledger: Path | str | None = None,
-    allow_empty_revision_overwrite: bool = False,
-) -> int:
-    df = augment_event_frame(frame(result), spec)
-    # Event pulls cover their partition's full scope (request param == partition
-    # key), so removed keys can only be alerted source corrections.
-    written = write_parquet_revision_aware(
-        path,
-        df,
-        api_name=spec.api_name,
-        params=params,
-        fields=list(df.columns),
-        key_columns=list(spec.key_columns),
-        revision_ledger=revision_ledger,
-        allow_empty_revision_overwrite=allow_empty_revision_overwrite,
-        allow_key_removal_overwrite=True,
-    )
-    if not written:
-        return 0
-    return len(df)
-
 def normalize_source_datetime(value: Any) -> str:
     text = str(value or "").strip()
     if not text or text in {"nan", "None"}:

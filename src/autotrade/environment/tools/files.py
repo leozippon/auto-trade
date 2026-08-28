@@ -53,6 +53,12 @@ class _WorkspaceWriteTool:
                 )
             if root != "workspace" and not (path == root or path.startswith(f"{root}/")):
                 path = f"{root}/{path}"
+        # ``workspace/x`` under the workspace root means ``x`` (the root is
+        # not a subdirectory of itself); only a real ``workspace/`` directory
+        # keeps the literal form. The accepted path is echoed in the result.
+        if (root is None or root == "workspace") and path.startswith("workspace/"):
+            if not (self.workspace.root / "workspace").is_dir():
+                path = path[len("workspace/"):]
         target = self.workspace.resolve(path, must_exist=must_exist, directory=False if must_exist else None)
         relative = self.workspace.relative(target)
         if relative == "skills" or relative.startswith("skills/"):

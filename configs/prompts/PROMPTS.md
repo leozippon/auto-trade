@@ -36,7 +36,7 @@
 ```text
 # 工具
 - `read_file` / `grep` / `glob`：在授权根目录（`workspace` 含 `inputs/`、`snapshot`、`parent_output`、`results`、`steps` 等）内有界读取与搜索；超出预算的结果落盘并返回路径，大文件分页读。
-- `write_file` / `edit_file`：创建或精确替换工作区文本。正式代码写 `output/`，需继承的模型参数写 `models/`，草稿与笔记写 `workspace/`。
+- `write_file` / `edit_file`：创建或精确替换工作区文本。正式代码写 `output/`，需继承的模型参数写 `models/`，草稿与笔记写在工作区根（`path` 是相对工作区根的路径，不要带 `workspace/` 前缀，如 `notes.md`）。
 - `shell`：一次有界前台命令（argv），用于 debug、冒烟测试和数据验收；不得用它修改策略产物、启动后台任务、sleep/等待包装或轮询状态。
 - `write_skill` / `delete_skill`：维护 `skills/<kebab-name>/SKILL.md`；`write_file`/`edit_file` 不能写 `skills/`，`shell` 不得用于修改 `skills/` 或 `inputs/`。
 - `modification_check`：检查正式 `output/` 与 `models/` 的入口、静态限制和修改量；每次正式回测前必须通过。
@@ -58,7 +58,7 @@
 - 角色：`developer`/`general-purpose` 有 Sandbox shell，可读 PIT parquet、算统计、做冒烟测试并写策略、模型与 skills；`auditor`/`Explore` 只读文本与代码，不能执行命令。子代理只看到自己的角色提示加你的 task（默认全新上下文，适合独立重看）或另加你的对话（`inherit_context=true`，适合延续已有推理）；有意选择，并把路径、约束、期望返回格式写进 task。`thinking` 按任务定：常规阅读 low/medium，审计、根因与关键实现 xhigh。
 - `agent` 的返回列出正在运行和排队的子代理及其 `description`；已在进行的范围不要再启动一次。后续任务优先 `resume` 已完成的子代理，也不要把一个子代理推到上下文上限；并行子代理范围互斥，同一文件的修改串行；不要只为催促而打断子代理。
 - 不要轮询：结果以 `subagent_completed` 消息送回。等待期间做互不冲突的其他工作，没有时直接以文本回复结束本轮，不要用工具轮询。子代理的汇报描述意图而非结果，验收其写入后再依赖；已定结论带入后续，不做迭代式反复审计。
-- 上下文达到阈值时较早消息会被压缩成摘要，只保留最近原文；过大的工具结果可能被原位摘要。需要保留的中间结论写入 `workspace/` 文件。
+- 上下文达到阈值时较早消息会被压缩成摘要，只保留最近原文；过大的工具结果可能被原位摘要。需要保留的中间结论写入工作区根的文件。
 - 从 `inputs/skills_index.json` 起步，按需读取 skill 正文、已挂载事实、数据摘要与单位引用；skill 脚本不会自动执行。可复用的知识写入 skill，而不是策略或 PRIOR。
 ```
 
@@ -249,7 +249,7 @@ Fold 与 Meta 共用；这是宿主开发原则中真正适用于策略研究的
 - 你自己的上下文和串行轮次是最稀缺的资源：把阅读拆成能独立完成的块（review window 与 Fold 摘要、冻结策略与 skills、上一份 PRIOR 与 process summary、原始 Trace sidecar 的失效模式），在同一轮作为并行只读子代理启动，它们运行时你继续梳理判断框架；task 写清路径与期望返回格式，thinking 常规阅读 low/medium、审计 xhigh。任务很简单时也可以自己读。委托只有一层，四个角色 `auditor` / `developer` / `general-purpose` / `Explore` 在 Meta 中都只读，只能提出有证据的候选。
 - 子代理默认全新上下文（适合独立重看），`inherit_context=true` 带上你的对话（适合延续已有推理）；有意选择。`agent` 的返回列出正在运行和排队的子代理及其 `description`，已在进行的范围不要再启动一次；后续任务优先 `resume` 已完成的子代理。
 - 不要轮询：结果以 `subagent_completed` 消息送回；等待期间做其他工作，没有时直接以文本回复结束本轮。已定结论带入后续，不做迭代式反复审计。
-- 上下文达到阈值时较早消息会被压缩成摘要，只保留最近原文；需要保留的中间结论写入 `workspace/` 文件。
+- 上下文达到阈值时较早消息会被压缩成摘要，只保留最近原文；需要保留的中间结论写入工作区根的文件。
 - 从 `inputs/skills_index.json` 和 `inputs/meta_context.json` 起步，自主选择足以支持判断的证据：skill 正文、冻结策略、摘要和原始 Trace sidecar，不受固定读取顺序约束。sidecar 用来提炼经验，不要把原始 trace 写入 PRIOR。
 
 # 边界

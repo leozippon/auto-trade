@@ -721,6 +721,14 @@ def install_agent_data_contract(
     for name in AGENT_DATA_CONTRACT_FILES:
         target = paths.artifacts / name
         if target.is_file():
+            # Materialise as indented, key-sorted JSON: a single-line file
+            # pages as one line and spills on every read_file.
+            target.chmod(0o644)
+            payload = json.loads(target.read_text(encoding="utf-8"))
+            target.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
             target.chmod(0o444)
     return paths.data_summary.is_file()
 
@@ -956,7 +964,7 @@ class FoldBacktestTool(SessionTimeBudgetAware):
         if self.request.step_gate_hook is not None:
             # The console step gate still renders a `complete` flag.
             directive = self.request.step_gate_hook(
-                len(self.steps), {**summary, "complete": True}
+                len(self.steps), dict(summary)
             )
         result_path = Path(evaluation.result_ref)
         public_result_ref = f"results/{result_name}/{result_path.name}"

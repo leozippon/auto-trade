@@ -230,14 +230,6 @@ def _number(value: object) -> float | None:
     return result if math.isfinite(result) else None
 
 
-def _nonnegative_count(value: object) -> int:
-    return (
-        value
-        if isinstance(value, int) and not isinstance(value, bool) and value >= 0
-        else 0
-    )
-
-
 def _metric(record: Mapping[str, object], result_key: str, key: str) -> float | None:
     result = record.get(result_key)
     return _number(result.get(key)) if isinstance(result, Mapping) else None

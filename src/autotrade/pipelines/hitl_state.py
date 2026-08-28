@@ -24,7 +24,6 @@ from .meta_schedule import meta_learning_trigger_counts, meta_session_key
 
 HITL_STATE_SCHEMA_VERSION = 1
 CONTROL_MODES = ("auto", "manual", "step")
-CONTROL_REQUESTS = (None, "pause", "stop")
 HITL_DIR_NAME = "hitl"
 PARAMS_NAME = "params.json"
 CONTROL_NAME = "control.json"

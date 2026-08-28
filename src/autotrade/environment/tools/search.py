@@ -183,7 +183,13 @@ class SearchRoots:
             ref = path.resolve().relative_to(self._spill_base.resolve()).as_posix()
         except (OSError, ValueError):
             return {}
-        return {"result_root": self._spill_root, "result_ref": ref}
+        return {
+            "result_root": self._spill_root,
+            "result_ref": ref,
+            "result_hint": (
+                f"full result spilled; read it back with: read_file root='{self._spill_root}' path='{ref}'"
+            ),
+        }
 
 
 def _has_entries(directory: Path) -> bool:

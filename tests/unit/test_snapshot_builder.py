@@ -1321,19 +1321,32 @@ class SnapshotBuilderTest(unittest.TestCase):
             build_fundamental_events(events_root)
             status_path = Path(tmp) / "fundamental_events_status.json"
             write_fundamental_status(status_path)
-            generation = {
+            identity = {
                 "schema_version": 2,
                 "state": "committed",
                 "generation_id": "abc123",
                 "completed_at": "2021-10-08T01:00:00+00:00",
             }
+            # The lake stamp also carries host-side audit data (update commands,
+            # interpreter path); the mounted manifest must keep only the identity.
+            generation = {
+                **identity,
+                "transaction": {"commands": [["/home/op/miniconda3/envs/quant/bin/python", "-m", "update"]]},
+                "config_identity": {"shared": {"python": "/home/op/miniconda3/envs/quant/bin/python"}},
+            }
             (raw / ".raw_generation.json").write_text(json.dumps(generation), encoding="utf-8")
             builder = SnapshotBuilder(raw, events_root, status_path)
 
             manifest = builder.build_decision_snapshot(DECISION, Path(tmp) / "snap", CONFIG)
-            self.assertEqual(manifest["raw_generation"], generation)
+            self.assertEqual(manifest["raw_generation"], identity)
             replay_manifest = builder.build_replay_slot("20211007", "20211011", Path(tmp) / "replay", label="valid", config=CONFIG)
-            self.assertEqual(replay_manifest["raw_generation"], generation)
+            self.assertEqual(replay_manifest["raw_generation"], identity)
+            from autotrade.environment.runtime import HOST_PATH_RE
+
+            for written in (Path(tmp) / "snap" / "manifest.json", Path(tmp) / "replay" / "manifest.json"):
+                text = written.read_text(encoding="utf-8")
+                self.assertIsNone(HOST_PATH_RE.search(text), written.name)
+                self.assertNotIn("miniconda3", text)
 
             # Lake mutating mid-build must fail the build.
             with self.assertRaisesRegex(RuntimeError, "generation changed"):

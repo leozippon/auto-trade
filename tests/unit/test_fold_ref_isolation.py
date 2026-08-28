@@ -573,6 +573,12 @@ def test_a_meta_session_can_read_every_artifact_its_manifest_advertises(tmp_path
     # The unit reference rides along, so Meta reasons about the same contract
     # a Fold does.
     assert (artifacts / "unit_reference.json").is_file()
+    # Materialised indented and key-sorted: a single-line JSON file pages as
+    # one line and spills on every read_file.
+    for name in ("data_summary.json", "unit_reference.json"):
+        text = (artifacts / name).read_text(encoding="utf-8")
+        assert text.count("\n") > 1, name
+        assert text == json.dumps(json.loads(text), ensure_ascii=False, indent=2, sort_keys=True) + "\n", name
     assert json.loads((artifacts / "data_summary.json").read_text(encoding="utf-8"))[
         "kind"
     ] == "meta"

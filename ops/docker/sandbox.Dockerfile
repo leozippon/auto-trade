@@ -166,7 +166,7 @@ RUN useradd --create-home --uid 61000 agent
 # must exist as a file for the read-only bind of the frozen strategy;
 # /opt/autotrade_runtime receives trusted host modules for the Agent session.
 RUN mkdir -p /mnt/snapshots/train /mnt/snapshots/valid /mnt/snapshot \
-        /mnt/artifacts /mnt/agent/workspace /mnt/agent/output /mnt/agent/models \
+        /mnt/artifacts /mnt/agent/workspace \
         /mnt/runtime /opt/autotrade_runtime /strategy /strategy-data \
     && chown root:root /mnt \
     && touch /strategy/main.py \

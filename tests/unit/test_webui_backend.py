@@ -1050,7 +1050,7 @@ def test_status_reporter_keeps_only_the_current_wait_payload(tmp_path: Path):
     reporter.set(
         state="waiting_step_user",
         step_index=1,
-        step_summary={"complete": True},
+        step_summary={"node_id": "step_001"},
     )
     status = read_status(path)
     assert status["step_index"] == 1

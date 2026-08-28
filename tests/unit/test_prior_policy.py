@@ -166,3 +166,6 @@ class IdentifierDateTest(unittest.TestCase):
         self.assertIn("calendar date", calendar_policy_violation("样本截至20210930 为止"))
         self.assertIn("calendar date", calendar_policy_violation("从 20210930 开始"))
         self.assertIn("calendar date", calendar_policy_violation("2021 年 8 月"))
+        self.assertEqual(calendar_policy_violation("节点 fold_2022Q1 的父本"), "")
+        self.assertIn("calendar date", calendar_policy_violation("在 2022Q1 回撤最大"))
+        self.assertIn("calendar date", calendar_policy_violation("Q1 2022 的样本"))

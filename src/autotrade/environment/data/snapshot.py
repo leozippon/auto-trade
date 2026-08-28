@@ -610,7 +610,7 @@ class SnapshotBuilder:
             },
             "domains": domains,
             "data_quality_warnings": data_quality_warnings,
-            "raw_generation": raw_generation,
+            "raw_generation": _raw_generation_identity(raw_generation),
             "build_profile": {
                 "total_seconds": round(time.perf_counter() - total_started, 3),
                 "domains": _profile_timings(profiles),
@@ -958,7 +958,7 @@ class SnapshotBuilder:
             "period_end": end_key,
             "available_from": anchor.isoformat() if anchor is not None else None,
             "domains": domains,
-            "raw_generation": raw_generation,
+            "raw_generation": _raw_generation_identity(raw_generation),
             "build_profile": {
                 "total_seconds": round(time.perf_counter() - total_started, 3),
                 "domains": _profile_timings(profiles),
@@ -2376,6 +2376,19 @@ def _fundamental_dataset_columns(raw_dir: Path, datasets: tuple[str, ...]) -> di
             columns.update(dict.fromkeys(pq.read_schema(files[index]).names))
         out[dataset] = list(columns)
     return out
+
+
+# The raw-lake stamp also records the update transaction (host commands) and
+# the config identity (host interpreter path). The snapshot manifest is
+# mounted read-only into the Agent sandbox, so it keeps only the identity the
+# PIT contract checks; the full stamp stays in the lake's own record.
+_RAW_GENERATION_IDENTITY_KEYS = ("schema_version", "state", "generation_id", "completed_at")
+
+
+def _raw_generation_identity(stamp: dict[str, object] | None) -> dict[str, object] | None:
+    if stamp is None:
+        return None
+    return {key: stamp[key] for key in _RAW_GENERATION_IDENTITY_KEYS if key in stamp}
 
 
 def _write_manifest(output_dir: Path, manifest: dict[str, object], *, trim_trade_dates: bool = True) -> None:

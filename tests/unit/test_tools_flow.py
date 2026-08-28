@@ -931,6 +931,30 @@ class SpillAndRootContractTest(unittest.TestCase):
             spilled = registry.invoke("read_file", {"root": "artifacts", "path": ref})
             self.assertTrue(spilled.ok, spilled.error)
             self.assertEqual(spilled.value["line_count"], 200)
+            self.assertEqual(
+                first.value["result_hint"],
+                f"full result spilled; read it back with: read_file root='artifacts' path='{ref}'",
+            )
+
+    def test_workspace_prefix_is_tolerated_on_read_and_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            paths, roots = self._layout(tmp)
+            workspace = SafeWorkspace(paths.workspace)
+            registry = ToolRegistry([ReadFileTool(roots), WriteFileTool(workspace), EditFileTool(workspace)])
+            written = registry.invoke("write_file", {"path": "workspace/design_note.md", "content": "v1"})
+            self.assertTrue(written.ok, written.error)
+            self.assertEqual(written.value["path"], "design_note.md")
+            self.assertTrue((paths.workspace / "design_note.md").is_file())
+            self.assertFalse((paths.workspace / "workspace").exists())
+            edited = registry.invoke(
+                "edit_file", {"path": "workspace/design_note.md", "old_text": "v1", "new_text": "v2"}
+            )
+            self.assertTrue(edited.ok, edited.error)
+            self.assertEqual(edited.value["path"], "design_note.md")
+            read = registry.invoke("read_file", {"root": "workspace", "path": "workspace/design_note.md"})
+            self.assertTrue(read.ok, read.error)
+            self.assertEqual(read.value["path"], "design_note.md")
+            self.assertIn("v2", read.value["content"])
 
     def test_empty_mounted_roots_are_not_offered_but_writable_roots_are(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

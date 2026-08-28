@@ -695,17 +695,10 @@ def test_meta_runner_allows_finish_without_subagent_attempt() -> None:
     assert runner._subagent_roles == set()
 
 
-def test_fold_and_subagent_prompts_keep_roles_without_pyright_how_to() -> None:
+def test_fold_and_subagent_prompts_keep_roles() -> None:
+    # The pyright how-to assertion lives in test_sandbox_pyright.py.
     fold = build_system_prompt(mode="fold", experiment_facts={})
     meta = build_system_prompt(mode="meta", experiment_facts={})
-    command = (
-        "pyright --project /opt/autotrade/pyrightconfig.json "
-        "/mnt/agent/workspace /mnt/agent/output"
-    )
-    assert command not in fold
-    assert command not in SUBAGENT_SYSTEM_PROMPT
-    assert "pyright" not in meta
-    assert command not in META_SUBAGENT_SYSTEM_PROMPT
     for role in ("`auditor`", "`developer`", "`general-purpose`", "`Explore`"):
         assert role in fold
         assert role in meta

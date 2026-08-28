@@ -3705,7 +3705,6 @@ function stepGatePanel(detail, session) {
                 : Number(stats.sharpe).toFixed(2),
           },
           { label: "最大回撤", value: fmtPct(stats.max_drawdown) },
-          { label: "完整验证", value: summary.complete ? "是" : "否" },
           { label: "本 Fold 已耗时", value: foldDurationNode(detail, session) },
         ]),
       ),
@@ -4345,10 +4344,11 @@ function runningSubagentChip(block, detail, runRef) {
       "span",
       { class: "trace-subagent-chip-title" },
       `🧩 ${role} · ${statusLabel}`,
-      subagentClockNode(block, "trace-subagent-chip-clock"),
     ),
   );
   if (task) chip.append(el("span", { class: "trace-subagent-chip-task" }, task));
+  // The same launch/elapsed line the inline card and the drawer head render.
+  chip.append(subagentHeadMetaNode(block, detail));
   if (progress.length)
     chip.append(
       el(

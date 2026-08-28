@@ -18,7 +18,6 @@ from pathlib import Path
 from typing import Iterator, Mapping
 
 AGENT_REF_SCHEMA_VERSION = 1
-AGENT_REF_NAMESPACES = ("fold", "strategy", "run", "trace", "meta")
 AGENT_REF_PREFIXES: Mapping[str, str] = {
     "fold": "fold_ref",
     "strategy": "strategy_ref",
