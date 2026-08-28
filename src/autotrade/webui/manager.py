@@ -58,6 +58,11 @@ MAX_RUNNING_EXPERIMENTS = 4
 # Worker stdout/stderr, repo-relative and inside the ignored logs/ tree so a
 # crashed session stays diagnosable without ever entering the repository.
 WORKER_LOG_DIR = "logs/workers"
+
+
+def worker_log_ref(experiment_id: str) -> str:
+    """Repo-relative worker log location published to status.json and the API."""
+    return f"{WORKER_LOG_DIR}/{experiment_id}.log"
 _ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$")
 _TERMINAL_RESUMABLE_STATES = (
     "stopped",
@@ -572,7 +577,8 @@ class ExperimentManager:
             # /dev/null, leaving the run unexplainable. Append both streams to a
             # per-experiment file under the ignored logs/ tree instead; the
             # parent closes its handle immediately, the detached child keeps it.
-            log_path = self._worker_log_path(experiment_id)
+            log_ref = worker_log_ref(experiment_id)
+            log_path = self.repo_root / log_ref
             log_path.parent.mkdir(parents=True, exist_ok=True)
             with log_path.open("a", encoding="utf-8") as log:
                 log.write(f"\n===== worker start {utc_now_iso()} =====\n")
@@ -598,18 +604,17 @@ class ExperimentManager:
                     "pid": process.pid,
                     "pid_start_ticks": proc_start_ticks(process.pid),
                     "launched_at": utc_now_iso(),
-                    "worker_log_ref": str(log_path),
+                    # Repo-relative only: status.json is projected to the API and
+                    # the console, and the public boundary never carries a host
+                    # path. It is a plain location, not an opaque ref.
+                    "worker_log": log_ref,
                 },
             )
             return {
                 "spawned": True,
                 "spawned_pid": process.pid,
-                "worker_log_ref": str(log_path),
+                "worker_log": log_ref,
             }
-
-    def _worker_log_path(self, experiment_id: str) -> Path:
-        """Per-experiment worker stdout/stderr under the ignored logs/ tree."""
-        return self.repo_root / WORKER_LOG_DIR / f"{experiment_id}.log"
 
     def _require_running_slot(self) -> None:
         running = self.running_experiments()

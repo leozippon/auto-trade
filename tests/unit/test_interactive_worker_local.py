@@ -884,7 +884,9 @@ def test_webui_worker_output_is_recoverable_from_a_per_experiment_log(
     result = ExperimentManager(repo).start_worker("demo")
 
     log_path = repo / "logs" / "workers" / "demo.log"
-    assert result["worker_log_ref"] == str(log_path)
+    # Repo-relative only: this value crosses the public API/status boundary.
+    assert result["worker_log"] == "logs/workers/demo.log"
+    assert not Path(result["worker_log"]).is_absolute()
     # stdin stays closed; stderr is folded into the same stream so an
     # interleaved traceback keeps its ordering.
     assert captured["stdin"] == __import__("subprocess").DEVNULL
@@ -896,7 +898,8 @@ def test_webui_worker_output_is_recoverable_from_a_per_experiment_log(
     status = json.loads(
         (experiment / "hitl/status.json").read_text(encoding="utf-8")
     )
-    assert status["worker_log_ref"] == str(log_path)
+    assert status["worker_log"] == "logs/workers/demo.log"
+    assert str(repo) not in json.dumps(status)
     # Appended, never truncated: a restart must not erase the crash before it.
     assert "===== worker start" in log_path.read_text(encoding="utf-8")
     (experiment / "hitl/status.json").write_text(

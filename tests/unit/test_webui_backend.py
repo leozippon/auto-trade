@@ -3950,3 +3950,41 @@ class HitlControlActionTest(unittest.TestCase):
         dead = self._post(action="terminate")
         self.assertEqual(dead.status_code, 400)
         self.assertEqual(dead.json()["detail"], "no live worker to terminate")
+
+
+def test_public_worker_log_is_repo_relative_and_never_a_host_path(tmp_path: Path):
+    """The worker log location crosses the public boundary; a host path must not.
+
+    ``worker_log`` is written into hitl/status.json and returned by the create
+    and restart endpoints, both of which the console projects.
+    """
+    from autotrade.webui.manager import WORKER_LOG_DIR, worker_log_ref
+
+    directory = tmp_path / "experiments" / "demo"
+    AgentRefStore(directory)
+    hitl = directory / "hitl"
+    hitl.mkdir(parents=True)
+    (hitl / "schedule.json").write_text(
+        json.dumps({"schema_version": 1, "sessions": []}), encoding="utf-8"
+    )
+
+    relative = worker_log_ref("demo")
+    assert relative == f"{WORKER_LOG_DIR}/demo.log"
+    assert not Path(relative).is_absolute()
+
+    identity = PublicIdentity(directory)
+    public = identity.public_status(
+        {"schema_version": 1, "state": "launching", "worker_log": relative}
+    )
+    # A relative location survives the projection unchanged...
+    assert public["worker_log"] == relative
+    # ...while the absolute form it replaced would have been redacted, which is
+    # exactly why it must never be stored.
+    assert identity.public_status(
+        {"worker_log": f"/Data2/lzp/ADMCubeQuant/{relative}"}
+    )["worker_log"] == "[host path omitted]"
+    assert "/" != json.dumps(public)[0]
+    assert not any(
+        isinstance(value, str) and Path(value).is_absolute()
+        for value in public.values()
+    )
