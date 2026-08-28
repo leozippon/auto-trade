@@ -2333,12 +2333,14 @@ def _safe_meta_trace_payload(
     """Keep Meta operations observable without exposing compact Test evidence.
 
     Sub-agent events keep their identity, progress and usage fields (the
-    console cards, ``trace_stats`` and the Meta process summary need them);
-    model text (``content``, ``summary``, tool ``result`` bodies) is dropped
-    like the parent ``llm_call`` content. The session prompts are built before
-    any Test data is read, so ``session_start`` keeps them, and every tool
-    call keeps its ``ok``/``error_type``/``error`` status so a failing Meta
-    session stays auditable.
+    console cards, ``trace_stats`` and the Meta process summary need them) plus
+    the parent-written brief (``description``, ``task``) that delegation
+    quality is judged by, already clipped where it is emitted; the child's own
+    text (``content``, ``summary``, tool ``result`` bodies) is dropped like the
+    parent ``llm_call`` content. The session prompts are built before any Test
+    data is read, so ``session_start`` keeps them, and every tool call keeps
+    its ``ok``/``error_type``/``error`` status so a failing Meta session stays
+    auditable.
     """
 
     subagent_identity = {
@@ -2349,13 +2351,14 @@ def _safe_meta_trace_payload(
         "mode",
         "model",
         "thinking",
+        "thinking_applied",
         "inherit_context",
         "description",
         "resumed_from",
     }
     allowed = {
         "session_start": {"mode", "system_prompt", "instruction"},
-        "subagent_task": subagent_identity,
+        "subagent_task": subagent_identity | {"task"},
         "subagent_llm": {
             "task_id",
             "role",
@@ -2366,10 +2369,38 @@ def _safe_meta_trace_payload(
             "tool_names",
             "parent_call_id",
         },
+        "subagent_llm_error": {
+            "task_id",
+            "role",
+            "round",
+            "provider",
+            "model",
+            "llm_error",
+            "parent_call_id",
+        },
         "subagent_tool": {"task_id", "role", "round", "tool", "parent_call_id", "result"},
         "subagent_wrap_up": {"task_id", "role", "round", "rounds_limit", "parent_call_id"},
+        "subagent_output_truncated": {
+            "task_id",
+            "role",
+            "round",
+            "completion_tokens",
+            "max_tokens",
+            "continuation",
+            "parent_call_id",
+        },
         "subagent": subagent_identity
-        | {"rounds", "tool_calls", "llm_calls", "provider", "usage_totals", "error", "truncated"},
+        | {
+            "rounds",
+            "tool_calls",
+            "llm_calls",
+            "provider",
+            "usage_totals",
+            "error",
+            "truncated",
+            "truncated_rounds",
+            "llm_errors",
+        },
         "subagent_attempt": {"attempt", "role", "ok", "status", "task_id", "error"},
         "delegation_reminder": {"own_work_calls", "running_children", "queued_children"},
         "output_truncated": {"call_index", "completion_tokens", "max_tokens"},
