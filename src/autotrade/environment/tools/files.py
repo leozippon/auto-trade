@@ -21,6 +21,12 @@ from .base import ToolError, ToolResult, ToolSpec
 from .workspace import SafeWorkspace
 
 MAX_WRITE_CHARS = 200_000
+# Everything the host-side writers create must stay writable by the sandbox
+# user that runs ``shell``: the workspace root is world-writable, but a
+# default-umask mkdir or write from the host user would lock the sandbox out
+# of its own scratch tree (files could then only travel through the model).
+_SANDBOX_DIR_MODE = 0o777
+_SANDBOX_FILE_MODE = 0o666
 _PATH = {"type": "string", "minLength": 1, "maxLength": 500}
 # The same root convention as the search tools, restricted to the writable
 # tree: `workspace` is the workspace root, `output`/`models` its formal
@@ -78,6 +84,25 @@ class _WorkspaceWriteTool:
             )
         return target
 
+    def _write(self, target: Path, content: str) -> None:
+        """Write ``content`` so the sandbox user can read, change and delete it."""
+
+        created: list[Path] = []
+        parent = target.parent
+        while not parent.exists() and parent != parent.parent:
+            created.append(parent)
+            parent = parent.parent
+        target.parent.mkdir(parents=True, exist_ok=True)
+        for directory in created:
+            directory.chmod(_SANDBOX_DIR_MODE)
+        target.write_text(content, encoding="utf-8")
+        try:
+            target.chmod(_SANDBOX_FILE_MODE)
+        except PermissionError:
+            # A file the sandbox user created is not ours to chmod; it already
+            # carries that user's own mode, which is what this write preserves.
+            pass
+
 
 class WriteFileTool(_WorkspaceWriteTool):
     spec = ToolSpec(
@@ -104,9 +129,8 @@ class WriteFileTool(_WorkspaceWriteTool):
         if len(content) > MAX_WRITE_CHARS:
             raise ToolError(f"content exceeds {MAX_WRITE_CHARS} chars", error_type="too_large")
         target = self._resolve(str(arguments["path"]), root=arguments.get("root"))
-        target.parent.mkdir(parents=True, exist_ok=True)
         existed = target.exists()
-        target.write_text(content, encoding="utf-8")
+        self._write(target, content)
         return ToolResult(True, value={
             "path": self.workspace.relative(target),
             "created": not existed,
@@ -165,7 +189,7 @@ class EditFileTool(_WorkspaceWriteTool):
         updated = current.replace(old, new) if replace_all else current.replace(old, new, 1)
         if len(updated) > MAX_WRITE_CHARS:
             raise ToolError(f"resulting file exceeds {MAX_WRITE_CHARS} chars", error_type="too_large")
-        target.write_text(updated, encoding="utf-8")
+        self._write(target, updated)
         return ToolResult(True, value={
             "path": self.workspace.relative(target),
             "changed": True,

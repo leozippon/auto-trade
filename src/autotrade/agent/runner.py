@@ -57,6 +57,7 @@ from .compact import (
     safe_error_summary,
 )
 from .subagent import (
+    OUTPUT_TRUNCATED_CONTINUATION,
     SubAgentEngine,
     AgentTool,
     _copy_chat_message,
@@ -153,13 +154,19 @@ INBOX_SAFE_AFTER_PARALLEL_READONLY = "after_parallel_readonly"
 INBOX_SAFE_AFTER_TOOLS_BEFORE_LLM = "after_tools_before_llm"
 _INBOX_TRACE_CHARS = 400
 _INTERRUPTED_BY_USER = "interrupted_by_user"
-# Consecutive own read/search/shell/write calls since the last sub-agent
-# launch that trigger the delegation reminder; it fires once per such streak
-# and re-arms on the next ``agent`` launch.
+# Consecutive own read/search/shell/write calls that trigger the delegation
+# reminder while no child is running. The streak resets on an ``agent``
+# launch and on every reminder, so a parent that keeps working alone is
+# reminded again after each further streak.
 DELEGATION_NUDGE_AFTER_CALLS = 8
 _OWN_WORK_TOOLS = frozenset(
     {"read_file", "grep", "glob", "shell", "write_file", "edit_file"}
 )
+# Elapsed fractions of the session's inference time budget at which one
+# ``time_budget_notice`` observation states the remaining minutes and, for a
+# Fold, how many backtests have run so far.
+TIME_BUDGET_NOTICE_FRACTIONS = (0.5, 0.75, 0.9)
+_BACKTEST_TOOLS = ("smoke_backtest", "daily_backtest")
 
 
 class AgentInboxHook(Protocol):
@@ -323,6 +330,9 @@ class AgentSessionRunner:
         time_budget = self.time_budget or InferenceTimeBudget(
             duration_seconds=self.config.deadline_seconds
         )
+        budget_total = max(time_budget.remaining(), 0.0)
+        notice_index = 0
+        backtests = dict.fromkeys(_BACKTEST_TOOLS, 0)
         messages = [
             ChatMessage("system", self.system_prompt),
             ChatMessage("user", instruction.strip()),
@@ -343,7 +353,6 @@ class AgentSessionRunner:
         self._subagent_jobs = []
         self._live_messages = []
         own_work_streak = 0
-        delegation_nudged = False
         self._cancelled.clear()
         self._emit(
             "session_start",
@@ -382,6 +391,10 @@ class AgentSessionRunner:
                             "remaining_seconds": round(remaining, 6),
                             "grace_seconds": self.config.deadline_grace_seconds,
                         },
+                    )
+                if not self._wrap_up_sent:
+                    notice_index = self._time_budget_notice(
+                        messages, remaining, budget_total, notice_index, backtests
                     )
                 messages, _ = self._compact_if_needed(
                     messages, remaining, provider_tools
@@ -527,9 +540,8 @@ class AgentSessionRunner:
                                     "observation": "output_truncated",
                                     "completion_tokens": completion,
                                     "max_tokens": self.config.max_response_tokens,
-                                    "message": (
-                                        f"上一轮输出在 {self.config.max_response_tokens} token 上限被截断且没有工具调用。"
-                                        "请把已有结论压缩成几句话，然后直接调用下一步工具；不要重新展开完整推理。"
+                                    "message": OUTPUT_TRUNCATED_CONTINUATION.format(
+                                        limit=self.config.max_response_tokens
                                     ),
                                 },
                                 ensure_ascii=False,
@@ -596,21 +608,24 @@ class AgentSessionRunner:
                     },
                 )
             accepted_steps = len(self._complete_validation_nodes)
+            for call, _record in results:
+                if call.name in backtests:
+                    backtests[call.name] += 1
             if self.subagent is not None:
                 for call, _record in results:
                     if call.name == "agent":
                         own_work_streak = 0
-                        delegation_nudged = False
                     elif call.name in _OWN_WORK_TOOLS:
                         own_work_streak += 1
                     else:
                         own_work_streak = 0
+                picture = self._subagent_live_picture()
                 if (
                     own_work_streak >= DELEGATION_NUDGE_AFTER_CALLS
-                    and not delegation_nudged
+                    and not picture["running_children"]
                 ):
-                    delegation_nudged = True
-                    picture = self._subagent_live_picture()
+                    reminded = own_work_streak
+                    own_work_streak = 0
                     messages.append(
                         ChatMessage(
                             "user",
@@ -618,9 +633,9 @@ class AgentSessionRunner:
                                 {
                                     "observation": "delegation_reminder",
                                     "message": (
-                                        f"已连续 {own_work_streak} 次自行读取/执行而未委托；"
-                                        "除非任务很简单，请把读取与计算委托给 agent 子代理"
-                                        "（同一轮可并行多个，范围互斥）。"
+                                        f"现在没有子代理在运行，而你已连续 {reminded} 次自行读取/执行/写入。"
+                                        "把接下来可并行的块（实现、统计、审计、性能剖析）作为并行 agent 子代理启动"
+                                        "（范围互斥），再继续本轮设计；串行自做占用的是本会话最稀缺的资源。"
                                     ),
                                     **picture,
                                 },
@@ -630,7 +645,7 @@ class AgentSessionRunner:
                     )
                     self._emit(
                         "delegation_reminder",
-                        {"own_work_calls": own_work_streak, **picture},
+                        {"own_work_calls": reminded, **picture},
                     )
 
             if self.tools.finished:
@@ -676,6 +691,61 @@ class AgentSessionRunner:
             }
         )
         raise RuntimeError("Agent exceeded the session call budget")
+
+    def _time_budget_notice(
+        self,
+        messages: list[ChatMessage],
+        remaining: float,
+        total: float,
+        notice_index: int,
+        backtests: Mapping[str, int],
+    ) -> int:
+        """Inject one budget notice per crossed fraction; return the next index."""
+
+        fractions = TIME_BUDGET_NOTICE_FRACTIONS
+        if total <= 0 or notice_index >= len(fractions):
+            return notice_index
+        elapsed = 1.0 - remaining / total
+        crossed: float | None = None
+        while notice_index < len(fractions) and elapsed >= fractions[notice_index]:
+            crossed = fractions[notice_index]
+            notice_index += 1
+        if crossed is None:
+            return notice_index
+        remaining_minutes = round(max(remaining, 0.0) / 60.0, 1)
+        payload: dict[str, object] = {
+            "observation": "time_budget_notice",
+            "elapsed_fraction": crossed,
+            "remaining_minutes": remaining_minutes,
+        }
+        if self.config.mode == "fold":
+            complete = len(self._complete_validation_nodes)
+            payload.update(
+                smoke_backtests=backtests["smoke_backtest"],
+                daily_backtests=backtests["daily_backtest"],
+                complete_validations=complete,
+            )
+            payload["message"] = (
+                f"推理时间预算已用去 {crossed:.0%}，剩余约 {remaining_minutes:g} 分钟；"
+                f"至今 smoke_backtest {backtests['smoke_backtest']} 次、"
+                f"daily_backtest {backtests['daily_backtest']} 次、完整 Validation {complete} 个。"
+                "一次完整 Validation 通常需要半小时以上：请在剩余时间内完成正式回测并 finish_fold。"
+            )
+        else:
+            payload["message"] = (
+                f"推理时间预算已用去 {crossed:.0%}，剩余约 {remaining_minutes:g} 分钟；"
+                "请在剩余时间内完成 PRIOR 并 finish_meta。"
+            )
+        messages.append(ChatMessage("user", json.dumps(payload, ensure_ascii=False)))
+        self._emit(
+            "time_budget_notice",
+            {
+                key: value
+                for key, value in payload.items()
+                if key not in {"observation", "message"}
+            },
+        )
+        return notice_index
 
     def _provider_tools(self) -> tuple[dict[str, object], ...]:
         if self._hard_finalization:
@@ -1151,6 +1221,9 @@ class AgentSessionRunner:
                     # A cut-off report is not a complete one; the marker at
                     # the tail of a long summary is easy to miss.
                     payload["truncated"] = True
+                for key in ("truncated_rounds", "llm_errors"):
+                    if isinstance(value.get(key), int) and value[key] > 0:
+                        payload[key] = value[key]
                 if value.get("error"):
                     payload["error"] = value.get("error")
             messages.append(

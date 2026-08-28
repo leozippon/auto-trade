@@ -142,7 +142,7 @@ class ShellToolTest(unittest.TestCase):
             custom = SandboxShellTool(workspace, FakeRunner(), max_timeout_seconds=5)
             default_schema = json.loads(json.dumps(default.spec.input_schema))
             custom_schema = json.loads(json.dumps(custom.spec.input_schema))
-            self.assertEqual((DEFAULT_SHELL_TIMEOUT_SECONDS, MAX_SHELL_TIMEOUT_SECONDS), (60.0, 300.0))
+            self.assertEqual((DEFAULT_SHELL_TIMEOUT_SECONDS, MAX_SHELL_TIMEOUT_SECONDS), (60.0, 600.0))
             self.assertEqual(default.timeout_seconds, DEFAULT_SHELL_TIMEOUT_SECONDS)
             self.assertEqual(
                 default_schema["properties"]["timeout_seconds"]["maximum"],
@@ -152,7 +152,8 @@ class ShellToolTest(unittest.TestCase):
             self.assertEqual(
                 custom_schema["properties"]["timeout_seconds"]["maximum"], 5
             )
-            self.assertIn("defaults to 60 and is at most 300", default.spec.description)
+            self.assertIn("defaults to 60 and is at most 600", default.spec.description)
+            self.assertIn("sample of dates/stocks", default.spec.description)
             registry = ToolRegistry([default])
             # Omitted: the default; explicit within the cap: honoured as given.
             registry.invoke("shell", {"argv": ["echo", "ok"]})
@@ -491,6 +492,38 @@ class ArtifactIOToolTest(unittest.TestCase):
             )
             self.assertFalse(overwrite.value["created"])
 
+    def test_host_writes_stay_writable_for_the_sandbox_user(self) -> None:
+        """``shell`` runs as the sandbox uid, not the host user: every file
+        and directory the host-side writers create must be writable by it,
+        whatever the host umask; a directory that already existed is left
+        as its creator set it."""
+        previous = os.umask(0o022)
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                paths, registry = self._registry(Path(tmp))
+                (paths.agent / "pre").mkdir(mode=0o755)
+                written = registry.invoke(
+                    "write_file", {"path": "scratch/deep/study.py", "content": "x = 1\n"}
+                )
+                self.assertTrue(written.ok, written.error)
+                def mode(path: Path) -> int:
+                    return path.stat().st_mode & 0o777
+
+                self.assertEqual(mode(paths.agent / "scratch"), 0o777)
+                self.assertEqual(mode(paths.agent / "scratch" / "deep"), 0o777)
+                self.assertEqual(mode(paths.agent / "scratch" / "deep" / "study.py"), 0o666)
+                edited = registry.invoke(
+                    "edit_file",
+                    {"path": "scratch/deep/study.py", "old_text": "x = 1", "new_text": "x = 2"},
+                )
+                self.assertTrue(edited.ok, edited.error)
+                self.assertEqual(mode(paths.agent / "scratch" / "deep" / "study.py"), 0o666)
+                registry.invoke("write_file", {"path": "pre/note.md", "content": "n"})
+                self.assertEqual(mode(paths.agent / "pre"), 0o755)
+                self.assertEqual(mode(paths.agent / "pre" / "note.md"), 0o666)
+        finally:
+            os.umask(previous)
+
     def test_edit_missing_and_stale_are_typed_errors(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             _, registry = self._registry(Path(tmp))
@@ -788,8 +821,8 @@ class ToolContractHintTest(unittest.TestCase):
             custom = SandboxShellTool(workspace, FakeRunner(), max_timeout_seconds=5).spec.description
             self.assertIn('["python", "-c", "print(1)"]', default)
             self.assertIn("inside the workspace", default)
-            self.assertIn("at most 30", default)
-            self.assertIn("at most 5", custom)
+            self.assertIn("at most 600", default)
+            self.assertIn("at most 5;", custom)
 
 
 class ToolResultContractTest(unittest.TestCase):
@@ -1000,3 +1033,159 @@ class SpillAndRootContractTest(unittest.TestCase):
             self.assertIn("available now: finish_fold, read_file", unavailable.error)
             unknown = registry.invoke("shell", {"argv": ["ls"]})
             self.assertIn("tools in this session: glob, read_file", unknown.error)
+
+
+class FoldBacktestResultBudgetTest(unittest.TestCase):
+    """``daily_backtest`` is the one tool whose payload scales with the replay.
+
+    The observation the model keeps for the rest of the session must stay a
+    fixed-cost summary, and the reference it hands back for the full record
+    must resolve through the Agent's own read path — a dangling reference costs
+    a round of blind searching, and an inline per-position block once forced a
+    mid-Fold context compaction.
+    """
+
+    def _tool(self, tmp: Path, trades: int, *, tree=None):
+        from contextlib import nullcontext
+        from datetime import UTC
+
+        from autotrade.environment.artifacts import FilesystemArtifactStore
+        from autotrade.environment.identity import AgentRefStore
+        from autotrade.environment.runtime import write_json_atomic
+        from autotrade.environment.step_tree import StepTree
+        from autotrade.environment.time_budget import InferenceTimeBudget
+        from autotrade.environment.tools.base import ToolResult
+        from autotrade.pipelines.config import (
+            BrokerProfile,
+            EvaluationResult,
+            FoldSessionRequest,
+            FoldSpec,
+            SnapshotBundle,
+            StrategySchedule,
+        )
+        from autotrade.pipelines.local_backend import FoldBacktestTool
+
+        paths, _, _ = build_sandbox(tmp)
+        output = paths.agent / "output"
+        models = paths.agent / "models"
+        (output / "main.py").write_text(
+            "def generate_orders(context):\n    return []\n", encoding="utf-8"
+        )
+        summary = {
+            "total_return": 0.0843,
+            "sharpe": 1.51,
+            "max_drawdown": 0.0811,
+            "order_count": trades * 2,
+            "trade_count": trades,
+            "decision_calls": 60,
+            "replayed_trade_days": 60,
+            "phase_seconds": {"strategy": 12.5, "data_view": 88.0},
+            "weekly_returns": [
+                {"week": f"2022-W{index:02d}", "return": 0.001 * index}
+                for index in range(1, 61)
+            ],
+            "per_stock": [
+                {
+                    "symbol": f"{index:06d}.SZ",
+                    "exit_at": "2022-03-31T15:00:00+08:00",
+                    "exit_price": 12.34,
+                    "quantity": 100,
+                    "realized_pnl": 1.5,
+                }
+                for index in range(trades)
+            ],
+        }
+
+        class Evaluator:
+            def evaluate(self, _request, max_days=None):
+                target = tmp / "host_results" / "valid_deadbeef" / "result.json"
+                write_json_atomic(target, {"stats": summary})
+                return EvaluationResult(summary=dict(summary), result_ref=str(target))
+
+        class PassingCheck:
+            def invoke(self, _arguments):
+                return ToolResult(True, value={"check_index": 1, "changed_lines": 3})
+
+        moment = datetime(2021, 12, 31, 23, 59, 59, tzinfo=UTC)
+        request = FoldSessionRequest(
+            experiment_id="exp",
+            epoch_id="epoch_001",
+            fold=FoldSpec(
+                fold_id="fold_2022Q1",
+                input_window_start="20200101",
+                input_window_end="20210930",
+                validation_start="20220101",
+                validation_end="20220331",
+                test_start="20220401",
+                test_end="20220630",
+                valid_decision_time=moment,
+                test_decision_time=moment,
+            ),
+            run_id="run_budget",
+            parent=None,
+            prior="",
+            snapshot=SnapshotBundle("snapshot", "decision", "replay"),
+            max_steps=3,
+            max_backtests=3,
+            max_llm_calls=3,
+            deadline_seconds=600.0,
+        )
+        tool = FoldBacktestTool(
+            request=request,
+            output_dir=output,
+            models_dir=models,
+            modification_check=PassingCheck(),
+            artifact_store=FilesystemArtifactStore(tmp / "revisions"),
+            evaluator=Evaluator(),
+            tree=tree(paths.steps) if tree is not None else StepTree(paths.steps),
+            schedule=StrategySchedule(),
+            broker_profile=BrokerProfile(),
+            time_budget=InferenceTimeBudget(duration_seconds=600.0),
+            formal_guard=nullcontext,
+            ref_store=AgentRefStore(tmp / "experiment"),
+        )
+        return paths, tool, summary
+
+    def test_inline_result_stays_in_budget_and_the_reference_reads_back(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            paths, tool, summary = self._tool(Path(tmp), 5000)
+            result = ToolRegistry([tool]).invoke("daily_backtest", {})
+            self.assertTrue(result.ok, result.error)
+            rendered = json.dumps(result.value, ensure_ascii=False, default=str)
+            self.assertLessEqual(len(rendered), search_module.MAX_RESULT_CHARS, len(rendered))
+            # The blocks that scale with the replay are the ones left out; every
+            # metric the accept/reject decision needs still rides inline.
+            stats = result.value["stats"]
+            self.assertNotIn("per_stock", stats)
+            self.assertNotIn("weekly_returns", stats)
+            for key in ("total_return", "sharpe", "max_drawdown", "trade_count", "phase_seconds"):
+                self.assertIn(key, stats)
+            self.assertEqual(result.value["result_root"], "steps")
+            self.assertIn(result.value["result_ref"], result.value["result_hint"])
+            # The reference resolves through the Agent's own read path and the
+            # file behind it holds the full record.
+            roots = SearchRoots(SafeWorkspace(paths.workspace), paths=paths)
+            self.assertIn("steps", roots.names)
+            registry = ToolRegistry([ReadFileTool(roots)])
+            read = registry.invoke(
+                "read_file",
+                {"root": result.value["result_root"], "path": result.value["result_ref"]},
+            )
+            self.assertTrue(read.ok, read.error)
+            target, _ = roots.resolve("steps", result.value["result_ref"])
+            record = json.loads(target.read_text(encoding="utf-8"))
+            self.assertEqual(len(record["stats"]["per_stock"]), len(summary["per_stock"]))
+
+    def test_a_step_without_its_result_attachment_fails_instead_of_dangling(self) -> None:
+        from autotrade.environment.step_tree import StepTree
+
+        class TreeWithoutAttachments(StepTree):
+            def record_step(self, output_root, **kwargs):
+                kwargs["attachments"] = None
+                return super().record_step(output_root, **kwargs)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            _, tool, _ = self._tool(Path(tmp), 5, tree=TreeWithoutAttachments)
+            result = ToolRegistry([tool]).invoke("daily_backtest", {})
+            self.assertFalse(result.ok)
+            self.assertIn("attachment is missing", result.error)

@@ -1023,6 +1023,38 @@ def test_complete_writes_conversation_log(tmp_path: Path):
     assert fake_secret not in json.dumps(records)
 
 
+def test_concurrent_callers_append_whole_conversation_log_records(tmp_path: Path):
+    """The parent conversation and its sub-agent threads share one per-pid
+    log file; every record must land as one intact JSON line."""
+    workers = 8
+    transport = FakeTransport(
+        [_response({"content": "x" * 20_000}) for _ in range(workers)]
+    )
+    proxy = DeepSeekProxy(
+        make_config(max_retries=0, conversation_log_dir=tmp_path), transport=transport
+    )
+    prompt = [ChatMessage("user", "y" * 50_000)]
+    errors: list[BaseException] = []
+
+    def call() -> None:
+        try:
+            proxy.complete(prompt)
+        except BaseException as exc:  # noqa: BLE001 - surfaced by the assertion below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=call) for _ in range(workers)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(10)
+    assert errors == []
+    records = _log_records(tmp_path)
+    assert sorted(record["status"] for record in records) == ["ok"] * workers + [
+        "started"
+    ] * workers
+    assert len({record["call_id"] for record in records}) == workers
+
+
 def test_failed_call_writes_conversation_log(tmp_path: Path):
     fake_secret = "sk-" + "secretvalue123456"
     failure = LLMProxyError(

@@ -113,6 +113,14 @@ AGENT_VISIBLE_BACKTEST_SUMMARY_KEYS = (
 )
 TRACE_MAX_BYTES = 32 * 1024 * 1024
 TRACE_MAX_EVENT_BYTES = 256 * 1024
+# What an over-sized event keeps. Identity plus these named fields survive
+# verbatim; ``content`` (a model reply) keeps its own preview because the trace
+# views read it back, and everything else — a ``tool_call``'s ``arguments`` and
+# ``result`` above all — survives as one clipped JSON head, so an event with no
+# ``content`` field still says what it did.
+_TRACE_STUB_KEYS = ("status", "call_index", "tool", "tool_names")
+TRACE_CONTENT_PREVIEW_CHARS = 32_000
+TRACE_PAYLOAD_HEAD_CHARS = 8_000
 _TRACE_LOCKS: dict[str, threading.Lock] = {}
 _TRACE_LOCKS_GUARD = threading.Lock()
 
@@ -532,6 +540,20 @@ def agent_trace_path(artifacts_root: str | Path, run_id: str) -> Path:
     return Path(artifacts_root) / "traces" / f"{run_id}.jsonl"
 
 
+def _trace_payload_head(payload: dict[str, object]) -> str | None:
+    """Clipped JSON of the payload fields the truncation stub does not keep."""
+
+    body = {
+        key: value
+        for key, value in payload.items()
+        if key not in _TRACE_STUB_KEYS and key not in ("content", "error")
+    }
+    if not body:
+        return None
+    head = json.dumps(body, ensure_ascii=False, sort_keys=True, default=str)
+    return head[:TRACE_PAYLOAD_HEAD_CHARS]
+
+
 class AgentTraceWriter:
     """Bounded, redacted JSONL event stream for one Agent session."""
 
@@ -579,7 +601,8 @@ class AgentTraceWriter:
                 "call_index": record.get("call_index"),
                 "tool": record.get("tool"),
                 "tool_names": record.get("tool_names"),
-                "content_preview": str(record.get("content") or "")[:32_000],
+                "content_preview": str(record.get("content") or "")[:TRACE_CONTENT_PREVIEW_CHARS],
+                "payload_head": _trace_payload_head(sanitized),
                 "error": str(record.get("error") or "")[:4_000] or None,
             }
             encoded = (
@@ -588,6 +611,7 @@ class AgentTraceWriter:
             ).encode("utf-8")
             if len(encoded) > self.max_event_bytes:
                 record.pop("content_preview", None)
+                record.pop("payload_head", None)
                 record.pop("error", None)
                 encoded = (
                     json.dumps(record, ensure_ascii=False, sort_keys=True, default=str, allow_nan=False)

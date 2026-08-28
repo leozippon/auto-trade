@@ -307,6 +307,7 @@ class _DomainView:
             elif "dataset" in replay.columns:
                 self._cursors = _dataset_cursors(replay["dataset"].astype(str).to_numpy(), valid, keys)
         self._dataset_names: list[str] = sorted(self._cursors)
+        self._frozen_schema: pa.Schema | None = None
         self._columns = self._init_frozen_part(frozen_file)
         if not self.incremental:
             self._require_schema_covers(self.replay)
@@ -342,7 +343,7 @@ class _DomainView:
         self._last_signature = object()
 
     def _require_schema_covers(self, replay: pd.DataFrame) -> None:
-        """Surface replay columns the roll's ``reindex`` will drop.
+        """Surface replay columns the roll's projection will drop.
 
         The canonical schema is fixed by the frozen part (parts must share one
         schema for the documented DuckDB ``dir/*.parquet`` read), and union
@@ -395,6 +396,9 @@ class _DomainView:
             if footer.metadata.num_rows > 0 or typed_empty:
                 _link_or_copy(frozen_file, self.out_dir / "part_0000.parquet")
                 self._part_seq = 1
+                # Types for canonical columns a replay frame does not carry:
+                # every part in the directory has to unify with part 0.
+                self._frozen_schema = schema
                 return frozen_columns
         # The agent-facing schema drops the gating-only available_at unless the frozen
         # domain already carries it (events/macro/fundamentals do; daily does not).
@@ -417,7 +421,7 @@ class _DomainView:
         if newly.size == 0:
             return False
         newly.sort()  # original frame order: parts read back exactly as the frame slice
-        self._write_part(int(newly.size), lambda: self.replay.iloc[newly].reindex(columns=self._columns))
+        self._write_part(int(newly.size), lambda: self._project(self.replay.iloc[newly]))
         return True
 
     def _roll_incremental(self, when: pd.Timestamp) -> bool:
@@ -452,14 +456,43 @@ class _DomainView:
         if not newly:
             return False
 
-        def build() -> pd.DataFrame:
-            rows = newly[0] if len(newly) == 1 else pd.concat(newly, ignore_index=True)
-            return rows.reindex(columns=self._columns)
+        def build() -> pa.Table:
+            parts = [self._project(frame) for frame in newly]
+            return parts[0] if len(parts) == 1 else pa.concat_tables(parts)
 
         self._write_part(sum(len(frame) for frame in newly), build)
         return True
 
-    def _write_part(self, row_count: int, build: Callable[[], pd.DataFrame]) -> None:
+    def _project(self, frame: pd.DataFrame) -> pa.Table:
+        """Project one slice onto the canonical part schema.
+
+        ``DataFrame.reindex(columns=...)`` rebuilds every block of the slice.
+        On one day of minute bars (~700k rows over seven object columns) that
+        copy measured 18-73 s and was 95 % of replay wall, against 0.3 s for
+        the same projection in Arrow, which reuses the converted buffers.
+        """
+        table = pa.Table.from_pandas(frame, preserve_index=False)
+        fields: list[pa.Field] = []
+        arrays: list[object] = []
+        for name in self._columns:
+            index = table.schema.get_field_index(name)
+            if index >= 0:
+                fields.append(table.schema.field(index))
+                arrays.append(table.column(index))
+                continue
+            if self._frozen_schema is None:
+                raise RuntimeError(
+                    f"Timeview domain {self.name!r}: replay slice has no column {name!r} and "
+                    "no frozen part fixes its type"
+                )
+            field = self._frozen_schema.field(self._frozen_schema.get_field_index(name))
+            fields.append(field)
+            arrays.append(pa.nulls(table.num_rows, type=field.type))
+        # Rebuilt without the pandas metadata of the source frame: it still
+        # describes the dropped gating columns.
+        return pa.Table.from_arrays(arrays, schema=pa.schema(fields))
+
+    def _write_part(self, row_count: int, build: Callable[[], pa.Table]) -> None:
         """Write the next part, reusing the run-level stash when one is present.
 
         The PIT backend has already bound the stash to the exact semantic
@@ -488,14 +521,14 @@ class _DomainView:
                 else:
                     tmp = stash.parent / f".{name}.{uuid.uuid4().hex}.tmp"
                     try:
-                        build().to_parquet(tmp, index=False)
+                        pq.write_table(build(), tmp)
                         os.replace(tmp, stash)
                     finally:
                         if tmp.exists():
                             tmp.unlink()
                 os.link(stash, out)
         else:
-            build().to_parquet(out, index=False)
+            pq.write_table(build(), out)
         self._part_seq += 1
 
     def _newly_visible(self, when: pd.Timestamp) -> np.ndarray:

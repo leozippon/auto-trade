@@ -16,10 +16,11 @@ STDERR_SUPPRESSION_REMINDER = (
 )
 # Default per-call timeout when the Agent omits ``timeout_seconds``, and the
 # hard cap it may request. Data checks over PIT parquet (IC tables, coverage
-# scans) regularly need more than 30 s; 300 s keeps every call a bounded
-# foreground command while no longer starving a child of its numbers.
+# scans) regularly need more than 30 s, and a full-market pass in the 4-CPU
+# sandbox did not fit 300 s; 600 s keeps every call a bounded foreground
+# command while no longer starving a child of its numbers.
 DEFAULT_SHELL_TIMEOUT_SECONDS = 60.0
-MAX_SHELL_TIMEOUT_SECONDS = 300.0
+MAX_SHELL_TIMEOUT_SECONDS = 600.0
 SHELL_ARGV_MAX_CHARS = 1000
 FORBIDDEN_WAIT = "forbidden_wait"
 _WAIT_COMMANDS = frozenset({"sleep", "usleep"})
@@ -100,8 +101,11 @@ def _shell_description(timeout_seconds: float, max_timeout_seconds: float) -> st
         '(e.g. workspace/probe.py) and run ["python", "workspace/probe.py"]. '
         "`cwd` and every path must stay inside the workspace (relative, no `..`). "
         f"`timeout_seconds` defaults to {timeout_seconds:g} and is at most {max_timeout_seconds:g}; "
-        "the command runs in the foreground and is killed at the timeout, so bound the "
-        "work (column/date filters, sampled rows) rather than starting anything in the background."
+        "the command runs in the foreground and is killed at the timeout, so bound the work: "
+        "validate a script on a sample of dates/stocks first, split a full-market or "
+        "full-history pass into chunks that each finish within the cap, and checkpoint "
+        "intermediate results to files under the workspace (they persist) rather than "
+        "starting anything in the background."
     )
 
 

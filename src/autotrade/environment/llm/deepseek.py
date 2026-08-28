@@ -341,6 +341,11 @@ class OpenAICompatibleConfig:
         return metadata
 
 
+# The parent conversation and its sub-agent threads share one per-pid log
+# file; appends are serialized here so records never interleave.
+_CONVERSATION_LOG_LOCK = threading.Lock()
+
+
 class OpenAICompatibleProxy:
     config_type = OpenAICompatibleConfig
 
@@ -624,7 +629,7 @@ class OpenAICompatibleProxy:
         date_key = started_at[:10].replace("-", "")
         # Per-process file: concurrent HITL workers share the log dir, and an
         # append over PIPE_BUF is not atomic across writers — isolating by pid
-        # makes interleaving impossible without any locking.
+        # keeps processes apart; threads of one process share the lock above.
         name = f"{date_key}-p{os.getpid()}.jsonl"
         return (
             Path(self.config.conversation_log_dir)
@@ -639,19 +644,17 @@ class OpenAICompatibleProxy:
         if path is None:
             return
         try:
-            _ensure_log_parent(path)
-            # Within one process every caller (Runner, NL/sub-agent host service)
-            # drives the provider serially, so per-pid appends never interleave.
-            with path.open("a", encoding="utf-8") as handle:
-                safe_record = _redact_audit_details(
-                    record,
-                    base_url=self.config.base_url,
-                    endpoint=self.config.endpoint,
-                    api_key=self.config.api_key,
-                )
-                handle.write(
-                    json.dumps(safe_record, ensure_ascii=False, sort_keys=True) + "\n"
-                )
+            safe_record = _redact_audit_details(
+                record,
+                base_url=self.config.base_url,
+                endpoint=self.config.endpoint,
+                api_key=self.config.api_key,
+            )
+            line = json.dumps(safe_record, ensure_ascii=False, sort_keys=True) + "\n"
+            with _CONVERSATION_LOG_LOCK:
+                _ensure_log_parent(path)
+                with path.open("a", encoding="utf-8") as handle:
+                    handle.write(line)
         except OSError as exc:
             raise LLMProxyError(
                 f"failed to write provider conversation log: {path}"

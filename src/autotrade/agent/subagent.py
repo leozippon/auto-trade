@@ -31,7 +31,6 @@ from autotrade.environment.llm import (
     clamp_requested_max_tokens,
     context_request_fits,
 )
-from autotrade.environment.llm.deepseek import OpenAICompatibleProxy
 from autotrade.environment.runtime import sanitize_for_log
 from autotrade.environment.time_budget import (
     InferenceTimeBudget,
@@ -78,6 +77,15 @@ _CALL_BUDGET_EXHAUSTED = "call budget exhausted"
 # Appended to a child's summary when its reply hit the output ceiling, so the
 # parent never receives a silently cut half-sentence.
 OUTPUT_TRUNCATED_MARKER = "[输出在 {limit} token 上限被截断]"
+# A reply that spent its whole completion budget on reasoning (no content, no
+# tool call) gets a forced concise continuation — the same observation the
+# parent conversation receives — at most this many times per child before the
+# launch is reported as failed instead of terminated as ``completed``.
+SUBAGENT_MAX_TRUNCATION_CONTINUATIONS = 2
+OUTPUT_TRUNCATED_CONTINUATION = (
+    "上一轮输出在 {limit} token 上限被截断且没有工具调用。"
+    "请把已有结论压缩成几句话，然后直接调用下一步工具；不要重新展开完整推理。"
+)
 
 _FOLD_READ_TOOLS = frozenset({"glob", "grep", "read_file"})
 _FOLD_WRITE_TOOLS = frozenset(
@@ -108,7 +116,7 @@ _FOLD_WRITE_PROMPT = """\
 # 边界
 - 先读 `inputs/skills_index.json`，再从已挂载数据、单位引用、制品和参考材料中自主发现任务所需证据；skill 脚本不自动执行。把有复用价值的知识写入 skill，而不是堆入策略或汇报。
 - 只完成父任务；不得再委托子代理、读取 Test/Held-out、改变权威 PRIOR、安装依赖、替父 Agent 提问或伪造结果。分钟和竞价不是策略时钟。
-- 工具 schema 决定实际能力。同一轮的只读调用并发执行；写、检查与 shell 按因果顺序分轮调用。shell 只做有界前台工作，不启动后台任务、sleep/等待包装、轮询状态或隐藏错误。
+- 工具 schema 决定实际能力。同一轮的只读调用并发执行；写、检查与 shell 按因果顺序分轮调用。shell 只做有界前台工作，不启动后台任务、sleep/等待包装、轮询状态或隐藏错误；shell 写入工作区的文件会保留。全市场逐股或全历史的计算先在抽样上验证脚本，再分块运行并把中间结果落盘，每块都要在 shell 超时内完成。
 
 # 返回
 用简洁中文说明结论、实际修改、关键证据和剩余风险，然后停止。\
@@ -166,10 +174,11 @@ AGENT_TOOL_DESCRIPTION = (
     "角色能力：developer/general-purpose 有 Sandbox shell（可跑 Python 读 PIT parquet、算 IC 表、做冒烟测试）并可写策略、模型与 skills；"
     "auditor/Explore 只能用 glob/grep/read_file 读文本与代码，不能执行任何命令——任何需要计算的任务用 general-purpose 或 developer；"
     "Meta 会话中全部角色只读。子代理只看到自己的角色提示和你的 task（inherit_context=true 时另带你的对话），"
-    "所以 task 要写全路径、约束和期望的返回格式。thinking：常规阅读 low/medium，审计、根因与关键策略实现 xhigh。"
+    "所以 task 要写全路径、约束和期望的返回格式。thinking：需要执行工具（shell、写文件、计算）的子代理用 low/medium；"
+    f"xhigh 只给纯文本推理的裁决类任务，因为它会把 {AGENT_MAX_OUTPUT_TOKENS} token 的输出预算耗在思考里，整轮发不出工具调用。"
     "子代理不能嵌套、正式回测、结束会话、改 PRIOR 或自行验收；它的汇报描述意图而非结果，其写入须由你验收。"
     "resume=<task_id> 让一个已完成的子代理在自己的对话上继续新的 task（保留它读过的上下文，角色须相同）；"
-    "仍在运行或未知的 task_id 会被拒绝。"
+    "仍在运行或未知的 task_id 会被拒绝。只在后续任务确实需要它已有的上下文时 resume；独立的后续工作另起并行的全新子代理，不要串成 resume 链。"
 )
 
 AGENT_TOOL_SPEC = ToolSpec(
@@ -202,7 +211,7 @@ AGENT_TOOL_SPEC = ToolSpec(
             "thinking": {
                 "type": "string",
                 "enum": list(SUBAGENT_THINKING_LEVELS),
-                "description": "子代理思考强度；省略为 medium，不继承父会话。常规阅读 low/medium，审计、根因与关键实现 xhigh（旧值 high/max 等同 xhigh）；off 关闭扩展思考。",
+                "description": "子代理思考强度；省略为 medium，不继承父会话。执行工具的任务用 low/medium；xhigh 只给纯文本裁决类任务，它会把输出预算耗在思考里而发不出工具调用（旧值 high/max 等同 xhigh）；off 关闭扩展思考。",
             },
             "inherit_context": {
                 "type": "boolean",
@@ -285,7 +294,7 @@ def subagent_system_prompt(mode: str, role: str) -> str:
     )
 
 
-def normalize_subagent_thinking(value: object) -> str | None:
+def normalize_subagent_thinking(value: object) -> str:
     """Return a canonical thinking level.
 
     Omitted, empty, or inherit aliases use ``DEFAULT_SUBAGENT_THINKING``
@@ -307,15 +316,25 @@ def normalize_subagent_thinking(value: object) -> str | None:
     return text
 
 
-def llm_with_thinking(proxy: LLMProxy, thinking: str | None) -> LLMProxy:
-    """Clone a gateway proxy with a per-child thinking override; no-op if inherit."""
+def llm_with_thinking(proxy: LLMProxy, thinking: str) -> LLMProxy:
+    """Clone the gateway with this child's thinking level.
 
-    if thinking is None or not isinstance(proxy, OpenAICompatibleProxy):
+    The session hands the engine a budget wrapper, not the gateway itself; the
+    wrapper clones itself over a re-configured gateway, so the level really
+    reaches the request. A proxy that cannot take one (test doubles) is
+    returned as is, and ``thinking_applied`` in the child's trace says which
+    happened.
+    """
+
+    clone = getattr(proxy, "with_thinking", None)
+    if clone is None:
         return proxy
-    if thinking == "off":
-        return cast(LLMProxy, proxy.with_thinking(enabled=False, reasoning_effort=None))
+    enabled = thinking != "off"
     # low/medium/xhigh are native levels for every supported dialect.
-    return cast(LLMProxy, proxy.with_thinking(enabled=True, reasoning_effort=thinking))
+    return cast(
+        LLMProxy,
+        clone(enabled=enabled, reasoning_effort=thinking if enabled else None),
+    )
 
 
 @dataclass(frozen=True)
@@ -441,6 +460,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
         deadline = min(child_cap, self._deadline_monotonic())
         thinking = normalize_subagent_thinking(thinking)
         llm = llm_with_thinking(self.llm, thinking)
+        thinking_applied = llm is not self.llm
         started = {
             "task_id": task_id,
             "role": role,
@@ -448,8 +468,12 @@ class SubAgentEngine(SessionTimeBudgetAware):
             "status": "started",
             "mode": self.mode,
             "model": getattr(llm, "model", "") or getattr(self.llm, "model", ""),
-            "thinking": thinking or "inherit",
+            "thinking": thinking,
+            "thinking_applied": thinking_applied,
             "inherit_context": bool(inherit_context),
+            # The brief is what delegation quality is judged by; clipped like
+            # every other traced argument.
+            "task": _traced_arguments(task.strip()),
         }
         if description:
             started["description"] = description
@@ -485,7 +509,9 @@ class SubAgentEngine(SessionTimeBudgetAware):
         status = "completed"
         error = ""
         llm_calls = 0
-        truncated = False
+        llm_errors = 0
+        truncated_rounds = 0
+        continuations = 0
         try:
             while rounds_limit is None or rounds < rounds_limit:
                 if self._cancelled():
@@ -540,7 +566,20 @@ class SubAgentEngine(SessionTimeBudgetAware):
                     )
                 except Exception as exc:  # noqa: BLE001 - child retry must not kill parent
                     llm_calls += 1
+                    llm_errors += 1
                     error = safe_error_summary(exc)
+                    self._emit(
+                        "subagent_llm_error",
+                        {
+                            "task_id": task_id,
+                            "role": role,
+                            "round": rounds,
+                            "provider": getattr(llm, "provider", ""),
+                            "model": getattr(llm, "model", ""),
+                            "llm_error": error,
+                            "parent_call_id": parent_call_id,
+                        },
+                    )
                     if self._cancelled():
                         status = "cancelled"
                         error = "Sub-agent cancelled"
@@ -570,9 +609,12 @@ class SubAgentEngine(SessionTimeBudgetAware):
                     )
                     continue
                 llm_calls += 1
+                # A transient provider error that a later round survived is
+                # not this child's outcome.
+                error = ""
                 _add_usage(usage, response.usage)
                 cut_off = _output_truncated(response.usage, output_tokens)
-                truncated = truncated or cut_off
+                truncated_rounds += int(cut_off)
                 messages.append(
                     ChatMessage(
                         "assistant",
@@ -607,9 +649,48 @@ class SubAgentEngine(SessionTimeBudgetAware):
                             summary += "\n" + OUTPUT_TRUNCATED_MARKER.format(limit=output_tokens)
                         break
                     if cut_off:
-                        # The whole budget went into thinking: do not retry the
-                        # same open-ended turn; fall through to the forced
-                        # concise summary below.
+                        # The whole budget went into thinking: ask for a
+                        # concise continuation like the parent does, a bounded
+                        # number of times; then the launch failed.
+                        if continuations < SUBAGENT_MAX_TRUNCATION_CONTINUATIONS:
+                            continuations += 1
+                            completion = int(
+                                dict(response.usage).get("completion_tokens") or 0
+                            )
+                            self._emit(
+                                "subagent_output_truncated",
+                                {
+                                    "task_id": task_id,
+                                    "role": role,
+                                    "round": rounds,
+                                    "completion_tokens": completion,
+                                    "max_tokens": output_tokens,
+                                    "continuation": continuations,
+                                    "parent_call_id": parent_call_id,
+                                },
+                            )
+                            messages.append(
+                                ChatMessage(
+                                    "user",
+                                    json.dumps(
+                                        {
+                                            "observation": "output_truncated",
+                                            "completion_tokens": completion,
+                                            "max_tokens": output_tokens,
+                                            "message": OUTPUT_TRUNCATED_CONTINUATION.format(
+                                                limit=output_tokens
+                                            ),
+                                        },
+                                        ensure_ascii=False,
+                                    ),
+                                )
+                            )
+                            continue
+                        status = "error"
+                        error = (
+                            f"output budget exhausted on reasoning in {truncated_rounds} "
+                            "rounds without a tool call or report"
+                        )
                         break
                     messages.append(
                         ChatMessage(
@@ -686,7 +767,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
                 _add_usage(usage, response.usage)
                 summary = response.content.strip()
                 if _output_truncated(response.usage, output_tokens):
-                    truncated = True
+                    truncated_rounds += 1
                     summary = (
                         summary + "\n" if summary else ""
                     ) + OUTPUT_TRUNCATED_MARKER.format(limit=output_tokens)
@@ -695,6 +776,14 @@ class SubAgentEngine(SessionTimeBudgetAware):
         except Exception as exc:  # noqa: BLE001 - a sub-agent failure must not kill the parent
             status = "timeout" if isinstance(exc, TimeoutError) else "error"
             error = safe_error_summary(exc)
+        if status == "completed" and not summary:
+            # ``completed`` means a report reached the parent; nothing else.
+            if self._deadline_reached(deadline):
+                status, error = "timeout", "Sub-agent deadline reached before a report"
+            elif self._cancelled():
+                status, error = "cancelled", "Sub-agent cancelled"
+            else:
+                status, error = "error", "Sub-agent ended without a report"
 
         result: dict[str, object] = {
             "task_id": task_id,
@@ -708,13 +797,17 @@ class SubAgentEngine(SessionTimeBudgetAware):
             "summary": summary,
             "mode": self.mode,
             "role": role,
-            "thinking": thinking or "inherit",
+            "thinking": thinking,
+            "thinking_applied": thinking_applied,
             "inherit_context": bool(inherit_context),
         }
         if resumed_from:
             result["resumed_from"] = resumed_from
-        if truncated:
+        if truncated_rounds:
             result["truncated"] = True
+            result["truncated_rounds"] = truncated_rounds
+        if llm_errors:
+            result["llm_errors"] = llm_errors
         if error:
             result["error"] = error
         self._emit(

@@ -256,9 +256,13 @@ def test_backtest_failure_past_wall_deadline_keeps_llm_repair_budget(
         and event.get("tool") == "daily_backtest"
         and event["result"]["ok"]
     )
+    # The reference names the step-tree attachment that actually holds the full
+    # replay record, under the ``steps`` search root the Agent can read.
+    assert successful["result"]["value"]["result_root"] == "steps"
     assert successful["result"]["value"]["result_ref"] == (
-        "results/valid_002/result.json"
+        f"epoch_001__{fold_ref}__{run_ref}__valid_002/validation/result.json"
     )
+    assert (tree.root / successful["result"]["value"]["result_ref"]).is_file()
 
 
 def test_complete_node_enters_hard_finalization_without_compaction_or_research(

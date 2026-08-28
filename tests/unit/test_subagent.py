@@ -166,7 +166,10 @@ def test_subagent_events_land_on_the_parent_fold_trace() -> None:
     assert types[-1] == "subagent"
     assert events[0][1]["parent_call_id"] == "call_parent"
     assert events[0][1]["role"] == "developer"
-    assert "task" not in events[0][1]
+    # The brief is traced (clipped like tool arguments); a scripted double
+    # cannot carry a thinking level, and the trace says so.
+    assert events[0][1]["task"] == "inspect snapshot schema"
+    assert events[0][1]["thinking_applied"] is False
     assert events[0][1]["task_id"] == result["task_id"]
     assert result["role"] == "developer"
     tool_event = next(payload for event, payload in events if event == "subagent_tool")
@@ -2087,9 +2090,9 @@ def test_delegation_reminder_fires_once_after_eight_own_calls() -> None:
 
 
 def test_delegation_reminder_rearms_per_streak_and_counts_writes() -> None:
-    """One launch does not silence the reminder for the whole session: a new
-    streak of eight own-work calls (reads or writes) since the last launch
-    fires it again, and a streak fires at most once."""
+    """The reminder is not a one-shot latch: every further streak of eight
+    own-work calls (reads or writes) with no child running fires it again,
+    whether or not a launch happened in between."""
     read = _NamedTool("read_file")
     write = _NamedTool("write_file")
     finish = _FinishStub("finish_fold")
@@ -2098,7 +2101,9 @@ def test_delegation_reminder_rearms_per_streak_and_counts_writes() -> None:
             ProviderResponse(
                 tool_calls=(ToolCall("a1", "agent", {"agent": "auditor", "task": "look"}),)
             ),
-            # Streak one: fires at the eighth call, silent through the eighteenth.
+            # Text only while the child runs: the parent yields until it ends.
+            ProviderResponse(content="waiting"),
+            # Streak one and two: the eighth and the sixteenth call fire.
             *(
                 ProviderResponse(tool_calls=(ToolCall(f"r{index}", "read_file", {}),))
                 for index in range(18)
@@ -2106,7 +2111,8 @@ def test_delegation_reminder_rearms_per_streak_and_counts_writes() -> None:
             ProviderResponse(
                 tool_calls=(ToolCall("a2", "agent", {"agent": "auditor", "task": "again"}),)
             ),
-            # Streak two: self-implementation counts as own work too.
+            ProviderResponse(content="waiting"),
+            # Streak three: self-implementation counts as own work too.
             *(
                 ProviderResponse(tool_calls=(ToolCall(f"w{index}", "write_file", {}),))
                 for index in range(8)
@@ -2128,18 +2134,83 @@ def test_delegation_reminder_rearms_per_streak_and_counts_writes() -> None:
     )
     assert runner.run("go").status == "finished"
     reminders = [payload for event, payload in events if event == "delegation_reminder"]
-    assert [payload["own_work_calls"] for payload in reminders] == [8, 8]
-    assert all("running_children" in payload and "queued_children" in payload for payload in reminders)
+    assert [payload["own_work_calls"] for payload in reminders] == [8, 8, 8]
+    assert all(payload["running_children"] == [] for payload in reminders)
     delivered = sum(
         '"observation": "delegation_reminder"' in str(message.content or "")
         for message in llm.calls[-1]["messages"]
     )
-    assert delivered == 2
+    assert delivered == 3
+
+
+def test_delegation_reminder_waits_for_a_running_child_to_finish() -> None:
+    """Own work beside a running child is parallel work, not a reason to
+    nag; the streak fires once the parent is alone again."""
+    started, release = threading.Event(), threading.Event()
+
+    class ReleasingRead(_NamedTool):
+        def __init__(self) -> None:
+            super().__init__("read_file")
+            self.calls = 0
+
+        def invoke(self, arguments: Mapping[str, object]) -> ToolResult:
+            self.calls += 1
+            if self.calls == 9:
+                release.set()
+            return super().invoke(arguments)
+
+    read = ReleasingRead()
+    finish = _FinishStub("finish_fold")
+    llm = ScriptedLLM(
+        [
+            ProviderResponse(
+                tool_calls=(ToolCall("a1", "agent", {"agent": "auditor", "task": "slow look"}),)
+            ),
+            *(
+                ProviderResponse(tool_calls=(ToolCall(f"r{index}", "read_file", {}),))
+                for index in range(9)
+            ),
+            ProviderResponse(content="waiting"),
+            ProviderResponse(tool_calls=(ToolCall("r9", "read_file", {}),)),
+            ProviderResponse(tool_calls=(ToolCall("f1", "finish_fold", {}),)),
+        ]
+    )
+    events: list[tuple[str, dict[str, object]]] = []
+    runner = AgentSessionRunner(
+        llm=llm,
+        tools=ToolRegistry([read, finish]),
+        system_prompt="fold",
+        config=_fold_config(),
+        subagent=SubAgentEngine(
+            llm=_GateLLM(started, release),
+            tools=ToolRegistry([DeclaredReadOnlyShell()]),
+        ),
+        event_sink=lambda event, payload: events.append((event, payload)),
+    )
+    try:
+        assert runner.run("go").status == "finished"
+    finally:
+        release.set()
+    reminders = [payload for event, payload in events if event == "delegation_reminder"]
+    assert [payload["own_work_calls"] for payload in reminders] == [10]
+    assert reminders[0]["running_children"] == []
 
 
 def test_agent_description_states_role_capabilities_and_thinking_tiers() -> None:
-    for phrase in ("shell", "不能执行", "general-purpose 或 developer", "low/medium", "xhigh"):
+    for phrase in (
+        "shell",
+        "不能执行",
+        "general-purpose 或 developer",
+        "low/medium",
+        "xhigh 只给纯文本",
+        "发不出工具调用",
+        "不要串成 resume 链",
+    ):
         assert phrase in AGENT_TOOL_DESCRIPTION
+    assert "发不出工具调用" in AGENT_TOOL_SPEC.input_schema["properties"]["thinking"]["description"]
+    for prompt in (FOLD_WORKFLOW_SECTION, build_system_prompt(mode="meta", experiment_facts={})):
+        assert "xhigh 只给纯文本" in prompt
+        assert "优先 `resume`" not in prompt
     agent_field = AGENT_TOOL_SPEC.input_schema["properties"]["agent"]
     assert "不能执行" in agent_field["description"] and "shell" in agent_field["description"]
 
@@ -2273,28 +2344,57 @@ def test_child_output_truncation_is_marked_and_never_silent() -> None:
     assert result["summary"].endswith(OUTPUT_TRUNCATED_MARKER.format(limit=500))
     assert result["summary"].startswith("结论：因子 A 在 2019 年后")
 
-    # The whole budget went into thinking: no retry of the open-ended turn,
-    # one forced concise summary instead of a silent empty result.
+    # The whole budget went into thinking: the child gets the same forced
+    # concise continuation as the parent and carries on with a tool call.
+    from autotrade.agent.subagent import SUBAGENT_MAX_TRUNCATION_CONTINUATIONS
+
+    cut_reply = ProviderResponse(
+        content="",
+        reasoning_content="thinking...",
+        usage={"prompt_tokens": 10, "completion_tokens": 500, "total_tokens": 510},
+    )
     empty = ScriptedLLM(
         [
-            ProviderResponse(
-                content="",
-                reasoning_content="thinking...",
-                usage={"prompt_tokens": 10, "completion_tokens": 500, "total_tokens": 510},
-            ),
+            cut_reply,
+            ProviderResponse(tool_calls=(ToolCall("s", "shell", {"argv": ["ls"]}),)),
             ProviderResponse(content="简洁结论"),
         ],
         context_window_tokens=128_000,
     )
+    events: list[tuple[str, dict[str, object]]] = []
     result = SubAgentEngine(
         llm=empty,
         tools=ToolRegistry([DeclaredReadOnlyShell()]),
         config=SubAgentConfig(max_tokens=500),
+        event_sink=lambda event, payload: events.append((event, payload)),
+    ).run("audit", role="developer")
+    assert result["status"] == "completed" and result["llm_calls"] == 3
+    assert result["summary"] == "简洁结论" and result["tool_calls"] == 1
+    assert result["truncated"] is True and result["truncated_rounds"] == 1
+    continued = empty.calls[1]["messages"]
+    assert continued[-1].role == "user"
+    observation = json.loads(str(continued[-1].content))
+    assert observation["observation"] == "output_truncated"
+    assert observation["max_tokens"] == 500 and "被截断" in observation["message"]
+    cut_events = [payload for event, payload in events if event == "subagent_output_truncated"]
+    assert [(e["round"], e["continuation"], e["max_tokens"]) for e in cut_events] == [(1, 1, 500)]
+
+    # Every continuation exhausted on reasoning too: the launch failed, and
+    # it says so instead of paying for one more apology round.
+    exhausted = ScriptedLLM(
+        [cut_reply] * (SUBAGENT_MAX_TRUNCATION_CONTINUATIONS + 1)
+        + [ProviderResponse(content="must not be requested")],
+        context_window_tokens=128_000,
+    )
+    result = SubAgentEngine(
+        llm=exhausted,
+        tools=ToolRegistry([DeclaredReadOnlyShell()]),
+        config=SubAgentConfig(max_tokens=500),
     ).run("audit", role="auditor")
-    assert result["status"] == "completed" and result["llm_calls"] == 2
-    assert result["summary"] == "简洁结论" and result["truncated"] is True
-    forced = empty.calls[1]["messages"]
-    assert forced[-1].role == "user" and "请立即用简洁中文说明结论" in str(forced[-1].content)
+    assert result["status"] == "error" and result["summary"] == ""
+    assert result["llm_calls"] == SUBAGENT_MAX_TRUNCATION_CONTINUATIONS + 1
+    assert result["truncated_rounds"] == SUBAGENT_MAX_TRUNCATION_CONTINUATIONS + 1
+    assert "output budget exhausted" in result["error"] and result["tool_calls"] == 0
 
 
 def test_child_turns_default_to_24_with_grace_wrap_up() -> None:
@@ -2431,6 +2531,237 @@ def test_subagent_completed_surfaces_truncation_and_rounds() -> None:
         for message in llm.calls[-1]["messages"]
         if '"subagent_completed"' in str(message.content or "")
     )
-    assert completed["truncated"] is True
+    assert completed["truncated"] is True and completed["truncated_rounds"] == 1
     assert completed["rounds"] == 1 and completed["tool_calls"] == 0
     assert completed["summary"].endswith(OUTPUT_TRUNCATED_MARKER.format(limit=500))
+
+
+def test_child_llm_error_is_traced_and_a_recovered_child_is_not_an_error() -> None:
+    """A transient provider failure leaves a trace event and a counter; the
+    child's outcome is what the surviving rounds produced."""
+
+    class Flaky:
+        model = "child"
+        provider = "test"
+        context_window_tokens = 128000
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def complete(self, messages, **kwargs):
+            del messages, kwargs
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("provider returned an invalid stream tool call")
+            return ProviderResponse(content="recovered report")
+
+    events: list[tuple[str, dict[str, object]]] = []
+    result = SubAgentEngine(
+        llm=Flaky(),
+        tools=ToolRegistry([DeclaredReadOnlyShell()]),
+        event_sink=lambda event, payload: events.append((event, payload)),
+    ).run("look", role="auditor", parent_call_id="call_p")
+    assert result["status"] == "completed" and result["summary"] == "recovered report"
+    assert result["llm_errors"] == 1 and result["llm_calls"] == 2 and "error" not in result
+    traced = [payload for event, payload in events if event == "subagent_llm_error"]
+    assert len(traced) == 1
+    assert traced[0]["round"] == 1 and traced[0]["parent_call_id"] == "call_p"
+    assert "invalid stream tool call" in traced[0]["llm_error"]
+    # The runner's observation forwards the counter so the parent sees it.
+    finish = _FinishStub("finish_fold")
+    llm = ScriptedLLM(
+        [
+            ProviderResponse(tool_calls=(ToolCall("a1", "agent", {"agent": "auditor", "task": "look"}),)),
+            ProviderResponse(content="waiting"),
+            ProviderResponse(tool_calls=(ToolCall("f1", "finish_fold", {}),)),
+        ]
+    )
+    runner = AgentSessionRunner(
+        llm=llm,
+        tools=ToolRegistry([finish]),
+        system_prompt="fold",
+        config=_fold_config(),
+        subagent=SubAgentEngine(llm=Flaky(), tools=ToolRegistry([DeclaredReadOnlyShell()])),
+    )
+    assert runner.run("go").status == "finished"
+    completed = next(
+        json.loads(str(message.content))
+        for message in llm.calls[-1]["messages"]
+        if '"subagent_completed"' in str(message.content or "")
+    )
+    assert completed["ok"] is True and completed["llm_errors"] == 1
+    assert "error" not in completed
+
+
+def test_child_without_a_report_is_not_completed() -> None:
+    """``completed`` means a report reached the parent: a child whose rounds
+    ran out and whose forced summary came back empty is an error."""
+    silent = ScriptedLLM(
+        [
+            ProviderResponse(tool_calls=(ToolCall("s", "shell", {"argv": ["ls"]}),)),
+            ProviderResponse(content="", reasoning_content="nothing to report"),
+        ],
+        context_window_tokens=128_000,
+    )
+    result = SubAgentEngine(
+        llm=silent,
+        tools=ToolRegistry([DeclaredReadOnlyShell()]),
+        config=SubAgentConfig(max_rounds=1),
+    ).run("dig", role="developer")
+    assert result["status"] == "error" and result["summary"] == ""
+    assert result["error"] == "Sub-agent ended without a report"
+    assert result["tool_calls"] == 1 and result["llm_calls"] == 2
+
+
+def test_child_thinking_level_reaches_the_budget_wrapped_gateway() -> None:
+    """Production hands the child a budget wrapper around the gateway; the
+    per-child ``thinking`` must still change the request that goes out."""
+    from autotrade.environment.llm.deepseek import (
+        OpenAICompatibleConfig,
+        OpenAICompatibleProxy,
+    )
+    from autotrade.environment.llm.model_profiles import LOCAL_QWEN_MODEL
+
+    class Transport:
+        def __init__(self) -> None:
+            self.bodies: list[dict[str, object]] = []
+
+        def post(self, url, headers, body, timeout):
+            del url, headers, timeout
+            self.bodies.append(json.loads(body))
+            return json.dumps(
+                {
+                    "model": LOCAL_QWEN_MODEL,
+                    "choices": [{"message": {"content": "child report"}}],
+                    "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8},
+                }
+            ).encode()
+
+    transport = Transport()
+    gateway = OpenAICompatibleProxy(
+        OpenAICompatibleConfig(
+            api_key="local-secret",
+            provider="vllm",
+            model=LOCAL_QWEN_MODEL,
+            base_url="http://127.0.0.1:8011/v1",
+            request_dialect="vllm-qwen",
+            thinking_enabled=True,
+            reasoning_effort="xhigh",
+            stream_tool_calls=False,
+            conversation_log_dir=None,
+            context_window_tokens=262_144,
+        ),
+        transport=transport,
+    )
+    budgeted = SessionBudgetLLM(gateway, max_calls=4, deadline=time.monotonic() + 10, role="subagent")
+    events: list[tuple[str, dict[str, object]]] = []
+    engine = SubAgentEngine(
+        llm=budgeted,
+        tools=ToolRegistry([DeclaredReadOnlyShell()]),
+        event_sink=lambda event, payload: events.append((event, payload)),
+    )
+    for level, expected in (
+        ("low", {"enable_thinking": True, "reasoning_effort": "low"}),
+        ("off", {"enable_thinking": False}),
+    ):
+        result = engine.run("look", role="auditor", thinking=level)
+        assert result["status"] == "completed" and result["thinking_applied"] is True
+        assert transport.bodies[-1]["chat_template_kwargs"] == expected
+    # The session's own gateway and call budget are untouched by the clones.
+    assert budgeted.calls == 2 and gateway.config.reasoning_effort == "xhigh"
+    started = [payload for event, payload in events if event == "subagent_task"]
+    assert [payload["thinking_applied"] for payload in started] == [True, True]
+
+
+class _Clock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+class _ClockedLLM(ScriptedLLM):
+    """Scripted replies that move a fake clock to a given time after each call."""
+
+    def __init__(self, responses, clock: _Clock, times: list[float]) -> None:
+        super().__init__(responses)
+        self.clock = clock
+        self.times = list(times)
+
+    def complete(self, messages, **kwargs):
+        response = super().complete(messages, **kwargs)
+        if self.times:
+            self.clock.now = self.times.pop(0)
+        return response
+
+
+def test_time_budget_notice_states_remaining_minutes_and_backtests() -> None:
+    from autotrade.agent.runner import TIME_BUDGET_NOTICE_FRACTIONS
+
+    assert TIME_BUDGET_NOTICE_FRACTIONS == (0.5, 0.75, 0.9)
+    clock = _Clock()
+    budget = InferenceTimeBudget(duration_seconds=100_000.0, clock=clock)
+    llm = _ClockedLLM(
+        [
+            ProviderResponse(tool_calls=(ToolCall("r1", "read_file", {}),)),
+            ProviderResponse(tool_calls=(ToolCall("s1", "smoke_backtest", {}),)),
+            ProviderResponse(tool_calls=(ToolCall("r2", "read_file", {}),)),
+            ProviderResponse(tool_calls=(ToolCall("f1", "finish_fold", {}),)),
+        ],
+        clock,
+        [55_000.0, 80_000.0, 95_000.0],
+    )
+    events: list[tuple[str, dict[str, object]]] = []
+    runner = AgentSessionRunner(
+        llm=llm,
+        tools=ToolRegistry([_NamedTool("read_file"), _NamedTool("smoke_backtest"), _FinishStub("finish_fold")]),
+        system_prompt="fold",
+        config=_fold_config(),
+        time_budget=budget,
+        event_sink=lambda event, payload: events.append((event, payload)),
+    )
+    assert runner.run("go").status == "finished"
+    notices = [payload for event, payload in events if event == "time_budget_notice"]
+    assert [n["elapsed_fraction"] for n in notices] == [0.5, 0.75, 0.9]
+    assert [n["remaining_minutes"] for n in notices] == [750.0, 333.3, 83.3]
+    assert [n["smoke_backtests"] for n in notices] == [0, 1, 1]
+    assert all(n["daily_backtests"] == 0 and n["complete_validations"] == 0 for n in notices)
+    delivered = [
+        json.loads(str(message.content))
+        for message in llm.calls[-1]["messages"]
+        if '"time_budget_notice"' in str(message.content or "")
+    ]
+    assert len(delivered) == 3
+    assert "smoke_backtest 1 次" in delivered[1]["message"] and "finish_fold" in delivered[1]["message"]
+
+    # Crossing several fractions at once yields one notice, and Meta has no
+    # backtests to report.
+    clock = _Clock()
+    budget = InferenceTimeBudget(duration_seconds=100_000.0, clock=clock)
+    llm = _ClockedLLM(
+        [
+            ProviderResponse(tool_calls=(ToolCall("r1", "read_file", {}),)),
+            ProviderResponse(tool_calls=(ToolCall("f1", "finish_meta", {}),)),
+        ],
+        clock,
+        [80_000.0],
+    )
+    events = []
+    runner = AgentSessionRunner(
+        llm=llm,
+        tools=ToolRegistry([_NamedTool("read_file"), _FinishStub("finish_meta")]),
+        system_prompt="meta",
+        config=_meta_config(),
+        time_budget=budget,
+        event_sink=lambda event, payload: events.append((event, payload)),
+    )
+    assert runner.run("go").status == "finished"
+    notices = [payload for event, payload in events if event == "time_budget_notice"]
+    assert notices == [{"elapsed_fraction": 0.75, "remaining_minutes": 333.3}]
+    message = next(
+        json.loads(str(m.content))["message"]
+        for m in llm.calls[-1]["messages"]
+        if '"time_budget_notice"' in str(m.content or "")
+    )
+    assert "finish_meta" in message

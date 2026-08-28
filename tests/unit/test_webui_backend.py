@@ -22,7 +22,11 @@ from fastapi.testclient import TestClient
 
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.llm import LOCAL_QWEN_MODEL, MODEL_CHOICES
-from autotrade.environment.runtime import AgentTraceWriter, write_json_atomic
+from autotrade.environment.runtime import (
+    TRACE_PAYLOAD_HEAD_CHARS,
+    AgentTraceWriter,
+    write_json_atomic,
+)
 from autotrade.pipelines.hitl_state import (
     WEB_CREATE_DEFAULTS,
     ControlState,
@@ -301,6 +305,38 @@ def test_agent_trace_is_redacted_bounded_and_private(tmp_path: Path):
     assert path.stat().st_size <= 900
     assert path.stat().st_mode & 0o777 == 0o600
     assert path.parent.stat().st_mode & 0o777 == 0o700
+
+
+def test_oversized_tool_call_event_keeps_a_readable_bounded_stub(tmp_path: Path):
+    """A tool_call carries no ``content``: without a payload head the stub kept
+    only identifiers, and the largest events — exactly the ones worth reading
+    back — said nothing about what the tool was asked to do."""
+    path = tmp_path / "artifacts/traces/run_002.jsonl"
+    writer = AgentTraceWriter(
+        path,
+        ids={"experiment_id": "demo", "run_id": "run_002"},
+        max_bytes=1_000_000,
+        max_event_bytes=64 * 1024,
+    )
+    writer.emit(
+        "tool_call",
+        {
+            "call_index": 7,
+            "tool": "daily_backtest",
+            "arguments": {"note": "rebalance", "api_key": "sk-abcdefghijk"},
+            "result": {"ok": True, "per_stock": ["row" * 40 for _ in range(4_000)]},
+        },
+    )
+    record = json.loads(path.read_text(encoding="utf-8").strip())
+    assert record["truncated"] is True
+    assert record["tool"] == "daily_backtest" and record["call_index"] == 7
+    assert record["original_bytes"] > 64 * 1024
+    head = record["payload_head"]
+    assert len(head) <= TRACE_PAYLOAD_HEAD_CHARS
+    assert '"note": "rebalance"' in head and '"per_stock"' in head
+    assert "abcdefghijk" not in head
+    # The reply preview stays empty: this event never had a ``content`` field.
+    assert record["content_preview"] == ""
 
 
 def test_experiment_endpoint_rejects_console_managed_unknown_and_missing_parameters(

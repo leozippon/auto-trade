@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 import pyarrow as pa
+import pyarrow.parquet as pq
 
 from autotrade.environment.replay.timeview import Timeview
 
@@ -171,10 +172,38 @@ class TimeviewTest(unittest.TestCase):
             events = pd.read_parquet(Path(asof) / "events")
             self.assertIn(7.0, set(events["hot_num"].dropna().astype(float)))
 
+    def test_frozen_only_column_is_padded_with_the_frozen_type(self):
+        # The mirror of the warning below: a frozen column the replay window
+        # never carries must still appear in the rolled part, typed by the
+        # frozen part, or the parts directory stops reading back as one table.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshot = root / "snapshot"
+            snapshot.mkdir()
+            _write(
+                snapshot / "daily.parquet",
+                pd.DataFrame([{"trade_date": "20211231", "ts_code": TS, "close": 9.5, "note": "frozen"}]),
+            )
+            replay = pd.DataFrame([{
+                "trade_date": "20220104", "ts_code": TS, "close": 10.2,
+                "available_at": "2022-01-04T17:30:00+08:00",
+            }])
+            tv = Timeview(
+                host_dir=root / "asof", executor=FakeExecutor(),
+                snapshot_dir=snapshot, replay_frames={"daily": replay},
+            )
+            asof, _ = tv.refresh(_when("2022-01-05 09:10:00"))
+            part = pq.ParquetFile(Path(asof) / "daily" / "part_0001.parquet")
+            self.assertEqual(part.schema_arrow.field("note").type, pa.string())
+            daily = pd.read_parquet(Path(asof) / "daily")
+            self.assertEqual(sorted(daily["trade_date"].astype(str)), ["20211231", "20220104"])
+            self.assertEqual(list(daily.loc[daily["trade_date"] == "20220104", "note"].isna()), [True])
+
     def test_replay_column_missing_from_frozen_schema_warns(self):
         # Designed advisory: replay-only columns are dropped by the roll's
-        # reindex, so a frozen/replay schema mismatch must warn loudly (not
-        # fail — the financial domain allows schema ahead of window data).
+        # projection onto the frozen schema, so a frozen/replay schema mismatch
+        # must warn loudly (not fail — the financial domain allows schema ahead
+        # of window data).
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             snapshot = root / "snapshot"

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import shutil
 import threading
@@ -459,6 +460,24 @@ class SessionBudgetLLM(SessionTimeBudgetAware):
     def session_time_budget(self) -> InferenceTimeBudget:
         return self.time_budget
 
+    def with_thinking(self, *, enabled: bool, reasoning_effort: str | None) -> LLMProxy:
+        """Clone this wrapper over a gateway carrying another thinking setting.
+
+        The clone keeps the same shared budget and role, so a per-call thinking
+        level never forks the session's accounting. A delegate that cannot take
+        a level (test doubles) leaves the wrapper unchanged, which the caller
+        recognizes by identity.
+        """
+
+        clone_gateway = getattr(self.delegate, "with_thinking", None)
+        if clone_gateway is None:
+            return self
+        clone = copy.copy(self)
+        clone.delegate = clone_gateway(
+            enabled=enabled, reasoning_effort=reasoning_effort
+        )
+        return clone
+
     def complete(
         self,
         messages: Sequence[ChatMessage],
@@ -752,6 +771,30 @@ def _smoke_asof_domains(result_dir: Path) -> list[str]:
     return [str(item) for item in domains] if isinstance(domains, list) else []
 
 
+# One Validation's full replay record is attached to its step-tree node, and
+# the node tree is mounted as the ``steps`` search root. This pair is the only
+# Agent-readable reference to the full result, so the attachment site and the
+# returned reference must name the same file.
+VALIDATION_RESULT_ATTACHMENT = "validation/result.json"
+STEP_TREE_SEARCH_ROOT = "steps"
+# Summary blocks whose size scales with the replay: one row per closed position
+# and one per week of the window. An inline copy is therefore not a fixed-cost
+# observation — an audited Fold shipped 427 KB of ``per_stock`` into the
+# conversation and forced a 174 s compaction plus twelve recovery calls. They
+# stay in the referenced result.json; every other metric is O(1) and rides
+# inline.
+REPLAY_SCALED_SUMMARY_BLOCKS = ("per_stock", "weekly_returns")
+
+
+def inline_backtest_stats(summary: Mapping[str, object]) -> dict[str, object]:
+    """The backtest metrics an Agent observation may carry inline."""
+    return {
+        key: value
+        for key, value in summary.items()
+        if key not in REPLAY_SCALED_SUMMARY_BLOCKS
+    }
+
+
 class FoldBacktestTool(SessionTimeBudgetAware):
     """Commit and evaluate the current work copy as one immutable Step."""
 
@@ -885,9 +928,14 @@ class FoldBacktestTool(SessionTimeBudgetAware):
                     run_id=self.ref_store.get_or_create("run", self.request.run_id),
                     result_name=result_name,
                     revision_id=revision_ref,
-                    metrics=evaluation.summary,
+                    # tree.json is Agent-readable and accumulates one node per
+                    # Validation for the whole experiment, so it carries the
+                    # same fixed-size projection the observation does.
+                    metrics=inline_backtest_stats(evaluation.summary),
                     models_root=typed.models_path,
-                    attachments={"validation/result.json": evaluation.result_ref},
+                    attachments={
+                        VALIDATION_RESULT_ATTACHMENT: evaluation.result_ref
+                    },
                 )
         except Exception as exc:
             if node_id is None or evaluation is None:
@@ -958,20 +1006,34 @@ class FoldBacktestTool(SessionTimeBudgetAware):
             "run_id": self.ref_store.get_or_create("run", self.request.run_id),
             "node_id": node_id,
             "revision_id": self.ref_store.get_or_create("strategy", revision_id),
-            "stats": evaluation.summary,
+            "stats": inline_backtest_stats(evaluation.summary),
         }
         directive = ""
         if self.request.step_gate_hook is not None:
             directive = self.request.step_gate_hook(
                 len(self.steps), dict(summary)
             )
-        result_path = Path(evaluation.result_ref)
-        public_result_ref = f"results/{result_name}/{result_path.name}"
+        # The full record — per-position rows, executions, equity curve — is the
+        # attachment ``record_step`` just wrote under the node tree, which the
+        # Agent reads through the ``steps`` root. A reference the Agent cannot
+        # resolve is worse than none: it costs a round of blind searching.
+        public_result_ref = f"{node_id}/{VALIDATION_RESULT_ATTACHMENT}"
+        if not (self.tree.root / public_result_ref).is_file():
+            raise ToolError(
+                "Validation result attachment is missing for the recorded step: "
+                f"{public_result_ref}"
+            )
         return ToolResult(
             True,
             value={
                 **summary,
+                "result_root": STEP_TREE_SEARCH_ROOT,
                 "result_ref": public_result_ref,
+                "result_hint": (
+                    "full replay record (per_stock, executions, equity_curve); "
+                    f"read it with: read_file root='{STEP_TREE_SEARCH_ROOT}' "
+                    f"path='{public_result_ref}'"
+                ),
                 "modification_check": dict(check.value),
                 "step_directive": str(directive),
                 "backtests_used": self.backtests,
