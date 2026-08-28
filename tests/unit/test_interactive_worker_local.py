@@ -557,7 +557,12 @@ def _agent_then(
                     )
                 )
             )
-        responses.append(ProviderResponse(content=summary))
+        responses.append(
+            ProviderResponse(
+                content=summary,
+                usage={"prompt_tokens": 50, "completion_tokens": 7, "total_tokens": 57},
+            )
+        )
     return tuple(responses)
 
 
@@ -681,6 +686,57 @@ def test_llm_worker_runs_real_meta_fold_validation_and_heldout(
     )
     assert '"stage": "frozen_test"' in fold_trace
     assert '"stage": "publishing"' in fold_trace
+    # The Meta trace writer must keep sub-agent identity, progress and usage
+    # on disk: the console cards, trace stats and Meta process summaries are
+    # built from these files, not from in-memory events.
+    from autotrade.webui.traces import project_trace_blocks, trace_stats
+
+    meta_trace_path = next(
+        path
+        for path in traces
+        if '"session_kind": "fold"' not in path.read_text(encoding="utf-8")
+    )
+    meta_events = [
+        json.loads(line)
+        for line in meta_trace_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    by_type: dict[str, list[dict[str, object]]] = {}
+    for event in meta_events:
+        by_type.setdefault(str(event["event_type"]), []).append(event)
+    started = by_type["subagent_task"]
+    assert started and all(
+        event["task_id"].startswith("agent_") and event["role"] == "auditor"
+        and event["status"] == "started" and event["mode"] == "meta"
+        and "thinking" in event
+        for event in started
+    )
+    assert all(
+        event["task_id"] == started[0]["task_id"] or event["task_id"].startswith("agent_")
+        for event in by_type["subagent_llm"]
+    )
+    assert all(
+        event["round"] >= 1 and event["usage"]["total_tokens"] == 57
+        and "content" not in event
+        for event in by_type["subagent_llm"]
+    )
+    ended = by_type["subagent"]
+    assert ended and all(
+        event["task_id"] == start["task_id"] for event, start in zip(ended, started)
+    )
+    assert all(
+        event["status"] == "completed" and event["usage_totals"]["total_tokens"] == 57
+        and event["llm_calls"] == 1 and "summary" not in event
+        for event in ended
+    )
+    stats = trace_stats(meta_trace_path)
+    assert stats["subagent_tasks"] == len(started)
+    assert stats["subagent_running"] == 0
+    assert stats["subagent_total_tokens"] == 57 * len(started)
+    cards = [block for block in project_trace_blocks(meta_events) if block.get("kind") == "subagent"]
+    assert len(cards) == len(started)
+    assert cards[0]["status"] == "completed" and cards[0]["role"] == "auditor"
+    assert cards[0]["usage"]["total_tokens"] == 57
     # Completion prunes nothing: the run evidence a later audit reads stays on disk.
     assert (options.work_root / options.experiment_id).is_dir()
     assert not any((experiment / "artifacts/strategy/revisions").iterdir())

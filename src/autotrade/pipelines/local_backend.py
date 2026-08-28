@@ -1962,10 +1962,43 @@ def _safe_meta_trace_payload(
     event_type: str,
     payload: dict[str, object],
 ) -> dict[str, object]:
-    """Keep Meta operations observable without exposing compact Test evidence."""
+    """Keep Meta operations observable without exposing compact Test evidence.
 
+    Sub-agent events keep their identity, progress and usage fields (the
+    console cards, ``trace_stats`` and the Meta process summary need them);
+    model text (``content``, ``summary``, tool ``result`` bodies) is dropped
+    like the parent ``llm_call`` content.
+    """
+
+    subagent_identity = {
+        "task_id",
+        "role",
+        "parent_call_id",
+        "status",
+        "mode",
+        "model",
+        "thinking",
+        "inherit_context",
+        "description",
+        "resumed_from",
+    }
     allowed = {
         "session_start": {"mode"},
+        "subagent_task": subagent_identity,
+        "subagent_llm": {
+            "task_id",
+            "round",
+            "provider",
+            "model",
+            "usage",
+            "tool_names",
+            "parent_call_id",
+        },
+        "subagent_tool": {"task_id", "round", "tool", "parent_call_id", "result"},
+        "subagent": subagent_identity
+        | {"rounds", "tool_calls", "llm_calls", "provider", "usage_totals", "error"},
+        "subagent_attempt": {"attempt", "role", "ok", "status", "task_id", "error"},
+        "delegation_reminder": {"own_work_calls"},
         "llm_call_started": {"call_index", "status"},
         "llm_call": {"call_index", "status", "model", "usage", "tool_names", "error"},
         "tool_call_started": {"tool", "tool_call_id", "status"},
@@ -1986,7 +2019,14 @@ def _safe_meta_trace_payload(
             "safe_point",
         },
     }.get(event_type, {"status", "error"})
-    return {key: value for key, value in payload.items() if key in allowed}
+    kept = {key: value for key, value in payload.items() if key in allowed}
+    result = kept.get("result")
+    if event_type == "subagent_tool" and isinstance(result, dict):
+        # Status only: a child's tool result may carry compact Test evidence.
+        kept["result"] = {
+            key: result[key] for key in ("ok", "error") if key in result
+        }
+    return kept
 
 
 def _finalize_modification_check(
