@@ -29,6 +29,7 @@ FOLD_TOOLS_SECTION = """\
 - `shell`：一次有界前台命令（argv），用于 debug、冒烟测试和数据验收；不得用它修改策略产物、启动后台任务、sleep/等待包装或轮询状态。
 - `write_skill` / `delete_skill`：维护 `skills/<kebab-name>/SKILL.md`；`write_file`/`edit_file` 不能写 `skills/`，`shell` 不得用于修改 `skills/` 或 `inputs/`。
 - `modification_check`：检查正式 `output/` 与 `models/` 的入口、静态限制和修改量；每次正式回测前必须通过。
+- `smoke_backtest`：非正式短回放，按真实布局与 ABI 跑当前 `output/` 3–5 个交易日，确认 ABI、订单合同和单日耗时；正式回测前先用它。它不产生可选择节点。
 - `daily_backtest`：把当前 `output/` 提交为不可变 revision 并运行本 Fold 完整 Validation；正式回测前会先等待后台子代理结束。任一交易日的 `generate_orders` 推断超过运行事实 `budgets.strategy_inference_timeout_seconds` 即整场回测失败。只有它产生的完整节点可被选择，正式回测不能由自建回放替代。
 - `step_rollback`：把工作副本恢复到本 run 一个完整 Validation 节点并从它分支（已注册时可用）。
 - `ask_user`：只在真正需要研究者决定方向时提问（已注册时可用）。
@@ -40,8 +41,9 @@ FOLD_WORKFLOW_SECTION = """\
 # 工作方式
 - 工具用原生 function calling 调用，schema 是参数事实源；未注册的工具不存在。纯文本回复不结束会话，只有 `finish_fold` 结束。
 - 同一轮的多个调用并发执行；批次里含写入、shell、回测、回滚、提问或结束时按顺序执行，终止工具成功后同轮其余调用取消。有因果关系的步骤分轮调用。
-- 除非任务很简单，否则以协作开始：Fold 开始时在同一轮并行启动几个只读子代理（参考笔记与计划、数据摘要与单位与 PIT 规则、父策略与 skills 与 PRIOR），范围互斥；然后把计算与实现交给 `general-purpose`/`developer`，结果由你验收。委托只有一层，子代理不能再派生。
-- 子代理只看到自己的角色提示加你的 task（默认全新上下文）或另加你的对话（`inherit_context=true`）；有意选择，并把路径、约束、期望返回格式写进 task。`thinking` 按任务定：常规阅读 low/medium，审计与根因 high，关键策略实现 high/max。后续任务优先 `resume` 已有子代理，也不要把一个子代理推到上下文上限；并行子代理范围互斥，同一文件的修改串行；不要只为催促而打断子代理。
+- 你自己的上下文和串行轮次是最稀缺的资源：一个子代理读完并汇总的材料，你只需读它几百字的结论。把工作拆成能独立完成的块（数据与单位核查、特征与 IC 计算、实现、审计），在同一轮作为并行子代理启动；它们运行时你继续设计、决策和启动下一块，而不是等一个做完再开下一个。任务很简单时也可以自己做。委托只有一层，子代理不能再派生。
+- 角色：`developer`/`general-purpose` 有 Sandbox shell，可读 PIT parquet、算统计、做冒烟测试并写策略、模型与 skills；`auditor`/`Explore` 只读文本与代码，不能执行命令。子代理只看到自己的角色提示加你的 task（默认全新上下文，适合独立重看）或另加你的对话（`inherit_context=true`，适合延续已有推理）；有意选择，并把路径、约束、期望返回格式写进 task。`thinking` 按任务定：常规阅读 low/medium，审计、根因与关键实现 xhigh。
+- `agent` 的返回列出正在运行和排队的子代理及其 `description`；已在进行的范围不要再启动一次。后续任务优先 `resume` 已完成的子代理，也不要把一个子代理推到上下文上限；并行子代理范围互斥，同一文件的修改串行；不要只为催促而打断子代理。
 - 不要轮询：结果以 `subagent_completed` 消息送回。等待期间做互不冲突的其他工作，没有时直接以文本回复结束本轮，不要用工具轮询。子代理的汇报描述意图而非结果，验收其写入后再依赖；已定结论带入后续，不做迭代式反复审计。
 - 上下文达到阈值时较早消息会被压缩成摘要，只保留最近原文；过大的工具结果可能被原位摘要。需要保留的中间结论写入 `workspace/` 文件。
 - 从 `inputs/skills_index.json` 起步，按需读取 skill 正文、已挂载事实、数据摘要与单位引用；skill 脚本不会自动执行。可复用的知识写入 skill，而不是策略或 PRIOR。\
@@ -121,7 +123,7 @@ FOLD_GUARDRAILS_SECTION = """\
 - 写或改代码前先（经子代理）读够相关数据、单位与父策略；删除某段逻辑或依赖前先查清谁在用。
 - 任务指令、数据证据与执行合同冲突时及时指出并调整，不要沉默照做。
 - 不要反复打补丁：同一组件持续失败（例如回测反复超时）时停下来重新设计。
-- 不搭建重型自建测试脚手架，但正式回测前用 shell 冒烟测试 2–3 个交易日的 `generate_orders`：确认 ABI、订单合同和单日耗时低于推断上限。\
+- 不搭建重型自建测试脚手架；正式回测前先用 `smoke_backtest` 确认 ABI、订单合同和单日耗时低于推断上限。\
 """
 
 FOLD_STATIC_SECTIONS = (
@@ -138,11 +140,7 @@ FOLD_STATIC_SECTIONS = (
 )
 
 FOLD_DEFAULT_INSTRUCTION = """\
-第一轮：在同一轮并行启动以下子代理（范围互斥，task 里写清路径与期望返回格式，thinking=low/medium）：
-1. `Explore`：读 `workspace/refs/`（若存在）与只读 `output/README.md`，返回研究主线、可用参考与它们的适用边界。
-2. `auditor`：读运行事实 `source_refs` 指向的 data summary 与 unit reference，以及 `snapshot` 根的清单，返回可用字段、单位、`available_at` 规则与大表访问方式。
-3. `auditor`：读父策略 `output/main.py`、`inputs/skills_index.json` 所列相关 skill 与 PRIOR，返回现有逻辑、已知失效模式与可复用知识。
-结果以 subagent_completed 送回后，设计一个可证伪假设；把计算（IC、分位统计、覆盖率）与实现交给 `general-purpose`/`developer`，自己验收。正式回测前用 shell 冒烟测试 2–3 个交易日的 `generate_orders` 耗时；用 modification_check 与 daily_backtest 取得完整 Validation，最后 finish_fold。\
+开始本 Fold。适合并行委托的开局工作，例如：`Explore` 读 `workspace/refs/`（若存在）与只读 `output/README.md`，返回研究主线与可用参考的适用边界；`auditor` 读运行事实 `source_refs` 指向的 data summary、unit reference 与 `snapshot` 根的清单，返回可用字段、单位、`available_at` 规则与大表访问方式；`auditor` 读父策略 `output/main.py`、`inputs/skills_index.json` 所列相关 skill 与 PRIOR，返回现有逻辑、已知失效模式与可复用知识。怎样拆分、用几个子代理由你按任务决定，task 里写清路径与期望返回格式。结果送回后设计一个可证伪假设；把计算（IC、分位统计、覆盖率）与实现交给 `general-purpose`/`developer`，它们运行时你继续规划下一步，写入由你验收。正式回测前用 smoke_backtest 确认 ABI 与耗时；用 modification_check 与 daily_backtest 取得完整 Validation，最后 finish_fold。\
 """
 PROTOCOL_INSTRUCTION = "\n\n".join(FOLD_STATIC_SECTIONS)
 
@@ -196,7 +194,8 @@ META_SYSTEM_PROMPT = """\
 
 # 工作方式
 - 工具用原生 function calling 调用，schema 是参数事实源。同一轮的多个调用并发执行；批次里含写入、提问或结束时按顺序执行。纯文本回复不结束会话。
-- 除非任务很简单，否则以协作开始：第一轮并行启动几个只读子代理，范围互斥（review window 与 Fold 摘要、冻结策略与 skills、上一份 PRIOR 与 process summary、原始 Trace sidecar 的失效模式），task 写清路径与期望返回格式，thinking 常规阅读 low/medium、审计 high；后续任务优先 `resume` 已有子代理。委托只有一层，四个角色 `auditor` / `developer` / `general-purpose` / `Explore` 在 Meta 中都只读，只能提出有证据的候选。
+- 你自己的上下文和串行轮次是最稀缺的资源：把阅读拆成能独立完成的块（review window 与 Fold 摘要、冻结策略与 skills、上一份 PRIOR 与 process summary、原始 Trace sidecar 的失效模式），在同一轮作为并行只读子代理启动，它们运行时你继续梳理判断框架；task 写清路径与期望返回格式，thinking 常规阅读 low/medium、审计 xhigh。任务很简单时也可以自己读。委托只有一层，四个角色 `auditor` / `developer` / `general-purpose` / `Explore` 在 Meta 中都只读，只能提出有证据的候选。
+- 子代理默认全新上下文（适合独立重看），`inherit_context=true` 带上你的对话（适合延续已有推理）；有意选择。`agent` 的返回列出正在运行和排队的子代理及其 `description`，已在进行的范围不要再启动一次；后续任务优先 `resume` 已完成的子代理。
 - 不要轮询：结果以 `subagent_completed` 消息送回；等待期间做其他工作，没有时直接以文本回复结束本轮。已定结论带入后续，不做迭代式反复审计。
 - 上下文达到阈值时较早消息会被压缩成摘要，只保留最近原文；需要保留的中间结论写入 `workspace/` 文件。
 - 从 `inputs/skills_index.json` 和 `inputs/meta_context.json` 起步，自主选择足以支持判断的证据：skill 正文、冻结策略、摘要和原始 Trace sidecar，不受固定读取顺序约束。sidecar 用来提炼经验，不要把原始 trace 写入 PRIOR。
@@ -404,12 +403,13 @@ def build_meta_learning_prompt(
     del history  # on disk as inputs/meta_context.json; inlining it overflows the window
     sections = [
         (
-            "第一轮：在同一轮并行启动以下只读子代理（范围互斥，task 写清路径与期望返回格式）："
-            "1. `auditor`：读 `inputs/meta_context.json` 的 review window 与各 Fold 的 Validation/紧凑 Test 摘要，"
+            "开始本轮 Meta。适合并行委托的开局工作，例如："
+            "`auditor` 读 `inputs/meta_context.json` 的 review window 与各 Fold 的 Validation/紧凑 Test 摘要，"
             "返回跨 Fold 反复出现的失效模式与稳定的方向；"
-            "2. `Explore`：读冻结策略、`inputs/skills_index.json` 所列相关 skill 与上一份 PRIOR，"
+            "`Explore` 读冻结策略、`inputs/skills_index.json` 所列相关 skill 与上一份 PRIOR，"
             "返回现有机制、已沉淀知识与过时条目；"
-            "3. `auditor`：抽读原始 Trace sidecar 中失败或超时的会话，返回流程层面的根因。"
+            "`auditor` 抽读原始 Trace sidecar 中失败或超时的会话，返回流程层面的根因。"
+            "怎样拆分由你按证据决定，task 写清路径与期望返回格式。"
             "结果送回后自主选择足以支持判断的本地 development 证据，维护工作区根的 `PRIOR.md`、"
             "按需共享 skills 与可选策略正则化。不要把 catalogs、how-tos、skill 正文或 raw traces 复制进 PRIOR；"
             "没有有效流程改进时保持原文。首轮必须产生非空正文，最后调用无参数 finish_meta。"

@@ -48,7 +48,6 @@ MAX_READ_BYTES = 10 * 1024 * 1024
 RG_TIMEOUT_SECONDS = 20.0
 VCS_DIRS = (".git", ".hg", ".svn", ".bzr", ".jj", ".sl")
 SEARCH_ROOTS = (
-    "agent",
     "workspace",
     "output",
     "models",
@@ -65,7 +64,6 @@ GREP_OUTPUT_MODES = ("content", "files", "count")
 # Roots that live outside the writable workspace tree; resolved from the
 # sandbox layout when one is available.
 _LAYOUT_ROOTS = {
-    "agent": "agent",
     # The decision view bound into the container as /mnt/snapshot.
     "snapshot": "current_snapshot",
     "train": "train",
@@ -144,8 +142,19 @@ class SearchRoots:
         return {"result_path": str(path)}
 
 
+_ROOT_HINT = (
+    " Default `workspace`, whose `inputs/` holds the session facts "
+    "(e.g. root='workspace', path='inputs/skills_index.json'); formal strategy "
+    "files are root='output', path='main.py'."
+)
+
+
 def _root_field(roots: SearchRoots, description: str) -> dict[str, object]:
-    return {"type": "string", "enum": list(roots.names), "description": description}
+    return {
+        "type": "string",
+        "enum": list(roots.names),
+        "description": description + _ROOT_HINT,
+    }
 
 
 class _SearchToolBase:

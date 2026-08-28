@@ -51,6 +51,8 @@ IP_UNAUTHENTICATED = (
     "= /login.css",
     "= /login-logo.png",
     "= /gongan.png",
+    "= /favicon.ico",
+    "= /static/logo.png",
     "= /static/gongan.png",
     "@login_required",
     "@service_unavailable",

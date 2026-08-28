@@ -27,6 +27,7 @@ from autotrade.environment.artifacts import (
 from autotrade.environment.data.summary import HOST_PATH_RE, write_agent_data_summary
 from autotrade.environment.executor import PersistentCommandRunner
 from autotrade.environment.identity import AgentRefStore
+from autotrade.environment.llm.model_profiles import AGENT_MAX_OUTPUT_TOKENS
 from autotrade.environment.replay.stats import PhaseTimer, finalize_summary_timing
 from autotrade.environment.replay.style import (
     benchmark_summary_block,
@@ -174,7 +175,17 @@ class LocalDailyEvaluationBackend:
             & (self._daily["trade_date"] <= _date_key(end))
         ].copy()
 
-    def evaluate(self, request: EvaluationRequest) -> EvaluationResult:
+    def evaluate(
+        self, request: EvaluationRequest, *, max_days: int | None = None
+    ) -> EvaluationResult:
+        """``max_days`` truncates the replay to its first N trading days.
+
+        Same contract as the PIT backend: an unofficial smoke run gets the real
+        replay path over a short window, never a short window dressed up as a
+        full Validation.
+        """
+        if max_days is not None and max_days <= 0:
+            raise ValueError("max_days must be a positive integer")
         if request.mode not in {"valid", "frozen_test", "heldout"}:
             raise ValueError(f"unsupported local evaluation mode: {request.mode}")
         strategy_path = Path(request.revision.output_path) / "main.py"
@@ -189,6 +200,9 @@ class LocalDailyEvaluationBackend:
         timer = PhaseTimer()
         with timer.phase("replay_frames"):
             frame = self.frame_between(request.start, request.end)
+            if max_days is not None:
+                kept = sorted(set(frame["trade_date"]))[:max_days]
+                frame = frame[frame["trade_date"].isin(set(kept))].copy()
         if frame.empty:
             raise ValueError(
                 f"daily replay is empty for {request.start}..{request.end}"
@@ -475,6 +489,217 @@ def _public_validation_error(
     return f"daily Validation failed: {text}"
 
 
+SMOKE_BACKTEST_DEFAULT_DAYS = 3
+SMOKE_BACKTEST_MAX_DAYS = 5
+
+
+class SmokeBacktestTool:
+    """Run the CURRENT working copy through the real replay for a few days.
+
+    Hand-rolled shell smoke tests are what let seven of nine official backtests
+    die on day one: a script that sets ``ctx.asof_dir = "/mnt/snapshot"`` and
+    fakes an account object exercises the flat frozen snapshot and a dict-like
+    account, while the replay hands the strategy a rolling directory-per-domain
+    as-of view and a real ``AccountSnapshot``. This tool removes the reason to
+    hand-roll one: same executor, same 30 s per-decision cap, same as-of layout,
+    same account object, same modification gate — only the window is short.
+
+    It is deliberately NOT an evaluation: no revision is committed, no step-tree
+    node is written, nothing here can be selected at freeze time, and it does
+    not consume the Fold's backtest budget.
+    """
+
+    spec = ToolSpec(
+        "smoke_backtest",
+        "UNOFFICIAL smoke run of the CURRENT output/ over the first few trading "
+        "days of the validation window, on the real replay path: real rolling "
+        "as-of view (each context.asof_dir/<domain>/ is a DIRECTORY of parquet "
+        "parts, read it with pd.read_parquet(directory)), real AccountSnapshot "
+        "object, same sandbox executor and per-decision timeout as "
+        "daily_backtest. Returns per-day strategy and as-of seconds, order "
+        "counts, the as-of domain directory names, and the exact exception text "
+        "on failure. It commits no revision, creates no Step, cannot be frozen, "
+        "and does not consume the backtest budget. Use it before daily_backtest "
+        "instead of hand-writing a shell smoke test against /mnt/snapshot.",
+        {
+            "type": "object",
+            "properties": {
+                "days": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": SMOKE_BACKTEST_MAX_DAYS,
+                    "description": (
+                        "Trading days from the start of the validation window "
+                        f"(default {SMOKE_BACKTEST_DEFAULT_DAYS})."
+                    ),
+                }
+            },
+            "required": [],
+            "additionalProperties": False,
+        },
+        mutating=True,
+    )
+
+    def __init__(
+        self,
+        *,
+        request: FoldSessionRequest,
+        output_dir: Path,
+        models_dir: Path,
+        modification_check: ModificationCheckTool,
+        evaluator: EvaluationBackend,
+        schedule,
+        broker_profile,
+        formal_guard: Callable[[], object],
+    ) -> None:
+        self.request = request
+        self.output_dir = output_dir
+        self.models_dir = models_dir
+        self.modification_check = modification_check
+        self.evaluator = evaluator
+        self.schedule = schedule
+        self.broker_profile = broker_profile
+        self.formal_guard = formal_guard
+        self.runs = 0
+
+    def invoke(self, arguments: Mapping[str, object]) -> ToolResult:
+        days = self._days(arguments)
+        self.runs += 1
+        check = self.modification_check.invoke({})
+        if not check.ok:
+            # Same static gate as daily_backtest, so a green smoke run means the
+            # gate will not be what fails the official one.
+            raise ToolError(f"smoke_backtest blocked by modification_check: {check.error}")
+        fold = self.request.fold
+        # A throwaway copy, not a committed revision and not the live tree: the
+        # rehearsal can neither be frozen nor leave anything behind in output/
+        # (a trusted-mode run imports main.py and would drop __pycache__ into
+        # the working copy, which the next modification_check would reject).
+        scratch = self._scratch_dir()
+        evaluation = None
+        try:
+            copy_artifact(self.output_dir, scratch / "output")
+            models = None
+            if self.models_dir.is_dir():
+                copy_model_artifacts(self.models_dir, scratch / "models")
+                models = scratch / "models"
+            revision = ArtifactRevision("smoke", scratch / "output", models)
+            with self.formal_guard():
+                evaluation = self.evaluator.evaluate(
+                    EvaluationRequest(
+                        revision=revision,
+                        snapshot=self.request.snapshot,
+                        mode="valid",
+                        start=fold.validation_start,
+                        end=fold.validation_end,
+                        schedule=self.schedule,
+                        broker_profile=self.broker_profile,
+                    ),
+                    max_days=days,
+                )
+        except Exception as exc:  # noqa: BLE001 - the exception text IS the result
+            shutil.rmtree(scratch, ignore_errors=True)
+            return ToolResult(
+                True,
+                value={
+                    "status": "failed",
+                    "days_requested": days,
+                    "official": False,
+                    "counts_against_backtest_budget": False,
+                    "error": _public_smoke_error(
+                        exc, hidden=(fold.fold_id, fold.test_start, fold.test_end)
+                    ),
+                    "hint": _SMOKE_LAYOUT_HINT,
+                },
+            )
+        result_dir = Path(evaluation.result_ref).parent
+        try:
+            return ToolResult(True, value=self._report(evaluation, result_dir, days))
+        finally:
+            # A smoke run leaves no result behind for the ledger or the Agent to
+            # mistake for a Validation.
+            shutil.rmtree(result_dir, ignore_errors=True)
+            shutil.rmtree(scratch, ignore_errors=True)
+
+    def _scratch_dir(self) -> Path:
+        target = self.output_dir.parent / ".smoke" / uuid.uuid4().hex
+        target.mkdir(parents=True, exist_ok=False)
+        return target
+
+    def _days(self, arguments: Mapping[str, object]) -> int:
+        raw = arguments.get("days", SMOKE_BACKTEST_DEFAULT_DAYS)
+        if isinstance(raw, bool) or not isinstance(raw, int):
+            raise ToolError("smoke_backtest days must be an integer")
+        if not 1 <= raw <= SMOKE_BACKTEST_MAX_DAYS:
+            raise ToolError(
+                f"smoke_backtest days must be between 1 and {SMOKE_BACKTEST_MAX_DAYS}"
+            )
+        return raw
+
+    def _report(
+        self, evaluation: EvaluationResult, result_dir: Path, days: int
+    ) -> dict[str, object]:
+        summary = dict(evaluation.summary)
+        phases = summary.get("phase_seconds")
+        phases = dict(phases) if isinstance(phases, dict) else {}
+        replayed = summary.get("replayed_trade_days")
+        replayed = int(replayed) if isinstance(replayed, int) else 0
+        per_day = (
+            {
+                name: round(phases[name] / replayed, 3)
+                for name in ("strategy", "data_view")
+                if name in phases
+            }
+            if replayed
+            else {}
+        )
+        return {
+            "status": "ok",
+            "official": False,
+            "counts_against_backtest_budget": False,
+            "days_requested": days,
+            "replayed_trade_days": replayed,
+            "decision_calls": summary.get("decision_calls"),
+            "order_count": summary.get("order_count"),
+            "order_lifecycle": summary.get("order_lifecycle"),
+            "reject_counts": summary.get("reject_counts"),
+            "seconds_per_day": per_day,
+            "phase_seconds": phases,
+            "nl_calls": summary.get("nl_calls"),
+            "asof_domains": _smoke_asof_domains(result_dir),
+            "hint": _SMOKE_LAYOUT_HINT,
+        }
+
+
+_SMOKE_LAYOUT_HINT = (
+    "context.asof_dir/<domain>/ is a directory of parquet parts: read it with "
+    "pd.read_parquet(context.asof_dir + '/daily'), never "
+    "context.asof_dir + '/daily.parquet'. context.account is an AccountSnapshot "
+    "object (context.account.cash, context.account.positions), not a dict. Never "
+    "fall back to context.snapshot_dir when an as-of read fails: the frozen "
+    "snapshot stops at the decision time and using it is a PIT violation."
+)
+
+
+def _public_smoke_error(exc: Exception, *, hidden: Sequence[str] = ()) -> str:
+    """The exact failure text, host paths and hidden calendar redacted."""
+    text = HOST_PATH_RE.sub("[host_path]", safe_error_summary(exc))
+    for value in sorted({item for item in hidden if item}, key=len, reverse=True):
+        text = text.replace(value, "[redacted]")
+    return text
+
+
+def _smoke_asof_domains(result_dir: Path) -> list[str]:
+    """Domain directory names the replay actually exposed under asof_dir."""
+    try:
+        record = json.loads((result_dir / "result.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    pit = record.get("pit")
+    domains = pit.get("asof_domains") if isinstance(pit, dict) else None
+    return [str(item) for item in domains] if isinstance(domains, list) else []
+
+
 class FoldBacktestTool(SessionTimeBudgetAware):
     """Commit and evaluate the current work copy as one immutable Step."""
 
@@ -759,8 +984,8 @@ class LLMFoldDeveloper:
         runtime_root: str | Path,
         sandbox_spec: SandboxSpec | None = None,
         command_runner_factory: Callable[[Path], CommandRunner] | None = None,
-        max_response_tokens: int = 8_000,
-        subagent_max_tokens: int | None = None,
+        max_response_tokens: int = AGENT_MAX_OUTPUT_TOKENS,
+        subagent_max_tokens: int = AGENT_MAX_OUTPUT_TOKENS,
         step_tree_enabled: bool = True,
         fold_exploration_directive: str = "",
         workspace_reference: str = "",
@@ -1046,6 +1271,16 @@ class LLMFoldDeveloper:
                 manifest=manifest,
                 decision_timeout_seconds=self.decision_timeout_seconds,
             )
+            smoke = SmokeBacktestTool(
+                request=request,
+                output_dir=output_dir,
+                models_dir=models_dir,
+                modification_check=modification,
+                evaluator=self.evaluator,
+                schedule=self.schedule,
+                broker_profile=self.broker_profile,
+                formal_guard=formal_guard,
+            )
             tools: list[Tool] = [
                 ReadFileTool(search_roots),
                 GrepTool(search_roots),
@@ -1056,6 +1291,7 @@ class LLMFoldDeveloper:
                 WriteSkillTool(safe),
                 DeleteSkillTool(safe),
                 modification,
+                smoke,
                 backtest,
             ]
             if self.step_tree_enabled:
@@ -1344,8 +1580,8 @@ class LLMMetaLearner:
         runtime_root: str | Path,
         max_llm_calls: int,
         deadline_seconds: float,
-        max_response_tokens: int = 8_000,
-        subagent_max_tokens: int | None = None,
+        max_response_tokens: int = AGENT_MAX_OUTPUT_TOKENS,
+        subagent_max_tokens: int = AGENT_MAX_OUTPUT_TOKENS,
         meta_learning_directive: str = "",
         fold_exploration_directive: str = "",
         workspace_reference: str = "",
@@ -1967,7 +2203,10 @@ def _safe_meta_trace_payload(
     Sub-agent events keep their identity, progress and usage fields (the
     console cards, ``trace_stats`` and the Meta process summary need them);
     model text (``content``, ``summary``, tool ``result`` bodies) is dropped
-    like the parent ``llm_call`` content.
+    like the parent ``llm_call`` content. The session prompts are built before
+    any Test data is read, so ``session_start`` keeps them, and every tool
+    call keeps its ``ok``/``error_type``/``error`` status so a failing Meta
+    session stays auditable.
     """
 
     subagent_identity = {
@@ -1983,7 +2222,7 @@ def _safe_meta_trace_payload(
         "resumed_from",
     }
     allowed = {
-        "session_start": {"mode"},
+        "session_start": {"mode", "system_prompt", "instruction"},
         "subagent_task": subagent_identity,
         "subagent_llm": {
             "task_id",
@@ -2002,7 +2241,7 @@ def _safe_meta_trace_payload(
         "llm_call_started": {"call_index", "status"},
         "llm_call": {"call_index", "status", "model", "usage", "tool_names", "error"},
         "tool_call_started": {"tool", "tool_call_id", "status"},
-        "tool_call": {"call_index", "tool_call_id", "tool"},
+        "tool_call": {"call_index", "tool_call_id", "tool", "result"},
         "session_end": {"status", "llm_calls", "steps_used"},
         "user_message": {
             "message_id",
@@ -2021,11 +2260,13 @@ def _safe_meta_trace_payload(
     }.get(event_type, {"status", "error"})
     kept = {key: value for key, value in payload.items() if key in allowed}
     result = kept.get("result")
-    if event_type == "subagent_tool" and isinstance(result, dict):
-        # Status only: a child's tool result may carry compact Test evidence.
-        kept["result"] = {
-            key: result[key] for key in ("ok", "error") if key in result
-        }
+    if event_type in {"subagent_tool", "tool_call"} and isinstance(result, dict):
+        # Status only: a tool result body may carry compact Test evidence.
+        status = {key: result[key] for key in ("ok", "error") if key in result}
+        value = result.get("value")
+        if isinstance(value, dict) and "error_type" in value:
+            status["error_type"] = value["error_type"]
+        kept["result"] = status
     return kept
 
 

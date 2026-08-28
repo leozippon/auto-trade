@@ -8,6 +8,7 @@ from .deepseek import (
 )
 from .extraction import ExtractionError, extract_json_object
 from .model_profiles import (
+    AGENT_MAX_OUTPUT_TOKENS,
     LEGACY_LOCAL_QWEN_MODEL,
     LOCAL_QWEN_MODEL,
     MODEL_CHOICES,
@@ -33,6 +34,7 @@ from .proxy import (
 )
 
 __all__ = [
+    "AGENT_MAX_OUTPUT_TOKENS",
     "LEGACY_LOCAL_QWEN_MODEL",
     "LOCAL_QWEN_MODEL",
     "MODEL_CHOICES",

@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Protocol
 
 from autotrade.environment.llm import (
+    AGENT_MAX_OUTPUT_TOKENS,
     ChatMessage,
     LLMProxy,
     ToolCall,
@@ -122,6 +123,7 @@ _FOLD_TOOLS = frozenset(
         "modification_check",
         "read_file",
         "shell",
+        "smoke_backtest",
         "step_rollback",
         "write_file",
         "edit_file",
@@ -185,7 +187,9 @@ class AgentSessionConfig:
     max_llm_calls: int = 200
     max_steps: int = 10
     deadline_seconds: float = 1_200.0
-    max_response_tokens: int = 8_000
+    # Completion-token safety ceiling shared with the sub-agents; see
+    # ``AGENT_MAX_OUTPUT_TOKENS``.
+    max_response_tokens: int = AGENT_MAX_OUTPUT_TOKENS
 
     def __post_init__(self) -> None:
         if self.mode not in ("fold", "meta", "meta_learning"):
@@ -212,6 +216,9 @@ class _SubAgentJob:
     role: str
     attempt: int
     future: Future
+    # The parent's one-line label; echoed in the live picture so a duplicate
+    # scope is visible before it is launched again.
+    description: str = ""
     # Collected result (usage accounted, ``subagent_attempt`` emitted).
     record: dict[str, object] | None = None
     # Whether the ``subagent_completed`` observation reached the conversation.
@@ -576,6 +583,7 @@ class AgentSessionRunner:
                                         "除非任务很简单，请把读取与计算委托给 agent 子代理"
                                         "（同一轮可并行多个，范围互斥）。"
                                     ),
+                                    **self._subagent_live_picture(),
                                 },
                                 ensure_ascii=False,
                             ),
@@ -1027,8 +1035,10 @@ class AgentSessionRunner:
                     role=role,
                     attempt=attempt,
                     future=future,
+                    description=description,
                 )
             )
+            picture = self._subagent_live_picture()
         record: dict[str, object] = {
             "status": "started",
             "background": True,
@@ -1040,7 +1050,37 @@ class AgentSessionRunner:
             record["resumed_from"] = resume
         if queued:
             record["queued"] = True
+        record.update(picture)
         return record
+
+    def _subagent_live_picture(self) -> dict[str, object]:
+        """Children still in flight, as the parent should see them.
+
+        The pool is FIFO with ``max_concurrent`` workers, so the oldest
+        uncollected children are the running ones and the rest wait for a
+        slot. Each entry carries the parent's own ``description`` so a scope
+        that is already in progress is visible before it is launched twice.
+        Callers on a tool thread hold ``_subagent_lock``.
+        """
+
+        in_flight = [
+            job
+            for job in self._subagent_jobs
+            if job.record is None and not job.future.done()
+        ]
+        cap = self.subagent.config.max_concurrent if self.subagent is not None else 0
+
+        def entry(job: _SubAgentJob) -> dict[str, str]:
+            return {
+                "task_id": job.task_id,
+                "role": job.role,
+                "description": job.description,
+            }
+
+        return {
+            "running_children": [entry(job) for job in in_flight[:cap]],
+            "queued_children": [entry(job) for job in in_flight[cap:]],
+        }
 
     def _append_subagent_observations(
         self, messages: list[ChatMessage], *, wait: bool = False

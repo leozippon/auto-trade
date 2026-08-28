@@ -730,3 +730,40 @@ class SequentialDispatchClassificationTest(unittest.TestCase):
             spec = ToolSpec(name, "gate", {"type": "object", "properties": {}})
             self.assertFalse(spec.mutating, name)
             self.assertTrue(is_sequential_tool(spec), name)
+
+
+class ToolContractHintTest(unittest.TestCase):
+    """What the schema tells the model must match what the tools accept."""
+
+    def test_inputs_resolve_under_the_default_workspace_root(self) -> None:
+        # The real session layout: the writable workspace is the default root
+        # and the session facts live in its `inputs/`, so the model's natural
+        # `inputs/...` path resolves with no root at all.
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = SandboxPaths(Path(tmp))
+            for directory in (paths.workspace / "inputs", paths.logs):
+                directory.mkdir(parents=True, exist_ok=True)
+            (paths.workspace / "inputs" / "skills_index.json").write_text("[]\n", encoding="utf-8")
+            roots = SearchRoots(SafeWorkspace(paths.workspace), paths=paths)
+            self.assertNotIn("agent", search_module.SEARCH_ROOTS)
+            self.assertEqual(roots.names[0], "workspace")
+            registry = ToolRegistry([ReadFileTool(roots), GlobTool(roots)])
+            read = registry.invoke("read_file", {"path": "inputs/skills_index.json"})
+            self.assertTrue(read.ok, read.error)
+            self.assertEqual(read.value["root"], "workspace")
+            stale = registry.invoke(
+                "read_file", {"root": "agent", "path": "inputs/skills_index.json"}
+            )
+            self.assertFalse(stale.ok)
+            root_help = ReadFileTool(roots).spec.input_schema["properties"]["root"]["description"]
+            self.assertIn("path='inputs/skills_index.json'", root_help)
+
+    def test_shell_description_states_argv_shape_timeout_and_workspace_bound(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, _, workspace = build_sandbox(Path(tmp))
+            default = SandboxShellTool(workspace, FakeRunner()).spec.description
+            custom = SandboxShellTool(workspace, FakeRunner(), timeout_seconds=5).spec.description
+            self.assertIn('["python", "-c", "print(1)"]', default)
+            self.assertIn("inside the workspace", default)
+            self.assertIn("at most 30", default)
+            self.assertIn("at most 5", custom)

@@ -482,9 +482,9 @@ _FIELDS: list[dict[str, object]] = [
         "group": "模型与上下文",
         "label": "推理强度",
         "type": "choice",
-        "choices": ["max", "xhigh", "high", "medium", "low"],
-        "choice_labels": {"max": "最高", "xhigh": "极高", "high": "高", "medium": "中", "low": "低"},
-        "help": "启用推理模式时 Agent 与 NL 调用的推理强度；可用档位由所选模型服务决定。",
+        "choices": ["xhigh", "medium", "low"],
+        "choice_labels": {"xhigh": "极高", "medium": "中", "low": "低"},
+        "help": "启用推理模式时 Agent 主对话与子代理的推理强度；三档即本机 Qwen 模板在线上真正区分的档位（旧参数中的 high/max 等同 xhigh）。NL 固定 medium。",
     },
     {
         "key": "no_thinking",

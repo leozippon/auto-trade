@@ -806,9 +806,16 @@ def _all_registrable_tool_names() -> set[str]:
     from autotrade.environment.nl.engine import TEXT_RETRIEVE_TOOL
     from autotrade.environment.tools import SafeWorkspace, SearchRoots
     from autotrade.environment.tools.search import GlobTool, GrepTool, ReadFileTool
-    # The backtest tool is constructed per fold in local_backend, so its name
-    # is named here rather than discovered.
-    names = {TEXT_RETRIEVE_TOOL, "daily_backtest"}
+    from autotrade.pipelines.local_backend import FoldBacktestTool, SmokeBacktestTool
+
+    # The backtest tools are constructed per fold in local_backend rather than
+    # exported from the tools package, so read their names off the classes: a
+    # rename must not silently drop one from this set.
+    names = {
+        TEXT_RETRIEVE_TOOL,
+        FoldBacktestTool.spec.name,
+        SmokeBacktestTool.spec.name,
+    }
     with tempfile.TemporaryDirectory() as tmp:
         roots = SearchRoots(SafeWorkspace(Path(tmp)))
         instances = [GlobTool(roots), GrepTool(roots), ReadFileTool(roots)]

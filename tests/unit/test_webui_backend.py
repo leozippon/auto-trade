@@ -166,7 +166,7 @@ def test_local_webui_health_schema_and_brand(tmp_path: Path):
     assert fields["meta_model"]["default"] == LOCAL_QWEN_MODEL
     assert fields["nl_model"]["default"] == LOCAL_QWEN_MODEL
     assert fields["compact_model"]["default"] == LOCAL_QWEN_MODEL
-    assert fields["reasoning_effort"]["default"] == "max"
+    assert fields["reasoning_effort"]["default"] == "xhigh"
     assert fields["compact_token_threshold"]["default"] == 200_000
     assert fields["compact_keep_recent_messages"]["default"] == 10
     assert fields["compact_max_tokens"]["default"] == 10_000
@@ -195,7 +195,11 @@ def test_local_webui_health_schema_and_brand(tmp_path: Path):
     assert page.status_code == 200
     assert "ADM-Cube" in page.text
     assert "no-store" in page.headers["cache-control"]
-    assert '<img class="logo" src="/static/logo.png"' in page.text
+    # Brand mark is a CSS background, so a failed fetch paints nothing rather
+    # than the browser placeholder glyph in the top-left corner.
+    assert '<span class="logo" aria-hidden="true"></span>' in page.text
+    assert "<img" not in page.text.split("</header>")[0]
+    assert 'url("/static/logo.png")' in client.get("/static/style.css").text
     assert 'rel="icon" href="/static/logo.png"' in page.text
     favicon = client.get("/favicon.ico")
     assert favicon.status_code == 200

@@ -297,11 +297,13 @@ def add_model_arguments(parser: argparse.ArgumentParser, *, verbose_help: bool) 
     )
     parser.add_argument(
         "--reasoning-effort",
-        choices=("low", "medium", "high", "max", "xhigh"),
-        default="max",
+        choices=("low", "medium", "xhigh"),
+        default="xhigh",
         help=_opt_help(
-            "Reasoning effort for Agent and NL calls when thinking is enabled; default max. "
-            "The local Qwen service receives low/medium/xhigh (high/max map to xhigh).",
+            "Reasoning effort for the Agent conversation and its sub-agents when "
+            "thinking is enabled; default xhigh. These are the levels the local Qwen "
+            "template distinguishes on the wire (legacy high/max in params.json "
+            "resolve to xhigh).",
             verbose_help,
         ),
     )

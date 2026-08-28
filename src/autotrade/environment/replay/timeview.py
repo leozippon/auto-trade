@@ -132,6 +132,15 @@ _DOMAINS: tuple[tuple[str, str, str | None], ...] = (
     ("auction", "auction.parquet", _ROW_AVAILABLE_AT),
 )
 
+# Every domain the rolling view exposes as a DIRECTORY of parquet parts under
+# ``ctx.asof_dir``. Single source for the static strategy check that rejects
+# reading one of them as a flat ``<domain>.parquet`` file (the shape the frozen
+# decision snapshot has). ``text_library`` is deliberately absent: its shards
+# really are individual ``<name>.parquet`` files.
+ASOF_DOMAIN_NAMES: tuple[str, ...] = tuple(
+    sorted({name for name, _file, _key in _DOMAINS} | {"text_index", "universe"})
+)
+
 # Per-dataset cutoff/boundary resolvers for domains gated dataset-by-dataset.
 _DATASET_CUTOFFS = {
     "events": (event_dataset_visible_cutoff, event_dataset_next_visible_boundary),

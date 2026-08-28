@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -11,12 +12,26 @@ from autotrade.environment.artifacts import (
     model_artifact_delta,
     modification_delta,
 )
+from autotrade.environment.replay.timeview import ASOF_DOMAIN_NAMES
 from autotrade.environment.strategy_loader import (
     StrategyLoadError,
     validate_strategy_source,
 )
 
 from .base import ToolError, ToolResult, ToolSpec
+
+# ``ctx.asof_dir/<domain>/`` is a DIRECTORY of parquet parts; only the frozen
+# decision snapshot is flat ``<domain>.parquet``. Reading the rolling view with
+# the snapshot's shape raises FileNotFoundError on the first decision, which is
+# how official backtests kept dying on day one. Cheap static catch: a domain
+# file name whose expression also mentions ``asof_dir``.
+# The gap may not cross another path root, so a correct directory read followed
+# by a correct flat SNAPSHOT read on the next line is not mistaken for a hit.
+_ASOF_FLAT_READ = re.compile(
+    r"asof_dir(?:(?!asof_dir|snapshot_dir).){0,120}?"
+    r"(?P<domain>" + "|".join(ASOF_DOMAIN_NAMES) + r")\.parquet",
+    re.DOTALL,
+)
 
 
 class ModificationCheckTool:
@@ -62,6 +77,7 @@ class ModificationCheckTool:
             validate_strategy_source(main.read_text(encoding="utf-8"), filename="main.py")
         except StrategyLoadError as exc:
             raise ToolError(str(exc)) from exc
+        _reject_flat_asof_reads(files, self.output_dir)
         try:
             delta = modification_delta(self.parent_dir or self.output_dir, self.output_dir)
             model_delta = (
@@ -89,6 +105,29 @@ class ModificationCheckTool:
                 "delta": delta.to_record(),
                 "model_delta": model_delta.to_record() if model_delta is not None else None,
             },
+        )
+
+
+def _reject_flat_asof_reads(files: list[Path], root: Path) -> None:
+    """Reject reading a rolling as-of domain as a flat ``<domain>.parquet``."""
+    for path in files:
+        if path.suffix != ".py":
+            continue
+        try:
+            source = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        match = _ASOF_FLAT_READ.search(source)
+        if match is None:
+            continue
+        domain = match.group("domain")
+        relative = path.relative_to(root)
+        raise ToolError(
+            f"{relative} reads context.asof_dir/{domain}.parquet, but every "
+            f"as-of domain is a DIRECTORY of parquet parts: use "
+            f'pd.read_parquet(context.asof_dir + "/{domain}"). Only '
+            f"context.snapshot_dir is flat ({domain}.parquet), and falling back "
+            f"to it when an as-of read fails is a point-in-time violation."
         )
 
 

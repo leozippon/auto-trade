@@ -32,6 +32,7 @@ from autotrade.pipelines.config import (
 )
 from autotrade.pipelines.pit_backend import (
     HistoricalMinuteSource,
+    _AsOfReadOnlyView,
     PITDailyEvaluationBackend,
     ResearchPITSnapshotProvider,
     _asof_stash_dir,
@@ -1411,3 +1412,154 @@ def _write_unphased_replay(
         ),
         encoding="utf-8",
     )
+
+
+def test_asof_view_is_a_directory_per_domain_and_truncates_to_max_days(
+    tmp_path: Path,
+) -> None:
+    """The layout hint a smoke run reports has to be the real one.
+
+    Strategies kept reading ``asof_dir/daily.parquet`` because the mounted
+    decision snapshot is flat while the rolling view is a directory of parts.
+    Pin both the recorded domain names and the short-window truncation the
+    unofficial rehearsal rides on.
+    """
+    snapshot, replay = _pit_slot_paths(
+        tmp_path, decision="layout", replay="layout", generation_id="generation_layout"
+    )
+    (snapshot / "text_library").mkdir()
+    (replay / "text_library").mkdir()
+    _write_domains(snapshot, replay)
+    (snapshot / "manifest.json").write_text(
+        json.dumps(
+            {
+                "snapshot_id": "snap_layout",
+                "kind": "decision_input",
+                "raw_generation": {"generation_id": "generation_layout"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (replay / "manifest.json").write_text(
+        json.dumps(
+            {
+                "snapshot_id": "replay_layout",
+                "kind": "replay_slot",
+                "label": "valid",
+                "period_start": "20240102",
+                "period_end": "20240103",
+                "available_from": "2024-01-01T23:59:59+08:00",
+                "raw_generation": {"generation_id": "generation_layout"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    chmod_tree(snapshot, file_mode=0o444, dir_mode=0o555)
+    revision = tmp_path / "revision"
+    revision.mkdir()
+    (revision / "main.py").write_text(
+        """import pandas as pd
+
+def generate_orders(context):
+    # The directory form is the only one that exists in the rolling view.
+    pd.read_parquet(context.asof_dir + "/daily")
+    return []
+""",
+        encoding="utf-8",
+    )
+
+    def _run(max_days):
+        return PITDailyEvaluationBackend(
+            tmp_path / f"results_{max_days}", execution_mode="trusted"
+        ).evaluate(
+            EvaluationRequest(
+                ArtifactRevision("revision_layout", revision),
+                SnapshotBundle(
+                    "snap_layout",
+                    str(snapshot),
+                    str(replay),
+                    generation_id="generation_layout",
+                ),
+                "valid",
+                "20240102",
+                "20240103",
+                StrategySchedule("day", "09:28"),
+                BrokerProfile(initial_cash=100_000),
+            ),
+            max_days=max_days,
+        )
+
+    full = _run(None)
+    record = json.loads(Path(full.result_ref).read_text(encoding="utf-8"))
+    domains = record["pit"]["asof_domains"]
+    assert {"daily", "events", "macro", "fundamentals", "universe"} <= set(domains)
+    # The slot identity check still sees the full window; only the replay frame
+    # is short, so a truncated run can never masquerade as a full Validation.
+    assert full.summary["replayed_trade_days"] == 2
+
+    short = _run(1)
+    assert short.summary["replayed_trade_days"] == 1
+    assert short.summary["decision_calls"] == 1
+
+    for days in (0, -1):
+        with pytest.raises(ValueError, match="max_days must be a positive integer"):
+            _run(days)
+
+
+def test_incremental_asof_lock_matches_a_full_chmod_tree(tmp_path: Path) -> None:
+    """The cheap lock must leave exactly the modes the expensive one left.
+
+    Re-chmod'ing the whole as-of tree every decision day was the dominant cost
+    of the data_view phase (it grows with every part that lands). The
+    replacement only touches what newly appeared, which is only safe because the
+    tree is append-only — so the end state has to be identical, day by day.
+    """
+    incremental = tmp_path / "incremental"
+    reference = tmp_path / "reference"
+    for root in (incremental, reference):
+        root.mkdir()
+        (root / "daily").mkdir()
+        (root / "text_library").mkdir()
+    view = _AsOfReadOnlyView(incremental)
+
+    for day in range(1, 6):
+        # Real order: the view reopens its directories, Timeview appends, the
+        # view locks again.
+        view.unlock_directories()
+        chmod_tree(reference, file_mode=0o644, dir_mode=0o755)
+        for root in (incremental, reference):
+            for name in ("daily", "text_library"):
+                (root / name / f"part_{day:04d}.parquet").write_bytes(b"x")
+            if day == 3:  # a domain directory can appear mid-replay
+                (root / "auction").mkdir(exist_ok=True)
+                (root / "auction" / "part_0000.parquet").write_bytes(b"x")
+        view.lock()
+        chmod_tree(reference, file_mode=0o444, dir_mode=0o555)
+
+        left = {
+            str(path.relative_to(incremental)): stat.S_IMODE(path.stat().st_mode)
+            for path in incremental.rglob("*")
+        }
+        right = {
+            str(path.relative_to(reference)): stat.S_IMODE(path.stat().st_mode)
+            for path in reference.rglob("*")
+        }
+        assert left == right, f"day {day}: {sorted(set(left.items()) ^ set(right.items()))}"
+        assert stat.S_IMODE(incremental.stat().st_mode) == stat.S_IMODE(
+            reference.stat().st_mode
+        )
+
+    # Unlocking must leave every file read-only: only directories reopen.
+    view.unlock_directories()
+    assert all(
+        stat.S_IMODE(path.stat().st_mode) == 0o444
+        for path in incremental.rglob("*")
+        if path.is_file()
+    )
+    assert all(
+        stat.S_IMODE(path.stat().st_mode) == 0o755
+        for path in incremental.rglob("*")
+        if path.is_dir()
+    )
+    chmod_tree(incremental, file_mode=0o644, dir_mode=0o755)
+    chmod_tree(reference, file_mode=0o644, dir_mode=0o755)

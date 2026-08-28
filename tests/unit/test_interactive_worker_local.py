@@ -206,10 +206,10 @@ def test_nl_cost_controls_reach_the_worker_without_being_configured(
 
     settings = options.llm
     assert settings is not None
-    assert settings.reasoning_effort == "max"
+    assert settings.reasoning_effort == "xhigh"
     assert settings.thinking_enabled is True
-    # The local Qwen profile maps the shared `max` tier to its native `xhigh`;
-    # NL's own tier is already native and passes through unmapped.
+    # The default is the native `xhigh` tier and passes through the local Qwen
+    # profile unmapped; NL keeps its own native tier.
     assert settings.build_gateway("main").config.reasoning_effort == "xhigh"
     assert settings.build_gateway("nl").config.reasoning_effort == NL_REASONING_EFFORT
     assert NL_REASONING_EFFORT == "medium"
@@ -313,7 +313,7 @@ def test_worker_resolves_mixed_local_and_deepseek_roles_with_real_timeout(
     assert isinstance(nl, DeepSeekProxy)
     assert nl.provider == "deepseek"
     assert analysis.provider == "vllm"
-    assert main.config.max_tokens == 32_768
+    assert main.config.max_tokens == 12_000
     assert analysis.config.max_tokens == 6_000
     assert main.config.timeout_seconds == 120
     assert main.config.reasoning_effort == "xhigh"
@@ -344,8 +344,8 @@ def test_worker_applies_local_output_cap_to_each_role_budget(
     options = load_worker_options(experiment, repo_root=repo)
     assert options.llm is not None
     assert options.llm.compaction.max_response_tokens == 20_000
-    assert options.llm.max_tokens_for("main") == 32_768
-    assert options.llm.max_tokens_for("meta") == 32_768
+    assert options.llm.max_tokens_for("main") == 12_000
+    assert options.llm.max_tokens_for("meta") == 12_000
     assert options.llm.max_tokens_for("nl", requested=1_200) == 1_200
     assert options.llm.max_tokens_for("nl", requested=20_000) == 20_000
     assert (
@@ -355,7 +355,7 @@ def test_worker_applies_local_output_cap_to_each_role_budget(
         == 6_000
     )
     for role in ("main", "meta", "nl"):
-        assert options.llm.build_gateway(role).config.max_tokens == 32_768
+        assert options.llm.build_gateway(role).config.max_tokens == 12_000
     assert options.llm.build_gateway("compact").config.max_tokens == 20_000
 
 
@@ -372,8 +372,8 @@ def test_worker_clamps_compaction_threshold_to_the_model_context(
     monkeypatch.setenv("DEEPSEEK_API_KEY", "deepseek-test-key")
     monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
     options = load_worker_options(experiment, repo_root=repo)
-    # 262,144 - 32,768 output budget - 2,048 margin.
-    assert options.llm.compaction.token_threshold == 227_328
+    # 262,144 - 12,000 output budget - 2,048 margin.
+    assert options.llm.compaction.token_threshold == 248_096
 
 
 def test_worker_default_threshold_fits_deepseek_and_compaction_can_be_disabled(
@@ -389,8 +389,8 @@ def test_worker_default_threshold_fits_deepseek_and_compaction_can_be_disabled(
     monkeypatch.setenv("DEEPSEEK_API_KEY", "deepseek-test-key")
     monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
     options = load_worker_options(experiment, repo_root=repo)
-    # 128,000 - 32,768 output budget - 2,048 margin: shipped defaults launch.
-    assert options.llm.compaction.token_threshold == 93_184
+    # 128,000 - 12,000 output budget - 2,048 margin: shipped defaults launch.
+    assert options.llm.compaction.token_threshold == 113_952
     params["disable_context_compact"] = True
     path.write_text(json.dumps(params), encoding="utf-8")
     disabled = load_worker_options(experiment, repo_root=repo)
@@ -1278,3 +1278,76 @@ def test_compaction_gateway_makes_one_attempt(tmp_path: Path, monkeypatch):
     settings = load_worker_options(experiment, repo_root=repo).llm
     assert settings.build_gateway("compact", max_retries=0).config.max_retries == 0
     assert settings.build_gateway("main").config.max_retries == settings.max_retries
+
+
+def test_worker_reasoning_effort_offers_wire_levels_and_maps_legacy_aliases(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The console enum is exactly what the local Qwen template distinguishes;
+    older params.json files that still say high/max keep launching as xhigh."""
+    from autotrade.pipelines.hitl_state import WEB_CREATE_DEFAULTS
+    from autotrade.pipelines.worker import DEFAULT_REASONING_EFFORT, REASONING_EFFORTS
+    from autotrade.webui.params_schema import _FIELDS
+
+    assert REASONING_EFFORTS == ("low", "medium", "xhigh")
+    assert WEB_CREATE_DEFAULTS["reasoning_effort"] == DEFAULT_REASONING_EFFORT == "xhigh"
+    field = next(item for item in _FIELDS if item["key"] == "reasoning_effort")
+    assert set(field["choices"]) == set(REASONING_EFFORTS)
+
+    repo, experiment = _experiment(tmp_path, developer_mode="llm")
+    path = experiment / "hitl/params.json"
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-only-key")
+    monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
+    for configured, effective in (("max", "xhigh"), ("high", "xhigh"), ("medium", "medium")):
+        params = json.loads(path.read_text(encoding="utf-8"))
+        params["reasoning_effort"] = configured
+        path.write_text(json.dumps(params), encoding="utf-8")
+        settings = load_worker_options(experiment, repo_root=repo).llm
+        assert settings is not None
+        assert settings.reasoning_effort == effective
+        assert settings.build_gateway("main").config.reasoning_effort == effective
+
+
+def test_meta_trace_payload_keeps_prompts_and_tool_status_without_bodies() -> None:
+    from autotrade.pipelines.local_backend import _safe_meta_trace_payload
+
+    start = _safe_meta_trace_payload(
+        "session_start",
+        {"mode": "meta", "system_prompt": "SYS", "instruction": "GO", "extra": 1},
+    )
+    assert start == {"mode": "meta", "system_prompt": "SYS", "instruction": "GO"}
+    failed = _safe_meta_trace_payload(
+        "tool_call",
+        {
+            "call_index": 3,
+            "tool_call_id": "t1",
+            "tool": "read_file",
+            "arguments": {"path": "inputs/x"},
+            "result": {
+                "ok": False,
+                "error": "search path does not exist",
+                "value": {"error_type": "not_found", "content": "body"},
+            },
+        },
+    )
+    assert failed == {
+        "call_index": 3,
+        "tool_call_id": "t1",
+        "tool": "read_file",
+        "result": {
+            "ok": False,
+            "error": "search path does not exist",
+            "error_type": "not_found",
+        },
+    }
+    succeeded = _safe_meta_trace_payload(
+        "tool_call",
+        {"tool": "read_file", "result": {"ok": True, "value": {"content": "test evidence"}}},
+    )
+    assert succeeded["result"] == {"ok": True}
+    call = _safe_meta_trace_payload(
+        "llm_call",
+        {"call_index": 1, "status": "ok", "content": "model text", "usage": {"total_tokens": 5}},
+    )
+    assert "content" not in call and call["usage"] == {"total_tokens": 5}

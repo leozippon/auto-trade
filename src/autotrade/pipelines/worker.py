@@ -23,6 +23,7 @@ from autotrade.environment.data.research_release import pin_research_release
 from autotrade.environment.data.snapshot import SnapshotConfig
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.llm import (
+    AGENT_MAX_OUTPUT_TOKENS,
     LOCAL_QWEN_MODEL,
     LLMProxy,
     build_model_gateway,
@@ -190,6 +191,14 @@ NL_DEFAULTS = NLConfig()
 # a native Qwen tier and passes through the shared gateway unmapped.
 NL_REASONING_EFFORT = "medium"
 
+# The experiment-level ``reasoning_effort`` offers exactly the levels that are
+# distinct on the wire for the local Qwen profile (its chat template knows
+# low/medium/xhigh; ``high`` was always sent as ``xhigh``). The legacy aliases
+# stay readable so existing params.json files keep launching.
+REASONING_EFFORTS = ("low", "medium", "xhigh")
+DEFAULT_REASONING_EFFORT = "xhigh"
+LEGACY_REASONING_EFFORTS = {"high": "xhigh", "max": "xhigh"}
+
 # Historical snapshots may contain this former operator override.  It is
 # deliberately ignored rather than interpreted or exposed: provider endpoints
 # now come only from the trusted model profile's fixed environment key.
@@ -294,15 +303,6 @@ class LLMWorkerSettings:
             # deliberately lower effort than the strategy-design dialogues.
             return NL_REASONING_EFFORT
         return self.reasoning_effort
-
-
-def _subagent_native_max_tokens(settings: LLMWorkerSettings, role: str) -> int:
-    """Give sub-agents the model's native output ceiling, not the NL/child stub."""
-
-    model = settings.model if role == "main" else settings.meta_model
-    window = model_profile(model).context_window_tokens
-    requested = window or settings.max_response_tokens
-    return settings.max_tokens_for(role, requested=requested)
 
 
 @dataclass(frozen=True)
@@ -857,7 +857,8 @@ def run_local_interactive_worker(
             sandbox_spec=options.agent_sandbox,
             command_runner_factory=command_runner_factory,
             max_response_tokens=options.llm.max_tokens_for("main"),
-            subagent_max_tokens=_subagent_native_max_tokens(options.llm, "main"),
+            # Children share the parent's completion ceiling.
+            subagent_max_tokens=options.llm.max_tokens_for("main"),
             step_tree_enabled=options.rolling.step_tree_enabled,
             fold_exploration_directive=options.rolling.fold_exploration_directive,
             workspace_reference=options.rolling.workspace_reference,
@@ -875,7 +876,7 @@ def run_local_interactive_worker(
             max_llm_calls=options.rolling.max_llm_calls,
             deadline_seconds=options.rolling.max_fold_minutes * 60,
             max_response_tokens=options.llm.max_tokens_for("meta"),
-            subagent_max_tokens=_subagent_native_max_tokens(options.llm, "meta"),
+            subagent_max_tokens=options.llm.max_tokens_for("meta"),
             meta_learning_directive=options.rolling.meta_learning_directive,
             fold_exploration_directive=options.rolling.fold_exploration_directive,
             workspace_reference=options.rolling.workspace_reference,
@@ -1527,13 +1528,15 @@ def _llm_settings(
             params.get("llm_temperature", 0.0), "llm_temperature", 0.0, 2.0
         ),
         max_response_tokens=_positive_int(
-            params.get("llm_max_response_tokens", 32_768),
+            params.get("llm_max_response_tokens", AGENT_MAX_OUTPUT_TOKENS),
             "llm_max_response_tokens",
         ),
         thinking_enabled=not _strict_bool(
             params.get("no_thinking", False), "no_thinking"
         ),
-        reasoning_effort=_reasoning_effort(params.get("reasoning_effort", "max")),
+        reasoning_effort=_reasoning_effort(
+            params.get("reasoning_effort", DEFAULT_REASONING_EFFORT)
+        ),
         compact_enabled=not _strict_bool(
             params.get("disable_context_compact", False),
             "disable_context_compact",
@@ -1647,9 +1650,16 @@ def _strict_bool(value: object, name: str) -> bool:
 
 def _reasoning_effort(value: object) -> str:
     effort = str(value)
-    if effort not in {"max", "xhigh", "high", "medium", "low"}:
+    # Older params.json files may still carry the shared-scale aliases; on
+    # the wire they were never distinct from xhigh, so they stay valid and
+    # resolve to it rather than failing a running experiment.
+    if effort in LEGACY_REASONING_EFFORTS:
+        return LEGACY_REASONING_EFFORTS[effort]
+    if effort not in REASONING_EFFORTS:
         raise ValueError(
-            "reasoning_effort must be one of max, xhigh, high, medium, low"
+            "reasoning_effort must be one of "
+            + ", ".join(REASONING_EFFORTS)
+            + " (legacy high/max resolve to xhigh)"
         )
     return effort
 

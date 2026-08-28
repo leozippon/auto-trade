@@ -1002,8 +1002,10 @@ def test_normalize_subagent_thinking_accepts_aliases() -> None:
     assert normalize_subagent_thinking(None) == "medium"
     assert normalize_subagent_thinking("inherit") == "medium"
     assert normalize_subagent_thinking("minimal") == "low"
-    assert normalize_subagent_thinking("xhigh") == "high"
-    assert normalize_subagent_thinking("max") == "max"
+    assert normalize_subagent_thinking("xhigh") == "xhigh"
+    assert normalize_subagent_thinking("high") == "xhigh"
+    assert normalize_subagent_thinking("max") == "xhigh"
+    assert SUBAGENT_THINKING_LEVELS == ("off", "low", "medium", "xhigh")
     with pytest.raises(ValueError, match="agent.thinking"):
         normalize_subagent_thinking("turbo")
 
@@ -2123,7 +2125,115 @@ def test_delegation_reminder_is_silent_once_a_child_was_launched() -> None:
 
 
 def test_agent_description_states_role_capabilities_and_thinking_tiers() -> None:
-    for phrase in ("shell", "不能执行", "general-purpose 或 developer", "low/medium", "high/max"):
+    for phrase in ("shell", "不能执行", "general-purpose 或 developer", "low/medium", "xhigh"):
         assert phrase in AGENT_TOOL_DESCRIPTION
     agent_field = AGENT_TOOL_SPEC.input_schema["properties"]["agent"]
     assert "不能执行" in agent_field["description"] and "shell" in agent_field["description"]
+
+
+def test_agent_result_echoes_running_and_queued_children_with_descriptions() -> None:
+    """The launch result is the parent's live picture: which scopes are already
+    running or waiting for a slot, by the parent's own description, so a
+    duplicate fan-out is visible before it is issued again."""
+    gates = {
+        needle: (threading.Event(), threading.Event(), f"done-{needle}")
+        for needle in ("scope-alpha", "scope-beta")
+    }
+    runner = AgentSessionRunner(
+        llm=ScriptedLLM([]),
+        tools=ToolRegistry(),
+        system_prompt="fold",
+        config=_fold_config(),
+        subagent=SubAgentEngine(
+            llm=_TaskGatedLLM(gates),
+            tools=ToolRegistry([DeclaredReadOnlyShell()]),
+            config=SubAgentConfig(max_concurrent=1),
+        ),
+    )
+    try:
+        first = runner.tools.invoke(
+            "agent",
+            {"agent": "auditor", "task": "scope-alpha", "description": "read data summary"},
+        )
+        assert first.ok
+        assert first.value["running_children"] == [
+            {
+                "task_id": first.value["task_id"],
+                "role": "auditor",
+                "description": "read data summary",
+            }
+        ]
+        assert first.value["queued_children"] == []
+        assert "queued" not in first.value
+        assert gates["scope-alpha"][0].wait(3)
+        second = runner.tools.invoke(
+            "agent",
+            {"agent": "Explore", "task": "scope-beta", "description": "read parent strategy"},
+        )
+        assert second.ok and second.value["queued"] is True
+        assert [child["description"] for child in second.value["running_children"]] == [
+            "read data summary"
+        ]
+        assert second.value["queued_children"] == [
+            {
+                "task_id": second.value["task_id"],
+                "role": "Explore",
+                "description": "read parent strategy",
+            }
+        ]
+    finally:
+        for _started, release, _summary in gates.values():
+            release.set()
+    assert all(record["ok"] for record in runner._wait_subagent_jobs())
+    assert runner._subagent_live_picture() == {
+        "running_children": [],
+        "queued_children": [],
+    }
+
+
+def test_delegation_reminder_carries_the_live_picture() -> None:
+    read = _NamedTool("read_file")
+    finish = _FinishStub("finish_fold")
+    llm = ScriptedLLM(
+        [
+            *(
+                ProviderResponse(tool_calls=(ToolCall(f"r{index}", "read_file", {}),))
+                for index in range(9)
+            ),
+            ProviderResponse(tool_calls=(ToolCall("f1", "finish_fold", {}),)),
+        ]
+    )
+    runner = AgentSessionRunner(
+        llm=llm,
+        tools=ToolRegistry([read, finish]),
+        system_prompt="fold",
+        config=_fold_config(),
+        subagent=SubAgentEngine(
+            llm=ScriptedLLM([]), tools=ToolRegistry([DeclaredReadOnlyShell()])
+        ),
+    )
+    assert runner.run("go").status == "finished"
+    reminder = next(
+        json.loads(str(message.content))
+        for message in llm.calls[8]["messages"]
+        if message.role == "user"
+        and '"observation": "delegation_reminder"' in str(message.content or "")
+    )
+    assert reminder["running_children"] == [] and reminder["queued_children"] == []
+
+
+def test_parent_and_child_output_budgets_share_the_safety_ceiling() -> None:
+    from autotrade.environment.llm import AGENT_MAX_OUTPUT_TOKENS
+
+    assert AGENT_MAX_OUTPUT_TOKENS == 12_000
+    assert AgentSessionConfig().max_response_tokens == AGENT_MAX_OUTPUT_TOKENS
+    llm = _GateLLM(threading.Event(), threading.Event())  # 128k window
+    messages = [ChatMessage("user", "x")]
+    shared = SubAgentEngine(llm=llm, tools=ToolRegistry([DeclaredReadOnlyShell()]))
+    assert shared._output_tokens(llm, messages, ()) == AGENT_MAX_OUTPUT_TOKENS
+    capped = SubAgentEngine(
+        llm=llm,
+        tools=ToolRegistry([DeclaredReadOnlyShell()]),
+        config=SubAgentConfig(max_tokens=500),
+    )
+    assert capped._output_tokens(llm, messages, ()) == 500

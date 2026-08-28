@@ -104,7 +104,7 @@ WEB_CREATE_DEFAULTS: dict[str, object] = {
     "meta_model": MODEL_CHOICES[0],
     "nl_model": MODEL_CHOICES[0],
     "compact_model": MODEL_CHOICES[0],
-    "reasoning_effort": "max",
+    "reasoning_effort": "xhigh",
     "no_thinking": False,
     "disable_context_compact": False,
     "compact_token_threshold": 200_000,

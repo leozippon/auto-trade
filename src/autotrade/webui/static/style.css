@@ -191,13 +191,14 @@ a:hover {
  gap: 0.55rem;
  letter-spacing: 0.01em;
 }
+/* Brand mark as a background: a failed fetch paints nothing, where a broken
+   <img> would leave the browser placeholder glyph in the top-left corner. */
 .brand .logo {
  display: block;
+ flex: none;
  width: 1.7rem;
  height: 1.7rem;
- object-fit: contain;
- border: 0;
- background: transparent;
+ background: url("/static/logo.png") center / contain no-repeat;
 }
 .brand:hover {
  text-decoration: none;

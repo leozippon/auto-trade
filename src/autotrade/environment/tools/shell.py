@@ -84,10 +84,20 @@ def _shell_input_schema(timeout_seconds: float) -> dict[str, object]:
     }
 
 
+def _shell_description(timeout_seconds: float) -> str:
+    return (
+        "Run one bounded foreground argv command in the injected network-disabled "
+        "Agent sandbox. `argv` is a JSON array of strings, e.g. "
+        '["python", "-c", "print(1)"] or ["bash", "-lc", "ls output"]; a single '
+        "command-line string is rejected. `cwd` and every path must stay inside "
+        f"the workspace (relative, no `..`). `timeout_seconds` is at most {timeout_seconds:g}."
+    )
+
+
 class SandboxShellTool:
     spec = ToolSpec(
         "shell",
-        "Run an argv command in the injected network-disabled Agent sandbox.",
+        _shell_description(DEFAULT_SHELL_TIMEOUT_SECONDS),
         _shell_input_schema(DEFAULT_SHELL_TIMEOUT_SECONDS),
         mutating=True,
     )
@@ -104,7 +114,7 @@ class SandboxShellTool:
             raise ValueError("shell limits must be positive")
         self.spec = ToolSpec(
             "shell",
-            "Run an argv command in the injected network-disabled Agent sandbox.",
+            _shell_description(timeout_seconds),
             _shell_input_schema(timeout_seconds),
             mutating=True,
         )

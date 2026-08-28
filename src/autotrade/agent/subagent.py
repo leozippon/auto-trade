@@ -24,12 +24,12 @@ from datetime import UTC, datetime
 from typing import cast
 
 from autotrade.environment.llm import (
+    AGENT_MAX_OUTPUT_TOKENS,
     ChatMessage,
     LLMProxy,
     ToolCall,
     clamp_requested_max_tokens,
     context_request_fits,
-    context_window_tokens,
 )
 from autotrade.environment.llm.deepseek import OpenAICompatibleProxy
 from autotrade.environment.runtime import sanitize_for_log
@@ -55,13 +55,15 @@ from .compact import (
 
 SUBAGENT_MODES = frozenset({"fold", "meta"})
 SUBAGENT_ROLES = ("auditor", "developer", "general-purpose", "Explore")
-SUBAGENT_THINKING_LEVELS = ("off", "low", "medium", "high", "max")
+SUBAGENT_THINKING_LEVELS = ("off", "low", "medium", "xhigh")
+# Read-compatible aliases from older traces and prompts; on the wire they were
+# never distinct from xhigh.
+_LEGACY_THINKING_ALIASES = {"minimal": "low", "high": "xhigh", "max": "xhigh"}
 DEFAULT_SUBAGENT_MAX_CONCURRENT = 4
 DEFAULT_SUBAGENT_THINKING = "medium"
 SUBAGENT_DESCRIPTION_MAX_CHARS = 200
 SUBAGENT_TASK_ID_PREFIX = "agent_"
 _CALL_BUDGET_EXHAUSTED = "call budget exhausted"
-_NATIVE_WINDOW_FALLBACK = 262_144
 
 _FOLD_READ_TOOLS = frozenset({"glob", "grep", "read_file"})
 _FOLD_WRITE_TOOLS = frozenset(
@@ -149,7 +151,7 @@ AGENT_TOOL_DESCRIPTION = (
     "角色能力：developer/general-purpose 有 Sandbox shell（可跑 Python 读 PIT parquet、算 IC 表、做冒烟测试）并可写策略、模型与 skills；"
     "auditor/Explore 只能用 glob/grep/read_file 读文本与代码，不能执行任何命令——任何需要计算的任务用 general-purpose 或 developer；"
     "Meta 会话中全部角色只读。子代理只看到自己的角色提示和你的 task（inherit_context=true 时另带你的对话），"
-    "所以 task 要写全路径、约束和期望的返回格式。thinking：常规阅读 low/medium，审计与根因 high，关键策略实现 high/max。"
+    "所以 task 要写全路径、约束和期望的返回格式。thinking：常规阅读 low/medium，审计、根因与关键策略实现 xhigh。"
     "子代理不能嵌套、正式回测、结束会话、改 PRIOR 或自行验收；它的汇报描述意图而非结果，其写入须由你验收。"
     "resume=<task_id> 让一个已完成的子代理在自己的对话上继续新的 task（保留它读过的上下文，角色须相同）；"
     "仍在运行或未知的 task_id 会被拒绝。"
@@ -185,7 +187,7 @@ AGENT_TOOL_SPEC = ToolSpec(
             "thinking": {
                 "type": "string",
                 "enum": list(SUBAGENT_THINKING_LEVELS),
-                "description": "子代理思考强度；省略为 medium，不继承父会话。常规阅读 low/medium，审计与根因 high，关键实现 high/max；off 关闭扩展思考。",
+                "description": "子代理思考强度；省略为 medium，不继承父会话。常规阅读 low/medium，审计、根因与关键实现 xhigh（旧值 high/max 等同 xhigh）；off 关闭扩展思考。",
             },
             "inherit_context": {
                 "type": "boolean",
@@ -276,7 +278,7 @@ def normalize_subagent_thinking(value: object) -> str | None:
     text = value.strip().lower()
     if text in {"", "inherit", "parent"}:
         return DEFAULT_SUBAGENT_THINKING
-    text = {"minimal": "low", "xhigh": "high"}.get(text, text)
+    text = _LEGACY_THINKING_ALIASES.get(text, text)
     if text not in SUBAGENT_THINKING_LEVELS:
         raise ValueError(
             "agent.thinking must be one of: " + ", ".join(SUBAGENT_THINKING_LEVELS)
@@ -291,21 +293,15 @@ def llm_with_thinking(proxy: LLMProxy, thinking: str | None) -> LLMProxy:
         return proxy
     if thinking == "off":
         return cast(LLMProxy, proxy.with_thinking(enabled=False, reasoning_effort=None))
-    dialect = str(proxy.config.request_dialect or "")
-    effort = (
-        {"low": "low", "medium": "medium", "high": "xhigh", "max": "xhigh"}.get(
-            thinking, "xhigh"
-        )
-        if dialect == "vllm-qwen"
-        else thinking
-    )
-    return cast(LLMProxy, proxy.with_thinking(enabled=True, reasoning_effort=effort))
+    # low/medium/xhigh are native levels for every supported dialect.
+    return cast(LLMProxy, proxy.with_thinking(enabled=True, reasoning_effort=thinking))
 
 
 @dataclass(frozen=True)
 class SubAgentConfig:
     per_call_timeout_seconds: float | None = None
-    # None = native model window, clamped per call to remaining context.
+    # None = the shared ``AGENT_MAX_OUTPUT_TOKENS`` ceiling (same as the
+    # parent conversation), clamped per call to the remaining context.
     max_tokens: int | None = None
     # None = unlimited turns until the parent session deadline.
     max_rounds: int | None = None
@@ -669,8 +665,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
         messages: Sequence[ChatMessage],
         tools: Sequence[object],
     ) -> int:
-        window = context_window_tokens(llm)
-        requested = self.config.max_tokens or window or _NATIVE_WINDOW_FALLBACK
+        requested = self.config.max_tokens or AGENT_MAX_OUTPUT_TOKENS
         _fits, prompt_tokens, resolved_window = context_request_fits(
             llm,
             messages,

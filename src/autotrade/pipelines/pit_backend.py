@@ -518,9 +518,21 @@ class PITDailyEvaluationBackend:
         self.max_intraday_row_group_rows = int(max_intraday_row_group_rows)
         self._replay_frame_cache: _ReplayFrameCache = {}
 
-    def evaluate(self, request: EvaluationRequest) -> EvaluationResult:
+    def evaluate(
+        self, request: EvaluationRequest, *, max_days: int | None = None
+    ) -> EvaluationResult:
+        """Replay one revision over its slot.
+
+        ``max_days`` truncates the replay to the first N trading days of the
+        window AFTER the slot identity check, so an unofficial smoke run gets
+        the real as-of view, ABI and executor without being able to pass off a
+        short window as a full Validation (the caller decides what the result
+        is allowed to become; see ``SmokeBacktestTool``).
+        """
         started_at = utc_now_iso()
         timer = PhaseTimer()
+        if max_days is not None and max_days <= 0:
+            raise ValueError("max_days must be a positive integer")
         if request.mode not in {"valid", "frozen_test", "heldout"}:
             raise ValueError(f"unsupported PIT evaluation mode: {request.mode}")
         strategy_path = Path(request.revision.output_path) / "main.py"
@@ -560,6 +572,9 @@ class PITDailyEvaluationBackend:
                 (daily["trade_date"].map(_date_key) >= _date_key(request.start))
                 & (daily["trade_date"].map(_date_key) <= _date_key(request.end))
             ].copy()
+            if max_days is not None:
+                kept = sorted({_date_key(value) for value in daily["trade_date"]})[:max_days]
+                daily = daily[daily["trade_date"].map(_date_key).isin(set(kept))].copy()
         if daily.empty:
             raise ValueError(f"PIT daily replay is empty for {request.start}..{request.end}")
 
@@ -596,13 +611,19 @@ class PITDailyEvaluationBackend:
             if key in refreshed:
                 raise RuntimeError(f"Timeview refresh was requested twice for one daily inference: {key}")
             refreshed.add(key)
-            lock.unlock_directories()
+            # Sub-phases of data_view: the as-of build dominated replay wall on
+            # real runs, and "which of the three" is the whole diagnosis.
+            with timer.phase("asof_unlock"):
+                lock.unlock_directories()
             try:
                 if minute_source is not None:
-                    minute_source.append_visible(timeview, inference_at)
-                path, version = timeview.refresh(pd.Timestamp(inference_at))
+                    with timer.phase("minute_append"):
+                        minute_source.append_visible(timeview, inference_at)
+                with timer.phase("timeview_refresh"):
+                    path, version = timeview.refresh(pd.Timestamp(inference_at))
             finally:
-                lock.lock()
+                with timer.phase("asof_lock"):
+                    lock.lock()
             return StrategyDataView(str(snapshot_dir), path, version)
 
         config = StrategyExperimentConfig(
@@ -651,6 +672,14 @@ class PITDailyEvaluationBackend:
                     minute_source.max_loaded_partition_rows if minute_source is not None else 0
                 ),
                 "minute_total_rows": minute_source.total_rows if minute_source is not None else 0,
+                # The layout a strategy actually reads: every domain is a
+                # DIRECTORY of parquet parts under asof_dir, never a flat
+                # <domain>.parquet like the frozen decision snapshot.
+                "asof_domains": sorted(
+                    item.name for item in asof_dir.iterdir() if item.is_dir()
+                )
+                if asof_dir.is_dir()
+                else [],
             }
             with timer.phase("style_analysis"):
                 style = replay_style_analysis(
@@ -822,17 +851,62 @@ def _discard_ephemeral_asof(asof_dir: Path) -> None:
 
 
 class _AsOfReadOnlyView:
-    """Keep a trusted strategy's rolling view read-only between refreshes."""
+    """Keep a trusted strategy's rolling view read-only between refreshes.
+
+    The as-of tree is append-only for the length of a replay: Timeview publishes
+    each part under a fresh name and never rewrites a published one. So a file
+    this view has already set to 0444 stays correct for the rest of the run, and
+    re-chmod'ing it every day is pure overhead that grows with the tree.
+
+    That overhead was the dominant cost of the ``data_view`` phase: a full
+    ``rglob`` + sort + chmod of every path, twice per decision day, measured at
+    roughly 25 us per file per day. A quarter of minute parts and text shards
+    reaches hundreds of thousands of files, which is how a single day's as-of
+    build reached tens of seconds late in a replay. Discovery now walks with
+    ``os.walk`` (no sort) and only newly-appeared files are chmod'ed, so the
+    per-day cost tracks what actually landed instead of the whole history.
+    """
 
     def __init__(self, root: Path) -> None:
         self.root = root
+        self._locked_files: set[str] = set()
+        self._known_dirs: set[str] = set()
 
     def unlock_directories(self) -> None:
-        for path in [self.root, *(item for item in self.root.rglob("*") if item.is_dir())]:
-            path.chmod(0o755)
+        # Directories only: files stay read-only, and new parts land under a new
+        # name rather than overwriting one. After the first pass the known-dir
+        # set makes this a handful of chmods instead of a tree walk.
+        self._chmod_dirs(0o755)
 
     def lock(self) -> None:
-        chmod_tree(self.root, file_mode=0o444, dir_mode=0o555)
+        if not self.root.exists():
+            return
+        for directory, dirnames, filenames in os.walk(self.root):
+            base = Path(directory)
+            self._known_dirs.add(str(base))
+            for name in dirnames:
+                self._known_dirs.add(str(base / name))
+            for name in filenames:
+                path = base / name
+                key = str(path)
+                if key in self._locked_files:
+                    continue
+                self._locked_files.add(key)
+                try:
+                    path.chmod(0o444)
+                except OSError:
+                    # Same tolerant policy as chmod_tree: a path the host cannot
+                    # chmod must not crash a replay mid-flight.
+                    pass
+        self._chmod_dirs(0o555)
+
+    def _chmod_dirs(self, mode: int) -> None:
+        self._known_dirs.add(str(self.root))
+        for key in self._known_dirs:
+            try:
+                Path(key).chmod(mode)
+            except OSError:
+                pass
 
 
 _STASH_CONTRACT_SCHEMA_VERSION = 1

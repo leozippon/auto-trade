@@ -57,6 +57,19 @@ The strategy receives no Broker, Shell, writable state, experiment controls, pre
 
 `context.bars` is an evaluation-interval market surface, not the complete strategy input history. For a long daily lookback, use the PIT `daily` domain under `context.asof_dir`; it contains the frozen input history plus rows that have become visible by the current inference time. Read only confirmed columns and bound the strategy's date window after inspecting the current schema. Additional configured domains may use the same context-rooted pandas access.
 
+The two path strings have **different layouts**, and mixing them up is the single most common way a backtest dies on its first decision:
+
+| Path | Layout | Read it as |
+| --- | --- | --- |
+| `context.asof_dir` | one **directory of parquet parts per domain**: `asof_dir/daily/part_0000.parquet`, `part_0001.parquet`, … | `pd.read_parquet(context.asof_dir + "/daily")` — pass the **directory**, pandas concatenates the parts |
+| `context.snapshot_dir` | one **flat file per domain**: `snapshot_dir/daily.parquet` | `pd.read_parquet(context.snapshot_dir + "/daily.parquet")` |
+
+`context.asof_dir + "/daily.parquet"` does not exist and raises `FileNotFoundError`. `modification_check` rejects that spelling before a backtest starts. The same applies to every as-of domain (`daily`, `events`, `macro`, `fundamentals`, `intraday_1min`, `auction`, `text_index`, `universe`); only text bodies under `asof_dir/text_library/` are individual `<name>.parquet` shards.
+
+**Never fall back from `asof_dir` to `snapshot_dir` when an as-of read fails.** The frozen snapshot stops at the decision time, so reading it during the replay silently substitutes stale data for the rolling view — a point-in-time violation, not a recovery. Fix the read instead, and let a genuine failure fail.
+
+Run `smoke_backtest` before `daily_backtest`: it replays the current `output/` over the first few trading days on the real path — real as-of layout, real `AccountSnapshot`, same executor and per-decision timeout — and returns the exact exception text plus the as-of domain directory names. A hand-written shell script that assigns `context.asof_dir = "/mnt/snapshot"` or fakes an account object proves nothing about the replay.
+
 The static contract accepts `pandas.read_parquet` only when its first argument is directly rooted in one of those two path strings. For example:
 
 ```python

@@ -60,6 +60,13 @@ _VLLM_PROFILE = ModelProfile(
     max_output_tokens=262_144,
 )
 
+# Completion-token safety ceiling for the Fold/Meta parent conversation and
+# its sub-agents (thinking tokens included). Observed calls pool around 1.4k
+# tokens with p90 ≈ 4k; only a runaway outlier class (20k+) is cut. Do not
+# lower it further: a truncated thinking block loses the whole answer.
+# compact, NL and analysis keep their own budgets.
+AGENT_MAX_OUTPUT_TOKENS = 12_000
+
 
 def _qwen_reasoning_effort(value: str | None) -> str:
     """Map the shared UI scale onto the gateway's low/medium/xhigh contract."""
@@ -193,6 +200,7 @@ def build_model_gateway(
 
 
 __all__ = [
+    "AGENT_MAX_OUTPUT_TOKENS",
     "LEGACY_LOCAL_QWEN_MODEL",
     "LOCAL_QWEN_MODEL",
     "MODEL_CHOICES",
