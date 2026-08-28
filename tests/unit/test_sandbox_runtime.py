@@ -1546,34 +1546,24 @@ def test_a_cpu_only_sandbox_never_consults_the_gpu_selector(tmp_path: Path):
     assert "--gpus" not in run.call_args_list[0][0][0]
 
 
-def test_collect_artifacts_uses_official_siblings_not_workspace_copies(tmp_path: Path):
+def test_layout_has_no_decoy_output_siblings_and_collects_the_workspace(tmp_path: Path):
+    """The formal working copies live inside the workspace; the layout must not
+    create empty ``agent/output`` / ``agent/models`` siblings that documents,
+    tools or a model could mistake for the real ones."""
     local = LocalSandbox(tmp_path / "session")
     paths = local.prepare_layout()
+    assert not (paths.agent / "output").exists()
+    assert not (paths.agent / "models").exists()
+    assert not hasattr(paths, "agent_output") and not hasattr(paths, "writable_root_map")
     work_output = paths.workspace / "output"
     work_models = paths.workspace / "models"
     work_output.mkdir(parents=True, exist_ok=True)
     work_models.mkdir(parents=True, exist_ok=True)
-    (work_output / "main.py").write_text("stray workspace\n", encoding="utf-8")
+    (work_output / "main.py").write_text("working copy\n", encoding="utf-8")
     (work_models / "weights.json").write_text('{"src": "workspace"}\n', encoding="utf-8")
-    (paths.agent_output / "main.py").write_text("official\n", encoding="utf-8")
-    (paths.model_artifacts / "weights.json").write_text(
-        '{"src": "official"}\n', encoding="utf-8"
-    )
     dest = local.collect_artifacts(tmp_path / "collected")
-    assert (dest / "output" / "main.py").read_text(encoding="utf-8") == "official\n"
-    assert (dest / "models" / "weights.json").read_text(encoding="utf-8") == (
-        '{"src": "official"}\n'
+    assert (dest / "workspace" / "output" / "main.py").read_text(encoding="utf-8") == "working copy\n"
+    assert (dest / "workspace" / "models" / "weights.json").read_text(encoding="utf-8") == (
+        '{"src": "workspace"}\n'
     )
-    assert (dest / "workspace" / "output" / "main.py").read_text(
-        encoding="utf-8"
-    ) == "stray workspace\n"
-
-
-def test_collect_artifacts_collects_official_output_and_models(
-    tmp_path: Path,
-):
-    local = LocalSandbox(tmp_path / "session")
-    paths = local.prepare_layout()
-    (paths.agent_output / "main.py").write_text("sibling\n", encoding="utf-8")
-    dest = local.collect_artifacts(tmp_path / "collected")
-    assert (dest / "output" / "main.py").read_text(encoding="utf-8") == "sibling\n"
+    assert not (dest / "output").exists() and not (dest / "models").exists()

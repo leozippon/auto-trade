@@ -4049,6 +4049,7 @@ function liveTracePanel(detail, session) {
         eof: streamDone,
         previous: lastBlocks,
         detail,
+        runRef: runId,
       });
       if (auto.checked) {
         const scroller = box.querySelector(".trace-box-scroll") || box;
@@ -4169,6 +4170,7 @@ function traceReplayNode(experimentId, runId, detail) {
         truncated: Boolean(data.history_truncated),
         eof: Boolean(data.eof),
         detail,
+        runRef: runId,
       });
       loadedBlocks = blocks.length;
       // D2: the server rejects a window above its own cap with a 422.
@@ -4325,9 +4327,8 @@ function subagentLastToolLabel(block) {
   return `最近工具 ${name}${status ? ` · ${status}` : ""}`;
 }
 
-function runningSubagentChip(block, box) {
+function runningSubagentChip(block, detail, runRef) {
   const role = String(block.role || "子代理");
-  const taskId = String(block.task_id || "");
   const status = String(block.status || "running");
   const statusLabel = SUBAGENT_STATUS_LABELS.get(status) || "进行中";
   const task = String(block.description || "");
@@ -4336,12 +4337,8 @@ function runningSubagentChip(block, box) {
   const chip = el("button", {
     type: "button",
     class: "trace-subagent-chip",
-    onclick: () => {
-      const target = taskId
-        ? box.querySelector(`[data-task-id="${CSS.escape(taskId)}"]`)
-        : null;
-      if (target) target.scrollIntoView({ block: "nearest", behavior: "smooth" });
-    },
+    title: "查看该子代理的详细 Trace",
+    onclick: () => openSubagentTrace(detail, runRef, block),
   });
   chip.append(
     el(
@@ -4364,11 +4361,116 @@ function runningSubagentChip(block, box) {
   return chip;
 }
 
+/* The child's own Trace, opened from its card or from the running dock chip.
+   It is an overlay: the parent trace, its scroll position and its open folds
+   stay exactly as they were, and closing returns to them. */
+async function openSubagentTrace(detail, runRef, block) {
+  const taskId = String((block && block.task_id) || "");
+  if (!taskId || !detail || !detail.experiment_id) return;
+  const query = runRef ? `?run_id=${encodeURIComponent(runRef)}` : "";
+  const head = el("div", {}, el("div", { class: "loading" }, "加载子代理 Trace…"));
+  // One box for the lifetime of the drawer, so a refresh keeps the folds the
+  // reader opened instead of collapsing them every five seconds.
+  const box = el("div", { class: "trace-box subagent-trace-box" });
+  const body = el("div", { class: "subagent-trace" }, head, box);
+  showModal(
+    `🧩 子代理 Trace · ${String(block.role || "子代理")}`,
+    body,
+    [el("button", { class: "btn", onclick: closeModal }, "关闭")],
+    "subagent-modal",
+  );
+  let previousBlocks = "";
+  const load = async () => {
+    if (!body.isConnected) return false;
+    let payload;
+    try {
+      payload = await api(
+        `/api/experiments/${encodeURIComponent(detail.experiment_id)}/trace/subagents/${encodeURIComponent(taskId)}${query}`,
+      );
+    } catch (error) {
+      head.replaceChildren(
+        el("div", { class: "empty" }, `加载失败：${error.message}`),
+      );
+      return false;
+    }
+    head.replaceChildren(subagentTraceHead(payload, detail));
+    previousBlocks = renderTraceBlocks(box, payload.blocks || [], {
+      detail,
+      previous: previousBlocks,
+    });
+    if (!(payload.blocks || []).length)
+      box.replaceChildren(
+        el("div", { class: "empty" }, "该子代理尚未产生可展示的轮次。"),
+      );
+    return isRunningSubagent(payload.header || block);
+  };
+  if (!(await load())) return;
+  // Follow a child that is still working: the clock ticks every second, the
+  // records refresh every five, and both stop when it ends or the drawer goes.
+  const clock = setInterval(() => {
+    if (body.isConnected) tickElapsedClocks(body);
+    else clearInterval(clock);
+  }, 1000);
+  const poll = setInterval(async () => {
+    if (!body.isConnected) {
+      clearInterval(poll);
+      return;
+    }
+    if (!(await load())) {
+      clearInterval(poll);
+      clearInterval(clock);
+    }
+  }, 5000);
+  liveTimers.push(clock, poll);
+}
+
+function subagentTraceHead(payload, detail) {
+  const header = payload.header || {};
+  const status = String(header.status || "started");
+  const statusLabel = SUBAGENT_STATUS_LABELS.get(status) || status;
+  const progress = subagentProgressParts(header);
+  const wrap = el("div", {});
+  wrap.append(
+    el(
+      "div",
+      { class: "subagent-trace-head" },
+      el(
+        "span",
+        { class: `type subagent ${status}` },
+        `🧩 ${String(header.role || "子代理")} · ${statusLabel}`,
+      ),
+      header.description ? el("span", {}, String(header.description)) : null,
+      subagentHeadMetaNode(header, detail),
+    ),
+  );
+  if (progress.length)
+    wrap.append(
+      el(
+        "div",
+        { class: "hint", title: subagentUsageTitle(header) || null },
+        progress.join(" · "),
+      ),
+    );
+  if (header.error)
+    wrap.append(el("div", { class: "hint warn" }, `错误：${header.error}`));
+  if (payload.reduced)
+    wrap.append(
+      el(
+        "div",
+        { class: "hint warn" },
+        "Meta 会话的子代理记录按设计只保留形状：轮次、工具、用量与字符数可见，模型正文与工具结果正文不写入 Trace。",
+      ),
+    );
+  if (payload.truncated_window)
+    wrap.append(el("div", { class: "hint" }, "仅显示当前读取窗口内的记录。"));
+  return wrap;
+}
+
 function runningSubagentBlocks(blocks) {
   return (blocks || []).filter(isRunningSubagent);
 }
 
-function renderTraceBlocks(box, blocks, { truncated, eof, previous, detail } = {}) {
+function renderTraceBlocks(box, blocks, { truncated, eof, previous, detail, runRef } = {}) {
   const serialized = JSON.stringify({
     blocks: blocks || [],
     truncated: Boolean(truncated),
@@ -4392,7 +4494,7 @@ function renderTraceBlocks(box, blocks, { truncated, eof, previous, detail } = {
   }
   const scroll = el("div", { class: "trace-box-scroll" });
   const appendNode = (host, block, index) => {
-    const node = traceBlockNode(block, index, detail);
+    const node = traceBlockNode(block, index, detail, runRef);
     for (const details of node.querySelectorAll("details[data-key]")) {
       if (open.has(details.dataset.key)) details.open = true;
     }
@@ -4404,7 +4506,9 @@ function renderTraceBlocks(box, blocks, { truncated, eof, previous, detail } = {
   const running = runningSubagentBlocks(blocks);
   if (running.length) {
     const dock = el("div", { class: "trace-subagent-dock" });
-    running.forEach((block) => dock.append(runningSubagentChip(block, scroll)));
+    running.forEach((block) =>
+      dock.append(runningSubagentChip(block, detail, runRef)),
+    );
     fragment.append(dock);
   }
   box.replaceChildren(fragment);
@@ -4412,7 +4516,7 @@ function renderTraceBlocks(box, blocks, { truncated, eof, previous, detail } = {
   return serialized;
 }
 
-function traceBlockNode(block, index, detail) {
+function traceBlockNode(block, index, detail, runRef) {
   const kind = String((block && block.kind) || "");
   const node = el("div", { class: `trace-block ${kind}` });
   if (kind === "subagent" && block && block.task_id)
@@ -4420,9 +4524,12 @@ function traceBlockNode(block, index, detail) {
   try {
     if (kind === "agent_output") renderAgentOutputBlock(node, block, detail);
     else if (kind === "tool_group") renderToolGroupBlock(node, block, index);
-    else if (kind === "subagent") renderSubagentBlock(node, block, detail);
+    else if (kind === "subagent")
+      renderSubagentBlock(node, block, detail, runRef);
     else if (kind === "user") renderUserBlock(node, block);
     else if (kind === "raw") renderRawBlock(node, block);
+    else if (kind === "marker") renderMarkerBlock(node, block);
+    else if (kind === "summary") renderSummaryBlock(node, block);
     else node.append(el("div", { class: "hint" }, "未知展示块"));
   } catch {
     node.append(el("div", { class: "hint" }, "该展示块无法渲染"));
@@ -4439,9 +4546,10 @@ function parentReasoningLabel(detail) {
 function renderAgentOutputBlock(node, block, detail) {
   const effort = parentReasoningLabel(detail);
   const model = String((block && block.model) || "").trim();
-  const title = ["Agent", model, effort ? `推理 ${effort}` : ""]
-    .filter(Boolean)
-    .join(" · ");
+  const round = Number(block.round) || 0;
+  const title = round
+    ? [`第 ${round} 轮`, model].filter(Boolean).join(" · ")
+    : ["Agent", model, effort ? `推理 ${effort}` : ""].filter(Boolean).join(" · ");
   node.append(
     el(
       "div",
@@ -4452,6 +4560,11 @@ function renderAgentOutputBlock(node, block, detail) {
   );
   const text = String(block.text || "");
   if (text) node.append(el("div", { class: "llm-content" }, text));
+  const contentChars = Number(block.content_chars) || 0;
+  if (!text && contentChars)
+    node.append(
+      el("div", { class: "hint" }, `模型正文未写入 Trace（${contentChars} 字符）`),
+    );
   const reasoningChars = Number(block.reasoning_chars) || 0;
   if (reasoningChars) {
     node.append(
@@ -4468,7 +4581,10 @@ function renderToolGroupBlock(node, block, index) {
   const key = `tools:${index}`;
   const details = lazyDetails(
     toolGroupTitle(block),
-    () => toolRowsNode(block.tools),
+    () =>
+      Array.isArray(block.calls) && block.calls.length
+        ? toolCallsNode(block.calls)
+        : toolRowsNode(block.tools),
     key,
   );
   node.append(
@@ -4482,27 +4598,53 @@ function renderToolGroupBlock(node, block, index) {
   );
 }
 
-/* The one place sub-agent launch metadata is spelled out. `thinking:
-   "inherit"` means the child took the parent's effort, so fall back to it. */
+/* `thinking: "inherit"` means the child ran at the parent's effort: show that
+   effective level and say it was inherited, never a bare "inherit". */
+function subagentThinkingLabel(block, detail) {
+  const own = String((block && block.thinking) || "").trim();
+  if (own && own !== "inherit") return own;
+  const parent = parentReasoningLabel(detail);
+  return parent ? `${parent}（继承）` : "继承父会话";
+}
+
+function subagentContextLabel(block) {
+  if (block && block.resumed_from) return `续用 ${block.resumed_from}`;
+  if (block && block.inherit_context === true) return "继承上下文";
+  if (block && block.inherit_context === false) return "独立上下文";
+  return "";
+}
+
+/* The one place sub-agent launch metadata is spelled out:
+   `model · 推理 xhigh · 独立上下文`. */
 function subagentMetaLine(block, detail) {
-  const thinking =
-    block.thinking && block.thinking !== "inherit"
-      ? block.thinking
-      : parentReasoningLabel(detail);
+  const thinking = subagentThinkingLabel(block, detail);
   return [
     block.model ? String(block.model) : "",
     thinking ? `推理 ${thinking}` : "",
-    block.inherit_context === true
-      ? "继承上下文"
-      : block.inherit_context === false
-        ? "独立上下文"
-        : "",
+    subagentContextLabel(block),
   ]
     .filter(Boolean)
     .join(" · ");
 }
 
-function renderSubagentBlock(node, block, detail) {
+/* `model · 推理 x · 独立上下文 ⏱ 5:21 · 08-28 15:13:20` — the clock is a live
+   node, so the separators around it are explicit text nodes rather than a
+   flex gap that a wrapped line drops. */
+function subagentHeadMetaNode(block, detail) {
+  const line = el("span", { class: "hint subagent-meta" });
+  const meta = subagentMetaLine(block, detail);
+  if (meta) line.append(meta);
+  const clock = subagentClockNode(block, "subagent-clock");
+  if (clock) {
+    if (line.childNodes.length) line.append(" ");
+    line.append(clock);
+  }
+  const launched = block.ts ? fmtTsTime(block.ts) : "";
+  if (launched) line.append(line.childNodes.length ? ` · ${launched}` : launched);
+  return line.childNodes.length ? line : null;
+}
+
+function renderSubagentBlock(node, block, detail, runRef) {
   const status = String(block.status || block.phase || "started");
   const phase = String(block.phase || "");
   const statusLabel =
@@ -4510,23 +4652,25 @@ function renderSubagentBlock(node, block, detail) {
       ? SUBAGENT_STATUS_LABELS.get(status) || status
       : SUBAGENT_STATUS_LABELS.get(status) || "进行中";
   const role = String(block.role || "子代理");
-  const meta = subagentMetaLine(block, detail);
   const key = `sub:${block.task_id || ""}`;
   const progress = subagentProgressParts(block);
   const lastTool = subagentLastToolLabel(block);
   node.append(
     el(
       "div",
-      { class: "head" },
+      {
+        class: "head subagent-open",
+        title: "查看该子代理的详细 Trace",
+        onclick: () => openSubagentTrace(detail, runRef, block),
+      },
       el(
         "span",
         { class: `type subagent ${status}` },
         `🧩 ${role} · ${statusLabel}`,
       ),
       block.description ? el("span", {}, String(block.description)) : null,
-      meta ? el("span", { class: "hint" }, meta) : null,
-      subagentClockNode(block),
-      block.ts ? el("span", {}, fmtTsTime(block.ts)) : null,
+      subagentHeadMetaNode(block, detail),
+      el("span", { class: "subagent-open-hint" }, "详细 Trace ↗"),
     ),
   );
   if (progress.length || lastTool)
@@ -4553,6 +4697,67 @@ function renderRawBlock(node, block) {
   );
   const text = String(block.text || "");
   if (text) node.append(el("div", { class: "llm-content" }, text));
+}
+
+/* A wrap-up prompt or an output-truncation notice recorded for the child. */
+function renderMarkerBlock(node, block) {
+  node.append(
+    el(
+      "div",
+      { class: "head" },
+      el("span", { class: "type marker" }, String(block.label || "标记")),
+      block.ts ? el("span", {}, fmtTsTime(block.ts)) : null,
+    ),
+  );
+  const text = String(block.text || "");
+  if (text) node.append(el("div", { class: "hint" }, text));
+}
+
+function renderSummaryBlock(node, block) {
+  const status = String(block.status || "completed");
+  node.append(
+    el(
+      "div",
+      { class: "head" },
+      el("span", { class: `type subagent ${status}` }, "最终汇报"),
+      block.ts ? el("span", {}, fmtTsTime(block.ts)) : null,
+    ),
+  );
+  const text = String(block.text || "");
+  const chars = Number(block.text_chars) || 0;
+  node.append(
+    text
+      ? el("div", { class: "llm-content" }, text)
+      : el("div", { class: "hint" }, `汇报正文未写入 Trace（${chars} 字符）`),
+  );
+}
+
+function toolCallsNode(calls) {
+  const list = el("div", { class: "trace-tool-list" });
+  for (const call of calls || []) {
+    const status = TOOL_STATUS_LABELS.get(String(call.status || "")) || "";
+    const round = Number(call.round) || 0;
+    const row = el(
+      "div",
+      { class: "trace-tool-call" },
+      el(
+        "div",
+        { class: "tool-brief" },
+        [String(call.name || "工具"), round ? `第 ${round} 轮` : "", status]
+          .filter(Boolean)
+          .join(" · "),
+      ),
+    );
+    for (const [key, value] of Object.entries(call.arguments || {}))
+      row.append(el("div", { class: "tool-arg" }, `${key}: ${value}`));
+    if (call.error)
+      row.append(el("div", { class: "hint warn" }, String(call.error)));
+    if (call.result)
+      row.append(el("div", { class: "tool-result" }, String(call.result)));
+    list.append(row);
+  }
+  if (!list.childNodes.length) list.append(el("div", { class: "hint" }, "无工具"));
+  return list;
 }
 
 function renderUserBlock(node, block) {

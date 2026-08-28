@@ -967,7 +967,7 @@ def test_compactor_keeps_markdown_summary_and_files_trail_across_compactions():
     assert first is not None and first.event["status"] == "ok"
     envelope = json.loads(first.messages[1].content or "{}")
     assert envelope["summary"].startswith("## 目标\nfirst")
-    assert envelope["files"] == {"read": ["snapshot:a.parquet"], "modified": ["output/main.py"]}
+    assert envelope["files"] == {"read": ["[snapshot] a.parquet"], "modified": ["output/main.py"]}
     # The compactor request carried the previous summary as Markdown, not JSON.
     second_input = list(first.messages) + [
         ChatMessage("assistant", None, (ToolCall("r2", "grep", {"root": "workspace", "path": "inputs"}),)),
@@ -980,7 +980,7 @@ def test_compactor_keeps_markdown_summary_and_files_trail_across_compactions():
     request = llm.calls[1]["messages"][1].content
     assert "## 上一份摘要" in request and "## 目标\nfirst" in request
     envelope = json.loads(second.messages[1].content or "{}")
-    assert envelope["files"]["read"] == ["snapshot:a.parquet", "workspace:inputs"]
+    assert envelope["files"]["read"] == ["[snapshot] a.parquet", "[workspace] inputs"]
     assert len(second.messages) == 3
     # An empty reply is one failed attempt: the history is kept untouched.
     third = compactor.compact(list(second.messages) + [ChatMessage("user", f"m{i}") for i in range(4)])

@@ -155,3 +155,14 @@ class FinishMetaToolTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class IdentifierDateTest(unittest.TestCase):
+    def test_experiment_id_style_identifiers_are_not_dates(self) -> None:
+        from autotrade.environment.tools.prior_policy import calendar_policy_violation
+
+        self.assertEqual(calendar_policy_violation("# PRIOR — factor_cs_20260901"), "")
+        self.assertEqual(calendar_policy_violation("实验 momentum_20250115_v2 的方向"), "")
+        self.assertIn("calendar date", calendar_policy_violation("样本截至20210930 为止"))
+        self.assertIn("calendar date", calendar_policy_violation("从 20210930 开始"))
+        self.assertIn("calendar date", calendar_policy_violation("2021 年 8 月"))

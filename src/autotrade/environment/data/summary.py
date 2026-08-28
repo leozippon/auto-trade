@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 from typing import Mapping
 
@@ -12,7 +11,7 @@ from autotrade.environment.data.units import (
     build_unit_reference,
     snapshot_column_map,
 )
-from autotrade.environment.runtime import utc_now_iso
+from autotrade.environment.runtime import HOST_PATH_RE, utc_now_iso
 
 LARGE_TABLE_ROW_THRESHOLD = 1_000_000
 LARGE_TABLE_SIZE_THRESHOLD_BYTES = 100 * 1024 * 1024
@@ -77,7 +76,6 @@ LARGE_TABLE_GUIDANCE = (
     "不要对未知规模大表直接 pd.read_parquet() 全量读取；需要 pandas 时先限制列、过滤日期或抽样。",
 )
 PRIMARY_VIEW_NAME = "snapshot"
-HOST_PATH_RE = re.compile(r"(?<![\w.:\-/])/(?!mnt/)(?:[^\s'\";|,)]*)")
 
 
 def write_agent_data_summary(

@@ -244,5 +244,6 @@ def test_host_mapping_is_not_a_sandbox_path(tmp_path: Path) -> None:
     store = AgentRefStore(experiment)
     paths = SandboxPaths(tmp_path / "sandbox")
 
-    assert store.host_dir not in paths.writable_root_map.values()
-    assert all(".host" not in str(path) for path in paths.writable_root_map.values())
+    writable = (paths.workspace, paths.workspace / "output", paths.workspace / "models")
+    assert store.host_dir not in writable
+    assert all(".host" not in str(path) for path in writable)

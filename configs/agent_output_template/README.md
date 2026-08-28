@@ -9,9 +9,9 @@ def generate_orders(context):
 
 The strategy returns orders; it never receives or calls the Broker. The Environment validates the complete return value, queues accepted orders, and applies market timing, cash, positions, T+1, trading constraints, costs, and account updates.
 
-The official working copy is `/mnt/agent/output`. The loader only loads `main.py`; user-module and helper imports are unsupported. Do not write caches, logs, data dumps, model weights, notebooks, hidden files, or secrets here.
+The official working copy is `/mnt/agent/workspace/output` (search root `output`); there is no sibling `/mnt/agent/output`. The loader only loads `main.py`; user-module and helper imports are unsupported. Do not write caches, logs, data dumps, model weights, notebooks, hidden files, or secrets here.
 
-Persisted model parameters belong in `/mnt/agent/models`, not in `output/`. It may contain subdirectories for reproducible model parameters such as `.json`, `.joblib`, `.pkl`, `.npy`, `.npz`, `.pt`, `.pth`, `.onnx`, `.safetensors`, `.cbm`, `.ubj`, or `.model` files. Temporary training files stay in `/mnt/agent/workspace/`.
+Persisted model parameters belong in `/mnt/agent/workspace/models` (search root `models`), not in `output/`. It may contain subdirectories for reproducible model parameters such as `.json`, `.joblib`, `.pkl`, `.npy`, `.npz`, `.pt`, `.pth`, `.onnx`, `.safetensors`, `.cbm`, `.ubj`, or `.model` files. Temporary training files stay elsewhere in `/mnt/agent/workspace/` (never under `output/` or `models/`).
 
 ## Data units are part of the strategy contract
 

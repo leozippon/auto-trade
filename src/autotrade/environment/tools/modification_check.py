@@ -133,7 +133,7 @@ def _reject_flat_asof_reads(files: list[Path], root: Path) -> None:
 
 def _formal_files(root: Path) -> list[Path]:
     if not root.is_dir():
-        raise ToolError(f"missing formal output directory: {root}")
+        raise ToolError(f"missing formal output directory: {root.name}/")
     files: list[Path] = []
     for path in sorted(root.rglob("*")):
         relative = path.relative_to(root)

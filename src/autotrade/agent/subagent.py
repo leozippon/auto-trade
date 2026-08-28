@@ -69,6 +69,10 @@ DEFAULT_SUBAGENT_MAX_ROUNDS = 24
 SUBAGENT_GRACE_ROUNDS = 2
 DEFAULT_SUBAGENT_THINKING = "medium"
 SUBAGENT_DESCRIPTION_MAX_CHARS = 200
+# Bounded argument echo for the child's Trace: a write/edit call can carry a
+# whole file, and the trace writer replaces any event above its per-event cap
+# with a stub that loses ``task_id`` — the console would then lose the call.
+TRACE_ARGUMENT_MAX_CHARS = 2_000
 SUBAGENT_TASK_ID_PREFIX = "agent_"
 _CALL_BUDGET_EXHAUSTED = "call budget exhausted"
 # Appended to a child's summary when its reply hit the output ceiling, so the
@@ -644,7 +648,8 @@ class SubAgentEngine(SessionTimeBudgetAware):
                             "role": role,
                             "round": rounds,
                             "tool": call.name,
-                            "result": record,
+                            "arguments": _traced_arguments(call.arguments),
+                            "result": sanitize_for_log(record),
                             "parent_call_id": parent_call_id,
                         },
                     )
@@ -856,6 +861,26 @@ def _copy_chat_message(message: ChatMessage) -> ChatMessage:
         tool_call_id=message.tool_call_id,
         reasoning_content=message.reasoning_content,
     )
+
+
+def _traced_arguments(arguments: object) -> object:
+    """Sanitized, length-bounded arguments for the Trace record.
+
+    Mirrors the parent ``tool_call`` echo; only the recorded copy is clipped,
+    the tool itself still receives the full arguments.
+    """
+
+    return _clip_traced(sanitize_for_log(arguments))
+
+
+def _clip_traced(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {str(key): _clip_traced(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_clip_traced(item) for item in value]
+    if isinstance(value, str) and len(value) > TRACE_ARGUMENT_MAX_CHARS:
+        return f"{value[: TRACE_ARGUMENT_MAX_CHARS - 1]}…"
+    return value
 
 
 def _add_usage(total: dict[str, int], usage: object) -> None:

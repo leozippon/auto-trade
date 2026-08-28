@@ -3958,7 +3958,7 @@ def test_public_worker_log_is_repo_relative_and_never_a_host_path(tmp_path: Path
     ``worker_log`` is written into hitl/status.json and returned by the create
     and restart endpoints, both of which the console projects.
     """
-    from autotrade.webui.manager import WORKER_LOG_DIR, worker_log_ref
+    from autotrade.webui.registry import WORKER_LOG_DIR, worker_log_ref
 
     directory = tmp_path / "experiments" / "demo"
     AgentRefStore(directory)
@@ -3988,3 +3988,26 @@ def test_public_worker_log_is_repo_relative_and_never_a_host_path(tmp_path: Path
         isinstance(value, str) and Path(value).is_absolute()
         for value in public.values()
     )
+
+    # The launch write is transient: the worker replaces status.json with its
+    # own record, so a running experiment must still carry the reference.
+    from autotrade.webui.registry import experiment_state, summarize_experiment
+
+    (hitl / "status.json").write_text(
+        json.dumps(
+            {"schema_version": 1, "state": "running_session", "run_id": "run_001"}
+        ),
+        encoding="utf-8",
+    )
+    assert "worker_log" not in experiment_state(directory)
+    log_path = tmp_path / relative
+    log_path.parent.mkdir(parents=True)
+    log_path.write_text("boom\n", encoding="utf-8")
+    running = experiment_state(directory)
+    # A recorded running state whose pid is gone reads as interrupted — the
+    # case where the log is the only explanation left.
+    assert running["state"] == "interrupted"
+    assert running["worker_log"] == relative
+    assert "worker_log" not in running["status"]
+    listed = summarize_experiment(directory)
+    assert listed["worker_log"] == relative

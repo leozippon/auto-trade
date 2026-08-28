@@ -17,10 +17,12 @@ _COUNT_UNITS = "只家个支亿万元点名股条款行列页倍"
 
 # A year welded to date syntax (年 / -MM / .MM / Qn / 季度), an 8-digit YYYYMMDD,
 # or QnYYYY — a calendar date regardless of which year, so it stays correct when
-# the visible fold moves to another year. Bare 4-digit numbers are NOT matched.
+# the visible fold moves to another year. Bare 4-digit numbers are NOT matched,
+# and an 8-digit run inside an ASCII identifier (``factor_cs_20260901``, the
+# experiment id pattern) is a name, not a date; ``截至20210930`` still is one.
 _DATE_EXPR = re.compile(
     r"(?:19|20)\d{2}\s*(?:年|[/.\-]\s*\d{1,2}|[Qq][1-4]|\s*[一二三四]\s*季度)"
-    r"|(?:19|20)\d{6}"
+    r"|(?<![A-Za-z0-9_])(?:19|20)\d{6}(?![A-Za-z0-9_])"
     r"|[Qq][1-4]\s*(?:19|20)\d{2}"
 )
 

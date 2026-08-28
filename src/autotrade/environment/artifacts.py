@@ -336,17 +336,6 @@ def restore_frozen_artifact_trees(
         _assert_readonly_tree(live_models)
 
 
-def make_formal_artifacts_readonly(paths) -> None:
-    """Lock the strategy and model artifacts for formal validation/freeze."""
-    chmod_tree(paths.agent_output, file_mode=0o444, dir_mode=0o555)
-    chmod_tree(paths.model_artifacts, file_mode=0o444, dir_mode=0o555)
-
-
-def restore_formal_artifacts_writable(paths) -> None:
-    """Unlock formal artifacts while retaining immutable template files."""
-    restore_working_artifacts_writable(paths.agent_output, paths.model_artifacts)
-
-
 def restore_working_artifacts_writable(
     output_root: str | Path,
     models_root: str | Path | None = None,

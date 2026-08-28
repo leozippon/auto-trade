@@ -27,6 +27,7 @@ import os
 import selectors
 import subprocess
 import time
+import uuid
 from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
 
@@ -61,6 +62,10 @@ SEARCH_ROOTS = (
     "steps",
 )
 GREP_OUTPUT_MODES = ("content", "files", "count")
+# Read-only mounts populated before the session starts: offered only when
+# non-empty (a Meta session mounts no snapshot). ``artifacts``/``results``/
+# ``steps`` fill during the session and are offered whenever they exist.
+_MOUNTED_ROOTS = frozenset({"snapshot", "train", "valid", "parent_output", "parent_models"})
 # Roots that live outside the writable workspace tree; resolved from the
 # sandbox layout when one is available.
 _LAYOUT_ROOTS = {
@@ -98,12 +103,25 @@ class SearchRoots:
                 if base is not None:
                     roots[name] = Path(base)
         self._roots = {name: roots[name] for name in SEARCH_ROOTS if name in roots}
-        self.log_root = Path(getattr(paths, "logs", workspace.root / "logs"))
+        # Oversized results spill under the artifacts logs (or the workspace
+        # when there is no layout) and are referenced back through that root.
+        if paths is not None and getattr(paths, "logs", None) is not None:
+            self._spill_root, self._spill_base = "artifacts", Path(paths.artifacts)
+            self.log_root = Path(paths.logs)
+        else:
+            self._spill_root, self._spill_base = "workspace", workspace.root
+            self.log_root = workspace.root / "logs"
 
     @property
     def names(self) -> tuple[str, ...]:
-        """Root names offered to the Agent: allowlisted AND present on disk."""
-        available = tuple(name for name, base in self._roots.items() if base.is_dir())
+        """Root names offered to the Agent: allowlisted, present on disk and,
+        for the mounted read-only roots, non-empty (a Meta session mounts no
+        snapshot, so an empty ``snapshot`` root is not offered)."""
+        available = tuple(
+            name
+            for name, base in self._roots.items()
+            if base.is_dir() and (name not in _MOUNTED_ROOTS or _has_entries(base))
+        )
         return available or ("workspace",)
 
     def base(self, root: str) -> Path:
@@ -144,21 +162,35 @@ class SearchRoots:
             if candidate.exists():
                 return candidate, stripped
         raise ToolError(
-            f"search path does not exist: {root}:{path}",
+            f"search path does not exist under root {root!r}: {path!r}",
             error_type="not_found",
-            retry_hint=f"path is relative to root {root!r}; do not repeat the root name in path",
+            retry_hint=(
+                f"path is relative to root {root!r}; do not repeat the root name and do not "
+                f'use a colon, e.g. {{"root": "{root}", "path": "<relative/file>"}}'
+            ),
         )
 
     def store_tool_result(self, *, tool: str, kind: str, content: str) -> dict[str, object]:
-        """Persist an oversized tool result outside the model context budget."""
-        result_dir = self.log_root / "tool_results" / f"{tool}_{kind}_{os.getpid()}_{time.monotonic_ns()}"
+        """Persist an oversized tool result outside the model context budget.
+
+        Returns a reference the Agent can read back through the search tools
+        (``result_root`` + ``result_ref``); no host path and no host PID."""
+        result_dir = self.log_root / "tool_results" / f"{tool}_{kind}_{uuid.uuid4().hex[:12]}"
         try:
             result_dir.mkdir(parents=True, exist_ok=True)
             path = result_dir / f"{kind}.txt"
             path.write_text(content, encoding="utf-8", errors="replace")
-        except OSError:
+            ref = path.resolve().relative_to(self._spill_base.resolve()).as_posix()
+        except (OSError, ValueError):
             return {}
-        return {"result_path": str(path)}
+        return {"result_root": self._spill_root, "result_ref": ref}
+
+
+def _has_entries(directory: Path) -> bool:
+    try:
+        return any(directory.iterdir())
+    except OSError:
+        return False
 
 
 _ROOT_HINT = (
@@ -383,7 +415,7 @@ class GlobTool(_SearchToolBase):
         _validate_relative_pattern(pattern, label="pattern")
         target, path = self.roots.resolve(root, path)
         if not target.is_dir():
-            raise ToolError(f"glob path must be a directory: {root}:{path}", error_type="path_error")
+            raise ToolError(f"glob path must be a directory under root {root!r}: {path!r}", error_type="path_error")
         files: list[str] = []
         seen_matches = 0
         source_truncated = False
@@ -446,19 +478,19 @@ class ReadFileTool(_SearchToolBase):
         limit = int(arguments.get("limit") or DEFAULT_READ_LIMIT)
         target, path = self.roots.resolve(root, path)
         if target.is_dir():
-            raise ToolError(f"read path is a directory, not a file: {root}:{path}", error_type="path_error")
+            raise ToolError(f"read path is a directory, not a file, under root {root!r}: {path!r}", error_type="path_error")
         try:
             size = target.stat().st_size
         except OSError as exc:
-            raise ToolError(f"read failed for {root}:{path}: {exc}", error_type="tool_error") from exc
+            raise ToolError(f"read failed under root {root!r} for {path!r}: {exc.strerror or type(exc).__name__}", error_type="tool_error") from exc
         if size > MAX_READ_BYTES:
             # The whole file is decoded host-side before pagination, so an
             # unbounded input (e.g. a multi-GB parquet) must be refused, not
             # silently absorbed outside the sandbox resource limits.
             raise ToolError(
-                f"file is {size} bytes, over the {MAX_READ_BYTES}-byte read cap: {root}:{path}",
+                f"file is {size} bytes, over the {MAX_READ_BYTES}-byte read cap, under root {root!r}: {path!r}",
                 error_type="too_large",
-                blocked_target=f"{root}:{path}",
+                blocked_target=path,
                 retry_hint=(
                     "read_file is for bounded text files; use shell head/tail/wc for large text, "
                     "or Parquet metadata and DuckDB/pyarrow column reads for data files"
@@ -467,7 +499,7 @@ class ReadFileTool(_SearchToolBase):
         try:
             text = target.read_text(encoding="utf-8", errors="replace")
         except OSError as exc:
-            raise ToolError(f"read failed for {root}:{path}: {exc}", error_type="tool_error") from exc
+            raise ToolError(f"read failed under root {root!r} for {path!r}: {exc.strerror or type(exc).__name__}", error_type="tool_error") from exc
         # cat -n style line numbering, paginated by line so large files stay bounded.
         numbered = [f"{index}\t{line}" for index, line in enumerate(text.splitlines(), start=1)]
         visible, paging = _apply_paging(numbered, offset=offset, head_limit=limit, source_truncated=False)
@@ -497,7 +529,7 @@ def _safe_subpath(base: Path, path: str) -> Path:
             error_type="path_error", blocked_target=path,
         )
     target = (base_resolved / candidate).resolve()
-    _assert_inside(target, base_resolved)
+    _assert_inside(target, base_resolved, display=path)
     return target
 
 
@@ -509,14 +541,15 @@ def _iter_glob_matches(root: Path, pattern: str):
         try:
             entries = sorted(directory.iterdir(), key=lambda item: item.name)
         except OSError as exc:
-            raise ToolError(f"glob failed to list directory: {directory}", error_type="tool_error") from exc
+            shown = directory.relative_to(root).as_posix() if directory != root else "."
+            raise ToolError(f"glob failed to list directory: {shown!r}", error_type="tool_error") from exc
         subdirs: list[Path] = []
         for candidate in entries:
             if candidate.is_symlink():
                 continue
             if _is_vcs_path(candidate, root) or _has_hidden_part(candidate, root):
                 continue
-            _assert_inside(candidate, root)
+            _assert_inside(candidate, root, display=candidate.relative_to(root).as_posix())
             if candidate.is_dir():
                 subdirs.append(candidate)
                 continue
@@ -542,13 +575,15 @@ def _glob_match_parts(path_parts: tuple[str, ...], pattern_parts: tuple[str, ...
     return fnmatch.fnmatchcase(path_parts[0], first) and _glob_match_parts(path_parts[1:], pattern_parts[1:])
 
 
-def _assert_inside(path: Path, root: Path) -> None:
+def _assert_inside(path: Path, root: Path, *, display: str) -> None:
+    """``display`` is the Agent-facing relative path: the host path never
+    appears in the error."""
     try:
         path.resolve().relative_to(root.resolve())
     except ValueError as exc:
         raise ToolError(
-            f"path escapes the selected search root: {path}",
-            error_type="path_error", blocked_target=str(path),
+            f"path escapes the selected search root: {display!r}",
+            error_type="path_error", blocked_target=display,
         ) from exc
 
 

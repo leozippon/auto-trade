@@ -58,7 +58,14 @@ ARTIFACT_TOP_LEVEL = (
     "steps",
     "logs",
 )
-AGENT_TOP_LEVEL = ("workspace", "output", "models")
+# Absolute host paths must never reach a model: the Agent sees only sandbox
+# mounts under /mnt. Shared by the data summary, error summaries and tool
+# tracebacks.
+HOST_PATH_RE = re.compile(r"(?<![\w.:\-/])/(?!mnt/)(?:[^\s'\";|,)]*)")
+
+
+def redact_host_paths(text: str) -> str:
+    return HOST_PATH_RE.sub("[host_path]", text)
 # Python bytecode-cache dirs/suffixes that are never experiment artifacts. Single
 # source for both the artifact-collection ignore list (sandbox._COLLECT_IGNORE, which
 # adds VCS/venv/tooling dirs on top) and the formal-file runtime-cache predicate
@@ -223,31 +230,10 @@ class SandboxPaths:
     def workspace(self) -> Path:
         return self.agent / "workspace"
 
-    @property
-    def agent_output(self) -> Path:
-        """Agent formal strategy output directory, mounted as /mnt/agent/output."""
-        return self.agent / "output"
-
-    @property
-    def output(self) -> Path:
-        """Agent-facing name for ``agent_output``. Load-bearing: the structured
-        search tool resolves its ``SEARCH_ROOTS`` names via ``getattr`` on this
-        object, and the agent-visible root name is ``output``."""
-        return self.agent_output
-
-    @property
-    def model_artifacts(self) -> Path:
-        """Agent model-parameter artifact directory (/mnt/agent/models).
-
-        Strategy code lives in ``agent_output``. Optional trained parameters
-        and weights live here and are frozen separately.
-        """
-        return self.agent / "models"
-
-    @property
-    def writable_root_map(self) -> dict[str, Path]:
-        """Agent-facing writable-root name (see ``AGENT_TOP_LEVEL``) -> path."""
-        return {"workspace": self.workspace, "output": self.agent_output, "models": self.model_artifacts}
+    # The formal working copies live INSIDE the workspace: ``workspace/output``
+    # and ``workspace/models`` (the session backend creates them and the search
+    # roots ``output``/``models`` resolve there). There are no sibling
+    # ``agent/output`` or ``agent/models`` directories.
 
 
 def sanitize_for_log(value: object) -> object:

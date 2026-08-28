@@ -137,7 +137,35 @@ def read_ledger_records(experiment_dir: Path) -> list[dict[str, object]]:
     return ExperimentLedger(Path(experiment_dir) / "ledgers" / "experiment_ledger.jsonl").read()
 
 
-def experiment_state(experiment_dir: Path) -> dict[str, object]:
+# Worker stdout/stderr, repo-relative and inside the ignored logs/ tree so a
+# crashed session stays diagnosable without ever entering the repository.
+WORKER_LOG_DIR = "logs/workers"
+
+
+def worker_log_ref(experiment_id: str) -> str:
+    """Repo-relative worker log location published to status.json and the API."""
+    return f"{WORKER_LOG_DIR}/{experiment_id}.log"
+
+
+def worker_log_for(experiment_dir: Path, repo_root: Path | None = None) -> str:
+    """The worker log for this experiment, when it exists on disk.
+
+    The manager writes ``worker_log`` into the transient ``launching`` status
+    and the worker's own first status write replaces it, so a running or
+    crashed experiment carried no log reference at all. Deriving it from the
+    experiment id keeps every state diagnosable; the file has to exist, so a
+    never-launched experiment still advertises nothing.
+    """
+
+    directory = Path(experiment_dir)
+    root = Path(repo_root) if repo_root is not None else directory.parents[1]
+    ref = worker_log_ref(directory.name)
+    return ref if (root / ref).is_file() else ""
+
+
+def experiment_state(
+    experiment_dir: Path, *, repo_root: Path | None = None
+) -> dict[str, object]:
     """Effective lifecycle state combining status.json and pid liveness.
 
     A missing/empty status.json reads as "created" — the pre-first-spawn
@@ -160,8 +188,17 @@ def experiment_state(experiment_dir: Path) -> dict[str, object]:
             "worker_alive": False,
             "error": f"{type(exc).__name__}: {exc}",
         }
+    log_ref = worker_log_for(experiment_dir, repo_root)
     if not status:
-        return {"kind": "hitl", "state": "created", "worker_alive": False, "status": {}}
+        result: dict[str, object] = {
+            "kind": "hitl",
+            "state": "created",
+            "worker_alive": False,
+            "status": {},
+        }
+        if log_ref:
+            result["worker_log"] = log_ref
+        return result
     alive = status_pid_alive(status)
     state = str(status.get("state") or "unknown")
     if state == "launching" and not alive:
@@ -169,7 +206,10 @@ def experiment_state(experiment_dir: Path) -> dict[str, object]:
             state = "interrupted"
     elif state in ACTIVE_STATES and not alive:
         state = "interrupted"
-    return {"kind": "hitl", "state": state, "worker_alive": alive, "status": status}
+    result = {"kind": "hitl", "state": state, "worker_alive": alive, "status": status}
+    if log_ref:
+        result["worker_log"] = log_ref
+    return result
 
 
 def _age_seconds(stamp: object) -> float:

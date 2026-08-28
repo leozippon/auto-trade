@@ -243,8 +243,7 @@ def test_subagent_trace_card_shows_model_thinking_and_context() -> None:
     )[0]
     assert "🧩" in source
     assert "block.role" in source
-    assert "subagentMetaLine" in source
-    assert "subagentClockNode" in source
+    assert "subagentHeadMetaNode" in source
     assert "subagentProgressParts" in source
     assert "subagentLastToolLabel" in source
     # The dead `task` field is gone from both the projection and the UI.
@@ -258,8 +257,23 @@ def test_subagent_trace_card_shows_model_thinking_and_context() -> None:
     # Launch metadata is spelled out once, in subagentMetaLine.
     meta = script.split("function subagentMetaLine(", 1)[1].split("\nfunction ", 1)[0]
     assert "block.model" in meta
-    assert "parentReasoningLabel" in meta
-    assert "继承上下文" in meta and "独立上下文" in meta
+    assert "subagentThinkingLabel" in meta
+    assert "subagentContextLabel" in meta
+    assert '.join(" · ")' in meta
+    context = script.split("function subagentContextLabel(", 1)[1].split(
+        "\nfunction ", 1
+    )[0]
+    assert "继承上下文" in context and "独立上下文" in context
+    assert "续用 ${block.resumed_from}" in context
+    # `model · 推理 x · 独立上下文 ⏱ 5:21 · 08-28 15:13:20`: the live clock node
+    # and the launch timestamp need explicit separators, not a flex gap.
+    head_meta = script.split("function subagentHeadMetaNode(", 1)[1].split(
+        "\nfunction ", 1
+    )[0]
+    assert "subagentMetaLine(block, detail)" in head_meta
+    assert 'line.append(" ")' in head_meta
+    assert "` · ${launched}`" in head_meta
+    assert "fmtTsTime(block.ts)" in head_meta
     detail_node = script.split("function subagentDetailNode(", 1)[1].split(
         "\nfunction ", 1
     )[0]
@@ -1187,3 +1201,286 @@ def test_trace_replay_threads_detail_and_clamps_the_block_window() -> None:
         "32 * 1024 * 1024", str(32 * 1024 * 1024)
     )
     assert traces.MAX_BLOCK_READ_BYTES == 32 * 1024 * 1024
+
+
+def _child_events(*, terminal: bool = True, legacy: bool = False) -> list[dict[str, object]]:
+    """One Fold child's own records, plus a parent event it must ignore."""
+
+    names = (
+        {
+            "task": "explore_task",
+            "llm": "explore_llm",
+            "tool": "explore_tool",
+            "end": "explore",
+        }
+        if legacy
+        else {
+            "task": "subagent_task",
+            "llm": "subagent_llm",
+            "tool": "subagent_tool",
+            "end": "subagent",
+        }
+    )
+    events: list[dict[str, object]] = [
+        {"event_type": "llm_call", "content": "parent turn"},
+        {
+            "event_type": names["task"],
+            "ts": "2026-09-01T10:00:00+00:00",
+            "task_id": "agent_1",
+            "status": "started",
+            "role": "developer",
+            "model": "qwen-3.8-27b-fp8",
+            "thinking": "inherit",
+            "inherit_context": False,
+            "description": "因子实现",
+        },
+        {
+            "event_type": names["llm"],
+            "ts": "2026-09-01T10:00:20+00:00",
+            "task_id": "agent_1",
+            "round": 1,
+            "model": "qwen-3.8-27b-fp8",
+            "content": "先看数据布局",
+            "usage": {"prompt_tokens": 100, "completion_tokens": 10, "total_tokens": 110},
+        },
+        {
+            "event_type": names["tool"],
+            "ts": "2026-09-01T10:00:25+00:00",
+            "task_id": "agent_1",
+            "round": 1,
+            "tool": "read_file",
+            "arguments": {"path": "/mnt/agent/workspace/output/main.py", "limit": 40},
+            "result": {"ok": True, "value": {"lines": 40}},
+        },
+        {
+            "event_type": names["tool"],
+            "ts": "2026-09-01T10:00:26+00:00",
+            "task_id": "agent_1",
+            "round": 1,
+            "tool": "grep",
+            "arguments": {"pattern": "trade_date"},
+            "result": {"ok": False, "error": "no match"},
+        },
+        {
+            "event_type": names["llm"],
+            "ts": "2026-09-01T10:01:00+00:00",
+            "task_id": "agent_1",
+            "round": 2,
+            "content": "已确认字段",
+            "usage": {"prompt_tokens": 200, "completion_tokens": 20, "total_tokens": 220},
+        },
+        {"event_type": "tool_call", "tool": "shell", "result": {"ok": True}},
+    ]
+    if not terminal:
+        return events
+    events.extend(
+        [
+            {
+                "event_type": "subagent_wrap_up",
+                "ts": "2026-09-01T10:01:10+00:00",
+                "task_id": "agent_1",
+                "round": 2,
+                "rounds_limit": 3,
+            },
+            {
+                "event_type": names["end"],
+                "ts": "2026-09-01T10:02:00+00:00",
+                "task_id": "agent_1",
+                "status": "completed",
+                "role": "developer",
+                "rounds": 2,
+                "llm_calls": 3,
+                "tool_calls": 2,
+                "truncated": True,
+                "summary": "因子已实现并通过静态检查。",
+                "usage_totals": {
+                    "prompt_tokens": 300,
+                    "completion_tokens": 30,
+                    "total_tokens": 330,
+                },
+            },
+        ]
+    )
+    return events
+
+
+def test_project_subagent_trace_orders_rounds_tools_and_summary() -> None:
+    projected = traces.project_subagent_trace(_child_events(), "agent_1")
+    assert projected["found"] is True
+    assert projected["reduced"] is False
+    # Two markers: the wrap-up prompt, then the output-truncation notice.
+    assert [block["kind"] for block in projected["blocks"]] == [
+        "agent_output",
+        "tool_group",
+        "agent_output",
+        "marker",
+        "marker",
+        "summary",
+    ]
+    first, group, second, marker, cut_off, summary = projected["blocks"]
+    assert first["round"] == 1 and first["text"] == "先看数据布局"
+    assert second["round"] == 2
+    assert [row["name"] for row in group["tools"]] == ["read_file", "grep"]
+    calls = group["calls"]
+    assert [call["name"] for call in calls] == ["read_file", "grep"]
+    assert calls[0]["arguments"]["path"] == "/mnt/agent/workspace/output/main.py"
+    assert calls[0]["arguments"]["limit"] == "40"
+    assert calls[0]["status"] == "ok" and "lines" in str(calls[0]["result"])
+    assert calls[1]["status"] == "failed" and calls[1]["error"] == "no match"
+    assert marker["label"] == "收尾提示"
+    assert cut_off["label"] == "输出截断"
+    assert summary["text"] == "因子已实现并通过静态检查。"
+    # The terminal event's own totals drive the header, as on the outer card.
+    header = projected["header"]
+    assert header["kind"] == "subagent" and header["phase"] == "ended"
+    assert header["status"] == "completed"
+    assert header["role"] == "developer"
+    assert header["model"] == "qwen-3.8-27b-fp8"
+    assert header["thinking"] == "inherit"
+    assert (header["rounds"], header["llm_calls"], header["tool_calls"]) == (2, 3, 2)
+    assert header["usage"]["total_tokens"] == 330
+    assert header["started_at"] == "2026-09-01T10:00:00+00:00"
+    assert header["ended_at"] == "2026-09-01T10:02:00+00:00"
+
+
+def test_project_subagent_trace_legacy_explore_events_project_the_same() -> None:
+    current = traces.project_subagent_trace(_child_events(), "agent_1")
+    legacy = traces.project_subagent_trace(_child_events(legacy=True), "agent_1")
+    assert [block["kind"] for block in legacy["blocks"]] == [
+        block["kind"] for block in current["blocks"]
+    ]
+    assert legacy["header"]["status"] == "completed"
+    assert legacy["header"]["usage"]["total_tokens"] == 330
+
+
+def test_project_subagent_trace_running_child_has_no_report_yet() -> None:
+    projected = traces.project_subagent_trace(_child_events(terminal=False), "agent_1")
+    header = projected["header"]
+    assert header["phase"] == "started" and header["status"] == "running"
+    assert "ended_at" not in header
+    # Live accumulation, not terminal totals.
+    assert header["llm_calls"] == 2 and header["rounds"] == 2
+    assert header["usage"]["total_tokens"] == 330
+    assert all(block["kind"] != "summary" for block in projected["blocks"])
+    assert [block["kind"] for block in projected["blocks"]] == [
+        "agent_output",
+        "tool_group",
+        "agent_output",
+    ]
+
+
+def test_project_subagent_trace_states_the_meta_reduction() -> None:
+    projected = traces.project_subagent_trace(
+        [
+            {
+                "event_type": "subagent_task",
+                "task_id": "agent_m",
+                "status": "started",
+                "role": "auditor",
+                "thinking": "medium",
+            },
+            {
+                "event_type": "subagent_llm",
+                "task_id": "agent_m",
+                "round": 1,
+                "content_chars": 812,
+                "usage": {"prompt_tokens": 5, "completion_tokens": 1, "total_tokens": 6},
+            },
+            {
+                "event_type": "subagent_tool",
+                "task_id": "agent_m",
+                "round": 1,
+                "tool": "read_file",
+                "result": {"ok": True},
+            },
+            {
+                "event_type": "subagent",
+                "task_id": "agent_m",
+                "status": "completed",
+                "summary_chars": 4521,
+                "usage_totals": {"total_tokens": 6},
+            },
+        ],
+        "agent_m",
+    )
+    assert projected["reduced"] is True
+    round_block = projected["blocks"][0]
+    assert round_block["text"] == "" and round_block["content_chars"] == 812
+    summary = projected["blocks"][-1]
+    assert summary["kind"] == "summary"
+    assert summary["text"] == "" and summary["text_chars"] == 4521
+    assert "value" not in str(projected["blocks"][1]["calls"][0].get("result"))
+
+
+def test_subagent_trace_route_projects_redacts_and_guards(tmp_path: Path) -> None:
+    events = _child_events()
+    events[3]["arguments"] = {  # type: ignore[index]
+        "path": "/Data2/host/secret/experiments/demo/output/main.py"
+    }
+    identity = _experiment_with_trace(tmp_path, events)
+    client = TestClient(create_app(tmp_path))
+    trace_ref = identity.trace_ref("run_001")
+
+    payload = client.get(
+        f"/api/experiments/demo/trace/subagents/agent_1",
+        params={"run_id": trace_ref},
+    )
+    assert payload.status_code == 200
+    body = payload.json()
+    assert body["task_id"] == "agent_1"
+    assert body["trace_ref"] == trace_ref
+    assert [block["kind"] for block in body["blocks"]] == [
+        "agent_output",
+        "tool_group",
+        "agent_output",
+        "marker",
+        "marker",
+        "summary",
+    ]
+    assert body["header"]["status"] == "completed"
+    text = json.dumps(body, ensure_ascii=False)
+    assert "/Data2/host/secret" not in text
+    assert str(tmp_path) not in text
+
+    assert (
+        client.get(
+            "/api/experiments/demo/trace/subagents/agent_missing",
+            params={"run_id": trace_ref},
+        ).status_code
+        == 404
+    )
+    bad = client.get(
+        "/api/experiments/demo/trace/subagents/..%2Fetc",
+        params={"run_id": trace_ref},
+    )
+    assert bad.status_code in {400, 404}
+    assert "etc" not in bad.text
+
+
+def test_subagent_drawer_is_wired_to_the_card_and_the_dock_chip() -> None:
+    script = APP_JS.read_text(encoding="utf-8")
+    assert "async function openSubagentTrace(detail, runRef, block)" in script
+    assert "/trace/subagents/${encodeURIComponent(taskId)}" in script
+    card = script.split("function renderSubagentBlock(", 1)[1].split("\nfunction ", 1)[0]
+    assert "openSubagentTrace(detail, runRef, block)" in card
+    chip = script.split("function runningSubagentChip(", 1)[1].split("\nfunction ", 1)[0]
+    assert "openSubagentTrace(detail, runRef, block)" in chip
+    opener = script.split("async function openSubagentTrace(", 1)[1].split(
+        "\nfunction ", 1
+    )[0]
+    # One box for the drawer's lifetime: a live refresh must not collapse the
+    # folds the reader opened, and it must stop when the child ends.
+    assert "renderTraceBlocks(box" in opener
+    assert "previous: previousBlocks" in opener
+    assert "isRunningSubagent(payload.header || block)" in opener
+    assert "clearInterval(poll)" in opener
+    head = script.split("function subagentTraceHead(", 1)[1].split("\nfunction ", 1)[0]
+    assert "payload.reduced" in head
+    assert "subagentHeadMetaNode" in head
+    # An inherited level is reported as the effective parent level.
+    thinking = script.split("function subagentThinkingLabel(", 1)[1].split(
+        "\nfunction ", 1
+    )[0]
+    assert '"inherit"' in thinking
+    assert "（继承）" in thinking
+    assert "parentReasoningLabel" in thinking

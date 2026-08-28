@@ -264,6 +264,10 @@ class InteractiveExperimentRunner:
         return wait_for_step
 
     def user_question_hook(self, session_key: str):
+        # In auto mode nobody answers: no hook means no ``ask_user`` tool, so
+        # the session cannot spend turns on a question that returns "".
+        if read_control(self.control_path).mode == "auto":
+            return None
         question_index = 0
 
         def ask(question: str, summary: str = "") -> str:

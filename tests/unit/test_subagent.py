@@ -2368,3 +2368,76 @@ def test_child_turns_default_to_24_with_grace_wrap_up() -> None:
     ).run("dig", role="auditor", max_rounds=2)
     assert result["rounds"] == 2 and result["summary"] == "done"
     assert not any("还剩" in str(m.content) for call in short.calls for m in call["messages"])
+
+
+def test_parent_thinking_only_truncated_turn_gets_a_forced_continuation() -> None:
+    finish = _FinishStub("finish_fold")
+    llm = ScriptedLLM(
+        [
+            ProviderResponse(
+                content="",
+                reasoning_content="12k tokens of thinking",
+                usage={"prompt_tokens": 10, "completion_tokens": 500, "total_tokens": 510},
+            ),
+            ProviderResponse(tool_calls=(ToolCall("f1", "finish_fold", {}),)),
+        ]
+    )
+    events: list[tuple[str, dict[str, object]]] = []
+    runner = AgentSessionRunner(
+        llm=llm,
+        tools=ToolRegistry([finish]),
+        system_prompt="fold",
+        config=_fold_config(max_response_tokens=500),
+        event_sink=lambda event, payload: events.append((event, payload)),
+    )
+    assert runner.run("go").status == "finished"
+    truncated = [payload for event, payload in events if event == "output_truncated"]
+    assert truncated == [{"call_index": 1, "completion_tokens": 500, "max_tokens": 500}]
+    second = llm.calls[1]["messages"]
+    assert second[-1].role == "user"
+    observation = json.loads(str(second[-1].content))
+    assert observation["observation"] == "output_truncated"
+    assert "被截断" in observation["message"]
+    assert not any('"no_tool_call"' in str(message.content or "") for message in second)
+
+
+def test_subagent_completed_surfaces_truncation_and_rounds() -> None:
+    from autotrade.agent.subagent import OUTPUT_TRUNCATED_MARKER
+
+    finish = _FinishStub("finish_fold")
+    child = ScriptedLLM(
+        [
+            ProviderResponse(
+                content="长报告" * 100,
+                usage={"prompt_tokens": 10, "completion_tokens": 500, "total_tokens": 510},
+            )
+        ],
+        context_window_tokens=128_000,
+    )
+    llm = ScriptedLLM(
+        [
+            ProviderResponse(tool_calls=(ToolCall("a1", "agent", {"agent": "auditor", "task": "audit"}),)),
+            ProviderResponse(content="waiting"),
+            ProviderResponse(tool_calls=(ToolCall("f1", "finish_fold", {}),)),
+        ]
+    )
+    runner = AgentSessionRunner(
+        llm=llm,
+        tools=ToolRegistry([finish]),
+        system_prompt="fold",
+        config=_fold_config(),
+        subagent=SubAgentEngine(
+            llm=child,
+            tools=ToolRegistry([DeclaredReadOnlyShell()]),
+            config=SubAgentConfig(max_tokens=500),
+        ),
+    )
+    assert runner.run("go").status == "finished"
+    completed = next(
+        json.loads(str(message.content))
+        for message in llm.calls[-1]["messages"]
+        if '"subagent_completed"' in str(message.content or "")
+    )
+    assert completed["truncated"] is True
+    assert completed["rounds"] == 1 and completed["tool_calls"] == 0
+    assert completed["summary"].endswith(OUTPUT_TRUNCATED_MARKER.format(limit=500))

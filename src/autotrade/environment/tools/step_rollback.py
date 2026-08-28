@@ -57,7 +57,7 @@ def _empty_tree(target: Path) -> None:
 
 def _replace_tree(source: Path, target: Path) -> None:
     if not source.is_dir():
-        raise ToolError(f"missing Step revision directory: {source}")
+        raise ToolError(f"missing Step revision directory: {source.name}")
     _empty_tree(target)
     for child in source.iterdir():
         destination = target / child.name

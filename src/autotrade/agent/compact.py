@@ -525,7 +525,8 @@ def _touched_files(messages: Sequence[ChatMessage]) -> dict[str, list[str]]:
             if not isinstance(path, str) or not path:
                 continue
             root = call.arguments.get("root")
-            label = f"{root}:{path}" if isinstance(root, str) and root else path
+            # Root and relative path, in the shape the tools accept (no colon syntax).
+            label = f"[{root}] {path}" if isinstance(root, str) and root else path
             if call.name in _READ_TOOLS and label not in read:
                 read.append(label)
             elif call.name in _WRITE_TOOLS and label not in modified:

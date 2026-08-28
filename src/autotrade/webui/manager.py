@@ -52,17 +52,14 @@ from autotrade.pipelines.ledger import (
 from autotrade.pipelines.meta_schedule import meta_record_session_key
 
 from .public_identity import PublicIdentity
-from .registry import experiment_state, heldout_complete, test_results_revealed
+from .registry import (
+    experiment_state,
+    heldout_complete,
+    test_results_revealed,
+    worker_log_ref,
+)
 
 MAX_RUNNING_EXPERIMENTS = 4
-# Worker stdout/stderr, repo-relative and inside the ignored logs/ tree so a
-# crashed session stays diagnosable without ever entering the repository.
-WORKER_LOG_DIR = "logs/workers"
-
-
-def worker_log_ref(experiment_id: str) -> str:
-    """Repo-relative worker log location published to status.json and the API."""
-    return f"{WORKER_LOG_DIR}/{experiment_id}.log"
 _ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$")
 _TERMINAL_RESUMABLE_STATES = (
     "stopped",

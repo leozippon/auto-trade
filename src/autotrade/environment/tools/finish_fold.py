@@ -8,6 +8,8 @@ from pathlib import Path
 
 from autotrade.environment.step_tree import StepTree
 
+from autotrade.environment.runtime import redact_host_paths
+
 from .base import ToolError, ToolResult, ToolSpec
 
 
@@ -190,7 +192,9 @@ class FinishFoldTool:
         try:
             return executable_source_structure(main_py.read_text(encoding="utf-8"))
         except (OSError, SyntaxError) as exc:
-            raise ToolError(f"finish_fold cannot compare {node_id}: {exc}") from exc
+            raise ToolError(
+                f"finish_fold cannot compare {node_id}: {redact_host_paths(str(exc))}"
+            ) from exc
 
 
 __all__ = ["FinishFoldTool", "executable_source_structure"]

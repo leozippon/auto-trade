@@ -12,6 +12,7 @@ from autotrade.environment.time_budget import (
     SessionTimeBudgetAware,
     TimeBudgetBinding,
 )
+from autotrade.environment.runtime import redact_host_paths
 
 
 class SessionInterrupt(Exception):
@@ -244,13 +245,21 @@ class ToolRegistry:
         allowed_names: Collection[str] | None = None,
     ) -> ToolResult:
         if allowed_names is not None and name not in allowed_names:
+            available = ", ".join(sorted(str(item) for item in allowed_names))
             return ToolResult(
                 False,
-                error=f"tool is unavailable in the current session phase: {name}",
+                error=(
+                    f"tool is unavailable in the current session phase: {name}; "
+                    f"available now: {available}"
+                ),
             )
         tool = self._tools.get(name)
         if tool is None:
-            return ToolResult(False, error=f"unknown tool: {name}")
+            available = ", ".join(sorted(self._tools))
+            return ToolResult(
+                False,
+                error=f"unknown tool: {name}; tools in this session: {available}",
+            )
         if self._finished and tool.spec.mutating:
             return ToolResult(False, error="the strategy workspace is locked after finish")
         try:
@@ -293,7 +302,7 @@ def _traceback_tail(exc: BaseException, limit: int = 4) -> str:
     """The innermost frames of a tool failure, bounded for an observation."""
 
     frames = traceback.format_exception(type(exc), exc, exc.__traceback__)
-    return "".join(frames[-limit:])[-1_500:]
+    return redact_host_paths("".join(frames[-limit:])[-1_500:])
 
 
 def validate_arguments(

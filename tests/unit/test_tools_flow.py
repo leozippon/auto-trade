@@ -35,6 +35,7 @@ from autotrade.environment.tools import (
 from autotrade.environment.tools.shell import (
     DEFAULT_SHELL_TIMEOUT_SECONDS,
     FORBIDDEN_WAIT,
+    MAX_SHELL_TIMEOUT_SECONDS,
     argv_is_forbidden_wait,
 )
 from autotrade.environment.tools import search as search_module
@@ -47,8 +48,8 @@ def build_sandbox(root: Path) -> tuple[SandboxPaths, SearchRoots, SafeWorkspace]
     paths = SandboxPaths(root)
     for directory in (
         paths.workspace,
-        paths.agent_output,
-        paths.model_artifacts,
+        paths.agent / "output",
+        paths.agent / "models",
         paths.current_snapshot,
         paths.train,
         paths.valid,
@@ -60,7 +61,14 @@ def build_sandbox(root: Path) -> tuple[SandboxPaths, SearchRoots, SafeWorkspace]
         paths.logs,
     ):
         directory.mkdir(parents=True, exist_ok=True)
-    (paths.agent_output / "README.md").write_text("readonly\n", encoding="utf-8")
+    (paths.agent / "output" / "README.md").write_text("readonly\n", encoding="utf-8")
+    # Mounted read-only roots are offered only when populated, as they are
+    # in a real Fold; a hidden marker keeps them non-empty without showing
+    # up in glob/grep results.
+    for mounted in (
+        paths.current_snapshot, paths.train, paths.valid, paths.parent_output, paths.parent_model_artifacts
+    ):
+        (mounted / ".mounted").write_text("", encoding="utf-8")
     workspace = SafeWorkspace(paths.agent)
     return paths, SearchRoots(workspace, paths=paths), workspace
 
@@ -83,7 +91,9 @@ class ShellToolTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             _, _, workspace = build_sandbox(Path(tmp))
             runner = FakeRunner(CommandResult(0, stdout="hello"))
-            tool = SandboxShellTool(workspace, runner, timeout_seconds=5, max_output_chars=100)
+            tool = SandboxShellTool(
+                workspace, runner, timeout_seconds=5, max_timeout_seconds=5, max_output_chars=100
+            )
             result = tool.invoke({"argv": ["echo", "hello"], "cwd": ".", "timeout_seconds": 900})
             self.assertTrue(result.ok)
             self.assertEqual(result.value["stdout"], "hello")
@@ -127,21 +137,29 @@ class ShellToolTest(unittest.TestCase):
     def test_shell_schema_timeout_maximum_matches_instance_cap(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             _, _, workspace = build_sandbox(Path(tmp))
-            default = SandboxShellTool(workspace, FakeRunner())
-            custom = SandboxShellTool(workspace, FakeRunner(), timeout_seconds=5)
+            runner = FakeRunner()
+            default = SandboxShellTool(workspace, runner)
+            custom = SandboxShellTool(workspace, FakeRunner(), max_timeout_seconds=5)
             default_schema = json.loads(json.dumps(default.spec.input_schema))
             custom_schema = json.loads(json.dumps(custom.spec.input_schema))
+            self.assertEqual((DEFAULT_SHELL_TIMEOUT_SECONDS, MAX_SHELL_TIMEOUT_SECONDS), (60.0, 300.0))
             self.assertEqual(default.timeout_seconds, DEFAULT_SHELL_TIMEOUT_SECONDS)
             self.assertEqual(
                 default_schema["properties"]["timeout_seconds"]["maximum"],
-                DEFAULT_SHELL_TIMEOUT_SECONDS,
+                MAX_SHELL_TIMEOUT_SECONDS,
             )
+            self.assertEqual(custom.timeout_seconds, 5)
             self.assertEqual(
                 custom_schema["properties"]["timeout_seconds"]["maximum"], 5
             )
+            self.assertIn("defaults to 60 and is at most 300", default.spec.description)
             registry = ToolRegistry([default])
+            # Omitted: the default; explicit within the cap: honoured as given.
+            registry.invoke("shell", {"argv": ["echo", "ok"]})
+            registry.invoke("shell", {"argv": ["echo", "ok"], "timeout_seconds": 240})
+            self.assertEqual([call[2] for call in runner.calls], [60.0, 240.0])
             blocked = registry.invoke(
-                "shell", {"argv": ["echo", "ok"], "timeout_seconds": 120}
+                "shell", {"argv": ["echo", "ok"], "timeout_seconds": 900}
             )
             self.assertFalse(blocked.ok)
             self.assertIn("above its maximum", blocked.error)
@@ -204,11 +222,11 @@ class StructuredSearchToolTest(unittest.TestCase):
             (paths.workspace / ".hidden.txt").write_text("alpha\n", encoding="utf-8")
             (paths.workspace / "nested").mkdir()
             (paths.workspace / "nested" / "gamma.json").write_text('{"key": "alpha"}', encoding="utf-8")
-            (paths.agent_output / "main.py").write_text(
+            (paths.agent / "output" / "main.py").write_text(
                 "def generate_orders(context):\n    unique_output_marker = True\n    return []\n",
                 encoding="utf-8",
             )
-            (paths.model_artifacts / "model.json").write_text('{"name": "agent-model"}\n', encoding="utf-8")
+            (paths.agent / "models" / "model.json").write_text('{"name": "agent-model"}\n', encoding="utf-8")
             (paths.parent_model_artifacts / "parent.json").write_text('{"name": "parent-model"}\n', encoding="utf-8")
 
             files = registry.invoke(
@@ -372,9 +390,14 @@ class StructuredSearchToolTest(unittest.TestCase):
                 for name in record["filenames"]:
                     self.assertIn(name, names)  # no char-cut partial paths
                 self.assertEqual(record["returned"], len(record["filenames"]))
-                # The full page is persisted outside the model context budget.
-                stored = Path(str(record["result_path"])).read_text(encoding="utf-8")
-                self.assertEqual(len(stored.split("\n")), len(names))
+                # The full page is persisted outside the model context budget
+                # and referenced back through a search root, not a host path.
+                self.assertNotIn("result_path", record)
+                spilled = registry.invoke(
+                    "read_file", {"root": record["result_root"], "path": record["result_ref"]}
+                )
+                self.assertTrue(spilled.ok, spilled.error)
+                self.assertEqual(spilled.value["line_count"], len(names))
 
     def test_content_filenames_come_from_the_budgeted_page(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -453,7 +476,7 @@ class ArtifactIOToolTest(unittest.TestCase):
             self.assertTrue(written.ok, written.error)
             self.assertTrue(written.value["created"])
             self.assertGreater(written.value["bytes_written"], 0)
-            self.assertTrue((paths.agent_output / "helpers" / "sig.py").exists())
+            self.assertTrue((paths.agent / "output" / "helpers" / "sig.py").exists())
             edited = registry.invoke(
                 "edit_file",
                 {"path": "output/helpers/sig.py", "old_text": "x = 1", "new_text": "x = 42"},
@@ -461,7 +484,7 @@ class ArtifactIOToolTest(unittest.TestCase):
             self.assertTrue(edited.ok, edited.error)
             self.assertEqual(edited.value["replacements"], 1)
             self.assertIn(
-                "x = 42", (paths.agent_output / "helpers" / "sig.py").read_text(encoding="utf-8")
+                "x = 42", (paths.agent / "output" / "helpers" / "sig.py").read_text(encoding="utf-8")
             )
             overwrite = registry.invoke(
                 "write_file", {"path": "output/helpers/sig.py", "content": "x = 0\n"}
@@ -512,7 +535,7 @@ class ArtifactIOToolTest(unittest.TestCase):
             self.assertFalse(readonly.ok)
             self.assertEqual(readonly.value["error_type"], "readonly")
             self.assertEqual(
-                (paths.agent_output / "README.md").read_text(encoding="utf-8"), "readonly\n"
+                (paths.agent / "output" / "README.md").read_text(encoding="utf-8"), "readonly\n"
             )
 
     def test_write_rejects_absolute_paths(self) -> None:
@@ -522,7 +545,7 @@ class ArtifactIOToolTest(unittest.TestCase):
                 "write_file", {"path": "/mnt/agent/output/abs_bug.py", "content": "x = 1\n"}
             )
             self.assertFalse(result.ok)
-            self.assertFalse((paths.agent_output / "mnt").exists())
+            self.assertFalse((paths.agent / "output" / "mnt").exists())
 
     def test_write_rejects_symlink_escape(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -600,12 +623,12 @@ class TerminalToolWriteLockTest(unittest.TestCase):
         from autotrade.environment.tools import FinishFoldTool
 
         paths, roots, workspace = build_sandbox(root)
-        (paths.agent_output / "main.py").write_text(
+        (paths.agent / "output" / "main.py").write_text(
             "def generate_orders(context):\n    return []\n", encoding="utf-8"
         )
         tree = StepTree(paths.steps)
         node_id = tree.record_step(
-            paths.agent_output,
+            paths.agent / "output",
             epoch_id="epoch_001",
             fold_id="fold_ref_ab",
             run_id="run_x",
@@ -762,7 +785,7 @@ class ToolContractHintTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             _, _, workspace = build_sandbox(Path(tmp))
             default = SandboxShellTool(workspace, FakeRunner()).spec.description
-            custom = SandboxShellTool(workspace, FakeRunner(), timeout_seconds=5).spec.description
+            custom = SandboxShellTool(workspace, FakeRunner(), max_timeout_seconds=5).spec.description
             self.assertIn('["python", "-c", "print(1)"]', default)
             self.assertIn("inside the workspace", default)
             self.assertIn("at most 30", default)
@@ -869,3 +892,87 @@ class ToolResultContractTest(unittest.TestCase):
             shell_description = SandboxShellTool(workspace, FakeRunner()).spec.description
             self.assertIn("at most 1000 chars", shell_description)
             self.assertIn('["python", "workspace/probe.py"]', shell_description)
+
+
+class SpillAndRootContractTest(unittest.TestCase):
+    """Oversized results spill to a reference the Agent can read back; roots
+    and errors never expose the host, and empty mounted roots are not offered."""
+
+    def _layout(self, tmp: str):
+        root = Path(tmp) / "repo" / ".runtime" / "sandboxes" / "exp" / "run_deadbeefcafe"
+        paths = SandboxPaths(root)
+        for directory in (paths.workspace / "inputs", paths.artifacts, paths.logs, paths.current_snapshot):
+            directory.mkdir(parents=True, exist_ok=True)
+        workspace = SafeWorkspace(paths.workspace)
+        return paths, SearchRoots(workspace, paths=paths)
+
+    def test_spilled_result_is_a_readable_reference_without_host_path_or_pid(self) -> None:
+        from autotrade.environment.runtime import HOST_PATH_RE
+
+        with tempfile.TemporaryDirectory() as tmp:
+            paths, roots = self._layout(tmp)
+            big = "\n".join(f"line {index} " + "x" * 40 for index in range(200)) + "\n"
+            (paths.workspace / "inputs" / "big.txt").write_text(big, encoding="utf-8")
+            registry = ToolRegistry([ReadFileTool(roots), GlobTool(roots)])
+            with patch.object(search_module, "MAX_RESULT_CHARS", 500):
+                first = registry.invoke("read_file", {"path": "inputs/big.txt"})
+            self.assertTrue(first.ok, first.error)
+            self.assertTrue(first.value["truncated_by_chars"])
+            self.assertNotIn("result_path", first.value)
+            self.assertEqual(first.value["result_root"], "artifacts")
+            ref = first.value["result_ref"]
+            self.assertTrue(ref.startswith("logs/tool_results/read_file_read_"), ref)
+            self.assertNotIn(str(os.getpid()), ref)
+            rendered = json.dumps(first.value, ensure_ascii=False)
+            self.assertIsNone(HOST_PATH_RE.search(rendered), rendered)
+            self.assertNotIn("run_deadbeefcafe", rendered)
+            # The reference resolves through the offered root and holds the whole result.
+            self.assertIn("artifacts", roots.names)
+            spilled = registry.invoke("read_file", {"root": "artifacts", "path": ref})
+            self.assertTrue(spilled.ok, spilled.error)
+            self.assertEqual(spilled.value["line_count"], 200)
+
+    def test_empty_mounted_roots_are_not_offered_but_writable_roots_are(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            paths, roots = self._layout(tmp)
+            (paths.workspace / "output").mkdir()
+            # A Meta session mounts no snapshot: the empty directory must not
+            # tempt a child into a call that can only fail.
+            self.assertNotIn("snapshot", roots.names)
+            self.assertIn("output", roots.names)
+            (paths.current_snapshot / "manifest.json").write_text("{}", encoding="utf-8")
+            self.assertIn("snapshot", roots.names)
+
+    def test_errors_carry_a_correct_example_and_no_host_path(self) -> None:
+        from autotrade.environment.runtime import HOST_PATH_RE
+
+        with tempfile.TemporaryDirectory() as tmp:
+            paths, roots = self._layout(tmp)
+            (paths.artifacts / "x.txt").write_text("x", encoding="utf-8")
+            registry = ToolRegistry([ReadFileTool(roots), GlobTool(roots)])
+            missing = registry.invoke("read_file", {"root": "artifacts", "path": "nope.txt"})
+            self.assertFalse(missing.ok)
+            self.assertIn('{"root": "artifacts", "path": "<relative/file>"}', missing.value["retry_hint"])
+            self.assertNotIn("artifacts:", missing.error)
+            for arguments in (
+                {"root": "artifacts", "path": "nope.txt"},
+                {"root": "artifacts", "path": "../x.txt"},
+                {"root": "artifacts", "path": "sub/../../x.txt"},
+            ):
+                result = registry.invoke("read_file", arguments)
+                self.assertFalse(result.ok, arguments)
+                blob = result.error + json.dumps(result.value, ensure_ascii=False)
+                self.assertIsNone(HOST_PATH_RE.search(blob), blob)
+                self.assertNotIn(tmp, blob)
+            # An absolute path the model itself sent is echoed as the blocked
+            # target; the host layout still never appears.
+            absolute = registry.invoke("read_file", {"root": "artifacts", "path": "/etc/passwd"})
+            self.assertFalse(absolute.ok)
+            self.assertNotIn(tmp, absolute.error + json.dumps(absolute.value))
+            unavailable = registry.invoke(
+                "glob", {"pattern": "*"}, allowed_names={"read_file", "finish_fold"}
+            )
+            self.assertFalse(unavailable.ok)
+            self.assertIn("available now: finish_fold, read_file", unavailable.error)
+            unknown = registry.invoke("shell", {"argv": ["ls"]})
+            self.assertIn("tools in this session: glob, read_file", unknown.error)

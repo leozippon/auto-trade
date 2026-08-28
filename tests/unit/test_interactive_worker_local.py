@@ -449,6 +449,9 @@ def test_interactive_hooks_consume_current_controls_without_retaining_content(
     assert runner.user_question_hook(session_key)("继续吗？") == ""
     assert read_control(control_path).user_replies == {}
     assert read_status(status_path)["state"] == "running_session"
+    # Auto mode has nobody to answer: no hook, so no ask_user tool is registered.
+    write_control(control_path, ControlState(mode="auto"))
+    assert runner.user_question_hook(session_key) is None
 
 
 def test_interactive_runner_publishes_current_session_timing(tmp_path: Path):
@@ -754,7 +757,6 @@ def test_llm_worker_runs_real_meta_fold_validation_and_heldout(
     fold_tool_names = {item["function"]["name"] for item in llm.calls[2]["tools"]}
     # Fold parent holds typed writers; shell is debug-only and must not edit strategy.
     assert {
-        "ask_user",
         "daily_backtest",
         "edit_file",
         "agent",
@@ -763,6 +765,8 @@ def test_llm_worker_runs_real_meta_fold_validation_and_heldout(
         "step_rollback",
         "write_file",
     }.issubset(fold_tool_names)
+    # Auto mode registers no ask_user: nobody would answer it.
+    assert "ask_user" not in fold_tool_names
     assert all(
         "test_period" not in (message.content or "")
         for call in llm.calls
@@ -1411,3 +1415,18 @@ def test_meta_trace_payload_keeps_shape_only_usefulness_signals() -> None:
         "subagent_wrap_up", {"task_id": "agent_1", "role": "auditor", "round": 22, "rounds_limit": 24, "parent_call_id": "c1"}
     )
     assert wrap["rounds_limit"] == 24 and wrap["role"] == "auditor"
+
+
+def test_meta_trace_payload_keeps_child_argument_keys_and_parent_truncation() -> None:
+    from autotrade.pipelines.local_backend import _safe_meta_trace_payload
+
+    child_tool = _safe_meta_trace_payload(
+        "subagent_tool",
+        {"task_id": "agent_1", "role": "Explore", "round": 2, "tool": "read_file",
+         "arguments": {"root": "workspace", "path": "inputs/x"}, "result": {"ok": True, "value": {"content": "s"}}},
+    )
+    assert child_tool["argument_keys"] == ["path", "root"] and "arguments" not in child_tool
+    cut = _safe_meta_trace_payload(
+        "output_truncated", {"call_index": 7, "completion_tokens": 12000, "max_tokens": 12000, "content": "x"}
+    )
+    assert cut == {"call_index": 7, "completion_tokens": 12000, "max_tokens": 12000}

@@ -14,7 +14,12 @@ STDERR_SUPPRESSION_RE = re.compile(r"2\s*>\s*/dev/null|&>\s*/dev/null|/dev/null\
 STDERR_SUPPRESSION_REMINDER = (
     "stderr 被重定向到 /dev/null：错误输出对审计与调试很重要，请保留 stderr（去掉 2>/dev/null 等）。"
 )
-DEFAULT_SHELL_TIMEOUT_SECONDS = 30.0
+# Default per-call timeout when the Agent omits ``timeout_seconds``, and the
+# hard cap it may request. Data checks over PIT parquet (IC tables, coverage
+# scans) regularly need more than 30 s; 300 s keeps every call a bounded
+# foreground command while no longer starving a child of its numbers.
+DEFAULT_SHELL_TIMEOUT_SECONDS = 60.0
+MAX_SHELL_TIMEOUT_SECONDS = 300.0
 SHELL_ARGV_MAX_CHARS = 1000
 FORBIDDEN_WAIT = "forbidden_wait"
 _WAIT_COMMANDS = frozenset({"sleep", "usleep"})
@@ -85,7 +90,7 @@ def _shell_input_schema(timeout_seconds: float) -> dict[str, object]:
     }
 
 
-def _shell_description(timeout_seconds: float) -> str:
+def _shell_description(timeout_seconds: float, max_timeout_seconds: float) -> str:
     return (
         "Run one bounded foreground argv command in the injected network-disabled "
         "Agent sandbox. `argv` is a JSON array of strings, e.g. "
@@ -94,7 +99,9 @@ def _shell_description(timeout_seconds: float) -> str:
         f"{SHELL_ARGV_MAX_CHARS} chars: put longer code in a file with write_file "
         '(e.g. workspace/probe.py) and run ["python", "workspace/probe.py"]. '
         "`cwd` and every path must stay inside the workspace (relative, no `..`). "
-        f"`timeout_seconds` is at most {timeout_seconds:g}."
+        f"`timeout_seconds` defaults to {timeout_seconds:g} and is at most {max_timeout_seconds:g}; "
+        "the command runs in the foreground and is killed at the timeout, so bound the "
+        "work (column/date filters, sampled rows) rather than starting anything in the background."
     )
 
 
@@ -105,8 +112,8 @@ def _shell_example(timeout_seconds: float) -> dict[str, object]:
 class SandboxShellTool:
     spec = ToolSpec(
         "shell",
-        _shell_description(DEFAULT_SHELL_TIMEOUT_SECONDS),
-        _shell_input_schema(DEFAULT_SHELL_TIMEOUT_SECONDS),
+        _shell_description(DEFAULT_SHELL_TIMEOUT_SECONDS, MAX_SHELL_TIMEOUT_SECONDS),
+        _shell_input_schema(MAX_SHELL_TIMEOUT_SECONDS),
         mutating=True,
         example=_shell_example(DEFAULT_SHELL_TIMEOUT_SECONDS),
     )
@@ -117,20 +124,24 @@ class SandboxShellTool:
         runner: CommandRunner,
         *,
         timeout_seconds: float = DEFAULT_SHELL_TIMEOUT_SECONDS,
+        max_timeout_seconds: float = MAX_SHELL_TIMEOUT_SECONDS,
         max_output_chars: int = 40_000,
     ) -> None:
-        if timeout_seconds <= 0 or max_output_chars <= 0:
+        if timeout_seconds <= 0 or max_timeout_seconds <= 0 or max_output_chars <= 0:
             raise ValueError("shell limits must be positive")
+        # The default never exceeds the cap; a lower cap pulls it down.
+        timeout_seconds = min(timeout_seconds, max_timeout_seconds)
         self.spec = ToolSpec(
             "shell",
-            _shell_description(timeout_seconds),
-            _shell_input_schema(timeout_seconds),
+            _shell_description(timeout_seconds, max_timeout_seconds),
+            _shell_input_schema(max_timeout_seconds),
             mutating=True,
             example=_shell_example(timeout_seconds),
         )
         self.workspace = workspace
         self.runner = runner
         self.timeout_seconds = timeout_seconds
+        self.max_timeout_seconds = max_timeout_seconds
         self.max_output_chars = max_output_chars
 
     def invoke(self, arguments: Mapping[str, object]) -> ToolResult:
@@ -142,7 +153,7 @@ class SandboxShellTool:
         requested_cwd = str(arguments.get("cwd", "."))
         cwd = self.workspace.resolve(requested_cwd, must_exist=True, directory=True)
         requested_timeout = float(arguments.get("timeout_seconds", self.timeout_seconds))
-        timeout = min(requested_timeout, self.timeout_seconds)
+        timeout = min(requested_timeout, self.max_timeout_seconds)
         result = self.runner.run(
             argv,
             cwd=self.workspace.relative(cwd) if cwd != self.workspace.root else ".",
@@ -332,6 +343,7 @@ def _basename(token: str) -> str:
 __all__ = [
     "DEFAULT_SHELL_TIMEOUT_SECONDS",
     "FORBIDDEN_WAIT",
+    "MAX_SHELL_TIMEOUT_SECONDS",
     "SHELL_ARGV_MAX_CHARS",
     "SandboxShellTool",
     "argv_is_forbidden_wait",

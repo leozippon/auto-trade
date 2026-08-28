@@ -506,6 +506,37 @@ class AgentSessionRunner:
                 },
             )
             if not response.tool_calls:
+                if _output_truncated(response.usage, self.config.max_response_tokens):
+                    # The whole budget went into thinking (or an unfinished
+                    # essay): say so, ask for a concise continuation, and do
+                    # not let the next turn silently repeat the same.
+                    completion = int(dict(response.usage).get("completion_tokens") or 0)
+                    self._emit(
+                        "output_truncated",
+                        {
+                            "call_index": llm_calls,
+                            "completion_tokens": completion,
+                            "max_tokens": self.config.max_response_tokens,
+                        },
+                    )
+                    messages.append(
+                        ChatMessage(
+                            "user",
+                            json.dumps(
+                                {
+                                    "observation": "output_truncated",
+                                    "completion_tokens": completion,
+                                    "max_tokens": self.config.max_response_tokens,
+                                    "message": (
+                                        f"上一轮输出在 {self.config.max_response_tokens} token 上限被截断且没有工具调用。"
+                                        "请把已有结论压缩成几句话，然后直接调用下一步工具；不要重新展开完整推理。"
+                                    ),
+                                },
+                                ensure_ascii=False,
+                            ),
+                        )
+                    )
+                    continue
                 if self._yield_for_pending_subagent(time_budget):
                     continue
                 nudge: dict[str, object] = {
@@ -1113,6 +1144,13 @@ class AgentSessionRunner:
             }
             if isinstance(value, dict):
                 payload["summary"] = value.get("summary") or ""
+                for key in ("rounds", "tool_calls"):
+                    if isinstance(value.get(key), int):
+                        payload[key] = value[key]
+                if value.get("truncated"):
+                    # A cut-off report is not a complete one; the marker at
+                    # the tail of a long summary is easy to miss.
+                    payload["truncated"] = True
                 if value.get("error"):
                     payload["error"] = value.get("error")
             messages.append(
@@ -1475,6 +1513,20 @@ def _new_token_totals() -> dict[str, int]:
             "cache_miss_tokens",
         )
     }
+
+
+def _output_truncated(usage: object, max_tokens: int) -> bool:
+    """A reply that used its whole completion budget (the transport surfaces no
+    ``finish_reason``, so the usage count is the signal)."""
+
+    if not isinstance(usage, Mapping):
+        return False
+    completion = usage.get("completion_tokens")
+    return (
+        isinstance(completion, (int, float))
+        and not isinstance(completion, bool)
+        and completion >= max_tokens
+    )
 
 
 def _accumulate_usage(total: dict[str, int], usage: object) -> None:

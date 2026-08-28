@@ -613,6 +613,37 @@ h4.subsection-title,
 .chart-tip {
  white-space: pre-line;
 }
+.modal.subagent-modal {
+ width: min(1180px, 96vw);
+ max-height: 94vh;
+}
+.modal.subagent-modal .body {
+ flex: 1;
+}
+.subagent-trace-head {
+ display: flex;
+ gap: 0.6rem;
+ align-items: baseline;
+ flex-wrap: wrap;
+ margin: 0.2rem 0 0.35rem;
+}
+.subagent-trace-box {
+ max-height: 68vh;
+}
+.trace-tool-call {
+ border-left: 2px solid var(--border);
+ padding-left: 0.6rem;
+}
+.tool-arg,
+.tool-result {
+ font-family: var(--mono);
+ font-size: 0.78rem;
+ color: var(--muted);
+ white-space: pre-wrap;
+ word-break: break-word;
+ max-height: 12rem;
+ overflow: auto;
+}
 .modal.prompt-modal {
  width: min(1280px, 96vw);
  max-height: 96vh;
@@ -1191,6 +1222,17 @@ textarea.directive.inject-input {
  text-align: left;
  cursor: pointer;
 }
+.trace-block .head.subagent-open {
+ cursor: pointer;
+}
+.subagent-meta,
+.subagent-clock {
+ font-variant-numeric: tabular-nums;
+}
+.subagent-open-hint {
+ color: var(--accent);
+ font-size: 0.8rem;
+}
 .trace-subagent-chip-title {
  display: flex;
  gap: 0.4rem;
@@ -1215,6 +1257,9 @@ textarea.directive.inject-input {
 .trace-subagent-chip:focus-visible {
  border-color: var(--accent);
  outline: none;
+}
+.trace-block .type.marker {
+ color: var(--warn);
 }
 .trace-block .type.raw {
  color: var(--warn);

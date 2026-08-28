@@ -339,8 +339,10 @@ class InteractiveRunnerTest(RunnerTestCase):
         self.assertEqual(context["prompt_override"], "custom prompt")
         self.assertEqual(context["resource_override"], {"max_steps": 2})
         self.assertEqual(context["session_key"], "epoch_001/fold_a")
-        for hook in ("step_gate_hook", "user_question_hook", "progress_hook", "session_timing"):
+        for hook in ("step_gate_hook", "progress_hook", "session_timing"):
             self.assertTrue(callable(context[hook]), hook)
+        # Auto mode has nobody to answer questions: no hook, no ask_user tool.
+        self.assertIsNone(context["user_question_hook"])
         control = read_control(self.control)
         self.assertEqual((control.directives, control.prompt_overrides, control.resource_overrides),
                          ({}, {}, {}))

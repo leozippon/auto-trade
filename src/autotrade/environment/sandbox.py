@@ -15,15 +15,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .artifacts import (
-    copy_artifact,
-    copy_model_artifacts,
-    init_from_template,
-    make_formal_artifacts_readonly,
-    restore_formal_artifacts_writable,
-)
 from .runtime import (
-    AGENT_TOP_LEVEL,
     ARTIFACT_TOP_LEVEL,
     RUNTIME_CACHE_DIR_NAMES,
     RUNTIME_CACHE_SUFFIXES,
@@ -174,15 +166,14 @@ class LocalSandbox:
             self.paths.train, self.paths.valid, self.paths.test, self.paths.snapshot_views,
             self.paths.current_snapshot, self.paths.parent_output, self.paths.parent_model_artifacts,
             self.paths.results, self.paths.steps, self.paths.workspace,
-            self.paths.agent_output, self.paths.model_artifacts, self.paths.runtime,
+            self.paths.runtime,
         ):
             path.mkdir(parents=True, exist_ok=True)
         self.paths.agent.chmod(0o555)
         self.paths.artifacts.chmod(0o755)
         self.paths.runtime.chmod(0o700)
         self.paths.test.chmod(0o700)
-        for path in (self.paths.workspace, self.paths.agent_output, self.paths.model_artifacts):
-            path.chmod(0o777)
+        self.paths.workspace.chmod(0o777)
         self.write_runtime_env(mode="local")
         return self.paths
 
@@ -212,28 +203,6 @@ class LocalSandbox:
         self.paths.runtime_env.chmod(0o444)
         return self.paths.runtime_env
 
-    def install_strategy_artifact(
-        self,
-        source_root: Path | None,
-        template_dir: Path,
-        *,
-        source_model_root: Path | None = None,
-    ) -> bool:
-        if source_root is None:
-            init_from_template(template_dir, self.paths.parent_output)
-            init_from_template(template_dir, self.paths.agent_output)
-            is_initial = True
-        else:
-            copy_artifact(source_root, self.paths.parent_output)
-            copy_artifact(source_root, self.paths.agent_output)
-            is_initial = False
-        copy_model_artifacts(source_model_root, self.paths.parent_model_artifacts)
-        copy_model_artifacts(source_model_root, self.paths.model_artifacts)
-        chmod_tree(self.paths.parent_output, file_mode=0o444, dir_mode=0o555)
-        chmod_tree(self.paths.parent_model_artifacts, file_mode=0o444, dir_mode=0o555)
-        self.unlock_agent_output()
-        return is_initial
-
     def install_replay_slot(self, slot: str, source_dir: Path) -> Path:
         if slot not in {"train", "valid", "test"}:
             raise ValueError(f"unknown replay slot: {slot}")
@@ -260,18 +229,15 @@ class LocalSandbox:
             link.unlink()
         link.symlink_to(source.resolve(), target_is_directory=True)
 
-    def lock_agent_output(self) -> None:
-        make_formal_artifacts_readonly(self.paths)
-
-    def unlock_agent_output(self) -> None:
-        restore_formal_artifacts_writable(self.paths)
-
     def collect_artifacts(self, dest_dir: Path) -> Path:
         """Collect runtime outputs into the host experiment run directory.
 
         Runtime separates trusted `/mnt/artifacts` from agent-writable
         `/mnt/agent`; the collected experiment directory keeps the historical
-        flat layout for reports and ledgers.
+        flat layout for reports and ledgers. The formal working copies live
+        inside the workspace (``workspace/output``, ``workspace/models``) and
+        are collected with it; the formal record of a strategy is its revision
+        in the artifact store, not this copy.
         """
         dest_dir.parent.mkdir(parents=True, exist_ok=True)
         if dest_dir.exists():
@@ -283,18 +249,8 @@ class LocalSandbox:
                 _copy_path(source, dest_dir / name)
         if self.paths.host_run_manifest.exists():
             _copy_path(self.paths.host_run_manifest, dest_dir / "host_run_manifest.json")
-        # Collect official output/ and models/ from the /mnt/agent siblings
-        # FIRST so an uncollectable file later in the adversarial workspace
-        # tree cannot displace them. Workspace copies never win.
-        # ``workspace`` is collected LAST and best-effort — a single
-        # unreadable/special file there is skipped and logged instead of
-        # aborting the whole collection.
-        for name in AGENT_TOP_LEVEL:
-            if name == _AGENT_WORKSPACE:
-                continue
-            source = self.paths.agent / name
-            if source.exists():
-                _copy_path(source, dest_dir / name)
+        # ``workspace`` is collected best-effort — a single unreadable/special
+        # file there is skipped and logged instead of aborting the collection.
         workspace_source = self.paths.agent / _AGENT_WORKSPACE
         if workspace_source.exists():
             try:
@@ -538,8 +494,7 @@ _COLLECT_IGNORE = shutil.ignore_patterns(
 )
 
 
-# The single agent-writable top-level tree; everything else under /mnt/agent
-# (output/, models/) is a controlled, chmod-locked artifact.
+# The single agent-writable tree under /mnt/agent.
 _AGENT_WORKSPACE = "workspace"
 
 

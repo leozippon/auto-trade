@@ -22,6 +22,9 @@ _BLOCK_SUMMARY_CHARS = 160
 _BLOCK_SUBAGENT_SUMMARY_CHARS = 400
 _BLOCK_DESCRIPTION_CHARS = 80
 _BLOCK_ERROR_CHARS = 240
+_BLOCK_ARGUMENT_CHARS = 600
+_BLOCK_RESULT_CHARS = 1_200
+SUBAGENT_TASK_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 _TERMINAL_SUBAGENT = frozenset({"completed", "timeout", "error", "cancelled"})
 
 
@@ -236,6 +239,157 @@ def project_trace_blocks(events: object) -> list[dict[str, object]]:
             interval.tools.add(event, seq)
     blocks.extend(interval.flush())
     return blocks
+
+
+def read_subagent_trace(path: Path, task_id: str) -> dict[str, object]:
+    """Project one sub-agent task's own events out of the parent trace."""
+
+    size = Path(path).stat().st_size
+    page = read_trace_page(path, offset=0, max_bytes=min(size or 1, MAX_BLOCK_READ_BYTES))
+    events = page.get("events")
+    projected = project_subagent_trace(events if isinstance(events, list) else [], task_id)
+    projected["truncated_window"] = not bool(page.get("eof"))
+    return projected
+
+
+def project_subagent_trace(events: object, task_id: str) -> dict[str, object]:
+    """One child's rounds in order, in the block model the parent view renders.
+
+    ``agent_output`` per model round and ``tool_group`` per batch of tool calls
+    reuse the parent renderers; ``marker`` and ``summary`` carry the wrap-up,
+    truncation and final report. Meta traces arrive already reduced to counts,
+    which the ``reduced`` flag reports rather than silently showing nothing.
+    """
+
+    if not isinstance(events, list):
+        events = []
+    header_interval = _Interval()
+    state = _SubagentState()
+    blocks: list[dict[str, object]] = []
+    tools = _ToolAcc()
+    calls: list[dict[str, object]] = []
+    matched = 0
+    reduced = False
+    seq = 0
+
+    def flush_tools() -> None:
+        nonlocal tools, calls
+        if tools:
+            blocks.append({**tools.to_block(), "calls": calls})
+        tools = _ToolAcc()
+        calls = []
+
+    for item in events:
+        seq += 1
+        if not isinstance(item, dict):
+            continue
+        event: dict[str, object] = item
+        if _subagent_event_task_id(event) != task_id:
+            continue
+        matched += 1
+        kind = _event_kind(event)
+        if kind in {"subagent_tool", "subagent_tool_started"}:
+            state.tools.add(event, seq)
+            tools.add(event, seq)
+            calls.append(_subagent_call_row(event))
+        _observe_subagent(header_interval, state, event, task_id, seq)
+        if kind == "subagent_llm":
+            flush_tools()
+            blocks.append(_subagent_round_block(event))
+            reduced = reduced or _is_reduced_round(event)
+        elif kind == "subagent_wrap_up":
+            flush_tools()
+            blocks.append(
+                _marker_block(
+                    event,
+                    "收尾提示",
+                    f"第 {_as_int(event.get('round'))} 轮，上限 "
+                    f"{_as_int(event.get('rounds_limit'))}：已要求子代理立即收尾。",
+                )
+            )
+        elif _subagent_phase(event) == "ended":
+            flush_tools()
+            if event.get("truncated") is True:
+                blocks.append(
+                    _marker_block(event, "输出截断", "子代理的模型输出触及长度上限。")
+                )
+            summary = _clip(event.get("summary"), _BLOCK_TEXT_CHARS)
+            summary_chars = _as_int(event.get("summary_chars"))
+            if summary or summary_chars:
+                blocks.append(
+                    {
+                        "kind": "summary",
+                        "ts": _event_ts(event),
+                        "status": _terminal_status(event),
+                        "text": summary,
+                        "text_chars": len(summary) if summary else summary_chars,
+                    }
+                )
+            reduced = reduced or (summary_chars > 0 and not summary)
+    flush_tools()
+    return {
+        "task_id": task_id,
+        "found": matched > 0,
+        "header": state.block,
+        "blocks": blocks,
+        "reduced": reduced,
+        "event_count": matched,
+    }
+
+
+def _subagent_round_block(event: dict[str, object]) -> dict[str, object]:
+    block: dict[str, object] = {
+        "kind": "agent_output",
+        "ts": _event_ts(event),
+        "round": _as_int(event.get("round")),
+        "text": _clip(event.get("content"), _BLOCK_TEXT_CHARS),
+        "reasoning_chars": _reasoning_chars(event),
+    }
+    chars = _as_int(event.get("content_chars"))
+    if chars and not block["text"]:
+        block["content_chars"] = chars
+    model = _event_model(event)
+    if model:
+        block["model"] = model
+    return block
+
+
+def _is_reduced_round(event: dict[str, object]) -> bool:
+    """Meta payloads keep the round's shape but drop its text."""
+
+    return "content" not in event and _as_int(event.get("content_chars")) > 0
+
+
+def _marker_block(event: dict[str, object], label: str, text: str) -> dict[str, object]:
+    return {"kind": "marker", "ts": _event_ts(event), "label": label, "text": text}
+
+
+def _subagent_call_row(event: dict[str, object]) -> dict[str, object]:
+    row: dict[str, object] = {
+        "name": _tool_name(event),
+        "status": _tool_outcome(event),
+        "ts": _event_ts(event),
+        "round": _as_int(event.get("round")),
+    }
+    arguments = _as_mapping(event.get("arguments"))
+    if arguments:
+        row["arguments"] = {
+            key: _clip(_as_text(value), _BLOCK_ARGUMENT_CHARS)
+            for key, value in arguments.items()
+        }
+    result = event.get("result")
+    if result is not None:
+        row["result"] = _clip(_as_text(result), _BLOCK_RESULT_CHARS)
+    summary = _tool_summary(event)
+    if summary:
+        row["error"] = summary
+    return row
+
+
+def _as_text(value: object) -> str:
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, ensure_ascii=False, default=str, sort_keys=True)
 
 
 _STATS_CACHE: dict[str, dict[str, object]] = {}
@@ -662,6 +816,7 @@ class _SubagentState:
         self.thinking = ""
         self.inherit_context: bool | None = None
         self.description = ""
+        self.resumed_from = ""
         self.started_at: object = None
         self.ended_at: object = None
         self.rounds = 0
@@ -731,6 +886,9 @@ def _absorb_subagent_text(state: _SubagentState, event: dict[str, object]) -> No
     description = _clip(event.get("description"), _BLOCK_DESCRIPTION_CHARS)
     if description:
         state.description = description
+    resumed_from = _clip(event.get("resumed_from"), _BLOCK_DESCRIPTION_CHARS)
+    if resumed_from:
+        state.resumed_from = resumed_from
 
 
 def _absorb_subagent_totals(state: _SubagentState, event: dict[str, object]) -> None:
@@ -777,6 +935,8 @@ def _refresh_subagent_block(state: _SubagentState) -> None:
         block["inherit_context"] = state.inherit_context
     if state.description:
         block["description"] = state.description
+    if state.resumed_from:
+        block["resumed_from"] = state.resumed_from
 
 
 def _subagent_phase(event: dict[str, object]) -> str:

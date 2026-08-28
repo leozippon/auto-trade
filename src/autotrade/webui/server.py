@@ -190,6 +190,9 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
                 for block in blocks
                 if isinstance(block, dict)
             ]
+        header = public.get("header")
+        if isinstance(header, dict):
+            public["header"] = identity.public_record(header, heldout_revealed=False)
         return public
 
     def _public_trace_download(path: Path, identity: PublicIdentity) -> Path:
@@ -357,6 +360,22 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
             tail_events=tail_events,
         )
         return {**_public_trace_blocks(blocks, identity), "trace_ref": trace_ref}
+
+    @app.get("/api/experiments/{experiment_id}/trace/subagents/{task_id}")
+    def get_subagent_trace(
+        experiment_id: str,
+        task_id: str,
+        run_id: str | None = Query(None),
+    ) -> dict[str, object]:
+        """One sub-agent's own rounds, redacted like the parent projection."""
+
+        if not traces.SUBAGENT_TASK_ID.fullmatch(task_id):
+            raise HTTPException(status_code=400, detail="invalid sub-agent task id")
+        path, _raw_run_id, trace_ref, identity = _trace_target(experiment_id, run_id)
+        projected = traces.read_subagent_trace(path, task_id)
+        if not projected.get("found"):
+            raise HTTPException(status_code=404, detail="unknown sub-agent task")
+        return {**_public_trace_blocks(projected, identity), "trace_ref": trace_ref}
 
     @app.get("/api/experiments/{experiment_id}/trace/stream")
     def get_trace_stream(

@@ -1278,14 +1278,12 @@ class LLMFoldDeveloper:
             def formal_guard():
                 guard = sandbox.formal_guard() if sandbox is not None else nullcontext()
                 with guard:
-                    local.lock_agent_output()
                     chmod_tree(output_dir, file_mode=0o444, dir_mode=0o555)
                     chmod_tree(models_dir, file_mode=0o444, dir_mode=0o555)
                     try:
                         yield
                     finally:
                         restore_working_artifacts_writable(output_dir, models_dir)
-                        local.unlock_agent_output()
 
             modification = ModificationCheckTool(
                 output_dir,
@@ -1876,8 +1874,8 @@ class LLMMetaLearner:
                             for item in sidecars
                         ],
                     },
-                    "strategy_working_copy": "/mnt/agent/output",
-                    "model_working_copy": "/mnt/agent/models",
+                    "strategy_working_copy": "/mnt/agent/workspace/output",
+                    "model_working_copy": "/mnt/agent/workspace/models",
                     "previous_prior": bool(previous_prior),
                 },
                 "prior_output": "/mnt/agent/workspace/PRIOR.md",
@@ -2305,6 +2303,7 @@ def _safe_meta_trace_payload(
         | {"rounds", "tool_calls", "llm_calls", "provider", "usage_totals", "error", "truncated"},
         "subagent_attempt": {"attempt", "role", "ok", "status", "task_id", "error"},
         "delegation_reminder": {"own_work_calls", "running_children", "queued_children"},
+        "output_truncated": {"call_index", "completion_tokens", "max_tokens"},
         "llm_call_started": {"call_index", "status"},
         "llm_call": {"call_index", "status", "model", "usage", "tool_names", "error"},
         "tool_call_started": {"tool", "tool_call_id", "status"},
@@ -2342,7 +2341,7 @@ def _safe_meta_trace_payload(
     if event_type in {"llm_call", "subagent_llm"} and isinstance(payload.get("content"), str):
         kept["content_chars"] = len(payload["content"])
     arguments = payload.get("arguments")
-    if event_type == "tool_call" and isinstance(arguments, Mapping):
+    if event_type in {"tool_call", "subagent_tool"} and isinstance(arguments, Mapping):
         kept["argument_keys"] = sorted(str(key) for key in arguments)
     return kept
 
