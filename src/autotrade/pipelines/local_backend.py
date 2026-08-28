@@ -962,7 +962,6 @@ class FoldBacktestTool(SessionTimeBudgetAware):
         }
         directive = ""
         if self.request.step_gate_hook is not None:
-            # The console step gate still renders a `complete` flag.
             directive = self.request.step_gate_hook(
                 len(self.steps), dict(summary)
             )
