@@ -86,7 +86,7 @@ class SandboxSpec:
     build_generation_id: str = ""
     user: str = "61000:61000"
     network: str = "none"
-    cpus: float = 4.0
+    cpus: float = 8.0
     memory: str = "8g"
     pids_limit: int = 512
     tmpfs_size: str = "1g"

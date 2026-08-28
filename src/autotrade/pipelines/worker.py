@@ -1553,10 +1553,10 @@ def _llm_settings(
     sandbox = SandboxSpec(
         image=str(params.get("agent_sandbox_image") or DEFAULT_IMAGE),
         cpus=_positive_float(
-            params.get("agent_sandbox_cpus", 4.0), "agent_sandbox_cpus"
+            params.get("agent_sandbox_cpus", SandboxSpec().cpus), "agent_sandbox_cpus"
         ),
         memory=_memory_limit(
-            params.get("agent_sandbox_memory", "8g"), "agent_sandbox_memory"
+            params.get("agent_sandbox_memory", SandboxSpec().memory), "agent_sandbox_memory"
         ),
         pids_limit=_positive_int(
             params.get("agent_sandbox_pids", 512), "agent_sandbox_pids"
