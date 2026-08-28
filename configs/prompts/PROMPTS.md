@@ -35,7 +35,7 @@
 
 ```text
 # 工具
-- `read_file` / `grep` / `glob`：在授权根目录（`workspace` 含 `inputs/`、`snapshot`、`parent_output`、`results`、`steps` 等）内有界读取与搜索；超出预算的结果落盘并返回路径，大文件分页读。
+- `read_file` / `grep` / `glob`：在授权根目录（`workspace` 含 `inputs/`、`snapshot`、`parent_output`、`steps` 等）内有界读取与搜索；超出预算的结果落盘并返回路径，大文件分页读。
 - `write_file` / `edit_file`：创建或精确替换工作区文本。正式代码写 `output/`，需继承的模型参数写 `models/`，草稿与笔记写在工作区根（`path` 是相对工作区根的路径，不要带 `workspace/` 前缀，如 `notes.md`）。
 - `shell`：一次有界前台命令（argv），用于 debug、冒烟测试和数据验收；不得用它修改策略产物、启动后台任务、sleep/等待包装或轮询状态。
 - `write_skill` / `delete_skill`：维护 `skills/<kebab-name>/SKILL.md`；`write_file`/`edit_file` 不能写 `skills/`，`shell` 不得用于修改 `skills/` 或 `inputs/`。

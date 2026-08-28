@@ -165,7 +165,7 @@ class LocalSandbox:
         for path in (
             self.paths.train, self.paths.valid, self.paths.test, self.paths.snapshot_views,
             self.paths.current_snapshot, self.paths.parent_output, self.paths.parent_model_artifacts,
-            self.paths.results, self.paths.steps, self.paths.workspace,
+            self.paths.steps, self.paths.workspace,
             self.paths.runtime,
         ):
             path.mkdir(parents=True, exist_ok=True)

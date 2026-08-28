@@ -1314,6 +1314,20 @@ def test_public_identity_keeps_cjk_slash_lists_and_redacts_host_paths(
         assert token in kept
     assert omitted not in kept
 
+    # Two segments is the whole threshold: the shortest host path still goes.
+    assert identity.public_text("cat /srv/dump.log 后再看") == f"cat {omitted} 后再看"
+    # A single-segment token is prose or arithmetic, never a host path.
+    formulas = identity.public_text(
+        'k_mid=(C-O)/C；z=(x-mean)/std；pd.read_parquet(asof_dir + "/daily")'
+    )
+    assert omitted not in formulas
+    # An allow-listed sandbox root followed by CJK must not be absorbed.
+    assert identity.public_text("读 /mnt/snapshot。pandas") == "读 /mnt/snapshot。pandas"
+    # Container FHS frames stay readable: they are image-fixed, not host identity.
+    traceback_frame = "/usr/local/lib/python3.11/x.py:12: RuntimeWarning"
+    assert identity.public_text(traceback_frame) == traceback_frame
+    assert identity.public_text("2>/dev/null 会丢证据") == "2>/dev/null 会丢证据"
+
 
 class WebuiBackendTest(unittest.TestCase):
     """HITL console backend: registry read-models, lifecycle guards, API routes.
@@ -2293,10 +2307,12 @@ class WebuiBackendTest(unittest.TestCase):
             400,
         )
 
+        # A host path has at least two segments; a bare ``/secret`` is prose or
+        # arithmetic far more often than a path, and cannot identify a host.
         embedded_host_paths = (
             "/var/lib/private/result.json",
-            "/secret",
-            "path:/secret",
+            "/srv/secret",
+            "path:/srv/secret",
             "path:/var/lib/private/result.json",
             "file:///tmp/private/result.json",
             "file://server/share/private.txt",

@@ -46,15 +46,17 @@ SENSITIVE_KEYS = {
     "proxy_url",
 }
 
+# Everything the Agent session actually writes under ``/mnt/artifacts``. The
+# AgentTrace is not here: it is written straight to the experiment's
+# ``artifacts/traces/<run_id>.jsonl`` (see :func:`agent_trace_path`), never
+# into the sandbox.
 ARTIFACT_TOP_LEVEL = (
     "run_manifest.json",
     "runtime_env.json",
     "data_summary.json",
     "unit_reference.json",
-    "agent_trace.jsonl",
     "parent_output",
     "parent_models",
-    "results",
     "steps",
     "logs",
 )
@@ -210,10 +212,6 @@ class SandboxPaths:
         return self.artifacts / "data_summary.json"
 
     @property
-    def agent_trace(self) -> Path:
-        return self.artifacts / "agent_trace.jsonl"
-
-    @property
     def parent_output(self) -> Path:
         return self.artifacts / "parent_output"
 
@@ -221,9 +219,10 @@ class SandboxPaths:
     def parent_model_artifacts(self) -> Path:
         return self.artifacts / "parent_models"
 
-    @property
-    def results(self) -> Path:
-        return self.artifacts / "results"
+    # There is no sandbox ``results`` directory: a full Validation record is
+    # written host-side to the experiment's ``artifacts/results/`` and reaches
+    # the Agent as the ``validation/result.json`` attachment inside the Step
+    # node it belongs to (search root ``steps``).
 
     @property
     def steps(self) -> Path:

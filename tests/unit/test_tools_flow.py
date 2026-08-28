@@ -56,7 +56,6 @@ def build_sandbox(root: Path) -> tuple[SandboxPaths, SearchRoots, SafeWorkspace]
         paths.artifacts,
         paths.parent_output,
         paths.parent_model_artifacts,
-        paths.results,
         paths.steps,
         paths.logs,
     ):
@@ -440,15 +439,22 @@ class StructuredSearchToolTest(unittest.TestCase):
             paths, roots, registry = self._tools(Path(tmp))
             (paths.current_snapshot / "manifest.json").write_text('{"kind": "decision_input"}\n', encoding="utf-8")
             (paths.parent_output / "main.py").write_text("# parent strategy\n", encoding="utf-8")
-            (paths.results / "valid_000.json").write_text('{"total_return": 0.0}\n', encoding="utf-8")
             (paths.steps / "tree.txt").write_text("- epoch_001__fold_ref_ab__run_x__valid_000\n", encoding="utf-8")
-            for root in ("snapshot", "parent_output", "results", "steps"):
+            for root in ("snapshot", "parent_output", "steps"):
                 self.assertIn(root, roots.names)
             snapshot = registry.invoke("read_file", {"root": "snapshot", "path": "manifest.json"})
             self.assertTrue(snapshot.ok, snapshot.error)
             self.assertIn("decision_input", snapshot.value["content"])
             steps = registry.invoke("read_file", {"root": "steps", "path": "tree.txt"})
             self.assertIn("fold_ref_ab", steps.value["content"])
+            # A Validation record reaches the Agent as the Step node's own
+            # attachment; there is no sandbox ``results`` root to waste a call on.
+            self.assertNotIn("results", roots.names)
+            self.assertFalse((paths.artifacts / "results").exists())
+            rejected = registry.invoke("read_file", {"root": "results", "path": "valid_000.json"})
+            self.assertFalse(rejected.ok)
+            self.assertIn("root must be one of", rejected.error)
+            self.assertNotIn("'results'", rejected.error)
 
     def test_standalone_authoring_degrades_to_the_workspace_root(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

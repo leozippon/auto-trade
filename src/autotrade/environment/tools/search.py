@@ -16,8 +16,9 @@ is a budget/parallelism boundary, not redundancy.
 The read-only roots reach beyond the writable workspace on purpose: the Agent
 authors against PIT decision inputs and prior-fold artifacts, so it must be
 able to locate and read them (``snapshot``/``train``/``valid`` PIT views,
-``parent_output``/``parent_models`` inherited artifacts, ``results`` backtest
-outputs and the ``steps`` lineage) without shelling out.
+``parent_output``/``parent_models`` inherited artifacts and the ``steps``
+lineage, which carries each Validation's own result attachment) without
+shelling out.
 """
 
 from __future__ import annotations
@@ -58,13 +59,12 @@ SEARCH_ROOTS = (
     "artifacts",
     "parent_output",
     "parent_models",
-    "results",
     "steps",
 )
 GREP_OUTPUT_MODES = ("content", "files", "count")
 # Read-only mounts populated before the session starts: offered only when
-# non-empty (a Meta session mounts no snapshot). ``artifacts``/``results``/
-# ``steps`` fill during the session and are offered whenever they exist.
+# non-empty (a Meta session mounts no snapshot). ``artifacts``/``steps`` fill
+# during the session and are offered whenever they exist.
 _MOUNTED_ROOTS = frozenset({"snapshot", "train", "valid", "parent_output", "parent_models"})
 # Roots that live outside the writable workspace tree; resolved from the
 # sandbox layout when one is available.
@@ -76,7 +76,6 @@ _LAYOUT_ROOTS = {
     "artifacts": "artifacts",
     "parent_output": "parent_output",
     "parent_models": "parent_model_artifacts",
-    "results": "results",
     "steps": "steps",
 }
 

@@ -147,7 +147,6 @@ def test_local_sandbox_runtime_contract_has_no_git_and_no_image_record(tmp_path:
     assert {path.name for path in paths.artifacts.iterdir()} == {
         "parent_models",
         "parent_output",
-        "results",
         "runtime_env.json",
         "steps",
     }

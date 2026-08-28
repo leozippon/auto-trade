@@ -56,11 +56,23 @@ _ALLOWED_PUBLIC_PATH_PREFIXES = (
     "/mnt/artifacts",
     "/mnt/snapshot",
     "/mnt/snapshots",
+    # Container FHS roots: fixed by the sandbox image, identical on every
+    # machine, so they carry no host identity. Keeping them readable preserves
+    # traceback frames (`/usr/local/lib/python3.11/...`) and `2>/dev/null`
+    # in the console. The host interpreter lives under a home directory and is
+    # still redacted.
+    "/dev",
+    "/usr",
 )
 _FILE_URI = re.compile(r"file://(?:[^\s\"'`<>])+", re.IGNORECASE)
+# A host path has at least two segments and an ASCII path body. Requiring the
+# second segment keeps division and prose out (`(C-O)/C`, `(x-mean)/std`,
+# `asof_dir + "/daily"`); restricting the body to ASCII path characters stops a
+# trailing CJK run from being absorbed into the token, which would otherwise
+# make an allow-listed root (`/mnt/snapshot。pandas`) fail the prefix test.
 _POSIX_PATH = re.compile(
-    r"(?<![A-Za-z0-9_/])/[A-Za-z._][^/\s\"'`<>|()\[\]{},;]*"
-    r"(?:/[^/\s\"'`<>|()\[\]{},;]+)*"
+    r"(?<![A-Za-z0-9_/])/[A-Za-z._][A-Za-z0-9._+@%~-]*"
+    r"(?:/[A-Za-z0-9._+@%~-]+)+"
 )
 _WINDOWS_PATH = re.compile(
     r"(?<![A-Za-z0-9_])(?:[A-Za-z]:[\\/]|\\\\)"
