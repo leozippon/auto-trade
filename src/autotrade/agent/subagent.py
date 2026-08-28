@@ -6,7 +6,8 @@ runner, and the runner starts the child in the background and returns at once.
 Roles are the unified set ``auditor``, ``developer``, ``general-purpose``,
 ``Explore``; ``Explore`` is the optional read-only discovery role. Depth is
 one. The child shares the parent SafeWorkspace, SessionBudgetLLM calls,
-inference time budget, and Trace. A finished child keeps its transcript for
+inference time budget, output ceiling, context window with its compaction
+gateway and thresholds, and Trace. A finished child keeps its transcript for
 the session so ``resume=<task_id>`` can hand it a follow-up task. Failures
 return a structured observation; they do not finish the parent session.
 """
@@ -30,6 +31,7 @@ from autotrade.environment.llm import (
     ToolCall,
     clamp_requested_max_tokens,
     context_request_fits,
+    is_context_overflow_error,
 )
 from autotrade.environment.runtime import sanitize_for_log
 from autotrade.environment.time_budget import (
@@ -47,6 +49,7 @@ from autotrade.environment.tools.base import (
 )
 
 from .compact import (
+    ContextCompactor,
     drop_trailing_unanswered_tool_calls,
     fit_tool_results_to_context,
     safe_error_summary,
@@ -59,12 +62,14 @@ SUBAGENT_THINKING_LEVELS = ("off", "low", "medium", "xhigh")
 # never distinct from xhigh.
 _LEGACY_THINKING_ALIASES = {"minimal": "low", "high": "xhigh", "max": "xhigh"}
 DEFAULT_SUBAGENT_MAX_CONCURRENT = 4
-# Default child turn budget when the parent omits ``max_turns``. Productive
-# children in the reviewed traces finished well inside 20 rounds; the ones
-# that stalled their parent ran 30-40 rounds. The last ``SUBAGENT_GRACE_ROUNDS``
-# turns start with a wrap-up notice (Pi's grace-turn pattern); an explicit
-# ``max_turns`` is honoured as given.
-DEFAULT_SUBAGENT_MAX_ROUNDS = 24
+# Default child turn budget when the parent omits ``max_turns``. A child has
+# the parent's context window and compaction, so the round cap bounds work,
+# not memory: under the earlier cap of 24, one child in eleven hit the wrap-up
+# notice while still issuing tool calls every round at 25k-144k prompt
+# tokens, i.e. bounded work was cut short, not wandering. The last
+# ``SUBAGENT_GRACE_ROUNDS`` turns start with a wrap-up notice (Pi's grace-turn
+# pattern); an explicit ``max_turns`` is honoured as given.
+DEFAULT_SUBAGENT_MAX_ROUNDS = 48
 SUBAGENT_GRACE_ROUNDS = 2
 DEFAULT_SUBAGENT_THINKING = "medium"
 SUBAGENT_DESCRIPTION_MAX_CHARS = 200
@@ -170,7 +175,9 @@ AGENT_TOOL_DESCRIPTION = (
     "用于读库、探索、计算、实现或审计等能独立完成的任务：把大量阅读、计算和实现留在子代理里以保护主上下文；"
     "目标已知的单个文件直接用 read_file/grep/glob；不要重复子代理正在做的搜索。"
     "同一轮可发起多个（默认同时运行 4 个，超出排队），并行的子代理范围须互斥。"
-    "省略 max_turns 时子代理最多 24 轮：倒数第 2 轮起收到收尾提示，到上限后强制一次简洁总结；长任务请拆分而不是加大轮次。"
+    "子代理拥有与你相同的上下文窗口、压缩阈值和输出上限（达到阈值时自动压缩，不会因上下文写满而失败），"
+    f"可以承担较大的有界块；省略 max_turns 时最多 {DEFAULT_SUBAGENT_MAX_ROUNDS} 轮：倒数第 {SUBAGENT_GRACE_ROUNDS} 轮起收到收尾提示，"
+    "到上限后强制一次简洁总结。几个并行的有界子代理仍好过一个很长的串行子代理；确需更多轮次时显式给 max_turns。"
     "角色能力：developer/general-purpose 有 Sandbox shell（可跑 Python 读 PIT parquet、算 IC 表、做冒烟测试）并可写策略、模型与 skills；"
     "auditor/Explore 只能用 glob/grep/read_file 读文本与代码，不能执行任何命令——任何需要计算的任务用 general-purpose 或 developer；"
     "Meta 会话中全部角色只读。子代理只看到自己的角色提示和你的 task（inherit_context=true 时另带你的对话），"
@@ -206,7 +213,11 @@ AGENT_TOOL_SPEC = ToolSpec(
             "max_turns": {
                 "type": "integer",
                 "minimum": 1,
-                "description": "子代理最多的模型轮次；省略则 24 轮（倒数第 2 轮起收到收尾提示，上限后强制简洁总结），显式值按原值生效。",
+                "description": (
+                    f"子代理最多的模型轮次；省略则 {DEFAULT_SUBAGENT_MAX_ROUNDS} 轮"
+                    f"（倒数第 {SUBAGENT_GRACE_ROUNDS} 轮起收到收尾提示，上限后强制简洁总结），显式值按原值生效。"
+                    "子代理的上下文与你同样大并自动压缩，轮次只约束工作量。"
+                ),
             },
             "thinking": {
                 "type": "string",
@@ -344,7 +355,8 @@ class SubAgentConfig:
     # parent conversation), clamped per call to the remaining context.
     max_tokens: int | None = None
     # Turn budget for a child whose launch omits ``max_turns``; None = only the
-    # parent session deadline bounds it.
+    # parent session deadline bounds it. Context is not a bound: a child
+    # compacts at the parent's threshold (``SubAgentEngine.compactor``).
     max_rounds: int | None = DEFAULT_SUBAGENT_MAX_ROUNDS
     # None = no extra child wall clock; the parent time budget is the cap.
     deadline_seconds: float | None = None
@@ -378,6 +390,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
         event_sink: Callable[[str, dict[str, object]], None] | None = None,
         mode: str = "fold",
         cancel_event: threading.Event | None = None,
+        compactor: ContextCompactor | None = None,
     ) -> None:
         if mode not in SUBAGENT_MODES:
             raise ValueError("Sub-agent mode must be fold or meta")
@@ -390,14 +403,20 @@ class SubAgentEngine(SessionTimeBudgetAware):
         self.config = config or SubAgentConfig()
         self.deadline_at = deadline_at
         self.event_sink = event_sink
+        # The parent session's compactor (gateway and thresholds); each child
+        # runs a fresh instance of it over its own conversation. The runner
+        # hands its own compactor down when none is given here.
+        self.compactor = compactor
         self._cancel_event = cancel_event or threading.Event()
-        bindings = (
-            (TimeBudgetBinding("subagent_llm", llm.session_time_budget),)
-            if isinstance(llm, SessionTimeBudgetAware)
-            else ()
-        )
+        bindings: list[TimeBudgetBinding] = []
+        if isinstance(llm, SessionTimeBudgetAware):
+            bindings.append(TimeBudgetBinding("subagent_llm", llm.session_time_budget))
+        if compactor is not None:
+            bindings.append(
+                TimeBudgetBinding("subagent_compactor", compactor.session_time_budget)
+            )
         self.time_budget = validate_time_budget_bindings(
-            time_budget, bindings, owner="Sub-agent"
+            time_budget, tuple(bindings), owner="Sub-agent"
         )
         self._validate_tools()
 
@@ -461,6 +480,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
         thinking = normalize_subagent_thinking(thinking)
         llm = llm_with_thinking(self.llm, thinking)
         thinking_applied = llm is not self.llm
+        compactor = self.compactor.fresh() if self.compactor is not None else None
         started = {
             "task_id": task_id,
             "role": role,
@@ -549,14 +569,17 @@ class SubAgentEngine(SessionTimeBudgetAware):
                         },
                     )
                 provider_tools = self._provider_tools(allowed)
-                output_tokens = self._output_tokens(llm, messages, provider_tools)
-                messages, _context_edit = fit_tool_results_to_context(
+                messages, output_tokens = self._fit_context(
+                    compactor,
                     llm,
                     messages,
-                    tools=provider_tools,
-                    max_tokens=output_tokens,
+                    provider_tools,
+                    deadline,
+                    task_id=task_id,
+                    role=role,
+                    round_index=rounds,
+                    parent_call_id=parent_call_id,
                 )
-                output_tokens = self._output_tokens(llm, messages, provider_tools)
                 try:
                     response = llm.complete(
                         messages,
@@ -749,14 +772,17 @@ class SubAgentEngine(SessionTimeBudgetAware):
                     )
                 )
                 provider_tools = self._provider_tools(allowed)
-                output_tokens = self._output_tokens(llm, messages, provider_tools)
-                messages, _context_edit = fit_tool_results_to_context(
+                messages, output_tokens = self._fit_context(
+                    compactor,
                     llm,
                     messages,
-                    tools=provider_tools,
-                    max_tokens=output_tokens,
+                    provider_tools,
+                    deadline,
+                    task_id=task_id,
+                    role=role,
+                    round_index=rounds,
+                    parent_call_id=parent_call_id,
                 )
-                output_tokens = self._output_tokens(llm, messages, provider_tools)
                 response = llm.complete(
                     messages,
                     tools=provider_tools,
@@ -818,6 +844,67 @@ class SubAgentEngine(SessionTimeBudgetAware):
             },
         )
         return result, tuple(messages)
+
+    def _fit_context(
+        self,
+        compactor: ContextCompactor | None,
+        llm: LLMProxy,
+        messages: list[ChatMessage],
+        provider_tools: tuple[dict[str, object], ...],
+        deadline: float,
+        *,
+        task_id: str,
+        role: str,
+        round_index: int,
+        parent_call_id: str | None,
+    ) -> tuple[list[ChatMessage], int]:
+        """The parent loop's context discipline before one child request.
+
+        Semantic compaction at the shared threshold (forced when the request
+        does not fit), then the emergency in-place tool-result summary; a
+        request that still does not fit fails at the gateway, which ends the
+        child instead of being retried.
+        """
+
+        output_tokens = self._output_tokens(llm, messages, provider_tools)
+        identity = {
+            "task_id": task_id,
+            "role": role,
+            "round": round_index,
+            "parent_call_id": parent_call_id,
+        }
+        if compactor is not None:
+            fits, _prompt_tokens, _window = context_request_fits(
+                llm, messages, tools=provider_tools, max_tokens=output_tokens
+            )
+            result = compactor.compact(
+                messages,
+                tools=provider_tools,
+                remaining_seconds=self._remaining_seconds(deadline),
+                force=not fits,
+            )
+            if result is not None:
+                # Nested: the compaction record's own ``status``/``summary``
+                # must not read as the child's outcome or report.
+                self._emit(
+                    "subagent_context_compaction",
+                    {**identity, "compaction": dict(result.event)},
+                )
+                messages = list(result.messages)
+                output_tokens = self._output_tokens(llm, messages, provider_tools)
+        messages, edit = fit_tool_results_to_context(
+            llm, messages, tools=provider_tools, max_tokens=output_tokens
+        )
+        if edit:
+            self._emit("subagent_context_edit", {**identity, "context_edit": edit})
+            output_tokens = self._output_tokens(llm, messages, provider_tools)
+        return messages, output_tokens
+
+    def _remaining_seconds(self, local_deadline: float) -> float:
+        remaining = local_deadline - time.monotonic()
+        if self.time_budget is not None:
+            remaining = min(remaining, self.time_budget.remaining())
+        return max(remaining, 0.0)
 
     def _output_tokens(
         self,
@@ -941,6 +1028,10 @@ def _output_truncated(usage: object, max_tokens: int) -> bool:
 
 def _is_nonretryable_subagent_error(exc: Exception) -> bool:
     if isinstance(exc, (SessionInterrupt, TimeoutError)):
+        return True
+    if is_context_overflow_error(exc):
+        # Compaction and tool-result editing already ran; the next round
+        # would only overflow again.
         return True
     text = f"{exc} {safe_error_summary(exc)}"
     return _CALL_BUDGET_EXHAUSTED in text

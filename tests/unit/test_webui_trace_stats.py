@@ -1287,6 +1287,22 @@ def _child_events(*, terminal: bool = True, legacy: bool = False) -> list[dict[s
                 "rounds_limit": 3,
             },
             {
+                # The compaction record is nested: its own status/summary must
+                # not read as the child's outcome or report.
+                "event_type": "subagent_context_compaction",
+                "ts": "2026-09-01T10:01:20+00:00",
+                "task_id": "agent_1",
+                "round": 3,
+                "compaction": {
+                    "status": "error",
+                    "error": "compaction response is empty",
+                    "summary": "should not become the child's report",
+                    "estimated_tokens": 201000,
+                    "messages_before": 40,
+                    "messages_after": 40,
+                },
+            },
+            {
                 "event_type": names["end"],
                 "ts": "2026-09-01T10:02:00+00:00",
                 "task_id": "agent_1",
@@ -1312,16 +1328,20 @@ def test_project_subagent_trace_orders_rounds_tools_and_summary() -> None:
     projected = traces.project_subagent_trace(_child_events(), "agent_1")
     assert projected["found"] is True
     assert projected["reduced"] is False
-    # Two markers: the wrap-up prompt, then the output-truncation notice.
+    # Three markers: the wrap-up prompt, the child's own context compaction,
+    # then the output-truncation notice.
     assert [block["kind"] for block in projected["blocks"]] == [
         "agent_output",
         "tool_group",
         "agent_output",
         "marker",
         "marker",
+        "marker",
         "summary",
     ]
-    first, group, second, marker, cut_off, summary = projected["blocks"]
+    first, group, second, marker, compaction, cut_off, summary = projected["blocks"]
+    assert compaction["label"] == "上下文压缩"
+    assert "第 3 轮：error，消息 40→40，估算 201000 tokens" in compaction["text"]
     assert first["round"] == 1 and first["text"] == "先看数据布局"
     assert second["round"] == 2
     assert [row["name"] for row in group["tools"]] == ["read_file", "grep"]
@@ -1437,6 +1457,7 @@ def test_subagent_trace_route_projects_redacts_and_guards(tmp_path: Path) -> Non
         "agent_output",
         "tool_group",
         "agent_output",
+        "marker",
         "marker",
         "marker",
         "summary",

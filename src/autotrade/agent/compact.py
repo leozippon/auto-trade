@@ -112,6 +112,16 @@ class ContextCompactor(SessionTimeBudgetAware):
             return self.llm.session_time_budget
         return None
 
+    def fresh(self) -> ContextCompactor:
+        """A compactor over the same gateway and config with zero counters.
+
+        One conversation, one compactor: the call cap and failure circuit are
+        per conversation and the counters are not thread-safe, so a child
+        session derives its own instance instead of sharing the parent's.
+        """
+
+        return ContextCompactor(self.llm, self.config)
+
     def should_compact(
         self,
         messages: Sequence[ChatMessage],

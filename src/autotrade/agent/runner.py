@@ -288,6 +288,11 @@ class AgentSessionRunner:
         if self.subagent is not None:
             if self.subagent.event_sink is None:
                 self.subagent.event_sink = self._locked_event_sink
+            if self.subagent.compactor is None and compactor is not None:
+                # Children get the parent's context window discipline: the
+                # same compaction gateway and thresholds, one fresh instance
+                # per child conversation.
+                self.subagent.compactor = compactor
             self.tools.register(AgentTool(self._launch_subagent))
         bindings: list[TimeBudgetBinding] = []
         if isinstance(llm, SessionTimeBudgetAware):

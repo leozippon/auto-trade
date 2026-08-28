@@ -307,6 +307,20 @@ def project_subagent_trace(events: object, task_id: str) -> dict[str, object]:
                     f"{_as_int(event.get('rounds_limit'))}：已要求子代理立即收尾。",
                 )
             )
+        elif kind == "subagent_context_compaction":
+            flush_tools()
+            compaction = _as_mapping(event.get("compaction"))
+            blocks.append(
+                _marker_block(
+                    event,
+                    "上下文压缩",
+                    f"第 {_as_int(event.get('round'))} 轮："
+                    f"{compaction.get('status') or 'unknown'}，消息 "
+                    f"{_as_int(compaction.get('messages_before'))}→"
+                    f"{_as_int(compaction.get('messages_after'))}，估算 "
+                    f"{_as_int(compaction.get('estimated_tokens'))} tokens。",
+                )
+            )
         elif _subagent_phase(event) == "ended":
             flush_tools()
             if event.get("truncated") is True:

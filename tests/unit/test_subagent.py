@@ -17,7 +17,6 @@ from autotrade.agent.subagent import (
     DEFAULT_SUBAGENT_THINKING,
     SUBAGENT_DESCRIPTION_MAX_CHARS,
     SUBAGENT_ROLES,
-    SUBAGENT_SYSTEM_PROMPT,
     SUBAGENT_THINKING_LEVELS,
     META_SUBAGENT_SYSTEM_PROMPT,
     SubAgentConfig,
@@ -49,6 +48,7 @@ from autotrade.environment.tools import (
 from autotrade.environment.time_budget import InferenceTimeBudget
 from autotrade.pipelines.local_backend import (
     SessionBudgetLLM,
+    SessionCallBudget,
     build_fold_subagent_tools,
     build_meta_subagent_tools,
 )
@@ -2397,13 +2397,22 @@ def test_child_output_truncation_is_marked_and_never_silent() -> None:
     assert "output budget exhausted" in result["error"] and result["tool_calls"] == 0
 
 
-def test_child_turns_default_to_24_with_grace_wrap_up() -> None:
+def test_child_turns_default_to_48_with_grace_wrap_up() -> None:
     from autotrade.agent.subagent import DEFAULT_SUBAGENT_MAX_ROUNDS, SUBAGENT_GRACE_ROUNDS
 
-    assert DEFAULT_SUBAGENT_MAX_ROUNDS == 24 and SUBAGENT_GRACE_ROUNDS == 2
-    assert SubAgentConfig().max_rounds == 24
-    assert "24 轮" in AGENT_TOOL_DESCRIPTION
-    assert "24 轮" in AGENT_TOOL_SPEC.input_schema["properties"]["max_turns"]["description"]
+    assert DEFAULT_SUBAGENT_MAX_ROUNDS == 48 and SUBAGENT_GRACE_ROUNDS == 2
+    assert SubAgentConfig().max_rounds == 48
+    assert "48 轮" in AGENT_TOOL_DESCRIPTION and "24 轮" not in AGENT_TOOL_DESCRIPTION
+    max_turns_field = AGENT_TOOL_SPEC.input_schema["properties"]["max_turns"]["description"]
+    assert "48 轮" in max_turns_field and "自动压缩" in max_turns_field
+    # Parents learn that a child has their context window, and that several
+    # bounded parallel children still beat one long serial child.
+    assert "相同的上下文窗口" in AGENT_TOOL_DESCRIPTION
+    assert "并行的有界子代理仍好过一个很长的串行子代理" in AGENT_TOOL_DESCRIPTION
+    assert "并行的有界子代理仍好过一个很长的串行子代理" in FOLD_WORKFLOW_SECTION
+    assert "并行的有界子代理仍好过一个很长的串行子代理" in build_system_prompt(
+        mode="meta", experiment_facts={}
+    )
 
     busy = ScriptedLLM(
         [
@@ -2461,6 +2470,147 @@ def test_child_turns_default_to_24_with_grace_wrap_up() -> None:
     ).run("dig", role="auditor", max_rounds=2)
     assert result["rounds"] == 2 and result["summary"] == "done"
     assert not any("还剩" in str(m.content) for call in short.calls for m in call["messages"])
+
+
+def _tool_round(index: int) -> ProviderResponse:
+    return ProviderResponse(tool_calls=(ToolCall(f"s{index}", "shell", {"argv": ["ls"]}),))
+
+
+def test_child_compacts_at_the_shared_threshold_with_fresh_counters_per_launch() -> None:
+    """A child has the parent's context window: at the parent's threshold it
+    compacts with the parent's gateway and config instead of failing when the
+    window fills, every launch gets its own counters, and the record reaches
+    the trace nested so its status never reads as the child's outcome."""
+    from autotrade.agent.compact import (
+        ContextCompactionConfig,
+        ContextCompactor,
+        is_compaction_message,
+    )
+    from autotrade.pipelines.local_backend import _safe_meta_trace_payload
+
+    # Production shape: every model role shares one session budget, and the
+    # engine refuses a compactor bound to another budget.
+    shared = SessionCallBudget(
+        max_calls=40, time_budget=InferenceTimeBudget(duration_seconds=600)
+    )
+    summary = "## 目标\ncontinue\n\n## 下一步\n- finish"
+    compact_llm = ScriptedLLM([ProviderResponse(content=summary)] * 2)
+    parent_compactor = ContextCompactor(
+        SessionBudgetLLM(compact_llm, budget=shared, role="compact"),
+        ContextCompactionConfig(
+            token_threshold=1, min_messages=4, keep_recent_messages=2, max_calls=1
+        ),
+    )
+    child_llm = ScriptedLLM(
+        [*(_tool_round(index) for index in range(3)), ProviderResponse(content="first")]
+        + [*(_tool_round(index) for index in range(3)), ProviderResponse(content="second")],
+        context_window_tokens=128_000,
+    )
+    events: list[tuple[str, dict[str, object]]] = []
+    with pytest.raises(ValueError, match="subagent_compactor is unbound"):
+        SubAgentEngine(
+            llm=child_llm,
+            tools=ToolRegistry([DeclaredReadOnlyShell()]),
+            compactor=ContextCompactor(compact_llm),
+            time_budget=shared.time_budget,
+        )
+    engine = SubAgentEngine(
+        llm=SessionBudgetLLM(child_llm, budget=shared, role="subagent"),
+        tools=ToolRegistry([DeclaredReadOnlyShell()]),
+        compactor=parent_compactor,
+        event_sink=lambda event, payload: events.append((event, payload)),
+    )
+    assert engine.time_budget is shared.time_budget
+    first = engine.run("dig", role="auditor")
+    second = engine.run("dig again", role="auditor")
+    assert first["summary"] == "first" and second["summary"] == "second"
+    # Round 2 crossed the threshold: the request the model saw carries the
+    # compaction summary in place of the older turns.
+    round_two = child_llm.calls[1]["messages"]
+    assert is_compaction_message(round_two[1]) and len(round_two) == 4
+    assert not any(is_compaction_message(m) for m in child_llm.calls[0]["messages"])
+    compactions = [payload for event, payload in events if event == "subagent_context_compaction"]
+    assert [payload["task_id"] for payload in compactions] == [first["task_id"], second["task_id"]]
+    record = compactions[0]
+    assert record["role"] == "auditor" and record["round"] == 2
+    assert record["compaction"]["status"] == "ok" and record["compaction"]["messages_before"] == 4
+    assert "status" not in record and "summary" not in record
+    # ``max_calls=1`` per conversation: the second child compacted too, so
+    # each launch ran a fresh compactor while the parent's stayed untouched.
+    assert len(compact_llm.calls) == 2 and parent_compactor.compaction_count == 0
+    # A Meta trace keeps the shape of the compaction, never the summary text.
+    meta = _safe_meta_trace_payload("subagent_context_compaction", record)
+    assert meta["compaction"]["status"] == "ok" and meta["compaction"]["messages_before"] == 4
+    assert "summary" not in meta["compaction"] and meta["task_id"] == first["task_id"]
+
+
+def test_runner_hands_its_compactor_to_children_and_honours_max_turns() -> None:
+    from autotrade.agent.compact import ContextCompactionConfig, ContextCompactor
+
+    shared = SessionCallBudget(
+        max_calls=40, time_budget=InferenceTimeBudget(duration_seconds=600)
+    )
+    parent_compactor = ContextCompactor(
+        SessionBudgetLLM(ScriptedLLM([]), budget=shared, role="compact"),
+        ContextCompactionConfig(),
+    )
+    engine = SubAgentEngine(
+        llm=SessionBudgetLLM(
+            ScriptedLLM(
+                [_tool_round(0), _tool_round(1), ProviderResponse(content="done")],
+                context_window_tokens=128_000,
+            ),
+            budget=shared,
+            role="subagent",
+        ),
+        tools=ToolRegistry([DeclaredReadOnlyShell()]),
+    )
+    events: list[tuple[str, dict[str, object]]] = []
+    runner = AgentSessionRunner(
+        llm=SessionBudgetLLM(ScriptedLLM([]), budget=shared, role="main"),
+        tools=ToolRegistry(),
+        system_prompt="fold",
+        config=_fold_config(),
+        compactor=parent_compactor,
+        subagent=engine,
+        event_sink=lambda event, payload: events.append((event, payload)),
+    )
+    assert engine.compactor is parent_compactor
+    started = runner.tools.invoke("agent", {"agent": "auditor", "task": "dig", "max_turns": 3})
+    assert started.ok is True
+    assert runner._wait_subagent_jobs()[-1]["ok"] is True
+    wrap = [payload for event, payload in events if event == "subagent_wrap_up"]
+    assert [(payload["round"], payload["rounds_limit"]) for payload in wrap] == [(1, 3)]
+    ended = [payload for event, payload in events if event == "subagent"]
+    assert ended[-1]["rounds"] == 3 and ended[-1]["summary"] == "done"
+
+
+def test_child_ends_on_context_overflow_instead_of_retrying() -> None:
+    from autotrade.environment.llm import context_overflow_error
+
+    class Overflowing:
+        model = "child"
+        provider = "test"
+        context_window_tokens = 128_000
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def complete(self, messages, **kwargs):
+            del messages, kwargs
+            self.calls += 1
+            raise context_overflow_error(
+                estimated_prompt_tokens=130_000, max_tokens=12_000, context_window=128_000
+            )
+
+    llm = Overflowing()
+    result = SubAgentEngine(
+        llm=llm,
+        tools=ToolRegistry([DeclaredReadOnlyShell()]),
+        config=SubAgentConfig(max_rounds=5),
+    ).run("look", role="auditor")
+    assert result["status"] == "error" and llm.calls == 1
+    assert "context window" in result["error"] and result["llm_errors"] == 1
 
 
 def test_parent_thinking_only_truncated_turn_gets_a_forced_continuation() -> None:

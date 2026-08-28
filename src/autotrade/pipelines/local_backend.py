@@ -2380,6 +2380,20 @@ def _safe_meta_trace_payload(
         },
         "subagent_tool": {"task_id", "role", "round", "tool", "parent_call_id", "result"},
         "subagent_wrap_up": {"task_id", "role", "round", "rounds_limit", "parent_call_id"},
+        "subagent_context_compaction": {
+            "task_id",
+            "role",
+            "round",
+            "parent_call_id",
+            "compaction",
+        },
+        "subagent_context_edit": {
+            "task_id",
+            "role",
+            "round",
+            "parent_call_id",
+            "context_edit",
+        },
         "subagent_output_truncated": {
             "task_id",
             "role",
@@ -2433,6 +2447,23 @@ def _safe_meta_trace_payload(
         if isinstance(value, dict) and "error_type" in value:
             status["error_type"] = value["error_type"]
         kept["result"] = status
+    compaction = kept.get("compaction")
+    if event_type == "subagent_context_compaction" and isinstance(compaction, dict):
+        # Shape only, like the parent's own compaction record in a Meta trace:
+        # the summary text is the child's compacted history.
+        kept["compaction"] = {
+            key: compaction[key]
+            for key in (
+                "status",
+                "error",
+                "skip_reason",
+                "estimated_tokens",
+                "messages_before",
+                "messages_after",
+                "summary_chars",
+            )
+            if key in compaction
+        }
     # Bounded shape-only signals so a Meta child's usefulness stays auditable
     # without any model text: how long its summary/content was and which
     # argument keys the parent used.
