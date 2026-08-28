@@ -767,3 +767,105 @@ class ToolContractHintTest(unittest.TestCase):
             self.assertIn("inside the workspace", default)
             self.assertIn("at most 30", default)
             self.assertIn("at most 5", custom)
+
+
+class ToolResultContractTest(unittest.TestCase):
+    """Tool results identify targets by root plus relative path only, and a
+    wrong call shape comes back with one correct example."""
+
+    def _layout(self, tmp: str):
+        # A realistic host layout: repository root, sandbox tree and a raw run
+        # id, none of which may reach the model.
+        root = Path(tmp) / "repo" / ".runtime" / "sandboxes" / "exp" / "run_deadbeefcafe"
+        paths = SandboxPaths(root)
+        for directory in (paths.workspace / "inputs", paths.artifacts, paths.logs):
+            directory.mkdir(parents=True, exist_ok=True)
+        (paths.workspace / "inputs" / "x.json").write_text('{"k": 1}\n', encoding="utf-8")
+        (paths.artifacts / "x.txt").write_text("evidence\n", encoding="utf-8")
+        workspace = SafeWorkspace(paths.workspace)
+        roots = SearchRoots(workspace, paths=paths)
+        registry = ToolRegistry(
+            [GrepTool(roots), GlobTool(roots), ReadFileTool(roots), WriteFileTool(workspace), EditFileTool(workspace)]
+        )
+        return paths, registry
+
+    def test_results_carry_no_host_path_or_raw_run_id(self) -> None:
+        from autotrade.environment.data.summary import HOST_PATH_RE
+
+        with tempfile.TemporaryDirectory() as tmp:
+            _, registry = self._layout(tmp)
+            calls = [
+                ("glob", {"pattern": "*.json", "root": "workspace", "path": "inputs"}),
+                ("read_file", {"root": "workspace", "path": "inputs/x.json"}),
+                ("read_file", {"root": "artifacts", "path": "x.txt"}),
+            ]
+            if RG_AVAILABLE:
+                calls.append(("grep", {"pattern": "k", "root": "workspace", "output_mode": "content"}))
+            for name, arguments in calls:
+                result = registry.invoke(name, arguments)
+                self.assertTrue(result.ok, (name, result.error))
+                rendered = json.dumps(result.value, ensure_ascii=False)
+                self.assertNotIn("root_path", result.value, name)
+                self.assertIsNone(HOST_PATH_RE.search(rendered), (name, rendered))
+                self.assertNotIn("run_deadbeefcafe", rendered, name)
+                self.assertNotIn(tmp, rendered, name)
+
+    def test_duplicated_leading_root_segment_is_accepted_and_echoed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, registry = self._layout(tmp)
+            doubled = registry.invoke("read_file", {"root": "workspace", "path": "workspace/inputs/x.json"})
+            self.assertTrue(doubled.ok, doubled.error)
+            self.assertEqual(doubled.value["path"], "inputs/x.json")
+            artifact = registry.invoke("read_file", {"root": "artifacts", "path": "artifacts/x.txt"})
+            self.assertTrue(artifact.ok, artifact.error)
+            self.assertEqual(artifact.value["path"], "x.txt")
+            missing = registry.invoke("read_file", {"root": "artifacts", "path": "artifacts/nope.txt"})
+            self.assertFalse(missing.ok)
+            self.assertEqual(missing.value["error_type"], "not_found")
+            self.assertIn("do not repeat the root name", missing.value["retry_hint"])
+
+    def test_write_and_edit_accept_the_writable_root_convention(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            paths, registry = self._layout(tmp)
+            written = registry.invoke(
+                "write_file",
+                {"root": "output", "path": "main.py", "content": "def generate_orders(context):\n    return []\n"},
+            )
+            self.assertTrue(written.ok, written.error)
+            self.assertEqual(written.value["path"], "output/main.py")
+            self.assertTrue((paths.workspace / "output" / "main.py").is_file())
+            edited = registry.invoke(
+                "edit_file",
+                {"root": "output", "path": "main.py", "old_text": "return []", "new_text": "return list()"},
+            )
+            self.assertTrue(edited.ok, edited.error)
+            self.assertEqual(edited.value["path"], "output/main.py")
+            draft = registry.invoke("write_file", {"root": "workspace", "path": "notes.md", "content": "x"})
+            self.assertTrue(draft.ok, draft.error)
+            self.assertEqual(draft.value["path"], "notes.md")
+            # Read-only roots are not writable through the write tools.
+            refused = registry.invoke("write_file", {"root": "artifacts", "path": "x.txt", "content": "x"})
+            self.assertFalse(refused.ok)
+            self.assertEqual(refused.value["error_type"], "schema_error")
+            self.assertIn("correct call example", refused.error)
+            self.assertEqual((paths.artifacts / "x.txt").read_text(encoding="utf-8"), "evidence\n")
+
+    def test_schema_errors_carry_one_correct_example(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, registry = self._layout(tmp)
+            _, _, workspace = build_sandbox(Path(tmp + "/shell"))
+            registry = ToolRegistry([*registry._tools.values(), SandboxShellTool(workspace, FakeRunner())])
+            for name, arguments, needle in (
+                ("shell", {"argv": "ls -la"}, '"argv": ["python", "-c", "print(1)"]'),
+                ("shell", {"argv": ["python", "-c", "x" * 1001]}, "argv[2] is too long; correct call example"),
+                ("shell", {"argv": ["ls"], "timeout_seconds": 900}, "above its maximum; correct call example"),
+                ("edit_file", {"path": "output/main.py", "old_text": "a", "new_text": "b", "offset": 3}, "unknown argument(s): ['offset']; correct call example: {\"path\": \"output/main.py\""),
+                ("read_file", {"path": ""}, '"path": "inputs/skills_index.json"'),
+            ):
+                result = registry.invoke(name, arguments)
+                self.assertFalse(result.ok, name)
+                self.assertIn(needle, result.error, name)
+                self.assertIn("correct call example", result.value["retry_hint"], name)
+            shell_description = SandboxShellTool(workspace, FakeRunner()).spec.description
+            self.assertIn("at most 1000 chars", shell_description)
+            self.assertIn('["python", "workspace/probe.py"]', shell_description)

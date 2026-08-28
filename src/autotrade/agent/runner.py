@@ -153,10 +153,13 @@ INBOX_SAFE_AFTER_PARALLEL_READONLY = "after_parallel_readonly"
 INBOX_SAFE_AFTER_TOOLS_BEFORE_LLM = "after_tools_before_llm"
 _INBOX_TRACE_CHARS = 400
 _INTERRUPTED_BY_USER = "interrupted_by_user"
-# Consecutive own read/search/shell calls without any sub-agent launch that
-# trigger the one-time delegation reminder.
+# Consecutive own read/search/shell/write calls since the last sub-agent
+# launch that trigger the delegation reminder; it fires once per such streak
+# and re-arms on the next ``agent`` launch.
 DELEGATION_NUDGE_AFTER_CALLS = 8
-_OWN_WORK_TOOLS = frozenset({"read_file", "grep", "glob", "shell"})
+_OWN_WORK_TOOLS = frozenset(
+    {"read_file", "grep", "glob", "shell", "write_file", "edit_file"}
+)
 
 
 class AgentInboxHook(Protocol):
@@ -562,16 +565,21 @@ class AgentSessionRunner:
                     },
                 )
             accepted_steps = len(self._complete_validation_nodes)
-            if self.subagent is not None and not delegation_nudged:
+            if self.subagent is not None:
                 for call, _record in results:
-                    own_work_streak = (
-                        own_work_streak + 1 if call.name in _OWN_WORK_TOOLS else 0
-                    )
+                    if call.name == "agent":
+                        own_work_streak = 0
+                        delegation_nudged = False
+                    elif call.name in _OWN_WORK_TOOLS:
+                        own_work_streak += 1
+                    else:
+                        own_work_streak = 0
                 if (
                     own_work_streak >= DELEGATION_NUDGE_AFTER_CALLS
-                    and self._subagent_attempts == 0
+                    and not delegation_nudged
                 ):
                     delegation_nudged = True
+                    picture = self._subagent_live_picture()
                     messages.append(
                         ChatMessage(
                             "user",
@@ -583,14 +591,15 @@ class AgentSessionRunner:
                                         "除非任务很简单，请把读取与计算委托给 agent 子代理"
                                         "（同一轮可并行多个，范围互斥）。"
                                     ),
-                                    **self._subagent_live_picture(),
+                                    **picture,
                                 },
                                 ensure_ascii=False,
                             ),
                         )
                     )
                     self._emit(
-                        "delegation_reminder", {"own_work_calls": own_work_streak}
+                        "delegation_reminder",
+                        {"own_work_calls": own_work_streak, **picture},
                     )
 
             if self.tools.finished:
@@ -1139,6 +1148,7 @@ class AgentSessionRunner:
         ]
         if not pending:
             return
+        self._emit("subagent_wait_started", {"pending": len(pending)})
         for future in pending:
             future.add_done_callback(_on_done)
             if future.done():

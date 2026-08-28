@@ -854,9 +854,14 @@ def test_local_worker_resume_skips_durable_sessions_and_heldout(tmp_path: Path):
     assert after == before
 
 
-def test_webui_worker_discards_process_output_without_log_files(
+def test_webui_worker_output_is_recoverable_from_a_per_experiment_log(
     tmp_path: Path, monkeypatch
 ):
+    """A worker traceback must survive the run that produced it.
+
+    stdout/stderr used to go to /dev/null, so an unhandled exception in a live
+    session was unrecoverable — the run could only be described as "it stopped".
+    """
     repo = tmp_path / "repo"
     experiment = repo / "experiments/demo"
     (experiment / "hitl").mkdir(parents=True)
@@ -878,10 +883,27 @@ def test_webui_worker_discards_process_output_without_log_files(
     monkeypatch.setattr("autotrade.webui.manager.subprocess.Popen", fake_popen)
     result = ExperimentManager(repo).start_worker("demo")
 
-    devnull = __import__("subprocess").DEVNULL
-    assert captured["stdout"] == devnull and captured["stderr"] == devnull
-    assert "log_path" not in result
-    assert not (repo / "logs").exists()
+    log_path = repo / "logs" / "workers" / "demo.log"
+    assert result["worker_log_ref"] == str(log_path)
+    # stdin stays closed; stderr is folded into the same stream so an
+    # interleaved traceback keeps its ordering.
+    assert captured["stdin"] == __import__("subprocess").DEVNULL
+    assert captured["stderr"] == __import__("subprocess").STDOUT
+    assert captured["stdout"].name == str(log_path)
+    # The parent releases its handle; the detached child keeps writing.
+    assert captured["stdout"].closed
+
+    status = json.loads(
+        (experiment / "hitl/status.json").read_text(encoding="utf-8")
+    )
+    assert status["worker_log_ref"] == str(log_path)
+    # Appended, never truncated: a restart must not erase the crash before it.
+    assert "===== worker start" in log_path.read_text(encoding="utf-8")
+    (experiment / "hitl/status.json").write_text(
+        '{"schema_version":1,"state":"created"}', encoding="utf-8"
+    )
+    ExperimentManager(repo).start_worker("demo")
+    assert log_path.read_text(encoding="utf-8").count("===== worker start") == 2
 
 
 def test_worker_params_reject_unknown_and_partial_periods(tmp_path: Path):
@@ -1335,6 +1357,7 @@ def test_meta_trace_payload_keeps_prompts_and_tool_status_without_bodies() -> No
         "call_index": 3,
         "tool_call_id": "t1",
         "tool": "read_file",
+        "argument_keys": ["path"],
         "result": {
             "ok": False,
             "error": "search path does not exist",
@@ -1351,3 +1374,37 @@ def test_meta_trace_payload_keeps_prompts_and_tool_status_without_bodies() -> No
         {"call_index": 1, "status": "ok", "content": "model text", "usage": {"total_tokens": 5}},
     )
     assert "content" not in call and call["usage"] == {"total_tokens": 5}
+
+
+def test_meta_trace_payload_keeps_shape_only_usefulness_signals() -> None:
+    from autotrade.pipelines.local_backend import _safe_meta_trace_payload
+
+    ended = _safe_meta_trace_payload(
+        "subagent",
+        {"task_id": "agent_1", "role": "auditor", "status": "completed", "summary": "十个字的总结文本啊", "truncated": True},
+    )
+    assert ended["summary_chars"] == 9 and "summary" not in ended and ended["truncated"] is True
+    call = _safe_meta_trace_payload("llm_call", {"call_index": 2, "content": "abc", "status": "ok"})
+    assert call["content_chars"] == 3 and "content" not in call
+    child_call = _safe_meta_trace_payload(
+        "subagent_llm", {"task_id": "agent_1", "role": "auditor", "round": 1, "content": "xy"}
+    )
+    assert child_call["content_chars"] == 2 and child_call["role"] == "auditor"
+    tool = _safe_meta_trace_payload(
+        "tool_call",
+        {"tool": "agent", "arguments": {"agent": "auditor", "description": "d", "thinking": "medium"}, "result": {"ok": True, "value": {"task_id": "agent_2"}}},
+    )
+    assert tool["argument_keys"] == ["agent", "description", "thinking"] and "arguments" not in tool
+    child_tool = _safe_meta_trace_payload(
+        "subagent_tool", {"task_id": "agent_1", "role": "Explore", "round": 2, "tool": "read_file", "result": {"ok": True, "value": {"content": "secret"}}}
+    )
+    assert child_tool["role"] == "Explore" and child_tool["result"] == {"ok": True}
+    reminder = _safe_meta_trace_payload(
+        "delegation_reminder",
+        {"own_work_calls": 8, "running_children": [{"task_id": "agent_1", "role": "auditor", "description": "d"}], "queued_children": []},
+    )
+    assert reminder["running_children"][0]["description"] == "d" and reminder["queued_children"] == []
+    wrap = _safe_meta_trace_payload(
+        "subagent_wrap_up", {"task_id": "agent_1", "role": "auditor", "round": 22, "rounds_limit": 24, "parent_call_id": "c1"}
+    )
+    assert wrap["rounds_limit"] == 24 and wrap["role"] == "auditor"

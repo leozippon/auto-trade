@@ -15,6 +15,7 @@ STDERR_SUPPRESSION_REMINDER = (
     "stderr 被重定向到 /dev/null：错误输出对审计与调试很重要，请保留 stderr（去掉 2>/dev/null 等）。"
 )
 DEFAULT_SHELL_TIMEOUT_SECONDS = 30.0
+SHELL_ARGV_MAX_CHARS = 1000
 FORBIDDEN_WAIT = "forbidden_wait"
 _WAIT_COMMANDS = frozenset({"sleep", "usleep"})
 _WAIT_WRAPPERS = frozenset({"env", "timeout", "nice", "stdbuf", "nohup", "time"})
@@ -69,7 +70,7 @@ def _shell_input_schema(timeout_seconds: float) -> dict[str, object]:
         "properties": {
             "argv": {
                 "type": "array",
-                "items": {"type": "string", "minLength": 1, "maxLength": 1000},
+                "items": {"type": "string", "minLength": 1, "maxLength": SHELL_ARGV_MAX_CHARS},
             },
             "cwd": {"type": "string", "minLength": 1, "maxLength": 500},
             "timeout_seconds": {
@@ -89,9 +90,16 @@ def _shell_description(timeout_seconds: float) -> str:
         "Run one bounded foreground argv command in the injected network-disabled "
         "Agent sandbox. `argv` is a JSON array of strings, e.g. "
         '["python", "-c", "print(1)"] or ["bash", "-lc", "ls output"]; a single '
-        "command-line string is rejected. `cwd` and every path must stay inside "
-        f"the workspace (relative, no `..`). `timeout_seconds` is at most {timeout_seconds:g}."
+        "command-line string is rejected. Each argv element is at most "
+        f"{SHELL_ARGV_MAX_CHARS} chars: put longer code in a file with write_file "
+        '(e.g. workspace/probe.py) and run ["python", "workspace/probe.py"]. '
+        "`cwd` and every path must stay inside the workspace (relative, no `..`). "
+        f"`timeout_seconds` is at most {timeout_seconds:g}."
     )
+
+
+def _shell_example(timeout_seconds: float) -> dict[str, object]:
+    return {"argv": ["python", "-c", "print(1)"], "cwd": ".", "timeout_seconds": timeout_seconds}
 
 
 class SandboxShellTool:
@@ -100,6 +108,7 @@ class SandboxShellTool:
         _shell_description(DEFAULT_SHELL_TIMEOUT_SECONDS),
         _shell_input_schema(DEFAULT_SHELL_TIMEOUT_SECONDS),
         mutating=True,
+        example=_shell_example(DEFAULT_SHELL_TIMEOUT_SECONDS),
     )
 
     def __init__(
@@ -117,6 +126,7 @@ class SandboxShellTool:
             _shell_description(timeout_seconds),
             _shell_input_schema(timeout_seconds),
             mutating=True,
+            example=_shell_example(timeout_seconds),
         )
         self.workspace = workspace
         self.runner = runner
@@ -322,6 +332,7 @@ def _basename(token: str) -> str:
 __all__ = [
     "DEFAULT_SHELL_TIMEOUT_SECONDS",
     "FORBIDDEN_WAIT",
+    "SHELL_ARGV_MAX_CHARS",
     "SandboxShellTool",
     "argv_is_forbidden_wait",
     "reject_forbidden_wait",

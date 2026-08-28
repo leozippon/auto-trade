@@ -60,10 +60,20 @@ SUBAGENT_THINKING_LEVELS = ("off", "low", "medium", "xhigh")
 # never distinct from xhigh.
 _LEGACY_THINKING_ALIASES = {"minimal": "low", "high": "xhigh", "max": "xhigh"}
 DEFAULT_SUBAGENT_MAX_CONCURRENT = 4
+# Default child turn budget when the parent omits ``max_turns``. Productive
+# children in the reviewed traces finished well inside 20 rounds; the ones
+# that stalled their parent ran 30-40 rounds. The last ``SUBAGENT_GRACE_ROUNDS``
+# turns start with a wrap-up notice (Pi's grace-turn pattern); an explicit
+# ``max_turns`` is honoured as given.
+DEFAULT_SUBAGENT_MAX_ROUNDS = 24
+SUBAGENT_GRACE_ROUNDS = 2
 DEFAULT_SUBAGENT_THINKING = "medium"
 SUBAGENT_DESCRIPTION_MAX_CHARS = 200
 SUBAGENT_TASK_ID_PREFIX = "agent_"
 _CALL_BUDGET_EXHAUSTED = "call budget exhausted"
+# Appended to a child's summary when its reply hit the output ceiling, so the
+# parent never receives a silently cut half-sentence.
+OUTPUT_TRUNCATED_MARKER = "[输出在 {limit} token 上限被截断]"
 
 _FOLD_READ_TOOLS = frozenset({"glob", "grep", "read_file"})
 _FOLD_WRITE_TOOLS = frozenset(
@@ -148,6 +158,7 @@ AGENT_TOOL_DESCRIPTION = (
     "用于读库、探索、计算、实现或审计等能独立完成的任务：把大量阅读、计算和实现留在子代理里以保护主上下文；"
     "目标已知的单个文件直接用 read_file/grep/glob；不要重复子代理正在做的搜索。"
     "同一轮可发起多个（默认同时运行 4 个，超出排队），并行的子代理范围须互斥。"
+    "省略 max_turns 时子代理最多 24 轮：倒数第 2 轮起收到收尾提示，到上限后强制一次简洁总结；长任务请拆分而不是加大轮次。"
     "角色能力：developer/general-purpose 有 Sandbox shell（可跑 Python 读 PIT parquet、算 IC 表、做冒烟测试）并可写策略、模型与 skills；"
     "auditor/Explore 只能用 glob/grep/read_file 读文本与代码，不能执行任何命令——任何需要计算的任务用 general-purpose 或 developer；"
     "Meta 会话中全部角色只读。子代理只看到自己的角色提示和你的 task（inherit_context=true 时另带你的对话），"
@@ -182,7 +193,7 @@ AGENT_TOOL_SPEC = ToolSpec(
             "max_turns": {
                 "type": "integer",
                 "minimum": 1,
-                "description": "子代理最多的模型轮次；省略则直到父会话 deadline。",
+                "description": "子代理最多的模型轮次；省略则 24 轮（倒数第 2 轮起收到收尾提示，上限后强制简洁总结），显式值按原值生效。",
             },
             "thinking": {
                 "type": "string",
@@ -201,6 +212,12 @@ AGENT_TOOL_SPEC = ToolSpec(
         },
         "required": ["agent", "task"],
         "additionalProperties": False,
+    },
+    example={
+        "agent": "auditor",
+        "task": "读 workspace 根下 inputs/data_summary.json，返回可用字段、单位与 available_at 规则。",
+        "description": "数据摘要与单位",
+        "thinking": "medium",
     },
 )
 
@@ -303,8 +320,9 @@ class SubAgentConfig:
     # None = the shared ``AGENT_MAX_OUTPUT_TOKENS`` ceiling (same as the
     # parent conversation), clamped per call to the remaining context.
     max_tokens: int | None = None
-    # None = unlimited turns until the parent session deadline.
-    max_rounds: int | None = None
+    # Turn budget for a child whose launch omits ``max_turns``; None = only the
+    # parent session deadline bounds it.
+    max_rounds: int | None = DEFAULT_SUBAGENT_MAX_ROUNDS
     # None = no extra child wall clock; the parent time budget is the cap.
     deadline_seconds: float | None = None
     # Children running at once; further launches queue in the same pool.
@@ -463,6 +481,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
         status = "completed"
         error = ""
         llm_calls = 0
+        truncated = False
         try:
             while rounds_limit is None or rounds < rounds_limit:
                 if self._cancelled():
@@ -474,6 +493,31 @@ class SubAgentEngine(SessionTimeBudgetAware):
                     error = "Sub-agent deadline reached"
                     break
                 rounds += 1
+                if (
+                    rounds_limit is not None
+                    and rounds_limit > SUBAGENT_GRACE_ROUNDS
+                    and rounds == rounds_limit - SUBAGENT_GRACE_ROUNDS
+                ):
+                    # Grace turns: the child hears about the ceiling while it
+                    # can still finish cleanly, instead of being cut off.
+                    remaining_rounds = rounds_limit - rounds + 1
+                    messages.append(
+                        ChatMessage(
+                            "user",
+                            f"还剩 {remaining_rounds} 轮模型调用（上限 {rounds_limit}）："
+                            "请立即收尾，用简洁中文汇报结论、关键证据与剩余风险，不要再开新的探索。",
+                        )
+                    )
+                    self._emit(
+                        "subagent_wrap_up",
+                        {
+                            "task_id": task_id,
+                            "role": role,
+                            "round": rounds,
+                            "rounds_limit": rounds_limit,
+                            "parent_call_id": parent_call_id,
+                        },
+                    )
                 provider_tools = self._provider_tools(allowed)
                 output_tokens = self._output_tokens(llm, messages, provider_tools)
                 messages, _context_edit = fit_tool_results_to_context(
@@ -523,6 +567,8 @@ class SubAgentEngine(SessionTimeBudgetAware):
                     continue
                 llm_calls += 1
                 _add_usage(usage, response.usage)
+                cut_off = _output_truncated(response.usage, output_tokens)
+                truncated = truncated or cut_off
                 messages.append(
                     ChatMessage(
                         "assistant",
@@ -535,6 +581,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
                     "subagent_llm",
                     {
                         "task_id": task_id,
+                        "role": role,
                         "round": rounds,
                         "provider": getattr(llm, "provider", ""),
                         "model": response.model,
@@ -552,6 +599,13 @@ class SubAgentEngine(SessionTimeBudgetAware):
                     text = (response.content or "").strip()
                     if text:
                         summary = text
+                        if cut_off:
+                            summary += "\n" + OUTPUT_TRUNCATED_MARKER.format(limit=output_tokens)
+                        break
+                    if cut_off:
+                        # The whole budget went into thinking: do not retry the
+                        # same open-ended turn; fall through to the forced
+                        # concise summary below.
                         break
                     messages.append(
                         ChatMessage(
@@ -587,6 +641,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
                         "subagent_tool",
                         {
                             "task_id": task_id,
+                            "role": role,
                             "round": rounds,
                             "tool": call.name,
                             "result": record,
@@ -625,6 +680,11 @@ class SubAgentEngine(SessionTimeBudgetAware):
                 llm_calls += 1
                 _add_usage(usage, response.usage)
                 summary = response.content.strip()
+                if _output_truncated(response.usage, output_tokens):
+                    truncated = True
+                    summary = (
+                        summary + "\n" if summary else ""
+                    ) + OUTPUT_TRUNCATED_MARKER.format(limit=output_tokens)
                 if summary:
                     messages.append(ChatMessage("assistant", summary))
         except Exception as exc:  # noqa: BLE001 - a sub-agent failure must not kill the parent
@@ -648,6 +708,8 @@ class SubAgentEngine(SessionTimeBudgetAware):
         }
         if resumed_from:
             result["resumed_from"] = resumed_from
+        if truncated:
+            result["truncated"] = True
         if error:
             result["error"] = error
         self._emit(
@@ -763,6 +825,20 @@ class SubAgentEngine(SessionTimeBudgetAware):
     def _emit(self, event: str, payload: dict[str, object]) -> None:
         if self.event_sink is not None:
             self.event_sink(event, dict(payload))
+
+
+def _output_truncated(usage: object, max_tokens: int) -> bool:
+    """True when a reply used its whole completion budget (finish_reason=length
+    is not surfaced by the transport, so the usage count is the signal)."""
+
+    if not isinstance(usage, Mapping):
+        return False
+    completion = usage.get("completion_tokens")
+    return (
+        isinstance(completion, (int, float))
+        and not isinstance(completion, bool)
+        and completion >= max_tokens
+    )
 
 
 def _is_nonretryable_subagent_error(exc: Exception) -> bool:

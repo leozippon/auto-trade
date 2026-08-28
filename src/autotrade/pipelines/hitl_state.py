@@ -393,11 +393,17 @@ class StatusReporter:
                 values.setdefault("environment_progress", None)
             if "environment_stage" in values:
                 stage = values.get("environment_stage")
+                # Every stage event restarts the clock, not just a changed
+                # stage name: the console reads this as "how long has the
+                # CURRENT step been running". Keeping it across repeated
+                # llm_call events showed one 38-minute llm_call for what was
+                # really a series of short calls plus idle waiting.
+                values.setdefault(
+                    "environment_stage_started_at",
+                    _now() if stage else None,
+                )
                 if stage != self._state.get("environment_stage"):
-                    values.setdefault(
-                        "environment_stage_started_at",
-                        _now() if stage else None,
-                    )
+                    # Progress counters belong to one stage instance.
                     values.setdefault("environment_progress", None)
             if "state" in values:
                 state = values["state"]

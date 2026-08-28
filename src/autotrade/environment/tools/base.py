@@ -109,6 +109,9 @@ class ToolSpec:
     description: str
     input_schema: Mapping[str, object]
     mutating: bool = False
+    # One correct call, echoed in every schema error for this tool so the
+    # model can fix the shape in its next call instead of guessing.
+    example: Mapping[str, object] | None = None
 
     def __post_init__(self) -> None:
         if not self.name or not self.description:
@@ -117,6 +120,8 @@ class ToolSpec:
         if schema.get("type") != "object":
             raise ValueError("tool input_schema must describe an object")
         object.__setattr__(self, "input_schema", schema)
+        if self.example is not None:
+            object.__setattr__(self, "example", _json_object(self.example, name="example"))
 
     def provider_record(self) -> dict[str, object]:
         return {
@@ -251,6 +256,16 @@ class ToolRegistry:
         try:
             validated = validate_arguments(tool.spec.input_schema, arguments)
             result = tool.invoke(validated)
+        except ToolSchemaError as exc:
+            # A shape error is self-correcting: the message carries one
+            # correct call for this tool.
+            message = str(exc)
+            if tool.spec.example is not None:
+                example = json.dumps(tool.spec.example, ensure_ascii=False)
+                message = f"{message}; correct call example: {example}"
+                if exc.retry_hint is None:
+                    exc.retry_hint = f"correct call example: {example}"
+            return ToolResult(False, value=exc.to_record(), error=message)
         except ToolError as exc:
             # Structured failure detail rides back with the message so the Agent
             # can act on the kind of failure, not just read a sentence.

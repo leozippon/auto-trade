@@ -22,6 +22,18 @@ from .workspace import SafeWorkspace
 
 MAX_WRITE_CHARS = 200_000
 _PATH = {"type": "string", "minLength": 1, "maxLength": 500}
+# The same root convention as the search tools, restricted to the writable
+# tree: `workspace` is the workspace root, `output`/`models` its formal
+# subtrees. Any other search root is read-only and refused.
+WRITABLE_ROOTS = ("workspace", "output", "models")
+_ROOT = {
+    "type": "string",
+    "enum": list(WRITABLE_ROOTS),
+    "description": (
+        "Optional, same convention as read_file: `output` = output/, `models` = models/, "
+        "`workspace` (default) = the workspace root; read-only roots are refused."
+    ),
+}
 
 
 class _WorkspaceWriteTool:
@@ -30,7 +42,17 @@ class _WorkspaceWriteTool:
     def __init__(self, workspace: SafeWorkspace) -> None:
         self.workspace = workspace
 
-    def _resolve(self, path: str, *, must_exist: bool = False) -> Path:
+    def _resolve(self, path: str, *, root: object = None, must_exist: bool = False) -> Path:
+        if root is not None:
+            root = str(root)
+            if root not in WRITABLE_ROOTS:
+                raise ToolError(
+                    f"root {root!r} is read-only; writable roots: {', '.join(WRITABLE_ROOTS)}",
+                    error_type="path_error",
+                    blocked_target=f"{root}:{path}",
+                )
+            if root != "workspace" and not (path == root or path.startswith(f"{root}/")):
+                path = f"{root}/{path}"
         target = self.workspace.resolve(path, must_exist=must_exist, directory=False if must_exist else None)
         relative = self.workspace.relative(target)
         if relative == "skills" or relative.startswith("skills/"):
@@ -56,24 +78,26 @@ class WriteFileTool(_WorkspaceWriteTool):
         "write_file",
         "Create or overwrite a UTF-8 text file in the strategy workspace "
         "(formal code under output/, drafts elsewhere, text metadata under models/). "
+        "`path` is relative to the workspace root, or to the optional writable `root`. "
         "Binary model weights are still written with shell/python.",
         {
             "type": "object",
             # No schema-level maxLength: the size refusal is raised in invoke()
             # as a typed `too_large` the Agent can act on, and a schema rejection
             # here would mask it with a generic schema error.
-            "properties": {"path": _PATH, "content": {"type": "string"}},
+            "properties": {"path": _PATH, "content": {"type": "string"}, "root": _ROOT},
             "required": ["path", "content"],
             "additionalProperties": False,
         },
         mutating=True,
+        example={"path": "output/main.py", "content": "def generate_orders(context):\n    return []\n"},
     )
 
     def invoke(self, arguments: Mapping[str, object]) -> ToolResult:
         content = str(arguments["content"])
         if len(content) > MAX_WRITE_CHARS:
             raise ToolError(f"content exceeds {MAX_WRITE_CHARS} chars", error_type="too_large")
-        target = self._resolve(str(arguments["path"]))
+        target = self._resolve(str(arguments["path"]), root=arguments.get("root"))
         target.parent.mkdir(parents=True, exist_ok=True)
         existed = target.exists()
         target.write_text(content, encoding="utf-8")
@@ -89,11 +113,14 @@ class EditFileTool(_WorkspaceWriteTool):
     spec = ToolSpec(
         "edit_file",
         "Replace exact UTF-8 text in an existing strategy workspace file; "
-        "old_text must match the current content uniquely unless replace_all is set.",
+        "old_text must match the current content uniquely unless replace_all is set. "
+        "`path` is relative to the workspace root, or to the optional writable `root`; "
+        "there is no offset/limit (edits match text, not lines).",
         {
             "type": "object",
             "properties": {
                 "path": _PATH,
+                "root": _ROOT,
                 "old_text": {"type": "string", "minLength": 1, "maxLength": 100_000},
                 "new_text": {"type": "string", "maxLength": 100_000},
                 "replace_all": {
@@ -105,10 +132,13 @@ class EditFileTool(_WorkspaceWriteTool):
             "additionalProperties": False,
         },
         mutating=True,
+        example={"path": "output/main.py", "old_text": "return []", "new_text": "return orders"},
     )
 
     def invoke(self, arguments: Mapping[str, object]) -> ToolResult:
-        target = self._resolve(str(arguments["path"]), must_exist=True)
+        target = self._resolve(
+            str(arguments["path"]), root=arguments.get("root"), must_exist=True
+        )
         current = target.read_text(encoding="utf-8", errors="replace")
         old = str(arguments["old_text"])
         replace_all = bool(arguments.get("replace_all"))

@@ -55,6 +55,9 @@ from .public_identity import PublicIdentity
 from .registry import experiment_state, heldout_complete, test_results_revealed
 
 MAX_RUNNING_EXPERIMENTS = 4
+# Worker stdout/stderr, repo-relative and inside the ignored logs/ tree so a
+# crashed session stays diagnosable without ever entering the repository.
+WORKER_LOG_DIR = "logs/workers"
 _ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$")
 _TERMINAL_RESUMABLE_STATES = (
     "stopped",
@@ -565,19 +568,28 @@ class ExperimentManager:
                 if control.request == "stop":
                     control.request = None
                     write_control(control_path, control)
-            process = subprocess.Popen(
-                [
-                    sys.executable,
-                    str(self.worker_script),
-                    "--experiment-dir",
-                    str(directory),
-                ],
-                cwd=str(self.repo_root),
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
+            # A worker that dies on an unhandled traceback used to write it to
+            # /dev/null, leaving the run unexplainable. Append both streams to a
+            # per-experiment file under the ignored logs/ tree instead; the
+            # parent closes its handle immediately, the detached child keeps it.
+            log_path = self._worker_log_path(experiment_id)
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            with log_path.open("a", encoding="utf-8") as log:
+                log.write(f"\n===== worker start {utc_now_iso()} =====\n")
+                log.flush()
+                process = subprocess.Popen(
+                    [
+                        sys.executable,
+                        str(self.worker_script),
+                        "--experiment-dir",
+                        str(directory),
+                    ],
+                    cwd=str(self.repo_root),
+                    stdin=subprocess.DEVNULL,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                )
             write_json_atomic(
                 status_path,
                 {
@@ -586,9 +598,18 @@ class ExperimentManager:
                     "pid": process.pid,
                     "pid_start_ticks": proc_start_ticks(process.pid),
                     "launched_at": utc_now_iso(),
+                    "worker_log_ref": str(log_path),
                 },
             )
-            return {"spawned": True, "spawned_pid": process.pid}
+            return {
+                "spawned": True,
+                "spawned_pid": process.pid,
+                "worker_log_ref": str(log_path),
+            }
+
+    def _worker_log_path(self, experiment_id: str) -> Path:
+        """Per-experiment worker stdout/stderr under the ignored logs/ tree."""
+        return self.repo_root / WORKER_LOG_DIR / f"{experiment_id}.log"
 
     def _require_running_slot(self) -> None:
         running = self.running_experiments()

@@ -512,3 +512,103 @@ def test_meta_context_parent_artifact_id_is_an_opaque_strategy_ref(tmp_path: Pat
         (tmp_path / "run_meta" / "host_run_manifest.json").read_text(encoding="utf-8")
     )
     assert host["parent_strategy_artifact_id"] == parent_id
+
+
+def test_a_meta_session_can_read_every_artifact_its_manifest_advertises(tmp_path: Path):
+    """A declared ref must be backed by a readable file.
+
+    The Meta manifest advertised ``data_summary_ref`` while nothing installed
+    the file, so a Meta session read a missing path and published the absence
+    as a data fact into the immutable PRIOR every later Fold reads.
+    """
+    baseline = tmp_path / "baseline" / "main.py"
+    baseline.parent.mkdir()
+    baseline.write_text(
+        "def generate_orders(context):\n    return []\n", encoding="utf-8"
+    )
+    bundle = tmp_path / "bundles" / "meta" / "window"
+    bundle.mkdir(parents=True)
+    (bundle / "data_summary.json").write_text(
+        json.dumps({"kind": "meta", "views": {"snapshot": {"domains": {}}}}),
+        encoding="utf-8",
+    )
+    (bundle / "unit_reference.json").write_text(
+        json.dumps({"columns": []}), encoding="utf-8"
+    )
+
+    learner = LLMMetaLearner(
+        llm=ScriptedLLM(
+            [*_agent_then(ToolCall("finish_meta", "finish_meta", {}), roles=())]
+        ),
+        baseline_strategy=baseline,
+        artifact_store=FilesystemArtifactStore(tmp_path / "artifacts"),
+        experiment_dir=tmp_path / "experiment",
+        runtime_root=tmp_path / "runtime",
+        max_llm_calls=2,
+        deadline_seconds=30.0,
+        use_docker=False,
+        rebuild_enabled=False,
+    )
+    learner(
+        {
+            "run_id": "run_contract",
+            "experiment_id": "exp",
+            "epoch_id": "epoch_002",
+            "meta_learning_id": "epoch_002",
+            "previous_prior": "keep the current transferable direction",
+            "data_summary_ref": str(bundle / "data_summary.json"),
+        }
+    )
+
+    artifacts = tmp_path / "run_contract"
+    manifest = json.loads((artifacts / "run_manifest.json").read_text(encoding="utf-8"))
+    for key, mounted in (
+        ("runtime_env_ref", "runtime_env.json"),
+        ("data_summary_ref", "data_summary.json"),
+    ):
+        ref = manifest.get(key)
+        assert ref, f"Meta manifest lost {key}"
+        assert ref.startswith("/mnt/artifacts/")
+        assert (artifacts / mounted).is_file(), f"{key} names a file Meta cannot read"
+    # The unit reference rides along, so Meta reasons about the same contract
+    # a Fold does.
+    assert (artifacts / "unit_reference.json").is_file()
+    assert json.loads((artifacts / "data_summary.json").read_text(encoding="utf-8"))[
+        "kind"
+    ] == "meta"
+
+
+def test_a_meta_manifest_never_advertises_a_missing_data_summary(tmp_path: Path):
+    """No bundle summary (the local daily backend) means no ref, not a dead one."""
+    baseline = tmp_path / "baseline" / "main.py"
+    baseline.parent.mkdir()
+    baseline.write_text(
+        "def generate_orders(context):\n    return []\n", encoding="utf-8"
+    )
+    learner = LLMMetaLearner(
+        llm=ScriptedLLM(
+            [*_agent_then(ToolCall("finish_meta", "finish_meta", {}), roles=())]
+        ),
+        baseline_strategy=baseline,
+        artifact_store=FilesystemArtifactStore(tmp_path / "artifacts"),
+        experiment_dir=tmp_path / "experiment",
+        runtime_root=tmp_path / "runtime",
+        max_llm_calls=2,
+        deadline_seconds=30.0,
+        use_docker=False,
+        rebuild_enabled=False,
+    )
+    learner(
+        {
+            "run_id": "run_nosummary",
+            "experiment_id": "exp",
+            "epoch_id": "epoch_002",
+            "meta_learning_id": "epoch_002",
+            "previous_prior": "keep the current transferable direction",
+            "data_summary_ref": "",
+        }
+    )
+    artifacts = tmp_path / "run_nosummary"
+    manifest = json.loads((artifacts / "run_manifest.json").read_text(encoding="utf-8"))
+    assert "data_summary_ref" not in manifest
+    assert not (artifacts / "data_summary.json").exists()

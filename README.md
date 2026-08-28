@@ -23,7 +23,7 @@ Live trading is deliberately not implemented. The console has a live-trading pag
 | `ops/` | Sandbox Dockerfile, cron templates, nginx deployment configs |
 | `tests/unit/` | The whole test suite |
 
-Runtime directories (`data/`, `experiments/`, `logs/`, `results/`, `.runtime/`) are created locally and are not tracked.
+Runtime directories (`data/`, `experiments/`, `logs/`, `results/`, `.runtime/`) are created locally and are not tracked. Worker stdout/stderr for a console-launched experiment is appended to `logs/workers/<experiment_id>.log`.
 
 ## Setup
 

@@ -295,7 +295,7 @@ Meta 用户消息由 `build_meta_learning_prompt` 组织：
 父会话看到的 `agent` function 描述——子代理机制只在这里向模型说明；参数 `agent`、`task`、可选 `description`、`max_turns`、`thinking`、`inherit_context`、`resume` 由 schema 给出：
 
 ```text
-启动一个后台子代理并立即返回；它完成后结果以 subagent_completed 消息送回，不要轮询。用于读库、探索、计算、实现或审计等能独立完成的任务：把大量阅读、计算和实现留在子代理里以保护主上下文；目标已知的单个文件直接用 read_file/grep/glob；不要重复子代理正在做的搜索。同一轮可发起多个（默认同时运行 4 个，超出排队），并行的子代理范围须互斥。角色能力：developer/general-purpose 有 Sandbox shell（可跑 Python 读 PIT parquet、算 IC 表、做冒烟测试）并可写策略、模型与 skills；auditor/Explore 只能用 glob/grep/read_file 读文本与代码，不能执行任何命令——任何需要计算的任务用 general-purpose 或 developer；Meta 会话中全部角色只读。子代理只看到自己的角色提示和你的 task（inherit_context=true 时另带你的对话），所以 task 要写全路径、约束和期望的返回格式。thinking：常规阅读 low/medium，审计、根因与关键策略实现 xhigh。子代理不能嵌套、正式回测、结束会话、改 PRIOR 或自行验收；它的汇报描述意图而非结果，其写入须由你验收。resume=<task_id> 让一个已完成的子代理在自己的对话上继续新的 task（保留它读过的上下文，角色须相同）；仍在运行或未知的 task_id 会被拒绝。
+启动一个后台子代理并立即返回；它完成后结果以 subagent_completed 消息送回，不要轮询。用于读库、探索、计算、实现或审计等能独立完成的任务：把大量阅读、计算和实现留在子代理里以保护主上下文；目标已知的单个文件直接用 read_file/grep/glob；不要重复子代理正在做的搜索。同一轮可发起多个（默认同时运行 4 个，超出排队），并行的子代理范围须互斥。省略 max_turns 时子代理最多 24 轮：倒数第 2 轮起收到收尾提示，到上限后强制一次简洁总结；长任务请拆分而不是加大轮次。角色能力：developer/general-purpose 有 Sandbox shell（可跑 Python 读 PIT parquet、算 IC 表、做冒烟测试）并可写策略、模型与 skills；auditor/Explore 只能用 glob/grep/read_file 读文本与代码，不能执行任何命令——任何需要计算的任务用 general-purpose 或 developer；Meta 会话中全部角色只读。子代理只看到自己的角色提示和你的 task（inherit_context=true 时另带你的对话），所以 task 要写全路径、约束和期望的返回格式。thinking：常规阅读 low/medium，审计、根因与关键策略实现 xhigh。子代理不能嵌套、正式回测、结束会话、改 PRIOR 或自行验收；它的汇报描述意图而非结果，其写入须由你验收。resume=<task_id> 让一个已完成的子代理在自己的对话上继续新的 task（保留它读过的上下文，角色须相同）；仍在运行或未知的 task_id 会被拒绝。
 ```
 
 ### 5.1 Fold developer

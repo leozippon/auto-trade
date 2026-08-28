@@ -117,6 +117,15 @@ class SearchRoots:
         return self._roots[root]
 
     def resolve(self, root: str, path: str) -> tuple[Path, str]:
+        """Resolve ``path`` under ``root``; return the target and the accepted path.
+
+        A path that repeats the root as its first segment (``artifacts:artifacts/x``)
+        is accepted as ``artifacts:x`` when only the stripped form exists, and
+        the accepted form is echoed so the model learns the convention. No host
+        path is ever returned: ``root`` plus the relative path identify the
+        target, and the host layout (repository root, sandbox tree, raw run
+        id) must stay invisible to the model.
+        """
         base = self.base(root)
         if not base.is_dir():
             raise ToolError(
@@ -126,9 +135,19 @@ class SearchRoots:
                 retry_hint=f"available roots: {', '.join(self.names)}",
             )
         target = _safe_subpath(base, path)
-        if not target.exists():
-            raise ToolError(f"search path does not exist: {root}:{path}", error_type="not_found")
-        return target, str(base)
+        if target.exists():
+            return target, path
+        parts = PurePosixPath(path).parts
+        if len(parts) > 1 and parts[0] == root:
+            stripped = PurePosixPath(*parts[1:]).as_posix()
+            candidate = _safe_subpath(base, stripped)
+            if candidate.exists():
+                return candidate, stripped
+        raise ToolError(
+            f"search path does not exist: {root}:{path}",
+            error_type="not_found",
+            retry_hint=f"path is relative to root {root!r}; do not repeat the root name in path",
+        )
 
     def store_tool_result(self, *, tool: str, kind: str, content: str) -> dict[str, object]:
         """Persist an oversized tool result outside the model context budget."""
@@ -225,6 +244,7 @@ class GrepTool(_SearchToolBase):
                 "required": ["pattern"],
                 "additionalProperties": False,
             },
+            example={"pattern": "generate_orders", "root": "output", "output_mode": "content"},
         )
 
     def invoke(self, arguments: Mapping[str, object]) -> ToolResult:
@@ -238,7 +258,7 @@ class GrepTool(_SearchToolBase):
         context = int(arguments.get("context") or 0)
         if output_mode not in GREP_OUTPUT_MODES:
             raise ToolError(f"unsupported grep output_mode: {output_mode}", error_type="schema_error")
-        target, display_root = self.roots.resolve(root, path)
+        target, path = self.roots.resolve(root, path)
         cwd, target_arg = (target.parent, target.name) if target.is_file() else (target, ".")
         args = [
             "rg", "--no-heading", "--color", "never", "--max-columns", "500",
@@ -277,7 +297,7 @@ class GrepTool(_SearchToolBase):
             )
 
         common = {
-            "mode": output_mode, "root": root, "root_path": display_root, "path": path,
+            "mode": output_mode, "root": root, "path": path,
             "pattern": pattern, "glob": glob, "stderr": stderr, "timeout": completed["timeout"],
         }
         if output_mode == "count":
@@ -351,6 +371,7 @@ class GlobTool(_SearchToolBase):
                 "required": ["pattern"],
                 "additionalProperties": False,
             },
+            example={"pattern": "**/*.parquet", "root": "snapshot"},
         )
 
     def invoke(self, arguments: Mapping[str, object]) -> ToolResult:
@@ -360,7 +381,7 @@ class GlobTool(_SearchToolBase):
         head_limit = int(arguments.get("head_limit") or DEFAULT_GLOB_LIMIT)
         offset = int(arguments.get("offset") or 0)
         _validate_relative_pattern(pattern, label="pattern")
-        target, display_root = self.roots.resolve(root, path)
+        target, path = self.roots.resolve(root, path)
         if not target.is_dir():
             raise ToolError(f"glob path must be a directory: {root}:{path}", error_type="path_error")
         files: list[str] = []
@@ -385,7 +406,7 @@ class GlobTool(_SearchToolBase):
             paging["returned"] = len(filenames)
             paging["truncated"] = True
         return ToolResult(True, value={
-            "root": root, "root_path": display_root, "path": path, "pattern": pattern,
+            "root": root, "path": path, "pattern": pattern,
             "num_files": paging["total"], "filenames": filenames, **paging, **budget,
         })
 
@@ -415,6 +436,7 @@ class ReadFileTool(_SearchToolBase):
                 "required": ["path"],
                 "additionalProperties": False,
             },
+            example={"root": "workspace", "path": "inputs/skills_index.json", "offset": 0, "limit": 200},
         )
 
     def invoke(self, arguments: Mapping[str, object]) -> ToolResult:
@@ -422,7 +444,7 @@ class ReadFileTool(_SearchToolBase):
         path = str(arguments["path"])
         offset = int(arguments.get("offset") or 0)
         limit = int(arguments.get("limit") or DEFAULT_READ_LIMIT)
-        target, display_root = self.roots.resolve(root, path)
+        target, path = self.roots.resolve(root, path)
         if target.is_dir():
             raise ToolError(f"read path is a directory, not a file: {root}:{path}", error_type="path_error")
         try:
@@ -451,7 +473,7 @@ class ReadFileTool(_SearchToolBase):
         visible, paging = _apply_paging(numbered, offset=offset, head_limit=limit, source_truncated=False)
         content, budget = self._apply_result_budget("\n".join(visible), tool_kind="read")
         return ToolResult(True, value={
-            "root": root, "root_path": display_root, "path": path,
+            "root": root, "path": path,
             "line_count": len(numbered), "content": content, **paging, **budget,
         })
 

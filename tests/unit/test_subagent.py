@@ -2093,35 +2093,55 @@ def test_delegation_reminder_fires_once_after_eight_own_calls() -> None:
     assert sum('"observation": "delegation_reminder"' in (m.content or "") for m in last) == 1
 
 
-def test_delegation_reminder_is_silent_once_a_child_was_launched() -> None:
+def test_delegation_reminder_rearms_per_streak_and_counts_writes() -> None:
+    """One launch does not silence the reminder for the whole session: a new
+    streak of eight own-work calls (reads or writes) since the last launch
+    fires it again, and a streak fires at most once."""
     read = _NamedTool("read_file")
+    write = _NamedTool("write_file")
     finish = _FinishStub("finish_fold")
     llm = ScriptedLLM(
         [
             ProviderResponse(
                 tool_calls=(ToolCall("a1", "agent", {"agent": "auditor", "task": "look"}),)
             ),
+            # Streak one: fires at the eighth call, silent through the eighteenth.
             *(
                 ProviderResponse(tool_calls=(ToolCall(f"r{index}", "read_file", {}),))
-                for index in range(9)
+                for index in range(18)
+            ),
+            ProviderResponse(
+                tool_calls=(ToolCall("a2", "agent", {"agent": "auditor", "task": "again"}),)
+            ),
+            # Streak two: self-implementation counts as own work too.
+            *(
+                ProviderResponse(tool_calls=(ToolCall(f"w{index}", "write_file", {}),))
+                for index in range(8)
             ),
             ProviderResponse(tool_calls=(ToolCall("f1", "finish_fold", {}),)),
         ]
     )
-    events: list[str] = []
+    events: list[tuple[str, dict[str, object]]] = []
     runner = AgentSessionRunner(
         llm=llm,
-        tools=ToolRegistry([read, finish]),
+        tools=ToolRegistry([read, write, finish]),
         system_prompt="fold",
         config=_fold_config(),
         subagent=SubAgentEngine(
-            llm=ScriptedLLM([ProviderResponse(content="seen")]),
+            llm=ScriptedLLM([ProviderResponse(content="seen")] * 2),
             tools=ToolRegistry([DeclaredReadOnlyShell()]),
         ),
-        event_sink=lambda event, _payload: events.append(event),
+        event_sink=lambda event, payload: events.append((event, payload)),
     )
     assert runner.run("go").status == "finished"
-    assert "delegation_reminder" not in events
+    reminders = [payload for event, payload in events if event == "delegation_reminder"]
+    assert [payload["own_work_calls"] for payload in reminders] == [8, 8]
+    assert all("running_children" in payload and "queued_children" in payload for payload in reminders)
+    delivered = sum(
+        '"observation": "delegation_reminder"' in str(message.content or "")
+        for message in llm.calls[-1]["messages"]
+    )
+    assert delivered == 2
 
 
 def test_agent_description_states_role_capabilities_and_thinking_tiers() -> None:
@@ -2237,3 +2257,114 @@ def test_parent_and_child_output_budgets_share_the_safety_ceiling() -> None:
         config=SubAgentConfig(max_tokens=500),
     )
     assert capped._output_tokens(llm, messages, ()) == 500
+
+
+def test_child_output_truncation_is_marked_and_never_silent() -> None:
+    from autotrade.agent.subagent import OUTPUT_TRUNCATED_MARKER
+
+    cut = ScriptedLLM(
+        [
+            ProviderResponse(
+                content="结论：因子 A 在 2019 年后",
+                usage={"prompt_tokens": 10, "completion_tokens": 500, "total_tokens": 510},
+            )
+        ],
+        context_window_tokens=128_000,
+    )
+    result = SubAgentEngine(
+        llm=cut,
+        tools=ToolRegistry([DeclaredReadOnlyShell()]),
+        config=SubAgentConfig(max_tokens=500),
+    ).run("audit", role="auditor")
+    assert result["status"] == "completed" and result["truncated"] is True
+    assert result["summary"].endswith(OUTPUT_TRUNCATED_MARKER.format(limit=500))
+    assert result["summary"].startswith("结论：因子 A 在 2019 年后")
+
+    # The whole budget went into thinking: no retry of the open-ended turn,
+    # one forced concise summary instead of a silent empty result.
+    empty = ScriptedLLM(
+        [
+            ProviderResponse(
+                content="",
+                reasoning_content="thinking...",
+                usage={"prompt_tokens": 10, "completion_tokens": 500, "total_tokens": 510},
+            ),
+            ProviderResponse(content="简洁结论"),
+        ],
+        context_window_tokens=128_000,
+    )
+    result = SubAgentEngine(
+        llm=empty,
+        tools=ToolRegistry([DeclaredReadOnlyShell()]),
+        config=SubAgentConfig(max_tokens=500),
+    ).run("audit", role="auditor")
+    assert result["status"] == "completed" and result["llm_calls"] == 2
+    assert result["summary"] == "简洁结论" and result["truncated"] is True
+    forced = empty.calls[1]["messages"]
+    assert forced[-1].role == "user" and "请立即用简洁中文说明结论" in str(forced[-1].content)
+
+
+def test_child_turns_default_to_24_with_grace_wrap_up() -> None:
+    from autotrade.agent.subagent import DEFAULT_SUBAGENT_MAX_ROUNDS, SUBAGENT_GRACE_ROUNDS
+
+    assert DEFAULT_SUBAGENT_MAX_ROUNDS == 24 and SUBAGENT_GRACE_ROUNDS == 2
+    assert SubAgentConfig().max_rounds == 24
+    assert "24 轮" in AGENT_TOOL_DESCRIPTION
+    assert "24 轮" in AGENT_TOOL_SPEC.input_schema["properties"]["max_turns"]["description"]
+
+    busy = ScriptedLLM(
+        [
+            *(
+                ProviderResponse(tool_calls=(ToolCall(f"s{index}", "shell", {"argv": ["ls"]}),))
+                for index in range(4)
+            ),
+            ProviderResponse(content="final"),
+        ],
+        context_window_tokens=128_000,
+    )
+    events: list[tuple[str, dict[str, object]]] = []
+    engine = SubAgentEngine(
+        llm=busy,
+        tools=ToolRegistry([DeclaredReadOnlyShell()]),
+        config=SubAgentConfig(max_rounds=4),
+        event_sink=lambda event, payload: events.append((event, payload)),
+    )
+    result = engine.run("dig", role="auditor")
+    assert result["rounds"] == 4 and result["summary"] == "final"
+    # Round 2 of 4 opens with the wrap-up notice; rounds 1 and 3 do not.
+    second = busy.calls[1]["messages"]
+    assert second[-1].role == "user" and "还剩 3 轮模型调用（上限 4）" in str(second[-1].content)
+    assert "还剩" not in str(busy.calls[0]["messages"][-1].content)
+    assert "还剩" not in str(busy.calls[2]["messages"][-1].content)
+    wrap = [payload for event, payload in events if event == "subagent_wrap_up"]
+    assert wrap == [
+        {
+            "task_id": result["task_id"],
+            "role": "auditor",
+            "round": 2,
+            "rounds_limit": 4,
+            "parent_call_id": None,
+        }
+    ]
+    assert all(
+        payload["role"] == "auditor"
+        for event, payload in events
+        if event in {"subagent_llm", "subagent_tool"}
+    )
+
+    # An explicit small budget is honoured as given; no grace below three turns.
+    short = ScriptedLLM(
+        [
+            *(
+                ProviderResponse(tool_calls=(ToolCall(f"s{index}", "shell", {"argv": ["ls"]}),))
+                for index in range(2)
+            ),
+            ProviderResponse(content="done"),
+        ],
+        context_window_tokens=128_000,
+    )
+    result = SubAgentEngine(
+        llm=short, tools=ToolRegistry([DeclaredReadOnlyShell()])
+    ).run("dig", role="auditor", max_rounds=2)
+    assert result["rounds"] == 2 and result["summary"] == "done"
+    assert not any("还剩" in str(m.content) for call in short.calls for m in call["messages"])

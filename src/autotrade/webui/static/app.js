@@ -78,6 +78,7 @@ const ENVIRONMENT_STAGE_LABELS = {
   sandbox_start: "启动 Sandbox",
   llm_call: "Agent 推理",
   tool_call: "执行工具",
+  subagent_wait: "等待子代理",
   backtest: "执行验证回测",
   agent_complete: "Agent 推理完成",
   frozen_test: "执行冻结测试",

@@ -681,6 +681,50 @@ _SMOKE_LAYOUT_HINT = (
 )
 
 
+AGENT_DATA_CONTRACT_FILES = ("data_summary.json", "unit_reference.json")
+
+
+def install_agent_data_contract(
+    paths,
+    *,
+    kind: str,
+    fold_id: str | None = None,
+    views: Mapping[str, tuple[Path, str]] | None = None,
+    bundle_ref: str = "",
+) -> bool:
+    """Publish the data contract a session's run manifest advertises.
+
+    A manifest that declares ``data_summary_ref`` must be backed by a file the
+    session can actually read. Meta declared it and never installed it, so a
+    Meta session read a missing path and published the false premise
+    "data_summary.json is not mounted" into the immutable PRIOR that every later
+    Fold reads. One installer for both session kinds, and the caller records the
+    ref only when this returns True.
+
+    A Fold builds the summary from its own mounted snapshot view (its fold id is
+    opaqued so the calendar period cannot leak). Meta has no mounted snapshot,
+    so it installs the prebuilt bundle summary its SnapshotBundle already names
+    — the same numbers, for the Meta window's decision snapshot.
+    """
+    if views:
+        write_agent_data_summary(
+            paths.data_summary, kind=kind, fold_id=fold_id, views=views
+        )
+    else:
+        source = Path(bundle_ref) if bundle_ref else None
+        if source is None or not source.is_file():
+            return False
+        for name in AGENT_DATA_CONTRACT_FILES:
+            candidate = source.parent / name
+            if candidate.is_file():
+                shutil.copy2(candidate, paths.artifacts / name)
+    for name in AGENT_DATA_CONTRACT_FILES:
+        target = paths.artifacts / name
+        if target.is_file():
+            target.chmod(0o444)
+    return paths.data_summary.is_file()
+
+
 def _public_smoke_error(exc: Exception, *, hidden: Sequence[str] = ()) -> str:
     """The exact failure text, host paths and hidden calendar redacted."""
     text = HOST_PATH_RE.sub("[host_path]", safe_error_summary(exc))
@@ -1498,8 +1542,8 @@ class LLMFoldDeveloper:
             raise ValueError(
                 f"snapshot decision_ref is neither a file nor directory: {source}"
             )
-        write_agent_data_summary(
-            local.paths.data_summary,
+        install_agent_data_contract(
+            local.paths,
             kind="fold",
             # Agent-visible: opaque the fold id so the calendar period (e.g.
             # 2022Q1) cannot leak through data_summary.json. Host correlation
@@ -1507,7 +1551,6 @@ class LLMFoldDeveloper:
             fold_id=self.ref_store.get_or_create("fold", request.fold.fold_id),
             views={"snapshot": (target, "/mnt/snapshot")},
         )
-        local.paths.data_summary.chmod(0o444)
 
     def _fold_facts(
         self,
@@ -1670,6 +1713,14 @@ class LLMMetaLearner:
         _environment_phase(progress_hook, "sandbox_layout", run_id)
         local = LocalSandbox(root)
         paths = local.prepare_layout()
+        # Meta reasons about the data contract too, so it gets the same
+        # data_summary.json / unit_reference.json a Fold gets — from the Meta
+        # window's own bundle. The manifest records the ref only if this lands.
+        data_contract_installed = install_agent_data_contract(
+            paths,
+            kind="meta_learning",
+            bundle_ref=str(facts.get("data_summary_ref") or ""),
+        )
         # Only a Meta session may declare new sandbox dependencies, so only a
         # Meta workspace carries the request format example.
         write_sandbox_environment_example(paths.workspace)
@@ -1790,7 +1841,14 @@ class LLMMetaLearner:
                     "model": str(getattr(self.llm, "model", "")),
                 },
                 "runtime_env_ref": "/mnt/artifacts/runtime_env.json",
-                "data_summary_ref": "/mnt/artifacts/data_summary.json",
+                # Never advertise a path the session cannot read: a Meta run
+                # that found this missing published the absence as a data fact
+                # into PRIOR.
+                **(
+                    {"data_summary_ref": "/mnt/artifacts/data_summary.json"}
+                    if data_contract_installed
+                    else {}
+                ),
                 "meta_learning_visible_fold": dict(host_visible_fold),
                 "valid_decision_time": host_visible_fold.get("valid_decision_time"),
                 "snapshots": {
@@ -2175,8 +2233,15 @@ def _agent_event_sink(
             stage = "llm_call"
         elif event_type == "tool_call_started":
             stage = (
-                "backtest" if payload.get("tool") == "daily_backtest" else "tool_call"
+                "backtest"
+                if payload.get("tool") in ("daily_backtest", "smoke_backtest")
+                else "tool_call"
             )
+        elif event_type == "subagent_wait_started":
+            # The parent is idle waiting on a child. Without its own stage the
+            # console kept showing the preceding llm_call, so a yielding parent
+            # looked like a single model call running for tens of minutes.
+            stage = "subagent_wait"
         elif event_type == "session_end":
             stage = "agent_complete"
         else:
@@ -2226,6 +2291,7 @@ def _safe_meta_trace_payload(
         "subagent_task": subagent_identity,
         "subagent_llm": {
             "task_id",
+            "role",
             "round",
             "provider",
             "model",
@@ -2233,11 +2299,12 @@ def _safe_meta_trace_payload(
             "tool_names",
             "parent_call_id",
         },
-        "subagent_tool": {"task_id", "round", "tool", "parent_call_id", "result"},
+        "subagent_tool": {"task_id", "role", "round", "tool", "parent_call_id", "result"},
+        "subagent_wrap_up": {"task_id", "role", "round", "rounds_limit", "parent_call_id"},
         "subagent": subagent_identity
-        | {"rounds", "tool_calls", "llm_calls", "provider", "usage_totals", "error"},
+        | {"rounds", "tool_calls", "llm_calls", "provider", "usage_totals", "error", "truncated"},
         "subagent_attempt": {"attempt", "role", "ok", "status", "task_id", "error"},
-        "delegation_reminder": {"own_work_calls"},
+        "delegation_reminder": {"own_work_calls", "running_children", "queued_children"},
         "llm_call_started": {"call_index", "status"},
         "llm_call": {"call_index", "status", "model", "usage", "tool_names", "error"},
         "tool_call_started": {"tool", "tool_call_id", "status"},
@@ -2267,6 +2334,16 @@ def _safe_meta_trace_payload(
         if isinstance(value, dict) and "error_type" in value:
             status["error_type"] = value["error_type"]
         kept["result"] = status
+    # Bounded shape-only signals so a Meta child's usefulness stays auditable
+    # without any model text: how long its summary/content was and which
+    # argument keys the parent used.
+    if event_type == "subagent" and isinstance(payload.get("summary"), str):
+        kept["summary_chars"] = len(payload["summary"])
+    if event_type in {"llm_call", "subagent_llm"} and isinstance(payload.get("content"), str):
+        kept["content_chars"] = len(payload["content"])
+    arguments = payload.get("arguments")
+    if event_type == "tool_call" and isinstance(arguments, Mapping):
+        kept["argument_keys"] = sorted(str(key) for key in arguments)
     return kept
 
 
