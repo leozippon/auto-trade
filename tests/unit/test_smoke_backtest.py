@@ -66,7 +66,7 @@ def _fold() -> FoldSpec:
     )
 
 
-def _tool(root: Path, strategy: str, *, check=None) -> SmokeBacktestTool:
+def _tool(root: Path, strategy: str, *, check=None, guard=nullcontext) -> SmokeBacktestTool:
     daily = root / "daily.parquet"
     pd.DataFrame(
         {
@@ -103,8 +103,30 @@ def _tool(root: Path, strategy: str, *, check=None) -> SmokeBacktestTool:
         ),
         schedule=StrategySchedule("day", "09:00"),
         broker_profile=BrokerProfile(initial_cash=100_000),
-        formal_guard=nullcontext,
+        formal_guard=guard,
     )
+
+
+def test_a_destroyed_sandbox_aborts_the_session_instead_of_reading_as_a_bad_strategy(
+    tmp_path: Path,
+) -> None:
+    """Every other smoke failure is an observation the Agent can act on. A
+    sandbox destroyed while recovering the formal guard is not: no later call
+    can run, so it must leave the tool as a session interrupt."""
+    from contextlib import contextmanager
+
+    from autotrade.pipelines.local_backend import SandboxLost
+
+    @contextmanager
+    def lost():
+        raise SandboxLost("sandbox could not be paused and was destroyed")
+        yield  # pragma: no cover - the guard never holds
+
+    tool = _tool(tmp_path, WORKING_STRATEGY, guard=lost)
+    with pytest.raises(SandboxLost):
+        tool.invoke({"days": 1})
+    # The rehearsal copy is still cleaned up on the way out.
+    assert list((tmp_path / ".smoke").iterdir()) == []
 
 
 def test_smoke_runs_the_real_replay_over_a_short_window(tmp_path: Path) -> None:

@@ -49,6 +49,7 @@ from autotrade.environment.sandbox import (
     DockerSandbox,
     LocalSandbox,
     SandboxConfig,
+    SandboxDestroyed,
     SandboxSpec,
     link_copytree,
 )
@@ -65,6 +66,7 @@ from autotrade.environment.time_budget import (
 )
 from autotrade.environment.tools.base import (
     CommandRunner,
+    SessionInterrupt,
     Tool,
     ToolError,
     ToolRegistry,
@@ -497,15 +499,29 @@ class SessionBudgetLLM(SessionTimeBudgetAware):
         return response
 
 
+class SandboxLost(SessionInterrupt):
+    """The session sandbox was destroyed while a formal call held it.
+
+    Every later tool call would fail against a container that no longer exists,
+    so the session aborts here and the pipeline retries the Fold with a fresh
+    one instead of letting the Agent spend its whole budget probing a dead
+    sandbox.
+    """
+
+
+def _public_error_text(exc: Exception, *, hidden: Sequence[str] = ()) -> str:
+    """The exact failure text, host paths and hidden calendar redacted."""
+    text = HOST_PATH_RE.sub("[host_path]", safe_error_summary(exc))
+    for value in sorted({item for item in hidden if item}, key=len, reverse=True):
+        text = text.replace(value, "[redacted]")
+    return text
+
+
 def _public_validation_error(
     exc: Exception, *, hidden: Sequence[str] = ()
 ) -> str:
     """Agent-visible Validation failure: type, actionable reason, no host leaks."""
-    summary = safe_error_summary(exc)
-    text = HOST_PATH_RE.sub("[host_path]", summary)
-    for value in sorted({item for item in hidden if item}, key=len, reverse=True):
-        text = text.replace(value, "[redacted]")
-    return f"daily Validation failed: {text}"
+    return f"daily Validation failed: {_public_error_text(exc, hidden=hidden)}"
 
 
 SMOKE_BACKTEST_DEFAULT_DAYS = 3
@@ -616,6 +632,9 @@ class SmokeBacktestTool:
                     ),
                     max_days=days,
                 )
+        except SessionInterrupt:
+            shutil.rmtree(scratch, ignore_errors=True)
+            raise
         except Exception as exc:  # noqa: BLE001 - the exception text IS the result
             shutil.rmtree(scratch, ignore_errors=True)
             return ToolResult(
@@ -625,7 +644,7 @@ class SmokeBacktestTool:
                     "days_requested": days,
                     "official": False,
                     "counts_against_backtest_budget": False,
-                    "error": _public_smoke_error(
+                    "error": _public_error_text(
                         exc, hidden=(fold.fold_id, fold.test_start, fold.test_end)
                     ),
                     "hint": _SMOKE_LAYOUT_HINT,
@@ -752,14 +771,6 @@ def install_agent_data_contract(
     return paths.data_summary.is_file()
 
 
-def _public_smoke_error(exc: Exception, *, hidden: Sequence[str] = ()) -> str:
-    """The exact failure text, host paths and hidden calendar redacted."""
-    text = HOST_PATH_RE.sub("[host_path]", safe_error_summary(exc))
-    for value in sorted({item for item in hidden if item}, key=len, reverse=True):
-        text = text.replace(value, "[redacted]")
-    return text
-
-
 def _smoke_asof_domains(result_dir: Path) -> list[str]:
     """Domain directory names the replay actually exposed under asof_dir."""
     try:
@@ -881,14 +892,19 @@ class FoldBacktestTool(SessionTimeBudgetAware):
             raise ToolError("Fold Validation backtest budget exhausted")
         if len(self.steps) >= self.request.max_steps:
             raise ToolError("Fold Step budget exhausted")
-        self.backtests += 1
-        result_name = f"valid_{self.backtests:03d}"
+        result_name = f"valid_{self.backtests + 1:03d}"
         revision_id = ""
         node_id = None
         evaluation = None
+        started = False
         check: ToolResult | None = None
         try:
             with self.formal_guard():
+                # The guard is what makes the replayed revision the one the
+                # check approved, so the attempt starts — and only then costs a
+                # Validation slot — once the guard holds.
+                self.backtests += 1
+                started = True
                 check = self.modification_check.invoke({})
                 _assert_skills_absent_from_formal(self.output_dir, self.models_dir)
                 revision = self.artifact_store.create_revision(
@@ -937,7 +953,36 @@ class FoldBacktestTool(SessionTimeBudgetAware):
                         VALIDATION_RESULT_ATTACHMENT: evaluation.result_ref
                     },
                 )
+        except SessionInterrupt:
+            # The sandbox is gone: an environment failure must never be
+            # recorded, or reported to the Agent, as a strategy failure.
+            raise
         except Exception as exc:
+            if not started:
+                # The guard never took hold: no revision was committed and no
+                # replay ran, so this is infrastructure, not a Validation, and
+                # it costs neither a backtest slot nor a Step.
+                fold = self.request.fold
+                public_error = _public_error_text(
+                    exc, hidden=(fold.fold_id, fold.test_start, fold.test_end)
+                )
+                self._append_manifest_summary(
+                    {
+                        "mode": "valid",
+                        "status": "infrastructure_error",
+                        "complete_validation": False,
+                        "error": public_error,
+                    }
+                )
+                raise ToolError(
+                    f"daily_backtest could not start: {public_error}",
+                    error_type="infrastructure_error",
+                    retry_hint=(
+                        "The sandbox could not be held for a formal call and no "
+                        "backtest ran; no budget was consumed. Let any long "
+                        "in-container job finish, then call daily_backtest again."
+                    ),
+                ) from exc
             if node_id is None or evaluation is None:
                 fold = self.request.fold
                 public_error = _public_validation_error(
@@ -1346,13 +1391,16 @@ class LLMFoldDeveloper:
             @contextmanager
             def formal_guard():
                 guard = sandbox.formal_guard() if sandbox is not None else nullcontext()
-                with guard:
-                    chmod_tree(output_dir, file_mode=0o444, dir_mode=0o555)
-                    chmod_tree(models_dir, file_mode=0o444, dir_mode=0o555)
-                    try:
-                        yield
-                    finally:
-                        restore_working_artifacts_writable(output_dir, models_dir)
+                try:
+                    with guard:
+                        chmod_tree(output_dir, file_mode=0o444, dir_mode=0o555)
+                        chmod_tree(models_dir, file_mode=0o444, dir_mode=0o555)
+                        try:
+                            yield
+                        finally:
+                            restore_working_artifacts_writable(output_dir, models_dir)
+                except SandboxDestroyed as exc:
+                    raise SandboxLost(str(exc)) from exc
 
             modification = ModificationCheckTool(
                 output_dir,
@@ -2352,6 +2400,7 @@ def _safe_meta_trace_payload(
         "model",
         "thinking",
         "thinking_applied",
+        "rounds_limit",
         "inherit_context",
         "description",
         "resumed_from",
@@ -2415,7 +2464,21 @@ def _safe_meta_trace_payload(
             "truncated_rounds",
             "llm_errors",
         },
-        "subagent_attempt": {"attempt", "role", "ok", "status", "task_id", "error"},
+        "subagent_attempt": {
+            "attempt",
+            "role",
+            "ok",
+            "status",
+            "task_id",
+            "error",
+            # Report delivery is a count-and-reference record, not the child's
+            # own text: how much it wrote, how much the parent got, and where
+            # the rest was spilled.
+            "summary_chars",
+            "summary_delivered_chars",
+            "summary_truncated",
+            "result_ref",
+        },
         "delegation_reminder": {"own_work_calls", "running_children", "queued_children"},
         "output_truncated": {"call_index", "completion_tokens", "max_tokens"},
         "llm_call_started": {"call_index", "status"},

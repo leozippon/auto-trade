@@ -14,6 +14,7 @@ import os
 import shutil
 import tempfile
 import unittest
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
@@ -1041,6 +1042,112 @@ class SpillAndRootContractTest(unittest.TestCase):
             self.assertIn("tools in this session: glob, read_file", unknown.error)
 
 
+def _fold_backtest_tool(
+    tmp: Path, trades: int, *, tree=None, formal_guard=None, manifest=None
+):
+    """A FoldBacktestTool over a fake evaluator, with its host paths."""
+    from contextlib import nullcontext
+    from datetime import UTC
+
+    from autotrade.environment.artifacts import FilesystemArtifactStore
+    from autotrade.environment.identity import AgentRefStore
+    from autotrade.environment.runtime import write_json_atomic
+    from autotrade.environment.step_tree import StepTree
+    from autotrade.environment.time_budget import InferenceTimeBudget
+    from autotrade.environment.tools.base import ToolResult
+    from autotrade.pipelines.config import (
+        BrokerProfile,
+        EvaluationResult,
+        FoldSessionRequest,
+        FoldSpec,
+        SnapshotBundle,
+        StrategySchedule,
+    )
+    from autotrade.pipelines.local_backend import FoldBacktestTool
+
+    paths, _, _ = build_sandbox(tmp)
+    output = paths.agent / "output"
+    models = paths.agent / "models"
+    (output / "main.py").write_text(
+        "def generate_orders(context):\n    return []\n", encoding="utf-8"
+    )
+    summary = {
+        "total_return": 0.0843,
+        "sharpe": 1.51,
+        "max_drawdown": 0.0811,
+        "order_count": trades * 2,
+        "trade_count": trades,
+        "decision_calls": 60,
+        "replayed_trade_days": 60,
+        "phase_seconds": {"strategy": 12.5, "data_view": 88.0},
+        "weekly_returns": [
+            {"week": f"2022-W{index:02d}", "return": 0.001 * index}
+            for index in range(1, 61)
+        ],
+        "per_stock": [
+            {
+                "symbol": f"{index:06d}.SZ",
+                "exit_at": "2022-03-31T15:00:00+08:00",
+                "exit_price": 12.34,
+                "quantity": 100,
+                "realized_pnl": 1.5,
+            }
+            for index in range(trades)
+        ],
+    }
+
+    class Evaluator:
+        def evaluate(self, _request, max_days=None):
+            target = tmp / "host_results" / "valid_deadbeef" / "result.json"
+            write_json_atomic(target, {"stats": summary})
+            return EvaluationResult(summary=dict(summary), result_ref=str(target))
+
+    class PassingCheck:
+        def invoke(self, _arguments):
+            return ToolResult(True, value={"check_index": 1, "changed_lines": 3})
+
+    moment = datetime(2021, 12, 31, 23, 59, 59, tzinfo=UTC)
+    request = FoldSessionRequest(
+        experiment_id="exp",
+        epoch_id="epoch_001",
+        fold=FoldSpec(
+            fold_id="fold_2022Q1",
+            input_window_start="20200101",
+            input_window_end="20210930",
+            validation_start="20220101",
+            validation_end="20220331",
+            test_start="20220401",
+            test_end="20220630",
+            valid_decision_time=moment,
+            test_decision_time=moment,
+        ),
+        run_id="run_budget",
+        parent=None,
+        prior="",
+        snapshot=SnapshotBundle("snapshot", "decision", "replay"),
+        max_steps=3,
+        max_backtests=3,
+        max_llm_calls=3,
+        deadline_seconds=600.0,
+    )
+    tool = FoldBacktestTool(
+        request=request,
+        output_dir=output,
+        models_dir=models,
+        modification_check=PassingCheck(),
+        artifact_store=FilesystemArtifactStore(tmp / "revisions"),
+        evaluator=Evaluator(),
+        tree=tree(paths.steps) if tree is not None else StepTree(paths.steps),
+        schedule=StrategySchedule(),
+        broker_profile=BrokerProfile(),
+        time_budget=InferenceTimeBudget(duration_seconds=600.0),
+        formal_guard=formal_guard or nullcontext,
+        ref_store=AgentRefStore(tmp / "experiment"),
+        manifest=manifest,
+    )
+    return paths, tool, summary
+
+
 class FoldBacktestResultBudgetTest(unittest.TestCase):
     """``daily_backtest`` is the one tool whose payload scales with the replay.
 
@@ -1051,110 +1158,10 @@ class FoldBacktestResultBudgetTest(unittest.TestCase):
     mid-Fold context compaction.
     """
 
-    def _tool(self, tmp: Path, trades: int, *, tree=None):
-        from contextlib import nullcontext
-        from datetime import UTC
-
-        from autotrade.environment.artifacts import FilesystemArtifactStore
-        from autotrade.environment.identity import AgentRefStore
-        from autotrade.environment.runtime import write_json_atomic
-        from autotrade.environment.step_tree import StepTree
-        from autotrade.environment.time_budget import InferenceTimeBudget
-        from autotrade.environment.tools.base import ToolResult
-        from autotrade.pipelines.config import (
-            BrokerProfile,
-            EvaluationResult,
-            FoldSessionRequest,
-            FoldSpec,
-            SnapshotBundle,
-            StrategySchedule,
-        )
-        from autotrade.pipelines.local_backend import FoldBacktestTool
-
-        paths, _, _ = build_sandbox(tmp)
-        output = paths.agent / "output"
-        models = paths.agent / "models"
-        (output / "main.py").write_text(
-            "def generate_orders(context):\n    return []\n", encoding="utf-8"
-        )
-        summary = {
-            "total_return": 0.0843,
-            "sharpe": 1.51,
-            "max_drawdown": 0.0811,
-            "order_count": trades * 2,
-            "trade_count": trades,
-            "decision_calls": 60,
-            "replayed_trade_days": 60,
-            "phase_seconds": {"strategy": 12.5, "data_view": 88.0},
-            "weekly_returns": [
-                {"week": f"2022-W{index:02d}", "return": 0.001 * index}
-                for index in range(1, 61)
-            ],
-            "per_stock": [
-                {
-                    "symbol": f"{index:06d}.SZ",
-                    "exit_at": "2022-03-31T15:00:00+08:00",
-                    "exit_price": 12.34,
-                    "quantity": 100,
-                    "realized_pnl": 1.5,
-                }
-                for index in range(trades)
-            ],
-        }
-
-        class Evaluator:
-            def evaluate(self, _request, max_days=None):
-                target = tmp / "host_results" / "valid_deadbeef" / "result.json"
-                write_json_atomic(target, {"stats": summary})
-                return EvaluationResult(summary=dict(summary), result_ref=str(target))
-
-        class PassingCheck:
-            def invoke(self, _arguments):
-                return ToolResult(True, value={"check_index": 1, "changed_lines": 3})
-
-        moment = datetime(2021, 12, 31, 23, 59, 59, tzinfo=UTC)
-        request = FoldSessionRequest(
-            experiment_id="exp",
-            epoch_id="epoch_001",
-            fold=FoldSpec(
-                fold_id="fold_2022Q1",
-                input_window_start="20200101",
-                input_window_end="20210930",
-                validation_start="20220101",
-                validation_end="20220331",
-                test_start="20220401",
-                test_end="20220630",
-                valid_decision_time=moment,
-                test_decision_time=moment,
-            ),
-            run_id="run_budget",
-            parent=None,
-            prior="",
-            snapshot=SnapshotBundle("snapshot", "decision", "replay"),
-            max_steps=3,
-            max_backtests=3,
-            max_llm_calls=3,
-            deadline_seconds=600.0,
-        )
-        tool = FoldBacktestTool(
-            request=request,
-            output_dir=output,
-            models_dir=models,
-            modification_check=PassingCheck(),
-            artifact_store=FilesystemArtifactStore(tmp / "revisions"),
-            evaluator=Evaluator(),
-            tree=tree(paths.steps) if tree is not None else StepTree(paths.steps),
-            schedule=StrategySchedule(),
-            broker_profile=BrokerProfile(),
-            time_budget=InferenceTimeBudget(duration_seconds=600.0),
-            formal_guard=nullcontext,
-            ref_store=AgentRefStore(tmp / "experiment"),
-        )
-        return paths, tool, summary
 
     def test_inline_result_stays_in_budget_and_the_reference_reads_back(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            paths, tool, summary = self._tool(Path(tmp), 5000)
+            paths, tool, summary = _fold_backtest_tool(Path(tmp), 5000)
             result = ToolRegistry([tool]).invoke("daily_backtest", {})
             self.assertTrue(result.ok, result.error)
             rendered = json.dumps(result.value, ensure_ascii=False, default=str)
@@ -1191,7 +1198,102 @@ class FoldBacktestResultBudgetTest(unittest.TestCase):
                 return super().record_step(output_root, **kwargs)
 
         with tempfile.TemporaryDirectory() as tmp:
-            _, tool, _ = self._tool(Path(tmp), 5, tree=TreeWithoutAttachments)
+            _, tool, _ = _fold_backtest_tool(Path(tmp), 5, tree=TreeWithoutAttachments)
             result = ToolRegistry([tool]).invoke("daily_backtest", {})
             self.assertFalse(result.ok)
             self.assertIn("attachment is missing", result.error)
+
+
+class FoldBacktestGuardAccountingTest(unittest.TestCase):
+    """A formal call that never started is not a Validation attempt.
+
+    The formal guard — paused container, read-only working copy — is what makes
+    the replayed revision the one the modification check approved. A Fold has a
+    handful of Validation slots, so a guard that cannot be established must cost
+    none of them, and a sandbox destroyed while recovering one must abort the
+    session instead of reaching the Agent as a strategy failure it could fix.
+    """
+
+    class _Manifest:
+        def __init__(self) -> None:
+            self.summaries: list[dict] = []
+
+        def append_backtest_summary(self, summary) -> None:
+            self.summaries.append(dict(summary))
+
+    @staticmethod
+    @contextmanager
+    def _unpausable():
+        raise RuntimeError(
+            "failed to pause sandbox: OCI runtime pause failed: timeout of 10s reached"
+        )
+        yield  # pragma: no cover - the guard never holds
+
+    def test_a_guard_that_never_holds_costs_no_backtest_slot(self) -> None:
+        from contextlib import nullcontext
+
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest = self._Manifest()
+            _, tool, _ = _fold_backtest_tool(
+                Path(tmp), 5, formal_guard=self._unpausable, manifest=manifest
+            )
+            registry = ToolRegistry([tool])
+            result = registry.invoke("daily_backtest", {})
+            self.assertFalse(result.ok)
+            self.assertEqual(result.value["error_type"], "infrastructure_error")
+            self.assertIn("could not start", result.error)
+            self.assertIn("pause", result.error)
+            # Nothing ran: no slot, no Step, no dead-end node.
+            self.assertEqual(tool.backtests, 0)
+            self.assertEqual(tool.steps, [])
+            self.assertEqual(tool.tree.nodes(), [])
+            # The manifest still records the attempt, as what it was.
+            self.assertEqual(
+                [(item["status"], "result_name" in item) for item in manifest.summaries],
+                [("infrastructure_error", False)],
+            )
+            # The slot survives for the retry, which numbers itself 001.
+            tool.formal_guard = nullcontext
+            retried = registry.invoke("daily_backtest", {})
+            self.assertTrue(retried.ok, retried.error)
+            self.assertEqual(tool.backtests, 1)
+            self.assertEqual(retried.value["backtests_used"], 1)
+            self.assertEqual(manifest.summaries[-1]["result_name"], "valid_001")
+
+    def test_a_destroyed_sandbox_aborts_the_session_before_any_backtest(self) -> None:
+        from autotrade.pipelines.local_backend import SandboxLost
+
+        @contextmanager
+        def lost():
+            raise SandboxLost("sandbox could not be paused and was destroyed")
+            yield  # pragma: no cover - the guard never holds
+
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest = self._Manifest()
+            _, tool, _ = _fold_backtest_tool(
+                Path(tmp), 5, formal_guard=lost, manifest=manifest
+            )
+            # The registry re-raises a session interrupt instead of turning it
+            # into an observation the Agent would answer with another attempt.
+            with self.assertRaises(SandboxLost):
+                ToolRegistry([tool]).invoke("daily_backtest", {})
+            self.assertEqual(tool.backtests, 0)
+            self.assertEqual(manifest.summaries, [])
+
+    def test_a_sandbox_destroyed_at_teardown_is_not_swallowed_by_a_good_replay(
+        self,
+    ) -> None:
+        """A guard teardown failure after a complete Validation is normally
+        swallowed — the Validation happened. A destroyed container is not that:
+        no later call can run, so it must still abort the session."""
+        from autotrade.pipelines.local_backend import SandboxLost
+
+        @contextmanager
+        def lost_at_teardown():
+            yield
+            raise SandboxLost("sandbox could not be safely unpaused and was destroyed")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            _, tool, _ = _fold_backtest_tool(Path(tmp), 5, formal_guard=lost_at_teardown)
+            with self.assertRaises(SandboxLost):
+                ToolRegistry([tool]).invoke("daily_backtest", {})

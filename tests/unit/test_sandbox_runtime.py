@@ -36,6 +36,7 @@ from autotrade.environment.sandbox import (
     DockerSandbox,
     LocalSandbox,
     SandboxConfig,
+    SandboxDestroyed,
     SandboxLimits,
     SandboxSpec,
 )
@@ -973,6 +974,104 @@ def test_persistent_sandbox_run_args_forbid_pull_network_and_privilege_escalatio
     assert command[command.index("--security-opt") + 1] == "no-new-privileges"
     assert command[command.index("--cap-drop") + 1] == "ALL"
     assert "/var/run/docker.sock" not in " ".join(command)
+
+
+def _started_fake_sandbox(tmp_path: Path) -> DockerSandbox:
+    """A started DockerSandbox whose docker calls are all faked."""
+    local = LocalSandbox(tmp_path / "session")
+    local.prepare_layout()
+    sandbox = DockerSandbox(local, SandboxSpec(gpu=None))
+    started = subprocess.CompletedProcess(args=[], returncode=0, stdout="c\n", stderr="")
+    with (
+        patch("autotrade.environment.sandbox.probe_image_runtime", return_value={}),
+        patch("autotrade.environment.sandbox.subprocess.run", return_value=started),
+    ):
+        sandbox.start()
+    return sandbox
+
+
+def _fake_docker(*, pause: int = 0, unpause: int = 0, probe: object = 0):
+    """Fake docker CLI recording the verbs the guard drives, in order.
+
+    ``probe`` is the ``docker exec true`` outcome: a return code, or
+    ``"hang"`` for a call that outlives its timeout.
+    """
+
+    verbs: list[str] = []
+    frozen = "OCI runtime pause failed: timeout of 10s reached"
+
+    def run(command, **_kwargs):
+        verb = command[1]
+        verbs.append(verb)
+        if verb == "pause":
+            return subprocess.CompletedProcess(command, pause, "", frozen)
+        if verb == "unpause":
+            return subprocess.CompletedProcess(command, unpause, "", "is not paused")
+        if verb == "exec":
+            if probe == "hang":
+                raise subprocess.TimeoutExpired(command, 15)
+            return subprocess.CompletedProcess(
+                command, probe, "", "cannot exec in a paused container"
+            )
+        if verb == "rm":
+            return subprocess.CompletedProcess(command, 0, "", "")
+        raise AssertionError(f"unexpected docker verb: {verb}")
+
+    return run, verbs
+
+
+def test_a_failed_pause_is_thawed_and_the_formal_call_refuses_to_run(tmp_path: Path):
+    """``docker pause`` can fail with the freezer already engaged: runc writes
+    cgroup.freeze=1, times out waiting for `frozen`, and the daemon rolls its
+    own state back to running. Raising there left nothing to unpause the cgroup
+    and every later exec died with "cannot exec in a paused container"."""
+    sandbox = _started_fake_sandbox(tmp_path)
+    run, verbs = _fake_docker(pause=1, probe=0)
+    entered = False
+    with patch("autotrade.environment.sandbox.subprocess.run", side_effect=run):
+        with pytest.raises(RuntimeError, match="failed to pause sandbox") as caught, sandbox.formal_guard():
+            entered = True  # pragma: no cover - the guard never yields
+        # A container that proved usable is kept: the formal call simply does
+        # not run, and the Agent can call the backtest again.
+        assert sandbox.exec(["true"], timeout_seconds=5).returncode == 0
+    assert not entered
+    assert not isinstance(caught.value, SandboxDestroyed)
+    assert verbs == ["pause", "unpause", "exec", "exec"]
+
+
+@pytest.mark.parametrize("probe", [1, "hang"])
+def test_a_sandbox_that_cannot_be_thawed_is_destroyed_and_aborts_the_session(
+    tmp_path: Path, probe: object
+):
+    """A container that no longer executes anything is unrecoverable here, so
+    it is destroyed (the workspace is a host bind mount and survives) and the
+    failure is explicit — never a silent continuation against a wedged
+    sandbox."""
+    sandbox = _started_fake_sandbox(tmp_path)
+    run, verbs = _fake_docker(pause=1, unpause=1, probe=probe)
+    entered = False
+    with patch("autotrade.environment.sandbox.subprocess.run", side_effect=run):
+        with pytest.raises(SandboxDestroyed, match="could not be paused"), sandbox.formal_guard():
+            entered = True  # pragma: no cover - the guard never yields
+        assert not entered
+        assert verbs == ["pause", "unpause", "exec", "rm"]
+        # Nothing can run against it afterwards, and it says so.
+        with pytest.raises(RuntimeError, match="not started"):
+            sandbox.exec(["true"], timeout_seconds=5)
+
+
+def test_a_sandbox_that_cannot_be_unpaused_is_destroyed_and_aborts_the_session(
+    tmp_path: Path,
+):
+    sandbox = _started_fake_sandbox(tmp_path)
+    run, verbs = _fake_docker(unpause=1)
+    with (
+        patch("autotrade.environment.sandbox.subprocess.run", side_effect=run),
+        pytest.raises(SandboxDestroyed, match="could not be safely unpaused"),
+        sandbox.formal_guard(),
+    ):
+        pass
+    assert verbs == ["pause", "unpause", "rm"]
 
 
 def test_persistent_command_runner_rejects_an_empty_or_blank_argv():

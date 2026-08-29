@@ -1439,10 +1439,11 @@ def test_meta_trace_payload_keeps_sub_agent_brief_thinking_and_failure_events() 
         "subagent_task",
         {"task_id": "agent_1", "role": "auditor", "parent_call_id": "call_p", "status": "started",
          "mode": "meta", "model": "local-model", "thinking": "medium", "thinking_applied": True,
-         "inherit_context": False, "description": "trace audit",
+         "rounds_limit": 12, "inherit_context": False, "description": "trace audit",
          "task": "读 inputs/agent_traces/x.jsonl，回答委托质量问题。"},
     )
     assert started["thinking_applied"] is True and started["description"] == "trace audit"
+    assert started["rounds_limit"] == 12
     assert started["task"] == "读 inputs/agent_traces/x.jsonl，回答委托质量问题。"
     child_cut = _safe_meta_trace_payload(
         "subagent_output_truncated",
@@ -1466,9 +1467,21 @@ def test_meta_trace_payload_keeps_sub_agent_brief_thinking_and_failure_events() 
         {"task_id": "agent_1", "status": "error", "rounds": 4, "tool_calls": 2, "llm_calls": 5,
          "provider": "vllm", "model": "local-model", "usage_totals": {"total_tokens": 900},
          "summary": "报告正文", "mode": "meta", "role": "auditor", "thinking": "medium",
-         "thinking_applied": True, "inherit_context": False, "truncated": True,
+         "thinking_applied": True, "rounds_limit": 12, "inherit_context": False, "truncated": True,
          "truncated_rounds": 3, "llm_errors": 1, "error": "output budget exhausted on reasoning"},
     )
-    assert ended["thinking_applied"] is True
+    assert ended["thinking_applied"] is True and ended["rounds_limit"] == 12
     assert ended["truncated_rounds"] == 3 and ended["llm_errors"] == 1
     assert "summary" not in ended and ended["summary_chars"] == 4
+    # Report delivery is counters and a spill reference, never the child's text.
+    delivered = _safe_meta_trace_payload(
+        "subagent_attempt",
+        {"attempt": 2, "role": "auditor", "ok": True, "status": "completed",
+         "task_id": "agent_1", "summary_chars": 9000, "summary_delivered_chars": 6000,
+         "summary_truncated": True, "result_ref": "logs/tool_results/subagent_report_ab12/report.txt",
+         "summary": "报告正文", "report": {"summary": "报告正文"}},
+    )
+    assert delivered == {"attempt": 2, "role": "auditor", "ok": True, "status": "completed",
+                         "task_id": "agent_1", "summary_chars": 9000,
+                         "summary_delivered_chars": 6000, "summary_truncated": True,
+                         "result_ref": "logs/tool_results/subagent_report_ab12/report.txt"}

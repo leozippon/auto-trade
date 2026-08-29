@@ -34,6 +34,16 @@ _MEMORY_LIMIT = re.compile(r"^[1-9][0-9]*(?:[kKmMgG])?$")
 _IMAGE_TAG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,200}$")
 
 
+class SandboxDestroyed(RuntimeError):
+    """The session container was destroyed while recovering the formal guard.
+
+    Raised only once the container is gone: nothing in the session can run
+    another command, so the caller must abort the session rather than report it
+    as a strategy failure and let the Agent probe a sandbox that no longer
+    exists.
+    """
+
+
 @dataclass(frozen=True)
 class SandboxLimits:
     """Per-container resources and per-inference protocol limits."""
@@ -423,6 +433,14 @@ class DockerSandbox:
 
     @contextmanager
     def formal_guard(self) -> Iterator[None]:
+        """Freeze the development container for one formal call.
+
+        The Agent's own processes are the only writers of the working strategy
+        tree, so pausing them is what makes the artifact the evaluator reads the
+        one the modification check just approved. A formal call therefore never
+        runs without the guard: if the pause cannot be established the caller
+        gets an error and no evaluation happens.
+        """
         if not self._started:
             raise RuntimeError("persistent sandbox is not started")
         paused = subprocess.run(
@@ -430,7 +448,7 @@ class DockerSandbox:
             capture_output=True, text=True, timeout=30, check=False,
         )
         if paused.returncode != 0:
-            raise RuntimeError(f"failed to pause sandbox: {paused.stderr.strip()}")
+            self._recover_failed_pause(paused.stderr.strip())
         try:
             yield
         finally:
@@ -440,7 +458,42 @@ class DockerSandbox:
             )
             if resumed.returncode != 0:
                 self.stop()
-                raise RuntimeError("sandbox could not be safely unpaused and was destroyed")
+                raise SandboxDestroyed(
+                    "sandbox could not be safely unpaused and was destroyed"
+                )
+
+    def _recover_failed_pause(self, error: str) -> None:
+        """Leave a failed pause in a known state, or destroy the container.
+
+        A failed pause is not a no-op: ``docker pause`` writes
+        ``cgroup.freeze=1`` and then waits for the freezer to report ``frozen``,
+        so a task that is slow to freeze (heavy I/O) makes it time out with the
+        cgroup still frozen while the daemon rolls its own state back to
+        running. Every later ``exec`` then fails with "cannot exec in a paused
+        container". Thaw it best-effort and prove the container still runs a
+        command; one that does not is unrecoverable from here, so destroy it and
+        say so — the workspace is a host bind mount and survives, and every
+        later call against a wedged container would fail anyway.
+
+        A usable container is simply not guarded, so the formal call does not
+        run. Retrying the pause here would race the same slow-to-freeze task
+        that just defeated it; the caller's next backtest is the better-informed
+        retry.
+        """
+        subprocess.run(
+            [self.spec.docker_executable, "unpause", self.container],
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+        try:
+            usable = self.exec(["true"], timeout_seconds=15).returncode == 0
+        except subprocess.TimeoutExpired:
+            usable = False
+        if not usable:
+            self.stop()
+            raise SandboxDestroyed(
+                f"sandbox could not be paused and was destroyed: {error}"
+            )
+        raise RuntimeError(f"failed to pause sandbox: {error}")
 
     def stop(self) -> None:
         if not self._started:
