@@ -22,7 +22,9 @@ This pack turns common 雪球、东财股吧、同花顺、财联社 and short-t
 
 ## Fold exploration order
 
-Test one mechanism per revision. Do not begin by stacking several weak ideas into an opaque score.
+Development is one long Validation window (no Test stage, no epoch loop) and the input window covers the preceding 21 months. Screen all nine mechanisms offline against the input window first — event counts, coverage, and the sub-window sign of each cohort's forward return — then pre-register the three or more strongest survivors and run their complete Validations side by side with `batch_validate`. Keep one mechanism per revision, but do not stop after one mechanism, and do not begin by stacking several weak ideas into an opaque score.
+
+The list below is a priority order for that screening, not a fixed running order.
 
 1. **情绪冰点修复篮子** — longest relevant limit-list history; first establish whether market-level sentiment state adds anything after open execution costs.
 2. **资金流—价格背离低吸** — broad 2020+ stock flow coverage; use the base `moneyflow` feed before late-start vendor confirmations.
@@ -34,4 +36,8 @@ Test one mechanism per revision. Do not begin by stacking several weak ideas int
 8. **行业资金扩散轮动** — first use 2020+ stock flows aggregated by PIT 申万一级行业; vendor board-flow confirmation is only a later-window check.
 9. **本地文本催化 + 关注确认** — last because text parsing, negation, deduplication, and large-table reads create the most implementation risk.
 
-For each step, run a full daily Validation, report empty-signal rates and rejected orders, and compare against a same-date liquidity/size-matched cohort. Drop the idea when its stated falsifier fires; do not rescue it with a new MA filter or unrelated factor stack.
+For each validated mechanism, report empty-signal rates and rejected orders and compare against a same-date liquidity/size-matched cohort, broken out by the two halves and the four sub-windows of the Validation year. An edge that appears in only one sub-window, or whose halves disagree in sign, is not evidence even when the full-year total looks good. Drop the idea when its stated falsifier fires; do not rescue it with a new MA filter or unrelated factor stack. Keeping the parent is legitimate only after at least two genuinely different mechanisms have completed Validations and failed.
+
+## 运行教训
+
+跨实验的运行教训不再重复写在参考包里：默认挂载的运行记忆在工作区 `memory/<来源>/` 下只读可读，索引见 `inputs/skills_index.json` 的 `operating_memory` 一节（`origin=curated` 为策展经验，`origin=graduated` 为通过最终评估的历史实验留下的 skills）。

@@ -69,6 +69,29 @@ _SEALED_AFTER_REVEAL = (
 )
 
 
+# The evaluation backends name every result directory f"{mode}_{uuid4().hex}"
+# (pipelines/pit_backend.py, pipelines/local_backend.py). Fixtures use that real
+# shape so the console's prefix handling is exercised exactly as it ships.
+VALID_RESULT_DIR = "valid_5b1d0a9c8e7f46329d1c4b7a2e6f8d03"
+TEST_RESULT_DIR = "frozen_test_2c9f7a1e4d6b48305fa8e3c7b105d69e"
+# One calendar-quarter row of the breakdown every result now carries.
+_SUB_WINDOW = {
+    "kind": "quarter",
+    "label": "2022Q1",
+    "start": "20220104",
+    "end": "20220331",
+    "trade_days": 58,
+    "partial": False,
+    "return": 0.04,
+    "benchmark_return": 0.01,
+    "excess_return": 0.03,
+    "sharpe": 0.9,
+    "max_drawdown": 0.03,
+    "turnover": 1.1,
+    "trade_count": 5,
+}
+
+
 def _write_ledger(experiment_dir: Path, records: list[dict[str, object]]) -> None:
     ledger = experiment_dir / "ledgers" / "experiment_ledger.jsonl"
     ledger.parent.mkdir(parents=True, exist_ok=True)
@@ -139,7 +162,7 @@ def test_local_webui_health_schema_and_brand(tmp_path: Path):
     assert fields["strategy_period"]["choices"] == ["day", "month", "quarter", "year"]
     assert fields["inference_time"]["default"] == "08:30"
     assert fields["daily_window_months"]["optional"] is True
-    assert fields["include_intraday"]["default"] is True
+    assert fields["include_intraday"]["default"] is WEB_CREATE_DEFAULTS["include_intraday"]
     assert fields["fundamental_datasets"]["type"] == "multi"
     assert fields["macro_datasets"]["choices"]
     assert fields["events_datasets"]["choices"]
@@ -380,8 +403,9 @@ def test_experiment_endpoint_creates_only_persistent_sandbox_research(tmp_path: 
         json={
             "params": {
                 "experiment_id": "persistent_demo",
-                "first_test_period": "2024Q1",
-                "last_test_period": "2024Q1",
+                "fold_period": "quarter",
+                "development_first_period": "2024Q1",
+                "development_last_period": "2024Q1",
                 "heldout_first_period": "2024Q2",
                 "heldout_last_period": "2024Q2",
                 "strategy_period": "quarter",
@@ -1373,8 +1397,9 @@ class WebuiBackendTest(unittest.TestCase):
             hitl / "params.json",
             {
                 "experiment_id": experiment_id,
-                "first_test_period": "2022Q1",
-                "last_test_period": "2022Q2",
+                "fold_period": "quarter",
+                "development_first_period": "2022Q1",
+                "development_last_period": "2022Q2",
                 "heldout_first_period": "2023Q1",
                 "heldout_last_period": "2023Q1",
                 "analysis_model": "deepseek-v4-flash",
@@ -1441,7 +1466,7 @@ class WebuiBackendTest(unittest.TestCase):
             / "artifacts"
             / "run_001"
             / "results"
-            / "valid_000"
+            / VALID_RESULT_DIR
             / "result.json"
         )
         valid_result.parent.mkdir(parents=True)
@@ -1483,6 +1508,7 @@ class WebuiBackendTest(unittest.TestCase):
                     "fold_status": "frozen",
                     "validation_period": "20211001..20211231",
                     "test_period": "20220101..20220331",
+                    "test_decision_time": "2021-12-31T23:59:59+08:00",
                     "frozen_strategy_artifact_id": "strategy_epoch_001_fold_2022Q1",
                     "frozen_strategy_artifact_path": str(strategy_dir),
                     "validation_result": {
@@ -1490,12 +1516,14 @@ class WebuiBackendTest(unittest.TestCase):
                         "sharpe": 1.0,
                         "max_drawdown": 0.05,
                         "long_return": 0.08,
+                        "sub_windows": [_SUB_WINDOW],
                     },
                     "test_result": {
                         "total_return": 0.20,
                         "sharpe": 1.5,
                         "max_drawdown": 0.04,
                         "long_return": 0.15,
+                        "sub_windows": [_SUB_WINDOW],
                     },
                     "selected_step_id": "step_001",
                     "steps": [
@@ -1527,7 +1555,7 @@ class WebuiBackendTest(unittest.TestCase):
                 },
             ],
         )
-        orders_dir = experiment_dir / "artifacts" / "run_001" / "results" / "valid_000"
+        orders_dir = experiment_dir / "artifacts" / "run_001" / "results" / VALID_RESULT_DIR
         pd.DataFrame(
             [
                 {
@@ -1671,7 +1699,7 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertEqual(fields["no_thinking"]["label"], "禁用推理模式")
         # No trade calendar under the tmp repo root: period pickers degrade to text.
         self.assertEqual(schema["period_options"], {})
-        self.assertEqual(fields["first_test_period"]["type"], "string")
+        self.assertEqual(fields["development_first_period"]["type"], "string")
         # Filled per-epoch on the detail page instead of at creation.
         self.assertNotIn("meta_learning_directive", fields)
         self.assertEqual(
@@ -1700,11 +1728,11 @@ class WebuiBackendTest(unittest.TestCase):
 
         trading_days = [
             day.strftime("%Y%m%d")
-            for day in pd.date_range("2023-01-02", "2024-07-05", freq="B")
+            for day in pd.date_range("2021-01-04", "2024-07-05", freq="B")
         ]
         options = build_period_options(trading_days)
-        self.assertEqual(options["year"], ["2023"])
-        self.assertEqual(options["quarter"][0], "2023Q1")
+        self.assertEqual(options["year"], ["2021", "2022", "2023"])
+        self.assertEqual(options["quarter"][0], "2021Q1")
         self.assertEqual(
             options["quarter"][-1], "2024Q2"
         )  # ends 20240630 <= last trading day
@@ -1713,31 +1741,60 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertTrue(all(len(label) == 8 for label in options["week"]))
         defaults = suggest_period_defaults(options)
         quarter = defaults["quarter"]
-        # Calendar ends 2024Q2, so the pinned 2025Q4/2026Q1 preset cannot apply.
+        # The calendar ends 2024Q2, so the configured window cannot apply and
+        # every cadence derives its own window from the calendar instead.
         self.assertEqual(quarter["heldout_first_period"], "2024Q2")
-        self.assertEqual(quarter["last_test_period"], "2024Q1")
-        self.assertLess(quarter["first_test_period"], quarter["last_test_period"])
+        self.assertEqual(quarter["development_last_period"], "2024Q1")
+        self.assertLess(quarter["development_first_period"], quarter["development_last_period"])
         # first_test never takes the very first option (its validation period
         # must also exist in the calendar).
-        self.assertNotEqual(quarter["first_test_period"], options["quarter"][0])
+        self.assertNotEqual(quarter["development_first_period"], options["quarter"][0])
         schema = parameter_schema(trading_days=trading_days)
         fields = {
             field["key"]: field
             for group in schema["groups"]
             for field in group["fields"]
         }
-        self.assertEqual(fields["first_test_period"]["type"], "period")
-        self.assertEqual(fields["heldout_first_period"]["default"], "2024Q2")
+        self.assertEqual(fields["development_first_period"]["type"], "period")
+        # The form opens on the configured cadence, so its period defaults must
+        # be that cadence's suggestion — whatever cadence is configured.
+        cadence = str(WEB_CREATE_DEFAULTS["fold_period"])
+        for key, value in defaults[cadence].items():
+            self.assertEqual(fields[key]["default"], value)
+            self.assertIn(value, schema["period_options"][cadence])
 
-    def test_quarter_defaults_prefer_the_console_research_window(self) -> None:
-        from autotrade.webui.params_schema import suggest_period_defaults
+    def test_configured_defaults_prefer_the_console_research_window(self) -> None:
+        """The configured cadence keeps the configured window (an explicit
+        YYYYMMDD..YYYYMMDD held-out included, which no cadence enumeration can
+        produce); other cadences derive a window from the calendar."""
 
-        labels = [f"{year}Q{quarter}" for year in range(2022, 2027) for quarter in range(1, 5)]
-        defaults = suggest_period_defaults({"quarter": labels})["quarter"]
-        self.assertEqual(defaults["first_test_period"], "2022Q1")
-        self.assertEqual(defaults["last_test_period"], "2025Q4")
-        self.assertEqual(defaults["heldout_first_period"], "2026Q1")
-        self.assertEqual(defaults["heldout_last_period"], "2026Q2")
+        from autotrade.webui.params_schema import (
+            PERIOD_KEYS,
+            parameter_schema,
+            suggest_period_defaults,
+        )
+
+        cadence = str(WEB_CREATE_DEFAULTS["fold_period"])
+        preferred = {key: str(WEB_CREATE_DEFAULTS[key]) for key in PERIOD_KEYS}
+        labels = sorted(
+            {value for value in preferred.values() if ".." not in value}
+            | {"2019", "2020", "2021", "2022"}
+        )
+        defaults = suggest_period_defaults({cadence: labels})
+        self.assertEqual(defaults[cadence], preferred)
+        other = "quarter" if cadence != "quarter" else "year"
+        derived = suggest_period_defaults({other: labels})[other]
+        self.assertEqual(derived["heldout_first_period"], labels[-1])
+        self.assertEqual(derived["development_last_period"], labels[-2])
+        # A range default has to reach the picker, or the form could not
+        # reproduce its own default.
+        trading_days = [
+            day.strftime("%Y%m%d")
+            for day in pd.date_range("2015-01-05", "2026-07-31", freq="B")
+        ]
+        schema = parameter_schema(trading_days=trading_days)
+        for key, value in preferred.items():
+            self.assertIn(value, schema["period_options"][cadence], key)
 
     def test_public_params_never_echo_hidden_keys(self) -> None:
         # The console API refuses HIDDEN_KEYS at creation, but params.json is
@@ -1757,22 +1814,27 @@ class WebuiBackendTest(unittest.TestCase):
             "llm_env_file",
             "llm_base_url",
         )
+        # Only the held-out calendar is sealed; the development window is
+        # public research scope the session labels already carry.
+        development = {
+            "development_first_period": "2024Q1",
+            "development_last_period": "2024Q4",
+        }
         sealed_periods = {
-            "first_test_period": "2024Q1",
-            "last_test_period": "2024Q4",
             "heldout_first_period": "2025Q1",
             "heldout_last_period": "2025Q4",
         }
         params = {
             "model": "deepseek-v4-pro",
+            **development,
             **sealed_periods,
             **{key: f"secret-{key}" for key in operator_only},
         }
         public = _public_params(params, test_revealed=False)
-        self.assertEqual(public, {"model": "deepseek-v4-pro"})
+        self.assertEqual(public, {"model": "deepseek-v4-pro", **development})
         self.assertEqual(
             _public_params(params, test_revealed=True),
-            {"model": "deepseek-v4-pro", **sealed_periods},
+            {"model": "deepseek-v4-pro", **development, **sealed_periods},
         )
 
     def test_historical_endpoint_is_absent_from_list_and_detail_api(self) -> None:
@@ -1913,6 +1975,57 @@ class WebuiBackendTest(unittest.TestCase):
         )
         self.assertEqual(ok.status_code, 200)
 
+    def test_the_sealed_test_calendar_stays_sealed_until_the_reveal(self) -> None:
+        """The fold record names the window the Test evaluation will use.
+
+        ``_public_params`` and ``public_session`` already refuse to publish
+        those dates; a fold record that carried them anyway would hand out the
+        same calendar through a different route.
+        """
+        fold_ref = self._fold_ref("fold_2022Q1")
+        url = f"/api/experiments/exp_hitl/folds/epoch_001/{fold_ref}"
+        record = self.client.get(url).json()["record"]
+        self.assertNotIn("test_period", record)
+        self.assertNotIn("test_decision_time", record)
+        # The Validation window is public and stays visible.
+        self.assertEqual(record["validation_period"], "20211001..20211231")
+        self._reveal()
+        revealed = self.client.get(url).json()["record"]
+        self.assertEqual(revealed["test_period"], "20220101..20220331")
+        self.assertEqual(
+            revealed["test_decision_time"], "2021-12-31T23:59:59+08:00"
+        )
+
+    def test_the_sealed_calendar_is_absent_from_the_ledger_projection(self) -> None:
+        detail = self.client.get("/api/experiments/exp_hitl").json()
+        folds = [
+            row for row in detail["ledger"] if row.get("record_type") == "fold"
+        ]
+        self.assertTrue(folds)
+        for row in folds:
+            self.assertNotIn("test_period", row)
+            self.assertNotIn("test_decision_time", row)
+        for session in detail["sessions"]:
+            record = session.get("record") or {}
+            self.assertNotIn("test_period", record)
+            self.assertNotIn("test_decision_time", record)
+
+    def test_sub_windows_ride_with_the_result_they_belong_to(self) -> None:
+        """The per-quarter breakdown follows its result through the same gate:
+        Validation is public, the Test copy only exists after the reveal."""
+        fold_ref = self._fold_ref("fold_2022Q1")
+        url = f"/api/experiments/exp_hitl/folds/epoch_001/{fold_ref}"
+        detail = self.client.get(url).json()
+        rows = detail["record"]["validation_result"]["sub_windows"]
+        self.assertEqual(rows[0]["label"], "2022Q1")
+        self.assertEqual(detail["test_audit"], {"hidden": True})
+        self._reveal()
+        revealed = self.client.get(url).json()
+        self.assertEqual(
+            revealed["test_audit"]["test_result"]["sub_windows"][0]["label"],
+            "2022Q1",
+        )
+
     def test_fold_detail_separates_test_audit_from_record(self) -> None:
         fold_ref = self._fold_ref("fold_2022Q1")
         detail = self.client.get(
@@ -1936,11 +2049,11 @@ class WebuiBackendTest(unittest.TestCase):
         results = (
             self.experiments_root / "exp_hitl" / "artifacts" / "run_001" / "results"
         )
-        for prefix in ("valid_000", "test_000"):
+        for prefix in (VALID_RESULT_DIR, TEST_RESULT_DIR):
             directory = results / prefix
             directory.mkdir(parents=True, exist_ok=True)
             (directory / "result.json").write_text("{}", encoding="utf-8")
-            style_mode = "frozen_test" if prefix.startswith("test") else prefix.split("_")[0]
+            style_mode = prefix.rsplit("_", maxsplit=1)[0]
             (directory / "style_analysis.json").write_text(
                 json.dumps({"schema_version": 1, "mode": style_mode}),
                 encoding="utf-8",
@@ -1954,7 +2067,7 @@ class WebuiBackendTest(unittest.TestCase):
         ]
         for record in records:
             if record["record_type"] == "fold":
-                record["test_result_ref"] = str(results / "test_000" / "result.json")
+                record["test_result_ref"] = str(results / TEST_RESULT_DIR / "result.json")
         record_path.write_text(
             "".join(json.dumps(record) + "\n" for record in records), encoding="utf-8"
         )
@@ -1978,7 +2091,7 @@ class WebuiBackendTest(unittest.TestCase):
         results = (
             self.experiments_root / "exp_hitl" / "artifacts" / "run_001" / "results"
         )
-        test_dir = results / "test_000"
+        test_dir = results / TEST_RESULT_DIR
         test_dir.mkdir(parents=True, exist_ok=True)
         (test_dir / "result.json").write_text(
             json.dumps(
@@ -1999,28 +2112,78 @@ class WebuiBackendTest(unittest.TestCase):
         )
         fold_ref = self._fold_ref("fold_2022Q1")
         url = f"/api/experiments/exp_hitl/folds/epoch_001/{fold_ref}/orders"
-        hidden = self.client.get(url, params={"result": "test_000"})
+        hidden = self.client.get(url, params={"result": TEST_RESULT_DIR})
         self.assertEqual(hidden.status_code, 404)
         listing = self.client.get(url).json()
-        self.assertEqual(listing["result"], "valid_000")
+        self.assertEqual(listing["result"], VALID_RESULT_DIR)
         # The visible enumeration must not leak the sealed result's existence.
-        self.assertEqual(listing["available"], ["valid_000"])
-        csv_hidden = self.client.get(url + ".csv", params={"result": "test_000"})
+        self.assertEqual(listing["available"], [VALID_RESULT_DIR])
+        csv_hidden = self.client.get(url + ".csv", params={"result": TEST_RESULT_DIR})
         self.assertEqual(csv_hidden.status_code, 404)
         self._reveal()
-        revealed = self.client.get(url, params={"result": "test_000"})
+        revealed = self.client.get(url, params={"result": TEST_RESULT_DIR})
         self.assertEqual(revealed.status_code, 200, revealed.text)
-        self.assertEqual(revealed.json()["result"], "test_000")
+        self.assertEqual(revealed.json()["result"], TEST_RESULT_DIR)
         # Revealed test results surface in their own list, never in `available`:
         # the default selection reads `available`, so a test result can never
         # silently become the pane's default.
         listing = self.client.get(url).json()
-        self.assertIn("test_000", listing["test_results"])
-        self.assertEqual(listing["available"], ["valid_000"])
-        self.assertEqual(listing["result"], "valid_000")
-        csv_ok = self.client.get(url + ".csv", params={"result": "test_000"})
+        self.assertIn(TEST_RESULT_DIR, listing["test_results"])
+        self.assertEqual(listing["available"], [VALID_RESULT_DIR])
+        self.assertEqual(listing["result"], VALID_RESULT_DIR)
+        csv_ok = self.client.get(url + ".csv", params={"result": TEST_RESULT_DIR})
         self.assertEqual(csv_ok.status_code, 200)
         self.assertEqual(len(csv_ok.text.strip().splitlines()), 2)  # header + 1 order
+
+    def test_fold_detail_exposes_real_test_result_id(self) -> None:
+        """The console links the test-period order export by the id the
+        read-model serves: result directories are named frozen_test_<uuid>, so
+        any guessed name would only ever 404."""
+
+        results = (
+            self.experiments_root / "exp_hitl" / "artifacts" / "run_001" / "results"
+        )
+        test_dir = results / TEST_RESULT_DIR
+        test_dir.mkdir(parents=True, exist_ok=True)
+        (test_dir / "result.json").write_text(
+            json.dumps(
+                {
+                    "executions": [
+                        {
+                            "symbol": "000001.SZ",
+                            "action": "buy",
+                            "quantity": 100,
+                            "execute_at": "2022-04-01T09:30:00+08:00",
+                            "status": "filled",
+                            "price": 9.0,
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        ledger = (
+            self.experiments_root / "exp_hitl" / "ledgers" / "experiment_ledger.jsonl"
+        )
+        records = [
+            json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines()
+        ]
+        for record in records:
+            if record["record_type"] == "fold":
+                record["test_result_ref"] = str(test_dir / "result.json")
+        ledger.write_text(
+            "".join(json.dumps(record) + "\n" for record in records), encoding="utf-8"
+        )
+        fold_ref = self._fold_ref("fold_2022Q1")
+        url = f"/api/experiments/exp_hitl/folds/epoch_001/{fold_ref}"
+        self.assertEqual(self.client.get(url).json()["test_audit"], {"hidden": True})
+        self._reveal()
+        audit = self.client.get(url).json()["test_audit"]
+        self.assertEqual(audit["result"], TEST_RESULT_DIR)
+        export = self.client.get(
+            f"{url}/orders.csv", params={"result": audit["result"]}
+        )
+        self.assertEqual(export.status_code, 200, export.text)
 
     def test_fold_orders_rows_and_csv_export(self) -> None:
         results = (
@@ -2029,7 +2192,7 @@ class WebuiBackendTest(unittest.TestCase):
             / "artifacts"
             / "run_001"
             / "results"
-            / "valid_000"
+            / VALID_RESULT_DIR
         )
         (results / "result.json").write_text(
             json.dumps(
@@ -2068,7 +2231,7 @@ class WebuiBackendTest(unittest.TestCase):
         data = self.client.get(
             f"/api/experiments/exp_hitl/folds/epoch_001/{fold_ref}/orders"
         ).json()
-        self.assertEqual(data["result"], "valid_000")
+        self.assertEqual(data["result"], VALID_RESULT_DIR)
         self.assertEqual(data["row_count"], 3)
         self.assertEqual(
             [row["action"] for row in data["rows"]], ["buy", "sell", "buy"]
@@ -2076,7 +2239,7 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertEqual(data["rows"][2]["reason"], "limit_up_blocked_buy")
         csv_response = self.client.get(
             f"/api/experiments/exp_hitl/folds/epoch_001/{fold_ref}/orders.csv",
-            params={"result": "valid_000"},
+            params={"result": VALID_RESULT_DIR},
         )
         self.assertEqual(csv_response.status_code, 200)
         self.assertIn("attachment", csv_response.headers.get("content-disposition", ""))
@@ -2110,7 +2273,7 @@ class WebuiBackendTest(unittest.TestCase):
         url = f"/api/experiments/exp_hitl/folds/epoch_001/{fold_ref}/orders"
         payload = self.client.get(url).json()
         self.assertEqual(sorted(payload), expected_keys)
-        self.assertEqual(payload["available"], ["valid_000"])
+        self.assertEqual(payload["available"], [VALID_RESULT_DIR])
         # Pre-reveal the sealed list is empty, and three orders are far under
         # the 500-row cap.
         self.assertEqual(payload["test_results"], [])
@@ -2137,7 +2300,7 @@ class WebuiBackendTest(unittest.TestCase):
         shrank the count would report a lie; and the CSV is the escape hatch
         from the cap, so it must stay uncapped.
         """
-        results = self.experiments_root / "exp_hitl/artifacts/run_001/results/valid_000"
+        results = self.experiments_root / f"exp_hitl/artifacts/run_001/results/{VALID_RESULT_DIR}"
         (results / "result.json").write_text(
             json.dumps(
                 {
@@ -2164,7 +2327,7 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertIs(payload["truncated"], True)
         self.assertEqual(payload["stats"]["orders"], 501)
         self.assertEqual(payload["stats"]["filled"], 501)
-        csv_response = self.client.get(url + ".csv", params={"result": "valid_000"})
+        csv_response = self.client.get(url + ".csv", params={"result": VALID_RESULT_DIR})
         self.assertEqual(csv_response.status_code, 200)
         self.assertEqual(
             len(csv_response.text.strip().splitlines()), 502
@@ -2198,23 +2361,16 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertNotEqual(sessions[q1_key]["key"], "epoch_001/fold_2022Q1")
         self.assertTrue(sessions[q1_key]["analysis_available"])
         self.assertEqual(detail["control"]["mode"], "manual")
-        sealed_period_fields = {
-            "first_test_period",
-            "last_test_period",
-            "heldout_first_period",
-            "heldout_last_period",
-        }
+        sealed_period_fields = {"heldout_first_period", "heldout_last_period"}
         self.assertTrue(sealed_period_fields.isdisjoint(detail["params"]))
+        # The development window is not sealed: the session labels publish it.
+        self.assertEqual(detail["params"]["development_first_period"], "2022Q1")
+        self.assertEqual(detail["params"]["development_last_period"], "2022Q2")
         self._reveal()
         revealed = self.client.get("/api/experiments/exp_hitl").json()
         self.assertEqual(
             {key: revealed["params"][key] for key in sealed_period_fields},
-            {
-                "first_test_period": "2022Q1",
-                "last_test_period": "2022Q2",
-                "heldout_first_period": "2023Q1",
-                "heldout_last_period": "2023Q1",
-            },
+            {"heldout_first_period": "2023Q1", "heldout_last_period": "2023Q1"},
         )
         self.assertEqual(self.client.get("/api/experiments/nope").status_code, 404)
 
@@ -2275,7 +2431,7 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertEqual(strategy_download.status_code, 200)
         orders_download = self.client.get(
             f"/api/experiments/exp_hitl/folds/epoch_001/{fold_ref}/orders.csv",
-            params={"result": "valid_000"},
+            params={"result": VALID_RESULT_DIR},
         )
         self.assertEqual(orders_download.status_code, 200)
         for response in (trace_download, strategy_download, orders_download):
@@ -2815,8 +2971,9 @@ class WebuiBackendTest(unittest.TestCase):
             json={
                 "params": {
                     "experiment_id": "exp_new",
-                    "first_test_period": "2024Q1",
-                    "last_test_period": "2024Q1",
+                    "fold_period": "quarter",
+                    "development_first_period": "2024Q1",
+                    "development_last_period": "2024Q1",
                     "heldout_first_period": "2024Q2",
                     "heldout_last_period": "2024Q2",
                 }
@@ -2835,8 +2992,9 @@ class WebuiBackendTest(unittest.TestCase):
             created = manager.create_experiment(
                 {
                     "experiment_id": "exp_last_slot",
-                    "first_test_period": "2024Q1",
-                    "last_test_period": "2024Q1",
+                    "fold_period": "quarter",
+                    "development_first_period": "2024Q1",
+                    "development_last_period": "2024Q1",
                     "heldout_first_period": "2024Q2",
                     "heldout_last_period": "2024Q2",
                 }
@@ -2854,8 +3012,9 @@ class WebuiBackendTest(unittest.TestCase):
             manager.create_experiment(
                 {
                     "experiment_id": "exp_overflow",
-                    "first_test_period": "2024Q1",
-                    "last_test_period": "2024Q1",
+                    "fold_period": "quarter",
+                    "development_first_period": "2024Q1",
+                    "development_last_period": "2024Q1",
                     "heldout_first_period": "2024Q2",
                     "heldout_last_period": "2024Q2",
                 }
@@ -3069,8 +3228,9 @@ class InheritFromTest(unittest.TestCase):
             self.manager.create_experiment(
                 {
                     "experiment_id": "exp_child",
-                    "first_test_period": "2024Q1",
-                    "last_test_period": "2024Q1",
+                    "fold_period": "quarter",
+                    "development_first_period": "2024Q1",
+                    "development_last_period": "2024Q1",
                     "heldout_first_period": "2024Q2",
                     "heldout_last_period": "2024Q2",
                     "inherit_from": "exp_source",
@@ -3095,8 +3255,9 @@ class InheritFromTest(unittest.TestCase):
             self.manager.create_experiment(
                 {
                     "experiment_id": "exp_child",
-                    "first_test_period": "2024Q1",
-                    "last_test_period": "2024Q1",
+                    "fold_period": "quarter",
+                    "development_first_period": "2024Q1",
+                    "development_last_period": "2024Q1",
                     "heldout_first_period": "2024Q2",
                     "heldout_last_period": "2024Q2",
                     "inherit_from": "exp_source",
@@ -3119,8 +3280,9 @@ class InheritFromTest(unittest.TestCase):
             self.manager.create_experiment(
                 {
                     "experiment_id": "exp_blank",
-                    "first_test_period": "2024Q1",
-                    "last_test_period": "2024Q1",
+                    "fold_period": "quarter",
+                    "development_first_period": "2024Q1",
+                    "development_last_period": "2024Q1",
                     "heldout_first_period": "2024Q2",
                     "heldout_last_period": "2024Q2",
                 }
@@ -3138,8 +3300,9 @@ class InheritFromTest(unittest.TestCase):
             self.manager.create_experiment(
                 {
                     "experiment_id": "exp_child",
-                    "first_test_period": "2024Q1",
-                    "last_test_period": "2024Q1",
+                    "fold_period": "quarter",
+                    "development_first_period": "2024Q1",
+                    "development_last_period": "2024Q1",
                     "heldout_first_period": "2024Q2",
                     "heldout_last_period": "2024Q2",
                     "inherit_from": "exp_source",
@@ -3417,7 +3580,9 @@ class HitlControlActionTest(unittest.TestCase):
             directive=later,
         )
         self.assertEqual(refused.status_code, 400)
-        self.assertIn("未来验证信息泄漏", refused.json()["detail"])
+        self.assertIn(
+            "future validation information would leak", refused.json()["detail"]
+        )
         self.assertEqual(self._control().parent_overrides, {})
 
     def test_rerun_fold_issues_a_token_and_resets_the_session_gates(self) -> None:
@@ -4065,3 +4230,41 @@ def test_public_worker_log_is_repo_relative_and_never_a_host_path(tmp_path: Path
     assert "worker_log" not in running["status"]
     listed = summarize_experiment(directory)
     assert listed["worker_log"] == relative
+
+
+def test_guarded_fold_view_handles_a_fold_without_a_test_stage() -> None:
+    """A development fold may have no Test stage at all.
+
+    Nothing then needs sealing and nothing is missing: the view is the record,
+    before and after the reveal, and the console renders no test block rather
+    than an empty "pending" one.
+    """
+    from autotrade.webui.registry import guarded_fold_view
+
+    record = {
+        "record_type": "fold",
+        "fold_id": "fold_dev",
+        "validation_period": "20220101..20251231",
+        "validation_result": {"total_return": 0.1, "sub_windows": [_SUB_WINDOW]},
+    }
+    assert guarded_fold_view(record, test_revealed=False) == record
+    assert guarded_fold_view(record, test_revealed=True) == record
+
+
+def test_guarded_fold_view_never_publishes_result_payloads() -> None:
+    """Test evidence and its on-disk pointers leave through the labelled audit
+    block only, revealed or not; only the calendar is reveal-gated."""
+    from autotrade.webui.registry import guarded_fold_view
+
+    record = {
+        "record_type": "fold",
+        "test_period": "20220101..20220331",
+        "test_decision_time": "2021-12-31T23:59:59+08:00",
+        "test_result": {"total_return": 0.2},
+        "test_result_ref": "/host/path/result.json",
+        "snapshot_ids": ["snap"],
+    }
+    sealed = guarded_fold_view(record, test_revealed=False)
+    assert sealed == {"record_type": "fold"}
+    revealed = guarded_fold_view(record, test_revealed=True)
+    assert set(revealed) == {"record_type", "test_period", "test_decision_time"}

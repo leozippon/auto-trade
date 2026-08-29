@@ -17,7 +17,7 @@ import pytest
 
 from autotrade.environment.llm import ProviderResponse, ScriptedLLM, ToolCall
 from autotrade.environment.nl import NLConfig, NLService
-from autotrade.environment.nl.service import DEFAULT_MAX_TOTAL_CALLS
+from autotrade.environment.nl.service import NL_CALLS_PER_TRADING_DAY
 
 NOW = datetime(2026, 1, 2, tzinfo=UTC)
 INDEX_COLUMNS = [
@@ -542,11 +542,22 @@ def test_nl_call_budget_is_per_decision_and_total(tmp_path: Path):
     service.close()
 
 
-def test_nl_total_call_budget_defaults_to_a_real_ceiling():
-    # NL is the only real LLM inference inside a backtest's wall clock, so the
-    # shipped default must bound it rather than leave it open-ended.
-    assert NLConfig().max_total_calls == DEFAULT_MAX_TOTAL_CALLS
-    assert isinstance(DEFAULT_MAX_TOTAL_CALLS, int) and DEFAULT_MAX_TOTAL_CALLS > 0
+def test_nl_total_call_budget_scales_with_the_replay_it_runs():
+    # NL is the only real LLM inference inside a replay's wall clock, so the
+    # ceiling must bound it — derived from the replay length, not a constant.
+    assert NLConfig().max_total_calls is None
+    long_window = NLConfig().for_replay(242)
+    assert long_window.max_total_calls == NL_CALLS_PER_TRADING_DAY * 242
+    short_window = NLConfig().for_replay(61)
+    assert short_window.max_total_calls == NL_CALLS_PER_TRADING_DAY * 61
+    assert short_window.max_total_calls < long_window.max_total_calls
+    # A very short replay still affords one full decision's per-decision peak.
+    assert NLConfig().for_replay(1).max_total_calls == NLConfig().max_calls_per_decision
+    # An explicit ceiling is the operator's own and is never re-derived.
+    assert NLConfig(max_total_calls=7).for_replay(242).max_total_calls == 7
+    for bad in (0, -1, True, 2.5):
+        with pytest.raises(ValueError, match="trading_days"):
+            NLConfig().for_replay(bad)  # type: ignore[arg-type]
 
 
 def test_nl_counters_separate_gated_calls_from_calls_that_reached_the_model(

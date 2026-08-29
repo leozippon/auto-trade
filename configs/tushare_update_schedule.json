@@ -552,6 +552,33 @@
       "doc_ref": "https://tushare.pro/document/2?doc_id=182"
     },
     {
+      "dataset": "ths_index",
+      "api": "ths_index",
+      "domain": "reference",
+      "frequency": "low_frequency",
+      "official_update": "同花顺概念与行业指数目录（exchange=A 全量分页）；官方入库时刻未收录，目录中 type=N/I 的指数驱动 ths_member 下载。",
+      "cron_policy": "weekly_force_refresh",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=259"
+    },
+    {
+      "dataset": "ths_member",
+      "api": "ths_member",
+      "domain": "reference",
+      "frequency": "low_frequency",
+      "official_update": "同花顺概念/行业指数成分；官方入库时刻未收录，按 ths_index 目录逐指数下载，与目录同批刷新。",
+      "cron_policy": "weekly_force_refresh_with_ths_index",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=261"
+    },
+    {
+      "dataset": "index_basic",
+      "api": "index_basic",
+      "domain": "reference",
+      "frequency": "low_frequency",
+      "official_update": "指数基础信息目录；官方入库时刻未收录，源端单次调用钳制 8000 行，必须分页取全量。",
+      "cron_policy": "daily_force_refresh",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=94"
+    },
+    {
       "dataset": "index_weight",
       "api": "index_weight",
       "domain": "reference",

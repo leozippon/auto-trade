@@ -1,6 +1,6 @@
 # Fold rewrite playbook
 
-The goal is not to preserve a GitHub implementation. The goal is to turn 2–4 independent hypotheses into legal `output/main.py` revisions and let this project's complete Validation falsify them.
+The goal is not to preserve a GitHub implementation. The goal is to turn three or more independent hypotheses into legal `output/main.py` revisions inside one fold and let this project's complete Validation falsify them.
 
 ## 1. Establish the local contract
 
@@ -34,16 +34,18 @@ Do not add a generic optimizer, custom backtester, persistent state machine, fra
 
 A Fold with a parent must complete a Validation of executable logic different from that parent before it may retain the parent. Comment-only edits, a parent replay, and an inactive parameter change do not satisfy this pack's purpose.
 
+Before spending a Validation on an idea, screen it offline over the 21-month input window — visible event counts, coverage stability, and the quarter-by-quarter sign of the cohort's forward return — and drop the ones that cannot clear that screen.
+
 Use this order, skipping an item only when its required domain is absent or its schema/PIT contract cannot be proved:
 
 1. **Earnings-forecast drift.** Implement the smallest announcement-visible surprise ranking. Validate it as a standalone candidate.
 2. **Holder accumulation minus unlock pressure.** Implement only if `events` contains both required datasets with unit rules. Validate it independently, not as an overlay on idea 1.
-3. **Volume-weighted reversal.** This is the daily-only fallback and should be tested when an optional domain is unavailable.
-4. **EP plus abnormal turnover.** Test the slow monthly daily-only alternative.
+3. **Volume-weighted reversal.** Daily-only, so it is always available; validate it standalone in the same fold instead of holding it back as a fallback.
+4. **EP plus abnormal turnover.** The slow monthly daily-only alternative; validate it standalone as well.
 
-Complete at least two genuinely different idea Validations before tuning thresholds. If only daily data is available, use ideas 3 then 4. If budget permits a third or fourth Validation, use another standalone idea before combining signals. A hybrid of the two best completed candidates is allowed only after both standalone mechanisms have been measured.
+Complete at least three genuinely different idea Validations inside the fold before tuning thresholds; the fold budget allows more. If only daily data is available, use ideas 3 and 4 and then an independent variant of one of them rather than stopping early. A hybrid of the two best completed candidates is allowed only after both standalone mechanisms have been measured.
 
-For each revision, change one hypothesis family, state its failure condition before Validation, and compare exposure, turnover, rejected orders, costs, concentration, drawdown, and return. Roll back a failed node rather than carrying dead branches into the official file.
+For each revision, change one hypothesis family, state its failure condition before Validation, and compare exposure, turnover, rejected orders, costs, concentration, drawdown, and return against a same-window run of the parent. Report those figures separately for the two halves and the four sub-windows of the Validation year: an edge confined to one sub-window, or with halves of opposite sign, is a failure even when the full-year total looks good. Roll back a failed node rather than carrying dead branches into the official file.
 
 ## 4. Idea implementation cards
 
@@ -100,7 +102,7 @@ Do not use `order_target_value`, `run_daily`, `get_fundamentals`, `attribute_his
 
 Before `finish_fold`, verify that the chosen node:
 
-- differs in executable logic from the parent or follows a completed distinct-hypothesis Validation;
+- differs in executable logic from the parent, or keeps the parent only after at least two distinct-hypothesis Validations completed and were falsified;
 - contains a self-contained `output/main.py` and no imported helper source;
 - uses only visible rows and T-1 daily data at `08:30`;
 - returns strict JSON and uses deterministic positive integer quantities;

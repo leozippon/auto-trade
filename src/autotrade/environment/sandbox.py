@@ -42,6 +42,9 @@ class SandboxLimits:
     memory: str = "16g"
     pids: int = 64
     timeout_seconds: float = 30.0
+    # Wall clock for one ``fit(context)`` invocation; the pipeline knob
+    # ``strategy_fit_timeout_seconds`` sets it.
+    fit_timeout_seconds: float = 1800.0
     max_output_chars: int = 1_000_000
     tmpfs_size: str = "64m"
 
@@ -54,6 +57,8 @@ class SandboxLimits:
             raise ValueError("sandbox pids must be a positive integer")
         if not math.isfinite(self.timeout_seconds) or self.timeout_seconds <= 0:
             raise ValueError("sandbox timeout_seconds must be positive")
+        if not math.isfinite(self.fit_timeout_seconds) or self.fit_timeout_seconds <= 0:
+            raise ValueError("sandbox fit_timeout_seconds must be positive")
         if (
             isinstance(self.max_output_chars, bool)
             or not isinstance(self.max_output_chars, int)

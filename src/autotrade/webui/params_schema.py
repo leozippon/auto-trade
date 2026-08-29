@@ -22,20 +22,54 @@ from __future__ import annotations
 
 import bisect
 import json
+import re
 from pathlib import Path
 
 import pandas as pd
 
-from autotrade.environment.data.snapshot import SnapshotConfig
+from autotrade.environment.data.snapshot import DEFAULT_DATASETS, SELECTABLE_DATASETS
 from autotrade.environment.llm.model_profiles import MODEL_CHOICES
 from autotrade.pipelines.folds import MIN_REGION_TRADE_DAYS, period_bounds
 from autotrade.pipelines.hitl_state import WEB_CREATE_DEFAULTS
+from autotrade.pipelines.skills import (
+    OPERATING_MEMORY_LIBRARY,
+    OPERATING_MEMORY_MODES,
+    build_skills_index,
+)
 
-# Suggested development length (test periods) per cadence: 8 spans two years at
-# the default quarterly cadence — a one-year dev window is a single regime
-# sample (lzp-test21 review: dev-fit strategies inverted out-of-sample).
+# Suggested development length in cadence periods when the calendar picker seeds
+# a cadence other than the configured one: eight periods, so a one-period
+# development window (a single regime sample; lzp-test21 review: dev-fit
+# strategies inverted out-of-sample) is only reached by an explicit choice.
 DEV_DEFAULT_PERIODS = 8
+PERIOD_KEYS = (
+    "development_first_period",
+    "development_last_period",
+    "heldout_first_period",
+    "heldout_last_period",
+)
+# A period field also accepts an explicit calendar range instead of a cadence
+# label (``folds.period_bounds`` reads both), which is how a held-out window
+# that does not fill a whole cadence period is expressed.
+_EXPLICIT_RANGE = re.compile(r"^\d{8}\.\.\d{8}$")
 _SCHEDULE_REGISTRY = Path(__file__).resolve().parents[3] / "configs" / "tushare_update_schedule.json"
+_OPERATING_MEMORY_LIBRARY = Path(__file__).resolve().parents[3] / OPERATING_MEMORY_LIBRARY
+
+
+def _operating_memory_entries() -> list[dict[str, str]]:
+    """Curated operating-memory entries, used only to describe the mode field.
+
+    A missing or malformed library degrades to an empty list (display-only
+    concern); what actually mounts is decided by the session at run time."""
+
+    try:
+        index = build_skills_index(_OPERATING_MEMORY_LIBRARY)
+    except (OSError, ValueError):
+        return []
+    return [
+        {"name": str(entry["name"]), "title": str(entry["title"])}
+        for entry in index["skills"]  # type: ignore[union-attr]
+    ]
 
 
 def _dataset_labels() -> dict[str, str]:
@@ -60,7 +94,7 @@ def _dataset_labels() -> dict[str, str]:
 
 
 _DATASET_LABELS = _dataset_labels()
-_SNAPSHOT_DEFAULTS = SnapshotConfig()
+_OPERATING_MEMORY_ENTRIES = _operating_memory_entries()
 
 _FIELDS: list[dict[str, object]] = [
     # 基本与排程
@@ -75,27 +109,34 @@ _FIELDS: list[dict[str, object]] = [
     {
         "key": "fold_period",
         "group": "基本与排程",
-        "label": "Fold 周期",
+        "label": "日历周期单位",
         "type": "choice",
         "choices": ["week", "month", "quarter", "year"],
         "choice_labels": {"week": "周", "month": "月", "quarter": "季度", "year": "年"},
-        "help": "每个 Fold 的验证/测试周期粒度。验证区间取测试区间的前一个同频周期；切换后下方周期选项随之变化。",
+        "help": "Development 与 Held-out 周期标签的单位；切换后下方周期选项随之变化。开启 Test 阶段时它也是 Fold 滚动的粒度。",
     },
     {
-        "key": "first_test_period",
+        "key": "development_first_period",
         "group": "基本与排程",
-        "label": "首个测试周期（Fold 以测试周期命名）",
+        "label": "Development 起始周期",
         "type": "period",
         "required": True,
-        "help": "development 首个 Fold 的测试（样本外）周期；其前一个同频周期自动作为该 Fold 的验证区间，无需单独配置。",
+        "help": "Development 窗口的第一个周期。默认整个窗口作为一个 Fold 开发并在整窗验证，冻结后直接进入 Held-out。",
     },
     {
-        "key": "last_test_period",
+        "key": "development_last_period",
         "group": "基本与排程",
-        "label": "末个测试周期",
+        "label": "Development 结束周期",
         "type": "period",
         "required": True,
-        "help": "development 末个 Fold 的测试周期；与首个周期共同决定 Fold 数。每个 Fold 的验证区间 = 其测试周期的前一同频周期。",
+        "help": "Development 窗口的最后一个周期；Held-out 必须晚于它。",
+    },
+    {
+        "key": "test_stage",
+        "group": "基本与排程",
+        "label": "启用 Test 阶段（滚动 Fold）",
+        "type": "bool",
+        "help": "关闭（默认）= 整个 Development 窗口是一个 Fold，没有冻结 Test，Held-out 就是裁决。开启 = 在窗口内按周期滚动：首个周期只做验证，之后每个周期作为一个 Fold 的测试区间、其前一周期为验证区间。",
     },
     {
         "key": "heldout_first_period",
@@ -114,14 +155,14 @@ _FIELDS: list[dict[str, object]] = [
         "help": "最终冻结测试的结束周期。",
     },
     {"key": "epochs", "group": "基本与排程", "label": "Epoch 数", "type": "int",
-     "help": "从首个 Fold 到末个 Fold 完整滚动的轮数；每个 Epoch 开始前固定运行一次元学习。"},
+     "help": "对 Development 窗口的完整遍历轮数，默认 1；每个 Epoch 开始前固定运行一次元学习。"},
     {
         "key": "meta_learning_fold_interval",
         "group": "基本与排程",
         "label": "元学习 Fold 间隔",
         "type": "int",
         "min": 0,
-        "help": "0=仅每个 Epoch 开始运行一次；N>0=每完成 N 个 Fold 且仍有下一 Fold 时，再运行一次元学习并更新后续 PRIOR。探索默认 2（约每两个季度一次）。",
+        "help": "0=仅每个 Epoch 开始运行一次；N>0=每完成 N 个 Fold 且仍有下一 Fold 时，再运行一次元学习并更新后续 PRIOR。按 Fold 计数：默认单个 Development Fold 时只有 Epoch 开头的元学习；开启 Test 阶段后默认 1 表示每个 Fold 之间都有一次。",
     },
     {"key": "inherit_from", "group": "基本与排程", "label": "继承已有实验的 Agent Output", "type": "choice",
      "optional": True,
@@ -256,13 +297,17 @@ _FIELDS: list[dict[str, object]] = [
         "optional": True,
         "default": [],
         "advanced": True,
-        "choices": list(_SNAPSHOT_DEFAULTS.fundamental_datasets),
+        "choices": list(SELECTABLE_DATASETS["fundamentals"]),
         "choice_labels": {
             name: _DATASET_LABELS[name]
-            for name in _SNAPSHOT_DEFAULTS.fundamental_datasets
+            for name in SELECTABLE_DATASETS["fundamentals"]
             if name in _DATASET_LABELS
         },
-        "help": "只加载所选财务事件数据集；全不选 = 全部默认数据集。",
+        "help": (
+            "只加载所选财务事件数据集（可选中默认范围之外的数据集）；全不选 = 默认数据集集合："
+            + "、".join(DEFAULT_DATASETS["fundamentals"])
+            + "。"
+        ),
     },
     {
         "key": "macro_datasets",
@@ -272,13 +317,17 @@ _FIELDS: list[dict[str, object]] = [
         "optional": True,
         "default": [],
         "advanced": True,
-        "choices": list(_SNAPSHOT_DEFAULTS.macro_datasets),
+        "choices": list(SELECTABLE_DATASETS["macro"]),
         "choice_labels": {
             name: _DATASET_LABELS[name]
-            for name in _SNAPSHOT_DEFAULTS.macro_datasets
+            for name in SELECTABLE_DATASETS["macro"]
             if name in _DATASET_LABELS
         },
-        "help": "只加载所选宏观数据集；全不选 = 全部默认数据集。",
+        "help": (
+            "只加载所选宏观数据集（可选中默认范围之外的数据集）；全不选 = 默认数据集集合："
+            + "、".join(DEFAULT_DATASETS["macro"])
+            + "。"
+        ),
     },
     {
         "key": "events_datasets",
@@ -288,13 +337,17 @@ _FIELDS: list[dict[str, object]] = [
         "optional": True,
         "default": [],
         "advanced": True,
-        "choices": list(_SNAPSHOT_DEFAULTS.events_datasets),
+        "choices": list(SELECTABLE_DATASETS["events"]),
         "choice_labels": {
             name: _DATASET_LABELS[name]
-            for name in _SNAPSHOT_DEFAULTS.events_datasets
+            for name in SELECTABLE_DATASETS["events"]
             if name in _DATASET_LABELS
         },
-        "help": "只加载所选事件数据集；全不选 = 全部默认数据集。",
+        "help": (
+            "只加载所选事件数据集（可选中默认范围之外的数据集）；全不选 = 默认数据集集合："
+            + "、".join(DEFAULT_DATASETS["events"])
+            + "。"
+        ),
     },
     {
         "key": "text_datasets",
@@ -304,13 +357,17 @@ _FIELDS: list[dict[str, object]] = [
         "optional": True,
         "default": [],
         "advanced": True,
-        "choices": list(_SNAPSHOT_DEFAULTS.text_datasets),
+        "choices": list(SELECTABLE_DATASETS["text"]),
         "choice_labels": {
             name: _DATASET_LABELS[name]
-            for name in _SNAPSHOT_DEFAULTS.text_datasets
+            for name in SELECTABLE_DATASETS["text"]
             if name in _DATASET_LABELS
         },
-        "help": "只加载所选文本数据集；全不选 = 全部默认数据集。",
+        "help": (
+            "只加载所选文本数据集（可选中默认范围之外的数据集）；全不选 = 默认数据集集合："
+            + "、".join(DEFAULT_DATASETS["text"])
+            + "。"
+        ),
     },
     # 股票筛选
     {
@@ -318,7 +375,7 @@ _FIELDS: list[dict[str, object]] = [
         "group": "股票筛选",
         "label": "剔除 ST 股",
         "type": "bool",
-        "help": "按锚点在市名称剔除含 ST 的股票（含 *ST）。",
+        "help": "按锚点在市名称剔除含 ST 的股票（含 *ST）；默认不剔除，由策略自行筛选。",
     },
     {
         "key": "screen_boards",
@@ -330,14 +387,14 @@ _FIELDS: list[dict[str, object]] = [
         "wide": False,
         "choices": ["main", "gem", "star", "bj"],
         "choice_labels": {"main": "主板", "gem": "创业板", "star": "科创板", "bj": "北交所"},
-        "help": "只保留所选板块（main=主板 gem=创业板 star=科创板 bj=北交所）；全不选 = 全部板块。",
+        "help": "只保留所选板块（main=主板 gem=创业板 star=科创板 bj=北交所）；全不选（默认）= 全部板块，由策略自行筛选。",
     },
     {
         "key": "screen_exclude_new_listed_days",
         "group": "股票筛选",
         "label": "剔除新股（上市天数 <）",
         "type": "int",
-        "help": "剔除锚点前 N 天内上市的新股；0 = 不剔除。",
+        "help": "剔除锚点前 N 天内上市的新股；0（默认）= 不剔除，由策略自行筛选。",
     },
     {
         "key": "screen_min_circ_mv_yi",
@@ -376,7 +433,7 @@ _FIELDS: list[dict[str, object]] = [
     },
     # 预算与验收
     {"key": "max_fold_minutes", "group": "预算与验收", "label": "单 Fold 推理时长（分钟）", "type": "int",
-     "help": "每个 Fold 和元学习会话的推理墙钟上限；回测耗时独立计算并回补。"},
+     "help": "每个 Fold 和元学习会话的推理墙钟上限；回测耗时独立计算并回补。默认按一个覆盖整个 Development 窗口的长会话设定。"},
     {"key": "convergence_start_epoch", "group": "预算与验收", "label": "收敛起始 Epoch", "type": "int",
      "help": "从该 Epoch（1 起）开始 Fold 提示词进入收敛阶段：优先更小更稳的策略。"},
     {"key": "min_return", "group": "预算与验收", "label": "验收目标验证收益", "type": "float",
@@ -404,6 +461,8 @@ _FIELDS: list[dict[str, object]] = [
      "help": "距推理 deadline 该秒数且已有完整 Validation 时，只保留已有节点的回滚与显式结束；尚无完整节点时继续现有流程。"},
     {"key": "per_call_timeout_seconds", "group": "预算与验收", "label": "单次 LLM 调用超时（秒）", "type": "int", "advanced": True,
      "help": "Agent 主对话单次模型 API 调用的硬超时；默认 3600 秒，与本机网关非流式读超时一致。"},
+    {"key": "strategy_fit_timeout_seconds", "group": "预算与验收", "label": "单次策略 fit 超时（秒）", "type": "int", "advanced": True,
+     "help": "正式策略可选 fit(context) 单次调用的墙钟上限：回放开始前先训练一次模型，之后按 REFIT_PERIOD 在新周期首个决策日重训；超时或异常即整场回测失败。generate_orders 的单日 30 秒上限不受影响。"},
     {"key": "disable_step_tree", "group": "预算与验收", "label": "禁用 Step 产物树", "type": "bool", "advanced": True,
      "help": "关闭跨 Fold 的 Step 谱系树（仅用于消融实验）。"},
     {"key": "record_failed_attempts", "group": "预算与验收", "label": "记录失败尝试节点", "type": "bool", "advanced": True,
@@ -436,6 +495,24 @@ _FIELDS: list[dict[str, object]] = [
      "help": "单次分析调用的输出 token 配额（推理 token 计入）。"},
     {"key": "analysis_enabled", "group": "运行控制", "label": "Fold 完成后自动生成策略分析", "type": "bool",
      "help": "每个 Fold 结束后用预定义模板调用 LLM 生成自然语言策略分析（仅基于验证期证据）。"},
+    {
+        "key": "operating_memory",
+        "group": "运行控制",
+        "label": "跨实验运行记忆",
+        "type": "choice",
+        "choices": list(OPERATING_MEMORY_MODES),
+        "choice_labels": {
+            "none": "不挂载",
+            "curated": "只挂载策展条目",
+            "curated+graduated": "策展条目 + 毕业实验的 skills",
+        },
+        "help": (
+            "把跨实验知识只读挂载进每个 Fold 与元学习工作区："
+            f"策展层是仓库里人工维护的 {len(_OPERATING_MEMORY_ENTRIES)} 条运行经验；"
+            "毕业层是 Held-out 判定为 graduated 的历史实验自己写下的 skills，"
+            "带来源实验与判定标记，由 Agent 自行取舍。会话不能改写或删除挂载内容。"
+        ),
+    },
     {"key": "gpu_count", "group": "运行控制", "label": "默认 GPU 数量", "type": "int", "min": 0, "max": 4,
      "help": "每个元学习、Fold 和 Held-out Sandbox 默认分配的 GPU 数量（0–4）；0 表示 CPU-only，不占用 L20。大于 0 时按空闲显存自动选择，逐 Fold 设置可覆盖此默认值。"},
     {"key": "disable_meta_sandbox_rebuild", "group": "运行控制", "label": "禁用派生镜像构建", "type": "bool", "advanced": True,
@@ -588,21 +665,23 @@ def suggest_period_defaults(options: dict[str, list[str]]) -> dict[str, dict[str
     period as held-out (held-out must follow development without overlap)."""
 
     defaults: dict[str, dict[str, str]] = {}
-    preferred = {
-        "first_test_period": str(WEB_CREATE_DEFAULTS["first_test_period"]),
-        "last_test_period": str(WEB_CREATE_DEFAULTS["last_test_period"]),
-        "heldout_first_period": str(WEB_CREATE_DEFAULTS["heldout_first_period"]),
-        "heldout_last_period": str(WEB_CREATE_DEFAULTS["heldout_last_period"]),
-    }
+    preferred = {key: str(WEB_CREATE_DEFAULTS[key]) for key in PERIOD_KEYS}
+    configured_cadence = str(WEB_CREATE_DEFAULTS["fold_period"])
     for cadence, labels in options.items():
         if len(labels) < 3:
             continue
-        if cadence == "quarter" and set(preferred.values()).issubset(labels):
+        # The configured cadence keeps the configured window whenever every one
+        # of its labels is still selectable; other cadences derive a window from
+        # the calendar, so switching cadence never leaves an unusable default.
+        if cadence == configured_cadence and all(
+            label in labels or _EXPLICIT_RANGE.fullmatch(label)
+            for label in preferred.values()
+        ):
             defaults[cadence] = dict(preferred)
             continue
         defaults[cadence] = {
-            "first_test_period": labels[max(1, len(labels) - 1 - DEV_DEFAULT_PERIODS)],
-            "last_test_period": labels[-2],
+            "development_first_period": labels[max(0, len(labels) - 1 - DEV_DEFAULT_PERIODS)],
+            "development_last_period": labels[-2],
             "heldout_first_period": labels[-1],
             "heldout_last_period": labels[-1],
         }
@@ -623,6 +702,17 @@ def parameter_schema(
     period_options = build_period_options(trading_days or [])
     period_defaults = suggest_period_defaults(period_options)
     default_cadence = str(WEB_CREATE_DEFAULTS["fold_period"])
+    # A suggested explicit range is not a cadence label, so the enumeration
+    # cannot contain it; append it or the picker could not show its own default.
+    for cadence, suggested in period_defaults.items():
+        labels = period_options.get(cadence)
+        if labels is None:
+            continue
+        labels.extend(
+            label
+            for label in dict.fromkeys(suggested.values())
+            if label not in labels and _EXPLICIT_RANGE.fullmatch(label)
+        )
     groups: dict[str, list[dict[str, object]]] = {name: [] for name in _GROUP_ORDER}
     for field in _FIELDS:
         entry = dict(field)

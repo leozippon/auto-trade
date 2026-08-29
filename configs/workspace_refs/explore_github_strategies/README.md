@@ -4,6 +4,8 @@ This pack is a small, screened set of strategy ideas for a Fold Agent to **rewri
 
 The previous `github_strategies` pack exposed many unrelated seeds and large platform-shaped files. The `ref_github_strats` experiment eventually spent folds replaying a parent or committing execution-identical variants. This pack instead presents four distinct, data-mapped hypotheses and requires executable rewrites before tuning.
 
+Development is one long Validation window with a 21-month input window before it — there is no Test stage and no epoch loop — and the budget allows well more than one complete Validation. Pre-register at least three of the four ideas before implementing, rewrite them, run them side by side with `batch_validate`, and judge each on sub-windows of the development window rather than on a single aggregate number.
+
 ## Non-negotiable contract
 
 - Read references with workspace-relative paths such as `refs/README.md`; write the official strategy only to `output/main.py`.
@@ -38,3 +40,7 @@ The WorldQuant formulas in `vendor/alpha101_control/` are retained only as opera
 ## Explicitly out of scope
 
 Do not vendor, import, or recommend vn.py, Qlib, RQAlpha, Backtrader, JoinQuant APIs, broker SDKs, database layers, factor platforms, full repositories, notebooks, PDFs, pretrained models, or package environments. Framework code is not strategy evidence.
+
+## 运行教训
+
+跨实验的运行教训不再重复写在参考包里：默认挂载的运行记忆在工作区 `memory/<来源>/` 下只读可读，索引见 `inputs/skills_index.json` 的 `operating_memory` 一节（`origin=curated` 为策展经验，`origin=graduated` 为通过最终评估的历史实验留下的 skills）。

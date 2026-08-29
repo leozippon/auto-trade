@@ -4,7 +4,7 @@ ADMCubeQuant is a research system in which an LLM agent designs and tests A-shar
 
 The agent works inside a networkless Docker sandbox. Everything it can read is a point-in-time snapshot built from a local TuShare data lake: every row carries the timestamp at which it actually became available, so a strategy can never see a number that did not exist yet at the moment it claims to decide. The agent writes a single-file strategy exposing `generate_orders(context)`, backtests it against a simulated A-share broker (price limits, suspensions, lot sizes, stamp duty), and iterates.
 
-Research is organised as a rolling experiment. A Fold is one development session over one test period; an Epoch is a full sweep of folds; a Meta session periodically reviews completed folds and rewrites the standing research direction the next folds start from. Each fold either freezes a new strategy or keeps the previous one, and a held-out period is scored exactly once at the very end. A local web console drives all of this, with optional human gating between sessions.
+Research runs as one experiment over a fixed development window, 2022 to 2025 by default. A Fold is one development session, an Epoch is a sweep of folds, and a Meta session reviews the completed folds and rewrites the standing research direction the next ones start from. By default the whole window is a single Fold; the optional Test stage instead cuts it into rolling folds, each validated on the period before the one it is scored on. Every fold either freezes a new strategy or keeps the previous one, and the strategy frozen at the end is replayed once over a held-out period it never saw: beating the benchmark with a positive Sharpe and a drawdown inside the limit is what graduates the experiment. A local web console drives all of this, with optional human gating between sessions.
 
 Live trading is deliberately not implemented. The console has a live-trading page, but it is an empty frontend placeholder: no backend, no broker connection, no order path.
 
@@ -52,7 +52,7 @@ Start the console on the machine that holds the data, the Docker daemon and the 
 python scripts/webui/run_webui.py
 ```
 
-It listens on `127.0.0.1:38888` and refuses any non-loopback bind. Create an experiment from the homepage: choose the fold calendar, the held-out periods, the models and the run mode (`auto` runs straight through, `manual` waits for approval before each session, `step` also pauses after each validation backtest). The console then spawns a detached worker process, and the experiment detail page shows live status, agent traces, backtest results and the controls for pausing, injecting a message, re-running a fold or rolling back.
+It listens on `127.0.0.1:38888` and refuses any non-loopback bind. Create an experiment from the homepage: choose the development window, the held-out period, the models and the run mode (`auto` runs straight through, `manual` waits for approval before each session, `step` also pauses after each validation backtest). The console then spawns a detached worker process, and the experiment detail page shows live status, agent traces, backtest results and the controls for pausing, injecting a message, re-running a fold or rolling back.
 
 The same worker can be launched by hand for a headless run, and two smaller entry points exist for narrower work — replaying a single strategy against a daily parquet, and running exactly one Fold or Meta session in isolation to inspect its prompts, traces and artifacts:
 

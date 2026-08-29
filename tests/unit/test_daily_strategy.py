@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -23,6 +25,33 @@ from autotrade.environment.strategy import (
     validate_order_payload,
 )
 from autotrade.pipelines import DailyStrategyPipeline, StrategyExperimentConfig
+
+# The optional fit(context) half of the strategy ABI: it may only write under
+# context.state_dir and read the frozen models tree, and both directories must
+# reach it on every path that runs a strategy.
+FIT_STRATEGY = """import numpy as np
+
+REFIT_PERIOD = "day"
+
+
+def fit(context):
+    np.save(
+        context.state_dir + "/fitted_on.npy",
+        np.array([int(context.inference_at.strftime("%Y%m%d"))]),
+    )
+
+
+def generate_orders(context):
+    fitted_on = int(np.load(context.state_dir + "/fitted_on.npy")[0])
+    lot = int(np.load(context.models_dir + "/lot.npy")[0])
+    return [{
+        "symbol": "000001.SZ",
+        "action": "buy",
+        "quantity": lot,
+        "execute_at": context.inference_at.strftime("%Y-%m-%dT09:30:00+08:00"),
+        "fitted_on": fitted_on,
+    }]
+"""
 
 
 def _daily() -> pd.DataFrame:
@@ -119,7 +148,10 @@ def test_daily_market_hides_rows_until_available_at():
         account=AccountSnapshot(cash=1000, positions={}),
     )
     assert type(agent_context.bars) is tuple
-    assert type(agent_context.bars[0]).__name__ == "mappingproxy"
+    assert isinstance(agent_context.bars[0], Mapping) and not isinstance(agent_context.bars[0], dict)
+    with pytest.raises(TypeError):
+        agent_context.bars[0]["close"] = 0.0  # type: ignore[index]
+    assert not hasattr(agent_context.bars, "_table")
     for bars in (complete, complete[::-1]):
         with pytest.raises(StrategyContractError, match="not visible"):
             StrategyContext(
@@ -359,7 +391,6 @@ def test_strategy_loader_blocks_environment_and_network_modules(tmp_path: Path):
 @pytest.mark.parametrize(
     "source",
     [
-        "import numpy as np\ndef generate_orders(context): return np.load('x.npy')",
         "import numpy as np\ndef generate_orders(context): return np.genfromtxt('x.csv')",
         "import numpy as np\ndef generate_orders(context): np.savetxt('x.csv', [])\n",
         "import pandas as pd\ndef generate_orders(context): return pd.read_fwf('x.txt')",
@@ -381,6 +412,33 @@ def test_pipeline_loads_strategy_and_returns_in_memory_result(tmp_path: Path):
     result = DailyStrategyPipeline(config).run(_daily())
     assert len(result.inference_dates) == 1
     assert result.executions == ()
+
+
+def test_pipeline_runs_a_fit_and_models_strategy(tmp_path: Path):
+    """The replay owns the per-run state directory, so a fit strategy runs here
+    too; the strategy's frozen models tree is mounted alongside it."""
+
+    path = tmp_path / "main.py"
+    path.write_text(FIT_STRATEGY, encoding="utf-8")
+    models = tmp_path / "models"
+    models.mkdir()
+    np.save(models / "lot.npy", np.array([100]))
+    config = StrategyExperimentConfig(
+        strategy_path=path, execution_mode="trusted", models_dir=models
+    )
+    result = DailyStrategyPipeline(config).run(_daily())
+    assert len(result.inference_dates) == 2
+    # Both days decided, so both read a fitted state and the models lot size.
+    assert [row["quantity"] for row in result.executions] == [100, 100]
+    assert [row["status"] for row in result.executions] == ["filled", "filled"]
+
+
+def test_a_fit_strategy_without_its_models_fails_explicitly(tmp_path: Path):
+    path = tmp_path / "main.py"
+    path.write_text(FIT_STRATEGY, encoding="utf-8")
+    config = StrategyExperimentConfig(strategy_path=path, execution_mode="trusted")
+    with pytest.raises(BacktestError, match="generate_orders failed"):
+        DailyStrategyPipeline(config).run(_daily())
 
 
 def test_strategy_failure_is_explicit():

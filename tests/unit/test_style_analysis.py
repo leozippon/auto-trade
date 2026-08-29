@@ -265,3 +265,84 @@ def test_benchmark_block_is_absent_when_the_slot_has_no_benchmark(tmp_path: Path
     # and the report keeps reporting missing coverage truthfully.
     assert analysis["benchmark_regression"]["reason"] == "benchmark_unavailable"
     assert benchmark_summary_block(analysis) is None
+
+
+def _neutralization_inputs(tmp_path: Path, days: list[str]) -> tuple[Path, pd.DataFrame]:
+    """A replay slot whose cross-section has a real small-minus-big spread."""
+    replay_dir = tmp_path / "replay"
+    replay_dir.mkdir()
+    pd.DataFrame(
+        [
+            {
+                "dataset": "index_daily",
+                "ts_code": BENCHMARK_TS_CODE,
+                "trade_date": day,
+                "pct_chg": (-0.25 if index % 2 == 0 else 0.5),
+            }
+            for index, day in enumerate(days)
+        ]
+    ).to_parquet(replay_dir / "macro.parquet", index=False)
+    rows = []
+    for index, day in enumerate(days):
+        # 40 names per day, and the small half moves opposite the large half so
+        # the size factor is not a constant.
+        for slot in range(40):
+            rows.append(
+                {
+                    "trade_date": day,
+                    "ts_code": f"{slot:06d}.SZ",
+                    "close": 10.0,
+                    "circ_mv": 100.0 * (slot + 1),
+                    "pb": 1.0,
+                    "turnover_rate": 1.0,
+                    "pct_chg": (0.6 if slot < 20 else -0.4) * (1 if index % 2 else -1),
+                }
+            )
+    return replay_dir, pd.DataFrame(rows)
+
+
+def test_neutralized_excess_removes_the_market_and_size_contributions(tmp_path: Path):
+    """A raw excess return cannot tell an edge from a small-cap or high-beta
+    tilt — the audited fold's apparent edge was mostly the latter."""
+    days = [stamp.strftime("%Y%m%d") for stamp in pd.bdate_range("2024-01-02", periods=20)]
+    replay_dir, daily = _neutralization_inputs(tmp_path, days)
+    analysis = replay_style_analysis(
+        _replay(days),
+        daily,
+        replay_dir=replay_dir,
+        snapshot_dir=None,
+        mode="valid",
+    )
+    block = analysis["neutralized_excess"]
+    assert block["available"] is True
+    assert block["n_days"] == len(days)
+    assert block["market_beta"] is not None
+    assert block["size_beta"] is not None
+    # The method is stated with the number, not left to the reader.
+    assert "沪深300" in block["method"] and "244" in block["method"]
+    assert analysis["size_factor_daily"]
+    compact = benchmark_summary_block(analysis)
+    assert compact["neutralized_excess_return"] == block["neutralized_excess_return"]
+    assert compact["neutralized_excess_method"] == block["method"]
+    # It is a different number from the raw excess, not a relabelling of it.
+    assert compact["neutralized_excess_return"] != compact["excess_return"]
+
+
+def test_neutralized_excess_reports_missing_factors_instead_of_zero(tmp_path: Path):
+    days = [stamp.strftime("%Y%m%d") for stamp in pd.bdate_range("2024-01-02", periods=20)]
+    # No macro.parquet: no benchmark, so no neutralization is possible.
+    replay_dir = tmp_path / "empty_replay"
+    replay_dir.mkdir()
+    _, daily = _neutralization_inputs(tmp_path, days)
+    analysis = replay_style_analysis(
+        _replay(days),
+        daily,
+        replay_dir=replay_dir,
+        snapshot_dir=None,
+        mode="valid",
+    )
+    block = analysis["neutralized_excess"]
+    assert block["available"] is False
+    assert block["reason"] == "factors_unavailable"
+    assert block["neutralized_excess_return"] is None
+    assert benchmark_summary_block(analysis) is None

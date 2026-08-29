@@ -116,6 +116,13 @@ def _executor_for_process(
     executor._closed = False
     executor.snapshot_dir = None
     executor.asof_dir = None
+    executor.models_dir = None
+    executor.state_dir = None
+    executor.fit_schedule = None
+    executor.context_state_dir = ""
+    executor.context_models_dir = ""
+    executor._state_writable = False
+    executor._fit_worker = None
     executor._reset_transport_state()
     if drain_stderr:
         thread = threading.Thread(target=executor._drain_stderr, daemon=True)
@@ -1354,16 +1361,18 @@ def test_executor_rejects_strict_json_type_or_value_drift_in_cached_prefix(
     executor._transport_sequence = request["sequence"]
     executor._transport_inference_at = initial.inference_at
     executor._transport_bars = initial.bars
-    executor._transport_bar_identity = initial._bar_identity
+    executor._transport_table = initial._bars_table
     executor._transport_last_available_at = last_available_at
-    original_identity = executor._transport_bar_identity
 
     with pytest.raises(StrategyExecutionError, match="changed before base_count"):
         executor._prepare_execute(context(5, revised))
     assert executor._transport_sequence == 0
     assert executor._transport_inference_at == initial.inference_at
     assert executor._transport_bars is initial.bars
-    assert executor._transport_bar_identity is original_identity
+    assert executor._transport_table is initial._bars_table
+    # An equal prefix built separately is accepted on its values.
+    request, _ = executor._prepare_execute(context(5, original))
+    assert (request["reset"], request["base_count"], request["bars"]) == (False, 1, [])
 
 
 def test_host_nl_wait_does_not_consume_the_inference_cap(tmp_path: Path):

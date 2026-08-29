@@ -19,6 +19,9 @@ from datetime import UTC, datetime
 from typing import Any
 
 from autotrade.environment.llm import (
+    AGENT_MAX_OUTPUT_TOKENS,
+    CONTEXT_OUTPUT_TOKEN_MARGIN,
+    MIN_CONTEXT_WINDOW_TOKENS,
     ChatMessage,
     LLMProxy,
     ProviderResponse,
@@ -59,14 +62,21 @@ _FILES_TRAIL_LIMIT = 40
 _READ_TOOLS = frozenset({"read_file", "grep", "glob"})
 _WRITE_TOOLS = frozenset({"write_file", "edit_file", "write_skill", "delete_skill"})
 _THINK_BLOCK = re.compile(r"\A\s*<think>.*?</think>\s*", re.DOTALL)
+# Fallback threshold for a session assembled without the worker's per-role
+# derivation: the smallest catalog window minus the agent output ceiling and
+# the gateway's tokenizer slack, so proactive compaction still triggers on the
+# narrowest supported model instead of never firing.
+DEFAULT_COMPACTION_TOKEN_THRESHOLD = (
+    MIN_CONTEXT_WINDOW_TOKENS - AGENT_MAX_OUTPUT_TOKENS - CONTEXT_OUTPUT_TOKEN_MARGIN
+)
 
 
 @dataclass(frozen=True)
 class ContextCompactionConfig:
-    # The experiment worker always derives the operational threshold from the
-    # model windows (``window − output budget − margin``); this default only
-    # serves a session assembled without a model profile.
-    token_threshold: int = 200_000
+    # The experiment worker always derives the operational threshold from this
+    # run's model windows (``window − role output budget − margin``); the
+    # default only serves a session assembled without that derivation.
+    token_threshold: int = DEFAULT_COMPACTION_TOKEN_THRESHOLD
     min_messages: int = 20
     keep_recent_messages: int = 12
     max_response_tokens: int = 1_600

@@ -29,9 +29,8 @@ from _bootstrap import add_repo_src
 add_repo_src(__file__)
 
 from _cli import (
-    QUARTER_DEFAULT_FIRST_TEST_PERIOD,
-    QUARTER_DEFAULT_LAST_TEST_PERIOD,
     add_acceptance_arguments,
+    add_calendar_arguments,
     add_fold_exploration_directive_arguments,
     add_meta_directive_arguments,
     add_model_arguments,
@@ -39,9 +38,9 @@ from _cli import (
     add_schedule_arguments,
     add_snapshot_window_arguments,
     build_worker_options,
-    require_generic_period_args,
     resolve_fold_exploration_directive,
     resolve_meta_learning_directive,
+    resolve_period_args,
 )
 
 from autotrade.environment.artifacts import FilesystemArtifactStore
@@ -59,9 +58,6 @@ from autotrade.pipelines.local_backend import LLMFoldDeveloper, LLMMetaLearner
 from autotrade.pipelines.pit_views_seed import DEFAULT_PIT_VIEWS_SEED
 from autotrade.pipelines.worker import _parent_from_step_node
 
-QUARTER_DEFAULT_HELDOUT_FIRST_PERIOD = "2026Q1"
-QUARTER_DEFAULT_HELDOUT_LAST_PERIOD = "2026Q2"
-
 
 def main() -> int:
     repo_root = Path(__file__).resolve().parents[2]
@@ -71,11 +67,7 @@ def main() -> int:
     parser.add_argument("--epoch-id", default="epoch_001")
     parser.add_argument("--fold-index", type=int, default=0, help="0-based Fold index to run; default first Fold.")
     add_path_arguments(parser, repo_root)
-    parser.add_argument("--fold-period", choices=("week", "month", "quarter", "year"), default="quarter")
-    parser.add_argument("--first-test-period", help="default 2022Q1 for quarter folds; required otherwise")
-    parser.add_argument("--last-test-period", help="default 2025Q4 for quarter folds; required otherwise")
-    parser.add_argument("--heldout-first-period", help="default 2026Q1 for quarter folds; required otherwise")
-    parser.add_argument("--heldout-last-period", help="default 2026Q2 for quarter folds; required otherwise")
+    add_calendar_arguments(parser)
     add_schedule_arguments(parser, verbose_help=False)
     add_snapshot_window_arguments(parser, verbose_help=False)
     parser.add_argument("--max-fold-minutes", type=int, default=20)
@@ -115,16 +107,7 @@ def main() -> int:
     )
     add_acceptance_arguments(parser, verbose_help=False)
     args = parser.parse_args()
-    require_generic_period_args(parser, args)
-    if args.fold_period == "quarter":
-        args.first_test_period = args.first_test_period or QUARTER_DEFAULT_FIRST_TEST_PERIOD
-        args.last_test_period = args.last_test_period or QUARTER_DEFAULT_LAST_TEST_PERIOD
-        args.heldout_first_period = (
-            args.heldout_first_period or QUARTER_DEFAULT_HELDOUT_FIRST_PERIOD
-        )
-        args.heldout_last_period = (
-            args.heldout_last_period or QUARTER_DEFAULT_HELDOUT_LAST_PERIOD
-        )
+    resolve_period_args(parser, args)
     if args.parent_artifact_id and args.parent_step_node:
         parser.error("pass only one of --parent-artifact-id or --parent-step-node")
     if args.parent_artifact_root and not args.parent_artifact_id:
@@ -155,12 +138,13 @@ def main() -> int:
 
     pipeline, trading_days = _build_pipeline(options)
     folds = build_fold_schedule(
-        options.rolling.first_test_period,
-        options.rolling.last_test_period,
+        options.rolling.development_first_period,
+        options.rolling.development_last_period,
         trading_days,
         window_months=options.rolling.window_months,
         period=options.rolling.fold_period,
         min_region_trade_days=options.rolling.min_region_trade_days,
+        test_stage=options.rolling.test_stage,
     )
     if not 0 <= args.fold_index < len(folds):
         raise SystemExit(f"--fold-index {args.fold_index} out of range for {len(folds)} folds")
@@ -203,8 +187,11 @@ def main() -> int:
             "fold": fold.to_record(),
             "run_id": outcome.run_id,
             "fold_status": outcome.fold_status,
-            "frozen_strategy_artifact_id": outcome.frozen.artifact_id,
+            "frozen_strategy_artifact_id": (
+                outcome.frozen.artifact_id if outcome.frozen is not None else None
+            ),
             "validation_total_return": _metric(outcome.validation_summary, "total_return"),
+            # None for a development Fold without a Test stage.
             "test_total_return": _metric(outcome.test_summary, "total_return"),
             "experiment_dir": str(options.experiment_dir),
         }

@@ -558,7 +558,6 @@ def llm_with_thinking(proxy: LLMProxy, thinking: str) -> LLMProxy:
 
 @dataclass(frozen=True)
 class SubAgentConfig:
-    per_call_timeout_seconds: float | None = None
     # The child's completion ceiling, clamped per call to the remaining
     # context; the pipeline passes the parent conversation's value.
     max_tokens: int = AGENT_MAX_OUTPUT_TOKENS
@@ -566,14 +565,14 @@ class SubAgentConfig:
     # parent session deadline bounds it. Context is not a bound: a child
     # compacts at the parent's threshold (``SubAgentEngine.compactor``).
     max_rounds: int | None = DEFAULT_SUBAGENT_MAX_ROUNDS
-    # None = no extra child wall clock; the parent time budget is the cap.
+    # None = no extra child wall clock; the parent time budget is the cap. One
+    # LLM call is bounded by the gateway timeout the run configures, never by a
+    # second per-call clock here.
     deadline_seconds: float | None = None
     # Children running at once; further launches queue in the same pool.
     max_concurrent: int = DEFAULT_SUBAGENT_MAX_CONCURRENT
 
     def __post_init__(self) -> None:
-        if self.per_call_timeout_seconds is not None and self.per_call_timeout_seconds <= 0:
-            raise ValueError("Sub-agent per_call_timeout_seconds must be positive")
         if self.max_tokens <= 0:
             raise ValueError("Sub-agent max_tokens must be positive")
         if self.max_rounds is not None and self.max_rounds <= 0:

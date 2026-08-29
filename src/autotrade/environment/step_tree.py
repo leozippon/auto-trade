@@ -10,6 +10,11 @@ positions ``current_node_id`` at the parent artifact, so the Agent can read
 where it stands in the search history and branch from any validated node via
 the ``step_rollback`` tool. The feature is toggleable for ablations
 (``step_tree_enabled``).
+
+One ``daily_backtest`` appends one node under the current position;
+``batch_validate`` repositions the tree between records so its candidates
+become siblings of one parent rather than a chain, which is what makes their
+numbers comparable.
 """
 
 from __future__ import annotations
@@ -18,6 +23,7 @@ import json
 import os
 import shutil
 import uuid
+from collections.abc import Mapping
 from pathlib import Path
 
 from autotrade.environment.artifacts import copy_artifact, copy_model_artifacts
@@ -28,6 +34,17 @@ TREE_FILE = "tree.json"
 # shadow them (attachment files live at the node root next to these).
 NODE_OUTPUT_DIR = "output"
 NODE_MODELS_DIR = "models"
+
+
+def node_in_session(node: Mapping[str, object], *, fold_id: str, run_id: str) -> bool:
+    """Whether a node was produced by this Fold session (fold plus run identity).
+
+    Single source for the Agent-facing rule that only the current Fold's,
+    current run's nodes can be restored or submitted; the nodes this tree
+    carries in from earlier Folds and earlier runs are read-only evidence.
+    """
+
+    return node.get("fold_id") == fold_id and node.get("run_id") == run_id
 
 
 class StepTree:
@@ -53,6 +70,7 @@ class StepTree:
         metrics: dict[str, object],
         models_root: str | Path | None = None,
         attachments: dict[str, str | Path] | None = None,
+        metadata: Mapping[str, object] | None = None,
     ) -> str:
         # result_name (valid_NNN) is only unique within one run's results dir;
         # the same fold re-executed (rerun_fold / post-rollback) starts again at
@@ -97,6 +115,10 @@ class StepTree:
                 "metrics": metrics,
                 "attachments": copied_attachments,
                 "created_at": utc_now_iso(),
+                # Why this node exists, when the caller knows: a batch records
+                # the pre-registered hypothesis and its batch id here so the
+                # fan-out stays readable long after the conversation is gone.
+                **({"metadata": dict(metadata)} if metadata else {}),
             }
         )
         self.data["current_node_id"] = node_id

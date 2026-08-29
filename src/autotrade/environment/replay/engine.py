@@ -8,7 +8,7 @@ from datetime import date, datetime, time
 from time import perf_counter
 
 from autotrade.environment.broker import BrokerProfile, DailyBroker
-from autotrade.environment.executor import StrategyExecutor
+from autotrade.environment.executor import FittableStrategyExecutor, StrategyExecutor
 from autotrade.environment.strategy import (
     CN_TZ,
     AccountSnapshot,
@@ -91,6 +91,12 @@ class DailyReplayEngine:
         self.execution_price = execution_price
         self.timer = timer if timer is not None else PhaseTimer()
         self.inbox = DailyOrderInbox()
+        # A strategy with fit(context) fits at the first decision of the replay
+        # and again whenever its declared refit period rolls over.
+        self._fittable = (
+            strategy if isinstance(strategy, FittableStrategyExecutor) else None
+        )
+        self._last_fit_date: str | None = None
 
     def run(self, market: DailyMarketData) -> ReplayResult:
         equity_curve: list[dict[str, object]] = []
@@ -113,7 +119,7 @@ class DailyReplayEngine:
             with self.timer.phase("broker"):
                 self._match_due(inference_at, market)
             if due:
-                self._infer(market, inference_at)
+                self._infer(market, trade_date, inference_at)
                 inference_dates.append(inference_at.isoformat())
             with self.timer.phase("broker"):
                 self._match_due(day_end, market)
@@ -140,7 +146,7 @@ class DailyReplayEngine:
             phase_seconds=self.timer.to_record(),
         )
 
-    def _infer(self, market: DailyMarketData, inference_at: datetime) -> None:
+    def _infer(self, market: DailyMarketData, trade_date: str, inference_at: datetime) -> None:
         cash, positions = self.broker.account_snapshot()
         with self.timer.phase("data_view"):
             data_view = (
@@ -150,6 +156,7 @@ class DailyReplayEngine:
             )
         if not isinstance(data_view, StrategyDataView):
             raise BacktestError("context_data must return StrategyDataView")
+        fittable = self._fittable
         context = StrategyContext(
             inference_at=inference_at,
             bars=market.visible_at(inference_at),
@@ -157,8 +164,23 @@ class DailyReplayEngine:
             snapshot_dir=data_view.snapshot_dir,
             asof_dir=data_view.asof_dir,
             asof_version=data_view.asof_version,
+            state_dir=fittable.context_state_dir if fittable is not None else "",
+            models_dir=fittable.context_models_dir if fittable is not None else "",
             _nl_query=self.nl_query,
         )
+        # fit receives the very context object generate_orders gets on this
+        # day, so it cannot see one row more than the decision itself.
+        if (
+            fittable is not None
+            and fittable.fit_schedule is not None
+            and fittable.fit_schedule.is_due(trade_date, self._last_fit_date)
+        ):
+            try:
+                with self.timer.phase("fit"):
+                    fittable.fit(context)
+            except Exception as exc:
+                raise BacktestError(f"fit failed at {inference_at.isoformat()}: {exc}") from exc
+            self._last_fit_date = trade_date
         try:
             # Includes the host NL wait: ctx.nl() blocks inside the strategy
             # call, and phase_seconds["nl"] reports that share separately.

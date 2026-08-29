@@ -827,10 +827,10 @@ def test_role_tool_visibility_hides_writes_from_audits(tmp_path: Path) -> None:
         _function_name(record)
         for record in engine._provider_tools(allowed_subagent_tools("fold", "auditor"))
     }
-    # The parent's Fold surface minus what it keeps by design (formal
-    # backtest, finish, rollback, ask_user, agent): the unofficial smoke run
-    # is a child's tool too, so it verifies its own implementation on the
-    # real replay path instead of hand-rolling a shell smoke test.
+    # The parent's Fold surface minus what it keeps by design (both formal
+    # validation tools, finish, rollback, ask_user, agent): the unofficial
+    # smoke run is a child's tool too, so it verifies its own implementation
+    # on the real replay path instead of hand-rolling a shell smoke test.
     assert impl == {
         "delete_skill",
         "edit_file",
@@ -843,7 +843,14 @@ def test_role_tool_visibility_hides_writes_from_audits(tmp_path: Path) -> None:
         "write_file",
         "write_skill",
     }
-    assert impl == _FOLD_TOOLS - {"agent", "ask_user", "daily_backtest", "finish_fold", "step_rollback"}
+    assert impl == _FOLD_TOOLS - {
+        "agent",
+        "ask_user",
+        "batch_validate",
+        "daily_backtest",
+        "finish_fold",
+        "step_rollback",
+    }
     assert audit == {"glob", "grep", "read_file"}
     fold_general = {
         _function_name(record)

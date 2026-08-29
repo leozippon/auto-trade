@@ -75,7 +75,9 @@ class ModificationCheckTool:
         if total_bytes > constraints.max_strategy_bytes:
             raise ToolError(f"formal output exceeds {constraints.max_strategy_bytes} bytes")
         try:
-            validate_strategy_source(main.read_text(encoding="utf-8"), filename="main.py")
+            fit_schedule = validate_strategy_source(
+                main.read_text(encoding="utf-8"), filename="main.py"
+            )
         except StrategyLoadError as exc:
             raise ToolError(str(exc)) from exc
         _reject_flat_asof_reads(files, self.output_dir)
@@ -99,6 +101,9 @@ class ModificationCheckTool:
             value={
                 "check_index": self.check_index,
                 "strategy_entry": "generate_orders",
+                # The optional fit(context) entry as statically declared: None
+                # when main.py has none, else its REFIT_PERIOD (None = once).
+                "fit": fit_schedule.to_record() if fit_schedule is not None else None,
                 # Content address of exactly what this check read. A formal
                 # call snapshots the artifact and refuses to replay a snapshot
                 # whose fingerprint is not this one, so an approval cannot be

@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import re
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import MISSING, dataclass, field, fields
 from datetime import datetime
 from pathlib import Path
 from typing import Literal, Protocol
@@ -15,6 +15,7 @@ from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.sandbox import SandboxConfig
 from autotrade.environment.strategy import StrategySchedule
 
+from .skills import DEFAULT_OPERATING_MEMORY
 from .folds import FoldSpec, assert_no_overlap
 
 ExecutionMode = Literal["sandbox", "trusted"]
@@ -25,11 +26,20 @@ ExecutionMode = Literal["sandbox", "trusted"]
 # v6: events/macro unions carry the full configured-dataset schema (typed
 # zero-row contributions for datasets without visible rows in the window).
 # v7: the snapshot manifest carries dataset_columns for the unit reference.
-SNAPSHOT_CACHE_FORMAT_VERSION = 7
+# v8: incomplete/unusable vendor columns are dropped from the union domains
+# (SNAPSHOT_EXCLUDED_COLUMNS in environment.data.snapshot), so a v7 view still
+# carries fields the Agent must no longer see.
+# v9: the daily join drops its duplicate close_basic/pre_close_limit columns.
+SNAPSHOT_CACHE_FORMAT_VERSION = 9
 
 # Trailing wrap-up grace added to the Fold session budget. Not a console/worker
 # HITL knob; FoldSessionRequest carries the seconds to AgentSessionConfig.
 DEFAULT_DEADLINE_GRACE_MINUTES = 10
+
+# Research calendar cadence: the unit the development and held-out labels are
+# written in. The default development window is whole years, long enough to
+# contain more than one market state.
+DEFAULT_FOLD_PERIOD = "year"
 
 
 @dataclass(frozen=True)
@@ -39,6 +49,10 @@ class StrategyExperimentConfig:
     broker_profile: BrokerProfile = field(default_factory=BrokerProfile)
     execution_mode: ExecutionMode = "sandbox"
     sandbox: SandboxConfig = field(default_factory=SandboxConfig)
+    # The strategy's frozen ``models/`` tree, mounted read-only when it has
+    # one. The per-replay ``fit`` state directory is not a configuration knob:
+    # the replay creates it empty and discards it with the run.
+    models_dir: Path | None = None
 
     def __post_init__(self) -> None:
         path = Path(self.strategy_path).resolve()
@@ -47,6 +61,11 @@ class StrategyExperimentConfig:
         if self.execution_mode not in ("sandbox", "trusted"):
             raise ValueError("execution_mode must be sandbox or trusted")
         object.__setattr__(self, "strategy_path", path)
+        if self.models_dir is not None:
+            models = Path(self.models_dir).resolve()
+            if not models.is_dir():
+                raise ValueError(f"models directory does not exist: {models}")
+            object.__setattr__(self, "models_dir", models)
 
 
 ExperimentConfig = StrategyExperimentConfig
@@ -74,6 +93,63 @@ class AcceptanceRules:
             "min_return": self.min_return,
             "min_sharpe": self.min_sharpe,
             "max_drawdown": self.max_drawdown,
+        }
+
+    def heldout_verdict(self, summary: Mapping[str, object] | None) -> dict[str, object]:
+        """Graduation verdict of one Held-out replay (docs/pipeline-design.md §3.3).
+
+        ``graduated`` iff the frozen strategy beat its benchmark (excess return
+        > 0), earned a positive annualized Sharpe, and stayed within the
+        experiment's ``max_drawdown``; otherwise ``discarded`` with every
+        failing reason. A missing or non-finite input is itself a failing
+        reason: a replay that cannot prove the three conditions did not pass.
+        """
+        reasons: list[str] = []
+        values: dict[str, float | None] = {}
+        source = summary if isinstance(summary, Mapping) else {}
+        if not source or source.get("status") == "failed":
+            reasons.append("heldout_failed")
+        benchmark = source.get("benchmark")
+        benchmark_return = (
+            benchmark.get("benchmark_return") if isinstance(benchmark, Mapping) else None
+        )
+        for name, value in (
+            ("total_return", source.get("total_return")),
+            ("benchmark_return", benchmark_return),
+            ("sharpe", source.get("sharpe")),
+            ("max_drawdown", source.get("max_drawdown")),
+        ):
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+            ):
+                values[name] = None
+                reasons.append(f"missing_{name}")
+            else:
+                values[name] = float(value)
+        total_return, bench, sharpe, drawdown = (
+            values["total_return"],
+            values["benchmark_return"],
+            values["sharpe"],
+            values["max_drawdown"],
+        )
+        excess = (
+            total_return - bench if total_return is not None and bench is not None else None
+        )
+        if excess is not None and excess <= 0:
+            reasons.append("excess_return_not_positive")
+        if sharpe is not None and sharpe <= 0:
+            reasons.append("sharpe_not_positive")
+        if drawdown is not None and abs(drawdown) > self.max_drawdown:
+            reasons.append("max_drawdown_exceeded")
+        return {
+            "status": "discarded" if reasons else "graduated",
+            "reasons": reasons,
+            "excess_return": excess,
+            "sharpe": sharpe,
+            "max_drawdown": drawdown,
+            "max_drawdown_limit": self.max_drawdown,
         }
 
     def evaluate(self, summary: dict[str, object]) -> tuple[list[str], list[str]]:
@@ -121,24 +197,38 @@ class AcceptanceRules:
 class RollingExperimentConfig:
     experiment_id: str
     experiments_root: Path
-    first_test_period: str
-    last_test_period: str
+    # Development window as inclusive cadence labels (``2022``..``2025``) or one
+    # explicit ``YYYYMMDD..YYYYMMDD`` range written in both fields.
+    development_first_period: str
+    development_last_period: str
     heldout_first_period: str
     heldout_last_period: str
-    fold_period: str = "quarter"
-    epochs: int = 3
-    window_months: int = 21
+    fold_period: str = DEFAULT_FOLD_PERIOD
+    # False: one development Fold over the whole window, no frozen Test; the
+    # frozen strategy goes straight to Held-out, which is the verdict. True:
+    # rolling Folds inside the window (first period validation only, each
+    # later period a test with the preceding period as its validation).
+    test_stage: bool = False
+    epochs: int = 1
+    # The macro data floor is 2020-01, so 24 months before the default 2022-01
+    # development start is the most history available.
+    window_months: int = 24
     min_region_trade_days: int = 2
-    max_steps_per_fold: int = 10
-    max_backtests_per_fold: int = 15
-    max_llm_calls: int = 400
+    max_steps_per_fold: int = 30
+    max_backtests_per_fold: int = 30
+    max_llm_calls: int = 1600
     session_max_attempts: int = 3
-    max_fold_minutes: int = 240
+    # One development Fold spans the whole window and is fitted as far as the
+    # agent can take it, so the session budget is sized for a long session.
+    max_fold_minutes: int = 720
     # Trailing wrap-up grace added to the Fold session budget and forwarded on
     # FoldSessionRequest.deadline_grace_seconds. Implementation default only.
     deadline_grace_minutes: int = DEFAULT_DEADLINE_GRACE_MINUTES
     finalize_before_deadline_seconds: int = 300
     per_call_timeout_seconds: int = 3600
+    # Wall clock for one ``fit(context)`` invocation of the formal strategy
+    # (SandboxLimits.fit_timeout_seconds); a slower fit fails the backtest.
+    strategy_fit_timeout_seconds: int = 1800
     # Individual NL Sub Agent failures return audited error results by default
     # so Agent code can decide whether to ignore, retry, or fail closed.
     nl_failure_policy: str = "return_error_with_audit"
@@ -147,8 +237,11 @@ class RollingExperimentConfig:
     convergence_start_epoch: int = 3
     # Preserve the Epoch-start Meta session. A positive value additionally
     # triggers Meta after every N completed Folds, before the next Fold; 0
-    # disables the within-Epoch triggers. Default 2 on a quarterly calendar.
-    meta_learning_fold_interval: int = 2
+    # disables the within-Epoch triggers. The interval counts Folds: with the
+    # default single development Fold only the Epoch-start Meta ever runs,
+    # and the same value keeps a Meta between consecutive Folds when
+    # test_stage cuts the window into several.
+    meta_learning_fold_interval: int = 1
     # Raw prior meta-learning traces handed to the next meta session are bounded
     # to the most recent N epochs (0 disables raw memory). Unbounded concatenation
     # grows O(epochs^2); older sessions persist via PRIOR and compact fold history.
@@ -164,6 +257,10 @@ class RollingExperimentConfig:
     # Fold/Meta session's workspace/refs/. Empty keeps the historical no-copy
     # behavior; a set path must exist and be a directory.
     workspace_reference: str = ""
+    # Which cross-experiment memory tiers mount read-only into every Fold and
+    # Meta workspace: the curated repository library alone, plus the skills of
+    # every graduated experiment, or nothing.
+    operating_memory: str = DEFAULT_OPERATING_MEMORY
     # If meta-learning writes workspace/sandbox_environment.json, Pipeline can
     # build a derived Docker image and use it for later ordinary Fold runs.
     meta_sandbox_rebuild_enabled: bool = True
@@ -201,6 +298,7 @@ class RollingExperimentConfig:
             "session_max_attempts",
             "max_fold_minutes",
             "per_call_timeout_seconds",
+            "strategy_fit_timeout_seconds",
             "convergence_start_epoch",
         ):
             value = getattr(self, name)
@@ -217,8 +315,10 @@ class RollingExperimentConfig:
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError(f"{name} must be a non-negative integer")
+        if not isinstance(self.test_stage, bool):
+            raise ValueError("test_stage must be boolean")
         assert_no_overlap(
-            self.last_test_period, self.heldout_first_period, period=self.fold_period
+            self.development_last_period, self.heldout_first_period, period=self.fold_period
         )
         object.__setattr__(self, "experiments_root", Path(self.experiments_root))
 
@@ -229,6 +329,22 @@ class RollingExperimentConfig:
     @property
     def ledger_path(self) -> Path:
         return self.experiment_dir / "ledgers" / "experiment_ledger.jsonl"
+
+
+_ROLLING_FIELDS = {field_obj.name: field_obj for field_obj in fields(RollingExperimentConfig)}
+
+
+def rolling_default(name: str) -> object:
+    """Default of one ``RollingExperimentConfig`` field.
+
+    The dataclass is the single source of truth for the pipeline defaults. A
+    caller that fills in an absent value (the ``params.json`` loader, a CLI)
+    reads it from here instead of restating a literal that can drift.
+    """
+    field_obj = _ROLLING_FIELDS.get(name)
+    if field_obj is None or field_obj.default is MISSING:
+        raise KeyError(f"{name} is not a defaulted RollingExperimentConfig field")
+    return field_obj.default
 
 
 def fold_session_deadline_seconds(
@@ -359,7 +475,10 @@ class FoldSessionRequest:
     # enforce while it runs. Closed source carries the same values on the
     # manifest the pipeline writes; here the pipeline hands them to the
     # sandbox owner, which is the component that writes the manifest.
-    fold_period: str = "quarter"
+    fold_period: str = DEFAULT_FOLD_PERIOD
+    # Whether a frozen Test follows this Fold (rolling development) or the
+    # Held-out replay is the next and final evaluation (single window).
+    test_stage: bool = False
     epoch_index: int = 1
     phase: str = "exploration"
     acceptance_rules: Mapping[str, object] = field(default_factory=dict)
@@ -442,6 +561,7 @@ class FoldOutcome:
 
 __all__ = [
     "DEFAULT_DEADLINE_GRACE_MINUTES",
+    "DEFAULT_FOLD_PERIOD",
     "AcceptanceRules",
     "ArtifactRevision",
     "ArtifactStore",
@@ -463,4 +583,5 @@ __all__ = [
     "StepResult",
     "StrategyExperimentConfig",
     "fold_session_deadline_seconds",
+    "rolling_default",
 ]

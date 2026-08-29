@@ -49,6 +49,7 @@ MODEL_ARTIFACT_ALLOWED_SUFFIXES = frozenset(
         ".npz",
         ".onnx",
         ".params",
+        ".parquet",
         ".pb",
         ".pdparams",
         ".pickle",

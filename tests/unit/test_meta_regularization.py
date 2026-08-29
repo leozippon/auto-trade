@@ -78,7 +78,7 @@ class Evaluator:
 
 def _pipeline(root: Path, *, meta_learner, developer=lambda request: None):
     config = RollingExperimentConfig(
-        "exp", root / "experiments", "2026Q1", "2026Q1", "2026Q2", "2026Q2", epochs=1
+        "exp", root / "experiments", "2026Q1", "2026Q1", "2026Q2", "2026Q2", fold_period="quarter", epochs=1
     )
     artifacts = Artifacts(root / "artifacts")
     pipeline = RollingExperimentPipeline(
@@ -108,7 +108,7 @@ class MetaSessionStatusTest(unittest.TestCase):
         parent = _parent(artifacts)
         if session.revision_id:
             artifacts.add_revision(session.revision_id, artifacts_body or (MAIN + "# regularized\n"))
-        fold = build_fold_schedule("2026Q1", "2026Q1", DAYS)[0]
+        fold = build_fold_schedule("2026Q1", "2026Q1", DAYS, window_months=24)[0]
         prior, next_parent = pipeline.run_meta_session(
             "epoch_001", 1, fold, parent=parent, previous_prior=""
         )

@@ -20,6 +20,8 @@ from autotrade.environment.data.fundamental_events import (
     read_fundamental_events,
 )
 from autotrade.environment.data.snapshot import (
+    DEFAULT_DATASETS,
+    SELECTABLE_DATASETS,
     SnapshotBuilder,
     SnapshotConfig,
     finalize_snapshot_dir,
@@ -224,6 +226,9 @@ def write_domain_statuses(quality_dir: Path, **overrides: str) -> None:
         )
 
 
+# Minute bars are opt-in by default; the builder fixture keeps them on so the
+# intraday domain, its auction correction and the replay minute file stay
+# covered.
 CONFIG = SnapshotConfig(
     events_datasets=("margin_secs", "moneyflow"),
     macro_datasets=("cn_gdp",),
@@ -231,6 +236,8 @@ CONFIG = SnapshotConfig(
     fundamental_datasets=("income_vip",),
     intraday_trade_days=1,
     include_industry=False,
+    include_intraday=True,
+    replay_include_minutes=True,
 )
 
 
@@ -1445,25 +1452,45 @@ class SnapshotBuilderTest(unittest.TestCase):
             self.assertEqual(meta["rows"], 1)
             self.assertEqual(meta["dropped"]["announced_after_ex_date"], 1)
 
-    def test_default_config_exposes_coverage_audit_additions(self):
+    def test_selectable_and_default_dataset_scopes(self):
         # Drift guard for the raw-coverage audit batch: board/sentiment events,
-        # macro regime additions, the news wire, and the A-share index set stay
-        # exposed; cn_schedule stays out (source keeps no history).
-        config = SnapshotConfig()
+        # macro regime additions, the news wire and the A-share index set stay
+        # SELECTABLE, so an experiment can still opt into them; cn_schedule
+        # stays out entirely (the source keeps no history).
         for dataset in ("kpl_list", "limit_step", "limit_cpt_list", "limit_list_d",
                         "limit_list_ths", "ths_hot", "dc_hot", "hm_detail"):
-            self.assertIn(dataset, config.events_datasets, dataset)
+            self.assertIn(dataset, SELECTABLE_DATASETS["events"], dataset)
         for dataset in ("repo_daily", "us_tycr", "us_trycr", "us_tbr", "us_tltr",
                         "shibor_quote", "index_daily"):
-            self.assertIn(dataset, config.macro_datasets, dataset)
-        self.assertIn("news", config.text_datasets)
-        self.assertNotIn("cn_schedule", config.macro_datasets)
-        # Deliberate default exclusions (see SnapshotConfig comment): datasets
-        # with contradictory duplicate versions (pledge_detail, repurchase), no
-        # PIT timestamps (hm_list), or decommissioned sources (slb_len_mm,
-        # slb_len).
+            self.assertIn(dataset, SELECTABLE_DATASETS["macro"], dataset)
+        self.assertIn("news", SELECTABLE_DATASETS["text"])
+        self.assertNotIn("cn_schedule", SELECTABLE_DATASETS["macro"])
+        # Never selectable (see the SELECTABLE_DATASETS comment): contradictory
+        # duplicate versions (pledge_detail, repurchase), no PIT timestamps
+        # (hm_list), decommissioned sources (slb_len_mm, slb_len).
         for dataset in ("pledge_detail", "repurchase", "hm_list", "slb_len_mm", "slb_len"):
+            self.assertNotIn(dataset, SELECTABLE_DATASETS["events"], dataset)
+        # The default scope a snapshot carries when nothing is selected is a
+        # strict subset, and every default name must be selectable.
+        config = SnapshotConfig()
+        for domain, selected in (
+            ("events", config.events_datasets),
+            ("macro", config.macro_datasets),
+            ("text", config.text_datasets),
+            ("fundamentals", config.fundamental_datasets),
+        ):
+            self.assertEqual(selected, DEFAULT_DATASETS[domain], domain)
+            self.assertTrue(set(selected) <= set(SELECTABLE_DATASETS[domain]), domain)
+        # Vendor duplicates, concept-membership bulk and hot lists are out of
+        # the default scope; the official per-stock series stay in.
+        for dataset in ("moneyflow_dc", "moneyflow_ths", "dc_member",
+                        "kpl_concept_cons", "ths_hot", "dc_hot", "limit_list_ths"):
             self.assertNotIn(dataset, config.events_datasets, dataset)
+        for dataset in ("moneyflow", "limit_list_d", "kpl_list", "margin_detail"):
+            self.assertIn(dataset, config.events_datasets, dataset)
+        # Default text is the per-stock corpus only.
+        self.assertNotIn("news", config.text_datasets)
+        self.assertIn("anns_d", config.text_datasets)
 
     def test_events_limit_list_d_rows_gate_on_the_16_00_stamp(self):
         # The official limit list becomes visible at trade-date 16:00: the prior
@@ -1548,6 +1575,128 @@ class SnapshotBuilderTest(unittest.TestCase):
             self.assertEqual(len(zero_rows), 0)
             self.assertNotIn("limit_amount", zero_meta["dataset_columns"]["limit_list_d"])
             self.assertIn("fd_amount", zero_meta["dataset_columns"]["limit_list_d"])
+
+    def test_incomplete_vendor_columns_never_reach_a_built_snapshot(self):
+        # Every SNAPSHOT_EXCLUDED_COLUMNS entry that this fixture can cover is
+        # gone from the written files AND from the manifest attribution, while
+        # a same-named column of a sibling dataset survives the per-dataset
+        # drop. The build also runs validate_snapshot_units, so the registry
+        # must still classify everything that remains.
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = Path(tmp) / "raw"
+            build_raw(raw)
+            stamp = {
+                "available_at": "2021-10-07 16:00:00+08:00",
+                "available_at_rule": "official_16_from:trade_date",
+            }
+            write(
+                raw / "limit_list_ths" / "limit_type=涨停池" / "trade_date=20211007.parquet",
+                pd.DataFrame([{
+                    "trade_date": "20211007", "ts_code": "000001.SZ", "price": 10.5,
+                    "limit_amount": 4.4e7, "limit_order": 3.9e6, "lu_limit_order": None, **stamp,
+                }]),
+            )
+            write(
+                raw / "kpl_list" / "tag=竞价" / "trade_date=20211007.parquet",
+                pd.DataFrame([{
+                    "trade_date": "20211007", "ts_code": "000001.SZ", "tag": "竞价",
+                    "bid_amount": 1.2e7, "bid_change": 3.0e6, "bid_turnover": 0.4,
+                    "lu_bid_vol": 1.0e5, "lu_limit_order": None, **stamp,
+                }]),
+            )
+            write(
+                raw / "daily_info" / "year=2021.parquet",
+                pd.DataFrame([{
+                    "trade_date": "20211007", "ts_code": "SSE", "com_count": 2000.0,
+                    "total_share": 4.6e4, "float_share": 3.9e4, "vol": 4.1e2,
+                    "amount": 3.9e3, "trans_count": None, **stamp,
+                }]),
+            )
+            write(
+                raw / "sz_daily_info" / "year=2021.parquet",
+                pd.DataFrame([{
+                    "trade_date": "20211007", "ts_code": "主板", "count": 1500.0,
+                    "amount": 6.9e10, "vol": None, "total_share": None, "float_share": None,
+                    **stamp,
+                }]),
+            )
+            write(
+                raw / "fina_indicator_vip" / "period=20210630.parquet",
+                pd.DataFrame([{
+                    "ts_code": "000001.SZ", "ann_date": "20210910", "end_date": "20210630",
+                    "eps": 0.5, "impai_ttm": -0.63,
+                }]),
+            )
+            events_root = Path(tmp) / "fund_events"
+            write(
+                events_root / "fina_indicator_vip" / "available_month=202109.parquet",
+                pd.DataFrame([{
+                    "dataset": "fina_indicator_vip", "ts_code": "000001.SZ",
+                    "available_at": "2021-09-10T18:00:00+08:00",
+                    "available_at_rule": "source:f_ann_date_or_ann_date",
+                    "available_month": "202109", "business_key": "k1", "source_path": "x",
+                    "source_write_id": "w", "source_row_id": 0,
+                    "eps": 0.5, "impai_ttm": -0.63,
+                }]),
+            )
+            status_path = Path(tmp) / "fundamental_events_status.json"
+            write_fundamental_status(status_path)
+            out = Path(tmp) / "snap"
+            config = replace(
+                CONFIG,
+                events_datasets=("limit_list_ths", "kpl_list"),
+                macro_datasets=("daily_info", "sz_daily_info"),
+                text_datasets=(),
+                fundamental_datasets=("fina_indicator_vip",),
+                include_intraday=False,
+            )
+            manifest = SnapshotBuilder(raw, events_root, status_path).build_decision_snapshot(
+                DECISION, out, config
+            )
+
+            events = pd.read_parquet(out / "events.parquet")
+            events_columns = manifest["domains"]["events"]["dataset_columns"]
+            self.assertNotIn("lu_limit_order", events_columns["limit_list_ths"])
+            # kpl_list keeps its own lu_limit_order: the drop is per dataset,
+            # so the union column survives for the dataset that populates it.
+            self.assertIn("lu_limit_order", events_columns["kpl_list"])
+            self.assertIn("lu_limit_order", events.columns)
+            # Pool-conditional and tag-conditional fields are complete inside
+            # the rows they describe and stay Agent-visible.
+            self.assertIn("limit_amount", events_columns["limit_list_ths"])
+            for column in ("bid_amount", "bid_change", "bid_turnover", "lu_bid_vol"):
+                self.assertIn(column, events_columns["kpl_list"], column)
+
+            macro = pd.read_parquet(out / "macro.parquet")
+            macro_columns = manifest["domains"]["macro"]["dataset_columns"]
+            for column in ("vol", "total_share", "float_share"):
+                self.assertNotIn(column, macro_columns["sz_daily_info"], column)
+                # daily_info's verified exchange-level shares are unaffected.
+                self.assertIn(column, macro_columns["daily_info"], column)
+                self.assertIn(column, macro.columns, column)
+            self.assertNotIn("trans_count", macro_columns["daily_info"])
+            self.assertNotIn("trans_count", macro.columns)
+
+            fundamentals = pd.read_parquet(out / "fundamentals.parquet")
+            fundamental_columns = manifest["domains"]["fundamentals"]["dataset_columns"]
+            self.assertNotIn("impai_ttm", fundamentals.columns)
+            self.assertNotIn("impai_ttm", fundamental_columns["fina_indicator_vip"])
+            self.assertIn("eps", fundamental_columns["fina_indicator_vip"])
+
+    def test_fundamental_exclusion_refuses_to_widen_to_a_sibling_dataset(self):
+        # The fundamentals union arrives pre-built, so an excluded name shared
+        # with another dataset cannot be removed for one dataset alone: fail
+        # instead of silently stripping the sibling's data.
+        frame = pd.DataFrame([{"dataset": "fina_indicator_vip", "impai_ttm": 1.0}])
+        with self.assertRaises(ValueError) as ctx:
+            snapshot_module._apply_fundamental_exclusions(
+                frame,
+                {
+                    "fina_indicator_vip": ["dataset", "impai_ttm"],
+                    "income_vip": ["dataset", "impai_ttm"],
+                },
+            )
+        self.assertIn("impai_ttm", str(ctx.exception))
 
     def test_available_at_union_keeps_dataset_order_when_datasets_load_in_parallel(self):
         with tempfile.TemporaryDirectory() as tmp:

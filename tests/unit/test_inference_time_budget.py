@@ -356,7 +356,13 @@ def test_complete_node_enters_hard_finalization_without_compaction_or_research(
             [
                 ExistingValidation(),
                 shell,
-                StepRollbackTool(tree, output, models),
+                StepRollbackTool(
+                    tree,
+                    output,
+                    models,
+                    fold_id="fold_ref_current",
+                    run_id="run_current",
+                ),
                 FinishFoldTool(tree, fold_id="fold_ref_current", run_id="run_current"),
             ]
         ),

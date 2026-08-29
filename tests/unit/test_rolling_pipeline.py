@@ -21,6 +21,7 @@ from autotrade.pipelines.config import (
     DEFAULT_DEADLINE_GRACE_MINUTES,
     MetaSessionResult,
     fold_session_deadline_seconds,
+    rolling_default,
 )
 from autotrade.pipelines.experiment import _session_budgets
 from autotrade.pipelines.folds import build_fold_schedule
@@ -93,10 +94,12 @@ def test_rolling_pipeline_runs_meta_fold_test_and_heldout(tmp_path: Path):
     config = RollingExperimentConfig(
         "experiment_a",
         tmp_path / "experiments",
-        "2026Q1",
+        "2025Q4",
         "2026Q1",
         "2026Q2",
         "2026Q2",
+        fold_period="quarter",
+        test_stage=True,
         epochs=1,
     )
     ledger = ExperimentLedger(config.ledger_path)
@@ -110,7 +113,9 @@ def test_rolling_pipeline_runs_meta_fold_test_and_heldout(tmp_path: Path):
         ledger=ledger,
     )
     days = [stamp.strftime("%Y%m%d") for stamp in pd.bdate_range("2025-09-29", "2026-06-30")]
-    fold = build_fold_schedule("2026Q1", "2026Q1", days)[0]
+    fold = build_fold_schedule(
+        "2025Q4", "2026Q1", days, window_months=24, test_stage=True
+    )[0]
     # The same call order the interactive worker drives: epoch-start Meta, then
     # the Fold, then one Held-out pass over the resulting frontier.
     prior, parent = pipeline.run_meta_session("epoch_001", 0, fold, parent=None)
@@ -147,6 +152,7 @@ def test_successful_fold_publishes_skills_and_next_fold_noops_by_bytes(
         "2026Q1",
         "2026Q2",
         "2026Q2",
+        fold_period="quarter",
         epochs=1,
     )
     seen_sources: list[str] = []
@@ -193,7 +199,7 @@ def test_successful_fold_publishes_skills_and_next_fold_noops_by_bytes(
         stamp.strftime("%Y%m%d")
         for stamp in pd.bdate_range("2025-09-29", "2026-06-30")
     ]
-    fold = build_fold_schedule("2026Q1", "2026Q1", days)[0]
+    fold = build_fold_schedule("2026Q1", "2026Q1", days, window_months=24)[0]
     first = pipeline.run_fold("epoch_001", fold, parent=None)
     second = pipeline.run_fold("epoch_001", fold, parent=first.frozen)
 
@@ -227,6 +233,7 @@ def test_meta_session_retains_only_the_authorized_test_diagnostic(tmp_path: Path
         "2026Q1",
         "2026Q2",
         "2026Q2",
+        fold_period="quarter",
         epochs=1,
     )
     AgentRefStore(config.experiment_dir)
@@ -284,7 +291,7 @@ def test_meta_session_retains_only_the_authorized_test_diagnostic(tmp_path: Path
         stamp.strftime("%Y%m%d")
         for stamp in pd.bdate_range("2025-09-29", "2026-06-30")
     ]
-    visible_fold = build_fold_schedule("2026Q1", "2026Q1", days)[0]
+    visible_fold = build_fold_schedule("2026Q1", "2026Q1", days, window_months=24)[0]
 
     prior = pipeline.run_meta_session(
         "epoch_001",
@@ -356,6 +363,7 @@ def _meta_only_pipeline(tmp_path: Path, ledger: ExperimentLedger, captured: dict
         "2026Q1",
         "2026Q2",
         "2026Q2",
+        fold_period="quarter",
         epochs=1,
     )
     pipeline = RollingExperimentPipeline(
@@ -371,7 +379,7 @@ def _meta_only_pipeline(tmp_path: Path, ledger: ExperimentLedger, captured: dict
         stamp.strftime("%Y%m%d")
         for stamp in pd.bdate_range("2025-09-29", "2026-06-30")
     ]
-    return pipeline, build_fold_schedule("2026Q1", "2026Q1", days)[0]
+    return pipeline, build_fold_schedule("2026Q1", "2026Q1", days, window_months=24)[0]
 
 
 def test_first_meta_session_has_empty_review_window(tmp_path: Path):
@@ -382,6 +390,7 @@ def test_first_meta_session_has_empty_review_window(tmp_path: Path):
         "2026Q1",
         "2026Q2",
         "2026Q2",
+        fold_period="quarter",
         epochs=1,
     )
     AgentRefStore(config.experiment_dir)
@@ -421,6 +430,7 @@ def test_meta_session_window_skips_folds_before_previous_meta(tmp_path: Path):
         "2026Q1",
         "2026Q2",
         "2026Q2",
+        fold_period="quarter",
         epochs=1,
     )
     AgentRefStore(config.experiment_dir)
@@ -516,6 +526,7 @@ def _pipeline_capturing_fold_requests(tmp_path: Path, captured: list, **config_o
         "2026Q1",
         "2026Q2",
         "2026Q2",
+        fold_period="quarter",
         epochs=1,
         **config_overrides,
     )
@@ -529,7 +540,7 @@ def _pipeline_capturing_fold_requests(tmp_path: Path, captured: list, **config_o
         ledger=ExperimentLedger(config.ledger_path),
     )
     days = [stamp.strftime("%Y%m%d") for stamp in pd.bdate_range("2025-09-29", "2026-06-30")]
-    return pipeline, build_fold_schedule("2026Q1", "2026Q1", days)[0]
+    return pipeline, build_fold_schedule("2026Q1", "2026Q1", days, window_months=24)[0]
 
 
 def test_run_fold_forwards_the_consoles_gpu_allocation_to_the_session_request(tmp_path: Path):
@@ -648,10 +659,12 @@ def _pipeline_with_evaluator(
     config = RollingExperimentConfig(
         "experiment_a",
         tmp_path / "experiments",
-        "2026Q1",
+        "2025Q4",
         "2026Q1",
         "2026Q2",
         "2026Q2",
+        fold_period="quarter",
+        test_stage=True,
         epochs=1,
         **config_overrides,
     )
@@ -665,7 +678,9 @@ def _pipeline_with_evaluator(
         meta_learner=lambda facts: MetaSessionResult(prior="prefer simple daily signals"),
         ledger=ledger,
     )
-    fold = build_fold_schedule("2026Q1", "2026Q1", _days())[0]
+    fold = build_fold_schedule(
+        "2025Q4", "2026Q1", _days(), window_months=24, test_stage=True
+    )[0]
     return pipeline, fold, ledger
 
 
@@ -688,13 +703,14 @@ def test_session_budgets_honor_nondefault_deadline_grace(tmp_path: Path):
             "2026Q1",
             "2026Q2",
             "2026Q2",
+            fold_period="quarter",
             epochs=1,
             deadline_grace_minutes=minutes,
         )
         budgets = _session_budgets(config, None)
         assert budgets["deadline_grace_seconds"] == minutes * 60
         assert budgets["deadline_seconds"] == fold_session_deadline_seconds(
-            240, minutes
+            config.max_fold_minutes, minutes
         )
         overridden = _session_budgets(config, {"deadline_seconds": 1200})
         assert overridden["deadline_seconds"] == 1200 + minutes * 60
@@ -714,14 +730,21 @@ def test_fold_session_request_carries_configured_deadline_grace(tmp_path: Path):
         pipeline.run_fold("epoch_001", fold, parent=None)
         request = captured[-1]
         assert request.deadline_grace_seconds == minutes * 60
-        assert request.deadline_seconds == fold_session_deadline_seconds(240, minutes)
+        assert request.deadline_seconds == fold_session_deadline_seconds(
+            pipeline.config.max_fold_minutes, minutes
+        )
 
 
 def test_prompt_preview_deadline_matches_live_fold_budget(tmp_path: Path):
     from autotrade.webui.prompt_preview import build_prompt_preview
 
     cases = (
-        ({}, fold_session_deadline_seconds(240, DEFAULT_DEADLINE_GRACE_MINUTES)),
+        (
+            {},
+            fold_session_deadline_seconds(
+                rolling_default("max_fold_minutes"), DEFAULT_DEADLINE_GRACE_MINUTES
+            ),
+        ),
         (
             {"deadline_grace_minutes": 0, "max_fold_minutes": 240},
             fold_session_deadline_seconds(240, DEFAULT_DEADLINE_GRACE_MINUTES),
@@ -908,3 +931,159 @@ def test_frozen_restore_copy_failure_is_fail_closed(
     assert [row.get("run_id") for row in ledger.read()] == [
         row.get("run_id") for row in records
     ]
+
+
+class BenchmarkedEvaluator:
+    """Replay summaries carrying the frozen benchmark block Held-out is judged on."""
+
+    def __init__(self, total_return: float, sharpe: float, max_drawdown: float, benchmark: float):
+        self.summary = {
+            "total_return": total_return,
+            "sharpe": sharpe,
+            "max_drawdown": max_drawdown,
+            "benchmark": {"label": "CSI 300", "benchmark_return": benchmark},
+        }
+
+    def evaluate(self, request):
+        return EvaluationResult(dict(self.summary), f"result/{request.mode}")
+
+
+def _single_window_pipeline(tmp_path: Path, evaluator):
+    """The default research design: one development Fold, no Test stage."""
+    revision_dir = tmp_path / "revision"
+    revision_dir.mkdir()
+    (revision_dir / "main.py").write_text(
+        "def generate_orders(context):\n    return []\n", encoding="utf-8"
+    )
+    revision = ArtifactRevision("revision_1", revision_dir)
+
+    def developer(request):
+        return FoldSessionResult(
+            "conversation_1",
+            (
+                StepResult(
+                    "step_1",
+                    revision.revision_id,
+                    EvaluationResult({"total_return": 0.05, "max_drawdown": -0.02}, "result/valid"),
+                    True,
+                ),
+            ),
+            "step_1",
+        )
+
+    config = RollingExperimentConfig(
+        "experiment_a",
+        tmp_path / "experiments",
+        "2025Q4",
+        "2026Q1",
+        "2026Q2",
+        "2026Q2",
+        fold_period="quarter",
+    )
+    assert config.test_stage is False
+    ledger = ExperimentLedger(config.ledger_path)
+    pipeline = RollingExperimentPipeline(
+        config,
+        snapshots=Snapshots(),
+        artifacts=Artifacts(revision, tmp_path / "frozen"),
+        evaluator=evaluator,
+        developer=developer,
+        meta_learner=lambda facts: MetaSessionResult(prior="prefer simple daily signals"),
+        ledger=ledger,
+    )
+    fold = build_fold_schedule("2025Q4", "2026Q1", _days(), window_months=24)[0]
+    return pipeline, fold, ledger
+
+
+def test_single_window_fold_has_no_frozen_test_and_held_out_graduates(tmp_path: Path):
+    from autotrade.pipelines.ledger import experiment_verdict
+
+    evaluator = BenchmarkedEvaluator(0.08, 1.2, -0.05, 0.03)
+    pipeline, fold, ledger = _single_window_pipeline(tmp_path, evaluator)
+    assert not fold.has_test
+    assert fold.validation_start == "20251001" and fold.validation_end == "20260331"
+    assert experiment_verdict(ledger.read()) is None
+    outcome = pipeline.run_fold("epoch_001", fold, parent=None)
+    assert outcome.fold_status == "frozen"
+    assert outcome.frozen is not None
+    # No Test stage: nothing was evaluated or recorded for a test region.
+    assert outcome.test_summary is None
+    record = ledger.read("fold")[0]
+    assert record["test_period"] is None
+    assert record["test_decision_time"] is None
+    assert record["test_result"] is None
+    assert record["test_result_ref"] is None
+    assert record["snapshot_ids"] == {
+        "valid_decision_input": "valid_20251001_20260331",
+        "test_decision_input": None,
+    }
+    assert pipeline.run_heldout("epoch_001", outcome.frozen, _days()) == 1
+    heldout = ledger.read("heldout")[0]
+    assert heldout["verdict"] == {
+        "status": "graduated",
+        "reasons": [],
+        "excess_return": pytest.approx(0.05),
+        "sharpe": 1.2,
+        "max_drawdown": -0.05,
+        "max_drawdown_limit": 0.25,
+    }
+    verdict = experiment_verdict(ledger.read())
+    assert verdict is not None
+    assert verdict["status"] == "graduated"
+    assert verdict["reasons"] == []
+    assert verdict["periods"][0]["period"] == "2026Q2"
+
+
+def test_a_frozen_test_never_runs_without_a_test_stage(tmp_path: Path):
+    """The evaluator must never be asked for a frozen_test replay of a
+    single-window Fold, and the ledger must not carry a placeholder."""
+    pipeline, fold, ledger = _single_window_pipeline(
+        tmp_path, ModeMutatingEvaluator("frozen_test", "output")
+    )
+    outcome = pipeline.run_fold("epoch_001", fold, parent=None)
+    assert outcome.fold_status == "frozen"
+    assert ledger.read("fold")[0]["test_result"] is None
+    assert "state_changed_during_test" not in ledger.read("fold")[0]
+
+
+@pytest.mark.parametrize(
+    ("summary", "reasons"),
+    (
+        ((0.02, 0.5, -0.10, 0.03), ["excess_return_not_positive"]),
+        ((0.08, 0.0, -0.10, 0.03), ["sharpe_not_positive"]),
+        ((0.08, 0.9, -0.30, 0.03), ["max_drawdown_exceeded"]),
+        (
+            (-0.02, -0.4, -0.40, 0.03),
+            ["excess_return_not_positive", "sharpe_not_positive", "max_drawdown_exceeded"],
+        ),
+    ),
+)
+def test_held_out_discards_with_every_failing_reason(tmp_path: Path, summary, reasons):
+    from autotrade.pipelines.ledger import experiment_verdict
+
+    pipeline, fold, ledger = _single_window_pipeline(tmp_path, BenchmarkedEvaluator(*summary))
+    frozen = pipeline.run_fold("epoch_001", fold, parent=None).frozen
+    assert frozen is not None
+    pipeline.run_heldout("epoch_001", frozen, _days())
+    verdict = experiment_verdict(ledger.read())
+    assert verdict is not None
+    assert verdict["status"] == "discarded"
+    assert verdict["reasons"] == reasons
+
+
+def test_held_out_without_a_benchmark_block_cannot_graduate():
+    from autotrade.pipelines.config import AcceptanceRules
+
+    rules = AcceptanceRules()
+    verdict = rules.heldout_verdict({"total_return": 0.2, "sharpe": 2.0, "max_drawdown": -0.01})
+    assert verdict["status"] == "discarded"
+    assert verdict["reasons"] == ["missing_benchmark_return"]
+    assert verdict["excess_return"] is None
+    failed = rules.heldout_verdict({"status": "failed", "error": "boom"})
+    assert failed["status"] == "discarded"
+    assert failed["reasons"][0] == "heldout_failed"
+    nan = rules.heldout_verdict(
+        {"total_return": float("nan"), "sharpe": 1.0, "max_drawdown": -0.01,
+         "benchmark": {"benchmark_return": 0.0}}
+    )
+    assert "missing_total_return" in nan["reasons"]

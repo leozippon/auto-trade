@@ -12,14 +12,12 @@ from pathlib import Path
 
 from .strategy import (
     AccountSnapshot,
+    BarTable,
     StrategyContext,
     StrategyContractError,
     _parse_datetime,
-    _validated_strategy_bar,
-    _ValidatedStrategyBar,
-    _ValidatedStrategyBars,
 )
-from .strategy_loader import load_strategy
+from .strategy_loader import load_strategy_module
 
 
 class WorkerProtocolError(RuntimeError):
@@ -86,21 +84,30 @@ _CONTEXT_KEYS = {
     "snapshot_dir",
     "asof_dir",
     "asof_version",
+    "state_dir",
+    "models_dir",
 }
+# ``execute`` runs generate_orders and answers ``orders``; ``fit`` runs the
+# optional fit entrypoint over the same context shape and answers ``fitted``.
+_CALL_KINDS = {"execute": "orders", "fit": "fitted"}
 
 
 class BarStream:
     """Worker-owned append-only bars, independent of strategy module state."""
 
     def __init__(self) -> None:
-        self._bars = _ValidatedStrategyBars()
+        # Columnar and append-only: each delta becomes one chunk, so the
+        # worker's memory grows by the delta's typed columns, not by a dict
+        # per bar, and a rejected delta never touches the accepted table.
+        self._table = BarTable()
         self._sequence = -1
         self._inference_at: datetime | None = None
-        self._last_available_at: datetime | None = None
 
     def context(self, message: Mapping[str, object], protocol: Protocol) -> StrategyContext:
         if set(message) != _EXECUTE_KEYS:
             raise WorkerProtocolError("execute message has missing or unsupported fields")
+        if message.get("type") not in _CALL_KINDS:
+            raise WorkerProtocolError("expected execute or fit message")
         sequence = _integer(message.get("sequence"), "sequence")
         base_count = _integer(message.get("base_count"), "base_count")
         total_count = _integer(message.get("total_count"), "total_count")
@@ -110,19 +117,17 @@ class BarStream:
         if reset:
             if sequence != 0 or base_count != 0:
                 raise WorkerProtocolError("reset execute must start at sequence=0 and base_count=0")
-            previous_bars = _ValidatedStrategyBars()
+            table = BarTable()
             previous_inference = None
-            previous_available_at = None
         else:
             if self._sequence < 0:
                 raise WorkerProtocolError("first execute message must reset the bar stream")
             if sequence != self._sequence + 1:
                 raise WorkerProtocolError("execute sequence is not contiguous")
-            if base_count != len(self._bars):
+            if base_count != len(self._table):
                 raise WorkerProtocolError("base_count does not match worker bar state")
-            previous_bars = self._bars
+            table = self._table
             previous_inference = self._inference_at
-            previous_available_at = self._last_available_at
 
         raw_context = message.get("context")
         if not isinstance(raw_context, dict) or set(raw_context) != _CONTEXT_KEYS:
@@ -136,46 +141,31 @@ class BarStream:
         if total_count != base_count + len(raw_delta):
             raise WorkerProtocolError("total_count does not equal base_count plus delta")
 
-        delta: list[_ValidatedStrategyBar] = []
-        last_available_at = previous_available_at
-        for raw in raw_delta:
-            try:
-                bar = _validated_strategy_bar(
-                    raw,
-                    inference_at=inference_at,
-                    decoded_json=True,
-                )
-            except StrategyContractError as exc:
-                raise WorkerProtocolError(str(exc)) from exc
-            if last_available_at is not None and bar._available_at < last_available_at:
-                raise WorkerProtocolError("bar available_at must be monotonic")
-            delta.append(bar)
-            last_available_at = bar._available_at
-        bars = _ValidatedStrategyBars(
-            (*previous_bars, *delta),
-            max_available_at=last_available_at,
-            available_at_monotonic=True,
-        )
-        if len(bars) != total_count:
-            raise WorkerProtocolError("worker bar state does not match total_count")
+        try:
+            table = table.extended(
+                raw_delta, inference_at=inference_at, decoded_json=True, monotonic=True
+            )
+        except StrategyContractError as exc:
+            raise WorkerProtocolError(str(exc)) from exc
 
         try:
             context = StrategyContext(
                 inference_at=inference_at,
-                bars=bars,
+                bars=table.rows(len(table)),
                 account=AccountSnapshot.from_record(raw_context.get("account")),
                 snapshot_dir=raw_context.get("snapshot_dir"),  # type: ignore[arg-type]
                 asof_dir=raw_context.get("asof_dir"),  # type: ignore[arg-type]
                 asof_version=raw_context.get("asof_version"),  # type: ignore[arg-type]
+                state_dir=raw_context.get("state_dir"),  # type: ignore[arg-type]
+                models_dir=raw_context.get("models_dir"),  # type: ignore[arg-type]
                 _nl_query=protocol.nl_query,
             )
         except StrategyContractError as exc:
             raise WorkerProtocolError(str(exc)) from exc
 
-        self._bars = bars
+        self._table = table
         self._sequence = sequence
         self._inference_at = inference_at
-        self._last_available_at = last_available_at
         return context
 
 
@@ -190,7 +180,7 @@ def run(strategy_path: str | Path) -> int:
     stream = BarStream()
     try:
         with contextlib.redirect_stdout(sys.stderr):
-            strategy = load_strategy(strategy_path)
+            strategy = load_strategy_module(strategy_path)
     except Exception as exc:  # noqa: BLE001 - report import failures through the protocol
         protocol.write({"type": "error", "error": f"strategy import failed: {exc}"})
         return 1
@@ -200,17 +190,24 @@ def run(strategy_path: str | Path) -> int:
             message = protocol.read()
             if message is None or message.get("type") == "close":
                 return 0
-            if message.get("type") != "execute":
-                raise WorkerProtocolError("expected execute message")
+            kind = message.get("type")
+            if kind not in _CALL_KINDS:
+                raise WorkerProtocolError("expected execute or fit message")
+            if kind == "fit" and strategy.fit is None:
+                raise WorkerProtocolError("strategy defines no fit(context)")
             context = stream.context(message, protocol)
             sequence = message["sequence"]
             protocol._active_sequence = sequence  # worker-private protocol state
             try:
                 with contextlib.redirect_stdout(sys.stderr):
-                    orders = strategy(context)
+                    if kind == "fit":
+                        strategy.fit(context)  # type: ignore[misc]
+                        response: dict[str, object] = {}
+                    else:
+                        response = {"orders": strategy.generate_orders(context)}
             finally:
                 protocol._active_sequence = None
-            protocol.write({"type": "orders", "sequence": sequence, "orders": orders})
+            protocol.write({"type": _CALL_KINDS[kind], "sequence": sequence, **response})
         except Exception as exc:  # noqa: BLE001 - isolate each untrusted strategy call
             error: dict[str, object] = {"type": "error", "error": str(exc)}
             if isinstance(message, Mapping):

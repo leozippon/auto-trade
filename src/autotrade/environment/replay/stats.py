@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import math
 import time
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date
@@ -22,6 +22,15 @@ TRADING_DAYS_PER_YEAR = 244
 
 # Position-reducing verbs; fills here are strategy-initiated exits.
 _EXIT_ACTIONS = frozenset({"sell"})
+
+# Sub-window granularity of every Validation / Test / Held-out result. One
+# whole-window number cannot separate a persistent edge from one good month,
+# and the audited folds reverse from quarter to quarter, so every result also
+# carries the same metrics per calendar quarter of its replay window.
+SUB_WINDOW_KIND = "quarter"
+# Sub-window figures are read as a table, not compounded further: six decimals
+# keep the block small enough to ride inline in an Agent observation.
+_SUB_WINDOW_DIGITS = 6
 
 
 class PhaseTimer:
@@ -59,18 +68,25 @@ class ReplayResult:
     wall_seconds: float = 0.0
     phase_seconds: Mapping[str, float] = field(default_factory=dict)
 
-    def to_record(self) -> dict[str, object]:
+    def to_record(self, *, start: str = "", end: str = "") -> dict[str, object]:
         return {
             "equity_curve": list(self.equity_curve),
             "executions": list(self.executions),
             "inference_dates": list(self.inference_dates),
             "pending_orders": list(self.pending_orders),
-            "stats": compute_return_stats(self),
+            "stats": compute_return_stats(self, start=start, end=end),
         }
 
 
-def compute_return_stats(result: ReplayResult) -> dict[str, object]:
-    """The minimum return statistics from docs/environment-design.md §3.8."""
+def compute_return_stats(
+    result: ReplayResult, *, start: str = "", end: str = ""
+) -> dict[str, object]:
+    """The minimum return statistics from docs/environment-design.md §3.8.
+
+    ``start``/``end`` are the replay window that was requested (``YYYYMMDD``),
+    which only the evaluation backend knows; they decide which quarters
+    ``sub_windows`` reports as partial.
+    """
     curve = result.equity_curve
     orders = result.executions
     initial = float(curve[0]["initial_equity"]) if curve else 0.0
@@ -185,6 +201,9 @@ def compute_return_stats(result: ReplayResult) -> dict[str, object]:
         "max_drawdown": max_drawdown,
         "win_rate": float(wins / len(realized)) if realized else 0.0,
         "exposure": exposure,
+        # Fixed-cost (four rows per replayed year) and therefore inline, unlike
+        # weekly_returns / per_stock which scale with the window and the book.
+        "sub_windows": sub_window_stats(curve, orders, initial=initial, start=start, end=end),
         "weekly_returns": _weekly_returns(curve, initial),
         "trade_count": len(realized),
         "turnover": float(traded_notional / initial) if initial > 0 else 0.0,
@@ -204,6 +223,214 @@ def compute_return_stats(result: ReplayResult) -> dict[str, object]:
         "replayed_trade_days": len(curve),
         "phase_seconds": dict(result.phase_seconds),
     }
+
+
+def sub_window_stats(
+    curve: Sequence[Mapping[str, object]],
+    executions: Sequence[Mapping[str, object]],
+    *,
+    initial: float,
+    start: str = "",
+    end: str = "",
+) -> list[dict[str, object]]:
+    """Per calendar quarter of the replay window, the same metrics as the whole.
+
+    Each row compounds from the equity the quarter opened at (the previous
+    quarter's close, or the initial equity), so the rows chain back to
+    ``total_return``; ``turnover`` and ``trade_count`` keep the whole-window
+    denominators and therefore sum to the whole-window figures.
+
+    ``partial`` marks a quarter the requested replay window ``start..end``
+    (``YYYYMMDD`` calendar dates) does not span end to end — interior quarters
+    never are. It must be measured against those calendar bounds, not against
+    the first and last trading day: a window opening on the first trading day
+    of a quarter covers that quarter completely even though that day is rarely
+    the first of the month. A caller that cannot state the requested window
+    leaves both empty and gets the replayed span instead, which reports the two
+    end quarters partial unless the replay itself reaches the calendar bounds.
+
+    ``benchmark_return`` / ``excess_return`` stay ``None`` until the evaluation
+    backend joins the benchmark series in (``attach_sub_window_benchmark``):
+    the replay itself never reads an index.
+    """
+
+    rows = sorted(
+        (row for row in curve if row.get("trade_date") is not None),
+        key=lambda row: str(row["trade_date"]),
+    )
+    if not rows:
+        return []
+    buckets: dict[tuple[int, int], list[Mapping[str, object]]] = {}
+    for row in rows:
+        buckets.setdefault(_quarter_key(str(row["trade_date"])), []).append(row)
+    traded, exits = _quarter_order_totals(executions)
+    keys = sorted(buckets)
+    window_start = _window_bound(start, "start") or str(rows[0]["trade_date"])
+    window_end = _window_bound(end, "end") or str(rows[-1]["trade_date"])
+    out: list[dict[str, object]] = []
+    opening = initial
+    for key in keys:
+        quarter_rows = buckets[key]
+        quarter_start = str(quarter_rows[0]["trade_date"])
+        quarter_end = str(quarter_rows[-1]["trade_date"])
+        equities = [float(row["equity"]) for row in quarter_rows]
+        closing = equities[-1]
+        calendar_start, calendar_end = _quarter_bounds(*key)
+        # Every quarter is compared against the window itself; an interior one
+        # is inside both bounds and therefore never partial.
+        partial = window_start > calendar_start or window_end < calendar_end
+        out.append(
+            {
+                "kind": SUB_WINDOW_KIND,
+                "label": f"{key[0]}Q{key[1]}",
+                "start": quarter_start,
+                "end": quarter_end,
+                "trade_days": len(quarter_rows),
+                "partial": partial,
+                "return": _round(closing / opening - 1.0 if opening > 0 else 0.0),
+                "benchmark_return": None,
+                "excess_return": None,
+                "sharpe": _round(_annualized_sharpe(opening, equities)),
+                "max_drawdown": _round(_max_drawdown(opening, equities)),
+                "turnover": _round(
+                    traded.get(key, 0.0) / initial if initial > 0 else 0.0
+                ),
+                "trade_count": exits.get(key, 0),
+            }
+        )
+        opening = closing
+    return out
+
+
+def attach_sub_window_benchmark(
+    summary: dict[str, object], style_analysis: Mapping[str, object]
+) -> dict[str, object]:
+    """Fill each sub-window's benchmark and excess return, in place.
+
+    ``compute_return_stats`` sees only the replay; the benchmark series is read
+    once, host-side, by ``replay_style_analysis``. The evaluation backend owns
+    both, so it closes the sub-window block here rather than each backend — or
+    each reader — re-deriving the join. A slot without a usable benchmark
+    leaves both fields ``None`` rather than reporting a fabricated zero.
+    """
+
+    rows = summary.get("sub_windows")
+    if not isinstance(rows, list):
+        return summary
+    daily: dict[str, float] = {}
+    series = style_analysis.get("benchmark_daily")
+    if isinstance(series, Sequence) and not isinstance(series, (str, bytes)):
+        for item in series:
+            if (
+                not isinstance(item, Sequence)
+                or isinstance(item, (str, bytes))
+                or len(item) != 2
+            ):
+                continue
+            try:
+                daily[str(item[0])] = float(item[1])
+            except (TypeError, ValueError):
+                continue
+    if not daily:
+        return summary
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        start = str(row.get("start") or "")
+        end = str(row.get("end") or "")
+        covered = [
+            value for day, value in daily.items() if start <= day <= end
+        ]
+        if not covered:
+            continue
+        compounded = 1.0
+        for value in covered:
+            compounded *= 1.0 + value
+        benchmark = compounded - 1.0
+        own = row.get("return")
+        row["benchmark_return"] = _round(benchmark)
+        if isinstance(own, (int, float)) and not isinstance(own, bool):
+            row["excess_return"] = _round(float(own) - benchmark)
+    return summary
+
+
+def _window_bound(value: str, name: str) -> str:
+    """A requested replay bound as ``YYYYMMDD``, or empty when unstated."""
+
+    text = str(value or "")
+    if text and not (len(text) == 8 and text.isdigit()):
+        raise ValueError(f"replay window {name} must be YYYYMMDD, got {value!r}")
+    return text
+
+
+def _quarter_key(trade_date: str) -> tuple[int, int]:
+    return int(trade_date[:4]), (int(trade_date[4:6]) - 1) // 3 + 1
+
+
+def _quarter_bounds(year: int, quarter: int) -> tuple[str, str]:
+    first_month = 3 * (quarter - 1) + 1
+    last_month = first_month + 2
+    last_day = 31 if last_month in (3, 12) else 30
+    return f"{year}{first_month:02d}01", f"{year}{last_month:02d}{last_day:02d}"
+
+
+def _quarter_order_totals(
+    executions: Sequence[Mapping[str, object]],
+) -> tuple[dict[tuple[int, int], float], dict[tuple[int, int], int]]:
+    """Filled notional and realized exits per quarter, keyed by the fill date."""
+
+    traded: dict[tuple[int, int], float] = {}
+    exits: dict[tuple[int, int], int] = {}
+    for order in executions:
+        if str(order.get("status") or "") != "filled":
+            continue
+        day = _fill_date(order)
+        if not day:
+            continue
+        key = _quarter_key(day)
+        price = order.get("price")
+        if isinstance(price, (int, float)) and not isinstance(price, bool):
+            traded[key] = traded.get(key, 0.0) + float(price) * int(
+                order.get("quantity") or 0
+            )
+        if order.get("realized_pnl") is not None:
+            exits[key] = exits.get(key, 0) + 1
+    return traded, exits
+
+
+def _fill_date(order: Mapping[str, object]) -> str:
+    """``YYYYMMDD`` of one fill, from the broker's ISO ``matched_at``."""
+
+    digits = "".join(char for char in str(order.get("matched_at") or "") if char.isdigit())
+    return digits[:8] if len(digits) >= 8 else ""
+
+
+def _annualized_sharpe(opening: float, equities: Sequence[float]) -> float:
+    previous = opening
+    returns: list[float] = []
+    for equity in equities:
+        if previous > 0:
+            returns.append(equity / previous - 1.0)
+        previous = equity
+    if len(returns) < 2:
+        return 0.0
+    mean = sum(returns) / len(returns)
+    stdev = math.sqrt(sum((value - mean) ** 2 for value in returns) / (len(returns) - 1))
+    return mean / stdev * math.sqrt(TRADING_DAYS_PER_YEAR) if stdev > 0 else 0.0
+
+
+def _max_drawdown(opening: float, equities: Sequence[float]) -> float:
+    peak = opening
+    worst = 0.0
+    for equity in (opening, *equities):
+        peak = max(peak, equity)
+        if peak > 0:
+            worst = max(worst, (peak - equity) / peak)
+    return worst
+
+
+def _round(value: float) -> float:
+    return round(float(value), _SUB_WINDOW_DIGITS)
 
 
 def finalize_summary_timing(

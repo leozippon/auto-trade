@@ -8,8 +8,8 @@ from autotrade.agent.prompts import build_meta_learning_prompt, build_system_pro
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.strategy import StrategySchedule
 from autotrade.pipelines.config import (
-    DEFAULT_DEADLINE_GRACE_MINUTES,
     fold_session_deadline_seconds,
+    rolling_default,
 )
 from autotrade.pipelines.hitl_state import (
     HITL_DIR_NAME,
@@ -79,12 +79,14 @@ def build_prompt_preview(
         )
     facts.update(
         {
-            "max_steps": params.get("max_steps_per_fold", 10),
-            "max_backtests": params.get("max_backtests_per_fold", 15),
-            "max_llm_calls": params.get("max_llm_calls", 400),
+            "max_steps": params.get("max_steps_per_fold", rolling_default("max_steps_per_fold")),
+            "max_backtests": params.get(
+                "max_backtests_per_fold", rolling_default("max_backtests_per_fold")
+            ),
+            "max_llm_calls": params.get("max_llm_calls", rolling_default("max_llm_calls")),
             "deadline_seconds": fold_session_deadline_seconds(
-                int(params.get("max_fold_minutes", 240)),  # type: ignore[arg-type]
-                DEFAULT_DEADLINE_GRACE_MINUTES,
+                int(params.get("max_fold_minutes", rolling_default("max_fold_minutes"))),  # type: ignore[arg-type]
+                rolling_default("deadline_grace_minutes"),  # type: ignore[arg-type]
             ),
         }
     )

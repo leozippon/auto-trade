@@ -3,12 +3,16 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 
+from autotrade.environment.executor import TrustedStrategyExecutor
 from autotrade.environment.replay.engine import StrategyDataView
 from autotrade.environment.strategy import StrategySchedule
 from autotrade.paper import DailyPaperEngine, PaperEngineError
+
+from .test_daily_strategy import FIT_STRATEGY
 
 
 class _Executor:
@@ -38,7 +42,7 @@ def _engine(tmp_path: Path, executor: _Executor) -> DailyPaperEngine:
             "down_limit": 8.0,
         }
     ])
-    return DailyPaperEngine(strategy_path=strategy, strategy_revision="revision_1", daily=daily, state_root=tmp_path / "paper", executor_factory=lambda _path, _config: executor)
+    return DailyPaperEngine(strategy_path=strategy, strategy_revision="revision_1", daily=daily, state_root=tmp_path / "paper", executor_factory=lambda *_mounts: executor)
 
 
 def test_paper_day_is_persistent_and_idempotent(tmp_path: Path):
@@ -165,7 +169,7 @@ def test_paper_refuses_to_skip_a_fixed_market_day_and_preserves_t_plus_one(tmp_p
         strategy_revision="revision_1",
         daily=daily,
         state_root=tmp_path / "paper",
-        executor_factory=lambda _path, _config: executor,
+        executor_factory=lambda *_mounts: executor,
     )
 
     engine.run_day("20260102")
@@ -210,7 +214,7 @@ def test_paper_persists_and_freezes_schedule_and_strategy_path(tmp_path: Path):
         daily=daily,
         state_root=tmp_path / "paper",
         schedule=StrategySchedule("month", "09:00"),
-        executor_factory=lambda _path, _config: executor,
+        executor_factory=lambda *_mounts: executor,
     )
     with pytest.raises(PaperEngineError, match="strategy schedule differs"):
         changed_schedule.run_day("20260102")
@@ -222,7 +226,7 @@ def test_paper_persists_and_freezes_schedule_and_strategy_path(tmp_path: Path):
         strategy_revision="revision_1",
         daily=daily,
         state_root=tmp_path / "paper",
-        executor_factory=lambda _path, _config: executor,
+        executor_factory=lambda *_mounts: executor,
     )
     with pytest.raises(PaperEngineError, match="strategy path differs"):
         changed_path.run_day("20260102")
@@ -237,3 +241,51 @@ def test_paper_rejects_previous_state_schema_explicitly(tmp_path: Path):
     path.write_text(json.dumps(state), encoding="utf-8")
     with pytest.raises(PaperEngineError, match="unsupported Paper state schema"):
         engine.run_day("20260102")
+
+
+def test_paper_refits_every_day_from_an_empty_state_dir(tmp_path: Path):
+    """A fit/models strategy runs on Paper: the engine mounts the activated
+    revision's models and rebuilds the state directory for every day, so no
+    fitted state ever crosses a Paper day or enters the account journals."""
+
+    strategy = tmp_path / "main.py"
+    strategy.write_text(FIT_STRATEGY, encoding="utf-8")
+    models = tmp_path / "models"
+    models.mkdir()
+    np.save(models / "lot.npy", np.array([100]))
+    daily = pd.DataFrame([
+        {
+            "trade_date": day,
+            "symbol": "000001.SZ",
+            "open": 10.0,
+            "close": 11.0,
+            "up_limit": 12.0,
+            "down_limit": 8.0,
+        }
+        for day in ("20260102", "20260105")
+    ])
+    engine = DailyPaperEngine(
+        strategy_path=strategy,
+        strategy_revision="revision_1",
+        daily=daily,
+        state_root=tmp_path / "paper",
+        models_dir=models,
+        executor_factory=lambda path, _sandbox, state_dir, models_dir: (
+            TrustedStrategyExecutor.from_path(
+                path, state_dir=state_dir, models_dir=models_dir
+            )
+        ),
+    )
+    for day in ("20260102", "20260105"):
+        engine.run_day(day)
+    orders = [
+        json.loads(line)
+        for day in ("20260102", "20260105")
+        for line in (tmp_path / f"paper/orders_{day}.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    # State carried over from the previous day would still report its fit date.
+    assert [row["fitted_on"] for row in orders] == [20260102, 20260105]
+    assert [row["quantity"] for row in orders] == [100, 100]
+    assert not (tmp_path / "paper" / ".strategy_state").exists()

@@ -201,11 +201,12 @@ def test_paper_bundle_serves_the_key_names_the_console_reads(tmp_path: Path):
     )
     client = TestClient(create_app(tmp_path))
 
-    # The five requests the Paper page issues together; api() throws inside
+    # The four requests the Paper page issues together; api() throws inside
     # Promise.all, so ONE 404 blanks the whole route.
-    for route in ("snapshot", "orders", "deals", "series", "health"):
+    for route in ("snapshot", "orders", "deals", "series"):
         response = client.get(f"/api/trading/paper/{route}")
         assert response.status_code == 200, route
+    assert client.get("/api/trading/paper/health").status_code == 200
 
     orders = client.get("/api/trading/paper/orders").json()
     assert "orders" in orders and orders["count"] == 1
@@ -226,7 +227,82 @@ def test_paper_bundle_serves_the_key_names_the_console_reads(tmp_path: Path):
     assert "series" in series and "state" in series
 
 
-@pytest.mark.parametrize("route", ["orders", "deals", "series", "snapshot", "health"])
+@pytest.mark.parametrize("route", ["orders", "deals", "series", "snapshot"])
 def test_the_paper_routes_the_console_reads_are_named_on_both_sides(route: str):
     assert f"/api/trading/{{}}/{route}" in client_api_paths()
     assert f"/api/trading/{{}}/{route}" in server_api_paths()
+
+
+def test_the_paper_health_route_is_an_external_probe_only() -> None:
+    """``/health`` returns the roster entry the page already reads plus an
+    ``ok`` flag. Polling it from the console would spend a request per refresh
+    on data the page never renders, so it stays server-side only."""
+
+    assert "/api/trading/{}/health" in server_api_paths()
+    assert "/api/trading/{}/health" not in client_api_paths()
+
+
+def _js_function_body(name: str) -> str:
+    """Source of one top-level ``function name(...) { … }`` in app.js."""
+    source = APP_JS.read_text(encoding="utf-8")
+    start = source.index(f"function {name}(")
+    index = source.index("{", start)
+    depth = 0
+    for end in range(index, len(source)):
+        if source[end] == "{":
+            depth += 1
+        elif source[end] == "}":
+            depth -= 1
+            if not depth:
+                return source[index : end + 1]
+    raise AssertionError(f"unbalanced braces in {name}")
+
+
+def test_the_sub_window_columns_the_console_reads_are_the_ones_produced() -> None:
+    """Same class of defect as the renamed route, one level down: the fold
+    panel renders per-quarter rows the replay reducer writes, and a renamed or
+    dropped column would silently render an empty column instead of failing."""
+
+    from autotrade.environment.replay.stats import sub_window_stats
+
+    body = _js_function_body("subWindowSection")
+    read = set(re.findall(r"\brow\.([a-z_]+)", body))
+    produced = set(
+        sub_window_stats(
+            (
+                {"trade_date": "20220104", "initial_equity": 100.0, "equity": 110.0},
+                {"trade_date": "20220331", "initial_equity": 100.0, "equity": 105.0},
+            ),
+            (),
+            initial=100.0,
+        )[0]
+    )
+    assert read, "the sub-window table reads no row field"
+    assert read <= produced, sorted(read - produced)
+
+
+def test_the_benchmark_fields_the_fold_panel_reads_are_served() -> None:
+    """The raw and the size/beta-neutralized excess are read side by side, so
+    both must exist in the block the evaluation summary actually carries."""
+
+    from autotrade.environment.replay.style import benchmark_summary_block
+
+    body = _js_function_body("foldResultPanel")
+    read = set(re.findall(r"\bbenchmark\.([a-z_]+)", body))
+    served = set(
+        benchmark_summary_block(
+            {
+                "compact": {
+                    "benchmark_return": 0.01,
+                    "excess_return": 0.02,
+                    "neutralized_excess_return": 0.03,
+                    "neutralized_excess_method": "…",
+                    "beta": 0.9,
+                    "n_days": 60,
+                    "size_tilt": -0.2,
+                }
+            }
+        )
+    )
+    assert read, "the fold panel reads no benchmark field"
+    assert read <= served, sorted(read - served)

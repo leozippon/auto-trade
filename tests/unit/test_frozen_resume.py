@@ -530,10 +530,12 @@ def test_first_fold_flagged_prune_rollback_and_retry(tmp_path: Path) -> None:
     config = RollingExperimentConfig(
         "experiment_a",
         tmp_path / "experiments",
-        "2026Q1",
+        "2025Q4",
         "2026Q1",
         "2026Q2",
         "2026Q2",
+        fold_period="quarter",
+        test_stage=True,
         epochs=1,
     )
     ledger = ExperimentLedger(config.ledger_path)
@@ -549,7 +551,9 @@ def test_first_fold_flagged_prune_rollback_and_retry(tmp_path: Path) -> None:
         stamp.strftime("%Y%m%d")
         for stamp in pd.bdate_range("2025-09-29", "2026-06-30")
     ]
-    fold = build_fold_schedule("2026Q1", "2026Q1", days)[0]
+    fold = build_fold_schedule(
+        "2025Q4", "2026Q1", days, window_months=24, test_stage=True
+    )[0]
     with pytest.raises(FrozenArtifactMutated, match="changed during frozen test"):
         pipeline.run_fold("epoch_001", fold, parent=None)
     records = ledger.read("fold")

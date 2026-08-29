@@ -30,7 +30,7 @@ On the latest date, select liquid closed first boards (`U`, `limit_times == 1`) 
 
 **Exit.** Remove a position at the next 09:30 when the repair state fails, its industry breadth disappears, or the stock is no longer in the fresh/continued closed-board cohort. Keep cash rather than inventing a trend fallback.
 
-**Falsifies it.** Net open-to-open performance after costs does not beat a same-date, same-liquidity first-board basket **without** the repair gate; improvement is confined to one fold; or most apparent close-to-close alpha vanishes at next-open execution.
+**Falsifies it.** Net open-to-open performance after costs does not beat a same-date, same-liquidity first-board basket **without** the repair gate; improvement is confined to a single sub-window of the Validation year; or most apparent close-to-close alpha vanishes at next-open execution.
 
 **One-file sketch.** Load a 10-date limit-list tail, aggregate one row per market date, shift every market-state feature by construction to the next execution date, rank the latest eligible cohort, then map stale positions to sells and top-ranked new candidates to buffered 100-share buys.
 
@@ -133,7 +133,7 @@ Rank `hot` only within the same THS list/time; never compare opaque heat levels 
 
 **Exit.** Sell when latest visible rank leaves the retained band, improvement reverses, or after a short declared horizon. Do not call a missing row negative sentiment without checking list coverage.
 
-**Falsifies it.** Rank improvement adds nothing over final rank; cross-platform confirmation adds nothing within common coverage; a same-return/turnover/size attention-matched control performs equally; or direction flips by fold.
+**Falsifies it.** Rank improvement adds nothing over final rank; cross-platform confirmation adds nothing within common coverage; a same-return/turnover/size attention-matched control performs equally; or direction flips between sub-windows.
 
 **One-file sketch.** Deduplicate exact rank snapshots, sort by source/list/code/time, use group `first`/`last`, outer-report source coverage but inner-join only for the declared confirmation test, and merge T-1 daily state before ranking.
 
@@ -187,4 +187,4 @@ Every playbook should report its own mechanism ablation:
 | 行业扩散 | stock flow only, aggregate sector flow only, and diffusion variant |
 | 文本催化 | each event class separately; no pooled keyword score |
 
-If an ablation performs the same or better, keep the simpler mechanism. A broad MA overlay is not a valid rescue.
+If an ablation performs the same or better, keep the simpler mechanism; when the two are hard to separate, compare sub-window consistency before falling back on simplicity. A broad MA overlay is not a valid rescue.

@@ -112,15 +112,58 @@ FORWARD_EVENT_DATE_COLUMNS = {"share_float_complete": "float_date"}
 # pipeline outages. Observed landing times stay recorded in the sidecars as
 # operational evidence; they no longer influence visibility.
 _AUCTION_PUBLISH_CLOCK = "09:29:00"
-# Columns that must never enter frozen research inputs (raw keeps them).
-# cb_basic is a nightly CURRENT-STATE registry ingested by list_date, so its
-# mutable fields leak post-decision state into history (data docs §3.3); its
-# static issuance terms stay. limit_list_d.limit_amount is source-rewritten to
-# null with early-2020 magnitude anomalies and is audit-only by contract (data
-# docs §3.2); the same-named columns of limit_list_ths/new_share are unaffected.
+# Columns that must never enter frozen research inputs. The raw lake keeps
+# them and the unit registry still classifies them for the data audit; they
+# are dropped per dataset before the domain union, so a same-named column of
+# another dataset (limit_list_ths.limit_amount, daily_info.total_share) is
+# unaffected. Two removal reasons, both permanent:
+#
+# leakage — the column would carry post-decision state into history.
+# unusable — the column is dead, dead for the recent years, mostly zero with
+#   undocumented semantics, inconsistent with its declared unit, or carries
+#   irreconcilable regimes inside one series. Evidence below comes from a
+#   per-year raw-lake scan (2026-08-29) recorded in data docs §4. Columns that
+#   are merely sparse by nature (block_trade.amount) or populated per vendor
+#   category (kpl_list bid_*, the limit_list_ths pool fields) are NOT removed:
+#   they are complete within the rows they describe.
 SNAPSHOT_EXCLUDED_COLUMNS: dict[str, tuple[str, ...]] = {
-    "cb_basic": ("conv_price", "remain_size", "newest_rating", "delist_date"),
+    # avg_turnover: always present but 95.9% zeros, max 0.04, semantics
+    # undocumented. interval_3/interval_6: last populated 2018-09, all-NA in
+    # every later partition (8.0% of scanned rows overall).
+    "bak_daily": ("avg_turnover", "interval_3", "interval_6"),
+    # 板上成交金额: the source rewrites history to null and early-2020
+    # magnitudes are anomalous — audit-only by contract (data docs §3.2).
     "limit_list_d": ("limit_amount",),
+    # All-NA in every limit_type pool and every year; the pool-conditional
+    # siblings (limit_order/limit_amount/turnover/rise_rate/sum_float) stay.
+    "limit_list_ths": ("lu_limit_order",),
+    # Populated 2020-2022 only, all-NA 2023+, and the count basis (笔 vs 万笔)
+    # was never confirmed.
+    "daily_info": ("trans_count",),
+    # All-NA 2023+ (populated 78-100% 2020-2021, 27-34% in 2022); the
+    # exchange-level amount/market-value columns of this dataset are complete.
+    "sz_daily_info": ("vol", "total_share", "float_share"),
+    # All-NA locally across 2020-2026 (0 of 1652 scanned rows).
+    "us_tltr": ("e_factor",),
+    # nt_accu alternates between a cumulative index level (~100.x) and a
+    # cumulative percent change (0.2 in 202411-202412, -0.1 in 202502) with no
+    # regime marker; town_accu/cnt_accu hold index levels throughout and stay.
+    "cn_cpi": ("nt_accu",),
+    # Free-text vendor fields pooled over 3136 distinct events: 71.5%/91.5%/
+    # 36.5% non-empty but only 18.4%/21.9%/8.9% parse as numbers, and the scale
+    # is per event (rig counts, PMI, indices, percentages). The calendar's
+    # date/event/country columns stay.
+    "eco_cal": ("value", "pre_value", "fore_value"),
+    # All-NA except two Hong Kong indexes (300 of 16341 scanned rows); the
+    # per-market vol column stays.
+    "index_global": ("amount",),
+    # Nightly CURRENT-STATE registry refresh ingested by list_date: these
+    # mutable fields would leak post-decision state into history (data docs
+    # §3.3). The static issuance terms stay.
+    "cb_basic": ("conv_price", "remain_size", "newest_rating", "delist_date"),
+    # Declared a CNY impairment amount, but 96.4% of values are |x| < 10 with
+    # a median of 0.0005 — the unit contradicts the declared meaning.
+    "fina_indicator_vip": ("impai_ttm",),
 }
 DomainBuildResult = tuple[dict[str, object], dict[str, object]]
 DomainBuildTask = tuple[
@@ -129,57 +172,63 @@ DomainBuildTask = tuple[
     Callable[[Mapping[str, DomainBuildResult]], DomainBuildResult],
 ]
 
-@dataclass(frozen=True)
-class SnapshotConfig:
-    window_months: int = 21
-    daily_window_months: int | None = None
-    fundamentals_window_months: int | None = None
-    events_window_months: int | None = None
-    macro_window_months: int | None = None
-    text_window_months: int | None = None
-    # One trading month of decision-input minute bars; valid/test replay minute
-    # windows are sized by the fold periods, not this field.
-    intraday_trade_days: int = 21
-    # Excluded on purpose (raw keeps downloading; re-enable per experiment via
-    # a custom events tuple once the stated condition is met):
-    # - pledge_detail: 24% of in-window business keys carry contradictory
-    #   versions (is_release/is_buyback/amount conflicts) with no version
-    #   column — excluded until source identity rules exist (data docs §4).
-    # - repurchase: same defect class at ~3% (conflicting amounts/price caps
-    #   for one announcement) — excluded with the same re-inclusion condition.
-    # - hm_list: daily-refreshed reference without PIT timestamps; contributed
-    #   0 rows to every snapshot ever built and injected two all-null columns.
-    # - slb_len_mm / slb_len: 转融通 feeds dead at source (last rows
-    #   2025-07-25, zero-row ever since); datasets decommissioned.
-    events_datasets: tuple[str, ...] = (
+# ---- Agent-visible dataset scope -------------------------------------------
+# Two levels over one source. ``SELECTABLE_DATASETS`` is every dataset a domain
+# can load: the raw lake downloads and audits all of them and the fail-closed
+# unit registry classifies every one of their columns, so an experiment may
+# select any subset. ``DEFAULT_DATASETS`` is the narrower scope built when an
+# experiment selects nothing — the A-share daily/weekly stock material, one
+# series per concept. Selectable-but-not-default datasets stay downloadable,
+# auditable and opt-in per experiment; the scope and the evidence behind it are
+# in docs/data-documentation.md.
+#
+# Never selectable (raw keeps downloading; re-enable once the stated condition
+# is met):
+# - pledge_detail: 24% of in-window business keys carry contradictory versions
+#   (is_release/is_buyback/amount conflicts) with no version column — excluded
+#   until source identity rules exist (data docs §4).
+# - repurchase: same defect class at ~3% (conflicting amounts/price caps for
+#   one announcement) — excluded with the same re-inclusion condition.
+# - hm_list: daily-refreshed reference without PIT timestamps; contributed 0
+#   rows to every snapshot ever built and injected two all-null columns.
+# - slb_len_mm / slb_len: 转融通 feeds dead at source (last rows 2025-07-25,
+#   zero-row ever since); datasets decommissioned.
+# - cn_schedule: the source keeps only the current months, so it contributes
+#   nothing to a historical replay.
+SELECTABLE_DATASETS: dict[str, tuple[str, ...]] = {
+    "events": (
+        # 两融
         "margin",
         "margin_detail",
         "margin_secs",
+        # per-stock money flow (one official series plus two vendor variants)
+        # and the industry/concept aggregates derived from them
         "moneyflow",
         "moneyflow_dc",
         "moneyflow_ths",
         "moneyflow_ind_dc",
         "moneyflow_ind_ths",
         "moneyflow_cnt_ths",
+        # per-stock trading structure
         "cyq_perf",
         "bak_daily",
         "block_trade",
+        # shareholder structure and share supply
         "stk_holdernumber",
+        "stk_holdertrade",
         "top10_holders",
         "top10_floatholders",
         "stk_surv",
         "new_share",
-        "stk_holdertrade",
         "share_float_complete",
+        # 龙虎榜 and the official full-market 涨跌停/炸板 list (history since
+        # 2020-01; row-level available_at at trade-date 16:00)
         "top_list",
         "top_inst",
-        # Official full-market 涨跌停/炸板 list (board download tier, history
-        # since 2020-01; complements limit_list_ths whose source starts
-        # 2023-11). Row-level available_at: trade-date 16:00.
         "limit_list_d",
-        # Board-trading / sentiment cluster (row-level available_at; day-end or
+        # board-trading / sentiment cluster (row-level available_at; day-end or
         # next-morning labels — descriptive sentiment signals, never a truth
-        # source for fills/tradability/risk):
+        # source for fills, tradability or risk)
         "kpl_list",
         "kpl_concept_cons",
         "dc_index",
@@ -190,43 +239,41 @@ class SnapshotConfig:
         "ths_hot",
         "dc_hot",
         "hm_detail",
-    )
-    macro_datasets: tuple[str, ...] = (
+    ),
+    "macro": (
+        # CN macro releases
         "cn_gdp",
         "cn_cpi",
         "cn_ppi",
         "cn_pmi",
         "cn_m",
         "sf_month",
+        "eco_cal",
+        # money market and policy rates
         "shibor",
         "shibor_quote",
         "shibor_lpr",
-        "eco_cal",
-        "index_global",
-        # Core A-share benchmark indexes (000001/000016/000300/000905/000852/
-        # 399006/000688): market timing, beta management, relative strength.
+        "repo_daily",
+        # A-share index and industry context
         "index_daily",
         "index_dailybasic",
         "sw_daily",
         "ci_daily",
+        "ths_daily",
+        # exchange aggregates and market-level money flow
         "daily_info",
         "sz_daily_info",
         "moneyflow_mkt_dc",
         "broker_recommend",
-        "ths_daily",
+        # offshore equity, FX and US yield curves
+        "index_global",
         "fx_daily",
-        # Regime/background additions: repo liquidity, US nominal + real yield
-        # curves plus T-bill and long-term average rates (risk appetite).
-        # cn_schedule deliberately NOT exposed: the source keeps no history
-        # (only current months), so it contributes nothing to historical replay.
-        "repo_daily",
         "us_tycr",
         "us_trycr",
         "us_tbr",
         "us_tltr",
-        # Derivatives market context (non-tradable): CFFEX index-futures basis,
-        # option PCR/IV inputs and CB conversion premium + redemption ledger.
-        # The Agent computes the signals itself.
+        # derivatives and convertible bonds (non-tradable context; the Agent
+        # computes basis, PCR and conversion premium itself)
         "fut_basic",
         "fut_mapping",
         "fut_daily",
@@ -235,25 +282,116 @@ class SnapshotConfig:
         "cb_basic",
         "cb_daily",
         "cb_call",
-    )
-    text_datasets: tuple[str, ...] = (
-        "anns_d", "major_news", "cctv_news", "npr", "research_report", "report_rc",
-        "irm_qa_sh", "irm_qa_sz", "news",
-    )
-    # Newswire knobs. Defaults are deliberately generous (testing phase,
-    # maximize Agent-visible data): every src= partition on disk, the full
-    # text window. Cross-source content dedup always applies — measured 43%
-    # of full-window rows are duplicates (4.56M -> 2.60M, ~0.4GB library).
-    # Tighten via an explicit source tuple and/or a months clamp if needed.
+    ),
+    "text": (
+        # per-stock text (every row carries ts_code)
+        "anns_d",
+        "research_report",
+        "report_rc",
+        "irm_qa_sh",
+        "irm_qa_sz",
+        # market-wide newswire (no ts_code on any row)
+        "major_news",
+        "news",
+        "cctv_news",
+        "npr",
+    ),
+    "fundamentals": FUNDAMENTAL_EVENT_DATASETS,
+}
+
+# What a snapshot carries when the experiment selects nothing. Excluded by
+# default and why (measured on the 2025-12-31 decision snapshot; the share is
+# of that domain's rows):
+# - events: dc_member (55.1%) and kpl_concept_cons (6.6%) are concept-board
+#   membership tables, ths_hot/dc_hot (5.6%) are hot-list rankings, moneyflow_dc
+#   /moneyflow_ths (7.4%) duplicate moneyflow per stock and the moneyflow_ind_*
+#   /moneyflow_cnt_ths series aggregate it by industry, margin_secs (3.0%) is
+#   the eligibility roster behind margin_detail, top10_holders /
+#   top10_floatholders / stk_surv are quarterly holder and survey tables, and
+#   limit_step / limit_cpt_list / limit_list_ths / hm_detail extend the board
+#   cluster past the official limit_list_d. Together 81% of the domain's rows.
+# - macro: opt_*/fut_*/cb_* derivatives and convertible bonds (54.9%),
+#   ths_daily and ci_daily duplicate sw_daily's industry-index role (32.7%),
+#   and repo_daily, fx_daily, us_* curves, index_global, shibor_quote,
+#   daily_info, sz_daily_info, moneyflow_mkt_dc, broker_recommend and eco_cal
+#   are cross-asset or aggregate series a stock strategy can rebuild from the
+#   daily domain. Together 93% of the domain's rows.
+# - text: the four market-wide newswire feeds carry no ts_code on any row and
+#   hold 83% of the text library's bytes.
+DEFAULT_DATASETS: dict[str, tuple[str, ...]] = {
+    "events": (
+        "margin",
+        "margin_detail",
+        "moneyflow",
+        "cyq_perf",
+        "bak_daily",
+        "block_trade",
+        "stk_holdernumber",
+        "stk_holdertrade",
+        "new_share",
+        "share_float_complete",
+        "top_list",
+        "top_inst",
+        "limit_list_d",
+        "kpl_list",
+    ),
+    "macro": (
+        "cn_gdp",
+        "cn_cpi",
+        "cn_ppi",
+        "cn_pmi",
+        "cn_m",
+        "sf_month",
+        "shibor",
+        "shibor_lpr",
+        "index_daily",
+        "index_dailybasic",
+        "sw_daily",
+    ),
+    "text": (
+        "anns_d",
+        "research_report",
+        "report_rc",
+        "irm_qa_sh",
+        "irm_qa_sz",
+    ),
+    "fundamentals": FUNDAMENTAL_EVENT_DATASETS,
+}
+
+
+@dataclass(frozen=True)
+class SnapshotConfig:
+    # Same base window the research calendar uses (RollingExperimentConfig).
+    window_months: int = 24
+    daily_window_months: int | None = None
+    fundamentals_window_months: int | None = None
+    events_window_months: int | None = None
+    macro_window_months: int | None = None
+    text_window_months: int | None = None
+    # One trading month of decision-input minute bars; valid/test replay minute
+    # windows are sized by the fold periods, not this field.
+    intraday_trade_days: int = 21
+    events_datasets: tuple[str, ...] = DEFAULT_DATASETS["events"]
+    macro_datasets: tuple[str, ...] = DEFAULT_DATASETS["macro"]
+    text_datasets: tuple[str, ...] = DEFAULT_DATASETS["text"]
+    # Newswire knobs, effective only when the opt-in ``news`` dataset is
+    # selected: every src= partition on disk and the full text window. Its
+    # cross-source content dedup always applies — measured 43% of full-window
+    # rows are duplicates (4.56M -> 2.60M, ~0.4GB library).
     news_sources: tuple[str, ...] = ()  # empty = all sources present on disk
     news_window_months: int | None = None  # None = follow the text window
-    fundamental_datasets: tuple[str, ...] = FUNDAMENTAL_EVENT_DATASETS
-    include_intraday: bool = True
+    fundamental_datasets: tuple[str, ...] = DEFAULT_DATASETS["fundamentals"]
+    # Minute bars are opt-in: they are the single largest domain to build and
+    # carry, and a daily/weekly stock strategy reads them only to price an
+    # order at an exact historical minute. With them off, execution resolves at
+    # the open and the close and any other execute_at is rejected as
+    # ``missing_execution_price``.
+    include_intraday: bool = False
     include_industry: bool = True
     text_body_chars: int = 4000
     replay_include_events: bool = True
     replay_include_text: bool = True
-    replay_include_minutes: bool = True
+    replay_include_minutes: bool = False  # follows include_intraday
     replay_include_macro: bool = True
     replay_include_fundamentals: bool = True
     # ---- universe screening (experiment-level research universe) ----
@@ -283,6 +421,15 @@ class SnapshotConfig:
         )
 
     def __post_init__(self) -> None:
+        for domain, selected in (
+            ("events", self.events_datasets),
+            ("macro", self.macro_datasets),
+            ("text", self.text_datasets),
+            ("fundamentals", self.fundamental_datasets),
+        ):
+            unknown = sorted(set(selected) - set(SELECTABLE_DATASETS[domain]))
+            if unknown:
+                raise ValueError(f"unsupported {domain} datasets: {unknown}")
         for domain in ("daily", "fundamentals", "events", "macro", "text"):
             if self.months_for(domain) <= 0:
                 raise ValueError(f"{domain}_months must be positive")
@@ -503,6 +650,10 @@ class SnapshotBuilder:
                 require_partitions=bool(config.fundamental_datasets),
             )
             fundamentals = self._apply_screen(fundamentals, screened)
+            fundamentals, dataset_columns = _apply_fundamental_exclusions(
+                fundamentals,
+                _fundamental_dataset_columns(self.raw_dir, tuple(config.fundamental_datasets)),
+            )
             profile = _write_with_profile(
                 output_dir / "fundamentals.parquet",
                 fundamentals,
@@ -512,9 +663,7 @@ class SnapshotBuilder:
                 "rows": int(len(fundamentals)),
                 "datasets": list(config.fundamental_datasets),
                 "units": "source",
-                "dataset_columns": _fundamental_dataset_columns(
-                    self.raw_dir, tuple(config.fundamental_datasets)
-                ),
+                "dataset_columns": dataset_columns,
             }, profile
 
         def build_events(_: Mapping[str, DomainBuildResult]) -> DomainBuildResult:
@@ -855,15 +1004,17 @@ class SnapshotBuilder:
                 require_partitions=False,
             )
             fundamentals = self._apply_screen(fundamentals, screened)
+            fundamentals, dataset_columns = _apply_fundamental_exclusions(
+                fundamentals,
+                _fundamental_dataset_columns(self.raw_dir, tuple(config.fundamental_datasets)),
+            )
             profile = _write_with_profile(
                 output_dir / "fundamentals.parquet", fundamentals, build_seconds=time.perf_counter() - started
             )
             return {
                 "rows": int(len(fundamentals)),
                 "datasets": list(config.fundamental_datasets),
-                "dataset_columns": _fundamental_dataset_columns(
-                    self.raw_dir, tuple(config.fundamental_datasets)
-                ),
+                "dataset_columns": dataset_columns,
             }, profile
 
         def build_events(_: Mapping[str, DomainBuildResult]) -> DomainBuildResult:
@@ -1373,6 +1524,14 @@ class SnapshotBuilder:
         for name, frame in (("daily", daily), ("daily_basic", basic), ("stk_limit", limits), ("adj_factor", adj)):
             if frame.duplicated(["trade_date", "ts_code"]).any():
                 raise ValueError(f"{name} has duplicate (trade_date, ts_code) keys in {start}..{end}")
+        # The join keys are (trade_date, ts_code), so daily_basic.close and
+        # stk_limit.pre_close only ever survived as the suffixed duplicates
+        # close_basic / pre_close_limit. Measured on the 2025-12-31 snapshot
+        # (1,291,986 rows): close_basic equalled close in every row and
+        # pre_close_limit equalled pre_close wherever stk_limit had a row, so
+        # they were a second name for one number in the Agent's schema.
+        basic = basic.drop(columns=["close"], errors="ignore")
+        limits = limits.drop(columns=["pre_close"], errors="ignore")
         out = daily.merge(basic, on=["trade_date", "ts_code"], how="left", suffixes=("", "_basic"))
         out = out.merge(limits, on=["trade_date", "ts_code"], how="left", suffixes=("", "_limit"))
         if not adj.empty:
@@ -2376,6 +2535,43 @@ def _fundamental_dataset_columns(raw_dir: Path, datasets: tuple[str, ...]) -> di
             columns.update(dict.fromkeys(pq.read_schema(files[index]).names))
         out[dataset] = list(columns)
     return out
+
+
+def _apply_fundamental_exclusions(
+    frame: pd.DataFrame, dataset_columns: dict[str, list[str]]
+) -> tuple[pd.DataFrame, dict[str, list[str]]]:
+    """Apply SNAPSHOT_EXCLUDED_COLUMNS to the already-unioned fundamentals.
+
+    events/macro drop excluded columns per dataset before their union; the PIT
+    fundamental store hands over one union frame, so a column can only be
+    dropped for every dataset at once. Refuse when another fundamental dataset
+    still declares an excluded name rather than silently widening the removal.
+    """
+    kept = {
+        dataset: [
+            column
+            for column in columns
+            if column not in SNAPSHOT_EXCLUDED_COLUMNS.get(dataset, ())
+        ]
+        for dataset, columns in dataset_columns.items()
+    }
+    excluded = {
+        column
+        for dataset, columns in dataset_columns.items()
+        for column in SNAPSHOT_EXCLUDED_COLUMNS.get(dataset, ())
+        if column in columns
+    }
+    if not excluded:
+        return frame, kept
+    shared = sorted(
+        column for column in excluded if any(column in columns for columns in kept.values())
+    )
+    if shared:
+        raise ValueError(
+            "excluded fundamental columns are also declared by another dataset "
+            f"of the same union file: {shared}"
+        )
+    return frame.drop(columns=[c for c in frame.columns if c in excluded]), kept
 
 
 # The raw-lake stamp also records the update transaction (host commands) and

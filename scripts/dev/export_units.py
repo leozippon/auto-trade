@@ -24,6 +24,11 @@ from _bootstrap import add_repo_src
 
 add_repo_src(__file__)
 
+from autotrade.environment.data.snapshot import (
+    DEFAULT_DATASETS,
+    SELECTABLE_DATASETS,
+    SNAPSHOT_EXCLUDED_COLUMNS,
+)
 from autotrade.environment.data.units import (
     COMMON_FIELD_SEMANTICS,
     FIELD_RULES,
@@ -45,6 +50,18 @@ FILE_TITLES = {
     "raw_only": "仅原始湖数据（不进入快照）",
 }
 
+# Snapshot visibility is derived, never written by hand: a union file's domain
+# decides whether a dataset can enter a snapshot at all and whether it is in the
+# default scope, and SNAPSHOT_EXCLUDED_COLUMNS decides which of its columns do.
+_FILE_DOMAINS = {
+    "events.parquet": "events",
+    "macro.parquet": "macro",
+    "fundamentals.parquet": "fundamentals",
+}
+_DATASET_NOT_IN_SNAPSHOT = "该数据集不进入快照，只保留在原始湖与数据审计中"
+_DATASET_NOT_DEFAULT = "该数据集默认不加载，可在创建实验时通过数据集子集显式选择"
+_COLUMNS_NOT_IN_SNAPSHOT = "这些字段不进入快照，只保留在原始湖与数据审计中"
+
 DOC_REFERENCE_LINKS = {
     "data docs §3.3": "[数据文档 §3.3](data-documentation.md#33-原始数据何时可见)",
     "data docs §4": "[数据文档 §4](data-documentation.md#4-已知数据风险与限制)",
@@ -59,6 +76,27 @@ def _link_doc_references(text: str) -> str:
     for source, link in DOC_REFERENCE_LINKS.items():
         text = text.replace(source, link)
     return text
+
+
+def _visibility_note(rule) -> str | None:
+    """Whether this rule's dataset/columns reach the Agent snapshot."""
+    domain = _FILE_DOMAINS.get(rule.file)
+    if domain is None or rule.dataset is None:
+        return None
+    if rule.dataset not in SELECTABLE_DATASETS[domain]:
+        return _DATASET_NOT_IN_SNAPSHOT
+    if rule.dataset not in DEFAULT_DATASETS[domain]:
+        return _DATASET_NOT_DEFAULT
+    excluded = set(SNAPSHOT_EXCLUDED_COLUMNS.get(rule.dataset, ()))
+    covered = excluded.intersection(rule.columns)
+    if not covered:
+        return None
+    if covered != set(rule.columns):
+        raise ValueError(
+            f"unit rule {rule.key()} mixes snapshot-excluded and visible columns; "
+            "split it so each rule is uniformly one or the other"
+        )
+    return _COLUMNS_NOT_IN_SNAPSHOT
 
 
 def render_units_markdown() -> str:
@@ -78,6 +116,8 @@ def render_units_markdown() -> str:
         "- 每次快照还会生成 `/mnt/artifacts/unit_reference.json`，只列出本次实际可见的文件、数据集和字段。",
         "- 快照构建会逐列检查单位，并核对多来源合并清单与文件结构；缺少规则或字段归属时立即失败。",
         "- 回归测试会逐列检查 `configs/data/snapshot_columns.json`。该文件从供应商分区抽样汇总，不扫描全库；少数历史分区独有的字段由快照构建检查。",
+        "- 注明“不进入快照”的数据集或字段只保留在原始湖与数据审计中，Agent 看不到，也不会出现在 `unit_reference.json` 里。",
+        "- 注明“默认不加载”的数据集仍可被实验显式选择；选中后它的字段与规则同样生效。",
         "",
         "## 状态与换算",
         "",
@@ -96,7 +136,13 @@ def render_units_markdown() -> str:
             if rule.file != file:
                 continue
             factor = f"×{rule.factor:g} → {rule.normalized_unit}" if rule.factor is not None else ""
-            basis = _link_doc_references("；".join(part for part in (rule.evidence, rule.note) if part))
+            basis = _link_doc_references(
+                "；".join(
+                    part
+                    for part in (_visibility_note(rule), rule.evidence, rule.note)
+                    if part
+                )
+            )
             lines.append(
                 "| " + " | ".join([
                     _cell(f"`{rule.dataset}`" if rule.dataset else ""),
@@ -130,19 +176,22 @@ def refresh_inventory() -> None:
     import pyarrow.parquet as pq
 
     from autotrade.environment.data.fundamental_events import (
-        FUNDAMENTAL_EVENT_DATASETS,
         FUNDAMENTAL_SIDECAR_COLUMNS,
     )
-    from autotrade.environment.data.snapshot import SnapshotConfig
 
     raw = REPO_ROOT / "data" / "raw"
     if not raw.exists():
         raise FileNotFoundError(f"raw lake not available at {raw}; run on the data host")
-    config = SnapshotConfig()
+    # Every SELECTABLE dataset, not just the default scope: the unit registry is
+    # fail-closed, so a dataset an experiment can opt into must stay covered.
     plans = [
-        ("events.parquet", tuple(config.events_datasets), ["dataset"]),
-        ("macro.parquet", tuple(config.macro_datasets), ["dataset"]),
-        ("fundamentals.parquet", tuple(FUNDAMENTAL_EVENT_DATASETS), list(FUNDAMENTAL_SIDECAR_COLUMNS)),
+        ("events.parquet", SELECTABLE_DATASETS["events"], ["dataset"]),
+        ("macro.parquet", SELECTABLE_DATASETS["macro"], ["dataset"]),
+        (
+            "fundamentals.parquet",
+            SELECTABLE_DATASETS["fundamentals"],
+            list(FUNDAMENTAL_SIDECAR_COLUMNS),
+        ),
     ]
     files: dict[str, dict[str, list[str]]] = {}
     for file, datasets, extra in plans:

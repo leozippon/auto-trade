@@ -30,10 +30,15 @@ DEFAULT_META_MODEL = DEFAULT_AGENT_MODEL
 DEFAULT_NL_MODEL = DEFAULT_AGENT_MODEL
 DEFAULT_COMPACT_MODEL = DEFAULT_AGENT_MODEL
 
-# Standing development defaults for the quarter cadence, shared by both
-# entrypoints' resolve functions (single source; help texts restate them).
-QUARTER_DEFAULT_FIRST_TEST_PERIOD = "2022Q1"
-QUARTER_DEFAULT_LAST_TEST_PERIOD = "2025Q4"
+# The four period labels the console form is seeded with; only this cadence has
+# standing defaults (see resolve_period_args).
+DEFAULT_FOLD_PERIOD = str(WEB_CREATE_DEFAULTS["fold_period"])
+PERIOD_ARGS = (
+    "development_first_period",
+    "development_last_period",
+    "heldout_first_period",
+    "heldout_last_period",
+)
 
 
 def _opt_help(text: str, verbose_help: bool) -> str | None:
@@ -69,29 +74,27 @@ def resolve_fold_exploration_directive(
     return args.fold_exploration_directive
 
 
-def require_generic_period_args(
+def resolve_period_args(
     parser: argparse.ArgumentParser, args: argparse.Namespace
 ) -> None:
-    """Non-quarter fold periods have no safe defaults: demand explicit labels.
+    """Fill the four period labels from the console defaults, or demand them.
 
-    Quarter labels like 2022Q1 silently mis-parse under other cadences, so both
-    entrypoints must fail fast here instead of deep inside schedule building.
+    Only the default cadence has standing labels. A label written for one
+    cadence silently mis-parses under another (``2022Q1`` is not a year, ``2023``
+    is not a quarter), so any other ``--fold-period`` must carry all four
+    explicitly and fail fast here rather than deep inside schedule building.
     """
-    if args.fold_period == "quarter":
+    if args.fold_period == DEFAULT_FOLD_PERIOD:
+        for name in PERIOD_ARGS:
+            if not getattr(args, name):
+                setattr(args, name, str(WEB_CREATE_DEFAULTS[name]))
         return
     missing = [
-        flag
-        for flag, value in (
-            ("--first-test-period", args.first_test_period),
-            ("--last-test-period", args.last_test_period),
-            ("--heldout-first-period", args.heldout_first_period),
-            ("--heldout-last-period", args.heldout_last_period),
-        )
-        if not value
+        f"--{name.replace('_', '-')}" for name in PERIOD_ARGS if not getattr(args, name)
     ]
     if missing:
         parser.error(
-            f"--fold-period {args.fold_period} requires explicit generic period args: {', '.join(missing)}"
+            f"--fold-period {args.fold_period} requires explicit period args: {', '.join(missing)}"
         )
 
 
@@ -121,6 +124,34 @@ def add_path_arguments(parser: argparse.ArgumentParser, repo_root: Path) -> None
         type=Path,
         default=repo_root / "configs/agent_output_template/main.py",
         help="Baseline strategy seeded into the first Fold's working copy.",
+    )
+
+
+def add_calendar_arguments(parser: argparse.ArgumentParser) -> None:
+    """Development window, optional Test stage and Held-out (worker-validated)."""
+    parser.add_argument(
+        "--fold-period",
+        choices=("week", "month", "quarter", "year"),
+        default=DEFAULT_FOLD_PERIOD,
+        help="Cadence unit the development and held-out labels are written in.",
+    )
+    period_help = (
+        f"console default at --fold-period {DEFAULT_FOLD_PERIOD}; required for any other cadence"
+    )
+    parser.add_argument("--development-first-period", help=period_help)
+    parser.add_argument("--development-last-period", help=period_help)
+    parser.add_argument("--heldout-first-period", help=period_help)
+    parser.add_argument("--heldout-last-period", help=period_help)
+    parser.set_defaults(test_stage=bool(WEB_CREATE_DEFAULTS["test_stage"]))
+    parser.add_argument(
+        "--test-stage",
+        dest="test_stage",
+        action="store_true",
+        help=(
+            "Roll Folds inside the development window (first period validation only, "
+            "each later period a frozen Test) instead of one development Fold over the "
+            "whole window."
+        ),
     )
 
 
@@ -155,7 +186,7 @@ def add_snapshot_window_arguments(
     parser.add_argument(
         "--window-months",
         type=int,
-        default=21,
+        default=int(WEB_CREATE_DEFAULTS["window_months"]),
         help=_opt_help(
             "Default PIT history window in months for decision-input snapshots and Fold input windows.",
             verbose_help,
@@ -457,8 +488,9 @@ def build_worker_params(
             repo_root, args.fundamental_events_status
         ),
         "fold_period": args.fold_period,
-        "first_test_period": args.first_test_period,
-        "last_test_period": args.last_test_period,
+        "development_first_period": args.development_first_period,
+        "development_last_period": args.development_last_period,
+        "test_stage": bool(args.test_stage),
         "heldout_first_period": args.heldout_first_period,
         "heldout_last_period": args.heldout_last_period,
         "strategy_period": args.strategy_period,

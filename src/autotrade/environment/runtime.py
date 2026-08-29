@@ -414,6 +414,7 @@ def _agent_visible_manifest(
             "sandbox_spec",
             "sandbox_runtime",
             "prior_prompt",
+            "operating_memory",
             "skills",
             "development_inputs",
             "prior_output",

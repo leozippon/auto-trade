@@ -35,4 +35,4 @@
 
 - 日线、复权、每日指标、财务报表和财务指标已落为 PIT parquet；正式策略从这些原料重算。
 - 唯一总闸是 `available_at <= inference_at`。
-- 正式 ABI 不挂载 `models/`，也不允许 sklearn/lightgbm/qlib。
+- 正式 ABI 只读挂载 `models/`，回放内拟合经 `fit(context)` 写入 `context.state_dir`；不允许 sklearn/lightgbm/qlib。

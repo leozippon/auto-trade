@@ -108,6 +108,48 @@ def latest_heldout_records(records: list[dict[str, object]]) -> list[dict[str, o
     return [latest[key] for key in sorted(latest)]
 
 
+def experiment_verdict(
+    records: list[dict[str, object]], *, strict: bool = True
+) -> dict[str, object] | None:
+    """The experiment's graduation verdict from its latest Held-out records.
+
+    Each ``heldout`` row carries the per-period verdict the pipeline computed
+    from ``AcceptanceRules.heldout_verdict``; the experiment graduates only when
+    every Held-out period did. ``None`` until a Held-out record exists. A row
+    without a verdict block is not the current ledger format: ``strict``
+    callers (report, terminal status) refuse it, the console read model
+    (``strict=False``) shows no verdict rather than inventing one.
+    """
+    latest = latest_heldout_records(records)
+    if not latest:
+        return None
+    reasons: list[str] = []
+    periods: list[dict[str, object]] = []
+    graduated = True
+    for record in latest:
+        verdict = record.get("verdict")
+        if not isinstance(verdict, Mapping):
+            if not strict:
+                return None
+            raise ValueError(
+                f"heldout record {record.get('fold_id')!r} carries no verdict block"
+            )
+        label = str(record.get("period") or record.get("fold_id") or "")
+        status = str(verdict.get("status") or "")
+        if status != "graduated":
+            graduated = False
+        for reason in verdict.get("reasons") or ():
+            text = f"{label}: {reason}" if len(latest) > 1 else str(reason)
+            if text not in reasons:
+                reasons.append(text)
+        periods.append({"period": label, **dict(verdict)})
+    return {
+        "status": "graduated" if graduated else "discarded",
+        "reasons": reasons,
+        "periods": periods,
+    }
+
+
 class ExperimentLedger:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)

@@ -59,7 +59,11 @@ from .registry import (
     worker_log_ref,
 )
 
-MAX_RUNNING_EXPERIMENTS = 4
+# Concurrency ceiling for the shared vLLM gateway: measured aggregate
+# throughput still rises to ~16-20 concurrent streams before per-stream
+# decode degrades sharply, and each experiment drives at most 4 sub-agent
+# streams, so 5 experiments sit at the top of the measured band.
+MAX_RUNNING_EXPERIMENTS = 5
 # SIGTERM graces before the worker's process group is SIGKILLed. Terminate is
 # an explicit stop, so it stays short; restart has to outwait the in-flight
 # work a worker cannot interrupt (a model call runs minutes) before forcing it.

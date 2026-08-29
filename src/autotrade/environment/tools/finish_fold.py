@@ -6,7 +6,7 @@ import ast
 from collections.abc import Mapping
 from pathlib import Path
 
-from autotrade.environment.step_tree import StepTree
+from autotrade.environment.step_tree import StepTree, node_in_session
 
 from autotrade.environment.runtime import redact_host_paths
 
@@ -95,7 +95,7 @@ class FinishFoldTool:
             node = self.tree.get_node(node_id)
         except ValueError as exc:
             raise ToolError("finish_fold cannot select an absent Step") from exc
-        if node.get("fold_id") != self.fold_id or node.get("run_id") != self.run_id:
+        if not node_in_session(node, fold_id=self.fold_id, run_id=self.run_id):
             raise ToolError("finish_fold can select only a Step from the current Fold session")
         if not node.get("complete_validation") or not node.get("revision_id"):
             raise ToolError("finish_fold requires successful complete validation")
@@ -143,8 +143,7 @@ class FinishFoldTool:
         found: list[tuple[str, str]] = []
         for node in self.tree.nodes():
             if (
-                node.get("fold_id") != self.fold_id
-                or node.get("run_id") != self.run_id
+                not node_in_session(node, fold_id=self.fold_id, run_id=self.run_id)
                 or not node.get("complete_validation")
                 or not node.get("revision_id")
             ):

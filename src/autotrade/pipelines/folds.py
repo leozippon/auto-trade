@@ -1,11 +1,18 @@
-"""Rolling Fold schedules (docs/pipeline-design.md chapter 2).
+"""Development calendar (docs/pipeline-design.md chapter 1).
 
-A fold is named after its test period. The previous period at the configured
-cadence is its validation period, and the months before validation are the input
-window. Each segment's decision-input snapshot is anchored at 23:59:59 of the last
-trading day BEFORE the period begins: the agent's frozen research baseline then
+The development window is one contiguous range of cadence periods. By default
+it is a single Fold whose validation region is the whole window and which has
+no test region: freezing it ends development and the frozen strategy goes
+straight to the automatic Held-out replay. With ``test_stage`` the window is
+cut into rolling Folds instead: the first period is validation only and every
+later period is a Fold named after it, with the preceding period as its
+validation region. Either way the months before a validation region are its
+input window.
+
+Each region's decision-input snapshot is anchored at 23:59:59 of the last
+trading day BEFORE the region begins: the agent's frozen research baseline then
 holds everything published through that prior day's close but nothing from the
-period's first day, whose intraday/pre-open data rolls in only later as each
+region's first day, whose intraday/pre-open data rolls in only later as each
 fixed-cycle inference instant crosses the row's available_at. The inference
 time-of-day is the user's choice at experiment creation and is a separate
 schedule concern defined in environment-design.md, not this schedule.
@@ -26,7 +33,6 @@ QUARTER_PATTERN = re.compile(r"^(\d{4})Q([1-4])$")
 # Research-snapshot anchor: end of the prior trading day (close of business),
 # not an intraday moment. The decision-input view is frozen as of this time.
 RESEARCH_ANCHOR_TIME = time(23, 59, 59)
-DEFAULT_WINDOW_MONTHS = 21
 PERIOD_UNITS = ("week", "month", "quarter", "year")
 # Every validation/test/held-out region needs at least two trading days to be
 # backtestable at all: a single-day region yields a one-point equity curve with
@@ -37,24 +43,48 @@ MIN_REGION_TRADE_DAYS = 2
 
 @dataclass(frozen=True)
 class FoldSpec:
+    """One development Fold.
+
+    The test region is optional: the default single-window development Fold
+    has none, and its ledger record carries ``test_period=None`` rather than a
+    placeholder. Held-out is the verdict for such a Fold.
+    """
+
     fold_id: str
     input_window_start: str
     input_window_end: str
     validation_start: str
     validation_end: str
-    test_start: str
-    test_end: str
     valid_decision_time: datetime
-    test_decision_time: datetime
+    test_start: str | None = None
+    test_end: str | None = None
+    test_decision_time: datetime | None = None
+
+    def __post_init__(self) -> None:
+        test_fields = (self.test_start, self.test_end, self.test_decision_time)
+        if any(value is None for value in test_fields) and any(
+            value is not None for value in test_fields
+        ):
+            raise ValueError("a fold test region needs start, end and decision time together")
+
+    @property
+    def has_test(self) -> bool:
+        return self.test_start is not None
 
     def to_record(self) -> dict[str, object]:
         return {
             "fold_id": self.fold_id,
             "input_window": f"{self.input_window_start}..{self.input_window_end}",
             "validation_period": f"{self.validation_start}..{self.validation_end}",
-            "test_period": f"{self.test_start}..{self.test_end}",
+            "test_period": (
+                f"{self.test_start}..{self.test_end}" if self.has_test else None
+            ),
             "valid_decision_time": self.valid_decision_time.isoformat(),
-            "test_decision_time": self.test_decision_time.isoformat(),
+            "test_decision_time": (
+                self.test_decision_time.isoformat()
+                if self.test_decision_time is not None
+                else None
+            ),
         }
 
 
@@ -74,6 +104,17 @@ def quarter_bounds(label: str) -> tuple[str, str]:
 
 def period_range(first: str, last: str, *, period: str = "quarter") -> list[str]:
     period = _normalize_period(period)
+    if _is_explicit_range(first) or _is_explicit_range(last):
+        # An explicit label already names one whole region. Cadence arithmetic
+        # cannot walk from one such region to another, and re-deriving a cadence
+        # label from its start would silently widen it: a 20260101..20260630
+        # held-out would come back as the whole of 2026.
+        if str(first).strip() != str(last).strip():
+            raise ValueError(
+                f"an explicit date-range period cannot be enumerated: {first}..{last}"
+            )
+        period_bounds(first, period=period)
+        return [str(first).strip()]
     first_start, _ = period_bounds(first, period=period)
     last_start, _ = period_bounds(last, period=period)
     labels: list[str] = []
@@ -90,8 +131,15 @@ def period_range(first: str, last: str, *, period: str = "quarter") -> list[str]
 
 
 def period_bounds(label: str, *, period: str = "quarter") -> tuple[str, str]:
+    """Inclusive ``YYYYMMDD`` bounds of one period label.
+
+    A cadence label (``2022Q1``, ``202201``, ``2022``) spans its whole period.
+    An explicit ``YYYYMMDD..YYYYMMDD`` label names its region directly at any
+    cadence, which is how a held-out window that is not a whole cadence period
+    is expressed.
+    """
     period = _normalize_period(period)
-    if ".." in str(label):
+    if _is_explicit_range(label):
         start, end = [yyyymmdd(part) for part in str(label).split("..", maxsplit=1)]
         if end < start:
             raise ValueError(f"period range end precedes start: {label!r}")
@@ -105,6 +153,11 @@ def period_bounds(label: str, *, period: str = "quarter") -> tuple[str, str]:
 
 def previous_period(label: str, *, period: str = "quarter") -> str:
     period = _normalize_period(period)
+    if _is_explicit_range(label):
+        raise ValueError(
+            f"explicit date-range period {label!r} has no preceding {period}; a "
+            "fold's validation period is derived at the configured cadence"
+        )
     start, _ = period_bounds(label, period=period)
     previous = _advance_period(pd.Timestamp(start), period, -1)
     return _period_label(previous, period)
@@ -118,41 +171,95 @@ def first_trading_day(start: str, end: str, trading_days: list[str]) -> str:
 
 
 def build_fold_schedule(
-    first_test_period: str,
-    last_test_period: str,
+    development_first_period: str,
+    development_last_period: str,
     trading_days: list[str],
     *,
-    window_months: int = DEFAULT_WINDOW_MONTHS,
+    window_months: int,
     period: str = "quarter",
     min_region_trade_days: int = MIN_REGION_TRADE_DAYS,
+    test_stage: bool = False,
 ) -> list[FoldSpec]:
-    folds: list[FoldSpec] = []
+    """Folds of the development window ``first..last`` (inclusive labels).
+
+    ``test_stage=False``: exactly one Fold whose validation region is the whole
+    window and which has no test region; its id is the explicit range label.
+    ``test_stage=True``: rolling Folds inside the window, one per period after
+    the first; each is named after its test period and validated on the period
+    before it, so the whole window is used and nothing hidden precedes it.
+    """
     period = _normalize_period(period)
-    test_labels = period_range(first_test_period, last_test_period, period=period)
-    for test_label in test_labels:
-        validation_label = previous_period(test_label, period=period)
+    labels = period_range(development_first_period, development_last_period, period=period)
+    if not test_stage:
+        validation_start = period_bounds(labels[0], period=period)[0]
+        validation_end = period_bounds(labels[-1], period=period)[1]
+        label = f"{validation_start}..{validation_end}"
+        _require_min_trade_days(
+            f"fold_{label} validation", validation_start, validation_end, trading_days, min_region_trade_days
+        )
+        return [
+            _fold_spec(
+                f"fold_{label}",
+                validation_start,
+                validation_end,
+                trading_days,
+                window_months=window_months,
+            )
+        ]
+    if len(labels) < 2:
+        raise ValueError(
+            f"test_stage needs at least two development periods, got {labels}: the first "
+            "period is validation only and every later period is a test period"
+        )
+    folds: list[FoldSpec] = []
+    for validation_label, test_label in zip(labels, labels[1:]):
         validation_start, validation_end = period_bounds(validation_label, period=period)
         test_start, test_end = period_bounds(test_label, period=period)
         _require_min_trade_days(
             f"fold_{test_label} validation", validation_start, validation_end, trading_days, min_region_trade_days
         )
         _require_min_trade_days(f"fold_{test_label} test", test_start, test_end, trading_days, min_region_trade_days)
-        window_start = pd.Timestamp(validation_start) - pd.DateOffset(months=window_months)
-        window_end = pd.Timestamp(validation_start) - pd.Timedelta(days=1)
         folds.append(
-            FoldSpec(
-                fold_id=f"fold_{test_label}",
-                input_window_start=window_start.strftime("%Y%m%d"),
-                input_window_end=window_end.strftime("%Y%m%d"),
-                validation_start=validation_start,
-                validation_end=validation_end,
+            _fold_spec(
+                f"fold_{test_label}",
+                validation_start,
+                validation_end,
+                trading_days,
+                window_months=window_months,
                 test_start=test_start,
                 test_end=test_end,
-                valid_decision_time=_decision_time(validation_start, validation_end, trading_days),
-                test_decision_time=_decision_time(test_start, test_end, trading_days),
             )
         )
     return folds
+
+
+def _fold_spec(
+    fold_id: str,
+    validation_start: str,
+    validation_end: str,
+    trading_days: list[str],
+    *,
+    window_months: int,
+    test_start: str | None = None,
+    test_end: str | None = None,
+) -> FoldSpec:
+    window_start = pd.Timestamp(validation_start) - pd.DateOffset(months=window_months)
+    window_end = pd.Timestamp(validation_start) - pd.Timedelta(days=1)
+    return FoldSpec(
+        fold_id=fold_id,
+        input_window_start=window_start.strftime("%Y%m%d"),
+        input_window_end=window_end.strftime("%Y%m%d"),
+        validation_start=validation_start,
+        validation_end=validation_end,
+        valid_decision_time=_decision_time(validation_start, validation_end, trading_days),
+        test_start=test_start,
+        test_end=test_end,
+        test_decision_time=(
+            _decision_time(test_start, test_end, trading_days)
+            if test_start is not None and test_end is not None
+            else None
+        ),
+    )
 
 
 def heldout_periods(
@@ -163,7 +270,12 @@ def heldout_periods(
     period: str = "quarter",
     min_region_trade_days: int = MIN_REGION_TRADE_DAYS,
 ) -> list[dict[str, object]]:
-    """Held-out replay periods at the configured cadence."""
+    """Held-out replay periods.
+
+    Cadence labels enumerate; a single explicit ``YYYYMMDD..YYYYMMDD`` label
+    replays exactly that region, which is how a held-out window shorter than one
+    cadence period is configured.
+    """
     periods = []
     period = _normalize_period(period)
     for label in period_range(first_period, last_period, period=period):
@@ -180,9 +292,9 @@ def heldout_periods(
     return periods
 
 
-def assert_no_overlap(development_last_test_period: str, heldout_first_period: str, *, period: str = "quarter") -> None:
+def assert_no_overlap(development_last_period: str, heldout_first_period: str, *, period: str = "quarter") -> None:
     """Held-out must be configured upfront and not overlap development."""
-    dev_end = period_bounds(development_last_test_period, period=period)[1]
+    dev_end = period_bounds(development_last_period, period=period)[1]
     heldout_start = period_bounds(heldout_first_period, period=period)[0]
     if heldout_start <= dev_end:
         raise ValueError(
@@ -235,6 +347,10 @@ def _prior_trading_day(day: str, trading_days: list[str]) -> str:
     if not earlier:
         raise ValueError(f"no trading day before {day}; cannot anchor the research snapshot")
     return max(earlier)
+
+
+def _is_explicit_range(label: object) -> bool:
+    return ".." in str(label)
 
 
 def _normalize_period(period: str) -> str:

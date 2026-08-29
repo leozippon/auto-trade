@@ -34,7 +34,10 @@ def test_step_revision_can_be_selected_and_restored(tmp_path: Path):
     work_models.mkdir()
     (work / "main.py").write_text("broken", encoding="utf-8")
     (work_models / "weights.bin").write_bytes(b"broken")
-    restored = StepRollbackTool(tree, work, work_models).invoke({"node_id": node})
+    rollback = StepRollbackTool(
+        tree, work, work_models, fold_id="fold_2026Q1", run_id="run_a"
+    )
+    restored = rollback.invoke({"node_id": node})
     assert restored.ok
     assert "generate_orders" in (work / "main.py").read_text(encoding="utf-8")
     assert (work_models / "weights.bin").read_bytes() == b"selected"
@@ -46,6 +49,60 @@ def test_step_revision_can_be_selected_and_restored(tmp_path: Path):
     assert stat.S_IMODE((tree.node_models_dir(node) / "weights.bin").stat().st_mode) == 0o444
     finished = FinishFoldTool(tree, fold_id="fold_2026Q1", run_id="run_a").invoke({})
     assert finished.finish and finished.value["revision_id"] == "revision_a"
+
+
+def test_step_rollback_refuses_a_node_outside_the_current_fold_session(tmp_path: Path):
+    """Another Fold's or run's node is evidence only, exactly as finish_fold treats it.
+
+    The experiment-level tree is handed whole to every Fold, so a foreign
+    ``node_id`` is readable; restoring one would rebase this Fold's work copy
+    and lineage onto an artifact it may not submit.
+    """
+
+    revision = tmp_path / "revision"
+    revision.mkdir()
+    (revision / "main.py").write_text(
+        "def generate_orders(context):\n    return []\n", encoding="utf-8"
+    )
+    tree = StepTree(tmp_path / "steps")
+    foreign_fold = tree.record_step(
+        revision,
+        epoch_id="epoch_001",
+        fold_id="fold_2025Q4",
+        run_id="run_old",
+        result_name="valid_000",
+        revision_id="revision_old",
+        metrics={"total_return": 0.4},
+    )
+    earlier_run = tree.record_step(
+        revision,
+        epoch_id="epoch_001",
+        fold_id="fold_2026Q1",
+        run_id="run_crashed",
+        result_name="valid_000",
+        revision_id="revision_crashed",
+        metrics={"total_return": 0.2},
+    )
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "main.py").write_text("current work copy", encoding="utf-8")
+    registry = ToolRegistry(
+        [
+            StepRollbackTool(tree, work, fold_id="fold_2026Q1", run_id="run_a"),
+            FinishFoldTool(tree, fold_id="fold_2026Q1", run_id="run_a"),
+        ]
+    )
+    position = tree.current_node_id
+
+    for node_id in (foreign_fold, earlier_run):
+        result = registry.invoke("step_rollback", {"node_id": node_id})
+        assert not result.ok
+        assert "current Fold session" in result.error
+        assert (work / "main.py").read_text(encoding="utf-8") == "current work copy"
+        assert StepTree(tmp_path / "steps").current_node_id == position
+        finished = registry.invoke("finish_fold", {"node_id": node_id})
+        assert not finished.ok
+        assert "current Fold session" in finished.error
 
 
 def test_modification_check_keeps_daily_json_entry(tmp_path: Path):

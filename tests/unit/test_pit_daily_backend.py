@@ -31,6 +31,7 @@ from autotrade.pipelines.config import (
     SnapshotBundle,
 )
 from autotrade.pipelines.pit_backend import (
+    REPLAY_SOURCE_LABEL,
     HistoricalMinuteSource,
     _AsOfReadOnlyView,
     PITDailyEvaluationBackend,
@@ -421,7 +422,7 @@ def test_evaluation_summary_carries_the_whole_agent_visible_field_set(
     result = PITDailyEvaluationBackend(
         tmp_path / "results",
         execution_mode="trusted",
-        nl_config=NLConfig(max_total_calls=4),
+        nl_config=NLConfig(),
     ).evaluate(
         EvaluationRequest(
             ArtifactRevision("revision_timing", revision),
@@ -474,7 +475,11 @@ def test_evaluation_summary_carries_the_whole_agent_visible_field_set(
     assert summary["nl_executed_calls"] == 0
     assert summary["nl_llm_calls"] == 0
     assert summary["nl_budget_rejected_calls"] == 0
-    assert summary["nl_max_total_calls"] == 4
+    # The total ceiling is derived from this replay's own trading days, so the
+    # effective budget the summary echoes is the one the window earned.
+    assert summary["nl_max_total_calls"] == (
+        NLConfig().for_replay(int(summary["replayed_trade_days"])).max_total_calls
+    )
     assert summary["nl_wall_seconds"] >= 0.0
 
     # The same block reaches the persisted result and the Agent-visible view.
@@ -525,8 +530,9 @@ def test_research_pit_provider_reuses_completed_semantic_views(tmp_path: Path) -
     )
 
     class FakeBuilder:
-        def __init__(self) -> None:
+        def __init__(self, generation_id: str) -> None:
             self.calls: list[str] = []
+            self.generation_id = generation_id
 
         def build_decision_snapshot(self, decision, output, config, **_kwargs):
             del config
@@ -564,11 +570,12 @@ def test_research_pit_provider_reuses_completed_semantic_views(tmp_path: Path) -
                 "period_start": start,
                 "period_end": end,
                 "available_from": available_from.isoformat(),
+                "raw_generation": {"generation_id": self.generation_id},
             }
             (output / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
             return manifest
 
-    fake = FakeBuilder()
+    fake = FakeBuilder(provider.release.generation_id)
     provider.builder = fake  # type: ignore[assignment]
     decision = datetime.fromisoformat("2024-01-01T23:59:59+08:00")
     first = provider.prepare(
@@ -611,7 +618,9 @@ def test_research_pit_provider_reuses_completed_semantic_views(tmp_path: Path) -
     assert json.loads(Path(heldout.replay_ref, "manifest.json").read_text(encoding="utf-8"))[
         "label"
     ] == "heldout"
-    assert fake.calls == ["decision", "replay", "replay", "replay"]
+    # One region, one build: the three phase views are hardlinks of the single
+    # unphased store, each carrying its own immutable label.
+    assert fake.calls == ["decision", "replay"]
 
 
 def test_unphased_meta_replay_is_cloned_into_valid_phase(tmp_path: Path) -> None:
@@ -654,7 +663,16 @@ def test_unphased_meta_replay_is_cloned_into_valid_phase(tmp_path: Path) -> None
     stash = _asof_stash_dir(
         snapshot, replay, StrategySchedule("day", "08:30"), "valid"
     )
-    assert "phase" in stash.parts and stash.parts[stash.parts.index("phase") + 1] == "valid"
+    # The stash hangs off the region, not the phase view that materialized it.
+    assert stash.parts[-7:] == (
+        "replay",
+        replay.name,
+        "schedule",
+        "period=day",
+        "inference_time",
+        "hour=08",
+        "minute=30",
+    )
     again = provider.prepare(
         fold=None,
         phase="valid",
@@ -771,7 +789,14 @@ def test_failed_unphased_clone_leaves_no_phased_residue(
     assert fake.calls == ["decision"]
 
 
-def test_unphased_replay_with_wrong_identity_is_not_returned(tmp_path: Path) -> None:
+def test_replay_source_with_wrong_identity_is_refused(tmp_path: Path) -> None:
+    """A store whose manifest contradicts its own key is a corrupt cache.
+
+    The store is now the canonical build target for a region, so a conflicting
+    one fails the request instead of being quietly rebuilt around — the same
+    rule the decision snapshot and the phase view already follow.
+    """
+
     provider, fake = _provider_with_fake_builder(tmp_path)
     decision = datetime.fromisoformat("2024-01-01T23:59:59+08:00")
     slot = "20240102_20240103_20240101T235959+0800"
@@ -784,20 +809,53 @@ def test_unphased_replay_with_wrong_identity_is_not_returned(tmp_path: Path) -> 
         available_from=decision,
         generation_id=provider.release.generation_id,
     )
-    bundle = provider.prepare(
-        fold=None,
-        phase="valid",
-        start="20240102",
-        end="20240103",
-        decision_time=decision,
-    )
-    replay = Path(bundle.replay_ref)
-    assert replay == provider.cache_root / "replay" / "valid" / slot
-    assert replay.resolve() != unphased.resolve()
-    assert json.loads((replay / "manifest.json").read_text(encoding="utf-8"))[
-        "label"
-    ] == "valid"
+    with pytest.raises(RuntimeError, match="conflicting cached replay source"):
+        provider.prepare(
+            fold=None,
+            phase="valid",
+            start="20240102",
+            end="20240103",
+            decision_time=decision,
+        )
+    assert not (provider.cache_root / "replay" / "valid" / slot).exists()
+    assert "replay" not in fake.calls
+
+
+def test_one_region_is_built_once_and_shared_by_every_phase(tmp_path: Path) -> None:
+    """Meta, Validation and the previous fold's frozen test share one region.
+
+    On a contiguous calendar all three ask for the same (start, end, decision)
+    window, so the region must be replayed once and relabelled, not rebuilt per
+    phase.
+    """
+
+    provider, fake = _provider_with_fake_builder(tmp_path)
+    decision = datetime.fromisoformat("2024-01-01T23:59:59+08:00")
+    bundles = [
+        provider.prepare(
+            fold=None,
+            phase=phase,
+            start="20240102",
+            end="20240103",
+            decision_time=decision,
+        )
+        for phase in ("meta", "valid", "frozen_test")
+    ]
     assert fake.calls == ["decision", "replay"]
+    source = provider.cache_root / "replay" / "20240102_20240103_20240101T235959+0800"
+    source_manifest = json.loads((source / "manifest.json").read_text(encoding="utf-8"))
+    assert source_manifest["label"] == REPLAY_SOURCE_LABEL
+    assert len({bundle.replay_ref for bundle in bundles}) == 3
+    for phase, bundle in zip(("meta", "valid", "frozen_test"), bundles, strict=True):
+        replay = Path(bundle.replay_ref)
+        assert replay == provider.cache_root / "replay" / phase / source.name
+        manifest = json.loads((replay / "manifest.json").read_text(encoding="utf-8"))
+        assert manifest["label"] == phase
+        assert manifest["snapshot_id"] != source_manifest["snapshot_id"]
+        assert (
+            os.stat(replay / "daily.parquet").st_ino
+            == os.stat(source / "daily.parquet").st_ino
+        )
 
 
 def test_unphased_clone_refuses_cross_filesystem_copy(
@@ -1003,14 +1061,55 @@ def test_asof_stash_uses_complete_schedule_hierarchy(tmp_path: Path) -> None:
         / snapshot.name
         / "replay"
         / replay.name
-        / "phase"
-        / "valid"
         / "schedule"
         / "period=day"
         / "inference_time"
         / "hour=08"
         / "minute=30"
     )
+
+
+def test_every_phase_of_one_region_shares_a_stash(tmp_path: Path) -> None:
+    """Meta and Validation replay one region, so they encode it once.
+
+    Their replay views are hardlinks of one store, so the as-of parts are the
+    same bytes; the stash contract states that data identity and never the
+    phase or the path of the view that happened to build it.
+    """
+
+    cache_root = tmp_path / "pit_views"
+    snapshot = cache_root / "decision" / "20211231T235959+0800"
+    snapshot.mkdir(parents=True)
+    _write_provider_contract(cache_root, generation_id="generation_one")
+    slot = "20220101_20251231_20211231T235959+0800"
+    schedule = StrategySchedule("day", "08:30")
+    contracts: list[Path] = []
+    for phase in ("meta", "valid"):
+        replay = cache_root / "replay" / phase / slot
+        replay.mkdir(parents=True)
+        decision_manifest, replay_manifest = _stash_manifests(
+            "generation_one", phase=phase
+        )
+        contracts.append(
+            _bind_asof_stash_contract(
+                snapshot_dir=snapshot,
+                replay_dir=replay,
+                schedule=schedule,
+                phase=phase,
+                generation_id="generation_one",
+                decision_manifest=decision_manifest,
+                replay_manifest=replay_manifest,
+            )
+        )
+    assert contracts[0] == contracts[1]
+    record = json.loads((contracts[0] / "contract.json").read_text(encoding="utf-8"))
+    assert record["decision_slot"] == snapshot.name
+    assert record["replay_slot"] == slot
+    # No build identity: a stash prebuilt offline and hardlinked into an
+    # experiment must bind to exactly the same contract.
+    assert "phase" not in record
+    assert "/" not in record["decision_slot"] and "/" not in record["replay_slot"]
+    assert "snapshot_id" not in json.dumps(record)
 
 
 def test_different_schedules_never_share_a_stash(tmp_path: Path) -> None:
@@ -1298,8 +1397,11 @@ def _write_simple_domain(
 
 
 class _FakeReplayBuilder:
-    def __init__(self) -> None:
+    def __init__(self, generation_id: str = "") -> None:
         self.calls: list[str] = []
+        # The real builder stamps every manifest with the raw generation it
+        # read; the cache refuses a view that cannot prove its release.
+        self.generation_id = generation_id
 
     def build_decision_snapshot(self, decision, output, config, **_kwargs):
         del config
@@ -1339,6 +1441,7 @@ class _FakeReplayBuilder:
             "period_start": start,
             "period_end": end,
             "available_from": available_from.isoformat(),
+            "raw_generation": {"generation_id": self.generation_id},
         }
         (output / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
         return manifest
@@ -1378,7 +1481,7 @@ def _provider_with_fake_builder(
             replay_include_fundamentals=False,
         ),
     )
-    fake = _FakeReplayBuilder()
+    fake = _FakeReplayBuilder(provider.release.generation_id)
     provider.builder = fake  # type: ignore[assignment]
     return provider, fake
 

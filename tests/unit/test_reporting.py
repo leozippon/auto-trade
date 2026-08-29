@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from autotrade.pipelines.config import AcceptanceRules
 from autotrade.pipelines.ledger import ExperimentLedger
 from autotrade.pipelines.reporting import (
     _compound_active_return,
@@ -22,6 +23,20 @@ PERIODS = {
 B_Q1 = 0.05
 B_Q2 = 110.0 / 105.0 - 1.0
 BENCHMARKS = {"fold_2022Q1": B_Q1, "fold_2022Q2": B_Q2}
+
+
+def heldout_record(result, *, run_id="run_ho", epoch_id="epoch_002"):
+    """A held-out row as the pipeline writes it: result plus its verdict."""
+    return {
+        "record_type": "heldout",
+        "experiment_id": "e",
+        "epoch_id": epoch_id,
+        "fold_id": "heldout_2026Q1",
+        "run_id": run_id,
+        "period": {"start": "20260101", "end": "20260331"},
+        "result": result,
+        "verdict": AcceptanceRules().heldout_verdict(result),
+    }
 
 
 def fold_record(fold_id, valid_ret, test_ret, epoch_id="epoch_001", benchmark=True):
@@ -61,21 +76,18 @@ class ReportingTest(unittest.TestCase):
             ledger.append(fold_record("fold_2022Q1", 0.02, 0.03, epoch_id="epoch_002"))
             ledger.append(fold_record("fold_2022Q2", 0.04, 0.04, epoch_id="epoch_002"))
             ledger.append(
-                {
-                    "record_type": "heldout",
-                    "experiment_id": "e",
-                    "epoch_id": "epoch_002",
-                    "fold_id": "heldout_2026Q1",
-                    "run_id": "run_ho",
-                    "period": {"start": "20260101", "end": "20260331"},
-                    "result": {
+                heldout_record(
+                    {
                         "total_return": 0.015, "sharpe": 0.5, "max_drawdown": 0.04,
                         "order_count": 3,
                         "benchmark": {"label": "沪深300", "benchmark_return": 121.0 / 110.0 - 1.0},
-                    },
-                }
+                    }
+                )
             )
             summary = build_experiment_report(tmp / "ledger.jsonl", tmp / "reports")
+            # Held-out trailed its benchmark (1.5% vs 10%): discarded, reason named.
+            self.assertEqual(summary["verdict"]["status"], "discarded")
+            self.assertEqual(summary["verdict"]["reasons"], ["excess_return_not_positive"])
             self.assertTrue((tmp / "reports" / "epoch_comparison_returns.png").exists())
             self.assertTrue((tmp / "reports" / "epoch_returns" / "epoch_001_returns.png").exists())
             self.assertTrue((tmp / "reports" / "epoch_returns" / "epoch_002_returns.png").exists())
@@ -152,25 +164,23 @@ class ReportingTest(unittest.TestCase):
             ledger.append(fold_record("fold_2022Q1", 0.05, 0.06))
             for total in (0.010, 0.020):
                 ledger.append(
-                    {
-                        "record_type": "heldout",
-                        "experiment_id": "e",
-                        "epoch_id": "epoch_001",
-                        "fold_id": "heldout_2026Q1",
-                        "run_id": f"run_ho_{total}",
-                        "period": {"start": "20260101", "end": "20260331"},
-                        "result": {
+                    heldout_record(
+                        {
                             "total_return": total, "sharpe": 0.5, "max_drawdown": 0.04,
                             "order_count": 3,
                             "benchmark": {"label": "沪深300", "benchmark_return": 0.01},
                         },
-                    }
+                        run_id=f"run_ho_{total}",
+                        epoch_id="epoch_001",
+                    )
                 )
             summary = build_experiment_report(tmp / "ledger.jsonl", tmp / "reports")
             self.assertEqual(summary["folds"], 1)
             self.assertEqual(summary["heldout_periods"], 1)
             self.assertAlmostEqual(summary["development"]["mean_test_return"], 0.06)
             self.assertAlmostEqual(summary["heldout"]["mean_return"], 0.020)
+            # The verdict follows the superseding held-out record (2% beats 1%).
+            self.assertEqual(summary["verdict"]["status"], "graduated")
 
     def test_warns_when_frozen_benchmark_blocks_missing(self):
         # A ledger record without the replay-time benchmark block must flag the
@@ -188,6 +198,45 @@ class ReportingTest(unittest.TestCase):
             partial = build_experiment_report(tmp / "ledger.jsonl", tmp / "reports_p")
             self.assertEqual(partial["benchmark"]["status"], "partial_coverage")
             self.assertEqual(partial["status"], "warning")
+
+    def test_a_single_window_fold_reports_on_its_validation_period(self):
+        # The default design has no Test stage: the row spans the validation
+        # window, the test columns stay empty, and there is no verdict until a
+        # held-out record exists.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            ledger = ExperimentLedger(tmp / "ledger.jsonl")
+            ledger.append(
+                {
+                    "record_type": "fold",
+                    "experiment_id": "e",
+                    "epoch_id": "epoch_001",
+                    "fold_id": "fold_20220101..20251231",
+                    "run_id": "run_dev",
+                    "fold_status": "frozen",
+                    "validation_period": "20220101..20251231",
+                    "test_period": None,
+                    "validation_result": {"total_return": 0.3, "sharpe": 1.1, "max_drawdown": 0.05},
+                    "test_result": None,
+                }
+            )
+            summary = build_experiment_report(tmp / "ledger.jsonl", tmp / "reports")
+            self.assertEqual(summary["folds"], 1)
+            self.assertIsNone(summary["verdict"])
+            self.assertIsNone(summary["development"]["mean_test_return"])
+            self.assertEqual(summary["benchmark"]["status"], "missing_frozen_benchmark")
+            self.assertTrue((tmp / "reports" / "epoch_comparison_returns.png").exists())
+
+    def test_a_held_out_row_without_a_verdict_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            ledger = ExperimentLedger(tmp / "ledger.jsonl")
+            ledger.append(fold_record("fold_2022Q1", 0.03, 0.02))
+            row = heldout_record({"total_return": 0.01, "sharpe": 0.5, "max_drawdown": 0.04})
+            del row["verdict"]
+            ledger.append(row)
+            with self.assertRaisesRegex(ValueError, "no verdict"):
+                build_experiment_report(tmp / "ledger.jsonl", tmp / "reports")
 
     def test_requires_fold_records(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -21,7 +21,7 @@ sklearn 可能装在沙箱镜像里，同样不在允许列表：`__future__`、
 
 ## 运行时模型目录
 
-`models/` 可以在开发阶段存放跨 Fold 继承物，但 **正式策略进程不挂载该目录**。推断路径里的 `np.load` / pickle / torch 都会失败或被静态检查拒绝。系数必须出现在 `output/main.py` 或由可见 PIT 行当场算出。
+`models/` 存放跨 Fold 继承的静态资产，正式策略进程以只读 `context.models_dir` 挂载它。回放内的拟合属于 `fit(context)`：它把系数写到 `context.state_dir`，`generate_orders` 只读该目录。pickle / torch 加载仍被静态检查拒绝；允许的是 `np.load`/`np.save`/parquet，且首个路径参数必须直接以某个 context 目录为根。
 
 ## 不要做的移植
 

@@ -1392,6 +1392,23 @@ function heroSignature(item) {
   ].join("|");
 }
 
+/* Held-out graduation verdict (sealed until the reveal). */
+function verdictBadge(verdict) {
+  if (!verdict || !verdict.status) return null;
+  const graduated = verdict.status === "graduated";
+  const reasons = (verdict.reasons || []).join("、");
+  return el(
+    "span",
+    {
+      class: `badge state-${graduated ? "completed" : "failed"}`,
+      title: graduated
+        ? "Held-out 通过：超额收益 > 0、Sharpe > 0、回撤在限内"
+        : `Held-out 未通过：${reasons || "见账本"}`,
+    },
+    graduated ? "graduated" : "discarded",
+  );
+}
+
 function experimentCard(item) {
   const metrics = item.metrics || {};
   const total = item.total_sessions,
@@ -1414,6 +1431,7 @@ function experimentCard(item) {
         item.experiment_id,
       ),
       stateBadge(item.state),
+      verdictBadge(item.verdict),
     ),
     el(
       "div",
@@ -1767,10 +1785,10 @@ async function openCreateModal() {
       "p",
       { class: "hint" },
       hasPeriodOptions
-        ? "所有参数均有默认值。周期从交易日历自动生成，仅列出数据完整、可回测的周期；切换 Fold 周期后选项与推荐值随之更新。"
+        ? "所有参数均有默认值。周期从交易日历自动生成，仅列出数据完整、可回测的周期；切换 Fold 周期后选项与推荐值随之更新。任一周期字段也接受显式区间 20220101..20251231。"
         : "所有参数均有默认值；仅实验名与周期标签必填。周期标签格式随 Fold 周期而定：quarter → 2024Q1，month → 202401，" +
-            "week → 周一日期 20240108，year → 2024。策略按固定周期在固定推理时间运行；推理时间使用 Asia/Shanghai 24 小时制，" +
-            "并始终遵守 PIT 可见性。",
+            "week → 周一日期 20240108，year → 2024；任一周期字段也接受显式区间 20260101..20260630。" +
+            "策略按固定周期在固定推理时间运行；推理时间使用 Asia/Shanghai 24 小时制，并始终遵守 PIT 可见性。",
     ),
   );
   for (const group of schema.groups) {
@@ -2040,8 +2058,8 @@ function fieldNode(field, inputs) {
 }
 
 const PERIOD_FIELD_KEYS = [
-  "first_test_period",
-  "last_test_period",
+  "development_first_period",
+  "development_last_period",
   "heldout_first_period",
   "heldout_last_period",
 ];
@@ -2056,7 +2074,9 @@ function repopulatePeriodSelects(inputs) {
     const previous = entry.input.value;
     entry.input.innerHTML = "";
     for (const label of options) {
-      const option = el("option", { value: label }, label);
+      // Cadence labels (2024Q1 / 2024 / 202401) render as-is; an explicit
+      // YYYYMMDD..YYYYMMDD range renders as dates, value stays the raw label.
+      const option = el("option", { value: label }, fmtPeriodRange(label));
       entry.input.append(option);
     }
     const wanted = options.includes(previous) ? previous : defaults[key];
@@ -2065,23 +2085,39 @@ function repopulatePeriodSelects(inputs) {
   updateValidationHint(inputs);
 }
 
-/* Folds are named by their TEST period; surface the derived validation period
-   so the naming never reads as ambiguous. */
+/* Spell out what the development window becomes: one Fold over the whole
+   window by default, or rolling Folds once the Test stage is switched on. */
 function updateValidationHint(inputs) {
-  const entry = inputs.get("first_test_period");
-  if (!entry || entry.field.type !== "period" || !entry.input) return;
+  const first = inputs.get("development_first_period");
+  const last = inputs.get("development_last_period");
+  if (!first || first.field.type !== "period" || !first.input) return;
   const cadence = inputs.get("fold_period").input.value;
   const options = (createSchema.period_options || {})[cadence] || [];
-  const index = options.indexOf(entry.input.value);
-  if (!entry.__hint) {
-    entry.__hint = el("div", { class: "help derived-hint" });
-    entry.input.parentElement.append(entry.__hint);
-    entry.input.addEventListener("change", () => updateValidationHint(inputs));
+  const stage = inputs.get("test_stage");
+  if (!first.__hint) {
+    first.__hint = el("div", { class: "help derived-hint" });
+    first.input.parentElement.append(first.__hint);
+    const refresh = () => updateValidationHint(inputs);
+    first.input.addEventListener("change", refresh);
+    if (last && last.input) last.input.addEventListener("change", refresh);
+    if (stage && stage.input) stage.input.addEventListener("change", refresh);
   }
-  entry.__hint.textContent =
-    index > 0
-      ? `↳ 首个 Fold：验证区间 ${options[index - 1]} → 测试区间 ${options[index]}（验证区间自动取测试周期的前一周期）`
-      : "";
+  const start = first.input.value;
+  const end = last && last.input ? last.input.value : "";
+  const rolling = Boolean(stage && stage.input && stage.input.checked);
+  if (!start || !end) {
+    first.__hint.textContent = "";
+    return;
+  }
+  if (!rolling) {
+    first.__hint.textContent = `↳ 单个 Development Fold：验证区间 ${fmtPeriodRange(start)} ～ ${fmtPeriodRange(end)} 整窗；冻结后直接进入 Held-out 裁决`;
+    return;
+  }
+  const index = options.indexOf(start);
+  first.__hint.textContent =
+    index >= 0 && index + 1 < options.length
+      ? `↳ 首个 Fold：验证区间 ${fmtPeriodRange(options[index])} → 测试区间 ${fmtPeriodRange(options[index + 1])}（首个周期只做验证，之后逐周期滚动）`
+      : "↳ Test 阶段需要至少两个 Development 周期";
 }
 
 function collectParams(inputs) {
@@ -5687,6 +5723,7 @@ function foldResultPanel(detail, session) {
       ]),
     ),
   );
+  const benchmark = validation.benchmark || {};
   panel.append(
     el(
       "table",
@@ -5694,6 +5731,28 @@ function foldResultPanel(detail, session) {
       kvRow(
         "验证区间",
         fmtPeriodRange(record.validation_period || session.validation_period),
+      ),
+      // The raw excess cannot separate an edge from a small-cap or high-beta
+      // tilt, so the neutralized figure is read beside it, never alone.
+      kvRow(
+        "超额收益（vs 沪深300）",
+        el(
+          "span",
+          { class: numClass(benchmark.excess_return) },
+          fmtPct(benchmark.excess_return),
+        ),
+      ),
+      kvRow(
+        el(
+          "span",
+          { title: benchmark.neutralized_excess_method || "" },
+          "规模/β 中性化超额（年化）",
+        ),
+        el(
+          "span",
+          { class: numClass(benchmark.neutralized_excess_return) },
+          fmtPct(benchmark.neutralized_excess_return),
+        ),
       ),
       record.run_wall_seconds
         ? kvRow("总耗时", fmtDuration(record.run_wall_seconds))
@@ -5714,6 +5773,11 @@ function foldResultPanel(detail, session) {
         : null,
     ),
   );
+  const validationSubWindows = subWindowSection(
+    "验证期分季度表现",
+    validation.sub_windows,
+  );
+  if (validationSubWindows) panel.append(validationSubWindows);
   if (record.run_ref) {
     panel.append(
       el(
@@ -5749,6 +5813,72 @@ function foldResultPanel(detail, session) {
 
 function kvRow(key, value) {
   return el("tr", {}, el("td", {}, key), el("td", {}, value));
+}
+
+/* Per-calendar-quarter breakdown of one replay window (stats.sub_windows):
+   the same figures as the headline tiles, one row per quarter, so a whole-
+   window number can be read against its sub-periods instead of on its own.
+   "部分" marks a quarter the window does not span end to end. 超额 is against
+   沪深300 and stays blank when the slot had no usable benchmark. */
+function subWindowSection(title, rows) {
+  if (!Array.isArray(rows) || !rows.length) return null;
+  const head = el(
+    "tr",
+    {},
+    el("th", {}, "分季度"),
+    el("th", { title: "季度开盘权益起算的区间收益" }, "收益"),
+    el("th", { title: "相对沪深300的超额收益" }, "超额"),
+    el("th", { title: "季度内日收益的年化 Sharpe" }, "Sharpe"),
+    el("th", { title: "季度内峰谷回撤" }, "回撤"),
+    el("th", { title: "成交名义额 / 初始资金" }, "换手"),
+    el("th", { title: "已实现平仓笔数" }, "笔数"),
+    el("th", {}, "交易日"),
+  );
+  const body = rows.map((row) =>
+    el(
+      "tr",
+      {},
+      el(
+        "td",
+        {},
+        `${row.label || "—"}${row.partial ? " ·部分" : ""}`,
+        el(
+          "span",
+          { class: "mode-note" },
+          ` ${fmtPeriodRange(`${row.start}..${row.end}`)}`,
+        ),
+      ),
+      el("td", { class: signCls(row.return) }, fmtPct(row.return)),
+      el(
+        "td",
+        { class: signCls(row.excess_return) },
+        fmtPct(row.excess_return),
+      ),
+      el("td", { class: signCls(row.sharpe) }, fmtSharpe(row.sharpe)),
+      el("td", {}, fmtPct(row.max_drawdown)),
+      el("td", {}, fmtSharpe(row.turnover)),
+      el(
+        "td",
+        {},
+        row.trade_count === null || row.trade_count === undefined
+          ? "—"
+          : String(row.trade_count),
+      ),
+      el(
+        "td",
+        {},
+        row.trade_days === null || row.trade_days === undefined
+          ? "—"
+          : String(row.trade_days),
+      ),
+    ),
+  );
+  return el(
+    "div",
+    { class: "section-gap" },
+    el("h4", { class: "subsection-title" }, title),
+    el("table", { class: "data" }, head, ...body),
+  );
 }
 
 /* Barra-lite style validation card: CSI300 alpha/beta regression + holdings
@@ -5996,6 +6126,10 @@ function loadFoldExtras(experimentId, epochId, foldId) {
             ),
             kvRow("测试回撤", fmtPct(test.max_drawdown)),
           ),
+          // Sealed with the rest of this block: fold_detail returns
+          // {hidden:true} until the reveal, so no sub-window row exists here
+          // before then.
+          subWindowSection("测试期分季度表现", test.sub_windows),
           el(
             "div",
             { class: "section-gap" },
@@ -6016,18 +6150,26 @@ function loadFoldExtras(experimentId, epochId, foldId) {
           (fold.record || {}).run_ref
             ? styleCard(experimentId, fold.record.run_ref, "test")
             : null,
-          el(
-            "div",
-            { class: "section-gap" },
-            el(
-              "a",
-              {
-                class: "btn small",
-                href: `/api/experiments/${encodeURIComponent(experimentId)}/folds/${encodeURIComponent(epochId)}/${encodeURIComponent(foldId)}/orders.csv?result=test_000`,
-              },
-              "⬇ 测试期交易明细 CSV",
-            ),
-          ),
+          // The result id comes from the read-model: result directories are
+          // named frozen_test_<uuid>, so a guessed name would only ever 404.
+          audit.result
+            ? el(
+                "div",
+                { class: "section-gap" },
+                el(
+                  "a",
+                  {
+                    class: "btn small",
+                    href: `/api/experiments/${encodeURIComponent(experimentId)}/folds/${encodeURIComponent(epochId)}/${encodeURIComponent(foldId)}/orders.csv?result=${encodeURIComponent(audit.result)}`,
+                  },
+                  "⬇ 测试期交易明细 CSV",
+                ),
+              )
+            : el(
+                "div",
+                { class: "hint section-gap" },
+                "该测试评估没有可导出的交易明细。",
+              ),
         ),
       );
     }
@@ -6289,6 +6431,11 @@ function metaResultPanel(detail, session) {
 
 function heldoutPanel(detail, session) {
   const records = session.records || [];
+  const plannedPeriods = new Map(
+    (session.periods || [])
+      .filter((item) => item && item.label)
+      .map((item) => [String(item.label), item]),
+  );
   const hidden =
     !detail.test_revealed || records.some((record) => record.hidden);
   if (hidden) {
@@ -6325,8 +6472,21 @@ function heldoutPanel(detail, session) {
   const panel = el(
     "div",
     { class: "panel section-gap" },
-    el("h4", { class: "subsection-title" }, "Held-out 冻结测试（最终样本外）"),
+    el(
+      "h4",
+      { class: "subsection-title" },
+      "Held-out 冻结测试（最终样本外）",
+      verdictBadge(detail.verdict),
+    ),
   );
+  if (detail.verdict && (detail.verdict.reasons || []).length)
+    panel.append(
+      el(
+        "div",
+        { class: "meta-line" },
+        `未达标：${detail.verdict.reasons.join("、")}`,
+      ),
+    );
   panel.append(
     el(
       "div",
@@ -6395,18 +6555,14 @@ function heldoutPanel(detail, session) {
       ),
       ...records.map((record) => {
         const result = record.result || {};
-        const period =
-          record.period && typeof record.period === "object"
-            ? record.period
-            : {};
+        // The ledger carries the period LABEL; its calendar bounds live on the
+        // planned held-out session (revealed alongside these records).
+        const label = String(record.period || "");
+        const period = plannedPeriods.get(label) || {};
         return el(
           "tr",
           {},
-          el(
-            "td",
-            {},
-            String(record.fold_ref || "—"),
-          ),
+          el("td", {}, label ? fmtPeriodRange(label) : "—"),
           el(
             "td",
             {},
@@ -6437,6 +6593,17 @@ function heldoutPanel(detail, session) {
       }),
     ),
   );
+  // Held-out is the final untouched estimate; its per-quarter rows are what
+  // say whether one stretch of market carried the whole span.
+  for (const record of records) {
+    const result = record.result || {};
+    const label = String(record.period || "");
+    const section = subWindowSection(
+      label ? `Held-out ${label} 分季度表现` : "Held-out 分季度表现",
+      result.sub_windows,
+    );
+    if (section) panel.append(section);
+  }
   return panel;
 }
 
@@ -6569,15 +6736,16 @@ function actionCell(action) {
 
 async function fetchTradingBundle(env, date) {
   const query = date ? `?date=${encodeURIComponent(date)}` : "";
-  const [roster, snapshot, orders, deals, series, health] = await Promise.all([
+  // /health repeats the roster entry plus an `ok` flag for external monitors;
+  // the page reads the roster, so polling it too would only add a request.
+  const [roster, snapshot, orders, deals, series] = await Promise.all([
     api("/api/trading/environments"),
     api(`/api/trading/${env}/snapshot`),
     api(`/api/trading/${env}/orders${query}`),
     api(`/api/trading/${env}/deals${query}`),
     api(`/api/trading/${env}/series`),
-    api(`/api/trading/${env}/health`),
   ]);
-  return { roster, snapshot, orders, deals, series, health };
+  return { roster, snapshot, orders, deals, series };
 }
 
 async function renderTradingPage(env) {

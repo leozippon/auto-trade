@@ -37,6 +37,7 @@ import autotrade
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.runtime import write_json_atomic
 from autotrade.pipelines.hitl_state import (
+    WEB_CREATE_DEFAULTS,
     ControlState,
     proc_start_ticks,
     read_control,
@@ -589,8 +590,9 @@ class CreatePreflightTest(unittest.TestCase):
     def _create(self, **overrides):
         payload = {
             "experiment_id": "preflight_demo",
-            "first_test_period": "2026Q1",
-            "last_test_period": "2026Q1",
+            "fold_period": "quarter",
+            "development_first_period": "2026Q1",
+            "development_last_period": "2026Q1",
             "heldout_first_period": "2026Q2",
             "heldout_last_period": "2026Q2",
         }
@@ -686,8 +688,9 @@ class CreatePreflightTest(unittest.TestCase):
         self.assertTrue(manager.worker_script.is_file())
         payload = {
             "experiment_id": "shared_body",
-            "first_test_period": "2026Q1",
-            "last_test_period": "2026Q1",
+            "fold_period": "quarter",
+            "development_first_period": "2026Q1",
+            "development_last_period": "2026Q1",
             "heldout_first_period": "2026Q2",
             "heldout_last_period": "2026Q2",
         }
@@ -701,7 +704,7 @@ class CreatePreflightTest(unittest.TestCase):
         original = worker_module._positive_int
 
         def stricter(value: object, name: str) -> int:
-            if name == "epochs" and value == 3:
+            if name == "epochs" and value == WEB_CREATE_DEFAULTS["epochs"]:
                 raise ValueError("epochs is temporarily unavailable")
             return original(value, name)
 

@@ -60,6 +60,16 @@ _VLLM_PROFILE = ModelProfile(
     max_output_tokens=262_144,
 )
 
+# Smallest declared window in the catalog. A component that must pick a
+# window-dependent default before the run's model roles are known (the
+# compaction threshold) bounds itself here; the worker replaces it with the
+# exact per-role bound once the roles are resolved.
+MIN_CONTEXT_WINDOW_TOKENS = min(
+    profile.context_window_tokens
+    for profile in (_DEEPSEEK_PROFILE, _VLLM_PROFILE)
+    if profile.context_window_tokens is not None
+)
+
 # Transient provider failures (HTTP 429/500/503, transport timeouts, an empty
 # or cut-off stream) are retried with exponential backoff from this base:
 # 2 s, 4 s, 8 s, the same schedule pi uses, inside the logical call deadline.
@@ -216,6 +226,7 @@ __all__ = [
     "DEFAULT_LLM_RETRY_BACKOFF_SECONDS",
     "LEGACY_LOCAL_QWEN_MODEL",
     "LOCAL_QWEN_MODEL",
+    "MIN_CONTEXT_WINDOW_TOKENS",
     "MODEL_CHOICES",
     "ModelProfile",
     "build_model_gateway",

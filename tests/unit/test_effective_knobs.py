@@ -287,7 +287,7 @@ class RecordFailedAttemptsTest(unittest.TestCase):
 
     def test_the_config_default_records_them(self) -> None:
         config = RollingExperimentConfig(
-            "exp", Path("/tmp/experiments"), "2022Q1", "2022Q1", "2023Q1", "2023Q1"
+            "exp", Path("/tmp/experiments"), "2022Q1", "2022Q1", "2023Q1", "2023Q1", fold_period="quarter"
         )
         self.assertTrue(config.record_failed_attempts)
         self.assertTrue(config.step_tree_enabled)
@@ -301,7 +301,7 @@ class MetaMemoryBoundTest(unittest.TestCase):
         from autotrade.pipelines.experiment import RollingExperimentPipeline
 
         config = RollingExperimentConfig(
-            "exp", root / "experiments", "2022Q1", "2022Q1", "2023Q1", "2023Q1",
+            "exp", root / "experiments", "2022Q1", "2022Q1", "2023Q1", "2023Q1", fold_period="quarter",
             meta_memory_max_epochs=keep,
         )
         AgentRefStore(config.experiment_dir)
@@ -379,12 +379,12 @@ class ConvergencePhaseTest(unittest.TestCase):
 
     def test_the_config_carries_closed_s_default(self) -> None:
         config = RollingExperimentConfig(
-            "exp", Path("/tmp/experiments"), "2022Q1", "2022Q1", "2023Q1", "2023Q1"
+            "exp", Path("/tmp/experiments"), "2022Q1", "2022Q1", "2023Q1", "2023Q1", fold_period="quarter"
         )
         self.assertEqual(config.convergence_start_epoch, 3)
         with self.assertRaisesRegex(ValueError, "convergence_start_epoch"):
             RollingExperimentConfig(
-                "exp", Path("/tmp/experiments"), "2022Q1", "2022Q1", "2023Q1", "2023Q1",
+                "exp", Path("/tmp/experiments"), "2022Q1", "2022Q1", "2023Q1", "2023Q1", fold_period="quarter",
                 convergence_start_epoch=0,
             )
 

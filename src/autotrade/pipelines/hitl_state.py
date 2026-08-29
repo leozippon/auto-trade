@@ -19,6 +19,7 @@ from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.llm.model_profiles import MODEL_CHOICES
 from autotrade.environment.sandbox import SandboxSpec
 
+from .config import rolling_default
 from .folds import FoldSpec
 from .meta_schedule import meta_learning_trigger_counts, meta_session_key
 
@@ -37,18 +38,28 @@ LIVE_RUN_STATES = {"running_session", "waiting_step_user", "waiting_user_reply"}
 # these defaults, while the worker retains its broader file-based/CLI contract.
 # Paths and capability-bearing switches are intentionally absent: they are
 # console-managed values below and can never be supplied by an HTTP client.
+# Every knob that is also a pipeline knob is read from its dataclass default
+# (``rolling_default``), so the console and a headless run can never drift; the
+# literals below are the values the console alone owns.
 WEB_CREATE_DEFAULTS: dict[str, object] = {
     "experiment_id": None,
-    "fold_period": "quarter",
-    "first_test_period": "2022Q1",
-    "last_test_period": "2025Q4",
-    "heldout_first_period": "2026Q1",
-    "heldout_last_period": "2026Q2",
-    "epochs": 3,
-    "meta_learning_fold_interval": 2,
-    "meta_memory_max_epochs": 3,
-    "fold_exploration_directive": "",
-    "workspace_reference": "",
+    "fold_period": rolling_default("fold_period"),
+    # One development window 2022..2025, fitted as one Fold (no Test stage);
+    # the frozen strategy is judged by Held-out alone.
+    "development_first_period": "2022",
+    "development_last_period": "2025",
+    "test_stage": rolling_default("test_stage"),
+    # One explicit range, not a cadence label: held-out is the part of 2026 the
+    # data lake actually covers, and naming it directly keeps the window fixed
+    # as the lake grows.
+    "heldout_first_period": "20260101..20260630",
+    "heldout_last_period": "20260101..20260630",
+    "epochs": rolling_default("epochs"),
+    "meta_learning_fold_interval": rolling_default("meta_learning_fold_interval"),
+    "meta_memory_max_epochs": rolling_default("meta_memory_max_epochs"),
+    "fold_exploration_directive": rolling_default("fold_exploration_directive"),
+    "workspace_reference": rolling_default("workspace_reference"),
+    "operating_memory": rolling_default("operating_memory"),
     "inherit_from": "",
     "strategy_period": "day",
     "inference_time": "08:30",
@@ -56,7 +67,7 @@ WEB_CREATE_DEFAULTS: dict[str, object] = {
     "analysis_enabled": False,
     "analysis_model": MODEL_CHOICES[0],
     "analysis_max_tokens": 6000,
-    "window_months": 21,
+    "window_months": rolling_default("window_months"),
     "daily_window_months": None,
     "fundamentals_window_months": None,
     "events_window_months": None,
@@ -67,30 +78,33 @@ WEB_CREATE_DEFAULTS: dict[str, object] = {
     "include_macro": True,
     "include_events": True,
     "include_text": True,
-    "include_intraday": True,
+    "include_intraday": False,
     "fundamental_datasets": (),
     "macro_datasets": (),
     "events_datasets": (),
     "text_datasets": (),
-    "screen_exclude_st": True,
-    "screen_exclude_new_listed_days": 180,
+    # The universe reaches the agent unfiltered (all boards, ST included, no
+    # new-listing exclusion); the strategy applies its own filters.
+    "screen_exclude_st": False,
+    "screen_exclude_new_listed_days": 0,
     "screen_min_circ_mv_yi": None,
     "screen_max_circ_mv_yi": None,
     "screen_min_price": None,
     "screen_max_price": None,
-    "screen_boards": ("main",),
-    "min_region_trade_days": 2,
-    "max_steps_per_fold": 10,
-    "max_backtests_per_fold": 15,
-    "max_llm_calls": 400,
-    "session_max_attempts": 3,
-    "max_fold_minutes": 240,
-    "convergence_start_epoch": 3,
-    "nl_failure_policy": "return_error_with_audit",
-    "finalize_before_deadline_seconds": 300,
-    "per_call_timeout_seconds": 3600,
+    "screen_boards": (),
+    "min_region_trade_days": rolling_default("min_region_trade_days"),
+    "max_steps_per_fold": rolling_default("max_steps_per_fold"),
+    "max_backtests_per_fold": rolling_default("max_backtests_per_fold"),
+    "max_llm_calls": rolling_default("max_llm_calls"),
+    "session_max_attempts": rolling_default("session_max_attempts"),
+    "max_fold_minutes": rolling_default("max_fold_minutes"),
+    "convergence_start_epoch": rolling_default("convergence_start_epoch"),
+    "nl_failure_policy": rolling_default("nl_failure_policy"),
+    "finalize_before_deadline_seconds": rolling_default("finalize_before_deadline_seconds"),
+    "per_call_timeout_seconds": rolling_default("per_call_timeout_seconds"),
+    "strategy_fit_timeout_seconds": rolling_default("strategy_fit_timeout_seconds"),
     "disable_step_tree": False,
-    "record_failed_attempts": True,
+    "record_failed_attempts": rolling_default("record_failed_attempts"),
     "min_return": 0.0,
     "min_sharpe": 0.0,
     "max_drawdown": 0.25,
@@ -113,8 +127,8 @@ WEB_CREATE_DEFAULTS: dict[str, object] = {
     "max_intraday_row_group_rows": 2_000_000,
     "gpu_count": SandboxSpec().gpu_count,
     "disable_meta_sandbox_rebuild": False,
-    "meta_sandbox_rebuild_timeout_seconds": 1800,
-    "meta_sandbox_image_keep": 3,
+    "meta_sandbox_rebuild_timeout_seconds": rolling_default("meta_sandbox_rebuild_timeout_seconds"),
+    "meta_sandbox_image_keep": rolling_default("meta_sandbox_image_keep"),
 }
 
 # These values describe the only supported WebUI research environment.  The
@@ -161,8 +175,8 @@ WEB_CLOSED_PARAMS = frozenset(
 WEB_REQUIRED_PARAMS = frozenset(
     {
         "experiment_id",
-        "first_test_period",
-        "last_test_period",
+        "development_first_period",
+        "development_last_period",
         "heldout_first_period",
         "heldout_last_period",
     }
@@ -590,7 +604,8 @@ def assert_node_not_from_later_fold(
         raise ValueError(f"{session_key!r} is not a fold session")
     if fold_keys.index(node_key) > fold_keys.index(session_key):
         raise ValueError(
-            "不能把更晚 Fold 会话的节点设为更早会话的起点（未来验证信息泄漏）"
+            "a node from a later Fold session cannot seed an earlier session "
+            "(future validation information would leak)"
         )
 
 

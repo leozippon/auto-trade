@@ -37,9 +37,8 @@ from autotrade.environment.replay import (
     ReplayResult,
     run_daily_replay,
 )
-from autotrade.environment.runtime import agent_trace_path
+from autotrade.environment.runtime import agent_trace_path, chmod_tree
 from autotrade.environment.strategy import NLQuery
-from autotrade.environment.strategy_loader import load_strategy
 
 from .agent_inbox import expire_experiment_session_inbox
 from .agent_views import (
@@ -97,8 +96,10 @@ from .skills import (
 )
 
 # A per-session deadline override may raise the fold deadline above the
-# configured maximum, bounded by this hard ceiling in minutes.
-_MAX_DEADLINE_OVERRIDE_MINUTES = 480
+# configured maximum, bounded by this absolute ceiling in minutes: twice the
+# default development-Fold budget (config.max_fold_minutes), enough headroom
+# for one slow session without letting it run unattended for days.
+_MAX_DEADLINE_OVERRIDE_MINUTES = 1440
 
 
 class DailyStrategyPipeline:
@@ -122,29 +123,49 @@ class DailyStrategyPipeline:
         frame = pd.read_parquet(daily) if isinstance(daily, (str, Path)) else daily
         if not isinstance(frame, pd.DataFrame):
             raise TypeError("daily must be a pandas DataFrame or parquet path")
-        executor = self._create_executor()
+        # Every replay fits from empty: the state directory is created here and
+        # discarded with the run, so nothing an earlier run wrote reaches it.
+        # World-writable for the sandbox's non-root fit worker.
+        state = TemporaryDirectory(prefix="strategy_state_")
+        state_dir = Path(state.name)
+        state_dir.chmod(0o777)
         try:
-            return run_daily_replay(
-                daily=frame,
-                strategy=executor,
-                schedule=self.config.schedule,
-                profile=self.config.broker_profile,
-                nl_query=self.nl_query,
-                context_data=self.context_data,
-                execution_price=self.execution_price,
-            )
+            executor = self._create_executor(state_dir)
+            try:
+                return run_daily_replay(
+                    daily=frame,
+                    strategy=executor,
+                    schedule=self.config.schedule,
+                    profile=self.config.broker_profile,
+                    nl_query=self.nl_query,
+                    context_data=self.context_data,
+                    execution_price=self.execution_price,
+                )
+            finally:
+                executor.close()
         finally:
-            executor.close()
+            # The trusted executor leaves the tree read-only between fits.
+            chmod_tree(state_dir, file_mode=0o644, dir_mode=0o755)
+            state.cleanup()
 
-    def _create_executor(self) -> StrategyExecutor:
+    def _create_executor(self, state_dir: Path) -> StrategyExecutor:
         if self.executor_factory is not None:
             executor = self.executor_factory(self.config)
             if not isinstance(executor, StrategyExecutor):
                 raise TypeError("executor_factory must return a StrategyExecutor")
             return executor
         if self.config.execution_mode == "trusted":
-            return TrustedStrategyExecutor(load_strategy(self.config.strategy_path))
-        return DockerStrategyExecutor(self.config.strategy_path, self.config.sandbox)
+            return TrustedStrategyExecutor.from_path(
+                self.config.strategy_path,
+                state_dir=state_dir,
+                models_dir=self.config.models_dir,
+            )
+        return DockerStrategyExecutor(
+            self.config.strategy_path,
+            self.config.sandbox,
+            models_dir=self.config.models_dir,
+            state_dir=state_dir,
+        )
 
 
 class RollingExperimentPipeline:
@@ -222,6 +243,7 @@ class RollingExperimentPipeline:
                             context.get("sandbox_gpu_count")
                         ),
                         fold_period=self.config.fold_period,
+                        test_stage=self.config.test_stage,
                         epoch_index=_epoch_index(epoch_id),
                         phase=(
                             "convergence"
@@ -317,7 +339,17 @@ class RollingExperimentPipeline:
             test_result_ref: str | None = None
             state_changed_during_test = False
             restore_error: BaseException | None = None
-            if frozen is not None:
+            test_snapshot = None
+            test_summary: dict[str, object] | None
+            if frozen is None:
+                test_summary = {"status": "skipped_no_frozen_artifact"} if fold.has_test else None
+            elif not fold.has_test:
+                # Single-window development: there is no Test stage. The frozen
+                # strategy is judged by the automatic Held-out replay instead.
+                test_summary = None
+            else:
+                assert fold.test_start is not None and fold.test_end is not None
+                assert fold.test_decision_time is not None
                 _publish_progress(progress, "frozen_test", run_id=run_id)
                 test_snapshot = self.snapshots.prepare(
                     fold=fold,
@@ -356,9 +388,6 @@ class RollingExperimentPipeline:
                             else "frozen_test_failed"
                         ),
                     }
-            else:
-                test_snapshot = None
-                test_summary = {"status": "skipped_no_frozen_artifact"}
             _publish_progress(progress, "publishing", run_id=run_id)
             skills = self._publish_or_keep_skills(
                 session.skills_source_ref,
@@ -571,6 +600,9 @@ class RollingExperimentPipeline:
                     "snapshot_id": snapshot.snapshot_id,
                     "result": result.summary,
                     "result_ref": result.result_ref,
+                    # Graduation verdict of this period; the experiment-level
+                    # verdict (ledger.experiment_verdict) needs every period.
+                    "verdict": self.config.acceptance.heldout_verdict(result.summary),
                 }
             )
             count += 1
@@ -1197,7 +1229,7 @@ def _session_budgets(
                 raise ValueError(f"{name} override must be positive")
             if name == "deadline_seconds":
                 # The fold deadline may be raised per session, bounded by the
-                # 240-minute hard ceiling; the other budgets stay downward-only.
+                # absolute ceiling above; other budgets stay downward-only.
                 if float(value) > _MAX_DEADLINE_OVERRIDE_MINUTES * 60:
                     raise ValueError(
                         "deadline_seconds override cannot exceed "

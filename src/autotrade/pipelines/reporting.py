@@ -23,7 +23,12 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.ticker import FuncFormatter
 
-from .ledger import ExperimentLedger, latest_fold_records, latest_heldout_records
+from .ledger import (
+    ExperimentLedger,
+    experiment_verdict,
+    latest_fold_records,
+    latest_heldout_records,
+)
 
 DEV_COLOR = "#1f77b4"
 TEST_COLOR = "#d62728"
@@ -59,6 +64,8 @@ def build_experiment_report(ledger_path: str | Path, output_dir: str | Path) -> 
     _plot_epoch_comparison(rows, epoch_comparison)
     summary = _summarize(rows)
     summary["benchmark"] = benchmark_info
+    # Graduation verdict of the frozen strategy on Held-out; None until recorded.
+    summary["verdict"] = experiment_verdict(heldout)
     # Flag the whole report when frozen benchmark blocks are missing for scored
     # periods so downstream gates can react (docs/pipeline-design.md §4.2).
     summary["status"] = "ok" if str(benchmark_info.get("status")) == "ok" else "warning"
@@ -72,6 +79,9 @@ def _fold_row(record: dict[str, object]) -> dict[str, object]:
     test = record.get("test_result") or {}
     benchmark_return, benchmark_label = _frozen_benchmark(test)
     test_return = _num(test.get("total_return"))
+    # A single-window development Fold has no Test region: its row spans the
+    # validation window and its test columns stay empty.
+    period = record.get("test_period") or record.get("validation_period")
     return {
         "epoch_id": str(record.get("epoch_id", "")),
         "label": str(record.get("fold_id", "")).replace("fold_", ""),
@@ -87,8 +97,8 @@ def _fold_row(record: dict[str, object]) -> dict[str, object]:
         "orders": test.get("order_count"),
         "selected_step": record.get("selected_step_id"),
         "finish_reason": record.get("finish_reason"),
-        "period_start": _period_part(record.get("test_period"), "start"),
-        "period_end": _period_part(record.get("test_period"), "end"),
+        "period_start": _period_part(period, "start"),
+        "period_end": _period_part(period, "end"),
         "benchmark_return": benchmark_return,
         "benchmark_label": benchmark_label,
         "active_return": (

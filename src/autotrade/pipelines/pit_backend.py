@@ -21,6 +21,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, time
 from pathlib import Path
+from time import perf_counter
 
 import pandas as pd
 import pyarrow.parquet as pq
@@ -37,10 +38,17 @@ from autotrade.environment.data.snapshot import (
     load_snapshot_manifest,
 )
 from autotrade.environment.data.summary import write_agent_data_summary
-from autotrade.environment.executor import DockerStrategyExecutor
+from autotrade.environment.executor import (
+    DockerStrategyExecutor,
+    TrustedStrategyExecutor,
+)
 from autotrade.environment.nl import NLConfig, NLService
 from autotrade.environment.replay.engine import StrategyDataView
-from autotrade.environment.replay.stats import PhaseTimer, finalize_summary_timing
+from autotrade.environment.replay.stats import (
+    PhaseTimer,
+    attach_sub_window_benchmark,
+    finalize_summary_timing,
+)
 from autotrade.environment.replay.style import (
     benchmark_summary_block,
     replay_style_analysis,
@@ -68,6 +76,9 @@ from .experiment import DailyStrategyPipeline
 from .pit_views_seed import pit_cache_provider_record, seed_pit_views
 
 _PHASES = frozenset({"meta", "valid", "frozen_test", "heldout", "paper"})
+# Manifest label of the unphased replay store. Never a phase, so a store can
+# never be handed to an evaluation as if it were a phase view.
+REPLAY_SOURCE_LABEL = "replay_source"
 _CORE_RAW_DATASETS = ("daily", "daily_basic", "adj_factor", "stk_limit", "suspend_d")
 
 
@@ -273,22 +284,10 @@ class ResearchPITSnapshotProvider:
                 ):
                     raise RuntimeError(f"conflicting cached replay slot: {target}")
                 return target
+            source = self._replay_source(start, end, decision)
             staging = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
             try:
-                source = self._unphased_replay_source(
-                    target, start, end, decision, phase
-                )
-                if source is not None:
-                    _materialize_phased_replay(source, staging, phase=phase)
-                else:
-                    self.builder.build_replay_slot(
-                        start,
-                        end,
-                        staging,
-                        label=phase,
-                        config=self.config,
-                        available_from=decision,
-                    )
+                _materialize_phased_replay(source, staging, phase=phase)
                 target.parent.mkdir(parents=True, exist_ok=True)
                 os.replace(staging, target)
                 try:
@@ -313,38 +312,50 @@ class ResearchPITSnapshotProvider:
                 if staging.exists():
                     _rmtree_replay_staging(staging)
 
-    def _unphased_replay_source(
-        self,
-        target: Path,
-        start: str,
-        end: str,
-        decision: datetime,
-        phase: str,
-    ) -> Path | None:
-        unphased = self.cache_root / "replay" / target.name
-        try:
-            if unphased.is_symlink() or not unphased.is_dir():
-                return None
-            resolved = unphased.resolve()
-            if resolved == target.resolve():
-                return None
-            if resolved.parent != (self.cache_root / "replay").resolve():
-                return None
-            if not (unphased / "daily.parquet").is_file():
-                return None
-            manifest = load_snapshot_manifest(unphased)
-        except (OSError, TypeError, ValueError):
-            return None
-        if not _replay_source_reusable(
-            manifest,
-            start=start,
-            end=end,
-            decision=decision,
-            phase=phase,
-            generation_id=self.release.generation_id,
-        ):
-            return None
-        return unphased
+    def _replay_source(self, start: str, end: str, decision: datetime) -> Path:
+        """The single unphased store behind every phase view of one window.
+
+        Meta and Validation always replay the same region, and on a contiguous
+        calendar so does the previous fold's frozen test, so a phase-scoped
+        build would replay one region two or three times. The region is built
+        once here, under its own lock, and each phase view is a hardlink of it
+        carrying its own immutable ``label``/``snapshot_id`` — which is also
+        what makes publishing a phase view and hardlinking a seed cheap.
+        """
+
+        decision_key = decision.strftime("%Y%m%dT%H%M%S%z")
+        target = self.cache_root / "replay" / f"{start}_{end}_{decision_key}"
+        if target.is_symlink():
+            raise RuntimeError(f"replay source must be a real directory: {target}")
+        with _exclusive_lock(target.with_suffix(".lock")):
+            if target.exists():
+                manifest = load_snapshot_manifest(target)
+                if not _replay_source_reusable(
+                    manifest,
+                    start=start,
+                    end=end,
+                    decision=decision,
+                    generation_id=self.release.generation_id,
+                ):
+                    raise RuntimeError(f"conflicting cached replay source: {target}")
+                return target
+            staging = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+            try:
+                self.builder.build_replay_slot(
+                    start,
+                    end,
+                    staging,
+                    label=REPLAY_SOURCE_LABEL,
+                    config=self.config,
+                    available_from=decision,
+                )
+                target.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(staging, target)
+                chmod_tree(target, file_mode=0o444, dir_mode=0o555)
+                return target
+            finally:
+                if staging.exists():
+                    _rmtree_replay_staging(staging)
 
 
 @dataclass(frozen=True)
@@ -559,6 +570,14 @@ class PITDailyEvaluationBackend:
         result_dir = self.results_root / result_id
         result_dir.mkdir(parents=True, exist_ok=False)
         asof_dir = result_dir / "asof"
+        # Fresh and empty for every replay: fit(context) recomputes it from PIT
+        # data in Validation, frozen Test and Held-out alike, and nothing from
+        # an earlier run or the revision can reach it. World-writable so the
+        # sandbox's non-root fit worker can create files in it.
+        state_dir = result_dir / "state"
+        state_dir.mkdir()
+        state_dir.chmod(0o777)
+        models_dir = _revision_models_dir(request.revision.models_path)
         keep_result_dir = False
         with timer.phase("replay_frames"):
             frames = _load_replay_frames(
@@ -572,9 +591,12 @@ class PITDailyEvaluationBackend:
                 (daily["trade_date"].map(_date_key) >= _date_key(request.start))
                 & (daily["trade_date"].map(_date_key) <= _date_key(request.end))
             ].copy()
+            replay_end = _date_key(request.end)
             if max_days is not None:
                 kept = sorted({_date_key(value) for value in daily["trade_date"]})[:max_days]
                 daily = daily[daily["trade_date"].map(_date_key).isin(set(kept))].copy()
+                # A truncated replay must not claim it covered the last quarter.
+                replay_end = kept[-1] if kept else replay_end
         if daily.empty:
             raise ValueError(f"PIT daily replay is empty for {request.start}..{request.end}")
 
@@ -601,7 +623,11 @@ class PITDailyEvaluationBackend:
         nl_service = NLService.from_snapshot(
             asof_dir,
             llm=self.nl_llm,
-            config=self.nl_config,
+            # The NL total budget belongs to this replay, not to a calendar: it
+            # scales with the trading days actually being replayed.
+            config=self.nl_config.for_replay(
+                len({_date_key(value) for value in daily["trade_date"]})
+            ),
             failure_policy=self.nl_failure_policy,
         )
         refreshed: set[str] = set()
@@ -633,19 +659,22 @@ class PITDailyEvaluationBackend:
             execution_mode=self.execution_mode,  # type: ignore[arg-type]
             sandbox=self.sandbox,
         )
-        executor_factory = None
-        if self.execution_mode == "sandbox":
-
-            def executor_factory(cfg):
-                # Container start is a one-off cost the per-day phases would
-                # otherwise hide inside the first strategy call.
-                with timer.phase("executor_start"):
+        def executor_factory(cfg):
+            # Container start is a one-off cost the per-day phases would
+            # otherwise hide inside the first strategy call.
+            with timer.phase("executor_start"):
+                if self.execution_mode == "sandbox":
                     return DockerStrategyExecutor(
                         cfg.strategy_path,
                         cfg.sandbox,
                         snapshot_dir=snapshot_dir,
                         asof_dir=asof_dir,
+                        models_dir=models_dir,
+                        state_dir=state_dir,
                     )
+                return TrustedStrategyExecutor.from_path(
+                    cfg.strategy_path, state_dir=state_dir, models_dir=models_dir
+                )
 
         try:
             try:
@@ -656,7 +685,9 @@ class PITDailyEvaluationBackend:
                     execution_price=minute_source.price_at if minute_source is not None else None,
                     executor_factory=executor_factory,
                 ).run(daily)
-                record = replay.to_record()
+                record = replay.to_record(
+                    start=_date_key(request.start), end=replay_end
+                )
             finally:
                 nl_service.close()
                 lock.lock()
@@ -695,6 +726,7 @@ class PITDailyEvaluationBackend:
             benchmark = benchmark_summary_block(style)
             if benchmark is not None:
                 summary["benchmark"] = benchmark
+            attach_sub_window_benchmark(summary, style)
             finalize_summary_timing(
                 summary,
                 started_at=started_at,
@@ -708,6 +740,7 @@ class PITDailyEvaluationBackend:
             return EvaluationResult(dict(summary), str(target))
         finally:
             _discard_ephemeral_asof(asof_dir)
+            _discard_strategy_state(state_dir)
             if not keep_result_dir:
                 shutil.rmtree(result_dir, ignore_errors=True)
 
@@ -803,7 +836,8 @@ class PaperPITData:
         self.nl_service = NLService.from_snapshot(
             self.asof_dir,
             llm=nl_llm,
-            config=nl_config or NLConfig(),
+            # Paper replays exactly one trade date.
+            config=(nl_config or NLConfig()).for_replay(1),
             failure_policy=nl_failure_policy,
         )
         self._refreshed: set[str] = set()
@@ -830,6 +864,29 @@ class PaperPITData:
     def close(self) -> None:
         self.nl_service.close()
         self._lock.lock()
+
+
+def _revision_models_dir(models_path: Path | None) -> Path | None:
+    """The revision's frozen ``models/`` tree, mounted read-only when present."""
+
+    if models_path is None:
+        return None
+    path = Path(models_path).resolve()
+    if not path.is_dir():
+        raise FileNotFoundError(f"strategy revision models directory is missing: {path}")
+    return path
+
+
+def _discard_strategy_state(state_dir: Path) -> None:
+    """Drop the per-replay fitted state; it is never an artifact of the result."""
+
+    if not state_dir.exists():
+        return
+    try:
+        chmod_tree(state_dir, file_mode=0o644, dir_mode=0o755)
+        shutil.rmtree(state_dir)
+    except OSError as exc:
+        raise RuntimeError(f"cannot discard strategy state: {state_dir}: {exc}") from exc
 
 
 def _discard_ephemeral_asof(asof_dir: Path) -> None:
@@ -909,7 +966,10 @@ class _AsOfReadOnlyView:
                 pass
 
 
-_STASH_CONTRACT_SCHEMA_VERSION = 1
+# v2: the contract states the data identity of the parts (release, config,
+# schedule, slot keys) instead of the paths and snapshot_ids of one build, so
+# one region's phases and an offline prebuild share a single stash.
+_STASH_CONTRACT_SCHEMA_VERSION = 2
 _ReplayFrameCache = dict[
     str, tuple[dict[str, object], dict[str, pd.DataFrame]]
 ]
@@ -921,7 +981,13 @@ def _asof_stash_dir(
     schedule: StrategySchedule,
     phase: str,
 ) -> Path:
-    """Return the complete semantic stash hierarchy for one scheduled replay."""
+    """Return the complete semantic stash hierarchy for one scheduled replay.
+
+    The phase is validated but is NOT part of the key: every phase view of one
+    region is a hardlink of the single unphased store, so the as-of parts they
+    produce for a given decision snapshot and schedule are identical, and Meta
+    and Validation would otherwise encode the same region twice.
+    """
 
     snapshot = Path(snapshot_dir).resolve()
     replay = Path(replay_dir).resolve()
@@ -955,8 +1021,6 @@ def _asof_stash_dir(
         / decision_slot
         / "replay"
         / replay_slot
-        / "phase"
-        / safe_phase
         / "schedule"
         / f"period={period}"
         / "inference_time"
@@ -978,7 +1042,19 @@ def _bind_asof_stash_contract(
     decision_manifest: dict[str, object],
     replay_manifest: dict[str, object],
 ) -> Path:
-    """Bind a part stash to complete, directly-comparable PIT semantics."""
+    """Bind a part stash to complete, directly-comparable PIT semantics.
+
+    The contract names what DETERMINES the parts — the pinned release, the
+    exact SnapshotConfig, the refresh schedule, and the two slot keys that
+    carry the decision anchor and the replay boundary — and deliberately not
+    where the slots happen to live or which build wrote them. A view is a pure
+    function of those inputs, so an identical contract means identical parts
+    whether they were encoded by this experiment, by a sibling phase of the
+    same region, or by the offline seed prebuild that experiments hardlink.
+    The manifests are still verified against the requested release here; a part
+    is additionally row-count checked against a fresh slice before it is
+    reused.
+    """
 
     stash_dir = _asof_stash_dir(snapshot_dir, replay_dir, schedule, phase)
     cache_root = Path(snapshot_dir).resolve().parent.parent
@@ -1028,16 +1104,9 @@ def _bind_asof_stash_contract(
         "generation_id": generation_id,
         "release_raw_dir": provider_record["release_raw_dir"],
         "snapshot_config": snapshot_config,
-        "phase": safe_phase,
         "schedule": schedule.to_record(),
-        "decision_slot": {
-            "path": str(Path(snapshot_dir).resolve()),
-            "manifest": decision_manifest,
-        },
-        "replay_slot": {
-            "path": str(Path(replay_dir).resolve()),
-            "manifest": replay_manifest,
-        },
+        "decision_slot": Path(snapshot_dir).resolve().name,
+        "replay_slot": Path(replay_dir).resolve().name,
     }
     contract_path = stash_dir / "contract.json"
     lock_path = stash_dir.parent / f".{stash_dir.name}.contract.lock"
@@ -1054,6 +1123,95 @@ def _bind_asof_stash_contract(
             stash_dir.mkdir(parents=True)
             write_json_atomic(contract_path, contract)
     return stash_dir
+
+
+def prebuild_asof_stash(
+    *,
+    snapshot_dir: str | Path,
+    replay_dir: str | Path,
+    schedule: StrategySchedule,
+    phase: str,
+    generation_id: str,
+    start: str,
+    end: str,
+    host_dir: str | Path,
+) -> dict[str, object]:
+    """Encode one replay's as-of parts into its stash without a strategy.
+
+    The first backtest over a slot otherwise pays the whole per-day encode
+    inside a Fold session. Everything that decides a part — the frozen
+    snapshot, the replay frames, and the refresh instants the replay engine
+    would reach — is read through the same functions the evaluation uses, and
+    the parts are published through the same stash contract, so a later
+    backtest hardlinks them instead of re-encoding. ``host_dir`` receives the
+    throwaway as-of tree and is removed afterwards.
+    """
+
+    snapshot = Path(snapshot_dir).resolve(strict=True)
+    replay = Path(replay_dir).resolve(strict=True)
+    host = Path(host_dir)
+    decision_manifest = load_snapshot_manifest(snapshot)
+    replay_manifest = load_snapshot_manifest(replay)
+    stash_dir = _bind_asof_stash_contract(
+        snapshot_dir=snapshot,
+        replay_dir=replay,
+        schedule=schedule,
+        phase=phase,
+        generation_id=generation_id,
+        decision_manifest=decision_manifest,
+        replay_manifest=replay_manifest,
+    )
+    started = perf_counter()
+    frames = _load_replay_frames(
+        replay,
+        generation_id=generation_id,
+        replay_manifest=replay_manifest,
+        cache={},
+    )
+    daily = frames["daily"]
+    daily = daily[
+        (daily["trade_date"].map(_date_key) >= _date_key(start))
+        & (daily["trade_date"].map(_date_key) <= _date_key(end))
+    ].copy()
+    if daily.empty:
+        raise ValueError(f"PIT daily replay is empty for {start}..{end}")
+    minute_path = replay / "intraday_1min.parquet"
+    minute_source = (
+        HistoricalMinuteSource(minute_path)
+        if minute_path.exists() and pq.ParquetFile(minute_path).metadata.num_rows
+        else None
+    )
+    try:
+        timeview = Timeview(
+            host_dir=host,
+            snapshot_dir=snapshot,
+            replay_frames={key: value for key, value in frames.items() if key != "daily"}
+            | {"daily": daily},
+            replay_text_library_dir=(replay / "text_library"),
+            incremental_domains={"intraday_1min"} if minute_source is not None else None,
+            stash_dir=stash_dir,
+        )
+        # The replay engine's own decision points: one per trading day of the
+        # window on which the schedule is due, at its fixed inference time.
+        trade_dates = sorted({_date_key(value) for value in daily["trade_date"]})
+        previous: str | None = None
+        refreshes = 0
+        for trade_date in trade_dates:
+            if schedule.is_due(trade_date, previous):
+                inference_at = schedule.at(trade_date)
+                if minute_source is not None:
+                    minute_source.append_visible(timeview, inference_at)
+                timeview.refresh(pd.Timestamp(inference_at))
+                refreshes += 1
+            previous = trade_date
+    finally:
+        shutil.rmtree(host, ignore_errors=True)
+    return {
+        "stash_dir": str(stash_dir),
+        "trade_days": len(trade_dates),
+        "refresh_calls": refreshes,
+        "seconds": round(perf_counter() - started, 1),
+    }
 
 
 def _safe_path_component(value: object, *, label: str) -> str:
@@ -1158,16 +1316,17 @@ def _replay_source_reusable(
     start: str,
     end: str,
     decision: datetime,
-    phase: str,
     generation_id: str,
 ) -> bool:
+    """A store is reusable on time boundary and raw generation, not on label.
+
+    The store carries no phase: its label is whatever built it (older caches
+    carry a phase name), and the phase view written from it restates the phase
+    in its own manifest.
+    """
+
     if not _replay_manifest_matches(
-        manifest,
-        start=start,
-        end=end,
-        decision=decision,
-        phase=phase,
-        require_label=False,
+        manifest, start=start, end=end, decision=decision, phase=None
     ):
         return False
     raw_generation = manifest.get("raw_generation")
@@ -1237,9 +1396,13 @@ def _replay_manifest_matches(
     start: str,
     end: str,
     decision: datetime,
-    phase: str,
-    require_label: bool = True,
+    phase: str | None,
 ) -> bool:
+    """Time boundary always; the immutable phase label unless ``phase`` is None.
+
+    ``None`` is the unphased store, whose label names no phase.
+    """
+
     if (
         manifest.get("kind") != "replay_slot"
         or str(manifest.get("period_start")) != start
@@ -1247,7 +1410,7 @@ def _replay_manifest_matches(
         or _optional_cn_datetime(manifest.get("available_from")) != decision
     ):
         return False
-    if require_label and str(manifest.get("label") or "") != phase:
+    if phase is not None and str(manifest.get("label") or "") != phase:
         return False
     return True
 
@@ -1285,9 +1448,11 @@ def _exclusive_lock(path: Path) -> Iterator[None]:
 
 
 __all__ = [
+    "REPLAY_SOURCE_LABEL",
     "HistoricalMinuteSource",
     "PITDailyEvaluationBackend",
     "PaperPITData",
     "ResearchPITSnapshotProvider",
+    "prebuild_asof_stash",
     "required_release_raw_datasets",
 ]

@@ -12,16 +12,16 @@ import threading
 import time
 import uuid
 from collections import deque
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, Self, runtime_checkable
 
-from .runtime import SandboxPaths
+from .runtime import SandboxPaths, chmod_tree
 from .sandbox import DockerSandbox, SandboxConfig
-from .strategy import StrategyContext, StrategyFunction
-from .strategy_loader import validate_strategy_source
+from .strategy import BarTable, FitSchedule, StrategyContext, StrategyFunction
+from .strategy_loader import load_strategy_module, validate_strategy_source
 
 if TYPE_CHECKING:
     from .tools.base import CommandResult
@@ -29,6 +29,12 @@ if TYPE_CHECKING:
 _HOST_TIMEOUT_BUFFER_SECONDS = 15.0
 _MAX_STRATEGY_THREADS = 8
 _PROCESS_STOP_TIMEOUT_SECONDS = 2.0
+# Container-side paths of the read-only data roots and of the per-replay state
+# directory, which is read-only for generate_orders and read-write for fit.
+CONTAINER_SNAPSHOT_DIR = "/strategy-data/snapshot"
+CONTAINER_ASOF_DIR = "/strategy-data/asof"
+CONTAINER_MODELS_DIR = "/strategy-data/models"
+CONTAINER_STATE_DIR = "/strategy-data/state"
 
 
 class StrategyExecutionError(RuntimeError):
@@ -42,17 +48,92 @@ class StrategyExecutor(Protocol):
     def close(self) -> None: ...
 
 
+@runtime_checkable
+class FittableStrategyExecutor(StrategyExecutor, Protocol):
+    """An executor that also runs the strategy's optional ``fit(context)``.
+
+    ``fit_schedule`` is ``None`` when ``main.py`` declares no ``fit``.
+    ``context_state_dir`` and ``context_models_dir`` are the path strings the
+    strategy sees on its context, empty when the directory is absent.
+    """
+
+    fit_schedule: FitSchedule | None
+    context_state_dir: str
+    context_models_dir: str
+
+    def fit(self, context: StrategyContext) -> None: ...
+
+
+def _lock_state_dir(state_dir: Path | None, *, writable: bool) -> None:
+    """Host-side read-only gate over an in-process strategy's state directory."""
+
+    if state_dir is None:
+        return
+    if writable:
+        chmod_tree(state_dir, file_mode=0o644, dir_mode=0o755)
+    else:
+        chmod_tree(state_dir, file_mode=0o444, dir_mode=0o555)
+
+
 class TrustedStrategyExecutor:
     """Run an explicitly trusted, reviewed strategy in the host process.
 
     This is intentionally not an isolation boundary and is never selected by
-    an implicit fallback from Docker execution.
+    an implicit fallback from Docker execution. The state directory is still
+    chmod-locked between ``fit`` calls so a ``generate_orders`` write fails.
     """
 
-    def __init__(self, strategy: StrategyFunction) -> None:
+    def __init__(
+        self,
+        strategy: StrategyFunction,
+        *,
+        fit: Callable[[StrategyContext], object] | None = None,
+        fit_schedule: FitSchedule | None = None,
+        state_dir: str | Path | None = None,
+        models_dir: str | Path | None = None,
+    ) -> None:
         if not callable(strategy):
             raise TypeError("trusted strategy must be callable")
+        if (fit is None) != (fit_schedule is None):
+            raise TypeError("fit and fit_schedule must be given together")
         self._strategy = strategy
+        self._fit = fit
+        self.fit_schedule = fit_schedule
+        self.state_dir = _existing_dir(state_dir, "state_dir")
+        self.models_dir = _existing_dir(models_dir, "models_dir")
+        if fit is not None and self.state_dir is None:
+            raise StrategyExecutionError(
+                "strategy defines fit(context) but the executor has no state_dir"
+            )
+        self.context_state_dir = str(self.state_dir) if self.state_dir is not None else ""
+        self.context_models_dir = str(self.models_dir) if self.models_dir is not None else ""
+        _lock_state_dir(self.state_dir, writable=False)
+
+    @classmethod
+    def from_path(
+        cls,
+        strategy_path: str | Path,
+        *,
+        state_dir: str | Path | None = None,
+        models_dir: str | Path | None = None,
+    ) -> TrustedStrategyExecutor:
+        loaded = load_strategy_module(strategy_path)
+        return cls(
+            loaded.generate_orders,
+            fit=loaded.fit,
+            fit_schedule=loaded.fit_schedule,
+            state_dir=state_dir,
+            models_dir=models_dir,
+        )
+
+    def fit(self, context: StrategyContext) -> None:
+        if self._fit is None:
+            raise StrategyExecutionError("strategy defines no fit(context)")
+        _lock_state_dir(self.state_dir, writable=True)
+        try:
+            self._fit(context)
+        finally:
+            _lock_state_dir(self.state_dir, writable=False)
 
     def execute(self, context: StrategyContext) -> object:
         return self._strategy(context)
@@ -62,7 +143,13 @@ class TrustedStrategyExecutor:
 
 
 class DockerStrategyExecutor:
-    """Reuse one locked-down Docker worker for every inference in an experiment."""
+    """Reuse one locked-down Docker worker for every inference in an experiment.
+
+    A strategy that declares ``fit`` gets a second, equally locked-down worker
+    whose only difference is a read-write bind of the state directory; the
+    inference worker binds the same directory read-only, so the kernel — not
+    the strategy — decides that ``generate_orders`` cannot write state.
+    """
 
     def __init__(
         self,
@@ -71,17 +158,30 @@ class DockerStrategyExecutor:
         *,
         snapshot_dir: str | Path | None = None,
         asof_dir: str | Path | None = None,
+        models_dir: str | Path | None = None,
+        state_dir: str | Path | None = None,
+        state_writable: bool = False,
     ) -> None:
         self.strategy_path = Path(strategy_path).resolve()
         if not self.strategy_path.is_file():
             raise StrategyExecutionError(f"strategy file does not exist: {self.strategy_path}")
-        validate_strategy_source(
+        self.fit_schedule = validate_strategy_source(
             self.strategy_path.read_text(encoding="utf-8"),
             filename=self.strategy_path.name,
         )
         self.config = config or SandboxConfig()
-        self.snapshot_dir = _read_only_data_dir(snapshot_dir, "snapshot_dir")
-        self.asof_dir = _read_only_data_dir(asof_dir, "asof_dir")
+        self.snapshot_dir = _existing_dir(snapshot_dir, "snapshot_dir")
+        self.asof_dir = _existing_dir(asof_dir, "asof_dir")
+        self.models_dir = _existing_dir(models_dir, "models_dir")
+        self.state_dir = _existing_dir(state_dir, "state_dir")
+        if self.fit_schedule is not None and self.state_dir is None:
+            raise StrategyExecutionError(
+                "strategy defines fit(context) but the executor has no state_dir"
+            )
+        self.context_state_dir = CONTAINER_STATE_DIR if self.state_dir is not None else ""
+        self.context_models_dir = CONTAINER_MODELS_DIR if self.models_dir is not None else ""
+        self._state_writable = state_writable
+        self._fit_worker: DockerStrategyExecutor | None = None
         self.container_name = f"autotrade-strategy-{uuid.uuid4().hex}"
         self._process: subprocess.Popen[bytes] | None = None
         self._stdout_buffer = bytearray()
@@ -134,13 +234,17 @@ class DockerStrategyExecutor:
         for key, value in sorted(strategy_env.items()):
             command.extend(["--env", f"{key}={value}"])
         command.extend(["--mount", strategy_mount])
-        if self.snapshot_dir is not None:
+        for source, target in (
+            (self.snapshot_dir, CONTAINER_SNAPSHOT_DIR),
+            (self.asof_dir, CONTAINER_ASOF_DIR),
+            (self.models_dir, CONTAINER_MODELS_DIR),
+        ):
+            if source is not None:
+                command.extend(["--mount", f"type=bind,src={source},dst={target},readonly"])
+        if self.state_dir is not None:
+            mode = "" if self._state_writable else ",readonly"
             command.extend(
-                ["--mount", f"type=bind,src={self.snapshot_dir},dst=/strategy-data/snapshot,readonly"]
-            )
-        if self.asof_dir is not None:
-            command.extend(
-                ["--mount", f"type=bind,src={self.asof_dir},dst=/strategy-data/asof,readonly"]
+                ["--mount", f"type=bind,src={self.state_dir},dst={CONTAINER_STATE_DIR}{mode}"]
             )
         command.extend([
             "--workdir",
@@ -153,13 +257,48 @@ class DockerStrategyExecutor:
         ])
         return command
 
+    def fit(self, context: StrategyContext) -> None:
+        if self.fit_schedule is None:
+            raise StrategyExecutionError("strategy defines no fit(context)")
+        if self._closed:
+            raise StrategyExecutionError("Docker strategy executor is closed")
+        if self._fit_worker is None:
+            self._fit_worker = DockerStrategyExecutor(
+                self.strategy_path,
+                self.config,
+                snapshot_dir=self.snapshot_dir,
+                asof_dir=self.asof_dir,
+                models_dir=self.models_dir,
+                state_dir=self.state_dir,
+                state_writable=True,
+            )
+        try:
+            self._fit_worker._roundtrip(
+                context, kind="fit", timeout_seconds=self.config.limits.fit_timeout_seconds
+            )
+        except StrategyExecutionError:
+            self._abort()
+            raise
+
     def execute(self, context: StrategyContext) -> object:
+        return self._roundtrip(
+            context, kind="execute", timeout_seconds=self.config.limits.timeout_seconds
+        )
+
+    def _roundtrip(
+        self, context: StrategyContext, *, kind: str, timeout_seconds: float
+    ) -> object:
         if self._closed or self._process is None:
             raise StrategyExecutionError("Docker strategy executor is closed")
-        deadline = time.monotonic() + self.config.limits.timeout_seconds
+        label = "strategy fit" if kind == "fit" else "strategy inference"
+        # The message a deadline miss reports, read by _write/_read_line.
+        self._active_limit = f"{label} exceeded {timeout_seconds:g}s"
+        expected = "fitted" if kind == "fit" else "orders"
+        deadline = time.monotonic() + timeout_seconds
         consumed = 0
         try:
             request, last_available_at = self._prepare_execute(context)
+            request["type"] = kind
             sequence = request["sequence"]
             self._send(request, deadline)
             while True:
@@ -181,7 +320,7 @@ class DockerStrategyExecutor:
                         raise StrategyExecutionError("worker sent an invalid NL request")
                     # Host NL is a trusted service with its own quotas. Its wait
                     # is not untrusted strategy compute and must not burn the
-                    # generate_orders inference cap.
+                    # strategy's own inference or fit cap.
                     nl_started = time.monotonic()
                     try:
                         try:
@@ -202,11 +341,11 @@ class DockerStrategyExecutor:
                         deadline += time.monotonic() - nl_started
                     self._send(payload, deadline)
                     continue
-                if message_type == "orders":
+                if message_type == expected:
                     self._transport_sequence = sequence
                     self._transport_inference_at = context.inference_at
                     self._transport_bars = context.bars
-                    self._transport_bar_identity = context._bar_identity
+                    self._transport_table = context._bars_table
                     self._transport_last_available_at = last_available_at
                     return message.get("orders")
                 if message_type == "error":
@@ -216,7 +355,7 @@ class DockerStrategyExecutor:
             self._abort()
             detail = self._stderr_text()
             suffix = f"; worker stderr: {detail}" if detail else ""
-            raise StrategyExecutionError(f"Docker strategy execution failed: {exc}{suffix}") from exc
+            raise StrategyExecutionError(f"Docker {label} failed: {exc}{suffix}") from exc
         except StrategyExecutionError:
             self._abort()
             raise
@@ -228,24 +367,22 @@ class DockerStrategyExecutor:
         reset = self._transport_sequence < 0
         sequence = 0 if reset else self._transport_sequence + 1
         base_count = 0 if reset else len(self._transport_bars)
+        table = context._bars_table
+        total_count = len(context.bars)
+        if len(table) < total_count:
+            raise StrategyExecutionError("strategy bar PIT metadata is inconsistent")
         if not reset:
             previous_inference = self._transport_inference_at
             if previous_inference is None or context.inference_at <= previous_inference:
                 raise StrategyExecutionError("strategy inference_at must increase monotonically")
-            if len(context.bars) < base_count:
+            if total_count < base_count:
                 raise StrategyExecutionError("strategy bars are not append-only")
-            if context._bar_identity[:base_count] != self._transport_bar_identity:
+            if not self._transport_table.prefix_matches(table, base_count):
                 raise StrategyExecutionError("strategy bars changed before base_count")
 
-        delta = context.bars[base_count:]
-        delta_available_at = context._bar_available_at[base_count:]
-        if (
-            len(context._bar_available_at) != len(context.bars)
-            or len(context._bar_identity) != len(context.bars)
-        ):
-            raise StrategyExecutionError("strategy bar PIT metadata is inconsistent")
         last_available_at = None if reset else self._transport_last_available_at
-        for available_at in delta_available_at:
+        for index in range(base_count, total_count):
+            available_at = table.available_at(index)
             if available_at > context.inference_at:
                 raise StrategyExecutionError("strategy context contains data not visible at inference time")
             if last_available_at is not None and available_at < last_available_at:
@@ -258,9 +395,10 @@ class DockerStrategyExecutor:
                 "sequence": sequence,
                 "reset": reset,
                 "base_count": base_count,
-                "total_count": len(context.bars),
+                "total_count": total_count,
                 "context": self._context_record(context),
-                "bars": [dict(row) for row in delta],
+                # Only the delta is materialized; the shipped prefix stays columnar.
+                "bars": [table.record(index) for index in range(base_count, total_count)],
             },
             last_available_at,
         )
@@ -272,18 +410,25 @@ class DockerStrategyExecutor:
             "snapshot_dir": context.snapshot_dir,
             "asof_dir": context.asof_dir,
             "asof_version": context.asof_version,
+            "state_dir": context.state_dir,
+            "models_dir": context.models_dir,
         }
-        if context.snapshot_dir:
-            if self.snapshot_dir is None:
-                raise StrategyExecutionError("strategy context has snapshot_dir without a read-only mount")
-            record["snapshot_dir"] = "/strategy-data/snapshot"
-        if context.asof_dir:
-            if self.asof_dir is None:
-                raise StrategyExecutionError("strategy context has asof_dir without a read-only mount")
-            record["asof_dir"] = "/strategy-data/asof"
+        for name, target in (
+            ("snapshot_dir", CONTAINER_SNAPSHOT_DIR),
+            ("asof_dir", CONTAINER_ASOF_DIR),
+            ("models_dir", CONTAINER_MODELS_DIR),
+            ("state_dir", CONTAINER_STATE_DIR),
+        ):
+            if not getattr(context, name):
+                continue
+            if getattr(self, name) is None:
+                raise StrategyExecutionError(f"strategy context has {name} without a mount")
+            record[name] = target
         return record
 
     def close(self) -> None:
+        if self._fit_worker is not None:
+            self._fit_worker.close()
         if self._closed and self._process is None:
             self._reset_transport_state()
             return
@@ -339,6 +484,11 @@ class DockerStrategyExecutor:
             raise BrokenPipeError("strategy worker stdin is unavailable")
         self._write(process.stdin, message, deadline)
 
+    def _timeout_message(self) -> str:
+        return self._active_limit or (
+            f"strategy inference exceeded {self.config.limits.timeout_seconds:g}s"
+        )
+
     def _write(self, stream, message: Mapping[str, object], deadline: float) -> None:
         encoded = json.dumps(message, ensure_ascii=False, allow_nan=False).encode("utf-8") + b"\n"
         fd = stream.fileno()
@@ -349,9 +499,7 @@ class DockerStrategyExecutor:
             while view:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0 or not selector.select(remaining):
-                    raise TimeoutError(
-                        f"strategy inference exceeded {self.config.limits.timeout_seconds:g}s"
-                    )
+                    raise TimeoutError(self._timeout_message())
                 try:
                     written = os.write(fd, view)
                 except (BlockingIOError, InterruptedError):
@@ -387,9 +535,7 @@ class DockerStrategyExecutor:
                     raise StrategyExecutionError("strategy protocol line exceeded max_output_chars")
                 remaining = deadline - time.monotonic()
                 if remaining <= 0 or not selector.select(remaining):
-                    raise TimeoutError(
-                        f"strategy inference exceeded {self.config.limits.timeout_seconds:g}s"
-                    )
+                    raise TimeoutError(self._timeout_message())
                 chunk = os.read(fd, min(4096, self.config.limits.max_output_chars + 1))
                 if not chunk:
                     code = process.poll()
@@ -415,6 +561,8 @@ class DockerStrategyExecutor:
 
     def _abort(self) -> None:
         self._closed = True
+        if self._fit_worker is not None and self._fit_worker is not self:
+            self._fit_worker._abort()
         process = self._process
         if process is None:
             self._reset_transport_state()
@@ -426,10 +574,11 @@ class DockerStrategyExecutor:
             self._reset_transport_state()
 
     def _reset_transport_state(self) -> None:
+        self._active_limit: str | None = None
         self._transport_sequence = -1
         self._transport_inference_at = None
         self._transport_bars = ()
-        self._transport_bar_identity = ()
+        self._transport_table = BarTable()
         self._transport_last_available_at = None
 
     def _reap_process(self, process: subprocess.Popen[bytes], *, force: bool) -> None:
@@ -824,7 +973,7 @@ def _limited_text(value: str | bytes | None, maximum: int) -> str:
     return text[:maximum]
 
 
-def _read_only_data_dir(value: str | Path | None, name: str) -> Path | None:
+def _existing_dir(value: str | Path | None, name: str) -> Path | None:
     if value is None or str(value) == "":
         return None
     path = Path(value).resolve()
@@ -860,10 +1009,15 @@ def _require_local_image(config: SandboxConfig) -> str:
 
 
 __all__ = [
+    "CONTAINER_ASOF_DIR",
+    "CONTAINER_MODELS_DIR",
+    "CONTAINER_SNAPSHOT_DIR",
+    "CONTAINER_STATE_DIR",
     "DockerExecutor",
     "DockerStrategyExecutor",
     "ExecResult",
     "ExecutorError",
+    "FittableStrategyExecutor",
     "LocalExecutor",
     "PersistentCommandRunner",
     "StrategyExecutionError",

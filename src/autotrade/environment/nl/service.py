@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Literal
 
@@ -24,13 +24,13 @@ from .retrieval import TextRetriever, validate_pattern
 
 NLMode = Literal["search", "answer"]
 
-# Per-backtest NL call ceiling. NL is the only real LLM inference inside a
-# backtest's wall clock, so an unbounded total budget lets one strategy turn an
-# official backtest into an LLM latency test. Two calls per decision day over a
-# quarterly (~61 trading day) validation window keeps the 10-call per-decision
-# peak usable on the days that need it while bounding worst-case NL wall to
-# roughly 120 x nl_deadline_seconds.
-DEFAULT_MAX_TOTAL_CALLS = 120
+# Per-replay NL call allowance. NL is the only real LLM inference inside a
+# replay's wall clock, so an unbounded total budget lets one strategy turn an
+# official evaluation into an LLM latency measurement. The ceiling is two calls
+# per decision day of the replay itself: the per-decision peak stays usable on
+# the days that need it, the worst-case NL wall stays proportional to the window
+# being replayed, and no calendar shape is baked into a constant.
+NL_CALLS_PER_TRADING_DAY = 2
 
 
 @dataclass(frozen=True)
@@ -49,9 +49,9 @@ class NLConfig:
     deadline_seconds: float = 20.0
     max_tokens: int = 1200
     max_calls_per_decision: int = 10
-    # None keeps the per-decision cap as the only bound; the shipped default is
-    # a real ceiling (see DEFAULT_MAX_TOTAL_CALLS).
-    max_total_calls: int | None = DEFAULT_MAX_TOTAL_CALLS
+    # None defers the total ceiling to the replay that runs this config (see
+    # ``for_replay``); a set value is an explicit operator override.
+    max_total_calls: int | None = None
 
     def __post_init__(self) -> None:
         values = (
@@ -81,6 +81,30 @@ class NLConfig:
             or self.max_total_calls <= 0
         ):
             raise ValueError("max_total_calls must be a positive integer or None")
+
+    def for_replay(self, trading_days: int) -> "NLConfig":
+        """Bind the total-call ceiling to the length of the replay about to run.
+
+        A configured ``max_total_calls`` is kept as the operator's own ceiling.
+        Otherwise the budget is ``NL_CALLS_PER_TRADING_DAY`` per decision day,
+        never below the per-decision cap, so a short window (a smoke replay, one
+        Paper day) can still spend a full decision's allowance.
+        """
+
+        if (
+            isinstance(trading_days, bool)
+            or not isinstance(trading_days, int)
+            or trading_days <= 0
+        ):
+            raise ValueError("trading_days must be a positive integer")
+        if self.max_total_calls is not None:
+            return self
+        return replace(
+            self,
+            max_total_calls=max(
+                NL_CALLS_PER_TRADING_DAY * trading_days, self.max_calls_per_decision
+            ),
+        )
 
 
 @dataclass(frozen=True)
@@ -502,7 +526,7 @@ def _response_choices(value: object) -> tuple[str, ...]:
 
 
 __all__ = [
-    "DEFAULT_MAX_TOTAL_CALLS",
+    "NL_CALLS_PER_TRADING_DAY",
     "NLConfig",
     "NLMode",
     "NLResult",

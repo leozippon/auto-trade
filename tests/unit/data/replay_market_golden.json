@@ -1,0 +1,695 @@
+{
+ "equity_curve": [
+  {
+   "trade_date": "20230821",
+   "initial_equity": 200000.0,
+   "equity": 199969.502745125,
+   "cash": 199019.502745125,
+   "positions": {
+    "000001.SZ": 100
+   }
+  },
+  {
+   "trade_date": "20230822",
+   "initial_equity": 200000.0,
+   "equity": 199959.06641083502,
+   "cash": 192141.06641083502,
+   "positions": {
+    "688001.SH": 200,
+    "830000.BJ": 150
+   }
+  },
+  {
+   "trade_date": "20230823",
+   "initial_equity": 200000.0,
+   "equity": 199959.06641083502,
+   "cash": 192141.06641083502,
+   "positions": {
+    "688001.SH": 200,
+    "830000.BJ": 150
+   }
+  },
+  {
+   "trade_date": "20230824",
+   "initial_equity": 200000.0,
+   "equity": 200071.56641083502,
+   "cash": 192141.06641083502,
+   "positions": {
+    "688001.SH": 200,
+    "830000.BJ": 150
+   }
+  },
+  {
+   "trade_date": "20230825",
+   "initial_equity": 200000.0,
+   "equity": 199909.56641083502,
+   "cash": 192141.06641083502,
+   "positions": {
+    "688001.SH": 200,
+    "830000.BJ": 150
+   }
+  },
+  {
+   "trade_date": "20230828",
+   "initial_equity": 200000.0,
+   "equity": 199824.99713848502,
+   "cash": 196161.99713848502,
+   "positions": {
+    "830000.BJ": 150
+   }
+  },
+  {
+   "trade_date": "20230829",
+   "initial_equity": 200000.0,
+   "equity": 199953.73075156,
+   "cash": 188763.23075156,
+   "positions": {
+    "300001.SZ": 100,
+    "600000.SH": 300,
+    "830000.BJ": 150
+   }
+  },
+  {
+   "trade_date": "20230830",
+   "initial_equity": 200000.0,
+   "equity": 200071.495704805,
+   "cash": 192453.495704805,
+   "positions": {
+    "300001.SZ": 100,
+    "600000.SH": 300
+   }
+  },
+  {
+   "trade_date": "20230831",
+   "initial_equity": 200000.0,
+   "equity": 199934.495704805,
+   "cash": 192453.495704805,
+   "positions": {
+    "300001.SZ": 100,
+    "600000.SH": 300
+   }
+  },
+  {
+   "trade_date": "20230901",
+   "initial_equity": 200000.0,
+   "equity": 199804.00940777,
+   "cash": 196882.00940777,
+   "positions": {
+    "600000.SH": 200
+   }
+  },
+  {
+   "trade_date": "20230904",
+   "initial_equity": 200000.0,
+   "equity": 199951.49966916296,
+   "cash": 192973.60966916295,
+   "positions": {
+    "600000.SH": 200,
+    "688001.SH": 201
+   }
+  },
+  {
+   "trade_date": "20230905",
+   "initial_equity": 200000.0,
+   "equity": 199931.69966916295,
+   "cash": 192973.60966916295,
+   "positions": {
+    "600000.SH": 200,
+    "688001.SH": 201
+   }
+  },
+  {
+   "trade_date": "20230906",
+   "initial_equity": 200000.0,
+   "equity": 199957.09966916294,
+   "cash": 192973.60966916295,
+   "positions": {
+    "600000.SH": 200,
+    "688001.SH": 201
+   }
+  },
+  {
+   "trade_date": "20230907",
+   "initial_equity": 200000.0,
+   "equity": 200136.96758093793,
+   "cash": 194514.69758093794,
+   "positions": {
+    "600000.SH": 100,
+    "688001.SH": 201
+   }
+  }
+ ],
+ "executions": [
+  {
+   "symbol": "000001.SZ",
+   "action": "buy",
+   "quantity": 100,
+   "execute_at": "2023-08-21T09:30:00+08:00",
+   "matched_at": "2023-08-21T09:30:00+08:00",
+   "status": "filled",
+   "price": 9.754875,
+   "commission": 5.009754875,
+   "stamp_duty": 0.0,
+   "realized_pnl": null,
+   "reason": null,
+   "metadata": {
+    "seen": 0,
+    "history": 0,
+    "latest_close": null,
+    "latest_name": null
+   }
+  },
+  {
+   "symbol": "000001.SZ",
+   "action": "sell",
+   "quantity": 100,
+   "execute_at": "2023-08-22T09:30:00+08:00",
+   "matched_at": "2023-08-22T09:30:00+08:00",
+   "status": "filled",
+   "price": 9.5952,
+   "commission": 5.0095952,
+   "stamp_duty": 0.95952,
+   "realized_pnl": -26.94637007500023,
+   "reason": null,
+   "metadata": {
+    "seen": 5,
+    "history": 1,
+    "latest_close": 9.5,
+    "latest_name": "name-000001.SZ"
+   }
+  },
+  {
+   "symbol": "688001.SH",
+   "action": "buy",
+   "quantity": 200,
+   "execute_at": "2023-08-22T15:00:00+08:00",
+   "matched_at": "2023-08-22T15:00:00+08:00",
+   "status": "filled",
+   "price": 19.599795,
+   "commission": 5.03919959,
+   "stamp_duty": 0.0,
+   "realized_pnl": null,
+   "reason": null,
+   "metadata": {
+    "seen": 5,
+    "history": 1,
+    "latest_close": 20.2,
+    "latest_name": "name-688001.SH"
+   }
+  },
+  {
+   "symbol": "830000.BJ",
+   "action": "buy",
+   "quantity": 150,
+   "execute_at": "2023-08-22T15:00:00+08:00",
+   "matched_at": "2023-08-22T15:00:00+08:00",
+   "status": "filled",
+   "price": 26.012999999999998,
+   "commission": 5.0390195,
+   "stamp_duty": 0.0,
+   "realized_pnl": null,
+   "reason": null,
+   "metadata": {
+    "seen": 5,
+    "history": 1,
+    "latest_close": 26.0,
+    "latest_name": "name-830000.BJ"
+   }
+  },
+  {
+   "symbol": "000001.SZ",
+   "action": "buy",
+   "quantity": 100,
+   "execute_at": "2023-08-23T10:00:00+08:00",
+   "matched_at": "2023-08-23T10:00:00+08:00",
+   "status": "rejected",
+   "price": null,
+   "commission": 0.0,
+   "stamp_duty": 0.0,
+   "realized_pnl": null,
+   "reason": "missing_execution_price",
+   "metadata": {
+    "seen": 10,
+    "history": 2,
+    "latest_close": 9.69,
+    "latest_name": "name-000001.SZ"
+   }
+  },
+  {
+   "symbol": "300001.SZ",
+   "action": "buy",
+   "quantity": 100,
+   "execute_at": "2023-08-23T15:00:00+08:00",
+   "matched_at": "2023-08-23T15:00:00+08:00",
+   "status": "rejected",
+   "price": null,
+   "commission": 0.0,
+   "stamp_duty": 0.0,
+   "realized_pnl": null,
+   "reason": "suspended",
+   "metadata": {
+    "seen": 10,
+    "history": 2,
+    "latest_close": 29.66,
+    "latest_name": null
+   }
+  },
+  {
+   "symbol": "600000.SH",
+   "action": "buy",
+   "quantity": 100,
+   "execute_at": "2023-08-24T09:30:00+08:00",
+   "matched_at": "2023-08-24T09:30:00+08:00",
+   "status": "rejected",
+   "price": null,
+   "commission": 0.0,
+   "stamp_duty": 0.0,
+   "realized_pnl": null,
+   "reason": "missing_daily_price_limit",
+   "metadata": {
+    "seen": 15,
+    "history": 3,
+    "latest_close": 15.59,
+    "latest_name": "name-600000.SH"
+   }
+  },
+  {
+   "symbol": "688001.SH",
+   "action": "sell",
+   "quantity": 100,
+   "execute_at": "2023-08-25T09:30:00+08:00",
+   "matched_at": "2023-08-25T09:30:00+08:00",
+   "status": "rejected",
+   "price": null,
+   "commission": 0.0,
+   "stamp_duty": 0.0,
+   "realized_pnl": null,
+   "reason": "amount_below_lot_size",
+   "metadata": {
+    "seen": 20,
+    "history": 4,
+    "latest_close": 20.37,
+    "latest_name": "name-688001.SH"
+   }
+  },
+  {
+   "symbol": "830000.BJ",
+   "action": "buy",
+   "quantity": 100,
+   "execute_at": "2023-08-25T15:00:00+08:00",
+   "matched_at": "2023-08-25T15:00:00+08:00",
+   "status": "rejected",
+   "price": null,
+   "commission": 0.0,
+   "stamp_duty": 0.0,
+   "realized_pnl": null,
+   "reason": "missing_execution_price",
+   "metadata": {
+    "seen": 20,
+    "history": 4,
+    "latest_close": 25.71,
+    "latest_name": "name-830000.BJ"
+   }
+  },
+  {
+   "symbol": "000001.SZ",
+   "action": "buy",
+   "quantity": 100,
+   "execute_at": "2023-08-28T09:30:00+08:00",
+   "matched_at": "2023-08-28T09:30:00+08:00",
+   "status": "rejected",
+   "price": null,
+   "commission": 0.0,
+   "stamp_duty": 0.0,
+   "realized_pnl": null,
+   "reason": "daily_price_limit",
+   "metadata": {
+    "seen": 24,
+    "history": 5,
+    "latest_close": 10.07,
+    "latest_name": "name-000001.SZ"
+   }
+  },
+  {
+   "symbol": "688001.SH",
+   "action": "sell",
+   "quantity": 200,
+   "execute_at": "2023-08-28T15:00:00+08:00",
+   "matched_at": "2023-08-28T15:00:00+08:00",
+   "status": "filled",
+   "price": 20.139924999999998,
+   "commission": 5.04027985,
+   "stamp_duty": 2.0139925,
+   "realized_pnl": 95.93252805999964,
+   "reason": null,
+   "metadata": {
+    "seen": 24,
+    "history": 5,
+    "latest_close": 19.56,
+    "latest_name": "name-688001.SH"
+   }
+  },
+  {
+   "symbol": "300001.SZ",
+   "action": "buy",
+   "quantity": 100,
+   "execute_at": "2023-08-29T09:30:00+08:00",
+   "matched_at": "2023-08-29T09:30:00+08:00",
+   "status": "filled",
+   "price": 28.594289999999997,
+   "commission": 5.02859429,
+   "stamp_duty": 0.0,
+   "realized_pnl": null,
+   "reason": null,
+   "metadata": {
+    "seen": 29,
+    "history": 6,
+    "latest_close": 27.88,
+    "latest_name": null
+   }
+  },
+  {
+   "symbol": "600000.SH",
+   "action": "buy",
+   "quantity": 300,
+   "execute_at": "2023-08-29T15:00:00+08:00",
+   "matched_at": "2023-08-29T15:00:00+08:00",
+   "status": "filled",
+   "price": 15.097544999999998,
+   "commission": 5.045292635,
+   "stamp_duty": 0.0,
+   "realized_pnl": null,
+   "reason": null,
+   "metadata": {
+    "seen": 29,
+    "history": 6,
+    "latest_close": 15.72,
+    "latest_name": "name-600000.SH"
+   }
+  },
+  {
+   "symbol": "830000.BJ",
+   "action": "sell",
+   "quantity": 150,
+   "execute_at": "2023-08-30T09:30:00+08:00",
+   "matched_at": "2023-08-30T09:30:00+08:00",
+   "status": "filled",
+   "price": 24.64767,
+   "commission": 5.036971505,
+   "stamp_duty": 1.8485752500000003,
+   "realized_pnl": -216.72406625499934,
+   "reason": null,
+   "metadata": {
+    "seen": 34,
+    "history": 6,
+    "latest_close": 24.91,
+    "latest_name": "name-830000.BJ"
+   }
+  },
+  {
+   "symbol": "000001.SZ",
+   "action": "buy",
+   "quantity": 1000000,
+   "execute_at": "2023-08-31T15:00:00+08:00",
+   "matched_at": "2023-08-31T15:00:00+08:00",
+   "status": "rejected",
+   "price": null,
+   "commission": 0.0,
+   "stamp_duty": 0.0,
+   "realized_pnl": null,
+   "reason": "insufficient_cash",
+   "metadata": {
+    "seen": 39,
+    "history": 8,
+    "latest_close": 10.16,
+    "latest_name": "name-000001.SZ"
+   }
+  },
+  {
+   "symbol": "300001.SZ",
+   "action": "sell",
+   "quantity": 100,
+   "execute_at": "2023-09-01T15:00:00+08:00",
+   "matched_at": "2023-09-01T15:00:00+08:00",
+   "status": "filled",
+   "price": 29.805090000000003,
+   "commission": 5.02980509,
+   "stamp_duty": 1.4902545000000003,
+   "realized_pnl": 109.53134612000076,
+   "reason": null,
+   "metadata": {
+    "seen": 44,
+    "history": 9,
+    "latest_close": 28.67,
+    "latest_name": null
+   }
+  },
+  {
+   "symbol": "600000.SH",
+   "action": "sell",
+   "quantity": 100,
+   "execute_at": "2023-09-01T15:00:00+08:00",
+   "matched_at": "2023-09-01T15:00:00+08:00",
+   "status": "filled",
+   "price": 14.602695,
+   "commission": 5.014602695,
+   "stamp_duty": 0.73013475,
+   "realized_pnl": -56.91150165666613,
+   "reason": null,
+   "metadata": {
+    "seen": 44,
+    "history": 9,
+    "latest_close": 15.38,
+    "latest_name": "name-600000.SH"
+   }
+  },
+  {
+   "symbol": "688001.SH",
+   "action": "buy",
+   "quantity": 201,
+   "execute_at": "2023-09-04T09:30:00+08:00",
+   "matched_at": "2023-09-04T09:30:00+08:00",
+   "status": "filled",
+   "price": 19.419705,
+   "commission": 5.03903360705,
+   "stamp_duty": 0.0,
+   "realized_pnl": null,
+   "reason": null,
+   "metadata": {
+    "seen": 49,
+    "history": 10,
+    "latest_close": 18.94,
+    "latest_name": "name-688001.SH"
+   }
+  },
+  {
+   "symbol": "000001.SZ",
+   "action": "buy",
+   "quantity": 150,
+   "execute_at": "2023-09-05T09:30:00+08:00",
+   "matched_at": "2023-09-05T09:30:00+08:00",
+   "status": "rejected",
+   "price": null,
+   "commission": 0.0,
+   "stamp_duty": 0.0,
+   "realized_pnl": null,
+   "reason": "invalid_buy_lot",
+   "metadata": {
+    "seen": 54,
+    "history": 11,
+    "latest_close": 9.94,
+    "latest_name": "name-000001.SZ"
+   }
+  },
+  {
+   "symbol": "600000.SH",
+   "action": "buy",
+   "quantity": 100,
+   "execute_at": "2023-09-07T09:30:00+08:00",
+   "matched_at": "2023-09-07T09:30:00+08:00",
+   "status": "filled",
+   "price": 15.417705,
+   "commission": 5.015417705,
+   "stamp_duty": 0.0,
+   "realized_pnl": null,
+   "reason": null,
+   "metadata": {
+    "seen": 59,
+    "history": 12,
+    "latest_close": 14.6,
+    "latest_name": "name-600000.SH"
+   }
+  },
+  {
+   "symbol": "600000.SH",
+   "action": "sell",
+   "quantity": 200,
+   "execute_at": "2023-09-07T15:00:00+08:00",
+   "matched_at": "2023-09-07T15:00:00+08:00",
+   "status": "filled",
+   "price": 15.472260000000002,
+   "commission": 5.03094452,
+   "stamp_duty": 1.5472260000000002,
+   "realized_pnl": 41.43486539444484,
+   "reason": null,
+   "metadata": {
+    "seen": 64,
+    "history": 13,
+    "latest_close": 15.33,
+    "latest_name": "name-600000.SH"
+   }
+  }
+ ],
+ "inference_dates": [
+  "2023-08-21T08:30:00+08:00",
+  "2023-08-22T08:30:00+08:00",
+  "2023-08-23T08:30:00+08:00",
+  "2023-08-24T08:30:00+08:00",
+  "2023-08-25T08:30:00+08:00",
+  "2023-08-28T08:30:00+08:00",
+  "2023-08-29T08:30:00+08:00",
+  "2023-08-30T08:30:00+08:00",
+  "2023-08-31T08:30:00+08:00",
+  "2023-09-01T08:30:00+08:00",
+  "2023-09-04T08:30:00+08:00",
+  "2023-09-05T08:30:00+08:00",
+  "2023-09-06T08:30:00+08:00",
+  "2023-09-07T08:30:00+08:00"
+ ],
+ "pending_orders": [
+  {
+   "seen": 64,
+   "history": 13,
+   "latest_close": 9.63,
+   "latest_name": "name-000001.SZ",
+   "symbol": "000001.SZ",
+   "action": "buy",
+   "quantity": 100,
+   "execute_at": "2023-09-08T09:30:00+08:00"
+  }
+ ],
+ "stats": {
+  "initial_cash": 200000.0,
+  "final_equity": 200136.96758093793,
+  "total_return": 0.0006848379046895392,
+  "long_return": -0.0002684159920611023,
+  "annualized_return": 0.012003127401439606,
+  "sharpe": 1.3511857388632542,
+  "max_drawdown": 0.0013373064841987596,
+  "win_rate": 0.5,
+  "exposure": {
+   "avg_gross": 0.03275549134028979,
+   "max_gross": 0.05596544739594809,
+   "zero_position_days": 0,
+   "replay_days": 14
+  },
+  "sub_windows": [
+   {
+    "kind": "quarter",
+    "label": "2023Q3",
+    "start": "20230821",
+    "end": "20230907",
+    "trade_days": 14,
+    "partial": true,
+    "return": 0.000685,
+    "benchmark_return": null,
+    "excess_return": null,
+    "sharpe": 1.351186,
+    "max_drawdown": 0.001337,
+    "turnover": 0.189256,
+    "trade_count": 6
+   }
+  ],
+  "weekly_returns": [
+   {
+    "week_end": "20230825",
+    "return": -0.0004521679458249217
+   },
+   {
+    "week_end": "20230901",
+    "return": -0.0005280237707487867
+   },
+   {
+    "week_end": "20230907",
+    "return": 0.0016664238828580924
+   }
+  ],
+  "trade_count": 6,
+  "turnover": 0.18925553102499998,
+  "order_count": 21,
+  "order_status_counts": {
+   "filled": 13,
+   "rejected": 8
+  },
+  "order_lifecycle": {
+   "entry": {
+    "total": 14,
+    "filled": 7,
+    "rejected": 7
+   },
+   "exit": {
+    "total": 7,
+    "filled": 6,
+    "rejected": 1
+   }
+  },
+  "strategy_exit_fill_count": 6,
+  "reject_counts": {
+   "missing_execution_price": 2,
+   "suspended": 1,
+   "missing_daily_price_limit": 1,
+   "amount_below_lot_size": 1,
+   "daily_price_limit": 1,
+   "insufficient_cash": 1,
+   "invalid_buy_lot": 1
+  },
+  "fees_paid": 65.37851106205,
+  "stamp_duty_paid": 8.589703,
+  "decision_calls": 14,
+  "per_stock": [
+   {
+    "symbol": "000001.SZ",
+    "exit_at": "2023-08-22T09:30:00+08:00",
+    "exit_price": 9.5952,
+    "quantity": 100,
+    "realized_pnl": -26.94637007500023
+   },
+   {
+    "symbol": "688001.SH",
+    "exit_at": "2023-08-28T15:00:00+08:00",
+    "exit_price": 20.139924999999998,
+    "quantity": 200,
+    "realized_pnl": 95.93252805999964
+   },
+   {
+    "symbol": "830000.BJ",
+    "exit_at": "2023-08-30T09:30:00+08:00",
+    "exit_price": 24.64767,
+    "quantity": 150,
+    "realized_pnl": -216.72406625499934
+   },
+   {
+    "symbol": "300001.SZ",
+    "exit_at": "2023-09-01T15:00:00+08:00",
+    "exit_price": 29.805090000000003,
+    "quantity": 100,
+    "realized_pnl": 109.53134612000076
+   },
+   {
+    "symbol": "600000.SH",
+    "exit_at": "2023-09-01T15:00:00+08:00",
+    "exit_price": 14.602695,
+    "quantity": 100,
+    "realized_pnl": -56.91150165666613
+   },
+   {
+    "symbol": "600000.SH",
+    "exit_at": "2023-09-07T15:00:00+08:00",
+    "exit_price": 15.472260000000002,
+    "quantity": 200,
+    "realized_pnl": 41.43486539444484
+   }
+  ],
+  "replayed_trade_days": 14
+ }
+}

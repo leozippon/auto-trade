@@ -20,7 +20,6 @@ from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.data.snapshot import SnapshotConfig
 from autotrade.environment.llm import MODEL_CHOICES, build_model_gateway
 from autotrade.environment.nl import NLConfig
-from autotrade.environment.nl.service import DEFAULT_MAX_TOTAL_CALLS
 from autotrade.environment.sandbox import DEFAULT_IMAGE, SandboxConfig, SandboxLimits
 from autotrade.environment.strategy import StrategySchedule
 from autotrade.paper import DailyPaperEngine
@@ -30,6 +29,11 @@ from autotrade.pipelines import PaperPITData, ResearchPITSnapshotProvider
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--strategy", type=Path, required=True)
+    parser.add_argument(
+        "--models-dir",
+        type=Path,
+        help="The activated revision's models/ tree, if it has one.",
+    )
     parser.add_argument(
         "--strategy-revision",
         required=True,
@@ -86,7 +90,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--nl-max-results", type=int, default=8)
     parser.add_argument("--nl-max-calls-per-decision", type=int, default=10)
     parser.add_argument(
-        "--nl-max-total-calls", type=int, default=DEFAULT_MAX_TOTAL_CALLS
+        "--nl-max-total-calls",
+        type=int,
+        default=None,
+        help="Hard NL ceiling for the day; unset derives it from the replay length.",
     )
     return parser
 
@@ -142,6 +149,7 @@ def main(argv: list[str] | None = None) -> int:
         strategy_revision=args.strategy_revision,
         daily=daily,
         state_root=args.state_root,
+        models_dir=args.models_dir,
         schedule=StrategySchedule(
             period=args.strategy_period,
             inference_time=args.inference_time,

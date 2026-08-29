@@ -42,6 +42,17 @@ _MIN_REGRESSION_DAYS = 8
 STYLE_ARTIFACT_NAME = "style_analysis.json"
 STYLE_SCHEMA_VERSION = 1
 _STYLE_COLUMNS = ("circ_mv", "pb", "turnover_rate")
+# Size-factor proxy for the neutralized excess return: the small-minus-big
+# daily spread of the replay slot's OWN cross-section, equal-weighted inside
+# each leg. The audited edge read as a small-cap / low-beta tilt rather than
+# proven alpha, and a raw excess return cannot tell those apart. This is not a
+# Barra or Fama-French factor and the result says so in ``method``.
+_SIZE_FACTOR_QUANTILE = 0.3
+_SIZE_FACTOR_MIN_NAMES = 30
+NEUTRALIZATION_METHOD = (
+    "日度策略收益对沪深300收益与规模因子（本回放槽流通市值最小 30% 等权减最大 30% 等权）"
+    "的二元 OLS，截距按 244 个交易日年化"
+)
 
 
 def _date_text(value: object) -> str:
@@ -172,6 +183,99 @@ def _benchmark_regression(
             if variance_strategy > 0
             else None
         ),
+    )
+    return result
+
+
+def _size_factor(replay_daily: pd.DataFrame) -> dict[str, float]:
+    """Daily small-minus-big spread built from the replay slot's own universe.
+
+    Frozen replay data only, like every other input here: the cross-section is
+    the slot's ``daily`` frame, so the factor cannot disagree with what the
+    strategy actually traded against.
+    """
+
+    required = {"trade_date", "circ_mv", "pct_chg"}
+    if not required.issubset(replay_daily.columns):
+        return {}
+    frame = replay_daily[["trade_date", "circ_mv", "pct_chg"]].copy()
+    frame["circ_mv"] = pd.to_numeric(frame["circ_mv"], errors="coerce")
+    frame["pct_chg"] = pd.to_numeric(frame["pct_chg"], errors="coerce")
+    frame = frame.dropna(subset=["circ_mv", "pct_chg"])
+    result: dict[str, float] = {}
+    for date, group in frame.groupby("trade_date"):
+        if len(group) < _SIZE_FACTOR_MIN_NAMES:
+            continue
+        small = group.loc[
+            group["circ_mv"] <= group["circ_mv"].quantile(_SIZE_FACTOR_QUANTILE),
+            "pct_chg",
+        ]
+        big = group.loc[
+            group["circ_mv"] >= group["circ_mv"].quantile(1.0 - _SIZE_FACTOR_QUANTILE),
+            "pct_chg",
+        ]
+        if small.empty or big.empty:
+            continue
+        value = float(small.mean() - big.mean()) / 100.0
+        if math.isfinite(value):
+            result[_date_text(date)] = value
+    return result
+
+
+def _neutralized_excess(
+    strategy: list[tuple[str, float]],
+    benchmark: Mapping[str, float],
+    size: Mapping[str, float],
+) -> dict[str, object]:
+    """Excess return left after the market-beta and size contributions.
+
+    Two-regressor OLS through the normal equations, so a collinear or degenerate
+    pair is reported as a reason instead of raising: attribution is advisory and
+    must never fail a backtest.
+    """
+
+    rows = [
+        (value, benchmark[date], size[date])
+        for date, value in strategy
+        if date in benchmark and date in size
+    ]
+    days = len(rows)
+    result: dict[str, object] = {
+        "available": False,
+        "reason": "factors_unavailable" if not days else "insufficient_overlapping_days",
+        "method": NEUTRALIZATION_METHOD,
+        "n_days": days,
+        "neutralized_excess_return": None,
+        "market_beta": None,
+        "size_beta": None,
+        "r2": None,
+    }
+    if days < _MIN_REGRESSION_DAYS:
+        return result
+    mean_y = sum(row[0] for row in rows) / days
+    mean_1 = sum(row[1] for row in rows) / days
+    mean_2 = sum(row[2] for row in rows) / days
+    s11 = sum((row[1] - mean_1) ** 2 for row in rows)
+    s22 = sum((row[2] - mean_2) ** 2 for row in rows)
+    s12 = sum((row[1] - mean_1) * (row[2] - mean_2) for row in rows)
+    s1y = sum((row[1] - mean_1) * (row[0] - mean_y) for row in rows)
+    s2y = sum((row[2] - mean_2) * (row[0] - mean_y) for row in rows)
+    syy = sum((row[0] - mean_y) ** 2 for row in rows)
+    determinant = s11 * s22 - s12 * s12
+    if determinant <= 0:
+        result["reason"] = "factors_collinear"
+        return result
+    market_beta = (s22 * s1y - s12 * s2y) / determinant
+    size_beta = (s11 * s2y - s12 * s1y) / determinant
+    alpha_daily = mean_y - market_beta * mean_1 - size_beta * mean_2
+    residual = syy - market_beta * s1y - size_beta * s2y
+    result.update(
+        available=True,
+        reason=None,
+        neutralized_excess_return=round(alpha_daily * TRADING_DAYS_PER_YEAR, 4),
+        market_beta=round(market_beta, 3),
+        size_beta=round(size_beta, 3),
+        r2=round(1.0 - residual / syy, 3) if syy > 0 else None,
     )
     return result
 
@@ -310,6 +414,8 @@ def replay_style_analysis(
     strategy = daily_returns_from_curve(replay.equity_curve)
     benchmark = _slot_benchmark(replay_dir)
     regression = _benchmark_regression(strategy, benchmark)
+    size = _size_factor(replay_daily)
+    neutralized = _neutralized_excess(strategy, benchmark, size)
     style = _style_exposures(replay_daily, replay.equity_curve, _snapshot_industry(snapshot_dir))
     total_return = compute_return_stats(replay).get("total_return")
     benchmark_return = regression.get("benchmark_return")
@@ -327,12 +433,19 @@ def replay_style_analysis(
         "mode": mode,
         "benchmark": {"ts_code": BENCHMARK_TS_CODE, "label": BENCHMARK_LABEL},
         "benchmark_regression": regression,
+        "neutralized_excess": neutralized,
         "style": style,
         "strategy_daily": [[date, value] for date, value in strategy],
         "benchmark_daily": [[date, benchmark[date]] for date, _ in strategy if date in benchmark],
+        "size_factor_daily": [[date, size[date]] for date, _ in strategy if date in size],
         "compact": {
             "benchmark_return": benchmark_return,
             "excess_return": excess_return,
+            # The raw excess cannot separate an edge from a small-cap or
+            # high-beta tilt, so the neutralized figure rides beside it
+            # wherever the raw one is read.
+            "neutralized_excess_return": neutralized.get("neutralized_excess_return"),
+            "neutralized_excess_method": NEUTRALIZATION_METHOD,
             "beta": regression.get("beta"),
             "n_days": regression.get("n_days"),
             "size_tilt": tilts.get("size") if isinstance(tilts, Mapping) else None,
@@ -377,6 +490,7 @@ def write_style_rollup(result_dir: Path, payload: Mapping[str, object]) -> Path:
 __all__ = [
     "BENCHMARK_LABEL",
     "BENCHMARK_TS_CODE",
+    "NEUTRALIZATION_METHOD",
     "STYLE_ARTIFACT_NAME",
     "STYLE_SCHEMA_VERSION",
     "benchmark_summary_block",

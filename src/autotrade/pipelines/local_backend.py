@@ -6,11 +6,13 @@ import copy
 import json
 import shutil
 import threading
+import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import replace
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, replace
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
 import pandas as pd
@@ -30,7 +32,11 @@ from autotrade.environment.data.summary import HOST_PATH_RE, write_agent_data_su
 from autotrade.environment.executor import PersistentCommandRunner
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.llm.model_profiles import AGENT_MAX_OUTPUT_TOKENS
-from autotrade.environment.replay.stats import PhaseTimer, finalize_summary_timing
+from autotrade.environment.replay.stats import (
+    PhaseTimer,
+    attach_sub_window_benchmark,
+    finalize_summary_timing,
+)
 from autotrade.environment.replay.style import (
     benchmark_summary_block,
     replay_style_analysis,
@@ -74,7 +80,10 @@ from autotrade.environment.tools.base import (
     ToolSpec,
 )
 from autotrade.environment.tools.files import EditFileTool, WriteFileTool
-from autotrade.environment.tools.finish_fold import FinishFoldTool
+from autotrade.environment.tools.finish_fold import (
+    FinishFoldTool,
+    executable_source_structure,
+)
 from autotrade.environment.tools.hitl import AskUserTool
 from autotrade.environment.tools.modification_check import ModificationCheckTool
 from autotrade.environment.tools.search import (
@@ -105,7 +114,9 @@ from .ledger import ExperimentLedger, latest_fold_records
 from .skills import (
     SKILLS_INDEX_PATH,
     DeleteSkillTool,
+    MemorySource,
     WriteSkillTool,
+    install_operating_memory,
     install_workspace_skills,
     write_skills_index,
 )
@@ -203,9 +214,12 @@ class LocalDailyEvaluationBackend:
         timer = PhaseTimer()
         with timer.phase("replay_frames"):
             frame = self.frame_between(request.start, request.end)
+            replay_end = str(request.end)
             if max_days is not None:
                 kept = sorted(set(frame["trade_date"]))[:max_days]
                 frame = frame[frame["trade_date"].isin(set(kept))].copy()
+                # A truncated replay must not claim it covered the last quarter.
+                replay_end = str(kept[-1]) if kept else replay_end
         if frame.empty:
             raise ValueError(
                 f"daily replay is empty for {request.start}..{request.end}"
@@ -221,7 +235,7 @@ class LocalDailyEvaluationBackend:
             config,
             executor_factory=self.executor_factory,
         ).run(frame)
-        record = replay.to_record()
+        record = replay.to_record(start=str(request.start), end=replay_end)
         with timer.phase("style_analysis"):
             style = replay_style_analysis(
                 replay,
@@ -236,6 +250,7 @@ class LocalDailyEvaluationBackend:
         benchmark = benchmark_summary_block(style)
         if benchmark is not None:
             summary["benchmark"] = benchmark
+        attach_sub_window_benchmark(summary, style)
         finalize_summary_timing(
             summary, started_at=started_at, setup_phases=timer.to_record()
         )
@@ -524,6 +539,16 @@ def _public_validation_error(
     return f"daily Validation failed: {_public_error_text(exc, hidden=hidden)}"
 
 
+def _hidden_calendar(fold) -> tuple[str | None, ...]:
+    """Calendar values no Agent-visible failure text may contain.
+
+    Single source for every formal tool in this module. A Fold without a Test
+    stage simply has nothing to redact there; ``_public_error_text`` drops the
+    empty entries.
+    """
+    return (fold.fold_id, fold.test_start, fold.test_end)
+
+
 SMOKE_BACKTEST_DEFAULT_DAYS = 3
 SMOKE_BACKTEST_MAX_DAYS = 5
 
@@ -653,9 +678,7 @@ class SmokeBacktestTool:
                     "days_requested": days,
                     "official": False,
                     "counts_against_backtest_budget": False,
-                    "error": _public_error_text(
-                        exc, hidden=(fold.fold_id, fold.test_start, fold.test_end)
-                    ),
+                    "error": _public_error_text(exc, hidden=_hidden_calendar(fold)),
                     "hint": _SMOKE_LAYOUT_HINT,
                 },
             )
@@ -879,7 +902,7 @@ class FoldBacktestTool(SessionTimeBudgetAware):
     def session_time_budget(self) -> InferenceTimeBudget:
         return self.time_budget
 
-    def _append_manifest_summary(self, summary: dict[str, object]) -> None:
+    def append_manifest_summary(self, summary: dict[str, object]) -> None:
         """Every backtest attempt, successful or not, lands in the run manifest.
 
         It is the only durable per-run record of what the session actually ran:
@@ -891,19 +914,124 @@ class FoldBacktestTool(SessionTimeBudgetAware):
 
     def invoke(self, arguments: Mapping[str, object]) -> ToolResult:
         del arguments
-        self._check_deadline()
+        self.check_deadline()
         with self.time_budget.pause():
             return self._invoke_exempt()
 
+    def commit_revision(
+        self, source_output: Path, fingerprint: str, *, label: str
+    ) -> ArtifactRevision:
+        """Freeze one approved working tree into an immutable revision.
+
+        The revision is verified to be the bytes ``modification_check`` just
+        approved, so an approval can never be transferred to a tree that was
+        still being written; a mismatch discards the revision and raises.
+        """
+        revision = self.artifact_store.create_revision(
+            source_output, models_path=self.models_dir
+        )
+        if revision.fingerprint != fingerprint:
+            self.artifact_store.discard_revision(str(revision.revision_id))
+            raise ArtifactSnapshotUnstable(
+                f"{label} changed between modification_check and the "
+                "Validation snapshot"
+            )
+        typed = ArtifactRevision(
+            str(revision.revision_id),
+            Path(revision.output_path),
+            Path(revision.models_path)
+            if revision.models_path is not None
+            else None,
+        )
+        _assert_skills_absent_from_formal(typed.output_path, typed.models_path)
+        return typed
+
+    def record_validation(
+        self,
+        revision: ArtifactRevision,
+        evaluation: EvaluationResult,
+        *,
+        result_name: str,
+        metadata: Mapping[str, object] | None = None,
+    ) -> str:
+        """Append one completed Validation to the step tree under the current
+        position. ``batch_validate`` repositions the tree first so its
+        candidates become siblings rather than a chain."""
+        return self.tree.record_step(
+            revision.output_path,
+            epoch_id=self.request.epoch_id,
+            # Opaque the fold id so the step-tree node names the Agent
+            # reads (steps/tree.txt|tree.json) never leak the held-out
+            # calendar period.
+            fold_id=self.ref_store.get_or_create("fold", self.request.fold.fold_id),
+            run_id=self.ref_store.get_or_create("run", self.request.run_id),
+            result_name=result_name,
+            revision_id=self.ref_store.get_or_create(
+                "strategy", revision.revision_id
+            ),
+            # tree.json is Agent-readable and accumulates one node per
+            # Validation for the whole experiment, so it carries the
+            # same fixed-size projection the observation does.
+            metrics=inline_backtest_stats(evaluation.summary),
+            models_root=revision.models_path,
+            attachments={VALIDATION_RESULT_ATTACHMENT: evaluation.result_ref},
+            metadata=metadata,
+        )
+
+    def validation_request(
+        self, revision: ArtifactRevision
+    ) -> EvaluationRequest:
+        """The Fold's own Validation replay, for any revision it accepted."""
+        return EvaluationRequest(
+            revision=revision,
+            snapshot=self.request.snapshot,
+            mode="valid",
+            start=self.request.fold.validation_start,
+            end=self.request.fold.validation_end,
+            schedule=self.schedule,
+            broker_profile=self.broker_profile,
+        )
+
+    def reserve_validations(self, count: int) -> list[str]:
+        """Claim ``count`` Validation slots and name their results.
+
+        One Fold session has one Validation budget and one Step list, whether
+        the calls arrive one at a time through ``daily_backtest`` or as a set
+        through ``batch_validate``; both go through here so neither can
+        overspend behind the other's back. A batch claims every slot before it
+        commits anything, so a batch that does not fit is refused whole instead
+        of half-run.
+        """
+        remaining_backtests = self.request.max_backtests - self.backtests
+        if count > remaining_backtests:
+            raise ToolError(
+                "Fold Validation backtest budget exhausted"
+                if remaining_backtests <= 0
+                else f"Fold Validation backtest budget has {remaining_backtests} "
+                f"left and {count} were requested"
+            )
+        remaining_steps = self.request.max_steps - len(self.steps)
+        if count > remaining_steps:
+            raise ToolError(
+                "Fold Step budget exhausted"
+                if remaining_steps <= 0
+                else f"Fold Step budget has {remaining_steps} left and {count} "
+                "were requested"
+            )
+        names = [
+            f"valid_{self.backtests + offset + 1:03d}" for offset in range(count)
+        ]
+        self.backtests += count
+        return names
+
+    def release_validations(self, count: int) -> None:
+        """Refund slots for attempts whose snapshot never held (no replay ran)."""
+        self.backtests = max(0, self.backtests - count)
+
     def _invoke_exempt(self) -> ToolResult:
-        if self.backtests >= self.request.max_backtests:
-            raise ToolError("Fold Validation backtest budget exhausted")
-        if len(self.steps) >= self.request.max_steps:
-            raise ToolError("Fold Step budget exhausted")
         # The attempt begins here and costs one Validation slot; only a snapshot
         # that never held is refunded below.
-        self.backtests += 1
-        result_name = f"valid_{self.backtests:03d}"
+        result_name = self.reserve_validations(1)[0]
         revision_id = ""
         node_id = None
         evaluation = None
@@ -915,58 +1043,14 @@ class FoldBacktestTool(SessionTimeBudgetAware):
             # snapshot is verified to be the bytes the check just approved — a
             # write that lands after this line belongs to the next attempt and
             # cannot reach this one's result.
-            revision = self.artifact_store.create_revision(
-                self.output_dir,
-                models_path=self.models_dir,
+            typed = self.commit_revision(
+                self.output_dir, str(check.value["fingerprint"]), label="output/"
             )
-            if revision.fingerprint != check.value["fingerprint"]:
-                self.artifact_store.discard_revision(str(revision.revision_id))
-                raise ArtifactSnapshotUnstable(
-                    "output/ changed between modification_check and the "
-                    "Validation snapshot"
-                )
-            revision_id = str(revision.revision_id)
-            typed = ArtifactRevision(
-                revision_id,
-                Path(revision.output_path),
-                Path(revision.models_path)
-                if revision.models_path is not None
-                else None,
-            )
-            _assert_skills_absent_from_formal(typed.output_path, typed.models_path)
-            evaluation = self.evaluator.evaluate(
-                EvaluationRequest(
-                    revision=typed,
-                    snapshot=self.request.snapshot,
-                    mode="valid",
-                    start=self.request.fold.validation_start,
-                    end=self.request.fold.validation_end,
-                    schedule=self.schedule,
-                    broker_profile=self.broker_profile,
-                )
-            )
-            self._check_deadline()
-            revision_ref = self.ref_store.get_or_create("strategy", revision_id)
-            node_id = self.tree.record_step(
-                typed.output_path,
-                epoch_id=self.request.epoch_id,
-                # Opaque the fold id so the step-tree node names the Agent
-                # reads (steps/tree.txt|tree.json) never leak the held-out
-                # calendar period.
-                fold_id=self.ref_store.get_or_create(
-                    "fold", self.request.fold.fold_id
-                ),
-                run_id=self.ref_store.get_or_create("run", self.request.run_id),
-                result_name=result_name,
-                revision_id=revision_ref,
-                # tree.json is Agent-readable and accumulates one node per
-                # Validation for the whole experiment, so it carries the
-                # same fixed-size projection the observation does.
-                metrics=inline_backtest_stats(evaluation.summary),
-                models_root=typed.models_path,
-                attachments={
-                    VALIDATION_RESULT_ATTACHMENT: evaluation.result_ref
-                },
+            revision_id = typed.revision_id
+            evaluation = self.evaluator.evaluate(self.validation_request(typed))
+            self.check_deadline()
+            node_id = self.record_validation(
+                typed, evaluation, result_name=result_name
             )
         except SessionInterrupt:
             # The session is over: an environment failure must never be
@@ -976,12 +1060,10 @@ class FoldBacktestTool(SessionTimeBudgetAware):
             # No snapshot was accepted and no replay ran, so this is
             # infrastructure, not a Validation: it costs neither a backtest slot
             # nor a Step.
-            self.backtests -= 1
+            self.release_validations(1)
             fold = self.request.fold
-            public_error = _public_error_text(
-                exc, hidden=(fold.fold_id, fold.test_start, fold.test_end)
-            )
-            self._append_manifest_summary(
+            public_error = _public_error_text(exc, hidden=_hidden_calendar(fold))
+            self.append_manifest_summary(
                 {
                     "mode": "valid",
                     "status": "infrastructure_error",
@@ -1002,12 +1084,7 @@ class FoldBacktestTool(SessionTimeBudgetAware):
         except Exception as exc:
             fold = self.request.fold
             public_error = _public_validation_error(
-                exc,
-                hidden=(
-                    fold.fold_id,
-                    fold.test_start,
-                    fold.test_end,
-                ),
+                exc, hidden=_hidden_calendar(fold)
             )
             if self.request.record_failed_attempts:
                 self.tree.record_failed_attempt(
@@ -1028,7 +1105,7 @@ class FoldBacktestTool(SessionTimeBudgetAware):
                         else None
                     ),
                 )
-            self._append_manifest_summary(
+            self.append_manifest_summary(
                 {
                     "result_name": result_name,
                     "mode": "valid",
@@ -1043,7 +1120,7 @@ class FoldBacktestTool(SessionTimeBudgetAware):
         assert node_id is not None and evaluation is not None and check is not None
         step = StepResult(node_id, revision_id, evaluation)
         self.steps.append(step)
-        self._append_manifest_summary(
+        self.append_manifest_summary(
             {
                 "result_name": result_name,
                 "mode": "valid",
@@ -1102,11 +1179,627 @@ class FoldBacktestTool(SessionTimeBudgetAware):
             },
         )
 
-    def _check_deadline(self) -> None:
+    def check_deadline(self) -> None:
         try:
             self.time_budget.check()
         except TimeoutError as exc:
             raise TimeoutError("Fold deadline exceeded") from exc
+
+
+# ``batch_validate``: one formal step that fans out a pre-registered candidate
+# set over the same Validation window. Audited folds reached at most two formal
+# Validations each and carried the parent forward whenever a single quarter
+# could not separate a challenger from it — one candidate per serial step, each
+# branching off the last, is what made the evidence per decision too thin. A
+# batch fixes the parent for every candidate, so their numbers are comparable,
+# and pre-registers each hypothesis before any result exists.
+BATCH_VALIDATE_MIN_CANDIDATES = 2
+# The Fold's own configured budget is the real limit and is checked per call;
+# this cap only bounds what one observation may carry, and six screening
+# candidates already make a wide round.
+BATCH_VALIDATE_MAX_CANDIDATES = 6
+# Concurrent replays per batch. Each one holds its own result/as-of directory
+# and its own strategy container — two when the candidate declares fit, whose
+# read-write state bind needs a second worker — and the Timeview stash
+# serializes part publication across evaluations, so the bound is host capacity
+# (up to two containers per replay at SandboxLimits.cpus), not correctness.
+BATCH_VALIDATE_MAX_CONCURRENCY = 3
+BATCH_NAME_MAX_CHARS = 40
+BATCH_HYPOTHESIS_MAX_CHARS = 500
+BATCH_PATH_MAX_CHARS = 200
+# Workspace roots a candidate may not be or sit under: output/ and models/ are
+# the live working copy ``daily_backtest`` submits, and the rest are not
+# strategy trees. A candidate is a separate directory, so the bytes a batch
+# freezes cannot change while the Agent keeps editing the working copy.
+_BATCH_RESERVED_ROOTS = frozenset({"output", "models", "inputs", "skills", "refs"})
+# The per-candidate projection an observation carries. ``daily_backtest`` ships
+# the whole fixed-size summary for its single node; a batch multiplies that by
+# N, so a row keeps what a screening decision is actually made on and points at
+# the node's full record for everything else.
+BATCH_CANDIDATE_SUMMARY_KEYS = (
+    "total_return",
+    "annualized_return",
+    "long_return",
+    "sharpe",
+    "max_drawdown",
+    "win_rate",
+    "turnover",
+    "trade_count",
+    "order_count",
+    "decision_calls",
+    "replayed_trade_days",
+    "exposure",
+    "benchmark",
+    "sub_windows",
+)
+# A multi-year Validation window has one sub-window row per quarter, and a
+# batch multiplies that by the number of candidates. A row keeps the columns a
+# screening comparison is made on; the node's result.json keeps the full table.
+BATCH_SUB_WINDOW_KEYS = ("label", "return", "excess_return", "sharpe")
+
+
+def batch_candidate_stats(summary: Mapping[str, object]) -> dict[str, object]:
+    """The metrics one batch row carries inline."""
+    stats = {
+        key: value
+        for key, value in summary.items()
+        if key in BATCH_CANDIDATE_SUMMARY_KEYS
+    }
+    rows = stats.get("sub_windows")
+    if isinstance(rows, list):
+        stats["sub_windows"] = [
+            {key: row.get(key) for key in BATCH_SUB_WINDOW_KEYS}
+            for row in rows
+            if isinstance(row, Mapping)
+        ]
+    return stats
+
+
+@dataclass(frozen=True)
+class _BatchCandidate:
+    name: str
+    hypothesis: str
+    path: str
+    directory: Path
+
+
+class BatchValidateTool(SessionTimeBudgetAware):
+    """Commit and evaluate several pre-registered candidates as sibling Steps.
+
+    Every candidate goes through exactly what ``daily_backtest`` does — its own
+    ``modification_check``, its own immutable revision, one full Validation
+    replay, one Step node — and costs the same budget. What the batch adds is
+    that the candidates share one parent node and one call, so a screening
+    round is one formal step instead of N serial ones whose results are not
+    comparable because each branched off the previous winner.
+
+    Selection is never automatic: the Agent reads the table and nominates a
+    winner with ``step_rollback`` then ``finish_fold``.
+    """
+
+    spec = ToolSpec(
+        "batch_validate",
+        "Run the Fold Validation replay on "
+        f"{BATCH_VALIDATE_MIN_CANDIDATES}-{BATCH_VALIDATE_MAX_CANDIDATES} "
+        "PRE-REGISTERED candidates in one call. Each candidate is {name, "
+        "hypothesis, path}: path is a workspace directory laid out like "
+        "output/ (main.py plus its siblings, models/ is shared with the "
+        "working copy), and hypothesis is the falsifiable statement you "
+        "register BEFORE any result exists. Each candidate becomes its own "
+        "immutable revision, full Validation and Step node under the CURRENT "
+        "node as shared parent, and each consumes one backtest and one Step of "
+        "the Fold budget; the whole batch is refused before anything runs if "
+        "it does not fit the budget, if two candidates are byte-identical, if "
+        "one has the parent strategy's executable structure, or if one fails "
+        "modification_check. Candidates replay concurrently on the same "
+        "Validation window. Returns one row per candidate: node id, headline "
+        "metrics, the per-quarter return/excess/Sharpe of sub_windows, wall "
+        "seconds, and the exact failure text for any that failed — one failure "
+        "never hides the others; each row's result_ref reads back that "
+        "candidate's full replay record. Selection stays yours: "
+        "step_rollback(node_id) the winner, then finish_fold(node_id). Use "
+        "daily_backtest for a single candidate or the live output/.",
+        {
+            "type": "object",
+            "properties": {
+                "candidates": {
+                    "type": "array",
+                    "minItems": BATCH_VALIDATE_MIN_CANDIDATES,
+                    "maxItems": BATCH_VALIDATE_MAX_CANDIDATES,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": BATCH_NAME_MAX_CHARS,
+                                "description": "Short label, unique in the batch.",
+                            },
+                            "hypothesis": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": BATCH_HYPOTHESIS_MAX_CHARS,
+                                "description": (
+                                    "Falsifiable statement registered before "
+                                    "the result exists."
+                                ),
+                            },
+                            "path": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": BATCH_PATH_MAX_CHARS,
+                                "description": (
+                                    "Workspace-relative directory laid out "
+                                    "like output/, e.g. candidates/value."
+                                ),
+                            },
+                        },
+                        "required": ["name", "hypothesis", "path"],
+                        "additionalProperties": False,
+                    },
+                }
+            },
+            "required": ["candidates"],
+            "additionalProperties": False,
+        },
+        mutating=True,
+        example={
+            "candidates": [
+                {
+                    "name": "value_quality",
+                    "hypothesis": "T-1 估值+质量 4 因子等权打分优于父本动量排序",
+                    "path": "candidates/value_quality",
+                },
+                {
+                    "name": "reversal",
+                    "hypothesis": "21 日反转单因子优于父本动量排序",
+                    "path": "candidates/reversal",
+                },
+            ]
+        },
+    )
+
+    def __init__(
+        self,
+        *,
+        backtest: FoldBacktestTool,
+        workspace: SafeWorkspace,
+        modification_check_factory: Callable[[Path], ModificationCheckTool],
+        parent_main_py: str | Path | None = None,
+    ) -> None:
+        self.backtest = backtest
+        self.workspace = workspace
+        self.modification_check_factory = modification_check_factory
+        self._parent_structure: str | None = None
+        if parent_main_py is not None:
+            path = Path(parent_main_py)
+            try:
+                self._parent_structure = executable_source_structure(
+                    path.read_text(encoding="utf-8")
+                )
+            except (OSError, SyntaxError) as exc:
+                raise ValueError(
+                    f"parent strategy structure is invalid: {exc}"
+                ) from exc
+
+    @property
+    def session_time_budget(self) -> InferenceTimeBudget:
+        return self.backtest.time_budget
+
+    def invoke(self, arguments: Mapping[str, object]) -> ToolResult:
+        self.backtest.check_deadline()
+        with self.backtest.time_budget.pause():
+            return self._invoke_exempt(arguments)
+
+    def _invoke_exempt(self, arguments: Mapping[str, object]) -> ToolResult:
+        candidates = self._parse(arguments)
+        # Everything that can refuse the batch runs before a single slot is
+        # spent, so a rejected batch costs nothing and the Agent can fix the
+        # offending candidate and call again.
+        checks = self._precheck(candidates)
+        result_names = self.backtest.reserve_validations(len(candidates))
+        batch_id = uuid.uuid4().hex[:12]
+        parent_node_id = self.backtest.tree.current_node_id
+        revisions = self._commit(candidates, checks, count=len(candidates))
+        outcomes = self._replay(revisions)
+        # Unlike a single backtest, a batch does not re-check the deadline here:
+        # every replay is already paid for, and dropping N completed Validations
+        # because the clock ran out during them would destroy real evidence. The
+        # session deadline is enforced at the next dispatch and LLM call.
+        rows: list[dict[str, object]] = []
+        recorded = 0
+        try:
+            for candidate, revision, result_name, outcome in zip(
+                candidates, revisions, result_names, outcomes, strict=True
+            ):
+                evaluation, error, seconds = outcome
+                # Every candidate — recorded or dead end — hangs off the node
+                # the batch started at, never off the sibling before it.
+                self.backtest.tree.set_position(parent_node_id)
+                row: dict[str, object] = {
+                    "name": candidate.name,
+                    "hypothesis": candidate.hypothesis,
+                    "path": candidate.path,
+                    "result_name": result_name,
+                    "wall_seconds": round(seconds, 1),
+                }
+                if evaluation is None:
+                    row.update(
+                        self._record_failure(candidate, result_name, error, batch_id)
+                    )
+                else:
+                    row.update(
+                        self._record_success(
+                            candidate,
+                            revision,
+                            evaluation,
+                            result_name=result_name,
+                            batch_id=batch_id,
+                        )
+                    )
+                    recorded += 1
+                rows.append(row)
+        finally:
+            # The batch never touched the working copy, so the tree position
+            # comes back to where it branched from even if recording failed:
+            # the Agent moves it deliberately with step_rollback once it picks
+            # a winner.
+            self.backtest.tree.set_position(parent_node_id)
+        if not recorded:
+            raise ToolError(
+                f"batch_validate: all {len(rows)} candidates failed their "
+                "Validation; each still consumed one backtest slot",
+                error_type="validation_failed",
+                details={"batch_id": batch_id, "candidates": rows},
+            )
+        return ToolResult(
+            True,
+            value={
+                "batch_id": batch_id,
+                "run_id": self.backtest.ref_store.get_or_create(
+                    "run", self.backtest.request.run_id
+                ),
+                "parent_node_id": parent_node_id,
+                "candidates": rows,
+                "complete_validations": recorded,
+                "failed": len(rows) - recorded,
+                "backtests_used": self.backtest.backtests,
+                "backtests_remaining": (
+                    self.backtest.request.max_backtests - self.backtest.backtests
+                ),
+                "steps_used": len(self.backtest.steps),
+                "step_directive": self._step_gate(batch_id, rows),
+                "result_root": STEP_TREE_SEARCH_ROOT,
+                "select_hint": (
+                    "compare the rows (whole window AND sub_windows), then "
+                    "step_rollback(node_id=<winner>) followed by "
+                    "finish_fold(node_id=<winner>); nothing is selected for you"
+                ),
+            },
+        )
+
+    # ---- input ----
+
+    def _parse(self, arguments: Mapping[str, object]) -> list[_BatchCandidate]:
+        raw = arguments.get("candidates")
+        if not isinstance(raw, list):
+            raise ToolError("batch_validate candidates must be an array")
+        if not (
+            BATCH_VALIDATE_MIN_CANDIDATES
+            <= len(raw)
+            <= BATCH_VALIDATE_MAX_CANDIDATES
+        ):
+            raise ToolError(
+                f"batch_validate takes {BATCH_VALIDATE_MIN_CANDIDATES} to "
+                f"{BATCH_VALIDATE_MAX_CANDIDATES} candidates, got {len(raw)}"
+            )
+        names: set[str] = set()
+        directories: set[str] = set()
+        parsed: list[_BatchCandidate] = []
+        for index, item in enumerate(raw):
+            if not isinstance(item, dict):
+                raise ToolError(
+                    f"candidate {index} must be an object with name, "
+                    "hypothesis and path"
+                )
+            unknown = sorted(set(item) - {"name", "hypothesis", "path"})
+            if unknown:
+                raise ToolError(f"candidate {index} has unknown field(s): {unknown}")
+            name = _batch_text(item, "name", index, BATCH_NAME_MAX_CHARS)
+            hypothesis = _batch_text(
+                item, "hypothesis", index, BATCH_HYPOTHESIS_MAX_CHARS
+            )
+            path = _batch_text(item, "path", index, BATCH_PATH_MAX_CHARS)
+            if name in names:
+                raise ToolError(f"duplicate candidate name: {name}")
+            names.add(name)
+            directory = self.workspace.resolve(path, must_exist=True, directory=True)
+            if directory == self.workspace.root or PurePosixPath(path).parts[
+                0
+            ] in _BATCH_RESERVED_ROOTS:
+                raise ToolError(
+                    f"candidate {name} points at a reserved workspace root "
+                    f"({path}); copy the tree to its own directory, e.g. "
+                    "candidates/<name>/"
+                )
+            if str(directory) in directories:
+                raise ToolError(f"duplicate candidate path: {path}")
+            directories.add(str(directory))
+            parsed.append(_BatchCandidate(name, hypothesis, path, directory))
+        return parsed
+
+    def _precheck(self, candidates: Sequence[_BatchCandidate]) -> list[dict[str, object]]:
+        """Static gate for every candidate, plus the two batch-only rules:
+        no two candidates may be the same bytes, and none may be the parent
+        strategy's executable structure — ``finish_fold`` could not select
+        that node, so replaying it would burn a Validation for nothing."""
+
+        checks: list[dict[str, object]] = []
+        fingerprints: dict[str, str] = {}
+        for candidate in candidates:
+            try:
+                check = self.modification_check_factory(candidate.directory).invoke({})
+            except ToolError as exc:
+                raise ToolError(
+                    f"candidate {candidate.name} ({candidate.path}) failed "
+                    f"modification_check: {exc}"
+                ) from exc
+            value = dict(check.value)
+            fingerprint = str(value.get("fingerprint") or "")
+            if fingerprint in fingerprints:
+                raise ToolError(
+                    f"candidates {fingerprints[fingerprint]} and "
+                    f"{candidate.name} are byte-identical; every candidate "
+                    "must carry a distinct hypothesis"
+                )
+            fingerprints[fingerprint] = candidate.name
+            self._reject_parent_structure(candidate)
+            checks.append(value)
+        return checks
+
+    def _reject_parent_structure(self, candidate: _BatchCandidate) -> None:
+        if self._parent_structure is None:
+            return
+        main_py = candidate.directory / "main.py"
+        try:
+            structure = executable_source_structure(
+                main_py.read_text(encoding="utf-8")
+            )
+        except (OSError, SyntaxError) as exc:
+            raise ToolError(
+                f"candidate {candidate.name} has an unreadable main.py: "
+                f"{_public_error_text(exc)}"
+            ) from exc
+        if structure == self._parent_structure:
+            raise ToolError(
+                f"candidate {candidate.name} has the parent strategy's "
+                "executable logic (comment-only changes do not count), and "
+                "finish_fold could not select it; batch distinct hypotheses"
+            )
+
+    # ---- execution ----
+
+    def _commit(
+        self,
+        candidates: Sequence[_BatchCandidate],
+        checks: Sequence[Mapping[str, object]],
+        *,
+        count: int,
+    ) -> list[ArtifactRevision]:
+        revisions: list[ArtifactRevision] = []
+        try:
+            for candidate, check in zip(candidates, checks, strict=True):
+                revisions.append(
+                    self.backtest.commit_revision(
+                        candidate.directory,
+                        str(check["fingerprint"]),
+                        label=candidate.path,
+                    )
+                )
+        except SessionInterrupt:
+            raise
+        except Exception as exc:
+            # No replay ran, so the batch is infrastructure, not a Validation:
+            # every revision and every reserved slot goes back.
+            for revision in revisions:
+                self.backtest.artifact_store.discard_revision(revision.revision_id)
+            self.backtest.release_validations(count)
+            fold = self.backtest.request.fold
+            raise ToolError(
+                "batch_validate could not start: "
+                + _public_error_text(exc, hidden=_hidden_calendar(fold)),
+                error_type="infrastructure_error",
+                retry_hint=(
+                    "A candidate directory was still being written when its "
+                    "snapshot was taken and nothing ran; no budget was "
+                    "consumed. Let any in-container job finish, then call "
+                    "batch_validate again."
+                ),
+            ) from exc
+        return revisions
+
+    def _replay(
+        self, revisions: Sequence[ArtifactRevision]
+    ) -> list[tuple[EvaluationResult | None, Exception | None, float]]:
+        """Replay every committed revision, bounded-concurrently.
+
+        Each evaluation owns its result directory, its as-of view and its
+        strategy container; the shared Timeview stash serializes part
+        publication with its own file locks. Bookkeeping (revisions above,
+        step-tree nodes below) stays on this thread and in input order, so the
+        recorded lineage does not depend on which replay finished first.
+        """
+
+        outcomes: list[tuple[EvaluationResult | None, Exception | None, float] | None]
+        outcomes = [None] * len(revisions)
+
+        def run_one(index: int):
+            started = time.perf_counter()
+            try:
+                evaluation = self.backtest.evaluator.evaluate(
+                    self.backtest.validation_request(revisions[index])
+                )
+            except SessionInterrupt:
+                raise
+            except Exception as exc:  # noqa: BLE001 - the text IS this row's result
+                return None, exc, time.perf_counter() - started
+            return evaluation, None, time.perf_counter() - started
+
+        workers = min(len(revisions), BATCH_VALIDATE_MAX_CONCURRENCY)
+        if workers <= 1:
+            return [run_one(index) for index in range(len(revisions))]
+        interrupt: SessionInterrupt | None = None
+        with ThreadPoolExecutor(
+            max_workers=workers, thread_name_prefix="batch-validate"
+        ) as pool:
+            futures = {
+                pool.submit(run_one, index): index for index in range(len(revisions))
+            }
+            for future in as_completed(futures):
+                index = futures[future]
+                try:
+                    outcomes[index] = future.result()
+                except SessionInterrupt as exc:
+                    interrupt = exc
+        if interrupt is not None:
+            raise interrupt
+        return [
+            outcome if outcome is not None else (None, RuntimeError("replay did not run"), 0.0)
+            for outcome in outcomes
+        ]
+
+    # ---- recording ----
+
+    def _record_success(
+        self,
+        candidate: _BatchCandidate,
+        revision: ArtifactRevision,
+        evaluation: EvaluationResult,
+        *,
+        result_name: str,
+        batch_id: str,
+    ) -> dict[str, object]:
+        node_id = self.backtest.record_validation(
+            revision,
+            evaluation,
+            result_name=result_name,
+            metadata={
+                "batch_id": batch_id,
+                "candidate": candidate.name,
+                "hypothesis": candidate.hypothesis,
+                "source_path": candidate.path,
+            },
+        )
+        self.backtest.steps.append(
+            StepResult(node_id, revision.revision_id, evaluation)
+        )
+        self.backtest.append_manifest_summary(
+            {
+                "result_name": result_name,
+                "mode": "valid",
+                "status": "ok",
+                "complete_validation": True,
+                "batch_id": batch_id,
+                "candidate": candidate.name,
+                "hypothesis": candidate.hypothesis,
+                **{
+                    key: value
+                    for key, value in evaluation.summary.items()
+                    if not isinstance(value, (dict, list))
+                    or key in AGENT_VISIBLE_BACKTEST_SUMMARY_KEYS
+                },
+            }
+        )
+        public_result_ref = f"{node_id}/{VALIDATION_RESULT_ATTACHMENT}"
+        if not (self.backtest.tree.root / public_result_ref).is_file():
+            raise ToolError(
+                "Validation result attachment is missing for the recorded step: "
+                f"{public_result_ref}"
+            )
+        return {
+            "status": "ok",
+            "node_id": node_id,
+            "revision_id": self.backtest.ref_store.get_or_create(
+                "strategy", revision.revision_id
+            ),
+            "stats": batch_candidate_stats(evaluation.summary),
+            "result_ref": public_result_ref,
+        }
+
+    def _record_failure(
+        self,
+        candidate: _BatchCandidate,
+        result_name: str,
+        error: Exception | None,
+        batch_id: str,
+    ) -> dict[str, object]:
+        fold = self.backtest.request.fold
+        public_error = _public_validation_error(
+            error if error is not None else RuntimeError("unknown replay failure"),
+            hidden=_hidden_calendar(fold),
+        )
+        request = self.backtest.request
+        if request.record_failed_attempts:
+            # record_failed_attempt leaves the tree position alone by design,
+            # so a dead end never becomes anybody's parent.
+            self.backtest.tree.record_failed_attempt(
+                epoch_id=request.epoch_id,
+                fold_id=self.backtest.ref_store.get_or_create(
+                    "fold", request.fold.fold_id
+                ),
+                run_id=self.backtest.ref_store.get_or_create("run", request.run_id),
+                result_name=result_name,
+                error=public_error,
+                metrics={"batch_id": batch_id, "candidate": candidate.name},
+            )
+        self.backtest.append_manifest_summary(
+            {
+                "result_name": result_name,
+                "mode": "valid",
+                "status": "failed",
+                "complete_validation": False,
+                "batch_id": batch_id,
+                "candidate": candidate.name,
+                "hypothesis": candidate.hypothesis,
+                "error": public_error,
+            }
+        )
+        return {"status": "failed", "error": public_error}
+
+    def _step_gate(self, batch_id: str, rows: Sequence[Mapping[str, object]]) -> str:
+        """One gate for the whole batch: the replays are already done, and the
+        gate's own rule (approving step N approves everything up to N) makes a
+        per-candidate wait meaningless."""
+
+        hook = self.backtest.request.step_gate_hook
+        if hook is None:
+            return ""
+        return str(
+            hook(
+                len(self.backtest.steps),
+                {
+                    "run_id": self.backtest.ref_store.get_or_create(
+                        "run", self.backtest.request.run_id
+                    ),
+                    "batch_id": batch_id,
+                    "candidates": [dict(row) for row in rows],
+                },
+            )
+        )
+
+
+def _batch_text(
+    item: Mapping[str, object], field_name: str, index: int, limit: int
+) -> str:
+    value = item.get(field_name)
+    if not isinstance(value, str) or not value.strip():
+        raise ToolError(f"candidate {index} needs a non-empty {field_name} string")
+    text = value.strip()
+    if len(text) > limit:
+        raise ToolError(
+            f"candidate {index} {field_name} exceeds {limit} characters"
+        )
+    return text
 
 
 def build_fold_subagent_tools(
@@ -1166,6 +1859,7 @@ class LLMFoldDeveloper:
         step_tree_enabled: bool = True,
         fold_exploration_directive: str = "",
         workspace_reference: str = "",
+        operating_memory: str = "none",
         repo_root: str | Path | None = None,
     ) -> None:
         self.llm = llm
@@ -1187,6 +1881,7 @@ class LLMFoldDeveloper:
         self.step_tree_enabled = step_tree_enabled
         self.fold_exploration_directive = fold_exploration_directive
         self.workspace_reference = workspace_reference
+        self.operating_memory = str(operating_memory)
         self.repo_root = Path(repo_root).resolve() if repo_root is not None else None
         validate_strategy_source(
             self.baseline_strategy.read_text(encoding="utf-8"),
@@ -1200,6 +1895,14 @@ class LLMFoldDeveloper:
         sandbox = getattr(self.evaluator, "sandbox", None)
         limits = getattr(sandbox, "limits", None) or SandboxLimits()
         return float(limits.timeout_seconds)
+
+    @property
+    def fit_timeout_seconds(self) -> float:
+        """The formal executor's wall clock for one strategy ``fit(context)``."""
+
+        sandbox = getattr(self.evaluator, "sandbox", None)
+        limits = getattr(sandbox, "limits", None) or SandboxLimits()
+        return float(limits.fit_timeout_seconds)
 
     def set_sandbox_spec(self, spec: SandboxSpec) -> None:
         """Adopt the derived image a Meta session just built, for later Folds."""
@@ -1275,6 +1978,7 @@ class LLMFoldDeveloper:
                     "valid_decision_time": request.fold.valid_decision_time.isoformat(),
                 },
                 "fold_period": request.fold_period,
+                "test_stage": request.test_stage,
                 "snapshot_config": dict(request.snapshot_config),
                 "snapshots": {
                     "valid_decision_input": {
@@ -1311,6 +2015,7 @@ class LLMFoldDeveloper:
                     "max_llm_calls": request.max_llm_calls,
                     "deadline_seconds": request.deadline_seconds,
                     "strategy_inference_timeout_seconds": self.decision_timeout_seconds,
+                    "strategy_fit_timeout_seconds": self.fit_timeout_seconds,
                 },
             },
             ref_store=self.ref_store,
@@ -1335,6 +2040,18 @@ class LLMFoldDeveloper:
         copy_model_artifacts(source_models, models_dir)
         restore_working_artifacts_writable(output_dir, models_dir)
         inputs_dir.mkdir()
+        # Mount before the index is written: the curated entries and this
+        # experiment's own skills reach the Agent through the same index.
+        mounted_memory = install_operating_memory(
+            workspace_root,
+            mode=self.operating_memory,
+            repo_root=self.repo_root,
+            experiments_root=self.experiment_dir.parent,
+            experiment_id=self.experiment_dir.name,
+        )
+        manifest.update(operating_memory=_operating_memory_record(
+            self.operating_memory, mounted_memory
+        ))
         skills_stats = install_workspace_skills(
             request.skills_source_ref or None,
             workspace_root,
@@ -1446,6 +2163,9 @@ class LLMFoldDeveloper:
                 # is replaying.
                 scratch_root=paths.runtime / "smoke",
             )
+            parent_main_py = (
+                (source / "main.py") if request.parent is not None else None
+            )
             tools: list[Tool] = [
                 ReadFileTool(search_roots),
                 GrepTool(search_roots),
@@ -1458,9 +2178,28 @@ class LLMFoldDeveloper:
                 modification,
                 smoke,
                 backtest,
+                BatchValidateTool(
+                    backtest=backtest,
+                    workspace=safe,
+                    # Same static gate as the live working copy, pointed at the
+                    # candidate directory: one constraint set for every formal
+                    # artifact this session produces.
+                    modification_check_factory=lambda directory: ModificationCheckTool(
+                        directory,
+                        parent_dir=source,
+                        models_dir=models_dir,
+                        parent_models_dir=source_models,
+                        constraints=request.modification_constraints,
+                    ),
+                    parent_main_py=parent_main_py,
+                ),
             ]
             if self.step_tree_enabled:
-                tools.append(StepRollbackTool(tree, output_dir, models_dir))
+                tools.append(
+                    StepRollbackTool(
+                        tree, output_dir, models_dir, fold_id=fold_ref, run_id=run_ref
+                    )
+                )
             if request.user_question_hook is not None:
                 tools.append(
                     AskUserTool(request.user_question_hook, time_budget=time_budget)
@@ -1472,9 +2211,7 @@ class LLMFoldDeveloper:
                     tree,
                     fold_id=fold_ref,
                     run_id=run_ref,
-                    parent_main_py=(
-                        (source / "main.py") if request.parent is not None else None
-                    ),
+                    parent_main_py=parent_main_py,
                     current_output=output_dir,
                     current_models=models_dir,
                 )
@@ -1744,11 +2481,16 @@ class LLMMetaLearner:
         runtime_root: str | Path,
         max_llm_calls: int,
         deadline_seconds: float,
+        # The formal executor's strategy wall clocks, published in the run
+        # manifest: Meta rewrites main.py, fit(context) included.
+        decision_timeout_seconds: float = SandboxLimits().timeout_seconds,
+        fit_timeout_seconds: float = SandboxLimits().fit_timeout_seconds,
         # One completion ceiling for the parent conversation and its children.
         max_response_tokens: int = AGENT_MAX_OUTPUT_TOKENS,
         meta_learning_directive: str = "",
         fold_exploration_directive: str = "",
         workspace_reference: str = "",
+        operating_memory: str = "none",
         repo_root: str | Path | None = None,
         regularization_constraints: ModificationConstraints | None = None,
         sandbox_spec: SandboxSpec | None = None,
@@ -1769,6 +2511,8 @@ class LLMMetaLearner:
         self.runtime_root = Path(runtime_root).resolve()
         self.max_llm_calls = max_llm_calls
         self.deadline_seconds = deadline_seconds
+        self.decision_timeout_seconds = float(decision_timeout_seconds)
+        self.fit_timeout_seconds = float(fit_timeout_seconds)
         # Derived-image rebuild: a Meta session may declare stable dependencies
         # that later ordinary Folds inherit. The new tag reaches those folds
         # through ``sandbox_spec_sink``.
@@ -1782,6 +2526,7 @@ class LLMMetaLearner:
         self.meta_learning_directive = meta_learning_directive
         self.fold_exploration_directive = fold_exploration_directive
         self.workspace_reference = workspace_reference
+        self.operating_memory = str(operating_memory)
         self.repo_root = Path(repo_root).resolve() if repo_root is not None else None
         # The limits a Meta regularization must satisfy before the Pipeline will
         # freeze it; published in the run manifest and enforced by the check.
@@ -1848,6 +2593,13 @@ class LLMMetaLearner:
             paths.workspace,
             self.workspace_reference,
             repo_root=self.repo_root,
+        )
+        mounted_memory = install_operating_memory(
+            paths.workspace,
+            mode=self.operating_memory,
+            repo_root=self.repo_root,
+            experiments_root=self.experiment_dir.parent,
+            experiment_id=self.experiment_dir.name,
         )
         safe = SafeWorkspace(paths.workspace)
         search_roots = SearchRoots(safe, paths=paths)
@@ -2001,6 +2753,9 @@ class LLMMetaLearner:
                     "previous_prior": bool(previous_prior),
                 },
                 "prior_output": "/mnt/agent/workspace/PRIOR.md",
+                "operating_memory": _operating_memory_record(
+                    self.operating_memory, mounted_memory
+                ),
                 "skills": {
                     "index_path": SKILLS_INDEX_PATH,
                     "count": skills_stats.count,
@@ -2021,9 +2776,13 @@ class LLMMetaLearner:
                         "fold_count": 0,
                     }
                 ),
+                # Meta may rewrite main.py, fit(context) included, so it is
+                # told the same strategy wall clocks an ordinary Fold gets.
                 "budgets": {
                     "max_llm_calls": self.max_llm_calls,
                     "deadline_seconds": self.deadline_seconds,
+                    "strategy_inference_timeout_seconds": self.decision_timeout_seconds,
+                    "strategy_fit_timeout_seconds": self.fit_timeout_seconds,
                 },
             },
             ref_store=self.ref_store,
@@ -2225,6 +2984,14 @@ def fold_workspace_map(workspace: str | Path) -> dict[str, str]:
     if (Path(workspace) / "inputs" / "PRIOR.md").is_file():
         mapping["prior"] = "inputs/PRIOR.md"
     return mapping
+
+
+def _operating_memory_record(
+    mode: str, sources: Sequence[MemorySource]
+) -> dict[str, object]:
+    """What the run manifest records about mounted cross-experiment memory."""
+
+    return {"mode": mode, "sources": [source.to_record() for source in sources]}
 
 
 def install_workspace_reference(

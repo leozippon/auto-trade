@@ -22,9 +22,50 @@ from autotrade.environment.data.snapshot import SnapshotConfig
 from autotrade.environment.runtime import chmod_tree
 from autotrade.pipelines.config import SNAPSHOT_CACHE_FORMAT_VERSION
 from autotrade.pipelines.folds import build_fold_schedule, heldout_periods
+from autotrade.pipelines.hitl_state import WEB_CREATE_DEFAULTS
 
 DEFAULT_PIT_VIEWS_SEED = Path("data/pit_views_seed/explore")
 DEFAULT_PIT_VIEWS_SEED_WORKSPACE = Path("data/pit_views_seed/explore_workspace")
+
+# The calendar a seed is planned over. One source: the console creation
+# defaults an experiment is actually created with, so a seed prebuilt without
+# overrides matches what the next experiment asks the provider to build.
+PLAN_PARAMETERS: tuple[str, ...] = (
+    "fold_period",
+    "development_first_period",
+    "development_last_period",
+    "test_stage",
+    "heldout_first_period",
+    "heldout_last_period",
+    "window_months",
+    "min_region_trade_days",
+)
+_INT_PLAN_PARAMETERS = frozenset({"window_months", "min_region_trade_days"})
+_BOOL_PLAN_PARAMETERS = frozenset({"test_stage"})
+
+
+def plan_parameters(params: Mapping[str, object] | None = None) -> dict[str, object]:
+    """Calendar keywords for ``iter_plan_pit_jobs`` from creation parameters.
+
+    Defaults to the console creation defaults, so a seed prebuilt without
+    overrides plans exactly the calendar the next experiment is created with.
+    """
+
+    source = WEB_CREATE_DEFAULTS if params is None else params
+    plan: dict[str, object] = {}
+    for name in PLAN_PARAMETERS:
+        value = source[name]
+        if name in _INT_PLAN_PARAMETERS:
+            if type(value) is not int:
+                raise TypeError(f"calendar default {name} must be an int")
+            plan[name] = value
+        elif name in _BOOL_PLAN_PARAMETERS:
+            if type(value) is not bool:
+                raise TypeError(f"calendar default {name} must be a bool")
+            plan[name] = value
+        else:
+            plan[name] = str(value)
+    return plan
 
 
 def pit_cache_provider_record(
@@ -56,7 +97,14 @@ def seed_pit_views(
     already present). Returns False when the default seed is missing or its
     contract does not match — the experiment then cold-builds. An explicit
     seed (``required=True``) fails fast on a missing tree or a mismatch.
-    Never copies ``asof_stash`` or writes outside ``experiment_pit_views``.
+    Never writes outside ``experiment_pit_views``.
+
+    Prebuilt ``asof_stash`` parts come across too, so the first backtest over a
+    slot hardlinks the day-by-day as-of parts instead of encoding them. Their
+    stash contract names only what determines the parts, which is why parts
+    encoded offline are valid here. Unlike a view, a stash keeps growing (a
+    replay can reach a day the prebuild did not cover), so its directories are
+    published writable while the parts themselves stay read-only.
     """
 
     dest = Path(experiment_pit_views)
@@ -81,54 +129,75 @@ def seed_pit_views(
     dest_root = dest.resolve()
     dest_root.mkdir(parents=True, exist_ok=True)
     for source_view in _completed_seed_views(seed):
-        target = dest_root / source_view.relative_to(seed)
-        _assert_inside(target, dest_root)
-        if target.exists():
-            continue
-        target.parent.mkdir(parents=True, exist_ok=True)
-        _assert_inside(target.parent, dest_root)
-        staging = target.parent / f".{target.name}.{uuid.uuid4().hex}.tmp"
-        _assert_inside(staging, dest_root)
-        try:
-            _hardlink_tree(source_view, staging, dest_root=dest_root)
-            chmod_tree(staging, file_mode=0o444, dir_mode=0o555)
-            try:
-                staging.replace(target)
-            except OSError:
-                if not target.exists():
-                    raise
-        finally:
-            if staging.exists():
-                chmod_tree(staging, file_mode=0o644, dir_mode=0o755)
-                shutil.rmtree(staging)
+        _publish_seed_entry(source_view, seed, dest_root, dir_mode=0o555)
+    for source_stash in _completed_seed_stashes(seed):
+        _publish_seed_entry(source_stash, seed, dest_root, dir_mode=0o755)
     return True
+
+
+def _publish_seed_entry(
+    source: Path, seed: Path, dest_root: Path, *, dir_mode: int
+) -> None:
+    """Hardlink one seed entry into place, or leave an existing one alone."""
+
+    target = dest_root / source.relative_to(seed)
+    _assert_inside(target, dest_root)
+    if target.exists():
+        return
+    target.parent.mkdir(parents=True, exist_ok=True)
+    _assert_inside(target.parent, dest_root)
+    staging = target.parent / f".{target.name}.{uuid.uuid4().hex}.tmp"
+    _assert_inside(staging, dest_root)
+    try:
+        _hardlink_tree(source, staging, dest_root=dest_root)
+        chmod_tree(staging, file_mode=0o444, dir_mode=dir_mode)
+        try:
+            staging.replace(target)
+        except OSError:
+            if not target.exists():
+                raise
+    finally:
+        if staging.exists():
+            chmod_tree(staging, file_mode=0o644, dir_mode=0o755)
+            shutil.rmtree(staging)
 
 
 def iter_plan_pit_jobs(
     trading_days: list[str],
     *,
-    first_test_period: str,
-    last_test_period: str,
+    development_first_period: str,
+    development_last_period: str,
     heldout_first_period: str,
     heldout_last_period: str,
-    fold_period: str = "quarter",
-    window_months: int = 21,
-    min_region_trade_days: int = 2,
+    fold_period: str,
+    window_months: int,
+    min_region_trade_days: int,
+    test_stage: bool,
 ) -> tuple[tuple[str, str, str, datetime], ...]:
     """Unique Meta/Fold/frozen_test/held-out prepare jobs for one fold plan.
 
-    Epoch count does not multiply the set: later epochs reuse the same
-    decision times and replay windows. Jobs are ordered by decision time so
-    later decision snapshots can reuse prior events.
+    The plan comes from the schedule API, never from a second calendar: the
+    regions and decision anchors are exactly the ``FoldSpec`` and held-out
+    periods the pipeline will ask the provider to prepare. A fold without a
+    test region (the default single-window development Fold) contributes no
+    frozen_test job.
+
+    Epoch count does not multiply the set: later epochs reuse the same decision
+    times and replay windows. Several phases routinely share one region — meta
+    and valid always do, and on a contiguous calendar the previous fold's test
+    does too — so the returned tuples repeat a region once per phase while the
+    provider builds it once. Jobs are ordered by decision time so later
+    decision snapshots can reuse the previous one's events.
     """
 
     folds = build_fold_schedule(
-        first_test_period,
-        last_test_period,
+        development_first_period,
+        development_last_period,
         trading_days,
         window_months=window_months,
         period=fold_period,
         min_region_trade_days=min_region_trade_days,
+        test_stage=test_stage,
     )
     jobs: list[tuple[str, str, str, datetime]] = []
     for fold in folds:
@@ -138,14 +207,12 @@ def iter_plan_pit_jobs(
         jobs.append(
             ("valid", fold.validation_start, fold.validation_end, fold.valid_decision_time)
         )
-        jobs.append(
-            (
-                "frozen_test",
-                fold.test_start,
-                fold.test_end,
-                fold.test_decision_time,
+        if fold.has_test:
+            assert fold.test_start is not None and fold.test_end is not None
+            assert fold.test_decision_time is not None
+            jobs.append(
+                ("frozen_test", fold.test_start, fold.test_end, fold.test_decision_time)
             )
-        )
     for period in heldout_periods(
         heldout_first_period,
         heldout_last_period,
@@ -189,6 +256,19 @@ def _completed_seed_views(seed: Path) -> list[Path]:
                 and not _skip_seed_name(path.name)
             )
     return views
+
+
+def _completed_seed_stashes(seed: Path) -> list[Path]:
+    """Every stash directory the seed prebuild finished, by its contract file."""
+
+    root = seed / "asof_stash"
+    if not root.is_dir() or root.is_symlink():
+        return []
+    return sorted(
+        contract.parent
+        for contract in root.rglob("contract.json")
+        if contract.is_file() and not contract.is_symlink()
+    )
 
 
 def _hardlink_tree(source: Path, dest: Path, *, dest_root: Path) -> None:
@@ -246,7 +326,9 @@ def _load_json(path: Path) -> dict[str, object]:
 __all__ = [
     "DEFAULT_PIT_VIEWS_SEED",
     "DEFAULT_PIT_VIEWS_SEED_WORKSPACE",
+    "PLAN_PARAMETERS",
     "iter_plan_pit_jobs",
     "pit_cache_provider_record",
+    "plan_parameters",
     "seed_pit_views",
 ]

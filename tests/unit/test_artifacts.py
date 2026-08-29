@@ -43,21 +43,33 @@ class ArtifactContractTest(unittest.TestCase):
         module = ModuleType("agent_output_template_main")
         source = (TEMPLATE_DIR / "main.py").read_text(encoding="utf-8")
         exec(compile(source, str(TEMPLATE_DIR / "main.py"), "exec"), module.__dict__)
-        context = SimpleNamespace(
-            bars=(
-                {"symbol": "000002.SZ", "close": 20.0},
-                {"symbol": "000001.SZ", "close": 10.0},
-            ),
-            account=SimpleNamespace(cash=100_000.0, positions={}),
+        self.assertEqual(module.REFIT_PERIOD, "quarter")
+        import pandas as pd
+
+        frame = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"] * 21 + ["000002.SZ"] * 21,
+                "trade_date": [f"2024{index:04d}" for index in range(21)] * 2,
+                "adj_close": [10.0 + index for index in range(21)]
+                + [20.0 + 3 * index for index in range(21)],
+            }
+        )
+        features = module._features(frame)
+        # Only the last row per symbol carries both a 5-day and a 20-day return,
+        # and a two-symbol cross-section standardizes to opposite equal scores.
+        self.assertEqual(sorted(features["trade_date"].unique()), ["20240020"])
+        low, high = sorted(features["ret_20"].tolist())
+        self.assertGreater(high, 0.0)
+        self.assertAlmostEqual(low, -high)
+        # A holder of any position emits nothing before touching any file, so
+        # the template never double-enters while flat logic is the only
+        # implemented lifecycle.
+        held = SimpleNamespace(
+            account=SimpleNamespace(cash=0.0, positions={"000001.SZ": 100}),
             inference_at=None,
+            state_dir="",
+            asof_dir="",
         )
-        self.assertEqual(
-            module._visible_prices(context), {"000002.SZ": 20.0, "000001.SZ": 10.0}
-        )
-        # A holder of any position emits nothing, so the template never
-        # double-enters while flat logic is the only implemented lifecycle.
-        held = SimpleNamespace(**{**context.__dict__})
-        held.account = SimpleNamespace(cash=0.0, positions={"000001.SZ": 100})
         self.assertEqual(module.generate_orders(held), [])
 
     def test_loads_valid_artifact_directory_and_stamps_a_revision_id(self):
@@ -268,7 +280,7 @@ def generate_orders(context):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "models"
             root.mkdir()
-            (root / "data.parquet").write_bytes(b"not a model")
+            (root / "data.so").write_bytes(b"not a model")
             with self.assertRaisesRegex(ArtifactError, "unsupported"):
                 load_model_artifacts(root)
 

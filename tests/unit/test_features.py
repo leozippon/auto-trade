@@ -527,10 +527,10 @@ class UnitRegistryProjectionTest(unittest.TestCase):
         # contract, pinned here; the snapshot build re-validates live).
         column_map[("daily.parquet", None)] = [
             "ts_code", "trade_date", "open", "high", "low", "close", "pre_close", "change",
-            "pct_chg", "vol", "amount", "close_basic", "turnover_rate", "turnover_rate_f",
+            "pct_chg", "vol", "amount", "turnover_rate", "turnover_rate_f",
             "volume_ratio", "pe", "pe_ttm", "pb", "ps", "ps_ttm", "dv_ratio", "dv_ttm",
             "total_share", "float_share", "free_share", "total_mv", "circ_mv",
-            "pre_close_limit", "up_limit", "down_limit", "adj_factor", "is_suspended",
+            "up_limit", "down_limit", "adj_factor", "is_suspended",
         ]
         column_map[("auction.parquet", None)] = [
             "ts_code", "trade_date", "session", "price", "vol", "amount", "pre_close",
@@ -570,8 +570,8 @@ class UnitRegistryProjectionTest(unittest.TestCase):
             else:
                 self.assertIsNone(record["source_unit"], record)
 
-    def test_registry_structure_and_default_dataset_coverage(self):
-        from autotrade.environment.data.snapshot import SnapshotConfig
+    def test_registry_structure_and_selectable_dataset_coverage(self):
+        from autotrade.environment.data.snapshot import SELECTABLE_DATASETS
         from autotrade.environment.data.units import (
             FIELD_RULES,
             NO_NUMERIC_DATASETS,
@@ -589,14 +589,15 @@ class UnitRegistryProjectionTest(unittest.TestCase):
                 self.assertTrue(rule.normalized_unit, rule.key())
             if rule.status == "verified":
                 self.assertTrue(rule.evidence, rule.key())
-        # Every default snapshot dataset is either ruled under its OWN file
-        # (a fundamentals dataset registered under events.parquet fails here)
-        # or a declared no-numeric dataset.
-        config = SnapshotConfig()
+        # Every SELECTABLE snapshot dataset — not just the default scope — is
+        # either ruled under its OWN file (a fundamentals dataset registered
+        # under events.parquet fails here) or a declared no-numeric dataset:
+        # an experiment may opt into any of them and the registry is
+        # fail-closed, so a missing rule would break that experiment's build.
         domain_files = (
-            ("events.parquet", config.events_datasets),
-            ("macro.parquet", config.macro_datasets),
-            ("fundamentals.parquet", config.fundamental_datasets),
+            ("events.parquet", SELECTABLE_DATASETS["events"]),
+            ("macro.parquet", SELECTABLE_DATASETS["macro"]),
+            ("fundamentals.parquet", SELECTABLE_DATASETS["fundamentals"]),
         )
         for file, datasets in domain_files:
             for dataset in datasets:
@@ -604,8 +605,31 @@ class UnitRegistryProjectionTest(unittest.TestCase):
                 if dataset in NO_NUMERIC_DATASETS:
                     self.assertEqual(rules, (), dataset)
                     continue
-                self.assertTrue(rules, f"no unit rules for default dataset {dataset}")
+                self.assertTrue(rules, f"no unit rules for selectable dataset {dataset}")
                 self.assertEqual({rule.file for rule in rules}, {file}, dataset)
+
+    def test_snapshot_excluded_columns_stay_classified_and_unmixed(self):
+        from autotrade.environment.data.snapshot import SNAPSHOT_EXCLUDED_COLUMNS
+        from autotrade.environment.data.units import FIELD_RULES, resolve_field
+
+        # A column removed from the snapshot is still downloaded and audited,
+        # so the registry must keep classifying it — dropping the rule would
+        # break the raw-lake audit projections instead of the snapshot.
+        for dataset, columns in SNAPSHOT_EXCLUDED_COLUMNS.items():
+            files = {rule.file for rule in FIELD_RULES if rule.dataset == dataset}
+            self.assertTrue(files, dataset)
+            for file in files:
+                for column in columns:
+                    record = resolve_field(file, dataset, column)
+                    self.assertEqual(record["column"], column)
+        # A rule must be wholly excluded or wholly visible: a mixed rule would
+        # make both the unit reference and the rendered doc ambiguous about
+        # what the Agent can actually see.
+        for rule in FIELD_RULES:
+            excluded = set(SNAPSHOT_EXCLUDED_COLUMNS.get(rule.dataset or "", ()))
+            covered = excluded.intersection(rule.columns)
+            if covered:
+                self.assertEqual(covered, set(rule.columns), rule.key())
 
     def test_conversion_rules_never_overlap(self):
         from autotrade.environment.data.units import (
@@ -634,7 +658,7 @@ class UnitRegistryProjectionTest(unittest.TestCase):
             ("fundamentals.parquet", "fina_indicator_vip", "gross_margin", "CNY"),
             ("fundamentals.parquet", "balancesheet_vip", "total_share", "shares"),
             ("daily.parquet", None, "volume_ratio", "multiple"),
-            ("daily.parquet", None, "close_basic", "CNY_per_share"),
+            ("daily.parquet", None, "pre_close", "CNY_per_share"),
             ("macro.parquet", "repo_daily", "close", "percent"),
         ]
         for file, dataset, column, unit in expectations:

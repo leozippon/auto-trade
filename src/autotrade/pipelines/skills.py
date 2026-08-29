@@ -3,6 +3,11 @@
 ``skills/`` is writable session knowledge, not a formal strategy artifact.  The
 ledger is the only current-pointer mechanism: immutable generations without a
 remaining successful Fold/Meta row are deliberately unreachable orphans.
+
+``memory/`` is the second source of session knowledge: entries the researcher
+curated into ``configs/operating_memory/`` and mounted read-only for this run.
+Both reach the Agent through one ``inputs/skills_index.json``, tagged by origin,
+and only the writable ``skills/`` tree is ever published as a generation.
 """
 
 from __future__ import annotations
@@ -23,7 +28,18 @@ from autotrade.environment.tools.prior_policy import (
 )
 from autotrade.environment.tools.workspace import SafeWorkspace
 
+from .ledger import ExperimentLedger, experiment_verdict
+
 SKILLS_DIRNAME = "skills"
+OPERATING_MEMORY_DIRNAME = "memory"
+# Repository-relative library of human-curated cross-experiment entries, in
+# the same format ``write_skill`` produces so a promoted skill copies verbatim.
+OPERATING_MEMORY_LIBRARY = "configs/operating_memory"
+# Reserved mount name of the curated tier; every other mounted source directory
+# is named after the graduated experiment its skills came from.
+CURATED_MEMORY_SOURCE = "curated"
+OPERATING_MEMORY_MODES = ("none", "curated", "curated+graduated")
+DEFAULT_OPERATING_MEMORY = "curated+graduated"
 SKILL_FILENAME = "SKILL.md"
 SKILLS_INDEX_PATH = "inputs/skills_index.json"
 MAX_SKILL_NAME_CHARS = 64
@@ -217,9 +233,7 @@ def _skill_title_summary(text: str) -> tuple[str, str]:
     return title, " ".join(summary_lines)[:500]
 
 
-def build_skills_index(root: str | Path) -> dict[str, object]:
-    tree = Path(root)
-    stats = validate_skills_tree(tree, require_writable=False)
+def _index_entries(tree: Path, *, directory: str, origin: str) -> list[dict[str, object]]:
     entries: list[dict[str, object]] = []
     for item in sorted(tree.iterdir(), key=lambda path: path.name):
         files: list[dict[str, object]] = []
@@ -232,7 +246,7 @@ def build_skills_index(root: str | Path) -> dict[str, object]:
             item_bytes += size
             files.append(
                 {
-                    "path": f"skills/{item.name}/{path.relative_to(item).as_posix()}",
+                    "path": f"{directory}/{item.name}/{path.relative_to(item).as_posix()}",
                     "bytes": size,
                 }
             )
@@ -243,13 +257,45 @@ def build_skills_index(root: str | Path) -> dict[str, object]:
                 "name": item.name,
                 "title": title,
                 "summary": summary,
-                "path": f"skills/{item.name}/{SKILL_FILENAME}",
+                "path": f"{directory}/{item.name}/{SKILL_FILENAME}",
                 "files": files,
                 "bytes": item_bytes,
+                "origin": origin,
             }
         )
+    return entries
+
+
+def build_skills_index(root: str | Path) -> dict[str, object]:
+    """Index the writable session skills plus the operating memory mounted beside them.
+
+    ``count``/``files``/``bytes`` describe the writable tree alone, because they
+    are the published generation's ledger fields; the read-only entries are a
+    separate list, each carrying its ``origin`` (``curated`` or ``graduated``)
+    and its ``source``, so a session can tell what it may rewrite from what it
+    may not and can weigh a graduated experiment's knowledge accordingly.
+    """
+
+    tree = Path(root)
+    stats = validate_skills_tree(tree, require_writable=False)
+    memory_root = tree.parent / OPERATING_MEMORY_DIRNAME
+    memory: list[dict[str, object]] = []
+    if memory_root.is_dir():
+        for source in sorted(memory_root.iterdir(), key=lambda path: path.name):
+            validate_skills_tree(source, require_writable=False)
+            origin = (
+                "curated" if source.name == CURATED_MEMORY_SOURCE else "graduated"
+            )
+            for entry in _index_entries(
+                source,
+                directory=f"{OPERATING_MEMORY_DIRNAME}/{source.name}",
+                origin=origin,
+            ):
+                entry["source"] = source.name
+                memory.append(entry)
     return {
-        "skills": entries,
+        "skills": _index_entries(tree, directory=SKILLS_DIRNAME, origin="session"),
+        "operating_memory": memory,
         "count": stats.count,
         "files": stats.files,
         "bytes": stats.bytes,
@@ -290,6 +336,181 @@ def install_workspace_skills(
         destination,
         Path(index_path) if index_path is not None else workspace_path / SKILLS_INDEX_PATH,
     )
+
+
+@dataclass(frozen=True)
+class MemorySource:
+    """One mounted knowledge source: where it came from and what it carries."""
+
+    source: str
+    origin: str
+    root: Path
+    entries: tuple[str, ...]
+
+    def to_record(self) -> dict[str, object]:
+        return {
+            "source": self.source,
+            "origin": self.origin,
+            "entries": list(self.entries),
+        }
+
+
+def operating_memory_entries(library: str | Path) -> tuple[str, ...]:
+    """Entry names of one memory tree, validated in the shared skill format."""
+
+    root = Path(library)
+    if not root.is_dir():
+        raise FileNotFoundError(f"operating memory library does not exist: {root}")
+    validate_skills_tree(root, require_writable=False)
+    return tuple(sorted(item.name for item in root.iterdir()))
+
+
+def resolve_operating_memory(value: object) -> str:
+    """Validate the create-time mode: ``none``/``curated``/``curated+graduated``."""
+
+    text = str(value).strip() if value not in (None, "") else DEFAULT_OPERATING_MEMORY
+    if text not in OPERATING_MEMORY_MODES:
+        raise ValueError(
+            "operating_memory must be one of " + ", ".join(OPERATING_MEMORY_MODES)
+        )
+    return text
+
+
+def experiment_graduated(records: Sequence[Mapping[str, object]]) -> bool:
+    """Whether the Pipeline's held-out verdict adopted this experiment.
+
+    ``ledger.experiment_verdict`` is the one aggregator: every latest held-out
+    period must be ``graduated``, so a single failed period keeps the whole
+    experiment out. Only durable successful held-out rows reach it, so a
+    running, failed or integrity-flagged experiment never qualifies. Read
+    non-strict on purpose — these are other experiments' ledgers, and one that
+    predates the verdict block must contribute nothing rather than break the
+    session that is mounting memory.
+    """
+
+    verdict = experiment_verdict([dict(record) for record in records], strict=False)
+    return verdict is not None and verdict.get("status") == "graduated"
+
+
+def curated_memory_source(repo_root: str | Path | None) -> MemorySource | None:
+    """The human-curated library, or ``None`` when this checkout has none."""
+
+    if repo_root is None:
+        return None
+    library = Path(repo_root) / OPERATING_MEMORY_LIBRARY
+    if not library.is_dir():
+        return None
+    entries = operating_memory_entries(library)
+    if not entries:
+        return None
+    return MemorySource(CURATED_MEMORY_SOURCE, "curated", library, entries)
+
+
+def graduated_memory_sources(
+    experiments_root: str | Path, *, exclude: str = ""
+) -> tuple[MemorySource, ...]:
+    """Skills of every graduated experiment, read from the experiments on disk.
+
+    The ledgers are the single source of both the verdict and the current skills
+    generation, so there is no second registry to keep in sync. An experiment
+    without a ledger, without a graduated held-out row, or without a published
+    skills generation contributes nothing.
+    """
+
+    root = Path(experiments_root)
+    if not root.is_dir():
+        return ()
+    sources: list[MemorySource] = []
+    for directory in sorted(root.iterdir(), key=lambda path: path.name):
+        if not directory.is_dir() or directory.name == exclude:
+            continue
+        ledger_path = directory / "ledgers" / "experiment_ledger.jsonl"
+        if not ledger_path.is_file():
+            continue
+        records = ExperimentLedger(ledger_path).read()
+        if not experiment_graduated(records):
+            continue
+        if directory.name == CURATED_MEMORY_SOURCE:
+            raise ValueError(
+                f"experiment id {CURATED_MEMORY_SOURCE!r} is reserved for the "
+                "curated memory tier; rename that experiment"
+            )
+        snapshot = latest_skills_snapshot(records, experiment_dir=directory)
+        if snapshot.root is None or not snapshot.stats.count:
+            continue
+        sources.append(
+            MemorySource(
+                directory.name,
+                "graduated",
+                snapshot.root,
+                tuple(sorted(item.name for item in snapshot.root.iterdir())),
+            )
+        )
+    return tuple(sources)
+
+
+def install_operating_memory(
+    workspace: str | Path,
+    *,
+    mode: str,
+    repo_root: str | Path | None = None,
+    experiments_root: str | Path | None = None,
+    experiment_id: str = "",
+) -> tuple[MemorySource, ...]:
+    """Mount the selected memory tiers read-only next to the session skills.
+
+    ``curated`` mounts the repository library; ``curated+graduated`` adds the
+    skills of every experiment the held-out verdict graduated. Each source lands
+    in ``workspace/memory/<source>/<name>/`` as read-only files, so a session can
+    read them like its own skills but can never change or delete them: the skill
+    tools refuse mounted names and the copy itself is not writable. Nothing
+    mounted here is ever published as this experiment's skills generation.
+    """
+
+    if mode not in OPERATING_MEMORY_MODES:
+        raise ValueError(
+            "operating_memory must be one of " + ", ".join(OPERATING_MEMORY_MODES)
+        )
+    destination = Path(workspace) / OPERATING_MEMORY_DIRNAME
+    if destination.exists():
+        raise FileExistsError(f"workspace memory directory already exists: {destination}")
+    if mode == "none":
+        return ()
+    if repo_root is None:
+        raise ValueError("operating_memory needs a repository root to mount from")
+    sources: list[MemorySource] = []
+    curated = curated_memory_source(repo_root)
+    if curated is not None:
+        sources.append(curated)
+    if mode == "curated+graduated" and experiments_root is not None:
+        sources.extend(
+            graduated_memory_sources(experiments_root, exclude=experiment_id)
+        )
+    if not sources:
+        return ()
+    destination.mkdir()
+    for source in sources:
+        shutil.copytree(
+            source.root, destination / source.source, copy_function=shutil.copyfile
+        )
+    chmod_tree(destination, file_mode=0o444, dir_mode=0o555)
+    for source in sources:
+        validate_skills_tree(destination / source.source, require_writable=False)
+    return tuple(sources)
+
+
+def _reject_operating_memory_name(workspace_root: Path, name: str) -> None:
+    """Mounted memory is read-only; a session may not shadow it under its own name."""
+
+    memory = workspace_root / OPERATING_MEMORY_DIRNAME
+    if not memory.is_dir():
+        return
+    for source in sorted(memory.iterdir(), key=lambda path: path.name):
+        if (source / name).is_dir():
+            raise ValueError(
+                f"{name} is mounted operating memory ({source.name}) and is "
+                "read-only; use a different skill name"
+            )
 
 
 def _file_map(root: Path) -> dict[str, Path]:
@@ -477,6 +698,7 @@ class WriteSkillTool:
     def invoke(self, arguments: Mapping[str, object]) -> ToolResult:
         try:
             name = validate_skill_name(str(arguments["name"]))
+            _reject_operating_memory_name(self.workspace.root, name)
             relative = validate_skill_path(str(arguments["path"]))
             content = str(arguments["content"])
             payload = content.encode("utf-8")
@@ -545,6 +767,7 @@ class DeleteSkillTool:
     def invoke(self, arguments: Mapping[str, object]) -> ToolResult:
         try:
             name = validate_skill_name(str(arguments["name"]))
+            _reject_operating_memory_name(self.workspace.root, name)
             validate_skills_tree(self.root, require_writable=True)
             item = self.root / name
             if item.is_symlink() or not item.is_dir():
@@ -577,14 +800,26 @@ __all__ = [
     "MAX_SKILLS",
     "MAX_SKILLS_BYTES",
     "MAX_SKILLS_FILES",
+    "CURATED_MEMORY_SOURCE",
+    "DEFAULT_OPERATING_MEMORY",
+    "OPERATING_MEMORY_DIRNAME",
+    "OPERATING_MEMORY_LIBRARY",
+    "OPERATING_MEMORY_MODES",
+    "MemorySource",
     "SKILLS_INDEX_PATH",
     "SkillsPublication",
     "SkillsSnapshot",
     "SkillsStats",
     "WriteSkillTool",
     "build_skills_index",
+    "curated_memory_source",
+    "experiment_graduated",
+    "graduated_memory_sources",
+    "install_operating_memory",
     "install_workspace_skills",
     "latest_skills_snapshot",
+    "operating_memory_entries",
+    "resolve_operating_memory",
     "resolve_collected_skills_source",
     "skills_trees_equal",
     "validate_skill_name",

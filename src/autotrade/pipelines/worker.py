@@ -20,7 +20,11 @@ from autotrade.environment.artifacts import (
 )
 from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.data.research_release import pin_research_release
-from autotrade.environment.data.snapshot import SnapshotConfig
+from autotrade.environment.data.snapshot import (
+    DEFAULT_DATASETS,
+    SELECTABLE_DATASETS,
+    SnapshotConfig,
+)
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.llm import (
     AGENT_MAX_OUTPUT_TOKENS,
@@ -35,12 +39,22 @@ from autotrade.environment.llm import (
 )
 from autotrade.environment.nl import NLConfig
 from autotrade.environment.runtime import utc_now_iso, write_json_atomic
-from autotrade.environment.sandbox import DEFAULT_IMAGE, SandboxConfig, SandboxSpec
+from autotrade.environment.sandbox import (
+    DEFAULT_IMAGE,
+    SandboxConfig,
+    SandboxLimits,
+    SandboxSpec,
+)
 from autotrade.environment.sandbox_images import prepare_experiment_sandbox_image
 from autotrade.environment.strategy import StrategySchedule
 from autotrade.environment.tools.base import CommandRunner
 
-from .config import AcceptanceRules, FrozenArtifact, RollingExperimentConfig
+from .config import (
+    AcceptanceRules,
+    FrozenArtifact,
+    RollingExperimentConfig,
+    rolling_default,
+)
 from .experiment import RollingExperimentPipeline
 from .folds import build_fold_schedule, heldout_periods, load_sse_trading_days
 from .hitl_state import (
@@ -58,6 +72,7 @@ from .ledger import (
     ExperimentLedger,
     FrozenArtifactMutated,
     assert_no_frozen_artifact_mutation,
+    experiment_verdict,
 )
 from .local_backend import (
     DeterministicBaselineDeveloper,
@@ -73,7 +88,7 @@ from .pit_backend import (
 )
 from .pit_views_seed import DEFAULT_PIT_VIEWS_SEED
 from .prior import latest_prior_text, restore_current_from_records
-from .skills import latest_skills_snapshot
+from .skills import latest_skills_snapshot, resolve_operating_memory
 
 _ALLOWED_PARAMS = {
     "experiment_id",
@@ -122,8 +137,9 @@ _ALLOWED_PARAMS = {
     "max_intraday_row_group_rows",
     "developer_mode",
     "fold_period",
-    "first_test_period",
-    "last_test_period",
+    "development_first_period",
+    "development_last_period",
+    "test_stage",
     "heldout_first_period",
     "heldout_last_period",
     "epochs",
@@ -143,12 +159,14 @@ _ALLOWED_PARAMS = {
     "meta_learning_directive",
     "fold_exploration_directive",
     "workspace_reference",
+    "operating_memory",
     "disable_step_tree",
     "record_failed_attempts",
     "convergence_start_epoch",
     "nl_failure_policy",
     "finalize_before_deadline_seconds",
     "per_call_timeout_seconds",
+    "strategy_fit_timeout_seconds",
     "commission_bps",
     "slippage_bps",
     "max_total_holdings",
@@ -371,6 +389,16 @@ def resolve_worker_options(
     params = {
         key: value for key, value in params.items() if key not in NON_PERSISTABLE_PARAMS
     }
+
+    def knob(name: str) -> object:
+        """One rolling-config knob, defaulted from the dataclass.
+
+        ``RollingExperimentConfig`` is the single source of truth for the
+        pipeline defaults. A second literal here would silently reconfigure
+        every experiment whose ``params.json`` predates the knob.
+        """
+        return params.get(name, rolling_default(name))
+
     directory = Path(experiment_dir).resolve()
     repository = Path(repo_root).resolve(strict=True)
     # The deployment's template file and data roots are identical for every
@@ -508,16 +536,16 @@ def resolve_worker_options(
         trading_days = load_sse_trading_days(release.raw_dir)
     if not trading_days and not preflight:
         raise ValueError("daily Parquet has no trading days")
-    fold_period = str(params.get("fold_period") or "quarter")
+    fold_period = str(params.get("fold_period") or rolling_default("fold_period"))
     supplied_periods = [
-        params.get("first_test_period"),
-        params.get("last_test_period"),
+        params.get("development_first_period"),
+        params.get("development_last_period"),
         params.get("heldout_first_period"),
         params.get("heldout_last_period"),
     ]
     if not all(value not in (None, "") for value in supplied_periods):
         raise ValueError("all four Development/Held-out period fields are required")
-    first_test, last_test, first_heldout, last_heldout = (
+    first_development, last_development, first_heldout, last_heldout = (
         str(value) for value in supplied_periods
     )
     schedule = StrategySchedule(
@@ -530,34 +558,33 @@ def resolve_worker_options(
     rolling = RollingExperimentConfig(
         experiment_id=experiment_id,
         experiments_root=directory.parent,
-        first_test_period=first_test,
-        last_test_period=last_test,
+        development_first_period=first_development,
+        development_last_period=last_development,
         heldout_first_period=first_heldout,
         heldout_last_period=last_heldout,
         fold_period=fold_period,
-        epochs=_positive_int(params.get("epochs", 1), "epochs"),
-        window_months=_positive_int(params.get("window_months", 21), "window_months"),
+        test_stage=_strict_bool(knob("test_stage"), "test_stage"),
+        epochs=_positive_int(knob("epochs"), "epochs"),
+        window_months=_positive_int(knob("window_months"), "window_months"),
         min_region_trade_days=_positive_int(
-            params.get("min_region_trade_days", 2), "min_region_trade_days"
+            knob("min_region_trade_days"), "min_region_trade_days"
         ),
         max_steps_per_fold=_positive_int(
-            params.get("max_steps_per_fold", 10), "max_steps_per_fold"
+            knob("max_steps_per_fold"), "max_steps_per_fold"
         ),
         max_backtests_per_fold=_positive_int(
-            params.get("max_backtests_per_fold", 15), "max_backtests_per_fold"
+            knob("max_backtests_per_fold"), "max_backtests_per_fold"
         ),
-        max_llm_calls=_positive_int(params.get("max_llm_calls", 400), "max_llm_calls"),
+        max_llm_calls=_positive_int(knob("max_llm_calls"), "max_llm_calls"),
         session_max_attempts=_positive_int(
-            params.get("session_max_attempts", 3), "session_max_attempts"
+            knob("session_max_attempts"), "session_max_attempts"
         ),
-        max_fold_minutes=_positive_int(
-            params.get("max_fold_minutes", 240), "max_fold_minutes"
-        ),
+        max_fold_minutes=_positive_int(knob("max_fold_minutes"), "max_fold_minutes"),
         meta_learning_fold_interval=_nonnegative_int(
-            params.get("meta_learning_fold_interval", 0), "meta_learning_fold_interval"
+            knob("meta_learning_fold_interval"), "meta_learning_fold_interval"
         ),
         meta_memory_max_epochs=_nonnegative_int(
-            params.get("meta_memory_max_epochs", 3), "meta_memory_max_epochs"
+            knob("meta_memory_max_epochs"), "meta_memory_max_epochs"
         ),
         meta_learning_directive=_calendar_free_text(
             params.get("meta_learning_directive"), "meta_learning_directive"
@@ -568,35 +595,37 @@ def resolve_worker_options(
         workspace_reference=_optional_workspace_reference(
             params.get("workspace_reference"), repository
         ),
+        operating_memory=resolve_operating_memory(params.get("operating_memory")),
         step_tree_enabled=not _strict_bool(
             params.get("disable_step_tree", False), "disable_step_tree"
         ),
         record_failed_attempts=_strict_bool(
-            params.get("record_failed_attempts", True), "record_failed_attempts"
+            knob("record_failed_attempts"), "record_failed_attempts"
         ),
         convergence_start_epoch=_positive_int(
-            params.get("convergence_start_epoch", 3), "convergence_start_epoch"
+            knob("convergence_start_epoch"), "convergence_start_epoch"
         ),
-        nl_failure_policy=_nl_failure_policy(
-            params.get("nl_failure_policy", "return_error_with_audit")
-        ),
+        nl_failure_policy=_nl_failure_policy(knob("nl_failure_policy")),
         finalize_before_deadline_seconds=_nonnegative_int(
-            params.get("finalize_before_deadline_seconds", 300),
+            knob("finalize_before_deadline_seconds"),
             "finalize_before_deadline_seconds",
         ),
         per_call_timeout_seconds=_positive_int(
-            params.get("per_call_timeout_seconds", 3600), "per_call_timeout_seconds"
+            knob("per_call_timeout_seconds"), "per_call_timeout_seconds"
+        ),
+        strategy_fit_timeout_seconds=_positive_int(
+            knob("strategy_fit_timeout_seconds"), "strategy_fit_timeout_seconds"
         ),
         meta_sandbox_rebuild_enabled=not _strict_bool(
             params.get("disable_meta_sandbox_rebuild", False),
             "disable_meta_sandbox_rebuild",
         ),
         meta_sandbox_rebuild_timeout_seconds=_nonnegative_int(
-            params.get("meta_sandbox_rebuild_timeout_seconds", 1800),
+            knob("meta_sandbox_rebuild_timeout_seconds"),
             "meta_sandbox_rebuild_timeout_seconds",
         ),
         meta_sandbox_image_keep=_nonnegative_int(
-            params.get("meta_sandbox_image_keep", 3), "meta_sandbox_image_keep"
+            knob("meta_sandbox_image_keep"), "meta_sandbox_image_keep"
         ),
         acceptance=AcceptanceRules(
             min_return=_finite_float(params.get("min_return", 0.0), "min_return"),
@@ -625,12 +654,13 @@ def resolve_worker_options(
     # Validate the derived/supplied schedule before the worker advertises it.
     if not preflight:
         build_fold_schedule(
-            rolling.first_test_period,
-            rolling.last_test_period,
+            rolling.development_first_period,
+            rolling.development_last_period,
             trading_days,
             window_months=rolling.window_months,
             period=rolling.fold_period,
             min_region_trade_days=rolling.min_region_trade_days,
+            test_stage=rolling.test_stage,
         )
     analysis_enabled = _strict_bool(
         params.get("analysis_enabled", WEB_CREATE_DEFAULTS["analysis_enabled"]),
@@ -700,11 +730,15 @@ def resolve_worker_options(
     )
 
 
-def _strategy_sandbox_from_spec(spec: SandboxSpec | None) -> SandboxConfig:
+def _strategy_sandbox_from_spec(
+    spec: SandboxSpec | None, *, fit_timeout_seconds: float
+) -> SandboxConfig:
+    limits = SandboxLimits(fit_timeout_seconds=float(fit_timeout_seconds))
     if spec is None:
-        return SandboxConfig(image=DEFAULT_IMAGE)
+        return SandboxConfig(image=DEFAULT_IMAGE, limits=limits)
     return SandboxConfig(
         image=spec.image,
+        limits=limits,
         docker_executable=spec.docker_executable,
     )
 
@@ -756,7 +790,9 @@ def run_local_interactive_worker(
         # A finished experiment is terminal: every session and the held-out
         # evaluation are already durable in the ledger, so a resume must
         # republish the completion status instead of re-running anything.
-        payload = _terminal_status(completed)
+        payload = _terminal_status(
+            completed, verdict=experiment_verdict(ledger.read())
+        )
         write_json_atomic(hitl / "status.json", payload)
         return payload
     if (
@@ -795,7 +831,10 @@ def run_local_interactive_worker(
         and options.llm.compact_enabled
         else None
     )
-    strategy_sandbox = _strategy_sandbox_from_spec(options.agent_sandbox)
+    strategy_sandbox = _strategy_sandbox_from_spec(
+        options.agent_sandbox,
+        fit_timeout_seconds=options.rolling.strategy_fit_timeout_seconds,
+    )
     if options.data_backend == "pit":
         if (
             options.raw_dir is None
@@ -863,6 +902,7 @@ def run_local_interactive_worker(
             step_tree_enabled=options.rolling.step_tree_enabled,
             fold_exploration_directive=options.rolling.fold_exploration_directive,
             workspace_reference=options.rolling.workspace_reference,
+            operating_memory=options.rolling.operating_memory,
             repo_root=options.repo_root,
         )
         meta_learner = LLMMetaLearner(
@@ -876,10 +916,13 @@ def run_local_interactive_worker(
             runtime_root=runtime_root,
             max_llm_calls=options.rolling.max_llm_calls,
             deadline_seconds=options.rolling.max_fold_minutes * 60,
+            decision_timeout_seconds=strategy_sandbox.limits.timeout_seconds,
+            fit_timeout_seconds=strategy_sandbox.limits.fit_timeout_seconds,
             max_response_tokens=options.llm.max_tokens_for("meta"),
             meta_learning_directive=options.rolling.meta_learning_directive,
             fold_exploration_directive=options.rolling.fold_exploration_directive,
             workspace_reference=options.rolling.workspace_reference,
+            operating_memory=options.rolling.operating_memory,
             repo_root=options.repo_root,
             regularization_constraints=options.rolling.regularization_constraints,
             sandbox_spec=options.agent_sandbox,
@@ -920,12 +963,13 @@ def run_local_interactive_worker(
         ledger=ledger,
     )
     folds = build_fold_schedule(
-        options.rolling.first_test_period,
-        options.rolling.last_test_period,
+        options.rolling.development_first_period,
+        options.rolling.development_last_period,
         trading_days,
         window_months=options.rolling.window_months,
         period=options.rolling.fold_period,
         min_region_trade_days=options.rolling.min_region_trade_days,
+        test_stage=options.rolling.test_stage,
     )
     heldout = heldout_periods(
         options.rolling.heldout_first_period,
@@ -1051,6 +1095,7 @@ def run_local_interactive_worker(
         },
         developer_mode=developer_label,
         heldout_runs=heldout_runs,
+        verdict=experiment_verdict(ledger.read()),
     )
     write_json_atomic(hitl / "status.json", payload)
     return payload
@@ -1117,11 +1162,13 @@ def _terminal_status(
     *,
     developer_mode: str | None = None,
     heldout_runs: int = 0,
+    verdict: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """Durable completion status. The experiment's own evidence stays in the
     append-only ledger; status.json only records that the run reached its end,
     so a resume republishes it without re-running or re-recording anything
-    (``heldout_runs`` counts what THIS invocation executed)."""
+    (``heldout_runs`` counts what THIS invocation executed). ``verdict`` is the
+    ledger-derived graduation verdict, re-read on every publish."""
     return {
         "schema_version": 1,
         "state": "completed",
@@ -1132,6 +1179,7 @@ def _terminal_status(
         "total_sessions": source.get("total_sessions"),
         "heldout_runs": heldout_runs,
         "final_strategy_artifact": source.get("final_strategy_artifact"),
+        "verdict": dict(verdict) if verdict is not None else None,
     }
 
 
@@ -1385,11 +1433,12 @@ def _snapshot_config(params: dict[str, object]) -> SnapshotConfig:
             raise ValueError(f"unknown {name}: {unknown}")
         return selected
 
-    def datasets(
-        name: str, is_enabled: bool, defaults: tuple[str, ...]
-    ) -> tuple[str, ...]:
-        selected = selection(name, defaults)
-        return (selected or defaults) if is_enabled else ()
+    def datasets(name: str, is_enabled: bool, domain: str) -> tuple[str, ...]:
+        # Selecting nothing means this domain's default scope; an explicit
+        # selection may name ANY dataset the domain can load, which is how an
+        # experiment opts into a series the default scope leaves out.
+        selected = selection(name, SELECTABLE_DATASETS[domain])
+        return (selected or DEFAULT_DATASETS[domain]) if is_enabled else ()
 
     include_fundamentals = enabled("include_fundamentals")
     include_macro = enabled("include_macro")
@@ -1401,7 +1450,9 @@ def _snapshot_config(params: dict[str, object]) -> SnapshotConfig:
         raise ValueError("screen_exclude_st must be boolean")
     screen_boards = selection("screen_boards", ("main", "gem", "star", "bj"))
     return SnapshotConfig(
-        window_months=_positive_int(params.get("window_months", 21), "window_months"),
+        window_months=_positive_int(
+            params.get("window_months", rolling_default("window_months")), "window_months"
+        ),
         daily_window_months=_optional_positive_int(
             params.get("daily_window_months"), "daily_window_months"
         ),
@@ -1422,15 +1473,11 @@ def _snapshot_config(params: dict[str, object]) -> SnapshotConfig:
             "intraday_trade_days",
         ),
         fundamental_datasets=datasets(
-            "fundamental_datasets",
-            include_fundamentals,
-            base.fundamental_datasets,
+            "fundamental_datasets", include_fundamentals, "fundamentals"
         ),
-        macro_datasets=datasets("macro_datasets", include_macro, base.macro_datasets),
-        events_datasets=datasets(
-            "events_datasets", include_events, base.events_datasets
-        ),
-        text_datasets=datasets("text_datasets", include_text, base.text_datasets),
+        macro_datasets=datasets("macro_datasets", include_macro, "macro"),
+        events_datasets=datasets("events_datasets", include_events, "events"),
+        text_datasets=datasets("text_datasets", include_text, "text"),
         include_intraday=include_intraday,
         replay_include_fundamentals=include_fundamentals,
         replay_include_macro=include_macro,

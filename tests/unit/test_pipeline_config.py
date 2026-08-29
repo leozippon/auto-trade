@@ -32,36 +32,41 @@ _CONSOLE_CREATE_PRESET: dict[str, object] = {
     "compact_max_tokens": 10_000,
     # Empty: the worker derives it from the model window and output ceiling.
     "compact_token_threshold": None,
-    "epochs": 3,
-    "first_test_period": "2022Q1",
-    "fold_period": "quarter",
+    "epochs": 1,
+    "development_first_period": "2022",
+    "fold_period": "year",
     "gpu_count": 1,
-    "heldout_first_period": "2026Q1",
-    "heldout_last_period": "2026Q2",
+    "heldout_first_period": "20260101..20260630",
+    "heldout_last_period": "20260101..20260630",
     "include_events": True,
-    "include_intraday": True,
+    "include_intraday": False,
     "include_text": True,
     "inference_time": "08:30",
     "initial_cash": 1_000_000.0,
     "initial_control_mode": "auto",
     "analysis_enabled": False,
-    "last_test_period": "2025Q4",
-    "max_backtests_per_fold": 15,
-    "max_fold_minutes": 240,
-    "max_llm_calls": 400,
-    "max_steps_per_fold": 10,
-    "meta_learning_fold_interval": 2,
+    "development_last_period": "2025",
+    "max_backtests_per_fold": 30,
+    "max_fold_minutes": 720,
+    "max_llm_calls": 1600,
+    "max_steps_per_fold": 30,
+    "meta_learning_fold_interval": 1,
     "meta_model": LOCAL_QWEN_MODEL,
     "model": LOCAL_QWEN_MODEL,
-    "screen_boards": ("main",),
-    "screen_exclude_new_listed_days": 180,
-    "screen_exclude_st": True,
+    # The universe reaches the agent unfiltered; the strategy filters itself.
+    "screen_boards": (),
+    "screen_exclude_new_listed_days": 0,
+    "screen_exclude_st": False,
     "strategy_period": "day",
+    # One development window, no Test stage: Held-out is the verdict.
+    "test_stage": False,
+    "window_months": 24,
 }
 
 PERIODS = {
-    "first_test_period": "2022Q1",
-    "last_test_period": "2022Q2",
+    "fold_period": "quarter",
+    "development_first_period": "2022Q1",
+    "development_last_period": "2022Q2",
     "heldout_first_period": "2023Q1",
     "heldout_last_period": "2023Q1",
 }
@@ -83,7 +88,7 @@ def test_screen_exclude_st_cli_alias_and_help() -> None:
     parser = argparse.ArgumentParser()
     add_snapshot_window_arguments(parser, verbose_help=True)
 
-    assert parser.parse_args([]).screen_exclude_st is True
+    assert parser.parse_args([]).screen_exclude_st is False
     assert parser.parse_args(["--screen-exclude-st"]).screen_exclude_st is True
     assert parser.parse_args(["--no-screen-exclude-st"]).screen_exclude_st is False
     assert not re.search(
@@ -155,10 +160,12 @@ class AcceptanceRulesTest(unittest.TestCase):
 class RollingExperimentConfigValidationTest(unittest.TestCase):
     def test_valid_defaults_pass(self) -> None:
         config = make_config(Path("/tmp"))
-        self.assertEqual(config.first_test_period, "2022Q1")
-        self.assertEqual(config.meta_learning_fold_interval, 2)
+        self.assertEqual(config.development_first_period, "2022Q1")
+        self.assertFalse(config.test_stage)
+        self.assertEqual(config.epochs, 1)
+        self.assertEqual(config.meta_learning_fold_interval, 1)
         self.assertEqual(config.fold_exploration_directive, "")
-        self.assertEqual(config.max_fold_minutes, 240)
+        self.assertEqual(config.max_fold_minutes, 720)
         self.assertEqual(config.experiment_dir, Path("/tmp/experiments/exp"))
         self.assertEqual(
             config.ledger_path,
@@ -204,7 +211,7 @@ class RollingExperimentConfigValidationTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             make_config(
                 Path("/tmp"),
-                last_test_period="2023Q1",
+                development_last_period="2023Q1",
                 heldout_first_period="2023Q1",
                 heldout_last_period="2023Q2",
             )
@@ -234,6 +241,49 @@ class DefaultsDriftTest(unittest.TestCase):
         schedule = StrategySchedule()
         self.assertEqual(WEB_CREATE_DEFAULTS["strategy_period"], schedule.period)
         self.assertEqual(WEB_CREATE_DEFAULTS["inference_time"], schedule.inference_time)
+
+    def test_the_params_loader_defaults_are_the_dataclass_defaults(self) -> None:
+        """An absent knob in `params.json` resolves to the dataclass default.
+
+        The loader used to carry its own fallbacks, so an experiment created
+        before a knob existed ran with a different cadence, budget or meta
+        interval than the console offered, and nothing reported the divergence.
+        """
+        import tempfile
+
+        from autotrade.pipelines.worker import resolve_worker_options
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            (repo_root / "experiments").mkdir()
+            options = resolve_worker_options(
+                {
+                    "experiment_id": "defaults_demo",
+                    "development_first_period": "2023",
+                    "development_last_period": "2025",
+                    "heldout_first_period": "20260101..20260630",
+                    "heldout_last_period": "20260101..20260630",
+                    "strategy_path": "configs/agent_output_template/main.py",
+                    "data_backend": "pit",
+                    "raw_dir": "data/raw",
+                    "fundamental_events_root": "data/pit/fundamental_events",
+                    "fundamental_events_status": (
+                        "results/data_quality/fundamental_events_status.json"
+                    ),
+                },
+                experiment_dir=repo_root / "experiments/defaults_demo",
+                repo_root=repo_root,
+                preflight=True,
+            )
+        for field_obj in fields(RollingExperimentConfig):
+            if field_obj.default is MISSING:
+                continue
+            with self.subTest(field=field_obj.name):
+                self.assertEqual(
+                    getattr(options.rolling, field_obj.name),
+                    field_obj.default,
+                    field_obj.name,
+                )
 
     def test_the_console_create_form_is_seeded_with_the_research_preset(self) -> None:
         """The create defaults the owner set from a real launch.
@@ -279,14 +329,14 @@ class DefaultsDriftTest(unittest.TestCase):
             "model": "deepseek-v4-pro",
             "max_steps_per_fold": 7,
             "screen_boards": ("gem", "star"),
-            "first_test_period": "2019Q3",
+            "development_first_period": "2019Q3",
         }
         with patch.dict(WEB_CREATE_DEFAULTS, moved):
             after = rendered()
         self.assertEqual(after["model"], "deepseek-v4-pro")
         self.assertEqual(after["max_steps_per_fold"], 7)
         self.assertEqual(after["screen_boards"], ["gem", "star"])
-        self.assertEqual(after["first_test_period"], "2019Q3")
+        self.assertEqual(after["development_first_period"], "2019Q3")
         self.assertEqual(rendered(), baseline, "the schema retained a mutated default")
 
     def test_removed_minute_replay_knobs_are_absent_from_every_surface(self) -> None:
@@ -490,8 +540,9 @@ class ConsoleParameterSurfaceTest(unittest.TestCase):
                     json={
                         "params": {
                             "experiment_id": "params_demo",
-                            "first_test_period": "2024Q1",
-                            "last_test_period": "2024Q1",
+                            "fold_period": "quarter",
+                            "development_first_period": "2024Q1",
+                            "development_last_period": "2024Q1",
                             "heldout_first_period": "2024Q2",
                             "heldout_last_period": "2024Q2",
                             **overrides,

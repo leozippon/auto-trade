@@ -167,9 +167,11 @@ COMMON_FIELD_SEMANTICS: tuple[tuple[str, str], ...] = (
 
 FIELD_RULES: tuple[FieldRule, ...] = (
     # ======================= daily.parquet (normalized) =====================
+    # daily_basic.close and stk_limit.pre_close are dropped before the join, so
+    # the suffixed close_basic / pre_close_limit no longer exist in the file.
     FieldRule("daily.parquet", None,
-              ("open", "high", "low", "close", "pre_close", "change", "close_basic",
-               "pre_close_limit", "up_limit", "down_limit"),
+              ("open", "high", "low", "close", "pre_close", "change",
+               "up_limit", "down_limit"),
               source_unit="CNY_per_share",
               status="verified", evidence="matches auction and minute price scales"),
     FieldRule("daily.parquet", None, ("vol",), source_unit="hands", factor=100.0,
@@ -311,7 +313,9 @@ FIELD_RULES: tuple[FieldRule, ...] = (
               note="opaque vendor composite indicators"),
     FieldRule("events.parquet", "bak_daily", ("avg_turnover", "interval_3", "interval_6"),
               source_unit="unknown", status="unknown",
-              note="populated locally (avg_turnover mostly 0, interval_3/6 ~10% non-null) but semantics/unit undocumented; resolve before use"),
+              evidence="per-year lake scan 2026-08: avg_turnover 95.9% zeros with max 0.04; "
+                       "interval_3/interval_6 last populated 2018-09, all-NA afterwards",
+              note="semantics and unit never documented by the vendor"),
     FieldRule("events.parquet", "block_trade", ("price",), source_unit="CNY_per_share",
               status="verified", evidence="price*vol == amount"),
     FieldRule("events.parquet", "block_trade", ("vol",), source_unit="10k_shares",
@@ -391,7 +395,9 @@ FIELD_RULES: tuple[FieldRule, ...] = (
     FieldRule("events.parquet", "kpl_list",
               ("bid_amount", "bid_change", "bid_turnover", "lu_bid_vol"),
               source_unit="unknown", status="unknown",
-              note="populated only under one tag= category (~43% overall), all-NA elsewhere; resolve before use"),
+              evidence="per-tag lake scan 2026-08: 100% non-null under tag=竞价 (the only "
+                       "rows these fields describe), all-NA under the other tags",
+              note="filter tag=竞价 before use; the unit is undocumented, so rank/quantile only"),
     FieldRule("events.parquet", "kpl_concept_cons", ("hot_num",), source_unit="vendor_score"),
     FieldRule("events.parquet", "dc_index",
               ("pct_change", "leading_pct", "turnover_rate"), source_unit="percent"),
@@ -422,8 +428,7 @@ FIELD_RULES: tuple[FieldRule, ...] = (
     FieldRule("events.parquet", "limit_list_d", ("limit_amount",),
               source_unit="unknown", status="unknown",
               note="板上成交金额 (down-limit rows only per vendor doc); the source rewrites "
-                   "history to null and early-2020 anomalies exist (data docs §4) — "
-                   "masked from the snapshot (SNAPSHOT_EXCLUDED_COLUMNS), raw/audit only"),
+                   "history to null and early-2020 anomalies exist (data docs §4)"),
     FieldRule("events.parquet", "limit_list_d", ("limit",), semantic="categorical",
               note="D=跌停 U=涨停 Z=炸板"),
     FieldRule("events.parquet", "limit_step", ("nums",), source_unit="count",
@@ -440,11 +445,16 @@ FIELD_RULES: tuple[FieldRule, ...] = (
     FieldRule("events.parquet", "limit_list_ths", ("free_float",), source_unit="CNY",
               status="inferred", evidence="median 7.1e9 at float-market-value scale"),
     FieldRule("events.parquet", "limit_list_ths",
-              ("limit_order", "limit_amount", "turnover", "rise_rate", "sum_float",
-               "lu_limit_order"),
+              ("limit_order", "limit_amount", "turnover", "rise_rate", "sum_float"),
               source_unit="unknown", status="unknown",
-              note="populated category-conditionally under some limit_type= partitions "
-                   "(12-69% non-null) except lu_limit_order (all-NA); resolve before use"),
+              evidence="per-limit_type lake scan 2026-08: each field is 100% non-null inside "
+                       "the pools it describes (limit_order/limit_amount 涨停池+连扳池, "
+                       "turnover/rise_rate 冲刺涨停+炸板池, sum_float 连扳池) and all-NA elsewhere",
+              note="filter limit_type before use; the unit is undocumented, so rank/quantile only"),
+    FieldRule("events.parquet", "limit_list_ths", ("lu_limit_order",),
+              source_unit="unknown", status="unknown",
+              evidence="per-limit_type lake scan 2026-08: all-NA in every pool and every year",
+              note="never populated by the source"),
     FieldRule("events.parquet", "ths_hot", ("rank",), source_unit="rank"),
     FieldRule("events.parquet", "ths_hot", ("pct_change",), source_unit="percent"),
     FieldRule("events.parquet", "ths_hot", ("current_price",), source_unit="CNY_per_share",
@@ -464,12 +474,14 @@ FIELD_RULES: tuple[FieldRule, ...] = (
     FieldRule("macro.parquet", "cn_cpi", ("nt_val", "town_val", "cnt_val"),
               source_unit="official_index"),
     FieldRule("macro.parquet", "cn_cpi", ("*_yoy", "*_mom"), source_unit="percent"),
-    FieldRule("macro.parquet", "cn_cpi", ("*_accu",), source_unit="unknown", status="unknown",
-              evidence="local per-year scan 2026-08: town_accu/cnt_accu (all rows) and "
-                       "nt_accu through 202410 hold cumulative index levels ~100.x; "
-                       "nt_accu from 202411 holds cumulative pct change",
-              note="mixed regimes inside one column; rank/quantile use only until the "
-                   "vendor series is disambiguated"),
+    FieldRule("macro.parquet", "cn_cpi", ("town_accu", "cnt_accu"),
+              source_unit="official_index", status="inferred",
+              evidence="local scan 2026-08: cumulative index levels ~100.x across every month"),
+    FieldRule("macro.parquet", "cn_cpi", ("nt_accu",), source_unit="unknown", status="unknown",
+              evidence="local scan 2026-08: cumulative index level ~100.x through 202410, then "
+                       "cumulative pct change (0.3/0.2 in 202411-202412, -0.1 in 202502) and "
+                       "index levels again in other months",
+              note="irreconcilable regimes inside one column, with no vendor regime marker"),
     FieldRule("macro.parquet", "cn_ppi", ("ppi*",), source_unit="percent",
               note="yoy/mom/accumulated change rates; no index level columns"),
     FieldRule("macro.parquet", "cn_pmi", ("pmi*",), source_unit="diffusion_index"),
@@ -484,14 +496,21 @@ FIELD_RULES: tuple[FieldRule, ...] = (
     FieldRule("macro.parquet", "shibor_lpr", ("1y", "5y"), source_unit="percent"),
     FieldRule("macro.parquet", "eco_cal", ("value", "pre_value", "fore_value"),
               source_unit="unknown", status="unknown",
-              note="heterogeneous by event; must not be pooled without event-specific parsing"),
+              evidence="full-file scan 2026-08: free text over 3136 distinct events, only "
+                       "18.4%/21.9%/8.9% parse as numbers and the scale is per event",
+              note="heterogeneous by event; cannot be pooled without event-specific parsing"),
     FieldRule("macro.parquet", "index_global",
               ("open", "close", "high", "low", "pre_close", "change"),
               source_unit="index_points"),
     FieldRule("macro.parquet", "index_global", ("pct_chg", "swing"), source_unit="percent"),
-    FieldRule("macro.parquet", "index_global", ("vol", "amount"),
+    FieldRule("macro.parquet", "index_global", ("vol",),
               source_unit="unknown", status="unknown",
-              note="unit varies by market and source; sparse"),
+              evidence="per-index scan 2026-08: 85% non-null overall, complete per index "
+                       "except HKTECH/XIN9 (none) and RUT (9%)",
+              note="the unit differs by market — compare within one ts_code only"),
+    FieldRule("macro.parquet", "index_global", ("amount",),
+              source_unit="unknown", status="unknown",
+              evidence="per-index scan 2026-08: 300 of 16341 rows, only HSI and HKTECH"),
     FieldRule("macro.parquet", "index_daily",
               ("open", "close", "high", "low", "pre_close", "change"),
               source_unit="index_points"),
@@ -529,7 +548,8 @@ FIELD_RULES: tuple[FieldRule, ...] = (
     FieldRule("macro.parquet", "daily_info", ("com_count",), source_unit="count"),
     FieldRule("macro.parquet", "daily_info", ("trans_count",),
               source_unit="unknown", status="unknown",
-              note="populated 2020-2022 only, all-NA 2023+; count basis (笔 vs 万笔) unverified"),
+              evidence="per-year scan 2026-08: 47%/55%/16% non-null 2020-2022, all-NA 2023+",
+              note="count basis (笔 vs 万笔) never confirmed"),
     FieldRule("macro.parquet", "daily_info", ("total_share", "float_share", "vol"),
               source_unit="100m_shares",
               status="verified", evidence="exchange-level medians only plausible in 100m units"),
@@ -543,10 +563,10 @@ FIELD_RULES: tuple[FieldRule, ...] = (
     FieldRule("macro.parquet", "sz_daily_info",
               ("amount", "total_mv", "float_mv"), source_unit="CNY",
               status="verified", evidence="SZSE daily turnover ~6.9e10 == 69b CNY"),
-    FieldRule("macro.parquet", "sz_daily_info", ("vol",), source_unit="shares",
-              status="inferred", note="sparse locally"),
-    FieldRule("macro.parquet", "sz_daily_info", ("total_share", "float_share"),
-              source_unit="shares", status="inferred", note="sparse locally"),
+    FieldRule("macro.parquet", "sz_daily_info", ("vol", "total_share", "float_share"),
+              source_unit="shares", status="inferred",
+              evidence="per-year scan 2026-08: 78-100% non-null 2020-2021, 27-34% in 2022, "
+                       "all-NA 2023+"),
     FieldRule("macro.parquet", "moneyflow_mkt_dc", ("close_sh", "close_sz"),
               source_unit="index_points"),
     FieldRule("macro.parquet", "moneyflow_mkt_dc",
@@ -584,8 +604,8 @@ FIELD_RULES: tuple[FieldRule, ...] = (
                    "constant-maturity (TREASURY 20-Yr CMT) rate"),
     FieldRule("macro.parquet", "us_tltr", ("e_factor",),
               source_unit="unknown", status="unknown",
-              note="extrapolation methodology flag, not a rate; all-NA locally "
-                   "(2020-2026); resolve before use"),
+              evidence="per-year scan 2026-08: 0 of 1652 rows populated (2020-2026)",
+              note="extrapolation methodology flag, not a rate"),
     FieldRule("macro.parquet", "fut_basic", ("multiplier", "per_unit"),
               source_unit="units_per_lot"),
     # fut_mapping is a contract mapping: identifiers only.
@@ -615,7 +635,7 @@ FIELD_RULES: tuple[FieldRule, ...] = (
               status="inferred", evidence="issue_size ~7.5e8 at bond-issue scale"),
     FieldRule("macro.parquet", "cb_basic", ("remain_size",), source_unit="CNY",
               status="inferred", evidence="same scale as issue_size",
-              note="CURRENT-STATE balance; masked from the snapshot (SNAPSHOT_EXCLUDED_COLUMNS), raw only"),
+              note="CURRENT-STATE balance refreshed nightly"),
     FieldRule("macro.parquet", "cb_basic", ("maturity",), source_unit="years"),
     FieldRule("macro.parquet", "cb_basic", ("coupon_rate",), source_unit="percent"),
     FieldRule("macro.parquet", "cb_basic", ("pay_per_year",), source_unit="count"),
@@ -626,8 +646,7 @@ FIELD_RULES: tuple[FieldRule, ...] = (
     FieldRule("macro.parquet", "cb_basic", ("conv_price",),
               source_unit="CNY_per_share",
               status="inferred", evidence="medians 12-16 at stock price scale",
-              note="nightly CURRENT-STATE refresh; masked from the snapshot "
-                   "(SNAPSHOT_EXCLUDED_COLUMNS), raw only — historical conversion price "
+              note="nightly CURRENT-STATE refresh; the historical conversion price "
                    "derives from cb_daily (data docs §3.3)"),
     FieldRule("macro.parquet", "cb_daily",
               ("pre_close", "open", "high", "low", "close", "change", "bond_value",
@@ -695,7 +714,8 @@ FIELD_RULES: tuple[FieldRule, ...] = (
               evidence="roe median 10.6, debt_to_assets 42.8 at percent scale"),
     FieldRule("fundamentals.parquet", "fina_indicator_vip", ("impai_ttm",),
               source_unit="unknown", status="unknown",
-              note="median -0.63 inconsistent with a CNY amount; resolve before use"),
+              evidence="scan 2026-08: median 0.0005 and 96.4% of values |x| < 10",
+              note="the magnitude contradicts the declared CNY impairment amount"),
     FieldRule("fundamentals.parquet", "forecast_vip", ("p_change_min", "p_change_max"),
               source_unit="percent"),
     FieldRule("fundamentals.parquet", "forecast_vip",

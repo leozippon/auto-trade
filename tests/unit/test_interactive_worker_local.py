@@ -19,7 +19,6 @@ from autotrade.environment.llm import (
     ToolCall,
 )
 from autotrade.environment.nl import NLConfig
-from autotrade.environment.nl.service import DEFAULT_MAX_TOTAL_CALLS
 from autotrade.environment.tools import CommandResult
 from autotrade.pipelines.agent_views import compact_fold_history
 from autotrade.pipelines.hitl_state import (
@@ -80,8 +79,12 @@ def _experiment(
                 "inference_time": "08:30",
                 "initial_cash": 100_000,
                 "epochs": 1,
-                "first_test_period": "2026Q1",
-                "last_test_period": "2026Q1",
+                "fold_period": "quarter",
+                # Rolling design: validation 2025Q4, frozen Test 2026Q1. The
+                # default single-window design is exercised separately.
+                "development_first_period": "2025Q4",
+                "development_last_period": "2026Q1",
+                "test_stage": True,
                 "heldout_first_period": "2026Q2",
                 "heldout_last_period": "2026Q2",
             }
@@ -92,6 +95,49 @@ def _experiment(
         json.dumps({"schema_version": 1, "mode": "auto"}), encoding="utf-8"
     )
     return repo, experiment
+
+
+def test_local_worker_single_window_fold_goes_straight_to_held_out(tmp_path: Path):
+    """The default research design end to end: one development Fold over the
+    whole window, no frozen Test, an automatic Held-out replay, and the
+    graduation verdict on the ledger and the terminal status."""
+    repo, experiment = _experiment(tmp_path)
+    path = experiment / "hitl/params.json"
+    params = json.loads(path.read_text(encoding="utf-8"))
+    params.update(
+        {
+            "development_first_period": "2025Q4",
+            "development_last_period": "2026Q1",
+            "test_stage": False,
+        }
+    )
+    path.write_text(json.dumps(params), encoding="utf-8")
+    options = load_worker_options(experiment, repo_root=repo)
+    assert options.rolling.test_stage is False
+    result = run_local_interactive_worker(options)
+    assert result["state"] == "completed"
+    records = ExperimentLedger(options.rolling.ledger_path).read()
+    assert [record["record_type"] for record in records] == ["fold", "heldout"]
+    fold, heldout = records
+    assert fold["fold_id"] == "fold_20251001..20260331"
+    assert fold["validation_period"] == "20251001..20260331"
+    assert fold["test_period"] is None
+    assert fold["test_result"] is None
+    assert fold["snapshot_ids"]["test_decision_input"] is None
+    assert not list((experiment / "artifacts/results").glob("frozen_test_*"))
+    plan = json.loads((experiment / "hitl/schedule.json").read_text(encoding="utf-8"))
+    assert [row["kind"] for row in plan["sessions"]] == ["fold", "heldout"]
+    # The deterministic baseline holds cash (zero Sharpe) and the local daily
+    # fixture carries no benchmark series, so the verdict names both.
+    assert heldout["verdict"]["status"] == "discarded"
+    assert heldout["verdict"]["reasons"] == [
+        "missing_benchmark_return",
+        "sharpe_not_positive",
+    ]
+    assert result["verdict"]["status"] == "discarded"
+    assert result["verdict"]["periods"][0]["period"] == "2026Q2"
+    status = read_status(experiment / "hitl/status.json")
+    assert status["verdict"] == result["verdict"]
 
 
 def test_analysis_enabled_defaults_off_and_can_be_enabled(tmp_path: Path):
@@ -203,7 +249,8 @@ def test_nl_cost_controls_reach_the_worker_without_being_configured(
     monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
 
     options = load_worker_options(experiment, repo_root=repo)
-    assert options.nl_config.max_total_calls == DEFAULT_MAX_TOTAL_CALLS
+    # Unset: the evaluation backend derives it from each replay's own length.
+    assert options.nl_config.max_total_calls is None
     assert options.nl_config.max_calls_per_decision == NLConfig().max_calls_per_decision
 
     settings = options.llm
@@ -899,10 +946,16 @@ def test_second_llm_fold_prompt_excludes_prior_test_diagnostic(
     params = json.loads(params_path.read_text(encoding="utf-8"))
     params.update(
         {
-            "first_test_period": "2026Q1",
-            "last_test_period": "2026Q2",
+            "fold_period": "quarter",
+            # Two rolling Folds: 2025Q4 -> 2026Q1 and 2026Q1 -> 2026Q2.
+            "development_first_period": "2025Q4",
+            "development_last_period": "2026Q2",
+            "test_stage": True,
             "heldout_first_period": "2026Q3",
             "heldout_last_period": "2026Q3",
+            # One Epoch-start Meta only: this asserts what the SECOND Fold
+            # prompt carries, not the periodic meta cadence.
+            "meta_learning_fold_interval": 0,
         }
     )
     params_path.write_text(json.dumps(params), encoding="utf-8")
@@ -1029,7 +1082,7 @@ def test_worker_params_reject_unknown_and_partial_periods(tmp_path: Path):
     with pytest.raises(ValueError, match="unknown experiment parameters"):
         load_worker_options(experiment, repo_root=repo)
     params.pop("typo_budget")
-    for key in ("last_test_period", "heldout_first_period", "heldout_last_period"):
+    for key in ("development_last_period", "heldout_first_period", "heldout_last_period"):
         params.pop(key)
     path.write_text(json.dumps(params), encoding="utf-8")
     with pytest.raises(ValueError, match="all four"):
@@ -1114,8 +1167,9 @@ def test_webui_persistent_create_uses_available_worker_entrypoint(
     created = manager.create_experiment(
         {
             "experiment_id": "worker_smoke",
-            "first_test_period": "2026Q1",
-            "last_test_period": "2026Q1",
+            "fold_period": "quarter",
+            "development_first_period": "2026Q1",
+            "development_last_period": "2026Q1",
             "heldout_first_period": "2026Q2",
             "heldout_last_period": "2026Q2",
             "initial_control_mode": "manual",

@@ -112,7 +112,7 @@ def _exposure_entry(rows: list[tuple[str, float]]) -> dict[str, object]:
     return {"dates": [row[0] for row in rows], "long": [row[1] for row in rows]}
 
 
-_STYLE_MODES = frozenset({"valid", "frozen_test", "heldout"})
+_STYLE_MODES = frozenset(registry.RESULT_MODES.values())
 
 
 def _benchmark_returns(experiment_dir: Path, reference: object) -> list[tuple[str, float]]:
@@ -176,7 +176,8 @@ def _run_result_ref(experiment_dir: Path, record: Mapping[str, object], prefix: 
     run_id = str(record.get("run_id") or "")
     if run_id and Path(run_id).name == run_id:
         results = experiment_dir / "artifacts" / run_id / "results"
-        candidates = sorted(path for path in results.glob(f"{prefix}*") if path.is_dir()) if results.is_dir() else []
+        pattern = f"{registry.result_dir_prefixes((prefix,))[0]}*"
+        candidates = sorted(path for path in results.glob(pattern) if path.is_dir()) if results.is_dir() else []
         if candidates:
             return str(candidates[-1])
     return None
@@ -186,7 +187,8 @@ def _local_result_refs(experiment_dir: Path, prefix: str) -> list[str]:
     root = experiment_dir / "artifacts/results"
     if not root.is_dir():
         return []
-    paths = [path for path in root.glob(f"{prefix}_*") if path.is_dir()]
+    pattern = f"{registry.result_dir_prefixes((prefix,))[0]}*"
+    paths = [path for path in root.glob(pattern) if path.is_dir()]
     paths.sort(key=lambda path: (path.stat().st_mtime_ns, path.name))
     return [str(path) for path in paths]
 
@@ -311,7 +313,7 @@ def fold_equity_payload(root: Path, experiment_id: str, epoch_id: str, fold_ref:
         test_reference = _run_result_ref(experiment_dir, record, "test")
         test_rows = _returns(experiment_dir, test_reference)
         if not test_rows:
-            candidates = _local_result_refs(experiment_dir, "frozen_test")
+            candidates = _local_result_refs(experiment_dir, "test")
             ordered = sorted(latest_fold_records(records).values(), key=lambda row: str(row.get("recorded_at") or ""))
             try:
                 test_reference = candidates[ordered.index(record)]
@@ -353,7 +355,7 @@ def experiment_equity_payload(root: Path, experiment_id: str, *, epoch_id: str |
         "valid": _chain([_exposures(experiment_dir, reference) for reference in validation_refs])
     }
     if registry.test_results_revealed(experiment_dir, records):
-        test_refs = _local_result_refs(experiment_dir, "frozen_test")
+        test_refs = _local_result_refs(experiment_dir, "test")
         test_parts: list[list[tuple[str, float]]] = []
         test_exposure_parts: list[list[tuple[str, float]]] = []
         for record in selected:

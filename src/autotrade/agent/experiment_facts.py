@@ -95,6 +95,9 @@ def build_experiment_facts(
             fold_period=fold_period,
             is_meta=is_meta,
         ),
+        "research_scope": _research_scope(
+            manifest=manifest, snapshot_config=snapshot_config, is_meta=is_meta
+        ),
         "budgets": _budget_facts(manifest, max_llm_calls=max_llm_calls, context_compaction=context_compaction),
         # No "paths" table and no per-file "data_profile": every production
         # consumer of this object is the prompt renderer, which dropped both
@@ -125,8 +128,10 @@ def _visible_timeline(
 ) -> dict[str, object]:
     execution_policy = _execution_policy(data_summary)
     snapshot_windows = _snapshot_windows(snapshot_config)
+    # A single-window development Fold (test_stage False) has no Test cadence
+    # to name; the cadence unit only matters when Folds roll inside the window.
     timeline = {
-        "fold_period": fold_period,
+        "fold_period": None if manifest.get("test_stage") is False else fold_period,
         "snapshot_windows": snapshot_windows,
         "decision_snapshot_intraday_lookback_trade_days": snapshot_windows.get("intraday_trade_days"),
         "validation_intraday_scope": "historical_pit_features_and_exact_execution_prices",
@@ -148,7 +153,80 @@ def _visible_timeline(
     return compact_mapping(timeline)
 
 
+def _research_scope(
+    *,
+    manifest: Mapping[str, object],
+    snapshot_config: Mapping[str, object],
+    is_meta: bool,
+) -> dict[str, object]:
+    """One sentence each on the development window, the universe and the cadence."""
+    fold = _as_mapping(manifest.get("fold"))
+    window = fold.get("validation_period")
+    if manifest.get("test_stage") is False:
+        development = (
+            f"The development window is {window}: the strategy is developed and "
+            "validated on this whole window as one Fold, and the frozen strategy is "
+            "then judged only by the automatic Held-out replay."
+        )
+    elif manifest.get("test_stage") is True:
+        development = (
+            f"This Fold's development window is its validation period {window}; "
+            "development rolls period by period inside the configured window."
+        )
+    else:
+        development = f"The development window of this session is {window}."
+    screen = _as_mapping(snapshot_config.get("universe_screen"))
+    active = {
+        key: value
+        for key, value in screen.items()
+        if value not in (None, False, 0, [], ())
+    }
+    if active:
+        universe = (
+            "The universe is screened at the decision anchor "
+            f"({', '.join(f'{key}={value}' for key, value in active.items())}); "
+            "the strategy may filter further."
+        )
+    else:
+        universe = (
+            "The universe is unfiltered: every listed A share on all boards, ST "
+            "names included and no new-listing exclusion; the strategy applies its "
+            "own universe filters."
+        )
+    schedule = _as_mapping(manifest.get("schedule"))
+    if not schedule:
+        schedule = _as_mapping(_as_mapping(manifest.get("experiment_parameters")).get("schedule"))
+    period = str(schedule.get("period") or "day")
+    inference_time = schedule.get("inference_time")
+    when = (
+        "every trading day"
+        if period == "day"
+        else f"on the first available trading day of each {period}"
+    )
+    cadence = (
+        f"generate_orders is called {when} at {inference_time}; the strategy chooses "
+        "its own rebalance cadence by returning no orders on days it does not want to "
+        "trade."
+    )
+    return compact_mapping(
+        {
+            "development_window": None if is_meta else development,
+            "universe": universe,
+            "strategy_cadence": cadence,
+        }
+    )
+
+
 def _snapshot_windows(snapshot_config: Mapping[str, object]) -> dict[str, object]:
+    """The decision-input windows the session can actually read.
+
+    ``SnapshotConfig.to_record`` always carries ``intraday_trade_days`` because
+    that record is the on-disk PIT cache contract and its shape must stay
+    stable. With minute bars off there is no minute file to look back over, so
+    the projection drops the key instead of advertising a window over data the
+    execution policy reports as unavailable.
+    """
+
     windows = _as_mapping(snapshot_config.get("decision_windows"))
     return compact_mapping(
         {
@@ -157,7 +235,11 @@ def _snapshot_windows(snapshot_config: Mapping[str, object]) -> dict[str, object
             "events_months": windows.get("events_months"),
             "macro_months": windows.get("macro_months"),
             "text_months": windows.get("text_months"),
-            "intraday_trade_days": windows.get("intraday_trade_days"),
+            "intraday_trade_days": (
+                windows.get("intraday_trade_days")
+                if snapshot_config.get("include_intraday")
+                else None
+            ),
         }
     )
 
@@ -197,6 +279,11 @@ def _budget_facts(
             # slower generate_orders fails the whole backtest.
             "strategy_inference_timeout_seconds": budgets.get(
                 "strategy_inference_timeout_seconds"
+            ),
+            # The separate wall clock of one fit(context) call, which the
+            # prompts tell the agent to read before moving work into fit.
+            "strategy_fit_timeout_seconds": budgets.get(
+                "strategy_fit_timeout_seconds"
             ),
             "context_compaction": context_compaction,
         }

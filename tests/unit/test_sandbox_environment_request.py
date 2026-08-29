@@ -182,7 +182,7 @@ class SandboxEnvironmentRequestTest(unittest.TestCase):
         from autotrade.pipelines.config import RollingExperimentConfig
 
         config = RollingExperimentConfig(
-            "exp", Path("/tmp/experiments"), "2022Q1", "2022Q1", "2023Q1", "2023Q1"
+            "exp", Path("/tmp/experiments"), "2022Q1", "2022Q1", "2023Q1", "2023Q1", fold_period="quarter"
         )
         self.assertTrue(config.meta_sandbox_rebuild_enabled)
         self.assertEqual(config.meta_sandbox_rebuild_timeout_seconds, 1800)
@@ -193,7 +193,7 @@ class SandboxEnvironmentRequestTest(unittest.TestCase):
         ):
             with self.subTest(field=field), self.assertRaisesRegex(ValueError, field):
                 RollingExperimentConfig(
-                    "exp", Path("/tmp/experiments"), "2022Q1", "2022Q1", "2023Q1", "2023Q1",
+                    "exp", Path("/tmp/experiments"), "2022Q1", "2022Q1", "2023Q1", "2023Q1", fold_period="quarter",
                     **{field: value},
                 )
 

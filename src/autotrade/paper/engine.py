@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import fcntl
 import math
+import shutil
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager
@@ -20,7 +21,11 @@ from pathlib import Path
 import pandas as pd
 
 from autotrade.environment.broker import BrokerProfile, DailyBroker, Position
-from autotrade.environment.executor import DockerStrategyExecutor, StrategyExecutor
+from autotrade.environment.executor import (
+    DockerStrategyExecutor,
+    FittableStrategyExecutor,
+    StrategyExecutor,
+)
 from autotrade.environment.replay.engine import (
     ContextDataProvider,
     ExecutionPriceProvider,
@@ -28,6 +33,7 @@ from autotrade.environment.replay.engine import (
     resolve_execution_price,
 )
 from autotrade.environment.replay.market import DailyMarketData
+from autotrade.environment.runtime import chmod_tree
 from autotrade.environment.sandbox import SandboxConfig
 from autotrade.environment.strategy import (
     CN_TZ,
@@ -45,6 +51,10 @@ PAPER_SOURCE = "paper_engine"
 PAPER_STATE_SCHEMA_VERSION = 3
 PAPER_STATE_NAME = ".paper_state.json"
 PAPER_LOCK_NAME = ".paper_engine.lock"
+# Per-day working directory of a strategy that declares ``fit(context)``. It is
+# rebuilt empty for every day and discarded with that day's executor, so no
+# fitted state ever crosses a Paper day or enters the account journals.
+STRATEGY_STATE_NAME = ".strategy_state"
 SNAPSHOT_NAME = "account_snapshot.json"
 
 
@@ -53,7 +63,10 @@ class PaperEngineError(RuntimeError):
 
 
 VisibleRecords = Callable[[datetime], Sequence[Mapping[str, object]]]
-ExecutorFactory = Callable[[Path, SandboxConfig], StrategyExecutor]
+# (strategy_path, sandbox, this day's empty state directory, revision models
+# directory or None) -> executor. The engine owns the two directories so every
+# implementation mounts the same ones.
+ExecutorFactory = Callable[[Path, SandboxConfig, Path, Path | None], StrategyExecutor]
 
 
 class DailyPaperEngine:
@@ -63,6 +76,7 @@ class DailyPaperEngine:
         strategy_path: str | Path,
         daily: pd.DataFrame | str | Path,
         state_root: str | Path = "data/trading/paper",
+        models_dir: str | Path | None = None,
         strategy_revision: str | None = None,
         schedule: StrategySchedule | None = None,
         profile: BrokerProfile | None = None,
@@ -81,6 +95,11 @@ class DailyPaperEngine:
             raise TypeError("daily must be a DataFrame or parquet path")
         self.market = DailyMarketData(frame)
         self.state_root = Path(state_root).resolve()
+        # The activated revision's frozen models/ tree, mounted read-only for
+        # both fit and generate_orders exactly as a replay mounts it.
+        self.models_dir = Path(models_dir).resolve() if models_dir is not None else None
+        if self.models_dir is not None and not self.models_dir.is_dir():
+            raise ValueError(f"models directory does not exist: {self.models_dir}")
         self.strategy_revision = str(strategy_revision or self.strategy_path.name)
         if not self.strategy_revision.strip():
             raise ValueError("strategy_revision must be non-empty")
@@ -98,6 +117,32 @@ class DailyPaperEngine:
         if self._executor is not None:
             self._executor.close()
             self._executor = None
+        self._discard_strategy_state()
+
+    def _strategy_state_dir(self) -> Path:
+        """An empty state directory for this day's fit, replacing any leftover.
+
+        World-writable because the sandbox fit worker runs as a non-root user;
+        the inference worker binds the same directory read-only.
+        """
+
+        state_dir = self.state_root / STRATEGY_STATE_NAME
+        self._discard_strategy_state()
+        state_dir.mkdir(parents=True)
+        state_dir.chmod(0o777)
+        return state_dir
+
+    def _discard_strategy_state(self) -> None:
+        state_dir = self.state_root / STRATEGY_STATE_NAME
+        if not state_dir.exists():
+            return
+        try:
+            chmod_tree(state_dir, file_mode=0o644, dir_mode=0o755)
+            shutil.rmtree(state_dir)
+        except OSError as exc:
+            raise PaperEngineError(
+                f"cannot discard strategy state: {state_dir}: {exc}"
+            ) from exc
 
     def run_day(self, trade_date: str) -> dict[str, object]:
         if len(trade_date) != 8 or not trade_date.isdigit():
@@ -262,6 +307,27 @@ class DailyPaperEngine:
         data_view = self.context_data(inference_at) if self.context_data is not None else StrategyDataView()
         if not isinstance(data_view, StrategyDataView):
             raise PaperEngineError("context_data must return StrategyDataView")
+        if self._executor is None:
+            state_dir = self._strategy_state_dir()
+            self._executor = (
+                self.executor_factory(
+                    self.strategy_path, self.sandbox, state_dir, self.models_dir
+                )
+                if self.executor_factory is not None
+                else DockerStrategyExecutor(
+                    self.strategy_path,
+                    self.sandbox,
+                    snapshot_dir=data_view.snapshot_dir or None,
+                    asof_dir=data_view.asof_dir or None,
+                    models_dir=self.models_dir,
+                    state_dir=state_dir,
+                )
+            )
+        fittable = (
+            self._executor
+            if isinstance(self._executor, FittableStrategyExecutor)
+            else None
+        )
         context = StrategyContext(
             inference_at=inference_at,
             bars=visible,
@@ -269,19 +335,21 @@ class DailyPaperEngine:
             snapshot_dir=data_view.snapshot_dir,
             asof_dir=data_view.asof_dir,
             asof_version=data_view.asof_version,
+            state_dir=fittable.context_state_dir if fittable is not None else "",
+            models_dir=fittable.context_models_dir if fittable is not None else "",
             _nl_query=self.nl_query,
         )
-        if self._executor is None:
-            self._executor = (
-                self.executor_factory(self.strategy_path, self.sandbox)
-                if self.executor_factory is not None
-                else DockerStrategyExecutor(
-                    self.strategy_path,
-                    self.sandbox,
-                    snapshot_dir=data_view.snapshot_dir or None,
-                    asof_dir=data_view.asof_dir or None,
-                )
-            )
+        # Paper advances one day at a time and keeps no fitted state between
+        # days, so a declared fit runs before every decision on the very context
+        # that decision gets. REFIT_PERIOD is a within-replay cadence and cannot
+        # stretch across Paper days.
+        if fittable is not None and fittable.fit_schedule is not None:
+            try:
+                fittable.fit(context)
+            except Exception as exc:
+                raise PaperEngineError(
+                    f"fit failed at {inference_at.isoformat()}: {exc}"
+                ) from exc
         payload = self._executor.execute(context)
         orders = validate_order_payload(payload, inference_at=inference_at)
         pending.extend(orders)

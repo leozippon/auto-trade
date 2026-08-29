@@ -21,7 +21,10 @@ from pyarrow.lib import ArrowInvalid
 
 from autotrade.data_sources.tushare import audit, common, cron_update, download
 from autotrade.data_sources.tushare import io as tushare_io
-from autotrade.environment.data.snapshot import SnapshotConfig
+from autotrade.environment.data.snapshot import (
+    SELECTABLE_DATASETS,
+    SnapshotConfig,
+)
 
 
 class EmptyMinuteClient:
@@ -6252,6 +6255,17 @@ class FullPortContractTest(unittest.TestCase):
             inventory["fundamentals.parquet"]["income_vip"],
         )
 
+    def test_every_downloaded_reference_dataset_is_registered(self) -> None:
+        # interfaces[] is the operational fact source for datasets (the console
+        # reads it for dataset labels): a table the downloader writes but the
+        # registry omits carries no documented refresh or availability contract.
+        root = Path(__file__).resolve().parents[2]
+        schedule = json.loads(
+            (root / "configs/tushare_update_schedule.json").read_text(encoding="utf-8")
+        )
+        scheduled = {item["dataset"] for item in schedule["interfaces"]}
+        self.assertEqual(set(common.REFERENCE_DATASETS) - scheduled, set())
+
     def test_active_macro_registries_are_consistent(self) -> None:
         root = Path(__file__).resolve().parents[2]
         schedule = json.loads(
@@ -6264,8 +6278,11 @@ class FullPortContractTest(unittest.TestCase):
 
         self.assertEqual(set(common.MACRO_DATASETS), set(common.MACRO_SPECS))
         self.assertTrue(set(common.MACRO_DATASETS).issubset(scheduled_datasets))
+        # The committed inventory covers every SELECTABLE macro dataset, not
+        # just the default scope: the unit registry is fail-closed, so a
+        # dataset an experiment can opt into must resolve column by column.
         self.assertEqual(
-            set(SnapshotConfig().macro_datasets),
+            set(SELECTABLE_DATASETS["macro"]),
             set(inventory["macro.parquet"]),
         )
-        self.assertTrue(set(SnapshotConfig().macro_datasets).issubset(common.MACRO_SPECS))
+        self.assertTrue(set(SELECTABLE_DATASETS["macro"]).issubset(common.MACRO_SPECS))

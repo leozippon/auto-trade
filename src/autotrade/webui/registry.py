@@ -34,11 +34,13 @@ from autotrade.pipelines.hitl_state import (
 )
 from autotrade.pipelines.ledger import (
     ExperimentLedger,
+    experiment_verdict,
     is_durable_success_record,
     is_frozen_artifact_mutation,
     latest_fold_records,
     latest_heldout_records,
 )
+from autotrade.pipelines.worker import _ALLOWED_PARAMS
 from autotrade.pipelines.meta_schedule import meta_record_session_key
 from autotrade.pipelines.prior import latest_prior_text, unified_meta_record
 from autotrade.pipelines.skills import latest_skills_snapshot
@@ -105,6 +107,10 @@ TEST_FIELDS = ("test_result",)
 # every projection and never surface in the audit block either — the reveal
 # gate would be pointless if the console handed out the path to the artifact.
 _TEST_EVIDENCE_REFS = ("test_result_ref", "snapshot_ids")
+# The sealed calendar itself. A fold record names the Test window it will be
+# scored on; publishing it before the reveal would hand out the held-out dates
+# the params view and the session list already seal.
+_SEALED_FOLD_PERIODS = ("test_period", "test_decision_time")
 # Operator-only keys plus retired sensitive configuration from historical
 # params files. The read model never echoes any of them back out.
 _PRIVATE_PARAMS = {
@@ -120,12 +126,27 @@ _PRIVATE_PARAMS = {
     "llm_env_file",
     "llm_base_url",
 }
+# Held-out is the one calendar the console must not publish before the reveal.
+# The development window is public research scope: the session list already
+# labels every Fold with its own period (``20220101..20251231`` for the default
+# single-window Fold), so sealing the same dates here sealed nothing.
 _SEALED_PERIOD_PARAMS = {
-    "first_test_period",
-    "last_test_period",
     "heldout_first_period",
     "heldout_last_period",
 }
+
+
+class UnsupportedParamsError(ValueError):
+    """params.json names parameters the worker no longer accepts (a legacy
+    experiment). The listing flags it unreadable instead of crashing."""
+
+
+def _require_supported_params(params: Mapping[str, object]) -> None:
+    unknown = sorted(
+        key for key in params if not str(key).startswith("_") and key not in _ALLOWED_PARAMS
+    )
+    if unknown:
+        raise UnsupportedParamsError(f"unsupported experiment parameters: {unknown}")
 
 
 def read_ledger_records(experiment_dir: Path) -> list[dict[str, object]]:
@@ -378,17 +399,46 @@ def _durable_session_progress(
     return completed, len(sessions)
 
 
-def sealed_result_prefixes(experiment_dir: Path) -> tuple[str, ...]:
+# The evaluation backends name every result directory ``f"{mode}_{uuid4().hex}"``
+# (pipelines/pit_backend.py, pipelines/local_backend.py). The console speaks a
+# shorter public vocabulary — valid | test | heldout — so this mapping is the
+# single place that knows how a public prefix is spelled on disk.
+RESULT_MODES: dict[str, str] = {
+    "valid": "valid",
+    "test": "frozen_test",
+    "heldout": "heldout",
+}
+# Public prefixes whose results carry test-period evidence.
+SEALED_PREFIXES: tuple[str, ...] = ("test", "heldout")
+
+
+def result_dir_prefixes(prefixes: tuple[str, ...]) -> tuple[str, ...]:
+    """Result-directory name prefixes for the given public prefixes."""
+    return tuple(f"{RESULT_MODES[prefix]}_" for prefix in prefixes)
+
+
+def sealed_prefixes(experiment_dir: Path) -> tuple[str, ...]:
     """Central reveal gate for artifact routes (style, orders, CSV, result-name
-    enumeration): result names / style prefixes starting with these carry
-    test-period evidence and must stay invisible pre-reveal — respond 404 and
-    filter listings, never confirm existence. Empty once revealed."""
-    return () if test_results_revealed(experiment_dir) else ("test", "heldout")
+    enumeration): results under these public prefixes carry test-period
+    evidence and must stay invisible pre-reveal — respond 404 and filter
+    listings, never confirm existence. Empty once revealed."""
+    return () if test_results_revealed(experiment_dir) else SEALED_PREFIXES
 
 
-def guarded_fold_view(record: Mapping[str, object]) -> dict[str, object]:
-    """Fold record minus test-period evidence (shown separately, labelled)."""
+def guarded_fold_view(
+    record: Mapping[str, object], *, test_revealed: bool
+) -> dict[str, object]:
+    """Fold record minus test-period evidence (shown separately, labelled).
+
+    Result payloads and their on-disk pointers are always stripped — the
+    console shows them through the labelled ``test_audit`` block instead. The
+    Test window and its decision time are stripped only until the reveal, the
+    same boundary ``_public_params`` and ``public_session`` apply to the very
+    same dates.
+    """
     hidden = (*TEST_FIELDS, *_TEST_EVIDENCE_REFS)
+    if not test_revealed:
+        hidden = (*hidden, *_SEALED_FOLD_PERIODS)
     return {key: value for key, value in record.items() if key not in hidden}
 
 
@@ -426,6 +476,7 @@ def summarize_experiment(directory: Path) -> dict[str, object]:
         meta = [row for row in records if row.get("record_type") == "meta_learning"]
         skills_snapshot = latest_skills_snapshot(records, experiment_dir=directory)
         params = read_json(directory / HITL_DIR_NAME / PARAMS_NAME)
+        _require_supported_params(params)
         schedule = read_json(directory / HITL_DIR_NAME / SCHEDULE_NAME)
         sessions = schedule.get("sessions") if isinstance(schedule.get("sessions"), list) else None
         revealed = test_results_revealed(directory, records)
@@ -462,6 +513,9 @@ def summarize_experiment(directory: Path) -> dict[str, object]:
                 "completed_sessions": completed_sessions,
                 "total_sessions": total_sessions,
                 "test_revealed": revealed,
+                # Graduation verdict from the Held-out records; sealed like
+                # every other Held-out number until the reveal.
+                "verdict": experiment_verdict(records, strict=False) if revealed else None,
                 "metrics": {
                     "epoch_id": latest_epoch,
                     "cum_valid_return": _compound(
@@ -585,7 +639,8 @@ def experiment_detail(root: Path, experiment_id: str) -> dict[str, object]:
             record = folds.get((str(planned.get("epoch_id")), raw_fold))
             if record is not None:
                 entry["record"] = identity.public_record(
-                    guarded_fold_view(record), heldout_revealed=revealed
+                    guarded_fold_view(record, test_revealed=revealed),
+                    heldout_revealed=revealed,
                 )
                 entry["analysis_available"] = analysis_available(
                     hitl,
@@ -636,7 +691,8 @@ def experiment_detail(root: Path, experiment_id: str) -> dict[str, object]:
         ],
         "ledger": [
             identity.public_record(
-                guarded_fold_view(row) if row.get("record_type") == "fold"
+                guarded_fold_view(row, test_revealed=revealed)
+                if row.get("record_type") == "fold"
                 else _public_meta_view(
                     row,
                     current_prior=current_prior if row is latest_meta else None,
@@ -693,13 +749,20 @@ def fold_detail(root: Path, experiment_id: str, epoch_id: str, fold_ref: str) ->
         "epoch_id": epoch_id,
         "fold_ref": fold_ref,
         "record": identity.public_record(
-            guarded_fold_view(record), heldout_revealed=revealed
+            guarded_fold_view(record, test_revealed=revealed),
+            heldout_revealed=revealed,
         ),
         "test_audit": (
-            identity.public_record(
-                {"record_type": "fold", **{field: record.get(field) for field in TEST_FIELDS}},
-                heldout_revealed=True,
-            )
+            {
+                **identity.public_record(
+                    {"record_type": "fold", **{field: record.get(field) for field in TEST_FIELDS}},
+                    heldout_revealed=True,
+                ),
+                # Result-directory name of the revealed test evaluation, so the
+                # console links its order export by the id the read-model
+                # actually serves instead of guessing a name.
+                "result": _result_name(directory, record.get("test_result_ref")),
+            }
             if revealed else {"hidden": True}
         ),
         "strategy_available": bool(record.get("frozen_strategy_artifact_path")),
@@ -759,7 +822,7 @@ def style_payload(
 ) -> dict[str, object]:
     """Read the canonical style sidecar selected by one public run reference."""
 
-    if prefix not in {"valid", "test", "heldout"}:
+    if prefix not in RESULT_MODES:
         raise ValueError("prefix must be valid|test|heldout")
     experiment_dir = resolve_experiment_dir(root, experiment_id)
     identity = PublicIdentity(experiment_dir)
@@ -769,7 +832,7 @@ def style_payload(
         raise ValueError("invalid run reference") from exc
     # Reveal gate: pre-reveal, sealed prefixes answer exactly like a missing
     # rollup so test/held-out existence never leaks.
-    if prefix.startswith(sealed_result_prefixes(experiment_dir)):
+    if prefix in sealed_prefixes(experiment_dir):
         raise KeyError("该运行没有已落盘的风格归因结果")
     records = read_ledger_records(experiment_dir)
 
@@ -818,7 +881,7 @@ def style_payload(
         payload = read_json(sidecar)
     except (OSError, ValueError) as exc:
         raise KeyError("该运行没有已落盘的风格归因结果") from exc
-    expected_mode = {"valid": "valid", "test": "frozen_test", "heldout": "heldout"}[prefix]
+    expected_mode = RESULT_MODES[prefix]
     if payload.get("schema_version") != STYLE_SCHEMA_VERSION or payload.get("mode") != expected_mode:
         raise KeyError("该运行没有已落盘的风格归因结果")
     return payload
@@ -838,6 +901,12 @@ def _result_file(experiment_dir: Path, reference: object) -> Path | None:
         if candidate.is_file():
             return candidate
     return None
+
+
+def _result_name(experiment_dir: Path, reference: object) -> str | None:
+    """Result-directory name (``frozen_test_<hex>``) behind one result ref."""
+    path = _result_file(experiment_dir, reference)
+    return path.parent.name if path is not None else None
 
 
 def _fold_result_files(experiment_dir: Path, record: Mapping[str, object], *, revealed: bool) -> dict[str, Path]:
@@ -861,7 +930,7 @@ def _fold_result_files(experiment_dir: Path, record: Mapping[str, object], *, re
     run_id = str(record.get("run_id") or "")
     if run_id and Path(run_id).name == run_id:
         results = experiment_dir / "artifacts" / run_id / "results"
-        sealed = sealed_result_prefixes(experiment_dir)
+        sealed = result_dir_prefixes(sealed_prefixes(experiment_dir))
         if results.is_dir():
             for directory in sorted(path for path in results.iterdir() if path.is_dir()):
                 # Pre-reveal: invisible, not just unselectable.
@@ -896,8 +965,9 @@ def fold_orders(
     files = _fold_result_files(
         experiment_dir, record, revealed=test_results_revealed(experiment_dir, records)
     )
-    available = [name for name in files if not name.startswith("test")]
-    test_results = [name for name in files if name.startswith("test")]
+    guarded = result_dir_prefixes(SEALED_PREFIXES)
+    available = [name for name in files if not name.startswith(guarded)]
+    test_results = [name for name in files if name.startswith(guarded)]
     selected = result or (available[0] if available else None)
     if selected is None:
         return {
