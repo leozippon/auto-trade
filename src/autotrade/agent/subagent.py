@@ -22,7 +22,7 @@ from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import cast
+from typing import Protocol, cast
 
 from autotrade.environment.llm import (
     AGENT_MAX_OUTPUT_TOKENS,
@@ -56,23 +56,30 @@ from .compact import (
 )
 
 SUBAGENT_MODES = frozenset({"fold", "meta"})
-SUBAGENT_ROLES = ("auditor", "developer", "general-purpose", "Explore")
 SUBAGENT_THINKING_LEVELS = ("off", "low", "medium", "xhigh")
 # Read-compatible aliases from older traces and prompts; on the wire they were
 # never distinct from xhigh.
 _LEGACY_THINKING_ALIASES = {"minimal": "low", "high": "xhigh", "max": "xhigh"}
 DEFAULT_SUBAGENT_MAX_CONCURRENT = 4
-# Default child turn budget when the parent omits ``max_turns``. A child has
-# the parent's context window and compaction, so the round cap bounds work,
-# not memory: under the earlier cap of 24, one child in eleven hit the wrap-up
-# notice while still issuing tool calls every round at 25k-144k prompt
-# tokens, i.e. bounded work was cut short, not wandering. The last
-# ``SUBAGENT_GRACE_ROUNDS`` turns start with a wrap-up notice (Pi's grace-turn
-# pattern); an explicit ``max_turns`` is honoured as given.
+# Global default child turn budget (the last tier of the launch precedence:
+# call argument > role default > this). A child has the parent's context
+# window and compaction, so the round cap bounds work, not memory: under the
+# earlier cap of 24, one child in eleven hit the wrap-up notice while still
+# issuing tool calls every round at 25k-144k prompt tokens, i.e. bounded work
+# was cut short, not wandering. The last ``SUBAGENT_GRACE_ROUNDS`` turns start
+# with a wrap-up notice (Pi's grace-turn pattern); an explicit ``max_turns``
+# is honoured as given.
 DEFAULT_SUBAGENT_MAX_ROUNDS = 48
 SUBAGENT_GRACE_ROUNDS = 2
+# Global default thinking level; a child never inherits the parent's level.
 DEFAULT_SUBAGENT_THINKING = "medium"
 SUBAGENT_DESCRIPTION_MAX_CHARS = 200
+# Characters of a child's final report delivered inline in the parent's
+# ``subagent_completed`` observation (Pi's preview-then-fetch shape). A longer
+# report is clipped there and spilled in full through the search tools'
+# result store, so the parent reads it back in pages instead of receiving it
+# whole.
+SUBAGENT_REPORT_MAX_CHARS = 6_000
 # Bounded argument echo for the child's Trace: a write/edit call can carry a
 # whole file, and the trace writer replaces any event above its per-event cap
 # with a stub that loses ``task_id`` — the console would then lose the call.
@@ -106,13 +113,98 @@ _FOLD_WRITE_TOOLS = frozenset(
         "delete_skill",
     }
 )
+# Every role is read-only in a Meta session.
 _META_ROLE_TOOLS = frozenset({"glob", "grep", "read_file"})
-_FOLD_ROLE_TOOLS = {
-    "auditor": _FOLD_READ_TOOLS,
-    "developer": _FOLD_WRITE_TOOLS,
-    "general-purpose": _FOLD_WRITE_TOOLS,
-    "Explore": _FOLD_READ_TOOLS,
-}
+
+
+@dataclass(frozen=True)
+class SubAgentRole:
+    """One row of the role table: a role's identity, Fold tool set, missions
+    and launch defaults, the way a Pi agent-definition file carries them.
+
+    ``thinking`` and ``max_turns`` are the role tier of the launch precedence
+    (call argument > role default > global default); ``None`` defers to the
+    global default, which every shipped role does today.
+    """
+
+    name: str
+    description: str
+    fold_tools: frozenset[str]
+    fold_mission: str
+    meta_mission: str
+    thinking: str | None = None
+    max_turns: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.thinking is not None and self.thinking not in SUBAGENT_THINKING_LEVELS:
+            raise ValueError(f"role {self.name}: unknown thinking level {self.thinking}")
+        if self.max_turns is not None and self.max_turns < 1:
+            raise ValueError(f"role {self.name}: max_turns must be at least 1")
+
+    @property
+    def shell(self) -> bool:
+        return "shell" in self.fold_tools
+
+    @property
+    def default_thinking(self) -> str:
+        return self.thinking or DEFAULT_SUBAGENT_THINKING
+
+    def default_max_turns(self, global_default: int | None) -> int | None:
+        return self.max_turns if self.max_turns is not None else global_default
+
+
+SUBAGENT_ROLE_TABLE: tuple[SubAgentRole, ...] = (
+    SubAgentRole(
+        "auditor",
+        "只读审计：核对数据、单位、代码与证据边界",
+        _FOLD_READ_TOOLS,
+        fold_mission="审查委托问题及其证据边界",
+        meta_mission="独立审查委托问题",
+    ),
+    SubAgentRole(
+        "developer",
+        "读写实现：跑 Python、写策略、模型与 skills",
+        _FOLD_WRITE_TOOLS,
+        fold_mission="实现并检查委托的代码或知识任务",
+        meta_mission="只读分析候选策略改进",
+    ),
+    SubAgentRole(
+        "general-purpose",
+        "读写通用：一个有界的跨域实现或计算任务",
+        _FOLD_WRITE_TOOLS,
+        fold_mission="完成一个有界的跨域实现任务",
+        meta_mission="只读处理一个有界跨域问题",
+    ),
+    SubAgentRole(
+        "Explore",
+        "只读探索：定位文件、接口与材料",
+        _FOLD_READ_TOOLS,
+        fold_mission="定位未知位置、接口或材料",
+        meta_mission="只读定位未知位置、接口或材料",
+    ),
+)
+_ROLES_BY_NAME = {role.name: role for role in SUBAGENT_ROLE_TABLE}
+SUBAGENT_ROLES = tuple(role.name for role in SUBAGENT_ROLE_TABLE)
+
+
+def subagent_role(name: object) -> SubAgentRole:
+    role = _ROLES_BY_NAME.get(name)  # type: ignore[arg-type]
+    if role is None:
+        raise ValueError(f"Sub-agent role is not allowed: {name}")
+    return role
+
+
+def _role_schema_text() -> str:
+    """Per-role capability and launch defaults for the ``agent`` field."""
+
+    lines = []
+    for role in SUBAGENT_ROLE_TABLE:
+        tools = "有 Sandbox shell、可写" if role.shell else "只读 glob/grep/read_file，不能执行"
+        lines.append(
+            f"{role.name}：{role.description}（{tools}；默认 thinking {role.default_thinking}、"
+            f"max_turns {role.default_max_turns(DEFAULT_SUBAGENT_MAX_ROUNDS)}）"
+        )
+    return "；".join(lines) + "。Meta 会话中全部角色只读。"
 
 _FOLD_WRITE_PROMPT = """\
 # 身份
@@ -151,21 +243,9 @@ META_SUBAGENT_SYSTEM_PROMPT = """\
 用简洁中文说明结论、关键证据、限制和建议；不要复制 raw traces 或写逐 Fold Test 数字。\
 """
 
-_FOLD_ROLE_MISSIONS = {
-    "auditor": "审查委托问题及其证据边界",
-    "developer": "实现并检查委托的代码或知识任务",
-    "general-purpose": "完成一个有界的跨域实现任务",
-    "Explore": "定位未知位置、接口或材料",
-}
-_META_ROLE_MISSIONS = {
-    "auditor": "独立审查委托问题",
-    "developer": "只读分析候选策略改进",
-    "general-purpose": "只读处理一个有界跨域问题",
-    "Explore": "只读定位未知位置、接口或材料",
-}
 SUBAGENT_SYSTEM_PROMPT = _FOLD_WRITE_PROMPT.format(
     role="developer",
-    mission=_FOLD_ROLE_MISSIONS["developer"],
+    mission=subagent_role("developer").fold_mission,
 )
 
 # The single place the sub-agent mechanism is explained to the model; the
@@ -183,6 +263,10 @@ AGENT_TOOL_DESCRIPTION = (
     "Meta 会话中全部角色只读。子代理只看到自己的角色提示和你的 task（inherit_context=true 时另带你的对话），"
     "所以 task 要写全路径、约束和期望的返回格式。thinking：需要执行工具（shell、写文件、计算）的子代理用 low/medium；"
     f"xhigh 只给纯文本推理的裁决类任务，因为它会把 {AGENT_MAX_OUTPUT_TOKENS} token 的输出预算耗在思考里，整轮发不出工具调用。"
+    "thinking 与 max_turns 由你按次决定，生效顺序：本次调用参数 > 角色默认（见 agent 字段） > 全局默认"
+    f"（{DEFAULT_SUBAGENT_THINKING}、{DEFAULT_SUBAGENT_MAX_ROUNDS} 轮）；生效值记入该子代理的 subagent_task 事件。"
+    f"子代理的汇报最多内联 {SUBAGENT_REPORT_MAX_CHARS} 字符：更长的汇报只内联开头（summary_truncated=true），"
+    "全文落盘并以 result_root/result_ref 返回，用 read_file 分页读回；要求子代理把长材料写进工作区文件而不是塞进汇报。"
     "子代理不能嵌套、正式回测、结束会话、改 PRIOR 或自行验收；它的汇报描述意图而非结果，其写入须由你验收。"
     "resume=<task_id> 让一个已完成的子代理在自己的对话上继续新的 task（保留它读过的上下文，角色须相同）；"
     "仍在运行或未知的 task_id 会被拒绝。只在后续任务确实需要它已有的上下文时 resume；独立的后续工作另起并行的全新子代理，不要串成 resume 链。"
@@ -197,7 +281,7 @@ AGENT_TOOL_SPEC = ToolSpec(
             "agent": {
                 "type": "string",
                 "enum": list(SUBAGENT_ROLES),
-                "description": "developer / general-purpose：有 shell、可执行 Python 与写策略；auditor / Explore：只读文本与代码，不能执行。"
+                "description": "角色、能力与默认档位——" + _role_schema_text(),
             },
             "task": {
                 "type": "string",
@@ -214,15 +298,19 @@ AGENT_TOOL_SPEC = ToolSpec(
                 "type": "integer",
                 "minimum": 1,
                 "description": (
-                    f"子代理最多的模型轮次；省略则 {DEFAULT_SUBAGENT_MAX_ROUNDS} 轮"
-                    f"（倒数第 {SUBAGENT_GRACE_ROUNDS} 轮起收到收尾提示，上限后强制简洁总结），显式值按原值生效。"
-                    "子代理的上下文与你同样大并自动压缩，轮次只约束工作量。"
+                    f"子代理最多的模型轮次，≥1；省略时按角色默认（当前各角色均为 {DEFAULT_SUBAGENT_MAX_ROUNDS} 轮），"
+                    f"倒数第 {SUBAGENT_GRACE_ROUNDS} 轮起收到收尾提示，上限后强制简洁总结；显式值按原值生效。"
+                    "子代理的上下文与你同样大并自动压缩，轮次只约束工作量。没有 schema 上限，但每轮占用会话共享调用配额中的一次子代理调用"
+                    "（全部子代理累计不超过会话 max_llm_calls 的一半），配额耗尽的子代理以 error 结束，所以不要设得远超任务需要。"
                 ),
             },
             "thinking": {
                 "type": "string",
                 "enum": list(SUBAGENT_THINKING_LEVELS),
-                "description": "子代理思考强度；省略为 medium，不继承父会话。执行工具的任务用 low/medium；xhigh 只给纯文本裁决类任务，它会把输出预算耗在思考里而发不出工具调用（旧值 high/max 等同 xhigh）；off 关闭扩展思考。",
+                "description": (
+                    f"子代理思考强度 off/low/medium/xhigh；省略时按角色默认（当前各角色均为 {DEFAULT_SUBAGENT_THINKING}），不继承父会话。"
+                    "执行工具的任务用 low/medium；xhigh 只给纯文本裁决类任务，它会把输出预算耗在思考里而发不出工具调用（旧值 high/max 等同 xhigh）；off 关闭扩展思考。"
+                ),
             },
             "inherit_context": {
                 "type": "boolean",
@@ -275,56 +363,105 @@ def _subagent_mode(mode: str) -> str:
 
 def allowed_subagent_tools(mode: str, role: str | None = None) -> frozenset[str]:
     resolved = _subagent_mode(mode)
-    if role is not None and role not in SUBAGENT_ROLES:
-        raise ValueError(f"Sub-agent role is not allowed: {role}")
+    spec = subagent_role(role) if role is not None else None
     if resolved == "meta":
         return _META_ROLE_TOOLS
-    if role is None:
-        allowed: set[str] = set()
-        for names in _FOLD_ROLE_TOOLS.values():
-            allowed.update(names)
-        return frozenset(allowed)
-    return _FOLD_ROLE_TOOLS[role]
+    if spec is None:
+        return frozenset().union(*(item.fold_tools for item in SUBAGENT_ROLE_TABLE))
+    return spec.fold_tools
 
 
 def subagent_system_prompt(mode: str, role: str) -> str:
     resolved = _subagent_mode(mode)
+    spec = subagent_role(role)
     if resolved == "fold":
-        mission = _FOLD_ROLE_MISSIONS.get(role)
-        if mission is None:
-            raise ValueError(f"Sub-agent role is not allowed: {role}")
-        if role in {"developer", "general-purpose"}:
-            return _FOLD_WRITE_PROMPT.format(role=role, mission=mission)
-        return _FOLD_READ_PROMPT.format(role=role, mission=mission)
-    mission = _META_ROLE_MISSIONS.get(role)
-    if mission is None:
-        raise ValueError(f"Sub-agent role is not allowed: {role}")
+        template = _FOLD_WRITE_PROMPT if spec.shell else _FOLD_READ_PROMPT
+        return template.format(role=role, mission=spec.fold_mission)
     return (
-        f"# 本任务角色\n你的角色是 `{role}`：{mission}。\n\n"
+        f"# 本任务角色\n你的角色是 `{role}`：{spec.meta_mission}。\n\n"
         + META_SUBAGENT_SYSTEM_PROMPT
     )
 
 
-def normalize_subagent_thinking(value: object) -> str:
-    """Return a canonical thinking level.
+def normalize_subagent_thinking(value: object, role: str | None = None) -> str:
+    """Return the effective thinking level for one launch.
 
-    Omitted, empty, or inherit aliases use ``DEFAULT_SUBAGENT_THINKING``
-    (medium) and do not inherit the parent session's reasoning intensity.
+    Precedence: the call argument, then the role default, then
+    ``DEFAULT_SUBAGENT_THINKING``. Omitted, empty, or inherit aliases fall
+    through to the defaults; a child never inherits the parent session's
+    reasoning intensity.
     """
 
+    default = subagent_role(role).default_thinking if role is not None else DEFAULT_SUBAGENT_THINKING
     if value is None:
-        return DEFAULT_SUBAGENT_THINKING
+        return default
     if not isinstance(value, str):
         raise ValueError("agent.thinking must be a string")
     text = value.strip().lower()
     if text in {"", "inherit", "parent"}:
-        return DEFAULT_SUBAGENT_THINKING
+        return default
     text = _LEGACY_THINKING_ALIASES.get(text, text)
     if text not in SUBAGENT_THINKING_LEVELS:
         raise ValueError(
             "agent.thinking must be one of: " + ", ".join(SUBAGENT_THINKING_LEVELS)
         )
     return text
+
+
+def resolve_subagent_max_turns(
+    value: object, role: str, global_default: int | None
+) -> int | None:
+    """The effective turn budget: call argument > role default > global default.
+
+    ``None`` means only the session deadline and call quota bound the child.
+    """
+
+    if isinstance(value, int) and not isinstance(value, bool):
+        if value < 1:
+            raise ValueError("agent.max_turns must be at least 1")
+        return value
+    if value is not None:
+        raise ValueError("agent.max_turns must be an integer")
+    return subagent_role(role).default_max_turns(global_default)
+
+
+class ToolResultStore(Protocol):
+    """Where an oversized result goes when it must leave the conversation
+    (the search tools' spill store)."""
+
+    def store_tool_result(
+        self, *, tool: str, kind: str, content: str
+    ) -> dict[str, object]: ...
+
+
+def deliver_subagent_report(
+    summary: str, store: ToolResultStore | None
+) -> dict[str, object]:
+    """Bound what a child's report puts into the parent's context.
+
+    Up to ``SUBAGENT_REPORT_MAX_CHARS`` is delivered inline; a longer report
+    is clipped there, marked ``summary_truncated``, and spilled in full to the
+    result store as ``result_root``/``result_ref`` so the parent reads it back
+    in pages. Without a store the clip is still explicit, never silent.
+    """
+
+    total = len(summary)
+    if total <= SUBAGENT_REPORT_MAX_CHARS:
+        return {"summary": summary, "summary_chars": total}
+    payload: dict[str, object] = {
+        "summary": summary[:SUBAGENT_REPORT_MAX_CHARS],
+        "summary_chars": total,
+        "summary_delivered_chars": SUBAGENT_REPORT_MAX_CHARS,
+        "summary_truncated": True,
+    }
+    if store is not None:
+        payload.update(store.store_tool_result(tool="agent", kind="report", content=summary))
+    if "result_ref" not in payload:
+        payload["result_hint"] = (
+            "full report was not persisted; the rest is lost — have the child write "
+            "long findings to a workspace file next time"
+        )
+    return payload
 
 
 def llm_with_thinking(proxy: LLMProxy, thinking: str) -> LLMProxy:
@@ -465,11 +602,9 @@ class SubAgentEngine(SessionTimeBudgetAware):
             raise ValueError("Sub-agent task cannot be empty")
         allowed = allowed_subagent_tools(self.mode, role)
         self._validate_tools()
-        rounds_limit = (
-            max_rounds
-            if isinstance(max_rounds, int) and max_rounds > 0
-            else self.config.max_rounds
-        )
+        # Launch precedence (Pi's): call argument > role default > global.
+        rounds_limit = resolve_subagent_max_turns(max_rounds, role, self.config.max_rounds)
+        thinking = normalize_subagent_thinking(thinking, role)
         task_id = task_id or f"{SUBAGENT_TASK_ID_PREFIX}{uuid.uuid4().hex[:12]}"
         child_cap = (
             time.monotonic() + self.config.deadline_seconds
@@ -477,7 +612,6 @@ class SubAgentEngine(SessionTimeBudgetAware):
             else float("inf")
         )
         deadline = min(child_cap, self._deadline_monotonic())
-        thinking = normalize_subagent_thinking(thinking)
         llm = llm_with_thinking(self.llm, thinking)
         thinking_applied = llm is not self.llm
         compactor = self.compactor.fresh() if self.compactor is not None else None
@@ -488,8 +622,10 @@ class SubAgentEngine(SessionTimeBudgetAware):
             "status": "started",
             "mode": self.mode,
             "model": getattr(llm, "model", "") or getattr(self.llm, "model", ""),
+            # The effective launch values, whichever tier they came from.
             "thinking": thinking,
             "thinking_applied": thinking_applied,
+            "rounds_limit": rounds_limit,
             "inherit_context": bool(inherit_context),
             # The brief is what delegation quality is judged by; clipped like
             # every other traced argument.
@@ -825,6 +961,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
             "role": role,
             "thinking": thinking,
             "thinking_applied": thinking_applied,
+            "rounds_limit": rounds_limit,
             "inherit_context": bool(inherit_context),
         }
         if resumed_from:

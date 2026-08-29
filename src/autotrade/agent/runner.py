@@ -61,7 +61,9 @@ from .subagent import (
     SubAgentEngine,
     AgentTool,
     _copy_chat_message,
+    deliver_subagent_report,
     normalize_subagent_thinking,
+    resolve_subagent_max_turns,
 )
 from .prompts import (
     HARD_FINALIZATION_SYSTEM_PROMPT,
@@ -1069,11 +1071,15 @@ class AgentSessionRunner:
         if not task.strip():
             raise ToolError("agent.task must be a non-empty string")
         try:
-            thinking = normalize_subagent_thinking(arguments.get("thinking"))
+            # Validated here so a bad value is a tool error on the parent's
+            # turn; the engine resolves the same precedence for the record.
+            thinking = normalize_subagent_thinking(arguments.get("thinking"), role)
+            max_rounds = resolve_subagent_max_turns(
+                arguments.get("max_turns"), role, self.subagent.config.max_rounds
+            )
         except ValueError as exc:
             raise ToolError(str(exc)) from exc
         inherit = bool(arguments.get("inherit_context", False))
-        max_rounds = arguments.get("max_turns")
         description = str(arguments.get("description") or "").strip()
         resume = str(arguments.get("resume") or "").strip() or None
         call_id = getattr(self._call_context, "call_id", None)
@@ -1133,7 +1139,7 @@ class AgentSessionRunner:
                 self.subagent.run_with_transcript,
                 task,
                 role=role,
-                max_rounds=max_rounds if isinstance(max_rounds, int) else None,
+                max_rounds=max_rounds,
                 parent_call_id=call_id,
                 thinking=thinking,
                 inherit_context=inherit,
@@ -1218,7 +1224,8 @@ class AgentSessionRunner:
                 "role": job.role,
             }
             if isinstance(value, dict):
-                payload["summary"] = value.get("summary") or ""
+                # The bounded report (clipped and spilled at collection).
+                payload.update(job.record.get("report") or {"summary": ""})
                 for key in ("rounds", "tool_calls"):
                     if isinstance(value.get(key), int):
                         payload[key] = value[key]
@@ -1335,6 +1342,13 @@ class AgentSessionRunner:
                 "value": result,
             }
             job.record = record
+            attempt: dict[str, object] = {
+                "attempt": job.attempt,
+                "role": job.role,
+                "ok": ok,
+                "status": record["status"],
+                "task_id": job.task_id,
+            }
             if isinstance(result, dict):
                 if self._subagent_totals is None:
                     self._subagent_totals = {
@@ -1344,16 +1358,23 @@ class AgentSessionRunner:
                         "total_tokens": 0,
                     }
                 _accumulate_subagent_usage(self._subagent_totals, result)
-            self._emit(
-                "subagent_attempt",
-                {
-                    "attempt": job.attempt,
-                    "role": job.role,
-                    "ok": ok,
-                    "status": record["status"],
-                    "task_id": job.task_id,
-                },
-            )
+                # Bound the report once, here, so the Trace records what the
+                # parent will receive and where the rest went.
+                report = deliver_subagent_report(
+                    str(result.get("summary") or ""), self.tools.result_store()
+                )
+                record["report"] = report
+                attempt.update(
+                    (key, report[key])
+                    for key in (
+                        "summary_chars",
+                        "summary_delivered_chars",
+                        "summary_truncated",
+                        "result_ref",
+                    )
+                    if key in report
+                )
+            self._emit("subagent_attempt", attempt)
             finished.append(record)
         return finished
 

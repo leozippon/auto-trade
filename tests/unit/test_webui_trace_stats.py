@@ -619,6 +619,31 @@ def test_project_subagent_exposes_model_thinking_and_inherit_context() -> None:
     assert card["thinking"] == "low"
     assert card["inherit_context"] is True
     assert card["description"] == "schema audit"
+    assert "rounds_limit" not in card
+
+
+def test_project_subagent_card_carries_the_effective_turn_budget() -> None:
+    """The parent-chosen (or defaulted) ``max_turns`` lands on the card as
+    ``rounds_limit`` and the console spells it out next to the thinking level."""
+
+    blocks = project_trace_blocks(
+        [
+            {
+                "event_type": "subagent_task",
+                "task_id": "agent_turns",
+                "status": "started",
+                "role": "developer",
+                "thinking": "medium",
+                "rounds_limit": 12,
+            }
+        ]
+    )
+    (card,) = _subagent_blocks(blocks)
+    assert card["rounds_limit"] == 12
+    meta = APP_JS.read_text(encoding="utf-8").split("function subagentMetaLine(", 1)[1].split(
+        "\nfunction ", 1
+    )[0]
+    assert "block.rounds_limit" in meta and "上限 ${roundsLimit} 轮" in meta
 
 
 def test_project_legacy_subagent_digest_is_ignored() -> None:

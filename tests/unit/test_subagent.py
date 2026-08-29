@@ -2915,3 +2915,203 @@ def test_time_budget_notice_states_remaining_minutes_and_backtests() -> None:
         if '"time_budget_notice"' in str(m.content or "")
     )
     assert "finish_meta" in message
+
+
+def test_role_table_is_the_single_source_for_roles_and_launch_defaults() -> None:
+    from autotrade.agent.subagent import (
+        DEFAULT_SUBAGENT_MAX_ROUNDS,
+        SUBAGENT_ROLE_TABLE,
+        SubAgentRole,
+        resolve_subagent_max_turns,
+        subagent_role,
+    )
+
+    assert tuple(role.name for role in SUBAGENT_ROLE_TABLE) == SUBAGENT_ROLES
+    for role in SUBAGENT_ROLE_TABLE:
+        assert allowed_subagent_tools("fold", role.name) == role.fold_tools
+        assert role.shell == ("shell" in role.fold_tools)
+        # No shipped role pins a level or a budget: both defer to the globals.
+        assert role.thinking is None and role.max_turns is None
+        assert role.default_thinking == DEFAULT_SUBAGENT_THINKING
+        assert role.default_max_turns(DEFAULT_SUBAGENT_MAX_ROUNDS) == DEFAULT_SUBAGENT_MAX_ROUNDS
+        assert subagent_role(role.name) is role
+        line = (
+            f"{role.name}：{role.description}（"
+            f"{'有 Sandbox shell、可写' if role.shell else '只读 glob/grep/read_file，不能执行'}；"
+            f"默认 thinking {DEFAULT_SUBAGENT_THINKING}、max_turns {DEFAULT_SUBAGENT_MAX_ROUNDS}）"
+        )
+        assert line in AGENT_TOOL_SPEC.input_schema["properties"]["agent"]["description"]
+    assert {role.name for role in SUBAGENT_ROLE_TABLE if role.shell} == {"developer", "general-purpose"}
+    with pytest.raises(ValueError, match="not allowed"):
+        subagent_role("reader")
+    with pytest.raises(ValueError, match="thinking"):
+        SubAgentRole("x", "d", frozenset(), fold_mission="m", meta_mission="m", thinking="turbo")
+    with pytest.raises(ValueError, match="max_turns"):
+        SubAgentRole("x", "d", frozenset(), fold_mission="m", meta_mission="m", max_turns=0)
+
+    # Precedence: call argument > role default > global default.
+    pinned = SubAgentRole("x", "d", frozenset(), fold_mission="m", meta_mission="m", thinking="low", max_turns=12)
+    assert pinned.default_thinking == "low" and pinned.default_max_turns(48) == 12
+    assert resolve_subagent_max_turns(None, "auditor", 48) == 48
+    assert resolve_subagent_max_turns(None, "auditor", None) is None
+    assert resolve_subagent_max_turns(7, "auditor", 48) == 7
+    assert normalize_subagent_thinking(None, "auditor") == DEFAULT_SUBAGENT_THINKING
+    assert normalize_subagent_thinking("xhigh", "auditor") == "xhigh"
+    for bad in (0, -1, True, "3"):
+        with pytest.raises(ValueError, match="max_turns"):
+            resolve_subagent_max_turns(bad, "auditor", 48)
+    # The tool text states the precedence and the ranges.
+    assert "本次调用参数 > 角色默认" in AGENT_TOOL_DESCRIPTION
+    max_turns_field = AGENT_TOOL_SPEC.input_schema["properties"]["max_turns"]
+    assert max_turns_field["minimum"] == 1 and "max_llm_calls 的一半" in max_turns_field["description"]
+    assert "off/low/medium/xhigh" in AGENT_TOOL_SPEC.input_schema["properties"]["thinking"]["description"]
+
+
+def test_launch_precedence_reaches_the_child_and_its_trace(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A pinned role tier beats the global default and loses to the call argument;
+    the effective values are what ``subagent_task``/``subagent`` record."""
+
+    import dataclasses
+
+    from autotrade.agent import subagent as module
+
+    pinned = dataclasses.replace(module.subagent_role("auditor"), thinking="low", max_turns=3)
+    monkeypatch.setitem(module._ROLES_BY_NAME, "auditor", pinned)
+
+    def _run(arguments: dict[str, object]) -> tuple[dict[str, object], dict[str, object]]:
+        child = ScriptedLLM([ProviderResponse(content="report")], context_window_tokens=128_000)
+        events: list[tuple[str, dict[str, object]]] = []
+        runner = AgentSessionRunner(
+            llm=ScriptedLLM([]),
+            tools=ToolRegistry(),
+            system_prompt="fold",
+            config=_fold_config(),
+            subagent=SubAgentEngine(llm=child, tools=ToolRegistry([DeclaredReadOnlyShell()])),
+            event_sink=lambda event, payload: events.append((event, payload)),
+        )
+        assert runner.tools.invoke("agent", {"agent": "auditor", "task": "dig", **arguments}).ok
+        assert runner._wait_subagent_jobs()[-1]["ok"] is True
+        started = next(payload for event, payload in events if event == "subagent_task")
+        ended = next(payload for event, payload in events if event == "subagent")
+        return started, ended
+
+    started, ended = _run({})
+    assert (started["thinking"], started["rounds_limit"]) == ("low", 3)
+    assert (ended["thinking"], ended["rounds_limit"]) == ("low", 3)
+    assert isinstance(started["thinking_applied"], bool)
+    started, ended = _run({"thinking": "xhigh", "max_turns": 5})
+    assert (started["thinking"], started["rounds_limit"]) == ("xhigh", 5)
+    assert (ended["thinking"], ended["rounds_limit"]) == ("xhigh", 5)
+
+    # Untouched roles still resolve to the global defaults.
+    monkeypatch.undo()
+    started, _ended = _run({})
+    assert (started["thinking"], started["rounds_limit"]) == (
+        module.DEFAULT_SUBAGENT_THINKING,
+        module.DEFAULT_SUBAGENT_MAX_ROUNDS,
+    )
+
+
+def test_long_child_report_is_clipped_inline_and_spilled_for_read_back(tmp_path: Path) -> None:
+    from autotrade.agent.subagent import SUBAGENT_REPORT_MAX_CHARS
+    from autotrade.environment.tools import ReadFileTool
+
+    assert SUBAGENT_REPORT_MAX_CHARS == 6_000
+    assert f"{SUBAGENT_REPORT_MAX_CHARS} 字符" in AGENT_TOOL_DESCRIPTION
+    report = "\n".join(f"第{index}行 证据与结论" for index in range(700))
+    assert len(report) > SUBAGENT_REPORT_MAX_CHARS
+    roots = SearchRoots(SafeWorkspace(tmp_path))
+    finish = _FinishStub("finish_fold")
+    llm = ScriptedLLM(
+        [
+            ProviderResponse(tool_calls=(ToolCall("a1", "agent", {"agent": "auditor", "task": "audit"}),)),
+            ProviderResponse(content="waiting"),
+            ProviderResponse(tool_calls=(ToolCall("f1", "finish_fold", {}),)),
+        ]
+    )
+    events: list[tuple[str, dict[str, object]]] = []
+    runner = AgentSessionRunner(
+        llm=llm,
+        tools=ToolRegistry([ReadFileTool(roots), finish]),
+        system_prompt="fold",
+        config=_fold_config(),
+        subagent=SubAgentEngine(
+            llm=ScriptedLLM([ProviderResponse(content=report)], context_window_tokens=128_000),
+            tools=ToolRegistry([DeclaredReadOnlyShell()]),
+        ),
+        event_sink=lambda event, payload: events.append((event, payload)),
+    )
+    assert runner.tools.result_store() is roots
+    assert runner.run("go").status == "finished"
+    completed = next(
+        json.loads(str(message.content))
+        for message in llm.calls[-1]["messages"]
+        if '"subagent_completed"' in str(message.content or "")
+    )
+    assert completed["summary"] == report[:SUBAGENT_REPORT_MAX_CHARS]
+    assert completed["summary_chars"] == len(report)
+    assert completed["summary_delivered_chars"] == SUBAGENT_REPORT_MAX_CHARS
+    assert completed["summary_truncated"] is True
+    assert completed["result_root"] == "workspace" and "read_file" in completed["result_hint"]
+    # The parent reads the full report back through the same path as any
+    # other spilled tool result; the reference carries no host path.
+    ref = completed["result_ref"]
+    assert ref.startswith("logs/tool_results/agent_report_") and str(tmp_path) not in ref
+    assert (tmp_path / ref).read_text(encoding="utf-8") == report
+    page = runner.tools.invoke("read_file", {"root": "workspace", "path": ref, "limit": 2})
+    assert page.ok and "1\t第0行 证据与结论" in str(page.value["content"])
+    attempt = next(payload for event, payload in events if event == "subagent_attempt")
+    assert attempt["summary_chars"] == len(report)
+    assert attempt["summary_delivered_chars"] == SUBAGENT_REPORT_MAX_CHARS
+    assert attempt["summary_truncated"] is True and attempt["result_ref"] == ref
+
+
+def test_short_child_report_is_delivered_whole_and_no_store_is_explicit() -> None:
+    from autotrade.agent.subagent import SUBAGENT_REPORT_MAX_CHARS, deliver_subagent_report
+
+    assert ToolRegistry([DeclaredReadOnlyShell()]).result_store() is None
+    whole = deliver_subagent_report("短汇报", None)
+    assert whole == {"summary": "短汇报", "summary_chars": 3}
+    long = "x" * (SUBAGENT_REPORT_MAX_CHARS + 1)
+    clipped = deliver_subagent_report(long, None)
+    assert clipped["summary"] == long[:SUBAGENT_REPORT_MAX_CHARS]
+    assert clipped["summary_truncated"] is True and "result_ref" not in clipped
+    assert "not persisted" in clipped["result_hint"]
+
+    # Through the runner without search tools: the clip is still visible.
+    finish = _FinishStub("finish_fold")
+    llm = ScriptedLLM(
+        [
+            ProviderResponse(tool_calls=(ToolCall("a1", "agent", {"agent": "auditor", "task": "audit"}),)),
+            ProviderResponse(content="waiting"),
+            ProviderResponse(tool_calls=(ToolCall("f1", "finish_fold", {}),)),
+        ]
+    )
+    runner = AgentSessionRunner(
+        llm=llm,
+        tools=ToolRegistry([finish]),
+        system_prompt="fold",
+        config=_fold_config(),
+        subagent=SubAgentEngine(
+            llm=ScriptedLLM([ProviderResponse(content=long)], context_window_tokens=128_000),
+            tools=ToolRegistry([DeclaredReadOnlyShell()]),
+        ),
+    )
+    assert runner.run("go").status == "finished"
+    completed = next(
+        json.loads(str(message.content))
+        for message in llm.calls[-1]["messages"]
+        if '"subagent_completed"' in str(message.content or "")
+    )
+    assert completed["summary_truncated"] is True and "result_ref" not in completed
+    assert len(completed["summary"]) == SUBAGENT_REPORT_MAX_CHARS
+
+
+def test_prompts_carry_the_todo_convention_and_per_launch_knobs() -> None:
+    fold = build_system_prompt(mode="fold", experiment_facts={})
+    meta = build_system_prompt(mode="meta", experiment_facts={})
+    for prompt, finish in ((fold, "finish_fold"), (meta, "finish_meta")):
+        assert "`TODO.md`" in prompt and "不需要任何人工参与" in prompt
+        assert "owner: parent|<task_id> · status: pending|running|done|failed · result: <一句话>" in prompt
+        assert f"`{finish}` 前核对全部条目" in prompt
+    assert "`thinking` 与 `max_turns` 由你按次决定" in FOLD_WORKFLOW_SECTION

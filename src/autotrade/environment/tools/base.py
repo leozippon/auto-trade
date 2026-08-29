@@ -237,6 +237,17 @@ class ToolRegistry:
             if isinstance(tool, SessionTimeBudgetAware)
         )
 
+    def result_store(self) -> object | None:
+        """The registered search tools' spill store for oversized results, if
+        any: the one place a result too large for the conversation goes, so
+        other components (sub-agent reports) reuse the same read-back path."""
+
+        for tool in self._tools.values():
+            store = getattr(tool, "result_store", None)
+            if store is not None:
+                return store
+        return None
+
     def invoke(
         self,
         name: str,

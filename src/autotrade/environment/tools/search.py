@@ -220,6 +220,13 @@ class _SearchToolBase:
         self.roots = roots
         self.timeout_seconds = timeout_seconds
 
+    @property
+    def result_store(self) -> SearchRoots:
+        """Exposed for ``ToolRegistry.result_store``: oversized results from
+        other components spill through the same roots and read back the same way."""
+
+        return self.roots
+
     def _run_rg(self, args: list[str], cwd: Path, *, max_lines: int) -> dict[str, object]:
         try:
             proc = subprocess.Popen(args, cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.PIPE)

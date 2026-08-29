@@ -4629,12 +4629,14 @@ function subagentContextLabel(block) {
 }
 
 /* The one place sub-agent launch metadata is spelled out:
-   `model · 推理 xhigh · 独立上下文`. */
+   `model · 推理 xhigh · 上限 48 轮 · 独立上下文`. */
 function subagentMetaLine(block, detail) {
   const thinking = subagentThinkingLabel(block, detail);
+  const roundsLimit = Number(block.rounds_limit) || 0;
   return [
     block.model ? String(block.model) : "",
     thinking ? `推理 ${thinking}` : "",
+    roundsLimit ? `上限 ${roundsLimit} 轮` : "",
     subagentContextLabel(block),
   ]
     .filter(Boolean)

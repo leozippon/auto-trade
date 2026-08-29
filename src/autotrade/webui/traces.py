@@ -828,6 +828,7 @@ class _SubagentState:
         self.role = ""
         self.model = ""
         self.thinking = ""
+        self.rounds_limit = 0
         self.inherit_context: bool | None = None
         self.description = ""
         self.resumed_from = ""
@@ -895,6 +896,8 @@ def _absorb_subagent_text(state: _SubagentState, event: dict[str, object]) -> No
     thinking = event.get("thinking")
     if isinstance(thinking, str) and thinking.strip():
         state.thinking = thinking.strip()
+    if _as_int(event.get("rounds_limit")) > 0:
+        state.rounds_limit = _as_int(event.get("rounds_limit"))
     if "inherit_context" in event:
         state.inherit_context = bool(event.get("inherit_context"))
     description = _clip(event.get("description"), _BLOCK_DESCRIPTION_CHARS)
@@ -945,6 +948,8 @@ def _refresh_subagent_block(state: _SubagentState) -> None:
         block["model"] = state.model
     if state.thinking:
         block["thinking"] = state.thinking
+    if state.rounds_limit:
+        block["rounds_limit"] = state.rounds_limit
     if state.inherit_context is not None:
         block["inherit_context"] = state.inherit_context
     if state.description:
