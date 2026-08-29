@@ -1,9 +1,0 @@
-总计 32
-drwxrwxr-x  8 lzp lzp 4096 Aug24日 04:17 .
-drwxrwxr-x 83 lzp lzp 4096 Aug24日 04:17 ..
-drwxrwxr-x  3 lzp lzp 4096 Aug24日 04:17 pi-agent-core
-drwxrwxr-x  3 lzp lzp 4096 Aug24日 04:17 pi-ai
-drwxrwxr-x  3 lzp lzp 4096 Aug24日 04:17 pi-client
-drwxrwxr-x  3 lzp lzp 4096 Aug24日 04:17 pi-protocol
-drwxrwxr-x  3 lzp lzp 4096 Aug24日 04:17 pi-telemetry
-drwxrwxr-x  4 lzp lzp 4096 Aug24日 04:17 pi-tui
