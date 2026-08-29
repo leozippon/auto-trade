@@ -51,6 +51,16 @@ SUPPORTED_REASONING_EFFORTS = frozenset({"low", "medium", "high", "max", "xhigh"
 _QWEN_REASONING_EFFORTS = frozenset({"low", "medium", "xhigh"})
 USER_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,512}$")
 _EMPTY_PROVIDER_RESPONSE_ERROR = "provider response must contain content or tool calls"
+# A generation cut at max_tokens inside a tool call (finish_reason=length)
+# leaves unparseable arguments. That is the model's own doing, not a
+# transient provider fault: the response is rejected without a retry and the
+# error names the cause so the Runner's observation lets the model shrink the
+# call instead of repeating it.
+_OUTPUT_LIMIT_TOOL_CALL_ERROR = (
+    "provider output hit max_tokens inside a tool call (finish_reason=length); "
+    "no call from this response was executed: re-issue it with shorter arguments, "
+    "e.g. write large content in several write_file/edit_file calls"
+)
 _HTTP_ERROR_BODY_MAX_BYTES = 64 * 1024
 _RUNTIME_ERROR_MAX_CHARS = 1_025
 # The local Qwen service owns sampling in thinking mode; these values are the
@@ -812,9 +822,16 @@ def _parse_complete_tool_call(
     *,
     error_message: str,
     retryable: bool,
+    output_limited: bool = False,
 ) -> ToolCall:
-    """Validate one complete OpenAI-compatible tool call without coercion."""
+    """Validate one complete OpenAI-compatible tool call without coercion.
 
+    ``output_limited`` says the generation stopped at max_tokens: a call that
+    then fails to parse was cut off, and the error says so instead of
+    reporting a provider fault."""
+
+    if output_limited:
+        error_message, retryable = _OUTPUT_LIMIT_TOOL_CALL_ERROR, False
     try:
         if not isinstance(raw_call, Mapping):
             raise TypeError("tool call is not an object")
@@ -867,6 +884,7 @@ def _parse_response(raw: bytes, *, expected_model: str) -> ProviderResponse:
                 raw_call,
                 error_message="provider returned an invalid tool call",
                 retryable=False,
+                output_limited=choice.get("finish_reason") == "length",
             )
         )
     _reasoning_present, reasoning_content = _parse_reasoning_content(message)
@@ -923,6 +941,7 @@ def _parse_stream_response(raw: bytes, *, expected_model: str) -> ProviderRespon
     tools: dict[int, dict[str, str]] = {}
     model = expected_model
     usage: dict[str, object] = {}
+    finish_reason: object = None
     for line in text.splitlines():
         stripped = line.strip()
         if not stripped.startswith("data:"):
@@ -949,7 +968,11 @@ def _parse_stream_response(raw: bytes, *, expected_model: str) -> ProviderRespon
             isinstance(choice, Mapping) for choice in choices
         ):
             raise LLMProxyError("provider returned an invalid stream", retryable=False)
-        if not choices or "delta" not in choices[0]:
+        if not choices:
+            continue
+        if choices[0].get("finish_reason") is not None:
+            finish_reason = choices[0]["finish_reason"]
+        if "delta" not in choices[0]:
             continue
         delta = choices[0]["delta"]
         if not isinstance(delta, Mapping):
@@ -1024,6 +1047,7 @@ def _parse_stream_response(raw: bytes, *, expected_model: str) -> ProviderRespon
                 },
                 error_message="provider returned an invalid stream tool call",
                 retryable=True,
+                output_limited=finish_reason == "length",
             )
         )
     try:

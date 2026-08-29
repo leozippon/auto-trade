@@ -965,6 +965,127 @@ def test_provider_http_500_retries_then_succeeds():
     assert len(transport.requests) == 2
 
 
+def test_transient_failures_back_off_exponentially_before_each_retry():
+    failure = LLMProxyError("provider HTTP error 503", retryable=True, status_code=503)
+    transport = FakeTransport([failure, failure, failure, _response({"content": "ok"})])
+    delays: list[float] = []
+    proxy = DeepSeekProxy(
+        make_config(max_retries=3, retry_backoff_seconds=2.0, timeout_seconds=600),
+        transport=transport,
+        sleep=delays.append,
+    )
+    assert proxy.complete([ChatMessage("user", "hello")]).content == "ok"
+    assert len(transport.requests) == 4
+    assert delays == [2.0, 4.0, 8.0]
+
+
+def test_context_overflow_shrink_retries_without_backoff():
+    transport = FakeTransport(
+        [_tautology_overflow(1_200, window=8_192), _response({"content": "ok"})]
+    )
+    delays: list[float] = []
+    proxy = DeepSeekProxy(
+        make_config(max_retries=3, retry_backoff_seconds=2.0),
+        transport=transport,
+        sleep=delays.append,
+    )
+    assert proxy.complete([ChatMessage("user", "hello")]).content == "ok"
+    # The shrunk re-send is not a transient failure: no wait, the second
+    # attempt halves max_tokens.
+    assert delays == []
+    assert [request[2]["max_tokens"] for request in transport.requests] == [1_200, 600]
+
+
+def test_model_gateway_defaults_to_pi_style_retry_backoff(tmp_path: Path):
+    path = tmp_path / ".env"
+    path.write_text("VLLM_API_KEY=local-secret\n", encoding="utf-8")
+    proxy = build_model_gateway(LOCAL_QWEN_MODEL, env_file=path, max_tokens=8_000)
+    assert isinstance(proxy, OpenAICompatibleProxy)
+    assert proxy.config.max_retries == 3
+    assert proxy.config.retry_backoff_seconds == 2.0
+
+
+def _length_cut_stream(arguments: str) -> bytes:
+    return _stream_response(
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "call-1",
+                                "function": {"name": "write_file", "arguments": arguments},
+                            }
+                        ]
+                    }
+                }
+            ]
+        },
+        {"choices": [{"delta": {}, "finish_reason": "length"}]},
+        {"usage": {"prompt_tokens": 10, "completion_tokens": 1_200, "total_tokens": 1_210}},
+    )
+
+
+def test_stream_tool_call_cut_at_max_tokens_is_rejected_once_and_names_the_cause():
+    transport = FakeTransport([_length_cut_stream('{"path": "a.py", "content": "abc')])
+    delays: list[float] = []
+    proxy = DeepSeekProxy(
+        make_config(max_retries=2, retry_backoff_seconds=2.0),
+        transport=transport,
+        sleep=delays.append,
+    )
+    with pytest.raises(LLMProxyError, match="finish_reason=length") as caught:
+        proxy.complete([ChatMessage("user", "hello")], tools=({"type": "function"},))
+    # Not a provider fault: no retry burns another full generation, and the
+    # message tells the model to shrink the call.
+    assert caught.value.retryable is False
+    assert "shorter arguments" in str(caught.value)
+    assert len(transport.requests) == 1
+    assert delays == []
+
+
+def test_stream_tool_call_complete_at_max_tokens_is_still_delivered():
+    transport = FakeTransport([_length_cut_stream('{"path": "a.py", "content": "abc"}')])
+    proxy = DeepSeekProxy(make_config(max_retries=0), transport=transport)
+    result = proxy.complete([ChatMessage("user", "hello")], tools=({"type": "function"},))
+    assert [(call.name, call.arguments) for call in result.tool_calls] == [
+        ("write_file", {"path": "a.py", "content": "abc"})
+    ]
+
+
+def test_json_tool_call_cut_at_max_tokens_is_rejected_without_retry():
+    payload = {
+        "model": "deepseek-chat",
+        "choices": [
+            {
+                "message": {
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {"name": "write_file", "arguments": '{"path": "a.py"'},
+                        }
+                    ],
+                },
+                "finish_reason": "length",
+            }
+        ],
+        "usage": {"total_tokens": 3},
+    }
+    transport = FakeTransport([payload])
+    proxy = DeepSeekProxy(
+        make_config(max_retries=2, retry_backoff_seconds=0, stream_tool_calls=False),
+        transport=transport,
+        sleep=lambda _seconds: None,
+    )
+    with pytest.raises(LLMProxyError, match="finish_reason=length") as caught:
+        proxy.complete([ChatMessage("user", "hello")], tools=({"type": "function"},))
+    assert caught.value.retryable is False
+    assert len(transport.requests) == 1
+
+
 def test_non_retryable_provider_error_stops_after_one_attempt():
     failure = LLMProxyError("provider HTTP error 401", retryable=False, status_code=401)
     transport = FakeTransport([failure])

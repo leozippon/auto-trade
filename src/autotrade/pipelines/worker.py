@@ -24,6 +24,8 @@ from autotrade.environment.data.snapshot import SnapshotConfig
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.llm import (
     AGENT_MAX_OUTPUT_TOKENS,
+    DEFAULT_LLM_MAX_RETRIES,
+    DEFAULT_LLM_RETRY_BACKOFF_SECONDS,
     LOCAL_QWEN_MODEL,
     LLMProxy,
     build_model_gateway,
@@ -1518,10 +1520,10 @@ def _llm_settings(
             "llm_timeout_seconds",
         ),
         max_retries=_nonnegative_int(
-            params.get("llm_max_retries", 2), "llm_max_retries"
+            params.get("llm_max_retries", DEFAULT_LLM_MAX_RETRIES), "llm_max_retries"
         ),
         retry_backoff_seconds=_nonnegative_float(
-            params.get("llm_retry_backoff_seconds", 0.5),
+            params.get("llm_retry_backoff_seconds", DEFAULT_LLM_RETRY_BACKOFF_SECONDS),
             "llm_retry_backoff_seconds",
         ),
         temperature=_bounded_float(

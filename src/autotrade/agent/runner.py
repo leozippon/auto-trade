@@ -1687,8 +1687,8 @@ def _new_token_totals() -> dict[str, int]:
 
 
 def _output_truncated(usage: object, max_tokens: int) -> bool:
-    """A reply that used its whole completion budget (the transport surfaces no
-    ``finish_reason``, so the usage count is the signal)."""
+    """A reply that used its whole completion budget (``ProviderResponse``
+    carries no ``finish_reason``, so the usage count is the signal)."""
 
     if not isinstance(usage, Mapping):
         return False

@@ -76,6 +76,10 @@ class CommandResult:
     stdout: str = ""
     stderr: str = ""
     timed_out: bool = False
+    # The runner discarded output beyond its capture cap: the stream held
+    # here is a prefix of what the command produced, not the whole of it.
+    stdout_truncated: bool = False
+    stderr_truncated: bool = False
 
     def __post_init__(self) -> None:
         if isinstance(self.exit_code, bool) or not isinstance(self.exit_code, int):
@@ -88,6 +92,15 @@ class CommandResult:
             "stderr": self.stderr,
             "timed_out": self.timed_out,
         }
+
+
+class ToolResultStore(Protocol):
+    """Where an oversized result goes when it must leave the conversation
+    (the search tools' spill store)."""
+
+    def store_tool_result(
+        self, *, tool: str, kind: str, content: str
+    ) -> dict[str, object]: ...
 
 
 class CommandRunner(Protocol):
@@ -237,10 +250,11 @@ class ToolRegistry:
             if isinstance(tool, SessionTimeBudgetAware)
         )
 
-    def result_store(self) -> object | None:
+    def result_store(self) -> ToolResultStore | None:
         """The registered search tools' spill store for oversized results, if
         any: the one place a result too large for the conversation goes, so
-        other components (sub-agent reports) reuse the same read-back path."""
+        other components (shell output, sub-agent reports) reuse the same
+        read-back path."""
 
         for tool in self._tools.values():
             store = getattr(tool, "result_store", None)
@@ -395,6 +409,7 @@ __all__ = [
     "ToolError",
     "ToolRegistry",
     "ToolResult",
+    "ToolResultStore",
     "ToolSchemaError",
     "ToolSpec",
     "is_sequential_tool",

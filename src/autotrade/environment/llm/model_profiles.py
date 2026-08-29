@@ -60,6 +60,13 @@ _VLLM_PROFILE = ModelProfile(
     max_output_tokens=262_144,
 )
 
+# Transient provider failures (HTTP 429/500/503, transport timeouts, an empty
+# or cut-off stream) are retried with exponential backoff from this base:
+# 2 s, 4 s, 8 s, the same schedule pi uses, inside the logical call deadline.
+# The context-overflow shrink path is not a transient error and never waits.
+DEFAULT_LLM_MAX_RETRIES = 3
+DEFAULT_LLM_RETRY_BACKOFF_SECONDS = 2.0
+
 # Completion-token safety ceiling for the Fold/Meta parent conversation and
 # its sub-agents (thinking tokens included). Observed calls pool around 1.4k
 # tokens with p90 ≈ 4k; only a runaway outlier class (20k+) is cut. Do not
@@ -117,8 +124,8 @@ def build_model_gateway(
     env_file: str | Path = ".env",
     deepseek_api_key_env: str = "DEEPSEEK_API_KEY",
     timeout_seconds: float = 600.0,
-    max_retries: int = 2,
-    retry_backoff_seconds: float = 0.5,
+    max_retries: int = DEFAULT_LLM_MAX_RETRIES,
+    retry_backoff_seconds: float = DEFAULT_LLM_RETRY_BACKOFF_SECONDS,
     max_tokens: int = 1_200,
     temperature: float = 0.0,
     thinking_enabled: bool = False,
@@ -201,6 +208,8 @@ def build_model_gateway(
 
 __all__ = [
     "AGENT_MAX_OUTPUT_TOKENS",
+    "DEFAULT_LLM_MAX_RETRIES",
+    "DEFAULT_LLM_RETRY_BACKOFF_SECONDS",
     "LEGACY_LOCAL_QWEN_MODEL",
     "LOCAL_QWEN_MODEL",
     "MODEL_CHOICES",

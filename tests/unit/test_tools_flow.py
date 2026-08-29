@@ -93,14 +93,114 @@ class ShellToolTest(unittest.TestCase):
             _, _, workspace = build_sandbox(Path(tmp))
             runner = FakeRunner(CommandResult(0, stdout="hello"))
             tool = SandboxShellTool(
-                workspace, runner, timeout_seconds=5, max_timeout_seconds=5, max_output_chars=100
+                workspace,
+                runner,
+                timeout_seconds=5,
+                max_timeout_seconds=5,
+                max_output_chars=100,
+                capture_output_chars=200,
             )
             result = tool.invoke({"argv": ["echo", "hello"], "cwd": ".", "timeout_seconds": 900})
             self.assertTrue(result.ok)
             self.assertEqual(result.value["stdout"], "hello")
             self.assertEqual(result.value["exit_code"], 0)
-            # The session's configured caps win over anything the model asks for.
-            self.assertEqual(runner.calls, [(("echo", "hello"), ".", 5, 100, None)])
+            # Output within the inline budget is passed through untouched.
+            self.assertNotIn("stdout_truncated", result.value)
+            self.assertNotIn("stdout_spill", result.value)
+            # The session's configured caps win over anything the model asks
+            # for; the runner captures up to the spill cap, not the inline one.
+            self.assertEqual(runner.calls, [(("echo", "hello"), ".", 5, 200, None)])
+        with self.assertRaises(ValueError):
+            SandboxShellTool(workspace, runner, max_output_chars=100, capture_output_chars=100)
+
+    def test_shell_spills_overflowing_stdout_and_reads_it_back_by_line(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, roots, workspace = build_sandbox(Path(tmp))
+            text = "".join(f"line-{index:04d}\n" for index in range(1000))
+            runner = FakeRunner(CommandResult(0, stdout=text, stderr="warn\n"))
+            tool = SandboxShellTool(
+                workspace, runner, max_output_chars=2_000, capture_output_chars=20_000,
+                result_store=roots,
+            )
+            record = tool.invoke({"argv": ["python", "dump.py"]}).value
+            self.assertEqual(record["exit_code"], 0)
+            self.assertTrue(record["stdout_truncated"])
+            self.assertEqual(record["stdout_lines"], 1000)
+            head, tail = record["stdout"], record["stdout_tail"]
+            # Head and tail are whole lines and together stay within budget.
+            self.assertTrue(head.startswith("line-0000\n") and head.endswith("\n"))
+            self.assertTrue(tail.startswith("line-09") and tail.endswith("line-0999\n"))
+            self.assertLessEqual(len(head) + len(tail), 2_000)
+            head_lines = head.count("\n")
+            spill = record["stdout_spill"]
+            self.assertEqual(spill["result_root"], "artifacts")
+            self.assertTrue(spill["result_ref"].startswith("logs/tool_results/shell_stdout_"))
+            self.assertIn(f"offset={head_lines}", spill["result_hint"])
+            self.assertIn(f"full stdout spilled ({1000} lines)", spill["result_hint"])
+            # stderr was within budget: untouched, no truncation fields.
+            self.assertEqual(record["stderr"], "warn\n")
+            self.assertNotIn("stderr_truncated", record)
+            # The hint's read_file call resumes exactly where the head stopped.
+            page = ReadFileTool(roots).invoke(
+                {"root": spill["result_root"], "path": spill["result_ref"],
+                 "offset": head_lines, "limit": 2}
+            ).value
+            self.assertEqual(page["line_count"], 1000)
+            self.assertEqual(
+                page["content"].split("\n")[0], f"{head_lines + 1}\tline-{head_lines:04d}"
+            )
+
+    def test_shell_keeps_stderr_and_exit_code_when_stderr_overflows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, roots, workspace = build_sandbox(Path(tmp))
+            stderr = "".join(f"frame {index}\n" for index in range(500)) + "ValueError: bad\n"
+            runner = FakeRunner(CommandResult(1, stdout="partial\n", stderr=stderr))
+            tool = SandboxShellTool(
+                workspace, runner, max_output_chars=1_000, capture_output_chars=10_000,
+                result_store=roots,
+            )
+            record = tool.invoke({"argv": ["python", "fail.py"]}).value
+            self.assertEqual(record["exit_code"], 1)
+            self.assertEqual(record["stdout"], "partial\n")
+            self.assertNotIn("stdout_truncated", record)
+            self.assertTrue(record["stderr_truncated"])
+            self.assertEqual(record["stderr_lines"], 501)
+            # The error at the end of stderr survives inline.
+            self.assertTrue(record["stderr_tail"].endswith("ValueError: bad\n"))
+            self.assertTrue(
+                record["stderr_spill"]["result_ref"].startswith("logs/tool_results/shell_stderr_")
+            )
+            spilled = ReadFileTool(roots).invoke(
+                {"root": "artifacts", "path": record["stderr_spill"]["result_ref"],
+                 "offset": 499, "limit": 5}
+            ).value
+            self.assertEqual(spilled["content"], "500\tframe 499\n501\tValueError: bad")
+
+    def test_shell_marks_a_capture_the_runner_cut_and_shows_no_tail(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, roots, workspace = build_sandbox(Path(tmp))
+            captured = ("x" * 99 + "\n") * 20  # exactly the capture cap; more was produced
+            runner = FakeRunner(CommandResult(0, stdout=captured, stdout_truncated=True))
+            tool = SandboxShellTool(
+                workspace, runner, max_output_chars=1_000, capture_output_chars=2_000,
+                result_store=roots,
+            )
+            record = tool.invoke({"argv": ["python", "flood.py"]}).value
+            self.assertTrue(record["stdout_truncated"])
+            self.assertTrue(record["stdout_capture_truncated"])
+            self.assertNotIn("stdout_tail", record)
+            self.assertIn("2000-char capture cap", record["stdout_spill"]["result_hint"])
+            self.assertIn("result_ref", record["stdout_spill"])
+
+    def test_shell_overflow_without_a_store_is_still_explicit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, _, workspace = build_sandbox(Path(tmp))
+            runner = FakeRunner(CommandResult(0, stdout="row\n" * 1_000))
+            tool = SandboxShellTool(workspace, runner, max_output_chars=400, capture_output_chars=5_000)
+            record = tool.invoke({"argv": ["cat", "rows.txt"]}).value
+            self.assertTrue(record["stdout_truncated"])
+            self.assertEqual(set(record["stdout_spill"]), {"result_hint"})
+            self.assertIn("not persisted", record["stdout_spill"]["result_hint"])
 
     def test_shell_reports_a_nonzero_exit_without_inventing_success(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -933,6 +1033,8 @@ class ToolResultContractTest(unittest.TestCase):
             shell_description = SandboxShellTool(workspace, FakeRunner()).spec.description
             self.assertIn("at most 1000 chars", shell_description)
             self.assertIn('["python", "workspace/probe.py"]', shell_description)
+            self.assertIn("over 40000 chars come back as an inline head", shell_description)
+            self.assertIn("`<stream>_spill.result_hint`", shell_description)
 
 
 class SpillAndRootContractTest(unittest.TestCase):

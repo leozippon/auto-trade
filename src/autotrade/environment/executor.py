@@ -521,6 +521,8 @@ class PersistentCommandRunner:
             completed.stdout,
             completed.stderr,
             timed_out=completed.exit_code == 124,
+            stdout_truncated=completed.stdout_truncated,
+            stderr_truncated=completed.stderr_truncated,
         )
 
 

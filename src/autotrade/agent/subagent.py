@@ -23,7 +23,7 @@ from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Protocol, cast
+from typing import cast
 
 from autotrade.environment.llm import (
     AGENT_MAX_OUTPUT_TOKENS,
@@ -45,6 +45,7 @@ from autotrade.environment.tools.base import (
     SessionInterrupt,
     ToolRegistry,
     ToolResult,
+    ToolResultStore,
     ToolSpec,
     is_sequential_tool,
 )
@@ -469,15 +470,6 @@ def resolve_subagent_max_turns(
     if value is not None:
         raise ValueError("agent.max_turns must be an integer")
     return subagent_role(role).default_max_turns(global_default)
-
-
-class ToolResultStore(Protocol):
-    """Where an oversized result goes when it must leave the conversation
-    (the search tools' spill store)."""
-
-    def store_tool_result(
-        self, *, tool: str, kind: str, content: str
-    ) -> dict[str, object]: ...
 
 
 def deliver_subagent_report(

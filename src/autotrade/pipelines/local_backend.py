@@ -1124,7 +1124,7 @@ def build_fold_subagent_tools(
         DeleteSkillTool(workspace),
         WriteFileTool(workspace),
         EditFileTool(workspace),
-        SandboxShellTool(workspace, command_runner),
+        SandboxShellTool(workspace, command_runner, result_store=search_roots),
         modification,
     ]
 
@@ -1450,7 +1450,7 @@ class LLMFoldDeveloper:
                 GlobTool(search_roots),
                 WriteFileTool(safe),
                 EditFileTool(safe),
-                SandboxShellTool(safe, command_runner),
+                SandboxShellTool(safe, command_runner, result_store=search_roots),
                 WriteSkillTool(safe),
                 DeleteSkillTool(safe),
                 modification,

@@ -6,7 +6,7 @@ import re
 import shlex
 from collections.abc import Mapping, Sequence
 
-from .base import CommandRunner, ToolError, ToolResult, ToolSpec
+from .base import CommandRunner, ToolError, ToolResult, ToolResultStore, ToolSpec
 from .workspace import SafeWorkspace
 
 # Advisory (not enforced): nudge the Agent away from hiding stderr, which breaks audit.
@@ -22,6 +22,12 @@ STDERR_SUPPRESSION_REMINDER = (
 DEFAULT_SHELL_TIMEOUT_SECONDS = 60.0
 MAX_SHELL_TIMEOUT_SECONDS = 600.0
 SHELL_ARGV_MAX_CHARS = 1000
+# Per-stream inline budget for one observation, and the host-side capture cap
+# behind it: a stream over the inline budget keeps a head and a tail inline
+# and spills the whole capture to the result store; a command that produces
+# more than the capture cap loses the rest, explicitly.
+DEFAULT_SHELL_OUTPUT_CHARS = 40_000
+SHELL_CAPTURE_MAX_CHARS = 1_000_000
 FORBIDDEN_WAIT = "forbidden_wait"
 _WAIT_COMMANDS = frozenset({"sleep", "usleep"})
 _WAIT_WRAPPERS = frozenset({"env", "timeout", "nice", "stdbuf", "nohup", "time"})
@@ -91,7 +97,9 @@ def _shell_input_schema(timeout_seconds: float) -> dict[str, object]:
     }
 
 
-def _shell_description(timeout_seconds: float, max_timeout_seconds: float) -> str:
+def _shell_description(
+    timeout_seconds: float, max_timeout_seconds: float, max_output_chars: int
+) -> str:
     return (
         "Run one bounded foreground argv command in the injected network-disabled "
         "Agent sandbox. `argv` is a JSON array of strings, e.g. "
@@ -105,7 +113,10 @@ def _shell_description(timeout_seconds: float, max_timeout_seconds: float) -> st
         "validate a script on a sample of dates/stocks first, split a full-market or "
         "full-history pass into chunks that each finish within the cap, and checkpoint "
         "intermediate results to files under the workspace (they persist) rather than "
-        "starting anything in the background."
+        "starting anything in the background. stdout and stderr over "
+        f"{max_output_chars} chars come back as an inline head plus `<stream>_tail`, with the "
+        "full stream spilled to a file: `<stream>_spill.result_hint` gives the read_file call "
+        "for the omitted lines. Write large outputs to a workspace file and read them selectively."
     )
 
 
@@ -116,7 +127,9 @@ def _shell_example(timeout_seconds: float) -> dict[str, object]:
 class SandboxShellTool:
     spec = ToolSpec(
         "shell",
-        _shell_description(DEFAULT_SHELL_TIMEOUT_SECONDS, MAX_SHELL_TIMEOUT_SECONDS),
+        _shell_description(
+            DEFAULT_SHELL_TIMEOUT_SECONDS, MAX_SHELL_TIMEOUT_SECONDS, DEFAULT_SHELL_OUTPUT_CHARS
+        ),
         _shell_input_schema(MAX_SHELL_TIMEOUT_SECONDS),
         mutating=True,
         example=_shell_example(DEFAULT_SHELL_TIMEOUT_SECONDS),
@@ -129,15 +142,20 @@ class SandboxShellTool:
         *,
         timeout_seconds: float = DEFAULT_SHELL_TIMEOUT_SECONDS,
         max_timeout_seconds: float = MAX_SHELL_TIMEOUT_SECONDS,
-        max_output_chars: int = 40_000,
+        max_output_chars: int = DEFAULT_SHELL_OUTPUT_CHARS,
+        capture_output_chars: int = SHELL_CAPTURE_MAX_CHARS,
+        result_store: ToolResultStore | None = None,
     ) -> None:
         if timeout_seconds <= 0 or max_timeout_seconds <= 0 or max_output_chars <= 0:
             raise ValueError("shell limits must be positive")
+        # A capture the runner cut is then always over the inline budget too.
+        if capture_output_chars <= max_output_chars:
+            raise ValueError("shell capture cap must exceed the inline output budget")
         # The default never exceeds the cap; a lower cap pulls it down.
         timeout_seconds = min(timeout_seconds, max_timeout_seconds)
         self.spec = ToolSpec(
             "shell",
-            _shell_description(timeout_seconds, max_timeout_seconds),
+            _shell_description(timeout_seconds, max_timeout_seconds, max_output_chars),
             _shell_input_schema(max_timeout_seconds),
             mutating=True,
             example=_shell_example(timeout_seconds),
@@ -147,6 +165,8 @@ class SandboxShellTool:
         self.timeout_seconds = timeout_seconds
         self.max_timeout_seconds = max_timeout_seconds
         self.max_output_chars = max_output_chars
+        self.capture_output_chars = capture_output_chars
+        self.result_store = result_store
 
     def invoke(self, arguments: Mapping[str, object]) -> ToolResult:
         raw_argv = arguments["argv"]
@@ -162,10 +182,12 @@ class SandboxShellTool:
             argv,
             cwd=self.workspace.relative(cwd) if cwd != self.workspace.root else ".",
             timeout_seconds=timeout,
-            max_output_chars=self.max_output_chars,
+            max_output_chars=self.capture_output_chars,
             input_text=str(arguments["input"]) if "input" in arguments else None,
         )
         record = result.to_record()
+        self._bound_stream(record, "stdout", result.stdout, capture_cut=result.stdout_truncated)
+        self._bound_stream(record, "stderr", result.stderr, capture_cut=result.stderr_truncated)
         # Audit statistics only; permissions stay with the sandbox, the
         # filesystem and the tool registry's post-finish write lock.
         record["command_kind"] = _classify_command(argv)
@@ -173,6 +195,65 @@ class SandboxShellTool:
         if reminder:
             record["stderr_suppression_reminder"] = reminder
         return ToolResult(True, value=record)
+
+    def _bound_stream(
+        self, record: dict[str, object], name: str, text: str, *, capture_cut: bool
+    ) -> None:
+        """Keep one stream within the inline budget without losing it.
+
+        Over budget, the observation carries a head and a tail (errors sit at
+        the end) plus the line geometry of the omitted middle, and the whole
+        capture goes to the result store; ``read_file`` pages it by line, so
+        the hint names the offset to resume from. A capture the runner itself
+        cut has no true tail, so none is shown and the hint says so.
+        """
+
+        if len(text) <= self.max_output_chars and not capture_cut:
+            return
+        tail_chars = self.max_output_chars // 4
+        head = text[: self.max_output_chars - tail_chars]
+        if "\n" in head:
+            head = head[: head.rfind("\n") + 1]
+        total_lines = len(text.splitlines())
+        head_lines = head.count("\n")
+        tail = text[-tail_chars:] if tail_chars and not capture_cut else ""
+        if "\n" in tail and text[-tail_chars - 1] != "\n":
+            # Drop the partial first line unless the window starts on a line.
+            tail = tail[tail.find("\n") + 1 :]
+        tail_lines = len(tail.splitlines())
+        omitted = total_lines - head_lines - tail_lines
+        record[name] = head
+        record[f"{name}_truncated"] = True
+        record[f"{name}_lines"] = total_lines
+        if tail:
+            record[f"{name}_tail"] = tail
+        if capture_cut:
+            record[f"{name}_capture_truncated"] = True
+        stored = (
+            self.result_store.store_tool_result(tool="shell", kind=name, content=text)
+            if self.result_store is not None
+            else {}
+        )
+        if "result_ref" in stored:
+            hint = (
+                f"{name} exceeded the {self.max_output_chars}-char inline budget: "
+                f"{head_lines} head lines inline, {omitted} lines omitted, {tail_lines} tail "
+                f"lines in {name}_tail; full {name} spilled ({total_lines} lines), read the "
+                f"omitted lines with: read_file root='{stored['result_root']}' "
+                f"path='{stored['result_ref']}' offset={head_lines}"
+            )
+        else:
+            hint = (
+                f"{name} exceeded the {self.max_output_chars}-char inline budget and was not "
+                f"persisted: {omitted} lines are lost; rerun with head/tail/grep or redirect "
+                "the output to a workspace file"
+            )
+        if capture_cut:
+            hint += (
+                f"; the command produced more than the {self.capture_output_chars}-char "
+                "capture cap, so the capture ends there and its true tail is lost"
+            )
+        record[f"{name}_spill"] = {**stored, "result_hint": hint}
 
 
 def reject_forbidden_wait(argv: Sequence[str]) -> None:
@@ -345,10 +426,12 @@ def _basename(token: str) -> str:
 
 
 __all__ = [
+    "DEFAULT_SHELL_OUTPUT_CHARS",
     "DEFAULT_SHELL_TIMEOUT_SECONDS",
     "FORBIDDEN_WAIT",
     "MAX_SHELL_TIMEOUT_SECONDS",
     "SHELL_ARGV_MAX_CHARS",
+    "SHELL_CAPTURE_MAX_CHARS",
     "SandboxShellTool",
     "argv_is_forbidden_wait",
     "reject_forbidden_wait",
