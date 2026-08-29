@@ -1485,3 +1485,11 @@ def test_meta_trace_payload_keeps_sub_agent_brief_thinking_and_failure_events() 
                          "task_id": "agent_1", "summary_chars": 9000,
                          "summary_delivered_chars": 6000, "summary_truncated": True,
                          "result_ref": "logs/tool_results/subagent_report_ab12/report.txt"}
+    # A parent instruction is counted and attributed, never quoted.
+    steer = _safe_meta_trace_payload(
+        "subagent_steer",
+        {"task_id": "agent_1", "role": "auditor", "round": 2, "chars": 40,
+         "delivery": "delivered", "parent_call_id": "call_p", "text": "改范围"},
+    )
+    assert steer == {"task_id": "agent_1", "role": "auditor", "round": 2, "chars": 40,
+                     "delivery": "delivered", "parent_call_id": "call_p"}

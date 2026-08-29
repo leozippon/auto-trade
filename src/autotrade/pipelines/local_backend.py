@@ -2433,6 +2433,8 @@ def _safe_meta_trace_payload(
         },
         "subagent_tool": {"task_id", "role", "round", "tool", "parent_call_id", "result"},
         "subagent_wrap_up": {"task_id", "role", "round", "rounds_limit", "parent_call_id"},
+        # A parent instruction is counted, never quoted.
+        "subagent_steer": {"task_id", "role", "round", "chars", "delivery", "parent_call_id"},
         "subagent_context_compaction": {
             "task_id",
             "role",

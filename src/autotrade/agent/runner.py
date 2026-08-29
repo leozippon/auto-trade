@@ -22,6 +22,7 @@ import json
 import threading
 import time
 import uuid
+from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -237,6 +238,9 @@ class _SubAgentJob:
     delivered: bool = False
     # The finished child's own transcript, kept for ``resume``.
     messages: tuple[ChatMessage, ...] | None = None
+    # Parent instructions not yet read by the child (``action="message"``);
+    # the child drains it before each model round.
+    steer: deque[str] = field(default_factory=deque)
 
 
 @dataclass(frozen=True)
@@ -1061,11 +1065,19 @@ class AgentSessionRunner:
         queue until a slot frees. Completion is delivered later as a
         ``subagent_completed`` observation. ``resume`` continues a finished
         child's own transcript with the new task; a running or unknown child
-        is refused.
+        is refused. ``action="message"`` instead queues an instruction for a
+        child that has not finished (see ``_steer_subagent``).
         """
 
         if self.subagent is None:
             raise ToolError("Sub-agent is not configured")
+        action = str(arguments.get("action") or "launch")
+        if action == "message":
+            return self._steer_subagent(arguments)
+        if "agent" not in arguments or "task" not in arguments:
+            raise ToolError(
+                "agent: launch requires agent and task", error_type="schema_error"
+            )
         role = str(arguments["agent"])
         task = str(arguments["task"])
         if not task.strip():
@@ -1135,6 +1147,7 @@ class AgentSessionRunner:
                     max_workers=max(1, cap),
                     thread_name_prefix="agent",
                 )
+            steer: deque[str] = deque()
             future = self._subagent_pool.submit(
                 self.subagent.run_with_transcript,
                 task,
@@ -1148,6 +1161,7 @@ class AgentSessionRunner:
                 resumed_from=resume,
                 description=description,
                 task_id=task_id,
+                steer_queue=steer,
             )
             self._subagent_jobs.append(
                 _SubAgentJob(
@@ -1157,6 +1171,7 @@ class AgentSessionRunner:
                     attempt=attempt,
                     future=future,
                     description=description,
+                    steer=steer,
                 )
             )
             picture = self._subagent_live_picture()
@@ -1172,6 +1187,58 @@ class AgentSessionRunner:
         if queued:
             record["queued"] = True
         record.update(picture)
+        return record
+
+    def _steer_subagent(self, arguments: Mapping[str, object]) -> dict[str, object]:
+        """Queue one parent instruction for a child that has not finished.
+
+        The child reads it before its next model round (a queued child before
+        its first), so the ack only says it was queued; delivery shows up as
+        the child's ``subagent_steer`` event and as ``steers`` /
+        ``steers_undelivered`` in its ``subagent_completed`` observation. A
+        finished child takes follow-ups through ``resume``.
+        """
+
+        if "task_id" not in arguments or "text" not in arguments:
+            raise ToolError(
+                "agent: message requires task_id and text", error_type="schema_error"
+            )
+        task_id = str(arguments["task_id"]).strip()
+        text = str(arguments["text"]).strip()
+        if not text:
+            raise ToolError("agent.text must be a non-empty string")
+        with self._subagent_lock:
+            job = next((job for job in self._subagent_jobs if job.task_id == task_id), None)
+            if job is None:
+                raise ToolError(
+                    f"message: unknown sub-agent task_id {task_id}",
+                    error_type="unknown_subagent",
+                )
+            if job.record is not None or job.future.done():
+                raise ToolError(
+                    f"message: sub-agent {task_id} has finished; give it a follow-up "
+                    "with resume instead",
+                    error_type="subagent_finished",
+                )
+            job.steer.append(text)
+            child_queued = not job.future.running()
+        self._emit(
+            "subagent_steer",
+            {
+                "task_id": task_id,
+                "role": job.role,
+                "chars": len(text),
+                "delivery": "queued",
+                "parent_call_id": job.call_id or None,
+            },
+        )
+        record: dict[str, object] = {
+            "status": "queued",
+            "task_id": task_id,
+            "delivered_at_round": None,
+        }
+        if child_queued:
+            record["child_queued"] = True
         return record
 
     def _subagent_live_picture(self) -> dict[str, object]:
@@ -1233,11 +1300,14 @@ class AgentSessionRunner:
                     # A cut-off report is not a complete one; the marker at
                     # the tail of a long summary is easy to miss.
                     payload["truncated"] = True
-                for key in ("truncated_rounds", "llm_errors"):
+                for key in ("truncated_rounds", "llm_errors", "steers"):
                     if isinstance(value.get(key), int) and value[key] > 0:
                         payload[key] = value[key]
                 if value.get("error"):
                     payload["error"] = value.get("error")
+            if job.steer:
+                # An instruction the child never read is not silently lost.
+                payload["steers_undelivered"] = len(job.steer)
             messages.append(
                 ChatMessage(
                     "user",

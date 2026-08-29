@@ -307,6 +307,18 @@ def project_subagent_trace(events: object, task_id: str) -> dict[str, object]:
                     f"{_as_int(event.get('rounds_limit'))}：已要求子代理立即收尾。",
                 )
             )
+        elif kind == "subagent_steer":
+            flush_tools()
+            chars = _as_int(event.get("chars"))
+            blocks.append(
+                _marker_block(
+                    event,
+                    "父代理指令",
+                    f"第 {_as_int(event.get('round'))} 轮前送达（{chars} 字符）。"
+                    if event.get("delivery") == "delivered"
+                    else f"已排队（{chars} 字符），子代理下一轮前读取。",
+                )
+            )
         elif kind == "subagent_context_compaction":
             flush_tools()
             compaction = _as_mapping(event.get("compaction"))

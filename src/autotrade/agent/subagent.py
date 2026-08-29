@@ -18,6 +18,7 @@ import json
 import threading
 import time
 import uuid
+from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -72,8 +73,15 @@ DEFAULT_SUBAGENT_MAX_CONCURRENT = 4
 DEFAULT_SUBAGENT_MAX_ROUNDS = 48
 SUBAGENT_GRACE_ROUNDS = 2
 # Global default thinking level; a child never inherits the parent's level.
-DEFAULT_SUBAGENT_THINKING = "medium"
+# The parent lowers it per launch for bounded mechanical work, where a round
+# that spends the whole completion cap on reasoning costs more than it adds.
+DEFAULT_SUBAGENT_THINKING = "xhigh"
 SUBAGENT_DESCRIPTION_MAX_CHARS = 200
+# A parent's mid-run instruction to a child (``action="message"``): bounded
+# like a brief, queued on the job, and delivered as one labelled user message
+# before the child's next model round.
+SUBAGENT_STEER_MAX_CHARS = 2_000
+STEER_MESSAGE_LABEL = "[父代理指令]"
 # Characters of a child's final report delivered inline in the parent's
 # ``subagent_completed`` observation (Pi's preview-then-fetch shape). A longer
 # report is clipped there and spilled in full through the search tools'
@@ -214,6 +222,7 @@ _FOLD_WRITE_PROMPT = """\
 - 先读 `inputs/skills_index.json`，再从已挂载数据、单位引用、制品和参考材料中自主发现任务所需证据；skill 脚本不自动执行。把有复用价值的知识写入 skill，而不是堆入策略或汇报。
 - 只完成父任务；不得再委托子代理、读取 Test/Held-out、改变权威 PRIOR、安装依赖、替父 Agent 提问或伪造结果。分钟和竞价不是策略时钟。
 - 工具 schema 决定实际能力。同一轮的只读调用并发执行；写、检查与 shell 按因果顺序分轮调用。shell 只做有界前台工作，不启动后台任务、sleep/等待包装、轮询状态或隐藏错误；shell 写入工作区的文件会保留。全市场逐股或全历史的计算先在抽样上验证脚本，再分块运行并把中间结果落盘，每块都要在 shell 超时内完成。
+- 运行中收到以 `[父代理指令]` 开头的消息时，它是父 Agent 的补充要求，优先于原 task。
 
 # 返回
 用简洁中文说明结论、实际修改、关键证据和剩余风险，然后停止。\
@@ -226,6 +235,7 @@ _FOLD_READ_PROMPT = """\
 # 边界
 - 先读 `inputs/skills_index.json`，再从已挂载数据、单位引用、制品和参考材料中自主发现任务所需证据；skill 脚本不自动执行。
 - 工具 schema 决定实际能力；同一轮的多个只读调用并发执行。不得再委托子代理、读取 Test/Held-out、安装依赖或伪造结果；分钟和竞价不是策略时钟。
+- 运行中收到以 `[父代理指令]` 开头的消息时，它是父 Agent 的补充要求，优先于原 task。
 
 # 返回
 用简洁中文说明结论、关键证据、限制和建议，然后停止。\
@@ -238,6 +248,7 @@ META_SUBAGENT_SYSTEM_PROMPT = """\
 # 边界
 - 先读 `inputs/skills_index.json`，再从 `inputs/meta_context.json` 及其挂载引用中自主发现任务所需证据；skill 脚本不自动执行。
 - 工具 schema 决定实际能力；同一轮的多个只读调用并发执行。不得再委托子代理、读取 Test/Held-out 原始记录、改变 PIT/隐藏阶段边界、访问外部资料、修改宿主代码或伪造结果。
+- 运行中收到以 `[父代理指令]` 开头的消息时，它是父 Agent 的补充要求，优先于原 task。
 
 # 返回
 用简洁中文说明结论、关键证据、限制和建议；不要复制 raw traces 或写逐 Fold Test 数字。\
@@ -261,8 +272,10 @@ AGENT_TOOL_DESCRIPTION = (
     "角色能力：developer/general-purpose 有 Sandbox shell（可跑 Python 读 PIT parquet、算 IC 表、做冒烟测试）并可写策略、模型与 skills；"
     "auditor/Explore 只能用 glob/grep/read_file 读文本与代码，不能执行任何命令——任何需要计算的任务用 general-purpose 或 developer；"
     "Meta 会话中全部角色只读。子代理只看到自己的角色提示和你的 task（inherit_context=true 时另带你的对话），"
-    "所以 task 要写全路径、约束和期望的返回格式。thinking：需要执行工具（shell、写文件、计算）的子代理用 low/medium；"
-    f"xhigh 只给纯文本推理的裁决类任务，因为它会把 {AGENT_MAX_OUTPUT_TOKENS} token 的输出预算耗在思考里，整轮发不出工具调用。"
+    f"所以 task 要写全路径、约束和期望的返回格式。thinking 默认 {DEFAULT_SUBAGENT_THINKING}，适合需要判断的审计、设计与实现；"
+    "有界的机械工作（按给定路径读取并摘录、跑一段已写好的脚本、逐文件核对）显式降到 low/medium："
+    f"每轮输出上限 {AGENT_MAX_OUTPUT_TOKENS} token，把它全部耗在思考里而发不出工具调用的一轮只得到最多 "
+    f"{SUBAGENT_MAX_TRUNCATION_CONTINUATIONS} 次强制简洁续写，之后该次委托记为 error。"
     "thinking 与 max_turns 由你按次决定，生效顺序：本次调用参数 > 角色默认（见 agent 字段） > 全局默认"
     f"（{DEFAULT_SUBAGENT_THINKING}、{DEFAULT_SUBAGENT_MAX_ROUNDS} 轮）；生效值记入该子代理的 subagent_task 事件。"
     f"子代理的汇报最多内联 {SUBAGENT_REPORT_MAX_CHARS} 字符：更长的汇报只内联开头（summary_truncated=true），"
@@ -271,6 +284,11 @@ AGENT_TOOL_DESCRIPTION = (
     "子代理不能嵌套、正式回测、结束会话、改 PRIOR 或自行验收；它的汇报描述意图而非结果，其写入须由你验收。"
     "resume=<task_id> 让一个已完成的子代理在自己的对话上继续新的 task（保留它读过的上下文，角色须相同）；"
     "仍在运行或未知的 task_id 会被拒绝。只在后续任务确实需要它已有的上下文时 resume；独立的后续工作另起并行的全新子代理，不要串成 resume 链。"
+    "action=message（带 task_id 与 text）给一个仍在运行的子代理发中途指令：立即返回 status=queued，"
+    "指令在它下一轮模型调用前作为一条 `[父代理指令]` 消息送达（尚未开始的排队子代理在第一轮前收到），"
+    "它的 subagent_completed 里 steers/steers_undelivered 记送达与未送达条数。"
+    "只在需要改变范围、追加刚发现的约束或让它提前收尾汇报时使用；不为催促而发，"
+    "后续任务用 resume 或新子代理，已完成的子代理不能 message。"
 )
 
 AGENT_TOOL_SPEC = ToolSpec(
@@ -279,15 +297,37 @@ AGENT_TOOL_SPEC = ToolSpec(
     {
         "type": "object",
         "properties": {
+            "action": {
+                "type": "string",
+                "enum": ["launch", "message"],
+                "description": (
+                    "省略或 launch：启动子代理（须给 agent 与 task）；"
+                    "message：给仍在运行的子代理发中途指令（须给 task_id 与 text）。"
+                ),
+            },
             "agent": {
                 "type": "string",
                 "enum": list(SUBAGENT_ROLES),
-                "description": "角色、能力与默认档位——" + _role_schema_text(),
+                "description": "launch：角色、能力与默认档位——" + _role_schema_text(),
             },
             "task": {
                 "type": "string",
                 "minLength": 1,
-                "description": "完整的委托任务：目标、范围、已知事实与期望的返回内容。",
+                "description": "launch：完整的委托任务：目标、范围、已知事实与期望的返回内容。",
+            },
+            "task_id": {
+                "type": "string",
+                "minLength": 1,
+                "description": "message：仍在运行（或排队）的子代理的 task_id。",
+            },
+            "text": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": SUBAGENT_STEER_MAX_CHARS,
+                "description": (
+                    f"message：中途指令正文（≤{SUBAGENT_STEER_MAX_CHARS} 字符），"
+                    "在子代理下一轮模型调用前作为 `[父代理指令]` 消息送达。"
+                ),
             },
             "description": {
                 "type": "string",
@@ -310,7 +350,10 @@ AGENT_TOOL_SPEC = ToolSpec(
                 "enum": list(SUBAGENT_THINKING_LEVELS),
                 "description": (
                     f"子代理思考强度 off/low/medium/xhigh；省略时按角色默认（当前各角色均为 {DEFAULT_SUBAGENT_THINKING}），不继承父会话。"
-                    "执行工具的任务用 low/medium；xhigh 只给纯文本裁决类任务，它会把输出预算耗在思考里而发不出工具调用（旧值 high/max 等同 xhigh）；off 关闭扩展思考。"
+                    "需要判断的任务保留默认；有界的机械工作显式给 low/medium，"
+                    f"因为把 {AGENT_MAX_OUTPUT_TOKENS} token 的输出预算全部耗在思考里而发不出工具调用的一轮"
+                    f"只得到最多 {SUBAGENT_MAX_TRUNCATION_CONTINUATIONS} 次强制简洁续写，之后记为 error"
+                    "（旧值 high/max 等同 xhigh）；off 关闭扩展思考。"
                 ),
             },
             "inherit_context": {
@@ -323,7 +366,9 @@ AGENT_TOOL_SPEC = ToolSpec(
                 "description": "本会话中一个已完成子代理的 task_id：在它自己的对话上继续执行新的 task。",
             },
         },
-        "required": ["agent", "task"],
+        # ``launch`` needs agent+task and ``message`` needs task_id+text; the
+        # dispatcher enforces the pair the action requires.
+        "required": [],
         "additionalProperties": False,
     },
     example={
@@ -608,12 +653,15 @@ class SubAgentEngine(SessionTimeBudgetAware):
         resumed_from: str | None = None,
         description: str = "",
         task_id: str | None = None,
+        steer_queue: deque[str] | None = None,
     ) -> tuple[dict[str, object], tuple[ChatMessage, ...]]:
         """Run one child; return its result record and final transcript.
 
         ``transcript`` resumes a finished child's own conversation with the
         new task appended; otherwise the child starts from its role prompt,
-        optionally forked from ``parent_messages``.
+        optionally forked from ``parent_messages``. ``steer_queue`` is the
+        parent's mid-run instructions: drained before every model round, each
+        one a labelled user message and a ``subagent_steer`` event.
         """
 
         if not task.strip():
@@ -686,6 +734,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
         llm_errors = 0
         truncated_rounds = 0
         continuations = 0
+        steers = 0
         try:
             while rounds_limit is None or rounds < rounds_limit:
                 if self._cancelled():
@@ -697,6 +746,23 @@ class SubAgentEngine(SessionTimeBudgetAware):
                     error = "Sub-agent deadline reached"
                     break
                 rounds += 1
+                # The child is this queue's only consumer, so a non-empty
+                # check followed by popleft cannot race the parent's appends.
+                while steer_queue:
+                    text = steer_queue.popleft()
+                    steers += 1
+                    messages.append(ChatMessage("user", f"{STEER_MESSAGE_LABEL} {text}"))
+                    self._emit(
+                        "subagent_steer",
+                        {
+                            "task_id": task_id,
+                            "role": role,
+                            "round": rounds,
+                            "chars": len(text),
+                            "delivery": "delivered",
+                            "parent_call_id": parent_call_id,
+                        },
+                    )
                 if (
                     rounds_limit is not None
                     and rounds_limit > SUBAGENT_GRACE_ROUNDS
@@ -989,6 +1055,8 @@ class SubAgentEngine(SessionTimeBudgetAware):
             result["truncated_rounds"] = truncated_rounds
         if llm_errors:
             result["llm_errors"] = llm_errors
+        if steers:
+            result["steers"] = steers
         if error:
             result["error"] = error
         self._emit(

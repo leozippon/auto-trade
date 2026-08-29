@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+from collections import deque
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -15,8 +16,10 @@ from autotrade.agent.subagent import (
     AGENT_TOOL_SPEC,
     DEFAULT_SUBAGENT_MAX_CONCURRENT,
     DEFAULT_SUBAGENT_THINKING,
+    STEER_MESSAGE_LABEL,
     SUBAGENT_DESCRIPTION_MAX_CHARS,
     SUBAGENT_ROLES,
+    SUBAGENT_STEER_MAX_CHARS,
     SUBAGENT_THINKING_LEVELS,
     META_SUBAGENT_SYSTEM_PROMPT,
     SubAgentConfig,
@@ -741,9 +744,13 @@ def test_subagent_schema_uses_session_role_enum() -> None:
     )
     parameters = schema["parameters"]
     assert isinstance(parameters, dict)
-    assert parameters["required"] == ["agent", "task"]
+    # launch needs agent+task and message needs task_id+text: the dispatcher
+    # enforces the pair, so the schema itself requires neither.
+    assert parameters["required"] == []
     properties = parameters["properties"]
     assert isinstance(properties, dict)
+    assert properties["action"]["enum"] == ["launch", "message"]
+    assert properties["text"]["maxLength"] == SUBAGENT_STEER_MAX_CHARS == 2_000
     role_schema = properties["agent"]
     assert isinstance(role_schema, dict)
     assert role_schema["enum"] == list(SUBAGENT_ROLES)
@@ -994,9 +1001,9 @@ def test_general_prompts_explain_mode_and_role() -> None:
 
 
 def test_normalize_subagent_thinking_accepts_aliases() -> None:
-    assert DEFAULT_SUBAGENT_THINKING == "medium"
-    assert normalize_subagent_thinking(None) == "medium"
-    assert normalize_subagent_thinking("inherit") == "medium"
+    assert DEFAULT_SUBAGENT_THINKING == "xhigh"
+    assert normalize_subagent_thinking(None) == "xhigh"
+    assert normalize_subagent_thinking("inherit") == "xhigh"
     assert normalize_subagent_thinking("minimal") == "low"
     assert normalize_subagent_thinking("xhigh") == "xhigh"
     assert normalize_subagent_thinking("high") == "xhigh"
@@ -1006,14 +1013,14 @@ def test_normalize_subagent_thinking_accepts_aliases() -> None:
         normalize_subagent_thinking("turbo")
 
 
-def test_subagent_defaults_are_medium_thinking_and_four_concurrent() -> None:
+def test_subagent_defaults_are_xhigh_thinking_and_four_concurrent() -> None:
     assert DEFAULT_SUBAGENT_MAX_CONCURRENT == 4
     assert SubAgentConfig().max_concurrent == 4
     result = SubAgentEngine(
         llm=ScriptedLLM([ProviderResponse(content="ok")]),
         tools=ToolRegistry([DeclaredReadOnlyShell()]),
     ).run("summarize", role="auditor")
-    assert result["thinking"] == "medium"
+    assert result["thinking"] == "xhigh"
     assert "默认同时运行 4 个，超出排队" in AGENT_TOOL_DESCRIPTION
     assert "subagent_completed" in FOLD_WORKFLOW_SECTION
     assert "不要用工具轮询" in FOLD_WORKFLOW_SECTION
@@ -1969,16 +1976,26 @@ def test_agent_tool_schema_through_the_registry() -> None:
     spec = runner.tools.spec("agent")
     assert spec is not None and spec.name == "agent"
     schema = spec.input_schema
-    assert schema["required"] == ["agent", "task"]
+    assert schema["required"] == []
     assert set(schema["properties"]) == {
-        "agent", "task", "description", "max_turns", "thinking", "inherit_context", "resume",
+        "action", "agent", "task", "task_id", "text",
+        "description", "max_turns", "thinking", "inherit_context", "resume",
     }
     assert schema["properties"]["agent"]["enum"] == list(SUBAGENT_ROLES)
-    for phrase in ("subagent_completed", "resume", "不能嵌套", "不要轮询"):
+    for phrase in ("subagent_completed", "resume", "不能嵌套", "不要轮询", "action=message"):
         assert phrase in spec.description
     # The old parameter name is a schema error, not a silent fallback.
     stale = runner.tools.invoke("agent", {"role": "auditor", "task": "x"})
     assert stale.ok is False and "role" in stale.error
+    # Each action still fails fast on its own required pair.
+    for arguments in ({"task": "x"}, {"agent": "auditor"}, {"action": "launch"}):
+        bare = runner.tools.invoke("agent", arguments)
+        assert bare.ok is False and bare.value["error_type"] == "schema_error"
+        assert "launch requires agent and task" in bare.error
+    for arguments in ({"action": "message", "text": "x"}, {"action": "message", "task_id": "agent_1"}):
+        bare = runner.tools.invoke("agent", arguments)
+        assert bare.ok is False and bare.value["error_type"] == "schema_error"
+        assert "message requires task_id and text" in bare.error
     assert runner.tools.spec("explore") is None
 
 
@@ -2201,15 +2218,21 @@ def test_agent_description_states_role_capabilities_and_thinking_tiers() -> None
         "shell",
         "不能执行",
         "general-purpose 或 developer",
+        "thinking 默认 xhigh",
+        "机械工作",
         "low/medium",
-        "xhigh 只给纯文本",
-        "发不出工具调用",
+        "12000 token",
+        "最多 2 次强制简洁续写",
         "不要串成 resume 链",
+        "action=message",
+        "不为催促而发",
     ):
         assert phrase in AGENT_TOOL_DESCRIPTION
-    assert "发不出工具调用" in AGENT_TOOL_SPEC.input_schema["properties"]["thinking"]["description"]
+    thinking_field = AGENT_TOOL_SPEC.input_schema["properties"]["thinking"]["description"]
+    assert "均为 xhigh" in thinking_field and "最多 2 次强制简洁续写" in thinking_field
     for prompt in (FOLD_WORKFLOW_SECTION, build_system_prompt(mode="meta", experiment_facts={})):
-        assert "xhigh 只给纯文本" in prompt
+        assert "xhigh" in prompt and "low/medium" in prompt and "action=message" in prompt
+        assert "xhigh 只给纯文本" not in prompt
         assert "优先 `resume`" not in prompt
     agent_field = AGENT_TOOL_SPEC.input_schema["properties"]["agent"]
     assert "不能执行" in agent_field["description"] and "shell" in agent_field["description"]
@@ -3137,3 +3160,195 @@ def test_prompts_carry_the_todo_convention_and_per_launch_knobs() -> None:
         assert "owner: parent|<task_id> · status: pending|running|done|failed · result: <一句话>" in prompt
         assert f"`{finish}` 前核对全部条目" in prompt
     assert "`thinking` 与 `max_turns` 由你按次决定" in FOLD_WORKFLOW_SECTION
+
+
+class _RecordingLLM:
+    """Scripted child model that keeps the messages of every request."""
+
+    model = "child"
+    provider = "test"
+    context_window_tokens = 128_000
+
+    def __init__(self, responses: list[ProviderResponse]) -> None:
+        self._responses = list(responses)
+        self.seen: list[list[tuple[str, str]]] = []
+
+    def complete(self, messages, **kwargs):
+        del kwargs
+        self.seen.append([(message.role, str(message.content or "")) for message in messages])
+        return self._responses.pop(0)
+
+
+def test_steer_is_delivered_before_the_childs_next_round() -> None:
+    steer: deque[str] = deque()
+    text = "范围缩小到 output/main.py，然后立即汇报"
+
+    class _SteeringShell(DeclaredReadOnlyShell):
+        # The parent steers while the child's tool is running.
+        def invoke(self, arguments: Mapping[str, object]) -> ToolResult:
+            steer.append(text)
+            return super().invoke(arguments)
+
+    llm = _RecordingLLM(
+        [
+            ProviderResponse(tool_calls=(ToolCall("s", "shell", {"argv": ["ls"]}),)),
+            ProviderResponse(content="done"),
+        ]
+    )
+    events: list[tuple[str, dict[str, object]]] = []
+    result, transcript = SubAgentEngine(
+        llm=llm,
+        tools=ToolRegistry([_SteeringShell()]),
+        event_sink=lambda event, payload: events.append((event, payload)),
+    ).run_with_transcript("look", role="developer", parent_call_id="call_p", steer_queue=steer)
+    assert result["status"] == "completed" and result["steers"] == 1 and not steer
+    # Round 1 never saw it; round 2 got it after the tool result, before the model call.
+    assert not any(
+        role == "user" and content.startswith(STEER_MESSAGE_LABEL) for role, content in llm.seen[0]
+    )
+    assert llm.seen[1][-1] == ("user", f"{STEER_MESSAGE_LABEL} {text}")
+    assert llm.seen[1][-2][0] == "tool"
+    assert [payload for event, payload in events if event == "subagent_steer"] == [
+        {
+            "task_id": result["task_id"],
+            "role": "developer",
+            "round": 2,
+            "chars": len(text),
+            "delivery": "delivered",
+            "parent_call_id": "call_p",
+        }
+    ]
+    assert any(STEER_MESSAGE_LABEL in str(message.content) for message in transcript)
+    # A queued child (instruction sent before its first round) reads it right after the task.
+    early = _RecordingLLM([ProviderResponse(content="ok")])
+    result = SubAgentEngine(llm=early, tools=ToolRegistry([DeclaredReadOnlyShell()])).run(
+        "queued task", role="auditor", steer_queue=deque(["先看 README"])
+    )
+    assert result["steers"] == 1
+    assert early.seen[0][-2:] == [("user", "queued task"), ("user", f"{STEER_MESSAGE_LABEL} 先看 README")]
+    # No instruction: no message, no counter.
+    plain = SubAgentEngine(
+        llm=ScriptedLLM([ProviderResponse(content="ok")]), tools=ToolRegistry([DeclaredReadOnlyShell()])
+    ).run("plain", role="auditor")
+    assert "steers" not in plain
+
+
+class _SteerProbeLLM:
+    """Child model shared by two children: the ``slow`` one blocks in its first
+    round behind a gate and then makes a tool call; every other request answers."""
+
+    model = "child"
+    provider = "test"
+    context_window_tokens = 128_000
+
+    def __init__(self, started: threading.Event, release: threading.Event) -> None:
+        self.started = started
+        self.release = release
+        self.seen: dict[str, list[list[tuple[str, str]]]] = {}
+
+    def complete(self, messages, **kwargs):
+        del kwargs
+        blob = [(message.role, str(message.content or "")) for message in messages]
+        task = "slow" if any("slow task" in content for _role, content in blob) else "queued"
+        self.seen.setdefault(task, []).append(blob)
+        if task == "slow" and len(self.seen["slow"]) == 1:
+            self.started.set()
+            if not self.release.wait(5):
+                raise TimeoutError("steer gate")
+            return ProviderResponse(tool_calls=(ToolCall("s", "shell", {"argv": ["ls"]}),))
+        return ProviderResponse(content=f"{task} done")
+
+
+def test_agent_message_action_steers_running_and_queued_children() -> None:
+    started = threading.Event()
+    release = threading.Event()
+    child = _SteerProbeLLM(started, release)
+    events: list[tuple[str, dict[str, object]]] = []
+    runner = AgentSessionRunner(
+        llm=ScriptedLLM([]),
+        tools=ToolRegistry(),
+        system_prompt="fold",
+        config=_fold_config(),
+        subagent=SubAgentEngine(
+            llm=child,
+            tools=ToolRegistry([DeclaredReadOnlyShell()]),
+            config=SubAgentConfig(max_concurrent=1),
+        ),
+        event_sink=lambda event, payload: events.append((event, payload)),
+    )
+    slow = runner.tools.invoke("agent", {"agent": "developer", "task": "slow task"})
+    queued = runner.tools.invoke("agent", {"agent": "auditor", "task": "queued task"})
+    assert slow.ok and queued.ok and queued.value["queued"] is True
+    slow_id, queued_id = slow.value["task_id"], queued.value["task_id"]
+    assert started.wait(3)
+    try:
+        ack = runner.tools.invoke("agent", {"action": "message", "task_id": slow_id, "text": " 提前收尾 "})
+        assert ack.ok and ack.value == {"status": "queued", "task_id": slow_id, "delivered_at_round": None}
+        ack = runner.tools.invoke("agent", {"action": "message", "task_id": queued_id, "text": "先看 README"})
+        assert ack.ok and ack.value["child_queued"] is True
+        # Bounded and sanitised like a brief; unknown ids are typed errors.
+        too_long = runner.tools.invoke(
+            "agent", {"action": "message", "task_id": slow_id, "text": "x" * (SUBAGENT_STEER_MAX_CHARS + 1)}
+        )
+        assert too_long.ok is False and too_long.value["error_type"] == "schema_error"
+        blank = runner.tools.invoke("agent", {"action": "message", "task_id": slow_id, "text": "   "})
+        assert blank.ok is False and "non-empty" in blank.error
+        unknown = runner.tools.invoke("agent", {"action": "message", "task_id": "agent_nope", "text": "hi"})
+        assert unknown.ok is False and unknown.value["error_type"] == "unknown_subagent"
+    finally:
+        release.set()
+    assert [record["ok"] for record in runner._wait_subagent_jobs()] == [True, True]
+    # The running child read it after its tool result, before round 2; the
+    # queued child read it right after its task, before round 1.
+    assert child.seen["slow"][1][-1] == ("user", f"{STEER_MESSAGE_LABEL} 提前收尾")
+    assert child.seen["slow"][1][-2][0] == "tool"
+    assert child.seen["queued"][0][-2:] == [
+        ("user", "queued task"),
+        ("user", f"{STEER_MESSAGE_LABEL} 先看 README"),
+    ]
+    steers = [payload for event, payload in events if event == "subagent_steer"]
+    assert [(p["task_id"], p["delivery"], p.get("round")) for p in steers] == [
+        (slow_id, "queued", None),
+        (queued_id, "queued", None),
+        (slow_id, "delivered", 2),
+        (queued_id, "delivered", 1),
+    ]
+    assert all(p["chars"] > 0 and "text" not in p for p in steers)
+    completed = {
+        payload["task_id"]: payload
+        for payload in (
+            json.loads(str(message.content))
+            for message in runner._append_subagent_observations([])
+        )
+    }
+    assert completed[slow_id]["steers"] == 1 and completed[queued_id]["steers"] == 1
+    assert "steers_undelivered" not in completed[slow_id]
+    # A finished child takes follow-ups through resume, not message.
+    finished = runner.tools.invoke("agent", {"action": "message", "task_id": slow_id, "text": "more"})
+    assert finished.ok is False and finished.value["error_type"] == "subagent_finished"
+    assert "resume" in finished.error
+
+
+def test_steer_the_child_never_read_is_reported_undelivered() -> None:
+    started = threading.Event()
+    release = threading.Event()
+    runner = AgentSessionRunner(
+        llm=ScriptedLLM([]),
+        tools=ToolRegistry(),
+        system_prompt="fold",
+        config=_fold_config(),
+        subagent=SubAgentEngine(
+            llm=_GateLLM(started, release), tools=ToolRegistry([DeclaredReadOnlyShell()])
+        ),
+    )
+    launched = runner.tools.invoke("agent", {"agent": "auditor", "task": "one round"})
+    assert launched.ok and started.wait(3)
+    # The child is inside its only model call; it reports without another round.
+    assert runner.tools.invoke(
+        "agent", {"action": "message", "task_id": launched.value["task_id"], "text": "stop"}
+    ).ok
+    release.set()
+    assert runner._wait_subagent_jobs()[0]["ok"] is True
+    completed = json.loads(str(runner._append_subagent_observations([])[0].content))
+    assert completed["status"] == "completed" and completed["steers_undelivered"] == 1
+    assert "steers" not in completed
