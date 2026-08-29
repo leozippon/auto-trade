@@ -180,7 +180,9 @@ def test_worker_maps_model_context_params_to_role_gateways_and_compactor(
     assert compact.thinking_enabled is False and compact.reasoning_effort is None
     assert compact.max_tokens == 1_200
     assert settings.compact_enabled is True
-    assert settings.compaction.token_threshold == 90_000
+    # The configured 90,000 is clamped to the DeepSeek bound
+    # 128,000 − 32,768 output ceiling − 8,192 margin.
+    assert settings.compaction.token_threshold == 87_040
     assert settings.compaction.keep_recent_messages == 10
     assert settings.compaction.max_response_tokens == 1_200
     assert settings.compaction.max_calls == 4
@@ -313,7 +315,7 @@ def test_worker_resolves_mixed_local_and_deepseek_roles_with_real_timeout(
     assert isinstance(nl, DeepSeekProxy)
     assert nl.provider == "deepseek"
     assert analysis.provider == "vllm"
-    assert main.config.max_tokens == 12_000
+    assert main.config.max_tokens == 32_768
     assert analysis.config.max_tokens == 6_000
     assert main.config.timeout_seconds == 120
     assert main.config.reasoning_effort == "xhigh"
@@ -344,8 +346,8 @@ def test_worker_applies_local_output_cap_to_each_role_budget(
     options = load_worker_options(experiment, repo_root=repo)
     assert options.llm is not None
     assert options.llm.compaction.max_response_tokens == 20_000
-    assert options.llm.max_tokens_for("main") == 12_000
-    assert options.llm.max_tokens_for("meta") == 12_000
+    assert options.llm.max_tokens_for("main") == 32_768
+    assert options.llm.max_tokens_for("meta") == 32_768
     assert options.llm.max_tokens_for("nl", requested=1_200) == 1_200
     assert options.llm.max_tokens_for("nl", requested=20_000) == 20_000
     assert (
@@ -355,25 +357,47 @@ def test_worker_applies_local_output_cap_to_each_role_budget(
         == 6_000
     )
     for role in ("main", "meta", "nl"):
-        assert options.llm.build_gateway(role).config.max_tokens == 12_000
+        assert options.llm.build_gateway(role).config.max_tokens == 32_768
     assert options.llm.build_gateway("compact").config.max_tokens == 20_000
 
 
-def test_worker_clamps_compaction_threshold_to_the_model_context(
+def test_worker_derives_the_compaction_threshold_from_the_model_context(
     tmp_path: Path,
     monkeypatch,
 ):
+    """The default threshold is window − output ceiling − margin, and a
+    configured value is clamped to that same bound."""
+    from autotrade.environment.llm import AGENT_MAX_OUTPUT_TOKENS
+    from autotrade.pipelines.worker import COMPACTION_SAFETY_MARGIN_TOKENS
+
+    assert COMPACTION_SAFETY_MARGIN_TOKENS == 8_192
+    derived = 262_144 - AGENT_MAX_OUTPUT_TOKENS - COMPACTION_SAFETY_MARGIN_TOKENS
+    assert derived == 221_184
     repo, experiment = _experiment(tmp_path, developer_mode="llm")
     path = experiment / "hitl/params.json"
     params = json.loads(path.read_text(encoding="utf-8"))
     params["model"] = LOCAL_QWEN_MODEL
-    params["compact_token_threshold"] = 300_000
-    path.write_text(json.dumps(params), encoding="utf-8")
     monkeypatch.setenv("DEEPSEEK_API_KEY", "deepseek-test-key")
     monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
-    options = load_worker_options(experiment, repo_root=repo)
-    # 262,144 - 12,000 output budget - 2,048 margin.
-    assert options.llm.compaction.token_threshold == 248_096
+    for absent in (None, ""):
+        params["compact_token_threshold"] = absent
+        path.write_text(json.dumps(params), encoding="utf-8")
+        options = load_worker_options(experiment, repo_root=repo)
+        assert options.llm.compaction.token_threshold == derived
+    params.pop("compact_token_threshold")
+    path.write_text(json.dumps(params), encoding="utf-8")
+    assert load_worker_options(experiment, repo_root=repo).llm.compaction.token_threshold == derived
+    params["compact_token_threshold"] = 300_000
+    path.write_text(json.dumps(params), encoding="utf-8")
+    assert load_worker_options(experiment, repo_root=repo).llm.compaction.token_threshold == derived
+    params["compact_token_threshold"] = 90_000
+    path.write_text(json.dumps(params), encoding="utf-8")
+    assert load_worker_options(experiment, repo_root=repo).llm.compaction.token_threshold == 90_000
+    # A larger output ceiling lowers the derived threshold by the same amount.
+    params["compact_token_threshold"] = None
+    params["llm_max_response_tokens"] = AGENT_MAX_OUTPUT_TOKENS + 1_000
+    path.write_text(json.dumps(params), encoding="utf-8")
+    assert load_worker_options(experiment, repo_root=repo).llm.compaction.token_threshold == derived - 1_000
 
 
 def test_worker_default_threshold_fits_deepseek_and_compaction_can_be_disabled(
@@ -389,8 +413,8 @@ def test_worker_default_threshold_fits_deepseek_and_compaction_can_be_disabled(
     monkeypatch.setenv("DEEPSEEK_API_KEY", "deepseek-test-key")
     monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
     options = load_worker_options(experiment, repo_root=repo)
-    # 128,000 - 12,000 output budget - 2,048 margin: shipped defaults launch.
-    assert options.llm.compaction.token_threshold == 113_952
+    # 128,000 - 32,768 output ceiling - 8,192 margin: shipped defaults launch.
+    assert options.llm.compaction.token_threshold == 87_040
     params["disable_context_compact"] = True
     path.write_text(json.dumps(params), encoding="utf-8")
     disabled = load_worker_options(experiment, repo_root=repo)

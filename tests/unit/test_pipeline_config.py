@@ -30,7 +30,8 @@ _CONSOLE_CREATE_PRESET: dict[str, object] = {
     "compact_keep_recent_messages": 10,
     "compact_max_calls": 10,
     "compact_max_tokens": 10_000,
-    "compact_token_threshold": 200_000,
+    # Empty: the worker derives it from the model window and output ceiling.
+    "compact_token_threshold": None,
     "epochs": 3,
     "first_test_period": "2022Q1",
     "fold_period": "quarter",

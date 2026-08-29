@@ -858,9 +858,8 @@ def run_local_interactive_worker(
             runtime_root=runtime_root,
             sandbox_spec=options.agent_sandbox,
             command_runner_factory=command_runner_factory,
+            # One ceiling for the parent conversation and its children.
             max_response_tokens=options.llm.max_tokens_for("main"),
-            # Children share the parent's completion ceiling.
-            subagent_max_tokens=options.llm.max_tokens_for("main"),
             step_tree_enabled=options.rolling.step_tree_enabled,
             fold_exploration_directive=options.rolling.fold_exploration_directive,
             workspace_reference=options.rolling.workspace_reference,
@@ -878,7 +877,6 @@ def run_local_interactive_worker(
             max_llm_calls=options.rolling.max_llm_calls,
             deadline_seconds=options.rolling.max_fold_minutes * 60,
             max_response_tokens=options.llm.max_tokens_for("meta"),
-            subagent_max_tokens=options.llm.max_tokens_for("meta"),
             meta_learning_directive=options.rolling.meta_learning_directive,
             fold_exploration_directive=options.rolling.fold_exploration_directive,
             workspace_reference=options.rolling.workspace_reference,
@@ -1488,11 +1486,13 @@ def _llm_settings(
         params.get("compact_max_tokens", 1_600),
         "compact_max_tokens",
     )
+    # None = derived from the model windows; ``_resolve_compaction_threshold``
+    # sets the effective value on the settings either way.
+    configured_threshold = _optional_positive_int(
+        params.get("compact_token_threshold"), "compact_token_threshold"
+    )
     compaction = ContextCompactionConfig(
-        token_threshold=_positive_int(
-            params.get("compact_token_threshold", 200_000),
-            "compact_token_threshold",
-        ),
+        token_threshold=configured_threshold or ContextCompactionConfig.token_threshold,
         keep_recent_messages=_positive_int(
             params.get("compact_keep_recent_messages", 12),
             "compact_keep_recent_messages",
@@ -1550,7 +1550,7 @@ def _llm_settings(
     # validated at preflight with a non-secret placeholder.
     for role in ("main", "meta", "nl", "compact"):
         settings.build_gateway(role, require_credentials=not preflight)
-    settings = _clamp_compaction_threshold(settings)
+    settings = _resolve_compaction_threshold(settings, configured_threshold)
     gpu_count = _gpu_count(params.get("gpu_count", SandboxSpec().gpu_count))
     sandbox = SandboxSpec(
         image=str(params.get("agent_sandbox_image") or DEFAULT_IMAGE),
@@ -1572,23 +1572,31 @@ def _llm_settings(
     return settings, sandbox
 
 
-COMPACTION_SAFETY_MARGIN_TOKENS = 2_048
+# Tokens the compaction threshold leaves below "window − output budget". The
+# threshold is checked before the sub-agent completion observations (≤6,000
+# chars each), inbox messages and budget notices of that turn are appended,
+# so the margin lets one such addition ride along without a forced
+# compaction; the gateway keeps its own 2,048-token tokenizer slack on top.
+COMPACTION_SAFETY_MARGIN_TOKENS = 8_192
 
 
-def _clamp_compaction_threshold(settings: LLMWorkerSettings) -> LLMWorkerSettings:
-    """Bound the compaction threshold by what every model role can hold.
+def _resolve_compaction_threshold(
+    settings: LLMWorkerSettings, configured: int | None
+) -> LLMWorkerSettings:
+    """The effective compaction threshold: derived from the windows, clamped.
 
-    A profile with a known context window caps the threshold at window minus
-    that role's output budget minus a safety margin; the smallest cap wins and
-    the clamped value is the effective one (it reaches the run facts through
-    the compaction budget). Only a window with no room for the output budget
-    at all is a launch error.
+    Every model role with a known context window bounds the threshold at
+    ``window − that role's output budget − COMPACTION_SAFETY_MARGIN_TOKENS``,
+    so prompt plus output never exceeds the window; the smallest bound is the
+    default, and a configured value is clamped to it. The result reaches the
+    run facts through the compaction budget. Only a window with no room for
+    the output budget at all is a launch error.
     """
 
     roles = [("main", settings.model), ("meta", settings.meta_model)]
     if settings.compact_enabled:
         roles.append(("compact", settings.compact_model))
-    limits: list[tuple[str, int]] = []
+    bounds: list[int] = []
     for role, model in roles:
         window = model_profile(model).context_window_tokens
         if window is None:
@@ -1598,12 +1606,13 @@ def _clamp_compaction_threshold(settings: LLMWorkerSettings) -> LLMWorkerSetting
             raise ValueError(
                 f"{role} model output budget leaves no context capacity"
             )
-        limits.append((role, maximum))
-    effective = min(
-        [settings.compaction.token_threshold, *(maximum for _, maximum in limits)]
-    )
-    if effective == settings.compaction.token_threshold:
-        return settings
+        bounds.append(maximum)
+    if not bounds and configured is None:
+        raise ValueError(
+            "compact_token_threshold is required when no model role declares "
+            "a context window"
+        )
+    effective = min([*bounds, *([configured] if configured is not None else [])])
     return replace(
         settings,
         compaction=replace(settings.compaction, token_threshold=effective),

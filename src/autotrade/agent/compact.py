@@ -63,6 +63,9 @@ _THINK_BLOCK = re.compile(r"\A\s*<think>.*?</think>\s*", re.DOTALL)
 
 @dataclass(frozen=True)
 class ContextCompactionConfig:
+    # The experiment worker always derives the operational threshold from the
+    # model windows (``window − output budget − margin``); this default only
+    # serves a session assembled without a model profile.
     token_threshold: int = 200_000
     min_messages: int = 20
     keep_recent_messages: int = 12

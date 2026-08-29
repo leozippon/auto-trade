@@ -106,7 +106,7 @@ WEB_CREATE_DEFAULTS: dict[str, object] = {
     "reasoning_effort": "xhigh",
     "no_thinking": False,
     "disable_context_compact": False,
-    "compact_token_threshold": 200_000,
+    "compact_token_threshold": None,
     "compact_keep_recent_messages": 10,
     "compact_max_tokens": 10_000,
     "compact_max_calls": 10,

@@ -171,7 +171,9 @@ def test_local_webui_health_schema_and_brand(tmp_path: Path):
     assert fields["nl_model"]["default"] == LOCAL_QWEN_MODEL
     assert fields["compact_model"]["default"] == LOCAL_QWEN_MODEL
     assert fields["reasoning_effort"]["default"] == "xhigh"
-    assert fields["compact_token_threshold"]["default"] == 200_000
+    # Empty = derived from the model window by the worker.
+    assert fields["compact_token_threshold"]["default"] is None
+    assert fields["compact_token_threshold"]["optional"] is True
     assert fields["compact_keep_recent_messages"]["default"] == 10
     assert fields["compact_max_tokens"]["default"] == 10_000
     assert fields["compact_max_calls"]["default"] == 10

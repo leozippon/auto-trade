@@ -458,6 +458,7 @@ def test_fold_subagent_tools_are_writable_shell_contract(tmp_path: Path) -> None
         safe,
         _UnusedRunner(),
         ModificationCheckTool(workspace / "output"),
+        _NamedTool("smoke_backtest"),
     )
     assert [tool.spec.name for tool in tools] == [
         "read_file",
@@ -469,6 +470,7 @@ def test_fold_subagent_tools_are_writable_shell_contract(tmp_path: Path) -> None
         "edit_file",
         "shell",
         "modification_check",
+        "smoke_backtest",
     ]
     by_name = {tool.spec.name: tool for tool in tools}
     assert type(by_name["shell"]) is SandboxShellTool
@@ -807,6 +809,7 @@ def test_role_tool_visibility_hides_writes_from_audits(tmp_path: Path) -> None:
         safe,
         _UnusedRunner(),
         ModificationCheckTool(workspace / "output"),
+        _NamedTool("smoke_backtest"),
     )
     engine = SubAgentEngine(llm=ScriptedLLM([]), tools=ToolRegistry(tools))
     impl = {
@@ -817,6 +820,10 @@ def test_role_tool_visibility_hides_writes_from_audits(tmp_path: Path) -> None:
         _function_name(record)
         for record in engine._provider_tools(allowed_subagent_tools("fold", "auditor"))
     }
+    # The parent's Fold surface minus what it keeps by design (formal
+    # backtest, finish, rollback, ask_user, agent): the unofficial smoke run
+    # is a child's tool too, so it verifies its own implementation on the
+    # real replay path instead of hand-rolling a shell smoke test.
     assert impl == {
         "delete_skill",
         "edit_file",
@@ -825,9 +832,11 @@ def test_role_tool_visibility_hides_writes_from_audits(tmp_path: Path) -> None:
         "modification_check",
         "read_file",
         "shell",
+        "smoke_backtest",
         "write_file",
         "write_skill",
     }
+    assert impl == _FOLD_TOOLS - {"agent", "ask_user", "daily_backtest", "finish_fold", "step_rollback"}
     assert audit == {"glob", "grep", "read_file"}
     fold_general = {
         _function_name(record)
@@ -2214,22 +2223,27 @@ def test_delegation_reminder_waits_for_a_running_child_to_finish() -> None:
 
 
 def test_agent_description_states_role_capabilities_and_thinking_tiers() -> None:
+    from autotrade.agent.subagent import SUBAGENT_MAX_TRUNCATION_CONTINUATIONS
+    from autotrade.environment.llm import AGENT_MAX_OUTPUT_TOKENS
+
+    continuations = f"最多 {SUBAGENT_MAX_TRUNCATION_CONTINUATIONS} 次强制简洁续写"
     for phrase in (
         "shell",
+        "smoke_backtest",
         "不能执行",
         "general-purpose 或 developer",
         "thinking 默认 xhigh",
         "机械工作",
         "low/medium",
-        "12000 token",
-        "最多 2 次强制简洁续写",
+        f"{AGENT_MAX_OUTPUT_TOKENS} token",
+        continuations,
         "不要串成 resume 链",
         "action=message",
         "不为催促而发",
     ):
         assert phrase in AGENT_TOOL_DESCRIPTION
     thinking_field = AGENT_TOOL_SPEC.input_schema["properties"]["thinking"]["description"]
-    assert "均为 xhigh" in thinking_field and "最多 2 次强制简洁续写" in thinking_field
+    assert "均为 xhigh" in thinking_field and continuations in thinking_field
     for prompt in (FOLD_WORKFLOW_SECTION, build_system_prompt(mode="meta", experiment_facts={})):
         assert "xhigh" in prompt and "low/medium" in prompt and "action=message" in prompt
         assert "xhigh 只给纯文本" not in prompt
@@ -2332,8 +2346,9 @@ def test_delegation_reminder_carries_the_live_picture() -> None:
 def test_parent_and_child_output_budgets_share_the_safety_ceiling() -> None:
     from autotrade.environment.llm import AGENT_MAX_OUTPUT_TOKENS
 
-    assert AGENT_MAX_OUTPUT_TOKENS == 12_000
+    assert AGENT_MAX_OUTPUT_TOKENS == 32_768
     assert AgentSessionConfig().max_response_tokens == AGENT_MAX_OUTPUT_TOKENS
+    assert SubAgentConfig().max_tokens == AGENT_MAX_OUTPUT_TOKENS
     llm = _GateLLM(threading.Event(), threading.Event())  # 128k window
     messages = [ChatMessage("user", "x")]
     shared = SubAgentEngine(llm=llm, tools=ToolRegistry([DeclaredReadOnlyShell()]))
@@ -2418,6 +2433,93 @@ def test_child_output_truncation_is_marked_and_never_silent() -> None:
     assert result["llm_calls"] == SUBAGENT_MAX_TRUNCATION_CONTINUATIONS + 1
     assert result["truncated_rounds"] == SUBAGENT_MAX_TRUNCATION_CONTINUATIONS + 1
     assert "output budget exhausted" in result["error"] and result["tool_calls"] == 0
+
+
+class _OverflowingLLM:
+    """A gateway whose scripted items are responses or exceptions to raise."""
+
+    model = "child"
+    provider = "test"
+    context_window_tokens = 128_000
+
+    def __init__(self, items: list[object]) -> None:
+        self.items = list(items)
+        self.calls: list[dict[str, object]] = []
+
+    def complete(self, messages, *, tools=(), tool_choice="auto", max_tokens=None):
+        self.calls.append({"messages": tuple(messages), "max_tokens": max_tokens})
+        item = self.items.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+
+class _LongResultTool:
+    def __init__(self) -> None:
+        self.spec = ToolSpec(
+            "read_file", "long", {"type": "object", "properties": {}, "required": []}
+        )
+
+    def invoke(self, arguments: Mapping[str, object]) -> ToolResult:
+        del arguments
+        return ToolResult(True, value={"rows": 9, "text": "x" * 4_000})
+
+
+def test_child_gets_the_parents_single_post_provider_overflow_recovery() -> None:
+    """The provider is authoritative: when it refuses a request the local
+    estimate called fitting, the child recovers once exactly like the parent
+    (forced compaction, then a guaranteed tool-result edit) and retries; a
+    second refusal ends the child with an explicit error."""
+    from autotrade.agent.subagent import SUBAGENT_MAX_TRUNCATION_CONTINUATIONS
+    from autotrade.environment.llm.proxy import LLMProxyError
+
+    assert SUBAGENT_MAX_TRUNCATION_CONTINUATIONS == 1
+    overflow = LLMProxyError(
+        "HTTP 400: This model's maximum context length is 128000 tokens",
+        retryable=False,
+    )
+    llm = _OverflowingLLM(
+        [
+            ProviderResponse(tool_calls=(ToolCall("r1", "read_file", {}),)),
+            overflow,
+            ProviderResponse(content="recovered report"),
+        ]
+    )
+    events: list[tuple[str, dict[str, object]]] = []
+    result = SubAgentEngine(
+        llm=llm,  # type: ignore[arg-type]
+        tools=ToolRegistry([_LongResultTool()]),
+        event_sink=lambda event, payload: events.append((event, payload)),
+    ).run("dig", role="auditor")
+    assert result["status"] == "completed" and result["summary"] == "recovered report"
+    assert result["llm_errors"] == 1 and result["llm_calls"] == 3
+    edits = [payload for event, payload in events if event == "subagent_context_edit"]
+    assert len(edits) == 1
+    assert edits[0]["context_edit"]["reason"] == "provider_context_overflow_recovery"
+    assert edits[0]["context_edit"]["summarized_tool_results"] == 1
+    # The retried request carries the summarized tool result, and no
+    # ``llm_error`` observation was spent on the recovery.
+    retried = llm.calls[2]["messages"]
+    tool_messages = [m for m in retried if m.role == "tool"]
+    assert len(tool_messages) == 1
+    assert '"context_tool_result_summary"' in str(tool_messages[0].content)
+    assert not any('"llm_error"' in str(m.content) for m in retried if m.role == "user")
+
+    twice = _OverflowingLLM(
+        [
+            ProviderResponse(tool_calls=(ToolCall("r1", "read_file", {}),)),
+            overflow,
+            overflow,
+            ProviderResponse(content="must not be requested"),
+        ]
+    )
+    result = SubAgentEngine(
+        llm=twice,  # type: ignore[arg-type]
+        tools=ToolRegistry([_LongResultTool()]),
+    ).run("dig", role="auditor")
+    assert result["status"] == "error" and result["summary"] == ""
+    assert result["llm_errors"] == 2 and len(twice.items) == 1
+    assert "maximum context length" in result["error"]
 
 
 def test_child_turns_default_to_48_with_grace_wrap_up() -> None:
@@ -2960,7 +3062,7 @@ def test_role_table_is_the_single_source_for_roles_and_launch_defaults() -> None
         assert subagent_role(role.name) is role
         line = (
             f"{role.name}：{role.description}（"
-            f"{'有 Sandbox shell、可写' if role.shell else '只读 glob/grep/read_file，不能执行'}；"
+            f"{'有 Sandbox shell 与 smoke_backtest、可写' if role.shell else '只读 glob/grep/read_file，不能执行'}；"
             f"默认 thinking {DEFAULT_SUBAGENT_THINKING}、max_turns {DEFAULT_SUBAGENT_MAX_ROUNDS}）"
         )
         assert line in AGENT_TOOL_SPEC.input_schema["properties"]["agent"]["description"]

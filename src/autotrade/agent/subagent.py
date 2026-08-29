@@ -101,14 +101,23 @@ OUTPUT_TRUNCATED_MARKER = "[输出在 {limit} token 上限被截断]"
 # A reply that spent its whole completion budget on reasoning (no content, no
 # tool call) gets a forced concise continuation — the same observation the
 # parent conversation receives — at most this many times per child before the
-# launch is reported as failed instead of terminated as ``completed``.
-SUBAGENT_MAX_TRUNCATION_CONTINUATIONS = 2
+# launch is reported as failed instead of terminated as ``completed``. One:
+# at the 12k cap 1-3 rounds per Fold were cut and the single observed
+# continuation succeeded at once; at the 32k ceiling a cut round is rare and
+# costs ~15 min, so a second consecutive all-reasoning round after an explicit
+# "be concise" instruction is a stuck loop, not an unfinished answer.
+SUBAGENT_MAX_TRUNCATION_CONTINUATIONS = 1
 OUTPUT_TRUNCATED_CONTINUATION = (
     "上一轮输出在 {limit} token 上限被截断且没有工具调用。"
     "请把已有结论压缩成几句话，然后直接调用下一步工具；不要重新展开完整推理。"
 )
 
 _FOLD_READ_TOOLS = frozenset({"glob", "grep", "read_file"})
+# The parent's Fold surface minus what it keeps by design: the formal
+# backtest (Validation quota and Step tree), finish, rollback, ask_user and
+# nesting. The unofficial ``smoke_backtest`` is included so a child verifies
+# its implementation on the real replay path instead of hand-rolling a shell
+# smoke test.
 _FOLD_WRITE_TOOLS = frozenset(
     {
         "edit_file",
@@ -117,6 +126,7 @@ _FOLD_WRITE_TOOLS = frozenset(
         "modification_check",
         "read_file",
         "shell",
+        "smoke_backtest",
         "write_file",
         "write_skill",
         "delete_skill",
@@ -208,7 +218,11 @@ def _role_schema_text() -> str:
 
     lines = []
     for role in SUBAGENT_ROLE_TABLE:
-        tools = "有 Sandbox shell、可写" if role.shell else "只读 glob/grep/read_file，不能执行"
+        tools = (
+            "有 Sandbox shell 与 smoke_backtest、可写"
+            if role.shell
+            else "只读 glob/grep/read_file，不能执行"
+        )
         lines.append(
             f"{role.name}：{role.description}（{tools}；默认 thinking {role.default_thinking}、"
             f"max_turns {role.default_max_turns(DEFAULT_SUBAGENT_MAX_ROUNDS)}）"
@@ -270,7 +284,7 @@ AGENT_TOOL_DESCRIPTION = (
     "子代理拥有与你相同的上下文窗口、压缩阈值和输出上限（达到阈值时自动压缩，不会因上下文写满而失败），"
     f"可以承担较大的有界块；省略 max_turns 时最多 {DEFAULT_SUBAGENT_MAX_ROUNDS} 轮：倒数第 {SUBAGENT_GRACE_ROUNDS} 轮起收到收尾提示，"
     "到上限后强制一次简洁总结。几个并行的有界子代理仍好过一个很长的串行子代理；确需更多轮次时显式给 max_turns。"
-    "角色能力：developer/general-purpose 有 Sandbox shell（可跑 Python 读 PIT parquet、算 IC 表、做冒烟测试）并可写策略、模型与 skills；"
+    "角色能力：developer/general-purpose 有 Sandbox shell（可跑 Python 读 PIT parquet、算 IC 表）与 smoke_backtest（真实回放路径上的非正式冒烟回测）并可写策略、模型与 skills；"
     "auditor/Explore 只能用 glob/grep/read_file 读文本与代码，不能执行任何命令——任何需要计算的任务用 general-purpose 或 developer；"
     "Meta 会话中全部角色只读。子代理只看到自己的角色提示和你的 task（inherit_context=true 时另带你的对话），"
     f"所以 task 要写全路径、约束和期望的返回格式。thinking 默认 {DEFAULT_SUBAGENT_THINKING}，适合需要判断的审计、设计与实现；"
@@ -543,9 +557,9 @@ def llm_with_thinking(proxy: LLMProxy, thinking: str) -> LLMProxy:
 @dataclass(frozen=True)
 class SubAgentConfig:
     per_call_timeout_seconds: float | None = None
-    # None = the shared ``AGENT_MAX_OUTPUT_TOKENS`` ceiling (same as the
-    # parent conversation), clamped per call to the remaining context.
-    max_tokens: int | None = None
+    # The child's completion ceiling, clamped per call to the remaining
+    # context; the pipeline passes the parent conversation's value.
+    max_tokens: int = AGENT_MAX_OUTPUT_TOKENS
     # Turn budget for a child whose launch omits ``max_turns``; None = only the
     # parent session deadline bounds it. Context is not a bound: a child
     # compacts at the parent's threshold (``SubAgentEngine.compactor``).
@@ -558,7 +572,7 @@ class SubAgentConfig:
     def __post_init__(self) -> None:
         if self.per_call_timeout_seconds is not None and self.per_call_timeout_seconds <= 0:
             raise ValueError("Sub-agent per_call_timeout_seconds must be positive")
-        if self.max_tokens is not None and self.max_tokens <= 0:
+        if self.max_tokens <= 0:
             raise ValueError("Sub-agent max_tokens must be positive")
         if self.max_rounds is not None and self.max_rounds <= 0:
             raise ValueError("Sub-agent max_rounds must be positive")
@@ -726,6 +740,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
         llm_errors = 0
         truncated_rounds = 0
         continuations = 0
+        overflow_recovery_used = False
         steers = 0
         try:
             while rounds_limit is None or rounds < rounds_limit:
@@ -819,6 +834,23 @@ class SubAgentEngine(SessionTimeBudgetAware):
                         status = "cancelled"
                         error = "Sub-agent cancelled"
                         break
+                    if is_context_overflow_error(exc) and not overflow_recovery_used:
+                        messages, progressed = self._recover_context_overflow(
+                            compactor,
+                            llm,
+                            messages,
+                            provider_tools,
+                            deadline,
+                            identity={
+                                "task_id": task_id,
+                                "role": role,
+                                "round": rounds,
+                                "parent_call_id": parent_call_id,
+                            },
+                        )
+                        if progressed:
+                            overflow_recovery_used = True
+                            continue
                     if _is_nonretryable_subagent_error(exc) or self._deadline_reached(
                         deadline
                     ):
@@ -1077,8 +1109,9 @@ class SubAgentEngine(SessionTimeBudgetAware):
 
         Semantic compaction at the shared threshold (forced when the request
         does not fit), then the emergency in-place tool-result summary; a
-        request that still does not fit fails at the gateway, which ends the
-        child instead of being retried.
+        request that still does not fit fails at the gateway, after which the
+        child gets the parent's single post-provider overflow recovery
+        (``_recover_context_overflow``) and then ends instead of retrying.
         """
 
         output_tokens = self._output_tokens(llm, messages, provider_tools)
@@ -1115,6 +1148,62 @@ class SubAgentEngine(SessionTimeBudgetAware):
             output_tokens = self._output_tokens(llm, messages, provider_tools)
         return messages, output_tokens
 
+    def _recover_context_overflow(
+        self,
+        compactor: ContextCompactor | None,
+        llm: LLMProxy,
+        messages: list[ChatMessage],
+        provider_tools: tuple[dict[str, object], ...],
+        deadline: float,
+        *,
+        identity: dict[str, object],
+    ) -> tuple[list[ChatMessage], bool]:
+        """The parent's sole post-provider overflow recovery, for one child.
+
+        The provider is authoritative: when it refused a request the local
+        estimate called fitting, force one compaction and guarantee one
+        tool-result edit, exactly as ``AgentSessionRunner`` does once per
+        session. Returns whether the conversation changed at all.
+        """
+
+        recovered = messages
+        compacted = False
+        if compactor is not None:
+            result = compactor.compact(
+                recovered,
+                tools=provider_tools,
+                remaining_seconds=self._remaining_seconds(deadline),
+                force=True,
+            )
+            if result is not None:
+                self._emit(
+                    "subagent_context_compaction",
+                    {**identity, "compaction": dict(result.event)},
+                )
+                compacted = result.event.get("status") == "ok" and tuple(
+                    result.messages
+                ) != tuple(recovered)
+                recovered = list(result.messages)
+        recovered, edit = fit_tool_results_to_context(
+            llm,
+            recovered,
+            tools=provider_tools,
+            max_tokens=self._output_tokens(llm, recovered, provider_tools),
+            force=not compacted,
+        )
+        if edit:
+            self._emit(
+                "subagent_context_edit",
+                {
+                    **identity,
+                    "context_edit": {
+                        **edit,
+                        "reason": "provider_context_overflow_recovery",
+                    },
+                },
+            )
+        return recovered, compacted or bool(edit)
+
     def _remaining_seconds(self, local_deadline: float) -> float:
         remaining = local_deadline - time.monotonic()
         if self.time_budget is not None:
@@ -1127,7 +1216,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
         messages: Sequence[ChatMessage],
         tools: Sequence[object],
     ) -> int:
-        requested = self.config.max_tokens or AGENT_MAX_OUTPUT_TOKENS
+        requested = self.config.max_tokens
         _fits, prompt_tokens, resolved_window = context_request_fits(
             llm,
             messages,

@@ -505,10 +505,11 @@ _FIELDS: list[dict[str, object]] = [
     {
         "key": "compact_token_threshold",
         "group": "模型与上下文",
-        "label": "压缩触发 token 阈值",
+        "label": "压缩触发 token 阈值（可选）",
         "type": "int",
+        "optional": True,
         "advanced": True,
-        "help": "估算上下文 token 超过该值时触发语义压缩。",
+        "help": "估算上下文 token 超过该值时触发语义压缩。留空按模型推导：上下文窗口 − 输出上限 − 8,192；填入的值也夹到该上限。",
     },
     {
         "key": "compact_keep_recent_messages",

@@ -1114,8 +1114,10 @@ def build_fold_subagent_tools(
     workspace: SafeWorkspace,
     command_runner: CommandRunner,
     modification: ModificationCheckTool,
+    smoke: Tool,
 ) -> list[Tool]:
-    """Tools handed to Fold ``SubAgentEngine``: writable shell, no backtest."""
+    """Tools handed to Fold ``SubAgentEngine``: the parent's research and
+    write surface plus the unofficial smoke run; no formal backtest."""
     return [
         ReadFileTool(search_roots),
         GrepTool(search_roots),
@@ -1126,6 +1128,7 @@ def build_fold_subagent_tools(
         EditFileTool(workspace),
         SandboxShellTool(workspace, command_runner, result_store=search_roots),
         modification,
+        smoke,
     ]
 
 
@@ -1158,8 +1161,8 @@ class LLMFoldDeveloper:
         runtime_root: str | Path,
         sandbox_spec: SandboxSpec | None = None,
         command_runner_factory: Callable[[Path], CommandRunner] | None = None,
+        # One completion ceiling for the parent conversation and its children.
         max_response_tokens: int = AGENT_MAX_OUTPUT_TOKENS,
-        subagent_max_tokens: int = AGENT_MAX_OUTPUT_TOKENS,
         step_tree_enabled: bool = True,
         fold_exploration_directive: str = "",
         workspace_reference: str = "",
@@ -1181,7 +1184,6 @@ class LLMFoldDeveloper:
         self.sandbox_spec = sandbox_spec or SandboxSpec()
         self.command_runner_factory = command_runner_factory
         self.max_response_tokens = max_response_tokens
-        self.subagent_max_tokens = subagent_max_tokens
         self.step_tree_enabled = step_tree_enabled
         self.fold_exploration_directive = fold_exploration_directive
         self.workspace_reference = workspace_reference
@@ -1492,13 +1494,13 @@ class LLMFoldDeveloper:
             )
             subagent_tools = ToolRegistry(
                 build_fold_subagent_tools(
-                    search_roots, safe, command_runner, modification
+                    search_roots, safe, command_runner, modification, smoke
                 )
             )
             subagent = SubAgentEngine(
                 llm=subagent_budgeted,
                 tools=subagent_tools,
-                config=SubAgentConfig(max_tokens=self.subagent_max_tokens),
+                config=SubAgentConfig(max_tokens=self.max_response_tokens),
                 time_budget=time_budget,
             )
             runner = AgentSessionRunner(
@@ -1742,8 +1744,8 @@ class LLMMetaLearner:
         runtime_root: str | Path,
         max_llm_calls: int,
         deadline_seconds: float,
+        # One completion ceiling for the parent conversation and its children.
         max_response_tokens: int = AGENT_MAX_OUTPUT_TOKENS,
-        subagent_max_tokens: int = AGENT_MAX_OUTPUT_TOKENS,
         meta_learning_directive: str = "",
         fold_exploration_directive: str = "",
         workspace_reference: str = "",
@@ -1777,7 +1779,6 @@ class LLMMetaLearner:
         self.image_keep = image_keep
         self.sandbox_spec_sink = sandbox_spec_sink
         self.max_response_tokens = max_response_tokens
-        self.subagent_max_tokens = subagent_max_tokens
         self.meta_learning_directive = meta_learning_directive
         self.fold_exploration_directive = fold_exploration_directive
         self.workspace_reference = workspace_reference
@@ -2044,7 +2045,7 @@ class LLMMetaLearner:
         subagent = SubAgentEngine(
             llm=subagent_budgeted,
             tools=ToolRegistry(build_meta_subagent_tools(search_roots)),
-            config=SubAgentConfig(max_tokens=self.subagent_max_tokens),
+            config=SubAgentConfig(max_tokens=self.max_response_tokens),
             time_budget=time_budget,
             mode="meta",
         )
