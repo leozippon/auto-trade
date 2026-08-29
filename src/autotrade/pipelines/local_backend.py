@@ -8,7 +8,6 @@ import shutil
 import threading
 import uuid
 from collections.abc import Callable, Mapping, Sequence
-from contextlib import contextmanager, nullcontext
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
@@ -19,9 +18,11 @@ import pandas as pd
 from autotrade.agent.compact import ContextCompactionConfig, safe_error_summary
 from autotrade.agent.experiment_facts import build_experiment_facts
 from autotrade.environment.artifacts import (
+    ArtifactSnapshotUnstable,
     FilesystemArtifactStore,
     ModificationConstraints,
     copy_artifact,
+    copy_artifact_snapshot,
     copy_model_artifacts,
     restore_working_artifacts_writable,
 )
@@ -49,7 +50,6 @@ from autotrade.environment.sandbox import (
     DockerSandbox,
     LocalSandbox,
     SandboxConfig,
-    SandboxDestroyed,
     SandboxSpec,
     link_copytree,
 )
@@ -585,7 +585,7 @@ class SmokeBacktestTool:
         evaluator: EvaluationBackend,
         schedule,
         broker_profile,
-        formal_guard: Callable[[], object],
+        scratch_root: Path,
     ) -> None:
         self.request = request
         self.output_dir = output_dir
@@ -594,7 +594,7 @@ class SmokeBacktestTool:
         self.evaluator = evaluator
         self.schedule = schedule
         self.broker_profile = broker_profile
-        self.formal_guard = formal_guard
+        self.scratch_root = Path(scratch_root)
         self.runs = 0
 
     def invoke(self, arguments: Mapping[str, object]) -> ToolResult:
@@ -606,37 +606,46 @@ class SmokeBacktestTool:
             # gate will not be what fails the official one.
             raise ToolError(f"smoke_backtest blocked by modification_check: {check.error}")
         fold = self.request.fold
-        # A throwaway copy, not a committed revision and not the live tree: the
-        # rehearsal can neither be frozen nor leave anything behind in output/
-        # (a trusted-mode run imports main.py and would drop __pycache__ into
-        # the working copy, which the next modification_check would reject).
+        # The rehearsal replays an immutable snapshot outside the Agent's mounts,
+        # not the live tree: it can neither be frozen nor leave anything behind
+        # in output/ (a trusted-mode run imports main.py and would drop
+        # __pycache__ into the working copy, which the next modification_check
+        # would reject), and the Agent's own writes during the run cannot reach
+        # the bytes being replayed.
         scratch = self._scratch_dir()
         evaluation = None
         try:
-            copy_artifact(self.output_dir, scratch / "output")
-            models = None
-            if self.models_dir.is_dir():
-                copy_model_artifacts(self.models_dir, scratch / "models")
-                models = scratch / "models"
-            revision = ArtifactRevision("smoke", scratch / "output", models)
-            with self.formal_guard():
-                evaluation = self.evaluator.evaluate(
-                    EvaluationRequest(
-                        revision=revision,
-                        snapshot=self.request.snapshot,
-                        mode="valid",
-                        start=fold.validation_start,
-                        end=fold.validation_end,
-                        schedule=self.schedule,
-                        broker_profile=self.broker_profile,
-                    ),
-                    max_days=days,
+            models_source = self.models_dir if self.models_dir.is_dir() else None
+            fingerprint = copy_artifact_snapshot(
+                self.output_dir,
+                models_source,
+                dest_output=scratch / "output",
+                dest_models=scratch / "models",
+            )
+            if fingerprint != check.value["fingerprint"]:
+                raise ArtifactSnapshotUnstable(
+                    "output/ changed between modification_check and the smoke snapshot"
                 )
+            revision = ArtifactRevision(
+                "smoke",
+                scratch / "output",
+                scratch / "models" if models_source is not None else None,
+            )
+            evaluation = self.evaluator.evaluate(
+                EvaluationRequest(
+                    revision=revision,
+                    snapshot=self.request.snapshot,
+                    mode="valid",
+                    start=fold.validation_start,
+                    end=fold.validation_end,
+                    schedule=self.schedule,
+                    broker_profile=self.broker_profile,
+                ),
+                max_days=days,
+            )
         except SessionInterrupt:
-            shutil.rmtree(scratch, ignore_errors=True)
             raise
         except Exception as exc:  # noqa: BLE001 - the exception text IS the result
-            shutil.rmtree(scratch, ignore_errors=True)
             return ToolResult(
                 True,
                 value={
@@ -650,6 +659,8 @@ class SmokeBacktestTool:
                     "hint": _SMOKE_LAYOUT_HINT,
                 },
             )
+        finally:
+            shutil.rmtree(scratch, ignore_errors=True)
         result_dir = Path(evaluation.result_ref).parent
         try:
             return ToolResult(True, value=self._report(evaluation, result_dir, days))
@@ -657,10 +668,9 @@ class SmokeBacktestTool:
             # A smoke run leaves no result behind for the ledger or the Agent to
             # mistake for a Validation.
             shutil.rmtree(result_dir, ignore_errors=True)
-            shutil.rmtree(scratch, ignore_errors=True)
 
     def _scratch_dir(self) -> Path:
-        target = self.output_dir.parent / ".smoke" / uuid.uuid4().hex
+        target = self.scratch_root / uuid.uuid4().hex
         target.mkdir(parents=True, exist_ok=False)
         return target
 
@@ -834,7 +844,6 @@ class FoldBacktestTool(SessionTimeBudgetAware):
         schedule,
         broker_profile,
         time_budget: InferenceTimeBudget,
-        formal_guard: Callable[[], object],
         ref_store: AgentRefStore,
         manifest: RunManifest | None = None,
         decision_timeout_seconds: float = SandboxLimits().timeout_seconds,
@@ -861,7 +870,6 @@ class FoldBacktestTool(SessionTimeBudgetAware):
         self.schedule = schedule
         self.broker_profile = broker_profile
         self.time_budget = time_budget
-        self.formal_guard = formal_guard
         self.ref_store = ref_store
         self.manifest = manifest
         self.backtests = 0
@@ -892,138 +900,146 @@ class FoldBacktestTool(SessionTimeBudgetAware):
             raise ToolError("Fold Validation backtest budget exhausted")
         if len(self.steps) >= self.request.max_steps:
             raise ToolError("Fold Step budget exhausted")
-        result_name = f"valid_{self.backtests + 1:03d}"
+        # The attempt begins here and costs one Validation slot; only a snapshot
+        # that never held is refunded below.
+        self.backtests += 1
+        result_name = f"valid_{self.backtests:03d}"
         revision_id = ""
         node_id = None
         evaluation = None
-        started = False
         check: ToolResult | None = None
         try:
-            with self.formal_guard():
-                # The guard is what makes the replayed revision the one the
-                # check approved, so the attempt starts — and only then costs a
-                # Validation slot — once the guard holds.
-                self.backtests += 1
-                started = True
-                check = self.modification_check.invoke({})
-                _assert_skills_absent_from_formal(self.output_dir, self.models_dir)
-                revision = self.artifact_store.create_revision(
-                    self.output_dir,
-                    models_path=self.models_dir,
+            check = self.modification_check.invoke({})
+            # The replay reads an immutable snapshot of the artifact, never the
+            # Agent's live tree, so the session keeps running while it does. The
+            # snapshot is verified to be the bytes the check just approved — a
+            # write that lands after this line belongs to the next attempt and
+            # cannot reach this one's result.
+            revision = self.artifact_store.create_revision(
+                self.output_dir,
+                models_path=self.models_dir,
+            )
+            if revision.fingerprint != check.value["fingerprint"]:
+                self.artifact_store.discard_revision(str(revision.revision_id))
+                raise ArtifactSnapshotUnstable(
+                    "output/ changed between modification_check and the "
+                    "Validation snapshot"
                 )
-                revision_id = str(revision.revision_id)
-                typed = ArtifactRevision(
-                    revision_id,
-                    Path(revision.output_path),
-                    Path(revision.models_path)
-                    if revision.models_path is not None
-                    else None,
+            revision_id = str(revision.revision_id)
+            typed = ArtifactRevision(
+                revision_id,
+                Path(revision.output_path),
+                Path(revision.models_path)
+                if revision.models_path is not None
+                else None,
+            )
+            _assert_skills_absent_from_formal(typed.output_path, typed.models_path)
+            evaluation = self.evaluator.evaluate(
+                EvaluationRequest(
+                    revision=typed,
+                    snapshot=self.request.snapshot,
+                    mode="valid",
+                    start=self.request.fold.validation_start,
+                    end=self.request.fold.validation_end,
+                    schedule=self.schedule,
+                    broker_profile=self.broker_profile,
                 )
-                evaluation = self.evaluator.evaluate(
-                    EvaluationRequest(
-                        revision=typed,
-                        snapshot=self.request.snapshot,
-                        mode="valid",
-                        start=self.request.fold.validation_start,
-                        end=self.request.fold.validation_end,
-                        schedule=self.schedule,
-                        broker_profile=self.broker_profile,
-                    )
-                )
-                self._check_deadline()
-                revision_ref = self.ref_store.get_or_create("strategy", revision_id)
-                node_id = self.tree.record_step(
-                    typed.output_path,
+            )
+            self._check_deadline()
+            revision_ref = self.ref_store.get_or_create("strategy", revision_id)
+            node_id = self.tree.record_step(
+                typed.output_path,
+                epoch_id=self.request.epoch_id,
+                # Opaque the fold id so the step-tree node names the Agent
+                # reads (steps/tree.txt|tree.json) never leak the held-out
+                # calendar period.
+                fold_id=self.ref_store.get_or_create(
+                    "fold", self.request.fold.fold_id
+                ),
+                run_id=self.ref_store.get_or_create("run", self.request.run_id),
+                result_name=result_name,
+                revision_id=revision_ref,
+                # tree.json is Agent-readable and accumulates one node per
+                # Validation for the whole experiment, so it carries the
+                # same fixed-size projection the observation does.
+                metrics=inline_backtest_stats(evaluation.summary),
+                models_root=typed.models_path,
+                attachments={
+                    VALIDATION_RESULT_ATTACHMENT: evaluation.result_ref
+                },
+            )
+        except SessionInterrupt:
+            # The session is over: an environment failure must never be
+            # recorded, or reported to the Agent, as a strategy failure.
+            raise
+        except ArtifactSnapshotUnstable as exc:
+            # No snapshot was accepted and no replay ran, so this is
+            # infrastructure, not a Validation: it costs neither a backtest slot
+            # nor a Step.
+            self.backtests -= 1
+            fold = self.request.fold
+            public_error = _public_error_text(
+                exc, hidden=(fold.fold_id, fold.test_start, fold.test_end)
+            )
+            self._append_manifest_summary(
+                {
+                    "mode": "valid",
+                    "status": "infrastructure_error",
+                    "complete_validation": False,
+                    "error": public_error,
+                }
+            )
+            raise ToolError(
+                f"daily_backtest could not start: {public_error}",
+                error_type="infrastructure_error",
+                retry_hint=(
+                    "The strategy artifact was still being written when the "
+                    "Validation snapshot was taken and no backtest ran; no "
+                    "budget was consumed. Let any in-container job that writes "
+                    "output/ or models/ finish, then call daily_backtest again."
+                ),
+            ) from exc
+        except Exception as exc:
+            fold = self.request.fold
+            public_error = _public_validation_error(
+                exc,
+                hidden=(
+                    fold.fold_id,
+                    fold.test_start,
+                    fold.test_end,
+                ),
+            )
+            if self.request.record_failed_attempts:
+                self.tree.record_failed_attempt(
                     epoch_id=self.request.epoch_id,
-                    # Opaque the fold id so the step-tree node names the Agent
-                    # reads (steps/tree.txt|tree.json) never leak the held-out
-                    # calendar period.
                     fold_id=self.ref_store.get_or_create(
                         "fold", self.request.fold.fold_id
                     ),
                     run_id=self.ref_store.get_or_create("run", self.request.run_id),
                     result_name=result_name,
-                    revision_id=revision_ref,
-                    # tree.json is Agent-readable and accumulates one node per
-                    # Validation for the whole experiment, so it carries the
-                    # same fixed-size projection the observation does.
-                    metrics=inline_backtest_stats(evaluation.summary),
-                    models_root=typed.models_path,
-                    attachments={
-                        VALIDATION_RESULT_ATTACHMENT: evaluation.result_ref
-                    },
-                )
-        except SessionInterrupt:
-            # The sandbox is gone: an environment failure must never be
-            # recorded, or reported to the Agent, as a strategy failure.
-            raise
-        except Exception as exc:
-            if not started:
-                # The guard never took hold: no revision was committed and no
-                # replay ran, so this is infrastructure, not a Validation, and
-                # it costs neither a backtest slot nor a Step.
-                fold = self.request.fold
-                public_error = _public_error_text(
-                    exc, hidden=(fold.fold_id, fold.test_start, fold.test_end)
-                )
-                self._append_manifest_summary(
-                    {
-                        "mode": "valid",
-                        "status": "infrastructure_error",
-                        "complete_validation": False,
-                        "error": public_error,
-                    }
-                )
-                raise ToolError(
-                    f"daily_backtest could not start: {public_error}",
-                    error_type="infrastructure_error",
-                    retry_hint=(
-                        "The sandbox could not be held for a formal call and no "
-                        "backtest ran; no budget was consumed. Let any long "
-                        "in-container job finish, then call daily_backtest again."
-                    ),
-                ) from exc
-            if node_id is None or evaluation is None:
-                fold = self.request.fold
-                public_error = _public_validation_error(
-                    exc,
-                    hidden=(
-                        fold.fold_id,
-                        fold.test_start,
-                        fold.test_end,
+                    error=public_error,
+                    metrics=(
+                        {
+                            "revision_id": self.ref_store.get_or_create(
+                                "strategy", revision_id
+                            )
+                        }
+                        if revision_id
+                        else None
                     ),
                 )
-                if self.request.record_failed_attempts:
-                    self.tree.record_failed_attempt(
-                        epoch_id=self.request.epoch_id,
-                        fold_id=self.ref_store.get_or_create(
-                            "fold", self.request.fold.fold_id
-                        ),
-                        run_id=self.ref_store.get_or_create("run", self.request.run_id),
-                        result_name=result_name,
-                        error=public_error,
-                        metrics=(
-                            {
-                                "revision_id": self.ref_store.get_or_create(
-                                    "strategy", revision_id
-                                )
-                            }
-                            if revision_id
-                            else None
-                        ),
-                    )
-                self._append_manifest_summary(
-                    {
-                        "result_name": result_name,
-                        "mode": "valid",
-                        "status": "failed",
-                        "complete_validation": False,
-                        "error": public_error,
-                    }
-                )
-                if isinstance(exc, TimeoutError):
-                    raise TimeoutError(public_error) from exc
-                raise ToolError(public_error) from exc
+            self._append_manifest_summary(
+                {
+                    "result_name": result_name,
+                    "mode": "valid",
+                    "status": "failed",
+                    "complete_validation": False,
+                    "error": public_error,
+                }
+            )
+            if isinstance(exc, TimeoutError):
+                raise TimeoutError(public_error) from exc
+            raise ToolError(public_error) from exc
         assert node_id is not None and evaluation is not None and check is not None
         step = StepResult(node_id, revision_id, evaluation)
         self.steps.append(step)
@@ -1388,20 +1404,6 @@ class LLMFoldDeveloper:
             write_json_atomic(inputs_dir / "fold_context.json", facts)
             chmod_tree(inputs_dir, file_mode=0o444, dir_mode=0o555)
 
-            @contextmanager
-            def formal_guard():
-                guard = sandbox.formal_guard() if sandbox is not None else nullcontext()
-                try:
-                    with guard:
-                        chmod_tree(output_dir, file_mode=0o444, dir_mode=0o555)
-                        chmod_tree(models_dir, file_mode=0o444, dir_mode=0o555)
-                        try:
-                            yield
-                        finally:
-                            restore_working_artifacts_writable(output_dir, models_dir)
-                except SandboxDestroyed as exc:
-                    raise SandboxLost(str(exc)) from exc
-
             modification = ModificationCheckTool(
                 output_dir,
                 parent_dir=source,
@@ -1425,7 +1427,6 @@ class LLMFoldDeveloper:
                 schedule=self.schedule,
                 broker_profile=self.broker_profile,
                 time_budget=time_budget,
-                formal_guard=formal_guard,
                 ref_store=self.ref_store,
                 manifest=manifest,
                 decision_timeout_seconds=self.decision_timeout_seconds,
@@ -1438,7 +1439,10 @@ class LLMFoldDeveloper:
                 evaluator=self.evaluator,
                 schedule=self.schedule,
                 broker_profile=self.broker_profile,
-                formal_guard=formal_guard,
+                # Host-only runtime scratch: the rehearsal copy is outside every
+                # Agent mount, so nothing in the session can reach the bytes it
+                # is replaying.
+                scratch_root=paths.runtime / "smoke",
             )
             tools: list[Tool] = [
                 ReadFileTool(search_roots),
@@ -2476,6 +2480,8 @@ def _safe_meta_trace_payload(
             # the rest was spilled.
             "summary_chars",
             "summary_delivered_chars",
+            "summary_lines",
+            "resume_line",
             "summary_truncated",
             "result_ref",
         },

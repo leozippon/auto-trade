@@ -14,7 +14,6 @@ import os
 import shutil
 import tempfile
 import unittest
-from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
@@ -40,6 +39,8 @@ from autotrade.environment.tools.shell import (
     argv_is_forbidden_wait,
 )
 from autotrade.environment.tools import search as search_module
+
+from .fixtures_sandbox import PassingModificationCheck
 
 RG_AVAILABLE = shutil.which("rg") is not None
 
@@ -1043,10 +1044,9 @@ class SpillAndRootContractTest(unittest.TestCase):
 
 
 def _fold_backtest_tool(
-    tmp: Path, trades: int, *, tree=None, formal_guard=None, manifest=None
+    tmp: Path, trades: int, *, tree=None, evaluator=None, manifest=None
 ):
     """A FoldBacktestTool over a fake evaluator, with its host paths."""
-    from contextlib import nullcontext
     from datetime import UTC
 
     from autotrade.environment.artifacts import FilesystemArtifactStore
@@ -1054,7 +1054,6 @@ def _fold_backtest_tool(
     from autotrade.environment.runtime import write_json_atomic
     from autotrade.environment.step_tree import StepTree
     from autotrade.environment.time_budget import InferenceTimeBudget
-    from autotrade.environment.tools.base import ToolResult
     from autotrade.pipelines.config import (
         BrokerProfile,
         EvaluationResult,
@@ -1102,10 +1101,6 @@ def _fold_backtest_tool(
             write_json_atomic(target, {"stats": summary})
             return EvaluationResult(summary=dict(summary), result_ref=str(target))
 
-    class PassingCheck:
-        def invoke(self, _arguments):
-            return ToolResult(True, value={"check_index": 1, "changed_lines": 3})
-
     moment = datetime(2021, 12, 31, 23, 59, 59, tzinfo=UTC)
     request = FoldSessionRequest(
         experiment_id="exp",
@@ -1134,14 +1129,15 @@ def _fold_backtest_tool(
         request=request,
         output_dir=output,
         models_dir=models,
-        modification_check=PassingCheck(),
+        modification_check=PassingModificationCheck(
+            output, models, check_index=1, changed_lines=3
+        ),
         artifact_store=FilesystemArtifactStore(tmp / "revisions"),
-        evaluator=Evaluator(),
+        evaluator=evaluator or Evaluator(),
         tree=tree(paths.steps) if tree is not None else StepTree(paths.steps),
         schedule=StrategySchedule(),
         broker_profile=BrokerProfile(),
         time_budget=InferenceTimeBudget(duration_seconds=600.0),
-        formal_guard=formal_guard or nullcontext,
         ref_store=AgentRefStore(tmp / "experiment"),
         manifest=manifest,
     )
@@ -1204,14 +1200,16 @@ class FoldBacktestResultBudgetTest(unittest.TestCase):
             self.assertIn("attachment is missing", result.error)
 
 
-class FoldBacktestGuardAccountingTest(unittest.TestCase):
-    """A formal call that never started is not a Validation attempt.
+class FoldBacktestSnapshotAccountingTest(unittest.TestCase):
+    """A formal call replays a snapshot, and one that never held is not an attempt.
 
-    The formal guard — paused container, read-only working copy — is what makes
-    the replayed revision the one the modification check approved. A Fold has a
-    handful of Validation slots, so a guard that cannot be established must cost
-    none of them, and a sandbox destroyed while recovering one must abort the
-    session instead of reaching the Agent as a strategy failure it could fix.
+    The Agent and its children keep running during a Validation, so the replay
+    reads an immutable copy of the artifact taken at approval time rather than
+    the live tree. That copy has to be the bytes the modification check just
+    approved; when it is not, no revision was evaluated, so the call must cost
+    none of the Fold's handful of Validation slots — and a lost session sandbox
+    must abort the session instead of reaching the Agent as a strategy failure
+    it could try to fix.
     """
 
     class _Manifest:
@@ -1221,29 +1219,36 @@ class FoldBacktestGuardAccountingTest(unittest.TestCase):
         def append_backtest_summary(self, summary) -> None:
             self.summaries.append(dict(summary))
 
-    @staticmethod
-    @contextmanager
-    def _unpausable():
-        raise RuntimeError(
-            "failed to pause sandbox: OCI runtime pause failed: timeout of 10s reached"
-        )
-        yield  # pragma: no cover - the guard never holds
-
-    def test_a_guard_that_never_holds_costs_no_backtest_slot(self) -> None:
-        from contextlib import nullcontext
-
+    def test_a_snapshot_that_never_holds_costs_no_backtest_slot(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             manifest = self._Manifest()
-            _, tool, _ = _fold_backtest_tool(
-                Path(tmp), 5, formal_guard=self._unpausable, manifest=manifest
-            )
+            _, tool, _ = _fold_backtest_tool(Path(tmp), 5, manifest=manifest)
+            approved = tool.modification_check
+
+            class DriftingCheck:
+                """A write lands between the approval and the snapshot."""
+
+                def __init__(self) -> None:
+                    self.drift = True
+
+                def invoke(self, arguments):
+                    result = approved.invoke(arguments)
+                    if self.drift:
+                        (approved.output_dir / "main.py").write_text(
+                            "def generate_orders(context):\n    return []\n# moved\n",
+                            encoding="utf-8",
+                        )
+                    return result
+
+            drifting = DriftingCheck()
+            tool.modification_check = drifting
             registry = ToolRegistry([tool])
             result = registry.invoke("daily_backtest", {})
             self.assertFalse(result.ok)
             self.assertEqual(result.value["error_type"], "infrastructure_error")
             self.assertIn("could not start", result.error)
-            self.assertIn("pause", result.error)
-            # Nothing ran: no slot, no Step, no dead-end node.
+            self.assertIn("changed", result.error)
+            # Nothing was evaluated: no slot, no Step, no dead-end node.
             self.assertEqual(tool.backtests, 0)
             self.assertEqual(tool.steps, [])
             self.assertEqual(tool.tree.nodes(), [])
@@ -1253,47 +1258,70 @@ class FoldBacktestGuardAccountingTest(unittest.TestCase):
                 [("infrastructure_error", False)],
             )
             # The slot survives for the retry, which numbers itself 001.
-            tool.formal_guard = nullcontext
+            drifting.drift = False
             retried = registry.invoke("daily_backtest", {})
             self.assertTrue(retried.ok, retried.error)
             self.assertEqual(tool.backtests, 1)
             self.assertEqual(retried.value["backtests_used"], 1)
             self.assertEqual(manifest.summaries[-1]["result_name"], "valid_001")
 
-    def test_a_destroyed_sandbox_aborts_the_session_before_any_backtest(self) -> None:
+    def test_a_write_during_the_replay_cannot_reach_the_evaluated_bytes(self) -> None:
+        """The session is no longer frozen for the duration of a Validation, so
+        the evaluated artifact is what makes the result reproducible: a write to
+        output/ while the replay runs must land in the next attempt, not this
+        one's revision or Step."""
+        replayed: list[str] = []
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            class WritingEvaluator:
+                def __init__(self, inner, output: Path) -> None:
+                    self.inner = inner
+                    self.output = output
+
+                def evaluate(self, request, max_days=None):
+                    main = Path(request.revision.output_path) / "main.py"
+                    replayed.append(main.read_text(encoding="utf-8"))
+                    self.output.write_text("# written mid-replay\n", encoding="utf-8")
+                    return self.inner.evaluate(request, max_days=max_days)
+
+            paths, tool, _ = _fold_backtest_tool(root, 5)
+            approved = (paths.agent / "output" / "main.py").read_text(encoding="utf-8")
+            tool.evaluator = WritingEvaluator(
+                tool.evaluator, paths.agent / "output" / "main.py"
+            )
+            result = ToolRegistry([tool]).invoke("daily_backtest", {})
+            self.assertTrue(result.ok, result.error)
+            # The replay read the approved bytes...
+            self.assertEqual(replayed, [approved])
+            # ...the Step node kept them...
+            node = tool.tree.root / result.value["node_id"] / "output" / "main.py"
+            self.assertEqual(node.read_text(encoding="utf-8"), approved)
+            # ...and the working copy really did move on underneath it.
+            self.assertEqual(
+                (paths.agent / "output" / "main.py").read_text(encoding="utf-8"),
+                "# written mid-replay\n",
+            )
+
+    def test_a_lost_sandbox_aborts_the_session_instead_of_failing_the_strategy(
+        self,
+    ) -> None:
         from autotrade.pipelines.local_backend import SandboxLost
 
-        @contextmanager
-        def lost():
-            raise SandboxLost("sandbox could not be paused and was destroyed")
-            yield  # pragma: no cover - the guard never holds
+        class LostEvaluator:
+            def evaluate(self, _request, max_days=None):
+                raise SandboxLost("the session sandbox is gone")
 
         with tempfile.TemporaryDirectory() as tmp:
             manifest = self._Manifest()
             _, tool, _ = _fold_backtest_tool(
-                Path(tmp), 5, formal_guard=lost, manifest=manifest
+                Path(tmp), 5, evaluator=LostEvaluator(), manifest=manifest
             )
             # The registry re-raises a session interrupt instead of turning it
             # into an observation the Agent would answer with another attempt.
             with self.assertRaises(SandboxLost):
                 ToolRegistry([tool]).invoke("daily_backtest", {})
-            self.assertEqual(tool.backtests, 0)
+            self.assertEqual(tool.steps, [])
+            self.assertEqual(tool.tree.nodes(), [])
             self.assertEqual(manifest.summaries, [])
-
-    def test_a_sandbox_destroyed_at_teardown_is_not_swallowed_by_a_good_replay(
-        self,
-    ) -> None:
-        """A guard teardown failure after a complete Validation is normally
-        swallowed — the Validation happened. A destroyed container is not that:
-        no later call can run, so it must still abort the session."""
-        from autotrade.pipelines.local_backend import SandboxLost
-
-        @contextmanager
-        def lost_at_teardown():
-            yield
-            raise SandboxLost("sandbox could not be safely unpaused and was destroyed")
-
-        with tempfile.TemporaryDirectory() as tmp:
-            _, tool, _ = _fold_backtest_tool(Path(tmp), 5, formal_guard=lost_at_teardown)
-            with self.assertRaises(SandboxLost):
-                ToolRegistry([tool]).invoke("daily_backtest", {})

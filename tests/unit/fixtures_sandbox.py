@@ -7,7 +7,9 @@ from pathlib import Path
 
 import pandas as pd
 
+from autotrade.environment.artifacts import artifact_fingerprint
 from autotrade.environment.data.snapshot import finalize_snapshot_dir
+from autotrade.environment.tools import ToolResult
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TEMPLATE_DIR = REPO_ROOT / "configs" / "agent_output_template"
@@ -99,3 +101,34 @@ class FakeSnapshotProvider:
 
     def replay_slot(self, start: str, end: str, out_dir: Path, *, label: str, available_from=None) -> dict[str, object]:
         return make_replay_dir(Path(out_dir), start=start, end=end, label=label)
+
+
+class PassingModificationCheck:
+    """A ``modification_check`` double that honours the formal contract.
+
+    A formal call snapshots the artifact and refuses to replay a snapshot whose
+    fingerprint is not the one the check published, so a double that publishes
+    no fingerprint would let a test walk past a gate the real environment
+    enforces. It reads the same trees the real tool would.
+    """
+
+    def __init__(
+        self,
+        output_dir: Path,
+        models_dir: Path | None = None,
+        **value: object,
+    ) -> None:
+        self.output_dir = Path(output_dir)
+        self.models_dir = Path(models_dir) if models_dir is not None else None
+        self.value = value
+        self.calls = 0
+
+    def invoke(self, _arguments):
+        self.calls += 1
+        return ToolResult(
+            True,
+            value={
+                **self.value,
+                "fingerprint": artifact_fingerprint(self.output_dir, self.models_dir),
+            },
+        )

@@ -3060,9 +3060,31 @@ def test_long_child_report_is_clipped_inline_and_spilled_for_read_back(tmp_path:
     assert (tmp_path / ref).read_text(encoding="utf-8") == report
     page = runner.tools.invoke("read_file", {"root": "workspace", "path": ref, "limit": 2})
     assert page.ok and "1\t第0行 证据与结论" in str(page.value["content"])
+
+    # read_file pages by LINE, so the clip is reported in lines too: a parent
+    # told only how many characters it received extrapolates the resume point
+    # in characters and reads past the end of the file for nothing.
+    lines = report.splitlines()
+    assert completed["summary_lines"] == len(lines)
+    resume = completed["resume_line"]
+    assert f"offset={resume}" in completed["result_hint"]
+    blind = runner.tools.invoke(
+        "read_file",
+        {"root": "workspace", "path": ref, "offset": completed["summary_delivered_chars"]},
+    )
+    assert blind.ok and blind.value["returned"] == 0
+    rest = runner.tools.invoke(
+        "read_file", {"root": "workspace", "path": ref, "offset": resume, "limit": 5}
+    )
+    assert rest.ok and rest.value["returned"] == 5
+    # The line the clip fell inside comes back whole rather than being lost.
+    assert str(rest.value["content"]).splitlines()[0] == f"{resume + 1}\t{lines[resume]}"
+    assert lines[resume].startswith(str(completed["summary"]).rsplit("\n", 1)[-1])
+
     attempt = next(payload for event, payload in events if event == "subagent_attempt")
     assert attempt["summary_chars"] == len(report)
     assert attempt["summary_delivered_chars"] == SUBAGENT_REPORT_MAX_CHARS
+    assert attempt["summary_lines"] == len(lines) and attempt["resume_line"] == resume
     assert attempt["summary_truncated"] is True and attempt["result_ref"] == ref
 
 

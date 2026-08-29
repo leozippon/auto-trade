@@ -28,6 +28,8 @@ from autotrade.environment.tools import ModificationCheckTool, ToolRegistry
 from autotrade.pipelines.config import RollingExperimentConfig
 from autotrade.pipelines.ledger import ExperimentLedger
 
+from .fixtures_sandbox import PassingModificationCheck
+
 VALID_MAIN = "def generate_orders(context):\n    return []\n"
 
 
@@ -121,8 +123,6 @@ class RecordFailedAttemptsTest(unittest.TestCase):
         record_failed_attempts: bool,
         error: Exception | None = None,
     ):
-        from contextlib import nullcontext
-
         from autotrade.environment.artifacts import FilesystemArtifactStore
         from autotrade.environment.broker import BrokerProfile
         from autotrade.environment.strategy import StrategySchedule
@@ -170,25 +170,18 @@ class RecordFailedAttemptsTest(unittest.TestCase):
             def evaluate(self, _request):
                 raise raised
 
-        class PassingCheck:
-            def invoke(self, _arguments):
-                from autotrade.environment.tools import ToolResult
-
-                return ToolResult(True, value={})
-
         return (
             FoldBacktestTool(
                 request=request,
                 output_dir=output,
                 models_dir=models,
-                modification_check=PassingCheck(),
+                modification_check=PassingModificationCheck(output, models),
                 artifact_store=FilesystemArtifactStore(root / "artifacts"),
                 evaluator=ExplodingEvaluator(),
                 tree=tree,
                 schedule=StrategySchedule(),
                 broker_profile=BrokerProfile(),
                 time_budget=InferenceTimeBudget(duration_seconds=300),
-                formal_guard=nullcontext,
                 ref_store=AgentRefStore(root / "experiment"),
             ),
             tree,
@@ -291,96 +284,6 @@ class RecordFailedAttemptsTest(unittest.TestCase):
             self.assertNotIn("secret.json", message)
             self.assertIn("[host_path]", message)
             self.assertIn("[redacted]", message)
-
-    def test_a_teardown_failure_after_record_step_still_keeps_the_revision(self) -> None:
-        from contextlib import contextmanager
-
-        from autotrade.environment.artifacts import FilesystemArtifactStore
-        from autotrade.environment.broker import BrokerProfile
-        from autotrade.environment.strategy import StrategySchedule
-        from autotrade.environment.time_budget import InferenceTimeBudget
-        from autotrade.pipelines.config import (
-            EvaluationResult,
-            FoldSessionRequest,
-            SnapshotBundle,
-        )
-        from autotrade.pipelines.folds import FoldSpec
-        from autotrade.pipelines.local_backend import FoldBacktestTool
-
-        with TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            output = _artifact(root / "output")
-            models = root / "models"
-            models.mkdir(parents=True, exist_ok=True)
-            tree = StepTree(root / "steps")
-            moment = datetime(2025, 12, 31, 23, 59, 59, tzinfo=UTC)
-            fold = FoldSpec(
-                fold_id="fold_2026Q1",
-                input_window_start="20240101",
-                input_window_end="20250930",
-                validation_start="20251001",
-                validation_end="20251231",
-                test_start="20260101",
-                test_end="20260331",
-                valid_decision_time=moment,
-                test_decision_time=moment,
-            )
-            request = FoldSessionRequest(
-                experiment_id="exp",
-                epoch_id="epoch_001",
-                fold=fold,
-                run_id="run_keep",
-                parent=None,
-                prior="",
-                snapshot=SnapshotBundle("snap", "decision", "replay"),
-                max_steps=10,
-                max_backtests=30,
-                max_llm_calls=200,
-                deadline_seconds=1200.0,
-                record_failed_attempts=True,
-            )
-
-            result_path = root / "result.json"
-            result_path.write_text("{}", encoding="utf-8")
-
-            class PassingEvaluator:
-                def evaluate(self, _request):
-                    return EvaluationResult({"total_return": 0.01}, str(result_path))
-
-            class PassingCheck:
-                def invoke(self, _arguments):
-                    from autotrade.environment.tools import ToolResult
-
-                    return ToolResult(True, value={})
-
-            @contextmanager
-            def exploding_teardown():
-                yield
-                raise RuntimeError("chmod failed")
-
-            tool = FoldBacktestTool(
-                request=request,
-                output_dir=output,
-                models_dir=models,
-                modification_check=PassingCheck(),
-                artifact_store=FilesystemArtifactStore(root / "artifacts"),
-                evaluator=PassingEvaluator(),
-                tree=tree,
-                schedule=StrategySchedule(),
-                broker_profile=BrokerProfile(),
-                time_budget=InferenceTimeBudget(duration_seconds=300),
-                formal_guard=exploding_teardown,
-                ref_store=AgentRefStore(root / "experiment"),
-            )
-            result = tool.invoke({})
-            self.assertTrue(result.ok, result.error)
-            self.assertEqual(len(tool.steps), 1)
-            self.assertTrue(
-                all(node.get("complete_validation") for node in tree.nodes())
-            )
-            self.assertFalse(
-                any(node.get("status") == "failed" for node in tree.nodes())
-            )
 
     def test_the_config_default_records_them(self) -> None:
         config = RollingExperimentConfig(

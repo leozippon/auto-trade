@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import threading
-from contextlib import nullcontext
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -45,6 +44,8 @@ from autotrade.pipelines.local_backend import (
     session_role_quotas,
 )
 
+from .fixtures_sandbox import PassingModificationCheck
+
 
 class FakeClock:
     def __init__(self, value: float = 100.0) -> None:
@@ -71,9 +72,11 @@ class TimedLLM:
         return self.delegate.complete(*args, **kwargs)
 
 
-class PassingCheck:
-    def invoke(self, _arguments):
-        return ToolResult(True, value={"allowed_to_backtest": True})
+class PassingCheck(PassingModificationCheck):
+    """The shared double, carrying this suite's marker value."""
+
+    def __init__(self, output_dir: Path, models_dir: Path) -> None:
+        super().__init__(output_dir, models_dir, allowed_to_backtest=True)
 
 
 class RecordingShell:
@@ -169,14 +172,13 @@ def test_backtest_failure_past_wall_deadline_keeps_llm_repair_budget(
         request=request,
         output_dir=output,
         models_dir=models,
-        modification_check=PassingCheck(),
+        modification_check=PassingCheck(output, models),
         artifact_store=FilesystemArtifactStore(tmp_path / "artifacts"),
         evaluator=evaluator,
         tree=tree,
         schedule=StrategySchedule(),
         broker_profile=BrokerProfile(),
         time_budget=time_budget,
-        formal_guard=nullcontext,
         ref_store=ref_store,
     )
     scripted = ScriptedLLM(
@@ -631,14 +633,13 @@ def test_runner_rejects_mismatched_backtest_budget(tmp_path: Path) -> None:
         request=_fold_request(),
         output_dir=output,
         models_dir=models,
-        modification_check=PassingCheck(),
+        modification_check=PassingCheck(output, models),
         artifact_store=FilesystemArtifactStore(tmp_path / "artifacts"),
         evaluator=UnusedEvaluator(),
         tree=StepTree(tmp_path / "steps"),
         schedule=StrategySchedule(),
         broker_profile=BrokerProfile(),
         time_budget=backtest_budget,
-        formal_guard=nullcontext,
         ref_store=AgentRefStore(tmp_path / "experiment"),
     )
     main = SessionBudgetLLM(

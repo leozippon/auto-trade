@@ -10,7 +10,6 @@ accounting surface.
 from __future__ import annotations
 
 import json
-from contextlib import nullcontext
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -66,7 +65,7 @@ def _fold() -> FoldSpec:
     )
 
 
-def _tool(root: Path, strategy: str, *, check=None, guard=nullcontext) -> SmokeBacktestTool:
+def _tool(root: Path, strategy: str, *, check=None, evaluator=None) -> SmokeBacktestTool:
     daily = root / "daily.parquet"
     pd.DataFrame(
         {
@@ -98,35 +97,70 @@ def _tool(root: Path, strategy: str, *, check=None, guard=nullcontext) -> SmokeB
         output_dir=output,
         models_dir=models,
         modification_check=check or ModificationCheckTool(output, models_dir=models),
-        evaluator=LocalDailyEvaluationBackend(
+        evaluator=evaluator
+        or LocalDailyEvaluationBackend(
             daily, root / "results", execution_mode="trusted"
         ),
         schedule=StrategySchedule("day", "09:00"),
         broker_profile=BrokerProfile(initial_cash=100_000),
-        formal_guard=guard,
+        # Host-only in production; a sibling of the workspace here.
+        scratch_root=root / "runtime" / "smoke",
     )
 
 
-def test_a_destroyed_sandbox_aborts_the_session_instead_of_reading_as_a_bad_strategy(
+def test_a_lost_sandbox_aborts_the_session_instead_of_reading_as_a_bad_strategy(
     tmp_path: Path,
 ) -> None:
-    """Every other smoke failure is an observation the Agent can act on. A
-    sandbox destroyed while recovering the formal guard is not: no later call
-    can run, so it must leave the tool as a session interrupt."""
-    from contextlib import contextmanager
-
+    """Every other smoke failure is an observation the Agent can act on. A lost
+    session sandbox is not: no later call can run, so it must leave the tool as
+    a session interrupt rather than a strategy the Agent could try to fix."""
     from autotrade.pipelines.local_backend import SandboxLost
 
-    @contextmanager
-    def lost():
-        raise SandboxLost("sandbox could not be paused and was destroyed")
-        yield  # pragma: no cover - the guard never holds
+    class LostEvaluator:
+        def evaluate(self, _request, max_days=None):
+            raise SandboxLost("the session sandbox is gone")
 
-    tool = _tool(tmp_path, WORKING_STRATEGY, guard=lost)
+    tool = _tool(tmp_path, WORKING_STRATEGY, evaluator=LostEvaluator())
     with pytest.raises(SandboxLost):
         tool.invoke({"days": 1})
     # The rehearsal copy is still cleaned up on the way out.
-    assert list((tmp_path / ".smoke").iterdir()) == []
+    assert list((tmp_path / "runtime" / "smoke").iterdir()) == []
+
+
+def test_the_rehearsal_replays_a_snapshot_the_agent_cannot_reach(
+    tmp_path: Path,
+) -> None:
+    """The session is not frozen during a rehearsal, so what runs must be a copy
+    outside the Agent's mounts: a write to output/ while the replay is running
+    reaches neither the replayed bytes nor the next call's result."""
+    replayed: list[str] = []
+
+    class RecordingEvaluator:
+        def __init__(self, inner) -> None:
+            self.inner = inner
+
+        def evaluate(self, request, max_days=None):
+            main = Path(request.revision.output_path) / "main.py"
+            replayed.append(main.read_text(encoding="utf-8"))
+            # The Agent keeps working while the rehearsal runs.
+            (tmp_path / "output" / "main.py").write_text(
+                SUBSCRIPT_STRATEGY, encoding="utf-8"
+            )
+            return self.inner.evaluate(request, max_days=max_days)
+
+    daily = tmp_path / "daily.parquet"
+    tool = _tool(tmp_path, WORKING_STRATEGY)
+    tool.evaluator = RecordingEvaluator(
+        LocalDailyEvaluationBackend(daily, tmp_path / "results", execution_mode="trusted")
+    )
+    result = tool.invoke({"days": 2})
+
+    assert result.value["status"] == "ok", result.value
+    # The replay read the approved bytes, not the ones written underneath it.
+    assert replayed == [WORKING_STRATEGY]
+    assert (tmp_path / "output" / "main.py").read_text(encoding="utf-8") == (
+        SUBSCRIPT_STRATEGY
+    )
 
 
 def test_smoke_runs_the_real_replay_over_a_short_window(tmp_path: Path) -> None:

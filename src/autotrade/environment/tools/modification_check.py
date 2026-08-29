@@ -9,6 +9,7 @@ from pathlib import Path
 from autotrade.environment.artifacts import (
     ArtifactError,
     ModificationConstraints,
+    artifact_fingerprint,
     model_artifact_delta,
     modification_delta,
 )
@@ -98,6 +99,11 @@ class ModificationCheckTool:
             value={
                 "check_index": self.check_index,
                 "strategy_entry": "generate_orders",
+                # Content address of exactly what this check read. A formal
+                # call snapshots the artifact and refuses to replay a snapshot
+                # whose fingerprint is not this one, so an approval cannot be
+                # transferred to bytes written after it.
+                "fingerprint": artifact_fingerprint(self.output_dir, self.models_dir),
                 "file_count": len(files),
                 "total_bytes": total_bytes,
                 "changed_lines": delta.diff_lines,

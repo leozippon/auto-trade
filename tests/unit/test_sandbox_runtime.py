@@ -16,9 +16,12 @@ from unittest.mock import Mock, patch
 import pandas as pd
 import pytest
 
+from autotrade.environment import artifacts
 from autotrade.environment.artifacts import (
     ArtifactError,
+    ArtifactSnapshotUnstable,
     FilesystemArtifactStore,
+    artifact_fingerprint,
     copy_artifact,
     copy_model_artifacts,
     restore_working_artifacts_writable,
@@ -36,7 +39,6 @@ from autotrade.environment.sandbox import (
     DockerSandbox,
     LocalSandbox,
     SandboxConfig,
-    SandboxDestroyed,
     SandboxLimits,
     SandboxSpec,
 )
@@ -284,8 +286,7 @@ def test_real_persistent_timeout_kills_command_only_and_preserves_session(tmp_pa
         )
         assert followup.exit_code == 0
         assert followup.stdout == "retained\nready\n"
-        with sandbox.formal_guard():
-            assert (paths.workspace / "timeout-proof.txt").is_file()
+        assert (paths.workspace / "timeout-proof.txt").is_file()
         assert sandbox.exec(["true"], timeout_seconds=5).returncode == 0
     finally:
         sandbox.stop()
@@ -976,102 +977,103 @@ def test_persistent_sandbox_run_args_forbid_pull_network_and_privilege_escalatio
     assert "/var/run/docker.sock" not in " ".join(command)
 
 
-def _started_fake_sandbox(tmp_path: Path) -> DockerSandbox:
-    """A started DockerSandbox whose docker calls are all faked."""
-    local = LocalSandbox(tmp_path / "session")
-    local.prepare_layout()
-    sandbox = DockerSandbox(local, SandboxSpec(gpu=None))
-    started = subprocess.CompletedProcess(args=[], returncode=0, stdout="c\n", stderr="")
-    with (
-        patch("autotrade.environment.sandbox.probe_image_runtime", return_value={}),
-        patch("autotrade.environment.sandbox.subprocess.run", return_value=started),
-    ):
-        sandbox.start()
-    return sandbox
+STRATEGY_BODY = "def generate_orders(context):\n    return []\n"
 
 
-def _fake_docker(*, pause: int = 0, unpause: int = 0, probe: object = 0):
-    """Fake docker CLI recording the verbs the guard drives, in order.
-
-    ``probe`` is the ``docker exec true`` outcome: a return code, or
-    ``"hang"`` for a call that outlives its timeout.
-    """
-
-    verbs: list[str] = []
-    frozen = "OCI runtime pause failed: timeout of 10s reached"
-
-    def run(command, **_kwargs):
-        verb = command[1]
-        verbs.append(verb)
-        if verb == "pause":
-            return subprocess.CompletedProcess(command, pause, "", frozen)
-        if verb == "unpause":
-            return subprocess.CompletedProcess(command, unpause, "", "is not paused")
-        if verb == "exec":
-            if probe == "hang":
-                raise subprocess.TimeoutExpired(command, 15)
-            return subprocess.CompletedProcess(
-                command, probe, "", "cannot exec in a paused container"
-            )
-        if verb == "rm":
-            return subprocess.CompletedProcess(command, 0, "", "")
-        raise AssertionError(f"unexpected docker verb: {verb}")
-
-    return run, verbs
+def _working_artifact(root: Path, body: str = STRATEGY_BODY) -> tuple[Path, Path]:
+    """An Agent working copy: the permissions the container writes through."""
+    output = root / "output"
+    models = root / "models"
+    output.mkdir(parents=True)
+    models.mkdir(parents=True)
+    (output / "main.py").write_text(body, encoding="utf-8")
+    (models / "weights.bin").write_bytes(b"parent")
+    restore_working_artifacts_writable(output, models)
+    return output, models
 
 
-def test_a_failed_pause_is_thawed_and_the_formal_call_refuses_to_run(tmp_path: Path):
-    """``docker pause`` can fail with the freezer already engaged: runc writes
-    cgroup.freeze=1, times out waiting for `frozen`, and the daemon rolls its
-    own state back to running. Raising there left nothing to unpause the cgroup
-    and every later exec died with "cannot exec in a paused container"."""
-    sandbox = _started_fake_sandbox(tmp_path)
-    run, verbs = _fake_docker(pause=1, probe=0)
-    entered = False
-    with patch("autotrade.environment.sandbox.subprocess.run", side_effect=run):
-        with pytest.raises(RuntimeError, match="failed to pause sandbox") as caught, sandbox.formal_guard():
-            entered = True  # pragma: no cover - the guard never yields
-        # A container that proved usable is kept: the formal call simply does
-        # not run, and the Agent can call the backtest again.
-        assert sandbox.exec(["true"], timeout_seconds=5).returncode == 0
-    assert not entered
-    assert not isinstance(caught.value, SandboxDestroyed)
-    assert verbs == ["pause", "unpause", "exec", "exec"]
-
-
-@pytest.mark.parametrize("probe", [1, "hang"])
-def test_a_sandbox_that_cannot_be_thawed_is_destroyed_and_aborts_the_session(
-    tmp_path: Path, probe: object
-):
-    """A container that no longer executes anything is unrecoverable here, so
-    it is destroyed (the workspace is a host bind mount and survives) and the
-    failure is explicit — never a silent continuation against a wedged
-    sandbox."""
-    sandbox = _started_fake_sandbox(tmp_path)
-    run, verbs = _fake_docker(pause=1, unpause=1, probe=probe)
-    entered = False
-    with patch("autotrade.environment.sandbox.subprocess.run", side_effect=run):
-        with pytest.raises(SandboxDestroyed, match="could not be paused"), sandbox.formal_guard():
-            entered = True  # pragma: no cover - the guard never yields
-        assert not entered
-        assert verbs == ["pause", "unpause", "exec", "rm"]
-        # Nothing can run against it afterwards, and it says so.
-        with pytest.raises(RuntimeError, match="not started"):
-            sandbox.exec(["true"], timeout_seconds=5)
-
-
-def test_a_sandbox_that_cannot_be_unpaused_is_destroyed_and_aborts_the_session(
+def test_an_evaluation_snapshot_is_immutable_and_keeps_the_bytes_it_fingerprinted(
     tmp_path: Path,
 ):
-    sandbox = _started_fake_sandbox(tmp_path)
-    run, verbs = _fake_docker(unpause=1)
+    """A formal call replays a snapshot instead of freezing the session, so the
+    snapshot is what makes the result reproducible: it is addressed by the
+    content it was taken from, the Agent's later writes cannot reach it, and it
+    is mode-locked against the unprivileged container user, which owns the
+    working copy but not this tree."""
+    output, models = _working_artifact(tmp_path)
+    store = FilesystemArtifactStore(tmp_path / "store")
+    revision = store.create_revision(output, models_path=models)
+
+    assert revision.fingerprint == artifact_fingerprint(output, models)
+
+    # The Agent keeps working while the replay runs.
+    (output / "main.py").write_text(STRATEGY_BODY + "# later\n", encoding="utf-8")
+    (models / "weights.bin").write_bytes(b"later")
+
+    assert (revision.output_path / "main.py").read_text(encoding="utf-8") == STRATEGY_BODY
+    assert (revision.models_path / "weights.bin").read_bytes() == b"parent"
+    assert (
+        artifact_fingerprint(revision.output_path, revision.models_path)
+        == revision.fingerprint
+    )
+    assert artifact_fingerprint(output, models) != revision.fingerprint
+
+    # uid 61000 owns nothing here and every path denies writes, so no process in
+    # the session can reach the evaluated bytes even by path.
+    root = revision.output_path.parent
+    for path in (root, *root.rglob("*")):
+        assert not path.is_symlink()
+        info = path.stat()
+        assert info.st_mode & 0o222 == 0, path
+        assert info.st_uid == os.getuid()
+
+
+def test_a_write_during_the_snapshot_is_retaken_once(tmp_path: Path):
+    """One concurrent write is the expected case — a child's shell job saving
+    output/main.py as the copy runs — and it must not be evaluated half-copied.
+    The snapshot is compared with its source and retaken; the retake replays the
+    settled bytes."""
+    output, models = _working_artifact(tmp_path)
+    real_copy_models = artifacts.copy_model_artifacts
+    moved = "def generate_orders(context):\n    return [1]\n"
+
+    def write_then_copy(source, dest):
+        # Lands after output/ was copied and before the copy is verified.
+        if (output / "main.py").read_text(encoding="utf-8") != moved:
+            (output / "main.py").write_text(moved, encoding="utf-8")
+        return real_copy_models(source, dest)
+
+    store = FilesystemArtifactStore(tmp_path / "store")
+    with patch.object(artifacts, "copy_model_artifacts", write_then_copy):
+        revision = store.create_revision(output, models_path=models)
+
+    assert (revision.output_path / "main.py").read_text(encoding="utf-8") == moved
+    assert revision.fingerprint == artifact_fingerprint(output, models)
+
+
+def test_a_source_that_never_settles_fails_explicitly_and_leaves_no_revision(
+    tmp_path: Path,
+):
+    """A tree still being written after the retake cannot be evaluated at all:
+    the alternative is replaying a strategy that never existed, so the snapshot
+    fails loudly and the candidate revision is not left behind."""
+    output, models = _working_artifact(tmp_path)
+    real_copy_models = artifacts.copy_model_artifacts
+    writes = iter(range(100))
+
+    def write_then_copy(source, dest):
+        (output / "main.py").write_text(
+            f"{STRATEGY_BODY}# {next(writes)}\n", encoding="utf-8"
+        )
+        return real_copy_models(source, dest)
+
+    store = FilesystemArtifactStore(tmp_path / "store")
     with (
-        patch("autotrade.environment.sandbox.subprocess.run", side_effect=run),
-        pytest.raises(SandboxDestroyed, match="could not be safely unpaused"),
-        sandbox.formal_guard(),
+        patch.object(artifacts, "copy_model_artifacts", write_then_copy),
+        pytest.raises(ArtifactSnapshotUnstable, match="kept changing"),
     ):
-        pass
-    assert verbs == ["pause", "unpause", "rm"]
+        store.create_revision(output, models_path=models, revision_id="revision_x")
+    assert list((tmp_path / "store" / "revisions").iterdir()) == []
 
 
 def test_persistent_command_runner_rejects_an_empty_or_blank_argv():

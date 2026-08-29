@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import ast
 import difflib
+import hashlib
 import json
 import shutil
 import stat
@@ -82,6 +83,16 @@ class ArtifactError(ValueError):
     """A strategy artifact violates the documented format contract."""
 
 
+class ArtifactSnapshotUnstable(RuntimeError):
+    """A working artifact kept changing while its evaluation snapshot was taken.
+
+    An evaluation never reads the Agent's live tree, so a copy taken while a
+    write is in flight could mix two versions' bytes into a strategy that never
+    existed. The copy is verified against its source and retaken once; a source
+    still moving after that raises this instead of evaluating the mixture.
+    """
+
+
 @dataclass(frozen=True)
 class StrategyArtifact:
     root: Path
@@ -122,14 +133,37 @@ class FilesystemArtifactStore:
         models_path: str | Path | None = None,
         revision_id: str | None = None,
     ):
+        """Snapshot a working artifact into a new immutable revision.
+
+        The returned record carries the snapshot's ``fingerprint``: the
+        evaluated bytes are addressed by content, not by the directory they
+        were copied from, so a caller can prove the revision it replays is the
+        one it approved.
+        """
         revision_id = revision_id or new_revision_id("revision")
         directory = self._id_path(self.revisions_root, revision_id)
         if directory.exists():
             raise FileExistsError(f"artifact revision already exists: {revision_id}")
-        copy_artifact(output_path, directory / "output")
-        copy_model_artifacts(models_path, directory / "models")
+        try:
+            fingerprint = copy_artifact_snapshot(
+                output_path,
+                models_path,
+                dest_output=directory / "output",
+                dest_models=directory / "models",
+            )
+        except Exception:
+            self.discard_revision(revision_id)
+            raise
         chmod_tree(directory, file_mode=0o444, dir_mode=0o555)
-        return self.revision(revision_id)
+        record = self.revision(revision_id)
+        record.fingerprint = fingerprint
+        return record
+
+    def discard_revision(self, revision_id: str) -> None:
+        """Drop a candidate revision that was never accepted."""
+        directory = self._id_path(self.revisions_root, revision_id)
+        if directory.is_dir():
+            self._discard_directory(directory)
 
     def revision(self, revision_id: str):
         directory = self._id_path(self.revisions_root, revision_id)
@@ -304,6 +338,65 @@ def copy_model_artifacts(source_root: str | Path | None, dest_root: str | Path) 
         return
     source_root = Path(source_root)
     _copy_revision(source_root, dest_root, _model_artifact_files(source_root, missing_ok=True))
+
+
+def artifact_fingerprint(
+    output_root: str | Path, models_root: str | Path | None = None
+) -> str:
+    """Content address of one strategy artifact: its file names and bytes.
+
+    Covers exactly the files ``copy_artifact``/``copy_model_artifacts`` carry,
+    so a copy and its source fingerprint identically and a missing ``models/``
+    is the same artifact as an empty one. It identifies the evaluated bytes
+    independently of the directory they were read from, which is what lets a
+    formal call prove it replayed the artifact it approved.
+    """
+    output_root = Path(output_root)
+    roots: list[tuple[str, Path, set[str]]] = [
+        (
+            "output",
+            output_root,
+            _artifact_files(output_root, reject_runtime_cache=False),
+        )
+    ]
+    if models_root is not None:
+        models = Path(models_root)
+        roots.append(("models", models, _model_artifact_files(models, missing_ok=True)))
+    digest = hashlib.sha256()
+    for label, root, relpaths in roots:
+        for relpath in sorted(relpaths):
+            path = root / relpath
+            digest.update(f"{label}/{relpath}\0{path.stat().st_size}\0".encode())
+            with path.open("rb") as stream:
+                while chunk := stream.read(1024 * 1024):
+                    digest.update(chunk)
+    return digest.hexdigest()
+
+
+def copy_artifact_snapshot(
+    output_root: str | Path,
+    models_root: str | Path | None,
+    *,
+    dest_output: str | Path,
+    dest_models: str | Path,
+) -> str:
+    """Copy one working artifact to an immutable destination; return its fingerprint.
+
+    The Agent and its children keep working while a formal call replays the
+    copy, so the copy has to be one point in that timeline rather than a blend
+    of two. It is taken, compared with its source, and retaken once if the
+    source moved meanwhile; a source still moving after that raises
+    ``ArtifactSnapshotUnstable`` instead of evaluating a torn tree.
+    """
+    for _ in range(2):
+        copy_artifact(output_root, dest_output)
+        copy_model_artifacts(models_root, dest_models)
+        fingerprint = artifact_fingerprint(dest_output, dest_models)
+        if fingerprint == artifact_fingerprint(output_root, models_root):
+            return fingerprint
+    raise ArtifactSnapshotUnstable(
+        "the strategy artifact kept changing while its evaluation snapshot was taken"
+    )
 
 
 def restore_frozen_artifact_trees(

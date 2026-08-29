@@ -1369,6 +1369,8 @@ class AgentSessionRunner:
                     for key in (
                         "summary_chars",
                         "summary_delivered_chars",
+                        "summary_lines",
+                        "resume_line",
                         "summary_truncated",
                         "result_ref",
                     )

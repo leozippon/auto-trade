@@ -266,7 +266,8 @@ AGENT_TOOL_DESCRIPTION = (
     "thinking 与 max_turns 由你按次决定，生效顺序：本次调用参数 > 角色默认（见 agent 字段） > 全局默认"
     f"（{DEFAULT_SUBAGENT_THINKING}、{DEFAULT_SUBAGENT_MAX_ROUNDS} 轮）；生效值记入该子代理的 subagent_task 事件。"
     f"子代理的汇报最多内联 {SUBAGENT_REPORT_MAX_CHARS} 字符：更长的汇报只内联开头（summary_truncated=true），"
-    "全文落盘并以 result_root/result_ref 返回，用 read_file 分页读回；要求子代理把长材料写进工作区文件而不是塞进汇报。"
+    "全文落盘并以 result_root/result_ref 返回，用 read_file 从 resume_line 起分页读回（offset 是行号，不是字符数）；"
+    "要求子代理把长材料写进工作区文件而不是塞进汇报。"
     "子代理不能嵌套、正式回测、结束会话、改 PRIOR 或自行验收；它的汇报描述意图而非结果，其写入须由你验收。"
     "resume=<task_id> 让一个已完成的子代理在自己的对话上继续新的 task（保留它读过的上下文，角色须相同）；"
     "仍在运行或未知的 task_id 会被拒绝。只在后续任务确实需要它已有的上下文时 resume；独立的后续工作另起并行的全新子代理，不要串成 resume 链。"
@@ -443,20 +444,37 @@ def deliver_subagent_report(
     is clipped there, marked ``summary_truncated``, and spilled in full to the
     result store as ``result_root``/``result_ref`` so the parent reads it back
     in pages. Without a store the clip is still explicit, never silent.
+
+    The spill is read back with ``read_file``, which pages by LINE, so the clip
+    is measured in lines as well as characters: a parent told only how many
+    characters it received has to guess where to resume and reads past the end
+    of the file for nothing. ``resume_line`` is that 0-based offset.
     """
 
     total = len(summary)
     if total <= SUBAGENT_REPORT_MAX_CHARS:
         return {"summary": summary, "summary_chars": total}
+    delivered = summary[:SUBAGENT_REPORT_MAX_CHARS]
     payload: dict[str, object] = {
-        "summary": summary[:SUBAGENT_REPORT_MAX_CHARS],
+        "summary": delivered,
         "summary_chars": total,
         "summary_delivered_chars": SUBAGENT_REPORT_MAX_CHARS,
+        "summary_lines": len(summary.splitlines()),
+        # The line the clip fell inside is re-delivered whole rather than lost.
+        "resume_line": delivered.count("\n"),
         "summary_truncated": True,
     }
     if store is not None:
         payload.update(store.store_tool_result(tool="agent", kind="report", content=summary))
-    if "result_ref" not in payload:
+    if "result_ref" in payload:
+        # The store's generic hint names the file; only this caller knows the
+        # report's line geometry, so it says where to resume too.
+        payload["result_hint"] = (
+            f"full report spilled ({payload['summary_lines']} lines); read the rest "
+            f"with: read_file root='{payload['result_root']}' "
+            f"path='{payload['result_ref']}' offset={payload['resume_line']}"
+        )
+    else:
         payload["result_hint"] = (
             "full report was not persisted; the rest is lost — have the child write "
             "long findings to a workspace file next time"
