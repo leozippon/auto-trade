@@ -23,6 +23,7 @@ from .proxy import (
     ChatMessage,
     LLMProxy,
     LLMProxyError,
+    MalformedToolCallError,
     ProviderResponse,
     ScriptedLLM,
     ToolCall,
@@ -33,6 +34,7 @@ from .proxy import (
     context_window_tokens,
     estimate_chat_request_tokens,
     is_context_overflow_error,
+    malformed_tool_call_messages,
 )
 
 __all__ = [
@@ -48,6 +50,7 @@ __all__ = [
     "ExtractionError",
     "LLMProxy",
     "LLMProxyError",
+    "MalformedToolCallError",
     "OpenAICompatibleConfig",
     "OpenAICompatibleProxy",
     "ProviderResponse",
@@ -66,5 +69,6 @@ __all__ = [
     "is_context_overflow_error",
     "load_api_key",
     "load_env_value",
+    "malformed_tool_call_messages",
     "model_profile",
 ]

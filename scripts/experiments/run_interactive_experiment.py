@@ -11,6 +11,7 @@ HITL run driven purely through the control file.
 from __future__ import annotations
 
 import argparse
+import os
 import signal
 import sys
 from pathlib import Path
@@ -35,6 +36,21 @@ def _terminate(signum, frame):  # noqa: ANN001 - signal handler signature
 def _restore_child_reaping() -> None:
     """Undo the console parent's SIGCHLD=SIG_IGN inheritance for this worker."""
     signal.signal(signal.SIGCHLD, signal.SIG_DFL)
+
+
+def _exec_self() -> None:
+    """Replace this worker with a fresh interpreter running the same command.
+
+    A deferred restart swaps the code without losing the session that was
+    running. ``execv`` keeps the pid and its start time (so the console's
+    liveness check and ``status.json`` stay valid), the process group created
+    by ``start_new_session`` (so terminate/restart still signal the right
+    group), the working directory, and the inherited append handle on the
+    worker log. Only the program image changes.
+    """
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os.execv(sys.executable, [sys.executable, *sys.argv])
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -64,7 +80,15 @@ def main(argv: list[str] | None = None) -> int:
     try:
         options = load_worker_options(experiment_dir, repo_root=args.repo_root)
         bootstrap.stop()
-        run_local_interactive_worker(options, poll_seconds=args.poll_seconds)
+        result = run_local_interactive_worker(options, poll_seconds=args.poll_seconds)
+        if result.get("status") == "restart":
+            print(
+                f"===== worker restart at session boundary {utc_now_iso()} =====",
+                flush=True,
+            )
+            # Never returns; a failure to exec falls through to the handler
+            # below and is recorded as a failed run rather than a silent exit.
+            _exec_self()
     except Exception as exc:  # noqa: BLE001 - CLI must persist every terminal failure
         bootstrap.stop()
         write_json_atomic(
@@ -72,7 +96,7 @@ def main(argv: list[str] | None = None) -> int:
             {
                 "schema_version": 1,
                 "state": "failed",
-                "pid": __import__("os").getpid(),
+                "pid": os.getpid(),
                 "failed_at": utc_now_iso(),
                 "error": f"{type(exc).__name__}: {exc}",
             },

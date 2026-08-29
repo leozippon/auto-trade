@@ -527,6 +527,89 @@ def test_interactive_runner_publishes_current_session_timing(tmp_path: Path):
     assert timing["researcher_wait_seconds"] == 0.0
 
 
+def test_session_boundary_restart_keeps_the_finished_session_and_stops_the_next(
+    tmp_path: Path,
+):
+    """A deferred restart costs no work: the session in flight is recorded,
+    the next one is not started, and the entrypoint is told to re-exec."""
+
+    control_path = tmp_path / "control.json"
+    status_path = tmp_path / "status.json"
+    ledger = ExperimentLedger(tmp_path / "ledger.jsonl")
+    write_control(control_path, ControlState(mode="auto"))
+    ran: list[str] = []
+
+    def execute(session, context):
+        del context
+        ran.append(session.session_key)
+        # The console records the request while this session is running.
+        pending = read_control(control_path)
+        pending.restart_pending = True
+        write_control(control_path, pending)
+        return {
+            "record_type": "fold",
+            "experiment_id": "demo",
+            "epoch_id": session.epoch_id,
+            "fold_id": session.session_key.rsplit("/", 1)[-1],
+            "run_id": f"run_{len(ran):03d}",
+        }
+
+    runner = InteractiveExperimentRunner(
+        experiment_id="demo",
+        sessions=(
+            DevelopmentSession("epoch_001/fold_2026Q1", "fold", "epoch_001", None),
+            DevelopmentSession("epoch_001/fold_2026Q2", "fold", "epoch_001", None),
+        ),
+        execute_session=execute,
+        ledger=ledger,
+        control_path=control_path,
+        status_path=status_path,
+        ref_store=AgentRefStore(tmp_path / "experiment"),
+        poll_seconds=0.01,
+    )
+
+    result = runner.run()
+
+    assert result == {"status": "restart", "sessions_run": 1, "reran_sessions": []}
+    assert ran == ["epoch_001/fold_2026Q1"]
+    assert [row["session_key"] for row in ledger.read()] == ["epoch_001/fold_2026Q1"]
+    # One-shot, and the console sees one worker coming up rather than a stop.
+    assert read_control(control_path).restart_pending is False
+    assert read_status(status_path)["state"] == "launching"
+
+
+def test_session_boundary_restart_is_taken_before_the_next_session_starts(
+    tmp_path: Path,
+):
+    """Requested while the worker waits at an approval gate, the swap happens
+    there: the next session must not run hours of the old code first."""
+
+    control_path = tmp_path / "control.json"
+    status_path = tmp_path / "status.json"
+    write_control(control_path, ControlState(mode="manual", restart_pending=True))
+
+    def execute(session, context):  # pragma: no cover - must not run
+        del session, context
+        raise AssertionError("the gate started a session instead of restarting")
+
+    runner = InteractiveExperimentRunner(
+        experiment_id="demo",
+        sessions=(
+            DevelopmentSession("epoch_001/fold_2026Q1", "fold", "epoch_001", None),
+        ),
+        execute_session=execute,
+        ledger=ExperimentLedger(tmp_path / "ledger.jsonl"),
+        control_path=control_path,
+        status_path=status_path,
+        poll_seconds=0.01,
+    )
+
+    result = runner.run()
+
+    assert result["status"] == "restart" and result["sessions_run"] == 0
+    assert read_control(control_path).restart_pending is False
+
+
 @pytest.mark.parametrize(
     ("key", "value", "message"),
     [

@@ -21,12 +21,14 @@ from autotrade.environment.llm import (
     DeepSeekConfig,
     DeepSeekProxy,
     LLMProxyError,
+    MalformedToolCallError,
     OpenAICompatibleConfig,
     OpenAICompatibleProxy,
     build_model_gateway,
     estimate_chat_request_tokens,
     load_api_key,
     load_env_value,
+    malformed_tool_call_messages,
     model_profile,
 )
 
@@ -215,30 +217,6 @@ def _stream_response(*chunks):
 
 RETRYABLE_PROTOCOL_FAILURES = (
     (
-        _stream_response(
-            {
-                "choices": [
-                    {
-                        "delta": {
-                            "tool_calls": [
-                                {
-                                    "index": 0,
-                                    "id": "call-1",
-                                    "function": {
-                                        "name": "read_file",
-                                        "arguments": '{"path":',
-                                    },
-                                }
-                            ]
-                        }
-                    }
-                ]
-            }
-        ),
-        ({"type": "function"},),
-        "provider returned an invalid stream tool call",
-    ),
-    (
         _stream_response({"choices": [{"delta": {"content": None}}]}),
         ({"type": "function"},),
         "provider response must contain content or tool calls",
@@ -370,7 +348,7 @@ def test_json_fallback_rejects_malformed_tool_call_without_retry(raw_call: objec
         transport=transport,
     )
 
-    with pytest.raises(LLMProxyError, match="invalid tool call") as caught:
+    with pytest.raises(MalformedToolCallError, match="malformed tool call") as caught:
         proxy.complete(
             [ChatMessage("user", "inspect")],
             tools=[{"type": "function"}],
@@ -1043,6 +1021,82 @@ def test_stream_tool_call_cut_at_max_tokens_is_rejected_once_and_names_the_cause
     assert "shorter arguments" in str(caught.value)
     assert len(transport.requests) == 1
     assert delays == []
+
+
+def test_stream_malformed_tool_call_is_rejected_once_and_keeps_the_assistant_text():
+    """The 13-minute failure mode: a model-written call that will not parse.
+
+    Retrying it repeats the whole generation for the same defect, so the
+    response is rejected on the first attempt, the error names the tool and
+    what was wrong with it, and the text that did arrive travels with the
+    error so the caller can keep a long analysis instead of paying for it
+    again."""
+    transport = FakeTransport(
+        [
+            _stream_response(
+                {"choices": [{"delta": {"reasoning_content": "先复核换手率"}}]},
+                {"choices": [{"delta": {"content": "结论：可以收官。"}}]},
+                {
+                    "choices": [
+                        {
+                            "delta": {
+                                "tool_calls": [
+                                    {
+                                        "index": 0,
+                                        "id": "call-1",
+                                        "function": {
+                                            "name": "read_file",
+                                            "arguments": '{"path":',
+                                        },
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                },
+            )
+        ]
+    )
+    delays: list[float] = []
+    proxy = DeepSeekProxy(
+        make_config(max_retries=3, retry_backoff_seconds=2.0),
+        transport=transport,
+        sleep=delays.append,
+    )
+
+    with pytest.raises(MalformedToolCallError) as caught:
+        proxy.complete([ChatMessage("user", "hello")], tools=({"type": "function"},))
+
+    assert caught.value.retryable is False
+    assert len(transport.requests) == 1
+    assert delays == []
+    assert "tool=read_file" in str(caught.value)
+    assert "no call from this response was executed" in str(caught.value)
+    assert caught.value.content == "结论：可以收官。"
+    assert caught.value.reasoning_content == "先复核换手率"
+
+
+def test_malformed_tool_call_recovery_replays_the_text_and_asks_for_the_call():
+    exc = MalformedToolCallError(
+        "provider returned a malformed tool call (tool=write_file: bad JSON)",
+        content="分析正文",
+        reasoning_content="推理正文",
+    )
+    assistant, observation = malformed_tool_call_messages(exc, error=str(exc))
+    assert assistant.role == "assistant"
+    assert assistant.content == "分析正文"
+    assert assistant.reasoning_content == "推理正文"
+    assert assistant.tool_calls == ()
+    payload = json.loads(observation.content or "{}")
+    assert payload["observation"] == "malformed_tool_call"
+    assert "tool=write_file" in payload["error"]
+    assert "Re-issue only that tool call" in payload["retry_hint"]
+    # A response with no text at all leaves nothing to replay.
+    only_observation = malformed_tool_call_messages(
+        MalformedToolCallError("bad"), error="bad"
+    )
+    assert len(only_observation) == 1
+    assert only_observation[0].role == "user"
 
 
 def test_stream_tool_call_complete_at_max_tokens_is_still_delivered():

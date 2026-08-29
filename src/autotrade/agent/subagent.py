@@ -29,10 +29,12 @@ from autotrade.environment.llm import (
     AGENT_MAX_OUTPUT_TOKENS,
     ChatMessage,
     LLMProxy,
+    MalformedToolCallError,
     ToolCall,
     clamp_requested_max_tokens,
     context_request_fits,
     is_context_overflow_error,
+    malformed_tool_call_messages,
 )
 from autotrade.environment.runtime import sanitize_for_log
 from autotrade.environment.time_budget import (
@@ -741,6 +743,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
         truncated_rounds = 0
         continuations = 0
         overflow_recovery_used = False
+        malformed_reissue_used = False
         steers = 0
         try:
             while rounds_limit is None or rounds < rounds_limit:
@@ -818,18 +821,19 @@ class SubAgentEngine(SessionTimeBudgetAware):
                     llm_calls += 1
                     llm_errors += 1
                     error = safe_error_summary(exc)
-                    self._emit(
-                        "subagent_llm_error",
-                        {
-                            "task_id": task_id,
-                            "role": role,
-                            "round": rounds,
-                            "provider": getattr(llm, "provider", ""),
-                            "model": getattr(llm, "model", ""),
-                            "llm_error": error,
-                            "parent_call_id": parent_call_id,
-                        },
-                    )
+                    malformed = isinstance(exc, MalformedToolCallError)
+                    failure: dict[str, object] = {
+                        "task_id": task_id,
+                        "role": role,
+                        "round": rounds,
+                        "provider": getattr(llm, "provider", ""),
+                        "model": getattr(llm, "model", ""),
+                        "llm_error": error,
+                        "parent_call_id": parent_call_id,
+                    }
+                    if malformed:
+                        failure["error_type"] = "malformed_tool_call"
+                    self._emit("subagent_llm_error", failure)
                     if self._cancelled():
                         status = "cancelled"
                         error = "Sub-agent cancelled"
@@ -861,6 +865,15 @@ class SubAgentEngine(SessionTimeBudgetAware):
                             else "error"
                         )
                         break
+                    if malformed and not malformed_reissue_used:
+                        # One re-issue per streak, like the parent runner: the
+                        # text that did arrive is kept and only the call is
+                        # asked for again.
+                        malformed_reissue_used = True
+                        messages.extend(
+                            malformed_tool_call_messages(exc, error=error)
+                        )
+                        continue
                     messages.append(
                         ChatMessage(
                             "user",
@@ -879,6 +892,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
                 # A transient provider error that a later round survived is
                 # not this child's outcome.
                 error = ""
+                malformed_reissue_used = False
                 _add_usage(usage, response.usage)
                 cut_off = _output_truncated(response.usage, output_tokens)
                 truncated_rounds += int(cut_off)
@@ -1044,8 +1058,11 @@ class SubAgentEngine(SessionTimeBudgetAware):
                 if summary:
                     messages.append(ChatMessage("assistant", summary))
         except Exception as exc:  # noqa: BLE001 - a sub-agent failure must not kill the parent
-            status = "timeout" if isinstance(exc, TimeoutError) else "error"
-            error = safe_error_summary(exc)
+            if _is_worker_shutdown_error(exc):
+                status, error = "cancelled", _WORKER_SHUTDOWN_CANCELLATION
+            else:
+                status = "timeout" if isinstance(exc, TimeoutError) else "error"
+                error = safe_error_summary(exc)
         if status == "completed" and not summary:
             # ``completed`` means a report reached the parent; nothing else.
             if self._deadline_reached(deadline):
@@ -1328,6 +1345,18 @@ def _output_truncated(usage: object, max_tokens: int) -> bool:
         and not isinstance(completion, bool)
         and completion >= max_tokens
     )
+
+
+# The exact RuntimeError a ThreadPoolExecutor raises once the interpreter has
+# begun shutting down. A worker terminated at a restart tears the pool down
+# under a child that is still running: the child was cut short, it did not
+# fail, and its terminal record has to say so.
+_INTERPRETER_SHUTDOWN_ERROR = "cannot schedule new futures after interpreter shutdown"
+_WORKER_SHUTDOWN_CANCELLATION = "Sub-agent cancelled by worker shutdown"
+
+
+def _is_worker_shutdown_error(exc: BaseException) -> bool:
+    return isinstance(exc, RuntimeError) and _INTERPRETER_SHUTDOWN_ERROR in str(exc)
 
 
 def _is_nonretryable_subagent_error(exc: Exception) -> bool:

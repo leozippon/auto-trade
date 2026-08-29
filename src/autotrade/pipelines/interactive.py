@@ -19,7 +19,10 @@ files (atomic replace, no locking needed):
 
 Pausing always lands at a session boundary: the worker finishes the session in
 flight, then blocks at the next gate. ``mode="manual"`` additionally requires an
-explicit per-session approval before each session starts.
+explicit per-session approval before each session starts. A deferred restart
+lands at the same boundary: the run returns ``status="restart"`` so the worker
+entrypoint can re-execute itself on the new code without discarding the
+session it was running.
 """
 
 from __future__ import annotations
@@ -38,6 +41,7 @@ from .agent_inbox import expire_experiment_session_inbox
 from .hitl_state import (
     DevelopmentSession,
     StatusReporter,
+    consume_restart_request,
     consume_session_controls,
     consume_step_approval,
     consume_user_reply,
@@ -118,7 +122,8 @@ class InteractiveExperimentRunner:
                     if not self._needs_rerun(session, rerun_id):
                         continue
                     reran.append(session.session_key)
-                self._gate(session)
+                if self._gate(session):
+                    return self._restart_result(ran, reran)
                 control = read_control(self.control_path)
                 context = {
                     "directive": control.directives.get(session.session_key, ""),
@@ -170,6 +175,10 @@ class InteractiveExperimentRunner:
                 if control.request in ("pause", "stop"):
                     self.status.set(state="paused" if control.request == "pause" else "stopped")
                     return {"status": control.request, "sessions_run": ran, "reran_sessions": reran}
+                if control.restart_pending and consume_restart_request(
+                    self.control_path
+                ):
+                    return self._restart_result(ran, reran)
                 if control.skip_to_heldout and session.kind == "fold":
                     break
             self.status.set(state="development_complete")
@@ -297,15 +306,32 @@ class InteractiveExperimentRunner:
 
         return ask
 
-    def _gate(self, session: DevelopmentSession) -> None:
+    def _restart_result(self, ran: int, reran: list[str]) -> dict[str, object]:
+        """Hand a consumed session-boundary restart back to the entrypoint.
+
+        ``launching`` is the state the console already writes for a worker that
+        is coming up, and the pid survives the entrypoint's ``execv``, so the
+        experiment keeps showing exactly one live worker across the swap."""
+
+        self.status.set(state="launching")
+        return {"status": "restart", "sessions_run": ran, "reran_sessions": reran}
+
+    def _gate(self, session: DevelopmentSession) -> bool:
+        """Hold until the session may start; True asks for a restart instead."""
+
         while True:
             control = read_control(self.control_path)
             if control.test_revealed:
                 raise ExperimentStopped("the experiment is sealed")
             if control.request == "stop":
                 raise ExperimentStopped("stop requested")
+            # Before starting the next session, not only after finishing one:
+            # a worker parked at an approval gate must swap code before it
+            # spends hours running the old one.
+            if control.restart_pending and consume_restart_request(self.control_path):
+                return True
             if control.mode == "auto" or session.session_key in control.approved_sessions:
-                return
+                return False
             self.status.set(
                 state="waiting_user",
                 session_key=session.session_key,

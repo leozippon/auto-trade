@@ -437,6 +437,7 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
                 mode=payload.get("mode"),
                 text=payload.get("text"),
                 interrupt=payload.get("interrupt", False),
+                at=payload.get("at"),
             )
         except ManagerError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc

@@ -28,6 +28,7 @@ from autotrade.agent.subagent import (
     subagent_system_prompt,
     normalize_subagent_thinking,
 )
+from autotrade.agent import subagent as subagent_module
 from autotrade.agent.prompts import FOLD_WORKFLOW_SECTION, build_system_prompt
 from autotrade.environment.tools.base import SessionInterrupt
 from autotrade.agent.runner import (
@@ -35,7 +36,13 @@ from autotrade.agent.runner import (
     AgentSessionDeadlineExceeded,
     AgentSessionRunner,
 )
-from autotrade.environment.llm import ChatMessage, ProviderResponse, ScriptedLLM, ToolCall
+from autotrade.environment.llm import (
+    ChatMessage,
+    MalformedToolCallError,
+    ProviderResponse,
+    ScriptedLLM,
+    ToolCall,
+)
 from autotrade.environment.tools import (
     CommandResult,
     EditFileTool,
@@ -2811,6 +2818,60 @@ def test_subagent_completed_surfaces_truncation_and_rounds() -> None:
     assert completed["summary"].endswith(OUTPUT_TRUNCATED_MARKER.format(limit=500))
 
 
+def test_child_malformed_tool_call_keeps_its_analysis_and_re_issues_once() -> None:
+    """A call the child wrote unparseably costs a round, not a generation.
+
+    The text that did arrive is replayed as the child's own turn and only the
+    call is asked for again; a second failure in the same streak falls back to
+    the generic llm_error observation instead of replaying the analysis again.
+    """
+
+    class Malformed:
+        model = "child"
+        provider = "test"
+        context_window_tokens = 128000
+
+        def __init__(self) -> None:
+            self.calls: list[tuple] = []
+
+        def complete(self, messages, **kwargs):
+            del kwargs
+            self.calls.append(tuple(messages))
+            if len(self.calls) <= 2:
+                raise MalformedToolCallError(
+                    "provider returned a malformed tool call (tool=shell: "
+                    "Expecting value: line 1 column 9 (char 8)); no call from "
+                    "this response was executed",
+                    content="已经读完三个文件",
+                    reasoning_content="逐个核对",
+                )
+            return ProviderResponse(content="recovered report")
+
+    child = Malformed()
+    events: list[tuple[str, dict[str, object]]] = []
+    result = SubAgentEngine(
+        llm=child,
+        tools=ToolRegistry([DeclaredReadOnlyShell()]),
+        event_sink=lambda event, payload: events.append((event, payload)),
+    ).run("look", role="auditor")
+
+    assert result["status"] == "completed" and result["summary"] == "recovered report"
+    assert result["llm_errors"] == 2
+    second = child.calls[1]
+    assert second[-2].role == "assistant"
+    assert second[-2].content == "已经读完三个文件"
+    assert second[-2].reasoning_content == "逐个核对"
+    assert json.loads(str(second[-1].content))["observation"] == "malformed_tool_call"
+    third = child.calls[2]
+    assert json.loads(str(third[-1].content))["observation"] == "llm_error"
+    assert sum(1 for message in third if message.role == "assistant") == 1
+    traced = [payload for event, payload in events if event == "subagent_llm_error"]
+    assert [payload.get("error_type") for payload in traced] == [
+        "malformed_tool_call",
+        "malformed_tool_call",
+    ]
+
+
 def test_child_llm_error_is_traced_and_a_recovered_child_is_not_an_error() -> None:
     """A transient provider failure leaves a trace event and a counter; the
     child's outcome is what the surviving rounds produced."""
@@ -2827,7 +2888,7 @@ def test_child_llm_error_is_traced_and_a_recovered_child_is_not_an_error() -> No
             del messages, kwargs
             self.calls += 1
             if self.calls == 1:
-                raise RuntimeError("provider returned an invalid stream tool call")
+                raise RuntimeError("provider returned an invalid stream")
             return ProviderResponse(content="recovered report")
 
     events: list[tuple[str, dict[str, object]]] = []
@@ -2841,7 +2902,8 @@ def test_child_llm_error_is_traced_and_a_recovered_child_is_not_an_error() -> No
     traced = [payload for event, payload in events if event == "subagent_llm_error"]
     assert len(traced) == 1
     assert traced[0]["round"] == 1 and traced[0]["parent_call_id"] == "call_p"
-    assert "invalid stream tool call" in traced[0]["llm_error"]
+    assert "invalid stream" in traced[0]["llm_error"]
+    assert "error_type" not in traced[0]
     # The runner's observation forwards the counter so the parent sees it.
     finish = _FinishStub("finish_fold")
     llm = ScriptedLLM(
@@ -2866,6 +2928,103 @@ def test_child_llm_error_is_traced_and_a_recovered_child_is_not_an_error() -> No
     )
     assert completed["ok"] is True and completed["llm_errors"] == 1
     assert "error" not in completed
+
+
+def test_child_cut_short_by_worker_shutdown_is_cancelled_not_failed(monkeypatch) -> None:
+    """A restart tears the thread pool down under a still-running child.
+
+    From then on ``ThreadPoolExecutor.submit`` raises for the rest of the
+    interpreter's life. That is the worker exiting, not the child failing, so
+    the terminal record has to say cancelled and name the reason — otherwise
+    every restart writes a child failure into the trace and the ledger."""
+
+    class _ShutdownPool:
+        def __init__(self, *args, **kwargs) -> None:
+            del args, kwargs
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc_info) -> bool:
+            return False
+
+        def submit(self, *args, **kwargs):
+            del args, kwargs
+            raise RuntimeError(
+                "cannot schedule new futures after interpreter shutdown"
+            )
+
+    monkeypatch.setattr(subagent_module, "ThreadPoolExecutor", _ShutdownPool)
+    events: list[tuple[str, dict[str, object]]] = []
+    child = ScriptedLLM(
+        [
+            ProviderResponse(
+                tool_calls=(
+                    ToolCall("g", "grep", {}),
+                    ToolCall("r", "read_file", {}),
+                )
+            )
+        ],
+        context_window_tokens=128_000,
+    )
+    result = SubAgentEngine(
+        llm=child,
+        tools=ToolRegistry([_NamedTool("grep"), _NamedTool("read_file")]),
+        event_sink=lambda event, payload: events.append((event, payload)),
+    ).run("look", role="auditor")
+
+    assert result["status"] == "cancelled"
+    assert result["error"] == "Sub-agent cancelled by worker shutdown"
+    ended = next(payload for event, payload in events if event == "subagent")
+    assert ended["status"] == "cancelled"
+
+    # What the parent, the trace projection and the console see.
+    finish = _FinishStub("finish_fold")
+    llm = ScriptedLLM(
+        [
+            ProviderResponse(
+                tool_calls=(
+                    ToolCall("a1", "agent", {"agent": "auditor", "task": "look"}),
+                )
+            ),
+            ProviderResponse(content="waiting"),
+            ProviderResponse(tool_calls=(ToolCall("f1", "finish_fold", {}),)),
+        ]
+    )
+    attempts: list[dict[str, object]] = []
+    runner = AgentSessionRunner(
+        llm=llm,
+        tools=ToolRegistry([finish]),
+        system_prompt="fold",
+        config=_fold_config(),
+        subagent=SubAgentEngine(
+            llm=ScriptedLLM(
+                [
+                    ProviderResponse(
+                        tool_calls=(
+                            ToolCall("g", "grep", {}),
+                            ToolCall("r", "read_file", {}),
+                        )
+                    )
+                ],
+                context_window_tokens=128_000,
+            ),
+            tools=ToolRegistry([_NamedTool("grep"), _NamedTool("read_file")]),
+        ),
+        event_sink=lambda event, payload: attempts.append(payload)
+        if event == "subagent_attempt"
+        else None,
+    )
+    assert runner.run("go").status == "finished"
+    assert [payload["status"] for payload in attempts] == ["cancelled"]
+    assert attempts[0]["ok"] is False
+    observation = next(
+        json.loads(str(message.content))
+        for message in llm.calls[-1]["messages"]
+        if '"subagent_completed"' in str(message.content or "")
+    )
+    assert observation["status"] == "cancelled"
+    assert observation["error"] == "Sub-agent cancelled by worker shutdown"
 
 
 def test_child_without_a_report_is_not_completed() -> None:

@@ -24,6 +24,7 @@ from autotrade.environment.llm import (
     LOCAL_QWEN_MODEL,
     ChatMessage,
     LLMProxyError,
+    MalformedToolCallError,
     ProviderResponse,
     ScriptedLLM,
     ToolCall,
@@ -377,6 +378,74 @@ def test_fold_session_recovers_one_provider_context_overflow_without_blind_repea
     assert next(
         message.tool_call_id for message in llm.calls[2] if message.role == "tool"
     ) == "shell-1"
+
+
+def test_fold_session_reissues_one_malformed_tool_call_without_repeating_the_analysis(
+    tmp_path: Path,
+):
+    """A tool call the model wrote unparseably must not cost a generation.
+
+    The whole reply is rejected by the gateway, so the session keeps the text
+    that did arrive as its own assistant turn and asks only for the call
+    again. A second failure in the same streak drops back to the generic
+    llm_error handling instead of replaying the analysis a second time."""
+
+    finish, node_id = finish_fold_tool(tmp_path)
+
+    class MalformedThenFinish:
+        provider = "vllm"
+        model = LOCAL_QWEN_MODEL
+        context_window_tokens = None
+
+        def __init__(self):
+            self.calls = []
+
+        def complete(self, messages, **kwargs):
+            del kwargs
+            self.calls.append(tuple(messages))
+            if len(self.calls) <= 2:
+                raise MalformedToolCallError(
+                    "provider returned a malformed tool call (tool=finish_fold: "
+                    "Expecting value: line 1 column 9 (char 8)); no call from "
+                    "this response was executed",
+                    content="换手率已压到 12%，可以收官。",
+                    reasoning_content="先复核 Validation",
+                )
+            return ProviderResponse(
+                tool_calls=(ToolCall("f", "finish_fold", {"node_id": node_id}),)
+            )
+
+    llm = MalformedThenFinish()
+    events: list[tuple[str, dict[str, object]]] = []
+    runner = AgentSessionRunner(
+        llm=llm,
+        tools=ToolRegistry([finish]),
+        system_prompt="daily JSON only",
+        config=AgentSessionConfig(max_llm_calls=6),
+        event_sink=lambda event, payload: events.append((event, payload)),
+    )
+
+    result = runner.run("finish the validated strategy")
+
+    assert result.status == "finished"
+    assert len(llm.calls) == 3
+    second = llm.calls[1]
+    assert second[-2].role == "assistant"
+    assert second[-2].content == "换手率已压到 12%，可以收官。"
+    assert second[-2].reasoning_content == "先复核 Validation"
+    assert second[-2].tool_calls == ()
+    observation = json.loads(second[-1].content or "{}")
+    assert observation["observation"] == "malformed_tool_call"
+    assert "tool=finish_fold" in observation["error"]
+    third = llm.calls[2]
+    assert json.loads(third[-1].content or "{}")["observation"] == "llm_error"
+    assert sum(1 for message in third if message.role == "assistant") == 1
+    # Countable in an audit, and separated from transport failures.
+    assert [
+        payload.get("error_type")
+        for event, payload in events
+        if event == "llm_call" and payload.get("status") == "error"
+    ] == ["malformed_tool_call", "malformed_tool_call"]
 
 
 def test_fold_session_keeps_long_history_without_proactive_clear_or_trim(

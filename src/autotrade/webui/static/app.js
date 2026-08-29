@@ -2461,6 +2461,10 @@ function controlBar(detail) {
     bar.append(
       el("span", { class: "badge state-waiting_user" }, "已请求提前收官"),
     );
+  if (control.restart_pending)
+    bar.append(
+      el("span", { class: "badge state-waiting_user" }, "已请求会话边界重启"),
+    );
   bar.append(el("span", { class: "spacer" }));
   // Early finish: skip the remaining folds and jump straight to Held-out with
   // the latest frozen artifact (needs at least one recorded fold).
@@ -2606,18 +2610,37 @@ function controlBar(detail) {
           class: "btn",
           onclick: () => {
             showModal(
-              "确认重启？",
+              "重启 worker",
               el(
                 "div",
                 {},
                 el(
                   "p",
                   {},
-                  "终止当前 worker 并立即按账本恢复运行：已完成会话保留，被中断的会话整体重跑。宽限内没有退出的 worker 会被强制终止。",
+                  "立即重启：终止当前 worker 并按账本恢复运行，已完成会话保留，被中断的会话整体重跑。宽限内没有退出的 worker 会被强制终止。",
+                ),
+                el(
+                  "p",
+                  {},
+                  "会话边界重启：worker 先把当前会话跑完记账，再在原地换用新代码继续，不丢进行中的 Fold。",
                 ),
               ),
               [
                 el("button", { class: "btn", onclick: closeModal }, "取消"),
+                el(
+                  "button",
+                  {
+                    class: "btn",
+                    onclick: () => {
+                      closeModal();
+                      send(
+                        { action: "restart", at: "session_boundary" },
+                        "已请求会话边界重启：当前会话结束后自动换代码重启",
+                      );
+                    },
+                  },
+                  "会话边界重启",
+                ),
                 el(
                   "button",
                   {
@@ -2636,7 +2659,7 @@ function controlBar(detail) {
                       );
                     },
                   },
-                  "确认重启",
+                  "立即重启",
                 ),
               ],
             );

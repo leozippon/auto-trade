@@ -173,6 +173,10 @@ WEB_REQUIRED_PARAMS = frozenset(
 class ControlState:
     mode: str = "manual"
     request: str | None = None
+    # One-shot: the console asked for a code swap at the next session
+    # boundary. The worker consumes it and re-executes itself in place, so an
+    # in-flight Fold is finished instead of replayed.
+    restart_pending: bool = False
     approved_sessions: tuple[str, ...] = ()
     directives: dict[str, str] = field(default_factory=dict)
     prompt_overrides: dict[str, str] = field(default_factory=dict)
@@ -202,6 +206,7 @@ class ControlState:
             "schema_version": HITL_STATE_SCHEMA_VERSION,
             "mode": self.mode,
             "request": self.request,
+            "restart_pending": self.restart_pending,
             "approved_sessions": sorted(set(self.approved_sessions)),
             "directives": dict(self.directives),
             "prompt_overrides": dict(self.prompt_overrides),
@@ -233,6 +238,7 @@ def read_control(path: str | Path) -> ControlState:
     return ControlState(
         mode=mode,
         request=str(request) if request in ("pause", "stop") else None,
+        restart_pending=bool(payload.get("restart_pending")),
         approved_sessions=tuple(
             str(item) for item in approved_sessions if isinstance(item, str)
         ),
@@ -314,6 +320,18 @@ def consume_step_approval(
         directive = state.step_directives.pop(directive_key, "")
         write_control(path, state)
         return True, directive
+
+
+def consume_restart_request(path: str | Path) -> bool:
+    """Consume a pending session-boundary restart; True when one was set."""
+
+    with control_lock(path):
+        state = read_control(path)
+        if not state.restart_pending:
+            return False
+        state.restart_pending = False
+        write_control(path, state)
+        return True
 
 
 def consume_user_reply(path: str | Path, question_key: str) -> tuple[bool, str]:

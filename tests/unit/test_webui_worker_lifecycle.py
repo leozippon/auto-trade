@@ -82,6 +82,47 @@ open({ready!r}, "w").close()
 time.sleep(300)
 """
 
+# A worker that honours a session-boundary restart the way the real one does:
+# it consumes the flag between sessions and calls the entrypoint's own
+# ``_exec_self``. Written to a file (not ``python -c``) because that is what
+# the console spawns and what ``sys.argv`` has to reproduce across the exec.
+_DEFERRED_RESTART = """
+import importlib.util, os, sys, time
+from pathlib import Path
+
+sys.path.insert(0, "__SRC__")
+from autotrade.environment.runtime import write_json_atomic
+from autotrade.pipelines.hitl_state import (
+    consume_restart_request,
+    proc_start_ticks,
+    read_control,
+)
+
+_spec = importlib.util.spec_from_file_location("worker_entry", "__ENTRY__")
+_entry = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_entry)
+
+pid = os.getpid()
+with open("__MARKER__", "a", encoding="utf-8") as handle:
+    handle.write(" ".join([str(pid), str(proc_start_ticks(pid)), *sys.argv[1:]]) + chr(10))
+write_json_atomic(
+    Path("__STATUS__"),
+    dict(
+        schema_version=1,
+        state="running_session",
+        pid=pid,
+        pid_start_ticks=proc_start_ticks(pid),
+        session_key="epoch_001/fold_2022Q2",
+    ),
+)
+open("__READY__", "w").close()
+deadline = time.monotonic() + 60.0
+while time.monotonic() < deadline:
+    if read_control("__CONTROL__").restart_pending and consume_restart_request("__CONTROL__"):
+        _entry._exec_self()
+    time.sleep(0.05)
+"""
+
 
 class WorkerLifecycleTest(unittest.TestCase):
     def setUp(self) -> None:
@@ -143,6 +184,37 @@ class WorkerLifecycleTest(unittest.TestCase):
             time.sleep(0.02)
         self.assertTrue(ready.exists(), "the child never reached its signal handler install")
         return process
+
+    def _spawn_deferred_worker(self) -> tuple[subprocess.Popen, Path]:
+        """A live worker that re-execs itself when the flag is set."""
+        entry = (
+            Path(SRC_ROOT).parent / "scripts/experiments/run_interactive_experiment.py"
+        )
+        self.assertTrue(entry.is_file(), "the real worker entrypoint is missing")
+        marker = self.repo_root / "restarts.txt"
+        ready = self.repo_root / f"ready_{os.urandom(4).hex()}"
+        script = self.repo_root / "fake_worker.py"
+        script.write_text(
+            textwrap.dedent(_DEFERRED_RESTART)
+            .replace("__SRC__", SRC_ROOT)
+            .replace("__ENTRY__", str(entry))
+            .replace("__MARKER__", str(marker))
+            .replace("__STATUS__", str(self.status_path))
+            .replace("__READY__", str(ready))
+            .replace("__CONTROL__", str(self.control_path)),
+            encoding="utf-8",
+        )
+        process = subprocess.Popen(
+            [sys.executable, str(script), "--experiment-dir", str(self.directory)],
+            start_new_session=True, stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        self.addCleanup(self._reap, process)
+        deadline = time.monotonic() + 30.0
+        while time.monotonic() < deadline and not ready.exists():
+            time.sleep(0.02)
+        self.assertTrue(ready.exists(), "the fake worker never published its status")
+        return process, marker
 
     def _reap(self, process: subprocess.Popen) -> None:
         if process.poll() is None:
@@ -282,7 +354,10 @@ class WorkerLifecycleTest(unittest.TestCase):
 
     def test_restart_terminates_the_old_worker_and_spawns_a_new_one(self) -> None:
         self._install_worker_script()
-        write_control(self.control_path, ControlState(mode="manual", request="stop"))
+        write_control(
+            self.control_path,
+            ControlState(mode="manual", request="stop", restart_pending=True),
+        )
         process = self._spawn(_COOPERATIVE)
         self._publish(process, session_key="epoch_001/fold_2022Q2")
         response = self._post(action="restart")
@@ -290,6 +365,7 @@ class WorkerLifecycleTest(unittest.TestCase):
         body = response.json()
         self.addCleanup(self._kill_pid, int(body["spawned_pid"]))
         self.assertIs(body["restarted"], True)
+        self.assertEqual(body["at"], "immediate")
         self.assertIs(body["escalated"], False)
         self.assertIs(body["spawned"], True)
         process.wait(timeout=10)
@@ -299,8 +375,11 @@ class WorkerLifecycleTest(unittest.TestCase):
         self.assertEqual(status["pid"], body["spawned_pid"])
         self.assertEqual(status["state"], "launching")
         # The restored `start_worker` clearing: a leftover stop request would
-        # make the freshly spawned worker halt at its first gate.
-        self.assertIsNone(read_control(self.control_path).request)
+        # make the freshly spawned worker halt at its first gate, and a
+        # leftover deferred restart belongs to the worker that was replaced.
+        control = read_control(self.control_path)
+        self.assertIsNone(control.request)
+        self.assertFalse(control.restart_pending)
 
     def test_restart_does_not_hold_control_lock_while_the_old_worker_exits(self) -> None:
         """`restart` is exposed to the same deadlock as `terminate`, twice over.
@@ -348,6 +427,70 @@ class WorkerLifecycleTest(unittest.TestCase):
         self.assertIsNone(control.request)
         self.assertEqual(control.mode, "step")
         self.assertEqual(control.approved_sessions, ("epoch_001/fold_2022Q2",))
+
+    def test_deferred_restart_swaps_code_in_place_without_killing_the_session(
+        self,
+    ) -> None:
+        """The whole point: a code swap that costs no in-progress Fold.
+
+        The request only records a flag — the live worker is never signalled —
+        and the worker re-executes itself at its next session boundary. The
+        exec keeps the pid, its start time and its argv, which is what the
+        console's liveness check, its signalling and ``status.json`` rely on.
+        """
+        process, marker = self._spawn_deferred_worker()
+        started = time.monotonic()
+        response = self._post(action="restart", at="session_boundary")
+        elapsed = time.monotonic() - started
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertEqual(body["at"], "session_boundary")
+        self.assertIs(body["restarted"], False)
+        self.assertIs(body["restart_pending"], True)
+        self.assertLess(elapsed, 5.0, "a deferred restart must not wait on the worker")
+        self.assertTrue(read_control(self.control_path).restart_pending)
+
+        deadline = time.monotonic() + 60.0
+        lines: list[str] = []
+        while time.monotonic() < deadline:
+            lines = marker.read_text(encoding="utf-8").split("\n")
+            lines = [line for line in lines if line]
+            if len(lines) >= 2:
+                break
+            time.sleep(0.05)
+        self.assertEqual(len(lines), 2, "the worker never re-executed itself")
+        before, after = (line.split(" ", 2) for line in lines)
+        self.assertEqual(after[0], str(process.pid), "the pid changed across the exec")
+        self.assertEqual(after[1], before[1], "the process start time changed")
+        self.assertEqual(
+            after[2], f"--experiment-dir {self.directory}", "argv was not reproduced"
+        )
+        self.assertIsNone(process.poll(), "the worker process was replaced, not killed")
+        # One-shot: the new image must not restart again at the next boundary.
+        self.assertFalse(read_control(self.control_path).restart_pending)
+        status = json.loads(self.status_path.read_text(encoding="utf-8"))
+        self.assertEqual(status["pid"], process.pid)
+        self.assertEqual(
+            self.client.get("/api/experiments/exp_ctl").json()["worker_alive"],
+            True,
+            "the console lost the worker across the exec",
+        )
+
+    def test_deferred_restart_refuses_without_a_live_worker(self) -> None:
+        refused = self._post(action="restart", at="session_boundary")
+        self.assertEqual(refused.status_code, 400)
+        self.assertEqual(
+            refused.json()["detail"], "session_boundary restart requires a live worker"
+        )
+        self.assertFalse(read_control(self.control_path).restart_pending)
+
+    def test_restart_rejects_an_unknown_boundary_and_at_on_other_actions(self) -> None:
+        rejected = self._post(action="restart", at="tomorrow")
+        self.assertEqual(rejected.status_code, 400)
+        self.assertIn("immediate or session_boundary", rejected.json()["detail"])
+        misplaced = self._post(action="pause", at="session_boundary")
+        self.assertEqual(misplaced.status_code, 400)
+        self.assertEqual(misplaced.json()["detail"], "at is only accepted by restart")
 
     def test_restart_sigkills_a_worker_that_outlives_its_grace_and_resumes(self) -> None:
         """A wedged worker is forced, not left to the researcher.

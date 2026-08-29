@@ -585,8 +585,11 @@ class ExperimentManager:
             control_path = directory / "hitl/control.json"
             with control_lock(control_path):
                 control = read_control(control_path)
-                if control.request == "stop":
+                if control.request == "stop" or control.restart_pending:
                     control.request = None
+                    # A deferred restart belongs to the worker that was
+                    # running when it was asked for; this one is already new.
+                    control.restart_pending = False
                     write_control(control_path, control)
             # A worker that dies on an unhandled traceback used to write it to
             # /dev/null, leaving the run unexplainable. Append both streams to a
@@ -650,9 +653,12 @@ class ExperimentManager:
         mode: str | None = None,
         text: object = None,
         interrupt: object = False,
+        at: str | None = None,
     ) -> dict[str, object]:
         if action not in _ACTIONS:
             raise ManagerError(f"unknown control action: {action!r}")
+        if at is not None and action != "restart":
+            raise ManagerError("at is only accepted by restart")
         with self._mutate:
             directory = self._experiment_dir(experiment_id)
             _modern_ref_store(directory)
@@ -689,7 +695,7 @@ class ExperimentManager:
                     )
                 return result
             if action == "restart":
-                return self._restart(experiment_id, directory)
+                return self._restart(experiment_id, directory, at=at)
             if action == "inject_message":
                 receipt = self._inject_message(
                     directory,
@@ -1406,9 +1412,15 @@ class ExperimentManager:
             result["approval_revoked_session"] = revoked
         return result
 
-    def _restart(self, experiment_id: str, directory: Path) -> dict[str, object]:
+    def _restart(
+        self, experiment_id: str, directory: Path, *, at: str | None = None
+    ) -> dict[str, object]:
         """Terminate-and-restart in one step: SIGTERM the live worker, SIGKILL
         it if it outlives the grace, then resume via the ledger.
+
+        ``at="session_boundary"`` defers instead: the request is recorded in
+        the control state and the live worker re-executes itself once the
+        session it is running has been recorded, so a code swap costs no Fold.
 
         Escalating rather than refusing: a worker that ignores SIGTERM is
         almost always inside a model call, which routinely outlasts any grace
@@ -1419,8 +1431,25 @@ class ExperimentManager:
         status and control writes are atomic, and the restarted worker
         re-derives its position from the ledger, rerunning the interrupted
         session whole."""
+        if at is not None and at not in {"immediate", "session_boundary"}:
+            raise ManagerError("restart at must be immediate or session_boundary")
         status_path = directory / "hitl/status.json"
         status = _read_json(status_path)
+        if at == "session_boundary":
+            # Only a live worker can consume the flag; without one the
+            # researcher would watch a request that never applies.
+            if not status_pid_alive(status):
+                raise ManagerError("session_boundary restart requires a live worker")
+            control_path = directory / "hitl/control.json"
+            with control_lock(control_path):
+                control = read_control(control_path)
+                control.restart_pending = True
+                write_control(control_path, control)
+            return {
+                "restarted": False,
+                "at": "session_boundary",
+                "restart_pending": True,
+            }
         escalated = False
         if status_pid_alive(status):
             pid = int(status["pid"])
@@ -1438,6 +1467,7 @@ class ExperimentManager:
         _reclaim_sandbox_containers(experiment_id)
         return {
             "restarted": True,
+            "at": "immediate",
             "escalated": escalated,
             **self.start_worker(experiment_id),
         }

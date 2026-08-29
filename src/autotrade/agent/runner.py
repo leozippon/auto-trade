@@ -33,10 +33,12 @@ from autotrade.environment.llm import (
     AGENT_MAX_OUTPUT_TOKENS,
     ChatMessage,
     LLMProxy,
+    MalformedToolCallError,
     ToolCall,
     context_overflow_error,
     context_request_fits,
     is_context_overflow_error,
+    malformed_tool_call_messages,
 )
 from autotrade.environment.runtime import sanitize_for_log, utc_now_iso
 from autotrade.environment.time_budget import (
@@ -354,6 +356,7 @@ class AgentSessionRunner:
         accepted_steps = 0
         step_wrap_up_sent = False
         llm_failure_streak = 0
+        malformed_reissue_used = False
         context_overflow_recovery_used = False
         self._complete_validation_nodes = []
         self._hard_finalization = False
@@ -439,20 +442,24 @@ class AgentSessionRunner:
                 )
                 llm_calls += 1
                 llm_failure_streak = 0
+                malformed_reissue_used = False
             except Exception as exc:
                 llm_calls += 1
                 llm_failure_streak += 1
                 error = safe_error_summary(exc)
-                self._emit(
-                    "llm_call",
-                    {
-                        "call_index": llm_calls,
-                        "status": "error",
-                        "provider": getattr(self.llm, "provider", ""),
-                        "model": getattr(self.llm, "model", ""),
-                        "error": error,
-                    },
-                )
+                malformed = isinstance(exc, MalformedToolCallError)
+                failure: dict[str, object] = {
+                    "call_index": llm_calls,
+                    "status": "error",
+                    "provider": getattr(self.llm, "provider", ""),
+                    "model": getattr(self.llm, "model", ""),
+                    "error": error,
+                }
+                if malformed:
+                    # Countable in an audit: this class costs one round, not a
+                    # repeated generation.
+                    failure["error_type"] = "malformed_tool_call"
+                self._emit("llm_call", failure)
                 if is_context_overflow_error(exc):
                     if not context_overflow_recovery_used:
                         messages, progressed = self._recover_context_overflow(
@@ -495,6 +502,13 @@ class AgentSessionRunner:
                     raise RuntimeError(
                         "Agent language model unavailable after consecutive failures"
                     ) from exc
+                if malformed and not malformed_reissue_used:
+                    # One re-issue per streak: keep the text that did arrive
+                    # and ask only for the call again. A second failure falls
+                    # through to the generic handling below.
+                    malformed_reissue_used = True
+                    messages.extend(malformed_tool_call_messages(exc, error=error))
+                    continue
                 observation: dict[str, object] = {
                     "observation": "llm_error",
                     "error": error,

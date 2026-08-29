@@ -41,6 +41,28 @@ class LLMProxyError(RuntimeError):
         self.status_code = status_code
 
 
+class MalformedToolCallError(LLMProxyError):
+    """A tool call the model itself emitted unparseable.
+
+    Model output, not transport: replaying the request repeats the whole
+    generation for the same defect, so it is never retryable. ``content`` and
+    ``reasoning_content`` carry the assistant text that did arrive, so the
+    caller can keep the analysis in the conversation and ask only for the call
+    to be re-issued.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        content: str = "",
+        reasoning_content: str | None = None,
+    ) -> None:
+        super().__init__(message, retryable=False)
+        self.content = content
+        self.reasoning_content = reasoning_content
+
+
 def _json_object(value: Mapping[str, object]) -> dict[str, object]:
     try:
         normalized = json.loads(
@@ -168,6 +190,46 @@ class ChatMessage:
         if self.reasoning_content is not None:
             record["reasoning_content"] = self.reasoning_content
         return record
+
+
+MALFORMED_TOOL_CALL_HINT = (
+    "Re-issue only that tool call, with a valid name and valid JSON arguments. "
+    "The analysis you already wrote is kept above; do not repeat it."
+)
+
+
+def malformed_tool_call_messages(
+    exc: MalformedToolCallError, *, error: str
+) -> list[ChatMessage]:
+    """The conversation turn that recovers one malformed tool call.
+
+    The assistant text that did arrive is kept as its own message (a rejected
+    trailing tool call must not cost a whole analysis), followed by the
+    observation naming the defect and asking for the call again.
+    """
+
+    messages: list[ChatMessage] = []
+    if exc.content or exc.reasoning_content:
+        messages.append(
+            ChatMessage(
+                "assistant", exc.content, reasoning_content=exc.reasoning_content
+            )
+        )
+    messages.append(
+        ChatMessage(
+            "user",
+            json.dumps(
+                {
+                    "observation": "malformed_tool_call",
+                    "error": error,
+                    "retry_hint": MALFORMED_TOOL_CALL_HINT,
+                },
+                ensure_ascii=False,
+                allow_nan=False,
+            ),
+        )
+    )
+    return messages
 
 
 @dataclass(frozen=True)

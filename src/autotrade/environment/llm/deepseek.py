@@ -33,6 +33,7 @@ from .conversation_log import (
 from .proxy import (
     ChatMessage,
     LLMProxyError,
+    MalformedToolCallError,
     ProviderResponse,
     ToolCall,
     CONTEXT_OUTPUT_MAX_SHRINKS,
@@ -60,6 +61,15 @@ _OUTPUT_LIMIT_TOOL_CALL_ERROR = (
     "provider output hit max_tokens inside a tool call (finish_reason=length); "
     "no call from this response was executed: re-issue it with shorter arguments, "
     "e.g. write large content in several write_file/edit_file calls"
+)
+# A tool call that fails to parse for any other reason (unparseable JSON
+# arguments, a missing name) is the same class of fault: the model wrote it.
+# Repeating the request only pays for the whole generation again, so the
+# response is rejected without a retry and the error names the call and the
+# defect for the Runner's observation.
+_MALFORMED_TOOL_CALL_ERROR = (
+    "provider returned a malformed tool call (tool={name}: {detail}); "
+    "no call from this response was executed"
 )
 _HTTP_ERROR_BODY_MAX_BYTES = 64 * 1024
 _RUNTIME_ERROR_MAX_CHARS = 1_025
@@ -671,6 +681,13 @@ class OpenAICompatibleProxy:
             ) from exc
 
     def _normalize_error(self, exc: Exception) -> LLMProxyError:
+        if isinstance(exc, MalformedToolCallError):
+            # Keeps the assistant text the caller replays; never retryable.
+            return MalformedToolCallError(
+                self._bounded_runtime_error(self._redact_runtime_details(str(exc))),
+                content=exc.content,
+                reasoning_content=exc.reasoning_content,
+            )
         if isinstance(exc, LLMProxyError):
             message = self._bounded_runtime_error(
                 self._redact_runtime_details(str(exc))
@@ -817,21 +834,30 @@ def _parse_reasoning_content(record: Mapping[str, object]) -> tuple[bool, str | 
     return True, value
 
 
+def _malformed_tool_call_name(raw_call: object) -> str:
+    if isinstance(raw_call, Mapping):
+        function = raw_call.get("function")
+        if isinstance(function, Mapping):
+            name = function.get("name")
+            if isinstance(name, str) and name.strip():
+                return name.strip()
+    return "<unnamed>"
+
+
 def _parse_complete_tool_call(
     raw_call: object,
     *,
-    error_message: str,
-    retryable: bool,
     output_limited: bool = False,
+    content: str = "",
+    reasoning_content: str | None = None,
 ) -> ToolCall:
     """Validate one complete OpenAI-compatible tool call without coercion.
 
-    ``output_limited`` says the generation stopped at max_tokens: a call that
-    then fails to parse was cut off, and the error says so instead of
-    reporting a provider fault."""
+    A call that does not parse is rejected as :class:`MalformedToolCallError`,
+    carrying the assistant text that did arrive. ``output_limited`` says the
+    generation stopped at max_tokens: the call was cut off, and the error says
+    so instead of reporting a generic defect."""
 
-    if output_limited:
-        error_message, retryable = _OUTPUT_LIMIT_TOOL_CALL_ERROR, False
     try:
         if not isinstance(raw_call, Mapping):
             raise TypeError("tool call is not an object")
@@ -852,7 +878,17 @@ def _parse_complete_tool_call(
             raise TypeError("tool arguments are not an object")
         return ToolCall(call_id, name, arguments)
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
-        raise LLMProxyError(error_message, retryable=retryable) from exc
+        detail = f"missing field {exc}" if isinstance(exc, KeyError) else str(exc)
+        message = (
+            _OUTPUT_LIMIT_TOOL_CALL_ERROR
+            if output_limited
+            else _MALFORMED_TOOL_CALL_ERROR.format(
+                name=_malformed_tool_call_name(raw_call), detail=detail
+            )
+        )
+        raise MalformedToolCallError(
+            message, content=content, reasoning_content=reasoning_content
+        ) from exc
 
 
 def _parse_response(raw: bytes, *, expected_model: str) -> ProviderResponse:
@@ -878,16 +914,17 @@ def _parse_response(raw: bytes, *, expected_model: str) -> ProviderResponse:
         raw_calls = []
     elif not isinstance(raw_calls, list):
         raise LLMProxyError("provider returned an invalid tool call", retryable=False)
+    _reasoning_present, reasoning_content = _parse_reasoning_content(message)
+    raw_content = message.get("content")
     for raw_call in raw_calls:
         calls.append(
             _parse_complete_tool_call(
                 raw_call,
-                error_message="provider returned an invalid tool call",
-                retryable=False,
                 output_limited=choice.get("finish_reason") == "length",
+                content=raw_content if isinstance(raw_content, str) else "",
+                reasoning_content=reasoning_content,
             )
         )
-    _reasoning_present, reasoning_content = _parse_reasoning_content(message)
     if "content" not in message:
         if not calls and not (
             _reasoning_present
@@ -1031,6 +1068,10 @@ def _parse_stream_response(raw: bytes, *, expected_model: str) -> ProviderRespon
                     assembled["name"] += name
                 if arguments:
                     assembled["arguments"] += arguments
+    assistant_content = "".join(content)
+    assistant_reasoning = (
+        "".join(reasoning_content) if reasoning_content_seen else None
+    )
     calls: list[ToolCall] = []
     for index in tool_order:
         assembled = tools[index]
@@ -1045,20 +1086,18 @@ def _parse_stream_response(raw: bytes, *, expected_model: str) -> ProviderRespon
                         "arguments": assembled["arguments"],
                     },
                 },
-                error_message="provider returned an invalid stream tool call",
-                retryable=True,
                 output_limited=finish_reason == "length",
+                content=assistant_content,
+                reasoning_content=assistant_reasoning,
             )
         )
     try:
         return ProviderResponse(
-            content="".join(content),
+            content=assistant_content,
             tool_calls=tuple(calls),
             model=model,
             usage=usage,
-            reasoning_content=(
-                "".join(reasoning_content) if reasoning_content_seen else None
-            ),
+            reasoning_content=assistant_reasoning,
         )
     except ValueError as exc:
         raise _provider_response_validation_error(exc) from exc
