@@ -4,7 +4,7 @@ The console lists experiments from whatever is on disk, so a legacy
 ``params.json`` (pre development-window keys) must degrade to an unreadable
 row instead of taking the listing down; the graduation verdict must reach the
 listing only after the reveal; and the create form must be seeded with the
-single-window defaults the worker actually runs.
+regular-Fold defaults the worker actually runs.
 """
 
 from __future__ import annotations
@@ -178,7 +178,7 @@ def test_a_held_out_row_without_a_verdict_shows_no_verdict_in_the_console(tmp_pa
     assert summary["verdict"] is None
 
 
-def test_the_create_form_is_seeded_with_the_single_window_design(tmp_path: Path):
+def test_the_create_form_is_seeded_with_the_yearly_fold_design(tmp_path: Path):
     schema = TestClient(create_app(tmp_path)).get("/api/parameter-schema").json()
     fields = {field["key"]: field for group in schema["groups"] for field in group["fields"]}
     assert fields["test_stage"]["type"] == "bool"
@@ -187,12 +187,13 @@ def test_the_create_form_is_seeded_with_the_single_window_design(tmp_path: Path)
     assert fields["development_last_period"]["required"] is True
     assert "first_test_period" not in fields and "last_test_period" not in fields
     for key, value in (
-        ("epochs", 1),
+        ("epochs", 3),
+        ("meta_learning_fold_interval", 1),
         ("window_months", 24),
-        ("max_fold_minutes", 720),
-        ("max_steps_per_fold", 30),
-        ("max_backtests_per_fold", 30),
-        ("max_llm_calls", 1600),
+        ("max_fold_minutes", 480),
+        ("max_steps_per_fold", 20),
+        ("max_backtests_per_fold", 20),
+        ("max_llm_calls", 1200),
         ("screen_exclude_st", False),
         ("screen_exclude_new_listed_days", 0),
         ("screen_boards", []),

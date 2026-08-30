@@ -393,6 +393,16 @@ class PublicIdentity:
         safe = self._safe_value(text)
         return safe if isinstance(safe, str) else ""
 
+    def public_value(self, value: object) -> object | None:
+        """Project one nested block that carries no record-level identities.
+
+        The record/status/control projections above key off field names they
+        know. A block the console republishes verbatim (a run manifest's
+        mounted-memory record) has none of them and still must not carry host
+        paths out, so it goes through the same generic projector."""
+
+        return self._safe_value(value)
+
     def public_analysis_meta(self, payload: Mapping[str, object]) -> dict[str, object]:
         return {
             key: self._safe_value(value)
@@ -462,10 +472,21 @@ class PublicIdentity:
             for root in self._host_roots:
                 if root and root != "/":
                     safe = safe.replace(root, "[host]")
-            safe = _FILE_URI.sub("[host path omitted]", safe)
-            safe = _WINDOWS_PATH.sub("[host path omitted]", safe)
-            return _POSIX_PATH.sub(_redact_posix_path, safe)
+            return redact_host_paths(safe)
         return value
+
+
+def redact_host_paths(text: str) -> str:
+    """Scrub host paths out of text that belongs to no single experiment.
+
+    :class:`PublicIdentity` adds the experiment's own roots and reference
+    mappings on top; repository-level content (the curated memory library) has
+    neither, so this is the whole rule for it — and the same rule, not a second
+    one, is what every experiment-scoped string ends with."""
+
+    safe = _FILE_URI.sub("[host path omitted]", text)
+    safe = _WINDOWS_PATH.sub("[host path omitted]", safe)
+    return _POSIX_PATH.sub(_redact_posix_path, safe)
 
 
 def _strategy_ref_key(name: str) -> str:

@@ -64,6 +64,11 @@ def build_experiment_report(ledger_path: str | Path, output_dir: str | Path) -> 
     _plot_epoch_comparison(rows, epoch_comparison)
     summary = _summarize(rows)
     summary["benchmark"] = benchmark_info
+    # Walk-forward record: each Fold's inherited strategy replayed unchanged on
+    # that Fold's window by the host before the session (docs/pipeline-design.md
+    # §2.2). Genuine out-of-sample evidence in Epoch 1; later Epochs revisit
+    # windows the lineage has already seen.
+    summary["walk_forward"] = _walk_forward(folds)
     # Graduation verdict of the frozen strategy on Held-out; None until recorded.
     summary["verdict"] = experiment_verdict(heldout)
     # Flag the whole report when frozen benchmark blocks are missing for scored
@@ -79,7 +84,7 @@ def _fold_row(record: dict[str, object]) -> dict[str, object]:
     test = record.get("test_result") or {}
     benchmark_return, benchmark_label = _frozen_benchmark(test)
     test_return = _num(test.get("total_return"))
-    # A single-window development Fold has no Test region: its row spans the
+    # A regular development Fold has no Test region: its row spans the
     # validation window and its test columns stay empty.
     period = record.get("test_period") or record.get("validation_period")
     return {
@@ -107,6 +112,55 @@ def _fold_row(record: dict[str, object]) -> dict[str, object]:
             else None
         ),
     }
+
+
+def _walk_forward(folds: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Per-Epoch transitions previous Fold -> this Fold from ``parent_control``."""
+    by_epoch: dict[str, list[dict[str, object]]] = {}
+    ordered = sorted(
+        folds,
+        key=lambda row: (str(row.get("epoch_id", "")), str(row.get("validation_period", ""))),
+    )
+    for record in ordered:
+        control = record.get("parent_control")
+        if not isinstance(control, dict):
+            continue
+        result = control.get("validation_result") or {}
+        benchmark_return, _label = _frozen_benchmark(result)
+        total = _num(result.get("total_return"))
+        period = record.get("validation_period")
+        by_epoch.setdefault(str(record.get("epoch_id", "")), []).append(
+            {
+                "fold": str(record.get("fold_id", "")).replace("fold_", ""),
+                "period_start": _period_part(period, "start"),
+                "period_end": _period_part(period, "end"),
+                "parent_strategy_artifact_id": control.get("parent_strategy_artifact_id"),
+                "status": control.get("status"),
+                "error": control.get("error"),
+                "return": total,
+                "benchmark_return": benchmark_return,
+                "excess_return": (
+                    total - benchmark_return
+                    if total is not None and benchmark_return is not None
+                    else None
+                ),
+                "sharpe": _num(result.get("sharpe")),
+                "max_drawdown": _num(result.get("max_drawdown")),
+            }
+        )
+    return [
+        {
+            "epoch_id": epoch_id,
+            "transitions": transitions,
+            "mean_excess_return": _mean(
+                [row["excess_return"] for row in transitions if row["excess_return"] is not None]
+            ),
+            "mean_sharpe": _mean(
+                [row["sharpe"] for row in transitions if row["sharpe"] is not None]
+            ),
+        }
+        for epoch_id, transitions in by_epoch.items()
+    ]
 
 
 def _heldout_row(record: dict[str, object]) -> dict[str, object]:

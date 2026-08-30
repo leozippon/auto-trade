@@ -34,7 +34,7 @@ Do not add a generic optimizer, custom backtester, persistent state machine, fra
 
 A Fold with a parent must complete a Validation of executable logic different from that parent before it may retain the parent. Comment-only edits, a parent replay, and an inactive parameter change do not satisfy this pack's purpose.
 
-Before spending a Validation on an idea, screen it offline over the 21-month input window — visible event counts, coverage stability, and the quarter-by-quarter sign of the cohort's forward return — and drop the ones that cannot clear that screen.
+Before spending a Validation on an idea, screen it offline over the 24-month input window — visible event counts, coverage stability, and the quarter-by-quarter sign of the cohort's forward return — and drop the ones that cannot clear that screen.
 
 Use this order, skipping an item only when its required domain is absent or its schema/PIT contract cannot be proved:
 
@@ -45,7 +45,7 @@ Use this order, skipping an item only when its required domain is absent or its 
 
 Complete at least three genuinely different idea Validations inside the fold before tuning thresholds; the fold budget allows more. If only daily data is available, use ideas 3 and 4 and then an independent variant of one of them rather than stopping early. A hybrid of the two best completed candidates is allowed only after both standalone mechanisms have been measured.
 
-For each revision, change one hypothesis family, state its failure condition before Validation, and compare exposure, turnover, rejected orders, costs, concentration, drawdown, and return against a same-window run of the parent. Report those figures separately for the two halves and the four sub-windows of the Validation year: an edge confined to one sub-window, or with halves of opposite sign, is a failure even when the full-year total looks good. Roll back a failed node rather than carrying dead branches into the official file.
+For each revision, change one hypothesis family, state its failure condition before Validation, and compare exposure, turnover, rejected orders, costs, concentration, drawdown, and return against the host's parent control — the inherited parent replayed unchanged on this Fold's window before the session started, so do not spend a Validation re-running it yourself. Report those figures separately for the two halves and the four sub-windows of the Validation year: an edge confined to one sub-window, or with halves of opposite sign, is a failure even when the full-year total looks good. Roll back a failed node rather than carrying dead branches into the official file.
 
 ## 4. Idea implementation cards
 

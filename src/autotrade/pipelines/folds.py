@@ -1,13 +1,15 @@
 """Development calendar (docs/pipeline-design.md chapter 1).
 
 The development window is one contiguous range of cadence periods. By default
-it is a single Fold whose validation region is the whole window and which has
-no test region: freezing it ends development and the frozen strategy goes
-straight to the automatic Held-out replay. With ``test_stage`` the window is
-cut into rolling Folds instead: the first period is validation only and every
-later period is a Fold named after it, with the preceding period as its
-validation region. Either way the months before a validation region are its
-input window.
+every period is one regular Fold whose validation region is that period and
+which has no test region; the Folds run in chronological order with a Meta
+session between them, and the last frozen strategy goes straight to the
+automatic Held-out replay. A window written as one explicit ``start..end``
+range is a single period and therefore a single Fold. With ``test_stage`` the
+window is cut into rolling Folds instead: the first period is validation only
+and every later period is a Fold named after it, with the preceding period as
+its validation region. Either way the months before a validation region are
+its input window.
 
 Each region's decision-input snapshot is anchored at 23:59:59 of the last
 trading day BEFORE the region begins: the agent's frozen research baseline then
@@ -45,9 +47,9 @@ MIN_REGION_TRADE_DAYS = 2
 class FoldSpec:
     """One development Fold.
 
-    The test region is optional: the default single-window development Fold
+    The test region is optional: a regular development Fold (no Test stage)
     has none, and its ledger record carries ``test_period=None`` rather than a
-    placeholder. Held-out is the verdict for such a Fold.
+    placeholder. Held-out is the verdict for such Folds.
     """
 
     fold_id: str
@@ -151,18 +153,6 @@ def period_bounds(label: str, *, period: str = "quarter") -> tuple[str, str]:
     return start.strftime("%Y%m%d"), end.strftime("%Y%m%d")
 
 
-def previous_period(label: str, *, period: str = "quarter") -> str:
-    period = _normalize_period(period)
-    if _is_explicit_range(label):
-        raise ValueError(
-            f"explicit date-range period {label!r} has no preceding {period}; a "
-            "fold's validation period is derived at the configured cadence"
-        )
-    start, _ = period_bounds(label, period=period)
-    previous = _advance_period(pd.Timestamp(start), period, -1)
-    return _period_label(previous, period)
-
-
 def first_trading_day(start: str, end: str, trading_days: list[str]) -> str:
     for day in trading_days:
         if start <= day <= end:
@@ -182,8 +172,10 @@ def build_fold_schedule(
 ) -> list[FoldSpec]:
     """Folds of the development window ``first..last`` (inclusive labels).
 
-    ``test_stage=False``: exactly one Fold whose validation region is the whole
-    window and which has no test region; its id is the explicit range label.
+    ``test_stage=False``: one regular Fold per period of the window, in
+    chronological order, each named after its period and validated on it, with
+    no test region. An explicit ``start..end`` window is one period, so it
+    yields the single Fold ``fold_<start>..<end>``.
     ``test_stage=True``: rolling Folds inside the window, one per period after
     the first; each is named after its test period and validated on the period
     before it, so the whole window is used and nothing hidden precedes it.
@@ -191,21 +183,22 @@ def build_fold_schedule(
     period = _normalize_period(period)
     labels = period_range(development_first_period, development_last_period, period=period)
     if not test_stage:
-        validation_start = period_bounds(labels[0], period=period)[0]
-        validation_end = period_bounds(labels[-1], period=period)[1]
-        label = f"{validation_start}..{validation_end}"
-        _require_min_trade_days(
-            f"fold_{label} validation", validation_start, validation_end, trading_days, min_region_trade_days
-        )
-        return [
-            _fold_spec(
-                f"fold_{label}",
-                validation_start,
-                validation_end,
-                trading_days,
-                window_months=window_months,
+        folds = []
+        for label in labels:
+            validation_start, validation_end = period_bounds(label, period=period)
+            _require_min_trade_days(
+                f"fold_{label} validation", validation_start, validation_end, trading_days, min_region_trade_days
             )
-        ]
+            folds.append(
+                _fold_spec(
+                    f"fold_{label}",
+                    validation_start,
+                    validation_end,
+                    trading_days,
+                    window_months=window_months,
+                )
+            )
+        return folds
     if len(labels) < 2:
         raise ValueError(
             f"test_stage needs at least two development periods, got {labels}: the first "

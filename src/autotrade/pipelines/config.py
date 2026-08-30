@@ -95,14 +95,22 @@ class AcceptanceRules:
             "max_drawdown": self.max_drawdown,
         }
 
-    def heldout_verdict(self, summary: Mapping[str, object] | None) -> dict[str, object]:
+    def heldout_verdict(
+        self,
+        summary: Mapping[str, object] | None,
+        walk_forward: Mapping[str, object] | None = None,
+    ) -> dict[str, object]:
         """Graduation verdict of one Held-out replay (docs/pipeline-design.md §3.3).
 
-        ``graduated`` iff the frozen strategy beat its benchmark (excess return
-        > 0), earned a positive annualized Sharpe, and stayed within the
-        experiment's ``max_drawdown``; otherwise ``discarded`` with every
-        failing reason. A missing or non-finite input is itself a failing
-        reason: a replay that cannot prove the three conditions did not pass.
+        ``graduated`` iff (a) the frozen strategy beat its benchmark on
+        Held-out (excess return > 0), earned a positive annualized Sharpe, and
+        stayed within the experiment's ``max_drawdown``, and (b) the final
+        Epoch's walk-forward transitions (``ledger.walk_forward_transitions``)
+        show a positive excess return in at least two thirds of them (rounded
+        up). Otherwise ``discarded`` with every failing reason. A missing or
+        non-finite input is itself a failing reason: a replay that cannot
+        prove the conditions did not pass. Term (b) is ``not_applicable`` when
+        the schedule has no transitions, and the verdict then rests on (a).
         """
         reasons: list[str] = []
         values: dict[str, float | None] = {}
@@ -143,6 +151,13 @@ class AcceptanceRules:
             reasons.append("sharpe_not_positive")
         if drawdown is not None and abs(drawdown) > self.max_drawdown:
             reasons.append("max_drawdown_exceeded")
+        consistency = self.walk_forward_consistency(walk_forward)
+        if consistency["status"] == "inconsistent":
+            reasons.append(
+                "walkforward_excess_inconsistent("
+                f"{consistency['positive_excess']}/{consistency['transitions']}"
+                f"<{consistency['required']})"
+            )
         return {
             "status": "discarded" if reasons else "graduated",
             "reasons": reasons,
@@ -150,6 +165,25 @@ class AcceptanceRules:
             "sharpe": sharpe,
             "max_drawdown": drawdown,
             "max_drawdown_limit": self.max_drawdown,
+            "walk_forward": consistency,
+        }
+
+    @staticmethod
+    def walk_forward_consistency(
+        walk_forward: Mapping[str, object] | None,
+    ) -> dict[str, object]:
+        """Term (b) of graduation: positive excess in >= ceil(2/3) of transitions."""
+        transitions = int((walk_forward or {}).get("transitions") or 0)
+        if transitions <= 0:
+            return {"status": "not_applicable", "transitions": 0}
+        positive = int((walk_forward or {}).get("positive_excess") or 0)
+        required = math.ceil(2 * transitions / 3)
+        return {
+            "status": "consistent" if positive >= required else "inconsistent",
+            "source": str((walk_forward or {}).get("source") or ""),
+            "transitions": transitions,
+            "positive_excess": positive,
+            "required": required,
         }
 
     def evaluate(self, summary: dict[str, object]) -> tuple[list[str], list[str]]:
@@ -204,23 +238,27 @@ class RollingExperimentConfig:
     heldout_first_period: str
     heldout_last_period: str
     fold_period: str = DEFAULT_FOLD_PERIOD
-    # False: one development Fold over the whole window, no frozen Test; the
-    # frozen strategy goes straight to Held-out, which is the verdict. True:
-    # rolling Folds inside the window (first period validation only, each
-    # later period a test with the preceding period as its validation).
+    # False: one regular Fold per cadence period of the window, no frozen
+    # Test; the last frozen strategy goes straight to Held-out, which is the
+    # verdict. True: rolling Folds inside the window (first period validation
+    # only, each later period a test with the preceding period as its
+    # validation).
     test_stage: bool = False
-    epochs: int = 1
+    # Passes over the whole development window; the Fold chain and the Meta
+    # cadence continue across the Epoch boundary.
+    epochs: int = 3
     # The macro data floor is 2020-01, so 24 months before the default 2022-01
     # development start is the most history available.
     window_months: int = 24
     min_region_trade_days: int = 2
-    max_steps_per_fold: int = 30
-    max_backtests_per_fold: int = 30
-    max_llm_calls: int = 1600
+    # Per-Fold budgets sized for a one-year Validation region with
+    # ``batch_validate`` available; the host's parent control before the
+    # session is never charged against them.
+    max_steps_per_fold: int = 20
+    max_backtests_per_fold: int = 20
+    max_llm_calls: int = 1200
     session_max_attempts: int = 3
-    # One development Fold spans the whole window and is fitted as far as the
-    # agent can take it, so the session budget is sized for a long session.
-    max_fold_minutes: int = 720
+    max_fold_minutes: int = 480
     # Trailing wrap-up grace added to the Fold session budget and forwarded on
     # FoldSessionRequest.deadline_grace_seconds. Implementation default only.
     deadline_grace_minutes: int = DEFAULT_DEADLINE_GRACE_MINUTES
@@ -237,10 +275,9 @@ class RollingExperimentConfig:
     convergence_start_epoch: int = 3
     # Preserve the Epoch-start Meta session. A positive value additionally
     # triggers Meta after every N completed Folds, before the next Fold; 0
-    # disables the within-Epoch triggers. The interval counts Folds: with the
-    # default single development Fold only the Epoch-start Meta ever runs,
-    # and the same value keeps a Meta between consecutive Folds when
-    # test_stage cuts the window into several.
+    # disables the within-Epoch triggers. The interval counts Folds: the
+    # default 1 puts a Meta session between every two consecutive Folds, and
+    # the Epoch-start session covers the boundary between Epochs.
     meta_learning_fold_interval: int = 1
     # Raw prior meta-learning traces handed to the next meta session are bounded
     # to the most recent N epochs (0 disables raw memory). Unbounded concatenation
@@ -447,6 +484,10 @@ class StepResult:
     revision_id: str
     validation: EvaluationResult
     selected: bool = False
+    # The host's parent control recorded as an in-session Step node: the
+    # inherited parent replayed unchanged on this Fold's Validation window
+    # before the Agent started. It is never charged against the Step budget.
+    parent_control: bool = False
 
 
 @dataclass(frozen=True)
@@ -477,8 +518,12 @@ class FoldSessionRequest:
     # sandbox owner, which is the component that writes the manifest.
     fold_period: str = DEFAULT_FOLD_PERIOD
     # Whether a frozen Test follows this Fold (rolling development) or the
-    # Held-out replay is the next and final evaluation (single window).
+    # Held-out replay is the next and final evaluation (regular Folds).
     test_stage: bool = False
+    # The parent's completed Validation on this Fold's window, replayed by the
+    # host before the session; None without a parent or when it failed. The
+    # developer records it as the session's first Step node.
+    parent_control: EvaluationResult | None = None
     epoch_index: int = 1
     phase: str = "exploration"
     acceptance_rules: Mapping[str, object] = field(default_factory=dict)

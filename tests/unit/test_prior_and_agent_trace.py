@@ -25,7 +25,7 @@ from autotrade.environment.identity import AgentRefStore
 from autotrade.pipelines.experiment import _development_inputs
 from autotrade.pipelines.meta_inputs import (
     build_agent_process_summary,
-    build_meta_fold_reviews,
+    build_meta_fold_review_bundle,
     compact_agent_trace,
     select_meta_review_folds,
 )
@@ -425,7 +425,7 @@ def test_meta_fold_reviews_include_strategy_and_agent_trace_not_heldout(tmp_path
         "result": {"total_return": 0.99},
         "frozen_strategy_artifact_path": str(strategy),
     }
-    reviews = build_meta_fold_reviews(
+    reviews, _sidecars = build_meta_fold_review_bundle(
         [fold, heldout], ref_store=AgentRefStore(tmp_path / "experiment")
     )
     assert len(reviews) == 1
@@ -479,7 +479,7 @@ def test_meta_fold_reviews_without_trace_ref_are_explicitly_unavailable(
         '"parent_call_id": "call_9", "role": "auditor", "task": "count rows", "status": "started"}\n',
         encoding="utf-8",
     )
-    reviews = build_meta_fold_reviews(
+    reviews, _sidecars = build_meta_fold_review_bundle(
         [
             {
                 "record_type": "fold",
@@ -511,7 +511,7 @@ def test_meta_fold_reviews_resolve_relative_trace_ref(tmp_path: Path) -> None:
         '"parent_call_id": "call_9", "role": "auditor", "task": "count rows", "status": "started"}\n',
         encoding="utf-8",
     )
-    reviews = build_meta_fold_reviews(
+    reviews, _sidecars = build_meta_fold_review_bundle(
         [
             {
                 "record_type": "fold",

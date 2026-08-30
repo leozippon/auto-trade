@@ -27,7 +27,6 @@ from .runtime import (
 )
 
 DEFAULT_IMAGE = "autotrade-sandbox:latest"
-DEFAULT_HOST_FRACTION = 0.10
 
 RUNTIME_ENV_SCHEMA_VERSION = 2
 _MEMORY_LIMIT = re.compile(r"^[1-9][0-9]*(?:[kKmMgG])?$")
@@ -134,16 +133,6 @@ class SandboxSpec:
         if self.gpu is not None and self.gpu_count <= 0:
             raise ValueError("gpu_count must be a positive integer when GPUs are requested")
 
-    @classmethod
-    def from_host_fraction(cls, fraction: float = DEFAULT_HOST_FRACTION, **overrides: object) -> SandboxSpec:
-        if not 0 < fraction <= 1:
-            raise ValueError("fraction must be in (0, 1]")
-        cpus = max(1.0, round((os.cpu_count() or 4) * fraction, 1))
-        with Path("/proc/meminfo").open(encoding="ascii") as stream:
-            total_kib = int(next(line for line in stream if line.startswith("MemTotal:")).split()[1])
-        memory = f"{max(1, int(total_kib / 1024 / 1024 * fraction))}g"
-        return cls(cpus=cpus, memory=memory, **overrides)  # pyright: ignore[reportArgumentType]
-
     def to_record(self) -> dict[str, object]:
         return {
             "image_ref": self.image,
@@ -208,31 +197,8 @@ class LocalSandbox:
         self.paths.runtime_env.chmod(0o444)
         return self.paths.runtime_env
 
-    def install_replay_slot(self, slot: str, source_dir: Path) -> Path:
-        if slot not in {"train", "valid", "test"}:
-            raise ValueError(f"unknown replay slot: {slot}")
-        target = getattr(self.paths, slot)
-        link_copytree(source_dir, target)
-        target.chmod(0o700 if slot == "test" else 0o755)
-        return target
-
     def bind_snapshot_view(self, view_dir: Path) -> None:
         _replace_dir_contents(Path(view_dir), self.paths.current_snapshot)
-
-    def bind_formal_snapshot_view(self, view_dir: Path) -> None:
-        source = Path(view_dir).resolve()
-        allowed = (self.paths.snapshot_views.resolve(), self.paths.current_snapshot.resolve())
-        if not source.is_dir() or not any(source == root or source.is_relative_to(root) for root in allowed):
-            raise ValueError("formal snapshot view is outside sandbox snapshot roots")
-        self._bind_snapshot_selector(self.paths.formal_snapshot, source)
-
-    @staticmethod
-    def _bind_snapshot_selector(link: Path, source: Path) -> None:
-        if link.is_symlink() or link.exists():
-            if link.is_dir() and not link.is_symlink():
-                raise ValueError(f"snapshot selector must be a symlink, found directory: {link}")
-            link.unlink()
-        link.symlink_to(source.resolve(), target_is_directory=True)
 
     def collect_artifacts(self, dest_dir: Path) -> Path:
         """Collect runtime outputs into the host experiment run directory.
@@ -534,7 +500,7 @@ def _validate_explicit_image_tag(image: str) -> None:
 
 
 __all__ = [
-    "DEFAULT_HOST_FRACTION", "DEFAULT_IMAGE", "DockerSandbox",
+    "DEFAULT_IMAGE", "DockerSandbox",
     "LocalSandbox", "SandboxConfig", "SandboxLimits", "SandboxSpec", "hide_snapshot_slots_from_agent",
     "link_copytree", "probe_image_runtime",
 ]

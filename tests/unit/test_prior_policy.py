@@ -153,10 +153,6 @@ class FinishMetaToolTest(unittest.TestCase):
             self.assertFalse(result.ok)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class IdentifierDateTest(unittest.TestCase):
     def test_experiment_id_style_identifiers_are_not_dates(self) -> None:
         from autotrade.environment.tools.prior_policy import calendar_policy_violation

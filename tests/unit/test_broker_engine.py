@@ -348,10 +348,6 @@ class BrokerAccountingTest(unittest.TestCase):
         self.assertEqual(positions, {"000001.SZ": 100})
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class PositionCapTest(unittest.TestCase):
     """``max_total_holdings`` and ``max_single_name_weight`` are risk limits,
     not advisory settings: an order that breaches one is rejected outright."""

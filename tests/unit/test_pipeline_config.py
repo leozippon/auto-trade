@@ -32,7 +32,7 @@ _CONSOLE_CREATE_PRESET: dict[str, object] = {
     "compact_max_tokens": 10_000,
     # Empty: the worker derives it from the model window and output ceiling.
     "compact_token_threshold": None,
-    "epochs": 1,
+    "epochs": 3,
     "development_first_period": "2022",
     "fold_period": "year",
     "gpu_count": 1,
@@ -46,10 +46,12 @@ _CONSOLE_CREATE_PRESET: dict[str, object] = {
     "initial_control_mode": "auto",
     "analysis_enabled": False,
     "development_last_period": "2025",
-    "max_backtests_per_fold": 30,
-    "max_fold_minutes": 720,
-    "max_llm_calls": 1600,
-    "max_steps_per_fold": 30,
+    # Per-Fold budgets for a one-year Validation with batch_validate available.
+    "max_backtests_per_fold": 20,
+    "max_fold_minutes": 480,
+    "max_llm_calls": 1200,
+    "max_steps_per_fold": 20,
+    # Meta between every two consecutive Folds.
     "meta_learning_fold_interval": 1,
     "meta_model": LOCAL_QWEN_MODEL,
     "model": LOCAL_QWEN_MODEL,
@@ -58,7 +60,7 @@ _CONSOLE_CREATE_PRESET: dict[str, object] = {
     "screen_exclude_new_listed_days": 0,
     "screen_exclude_st": False,
     "strategy_period": "day",
-    # One development window, no Test stage: Held-out is the verdict.
+    # Regular yearly Folds, no Test stage: Held-out is the verdict.
     "test_stage": False,
     "window_months": 24,
 }
@@ -149,6 +151,65 @@ class AcceptanceRulesTest(unittest.TestCase):
             with self.subTest(**kwargs), self.assertRaises(ValueError):
                 AcceptanceRules(**kwargs)
 
+    def test_walk_forward_consistency_needs_two_thirds_rounded_up(self) -> None:
+        """Graduation term (b): positive excess in >= ceil(2/3) of the transitions."""
+        rules = AcceptanceRules()
+        for transitions, positive, status in (
+            (3, 2, "consistent"),
+            (3, 1, "inconsistent"),
+            (2, 2, "consistent"),
+            (2, 1, "inconsistent"),
+            (1, 1, "consistent"),
+            (1, 0, "inconsistent"),
+        ):
+            with self.subTest(transitions=transitions, positive=positive):
+                block = rules.walk_forward_consistency(
+                    {"source": "parent_control", "transitions": transitions, "positive_excess": positive}
+                )
+                self.assertEqual(block["status"], status)
+                self.assertEqual(block["required"], math.ceil(2 * transitions / 3))
+        self.assertEqual(rules.walk_forward_consistency(None), {"status": "not_applicable", "transitions": 0})
+        self.assertEqual(
+            rules.walk_forward_consistency({"transitions": 0})["status"], "not_applicable"
+        )
+
+    def test_held_out_verdict_names_the_walk_forward_term_when_it_fails(self) -> None:
+        rules = AcceptanceRules()
+        passing = {
+            "total_return": 0.10,
+            "sharpe": 1.0,
+            "max_drawdown": -0.05,
+            "benchmark": {"benchmark_return": 0.02},
+        }
+        # Held-out passes but only 1 of 3 walk-forward transitions beat the
+        # benchmark: term (b) fails and the reason carries the counts.
+        verdict = rules.heldout_verdict(
+            passing, {"source": "parent_control", "transitions": 3, "positive_excess": 1}
+        )
+        self.assertEqual(verdict["status"], "discarded")
+        self.assertEqual(verdict["reasons"], ["walkforward_excess_inconsistent(1/3<2)"])
+        self.assertEqual(verdict["walk_forward"]["status"], "inconsistent")
+        # 2 of 3 suffice; both terms then hold.
+        verdict = rules.heldout_verdict(
+            passing, {"source": "parent_control", "transitions": 3, "positive_excess": 2}
+        )
+        self.assertEqual((verdict["status"], verdict["reasons"]), ("graduated", []))
+        self.assertEqual(verdict["walk_forward"]["status"], "consistent")
+        # No transitions: term (b) is not applicable and (a) alone decides.
+        verdict = rules.heldout_verdict(passing, {"source": "parent_control", "transitions": 0})
+        self.assertEqual(verdict["status"], "graduated")
+        self.assertEqual(verdict["walk_forward"], {"status": "not_applicable", "transitions": 0})
+        self.assertEqual(rules.heldout_verdict(passing)["walk_forward"]["status"], "not_applicable")
+        # Term (a) failures and term (b) failures are both listed.
+        verdict = rules.heldout_verdict(
+            {**passing, "sharpe": -0.1},
+            {"source": "frozen_test", "transitions": 2, "positive_excess": 1},
+        )
+        self.assertEqual(
+            verdict["reasons"],
+            ["sharpe_not_positive", "walkforward_excess_inconsistent(1/2<2)"],
+        )
+
     def test_record_round_trips_the_three_thresholds(self) -> None:
         rules = AcceptanceRules(min_return=0.01, min_sharpe=0.2, max_drawdown=0.3)
         self.assertEqual(
@@ -162,10 +223,14 @@ class RollingExperimentConfigValidationTest(unittest.TestCase):
         config = make_config(Path("/tmp"))
         self.assertEqual(config.development_first_period, "2022Q1")
         self.assertFalse(config.test_stage)
-        self.assertEqual(config.epochs, 1)
+        self.assertEqual(config.epochs, 3)
         self.assertEqual(config.meta_learning_fold_interval, 1)
         self.assertEqual(config.fold_exploration_directive, "")
-        self.assertEqual(config.max_fold_minutes, 720)
+        self.assertEqual(config.max_fold_minutes, 480)
+        self.assertEqual(
+            (config.max_steps_per_fold, config.max_backtests_per_fold, config.max_llm_calls),
+            (20, 20, 1200),
+        )
         self.assertEqual(config.experiment_dir, Path("/tmp/experiments/exp"))
         self.assertEqual(
             config.ledger_path,
@@ -412,10 +477,6 @@ class DefaultsDriftTest(unittest.TestCase):
             if cli_default != expected:
                 mismatches[action.dest] = (cli_default, expected)
         self.assertEqual(mismatches, {})
-
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 RESTORED_CONSOLE_PARAMETERS = (

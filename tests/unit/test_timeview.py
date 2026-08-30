@@ -592,10 +592,6 @@ class TimeviewIntradaySchemaTest(unittest.TestCase):
             self.assertFalse(intraday["vol_pit"].isna().any())
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 def test_timeview_releases_auction_only_at_row_availability(tmp_path: Path) -> None:
     replay = pd.DataFrame({
         "ts_code": ["000001.SZ"],

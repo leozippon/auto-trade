@@ -1,5 +1,6 @@
-"""The research calendar: one development window, an optional Test stage, and
-the explicitly ranged Held-out.
+"""The research calendar: one regular Fold per period of the development
+window with Meta between them, an optional Test stage, and the explicitly
+ranged Held-out.
 
 The schedule decides which data every session may see, so these assert the
 regions and the decision anchors themselves, not merely that a schedule was
@@ -24,7 +25,6 @@ from autotrade.pipelines.folds import (
     build_fold_schedule,
     heldout_periods,
     period_range,
-    previous_period,
 )
 from autotrade.pipelines.hitl_state import WEB_CREATE_DEFAULTS, build_session_plan
 
@@ -69,43 +69,68 @@ def schedule(config: RollingExperimentConfig) -> list[FoldSpec]:
     )
 
 
-class SingleWindowDevelopmentTest(unittest.TestCase):
-    def test_the_console_defaults_build_one_development_fold_without_a_test(self) -> None:
+class RegularFoldScheduleTest(unittest.TestCase):
+    def test_the_console_defaults_build_one_yearly_fold_per_year_without_a_test(self) -> None:
         config = default_config()
         self.assertFalse(config.test_stage)
         folds = schedule(config)
-        self.assertEqual(len(folds), 1)
-        fold = folds[0]
-        # The whole 2022..2025 window is the validation region; the input
-        # window is the 24 months before it (the macro data floor is 2020-01).
-        self.assertEqual(fold.fold_id, "fold_20220101..20251231")
-        self.assertEqual((fold.input_window_start, fold.input_window_end), ("20200101", "20211231"))
-        self.assertEqual((fold.validation_start, fold.validation_end), ("20220101", "20251231"))
-        self.assertEqual(fold.valid_decision_time, anchor("20211231"))
-        self.assertFalse(fold.has_test)
-        self.assertIsNone(fold.test_start)
-        self.assertIsNone(fold.test_end)
-        self.assertIsNone(fold.test_decision_time)
-        # The ledger record says "no Test" explicitly, never a placeholder.
-        record = fold.to_record()
-        self.assertIsNone(record["test_period"])
-        self.assertIsNone(record["test_decision_time"])
-        self.assertEqual(record["validation_period"], "20220101..20251231")
+        # One regular Fold per year of 2022..2025, in order; each is validated
+        # on its own year and takes the 24 months before it as input (the
+        # macro data floor is 2020-01, so 2022 gets the most history there is).
+        self.assertEqual(
+            [
+                (
+                    fold.fold_id,
+                    fold.input_window_start,
+                    fold.input_window_end,
+                    fold.validation_start,
+                    fold.validation_end,
+                )
+                for fold in folds
+            ],
+            [
+                ("fold_2022", "20200101", "20211231", "20220101", "20221231"),
+                ("fold_2023", "20210101", "20221231", "20230101", "20231231"),
+                ("fold_2024", "20220101", "20231231", "20240101", "20241231"),
+                ("fold_2025", "20230101", "20241231", "20250101", "20251231"),
+            ],
+        )
+        # Each decision anchor is the close of the last trading day before the
+        # year: the SSE calendar puts those on the same weekdays.
+        self.assertEqual(
+            [fold.valid_decision_time for fold in folds],
+            [anchor("20211231"), anchor("20221230"), anchor("20231229"), anchor("20241231")],
+        )
+        for fold in folds:
+            self.assertFalse(fold.has_test)
+            self.assertIsNone(fold.test_start)
+            self.assertIsNone(fold.test_end)
+            self.assertIsNone(fold.test_decision_time)
+            # The ledger record says "no Test" explicitly, never a placeholder.
+            record = fold.to_record()
+            self.assertIsNone(record["test_period"])
+            self.assertIsNone(record["test_decision_time"])
+        self.assertEqual(folds[0].to_record()["validation_period"], "20220101..20221231")
 
-    def test_an_explicit_range_can_name_the_whole_development_window(self) -> None:
+    def test_an_explicit_range_is_one_period_and_therefore_one_fold(self) -> None:
         folds = build_fold_schedule(
-            "20220301..20251231",
-            "20220301..20251231",
+            "20220101..20251231",
+            "20220101..20251231",
             TRADING_DAYS,
             window_months=24,
             period="year",
         )
-        self.assertEqual([fold.fold_id for fold in folds], ["fold_20220301..20251231"])
-        self.assertEqual(folds[0].input_window_start, "20200301")
-        self.assertEqual(folds[0].valid_decision_time, anchor("20220228"))
+        self.assertEqual([fold.fold_id for fold in folds], ["fold_20220101..20251231"])
+        self.assertEqual(
+            (folds[0].validation_start, folds[0].validation_end), ("20220101", "20251231")
+        )
+        self.assertEqual(folds[0].input_window_start, "20200101")
+        self.assertEqual(folds[0].valid_decision_time, anchor("20211231"))
+        self.assertFalse(folds[0].has_test)
 
-    def test_the_session_plan_has_one_fold_then_held_out(self) -> None:
+    def test_the_session_plan_interleaves_meta_between_every_two_folds(self) -> None:
         config = default_config()
+        self.assertEqual((config.epochs, config.meta_learning_fold_interval), (3, 1))
         folds = schedule(config)
         heldout = heldout_periods(
             config.heldout_first_period,
@@ -120,16 +145,31 @@ class SingleWindowDevelopmentTest(unittest.TestCase):
             meta_enabled=True,
             meta_learning_fold_interval=config.meta_learning_fold_interval,
         )
-        # Epoch-start Meta, the single development Fold, then Held-out: the
-        # fold interval has no second Fold to trigger on.
+        sessions = [(row.get("kind"), row.get("epoch_id"), row.get("fold_id")) for row in plan["sessions"]]
+        def epoch(epoch_id: str) -> list[tuple[str, str, str | None]]:
+            return [
+                ("meta", epoch_id, "fold_2022"),
+                ("fold", epoch_id, "fold_2022"),
+                ("meta", epoch_id, "fold_2023"),
+                ("fold", epoch_id, "fold_2023"),
+                ("meta", epoch_id, "fold_2024"),
+                ("fold", epoch_id, "fold_2024"),
+                ("meta", epoch_id, "fold_2025"),
+                ("fold", epoch_id, "fold_2025"),
+            ]
+        # 4 Folds x 3 Epochs = 12 Fold sessions, a Meta before every one of
+        # them (the Epoch-start Meta covers the Epoch boundary), then one
+        # Held-out after the last Epoch: no Meta ever follows the final Fold.
         self.assertEqual(
-            [(row.get("kind"), row.get("fold_id")) for row in plan["sessions"]],
-            [
-                ("meta", "fold_20220101..20251231"),
-                ("fold", "fold_20220101..20251231"),
-                ("heldout", None),
-            ],
+            sessions,
+            [*epoch("epoch_001"), *epoch("epoch_002"), *epoch("epoch_003"), ("heldout", "epoch_003", None)],
         )
+        kinds = [kind for kind, _epoch, _fold in sessions[:-1]]
+        self.assertEqual(kinds.count("fold"), 12)
+        self.assertEqual(kinds.count("meta"), 12)
+        for index in range(1, len(kinds)):
+            if kinds[index] == "fold":
+                self.assertEqual(kinds[index - 1], "meta")
         self.assertEqual(plan["sessions"][-1]["periods"][0]["label"], "20260101..20260630")
 
     def test_a_fold_test_region_is_all_or_nothing(self) -> None:
@@ -202,8 +242,6 @@ class TestStageScheduleTest(unittest.TestCase):
                 period="year",
                 test_stage=True,
             )
-        with self.assertRaisesRegex(ValueError, "no preceding year"):
-            previous_period("20230101..20230630", period="year")
 
     def test_test_stage_must_be_boolean(self) -> None:
         with self.assertRaisesRegex(ValueError, "test_stage must be boolean"):

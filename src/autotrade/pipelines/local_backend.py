@@ -514,16 +514,6 @@ class SessionBudgetLLM(SessionTimeBudgetAware):
         return response
 
 
-class SandboxLost(SessionInterrupt):
-    """The session sandbox was destroyed while a formal call held it.
-
-    Every later tool call would fail against a container that no longer exists,
-    so the session aborts here and the pipeline retries the Fold with a fresh
-    one instead of letting the Agent spend its whole budget probing a dead
-    sandbox.
-    """
-
-
 def _public_error_text(exc: Exception, *, hidden: Sequence[str] = ()) -> str:
     """The exact failure text, host paths and hidden calendar redacted."""
     text = HOST_PATH_RE.sub("[host_path]", safe_error_summary(exc))
@@ -837,6 +827,58 @@ def inline_backtest_stats(summary: Mapping[str, object]) -> dict[str, object]:
         for key, value in summary.items()
         if key not in REPLAY_SCALED_SUMMARY_BLOCKS
     }
+
+
+PARENT_CONTROL_RESULT_NAME = "parent_control"
+
+
+def record_parent_control(
+    backtest: FoldBacktestTool,
+    control: EvaluationResult,
+    *,
+    output_dir: Path,
+    models_dir: Path,
+) -> StepResult:
+    """Record the host's parent control as this session's first Step node.
+
+    Called before the Agent's first call, while the working copy is still the
+    inherited parent byte for byte, so the revision taken from it is the tree
+    the host replayed. The node belongs to this session (``finish_fold`` may
+    nominate it as the explicit keep-parent once a different hypothesis has
+    been validated) and it charges no Validation slot and no Step: it is not
+    appended to ``backtest.steps``.
+    """
+
+    revision = backtest.artifact_store.create_revision(output_dir, models_path=models_dir)
+    typed = ArtifactRevision(
+        str(revision.revision_id),
+        Path(revision.output_path),
+        Path(revision.models_path) if revision.models_path is not None else None,
+    )
+    node_id = backtest.record_validation(
+        typed,
+        control,
+        result_name=PARENT_CONTROL_RESULT_NAME,
+        metadata={
+            "parent_control": True,
+            "hypothesis": "inherited parent replayed unchanged on this Fold's Validation window",
+        },
+    )
+    backtest.append_manifest_summary(
+        {
+            "result_name": PARENT_CONTROL_RESULT_NAME,
+            "mode": "valid",
+            "status": "ok",
+            "complete_validation": True,
+            "parent_control": True,
+            **{
+                key: value
+                for key, value in control.summary.items()
+                if not isinstance(value, (dict, list))
+            },
+        }
+    )
+    return StepResult(node_id, typed.revision_id, control, parent_control=True)
 
 
 class FoldBacktestTool(SessionTimeBudgetAware):
@@ -2150,6 +2192,19 @@ class LLMFoldDeveloper:
                 manifest=manifest,
                 decision_timeout_seconds=self.decision_timeout_seconds,
             )
+            # The parent's Validation on this window becomes the lineage root
+            # of this session before the Agent is prompted; the Agent's own
+            # Steps branch from it.
+            control_step = (
+                record_parent_control(
+                    backtest,
+                    request.parent_control,
+                    output_dir=output_dir,
+                    models_dir=models_dir,
+                )
+                if request.parent_control is not None
+                else None
+            )
             smoke = SmokeBacktestTool(
                 request=request,
                 output_dir=output_dir,
@@ -2309,8 +2364,12 @@ class LLMFoldDeveloper:
                     step.revision_id,
                     step.validation,
                     selected=step.step_id == selected_node,
+                    parent_control=step.parent_control,
                 )
-                for step in backtest.steps
+                for step in (
+                    *((control_step,) if control_step is not None else ()),
+                    *backtest.steps,
+                )
             )
             if selected_revision not in {step.revision_id for step in steps}:
                 raise RuntimeError(
@@ -2444,6 +2503,14 @@ class LLMFoldDeveloper:
                 ),
             ),
             "development_history": history,
+            # The inherited parent's completed Validation on this very window,
+            # replayed by the host before this session: the Agent's baseline,
+            # already a Step node in the tree and charged to no budget.
+            "parent_control": (
+                inline_backtest_stats(request.parent_control.summary)
+                if request.parent_control is not None
+                else None
+            ),
             "workspace": fold_workspace_map(paths.workspace),
             "forbidden": [
                 "current_test",

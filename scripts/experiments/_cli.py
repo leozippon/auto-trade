@@ -149,8 +149,8 @@ def add_calendar_arguments(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help=(
             "Roll Folds inside the development window (first period validation only, "
-            "each later period a frozen Test) instead of one development Fold over the "
-            "whole window."
+            "each later period a frozen Test) instead of one regular Fold per period "
+            "judged by Held-out alone."
         ),
     )
 

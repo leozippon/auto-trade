@@ -227,6 +227,67 @@ class ReportingTest(unittest.TestCase):
             self.assertEqual(summary["benchmark"]["status"], "missing_frozen_benchmark")
             self.assertTrue((tmp / "reports" / "epoch_comparison_returns.png").exists())
 
+    def test_the_walk_forward_record_lists_each_epochs_parent_controls(self):
+        # The inherited strategy replayed on the next Fold's window, per Epoch;
+        # a failed control stays visible as a transition without numbers.
+        def fold(epoch_id, fold_id, period, control):
+            return {
+                "record_type": "fold",
+                "experiment_id": "e",
+                "epoch_id": epoch_id,
+                "fold_id": fold_id,
+                "run_id": f"run_{epoch_id}_{fold_id}",
+                "fold_status": "frozen",
+                "validation_period": period,
+                "test_period": None,
+                "validation_result": {"total_return": 0.1, "sharpe": 1.0, "max_drawdown": 0.05},
+                "test_result": None,
+                "parent_control": control,
+            }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            ledger = ExperimentLedger(tmp / "ledger.jsonl")
+            ledger.append(fold("epoch_001", "fold_2022", "20220101..20221231", None))
+            ledger.append(
+                fold(
+                    "epoch_001",
+                    "fold_2023",
+                    "20230101..20231231",
+                    {
+                        "status": "ok",
+                        "parent_strategy_artifact_id": "strategy_a",
+                        "step_id": "node_control",
+                        "validation_result": {
+                            "total_return": 0.06,
+                            "sharpe": 0.8,
+                            "max_drawdown": 0.04,
+                            "benchmark": {"label": "CSI 300", "benchmark_return": 0.02},
+                        },
+                        "validation_result_ref": "ref",
+                    },
+                )
+            )
+            ledger.append(
+                fold(
+                    "epoch_001",
+                    "fold_2024",
+                    "20240101..20241231",
+                    {"status": "failed", "parent_strategy_artifact_id": "strategy_b", "error": "TimeoutError: slow"},
+                )
+            )
+            summary = build_experiment_report(tmp / "ledger.jsonl", tmp / "reports")
+        walk = summary["walk_forward"]
+        self.assertEqual([row["epoch_id"] for row in walk], ["epoch_001"])
+        transitions = walk[0]["transitions"]
+        self.assertEqual([row["fold"] for row in transitions], ["2023", "2024"])
+        self.assertEqual(transitions[0]["parent_strategy_artifact_id"], "strategy_a")
+        self.assertAlmostEqual(transitions[0]["excess_return"], 0.04)
+        self.assertEqual(transitions[0]["sharpe"], 0.8)
+        self.assertEqual(transitions[1]["status"], "failed")
+        self.assertIsNone(transitions[1]["excess_return"])
+        self.assertAlmostEqual(walk[0]["mean_excess_return"], 0.04)
+
     def test_a_held_out_row_without_a_verdict_is_refused(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)

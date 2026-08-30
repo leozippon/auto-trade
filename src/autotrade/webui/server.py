@@ -38,7 +38,7 @@ from autotrade.pipelines.hitl_state import (
 )
 from autotrade.pipelines.ledger import latest_fold_records
 
-from . import equity, registry, steps, traces, trading
+from . import equity, memory, registry, steps, traces, trading
 from .analysis import AnalysisService
 from .manager import (
     MAX_RUNNING_EXPERIMENTS,
@@ -740,6 +740,32 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         except (ManagerError, KeyError, ValueError) as exc:
             raise HTTPException(status_code=409, detail="analysis request was rejected") from exc
         return {"status": "started"}
+
+    # ---- operating memory ---------------------------------------------------------
+    @app.get("/api/memory")
+    def get_memory() -> dict[str, object]:
+        return memory.memory_overview(root, experiment_root)
+
+    @app.get("/api/memory/curated/{name}")
+    def get_curated_memory(name: str) -> dict[str, object]:
+        try:
+            return memory.curated_entry(root, name)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="invalid memory entry name") from exc
+        except (KeyError, OSError) as exc:
+            raise HTTPException(
+                status_code=404, detail="unknown curated memory entry"
+            ) from exc
+
+    @app.get("/api/experiments/{experiment_id}/memory")
+    def get_experiment_memory(experiment_id: str) -> dict[str, object]:
+        _experiment_dir(experiment_id)
+        try:
+            return memory.experiment_memory(experiment_root, experiment_id)
+        except (OSError, TypeError, ValueError, KeyError) as exc:
+            raise HTTPException(
+                status_code=409, detail="experiment identity state is unreadable"
+            ) from exc
 
     @app.post("/api/experiments/{experiment_id}/prompt-preview")
     def post_prompt_preview(experiment_id: str, payload: dict = Body(...)) -> dict[str, object]:

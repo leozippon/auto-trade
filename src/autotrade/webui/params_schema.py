@@ -121,7 +121,7 @@ _FIELDS: list[dict[str, object]] = [
         "label": "Development 起始周期",
         "type": "period",
         "required": True,
-        "help": "Development 窗口的第一个周期。默认整个窗口作为一个 Fold 开发并在整窗验证，冻结后直接进入 Held-out。",
+        "help": "Development 窗口的第一个周期。默认窗口内每个周期各是一个常规 Fold（验证区间即该周期），按时间顺序开发、Fold 之间插入元学习，最后冻结的策略直接进入 Held-out。",
     },
     {
         "key": "development_last_period",
@@ -136,7 +136,7 @@ _FIELDS: list[dict[str, object]] = [
         "group": "基本与排程",
         "label": "启用 Test 阶段（滚动 Fold）",
         "type": "bool",
-        "help": "关闭（默认）= 整个 Development 窗口是一个 Fold，没有冻结 Test，Held-out 就是裁决。开启 = 在窗口内按周期滚动：首个周期只做验证，之后每个周期作为一个 Fold 的测试区间、其前一周期为验证区间。",
+        "help": "关闭（默认）= 窗口内每个周期一个常规 Fold，没有冻结 Test，Held-out 就是裁决。开启 = 在窗口内按周期滚动：首个周期只做验证，之后每个周期作为一个 Fold 的测试区间、其前一周期为验证区间。",
     },
     {
         "key": "heldout_first_period",
@@ -155,14 +155,14 @@ _FIELDS: list[dict[str, object]] = [
         "help": "最终冻结测试的结束周期。",
     },
     {"key": "epochs", "group": "基本与排程", "label": "Epoch 数", "type": "int",
-     "help": "对 Development 窗口的完整遍历轮数，默认 1；每个 Epoch 开始前固定运行一次元学习。"},
+     "help": "对 Development 窗口的完整遍历轮数，默认 3；每个 Epoch 开始前固定运行一次元学习，Fold 链与元学习节奏跨 Epoch 连续。"},
     {
         "key": "meta_learning_fold_interval",
         "group": "基本与排程",
         "label": "元学习 Fold 间隔",
         "type": "int",
         "min": 0,
-        "help": "0=仅每个 Epoch 开始运行一次；N>0=每完成 N 个 Fold 且仍有下一 Fold 时，再运行一次元学习并更新后续 PRIOR。按 Fold 计数：默认单个 Development Fold 时只有 Epoch 开头的元学习；开启 Test 阶段后默认 1 表示每个 Fold 之间都有一次。",
+        "help": "0=仅每个 Epoch 开始运行一次；N>0=每完成 N 个 Fold 且仍有下一 Fold 时，再运行一次元学习并更新后续 PRIOR。按 Fold 计数：默认 1 表示每两个相邻 Fold 之间都有一次元学习，Epoch 开头那次覆盖 Epoch 边界。",
     },
     {"key": "inherit_from", "group": "基本与排程", "label": "继承已有实验的 Agent Output", "type": "choice",
      "optional": True,
@@ -433,7 +433,7 @@ _FIELDS: list[dict[str, object]] = [
     },
     # 预算与验收
     {"key": "max_fold_minutes", "group": "预算与验收", "label": "单 Fold 推理时长（分钟）", "type": "int",
-     "help": "每个 Fold 和元学习会话的推理墙钟上限；回测耗时独立计算并回补。默认按一个覆盖整个 Development 窗口的长会话设定。"},
+     "help": "每个 Fold 和元学习会话的推理墙钟上限；回测耗时独立计算并回补。默认按一年验证区间的常规 Fold 设定；会话开始前宿主跑的父本对照回测不计入。"},
     {"key": "convergence_start_epoch", "group": "预算与验收", "label": "收敛起始 Epoch", "type": "int",
      "help": "从该 Epoch（1 起）开始 Fold 提示词进入收敛阶段：优先更小更稳的策略。"},
     {"key": "min_return", "group": "预算与验收", "label": "验收目标验证收益", "type": "float",

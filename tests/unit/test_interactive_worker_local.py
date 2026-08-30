@@ -97,10 +97,11 @@ def _experiment(
     return repo, experiment
 
 
-def test_local_worker_single_window_fold_goes_straight_to_held_out(tmp_path: Path):
-    """The default research design end to end: one development Fold over the
-    whole window, no frozen Test, an automatic Held-out replay, and the
-    graduation verdict on the ledger and the terminal status."""
+def test_local_worker_regular_folds_go_straight_to_held_out(tmp_path: Path):
+    """The default research design end to end: one regular Fold per period,
+    no frozen Test, the host's parent control before every Fold that has a
+    parent, an automatic Held-out replay, and the graduation verdict on the
+    ledger and the terminal status."""
     repo, experiment = _experiment(tmp_path)
     path = experiment / "hitl/params.json"
     params = json.loads(path.read_text(encoding="utf-8"))
@@ -117,22 +118,35 @@ def test_local_worker_single_window_fold_goes_straight_to_held_out(tmp_path: Pat
     result = run_local_interactive_worker(options)
     assert result["state"] == "completed"
     records = ExperimentLedger(options.rolling.ledger_path).read()
-    assert [record["record_type"] for record in records] == ["fold", "heldout"]
-    fold, heldout = records
-    assert fold["fold_id"] == "fold_20251001..20260331"
-    assert fold["validation_period"] == "20251001..20260331"
-    assert fold["test_period"] is None
-    assert fold["test_result"] is None
-    assert fold["snapshot_ids"]["test_decision_input"] is None
+    assert [record["record_type"] for record in records] == ["fold", "fold", "heldout"]
+    first, second, heldout = records
+    assert (first["fold_id"], second["fold_id"]) == ("fold_2025Q4", "fold_2026Q1")
+    assert first["validation_period"] == "20251001..20251231"
+    assert second["validation_period"] == "20260101..20260331"
+    for fold in (first, second):
+        assert fold["test_period"] is None
+        assert fold["test_result"] is None
+        assert fold["snapshot_ids"]["test_decision_input"] is None
     assert not list((experiment / "artifacts/results").glob("frozen_test_*"))
+    # Parent carry-forward: the second Fold inherits the first Fold's frozen
+    # strategy, and the host replayed it on the second window first.
+    assert first["parent_control"] is None
+    assert second["parent_strategy_artifact_id"] == first["frozen_strategy_artifact_id"]
+    control = second["parent_control"]
+    assert control["status"] == "ok"
+    assert control["parent_strategy_artifact_id"] == first["frozen_strategy_artifact_id"]
+    assert control["validation_result"]["total_return"] == 0.0
+    assert Path(control["validation_result_ref"]).is_file()
     plan = json.loads((experiment / "hitl/schedule.json").read_text(encoding="utf-8"))
-    assert [row["kind"] for row in plan["sessions"]] == ["fold", "heldout"]
+    assert [row["kind"] for row in plan["sessions"]] == ["fold", "fold", "heldout"]
     # The deterministic baseline holds cash (zero Sharpe) and the local daily
-    # fixture carries no benchmark series, so the verdict names both.
+    # fixture carries no benchmark series, so the verdict names both, and the
+    # one walk-forward transition (cash vs no benchmark) proves nothing.
     assert heldout["verdict"]["status"] == "discarded"
     assert heldout["verdict"]["reasons"] == [
         "missing_benchmark_return",
         "sharpe_not_positive",
+        "walkforward_excess_inconsistent(0/1<1)",
     ]
     assert result["verdict"]["status"] == "discarded"
     assert result["verdict"]["periods"][0]["period"] == "2026Q2"

@@ -1,7 +1,6 @@
 """The run facts a session is told: development window, universe policy and
-strategy call cadence — one sentence each, with no test cadence claimed for the
-single-window design and Held-out invisible as ever — plus the budgets and
-decision-input windows the same object publishes."""
+strategy call cadence — one sentence each, with Held-out invisible as ever —
+plus the budgets and decision-input windows the same object publishes."""
 
 from __future__ import annotations
 
@@ -22,11 +21,11 @@ def _facts(**manifest_overrides: object) -> dict[str, object]:
         "experiment_id": "exp",
         "run_id": "run_x",
         "epoch_id": "epoch_001",
-        "fold_id": "fold_20220101..20251231",
+        "fold_id": "fold_2022",
         "kind": "fold",
         "fold": {
             "input_window": "20200101..20211231",
-            "validation_period": "20220101..20251231",
+            "validation_period": "20220101..20221231",
             "valid_decision_time": "2021-12-31T23:59:59+08:00",
         },
         "fold_period": "year",
@@ -41,23 +40,27 @@ def _facts(**manifest_overrides: object) -> dict[str, object]:
         )
 
 
-def test_single_window_facts_name_the_window_and_no_test_cadence() -> None:
+def test_regular_fold_facts_name_the_yearly_folds_and_the_meta_between_them() -> None:
     facts = _facts()
     scope = facts["research_scope"]
-    assert "20220101..20251231" in scope["development_window"]
-    assert "one Fold" in scope["development_window"]
+    assert scope["development_window"].startswith(
+        "This Fold's validation period is 20220101..20221231."
+    )
+    assert "one Fold per year" in scope["development_window"]
+    assert "Meta-learning session between Folds" in scope["development_window"]
+    assert "no frozen Test stage" in scope["development_window"]
     assert "Held-out" in scope["development_window"]
     assert scope["universe"].startswith("The universe is unfiltered")
     assert "ST names included" in scope["universe"]
     assert "every trading day at 08:30" in scope["strategy_cadence"]
     assert "own rebalance cadence" in scope["strategy_cadence"]
-    # No Test cadence is claimed, and Held-out stays invisible.
-    assert "fold_period" not in facts["visible_timeline"]
+    # The cadence is public research scope; Held-out stays invisible.
+    assert facts["visible_timeline"]["fold_period"] == "year"
     assert facts["visibility_policy"]["heldout_visible"] is False
     assert facts["visibility_policy"]["test_visible"] is False
     rendered = json.dumps(facts, ensure_ascii=False)
     assert "2026" not in rendered
-    assert "fold_20220101..20251231" not in rendered
+    assert "fold_2022" not in rendered
 
 
 def test_rolling_facts_keep_the_cadence_and_a_screened_universe_is_described() -> None:

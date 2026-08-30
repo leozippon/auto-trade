@@ -76,6 +76,7 @@ const ENVIRONMENT_STAGE_LABELS = {
   sandbox_layout: "准备 Sandbox 工作区",
   pit_view: "装载 PIT 可见视图",
   sandbox_start: "启动 Sandbox",
+  parent_control: "父本对照回测",
   llm_call: "Agent 推理",
   tool_call: "执行工具",
   subagent_wait: "等待子代理",
@@ -89,12 +90,20 @@ const ENVIRONMENT_STAGE_LABELS = {
   heldout: "执行 Held-out",
   session_retry: "会话失败重试",
 };
+// How a walk-forward transition was measured: without a Test stage it is the
+// host's parent control of every Fold after the Epoch's first, with one it is
+// each Fold's frozen Test (pipelines/ledger.py::walk_forward_transitions).
+const WALK_FORWARD_SOURCES = {
+  parent_control: "父本对照",
+  frozen_test: "冻结测试",
+};
 const PREP_ENVIRONMENT_STAGES = new Set([
   "preparing_session",
   "pit_snapshot",
   "sandbox_layout",
   "pit_view",
   "sandbox_start",
+  "parent_control",
   "heldout",
   "session_retry",
   "environment_update",
@@ -1238,8 +1247,9 @@ function route(forceRefresh = false) {
   // Trading console pages are matched BEFORE the #/exp/... regex.
   const tradingMatch = hash.match(/^#\/trading\/(paper)$/);
   const qmtMatch = hash === "#/qmt";
+  const memoryMatch = hash === "#/memory";
   const expMatch =
-    tradingMatch || qmtMatch
+    tradingMatch || qmtMatch || memoryMatch
       ? null
       : hash.match(/^#\/exp\/([^/]+)(?:\/(.*))?$/);
   const expId = expMatch ? decodeURIComponent(expMatch[1]) : null;
@@ -1266,7 +1276,15 @@ function route(forceRefresh = false) {
   for (const source of liveSources) source.close();
   liveSources = [];
   document.querySelectorAll(".modal-mask").forEach((node) => node.remove());
-  setActiveNav(qmtMatch ? "qmt" : tradingMatch ? tradingMatch[1] : "research");
+  setActiveNav(
+    qmtMatch
+      ? "qmt"
+      : memoryMatch
+        ? "memory"
+        : tradingMatch
+          ? tradingMatch[1]
+          : "research",
+  );
   if (!tradingMatch) tradingView = null;
   if (tradingMatch) {
     detailView = null;
@@ -1274,6 +1292,9 @@ function route(forceRefresh = false) {
   } else if (qmtMatch) {
     detailView = null;
     renderQmtPage();
+  } else if (memoryMatch) {
+    detailView = null;
+    renderMemoryPage();
   } else if (expMatch) renderDetailPage(expId, key);
   else {
     detailView = null;
@@ -1407,6 +1428,95 @@ function verdictBadge(verdict) {
     },
     graduated ? "graduated" : "discarded",
   );
+}
+
+/* Graduation term (b) beside the verdict badge: how many of the final Epoch's
+   walk-forward transitions kept a positive excess return, and the count they
+   had to reach. The failing reason itself rides in verdict.reasons. */
+function walkForwardTerm(verdict) {
+  const term = (verdict || {}).walk_forward;
+  if (!term || !term.status) return null;
+  if (term.status === "not_applicable")
+    return el(
+      "span",
+      { class: "mode-note" },
+      "走向前：本排程没有转移，裁决只看 Held-out",
+    );
+  const consistent = term.status === "consistent";
+  return el(
+    "span",
+    {
+      class: `badge state-${consistent ? "completed" : "failed"}`,
+      title: `走向前一致性（${WALK_FORWARD_SOURCES[term.source] || term.source || "—"}）：${term.positive_excess}/${term.transitions} 个转移超额为正，需 ≥ ${term.required}`,
+    },
+    `走向前 ${term.positive_excess}/${term.transitions}`,
+  );
+}
+
+/* Walk-forward per Epoch: without a Test stage every Fold after the Epoch's
+   first opens with the previous Fold's frozen strategy replayed on this Fold's
+   Validation window, and graduation term (b) counts how many of those kept a
+   positive excess return. The counts come from the ledger, the rows from the
+   same parent-control metrics the fold panel reads. */
+function walkForwardPanel(detail) {
+  const epochs = (detail.metrics_by_epoch || []).filter(
+    (epoch) => (epoch.walk_forward || {}).transitions > 0,
+  );
+  if (!epochs.length) return null;
+  const panel = el(
+    "div",
+    { class: "panel section-gap" },
+    el("h4", { class: "subsection-title" }, "走向前转移（父本对照）"),
+  );
+  for (const epoch of epochs) {
+    const term = epoch.walk_forward || {};
+    panel.append(
+      el(
+        "div",
+        { class: "meta-line" },
+        `${epochShort(epoch.epoch_id)} ｜ 来源 ${WALK_FORWARD_SOURCES[term.source] || term.source || "—"} ｜ 转移 ${term.transitions} ｜ 超额为正 ${term.positive_excess}/${term.transitions}`,
+      ),
+    );
+    if (term.source !== "parent_control") continue;
+    const rows = (detail.fold_returns || []).filter(
+      (row) => row.epoch_id === epoch.epoch_id && row.parent_control,
+    );
+    if (!rows.length) continue;
+    panel.append(
+      el(
+        "table",
+        { class: "data" },
+        el(
+          "tr",
+          {},
+          el("th", {}, "Fold"),
+          el("th", { title: "对照未完成时没有数字" }, "状态"),
+          el("th", {}, "收益"),
+          el("th", { title: "相对沪深300的超额收益" }, "超额"),
+          el("th", {}, "Sharpe"),
+          el("th", {}, "回撤"),
+        ),
+        ...rows.map((row) => {
+          const control = row.parent_control || {};
+          return el(
+            "tr",
+            {},
+            el("td", {}, foldPeriodLabel(detail, row.fold_ref)),
+            el("td", {}, control.status === "ok" ? "完成" : "失败"),
+            el("td", { class: signCls(control.return) }, fmtPct(control.return)),
+            el(
+              "td",
+              { class: signCls(control.excess_return) },
+              fmtPct(control.excess_return),
+            ),
+            el("td", { class: signCls(control.sharpe) }, fmtSharpe(control.sharpe)),
+            el("td", {}, fmtPct(control.max_drawdown)),
+          );
+        }),
+      ),
+    );
+  }
+  return panel;
 }
 
 function experimentCard(item) {
@@ -2085,8 +2195,9 @@ function repopulatePeriodSelects(inputs) {
   updateValidationHint(inputs);
 }
 
-/* Spell out what the development window becomes: one Fold over the whole
-   window by default, or rolling Folds once the Test stage is switched on. */
+/* Spell out what the development window becomes: one regular Fold per period
+   of the window with a 元学习 before each of them by default, or rolling
+   Fold → Test pairs once the Test stage is switched on. */
 function updateValidationHint(inputs) {
   const first = inputs.get("development_first_period");
   const last = inputs.get("development_last_period");
@@ -2109,11 +2220,14 @@ function updateValidationHint(inputs) {
     first.__hint.textContent = "";
     return;
   }
+  const index = options.indexOf(start);
   if (!rolling) {
-    first.__hint.textContent = `↳ 单个 Development Fold：验证区间 ${fmtPeriodRange(start)} ～ ${fmtPeriodRange(end)} 整窗；冻结后直接进入 Held-out 裁决`;
+    const last = options.indexOf(end);
+    const folds = index >= 0 && last >= index ? last - index + 1 : 0;
+    const count = folds ? `${folds} 个常规 Fold` : "每个周期一个常规 Fold";
+    first.__hint.textContent = `↳ ${fmtPeriodRange(start)} ～ ${fmtPeriodRange(end)} 按周期切成 ${count}：每个 Fold 只验证本周期、没有测试区间，每个 Fold 前先做一次元学习；末个 Fold 冻结后进入 Held-out 裁决`;
     return;
   }
-  const index = options.indexOf(start);
   first.__hint.textContent =
     index >= 0 && index + 1 < options.length
       ? `↳ 首个 Fold：验证区间 ${fmtPeriodRange(options[index])} → 测试区间 ${fmtPeriodRange(options[index + 1])}（首个周期只做验证，之后逐周期滚动）`
@@ -2331,7 +2445,10 @@ async function renderDetailPage(experimentId, selectedKey) {
       ),
     );
   }
+  const walkForward = walkForwardPanel(detail);
+  if (walkForward) container.append(walkForward);
   container.append(stepTreePanel(detail));
+  container.append(mountedMemoryPanel(detail));
   const layout = el("div", { class: "detail section-gap" });
   // Panels read the global detailView (held-out equity/style card): set it
   // BEFORE building them, or the first render of a detail page silently
@@ -5723,6 +5840,7 @@ function foldResultPanel(detail, session) {
       ]),
     ),
   );
+  panel.append(parentControlSection(detail, session, validation));
   const benchmark = validation.benchmark || {};
   panel.append(
     el(
@@ -5809,6 +5927,96 @@ function foldResultPanel(detail, session) {
     ),
   );
   return panel;
+}
+
+/* This Fold's baseline: before the session starts the host replays the
+   inherited parent unchanged over this Fold's Validation window, so the Fold's
+   own Validation is read against it rather than on its own. The first Fold of
+   the first Epoch inherits nothing and has no control. Metrics come from the
+   same fold_returns row the walk-forward table uses; the failure text only
+   exists on the ledger record. */
+function parentControlSection(detail, session, validation) {
+  const record = session.record || {};
+  const control = record.parent_control;
+  if (!control)
+    return el(
+      "div",
+      { class: "meta-line" },
+      "父本对照：本 Fold 没有继承父产物，因此没有基线",
+    );
+  const row = (detail.fold_returns || []).find(
+    (item) =>
+      item.epoch_id === session.epoch_id &&
+      item.fold_ref === (session.fold_ref || record.fold_ref),
+  );
+  const metrics = (row || {}).parent_control || {};
+  const failed = control.status !== "ok";
+  const metricRow = (label, values) =>
+    el(
+      "tr",
+      {},
+      el("td", {}, label),
+      el("td", { class: signCls(values.total) }, fmtPct(values.total)),
+      el("td", { class: signCls(values.excess) }, fmtPct(values.excess)),
+      el("td", { class: signCls(values.sharpe) }, fmtSharpe(values.sharpe)),
+      el("td", {}, fmtPct(values.drawdown)),
+    );
+  const section = el(
+    "div",
+    { class: "section-gap" },
+    el(
+      "h4",
+      { class: "subsection-title" },
+      "父本对照（本 Fold 基线）",
+      failed ? el("span", { class: "badge state-failed" }, "对照失败") : null,
+    ),
+    el(
+      "table",
+      { class: "data" },
+      el(
+        "tr",
+        {},
+        el("th", {}, "对照"),
+        el("th", { title: "整个验证区间的区间收益" }, "收益"),
+        el("th", { title: "相对沪深300的超额收益" }, "超额"),
+        el("th", { title: "验证区间日收益的年化 Sharpe" }, "Sharpe"),
+        el("th", { title: "验证区间峰谷回撤" }, "回撤"),
+      ),
+      metricRow("本 Fold 验证", {
+        total: validation.total_return,
+        excess: (validation.benchmark || {}).excess_return,
+        sharpe: validation.sharpe,
+        drawdown: validation.max_drawdown,
+      }),
+      metricRow(
+        el(
+          "span",
+          {},
+          "父本原样重跑",
+          el(
+            "span",
+            { class: "mode-note" },
+            ` ${control.parent_strategy_artifact_ref || "—"}`,
+          ),
+        ),
+        {
+          total: metrics.return,
+          excess: metrics.excess_return,
+          sharpe: metrics.sharpe,
+          drawdown: metrics.max_drawdown,
+        },
+      ),
+    ),
+  );
+  if (failed)
+    section.append(
+      el(
+        "div",
+        { class: "meta-line" },
+        `对照未完成：${control.error || "见账本"}`,
+      ),
+    );
+  return section;
 }
 
 function kvRow(key, value) {
@@ -6477,6 +6685,7 @@ function heldoutPanel(detail, session) {
       { class: "subsection-title" },
       "Held-out 冻结测试（最终样本外）",
       verdictBadge(detail.verdict),
+      walkForwardTerm(detail.verdict),
     ),
   );
   if (detail.verdict && (detail.verdict.reasons || []).length)
@@ -6605,6 +6814,263 @@ function heldoutPanel(detail, session) {
     if (section) panel.append(section);
   }
   return panel;
+}
+
+/* ---------------- 运行记忆 ----------------
+   Read-only view of the cross-experiment knowledge a session mounts: the
+   curated library committed in the repository, the graduated tier as it would
+   be admitted right now, and — inside an experiment — what its own sessions
+   actually mounted. Nothing here promotes, edits or removes an entry. */
+
+function fmtBytes(value) {
+  const bytes = Number(value);
+  if (!Number.isFinite(bytes)) return "—";
+  return bytes < 1024 ? `${bytes} B` : `${(bytes / 1024).toFixed(1)} KB`;
+}
+
+async function renderMemoryPage() {
+  $main.innerHTML = '<div class="loading">加载运行记忆…</div>';
+  $topbarRight.replaceChildren(
+    el("span", { class: "mode-note" }, "跨实验只读知识"),
+  );
+  let payload;
+  try {
+    payload = await api("/api/memory");
+  } catch (error) {
+    $main.replaceChildren(
+      el("div", { class: "empty" }, `加载失败：${error.message}`),
+    );
+    return;
+  }
+  $main.replaceChildren(
+    el(
+      "div",
+      { id: "memory-page" },
+      el(
+        "div",
+        { class: "page-head" },
+        el("h2", {}, "运行记忆"),
+        el(
+          "div",
+          { class: "sub" },
+          `每个 Fold 与元学习会话按来源只读挂载到 memory/<来源>/ ｜ 默认模式 ${payload.default_mode || "—"}`,
+        ),
+      ),
+      curatedMemoryPanel(payload.curated || {}),
+      graduatedTierPanel(payload.graduated || {}),
+    ),
+  );
+}
+
+function curatedMemoryPanel(curated) {
+  const entries = curated.entries || [];
+  const panel = el(
+    "div",
+    { class: "panel section-gap" },
+    el("h4", {}, `策展库（${entries.length} 条）`),
+    el(
+      "div",
+      { class: "hint" },
+      `由研究者维护在 ${curated.library || "configs/operating_memory"}，随代码提交；挂载为 memory/${curated.source || "curated"}/`,
+    ),
+  );
+  if (curated.error) {
+    panel.append(el("div", { class: "hint warn" }, `策展库不可读：${curated.error}`));
+    return panel;
+  }
+  if (!entries.length) {
+    panel.append(el("div", { class: "empty" }, "策展库为空"));
+    return panel;
+  }
+  const table = el(
+    "table",
+    { class: "data section-gap" },
+    el(
+      "tr",
+      {},
+      el("th", {}, "条目"),
+      el("th", {}, "标题"),
+      el("th", {}, "摘要"),
+      el("th", {}, "文件"),
+      el("th", {}, "大小"),
+    ),
+    ...entries.map((entry) =>
+      el(
+        "tr",
+        {},
+        el(
+          "td",
+          {},
+          el(
+            "button",
+            {
+              class: "btn small",
+              title: "查看 SKILL.md 原文",
+              onclick: () => openCuratedEntry(entry.name),
+            },
+            entry.name,
+          ),
+        ),
+        el("td", {}, entry.title || "—"),
+        el("td", { class: "hint" }, entry.summary || "—"),
+        el("td", {}, String(entry.files ?? "—")),
+        el("td", {}, fmtBytes(entry.bytes)),
+      ),
+    ),
+  );
+  panel.append(table);
+  return panel;
+}
+
+/* Plain preformatted text on purpose: the console ships no markdown renderer
+   for skill bodies, and the researcher reads exactly what the Agent reads. */
+async function openCuratedEntry(name) {
+  let payload;
+  try {
+    payload = await api(`/api/memory/curated/${encodeURIComponent(name)}`);
+  } catch (error) {
+    toast(error.message, true);
+    return;
+  }
+  showModal(
+    payload.title || payload.name,
+    el(
+      "div",
+      {},
+      el(
+        "div",
+        { class: "hint" },
+        `${payload.name} ｜ ${fmtBytes(payload.bytes)} ｜ 只读挂载，会话不能改写`,
+      ),
+      el(
+        "pre",
+        { class: "code-view section-gap", style: "white-space:pre-wrap" },
+        payload.content || "",
+      ),
+    ),
+    [el("button", { class: "btn", onclick: closeModal }, "关闭")],
+  );
+}
+
+function graduatedTierPanel(tier) {
+  const rows = tier.experiments || [];
+  const panel = el(
+    "div",
+    { class: "panel section-gap" },
+    el("h4", {}, "毕业层"),
+    el(
+      "div",
+      { class: "hint" },
+      "Held-out 判定全部 graduated 且已发布 skills 世代的历史实验自动准入；未揭示的实验不显示裁决，本实验自己始终排除在外。",
+    ),
+  );
+  if (tier.error) {
+    panel.append(el("div", { class: "hint warn" }, `毕业层不可解析：${tier.error}`));
+  }
+  if (!rows.length) {
+    panel.append(el("div", { class: "empty" }, "没有可读的历史实验"));
+    return panel;
+  }
+  panel.append(
+    el(
+      "table",
+      { class: "data section-gap" },
+      el(
+        "tr",
+        {},
+        el("th", {}, "实验"),
+        el("th", {}, "Held-out 裁决"),
+        el("th", {}, "准入条目"),
+      ),
+      ...rows.map((row) =>
+        el(
+          "tr",
+          {},
+          el("td", {}, row.experiment_id),
+          el("td", {}, graduatedVerdictCell(row)),
+          el("td", {}, graduatedEntriesCell(row)),
+        ),
+      ),
+    ),
+  );
+  return panel;
+}
+
+function graduatedVerdictCell(row) {
+  if (row.error) return el("span", { class: "hint warn" }, row.error);
+  if (!row.revealed) return el("span", { class: "hint" }, "未揭示");
+  if (!row.verdict) return el("span", { class: "hint" }, "无 Held-out 记录");
+  return verdictBadge({ status: row.verdict });
+}
+
+/* `admitted === null` means the tier itself could not be resolved, which is
+   not the same answer as "contributes nothing". */
+function graduatedEntriesCell(row) {
+  if (row.error) return "—";
+  if (row.admitted === null || row.admitted === undefined)
+    return el("span", { class: "hint warn" }, "无法解析");
+  return row.admitted && (row.entries || []).length
+    ? (row.entries || []).join("、")
+    : "—";
+}
+
+/* Experiment-detail block: what THIS experiment's collected sessions mounted,
+   read from their run manifests rather than recomputed from today's tier. */
+function mountedMemoryPanel(detail) {
+  const host = el("div", {});
+  api(`/api/experiments/${encodeURIComponent(detail.experiment_id)}/memory`)
+    .then((payload) => {
+      if ((payload.sessions || []).length)
+        host.append(mountedMemorySection(payload));
+    })
+    .catch(() => {
+      /* no collected session artifacts for this experiment */
+    });
+  return host;
+}
+
+function mountedMemorySection(payload) {
+  const rows = [];
+  for (const session of payload.sessions || []) {
+    const label = session.session_label || session.run_ref;
+    if (session.error) {
+      rows.push([label, el("span", { class: "hint warn" }, session.error), "—"]);
+      continue;
+    }
+    const sources = session.sources || [];
+    if (!sources.length) {
+      rows.push([label, el("span", { class: "hint" }, "未挂载"), "—"]);
+      continue;
+    }
+    for (const source of sources)
+      rows.push([
+        label,
+        `${source.source}（${source.origin}）`,
+        (source.entries || []).join("、") || "—",
+      ]);
+  }
+  return el(
+    "div",
+    { class: "panel section-gap" },
+    el("h4", {}, "已挂载记忆"),
+    el(
+      "div",
+      { class: "hint" },
+      `挂载模式 ${payload.mode || "—"} ｜ 会话按来源只读挂载到 memory/<来源>/，不进入本实验的 skills 世代`,
+    ),
+    el(
+      "table",
+      { class: "data section-gap" },
+      el(
+        "tr",
+        {},
+        el("th", {}, "会话"),
+        el("th", {}, "来源"),
+        el("th", {}, "条目"),
+      ),
+      ...rows.map((row) => el("tr", {}, ...row.map((cell) => el("td", {}, cell)))),
+    ),
+  );
 }
 
 /* ---------------- ADM-Cube trading console ----------------

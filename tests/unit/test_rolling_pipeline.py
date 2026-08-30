@@ -319,9 +319,13 @@ def test_meta_session_retains_only_the_authorized_test_diagnostic(tmp_path: Path
         "evaluation_contract",
         "fold_backtest_summaries",
         "fold_reviews",
+        "fold_validation_history",
         "review_window",
         "meta_learning",
     }
+    # Every completed Fold so far, not only the review window, reaches Meta as
+    # a compact Validation summary.
+    assert len(history["fold_validation_history"]) == len(latest_fold_records(ledger.read("fold")))
     window = history["review_window"]
     assert isinstance(window, dict)
     assert window["fold_count"] == 1
@@ -949,7 +953,7 @@ class BenchmarkedEvaluator:
 
 
 def _single_window_pipeline(tmp_path: Path, evaluator):
-    """The default research design: one development Fold, no Test stage."""
+    """One explicit-range development Fold, no Test stage."""
     revision_dir = tmp_path / "revision"
     revision_dir.mkdir()
     (revision_dir / "main.py").write_text(
@@ -974,8 +978,8 @@ def _single_window_pipeline(tmp_path: Path, evaluator):
     config = RollingExperimentConfig(
         "experiment_a",
         tmp_path / "experiments",
-        "2025Q4",
-        "2026Q1",
+        "20251001..20260331",
+        "20251001..20260331",
         "2026Q2",
         "2026Q2",
         fold_period="quarter",
@@ -991,8 +995,257 @@ def _single_window_pipeline(tmp_path: Path, evaluator):
         meta_learner=lambda facts: MetaSessionResult(prior="prefer simple daily signals"),
         ledger=ledger,
     )
-    fold = build_fold_schedule("2025Q4", "2026Q1", _days(), window_months=24)[0]
-    return pipeline, fold, ledger
+    folds = build_fold_schedule(
+        "20251001..20260331", "20251001..20260331", _days(), window_months=24
+    )
+    assert [fold.fold_id for fold in folds] == ["fold_20251001..20260331"]
+    return pipeline, folds[0], ledger
+
+
+class RecordingEvaluator:
+    """Benchmarked summaries keyed by the revision replayed; records every call."""
+
+    def __init__(self, returns: dict[str, float], *, fail_on: set[str] = frozenset()):
+        self.returns = returns
+        self.fail_on = set(fail_on)
+        self.calls: list[tuple[str, str, str, str]] = []
+
+    def evaluate(self, request):
+        revision_id = request.revision.revision_id
+        self.calls.append((request.mode, revision_id, request.start, request.end))
+        if revision_id in self.fail_on:
+            raise TimeoutError(f"replay of {revision_id} exceeded its wall clock")
+        return EvaluationResult(
+            {
+                "total_return": self.returns[revision_id],
+                "sharpe": 1.0,
+                "max_drawdown": -0.05,
+                "benchmark": {"label": "CSI 300", "benchmark_return": 0.02},
+            },
+            f"result/{request.mode}/{revision_id}",
+        )
+
+
+def _regular_fold_pipeline(tmp_path: Path, evaluator, *, max_steps: int = 1, test_stage: bool = False):
+    """Two regular quarterly Folds (or two rolling Folds) driven by a fake developer.
+
+    The developer freezes its own revision on every Fold and echoes the parent
+    control it was handed, so the test can see exactly what reached it.
+    """
+    revision_dir = tmp_path / "revision"
+    revision_dir.mkdir()
+    (revision_dir / "main.py").write_text(
+        "def generate_orders(context):\n    return []\n", encoding="utf-8"
+    )
+    revision = ArtifactRevision("revision_1", revision_dir)
+    seen: list[FoldSessionResult | None] = []
+    requests: list = []
+
+    def developer(request):
+        requests.append(request)
+        steps = [
+            StepResult(
+                f"step_{len(requests)}_{index}",
+                revision.revision_id,
+                EvaluationResult(
+                    {"total_return": 0.05, "max_drawdown": -0.02},
+                    "result/valid",
+                ),
+                selected=index == 0,
+            )
+            for index in range(max_steps)
+        ]
+        if request.parent_control is not None:
+            steps.insert(
+                0,
+                StepResult(
+                    f"parent_control_{len(requests)}",
+                    "revision_parent_copy",
+                    request.parent_control,
+                    parent_control=True,
+                ),
+            )
+        result = FoldSessionResult("conversation", tuple(steps), steps[-1].step_id)
+        seen.append(result)
+        return result
+
+    config = RollingExperimentConfig(
+        "experiment_a",
+        tmp_path / "experiments",
+        "2025Q4",
+        "2026Q1",
+        "2026Q2",
+        "2026Q2",
+        fold_period="quarter",
+        test_stage=test_stage,
+        max_steps_per_fold=max_steps,
+    )
+    ledger = ExperimentLedger(config.ledger_path)
+    pipeline = RollingExperimentPipeline(
+        config,
+        snapshots=Snapshots(),
+        artifacts=Artifacts(revision, tmp_path / "frozen"),
+        evaluator=evaluator,
+        developer=developer,
+        meta_learner=None,
+        ledger=ledger,
+    )
+    folds = build_fold_schedule(
+        config.development_first_period,
+        config.development_last_period,
+        _days(),
+        window_months=24,
+        test_stage=test_stage,
+    )
+    return pipeline, folds, ledger, requests
+
+
+def test_parent_control_replays_the_inherited_parent_once_per_fold_off_budget(tmp_path: Path):
+    """Regular Folds without a Test stage: the host replays the previous Fold's
+    frozen strategy on the next Fold's Validation window before the session,
+    records it as the Fold's ``parent_control`` and charges no budget."""
+    evaluator = RecordingEvaluator({"revision_1": 0.05})
+    pipeline, folds, ledger, requests = _regular_fold_pipeline(tmp_path, evaluator, max_steps=1)
+    assert [fold.fold_id for fold in folds] == ["fold_2025Q4", "fold_2026Q1"]
+    assert all(not fold.has_test for fold in folds)
+
+    first = pipeline.run_fold("epoch_001", folds[0], parent=None)
+    assert first.frozen is not None
+    # No parent: nothing to control, nothing evaluated by the host.
+    assert requests[0].parent_control is None
+    assert evaluator.calls == []
+    assert ledger.read("fold")[0]["parent_control"] is None
+
+    # A recording evaluator keyed by artifact id: the frozen parent is what
+    # the host replays, on exactly the second Fold's Validation window.
+    evaluator.returns[first.frozen.artifact_id] = 0.04
+    second = pipeline.run_fold("epoch_001", folds[1], parent=first.frozen)
+    assert evaluator.calls == [("valid", first.frozen.artifact_id, "20260101", "20260331")]
+    control = requests[1].parent_control
+    assert control is not None
+    assert control.summary["total_return"] == 0.04
+    # The developer returned the control step plus max_steps=1 own Step: the
+    # control is not charged against the Step budget.
+    assert second.fold_status == "frozen"
+    record = ledger.read("fold")[1]
+    assert record["parent_control"] == {
+        "status": "ok",
+        "parent_strategy_artifact_id": first.frozen.artifact_id,
+        "step_id": "parent_control_2",
+        "validation_result": control.summary,
+        "validation_result_ref": control.result_ref,
+    }
+    assert [step["parent_control"] for step in record["steps"]] == [True, False]
+    assert record["test_period"] is None and record["test_result"] is None
+
+
+def test_a_failed_parent_control_is_recorded_and_the_fold_proceeds(tmp_path: Path):
+    evaluator = RecordingEvaluator({"revision_1": 0.05})
+    pipeline, folds, ledger, requests = _regular_fold_pipeline(tmp_path, evaluator)
+    first = pipeline.run_fold("epoch_001", folds[0], parent=None)
+    assert first.frozen is not None
+    evaluator.fail_on.add(first.frozen.artifact_id)
+    second = pipeline.run_fold("epoch_001", folds[1], parent=first.frozen)
+    assert second.fold_status == "frozen"
+    assert requests[1].parent_control is None
+    control = ledger.read("fold")[1]["parent_control"]
+    assert control["status"] == "failed"
+    assert control["parent_strategy_artifact_id"] == first.frozen.artifact_id
+    assert "TimeoutError" in control["error"]
+
+
+def test_the_agents_own_steps_still_count_against_the_step_budget(tmp_path: Path):
+    evaluator = RecordingEvaluator({"revision_1": 0.05})
+    pipeline, folds, _ledger, _requests = _regular_fold_pipeline(tmp_path, evaluator, max_steps=1)
+    first = pipeline.run_fold("epoch_001", folds[0], parent=None)
+    assert first.frozen is not None
+    evaluator.returns[first.frozen.artifact_id] = 0.04
+
+    def greedy(request):
+        return FoldSessionResult(
+            "conversation",
+            (
+                StepResult("control", "revision_parent_copy", request.parent_control, parent_control=True),
+                StepResult("step_a", "revision_1", EvaluationResult({"total_return": 0.05, "max_drawdown": -0.02}, "r")),
+                StepResult("step_b", "revision_1", EvaluationResult({"total_return": 0.05, "max_drawdown": -0.02}, "r")),
+            ),
+            "step_b",
+        )
+
+    pipeline.developer = greedy
+    with pytest.raises(RuntimeError, match="exceeded the Step budget"):
+        pipeline.run_fold("epoch_001", folds[1], parent=first.frozen)
+
+
+def test_walk_forward_term_reaches_the_held_out_verdict(tmp_path: Path):
+    """Graduation term (b) from the final Epoch's parent controls: with one
+    transition whose inherited strategy trailed the benchmark, a Held-out that
+    passes term (a) is still discarded, and the reason names the counts."""
+    from autotrade.pipelines.ledger import experiment_verdict
+
+    evaluator = RecordingEvaluator({"revision_1": 0.05})
+    pipeline, folds, ledger, _requests = _regular_fold_pipeline(tmp_path, evaluator)
+    first = pipeline.run_fold("epoch_001", folds[0], parent=None)
+    assert first.frozen is not None
+    evaluator.returns[first.frozen.artifact_id] = 0.01  # below the 0.02 benchmark
+    second = pipeline.run_fold("epoch_001", folds[1], parent=first.frozen)
+    assert second.frozen is not None
+    evaluator.returns[second.frozen.artifact_id] = 0.10  # Held-out itself passes
+    pipeline.run_heldout("epoch_001", second.frozen, _days())
+    verdict = experiment_verdict(ledger.read())
+    assert verdict is not None
+    assert verdict["status"] == "discarded"
+    assert verdict["reasons"] == ["walkforward_excess_inconsistent(0/1<1)"]
+    assert verdict["periods"][0]["walk_forward"] == {
+        "status": "inconsistent",
+        "source": "parent_control",
+        "transitions": 1,
+        "positive_excess": 0,
+        "required": 1,
+    }
+
+
+def test_a_positive_walk_forward_transition_lets_a_passing_held_out_graduate(tmp_path: Path):
+    from autotrade.pipelines.ledger import experiment_verdict
+
+    evaluator = RecordingEvaluator({"revision_1": 0.05})
+    pipeline, folds, ledger, _requests = _regular_fold_pipeline(tmp_path, evaluator)
+    first = pipeline.run_fold("epoch_001", folds[0], parent=None)
+    evaluator.returns[first.frozen.artifact_id] = 0.03  # beats the 0.02 benchmark
+    second = pipeline.run_fold("epoch_001", folds[1], parent=first.frozen)
+    evaluator.returns[second.frozen.artifact_id] = 0.10
+    pipeline.run_heldout("epoch_001", second.frozen, _days())
+    verdict = experiment_verdict(ledger.read())
+    assert verdict["status"] == "graduated"
+    assert verdict["periods"][0]["walk_forward"]["status"] == "consistent"
+
+
+def test_a_test_stage_schedule_uses_the_frozen_tests_as_walk_forward_evidence(tmp_path: Path):
+    """With rolling Folds every Fold already has an out-of-sample frozen Test,
+    so term (b) counts those instead of parent controls."""
+    from autotrade.pipelines.ledger import experiment_verdict
+
+    class FrozenTestEvaluator(RecordingEvaluator):
+        def evaluate(self, request):
+            result = super().evaluate(request)
+            if request.mode == "frozen_test":
+                # The frozen Test trails the benchmark; Held-out itself passes.
+                return EvaluationResult({**result.summary, "total_return": 0.01}, result.result_ref)
+            return result
+
+    evaluator = FrozenTestEvaluator({"revision_1": 0.05})
+    pipeline, folds, ledger, _requests = _regular_fold_pipeline(tmp_path, evaluator, test_stage=True)
+    assert [(fold.fold_id, fold.has_test) for fold in folds] == [("fold_2026Q1", True)]
+    outcome = pipeline.run_fold("epoch_001", folds[0], parent=None)
+    assert outcome.frozen is not None
+    evaluator.returns[outcome.frozen.artifact_id] = 0.10
+    pipeline.run_heldout("epoch_001", outcome.frozen, _days())
+    verdict = experiment_verdict(ledger.read())
+    assert verdict["status"] == "discarded"
+    assert verdict["reasons"] == ["walkforward_excess_inconsistent(0/1<1)"]
+    block = verdict["periods"][0]["walk_forward"]
+    assert block["source"] == "frozen_test"
+    assert (block["transitions"], block["positive_excess"], block["required"]) == (1, 0, 1)
 
 
 def test_single_window_fold_has_no_frozen_test_and_held_out_graduates(tmp_path: Path):
@@ -1026,6 +1279,9 @@ def test_single_window_fold_has_no_frozen_test_and_held_out_graduates(tmp_path: 
         "sharpe": 1.2,
         "max_drawdown": -0.05,
         "max_drawdown_limit": 0.25,
+        # A single development Fold has no walk-forward transition: term (b)
+        # is not applicable and Held-out alone decides.
+        "walk_forward": {"status": "not_applicable", "transitions": 0},
     }
     verdict = experiment_verdict(ledger.read())
     assert verdict is not None

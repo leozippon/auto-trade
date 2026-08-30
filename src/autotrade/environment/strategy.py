@@ -803,7 +803,3 @@ def _validate_pit_tree(value: object, *, inference_at: datetime, name: str) -> N
 
 
 StrategyFunction = Callable[[StrategyContext], Sequence[Mapping[str, object]]]
-
-
-def run_strategy(strategy: StrategyFunction, context: StrategyContext) -> tuple[StrategyOrder, ...]:
-    return validate_order_payload(strategy(context), inference_at=context.inference_at)

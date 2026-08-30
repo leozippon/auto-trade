@@ -4,7 +4,7 @@ This pack is a small, screened set of strategy ideas for a Fold Agent to **rewri
 
 The previous `github_strategies` pack exposed many unrelated seeds and large platform-shaped files. The `ref_github_strats` experiment eventually spent folds replaying a parent or committing execution-identical variants. This pack instead presents four distinct, data-mapped hypotheses and requires executable rewrites before tuning.
 
-Development is one long Validation window with a 21-month input window before it — there is no Test stage and no epoch loop — and the budget allows well more than one complete Validation. Pre-register at least three of the four ideas before implementing, rewrite them, run them side by side with `batch_validate`, and judge each on sub-windows of the development window rather than on a single aggregate number.
+Development is cut into one regular Fold per year — each Fold's Validation is that year, there is no Test stage, and a Meta session runs between adjacent Folds — with a 24-month input window before each Validation, and the budget allows well more than one complete Validation. Pre-register at least three of the four ideas before implementing, rewrite them, run them side by side with `batch_validate`, and judge each on sub-windows of the development window rather than on a single aggregate number.
 
 ## Non-negotiable contract
 

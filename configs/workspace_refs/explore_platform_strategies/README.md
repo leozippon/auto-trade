@@ -22,7 +22,7 @@ This pack turns common 雪球、东财股吧、同花顺、财联社 and short-t
 
 ## Fold exploration order
 
-Development is one long Validation window (no Test stage, no epoch loop) and the input window covers the preceding 21 months. Screen all nine mechanisms offline against the input window first — event counts, coverage, and the sub-window sign of each cohort's forward return — then pre-register the three or more strongest survivors and run their complete Validations side by side with `batch_validate`. Keep one mechanism per revision, but do not stop after one mechanism, and do not begin by stacking several weak ideas into an opaque score.
+Development is cut into one regular Fold per year (each Fold's Validation is that year, no Test stage, a Meta session between adjacent Folds) and the input window covers the 24 months before each Validation. Screen all nine mechanisms offline against the input window first — event counts, coverage, and the sub-window sign of each cohort's forward return — then pre-register the three or more strongest survivors and run their complete Validations side by side with `batch_validate`. Keep one mechanism per revision, but do not stop after one mechanism, and do not begin by stacking several weak ideas into an opaque score.
 
 The list below is a priority order for that screening, not a fixed running order.
 

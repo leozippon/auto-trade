@@ -481,20 +481,6 @@ def build_agent_process_summary(
     }
 
 
-def build_meta_fold_reviews(
-    records: Sequence[Mapping[str, object]],
-    *,
-    ref_store: AgentRefStore,
-    artifacts_root: str | Path | None = None,
-) -> list[dict[str, object]]:
-    """Per already-selected Fold: frozen artifact/ref, strategy source, Agent Trace."""
-
-    reviews, _sidecars = build_meta_fold_review_bundle(
-        records, ref_store=ref_store, artifacts_root=artifacts_root
-    )
-    return reviews
-
-
 def build_meta_fold_review_bundle(
     records: Sequence[Mapping[str, object]],
     *,

@@ -446,10 +446,6 @@ class PhasePromptTest(unittest.TestCase):
             self.assertEqual(public["max_backtests_per_fold"], manifest.data["max_backtests_per_fold"])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class PromptCompositionTest(unittest.TestCase):
     """The Fold prompt is assembled from a stable contract plus per-run context.
 

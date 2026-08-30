@@ -309,12 +309,6 @@ def load_model_artifacts(root: str | Path, *, revision_id: str | None = None) ->
     )
 
 
-def init_from_template(template_dir: str | Path, dest_root: str | Path) -> None:
-    """Initialize ``output/`` from ``configs/agent_output_template/``."""
-    template_dir = Path(template_dir)
-    _copy_revision(template_dir, Path(dest_root), _artifact_files(template_dir, reject_runtime_cache=False))
-
-
 def copy_artifact(source_root: str | Path, dest_root: str | Path) -> None:
     """Copy one strategy artifact directory, replacing any existing copy.
 

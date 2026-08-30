@@ -190,8 +190,7 @@ def iter_plan_pit_jobs(
     The plan comes from the schedule API, never from a second calendar: the
     regions and decision anchors are exactly the ``FoldSpec`` and held-out
     periods the pipeline will ask the provider to prepare. A fold without a
-    test region (the default single-window development Fold) contributes no
-    frozen_test job.
+    test region (the default regular Fold) contributes no frozen_test job.
 
     Epoch count does not multiply the set: later epochs reuse the same decision
     times and replay windows. Several phases routinely share one region — meta

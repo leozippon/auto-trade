@@ -39,6 +39,7 @@ from autotrade.pipelines.ledger import (
     is_frozen_artifact_mutation,
     latest_fold_records,
     latest_heldout_records,
+    walk_forward_transitions,
 )
 from autotrade.pipelines.worker import _ALLOWED_PARAMS
 from autotrade.pipelines.meta_schedule import meta_record_session_key
@@ -102,6 +103,9 @@ ACTIVE_STATES = (
 # (interpreter start + imports take seconds). Stale = the worker never came up.
 LAUNCH_GRACE_SECONDS = 180.0
 # Fold-record fields whose content is test-period evidence (guarded view).
+# ``parent_control`` is deliberately not one of them: the host's parent control
+# is a Validation over this Fold's own development window, so it stays visible
+# before the reveal exactly like the Fold's own Validation result.
 TEST_FIELDS = ("test_result",)
 # Pointers that resolve to the same evidence on disk. They are stripped from
 # every projection and never surface in the audit block either — the reveal
@@ -128,8 +132,9 @@ _PRIVATE_PARAMS = {
 }
 # Held-out is the one calendar the console must not publish before the reveal.
 # The development window is public research scope: the session list already
-# labels every Fold with its own period (``20220101..20251231`` for the default
-# single-window Fold), so sealing the same dates here sealed nothing.
+# labels every Fold with its own period (one regular Fold per period of the
+# window, ``fold_2022``..``fold_2025`` by default), so sealing the same dates
+# here sealed nothing.
 _SEALED_PERIOD_PARAMS = {
     "heldout_first_period",
     "heldout_last_period",
@@ -267,6 +272,81 @@ def _metric_series(records: list[dict[str, object]], result_key: str, metric: st
 
 def _mean(values: list[float]) -> float | None:
     return sum(values) / len(values) if values else None
+
+
+def _parent_control_view(record: Mapping[str, object]) -> dict[str, object] | None:
+    """Console metrics of one Fold's host parent control.
+
+    The parent control replays the inherited parent unchanged on this Fold's
+    Validation window, so it is the Fold's baseline and the previous Fold's
+    walk-forward evidence. ``None`` for a Fold that inherited no parent; a
+    failed control keeps its status and carries no numbers.
+    """
+    control = record.get("parent_control")
+    if not isinstance(control, Mapping):
+        return None
+    result = control.get("validation_result")
+    result = result if isinstance(result, Mapping) else {}
+    benchmark = result.get("benchmark")
+    total = _number(result.get("total_return"))
+    bench = (
+        _number(benchmark.get("benchmark_return")) if isinstance(benchmark, Mapping) else None
+    )
+    return {
+        "status": control.get("status"),
+        "return": total,
+        "excess_return": (
+            total - bench if total is not None and bench is not None else None
+        ),
+        "sharpe": _number(result.get("sharpe")),
+        "max_drawdown": _number(result.get("max_drawdown")),
+    }
+
+
+def _walk_forward_view(
+    records: list[dict[str, object]],
+    epoch_id: str,
+    *,
+    test_stage: bool,
+    revealed: bool,
+) -> dict[str, object] | None:
+    """Graduation term (b) for one Epoch (``ledger.walk_forward_transitions``).
+
+    Without a Test stage the transitions are the host's parent controls, which
+    are development evidence and readable while the experiment runs. With a
+    Test stage they are the frozen Test results, so the counts stay sealed
+    until the reveal like every other Test number.
+    """
+    if test_stage and not revealed:
+        return None
+    counts = walk_forward_transitions(records, epoch_id=epoch_id, test_stage=test_stage)
+    return {
+        "source": counts["source"],
+        "transitions": counts["transitions"],
+        "positive_excess": counts["positive_excess"],
+    }
+
+
+def _public_verdict(records: list[dict[str, object]]) -> dict[str, object] | None:
+    """Graduation verdict with term (b) surfaced beside it.
+
+    The pipeline computes the walk-forward term once over the final Epoch and
+    stamps the same block into every Held-out period's verdict, so the console
+    publishes it once next to the verdict instead of only inside the periods.
+    """
+    verdict = experiment_verdict(records, strict=False)
+    if verdict is None:
+        return None
+    walk_forward = next(
+        (
+            dict(period["walk_forward"])
+            for period in verdict.get("periods") or ()
+            if isinstance(period, Mapping)
+            and isinstance(period.get("walk_forward"), Mapping)
+        ),
+        None,
+    )
+    return {**verdict, "walk_forward": walk_forward}
 
 
 def _epoch_folds(folds: list[dict[str, object]], epoch_id: str | None) -> list[dict[str, object]]:
@@ -480,6 +560,7 @@ def summarize_experiment(directory: Path) -> dict[str, object]:
         schedule = read_json(directory / HITL_DIR_NAME / SCHEDULE_NAME)
         sessions = schedule.get("sessions") if isinstance(schedule.get("sessions"), list) else None
         revealed = test_results_revealed(directory, records)
+        test_stage = bool(params.get("test_stage"))
         epochs = sorted({str(row.get("epoch_id")) for row in folds if row.get("epoch_id")})
         latest_epoch = epochs[-1] if epochs else None
         completed_sessions, total_sessions = _durable_session_progress(sessions, records)
@@ -515,7 +596,7 @@ def summarize_experiment(directory: Path) -> dict[str, object]:
                 "test_revealed": revealed,
                 # Graduation verdict from the Held-out records; sealed like
                 # every other Held-out number until the reveal.
-                "verdict": experiment_verdict(records, strict=False) if revealed else None,
+                "verdict": _public_verdict(records) if revealed else None,
                 "metrics": {
                     "epoch_id": latest_epoch,
                     "cum_valid_return": _compound(
@@ -544,6 +625,9 @@ def summarize_experiment(directory: Path) -> dict[str, object]:
                         "mean_test_sharpe": _mean(
                             _metric_series(epoch_folds, "test_result", "sharpe")
                         ) if revealed else None,
+                        "walk_forward": _walk_forward_view(
+                            records, epoch, test_stage=test_stage, revealed=revealed
+                        ),
                     }
                     for epoch in epochs
                     for epoch_folds in [_epoch_folds(folds, epoch)]
@@ -557,6 +641,8 @@ def summarize_experiment(directory: Path) -> dict[str, object]:
                         "test_return": _metric(record, "test_result", "total_return") if revealed else None,
                         "valid_long": _metric(record, "validation_result", "long_return"),
                         "test_long": _metric(record, "test_result", "long_return") if revealed else None,
+                        # Development evidence: the Fold's baseline, never sealed.
+                        "parent_control": _parent_control_view(record),
                     }
                     for record in folds
                 ],

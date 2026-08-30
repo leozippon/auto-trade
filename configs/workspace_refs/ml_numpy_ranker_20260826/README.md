@@ -28,7 +28,7 @@
 用 T-1 日频构造少量 kbar / 滚动收益 / 滚动波动 / 量比特征，截面 z-score，丢掉 NaN，按分数取 top-k，并用 n_drop 类规则限制与当前持仓的换手。
 **默认候选是拟合出来的排序器**：在推断时可见的 PIT 窗口上，用 numpy 当场解 ridge 闭式解，或对二分类标签做少量梯度步的 logistic。等权与符号加权是它必须比过的对照基线，不是本折的目标产物；可选再加一层深度受限的 if/then 规则。
 LightGBM 不可 import；sklearn 虽在镜像中也属禁止模块。系数在 `fit(context)` 内用 numpy 拟合并持久化到 `context.state_dir`，`generate_orders` 只读取它；`fit` 有独立的分钟级预算（`budgets.strategy_fit_timeout_seconds`），`generate_orders` 仍受单日 30 秒上限约束。
-开发只有一个长 Validation 窗口（没有 Test 阶段，也没有 Epoch 循环），输入窗是它之前约 21 个月；预先登记至少三条假设——对照基线、拟合排序器和一个结构性变体——用 `batch_validate` 并列跑完整 Validation，并按窗口内的子区间判稳健。需要按调度重拟合的量放在 `fit(context)`，契约以只读 `output/README.md` 为准。
+开发窗口按年切成常规 Fold：每折的验证区间就是那一年，没有 Test 阶段，相邻两折之间跑一次元学习；本折输入窗是验证区间之前约 24 个月；预先登记至少三条假设——对照基线、拟合排序器和一个结构性变体——用 `batch_validate` 并列跑完整 Validation，并按窗口内的子区间判稳健。需要按调度重拟合的量放在 `fit(context)`，契约以只读 `output/README.md` 为准。
 
 ## 运行教训
 

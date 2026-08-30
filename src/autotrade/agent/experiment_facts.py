@@ -96,7 +96,10 @@ def build_experiment_facts(
             is_meta=is_meta,
         ),
         "research_scope": _research_scope(
-            manifest=manifest, snapshot_config=snapshot_config, is_meta=is_meta
+            manifest=manifest,
+            snapshot_config=snapshot_config,
+            fold_period=fold_period,
+            is_meta=is_meta,
         ),
         "budgets": _budget_facts(manifest, max_llm_calls=max_llm_calls, context_compaction=context_compaction),
         # No "paths" table and no per-file "data_profile": every production
@@ -128,10 +131,8 @@ def _visible_timeline(
 ) -> dict[str, object]:
     execution_policy = _execution_policy(data_summary)
     snapshot_windows = _snapshot_windows(snapshot_config)
-    # A single-window development Fold (test_stage False) has no Test cadence
-    # to name; the cadence unit only matters when Folds roll inside the window.
     timeline = {
-        "fold_period": None if manifest.get("test_stage") is False else fold_period,
+        "fold_period": fold_period,
         "snapshot_windows": snapshot_windows,
         "decision_snapshot_intraday_lookback_trade_days": snapshot_windows.get("intraday_trade_days"),
         "validation_intraday_scope": "historical_pit_features_and_exact_execution_prices",
@@ -157,6 +158,7 @@ def _research_scope(
     *,
     manifest: Mapping[str, object],
     snapshot_config: Mapping[str, object],
+    fold_period: object,
     is_meta: bool,
 ) -> dict[str, object]:
     """One sentence each on the development window, the universe and the cadence."""
@@ -164,9 +166,11 @@ def _research_scope(
     window = fold.get("validation_period")
     if manifest.get("test_stage") is False:
         development = (
-            f"The development window is {window}: the strategy is developed and "
-            "validated on this whole window as one Fold, and the frozen strategy is "
-            "then judged only by the automatic Held-out replay."
+            f"This Fold's validation period is {window}. The development window is "
+            f"split into one Fold per {fold_period or 'period'}, developed in "
+            "chronological order with a Meta-learning session between Folds; there "
+            "is no frozen Test stage, and the frozen strategy is judged only by the "
+            "automatic Held-out replay."
         )
     elif manifest.get("test_stage") is True:
         development = (

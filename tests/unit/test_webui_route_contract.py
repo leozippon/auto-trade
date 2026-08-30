@@ -144,6 +144,10 @@ def test_the_extractor_finds_the_routes_the_console_really_calls():
         # Assembled from a local `const base`, not written inline.
         "/api/experiments/{}/analysis/{}/{}",
         "/api/experiments/{}/folds/{}/{}/orders",
+        # 运行记忆: the page bundle, one entry's body, one experiment's mounts.
+        "/api/memory",
+        "/api/memory/curated/{}",
+        "/api/experiments/{}/memory",
     ):
         assert expected in paths, sorted(paths)
 
@@ -279,6 +283,101 @@ def test_the_sub_window_columns_the_console_reads_are_the_ones_produced() -> Non
     )
     assert read, "the sub-window table reads no row field"
     assert read <= produced, sorted(read - produced)
+
+
+def _js_literal(opening: str, closing: str) -> str:
+    """Source of one top-level literal, from its opening line to its close."""
+    source = APP_JS.read_text(encoding="utf-8")
+    start = source.index(opening)
+    return source[start : source.index(closing, start) + len(closing)]
+
+
+def test_every_progress_stage_the_pipeline_publishes_has_a_console_label() -> None:
+    """An unlabelled stage renders its raw token in the live status line, and
+    a preparation stage missing from the prep set makes the session panel offer
+    Agent controls for a session that has not started yet."""
+
+    pipeline = (
+        Path(__file__).resolve().parents[2] / "src/autotrade/pipelines/experiment.py"
+    ).read_text(encoding="utf-8")
+    stages = set(re.findall(r'_publish_progress\(\s*progress,\s*"([a-z_]+)"', pipeline))
+    labels = set(
+        re.findall(
+            r'^  ([a-z_]+): "',
+            _js_literal("const ENVIRONMENT_STAGE_LABELS = {", "\n};"),
+            re.MULTILINE,
+        )
+    )
+    assert labels and "parent_control" in stages
+    assert stages <= labels, sorted(stages - labels)
+    # The control runs before the Agent session opens.
+    prep = _js_literal("const PREP_ENVIRONMENT_STAGES = new Set([", "\n]);")
+    assert '"parent_control"' in prep
+
+
+def test_the_parent_control_and_walk_forward_surfaces_are_mounted() -> None:
+    """A rendered-but-never-called panel is invisible and wholly green."""
+
+    source = APP_JS.read_text(encoding="utf-8")
+    assert "parentControlSection(" in _js_function_body("foldResultPanel")
+    for name in ("walkForwardPanel", "walkForwardTerm"):
+        assert source.count(f"{name}(") > 1, f"{name} is never called"
+
+
+def test_the_parent_control_fields_the_console_reads_are_served() -> None:
+    """The fold panel's baseline row and the walk-forward table read the
+    registry's parent-control view by name; a renamed field would render an
+    empty column instead of failing."""
+
+    from autotrade.webui.registry import _parent_control_view
+
+    served = set(
+        _parent_control_view(
+            {
+                "parent_control": {
+                    "status": "ok",
+                    "validation_result": {
+                        "total_return": 0.08,
+                        "sharpe": 0.6,
+                        "max_drawdown": 0.07,
+                        "benchmark": {"benchmark_return": 0.03},
+                    },
+                }
+            }
+        )
+    )
+    read = set(
+        re.findall(r"\bmetrics\.([a-z_]+)", _js_function_body("parentControlSection"))
+    )
+    read |= set(
+        re.findall(r"\bcontrol\.([a-z_]+)", _js_function_body("walkForwardPanel"))
+    )
+    assert read, "the console reads no parent-control field"
+    assert read <= served, sorted(read - served)
+
+
+def test_the_walk_forward_counts_the_console_reads_are_served() -> None:
+    """Two producers, two shapes: the per-Epoch table reads the registry's
+    transition counts, the term beside the graduation badge reads the block
+    the acceptance rules stamp into every Held-out verdict."""
+
+    from autotrade.pipelines.config import AcceptanceRules
+    from autotrade.webui.registry import _walk_forward_view
+
+    counts = {"source": "parent_control", "transitions": 3, "positive_excess": 1}
+    epoch_served = set(
+        _walk_forward_view([], "epoch_001", test_stage=False, revealed=False)
+    )
+    verdict_served = set(AcceptanceRules.walk_forward_consistency(counts))
+    epoch_read = set(
+        re.findall(r"\bterm\.([a-z_]+)", _js_function_body("walkForwardPanel"))
+    )
+    verdict_read = set(
+        re.findall(r"\bterm\.([a-z_]+)", _js_function_body("walkForwardTerm"))
+    )
+    assert epoch_read and verdict_read
+    assert epoch_read <= epoch_served, sorted(epoch_read - epoch_served)
+    assert verdict_read <= verdict_served, sorted(verdict_read - verdict_served)
 
 
 def test_the_benchmark_fields_the_fold_panel_reads_are_served() -> None:

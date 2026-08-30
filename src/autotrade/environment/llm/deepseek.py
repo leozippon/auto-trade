@@ -367,8 +367,6 @@ _CONVERSATION_LOG_LOCK = threading.Lock()
 
 
 class OpenAICompatibleProxy:
-    config_type = OpenAICompatibleConfig
-
     def __init__(
         self,
         config: OpenAICompatibleConfig,
@@ -412,19 +410,6 @@ class OpenAICompatibleProxy:
             transport=self._transport,
             sleep=self._sleep,
         )
-
-    @classmethod
-    def from_environment(
-        cls,
-        *,
-        env_var: str = "DEEPSEEK_API_KEY",
-        env_file: str | Path = ".env",
-        **config: Any,
-    ) -> OpenAICompatibleProxy:
-        key = load_env_value(env_var, env_file)
-        if not key:
-            raise ValueError(f"missing API key in {env_var} or {env_file}")
-        return cls(cls.config_type(api_key=key, **config))
 
     def complete(
         self,
@@ -1149,5 +1134,3 @@ class DeepSeekConfig(OpenAICompatibleConfig):
 
 class DeepSeekProxy(OpenAICompatibleProxy):
     """Compatibility facade over the shared OpenAI-compatible proxy."""
-
-    config_type = DeepSeekConfig

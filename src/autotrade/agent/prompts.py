@@ -88,7 +88,7 @@ FOLD_ENV_SECTION = """\
 FOLD_SUBMIT_CONTRACT = """\
 # 提交合同（finish_fold 前自检）
 - 被选择节点属于当前 Fold、当前 run，且已完成一次成功的完整 Validation；Probe 或失败回放不算。
-- 有父产物时，被选择节点必须在可执行策略逻辑上不同于父本（注释-only 不算）；或本 Fold 已有一次不同假说的完整 Validation 之后，显式选择保留父本。
+- 有父产物时，被选择节点必须在可执行策略逻辑上不同于父本（注释-only 不算）；或本 Fold 已有一次不同假说的完整 Validation 之后，显式选择保留父本。宿主已在会话开始前把父本原样跑过一次本 Fold 的完整 Validation（Step 树里 `result_name=parent_control` 的节点，指标在运行事实 `parent_control`，不占任何预算）：它就是本 Fold 的基线，保留父本时直接选择该节点，不必再为父本花一次回测。
 - 当前 `output/` 和 `models/` 与被选择节点的快照逐字节一致；若最好版本是本 run 的更早 Step 或某个 `batch_validate` 候选节点，先用 `step_rollback` 恢复。`finish_fold` 会校验以上三项。
 - 正式产物不含隐藏文件、缓存、日志、数据 dump、notebook、密钥或宿主绝对路径依赖；`modification_check` 与回测前检查会拒绝。
 - `finish_fold` 只结束修改；Pipeline 仍会复核、冻结并在不可见区间运行后续阶段。\
@@ -155,7 +155,7 @@ FOLD_DYNAMIC_CONTEXT_HEADER = """\
 """
 
 STEP_WRAP_UP_PROMPT = """\
-正式 Step 预算已用完。请立即读取当前 Step 树，确认本 run 最佳完整 Validation 节点；必要时用 step_rollback 恢复它，运行 modification_check，然后调用 finish_fold。不要再修改策略或开始新方向。若本 Fold 已完成一次相对父本的逻辑或信号 Validation 且新方向未证明更好，收尾时可选择保留父本节点。\
+正式 Step 预算已用完。请立即读取当前 Step 树，确认本 run 最佳完整 Validation 节点；必要时用 step_rollback 恢复它，运行 modification_check，然后调用 finish_fold。不要再修改策略或开始新方向。若本 Fold 已完成一次相对父本的逻辑或信号 Validation 且新方向未证明更好，收尾时可选择保留父本节点（宿主的 `parent_control` 节点）。\
 """
 
 WRAP_UP_PROMPT = """\

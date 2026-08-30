@@ -27,6 +27,7 @@ from autotrade.environment.runtime import (
     AgentTraceWriter,
     write_json_atomic,
 )
+from autotrade.pipelines.config import AcceptanceRules
 from autotrade.pipelines.hitl_state import (
     WEB_CREATE_DEFAULTS,
     ControlState,
@@ -1640,6 +1641,154 @@ class WebuiBackendTest(unittest.TestCase):
         )
         return experiment_dir
 
+    def _build_walk_forward_experiment(self, experiment_id: str) -> Path:
+        """Four yearly Folds of one Epoch, exactly as the pipeline records them.
+
+        The first Fold of the first Epoch inherits nothing and has no control;
+        the three after it open with the previous Fold's frozen strategy
+        replayed on their own Validation window (one beats its benchmark, one
+        does not, one failed outright), so the Epoch has three walk-forward
+        transitions of which one is positive — short of the two-thirds term (b)
+        requires.
+        """
+        experiment_dir = self.experiments_root / experiment_id
+        AgentRefStore(experiment_dir)
+        hitl = experiment_dir / "hitl"
+        hitl.mkdir(parents=True)
+        write_json_atomic(
+            hitl / "params.json",
+            {
+                "experiment_id": experiment_id,
+                "fold_period": "year",
+                "development_first_period": "2022",
+                "development_last_period": "2025",
+                "heldout_first_period": "2026",
+                "heldout_last_period": "2026",
+                "test_stage": False,
+                "_created_at": "2026-07-06T00:00:00+00:00",
+            },
+        )
+        write_control(hitl / "control.json", ControlState(mode="manual"))
+        write_json_atomic(
+            hitl / "schedule.json",
+            {
+                "schema_version": 1,
+                "epochs": 1,
+                "sessions": [
+                    *(
+                        session
+                        for year in ("2022", "2023", "2024", "2025")
+                        for session in (
+                            {
+                                "key": f"epoch_001/meta_learning#{year}",
+                                "kind": "meta_learning",
+                                "epoch_id": "epoch_001",
+                            },
+                            {
+                                "key": f"epoch_001/fold_{year}",
+                                "kind": "fold",
+                                "epoch_id": "epoch_001",
+                                "fold_id": f"fold_{year}",
+                            },
+                        )
+                    ),
+                    {
+                        "key": "heldout",
+                        "kind": "heldout",
+                        "epoch_id": "epoch_001",
+                        "periods": [],
+                    },
+                ],
+            },
+        )
+        controls = {
+            "2022": None,
+            # Beat the benchmark: a positive transition.
+            "2023": {
+                "status": "ok",
+                "parent_strategy_artifact_id": "strategy_epoch_001_fold_2022",
+                "step_id": "step_control",
+                "validation_result": {
+                    "total_return": 0.08,
+                    "sharpe": 0.60,
+                    "max_drawdown": 0.07,
+                    "benchmark": {"benchmark_return": 0.03},
+                },
+            },
+            # Lost to the benchmark.
+            "2024": {
+                "status": "ok",
+                "parent_strategy_artifact_id": "strategy_epoch_001_fold_2023",
+                "step_id": "step_control",
+                "validation_result": {
+                    "total_return": 0.01,
+                    "sharpe": 0.10,
+                    "max_drawdown": 0.09,
+                    "benchmark": {"benchmark_return": 0.04},
+                },
+            },
+            # Never completed: a transition that proved nothing.
+            "2025": {
+                "status": "failed",
+                "parent_strategy_artifact_id": "strategy_epoch_001_fold_2024",
+                "error": "TimeoutError: parent control exceeded the deadline",
+            },
+        }
+        records: list[dict[str, object]] = [
+            {
+                "record_type": "fold",
+                "experiment_id": experiment_id,
+                "epoch_id": "epoch_001",
+                "fold_id": f"fold_{year}",
+                "run_id": f"run_{year}",
+                "session_key": f"epoch_001/fold_{year}",
+                "fold_status": "frozen",
+                "validation_period": f"{year}0104..{year}1230",
+                "test_period": None,
+                "test_result": None,
+                "parent_control": controls[year],
+                "validation_result": {
+                    "total_return": 0.10,
+                    "sharpe": 1.0,
+                    "max_drawdown": 0.05,
+                    "benchmark": {"benchmark_return": 0.04, "excess_return": 0.06},
+                },
+                "steps": [],
+            }
+            for year in ("2022", "2023", "2024", "2025")
+        ]
+        heldout_result = {
+            "total_return": 0.05,
+            "sharpe": 0.80,
+            "max_drawdown": 0.10,
+            "benchmark": {"benchmark_return": 0.02},
+        }
+        records.append(
+            {
+                "record_type": "heldout",
+                "experiment_id": experiment_id,
+                "epoch_id": "epoch_001",
+                "fold_id": "heldout_2026",
+                "run_id": "run_heldout",
+                "session_key": "heldout",
+                "period": "2026",
+                "result": heldout_result,
+                # The verdict the pipeline stamps: term (a) passes, term (b)
+                # does not, so the failing reason is the walk-forward one.
+                "verdict": AcceptanceRules().heldout_verdict(
+                    heldout_result,
+                    {
+                        "source": "parent_control",
+                        "epoch_id": "epoch_001",
+                        "transitions": 3,
+                        "positive_excess": 1,
+                    },
+                ),
+            }
+        )
+        _write_ledger(experiment_dir, records)
+        return experiment_dir
+
     def _reveal(self, experiment_id: str = "exp_hitl") -> None:
         response = self.client.post(
             f"/api/experiments/{experiment_id}/control",
@@ -2346,6 +2495,95 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertAlmostEqual(hitl["metrics"]["cum_heldout_return"], -0.03)
         row = hitl["fold_returns"][0]
         self.assertAlmostEqual(row["valid_long"], 0.08)
+
+    def test_fold_returns_carry_the_parent_control_baseline(self) -> None:
+        self._build_walk_forward_experiment("exp_wf")
+        detail = self.client.get("/api/experiments/exp_wf").json()
+        rows = {row["fold_ref"]: row for row in detail["fold_returns"]}
+        # The first Fold of the first Epoch inherits nothing.
+        first = rows[self._fold_ref("fold_2022", "exp_wf")]["parent_control"]
+        self.assertIsNone(first)
+        beat = rows[self._fold_ref("fold_2023", "exp_wf")]["parent_control"]
+        self.assertEqual(beat["status"], "ok")
+        self.assertAlmostEqual(beat["return"], 0.08)
+        # Excess is measured against the control's own benchmark.
+        self.assertAlmostEqual(beat["excess_return"], 0.05)
+        self.assertAlmostEqual(beat["sharpe"], 0.60)
+        self.assertAlmostEqual(beat["max_drawdown"], 0.07)
+        lost = rows[self._fold_ref("fold_2024", "exp_wf")]["parent_control"]
+        self.assertAlmostEqual(lost["excess_return"], -0.03)
+        # A failed control keeps its status and carries no numbers at all.
+        self.assertEqual(
+            rows[self._fold_ref("fold_2025", "exp_wf")]["parent_control"],
+            {
+                "status": "failed",
+                "return": None,
+                "excess_return": None,
+                "sharpe": None,
+                "max_drawdown": None,
+            },
+        )
+
+    def test_epoch_metrics_carry_the_walk_forward_transition_counts(self) -> None:
+        self._build_walk_forward_experiment("exp_wf")
+        detail = self.client.get("/api/experiments/exp_wf").json()
+        self.assertEqual(
+            [epoch["walk_forward"] for epoch in detail["metrics_by_epoch"]],
+            [{"source": "parent_control", "transitions": 3, "positive_excess": 1}],
+        )
+
+    def test_parent_control_is_development_evidence_and_survives_the_guard(
+        self,
+    ) -> None:
+        """The control is a Validation on the Fold's own development window:
+        sealing it with the Test evidence would hide the Fold's baseline for
+        the whole run."""
+
+        self._build_walk_forward_experiment("exp_wf")
+        detail = self.client.get("/api/experiments/exp_wf").json()
+        self.assertFalse(detail["test_revealed"])
+        session = next(
+            entry
+            for entry in detail["sessions"]
+            if entry.get("fold_ref") == self._fold_ref("fold_2023", "exp_wf")
+        )
+        control = session["record"]["parent_control"]
+        self.assertEqual(control["validation_result"]["total_return"], 0.08)
+        self.assertEqual(
+            control["parent_strategy_artifact_ref"],
+            self._identity("exp_wf").strategy_ref("strategy_epoch_001_fold_2022"),
+        )
+        # The on-disk pointer never rides along, and Test evidence stays gone.
+        self.assertNotIn("validation_result_ref", control)
+        self.assertNotIn("test_result", session["record"])
+        # The counts are development data too, so they are published pre-reveal.
+        self.assertEqual(detail["metrics_by_epoch"][0]["walk_forward"]["transitions"], 3)
+        fold_ref = self._fold_ref("fold_2023", "exp_wf")
+        fold = self.client.get(
+            f"/api/experiments/exp_wf/folds/epoch_001/{fold_ref}"
+        ).json()
+        self.assertEqual(fold["record"]["parent_control"]["status"], "ok")
+        self.assertEqual(fold["test_audit"], {"hidden": True})
+
+    def test_verdict_surfaces_the_walk_forward_term_beside_it(self) -> None:
+        self._build_walk_forward_experiment("exp_wf")
+        self.assertIsNone(self.client.get("/api/experiments/exp_wf").json()["verdict"])
+        self._reveal("exp_wf")
+        verdict = self.client.get("/api/experiments/exp_wf").json()["verdict"]
+        self.assertEqual(verdict["status"], "discarded")
+        self.assertEqual(
+            verdict["walk_forward"],
+            {
+                "status": "inconsistent",
+                "source": "parent_control",
+                "transitions": 3,
+                "positive_excess": 1,
+                "required": 2,
+            },
+        )
+        self.assertEqual(
+            verdict["reasons"], ["walkforward_excess_inconsistent(1/3<2)"]
+        )
 
     # ---- lifecycle guards ------------------------------------------------------
     def test_experiment_detail_merges_schedule_and_records(self) -> None:

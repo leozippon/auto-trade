@@ -44,8 +44,9 @@ LIVE_RUN_STATES = {"running_session", "waiting_step_user", "waiting_user_reply"}
 WEB_CREATE_DEFAULTS: dict[str, object] = {
     "experiment_id": None,
     "fold_period": rolling_default("fold_period"),
-    # One development window 2022..2025, fitted as one Fold (no Test stage);
-    # the frozen strategy is judged by Held-out alone.
+    # Development window 2022..2025: one regular yearly Fold per year (no Test
+    # stage) with Meta between Folds; the frozen strategy is judged by
+    # Held-out alone.
     "development_first_period": "2022",
     "development_last_period": "2025",
     "test_stage": rolling_default("test_stage"),

@@ -2385,10 +2385,6 @@ class SnapshotBuilderTest(unittest.TestCase):
             self.assertEqual(set(events["ts_code"]), {"600000.SH", "000001.SZ"})
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 def test_external_union_snapshot_fixture_finalizes_under_the_unit_contract(tmp_path):
     """The shared decision/replay snapshot fixtures must satisfy the same
     manifest and unit-registry gate as a builder-produced snapshot: an external

@@ -211,6 +211,18 @@ class UnvalidatedParentFallbackTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "refusing unvalidated fallback"):
                 pipeline._assert_parent_validated_in_fold(parent, ())
 
+    def test_an_acceptable_parent_control_is_the_validation(self) -> None:
+        # The host replayed the meta-regularized parent on this Fold's window
+        # before the session: that completed Validation satisfies the guard
+        # even when the session itself recorded no Step (deadline).
+        with TemporaryDirectory() as tmp:
+            pipeline, _artifacts, parent, _ = self._guard(Path(tmp), steps=())
+            control = EvaluationResult({"total_return": 0.02, "max_drawdown": 0.03}, "result/valid")
+            pipeline._assert_parent_validated_in_fold(parent, (), control=control)  # does not raise
+            breached = EvaluationResult({"total_return": 0.02, "max_drawdown": 0.9}, "result/valid")
+            with self.assertRaisesRegex(RuntimeError, "refusing unvalidated fallback"):
+                pipeline._assert_parent_validated_in_fold(parent, (), control=breached)
+
     def test_a_step_validating_identical_content_is_allowed(self) -> None:
         with TemporaryDirectory() as tmp:
             pipeline, artifacts, parent, _ = self._guard(Path(tmp), steps=())

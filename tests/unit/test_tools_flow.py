@@ -750,10 +750,6 @@ class ArtifactIOToolTest(unittest.TestCase):
                     safe.resolve(path, must_exist=path == "link")
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TerminalToolWriteLockTest(unittest.TestCase):
     """Finishing locks the workspace: after a terminal tool succeeds, the
     registry refuses every mutating tool while read-only ones keep working."""
@@ -1406,23 +1402,23 @@ class FoldBacktestSnapshotAccountingTest(unittest.TestCase):
                 "# written mid-replay\n",
             )
 
-    def test_a_lost_sandbox_aborts_the_session_instead_of_failing_the_strategy(
+    def test_a_session_interrupt_aborts_the_session_instead_of_failing_the_strategy(
         self,
     ) -> None:
-        from autotrade.pipelines.local_backend import SandboxLost
+        from autotrade.environment.tools.base import SessionInterrupt
 
-        class LostEvaluator:
+        class InterruptedEvaluator:
             def evaluate(self, _request, max_days=None):
-                raise SandboxLost("the session sandbox is gone")
+                raise SessionInterrupt("the session was interrupted")
 
         with tempfile.TemporaryDirectory() as tmp:
             manifest = self._Manifest()
             _, tool, _ = _fold_backtest_tool(
-                Path(tmp), 5, evaluator=LostEvaluator(), manifest=manifest
+                Path(tmp), 5, evaluator=InterruptedEvaluator(), manifest=manifest
             )
             # The registry re-raises a session interrupt instead of turning it
             # into an observation the Agent would answer with another attempt.
-            with self.assertRaises(SandboxLost):
+            with self.assertRaises(SessionInterrupt):
                 ToolRegistry([tool]).invoke("daily_backtest", {})
             self.assertEqual(tool.steps, [])
             self.assertEqual(tool.tree.nodes(), [])

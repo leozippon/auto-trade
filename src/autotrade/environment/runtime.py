@@ -172,11 +172,6 @@ class SandboxPaths:
         return self.root / "runtime"
 
     @property
-    def formal_snapshot(self) -> Path:
-        """Host-only selector for the decision input mounted by formal replay."""
-        return self.runtime / "formal_snapshot"
-
-    @property
     def snapshot_views(self) -> Path:
         return self.runtime / "snapshot_views"
 
@@ -320,10 +315,6 @@ class RunManifest:
         with self._lock:
             self.data.update(fields)
             self.save()
-
-    def record_modification_check(self, summary: dict[str, object]) -> None:
-        """Keep only the latest check summary (docs/environment-design.md §2.3)."""
-        self.update(last_modification_check=summary)
 
     def append_backtest_summary(self, summary: dict[str, object]) -> None:
         with self._lock:
@@ -647,7 +638,3 @@ class AgentTraceWriter:
             self.path.chmod(0o600)
         return record
 
-    def read_events(self) -> list[dict[str, object]]:
-        if not self.path.exists():
-            return []
-        return [json.loads(line) for line in self.path.read_text(encoding="utf-8").splitlines() if line.strip()]

@@ -108,6 +108,58 @@ def latest_heldout_records(records: list[dict[str, object]]) -> list[dict[str, o
     return [latest[key] for key in sorted(latest)]
 
 
+def walk_forward_transitions(
+    fold_records: list[dict[str, object]], *, epoch_id: str, test_stage: bool
+) -> dict[str, object]:
+    """Out-of-sample transitions of one Epoch for graduation term (b).
+
+    Without a Test stage a transition is the host's ``parent_control`` of every
+    Fold after the Epoch's first: the previous Fold's frozen strategy replayed
+    on this Fold's Validation window. With a Test stage it is each Fold's
+    frozen Test. A transition counts as positive only when its result exists
+    and its excess return over the benchmark is > 0; a failed or missing
+    result is a transition that proved nothing.
+    """
+    folds = sorted(
+        (
+            record
+            for record in latest_fold_records(fold_records).values()
+            if str(record.get("epoch_id")) == epoch_id
+        ),
+        key=lambda record: str(record.get("validation_period") or ""),
+    )
+    if test_stage:
+        source = "frozen_test"
+        results = [record.get("test_result") for record in folds]
+    else:
+        source = "parent_control"
+        results = [
+            (record.get("parent_control") or {}).get("validation_result")
+            if isinstance(record.get("parent_control"), Mapping)
+            else None
+            for record in folds[1:]
+        ]
+    return {
+        "source": source,
+        "epoch_id": epoch_id,
+        "transitions": len(results),
+        "positive_excess": sum(1 for result in results if _excess_positive(result)),
+    }
+
+
+def _excess_positive(result: object) -> bool:
+    if not isinstance(result, Mapping) or result.get("status") == "failed":
+        return False
+    benchmark = result.get("benchmark")
+    total = result.get("total_return")
+    bench = benchmark.get("benchmark_return") if isinstance(benchmark, Mapping) else None
+    if isinstance(total, bool) or isinstance(bench, bool):
+        return False
+    if not isinstance(total, (int, float)) or not isinstance(bench, (int, float)):
+        return False
+    return float(total) - float(bench) > 0
+
+
 def experiment_verdict(
     records: list[dict[str, object]], *, strict: bool = True
 ) -> dict[str, object] | None:

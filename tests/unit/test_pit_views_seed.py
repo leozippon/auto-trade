@@ -523,11 +523,12 @@ def test_default_plan_is_the_console_calendar_and_shares_regions() -> None:
     assert heldout[0][1], heldout[0][2]
 
 
-def test_single_window_development_fold_plans_no_frozen_test() -> None:
-    """One development Fold over the whole window, judged by Held-out alone.
+def test_yearly_regular_folds_plan_one_shared_region_per_year_and_no_frozen_test() -> None:
+    """One regular Fold per year, judged by Held-out alone.
 
-    Two regions and two decision anchors: the four-year validation region that
-    Meta and Validation share, and the explicit held-out range.
+    Five regions and five decision anchors: each year's validation region
+    (shared by Meta and Validation) plus the explicit held-out range; no
+    frozen_test job anywhere.
     """
 
     jobs = iter_plan_pit_jobs(
@@ -541,11 +542,40 @@ def test_single_window_development_fold_plans_no_frozen_test() -> None:
         min_region_trade_days=2,
         test_stage=False,
     )
+    assert [phase for phase, *_rest in jobs] == ["meta", "valid"] * 4 + ["heldout"]
+    assert [(start, end) for _phase, start, end, _d in jobs][::2] == [
+        ("20220101", "20221231"),
+        ("20230101", "20231231"),
+        ("20240101", "20241231"),
+        ("20250101", "20251231"),
+        ("20260101", "20260630"),
+    ]
+    assert [decision.isoformat() for *_rest, decision in jobs][::2] == [
+        "2021-12-31T23:59:59+08:00",
+        "2022-12-30T23:59:59+08:00",
+        "2023-12-29T23:59:59+08:00",
+        "2024-12-31T23:59:59+08:00",
+        "2025-12-31T23:59:59+08:00",
+    ]
+    regions = {(start, end, decision) for _phase, start, end, decision in jobs}
+    assert len(regions) == 5
+
+
+def test_an_explicit_range_window_plans_a_single_development_region() -> None:
+    jobs = iter_plan_pit_jobs(
+        _business_days(),
+        development_first_period="20220101..20251231",
+        development_last_period="20220101..20251231",
+        heldout_first_period="20260101..20260630",
+        heldout_last_period="20260101..20260630",
+        fold_period="year",
+        window_months=24,
+        min_region_trade_days=2,
+        test_stage=False,
+    )
     assert [phase for phase, *_rest in jobs] == ["meta", "valid", "heldout"]
     assert jobs[0][1:3] == ("20220101", "20251231")
-    assert jobs[1][1:3] == ("20220101", "20251231")
     assert jobs[2][1:3] == ("20260101", "20260630")
-    assert jobs[0][3].isoformat() == "2021-12-31T23:59:59+08:00"
     assert jobs[2][3].isoformat() == "2025-12-31T23:59:59+08:00"
     assert len({(start, end, decision) for _p, start, end, decision in jobs}) == 2
 

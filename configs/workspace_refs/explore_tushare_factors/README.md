@@ -6,7 +6,7 @@ Fold Agent 必须把正式单文件策略写到 `output/main.py`；不要复制�
 
 目标不是复刻 202 个供应商因子，而是从当前 PIT parquet 重算一个小集合，完成不同因子家族及其组合的完整 Validation。
 默认 08:30 推断只能使用 T-1 及更早的日频行，所有输入仍须满足 `available_at <= inference_at`。
-开发只有一个长 Validation 窗口（没有 Test 阶段，也没有 Epoch 循环），输入窗是它之前约 21 个月，可用的完整 Validation 次数远多于家族数量（上限以本轮事实为准）：候选先在输入窗上离线筛掉，幸存家族预先登记后用 `batch_validate` 并列跑完整 Validation，并按窗口内的子区间判稳健。
+开发窗口按年切成常规 Fold：每折的验证区间就是那一年，没有 Test 阶段，相邻两折之间跑一次元学习；本折输入窗是验证区间之前约 24 个月，可用的完整 Validation 次数远多于家族数量（上限以本轮事实为准）：候选先在输入窗上离线筛掉，幸存家族预先登记后用 `batch_validate` 并列跑完整 Validation，并按窗口内的子区间判稳健。
 
 按以下顺序使用：
 

@@ -1,4 +1,3 @@
-import shutil
 import stat
 import tempfile
 import unittest
@@ -13,7 +12,6 @@ from autotrade.environment.artifacts import (
     _unlock_directory,
     copy_artifact,
     copy_model_artifacts,
-    init_from_template,
     load_model_artifacts,
     load_strategy_artifact,
     modification_delta,
@@ -128,19 +126,6 @@ def generate_orders(context):
             root = write_artifact(Path(tmp), main=main)
             artifact = load_strategy_artifact(root)
             self.assertIn("main.py", artifact.files)
-
-    def test_init_from_template_skips_runtime_cache(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            template = Path(tmp) / "template"
-            shutil.copytree(TEMPLATE_DIR, template)
-            cache_dir = template / "__pycache__"
-            cache_dir.mkdir()
-            (cache_dir / "x.pyc").write_bytes(b"x")
-            dest = Path(tmp) / "dest"
-            init_from_template(template, dest)
-            self.assertTrue((dest / "main.py").exists())
-            self.assertFalse((dest / "__pycache__").exists())
-            load_strategy_artifact(dest)
 
     def test_copy_artifact_skips_runtime_cache(self):
         with tempfile.TemporaryDirectory() as tmp:

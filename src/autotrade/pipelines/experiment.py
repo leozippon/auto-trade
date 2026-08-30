@@ -61,6 +61,7 @@ from .config import (
     MetaLearner,
     MetaSessionResult,
     RollingExperimentConfig,
+    SnapshotBundle,
     SnapshotProvider,
     StepResult,
     StrategyExperimentConfig,
@@ -75,6 +76,7 @@ from .ledger import (
     assert_no_frozen_artifact_mutation,
     is_frozen_artifact_mutation,
     latest_fold_records,
+    walk_forward_transitions,
 )
 from .meta_inputs import (
     AgentTraceFullSidecar,
@@ -97,9 +99,9 @@ from .skills import (
 
 # A per-session deadline override may raise the fold deadline above the
 # configured maximum, bounded by this absolute ceiling in minutes: twice the
-# default development-Fold budget (config.max_fold_minutes), enough headroom
-# for one slow session without letting it run unattended for days.
-_MAX_DEADLINE_OVERRIDE_MINUTES = 1440
+# default Fold budget (config.max_fold_minutes), enough headroom for one slow
+# session without letting it run unattended for days.
+_MAX_DEADLINE_OVERRIDE_MINUTES = 960
 
 
 class DailyStrategyPipeline:
@@ -222,6 +224,9 @@ class RollingExperimentPipeline:
                 end=fold.validation_end,
                 decision_time=fold.valid_decision_time,
             )
+            control, control_error = self._parent_control(
+                parent, fold, valid_snapshot, progress=progress, run_id=run_id
+            )
             try:
                 session = self.developer(
                     FoldSessionRequest(
@@ -244,6 +249,7 @@ class RollingExperimentPipeline:
                         ),
                         fold_period=self.config.fold_period,
                         test_stage=self.config.test_stage,
+                        parent_control=control,
                         epoch_index=_epoch_index(epoch_id),
                         phase=(
                             "convergence"
@@ -290,7 +296,8 @@ class RollingExperimentPipeline:
                     selected_step_id=None,
                     finish_reason="deadline_grace_exhausted",
                 )
-            if len(session.steps) > budgets["max_steps"]:
+            # The parent control is the host's Step, never the Agent's.
+            if sum(not step.parent_control for step in session.steps) > budgets["max_steps"]:
                 raise RuntimeError("Fold developer exceeded the Step budget")
             selected = _select_step(session.steps, session.selected_step_id)
             hard: list[str] = ["no_complete_validation"]
@@ -316,7 +323,9 @@ class RollingExperimentPipeline:
                 validation = selected.validation.summary
             elif parent is not None:
                 if parent.requires_validation:
-                    self._assert_parent_validated_in_fold(parent, session.steps)
+                    self._assert_parent_validated_in_fold(
+                        parent, session.steps, control=control
+                    )
                     parent = replace(parent, requires_validation=False)
                 frozen = parent
                 status = "no_update" if selected is not None else "no_valid_backtest"
@@ -404,6 +413,9 @@ class RollingExperimentPipeline:
                 "session_key": fold_session_key(epoch_id, fold.fold_id),
                 **fold.to_record(),
                 "parent_strategy_artifact_id": parent.artifact_id if parent else None,
+                "parent_control": _parent_control_record(
+                    parent, control, control_error, session.steps
+                ),
                 "conversation_id": session.conversation_id,
                 "finish_reason": session.finish_reason,
                 "fold_status": status,
@@ -515,6 +527,14 @@ class RollingExperimentPipeline:
                 if record.get("period") and not is_frozen_artifact_mutation(record)
             }
         )
+        # Graduation term (b): the final Epoch's walk-forward transitions
+        # (docs/pipeline-design.md §3.3), read once from the ledger and applied
+        # to every Held-out period's verdict.
+        walk_forward = walk_forward_transitions(
+            self.ledger.read("fold"),
+            epoch_id=epoch_id,
+            test_stage=self.config.test_stage,
+        )
         for period in heldout_periods(
             self.config.heldout_first_period,
             self.config.heldout_last_period,
@@ -602,7 +622,9 @@ class RollingExperimentPipeline:
                     "result_ref": result.result_ref,
                     # Graduation verdict of this period; the experiment-level
                     # verdict (ledger.experiment_verdict) needs every period.
-                    "verdict": self.config.acceptance.heldout_verdict(result.summary),
+                    "verdict": self.config.acceptance.heldout_verdict(
+                        result.summary, walk_forward
+                    ),
                 }
             )
             count += 1
@@ -808,16 +830,62 @@ class RollingExperimentPipeline:
             )
             raise
 
+    def _parent_control(
+        self,
+        parent: FrozenArtifact | None,
+        fold: FoldSpec,
+        snapshot: SnapshotBundle,
+        *,
+        progress,
+        run_id: str,
+    ) -> tuple[EvaluationResult | None, str]:
+        """Replay the inherited parent unchanged on this Fold's Validation window.
+
+        Runs before the Agent session through the same evaluator, snapshot and
+        replay bounds the session's own Validations use, and is charged to no
+        session budget. The result is the walk-forward evidence for the
+        previous Fold's frozen strategy and the parent's completed Validation
+        in this Fold; a failure is recorded explicitly and the Fold proceeds.
+        """
+        if parent is None:
+            return None, ""
+        _publish_progress(progress, "parent_control", run_id=run_id)
+        try:
+            return (
+                self.evaluator.evaluate(
+                    EvaluationRequest(
+                        revision=_frozen_revision(parent),
+                        snapshot=snapshot,
+                        mode="valid",
+                        start=fold.validation_start,
+                        end=fold.validation_end,
+                        schedule=self.config.schedule,
+                        broker_profile=self.config.broker_profile,
+                    )
+                ),
+                "",
+            )
+        except Exception as exc:  # noqa: BLE001 - recorded, the Fold still runs
+            return None, f"{type(exc).__name__}: {exc}"
+
     def _assert_parent_validated_in_fold(
-        self, parent: FrozenArtifact, steps: tuple[StepResult, ...]
+        self,
+        parent: FrozenArtifact,
+        steps: tuple[StepResult, ...],
+        *,
+        control: EvaluationResult | None = None,
     ) -> None:
         """Refuse to fall back to a meta-regularized parent this Fold never validated.
 
         A meta-regularized artifact enters the Fold without a backtest. Falling
-        back to it silently would ship an unvalidated strategy. Identity is
-        established by comparing the trees directly: a Step whose revision has
-        no changed strategy or model file performed Validation on this parent.
+        back to it silently would ship an unvalidated strategy. The host's
+        parent control is that Validation when it completed and passed
+        acceptance; otherwise identity is established by comparing the trees
+        directly: a Step whose revision has no changed strategy or model file
+        performed Validation on this parent.
         """
+        if control is not None and not self.config.acceptance.evaluate(control.summary)[0]:
+            return
         for step in steps:
             revision = self.artifacts.revision(step.revision_id)
             if modification_delta(parent.path, revision.output_path).changed_files:
@@ -1028,8 +1096,37 @@ def _step_record(step: StepResult) -> dict[str, object]:
         "step_id": step.step_id,
         "revision_id": step.revision_id,
         "complete_validation": True,
+        "parent_control": step.parent_control,
         "summary": step.validation.summary,
         "validation_result_ref": step.validation.result_ref,
+    }
+
+
+def _parent_control_record(
+    parent: FrozenArtifact | None,
+    control: EvaluationResult | None,
+    error: str,
+    steps: tuple[StepResult, ...],
+) -> dict[str, object] | None:
+    """Ledger projection of the host's parent control; None without a parent."""
+    if parent is None:
+        return None
+    if control is None:
+        return {
+            "status": "failed",
+            "parent_strategy_artifact_id": parent.artifact_id,
+            "error": error,
+        }
+    return {
+        "status": "ok",
+        "parent_strategy_artifact_id": parent.artifact_id,
+        # The in-session Step node the developer recorded for it, when the
+        # session got that far (a deadline before the first call records none).
+        "step_id": next(
+            (step.step_id for step in steps if step.parent_control), None
+        ),
+        "validation_result": control.summary,
+        "validation_result_ref": control.result_ref,
     }
 
 
@@ -1106,7 +1203,9 @@ def _development_inputs(
     limited to the compact frozen-test metric whitelist of already-completed
     Folds. Held-out never appears. ``fold_reviews`` and
     ``fold_backtest_summaries`` only cover regular Folds completed after the
-    previous Meta; older Folds are already absorbed into PRIOR.
+    previous Meta; ``fold_validation_history`` carries the compact Validation
+    summaries of every completed Fold so far, across Epochs, so Meta sees the
+    whole accumulated Validation record next to the PRIOR that absorbed it.
     ``fold_reviews`` carries frozen strategy source, a bounded Agent Trace
     index, ``agent_process_summary``, and ``agent_trace_full`` sidecar metadata.
     Each sidecar is a byte-exact copy of the raw Fold AgentTraceWriter JSONL; its
@@ -1136,6 +1235,14 @@ def _development_inputs(
         ],
         "fold_reviews": reviews,
         "review_window": review_window,
+        "fold_validation_history": [
+            _compact_fold_history(
+                record,
+                ref_store=ref_store,
+                include_frozen_test_metrics=True,
+            )
+            for record in latest_fold_records(records).values()
+        ],
         "meta_learning": [
             _agent_visible_ledger_record(
                 record,

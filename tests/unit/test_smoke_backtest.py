@@ -108,20 +108,20 @@ def _tool(root: Path, strategy: str, *, check=None, evaluator=None) -> SmokeBack
     )
 
 
-def test_a_lost_sandbox_aborts_the_session_instead_of_reading_as_a_bad_strategy(
+def test_a_session_interrupt_aborts_the_session_instead_of_reading_as_a_bad_strategy(
     tmp_path: Path,
 ) -> None:
-    """Every other smoke failure is an observation the Agent can act on. A lost
-    session sandbox is not: no later call can run, so it must leave the tool as
-    a session interrupt rather than a strategy the Agent could try to fix."""
-    from autotrade.pipelines.local_backend import SandboxLost
+    """Every other smoke failure is an observation the Agent can act on. A
+    session interrupt is not: the session is over, so it must leave the tool as
+    an interrupt rather than a strategy the Agent could try to fix."""
+    from autotrade.environment.tools.base import SessionInterrupt
 
-    class LostEvaluator:
+    class InterruptedEvaluator:
         def evaluate(self, _request, max_days=None):
-            raise SandboxLost("the session sandbox is gone")
+            raise SessionInterrupt("the session was interrupted")
 
-    tool = _tool(tmp_path, WORKING_STRATEGY, evaluator=LostEvaluator())
-    with pytest.raises(SandboxLost):
+    tool = _tool(tmp_path, WORKING_STRATEGY, evaluator=InterruptedEvaluator())
+    with pytest.raises(SessionInterrupt):
         tool.invoke({"days": 1})
     # The rehearsal copy is still cleaned up on the way out.
     assert list((tmp_path / "runtime" / "smoke").iterdir()) == []
