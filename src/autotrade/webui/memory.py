@@ -40,8 +40,12 @@ from autotrade.pipelines.skills import (
     graduated_exclusion_record,
     graduated_memory_sources,
     latest_skills_snapshot,
+    operating_memory_snapshot_root,
     read_graduated_exclusions,
+    read_operating_memory_snapshot,
     resolve_operating_memory,
+    snapshot_memory_sources,
+    validate_memory_entry_ref,
     validate_skill_name,
     validate_skill_path,
     validate_skills_tree,
@@ -62,6 +66,7 @@ _UNREADABLE_LIBRARY = "curated memory library is unreadable"
 _UNREADABLE_TIER = "graduated memory cannot be resolved"
 _UNREADABLE_EXPERIMENT = "experiment state is unreadable"
 _UNREADABLE_MANIFEST = "run manifest is unreadable"
+_UNREADABLE_SNAPSHOT = "operating memory snapshot is unreadable"
 
 
 def _error(exc: Exception, phrase: str) -> str:
@@ -222,68 +227,99 @@ def _tier_row(
 
 
 def experiment_memory(experiments_root: Path, experiment_id: str) -> dict[str, object]:
-    """What each of one experiment's collected sessions actually mounted."""
+    """This experiment's operating memory: one list, frozen when it was created.
+
+    Nothing here is per session any more. The experiment resolved the curated
+    library and the graduated tier once, at creation, and every one of its
+    sessions mounts that same snapshot — so the question "what did this session
+    get" has one answer for the whole experiment, and a later library change
+    belongs to the next experiment rather than to this one's middle.
+    """
 
     directory = resolve_experiment_dir(Path(experiments_root), experiment_id)
-    identity = PublicIdentity(directory)
     params = read_json(directory / HITL_DIR_NAME / PARAMS_NAME)
-    # Collected runs are named by run id, so their directory order is arbitrary.
-    # The plan is the only order a reader can follow, and the page lists one row
-    # per session, so the sessions come back in it.
-    order = {
-        str(entry.get("_raw_key") or ""): index
-        for index, entry in enumerate(identity.sessions)
-    }
-    collected = [
-        _mounted_session(identity, path, order)
-        for path in sorted(
-            (directory / "artifacts").glob(f"*/{HOST_RUN_MANIFEST_NAME}")
-        )
-    ]
-    collected.sort(key=lambda item: item[0])
-    return {
+    payload: dict[str, object] = {
         "experiment_id": experiment_id,
         "mode": resolve_operating_memory(params.get("operating_memory")),
         "default_mode": DEFAULT_OPERATING_MEMORY,
-        "sessions": [entry for _index, entry in collected],
-    }
-
-
-def _mounted_session(
-    identity: PublicIdentity, manifest_path: Path, order: Mapping[str, int]
-) -> tuple[int, dict[str, object]]:
-    unplanned = len(order)
-    try:
-        manifest = read_json(manifest_path)
-    except (OSError, TypeError, ValueError) as exc:
-        return unplanned, {
-            "run_ref": identity.run_ref(manifest_path.parent.name),
-            "error": _error(exc, _UNREADABLE_MANIFEST),
-        }
-    entry: dict[str, object] = {
-        "run_ref": identity.run_ref(
-            str(manifest.get("run_id") or "") or manifest_path.parent.name
+        # A count, not a projection: the collected runs no longer answer what was
+        # mounted, they only say how many sessions have run against the snapshot.
+        "sessions_seen": len(
+            list((directory / "artifacts").glob(f"*/{HOST_RUN_MANIFEST_NAME}"))
         ),
-        "kind": str(manifest.get("kind") or ""),
+        "snapshot": None,
     }
-    raw_session = str(manifest.get("session_key") or "")
-    index = order.get(raw_session.split("#", 1)[0], unplanned)
-    if raw_session:
-        try:
-            entry["session_key"] = identity.public_session_key(raw_session)
-            entry["session_label"] = identity.session_display_key(raw_session)
-        except (KeyError, ValueError):
-            # A rollback or rerun can leave a collected run whose session the
-            # current plan no longer names; the run reference still identifies it.
-            pass
-    record = manifest.get("operating_memory")
-    if not isinstance(record, Mapping):
-        return index, {**entry, "mode": None, "sources": []}
-    sources = identity.public_value(record.get("sources"))
-    return index, {
-        **entry,
-        "mode": str(record.get("mode") or ""),
-        "sources": sources if isinstance(sources, list) else [],
+    try:
+        record = read_operating_memory_snapshot(directory)
+        if record is not None:
+            payload["snapshot"] = {
+                "snapshot_id": str(record.get("snapshot_id") or ""),
+                "created_at": str(record.get("created_at") or ""),
+                "created_from": str(record.get("created_from") or ""),
+                "mode": str(record.get("mode") or ""),
+                "sources": [
+                    {
+                        "source": source.source,
+                        "origin": source.origin,
+                        "entries": list(source.entries),
+                    }
+                    for source in snapshot_memory_sources(record, directory)
+                ],
+            }
+    except (OSError, TypeError, ValueError) as exc:
+        payload["error"] = _error(exc, _UNREADABLE_SNAPSHOT)
+    return payload
+
+
+def experiment_memory_entry(
+    experiments_root: Path, experiment_id: str, source: str, name: str
+) -> dict[str, object]:
+    """One entry's body as THIS experiment holds it, read from its snapshot.
+
+    Deliberately not the library's current text: the snapshot is what the
+    experiment's sessions actually read, and the library may have moved since.
+    """
+
+    directory = resolve_experiment_dir(Path(experiments_root), experiment_id)
+    mount_source, entry_name = validate_memory_entry_ref(f"{source}/{name}")
+    record = read_operating_memory_snapshot(directory)
+    if record is None:
+        raise KeyError(f"{experiment_id} has no operating memory snapshot")
+    item = operating_memory_snapshot_root(directory) / mount_source / entry_name
+    if not (item / SKILL_FILENAME).is_file():
+        raise KeyError(f"{experiment_id} did not mount {mount_source}/{entry_name}")
+    # The generation's own index, so the snapshot is described exactly as the
+    # session that mounted it described it.
+    listed = next(
+        (
+            entry
+            for entry in build_skills_index(item.parent)["skills"]  # type: ignore[union-attr]
+            if entry["name"] == entry_name
+        ),
+        None,
+    )
+    if listed is None:
+        raise KeyError(f"{experiment_id} did not mount {mount_source}/{entry_name}")
+    origin = next(
+        (
+            str(entry.get("origin") or "")
+            for entry in record.get("entries") or ()  # type: ignore[union-attr]
+            if isinstance(entry, Mapping)
+            and str(entry.get("source")) == mount_source
+            and str(entry.get("name")) == entry_name
+        ),
+        "",
+    )
+    return {
+        "experiment_id": experiment_id,
+        "source": mount_source,
+        "origin": origin,
+        "name": entry_name,
+        "title": str(listed["title"]),
+        "summary": str(listed["summary"]),
+        "bytes": int(listed["bytes"]),
+        "files": len(listed["files"]),  # type: ignore[arg-type]
+        "content": (item / SKILL_FILENAME).read_text(encoding="utf-8"),
     }
 
 
@@ -842,6 +878,7 @@ __all__ = [
     "entry_feedback",
     "exclude_graduated_skill",
     "experiment_memory",
+    "experiment_memory_entry",
     "graduated_entry",
     "graduated_tier",
     "memory_feedback",

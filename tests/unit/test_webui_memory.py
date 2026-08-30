@@ -32,6 +32,9 @@ from autotrade.pipelines.skills import (
     OPERATING_MEMORY_LIBRARY,
     ExperimentSkillsStore,
     build_skills_index,
+    create_operating_memory_snapshot,
+    operating_memory_snapshot_path,
+    read_operating_memory_snapshot,
     validate_skills_tree,
 )
 from autotrade.webui import memory
@@ -345,86 +348,152 @@ def test_a_tier_that_cannot_be_resolved_is_reported_not_hidden(tmp_path: Path) -
     assert payload["experiments"][0]["admitted"] is None
 
 
-# ---- what one experiment actually mounted ---------------------------------
+# ---- the snapshot one experiment froze -------------------------------------
+#
+# Operating memory is fixed per experiment: the tiers are resolved once, when
+# the experiment is created, and every session mounts that same copy. So the
+# block answers one question for the whole experiment, and a library change
+# after the fact belongs to the next experiment.
 
 
-def test_the_mounted_block_projects_the_run_manifest(tmp_path: Path) -> None:
+def _snapshot(
+    repo_root: Path,
+    experiments: Path,
+    experiment_id: str,
+    mode: str = "curated+graduated",
+) -> dict:
+    directory = experiments / experiment_id
+    directory.mkdir(parents=True, exist_ok=True)
+    return create_operating_memory_snapshot(
+        directory, mode=mode, repo_root=repo_root, experiments_root=experiments
+    )
+
+
+def test_the_block_lists_the_snapshot_this_experiment_froze(tmp_path: Path) -> None:
+    _library(tmp_path)
     experiments = tmp_path / "experiments"
     experiments.mkdir()
-    directory = _experiment(experiments, "adopted")
+    _experiment(experiments, "adopted")
+    directory = _experiment(experiments, "current", verdict=None, skills=False)
     _params(directory, operating_memory="curated+graduated")
+    record = _snapshot(tmp_path, experiments, "current")
     _mounted_run(directory)
 
-    payload = memory.experiment_memory(experiments, "adopted")
+    payload = memory.experiment_memory(experiments, "current")
     assert payload["mode"] == "curated+graduated"
-    session = payload["sessions"][0]
-    assert session["kind"] == "fold"
-    assert session["session_label"] == "epoch_001/2022Q1"
-    assert session["mode"] == "curated+graduated"
-    assert [source["source"] for source in session["sources"]] == ["curated", "adopted"]
-    assert [source["origin"] for source in session["sources"]] == [
+    assert payload["sessions_seen"] == 1
+    snapshot = payload["snapshot"]
+    assert snapshot["snapshot_id"] == record["snapshot_id"]
+    assert snapshot["created_from"] == "creation" and snapshot["created_at"]
+    assert [source["source"] for source in snapshot["sources"]] == [
+        "curated",
+        "adopted",
+    ]
+    assert [source["origin"] for source in snapshot["sources"]] == [
         "curated",
         "graduated",
     ]
-    assert session["sources"][0]["entries"] == [
+    assert snapshot["sources"][0]["entries"] == [
+        "output-dir-hygiene",
+        "pit-read-budget",
+    ]
+    # Nothing per session is projected any more, and no host identity leaks.
+    assert "sessions" not in payload
+    assert RUN_ID not in json.dumps(payload, ensure_ascii=False)
+
+
+def test_creating_an_experiment_freezes_its_operating_memory(tmp_path: Path) -> None:
+    """The snapshot is taken at creation, beside the inherited parent copy, and
+    a failure there leaves no half-created experiment behind."""
+
+    from unittest.mock import patch
+
+    from autotrade.webui.manager import ExperimentManager
+
+    _library(tmp_path)
+    experiments = tmp_path / "experiments"
+    experiments.mkdir()
+    manager = ExperimentManager(tmp_path, experiments)
+    params = {
+        "experiment_id": "exp_frozen",
+        "fold_period": "quarter",
+        "development_first_period": "2024Q1",
+        "development_last_period": "2024Q1",
+        "heldout_first_period": "2024Q2",
+        "heldout_last_period": "2024Q2",
+    }
+    with (
+        patch.object(manager, "_preflight"),
+        patch.object(manager, "start_worker", return_value={"spawned": False}),
+    ):
+        manager.create_experiment(dict(params))
+    record = read_operating_memory_snapshot(experiments / "exp_frozen")
+    assert record["created_from"] == "creation"
+    assert [entry["name"] for entry in record["entries"]] == [
+        "output-dir-hygiene",
+        "pit-read-budget",
+    ]
+    payload = memory.experiment_memory(experiments, "exp_frozen")
+    assert payload["snapshot"]["sources"][0]["entries"] == [
         "output-dir-hygiene",
         "pit-read-budget",
     ]
 
+    with (
+        patch.object(manager, "_preflight"),
+        patch.object(manager, "start_worker", return_value={"spawned": False}),
+        patch(
+            "autotrade.webui.manager.create_operating_memory_snapshot",
+            side_effect=OSError("no space"),
+        ),
+        pytest.raises(OSError),
+    ):
+        manager.create_experiment({**params, "experiment_id": "exp_broken"})
+    assert not (experiments / "exp_broken").exists()
 
-def test_the_mounted_block_never_carries_a_raw_run_id_or_a_host_path(
+
+def test_a_later_library_change_does_not_move_a_frozen_experiment(
     tmp_path: Path,
 ) -> None:
+    _library(tmp_path)
     experiments = tmp_path / "experiments"
     experiments.mkdir()
-    directory = _experiment(experiments, "adopted")
-    _params(directory, operating_memory="curated+graduated")
-    # A key this read model does not know about still has to leave the host
-    # boundary through the same projection, not verbatim.
-    _mounted_run(
-        directory,
-        operating_memory={
-            "mode": "curated",
-            "sources": [
-                {
-                    "source": "curated",
-                    "origin": "curated",
-                    "entries": ["pit-read-budget"],
-                    "mount_root": HOST_PATH,
-                }
-            ],
-        },
-    )
-    payload = memory.experiment_memory(experiments, "adopted")
-    text = json.dumps(payload, ensure_ascii=False)
-    assert RUN_ID not in text
-    assert HOST_PATH not in text
-    assert str(tmp_path) not in text
-    assert payload["sessions"][0]["run_ref"].startswith("run_ref_")
-    assert payload["sessions"][0]["sources"][0]["mount_root"] == "[host path omitted]"
+    directory = _experiment(experiments, "current", verdict=None, skills=False)
+    _params(directory, operating_memory="curated")
+    _snapshot(tmp_path, experiments, "current", mode="curated")
+    _curated(tmp_path, "added-later", "# 后加的\n\n正文\n")
+
+    listed = memory.experiment_memory(experiments, "current")["snapshot"]["sources"][0]
+    assert listed["entries"] == ["output-dir-hygiene", "pit-read-budget"]
+    # The library itself did move on, which is exactly the distinction.
+    assert len(memory.curated_library(tmp_path)["entries"]) == 3
 
 
-def test_an_unreadable_manifest_keeps_the_session_visible(tmp_path: Path) -> None:
+def test_an_experiment_without_a_snapshot_says_so(tmp_path: Path) -> None:
+    """An experiment that predates snapshotting has none until its next session
+    takes one; the block must say that rather than invent an empty mount."""
+
+    _library(tmp_path)
     experiments = tmp_path / "experiments"
     experiments.mkdir()
-    directory = _experiment(experiments, "adopted")
-    _params(directory, operating_memory="curated+graduated")
-    manifest = _mounted_run(directory)
-    manifest.write_text("{truncated", encoding="utf-8")
-    session = memory.experiment_memory(experiments, "adopted")["sessions"][0]
-    assert session["run_ref"].startswith("run_ref_")
-    assert session["error"].endswith("run manifest is unreadable")
+    directory = _experiment(experiments, "legacy", verdict=None, skills=False)
+    _params(directory, operating_memory="curated")
+    payload = memory.experiment_memory(experiments, "legacy")
+    assert payload["snapshot"] is None and payload["sessions_seen"] == 0
+    assert "error" not in payload
 
 
-def test_a_session_that_mounted_nothing_says_so(tmp_path: Path) -> None:
+def test_an_unreadable_snapshot_is_reported_not_hidden(tmp_path: Path) -> None:
+    _library(tmp_path)
     experiments = tmp_path / "experiments"
     experiments.mkdir()
-    directory = _experiment(experiments, "adopted")
-    _params(directory, operating_memory="none")
-    _mounted_run(directory, operating_memory={"mode": "none", "sources": []})
-    payload = memory.experiment_memory(experiments, "adopted")
-    assert payload["mode"] == "none"
-    assert payload["sessions"][0]["sources"] == []
+    directory = _experiment(experiments, "current", verdict=None, skills=False)
+    _snapshot(tmp_path, experiments, "current", mode="curated")
+    operating_memory_snapshot_path(directory).write_text("{truncated", encoding="utf-8")
+    payload = memory.experiment_memory(experiments, "current")
+    assert payload["snapshot"] is None
+    assert payload["error"].endswith("operating memory snapshot is unreadable")
+    assert str(tmp_path) not in payload["error"]
 
 
 def test_an_experiment_without_params_falls_back_to_the_pipeline_default(
@@ -435,41 +504,72 @@ def test_an_experiment_without_params_falls_back_to_the_pipeline_default(
     _experiment(experiments, "adopted")
     payload = memory.experiment_memory(experiments, "adopted")
     assert payload["mode"] == payload["default_mode"]
-    assert payload["sessions"] == []
+    assert payload["snapshot"] is None and payload["sessions_seen"] == 0
 
 
-def test_a_mounted_entry_opens_through_the_same_read_routes_until_it_is_gone(
+def test_the_snapshot_entry_route_serves_what_this_experiment_holds(
     tmp_path: Path,
 ) -> None:
-    """The mounted block is a historical record, and its entry chips ask today's
-    library and tier. Both sources must resolve while the entry still exists,
-    and an entry since removed must read as missing rather than as a failure —
-    the record itself is never rewritten."""
+    """Deliberately the frozen copy, not the library's current text: this is
+    what the experiment's sessions actually read."""
 
     _library(tmp_path)
     experiments = tmp_path / "experiments"
     experiments.mkdir()
-    directory = _experiment(experiments, "adopted")
+    _experiment(experiments, "adopted")
+    directory = _experiment(experiments, "current", verdict=None, skills=False)
     _params(directory, operating_memory="curated+graduated")
-    _mounted_run(directory)
+    _snapshot(tmp_path, experiments, "current")
     client = TestClient(create_app(tmp_path, experiments))
 
-    session = client.get("/api/experiments/adopted/memory").json()["sessions"][0]
-    curated, graduated = session["sources"]
-    assert (curated["source"], curated["origin"]) == ("curated", "curated")
-    assert (graduated["source"], graduated["origin"]) == ("adopted", "graduated")
-    for name in curated["entries"]:
-        assert client.get(f"/api/memory/curated/{name}").status_code == 200
-    for name in graduated["entries"]:
-        assert client.get(f"/api/memory/graduated/adopted/{name}").status_code == 200
+    entry = client.get("/api/experiments/current/memory/curated/pit-read-budget")
+    assert entry.status_code == 200
+    body = entry.json()
+    assert {
+        "experiment_id",
+        "source",
+        "origin",
+        "name",
+        "title",
+        "bytes",
+        "content",
+    } <= body.keys()
+    assert body["origin"] == "curated"
+    assert body["content"].startswith("# PIT 读取预算")
 
-    assert client.delete("/api/memory/curated/pit-read-budget").status_code == 200
-    assert client.get("/api/memory/curated/pit-read-budget").status_code == 404
-    # The manifest still records what that session mounted.
-    assert "pit-read-budget" in (
-        client.get("/api/experiments/adopted/memory").json()["sessions"][0]["sources"][
-            0
-        ]["entries"]
+    graduated = client.get(
+        "/api/experiments/current/memory/adopted/same-window-parent-control"
+    )
+    assert graduated.status_code == 200 and graduated.json()["origin"] == "graduated"
+
+    # The library moves; the frozen copy does not.
+    memory.update_curated_entry(tmp_path, "pit-read-budget", "# 改过的\n\n完全不同。\n")
+    assert (
+        client.get("/api/experiments/current/memory/curated/pit-read-budget")
+        .json()["content"]
+        .startswith("# PIT 读取预算")
+    )
+    assert (
+        client.get("/api/memory/curated/pit-read-budget")
+        .json()["content"]
+        .startswith("# 改过的")
+    )
+
+    assert (
+        client.get("/api/experiments/current/memory/curated/never-mounted").status_code
+        == 404
+    )
+    assert (
+        client.get("/api/experiments/current/memory/curated/Not_Kebab").status_code
+        == 400
+    )
+    assert (
+        client.get("/api/experiments/adopted/memory/curated/pit-read-budget").status_code
+        == 404
+    )
+    assert (
+        client.get("/api/experiments/unknown/memory/curated/pit-read-budget").status_code
+        == 404
     )
 
 
@@ -511,8 +611,13 @@ def test_the_console_routes_serve_the_keys_the_page_reads(tmp_path: Path) -> Non
 
     mounted = client.get("/api/experiments/adopted/memory")
     assert mounted.status_code == 200
-    assert {"experiment_id", "mode", "default_mode", "sessions"} <= mounted.json().keys()
-    assert mounted.json()["sessions"][0]["sources"][0]["source"] == "curated"
+    assert {
+        "experiment_id",
+        "mode",
+        "default_mode",
+        "sessions_seen",
+        "snapshot",
+    } <= mounted.json().keys()
     assert client.get("/api/experiments/unknown/memory").status_code == 404
 
 

@@ -12,6 +12,7 @@ and only the writable ``skills/`` tree is ever published as a generation.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -43,6 +44,12 @@ CURATED_MEMORY_SOURCE = "curated"
 # A sibling of the library, never inside it: the library root is validated as a
 # skills tree, which admits directories only, so a file there breaks every mount.
 GRADUATED_EXCLUSIONS_PATH = "configs/graduated_exclusions.json"
+# One experiment's frozen operating memory, resolved once when the experiment is
+# created and mounted unchanged by every session it runs. The library keeps
+# moving; an experiment does not, so its sessions are comparable to each other.
+OPERATING_MEMORY_SNAPSHOT_DIRNAME = "memory"
+OPERATING_MEMORY_SNAPSHOT_NAME = "memory_snapshot.json"
+OPERATING_MEMORY_SNAPSHOT_SCHEMA = 1
 GRADUATED_EXCLUSION_KEYS = frozenset(
     {"experiment_id", "skill", "reason", "excluded_at"}
 )
@@ -673,35 +680,62 @@ def graduated_memory_sources(
     return tuple(sources)
 
 
-def install_operating_memory(
-    workspace: str | Path,
-    *,
-    mode: str,
-    repo_root: str | Path | None = None,
-    experiments_root: str | Path | None = None,
-    experiment_id: str = "",
-) -> tuple[MemorySource, ...]:
-    """Mount the selected memory tiers read-only next to the session skills.
+def operating_memory_snapshot_root(experiment_dir: str | Path) -> Path:
+    return (
+        Path(experiment_dir) / "artifacts" / OPERATING_MEMORY_SNAPSHOT_DIRNAME
+    )
 
-    ``curated`` mounts the repository library; ``curated+graduated`` adds the
-    skills of every experiment the held-out verdict graduated. Each source lands
-    in ``workspace/memory/<source>/<name>/`` as read-only files, so a session can
-    read them like its own skills but can never change or delete them: the skill
-    tools refuse mounted names and the copy itself is not writable. Nothing
-    mounted here is ever published as this experiment's skills generation.
+
+def operating_memory_snapshot_path(experiment_dir: str | Path) -> Path:
+    return Path(experiment_dir) / "artifacts" / OPERATING_MEMORY_SNAPSHOT_NAME
+
+
+def _tree_digest(root: Path) -> str:
+    """Content hash of one tree: every file's relative path and bytes, in order.
+
+    Cheap here by construction — the curated library is bounded by the same
+    ``MAX_SKILLS_BYTES`` every skills tree is — and it is what lets a reader see
+    whether a snapshot predates a library change.
     """
 
-    if mode not in OPERATING_MEMORY_MODES:
-        raise ValueError(
-            "operating_memory must be one of " + ", ".join(OPERATING_MEMORY_MODES)
-        )
-    destination = Path(workspace) / OPERATING_MEMORY_DIRNAME
-    if destination.exists():
-        raise FileExistsError(f"workspace memory directory already exists: {destination}")
+    digest = hashlib.sha256()
+    if not root.is_dir():
+        return ""
+    for path in sorted(root.rglob("*"), key=lambda item: item.as_posix()):
+        if not path.is_file():
+            continue
+        digest.update(path.relative_to(root).as_posix().encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _exclusions_digest(repo_root: str | Path | None) -> str:
+    """Version of the deny list as the snapshot resolved it."""
+
+    exclusions = read_graduated_exclusions(repo_root)
+    if not exclusions:
+        return ""
+    payload = json.dumps(
+        [item.to_record() for item in exclusions], ensure_ascii=False, sort_keys=True
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _resolve_memory_sources(
+    *,
+    mode: str,
+    repo_root: str | Path | None,
+    experiments_root: str | Path | None,
+    experiment_id: str,
+) -> tuple[MemorySource, ...]:
+    """The live resolution, performed exactly once per experiment."""
+
     if mode == "none":
         return ()
     if repo_root is None:
-        raise ValueError("operating_memory needs a repository root to mount from")
+        raise ValueError("operating_memory needs a repository root to resolve")
     sources: list[MemorySource] = []
     curated = curated_memory_source(repo_root)
     if curated is not None:
@@ -712,22 +746,190 @@ def install_operating_memory(
                 experiments_root, repo_root=repo_root, exclude=experiment_id
             )
         )
+    return tuple(sources)
+
+
+def create_operating_memory_snapshot(
+    experiment_dir: str | Path,
+    *,
+    mode: str,
+    repo_root: str | Path | None = None,
+    experiments_root: str | Path | None = None,
+    created_from: str = "creation",
+) -> dict[str, object]:
+    """Freeze what this experiment will mount, once, and record what that was.
+
+    The curated library and the graduated tier keep moving; an experiment does
+    not. Resolving them once at creation is what makes an experiment's own Folds
+    comparable to each other, and what makes a library change something that
+    reaches the *next* experiment rather than the middle of this one.
+
+    The copy lands read-only in ``artifacts/memory/<source>/<name>/`` beside the
+    experiment's skills generations, so it survives exactly as long as the
+    experiment does.
+    """
+
+    resolved = resolve_operating_memory(mode)
+    root = operating_memory_snapshot_root(experiment_dir)
+    record_path = operating_memory_snapshot_path(experiment_dir)
+    if record_path.exists() or root.exists():
+        raise FileExistsError(
+            f"operating memory snapshot already exists: {record_path}"
+        )
+    sources = _resolve_memory_sources(
+        mode=resolved,
+        repo_root=repo_root,
+        experiments_root=experiments_root,
+        experiment_id=Path(experiment_dir).name,
+    )
+    root.parent.mkdir(parents=True, exist_ok=True)
+    staging = root.parent / (
+        f".{OPERATING_MEMORY_SNAPSHOT_DIRNAME}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp"
+    )
+    try:
+        staging.mkdir()
+        for source in sources:
+            # Entry by entry: a source's admitted set is what this experiment
+            # may see, and a withdrawn graduated skill is not in it.
+            target = staging / source.source
+            target.mkdir()
+            for entry in source.entries:
+                shutil.copytree(
+                    source.root / entry, target / entry, copy_function=shutil.copyfile
+                )
+        chmod_tree(staging, file_mode=0o444, dir_mode=0o555)
+        for source in sources:
+            validate_skills_tree(staging / source.source, require_writable=False)
+        staging.replace(root)
+    finally:
+        if staging.exists():
+            chmod_tree(staging, file_mode=0o644, dir_mode=0o755)
+            shutil.rmtree(staging, ignore_errors=True)
+    record: dict[str, object] = {
+        "schema_version": OPERATING_MEMORY_SNAPSHOT_SCHEMA,
+        "snapshot_id": uuid.uuid4().hex,
+        "mode": resolved,
+        "created_at": utc_now_iso(),
+        "created_from": created_from,
+        "curated_digest": _tree_digest(Path(repo_root) / OPERATING_MEMORY_LIBRARY)
+        if repo_root is not None
+        else "",
+        "exclusions_digest": _exclusions_digest(repo_root),
+        "entries": [
+            {"origin": source.origin, "source": source.source, "name": name}
+            for source in sources
+            for name in source.entries
+        ],
+    }
+    write_json_atomic(record_path, record)
+    return record
+
+
+def read_operating_memory_snapshot(
+    experiment_dir: str | Path,
+) -> dict[str, object] | None:
+    """This experiment's frozen record, or ``None`` before it has one."""
+
+    path = operating_memory_snapshot_path(experiment_dir)
+    if not path.is_file():
+        return None
+    record = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(record, dict):
+        raise ValueError("operating memory snapshot must be a JSON object")
+    if int(record.get("schema_version") or 0) != OPERATING_MEMORY_SNAPSHOT_SCHEMA:
+        raise ValueError("operating memory snapshot has an unknown schema_version")
+    return record
+
+
+def ensure_operating_memory_snapshot(
+    experiment_dir: str | Path,
+    *,
+    mode: str,
+    repo_root: str | Path | None = None,
+    experiments_root: str | Path | None = None,
+) -> dict[str, object]:
+    """The snapshot, taken now if this experiment predates snapshotting.
+
+    Experiments created before this existed have no snapshot and must keep
+    running: the first session that needs one resolves the tiers exactly as the
+    old behaviour did and freezes the result, so it happens once rather than at
+    every session, and the manifest says the snapshot came from a session.
+    """
+
+    existing = read_operating_memory_snapshot(experiment_dir)
+    if existing is not None:
+        return existing
+    return create_operating_memory_snapshot(
+        experiment_dir,
+        mode=mode,
+        repo_root=repo_root,
+        experiments_root=experiments_root,
+        created_from="first_session",
+    )
+
+
+def snapshot_memory_sources(
+    record: Mapping[str, object], experiment_dir: str | Path
+) -> tuple[MemorySource, ...]:
+    """The snapshot's entries, grouped back into their mount sources."""
+
+    root = operating_memory_snapshot_root(experiment_dir)
+    grouped: dict[str, tuple[str, list[str]]] = {}
+    for entry in record.get("entries") or ():  # type: ignore[union-attr]
+        if not isinstance(entry, Mapping):
+            raise ValueError("operating memory snapshot entry must be an object")
+        source = str(entry.get("source") or "")
+        name = validate_skill_name(str(entry.get("name") or ""))
+        origin = str(entry.get("origin") or "")
+        if not source or origin not in {"curated", "graduated"}:
+            raise ValueError("operating memory snapshot entry is invalid")
+        grouped.setdefault(source, (origin, []))[1].append(name)
+    # Curated first, then the graduated experiments by id: the same order the
+    # resolution produced, so a manifest reads the way it always did.
+    return tuple(
+        MemorySource(source, origin, root / source, tuple(sorted(names)))
+        for source, (origin, names) in sorted(
+            grouped.items(),
+            key=lambda item: (item[0] != CURATED_MEMORY_SOURCE, item[0]),
+        )
+    )
+
+
+def install_operating_memory(
+    workspace: str | Path, experiment_dir: str | Path
+) -> tuple[MemorySource, ...]:
+    """Mount this experiment's frozen snapshot read-only beside its skills.
+
+    Nothing is resolved here: the snapshot decided what this experiment mounts
+    when it was created, so two sessions of one experiment see the same entries
+    however the library moved between them. Each source lands in
+    ``workspace/memory/<source>/<name>/`` as read-only files, so a session can
+    read them like its own skills but can never change or delete them: the skill
+    tools refuse mounted names and the copy itself is not writable. Nothing
+    mounted here is ever published as this experiment's skills generation.
+    """
+
+    record = read_operating_memory_snapshot(experiment_dir)
+    if record is None:
+        raise FileNotFoundError(
+            "experiment has no operating memory snapshot to mount: "
+            f"{operating_memory_snapshot_path(experiment_dir)}"
+        )
+    destination = Path(workspace) / OPERATING_MEMORY_DIRNAME
+    if destination.exists():
+        raise FileExistsError(f"workspace memory directory already exists: {destination}")
+    sources = snapshot_memory_sources(record, experiment_dir)
     if not sources:
         return ()
-    destination.mkdir()
-    for source in sources:
-        # Entry by entry, not the whole tree: a source's admitted set is what
-        # the session may see, and a withdrawn graduated skill is not in it.
-        target = destination / source.source
-        target.mkdir()
-        for entry in source.entries:
-            shutil.copytree(
-                source.root / entry, target / entry, copy_function=shutil.copyfile
-            )
+    shutil.copytree(
+        operating_memory_snapshot_root(experiment_dir),
+        destination,
+        copy_function=shutil.copyfile,
+    )
     chmod_tree(destination, file_mode=0o444, dir_mode=0o555)
     for source in sources:
         validate_skills_tree(destination / source.source, require_writable=False)
-    return tuple(sources)
+    return sources
 
 
 def _require_mounted_memory_entry(workspace_root: Path, reference: str) -> None:
@@ -1053,6 +1255,7 @@ __all__ = [
     "GraduatedExclusion",
     "OPERATING_MEMORY_DIRNAME",
     "OPERATING_MEMORY_LIBRARY",
+    "OPERATING_MEMORY_SNAPSHOT_NAME",
     "OPERATING_MEMORY_MODES",
     "MemorySource",
     "SKILLS_INDEX_PATH",
@@ -1062,7 +1265,9 @@ __all__ = [
     "SkillsStats",
     "WriteSkillTool",
     "build_skills_index",
+    "create_operating_memory_snapshot",
     "curated_memory_source",
+    "ensure_operating_memory_snapshot",
     "experiment_graduated",
     "graduated_exclusion_record",
     "graduated_memory_sources",
@@ -1070,12 +1275,16 @@ __all__ = [
     "install_workspace_skills",
     "latest_skills_snapshot",
     "operating_memory_entries",
+    "operating_memory_snapshot_path",
+    "operating_memory_snapshot_root",
     "parse_skill_front_matter",
     "read_graduated_exclusions",
+    "read_operating_memory_snapshot",
     "resolve_operating_memory",
     "resolve_collected_skills_source",
     "skill_front_matter",
     "skills_trees_equal",
+    "snapshot_memory_sources",
     "validate_memory_entry_ref",
     "validate_skill_name",
     "validate_skill_path",

@@ -38,13 +38,17 @@ from autotrade.pipelines.skills import (
     ExperimentSkillsStore,
     WriteSkillTool,
     build_skills_index,
+    create_operating_memory_snapshot,
+    ensure_operating_memory_snapshot,
     graduated_exclusion_record,
-    parse_skill_front_matter,
     graduated_memory_sources,
     install_operating_memory,
     install_workspace_skills,
     operating_memory_entries,
+    operating_memory_snapshot_path,
+    parse_skill_front_matter,
     read_graduated_exclusions,
+    read_operating_memory_snapshot,
     resolve_operating_memory,
     skill_front_matter,
     validate_memory_entry_ref,
@@ -123,13 +127,36 @@ def _experiment_with_skill(
     return directory
 
 
-def _workspace(root: Path, **kwargs: object) -> tuple[Path, tuple[object, ...]]:
-    """One session workspace with memory mounted the way a session gets it."""
+def _workspace(
+    root: Path,
+    *,
+    mode: str,
+    repo_root: object = None,
+    experiments_root: object = None,
+    experiment_id: str = "current",
+) -> tuple[Path, tuple[object, ...]]:
+    """One session workspace with memory mounted the way a session gets it.
 
+    Two steps now, in the order the pipeline performs them: the experiment
+    freezes its snapshot once, and the session mounts that snapshot.
+    """
+
+    experiment_dir = (
+        Path(experiments_root) / experiment_id
+        if experiments_root is not None
+        else root / experiment_id
+    )
+    experiment_dir.mkdir(parents=True, exist_ok=True)
+    ensure_operating_memory_snapshot(
+        experiment_dir,
+        mode=mode,
+        repo_root=repo_root,
+        experiments_root=experiments_root,
+    )
     workspace = root / "workspace"
     workspace.mkdir()
     (workspace / "inputs").mkdir()
-    mounted = install_operating_memory(workspace, **kwargs)  # type: ignore[arg-type]
+    mounted = install_operating_memory(workspace, experiment_dir)
     install_workspace_skills(
         None, workspace, index_path=workspace / "inputs" / "skills_index.json"
     )
@@ -280,17 +307,33 @@ def test_mode_none_mounts_nothing(tmp_path: Path) -> None:
     assert index["operating_memory"] == []
 
 
-def test_mounting_refuses_an_unusable_request(tmp_path: Path) -> None:
+def test_snapshotting_and_mounting_each_refuse_an_unusable_request(
+    tmp_path: Path,
+) -> None:
+    experiment = tmp_path / "current"
+    experiment.mkdir()
+    with pytest.raises(ValueError, match="operating_memory must be one of"):
+        create_operating_memory_snapshot(experiment, mode="graduated", repo_root=REPO_ROOT)
+    with pytest.raises(ValueError, match="repository root"):
+        create_operating_memory_snapshot(experiment, mode="curated")
+    # A refused snapshot writes nothing at all.
+    assert not operating_memory_snapshot_path(experiment).exists()
+    assert not (experiment / "artifacts").exists()
+
+    create_operating_memory_snapshot(experiment, mode="curated", repo_root=REPO_ROOT)
+    with pytest.raises(FileExistsError, match="snapshot already exists"):
+        create_operating_memory_snapshot(experiment, mode="curated", repo_root=REPO_ROOT)
+
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    with pytest.raises(ValueError, match="operating_memory must be one of"):
-        install_operating_memory(workspace, mode="graduated", repo_root=REPO_ROOT)
-    with pytest.raises(ValueError, match="repository root"):
-        install_operating_memory(workspace, mode="curated")
-    assert not (workspace / OPERATING_MEMORY_DIRNAME).exists()
-    install_operating_memory(workspace, mode="curated", repo_root=REPO_ROOT)
+    install_operating_memory(workspace, experiment)
     with pytest.raises(FileExistsError, match="memory directory"):
-        install_operating_memory(workspace, mode="curated", repo_root=REPO_ROOT)
+        install_operating_memory(workspace, experiment)
+    # An experiment that never snapshotted cannot be mounted by guessing.
+    other = tmp_path / "other"
+    other.mkdir()
+    with pytest.raises(FileNotFoundError, match="snapshot"):
+        install_operating_memory(other, tmp_path / "never-created")
 
 
 def test_an_experiment_may_not_take_the_reserved_curated_name(tmp_path: Path) -> None:
@@ -511,7 +554,7 @@ def test_an_excluded_graduated_skill_is_never_mounted_again(tmp_path: Path) -> N
 
     before = tmp_path / "before"
     before.mkdir()
-    _workspace(before, **mount)
+    _workspace(before, experiment_id="before", **mount)
     assert (before / "workspace" / OPERATING_MEMORY_DIRNAME / "adopted").is_dir()
 
     write_graduated_exclusions(
@@ -519,9 +562,11 @@ def test_an_excluded_graduated_skill_is_never_mounted_again(tmp_path: Path) -> N
         [graduated_exclusion_record("adopted", GRADUATED_SKILL, "已被更好的做法取代")],
     )
     assert graduated_memory_sources(experiments, repo_root=repo) == ()
+    # The exclusion reaches the next experiment to snapshot, not the one that
+    # already froze its memory.
     after = tmp_path / "after"
     after.mkdir()
-    workspace, mounted = _workspace(after, **mount)
+    workspace, mounted = _workspace(after, experiment_id="after", **mount)
     assert [source.source for source in mounted] == [CURATED_MEMORY_SOURCE]
     assert not (workspace / OPERATING_MEMORY_DIRNAME / "adopted").exists()
     index = json.loads(
@@ -532,7 +577,7 @@ def test_an_excluded_graduated_skill_is_never_mounted_again(tmp_path: Path) -> N
     write_graduated_exclusions(repo, [])
     restored = tmp_path / "restored"
     restored.mkdir()
-    _, remounted = _workspace(restored, **mount)
+    _, remounted = _workspace(restored, experiment_id="restored", **mount)
     assert [source.source for source in remounted] == [CURATED_MEMORY_SOURCE, "adopted"]
 
 
@@ -554,7 +599,11 @@ def test_withdrawing_one_skill_leaves_the_experiment_s_others_mounted(
     root = tmp_path / "session"
     root.mkdir()
     workspace, _mounted = _workspace(
-        root, mode="curated+graduated", repo_root=repo, experiments_root=experiments
+        root,
+        mode="curated+graduated",
+        repo_root=repo,
+        experiments_root=experiments,
+        experiment_id="partial",
     )
     mounted = workspace / OPERATING_MEMORY_DIRNAME / "adopted"
     assert sorted(item.name for item in mounted.iterdir()) == ["pit-read-budget"]
@@ -869,3 +918,133 @@ def test_a_published_generation_keeps_its_front_matter_valid(tmp_path: Path) -> 
     )
     with pytest.raises(ValueError, match="successor/SKILL.md"):
         validate_skills_tree(tree, require_writable=True)
+
+
+# ---- the snapshot is the experiment's own copy ----------------------------
+#
+# The curated library and the graduated tier keep moving; an experiment does
+# not. Resolving them once at creation is what makes an experiment's own Folds
+# comparable to each other.
+
+
+def test_two_sessions_mount_the_same_entries_after_the_library_changes(
+    tmp_path: Path,
+) -> None:
+    experiments = tmp_path / "experiments"
+    experiments.mkdir()
+    repo = _repo_with_library(tmp_path)
+    experiment = experiments / "current"
+    experiment.mkdir()
+    record = create_operating_memory_snapshot(
+        experiment, mode="curated", repo_root=repo, experiments_root=experiments
+    )
+    assert record["created_from"] == "creation"
+    assert [entry["name"] for entry in record["entries"]] == ["pit-read-budget"]
+    assert record["curated_digest"] and record["snapshot_id"]
+
+    first = tmp_path / "first"
+    first.mkdir()
+    (first / "workspace").mkdir()
+    install_operating_memory(first / "workspace", experiment)
+
+    # The library moves under the experiment: a new entry, and a rewritten one.
+    library = repo / OPERATING_MEMORY_LIBRARY
+    added = library / "added-later"
+    added.mkdir()
+    (added / "SKILL.md").write_text("# 后加的\n\n正文\n", encoding="utf-8")
+    (library / "pit-read-budget" / "SKILL.md").write_text(
+        "# 改过的正文\n\n完全不同。\n", encoding="utf-8"
+    )
+
+    second = tmp_path / "second"
+    second.mkdir()
+    (second / "workspace").mkdir()
+    mounted = install_operating_memory(second / "workspace", experiment)
+    assert [source.entries for source in mounted] == [("pit-read-budget",)]
+    body = (
+        second
+        / "workspace"
+        / OPERATING_MEMORY_DIRNAME
+        / CURATED_MEMORY_SOURCE
+        / "pit-read-budget"
+        / "SKILL.md"
+    ).read_text(encoding="utf-8")
+    assert body.startswith("# PIT 读取预算")
+    assert "added-later" not in {
+        path.name
+        for path in (
+            second / "workspace" / OPERATING_MEMORY_DIRNAME / CURATED_MEMORY_SOURCE
+        ).iterdir()
+    }
+    # And the snapshot record still describes what was frozen, not the library.
+    assert read_operating_memory_snapshot(experiment) == record
+
+
+def test_an_experiment_without_a_snapshot_gets_one_on_its_first_session(
+    tmp_path: Path,
+) -> None:
+    """Experiments created before snapshotting must keep running: the first
+    session that needs memory freezes it, once, and says where it came from."""
+
+    experiments = tmp_path / "experiments"
+    experiments.mkdir()
+    repo = _repo_with_library(tmp_path)
+    legacy = experiments / "legacy"
+    legacy.mkdir()
+    assert read_operating_memory_snapshot(legacy) is None
+
+    record = ensure_operating_memory_snapshot(
+        legacy, mode="curated", repo_root=repo, experiments_root=experiments
+    )
+    assert record["created_from"] == "first_session"
+    assert operating_memory_snapshot_path(legacy).is_file()
+    # The second session reuses it rather than resolving again.
+    (repo / OPERATING_MEMORY_LIBRARY / "added-later").mkdir()
+    (repo / OPERATING_MEMORY_LIBRARY / "added-later" / "SKILL.md").write_text(
+        "# 后加的\n\n正文\n", encoding="utf-8"
+    )
+    again = ensure_operating_memory_snapshot(
+        legacy, mode="curated", repo_root=repo, experiments_root=experiments
+    )
+    assert again == record
+
+
+def test_the_snapshot_copy_is_read_only_and_valid_for_the_mount(
+    tmp_path: Path,
+) -> None:
+    experiments = tmp_path / "experiments"
+    experiments.mkdir()
+    _experiment_with_skill(experiments, "adopted")
+    repo = _repo_with_library(tmp_path)
+    experiment = experiments / "current"
+    experiment.mkdir()
+    create_operating_memory_snapshot(
+        experiment,
+        mode="curated+graduated",
+        repo_root=repo,
+        experiments_root=experiments,
+    )
+    root = experiment / "artifacts" / OPERATING_MEMORY_DIRNAME
+    assert sorted(path.name for path in root.iterdir()) == [
+        "adopted",
+        CURATED_MEMORY_SOURCE,
+    ]
+    for source in root.iterdir():
+        validate_skills_tree(source, require_writable=False)
+    frozen = root / "adopted" / GRADUATED_SKILL / "SKILL.md"
+    assert not stat.S_IMODE(frozen.stat().st_mode) & 0o222
+    with pytest.raises(PermissionError):
+        frozen.write_text("rewritten\n", encoding="utf-8")
+
+
+def test_a_snapshot_with_an_unknown_schema_is_refused(tmp_path: Path) -> None:
+    experiment = tmp_path / "current"
+    experiment.mkdir()
+    create_operating_memory_snapshot(experiment, mode="none")
+    path = operating_memory_snapshot_path(experiment)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["mode"] == "none" and payload["entries"] == []
+    payload["schema_version"] = 99
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="schema_version"):
+        read_operating_memory_snapshot(experiment)

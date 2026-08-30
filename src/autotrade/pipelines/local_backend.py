@@ -119,6 +119,7 @@ from .skills import (
     DeleteSkillTool,
     MemorySource,
     WriteSkillTool,
+    ensure_operating_memory_snapshot,
     install_operating_memory,
     install_workspace_skills,
     write_skills_index,
@@ -2121,16 +2122,19 @@ class LLMFoldDeveloper:
         inputs_dir.mkdir()
         # Mount before the index is written: the curated entries and this
         # experiment's own skills reach the Agent through the same index.
-        mounted_memory = install_operating_memory(
-            workspace_root,
+        # Fixed at creation: a session mounts this experiment's snapshot and
+        # never re-resolves the library. An experiment created before
+        # snapshotting existed gets its snapshot here, once.
+        memory_snapshot = ensure_operating_memory_snapshot(
+            self.experiment_dir,
             mode=self.operating_memory,
             repo_root=self.repo_root,
             experiments_root=self.experiment_dir.parent,
-            experiment_id=self.experiment_dir.name,
         )
-        manifest.update(operating_memory=_operating_memory_record(
-            self.operating_memory, mounted_memory
-        ))
+        mounted_memory = install_operating_memory(workspace_root, self.experiment_dir)
+        manifest.update(
+            operating_memory=_operating_memory_record(memory_snapshot, mounted_memory)
+        )
         skills_stats = install_workspace_skills(
             request.skills_source_ref or None,
             workspace_root,
@@ -2704,13 +2708,13 @@ class LLMMetaLearner:
             self.workspace_reference,
             repo_root=self.repo_root,
         )
-        mounted_memory = install_operating_memory(
-            paths.workspace,
+        memory_snapshot = ensure_operating_memory_snapshot(
+            self.experiment_dir,
             mode=self.operating_memory,
             repo_root=self.repo_root,
             experiments_root=self.experiment_dir.parent,
-            experiment_id=self.experiment_dir.name,
         )
+        mounted_memory = install_operating_memory(paths.workspace, self.experiment_dir)
         safe = SafeWorkspace(paths.workspace)
         search_roots = SearchRoots(safe, paths=paths)
         inputs = paths.workspace / "inputs"
@@ -2864,7 +2868,7 @@ class LLMMetaLearner:
                 },
                 "prior_output": "/mnt/agent/workspace/PRIOR.md",
                 "operating_memory": _operating_memory_record(
-                    self.operating_memory, mounted_memory
+                    memory_snapshot, mounted_memory
                 ),
                 "skills": {
                     "index_path": SKILLS_INDEX_PATH,
@@ -3095,11 +3099,23 @@ def fold_workspace_map(workspace: str | Path) -> dict[str, str]:
 
 
 def _operating_memory_record(
-    mode: str, sources: Sequence[MemorySource]
+    snapshot: Mapping[str, object], sources: Sequence[MemorySource]
 ) -> dict[str, object]:
-    """What the run manifest records about mounted cross-experiment memory."""
+    """What the run manifest records about mounted cross-experiment memory.
 
-    return {"mode": mode, "sources": [source.to_record() for source in sources]}
+    The snapshot id, not a live resolution: what this run mounted is decided by
+    the experiment's frozen snapshot, and ``created_from`` says whether that
+    snapshot was taken at creation or by the first session of an experiment
+    that predates snapshotting.
+    """
+
+    return {
+        "mode": str(snapshot.get("mode") or ""),
+        "snapshot_id": str(snapshot.get("snapshot_id") or ""),
+        "snapshot_created_at": str(snapshot.get("created_at") or ""),
+        "snapshot_created_from": str(snapshot.get("created_from") or ""),
+        "sources": [source.to_record() for source in sources],
+    }
 
 
 def install_workspace_reference(

@@ -473,7 +473,59 @@ def _live_pid_fields() -> dict[str, object]:
     return {"pid": pid, "pid_start_ticks": proc_start_ticks(pid)}
 
 
+# A console experiment is resolvable by definition — a worker ran it — and the
+# prompt preview resolves one the very same way. Fixtures that exercise the
+# preview therefore carry these parameters and the repository inputs below;
+# the rest keep a bare repository root on purpose.
+RESEARCH_PARAMS: dict[str, object] = {
+    "strategy_path": "configs/agent_output_template/main.py",
+    "data_backend": "pit",
+    "raw_dir": "data/raw",
+    "fundamental_events_root": "data/pit/fundamental_events",
+    "fundamental_events_status": "results/data_quality/fundamental_events_status.json",
+    # Keeps the pinned release to the core datasets the fixture provides.
+    "include_fundamentals": False,
+    "include_macro": False,
+    "include_events": False,
+    "include_text": False,
+    "include_intraday": False,
+}
+
+
+def _research_inputs(repo_root: Path) -> None:
+    """The repository inputs the worker's parameter resolution reads.
+
+    Only the trade calendar is parsed; the release's dataset partitions merely
+    have to exist, and the daily partition names are the pipeline's trading
+    calendar for the fold schedule.
+    """
+    template = repo_root / "configs" / "agent_output_template"
+    template.mkdir(parents=True, exist_ok=True)
+    (template / "main.py").write_text(
+        "def generate_orders(context):\n    return []\n", encoding="utf-8"
+    )
+    (repo_root / "data" / "pit" / "fundamental_events").mkdir(parents=True)
+    raw = repo_root / "data" / "raw"
+    days = [
+        f"{year}{month:02d}{day:02d}"
+        for year in range(2019, 2028)
+        for month in range(1, 13)
+        for day in (5, 20)
+    ]
+    calendar = raw / "trade_cal" / "exchange=SSE"
+    calendar.mkdir(parents=True)
+    pd.DataFrame({"cal_date": days, "is_open": ["1"] * len(days)}).to_parquet(
+        calendar / "year=2019.parquet"
+    )
+    for dataset in ("daily", "daily_basic", "adj_factor", "stk_limit", "suspend_d"):
+        directory = raw / dataset
+        directory.mkdir(parents=True)
+        for day in days if dataset == "daily" else days[:1]:
+            (directory / f"trade_date={day}.parquet").touch()
+
+
 def _persistent_experiment(tmp_path: Path) -> Path:
+    _research_inputs(tmp_path)
     directory = tmp_path / "experiments/demo"
     AgentRefStore(directory)
     hitl = directory / "hitl"
@@ -488,6 +540,12 @@ def _persistent_experiment(tmp_path: Path) -> Path:
                 "experiment_id": "demo",
                 "strategy_period": "day",
                 "inference_time": "08:30",
+                "fold_period": "quarter",
+                "development_first_period": "2026Q1",
+                "development_last_period": "2026Q1",
+                "heldout_first_period": "2026Q2",
+                "heldout_last_period": "2026Q2",
+                **RESEARCH_PARAMS,
             }
         ),
         encoding="utf-8",
@@ -1404,6 +1462,7 @@ class WebuiBackendTest(unittest.TestCase):
                 "heldout_first_period": "2023Q1",
                 "heldout_last_period": "2023Q1",
                 "analysis_model": "deepseek-v4-flash",
+                **RESEARCH_PARAMS,
                 "_created_at": "2026-07-06T00:00:00+00:00",
             },
         )
@@ -2613,6 +2672,7 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertEqual(self.client.get("/api/experiments/nope").status_code, 404)
 
     def test_modern_public_api_exposes_only_opaque_identities(self) -> None:
+        _research_inputs(self.repo_root)
         identity = self._identity()
         fold_ref = identity.fold_ref("fold_2022Q1")
         run_ref = identity.run_ref("run_001")
@@ -3339,6 +3399,7 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertNotIn("run_001", response.headers["content-disposition"])
 
     def test_prompt_preview_embeds_directive_and_guards_heldout(self) -> None:
+        _research_inputs(self.repo_root)
         preview = self.client.post(
             "/api/experiments/exp_hitl/prompt-preview",
             json={

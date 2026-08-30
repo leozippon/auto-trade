@@ -229,7 +229,9 @@ def test_legacy_web_audit_remains_readable_but_mutations_and_preview_fail(
     assert "identity state" in source.json()["detail"]
 
     with pytest.raises(LegacyExperimentError, match=LEGACY_EXPERIMENT_MESSAGE):
-        build_prompt_preview(experiment, "epoch_001/fold_2024Q1", "")
+        build_prompt_preview(
+            experiment, "epoch_001/fold_2024Q1", "", repo_root=tmp_path
+        )
     with pytest.raises(ManagerError, match=LEGACY_EXPERIMENT_MESSAGE):
         ExperimentManager(tmp_path, experiments).control(
             "legacy",

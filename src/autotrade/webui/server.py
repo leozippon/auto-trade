@@ -880,6 +880,24 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
                 status_code=409, detail="experiment identity state is unreadable"
             ) from exc
 
+    @app.get("/api/experiments/{experiment_id}/memory/{source}/{name}")
+    def get_experiment_memory_entry(
+        experiment_id: str, source: str, name: str
+    ) -> dict[str, object]:
+        """One entry as this experiment holds it, not as the library reads now."""
+
+        _experiment_dir(experiment_id)
+        try:
+            return memory.experiment_memory_entry(
+                experiment_root, experiment_id, source, name
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="invalid memory entry name") from exc
+        except (KeyError, OSError) as exc:
+            raise HTTPException(
+                status_code=404, detail="unknown mounted memory entry"
+            ) from exc
+
     @app.post("/api/experiments/{experiment_id}/prompt-preview")
     def post_prompt_preview(experiment_id: str, payload: dict = Body(...)) -> dict[str, object]:
         directory, identity = _public_identity(experiment_id)
@@ -891,6 +909,7 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
                 directory,
                 raw_session_key,
                 str(payload.get("directive") or ""),
+                repo_root=root,
             )
             return {
                 **preview,

@@ -41,6 +41,7 @@ from autotrade.pipelines.hitl_state import (
     status_pid_alive,
     write_control,
 )
+from autotrade.pipelines.skills import create_operating_memory_snapshot
 from autotrade.pipelines.ledger import (
     ExperimentLedger,
     FrozenArtifactMutated,
@@ -430,10 +431,23 @@ class ExperimentManager:
                         directory, inherit_from
                     )
                 except Exception:
-                    shutil.rmtree(
-                        directory, ignore_errors=True
-                    )  # leave no half-created experiment
+                    self._discard_half_created(directory)
                     raise
+            # Operating memory is fixed for the life of the experiment, like the
+            # inherited parent above: resolve the library and the graduated tier
+            # once, here, and copy the result in read-only. Every session then
+            # mounts that snapshot, so a library change reaches the next
+            # experiment instead of the middle of this one.
+            try:
+                create_operating_memory_snapshot(
+                    directory,
+                    mode=str(merged.get("operating_memory") or ""),
+                    repo_root=self.repo_root,
+                    experiments_root=self.experiments_root,
+                )
+            except Exception:
+                self._discard_half_created(directory)
+                raise
             merged["_created_at"] = utc_now_iso()
             write_json_atomic(hitl / "params.json", merged)
             write_control(
@@ -449,6 +463,18 @@ class ExperimentManager:
                 else {"spawned": False}
             )
             return {"experiment_id": experiment_id, **spawn}
+
+    def _discard_half_created(self, directory: Path) -> None:
+        """Leave no half-created experiment, and never mask why it failed.
+
+        The tree can already hold read-only copies (the inherited frozen parent,
+        the operating-memory snapshot), which a plain ``rmtree`` leaves behind.
+        """
+
+        try:
+            _remove_readonly_tree(directory)
+        except OSError:
+            shutil.rmtree(directory, ignore_errors=True)
 
     def _preflight(self, merged: dict[str, object], directory: Path) -> None:
         """Reject a bad create in the browser, not minutes later on disk.

@@ -7717,40 +7717,19 @@ function applyCuratedResult(result) {
 }
 
 /* ---------------- 已挂载记忆 ----------------
-   Experiment-detail block: what THIS experiment's sessions actually received,
-   read from their run manifests rather than recomputed from today's tier.
-   Two halves, because they answer two questions: a 挂载条目 panel names every
-   entry once (annotated when it did not reach every session), and a table with
-   one row per session says how much each session got and whether it differs
-   from that union. */
+   One list, not a per-session projection: an experiment resolves the curated
+   library and the graduated tier once, when it is created, and every session it
+   runs mounts that same read-only snapshot. So there is nothing to compare
+   between sessions here — only what this experiment holds, and when it froze. */
 
 function mountedMemoryPanel(detail) {
   const host = el("div", {});
   api(`/api/experiments/${encodeURIComponent(detail.experiment_id)}/memory`)
-    .then((payload) => host.append(mountedMemorySection(payload)))
+    .then((payload) => host.append(mountedMemorySection(detail, payload)))
     .catch(() => {
-      /* no collected session artifacts for this experiment */
+      /* no readable memory state for this experiment */
     });
   return host;
-}
-
-/* `epoch_001/meta_learning` is the manifest's key, not a name to read: the
-   block shows `Epoch 1 · 元学习`, the same way the session list names it. */
-function mountedSessionLabel(session) {
-  const raw = String(session.session_label || "");
-  const kind = KIND_LABELS[session.kind] || "";
-  if (!raw) {
-    // A rollback or rerun can leave a collected run the current plan no longer
-    // names; its run reference still tells the rows apart.
-    const ref = String(session.run_ref || "—");
-    return kind ? `${kind} · ${ref}` : ref;
-  }
-  const parts = raw.split("/");
-  const tail = parts.pop();
-  const epoch = /^epoch_0*(\d+)$/.exec(parts[0] || "");
-  const head = epoch ? `Epoch ${epoch[1]}` : parts.join("/");
-  const label = tail === session.kind ? kind || tail : tail;
-  return head ? `${head} · ${label}` : label;
 }
 
 function mountedSourceLabel(source) {
@@ -7759,104 +7738,16 @@ function mountedSourceLabel(source) {
     : `毕业实验 ${source.source || "—"}`;
 }
 
-function mountedEntryKey(origin, source, name) {
-  return `${origin} ${source} ${name}`;
-}
-
-/* Every entry once, with the sessions that received it. Sessions arrive in
-   plan order, so the indices below are chronological. */
-function mountedEntryIndex(sessions) {
-  const order = [];
-  const groups = new Map();
-  for (const session of sessions) {
-    if (session.error) continue;
-    const index = order.length;
-    order.push(mountedSessionLabel(session));
-    for (const source of session.sources || []) {
-      const key = `${source.origin} ${source.source}`;
-      const group = groups.get(key) || {
-        origin: source.origin,
-        source: source.source,
-        entries: new Map(),
-      };
-      for (const name of source.entries || [])
-        group.entries.set(name, [...(group.entries.get(name) || []), index]);
-      groups.set(key, group);
-    }
-  }
-  return { order, groups: [...groups.values()] };
-}
-
-function mountedEntryNote(indices, order) {
-  if (indices.length >= order.length) return "";
-  const first = indices[0];
-  const contiguous =
-    indices.length === order.length - first &&
-    indices.every((value, offset) => value === first + offset);
-  return contiguous ? ` · 自 ${order[first]} 起` : " · 仅部分会话";
-}
-
-function mountedEntryChip(group, name, indices, order) {
-  const note = mountedEntryNote(indices, order);
-  const chip = el(
-    "button",
-    {
-      class: "file-chip",
-      type: "button",
-      title: note
-        ? `挂载于：${indices.map((index) => order[index]).join("、")}`
-        : `全部 ${order.length} 个会话都挂载了它`,
-      onclick: () =>
-        openMountedSkill({ origin: group.origin, source: group.source }, name),
-    },
-    name,
-  );
-  if (note) chip.append(el("span", { class: "chip-note" }, note));
-  return chip;
-}
-
-function mountedEntriesPanel(index) {
-  const host = el(
-    "div",
-    { class: "mounted-entries section-gap" },
-    el("h4", { class: "subsection-title" }, "挂载条目"),
-    el(
-      "div",
-      { class: "hint" },
-      "点条目看原文。带说明的条目不是每个会话都拿到了，鼠标停留可以看到具体是哪些会话。",
-    ),
-  );
-  for (const group of index.groups) {
-    host.append(
-      el("div", { class: "mounted-group-title" }, mountedSourceLabel(group)),
-      el(
-        "div",
-        { class: "file-list" },
-        ...[...group.entries.entries()]
-          .sort((left, right) => (left[0] < right[0] ? -1 : 1))
-          .map(([name, indices]) =>
-            mountedEntryChip(group, name, indices, index.order),
-          ),
-      ),
-    );
-  }
-  return host;
-}
-
-/* The chips open the entry as it reads today; the block itself stays the record
-   of what each session received, so an entry since removed answers in the toast
-   instead of quietly rewriting that record. */
-async function openMountedSkill(source, name) {
-  const curated = source.origin === "curated";
+/* The snapshot's own copy, not the library's current text: the library may have
+   moved since, and this block is what the experiment actually read. */
+async function openMountedSkill(experimentId, source, name) {
   let entry;
   try {
-    entry = curated
-      ? await api(`/api/memory/curated/${encodeURIComponent(name)}`)
-      : await api(
-          `/api/memory/graduated/${encodeURIComponent(source.source)}/${encodeURIComponent(name)}`,
-        );
+    entry = await api(
+      `/api/experiments/${encodeURIComponent(experimentId)}/memory/${encodeURIComponent(source.source)}/${encodeURIComponent(name)}`,
+    );
   } catch (error) {
-    toast(`这条现在读不到了（表里是当时挂载的记录）：${error.message}`, true);
+    toast(`读不到这条快照条目：${error.message}`, true);
     return;
   }
   showModal(
@@ -7867,7 +7758,7 @@ async function openMountedSkill(source, name) {
       el(
         "div",
         { class: "hint" },
-        `${name} ｜ ${fmtBytes(entry.bytes)} ｜ ${mountedSourceLabel(source)} ｜ 只读，会话不能改写`,
+        `${name} ｜ ${fmtBytes(entry.bytes)} ｜ ${mountedSourceLabel(source)} ｜ 本实验创建时的快照副本，只读`,
       ),
       el("pre", { class: "code-view skill-body section-gap" }, entry.content || ""),
     ),
@@ -7875,113 +7766,39 @@ async function openMountedSkill(source, name) {
   );
 }
 
-function mountedStatusBadge(session) {
-  if (session.error)
-    return el(
-      "span",
-      { class: "badge state-failed", title: session.error },
-      "读取失败",
-    );
-  return (session.sources || []).length
-    ? el("span", { class: "badge state-completed" }, "已挂载")
-    : el("span", { class: "badge state-stopped" }, "未挂载");
-}
-
-function mountedMissingEntries(session, union) {
-  const received = new Set();
-  for (const source of session.sources || [])
-    for (const name of source.entries || [])
-      received.add(mountedEntryKey(source.origin, source.source, name));
-  return [...union]
-    .filter((key) => !received.has(key))
-    .map((key) => key.split(" ")[2]);
-}
-
-function mountedSessionRow(session, union) {
-  const sources = session.error ? [] : session.sources || [];
-  const curated = sources.filter((source) => source.origin === "curated");
-  const graduated = sources.filter((source) => source.origin !== "curated");
-  const count = (list) =>
-    list.reduce((total, source) => total + (source.entries || []).length, 0);
-  const curatedCount = count(curated);
-  const graduatedCount = count(graduated);
-  const status = el("div", { class: "mounted-status" }, mountedStatusBadge(session));
-  const missing = sources.length ? mountedMissingEntries(session, union) : [];
-  if (missing.length)
-    status.append(
+function mountedEntriesList(experimentId, sources) {
+  const host = el("div", {});
+  for (const source of sources) {
+    host.append(
+      el("div", { class: "mounted-group-title" }, mountedSourceLabel(source)),
       el(
-        "span",
-        { class: "badge state-paused", title: `缺少：${missing.join("、")}` },
-        "有差异",
+        "div",
+        { class: "file-list" },
+        ...(source.entries || []).map((name) =>
+          el(
+            "button",
+            {
+              class: "file-chip",
+              type: "button",
+              title: "查看本实验快照里的 SKILL.md 原文",
+              onclick: () => openMountedSkill(experimentId, source, name),
+            },
+            name,
+          ),
+        ),
       ),
     );
-  return el(
-    "tr",
-    {},
-    el("td", { class: "nowrap" }, mountedSessionLabel(session)),
-    el("td", {}, curatedCount ? `${curatedCount} 条` : "—"),
-    el(
-      "td",
-      {},
-      graduatedCount
-        ? `${graduatedCount} 条（来自 ${graduated.length} 个实验）`
-        : "—",
-    ),
-    el("td", { class: "nowrap" }, status),
+  }
+  return host;
+}
+
+function mountedMemorySection(detail, payload) {
+  const snapshot = payload.snapshot;
+  const sources = (snapshot && snapshot.sources) || [];
+  const entryCount = sources.reduce(
+    (total, source) => total + (source.entries || []).length,
+    0,
   );
-}
-
-function mountedUnion(index) {
-  const union = new Set();
-  for (const group of index.groups)
-    for (const name of group.entries.keys())
-      union.add(mountedEntryKey(group.origin, group.source, name));
-  return union;
-}
-
-/* The common case: every session that has run received the same set. Then the
-   per-session table has one distinct answer repeated N times, so one line says
-   it instead — the rows come back as soon as a session really differs. */
-function mountedSessionsUniform(sessions, index) {
-  if (!index.groups.length || index.order.length !== sessions.length) return false;
-  const union = mountedUnion(index);
-  return sessions.every(
-    (session) =>
-      !session.error &&
-      (session.sources || []).length &&
-      !mountedMissingEntries(session, union).length,
-  );
-}
-
-function mountedUniformLine(order) {
-  return el(
-    "div",
-    { class: "hint", title: order.join("、") },
-    order.length === 1
-      ? `已运行的 1 个会话（${order[0]}）挂载了以上条目`
-      : `全部 ${order.length} 个已运行会话挂载了相同的条目`,
-  );
-}
-
-function mountedSessionTable(sessions, index) {
-  const union = mountedUnion(index);
-  return el(
-    "table",
-    { class: "data text section-gap" },
-    el(
-      "tr",
-      {},
-      el("th", { class: "nowrap" }, "会话"),
-      el("th", {}, "精选库"),
-      el("th", {}, "毕业层"),
-      el("th", { class: "nowrap" }, "状态"),
-    ),
-    ...sessions.map((session) => mountedSessionRow(session, union)),
-  );
-}
-
-function mountedMemorySection(payload) {
-  const sessions = payload.sessions || [];
   const panel = el(
     "div",
     { class: "panel section-gap" },
@@ -7989,38 +7806,54 @@ function mountedMemorySection(payload) {
     el(
       "div",
       { class: "hint" },
-      "每个会话在启动的那一刻拿到一份只读副本：当时精选库里的全部条目，加上当时已经毕业的实验留下的 skills。下面按已经跑过的会话列出它们各自拿到了什么；还没启动的会话不在这里，它们会在启动时拿到那时的精选库。",
-    ),
-    el(
-      "table",
-      { class: "kv section-gap" },
-      kvRow("挂载模式", payload.mode || "—"),
-      kvRow("已运行会话", `${sessions.length} 个`),
+      "本实验创建时快照；库的后续改动作用于之后创建的实验。每个 Fold 与元学习会话都挂载这同一份只读副本，因此本实验各次会话看到的运行记忆完全一致。",
     ),
   );
-  if (!sessions.length) {
+  if (payload.error) {
     panel.append(
-      el("div", { class: "empty" }, "还没有会话跑过，所以还没有挂载记录"),
+      el("div", { class: "hint warn" }, `快照不可读：${payload.error}`),
     );
     return panel;
   }
-  const index = mountedEntryIndex(sessions);
-  if (!index.groups.length && !sessions.some((session) => session.error)) {
+  if (!snapshot) {
     panel.append(
       el(
         "div",
         { class: "empty" },
-        `本实验没有挂载运行记忆（挂载模式 ${payload.mode || "—"}）`,
+        `还没有运行记忆快照（挂载模式 ${payload.mode || "—"}），下一次会话启动时补建`,
       ),
     );
     return panel;
   }
-  if (index.groups.length) panel.append(mountedEntriesPanel(index));
   panel.append(
-    mountedSessionsUniform(sessions, index)
-      ? mountedUniformLine(index.order)
-      : mountedSessionTable(sessions, index),
+    el(
+      "table",
+      { class: "kv section-gap" },
+      kvRow("快照时间", fmtTs(snapshot.created_at)),
+      kvRow("挂载模式", snapshot.mode || payload.mode || "—"),
+      kvRow("挂载条目", `${entryCount} 条`),
+      kvRow("已运行会话", `${payload.sessions_seen ?? 0} 个`),
+    ),
   );
+  if (snapshot.created_from === "first_session")
+    panel.append(
+      el(
+        "div",
+        { class: "hint" },
+        "本实验创建于快照机制之前，快照由它的第一个会话补建。",
+      ),
+    );
+  if (!entryCount) {
+    panel.append(
+      el(
+        "div",
+        { class: "empty" },
+        `本实验没有挂载运行记忆（挂载模式 ${snapshot.mode || payload.mode || "—"}）`,
+      ),
+    );
+    return panel;
+  }
+  panel.append(mountedEntriesList(detail.experiment_id, sources));
   return panel;
 }
 

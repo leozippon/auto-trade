@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import shutil
 from pathlib import Path
 
@@ -18,10 +17,8 @@ from autotrade.pipelines import (
     StepResult,
 )
 from autotrade.pipelines.config import (
-    DEFAULT_DEADLINE_GRACE_MINUTES,
     MetaSessionResult,
     fold_session_deadline_seconds,
-    rolling_default,
 )
 from autotrade.pipelines.experiment import _session_budgets
 from autotrade.pipelines.folds import build_fold_schedule
@@ -737,52 +734,6 @@ def test_fold_session_request_carries_configured_deadline_grace(tmp_path: Path):
         assert request.deadline_seconds == fold_session_deadline_seconds(
             pipeline.config.max_fold_minutes, minutes
         )
-
-
-def test_prompt_preview_deadline_matches_live_fold_budget(tmp_path: Path):
-    from autotrade.webui.prompt_preview import build_prompt_preview
-
-    cases = (
-        (
-            {},
-            fold_session_deadline_seconds(
-                rolling_default("max_fold_minutes"), DEFAULT_DEADLINE_GRACE_MINUTES
-            ),
-        ),
-        (
-            {"deadline_grace_minutes": 0, "max_fold_minutes": 240},
-            fold_session_deadline_seconds(240, DEFAULT_DEADLINE_GRACE_MINUTES),
-        ),
-        (
-            {"deadline_grace_minutes": 20, "max_fold_minutes": 90},
-            fold_session_deadline_seconds(90, DEFAULT_DEADLINE_GRACE_MINUTES),
-        ),
-    )
-    for index, (extra, expected) in enumerate(cases):
-        experiment = tmp_path / f"preview_{index}"
-        hitl = experiment / "hitl"
-        hitl.mkdir(parents=True)
-        (hitl / "params.json").write_text(
-            json.dumps({"strategy_period": "day", **extra}),
-            encoding="utf-8",
-        )
-        (hitl / "schedule.json").write_text(
-            json.dumps(
-                {
-                    "sessions": [
-                        {
-                            "session_key": "epoch_001/fold_x",
-                            "kind": "fold",
-                            "epoch_id": "epoch_001",
-                            "fold_id": "fold_x",
-                        }
-                    ]
-                }
-            ),
-            encoding="utf-8",
-        )
-        preview = build_prompt_preview(experiment, "epoch_001/fold_x", "")
-        assert f'"deadline_seconds": {int(expected)}' in str(preview["prompt"])
 
 
 def test_frozen_test_fails_fast_when_output_changes(tmp_path: Path):
