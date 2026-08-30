@@ -1599,7 +1599,14 @@ class SnapshotBuilder:
                 if prior_time.tzinfo
                 else prior_time.replace(tzinfo=CN_TZ)
             ).astimezone(CN_TZ)
-            if prior_path.is_file() and prior_time < decision_time:
+            # Extending pays off only when the prior snapshot lies inside the new
+            # window: otherwise nothing of it survives ``window_start`` and the
+            # delta rebuild covers gap + window, then dedupes the whole frame.
+            if (
+                prior_path.is_file()
+                and prior_time < decision_time
+                and pd.Timestamp(prior_time) >= window_start
+            ):
                 try:
                     prior = pd.read_parquet(prior_path)
                 except (OSError, ValueError):

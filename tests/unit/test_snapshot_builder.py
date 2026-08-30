@@ -241,6 +241,36 @@ CONFIG = SnapshotConfig(
 )
 
 
+def build_incremental_events_fixture(
+    tmp: Path, prior_available_at: str
+) -> tuple[SnapshotBuilder, SnapshotConfig, Path]:
+    """Raw fixture plus a one-row prior decision events table in builder schema."""
+    raw = tmp / "raw"
+    events_root = tmp / "fund_events"
+    status_path = tmp / "fundamental_events_status.json"
+    build_raw(raw)
+    build_fundamental_events(events_root)
+    write_fundamental_status(status_path)
+    prior_path = tmp / "prior_events.parquet"
+    write(
+        prior_path,
+        pd.DataFrame([{
+            "dataset": "margin_secs",
+            "trade_date": prior_available_at[:10].replace("-", ""),
+            "ts_code": "600000.SH",
+            "available_at": prior_available_at,
+            "available_at_rule": "same_day_preopen",
+        }]),
+    )
+    config = replace(
+        CONFIG,
+        events_datasets=("margin_secs",),
+        events_window_months=6,
+        include_intraday=False,
+    )
+    return SnapshotBuilder(raw, events_root, status_path), config, prior_path
+
+
 class SnapshotBuilderTest(unittest.TestCase):
     def test_domain_scheduler_bounds_concurrency_and_respects_dependencies(self):
         lock = threading.Lock()
@@ -2318,6 +2348,41 @@ class SnapshotBuilderTest(unittest.TestCase):
                     pd.Timestamp("2021-04-08", tz=CN_TZ),
                     screen=None,
                 )
+
+    def test_prior_events_older_than_the_window_fall_back_to_a_full_rebuild(self):
+        # Nothing from a prior snapshot older than window_start survives the new
+        # window, while extending would scan gap + window and then dedupe the
+        # whole frame: a four-year gap ran over two hours at 80 GB RSS.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            builder, config, prior_path = build_incremental_events_fixture(
+                tmp, "2017-09-29T09:00:00+08:00"
+            )
+            manifest = builder.build_decision_snapshot(
+                DECISION,
+                tmp / "snap",
+                config,
+                prior_events=(prior_path, datetime(2017, 9, 30, 9, 25, tzinfo=CN_TZ)),
+            )
+            events = manifest["domains"]["events"]
+            self.assertFalse(events.get("incremental"))
+            self.assertNotIn("prior_decision_time", events)
+
+    def test_prior_events_inside_the_window_extend_incrementally(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            builder, config, prior_path = build_incremental_events_fixture(
+                tmp, "2021-09-30T09:00:00+08:00"
+            )
+            prior_time = datetime(2021, 10, 7, 9, 25, tzinfo=CN_TZ)
+            manifest = builder.build_decision_snapshot(
+                DECISION, tmp / "snap", config, prior_events=(prior_path, prior_time)
+            )
+            meta = manifest["domains"]["events"]
+            self.assertTrue(meta.get("incremental"))
+            self.assertEqual(meta["prior_decision_time"], prior_time.isoformat())
+            events = pd.read_parquet(tmp / "snap" / "events.parquet")
+            self.assertEqual(set(events["ts_code"]), {"600000.SH", "000001.SZ"})
 
 
 if __name__ == "__main__":
