@@ -4,10 +4,10 @@ This pack turns common 雪球、东财股吧、同花顺、财联社 and short-t
 
 ## Hard boundary
 
-- The Fold Agent must write the formal strategy only to `output/main.py`.
+- The Fold Agent must write the formal strategy only under `output/` (entry `output/main.py`; sibling modules are imported absolutely).
 - Do not copy this reference tree into `output`.
 - No `/mnt/agent/workspace` hard-code. Read formal inputs only through `context.asof_dir` or `context.snapshot_dir` after confirming the current run's manifest, schema, and unit reference.
-- The formal replay is one self-contained Python file using only supported `numpy`/`pandas` operations and `generate_orders(context)`.
+- The formal replay is the `output/` package (entry `main.py`, optional sibling modules) using only the runtime contract's supported libraries and `generate_orders(context)`.
 - The sandbox has no network. Never fetch 雪球、股吧、同花顺、财联社 or any other website at inference time.
 - Every used row must satisfy `available_at <= context.inference_at`. At the default 08:30 decision, today's daily bar, auction, opening gap, intraday comment stream, and intraday hot-list move do not exist yet.
 - This pack deliberately excludes the previous naive MA20 risk switch. Each retained playbook has an event, attention, limit-state, chip, seat, or money-flow mechanism with an explicit falsification test.
@@ -22,7 +22,7 @@ This pack turns common 雪球、东财股吧、同花顺、财联社 and short-t
 
 ## Fold exploration order
 
-Development is cut into one regular Fold per year (each Fold's Validation is that year, no Test stage, a Meta session between adjacent Folds) and the input window covers the 24 months before each Validation. Screen all nine mechanisms offline against the input window first — event counts, coverage, and the sub-window sign of each cohort's forward return — then pre-register the three or more strongest survivors and run their complete Validations side by side with `batch_validate`. Keep one mechanism per revision, but do not stop after one mechanism, and do not begin by stacking several weak ideas into an opaque score.
+Development is cut into one regular Fold per year (each Fold's Validation is that year, no Test stage, a Meta session between adjacent Folds) and the input window covers the 24 months before each Validation. Screen all nine mechanisms offline against the input window first — event counts, coverage, and the sub-window sign of each cohort's forward return — then pre-register the three or more strongest survivors and run their complete Validations side by side with `batch_validate`. That is the first round, not the Fold: mechanisms that hold go into further pre-registered rounds — gates and ablations, a within-cohort ranking fitted in `fit` (logistic or a small tree model over the T-1 fields the playbook already uses) against the equal-weight basket, holding-period and sizing rules — until the budget or the hypotheses run out. Keep one mechanism per revision, but do not stop after one round, and do not begin by stacking several weak ideas into an opaque score.
 
 The list below is a priority order for that screening, not a fixed running order.
 

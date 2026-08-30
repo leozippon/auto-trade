@@ -49,9 +49,11 @@ from autotrade.pipelines.local_backend import (
     BATCH_VALIDATE_MAX_CONCURRENCY,
     BatchValidateTool,
     FoldBacktestTool,
+    another_batch_round_fits,
 )
 
 PARENT_SOURCE = "def generate_orders(context):\n    return []\n"
+TEMPLATE_README = "# Strategy output contract\n\nRead-only template text.\n"
 
 
 def _strategy(marker: str) -> str:
@@ -154,6 +156,9 @@ class _Session:
         rendezvous: int = 0,
         with_parent: bool = True,
         record_failed_attempts: bool = True,
+        deadline_seconds: float = 600.0,
+        readonly_template: bool = False,
+        min_batch_rounds: int = 0,
     ) -> None:
         self.root = root
         self.workspace_root = root / "workspace"
@@ -164,6 +169,10 @@ class _Session:
             directory.mkdir(parents=True)
         (self.parent / "main.py").write_text(PARENT_SOURCE, encoding="utf-8")
         (self.output / "main.py").write_text(PARENT_SOURCE, encoding="utf-8")
+        if readonly_template:
+            # The read-only contract README travels with every formal artifact.
+            for directory in (self.parent, self.output):
+                (directory / "README.md").write_text(TEMPLATE_README, encoding="utf-8")
         moment = datetime(2021, 12, 31, 23, 59, 59, tzinfo=UTC)
         request = FoldSessionRequest(
             experiment_id="exp",
@@ -186,7 +195,9 @@ class _Session:
             max_steps=max_steps,
             max_backtests=max_backtests,
             max_llm_calls=10,
-            deadline_seconds=600.0,
+            deadline_seconds=deadline_seconds,
+            deadline_grace_seconds=60.0,
+            finalize_before_deadline_seconds=30,
             record_failed_attempts=record_failed_attempts,
         )
         self.tree = StepTree(root / "steps")
@@ -203,7 +214,7 @@ class _Session:
             tree=self.tree,
             schedule=StrategySchedule(),
             broker_profile=BrokerProfile(),
-            time_budget=InferenceTimeBudget(duration_seconds=600.0),
+            time_budget=InferenceTimeBudget(duration_seconds=deadline_seconds),
             ref_store=AgentRefStore(root / "experiment"),
         )
         self.workspace = SafeWorkspace(self.workspace_root)
@@ -227,11 +238,14 @@ class _Session:
             parent_main_py=self.parent / "main.py",
             current_output=self.output,
             current_models=self.models,
+            min_batch_rounds=min_batch_rounds,
+            another_round_fits=lambda: another_batch_round_fits(self.backtest),
         )
 
     def _check(self, directory: Path) -> ModificationCheckTool:
         return ModificationCheckTool(
             directory,
+            parent_dir=self.parent,
             models_dir=self.models,
             constraints=ModificationConstraints(),
         )
@@ -466,7 +480,10 @@ class BatchValidateRunTest(unittest.TestCase):
             self.assertEqual(
                 failed[0]["parent_node_id"], result.value["parent_node_id"]
             )
-            self.assertEqual(failed[0]["metrics"]["candidate"], "bad")
+            # The dead end carries the same batch id and hypothesis as its
+            # recorded siblings: the round is readable from the tree alone.
+            self.assertEqual(failed[0]["metadata"]["candidate"], "bad")
+            self.assertEqual(failed[0]["metadata"]["batch_id"], result.value["batch_id"])
             self.assertEqual(session.backtest.backtests, 3)
             self.assertEqual(len(session.backtest.steps), 2)
 
@@ -599,6 +616,90 @@ class BatchValidateContractTest(unittest.TestCase):
             [item["node_id"] for item in runner._complete_validation_nodes],
             ["n1", "n2", "n3"],
         )
+
+
+class BatchTemplateFilesTest(unittest.TestCase):
+    """A candidate is laid out from its strategy modules; the read-only
+    template README the Agent may not edit is supplied, not demanded."""
+
+    def test_a_candidate_without_the_readme_is_accepted_and_carries_it(self) -> None:
+        with TemporaryDirectory() as tmp:
+            session = _Session(Path(tmp), readonly_template=True)
+            session.candidate("a", _strategy("1"))
+            session.candidate("b", _strategy("22"))
+            value = session.call("a", "b").value
+            self.assertEqual(value["complete_validations"], 2)
+            for row in value["candidates"]:
+                snapshot = session.tree.node_output_dir(row["node_id"])
+                self.assertEqual(
+                    (snapshot / "README.md").read_text(encoding="utf-8"), TEMPLATE_README
+                )
+            # Only the template name was supplied; the package modules are
+            # exactly what the Agent wrote.
+            self.assertEqual(
+                sorted(p.name for p in (session.workspace_root / "candidates" / "a").iterdir()),
+                ["README.md", "main.py"],
+            )
+
+    def test_a_candidate_with_an_edited_readme_is_still_refused(self) -> None:
+        with TemporaryDirectory() as tmp:
+            session = _Session(Path(tmp), readonly_template=True)
+            session.candidate("a", _strategy("1"))
+            session.candidate("b", _strategy("22"))
+            (session.workspace_root / "candidates" / "a" / "README.md").write_text(
+                "rewritten contract\n", encoding="utf-8"
+            )
+            with self.assertRaises(ToolError) as caught:
+                session.call("a", "b")
+            self.assertIn("readonly files modified", str(caught.exception))
+            self.assertEqual(session.backtest.backtests, 0)
+
+
+class BatchRoundFloorTest(unittest.TestCase):
+    """``finish_fold`` insists on two completed rounds while another round
+    could still run; the wiring waives it exactly when one cannot."""
+
+    def _finish_winner(self, session: _Session, value: dict) -> object:
+        winner = value["candidates"][0]["node_id"]
+        session.rollback.invoke({"node_id": winner})
+        return session.finish.invoke({"node_id": winner})
+
+    def test_one_round_is_refused_and_two_are_accepted(self) -> None:
+        with TemporaryDirectory() as tmp:
+            session = _Session(Path(tmp), min_batch_rounds=2, max_backtests=6, max_steps=6)
+            session.candidate("a", _strategy("1"))
+            session.candidate("b", _strategy("22"))
+            first = session.call("a", "b").value
+            with self.assertRaises(ToolError) as caught:
+                self._finish_winner(session, first)
+            self.assertIn("1 of the 2 batch_validate rounds", str(caught.exception))
+            session.candidate("c", _strategy("333"))
+            session.candidate("d", _strategy("4444"))
+            second = session.call("c", "d").value
+            finished = self._finish_winner(session, second)
+            self.assertTrue(finished.finish)
+
+    def test_the_floor_is_waived_when_the_budget_cannot_fit_another_round(self) -> None:
+        with TemporaryDirectory() as tmp:
+            # Three backtests: one two-candidate round leaves a single slot,
+            # fewer than the smallest batch.
+            session = _Session(Path(tmp), min_batch_rounds=2, max_backtests=3, max_steps=6)
+            session.candidate("a", _strategy("1"))
+            session.candidate("b", _strategy("22"))
+            value = session.call("a", "b").value
+            self.assertFalse(another_batch_round_fits(session.backtest))
+            self.assertTrue(self._finish_winner(session, value).finish)
+
+    def test_the_floor_is_waived_inside_the_deadline_window(self) -> None:
+        with TemporaryDirectory() as tmp:
+            # 80 s of budget minus the 60 s grace leaves 20 s before the main
+            # deadline, inside the 30 s finalize reserve.
+            session = _Session(Path(tmp), min_batch_rounds=2, deadline_seconds=80.0)
+            session.candidate("a", _strategy("1"))
+            session.candidate("b", _strategy("22"))
+            value = session.call("a", "b").value
+            self.assertFalse(another_batch_round_fits(session.backtest))
+            self.assertTrue(self._finish_winner(session, value).finish)
 
 
 if __name__ == "__main__":

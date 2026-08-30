@@ -1,17 +1,42 @@
-"""Statically preflight and load a trusted Agent-authored strategy."""
+"""Statically preflight and load a trusted Agent-authored strategy package."""
 
 from __future__ import annotations
 
 import ast
 import importlib.util
+import os
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 from .strategy import FitSchedule, StrategyContext, StrategyContractError, StrategyFunction
 
+# Pure-computation standard library plus the numerical/ML stack the sandbox
+# image ships. Submodules (``scipy.stats``, ``sklearn.linear_model``,
+# ``torch.nn``) are covered by their top-level name; modules that live inside
+# the strategy package itself are added per package by ``local_modules``.
 ALLOWED_MODULES = frozenset(
-    {"__future__", "collections", "datetime", "decimal", "math", "numpy", "pandas", "statistics"}
+    {
+        "__future__",
+        "collections",
+        "dataclasses",
+        "datetime",
+        "decimal",
+        "functools",
+        "itertools",
+        "math",
+        "statistics",
+        "typing",
+        "numpy",
+        "pandas",
+        "scipy",
+        "sklearn",
+        "lightgbm",
+        "xgboost",
+        "statsmodels",
+        "torch",
+    }
 )
 FORBIDDEN_CALLS = frozenset({"compile", "eval", "exec", "open", "__import__"})
 FORBIDDEN_ATTRIBUTES = frozenset(
@@ -54,14 +79,18 @@ FORBIDDEN_ATTRIBUTES = frozenset(
         "urlopen",
     }
 )
-# The only file I/O a strategy may perform, and only on a path expression rooted
-# at one of the context directories: reads below any read-only data root, writes
-# below the per-replay state directory that ``fit`` owns.
-ROOTED_READS = frozenset({"read_parquet", "load"})
-ROOTED_WRITES = frozenset({"to_parquet", "save", "savez", "savez_compressed"})
+# The only file I/O a strategy may perform, and only when the FIRST positional
+# argument is a path expression rooted at one of the context directories:
+# reads below any read-only data root, writes below the per-replay state
+# directory that ``fit`` owns. ``save_model``/``load_model`` are the LightGBM
+# and XGBoost booster files; ``torch.save(obj, path)`` puts the path second
+# and is therefore rejected — persist tensors as NumPy arrays instead.
+ROOTED_READS = frozenset({"read_parquet", "load", "load_model"})
+ROOTED_WRITES = frozenset({"to_parquet", "save", "savez", "savez_compressed", "save_model"})
 READ_ROOTS = ("snapshot_dir", "asof_dir", "state_dir", "models_dir")
 WRITE_ROOTS = ("state_dir",)
 REFIT_PERIOD_NAME = "REFIT_PERIOD"
+ENTRYPOINT_NAME = "main.py"
 
 
 class StrategyLoadError(RuntimeError):
@@ -77,31 +106,48 @@ class LoadedStrategy:
     fit_schedule: FitSchedule | None
 
 
-def validate_strategy_source(source: str, *, filename: str = "main.py") -> FitSchedule | None:
+def validate_strategy_source(
+    source: str,
+    *,
+    filename: str = ENTRYPOINT_NAME,
+    local_modules: frozenset[str] = frozenset(),
+    entrypoints: bool = True,
+) -> FitSchedule | None:
     """Reject common direct capability and external-I/O calls before import.
 
-    Returns the declared ``fit`` schedule (``None`` when ``main.py`` defines no
-    ``fit``). This denylist is a convenience check for trusted, reviewed
-    strategies, not a sandbox or a security boundary.
+    ``local_modules`` names the top-level modules and packages that live next
+    to ``main.py`` and may be imported absolutely. With ``entrypoints`` the
+    file is the entry module and must declare ``generate_orders`` (and may
+    declare ``fit``/``REFIT_PERIOD``); the returned schedule is the declared
+    ``fit`` schedule (``None`` when there is no ``fit``). Helper modules pass
+    ``entrypoints=False`` and get the same import and I/O rules only.
+
+    This denylist is a convenience check for trusted, reviewed strategies,
+    not a sandbox or a security boundary.
     """
     try:
         tree = ast.parse(source, filename=filename)
     except SyntaxError as exc:
         raise StrategyLoadError(f"invalid strategy syntax: {exc}") from exc
-    generate = _entrypoint(tree, "generate_orders", required=True)
-    fit = _entrypoint(tree, "fit", required=False)
-    refit_period = _refit_period(tree, has_fit=fit is not None)
-    context_args = frozenset(
-        node.args.args[0].arg for node in (generate, fit) if node is not None
-    )
+    fit_schedule = None
+    if entrypoints:
+        _entrypoint(tree, "generate_orders", required=True)
+        fit = _entrypoint(tree, "fit", required=False)
+        refit_period = _refit_period(tree, has_fit=fit is not None)
+        fit_schedule = FitSchedule(refit_period) if fit is not None else None
+    allowed = ALLOWED_MODULES | local_modules
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             modules = [alias.name.split(".", 1)[0] for alias in node.names]
         elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                raise StrategyLoadError(
+                    "strategy uses a relative import; import package modules absolutely"
+                )
             modules = [str(node.module or "").split(".", 1)[0]]
         else:
             modules = []
-        unsupported = sorted(set(modules).difference(ALLOWED_MODULES))
+        unsupported = sorted(set(modules).difference(allowed))
         if unsupported:
             raise StrategyLoadError(f"strategy imports unsupported module: {unsupported[0]}")
         if not isinstance(node, ast.Call):
@@ -119,12 +165,67 @@ def validate_strategy_source(source: str, *, filename: str = "main.py") -> FitSc
             roots = WRITE_ROOTS
         else:
             continue
-        if not node.args or not _is_context_data_path(
-            node.args[0], context_args=context_args, roots=roots
-        ):
-            allowed = " or ".join(f"context.{root}" for root in roots)
-            raise StrategyLoadError(f"strategy may {method} only below {allowed}")
-    return FitSchedule(refit_period) if fit is not None else None
+        if not node.args or not _is_context_data_path(node.args[0], roots=roots):
+            allowed_roots = " or ".join(f"context.{root}" for root in roots)
+            raise StrategyLoadError(
+                f"strategy may {method} only below {allowed_roots} "
+                "(the path must be the first positional argument)"
+            )
+    return fit_schedule
+
+
+def validate_strategy_package(main_py: str | Path) -> FitSchedule | None:
+    """Preflight ``main.py`` and every ``.py`` file below its directory.
+
+    The directory of ``main.py`` is the strategy package: ``main.py`` is the
+    entry module and may import sibling modules and packages absolutely
+    (``import lib.features``). Every file gets the same import and I/O rules;
+    hidden and ``__pycache__`` paths are not part of the package.
+    """
+    main_py = Path(main_py)
+    if not main_py.is_file():
+        raise StrategyLoadError(f"strategy file does not exist: {main_py}")
+    root = main_py.parent
+    local_modules = package_modules(root)
+    clash = sorted(local_modules & ALLOWED_MODULES)
+    if clash:
+        raise StrategyLoadError(f"strategy package shadows a library module: {clash[0]}")
+    schedule: FitSchedule | None = None
+    for path in sorted(root.rglob("*.py")):
+        relative = path.relative_to(root)
+        if any(part.startswith(".") or part == "__pycache__" for part in relative.parts):
+            continue
+        try:
+            source = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            raise StrategyLoadError(f"{relative}: cannot read strategy source: {exc}") from exc
+        try:
+            result = validate_strategy_source(
+                source,
+                filename=str(relative),
+                local_modules=local_modules,
+                entrypoints=path == main_py,
+            )
+        except StrategyLoadError as exc:
+            raise StrategyLoadError(f"{relative}: {exc}") from exc
+        if path == main_py:
+            schedule = result
+    return schedule
+
+
+def package_modules(root: Path) -> frozenset[str]:
+    """Top-level module and package names importable from a strategy directory."""
+    names = set()
+    if not root.is_dir():
+        return frozenset()
+    for entry in root.iterdir():
+        if entry.name.startswith(".") or entry.name == "__pycache__":
+            continue
+        if entry.is_dir():
+            names.add(entry.name)
+        elif entry.suffix == ".py" and entry.name != ENTRYPOINT_NAME:
+            names.add(entry.stem)
+    return frozenset(names)
 
 
 def _entrypoint(tree: ast.Module, name: str, *, required: bool) -> ast.FunctionDef | None:
@@ -178,20 +279,14 @@ def _refit_period(tree: ast.Module, *, has_fit: bool) -> str | None:
     return value.value
 
 
-def _is_context_data_path(
-    node: ast.AST, *, context_args: frozenset[str], roots: tuple[str, ...]
-) -> bool:
-    """Recognize a path expression rooted in one of the named context directories."""
+def _is_context_data_path(node: ast.AST, *, roots: tuple[str, ...]) -> bool:
+    """Recognize ``<name>.<root>`` optionally followed by ``+ "<literal>"``."""
 
     if isinstance(node, ast.Attribute):
-        return (
-            isinstance(node.value, ast.Name)
-            and node.value.id in context_args
-            and node.attr in roots
-        )
+        return isinstance(node.value, ast.Name) and node.attr in roots
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
         return (
-            _is_context_data_path(node.left, context_args=context_args, roots=roots)
+            _is_context_data_path(node.left, roots=roots)
             and isinstance(node.right, ast.Constant)
             and isinstance(node.right.value, str)
         )
@@ -199,19 +294,34 @@ def _is_context_data_path(
 
 
 def load_strategy_module(path: str | Path) -> LoadedStrategy:
+    """Validate the package around ``main.py`` and import its entry module.
+
+    The package directory is importable only while the entry module executes,
+    and the modules it pulled in are forgotten from ``sys.modules`` afterwards
+    (the entry module keeps its own references), so several strategies whose
+    helper modules share names can be loaded into one host process. Bytecode
+    caches are never written next to the artifact.
+    """
     strategy_path = Path(path).resolve()
     if not strategy_path.is_file():
         raise StrategyLoadError(f"strategy file does not exist: {strategy_path}")
-    source = strategy_path.read_text(encoding="utf-8")
-    fit_schedule = validate_strategy_source(source, filename=strategy_path.name)
+    fit_schedule = validate_strategy_package(strategy_path)
     spec = importlib.util.spec_from_file_location("autotrade_user_strategy", strategy_path)
     if spec is None or spec.loader is None:
         raise StrategyLoadError(f"cannot load strategy: {strategy_path}")
     module = importlib.util.module_from_spec(spec)
+    root = str(strategy_path.parent)
+    write_bytecode = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
+    sys.path.insert(0, root)
     try:
         spec.loader.exec_module(module)
     except Exception as exc:
         raise StrategyLoadError(f"strategy import failed: {exc}") from exc
+    finally:
+        sys.path.remove(root)
+        sys.dont_write_bytecode = write_bytecode
+        _forget_package_modules(root)
     strategy = getattr(module, "generate_orders", None)
     if not callable(strategy):
         raise StrategyLoadError("strategy does not expose generate_orders")
@@ -221,6 +331,21 @@ def load_strategy_module(path: str | Path) -> LoadedStrategy:
         if not callable(fit):
             raise StrategyLoadError("strategy does not expose fit")
     return LoadedStrategy(strategy, fit, fit_schedule)
+
+
+def _forget_package_modules(root: str) -> None:
+    prefix = root + os.sep
+    for name, module in list(sys.modules.items()):
+        # Read the module's own namespace: some library modules answer any
+        # attribute lookup (torch._classes), so getattr would fabricate a path.
+        namespace = getattr(module, "__dict__", None) or {}
+        locations = [namespace.get("__file__")]
+        try:
+            locations.extend(namespace.get("__path__") or ())
+        except TypeError:
+            pass
+        if any(isinstance(location, str) and location.startswith(prefix) for location in locations):
+            del sys.modules[name]
 
 
 def load_strategy(path: str | Path) -> StrategyFunction:
@@ -235,9 +360,12 @@ def load_strategy(path: str | Path) -> StrategyFunction:
 
 
 __all__ = [
+    "ALLOWED_MODULES",
     "LoadedStrategy",
     "StrategyLoadError",
     "load_strategy",
     "load_strategy_module",
+    "package_modules",
+    "validate_strategy_package",
     "validate_strategy_source",
 ]

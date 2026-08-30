@@ -53,7 +53,9 @@ def test_pyrightconfig_is_basic_and_excludes_pit_roots() -> None:
     assert config["pythonVersion"] == "3.11"
     assert config["typeCheckingMode"] == "basic"
     assert "include" not in config
-    assert config["extraPaths"] == ["/opt/autotrade"]
+    # The trusted runtime, plus the strategy package root so pyright resolves
+    # main.py's sibling-module imports the same way the loader does.
+    assert config["extraPaths"] == ["/opt/autotrade", "/mnt/agent/workspace/output"]
     assert config["reportMissingImports"] == "warning"
     exclude = config["exclude"]
     assert "**/snapshots" in exclude

@@ -18,8 +18,8 @@
 
 ## 硬合同
 
-- 正式策略只能写到 `output/main.py`，入口为 `generate_orders(context)`，返回严格 JSON 订单数组。
-- 正式 import 只允许：`__future__`、`collections`、`datetime`、`decimal`、`math`、`numpy`、`pandas`、`statistics`。即使镜像里有 sklearn / lightgbm / qlib / vnpy / joinquant，也不得 import。
+- 正式策略写在 `output/` 包内：入口固定为 `output/main.py` 的 `generate_orders(context)`，返回严格 JSON 订单数组；辅助模块可放在 `output/` 下并用绝对导入（如 `from lib.features import x`），每个 `.py` 都受同一套静态检查。
+- 正式 import 只允许：纯计算标准库（`__future__`、`collections`、`dataclasses`、`datetime`、`decimal`、`functools`、`itertools`、`math`、`statistics`、`typing`）、`numpy`、`pandas`、`scipy`、`sklearn`、`lightgbm`、`xgboost`、`statsmodels`、`torch`（仅 CPU）及其子模块，以及 `output/` 内自己的模块。qlib / vnpy / joinquant / joblib / pickle 仍不得 import；模型参数用 NumPy 数组或 booster 的 `save_model(context.state_dir + ...)` 持久化。
 - 需要拟合的量放在 `fit(context)` 并写入 `context.state_dir`；`models/` 以只读 `context.models_dir` 挂载。不要加载 `.pkl` / `.pt`。
 - 沙箱无网络，不要抓网页，也不要去拉聚宽/东财实时榜。
 - 每一行必须 `available_at <= context.inference_at`。
@@ -28,7 +28,7 @@
 - Broker 负责 T+1、费用、涨跌停与成交；策略只发订单草图。涨停开盘可以拒单，这是真实结果。
 - 不要粘贴受版权保护的完整源码（含聚宽策略）。只引用 URL 并转述机制。
 
-开发窗口按年切成常规 Fold：每折的验证区间就是那一年，没有 Test 阶段，相邻两折之间跑一次元学习；本折输入窗是验证区间之前约 24 个月，可用的完整 Validation 次数远多于机制数量（上限以本轮事实为准）。先在输入窗上把多个 cohort 的事件研究做完，再预先登记最强的三条机制，用 `batch_validate` 并列跑完整 Validation，并按窗口内的子区间判稳健。
+开发窗口按年切成常规 Fold：每折的验证区间就是那一年，没有 Test 阶段，相邻两折之间跑一次元学习；本折输入窗是验证区间之前约 24 个月，可用的完整 Validation 次数远多于机制数量（上限以本轮事实为准）。先在输入窗上把多个 cohort 的事件研究做完，再预先登记最强的三条机制，用 `batch_validate` 并列跑完整 Validation；站住的 cohort 再进入后续轮次（门控变体、在 `fit` 里拟合的 cohort 内排序——logistic 或小型树模型——对比等权、持有期与仓位规则），一折跑多轮，并始终按窗口内的子区间判稳健。
 
 ## 和 08:30 包的差别
 

@@ -12,7 +12,9 @@ stores its coefficients as one NumPy array. While flat, it buys an
 equal-budget basket of the highest-scoring symbols at the next same-day daily
 price timestamp; an after-close invocation emits no order because the strategy
 does not receive a future trading calendar. It is deliberately small: replace
-the features and add an explicit exit lifecycle.
+the features and add an explicit exit lifecycle. A larger strategy splits into
+sibling modules under ``output/`` (see README.md); this one-file baseline is
+the smallest such package.
 """
 
 from __future__ import annotations

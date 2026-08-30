@@ -149,7 +149,7 @@ def render() -> str:
         "",
         _block(PRINCIPLES_SECTION),
         "",
-        "### 1.10 操作守则",
+        "### 1.10 研究方向与守则",
         "",
         _block(FOLD_GUARDRAILS_SECTION),
         "",

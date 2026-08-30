@@ -1,12 +1,12 @@
 # TuShare 因子探索参考包
 
 本目录是只读 refs：只提供研究假说、公式和执行检查，不是可直接提交的策略。
-Fold Agent 必须把正式单文件策略写到 `output/main.py`；不要复制本目录生成替代入口，也不要在策略中写死 `/mnt/agent/workspace`。
-正式回放只能使用沙箱已有的 NumPy、pandas 和当前 `context`；沙箱不能联网、不能安装包，也没有可调用的 TuShare `factor_value`、`stk_factor` 或 `stk_factor_pro`。
+Fold Agent 必须把正式策略写在 `output/` 包内（入口 `output/main.py`，辅助模块用绝对导入）；不要复制本目录生成替代入口，也不要在策略中写死 `/mnt/agent/workspace`。
+正式回放只能使用运行合同允许的库（NumPy、pandas、scipy、sklearn、LightGBM、XGBoost、statsmodels、CPU torch）和当前 `context`；沙箱不能联网、不能安装包，也没有可调用的 TuShare `factor_value`、`stk_factor` 或 `stk_factor_pro`。
 
 目标不是复刻 202 个供应商因子，而是从当前 PIT parquet 重算一个小集合，完成不同因子家族及其组合的完整 Validation。
 默认 08:30 推断只能使用 T-1 及更早的日频行，所有输入仍须满足 `available_at <= inference_at`。
-开发窗口按年切成常规 Fold：每折的验证区间就是那一年，没有 Test 阶段，相邻两折之间跑一次元学习；本折输入窗是验证区间之前约 24 个月，可用的完整 Validation 次数远多于家族数量（上限以本轮事实为准）：候选先在输入窗上离线筛掉，幸存家族预先登记后用 `batch_validate` 并列跑完整 Validation，并按窗口内的子区间判稳健。
+开发窗口按年切成常规 Fold：每折的验证区间就是那一年，没有 Test 阶段，相邻两折之间跑一次元学习；本折输入窗是验证区间之前约 24 个月，可用的完整 Validation 次数远多于家族数量（上限以本轮事实为准）。一折要跑多轮 `batch_validate`：候选先在输入窗上离线筛掉，幸存家族预先登记后并列跑完整 Validation；一轮胜出后围绕胜者再登记下一轮——组合方式、在 `fit` 里拟合的因子权重（ridge / 树模型打分）、稳健性与节奏变体——直到预算或假设用尽，并始终按窗口内的子区间判稳健。
 
 按以下顺序使用：
 

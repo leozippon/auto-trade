@@ -13,8 +13,8 @@
 
 ## 硬合同
 
-- 正式策略只能写到 `output/main.py`，入口为 `generate_orders(context)`，返回严格 JSON 订单数组。
-- 正式 import 只允许：`__future__`、`collections`、`datetime`、`decimal`、`math`、`numpy`、`pandas`、`statistics`。即使镜像里有 sklearn / lightgbm / qlib / vnpy / joinquant，也不得 import。
+- 正式策略写在 `output/` 包内：入口固定为 `output/main.py` 的 `generate_orders(context)`，返回严格 JSON 订单数组；辅助模块可放在 `output/` 下并用绝对导入（如 `from lib.features import x`），每个 `.py` 都受同一套静态检查。
+- 正式 import 只允许：纯计算标准库（`__future__`、`collections`、`dataclasses`、`datetime`、`decimal`、`functools`、`itertools`、`math`、`statistics`、`typing`）、`numpy`、`pandas`、`scipy`、`sklearn`、`lightgbm`、`xgboost`、`statsmodels`、`torch`（仅 CPU）及其子模块，以及 `output/` 内自己的模块。qlib / vnpy / joinquant / joblib / pickle 仍不得 import；模型参数用 NumPy 数组或 booster 的 `save_model(context.state_dir + ...)` 持久化。
 - 拟合放在 `fit(context)`（回放开始前调用一次，按 `REFIT_PERIOD` 重训），系数用 `np.save` 写到 `context.state_dir`，`generate_orders` 只读它；`models/` 以只读 `context.models_dir` 挂载。不要加载 `.pkl` / `.pt`（pickle / torch 加载被静态拒绝）。
 - 沙箱无网络，不要 `pip install`，不要抓 GitHub。
 - 每一行必须 `available_at <= context.inference_at`。默认 08:30 只用 T-1 及更早日线。
@@ -27,8 +27,8 @@
 
 用 T-1 日频构造少量 kbar / 滚动收益 / 滚动波动 / 量比特征，截面 z-score，丢掉 NaN，按分数取 top-k，并用 n_drop 类规则限制与当前持仓的换手。
 **默认候选是拟合出来的排序器**：在推断时可见的 PIT 窗口上，用 numpy 当场解 ridge 闭式解，或对二分类标签做少量梯度步的 logistic。等权与符号加权是它必须比过的对照基线，不是本折的目标产物；可选再加一层深度受限的 if/then 规则。
-LightGBM 不可 import；sklearn 虽在镜像中也属禁止模块。系数在 `fit(context)` 内用 numpy 拟合并持久化到 `context.state_dir`，`generate_orders` 只读取它；`fit` 有独立的分钟级预算（`budgets.strategy_fit_timeout_seconds`），`generate_orders` 仍受单日 30 秒上限约束。
-开发窗口按年切成常规 Fold：每折的验证区间就是那一年，没有 Test 阶段，相邻两折之间跑一次元学习；本折输入窗是验证区间之前约 24 个月；预先登记至少三条假设——对照基线、拟合排序器和一个结构性变体——用 `batch_validate` 并列跑完整 Validation，并按窗口内的子区间判稳健。需要按调度重拟合的量放在 `fit(context)`，契约以只读 `output/README.md` 为准。
+sklearn / LightGBM / XGBoost / CPU torch 现可 import：第一轮仍用 numpy 闭式解或少量梯度步的轻量排序器建立可比基线，后续轮次把 LightGBM/XGBoost 树模型排序器或小型 MLP 作为结构性变体与它同窗比较——它们必须在含成本收益与子窗一致性上胜过线性版本才留下。参数在 `fit(context)` 内拟合并持久化到 `context.state_dir`（数组或 booster 的 `save_model`），`generate_orders` 只读取它；`fit` 有独立的预算（`budgets.strategy_fit_timeout_seconds`），`generate_orders` 仍受单日推断上限（`budgets.strategy_inference_timeout_seconds`）约束。
+开发窗口按年切成常规 Fold：每折的验证区间就是那一年，没有 Test 阶段，相邻两折之间跑一次元学习；本折输入窗是验证区间之前约 24 个月。一折跑多轮 `batch_validate`：第一轮预先登记至少三条假设——对照基线、拟合排序器和一个结构性变体——并列跑完整 Validation；胜者进入下一轮（特征组、拟合窗/标签口径、树模型或小型网络、换手控制），直到预算或假设用尽，并按窗口内的子区间判稳健。需要按调度重拟合的量放在 `fit(context)`，契约以只读 `output/README.md` 为准。
 
 ## 运行教训
 

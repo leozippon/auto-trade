@@ -16,7 +16,7 @@ from autotrade.environment.artifacts import (
 from autotrade.environment.replay.timeview import ASOF_DOMAIN_NAMES
 from autotrade.environment.strategy_loader import (
     StrategyLoadError,
-    validate_strategy_source,
+    validate_strategy_package,
 )
 
 from .base import ToolError, ToolResult, ToolSpec
@@ -75,9 +75,8 @@ class ModificationCheckTool:
         if total_bytes > constraints.max_strategy_bytes:
             raise ToolError(f"formal output exceeds {constraints.max_strategy_bytes} bytes")
         try:
-            fit_schedule = validate_strategy_source(
-                main.read_text(encoding="utf-8"), filename="main.py"
-            )
+            # main.py and every sibling .py: one import/I-O rule set per file.
+            fit_schedule = validate_strategy_package(main)
         except StrategyLoadError as exc:
             raise ToolError(str(exc)) from exc
         _reject_flat_asof_reads(files, self.output_dir)

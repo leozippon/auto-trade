@@ -147,7 +147,10 @@ assert torch.ops.torch_cluster.cuda_version() > 0, 'torch_cluster built without 
 # Trusted host-side runtime baked in: the strategy worker, the loader and the
 # strategy context, loaded as `python -m autotrade.environment.strategy_worker`
 # in the strategy container. Standard-library plus the pinned data stack only;
-# the Broker stays on the host, so the worker never needs broker_core.
+# the Broker stays on the host, so the worker never needs broker_core. The
+# formal strategy allowlist (strategy_loader.ALLOWED_MODULES) names numpy,
+# pandas, scipy, scikit-learn, LightGBM, XGBoost, statsmodels and torch from
+# the pip layer above; the strategy container runs them CPU-only (no --gpus).
 WORKDIR /opt/autotrade
 COPY src/autotrade/__init__.py /opt/autotrade/autotrade/__init__.py
 COPY src/autotrade/environment/__init__.py /opt/autotrade/autotrade/environment/__init__.py
@@ -162,15 +165,14 @@ RUN chmod -R a+rX /opt/autotrade
 # Non-root agent user; Runner/root stays root for frozen execution and binds.
 RUN useradd --create-home --uid 61000 agent
 
-# Fixed mount points (populated by docker run -v / --mount). /strategy/main.py
-# must exist as a file for the read-only bind of the frozen strategy;
-# /opt/autotrade_runtime receives trusted host modules for the Agent session.
+# Fixed mount points (populated by docker run -v / --mount). /strategy receives
+# the read-only bind of the frozen strategy package (the directory holding
+# main.py and its sibling modules); /opt/autotrade_runtime receives trusted
+# host modules for the Agent session.
 RUN mkdir -p /mnt/snapshots/train /mnt/snapshots/valid /mnt/snapshot \
         /mnt/artifacts /mnt/agent/workspace \
         /mnt/runtime /opt/autotrade_runtime /strategy /strategy-data \
-    && chown root:root /mnt \
-    && touch /strategy/main.py \
-    && chmod 0444 /strategy/main.py
+    && chown root:root /mnt
 
 # Image default user stays root (the build never switches away); the executor
 # selects the non-root agent user per-process at docker run time.

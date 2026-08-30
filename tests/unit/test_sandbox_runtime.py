@@ -855,7 +855,9 @@ def test_docker_command_has_fail_closed_boundary(tmp_path: Path):
     (tmp_path / ".env").write_text("SECRET=do-not-mount\n", encoding="utf-8")
     (tmp_path / "data").mkdir()
     (tmp_path / "data" / "private.csv").write_text("private\n", encoding="utf-8")
-    strategy = _strategy(tmp_path)
+    package = tmp_path / "output"
+    package.mkdir()
+    strategy = _strategy(package)
     with patch.object(DockerStrategyExecutor, "_start"):
         executor = DockerStrategyExecutor(strategy)
     command = executor.docker_command()
@@ -873,22 +875,23 @@ def test_docker_command_has_fail_closed_boundary(tmp_path: Path):
     assert "--cpus" in command
     assert "--memory" in command
     assert "--pids-limit" in command
-    assert command[command.index("--cpus") + 1] == "8"
-    assert command[command.index("--memory") + 1] == "16g"
-    assert command[command.index("--pids-limit") + 1] == "64"
+    assert command[command.index("--cpus") + 1] == "16"
+    assert command[command.index("--memory") + 1] == "32g"
+    assert command[command.index("--pids-limit") + 1] == "256"
     env_pairs = [
         command[index + 1]
         for index, value in enumerate(command)
         if value == "--env"
     ]
     assert env_pairs == [
-        "MKL_NUM_THREADS=8",
-        "NUMEXPR_NUM_THREADS=8",
-        "OMP_NUM_THREADS=8",
-        "OPENBLAS_NUM_THREADS=8",
+        "MKL_NUM_THREADS=16",
+        "NUMEXPR_NUM_THREADS=16",
+        "OMP_NUM_THREADS=16",
+        "OPENBLAS_NUM_THREADS=16",
     ]
+    # Exactly the strategy package directory is bound, never its parent.
     mount = command[command.index("--mount") + 1]
-    assert mount == f"type=bind,src={strategy},dst=/strategy/main.py,readonly"
+    assert mount == f"type=bind,src={package},dst=/strategy,readonly"
     assert f"src={tmp_path}," not in mount
     assert str(tmp_path / ".env") not in command
     assert str(tmp_path / "data") not in command
@@ -896,7 +899,7 @@ def test_docker_command_has_fail_closed_boundary(tmp_path: Path):
     executor.close()
 
 
-@pytest.mark.parametrize(("cpus", "expected"), [(0.25, "1"), (1.5, "2"), (32.0, "8")])
+@pytest.mark.parametrize(("cpus", "expected"), [(0.25, "1"), (1.5, "2"), (32.0, "16")])
 def test_strategy_thread_limit_tracks_fractional_cpus_and_stays_bounded(
     tmp_path: Path,
     cpus: float,
@@ -929,15 +932,22 @@ def test_docker_missing_fails_without_trusted_fallback(tmp_path: Path):
         DockerStrategyExecutor(strategy)
 
 
-def test_sandbox_strategy_contract_rejects_sibling_import(tmp_path: Path):
+def test_sandbox_strategy_contract_checks_sibling_modules_before_start(tmp_path: Path):
+    """A sibling module is part of the package: it is importable, and it is
+    held to the same import rules as main.py before any container starts."""
+
     (tmp_path / "helper.py").write_text("VALUE = 1\n", encoding="utf-8")
     strategy = _strategy(
         tmp_path,
         "import helper\ndef generate_orders(context):\n    return []\n",
     )
+    with patch.object(DockerStrategyExecutor, "_start"):
+        executor = DockerStrategyExecutor(strategy)
+    executor.close()
+    (tmp_path / "helper.py").write_text("import subprocess\nVALUE = 1\n", encoding="utf-8")
     with (
         patch.object(DockerStrategyExecutor, "_start"),
-        pytest.raises(StrategyLoadError, match="unsupported module: helper"),
+        pytest.raises(StrategyLoadError, match="helper.py: strategy imports unsupported module: subprocess"),
     ):
         DockerStrategyExecutor(strategy)
 

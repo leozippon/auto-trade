@@ -20,6 +20,7 @@ import pandas as pd
 from autotrade.agent.compact import ContextCompactionConfig, safe_error_summary
 from autotrade.agent.experiment_facts import build_experiment_facts
 from autotrade.environment.artifacts import (
+    READONLY_FILES,
     ArtifactSnapshotUnstable,
     FilesystemArtifactStore,
     ModificationConstraints,
@@ -65,7 +66,7 @@ from autotrade.environment.sandbox_images import (
     write_sandbox_environment_example,
 )
 from autotrade.environment.step_tree import StepTree
-from autotrade.environment.strategy_loader import validate_strategy_source
+from autotrade.environment.strategy_loader import validate_strategy_package
 from autotrade.environment.time_budget import (
     InferenceTimeBudget,
     SessionTimeBudgetAware,
@@ -81,8 +82,9 @@ from autotrade.environment.tools.base import (
 )
 from autotrade.environment.tools.files import EditFileTool, WriteFileTool
 from autotrade.environment.tools.finish_fold import (
+    FINISH_FOLD_MIN_BATCH_ROUNDS,
     FinishFoldTool,
-    executable_source_structure,
+    executable_output_structure,
 )
 from autotrade.environment.tools.hitl import AskUserTool
 from autotrade.environment.tools.memory_feedback import MemoryFeedbackTool
@@ -208,9 +210,7 @@ class LocalDailyEvaluationBackend:
             raise FileNotFoundError(
                 f"strategy revision has no main.py: {strategy_path}"
             )
-        validate_strategy_source(
-            strategy_path.read_text(encoding="utf-8"), filename="main.py"
-        )
+        validate_strategy_package(strategy_path)
         started_at = utc_now_iso()
         timer = PhaseTimer()
         with timer.phase("replay_frames"):
@@ -290,10 +290,7 @@ class DeterministicBaselineDeveloper:
         self.broker_profile = broker_profile
         if not self.baseline_strategy.is_file():
             raise ValueError("baseline strategy must be a file")
-        validate_strategy_source(
-            self.baseline_strategy.read_text(encoding="utf-8"),
-            filename=self.baseline_strategy.name,
-        )
+        validate_strategy_package(self.baseline_strategy)
         self.baseline_root = self.artifact_store.root / "baseline_source"
         self.baseline_root.mkdir(parents=True, exist_ok=True)
         shutil.copy2(self.baseline_strategy, self.baseline_root / "main.py")
@@ -1326,8 +1323,9 @@ class BatchValidateTool(SessionTimeBudgetAware):
         f"{BATCH_VALIDATE_MIN_CANDIDATES}-{BATCH_VALIDATE_MAX_CANDIDATES} "
         "PRE-REGISTERED candidates in one call. Each candidate is {name, "
         "hypothesis, path}: path is a workspace directory laid out like "
-        "output/ (main.py plus its siblings, models/ is shared with the "
-        "working copy), and hypothesis is the falsifiable statement you "
+        "output/ (main.py plus its sibling modules; the read-only template "
+        "files such as README.md are supplied for you; models/ is shared with "
+        "the working copy), and hypothesis is the falsifiable statement you "
         "register BEFORE any result exists. Each candidate becomes its own "
         "immutable revision, full Validation and Step node under the CURRENT "
         "node as shared parent, and each consumes one backtest and one Step of "
@@ -1415,11 +1413,11 @@ class BatchValidateTool(SessionTimeBudgetAware):
         self.modification_check_factory = modification_check_factory
         self._parent_structure: str | None = None
         if parent_main_py is not None:
+            # The parent package is the directory holding its main.py; the
+            # comparison covers every module, exactly as finish_fold's does.
             path = Path(parent_main_py)
             try:
-                self._parent_structure = executable_source_structure(
-                    path.read_text(encoding="utf-8")
-                )
+                self._parent_structure = executable_output_structure(path.parent)
             except (OSError, SyntaxError) as exc:
                 raise ValueError(
                     f"parent strategy structure is invalid: {exc}"
@@ -1436,6 +1434,7 @@ class BatchValidateTool(SessionTimeBudgetAware):
 
     def _invoke_exempt(self, arguments: Mapping[str, object]) -> ToolResult:
         candidates = self._parse(arguments)
+        self._supply_readonly_files(candidates)
         # Everything that can refuse the batch runs before a single slot is
         # spent, so a rejected batch costs nothing and the Agent can fix the
         # offending candidate and call again.
@@ -1571,6 +1570,25 @@ class BatchValidateTool(SessionTimeBudgetAware):
             parsed.append(_BatchCandidate(name, hypothesis, path, directory))
         return parsed
 
+    def _supply_readonly_files(self, candidates: Sequence[_BatchCandidate]) -> None:
+        """Give each candidate the read-only template files it did not write.
+
+        ``README.md`` is part of every formal artifact but carries no strategy
+        content and the Agent may not edit it, so a candidate laid out from
+        its strategy modules alone would be refused for "modifying" a file it
+        never touched. The working copy's own read-only files are copied in
+        where absent; a candidate that carries a different one is still
+        refused by ``modification_check``. Only the read-only template names
+        are touched — never a sibling module of the package.
+        """
+
+        for candidate in candidates:
+            for name in READONLY_FILES:
+                source = self.backtest.output_dir / name
+                target = candidate.directory / name
+                if source.is_file() and not target.exists():
+                    shutil.copyfile(source, target)
+
     def _precheck(self, candidates: Sequence[_BatchCandidate]) -> list[dict[str, object]]:
         """Static gate for every candidate, plus the two batch-only rules:
         no two candidates may be the same bytes, and none may be the parent
@@ -1603,14 +1621,11 @@ class BatchValidateTool(SessionTimeBudgetAware):
     def _reject_parent_structure(self, candidate: _BatchCandidate) -> None:
         if self._parent_structure is None:
             return
-        main_py = candidate.directory / "main.py"
         try:
-            structure = executable_source_structure(
-                main_py.read_text(encoding="utf-8")
-            )
+            structure = executable_output_structure(candidate.directory)
         except (OSError, SyntaxError) as exc:
             raise ToolError(
-                f"candidate {candidate.name} has an unreadable main.py: "
+                f"candidate {candidate.name} has an unreadable module: "
                 f"{_public_error_text(exc)}"
             ) from exc
         if structure == self._parent_structure:
@@ -1793,7 +1808,12 @@ class BatchValidateTool(SessionTimeBudgetAware):
                 run_id=self.backtest.ref_store.get_or_create("run", request.run_id),
                 result_name=result_name,
                 error=public_error,
-                metrics={"batch_id": batch_id, "candidate": candidate.name},
+                metadata={
+                    "batch_id": batch_id,
+                    "candidate": candidate.name,
+                    "hypothesis": candidate.hypothesis,
+                    "source_path": candidate.path,
+                },
             )
         self.backtest.append_manifest_summary(
             {
@@ -1829,6 +1849,25 @@ class BatchValidateTool(SessionTimeBudgetAware):
                 },
             )
         )
+
+
+def another_batch_round_fits(backtest: FoldBacktestTool) -> bool:
+    """Whether the session could still run one more ``batch_validate`` round.
+
+    ``finish_fold`` insists on a minimum number of rounds only while this is
+    true. It stops being true inside the deadline window — the finalize
+    reserve before the main deadline, and the wrap-up grace behind it, where
+    the Runner itself asks the session to finish — and once the Step or
+    backtest budget has fewer slots left than the smallest batch.
+    """
+
+    request = backtest.request
+    main_remaining = backtest.time_budget.remaining() - request.deadline_grace_seconds
+    if main_remaining <= request.finalize_before_deadline_seconds:
+        return False
+    if request.max_backtests - backtest.backtests < BATCH_VALIDATE_MIN_CANDIDATES:
+        return False
+    return request.max_steps - len(backtest.steps) >= BATCH_VALIDATE_MIN_CANDIDATES
 
 
 def _batch_text(
@@ -1926,10 +1965,7 @@ class LLMFoldDeveloper:
         self.workspace_reference = workspace_reference
         self.operating_memory = str(operating_memory)
         self.repo_root = Path(repo_root).resolve() if repo_root is not None else None
-        validate_strategy_source(
-            self.baseline_strategy.read_text(encoding="utf-8"),
-            filename=self.baseline_strategy.name,
-        )
+        validate_strategy_package(self.baseline_strategy)
 
     @property
     def decision_timeout_seconds(self) -> float:
@@ -2274,6 +2310,8 @@ class LLMFoldDeveloper:
                     parent_main_py=parent_main_py,
                     current_output=output_dir,
                     current_models=models_dir,
+                    min_batch_rounds=FINISH_FOLD_MIN_BATCH_ROUNDS,
+                    another_round_fits=lambda: another_batch_round_fits(backtest),
                 )
             )
             budgeted = SessionBudgetLLM(self.llm, budget=shared_budget, role="main")
@@ -2985,10 +3023,7 @@ class LLMMetaLearner:
             revision_id = ""
             if parent_id and allowed and _check_has_changes(check):
                 _assert_skills_absent_from_formal(output_dir, models_dir)
-                validate_strategy_source(
-                    (output_dir / "main.py").read_text(encoding="utf-8"),
-                    filename="main.py",
-                )
+                validate_strategy_package(output_dir / "main.py")
                 revision = self.artifact_store.create_revision(
                     output_dir, models_path=models_dir
                 )

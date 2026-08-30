@@ -539,7 +539,7 @@ class ModificationConstraints:
     max_diff_lines: int = 600
     max_code_diff_lines: int = 500
     max_strategy_files: int = 64
-    max_strategy_bytes: int = 1_000_000
+    max_strategy_bytes: int = 2_000_000
     max_model_artifact_files: int = 64
     max_model_artifact_bytes: int = 1024 * 1024 * 1024
     early_epoch_count: int = 2

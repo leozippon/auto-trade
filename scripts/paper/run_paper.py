@@ -74,7 +74,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sandbox-cpus", type=float, default=SandboxLimits().cpus)
     parser.add_argument("--sandbox-memory", default=SandboxLimits().memory)
     parser.add_argument("--sandbox-pids", type=int, default=64)
-    parser.add_argument("--decision-timeout-seconds", type=float, default=30.0)
+    parser.add_argument("--decision-timeout-seconds", type=float, default=SandboxLimits().timeout_seconds)
     parser.add_argument(
         "--nl-model",
         choices=("", *MODEL_CHOICES),

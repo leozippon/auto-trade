@@ -1,6 +1,6 @@
 # Fold rewrite playbook
 
-The goal is not to preserve a GitHub implementation. The goal is to turn three or more independent hypotheses into legal `output/main.py` revisions inside one fold and let this project's complete Validation falsify them.
+The goal is not to preserve a GitHub implementation. The goal is to turn three or more independent hypotheses into legal `output/` package revisions inside one fold, let this project's complete Validation falsify them in a first `batch_validate` round, and then keep refining the survivors in further pre-registered rounds for as long as the budget lasts.
 
 ## 1. Establish the local contract
 
@@ -43,7 +43,7 @@ Use this order, skipping an item only when its required domain is absent or its 
 3. **Volume-weighted reversal.** Daily-only, so it is always available; validate it standalone in the same fold instead of holding it back as a fallback.
 4. **EP plus abnormal turnover.** The slow monthly daily-only alternative; validate it standalone as well.
 
-Complete at least three genuinely different idea Validations inside the fold before tuning thresholds; the fold budget allows more. If only daily data is available, use ideas 3 and 4 and then an independent variant of one of them rather than stopping early. A hybrid of the two best completed candidates is allowed only after both standalone mechanisms have been measured.
+Complete at least three genuinely different idea Validations in the first `batch_validate` round before tuning thresholds; the fold budget allows several more rounds, so plan them. Later rounds take the survivors further: a ranking fitted in `fit` over the same PIT features (logistic, or a LightGBM/XGBoost tree model where the feature set is rich enough) against the hand-signed score, size/industry-neutralized variants, holding-period and sizing rules. If only daily data is available, use ideas 3 and 4 and then an independent variant of one of them rather than stopping early. A hybrid of the two best completed candidates is allowed only after both standalone mechanisms have been measured.
 
 For each revision, change one hypothesis family, state its failure condition before Validation, and compare exposure, turnover, rejected orders, costs, concentration, drawdown, and return against the host's parent control — the inherited parent replayed unchanged on this Fold's window before the session started, so do not spend a Validation re-running it yourself. Report those figures separately for the two halves and the four sub-windows of the Validation year: an edge confined to one sub-window, or with halves of opposite sign, is a failure even when the full-year total looks good. Roll back a failed node rather than carrying dead branches into the official file.
 
@@ -103,7 +103,7 @@ Do not use `order_target_value`, `run_daily`, `get_fundamentals`, `attribute_his
 Before `finish_fold`, verify that the chosen node:
 
 - differs in executable logic from the parent, or keeps the parent only after at least two distinct-hypothesis Validations completed and were falsified;
-- contains a self-contained `output/main.py` and no imported helper source;
+- is a self-contained `output/` package: every import resolves inside it or to a library the runtime contract allows, and nothing is imported from `refs`;
 - uses only visible rows and T-1 daily data at `08:30`;
 - returns strict JSON and uses deterministic positive integer quantities;
 - has passed strategy validation, modification checks, and a complete Validation;

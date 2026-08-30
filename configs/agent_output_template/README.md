@@ -1,6 +1,6 @@
 # Strategy output contract
 
-This directory is the formal strategy artifact. `main.py` is the only runtime entrypoint and must define exactly one synchronous function:
+This directory is the formal strategy artifact: a Python package whose entry module `main.py` must define exactly one synchronous function:
 
 ```python
 def generate_orders(context):
@@ -17,11 +17,11 @@ def fit(context):
     ...  # train on the visible PIT history and np.save(...) the result under context.state_dir
 ```
 
-The Environment calls `fit` once before the first decision of every replay and again at the first decision that falls in a new `REFIT_PERIOD`, always with the same context object that day's `generate_orders` receives, so `fit` can never see a row the decision could not. `fit` may write files under `context.state_dir`; `generate_orders` can only read them. That directory is empty at the start of every replay (Validation, frozen Test and Held-out all re-fit from PIT data), is never part of a revision or frozen artifact, and is discarded with the replay. One `fit` invocation has its own wall-clock budget (`budgets.strategy_fit_timeout_seconds`, default 30 minutes); a timeout or an exception in `fit` fails the whole backtest.
+The Environment calls `fit` once before the first decision of every replay and again at the first decision that falls in a new `REFIT_PERIOD`, always with the same context object that day's `generate_orders` receives, so `fit` can never see a row the decision could not. `fit` may write files under `context.state_dir`; `generate_orders` can only read them. That directory is empty at the start of every replay (Validation, frozen Test and Held-out all re-fit from PIT data), is never part of a revision or frozen artifact, and is discarded with the replay. One `fit` invocation has its own wall-clock budget (`budgets.strategy_fit_timeout_seconds`, default 60 minutes) and every `generate_orders` call has a per-decision one (`budgets.strategy_inference_timeout_seconds`, default 180 seconds); a timeout or an exception in either fails the whole backtest.
 
 The strategy returns orders; it never receives or calls the Broker. The Environment validates the complete return value, queues accepted orders, and applies market timing, cash, positions, T+1, trading constraints, costs, and account updates.
 
-The official working copy is `/mnt/agent/workspace/output` (search root `output`); there is no sibling `/mnt/agent/output`. The loader only loads `main.py`; user-module and helper imports are unsupported. Do not write caches, logs, data dumps, model weights, notebooks, hidden files, or secrets here.
+The official working copy is `/mnt/agent/workspace/output` (search root `output`); there is no sibling `/mnt/agent/output`. `main.py` may import sibling modules and packages that live in this directory with absolute imports (`from lib.features import momentum` for `output/lib/features.py`); relative imports are rejected. Every `.py` file here is part of the strategy, is held to the same import and file-I/O rules as `main.py`, and counts toward the artifact fingerprint and the file and byte limits (`max_strategy_files`, `max_strategy_bytes`). A single-file strategy is simply a package with one module. Do not write caches, logs, data dumps, model weights, notebooks, hidden files, or secrets here.
 
 Static assets to inherit across Folds (hand-curated tables, priors, reference parameters) belong in `/mnt/agent/workspace/models` (search root `models`), not in `output/`; the running strategy sees that directory read-only as `context.models_dir`. It may contain subdirectories and files such as `.npy`, `.npz`, `.parquet`, `.json` or `.txt`; at runtime only `np.load` (`.npy`/`.npz`) and `pd.read_parquet` can read them, so pickle or torch formats are not loadable by a strategy. Anything fitted at replay time belongs in `context.state_dir`, never in `models/`. Temporary training files stay elsewhere in `/mnt/agent/workspace/` (never under `output/` or `models/`).
 
@@ -65,7 +65,7 @@ Each invocation receives an immutable market-level context:
 
 Every bar has a timezone-aware `available_at` no later than `context.inference_at`. The host also rejects any explicit future `available_at` nested in an NL request or response.
 
-The strategy receives no Broker, Shell, experiment controls or previous results. The runtime mounts `main.py`, the read-only snapshot/as-of directories, the read-only `models/` directory and the state directory (read-write only for `fit`), so executable strategy logic must be self-contained in `main.py`.
+The strategy receives no Broker, Shell, experiment controls or previous results. The runtime mounts this `output/` package read-only, the read-only snapshot/as-of directories, the read-only `models/` directory and the state directory (read-write only for `fit`); nothing else of the workspace is visible, so executable strategy logic must live in this package.
 
 ## Reading PIT data
 
@@ -84,7 +84,7 @@ The two path strings have **different layouts**, and mixing them up is the singl
 
 Run `smoke_backtest` before `daily_backtest`: it replays the current `output/` over the first few trading days on the real path — real as-of layout, real `AccountSnapshot`, same executor and per-decision timeout — and returns the exact exception text plus the as-of domain directory names. A hand-written shell script that assigns `context.asof_dir = "/mnt/snapshot"` or fakes an account object proves nothing about the replay.
 
-The static contract accepts `pandas.read_parquet` and `numpy.load` only when the first positional argument is a path expression directly rooted at `context.snapshot_dir`, `context.asof_dir`, `context.state_dir` or `context.models_dir` (`context.<dir> + "/<literal>"`), and `numpy.save`/`savez`/`savez_compressed` and `DataFrame.to_parquet` only when it is rooted at `context.state_dir`. At runtime the state directory is read-only outside `fit`, so a write from `generate_orders` fails the backtest. For example:
+The static contract accepts `pandas.read_parquet`, `numpy.load` and a booster's `load_model` only when the first positional argument is a path expression directly rooted at `context.snapshot_dir`, `context.asof_dir`, `context.state_dir` or `context.models_dir` (`context.<dir> + "/<literal>"`, under whichever parameter name the function receives the context), and `numpy.save`/`savez`/`savez_compressed`, `DataFrame.to_parquet` and a booster's `save_model` only when it is rooted at `context.state_dir`. At runtime the state directory is read-only outside `fit`, so a write from `generate_orders` fails the backtest. For example:
 
 ```python
 import pandas as pd
@@ -171,13 +171,14 @@ Treat text as fallible supporting evidence. Publish time, ingest time, retrieval
 
 ## Runtime restrictions
 
-The loader requires one synchronous single-argument `generate_orders`, accepts at most one synchronous single-argument `fit`, and requires `REFIT_PERIOD`, when present, to be a single module-level assignment of a period literal or `None`. Supported imports are limited to:
+The loader requires `main.py` to define one synchronous single-argument `generate_orders`, accepts at most one synchronous single-argument `fit`, and requires `REFIT_PERIOD`, when present, to be a single module-level assignment of a period literal or `None`. Supported imports, in every module of the package, are the package's own modules plus:
 
 ```text
-__future__, collections, datetime, decimal, math, statistics, numpy, pandas
+__future__, collections, dataclasses, datetime, decimal, functools, itertools, math, statistics, typing,
+numpy, pandas, scipy, sklearn, lightgbm, xgboost, statsmodels, torch
 ```
 
-User-module imports, relative imports, dynamic import/execution, arbitrary file access, process calls, and general external I/O are rejected. Common NumPy and pandas load/save methods are blocked; the only supported strategy file I/O is the context-rooted form described above.
+Submodules of these libraries (`scipy.stats`, `sklearn.linear_model`, `torch.nn`) are covered. The strategy container has no GPU, so torch runs on CPU with its thread count tied to the container's CPU quota. Relative imports, dynamic import/execution, arbitrary file access, process calls, and general external I/O are rejected. Common NumPy and pandas load/save methods and pickle-based persistence (`pickle`, `joblib`, `torch.save`, `read_pickle`/`to_pickle`) are blocked; the only supported strategy file I/O is the context-rooted form described above, so fitted parameters are persisted as NumPy arrays or as a LightGBM/XGBoost booster file written with `save_model(context.state_dir + "/model.txt")`.
 
 The default executor uses network-disabled, read-only Docker containers with bounded CPU, memory, process count, inference time, fit time, protocol output, and temporary storage; a strategy with `fit` gets a second identical container whose only difference is the writable state mount. If the container boundary cannot be established, execution fails instead of changing modes.
 
@@ -185,9 +186,140 @@ The default executor uses network-disabled, read-only Docker containers with bou
 
 The shipped `main.py` is a deliberately small working baseline. `fit` reads a bounded window of the PIT `daily` domain, builds cross-sectionally standardized 5-day and 20-day adjusted returns, fits a ridge regression against the realized 5-day forward return, and saves the three coefficients as `ridge_coef.npy` under `context.state_dir` (all zeros when fewer than 200 samples are visible, which makes the ranking flat and alphabetical). `generate_orders`, while flat, loads those coefficients, scores the latest visible cross-section, and submits strict JSON buy orders for up to ten top-ranked symbols with an equal-budget basket and a cash buffer at the next same-day daily price timestamp: `09:30` before the open or `15:00` before the close. An after-close invocation emits no order because the strategy does not receive a future trading calendar. Replace the features with a mechanism-backed PIT signal and add an explicit exit/rebalance lifecycle before treating it as a research strategy.
 
+## A fitted-model package example
+
+The same contract with a library model and a helper module. `fit` trains a scikit-learn classifier on the visible PIT window and persists its parameters as arrays; `generate_orders` scores the latest cross-section with NumPy from that state. Blocks are labelled with their path under `output/`.
+
+```python
+# output/lib/ranker.py
+"""Feature construction and a scikit-learn ranker persisted as NumPy arrays."""
+
+from datetime import timedelta
+
+import numpy as np
+import pandas as pd
+from sklearn.linear_model import LogisticRegression
+
+FEATURES = ["ret_5", "ret_20", "vol_20"]
+
+
+def daily_since(context, lookback_days):
+    """Visible daily rows from the PIT view, bounded to a calendar lookback."""
+
+    start = (context.inference_at - timedelta(days=lookback_days)).strftime("%Y%m%d")
+    frame = pd.read_parquet(
+        context.asof_dir + "/daily",
+        columns=["ts_code", "trade_date", "close", "adj_factor"],
+        filters=[("trade_date", ">=", start)],
+    ).dropna()
+    frame = frame[frame["close"] > 0].sort_values(["ts_code", "trade_date"])
+    frame["adj_close"] = frame["close"] * frame["adj_factor"]
+    return frame.reset_index(drop=True)
+
+
+def features(frame):
+    """Per row: cross-sectionally standardized momentum and volatility."""
+
+    grouped = frame.groupby("ts_code")["adj_close"]
+    out = frame[["ts_code", "trade_date"]].copy()
+    out["ret_5"] = grouped.pct_change(5).to_numpy()
+    out["ret_20"] = grouped.pct_change(20).to_numpy()
+    daily_return = grouped.pct_change()
+    out["vol_20"] = daily_return.groupby(frame["ts_code"]).transform(
+        lambda series: series.rolling(20).std()
+    ).to_numpy()
+    out = out.dropna()
+    for column in FEATURES:
+        by_day = out.groupby("trade_date")[column]
+        spread = by_day.transform("std").replace(0.0, np.nan)
+        out[column] = ((out[column] - by_day.transform("mean")) / spread).fillna(0.0)
+    return out
+
+
+def fit_classifier(frame, min_samples):
+    """Logistic model of beating the cross-sectional median 5-day forward return."""
+
+    sample = features(frame)
+    forward = frame.groupby("ts_code")["adj_close"].shift(-5) / frame["adj_close"] - 1.0
+    sample = sample.join(forward.rename("forward"), how="inner").dropna()
+    median = sample.groupby("trade_date")["forward"].transform("median")
+    sample["label"] = (sample["forward"] > median).astype(int)
+    if len(sample) < min_samples or sample["label"].nunique() < 2:
+        return np.zeros(len(FEATURES)), 0.0
+    model = LogisticRegression(C=0.5).fit(sample[FEATURES].to_numpy(), sample["label"].to_numpy())
+    return model.coef_[0], float(model.intercept_[0])
+
+
+def score(cross_section, coef, intercept):
+    logits = cross_section[FEATURES].to_numpy() @ coef + intercept
+    return 1.0 / (1.0 + np.exp(-logits))
+```
+
+```python
+# output/main.py
+"""Entry module: fit persists array parameters, generate_orders scores with NumPy."""
+
+import numpy as np
+
+from lib.ranker import daily_since, features, fit_classifier, score
+
+REFIT_PERIOD = "quarter"
+FIT_LOOKBACK_DAYS = 400
+FEATURE_LOOKBACK_DAYS = 45
+MIN_FIT_SAMPLES = 100
+TOP_N = 10
+CASH_FRACTION = 0.95
+
+
+def fit(context):
+    coef, intercept = fit_classifier(daily_since(context, FIT_LOOKBACK_DAYS), MIN_FIT_SAMPLES)
+    np.savez(context.state_dir + "/ranker.npz", coef=coef, intercept=np.array([intercept]))
+
+
+def generate_orders(context):
+    if context.account.positions:
+        return []
+    execution_at = context.inference_at.replace(hour=9, minute=30, second=0, microsecond=0)
+    if context.inference_at > execution_at:
+        return []
+    params = np.load(context.state_dir + "/ranker.npz")
+    frame = daily_since(context, FEATURE_LOOKBACK_DAYS)
+    if frame.empty:
+        return []
+    latest = frame["trade_date"].max()
+    cross_section = features(frame)
+    cross_section = cross_section[cross_section["trade_date"] == latest].copy()
+    if cross_section.empty:
+        return []
+    cross_section["score"] = score(cross_section, params["coef"], float(params["intercept"][0]))
+    ranked = cross_section.sort_values(["score", "ts_code"], ascending=[False, True])
+    prices = frame[frame["trade_date"] == latest].set_index("ts_code")["close"]
+    symbols = ranked["ts_code"].tolist()[:TOP_N]
+    remaining = float(context.account.cash) * CASH_FRACTION
+    orders = []
+    for index, symbol in enumerate(symbols):
+        price = float(prices[symbol])
+        quantity = int(remaining / (len(symbols) - index) / price // 100 * 100)
+        if quantity <= 0:
+            continue
+        orders.append(
+            {
+                "symbol": symbol,
+                "action": "buy",
+                "quantity": quantity,
+                "execute_at": execution_at.isoformat(),
+                "reason": "logistic_rank_equal_budget",
+            }
+        )
+        remaining -= quantity * price
+    return orders
+```
+
+A LightGBM or XGBoost booster follows the same shape with `booster.save_model(context.state_dir + "/model.txt")` in `fit` and `lgb.Booster(model_file=context.state_dir + "/model.txt")` (or `xgb.Booster().load_model(context.state_dir + "/model.json")`) in `generate_orders`.
+
 Before finishing a Fold, verify that:
 
-- `main.py` is self-contained and passes static validation.
+- The package under `output/` is complete (every import resolves inside it or to a supported library) and passes static validation.
 - If `fit` is defined, it writes everything `generate_orders` needs under `context.state_dir` and completes within `budgets.strategy_fit_timeout_seconds`.
 - Every field and unit used by the signal has been confirmed from the current data contract.
 - Orders pass strict JSON validation and respect the configured schedule.

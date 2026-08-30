@@ -63,7 +63,7 @@ from autotrade.environment.runtime import (
 )
 from autotrade.environment.sandbox import SandboxConfig
 from autotrade.environment.strategy import CN_TZ, StrategySchedule
-from autotrade.environment.strategy_loader import validate_strategy_source
+from autotrade.environment.strategy_loader import validate_strategy_package
 
 from .config import (
     SNAPSHOT_CACHE_FORMAT_VERSION,
@@ -549,7 +549,7 @@ class PITDailyEvaluationBackend:
         strategy_path = Path(request.revision.output_path) / "main.py"
         if not strategy_path.is_file():
             raise FileNotFoundError(f"strategy revision has no main.py: {strategy_path}")
-        validate_strategy_source(strategy_path.read_text(encoding="utf-8"), filename="main.py")
+        validate_strategy_package(strategy_path)
         snapshot_dir = Path(request.snapshot.decision_ref).resolve(strict=True)
         replay_dir = Path(request.snapshot.replay_ref).resolve(strict=True)
         decision_manifest, replay_manifest = self._validate_bundle(

@@ -101,7 +101,7 @@ from .skills import (
 # configured maximum, bounded by this absolute ceiling in minutes: twice the
 # default Fold budget (config.max_fold_minutes), enough headroom for one slow
 # session without letting it run unattended for days.
-_MAX_DEADLINE_OVERRIDE_MINUTES = 960
+_MAX_DEADLINE_OVERRIDE_MINUTES = 1440
 
 
 class DailyStrategyPipeline:

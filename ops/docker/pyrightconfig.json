@@ -10,7 +10,8 @@
     "**/.cache"
   ],
   "extraPaths": [
-    "/opt/autotrade"
+    "/opt/autotrade",
+    "/mnt/agent/workspace/output"
   ],
   "reportMissingImports": "warning"
 }

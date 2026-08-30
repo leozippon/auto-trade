@@ -3,18 +3,26 @@
 from __future__ import annotations
 
 import ast
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
-from autotrade.environment.step_tree import StepTree, node_in_session
+from autotrade.environment.step_tree import StepTree, node_in_session, session_batch_rounds
 
 from autotrade.environment.runtime import redact_host_paths
 
 from .base import ToolError, ToolResult, ToolSpec
 
+# Voluntary finishes are refused until this many ``batch_validate`` rounds
+# completed in the session. Reviewed sessions finished after exactly one round
+# at 14-21 % of every budget — hypothesis exhaustion, not budget pressure — so
+# the floor is the one place the environment insists on sustained exploration;
+# it is waived once another round can no longer fit (deadline window, Step or
+# backtest budget), where finishing is the only correct move.
+FINISH_FOLD_MIN_BATCH_ROUNDS = 2
+
 
 def executable_source_structure(source: str) -> str:
-    """Return the directly comparable executable structure of ``main.py``.
+    """Return the directly comparable executable structure of one module.
 
     Comments, module/function docstrings, and whitespace are ignored so a
     comment-only harvest has the parent's structure, while a logic or signal
@@ -24,6 +32,24 @@ def executable_source_structure(source: str) -> str:
     tree = ast.parse(source)
     _strip_docstrings(tree)
     return ast.dump(tree, annotate_fields=True, include_attributes=False)
+
+
+def executable_output_structure(root: Path) -> str:
+    """Structure of a whole strategy package: every ``.py`` below ``root``.
+
+    A helper module edited while ``main.py`` stays the same is a different
+    hypothesis, so the comparison covers the package, keyed by relative path.
+    """
+
+    parts = []
+    for path in sorted(root.rglob("*.py")):
+        relative = path.relative_to(root)
+        if any(part.startswith(".") or part == "__pycache__" for part in relative.parts):
+            continue
+        parts.append(
+            f"{relative.as_posix()}\0{executable_source_structure(path.read_text(encoding='utf-8'))}"
+        )
+    return "\n".join(parts)
 
 
 def _tree_bytes(root: Path | None) -> dict[str, bytes]:
@@ -71,19 +97,26 @@ class FinishFoldTool:
         parent_main_py: str | Path | None = None,
         current_output: str | Path | None = None,
         current_models: str | Path | None = None,
+        min_batch_rounds: int = 0,
+        another_round_fits: Callable[[], bool] | None = None,
     ) -> None:
         self.tree = tree
         self.fold_id = fold_id
         self.run_id = run_id
         self._current_output = Path(current_output) if current_output is not None else None
         self._current_models = Path(current_models) if current_models is not None else None
+        # The round floor applies only while the session could still run a
+        # round; the caller says whether time and budget allow one.
+        self.min_batch_rounds = min_batch_rounds
+        self._another_round_fits = another_round_fits or (lambda: True)
         self._parent_structure: str | None = None
         if parent_main_py is not None:
+            # The parent package is the directory that holds its main.py.
             path = Path(parent_main_py)
+            if not path.is_file():
+                raise ValueError(f"parent strategy structure is invalid: missing {path.name}")
             try:
-                self._parent_structure = executable_source_structure(
-                    path.read_text(encoding="utf-8")
-                )
+                self._parent_structure = executable_output_structure(path.parent)
             except (OSError, SyntaxError) as exc:
                 raise ValueError(f"parent strategy structure is invalid: {exc}") from exc
 
@@ -99,6 +132,7 @@ class FinishFoldTool:
             raise ToolError("finish_fold can select only a Step from the current Fold session")
         if not node.get("complete_validation") or not node.get("revision_id"):
             raise ToolError("finish_fold requires successful complete validation")
+        self._require_batch_rounds()
         nominated_structure = self._node_structure(node_id)
         if self._parent_structure is not None:
             self._require_different_hypothesis(node_id, nominated_structure)
@@ -116,6 +150,26 @@ class FinishFoldTool:
                 "write_locked": True,
             },
             finish=True,
+        )
+
+    def _require_batch_rounds(self) -> None:
+        required = self.min_batch_rounds
+        if required <= 0 or not self._another_round_fits():
+            return
+        completed = session_batch_rounds(
+            self.tree, fold_id=self.fold_id, run_id=self.run_id
+        )
+        if completed >= required:
+            return
+        raise ToolError(
+            f"finish_fold refused: {completed} of the {required} batch_validate "
+            "rounds required before a voluntary finish have completed in this "
+            "Fold session (a round is one batch_validate call whose candidates "
+            "all reached a terminal state; a round whose candidates were all "
+            "falsified counts). Pre-register another set of candidates and run "
+            "batch_validate; the requirement is waived once the deadline "
+            "window is reached or the Step/backtest budget cannot fit another "
+            "round."
         )
 
     def _require_different_hypothesis(self, node_id: str, nominated_structure: str) -> None:
@@ -149,16 +203,11 @@ class FinishFoldTool:
             ):
                 continue
             candidate_id = str(node["node_id"])
-            main_py = self.tree.node_output_dir(candidate_id) / "main.py"
-            if not main_py.is_file():
+            output_dir = self.tree.node_output_dir(candidate_id)
+            if not (output_dir / "main.py").is_file():
                 continue
             try:
-                found.append(
-                    (
-                        candidate_id,
-                        executable_source_structure(main_py.read_text(encoding="utf-8")),
-                    )
-                )
+                found.append((candidate_id, executable_output_structure(output_dir)))
             except (OSError, SyntaxError):
                 continue
         return found
@@ -183,17 +232,22 @@ class FinishFoldTool:
             )
 
     def _node_structure(self, node_id: str) -> str:
-        main_py = self.tree.node_output_dir(node_id) / "main.py"
-        if not main_py.is_file():
+        output_dir = self.tree.node_output_dir(node_id)
+        if not (output_dir / "main.py").is_file():
             raise ToolError(
                 "finish_fold cannot select a Step whose strategy snapshot is absent"
             )
         try:
-            return executable_source_structure(main_py.read_text(encoding="utf-8"))
+            return executable_output_structure(output_dir)
         except (OSError, SyntaxError) as exc:
             raise ToolError(
                 f"finish_fold cannot compare {node_id}: {redact_host_paths(str(exc))}"
             ) from exc
 
 
-__all__ = ["FinishFoldTool", "executable_source_structure"]
+__all__ = [
+    "FINISH_FOLD_MIN_BATCH_ROUNDS",
+    "FinishFoldTool",
+    "executable_output_structure",
+    "executable_source_structure",
+]

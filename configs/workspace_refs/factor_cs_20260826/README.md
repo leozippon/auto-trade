@@ -2,7 +2,7 @@
 
 本目录是只读 refs：只提供可证伪假说、家族公式和 PIT 检查，不是可提交策略，也不是预期收益。
 上一轮 `explore_tushare_factors` 已经跑过相近的因子菜单探索。本轮必须写可执行且与父本不同的家族，禁止克隆父策略或把多个家族揉成不透明总分。
-开发窗口按年切成常规 Fold：每折的验证区间就是那一年，没有 Test 阶段，相邻两折之间跑一次元学习；本折输入窗是验证区间之前约 24 个月，可用的完整 Validation 次数远多于假说数量（上限以本轮事实为准）。动手前预先登记至少三条互斥假设，用 `batch_validate` 并列验证，并按窗口内的子区间判稳健，不要只测一个家族就收工。
+开发窗口按年切成常规 Fold：每折的验证区间就是那一年，没有 Test 阶段，相邻两折之间跑一次元学习；本折输入窗是验证区间之前约 24 个月，可用的完整 Validation 次数远多于假说数量（上限以本轮事实为准）。动手前预先登记至少三条互斥假设，用 `batch_validate` 并列验证，并按窗口内的子区间判稳健；一轮胜出后围绕胜者再登记下一轮（`fit` 里拟合的因子权重或树模型打分对比等权、中性化版本、节奏与持仓数变体），一折跑多轮，不要只测一轮就收工。
 
 按以下顺序读：
 
@@ -15,8 +15,8 @@
 
 ## 硬合同
 
-- 正式策略只能写到 `output/main.py`，入口为 `generate_orders(context)`，返回严格 JSON 订单数组。
-- 正式 import 只允许：`__future__`、`collections`、`datetime`、`decimal`、`math`、`numpy`、`pandas`、`statistics`。即使镜像里有 sklearn / lightgbm / qlib / vnpy / joinquant，也不得 import。
+- 正式策略写在 `output/` 包内：入口固定为 `output/main.py` 的 `generate_orders(context)`，返回严格 JSON 订单数组；辅助模块可放在 `output/` 下并用绝对导入（如 `from lib.features import x`），每个 `.py` 都受同一套静态检查。
+- 正式 import 只允许：纯计算标准库（`__future__`、`collections`、`dataclasses`、`datetime`、`decimal`、`functools`、`itertools`、`math`、`statistics`、`typing`）、`numpy`、`pandas`、`scipy`、`sklearn`、`lightgbm`、`xgboost`、`statsmodels`、`torch`（仅 CPU）及其子模块，以及 `output/` 内自己的模块。qlib / vnpy / joinquant / joblib / pickle 仍不得 import；模型参数用 NumPy 数组或 booster 的 `save_model(context.state_dir + ...)` 持久化。
 - 需要拟合的量放在 `fit(context)` 并写入 `context.state_dir`；`models/` 以只读 `context.models_dir` 挂载。不要加载 `.pkl` / `.pt`。
 - 沙箱无网络，不要抓网页。
 - 每一行必须 `available_at <= context.inference_at`。

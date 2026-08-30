@@ -79,6 +79,10 @@ def _experiment(
                 "inference_time": "08:30",
                 "initial_cash": 100_000,
                 "epochs": 1,
+                # One Validation is the whole Fold budget here: these
+                # sessions script a single daily_backtest, and finish_fold
+                # waives its batch-round floor only when no round fits.
+                "max_backtests_per_fold": 1,
                 "fold_period": "quarter",
                 # Rolling design: validation 2025Q4, frozen Test 2026Q1. The
                 # default single-window design is exercised separately.

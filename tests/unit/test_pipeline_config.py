@@ -47,10 +47,10 @@ _CONSOLE_CREATE_PRESET: dict[str, object] = {
     "analysis_enabled": False,
     "development_last_period": "2025",
     # Per-Fold budgets for a one-year Validation with batch_validate available.
-    "max_backtests_per_fold": 20,
-    "max_fold_minutes": 480,
-    "max_llm_calls": 1200,
-    "max_steps_per_fold": 20,
+    "max_backtests_per_fold": 30,
+    "max_fold_minutes": 720,
+    "max_llm_calls": 1600,
+    "max_steps_per_fold": 30,
     # Meta between every two consecutive Folds.
     "meta_learning_fold_interval": 1,
     "meta_model": LOCAL_QWEN_MODEL,
@@ -226,10 +226,10 @@ class RollingExperimentConfigValidationTest(unittest.TestCase):
         self.assertEqual(config.epochs, 3)
         self.assertEqual(config.meta_learning_fold_interval, 1)
         self.assertEqual(config.fold_exploration_directive, "")
-        self.assertEqual(config.max_fold_minutes, 480)
+        self.assertEqual(config.max_fold_minutes, 720)
         self.assertEqual(
             (config.max_steps_per_fold, config.max_backtests_per_fold, config.max_llm_calls),
-            (20, 20, 1200),
+            (30, 30, 1600),
         )
         self.assertEqual(config.experiment_dir, Path("/tmp/experiments/exp"))
         self.assertEqual(

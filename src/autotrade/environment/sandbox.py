@@ -37,13 +37,17 @@ _IMAGE_TAG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,200}$")
 class SandboxLimits:
     """Per-container resources and per-inference protocol limits."""
 
-    cpus: float = 8.0
-    memory: str = "16g"
-    pids: int = 64
-    timeout_seconds: float = 30.0
-    # Wall clock for one ``fit(context)`` invocation; the pipeline knob
-    # ``strategy_fit_timeout_seconds`` sets it.
-    fit_timeout_seconds: float = 1800.0
+    cpus: float = 16.0
+    memory: str = "32g"
+    # A fork-bomb guard, not a budget: one worker with torch, LightGBM and
+    # XGBoost thread pools at the CPU-derived thread cap plus PyArrow's own
+    # pool needs well over the 64 the single-threaded NumPy era allowed.
+    pids: int = 256
+    # Wall clock for one ``generate_orders(context)`` call (published as
+    # ``strategy_inference_timeout_seconds``) and for one ``fit(context)``
+    # call; the pipeline knob ``strategy_fit_timeout_seconds`` sets the latter.
+    timeout_seconds: float = 180.0
+    fit_timeout_seconds: float = 3600.0
     max_output_chars: int = 1_000_000
     tmpfs_size: str = "64m"
 

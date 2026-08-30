@@ -10,6 +10,7 @@ and every replay starts from an empty state directory.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -331,7 +332,12 @@ def test_fit_timeout_fails_explicitly_and_aborts_the_worker():
 
 @pytest.mark.skipif(not docker_available(), reason="Docker is unavailable")
 def test_real_sandbox_fit_writes_state_that_generate_orders_can_only_read(tmp_path: Path):
-    strategy = tmp_path / "main.py"
+    # The package directory is what gets bound; pytest's tmp_path itself is
+    # 0700, so the package needs its own world-readable directory.
+    package = tmp_path / "output"
+    package.mkdir()
+    package.chmod(0o755)
+    strategy = package / "main.py"
     strategy.write_text(
         '''import numpy as np
 
@@ -482,6 +488,39 @@ def test_template_passes_modification_check_and_a_short_pit_smoke_replay(tmp_pat
     assert any(execution["status"] == "filled" for execution in record["executions"])
     result_dir = Path(result.result_ref).parent
     assert not (result_dir / "state").exists()
+
+
+def _readme_example_package(output: Path) -> list[str]:
+    """Materialize the README's ``# output/<path>`` python blocks as a package."""
+
+    text = (TEMPLATE / "README.md").read_text(encoding="utf-8")
+    blocks = re.findall(r"```python\n(# output/(\S+)\n.*?)```", text, re.DOTALL)
+    for source, relpath in blocks:
+        path = output / relpath
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(source, encoding="utf-8")
+    return [relpath for _source, relpath in blocks]
+
+
+def test_readme_package_example_passes_modification_check_and_a_short_pit_smoke_replay(tmp_path: Path):
+    """The README's scikit-learn example is a real two-module package: it clears the
+    same static gate and replays on the same PIT path as the shipped baseline."""
+
+    output = tmp_path / "revision" / "output"
+    assert sorted(_readme_example_package(output)) == ["lib/ranker.py", "main.py"]
+    models = tmp_path / "revision" / "models"
+    models.mkdir()
+    check = ModificationCheckTool(output, models_dir=models).invoke({})
+    assert check.value["fit"] == {"refit_period": "quarter"}
+    assert check.value["file_count"] == 2
+
+    days = ["20240328", "20240329", "20240401", "20240402"]
+    snapshot, replay = _pit_bundle(tmp_path, days)
+    result, record = _evaluate(tmp_path, output, snapshot, replay, days, max_days=3)
+    assert result.summary["replayed_trade_days"] == 3
+    assert result.summary["phase_seconds"]["fit"] > 0
+    assert result.summary["order_count"] >= 1
+    assert any(execution["status"] == "filled" for execution in record["executions"])
 
 
 def test_every_replay_starts_from_an_empty_state_directory(tmp_path: Path):

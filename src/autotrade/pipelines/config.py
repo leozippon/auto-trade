@@ -12,7 +12,7 @@ from typing import Literal, Protocol
 
 from autotrade.environment.artifacts import ModificationConstraints
 from autotrade.environment.broker import BrokerProfile
-from autotrade.environment.sandbox import SandboxConfig
+from autotrade.environment.sandbox import SandboxConfig, SandboxLimits
 from autotrade.environment.strategy import StrategySchedule
 
 from .skills import DEFAULT_OPERATING_MEMORY
@@ -254,19 +254,19 @@ class RollingExperimentConfig:
     # Per-Fold budgets sized for a one-year Validation region with
     # ``batch_validate`` available; the host's parent control before the
     # session is never charged against them.
-    max_steps_per_fold: int = 20
-    max_backtests_per_fold: int = 20
-    max_llm_calls: int = 1200
+    max_steps_per_fold: int = 30
+    max_backtests_per_fold: int = 30
+    max_llm_calls: int = 1600
     session_max_attempts: int = 3
-    max_fold_minutes: int = 480
+    max_fold_minutes: int = 720
     # Trailing wrap-up grace added to the Fold session budget and forwarded on
     # FoldSessionRequest.deadline_grace_seconds. Implementation default only.
     deadline_grace_minutes: int = DEFAULT_DEADLINE_GRACE_MINUTES
     finalize_before_deadline_seconds: int = 300
     per_call_timeout_seconds: int = 3600
-    # Wall clock for one ``fit(context)`` invocation of the formal strategy
-    # (SandboxLimits.fit_timeout_seconds); a slower fit fails the backtest.
-    strategy_fit_timeout_seconds: int = 1800
+    # Wall clock for one ``fit(context)`` invocation of the formal strategy;
+    # the executor default is the single source. A slower fit fails the backtest.
+    strategy_fit_timeout_seconds: int = int(SandboxLimits().fit_timeout_seconds)
     # Individual NL Sub Agent failures return audited error results by default
     # so Agent code can decide whether to ignore, retry, or fail closed.
     nl_failure_policy: str = "return_error_with_audit"

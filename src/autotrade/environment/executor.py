@@ -21,16 +21,18 @@ from typing import TYPE_CHECKING, Protocol, Self, runtime_checkable
 from .runtime import SandboxPaths, chmod_tree
 from .sandbox import DockerSandbox, SandboxConfig
 from .strategy import BarTable, FitSchedule, StrategyContext, StrategyFunction
-from .strategy_loader import load_strategy_module, validate_strategy_source
+from .strategy_loader import load_strategy_module, validate_strategy_package
 
 if TYPE_CHECKING:
     from .tools.base import CommandResult
 
 _HOST_TIMEOUT_BUFFER_SECONDS = 15.0
-_MAX_STRATEGY_THREADS = 8
+_MAX_STRATEGY_THREADS = 16
 _PROCESS_STOP_TIMEOUT_SECONDS = 2.0
-# Container-side paths of the read-only data roots and of the per-replay state
+# Container-side path of the read-only strategy package (the directory that
+# holds main.py), and of the read-only data roots and the per-replay state
 # directory, which is read-only for generate_orders and read-write for fit.
+CONTAINER_STRATEGY_DIR = "/strategy"
 CONTAINER_SNAPSHOT_DIR = "/strategy-data/snapshot"
 CONTAINER_ASOF_DIR = "/strategy-data/asof"
 CONTAINER_MODELS_DIR = "/strategy-data/models"
@@ -145,6 +147,8 @@ class TrustedStrategyExecutor:
 class DockerStrategyExecutor:
     """Reuse one locked-down Docker worker for every inference in an experiment.
 
+    The strategy package (the directory holding ``main.py``) is bind-mounted
+    read-only as a whole, so ``main.py`` can import its sibling modules.
     A strategy that declares ``fit`` gets a second, equally locked-down worker
     whose only difference is a read-write bind of the state directory; the
     inference worker binds the same directory read-only, so the kernel — not
@@ -165,10 +169,7 @@ class DockerStrategyExecutor:
         self.strategy_path = Path(strategy_path).resolve()
         if not self.strategy_path.is_file():
             raise StrategyExecutionError(f"strategy file does not exist: {self.strategy_path}")
-        self.fit_schedule = validate_strategy_source(
-            self.strategy_path.read_text(encoding="utf-8"),
-            filename=self.strategy_path.name,
-        )
+        self.fit_schedule = validate_strategy_package(self.strategy_path)
         self.config = config or SandboxConfig()
         self.snapshot_dir = _existing_dir(snapshot_dir, "snapshot_dir")
         self.asof_dir = _existing_dir(asof_dir, "asof_dir")
@@ -196,7 +197,9 @@ class DockerStrategyExecutor:
         """Render the complete container boundary for inspection and testing."""
 
         limits = self.config.limits
-        strategy_mount = f"type=bind,src={self.strategy_path},dst=/strategy/main.py,readonly"
+        strategy_mount = (
+            f"type=bind,src={self.strategy_path.parent},dst={CONTAINER_STRATEGY_DIR},readonly"
+        )
         command = [
             self.config.docker_executable,
             "run",
@@ -248,12 +251,12 @@ class DockerStrategyExecutor:
             )
         command.extend([
             "--workdir",
-            "/strategy",
+            CONTAINER_STRATEGY_DIR,
             self.config.image,
             "python",
             "-m",
             "autotrade.environment.strategy_worker",
-            "/strategy/main.py",
+            f"{CONTAINER_STRATEGY_DIR}/{self.strategy_path.name}",
         ])
         return command
 
@@ -1013,6 +1016,7 @@ __all__ = [
     "CONTAINER_MODELS_DIR",
     "CONTAINER_SNAPSHOT_DIR",
     "CONTAINER_STATE_DIR",
+    "CONTAINER_STRATEGY_DIR",
     "DockerExecutor",
     "DockerStrategyExecutor",
     "ExecResult",
