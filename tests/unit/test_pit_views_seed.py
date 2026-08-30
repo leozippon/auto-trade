@@ -3,6 +3,8 @@ from __future__ import annotations
 import errno
 import json
 import os
+import stat
+import uuid
 from pathlib import Path
 
 import pytest
@@ -10,6 +12,7 @@ import pytest
 import pandas as pd
 
 from autotrade.environment.data.snapshot import SnapshotConfig
+from autotrade.environment.runtime import chmod_tree
 from autotrade.environment.strategy import StrategySchedule
 from autotrade.pipelines import pit_backend
 from autotrade.pipelines.config import SNAPSHOT_CACHE_FORMAT_VERSION
@@ -41,29 +44,68 @@ def _record(raw_dir: Path, *, events: bool = True) -> dict[str, object]:
     )
 
 
+SEED_DECISION_KEY = "20240101T235959+0800"
+SEED_SLOT = "20240102_20240103_20240101T235959+0800"
+SEED_HELDOUT_SLOT = "20240201_20240202_20240101T235959+0800"
+
 SEED_STASH_LEAF = (
-    "asof_stash/decision/20240101T235959+0800/replay/"
-    "20240102_20240103_20240101T235959+0800/schedule/period=day/"
+    f"asof_stash/decision/{SEED_DECISION_KEY}/replay/"
+    f"{SEED_SLOT}/schedule/period=day/"
     "inference_time/hour=08/minute=30"
+)
+
+# The view layout a prebuild leaves behind: the decision snapshot, the unphased
+# replay source of each region, the phase views hardlinked from those sources,
+# and the tiny per-phase bundles.
+SEED_VIEWS = (
+    f"decision/{SEED_DECISION_KEY}",
+    f"replay/{SEED_SLOT}",
+    f"replay/{SEED_HELDOUT_SLOT}",
+    f"replay/meta/{SEED_SLOT}",
+    f"replay/valid/{SEED_SLOT}",
+    f"replay/heldout/{SEED_HELDOUT_SLOT}",
+    f"bundles/meta/{SEED_SLOT}",
+    f"bundles/valid/{SEED_SLOT}",
+    f"bundles/heldout/{SEED_HELDOUT_SLOT}",
 )
 
 
 def _write_seed(seed: Path, record: dict[str, object]) -> Path:
-    decision = seed / "decision" / "20240101T235959+0800"
-    replay = seed / "replay" / "20240102_20240103_20240101T235959+0800"
-    bundles = seed / "bundles" / "valid" / "20240102_20240103_20240101T235959+0800"
     stash = seed / SEED_STASH_LEAF
     partial = seed / "asof_stash" / "no_contract_yet"
-    for directory in (decision, replay, bundles, stash / "daily", partial):
+    for directory in (stash / "daily", partial):
         directory.mkdir(parents=True)
-    (decision / "daily.parquet").write_bytes(b"decision-bytes")
-    (replay / "daily.parquet").write_bytes(b"replay-bytes")
-    (bundles / "data_summary.json").write_text("{}", encoding="utf-8")
+    for name in SEED_VIEWS:
+        view = seed / name
+        view.mkdir(parents=True)
+        kind = name.split("/", 1)[0]
+        if kind == "bundles":
+            (view / "data_summary.json").write_text("{}", encoding="utf-8")
+        else:
+            (view / "manifest.json").write_text(
+                json.dumps({"kind": kind}), encoding="utf-8"
+            )
+            (view / "daily.parquet").write_bytes(f"{kind}-bytes".encode())
+        # The provider leaves its own slot lock beside every published view.
+        view.with_suffix(".lock").touch()
     (stash / "contract.json").write_text(json.dumps({"schema_version": 2}), encoding="utf-8")
     (stash / "daily" / "part_0001.parquet").write_bytes(b"asof-part")
     (partial / "scratch.bin").write_bytes(b"stash")
     (seed / "provider.json").write_text(json.dumps(record), encoding="utf-8")
-    return decision / "daily.parquet"
+    return seed / f"decision/{SEED_DECISION_KEY}" / "daily.parquet"
+
+
+def _freeze_seed(seed: Path) -> None:
+    """Leave the fake seed as the prebuild leaves a real one.
+
+    Every published view is read-only, the stash parts are read-only, and the
+    layout directories around them keep the mode ``mkdir`` gave them.
+    """
+
+    for name in SEED_VIEWS:
+        chmod_tree(seed / name, file_mode=0o444, dir_mode=0o555)
+    for part in (seed / SEED_STASH_LEAF).rglob("part_*.parquet"):
+        part.chmod(0o444)
 
 
 def test_matching_seed_hardlinks_views_and_prebuilt_stash(tmp_path: Path) -> None:
@@ -102,6 +144,100 @@ def test_matching_seed_hardlinks_views_and_prebuilt_stash(tmp_path: Path) -> Non
         assert resolved.is_relative_to(seed.resolve()) or resolved.is_relative_to(
             experiment.resolve()
         )
+
+
+def test_seeded_tree_is_indistinguishable_from_a_cold_build(tmp_path: Path) -> None:
+    """A seeded cache must still be a cache the provider can write into.
+
+    Before touching a slot the provider takes an exclusive lock beside it and
+    stages a new slot in the same directory. Publishing a layout level — a
+    replay phase directory, for one — as if it were a view freezes it
+    read-only, and the worker then dies on its own lock at startup.
+    """
+
+    seed = tmp_path / "seed"
+    dest = tmp_path / "exp" / "pit_views"
+    record = _record(tmp_path / "raw")
+    _write_seed(seed, record)
+    _freeze_seed(seed)
+
+    assert seed_pit_views(dest, seed, expected_provider=record) is True
+
+    # A seeded view is an immutable read-only hardlink of the seed's own.
+    view = dest / "replay" / "meta" / SEED_SLOT
+    linked = view / "daily.parquet"
+    assert (
+        os.stat(linked).st_ino
+        == os.stat(seed / "replay" / "meta" / SEED_SLOT / "daily.parquet").st_ino
+    )
+    assert not os.access(view, os.W_OK)
+    assert not os.access(linked, os.W_OK)
+
+    # Every directory that can still receive an entry stays writable.
+    for directory in (
+        dest,
+        dest / "decision",
+        dest / "replay",
+        dest / "replay" / "meta",
+        dest / "replay" / "valid",
+        dest / "replay" / "heldout",
+        dest / "bundles",
+        dest / "bundles" / "meta",
+        (dest / SEED_STASH_LEAF).parent,
+    ):
+        assert os.access(directory, os.W_OK), directory
+
+    # The provider's lock beside each seeded slot, in every phase directory and
+    # beside the decision snapshot and the bundle.
+    for slot in (
+        dest / "replay" / "meta" / SEED_SLOT,
+        dest / "replay" / "valid" / SEED_SLOT,
+        dest / "replay" / "heldout" / SEED_HELDOUT_SLOT,
+        dest / "replay" / SEED_SLOT,
+        dest / "decision" / SEED_DECISION_KEY,
+        dest / "bundles" / "valid" / SEED_SLOT,
+    ):
+        with pit_backend._exclusive_lock(slot.with_suffix(".lock")):
+            assert slot.with_suffix(".lock").is_file()
+
+    # A slot the seed does not carry still cold-builds beside the seeded ones:
+    # staging directory in the same phase directory, then the atomic rename.
+    fresh = dest / "replay" / "meta" / "20240301_20240302_20240101T235959+0800"
+    with pit_backend._exclusive_lock(fresh.with_suffix(".lock")):
+        staging = fresh.with_name(f".{fresh.name}.{uuid.uuid4().hex}.tmp")
+        staging.mkdir()
+        (staging / "manifest.json").write_text("{}", encoding="utf-8")
+        os.replace(staging, fresh)
+    assert (fresh / "manifest.json").is_file()
+
+
+def test_reseeding_an_already_seeded_experiment_changes_nothing(tmp_path: Path) -> None:
+    """A restarted worker seeds again over a cache the first run finished."""
+
+    seed = tmp_path / "seed"
+    dest = tmp_path / "exp" / "pit_views"
+    record = _record(tmp_path / "raw")
+    _write_seed(seed, record)
+    _freeze_seed(seed)
+
+    assert seed_pit_views(dest, seed, expected_provider=record) is True
+    before = _tree_state(dest)
+
+    assert seed_pit_views(dest, seed, expected_provider=record) is True
+    assert _tree_state(dest) == before
+    assert not [path for path in dest.rglob("*") if ".tmp" in path.name]
+
+
+def _tree_state(root: Path) -> dict[str, tuple[int, int]]:
+    """Inode and mode of every entry, so a re-link or a rewrite is visible."""
+
+    return {
+        str(path.relative_to(root)): (
+            path.stat().st_ino,
+            stat.S_IMODE(path.stat().st_mode),
+        )
+        for path in sorted(root.rglob("*"))
+    }
 
 
 def test_missing_seed_is_a_noop(tmp_path: Path) -> None:

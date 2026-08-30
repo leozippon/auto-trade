@@ -27,6 +27,11 @@ from autotrade.pipelines.hitl_state import WEB_CREATE_DEFAULTS
 DEFAULT_PIT_VIEWS_SEED = Path("data/pit_views_seed/explore")
 DEFAULT_PIT_VIEWS_SEED_WORKSPACE = Path("data/pit_views_seed/explore_workspace")
 
+# What a finished view carries: a snapshot restates its manifest and a bundle
+# its data summary. Any other directory in the layout is a level the provider
+# still writes into, so it is descended, never published as a view.
+_VIEW_MARKERS = ("manifest.json", "data_summary.json")
+
 # The calendar a seed is planned over. One source: the console creation
 # defaults an experiment is actually created with, so a seed prebuilt without
 # overrides matches what the next experiment asks the provider to build.
@@ -97,7 +102,13 @@ def seed_pit_views(
     already present). Returns False when the default seed is missing or its
     contract does not match — the experiment then cold-builds. An explicit
     seed (``required=True``) fails fast on a missing tree or a mismatch.
-    Never writes outside ``experiment_pit_views``.
+    Never writes outside ``experiment_pit_views``, and re-seeding an already
+    seeded experiment is a no-op.
+
+    The result is indistinguishable from a cold build: each view is published
+    read-only, exactly as the provider publishes its own, while the layout
+    directories around it stay writable, so the provider can still take the
+    lock beside a seeded slot and build the slots the seed does not carry.
 
     Prebuilt ``asof_stash`` parts come across too, so the first backtest over a
     slot hardlinks the day-by-day as-of parts instead of encoding them. Their
@@ -233,28 +244,34 @@ def iter_plan_pit_jobs(
 
 
 def _completed_seed_views(seed: Path) -> list[Path]:
+    """Every completed view in the seed, wherever the layout puts it.
+
+    Views sit at different depths: ``decision/<slot>``, the unphased
+    ``replay/<slot>`` source, the ``replay/<phase>/<slot>`` views hardlinked
+    from it, and ``bundles/<phase>/<slot>``. A view is therefore recognised by
+    the marker the provider writes when it publishes one, never by its depth.
+    Publishing a layout level instead of a view would freeze that level
+    read-only in the experiment, and the provider could then neither take the
+    lock beside a seeded slot nor stage a new slot next to it.
+    """
+
     views: list[Path] = []
-    for name in ("decision", "replay"):
-        root = seed / name
-        if not root.is_dir() or root.is_symlink():
+    for name in ("decision", "replay", "bundles"):
+        views.extend(_marked_seed_views(seed / name))
+    return views
+
+
+def _marked_seed_views(root: Path) -> list[Path]:
+    if not root.is_dir() or root.is_symlink():
+        return []
+    views: list[Path] = []
+    for path in sorted(root.iterdir()):
+        if _skip_seed_name(path.name) or path.is_symlink() or not path.is_dir():
             continue
-        views.extend(
-            path
-            for path in root.iterdir()
-            if path.is_dir() and not path.is_symlink() and not _skip_seed_name(path.name)
-        )
-    bundles = seed / "bundles"
-    if bundles.is_dir() and not bundles.is_symlink():
-        for phase in bundles.iterdir():
-            if not phase.is_dir() or phase.is_symlink() or _skip_seed_name(phase.name):
-                continue
-            views.extend(
-                path
-                for path in phase.iterdir()
-                if path.is_dir()
-                and not path.is_symlink()
-                and not _skip_seed_name(path.name)
-            )
+        if any((path / marker).is_file() for marker in _VIEW_MARKERS):
+            views.append(path)
+        else:
+            views.extend(_marked_seed_views(path))
     return views
 
 
