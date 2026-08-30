@@ -25,6 +25,7 @@ from pathlib import Path
 from autotrade.environment.runtime import chmod_tree
 from autotrade.pipelines.hitl_state import HITL_DIR_NAME, PARAMS_NAME, read_json
 from autotrade.pipelines.ledger import experiment_verdict
+from autotrade.environment.tools.memory_feedback import MEMORY_FEEDBACK_VERDICTS
 from autotrade.pipelines.skills import (
     CURATED_MEMORY_SOURCE,
     DEFAULT_OPERATING_MEMORY,
@@ -99,8 +100,10 @@ def curated_library(repo_root: Path) -> dict[str, object]:
     return payload
 
 
-def curated_entry(repo_root: Path, name: str) -> dict[str, object]:
-    """One curated entry's full ``SKILL.md`` text, read on demand.
+def curated_entry(
+    repo_root: Path, experiments_root: Path, name: str
+) -> dict[str, object]:
+    """One curated entry's full ``SKILL.md`` text and what sessions said about it.
 
     The name is validated against the shared skill-name rule before it touches
     the filesystem, so the route cannot be used to read anything else.
@@ -127,7 +130,13 @@ def curated_entry(repo_root: Path, name: str) -> dict[str, object]:
         ),
         {"name": entry_name, "title": "", "summary": "", "bytes": len(content.encode())},
     )
-    return {**listed, "content": content}
+    return {
+        **listed,
+        "content": content,
+        "feedback": entry_feedback(
+            experiments_root, f"{CURATED_MEMORY_SOURCE}/{entry_name}"
+        ),
+    }
 
 
 def graduated_tier(repo_root: Path, experiments_root: Path) -> dict[str, object]:
@@ -565,6 +574,7 @@ def graduated_entry(
         "bytes": int(listed["bytes"]),
         "files": len(listed["files"]),  # type: ignore[arg-type]
         "content": (item / SKILL_FILENAME).read_text(encoding="utf-8"),
+        "feedback": entry_feedback(experiments_root, f"{experiment_id}/{name}"),
     }
 
 
@@ -668,6 +678,148 @@ def restore_graduated_skill(
     return _tier_result(repo_root, experiments_root, experiment_id, name, "restored")
 
 
+# ---- what sessions reported back ------------------------------------------
+
+# A session may doubt, ignore and report mounted memory; it never rewrites it.
+# ``memory_feedback`` verdicts land in each run manifest, and this is the only
+# place they are read back together — one entry at a time, across experiments.
+_UNREADABLE_FEEDBACK = "session feedback is unreadable"
+# Two experiments disagreeing with an entry is a different signal from one
+# session's bad day, and it is the threshold the page badges.
+DISPUTED_EXPERIMENTS = 2
+
+
+def _empty_feedback() -> dict[str, object]:
+    return {
+        "counts": {verdict: 0 for verdict in MEMORY_FEEDBACK_VERDICTS},
+        "experiments": 0,
+        "disputed": False,
+        "reports": [],
+    }
+
+
+def _feedback_reports(directory: Path) -> list[dict[str, object]]:
+    """One experiment's recorded verdicts, projected past the host boundary."""
+
+    identity = PublicIdentity(directory)
+    reports: list[dict[str, object]] = []
+    for manifest_path in sorted(
+        (directory / "artifacts").glob(f"*/{HOST_RUN_MANIFEST_NAME}")
+    ):
+        manifest = read_json(manifest_path)
+        records = manifest.get("memory_feedback")
+        if not isinstance(records, list):
+            continue
+        label = ""
+        raw_session = str(manifest.get("session_key") or "")
+        if raw_session:
+            try:
+                label = identity.session_display_key(raw_session)
+            except (KeyError, ValueError):
+                # A rerun can leave a collected run the current plan no longer
+                # names; the verdict still counts, it just has no session label.
+                label = ""
+        for record in records:
+            if not isinstance(record, Mapping):
+                continue
+            verdict = str(record.get("verdict") or "")
+            entry = str(record.get("entry") or "")
+            if entry and verdict in MEMORY_FEEDBACK_VERDICTS:
+                reports.append(
+                    {
+                        "entry": entry,
+                        "experiment_id": directory.name,
+                        "session_label": label,
+                        "verdict": verdict,
+                        # Agent-authored text leaves the host through the same
+                        # projection as every other traced string.
+                        "note": identity.public_text(str(record.get("note") or "")),
+                        "recorded_at": str(record.get("recorded_at") or ""),
+                    }
+                )
+    return reports
+
+
+def memory_feedback(experiments_root: Path) -> dict[str, object]:
+    """Every experiment's verdicts on mounted entries, aggregated per entry.
+
+    An experiment whose feedback cannot be read is named rather than dropped:
+    a missing verdict changes what an entry looks like, so the page must not
+    quietly present a partial count as the whole picture.
+    """
+
+    root = Path(experiments_root)
+    entries: dict[str, dict[str, object]] = {}
+    unreadable: list[dict[str, object]] = []
+    if not root.is_dir():
+        return {"entries": entries, "unreadable": unreadable}
+    for directory in sorted(root.iterdir(), key=lambda path: path.name):
+        if not directory.is_dir() or directory.name.startswith("."):
+            continue
+        try:
+            reports = _feedback_reports(directory)
+        except (OSError, TypeError, ValueError) as exc:
+            unreadable.append(
+                {
+                    "experiment_id": directory.name,
+                    "error": _error(exc, _UNREADABLE_FEEDBACK),
+                }
+            )
+            continue
+        for report in reports:
+            entry = entries.setdefault(str(report["entry"]), _empty_feedback())
+            counts = entry["counts"]
+            counts[report["verdict"]] += 1  # type: ignore[index]
+            entry["reports"].append(  # type: ignore[union-attr]
+                {key: value for key, value in report.items() if key != "entry"}
+            )
+    for entry in entries.values():
+        experiments = {
+            str(report["experiment_id"])
+            for report in entry["reports"]  # type: ignore[union-attr]
+        }
+        entry["experiments"] = len(experiments)
+        entry["disputed"] = (
+            len(
+                {
+                    str(report["experiment_id"])
+                    for report in entry["reports"]  # type: ignore[union-attr]
+                    if report["verdict"] == "wrong"
+                }
+            )
+            >= DISPUTED_EXPERIMENTS
+        )
+    return {"entries": entries, "unreadable": unreadable}
+
+
+def entry_feedback(experiments_root: Path, entry: str) -> dict[str, object]:
+    """One entry's aggregate, including every report behind it."""
+
+    aggregate = memory_feedback(experiments_root)
+    found = aggregate["entries"].get(entry)  # type: ignore[union-attr]
+    return dict(found) if found else _empty_feedback()
+
+
+def _feedback_badges(aggregate: Mapping[str, object]) -> dict[str, object]:
+    """The page-level projection: how many said what, and whether it is disputed.
+
+    The notes themselves stay out of the page bundle; the right pane asks for
+    one entry's reports when the reader selects it.
+    """
+
+    return {
+        "entries": {
+            key: {
+                "counts": dict(record["counts"]),  # type: ignore[arg-type]
+                "experiments": record["experiments"],  # type: ignore[index]
+                "disputed": record["disputed"],  # type: ignore[index]
+            }
+            for key, record in aggregate["entries"].items()  # type: ignore[union-attr]
+        },
+        "unreadable": list(aggregate["unreadable"]),  # type: ignore[arg-type]
+    }
+
+
 def memory_overview(repo_root: Path, experiments_root: Path) -> dict[str, object]:
     """The whole operating-memory page in one read."""
 
@@ -675,20 +827,24 @@ def memory_overview(repo_root: Path, experiments_root: Path) -> dict[str, object
         "default_mode": DEFAULT_OPERATING_MEMORY,
         "curated": curated_library(repo_root),
         "graduated": graduated_tier(repo_root, experiments_root),
+        "feedback": _feedback_badges(memory_feedback(experiments_root)),
     }
 
 
 __all__ = [
     "CURATED_WRITE_NOTE",
+    "DISPUTED_EXPERIMENTS",
     "GRADUATED_EXCLUSION_NOTE",
     "create_curated_entry",
     "curated_entry",
     "curated_library",
     "delete_curated_entry",
+    "entry_feedback",
     "exclude_graduated_skill",
     "experiment_memory",
     "graduated_entry",
     "graduated_tier",
+    "memory_feedback",
     "memory_overview",
     "promote_curated_entry",
     "restore_graduated_skill",

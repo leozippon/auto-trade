@@ -849,6 +849,9 @@ def test_role_tool_visibility_hides_writes_from_audits(tmp_path: Path) -> None:
         "batch_validate",
         "daily_backtest",
         "finish_fold",
+        # A child gathers evidence; the parent session is what concludes that a
+        # mounted memory entry held up or did not, so the verdict is its call.
+        "memory_feedback",
         "step_rollback",
     }
     assert audit == {"glob", "grep", "read_file"}

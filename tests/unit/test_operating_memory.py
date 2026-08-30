@@ -16,8 +16,14 @@ from pathlib import Path
 import pytest
 
 from autotrade.environment.artifacts import FilesystemArtifactStore
+from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.llm import ScriptedLLM, ToolCall
+from autotrade.environment.runtime import RunManifest
 from autotrade.environment.tools.base import ToolError
+from autotrade.environment.tools.memory_feedback import (
+    MAX_MEMORY_FEEDBACK_NOTE_CHARS,
+    MemoryFeedbackTool,
+)
 from autotrade.environment.tools.workspace import SafeWorkspace
 from autotrade.pipelines.ledger import ExperimentLedger
 from autotrade.pipelines.local_backend import LLMMetaLearner
@@ -27,17 +33,21 @@ from autotrade.pipelines.skills import (
     GRADUATED_EXCLUSIONS_PATH,
     OPERATING_MEMORY_DIRNAME,
     OPERATING_MEMORY_LIBRARY,
+    SKILLS_DIRNAME,
     DeleteSkillTool,
     ExperimentSkillsStore,
     WriteSkillTool,
     build_skills_index,
     graduated_exclusion_record,
+    parse_skill_front_matter,
     graduated_memory_sources,
     install_operating_memory,
     install_workspace_skills,
     operating_memory_entries,
     read_graduated_exclusions,
     resolve_operating_memory,
+    skill_front_matter,
+    validate_memory_entry_ref,
     validate_skills_tree,
     write_graduated_exclusions,
 )
@@ -607,3 +617,255 @@ def test_the_written_list_round_trips_through_its_own_validation(
         write_graduated_exclusions(repo, [entry, entry])
     # The refused write left the stored list alone.
     assert read_graduated_exclusions(repo) == stored
+
+
+# ---- reporting on mounted memory ------------------------------------------
+#
+# A session may doubt mounted memory, ignore it, and say so; it may never
+# rewrite it. `memory_feedback` is that whole return path, and `supersedes` is
+# how a session writes a replacement without touching the original.
+
+
+def _feedback_session(tmp_path: Path) -> tuple[MemoryFeedbackTool, RunManifest, Path]:
+    """One mounted session with the manifest its feedback lands in."""
+
+    experiments = tmp_path / "experiments"
+    experiments.mkdir()
+    _experiment_with_skill(experiments, "adopted")
+    repo = _repo_with_library(tmp_path)
+    root = tmp_path / "session"
+    root.mkdir()
+    workspace, _mounted = _workspace(
+        root, mode="curated+graduated", repo_root=repo, experiments_root=experiments
+    )
+    manifest = RunManifest.create(
+        root / "artifacts" / "run_manifest.json",
+        {"experiment_id": "current", "run_id": "run_current", "kind": "fold"},
+        ref_store=AgentRefStore(root),
+    )
+    return MemoryFeedbackTool(SafeWorkspace(workspace), manifest), manifest, workspace
+
+
+def test_feedback_records_one_verdict_per_entry_in_the_run_manifest(
+    tmp_path: Path,
+) -> None:
+    tool, manifest, _workspace_root = _feedback_session(tmp_path)
+    result = tool.invoke(
+        {
+            "entry": "curated/pit-read-budget",
+            "verdict": "outdated",
+            "note": "按它的读取顺序取不到当前数据合同里的摘要字段。",
+        }
+    )
+    assert result.ok
+    assert result.value["entry"] == "curated/pit-read-budget"
+    assert result.value["source"] == "curated" and result.value["name"] == "pit-read-budget"
+    recorded = manifest.data["memory_feedback"]
+    assert [item["entry"] for item in recorded] == ["curated/pit-read-budget"]
+    assert recorded[0]["verdict"] == "outdated" and recorded[0]["recorded_at"]
+    # The graduated tier is reportable under its own source name.
+    tool.invoke(
+        {
+            "entry": f"adopted/{GRADUATED_SKILL}",
+            "verdict": "confirmed",
+            "note": "同窗对照的做法在本窗口同样成立。",
+        }
+    )
+    assert [item["entry"] for item in manifest.data["memory_feedback"]] == [
+        f"adopted/{GRADUATED_SKILL}",
+        "curated/pit-read-budget",
+    ]
+    # Nothing under memory/ changed: reporting is not rewriting.
+    validate_skills_tree(
+        _workspace_root / OPERATING_MEMORY_DIRNAME / CURATED_MEMORY_SOURCE,
+        require_writable=False,
+    )
+
+
+def test_reporting_the_same_entry_again_replaces_this_session_s_verdict(
+    tmp_path: Path,
+) -> None:
+    """The manifest holds the session's conclusion, not its deliberation."""
+
+    tool, manifest, _workspace_root = _feedback_session(tmp_path)
+    tool.invoke(
+        {
+            "entry": "curated/pit-read-budget",
+            "verdict": "wrong",
+            "note": "先按它做，结果与观察不符。",
+        }
+    )
+    tool.invoke(
+        {
+            "entry": "curated/pit-read-budget",
+            "verdict": "confirmed",
+            "note": "换用逐域摘要后其余结论成立，先前的判断是我读错了。",
+        }
+    )
+    recorded = manifest.data["memory_feedback"]
+    assert len(recorded) == 1
+    assert recorded[0]["verdict"] == "confirmed"
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"entry": "curated/not-mounted", "verdict": "wrong", "note": "x"},
+        {"entry": "no-such-source/pit-read-budget", "verdict": "wrong", "note": "x"},
+        {"entry": "pit-read-budget", "verdict": "wrong", "note": "x"},
+        {"entry": "curated/Not_Kebab", "verdict": "wrong", "note": "x"},
+        {"entry": "curated/../escape", "verdict": "wrong", "note": "x"},
+        {"entry": "curated/pit-read-budget", "verdict": "maybe", "note": "x"},
+        {"entry": "curated/pit-read-budget", "verdict": "wrong", "note": "   "},
+    ],
+)
+def test_feedback_refuses_anything_it_cannot_stand_behind(
+    tmp_path: Path, arguments: dict[str, str]
+) -> None:
+    tool, manifest, _workspace_root = _feedback_session(tmp_path)
+    with pytest.raises(ToolError):
+        tool.invoke(arguments)
+    assert "memory_feedback" not in manifest.data
+
+
+@pytest.mark.parametrize(
+    "note",
+    [
+        "2022Q1 那一窗它就不成立了。",
+        "20220101 之后的数据里字段改名了。",
+        "Test 上 sharpe 只有 0.3，所以别用它。",
+        "held-out 结果显示它不成立。",
+    ],
+)
+def test_a_note_that_leaks_a_window_or_a_hidden_stage_is_refused(
+    tmp_path: Path, note: str
+) -> None:
+    """The note travels to other experiments through the console, so it passes
+    the same transferable-content gate as PRIOR and shared skills."""
+
+    tool, manifest, _workspace_root = _feedback_session(tmp_path)
+    with pytest.raises(ToolError):
+        tool.invoke(
+            {"entry": "curated/pit-read-budget", "verdict": "wrong", "note": note}
+        )
+    assert "memory_feedback" not in manifest.data
+
+
+def test_a_note_longer_than_the_bound_is_refused(tmp_path: Path) -> None:
+    tool, _manifest, _workspace_root = _feedback_session(tmp_path)
+    with pytest.raises(ToolError):
+        tool.invoke(
+            {
+                "entry": "curated/pit-read-budget",
+                "verdict": "confirmed",
+                "note": "对" * (MAX_MEMORY_FEEDBACK_NOTE_CHARS + 1),
+            }
+        )
+
+
+def test_the_tool_schema_names_the_three_verdicts_and_the_note_bound() -> None:
+    """The schema is the parameter contract the model reads, so it must carry
+    the same enum and bound ``invoke`` enforces."""
+
+    schema = MemoryFeedbackTool.spec.input_schema["properties"]
+    assert schema["verdict"]["enum"] == ["confirmed", "outdated", "wrong"]
+    assert schema["note"]["maxLength"] == MAX_MEMORY_FEEDBACK_NOTE_CHARS
+    assert MemoryFeedbackTool.spec.mutating is True
+
+
+# ---- writing a replacement instead of an edit ------------------------------
+
+
+def test_front_matter_is_optional_and_only_supersedes_is_known() -> None:
+    assert parse_skill_front_matter("# 标题\n\n正文\n") == ({}, "# 标题\n\n正文\n")
+    fields, body = skill_front_matter(
+        "---\nsupersedes: curated/pit-read-budget\n---\n# 标题\n\n正文\n"
+    )
+    assert fields == {"supersedes": "curated/pit-read-budget"}
+    assert body == "# 标题\n\n正文\n"
+    for bad in (
+        "---\nunknown: x\n---\n# 标题\n",
+        "---\nsupersedes\n---\n# 标题\n",
+        "---\nsupersedes: curated/pit-read-budget\n# 标题\n",
+        "---\nsupersedes: curated/Not_Kebab\n---\n# 标题\n",
+        "---\nsupersedes: pit-read-budget\n---\n# 标题\n",
+    ):
+        with pytest.raises(ValueError):
+            skill_front_matter(bad)
+    assert validate_memory_entry_ref("adopted/same-window-parent-control") == (
+        "adopted",
+        "same-window-parent-control",
+    )
+
+
+def test_a_superseding_skill_marks_the_original_without_removing_it(
+    tmp_path: Path,
+) -> None:
+    """Both stay mounted and the relation is visible; withdrawing the original
+    is the researcher's decision, made in the repository."""
+
+    tool, _manifest, workspace = _feedback_session(tmp_path)
+    write_skill = WriteSkillTool(SafeWorkspace(workspace))
+    result = write_skill.invoke(
+        {
+            "name": "pit-read-budget-v2",
+            "path": "SKILL.md",
+            "content": (
+                "---\nsupersedes: curated/pit-read-budget\n---\n"
+                "# PIT 读取预算（修订）\n\n按域读摘要，再按需取明细。\n"
+            ),
+        }
+    )
+    assert result.ok
+    index = build_skills_index(workspace / SKILLS_DIRNAME)
+    written = next(
+        entry for entry in index["skills"] if entry["name"] == "pit-read-budget-v2"
+    )
+    assert written["supersedes"] == "curated/pit-read-budget"
+    assert written["title"] == "PIT 读取预算（修订）"
+    original = next(
+        entry
+        for entry in index["operating_memory"]
+        if entry["name"] == "pit-read-budget"
+    )
+    assert original["superseded_by"] == ["session/pit-read-budget-v2"]
+    # The mounted entry itself is untouched and still readable.
+    assert (
+        workspace / OPERATING_MEMORY_DIRNAME / CURATED_MEMORY_SOURCE / "pit-read-budget"
+    ).is_dir()
+    assert tool.spec.name == "memory_feedback"
+
+
+def test_supersedes_must_name_something_this_session_actually_mounted(
+    tmp_path: Path,
+) -> None:
+    _tool, _manifest, workspace = _feedback_session(tmp_path)
+    write_skill = WriteSkillTool(SafeWorkspace(workspace))
+    with pytest.raises(ToolError):
+        write_skill.invoke(
+            {
+                "name": "invented-successor",
+                "path": "SKILL.md",
+                "content": "---\nsupersedes: curated/never-mounted\n---\n# x\n\n正文\n",
+            }
+        )
+    assert not (workspace / SKILLS_DIRNAME / "invented-successor").exists()
+
+
+def test_a_published_generation_keeps_its_front_matter_valid(tmp_path: Path) -> None:
+    """The tree validator checks the format, never the reference: a generation
+    is validated far from the workspace that mounted the entry it names."""
+
+    tree = tmp_path / "skills"
+    item = tree / "successor"
+    item.mkdir(parents=True)
+    (item / "SKILL.md").write_text(
+        "---\nsupersedes: adopted/same-window-parent-control\n---\n# 后继\n\n正文\n",
+        encoding="utf-8",
+    )
+    assert validate_skills_tree(tree, require_writable=True).count == 1
+    (item / "SKILL.md").write_text(
+        "---\nsupersedes: adopted/Not_Kebab\n---\n# 后继\n\n正文\n", encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="successor/SKILL.md"):
+        validate_skills_tree(tree, require_writable=True)

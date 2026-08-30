@@ -85,6 +85,7 @@ from autotrade.environment.tools.finish_fold import (
     executable_source_structure,
 )
 from autotrade.environment.tools.hitl import AskUserTool
+from autotrade.environment.tools.memory_feedback import MemoryFeedbackTool
 from autotrade.environment.tools.modification_check import ModificationCheckTool
 from autotrade.environment.tools.search import (
     GlobTool,
@@ -2230,6 +2231,10 @@ class LLMFoldDeveloper:
                 SandboxShellTool(safe, command_runner, result_store=search_roots),
                 WriteSkillTool(safe),
                 DeleteSkillTool(safe),
+                # Offered only where something is mounted to report on, and only
+                # to the parent: a sub-agent gathers evidence, the session draws
+                # the conclusion this records.
+                *([MemoryFeedbackTool(safe, manifest)] if mounted_memory else []),
                 modification,
                 smoke,
                 backtest,
@@ -2894,6 +2899,7 @@ class LLMMetaLearner:
             EditFileTool(safe),
             WriteSkillTool(safe),
             DeleteSkillTool(safe),
+            *([MemoryFeedbackTool(safe, manifest)] if mounted_memory else []),
             modification,
         ]
         hook = facts.get("user_question_hook")

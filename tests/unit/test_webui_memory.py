@@ -142,11 +142,11 @@ def _experiment(
     return directory
 
 
-def _mounted_run(directory: Path, **overrides: object) -> Path:
-    manifest = directory / "artifacts" / RUN_ID / "host_run_manifest.json"
+def _mounted_run(directory: Path, *, run_dir: str = RUN_ID, **overrides: object) -> Path:
+    manifest = directory / "artifacts" / run_dir / "host_run_manifest.json"
     manifest.parent.mkdir(parents=True, exist_ok=True)
     payload: dict[str, object] = {
-        "run_id": RUN_ID,
+        "run_id": run_dir,
         "kind": "fold",
         "session_key": SESSION_KEY,
         "operating_memory": {
@@ -220,15 +220,15 @@ def test_a_malformed_library_reports_an_error_instead_of_an_empty_shelf(
 
 def test_one_entry_body_is_served_and_nothing_else_is(tmp_path: Path) -> None:
     _library(tmp_path)
-    entry = memory.curated_entry(tmp_path, "pit-read-budget")
+    entry = memory.curated_entry(tmp_path, tmp_path / "experiments", "pit-read-budget")
     assert entry["name"] == "pit-read-budget"
     assert entry["title"] == "PIT 读取预算"
     assert entry["content"].startswith("# PIT 读取预算")
     with pytest.raises(KeyError):
-        memory.curated_entry(tmp_path, "not-curated")
+        memory.curated_entry(tmp_path, tmp_path / "experiments", "not-curated")
     for bad in ("../configs", "PIT", "a/b", ""):
         with pytest.raises(ValueError):
-            memory.curated_entry(tmp_path, bad)
+            memory.curated_entry(tmp_path, tmp_path / "experiments", bad)
 
 
 def test_a_curated_body_is_served_verbatim_so_an_edit_round_trips(
@@ -241,7 +241,7 @@ def test_a_curated_body_is_served_verbatim_so_an_edit_round_trips(
     _library(tmp_path)
     body = f"# 路径规则\n\n只写 /mnt/agent/workspace/output，不要写 {HOST_PATH}。\n"
     _curated(tmp_path, "workspace-path-rules", body)
-    assert memory.curated_entry(tmp_path, "workspace-path-rules")["content"] == body
+    assert memory.curated_entry(tmp_path, tmp_path / "experiments", "workspace-path-rules")["content"] == body
     memory.update_curated_entry(tmp_path, "workspace-path-rules", body)
     assert (
         tmp_path / OPERATING_MEMORY_LIBRARY / "workspace-path-rules" / "SKILL.md"
@@ -488,7 +488,7 @@ def test_the_console_routes_serve_the_keys_the_page_reads(tmp_path: Path) -> Non
     overview = client.get("/api/memory")
     assert overview.status_code == 200
     body = overview.json()
-    assert {"default_mode", "curated", "graduated"} <= body.keys()
+    assert {"default_mode", "curated", "graduated", "feedback"} <= body.keys()
     assert body["graduated"]["exclusions"].endswith(".json")
     assert {"source", "library", "entries"} <= body["curated"].keys()
     assert {"name", "title", "summary", "bytes", "files"} <= body["curated"][
@@ -559,7 +559,7 @@ def test_a_created_entry_is_readable_by_the_mount_and_listed_back(
     assert validate_skills_tree(library, require_writable=False).count == 3
     indexed = {entry["name"]: entry for entry in build_skills_index(library)["skills"]}
     assert indexed["cash-buffer-rule"]["title"] == "现金缓冲"
-    assert memory.curated_entry(tmp_path, "cash-buffer-rule")["content"].startswith(
+    assert memory.curated_entry(tmp_path, tmp_path / "experiments", "cash-buffer-rule")["content"].startswith(
         "# 现金缓冲"
     )
 
@@ -601,7 +601,7 @@ def test_creating_over_an_existing_entry_is_refused_not_silently_merged(
     _library(tmp_path)
     with pytest.raises(FileExistsError):
         memory.create_curated_entry(tmp_path, "pit-read-budget", "# 覆盖\n")
-    assert memory.curated_entry(tmp_path, "pit-read-budget")["content"].startswith(
+    assert memory.curated_entry(tmp_path, tmp_path / "experiments", "pit-read-budget")["content"].startswith(
         "# PIT 读取预算"
     )
 
@@ -1063,3 +1063,189 @@ def test_a_curated_body_crosses_the_route_unchanged(tmp_path: Path) -> None:
         ).json()
         assert served["content"] == body
         assert "redacted" not in served
+
+
+# ---- what sessions reported back ------------------------------------------
+#
+# Sessions may doubt, ignore and report mounted memory; they never rewrite it.
+# The console is where those verdicts are read back together, so the invariants
+# are that a verdict is attributed to its experiment, that a note crosses the
+# host boundary projected, and that "disputed" means what it says.
+
+
+def _feedback(entry: str, verdict: str, note: str) -> dict[str, object]:
+    return {
+        "entry": entry,
+        "source": entry.split("/")[0],
+        "name": entry.split("/")[1],
+        "verdict": verdict,
+        "note": note,
+        "recorded_at": "2026-01-02T03:04:05+00:00",
+    }
+
+
+def test_feedback_is_aggregated_per_entry_across_experiments(tmp_path: Path) -> None:
+    _library(tmp_path)
+    experiments = tmp_path / "experiments"
+    experiments.mkdir()
+    first = _experiment(experiments, "adopted")
+    second = _experiment(experiments, "other")
+    _mounted_run(
+        first,
+        memory_feedback=[
+            _feedback("curated/pit-read-budget", "confirmed", "按它做结果一致。"),
+            _feedback("curated/output-dir-hygiene", "outdated", "目录约定已经变了。"),
+        ],
+    )
+    _mounted_run(
+        second,
+        memory_feedback=[
+            _feedback("curated/pit-read-budget", "outdated", "摘要字段取不到了。")
+        ],
+    )
+
+    aggregate = memory.memory_feedback(experiments)
+    assert aggregate["unreadable"] == []
+    entry = aggregate["entries"]["curated/pit-read-budget"]
+    assert entry["counts"] == {"confirmed": 1, "outdated": 1, "wrong": 0}
+    assert entry["experiments"] == 2 and entry["disputed"] is False
+    assert {report["experiment_id"] for report in entry["reports"]} == {
+        "adopted",
+        "other",
+    }
+    # The session is named the way every other console surface names it.
+    assert {report["session_label"] for report in entry["reports"]} == {
+        "epoch_001/2022Q1"
+    }
+    assert aggregate["entries"]["curated/output-dir-hygiene"]["counts"]["outdated"] == 1
+
+
+def test_disputed_needs_two_experiments_not_two_sessions(tmp_path: Path) -> None:
+    """One session's bad day is not the same signal as two experiments
+    independently concluding the entry is wrong."""
+
+    _library(tmp_path)
+    experiments = tmp_path / "experiments"
+    experiments.mkdir()
+    first = _experiment(experiments, "adopted")
+    second = _experiment(experiments, "other")
+    _mounted_run(
+        first,
+        memory_feedback=[_feedback("curated/pit-read-budget", "wrong", "不成立。")],
+    )
+    _mounted_run(
+        first,
+        run_dir="run_second_session",
+        memory_feedback=[_feedback("curated/pit-read-budget", "wrong", "还是不成立。")],
+    )
+    entry = memory.memory_feedback(experiments)["entries"]["curated/pit-read-budget"]
+    assert entry["counts"]["wrong"] == 2 and entry["experiments"] == 1
+    assert entry["disputed"] is False
+
+    _mounted_run(
+        second,
+        memory_feedback=[_feedback("curated/pit-read-budget", "wrong", "这里也不成立。")],
+    )
+    entry = memory.memory_feedback(experiments)["entries"]["curated/pit-read-budget"]
+    assert entry["experiments"] == 2 and entry["disputed"] is True
+
+
+def test_a_note_crosses_the_host_boundary_projected(tmp_path: Path) -> None:
+    _library(tmp_path)
+    experiments = tmp_path / "experiments"
+    experiments.mkdir()
+    directory = _experiment(experiments, "adopted")
+    _mounted_run(
+        directory,
+        memory_feedback=[
+            _feedback("curated/pit-read-budget", "wrong", f"它让我去读 {HOST_PATH}。")
+        ],
+    )
+    note = memory.memory_feedback(experiments)["entries"]["curated/pit-read-budget"][
+        "reports"
+    ][0]["note"]
+    assert HOST_PATH not in note and "[host path omitted]" in note
+
+
+def test_an_experiment_whose_feedback_is_unreadable_is_named_not_dropped(
+    tmp_path: Path,
+) -> None:
+    """A missing verdict changes what an entry looks like, so a partial count
+    must not be presented as the whole picture."""
+
+    _library(tmp_path)
+    experiments = tmp_path / "experiments"
+    experiments.mkdir()
+    directory = _experiment(experiments, "adopted")
+    _mounted_run(
+        directory,
+        memory_feedback=[_feedback("curated/pit-read-budget", "confirmed", "成立。")],
+    )
+    broken = experiments / "broken"
+    (broken / "artifacts" / "run_x").mkdir(parents=True)
+    (broken / "artifacts" / "run_x" / "host_run_manifest.json").write_text(
+        "{truncated", encoding="utf-8"
+    )
+    aggregate = memory.memory_feedback(experiments)
+    assert aggregate["entries"]["curated/pit-read-budget"]["counts"]["confirmed"] == 1
+    assert [item["experiment_id"] for item in aggregate["unreadable"]] == ["broken"]
+    assert aggregate["unreadable"][0]["error"].endswith("session feedback is unreadable")
+    assert str(tmp_path) not in aggregate["unreadable"][0]["error"]
+
+
+def test_a_verdict_this_console_does_not_know_is_not_counted(tmp_path: Path) -> None:
+    _library(tmp_path)
+    experiments = tmp_path / "experiments"
+    experiments.mkdir()
+    directory = _experiment(experiments, "adopted")
+    _mounted_run(
+        directory,
+        memory_feedback=[
+            _feedback("curated/pit-read-budget", "invented", "x"),
+            {"verdict": "confirmed", "note": "no entry"},
+        ],
+    )
+    assert memory.memory_feedback(experiments)["entries"] == {}
+
+
+def test_the_routes_serve_the_badges_on_the_page_and_the_reports_in_the_pane(
+    tmp_path: Path,
+) -> None:
+    """Two projections of one aggregate: the page bundle carries counts only,
+    and the notes arrive when the reader selects an entry."""
+
+    _library(tmp_path)
+    experiments = tmp_path / "experiments"
+    experiments.mkdir()
+    directory = _experiment(experiments, "adopted")
+    _mounted_run(
+        directory,
+        memory_feedback=[
+            _feedback("curated/pit-read-budget", "wrong", "与本窗口观察不符。"),
+            _feedback(
+                "adopted/same-window-parent-control", "confirmed", "同窗对照同样成立。"
+            ),
+        ],
+    )
+    client = TestClient(create_app(tmp_path, experiments))
+
+    overview = client.get("/api/memory").json()
+    badges = overview["feedback"]["entries"]["curated/pit-read-budget"]
+    assert badges["counts"]["wrong"] == 1 and badges["experiments"] == 1
+    assert badges["disputed"] is False
+    assert "reports" not in badges
+    assert overview["feedback"]["unreadable"] == []
+
+    curated = client.get("/api/memory/curated/pit-read-budget").json()
+    assert curated["feedback"]["counts"]["wrong"] == 1
+    assert curated["feedback"]["reports"][0]["note"] == "与本窗口观察不符。"
+    assert curated["feedback"]["reports"][0]["experiment_id"] == "adopted"
+
+    candidate = client.get(
+        "/api/memory/graduated/adopted/same-window-parent-control"
+    ).json()
+    assert candidate["feedback"]["counts"]["confirmed"] == 1
+    # An entry nobody reported on still answers with an empty aggregate.
+    other = client.get("/api/memory/curated/output-dir-hygiene").json()
+    assert other["feedback"]["counts"] == {"confirmed": 0, "outdated": 0, "wrong": 0}
+    assert other["feedback"]["reports"] == []

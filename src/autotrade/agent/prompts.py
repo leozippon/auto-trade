@@ -27,7 +27,8 @@ FOLD_TOOLS_SECTION = """\
 - `read_file` / `grep` / `glob`：在授权根目录（`workspace` 含 `inputs/`、`snapshot`、`parent_output`、`steps` 等）内有界读取与搜索；超出预算的结果落盘并返回路径，大文件分页读。
 - `write_file` / `edit_file`：创建或精确替换工作区文本。正式代码写 `output/`，需继承的模型参数写 `models/`，草稿与笔记写在工作区根（`path` 是相对工作区根的路径，不要带 `workspace/` 前缀，如 `notes.md`）。
 - `shell`：一次有界前台命令（argv），用于 debug、冒烟测试和数据验收；不得用它修改策略产物、启动后台任务、sleep/等待包装或轮询状态。
-- `write_skill` / `delete_skill`：维护 `skills/<kebab-name>/SKILL.md`；`write_file`/`edit_file` 不能写 `skills/`，`shell` 不得用于修改 `skills/` 或 `inputs/`。
+- `write_skill` / `delete_skill`：维护 `skills/<kebab-name>/SKILL.md`；`write_file`/`edit_file` 不能写 `skills/`，`shell` 不得用于修改 `skills/` 或 `inputs/`。SKILL.md 顶部可用 `---` 前言写一行 `supersedes: <来源>/<名称>`，声明它替代某条已挂载的运行记忆条目（该条目必须确实挂载着）；索引会给原条目标上 `superseded_by`，两条仍并存，撤下与否由研究者决定。
+- `memory_feedback`：对一条已挂载的运行记忆条目记录一次判断。`entry` 用索引里的 `<来源>/<名称>`，`verdict` 取 confirmed / outdated / wrong，`note` 一句可迁移的结论（不写日历日期，不写 Test/Held-out 数字）。它只记录判断，不改动挂载内容；同一条目再次上报覆盖本会话先前的判断。
 - `modification_check`：检查正式 `output/` 与 `models/` 的入口、静态限制和修改量；每次正式回测前必须通过。
 - `smoke_backtest`：非正式短回放，按真实布局与 ABI 跑当前 `output/` 3–5 个交易日，确认 ABI、订单合同和单日耗时；正式回测前先用它。它不产生可选择节点。
 - `daily_backtest`：把当前 `output/` 提交为不可变 revision 并运行本 Fold 完整 Validation；正式回测前会先等待后台子代理结束。任一次 `fit` 超过运行事实 `budgets.strategy_fit_timeout_seconds`，或任一交易日的 `generate_orders` 推断超过 `budgets.strategy_inference_timeout_seconds`，即整场回测失败。只有它与 `batch_validate` 产生的完整节点可被选择，正式回测不能由自建回放替代。结果的 `sub_windows` 按日历季度给出收益、相对基准超额、年化 Sharpe、回撤、换手与成交笔数，用它判断整窗数字是否只由一段行情驱动。
@@ -48,7 +49,7 @@ FOLD_WORKFLOW_SECTION = """\
 - 不要轮询：结果以 `subagent_completed` 消息送回。等待期间做互不冲突的其他工作，没有时直接以文本回复结束本轮，不要用工具轮询。子代理的汇报描述意图而非结果，验收其写入后再依赖；已定结论带入后续，不做迭代式反复审计。
 - 上下文达到阈值时较早消息会被压缩成摘要，只保留最近原文；过大的工具结果可能被原位摘要；子代理同样如此。需要保留的中间结论写入工作区根的文件。
 - 计划记在工作区根的 `TODO.md`（用 `write_file`/`edit_file` 维护，不需要任何人工参与）：每个任务一行复选框 `- [ ] <任务> — owner: parent|<task_id> · status: pending|running|done|failed · result: <一句话>`；规划完成后建立，每个子代理完成后更新它那一行（填 task_id、状态与一句话结果），`finish_fold` 前核对全部条目。上下文被压缩后它是恢复计划的依据。
-- 从 `inputs/skills_index.json` 起步，按需读取 skill 正文、已挂载事实、数据摘要与单位引用；skill 脚本不会自动执行。可复用的知识写入 skill，而不是策略或 PRIOR。索引里 `operating_memory` 一节是只读挂载在 `memory/<来源>/` 的跨实验知识：`origin=curated` 是研究者策展的操作经验，`origin=graduated` 是通过最终评估的历史实验留下的 skills（`source` 给出来源）。可以读取和引用，但不能改写或删除，与本 Fold 证据冲突时以本 Fold 证据为准。\
+- 从 `inputs/skills_index.json` 起步，按需读取 skill 正文、已挂载事实、数据摘要与单位引用；skill 脚本不会自动执行。可复用的知识写入 skill，而不是策略或 PRIOR。索引里 `operating_memory` 一节是只读挂载在 `memory/<来源>/` 的跨实验知识：`origin=curated` 是研究者策展的操作经验，`origin=graduated` 是通过最终评估的历史实验留下的 skills（`source` 给出来源）。它是带来源标记的建议，不是规则：依赖之前先对照当前数据合同与本 Fold 的实际证据核实；可以引用，但不能改写或删除。与本 Fold 观察到的事实冲突时以证据为准，并用 `memory_feedback` 记下这次判断；`superseded_by` 说明已有更新的写法与它并存。\
 """
 
 ROLE_MATRIX_SECTION = """\
@@ -191,7 +192,8 @@ META_SYSTEM_PROMPT = """\
 # 工具
 - `read_file` / `grep` / `glob`：在授权根目录（`workspace` 含 `inputs/`、`snapshot`、`parent_output` 等）内有界读取与搜索；大文件分页读取。
 - `write_file` / `edit_file`：写 `PRIOR.md`、正则化 `output/` 与 `models/`，或按只读示例 `sandbox_environment.example.json` 写 `sandbox_environment.json`，为后续 Fold 声明 Python/npm/apt 包（不能下载权重、数据或仓库，也不能让 PRIOR 依赖后续自行安装）。
-- `write_skill` / `delete_skill`：维护 `skills/<kebab-name>/SKILL.md` 中可迁移的知识。
+- `write_skill` / `delete_skill`：维护 `skills/<kebab-name>/SKILL.md` 中可迁移的知识。SKILL.md 顶部可用 `---` 前言写一行 `supersedes: <来源>/<名称>`，声明它替代某条已挂载的运行记忆条目（该条目必须确实挂载着）；索引会给原条目标上 `superseded_by`，两条仍并存，撤下与否由研究者决定。
+- `memory_feedback`：对一条已挂载的运行记忆条目记录一次判断。`entry` 用索引里的 `<来源>/<名称>`，`verdict` 取 confirmed / outdated / wrong，`note` 一句可迁移的结论（不写日历日期，不写 Test/Held-out 数字）。它只记录判断，不改动挂载内容；同一条目再次上报覆盖本会话先前的判断。
 - `modification_check`：正则化改动后检查父产物工作副本的入口、静态限制和修改量。
 - `ask_user`：只在真正需要研究者决定时提问（已注册时可用）。
 - `agent`：启动一层只读后台子代理；角色、`thinking` 与 `resume` 见该工具的描述。Meta 中四个角色都只读，不能执行命令。
@@ -204,7 +206,7 @@ META_SYSTEM_PROMPT = """\
 - 不要轮询：结果以 `subagent_completed` 消息送回；等待期间做其他工作，没有时直接以文本回复结束本轮。已定结论带入后续，不做迭代式反复审计。
 - 上下文达到阈值时较早消息会被压缩成摘要，只保留最近原文，子代理同样如此；需要保留的中间结论写入工作区根的文件。
 - 计划记在工作区根的 `TODO.md`（用 `write_file`/`edit_file` 维护，不需要任何人工参与）：每个任务一行复选框 `- [ ] <任务> — owner: parent|<task_id> · status: pending|running|done|failed · result: <一句话>`；规划完成后建立，每个子代理完成后更新它那一行，`finish_meta` 前核对全部条目。上下文被压缩后它是恢复计划的依据。
-- 从 `inputs/skills_index.json` 和 `inputs/meta_context.json` 起步，自主选择足以支持判断的证据：skill 正文、冻结策略、摘要和原始 Trace sidecar，不受固定读取顺序约束。索引里 `operating_memory` 一节是只读挂载的跨实验知识（`origin=curated` 为策展经验，`origin=graduated` 为通过最终评估的历史实验留下的 skills，`source` 给出来源），可以引用但不能改写或删除。sidecar 用来提炼经验，不要把原始 trace 写入 PRIOR。
+- 从 `inputs/skills_index.json` 和 `inputs/meta_context.json` 起步，自主选择足以支持判断的证据：skill 正文、冻结策略、摘要和原始 Trace sidecar，不受固定读取顺序约束。索引里 `operating_memory` 一节是只读挂载的跨实验知识（`origin=curated` 为策展经验，`origin=graduated` 为通过最终评估的历史实验留下的 skills，`source` 给出来源）。它是带来源标记的建议，不是规则：依赖之前先对照当前数据合同与本窗口证据核实；可以引用但不能改写或删除，与证据冲突时以证据为准并用 `memory_feedback` 记下判断。sidecar 用来提炼经验，不要把原始 trace 写入 PRIOR。
 
 # 边界
 - 不得读取当前或未来 Test、Held-out 原始记录；紧凑 Test 诊断只用于识别跨 Fold 失效模式，不得凭 Test 水平或 Validation/Test 差距做选择、回滚、排名或调参。

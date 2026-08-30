@@ -12,6 +12,7 @@ import os
 import re
 import threading
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -323,6 +324,33 @@ class RunManifest:
             summaries.append(summary)
             self.data["backtest_summaries"] = summaries
             self.save()
+
+    def record_memory_feedback(
+        self, record: Mapping[str, object]
+    ) -> list[dict[str, object]]:
+        """One session's verdict on one mounted operating-memory entry.
+
+        The last word wins: a session that revisits an entry replaces its own
+        earlier verdict rather than stacking two, so the manifest holds this
+        session's conclusion, not its deliberation.
+        """
+
+        entry = str(record.get("entry") or "")
+        if not entry:
+            raise ValueError("memory feedback record needs an entry")
+        with self._lock:
+            raw = self.data.get("memory_feedback")
+            items = (
+                [dict(item) for item in raw if isinstance(item, Mapping)]
+                if isinstance(raw, list)
+                else []
+            )
+            items = [item for item in items if item.get("entry") != entry]
+            items.append(dict(record))
+            items.sort(key=lambda item: str(item.get("entry")))
+            self.data["memory_feedback"] = items
+            self.save()
+            return items
 
     def get(self, key: str, default: object = None) -> object:
         return self.data.get(key, default)

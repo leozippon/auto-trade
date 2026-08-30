@@ -778,7 +778,7 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
     @app.get("/api/memory/curated/{name}")
     def get_curated_memory(name: str) -> dict[str, object]:
         try:
-            return memory.curated_entry(root, name)
+            return memory.curated_entry(root, experiment_root, name)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail="invalid memory entry name") from exc
         except (KeyError, OSError) as exc:

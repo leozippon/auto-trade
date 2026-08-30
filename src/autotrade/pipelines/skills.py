@@ -61,6 +61,11 @@ ALLOWED_SKILL_SUFFIXES = frozenset(
 )
 _SKILL_NAME_RE = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
 _HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$")
+# Optional `---` front matter at the top of SKILL.md. One field, because the
+# format only needs to say one thing a heading cannot: which mounted entry this
+# skill is written to replace. Unknown fields are refused rather than ignored.
+FRONT_MATTER_FENCE = "---"
+SKILL_FRONT_MATTER_KEYS = frozenset({"supersedes"})
 
 
 @dataclass(frozen=True)
@@ -104,6 +109,70 @@ def validate_skill_name(name: str) -> str:
     if violation:
         raise ValueError(f"skill name violates the transferable boundary: {violation}")
     return value
+
+
+def validate_memory_entry_ref(value: str) -> tuple[str, str]:
+    """Split ``<source>/<name>`` — one mount source and one entry inside it.
+
+    ``source`` is the mount directory name: the reserved curated tier, or the id
+    of the graduated experiment the entry came from. This is the same string the
+    skills index publishes, so a reference the Agent writes back always names
+    something the index listed.
+    """
+
+    text = str(value).strip()
+    source, separator, name = text.partition("/")
+    if not separator or not source or not name:
+        raise ValueError("memory entry reference must be <source>/<name>")
+    if source != CURATED_MEMORY_SOURCE and (
+        Path(source).name != source or source.startswith(".")
+    ):
+        raise ValueError(
+            f"memory entry source must be {CURATED_MEMORY_SOURCE!r} or an experiment id"
+        )
+    return source, validate_skill_name(name)
+
+
+def parse_skill_front_matter(text: str) -> tuple[dict[str, str], str]:
+    """Split an optional ``---`` front-matter block off one ``SKILL.md`` body.
+
+    A skill without front matter is the normal case and parses to no fields, so
+    every existing entry stays valid. A malformed or unknown-keyed block is an
+    error: the field changes how the index relates two entries, and a silently
+    dropped one would leave the reader with the wrong relation.
+    """
+
+    lines = text.splitlines(keepends=True)
+    if not lines or lines[0].strip() != FRONT_MATTER_FENCE:
+        return {}, text
+    fields: dict[str, str] = {}
+    for index in range(1, len(lines)):
+        stripped = lines[index].strip()
+        if stripped == FRONT_MATTER_FENCE:
+            return fields, "".join(lines[index + 1 :])
+        if not stripped:
+            continue
+        key, separator, value = stripped.partition(":")
+        key = key.strip()
+        if not separator or not key:
+            raise ValueError(
+                f"skill front matter must be 'key: value' lines: {stripped[:40]!r}"
+            )
+        if key not in SKILL_FRONT_MATTER_KEYS:
+            raise ValueError(f"unknown skill front-matter field: {key}")
+        if key in fields:
+            raise ValueError(f"duplicate skill front-matter field: {key}")
+        fields[key] = value.strip()
+    raise ValueError(f"skill front matter is not closed by {FRONT_MATTER_FENCE}")
+
+
+def skill_front_matter(text: str) -> tuple[dict[str, str], str]:
+    """Front matter with every field validated in its own format."""
+
+    fields, body = parse_skill_front_matter(text)
+    if fields.get("supersedes"):
+        validate_memory_entry_ref(fields["supersedes"])
+    return fields, body
 
 
 def validate_skill_path(path: str) -> PurePosixPath:
@@ -195,10 +264,15 @@ def validate_skills_tree(
                 raise ValueError(f"skill file extension is not allowed: {relative}")
             payload = path.read_bytes()
             text = _decode_skill_file(path, payload)
-            if relative == PurePosixPath(SKILL_FILENAME) and len(text) > MAX_SKILL_CHARS:
-                raise ValueError(
-                    f"{item.name}/{SKILL_FILENAME} exceeds {MAX_SKILL_CHARS} characters"
-                )
+            if relative == PurePosixPath(SKILL_FILENAME):
+                if len(text) > MAX_SKILL_CHARS:
+                    raise ValueError(
+                        f"{item.name}/{SKILL_FILENAME} exceeds {MAX_SKILL_CHARS} characters"
+                    )
+                try:
+                    skill_front_matter(text)
+                except ValueError as exc:
+                    raise ValueError(f"{item.name}/{SKILL_FILENAME}: {exc}") from exc
             file_count += 1
             total_bytes += len(payload)
             if file_count > MAX_SKILLS_FILES:
@@ -258,19 +332,22 @@ def _index_entries(tree: Path, *, directory: str, origin: str) -> list[dict[str,
                     "bytes": size,
                 }
             )
-        body = (item / SKILL_FILENAME).read_text(encoding="utf-8")
-        title, summary = _skill_title_summary(body)
-        entries.append(
-            {
-                "name": item.name,
-                "title": title,
-                "summary": summary,
-                "path": f"{directory}/{item.name}/{SKILL_FILENAME}",
-                "files": files,
-                "bytes": item_bytes,
-                "origin": origin,
-            }
+        fields, body = skill_front_matter(
+            (item / SKILL_FILENAME).read_text(encoding="utf-8")
         )
+        title, summary = _skill_title_summary(body)
+        entry: dict[str, object] = {
+            "name": item.name,
+            "title": title,
+            "summary": summary,
+            "path": f"{directory}/{item.name}/{SKILL_FILENAME}",
+            "files": files,
+            "bytes": item_bytes,
+            "origin": origin,
+        }
+        if fields.get("supersedes"):
+            entry["supersedes"] = fields["supersedes"]
+        entries.append(entry)
     return entries
 
 
@@ -301,13 +378,39 @@ def build_skills_index(root: str | Path) -> dict[str, object]:
             ):
                 entry["source"] = source.name
                 memory.append(entry)
+    skills = _index_entries(tree, directory=SKILLS_DIRNAME, origin="session")
+    _mark_superseded(skills, memory)
     return {
-        "skills": _index_entries(tree, directory=SKILLS_DIRNAME, origin="session"),
+        "skills": skills,
         "operating_memory": memory,
         "count": stats.count,
         "files": stats.files,
         "bytes": stats.bytes,
     }
+
+
+def _mark_superseded(
+    skills: list[dict[str, object]], memory: list[dict[str, object]]
+) -> None:
+    """Show the relation without acting on it.
+
+    A skill that declares ``supersedes`` does not remove the entry it replaces:
+    both stay mounted, and the older one is marked so the session can see that a
+    successor exists and decide for itself. Withdrawing the original is the
+    researcher's call, made in the repository.
+    """
+
+    successors: dict[str, list[str]] = {}
+    for entry in (*skills, *memory):
+        target = str(entry.get("supersedes") or "")
+        if not target:
+            continue
+        reference = f"{entry.get('source') or 'session'}/{entry['name']}"
+        successors.setdefault(target, []).append(reference)
+    for entry in memory:
+        found = successors.get(f"{entry['source']}/{entry['name']}")
+        if found:
+            entry["superseded_by"] = sorted(found)
 
 
 def write_skills_index(root: str | Path, index_path: str | Path) -> SkillsStats:
@@ -627,6 +730,16 @@ def install_operating_memory(
     return tuple(sources)
 
 
+def _require_mounted_memory_entry(workspace_root: Path, reference: str) -> None:
+    """``supersedes`` may only name an entry this session actually mounted."""
+
+    source, name = validate_memory_entry_ref(reference)
+    if not (workspace_root / OPERATING_MEMORY_DIRNAME / source / name).is_dir():
+        raise ValueError(
+            f"supersedes must name a mounted operating-memory entry: {reference}"
+        )
+
+
 def _reject_operating_memory_name(workspace_root: Path, name: str) -> None:
     """Mounted memory is read-only; a session may not shadow it under its own name."""
 
@@ -831,8 +944,14 @@ class WriteSkillTool:
             content = str(arguments["content"])
             payload = content.encode("utf-8")
             _decode_skill_file(Path(name) / Path(relative.as_posix()), payload)
-            if relative == PurePosixPath(SKILL_FILENAME) and len(content) > MAX_SKILL_CHARS:
-                raise ValueError(f"SKILL.md exceeds {MAX_SKILL_CHARS} characters")
+            if relative == PurePosixPath(SKILL_FILENAME):
+                if len(content) > MAX_SKILL_CHARS:
+                    raise ValueError(f"SKILL.md exceeds {MAX_SKILL_CHARS} characters")
+                fields, _body = skill_front_matter(content)
+                if fields.get("supersedes"):
+                    _require_mounted_memory_entry(
+                        self.workspace.root, fields["supersedes"]
+                    )
             before = validate_skills_tree(self.root, require_writable=True)
             item = self.root / name
             target = item.joinpath(*relative.parts)
@@ -937,6 +1056,7 @@ __all__ = [
     "OPERATING_MEMORY_MODES",
     "MemorySource",
     "SKILLS_INDEX_PATH",
+    "SKILL_FRONT_MATTER_KEYS",
     "SkillsPublication",
     "SkillsSnapshot",
     "SkillsStats",
@@ -950,10 +1070,13 @@ __all__ = [
     "install_workspace_skills",
     "latest_skills_snapshot",
     "operating_memory_entries",
+    "parse_skill_front_matter",
     "read_graduated_exclusions",
     "resolve_operating_memory",
     "resolve_collected_skills_source",
+    "skill_front_matter",
     "skills_trees_equal",
+    "validate_memory_entry_ref",
     "validate_skill_name",
     "validate_skill_path",
     "validate_skills_tree",

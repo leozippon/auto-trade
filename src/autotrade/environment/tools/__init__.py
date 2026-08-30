@@ -24,6 +24,11 @@ from .files import EditFileTool, WriteFileTool
 from .finish_fold import FinishFoldTool
 from .finish_meta import FinishMetaTool
 from .hitl import AskUserTool
+from .memory_feedback import (
+    MAX_MEMORY_FEEDBACK_NOTE_CHARS,
+    MEMORY_FEEDBACK_VERDICTS,
+    MemoryFeedbackTool,
+)
 from .modification_check import ModificationCheckTool
 from .search import SEARCH_ROOTS, GlobTool, GrepTool, ReadFileTool, SearchRoots
 from .shell import SandboxShellTool
@@ -39,6 +44,9 @@ __all__ = [
     "FinishMetaTool",
     "GlobTool",
     "GrepTool",
+    "MAX_MEMORY_FEEDBACK_NOTE_CHARS",
+    "MEMORY_FEEDBACK_VERDICTS",
+    "MemoryFeedbackTool",
     "ModificationCheckTool",
     "ReadFileTool",
     "SEARCH_ROOTS",
