@@ -213,7 +213,11 @@ def main(argv: list[str] | None = None) -> int:
             end=end,
             host_dir=workspace / "asof_stash_build" / uuid.uuid4().hex,
         )
-        print(f"    asof stash {json.dumps(report, sort_keys=True)}", flush=True)
+        status = "reused" if report.pop("reused") else "built"
+        print(
+            f"    asof stash {status} {json.dumps(report, sort_keys=True)}",
+            flush=True,
+        )
     print(
         json.dumps(
             {

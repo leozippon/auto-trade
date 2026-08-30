@@ -10,7 +10,10 @@ import pytest
 import pandas as pd
 
 from autotrade.environment.data.snapshot import SnapshotConfig
+from autotrade.environment.strategy import StrategySchedule
+from autotrade.pipelines import pit_backend
 from autotrade.pipelines.config import SNAPSHOT_CACHE_FORMAT_VERSION
+from autotrade.pipelines.pit_backend import prebuild_asof_stash
 from autotrade.pipelines.pit_views_seed import (
     iter_plan_pit_jobs,
     pit_cache_provider_record,
@@ -203,6 +206,119 @@ def test_provider_record_carries_the_cache_contract(tmp_path: Path) -> None:
     assert record["schema_version"] == SNAPSHOT_CACHE_FORMAT_VERSION
     assert record["generation_id"] == "generation_test"
     assert "snapshot_config" in record
+
+
+def _daily_frame(days: list[str]) -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "trade_date": days,
+            "ts_code": ["000001.SZ"] * len(days),
+            "close": [10.0] * len(days),
+            "available_at": [
+                f"{day[:4]}-{day[4:6]}-{day[6:]}T17:30:00+08:00" for day in days
+            ],
+        }
+    )
+
+
+def _stash_slots(tmp_path: Path) -> tuple[Path, Path]:
+    """A minimal PIT cache root: one decision slot and a three-day replay slot."""
+
+    cache_root = tmp_path / "pit_views"
+    snapshot = cache_root / "decision" / "20240101T235959+0800"
+    replay = cache_root / "replay" / "valid" / "20240102_20240104_20240101T235959+0800"
+    snapshot.mkdir(parents=True)
+    replay.mkdir(parents=True)
+    (cache_root / "provider.json").write_text(
+        json.dumps(_record(tmp_path / "raw")), encoding="utf-8"
+    )
+    raw_generation = {"generation_id": "generation_test"}
+    (snapshot / "manifest.json").write_text(
+        json.dumps({"kind": "decision_input", "raw_generation": raw_generation}),
+        encoding="utf-8",
+    )
+    (replay / "manifest.json").write_text(
+        json.dumps(
+            {"kind": "replay_slot", "label": "valid", "raw_generation": raw_generation}
+        ),
+        encoding="utf-8",
+    )
+    _daily_frame(["20240101"]).to_parquet(snapshot / "daily.parquet", index=False)
+    _daily_frame(["20240102", "20240103", "20240104"]).to_parquet(
+        replay / "daily.parquet", index=False
+    )
+    return snapshot, replay
+
+
+def _prebuild_stash(tmp_path: Path, slots: tuple[Path, Path], host: str) -> dict[str, object]:
+    snapshot, replay = slots
+    return prebuild_asof_stash(
+        snapshot_dir=snapshot,
+        replay_dir=replay,
+        schedule=StrategySchedule("day", "08:30"),
+        phase="valid",
+        generation_id="generation_test",
+        start="20240102",
+        end="20240104",
+        host_dir=tmp_path / "host" / host,
+    )
+
+
+def test_finished_stash_is_reused_instead_of_replayed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A seed prebuild is idempotent: the second run replays nothing.
+
+    The prebuild is the expensive half of seeding a region, and a killed run is
+    restarted from the top, so a stash this contract already finished must be
+    detected rather than encoded again.
+    """
+
+    slots = _stash_slots(tmp_path)
+    built = _prebuild_stash(tmp_path, slots, "first")
+    stash = Path(str(built["stash_dir"]))
+    assert built["reused"] is False
+    assert built["refresh_calls"] == 3
+    # Part 0000 is the frozen decision snapshot, which the stash never holds:
+    # only the rolling parts the replay encodes are shared.
+    parts = sorted(path.name for path in (stash / "daily").glob("part_*.parquet"))
+    assert parts == ["part_0001.parquet", "part_0002.parquet"]
+    inodes = {path: path.stat().st_ino for path in (stash / "daily").iterdir()}
+
+    def no_replay(*args: object, **kwargs: object) -> object:
+        raise AssertionError("a finished stash must not be replayed again")
+
+    monkeypatch.setattr(pit_backend, "Timeview", no_replay)
+    reused = _prebuild_stash(tmp_path, slots, "second")
+    assert reused["reused"] is True
+    assert reused["refresh_calls"] == 0
+    assert reused["trade_days"] == built["trade_days"]
+    assert reused["stash_dir"] == built["stash_dir"]
+    assert {path: path.stat().st_ino for path in (stash / "daily").iterdir()} == inodes
+
+
+def test_incomplete_stash_is_never_taken_for_a_finished_one(tmp_path: Path) -> None:
+    """A prebuild killed mid-window, or a stash that lost a part, rebuilds."""
+
+    slots = _stash_slots(tmp_path)
+    built = _prebuild_stash(tmp_path, slots, "first")
+    stash = Path(str(built["stash_dir"]))
+
+    # Killed before the window finished: parts on disk, no finished record.
+    record = stash / "prebuild.json"
+    kept = record.read_text(encoding="utf-8")
+    record.unlink()
+    assert _prebuild_stash(tmp_path, slots, "second")["reused"] is False
+    assert record.is_file()
+
+    # A part has since gone missing: the record alone does not make it complete.
+    record.write_text(kept, encoding="utf-8")
+    missing = stash / "daily" / "part_0002.parquet"
+    missing.unlink()
+    rebuilt = _prebuild_stash(tmp_path, slots, "third")
+    assert rebuilt["reused"] is False
+    assert rebuilt["refresh_calls"] == 3
+    assert missing.is_file()
 
 
 def _business_days() -> list[str]:

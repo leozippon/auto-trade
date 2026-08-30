@@ -970,6 +970,8 @@ class _AsOfReadOnlyView:
 # schedule, slot keys) instead of the paths and snapshot_ids of one build, so
 # one region's phases and an offline prebuild share a single stash.
 _STASH_CONTRACT_SCHEMA_VERSION = 2
+# What a finished offline prebuild leaves inside the stash it filled.
+_STASH_PREBUILD_RECORD = "prebuild.json"
 _ReplayFrameCache = dict[
     str, tuple[dict[str, object], dict[str, pd.DataFrame]]
 ]
@@ -1145,6 +1147,12 @@ def prebuild_asof_stash(
     the parts are published through the same stash contract, so a later
     backtest hardlinks them instead of re-encoding. ``host_dir`` receives the
     throwaway as-of tree and is removed afterwards.
+
+    Idempotent: a prebuild that already finished this region under the same
+    contract left ``prebuild.json`` naming the region and the parts, so a rerun
+    returns that record (``reused``) without replaying the window. Reuse is the
+    only work skipped — a hardlinked part is still row-count checked against a
+    fresh slice when an evaluation actually reads it.
     """
 
     snapshot = Path(snapshot_dir).resolve(strict=True)
@@ -1162,6 +1170,15 @@ def prebuild_asof_stash(
         replay_manifest=replay_manifest,
     )
     started = perf_counter()
+    finished = _finished_stash_prebuild(stash_dir, start=start, end=end)
+    if finished is not None:
+        return {
+            "stash_dir": str(stash_dir),
+            "trade_days": int(finished["trade_days"]),  # type: ignore[arg-type]
+            "refresh_calls": 0,
+            "seconds": round(perf_counter() - started, 1),
+            "reused": True,
+        }
     frames = _load_replay_frames(
         replay,
         generation_id=generation_id,
@@ -1206,12 +1223,62 @@ def prebuild_asof_stash(
             previous = trade_date
     finally:
         shutil.rmtree(host, ignore_errors=True)
+    # Written only once the whole window has been replayed, so a prebuild
+    # killed mid-window leaves no record and the next one resumes the build.
+    write_json_atomic(
+        stash_dir / _STASH_PREBUILD_RECORD,
+        {
+            "start": start,
+            "end": end,
+            "trade_days": len(trade_dates),
+            "refresh_calls": refreshes,
+            "parts": _stash_part_counts(stash_dir),
+        },
+    )
     return {
         "stash_dir": str(stash_dir),
         "trade_days": len(trade_dates),
         "refresh_calls": refreshes,
         "seconds": round(perf_counter() - started, 1),
+        "reused": False,
     }
+
+
+def _stash_part_counts(stash_dir: Path) -> dict[str, int]:
+    """How many parts each domain of the stash holds right now."""
+
+    return {
+        domain.name: len(list(domain.glob("part_*.parquet")))
+        for domain in sorted(stash_dir.iterdir())
+        if domain.is_dir() and not domain.is_symlink()
+    }
+
+
+def _finished_stash_prebuild(
+    stash_dir: Path, *, start: str, end: str
+) -> dict[str, object] | None:
+    """The finished prebuild record for ``start..end``, or None to build.
+
+    A stash directory cannot say by itself whether it is complete: a domain
+    writes a part only at the refresh instants where it actually grows, so the
+    part set is a result of the replay, not something the region predicts. The
+    finishing prebuild therefore records the region it covered and the parts it
+    left, and this reads that record back. Anything else — no record (a run
+    killed mid-window), another region, or a part set that no longer matches —
+    rebuilds, which republishes the record.
+    """
+
+    path = stash_dir / _STASH_PREBUILD_RECORD
+    if not path.is_file():
+        return None
+    record = _read_json(path)
+    if record.get("start") != start or record.get("end") != end:
+        return None
+    if "trade_days" not in record:
+        raise RuntimeError(f"PIT stash prebuild record is incomplete: {path}")
+    if record.get("parts") != _stash_part_counts(stash_dir):
+        return None
+    return record
 
 
 def _safe_path_component(value: object, *, label: str) -> str:
