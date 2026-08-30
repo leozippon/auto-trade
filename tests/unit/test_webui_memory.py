@@ -1,11 +1,14 @@
-"""Operating-memory console read model: library, tier gate, mounts, routes.
+"""Operating-memory console model: library, tier gate, mounts, curated CRUD.
 
-The view is read-only, so the invariants worth testing are what it refuses to
-show and what it refuses to invent: a malformed library reports an error rather
-than an empty shelf, an experiment that has not revealed its held-out results
-publishes no verdict here either, admission is never recomputed beside
-``skills.graduated_memory_sources``, and nothing crosses the HTTP boundary
-carrying a host path or a raw run identity.
+The read view's invariants are what it refuses to show and what it refuses to
+invent: a malformed library reports an error rather than an empty shelf, an
+experiment that has not revealed its held-out results publishes no verdict here
+either, admission is never recomputed beside ``skills.graduated_memory_sources``,
+and nothing crosses the HTTP boundary carrying a host path or a raw run identity.
+
+The curated writes add three of their own: an entry a session would refuse never
+reaches the library, the library is never left half-written, and the writes are
+accepted only from the local console — the public edge keeps the read-only page.
 
 Every fixture is synthesized in a tempfile repo root exactly as the pipeline
 writes it: a curated library under ``configs/operating_memory/``, experiment
@@ -25,9 +28,11 @@ from autotrade.environment.identity import AgentRefStore
 from autotrade.pipelines.hitl_state import ControlState, write_control
 from autotrade.pipelines.ledger import ExperimentLedger
 from autotrade.pipelines.skills import (
+    MAX_SKILL_CHARS,
     OPERATING_MEMORY_LIBRARY,
     ExperimentSkillsStore,
     build_skills_index,
+    validate_skills_tree,
 )
 from autotrade.webui import memory
 from autotrade.webui.server import create_app
@@ -65,6 +70,7 @@ def _experiment(
     verdict: str | None = "graduated",
     revealed: bool = True,
     skills: bool = True,
+    reference: str = "",
 ) -> Path:
     """One finished experiment: skills generation, ledger, reveal state."""
 
@@ -86,6 +92,9 @@ def _experiment(
         (item / "SKILL.md").write_text(
             "# 同窗父本对照\n\n候选与父本在同一窗口各跑一次再比较。\n", encoding="utf-8"
         )
+        if reference:
+            (item / "references").mkdir()
+            (item / "references" / "notes.md").write_text(reference, encoding="utf-8")
         publication = ExperimentSkillsStore(directory).publish(
             source, generation_id="gen-1"
         )
@@ -461,3 +470,366 @@ def test_the_console_routes_serve_the_keys_the_page_reads(tmp_path: Path) -> Non
     assert {"experiment_id", "mode", "default_mode", "sessions"} <= mounted.json().keys()
     assert mounted.json()["sessions"][0]["sources"][0]["source"] == "curated"
     assert client.get("/api/experiments/unknown/memory").status_code == 404
+
+
+# ---- curated writes -------------------------------------------------------
+
+PUBLIC_EDGE = {"X-Forwarded-For": "203.0.113.7"}
+
+
+def _entry_names(payload: dict) -> list[str]:
+    return [entry["name"] for entry in payload["curated"]["entries"]]
+
+
+def _staging_leftovers(repo_root: Path) -> list[str]:
+    """The swap stages beside the library; a failed write must leave nothing."""
+
+    return sorted(
+        item.name
+        for item in (repo_root / OPERATING_MEMORY_LIBRARY).parent.iterdir()
+        if item.name.startswith(".")
+    )
+
+
+def test_a_created_entry_is_readable_by_the_mount_and_listed_back(
+    tmp_path: Path,
+) -> None:
+    """The write's whole point: what lands must be what a session would mount,
+    and the caller must not have to guess what the library now holds."""
+
+    _library(tmp_path)
+    result = memory.create_curated_entry(
+        tmp_path, "cash-buffer-rule", "# 现金缓冲\n\n留出一天的申赎缓冲。\n"
+    )
+    assert result["action"] == "created"
+    assert "sessions started afterwards" in str(result["note"])
+    assert _entry_names(result) == [
+        "cash-buffer-rule",
+        "output-dir-hygiene",
+        "pit-read-budget",
+    ]
+    library = tmp_path / OPERATING_MEMORY_LIBRARY
+    # The mount's own validator, and the index the Agent reads, both accept it.
+    assert validate_skills_tree(library, require_writable=False).count == 3
+    indexed = {entry["name"]: entry for entry in build_skills_index(library)["skills"]}
+    assert indexed["cash-buffer-rule"]["title"] == "现金缓冲"
+    assert memory.curated_entry(tmp_path, "cash-buffer-rule")["content"].startswith(
+        "# 现金缓冲"
+    )
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["Not_Kebab", "../escape", "nested/name", "", "curated"],
+)
+def test_a_name_the_mount_layout_refuses_never_reaches_the_library(
+    tmp_path: Path, name: str
+) -> None:
+    """``curated`` is the mount's own directory name; the rest are the shared
+    skill-name rule, which is also what stops a path escape."""
+
+    _library(tmp_path)
+    with pytest.raises(ValueError):
+        memory.create_curated_entry(tmp_path, name, "# x\n")
+    assert sorted(
+        item.name for item in (tmp_path / OPERATING_MEMORY_LIBRARY).iterdir()
+    ) == ["output-dir-hygiene", "pit-read-budget"]
+    assert _staging_leftovers(tmp_path) == []
+
+
+def test_a_body_the_skill_format_refuses_leaves_the_library_untouched(
+    tmp_path: Path,
+) -> None:
+    _library(tmp_path)
+    before = memory.curated_library(tmp_path)["entries"]
+    with pytest.raises(ValueError):
+        memory.create_curated_entry(tmp_path, "too-long", "x" * (MAX_SKILL_CHARS + 1))
+    assert not (tmp_path / OPERATING_MEMORY_LIBRARY / "too-long").exists()
+    assert memory.curated_library(tmp_path)["entries"] == before
+    assert _staging_leftovers(tmp_path) == []
+
+
+def test_creating_over_an_existing_entry_is_refused_not_silently_merged(
+    tmp_path: Path,
+) -> None:
+    _library(tmp_path)
+    with pytest.raises(FileExistsError):
+        memory.create_curated_entry(tmp_path, "pit-read-budget", "# 覆盖\n")
+    assert memory.curated_entry(tmp_path, "pit-read-budget")["content"].startswith(
+        "# PIT 读取预算"
+    )
+
+
+def test_an_edit_replaces_the_body_and_keeps_the_entry_s_other_files(
+    tmp_path: Path,
+) -> None:
+    _library(tmp_path)
+    item = tmp_path / OPERATING_MEMORY_LIBRARY / "pit-read-budget"
+    (item / "references").mkdir()
+    (item / "references" / "notes.md").write_text("附注\n", encoding="utf-8")
+    result = memory.update_curated_entry(tmp_path, "pit-read-budget", "# 新正文\n\n改过。\n")
+    assert result["action"] == "updated"
+    assert (item / "SKILL.md").read_text(encoding="utf-8") == "# 新正文\n\n改过。\n"
+    assert (item / "references" / "notes.md").read_text(encoding="utf-8") == "附注\n"
+    # Two entries, three files: the edit replaced one body, not the item.
+    assert validate_skills_tree(
+        tmp_path / OPERATING_MEMORY_LIBRARY, require_writable=False
+    ).files == 3
+
+
+def test_editing_an_absent_entry_is_a_missing_entry_not_a_create(
+    tmp_path: Path,
+) -> None:
+    _library(tmp_path)
+    with pytest.raises(KeyError):
+        memory.update_curated_entry(tmp_path, "not-curated", "# x\n")
+    assert not (tmp_path / OPERATING_MEMORY_LIBRARY / "not-curated").exists()
+
+
+def test_a_delete_removes_the_whole_item_and_says_what_it_does_not_touch(
+    tmp_path: Path,
+) -> None:
+    """Running sessions hold their own read-only copy, so the delete is allowed
+    while they run; the response is where that is said."""
+
+    _library(tmp_path)
+    result = memory.delete_curated_entry(tmp_path, "pit-read-budget")
+    assert result["action"] == "deleted"
+    assert "running sessions keep" in str(result["note"])
+    assert _entry_names(result) == ["output-dir-hygiene"]
+    assert not (tmp_path / OPERATING_MEMORY_LIBRARY / "pit-read-budget").exists()
+    assert _staging_leftovers(tmp_path) == []
+    with pytest.raises(KeyError):
+        memory.delete_curated_entry(tmp_path, "pit-read-budget")
+
+
+def test_a_library_the_mount_refuses_blocks_new_entries_but_can_be_repaired(
+    tmp_path: Path,
+) -> None:
+    """An entry cannot be added to a library a session would already refuse —
+    and deleting the offending item is how the console repairs it."""
+
+    _library(tmp_path)
+    (tmp_path / OPERATING_MEMORY_LIBRARY / "no-skill-md").mkdir()
+    with pytest.raises(ValueError):
+        memory.create_curated_entry(tmp_path, "cash-buffer-rule", "# 现金缓冲\n")
+    result = memory.delete_curated_entry(tmp_path, "no-skill-md")
+    assert "error" not in result["curated"]
+    assert memory.create_curated_entry(tmp_path, "cash-buffer-rule", "# 现金缓冲\n")[
+        "action"
+    ] == "created"
+
+
+def test_a_name_a_running_experiment_still_maintains_is_refused(
+    tmp_path: Path,
+) -> None:
+    """Mounted memory is read-only and a session may not shadow it under its own
+    name, so this entry would stop that experiment's next session from
+    maintaining its own skill."""
+
+    _library(tmp_path)
+    experiments = tmp_path / "experiments"
+    experiments.mkdir()
+    _experiment(experiments, "adopted")
+    with pytest.raises(ValueError, match="adopted"):
+        memory.create_curated_entry(
+            tmp_path,
+            "same-window-parent-control",
+            "# 同窗父本对照\n",
+            experiments_root=experiments,
+            live_experiments=["adopted"],
+        )
+    # Nothing is running: the same name is then just a normal promotion target.
+    assert memory.create_curated_entry(
+        tmp_path,
+        "same-window-parent-control",
+        "# 同窗父本对照\n",
+        experiments_root=experiments,
+        live_experiments=[],
+    )["action"] == "created"
+
+
+def test_a_promotion_copies_the_admitted_skill_verbatim(tmp_path: Path) -> None:
+    """The whole item is what the mount would have carried, ``references/``
+    included, so that is what the curated copy starts from."""
+
+    _library(tmp_path)
+    experiments = tmp_path / "experiments"
+    experiments.mkdir()
+    _experiment(experiments, "adopted", reference="父本对照读法\n")
+    result = memory.promote_curated_entry(
+        tmp_path,
+        experiments,
+        name="parent-control-reading",
+        experiment_id="adopted",
+        skill="same-window-parent-control",
+    )
+    assert result["action"] == "promoted"
+    item = tmp_path / OPERATING_MEMORY_LIBRARY / "parent-control-reading"
+    assert item.joinpath("SKILL.md").read_text(encoding="utf-8").startswith("# 同窗父本对照")
+    assert item.joinpath("references/notes.md").read_text(encoding="utf-8") == "父本对照读法\n"
+    # Landed writable in the repository, not as the read-only generation copy.
+    assert validate_skills_tree(tmp_path / OPERATING_MEMORY_LIBRARY, require_writable=True)
+
+
+def test_a_promotion_can_only_copy_from_a_candidate_the_page_offers(
+    tmp_path: Path,
+) -> None:
+    """One admission rule, and the console's reveal gate: an unrevealed or
+    discarded experiment is not a promotion source, or this route would answer a
+    held-out question the page refuses to answer."""
+
+    _library(tmp_path)
+    experiments = tmp_path / "experiments"
+    experiments.mkdir()
+    _experiment(experiments, "adopted")
+    _experiment(experiments, "not_adopted", verdict="discarded")
+    _experiment(experiments, "mid_heldout", revealed=False)
+    for experiment_id, skill in (
+        ("adopted", "no-such-skill"),
+        ("not_adopted", "same-window-parent-control"),
+        ("mid_heldout", "same-window-parent-control"),
+        ("unknown", "same-window-parent-control"),
+    ):
+        with pytest.raises(KeyError):
+            memory.promote_curated_entry(
+                tmp_path,
+                experiments,
+                name="promoted-entry",
+                experiment_id=experiment_id,
+                skill=skill,
+            )
+    assert not (tmp_path / OPERATING_MEMORY_LIBRARY / "promoted-entry").exists()
+    assert _staging_leftovers(tmp_path) == []
+
+
+# ---- write routes ---------------------------------------------------------
+
+
+def test_the_curated_write_routes_carry_one_crud_cycle(tmp_path: Path) -> None:
+    _library(tmp_path)
+    experiments = tmp_path / "experiments"
+    experiments.mkdir()
+    _experiment(experiments, "adopted")
+    client = TestClient(create_app(tmp_path, experiments))
+
+    created = client.post(
+        "/api/memory/curated",
+        json={"name": "cash-buffer-rule", "content": "# 现金缓冲\n\n留出缓冲。\n"},
+    )
+    assert created.status_code == 200
+    assert {"name", "action", "note", "curated"} <= created.json().keys()
+    assert "cash-buffer-rule" in _entry_names(created.json())
+
+    edited = client.put(
+        "/api/memory/curated/cash-buffer-rule", json={"content": "# 现金缓冲\n\n改过。\n"}
+    )
+    assert edited.status_code == 200
+    assert client.get("/api/memory/curated/cash-buffer-rule").json()["content"].endswith(
+        "改过。\n"
+    )
+
+    promoted = client.post(
+        "/api/memory/curated/parent-control-reading/promote",
+        json={"experiment_id": "adopted", "skill": "same-window-parent-control"},
+    )
+    assert promoted.status_code == 200
+    assert "parent-control-reading" in _entry_names(promoted.json())
+
+    deleted = client.delete("/api/memory/curated/cash-buffer-rule")
+    assert deleted.status_code == 200
+    assert "cash-buffer-rule" not in _entry_names(deleted.json())
+
+
+def test_the_write_routes_map_each_refusal_to_its_own_status(tmp_path: Path) -> None:
+    _library(tmp_path)
+    experiments = tmp_path / "experiments"
+    experiments.mkdir()
+    client = TestClient(create_app(tmp_path, experiments))
+
+    for name in ("Not_Kebab", "curated", "..", "nested%2Fname"):
+        response = client.post(
+            "/api/memory/curated", json={"name": name, "content": "# x\n"}
+        )
+        assert response.status_code == 400, name
+    assert (
+        client.post(
+            "/api/memory/curated",
+            json={"name": "pit-read-budget", "content": "# x\n"},
+        ).status_code
+        == 409
+    )
+    assert client.put("/api/memory/curated/absent-entry", json={"content": "# x\n"}).status_code == 404
+    assert client.delete("/api/memory/curated/absent-entry").status_code == 404
+    assert (
+        client.post(
+            "/api/memory/curated/promoted-entry/promote",
+            json={"experiment_id": "unknown", "skill": "same-window-parent-control"},
+        ).status_code
+        == 404
+    )
+    # A refusal must not hand the host tree back with the reason.
+    detail = client.post(
+        "/api/memory/curated",
+        json={"name": "too-long", "content": "x" * (MAX_SKILL_CHARS + 1)},
+    ).json()["detail"]
+    assert "16000" in detail and str(tmp_path) not in detail
+    assert _entry_names({"curated": client.get("/api/memory").json()["curated"]}) == [
+        "output-dir-hygiene",
+        "pit-read-budget",
+    ]
+
+
+def test_the_public_edge_gets_the_read_only_page_and_no_write(tmp_path: Path) -> None:
+    """The library is a tracked repository directory: the edge forwards every
+    request with X-Forwarded-*, and those requests may only read."""
+
+    _library(tmp_path)
+    experiments = tmp_path / "experiments"
+    experiments.mkdir()
+    client = TestClient(create_app(tmp_path, experiments))
+
+    assert client.get("/api/memory").json()["writable"] is True
+    assert client.get("/api/memory", headers=PUBLIC_EDGE).json()["writable"] is False
+    for method, path, body in (
+        ("post", "/api/memory/curated", {"name": "cash-buffer-rule", "content": "# x\n"}),
+        ("put", "/api/memory/curated/pit-read-budget", {"content": "# x\n"}),
+        ("delete", "/api/memory/curated/pit-read-budget", None),
+        (
+            "post",
+            "/api/memory/curated/promoted-entry/promote",
+            {"experiment_id": "adopted", "skill": "same-window-parent-control"},
+        ),
+    ):
+        call = getattr(client, method)
+        response = (
+            call(path, headers=PUBLIC_EDGE)
+            if body is None
+            else call(path, json=body, headers=PUBLIC_EDGE)
+        )
+        assert response.status_code == 403, path
+    assert memory.curated_library(tmp_path)["entries"][1]["name"] == "pit-read-budget"
+    assert not (tmp_path / OPERATING_MEMORY_LIBRARY / "cash-buffer-rule").exists()
+
+
+def test_only_the_local_console_reads_the_bytes_an_edit_would_save_back(
+    tmp_path: Path,
+) -> None:
+    """Redaction rewrites host paths, so serving the redacted body to the editor
+    would silently save the placeholder over the real line."""
+
+    _library(tmp_path)
+    _curated(
+        tmp_path,
+        "workspace-path-rules",
+        f"# 路径规则\n\n不要写 {HOST_PATH}。\n",
+    )
+    client = TestClient(create_app(tmp_path, tmp_path / "experiments"))
+
+    local = client.get("/api/memory/curated/workspace-path-rules").json()
+    assert local["redacted"] is False and HOST_PATH in local["content"]
+    public = client.get(
+        "/api/memory/curated/workspace-path-rules", headers=PUBLIC_EDGE
+    ).json()
+    assert public["redacted"] is True and HOST_PATH not in public["content"]
+    assert "[host path omitted]" in public["content"]

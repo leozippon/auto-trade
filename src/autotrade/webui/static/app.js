@@ -6817,10 +6817,16 @@ function heldoutPanel(detail, session) {
 }
 
 /* ---------------- 运行记忆 ----------------
-   Read-only view of the cross-experiment knowledge a session mounts: the
-   curated library committed in the repository, the graduated tier as it would
-   be admitted right now, and — inside an experiment — what its own sessions
-   actually mounted. Nothing here promotes, edits or removes an entry. */
+   Two panes over the cross-experiment knowledge a session mounts: the curated
+   library on the left, its viewer/editor on the right, and the graduated tier
+   below. The library is a tracked repository directory that every session
+   copies read-only into its workspace at session start, so a write here
+   reaches sessions started afterwards and never the ones already running, and
+   the researcher still commits it. Writes land only on the local console: the
+   public edge is served `writable: false` and the read-only page it always had.
+   Inside an experiment, 已挂载记忆 stays what THAT experiment mounted. */
+
+let memoryView = null; // {payload, filter, selected, entry, mode, draft, dirty, …}
 
 function fmtBytes(value) {
   const bytes = Number(value);
@@ -6828,10 +6834,20 @@ function fmtBytes(value) {
   return bytes < 1024 ? `${bytes} B` : `${(bytes / 1024).toFixed(1)} KB`;
 }
 
+function memoryLibraryPath() {
+  const curated = (memoryView && memoryView.payload.curated) || {};
+  return curated.library || "configs/operating_memory";
+}
+
+function memoryWritable() {
+  return Boolean(memoryView && memoryView.payload.writable);
+}
+
 async function renderMemoryPage() {
+  memoryView = null;
   $main.innerHTML = '<div class="loading">加载运行记忆…</div>';
   $topbarRight.replaceChildren(
-    el("span", { class: "mode-note" }, "跨实验只读知识"),
+    el("span", { class: "mode-note" }, "跨实验知识"),
   );
   let payload;
   try {
@@ -6842,6 +6858,20 @@ async function renderMemoryPage() {
     );
     return;
   }
+  memoryView = {
+    payload,
+    filter: "",
+    selected: null,
+    entry: null,
+    mode: "view", // view | edit | create | promote
+    draft: null,
+    draftName: "",
+    source: null,
+    dirty: false,
+    listHost: el("div", { class: "session-list" }),
+    paneHost: el("div", { class: "session-detail" }),
+    countHost: el("span", {}, ""),
+  };
   $main.replaceChildren(
     el(
       "div",
@@ -6856,100 +6886,503 @@ async function renderMemoryPage() {
           `每个 Fold 与元学习会话按来源只读挂载到 memory/<来源>/ ｜ 默认模式 ${payload.default_mode || "—"}`,
         ),
       ),
-      curatedMemoryPanel(payload.curated || {}),
+      memoryNotice(),
+      el(
+        "div",
+        { class: "detail section-gap" },
+        curatedLibraryPanel(),
+        memoryView.paneHost,
+      ),
       graduatedTierPanel(payload.graduated || {}),
     ),
   );
+  renderMemoryList();
+  renderMemoryPane();
 }
 
-function curatedMemoryPanel(curated) {
-  const entries = curated.entries || [];
-  const panel = el(
+/* Persistent, not a toast: when a change takes effect and where it lives are
+   the two facts the resulting listing cannot show. */
+function memoryNotice() {
+  const notice = el(
     "div",
-    { class: "panel section-gap" },
-    el("h4", {}, `策展库（${entries.length} 条）`),
+    { class: "panel memory-notice" },
     el(
       "div",
       { class: "hint" },
-      `由研究者维护在 ${curated.library || "configs/operating_memory"}，随代码提交；挂载为 memory/${curated.source || "curated"}/`,
+      `策展库是仓库目录 ${memoryLibraryPath()}/，纳入版本控制，改动由研究者自行提交。挂载发生在会话启动时，因此新增、修改和删除只对此后启动的会话生效；运行中的会话保留启动时挂载的只读副本。`,
     ),
   );
-  if (curated.error) {
-    panel.append(el("div", { class: "hint warn" }, `策展库不可读：${curated.error}`));
-    return panel;
-  }
-  if (!entries.length) {
-    panel.append(el("div", { class: "empty" }, "策展库为空"));
-    return panel;
-  }
-  const table = el(
-    "table",
-    { class: "data section-gap" },
-    el(
-      "tr",
-      {},
-      el("th", {}, "条目"),
-      el("th", {}, "标题"),
-      el("th", {}, "摘要"),
-      el("th", {}, "文件"),
-      el("th", {}, "大小"),
-    ),
-    ...entries.map((entry) =>
+  if (!memoryWritable())
+    notice.append(
       el(
-        "tr",
-        {},
-        el(
-          "td",
-          {},
-          el(
-            "button",
-            {
-              class: "btn small",
-              title: "查看 SKILL.md 原文",
-              onclick: () => openCuratedEntry(entry.name),
-            },
-            entry.name,
-          ),
-        ),
-        el("td", {}, entry.title || "—"),
-        el("td", { class: "hint" }, entry.summary || "—"),
-        el("td", {}, String(entry.files ?? "—")),
-        el("td", {}, fmtBytes(entry.bytes)),
+        "div",
+        { class: "hint warn" },
+        "当前不是本机控制台：正文按公开表面规则脱敏展示，新建、编辑、删除与晋升只在本机控制台可用。",
       ),
-    ),
+    );
+  return notice;
+}
+
+function curatedLibraryPanel() {
+  const curated = memoryView.payload.curated || {};
+  memoryView.countHost.textContent = String((curated.entries || []).length);
+  const filter = el("input", {
+    type: "text",
+    placeholder: "过滤条目…",
+    oninput: (event) => {
+      memoryView.filter = event.target.value;
+      renderMemoryList();
+    },
+  });
+  const bar = el("div", { class: "control-bar" });
+  if (memoryWritable())
+    bar.append(
+      el(
+        "button",
+        { class: "btn small primary", onclick: () => startCuratedCreate() },
+        "新建",
+      ),
+    );
+  bar.append(el("div", { class: "field memory-filter" }, filter));
+  const panel = el(
+    "div",
+    { class: "panel" },
+    el("h4", {}, "策展库（", memoryView.countHost, " 条）"),
+    bar,
+    memoryView.listHost,
   );
-  panel.append(table);
+  if (curated.error)
+    panel.append(
+      el("div", { class: "hint warn" }, `策展库不可读：${curated.error}`),
+    );
   return panel;
 }
 
-/* Plain preformatted text on purpose: the console ships no markdown renderer
-   for skill bodies, and the researcher reads exactly what the Agent reads. */
-async function openCuratedEntry(name) {
-  let payload;
-  try {
-    payload = await api(`/api/memory/curated/${encodeURIComponent(name)}`);
-  } catch (error) {
-    toast(error.message, true);
+function renderMemoryList() {
+  const entries = (memoryView.payload.curated || {}).entries || [];
+  const needle = memoryView.filter.trim().toLowerCase();
+  const shown = needle
+    ? entries.filter((entry) =>
+        `${entry.name} ${entry.title || ""} ${entry.summary || ""}`
+          .toLowerCase()
+          .includes(needle),
+      )
+    : entries;
+  if (!shown.length) {
+    memoryView.listHost.replaceChildren(
+      el(
+        "div",
+        { class: "empty" },
+        entries.length ? "没有匹配的条目" : "策展库为空",
+      ),
+    );
+    return;
+  }
+  memoryView.listHost.replaceChildren(
+    ...shown.map((entry) =>
+      el(
+        "div",
+        {
+          class: `session-item${memoryView.selected === entry.name ? " selected" : ""}`,
+          title: entry.title || entry.name,
+          onclick: () => selectCuratedEntry(entry.name),
+        },
+        el("span", { class: "label" }, entry.name),
+        el("span", { class: "ret" }, fmtBytes(entry.bytes)),
+      ),
+    ),
+  );
+}
+
+/* In-page moves are guarded; leaving the 运行记忆 route entirely drops the
+   draft, as every other unsubmitted editor in the console does. */
+function guardUnsavedMemory(proceed) {
+  if (!memoryView || !memoryView.dirty) {
+    proceed();
     return;
   }
   showModal(
-    payload.title || payload.name,
+    "放弃未保存的修改？",
+    el("div", {}, el("p", {}, "当前编辑还没有保存，继续会丢弃这些修改。")),
+    [
+      el("button", { class: "btn", onclick: closeModal }, "继续编辑"),
+      el(
+        "button",
+        {
+          class: "btn danger",
+          onclick: () => {
+            closeModal();
+            proceed();
+          },
+        },
+        "放弃修改",
+      ),
+    ],
+  );
+}
+
+function resetCuratedDraft() {
+  memoryView.mode = "view";
+  memoryView.draft = null;
+  memoryView.draftName = "";
+  memoryView.source = null;
+  memoryView.dirty = false;
+}
+
+function selectCuratedEntry(name) {
+  guardUnsavedMemory(() => {
+    resetCuratedDraft();
+    memoryView.selected = name;
+    memoryView.entry = null;
+    renderMemoryList();
+    renderMemoryPane();
+    loadCuratedEntry(name);
+  });
+}
+
+async function loadCuratedEntry(name) {
+  let entry;
+  try {
+    entry = await api(`/api/memory/curated/${encodeURIComponent(name)}`);
+  } catch (error) {
+    entry = { name, error: error.message };
+  }
+  if (!memoryView || memoryView.selected !== name) return; // moved on meanwhile
+  memoryView.entry = entry;
+  renderMemoryPane();
+}
+
+function renderMemoryPane() {
+  memoryView.paneHost.replaceChildren(curatedEntryPanel());
+}
+
+function curatedEntryPanel() {
+  if (memoryView.mode === "create" || memoryView.mode === "promote")
+    return curatedCreatePanel();
+  if (!memoryView.selected)
+    return el(
+      "div",
+      { class: "panel" },
+      el("h4", {}, "条目"),
+      el("div", { class: "empty" }, "从左侧选择一个条目查看 SKILL.md 原文"),
+    );
+  const entry = memoryView.entry;
+  if (!entry)
+    return el("div", { class: "panel" }, el("div", { class: "loading" }, "加载条目…"));
+  if (entry.error)
+    return el(
+      "div",
+      { class: "panel" },
+      el("h4", { class: "subsection-title" }, entry.name),
+      el("div", { class: "hint warn" }, `无法读取：${entry.error}`),
+    );
+  const panel = el(
+    "div",
+    { class: "panel" },
+    el("h4", { class: "subsection-title" }, entry.title || entry.name),
     el(
       "div",
-      {},
+      { class: "hint" },
+      `${entry.name} ｜ ${fmtBytes(entry.bytes)} ｜ ${entry.files ?? 1} 个文件 ｜ 挂载为 memory/${(memoryView.payload.curated || {}).source || "curated"}/${entry.name}/`,
+    ),
+  );
+  if (entry.redacted)
+    panel.append(
+      el(
+        "div",
+        { class: "hint warn" },
+        "正文含宿主绝对路径，这里按脱敏后的文本展示，因此不能在此编辑；请在本机控制台或仓库中修改。",
+      ),
+    );
+  if (memoryView.mode === "edit") {
+    panel.append(...curatedEditorRows(entry));
+    return panel;
+  }
+  const bar = el("div", { class: "control-bar" });
+  if (memoryWritable() && !entry.redacted)
+    bar.append(
+      el(
+        "button",
+        { class: "btn small", onclick: () => startCuratedEdit(entry) },
+        "编辑",
+      ),
+      el("span", { class: "spacer" }),
+      el(
+        "button",
+        {
+          class: "btn small danger",
+          onclick: () => confirmDeleteCuratedEntry(entry.name),
+        },
+        "删除",
+      ),
+    );
+  if (bar.childElementCount) panel.append(bar);
+  panel.append(
+    el("pre", { class: "code-view skill-body section-gap" }, entry.content || ""),
+  );
+  return panel;
+}
+
+function curatedEditorRows(entry) {
+  const editor = el("textarea", {
+    class: "directive skill-editor",
+    oninput: () => {
+      memoryView.draft = editor.value;
+      memoryView.dirty = editor.value !== entry.content;
+    },
+  });
+  editor.value = memoryView.draft ?? entry.content ?? "";
+  const bar = el(
+    "div",
+    { class: "control-bar" },
+    el(
+      "button",
+      { class: "btn small primary", onclick: () => saveCuratedEntry() },
+      "保存",
+    ),
+    el(
+      "button",
+      {
+        class: "btn small",
+        onclick: () =>
+          guardUnsavedMemory(() => {
+            resetCuratedDraft();
+            renderMemoryPane();
+          }),
+      },
+      "取消",
+    ),
+  );
+  return [
+    el(
+      "div",
+      { class: "hint" },
+      `保存后写回 ${memoryLibraryPath()}/${entry.name}/SKILL.md，此后启动的会话挂载新正文。`,
+    ),
+    editor,
+    bar,
+  ];
+}
+
+function startCuratedEdit(entry) {
+  memoryView.mode = "edit";
+  memoryView.draft = entry.content || "";
+  memoryView.dirty = false;
+  renderMemoryPane();
+}
+
+function startCuratedCreate() {
+  guardUnsavedMemory(() => {
+    resetCuratedDraft();
+    memoryView.mode = "create";
+    memoryView.selected = null;
+    memoryView.entry = null;
+    renderMemoryList();
+    renderMemoryPane();
+  });
+}
+
+/* Prefill from an admitted graduated skill: the body is copied server-side
+   (references/ and scripts/ included), so this form only names the entry. */
+function startCuratedPromotion(experimentId, skill) {
+  guardUnsavedMemory(() => {
+    resetCuratedDraft();
+    memoryView.mode = "promote";
+    memoryView.source = { experiment_id: experimentId, skill };
+    memoryView.draftName = skill;
+    memoryView.selected = null;
+    memoryView.entry = null;
+    renderMemoryList();
+    renderMemoryPane();
+    memoryView.paneHost.scrollIntoView({ behavior: "smooth", block: "start" });
+  });
+}
+
+function curatedCreatePanel() {
+  const promoting = memoryView.mode === "promote";
+  const nameInput = el("input", {
+    type: "text",
+    placeholder: "kebab-case 条目名",
+    oninput: () => {
+      memoryView.draftName = nameInput.value;
+      memoryView.dirty = true;
+    },
+  });
+  nameInput.value = memoryView.draftName || "";
+  const panel = el(
+    "div",
+    { class: "panel" },
+    el("h4", { class: "subsection-title" }, promoting ? "晋升到策展库" : "新建策展条目"),
+  );
+  if (promoting)
+    panel.append(
       el(
         "div",
         { class: "hint" },
-        `${payload.name} ｜ ${fmtBytes(payload.bytes)} ｜ 只读挂载，会话不能改写`,
+        `来源：实验 ${memoryView.source.experiment_id} 的 skill ${memoryView.source.skill}，整项原样复制（含 scripts/ 与 references/），复制后可在此就地删改。`,
+      ),
+    );
+  else
+    panel.append(
+      el(
+        "div",
+        { class: "hint" },
+        `新建 ${memoryLibraryPath()}/<条目名>/SKILL.md。条目名为小写 kebab-case，正文按共享 skill 格式校验后才写入。`,
+      ),
+    );
+  panel.append(
+    el("div", { class: "field section-gap" }, el("label", {}, "条目名"), nameInput),
+  );
+  if (!promoting) {
+    const editor = el("textarea", {
+      class: "directive skill-editor",
+      oninput: () => {
+        memoryView.draft = editor.value;
+        memoryView.dirty = true;
+      },
+    });
+    editor.value = memoryView.draft || "";
+    panel.append(
+      el("div", { class: "field section-gap" }, el("label", {}, "SKILL.md"), editor),
+    );
+  }
+  panel.append(
+    el(
+      "div",
+      { class: "control-bar" },
+      el(
+        "button",
+        { class: "btn small primary", onclick: () => submitCuratedCreate() },
+        promoting ? "晋升" : "创建",
       ),
       el(
-        "pre",
-        { class: "code-view section-gap", style: "white-space:pre-wrap" },
-        payload.content || "",
+        "button",
+        {
+          class: "btn small",
+          onclick: () =>
+            guardUnsavedMemory(() => {
+              resetCuratedDraft();
+              renderMemoryPane();
+            }),
+        },
+        "取消",
       ),
     ),
-    [el("button", { class: "btn", onclick: closeModal }, "关闭")],
   );
+  return panel;
+}
+
+async function submitCuratedCreate() {
+  const name = String(memoryView.draftName || "").trim();
+  if (!name) {
+    toast("请填写条目名", true);
+    return;
+  }
+  const promoting = memoryView.mode === "promote";
+  try {
+    // Both calls stay written out: the client/server route contract is checked
+    // by reading these literals out of app.js.
+    applyCuratedResult(
+      promoting
+        ? await api(`/api/memory/curated/${encodeURIComponent(name)}/promote`, {
+            method: "POST",
+            body: JSON.stringify({
+              experiment_id: memoryView.source.experiment_id,
+              skill: memoryView.source.skill,
+            }),
+          })
+        : await api("/api/memory/curated", {
+            method: "POST",
+            body: JSON.stringify({ name, content: memoryView.draft || "" }),
+          }),
+    );
+  } catch (error) {
+    toast(`${promoting ? "晋升" : "新建"}失败：${error.message}`, true);
+  }
+}
+
+async function saveCuratedEntry() {
+  const name = memoryView.selected;
+  try {
+    applyCuratedResult(
+      await api(`/api/memory/curated/${encodeURIComponent(name)}`, {
+        method: "PUT",
+        body: JSON.stringify({ content: memoryView.draft || "" }),
+      }),
+    );
+  } catch (error) {
+    toast(`保存失败：${error.message}`, true);
+  }
+}
+
+function confirmDeleteCuratedEntry(name) {
+  showModal(
+    "删除策展条目",
+    el(
+      "div",
+      {},
+      el("p", {}, `将从仓库目录 ${memoryLibraryPath()}/ 删除 ${name}/ 整项。`),
+      el(
+        "p",
+        { class: "hint" },
+        "运行中的会话持有启动时挂载的只读副本，不受影响；此后启动的会话不再挂载它。这是一次仓库改动，由研究者提交。",
+      ),
+    ),
+    [
+      el("button", { class: "btn", onclick: closeModal }, "取消"),
+      el(
+        "button",
+        {
+          class: "btn danger",
+          onclick: async () => {
+            try {
+              const result = await api(
+                `/api/memory/curated/${encodeURIComponent(name)}`,
+                { method: "DELETE" },
+              );
+              closeModal();
+              applyCuratedResult(result);
+            } catch (error) {
+              toast(`删除失败：${error.message}`, true);
+            }
+          },
+        },
+        "确认删除",
+      ),
+    ],
+  );
+}
+
+const MEMORY_ACTION_LABELS = {
+  created: "已新建",
+  updated: "已保存",
+  deleted: "已删除",
+  promoted: "已晋升",
+};
+
+/* Every write answers with the refreshed listing, so the page never guesses
+   what the library now holds. The response also carries the mount-timing note;
+   the page states that once, persistently, instead of in every toast. */
+function applyCuratedResult(result) {
+  if (!memoryView) return; // the page was left while the write was in flight
+  memoryView.payload.curated = result.curated || memoryView.payload.curated;
+  resetCuratedDraft();
+  memoryView.countHost.textContent = String(
+    ((result.curated || {}).entries || []).length,
+  );
+  toast(`${MEMORY_ACTION_LABELS[result.action] || "已更新"} ${result.name}`);
+  if (result.action === "deleted") {
+    memoryView.selected = null;
+    memoryView.entry = null;
+    renderMemoryList();
+    renderMemoryPane();
+    return;
+  }
+  memoryView.selected = result.name;
+  memoryView.entry = null;
+  renderMemoryList();
+  renderMemoryPane();
+  loadCuratedEntry(result.name);
 }
 
 function graduatedTierPanel(tier) {
@@ -6961,7 +7394,7 @@ function graduatedTierPanel(tier) {
     el(
       "div",
       { class: "hint" },
-      "Held-out 判定全部 graduated 且已发布 skills 世代的历史实验自动准入；未揭示的实验不显示裁决，本实验自己始终排除在外。",
+      "Held-out 判定全部 graduated 且已发布 skills 世代的历史实验自动准入；未揭示的实验不显示裁决，本实验自己始终排除在外。准入条目可以晋升到策展库，晋升后由研究者在策展库里删改并提交。",
     ),
   );
   if (tier.error) {
@@ -7009,9 +7442,24 @@ function graduatedEntriesCell(row) {
   if (row.error) return "—";
   if (row.admitted === null || row.admitted === undefined)
     return el("span", { class: "hint warn" }, "无法解析");
-  return row.admitted && (row.entries || []).length
-    ? (row.entries || []).join("、")
-    : "—";
+  const entries = row.entries || [];
+  if (!row.admitted || !entries.length) return "—";
+  if (!memoryWritable()) return entries.join("、");
+  return el(
+    "div",
+    { class: "control-bar" },
+    ...entries.map((skill) =>
+      el(
+        "button",
+        {
+          class: "btn small",
+          title: "把这条 skill 整项复制到策展库",
+          onclick: () => startCuratedPromotion(row.experiment_id, skill),
+        },
+        `晋升 ${skill}`,
+      ),
+    ),
+  );
 }
 
 /* Experiment-detail block: what THIS experiment's collected sessions mounted,

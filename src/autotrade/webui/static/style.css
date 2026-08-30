@@ -2057,3 +2057,30 @@ details.advanced .form-grid {
  font-size: 0.92rem;
  line-height: 1.55;
 }
+
+/* 运行记忆: curated library pane */
+.memory-notice .hint:first-child {
+ margin-top: 0;
+}
+.memory-filter {
+ flex: 1;
+}
+/* The skill body is prose, not code: it wraps instead of scrolling sideways,
+   and long paths break rather than widening the pane on a phone. */
+pre.code-view.skill-body {
+ white-space: pre-wrap;
+ word-break: break-word;
+ max-height: 60vh;
+}
+textarea.directive.skill-editor {
+ min-height: 20rem;
+ font-size: 0.86rem;
+}
+@media (max-width: 760px) {
+ textarea.directive.skill-editor {
+  min-height: 14rem;
+ }
+ pre.code-view.skill-body {
+  max-height: 50vh;
+ }
+}

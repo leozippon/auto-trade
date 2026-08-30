@@ -48,7 +48,7 @@ from .manager import (
 )
 from .params_schema import parameter_schema
 from .prompt_preview import build_prompt_preview
-from .public_identity import PublicIdentity
+from .public_identity import PublicIdentity, redact_host_paths
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
@@ -63,6 +63,20 @@ def is_loopback_host(host: str) -> bool:
         return ipaddress.ip_address(value).is_loopback
     except ValueError:
         return False
+
+
+# The public edge (ops/nginx/aliyun/*.conf) proxies the whole console through
+# one `location /` that stamps X-Forwarded-For and X-Forwarded-Proto on every
+# request it forwards; a browser on the loopback bind sends neither. Their
+# absence is therefore what identifies the local console, and a public client
+# cannot suppress them.
+_FORWARDED_HEADERS = ("x-forwarded-for", "x-forwarded-proto")
+
+
+def is_local_console(request: Request) -> bool:
+    """Whether this request reached the app directly, not through the edge."""
+
+    return not any(request.headers.get(name) for name in _FORWARDED_HEADERS)
 
 
 def _raw_generation_status(repo_root: Path) -> dict[str, object]:
@@ -742,20 +756,111 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         return {"status": "started"}
 
     # ---- operating memory ---------------------------------------------------------
+    # The curated library is a tracked repository directory, so editing it is a
+    # repository write and stays on the local console: the public edge keeps the
+    # read-only, redacted view it already had. This is the only server-side gate
+    # in the console — the mutating experiment routes are protected by the
+    # edge's login gate alone — so it is stricter than what it mirrors, never
+    # weaker.
+    def _require_local_console(request: Request) -> None:
+        if not is_local_console(request):
+            raise HTTPException(
+                status_code=403,
+                detail="curated memory is editable only from the local console",
+            )
+
+    def _curated_write(action) -> dict[str, object]:
+        """One HTTP mapping for the four writes; messages carry no host path."""
+
+        try:
+            return action()
+        except FileExistsError as exc:
+            raise HTTPException(
+                status_code=409, detail=redact_host_paths(str(exc))
+            ) from exc
+        except KeyError as exc:
+            detail = str(exc.args[0]) if exc.args else "unknown curated memory entry"
+            raise HTTPException(
+                status_code=404, detail=redact_host_paths(detail)
+            ) from exc
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400, detail=redact_host_paths(str(exc))
+            ) from exc
+        except OSError as exc:
+            raise HTTPException(
+                status_code=409, detail="curated memory library is not writable"
+            ) from exc
+
     @app.get("/api/memory")
-    def get_memory() -> dict[str, object]:
-        return memory.memory_overview(root, experiment_root)
+    def get_memory(request: Request) -> dict[str, object]:
+        return memory.memory_overview(
+            root, experiment_root, writable=is_local_console(request)
+        )
 
     @app.get("/api/memory/curated/{name}")
-    def get_curated_memory(name: str) -> dict[str, object]:
+    def get_curated_memory(name: str, request: Request) -> dict[str, object]:
         try:
-            return memory.curated_entry(root, name)
+            # The local console is the authoring surface, so it reads the bytes
+            # on disk and an edit saves back what it opened.
+            return memory.curated_entry(
+                root, name, redact=not is_local_console(request)
+            )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail="invalid memory entry name") from exc
         except (KeyError, OSError) as exc:
             raise HTTPException(
                 status_code=404, detail="unknown curated memory entry"
             ) from exc
+
+    @app.post("/api/memory/curated")
+    def post_curated_memory(
+        request: Request, payload: dict = Body(...)
+    ) -> dict[str, object]:
+        _require_local_console(request)
+        return _curated_write(
+            lambda: memory.create_curated_entry(
+                root,
+                str(payload.get("name") or ""),
+                str(payload.get("content") or ""),
+                experiments_root=experiment_root,
+                live_experiments=manager.running_experiments(),
+            )
+        )
+
+    @app.put("/api/memory/curated/{name}")
+    def put_curated_memory(
+        name: str, request: Request, payload: dict = Body(...)
+    ) -> dict[str, object]:
+        _require_local_console(request)
+        return _curated_write(
+            lambda: memory.update_curated_entry(
+                root, name, str(payload.get("content") or "")
+            )
+        )
+
+    @app.delete("/api/memory/curated/{name}")
+    def delete_curated_memory(name: str, request: Request) -> dict[str, object]:
+        _require_local_console(request)
+        return _curated_write(lambda: memory.delete_curated_entry(root, name))
+
+    @app.post("/api/memory/curated/{name}/promote")
+    def post_curated_promotion(
+        name: str, request: Request, payload: dict = Body(...)
+    ) -> dict[str, object]:
+        """Copy one admitted graduated skill in under the name in the path."""
+
+        _require_local_console(request)
+        return _curated_write(
+            lambda: memory.promote_curated_entry(
+                root,
+                experiment_root,
+                name=name,
+                experiment_id=str(payload.get("experiment_id") or ""),
+                skill=str(payload.get("skill") or ""),
+                live_experiments=manager.running_experiments(),
+            )
+        )
 
     @app.get("/api/experiments/{experiment_id}/memory")
     def get_experiment_memory(experiment_id: str) -> dict[str, object]:
@@ -877,4 +982,4 @@ def run(
     uvicorn.run(**options)
 
 
-__all__ = ["create_app", "is_loopback_host", "run"]
+__all__ = ["create_app", "is_local_console", "is_loopback_host", "run"]

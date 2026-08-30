@@ -144,9 +144,12 @@ def test_the_extractor_finds_the_routes_the_console_really_calls():
         # Assembled from a local `const base`, not written inline.
         "/api/experiments/{}/analysis/{}/{}",
         "/api/experiments/{}/folds/{}/{}/orders",
-        # 运行记忆: the page bundle, one entry's body, one experiment's mounts.
+        # 运行记忆: the page bundle, one entry's body, one experiment's mounts,
+        # and the curated writes the page issues (create, edit, delete, promote).
         "/api/memory",
+        "/api/memory/curated",
         "/api/memory/curated/{}",
+        "/api/memory/curated/{}/promote",
         "/api/experiments/{}/memory",
     ):
         assert expected in paths, sorted(paths)
