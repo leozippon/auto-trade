@@ -2077,9 +2077,24 @@ details.advanced .form-grid {
  max-height: calc(100vh - var(--topbar-h) - 1.6rem);
  overflow-y: auto;
 }
+/* One rhythm for both catalogue sections: the heading owns the gap down to its
+   toolbar or hint, and every list starts one step below that. */
+.memory-nav h4 {
+ margin-bottom: 0.75rem;
+}
+.memory-nav h4.section-gap {
+ margin-top: 1.5rem;
+}
+.memory-nav .control-bar {
+ margin-top: 0;
+}
+.memory-nav .hint {
+ margin-top: 0.5rem;
+}
 .memory-nav .session-list {
  max-height: none;
  overflow: visible;
+ margin-top: 0.85rem;
 }
 .memory-nav .epoch-head {
  margin-top: 0.5rem;
@@ -2178,6 +2193,13 @@ table.data.text td {
 }
 table.data.text td {
  vertical-align: top;
+}
+/* The sessions sharing one mount, named under the count instead of being left
+   to be inferred from the row span. */
+.mounted-share {
+ color: var(--muted);
+ font-size: 0.85rem;
+ margin-top: 0.2rem;
 }
 @media (max-width: 1080px) {
  .memory-nav {

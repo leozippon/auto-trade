@@ -7493,11 +7493,11 @@ function applyCuratedResult(result) {
 }
 
 /* ---------------- 已挂载记忆 ----------------
-   Experiment-detail block: what THIS experiment's collected sessions mounted,
+   Experiment-detail block: what THIS experiment's sessions actually received,
    read from their run manifests rather than recomputed from today's tier. Most
-   sessions of an experiment mount exactly the same set, so identical mounts are
-   collapsed into one row that names the sessions sharing it — a 24-session
-   experiment reads as a few rows instead of 24. */
+   sessions of an experiment receive exactly the same set, so identical mounts
+   collapse into one row that names the sessions sharing it — and the row says
+   so in words, instead of leaving it to be read off a row span. */
 
 function mountedMemoryPanel(detail) {
   const host = el("div", {});
@@ -7509,15 +7509,23 @@ function mountedMemoryPanel(detail) {
   return host;
 }
 
-/* The manifest's display key is `<epoch>/<fold period>` for a Fold and
-   `<epoch>/meta_learning` for a Meta session; every other surface of the
-   console names the kind in Chinese, so this one does too. */
+/* `epoch_001/meta_learning` is the manifest's key, not a name to read: the
+   block shows `Epoch 1 · 元学习`, the same way the session list names it. */
 function mountedSessionLabel(session) {
-  const label = String(session.session_label || session.run_ref || "—");
-  const kind = KIND_LABELS[session.kind];
-  return kind && label.endsWith(session.kind)
-    ? label.slice(0, -session.kind.length) + kind
-    : label;
+  const raw = String(session.session_label || "");
+  const kind = KIND_LABELS[session.kind] || "";
+  if (!raw) {
+    // A rollback or rerun can leave a collected run the current plan no longer
+    // names; its run reference still tells the rows apart.
+    const ref = String(session.run_ref || "—");
+    return kind ? `${kind} · ${ref}` : ref;
+  }
+  const parts = raw.split("/");
+  const tail = parts.pop();
+  const epoch = /^epoch_0*(\d+)$/.exec(parts[0] || "");
+  const head = epoch ? `Epoch ${epoch[1]}` : parts.join("/");
+  const label = tail === session.kind ? kind || tail : tail;
+  return head ? `${head} · ${label}` : label;
 }
 
 function mountedMemoryGroups(sessions) {
@@ -7542,22 +7550,29 @@ function mountedMemoryGroups(sessions) {
 }
 
 function mountedSessionsCell(labels) {
-  const text =
-    labels.length <= 3
-      ? labels.join("、")
-      : `${labels.slice(0, 2).join("、")} 等 ${labels.length} 个会话`;
-  return el("span", { title: labels.join("、") }, text);
+  if (labels.length === 1) return labels[0];
+  const shown = labels.slice(0, 6).join("、");
+  return el(
+    "div",
+    {},
+    el("div", {}, `以下 ${labels.length} 个会话均挂载：`),
+    el(
+      "div",
+      { class: "mounted-share", title: labels.join("、") },
+      labels.length > 6 ? `${shown} 等 ${labels.length} 个` : shown,
+    ),
+  );
 }
 
 function mountedSourceLabel(source) {
   return source.origin === "curated"
     ? "精选库"
-    : `毕业层 ${source.source || "—"}`;
+    : `毕业实验 ${source.source || "—"}`;
 }
 
-/* The chips open the entry as it reads today; the row itself stays the
-   historical record, so an entry that has since been removed answers in the
-   toast instead of silently rewriting what this experiment mounted. */
+/* The chips open the entry as it reads today; the row itself stays the record
+   of that session, so an entry since removed answers in the toast instead of
+   quietly rewriting what the session received. */
 function mountedEntryChips(source) {
   const entries = source.entries || [];
   if (!entries.length) return "—";
@@ -7589,7 +7604,7 @@ async function openMountedSkill(source, name) {
           `/api/memory/graduated/${encodeURIComponent(source.source)}/${encodeURIComponent(name)}`,
         );
   } catch (error) {
-    toast(`该条目当前不可读（这是当时的挂载记录）：${error.message}`, true);
+    toast(`这条现在读不到了（表里是当时挂载的记录）：${error.message}`, true);
     return;
   }
   showModal(
@@ -7600,7 +7615,7 @@ async function openMountedSkill(source, name) {
       el(
         "div",
         { class: "hint" },
-        `${name} ｜ ${fmtBytes(entry.bytes)} ｜ ${mountedSourceLabel(source)} ｜ 只读挂载，会话不能改写`,
+        `${name} ｜ ${fmtBytes(entry.bytes)} ｜ ${mountedSourceLabel(source)} ｜ 只读，会话不能改写`,
       ),
       el("pre", { class: "code-view skill-body section-gap" }, entry.content || ""),
     ),
@@ -7628,27 +7643,33 @@ function mountedMemorySection(payload) {
     { class: "panel section-gap" },
     el("h4", {}, "已挂载记忆"),
     el(
-      "table",
-      { class: "kv" },
-      kvRow("挂载模式", payload.mode || "—"),
-      kvRow("会话记录", `${sessions.length} 次已收集运行 ｜ ${groups.length} 种挂载组合`),
-    ),
-    el(
       "div",
       { class: "hint" },
-      "按运行 manifest 记录的当时挂载结果分组，来源与条目相同的会话合并为一行。挂载只读，不进入本实验的 skills 世代。",
+      "每个会话在启动的那一刻拿到一份只读副本：当时精选库里的全部条目，加上当时已经毕业的实验留下的 skills。下表按已经跑过的会话列出它们各自拿到了什么，内容完全相同的会话合并成一行；还没启动的会话不在表里，它们会在启动时拿到那时的精选库。",
+    ),
+    el(
+      "table",
+      { class: "kv section-gap" },
+      kvRow("挂载模式", payload.mode || "—"),
+      kvRow("已运行会话", `${sessions.length} 个`),
     ),
   );
   if (!sessions.length) {
-    panel.append(el("div", { class: "empty" }, "尚无已收集的会话记录"));
+    panel.append(
+      el("div", { class: "empty" }, "还没有会话跑过，所以还没有挂载记录"),
+    );
     return panel;
   }
-  if (groups.every((group) => !group.session.error && !(group.session.sources || []).length)) {
+  if (
+    groups.every(
+      (group) => !group.session.error && !(group.session.sources || []).length,
+    )
+  ) {
     panel.append(
       el(
         "div",
         { class: "empty" },
-        `本实验未挂载运行记忆（模式 ${payload.mode || "—"}）`,
+        `本实验没有挂载运行记忆（挂载模式 ${payload.mode || "—"}）`,
       ),
     );
     return panel;
@@ -7658,11 +7679,7 @@ function mountedMemorySection(payload) {
     const sources = group.session.error ? [] : group.session.sources || [];
     const span = Math.max(sources.length, 1);
     const rowspan = span > 1 ? String(span) : null;
-    const sessionCell = el(
-      "td",
-      { rowspan },
-      mountedSessionsCell(group.labels),
-    );
+    const sessionCell = el("td", { rowspan }, mountedSessionsCell(group.labels));
     const statusCell = el("td", { rowspan }, mountedStatusCell(group.session));
     if (!sources.length) {
       rows.push(
@@ -7689,7 +7706,7 @@ function mountedMemorySection(payload) {
         {},
         el("th", {}, "会话"),
         el("th", {}, "来源"),
-        el("th", {}, "条目"),
+        el("th", {}, "挂载条目"),
         el("th", {}, "状态"),
       ),
       ...rows,
