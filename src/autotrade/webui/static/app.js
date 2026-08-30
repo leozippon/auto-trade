@@ -7015,28 +7015,34 @@ function renderMemoryList() {
   memoryView.listHost.replaceChildren(...nodes);
 }
 
-/* Admitted candidates are selectable; every other experiment stays visible in
-   one collapsed muted block, because "not offered" and "not there" are
-   different answers. */
+/* Admitted candidates are selectable, withdrawn ones stay listed under their
+   experiment so the withdrawal can be undone, and every other experiment stays
+   visible in one collapsed muted block — because "not offered", "taken out" and
+   "not there" are three different answers. */
 function renderMemoryCandidates() {
   const tier = memoryView.payload.graduated || {};
   const rows = tier.experiments || [];
-  const admitted = rows.filter(
-    (row) => row.admitted === true && (row.entries || []).length,
+  const listed = rows.filter(
+    (row) =>
+      (row.admitted === true && (row.entries || []).length) ||
+      (row.excluded || []).length,
   );
-  const aside = rows.filter((row) => !admitted.includes(row));
+  const aside = rows.filter((row) => !listed.includes(row));
   const nodes = [];
   if (tier.error)
     nodes.push(
       el("div", { class: "hint warn" }, `毕业层不可解析：${tier.error}`),
     );
   let shown = 0;
-  for (const row of admitted) {
+  for (const row of listed) {
     const skills = (row.entries || []).filter((skill) =>
       memoryFilterHit(skill, row.experiment_id),
     );
-    if (!skills.length) continue;
-    shown += skills.length;
+    const withdrawn = (row.excluded || []).filter((item) =>
+      memoryFilterHit(item.skill, row.experiment_id),
+    );
+    if (!skills.length && !withdrawn.length) continue;
+    shown += skills.length + withdrawn.length;
     nodes.push(el("div", { class: "epoch-head" }, row.experiment_id));
     for (const skill of skills)
       nodes.push(
@@ -7046,13 +7052,15 @@ function renderMemoryCandidates() {
           skill,
         }),
       );
+    for (const item of withdrawn)
+      nodes.push(withdrawnCandidateRow(row.experiment_id, item));
   }
   if (!shown)
     nodes.push(
       el(
         "div",
         { class: "empty compact" },
-        admitted.length ? "没有匹配的候选" : "没有准入的候选",
+        listed.length ? "没有匹配的候选" : "没有准入的候选",
       ),
     );
   if (aside.length)
@@ -7072,6 +7080,30 @@ function renderMemoryCandidates() {
       ),
     );
   memoryView.candidateHost.replaceChildren(...nodes);
+}
+
+/* Withdrawn: still named, never mounted, one click from coming back. */
+function withdrawnCandidateRow(experimentId, item) {
+  const reason = String(item.reason || "");
+  return el(
+    "div",
+    {
+      class: "session-item withdrawn",
+      title: reason ? `已排除：${reason}` : "已排除，不再进入新会话",
+    },
+    el("span", { class: "label" }, item.skill),
+    el(
+      "button",
+      {
+        class: "btn small",
+        onclick: (event) => {
+          event.stopPropagation();
+          restoreGraduatedSkill(experimentId, item.skill);
+        },
+      },
+      "恢复",
+    ),
+  );
 }
 
 /* `admitted === null` means the tier itself could not be resolved, which is
@@ -7267,6 +7299,17 @@ function candidateEntryView(selection, entry) {
         },
         "晋升到精选库",
       ),
+      el("span", { class: "spacer" }),
+      el(
+        "button",
+        {
+          class: "btn small danger",
+          title: "不再让新会话挂载这条 skill",
+          onclick: () =>
+            confirmExcludeGraduated(selection.experiment_id, selection.skill),
+        },
+        "排除",
+      ),
     ],
     body: [
       entry.summary ? el("div", { class: "hint" }, entry.summary) : null,
@@ -7460,6 +7503,88 @@ function confirmDeleteCuratedEntry(name) {
   );
 }
 
+/* A graduated skill is another experiment's immutable artifact: the console
+   never rewrites one, it only records that sessions stop mounting it. */
+function confirmExcludeGraduated(experimentId, skill) {
+  const reason = el("input", {
+    type: "text",
+    placeholder: "可选，例如：已被更好的做法取代",
+  });
+  showModal(
+    "从毕业层排除",
+    el(
+      "div",
+      {},
+      el("p", {}, `实验 ${experimentId} 的 skill ${skill} 将不再进入此后启动的会话。`),
+      el(
+        "p",
+        { class: "hint" },
+        "毕业实验的 skill 是它自己的不可变产物，这里不会改动它，只是记下不再挂载；已经跑过的会话不受影响。排除记录写在仓库文件里，由研究者提交，随时可以恢复。",
+      ),
+      el("div", { class: "field" }, el("label", {}, "原因"), reason),
+    ),
+    [
+      el("button", { class: "btn", onclick: closeModal }, "取消"),
+      el(
+        "button",
+        {
+          class: "btn danger",
+          onclick: async () => {
+            try {
+              const result = await api(
+                `/api/memory/graduated/${encodeURIComponent(experimentId)}/${encodeURIComponent(skill)}/exclude`,
+                {
+                  method: "POST",
+                  body: JSON.stringify({ reason: reason.value }),
+                },
+              );
+              closeModal();
+              applyTierResult(result);
+            } catch (error) {
+              toast(`排除失败：${error.message}`, true);
+            }
+          },
+        },
+        "确认排除",
+      ),
+    ],
+  );
+}
+
+async function restoreGraduatedSkill(experimentId, skill) {
+  try {
+    applyTierResult(
+      await api(
+        `/api/memory/graduated/${encodeURIComponent(experimentId)}/${encodeURIComponent(skill)}/exclude`,
+        { method: "DELETE" },
+      ),
+    );
+  } catch (error) {
+    toast(`恢复失败：${error.message}`, true);
+  }
+}
+
+/* The refreshed tier comes back with the write, so the pane never guesses. A
+   withdrawn skill also stops being readable, so a selection on it is dropped. */
+function applyTierResult(result) {
+  if (!memoryView) return;
+  memoryView.payload.graduated = result.graduated || memoryView.payload.graduated;
+  toast(`${result.action === "excluded" ? "已排除" : "已恢复"} ${result.skill}`);
+  const selection = memoryView.selection;
+  if (
+    result.action === "excluded" &&
+    selection &&
+    selection.kind === "candidate" &&
+    selection.experiment_id === result.experiment_id &&
+    selection.skill === result.skill
+  ) {
+    memoryView.selection = null;
+    memoryView.entry = null;
+    renderMemoryPane();
+  }
+  renderMemoryCandidates();
+}
+
 const MEMORY_ACTION_LABELS = {
   created: "已新建",
   updated: "已保存",
@@ -7494,10 +7619,11 @@ function applyCuratedResult(result) {
 
 /* ---------------- 已挂载记忆 ----------------
    Experiment-detail block: what THIS experiment's sessions actually received,
-   read from their run manifests rather than recomputed from today's tier. Most
-   sessions of an experiment receive exactly the same set, so identical mounts
-   collapse into one row that names the sessions sharing it — and the row says
-   so in words, instead of leaving it to be read off a row span. */
+   read from their run manifests rather than recomputed from today's tier.
+   Two halves, because they answer two questions: a 挂载条目 panel names every
+   entry once (annotated when it did not reach every session), and a table with
+   one row per session says how much each session got and whether it differs
+   from that union. */
 
 function mountedMemoryPanel(detail) {
   const host = el("div", {});
@@ -7528,72 +7654,99 @@ function mountedSessionLabel(session) {
   return head ? `${head} · ${label}` : label;
 }
 
-function mountedMemoryGroups(sessions) {
-  const groups = new Map();
-  for (const session of sessions) {
-    const label = mountedSessionLabel(session);
-    const key = session.error
-      ? `error:${session.error}`
-      : JSON.stringify([
-          session.mode || "",
-          (session.sources || []).map((source) => [
-            source.source,
-            source.origin,
-            source.entries || [],
-          ]),
-        ]);
-    const group = groups.get(key) || { session, labels: [] };
-    group.labels.push(label);
-    groups.set(key, group);
-  }
-  return [...groups.values()];
-}
-
-function mountedSessionsCell(labels) {
-  if (labels.length === 1) return labels[0];
-  const shown = labels.slice(0, 6).join("、");
-  return el(
-    "div",
-    {},
-    el("div", {}, `以下 ${labels.length} 个会话均挂载：`),
-    el(
-      "div",
-      { class: "mounted-share", title: labels.join("、") },
-      labels.length > 6 ? `${shown} 等 ${labels.length} 个` : shown,
-    ),
-  );
-}
-
 function mountedSourceLabel(source) {
   return source.origin === "curated"
     ? "精选库"
     : `毕业实验 ${source.source || "—"}`;
 }
 
-/* The chips open the entry as it reads today; the row itself stays the record
-   of that session, so an entry since removed answers in the toast instead of
-   quietly rewriting what the session received. */
-function mountedEntryChips(source) {
-  const entries = source.entries || [];
-  if (!entries.length) return "—";
-  return el(
-    "div",
-    { class: "file-list" },
-    ...entries.map((name) =>
-      el(
-        "button",
-        {
-          class: "file-chip",
-          type: "button",
-          title: "查看 SKILL.md 原文",
-          onclick: () => openMountedSkill(source, name),
-        },
-        name,
-      ),
-    ),
-  );
+function mountedEntryKey(origin, source, name) {
+  return `${origin} ${source} ${name}`;
 }
 
+/* Every entry once, with the sessions that received it. Sessions arrive in
+   plan order, so the indices below are chronological. */
+function mountedEntryIndex(sessions) {
+  const order = [];
+  const groups = new Map();
+  for (const session of sessions) {
+    if (session.error) continue;
+    const index = order.length;
+    order.push(mountedSessionLabel(session));
+    for (const source of session.sources || []) {
+      const key = `${source.origin} ${source.source}`;
+      const group = groups.get(key) || {
+        origin: source.origin,
+        source: source.source,
+        entries: new Map(),
+      };
+      for (const name of source.entries || [])
+        group.entries.set(name, [...(group.entries.get(name) || []), index]);
+      groups.set(key, group);
+    }
+  }
+  return { order, groups: [...groups.values()] };
+}
+
+function mountedEntryNote(indices, order) {
+  if (indices.length >= order.length) return "";
+  const first = indices[0];
+  const contiguous =
+    indices.length === order.length - first &&
+    indices.every((value, offset) => value === first + offset);
+  return contiguous ? ` · 自 ${order[first]} 起` : " · 仅部分会话";
+}
+
+function mountedEntryChip(group, name, indices, order) {
+  const note = mountedEntryNote(indices, order);
+  const chip = el(
+    "button",
+    {
+      class: "file-chip",
+      type: "button",
+      title: note
+        ? `挂载于：${indices.map((index) => order[index]).join("、")}`
+        : `全部 ${order.length} 个会话都挂载了它`,
+      onclick: () =>
+        openMountedSkill({ origin: group.origin, source: group.source }, name),
+    },
+    name,
+  );
+  if (note) chip.append(el("span", { class: "chip-note" }, note));
+  return chip;
+}
+
+function mountedEntriesPanel(index) {
+  const host = el(
+    "div",
+    { class: "mounted-entries section-gap" },
+    el("h4", { class: "subsection-title" }, "挂载条目"),
+    el(
+      "div",
+      { class: "hint" },
+      "点条目看原文。带说明的条目不是每个会话都拿到了，鼠标停留可以看到具体是哪些会话。",
+    ),
+  );
+  for (const group of index.groups) {
+    host.append(
+      el("div", { class: "mounted-group-title" }, mountedSourceLabel(group)),
+      el(
+        "div",
+        { class: "file-list" },
+        ...[...group.entries.entries()]
+          .sort((left, right) => (left[0] < right[0] ? -1 : 1))
+          .map(([name, indices]) =>
+            mountedEntryChip(group, name, indices, index.order),
+          ),
+      ),
+    );
+  }
+  return host;
+}
+
+/* The chips open the entry as it reads today; the block itself stays the record
+   of what each session received, so an entry since removed answers in the toast
+   instead of quietly rewriting that record. */
 async function openMountedSkill(source, name) {
   const curated = source.origin === "curated";
   let entry;
@@ -7623,7 +7776,7 @@ async function openMountedSkill(source, name) {
   );
 }
 
-function mountedStatusCell(session) {
+function mountedStatusBadge(session) {
   if (session.error)
     return el(
       "span",
@@ -7635,9 +7788,72 @@ function mountedStatusCell(session) {
     : el("span", { class: "badge state-stopped" }, "未挂载");
 }
 
+function mountedMissingEntries(session, union) {
+  const received = new Set();
+  for (const source of session.sources || [])
+    for (const name of source.entries || [])
+      received.add(mountedEntryKey(source.origin, source.source, name));
+  return [...union]
+    .filter((key) => !received.has(key))
+    .map((key) => key.split(" ")[2]);
+}
+
+function mountedSessionRow(session, union) {
+  const sources = session.error ? [] : session.sources || [];
+  const curated = sources.filter((source) => source.origin === "curated");
+  const graduated = sources.filter((source) => source.origin !== "curated");
+  const count = (list) =>
+    list.reduce((total, source) => total + (source.entries || []).length, 0);
+  const curatedCount = count(curated);
+  const graduatedCount = count(graduated);
+  const status = el("div", { class: "mounted-status" }, mountedStatusBadge(session));
+  const missing = sources.length ? mountedMissingEntries(session, union) : [];
+  if (missing.length)
+    status.append(
+      el(
+        "span",
+        { class: "badge state-paused", title: `缺少：${missing.join("、")}` },
+        "有差异",
+      ),
+    );
+  return el(
+    "tr",
+    {},
+    el("td", { class: "nowrap" }, mountedSessionLabel(session)),
+    el("td", {}, curatedCount ? `${curatedCount} 条` : "—"),
+    el(
+      "td",
+      {},
+      graduatedCount
+        ? `${graduatedCount} 条（来自 ${graduated.length} 个实验）`
+        : "—",
+    ),
+    el("td", { class: "nowrap" }, status),
+  );
+}
+
+function mountedSessionTable(sessions, index) {
+  const union = new Set();
+  for (const group of index.groups)
+    for (const name of group.entries.keys())
+      union.add(mountedEntryKey(group.origin, group.source, name));
+  return el(
+    "table",
+    { class: "data text section-gap" },
+    el(
+      "tr",
+      {},
+      el("th", { class: "nowrap" }, "会话"),
+      el("th", {}, "精选库"),
+      el("th", {}, "毕业层"),
+      el("th", { class: "nowrap" }, "状态"),
+    ),
+    ...sessions.map((session) => mountedSessionRow(session, union)),
+  );
+}
+
 function mountedMemorySection(payload) {
   const sessions = payload.sessions || [];
-  const groups = mountedMemoryGroups(sessions);
   const panel = el(
     "div",
     { class: "panel section-gap" },
@@ -7645,7 +7861,7 @@ function mountedMemorySection(payload) {
     el(
       "div",
       { class: "hint" },
-      "每个会话在启动的那一刻拿到一份只读副本：当时精选库里的全部条目，加上当时已经毕业的实验留下的 skills。下表按已经跑过的会话列出它们各自拿到了什么，内容完全相同的会话合并成一行；还没启动的会话不在表里，它们会在启动时拿到那时的精选库。",
+      "每个会话在启动的那一刻拿到一份只读副本：当时精选库里的全部条目，加上当时已经毕业的实验留下的 skills。下面按已经跑过的会话列出它们各自拿到了什么；还没启动的会话不在这里，它们会在启动时拿到那时的精选库。",
     ),
     el(
       "table",
@@ -7660,11 +7876,8 @@ function mountedMemorySection(payload) {
     );
     return panel;
   }
-  if (
-    groups.every(
-      (group) => !group.session.error && !(group.session.sources || []).length,
-    )
-  ) {
+  const index = mountedEntryIndex(sessions);
+  if (!index.groups.length && !sessions.some((session) => session.error)) {
     panel.append(
       el(
         "div",
@@ -7674,44 +7887,8 @@ function mountedMemorySection(payload) {
     );
     return panel;
   }
-  const rows = [];
-  for (const group of groups) {
-    const sources = group.session.error ? [] : group.session.sources || [];
-    const span = Math.max(sources.length, 1);
-    const rowspan = span > 1 ? String(span) : null;
-    const sessionCell = el("td", { rowspan }, mountedSessionsCell(group.labels));
-    const statusCell = el("td", { rowspan }, mountedStatusCell(group.session));
-    if (!sources.length) {
-      rows.push(
-        el("tr", {}, sessionCell, el("td", {}, "—"), el("td", {}, "—"), statusCell),
-      );
-      continue;
-    }
-    sources.forEach((source, index) => {
-      const cells = index ? [] : [sessionCell];
-      cells.push(
-        el("td", {}, mountedSourceLabel(source)),
-        el("td", {}, mountedEntryChips(source)),
-      );
-      if (!index) cells.push(statusCell);
-      rows.push(el("tr", {}, ...cells));
-    });
-  }
-  panel.append(
-    el(
-      "table",
-      { class: "data text section-gap" },
-      el(
-        "tr",
-        {},
-        el("th", {}, "会话"),
-        el("th", {}, "来源"),
-        el("th", {}, "挂载条目"),
-        el("th", {}, "状态"),
-      ),
-      ...rows,
-    ),
-  );
+  if (index.groups.length) panel.append(mountedEntriesPanel(index));
+  panel.append(mountedSessionTable(sessions, index));
   return panel;
 }
 

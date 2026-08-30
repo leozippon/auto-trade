@@ -12,6 +12,7 @@ and only the writable ``skills/`` tree is ever published as a generation.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -21,7 +22,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-from autotrade.environment.runtime import chmod_tree, write_json_atomic
+from autotrade.environment.runtime import chmod_tree, utc_now_iso, write_json_atomic
 from autotrade.environment.tools.base import ToolError, ToolResult, ToolSpec
 from autotrade.environment.tools.prior_policy import (
     strict_transferable_content_violation,
@@ -38,6 +39,13 @@ OPERATING_MEMORY_LIBRARY = "configs/operating_memory"
 # Reserved mount name of the curated tier; every other mounted source directory
 # is named after the graduated experiment its skills came from.
 CURATED_MEMORY_SOURCE = "curated"
+# Skills of graduated experiments the researcher has taken back out of the tier.
+# A sibling of the library, never inside it: the library root is validated as a
+# skills tree, which admits directories only, so a file there breaks every mount.
+GRADUATED_EXCLUSIONS_PATH = "configs/graduated_exclusions.json"
+GRADUATED_EXCLUSION_KEYS = frozenset(
+    {"experiment_id", "skill", "reason", "excluded_at"}
+)
 OPERATING_MEMORY_MODES = ("none", "curated", "curated+graduated")
 DEFAULT_OPERATING_MEMORY = "curated+graduated"
 SKILL_FILENAME = "SKILL.md"
@@ -392,6 +400,111 @@ def experiment_graduated(records: Sequence[Mapping[str, object]]) -> bool:
     return verdict is not None and verdict.get("status") == "graduated"
 
 
+@dataclass(frozen=True)
+class GraduatedExclusion:
+    """One graduated skill the researcher keeps out of every future mount.
+
+    Graduated skills are another experiment's immutable artifacts, so they are
+    never edited in place; withdrawing one is this record, kept in the
+    repository beside the curated library and committed with it.
+    """
+
+    experiment_id: str
+    skill: str
+    reason: str = ""
+    excluded_at: str = ""
+
+    @property
+    def key(self) -> tuple[str, str]:
+        return (self.experiment_id, self.skill)
+
+    def to_record(self) -> dict[str, str]:
+        return {
+            "experiment_id": self.experiment_id,
+            "skill": self.skill,
+            "reason": self.reason,
+            "excluded_at": self.excluded_at,
+        }
+
+
+def _graduated_exclusion(record: object) -> GraduatedExclusion:
+    if not isinstance(record, Mapping):
+        raise ValueError("graduated exclusion must be a JSON object")
+    unknown = sorted(set(map(str, record)) - GRADUATED_EXCLUSION_KEYS)
+    if unknown:
+        raise ValueError("unknown graduated exclusion keys: " + ", ".join(unknown))
+    experiment_id = str(record.get("experiment_id") or "")
+    if (
+        not experiment_id
+        or Path(experiment_id).name != experiment_id
+        or experiment_id.startswith(".")
+    ):
+        raise ValueError(
+            "graduated exclusion experiment_id must be one non-hidden path component"
+        )
+    return GraduatedExclusion(
+        experiment_id,
+        validate_skill_name(str(record.get("skill") or "")),
+        str(record.get("reason") or ""),
+        str(record.get("excluded_at") or ""),
+    )
+
+
+def read_graduated_exclusions(
+    repo_root: str | Path | None,
+) -> tuple[GraduatedExclusion, ...]:
+    """The deny list as written, or empty when this checkout has none.
+
+    A list that cannot be read is never treated as an empty one: it may be the
+    only thing keeping a withdrawn skill out of the next session.
+    """
+
+    if repo_root is None:
+        return ()
+    path = Path(repo_root) / GRADUATED_EXCLUSIONS_PATH
+    if not path.is_file():
+        return ()
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, list):
+        raise ValueError("graduated exclusions must be a JSON list")
+    exclusions = tuple(_graduated_exclusion(record) for record in payload)
+    keys = [item.key for item in exclusions]
+    if len(set(keys)) != len(keys):
+        raise ValueError("graduated exclusions contain a duplicate skill")
+    return exclusions
+
+
+def write_graduated_exclusions(
+    repo_root: str | Path, exclusions: Sequence[GraduatedExclusion]
+) -> tuple[GraduatedExclusion, ...]:
+    """Replace the deny list atomically, revalidating what is about to be written."""
+
+    records = [item.to_record() for item in exclusions]
+    validated = tuple(_graduated_exclusion(record) for record in records)
+    keys = [item.key for item in validated]
+    if len(set(keys)) != len(keys):
+        raise ValueError("graduated exclusions contain a duplicate skill")
+    path = Path(repo_root) / GRADUATED_EXCLUSIONS_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_json_atomic(path, [item.to_record() for item in validated])
+    return validated
+
+
+def graduated_exclusion_record(
+    experiment_id: str, skill: str, reason: str = ""
+) -> GraduatedExclusion:
+    """One new exclusion, stamped now and validated like a stored one."""
+
+    return _graduated_exclusion(
+        {
+            "experiment_id": experiment_id,
+            "skill": skill,
+            "reason": reason,
+            "excluded_at": utc_now_iso(),
+        }
+    )
+
+
 def curated_memory_source(repo_root: str | Path | None) -> MemorySource | None:
     """The human-curated library, or ``None`` when this checkout has none."""
 
@@ -407,7 +520,7 @@ def curated_memory_source(repo_root: str | Path | None) -> MemorySource | None:
 
 
 def graduated_memory_sources(
-    experiments_root: str | Path, *, exclude: str = ""
+    experiments_root: str | Path, *, repo_root: str | Path | None, exclude: str = ""
 ) -> tuple[MemorySource, ...]:
     """Skills of every graduated experiment, read from the experiments on disk.
 
@@ -415,11 +528,17 @@ def graduated_memory_sources(
     generation, so there is no second registry to keep in sync. An experiment
     without a ledger, without a graduated held-out row, or without a published
     skills generation contributes nothing.
+
+    ``repo_root`` carries the one thing the experiments cannot answer: the
+    researcher's deny list. It is required rather than optional so a caller
+    cannot silently mount a skill that was withdrawn; pass ``None`` only where
+    there is no repository to read it from.
     """
 
     root = Path(experiments_root)
     if not root.is_dir():
         return ()
+    withdrawn = {item.key for item in read_graduated_exclusions(repo_root)}
     sources: list[MemorySource] = []
     for directory in sorted(root.iterdir(), key=lambda path: path.name):
         if not directory.is_dir() or directory.name == exclude:
@@ -438,13 +557,15 @@ def graduated_memory_sources(
         snapshot = latest_skills_snapshot(records, experiment_dir=directory)
         if snapshot.root is None or not snapshot.stats.count:
             continue
+        entries = tuple(
+            name
+            for name in sorted(item.name for item in snapshot.root.iterdir())
+            if (directory.name, name) not in withdrawn
+        )
+        if not entries:
+            continue  # every skill of this experiment has been withdrawn
         sources.append(
-            MemorySource(
-                directory.name,
-                "graduated",
-                snapshot.root,
-                tuple(sorted(item.name for item in snapshot.root.iterdir())),
-            )
+            MemorySource(directory.name, "graduated", snapshot.root, entries)
         )
     return tuple(sources)
 
@@ -484,15 +605,22 @@ def install_operating_memory(
         sources.append(curated)
     if mode == "curated+graduated" and experiments_root is not None:
         sources.extend(
-            graduated_memory_sources(experiments_root, exclude=experiment_id)
+            graduated_memory_sources(
+                experiments_root, repo_root=repo_root, exclude=experiment_id
+            )
         )
     if not sources:
         return ()
     destination.mkdir()
     for source in sources:
-        shutil.copytree(
-            source.root, destination / source.source, copy_function=shutil.copyfile
-        )
+        # Entry by entry, not the whole tree: a source's admitted set is what
+        # the session may see, and a withdrawn graduated skill is not in it.
+        target = destination / source.source
+        target.mkdir()
+        for entry in source.entries:
+            shutil.copytree(
+                source.root / entry, target / entry, copy_function=shutil.copyfile
+            )
     chmod_tree(destination, file_mode=0o444, dir_mode=0o555)
     for source in sources:
         validate_skills_tree(destination / source.source, require_writable=False)
@@ -802,6 +930,8 @@ __all__ = [
     "MAX_SKILLS_FILES",
     "CURATED_MEMORY_SOURCE",
     "DEFAULT_OPERATING_MEMORY",
+    "GRADUATED_EXCLUSIONS_PATH",
+    "GraduatedExclusion",
     "OPERATING_MEMORY_DIRNAME",
     "OPERATING_MEMORY_LIBRARY",
     "OPERATING_MEMORY_MODES",
@@ -814,16 +944,19 @@ __all__ = [
     "build_skills_index",
     "curated_memory_source",
     "experiment_graduated",
+    "graduated_exclusion_record",
     "graduated_memory_sources",
     "install_operating_memory",
     "install_workspace_skills",
     "latest_skills_snapshot",
     "operating_memory_entries",
+    "read_graduated_exclusions",
     "resolve_operating_memory",
     "resolve_collected_skills_source",
     "skills_trees_equal",
     "validate_skill_name",
     "validate_skill_path",
     "validate_skills_tree",
+    "write_graduated_exclusions",
     "write_skills_index",
 ]

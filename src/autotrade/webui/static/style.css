@@ -2081,6 +2081,7 @@ details.advanced .form-grid {
    toolbar or hint, and every list starts one step below that. */
 .memory-nav h4 {
  margin-bottom: 0.75rem;
+ white-space: nowrap;
 }
 .memory-nav h4.section-gap {
  margin-top: 1.5rem;
@@ -2220,4 +2221,46 @@ table.data.text td {
  .memory-skeleton {
   min-height: 12rem;
  }
+}
+
+/* Withdrawn graduated candidate: still named under its experiment, never
+   mounted again, one click from coming back. */
+.session-item.withdrawn {
+ cursor: default;
+ color: var(--muted);
+ text-decoration: line-through;
+}
+.session-item.withdrawn:hover {
+ background: transparent;
+}
+.session-item.withdrawn .btn {
+ text-decoration: none;
+}
+
+/* 已挂载记忆: every entry once above, one row per session below. */
+.mounted-entries .file-list {
+ margin-top: 0.4rem;
+}
+.mounted-group-title {
+ margin-top: 0.75rem;
+ font-size: 0.845rem;
+ font-weight: 600;
+ color: var(--muted);
+ white-space: nowrap;
+}
+.chip-note {
+ color: var(--muted);
+ font-size: 0.8rem;
+}
+.mounted-status {
+ display: flex;
+ gap: 0.4rem;
+ align-items: center;
+}
+/* Session and status never wrap, and claim only the width they need, so the
+   two count columns absorb the rest instead of squeezing the labels. */
+table.data.text th.nowrap,
+table.data.text td.nowrap {
+ white-space: nowrap;
+ width: 1%;
 }

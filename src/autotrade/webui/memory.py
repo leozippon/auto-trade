@@ -28,6 +28,7 @@ from autotrade.pipelines.ledger import experiment_verdict
 from autotrade.pipelines.skills import (
     CURATED_MEMORY_SOURCE,
     DEFAULT_OPERATING_MEMORY,
+    GRADUATED_EXCLUSIONS_PATH,
     MAX_SKILLS,
     MAX_SKILLS_BYTES,
     MAX_SKILLS_FILES,
@@ -35,12 +36,15 @@ from autotrade.pipelines.skills import (
     SKILL_FILENAME,
     SkillsStats,
     build_skills_index,
+    graduated_exclusion_record,
     graduated_memory_sources,
     latest_skills_snapshot,
+    read_graduated_exclusions,
     resolve_operating_memory,
     validate_skill_name,
     validate_skill_path,
     validate_skills_tree,
+    write_graduated_exclusions,
 )
 
 from .public_identity import PublicIdentity
@@ -126,33 +130,48 @@ def curated_entry(repo_root: Path, name: str) -> dict[str, object]:
     return {**listed, "content": content}
 
 
-def graduated_tier(experiments_root: Path) -> dict[str, object]:
+def graduated_tier(repo_root: Path, experiments_root: Path) -> dict[str, object]:
     """Every experiment's held-out verdict, and what the tier would admit now.
 
     The verdict follows the console's own reveal gate: an experiment that has
     not revealed its held-out results publishes none here either, or this page
     would hand back exactly the evidence the gate seals. Admission is whatever
-    ``skills.graduated_memory_sources`` returns, never a second rule.
+    ``skills.graduated_memory_sources`` returns, never a second rule — including
+    the researcher's exclusion list, which is why the repository root is read
+    here too and why each row also carries what was withdrawn from it.
     """
 
     root = Path(experiments_root)
-    payload: dict[str, object] = {"experiments": []}
+    payload: dict[str, object] = {
+        "exclusions": GRADUATED_EXCLUSIONS_PATH,
+        "experiments": [],
+    }
     if not root.is_dir():
         return payload
     admitted: dict[str, list[str]] | None
+    withdrawn: dict[str, list[dict[str, str]]] = {}
     try:
         admitted = {
             source.source: list(source.entries)
-            for source in graduated_memory_sources(root)
+            for source in graduated_memory_sources(root, repo_root=repo_root)
         }
+        for item in read_graduated_exclusions(repo_root):
+            withdrawn.setdefault(item.experiment_id, []).append(
+                {
+                    "skill": item.skill,
+                    "reason": item.reason,
+                    "excluded_at": item.excluded_at,
+                }
+            )
     except (OSError, ValueError) as exc:
         # A tier that cannot be resolved is what a session starting now would
         # also hit. Report it, and leave every row's admission unknown rather
         # than printing a "not admitted" the read model cannot stand behind.
         payload["error"] = _error(exc, _UNREADABLE_TIER)
         admitted = None
+        withdrawn = {}
     payload["experiments"] = [
-        _tier_row(directory, admitted)
+        _tier_row(directory, admitted, withdrawn.get(directory.name, []))
         for directory in sorted(root.iterdir(), key=lambda path: path.name)
         if directory.is_dir() and not directory.name.startswith(".")
     ]
@@ -160,7 +179,9 @@ def graduated_tier(experiments_root: Path) -> dict[str, object]:
 
 
 def _tier_row(
-    directory: Path, admitted: Mapping[str, list[str]] | None
+    directory: Path,
+    admitted: Mapping[str, list[str]] | None,
+    excluded: list[dict[str, str]],
 ) -> dict[str, object]:
     row: dict[str, object] = {
         "experiment_id": directory.name,
@@ -168,6 +189,9 @@ def _tier_row(
         "verdict": None,
         "admitted": False,
         "entries": [],
+        # Researcher-authored metadata, not held-out evidence: it stays visible
+        # before the reveal so a withdrawal can always be undone.
+        "excluded": excluded,
     }
     try:
         records = read_ledger_records(directory)
@@ -194,24 +218,36 @@ def experiment_memory(experiments_root: Path, experiment_id: str) -> dict[str, o
     directory = resolve_experiment_dir(Path(experiments_root), experiment_id)
     identity = PublicIdentity(directory)
     params = read_json(directory / HITL_DIR_NAME / PARAMS_NAME)
+    # Collected runs are named by run id, so their directory order is arbitrary.
+    # The plan is the only order a reader can follow, and the page lists one row
+    # per session, so the sessions come back in it.
+    order = {
+        str(entry.get("_raw_key") or ""): index
+        for index, entry in enumerate(identity.sessions)
+    }
+    collected = [
+        _mounted_session(identity, path, order)
+        for path in sorted(
+            (directory / "artifacts").glob(f"*/{HOST_RUN_MANIFEST_NAME}")
+        )
+    ]
+    collected.sort(key=lambda item: item[0])
     return {
         "experiment_id": experiment_id,
         "mode": resolve_operating_memory(params.get("operating_memory")),
         "default_mode": DEFAULT_OPERATING_MEMORY,
-        "sessions": [
-            _mounted_session(identity, path)
-            for path in sorted(
-                (directory / "artifacts").glob(f"*/{HOST_RUN_MANIFEST_NAME}")
-            )
-        ],
+        "sessions": [entry for _index, entry in collected],
     }
 
 
-def _mounted_session(identity: PublicIdentity, manifest_path: Path) -> dict[str, object]:
+def _mounted_session(
+    identity: PublicIdentity, manifest_path: Path, order: Mapping[str, int]
+) -> tuple[int, dict[str, object]]:
+    unplanned = len(order)
     try:
         manifest = read_json(manifest_path)
     except (OSError, TypeError, ValueError) as exc:
-        return {
+        return unplanned, {
             "run_ref": identity.run_ref(manifest_path.parent.name),
             "error": _error(exc, _UNREADABLE_MANIFEST),
         }
@@ -222,6 +258,7 @@ def _mounted_session(identity: PublicIdentity, manifest_path: Path) -> dict[str,
         "kind": str(manifest.get("kind") or ""),
     }
     raw_session = str(manifest.get("session_key") or "")
+    index = order.get(raw_session.split("#", 1)[0], unplanned)
     if raw_session:
         try:
             entry["session_key"] = identity.public_session_key(raw_session)
@@ -232,9 +269,9 @@ def _mounted_session(identity: PublicIdentity, manifest_path: Path) -> dict[str,
             pass
     record = manifest.get("operating_memory")
     if not isinstance(record, Mapping):
-        return {**entry, "mode": None, "sources": []}
+        return index, {**entry, "mode": None, "sources": []}
     sources = identity.public_value(record.get("sources"))
-    return {
+    return index, {
         **entry,
         "mode": str(record.get("mode") or ""),
         "sources": sources if isinstance(sources, list) else [],
@@ -467,7 +504,9 @@ def delete_curated_entry(repo_root: Path, name: str) -> dict[str, object]:
     return _write_result(repo_root, entry, "deleted")
 
 
-def _admitted_skill_dir(experiments_root: Path, experiment_id: str, skill: str) -> Path:
+def _admitted_skill_dir(
+    repo_root: Path, experiments_root: Path, experiment_id: str, skill: str
+) -> Path:
     """The only place a promotion may copy from: an admitted graduated skill.
 
     Admission is ``skills.graduated_memory_sources`` and the reveal gate is the
@@ -483,7 +522,7 @@ def _admitted_skill_dir(experiments_root: Path, experiment_id: str, skill: str) 
     source = next(
         (
             item
-            for item in graduated_memory_sources(root)
+            for item in graduated_memory_sources(root, repo_root=repo_root)
             if item.source == experiment_id
         ),
         None,
@@ -494,7 +533,7 @@ def _admitted_skill_dir(experiments_root: Path, experiment_id: str, skill: str) 
 
 
 def graduated_entry(
-    experiments_root: Path, experiment_id: str, skill: str
+    repo_root: Path, experiments_root: Path, experiment_id: str, skill: str
 ) -> dict[str, object]:
     """One admitted graduated skill's body, read where it already lives.
 
@@ -505,7 +544,7 @@ def graduated_entry(
     """
 
     name = validate_skill_name(skill)
-    item = _admitted_skill_dir(Path(experiments_root), experiment_id, name)
+    item = _admitted_skill_dir(repo_root, Path(experiments_root), experiment_id, name)
     # The generation's own index, so a candidate is described exactly as the
     # session that mounts it would describe it.
     listed = next(
@@ -547,7 +586,7 @@ def promote_curated_entry(
 
     entry = _entry_name(name or skill)
     source = _admitted_skill_dir(
-        experiments_root, experiment_id, validate_skill_name(skill)
+        repo_root, experiments_root, experiment_id, validate_skill_name(skill)
     )
     _reject_live_conflict(experiments_root, live_experiments, entry)
     files: dict[str, bytes] = {}
@@ -561,26 +600,97 @@ def promote_curated_entry(
     return _write_result(repo_root, entry, "promoted")
 
 
+# ---- graduated exclusions -------------------------------------------------
+
+# Graduated skills are another experiment's immutable artifacts: the console
+# never edits one, it only stops mounting it.
+GRADUATED_EXCLUSION_NOTE = (
+    "the withdrawn skill is left untouched where it was published; this changes "
+    "what sessions started afterwards mount, and the exclusion list is a tracked "
+    "repository file the researcher commits"
+)
+
+
+def _tier_result(
+    repo_root: Path,
+    experiments_root: Path,
+    experiment_id: str,
+    skill: str,
+    action: str,
+) -> dict[str, object]:
+    return {
+        "experiment_id": experiment_id,
+        "skill": skill,
+        "action": action,
+        "note": GRADUATED_EXCLUSION_NOTE,
+        "graduated": graduated_tier(repo_root, experiments_root),
+    }
+
+
+def exclude_graduated_skill(
+    repo_root: Path,
+    experiments_root: Path,
+    *,
+    experiment_id: str,
+    skill: str,
+    reason: str = "",
+) -> dict[str, object]:
+    """Keep one currently admitted graduated skill out of every future mount."""
+
+    entry = graduated_exclusion_record(experiment_id, skill, reason)
+    current = list(read_graduated_exclusions(repo_root))
+    # Asked before admission: an already withdrawn skill is no longer admitted,
+    # and "already excluded" is the answer that says what happened.
+    if any(item.key == entry.key for item in current):
+        raise FileExistsError(
+            f"{entry.skill} is already excluded for {entry.experiment_id}"
+        )
+    # Otherwise only a skill the tier admits right now: the console cannot
+    # withdraw something it would not have mounted, nor name one that is absent.
+    _admitted_skill_dir(repo_root, experiments_root, entry.experiment_id, entry.skill)
+    write_graduated_exclusions(repo_root, [*current, entry])
+    return _tier_result(
+        repo_root, experiments_root, entry.experiment_id, entry.skill, "excluded"
+    )
+
+
+def restore_graduated_skill(
+    repo_root: Path, experiments_root: Path, *, experiment_id: str, skill: str
+) -> dict[str, object]:
+    """Put one withdrawn skill back into the tier."""
+
+    name = validate_skill_name(skill)
+    current = list(read_graduated_exclusions(repo_root))
+    remaining = [item for item in current if item.key != (experiment_id, name)]
+    if len(remaining) == len(current):
+        raise KeyError(f"{name} is not excluded for {experiment_id}")
+    write_graduated_exclusions(repo_root, remaining)
+    return _tier_result(repo_root, experiments_root, experiment_id, name, "restored")
+
+
 def memory_overview(repo_root: Path, experiments_root: Path) -> dict[str, object]:
     """The whole operating-memory page in one read."""
 
     return {
         "default_mode": DEFAULT_OPERATING_MEMORY,
         "curated": curated_library(repo_root),
-        "graduated": graduated_tier(experiments_root),
+        "graduated": graduated_tier(repo_root, experiments_root),
     }
 
 
 __all__ = [
     "CURATED_WRITE_NOTE",
+    "GRADUATED_EXCLUSION_NOTE",
     "create_curated_entry",
     "curated_entry",
     "curated_library",
     "delete_curated_entry",
+    "exclude_graduated_skill",
     "experiment_memory",
     "graduated_entry",
     "graduated_tier",
     "memory_overview",
     "promote_curated_entry",
+    "restore_graduated_skill",
     "update_curated_entry",
 ]

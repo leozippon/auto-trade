@@ -151,6 +151,7 @@ def test_the_extractor_finds_the_routes_the_console_really_calls():
         "/api/memory/curated/{}",
         "/api/memory/curated/{}/promote",
         "/api/memory/graduated/{}/{}",
+        "/api/memory/graduated/{}/{}/exclude",
         "/api/experiments/{}/memory",
     ):
         assert expected in paths, sorted(paths)
