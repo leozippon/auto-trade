@@ -1519,6 +1519,20 @@ function walkForwardPanel(detail) {
   return panel;
 }
 
+/* A long experiment id must not reflow the heading: the name takes one
+   elastic column and truncates, the badges keep their own column, so every
+   card's badges line up on the same edge. The full id stays in the tooltip. */
+function experimentName(experimentId, { link = true } = {}) {
+  const attrs = { class: "exp-name", title: experimentId };
+  return link
+    ? el("a", { ...attrs, href: `#/exp/${encodeURIComponent(experimentId)}` }, experimentId)
+    : el("span", attrs, experimentId);
+}
+
+function experimentBadges(...badges) {
+  return el("span", { class: "exp-badges" }, ...badges.filter(Boolean));
+}
+
 function experimentCard(item) {
   const metrics = item.metrics || {};
   const total = item.total_sessions,
@@ -1535,13 +1549,8 @@ function experimentCard(item) {
     el(
       "h3",
       {},
-      el(
-        "a",
-        { href: `#/exp/${encodeURIComponent(item.experiment_id)}` },
-        item.experiment_id,
-      ),
-      stateBadge(item.state),
-      verdictBadge(item.verdict),
+      experimentName(item.experiment_id),
+      experimentBadges(stateBadge(item.state), verdictBadge(item.verdict)),
     ),
     el(
       "div",
@@ -1731,15 +1740,7 @@ function heroPanel(item) {
       "div",
       { class: "control-bar" },
       el("span", { class: "hero-crown" }, "🏆"),
-      el(
-        "h3",
-        { style: "margin:0" },
-        el(
-          "a",
-          { href: `#/exp/${encodeURIComponent(item.experiment_id)}` },
-          item.experiment_id,
-        ),
-      ),
+      el("h3", { style: "margin:0" }, experimentName(item.experiment_id)),
       stateBadge(item.state),
       el(
         "span",
@@ -2326,20 +2327,22 @@ async function renderDetailPage(experimentId, selectedKey) {
     el(
       "h2",
       {},
-      el("a", { href: "#/" }, "← 实验"),
-      detail.experiment_id,
-      stateBadge(detail.state),
-      detail.kind === "hitl" && detail.test_revealed
-        ? el(
-            "span",
-            {
-              class: "badge state-waiting_user",
-              title:
-                "测试/Held-out 结果已揭示：实验已封存，不能再批准、重跑、回滚或注入指令",
-            },
-            "已揭示测试（封存）",
-          )
-        : null,
+      el("a", { class: "exp-back", href: "#/" }, "← 实验"),
+      experimentName(detail.experiment_id, { link: false }),
+      experimentBadges(
+        stateBadge(detail.state),
+        detail.kind === "hitl" && detail.test_revealed
+          ? el(
+              "span",
+              {
+                class: "badge state-waiting_user",
+                title:
+                  "测试/Held-out 结果已揭示：实验已封存，不能再批准、重跑、回滚或注入指令",
+              },
+              "已揭示测试（封存）",
+            )
+          : null,
+      ),
     ),
     el(
       "div",
@@ -7928,11 +7931,40 @@ function mountedSessionRow(session, union) {
   );
 }
 
-function mountedSessionTable(sessions, index) {
+function mountedUnion(index) {
   const union = new Set();
   for (const group of index.groups)
     for (const name of group.entries.keys())
       union.add(mountedEntryKey(group.origin, group.source, name));
+  return union;
+}
+
+/* The common case: every session that has run received the same set. Then the
+   per-session table has one distinct answer repeated N times, so one line says
+   it instead — the rows come back as soon as a session really differs. */
+function mountedSessionsUniform(sessions, index) {
+  if (!index.groups.length || index.order.length !== sessions.length) return false;
+  const union = mountedUnion(index);
+  return sessions.every(
+    (session) =>
+      !session.error &&
+      (session.sources || []).length &&
+      !mountedMissingEntries(session, union).length,
+  );
+}
+
+function mountedUniformLine(order) {
+  return el(
+    "div",
+    { class: "hint", title: order.join("、") },
+    order.length === 1
+      ? `已运行的 1 个会话（${order[0]}）挂载了以上条目`
+      : `全部 ${order.length} 个已运行会话挂载了相同的条目`,
+  );
+}
+
+function mountedSessionTable(sessions, index) {
+  const union = mountedUnion(index);
   return el(
     "table",
     { class: "data text section-gap" },
@@ -7984,7 +8016,11 @@ function mountedMemorySection(payload) {
     return panel;
   }
   if (index.groups.length) panel.append(mountedEntriesPanel(index));
-  panel.append(mountedSessionTable(sessions, index));
+  panel.append(
+    mountedSessionsUniform(sessions, index)
+      ? mountedUniformLine(index.order)
+      : mountedSessionTable(sessions, index),
+  );
   return panel;
 }
 

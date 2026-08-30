@@ -2287,3 +2287,47 @@ table.data.text td.nowrap {
 .feedback-block .hint {
  margin-top: 0;
 }
+
+/* A long experiment id truncates instead of reflowing its heading: the name is
+   the elastic column and the badges keep their own, so every card's badges line
+   up on the same edge. The full id stays in the title attribute. */
+.card h3,
+.page-head h2 {
+ flex-wrap: nowrap;
+}
+.exp-name {
+ display: block;
+ flex: 1;
+ min-width: 0;
+ max-width: 100%;
+ overflow: hidden;
+ text-overflow: ellipsis;
+ white-space: nowrap;
+}
+.exp-badges {
+ flex: none;
+ display: flex;
+ align-items: center;
+ gap: 0.45rem;
+ white-space: nowrap;
+}
+.exp-back {
+ flex: none;
+ white-space: nowrap;
+}
+/* The hero heading is a plain block inside the control bar; it must be allowed
+   to shrink there before its name can ellipsize. */
+.control-bar h3 {
+ min-width: 0;
+ overflow: hidden;
+}
+@media (max-width: 560px) {
+ /* Too narrow for one line: the badges take their own row rather than
+    squeezing the id down to a few characters. */
+ .page-head h2 {
+  flex-wrap: wrap;
+ }
+ .page-head h2 .exp-badges {
+  flex: 1 0 100%;
+ }
+}
