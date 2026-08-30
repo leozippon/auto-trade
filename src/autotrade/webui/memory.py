@@ -43,7 +43,7 @@ from autotrade.pipelines.skills import (
     validate_skills_tree,
 )
 
-from .public_identity import PublicIdentity, redact_host_paths
+from .public_identity import PublicIdentity
 from .registry import read_ledger_records, resolve_experiment_dir, test_results_revealed
 
 # The sandbox writes the full host-side manifest beside the Agent-visible one
@@ -95,18 +95,17 @@ def curated_library(repo_root: Path) -> dict[str, object]:
     return payload
 
 
-def curated_entry(
-    repo_root: Path, name: str, *, redact: bool = True
-) -> dict[str, object]:
+def curated_entry(repo_root: Path, name: str) -> dict[str, object]:
     """One curated entry's full ``SKILL.md`` text, read on demand.
 
     The name is validated against the shared skill-name rule before it touches
     the filesystem, so the route cannot be used to read anything else.
 
-    Redaction is the public surface's rule and it rewrites host paths, which
-    would make an editor round-trip lossy. The local console is the authoring
-    surface, so it reads the bytes on disk and an edit saves back exactly what
-    it opened; ``redacted`` says which of the two this body is.
+    The body is served verbatim: this is researcher-authored repository content
+    that the console also edits, and rewriting it for display would make the
+    editor's round-trip lossy. Host paths are scrubbed where they can genuinely
+    appear without anyone choosing to write them — error messages and projected
+    experiment state — not in a file the researcher wrote and committed.
     """
 
     entry_name = validate_skill_name(name)
@@ -114,7 +113,6 @@ def curated_entry(
     if not path.is_file():
         raise KeyError(f"unknown curated memory entry: {entry_name}")
     content = path.read_text(encoding="utf-8")
-    public = redact_host_paths(content)
     # The listing row this body belongs to, so the reader sees one description.
     # A library too malformed to index still serves the body it asked for.
     listed = next(
@@ -125,11 +123,7 @@ def curated_entry(
         ),
         {"name": entry_name, "title": "", "summary": "", "bytes": len(content.encode())},
     )
-    return {
-        **listed,
-        "content": public if redact else content,
-        "redacted": redact and public != content,
-    }
+    return {**listed, "content": content}
 
 
 def graduated_tier(experiments_root: Path) -> dict[str, object]:
@@ -499,6 +493,42 @@ def _admitted_skill_dir(experiments_root: Path, experiment_id: str, skill: str) 
     return source.root / skill
 
 
+def graduated_entry(
+    experiments_root: Path, experiment_id: str, skill: str
+) -> dict[str, object]:
+    """One admitted graduated skill's body, read where it already lives.
+
+    The same admission and reveal gate as the promotion it precedes, so the
+    console can never show a candidate it could not copy — and a skill whose
+    experiment is no longer admitted reads as unknown rather than as a body the
+    tier would not mount.
+    """
+
+    name = validate_skill_name(skill)
+    item = _admitted_skill_dir(Path(experiments_root), experiment_id, name)
+    # The generation's own index, so a candidate is described exactly as the
+    # session that mounts it would describe it.
+    listed = next(
+        (
+            entry
+            for entry in build_skills_index(item.parent)["skills"]  # type: ignore[union-attr]
+            if entry["name"] == name
+        ),
+        None,
+    )
+    if listed is None:
+        raise KeyError(f"{experiment_id} admits no skill named {name}")
+    return {
+        "experiment_id": experiment_id,
+        "name": name,
+        "title": str(listed["title"]),
+        "summary": str(listed["summary"]),
+        "bytes": int(listed["bytes"]),
+        "files": len(listed["files"]),  # type: ignore[arg-type]
+        "content": (item / SKILL_FILENAME).read_text(encoding="utf-8"),
+    }
+
+
 def promote_curated_entry(
     repo_root: Path,
     experiments_root: Path,
@@ -531,19 +561,11 @@ def promote_curated_entry(
     return _write_result(repo_root, entry, "promoted")
 
 
-def memory_overview(
-    repo_root: Path, experiments_root: Path, *, writable: bool = False
-) -> dict[str, object]:
-    """The whole operating-memory page in one read.
-
-    ``writable`` is the caller's answer to "may this surface edit the library",
-    carried so the page offers the curated actions the server would accept and
-    hides the ones it would refuse.
-    """
+def memory_overview(repo_root: Path, experiments_root: Path) -> dict[str, object]:
+    """The whole operating-memory page in one read."""
 
     return {
         "default_mode": DEFAULT_OPERATING_MEMORY,
-        "writable": writable,
         "curated": curated_library(repo_root),
         "graduated": graduated_tier(experiments_root),
     }
@@ -556,6 +578,7 @@ __all__ = [
     "curated_library",
     "delete_curated_entry",
     "experiment_memory",
+    "graduated_entry",
     "graduated_tier",
     "memory_overview",
     "promote_curated_entry",

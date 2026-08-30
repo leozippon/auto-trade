@@ -6817,16 +6817,22 @@ function heldoutPanel(detail, session) {
 }
 
 /* ---------------- 运行记忆 ----------------
-   Two panes over the cross-experiment knowledge a session mounts: the curated
-   library on the left, its viewer/editor on the right, and the graduated tier
-   below. The library is a tracked repository directory that every session
-   copies read-only into its workspace at session start, so a write here
-   reaches sessions started afterwards and never the ones already running, and
-   the researcher still commits it. Writes land only on the local console: the
-   public edge is served `writable: false` and the read-only page it always had.
-   Inside an experiment, 已挂载记忆 stays what THAT experiment mounted. */
+   One stable two-pane layout. The left pane is the whole catalogue — the
+   curated 精选库 above, the 毕业层候选 the tier admits below — and the right
+   pane is a single viewer/editor surface with a fixed head, toolbar and body,
+   so selecting anything swaps only what those three hosts contain: the page
+   header, the notice and both pane widths never move.
 
-let memoryView = null; // {payload, filter, selected, entry, mode, draft, dirty, …}
+   The library is a tracked repository directory that every session copies
+   read-only into its workspace at session start, so a write here reaches
+   sessions started afterwards and never the ones already running, and the
+   researcher still commits it. Who may write is settled by how the console is
+   reached (loopback bind, or the edge's login gate), not by this page.
+
+   Inside an experiment, 已挂载记忆 stays a projection of THAT experiment's run
+   manifests: what it mounted then, not what the tier admits now. */
+
+let memoryView = null;
 
 function fmtBytes(value) {
   const bytes = Number(value);
@@ -6839,8 +6845,11 @@ function memoryLibraryPath() {
   return curated.library || "configs/operating_memory";
 }
 
-function memoryWritable() {
-  return Boolean(memoryView && memoryView.payload.writable);
+function sameSelection(left, right) {
+  if (!left || !right || left.kind !== right.kind) return false;
+  return left.kind === "curated"
+    ? left.name === right.name
+    : left.experiment_id === right.experiment_id && left.skill === right.skill;
 }
 
 async function renderMemoryPage() {
@@ -6861,16 +6870,20 @@ async function renderMemoryPage() {
   memoryView = {
     payload,
     filter: "",
-    selected: null,
+    selection: null,
     entry: null,
+    loading: false,
     mode: "view", // view | edit | create | promote
     draft: null,
     draftName: "",
     source: null,
     dirty: false,
-    listHost: el("div", { class: "session-list" }),
-    paneHost: el("div", { class: "session-detail" }),
     countHost: el("span", {}, ""),
+    listHost: el("div", { class: "session-list" }),
+    candidateHost: el("div", { class: "session-list" }),
+    headHost: el("div", { class: "memory-pane-head" }),
+    toolbarHost: el("div", { class: "control-bar memory-toolbar" }),
+    bodyHost: el("div", { class: "memory-pane-body" }),
   };
   $main.replaceChildren(
     el(
@@ -6890,40 +6903,37 @@ async function renderMemoryPage() {
       el(
         "div",
         { class: "detail section-gap" },
-        curatedLibraryPanel(),
-        memoryView.paneHost,
+        memoryNavPanel(),
+        el(
+          "div",
+          { class: "panel memory-pane" },
+          memoryView.headHost,
+          memoryView.toolbarHost,
+          memoryView.bodyHost,
+        ),
       ),
-      graduatedTierPanel(payload.graduated || {}),
     ),
   );
   renderMemoryList();
+  renderMemoryCandidates();
   renderMemoryPane();
 }
 
 /* Persistent, not a toast: when a change takes effect and where it lives are
-   the two facts the resulting listing cannot show. */
+   the two facts the entry list itself cannot show. */
 function memoryNotice() {
-  const notice = el(
+  return el(
     "div",
     { class: "panel memory-notice" },
     el(
       "div",
       { class: "hint" },
-      `策展库是仓库目录 ${memoryLibraryPath()}/，纳入版本控制，改动由研究者自行提交。挂载发生在会话启动时，因此新增、修改和删除只对此后启动的会话生效；运行中的会话保留启动时挂载的只读副本。`,
+      `精选库是仓库目录 ${memoryLibraryPath()}/，纳入版本控制，改动由研究者自行提交。挂载发生在会话启动时，因此新增、修改和删除只对此后启动的会话生效；运行中的会话保留启动时挂载的只读副本。`,
     ),
   );
-  if (!memoryWritable())
-    notice.append(
-      el(
-        "div",
-        { class: "hint warn" },
-        "当前不是本机控制台：正文按公开表面规则脱敏展示，新建、编辑、删除与晋升只在本机控制台可用。",
-      ),
-    );
-  return notice;
 }
 
-function curatedLibraryPanel() {
+function memoryNavPanel() {
   const curated = memoryView.payload.curated || {};
   memoryView.countHost.textContent = String((curated.entries || []).length);
   const filter = el("input", {
@@ -6932,66 +6942,148 @@ function curatedLibraryPanel() {
     oninput: (event) => {
       memoryView.filter = event.target.value;
       renderMemoryList();
+      renderMemoryCandidates();
     },
   });
-  const bar = el("div", { class: "control-bar" });
-  if (memoryWritable())
-    bar.append(
+  return el(
+    "div",
+    { class: "panel memory-nav" },
+    el("h4", {}, "精选库（", memoryView.countHost, " 条）"),
+    el(
+      "div",
+      { class: "control-bar" },
       el(
         "button",
         { class: "btn small primary", onclick: () => startCuratedCreate() },
         "新建",
       ),
-    );
-  bar.append(el("div", { class: "field memory-filter" }, filter));
-  const panel = el(
-    "div",
-    { class: "panel" },
-    el("h4", {}, "策展库（", memoryView.countHost, " 条）"),
-    bar,
+      el("div", { class: "field memory-filter" }, filter),
+    ),
     memoryView.listHost,
+    el("h4", { class: "section-gap" }, "毕业层候选"),
+    el(
+      "div",
+      { class: "hint" },
+      "Held-out 判定全部 graduated 且已发布 skills 世代的历史实验自动准入，本实验自己始终排除在外。点选候选先看原文，再晋升到精选库。",
+    ),
+    memoryView.candidateHost,
   );
-  if (curated.error)
-    panel.append(
-      el("div", { class: "hint warn" }, `策展库不可读：${curated.error}`),
-    );
-  return panel;
+}
+
+function memoryFilterHit(...parts) {
+  const needle = memoryView.filter.trim().toLowerCase();
+  return !needle || parts.join(" ").toLowerCase().includes(needle);
+}
+
+function memoryNavItem(label, note, selection) {
+  return el(
+    "div",
+    {
+      class: `session-item${sameSelection(memoryView.selection, selection) ? " selected" : ""}`,
+      title: label,
+      onclick: () => selectMemoryItem(selection),
+    },
+    el("span", { class: "label" }, label),
+    el("span", { class: "ret" }, note),
+  );
 }
 
 function renderMemoryList() {
-  const entries = (memoryView.payload.curated || {}).entries || [];
-  const needle = memoryView.filter.trim().toLowerCase();
-  const shown = needle
-    ? entries.filter((entry) =>
-        `${entry.name} ${entry.title || ""} ${entry.summary || ""}`
-          .toLowerCase()
-          .includes(needle),
-      )
-    : entries;
-  if (!shown.length) {
-    memoryView.listHost.replaceChildren(
+  const curated = memoryView.payload.curated || {};
+  const entries = curated.entries || [];
+  const shown = entries.filter((entry) =>
+    memoryFilterHit(entry.name, entry.title || "", entry.summary || ""),
+  );
+  const nodes = shown.map((entry) =>
+    memoryNavItem(entry.name, fmtBytes(entry.bytes), {
+      kind: "curated",
+      name: entry.name,
+    }),
+  );
+  if (curated.error)
+    nodes.unshift(
+      el("div", { class: "hint warn" }, `精选库不可读：${curated.error}`),
+    );
+  if (!shown.length)
+    nodes.push(
       el(
         "div",
-        { class: "empty" },
-        entries.length ? "没有匹配的条目" : "策展库为空",
+        { class: "empty compact" },
+        entries.length ? "没有匹配的条目" : "精选库为空",
       ),
     );
-    return;
+  memoryView.listHost.replaceChildren(...nodes);
+}
+
+/* Admitted candidates are selectable; every other experiment stays visible in
+   one collapsed muted block, because "not offered" and "not there" are
+   different answers. */
+function renderMemoryCandidates() {
+  const tier = memoryView.payload.graduated || {};
+  const rows = tier.experiments || [];
+  const admitted = rows.filter(
+    (row) => row.admitted === true && (row.entries || []).length,
+  );
+  const aside = rows.filter((row) => !admitted.includes(row));
+  const nodes = [];
+  if (tier.error)
+    nodes.push(
+      el("div", { class: "hint warn" }, `毕业层不可解析：${tier.error}`),
+    );
+  let shown = 0;
+  for (const row of admitted) {
+    const skills = (row.entries || []).filter((skill) =>
+      memoryFilterHit(skill, row.experiment_id),
+    );
+    if (!skills.length) continue;
+    shown += skills.length;
+    nodes.push(el("div", { class: "epoch-head" }, row.experiment_id));
+    for (const skill of skills)
+      nodes.push(
+        memoryNavItem(skill, "候选", {
+          kind: "candidate",
+          experiment_id: row.experiment_id,
+          skill,
+        }),
+      );
   }
-  memoryView.listHost.replaceChildren(
-    ...shown.map((entry) =>
+  if (!shown)
+    nodes.push(
       el(
         "div",
-        {
-          class: `session-item${memoryView.selected === entry.name ? " selected" : ""}`,
-          title: entry.title || entry.name,
-          onclick: () => selectCuratedEntry(entry.name),
-        },
-        el("span", { class: "label" }, entry.name),
-        el("span", { class: "ret" }, fmtBytes(entry.bytes)),
+        { class: "empty compact" },
+        admitted.length ? "没有匹配的候选" : "没有准入的候选",
       ),
-    ),
-  );
+    );
+  if (aside.length)
+    nodes.push(
+      el(
+        "details",
+        { class: "memory-aside" },
+        el("summary", {}, `其他实验（${aside.length}）`),
+        ...aside.map((row) =>
+          el(
+            "div",
+            { class: "memory-aside-row" },
+            el("span", { class: "label" }, row.experiment_id),
+            candidateAsideReason(row),
+          ),
+        ),
+      ),
+    );
+  memoryView.candidateHost.replaceChildren(...nodes);
+}
+
+/* `admitted === null` means the tier itself could not be resolved, which is
+   not the same answer as "contributes nothing". */
+function candidateAsideReason(row) {
+  if (row.error) return el("span", { class: "hint warn" }, row.error);
+  if (row.admitted === null || row.admitted === undefined)
+    return el("span", { class: "hint warn" }, "无法解析");
+  if (!row.revealed) return el("span", { class: "hint" }, "未揭示");
+  if (!row.verdict) return el("span", { class: "hint" }, "无 Held-out 记录");
+  if (row.verdict !== "graduated") return verdictBadge({ status: row.verdict });
+  return el("span", { class: "hint" }, "无已发布 skill 条目");
 }
 
 /* In-page moves are guarded; leaving the 运行记忆 route entirely drops the
@@ -7029,78 +7121,116 @@ function resetCuratedDraft() {
   memoryView.dirty = false;
 }
 
-function selectCuratedEntry(name) {
+function selectMemoryItem(selection) {
   guardUnsavedMemory(() => {
     resetCuratedDraft();
-    memoryView.selected = name;
+    memoryView.selection = selection;
     memoryView.entry = null;
+    memoryView.loading = true;
     renderMemoryList();
+    renderMemoryCandidates();
     renderMemoryPane();
-    loadCuratedEntry(name);
+    loadMemorySelection(selection);
   });
 }
 
-async function loadCuratedEntry(name) {
+async function loadMemorySelection(selection) {
   let entry;
   try {
-    entry = await api(`/api/memory/curated/${encodeURIComponent(name)}`);
+    entry =
+      selection.kind === "curated"
+        ? await api(`/api/memory/curated/${encodeURIComponent(selection.name)}`)
+        : await api(
+            `/api/memory/graduated/${encodeURIComponent(selection.experiment_id)}/${encodeURIComponent(selection.skill)}`,
+          );
   } catch (error) {
-    entry = { name, error: error.message };
+    entry = { error: error.message };
   }
-  if (!memoryView || memoryView.selected !== name) return; // moved on meanwhile
+  if (!memoryView || !sameSelection(memoryView.selection, selection)) return;
   memoryView.entry = entry;
+  memoryView.loading = false;
   renderMemoryPane();
 }
 
+/* Three fixed hosts, always all three: only their contents change, so the
+   toolbar row never moves and the body never collapses under a load. */
 function renderMemoryPane() {
-  memoryView.paneHost.replaceChildren(curatedEntryPanel());
+  const view = memoryPaneView();
+  memoryView.headHost.replaceChildren(
+    el("div", { class: "memory-pane-title" }, view.title),
+    el("div", { class: "hint memory-pane-meta" }, view.meta || ""),
+  );
+  memoryView.toolbarHost.replaceChildren(...view.buttons);
+  memoryView.bodyHost.replaceChildren(...view.body);
 }
 
-function curatedEntryPanel() {
+function memoryPaneView() {
   if (memoryView.mode === "create" || memoryView.mode === "promote")
-    return curatedCreatePanel();
-  if (!memoryView.selected)
-    return el(
-      "div",
-      { class: "panel" },
-      el("h4", {}, "条目"),
-      el("div", { class: "empty" }, "从左侧选择一个条目查看 SKILL.md 原文"),
-    );
+    return curatedFormView();
+  const selection = memoryView.selection;
+  if (!selection)
+    return {
+      title: "运行记忆条目",
+      meta: "",
+      buttons: [],
+      body: [
+        el(
+          "div",
+          { class: "empty" },
+          "从左侧选择精选库条目或毕业层候选，查看 SKILL.md 原文",
+        ),
+      ],
+    };
+  const label = selection.kind === "curated" ? selection.name : selection.skill;
+  if (memoryView.loading || !memoryView.entry)
+    return {
+      title: label,
+      meta: "",
+      buttons: [],
+      body: [el("div", { class: "memory-skeleton" }, "加载条目…")],
+    };
   const entry = memoryView.entry;
-  if (!entry)
-    return el("div", { class: "panel" }, el("div", { class: "loading" }, "加载条目…"));
   if (entry.error)
-    return el(
-      "div",
-      { class: "panel" },
-      el("h4", { class: "subsection-title" }, entry.name),
-      el("div", { class: "hint warn" }, `无法读取：${entry.error}`),
-    );
-  const panel = el(
-    "div",
-    { class: "panel" },
-    el("h4", { class: "subsection-title" }, entry.title || entry.name),
-    el(
-      "div",
-      { class: "hint" },
-      `${entry.name} ｜ ${fmtBytes(entry.bytes)} ｜ ${entry.files ?? 1} 个文件 ｜ 挂载为 memory/${(memoryView.payload.curated || {}).source || "curated"}/${entry.name}/`,
-    ),
-  );
-  if (entry.redacted)
-    panel.append(
-      el(
-        "div",
-        { class: "hint warn" },
-        "正文含宿主绝对路径，这里按脱敏后的文本展示，因此不能在此编辑；请在本机控制台或仓库中修改。",
-      ),
-    );
-  if (memoryView.mode === "edit") {
-    panel.append(...curatedEditorRows(entry));
-    return panel;
-  }
-  const bar = el("div", { class: "control-bar" });
-  if (memoryWritable() && !entry.redacted)
-    bar.append(
+    return {
+      title: label,
+      meta: "",
+      buttons: [],
+      body: [el("div", { class: "hint warn" }, `无法读取：${entry.error}`)],
+    };
+  return selection.kind === "curated"
+    ? curatedEntryView(entry)
+    : candidateEntryView(selection, entry);
+}
+
+function skillMeta(entry, tail) {
+  return `${entry.name} ｜ ${fmtBytes(entry.bytes)} ｜ ${entry.files ?? 1} 个文件 ｜ ${tail}`;
+}
+
+function curatedEntryView(entry) {
+  const mounted = (memoryView.payload.curated || {}).source || "curated";
+  const meta = skillMeta(entry, `挂载为 memory/${mounted}/${entry.name}/`);
+  if (memoryView.mode === "edit")
+    return {
+      title: entry.title || entry.name,
+      meta,
+      buttons: [
+        el(
+          "button",
+          { class: "btn small primary", onclick: () => saveCuratedEntry() },
+          "保存",
+        ),
+        el(
+          "button",
+          { class: "btn small", onclick: () => cancelCuratedDraft() },
+          "取消",
+        ),
+      ],
+      body: curatedEditorBody(entry),
+    };
+  return {
+    title: entry.title || entry.name,
+    meta,
+    buttons: [
       el(
         "button",
         { class: "btn small", onclick: () => startCuratedEdit(entry) },
@@ -7115,15 +7245,37 @@ function curatedEntryPanel() {
         },
         "删除",
       ),
-    );
-  if (bar.childElementCount) panel.append(bar);
-  panel.append(
-    el("pre", { class: "code-view skill-body section-gap" }, entry.content || ""),
-  );
-  return panel;
+    ],
+    body: [
+      entry.summary ? el("div", { class: "hint" }, entry.summary) : null,
+      el("pre", { class: "code-view skill-body" }, entry.content || ""),
+    ].filter(Boolean),
+  };
 }
 
-function curatedEditorRows(entry) {
+function candidateEntryView(selection, entry) {
+  return {
+    title: entry.title || entry.name,
+    meta: skillMeta(entry, `毕业层 ${selection.experiment_id} 的 skill，只读`),
+    buttons: [
+      el(
+        "button",
+        {
+          class: "btn small primary",
+          onclick: () =>
+            startCuratedPromotion(selection.experiment_id, selection.skill),
+        },
+        "晋升到精选库",
+      ),
+    ],
+    body: [
+      entry.summary ? el("div", { class: "hint" }, entry.summary) : null,
+      el("pre", { class: "code-view skill-body" }, entry.content || ""),
+    ].filter(Boolean),
+  };
+}
+
+function curatedEditorBody(entry) {
   const editor = el("textarea", {
     class: "directive skill-editor",
     oninput: () => {
@@ -7132,27 +7284,6 @@ function curatedEditorRows(entry) {
     },
   });
   editor.value = memoryView.draft ?? entry.content ?? "";
-  const bar = el(
-    "div",
-    { class: "control-bar" },
-    el(
-      "button",
-      { class: "btn small primary", onclick: () => saveCuratedEntry() },
-      "保存",
-    ),
-    el(
-      "button",
-      {
-        class: "btn small",
-        onclick: () =>
-          guardUnsavedMemory(() => {
-            resetCuratedDraft();
-            renderMemoryPane();
-          }),
-      },
-      "取消",
-    ),
-  );
   return [
     el(
       "div",
@@ -7160,8 +7291,61 @@ function curatedEditorRows(entry) {
       `保存后写回 ${memoryLibraryPath()}/${entry.name}/SKILL.md，此后启动的会话挂载新正文。`,
     ),
     editor,
-    bar,
   ];
+}
+
+function curatedFormView() {
+  const promoting = memoryView.mode === "promote";
+  const nameInput = el("input", {
+    type: "text",
+    placeholder: "kebab-case 条目名",
+    oninput: () => {
+      memoryView.draftName = nameInput.value;
+      memoryView.dirty = true;
+    },
+  });
+  nameInput.value = memoryView.draftName || "";
+  const body = [
+    el(
+      "div",
+      { class: "hint" },
+      promoting
+        ? `来源：实验 ${memoryView.source.experiment_id} 的 skill ${memoryView.source.skill}，整项原样复制（含 scripts/ 与 references/），复制后可在此就地删改。`
+        : `新建 ${memoryLibraryPath()}/<条目名>/SKILL.md。条目名为小写 kebab-case，正文按共享 skill 格式校验后才写入。`,
+    ),
+    el("div", { class: "field" }, el("label", {}, "条目名"), nameInput),
+  ];
+  if (!promoting) {
+    const editor = el("textarea", {
+      class: "directive skill-editor",
+      oninput: () => {
+        memoryView.draft = editor.value;
+        memoryView.dirty = true;
+      },
+    });
+    editor.value = memoryView.draft || "";
+    body.push(el("div", { class: "field" }, el("label", {}, "SKILL.md"), editor));
+  }
+  return {
+    title: promoting ? "晋升到精选库" : "新建精选条目",
+    meta: promoting ? "" : `写入 ${memoryLibraryPath()}/`,
+    buttons: [
+      el(
+        "button",
+        { class: "btn small primary", onclick: () => submitCuratedCreate() },
+        promoting ? "晋升" : "创建",
+      ),
+      el("button", { class: "btn small", onclick: () => cancelCuratedDraft() }, "取消"),
+    ],
+    body,
+  };
+}
+
+function cancelCuratedDraft() {
+  guardUnsavedMemory(() => {
+    resetCuratedDraft();
+    renderMemoryPane();
+  });
 }
 
 function startCuratedEdit(entry) {
@@ -7175,101 +7359,24 @@ function startCuratedCreate() {
   guardUnsavedMemory(() => {
     resetCuratedDraft();
     memoryView.mode = "create";
-    memoryView.selected = null;
+    memoryView.selection = null;
     memoryView.entry = null;
     renderMemoryList();
+    renderMemoryCandidates();
     renderMemoryPane();
   });
 }
 
-/* Prefill from an admitted graduated skill: the body is copied server-side
-   (references/ and scripts/ included), so this form only names the entry. */
+/* Prefill from an admitted candidate: the body is copied server-side
+   (scripts/ and references/ included), so the form only names the entry. */
 function startCuratedPromotion(experimentId, skill) {
   guardUnsavedMemory(() => {
     resetCuratedDraft();
     memoryView.mode = "promote";
     memoryView.source = { experiment_id: experimentId, skill };
     memoryView.draftName = skill;
-    memoryView.selected = null;
-    memoryView.entry = null;
-    renderMemoryList();
     renderMemoryPane();
-    memoryView.paneHost.scrollIntoView({ behavior: "smooth", block: "start" });
   });
-}
-
-function curatedCreatePanel() {
-  const promoting = memoryView.mode === "promote";
-  const nameInput = el("input", {
-    type: "text",
-    placeholder: "kebab-case 条目名",
-    oninput: () => {
-      memoryView.draftName = nameInput.value;
-      memoryView.dirty = true;
-    },
-  });
-  nameInput.value = memoryView.draftName || "";
-  const panel = el(
-    "div",
-    { class: "panel" },
-    el("h4", { class: "subsection-title" }, promoting ? "晋升到策展库" : "新建策展条目"),
-  );
-  if (promoting)
-    panel.append(
-      el(
-        "div",
-        { class: "hint" },
-        `来源：实验 ${memoryView.source.experiment_id} 的 skill ${memoryView.source.skill}，整项原样复制（含 scripts/ 与 references/），复制后可在此就地删改。`,
-      ),
-    );
-  else
-    panel.append(
-      el(
-        "div",
-        { class: "hint" },
-        `新建 ${memoryLibraryPath()}/<条目名>/SKILL.md。条目名为小写 kebab-case，正文按共享 skill 格式校验后才写入。`,
-      ),
-    );
-  panel.append(
-    el("div", { class: "field section-gap" }, el("label", {}, "条目名"), nameInput),
-  );
-  if (!promoting) {
-    const editor = el("textarea", {
-      class: "directive skill-editor",
-      oninput: () => {
-        memoryView.draft = editor.value;
-        memoryView.dirty = true;
-      },
-    });
-    editor.value = memoryView.draft || "";
-    panel.append(
-      el("div", { class: "field section-gap" }, el("label", {}, "SKILL.md"), editor),
-    );
-  }
-  panel.append(
-    el(
-      "div",
-      { class: "control-bar" },
-      el(
-        "button",
-        { class: "btn small primary", onclick: () => submitCuratedCreate() },
-        promoting ? "晋升" : "创建",
-      ),
-      el(
-        "button",
-        {
-          class: "btn small",
-          onclick: () =>
-            guardUnsavedMemory(() => {
-              resetCuratedDraft();
-              renderMemoryPane();
-            }),
-        },
-        "取消",
-      ),
-    ),
-  );
-  return panel;
 }
 
 async function submitCuratedCreate() {
@@ -7302,7 +7409,7 @@ async function submitCuratedCreate() {
 }
 
 async function saveCuratedEntry() {
-  const name = memoryView.selected;
+  const name = memoryView.selection.name;
   try {
     applyCuratedResult(
       await api(`/api/memory/curated/${encodeURIComponent(name)}`, {
@@ -7317,7 +7424,7 @@ async function saveCuratedEntry() {
 
 function confirmDeleteCuratedEntry(name) {
   showModal(
-    "删除策展条目",
+    "删除精选条目",
     el(
       "div",
       {},
@@ -7371,154 +7478,224 @@ function applyCuratedResult(result) {
     ((result.curated || {}).entries || []).length,
   );
   toast(`${MEMORY_ACTION_LABELS[result.action] || "已更新"} ${result.name}`);
-  if (result.action === "deleted") {
-    memoryView.selected = null;
-    memoryView.entry = null;
-    renderMemoryList();
-    renderMemoryPane();
-    return;
-  }
-  memoryView.selected = result.name;
   memoryView.entry = null;
+  if (result.action === "deleted") {
+    memoryView.selection = null;
+    memoryView.loading = false;
+  } else {
+    memoryView.selection = { kind: "curated", name: result.name };
+    memoryView.loading = true;
+    loadMemorySelection(memoryView.selection);
+  }
   renderMemoryList();
+  renderMemoryCandidates();
   renderMemoryPane();
-  loadCuratedEntry(result.name);
 }
 
-function graduatedTierPanel(tier) {
-  const rows = tier.experiments || [];
-  const panel = el(
-    "div",
-    { class: "panel section-gap" },
-    el("h4", {}, "毕业层"),
-    el(
-      "div",
-      { class: "hint" },
-      "Held-out 判定全部 graduated 且已发布 skills 世代的历史实验自动准入；未揭示的实验不显示裁决，本实验自己始终排除在外。准入条目可以晋升到策展库，晋升后由研究者在策展库里删改并提交。",
-    ),
-  );
-  if (tier.error) {
-    panel.append(el("div", { class: "hint warn" }, `毕业层不可解析：${tier.error}`));
-  }
-  if (!rows.length) {
-    panel.append(el("div", { class: "empty" }, "没有可读的历史实验"));
-    return panel;
-  }
-  panel.append(
-    el(
-      "table",
-      { class: "data section-gap" },
-      el(
-        "tr",
-        {},
-        el("th", {}, "实验"),
-        el("th", {}, "Held-out 裁决"),
-        el("th", {}, "准入条目"),
-      ),
-      ...rows.map((row) =>
-        el(
-          "tr",
-          {},
-          el("td", {}, row.experiment_id),
-          el("td", {}, graduatedVerdictCell(row)),
-          el("td", {}, graduatedEntriesCell(row)),
-        ),
-      ),
-    ),
-  );
-  return panel;
-}
+/* ---------------- 已挂载记忆 ----------------
+   Experiment-detail block: what THIS experiment's collected sessions mounted,
+   read from their run manifests rather than recomputed from today's tier. Most
+   sessions of an experiment mount exactly the same set, so identical mounts are
+   collapsed into one row that names the sessions sharing it — a 24-session
+   experiment reads as a few rows instead of 24. */
 
-function graduatedVerdictCell(row) {
-  if (row.error) return el("span", { class: "hint warn" }, row.error);
-  if (!row.revealed) return el("span", { class: "hint" }, "未揭示");
-  if (!row.verdict) return el("span", { class: "hint" }, "无 Held-out 记录");
-  return verdictBadge({ status: row.verdict });
-}
-
-/* `admitted === null` means the tier itself could not be resolved, which is
-   not the same answer as "contributes nothing". */
-function graduatedEntriesCell(row) {
-  if (row.error) return "—";
-  if (row.admitted === null || row.admitted === undefined)
-    return el("span", { class: "hint warn" }, "无法解析");
-  const entries = row.entries || [];
-  if (!row.admitted || !entries.length) return "—";
-  if (!memoryWritable()) return entries.join("、");
-  return el(
-    "div",
-    { class: "control-bar" },
-    ...entries.map((skill) =>
-      el(
-        "button",
-        {
-          class: "btn small",
-          title: "把这条 skill 整项复制到策展库",
-          onclick: () => startCuratedPromotion(row.experiment_id, skill),
-        },
-        `晋升 ${skill}`,
-      ),
-    ),
-  );
-}
-
-/* Experiment-detail block: what THIS experiment's collected sessions mounted,
-   read from their run manifests rather than recomputed from today's tier. */
 function mountedMemoryPanel(detail) {
   const host = el("div", {});
   api(`/api/experiments/${encodeURIComponent(detail.experiment_id)}/memory`)
-    .then((payload) => {
-      if ((payload.sessions || []).length)
-        host.append(mountedMemorySection(payload));
-    })
+    .then((payload) => host.append(mountedMemorySection(payload)))
     .catch(() => {
       /* no collected session artifacts for this experiment */
     });
   return host;
 }
 
-function mountedMemorySection(payload) {
-  const rows = [];
-  for (const session of payload.sessions || []) {
-    const label = session.session_label || session.run_ref;
-    if (session.error) {
-      rows.push([label, el("span", { class: "hint warn" }, session.error), "—"]);
-      continue;
-    }
-    const sources = session.sources || [];
-    if (!sources.length) {
-      rows.push([label, el("span", { class: "hint" }, "未挂载"), "—"]);
-      continue;
-    }
-    for (const source of sources)
-      rows.push([
-        label,
-        `${source.source}（${source.origin}）`,
-        (source.entries || []).join("、") || "—",
-      ]);
+/* The manifest's display key is `<epoch>/<fold period>` for a Fold and
+   `<epoch>/meta_learning` for a Meta session; every other surface of the
+   console names the kind in Chinese, so this one does too. */
+function mountedSessionLabel(session) {
+  const label = String(session.session_label || session.run_ref || "—");
+  const kind = KIND_LABELS[session.kind];
+  return kind && label.endsWith(session.kind)
+    ? label.slice(0, -session.kind.length) + kind
+    : label;
+}
+
+function mountedMemoryGroups(sessions) {
+  const groups = new Map();
+  for (const session of sessions) {
+    const label = mountedSessionLabel(session);
+    const key = session.error
+      ? `error:${session.error}`
+      : JSON.stringify([
+          session.mode || "",
+          (session.sources || []).map((source) => [
+            source.source,
+            source.origin,
+            source.entries || [],
+          ]),
+        ]);
+    const group = groups.get(key) || { session, labels: [] };
+    group.labels.push(label);
+    groups.set(key, group);
   }
+  return [...groups.values()];
+}
+
+function mountedSessionsCell(labels) {
+  const text =
+    labels.length <= 3
+      ? labels.join("、")
+      : `${labels.slice(0, 2).join("、")} 等 ${labels.length} 个会话`;
+  return el("span", { title: labels.join("、") }, text);
+}
+
+function mountedSourceLabel(source) {
+  return source.origin === "curated"
+    ? "精选库"
+    : `毕业层 ${source.source || "—"}`;
+}
+
+/* The chips open the entry as it reads today; the row itself stays the
+   historical record, so an entry that has since been removed answers in the
+   toast instead of silently rewriting what this experiment mounted. */
+function mountedEntryChips(source) {
+  const entries = source.entries || [];
+  if (!entries.length) return "—";
   return el(
+    "div",
+    { class: "file-list" },
+    ...entries.map((name) =>
+      el(
+        "button",
+        {
+          class: "file-chip",
+          type: "button",
+          title: "查看 SKILL.md 原文",
+          onclick: () => openMountedSkill(source, name),
+        },
+        name,
+      ),
+    ),
+  );
+}
+
+async function openMountedSkill(source, name) {
+  const curated = source.origin === "curated";
+  let entry;
+  try {
+    entry = curated
+      ? await api(`/api/memory/curated/${encodeURIComponent(name)}`)
+      : await api(
+          `/api/memory/graduated/${encodeURIComponent(source.source)}/${encodeURIComponent(name)}`,
+        );
+  } catch (error) {
+    toast(`该条目当前不可读（这是当时的挂载记录）：${error.message}`, true);
+    return;
+  }
+  showModal(
+    entry.title || name,
+    el(
+      "div",
+      {},
+      el(
+        "div",
+        { class: "hint" },
+        `${name} ｜ ${fmtBytes(entry.bytes)} ｜ ${mountedSourceLabel(source)} ｜ 只读挂载，会话不能改写`,
+      ),
+      el("pre", { class: "code-view skill-body section-gap" }, entry.content || ""),
+    ),
+    [el("button", { class: "btn", onclick: closeModal }, "关闭")],
+  );
+}
+
+function mountedStatusCell(session) {
+  if (session.error)
+    return el(
+      "span",
+      { class: "badge state-failed", title: session.error },
+      "读取失败",
+    );
+  return (session.sources || []).length
+    ? el("span", { class: "badge state-completed" }, "已挂载")
+    : el("span", { class: "badge state-stopped" }, "未挂载");
+}
+
+function mountedMemorySection(payload) {
+  const sessions = payload.sessions || [];
+  const groups = mountedMemoryGroups(sessions);
+  const panel = el(
     "div",
     { class: "panel section-gap" },
     el("h4", {}, "已挂载记忆"),
     el(
-      "div",
-      { class: "hint" },
-      `挂载模式 ${payload.mode || "—"} ｜ 会话按来源只读挂载到 memory/<来源>/，不进入本实验的 skills 世代`,
+      "table",
+      { class: "kv" },
+      kvRow("挂载模式", payload.mode || "—"),
+      kvRow("会话记录", `${sessions.length} 次已收集运行 ｜ ${groups.length} 种挂载组合`),
     ),
     el(
+      "div",
+      { class: "hint" },
+      "按运行 manifest 记录的当时挂载结果分组，来源与条目相同的会话合并为一行。挂载只读，不进入本实验的 skills 世代。",
+    ),
+  );
+  if (!sessions.length) {
+    panel.append(el("div", { class: "empty" }, "尚无已收集的会话记录"));
+    return panel;
+  }
+  if (groups.every((group) => !group.session.error && !(group.session.sources || []).length)) {
+    panel.append(
+      el(
+        "div",
+        { class: "empty" },
+        `本实验未挂载运行记忆（模式 ${payload.mode || "—"}）`,
+      ),
+    );
+    return panel;
+  }
+  const rows = [];
+  for (const group of groups) {
+    const sources = group.session.error ? [] : group.session.sources || [];
+    const span = Math.max(sources.length, 1);
+    const rowspan = span > 1 ? String(span) : null;
+    const sessionCell = el(
+      "td",
+      { rowspan },
+      mountedSessionsCell(group.labels),
+    );
+    const statusCell = el("td", { rowspan }, mountedStatusCell(group.session));
+    if (!sources.length) {
+      rows.push(
+        el("tr", {}, sessionCell, el("td", {}, "—"), el("td", {}, "—"), statusCell),
+      );
+      continue;
+    }
+    sources.forEach((source, index) => {
+      const cells = index ? [] : [sessionCell];
+      cells.push(
+        el("td", {}, mountedSourceLabel(source)),
+        el("td", {}, mountedEntryChips(source)),
+      );
+      if (!index) cells.push(statusCell);
+      rows.push(el("tr", {}, ...cells));
+    });
+  }
+  panel.append(
+    el(
       "table",
-      { class: "data section-gap" },
+      { class: "data text section-gap" },
       el(
         "tr",
         {},
         el("th", {}, "会话"),
         el("th", {}, "来源"),
         el("th", {}, "条目"),
+        el("th", {}, "状态"),
       ),
-      ...rows.map((row) => el("tr", {}, ...row.map((cell) => el("td", {}, cell)))),
+      ...rows,
     ),
   );
+  return panel;
 }
 
 /* ---------------- ADM-Cube trading console ----------------

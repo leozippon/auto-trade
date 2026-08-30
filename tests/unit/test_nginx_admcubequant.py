@@ -169,15 +169,3 @@ def test_install_script_checks_ip_certs_before_enabling_ip_vhost() -> None:
         if "certbot" in line:
             assert "admcube-ip" not in line
 
-
-def test_the_public_vhosts_stamp_the_forwarded_headers_the_console_gates_on() -> None:
-    """The console refuses curated-memory writes from any request carrying
-    ``X-Forwarded-*`` (webui/server.py::is_local_console). That gate is only as
-    good as the edge always stamping them on the one location that proxies the
-    console, so the two halves are asserted together."""
-
-    for path in (DOMAIN_CONF, IP_CONF):
-        console = _location_blocks(path.read_text(encoding="utf-8"))["/"]
-        assert "proxy_pass http://127.0.0.1:19080;" in console, path
-        assert "proxy_set_header X-Forwarded-For $remote_addr;" in console, path
-        assert "proxy_set_header X-Forwarded-Proto https;" in console, path

@@ -231,21 +231,21 @@ def test_one_entry_body_is_served_and_nothing_else_is(tmp_path: Path) -> None:
             memory.curated_entry(tmp_path, bad)
 
 
-def test_a_host_path_inside_a_curated_body_is_redacted(tmp_path: Path) -> None:
-    """The library is repository content, but the console is proxied to a
-    public edge: the same path rule applies as to every other served text."""
+def test_a_curated_body_is_served_verbatim_so_an_edit_round_trips(
+    tmp_path: Path,
+) -> None:
+    """The library is researcher-authored repository content that this console
+    also edits: rewriting a body for display would silently save the rewrite
+    over the real line the next time it is opened and saved."""
 
     _library(tmp_path)
-    _curated(
-        tmp_path,
-        "workspace-path-rules",
-        f"# 路径规则\n\n只写 /mnt/agent/workspace/output，不要写 {HOST_PATH}。\n",
-    )
-    content = memory.curated_entry(tmp_path, "workspace-path-rules")["content"]
-    assert HOST_PATH not in content
-    assert "[host path omitted]" in content
-    # An allow-listed container root stays readable.
-    assert "/mnt/agent/workspace/output" in content
+    body = f"# 路径规则\n\n只写 /mnt/agent/workspace/output，不要写 {HOST_PATH}。\n"
+    _curated(tmp_path, "workspace-path-rules", body)
+    assert memory.curated_entry(tmp_path, "workspace-path-rules")["content"] == body
+    memory.update_curated_entry(tmp_path, "workspace-path-rules", body)
+    assert (
+        tmp_path / OPERATING_MEMORY_LIBRARY / "workspace-path-rules" / "SKILL.md"
+    ).read_text(encoding="utf-8") == body
 
 
 # ---- graduated tier -------------------------------------------------------
@@ -435,6 +435,41 @@ def test_an_experiment_without_params_falls_back_to_the_pipeline_default(
     assert payload["sessions"] == []
 
 
+def test_a_mounted_entry_opens_through_the_same_read_routes_until_it_is_gone(
+    tmp_path: Path,
+) -> None:
+    """The mounted block is a historical record, and its entry chips ask today's
+    library and tier. Both sources must resolve while the entry still exists,
+    and an entry since removed must read as missing rather than as a failure —
+    the record itself is never rewritten."""
+
+    _library(tmp_path)
+    experiments = tmp_path / "experiments"
+    experiments.mkdir()
+    directory = _experiment(experiments, "adopted")
+    _params(directory, operating_memory="curated+graduated")
+    _mounted_run(directory)
+    client = TestClient(create_app(tmp_path, experiments))
+
+    session = client.get("/api/experiments/adopted/memory").json()["sessions"][0]
+    curated, graduated = session["sources"]
+    assert (curated["source"], curated["origin"]) == ("curated", "curated")
+    assert (graduated["source"], graduated["origin"]) == ("adopted", "graduated")
+    for name in curated["entries"]:
+        assert client.get(f"/api/memory/curated/{name}").status_code == 200
+    for name in graduated["entries"]:
+        assert client.get(f"/api/memory/graduated/adopted/{name}").status_code == 200
+
+    assert client.delete("/api/memory/curated/pit-read-budget").status_code == 200
+    assert client.get("/api/memory/curated/pit-read-budget").status_code == 404
+    # The manifest still records what that session mounted.
+    assert "pit-read-budget" in (
+        client.get("/api/experiments/adopted/memory").json()["sessions"][0]["sources"][
+            0
+        ]["entries"]
+    )
+
+
 # ---- routes ---------------------------------------------------------------
 
 
@@ -474,7 +509,9 @@ def test_the_console_routes_serve_the_keys_the_page_reads(tmp_path: Path) -> Non
 
 # ---- curated writes -------------------------------------------------------
 
-PUBLIC_EDGE = {"X-Forwarded-For": "203.0.113.7"}
+# What the public edge stamps on every request it proxies; the console treats
+# such a request like any other client.
+PUBLIC_EDGE = {"X-Forwarded-For": "203.0.113.7", "X-Forwarded-Proto": "https"}
 
 
 def _entry_names(payload: dict) -> list[str]:
@@ -649,6 +686,33 @@ def test_a_name_a_running_experiment_still_maintains_is_refused(
     )["action"] == "created"
 
 
+def test_a_candidate_body_is_readable_only_while_the_tier_admits_it(
+    tmp_path: Path,
+) -> None:
+    """The review that precedes a promotion runs through the promotion's own
+    gate, so the page can never show a candidate it could not copy."""
+
+    _library(tmp_path)
+    experiments = tmp_path / "experiments"
+    experiments.mkdir()
+    _experiment(experiments, "adopted")
+    _experiment(experiments, "mid_heldout", revealed=False)
+    entry = memory.graduated_entry(experiments, "adopted", "same-window-parent-control")
+    assert entry["experiment_id"] == "adopted"
+    assert entry["title"] == "同窗父本对照"
+    assert entry["content"].startswith("# 同窗父本对照")
+    assert entry["files"] == 1 and entry["bytes"] > 0
+    for experiment_id, skill in (
+        ("adopted", "not-a-skill"),
+        ("mid_heldout", "same-window-parent-control"),
+        ("unknown", "same-window-parent-control"),
+    ):
+        with pytest.raises(KeyError):
+            memory.graduated_entry(experiments, experiment_id, skill)
+    with pytest.raises(ValueError):
+        memory.graduated_entry(experiments, "adopted", "Not_Kebab")
+
+
 def test_a_promotion_copies_the_admitted_skill_verbatim(tmp_path: Path) -> None:
     """The whole item is what the mount would have carried, ``references/``
     included, so that is what the curated copy starts from."""
@@ -729,6 +793,15 @@ def test_the_curated_write_routes_carry_one_crud_cycle(tmp_path: Path) -> None:
         "改过。\n"
     )
 
+    candidate = client.get(
+        "/api/memory/graduated/adopted/same-window-parent-control"
+    )
+    assert candidate.status_code == 200
+    assert {"experiment_id", "name", "title", "summary", "bytes", "files", "content"} <= (
+        candidate.json().keys()
+    )
+    assert client.get("/api/memory/graduated/adopted/absent-skill").status_code == 404
+
     promoted = client.post(
         "/api/memory/curated/parent-control-reading/promote",
         json={"experiment_id": "adopted", "skill": "same-window-parent-control"},
@@ -780,56 +853,61 @@ def test_the_write_routes_map_each_refusal_to_its_own_status(tmp_path: Path) -> 
     ]
 
 
-def test_the_public_edge_gets_the_read_only_page_and_no_write(tmp_path: Path) -> None:
-    """The library is a tracked repository directory: the edge forwards every
-    request with X-Forwarded-*, and those requests may only read."""
+def test_the_proxied_surface_reads_and_writes_like_any_other_client(
+    tmp_path: Path,
+) -> None:
+    """Write access is the deployment's question, not this route family's: the
+    loopback/Unix-socket bind and the edge's login gate decide who reaches the
+    console at all, exactly as they do for the experiment routes. A request
+    carrying the edge's forwarded headers is therefore an ordinary client."""
 
     _library(tmp_path)
     experiments = tmp_path / "experiments"
     experiments.mkdir()
+    _experiment(experiments, "adopted")
     client = TestClient(create_app(tmp_path, experiments))
 
-    assert client.get("/api/memory").json()["writable"] is True
-    assert client.get("/api/memory", headers=PUBLIC_EDGE).json()["writable"] is False
-    for method, path, body in (
-        ("post", "/api/memory/curated", {"name": "cash-buffer-rule", "content": "# x\n"}),
-        ("put", "/api/memory/curated/pit-read-budget", {"content": "# x\n"}),
-        ("delete", "/api/memory/curated/pit-read-budget", None),
-        (
-            "post",
-            "/api/memory/curated/promoted-entry/promote",
-            {"experiment_id": "adopted", "skill": "same-window-parent-control"},
-        ),
-    ):
-        call = getattr(client, method)
-        response = (
-            call(path, headers=PUBLIC_EDGE)
-            if body is None
-            else call(path, json=body, headers=PUBLIC_EDGE)
-        )
-        assert response.status_code == 403, path
-    assert memory.curated_library(tmp_path)["entries"][1]["name"] == "pit-read-budget"
-    assert not (tmp_path / OPERATING_MEMORY_LIBRARY / "cash-buffer-rule").exists()
+    created = client.post(
+        "/api/memory/curated",
+        json={"name": "cash-buffer-rule", "content": "# 现金缓冲\n"},
+        headers=PUBLIC_EDGE,
+    )
+    assert created.status_code == 200
+    assert "cash-buffer-rule" in _entry_names(created.json())
+    assert (
+        client.put(
+            "/api/memory/curated/cash-buffer-rule",
+            json={"content": "# 现金缓冲\n\n改过。\n"},
+            headers=PUBLIC_EDGE,
+        ).status_code
+        == 200
+    )
+    assert (
+        client.post(
+            "/api/memory/curated/parent-control-reading/promote",
+            json={"experiment_id": "adopted", "skill": "same-window-parent-control"},
+            headers=PUBLIC_EDGE,
+        ).status_code
+        == 200
+    )
+    assert (
+        client.delete(
+            "/api/memory/curated/cash-buffer-rule", headers=PUBLIC_EDGE
+        ).status_code
+        == 200
+    )
 
 
-def test_only_the_local_console_reads_the_bytes_an_edit_would_save_back(
-    tmp_path: Path,
-) -> None:
-    """Redaction rewrites host paths, so serving the redacted body to the editor
-    would silently save the placeholder over the real line."""
+def test_a_curated_body_crosses_the_route_unchanged(tmp_path: Path) -> None:
+    """One body on both surfaces: the editor saves back what it opened."""
 
     _library(tmp_path)
-    _curated(
-        tmp_path,
-        "workspace-path-rules",
-        f"# 路径规则\n\n不要写 {HOST_PATH}。\n",
-    )
+    body = f"# 路径规则\n\n不要写 {HOST_PATH}。\n"
+    _curated(tmp_path, "workspace-path-rules", body)
     client = TestClient(create_app(tmp_path, tmp_path / "experiments"))
-
-    local = client.get("/api/memory/curated/workspace-path-rules").json()
-    assert local["redacted"] is False and HOST_PATH in local["content"]
-    public = client.get(
-        "/api/memory/curated/workspace-path-rules", headers=PUBLIC_EDGE
-    ).json()
-    assert public["redacted"] is True and HOST_PATH not in public["content"]
-    assert "[host path omitted]" in public["content"]
+    for headers in ({}, PUBLIC_EDGE):
+        served = client.get(
+            "/api/memory/curated/workspace-path-rules", headers=headers
+        ).json()
+        assert served["content"] == body
+        assert "redacted" not in served

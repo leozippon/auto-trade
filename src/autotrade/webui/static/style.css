@@ -2058,29 +2058,144 @@ details.advanced .form-grid {
  line-height: 1.55;
 }
 
-/* 运行记忆: curated library pane */
+/* ---------------- 运行记忆 ----------------
+   One stable two-pane layout: the catalogue scrolls inside the left pane, the
+   right pane keeps a fixed head / toolbar / body so a selection never moves the
+   grid, the page header or the toolbar buttons. */
 .memory-notice .hint:first-child {
  margin-top: 0;
 }
 .memory-filter {
  flex: 1;
 }
+/* Sticky catalogue: both sections scroll together inside the pane, so the
+   nested list must not open a second scroller of its own. */
+.memory-nav {
+ position: sticky;
+ /* clears the fixed topbar, so the catalogue never slides under it */
+ top: calc(var(--topbar-h) + 0.8rem);
+ max-height: calc(100vh - var(--topbar-h) - 1.6rem);
+ overflow-y: auto;
+}
+.memory-nav .session-list {
+ max-height: none;
+ overflow: visible;
+}
+.memory-nav .epoch-head {
+ margin-top: 0.5rem;
+}
+.empty.compact {
+ padding: 1rem 0;
+ font-size: 0.9rem;
+}
+/* Collapsed, muted, and still there: an experiment the tier does not offer is
+   a different answer from an experiment that is missing. */
+details.memory-aside {
+ margin-top: 0.7rem;
+ font-size: 0.875rem;
+ color: var(--muted);
+}
+details.memory-aside summary {
+ cursor: pointer;
+ padding: 0.3rem 0;
+}
+.memory-aside-row {
+ display: flex;
+ align-items: center;
+ gap: 0.6rem;
+ padding: 0.22rem 0.2rem;
+}
+.memory-aside-row .label {
+ flex: 1;
+ overflow: hidden;
+ text-overflow: ellipsis;
+ white-space: nowrap;
+}
+.memory-aside-row .hint {
+ margin-top: 0;
+ white-space: nowrap;
+}
+/* The right pane reserves its space up front: a load or an empty selection
+   must not collapse it, and the toolbar row exists even with no buttons. */
+.memory-pane {
+ display: flex;
+ flex-direction: column;
+ min-height: 34rem;
+}
+.memory-pane-title {
+ font-size: 1.02rem;
+ font-weight: 700;
+ overflow-wrap: anywhere;
+}
+.memory-pane-meta {
+ min-height: 1.25rem;
+ overflow-wrap: anywhere;
+}
+.memory-toolbar {
+ min-height: 2.2rem;
+ margin-top: 0.6rem;
+}
+.memory-pane-body {
+ flex: 1;
+ display: flex;
+ flex-direction: column;
+ gap: 0.6rem;
+ margin-top: 0.8rem;
+ min-height: 0;
+}
+.memory-pane-body > .empty {
+ margin: auto 0;
+}
+.memory-skeleton {
+ flex: 1;
+ min-height: 16rem;
+ display: flex;
+ align-items: center;
+ justify-content: center;
+ color: var(--muted);
+ background: var(--code-bg);
+ border: 1px dashed var(--border);
+ border-radius: 10px;
+}
 /* The skill body is prose, not code: it wraps instead of scrolling sideways,
    and long paths break rather than widening the pane on a phone. */
 pre.code-view.skill-body {
  white-space: pre-wrap;
  word-break: break-word;
+ flex: 1;
  max-height: 60vh;
+ margin: 0;
 }
 textarea.directive.skill-editor {
  min-height: 20rem;
  font-size: 0.86rem;
 }
+/* Prose table: every column is text, so nothing is right-aligned. */
+table.data.text th,
+table.data.text td {
+ text-align: left;
+ font-variant-numeric: normal;
+}
+table.data.text td {
+ vertical-align: top;
+}
+@media (max-width: 1080px) {
+ .memory-nav {
+  position: static;
+  max-height: 26rem;
+ }
+}
 @media (max-width: 760px) {
+ .memory-pane {
+  min-height: 26rem;
+ }
  textarea.directive.skill-editor {
   min-height: 14rem;
  }
  pre.code-view.skill-body {
   max-height: 50vh;
+ }
+ .memory-skeleton {
+  min-height: 12rem;
  }
 }
