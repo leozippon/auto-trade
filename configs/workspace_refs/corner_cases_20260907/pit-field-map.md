@@ -38,7 +38,7 @@ universe = pd.read_parquet(context.asof_dir + "/universe")                # 决�
 6. **只有开盘与收盘两个成交时点。** 本轮不含分钟数据，`execute_at` 只有 09:30 与 15:00 有成交价，其余拒 `missing_execution_price`。事件「盘中反应」在本环境不可交易，不要改写成盘中触发。
 7. **T-1 事件面板的可见时间各不相同。** `moneyflow` 当日 19:00、`top_list`/`top_inst` 20:00、`block_trade` 21:00——T-1 行在 08:30 均可见；但融资融券 `margin`/`margin_detail` 次日 09:00 才可见，08:30 只能用 **T-2**。
 8. **单位。** 归一化 `daily.amount` 为元；`limit_list_d` 的 `amount`/`fd_amount`/`float_mv`/`total_mv` 为元、`pct_chg`/`turnover_ratio` 为百分数；`share_float_complete.float_share` 为股、`float_ratio` 为百分数；`stk_holdertrade.change_vol` 为股、比例为百分数；`dividend.cash_div` 为元/股、送转为股/股；`new_share.price` 为元/股、`funds` 为亿元、`ballot` 为百分数。跨表先对单位表。
-9. **ST 限幅比例启发式有失效日。** 2026-07-06 起主板 ST/*ST 涨跌幅由 5% 改为 10%，`up_limit/pre_close ≈ 1.05` 的识别在该日后失效；本折各验证窗均在其之前，但结论里必须写明该边界，特征本身要从 `stk_limit` 绝对价算而不是从 `pct_chg` 猜。
+9. **ST 限幅比例启发式有失效日。** 2026-07-06 起主板 ST/*ST 涨跌幅由 5% 改为 10%，`up_limit/pre_close ≈ 1.05` 的识别在该日之后失效。不要假定当前窗口落在这条边界的哪一侧：生效中的限幅比例就在可见数据里，逐窗用 `stk_limit` 的 `up_limit`/`down_limit` 绝对价实测，不要从 `pct_chg` 猜；结论里写明该边界。
 
 ## 本轮快照没有的东西
 

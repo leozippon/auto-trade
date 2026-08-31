@@ -42,6 +42,15 @@ RUN_MARKER_DIR = ".host/runs"
 INTERRUPTED_RUN_ERROR = (
     "RunInterrupted: the run process exited before it wrote a ledger record"
 )
+# The marker exists to survive exactly the events that can also tear it (the
+# atomic write renames without fsync, so a SIGKILL/OOM/host reset can leave a
+# zero-length or truncated file). Such a marker still proves a run died, so it
+# becomes an ``attempt_failed`` too, with its unknown link keys named as unknown.
+UNREADABLE_RUN_MARKER_ERROR = (
+    "RunMarkerUnreadable: the run process exited before it wrote a ledger "
+    "record and its run marker could not be read back"
+)
+UNKNOWN_MARKER_LINK_KEY = "unknown"
 
 
 class FrozenArtifactMutated(RuntimeError):
@@ -322,7 +331,8 @@ class RunMarkers:
     """
 
     def __init__(self, experiment_dir: str | Path) -> None:
-        self.root = Path(experiment_dir) / RUN_MARKER_DIR
+        self.experiment_dir = Path(experiment_dir)
+        self.root = self.experiment_dir / RUN_MARKER_DIR
 
     def begin(self, attempt: Mapping[str, object]) -> None:
         missing = [key for key in LINK_KEYS if not attempt.get(key)]
@@ -346,6 +356,12 @@ class RunMarkers:
         reached the ledger (the process died between the append and the marker
         cleanup) is dropped without a second record, and every handled marker is
         removed, so repeated restarts never duplicate a record.
+
+        An unreadable marker is handled the same way: it is still the evidence
+        of a dead run, and it must never be able to fail every later worker
+        start. Its file name is the run id, the experiment directory is the
+        experiment id, and the link keys it cannot supply are recorded as
+        unknown rather than guessed.
         """
         if not self.root.is_dir():
             return []
@@ -356,14 +372,35 @@ class RunMarkers:
         }
         appended: list[dict[str, object]] = []
         for path in sorted(self.root.glob("*.json")):
-            marker = json.loads(path.read_text(encoding="utf-8"))
-            if str(marker.get("run_id")) not in recorded:
+            marker, unreadable = _read_run_marker(path)
+            run_id = str(marker.get("run_id") or path.stem)
+            if run_id not in recorded:
                 record = {
                     **marker,
                     "record_type": "attempt_failed",
-                    "error": INTERRUPTED_RUN_ERROR,
+                    "experiment_id": marker.get("experiment_id")
+                    or self.experiment_dir.name,
+                    "epoch_id": marker.get("epoch_id") or UNKNOWN_MARKER_LINK_KEY,
+                    "fold_id": marker.get("fold_id") or UNKNOWN_MARKER_LINK_KEY,
+                    "run_id": run_id,
+                    "error": (
+                        f"{UNREADABLE_RUN_MARKER_ERROR}: {path.name}: {unreadable}"
+                        if unreadable
+                        else INTERRUPTED_RUN_ERROR
+                    ),
                 }
                 ledger.append(record)
                 appended.append(record)
             path.unlink(missing_ok=True)
         return appended
+
+
+def _read_run_marker(path: Path) -> tuple[dict[str, object], str]:
+    """A marker's fields, or ``({}, reason)`` when the file is not a JSON object."""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        return {}, f"invalid JSON ({exc})"
+    if not isinstance(payload, Mapping):
+        return {}, f"payload is {type(payload).__name__}, not a JSON object"
+    return dict(payload), ""

@@ -23,10 +23,14 @@ EXPECTED_DEFAULTS pins the values this round depends on, so a drift in the
 console defaults stops the script instead of silently re-scoping five
 experiments.
 
-Every parameter set is validated offline with exactly the checks the console
-runs on POST /api/experiments (ExperimentManager.create_experiment plus the
-worker's own resolve_worker_options pre-flight), so --dry-run answers whether
-the create would be accepted without touching the server.
+Every parameter set is validated offline with every request-level check the
+console applies on POST /api/experiments (ExperimentManager.create_experiment's
+key, id and stamp rules plus the worker's own resolve_worker_options
+pre-flight), and additionally refuses a directive the PRIOR calendar policy
+would reject. The console's deployment-state checks -- an experiment directory
+that already exists and a free running slot -- can only be decided against the
+live server and still happen at POST time, so --dry-run answers whether the
+parameters are acceptable, not whether the server will take the experiment now.
 
 Usage:
   PYTHONPATH=src ~/miniconda3/envs/quant/bin/python \
@@ -307,10 +311,13 @@ def request_params(experiment_id: str) -> dict[str, object]:
 def normalize(params: dict[str, object]) -> dict[str, object]:
     """Run the console's create-time validation offline and return params.json.
 
-    Same order and same checks as ExperimentManager.create_experiment up to the
-    first write: closed keys, unknown keys, required keys, the id rule, the
-    console-managed stamp, then the worker's own resolve_worker_options
-    pre-flight (which is what actually type-checks every knob).
+    Same order and same request-level checks as
+    ExperimentManager.create_experiment: closed keys, unknown keys, required
+    keys, the id rule, the console-managed stamp, then the worker's own
+    resolve_worker_options pre-flight (which is what actually type-checks every
+    knob). The console's duplicate-directory and running-slot checks need the
+    live deployment and stay at POST time; the calendar-policy gate below is
+    stricter than create.
     """
     closed = sorted(set(params) & WEB_CLOSED_PARAMS)
     if closed:

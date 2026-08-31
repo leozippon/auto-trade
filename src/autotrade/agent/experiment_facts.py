@@ -301,6 +301,10 @@ def _artifact_contract_facts(
     model_artifacts_empty: bool | None,
     is_meta: bool,
 ) -> dict[str, object]:
+    # Local import: the pipelines package imports this module, so binding the
+    # acceptance constant at module scope would close an import cycle.
+    from autotrade.pipelines.config import ACCEPTANCE_SEMANTICS_SUMMARY
+
     is_initial = bool(manifest.get("is_initial_artifact", manifest.get("template_ref") is not None))
     parent_id = manifest.get("parent_strategy_artifact_id") or manifest.get("parent_artifact_id")
     parent = {
@@ -326,7 +330,7 @@ def _artifact_contract_facts(
             # non-finite total_return/max_drawdown/sharpe are HARD rejects;
             # min_return / min_sharpe are targets — shortfalls freeze WITH a
             # recorded warning instead of resetting the fold.
-            "acceptance_semantics": None if is_meta else "max_drawdown+finite_metrics=hard; return/sharpe=warn-only targets",
+            "acceptance_semantics": None if is_meta else ACCEPTANCE_SEMANTICS_SUMMARY,
             "step_tree_enabled": manifest.get("step_tree_enabled"),
             "record_failed_attempts": manifest.get("record_failed_attempts"),
             "nl_failure_policy": manifest.get("nl_failure_policy"),

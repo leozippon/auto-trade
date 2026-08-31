@@ -25,6 +25,8 @@ from autotrade.pipelines.folds import build_fold_schedule
 from autotrade.pipelines.hitl_state import fold_session_key
 from autotrade.pipelines.ledger import (
     INTERRUPTED_RUN_ERROR,
+    UNKNOWN_MARKER_LINK_KEY,
+    UNREADABLE_RUN_MARKER_ERROR,
     ExperimentLedger,
     FrozenArtifactMutated,
     FrozenArtifactRestoreFailed,
@@ -1374,6 +1376,46 @@ def test_recovery_ignores_a_marker_whose_run_already_reached_the_ledger(tmp_path
 
     assert not any(row["record_type"] == "attempt_failed" for row in ledger.read())
     assert sorted(markers.root.glob("*.json")) == []
+
+
+def test_an_unreadable_run_marker_becomes_one_attempt_failed_and_is_cleared(
+    tmp_path: Path,
+):
+    """A torn marker is evidence, not a brick.
+
+    ``write_json_atomic`` renames without fsync, so the very events the marker
+    exists to survive can leave it zero-length or truncated. Such a marker must
+    still become exactly one ``attempt_failed`` and then be gone; if it stayed,
+    every later resume would fail on the same file.
+    """
+    pipeline, _fold, ledger = _pipeline_with_evaluator(tmp_path, Evaluator())
+    markers = RunMarkers(pipeline.config.experiment_dir)
+    markers.root.mkdir(parents=True, exist_ok=True)
+    (markers.root / "run_empty.json").write_text("", encoding="utf-8")
+    (markers.root / "run_truncated.json").write_text(
+        '{"experiment_id": "experiment_a", "epoch_id": "epoch_0',
+        encoding="utf-8",
+    )
+
+    appended = markers.recover(ledger)
+
+    assert [row["run_id"] for row in appended] == ["run_empty", "run_truncated"]
+    failed = [row for row in ledger.read() if row["record_type"] == "attempt_failed"]
+    assert len(failed) == 2
+    for row, marker_name in zip(failed, ("run_empty.json", "run_truncated.json")):
+        # Well-formed for every ledger reader: the link keys the marker could
+        # not supply are named unknown, never invented.
+        assert row["experiment_id"] == "experiment_a"
+        assert row["epoch_id"] == UNKNOWN_MARKER_LINK_KEY
+        assert row["fold_id"] == UNKNOWN_MARKER_LINK_KEY
+        assert row["error"].startswith(UNREADABLE_RUN_MARKER_ERROR)
+        assert marker_name in row["error"]
+    assert sorted(markers.root.glob("*.json")) == []
+    assert latest_fold_records(ledger.read()) == {}
+    # Restarting the worker again must not duplicate the evidence.
+    records = ledger.read()
+    assert markers.recover(ledger) == []
+    assert ledger.read() == records
 
 
 def test_a_run_marker_without_link_keys_is_refused(tmp_path: Path):

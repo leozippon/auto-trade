@@ -71,6 +71,14 @@ class StrategyExperimentConfig:
 ExperimentConfig = StrategyExperimentConfig
 
 
+# The one-line summary of AcceptanceRules.evaluate handed to the Agent as the
+# ``acceptance_semantics`` fact. It lives beside the rules it describes so the
+# projection cannot drift from the behavior.
+ACCEPTANCE_SEMANTICS_SUMMARY = (
+    "max_drawdown+finite_metrics=hard; return/sharpe=warn-only targets"
+)
+
+
 @dataclass(frozen=True)
 class AcceptanceRules:
     """Validation acceptance checks (docs/pipeline-design.md §2.2): drawdown and
@@ -605,6 +613,7 @@ class FoldOutcome:
 
 
 __all__ = [
+    "ACCEPTANCE_SEMANTICS_SUMMARY",
     "DEFAULT_DEADLINE_GRACE_MINUTES",
     "DEFAULT_FOLD_PERIOD",
     "AcceptanceRules",
