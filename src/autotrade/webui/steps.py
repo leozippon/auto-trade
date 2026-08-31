@@ -110,8 +110,6 @@ def step_tree_view(experiment_dir: Path) -> dict[str, object]:
         "current_node_id": tree.current_node_id,
         "nodes": nodes,
         "fold_sessions": fold_sessions(identity) if identity is not None else [],
-        "identity_status": "modern" if identity is not None else "legacy_read_only",
-        "identity_available": identity is not None,
     }
 
 

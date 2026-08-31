@@ -207,7 +207,6 @@ def test_fold_preview_states_the_pipeline_budgets_and_scope(tmp_path: Path):
 def test_meta_preview_is_the_meta_session_prompt(tmp_path: Path):
     preview = _preview(tmp_path, META_KEY)
     prompt = str(preview["prompt"])
-    assert preview["kind"] == "meta_learning"
     for section in META_STATIC_SECTIONS:
         assert section.strip() in prompt
     assert "`finish_meta`" in prompt

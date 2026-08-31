@@ -249,7 +249,6 @@ def _cycle_stats(
     vol = math.sqrt(variance)
     stats: dict[str, object] = {
         "n_days": n,
-        "cum_return": round(cum, 6),
         "annualized_return": round((1.0 + cum) ** (TRADING_DAYS_PER_YEAR / n) - 1.0, 6) if cum > -1.0 else -1.0,
         "annualized_vol": round(vol * math.sqrt(TRADING_DAYS_PER_YEAR), 6),
         "sharpe": round(mean / vol * math.sqrt(TRADING_DAYS_PER_YEAR), 4) if vol > 0 else 0.0,
@@ -270,7 +269,6 @@ def _cycle_stats(
         active_var = sum((x - active_mean) ** 2 for x in active) / (len(active) - 1)
         stats.update(
             {
-                "benchmark_days": len(paired),
                 "benchmark_return": round(bench_cum, 6),
                 "excess_return": round(strategy_cum - bench_cum, 6),
                 "beta": (

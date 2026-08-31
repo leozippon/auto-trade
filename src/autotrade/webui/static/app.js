@@ -7,8 +7,7 @@ const $toastRoot = document.getElementById("toast-root");
 
 const STATE_LABELS = {
   launching: "启动中",
-  starting: "初始化",
-  preparing: "准备数据",
+  initializing: "初始化中",
   running_session: "运行中",
   running_heldout: "Held-out 运行中",
   waiting_user: "等待批准",
@@ -458,8 +457,7 @@ function isPrepEnvironment(status, state) {
   return (
     !stage &&
     (state === "running_session" ||
-      state === "starting" ||
-      state === "preparing" ||
+      state === "initializing" ||
       state === "launching")
   );
 }
@@ -8303,7 +8301,8 @@ function paperDealsPanel(payload) {
         el(
           "tr",
           {},
-          el("th", {}, "时间"),
+          el("th", {}, "成交时间"),
+          el("th", {}, "计划时间"),
           el("th", {}, "代码"),
           el("th", {}, "方向"),
           el("th", {}, "数量"),
@@ -8316,6 +8315,7 @@ function paperDealsPanel(payload) {
             "tr",
             {},
             el("td", {}, fmtPaperTime(row.matched_at)),
+            el("td", {}, fmtPaperTime(row.execute_at)),
             el("td", {}, row.symbol || "—"),
             actionCell(row.action),
             el("td", {}, String(row.quantity ?? "—")),

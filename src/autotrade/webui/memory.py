@@ -29,7 +29,6 @@ from autotrade.environment.tools.memory_feedback import MEMORY_FEEDBACK_VERDICTS
 from autotrade.pipelines.skills import (
     CURATED_MEMORY_SOURCE,
     DEFAULT_OPERATING_MEMORY,
-    GRADUATED_EXCLUSIONS_PATH,
     MAX_SKILLS,
     MAX_SKILLS_BYTES,
     MAX_SKILLS_FILES,
@@ -156,10 +155,7 @@ def graduated_tier(repo_root: Path, experiments_root: Path) -> dict[str, object]
     """
 
     root = Path(experiments_root)
-    payload: dict[str, object] = {
-        "exclusions": GRADUATED_EXCLUSIONS_PATH,
-        "experiments": [],
-    }
+    payload: dict[str, object] = {"experiments": []}
     if not root.is_dir():
         return payload
     admitted: dict[str, list[str]] | None
@@ -253,7 +249,6 @@ def experiment_memory(experiments_root: Path, experiment_id: str) -> dict[str, o
         record = read_operating_memory_snapshot(directory)
         if record is not None:
             payload["snapshot"] = {
-                "snapshot_id": str(record.get("snapshot_id") or ""),
                 "created_at": str(record.get("created_at") or ""),
                 "created_from": str(record.get("created_from") or ""),
                 "mode": str(record.get("mode") or ""),

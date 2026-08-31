@@ -111,7 +111,6 @@ def build_prompt_preview(
             resource_override=control.resource_overrides.get(session_key),
             prompt_override=control.prompt_overrides.get(session_key, ""),
         )
-        preview_kind = "fold"
     else:
         system, instruction = _meta_prompt(
             context,
@@ -119,9 +118,8 @@ def build_prompt_preview(
             directive=directive,
             prompt_override=control.prompt_overrides.get(session_key, ""),
         )
-        preview_kind = "meta_learning"
     prompt = f"{_SYSTEM_BANNER}\n{system}\n\n{_USER_BANNER}\n{instruction}"
-    return {"kind": preview_kind, "prompt": prompt, "note": PREVIEW_NOTE}
+    return {"prompt": prompt, "note": PREVIEW_NOTE}
 
 
 @dataclass(frozen=True)

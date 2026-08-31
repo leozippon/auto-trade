@@ -110,7 +110,6 @@ def _payload(repo_root: Path, env: str, kind: str, date: str | None) -> dict[str
         item = {
             "symbol": _text(row.get("symbol")), "action": _text(row.get("action")),
             "quantity": _quantity(row.get("quantity")), "execute_at": _text(row.get("execute_at")),
-            "metadata": row.get("metadata") if isinstance(row.get("metadata"), dict) else {},
         }
         if kind == "deals":
             item.update({

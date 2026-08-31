@@ -90,8 +90,7 @@ def clamped_trading_days(repo_root: Path) -> list[str] | None:
 
 ACTIVE_STATES = (
     "launching",
-    "starting",
-    "preparing",
+    "initializing",
     "running_session",
     "running_heldout",
     "waiting_user",
@@ -553,7 +552,6 @@ def summarize_experiment(directory: Path) -> dict[str, object]:
         folds = list(latest_fold_records(records).values())
         folds.sort(key=lambda row: (str(row.get("epoch_id")), str(row.get("test_period") or row.get("fold_id"))))
         heldout = latest_heldout_records(records)
-        meta = [row for row in records if row.get("record_type") == "meta_learning"]
         skills_snapshot = latest_skills_snapshot(records, experiment_dir=directory)
         params = read_json(directory / HITL_DIR_NAME / PARAMS_NAME)
         _require_supported_params(params)
@@ -583,13 +581,11 @@ def summarize_experiment(directory: Path) -> dict[str, object]:
                 "environment_stage_started_at": status.get("environment_stage_started_at"),
                 "environment_progress": status.get("environment_progress"),
                 "folds_recorded": len(folds),
-                "meta_recorded": len(meta),
                 "heldout_recorded": len(heldout),
                 "skills": {
                     "count": skills_snapshot.stats.count,
                     "files": skills_snapshot.stats.files,
                     "bytes": skills_snapshot.stats.bytes,
-                    "generation_id": skills_snapshot.generation_id or None,
                 },
                 "completed_sessions": completed_sessions,
                 "total_sessions": total_sessions,
@@ -637,22 +633,11 @@ def summarize_experiment(directory: Path) -> dict[str, object]:
                         "epoch_id": record.get("epoch_id"),
                         "fold_ref": identity.fold_ref(record.get("fold_id")),
                         "fold_status": record.get("fold_status"),
-                        "valid_return": _metric(record, "validation_result", "total_return"),
-                        "test_return": _metric(record, "test_result", "total_return") if revealed else None,
-                        "valid_long": _metric(record, "validation_result", "long_return"),
-                        "test_long": _metric(record, "test_result", "long_return") if revealed else None,
                         # Development evidence: the Fold's baseline, never sealed.
                         "parent_control": _parent_control_view(record),
                     }
                     for record in folds
                 ],
-                "heldout_returns": [
-                    {
-                        "fold_ref": identity.fold_ref(record.get("fold_id")),
-                        "return": _metric(record, "result", "total_return"),
-                    }
-                    for record in sorted(heldout, key=lambda row: str(row.get("fold_id")))
-                ] if revealed else [],
             }
         )
     except Exception as exc:  # noqa: BLE001 - broken experiments remain inspectable and deletable
@@ -698,11 +683,8 @@ def experiment_detail(root: Path, experiment_id: str) -> dict[str, object]:
             **detail,
             "params": {},
             "control": None,
-            "schedule": {},
             "sessions": [],
             "test_revealed": False,
-            "heldout_records": [],
-            "ledger": [],
             "inbox": {"pending_count": 0, "queued_ids": []},
         }
     identity = PublicIdentity(directory)
@@ -770,24 +752,7 @@ def experiment_detail(root: Path, experiment_id: str) -> dict[str, object]:
             session_key=str(raw_current) if isinstance(raw_current, str) and raw_current else None,
         ),
         "test_revealed": revealed,
-        "schedule": identity.public_schedule(heldout_revealed=revealed),
         "sessions": sessions,
-        "heldout_records": [
-            identity.public_record(row, heldout_revealed=revealed) for row in heldout
-        ],
-        "ledger": [
-            identity.public_record(
-                guarded_fold_view(row, test_revealed=revealed)
-                if row.get("record_type") == "fold"
-                else _public_meta_view(
-                    row,
-                    current_prior=current_prior if row is latest_meta else None,
-                ) if row.get("record_type") == "meta_learning"
-                else row,
-                heldout_revealed=revealed,
-            )
-            for row in records
-        ],
     }
 
 
@@ -1053,12 +1018,11 @@ def fold_orders(
     )
     guarded = result_dir_prefixes(SEALED_PREFIXES)
     available = [name for name in files if not name.startswith(guarded)]
-    test_results = [name for name in files if name.startswith(guarded)]
     selected = result or (available[0] if available else None)
     if selected is None:
         return {
-            "result": None, "available": [], "test_results": test_results,
-            "stats": _order_stats([]), "rows": [], "row_count": 0, "truncated": False,
+            "result": None, "available": [],
+            "stats": _order_stats([]), "rows": [], "row_count": 0,
         }
     if selected not in files:
         raise KeyError(f"unknown result: {selected}")
@@ -1071,11 +1035,9 @@ def fold_orders(
     return {
         "result": selected,
         "available": available,
-        "test_results": test_results,
         "stats": _order_stats(orders),
         "rows": orders if max_rows is None else orders[:max_rows],
         "row_count": len(orders),
-        "truncated": max_rows is not None and len(orders) > max_rows,
     }
 
 
@@ -1138,7 +1100,7 @@ def fold_orders_csv(
     payload = fold_orders(root, experiment_id, epoch_id, fold_id, result=result, max_rows=None)
     fields = (
         "symbol", "action", "quantity", "execute_at", "matched_at", "status",
-        "price", "commission", "stamp_duty", "reason",
+        "price", "commission", "stamp_duty", "realized_pnl", "reason",
     )
     stream = StringIO()
     writer = csv.DictWriter(stream, fieldnames=fields, extrasaction="ignore")

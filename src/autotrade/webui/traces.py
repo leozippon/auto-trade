@@ -167,7 +167,6 @@ def read_trace_blocks(
         "blocks": project_trace_blocks(events),
         "next_offset": page.get("next_offset"),
         "eof": page.get("eof"),
-        "event_count": len(events),
     }
     if "history_truncated" in page:
         projected["history_truncated"] = page["history_truncated"]
@@ -359,7 +358,6 @@ def project_subagent_trace(events: object, task_id: str) -> dict[str, object]:
         "header": state.block,
         "blocks": blocks,
         "reduced": reduced,
-        "event_count": matched,
     }
 
 

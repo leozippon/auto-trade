@@ -376,14 +376,13 @@ def test_the_block_lists_the_snapshot_this_experiment_froze(tmp_path: Path) -> N
     _experiment(experiments, "adopted")
     directory = _experiment(experiments, "current", verdict=None, skills=False)
     _params(directory, operating_memory="curated+graduated")
-    record = _snapshot(tmp_path, experiments, "current")
+    _snapshot(tmp_path, experiments, "current")
     _mounted_run(directory)
 
     payload = memory.experiment_memory(experiments, "current")
     assert payload["mode"] == "curated+graduated"
     assert payload["sessions_seen"] == 1
     snapshot = payload["snapshot"]
-    assert snapshot["snapshot_id"] == record["snapshot_id"]
     assert snapshot["created_from"] == "creation" and snapshot["created_at"]
     assert [source["source"] for source in snapshot["sources"]] == [
         "curated",
@@ -589,7 +588,8 @@ def test_the_console_routes_serve_the_keys_the_page_reads(tmp_path: Path) -> Non
     assert overview.status_code == 200
     body = overview.json()
     assert {"default_mode", "curated", "graduated", "feedback"} <= body.keys()
-    assert body["graduated"]["exclusions"].endswith(".json")
+    # The exclusion file is a repository path the page never renders.
+    assert "exclusions" not in body["graduated"]
     assert {"source", "library", "entries"} <= body["curated"].keys()
     assert {"name", "title", "summary", "bytes", "files"} <= body["curated"][
         "entries"

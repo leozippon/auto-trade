@@ -212,7 +212,7 @@ def test_legacy_web_audit_remains_readable_but_mutations_and_preview_fail(
     )
 
     audit = step_tree_view(experiment)
-    assert audit["identity_status"] == "legacy_read_only"
+    # No ref store: the tree still projects, with no session plan behind it.
     assert audit["fold_sessions"] == []
     assert audit["nodes"][0]["fold_ref"] == "fold_ref_deadbeef00"
     assert "fold_id" not in audit["nodes"][0]

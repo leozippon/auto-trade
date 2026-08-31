@@ -733,7 +733,7 @@ def test_active_experiment_api_hides_historical_steps_analysis_and_reports(
     assert home["skills"]["count"] == 2
     assert home["skills"]["files"] == 3
     assert home["skills"]["bytes"] == 512
-    assert "generation_id" in home["skills"]
+    assert set(home["skills"]) == {"count", "files", "bytes"}
 
     detail = client.get("/api/experiments/demo").json()
     assert detail["sessions"][0]["record"]["fold_status"] == "frozen"
@@ -794,7 +794,7 @@ def test_active_experiment_api_hides_historical_steps_analysis_and_reports(
         "/api/experiments/demo/prompt-preview",
         json={"session_key": session_ref, "directive": "控制回撤"},
     ).json()
-    assert preview["kind"] == "fold"
+    assert set(preview) == {"prompt", "note"}
     assert "控制回撤" in preview["prompt"]
 
     analysis = client.get(f"/api/experiments/demo/analysis/epoch_001/{fold_ref}")
@@ -1221,8 +1221,9 @@ def test_partial_heldout_does_not_reveal_out_of_sample_results(tmp_path: Path):
     detail = client.get("/api/experiments/demo").json()
     assert detail["test_revealed"] is False
     assert "test_result" not in detail["sessions"][0]["record"]
-    assert [record["record_type"] for record in detail["ledger"]] == ["fold", "heldout"]
-    heldout = detail["ledger"][-1]
+    heldout_session = detail["sessions"][-1]
+    assert heldout_session["kind"] == "heldout"
+    heldout = heldout_session["records"][-1]
     assert heldout["hidden"] is True
     # Only identity survives redaction: no result, no reference to one.
     assert not {"result", "result_ref", "test_result"} & heldout.keys()
@@ -2204,17 +2205,13 @@ class WebuiBackendTest(unittest.TestCase):
             revealed["test_decision_time"], "2021-12-31T23:59:59+08:00"
         )
 
-    def test_the_sealed_calendar_is_absent_from_the_ledger_projection(self) -> None:
+    def test_the_sealed_calendar_is_absent_from_the_session_projection(self) -> None:
         detail = self.client.get("/api/experiments/exp_hitl").json()
-        folds = [
-            row for row in detail["ledger"] if row.get("record_type") == "fold"
+        records = [
+            session["record"] for session in detail["sessions"] if session.get("record")
         ]
-        self.assertTrue(folds)
-        for row in folds:
-            self.assertNotIn("test_period", row)
-            self.assertNotIn("test_decision_time", row)
-        for session in detail["sessions"]:
-            record = session.get("record") or {}
+        self.assertTrue(records)
+        for record in records:
             self.assertNotIn("test_period", record)
             self.assertNotIn("test_decision_time", record)
 
@@ -2332,11 +2329,10 @@ class WebuiBackendTest(unittest.TestCase):
         revealed = self.client.get(url, params={"result": TEST_RESULT_DIR})
         self.assertEqual(revealed.status_code, 200, revealed.text)
         self.assertEqual(revealed.json()["result"], TEST_RESULT_DIR)
-        # Revealed test results surface in their own list, never in `available`:
-        # the default selection reads `available`, so a test result can never
-        # silently become the pane's default.
+        # A revealed test result is served on request but never enters
+        # `available`: the default selection reads that list, so a test result
+        # can never silently become the pane's default.
         listing = self.client.get(url).json()
-        self.assertIn(TEST_RESULT_DIR, listing["test_results"])
         self.assertEqual(listing["available"], [VALID_RESULT_DIR])
         self.assertEqual(listing["result"], VALID_RESULT_DIR)
         csv_ok = self.client.get(url + ".csv", params={"result": TEST_RESULT_DIR})
@@ -2461,31 +2457,20 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertEqual(missing.status_code, 404)
 
     def test_fold_orders_payload_carries_exactly_the_console_key_names(self) -> None:
-        """The seven-key projection the order pane and the audit block read.
+        """The five-key projection the order pane reads.
 
         Pinned as an exact key set: a rename in either direction, or an extra
         field nothing consumes, breaks the pane silently otherwise.
         """
         import shutil
 
-        expected_keys = [
-            "available",
-            "result",
-            "row_count",
-            "rows",
-            "stats",
-            "test_results",
-            "truncated",
-        ]
+        expected_keys = ["available", "result", "row_count", "rows", "stats"]
         fold_ref = self._fold_ref("fold_2022Q1")
         url = f"/api/experiments/exp_hitl/folds/epoch_001/{fold_ref}/orders"
         payload = self.client.get(url).json()
         self.assertEqual(sorted(payload), expected_keys)
         self.assertEqual(payload["available"], [VALID_RESULT_DIR])
-        # Pre-reveal the sealed list is empty, and three orders are far under
-        # the 500-row cap.
-        self.assertEqual(payload["test_results"], [])
-        self.assertIs(payload["truncated"], False)
+        # Three orders are far under the 500-row cap.
         self.assertEqual(payload["row_count"], len(payload["rows"]))
         # The empty selection returns the same shape, so the pane never has to
         # branch on which keys are present.
@@ -2494,10 +2479,8 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertEqual(sorted(empty), expected_keys)
         self.assertEqual(empty["result"], None)
         self.assertEqual(empty["available"], [])
-        self.assertEqual(empty["test_results"], [])
         self.assertEqual(empty["rows"], [])
         self.assertEqual(empty["row_count"], 0)
-        self.assertIs(empty["truncated"], False)
 
     def test_fold_orders_caps_the_table_at_five_hundred_rows_but_not_the_export(
         self,
@@ -2532,7 +2515,6 @@ class WebuiBackendTest(unittest.TestCase):
         payload = self.client.get(url).json()
         self.assertEqual(len(payload["rows"]), 500)
         self.assertEqual(payload["row_count"], 501)
-        self.assertIs(payload["truncated"], True)
         self.assertEqual(payload["stats"]["orders"], 501)
         self.assertEqual(payload["stats"]["filled"], 501)
         csv_response = self.client.get(url + ".csv", params={"result": VALID_RESULT_DIR})
@@ -2541,19 +2523,19 @@ class WebuiBackendTest(unittest.TestCase):
             len(csv_response.text.strip().splitlines()), 502
         )  # header + 501
 
-    def test_summary_carries_per_period_heldout_returns(self) -> None:
+    def test_summary_carries_the_revealed_heldout_metric(self) -> None:
         self._reveal()
         payload = self.client.get("/api/experiments").json()
         hitl = next(
             e for e in payload["experiments"] if e["experiment_id"] == "exp_hitl"
         )
-        self.assertEqual(
-            hitl["heldout_returns"],
-            [{"fold_ref": self._fold_ref("heldout_2023Q1"), "return": -0.03}],
-        )
         self.assertAlmostEqual(hitl["metrics"]["cum_heldout_return"], -0.03)
-        row = hitl["fold_returns"][0]
-        self.assertAlmostEqual(row["valid_long"], 0.08)
+        # A fold row carries identity, status and the Fold's baseline; the
+        # returns themselves are read from each session's own record.
+        self.assertEqual(
+            sorted(hitl["fold_returns"][0]),
+            ["epoch_id", "fold_ref", "fold_status", "parent_control"],
+        )
 
     def test_fold_returns_carry_the_parent_control_baseline(self) -> None:
         self._build_walk_forward_experiment("exp_wf")
@@ -3337,7 +3319,7 @@ class WebuiBackendTest(unittest.TestCase):
         first = self.client.get(
             "/api/experiments/exp_hitl/trace/blocks", params={"run_id": run_ref}
         ).json()
-        self.assertEqual(first["event_count"], 3)
+        self.assertTrue(first["blocks"])
         self.assertTrue(first["eof"])
         again = self.client.get(
             "/api/experiments/exp_hitl/trace/blocks",
@@ -3368,7 +3350,6 @@ class WebuiBackendTest(unittest.TestCase):
             "/api/experiments/exp_hitl/trace/blocks",
             params={"run_id": self._run_ref("run_001"), "tail_events": 2},
         ).json()
-        self.assertEqual(tail["event_count"], 2)
         self.assertEqual(
             [block["kind"] for block in tail["blocks"]],
             ["agent_output", "tool_group"],
@@ -3409,7 +3390,7 @@ class WebuiBackendTest(unittest.TestCase):
         )
         self.assertEqual(preview.status_code, 200, preview.text)
         payload = preview.json()
-        self.assertEqual(payload["kind"], "fold")
+        self.assertEqual(sorted(payload), ["note", "prompt"])
         self.assertIn("控制回撤", payload["prompt"])
         # The preview is a prompt, not an evidence channel: the held-out
         # schedule never reaches it.
@@ -4529,6 +4510,36 @@ def test_public_worker_log_is_repo_relative_and_never_a_host_path(tmp_path: Path
     assert "worker_log" not in running["status"]
     listed = summarize_experiment(directory)
     assert listed["worker_log"] == relative
+
+
+def test_a_worker_that_dies_during_boot_reads_as_interrupted(tmp_path: Path) -> None:
+    """The console's active vocabulary must contain the worker's boot state.
+
+    ``StatusReporter`` writes that state before the first session opens. A
+    boot state the console does not count as active never degrades when the
+    pid dies, so the experiment keeps its boot badge forever: no 已中断, and
+    no resume button on a worker that is gone. The state is read back from the
+    writer rather than spelled a second time here, so the two cannot drift.
+    """
+    from autotrade.webui.manager import _TERMINAL_RESUMABLE_STATES
+    from autotrade.webui.registry import ACTIVE_STATES, experiment_state
+
+    directory = tmp_path / "experiments/demo"
+    hitl = directory / "hitl"
+    hitl.mkdir(parents=True)
+    reporter = StatusReporter(hitl / "status.json")
+    reporter.start()
+    reporter.stop()
+    boot = read_status(hitl / "status.json")
+    assert boot["state"] in ACTIVE_STATES
+
+    write_json_atomic(
+        hitl / "status.json", {**boot, "pid": 999_999_999, "pid_start_ticks": 1}
+    )
+    state = experiment_state(directory)
+    assert state["state"] == "interrupted"
+    # …and the console offers the researcher a way out of it.
+    assert state["state"] in _TERMINAL_RESUMABLE_STATES
 
 
 def test_guarded_fold_view_handles_a_fold_without_a_test_stage() -> None:

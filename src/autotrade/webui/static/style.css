@@ -341,7 +341,7 @@ main {
  white-space: nowrap;
 }
 .badge.state-running_session,
-.badge.state-starting {
+.badge.state-initializing {
  background: var(--accent-soft);
  color: var(--run);
 }

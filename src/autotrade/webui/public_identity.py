@@ -103,7 +103,6 @@ class PublicIdentity:
         self._text_replacements: dict[str, str] = {}
         schedule = read_json(self.experiment_dir / HITL_DIR_NAME / SCHEDULE_NAME)
         raw_sessions = schedule.get("sessions")
-        self.schedule = schedule
         self.sessions: list[dict[str, object]] = []
         self._raw_to_public: dict[str, str] = {}
         self._public_to_raw: dict[str, str] = {}
@@ -197,18 +196,6 @@ class PublicIdentity:
         if raw is None:
             raise KeyError("unknown public session key")
         return raw + suffix
-
-    def public_schedule(self, *, heldout_revealed: bool) -> dict[str, object]:
-        return {
-            key: self._safe_value(value)
-            for key, value in self.schedule.items()
-            if key != "sessions"
-        } | {
-            "sessions": [
-                self.public_session(entry, heldout_revealed=heldout_revealed)
-                for entry in self.sessions
-            ]
-        }
 
     def public_session(
         self, entry: Mapping[str, object], *, heldout_revealed: bool

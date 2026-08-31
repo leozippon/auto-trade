@@ -66,7 +66,6 @@ def test_daily_paper_projection(tmp_path: Path):
     _jsonl(root / "executions_20260102.jsonl", _execution())
     orders = trading.orders_payload(tmp_path)
     assert orders["orders"][0]["symbol"] == "000001.SZ"
-    assert orders["orders"][0]["metadata"] == {"reason": "rebalance"}
     # The engine journals matched fills as executions_<date>.jsonl; the console
     # serves them under the deals contract.
     deals = trading.deals_payload(tmp_path)
@@ -86,7 +85,10 @@ def test_order_projection_is_a_whitelist_and_never_echoes_extra_fields(tmp_path:
         _order(internal_note="must not surface", account_id="ACCT-PRIVATE"),
     )
     row = trading.orders_payload(tmp_path)["orders"][0]
-    assert set(row) == {"symbol", "action", "quantity", "execute_at", "metadata"}
+    assert set(row) == {"symbol", "action", "quantity", "execute_at"}
+    # Strategy-authored order metadata is writer content, not a projected
+    # scalar: it never reaches the payload either.
+    assert "rebalance" not in json.dumps(trading.orders_payload(tmp_path))
     assert "ACCT-PRIVATE" not in json.dumps(trading.orders_payload(tmp_path))
 
 
@@ -183,12 +185,11 @@ def test_non_finite_numbers_degrade_to_null_instead_of_failing_the_serializer(tm
 def test_invalid_quantity_and_blank_text_project_to_null(tmp_path: Path):
     _jsonl(
         tmp_path / "data/trading/paper/orders_20260102.jsonl",
-        _order(quantity=True, symbol="", metadata=["not a mapping"]),
+        _order(quantity=True, symbol=""),
         _order(quantity=-5),
     )
     rows = trading.orders_payload(tmp_path)["orders"]
     assert rows[0]["quantity"] is None and rows[0]["symbol"] is None
-    assert rows[0]["metadata"] == {}
     assert rows[1]["quantity"] is None
 
 

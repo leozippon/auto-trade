@@ -331,8 +331,8 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         experiment_id: str,
         run_id: str | None = Query(None),
     ) -> dict[str, object]:
-        path, _raw_run_id, trace_ref, _identity = _trace_target(experiment_id, run_id)
-        payload: dict[str, object] = {**traces.trace_stats(path), "trace_ref": trace_ref}
+        path, _raw_run_id, _trace_ref, _identity = _trace_target(experiment_id, run_id)
+        payload: dict[str, object] = traces.trace_stats(path)
         params = read_json(_experiment_dir(experiment_id) / HITL_DIR_NAME / PARAMS_NAME)
         model = str(params.get("model") or "")
         if model:
@@ -352,14 +352,14 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         max_bytes: int | None = Query(None, ge=1, le=traces.MAX_BLOCK_READ_BYTES),
         tail_events: int | None = Query(None, ge=1, le=500),
     ) -> dict[str, object]:
-        path, _raw_run_id, trace_ref, identity = _trace_target(experiment_id, run_id)
+        path, _raw_run_id, _trace_ref, identity = _trace_target(experiment_id, run_id)
         blocks = traces.read_trace_blocks(
             path,
             offset=offset,
             max_bytes=max_bytes,
             tail_events=tail_events,
         )
-        return {**_public_trace_blocks(blocks, identity), "trace_ref": trace_ref}
+        return _public_trace_blocks(blocks, identity)
 
     @app.get("/api/experiments/{experiment_id}/trace/subagents/{task_id}")
     def get_subagent_trace(
@@ -371,11 +371,11 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
 
         if not traces.SUBAGENT_TASK_ID.fullmatch(task_id):
             raise HTTPException(status_code=400, detail="invalid sub-agent task id")
-        path, _raw_run_id, trace_ref, identity = _trace_target(experiment_id, run_id)
+        path, _raw_run_id, _trace_ref, identity = _trace_target(experiment_id, run_id)
         projected = traces.read_subagent_trace(path, task_id)
         if not projected.get("found"):
             raise HTTPException(status_code=404, detail="unknown sub-agent task")
-        return {**_public_trace_blocks(projected, identity), "trace_ref": trace_ref}
+        return _public_trace_blocks(projected, identity)
 
     @app.get("/api/experiments/{experiment_id}/trace/stream")
     def get_trace_stream(
@@ -583,7 +583,7 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         try:
             _directory, _status, node, _node_dir = current_step(experiment_id)
         except (OSError, ValueError):
-            return {"available": False, "reason": "current Step is unavailable"}
+            return {"available": False}
         return {
             "available": True,
             "node": steps.public_step_node(node, identity=identity),
@@ -914,7 +914,6 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
             return {
                 **preview,
                 "prompt": identity.public_text(str(preview.get("prompt") or "")),
-                "session_key": identity.public_session_key(raw_session_key),
             }
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc.args[0] if exc.args else exc)) from exc

@@ -884,7 +884,6 @@ def test_trace_blocks_api_projects_whole_trace_without_paging_groups(
     payload = response.json()
     assert "events" not in payload
     assert payload["eof"] is True
-    assert payload["event_count"] == len(events)
     assert payload["blocks"] == project_trace_blocks(events)
     assert [block["kind"] for block in payload["blocks"]] == [
         "agent_output",
@@ -1487,7 +1486,6 @@ def test_subagent_trace_route_projects_redacts_and_guards(tmp_path: Path) -> Non
     assert payload.status_code == 200
     body = payload.json()
     assert body["task_id"] == "agent_1"
-    assert body["trace_ref"] == trace_ref
     assert [block["kind"] for block in body["blocks"]] == [
         "agent_output",
         "tool_group",
