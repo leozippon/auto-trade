@@ -73,6 +73,7 @@ from .ledger import (
     ExperimentLedger,
     FrozenArtifactMutated,
     FrozenArtifactRestoreFailed,
+    RunMarkers,
     assert_no_frozen_artifact_mutation,
     is_frozen_artifact_mutation,
     latest_fold_records,
@@ -192,6 +193,7 @@ class RollingExperimentPipeline:
         self.developer = developer
         self.meta_learner = meta_learner
         self.ledger = ledger or ExperimentLedger(config.ledger_path)
+        self.run_markers = RunMarkers(config.experiment_dir)
 
     def run_fold(
         self,
@@ -213,6 +215,16 @@ class RollingExperimentPipeline:
         )
         retained_artifact_id = parent.artifact_id if parent is not None else None
         wrote_business_record = False
+        attempt = {
+            "experiment_id": self.config.experiment_id,
+            "epoch_id": epoch_id,
+            "fold_id": fold.fold_id,
+            "run_id": run_id,
+            "session_key": fold_session_key(epoch_id, fold.fold_id),
+            "phase": "fold",
+        }
+        # Evidence for a run that never gets to run its own except branch.
+        self.run_markers.begin(attempt)
         try:
             _publish_progress(
                 progress, "pit_snapshot", run_id=run_id, phase="validation"
@@ -485,17 +497,16 @@ class RollingExperimentPipeline:
             if not wrote_business_record:
                 self.ledger.append(
                     {
+                        **attempt,
                         "record_type": "attempt_failed",
-                        "experiment_id": self.config.experiment_id,
-                        "epoch_id": epoch_id,
-                        "fold_id": fold.fold_id,
-                        "run_id": run_id,
-                        "phase": "fold",
                         "error": f"{type(exc).__name__}: {exc}",
                     }
                 )
             raise
         finally:
+            # Either a business record or an attempt_failed is now durable, so
+            # this run is no longer an interrupted one.
+            self.run_markers.finish(run_id)
             prune = getattr(self.artifacts, "prune_transient", None)
             if callable(prune):
                 prune(
@@ -645,6 +656,16 @@ class RollingExperimentPipeline:
         run_id = f"run_{uuid.uuid4().hex}"
         session_id = meta_learning_id(epoch_id, completed_folds)
         deadline_exceeded = False
+        attempt = {
+            "experiment_id": self.config.experiment_id,
+            "epoch_id": epoch_id,
+            "fold_id": session_id,
+            "run_id": run_id,
+            "session_key": meta_session_key(epoch_id, completed_folds),
+            "phase": "meta_learning",
+        }
+        # Evidence for a run that never gets to run its own except branch.
+        self.run_markers.begin(attempt)
         try:
             context = dict(session_context or {})
             current_skills = latest_skills_snapshot(
@@ -818,17 +839,16 @@ class RollingExperimentPipeline:
         except Exception as exc:
             self.ledger.append(
                 {
+                    **attempt,
                     "record_type": "attempt_failed",
-                    "experiment_id": self.config.experiment_id,
-                    "epoch_id": epoch_id,
-                    "fold_id": session_id,
-                    "run_id": run_id,
-                    "session_key": meta_session_key(epoch_id, completed_folds),
-                    "phase": "meta_learning",
                     "error": f"{type(exc).__name__}: {exc}",
                 }
             )
             raise
+        finally:
+            # Either a meta_learning record or an attempt_failed is now durable,
+            # so this run is no longer an interrupted one.
+            self.run_markers.finish(run_id)
 
     def _parent_control(
         self,

@@ -22,10 +22,13 @@ from autotrade.pipelines.config import (
 )
 from autotrade.pipelines.experiment import _session_budgets
 from autotrade.pipelines.folds import build_fold_schedule
+from autotrade.pipelines.hitl_state import fold_session_key
 from autotrade.pipelines.ledger import (
+    INTERRUPTED_RUN_ERROR,
     ExperimentLedger,
     FrozenArtifactMutated,
     FrozenArtifactRestoreFailed,
+    RunMarkers,
     latest_fold_records,
     latest_heldout_records,
 )
@@ -1294,3 +1297,87 @@ def test_held_out_without_a_benchmark_block_cannot_graduate():
          "benchmark": {"benchmark_return": 0.0}}
     )
     assert "missing_total_return" in nan["reasons"]
+
+
+def _killed_marker(fold_id: str, run_id: str) -> dict[str, object]:
+    """What a SIGKILLed fold run leaves behind: a marker and no ledger row."""
+    return {
+        "experiment_id": "experiment_a",
+        "epoch_id": "epoch_001",
+        "fold_id": fold_id,
+        "run_id": run_id,
+        "session_key": fold_session_key("epoch_001", fold_id),
+        "phase": "fold",
+    }
+
+
+def test_a_recorded_fold_run_leaves_nothing_for_interrupted_run_recovery(tmp_path: Path):
+    pipeline, fold, ledger = _pipeline_with_evaluator(tmp_path, Evaluator())
+    pipeline.run_fold("epoch_001", fold, parent=None)
+    markers = RunMarkers(pipeline.config.experiment_dir)
+    assert sorted(markers.root.glob("*.json")) == []
+    assert markers.recover(ledger) == []
+    assert not any(row["record_type"] == "attempt_failed" for row in ledger.read())
+
+
+def test_a_failing_fold_run_records_attempt_failed_and_clears_its_marker(tmp_path: Path):
+    pipeline, fold, ledger = _pipeline_with_evaluator(tmp_path, Evaluator())
+
+    def crashing_developer(_request):
+        raise RuntimeError("session crashed")
+
+    pipeline.developer = crashing_developer
+    with pytest.raises(RuntimeError, match="session crashed"):
+        pipeline.run_fold("epoch_001", fold, parent=None)
+    failed = [row for row in ledger.read() if row["record_type"] == "attempt_failed"]
+    assert len(failed) == 1
+    assert failed[0]["phase"] == "fold"
+    assert failed[0]["session_key"] == fold_session_key("epoch_001", fold.fold_id)
+    assert failed[0]["error"] == "RuntimeError: session crashed"
+    markers = RunMarkers(pipeline.config.experiment_dir)
+    assert sorted(markers.root.glob("*.json")) == []
+    # The in-process record is the only one; recovery must not add a second.
+    assert markers.recover(ledger) == []
+
+
+def test_a_killed_run_is_recorded_as_attempt_failed_once_at_the_next_start(tmp_path: Path):
+    pipeline, fold, ledger = _pipeline_with_evaluator(tmp_path, Evaluator())
+    markers = RunMarkers(pipeline.config.experiment_dir)
+    markers.begin(_killed_marker(fold.fold_id, "run_killed"))
+
+    appended = markers.recover(ledger)
+
+    assert [row["run_id"] for row in appended] == ["run_killed"]
+    records = ledger.read()
+    failed = [row for row in records if row["record_type"] == "attempt_failed"]
+    assert len(failed) == 1
+    assert failed[0]["fold_id"] == fold.fold_id
+    assert failed[0]["session_key"] == fold_session_key("epoch_001", fold.fold_id)
+    assert failed[0]["phase"] == "fold"
+    assert failed[0]["error"] == INTERRUPTED_RUN_ERROR
+    assert failed[0]["started_at"]
+    # Restarting the worker again must not duplicate the evidence.
+    assert markers.recover(ledger) == []
+    assert ledger.read() == records
+    # An attempt_failed row is not work: it neither completes nor blocks a rerun.
+    assert latest_fold_records(records) == {}
+
+
+def test_recovery_ignores_a_marker_whose_run_already_reached_the_ledger(tmp_path: Path):
+    pipeline, fold, ledger = _pipeline_with_evaluator(tmp_path, Evaluator())
+    outcome = pipeline.run_fold("epoch_001", fold, parent=None)
+    markers = RunMarkers(pipeline.config.experiment_dir)
+    # A kill between the ledger append and the marker cleanup.
+    markers.begin(_killed_marker(fold.fold_id, outcome.run_id))
+
+    assert markers.recover(ledger) == []
+
+    assert not any(row["record_type"] == "attempt_failed" for row in ledger.read())
+    assert sorted(markers.root.glob("*.json")) == []
+
+
+def test_a_run_marker_without_link_keys_is_refused(tmp_path: Path):
+    markers = RunMarkers(tmp_path / "experiments" / "experiment_a")
+    with pytest.raises(ValueError, match="run marker missing link keys"):
+        markers.begin({"experiment_id": "experiment_a", "run_id": "run_1"})
+    assert not markers.root.exists()

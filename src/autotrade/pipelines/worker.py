@@ -71,6 +71,7 @@ from .interactive import InteractiveExperimentRunner
 from .ledger import (
     ExperimentLedger,
     FrozenArtifactMutated,
+    RunMarkers,
     assert_no_frozen_artifact_mutation,
     experiment_verdict,
 )
@@ -783,6 +784,11 @@ def run_local_interactive_worker(
             },
         )
         raise
+    # A run killed outright (SIGKILL, OOM kill, host reset) cannot append its
+    # own attempt_failed record. Worker start is the only moment at which no run
+    # of this experiment is in flight, so the markers those runs left behind
+    # become their ledger evidence here, before any new session begins.
+    RunMarkers(options.experiment_dir).recover(ledger)
     completed = read_status(hitl / "status.json")
     if str(completed.get("state")) == "completed" and not _has_outstanding_work(
         hitl, ledger

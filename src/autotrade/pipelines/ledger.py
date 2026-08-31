@@ -6,6 +6,9 @@ summaries inside the fold record's ``steps[]``, never separate files.
 ``attempt_failed`` records are appended when a run throws before its success
 record — they carry the error evidence and are ignored by every reader that
 selects the success types, so a failed attempt is re-runnable but auditable.
+A run that is killed outright cannot append that record itself, so every run
+also leaves a host-only marker (:class:`RunMarkers`) that the next worker start
+turns into the missing ``attempt_failed``.
 
 A ``fold`` or ``heldout`` row with ``state_changed_during_test=true`` is an
 integrity failure, not a success: it is persisted before fail-fast so the
@@ -21,7 +24,11 @@ import os
 from collections.abc import Mapping
 from pathlib import Path
 
-from autotrade.environment.runtime import sanitize_for_log, utc_now_iso
+from autotrade.environment.runtime import (
+    sanitize_for_log,
+    utc_now_iso,
+    write_json_atomic,
+)
 
 # Stamped on every appended record; bump when the record shape changes.
 LEDGER_RECORD_SCHEMA_VERSION = 1
@@ -29,6 +36,12 @@ RECORD_TYPES = ("fold", "meta_learning", "heldout", "attempt_failed")
 LINK_KEYS = ("experiment_id", "epoch_id", "fold_id", "run_id")
 DURABLE_SUCCESS_TYPES = ("fold", "meta_learning", "heldout")
 _INTEGRITY_RECORD_TYPES = frozenset({"fold", "heldout"})
+
+# Host-only, never mounted into a sandbox and never Agent-visible.
+RUN_MARKER_DIR = ".host/runs"
+INTERRUPTED_RUN_ERROR = (
+    "RunInterrupted: the run process exited before it wrote a ledger record"
+)
 
 
 class FrozenArtifactMutated(RuntimeError):
@@ -294,3 +307,63 @@ class ExperimentLedger:
         if record_type is None:
             return records
         return [record for record in records if record.get("record_type") == record_type]
+
+
+class RunMarkers:
+    """In-flight run markers that make a killed run auditable.
+
+    ``run_fold`` and the Meta run append ``attempt_failed`` themselves when they
+    catch an exception, but a SIGKILL, an OOM kill or a host reset leaves no
+    code to run: the trace file stops mid-event and the ledger under-reports the
+    attempt. Each run therefore writes a marker holding its link keys before it
+    starts and deletes it once its ledger record — a business record or an
+    ``attempt_failed`` — is durable, so a leftover marker is exactly the
+    evidence of a run that died silently.
+    """
+
+    def __init__(self, experiment_dir: str | Path) -> None:
+        self.root = Path(experiment_dir) / RUN_MARKER_DIR
+
+    def begin(self, attempt: Mapping[str, object]) -> None:
+        missing = [key for key in LINK_KEYS if not attempt.get(key)]
+        if missing:
+            raise ValueError(f"run marker missing link keys: {missing}")
+        self.root.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.root.mkdir(exist_ok=True, mode=0o700)
+        write_json_atomic(
+            self.root / f"{attempt['run_id']}.json",
+            {**dict(attempt), "started_at": utc_now_iso()},
+        )
+
+    def finish(self, run_id: str) -> None:
+        (self.root / f"{run_id}.json").unlink(missing_ok=True)
+
+    def recover(self, ledger: ExperimentLedger) -> list[dict[str, object]]:
+        """Record every run that died before its ledger record, then forget it.
+
+        Called once when an experiment worker starts, the only moment at which
+        no run of this experiment is in flight. A marker whose run already
+        reached the ledger (the process died between the append and the marker
+        cleanup) is dropped without a second record, and every handled marker is
+        removed, so repeated restarts never duplicate a record.
+        """
+        if not self.root.is_dir():
+            return []
+        recorded = {
+            str(record.get("run_id"))
+            for record in ledger.read()
+            if record.get("run_id")
+        }
+        appended: list[dict[str, object]] = []
+        for path in sorted(self.root.glob("*.json")):
+            marker = json.loads(path.read_text(encoding="utf-8"))
+            if str(marker.get("run_id")) not in recorded:
+                record = {
+                    **marker,
+                    "record_type": "attempt_failed",
+                    "error": INTERRUPTED_RUN_ERROR,
+                }
+                ledger.append(record)
+                appended.append(record)
+            path.unlink(missing_ok=True)
+        return appended
