@@ -46,8 +46,17 @@ class SandboxLimits:
     # Wall clock for one ``generate_orders(context)`` call (published as
     # ``strategy_inference_timeout_seconds``) and for one ``fit(context)``
     # call; the pipeline knob ``strategy_fit_timeout_seconds`` sets the latter.
+    # Both start only once the worker holds the decision inputs, so neither
+    # bills container scheduling or host-side request materialization to the
+    # strategy.
     timeout_seconds: float = 180.0
     fit_timeout_seconds: float = 3600.0
+    # Environment-side bound on bringing one strategy container up to its
+    # request loop: container scheduling, interpreter start and the strategy
+    # module import. Generous on purpose — a loaded host must not turn into a
+    # strategy timeout — but finite, so a wedged Docker daemon or container
+    # still fails explicitly instead of blocking the replay forever.
+    startup_timeout_seconds: float = 900.0
     max_output_chars: int = 1_000_000
     tmpfs_size: str = "64m"
 
@@ -62,6 +71,11 @@ class SandboxLimits:
             raise ValueError("sandbox timeout_seconds must be positive")
         if not math.isfinite(self.fit_timeout_seconds) or self.fit_timeout_seconds <= 0:
             raise ValueError("sandbox fit_timeout_seconds must be positive")
+        if (
+            not math.isfinite(self.startup_timeout_seconds)
+            or self.startup_timeout_seconds <= 0
+        ):
+            raise ValueError("sandbox startup_timeout_seconds must be positive")
         if (
             isinstance(self.max_output_chars, bool)
             or not isinstance(self.max_output_chars, int)

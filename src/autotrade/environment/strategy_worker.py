@@ -182,6 +182,9 @@ def run(strategy_path: str | Path) -> int:
         with contextlib.redirect_stdout(sys.stderr):
             strategy = load_strategy_module(strategy_path)
     except Exception as exc:  # noqa: BLE001 - report import failures through the protocol
+        # The only message written before the first request is read, and the
+        # only one that carries no ``sequence``: that is how the host's
+        # readiness handshake tells a dead worker from a running one.
         protocol.write({"type": "error", "error": f"strategy import failed: {exc}"})
         return 1
     while True:
@@ -192,6 +195,9 @@ def run(strategy_path: str | Path) -> int:
                 return 0
             kind = message.get("type")
             if kind not in _CALL_KINDS:
+                # Reaching this line already proves the module import finished,
+                # so the host probes readiness with an unknown message type and
+                # reads the echoed sequence out of the error below.
                 raise WorkerProtocolError("expected execute or fit message")
             if kind == "fit" and strategy.fit is None:
                 raise WorkerProtocolError("strategy defines no fit(context)")

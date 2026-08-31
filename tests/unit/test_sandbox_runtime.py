@@ -1686,3 +1686,110 @@ def test_layout_has_no_decoy_output_siblings_and_collects_the_workspace(tmp_path
         '{"src": "workspace"}\n'
     )
     assert not (dest / "output").exists() and not (dest / "models").exists()
+
+
+def _worker_argv(strategy: Path, *, boot_delay: float = 0.0) -> list[str]:
+    """Run the real container-side worker as a local process.
+
+    ``boot_delay`` stands in for what ``docker run`` hides on a loaded host:
+    container scheduling, interpreter start and the strategy module import all
+    finish after the executor's constructor has already returned.
+    """
+    boot = (
+        "import time\n"
+        f"time.sleep({boot_delay!r})\n"
+        "from autotrade.environment.strategy_worker import main\n"
+        f"raise SystemExit(main([{str(strategy)!r}]))\n"
+    )
+    return [sys.executable, "-c", boot]
+
+
+def _started_executor(strategy: Path, argv: list[str], limits: SandboxLimits):
+    """A real DockerStrategyExecutor whose container is a local worker process."""
+    with (
+        patch.object(DockerStrategyExecutor, "docker_command", return_value=argv),
+        patch("autotrade.environment.executor._require_local_image"),
+    ):
+        return DockerStrategyExecutor(strategy, SandboxConfig(limits=limits))
+
+
+def test_worker_startup_is_not_charged_to_the_per_decision_clock(tmp_path: Path):
+    strategy = _strategy(tmp_path)
+    limits = SandboxLimits(timeout_seconds=0.5, startup_timeout_seconds=30.0)
+    started = time.monotonic()
+    executor = _started_executor(
+        strategy, _worker_argv(strategy, boot_delay=1.5), limits
+    )
+    startup_seconds = time.monotonic() - started
+    try:
+        assert executor.execute(_context()) == []
+    finally:
+        executor.close()
+    # The wait happened, and it was spent before the strategy's own clock began.
+    assert startup_seconds >= 1.5
+
+
+def test_host_side_request_materialization_is_not_charged_to_the_strategy(tmp_path: Path):
+    strategy = _strategy(tmp_path)
+    executor = _started_executor(
+        strategy, _worker_argv(strategy), SandboxLimits(timeout_seconds=0.5)
+    )
+    prepare = executor._prepare_execute
+
+    def slow_prepare(context):
+        time.sleep(1.0)
+        return prepare(context)
+
+    started = time.monotonic()
+    try:
+        with patch.object(executor, "_prepare_execute", slow_prepare):
+            assert executor.execute(_context()) == []
+    finally:
+        executor.close()
+    assert time.monotonic() - started >= 1.0
+
+
+def test_a_worker_that_never_becomes_ready_fails_as_a_host_side_error(tmp_path: Path):
+    strategy = _strategy(tmp_path)
+    process_holder: list[subprocess.Popen[bytes]] = []
+    real_popen = subprocess.Popen
+
+    def capture(*args, **kwargs):
+        process = real_popen(*args, **kwargs)
+        process_holder.append(process)
+        return process
+
+    started = time.monotonic()
+    with (
+        patch.object(DockerStrategyExecutor, "_remove_container") as remove,
+        patch("autotrade.environment.executor.subprocess.Popen", capture),
+        pytest.raises(
+            StrategyExecutionError,
+            match="did not become ready.*not strategy compute",
+        ),
+    ):
+        _started_executor(
+            strategy,
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            SandboxLimits(startup_timeout_seconds=0.2),
+        )
+    assert time.monotonic() - started < 5
+    assert process_holder and process_holder[0].poll() is not None
+    remove.assert_called_once()
+
+
+def test_a_worker_whose_strategy_import_fails_is_reported_as_a_startup_failure(
+    tmp_path: Path,
+):
+    strategy = _strategy(
+        tmp_path,
+        "import numpy as np\n\nBOOM = np.zeros(1)[5]\n\n\n"
+        "def generate_orders(context):\n    return []\n",
+    )
+    with (
+        patch.object(DockerStrategyExecutor, "_remove_container"),
+        pytest.raises(
+            StrategyExecutionError, match="failed to start: strategy import failed"
+        ),
+    ):
+        _started_executor(strategy, _worker_argv(strategy), SandboxLimits())

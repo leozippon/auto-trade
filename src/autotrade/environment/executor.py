@@ -29,6 +29,14 @@ if TYPE_CHECKING:
 _HOST_TIMEOUT_BUFFER_SECONDS = 15.0
 _MAX_STRATEGY_THREADS = 16
 _PROCESS_STOP_TIMEOUT_SECONDS = 2.0
+# Readiness handshake sequence. Request sequences are non-negative, so a worker
+# that echoes this one is answering the probe and nothing else. The worker
+# rejects the unknown message type and echoes the sequence with its error; that
+# reply is the proof that the container is up, the interpreter is running and
+# the strategy module finished importing. The one reply the worker emits
+# *before* reading anything is its import failure, which carries no sequence —
+# that is how a dead worker is told apart from a ready one.
+_READY_SEQUENCE = -1
 # Container-side path of the read-only strategy package (the directory that
 # holds main.py), and of the read-only data roots and the per-replay state
 # directory, which is read-only for generate_orders and read-write for fit.
@@ -297,12 +305,15 @@ class DockerStrategyExecutor:
         # The message a deadline miss reports, read by _write/_read_line.
         self._active_limit = f"{label} exceeded {timeout_seconds:g}s"
         expected = "fitted" if kind == "fit" else "orders"
-        deadline = time.monotonic() + timeout_seconds
         consumed = 0
         try:
+            # Materializing and validating the request is the host's own work on
+            # host-owned PIT data; only what happens from the hand-over onwards
+            # is the strategy's, so its clock starts here and not before.
             request, last_available_at = self._prepare_execute(context)
             request["type"] = kind
             sequence = request["sequence"]
+            deadline = time.monotonic() + timeout_seconds
             self._send(request, deadline)
             while True:
                 message, size = self._read_message(deadline)
@@ -480,6 +491,51 @@ class DockerStrategyExecutor:
         assert self._process.stderr is not None
         self._stderr_thread = threading.Thread(target=self._drain_stderr, daemon=True)
         self._stderr_thread.start()
+        self._await_ready()
+
+    def _await_ready(self) -> None:
+        """Block until the container's worker loop can answer, or fail explicitly.
+
+        ``docker run`` returns as soon as the process is spawned: container
+        scheduling, interpreter start and the strategy module import all finish
+        lazily, and without this handshake their wall clock lands inside the
+        first ``generate_orders`` call and is charged to the strategy's
+        per-decision timeout. That is an environment cost, so it gets its own
+        generous environment-side budget and its own error.
+        """
+
+        limit = self.config.limits.startup_timeout_seconds
+        self._active_limit = f"strategy worker startup exceeded {limit:g}s"
+        deadline = time.monotonic() + limit
+        try:
+            self._send({"type": "ready", "sequence": _READY_SEQUENCE}, deadline)
+            message, _ = self._read_message(deadline)
+        except (
+            TimeoutError,
+            BrokenPipeError,
+            OSError,
+            ValueError,
+            json.JSONDecodeError,
+            StrategyExecutionError,
+        ) as exc:
+            # Abort first: it joins the stderr drain, so a container that died
+            # on startup (missing image, daemon error) still has its own words
+            # in the message instead of a race with the reader thread.
+            self._abort()
+            detail = self._stderr_text()
+            suffix = f"; worker stderr: {detail}" if detail else ""
+            raise StrategyExecutionError(
+                "Docker strategy worker did not become ready (host side: container "
+                f"start, host contention or a broken worker, not strategy compute): "
+                f"{exc}{suffix}"
+            ) from exc
+        finally:
+            self._active_limit = None
+        if message.get("sequence") != _READY_SEQUENCE:
+            # The only message that precedes the worker's first read.
+            error = str(message.get("error") or message)
+            self._abort()
+            raise StrategyExecutionError(f"Docker strategy worker failed to start: {error}")
 
     def _send(self, message: Mapping[str, object], deadline: float) -> None:
         process = self._process
