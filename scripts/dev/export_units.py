@@ -85,18 +85,21 @@ def _visibility_note(rule) -> str | None:
         return None
     if rule.dataset not in SELECTABLE_DATASETS[domain]:
         return _DATASET_NOT_IN_SNAPSHOT
-    if rule.dataset not in DEFAULT_DATASETS[domain]:
-        return _DATASET_NOT_DEFAULT
+    # A column exclusion outranks the dataset's default scope. Selecting the
+    # dataset never brings an excluded column back, so reporting only "not
+    # loaded by default" would read as opt-in availability.
     excluded = set(SNAPSHOT_EXCLUDED_COLUMNS.get(rule.dataset, ()))
     covered = excluded.intersection(rule.columns)
-    if not covered:
-        return None
-    if covered != set(rule.columns):
-        raise ValueError(
-            f"unit rule {rule.key()} mixes snapshot-excluded and visible columns; "
-            "split it so each rule is uniformly one or the other"
-        )
-    return _COLUMNS_NOT_IN_SNAPSHOT
+    if covered:
+        if covered != set(rule.columns):
+            raise ValueError(
+                f"unit rule {rule.key()} mixes snapshot-excluded and visible columns; "
+                "split it so each rule is uniformly one or the other"
+            )
+        return _COLUMNS_NOT_IN_SNAPSHOT
+    if rule.dataset not in DEFAULT_DATASETS[domain]:
+        return _DATASET_NOT_DEFAULT
+    return None
 
 
 def render_units_markdown() -> str:

@@ -513,6 +513,18 @@ class UnitRegistryProjectionTest(unittest.TestCase):
     """The column-level unit registry: structure, coverage, projections."""
 
     @staticmethod
+    def _export_units_module():
+        import importlib.util
+
+        repo_root = Path(__file__).resolve().parents[2]
+        spec = importlib.util.spec_from_file_location(
+            "export_units", repo_root / "scripts" / "dev" / "export_units.py"
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    @staticmethod
     def _inventory_column_map() -> dict[tuple[str, str | None], list[str]]:
         repo_root = Path(__file__).resolve().parents[2]
         inventory = json.loads(
@@ -809,17 +821,38 @@ class UnitRegistryProjectionTest(unittest.TestCase):
         self.assertLess(len(json.dumps(AGENT_UNIT_CONTRACT)), 1200)
 
     def test_units_reference_doc_is_fresh(self):
-        import importlib.util
-
         repo_root = Path(__file__).resolve().parents[2]
-        spec = importlib.util.spec_from_file_location(
-            "export_units", repo_root / "scripts" / "dev" / "export_units.py"
-        )
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+        module = self._export_units_module()
         committed = (repo_root / "docs" / "units-reference.md").read_text(encoding="utf-8")
         self.assertEqual(
             committed,
             module.render_units_markdown(),
             "docs/units-reference.md is stale; run scripts/dev/export_units.py",
         )
+
+    def test_units_reference_marks_every_excluded_column_as_out_of_snapshot(self):
+        from autotrade.environment.data.snapshot import SNAPSHOT_EXCLUDED_COLUMNS
+        from autotrade.environment.data.units import FIELD_RULES
+
+        module = self._export_units_module()
+        rendered = module.render_units_markdown()
+        # An excluded column never reaches the Agent, whether or not its
+        # dataset is in the default scope. Reporting only "not loaded by
+        # default" would advertise it as opt-in available.
+        covered: set[str] = set()
+        for rule in FIELD_RULES:
+            excluded = set(SNAPSHOT_EXCLUDED_COLUMNS.get(rule.dataset or "", ()))
+            if not excluded.intersection(rule.columns):
+                continue
+            covered.add(rule.dataset)
+            self.assertEqual(
+                module._visibility_note(rule),
+                module._COLUMNS_NOT_IN_SNAPSHOT,
+                rule.key(),
+            )
+            row = f"| `{rule.dataset}` | {'/'.join(rule.columns)} |"
+            line = next(text for text in rendered.splitlines() if text.startswith(row))
+            self.assertIn(module._COLUMNS_NOT_IN_SNAPSHOT, line)
+            self.assertNotIn(module._DATASET_NOT_DEFAULT, line)
+        # Non-vacuous: every dataset with an exclusion is reached above.
+        self.assertEqual(covered, set(SNAPSHOT_EXCLUDED_COLUMNS))
