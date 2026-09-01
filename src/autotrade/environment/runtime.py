@@ -2,11 +2,14 @@
 
 Trusted logs are produced only by Runner / Execution Gateway / LLM Proxy /
 simulated Broker code paths (docs/environment-design.md §4.1). Agent text
-never replaces these records.
+never replaces these records. The durable versioned-JSONL log primitive every
+such record stream is written with also lives here, so the experiment ledger
+and the issue-report log share one implementation of the format.
 """
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
@@ -381,6 +384,75 @@ def write_json_atomic(path: Path, payload: object) -> None:
         tmp.replace(path)
     finally:
         tmp.unlink(missing_ok=True)
+
+
+def append_versioned_jsonl(
+    path: str | Path, record: Mapping[str, object], *, schema_version: int
+) -> dict[str, object]:
+    """Append one sanitized, version-stamped record line and return it.
+
+    The stamps come after the spread so a caller-supplied ``schema_version`` or
+    ``recorded_at`` can never override the log's own. flock + fsync: records
+    regularly exceed the 8 KiB text buffer, so an unlocked write reaches the
+    file in multiple chunks and a concurrent reader can see a torn final line;
+    and a finished run's record must survive power loss (the writer treats the
+    record as durable once this returns).
+    """
+    payload = {
+        **sanitize_for_log(record),
+        "schema_version": schema_version,
+        "recorded_at": utc_now_iso(),
+    }
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with target.open("a", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            handle.write(
+                json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+                + "\n"
+            )
+            handle.flush()
+            os.fsync(handle.fileno())
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    return payload
+
+
+def read_versioned_jsonl(
+    path: str | Path, *, schema_version: int, label: str
+) -> list[dict[str, object]]:
+    """All records in append order; a foreign or newer format fails fast.
+
+    The shared lock pairs with :func:`append_versioned_jsonl`'s exclusive lock
+    so a live reader never observes a half-written line. External corruption
+    (truncation, foreign writers) still fails fast in ``json.loads`` below.
+    There is no legacy tolerance: a missing or unknown version means a foreign
+    or newer format that older code must not silently misinterpret — migrate
+    the file, don't guess. ``label`` names the record kind in those errors.
+    """
+    target = Path(path)
+    if not target.exists():
+        return []
+    with target.open("r", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
+        try:
+            text = handle.read()
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    records = [json.loads(line) for line in text.splitlines() if line.strip()]
+    for record in records:
+        if not isinstance(record, dict):
+            raise TypeError(f"{label} line is not a JSON object in {target}")
+        version = record.get("schema_version")
+        # type() check: JSON true/1.0/"1" must not pass as 1 (bool subclasses
+        # int and floats compare equal), and "1" must not pass either.
+        if type(version) is not int or version != schema_version:
+            raise ValueError(
+                f"{label} schema_version {version!r} != {schema_version} in "
+                f"{target}; migrate the log before reading"
+            )
+    return records
 
 
 def _agent_visible_manifest(

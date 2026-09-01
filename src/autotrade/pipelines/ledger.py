@@ -18,14 +18,13 @@ selection must refuse until a human rolls the dirty frozen trees back.
 
 from __future__ import annotations
 
-import fcntl
 import json
-import os
 from collections.abc import Mapping
 from pathlib import Path
 
 from autotrade.environment.runtime import (
-    sanitize_for_log,
+    append_versioned_jsonl,
+    read_versioned_jsonl,
     utc_now_iso,
     write_json_atomic,
 )
@@ -235,27 +234,9 @@ class ExperimentLedger:
         missing = [key for key in LINK_KEYS if not record.get(key)]
         if missing:
             raise ValueError(f"ledger record missing link keys: {missing}")
-        # Stamps come after the spread so a caller-supplied schema_version or
-        # recorded_at can never override the ledger's own.
-        payload = {
-            **sanitize_for_log(record),
-            "schema_version": LEDGER_RECORD_SCHEMA_VERSION,
-            "recorded_at": utc_now_iso(),
-        }
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        # flock + fsync: fold records regularly exceed the 8 KiB text buffer,
-        # so an unlocked write reaches the file in multiple chunks and a
-        # concurrent console read can see a torn final line; and a finished
-        # run's record must survive power loss (the pipeline appends the
-        # ledger record before treating the run as recorded).
-        with self.path.open("a", encoding="utf-8") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-            try:
-                handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str) + "\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        append_versioned_jsonl(
+            self.path, record, schema_version=LEDGER_RECORD_SCHEMA_VERSION
+        )
 
     def rewrite(self, records: list[dict[str, object]]) -> None:
         """Atomic full rewrite for migrations and Fold/Held-out rollback.
@@ -289,30 +270,11 @@ class ExperimentLedger:
         tmp.replace(self.path)
 
     def read(self, record_type: str | None = None) -> list[dict[str, object]]:
-        if not self.path.exists():
-            return []
-        # Shared lock pairs with append's exclusive lock so a live console
-        # read can never observe a half-written record. External corruption
-        # (truncation, foreign writers) still fails fast in json.loads below.
-        with self.path.open("r", encoding="utf-8") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
-            try:
-                text = handle.read()
-            finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-        records = [json.loads(line) for line in text.splitlines() if line.strip()]
-        for record in records:
-            version = record.get("schema_version")
-            # type() check: JSON true/1.0 must not pass as 1 (bool subclasses
-            # int and floats compare equal), and "1" must not pass either.
-            if type(version) is not int or version != LEDGER_RECORD_SCHEMA_VERSION:
-                # Fail-fast, no legacy tolerance: a missing or unknown version
-                # means a foreign/newer format that older code must not
-                # silently misinterpret — migrate the ledger, don't guess.
-                raise ValueError(
-                    f"ledger record schema_version {version!r} != "
-                    f"{LEDGER_RECORD_SCHEMA_VERSION} in {self.path}; migrate the ledger before reading"
-                )
+        records = read_versioned_jsonl(
+            self.path,
+            schema_version=LEDGER_RECORD_SCHEMA_VERSION,
+            label="ledger record",
+        )
         if record_type is None:
             return records
         return [record for record in records if record.get("record_type") == record_type]

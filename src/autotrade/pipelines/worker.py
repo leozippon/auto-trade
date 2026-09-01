@@ -1008,7 +1008,7 @@ def run_local_interactive_worker(
     state = {
         "parent": _latest_artifact(ledger, store)
         or _load_inherited_parent(options.experiment_dir),
-        "prior": _latest_prior(ledger, options.experiment_dir),
+        "prior": latest_prior_text(ledger.read("meta_learning")),
     }
 
     def execute(session, context):
@@ -1341,12 +1341,6 @@ def _build_post_fold_hook(
         )
 
     return post_fold_hook
-
-
-def _latest_prior(ledger: ExperimentLedger, experiment_dir: Path) -> str:
-    return latest_prior_text(
-        ledger.read("meta_learning"), experiment_dir=experiment_dir
-    )
 
 
 def _restore_prior_store(experiment_dir: Path, ledger: ExperimentLedger) -> None:

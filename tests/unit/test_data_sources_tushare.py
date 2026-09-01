@@ -929,7 +929,6 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
 
         result = download.query_share_float_to_path(
             EmptyTradeDateClient(),
-            self.raw_dir,
             path,
             {"ann_date": "20200101"},
             "ann_date",
@@ -964,7 +963,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         # ts_code rescue unreachable and left the lake dirty every time a
         # capped partition rotated its keys.
         result = download.query_share_float_to_path(
-            ShrunkClient(), self.raw_dir, path, {"ann_date": "20200101"}, "ann_date", True,
+            ShrunkClient(), path, {"ann_date": "20200101"}, "ann_date", True,
             revision_ledger=self.root / "revision_events.jsonl",
         )
         self.assertTrue(result["guard_retained"])
@@ -988,7 +987,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                 raise AssertionError("resume must not call the API")
 
         result = download.query_share_float_to_path(
-            Unused(), self.raw_dir, path, {"ann_date": "20200101"}, "ann_date", False,
+            Unused(), path, {"ann_date": "20200101"}, "ann_date", False,
         )
         self.assertEqual(
             sorted(result), ["guard_retained", "path", "rows", "skipped", "source_cap_risk"])
@@ -4565,14 +4564,14 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         client = FloatClient()
         with redirect_stdout(io.StringIO()):
             report = download.query_share_float_to_path(
-                client, self.raw_dir, path, {"ann_date": "20200101"}, "ann_date", False,
+                client, path, {"ann_date": "20200101"}, "ann_date", False,
             )
         self.assertEqual([api for api, _ in client.calls], ["share_float"])
         self.assertFalse(report["skipped"])
         self.assertTrue(common.committed_partition_intact(path))
         client.calls.clear()
         report = download.query_share_float_to_path(
-            client, self.raw_dir, path, {"ann_date": "20200101"}, "ann_date", False,
+            client, path, {"ann_date": "20200101"}, "ann_date", False,
         )
         self.assertEqual(client.calls, [])
         self.assertTrue(report["skipped"])

@@ -175,64 +175,6 @@ def test_latest_prior_resume_reads_last_meta_record() -> None:
     assert latest_prior_text([{"record_type": "fold", "prior": "ignored"}]) == ""
 
 
-def test_latest_prior_migrates_inline_legacy_taste_only_in_memory() -> None:
-    records = [
-        {"record_type": "meta_learning", "taste": "prefer simpler signals"}
-    ]
-    merged = latest_prior_text(records)
-    assert merged == "## 策略探索方向\n\nprefer simpler signals"
-    assert "prior" not in records[0]
-
-
-@pytest.mark.parametrize("absolute", [False, True])
-def test_latest_prior_reads_only_experiment_local_legacy_taste_path(
-    tmp_path: Path, absolute: bool
-) -> None:
-    experiment = tmp_path / "experiment"
-    legacy = experiment / "meta_learning" / "epoch_001" / "taste.md"
-    legacy.parent.mkdir(parents=True)
-    legacy.write_text("prefer bounded turnover\n", encoding="utf-8")
-    raw_path = str(legacy if absolute else legacy.relative_to(experiment))
-    records = [
-        {"record_type": "meta_learning", "taste_path": raw_path}
-    ]
-    assert "prefer bounded turnover" in latest_prior_text(
-        records, experiment_dir=experiment
-    )
-
-
-@pytest.mark.parametrize("raw_path", ["../outside.md", "ABSOLUTE"])
-def test_latest_prior_rejects_legacy_taste_path_outside_experiment(
-    tmp_path: Path, raw_path: str
-) -> None:
-    experiment = tmp_path / "experiment"
-    experiment.mkdir()
-    outside = tmp_path / "outside.md"
-    outside.write_text("must not leak\n", encoding="utf-8")
-    selected = str(outside) if raw_path == "ABSOLUTE" else raw_path
-    records = [
-        {"record_type": "meta_learning", "taste_path": selected}
-    ]
-    assert latest_prior_text(records, experiment_dir=experiment) == ""
-
-
-def test_legacy_taste_and_prior_merge_once_without_rewriting_ledger() -> None:
-    legacy = {
-        "record_type": "meta_learning",
-        "prior": "## 累积经验\n\nUse bounded reads.",
-        "taste": "Prefer a different falsifiable mechanism.",
-    }
-    merged = latest_prior_text([legacy])
-    assert merged.count("Prefer a different falsifiable mechanism.") == 1
-    assert merged.count("Use bounded reads.") == 1
-    assert legacy["prior"] == "## 累积经验\n\nUse bounded reads."
-    unified = [legacy, {"record_type": "meta_learning", "prior": merged}]
-    assert latest_prior_text(unified) == merged
-    assert latest_prior_text(unified).count(
-        "Prefer a different falsifiable mechanism."
-    ) == 1
-
-
 def test_prior_store_restore_points_current_at_earlier_generation(
     tmp_path: Path,
 ) -> None:

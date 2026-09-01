@@ -64,6 +64,7 @@ from .subagent import (
     SubAgentEngine,
     AgentTool,
     _copy_chat_message,
+    _output_truncated,
     deliver_subagent_report,
     normalize_subagent_thinking,
     resolve_subagent_max_turns,
@@ -1728,20 +1729,6 @@ def _new_token_totals() -> dict[str, int]:
             "cache_miss_tokens",
         )
     }
-
-
-def _output_truncated(usage: object, max_tokens: int) -> bool:
-    """A reply that used its whole completion budget (``ProviderResponse``
-    carries no ``finish_reason``, so the usage count is the signal)."""
-
-    if not isinstance(usage, Mapping):
-        return False
-    completion = usage.get("completion_tokens")
-    return (
-        isinstance(completion, (int, float))
-        and not isinstance(completion, bool)
-        and completion >= max_tokens
-    )
 
 
 def _accumulate_usage(total: dict[str, int], usage: object) -> None:

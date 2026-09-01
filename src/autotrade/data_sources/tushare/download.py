@@ -1874,7 +1874,6 @@ def download_board_dc_hot(
 
 def query_share_float_to_path(
     client: TuShareClient,
-    raw_dir: Path,
     path: Path,
     params: dict[str, Any],
     source: str,
@@ -1943,7 +1942,6 @@ def download_share_float_ann_dates(client: TuShareClient, raw_dir: Path, args: a
         path = raw_dir / "share_float_ann_date" / f"ann_date={day}.parquet"
         result = query_share_float_to_path(
             client,
-            raw_dir,
             path,
             {"ann_date": day},
             "ann_date",
@@ -2010,7 +2008,6 @@ def download_share_float_ts_code_rescue_by_date(
             path = raw_dir / dataset_dir / f"{date_param}={day}" / f"ts_code={code}.parquet"
             result = query_share_float_to_path(
                 client,
-                raw_dir,
                 path,
                 {date_param: day, "ts_code": code},
                 source,

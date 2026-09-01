@@ -15,18 +15,15 @@ telemetry, not memory and not a results channel.
 
 from __future__ import annotations
 
-import fcntl
-import json
-import os
 import threading
 from collections.abc import Mapping
 from pathlib import Path
 
 from autotrade.environment.runtime import (
     RunManifest,
+    append_versioned_jsonl,
     new_id,
-    sanitize_for_log,
-    utc_now_iso,
+    read_versioned_jsonl,
 )
 
 from .base import ToolError, ToolResult, ToolSpec
@@ -59,57 +56,19 @@ def issue_reports_path(experiment_dir: str | Path) -> Path:
 def append_issue_report(
     path: str | Path, record: Mapping[str, object]
 ) -> dict[str, object]:
-    """Append one sanitized report line; flock + fsync like the experiment ledger."""
+    """Append one sanitized report line, durable like the experiment ledger."""
 
-    # Stamps come after the spread so a caller-supplied schema_version or
-    # recorded_at can never override the log's own.
-    payload = {
-        **sanitize_for_log(record),
-        "schema_version": ISSUE_REPORT_SCHEMA_VERSION,
-        "recorded_at": utc_now_iso(),
-    }
-    target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    with target.open("a", encoding="utf-8") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        try:
-            handle.write(
-                json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
-                + "\n"
-            )
-            handle.flush()
-            os.fsync(handle.fileno())
-        finally:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-    return payload
+    return append_versioned_jsonl(
+        path, record, schema_version=ISSUE_REPORT_SCHEMA_VERSION
+    )
 
 
 def read_issue_reports(path: str | Path) -> list[dict[str, object]]:
     """All reports in append order; a foreign or newer format fails fast."""
 
-    target = Path(path)
-    if not target.exists():
-        return []
-    # Shared lock pairs with append's exclusive lock so a live console read
-    # never observes a half-written line.
-    with target.open("r", encoding="utf-8") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
-        try:
-            text = handle.read()
-        finally:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-    records = [json.loads(line) for line in text.splitlines() if line.strip()]
-    for record in records:
-        if not isinstance(record, dict):
-            raise TypeError(f"issue report line is not a JSON object in {target}")
-        version = record.get("schema_version")
-        # type() check: JSON true/1.0/"1" must not pass as 1.
-        if type(version) is not int or version != ISSUE_REPORT_SCHEMA_VERSION:
-            raise ValueError(
-                f"issue report schema_version {version!r} != "
-                f"{ISSUE_REPORT_SCHEMA_VERSION} in {target}"
-            )
-    return records
+    return read_versioned_jsonl(
+        path, schema_version=ISSUE_REPORT_SCHEMA_VERSION, label="issue report"
+    )
 
 
 class ReportIssueTool:

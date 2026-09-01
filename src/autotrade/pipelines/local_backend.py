@@ -88,11 +88,11 @@ from autotrade.environment.tools.finish_fold import (
 )
 from autotrade.environment.tools.hitl import AskUserTool
 from autotrade.environment.tools.memory_feedback import MemoryFeedbackTool
+from autotrade.environment.tools.modification_check import ModificationCheckTool
 from autotrade.environment.tools.report_issue import (
     ReportIssueTool,
     issue_reports_path,
 )
-from autotrade.environment.tools.modification_check import ModificationCheckTool
 from autotrade.environment.tools.search import (
     GlobTool,
     GrepTool,

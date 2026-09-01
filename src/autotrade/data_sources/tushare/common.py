@@ -1747,7 +1747,7 @@ def normalize_revision_event(event: dict[str, Any]) -> dict[str, Any]:
     return {field: event[field] for field in REVISION_EVENT_FIELDS}
 
 
-def revision_event_id(event: dict[str, Any]) -> str:
+def revision_event_id() -> str:
     return str(uuid.uuid4())
 
 def build_revision_event(
@@ -1808,7 +1808,7 @@ def build_revision_event(
         "write_action": None,
         "allow_empty_revision_overwrite": None,
     }
-    event["event_id"] = revision_event_id(event)
+    event["event_id"] = revision_event_id()
     return normalize_revision_event(event)
 
 def finalize_revision_event(
@@ -1823,7 +1823,7 @@ def finalize_revision_event(
         "write_action": write_action,
         "allow_empty_revision_overwrite": bool(allow_empty_revision_overwrite),
     })
-    event["event_id"] = revision_event_id(event)
+    event["event_id"] = revision_event_id()
     return normalize_revision_event(event)
 
 def write_parquet_revision_aware(

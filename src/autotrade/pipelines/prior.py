@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import fcntl
 import os
-import re
 import uuid
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
@@ -14,7 +13,6 @@ from pathlib import Path
 from autotrade.environment.tools.prior_policy import PRIOR_MAX_CHARS
 
 PRIOR_FILENAME = "PRIOR.md"
-_LEGACY_DIRECTION_FIELDS = frozenset({"taste", "taste_path"})
 
 
 @dataclass(frozen=True)
@@ -128,96 +126,12 @@ class ExperimentPriorStore:
         return self.root / "generations" / generation_id / PRIOR_FILENAME
 
 
-def latest_prior_text(
-    records: Sequence[Mapping[str, object]],
-    *,
-    experiment_dir: str | Path | None = None,
-) -> str:
-    """Return the current unified PRIOR, including one safe legacy migration.
-
-    Old Meta rows could carry a separate direction document inline or by path.
-    Only the latest legacy row is migrated, and path recovery is confined to the
-    experiment directory. A later unified row has no legacy keys and wins as-is.
-    """
+def latest_prior_text(records: Sequence[Mapping[str, object]]) -> str:
+    """The PRIOR the last Meta row published; empty before the first Meta."""
     metas = [record for record in records if record.get("record_type") == "meta_learning"]
     if not metas:
         return ""
-    latest = metas[-1]
-    prior = str(latest.get("prior") or "").strip()
-    # Legacy compatibility: these are the only old fields read by new code.
-    has_legacy_direction = any(key in latest for key in _LEGACY_DIRECTION_FIELDS)
-    if not has_legacy_direction:
-        return prior
-    if not prior:
-        prior = next(
-            (
-                str(record.get("prior") or "").strip()
-                for record in reversed(metas[:-1])
-                if str(record.get("prior") or "").strip()
-            ),
-            "",
-        )
-    direction = _legacy_taste_text(latest, experiment_dir=experiment_dir)
-    return _merge_legacy_direction(prior, direction)
-
-
-def _legacy_taste_text(
-    record: Mapping[str, object], *, experiment_dir: str | Path | None
-) -> str:
-    """Read an inline or experiment-local legacy Taste body."""
-    inline = str(record.get("taste") or "").strip()
-    if inline:
-        return inline
-    raw_path = str(record.get("taste_path") or "").strip()
-    if not raw_path or experiment_dir is None:
-        return ""
-    root = Path(experiment_dir).resolve()
-    candidate = Path(raw_path)
-    path = (candidate if candidate.is_absolute() else root / candidate).resolve()
-    if path != root and root not in path.parents:
-        return ""
-    if not path.is_file():
-        return ""
-    return path.read_text(encoding="utf-8", errors="replace").strip()
-
-
-def _merge_legacy_direction(prior: str, direction: str) -> str:
-    prior = prior.strip()
-    direction = direction.strip()
-    if not direction:
-        return prior
-    if direction in prior:
-        return prior
-    heading = re.search(r"(?m)^(#{1,6}[ \t]+策略探索方向[ \t]*)$", prior)
-    if heading:
-        insert_at = heading.end()
-        return (
-            prior[:insert_at]
-            + "\n\n"
-            + direction
-            + prior[insert_at:]
-        ).strip()
-    section = f"## 策略探索方向\n\n{direction}"
-    return f"{section}\n\n{prior}".strip() if prior else section
-
-
-def unified_meta_record(
-    record: Mapping[str, object], *, current_prior: str | None = None
-) -> dict[str, object]:
-    """Return a public Meta row with legacy direction fields removed.
-
-    ``current_prior`` is supplied only for the latest row when callers need the
-    one-time in-memory migration rendered through the sole current channel.
-    The persisted ledger remains byte-for-byte unchanged.
-    """
-    public = {
-        str(key): value
-        for key, value in record.items()
-        if str(key) not in _LEGACY_DIRECTION_FIELDS
-    }
-    if current_prior is not None:
-        public["prior"] = current_prior
-    return public
+    return str(metas[-1].get("prior") or "").strip()
 
 
 def restore_current_from_records(

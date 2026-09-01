@@ -68,9 +68,6 @@ class StrategyExperimentConfig:
             object.__setattr__(self, "models_dir", models)
 
 
-ExperimentConfig = StrategyExperimentConfig
-
-
 # The one-line summary of AcceptanceRules.evaluate handed to the Agent as the
 # ``acceptance_semantics`` fact. It lives beside the rules it describes so the
 # projection cannot drift from the behavior.
@@ -623,7 +620,6 @@ __all__ = [
     "EvaluationRequest",
     "EvaluationResult",
     "ExecutionMode",
-    "ExperimentConfig",
     "FoldDeveloper",
     "FoldOutcome",
     "FoldSessionRequest",

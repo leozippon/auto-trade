@@ -43,7 +43,6 @@ from autotrade.pipelines.ledger import (
 )
 from autotrade.pipelines.worker import _ALLOWED_PARAMS
 from autotrade.pipelines.meta_schedule import meta_record_session_key
-from autotrade.pipelines.prior import latest_prior_text, unified_meta_record
 from autotrade.pipelines.skills import latest_skills_snapshot
 
 from .public_identity import PublicIdentity
@@ -521,12 +520,6 @@ def guarded_fold_view(
     return {key: value for key, value in record.items() if key not in hidden}
 
 
-def _public_meta_view(
-    record: Mapping[str, object], *, current_prior: str | None = None
-) -> dict[str, object]:
-    return unified_meta_record(record, current_prior=current_prior)
-
-
 def _public_params(
     params: Mapping[str, object], *, test_revealed: bool
 ) -> dict[str, object]:
@@ -691,9 +684,6 @@ def experiment_detail(root: Path, experiment_id: str) -> dict[str, object]:
     records = read_ledger_records(directory)
     folds = latest_fold_records(records)
     heldout = latest_heldout_records(records)
-    meta_records = [row for row in records if row.get("record_type") == "meta_learning"]
-    latest_meta = meta_records[-1] if meta_records else None
-    current_prior = latest_prior_text(records, experiment_dir=directory)
     revealed = test_results_revealed(directory, records)
     hitl = directory / HITL_DIR_NAME
     params = read_json(hitl / PARAMS_NAME)
@@ -726,12 +716,8 @@ def experiment_detail(root: Path, experiment_id: str) -> dict[str, object]:
                 None,
             )
             if record is not None:
-                public_meta = _public_meta_view(
-                    record,
-                    current_prior=current_prior if record is latest_meta else None,
-                )
                 entry["record"] = identity.public_record(
-                    public_meta, heldout_revealed=revealed
+                    record, heldout_revealed=revealed
                 )
         elif kind == "heldout" and heldout:
             entry["records"] = [

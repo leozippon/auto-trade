@@ -88,7 +88,7 @@ def build_prompt_preview(
     options = load_worker_options(directory, repo_root=repo_root)
     control = read_control(directory / HITL_DIR_NAME / CONTROL_NAME)
     records = read_ledger_records(directory)
-    prior = latest_prior_text(records, experiment_dir=directory)
+    prior = latest_prior_text(records)
     epoch_id = str(entry.get("epoch_id") or "")
     # What the worker would inherit as this session's parent: the console's
     # imported seed, or any frozen artifact the ledger already carries. Which
