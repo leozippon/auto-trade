@@ -147,7 +147,8 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         try:
             return registry.resolve_experiment_dir(experiment_root, experiment_id)
         except KeyError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
+            # str(KeyError) is the repr of its argument; the message is args[0].
+            raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -643,7 +644,7 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         try:
             return equity.experiment_equity_payload(experiment_root, experiment_id, epoch_id=epoch_id)
         except KeyError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
+            raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc
 
     @app.get("/api/experiments/{experiment_id}/folds/{epoch_id}/{fold_id}/equity")
     def get_fold_equity(experiment_id: str, epoch_id: str, fold_id: str) -> dict[str, object]:
@@ -666,7 +667,7 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except KeyError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
+            raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc
 
     @app.get("/api/experiments/{experiment_id}/folds/{epoch_id}/{fold_id}/orders")
     def get_fold_orders(
@@ -774,20 +775,6 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
     @app.get("/api/memory")
     def get_memory() -> dict[str, object]:
         return memory.memory_overview(root, experiment_root)
-
-    @app.get("/api/issue-reports")
-    def get_issue_reports(
-        experiment_id: str | None = Query(None),
-        limit: int = Query(100, ge=1, le=issues.MAX_ISSUE_REPORTS_PAGE),
-    ) -> dict[str, object]:
-        """Agent-filed issue reports across experiments, newest first. Read-only:
-        reports are operator telemetry, so the console offers no write or delete."""
-
-        if experiment_id is not None:
-            _experiment_dir(experiment_id)
-        return issues.issue_reports(
-            experiment_root, experiment_id=experiment_id, limit=limit
-        )
 
     @app.get("/api/memory/curated/{name}")
     def get_curated_memory(name: str) -> dict[str, object]:
@@ -911,6 +898,23 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
             raise HTTPException(
                 status_code=404, detail="unknown mounted memory entry"
             ) from exc
+
+    # ---- issue reports ------------------------------------------------------------
+    @app.get("/api/issue-reports")
+    def get_issue_reports(
+        experiment_id: str | None = Query(None),
+        limit: int = Query(
+            issues.MAX_ISSUE_REPORTS_PAGE, ge=1, le=issues.MAX_ISSUE_REPORTS_PAGE
+        ),
+    ) -> dict[str, object]:
+        """Agent-filed issue reports across experiments, newest first. Read-only:
+        reports are operator telemetry, so the console offers no write or delete."""
+
+        if experiment_id is not None:
+            _experiment_dir(experiment_id)
+        return issues.issue_reports(
+            experiment_root, experiment_id=experiment_id, limit=limit
+        )
 
     @app.post("/api/experiments/{experiment_id}/prompt-preview")
     def post_prompt_preview(experiment_id: str, payload: dict = Body(...)) -> dict[str, object]:

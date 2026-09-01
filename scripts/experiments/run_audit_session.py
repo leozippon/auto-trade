@@ -68,15 +68,15 @@ def main() -> int:
     parser.add_argument("--fold-index", type=int, default=0, help="0-based Fold index to run; default first Fold.")
     add_path_arguments(parser, repo_root)
     add_calendar_arguments(parser)
-    add_schedule_arguments(parser, verbose_help=False)
-    add_snapshot_window_arguments(parser, verbose_help=False)
+    add_schedule_arguments(parser)
+    add_snapshot_window_arguments(parser)
     parser.add_argument("--max-fold-minutes", type=int, default=20)
-    add_model_arguments(parser, verbose_help=False)
+    add_model_arguments(parser)
     parser.add_argument("--local-dev", action="store_true", help="Use the trusted executor; audit default is real Docker.")
     parser.add_argument("--sandbox-image", help="Optional Docker image override for this audit session.")
     parser.add_argument("--no-thinking", action="store_true")
-    add_meta_directive_arguments(parser, verbose_help=False)
-    add_fold_exploration_directive_arguments(parser, verbose_help=False)
+    add_meta_directive_arguments(parser)
+    add_fold_exploration_directive_arguments(parser)
     parser.add_argument(
         "--prior-file",
         type=Path,
@@ -105,7 +105,7 @@ def main() -> int:
         action="store_true",
         help="Skip Docker image existence preflight. Useful only with --local-dev or custom Docker handling.",
     )
-    add_acceptance_arguments(parser, verbose_help=False)
+    add_acceptance_arguments(parser)
     args = parser.parse_args()
     resolve_period_args(parser, args)
     if args.parent_artifact_id and args.parent_step_node:

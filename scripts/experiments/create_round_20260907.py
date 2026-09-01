@@ -45,6 +45,14 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+_SCRIPTS = Path(__file__).resolve().parents[1]
+if str(_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS))
+
+from _bootstrap import add_repo_src
+
+REPO_ROOT = add_repo_src(__file__)
+
 from autotrade.environment.tools.prior_policy import calendar_policy_violation
 from autotrade.pipelines.hitl_state import (
     WEB_CLOSED_PARAMS,
@@ -58,7 +66,6 @@ from autotrade.pipelines.worker import resolve_worker_options
 # growing a second copy of the create contract.
 from autotrade.webui.manager import _ID as EXPERIMENT_ID_RE
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
 EXPERIMENTS_ROOT = REPO_ROOT / "experiments"
 
 # Console defaults this round relies on. Values, not commentary: if the console
@@ -356,7 +363,8 @@ def normalize(params: dict[str, object]) -> dict[str, object]:
     return merged
 
 
-def post(port: int, params: dict[str, object]) -> None:
+def post(port: int, params: dict[str, object]) -> bool:
+    """POST one create request; report whether the console accepted it."""
     experiment_id = params["experiment_id"]
     request = urllib.request.Request(
         f"http://127.0.0.1:{port}/api/experiments",
@@ -367,11 +375,25 @@ def post(port: int, params: dict[str, object]) -> None:
     try:
         with urllib.request.urlopen(request, timeout=300) as response:
             print(experiment_id, response.status, response.read(400).decode("utf-8", "replace"))
+            return True
     except urllib.error.HTTPError as exc:
-        print(experiment_id, "HTTP", exc.code, exc.read(800).decode("utf-8", "replace"))
+        print(experiment_id, "HTTP", exc.code, exc.read(800).decode("utf-8", "replace"), file=sys.stderr)
+    except urllib.error.URLError as exc:
+        # No console on that port, or it dropped the connection: an operator
+        # error, not a traceback.
+        print(experiment_id, "console unreachable:", exc.reason, file=sys.stderr)
+    return False
 
 
-def main() -> None:
+def main() -> int:
+    # A mistyped flag must never fall through to the real POST path: without
+    # this, --dryrun is read as an experiment-id filter and creates the round.
+    mistyped = [
+        arg for arg in sys.argv[1:] if arg.startswith("--") and arg != "--dry-run"
+    ]
+    if mistyped:
+        print("unknown option: " + ", ".join(mistyped), file=sys.stderr)
+        return 2
     if len(sys.argv) < 2 or not sys.argv[1].isdigit():
         raise SystemExit(__doc__)
     port = int(sys.argv[1])
@@ -381,6 +403,7 @@ def main() -> None:
     if unknown_ids:
         raise SystemExit("not in this round: " + ", ".join(unknown_ids))
     check_console_defaults()
+    failed: list[str] = []
     for experiment_id in ROUND:
         if wanted and experiment_id not in wanted:
             continue
@@ -393,8 +416,13 @@ def main() -> None:
             for line in directive.splitlines():
                 print("   |", line)
             continue
-        post(port, params)
+        if not post(port, params):
+            failed.append(str(experiment_id))
+    if failed:
+        print("not created: " + ", ".join(failed), file=sys.stderr)
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

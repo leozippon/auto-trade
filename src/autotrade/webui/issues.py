@@ -22,8 +22,11 @@ from autotrade.environment.tools.report_issue import (
 from .public_identity import PublicIdentity
 from .registry import resolve_experiment_dir
 
-# One page is the whole surface: reports are rare (16 per session at most),
-# newest first, and the payload says how many matched beyond the page.
+# One bounded page, newest first, is the whole surface. It is a real cut, not a
+# formality: at 16 reports per session, a round of five experiments running
+# roughly 24 parent sessions each can file hundreds. ``total`` says how many
+# matched, so the console shows "最近 N 条，共 M 条" rather than implying the
+# page is everything.
 MAX_ISSUE_REPORTS_PAGE = 200
 _UNREADABLE_REPORTS = "issue reports are unreadable"
 

@@ -88,7 +88,7 @@ def test_screen_exclude_st_cli_alias_and_help() -> None:
     from scripts.experiments._cli import add_snapshot_window_arguments
 
     parser = argparse.ArgumentParser()
-    add_snapshot_window_arguments(parser, verbose_help=True)
+    add_snapshot_window_arguments(parser)
 
     assert parser.parse_args([]).screen_exclude_st is False
     assert parser.parse_args(["--screen-exclude-st"]).screen_exclude_st is True

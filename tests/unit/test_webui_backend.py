@@ -294,7 +294,7 @@ def test_cli_exposes_distinct_fold_and_meta_model_choices() -> None:
     from scripts.experiments._cli import add_model_arguments
 
     parser = argparse.ArgumentParser()
-    add_model_arguments(parser, verbose_help=True)
+    add_model_arguments(parser)
     defaults = parser.parse_args([])
     assert defaults.model == defaults.meta_model == LOCAL_QWEN_MODEL
     mixed = parser.parse_args(

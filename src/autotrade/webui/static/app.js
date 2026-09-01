@@ -7845,7 +7845,7 @@ async function openMountedSkill(experimentId, source, name) {
 }
 
 function mountedEntriesList(experimentId, sources) {
-  const host = el("div", {});
+  const host = el("div", { class: "mounted-entries" });
   for (const source of sources) {
     host.append(
       el("div", { class: "mounted-group-title" }, mountedSourceLabel(source)),

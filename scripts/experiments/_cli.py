@@ -41,15 +41,6 @@ PERIOD_ARGS = (
 )
 
 
-def _opt_help(text: str, verbose_help: bool) -> str | None:
-    """Return ``text`` when the caller renders full help, else ``None``.
-
-    ``run_experiment`` documents every flag; ``run_audit_session`` is terse and
-    leaves most shared flags help-less. Gating keeps each ``--help`` identical.
-    """
-    return text if verbose_help else None
-
-
 def resolve_meta_learning_directive(
     parser: argparse.ArgumentParser, args: argparse.Namespace
 ) -> str:
@@ -155,42 +146,31 @@ def add_calendar_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def add_schedule_arguments(
-    parser: argparse.ArgumentParser, *, verbose_help: bool
-) -> None:
+def add_schedule_arguments(parser: argparse.ArgumentParser) -> None:
     """The item-6 fixed-cycle strategy schedule the user picks per experiment."""
     parser.add_argument(
         "--strategy-period",
         choices=("day", "month", "quarter", "year"),
         default="day",
-        help=_opt_help(
+        help=(
             "Strategy invocation cadence: every trading day, or the first available "
-            "trading day of each new month/quarter/year.",
-            verbose_help,
+            "trading day of each new month/quarter/year."
         ),
     )
     parser.add_argument(
         "--inference-time",
         default="08:30",
         metavar="HH:MM",
-        help=_opt_help(
-            "Fixed Asia/Shanghai inference time-of-day; any valid 24-hour HH:MM.",
-            verbose_help,
-        ),
+        help="Fixed Asia/Shanghai inference time-of-day; any valid 24-hour HH:MM.",
     )
 
 
-def add_snapshot_window_arguments(
-    parser: argparse.ArgumentParser, *, verbose_help: bool
-) -> None:
+def add_snapshot_window_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--window-months",
         type=int,
         default=int(WEB_CREATE_DEFAULTS["window_months"]),
-        help=_opt_help(
-            "Default PIT history window in months for decision-input snapshots and Fold input windows.",
-            verbose_help,
-        ),
+        help="Default PIT history window in months for decision-input snapshots and Fold input windows.",
     )
     parser.add_argument(
         "--daily-window-months",
@@ -221,20 +201,14 @@ def add_snapshot_window_arguments(
         "--intraday-trade-days",
         type=int,
         default=SnapshotConfig().intraday_trade_days,
-        help=_opt_help(
-            "Number of recent visible trading days included in historical intraday_1min decision snapshots.",
-            verbose_help,
-        ),
+        help="Number of recent visible trading days included in historical intraday_1min decision snapshots.",
     )
     for domain in ("events", "macro", "text", "fundamentals", "intraday"):
         parser.add_argument(
             f"--no-include-{domain}",
             dest=f"include_{domain}",
             action="store_false",
-            help=_opt_help(
-                f"Exclude the {domain} domain from decision snapshots and evaluation slots.",
-                verbose_help,
-            ),
+            help=f"Exclude the {domain} domain from decision snapshots and evaluation slots.",
         )
     parser.set_defaults(
         screen_exclude_st=bool(WEB_CREATE_DEFAULTS["screen_exclude_st"])
@@ -290,153 +264,117 @@ def add_snapshot_window_arguments(
     )
 
 
-def add_model_arguments(parser: argparse.ArgumentParser, *, verbose_help: bool) -> None:
+def add_model_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--model",
         default=DEFAULT_AGENT_MODEL,
         choices=MODEL_CHOICES,
-        help=_opt_help("Ordinary Fold Agent main-conversation model.", verbose_help),
+        help="Ordinary Fold Agent main-conversation model.",
     )
     parser.add_argument(
         "--meta-model",
         default=DEFAULT_META_MODEL,
         choices=MODEL_CHOICES,
-        help=_opt_help("Meta-learning Agent main-conversation model.", verbose_help),
+        help="Meta-learning Agent main-conversation model.",
     )
     parser.add_argument(
         "--nl-model",
         default=DEFAULT_NL_MODEL,
         choices=MODEL_CHOICES,
-        help=_opt_help(
-            f"NL Sub Agent model; defaults to {DEFAULT_NL_MODEL} (independent interface).",
-            verbose_help,
-        ),
+        help=f"NL Sub Agent model; defaults to {DEFAULT_NL_MODEL} (independent interface).",
     )
     parser.add_argument(
         "--compact-model",
         default=DEFAULT_COMPACT_MODEL,
         choices=MODEL_CHOICES,
-        help=_opt_help(
-            f"Context compaction model; defaults to {DEFAULT_COMPACT_MODEL} with thinking disabled.",
-            verbose_help,
-        ),
+        help=f"Context compaction model; defaults to {DEFAULT_COMPACT_MODEL} with thinking disabled.",
     )
     parser.add_argument(
         "--disable-context-compact",
         action="store_true",
-        help=_opt_help("Disable semantic context compaction.", verbose_help),
+        help="Disable semantic context compaction.",
     )
     parser.add_argument(
         "--reasoning-effort",
         choices=("low", "medium", "xhigh"),
         default="xhigh",
-        help=_opt_help(
+        help=(
             "Reasoning effort for the Agent conversation and its sub-agents when "
             "thinking is enabled; default xhigh. These are the levels the local Qwen "
             "template distinguishes on the wire (legacy high/max in params.json "
-            "resolve to xhigh).",
-            verbose_help,
+            "resolve to xhigh)."
         ),
     )
     parser.add_argument(
         "--compact-token-threshold",
         type=int,
         default=200_000,
-        help=_opt_help(
-            "Estimated context tokens that trigger semantic compaction; default 200000.",
-            verbose_help,
-        ),
+        help="Estimated context tokens that trigger semantic compaction; default 200000.",
     )
     parser.add_argument(
         "--compact-keep-recent-messages",
         type=int,
         default=int(WEB_CREATE_DEFAULTS["compact_keep_recent_messages"]),
-        help=_opt_help(
-            "Raw non-summary messages preserved after semantic compaction.",
-            verbose_help,
-        ),
+        help="Raw non-summary messages preserved after semantic compaction.",
     )
     parser.add_argument(
         "--compact-max-tokens",
         type=int,
         default=int(WEB_CREATE_DEFAULTS["compact_max_tokens"]),
-        help=_opt_help(
-            "Maximum output tokens for one compaction summary.", verbose_help
-        ),
+        help="Maximum output tokens for one compaction summary.",
     )
     parser.add_argument(
         "--compact-max-calls",
         type=int,
         default=int(WEB_CREATE_DEFAULTS["compact_max_calls"]),
-        help=_opt_help(
-            "Maximum semantic compaction provider calls per Agent session.",
-            verbose_help,
-        ),
+        help="Maximum semantic compaction provider calls per Agent session.",
     )
 
 
-def add_meta_directive_arguments(
-    parser: argparse.ArgumentParser, *, verbose_help: bool
-) -> None:
+def add_meta_directive_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--meta-learning-directive",
         default="",
-        help=_opt_help(
-            "Optional experiment-level research direction injected into each meta-learning prompt.",
-            verbose_help,
-        ),
+        help="Optional experiment-level research direction injected into each meta-learning prompt.",
     )
     parser.add_argument(
         "--meta-learning-directive-file",
         type=Path,
-        help=_opt_help(
-            "Optional UTF-8 text file whose content is injected as the meta-learning research direction.",
-            verbose_help,
-        ),
+        help="Optional UTF-8 text file whose content is injected as the meta-learning research direction.",
     )
 
 
-def add_fold_exploration_directive_arguments(
-    parser: argparse.ArgumentParser, *, verbose_help: bool
-) -> None:
+def add_fold_exploration_directive_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--fold-exploration-directive",
         default="",
-        help=_opt_help(
-            "Optional experiment-level exploration direction injected into every ordinary Fold prompt.",
-            verbose_help,
-        ),
+        help="Optional experiment-level exploration direction injected into every ordinary Fold prompt.",
     )
     parser.add_argument(
         "--fold-exploration-directive-file",
         type=Path,
-        help=_opt_help(
-            "Optional UTF-8 text file whose content is injected into every ordinary Fold prompt.",
-            verbose_help,
-        ),
+        help="Optional UTF-8 text file whose content is injected into every ordinary Fold prompt.",
     )
 
 
-def add_acceptance_arguments(
-    parser: argparse.ArgumentParser, *, verbose_help: bool
-) -> None:
+def add_acceptance_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--min-return",
         type=float,
         default=0.0,
-        help=_opt_help("Minimum validation total return.", verbose_help),
+        help="Minimum validation total return.",
     )
     parser.add_argument(
         "--min-sharpe",
         type=float,
         default=0.0,
-        help=_opt_help("Minimum validation Sharpe.", verbose_help),
+        help="Minimum validation Sharpe.",
     )
     parser.add_argument(
         "--max-drawdown",
         type=float,
         default=0.25,
-        help=_opt_help("Maximum validation drawdown.", verbose_help),
+        help="Maximum validation drawdown.",
     )
 
 

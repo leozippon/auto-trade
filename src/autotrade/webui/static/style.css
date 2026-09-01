@@ -368,7 +368,6 @@ main {
 }
 .badge.state-stopped,
 .badge.state-created,
-.badge.state-legacy,
 .badge.state-unknown {
  background: var(--chip-bg);
  color: var(--muted);
@@ -473,31 +472,7 @@ progress.progress.done::-moz-progress-bar {
  background: var(--ok);
 }
 
-/* metrics (card) + stat tiles — proportional figures on big values */
-.metrics {
- display: flex;
- gap: 1.5rem;
- flex-wrap: wrap;
-}
-.metric {
- display: flex;
- flex-direction: column;
-}
-.metric .v {
- font-size: 1.12rem;
- font-weight: 700;
-}
-.metric .v.pos {
- color: var(--gain);
-}
-.metric .v.neg {
- color: var(--loss);
-}
-.metric .k {
- font-size: 0.845rem;
- color: var(--muted);
-}
-
+/* stat tiles — proportional figures on big values */
 .tiles {
  display: grid;
  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
@@ -768,10 +743,6 @@ h4.subsection-title,
 .mode-note {
  font-size: 0.875rem;
  color: var(--muted);
-}
-.mono {
- font-family: var(--mono);
- word-break: break-all;
 }
 .control-bar select,
 .zoom-select,
@@ -2030,9 +2001,6 @@ details.advanced .form-grid {
  .btn.small {
   min-height: 2.2rem;
  }
- .metrics {
-  gap: 1rem;
- }
  .control-bar {
   gap: 0.45rem;
  }
@@ -2195,13 +2163,6 @@ table.data.text td {
 table.data.text td {
  vertical-align: top;
 }
-/* The sessions sharing one mount, named under the count instead of being left
-   to be inferred from the row span. */
-.mounted-share {
- color: var(--muted);
- font-size: 0.85rem;
- margin-top: 0.2rem;
-}
 @media (max-width: 1080px) {
  .memory-nav {
   position: static;
@@ -2247,15 +2208,6 @@ table.data.text td {
  font-weight: 600;
  color: var(--muted);
  white-space: nowrap;
-}
-.chip-note {
- color: var(--muted);
- font-size: 0.8rem;
-}
-.mounted-status {
- display: flex;
- gap: 0.4rem;
- align-items: center;
 }
 /* Session and status never wrap, and claim only the width they need, so the
    two count columns absorb the rest instead of squeezing the labels. */
