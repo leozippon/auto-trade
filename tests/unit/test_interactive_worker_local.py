@@ -43,7 +43,7 @@ _FOLD_DELEGATION_ROLES = ("auditor", "developer")
 
 
 def _experiment(
-    tmp_path: Path, *, developer_mode: str = "baseline"
+    tmp_path: Path, *, developer_mode: str = "baseline", max_backtests: int = 1
 ) -> tuple[Path, Path]:
     repo = tmp_path / "repo"
     experiment = repo / "experiments" / "smoke"
@@ -79,10 +79,11 @@ def _experiment(
                 "inference_time": "08:30",
                 "initial_cash": 100_000,
                 "epochs": 1,
-                # One Validation is the whole Fold budget here: these
+                # One Validation is the whole Fold budget by default: these
                 # sessions script a single daily_backtest, and finish_fold
-                # waives its batch-round floor only when no round fits.
-                "max_backtests_per_fold": 1,
+                # waives its batch-round floor only when no round fits. A test
+                # that exercises the floor or the early-stop gate raises it.
+                "max_backtests_per_fold": max_backtests,
                 "fold_period": "quarter",
                 # Rolling design: validation 2025Q4, frozen Test 2026Q1. The
                 # default single-window design is exercised separately.
@@ -953,6 +954,141 @@ def test_llm_worker_runs_real_meta_fold_validation_and_heldout(
     assert resumed["heldout_runs"] == 0
     assert len(ExperimentLedger(options.rolling.ledger_path).read()) == 3
     assert len(llm.calls) == 6
+
+
+_EARLY_STOP_REASON = (
+    "两轮 batch_validate 已证伪动量与反转两类假设；仍未检验的只有需要分钟线的"
+    "日内假设，本 Fold 拿不到该数据，剩余回测预算留给下一个 Fold 更有价值。"
+)
+
+
+def _candidate_source(weight: str) -> str:
+    return (
+        "def generate_orders(context):\n"
+        f"    weight = {weight}\n"
+        "    return []\n"
+    )
+
+
+def _batch_round(names: tuple[str, str]) -> tuple[ToolCall, ...]:
+    return (
+        *(
+            ToolCall(
+                f"write_{name}",
+                "write_file",
+                {
+                    "path": f"candidates/{name}/main.py",
+                    "content": _candidate_source(f"0.{index}"),
+                },
+            )
+            for index, name in enumerate(names, start=1)
+        ),
+        ToolCall(
+            f"batch_{names[0]}",
+            "batch_validate",
+            {
+                "candidates": [
+                    {
+                        "name": name,
+                        "hypothesis": f"{name} beats the parent on this window",
+                        "path": f"candidates/{name}",
+                    }
+                    for name in names
+                ]
+            },
+        ),
+    )
+
+
+def test_a_voluntary_early_finish_must_justify_itself_and_reaches_the_ledger(
+    tmp_path: Path,
+    monkeypatch,
+):
+    """``finish_fold``'s early-stop gate, driven by the session's real counters.
+
+    Two ``batch_validate`` rounds clear the round floor while the Fold still
+    holds more than a third of its backtest budget: the bare finish is refused
+    with the unused budget named, the justified one is accepted, and the
+    Agent's own reason is what the fold ledger record and the Meta review carry.
+    """
+
+    repo, experiment = _experiment(tmp_path, developer_mode="llm", max_backtests=9)
+    monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
+    options = load_worker_options(experiment, repo_root=repo)
+    llm = ScriptedLLM(
+        [
+            *_agent_then(
+                ToolCall(
+                    "prior",
+                    "write_file",
+                    {"path": "PRIOR.md", "content": "prefer small daily changes"},
+                ),
+                ToolCall("finish_meta", "finish_meta", {}),
+            ),
+            *_agent_then(
+                *_batch_round(("momentum_a", "momentum_b")),
+                roles=_FOLD_DELEGATION_ROLES,
+                implement={
+                    "path": "output/main.py",
+                    "content": _candidate_source("0.5"),
+                },
+            ),
+            ProviderResponse(tool_calls=_batch_round(("reversal_a", "reversal_b"))),
+            ProviderResponse(
+                tool_calls=(
+                    ToolCall("check", "modification_check", {}),
+                    ToolCall("valid", "daily_backtest", {}),
+                )
+            ),
+            # 5 of 9 backtests spent and another round still fits: refused.
+            ProviderResponse(tool_calls=(ToolCall("early", "finish_fold", {}),)),
+            ProviderResponse(
+                tool_calls=(
+                    ToolCall(
+                        "finish",
+                        "finish_fold",
+                        {"early_stop_reason": _EARLY_STOP_REASON},
+                    ),
+                )
+            ),
+        ]
+    )
+    run_local_interactive_worker(
+        options,
+        llm=llm,
+        command_runner_factory=lambda _workspace: _NoShellRunner(),
+    )
+
+    records = ExperimentLedger(options.rolling.ledger_path).read()
+    fold = next(record for record in records if record["record_type"] == "fold")
+    assert fold["fold_status"] == "frozen"
+    assert fold["early_stop_reason"] == _EARLY_STOP_REASON
+    # The Meta review reads the Agent's own account of the early finish.
+    summary = compact_fold_history(fold, ref_store=AgentRefStore(experiment))
+    assert summary["early_stop_reason"] == _EARLY_STOP_REASON
+
+    fold_trace = next(
+        path
+        for path in sorted((experiment / "artifacts/traces").glob("*.jsonl"))
+        if '"session_kind": "fold"' in path.read_text(encoding="utf-8")
+    )
+    events = [
+        json.loads(line)
+        for line in fold_trace.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    refused = [
+        event
+        for event in events
+        if event.get("event_type") == "tool_call"
+        and event.get("tool") == "finish_fold"
+        and isinstance(event.get("result"), dict)
+        and event["result"].get("ok") is False
+    ]
+    assert len(refused) == 1
+    # The refusal states what this session would leave unused, from the real
+    # counters the backtest tool tracks.
+    assert "4/9 backtests" in str(refused[0]["result"].get("error"))
 
 
 def test_second_llm_fold_prompt_excludes_prior_test_diagnostic(

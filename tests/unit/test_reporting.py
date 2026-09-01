@@ -101,7 +101,9 @@ class ReportingTest(unittest.TestCase):
                 ],
             )
             self.assertEqual(summary["epoch_comparison_chart"], str(tmp / "reports" / "epoch_comparison_returns.png"))
-            self.assertAlmostEqual(summary["development"]["positive_test_rate"], 0.75)
+            self.assertAlmostEqual(summary["development"]["positive_rate"], 0.75)
+            # Every Fold here ran a Test stage, so that is what was scored.
+            self.assertEqual(summary["development"]["result_sources"], {"frozen_test": 4})
             self.assertAlmostEqual(summary["heldout"]["mean_return"], 0.015)
             self.assertEqual(summary["benchmark"]["status"], "ok")
             self.assertEqual(summary["benchmark"]["source"], "ledger_frozen_style")
@@ -122,7 +124,7 @@ class ReportingTest(unittest.TestCase):
             arithmetic_compound -= 1.0
             self.assertNotAlmostEqual(summary["development"]["compound_active_return"], arithmetic_compound, places=4)
             # Dispersion + significance stats over the per-fold development results.
-            self.assertAlmostEqual(summary["development"]["std_test_return"], statistics.stdev(dev_tests))
+            self.assertAlmostEqual(summary["development"]["std_return"], statistics.stdev(dev_tests))
             self.assertAlmostEqual(summary["development"]["std_active_return"], statistics.stdev(dev_active))
             self.assertAlmostEqual(
                 summary["development"]["active_return_tstat"],
@@ -177,7 +179,7 @@ class ReportingTest(unittest.TestCase):
             summary = build_experiment_report(tmp / "ledger.jsonl", tmp / "reports")
             self.assertEqual(summary["folds"], 1)
             self.assertEqual(summary["heldout_periods"], 1)
-            self.assertAlmostEqual(summary["development"]["mean_test_return"], 0.06)
+            self.assertAlmostEqual(summary["development"]["mean_return"], 0.06)
             self.assertAlmostEqual(summary["heldout"]["mean_return"], 0.020)
             # The verdict follows the superseding held-out record (2% beats 1%).
             self.assertEqual(summary["verdict"]["status"], "graduated")
@@ -199,33 +201,79 @@ class ReportingTest(unittest.TestCase):
             self.assertEqual(partial["benchmark"]["status"], "partial_coverage")
             self.assertEqual(partial["status"], "warning")
 
-    def test_a_single_window_fold_reports_on_its_validation_period(self):
-        # The default design has no Test stage: the row spans the validation
-        # window, the test columns stay empty, and there is no verdict until a
-        # held-out record exists.
+    def test_default_folds_are_scored_on_their_validation_window(self):
+        # The default design has no Test stage: each Fold is scored on its own
+        # Validation replay over the validation window, so the development
+        # summary and the charts carry real numbers with `test_result: null`.
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
             ledger = ExperimentLedger(tmp / "ledger.jsonl")
-            ledger.append(
-                {
-                    "record_type": "fold",
-                    "experiment_id": "e",
-                    "epoch_id": "epoch_001",
-                    "fold_id": "fold_20220101..20251231",
-                    "run_id": "run_dev",
-                    "fold_status": "frozen",
-                    "validation_period": "20220101..20251231",
-                    "test_period": None,
-                    "validation_result": {"total_return": 0.3, "sharpe": 1.1, "max_drawdown": 0.05},
-                    "test_result": None,
-                }
-            )
+            for fold_id, period, total, bench in (
+                ("fold_2022", "20220101..20221231", 0.05, -0.21),
+                ("fold_2023", "20230101..20231231", 0.15, -0.05),
+            ):
+                ledger.append(
+                    {
+                        "record_type": "fold",
+                        "experiment_id": "e",
+                        "epoch_id": "epoch_001",
+                        "fold_id": fold_id,
+                        "run_id": f"run_{fold_id}",
+                        "fold_status": "frozen",
+                        "validation_period": period,
+                        "test_period": None,
+                        "validation_result": {
+                            "total_return": total,
+                            "sharpe": 1.1,
+                            "max_drawdown": 0.05,
+                            "order_count": 7,
+                            "benchmark": {"label": "CSI 300", "benchmark_return": bench},
+                        },
+                        "test_result": None,
+                    }
+                )
             summary = build_experiment_report(tmp / "ledger.jsonl", tmp / "reports")
-            self.assertEqual(summary["folds"], 1)
+            development = summary["development"]
+            self.assertEqual(summary["folds"], 2)
+            self.assertEqual(development["result_sources"], {"validation": 2})
+            self.assertAlmostEqual(development["mean_return"], 0.10)
+            self.assertAlmostEqual(development["median_return"], 0.10)
+            self.assertAlmostEqual(development["worst_return"], 0.05)
+            self.assertAlmostEqual(development["positive_rate"], 1.0)
+            self.assertAlmostEqual(development["mean_benchmark_return"], (-0.21 - 0.05) / 2)
+            self.assertAlmostEqual(
+                development["mean_active_return"], ((0.05 + 0.21) + (0.15 + 0.05)) / 2
+            )
+            self.assertAlmostEqual(
+                development["compound_active_return"],
+                (1.05 * 1.15) / (0.79 * 0.95) - 1.0,
+            )
+            self.assertIsNotNone(development["std_return"])
+            self.assertIsNotNone(development["active_return_tstat"])
+            # Scored periods carry their frozen benchmark block: no coverage gap.
+            self.assertEqual(summary["benchmark"]["status"], "ok")
+            self.assertEqual(summary["status"], "ok")
+            # Held-out is still the only graduation evidence.
             self.assertIsNone(summary["verdict"])
-            self.assertIsNone(summary["development"]["mean_test_return"])
-            self.assertEqual(summary["benchmark"]["status"], "missing_frozen_benchmark")
             self.assertTrue((tmp / "reports" / "epoch_comparison_returns.png").exists())
+            self.assertTrue(
+                (tmp / "reports" / "epoch_returns" / "epoch_001_returns.png").exists()
+            )
+
+    def test_a_failed_frozen_test_scores_nothing_and_never_falls_back(self):
+        # With a Test stage the frozen Test is the scored result: when it failed
+        # the Fold contributes no numbers rather than borrowing its Validation.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            ledger = ExperimentLedger(tmp / "ledger.jsonl")
+            record = fold_record("fold_2022Q1", 0.03, 0.02)
+            record["test_result"] = {"status": "failed", "error": "boom"}
+            ledger.append(record)
+            summary = build_experiment_report(tmp / "ledger.jsonl", tmp / "reports")
+            self.assertEqual(summary["development"]["result_sources"], {"frozen_test": 1})
+            self.assertIsNone(summary["development"]["mean_return"])
+            self.assertIsNone(summary["development"]["mean_active_return"])
+            self.assertEqual(summary["benchmark"]["status"], "missing_frozen_benchmark")
 
     def test_the_walk_forward_record_lists_each_epochs_parent_controls(self):
         # The inherited strategy replayed on the next Fold's window, per Epoch;
@@ -313,7 +361,7 @@ class ReportingTest(unittest.TestCase):
             ledger = ExperimentLedger(tmp / "ledger.jsonl")
             ledger.append(fold_record("fold_2022Q1", 0.03, 0.02))
             summary = build_experiment_report(tmp / "ledger.jsonl", tmp / "reports")
-            self.assertIsNone(summary["development"]["std_test_return"])
+            self.assertIsNone(summary["development"]["std_return"])
             self.assertIsNone(summary["development"]["std_active_return"])
             self.assertIsNone(summary["development"]["active_return_tstat"])
 
@@ -321,8 +369,8 @@ class ReportingTest(unittest.TestCase):
 class ReportingStatsTest(unittest.TestCase):
     def test_compound_active_return_uses_equity_ratio_not_arithmetic_diff(self):
         rows = [
-            {"test_return": 0.50, "benchmark_return": 0.20},
-            {"test_return": -0.40, "benchmark_return": 0.20},
+            {"return": 0.50, "benchmark_return": 0.20},
+            {"return": -0.40, "benchmark_return": 0.20},
         ]
         ratio = (1.5 * 0.6) / (1.2 * 1.2) - 1.0  # -0.375
         self.assertAlmostEqual(_compound_active_return(rows), ratio)
@@ -331,8 +379,8 @@ class ReportingStatsTest(unittest.TestCase):
 
     def test_compound_active_return_skips_folds_missing_a_leg(self):
         rows = [
-            {"test_return": 0.10, "benchmark_return": None},
-            {"test_return": None, "benchmark_return": 0.05},
+            {"return": 0.10, "benchmark_return": None},
+            {"return": None, "benchmark_return": 0.05},
         ]
         self.assertIsNone(_compound_active_return(rows))
 

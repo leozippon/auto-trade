@@ -2,13 +2,20 @@
 
 Produces, per experiment:
 
-- ``epoch_comparison_returns.png``: all Epoch frozen-test return, CSI 300
+- ``epoch_comparison_returns.png``: every Epoch's per-Fold return, CSI 300
   benchmark return, and compounded equity curves on Fold-aligned charts, with
   held-out appended to the final Epoch and a metrics table underneath;
 - ``epoch_returns/<epoch_id>_returns.png``: one detailed Fold-return chart per
-  Epoch, including validation, frozen test, CSI 300 benchmark, cumulative
-  equity, drawdown, and a compact metrics table. The final Epoch appends
-  held-out points.
+  Epoch, including the scored return, CSI 300 benchmark, cumulative equity,
+  drawdown, and a compact metrics table. The final Epoch appends held-out
+  points.
+
+A Fold is scored on the result its run actually produced: its own Validation
+replay under the default single-window design, or the frozen Test when the
+experiment runs a Test stage. Charts and tables name which of the two they are
+showing. The genuine out-of-sample record of the default design is
+``summary.walk_forward`` (each Fold's inherited parent replayed on that Fold's
+window) and the Held-out points.
 
 Labels are English to stay font-safe on headless hosts.
 """
@@ -80,26 +87,33 @@ def build_experiment_report(ledger_path: str | Path, output_dir: str | Path) -> 
 
 
 def _fold_row(record: dict[str, object]) -> dict[str, object]:
+    """One development Fold, scored on the result its run actually produced.
+
+    A regular Fold has no Test region (the default): it is scored on its own
+    Validation replay and its row spans the validation window. With a Test
+    stage the frozen Test is the scored result and the row spans the test
+    window; a Test that failed scores nothing, it does not fall back.
+    """
     validation = record.get("validation_result") or {}
     test = record.get("test_result") or {}
-    benchmark_return, benchmark_label = _frozen_benchmark(test)
-    test_return = _num(test.get("total_return"))
-    # A regular development Fold has no Test region: its row spans the
-    # validation window and its test columns stay empty.
-    period = record.get("test_period") or record.get("validation_period")
+    scored = test or validation
+    source = "frozen_test" if test else "validation"
+    period = record.get("test_period") if test else record.get("validation_period")
+    benchmark_return, benchmark_label = _frozen_benchmark(scored)
+    scored_return = _num(scored.get("total_return"))
     return {
         "epoch_id": str(record.get("epoch_id", "")),
         "label": str(record.get("fold_id", "")).replace("fold_", ""),
         "kind": "development",
+        "source": source,
         "fold_status": record.get("fold_status"),
+        "return": scored_return,
+        "long_return": _num(scored.get("long_return")),
+        "sharpe": _num(scored.get("sharpe")),
+        "drawdown": _num(scored.get("max_drawdown")),
+        "orders": scored.get("order_count"),
+        # Secondary series, charted only where it is not the scored result.
         "valid_return": _num(validation.get("total_return")),
-        "valid_sharpe": _num(validation.get("sharpe")),
-        "valid_drawdown": _num(validation.get("max_drawdown")),
-        "test_return": test_return,
-        "long_return": _num(test.get("long_return")),
-        "test_sharpe": _num(test.get("sharpe")),
-        "test_drawdown": _num(test.get("max_drawdown")),
-        "orders": test.get("order_count"),
         "selected_step": record.get("selected_step_id"),
         "finish_reason": record.get("finish_reason"),
         "period_start": _period_part(period, "start"),
@@ -107,8 +121,8 @@ def _fold_row(record: dict[str, object]) -> dict[str, object]:
         "benchmark_return": benchmark_return,
         "benchmark_label": benchmark_label,
         "active_return": (
-            test_return - benchmark_return
-            if test_return is not None and benchmark_return is not None
+            scored_return - benchmark_return
+            if scored_return is not None and benchmark_return is not None
             else None
         ),
     }
@@ -164,22 +178,20 @@ def _walk_forward(folds: list[dict[str, object]]) -> list[dict[str, object]]:
 
 
 def _heldout_row(record: dict[str, object]) -> dict[str, object]:
-    test = record.get("result") or {}
-    benchmark_return, benchmark_label = _frozen_benchmark(test)
-    test_return = _num(test.get("total_return"))
+    result = record.get("result") or {}
+    benchmark_return, benchmark_label = _frozen_benchmark(result)
+    heldout_return = _num(result.get("total_return"))
     return {
         "epoch_id": str(record.get("epoch_id", "")),
         "label": str(record.get("fold_id", "")).replace("heldout_", "HO "),
         "kind": "heldout",
+        "source": "heldout",
         "fold_status": "heldout",
-        "valid_return": None,
-        "valid_sharpe": None,
-        "valid_drawdown": None,
-        "test_return": test_return,
-        "long_return": _num(test.get("long_return")),
-        "test_sharpe": _num(test.get("sharpe")),
-        "test_drawdown": _num(test.get("max_drawdown")),
-        "orders": test.get("order_count"),
+        "return": heldout_return,
+        "long_return": _num(result.get("long_return")),
+        "sharpe": _num(result.get("sharpe")),
+        "drawdown": _num(result.get("max_drawdown")),
+        "orders": result.get("order_count"),
         "selected_step": None,
         "finish_reason": "heldout",
         "period_start": _period_part(record.get("period"), "start"),
@@ -187,8 +199,8 @@ def _heldout_row(record: dict[str, object]) -> dict[str, object]:
         "benchmark_return": benchmark_return,
         "benchmark_label": benchmark_label,
         "active_return": (
-            test_return - benchmark_return
-            if test_return is not None and benchmark_return is not None
+            heldout_return - benchmark_return
+            if heldout_return is not None and benchmark_return is not None
             else None
         ),
     }
@@ -204,9 +216,9 @@ def _period_part(value: object, key: str) -> str | None:
     return None
 
 
-def _frozen_benchmark(test: dict[str, object]) -> tuple[float | None, str | None]:
-    """(benchmark_return, label) from a record's frozen ``benchmark`` block."""
-    block = test.get("benchmark")
+def _frozen_benchmark(result: dict[str, object]) -> tuple[float | None, str | None]:
+    """(benchmark_return, label) from a result's frozen ``benchmark`` block."""
+    block = result.get("benchmark")
     if not isinstance(block, dict):
         return None, None
     label = block.get("label")
@@ -215,7 +227,7 @@ def _frozen_benchmark(test: dict[str, object]) -> tuple[float | None, str | None
 
 def _benchmark_summary(rows: list[dict[str, object]]) -> dict[str, object]:
     """Coverage of the frozen benchmark blocks across scored periods."""
-    scored = [row for row in rows if row.get("test_return") is not None]
+    scored = [row for row in rows if row.get("return") is not None]
     covered = sum(1 for row in scored if row.get("benchmark_return") is not None)
     if covered == len(scored) and scored:
         status = "ok"
@@ -258,7 +270,7 @@ def _plot_epoch_comparison(rows: list[dict[str, object]], path: Path) -> None:
         return
 
     fold_labels = _ordered_labels(dev_rows)
-    heldout_rows = [row for row in rows if row["kind"] == "heldout" and row["test_return"] is not None]
+    heldout_rows = [row for row in rows if row["kind"] == "heldout" and row["return"] is not None]
     heldout_labels = [str(row["label"]) for row in heldout_rows]
     labels = fold_labels + heldout_labels
     x = list(range(len(labels)))
@@ -266,6 +278,7 @@ def _plot_epoch_comparison(rows: list[dict[str, object]], path: Path) -> None:
     benchmark_by_label = _benchmark_by_label(rows)
     benchmark_values = [_plot_num(benchmark_by_label.get(label)) for label in labels]
     benchmark_label = _benchmark_label(rows)
+    result_label = _result_label(dev_rows)
 
     fig = plt.figure(figsize=(max(13, 0.9 * len(labels)), 12.0), constrained_layout=True)
     fig.patch.set_facecolor("#fbfbfd")
@@ -281,11 +294,11 @@ def _plot_epoch_comparison(rows: list[dict[str, object]], path: Path) -> None:
         epoch_rows = {
             str(row["label"]): row
             for row in dev_rows
-            if str(row["epoch_id"]) == epoch_id and row["test_return"] is not None
+            if str(row["epoch_id"]) == epoch_id and row["return"] is not None
         }
-        values = [_plot_num(epoch_rows[label]["test_return"]) if label in epoch_rows else float("nan") for label in fold_labels]
+        values = [_plot_num(epoch_rows[label]["return"]) if label in epoch_rows else float("nan") for label in fold_labels]
         if epoch_id == last_epoch:
-            values += [_plot_num(row["test_return"]) for row in heldout_rows]
+            values += [_plot_num(row["return"]) for row in heldout_rows]
         else:
             values += [float("nan")] * len(heldout_rows)
         color = colors(index % 10)
@@ -296,7 +309,7 @@ def _plot_epoch_comparison(rows: list[dict[str, object]], path: Path) -> None:
             linewidth=2.0,
             markersize=5.5,
             color=color,
-            label=f"{epoch_id} frozen test",
+            label=f"{epoch_id} {result_label.lower()}",
         )
         ax_eq.plot(
             x,
@@ -336,7 +349,7 @@ def _plot_epoch_comparison(rows: list[dict[str, object]], path: Path) -> None:
             axis.axvspan(heldout_start - 0.5, len(labels) - 0.5, color=HELDOUT_COLOR, alpha=0.08)
         ax_ret.scatter(
             list(range(heldout_start, len(labels))),
-            [_plot_num(row["test_return"]) for row in heldout_rows],
+            [_plot_num(row["return"]) for row in heldout_rows],
             color=HELDOUT_COLOR,
             marker="D",
             s=80,
@@ -387,6 +400,16 @@ def _plot_epoch_comparison(rows: list[dict[str, object]], path: Path) -> None:
     plt.close(fig)
 
 
+def _result_label(rows: list[dict[str, object]]) -> str:
+    """Which stage the development rows are scored on, for chart and table text."""
+    sources = {str(row["source"]) for row in rows if row["kind"] == "development"}
+    if sources == {"frozen_test"}:
+        return "Frozen test"
+    if sources == {"validation"}:
+        return "Validation"
+    return "Fold result"
+
+
 def _ordered_labels(rows: list[dict[str, object]]) -> list[str]:
     labels: list[str] = []
     seen: set[str] = set()
@@ -423,11 +446,11 @@ def _epoch_metric_row(
     heldout_rows: list[dict[str, object]],
 ) -> list[str]:
     epoch_rows = [row for row in dev_rows if str(row["epoch_id"]) == epoch_id]
-    returns = [_num(row["test_return"]) for row in epoch_rows if _num(row["test_return"]) is not None]
-    sharpes = [_num(row["test_sharpe"]) for row in epoch_rows if _num(row["test_sharpe"]) is not None]
-    drawdowns = [_num(row["test_drawdown"]) for row in epoch_rows if _num(row["test_drawdown"]) is not None]
-    worst = min(epoch_rows, key=lambda row: _plot_num(row["test_return"])) if returns else None
-    heldout_returns = [_num(row["test_return"]) for row in heldout_rows if _num(row["test_return"]) is not None]
+    returns = [_num(row["return"]) for row in epoch_rows if _num(row["return"]) is not None]
+    sharpes = [_num(row["sharpe"]) for row in epoch_rows if _num(row["sharpe"]) is not None]
+    drawdowns = [_num(row["drawdown"]) for row in epoch_rows if _num(row["drawdown"]) is not None]
+    worst = min(epoch_rows, key=lambda row: _plot_num(row["return"])) if returns else None
+    heldout_returns = [_num(row["return"]) for row in heldout_rows if _num(row["return"]) is not None]
     return [
         epoch_id,
         str(len(returns)),
@@ -446,16 +469,17 @@ def _epoch_metric_row(
 def _plot_single_epoch(rows: list[dict[str, object]], epoch_id: str, path: Path) -> None:
     labels = [str(row["label"]) for row in rows]
     x = list(range(len(rows)))
-    valid = [_plot_num(row["valid_return"]) for row in rows]
-    test = [_plot_num(row["test_return"]) for row in rows]
+    valid = [_plot_num(row.get("valid_return")) for row in rows]
+    scored = [_plot_num(row["return"]) for row in rows]
     benchmark = [_plot_num(row["benchmark_return"]) for row in rows]
     benchmark_label = _benchmark_label(rows)
+    result_label = _result_label(rows)
     long_values = [_plot_num(row["long_return"]) for row in rows]
     equity: list[float] = []
     drawdown: list[float] = []
     current = 1.0
     peak = 1.0
-    for value in test:
+    for value in scored:
         if not _is_nan(value):
             current *= 1.0 + float(value)
         peak = max(peak, current)
@@ -485,22 +509,24 @@ def _plot_single_epoch(rows: list[dict[str, object]], epoch_id: str, path: Path)
     if dev_idx:
         ax_ret.plot(
             dev_idx,
-            [test[i] for i in dev_idx],
+            [scored[i] for i in dev_idx],
             color=TEST_COLOR,
             marker="o",
             linewidth=2.0,
-            label="Frozen test return",
+            label=f"{result_label} return",
         )
-        ax_ret.plot(
-            dev_idx,
-            [valid[i] for i in dev_idx],
-            color=DEV_COLOR,
-            marker="s",
-            linewidth=1.7,
-            linestyle="--",
-            alpha=0.85,
-            label="Validation return",
-        )
+        # Only a second series where it is not the scored one already.
+        if any(rows[i]["source"] == "frozen_test" for i in dev_idx):
+            ax_ret.plot(
+                dev_idx,
+                [valid[i] for i in dev_idx],
+                color=DEV_COLOR,
+                marker="s",
+                linewidth=1.7,
+                linestyle="--",
+                alpha=0.85,
+                label="Validation return",
+            )
         if any(not _is_nan(benchmark[i]) for i in dev_idx):
             ax_ret.plot(
                 dev_idx,
@@ -515,7 +541,7 @@ def _plot_single_epoch(rows: list[dict[str, object]], epoch_id: str, path: Path)
     if ho_idx:
         ax_ret.plot(
             ho_idx,
-            [test[i] for i in ho_idx],
+            [scored[i] for i in ho_idx],
             color=HELDOUT_COLOR,
             marker="D",
             linestyle="none",
@@ -535,12 +561,12 @@ def _plot_single_epoch(rows: list[dict[str, object]], epoch_id: str, path: Path)
         ax_ret.axvspan(min(ho_idx) - 0.5, max(ho_idx) + 0.5, color=HELDOUT_COLOR, alpha=0.08)
     ax_ret.axhline(0.0, color="#6e6e6e", linewidth=0.9)
     ax_ret.set_ylabel("Fold return")
-    ax_ret.set_title(f"{epoch_id}: validation, frozen test, long contribution, and held-out", pad=14)
+    ax_ret.set_title(f"{epoch_id}: {result_label.lower()} return, long contribution, and held-out", pad=14)
     ax_ret.yaxis.set_major_formatter(FuncFormatter(lambda value, _: f"{value * 100:.0f}%"))
     ax_ret.legend(loc="upper left", ncols=3, fontsize=8.5)
-    _add_best_worst_note(ax_ret, labels, test, dev_idx)
+    _add_best_worst_note(ax_ret, labels, scored, dev_idx)
 
-    ax_eq.plot(x, equity, color="#234f9b", marker="o", linewidth=2.0, label="Compounded frozen-test equity")
+    ax_eq.plot(x, equity, color="#234f9b", marker="o", linewidth=2.0, label=f"Compounded {result_label.lower()} equity")
     if any(not _is_nan(value) for value in benchmark):
         ax_eq.plot(
             x,
@@ -551,7 +577,7 @@ def _plot_single_epoch(rows: list[dict[str, object]], epoch_id: str, path: Path)
             linewidth=1.8,
             label=f"{benchmark_label} compounded",
         )
-        active_equity = _active_curve(test, benchmark)
+        active_equity = _active_curve(scored, benchmark)
         ax_eq.plot(
             x,
             active_equity,
@@ -575,8 +601,7 @@ def _plot_single_epoch(rows: list[dict[str, object]], epoch_id: str, path: Path)
     table_ax.axis("off")
     columns = [
         "Fold",
-        "Valid",
-        "Test",
+        result_label,
         "CSI300",
         "Active",
         "Long",
@@ -588,13 +613,12 @@ def _plot_single_epoch(rows: list[dict[str, object]], epoch_id: str, path: Path)
     cells = [
         [
             str(row["label"]),
-            _fmt_pct(row["valid_return"]),
-            _fmt_pct(row["test_return"]),
+            _fmt_pct(row["return"]),
             _fmt_pct(row["benchmark_return"]),
             _fmt_pct(row["active_return"]),
             _fmt_pct(row["long_return"]),
-            _fmt(row["test_sharpe"]),
-            _fmt_pct(row["test_drawdown"]),
+            _fmt(row["sharpe"]),
+            _fmt_pct(row["drawdown"]),
             _fmt_int(row["orders"]),
             str(row["selected_step"] or "-"),
         ]
@@ -702,19 +726,22 @@ def _is_nan(value: float) -> bool:
 def _summarize(rows: list[dict[str, object]]) -> dict[str, object]:
     dev = [row for row in rows if row["kind"] == "development"]
     heldout = [row for row in rows if row["kind"] == "heldout"]
-    dev_tests = [row["test_return"] for row in dev if row["test_return"] is not None]
+    dev_returns = [row["return"] for row in dev if row["return"] is not None]
     dev_benchmarks = [row["benchmark_return"] for row in dev if row["benchmark_return"] is not None]
     dev_active = [row["active_return"] for row in dev if row["active_return"] is not None]
     return {
         "folds": len(dev),
         "heldout_periods": len(heldout),
         "development": {
-            "mean_test_return": _mean(dev_tests),
-            "median_test_return": _median(dev_tests),
-            "std_test_return": _std(dev_tests),
-            "positive_test_rate": _mean([1.0 if value > 0 else 0.0 for value in dev_tests]),
-            "worst_test_return": min(dev_tests) if dev_tests else None,
-            "mean_test_sharpe": _mean([row["test_sharpe"] for row in dev if row["test_sharpe"] is not None]),
+            # Which stage produced these numbers, per Fold: "validation" under
+            # the default single-window design, "frozen_test" with a Test stage.
+            "result_sources": _counts([str(row["source"]) for row in dev]),
+            "mean_return": _mean(dev_returns),
+            "median_return": _median(dev_returns),
+            "std_return": _std(dev_returns),
+            "positive_rate": _mean([1.0 if value > 0 else 0.0 for value in dev_returns]),
+            "worst_return": min(dev_returns) if dev_returns else None,
+            "mean_sharpe": _mean([row["sharpe"] for row in dev if row["sharpe"] is not None]),
             "mean_benchmark_return": _mean(dev_benchmarks),
             "mean_active_return": _mean(dev_active),
             "std_active_return": _std(dev_active),
@@ -726,10 +753,10 @@ def _summarize(rows: list[dict[str, object]]) -> dict[str, object]:
             "fold_status_counts": _counts([str(row["fold_status"]) for row in dev]),
         },
         "heldout": {
-            "returns": {row["label"]: row["test_return"] for row in heldout},
+            "returns": {row["label"]: row["return"] for row in heldout},
             "benchmark_returns": {row["label"]: row["benchmark_return"] for row in heldout},
             "active_returns": {row["label"]: row["active_return"] for row in heldout},
-            "mean_return": _mean([row["test_return"] for row in heldout if row["test_return"] is not None]),
+            "mean_return": _mean([row["return"] for row in heldout if row["return"] is not None]),
             "mean_active_return": _mean([row["active_return"] for row in heldout if row["active_return"] is not None]),
         },
     }
@@ -795,11 +822,11 @@ def _compound_active_return(rows: list[dict[str, object]]) -> float | None:
     benchmark = 1.0
     count = 0
     for row in rows:
-        test_return = _num(row.get("test_return"))
+        scored_return = _num(row.get("return"))
         bench = _num(row.get("benchmark_return"))
-        if test_return is None or bench is None:
+        if scored_return is None or bench is None:
             continue
-        strategy *= 1.0 + test_return
+        strategy *= 1.0 + scored_return
         benchmark *= 1.0 + bench
         count += 1
     if count == 0 or benchmark == 0:

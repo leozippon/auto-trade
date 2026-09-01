@@ -430,6 +430,7 @@ class RollingExperimentPipeline:
                 ),
                 "conversation_id": session.conversation_id,
                 "finish_reason": session.finish_reason,
+                "early_stop_reason": session.early_stop_reason or None,
                 "fold_status": status,
                 "accept_reasons": hard,
                 "accept_warnings": warnings,
@@ -557,27 +558,82 @@ class RollingExperimentPipeline:
             label = str(period["label"])
             if label in completed:
                 continue
-            snapshot = self.snapshots.prepare(
-                fold=None,
-                phase="heldout",
-                start=str(period["start"]),
-                end=str(period["end"]),
-                decision_time=period["decision_time"],  # type: ignore[arg-type]
-            )
-            result, heldout_error, state_changed, restore_error = _run_guarded_evaluation(
-                self.evaluator,
-                EvaluationRequest(
-                    revision=_frozen_revision(final),
-                    snapshot=snapshot,
-                    mode="heldout",
+            attempt = {
+                "experiment_id": self.config.experiment_id,
+                "epoch_id": epoch_id,
+                "fold_id": f"heldout_{label}",
+                "run_id": run_id,
+                "session_key": "heldout",
+                "phase": "heldout",
+            }
+            # Evidence for a period that never gets to run its own except branch.
+            self.run_markers.begin(attempt)
+            wrote_business_record = False
+            try:
+                snapshot = self.snapshots.prepare(
+                    fold=None,
+                    phase="heldout",
                     start=str(period["start"]),
                     end=str(period["end"]),
-                    schedule=self.config.schedule,
-                    broker_profile=self.config.broker_profile,
-                ),
-                final,
-            )
-            if state_changed:
+                    decision_time=period["decision_time"],  # type: ignore[arg-type]
+                )
+                result, heldout_error, state_changed, restore_error = _run_guarded_evaluation(
+                    self.evaluator,
+                    EvaluationRequest(
+                        revision=_frozen_revision(final),
+                        snapshot=snapshot,
+                        mode="heldout",
+                        start=str(period["start"]),
+                        end=str(period["end"]),
+                        schedule=self.config.schedule,
+                        broker_profile=self.config.broker_profile,
+                    ),
+                    final,
+                )
+                if state_changed:
+                    self.ledger.append(
+                        {
+                            "record_type": "heldout",
+                            "experiment_id": self.config.experiment_id,
+                            "epoch_id": epoch_id,
+                            "fold_id": f"heldout_{label}",
+                            "run_id": run_id,
+                            "session_key": "heldout",
+                            "period": label,
+                            "strategy_artifact_id": final.artifact_id,
+                            "snapshot_id": snapshot.snapshot_id,
+                            "result": (
+                                result.summary
+                                if result is not None
+                                else {
+                                    "status": "failed",
+                                    "error": (
+                                        f"{type(heldout_error).__name__}: {heldout_error}"
+                                        if heldout_error is not None
+                                        else "heldout_failed"
+                                    ),
+                                }
+                            ),
+                            "result_ref": result.result_ref if result is not None else None,
+                            "state_changed_during_test": True,
+                        }
+                    )
+                    # The integrity row is this run's business record: the
+                    # fail-fast below must not also log a failed attempt.
+                    wrote_business_record = True
+                    if restore_error is not None:
+                        raise FrozenArtifactRestoreFailed(
+                            "strategy or model artifacts changed during held-out "
+                            "and restoring the pre-evaluation trees failed: "
+                            f"{restore_error}"
+                        ) from restore_error
+                    raise FrozenArtifactMutated(
+                        "strategy or model artifacts changed during held-out"
+                    ) from heldout_error
+                if heldout_error is not None:
+                    raise heldout_error
+                if result is None:
+                    raise RuntimeError("held-out evaluation returned no result")
                 self.ledger.append(
                     {
                         "record_type": "heldout",
@@ -589,55 +645,30 @@ class RollingExperimentPipeline:
                         "period": label,
                         "strategy_artifact_id": final.artifact_id,
                         "snapshot_id": snapshot.snapshot_id,
-                        "result": (
-                            result.summary
-                            if result is not None
-                            else {
-                                "status": "failed",
-                                "error": (
-                                    f"{type(heldout_error).__name__}: {heldout_error}"
-                                    if heldout_error is not None
-                                    else "heldout_failed"
-                                ),
-                            }
+                        "result": result.summary,
+                        "result_ref": result.result_ref,
+                        # Graduation verdict of this period; the experiment-level
+                        # verdict (ledger.experiment_verdict) needs every period.
+                        "verdict": self.config.acceptance.heldout_verdict(
+                            result.summary, walk_forward
                         ),
-                        "result_ref": result.result_ref if result is not None else None,
-                        "state_changed_during_test": True,
                     }
                 )
-                if restore_error is not None:
-                    raise FrozenArtifactRestoreFailed(
-                        "strategy or model artifacts changed during held-out "
-                        "and restoring the pre-evaluation trees failed: "
-                        f"{restore_error}"
-                    ) from restore_error
-                raise FrozenArtifactMutated(
-                    "strategy or model artifacts changed during held-out"
-                ) from heldout_error
-            if heldout_error is not None:
-                raise heldout_error
-            if result is None:
-                raise RuntimeError("held-out evaluation returned no result")
-            self.ledger.append(
-                {
-                    "record_type": "heldout",
-                    "experiment_id": self.config.experiment_id,
-                    "epoch_id": epoch_id,
-                    "fold_id": f"heldout_{label}",
-                    "run_id": run_id,
-                    "session_key": "heldout",
-                    "period": label,
-                    "strategy_artifact_id": final.artifact_id,
-                    "snapshot_id": snapshot.snapshot_id,
-                    "result": result.summary,
-                    "result_ref": result.result_ref,
-                    # Graduation verdict of this period; the experiment-level
-                    # verdict (ledger.experiment_verdict) needs every period.
-                    "verdict": self.config.acceptance.heldout_verdict(
-                        result.summary, walk_forward
-                    ),
-                }
-            )
+                wrote_business_record = True
+            except Exception as exc:
+                if not wrote_business_record:
+                    self.ledger.append(
+                        {
+                            **attempt,
+                            "record_type": "attempt_failed",
+                            "error": f"{type(exc).__name__}: {exc}",
+                        }
+                    )
+                raise
+            finally:
+                # Either a held-out record or an attempt_failed is now durable,
+                # so this run is no longer an interrupted one.
+                self.run_markers.finish(run_id)
             count += 1
         return count
 

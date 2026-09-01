@@ -391,10 +391,32 @@ def _redact_text(value: object, *, limit: int) -> str:
     return _redact_host_paths(value)[:limit]
 
 
+def _event_ok(event: Mapping[str, object]) -> object:
+    """Tool outcome flag, from a raw event's ``result`` or a compacted event."""
+    result = event.get("result")
+    if isinstance(result, Mapping):
+        return result.get("ok")
+    return event.get("ok")
+
+
+def _event_error(event: Mapping[str, object]) -> object:
+    result = event.get("result")
+    if isinstance(result, Mapping) and result.get("error"):
+        return result.get("error")
+    return event.get("error")
+
+
 def build_agent_process_summary(
     events: Sequence[Mapping[str, object]],
 ) -> dict[str, object]:
-    """Bounded deterministic process counts from a compact Agent Trace.
+    """Deterministic process counts over one Fold's whole Agent Trace.
+
+    Takes the full session's events, never the ``compact_agent_trace`` view:
+    that view is bounded to fit Meta's context, so every per-event tally
+    (sub-agent outcomes, tool failures) counted over it silently undercounts a
+    long session while the ``session_end`` scalars stay whole. Raw and compacted
+    events are both accepted -- a tool outcome lives in ``result`` before
+    compaction and at the top level after it.
 
     Counts only; no task body, paths, Test, or Held-out values.
     """
@@ -430,7 +452,7 @@ def build_agent_process_summary(
                 session_end_attempts = raw_attempts
         elif event_type == "subagent_attempt":
             attempt_events += 1
-            if event.get("ok") == False and not event.get("status"):
+            if _event_ok(event) is False and not event.get("status"):
                 subagent_failed += 1
         elif event_type == "subagent_task":
             task_events += 1
@@ -446,10 +468,10 @@ def build_agent_process_summary(
                 tool_agent += 1
             elif tool == "daily_backtest":
                 daily_backtest += 1
-            if event.get("ok") == False:
-                add_failure(tool, event.get("error"))
-        elif event_type == "subagent_tool" and event.get("ok") == False:
-            add_failure(str(event.get("tool") or "agent"), event.get("error"))
+            if _event_ok(event) is False:
+                add_failure(tool, _event_error(event))
+        elif event_type == "subagent_tool" and _event_ok(event) is False:
+            add_failure(str(event.get("tool") or "agent"), _event_error(event))
 
     if session_end_llm is not None:
         llm_calls = session_end_llm
@@ -527,6 +549,9 @@ def build_meta_fold_review_bundle(
             {
                 "epoch_id": record.get("epoch_id"),
                 "fold_id": fold_ref,
+                # Self-labelling window: the review carries its own Validation
+                # period so its metrics are never read against another node's.
+                "validation_period": record.get("validation_period"),
                 "fold_status": record.get("fold_status"),
                 "frozen_strategy_artifact_id": (
                     ref_store.get_or_create("strategy", str(artifact_id))
@@ -541,7 +566,9 @@ def build_meta_fold_review_bundle(
                 ),
                 "strategy_files": strategy_files,
                 "agent_trace": agent_trace,
-                "agent_process_summary": build_agent_process_summary(agent_trace),
+                # Counted over the whole trace: ``agent_trace`` above is the
+                # context-bounded view, not a statistically complete one.
+                "agent_process_summary": build_agent_process_summary(source_events),
                 "agent_trace_full": sidecar.metadata(),
             }
         )

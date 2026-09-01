@@ -17,6 +17,7 @@ from autotrade.environment.llm import ScriptedLLM, ToolCall
 from autotrade.pipelines.experiment import _development_inputs
 from autotrade.pipelines.local_backend import LLMMetaLearner
 from autotrade.pipelines.meta_inputs import (
+    _AGENT_TRACE_MAX_EVENTS,
     AGENT_TRACE_FULL_MAX_FILE_BYTES,
     AGENT_TRACE_FULL_MAX_WINDOW_BYTES,
     AGENT_TRACE_FULL_RELATIVE_DIR,
@@ -147,6 +148,83 @@ def test_changing_one_source_byte_changes_the_sidecar(tmp_path: Path) -> None:
     assert first_payload != second[0].payload
     assert second[0].payload == source.read_bytes()
     assert len(first_payload) == len(cast(bytes, second[0].payload))
+
+
+def test_process_summary_counts_the_whole_trace_not_the_bounded_view(
+    tmp_path: Path,
+) -> None:
+    """A long Fold session's sub-agent and tool counts must stay whole.
+
+    ``agent_trace`` is trimmed to fit Meta's context: parent-level events are
+    one group each, so a session with more main-loop calls than the bound keeps
+    no sub-agent group at all. Counting the summary over that view reported
+    ``completed: 0`` next to a correct ``attempts`` (which comes from the
+    ``session_end`` scalar), which is what a Meta session read as a defect.
+    """
+
+    events: list[dict[str, object]] = [
+        {"event_type": "session_start", "mode": "fold"},
+        {"event_type": "subagent_task", "task_id": "agent_a", "status": "started"},
+        {"event_type": "subagent_llm", "task_id": "agent_a"},
+        {
+            "event_type": "subagent_tool",
+            "task_id": "agent_a",
+            "tool": "grep",
+            "result": {"ok": False, "error": "grep failed under /Data2/lzp"},
+        },
+        {"event_type": "subagent", "task_id": "agent_a", "status": "completed"},
+        {
+            "event_type": "subagent_attempt",
+            "task_id": "agent_a",
+            "ok": True,
+            "status": "completed",
+        },
+        {"event_type": "subagent_task", "task_id": "agent_b", "status": "started"},
+        {"event_type": "subagent", "task_id": "agent_b", "status": "error"},
+        {
+            "event_type": "subagent_attempt",
+            "task_id": "agent_b",
+            "ok": False,
+            "status": "error",
+        },
+        {
+            "event_type": "tool_call",
+            "tool": "daily_backtest",
+            "result": {"ok": False, "error": "replay failed"},
+        },
+    ]
+    # Main-loop tail long enough to fill the bounded view on its own.
+    events += [
+        {"event_type": "tool_call", "tool": "read_file", "result": {"ok": True}}
+        for _index in range(_AGENT_TRACE_MAX_EVENTS + 20)
+    ]
+    events.append(
+        {
+            "event_type": "session_end",
+            "status": "finished",
+            "llm_calls": 42,
+            "subagent_attempts": 2,
+        }
+    )
+    payload = "".join(json.dumps(event) + "\n" for event in events).encode("utf-8")
+    record, _source = _fold(tmp_path, payload)
+    reviews, _sidecars = build_meta_fold_review_bundle(
+        [record], ref_store=AgentRefStore(tmp_path / "experiment")
+    )
+    review = reviews[0]
+
+    trace = cast(list[dict[str, object]], review["agent_trace"])
+    assert len(trace) == _AGENT_TRACE_MAX_EVENTS
+    # The bounded view really did lose every sub-agent group.
+    assert not [event for event in trace if str(event["event_type"]).startswith("subagent")]
+
+    summary = _as_map(review["agent_process_summary"])
+    assert summary["subagent"] == {"attempts": 2, "completed": 1, "failed": 1}
+    assert summary["llm_calls"] == 42
+    # Both failures are outside the bounded view, and the host path is scrubbed.
+    assert summary["tool_failures"] == 2
+    assert summary["daily_backtest"] == 1
+    assert "/Data2/" not in json.dumps(summary, ensure_ascii=False)
 
 
 def test_missing_ref_is_unavailable_but_referenced_bad_sources_fail(

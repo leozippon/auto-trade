@@ -283,7 +283,7 @@ class ExperimentLedger:
 class RunMarkers:
     """In-flight run markers that make a killed run auditable.
 
-    ``run_fold`` and the Meta run append ``attempt_failed`` themselves when they
+    Fold, Meta and Held-out runs append ``attempt_failed`` themselves when they
     catch an exception, but a SIGKILL, an OOM kill or a host reset leaves no
     code to run: the trace file stops mid-event and the ledger under-reports the
     attempt. Each run therefore writes a marker holding its link keys before it

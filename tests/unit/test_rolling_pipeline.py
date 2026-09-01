@@ -261,6 +261,7 @@ def test_meta_session_retains_only_the_authorized_test_diagnostic(tmp_path: Path
             "fold_id": "fold_2025Q4",
             "run_id": "run_prior",
             "fold_status": "frozen",
+            "validation_period": "20251001..20251231",
             "validation_result": {"total_return": 0.03},
             "test_result": {
                 "total_return": -0.02,
@@ -351,6 +352,10 @@ def test_meta_session_retains_only_the_authorized_test_diagnostic(tmp_path: Path
         "max_drawdown": -0.08,
     }
     assert summaries[0]["fold_id"].startswith("fold_ref_")
+    # Each summary names the window it was replayed on, so a benchmark figure
+    # is never read against a neighbouring node's period.
+    assert summaries[0]["validation_period"] == "20251001..20251231"
+    assert reviews[0]["validation_period"] == "20251001..20251231"
     assert "2025Q4" not in str(history)
     assert "private_detail" not in str(history)
 
@@ -798,6 +803,7 @@ def test_heldout_omits_state_changed_when_trees_are_stable(tmp_path: Path):
     assert pipeline.run_heldout("epoch_001", frozen, _days()) == 1
     heldout = ledger.read("heldout")[0]
     assert "state_changed_during_test" not in heldout
+    assert sorted(RunMarkers(pipeline.config.experiment_dir).root.glob("*.json")) == []
 
 
 def _add_output_file(request) -> None:
@@ -1337,6 +1343,39 @@ def test_a_failing_fold_run_records_attempt_failed_and_clears_its_marker(tmp_pat
     assert failed[0]["session_key"] == fold_session_key("epoch_001", fold.fold_id)
     assert failed[0]["error"] == "RuntimeError: session crashed"
     markers = RunMarkers(pipeline.config.experiment_dir)
+    assert sorted(markers.root.glob("*.json")) == []
+    # The in-process record is the only one; recovery must not add a second.
+    assert markers.recover(ledger) == []
+
+
+def test_a_failing_heldout_run_records_attempt_failed_and_clears_its_marker(
+    tmp_path: Path,
+):
+    pipeline, fold, ledger = _pipeline_with_evaluator(tmp_path, Evaluator())
+    frozen = pipeline.run_fold("epoch_001", fold, parent=None).frozen
+    assert frozen is not None
+    markers = RunMarkers(pipeline.config.experiment_dir)
+    in_flight: list[list[str]] = []
+
+    class CrashingHeldout:
+        def evaluate(self, request):
+            in_flight.append(sorted(path.name for path in markers.root.glob("*.json")))
+            raise RuntimeError("held-out replay crashed")
+
+    pipeline.evaluator = CrashingHeldout()
+    with pytest.raises(RuntimeError, match="held-out replay crashed"):
+        pipeline.run_heldout("epoch_001", frozen, _days())
+
+    # The marker is on disk while the replay runs: a SIGKILL here is still
+    # recoverable evidence, exactly as for a Fold or Meta run.
+    assert len(in_flight) == 1 and len(in_flight[0]) == 1
+    failed = [row for row in ledger.read() if row["record_type"] == "attempt_failed"]
+    assert len(failed) == 1
+    assert failed[0]["phase"] == "heldout"
+    assert failed[0]["session_key"] == "heldout"
+    assert failed[0]["error"] == "RuntimeError: held-out replay crashed"
+    # No held-out result was invented, and the period stays unfinished.
+    assert ledger.read("heldout") == []
     assert sorted(markers.root.glob("*.json")) == []
     # The in-process record is the only one; recovery must not add a second.
     assert markers.recover(ledger) == []
