@@ -3,7 +3,6 @@
 from .compact import ContextCompactionConfig, ContextCompactor
 from .subagent import SubAgentConfig, SubAgentEngine
 from .prompts import (
-    FOLD_SYSTEM_PROMPT,
     META_SYSTEM_PROMPT,
     RUNTIME_SYSTEM_PROMPT,
     build_meta_learning_prompt,
@@ -23,7 +22,6 @@ from .runner import (
 )
 
 __all__ = [
-    "FOLD_SYSTEM_PROMPT",
     "META_SYSTEM_PROMPT",
     "RUNTIME_SYSTEM_PROMPT",
     "AgentSessionConfig",

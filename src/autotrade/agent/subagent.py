@@ -45,6 +45,7 @@ from autotrade.environment.time_budget import (
 )
 from autotrade.environment.tools.base import (
     SessionInterrupt,
+    ToolError,
     ToolRegistry,
     ToolResult,
     ToolResultStore,
@@ -320,6 +321,7 @@ AGENT_TOOL_SPEC = ToolSpec(
                 "description": (
                     "省略或 launch：启动子代理（须给 agent 与 task）；"
                     "message：给仍在运行的子代理发中途指令（须给 task_id 与 text）。"
+                    "续跑一个已完成的子代理不是 action，用带 resume=<task_id> 的 launch。"
                 ),
             },
             "agent": {
@@ -397,6 +399,19 @@ AGENT_TOOL_SPEC = ToolSpec(
 )
 
 
+# ``resume`` is a launch parameter, not an action. Spelling it as one is a
+# recurring parent mistake, and the bare ``action`` enum does not say where
+# resuming lives, so the rejection names the correct call instead.
+_RESUME_ACTION_HINT = (
+    "agent: resume is not an action; continue a finished sub-agent with a launch "
+    "that carries resume=<task_id>, e.g. "
+    + json.dumps(
+        {"agent": "auditor", "task": "<follow-up task>", "resume": "<task_id>"},
+        ensure_ascii=False,
+    )
+)
+
+
 class AgentTool:
     """The parent-facing ``agent`` tool.
 
@@ -411,6 +426,25 @@ class AgentTool:
         self, launch: Callable[[Mapping[str, object]], Mapping[str, object]]
     ) -> None:
         self._launch = launch
+
+    def normalize_arguments(self, arguments: Mapping[str, object]) -> Mapping[str, object]:
+        """Settle the two call shapes the advertised enums would reject blindly.
+
+        The registry validates against the schema before ``invoke``, so the
+        compatibility this tool documents has to be applied here: the legacy
+        ``thinking`` values map to the canonical level they always meant on the
+        wire, while the schema keeps advertising only the four real ones, and a
+        call that spells ``resume`` as an action is told the correct form.
+        """
+
+        if str(arguments.get("action") or "").strip().lower() == "resume":
+            raise ToolError(_RESUME_ACTION_HINT, error_type="schema_error")
+        thinking = arguments.get("thinking")
+        if isinstance(thinking, str):
+            canonical = _LEGACY_THINKING_ALIASES.get(thinking.strip().lower())
+            if canonical is not None:
+                return {**arguments, "thinking": canonical}
+        return arguments
 
     def invoke(self, arguments: Mapping[str, object]) -> ToolResult:
         return ToolResult(True, value=dict(self._launch(arguments)))
@@ -1334,7 +1368,10 @@ class SubAgentEngine(SessionTimeBudgetAware):
 
 def _output_truncated(usage: object, max_tokens: int) -> bool:
     """True when a reply used its whole completion budget (finish_reason=length
-    is not surfaced by the transport, so the usage count is the signal)."""
+    is not surfaced by the transport, so the usage count is the signal).
+
+    Shared with the parent session runner, which imports it from here.
+    """
 
     if not isinstance(usage, Mapping):
         return False

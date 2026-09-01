@@ -1133,6 +1133,71 @@ def test_subagent_arguments_are_validated_by_the_registry() -> None:
     assert runner._wait_subagent_jobs()[-1]["ok"] is True
 
 
+def test_legacy_thinking_values_launch_at_xhigh_through_the_registry() -> None:
+    """The documented ``high``/``max`` aliases must survive the schema enum.
+
+    The advertised enum is the four canonical levels, so the alias mapping has
+    to run before validation; an unknown level still fails with the enum."""
+
+    runner = AgentSessionRunner(
+        llm=ScriptedLLM([]),
+        tools=ToolRegistry(),
+        system_prompt="fold",
+        config=_fold_config(),
+        subagent=SubAgentEngine(
+            llm=ScriptedLLM(
+                [ProviderResponse(content="ok"), ProviderResponse(content="ok")]
+            ),
+            tools=ToolRegistry([DeclaredReadOnlyShell()]),
+        ),
+    )
+    for legacy in ("high", "max"):
+        started = runner.tools.invoke(
+            "agent", {"agent": "auditor", "task": "x", "thinking": legacy}
+        )
+        assert started.ok and started.value["status"] == "started"
+        record = runner._wait_subagent_jobs()[-1]
+        assert record["ok"] is True
+        child = record["value"]
+        assert isinstance(child, dict) and child["thinking"] == "xhigh"
+    unknown = runner.tools.invoke(
+        "agent", {"agent": "auditor", "task": "x", "thinking": "turbo"}
+    )
+    assert unknown.ok is False
+    assert unknown.value["error_type"] == "schema_error"
+    assert f"thinking must be one of {list(SUBAGENT_THINKING_LEVELS)}" in unknown.error
+    # A rejected launch never reached the pool.
+    assert runner._subagent_attempts == 2
+
+
+def test_agent_action_resume_is_told_the_resume_parameter() -> None:
+    """``action="resume"`` is a recurring parent mistake; the bare enum list
+    does not say where resuming actually lives, so the rejection does."""
+
+    runner = AgentSessionRunner(
+        llm=ScriptedLLM([]),
+        tools=ToolRegistry(),
+        system_prompt="fold",
+        config=_fold_config(),
+        subagent=SubAgentEngine(
+            llm=ScriptedLLM([]), tools=ToolRegistry([DeclaredReadOnlyShell()])
+        ),
+    )
+    rejected = runner.tools.invoke(
+        "agent",
+        {"action": "resume", "agent": "auditor", "task": "x", "task_id": "agent_1"},
+    )
+    assert rejected.ok is False
+    assert rejected.value["error_type"] == "schema_error"
+    assert "resume is not an action" in rejected.error
+    assert "resume=<task_id>" in rejected.error
+    assert '"agent": "auditor"' in rejected.error
+    assert runner._subagent_attempts == 0
+    # Any other unknown action still gets the plain enum rejection.
+    other = runner.tools.invoke("agent", {"action": "steer", "task_id": "agent_1"})
+    assert other.ok is False and "action must be one of" in other.error
+
+
 def test_subagent_thinking_only_reply_does_not_finish_the_child() -> None:
     llm = ScriptedLLM(
         [

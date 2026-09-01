@@ -288,6 +288,14 @@ class ToolRegistry:
         if self._finished and tool.spec.mutating:
             return ToolResult(False, error="the strategy workspace is locked after finish")
         try:
+            # A tool may repair or reject its own call shape before the schema
+            # runs (duck-typed like ``result_store``): a documented argument
+            # alias has to be mapped to its canonical value before the enum the
+            # model is shown rejects it, and a wrong shape the tool can name
+            # precisely says so instead of listing the enum.
+            normalize = getattr(tool, "normalize_arguments", None)
+            if normalize is not None and isinstance(arguments, Mapping):
+                arguments = normalize(arguments)
             validated = validate_arguments(tool.spec.input_schema, arguments)
             result = tool.invoke(validated)
         except ToolSchemaError as exc:
