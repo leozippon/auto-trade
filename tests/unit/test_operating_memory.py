@@ -180,6 +180,8 @@ def test_the_curated_library_is_a_valid_skill_tree_of_operational_entries() -> N
         "redesign-after-second-failure",
         "workspace-path-rules",
         "subagent-delegation-pattern",
+        "dead-code-sweep",
+        "verify-parsed-counts",
     } <= set(entries)
 
 

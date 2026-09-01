@@ -85,7 +85,7 @@ score = rank(EP) + rank(-abnormal_turnover)
 | CTBZ/JoinQuant small-cap variants | Drop | Already dominated the previous lineage; some source logic filters with next-day/open information unavailable at `08:30` |
 | CST EP + low-vol + momentum | Drop from this pack | Already present in the old pack and accompanied by promotional backtest numbers and platform code |
 | RSRS, ETF momentum, Alligator, VMACD | Drop from primary set | Old-pack ideas; ETF/index availability is configuration-dependent and these do not address parent-clone drift |
-| Full Alpha101/Alpha191 collections | Drop | Too broad for a 30-second single-file replay; encourages formula shopping and repeated composite rewrites |
+| Full Alpha101/Alpha191 collections | Drop | Too broad for one per-decision inference budget; encourages formula shopping and repeated composite rewrites |
 | `a-share-quant-sim` simulator/strategy adapters | Drop | Framework and execution boilerplate, despite an MIT license |
 | Alpha Lab CN factor platform | Drop | Only the formulas are useful; database, analysis, ML, LLM, dashboard, and orchestration are out of scope |
 | Vortex strategy stack | Do not vendor | No license found in the inspected tree; reported results are not independently verified |

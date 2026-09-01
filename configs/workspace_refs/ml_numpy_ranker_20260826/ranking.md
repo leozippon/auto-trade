@@ -10,12 +10,12 @@
 
 权重来源：
 
-1. **默认：当场拟合。** `w = (X'X + λI)^{-1} X'y`（ridge 闭式解），或对二分类标签（收益前若干分位为 1）做少量梯度步的 logistic，二选一。只用推断时已经实现的可见历史样本，拟合窗长度与标签口径事先声明；`λ` 也预先声明，不按 Validation 搜索一大网格。整条拟合链路在 `generate_orders` 内跑完，受 30 秒/决策预算约束，所以矩阵要小（少量特征 × 有界样本窗）。
+1. **默认：在 `fit` 里拟合。** `w = (X'X + λI)^{-1} X'y`（ridge 闭式解），或对二分类标签（收益前若干分位为 1）做少量梯度步的 logistic，二选一。只用推断时已经实现的可见历史样本，拟合窗长度与标签口径事先声明；`λ` 也预先声明，不按 Validation 搜索一大网格。整条拟合链路放在 `fit(context)` 里跑完（它有独立的 `budgets.strategy_fit_timeout_seconds` 预算），系数写到 `context.state_dir`；`generate_orders` 只读系数、算当日特征、出单，受单日 `budgets.strategy_inference_timeout_seconds` 约束。
 2. **对照：符号加权。** 价值/质量/低波给正或负的先验符号，绝对值相等。
 3. **对照：秩加权。** 先把特征变成截面 rank，再等权。
 4. **退化路径。** 样本不足、`X'X` 奇异或有效覆盖过低时退回 2 或 3，并在 metadata 里标明本次发生了退化。退化必须可见，不能静默。
 
-不要用 LightGBM 叶子分数，不要用 sklearn `Ridge`。
+第一轮的线性基线自己实现闭式解，不要直接用 sklearn `Ridge` 或 LightGBM 叶子分数顶替它——那样比较的是库的默认超参，不是本包的口径。库模型排序器是后续轮次的结构性变体（见 `README.md`、`rewrite-plan.md`），必须与自实现线性版同窗、同标签口径比较。
 
 ## top-k + n_drop
 

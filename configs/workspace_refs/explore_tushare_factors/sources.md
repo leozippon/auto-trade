@@ -23,10 +23,10 @@
 - `docs/data-documentation.md`：唯一总闸是 `available_at <= inference_at`；本地有 `daily`、`adj_factor`、`daily_basic`、财务报表、`fina_indicator_vip` 与 `index_daily`，但未列出 `factor_value` 或 `stk_factor*` 作为正式输入。
 - `docs/data-documentation.md` 还确认：daily/daily_basic 当日收盘后可见；财务按公告时间；事件/宏观/财务保留源单位；daily、daily_basic 与其他逐日表覆盖不能假定完全一致。
 - `docs/environment-design.md`：长窗口日线来自滚动 `asof_dir/daily`；fundamentals 是公告可见的多版本事件，macro 含宽基指数；parts 随推断时点刷新。
-- `docs/agent-design.md`：正式策略只依赖当前 context 和只读 snapshot/asof 路径，单文件且仅 NumPy/pandas；读取前确认 schema，缓存按 `asof_version` 失效。
+- `docs/agent-design.md`：正式策略是 `output/` 下以 `main.py` 为入口的包，只依赖当前 context 和只读 snapshot/asof 路径，允许的库以只读 `output/README.md` 为准；读取前确认 schema，缓存按 `asof_version` 失效。
 - 已退役的 `tushare_factors` 包：曾正确识别 202 因子菜单、T-1 和供应商 qfq 风险，但其 202 名索引容易诱导注释收集；本包改成 42 个候选、家族级可证伪流程和明确组合淘汰条件。
 
 ## 筛选原则
 
-保留条件：当前 PIT parquet 有原料、约 24 个月数据窗可形成有效观测、NumPy/pandas 单文件可重算、方向和中性化方式可明确、能进入真实含成本 Validation。
+保留条件：当前 PIT parquet 有原料、约 24 个月数据窗可形成有效观测、可在允许的库内从 PIT 原料重算、方向和中性化方式可明确、能进入真实含成本 Validation。
 剔除条件：需要网络/供应商因子值、依赖未来或当前快照、供应商预排名、500–1320 日超长窗、复杂但覆盖弱的五年财务构造、与已选项近重复且没有独立假说。

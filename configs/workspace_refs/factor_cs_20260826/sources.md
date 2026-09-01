@@ -28,11 +28,11 @@
 只借用「先分家族、再看 IC / 换手 / 分位」的流程。不要把对方表达式库、遗传搜索或因子菜单搬进 `output`，也不要按其收益表验收。
 
 - [RndmVariableQ/AlphaAgent](https://github.com/RndmVariableQ/AlphaAgent)：A 股因子 DSL，用 IC / 换手 / 分位评估。当作「家族先立、再用 IC 证伪」的流程先验，不是可提交策略。禁止克隆其 FactorZoo 表达式或 LLM 挖因子循环；沙箱无网络，也不能按其 Tushare 抓数。其隔夜/日内算子与本包 08:30、T-1 冻结冲突，不要搬。
-- [cn-vhql/FactorHub](https://github.com/cn-vhql/FactorHub)：遗传算法 + 多目标（IC / IR / 单调性）挖掘。只作「不要单看毛收益」的筛选先验。禁止 import DEAP / TA-Lib / XGBoost，禁止通达信公式引擎，禁止把内置 MA / RSI / MACD 厨房当成第五个家族。
-- [wzx11223344/factor-mining](https://github.com/wzx11223344/factor-mining)：Spearman IC / ICIR，等权、IC 加权或 PCA 合成。支持先分家族再合成；本包合成只允许两个以上独立胜出家族等权。禁止 sklearn PCA，禁止把它的 14 项动量/反转/波动/流动性菜单整表复制（那会回到 202 因子厨房）。
+- [cn-vhql/FactorHub](https://github.com/cn-vhql/FactorHub)：遗传算法 + 多目标（IC / IR / 单调性）挖掘。只作「不要单看毛收益」的筛选先验。禁止克隆它的遗传搜索循环，禁止 import DEAP / TA-Lib（都不在允许清单里），禁止通达信公式引擎，禁止把内置 MA / RSI / MACD 厨房当成第五个家族。
+- [wzx11223344/factor-mining](https://github.com/wzx11223344/factor-mining)：Spearman IC / ICIR，等权、IC 加权或 PCA 合成。支持先分家族再合成；本包合成只允许两个以上独立胜出家族等权，不做 PCA 合成（自实现或调库都不做）；禁止把它的 14 项动量/反转/波动/流动性菜单整表复制（那会回到 202 因子厨房）。
 
 ## 本仓库
 
 - 日线、复权、每日指标、财务报表和财务指标已落为 PIT parquet；正式策略从这些原料重算。
 - 唯一总闸是 `available_at <= inference_at`。
-- 正式 ABI 只读挂载 `models/`，回放内拟合经 `fit(context)` 写入 `context.state_dir`；不允许 sklearn/lightgbm/qlib。
+- 正式 ABI 只读挂载 `models/`，回放内拟合经 `fit(context)` 写入 `context.state_dir`；允许的库以只读 `output/README.md` 为准（含 `sklearn`、`lightgbm`、`xgboost`、`statsmodels`、CPU `torch`），`qlib` / `joblib` / `pickle` 仍不得 import。
