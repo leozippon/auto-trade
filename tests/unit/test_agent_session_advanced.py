@@ -213,6 +213,40 @@ def test_fold_session_tracks_calls_and_finish_value(tmp_path: Path):
     assert result.llm_calls == 1
 
 
+def test_session_end_counts_the_parents_failed_tool_calls(tmp_path: Path):
+    """A summary-only audit reads ``session_end``; the parent's own failed
+    tool calls are counted there, and the finish payload rides along."""
+    finish, node_id = finish_fold_tool(tmp_path)
+    events: list[tuple[str, dict]] = []
+    llm = ScriptedLLM(
+        [
+            ProviderResponse(
+                tool_calls=(ToolCall("bad", "finish_fold", {"node_id": "missing"}),)
+            ),
+            ProviderResponse(
+                tool_calls=(
+                    ToolCall(
+                        "f",
+                        "finish_fold",
+                        {"node_id": node_id, "early_stop_reason": "H2 untestable here"},
+                    ),
+                )
+            ),
+        ]
+    )
+    runner = AgentSessionRunner(
+        llm=llm,
+        tools=ToolRegistry([finish]),
+        system_prompt="daily JSON only",
+        config=AgentSessionConfig(max_llm_calls=3),
+        event_sink=lambda event, payload: events.append((event, payload)),
+    )
+    assert runner.run("finish").status == "finished"
+    end = [payload for event, payload in events if event == "session_end"][-1]
+    assert end["status"] == "finished" and end["tool_failures"] == 1
+    assert end["finish"]["early_stop_reason"] == "H2 untestable here"
+
+
 def test_fold_session_nudges_text_only_turn_then_requires_finish(tmp_path: Path):
     finish, node_id = finish_fold_tool(tmp_path)
     llm = ScriptedLLM(

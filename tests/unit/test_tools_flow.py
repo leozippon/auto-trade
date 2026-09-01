@@ -33,9 +33,12 @@ from autotrade.environment.tools import (
     WriteFileTool,
 )
 from autotrade.environment.tools.shell import (
+    ARGV_STRING_NOTE,
+    ARGV_TOO_LONG_HINT,
     DEFAULT_SHELL_TIMEOUT_SECONDS,
     FORBIDDEN_WAIT,
     MAX_SHELL_TIMEOUT_SECONDS,
+    SHELL_ARGV_MAX_CHARS,
     argv_is_forbidden_wait,
 )
 from autotrade.environment.tools import search as search_module
@@ -227,6 +230,62 @@ class ShellToolTest(unittest.TestCase):
             registry = ToolRegistry([SandboxShellTool(workspace, runner)])
             for argv in ([], [""], ["ls", 3]):
                 self.assertFalse(registry.invoke("shell", {"argv": argv}).ok, argv)
+            self.assertEqual(runner.calls, [])
+
+    def test_shell_accepts_a_json_encoded_argv_array_and_says_it_repaired_it(self) -> None:
+        """The recurring one-layer-too-many quoting runs, and teaches: the same
+        command with the escaping removed is not a different call."""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            _, _, workspace = build_sandbox(Path(tmp))
+            runner = FakeRunner(CommandResult(0, stdout="1"))
+            registry = ToolRegistry([SandboxShellTool(workspace, runner)])
+            result = registry.invoke(
+                "shell", {"argv": '["python", "-c", "print(1)"]', "cwd": "."}
+            )
+            self.assertTrue(result.ok, result.error)
+            self.assertEqual(runner.calls[0][0], ("python", "-c", "print(1)"))
+            self.assertEqual(result.value["argv_normalized"], ARGV_STRING_NOTE)
+            # The repair note belongs to that call only.
+            plain = registry.invoke("shell", {"argv": ["echo", "ok"]})
+            self.assertTrue(plain.ok, plain.error)
+            self.assertNotIn("argv_normalized", plain.value)
+
+    def test_shell_refuses_a_command_string_with_that_command_as_an_array(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, _, workspace = build_sandbox(Path(tmp))
+            runner = FakeRunner()
+            registry = ToolRegistry([SandboxShellTool(workspace, runner)])
+            result = registry.invoke("shell", {"argv": "ls -la output"})
+            self.assertFalse(result.ok)
+            self.assertIn('send argv: ["ls", "-la", "output"]', result.error)
+            self.assertIn("correct call example", result.value["retry_hint"])
+            # A JSON array of anything but non-empty strings is not repairable,
+            # and splitting it as a command line would suggest nonsense, so the
+            # refusal states what the array must hold instead.
+            for argv in ('["ls", 3]', "[]", "[1, 2]", '["ls"', '{"argv": ["ls"]}'):
+                refused = registry.invoke("shell", {"argv": argv})
+                self.assertFalse(refused.ok, argv)
+                self.assertIn("must be an array of separate strings", refused.error)
+                self.assertIn("elements are all non-empty strings", refused.error)
+                self.assertNotIn("send argv:", refused.error)
+            self.assertEqual(runner.calls, [])
+
+    def test_shell_answers_an_over_long_argv_element_with_the_file_recipe(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, _, workspace = build_sandbox(Path(tmp))
+            runner = FakeRunner()
+            registry = ToolRegistry([SandboxShellTool(workspace, runner)])
+            script = "print(1)\n" * 200
+            self.assertGreater(len(script), SHELL_ARGV_MAX_CHARS)
+            for argv in (["python", "-c", script], json.dumps(["python", "-c", script])):
+                result = registry.invoke("shell", {"argv": argv})
+                self.assertFalse(result.ok)
+                self.assertIn("argv[2] is too long", result.error)
+                hint = result.value["retry_hint"]
+                self.assertIn("write_file", hint)
+                self.assertIn('["python", "notes/probe.py"]', hint)
+                self.assertIn("correct call example", hint)
             self.assertEqual(runner.calls, [])
 
     def test_shell_is_declared_mutating_so_the_finish_lock_reaches_it(self) -> None:
@@ -927,6 +986,35 @@ class ToolContractHintTest(unittest.TestCase):
             self.assertIn("inside the workspace", default)
             self.assertIn("at most 600", default)
             self.assertIn("at most 5;", custom)
+            # The two path conventions are contrasted where they are confused:
+            # shell's real sandbox path against the file tools' root+path.
+            self.assertIn("/mnt/agent/workspace", default)
+            self.assertIn("read_file/write_file/edit_file/grep/glob", default)
+
+    def test_file_and_search_tools_contrast_their_paths_with_the_shell_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, roots, workspace = build_sandbox(Path(tmp))
+            for spec in (
+                WriteFileTool(workspace).spec,
+                EditFileTool(workspace).spec,
+                ReadFileTool(roots).spec,
+                GrepTool(roots).spec,
+                GlobTool(roots).spec,
+            ):
+                self.assertIn(
+                    "never path='/mnt/agent/workspace/inputs/x.json'",
+                    spec.description,
+                    spec.name,
+                )
+            # Batched edits are applied in order, so the second must match the
+            # file the first one left behind.
+            self.assertIn(
+                "one edit per file per turn", EditFileTool(workspace).spec.description
+            )
+            grep = GrepTool(roots).spec.description
+            self.assertIn("Rust-regex", grep)
+            self.assertIn("look-around", grep)
+            self.assertIn("instead of -i, -U, -g, -C or -n", grep)
 
 
 class ToolResultContractTest(unittest.TestCase):
@@ -1028,7 +1116,7 @@ class ToolResultContractTest(unittest.TestCase):
                 self.assertIn("correct call example", result.value["retry_hint"], name)
             shell_description = SandboxShellTool(workspace, FakeRunner()).spec.description
             self.assertIn("at most 1000 chars", shell_description)
-            self.assertIn('["python", "workspace/probe.py"]', shell_description)
+            self.assertIn('["python", "notes/probe.py"]', shell_description)
             self.assertIn("over 40000 chars come back as an inline head", shell_description)
             self.assertIn("`<stream>_spill.result_hint`", shell_description)
 
@@ -1094,6 +1182,28 @@ class SpillAndRootContractTest(unittest.TestCase):
             self.assertTrue(read.ok, read.error)
             self.assertEqual(read.value["path"], "design_note.md")
             self.assertIn("v2", read.value["content"])
+
+    def test_the_script_recipe_names_a_path_shell_can_actually_run(self) -> None:
+        """The file tools drop a leading `workspace/`; shell does not. Every
+        path this tool family suggests for a script must therefore work in
+        both, or the suggested `write_file` + `python <path>` pair fails."""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            paths, _roots = self._layout(tmp)
+            workspace = SafeWorkspace(paths.workspace)
+            registry = ToolRegistry([WriteFileTool(workspace), SandboxShellTool(workspace, FakeRunner())])
+            for text in (
+                SandboxShellTool(workspace, FakeRunner()).spec.description,
+                ARGV_TOO_LONG_HINT,
+            ):
+                self.assertIn('["python", "notes/probe.py"]', text)
+                self.assertNotIn('["python", "workspace/probe.py"]', text)
+            written = registry.invoke("write_file", {"path": "notes/probe.py", "content": "print(1)\n"})
+            self.assertTrue(written.ok, written.error)
+            self.assertEqual(written.value["path"], "notes/probe.py")
+            # shell resolves the same relative path from the workspace root.
+            self.assertTrue((paths.workspace / "notes" / "probe.py").is_file())
+            self.assertTrue(registry.invoke("shell", {"argv": ["python", "notes/probe.py"]}).ok)
 
     def test_empty_mounted_roots_are_not_offered_but_writable_roots_are(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

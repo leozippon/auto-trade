@@ -2335,6 +2335,19 @@ def test_agent_description_states_role_capabilities_and_thinking_tiers() -> None
         assert "优先 `resume`" not in prompt
     agent_field = AGENT_TOOL_SPEC.input_schema["properties"]["agent"]
     assert "不能执行" in agent_field["description"] and "shell" in agent_field["description"]
+    # The three call shapes are separate, labelled parts carrying their exact
+    # argument names; resume is a launch parameter, never an action.
+    for shape in (
+        "1. launch（省略 action 或 action=launch）",
+        "2. resume（不是 action",
+        '"resume": <已完成子代理的 task_id>',
+        "action=resume、只给 task_id",
+        "3. message（action=message）",
+    ):
+        assert shape in AGENT_TOOL_DESCRIPTION
+    assert "没有 resume 这个 action" in AGENT_TOOL_SPEC.input_schema["properties"]["action"]["description"]
+    assert "不写 task_id" in AGENT_TOOL_SPEC.input_schema["properties"]["resume"]["description"]
+    assert "high 与 max 是 xhigh 的别名" in thinking_field
 
 
 def test_agent_result_echoes_running_and_queued_children_with_descriptions() -> None:

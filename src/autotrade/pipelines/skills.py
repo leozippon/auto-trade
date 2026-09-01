@@ -166,7 +166,13 @@ def parse_skill_front_matter(text: str) -> tuple[dict[str, str], str]:
                 f"skill front matter must be 'key: value' lines: {stripped[:40]!r}"
             )
         if key not in SKILL_FRONT_MATTER_KEYS:
-            raise ValueError(f"unknown skill front-matter field: {key}")
+            allowed = ", ".join(sorted(SKILL_FRONT_MATTER_KEYS))
+            raise ValueError(
+                f"unknown skill front-matter field: {key}; the only recognized "
+                f"front-matter field is {allowed} (<source>/<name>), so drop the "
+                f"'{FRONT_MATTER_FENCE}' block entirely unless this skill "
+                "supersedes a mounted memory entry"
+            )
         if key in fields:
             raise ValueError(f"duplicate skill front-matter field: {key}")
         fields[key] = value.strip()
@@ -1120,7 +1126,11 @@ class WriteSkillTool:
         "write_skill",
         "Atomically create or replace one UTF-8 file under skills/<name>/ using "
         "the bounded shared-skill contract. path is item-relative (SKILL.md, "
-        "scripts/..., or references/...).",
+        "scripts/..., or references/...). SKILL.md normally opens with a plain "
+        "'# Title' and no front matter; the only front matter accepted is a "
+        "'---' block whose single key is 'supersedes: <source>/<name>' naming a "
+        "mounted memory entry — any other key (name, description, version, ...) "
+        "or a block left unclosed is rejected.",
         {
             "type": "object",
             "properties": {

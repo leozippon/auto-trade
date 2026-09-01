@@ -143,6 +143,10 @@ def compact_fold_history(
     compact = {
         "epoch_id": record.get("epoch_id"),
         "fold_id": ref_store.get_or_create("fold", str(record.get("fold_id"))),
+        # The window these results were replayed on. Without it a reader has to
+        # borrow the label of whatever neighbouring node names a period, and a
+        # benchmark figure gets attributed to the wrong year.
+        "validation_period": record.get("validation_period"),
         "run_id": (
             ref_store.get_or_create("run", str(record["run_id"]))
             if record.get("run_id")
@@ -150,6 +154,7 @@ def compact_fold_history(
         ),
         "fold_status": record.get("fold_status"),
         "finish_reason": record.get("finish_reason"),
+        "early_stop_reason": record.get("early_stop_reason"),
         "validation_result": _visible_metrics(record.get("validation_result")),
         "accept_reasons": record.get("accept_reasons"),
         "accept_warnings": record.get("accept_warnings"),

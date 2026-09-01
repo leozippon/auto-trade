@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import ast
 from collections.abc import Callable, Mapping
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from autotrade.environment.step_tree import StepTree, node_in_session, session_batch_rounds
-
 from autotrade.environment.runtime import redact_host_paths
+from autotrade.environment.step_tree import (
+    StepTree,
+    node_in_session,
+    session_batch_rounds,
+)
 
 from .base import ToolError, ToolResult, ToolSpec
 
@@ -19,6 +23,46 @@ from .base import ToolError, ToolResult, ToolSpec
 # it is waived once another round can no longer fit (deadline window, Step or
 # backtest budget), where finishing is the only correct move.
 FINISH_FOLD_MIN_BATCH_ROUNDS = 2
+
+# A voluntary finish that leaves more than this share of the backtest budget
+# unused must say why. With the round floor in place, reviewed Folds still
+# finished at 27-50 % backtest usage with open hypotheses listed, and Meta only
+# caught it afterwards; the reason is recorded with the Fold result so the
+# review sees the Agent's own justification. It is a justification, not a
+# block, and like the round floor it lapses once another round cannot fit.
+FINISH_FOLD_EARLY_STOP_BUDGET_FRACTION = 1 / 3
+EARLY_STOP_REASON_MAX_CHARS = 500
+
+
+@dataclass(frozen=True)
+class FoldBudgetStatus:
+    """What the Fold session has left when ``finish_fold`` is called.
+
+    The Pipeline owns the budget counters; it hands them over through a
+    callable so the tool can decide whether a finish is early and tell the
+    Agent exactly what it is leaving unused.
+    """
+
+    backtests_remaining: int
+    backtests_total: int
+    steps_remaining: int
+    steps_total: int
+    inference_seconds_remaining: float
+
+    def to_record(self) -> dict[str, object]:
+        record = asdict(self)
+        record["inference_seconds_remaining"] = round(
+            max(self.inference_seconds_remaining, 0.0), 1
+        )
+        return record
+
+    @property
+    def early_finish(self) -> bool:
+        return (
+            self.backtests_total > 0
+            and self.backtests_remaining
+            > self.backtests_total * FINISH_FOLD_EARLY_STOP_BUDGET_FRACTION
+        )
 
 
 def executable_source_structure(source: str) -> str:
@@ -79,13 +123,34 @@ def _strip_docstrings(tree: ast.AST) -> None:
 class FinishFoldTool:
     spec = ToolSpec(
         "finish_fold",
-        "Finish this Fold with a fully evaluated Step revision.",
+        "Finish this Fold by nominating one complete Validation node of the current "
+        "run (its node_id comes from daily_backtest or a batch_validate row). Pass "
+        "node_id explicitly: after a batch_validate round the tree position is the "
+        "round's parent, so a bare call there is refused instead of silently keeping "
+        "the parent. Outside the deadline window a voluntary finish needs two "
+        "completed batch_validate rounds, and one that leaves more than a third of "
+        "the backtest budget unused must carry early_stop_reason (which hypotheses "
+        "stay untested and why they are not worth the remaining budget); the reason "
+        "is recorded with the Fold result for the Meta review.",
         {
             "type": "object",
-            "properties": {"node_id": {"type": "string", "minLength": 1, "maxLength": 500}},
+            "properties": {
+                "node_id": {"type": "string", "minLength": 1, "maxLength": 500},
+                "early_stop_reason": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": EARLY_STOP_REASON_MAX_CHARS,
+                    "description": (
+                        "Why this Fold stops while more than a third of its backtest "
+                        "budget remains: the untested hypotheses and why the remaining "
+                        "budget is better left unused. Required only in that case."
+                    ),
+                },
+            },
             "required": [],
             "additionalProperties": False,
         },
+        example={"node_id": "<complete Validation node_id>"},
     )
 
     def __init__(
@@ -99,16 +164,19 @@ class FinishFoldTool:
         current_models: str | Path | None = None,
         min_batch_rounds: int = 0,
         another_round_fits: Callable[[], bool] | None = None,
+        budget_status: Callable[[], FoldBudgetStatus] | None = None,
     ) -> None:
         self.tree = tree
         self.fold_id = fold_id
         self.run_id = run_id
         self._current_output = Path(current_output) if current_output is not None else None
         self._current_models = Path(current_models) if current_models is not None else None
-        # The round floor applies only while the session could still run a
-        # round; the caller says whether time and budget allow one.
+        # The round floor and the early-stop justification apply only while
+        # the session could still run a round; the caller says whether time
+        # and budget allow one, and (when wired) what is left of each budget.
         self.min_batch_rounds = min_batch_rounds
         self._another_round_fits = another_round_fits or (lambda: True)
+        self._budget_status = budget_status
         self._parent_structure: str | None = None
         if parent_main_py is not None:
             # The parent package is the directory that holds its main.py.
@@ -121,9 +189,7 @@ class FinishFoldTool:
                 raise ValueError(f"parent strategy structure is invalid: {exc}") from exc
 
     def invoke(self, arguments: Mapping[str, object]) -> ToolResult:
-        node_id = str(arguments.get("node_id") or self.tree.current_node_id or "")
-        if not node_id:
-            raise ToolError("finish_fold requires a fully evaluated Step")
+        node_id = self._resolve_node_id(arguments)
         try:
             node = self.tree.get_node(node_id)
         except ValueError as exc:
@@ -132,11 +198,14 @@ class FinishFoldTool:
             raise ToolError("finish_fold can select only a Step from the current Fold session")
         if not node.get("complete_validation") or not node.get("revision_id"):
             raise ToolError("finish_fold requires successful complete validation")
+        # The working-copy check comes before the budget gates so a winner
+        # nominated without step_rollback costs one refusal, not two.
+        self._require_current_matches_revision(node_id)
         self._require_batch_rounds()
+        early_stop = self._require_early_stop_reason(arguments)
         nominated_structure = self._node_structure(node_id)
         if self._parent_structure is not None:
             self._require_different_hypothesis(node_id, nominated_structure)
-        self._require_current_matches_revision(node_id)
         self.tree.set_position(node_id)
         return ToolResult(
             True,
@@ -148,8 +217,112 @@ class FinishFoldTool:
                 # the Pipeline's, not the Agent's: finishing only nominates.
                 "fold_status": "pending_pipeline_review",
                 "write_locked": True,
+                # The Agent's own account of an early finish and the budget it
+                # left, for the fold ledger and the Meta review.
+                **early_stop,
             },
             finish=True,
+        )
+
+    def _resolve_node_id(self, arguments: Mapping[str, object]) -> str:
+        """The nominated node: the argument, or the tree position when no
+        batch round hangs below it.
+
+        ``batch_validate`` leaves the position on the round's parent, so a
+        bare call there would freeze the parent even when a candidate won;
+        that call is refused with the candidates listed instead.
+        """
+
+        explicit = str(arguments.get("node_id") or "")
+        if explicit:
+            return explicit
+        cursor = self.tree.current_node_id
+        if not cursor:
+            raise ToolError("finish_fold requires a fully evaluated Step")
+        candidates = self._batch_candidates_under(cursor)
+        if not candidates:
+            return cursor
+        listed = "; ".join(
+            f"{row['node_id']} ({row['candidate']}: {row['result']})" for row in candidates
+        )
+        raise ToolError(
+            "finish_fold requires an explicit node_id here: the tree position is "
+            f"the parent of a batch_validate round ({cursor}), so a bare call "
+            "would select the parent, not a candidate. Candidates under it: "
+            f"{listed}. Pass the winner's node_id (step_rollback to it first so "
+            "the working copy matches), or the parent's own node_id to keep it "
+            "deliberately.",
+            details={"tree_position": cursor, "candidates": candidates},
+        )
+
+    def _batch_candidates_under(self, parent_id: str) -> list[dict[str, object]]:
+        rows: list[dict[str, object]] = []
+        for node in self.tree.nodes():
+            metadata = node.get("metadata")
+            if (
+                node.get("parent_node_id") != parent_id
+                or not node_in_session(node, fold_id=self.fold_id, run_id=self.run_id)
+                or not isinstance(metadata, Mapping)
+                or not metadata.get("batch_id")
+            ):
+                continue
+            metrics = node.get("metrics") if isinstance(node.get("metrics"), Mapping) else {}
+            if node.get("status") == "failed":
+                result = "failed"
+            else:
+                parts = [
+                    f"{key}={metrics[key]:.4f}"
+                    for key in ("total_return", "sharpe")
+                    if isinstance(metrics.get(key), (int, float))
+                ]
+                result = " ".join(parts) or "complete"
+            rows.append(
+                {
+                    "node_id": str(node["node_id"]),
+                    "candidate": str(metadata.get("candidate") or node.get("result_name")),
+                    "result": result,
+                }
+            )
+        return rows
+
+    def _require_early_stop_reason(
+        self, arguments: Mapping[str, object]
+    ) -> dict[str, object]:
+        """The early-stop fields to record, refusing a voluntary early finish
+        that gives no reason.
+
+        Voluntary means another round still fits (the same waiver as the round
+        floor); early means more than a third of the backtest budget is left.
+        Without a wired budget the tool cannot tell, so it only records a
+        reason the Agent chose to give.
+        """
+
+        reason = str(arguments.get("early_stop_reason") or "").strip()
+        status = self._budget_status() if self._budget_status is not None else None
+        recorded: dict[str, object] = {}
+        if reason:
+            recorded["early_stop_reason"] = reason
+        if status is None:
+            return recorded
+        recorded["budget_at_finish"] = status.to_record()
+        if reason or not status.early_finish or not self._another_round_fits():
+            return recorded
+        minutes = max(status.inference_seconds_remaining, 0.0) / 60
+        raise ToolError(
+            "finish_fold refused: this voluntary finish leaves "
+            f"{status.backtests_remaining}/{status.backtests_total} backtests, "
+            f"{status.steps_remaining}/{status.steps_total} Steps and about "
+            f"{minutes:.0f} min of inference time unused, more than a third of the "
+            "backtest budget. Either pre-register another round and run "
+            "batch_validate, or call finish_fold again with early_stop_reason "
+            f"(<= {EARLY_STOP_REASON_MAX_CHARS} chars) naming the hypotheses that "
+            "stay untested and why the remaining budget is better left unused; "
+            "the reason is recorded with the Fold result for the Meta review.",
+            retry_hint=(
+                "finish_fold({\"node_id\": ..., \"early_stop_reason\": \"...\"}) "
+                "or run another batch_validate round"
+            ),
+            details=status.to_record(),
         )
 
     def _require_batch_rounds(self) -> None:
@@ -246,8 +419,11 @@ class FinishFoldTool:
 
 
 __all__ = [
+    "EARLY_STOP_REASON_MAX_CHARS",
+    "FINISH_FOLD_EARLY_STOP_BUDGET_FRACTION",
     "FINISH_FOLD_MIN_BATCH_ROUNDS",
     "FinishFoldTool",
+    "FoldBudgetStatus",
     "executable_output_structure",
     "executable_source_structure",
 ]

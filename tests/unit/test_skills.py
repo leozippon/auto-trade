@@ -122,6 +122,45 @@ def test_write_skill_rejects_invalid_names_and_paths(
     assert result.value["error_type"] == "skill_policy"
 
 
+def test_write_skill_states_and_enforces_the_front_matter_contract(
+    tmp_path: Path,
+) -> None:
+    """The one recognized key is in the tool's own description and in the
+    refusal, so a SKILL.md does not have to be written twice to discover it."""
+
+    description = WriteSkillTool.spec.description
+    assert "supersedes: <source>/<name>" in description
+    assert "no front matter" in description
+    workspace = _workspace(tmp_path)
+    registry = ToolRegistry([WriteSkillTool(SafeWorkspace(workspace))])
+    refused = registry.invoke(
+        "write_skill",
+        {
+            "name": "schema-notes",
+            "path": "SKILL.md",
+            "content": "---\nname: schema-notes\ndescription: x\n---\n# Schema Notes\n",
+        },
+    )
+    assert not refused.ok
+    assert refused.value["error_type"] == "skill_policy"
+    assert "supersedes" in refused.error
+    unclosed = registry.invoke(
+        "write_skill",
+        {
+            "name": "schema-notes",
+            "path": "SKILL.md",
+            "content": "---\nsupersedes: curated/pit-read-budget\n",
+        },
+    )
+    assert not unclosed.ok
+    assert "not closed" in unclosed.error
+    plain = registry.invoke(
+        "write_skill",
+        {"name": "schema-notes", "path": "SKILL.md", "content": "# Schema Notes\n\n正文\n"},
+    )
+    assert plain.ok, plain.error
+
+
 def test_skill_content_uses_prior_boundary_but_allows_dates_and_security_knowledge(
     tmp_path: Path,
 ) -> None:

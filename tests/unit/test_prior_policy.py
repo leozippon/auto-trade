@@ -10,7 +10,9 @@ from autotrade.environment.tools import FinishMetaTool, SafeWorkspace, ToolRegis
 from autotrade.environment.tools.finish_meta import FinishMetaTool as _FinishMetaToolModule
 from autotrade.environment.tools.prior_policy import (
     PRIOR_MAX_CHARS,
+    prior_content_violation,
     prior_policy_violation,
+    strict_transferable_content_violation,
     visible_window_dates,
 )
 
@@ -151,6 +153,74 @@ class FinishMetaToolTest(unittest.TestCase):
                 "finish_meta", {"prior_path": "PRIOR.md"}
             )
             self.assertFalse(result.ok)
+
+
+class TestFigureLeakTest(unittest.TestCase):
+    """A Test leak is a hidden-stage number, not the word "test" near a digit:
+    the gate must keep catching reported figures while ordinary engineering and
+    mechanism prose (unit tests, clock times, offsets) passes."""
+
+    LEAKS = (
+        "Fold1 Test 收益 0.31",
+        "Test 夏普 1.35，回撤 12%",
+        "测试集年化收益 12.3%",
+        "test total_return 0.21",
+        "在 test 上 IC 0.03",
+        # English reporting is as much a leak as the Chinese wording.
+        "test set return 0.21",
+        "Test excess was +3.2%",
+        "Test performance 1.4 IR",
+        "测试段表现 1.35",
+        "test 段 +8%",
+    )
+    ORDINARY = (
+        "边界单测 test_b0_exit_due.py 全绿，覆盖 3 个用例",
+        "H+1 开盘首卖，阈值 ≥3pp，09:30 之前不下单",
+        "先跑一次冒烟测试，再做 2 轮完整验证",
+        "unit tests: 12 passed",
+        "写 3 个测试脚本覆盖边界",
+        "test 3 candidates",
+        "unit test 2",
+        "测试了 4 个参数",
+    )
+
+    def test_shared_skill_content_rejects_figures_and_allows_prose(self) -> None:
+        for line in self.LEAKS:
+            violation = strict_transferable_content_violation(line)
+            self.assertIn("Test figure", violation, line)
+            # The matched span is named, so the fix does not need bisection.
+            self.assertTrue(violation.endswith("'"), violation)
+        for line in self.ORDINARY:
+            self.assertEqual(strict_transferable_content_violation(line), "", line)
+
+    def test_shared_skills_reject_a_figure_written_before_the_stage(self) -> None:
+        self.assertIn(
+            "Test figure", strict_transferable_content_violation("夏普 1.42（Test 窗口）")
+        )
+
+    def test_prior_rejects_the_same_figures_and_keeps_process_prose(self) -> None:
+        for line in self.LEAKS:
+            self.assertIn("Test figure", prior_content_violation(line), line)
+        for line in self.ORDINARY:
+            self.assertEqual(prior_content_violation(line), "", line)
+        self.assertEqual(
+            prior_content_violation("每个 fold 先做 2 轮预注册测试，再复盘"), ""
+        )
+
+    def test_a_boundary_word_does_not_carry_a_figure_past_the_gate(self) -> None:
+        """The exemption exists for prohibition sentences, not for lines that
+        quote the very result the prohibition forbids."""
+
+        for line in (
+            "不得泄露 Test：测试段 Sharpe 1.2",
+            "排除法：test 收益 0.21 说明该方向可行",
+        ):
+            self.assertIn("Test figure", prior_content_violation(line), line)
+        for line in (
+            "不得使用 Test/Held-out。",
+            "审查窗口排除 Held-out。",
+        ):
+            self.assertEqual(prior_content_violation(line), "", line)
 
 
 class IdentifierDateTest(unittest.TestCase):

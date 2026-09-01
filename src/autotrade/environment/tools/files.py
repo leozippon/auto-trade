@@ -18,7 +18,7 @@ from pathlib import Path
 from autotrade.environment.artifacts import READONLY_FILES
 
 from .base import ToolError, ToolResult, ToolSpec
-from .workspace import SafeWorkspace
+from .workspace import ROOT_RELATIVE_PATH_RULE, SafeWorkspace
 
 MAX_WRITE_CHARS = 200_000
 # Everything the host-side writers create must stay writable by the sandbox
@@ -110,7 +110,8 @@ class WriteFileTool(_WorkspaceWriteTool):
         "Create or overwrite a UTF-8 text file in the strategy workspace "
         "(formal code under output/, drafts elsewhere, text metadata under models/). "
         "`path` is relative to the workspace root, or to the optional writable `root`. "
-        "Binary model weights are still written with shell/python.",
+        "Binary model weights are still written with shell/python. "
+        + ROOT_RELATIVE_PATH_RULE,
         {
             "type": "object",
             # No schema-level maxLength: the size refusal is raised in invoke()
@@ -145,7 +146,11 @@ class EditFileTool(_WorkspaceWriteTool):
         "Replace exact UTF-8 text in an existing strategy workspace file; "
         "old_text must match the current content uniquely unless replace_all is set. "
         "`path` is relative to the workspace root, or to the optional writable `root`; "
-        "there is no offset/limit (edits match text, not lines).",
+        "there is no offset/limit (edits match text, not lines). "
+        "Tool calls in one assistant turn are applied in the order you list them, so a "
+        "second edit to the same file must match what the first edit left behind: prefer "
+        "one edit per file per turn, or rewrite the whole file with write_file. "
+        + ROOT_RELATIVE_PATH_RULE,
         {
             "type": "object",
             "properties": {

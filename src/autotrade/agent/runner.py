@@ -333,6 +333,9 @@ class AgentSessionRunner:
         self._wrap_up_sent = False
         self._subagent_attempts = 0
         self._subagent_roles: set[str] = set()
+        # The parent's own failed tool calls, so a session_end-only audit
+        # sees them without walking every tool_call event.
+        self._tool_failures = 0
         self._subagent_jobs: list[_SubAgentJob] = []
         self._subagent_pool: ThreadPoolExecutor | None = None
         self._subagent_totals: dict[str, int] | None = None
@@ -373,6 +376,7 @@ class AgentSessionRunner:
         self._wrap_up_sent = False
         self._subagent_attempts = 0
         self._subagent_roles = set()
+        self._tool_failures = 0
         self._subagent_jobs = []
         self._live_messages = []
         own_work_streak = 0
@@ -616,6 +620,8 @@ class AgentSessionRunner:
                 else:
                     apply_point = INBOX_SAFE_AFTER_TOOLS_BEFORE_LLM
             for call, record in results:
+                if record.get("ok") is False:
+                    self._tool_failures += 1
                 messages.append(
                     ChatMessage(
                         "tool",
@@ -1539,6 +1545,7 @@ class AgentSessionRunner:
         payload.setdefault(
             "token_usage", _token_usage_summary(self._usage, self._subagent_totals)
         )
+        payload.setdefault("tool_failures", self._tool_failures)
         self._emit("session_end", payload)
         pool = self._subagent_pool
         self._subagent_pool = None

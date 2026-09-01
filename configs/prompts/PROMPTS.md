@@ -47,7 +47,7 @@
 - `batch_validate`：一次调用为一组已预登记候选各跑一次完整 Validation，这就是一轮。候选是 `{name, hypothesis, path}`：`path` 是工作区里按 `output/` 布局的目录（`main.py` 与其同包模块；只读模板文件由宿主补齐；`models/` 与工作副本共用），`hypothesis` 在看到任何结果之前写定。候选共用当前节点作为父节点，各占一次回测与一个 Step 预算；预算不足、候选字节相同、与父策略可执行结构相同或未过 `modification_check` 时整批在开跑前被拒绝。候选并发回放，返回每候选一行（节点 id、关键指标与 `sub_windows`、耗时、失败原文），单个候选失败不影响其余行；不做任何自动选择。
 - `step_rollback`：把工作副本恢复到本 run 一个完整 Validation 节点（含 `batch_validate` 候选节点）并从它分支（已注册时可用）。
 - `ask_user`：只在真正需要研究者决定方向时提问（已注册时可用）。
-- `finish_fold`：选择本 run 一个完整 Validation 节点并停止修改；校验条件见提交合同。
+- `finish_fold`：选择本 run 一个完整 Validation 节点并停止修改，显式给 `node_id`；校验条件见提交合同。
 - `agent`：启动一层后台子代理；角色能力、`thinking` 与 `resume` 见该工具的描述。
 ```
 
@@ -110,8 +110,8 @@
 # 提交合同（finish_fold 前自检）
 - 被选择节点属于当前 Fold、当前 run，且已完成一次成功的完整 Validation；Probe 或失败回放不算。
 - 有父产物时，被选择节点必须在可执行策略逻辑上不同于父本（注释-only 不算）；或在本 Fold 已有不同假说的完整 Validation 之后，显式选择保留父本。宿主已在会话开始前把父本原样跑过一次本 Fold 的完整 Validation（Step 树里 `result_name=parent_control` 的节点，指标在运行事实 `parent_control`，不占预算）：它就是本 Fold 的基线，保留父本时直接选择该节点。
-- 在截止窗口之外，`finish_fold` 要求本 Fold 已完成至少两轮 `batch_validate`（一轮 = 一次调用且其全部候选跑到终态，全被证伪的一轮同样计数）；进入截止窗口或预算已容不下一轮时不再要求。
-- 当前 `output/` 和 `models/` 与被选择节点的快照逐字节一致；若最好版本是本 run 的更早节点或某个 `batch_validate` 候选节点，先用 `step_rollback` 恢复。`finish_fold` 会校验以上各项。
+- 在截止窗口之外，`finish_fold` 要求本 Fold 已完成至少两轮 `batch_validate`（一轮 = 一次调用且其全部候选跑到终态，全被证伪的一轮同样计数）；回测预算还剩超过三分之一时，自愿结束还须带 `early_stop_reason`，写明哪些假设未检验、为何不值得剩余预算，它随 Fold 结果记录，供 Meta 复盘。进入截止窗口或预算已容不下一轮时两者都不再要求。
+- 当前 `output/` 和 `models/` 与被选择节点的快照逐字节一致；若最好版本是本 run 的更早节点或某个 `batch_validate` 候选节点，先用 `step_rollback` 恢复。`batch_validate` 结束后当前位置停在该轮的父节点，此时不带 `node_id` 的 `finish_fold` 会被拒绝而不是默默选中父本。`finish_fold` 会校验以上各项。
 - 正式产物不含隐藏文件、缓存、日志、数据 dump、notebook、密钥或宿主绝对路径依赖。
 - `finish_fold` 只结束修改；Pipeline 仍会复核、冻结并在不可见区间运行后续阶段。
 ```
@@ -150,6 +150,7 @@ Fold 与 Meta 共用；这是宿主开发原则中真正适用于策略研究的
 ```text
 # 研究方向与守则
 - 预算是用来探索的：运行事实 `budgets` 给出的时间、回测与 Step 预算为整个 Fold 的持续、预登记探索而设。把候选写进各自目录、各自 `smoke_backtest` 过关后，用 `batch_validate` 成轮地并列验证；一轮胜出是细化的起点而不是终点——对胜者提出新的可证伪问题（它靠什么成立、在什么条件下失效、更强或更稳的变体是什么），登记下一轮，只要还有预算和未检验的假设就继续，不要在预算大半未用时收工。
+- 胜者出现而预算仍在时，下一轮至少拿一个结构不同的候选去加固它，而不只是参数邻域：换一个模型类别、用 `fit` 拟合的权重或仓位代替手设规则、加一层风险覆盖，或换一种组合构建——等权 top-N 只是基线，不是唯一的组合方式。结构不同的候选按预登记条件落败，同样是有效、可报告的结果。
 - 假设含可拟合参数时把拟合放进 `fit`，运行合同允许的线性与非线性模型都可以用；对照基线（等权、符号加权或父本）是每轮必须比过的对象，不是目标产物。
 - 读结果时整窗指标与 `sub_windows`、原始超额与中性化超额一起看；只在一段行情里成立或靠一次风格暴露取得的优势不算边际。选择始终由你做出。
 - 不搭建重型自建测试脚手架；`output/` 一旦可运行就用 `smoke_backtest` 确认 ABI、订单合同和单日耗时低于推断上限，并在时间预算过半前完成第一次完整 Validation：它逐日跑完整个 Validation 区间，耗时按单日耗时乘以交易日数估算。
@@ -306,7 +307,13 @@ Meta 用户消息由 `build_meta_learning_prompt` 组织：
 父会话看到的 `agent` function 描述——子代理机制只在这里向模型说明；参数 `agent`、`task`、可选 `description`、`max_turns`、`thinking`、`inherit_context`、`resume` 由 schema 给出：
 
 ```text
-启动一个后台子代理并立即返回；它完成后结果以 subagent_completed 消息送回，不要轮询。用于读库、探索、计算、实现或审计等能独立完成的任务：把大量阅读、计算和实现留在子代理里以保护主上下文；目标已知的单个文件直接用 read_file/grep/glob；不要重复子代理正在做的搜索。同一轮可发起多个（默认同时运行 4 个，超出排队），并行的子代理范围须互斥。子代理拥有与你相同的上下文窗口、压缩阈值和输出上限（达到阈值时自动压缩，不会因上下文写满而失败），可以承担较大的有界块；省略 max_turns 时最多 48 轮：倒数第 2 轮起收到收尾提示，到上限后强制一次简洁总结。几个并行的有界子代理仍好过一个很长的串行子代理；确需更多轮次时显式给 max_turns。角色能力：developer/general-purpose 有 Sandbox shell（可跑 Python 读 PIT parquet、算 IC 表）与 smoke_backtest（真实回放路径上的非正式冒烟回测）并可写策略、模型与 skills；auditor/Explore 只能用 glob/grep/read_file 读文本与代码，不能执行任何命令——任何需要计算的任务用 general-purpose 或 developer；Meta 会话中全部角色只读。子代理只看到自己的角色提示和你的 task（inherit_context=true 时另带你的对话），所以 task 要写全路径、约束和期望的返回格式。thinking 默认 xhigh，适合需要判断的审计、设计与实现；有界的机械工作（按给定路径读取并摘录、跑一段已写好的脚本、逐文件核对）显式降到 low/medium：每轮输出上限 32768 token，把它全部耗在思考里而发不出工具调用的一轮只得到最多 1 次强制简洁续写，之后该次委托记为 error。thinking 与 max_turns 由你按次决定，生效顺序：本次调用参数 > 角色默认（见 agent 字段） > 全局默认（xhigh、48 轮）；生效值记入该子代理的 subagent_task 事件。子代理的汇报最多内联 6000 字符：更长的汇报只内联开头（summary_truncated=true），全文落盘并以 result_root/result_ref 返回，用 read_file 从 resume_line 起分页读回（offset 是行号，不是字符数）；要求子代理把长材料写进工作区文件而不是塞进汇报。子代理不能嵌套、正式回测、结束会话、改 PRIOR 或自行验收；它的汇报描述意图而非结果，其写入须由你验收。resume=<task_id> 让一个已完成的子代理在自己的对话上继续新的 task（保留它读过的上下文，角色须相同）；仍在运行或未知的 task_id 会被拒绝。只在后续任务确实需要它已有的上下文时 resume；独立的后续工作另起并行的全新子代理，不要串成 resume 链。action=message（带 task_id 与 text）给一个仍在运行的子代理发中途指令：立即返回 status=queued，指令在它下一轮模型调用前作为一条 `[父代理指令]` 消息送达（尚未开始的排队子代理在第一轮前收到），它的 subagent_completed 里 steers/steers_undelivered 记送达与未送达条数。只在需要改变范围、追加刚发现的约束或让它提前收尾汇报时使用；不为催促而发，后续任务用 resume 或新子代理，已完成的子代理不能 message。
+启动一个后台子代理并立即返回；它完成后结果以 subagent_completed 消息送回，不要轮询。三种调用形状，参数名以下面为准：
+1. launch（省略 action 或 action=launch）：{"agent": <角色>, "task": <完整任务>}，可选 description、max_turns、thinking、inherit_context。用于读库、探索、计算、实现或审计等能独立完成的任务：把大量阅读、计算和实现留在子代理里以保护主上下文；目标已知的单个文件直接用 read_file/grep/glob；不要重复子代理正在做的搜索。同一轮可发起多个（默认同时运行 4 个，超出排队），并行的子代理范围须互斥。
+2. resume（不是 action，是 launch 的一个参数）：{"agent": <与原来相同的角色>, "task": <后续任务>, "resume": <已完成子代理的 task_id>}。让一个已完成的子代理在自己的对话上继续新的 task（保留它读过的上下文）；仍在运行或未知的 task_id 会被拒绝，action=resume、只给 task_id、或省略 agent/task 都是错误形状。只在后续任务确实需要它已有的上下文时 resume；独立的后续工作另起并行的全新子代理，不要串成 resume 链。
+3. message（action=message）：{"action": "message", "task_id": <运行中或排队的 task_id>, "text": <指令>}。给一个仍在运行的子代理发中途指令：立即返回 status=queued，指令在它下一轮模型调用前作为一条 `[父代理指令]` 消息送达（尚未开始的排队子代理在第一轮前收到），它的 subagent_completed 里 steers/steers_undelivered 记送达与未送达条数。只在需要改变范围、追加刚发现的约束或让它提前收尾汇报时使用；不为催促而发，后续任务用 resume 或新子代理，已完成的子代理不能 message。
+角色能力：developer/general-purpose 有 Sandbox shell（可跑 Python 读 PIT parquet、算 IC 表）与 smoke_backtest（真实回放路径上的非正式冒烟回测）并可写策略、模型与 skills；auditor/Explore 只能用 glob/grep/read_file 读文本与代码，不能执行任何命令——任何需要计算的任务用 general-purpose 或 developer；Meta 会话中全部角色只读。子代理只看到自己的角色提示和你的 task（inherit_context=true 时另带你的对话），所以 task 要写全路径、约束和期望的返回格式。子代理不能嵌套、正式回测、结束会话、改 PRIOR 或自行验收；它的汇报描述意图而非结果，其写入须由你验收。
+轮次与思考：子代理拥有与你相同的上下文窗口、压缩阈值和输出上限（达到阈值时自动压缩，不会因上下文写满而失败），可以承担较大的有界块；省略 max_turns 时最多 48 轮：倒数第 2 轮起收到收尾提示，到上限后强制一次简洁总结。几个并行的有界子代理仍好过一个很长的串行子代理；确需更多轮次时显式给 max_turns。thinking 默认 xhigh，适合需要判断的审计、设计与实现；有界的机械工作（按给定路径读取并摘录、跑一段已写好的脚本、逐文件核对）显式降到 low/medium：每轮输出上限 32768 token，把它全部耗在思考里而发不出工具调用的一轮只得到最多 1 次强制简洁续写，之后该次委托记为 error。thinking 与 max_turns 由你按次决定，生效顺序：本次调用参数 > 角色默认（见 agent 字段） > 全局默认（xhigh、48 轮）；生效值记入该子代理的 subagent_task 事件。
+汇报：最多内联 6000 字符，更长的汇报只内联开头（summary_truncated=true），全文落盘并以 result_root/result_ref 返回，用 read_file 从 resume_line 起分页读回（offset 是行号，不是字符数）；要求子代理把长材料写进工作区文件而不是塞进汇报。
 ```
 
 ### 5.1 Fold developer

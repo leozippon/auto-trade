@@ -6,9 +6,11 @@ import pytest
 
 from autotrade.environment.artifacts import new_revision_id
 from autotrade.environment.step_tree import StepTree
-from autotrade.environment.tools.base import ToolError
+from autotrade.environment.tools.base import ToolError, ToolRegistry
 from autotrade.environment.tools.finish_fold import (
+    EARLY_STOP_REASON_MAX_CHARS,
     FinishFoldTool,
+    FoldBudgetStatus,
     executable_source_structure,
 )
 
@@ -189,6 +191,135 @@ def test_a_falsified_round_counts_and_other_sessions_rounds_do_not(tmp_path: Pat
         metadata={"batch_id": "b2", "candidate": "dead", "hypothesis": "h"},
     )
     assert finish.invoke({"node_id": node}).finish
+
+
+def _budget(remaining: int, total: int = 30) -> FoldBudgetStatus:
+    return FoldBudgetStatus(
+        backtests_remaining=remaining,
+        backtests_total=total,
+        steps_remaining=remaining,
+        steps_total=total,
+        inference_seconds_remaining=5400.0,
+    )
+
+
+def test_finish_fold_requires_a_reason_for_a_voluntary_early_finish(tmp_path: Path):
+    """More than a third of the backtest budget left while another round
+    still fits: the finish must say why, and the reason rides in the result."""
+    tree = StepTree(tmp_path / "steps")
+    node = _record_round(tree, tmp_path, batch_id="b1", marker="1")
+    finish = FinishFoldTool(
+        tree, fold_id="fold_ref_ab", run_id="run_x", budget_status=lambda: _budget(20)
+    )
+    with pytest.raises(ToolError, match="early_stop_reason") as refused:
+        finish.invoke({"node_id": node})
+    message = str(refused.value)
+    assert "20/30 backtests" in message and "20/30 Steps" in message and "90 min" in message
+    assert refused.value.details["backtests_remaining"] == 20
+    assert refused.value.retry_hint
+    reason = "H3 (unlock-pressure overlay) untested: the events domain is empty this window"
+    finished = finish.invoke({"node_id": node, "early_stop_reason": reason})
+    assert finished.finish
+    assert finished.value["early_stop_reason"] == reason
+    assert finished.value["budget_at_finish"]["backtests_remaining"] == 20
+    assert finished.value["budget_at_finish"]["inference_seconds_remaining"] == 5400.0
+
+
+def test_finish_fold_early_stop_reason_lapses_with_the_waiver_or_a_spent_budget(
+    tmp_path: Path,
+):
+    tree = StepTree(tmp_path / "steps")
+    node = _record_round(tree, tmp_path, batch_id="b1", marker="1")
+    waived = FinishFoldTool(
+        tree,
+        fold_id="fold_ref_ab",
+        run_id="run_x",
+        budget_status=lambda: _budget(20),
+        another_round_fits=lambda: False,
+    )
+    result = waived.invoke({"node_id": node})
+    assert result.finish and "early_stop_reason" not in result.value
+    assert result.value["budget_at_finish"]["backtests_total"] == 30
+    # Exactly a third left is not early; a reason given anyway is still recorded.
+    spent = FinishFoldTool(
+        tree, fold_id="fold_ref_ab", run_id="run_x", budget_status=lambda: _budget(10)
+    )
+    assert "early_stop_reason" not in spent.invoke({"node_id": node}).value
+    explained = spent.invoke({"node_id": node, "early_stop_reason": "done"})
+    assert explained.value["early_stop_reason"] == "done"
+    # Without a wired budget the tool cannot judge an early finish, only record.
+    unwired = FinishFoldTool(tree, fold_id="fold_ref_ab", run_id="run_x")
+    plain = unwired.invoke({"node_id": node})
+    assert plain.finish and "budget_at_finish" not in plain.value
+
+
+def test_finish_fold_bounds_the_early_stop_reason(tmp_path: Path):
+    tree = StepTree(tmp_path / "steps")
+    node = _record_round(tree, tmp_path, batch_id="b1", marker="1")
+    registry = ToolRegistry([FinishFoldTool(tree, fold_id="fold_ref_ab", run_id="run_x")])
+    overlong = registry.invoke(
+        "finish_fold",
+        {"node_id": node, "early_stop_reason": "x" * (EARLY_STOP_REASON_MAX_CHARS + 1)},
+    )
+    assert overlong.ok is False and "early_stop_reason is too long" in overlong.error
+    assert registry.invoke("finish_fold", {"node_id": node, "early_stop_reason": "x"}).ok
+
+
+def test_finish_fold_bare_call_is_refused_on_the_parent_of_a_batch_round(tmp_path: Path):
+    """``batch_validate`` leaves the position on the round's parent; a bare
+    call there must not freeze the parent silently."""
+    tree = StepTree(tmp_path / "steps")
+    parent = _record(tree, tmp_path / "parent_node", source=LOGIC, result_name="valid_000")
+    winner_dir = tmp_path / "cand_win"
+    winner_dir.mkdir()
+    (winner_dir / "main.py").write_text(
+        "def generate_orders(context):\n    _ = 'win'\n    return []\n", encoding="utf-8"
+    )
+    winner = tree.record_step(
+        winner_dir,
+        epoch_id="epoch_001",
+        fold_id="fold_ref_ab",
+        run_id="run_x",
+        result_name="valid_001",
+        revision_id=new_revision_id("revision"),
+        metrics={"total_return": 0.12, "sharpe": 1.5},
+        metadata={"batch_id": "b1", "candidate": "win", "hypothesis": "h"},
+    )
+    tree.set_position(parent)  # every candidate of a batch branches off the parent
+    loser = _record_round(tree, tmp_path, batch_id="b1", marker="2")
+    tree.set_position(parent)
+    tree.record_failed_attempt(
+        epoch_id="epoch_001",
+        fold_id="fold_ref_ab",
+        run_id="run_x",
+        result_name="valid_b1_dead",
+        error="generate_orders exceeded the per-decision timeout",
+        metadata={"batch_id": "b1", "candidate": "dead", "hypothesis": "h"},
+    )
+    finish = FinishFoldTool(tree, fold_id="fold_ref_ab", run_id="run_x")
+    with pytest.raises(ToolError, match="explicit node_id") as refused:
+        finish.invoke({})
+    message = str(refused.value)
+    assert f"{winner} (win: total_return=0.1200 sharpe=1.5000)" in message
+    assert f"{loser} (2: complete)" in message and "(dead: failed)" in message
+    assert refused.value.details["tree_position"] == parent
+    assert [row["candidate"] for row in refused.value.details["candidates"]] == [
+        "win",
+        "2",
+        "dead",
+    ]
+    # Explicit choices, the parent included, go through.
+    assert finish.invoke({"node_id": winner}).value["node_id"] == winner
+    assert finish.invoke({"node_id": parent}).value["node_id"] == parent
+
+
+def test_finish_fold_bare_call_takes_the_position_when_no_batch_hangs_below(
+    tmp_path: Path,
+):
+    tree = StepTree(tmp_path / "steps")
+    node = _record(tree, tmp_path / "node", source=LOGIC, result_name="valid_000")
+    finish = FinishFoldTool(tree, fold_id="fold_ref_ab", run_id="run_x")
+    assert finish.invoke({}).value["node_id"] == node
 
 
 def test_finish_fold_rejects_an_absent_or_snapshotless_node(tmp_path: Path):

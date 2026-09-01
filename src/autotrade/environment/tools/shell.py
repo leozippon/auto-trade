@@ -2,11 +2,20 @@
 
 from __future__ import annotations
 
+import json
 import re
 import shlex
+import threading
 from collections.abc import Mapping, Sequence
 
-from .base import CommandRunner, ToolError, ToolResult, ToolResultStore, ToolSpec
+from .base import (
+    CommandRunner,
+    ToolError,
+    ToolResult,
+    ToolResultStore,
+    ToolSchemaError,
+    ToolSpec,
+)
 from .workspace import SafeWorkspace
 
 # Advisory (not enforced): nudge the Agent away from hiding stderr, which breaks audit.
@@ -28,6 +37,22 @@ SHELL_ARGV_MAX_CHARS = 1000
 # more than the capture cap loses the rest, explicitly.
 DEFAULT_SHELL_OUTPUT_CHARS = 40_000
 SHELL_CAPTURE_MAX_CHARS = 1_000_000
+# Longest command string still echoed back as its argv form in a shape error:
+# past this the suggestion stops being readable and the rule alone is clearer.
+_ARGV_SUGGESTION_MAX_CHARS = 300
+# Trace audits show two argv shapes recurring in every Fold, mostly on a fresh
+# sub-agent's first shell call: a JSON-encoded array (repaired below, with the
+# repair named in the result so the next call is a real array) and a long
+# ``python -c`` script inlined as one element (refused with the file recipe).
+ARGV_STRING_NOTE = (
+    "argv arrived as a JSON-encoded string and was parsed into an array; "
+    "send argv as a real JSON array of strings, not a string containing one"
+)
+ARGV_TOO_LONG_HINT = (
+    f"each argv element is at most {SHELL_ARGV_MAX_CHARS} chars: write the "
+    "script to a file with write_file (e.g. notes/probe.py) and run "
+    '["python", "notes/probe.py"] instead of inlining it after -c'
+)
 FORBIDDEN_WAIT = "forbidden_wait"
 _WAIT_COMMANDS = frozenset({"sleep", "usleep"})
 _WAIT_WRAPPERS = frozenset({"env", "timeout", "nice", "stdbuf", "nohup", "time"})
@@ -106,8 +131,15 @@ def _shell_description(
         '["python", "-c", "print(1)"] or ["bash", "-lc", "ls output"]; a single '
         "command-line string is rejected. Each argv element is at most "
         f"{SHELL_ARGV_MAX_CHARS} chars: put longer code in a file with write_file "
-        '(e.g. workspace/probe.py) and run ["python", "workspace/probe.py"]. '
+        '(e.g. notes/probe.py) and run ["python", "notes/probe.py"]. '
         "`cwd` and every path must stay inside the workspace (relative, no `..`). "
+        "These are real sandbox filesystem paths under the workspace root, which the "
+        "sandbox mounts at /mnt/agent/workspace and this tool enters as `.`; the file "
+        "tools (read_file/write_file/edit_file/grep/glob) address the same files as a "
+        "`root` name plus a path relative to it, reject that absolute form, and read a "
+        "leading `workspace/` as that root name (dropping it unless a real `workspace/` "
+        "directory exists) while shell always takes it literally — so keep script paths "
+        "free of that prefix. "
         f"`timeout_seconds` defaults to {timeout_seconds:g} and is at most {max_timeout_seconds:g}; "
         "the command runs in the foreground and is killed at the timeout, so bound the work: "
         "validate a script on a sample of dates/stocks first, split a full-market or "
@@ -167,6 +199,33 @@ class SandboxShellTool:
         self.max_output_chars = max_output_chars
         self.capture_output_chars = capture_output_chars
         self.result_store = result_store
+        # One registry instance serves every concurrent sub-agent, so the note
+        # ``normalize_arguments`` leaves for ``invoke`` (they always run back to
+        # back on the same thread) must not be shared between calls.
+        self._repair = threading.local()
+
+    def normalize_arguments(self, arguments: Mapping[str, object]) -> Mapping[str, object]:
+        """Repair or refuse the call shape before the schema sees it.
+
+        A JSON-encoded array is the same command with one layer of quoting too
+        many, so it is parsed and the repair is reported back in the result. A
+        plain command line is a different call and stays refused, now with that
+        very command written as an array; an element over the per-element cap is
+        refused with the write_file recipe instead of a bare length error.
+        """
+
+        self._repair.note = None
+        argv = arguments.get("argv")
+        if isinstance(argv, str):
+            parsed = _json_string_argv(argv)
+            if parsed is None:
+                raise _argv_shape_error(argv)
+            self._repair.note = ARGV_STRING_NOTE
+            arguments = {**arguments, "argv": parsed}
+            argv = parsed
+        if isinstance(argv, list):
+            _reject_long_argv_elements(argv)
+        return arguments
 
     def invoke(self, arguments: Mapping[str, object]) -> ToolResult:
         raw_argv = arguments["argv"]
@@ -194,6 +253,11 @@ class SandboxShellTool:
         reminder = _stderr_suppression_reminder(argv)
         if reminder:
             record["stderr_suppression_reminder"] = reminder
+        # Consumed once: the note belongs to the call that was repaired.
+        note = getattr(self._repair, "note", None)
+        self._repair.note = None
+        if note:
+            record["argv_normalized"] = note
         return ToolResult(True, value=record)
 
     def _bound_stream(
@@ -254,6 +318,69 @@ class SandboxShellTool:
                 "capture cap, so the capture ends there and its true tail is lost"
             )
         record[f"{name}_spill"] = {**stored, "result_hint": hint}
+
+
+def _json_string_argv(value: str) -> list[str] | None:
+    """The argv array a JSON-encoded array string holds, else ``None``."""
+
+    text = value.strip()
+    if not text.startswith("["):
+        return None
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        return None
+    if (
+        isinstance(parsed, list)
+        and parsed
+        and all(isinstance(item, str) and item for item in parsed)
+    ):
+        return parsed
+    return None
+
+
+def _argv_shape_error(value: str) -> ToolSchemaError:
+    """Refuse a command line, showing that same command as an argv array.
+
+    A value that already looks like a JSON array failed to parse as one of
+    non-empty strings, so splitting it as a command line would suggest
+    nonsense (``"[1, 2]"`` -> ``["[1,", "2]"]``): it is told what the array
+    must hold instead.
+    """
+
+    text = value.strip()
+    if text.startswith(("[", "{")):
+        return ToolSchemaError(
+            "argv must be an array of separate strings, not one command string; "
+            "this value parses as neither, so send a real JSON array whose "
+            "elements are all non-empty strings"
+        )
+    message = "argv must be an array of separate strings, not one command string"
+    try:
+        tokens = shlex.split(value, posix=True)
+    except ValueError:
+        tokens = []
+    if tokens:
+        suggestion = json.dumps(tokens, ensure_ascii=False)
+        if len(suggestion) <= _ARGV_SUGGESTION_MAX_CHARS:
+            message = f"{message}; send argv: {suggestion}"
+    return ToolSchemaError(message)
+
+
+def _reject_long_argv_elements(argv: Sequence[object]) -> None:
+    """Name the over-long element and the file-based way to run it instead.
+
+    The schema enforces the same cap, but only as a length error; the recipe
+    the Agent needs (write the script, then run the file) lives here.
+    """
+
+    for index, item in enumerate(argv):
+        if isinstance(item, str) and len(item) > SHELL_ARGV_MAX_CHARS:
+            # Same message as the schema check, so the shape stays familiar;
+            # the retry hint is what this earlier check adds.
+            raise ToolSchemaError(
+                f"argv[{index}] is too long", retry_hint=ARGV_TOO_LONG_HINT
+            )
 
 
 def reject_forbidden_wait(argv: Sequence[str]) -> None:
@@ -426,6 +553,8 @@ def _basename(token: str) -> str:
 
 
 __all__ = [
+    "ARGV_STRING_NOTE",
+    "ARGV_TOO_LONG_HINT",
     "DEFAULT_SHELL_OUTPUT_CHARS",
     "DEFAULT_SHELL_TIMEOUT_SECONDS",
     "FORBIDDEN_WAIT",

@@ -35,7 +35,7 @@ from pathlib import Path, PurePosixPath
 from autotrade.environment.executor import close_process_pipes
 
 from .base import ToolError, ToolResult, ToolSpec
-from .workspace import SafeWorkspace
+from .workspace import ROOT_RELATIVE_PATH_RULE, SafeWorkspace
 
 DEFAULT_GREP_LIMIT = 250
 DEFAULT_GLOB_LIMIT = 100
@@ -264,7 +264,15 @@ class GrepTool(_SearchToolBase):
         self.spec = ToolSpec(
             "grep",
             "Search allowlisted sandbox roots with ripgrep and structured pagination. "
-            "Use for targeted text/code/log search; choose files/count modes before content when possible.",
+            "Use for targeted text/code/log search; choose files/count modes before content when possible. "
+            "`pattern` is a Rust-regex pattern (ripgrep's default engine): classes, groups, "
+            "alternation, quantifiers and anchors work, but look-around ((?=..), (?<=..)) and "
+            "backreferences do not and PCRE2 is not enabled, so split such a search into two calls. "
+            "Command-line flags belong in the typed arguments, not in `pattern`: use case_insensitive, "
+            "multiline, glob, context, head_limit and offset instead of -i, -U, -g, -C or -n. "
+            "Results come back as `filenames` (mode 'files'), 'path:count' lines (mode 'count') or "
+            "always line-numbered 'path:line:text' lines in `content` (mode 'content'). "
+            + ROOT_RELATIVE_PATH_RULE,
             {
                 "type": "object",
                 "properties": {
@@ -399,7 +407,8 @@ class GlobTool(_SearchToolBase):
         self.spec = ToolSpec(
             "glob",
             "List files under an allowlisted sandbox root with structured pagination. "
-            "Use to discover files by name/pattern before reading or grepping them.",
+            "Use to discover files by name/pattern before reading or grepping them. "
+            + ROOT_RELATIVE_PATH_RULE,
             {
                 "type": "object",
                 "properties": {
@@ -465,7 +474,8 @@ class ReadFileTool(_SearchToolBase):
             "Read a file under an allowlisted sandbox root with line numbers and pagination. "
             "Prefer this over `shell cat`/`head` for code you will edit (line-numbered, bounded output); "
             "`cat`/`head` stay available for pipelines. Rejects files over the size cap "
-            "(use shell or DuckDB/pyarrow for large data files).",
+            "(use shell or DuckDB/pyarrow for large data files). "
+            + ROOT_RELATIVE_PATH_RULE,
             {
                 "type": "object",
                 "properties": {

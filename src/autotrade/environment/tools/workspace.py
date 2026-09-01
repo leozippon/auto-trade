@@ -6,6 +6,20 @@ from pathlib import Path, PurePosixPath
 
 from .base import ToolError
 
+# Stated in every file tool's description because the two path conventions are
+# easy to mix up: `shell` runs on the real sandbox filesystem, while these tools
+# address files as a root name plus a path relative to it. Trace audits show
+# fresh sub-agents carrying the absolute path out of a shell call straight into
+# their first read_file/edit_file call.
+ROOT_RELATIVE_PATH_RULE = (
+    "`root` plus `path` is a virtual address, not a sandbox filesystem path: the "
+    "`workspace` root is the directory shell runs in as `.` (/mnt/agent/workspace), "
+    "so pass path='inputs/x.json', never path='/mnt/agent/workspace/inputs/x.json'. "
+    "A leading 'workspace/' is read as that root name and dropped when it does not "
+    "resolve as a real directory, while shell always takes it literally, so leave it "
+    "out: path='notes/probe.py' is what shell runs as ['python', 'notes/probe.py']."
+)
+
 
 class SafeWorkspace:
     def __init__(self, root: str | Path) -> None:
@@ -80,4 +94,4 @@ class SafeWorkspace:
         return path.resolve(strict=False).relative_to(self.root).as_posix()
 
 
-__all__ = ["SafeWorkspace"]
+__all__ = ["ROOT_RELATIVE_PATH_RULE", "SafeWorkspace"]

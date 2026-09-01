@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import re
 from collections.abc import Callable, Mapping
-from dataclasses import MISSING, dataclass, field, fields
+from dataclasses import MISSING, KW_ONLY, dataclass, field, fields
 from datetime import datetime
 from pathlib import Path
 from typing import Literal, Protocol
@@ -567,6 +567,12 @@ class FoldSessionResult:
     steps: tuple[StepResult, ...]
     selected_step_id: str | None = None
     finish_reason: str = "fold_finished"
+    # Keyword-only from here: these are independent optional records, so a new
+    # one must never be able to land in an older field's positional slot.
+    _: KW_ONLY
+    # The Agent's own account of a voluntary early finish, as ``finish_fold``
+    # recorded it. Empty when the session did not finish early.
+    early_stop_reason: str = ""
     # Host path of this run's manifest. The fold ledger record carries it so a
     # later Meta session can read the run's backtest summaries back out.
     run_manifest_ref: str = ""

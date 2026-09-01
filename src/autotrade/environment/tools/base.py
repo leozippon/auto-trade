@@ -305,8 +305,12 @@ class ToolRegistry:
             if tool.spec.example is not None:
                 example = json.dumps(tool.spec.example, ensure_ascii=False)
                 message = f"{message}; correct call example: {example}"
-                if exc.retry_hint is None:
-                    exc.retry_hint = f"correct call example: {example}"
+                hint = f"correct call example: {example}"
+                # A tool that named the specific fix keeps it; the example is
+                # appended so every shape error still carries one correct call.
+                exc.retry_hint = (
+                    hint if exc.retry_hint is None else f"{exc.retry_hint}; {hint}"
+                )
             return ToolResult(False, value=exc.to_record(), error=message)
         except ToolError as exc:
             # Structured failure detail rides back with the message so the Agent

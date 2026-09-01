@@ -87,9 +87,30 @@ _PRIOR_BOUNDARY_RE = re.compile(
     r"永远不可见|排除|不进入|不读取|不挂载"
 )
 _HELDOUT_MENTION_RE = re.compile(r"held-?out|holdout|持有期外|隐藏区间", re.I)
+# What a leaked Test result actually looks like: a performance word next to a
+# number. Both Test-figure checks below require one, because "test"/"测试" near a
+# bare digit is ordinary prose ("边界单测覆盖 3 个用例", "H+1", "09:30") far more
+# often than it is a hidden-stage figure, and rejecting that prose taught
+# sessions to avoid the word rather than the leak.
+_PERFORMANCE_WORD = (
+    r"sharpe|夏普|calmar|sortino|索提诺|total_return|收益|回报|回撤|drawdown|超额|"
+    r"alpha|年化|胜率|净值|盈亏|波动|换手|turnover|信息比|表现|"
+    r"excess|annualized|volatility|profit|performance|"
+    r"(?<![A-Za-z_])returns?(?![A-Za-z_])|(?<![A-Za-z])(?:ic|ir|pnl|cagr)(?![A-Za-z])"
+)
+# A signed percentage is a reported figure on its own ("Test 段 +8%"); a bare
+# number still needs a performance word beside it.
+_SIGNED_PERCENT = r"[-+±]\s*\d+(?:\.\d+)?\s*%"
+_PERFORMANCE_FIGURE = (
+    rf"(?:(?:{_PERFORMANCE_WORD}).{{0,12}}[-+±]?\d"
+    rf"|\d.{{0,12}}(?:{_PERFORMANCE_WORD})"
+    rf"|{_SIGNED_PERCENT})"
+)
+_PERFORMANCE_FIGURE_RE = re.compile(_PERFORMANCE_FIGURE, re.I)
 _TEST_NUMBER_RE = re.compile(
-    r"(?:逐\s*fold|每个\s*fold|fold[_\s-]?(?:ref)?\s*\d*).{0,48}(?:test|测试).{0,40}\d|"
-    r"(?:test|测试).{0,24}(?:sharpe|收益|回撤|夏普|total_return|超额).{0,16}\d",
+    rf"(?:逐\s*fold|每个\s*fold|fold[_\s-]?(?:ref)?\s*\d*).{{0,48}}(?:test|测试)"
+    rf".{{0,40}}{_PERFORMANCE_FIGURE}|"
+    rf"(?:test|测试).{{0,24}}{_PERFORMANCE_FIGURE}",
     re.I,
 )
 _TEST_SELECTION_RE = re.compile(
@@ -99,8 +120,13 @@ _TEST_SELECTION_RE = re.compile(
     r"test.{0,20}(?:better|worse|superior|stable).{0,16}(?:so|therefore|select|retain)",
     re.I,
 )
+# Stricter than the PRIOR check only in reach: a shared skill leaks whether the
+# figure precedes or follows the Test reference, but it still has to be a
+# figure. Held-out mentions are rejected outright by _HELDOUT_MENTION_RE above.
 _STRICT_TEST_NUMBER_RE = re.compile(
-    r"(?:test|测试).{0,48}\d|\d.{0,48}(?:test|测试)", re.I
+    rf"(?:test|测试).{{0,24}}{_PERFORMANCE_FIGURE}|"
+    rf"{_PERFORMANCE_FIGURE}.{{0,24}}(?:test|测试)",
+    re.I,
 )
 _STRICT_BOUNDARY_LINE_RE = re.compile(
     r"^(?:[-*]\s*)?(?:"
@@ -124,8 +150,15 @@ def strict_transferable_content_violation(text: str) -> str:
             continue
         if _HELDOUT_MENTION_RE.search(stripped):
             return f"line {lineno} leaks Held-out into shared skills"
-        if _STRICT_TEST_NUMBER_RE.search(stripped):
-            return f"line {lineno} contains a Test figure in shared skills"
+        figure = _STRICT_TEST_NUMBER_RE.search(stripped)
+        if figure:
+            # Name the matched span: the check is a same-line pattern, not a
+            # reading of the sentence, so the fix is only obvious once the
+            # Agent can see which words tripped it.
+            return (
+                f"line {lineno} contains a Test figure in shared skills: "
+                f"{figure.group(0)[:60]!r}"
+            )
         if _TEST_SELECTION_RE.search(stripped):
             return f"line {lineno} uses Test to choose shared skill content"
     return ""
@@ -135,16 +168,27 @@ def prior_content_violation(text: str) -> str:
     """Held-out leaks, per-Fold Test figures, or Test-based selection."""
     for lineno, line in enumerate(text.splitlines(), start=1):
         stripped = line.strip()
-        if not stripped or _PRIOR_BOUNDARY_RE.search(stripped):
+        if not stripped:
+            continue
+        # A prohibition line may name the hidden stages ("不得使用 Test/Held-out"),
+        # so it is exempt from the three content checks below — but only while it
+        # states no figure of its own: "不得泄露 Test：测试段 Sharpe 1.2" quotes the
+        # very result the boundary forbids, and the boundary word must not carry
+        # the rest of the line past the gate.
+        if _PRIOR_BOUNDARY_RE.search(stripped) and not _PERFORMANCE_FIGURE_RE.search(
+            stripped
+        ):
             continue
         if _HELDOUT_MENTION_RE.search(stripped):
             return (
                 f"line {lineno} leaks Held-out into PRIOR; "
                 "use a boundary sentence such as 不得使用 Test/Held-out"
             )
-        if _TEST_NUMBER_RE.search(stripped):
+        figure = _TEST_NUMBER_RE.search(stripped)
+        if figure:
             return (
-                f"line {lineno} contains a per-Fold Test figure; "
+                f"line {lineno} contains a per-Fold Test figure "
+                f"({figure.group(0)[:60]!r}); "
                 "remove Test numbers then call finish_meta again"
             )
         if _TEST_SELECTION_RE.search(stripped):

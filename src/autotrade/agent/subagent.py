@@ -281,32 +281,39 @@ SUBAGENT_SYSTEM_PROMPT = _FOLD_WRITE_PROMPT.format(
 # system prompt only points here. Modeled on Pi's Agent tool description.
 AGENT_TOOL_DESCRIPTION = (
     "启动一个后台子代理并立即返回；它完成后结果以 subagent_completed 消息送回，不要轮询。"
+    "三种调用形状，参数名以下面为准：\n"
+    "1. launch（省略 action 或 action=launch）：{\"agent\": <角色>, \"task\": <完整任务>}，"
+    "可选 description、max_turns、thinking、inherit_context。"
     "用于读库、探索、计算、实现或审计等能独立完成的任务：把大量阅读、计算和实现留在子代理里以保护主上下文；"
     "目标已知的单个文件直接用 read_file/grep/glob；不要重复子代理正在做的搜索。"
-    "同一轮可发起多个（默认同时运行 4 个，超出排队），并行的子代理范围须互斥。"
-    "子代理拥有与你相同的上下文窗口、压缩阈值和输出上限（达到阈值时自动压缩，不会因上下文写满而失败），"
-    f"可以承担较大的有界块；省略 max_turns 时最多 {DEFAULT_SUBAGENT_MAX_ROUNDS} 轮：倒数第 {SUBAGENT_GRACE_ROUNDS} 轮起收到收尾提示，"
-    "到上限后强制一次简洁总结。几个并行的有界子代理仍好过一个很长的串行子代理；确需更多轮次时显式给 max_turns。"
+    "同一轮可发起多个（默认同时运行 4 个，超出排队），并行的子代理范围须互斥。\n"
+    "2. resume（不是 action，是 launch 的一个参数）：{\"agent\": <与原来相同的角色>, \"task\": <后续任务>, "
+    "\"resume\": <已完成子代理的 task_id>}。让一个已完成的子代理在自己的对话上继续新的 task（保留它读过的上下文）；"
+    "仍在运行或未知的 task_id 会被拒绝，action=resume、只给 task_id、或省略 agent/task 都是错误形状。"
+    "只在后续任务确实需要它已有的上下文时 resume；独立的后续工作另起并行的全新子代理，不要串成 resume 链。\n"
+    "3. message（action=message）：{\"action\": \"message\", \"task_id\": <运行中或排队的 task_id>, \"text\": <指令>}。"
+    "给一个仍在运行的子代理发中途指令：立即返回 status=queued，"
+    "指令在它下一轮模型调用前作为一条 `[父代理指令]` 消息送达（尚未开始的排队子代理在第一轮前收到），"
+    "它的 subagent_completed 里 steers/steers_undelivered 记送达与未送达条数。"
+    "只在需要改变范围、追加刚发现的约束或让它提前收尾汇报时使用；不为催促而发，"
+    "后续任务用 resume 或新子代理，已完成的子代理不能 message。\n"
     "角色能力：developer/general-purpose 有 Sandbox shell（可跑 Python 读 PIT parquet、算 IC 表）与 smoke_backtest（真实回放路径上的非正式冒烟回测）并可写策略、模型与 skills；"
     "auditor/Explore 只能用 glob/grep/read_file 读文本与代码，不能执行任何命令——任何需要计算的任务用 general-purpose 或 developer；"
     "Meta 会话中全部角色只读。子代理只看到自己的角色提示和你的 task（inherit_context=true 时另带你的对话），"
-    f"所以 task 要写全路径、约束和期望的返回格式。thinking 默认 {DEFAULT_SUBAGENT_THINKING}，适合需要判断的审计、设计与实现；"
+    "所以 task 要写全路径、约束和期望的返回格式。"
+    "子代理不能嵌套、正式回测、结束会话、改 PRIOR 或自行验收；它的汇报描述意图而非结果，其写入须由你验收。\n"
+    "轮次与思考：子代理拥有与你相同的上下文窗口、压缩阈值和输出上限（达到阈值时自动压缩，不会因上下文写满而失败），"
+    f"可以承担较大的有界块；省略 max_turns 时最多 {DEFAULT_SUBAGENT_MAX_ROUNDS} 轮：倒数第 {SUBAGENT_GRACE_ROUNDS} 轮起收到收尾提示，"
+    "到上限后强制一次简洁总结。几个并行的有界子代理仍好过一个很长的串行子代理；确需更多轮次时显式给 max_turns。"
+    f"thinking 默认 {DEFAULT_SUBAGENT_THINKING}，适合需要判断的审计、设计与实现；"
     "有界的机械工作（按给定路径读取并摘录、跑一段已写好的脚本、逐文件核对）显式降到 low/medium："
     f"每轮输出上限 {AGENT_MAX_OUTPUT_TOKENS} token，把它全部耗在思考里而发不出工具调用的一轮只得到最多 "
     f"{SUBAGENT_MAX_TRUNCATION_CONTINUATIONS} 次强制简洁续写，之后该次委托记为 error。"
     "thinking 与 max_turns 由你按次决定，生效顺序：本次调用参数 > 角色默认（见 agent 字段） > 全局默认"
-    f"（{DEFAULT_SUBAGENT_THINKING}、{DEFAULT_SUBAGENT_MAX_ROUNDS} 轮）；生效值记入该子代理的 subagent_task 事件。"
-    f"子代理的汇报最多内联 {SUBAGENT_REPORT_MAX_CHARS} 字符：更长的汇报只内联开头（summary_truncated=true），"
+    f"（{DEFAULT_SUBAGENT_THINKING}、{DEFAULT_SUBAGENT_MAX_ROUNDS} 轮）；生效值记入该子代理的 subagent_task 事件。\n"
+    f"汇报：最多内联 {SUBAGENT_REPORT_MAX_CHARS} 字符，更长的汇报只内联开头（summary_truncated=true），"
     "全文落盘并以 result_root/result_ref 返回，用 read_file 从 resume_line 起分页读回（offset 是行号，不是字符数）；"
     "要求子代理把长材料写进工作区文件而不是塞进汇报。"
-    "子代理不能嵌套、正式回测、结束会话、改 PRIOR 或自行验收；它的汇报描述意图而非结果，其写入须由你验收。"
-    "resume=<task_id> 让一个已完成的子代理在自己的对话上继续新的 task（保留它读过的上下文，角色须相同）；"
-    "仍在运行或未知的 task_id 会被拒绝。只在后续任务确实需要它已有的上下文时 resume；独立的后续工作另起并行的全新子代理，不要串成 resume 链。"
-    "action=message（带 task_id 与 text）给一个仍在运行的子代理发中途指令：立即返回 status=queued，"
-    "指令在它下一轮模型调用前作为一条 `[父代理指令]` 消息送达（尚未开始的排队子代理在第一轮前收到），"
-    "它的 subagent_completed 里 steers/steers_undelivered 记送达与未送达条数。"
-    "只在需要改变范围、追加刚发现的约束或让它提前收尾汇报时使用；不为催促而发，"
-    "后续任务用 resume 或新子代理，已完成的子代理不能 message。"
 )
 
 AGENT_TOOL_SPEC = ToolSpec(
@@ -319,9 +326,9 @@ AGENT_TOOL_SPEC = ToolSpec(
                 "type": "string",
                 "enum": ["launch", "message"],
                 "description": (
-                    "省略或 launch：启动子代理（须给 agent 与 task）；"
-                    "message：给仍在运行的子代理发中途指令（须给 task_id 与 text）。"
-                    "续跑一个已完成的子代理不是 action，用带 resume=<task_id> 的 launch。"
+                    "省略或 launch：启动子代理（须给 agent 与 task；续跑已完成的子代理也是 launch，"
+                    "另加 resume=<task_id>）；message：给仍在运行的子代理发中途指令（须给 task_id 与 text）。"
+                    "没有 resume 这个 action。"
                 ),
             },
             "agent": {
@@ -371,8 +378,8 @@ AGENT_TOOL_SPEC = ToolSpec(
                     f"子代理思考强度 off/low/medium/xhigh；省略时按角色默认（当前各角色均为 {DEFAULT_SUBAGENT_THINKING}），不继承父会话。"
                     "需要判断的任务保留默认；有界的机械工作显式给 low/medium，"
                     f"因为把 {AGENT_MAX_OUTPUT_TOKENS} token 的输出预算全部耗在思考里而发不出工具调用的一轮"
-                    f"只得到最多 {SUBAGENT_MAX_TRUNCATION_CONTINUATIONS} 次强制简洁续写，之后记为 error"
-                    "（旧值 high/max 等同 xhigh）；off 关闭扩展思考。"
+                    f"只得到最多 {SUBAGENT_MAX_TRUNCATION_CONTINUATIONS} 次强制简洁续写，之后记为 error。"
+                    "high 与 max 是 xhigh 的别名（本机模型没有独立的 high 档），会被接受并记为 xhigh；off 关闭扩展思考。"
                 ),
             },
             "inherit_context": {
@@ -382,7 +389,10 @@ AGENT_TOOL_SPEC = ToolSpec(
             "resume": {
                 "type": "string",
                 "minLength": 1,
-                "description": "本会话中一个已完成子代理的 task_id：在它自己的对话上继续执行新的 task。",
+                "description": (
+                    "launch 的可选参数：本会话中一个已完成子代理的 task_id，在它自己的对话上继续执行新的 task。"
+                    "仍须给 agent（与原角色相同）和 task；id 写在这里，不写 task_id。"
+                ),
             },
         },
         # ``launch`` needs agent+task and ``message`` needs task_id+text; the

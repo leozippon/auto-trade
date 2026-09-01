@@ -39,7 +39,7 @@ FOLD_TOOLS_SECTION = """\
 - `batch_validate`：一次调用为一组已预登记候选各跑一次完整 Validation，这就是一轮。候选是 `{name, hypothesis, path}`：`path` 是工作区里按 `output/` 布局的目录（`main.py` 与其同包模块；只读模板文件由宿主补齐；`models/` 与工作副本共用），`hypothesis` 在看到任何结果之前写定。候选共用当前节点作为父节点，各占一次回测与一个 Step 预算；预算不足、候选字节相同、与父策略可执行结构相同或未过 `modification_check` 时整批在开跑前被拒绝。候选并发回放，返回每候选一行（节点 id、关键指标与 `sub_windows`、耗时、失败原文），单个候选失败不影响其余行；不做任何自动选择。
 - `step_rollback`：把工作副本恢复到本 run 一个完整 Validation 节点（含 `batch_validate` 候选节点）并从它分支（已注册时可用）。
 - `ask_user`：只在真正需要研究者决定方向时提问（已注册时可用）。
-- `finish_fold`：选择本 run 一个完整 Validation 节点并停止修改；校验条件见提交合同。
+- `finish_fold`：选择本 run 一个完整 Validation 节点并停止修改，显式给 `node_id`；校验条件见提交合同。
 - `agent`：启动一层后台子代理；角色能力、`thinking` 与 `resume` 见该工具的描述。\
 """
 
@@ -92,8 +92,8 @@ FOLD_SUBMIT_CONTRACT = """\
 # 提交合同（finish_fold 前自检）
 - 被选择节点属于当前 Fold、当前 run，且已完成一次成功的完整 Validation；Probe 或失败回放不算。
 - 有父产物时，被选择节点必须在可执行策略逻辑上不同于父本（注释-only 不算）；或在本 Fold 已有不同假说的完整 Validation 之后，显式选择保留父本。宿主已在会话开始前把父本原样跑过一次本 Fold 的完整 Validation（Step 树里 `result_name=parent_control` 的节点，指标在运行事实 `parent_control`，不占预算）：它就是本 Fold 的基线，保留父本时直接选择该节点。
-- 在截止窗口之外，`finish_fold` 要求本 Fold 已完成至少两轮 `batch_validate`（一轮 = 一次调用且其全部候选跑到终态，全被证伪的一轮同样计数）；进入截止窗口或预算已容不下一轮时不再要求。
-- 当前 `output/` 和 `models/` 与被选择节点的快照逐字节一致；若最好版本是本 run 的更早节点或某个 `batch_validate` 候选节点，先用 `step_rollback` 恢复。`finish_fold` 会校验以上各项。
+- 在截止窗口之外，`finish_fold` 要求本 Fold 已完成至少两轮 `batch_validate`（一轮 = 一次调用且其全部候选跑到终态，全被证伪的一轮同样计数）；回测预算还剩超过三分之一时，自愿结束还须带 `early_stop_reason`，写明哪些假设未检验、为何不值得剩余预算，它随 Fold 结果记录，供 Meta 复盘。进入截止窗口或预算已容不下一轮时两者都不再要求。
+- 当前 `output/` 和 `models/` 与被选择节点的快照逐字节一致；若最好版本是本 run 的更早节点或某个 `batch_validate` 候选节点，先用 `step_rollback` 恢复。`batch_validate` 结束后当前位置停在该轮的父节点，此时不带 `node_id` 的 `finish_fold` 会被拒绝而不是默默选中父本。`finish_fold` 会校验以上各项。
 - 正式产物不含隐藏文件、缓存、日志、数据 dump、notebook、密钥或宿主绝对路径依赖。
 - `finish_fold` 只结束修改；Pipeline 仍会复核、冻结并在不可见区间运行后续阶段。\
 """
@@ -129,6 +129,7 @@ PRINCIPLES_SECTION = """\
 FOLD_GUARDRAILS_SECTION = """\
 # 研究方向与守则
 - 预算是用来探索的：运行事实 `budgets` 给出的时间、回测与 Step 预算为整个 Fold 的持续、预登记探索而设。把候选写进各自目录、各自 `smoke_backtest` 过关后，用 `batch_validate` 成轮地并列验证；一轮胜出是细化的起点而不是终点——对胜者提出新的可证伪问题（它靠什么成立、在什么条件下失效、更强或更稳的变体是什么），登记下一轮，只要还有预算和未检验的假设就继续，不要在预算大半未用时收工。
+- 胜者出现而预算仍在时，下一轮至少拿一个结构不同的候选去加固它，而不只是参数邻域：换一个模型类别、用 `fit` 拟合的权重或仓位代替手设规则、加一层风险覆盖，或换一种组合构建——等权 top-N 只是基线，不是唯一的组合方式。结构不同的候选按预登记条件落败，同样是有效、可报告的结果。
 - 假设含可拟合参数时把拟合放进 `fit`，运行合同允许的线性与非线性模型都可以用；对照基线（等权、符号加权或父本）是每轮必须比过的对象，不是目标产物。
 - 读结果时整窗指标与 `sub_windows`、原始超额与中性化超额一起看；只在一段行情里成立或靠一次风格暴露取得的优势不算边际。选择始终由你做出。
 - 不搭建重型自建测试脚手架；`output/` 一旦可运行就用 `smoke_backtest` 确认 ABI、订单合同和单日耗时低于推断上限，并在时间预算过半前完成第一次完整 Validation：它逐日跑完整个 Validation 区间，耗时按单日耗时乘以交易日数估算。

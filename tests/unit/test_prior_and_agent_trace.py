@@ -153,6 +153,14 @@ def test_finish_meta_requires_a_bounded_nonempty_prior(tmp_path: Path) -> None:
     overlong = registry.invoke("finish_meta", {})
     assert overlong.ok is False
     assert overlong.value["error_type"] == "prior_policy"
+    # A content redline names the line and says the check is a line pattern,
+    # not a semantic review; the description lists the redlines up front.
+    (tmp_path / "PRIOR.md").write_text("方向\nheld-out 表现 0.9\n", encoding="utf-8")
+    leaked = registry.invoke("finish_meta", {})
+    assert leaked.ok is False and "line 2 leaks Held-out" in leaked.error
+    assert "line-level patterns" in leaked.value["retry_hint"]
+    for redline in ("held-out/holdout/持有期外/隐藏区间", "YYYYMMDD", "Test/测试", "line-level"):
+        assert redline in FinishMetaTool.spec.description
     (tmp_path / "PRIOR.md").write_text("keep grep first\n", encoding="utf-8")
     accepted = registry.invoke("finish_meta", {})
     assert accepted.ok is True

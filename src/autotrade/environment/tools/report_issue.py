@@ -120,7 +120,9 @@ class ReportIssueTool:
         self.path = Path(path)
         self.manifest = manifest
         # Concurrency-safe cap: the spec is non-mutating, so calls in one
-        # assistant turn may dispatch in parallel.
+        # assistant turn may dispatch in parallel. The counter is per tool
+        # instance, which is per run: a retried session is a new run with its
+        # own run_id, so the ledger holds no line this counter could inherit.
         self._lock = threading.Lock()
         self._filed = 0
 

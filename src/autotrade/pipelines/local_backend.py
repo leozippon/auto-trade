@@ -84,6 +84,7 @@ from autotrade.environment.tools.files import EditFileTool, WriteFileTool
 from autotrade.environment.tools.finish_fold import (
     FINISH_FOLD_MIN_BATCH_ROUNDS,
     FinishFoldTool,
+    FoldBudgetStatus,
     executable_output_structure,
 )
 from autotrade.environment.tools.hitl import AskUserTool
@@ -1875,6 +1876,26 @@ def another_batch_round_fits(backtest: FoldBacktestTool) -> bool:
     return request.max_steps - len(backtest.steps) >= BATCH_VALIDATE_MIN_CANDIDATES
 
 
+def fold_budget_status(backtest: FoldBacktestTool) -> FoldBudgetStatus:
+    """What this Fold session still has when ``finish_fold`` is called.
+
+    The inference time is the same main-window figure ``another_batch_round_fits``
+    reasons about: the grace reserve behind the deadline is wrap-up time, not
+    budget the session chose to leave unused.
+    """
+
+    request = backtest.request
+    return FoldBudgetStatus(
+        backtests_remaining=max(request.max_backtests - backtest.backtests, 0),
+        backtests_total=request.max_backtests,
+        steps_remaining=max(request.max_steps - len(backtest.steps), 0),
+        steps_total=request.max_steps,
+        inference_seconds_remaining=(
+            backtest.time_budget.remaining() - request.deadline_grace_seconds
+        ),
+    )
+
+
 def _batch_text(
     item: Mapping[str, object], field_name: str, index: int, limit: int
 ) -> str:
@@ -2323,6 +2344,7 @@ class LLMFoldDeveloper:
                     current_models=models_dir,
                     min_batch_rounds=FINISH_FOLD_MIN_BATCH_ROUNDS,
                     another_round_fits=lambda: another_batch_round_fits(backtest),
+                    budget_status=lambda: fold_budget_status(backtest),
                 )
             )
             budgeted = SessionBudgetLLM(self.llm, budget=shared_budget, role="main")
@@ -2442,6 +2464,9 @@ class LLMFoldDeveloper:
                 steps,
                 selected_node,
                 "llm_agent_finish_fold",
+                early_stop_reason=str(
+                    result.finish_value.get("early_stop_reason") or ""
+                ),
                 # The collected copy, not the live sandbox tree: the fold ledger
                 # record carries it so a later Meta session can still read this
                 # run's backtest summaries after the sandbox is cleaned up.
