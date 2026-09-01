@@ -140,6 +140,7 @@ _FOLD_TOOLS = frozenset(
         "write_skill",
         "delete_skill",
         "memory_feedback",
+        "report_issue",
     }
 )
 _META_TOOLS = frozenset(
@@ -156,6 +157,7 @@ _META_TOOLS = frozenset(
         "write_skill",
         "delete_skill",
         "memory_feedback",
+        "report_issue",
     }
 )
 INBOX_SAFE_BEFORE_LLM = "before_llm"

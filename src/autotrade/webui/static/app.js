@@ -6886,6 +6886,11 @@ async function renderMemoryPage() {
     toolbarHost: el("div", { class: "control-bar memory-toolbar" }),
     bodyHost: el("div", { class: "memory-pane-body" }),
   };
+  const issuesHost = el(
+    "div",
+    { class: "issue-list" },
+    el("div", { class: "loading" }, "加载问题反馈…"),
+  );
   $main.replaceChildren(
     el(
       "div",
@@ -6913,11 +6918,86 @@ async function renderMemoryPage() {
           memoryView.bodyHost,
         ),
       ),
+      el(
+        "div",
+        { class: "panel section-gap", id: "memory-issues" },
+        el("h4", {}, "问题反馈"),
+        el(
+          "div",
+          { class: "hint" },
+          "Fold 与元学习父会话用 report_issue 报告的环境、工具输出、数据与文档缺陷，跨实验按时间倒序列出。只读：会话读不回这些报告，处置由研究者完成。",
+        ),
+        issuesHost,
+      ),
     ),
   );
   renderMemoryList();
   renderMemoryCandidates();
   renderMemoryPane();
+  renderIssueReports(issuesHost);
+}
+
+/* Operators' inbox for defects the sessions themselves noticed: `report_issue`
+   lines from every experiment's ledgers, listed read-only, evidence folded. */
+const ISSUE_CATEGORY_LABELS = {
+  tool_output: "工具输出",
+  environment: "环境",
+  data: "数据",
+  docs: "文档",
+  other: "其他",
+};
+
+function issueReportRow(report) {
+  const meta = [
+    fmtTs(report.recorded_at),
+    report.experiment_id,
+    report.session_label,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  return el(
+    "details",
+    { class: "issue-report" },
+    el(
+      "summary",
+      {},
+      el(
+        "span",
+        { class: "badge mini kind" },
+        ISSUE_CATEGORY_LABELS[report.category] || report.category || "—",
+      ),
+      el("span", { class: "issue-meta" }, meta),
+      el("span", { class: "label" }, report.summary || "—"),
+    ),
+    el("div", { class: "issue-evidence" }, report.evidence || "—"),
+  );
+}
+
+async function renderIssueReports(host) {
+  let payload;
+  try {
+    payload = await api("/api/issue-reports");
+  } catch (error) {
+    host.replaceChildren(
+      el("div", { class: "hint warn" }, `加载失败：${error.message}`),
+    );
+    return;
+  }
+  const reports = payload.reports || [];
+  const nodes = (payload.unreadable || []).map((item) =>
+    el("div", { class: "hint warn" }, `${item.experiment_id}：${item.error}`),
+  );
+  if (reports.length) nodes.push(...reports.map(issueReportRow));
+  else nodes.push(el("div", { class: "empty compact" }, "会话没有报告过问题"));
+  if ((payload.total || 0) > reports.length)
+    nodes.push(
+      el(
+        "div",
+        { class: "hint" },
+        `仅显示最近 ${reports.length} 条，共 ${payload.total} 条`,
+      ),
+    );
+  host.replaceChildren(...nodes);
 }
 
 /* Persistent, not a toast: when a change takes effect and where it lives are

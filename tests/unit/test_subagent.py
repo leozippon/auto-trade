@@ -852,6 +852,9 @@ def test_role_tool_visibility_hides_writes_from_audits(tmp_path: Path) -> None:
         # A child gathers evidence; the parent session is what concludes that a
         # mounted memory entry held up or did not, so the verdict is its call.
         "memory_feedback",
+        # Same shape for defect reports: children report findings to the
+        # parent, the parent files them with the operators.
+        "report_issue",
         "step_rollback",
     }
     assert audit == {"glob", "grep", "read_file"}

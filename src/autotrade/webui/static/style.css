@@ -2288,6 +2288,36 @@ table.data.text td.nowrap {
  margin-top: 0;
 }
 
+/* Agent-filed issue reports: one folded row per report, evidence on demand. */
+.issue-list {
+ margin-top: 0.85rem;
+}
+details.issue-report {
+ border-top: 1px solid var(--border);
+ padding: 0.35rem 0;
+}
+details.issue-report summary {
+ display: flex;
+ align-items: baseline;
+ gap: 0.6rem;
+ cursor: pointer;
+}
+details.issue-report summary .issue-meta {
+ color: var(--muted);
+ font-size: 0.82rem;
+ white-space: nowrap;
+}
+details.issue-report summary .label {
+ flex: 1;
+ min-width: 0;
+}
+.issue-evidence {
+ white-space: pre-wrap;
+ color: var(--muted);
+ font-size: 0.875rem;
+ padding: 0.45rem 0 0.25rem 1rem;
+}
+
 /* A long experiment id truncates instead of reflowing its heading: the name is
    the elastic column and the badges keep their own, so every card's badges line
    up on the same edge. The full id stays in the title attribute. */

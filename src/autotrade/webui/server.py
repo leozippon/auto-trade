@@ -38,7 +38,7 @@ from autotrade.pipelines.hitl_state import (
 )
 from autotrade.pipelines.ledger import latest_fold_records
 
-from . import equity, memory, registry, steps, traces, trading
+from . import equity, issues, memory, registry, steps, traces, trading
 from .analysis import AnalysisService
 from .manager import (
     MAX_RUNNING_EXPERIMENTS,
@@ -774,6 +774,20 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
     @app.get("/api/memory")
     def get_memory() -> dict[str, object]:
         return memory.memory_overview(root, experiment_root)
+
+    @app.get("/api/issue-reports")
+    def get_issue_reports(
+        experiment_id: str | None = Query(None),
+        limit: int = Query(100, ge=1, le=issues.MAX_ISSUE_REPORTS_PAGE),
+    ) -> dict[str, object]:
+        """Agent-filed issue reports across experiments, newest first. Read-only:
+        reports are operator telemetry, so the console offers no write or delete."""
+
+        if experiment_id is not None:
+            _experiment_dir(experiment_id)
+        return issues.issue_reports(
+            experiment_root, experiment_id=experiment_id, limit=limit
+        )
 
     @app.get("/api/memory/curated/{name}")
     def get_curated_memory(name: str) -> dict[str, object]:

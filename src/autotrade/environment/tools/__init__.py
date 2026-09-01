@@ -30,6 +30,14 @@ from .memory_feedback import (
     MemoryFeedbackTool,
 )
 from .modification_check import ModificationCheckTool
+from .report_issue import (
+    ISSUE_CATEGORIES,
+    MAX_ISSUE_EVIDENCE_CHARS,
+    MAX_ISSUE_REPORTS_PER_SESSION,
+    MAX_ISSUE_SUMMARY_CHARS,
+    ReportIssueTool,
+    issue_reports_path,
+)
 from .search import SEARCH_ROOTS, GlobTool, GrepTool, ReadFileTool, SearchRoots
 from .shell import SandboxShellTool
 from .step_rollback import StepRollbackTool
@@ -44,11 +52,17 @@ __all__ = [
     "FinishMetaTool",
     "GlobTool",
     "GrepTool",
+    "ISSUE_CATEGORIES",
+    "MAX_ISSUE_EVIDENCE_CHARS",
+    "MAX_ISSUE_REPORTS_PER_SESSION",
+    "MAX_ISSUE_SUMMARY_CHARS",
     "MAX_MEMORY_FEEDBACK_NOTE_CHARS",
     "MEMORY_FEEDBACK_VERDICTS",
     "MemoryFeedbackTool",
     "ModificationCheckTool",
     "ReadFileTool",
+    "ReportIssueTool",
+    "issue_reports_path",
     "SEARCH_ROOTS",
     "SEQUENTIAL_TOOL_NAMES",
     "SafeWorkspace",

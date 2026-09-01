@@ -158,6 +158,7 @@ def test_fold_preview_carries_every_current_prompt_section(tmp_path: Path):
     for tool in (
         "batch_validate",
         "memory_feedback",
+        "report_issue",
         "modification_check",
         "smoke_backtest",
         "daily_backtest",
@@ -211,6 +212,7 @@ def test_meta_preview_is_the_meta_session_prompt(tmp_path: Path):
         assert section.strip() in prompt
     assert "`finish_meta`" in prompt
     assert "`memory_feedback`" in prompt
+    assert "`report_issue`" in prompt
     # A Meta session runs no replay and is given no strategy schedule block.
     assert "## 本轮调度" not in prompt
     assert "## 当前实验事实" in prompt

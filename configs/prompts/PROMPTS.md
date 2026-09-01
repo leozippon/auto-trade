@@ -40,6 +40,7 @@
 - `shell`：一次有界前台命令（argv），用于 debug、冒烟测试和数据验收；不得用它修改策略产物、启动后台任务、sleep/等待包装或轮询状态。
 - `write_skill` / `delete_skill`：维护 `skills/<kebab-name>/SKILL.md`；`write_file`/`edit_file` 不能写 `skills/`，`shell` 不得用于修改 `skills/` 或 `inputs/`。SKILL.md 顶部可用 `---` 前言写一行 `supersedes: <来源>/<名称>`，声明它替代某条已挂载的运行记忆条目（该条目必须确实挂载着）；索引会给原条目标上 `superseded_by`，两条仍并存，撤下与否由研究者决定。
 - `memory_feedback`：对一条已挂载的运行记忆条目记录一次判断。`entry` 用索引里的 `<来源>/<名称>`，`verdict` 取 confirmed / outdated / wrong，`note` 一句可迁移的结论（不写日历日期，不写 Test/Held-out 数字）。它只记录判断，不改动挂载内容；同一条目再次上报覆盖本会话先前的判断。
+- `report_issue`：向运营者报告环境、工具输出、数据或文档本身的可疑缺陷。`category` 取 tool_output / environment / data / docs / other，`summary` 一两句说清问题，`evidence` 给出具体复现（跑了或读了什么、预期与实际、工作区相对路径）。纯宿主侧记录：不改任何产物与预算，任何会话都读不回它；它不是研究笔记或结果通道。
 - `modification_check`：检查正式 `output/` 与 `models/` 的入口、静态限制和修改量；每次正式回测前必须通过。
 - `smoke_backtest`：非正式短回放，按真实布局与 ABI 跑当前 `output/` 开头几个交易日，确认 ABI、订单合同和单日耗时；正式回测前先用它。它不产生可选择节点。
 - `daily_backtest`：把当前 `output/` 提交为不可变 revision 并运行本 Fold 完整 Validation（先等待后台子代理结束）。任一次 `fit` 超过 `budgets.strategy_fit_timeout_seconds`，或任一决策日的 `generate_orders` 超过 `budgets.strategy_inference_timeout_seconds`，即整场回测失败。只有它与 `batch_validate` 产生的完整节点可被选择，正式回测不能由自建回放替代。结果带按子区间拆分的 `sub_windows`（收益、相对基准超额、Sharpe、回撤、换手、成交）以及原始与中性化超额，用它判断整窗数字是否只由一段行情或一次风格暴露驱动。
@@ -139,6 +140,7 @@ Fold 与 Meta 共用；这是宿主开发原则中真正适用于策略研究的
 - 审计与复盘先冻结范围、写明必须成立的条件，用可复现的证据区分缺陷、建议与已接受的限制。
 - 每次修改只针对一个根因；同一组件反复失败时重新设计而不是叠例外。
 - 正确性无法保证时显式失败，不静默回退；工具失败如实处理，不猜测成功、不伪造结果。
+- 发现环境、工具输出、数据或文档的可疑行为或缺陷时，用 `report_issue` 如实报告后继续工作；不要静默绕过，也不要把它当作研究笔记或结果通道。
 - 检验必须始终成立的条件、反面路径和真实回放，而不是只看当前实现的顺利路径。
 - 如实记录样本局限与不可消除的限制，不把未验证方向写成结论；策略、skills 与 PRIOR 各自只保留一份事实来源。
 ```
@@ -245,6 +247,7 @@ Fold 与 Meta 共用；这是宿主开发原则中真正适用于策略研究的
 - `write_file` / `edit_file`：写 `PRIOR.md`、正则化 `output/` 与 `models/`，或按只读示例 `sandbox_environment.example.json` 写 `sandbox_environment.json`，为后续 Fold 声明 Python/npm/apt 包（不能下载权重、数据或仓库，也不能让 PRIOR 依赖后续自行安装）。
 - `write_skill` / `delete_skill`：维护 `skills/<kebab-name>/SKILL.md` 中可迁移的知识。SKILL.md 顶部可用 `---` 前言写一行 `supersedes: <来源>/<名称>`，声明它替代某条已挂载的运行记忆条目（该条目必须确实挂载着）；索引会给原条目标上 `superseded_by`，两条仍并存，撤下与否由研究者决定。
 - `memory_feedback`：对一条已挂载的运行记忆条目记录一次判断。`entry` 用索引里的 `<来源>/<名称>`，`verdict` 取 confirmed / outdated / wrong，`note` 一句可迁移的结论（不写日历日期，不写 Test/Held-out 数字）。它只记录判断，不改动挂载内容；同一条目再次上报覆盖本会话先前的判断。
+- `report_issue`：向运营者报告环境、工具输出、数据或文档本身的可疑缺陷。`category` 取 tool_output / environment / data / docs / other，`summary` 一两句说清问题，`evidence` 给出具体复现（跑了或读了什么、预期与实际、工作区相对路径）。纯宿主侧记录：不改任何产物与预算，任何会话都读不回它；它不是研究笔记或结果通道。
 - `modification_check`：正则化改动后检查父产物工作副本的入口、静态限制和修改量。
 - `ask_user`：只在真正需要研究者决定时提问（已注册时可用）。
 - `agent`：启动一层只读后台子代理；角色、`thinking` 与 `resume` 见该工具的描述。Meta 中四个角色都只读，不能执行命令。
