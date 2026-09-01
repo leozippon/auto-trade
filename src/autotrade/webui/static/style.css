@@ -31,7 +31,6 @@
  --chip-bg: #ececf1;
  --code-bg: #f6f8fa;
  --code-ink: #333a46;
- --viz-alt: #7a3fa8;
  --mask: rgba(20, 26, 40, 0.45);
  --danger-border: #e5b8b8;
  --audit-border: #d8b96a;
@@ -67,7 +66,6 @@
  --chip-bg: #262c38;
  --code-bg: #161a22;
  --code-ink: #c6cdd9;
- --viz-alt: #b28ae0;
  --mask: rgba(0, 0, 0, 0.62);
  --danger-border: #6d3a3a;
  --audit-border: #8a6f2f;
@@ -1684,8 +1682,7 @@ details.advanced .form-grid {
  text-align: center;
 }
 
-/* ---------------- responsive breakpoints ---------------- */
-
+/* ---- params modal ---- */
 .params-modal-body {
  max-height: 62vh;
  overflow-y: auto;
@@ -1888,131 +1885,6 @@ details.advanced .form-grid {
  color: var(--muted);
  flex: none;
 }
-@media (hover: none) {
- #step-tip {
-  display: none !important;
- }
-}
-@media (max-width: 720px) {
- .step-time {
-  display: none;
- }
- .step-tree {
-  max-height: 50vh;
- }
-}
-@media (max-width: 1080px) {
- .detail {
-  grid-template-columns: 1fr;
- }
- .session-list {
-  max-height: 38vh;
- }
-}
-@media (max-width: 760px) {
- .topbar-left,
- .topbar-side,
- .topbar-right {
-  flex: 1 1 100%;
-  flex-wrap: wrap;
-  min-width: 0;
-  max-width: 100%;
- }
- .topbar-side {
-  justify-content: flex-end;
- }
- .topbar-right {
-  flex: 1 1 auto;
- }
- .topbar-right .btn {
-  flex: 1 1 auto;
-  min-width: 0;
- }
- .topnav {
-  flex-wrap: wrap;
- }
- .topbar .mode-note {
-  display: none;
- }
- .grid {
-  grid-template-columns: 1fr;
- }
- .form-grid {
-  grid-template-columns: minmax(0, 1fr);
- }
- .form-grid > .field.checkbox {
-  padding-top: 0;
- }
- .gpu-status {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
- }
- .page-head {
-  flex-direction: column;
-  align-items: flex-start;
- }
- .tiles {
-  grid-template-columns: repeat(2, 1fr);
- }
- /* tables scroll sideways instead of overflowing the panel */
- table.data,
- table.kv,
- table.cycle-stats {
-  display: block;
-  overflow-x: auto;
-  max-width: 100%;
- }
- table.kv td:first-child {
-  width: auto;
- }
- .trace-box {
-  max-height: 50vh;
- }
- .modal-mask {
-  padding: 0;
- }
- .modal {
-  width: 100%;
-  max-height: 100dvh;
-  height: 100dvh;
-  border-radius: 0;
- }
- .charts-row {
-  grid-template-columns: 1fr;
- }
-}
-@media (max-width: 560px) {
- .topbar {
-  padding: 0.6rem 12px;
- }
- .brand {
-  font-size: 1.1rem;
- }
- main {
-  margin-top: 0.9rem;
- }
- .panel,
- .card {
-  padding: 0.85rem 0.9rem;
- }
- /* comfortable touch targets */
- .btn {
-  min-height: 2.6rem;
- }
- .btn.small {
-  min-height: 2.2rem;
- }
- .control-bar {
-  gap: 0.45rem;
- }
- #toast-root {
-  left: 12px;
-  right: 12px;
-  bottom: 12px;
- }
- .toast {
-  max-width: none;
- }
-}
 
 /* ask_user question card */
 .ask-user-question {
@@ -2027,9 +1899,29 @@ details.advanced .form-grid {
 }
 
 /* ---------------- 运行记忆 ----------------
-   One stable two-pane layout: the catalogue scrolls inside the left pane, the
-   right pane keeps a fixed head / toolbar / body so a selection never moves the
-   grid, the page header or the toolbar buttons. */
+   One pattern for every section: a heading carrying the line that says what the
+   section answers, then the panels that answer it. Inside 记忆条目 those panels
+   are the shared .detail grid — the catalogue scrolls inside the left pane, and
+   the right pane keeps a fixed head / toolbar / body so a selection never moves
+   the grid, the page header or the toolbar buttons. */
+.memory-section {
+ margin-top: 1.5rem;
+}
+.memory-section-head {
+ margin-bottom: 0.7rem;
+}
+.memory-section-head h3 {
+ margin: 0;
+ font-size: 1.06rem;
+ font-weight: 700;
+ letter-spacing: 0.01em;
+}
+.memory-section-head .sub {
+ margin-top: 0.2rem;
+ color: var(--muted);
+ font-size: 0.875rem;
+ line-height: 1.55;
+}
 .memory-notice .hint:first-child {
  margin-top: 0;
 }
@@ -2106,9 +1998,15 @@ details.memory-aside summary {
  flex-direction: column;
  min-height: 34rem;
 }
-.memory-pane-title {
- font-size: 1.02rem;
+/* The entry title is the leaf of the page's heading tree: a real <h4> under
+   its section's <h3>, quieter than that heading and louder than the catalogue's
+   list labels — which is the order the page actually reads in. */
+h4.memory-pane-title {
+ margin: 0;
+ font-size: 0.98rem;
  font-weight: 700;
+ color: var(--text);
+ letter-spacing: 0;
  overflow-wrap: anywhere;
 }
 .memory-pane-meta {
@@ -2163,26 +2061,6 @@ table.data.text td {
 table.data.text td {
  vertical-align: top;
 }
-@media (max-width: 1080px) {
- .memory-nav {
-  position: static;
-  max-height: 26rem;
- }
-}
-@media (max-width: 760px) {
- .memory-pane {
-  min-height: 26rem;
- }
- textarea.directive.skill-editor {
-  min-height: 14rem;
- }
- pre.code-view.skill-body {
-  max-height: 50vh;
- }
- .memory-skeleton {
-  min-height: 12rem;
- }
-}
 
 /* Withdrawn graduated candidate: still named under its experiment, never
    mounted again, one click from coming back. */
@@ -2236,38 +2114,112 @@ table.data.text td.nowrap {
 .feedback-block .control-bar {
  margin-top: 0;
 }
-.feedback-block .hint {
- margin-top: 0;
+.feedback-block h4 {
+ margin: 0;
 }
 
-/* Agent-filed issue reports: one folded row per report, evidence on demand. */
+/* Agent-filed issue reports: one folded card per report — the summary is the
+   line that gets read, the attribution sits under it in its own columns, and
+   the evidence only appears when it is asked for. */
+.issue-filter {
+ display: flex;
+ align-items: center;
+ gap: 0.45rem;
+ min-width: 0;
+ font-size: 0.875rem;
+ color: var(--muted);
+}
+.issue-filter select {
+ max-width: 16rem;
+}
+.issue-count {
+ font-size: 0.82rem;
+ color: var(--muted);
+}
 .issue-list {
+ display: flex;
+ flex-direction: column;
+ gap: 0.5rem;
  margin-top: 0.85rem;
 }
 details.issue-report {
- border-top: 1px solid var(--border);
- padding: 0.35rem 0;
+ border: 1px solid var(--row-border);
+ border-radius: 10px;
+ background: var(--panel-2);
+ padding: 0.5rem 0.75rem;
 }
+/* Two rows beside one disclosure column, so every card's summary and metadata
+   start on the same left edge. */
 details.issue-report summary {
+ display: grid;
+ grid-template-columns: 1rem minmax(0, 1fr);
+ gap: 0.15rem 0.45rem;
+ cursor: pointer;
+ list-style: none;
+}
+/* A grid summary drops the native marker, so the disclosure is drawn here. */
+details.issue-report summary::-webkit-details-marker {
+ display: none;
+}
+details.issue-report summary::before {
+ content: "▸";
+ grid-column: 1;
+ grid-row: 1 / span 2;
+ color: var(--muted);
+ font-size: 0.8rem;
+ line-height: 1.7;
+}
+details.issue-report[open] summary::before {
+ content: "▾";
+}
+.issue-line {
  display: flex;
  align-items: baseline;
- gap: 0.6rem;
- cursor: pointer;
-}
-details.issue-report summary .issue-meta {
- color: var(--muted);
- font-size: 0.82rem;
- white-space: nowrap;
-}
-details.issue-report summary .label {
- flex: 1;
+ flex-wrap: wrap;
+ gap: 0.5rem;
  min-width: 0;
 }
-.issue-evidence {
- white-space: pre-wrap;
+.issue-summary {
+ min-width: 0;
+ font-weight: 600;
+ overflow-wrap: anywhere;
+}
+.issue-meta {
+ display: grid;
+ grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+ gap: 0.1rem 0.9rem;
  color: var(--muted);
- font-size: 0.875rem;
- padding: 0.45rem 0 0.25rem 1rem;
+ font-size: 0.82rem;
+}
+.issue-meta-item {
+ display: flex;
+ gap: 0.4rem;
+ min-width: 0;
+}
+.issue-meta-item .k {
+ flex: none;
+}
+.issue-meta-item .v {
+ min-width: 0;
+ overflow-wrap: anywhere;
+}
+/* Evidence is raw tool, data or document output: long paths and stack frames
+   wrap, and whatever still cannot wrap scrolls inside this box rather than
+   being clipped by the page's own overflow-x: hidden. */
+.issue-evidence {
+ margin: 0.5rem 0 0.15rem;
+ padding: 0.5rem 0.65rem;
+ border: 1px solid var(--border);
+ border-radius: 8px;
+ background: var(--code-bg);
+ color: var(--code-ink);
+ font: 0.8rem / 1.55 var(--mono);
+ white-space: pre-wrap;
+ overflow-wrap: anywhere;
+ word-break: break-word;
+ max-height: 24rem;
+ overflow: auto;
+ overscroll-behavior: contain;
 }
 
 /* A long experiment id truncates instead of reflowing its heading: the name is
@@ -2303,7 +2255,156 @@ details.issue-report summary .label {
  min-width: 0;
  overflow: hidden;
 }
+
+/* ---------------- responsive breakpoints ----------------
+   Every viewport rule in the console lives here, one block per breakpoint,
+   widest first, and after the component rules they override. */
+@media (hover: none) {
+ #step-tip {
+  display: none !important;
+ }
+}
+@media (max-width: 1080px) {
+ .detail {
+  grid-template-columns: 1fr;
+ }
+ .session-list {
+  max-height: 38vh;
+ }
+ /* One column: the 运行记忆 catalogue becomes an ordinary block in the page
+    flow. Keeping its own short scroller here would trap a touch drag in a
+    small box sitting directly above the pane it navigates. */
+ .memory-nav {
+  position: static;
+  max-height: none;
+  overflow-y: visible;
+ }
+ /* Tables scroll sideways inside their own box instead of overflowing the
+    panel: from here down a wide table no longer fits, and the page clips
+    horizontal overflow rather than scrolling to it. */
+ table.data,
+ table.kv,
+ table.cycle-stats {
+  display: block;
+  overflow-x: auto;
+  max-width: 100%;
+ }
+ table.kv td:first-child {
+  width: auto;
+ }
+}
+@media (max-width: 760px) {
+ .topbar-left,
+ .topbar-side,
+ .topbar-right {
+  flex: 1 1 100%;
+  flex-wrap: wrap;
+  min-width: 0;
+  max-width: 100%;
+ }
+ .topbar-side {
+  justify-content: flex-end;
+ }
+ .topbar-right {
+  flex: 1 1 auto;
+ }
+ .topbar-right .btn {
+  flex: 1 1 auto;
+  min-width: 0;
+ }
+ .topnav {
+  flex-wrap: wrap;
+ }
+ .topbar .mode-note {
+  display: none;
+ }
+ .grid {
+  grid-template-columns: 1fr;
+ }
+ .form-grid {
+  grid-template-columns: minmax(0, 1fr);
+ }
+ .form-grid > .field.checkbox {
+  padding-top: 0;
+ }
+ .gpu-status {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+ }
+ .page-head {
+  flex-direction: column;
+  align-items: flex-start;
+ }
+ .tiles {
+  grid-template-columns: repeat(2, 1fr);
+ }
+ .trace-box {
+  max-height: 50vh;
+ }
+ .modal-mask {
+  padding: 0;
+ }
+ .modal {
+  width: 100%;
+  max-height: 100dvh;
+  height: 100dvh;
+  border-radius: 0;
+ }
+ .charts-row {
+  grid-template-columns: 1fr;
+ }
+ .memory-pane {
+  min-height: 26rem;
+ }
+ textarea.directive.skill-editor {
+  min-height: 14rem;
+ }
+ pre.code-view.skill-body {
+  max-height: 50vh;
+ }
+ .memory-skeleton {
+  min-height: 12rem;
+ }
+}
+@media (max-width: 720px) {
+ .step-time {
+  display: none;
+ }
+ .step-tree {
+  max-height: 50vh;
+ }
+}
 @media (max-width: 560px) {
+ .topbar {
+  padding: 0.6rem 12px;
+ }
+ .brand {
+  font-size: 1.1rem;
+ }
+ main {
+  margin-top: 0.9rem;
+ }
+ .panel,
+ .card {
+  padding: 0.85rem 0.9rem;
+ }
+ /* comfortable touch targets */
+ .btn {
+  min-height: 2.6rem;
+ }
+ .btn.small {
+  min-height: 2.2rem;
+ }
+ .control-bar {
+  gap: 0.45rem;
+ }
+ #toast-root {
+  left: 12px;
+  right: 12px;
+  bottom: 12px;
+ }
+ .toast {
+  max-width: none;
+ }
  /* Too narrow for one line: the badges take their own row rather than
     squeezing the id down to a few characters. */
  .page-head h2 {
@@ -2311,5 +2412,27 @@ details.issue-report summary .label {
  }
  .page-head h2 .exp-badges {
   flex: 1 0 100%;
+ }
+ /* The GPU name takes the row to itself so the bar keeps a usable width. */
+ .gpu-row {
+  flex-wrap: wrap;
+ }
+ .gpu-row .gpu-name {
+  flex: 1 1 100%;
+ }
+ /* Same for a style-tilt label: an 11rem minimum next to a fixed value column
+    leaves the bar almost nothing on a phone. */
+ .tilt-row {
+  grid-template-columns: minmax(0, 1fr) 3.5rem;
+ }
+ .tilt-label {
+  grid-column: 1 / -1;
+ }
+ .memory-section {
+  margin-top: 1.2rem;
+ }
+ /* One labelled attribution per line. */
+ .issue-meta {
+  grid-template-columns: minmax(0, 1fr);
  }
 }

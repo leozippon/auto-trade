@@ -6879,18 +6879,16 @@ async function renderMemoryPage() {
     draftName: "",
     source: null,
     dirty: false,
+    issueExperiment: "",
     countHost: el("span", {}, ""),
     listHost: el("div", { class: "session-list" }),
     candidateHost: el("div", { class: "session-list" }),
     headHost: el("div", { class: "memory-pane-head" }),
     toolbarHost: el("div", { class: "control-bar memory-toolbar" }),
     bodyHost: el("div", { class: "memory-pane-body" }),
+    issueCountHost: el("span", { class: "issue-count" }, ""),
+    issuesHost: el("div", { class: "issue-list" }),
   };
-  const issuesHost = el(
-    "div",
-    { class: "issue-list" },
-    el("div", { class: "loading" }, "加载问题反馈…"),
-  );
   $main.replaceChildren(
     el(
       "div",
@@ -6906,35 +6904,51 @@ async function renderMemoryPage() {
         ),
       ),
       memoryNotice(),
-      el(
-        "div",
-        { class: "detail section-gap" },
-        memoryNavPanel(),
+      memorySection(
+        null,
+        "记忆条目",
+        "左栏是完整目录，右栏是唯一的查看与编辑面：精选库条目可改写，毕业层候选只读。",
         el(
           "div",
-          { class: "panel memory-pane" },
-          memoryView.headHost,
-          memoryView.toolbarHost,
-          memoryView.bodyHost,
+          { class: "detail" },
+          memoryNavPanel(),
+          el(
+            "div",
+            { class: "panel memory-pane" },
+            memoryView.headHost,
+            memoryView.toolbarHost,
+            memoryView.bodyHost,
+          ),
         ),
       ),
-      el(
-        "div",
-        { class: "panel section-gap", id: "memory-issues" },
-        el("h4", {}, "问题反馈"),
-        el(
-          "div",
-          { class: "hint" },
-          "Fold 与元学习父会话用 report_issue 报告的环境、工具输出、数据与文档缺陷，跨实验按时间倒序列出。只读：会话读不回这些报告，处置由研究者完成。",
-        ),
-        issuesHost,
+      memorySection(
+        "memory-issues",
+        "问题反馈",
+        "Fold 与元学习父会话用 report_issue 报告的环境、工具输出、数据与文档缺陷，跨实验按时间倒序。只读：会话读不回这些报告，处置由研究者完成。",
+        el("div", { class: "panel" }, issueFilterBar(), memoryView.issuesHost),
       ),
     ),
   );
   renderMemoryList();
   renderMemoryCandidates();
   renderMemoryPane();
-  renderIssueReports(issuesHost);
+  renderIssueReports();
+}
+
+/* One pattern for every section on this page: a heading carrying the single
+   line that says what the section answers, then the panels that answer it. */
+function memorySection(id, title, note, ...panels) {
+  return el(
+    "section",
+    { class: "memory-section", id },
+    el(
+      "div",
+      { class: "memory-section-head" },
+      el("h3", {}, title),
+      el("div", { class: "sub" }, note),
+    ),
+    ...panels,
+  );
 }
 
 /* Operators' inbox for defects the sessions themselves noticed: `report_issue`
@@ -6947,14 +6961,38 @@ const ISSUE_CATEGORY_LABELS = {
   other: "其他",
 };
 
+/* The list is one bounded newest-first page across every experiment, so
+   narrowing to a single experiment is how an older report is reached at all.
+   The options are the experiment directories the memory bundle already listed
+   — the same set the reports themselves are read from. */
+function issueFilterBar() {
+  const rows = (memoryView.payload.graduated || {}).experiments || [];
+  const select = el(
+    "select",
+    {
+      onchange: (event) => {
+        memoryView.issueExperiment = event.target.value;
+        renderIssueReports();
+      },
+    },
+    el("option", { value: "" }, "全部实验"),
+    ...rows.map((row) =>
+      el("option", { value: row.experiment_id }, row.experiment_id),
+    ),
+  );
+  return el(
+    "div",
+    { class: "control-bar" },
+    el("label", { class: "issue-filter" }, el("span", {}, "实验"), select),
+    el("span", { class: "spacer" }),
+    memoryView.issueCountHost,
+  );
+}
+
+/* One folded card per report: the summary is the line that gets read, and the
+   attribution sits under it as labelled metadata in its own columns instead of
+   one nowrap run that eats the row before the summary gets any width. */
 function issueReportRow(report) {
-  const meta = [
-    fmtTs(report.recorded_at),
-    report.experiment_id,
-    report.session_label,
-  ]
-    .filter(Boolean)
-    .join(" · ");
   return el(
     "details",
     { class: "issue-report" },
@@ -6963,40 +7001,70 @@ function issueReportRow(report) {
       {},
       el(
         "span",
-        { class: "badge mini kind" },
-        ISSUE_CATEGORY_LABELS[report.category] || report.category || "—",
+        { class: "issue-line" },
+        el(
+          "span",
+          { class: "badge mini kind" },
+          ISSUE_CATEGORY_LABELS[report.category] || report.category || "—",
+        ),
+        el("span", { class: "issue-summary" }, report.summary || "—"),
       ),
-      el("span", { class: "issue-meta" }, meta),
-      el("span", { class: "label" }, report.summary || "—"),
+      el(
+        "span",
+        { class: "issue-meta" },
+        issueMetaItem("时间", fmtTs(report.recorded_at)),
+        issueMetaItem("实验", report.experiment_id || "—"),
+        issueMetaItem("会话", report.session_label || "—"),
+      ),
     ),
     el("div", { class: "issue-evidence" }, report.evidence || "—"),
   );
 }
 
-async function renderIssueReports(host) {
+function issueMetaItem(label, value) {
+  return el(
+    "span",
+    { class: "issue-meta-item" },
+    el("span", { class: "k" }, label),
+    el("span", { class: "v" }, value),
+  );
+}
+
+async function renderIssueReports() {
+  const host = memoryView.issuesHost;
+  const experiment = memoryView.issueExperiment;
+  // A filter change and a page leave both land here while a fetch is open.
+  const stale = () =>
+    !memoryView ||
+    memoryView.issuesHost !== host ||
+    memoryView.issueExperiment !== experiment;
+  host.replaceChildren(el("div", { class: "loading" }, "加载问题反馈…"));
+  memoryView.issueCountHost.textContent = "";
   let payload;
   try {
-    payload = await api("/api/issue-reports");
+    const query = experiment
+      ? `?experiment_id=${encodeURIComponent(experiment)}`
+      : "";
+    payload = await api(`/api/issue-reports${query}`);
   } catch (error) {
+    if (stale()) return;
     host.replaceChildren(
       el("div", { class: "hint warn" }, `加载失败：${error.message}`),
     );
     return;
   }
+  if (stale()) return;
   const reports = payload.reports || [];
+  const total = payload.total || 0;
+  memoryView.issueCountHost.textContent =
+    total > reports.length
+      ? `最近 ${reports.length} 条，共 ${total} 条`
+      : `共 ${total} 条`;
   const nodes = (payload.unreadable || []).map((item) =>
     el("div", { class: "hint warn" }, `${item.experiment_id}：${item.error}`),
   );
   if (reports.length) nodes.push(...reports.map(issueReportRow));
   else nodes.push(el("div", { class: "empty compact" }, "会话没有报告过问题"));
-  if ((payload.total || 0) > reports.length)
-    nodes.push(
-      el(
-        "div",
-        { class: "hint" },
-        `仅显示最近 ${reports.length} 条，共 ${payload.total} 条`,
-      ),
-    );
   host.replaceChildren(...nodes);
 }
 
@@ -7099,8 +7167,8 @@ function feedbackSection(record) {
     "div",
     { class: "control-bar" },
     el(
-      "span",
-      { class: "hint" },
+      "h4",
+      {},
       `会话反馈 ${(record.reports || []).length} 条，来自 ${record.experiments || 0} 个实验`,
     ),
     ...feedbackBadges(record),
@@ -7364,7 +7432,7 @@ async function loadMemorySelection(selection) {
 function renderMemoryPane() {
   const view = memoryPaneView();
   memoryView.headHost.replaceChildren(
-    el("div", { class: "memory-pane-title" }, view.title),
+    el("h4", { class: "memory-pane-title" }, view.title),
     el("div", { class: "hint memory-pane-meta" }, view.meta || ""),
   );
   memoryView.toolbarHost.replaceChildren(...view.buttons);
