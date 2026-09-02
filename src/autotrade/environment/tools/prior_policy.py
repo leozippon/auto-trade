@@ -107,25 +107,29 @@ _PERFORMANCE_FIGURE = (
     rf"|{_SIGNED_PERCENT})"
 )
 _PERFORMANCE_FIGURE_RE = re.compile(_PERFORMANCE_FIGURE, re.I)
+# The stage reference itself must be a whole word: `test` is a substring of the
+# domain's most common loanwords (`backtest`, `latest`, `contest`), and matching
+# inside them rejected ordinary prose that never named the hidden stage.
+_TEST_WORD = r"(?:(?<![A-Za-z_])tests?(?![A-Za-z_])|测试)"
 _TEST_NUMBER_RE = re.compile(
-    rf"(?:逐\s*fold|每个\s*fold|fold[_\s-]?(?:ref)?\s*\d*).{{0,48}}(?:test|测试)"
+    rf"(?:逐\s*fold|每个\s*fold|fold[_\s-]?(?:ref)?\s*\d*).{{0,48}}{_TEST_WORD}"
     rf".{{0,40}}{_PERFORMANCE_FIGURE}|"
-    rf"(?:test|测试).{{0,24}}{_PERFORMANCE_FIGURE}",
+    rf"{_TEST_WORD}.{{0,24}}{_PERFORMANCE_FIGURE}",
     re.I,
 )
 _TEST_SELECTION_RE = re.compile(
-    r"(根据|按照|基于|凭).{0,20}(?:test|测试).{0,20}(选|选择|保留|淘汰|采用)|"
-    r"(?:test|测试).{0,20}(更好|更差|更优|更稳).{0,16}(所以|因此|于是|选择|保留)|"
-    r"(?:based on|according to).{0,20}test.{0,20}(?:select|choose|retain|reject|adopt)|"
-    r"test.{0,20}(?:better|worse|superior|stable).{0,16}(?:so|therefore|select|retain)",
+    rf"(根据|按照|基于|凭).{{0,20}}{_TEST_WORD}.{{0,20}}(选|选择|保留|淘汰|采用)|"
+    rf"{_TEST_WORD}.{{0,20}}(更好|更差|更优|更稳).{{0,16}}(所以|因此|于是|选择|保留)|"
+    rf"(?:based on|according to).{{0,20}}{_TEST_WORD}.{{0,20}}(?:select|choose|retain|reject|adopt)|"
+    rf"{_TEST_WORD}.{{0,20}}(?:better|worse|superior|stable).{{0,16}}(?:so|therefore|select|retain)",
     re.I,
 )
 # Stricter than the PRIOR check only in reach: a shared skill leaks whether the
 # figure precedes or follows the Test reference, but it still has to be a
 # figure. Held-out mentions are rejected outright by _HELDOUT_MENTION_RE above.
 _STRICT_TEST_NUMBER_RE = re.compile(
-    rf"(?:test|测试).{{0,24}}{_PERFORMANCE_FIGURE}|"
-    rf"{_PERFORMANCE_FIGURE}.{{0,24}}(?:test|测试)",
+    rf"{_TEST_WORD}.{{0,24}}{_PERFORMANCE_FIGURE}|"
+    rf"{_PERFORMANCE_FIGURE}.{{0,24}}{_TEST_WORD}",
     re.I,
 )
 _STRICT_BOUNDARY_LINE_RE = re.compile(

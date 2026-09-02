@@ -182,7 +182,17 @@ class TestFigureLeakTest(unittest.TestCase):
         "test 3 candidates",
         "unit test 2",
         "测试了 4 个参数",
+        # `test` inside a longer word never names the hidden stage, and
+        # `backtest` is the domain's most common such word: a Validation figure
+        # written beside it was the live half of the reported false positives.
+        "该止损条件已在 backtest 中反复验证，回撤超过 3pp 立即平仓",
+        "backtest 年化 12% 是 Validation 口径",
+        "latest gate value at 09:30, drawdown >= 3pp",
+        "H+1 的 latest 快照里 contest 名单更新 2 次",
     )
+    # The stage reference is what carries the leak; keeping it a whole word must
+    # not weaken any of the wordings the gate exists for.
+    WHOLE_WORD_LEAKS = ("Test 年化 12%", "测试窗口 +8%", "test Sharpe 1.2")
 
     def test_shared_skill_content_rejects_figures_and_allows_prose(self) -> None:
         for line in self.LEAKS:
@@ -197,6 +207,11 @@ class TestFigureLeakTest(unittest.TestCase):
         self.assertIn(
             "Test figure", strict_transferable_content_violation("夏普 1.42（Test 窗口）")
         )
+
+    def test_the_stage_reference_must_be_a_whole_word(self) -> None:
+        for line in self.WHOLE_WORD_LEAKS:
+            self.assertIn("Test figure", strict_transferable_content_violation(line), line)
+            self.assertIn("Test figure", prior_content_violation(line), line)
 
     def test_prior_rejects_the_same_figures_and_keeps_process_prose(self) -> None:
         for line in self.LEAKS:
