@@ -96,6 +96,17 @@ const WALK_FORWARD_SOURCES = {
   parent_control: "父本对照",
   frozen_test: "冻结测试",
 };
+// Why a Fold has no deflated-Sharpe probability; mirrors the reasons
+// pipelines/ledger.py::deflated_sharpe records. Never rendered as 0.
+const SELECTION_UNAVAILABLE = {
+  no_nominated_candidate: "本 Fold 未从候选中选出新策略",
+  no_observed_sharpe: "冻结候选没有有效 Sharpe",
+  fewer_than_two_trials: "参与去偏的候选少于 2，无法估计选择偏差",
+  return_series_missing: "读不到冻结候选的回放结果，没有权益曲线",
+  return_series_too_short: "日收益样本过短",
+  zero_return_variance: "日收益无波动",
+  undefined_sharpe_variance: "该分布下 Sharpe 方差无定义",
+};
 const PREP_ENVIRONMENT_STAGES = new Set([
   "preparing_session",
   "pit_snapshot",
@@ -5887,6 +5898,8 @@ function foldResultPanel(detail, session) {
       ]),
     ),
   );
+  const selection = selectionSection(detail, session);
+  if (selection) panel.append(selection);
   panel.append(parentControlSection(detail, session, validation));
   const benchmark = validation.benchmark || {};
   panel.append(
@@ -5976,6 +5989,60 @@ function foldResultPanel(detail, session) {
   return panel;
 }
 
+/* The Fold's own fold_returns row: the console computes the parent-control and
+   selection figures once per Fold there, so the panel reads them instead of
+   recomputing anything from the raw record. */
+function foldReturnsRow(detail, session) {
+  const record = session.record || {};
+  return (detail.fold_returns || []).find(
+    (item) =>
+      item.epoch_id === session.epoch_id &&
+      item.fold_ref === (session.fold_ref || record.fold_ref),
+  );
+}
+
+/* Selection bias: the Fold picks its winner among candidates all quoted on the
+   very window their returns come from, so the winner's Sharpe is the maximum
+   of a search rather than a single draw. The deflated-Sharpe probability
+   (Bailey & López de Prado 2014) says how much of it the search width alone
+   explains. Informational — no acceptance rule reads it. */
+function selectionSection(detail, session) {
+  const stats = (foldReturnsRow(detail, session) || {}).selection;
+  if (!stats) return null;
+  const candidates = stats.candidates_evaluated;
+  // The correction's N is the finite-Sharpe subset, not the raw candidate
+  // count: where they differ, both are shown so the formula's N is never read
+  // off the wrong number.
+  const trials = stats.trials;
+  const probability = stats.deflated_sharpe_probability;
+  const counted =
+    candidates === null || candidates === undefined ? "—" : candidates;
+  const line = el(
+    "div",
+    { class: "meta-line" },
+    trials !== null && trials !== undefined && trials !== candidates
+      ? `本 Fold 评估候选 ${counted} 个，其中 ${trials} 个有有效 Sharpe 参与去偏`
+      : `本 Fold 评估候选数 ${counted}`,
+    el(
+      "span",
+      { class: "mode-note" },
+      probability === null || probability === undefined
+        ? ` · 去偏 Sharpe 概率 —（${SELECTION_UNAVAILABLE[stats.unavailable_reason] || "无法计算"}）`
+        : ` · 去偏 Sharpe 概率 ${probability.toFixed(2)} · 选择阈值 Sharpe* ${fmtSharpe(stats.sharpe_star)}`,
+    ),
+  );
+  return el(
+    "div",
+    { class: "section-gap" },
+    line,
+    el(
+      "div",
+      { class: "meta-line" },
+      "去偏 Sharpe 概率按参与去偏的候选数校正选择偏差（Bailey & López de Prado 2014）：概率越低，冻结候选的 Sharpe 越可能只是多次尝试里运气最好的一次；它只作阅读参考，不参与验收与毕业判定。",
+    ),
+  );
+}
+
 /* This Fold's baseline: before the session starts the host replays the
    inherited parent unchanged over this Fold's Validation window, so the Fold's
    own Validation is read against it rather than on its own. The first Fold of
@@ -5991,12 +6058,7 @@ function parentControlSection(detail, session, validation) {
       { class: "meta-line" },
       "父本对照：本 Fold 没有继承父产物，因此没有基线",
     );
-  const row = (detail.fold_returns || []).find(
-    (item) =>
-      item.epoch_id === session.epoch_id &&
-      item.fold_ref === (session.fold_ref || record.fold_ref),
-  );
-  const metrics = (row || {}).parent_control || {};
+  const metrics = (foldReturnsRow(detail, session) || {}).parent_control || {};
   const failed = control.status !== "ok";
   const metricRow = (label, values) =>
     el(

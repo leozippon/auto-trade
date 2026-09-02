@@ -260,6 +260,83 @@ class ReportingTest(unittest.TestCase):
                 (tmp / "reports" / "epoch_returns" / "epoch_001_returns.png").exists()
             )
 
+    def test_summary_reports_the_selection_width_and_its_correction(self):
+        """The report carries how many candidates each Fold searched and the
+        deflated-Sharpe probability of the one it froze. A Fold whose
+        probability is unavailable is left out of the mean, never counted as
+        0, and a ledger written before the block reports nothing at all."""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            ledger = ExperimentLedger(tmp / "ledger.jsonl")
+            for fold_id, period, candidates, probability in (
+                ("fold_2022", "20220101..20221231", 6, 0.80),
+                ("fold_2023", "20230101..20231231", 2, 0.40),
+                ("fold_2024", "20240101..20241231", 1, None),
+            ):
+                ledger.append(
+                    {
+                        "record_type": "fold",
+                        "experiment_id": "e",
+                        "epoch_id": "epoch_001",
+                        "fold_id": fold_id,
+                        "run_id": f"run_{fold_id}",
+                        "fold_status": "frozen",
+                        "validation_period": period,
+                        "test_period": None,
+                        "validation_result": {
+                            "total_return": 0.10,
+                            "sharpe": 1.1,
+                            "max_drawdown": 0.05,
+                            "benchmark": {"label": "CSI 300", "benchmark_return": 0.02},
+                        },
+                        "test_result": None,
+                        "selection_statistics": {
+                            "candidates_evaluated": candidates,
+                            "trials": candidates,
+                            "deflated_sharpe_probability": probability,
+                            "unavailable_reason": (
+                                None if probability else "fewer_than_two_trials"
+                            ),
+                        },
+                    }
+                )
+            development = build_experiment_report(
+                tmp / "ledger.jsonl", tmp / "reports"
+            )["development"]
+            self.assertAlmostEqual(development["mean_candidates_evaluated"], 3.0)
+            self.assertAlmostEqual(
+                development["mean_deflated_sharpe_probability"], 0.60
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            ledger = ExperimentLedger(tmp / "ledger.jsonl")
+            ledger.append(
+                {
+                    "record_type": "fold",
+                    "experiment_id": "e",
+                    "epoch_id": "epoch_001",
+                    "fold_id": "fold_2022",
+                    "run_id": "run_2022",
+                    "fold_status": "frozen",
+                    "validation_period": "20220101..20221231",
+                    "test_period": None,
+                    "validation_result": {
+                        "total_return": 0.10,
+                        "sharpe": 1.1,
+                        "max_drawdown": 0.05,
+                        "benchmark": {"label": "CSI 300", "benchmark_return": 0.02},
+                    },
+                    "test_result": None,
+                }
+            )
+            development = build_experiment_report(
+                tmp / "ledger.jsonl", tmp / "reports"
+            )["development"]
+            self.assertIsNone(development["mean_candidates_evaluated"])
+            self.assertIsNone(development["mean_deflated_sharpe_probability"])
+
     def test_a_failed_frozen_test_scores_nothing_and_never_falls_back(self):
         # With a Test stage the frozen Test is the scored result: when it failed
         # the Fold contributes no numbers rather than borrowing its Validation.

@@ -11,6 +11,8 @@ evidence except through the explicit frozen-test metric whitelist.
 from __future__ import annotations
 
 import json
+import math
+from collections.abc import Mapping
 from pathlib import Path
 
 from autotrade.environment.identity import AgentRefStore
@@ -110,6 +112,74 @@ def agent_visible_metrics(summary: dict[str, object] | None) -> dict[str, object
     return compact
 
 
+# ``vs_parent``: one candidate's Validation minus the Fold's parent control.
+#
+# Every candidate of a Fold is quoted on the same Validation window as the
+# host's parent control, so the number that carries information is the
+# difference, not two absolute figures read side by side. ``beats_parent`` is
+# True only when BOTH excess deltas are > 0: the raw excess alone cannot
+# separate an edge from a small-cap or high-beta tilt, and the neutralized
+# excess alone cannot show what the tilt actually contributed.
+_VS_PARENT_KEYS = ("excess_return", "neutralized_excess_return")
+
+
+def vs_parent_metrics(
+    summary: Mapping[str, object] | None,
+    control_summary: Mapping[str, object] | None,
+) -> dict[str, object] | None:
+    """Candidate-minus-control deltas for one completed Validation.
+
+    ``None`` when the Fold has no parent control: a Fold that inherited
+    nothing has no baseline on this window, and borrowing another Fold's or
+    another candidate's numbers would invent one. Both excess figures come
+    from the summaries' own ``benchmark`` blocks (window excess return and the
+    annualized size/beta neutralized excess); ``max_drawdown_delta`` compares
+    magnitudes, so it is positive when the candidate drew down more than the
+    parent whichever sign convention the summary uses. ``beats_parent`` is
+    True only when both excess deltas are > 0, and ``None`` when either delta
+    could not be computed.
+    """
+
+    if not isinstance(summary, Mapping) or not isinstance(control_summary, Mapping):
+        return None
+    deltas: dict[str, object] = {}
+    for key in _VS_PARENT_KEYS:
+        candidate = _benchmark_number(summary, key)
+        control = _benchmark_number(control_summary, key)
+        deltas[f"{key}_delta"] = (
+            candidate - control
+            if candidate is not None and control is not None
+            else None
+        )
+    candidate_drawdown = _finite(summary.get("max_drawdown"))
+    control_drawdown = _finite(control_summary.get("max_drawdown"))
+    deltas["max_drawdown_delta"] = (
+        abs(candidate_drawdown) - abs(control_drawdown)
+        if candidate_drawdown is not None and control_drawdown is not None
+        else None
+    )
+    excess = deltas["excess_return_delta"]
+    neutralized = deltas["neutralized_excess_return_delta"]
+    deltas["beats_parent"] = (
+        bool(excess > 0 and neutralized > 0)
+        if isinstance(excess, float) and isinstance(neutralized, float)
+        else None
+    )
+    return deltas
+
+
+def _benchmark_number(summary: Mapping[str, object], key: str) -> float | None:
+    benchmark = summary.get("benchmark")
+    return _finite(benchmark.get(key)) if isinstance(benchmark, Mapping) else None
+
+
+def _finite(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) else None
+
+
 def compact_fold_history(
     record: dict[str, object],
     *,
@@ -152,6 +222,9 @@ def compact_fold_history(
                         "nl_calls",
                         "nl_llm_calls",
                         "nl_wall_seconds",
+                        # Selection evidence: this candidate against the
+                        # Fold's own parent control on the same window.
+                        "vs_parent",
                         "error",
                     )
                     if key in summary

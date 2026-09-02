@@ -401,6 +401,59 @@ def test_review_window_keeps_regular_completed_folds_isolated(tmp_path: Path) ->
     assert empty_window["fold_count"] == 0
 
 
+def test_review_carries_the_selection_statistics_and_the_parent_comparison(
+    tmp_path: Path,
+) -> None:
+    """Meta reads how wide each Fold's search was and how its frozen candidate
+    stood against that Fold's own baseline; both blocks are whitelisted, so a
+    field the projection does not name never crosses."""
+
+    record, _ = _fold(tmp_path, _raw_trace("S"))
+    record["selection_statistics"] = {
+        "candidates_evaluated": 5,
+        "trials": 5,
+        "deflated_sharpe_probability": 0.42,
+        "sharpe_star": 0.61,
+        "trial_sharpe_std": 0.30,
+        "observed_sharpe": 0.90,
+        "return_days": 243,
+        "return_skew": -0.2,
+        "return_kurtosis": 4.1,
+        "unavailable_reason": None,
+        "host_only_note": "/host/path/should/never/cross",
+    }
+    record["vs_parent"] = {
+        "excess_return_delta": 0.06,
+        "neutralized_excess_return_delta": 0.04,
+        "max_drawdown_delta": -0.02,
+        "beats_parent": True,
+        "host_only_note": "/host/path/should/never/cross",
+    }
+    ref_store = AgentRefStore(tmp_path / "experiment")
+    reviews, _sidecars = build_meta_fold_review_bundle([record], ref_store=ref_store)
+    review = _as_map(reviews[0])
+    statistics = _as_map(review["selection_statistics"])
+    assert statistics["candidates_evaluated"] == 5
+    assert statistics["deflated_sharpe_probability"] == 0.42
+    assert statistics["sharpe_star"] == 0.61
+    assert "host_only_note" not in statistics
+    assert _as_map(review["vs_parent"]) == {
+        "excess_return_delta": 0.06,
+        "neutralized_excess_return_delta": 0.04,
+        "max_drawdown_delta": -0.02,
+        "beats_parent": True,
+    }
+
+    # A Fold that inherited nothing and a ledger written before the blocks
+    # existed both read as absent, never as zeros.
+    bare, _ = _fold(tmp_path, _raw_trace("B"), run_id="run_bare")
+    bare_review = _as_map(
+        build_meta_fold_review_bundle([bare], ref_store=ref_store)[0][0]
+    )
+    assert bare_review["selection_statistics"] is None
+    assert bare_review["vs_parent"] is None
+
+
 def test_atomic_tmp_fsync_replace_and_cleanup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

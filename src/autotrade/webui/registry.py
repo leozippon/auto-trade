@@ -302,6 +302,35 @@ def _parent_control_view(record: Mapping[str, object]) -> dict[str, object] | No
     }
 
 
+def _selection_view(record: Mapping[str, object]) -> dict[str, object] | None:
+    """Console projection of one Fold's selection statistics.
+
+    How many candidates the Fold replayed on its Validation window, and the
+    deflated-Sharpe probability of the candidate it froze
+    (``pipelines/ledger.deflated_sharpe``). Validation-only development
+    evidence, never sealed. ``None`` for a Fold record written before the
+    block existed.
+    """
+    block = record.get("selection_statistics")
+    if not isinstance(block, Mapping):
+        return None
+    return {
+        "candidates_evaluated": _count(block.get("candidates_evaluated")),
+        "trials": _count(block.get("trials")),
+        "deflated_sharpe_probability": _number(
+            block.get("deflated_sharpe_probability")
+        ),
+        "sharpe_star": _number(block.get("sharpe_star")),
+        "unavailable_reason": block.get("unavailable_reason"),
+    }
+
+
+def _count(value: object) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
+
+
 def _walk_forward_view(
     records: list[dict[str, object]],
     epoch_id: str,
@@ -632,6 +661,10 @@ def summarize_experiment(directory: Path) -> dict[str, object]:
                         "fold_status": record.get("fold_status"),
                         # Development evidence: the Fold's baseline, never sealed.
                         "parent_control": _parent_control_view(record),
+                        # How wide the search behind this Fold's frozen
+                        # candidate was, and how much of its Sharpe that width
+                        # alone explains.
+                        "selection": _selection_view(record),
                     }
                     # Ordered like ledger.walk_forward_transitions, by
                     # validation window, so labels cannot mis-pair with the

@@ -19,9 +19,12 @@ selection must refuse until a human rolls the dirty frozen trees back.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+import math
+from collections.abc import Mapping, Sequence
 from pathlib import Path
+from statistics import NormalDist
 
+from autotrade.environment.replay.stats import TRADING_DAYS_PER_YEAR
 from autotrade.environment.runtime import (
     append_versioned_jsonl,
     read_versioned_jsonl,
@@ -179,6 +182,124 @@ def _excess_positive(result: object) -> bool:
     if not isinstance(total, (int, float)) or not isinstance(bench, (int, float)):
         return False
     return float(total) - float(bench) > 0
+
+
+# --- selection statistics (docs/pipeline-design.md §2.4) ---------------------
+#
+# A Fold nominates one winner out of the candidates it evaluated on the very
+# window their returns are quoted on, so the winner's Sharpe is the maximum of
+# a search, not a draw. The deflated Sharpe ratio (Bailey & López de Prado,
+# "The Deflated Sharpe Ratio: Correcting for Selection Bias, Backtest
+# Overfitting and Non-Normality", Journal of Portfolio Management 40(5), 2014)
+# is the probability that the selected Sharpe exceeds what the best of N
+# equally plausible trials would reach by chance alone. It is informational:
+# nothing in the pipeline gates on it.
+_EULER_MASCHERONI = 0.5772156649015329
+# Skew and kurtosis of a return series shorter than a trading month say more
+# about the sample than about the strategy, and √(T−1) barely separates
+# anything there. Below this the probability is reported as unavailable.
+DEFLATED_SHARPE_MIN_RETURN_DAYS = 20
+
+
+def deflated_sharpe(
+    *,
+    observed_sharpe: object,
+    trial_sharpes: Sequence[object],
+    returns: Sequence[object],
+    periods_per_year: float = TRADING_DAYS_PER_YEAR,
+) -> dict[str, object]:
+    """Deflated-Sharpe block for one selected candidate out of N trials.
+
+    ``observed_sharpe`` and ``trial_sharpes`` are annualized exactly as the
+    replay summaries report them; ``returns`` are the selected candidate's
+    per-period (daily) returns. The formula works in per-period units, so
+    every Sharpe is divided by ``√periods_per_year`` going in and
+    ``sharpe_star`` is annualized again coming out — the returned figures
+    therefore read directly beside the Sharpe the console shows.
+
+    With V the sample variance of the N trial Sharpes and γ the
+    Euler-Mascheroni constant, the expected maximum Sharpe under N trials is
+
+        SR* = √V · [ (1−γ)·Φ⁻¹(1 − 1/N) + γ·Φ⁻¹(1 − 1/(N·e)) ]
+
+    and the probability that the observed Sharpe exceeds it is
+
+        Φ[ (SR − SR*)·√(T−1) / √(1 − γ₃·SR + (γ₄−1)/4·SR²) ]
+
+    with γ₃ the skew and γ₄ the (non-excess, normal = 3) kurtosis of the T
+    returns. ``deflated_sharpe_probability`` is ``None`` — never 0 — whenever it is
+    undefined; ``unavailable_reason`` then names which condition failed.
+    """
+
+    scale = math.sqrt(float(periods_per_year))
+    trials = [value for value in map(_finite, trial_sharpes) if value is not None]
+    series = [value for value in map(_finite, returns) if value is not None]
+    block: dict[str, object] = {
+        "deflated_sharpe_probability": None,
+        "trials": len(trials),
+        "sharpe_star": None,
+        "trial_sharpe_std": None,
+        "observed_sharpe": _finite(observed_sharpe),
+        "return_days": len(series),
+        "return_skew": None,
+        "return_kurtosis": None,
+        "unavailable_reason": None,
+    }
+    if block["observed_sharpe"] is None:
+        block["unavailable_reason"] = "no_observed_sharpe"
+        return block
+    if len(trials) < 2:
+        # One trial has no dispersion to estimate the maximum's spread from,
+        # and zero trials is not a search at all.
+        block["unavailable_reason"] = "fewer_than_two_trials"
+        return block
+    if len(series) < DEFLATED_SHARPE_MIN_RETURN_DAYS:
+        block["unavailable_reason"] = "return_series_too_short"
+        return block
+    count = len(trials)
+    mean_trial = sum(trials) / count
+    variance = sum((value - mean_trial) ** 2 for value in trials) / (count - 1)
+    # Identical trials leave V = 0, hence SR* = 0: with no dispersion there is
+    # nothing to deflate and the statistic degenerates to the probabilistic
+    # Sharpe ratio against zero, which is the honest answer.
+    trial_std = math.sqrt(variance)
+    normal = NormalDist()
+    sharpe_star = trial_std * (
+        (1.0 - _EULER_MASCHERONI) * normal.inv_cdf(1.0 - 1.0 / count)
+        + _EULER_MASCHERONI * normal.inv_cdf(1.0 - 1.0 / (count * math.e))
+    )
+    block["trial_sharpe_std"] = trial_std
+    block["sharpe_star"] = sharpe_star
+    days = len(series)
+    mean_return = sum(series) / days
+    centered = [value - mean_return for value in series]
+    second = sum(value**2 for value in centered) / days
+    if second <= 0:
+        block["unavailable_reason"] = "zero_return_variance"
+        return block
+    skew = (sum(value**3 for value in centered) / days) / second**1.5
+    kurtosis = (sum(value**4 for value in centered) / days) / second**2
+    block["return_skew"] = skew
+    block["return_kurtosis"] = kurtosis
+    sharpe = float(block["observed_sharpe"]) / scale
+    variance_term = 1.0 - skew * sharpe + (kurtosis - 1.0) / 4.0 * sharpe**2
+    if variance_term <= 0:
+        # The Sharpe estimator's own variance is not positive under these
+        # moments; reporting a probability from it would be a fabrication.
+        block["unavailable_reason"] = "undefined_sharpe_variance"
+        return block
+    statistic = (sharpe - sharpe_star / scale) * math.sqrt(days - 1) / math.sqrt(
+        variance_term
+    )
+    block["deflated_sharpe_probability"] = normal.cdf(statistic)
+    return block
+
+
+def _finite(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) else None
 
 
 def experiment_verdict(

@@ -96,6 +96,7 @@ def _fold_row(record: dict[str, object]) -> dict[str, object]:
     """
     validation = record.get("validation_result") or {}
     test = record.get("test_result") or {}
+    selection = record.get("selection_statistics") or {}
     scored = test or validation
     source = "frozen_test" if test else "validation"
     period = record.get("test_period") if test else record.get("validation_period")
@@ -115,6 +116,13 @@ def _fold_row(record: dict[str, object]) -> dict[str, object]:
         # Secondary series, charted only where it is not the scored result.
         "valid_return": _num(validation.get("total_return")),
         "selected_step": record.get("selected_step_id"),
+        # Selection width and its correction: how many candidates this Fold
+        # replayed on its Validation window, and the deflated-Sharpe
+        # probability of the one it froze (pipelines/ledger.deflated_sharpe).
+        "candidates_evaluated": selection.get("candidates_evaluated"),
+        "deflated_sharpe_probability": _num(
+            selection.get("deflated_sharpe_probability")
+        ),
         "finish_reason": record.get("finish_reason"),
         "period_start": _period_part(period, "start"),
         "period_end": _period_part(period, "end"),
@@ -751,6 +759,25 @@ def _summarize(rows: list[dict[str, object]]) -> dict[str, object]:
             # One-sample t-stat of per-fold active return vs zero; null when n<2 or std==0.
             "active_return_tstat": _tstat(dev_active),
             "fold_status_counts": _counts([str(row["fold_status"]) for row in dev]),
+            # Selection bias: how wide the per-Fold search was, and how much of
+            # the frozen candidates' Sharpe that width alone explains. Folds
+            # whose probability is null (no nominated candidate, too few
+            # trials, too short a series) are left out of the mean, never
+            # counted as 0.
+            "mean_candidates_evaluated": _mean(
+                [
+                    float(row["candidates_evaluated"])
+                    for row in dev
+                    if isinstance(row.get("candidates_evaluated"), int)
+                ]
+            ),
+            "mean_deflated_sharpe_probability": _mean(
+                [
+                    row["deflated_sharpe_probability"]
+                    for row in dev
+                    if row.get("deflated_sharpe_probability") is not None
+                ]
+            ),
         },
         "heldout": {
             "returns": {row["label"]: row["return"] for row in heldout},

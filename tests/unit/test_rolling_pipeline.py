@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import shutil
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from autotrade.pipelines import (
     RollingExperimentPipeline,
     StepResult,
 )
+from autotrade.pipelines.agent_views import vs_parent_metrics
 from autotrade.pipelines.config import (
     MetaSessionResult,
     fold_session_deadline_seconds,
@@ -24,6 +26,7 @@ from autotrade.pipelines.experiment import _session_budgets
 from autotrade.pipelines.folds import build_fold_schedule
 from autotrade.pipelines.hitl_state import fold_session_key
 from autotrade.pipelines.ledger import (
+    DEFLATED_SHARPE_MIN_RETURN_DAYS,
     INTERRUPTED_RUN_ERROR,
     UNKNOWN_MARKER_LINK_KEY,
     UNREADABLE_RUN_MARKER_ERROR,
@@ -31,6 +34,7 @@ from autotrade.pipelines.ledger import (
     FrozenArtifactMutated,
     FrozenArtifactRestoreFailed,
     RunMarkers,
+    deflated_sharpe,
     latest_fold_records,
     latest_heldout_records,
 )
@@ -1462,3 +1466,383 @@ def test_a_run_marker_without_link_keys_is_refused(tmp_path: Path):
     with pytest.raises(ValueError, match="run marker missing link keys"):
         markers.begin({"experiment_id": "experiment_a", "run_id": "run_1"})
     assert not markers.root.exists()
+
+
+# ---------------------------------------------------------------------------
+# Selection statistics (docs/pipeline-design.md §2.4): the parent-control
+# comparison every candidate carries, and the trial count the frozen
+# candidate's Sharpe is deflated against.
+# ---------------------------------------------------------------------------
+
+
+def _candidate_summary(
+    *, total_return: float, sharpe: float, excess: float, neutralized: float
+) -> dict[str, object]:
+    return {
+        "total_return": total_return,
+        "sharpe": sharpe,
+        "max_drawdown": 0.03,
+        "benchmark": {
+            "label": "CSI 300",
+            "benchmark_return": total_return - excess,
+            "excess_return": excess,
+            "neutralized_excess_return": neutralized,
+        },
+    }
+
+
+class ControlBenchmarkEvaluator(RecordingEvaluator):
+    """Parent controls carrying the full benchmark block a real replay writes.
+
+    The neutralized excess is half the raw excess, so a test that reads the
+    wrong one of the two gets a different number instead of the same one.
+    """
+
+    def evaluate(self, request):
+        result = super().evaluate(request)
+        excess = result.summary["total_return"] - 0.02
+        result.summary["benchmark"].update(
+            {"excess_return": excess, "neutralized_excess_return": excess / 2}
+        )
+        result.summary["max_drawdown"] = 0.05
+        return result
+
+
+def _equity_result(path: Path, returns: list[float]) -> str:
+    """A replay result record carrying only the equity curve the statistics read."""
+
+    equity = 1_000_000.0
+    curve = []
+    for index, value in enumerate(returns):
+        equity *= 1.0 + value
+        curve.append(
+            {
+                "trade_date": f"2026{index + 1:04d}",
+                "initial_equity": 1_000_000.0,
+                "equity": equity,
+            }
+        )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"initial_cash": 1_000_000.0, "equity_curve": curve}),
+        encoding="utf-8",
+    )
+    return str(path)
+
+
+def _alternating_returns(count: int) -> list[float]:
+    """Mean 0.002, ±0.01 around it: skew 0 and kurtosis 1, both by hand."""
+    return [0.002 + (0.01 if index % 2 == 0 else -0.01) for index in range(count)]
+
+
+def test_the_deflated_sharpe_matches_a_hand_computed_example():
+    """Bailey & López de Prado (2014) on numbers whose every input is checkable.
+
+    Trials 0.1/0.5/0.3 have mean 0.3 and sample variance 0.04, so √V = 0.2;
+    the return series alternates ±0.01 around its mean, so its skew is 0 and
+    its kurtosis exactly 1, which makes the estimator's variance term 1. The
+    probability is then Φ[(SR − SR*)·√(T−1)] with SR* from the expected-maximum
+    formula.
+    """
+    block = deflated_sharpe(
+        observed_sharpe=0.5,
+        trial_sharpes=[0.1, 0.5, 0.3],
+        returns=_alternating_returns(40),
+        periods_per_year=1.0,
+    )
+    assert block["trials"] == 3
+    assert block["return_days"] == 40
+    assert block["trial_sharpe_std"] == pytest.approx(0.2)
+    assert block["return_skew"] == pytest.approx(0.0, abs=1e-12)
+    assert block["return_kurtosis"] == pytest.approx(1.0)
+    assert block["observed_sharpe"] == 0.5
+    assert block["sharpe_star"] == pytest.approx(0.17056089923013895, rel=1e-12)
+    assert block["deflated_sharpe_probability"] == pytest.approx(
+        0.9801735474758788, rel=1e-12
+    )
+    assert block["unavailable_reason"] is None
+
+
+def test_a_single_trial_leaves_the_deflated_sharpe_unavailable_not_zero():
+    """One trial has no dispersion to estimate the maximum's spread from, and a
+    reported 0 would read as "certainly overfitted" rather than "unknown"."""
+    block = deflated_sharpe(
+        observed_sharpe=0.5,
+        trial_sharpes=[0.5],
+        returns=_alternating_returns(40),
+        periods_per_year=1.0,
+    )
+    assert block["deflated_sharpe_probability"] is None
+    assert block["unavailable_reason"] == "fewer_than_two_trials"
+    assert block["trials"] == 1
+    assert block["sharpe_star"] is None
+
+
+def test_identical_trials_deflate_against_a_zero_threshold():
+    """Zero dispersion across trials means nothing to deflate: SR* is 0 and the
+    statistic degenerates to the probabilistic Sharpe against zero, which is a
+    real answer rather than a missing one."""
+    block = deflated_sharpe(
+        observed_sharpe=0.5,
+        trial_sharpes=[0.5, 0.5, 0.5],
+        returns=_alternating_returns(40),
+        periods_per_year=1.0,
+    )
+    assert block["trial_sharpe_std"] == 0.0
+    assert block["sharpe_star"] == 0.0
+    assert block["unavailable_reason"] is None
+    # Φ(0.5·√39) with a variance term of exactly 1.
+    assert block["deflated_sharpe_probability"] == pytest.approx(
+        0.999103386424075, rel=1e-12
+    )
+
+
+def test_a_short_return_series_leaves_the_probability_unavailable():
+    block = deflated_sharpe(
+        observed_sharpe=0.5,
+        trial_sharpes=[0.1, 0.5, 0.3],
+        returns=_alternating_returns(DEFLATED_SHARPE_MIN_RETURN_DAYS - 1),
+        periods_per_year=1.0,
+    )
+    assert block["deflated_sharpe_probability"] is None
+    assert block["unavailable_reason"] == "return_series_too_short"
+    assert block["return_days"] == DEFLATED_SHARPE_MIN_RETURN_DAYS - 1
+
+
+def test_vs_parent_is_the_candidate_minus_the_control_it_is_given():
+    """Both excess measures decide ``beats_parent``, and the comparison uses the
+    control it is handed — a different baseline gives a different verdict, so a
+    borrowed one could never pass unnoticed."""
+    candidate = _candidate_summary(
+        total_return=0.12, sharpe=0.5, excess=0.10, neutralized=0.06
+    )
+    weak_control = _candidate_summary(
+        total_return=0.06, sharpe=0.2, excess=0.04, neutralized=0.02
+    )
+    weak_control["max_drawdown"] = 0.05
+    block = vs_parent_metrics(candidate, weak_control)
+    assert block == {
+        "excess_return_delta": pytest.approx(0.06),
+        "neutralized_excess_return_delta": pytest.approx(0.04),
+        "max_drawdown_delta": pytest.approx(-0.02),
+        "beats_parent": True,
+    }
+
+    # Same candidate, a control that already neutralized better: the raw excess
+    # still leads but the tilt-adjusted one does not, so it does not beat it.
+    tilted_control = _candidate_summary(
+        total_return=0.06, sharpe=0.2, excess=0.04, neutralized=0.09
+    )
+    other = vs_parent_metrics(candidate, tilted_control)
+    assert other["excess_return_delta"] == pytest.approx(0.06)
+    assert other["neutralized_excess_return_delta"] == pytest.approx(-0.03)
+    assert other["beats_parent"] is False
+
+    assert vs_parent_metrics(candidate, None) is None
+    # A control whose benchmark block never carried the neutralized figure
+    # cannot decide the comparison, and the block says so instead of guessing.
+    bare = {"total_return": 0.06, "max_drawdown": 0.05, "benchmark": {"excess_return": 0.04}}
+    partial = vs_parent_metrics(candidate, bare)
+    assert partial["excess_return_delta"] == pytest.approx(0.06)
+    assert partial["neutralized_excess_return_delta"] is None
+    assert partial["beats_parent"] is None
+
+
+def _selection_fold_pipeline(tmp_path: Path):
+    evaluator = ControlBenchmarkEvaluator({"revision_1": 0.05})
+    return _regular_fold_pipeline(tmp_path, evaluator, max_steps=3)
+
+
+def test_a_fold_counts_its_own_trials_and_deflates_the_frozen_candidates_sharpe(
+    tmp_path: Path,
+):
+    """The Fold's own completed Validations are the trial set; the host's parent
+    control is the baseline, not a trial. The frozen candidate's ``vs_parent``
+    comes from this Fold's control, and the first Fold — which inherited
+    nothing — carries no comparison at all."""
+    pipeline, folds, ledger, _requests = _selection_fold_pipeline(tmp_path)
+    first = pipeline.run_fold("epoch_001", folds[0], parent=None)
+    assert first.frozen is not None
+    first_record = ledger.read("fold")[0]
+    assert first_record["vs_parent"] is None
+    # Three Steps ran, none of them carrying a Sharpe, so the trial count is
+    # honest about how many the formula could use.
+    assert first_record["selection_statistics"]["candidates_evaluated"] == 3
+    assert first_record["selection_statistics"]["trials"] == 0
+    assert first_record["selection_statistics"]["deflated_sharpe_probability"] is None
+
+    pipeline.evaluator.returns[first.frozen.artifact_id] = 0.06
+    winner = _equity_result(tmp_path / "results" / "winner.json", _alternating_returns(40))
+
+    def developer(request):
+        return FoldSessionResult(
+            "conversation",
+            (
+                StepResult(
+                    "control",
+                    "revision_parent_copy",
+                    request.parent_control,
+                    parent_control=True,
+                ),
+                StepResult(
+                    "step_a",
+                    "revision_1",
+                    EvaluationResult(
+                        _candidate_summary(
+                            total_return=0.12, sharpe=0.5, excess=0.10, neutralized=0.06
+                        ),
+                        winner,
+                    ),
+                ),
+                StepResult(
+                    "step_b",
+                    "revision_1",
+                    EvaluationResult(
+                        _candidate_summary(
+                            total_return=0.06, sharpe=0.1, excess=0.04, neutralized=0.01
+                        ),
+                        "results/missing.json",
+                    ),
+                ),
+                StepResult(
+                    "step_c",
+                    "revision_1",
+                    EvaluationResult(
+                        _candidate_summary(
+                            total_return=0.08, sharpe=0.3, excess=0.06, neutralized=0.03
+                        ),
+                        "results/missing.json",
+                    ),
+                ),
+            ),
+            "step_a",
+        )
+
+    pipeline.developer = developer
+    outcome = pipeline.run_fold("epoch_001", folds[1], parent=first.frozen)
+    assert outcome.fold_status == "frozen"
+    record = ledger.read("fold")[1]
+
+    # The control replayed at 0.06 against a 0.02 benchmark: excess 0.04,
+    # neutralized 0.02, drawdown 0.05. The winner: 0.10 / 0.06 / 0.03.
+    assert record["vs_parent"] == {
+        "excess_return_delta": pytest.approx(0.06),
+        "neutralized_excess_return_delta": pytest.approx(0.04),
+        "max_drawdown_delta": pytest.approx(-0.02),
+        "beats_parent": True,
+    }
+    statistics = record["selection_statistics"]
+    assert statistics["candidates_evaluated"] == 3
+    assert statistics["trials"] == 3
+    assert statistics["observed_sharpe"] == 0.5
+    assert statistics["return_days"] == 40
+    assert statistics["trial_sharpe_std"] == pytest.approx(0.2)
+    assert statistics["unavailable_reason"] is None
+    assert 0.0 < statistics["deflated_sharpe_probability"] < 1.0
+
+
+def test_an_unreadable_result_record_is_not_reported_as_a_short_window(
+    tmp_path: Path,
+):
+    """Both leave the probability None, but a missing replay record sends a
+    reader to the file while a short window sends them to the calendar, so the
+    two never share one reason."""
+    pipeline, folds, ledger, _requests = _selection_fold_pipeline(tmp_path)
+    first = pipeline.run_fold("epoch_001", folds[0], parent=None)
+    pipeline.evaluator.returns[first.frozen.artifact_id] = 0.06
+    short = _equity_result(tmp_path / "results" / "short.json", _alternating_returns(4))
+
+    def developer(request):
+        return FoldSessionResult(
+            "conversation",
+            (
+                StepResult(
+                    "control",
+                    "revision_1",
+                    request.parent_control,
+                    parent_control=True,
+                ),
+                StepResult(
+                    "step_a",
+                    "revision_1",
+                    EvaluationResult(
+                        _candidate_summary(
+                            total_return=0.12, sharpe=0.5, excess=0.10, neutralized=0.06
+                        ),
+                        str(tmp_path / "results" / "never_written.json"),
+                    ),
+                ),
+                StepResult(
+                    "step_b",
+                    "revision_1",
+                    EvaluationResult(
+                        _candidate_summary(
+                            total_return=0.08, sharpe=0.3, excess=0.06, neutralized=0.03
+                        ),
+                        short,
+                    ),
+                ),
+            ),
+            "step_a",
+        )
+
+    pipeline.developer = developer
+    pipeline.run_fold("epoch_001", folds[1], parent=first.frozen)
+    statistics = ledger.read("fold")[1]["selection_statistics"]
+    assert statistics["trials"] == 2
+    assert statistics["return_days"] == 0
+    assert statistics["deflated_sharpe_probability"] is None
+    assert statistics["unavailable_reason"] == "return_series_missing"
+
+    # The same Fold with a record that exists but spans four days is short,
+    # not missing.
+    def short_developer(request):
+        steps = developer(request).steps
+        return FoldSessionResult("conversation", steps, "step_b")
+
+    pipeline.developer = short_developer
+    pipeline.run_fold("epoch_001", folds[1], parent=first.frozen)
+    statistics = ledger.read("fold")[2]["selection_statistics"]
+    assert statistics["return_days"] == 4
+    assert statistics["unavailable_reason"] == "return_series_too_short"
+
+
+def test_keeping_the_parent_leaves_no_deflated_sharpe_to_report(tmp_path: Path):
+    """Nominating the control node is not a selection out of the search, so the
+    trial count still stands but the probability stays None."""
+    pipeline, folds, ledger, _requests = _selection_fold_pipeline(tmp_path)
+    first = pipeline.run_fold("epoch_001", folds[0], parent=None)
+    pipeline.evaluator.returns[first.frozen.artifact_id] = 0.06
+
+    def developer(request):
+        return FoldSessionResult(
+            "conversation",
+            (
+                StepResult(
+                    # The control node's revision is the parent tree itself;
+                    # the fake artifact store knows it under this id.
+                    "control",
+                    "revision_1",
+                    request.parent_control,
+                    parent_control=True,
+                ),
+                StepResult(
+                    "step_a",
+                    "revision_1",
+                    EvaluationResult(
+                        _candidate_summary(
+                            total_return=0.03, sharpe=0.2, excess=0.01, neutralized=0.00
+                        ),
+                        "results/missing.json",
+                    ),
+                ),
+            ),
+            "control",
+        )
+
+    pipeline.developer = developer
+    pipeline.run_fold("epoch_001", folds[1], parent=first.frozen)
+    statistics = ledger.read("fold")[1]["selection_statistics"]
+    assert statistics["candidates_evaluated"] == 1
+    assert statistics["deflated_sharpe_probability"] is None
+    assert statistics["unavailable_reason"] == "no_nominated_candidate"

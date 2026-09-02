@@ -133,9 +133,27 @@ def test_local_worker_regular_folds_go_straight_to_held_out(tmp_path: Path):
         assert fold["test_result"] is None
         assert fold["snapshot_ids"]["test_decision_input"] is None
     assert not list((experiment / "artifacts/results").glob("frozen_test_*"))
+    # Selection statistics ride on every Fold record. The deterministic
+    # baseline runs exactly one candidate, so the trial count is honest and
+    # the deflated Sharpe reports itself unavailable rather than 0.
+    for fold in (first, second):
+        statistics = fold["selection_statistics"]
+        assert statistics["candidates_evaluated"] == 1
+        assert statistics["deflated_sharpe_probability"] is None
+        assert statistics["unavailable_reason"] == "fewer_than_two_trials"
     # Parent carry-forward: the second Fold inherits the first Fold's frozen
     # strategy, and the host replayed it on the second window first.
     assert first["parent_control"] is None
+    # No parent, no baseline: the first Fold carries no comparison at all,
+    # while the second has one. The local daily fixture ships no benchmark
+    # series, so its excess deltas stay unavailable instead of invented.
+    assert first["vs_parent"] is None
+    assert second["vs_parent"] == {
+        "excess_return_delta": None,
+        "neutralized_excess_return_delta": None,
+        "max_drawdown_delta": 0.0,
+        "beats_parent": None,
+    }
     assert second["parent_strategy_artifact_id"] == first["frozen_strategy_artifact_id"]
     control = second["parent_control"]
     assert control["status"] == "ok"
@@ -1808,3 +1826,146 @@ def test_meta_trace_payload_keeps_sub_agent_brief_thinking_and_failure_events() 
     )
     assert steer == {"task_id": "agent_1", "role": "auditor", "round": 2, "chars": 40,
                      "delivery": "delivered", "parent_call_id": "call_p"}
+
+
+# ---------------------------------------------------------------------------
+# vs_parent: every candidate a Fold session validates is compared to that
+# Fold's own parent control, on the tool observation, in the run manifest, and
+# therefore in the development history Meta reads back.
+# ---------------------------------------------------------------------------
+
+
+def _benchmarked(evaluator, *, benchmark_return: float):
+    """Wrap a replay so its summaries carry the benchmark block a real one has.
+
+    The neutralized excess is half the raw excess, so a reader that confuses
+    the two gets a different number rather than the same one.
+    """
+
+    class _Wrapped:
+        def evaluate(self, request, max_days=None):
+            result = evaluator.evaluate(request, max_days)
+            excess = result.summary["total_return"] - benchmark_return
+            result.summary["benchmark"] = {
+                "label": "CSI 300",
+                "benchmark_return": benchmark_return,
+                "excess_return": excess,
+                "neutralized_excess_return": excess / 2,
+            }
+            return result
+
+    return _Wrapped()
+
+
+def test_batch_rows_compare_every_candidate_to_this_folds_own_control(tmp_path: Path):
+    """A batch row's ``vs_parent`` is the candidate minus the control the Fold
+    itself ran; without a control there is no baseline and no block at all."""
+    from dataclasses import replace
+
+    from autotrade.pipelines.config import EvaluationResult
+    from tests.unit.test_batch_validate import _Session, _strategy
+
+    session = _Session(tmp_path / "no_control")
+    # No inherited parent on this Fold: nothing to compare against.
+    assert session.backtest.parent_control_summary is None
+    session.candidate("a", _strategy("1"))
+    session.candidate("b", _strategy("22222"))
+    rows = session.call("a", "b").value["candidates"]
+    assert all("vs_parent" not in row for row in rows)
+
+    session = _Session(tmp_path / "with_control")
+    session.backtest.evaluator = _benchmarked(session.evaluator, benchmark_return=0.01)
+    sources = {"a": _strategy("1"), "b": _strategy("22222")}
+    # The harness prices a replay by its source length, so the two candidates
+    # straddle a control placed at their midpoint.
+    excesses = {name: 0.01 * len(source) - 0.01 for name, source in sources.items()}
+    midpoint = (excesses["a"] + excesses["b"]) / 2
+    control = EvaluationResult(
+        {
+            "total_return": midpoint + 0.01,
+            "sharpe": 1.0,
+            "max_drawdown": 0.08,
+            "benchmark": {
+                "label": "CSI 300",
+                "benchmark_return": 0.01,
+                "excess_return": midpoint,
+                "neutralized_excess_return": midpoint / 2,
+            },
+        },
+        "result/parent_control",
+    )
+    session.backtest.request = replace(
+        session.backtest.request, parent_control=control
+    )
+    assert session.backtest.parent_control_summary is control.summary
+    for name, source in sources.items():
+        session.candidate(name, source)
+    rows = {row["name"]: row for row in session.call("a", "b").value["candidates"]}
+
+    loser = rows["a"]["vs_parent"]
+    assert loser["excess_return_delta"] == pytest.approx(excesses["a"] - midpoint)
+    assert loser["neutralized_excess_return_delta"] == pytest.approx(
+        (excesses["a"] - midpoint) / 2
+    )
+    # The harness fixes every candidate's drawdown at 0.05 against a control at
+    # 0.08: the winner also drew down less.
+    assert loser["max_drawdown_delta"] == pytest.approx(-0.03)
+    assert loser["beats_parent"] is False
+
+    winner = rows["b"]["vs_parent"]
+    assert winner["excess_return_delta"] == pytest.approx(excesses["b"] - midpoint)
+    assert winner["beats_parent"] is True
+
+
+def test_meta_history_carries_each_candidates_parent_comparison(tmp_path: Path):
+    """The per-candidate comparison survives into the development history: a
+    key the projection does not name is dropped, so it has to be listed."""
+
+    manifest = tmp_path / "run_manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "backtest_summaries": [
+                    {
+                        "result_name": "valid_001",
+                        "mode": "valid",
+                        "status": "ok",
+                        "complete_validation": True,
+                        "total_return": 0.12,
+                        "vs_parent": {
+                            "excess_return_delta": 0.06,
+                            "neutralized_excess_return_delta": 0.04,
+                            "max_drawdown_delta": -0.02,
+                            "beats_parent": True,
+                        },
+                        "host_only_note": "/host/path/should/never/cross",
+                    },
+                    {
+                        "result_name": "parent_control",
+                        "mode": "valid",
+                        "status": "ok",
+                        "complete_validation": True,
+                        "parent_control": True,
+                        "total_return": 0.06,
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    history = compact_fold_history(
+        {
+            "record_type": "fold",
+            "epoch_id": "epoch_001",
+            "fold_id": "fold_2024",
+            "run_manifest_ref": str(manifest),
+        },
+        ref_store=AgentRefStore(tmp_path / "experiment"),
+    )
+    candidate, control = history["backtest_summaries"]
+    assert candidate["vs_parent"]["beats_parent"] is True
+    assert candidate["vs_parent"]["excess_return_delta"] == 0.06
+    assert "host_only_note" not in candidate
+    # The control is the baseline, not a candidate: it is never compared to
+    # itself, so it carries no block.
+    assert "vs_parent" not in control

@@ -8,6 +8,7 @@ strategy content; it only accepts, freezes, falls back, and records.
 
 from __future__ import annotations
 
+import json
 import time
 import uuid
 from collections.abc import Callable, Mapping
@@ -37,6 +38,7 @@ from autotrade.environment.replay import (
     ReplayResult,
     run_daily_replay,
 )
+from autotrade.environment.replay.style import daily_returns_from_curve
 from autotrade.environment.runtime import agent_trace_path, chmod_tree
 from autotrade.environment.strategy import NLQuery
 
@@ -46,6 +48,9 @@ from .agent_views import (
 )
 from .agent_views import (
     compact_fold_history as _compact_fold_history,
+)
+from .agent_views import (
+    vs_parent_metrics as _vs_parent_metrics,
 )
 from .config import (
     ArtifactRevision,
@@ -75,6 +80,7 @@ from .ledger import (
     FrozenArtifactRestoreFailed,
     RunMarkers,
     assert_no_frozen_artifact_mutation,
+    deflated_sharpe,
     is_frozen_artifact_mutation,
     latest_fold_records,
     walk_forward_transitions,
@@ -443,6 +449,14 @@ class RollingExperimentPipeline:
                     str(frozen.path) if frozen is not None else None
                 ),
                 "validation_result": validation,
+                # How the frozen candidate stands against this Fold's own
+                # baseline, and how wide a search it won (§2.4).
+                "vs_parent": _vs_parent_metrics(
+                    validation, control.summary if control is not None else None
+                ),
+                "selection_statistics": _selection_statistics(
+                    session.steps, selected
+                ),
                 "test_result": test_summary,
                 "test_result_ref": test_result_ref,
                 "run_manifest_ref": session.run_manifest_ref,
@@ -1151,6 +1165,79 @@ def _step_record(step: StepResult) -> dict[str, object]:
         "summary": step.validation.summary,
         "validation_result_ref": step.validation.result_ref,
     }
+
+
+def _selection_statistics(
+    steps: tuple[StepResult, ...], selected: StepResult | None
+) -> dict[str, object]:
+    """How wide this Fold's search was, and how much of the winner it explains.
+
+    ``candidates_evaluated`` counts every candidate the session replayed to a
+    complete Validation on this Fold's window: one per ``daily_backtest`` call
+    and one per ``batch_validate`` candidate that finished. A failed replay
+    never becomes a Step and never counts, and the host's parent control is
+    not a candidate — it is the baseline the search is measured against, not a
+    trial in it.
+
+    That same count is N for :func:`ledger.deflated_sharpe`, computed for the
+    candidate ``finish_fold`` nominated. ``trials`` is the subset of those
+    candidates carrying a finite Sharpe, i.e. the N the formula actually used.
+    Keeping the parent (nominating the control node) or finishing with no
+    candidate leaves the probability ``None``: nothing was selected out of the
+    search, so there is no selection bias to correct.
+    """
+
+    candidates = [step for step in steps if not step.parent_control]
+    nominated = (
+        selected if selected is not None and not selected.parent_control else None
+    )
+    series = (
+        _validation_daily_returns(nominated.validation.result_ref)
+        if nominated
+        else None
+    )
+    statistics = deflated_sharpe(
+        observed_sharpe=(
+            nominated.validation.summary.get("sharpe") if nominated else None
+        ),
+        trial_sharpes=[step.validation.summary.get("sharpe") for step in candidates],
+        returns=series if series is not None else (),
+    )
+    if nominated is None:
+        statistics["unavailable_reason"] = "no_nominated_candidate"
+    elif series is None and statistics["unavailable_reason"] == "return_series_too_short":
+        # The record could not be read at all; saying the window was short
+        # would send a reader looking at the calendar instead of the file.
+        statistics["unavailable_reason"] = "return_series_missing"
+    return {"candidates_evaluated": len(candidates), **statistics}
+
+
+def _validation_daily_returns(result_ref: str) -> list[float] | None:
+    """Daily returns of one completed Validation, read from its own record.
+
+    The equity curve lives in the replay's ``result.json``, never in the
+    summary, and it is the only place the return series exists. ``None`` says
+    the series could not be read at all -- an absent, unreadable or
+    curve-less record -- which is a different fact from a window that is
+    genuinely too short, and the two must not share one reason.
+    """
+
+    path = Path(str(result_ref or ""))
+    if path.is_dir():
+        path = path / "result.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    curve = payload.get("equity_curve") if isinstance(payload, dict) else None
+    if not isinstance(curve, list):
+        return None
+    return [
+        value
+        for _day, value in daily_returns_from_curve(
+            [row for row in curve if isinstance(row, Mapping)]
+        )
+    ]
 
 
 def _parent_control_record(

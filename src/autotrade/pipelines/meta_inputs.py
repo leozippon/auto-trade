@@ -63,6 +63,29 @@ _LEAK_KEYS = frozenset(
         "weekly_returns",
     }
 )
+# Selection evidence a Meta review carries verbatim from the Fold record: how
+# wide the search was, how much of the winner's Sharpe that width alone
+# explains, and how the frozen candidate stood against the Fold's own baseline
+# (pipelines/ledger.deflated_sharpe, pipelines/agent_views.vs_parent_metrics).
+# Host-computed development statistics only — no Test or Held-out evidence.
+_SELECTION_STATISTICS_KEYS = (
+    "candidates_evaluated",
+    "deflated_sharpe_probability",
+    "trials",
+    "sharpe_star",
+    "trial_sharpe_std",
+    "observed_sharpe",
+    "return_days",
+    "return_skew",
+    "return_kurtosis",
+    "unavailable_reason",
+)
+_VS_PARENT_KEYS = (
+    "excess_return_delta",
+    "neutralized_excess_return_delta",
+    "max_drawdown_delta",
+    "beats_parent",
+)
 _COMPLETED_FOLD_STATUSES = frozenset(
     {
         "baseline_missing",
@@ -561,6 +584,14 @@ def build_meta_fold_review_bundle(
                 "validation_result": agent_visible_metrics(
                     validation if isinstance(validation, dict) else None
                 ),
+                # The frozen candidate against this Fold's parent control, and
+                # the trial count its Sharpe was the maximum of.
+                "vs_parent": _allowed_keys(
+                    record.get("vs_parent"), _VS_PARENT_KEYS
+                ),
+                "selection_statistics": _allowed_keys(
+                    record.get("selection_statistics"), _SELECTION_STATISTICS_KEYS
+                ),
                 "test_result": agent_visible_metrics(
                     test_result if isinstance(test_result, dict) else None
                 ),
@@ -580,6 +611,16 @@ def build_meta_fold_review_bundle(
         max_window_bytes=max_window_bytes,
     )
     return reviews, sidecars
+
+
+def _allowed_keys(
+    block: object, keys: Sequence[str]
+) -> dict[str, object] | None:
+    """Whitelisted projection of one host-computed block; None when absent."""
+
+    if not isinstance(block, Mapping):
+        return None
+    return {key: block.get(key) for key in keys if key in block}
 
 
 def _build_full_sidecar(

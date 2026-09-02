@@ -104,7 +104,7 @@ from autotrade.environment.tools.shell import SandboxShellTool
 from autotrade.environment.tools.step_rollback import StepRollbackTool
 from autotrade.environment.tools.workspace import SafeWorkspace
 
-from .agent_views import compact_fold_history
+from .agent_views import compact_fold_history, vs_parent_metrics
 from .config import (
     ArtifactRevision,
     EvaluationBackend,
@@ -964,6 +964,16 @@ class FoldBacktestTool(SessionTimeBudgetAware):
     def session_time_budget(self) -> InferenceTimeBudget:
         return self.time_budget
 
+    @property
+    def parent_control_summary(self) -> dict[str, object] | None:
+        """This Fold's own parent control summary, or None without a parent.
+
+        Every ``vs_parent`` block in the session reads the control from here,
+        so a candidate can never be compared against a neighbour's baseline.
+        """
+        control = self.request.parent_control
+        return control.summary if control is not None else None
+
     def append_manifest_summary(self, summary: dict[str, object]) -> None:
         """Every backtest attempt, successful or not, lands in the run manifest.
 
@@ -1182,6 +1192,9 @@ class FoldBacktestTool(SessionTimeBudgetAware):
         assert node_id is not None and evaluation is not None and check is not None
         step = StepResult(node_id, revision_id, evaluation)
         self.steps.append(step)
+        vs_parent = vs_parent_metrics(
+            evaluation.summary, self.parent_control_summary
+        )
         self.append_manifest_summary(
             {
                 "result_name": result_name,
@@ -1189,6 +1202,7 @@ class FoldBacktestTool(SessionTimeBudgetAware):
                 "status": "ok",
                 "complete_validation": True,
                 **manifest_backtest_stats(evaluation.summary),
+                **({"vs_parent": vs_parent} if vs_parent is not None else {}),
             }
         )
         # A returned EvaluationResult is by construction a full-window replay;
@@ -1200,6 +1214,8 @@ class FoldBacktestTool(SessionTimeBudgetAware):
             "revision_id": self.ref_store.get_or_create("strategy", revision_id),
             "stats": inline_backtest_stats(evaluation.summary),
         }
+        if vs_parent is not None:
+            summary["vs_parent"] = vs_parent
         directive = ""
         if self.request.step_gate_hook is not None:
             directive = self.request.step_gate_hook(
@@ -1349,7 +1365,10 @@ class BatchValidateTool(SessionTimeBudgetAware):
         "modification_check. The call starts only after every background "
         "sub-agent has finished; candidates then replay concurrently on the same "
         "Validation window. Returns one row per candidate: node id, headline "
-        "metrics, the per-quarter return/excess/Sharpe of sub_windows, wall "
+        "metrics, the per-quarter return/excess/Sharpe of sub_windows, the "
+        "vs_parent deltas against this Fold's parent control (excess, "
+        "neutralized excess, drawdown, and beats_parent = both excess deltas "
+        "> 0), wall "
         "seconds, and the exact failure text for any that failed — one failure "
         "never hides the others; each row's result_ref reads back that "
         "candidate's full replay record. Selection stays yours: "
@@ -1752,6 +1771,13 @@ class BatchValidateTool(SessionTimeBudgetAware):
         result_name: str,
         batch_id: str,
     ) -> dict[str, object]:
+        # The screening decision is against the Fold's baseline, not against
+        # zero: ``vs_parent`` is this candidate minus the host's parent control
+        # on the same window (agent_views.vs_parent_metrics), absent when the
+        # Fold inherited no parent.
+        vs_parent = vs_parent_metrics(
+            evaluation.summary, self.backtest.parent_control_summary
+        )
         node_id = self.backtest.record_validation(
             revision,
             evaluation,
@@ -1776,6 +1802,7 @@ class BatchValidateTool(SessionTimeBudgetAware):
                 "candidate": candidate.name,
                 "hypothesis": candidate.hypothesis,
                 **manifest_backtest_stats(evaluation.summary),
+                **({"vs_parent": vs_parent} if vs_parent is not None else {}),
             }
         )
         public_result_ref = f"{node_id}/{VALIDATION_RESULT_ATTACHMENT}"
@@ -1791,6 +1818,7 @@ class BatchValidateTool(SessionTimeBudgetAware):
                 "strategy", revision.revision_id
             ),
             "stats": batch_candidate_stats(evaluation.summary),
+            **({"vs_parent": vs_parent} if vs_parent is not None else {}),
             "result_ref": public_result_ref,
         }
 

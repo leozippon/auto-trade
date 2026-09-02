@@ -1384,7 +1384,8 @@ def test_public_identity_keeps_cjk_slash_lists_and_redacts_host_paths(
     kept = identity.public_text(
         "see https://example.test/docs/path and/or 3/4 relative/path; "
         "GET /api/experiments/x; /mnt/agent/workspace/main.py; "
-        "/mnt/artifacts/a; /mnt/snapshot/s; /mnt/snapshots/t"
+        "/mnt/artifacts/a; /mnt/snapshot/s; /mnt/snapshots/t; "
+        "python /mnt/tools/screen.py --signal notes/idea.py"
     )
     for token in (
         "https://example.test/docs/path",
@@ -1396,6 +1397,7 @@ def test_public_identity_keeps_cjk_slash_lists_and_redacts_host_paths(
         "/mnt/artifacts/a",
         "/mnt/snapshot/s",
         "/mnt/snapshots/t",
+        "python /mnt/tools/screen.py --signal notes/idea.py",
     ):
         assert token in kept
     assert omitted not in kept
@@ -1794,6 +1796,29 @@ class WebuiBackendTest(unittest.TestCase):
                 "error": "TimeoutError: parent control exceeded the deadline",
             },
         }
+        # How wide each Fold's search was and how much of the frozen
+        # candidate's Sharpe that width alone explains; the last Fold ran a
+        # single candidate, which leaves the probability unavailable.
+        selections = {
+            year: {
+                "candidates_evaluated": candidates,
+                # 2024 ran three candidates but one carried no finite Sharpe,
+                # so the formula's N is smaller than the search width.
+                "trials": candidates - 1 if year == "2024" else candidates,
+                "deflated_sharpe_probability": probability,
+                "sharpe_star": 0.42 if probability is not None else None,
+                "observed_sharpe": 1.0,
+                "unavailable_reason": (
+                    None if probability is not None else "fewer_than_two_trials"
+                ),
+            }
+            for year, candidates, probability in (
+                ("2022", 6, 0.81),
+                ("2023", 4, 0.55),
+                ("2024", 3, 0.12),
+                ("2025", 1, None),
+            )
+        }
         records: list[dict[str, object]] = [
             {
                 "record_type": "fold",
@@ -1807,6 +1832,7 @@ class WebuiBackendTest(unittest.TestCase):
                 "test_period": None,
                 "test_result": None,
                 "parent_control": controls[year],
+                "selection_statistics": selections[year],
                 "validation_result": {
                     "total_return": 0.10,
                     "sharpe": 1.0,
@@ -2530,12 +2556,16 @@ class WebuiBackendTest(unittest.TestCase):
             e for e in payload["experiments"] if e["experiment_id"] == "exp_hitl"
         )
         self.assertAlmostEqual(hitl["metrics"]["cum_heldout_return"], -0.03)
-        # A fold row carries identity, status and the Fold's baseline; the
-        # returns themselves are read from each session's own record.
+        # A fold row carries identity, status, the Fold's baseline and its
+        # selection statistics; the returns themselves are read from each
+        # session's own record.
         self.assertEqual(
             sorted(hitl["fold_returns"][0]),
-            ["epoch_id", "fold_ref", "fold_status", "parent_control"],
+            ["epoch_id", "fold_ref", "fold_status", "parent_control", "selection"],
         )
+        # This ledger predates the block, so the row says so instead of
+        # publishing zeros.
+        self.assertIsNone(hitl["fold_returns"][0]["selection"])
 
     def test_fold_returns_carry_the_parent_control_baseline(self) -> None:
         self._build_walk_forward_experiment("exp_wf")
@@ -2564,6 +2594,36 @@ class WebuiBackendTest(unittest.TestCase):
                 "max_drawdown": None,
             },
         )
+
+    def test_fold_returns_carry_the_selection_statistics(self) -> None:
+        """Trial count and deflated-Sharpe probability per Fold: Validation-only
+        development evidence, published beside the baseline and before the
+        Test/Held-out reveal like every other development number."""
+
+        self._build_walk_forward_experiment("exp_wf")
+        detail = self.client.get("/api/experiments/exp_wf").json()
+        self.assertFalse(detail["test_revealed"])
+        rows = {row["fold_ref"]: row for row in detail["fold_returns"]}
+        self.assertEqual(
+            rows[self._fold_ref("fold_2022", "exp_wf")]["selection"],
+            {
+                "candidates_evaluated": 6,
+                "trials": 6,
+                "deflated_sharpe_probability": 0.81,
+                "sharpe_star": 0.42,
+                "unavailable_reason": None,
+            },
+        )
+        # The correction's N is the finite-Sharpe subset, served apart from the
+        # search width so the console never credits it to the wrong number.
+        narrowed = rows[self._fold_ref("fold_2024", "exp_wf")]["selection"]
+        self.assertEqual(narrowed["candidates_evaluated"], 3)
+        self.assertEqual(narrowed["trials"], 2)
+        thin = rows[self._fold_ref("fold_2025", "exp_wf")]["selection"]
+        self.assertEqual(thin["candidates_evaluated"], 1)
+        # Unavailable, never 0: one trial cannot estimate the selection bias.
+        self.assertIsNone(thin["deflated_sharpe_probability"])
+        self.assertEqual(thin["unavailable_reason"], "fewer_than_two_trials")
 
     def test_epoch_metrics_carry_the_walk_forward_transition_counts(self) -> None:
         """The per-Epoch counts carry the two-thirds bar the acceptance rules
