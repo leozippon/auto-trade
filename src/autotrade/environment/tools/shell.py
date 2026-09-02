@@ -132,7 +132,8 @@ def _shell_description(
         "command-line string is rejected. Each argv element is at most "
         f"{SHELL_ARGV_MAX_CHARS} chars: put longer code in a file with write_file "
         '(e.g. notes/probe.py) and run ["python", "notes/probe.py"]. '
-        "`cwd` and every path must stay inside the workspace (relative, no `..`). "
+        "`cwd` and every path must stay inside the workspace (relative, no `..`); "
+        "`skills/` is read-only for shell too (write_skill/delete_skill are its only writers). "
         "These are real sandbox filesystem paths under the workspace root, which the "
         "sandbox mounts at /mnt/agent/workspace and this tool enters as `.`; the file "
         "tools (read_file/write_file/edit_file/grep/glob) address the same files as a "

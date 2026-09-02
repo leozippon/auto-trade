@@ -29,7 +29,9 @@ _PRIOR_REDLINES = (
 class FinishMetaTool:
     spec = ToolSpec(
         "finish_meta",
-        "Finish local Meta learning after maintaining the fixed PRIOR.md. "
+        "Finish local Meta learning after maintaining the fixed PRIOR.md; the call "
+        "starts only after every background sub-agent has finished, and once it "
+        "succeeds the remaining tool calls of this assistant turn are cancelled. "
         + _PRIOR_REDLINES,
         {
             "type": "object",

@@ -131,7 +131,9 @@ class FinishFoldTool:
         "completed batch_validate rounds, and one that leaves more than a third of "
         "the backtest budget unused must carry early_stop_reason (which hypotheses "
         "stay untested and why they are not worth the remaining budget); the reason "
-        "is recorded with the Fold result for the Meta review.",
+        "is recorded with the Fold result for the Meta review. The call starts only "
+        "after every background sub-agent has finished, and once it succeeds the "
+        "remaining tool calls of this assistant turn are cancelled.",
         {
             "type": "object",
             "properties": {

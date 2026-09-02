@@ -782,7 +782,7 @@ def test_prompt_and_facts_encode_daily_json_and_offline_meta_boundaries(
     prompt = build_system_prompt(mode="fold", experiment_facts={"fold": "visible"})
     assert "generate_orders(context)" in prompt
     assert "严格 JSON 往返的订单数组" in prompt
-    assert "分钟策略时钟" in prompt
+    assert "策略执行时钟" in prompt
     assert "不能假定 `context.bars` 含完整历史" in prompt
     assert "实际挂载清单、schema、单位引用" in prompt
     assert "Test" in prompt and "Held-out" in prompt
@@ -798,8 +798,8 @@ def test_prompt_and_facts_encode_daily_json_and_offline_meta_boundaries(
     meta_prompt = build_system_prompt(mode="meta", experiment_facts={})
     assert "离线 Meta 主协调者" in META_SYSTEM_PROMPT
     assert "# 核心执行合同" not in meta_prompt
-    assert "`buy`/`sell` action" in meta_prompt
-    assert "不早于 `context.inference_at`" in meta_prompt
+    # The strategy contract itself lives in the mounted README, not the prompt.
+    assert "`output/README.md` 规定的策略合同" in meta_prompt
     # The Meta session is offline and evidence-bounded, may regularize under
     # the modification constraints, and may declare its own image dependencies.
     for rule in (
@@ -808,7 +808,7 @@ def test_prompt_and_facts_encode_daily_json_and_offline_meta_boundaries(
         "`inputs/meta_context.json`",
         "`modification_check`",
         "sandbox_environment.json",
-        "焊接的日历日期",
+        "日历日期",
     ):
         assert rule in META_SYSTEM_PROMPT
 

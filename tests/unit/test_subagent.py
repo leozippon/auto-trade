@@ -272,6 +272,169 @@ def test_subagent_write_edit_shell_and_checks_persist(tmp_path: Path) -> None:
     assert result["tool_calls"] == 4
 
 
+class LockstepLLM:
+    """Scripted replies gated on a shared barrier, so two children interleave
+    their tool rounds instead of running back to back."""
+
+    provider = "scripted"
+    model = "scripted"
+    context_window_tokens = None
+
+    def __init__(self, responses, barrier: threading.Barrier) -> None:
+        self._responses = deque(responses)
+        self._barrier = barrier
+
+    def complete(
+        self,
+        messages,
+        *,
+        tools=(),
+        tool_choice="auto",
+        max_tokens=None,
+    ) -> ProviderResponse:
+        del messages, tools, tool_choice, max_tokens
+        self._barrier.wait(timeout=30)
+        if not self._responses:
+            raise RuntimeError("LockstepLLM has no response remaining")
+        return self._responses.popleft()
+
+
+def _candidate_writer(name: str, barrier: threading.Barrier) -> LockstepLLM:
+    return LockstepLLM(
+        [
+            ProviderResponse(
+                tool_calls=(
+                    ToolCall(
+                        f"{name}-main",
+                        "write_file",
+                        {
+                            "path": f"candidates/{name}/main.py",
+                            "content": f"# {name}\n{_STRATEGY}",
+                        },
+                    ),
+                )
+            ),
+            ProviderResponse(
+                tool_calls=(
+                    ToolCall(
+                        f"{name}-lib",
+                        "write_file",
+                        {
+                            "path": f"candidates/{name}/lib/fit.py",
+                            "content": f"NAME = {name!r}\n",
+                        },
+                    ),
+                )
+            ),
+            ProviderResponse(content=f"结论：{name} 已写入。"),
+        ],
+        barrier,
+    )
+
+
+def test_concurrent_subagents_do_not_drop_each_others_workspace_writes(
+    tmp_path: Path,
+) -> None:
+    """Concurrent children write one live workspace: no private copy is taken
+    at launch and nothing is merged back at completion, so disjoint paths must
+    all survive whichever child finishes last."""
+
+    workspace = tmp_path / "agent"
+    workspace.mkdir()
+    safe = SafeWorkspace(workspace)
+    # One registry over one SafeWorkspace serves every child, as the Fold
+    # session builds it.
+    tools = ToolRegistry([WriteFileTool(safe), EditFileTool(safe)])
+    barrier = threading.Barrier(2)
+    results: dict[str, dict[str, object]] = {}
+
+    def run(name: str) -> None:
+        results[name] = SubAgentEngine(
+            llm=_candidate_writer(name, barrier), tools=tools
+        ).run(f"实现候选 {name}", role="developer")
+
+    threads = [threading.Thread(target=run, args=(name,)) for name in ("g20", "h1")]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+    assert not [thread for thread in threads if thread.is_alive()]
+    assert {name: record["status"] for name, record in results.items()} == {
+        "g20": "completed",
+        "h1": "completed",
+    }
+    assert {
+        item.relative_to(workspace).as_posix()
+        for item in workspace.rglob("*")
+        if item.is_file()
+    } == {
+        "candidates/g20/main.py",
+        "candidates/g20/lib/fit.py",
+        "candidates/h1/main.py",
+        "candidates/h1/lib/fit.py",
+    }
+    for name in ("g20", "h1"):
+        candidate = workspace / "candidates" / name
+        assert candidate.joinpath("main.py").read_text(encoding="utf-8").startswith(
+            f"# {name}"
+        )
+        assert candidate.joinpath("lib", "fit.py").read_text(
+            encoding="utf-8"
+        ) == f"NAME = {name!r}\n"
+
+
+def test_later_subagent_write_to_one_path_wins_and_leaves_the_rest(
+    tmp_path: Path,
+) -> None:
+    """Same shared tree, same path: the later write replaces that file only.
+
+    There is no merge and no rollback of the earlier child, so the first
+    child's other file stays exactly as it left it."""
+
+    workspace = tmp_path / "agent"
+    workspace.mkdir()
+    safe = SafeWorkspace(workspace)
+    tools = ToolRegistry([WriteFileTool(safe), EditFileTool(safe)])
+    for name in ("first", "second"):
+        result = SubAgentEngine(
+            llm=ScriptedLLM(
+                [
+                    ProviderResponse(
+                        tool_calls=(
+                            ToolCall(
+                                f"{name}-shared",
+                                "write_file",
+                                {
+                                    "path": "candidates/shared.py",
+                                    "content": f"OWNER = {name!r}\n",
+                                },
+                            ),
+                            ToolCall(
+                                f"{name}-own",
+                                "write_file",
+                                {
+                                    "path": f"candidates/{name}.py",
+                                    "content": f"OWNER = {name!r}\n",
+                                },
+                            ),
+                        )
+                    ),
+                    ProviderResponse(content=f"结论：{name} 已写入。"),
+                ]
+            ),
+            tools=tools,
+        ).run(f"写入 {name}", role="developer")
+        assert result["status"] == "completed"
+    candidates = workspace / "candidates"
+    assert candidates.joinpath("shared.py").read_text(encoding="utf-8") == (
+        "OWNER = 'second'\n"
+    )
+    assert candidates.joinpath("first.py").read_text(encoding="utf-8") == (
+        "OWNER = 'first'\n"
+    )
+    assert candidates.joinpath("second.py").exists()
+
+
 def test_subagent_write_failure_does_not_finish_parent(tmp_path: Path) -> None:
     events: list[str] = []
     subagent = SubAgentEngine(
@@ -1024,6 +1187,15 @@ def test_general_prompts_explain_mode_and_role() -> None:
     assert "一级 `general-purpose`" in fold
     assert "修改共享策略、模型或 skills" in fold
     assert "有界的跨域实现任务" in fold
+    # Writers share one live tree with the parent and sibling children: no
+    # private copy, no merge-back, so writes stay inside the task's paths.
+    for clause in (
+        "共用的同一棵实时目录树",
+        "只在 task 给定的路径下创建、修改与删除",
+        "删除目录要在汇报里写明删了什么",
+    ):
+        assert clause in fold
+        assert clause not in subagent_system_prompt("fold", "auditor")
     assert "`general-purpose`" in meta
     assert "只读" in meta
     assert "不能写策略、models、skills 或 PRIOR" in meta
@@ -2330,7 +2502,7 @@ def test_agent_description_states_role_capabilities_and_thinking_tiers() -> None
     thinking_field = AGENT_TOOL_SPEC.input_schema["properties"]["thinking"]["description"]
     assert "均为 xhigh" in thinking_field and continuations in thinking_field
     for prompt in (FOLD_WORKFLOW_SECTION, build_system_prompt(mode="meta", experiment_facts={})):
-        assert "xhigh" in prompt and "low/medium" in prompt and "action=message" in prompt
+        assert "low/medium" in prompt and "action=message" in prompt
         assert "xhigh 只给纯文本" not in prompt
         assert "优先 `resume`" not in prompt
     agent_field = AGENT_TOOL_SPEC.input_schema["properties"]["agent"]
@@ -3509,7 +3681,7 @@ def test_prompts_carry_the_todo_convention_and_per_launch_knobs() -> None:
     meta = build_system_prompt(mode="meta", experiment_facts={})
     for prompt, finish in ((fold, "finish_fold"), (meta, "finish_meta")):
         assert "`TODO.md`" in prompt and "不需要任何人工参与" in prompt
-        assert "owner: parent|<task_id> · status: pending|running|done|failed · result: <一句话>" in prompt
+        assert "每个任务一行，写明负责方、状态和一句话结果" in prompt
         assert f"`{finish}` 前核对全部条目" in prompt
     assert "`thinking` 与 `max_turns` 由你按次决定" in FOLD_WORKFLOW_SECTION
 
