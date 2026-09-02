@@ -8,6 +8,7 @@
 /.runtime/
 /experiments/
 CLAUDE.md
+AGENTS.md
 
 # Python bytecode and caches
 __pycache__/
