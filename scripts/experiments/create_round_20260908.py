@@ -1,14 +1,16 @@
 #!/usr/bin/env python
-"""Create the 2026-09-07 round: five research directions on the four-Fold design.
+"""Create the 2026-09-08 round: four research directions on the four-Fold design.
 
 This script lives in scripts/experiments/ and supersedes the gitignored
-logs/launch/ location where earlier round definitions were stranded.
+logs/launch/ location where earlier round definitions were stranded. One round
+definition is kept here at a time; superseded rounds stay in git history.
 
-The slate keeps the four arms that earned their places in the previous round
-(factor_cs, explore_github, explore_platform, open_mechanism) and replaces
-ml_numpy_ranker — the weakest arm, whose cross-sectional-ranker space overlaps
-factor_cs — with a new corner-cases direction mounting
-configs/workspace_refs/corner_cases_20260907.
+The slate is the previous round minus corner_cases: that arm is still running as
+corner_cases_20260907 and is deliberately left untouched, while factor_cs,
+explore_platform, explore_github and open_mechanism are terminated, archived and
+restarted here on the current code and the current v9 seed. Each of the four
+keeps the reference pack, budgets and model settings it had in the previous
+round; only the experiment id moves.
 
 The round keeps every console creation default (Development window cut into four
 regular yearly Folds, no Test stage, 3 Epochs, Meta before every Fold, explicit
@@ -20,7 +22,7 @@ mounted reference pack, the exploration directive, and CPU-only sandboxes.
 
 WEB_CREATE_DEFAULTS is the base -- no stale params template is read -- and
 EXPECTED_DEFAULTS pins the values this round depends on, so a drift in the
-console defaults stops the script instead of silently re-scoping five
+console defaults stops the script instead of silently re-scoping four
 experiments.
 
 Every parameter set is validated offline with every request-level check the
@@ -28,13 +30,14 @@ console applies on POST /api/experiments (ExperimentManager.create_experiment's
 key, id and stamp rules plus the worker's own resolve_worker_options
 pre-flight), and additionally refuses a directive the PRIOR calendar policy
 would reject. The console's deployment-state checks -- an experiment directory
-that already exists and a free running slot -- can only be decided against the
-live server and still happen at POST time, so --dry-run answers whether the
-parameters are acceptable, not whether the server will take the experiment now.
+that already exists and a free running slot (corner_cases_20260907 holds one of
+the five) -- can only be decided against the live server and still happen at
+POST time, so --dry-run answers whether the parameters are acceptable, not
+whether the server will take the experiment now.
 
 Usage:
   PYTHONPATH=src ~/miniconda3/envs/quant/bin/python \
-      scripts/experiments/create_round_20260907.py <port> [--dry-run] [experiment_id ...]
+      scripts/experiments/create_round_20260908.py <port> [--dry-run] [experiment_id ...]
 """
 
 from __future__ import annotations
@@ -153,7 +156,7 @@ OPEN_MECHANISM_PRIOR_DIRECTIVE = (
 )
 
 ROUND: dict[str, dict[str, object]] = {
-    "factor_cs_20260907": {
+    "factor_cs_20260908": {
         "workspace_reference": "configs/workspace_refs/factor_cs_20260826",
         "fold_exploration_directive": "\n".join(
             [
@@ -172,31 +175,7 @@ ROUND: dict[str, dict[str, object]] = {
             ]
         ),
     },
-    "corner_cases_20260907": {
-        "workspace_reference": "configs/workspace_refs/corner_cases_20260907",
-        "fold_exploration_directive": "\n".join(
-            [
-                "方向：专注 A 股市场的角落状态——涨跌停板动力学、停牌复牌再定价、ST 与摘帽戴帽、新股上市初期、"
-                "除权除息、解禁事件窗、极端市场日宽度——把普通截面策略过滤掉或处理错的边缘状态写成可证伪的"
-                "最小机制，每一步只推进一个机制，正式产物写在 output/ 包内。",
-                "先读 refs/README.md 与 exploration-plan.md，再按 pit-field-map.md 核对每个字段的可见时间与单位；"
-                "先在输入窗做各家族的可交易事件数普查，事件数不足的机制如实判「不可测」，"
-                "诚实的零结果与被证伪的方向都是本方向的合格产出。",
-                "角落状态的可执行性必须显式论证：封死的涨停买不进、复牌当日常被拒单、跌停票出不去、"
-                "新股首日没有可见行情；每个候选都要写明真实可达的入场与出场路径并汇报拒单。"
-                "角落组合天然集中，仓位上限、篮子分散与无信号日持币必须把最大回撤守在硬限之内。",
-                "股票池不做任何 ST、板块、次新、市值或价格筛选；可交易性、停牌与涨跌停由策略自己处理并说明理由。",
-                SESSION_LINE,
-                PARENT_CONTROL_LINE,
-                PREREGISTER_LINE,
-                FITTING_LINE,
-                ROBUSTNESS_LINE,
-                "禁止克隆父策略、禁止把 refs 拷进 output、禁止写死路径与股票代码；每一行输入都必须满足"
-                " available_at <= 推断时点，财务用 available_at。可执行指纹必须不同于父策略。",
-            ]
-        ),
-    },
-    "explore_platform_strategies_20260907": {
+    "explore_platform_strategies_20260908": {
         "workspace_reference": "configs/workspace_refs/explore_platform_strategies",
         "fold_exploration_directive": "\n".join(
             [
@@ -215,7 +194,7 @@ ROUND: dict[str, dict[str, object]] = {
             ]
         ),
     },
-    "explore_github_strategies_20260907": {
+    "explore_github_strategies_20260908": {
         "workspace_reference": "configs/workspace_refs/explore_github_strategies",
         "fold_exploration_directive": "\n".join(
             [
@@ -235,7 +214,7 @@ ROUND: dict[str, dict[str, object]] = {
             ]
         ),
     },
-    "open_mechanism_20260907": {
+    "open_mechanism_20260908": {
         # No workspace_reference and no inherit_from: the arm starts from the
         # empty template with nothing mounted but the operating memory.
         "fold_exploration_directive": "\n".join(
