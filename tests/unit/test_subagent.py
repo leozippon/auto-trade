@@ -2924,6 +2924,12 @@ def test_child_compacts_at_the_shared_threshold_with_fresh_counters_per_launch()
     round_two = child_llm.calls[1]["messages"]
     assert is_compaction_message(round_two[1]) and len(round_two) == 4
     assert not any(is_compaction_message(m) for m in child_llm.calls[0]["messages"])
+    # Compaction rewrites the child's history, never its role prompt: the
+    # system message stays byte-identical across the boundary.
+    role_prompt = subagent_system_prompt("fold", "auditor")
+    for call in child_llm.calls:
+        head = call["messages"][0]
+        assert head.role == "system" and head.content == role_prompt
     compactions = [payload for event, payload in events if event == "subagent_context_compaction"]
     assert [payload["task_id"] for payload in compactions] == [first["task_id"], second["task_id"]]
     record = compactions[0]

@@ -7,6 +7,10 @@ continuation summary (Pi's compaction shape), replaces older messages with it,
 and keeps recent raw turns. One attempt per trigger: a failed compaction is
 recorded and the runner continues with the emergency in-place tool-result
 fitting, which is the fail-closed overflow recovery.
+
+Compaction rewrites history only: the conversation's system prompt is carried
+over verbatim, so the session (or child) keeps the exact contract it was
+composed with and the provider's prefix cache still covers it.
 """
 
 from __future__ import annotations
@@ -196,6 +200,15 @@ class ContextCompactor(SessionTimeBudgetAware):
         step_id: str | None = None,
         force: bool = False,
     ) -> ContextCompactionResult | None:
+        # Every caller starts its conversation with the system prompt and the
+        # whole module treats ``messages[0]`` as that prompt: it is the one
+        # message compaction keeps verbatim, and ``messages[1:]`` is what gets
+        # summarized. A conversation shaped otherwise would silently summarize
+        # the session's contract away, so it is refused here.
+        if not messages or messages[0].role != "system":
+            raise ValueError(
+                "compaction requires a conversation whose first message is the system prompt"
+            )
         should_compact, decision = self.should_compact(
             messages, tools=tools, remaining_seconds=remaining_seconds, force=force
         )
@@ -248,6 +261,7 @@ class ContextCompactor(SessionTimeBudgetAware):
         recent_messages = drop_leading_orphan_tools(
             non_summary[-self.config.keep_recent_messages :]
         )
+        # The system prompt is reused as the same object, never re-rendered.
         compacted_messages = (messages[0], summary_message, *recent_messages)
         event = {
             **decision,

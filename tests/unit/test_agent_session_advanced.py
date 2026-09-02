@@ -127,6 +127,11 @@ def test_compactor_replaces_old_messages_and_keeps_recent_tool_turns():
         == "context_compaction"
     )
     assert len(result.messages) == 4
+    assert result.messages[0] is messages[0]
+    # A conversation that does not start with its system prompt would have the
+    # session contract summarized away; compaction refuses it instead.
+    with pytest.raises(ValueError, match="system prompt"):
+        compactor.compact(messages[1:])
 
 
 def test_compactor_bounds_one_huge_recent_tool_result_before_local_request():
@@ -612,6 +617,81 @@ def test_fold_session_triggers_semantic_compact_on_threshold(tmp_path: Path):
     ]
     assert tool_ids
     assert set(tool_ids) <= set(assistant_ids)
+
+
+def test_compaction_keeps_the_session_system_prompt_byte_identical(tmp_path: Path):
+    """The system prompt is composed once and reused verbatim all session.
+
+    Compaction rewrites history; it must not re-render or re-place the system
+    prompt, both because the session contract has to stay identical and
+    because a byte-stable prefix is what the provider's cache keys on."""
+    finish, node_id = finish_fold_tool(tmp_path)
+    system_prompt = build_system_prompt(
+        mode="fold",
+        experiment_facts={"experiment_id": "exp_x", "fold_id": "fold_ref_ab"},
+        phase="exploration",
+        step_tree_enabled=True,
+        prior_prompt="# PRIOR\n- keep the momentum direction",
+        fold_directive="check the volume filter",
+    )
+    compact_llm = ScriptedLLM(
+        [ProviderResponse(content="## 目标\ncontinue\n\n## 下一步\n- finish")] * 4
+    )
+    llm = ScriptedLLM(
+        [
+            ProviderResponse(
+                tool_calls=(ToolCall(f"s{index}", "shell", {"argv": ["rg", "a"]}),)
+            )
+            for index in range(3)
+        ]
+        + [
+            ProviderResponse(
+                tool_calls=(ToolCall("f", "finish_fold", {"node_id": node_id}),)
+            )
+        ]
+    )
+    events: list[tuple[str, dict[str, object]]] = []
+    time_budget = InferenceTimeBudget(duration_seconds=120.0)
+    shared = SessionCallBudget(max_calls=20, time_budget=time_budget)
+    runner = AgentSessionRunner(
+        llm=SessionBudgetLLM(llm, budget=shared, role="main"),
+        tools=ToolRegistry([DeclaredReadOnlyShell(), finish]),
+        system_prompt=system_prompt,
+        config=AgentSessionConfig(max_llm_calls=6),
+        compactor=ContextCompactor(
+            SessionBudgetLLM(compact_llm, budget=shared, role="compact"),
+            ContextCompactionConfig(
+                token_threshold=1,
+                min_messages=6,
+                keep_recent_messages=2,
+                min_remaining_seconds=0,
+            ),
+        ),
+        time_budget=time_budget,
+        event_sink=lambda event, payload: events.append((event, payload)),
+    )
+
+    assert runner.run("inspect then finish").status == "finished"
+
+    compactions = [
+        payload
+        for event, payload in events
+        if event == "context_compaction" and payload["status"] == "ok"
+    ]
+    assert compactions, "the session must cross a compaction to prove the invariant"
+    lengths = [len(call["messages"]) for call in llm.calls]
+    # History really shrank, so the equality below is not a vacuous check.
+    assert any(later < earlier for earlier, later in zip(lengths, lengths[1:]))
+    assert any(
+        "context_compaction" in (message.content or "")
+        for message in llm.calls[-1]["messages"]
+    )
+    for call in llm.calls:
+        head = call["messages"][0]
+        assert head.role == "system"
+        assert head.content == system_prompt
+    assert events[0][0] == "session_start"
+    assert events[0][1]["system_prompt"] == system_prompt
 
 
 def test_disabled_compact_fails_closed_without_dropping_history(tmp_path: Path):
