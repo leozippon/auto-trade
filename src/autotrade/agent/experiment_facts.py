@@ -249,12 +249,12 @@ def _snapshot_windows(snapshot_config: Mapping[str, object]) -> dict[str, object
 
 
 def _execution_policy(data_summary: Mapping[str, object]) -> dict[str, object]:
-    visible_files = _visible_file_names(data_summary)
+    populated_files = _populated_file_names(data_summary)
     return {
-        "historical_minutes_available": "intraday_1min.parquet" in visible_files,
-        "auction_available": "auction.parquet" in visible_files,
-        "events_available": "events.parquet" in visible_files,
-        "text_available": "text_index.parquet" in visible_files,
+        "historical_minutes_available": "intraday_1min.parquet" in populated_files,
+        "auction_available": "auction.parquet" in populated_files,
+        "events_available": "events.parquet" in populated_files,
+        "text_available": "text_index.parquet" in populated_files,
         "strategy_clock": "configured_schedule_only",
         "execution_time": "order_execute_at_exact",
         "missing_exact_price": "reject",
@@ -444,12 +444,25 @@ def _meta_learning_facts(manifest: Mapping[str, object]) -> dict[str, object]:
     )
 
 
-def _visible_file_names(data_summary: Mapping[str, object]) -> set[str]:
+def _populated_file_names(data_summary: Mapping[str, object]) -> set[str]:
+    """File names that actually carry rows in at least one visible view.
+
+    A switched-off domain (minute bars by default) or a domain with nothing in
+    the visible window (the auction file before 2025) is still written as a
+    zero-row Parquet, so file presence alone would advertise research columns
+    that do not exist and execution prices every order would be rejected for as
+    ``missing_execution_price``. The replay engine already gates its minute
+    execution-price source on the file's row count, and this projection states
+    the same fact to the session.
+    """
+
     names: set[str] = set()
     for view in _as_mapping(data_summary.get("views")).values():
         for item in _as_list(_as_mapping(view).get("files")):
-            path = str(_as_mapping(item).get("path") or "")
-            if path:
+            record = _as_mapping(item)
+            path = str(record.get("path") or "")
+            rows = record.get("rows")
+            if path and isinstance(rows, int) and rows > 0:
                 names.add(path.rsplit("/", 1)[-1])
     return names
 

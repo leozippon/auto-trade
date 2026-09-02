@@ -140,7 +140,7 @@ The fixed inference time controls when the strategy runs; each order independent
 - `15:00` uses that trading day's normalized daily `close`.
 - Any other timestamp requires the same symbol's static historical one-minute row at that exact minute and uses its `close`.
 
-If the exact price source is absent or invalid, including when the required daily row is unavailable, the order is rejected as `missing_execution_price`; the Environment does not substitute an adjacent minute or a daily endpoint.
+If the exact price source is absent or invalid, including when the required daily row is unavailable, the order is rejected as `missing_execution_price`; the Environment does not substitute an adjacent minute or a daily endpoint. Minute bars are off by default, and the run facts state whether this run actually has them: with `execution_policy.historical_minutes_available` false, only `09:30` and `15:00` can fill and every other `execute_at` is rejected.
 
 ## DailyBroker quick reference
 

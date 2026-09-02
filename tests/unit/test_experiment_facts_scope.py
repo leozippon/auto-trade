@@ -16,7 +16,11 @@ from autotrade.environment.llm import ProviderResponse, ScriptedLLM, ToolCall
 from autotrade.pipelines.local_backend import LLMMetaLearner
 
 
-def _facts(**manifest_overrides: object) -> dict[str, object]:
+def _facts(
+    *,
+    data_summary: dict[str, object] | None = None,
+    **manifest_overrides: object,
+) -> dict[str, object]:
     manifest: dict[str, object] = {
         "experiment_id": "exp",
         "run_id": "run_x",
@@ -36,8 +40,26 @@ def _facts(**manifest_overrides: object) -> dict[str, object]:
     manifest.update(manifest_overrides)
     with tempfile.TemporaryDirectory() as tmp:
         return build_experiment_facts(
-            manifest=manifest, ref_store=AgentRefStore(Path(tmp) / "experiment")
+            manifest=manifest,
+            ref_store=AgentRefStore(Path(tmp) / "experiment"),
+            data_summary=data_summary,
         )
+
+
+def _data_summary(rows: dict[str, int]) -> dict[str, object]:
+    """A snapshot view whose files carry the given row counts."""
+
+    return {
+        "views": {
+            "snapshot": {
+                "mount_path": "/mnt/snapshot",
+                "files": [
+                    {"path": name, "mount_path": f"/mnt/snapshot/{name}", "rows": count}
+                    for name, count in rows.items()
+                ],
+            }
+        }
+    }
 
 
 def test_regular_fold_facts_name_the_yearly_folds_and_the_meta_between_them() -> None:
@@ -133,6 +155,39 @@ def test_the_intraday_lookback_is_named_only_when_minutes_are_built() -> None:
     )["visible_timeline"]
     assert with_minutes["snapshot_windows"]["intraday_trade_days"] == 21
     assert with_minutes["decision_snapshot_intraday_lookback_trade_days"] == 21
+
+
+def test_a_zero_row_domain_file_is_reported_as_unavailable() -> None:
+    """A switched-off domain (minutes) and a domain with nothing in the visible
+    window (the auction before 2025) are still written as zero-row Parquet
+    files. Reading availability off file presence told the session it could
+    price orders at an exact minute or at the auction, and every such order was
+    rejected as ``missing_execution_price``."""
+
+    empty = _facts(
+        data_summary=_data_summary(
+            {
+                "intraday_1min.parquet": 0,
+                "auction.parquet": 0,
+                "events.parquet": 13_770_524,
+                "text_index.parquet": 0,
+            }
+        )
+    )["visible_timeline"]["execution_policy"]
+    assert empty["historical_minutes_available"] is False
+    assert empty["auction_available"] is False
+    assert empty["text_available"] is False
+    # A populated domain in the same summary still reports available.
+    assert empty["events_available"] is True
+
+    populated = _facts(
+        data_summary=_data_summary(
+            {"intraday_1min.parquet": 4_800_000, "auction.parquet": 5_067}
+        )
+    )["visible_timeline"]["execution_policy"]
+    assert populated["historical_minutes_available"] is True
+    assert populated["auction_available"] is True
+    assert populated["events_available"] is False
 
 
 def test_a_meta_run_manifest_publishes_both_strategy_wall_clocks(tmp_path: Path) -> None:
