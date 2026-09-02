@@ -11,6 +11,7 @@ from autotrade.environment.replay.style import (
     BENCHMARK_LABEL,
     BENCHMARK_TS_CODE,
     _benchmark_regression,
+    _neutralized_excess,
     benchmark_summary_block,
     daily_returns_from_curve,
     replay_style_analysis,
@@ -295,7 +296,9 @@ def _neutralization_inputs(tmp_path: Path, days: list[str]) -> tuple[Path, pd.Da
                     "circ_mv": 100.0 * (slot + 1),
                     "pb": 1.0,
                     "turnover_rate": 1.0,
-                    "pct_chg": (0.6 if slot < 20 else -0.4) * (1 if index % 2 else -1),
+                    # daily.parquet stores pct_chg as a decimal fraction:
+                    # +0.6% / -0.4%, not 0.6 / -0.4.
+                    "pct_chg": (0.006 if slot < 20 else -0.004) * (1 if index % 2 else -1),
                 }
             )
     return replay_dir, pd.DataFrame(rows)
@@ -326,6 +329,101 @@ def test_neutralized_excess_removes_the_market_and_size_contributions(tmp_path: 
     assert compact["neutralized_excess_method"] == block["method"]
     # It is a different number from the raw excess, not a relabelling of it.
     assert compact["neutralized_excess_return"] != compact["excess_return"]
+
+
+def test_size_beta_is_measured_on_the_decimal_pct_chg_scale(tmp_path: Path):
+    """A hand-built panel with a known size beta pins the factor's unit.
+
+    ``daily.parquet`` normalizes ``pct_chg`` to a decimal fraction at snapshot
+    load, on the same scale as the strategy and benchmark returns; the size
+    factor used to be divided by 100 again, which left ``size_beta`` inflated
+    100x (live windows reported 36-91 for what is really 0.36-0.91). Daily
+    returns are built here as ``alpha + 0.8 * market + 0.5 * smb`` exactly, so
+    every coefficient is known in advance.
+    """
+    days = [stamp.strftime("%Y%m%d") for stamp in pd.bdate_range("2024-01-02", periods=24)]
+    market_percent = [0.5, -0.3, 0.8, -0.6, 0.2, -0.1]
+    # A different period, so market and size are not collinear.
+    smb = [0.004, -0.002, -0.003, 0.001]
+    alpha_daily = 0.0002
+
+    replay_dir = tmp_path / "replay"
+    replay_dir.mkdir()
+    pd.DataFrame(
+        [
+            {
+                "dataset": "index_daily",
+                "ts_code": BENCHMARK_TS_CODE,
+                "trade_date": day,
+                # macro.parquet keeps index pct_chg in percent.
+                "pct_chg": market_percent[index % len(market_percent)],
+            }
+            for index, day in enumerate(days)
+        ]
+    ).to_parquet(replay_dir / "macro.parquet", index=False)
+
+    # 40 names ordered by circ_mv: the small 30% all move by the day's spread
+    # and the big 30% do not, so small-minus-big is exactly ``smb``.
+    daily = pd.DataFrame(
+        [
+            {
+                "trade_date": day,
+                "ts_code": f"{slot:06d}.SZ",
+                "close": 10.0,
+                "circ_mv": 100.0 * (slot + 1),
+                "pb": 1.0,
+                "turnover_rate": 1.0,
+                "pct_chg": smb[index % len(smb)] if slot < 20 else 0.0,
+            }
+            for index, day in enumerate(days)
+            for slot in range(40)
+        ]
+    )
+
+    equity = 100_000.0
+    curve = []
+    for index, day in enumerate(days):
+        market = market_percent[index % len(market_percent)] / 100.0
+        equity *= 1.0 + alpha_daily + 0.8 * market + 0.5 * smb[index % len(smb)]
+        curve.append(
+            {
+                "trade_date": day,
+                "initial_equity": 100_000.0,
+                "equity": equity,
+                "cash": equity,
+                "positions": {},
+            }
+        )
+
+    analysis = replay_style_analysis(
+        ReplayResult(tuple(curve), (), (), ()),
+        daily,
+        replay_dir=replay_dir,
+        snapshot_dir=None,
+        mode="valid",
+    )
+
+    # The published factor series is the raw decimal spread, not a percent.
+    assert analysis["size_factor_daily"][0] == [days[0], pytest.approx(smb[0])]
+
+    block = analysis["neutralized_excess"]
+    assert block["available"] is True and block["n_days"] == len(days)
+    assert block["market_beta"] == 0.8
+    assert block["size_beta"] == 0.5
+    assert block["r2"] == 1.0
+    assert block["neutralized_excess_return"] == round(alpha_daily * TRADING_DAYS_PER_YEAR, 4)
+
+    # Rescaling the factor moves only its own coefficient: the neutralized
+    # excess, the market beta and the fit quality are scale-invariant, which is
+    # why the old bug corrupted ``size_beta`` alone.
+    strategy = [(str(date), float(value)) for date, value in analysis["strategy_daily"]]
+    benchmark = {str(date): float(value) for date, value in analysis["benchmark_daily"]}
+    size = {str(date): float(value) for date, value in analysis["size_factor_daily"]}
+    rescaled = _neutralized_excess(strategy, benchmark, {k: v / 100.0 for k, v in size.items()})
+    assert rescaled["size_beta"] == pytest.approx(50.0)
+    assert rescaled["market_beta"] == block["market_beta"]
+    assert rescaled["r2"] == block["r2"]
+    assert rescaled["neutralized_excess_return"] == block["neutralized_excess_return"]
 
 
 def test_neutralized_excess_reports_missing_factors_instead_of_zero(tmp_path: Path):

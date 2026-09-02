@@ -93,6 +93,8 @@ def _slot_benchmark(replay_dir: Path | None) -> dict[str, float]:
         except (TypeError, ValueError):
             continue
         if math.isfinite(value):
+            # macro.parquet's index_daily keeps pct_chg in percent (no snapshot
+            # factor), unlike daily.parquet's already-decimal pct_chg.
             result[_date_text(date)] = value / 100.0
     return result
 
@@ -192,7 +194,10 @@ def _size_factor(replay_daily: pd.DataFrame) -> dict[str, float]:
 
     Frozen replay data only, like every other input here: the cross-section is
     the slot's ``daily`` frame, so the factor cannot disagree with what the
-    strategy actually traded against.
+    strategy actually traded against. ``daily``'s ``pct_chg`` is already a
+    decimal fraction (the unit registry applies the percent->decimal factor at
+    snapshot load), matching the strategy and benchmark return scale, so the
+    spread is used as-is.
     """
 
     required = {"trade_date", "circ_mv", "pct_chg"}
@@ -216,7 +221,7 @@ def _size_factor(replay_daily: pd.DataFrame) -> dict[str, float]:
         ]
         if small.empty or big.empty:
             continue
-        value = float(small.mean() - big.mean()) / 100.0
+        value = float(small.mean() - big.mean())
         if math.isfinite(value):
             result[_date_text(date)] = value
     return result
