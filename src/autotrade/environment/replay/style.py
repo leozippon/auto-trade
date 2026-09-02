@@ -51,7 +51,7 @@ _SIZE_FACTOR_QUANTILE = 0.3
 _SIZE_FACTOR_MIN_NAMES = 30
 NEUTRALIZATION_METHOD = (
     "日度策略收益对沪深300收益与规模因子（本回放槽流通市值最小 30% 等权减最大 30% 等权）"
-    "的二元 OLS，截距按 244 个交易日年化"
+    f"的二元 OLS，截距按 {TRADING_DAYS_PER_YEAR} 个交易日年化"
 )
 
 
