@@ -136,9 +136,10 @@ class SearchRoots:
     def resolve(self, root: str, path: str) -> tuple[Path, str]:
         """Resolve ``path`` under ``root``; return the target and the accepted path.
 
-        A path that repeats the root as its first segment (``artifacts:artifacts/x``)
-        is accepted as ``artifacts:x`` when only the stripped form exists, and
-        the accepted form is echoed so the model learns the convention. No host
+        A path that repeats the root as its first segment (``artifacts:artifacts/x``,
+        or the bare ``artifacts:artifacts``) is accepted as the stripped form
+        (``artifacts:x``, the root itself) when only that form exists, and the
+        accepted form is echoed so the model learns the convention. No host
         path is ever returned: ``root`` plus the relative path identify the
         target, and the host layout (repository root, sandbox tree, raw run
         id) must stay invisible to the model.
@@ -155,8 +156,13 @@ class SearchRoots:
         if target.exists():
             return target, path
         parts = PurePosixPath(path).parts
-        if len(parts) > 1 and parts[0] == root:
-            stripped = PurePosixPath(*parts[1:]).as_posix()
+        if parts and parts[0] == root:
+            # ``root=output path=output`` — listing or globbing the whole root —
+            # is the most natural form of the repeated-root mistake, so the
+            # repair has to cover the bare root name as well as a prefixed
+            # subpath. The stripped remainder is then empty, which
+            # ``_safe_subpath`` resolves to the root itself.
+            stripped = PurePosixPath(*parts[1:]).as_posix() if len(parts) > 1 else ""
             candidate = _safe_subpath(base, stripped)
             if candidate.exists():
                 return candidate, stripped

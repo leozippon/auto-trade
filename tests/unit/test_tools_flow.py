@@ -1067,10 +1067,25 @@ class ToolResultContractTest(unittest.TestCase):
             artifact = registry.invoke("read_file", {"root": "artifacts", "path": "artifacts/x.txt"})
             self.assertTrue(artifact.ok, artifact.error)
             self.assertEqual(artifact.value["path"], "x.txt")
+            # The bare root name is the same mistake with nothing left over:
+            # "list the whole root" must resolve to the root, not 404.
+            for root, expected in (("artifacts", "x.txt"), ("workspace", "inputs/x.json")):
+                listed = registry.invoke("glob", {"pattern": "**/*", "root": root, "path": root})
+                self.assertTrue(listed.ok, (root, listed.error))
+                self.assertEqual(listed.value["path"], "")
+                self.assertIn(expected, listed.value["filenames"], root)
             missing = registry.invoke("read_file", {"root": "artifacts", "path": "artifacts/nope.txt"})
             self.assertFalse(missing.ok)
             self.assertEqual(missing.value["error_type"], "not_found")
             self.assertIn("do not repeat the root name", missing.value["retry_hint"])
+            # The repair never widens the root: an unknown root and a path that
+            # climbs out of one stay rejected.
+            escaping = registry.invoke("glob", {"pattern": "*", "root": "artifacts", "path": "artifacts/.."})
+            self.assertFalse(escaping.ok)
+            self.assertEqual(escaping.value["error_type"], "path_error")
+            unknown = registry.invoke("glob", {"pattern": "*", "root": "steps", "path": "steps"})
+            self.assertFalse(unknown.ok)
+            self.assertIn(unknown.value["error_type"], ("path_error", "schema_error"))
 
     def test_write_and_edit_accept_the_writable_root_convention(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
