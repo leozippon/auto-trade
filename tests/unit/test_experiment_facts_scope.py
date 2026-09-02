@@ -13,6 +13,9 @@ from autotrade.environment.artifacts import FilesystemArtifactStore
 from autotrade.environment.data.snapshot import SnapshotConfig
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.llm import ProviderResponse, ScriptedLLM, ToolCall
+from autotrade.environment.replay.style import NEUTRALIZATION_METHOD
+from autotrade.environment.runtime import write_json_atomic
+from autotrade.pipelines.agent_views import compact_fold_history
 from autotrade.pipelines.local_backend import LLMMetaLearner
 
 
@@ -162,6 +165,109 @@ def test_both_strategy_wall_clocks_reach_the_session() -> None:
     )["budgets"]
     assert budgets["strategy_inference_timeout_seconds"] == 30.0
     assert budgets["strategy_fit_timeout_seconds"] == 1800
+
+
+def test_the_session_deadline_names_the_wrap_up_grace_inside_it() -> None:
+    """``deadline_seconds`` is main deadline PLUS grace.
+
+    Without the split the session plans against a wall clock ten minutes later
+    than the one its directive names and the one hard finalization uses. Meta
+    has no wrap-up window, so it must not be told it has one.
+    """
+
+    fold = _facts(
+        budgets={"deadline_seconds": 43800.0, "deadline_grace_seconds": 600.0}
+    )["budgets"]
+    assert fold["deadline_seconds"] == 43800.0
+    assert fold["deadline_grace_seconds"] == 600.0
+
+    meta = _facts(kind="meta_learning", budgets={"deadline_seconds": 43200.0})["budgets"]
+    assert meta["deadline_seconds"] == 43200.0
+    assert "deadline_grace_seconds" not in meta
+
+
+def test_the_facts_say_whether_a_parent_control_baseline_exists() -> None:
+    """An initial template is a mounted starting point, not a parent artifact.
+
+    The host seeds a ``parent_control`` node only for an inherited strategy.
+    Left implicit, four first-Fold sessions read the missing block as a fault
+    and either spent a backtest reproducing the template or silently redefined
+    their baseline, so the absence is a stated fact.
+    """
+
+    inherited = _facts(
+        is_initial_artifact=False,
+        parent_strategy_artifact_id="strategy_epoch_001_fold_2022",
+    )["artifact_contract"]["parent"]
+    assert inherited["kind"] == "frozen_artifact"
+    assert inherited["parent_control_available"] is True
+
+    template = _facts(
+        is_initial_artifact=True, template_ref="agent_output_template"
+    )["artifact_contract"]["parent"]
+    assert template["kind"] == "initial_template"
+    # False, not absent: compact_mapping drops empty values, so the fact has to
+    # survive as a bool for the submit contract's clause to have a referent.
+    assert template["parent_control_available"] is False
+
+
+def test_the_neutralization_caliber_is_stated_once_not_once_per_result(
+    tmp_path: Path,
+) -> None:
+    """One constant sentence belongs in the facts, not in every summary.
+
+    ``development_history`` grows with every completed Fold, so repeating the
+    ~130-char caliber in each of its backtest summaries spends prompt budget
+    that the shared prefix never releases. The NL counters are different: a
+    zero under a mounted text corpus is a real reading (the strategy never
+    asked), and only a run with the corpus switched off drops them.
+    """
+
+    assert _facts()["neutralized_excess_method"] == NEUTRALIZATION_METHOD
+    benchmark = {
+        "label": "沪深300",
+        "neutralized_excess_return": 0.1554,
+        "neutralized_excess_method": NEUTRALIZATION_METHOD,
+    }
+    summary = {
+        "result_name": "valid_001",
+        "mode": "valid",
+        "status": "ok",
+        "complete_validation": True,
+        "total_return": -0.0056,
+        "benchmark": benchmark,
+        "nl_calls": 0,
+        "nl_llm_calls": 0,
+        "nl_wall_seconds": 0.0,
+    }
+
+    def history(*, include_text: bool) -> dict[str, object]:
+        manifest_ref = tmp_path / f"text_{include_text}" / "run_manifest.json"
+        write_json_atomic(
+            manifest_ref,
+            {
+                "snapshot_config": {"replay": {"include_text": include_text}},
+                "backtest_summaries": [summary],
+            },
+        )
+        return compact_fold_history(
+            {
+                "record_type": "fold",
+                "epoch_id": "epoch_001",
+                "fold_id": "fold_2022",
+                "run_manifest_ref": str(manifest_ref),
+            },
+            ref_store=AgentRefStore(tmp_path / "experiment"),
+        )
+
+    with_text = history(include_text=True)["backtest_summaries"][0]
+    assert "neutralized_excess_method" not in with_text["benchmark"]
+    assert with_text["benchmark"]["neutralized_excess_return"] == 0.1554
+    assert with_text["nl_calls"] == 0 and with_text["nl_wall_seconds"] == 0.0
+
+    without_text = history(include_text=False)["backtest_summaries"][0]
+    assert not [key for key in without_text if key.startswith("nl_")]
+    assert without_text["total_return"] == -0.0056
 
 
 def test_the_intraday_lookback_is_named_only_when_minutes_are_built() -> None:

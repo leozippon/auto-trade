@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 from autotrade.environment.identity import AgentRefStore
+from autotrade.environment.replay.style import NEUTRALIZATION_METHOD
 from autotrade.environment.sandbox import SCREENING_TOOL_MOUNT
 
 EXPERIMENT_FACTS_SCHEMA_VERSION = 1
@@ -120,6 +121,10 @@ def build_experiment_facts(
             is_meta=is_meta,
         ),
         "broker_replay": _broker_replay_facts(manifest),
+        # The caliber every ``neutralized_excess_return`` in this session was
+        # computed under. One constant sentence: stating it here keeps it out
+        # of every backtest summary of every fold in development_history.
+        "neutralized_excess_method": NEUTRALIZATION_METHOD,
         "runtime_tools": _runtime_tool_facts(runtime_env, manifest=manifest, is_meta=is_meta),
     }
     if is_meta:
@@ -277,7 +282,14 @@ def _budget_facts(
     budgets = _as_mapping(manifest.get("budgets"))
     return compact_mapping(
         {
+            # Total session wall clock. For a Fold this is the main
+            # deadline PLUS the trailing wrap-up grace, so the grace rides
+            # beside it: without the split a session plans against a
+            # deadline that is already ``deadline_grace_seconds`` later
+            # than the one its directive and wrap-up prompt talk about.
+            # Meta has no wrap-up window and carries no grace.
             "deadline_seconds": manifest.get("deadline_seconds") or budgets.get("deadline_seconds"),
+            "deadline_grace_seconds": budgets.get("deadline_grace_seconds"),
             "finalize_before_deadline_seconds": manifest.get("finalize_before_deadline_seconds"),
             "max_steps": manifest.get("max_steps") or budgets.get("max_steps"),
             "max_llm_calls": max_llm_calls
@@ -320,6 +332,15 @@ def _artifact_contract_facts(
         "id": (
             ref_store.get_or_create("strategy", str(parent_id)) if parent_id else None
         ),
+        # An initial template is a mounted starting point, not an inherited
+        # artifact: the host replays a parent before the session, and seeds the
+        # ``parent_control`` node, exactly when one exists — the same condition
+        # this manifest records as ``is_initial_artifact``. Stating the absence
+        # is not optional prose: four first-Fold sessions read the missing
+        # ``parent_control`` block as a pipeline fault and either spent a
+        # backtest reproducing the template or silently redefined their
+        # baseline. False must survive compaction, so it is a bool.
+        "parent_control_available": not is_initial,
         "model_artifacts_empty": model_artifacts_empty,
     }
     return compact_mapping(

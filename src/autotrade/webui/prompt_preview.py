@@ -217,6 +217,7 @@ def _fold_prompt(
             "max_backtests": budgets["max_backtests"],
             "max_llm_calls": budgets["max_llm_calls"],
             "deadline_seconds": budgets["deadline_seconds"],
+            "deadline_grace_seconds": budgets["deadline_grace_seconds"],
             "strategy_inference_timeout_seconds": limits.timeout_seconds,
             "strategy_fit_timeout_seconds": limits.fit_timeout_seconds,
         },

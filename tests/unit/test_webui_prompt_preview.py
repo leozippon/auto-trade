@@ -180,6 +180,7 @@ def test_fold_preview_states_the_pipeline_budgets_and_scope(tmp_path: Path):
         "deadline_seconds": fold_session_deadline_seconds(
             rolling_default("max_fold_minutes"), DEFAULT_DEADLINE_GRACE_MINUTES
         ),
+        "deadline_grace_seconds": DEFAULT_DEADLINE_GRACE_MINUTES * 60.0,
         "finalize_before_deadline_seconds": rolling_default(
             "finalize_before_deadline_seconds"
         ),
@@ -200,8 +201,17 @@ def test_fold_preview_states_the_pipeline_budgets_and_scope(tmp_path: Path):
     # Runtime-only facts are marked, never invented.
     assert facts["identity"]["run_id"] == RUNTIME_PLACEHOLDER
     assert facts["visible_timeline"]["execution_policy"]["text_available"] == RUNTIME_PLACEHOLDER
-    # A first Fold inherits the template, so there is no parent control yet.
+    # deadline_seconds already contains the grace, so the two must differ by
+    # exactly the main deadline the directive and the wrap-up prompt name.
+    assert (
+        facts["budgets"]["deadline_seconds"] - facts["budgets"]["deadline_grace_seconds"]
+        == rolling_default("max_fold_minutes") * 60.0
+    )
+    # A first Fold inherits the template, so there is no parent and no parent
+    # control: the absence is stated, not left to be inferred from a missing
+    # block (four first-Fold sessions read that silence as a pipeline fault).
     assert facts["artifact_contract"]["parent"]["kind"] == "initial_template"
+    assert facts["artifact_contract"]["parent"]["parent_control_available"] is False
     assert "parent_control" not in facts
 
 
@@ -306,6 +316,7 @@ def test_inherited_parent_is_stated_without_inventing_the_artifact(tmp_path: Pat
     facts = _facts(prompt)
     parent = facts["artifact_contract"]["parent"]
     assert parent["kind"] == "frozen_artifact"
+    assert parent["parent_control_available"] is True
     assert parent["id"] == RUNTIME_PLACEHOLDER
     assert parent["model_artifacts_empty"] == RUNTIME_PLACEHOLDER
     # The host replays the parent on this window before the session starts.

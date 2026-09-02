@@ -180,6 +180,62 @@ def _finite(value: object) -> float | None:
     return number if math.isfinite(number) else None
 
 
+# One completed Validation as a later Fold or the Meta session reads it back.
+# ``neutralized_excess_method`` is deliberately absent: the caliber is one
+# constant sentence, and the session facts state it once
+# (``build_experiment_facts``) instead of once per summary per fold.
+_SUMMARY_KEYS = (
+    "result_name",
+    "mode",
+    "status",
+    "complete_validation",
+    "total_return",
+    "long_return",
+    "sharpe",
+    "max_drawdown",
+    "order_count",
+    "trade_count",
+    # Exit health + benchmark-relative view: a lineage whose "gains" trail the
+    # index must stay visible to later epochs.
+    "strategy_exit_fill_count",
+    "benchmark",
+    # Overfitting tell (lzp-test21 post-mortem): turnover cost drove the
+    # held-out loss while the dev metrics looked healthy — meta-learning must
+    # see it, not just returns.
+    "turnover",
+    # Cost of the Validation itself, so Meta can weigh a direction's replay and
+    # NL spend against its evidence.
+    "replay_wall_seconds",
+    "replayed_trade_days",
+    "nl_calls",
+    "nl_llm_calls",
+    "nl_wall_seconds",
+    # Selection evidence: this candidate against the Fold's own parent control
+    # on the same window.
+    "vs_parent",
+    "error",
+)
+_NL_SUMMARY_KEYS = frozenset({"nl_calls", "nl_llm_calls", "nl_wall_seconds"})
+
+
+def _nl_service_disabled(manifest: Mapping[str, object]) -> bool:
+    """True when this run mounted no text corpus for the NL sub-agent.
+
+    The NL service answers out of the replay slot's text domain. With that
+    domain switched off (``snapshot_config.replay.include_text``) every query
+    can only return ``no_evidence``, so the counters carry no information about
+    how the Fold spent its budget. A zero under a mounted corpus is a real
+    reading — the strategy never asked — and stays. An older manifest that does
+    not record the switch keeps the counters rather than hiding them.
+    """
+
+    snapshot_config = manifest.get("snapshot_config")
+    replay = (
+        snapshot_config.get("replay") if isinstance(snapshot_config, Mapping) else None
+    )
+    return isinstance(replay, Mapping) and replay.get("include_text") is False
+
+
 def compact_fold_history(
     record: dict[str, object],
     *,
@@ -187,49 +243,24 @@ def compact_fold_history(
     include_frozen_test_metrics: bool = False,
 ) -> dict[str, object]:
     manifest = _read_json(Path(str(record.get("run_manifest_ref", ""))))
+    keys = _SUMMARY_KEYS
+    if _nl_service_disabled(manifest):
+        keys = tuple(key for key in keys if key not in _NL_SUMMARY_KEYS)
     backtests = []
     raw_backtests = manifest.get("backtest_summaries")
     if isinstance(raw_backtests, list):
         for summary in raw_backtests:
             if not isinstance(summary, dict):
                 continue
-            backtests.append(
-                {
-                    key: summary.get(key)
-                    for key in (
-                        "result_name",
-                        "mode",
-                        "status",
-                        "complete_validation",
-                        "total_return",
-                        "long_return",
-                        "sharpe",
-                        "max_drawdown",
-                        "order_count",
-                        "trade_count",
-                        # Exit health + benchmark-relative view: a lineage whose
-                        # "gains" trail the index must stay visible to later epochs.
-                        "strategy_exit_fill_count",
-                        "benchmark",
-                        # Overfitting tell (lzp-test21 post-mortem): turnover cost
-                        # drove the held-out loss while the dev metrics looked
-                        # healthy — meta-learning must see it, not just returns.
-                        "turnover",
-                        # Cost of the Validation itself, so Meta can weigh a
-                        # direction's replay and NL spend against its evidence.
-                        "replay_wall_seconds",
-                        "replayed_trade_days",
-                        "nl_calls",
-                        "nl_llm_calls",
-                        "nl_wall_seconds",
-                        # Selection evidence: this candidate against the
-                        # Fold's own parent control on the same window.
-                        "vs_parent",
-                        "error",
-                    )
-                    if key in summary
+            projected = {key: summary.get(key) for key in keys if key in summary}
+            benchmark = projected.get("benchmark")
+            if isinstance(benchmark, dict) and "neutralized_excess_method" in benchmark:
+                projected["benchmark"] = {
+                    key: value
+                    for key, value in benchmark.items()
+                    if key != "neutralized_excess_method"
                 }
-            )
+            backtests.append(projected)
     compact = {
         "epoch_id": record.get("epoch_id"),
         "fold_id": ref_store.get_or_create("fold", str(record.get("fold_id"))),

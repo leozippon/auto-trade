@@ -2150,7 +2150,12 @@ class LLMFoldDeveloper:
                     "max_steps": request.max_steps,
                     "max_backtests": request.max_backtests,
                     "max_llm_calls": request.max_llm_calls,
+                    # deadline_seconds is the whole session wall clock;
+                    # the grace is the trailing wrap-up slice of it, so
+                    # the manifest carries both and the run facts can
+                    # publish the split instead of one opaque total.
                     "deadline_seconds": request.deadline_seconds,
+                    "deadline_grace_seconds": request.deadline_grace_seconds,
                     "strategy_inference_timeout_seconds": self.decision_timeout_seconds,
                     "strategy_fit_timeout_seconds": self.fit_timeout_seconds,
                 },

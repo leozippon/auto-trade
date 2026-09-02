@@ -121,14 +121,18 @@ COMMON_OVERRIDES: dict[str, object] = {"gpu_count": 0}
 # between two candidates. Direction, not procedure: no calendar labels, no
 # per-tool recipes.
 SESSION_LINE = (
-    "本 Fold 的预算是推理墙钟 720 分钟、30 个 Step、30 次回测、1600 次模型调用（回测墙钟独立计时并回补）。"
+    "本 Fold 的预算是推理墙钟 730 分钟（运行事实 `budgets.deadline_seconds`：720 分钟主截止加最后 "
+    "10 分钟收尾宽限 `deadline_grace_seconds`）、30 个 Step、30 次回测、1600 次模型调用"
+    "（回测墙钟独立计时并回补）。"
     "预算是用来持续探索的：一批候选跑出好结果，意味着可以进入下一轮细化与加固，而不是提前收工；"
     "把整段预算花在一条不断收敛的探索链上，直到时间或回测次数真的用完。"
 )
 PARENT_CONTROL_LINE = (
-    "有父产物时，宿主已在会话开始前把父产物在本 Fold 的验证窗口上自动跑完一次完整 Validation，"
+    "父产物是已冻结策略时，宿主已在会话开始前把它在本 Fold 的验证窗口上自动跑完一次完整 Validation，"
     "它是 Step 树的第一个节点、不占用上述预算，也是父策略在这一窗口的样本外记录；"
-    "直接把它当作对照基线，不要再花一次回测重跑父本。"
+    "直接把它当作对照基线，不要再花一次回测重跑父本。父产物是初始模板时没有这个节点"
+    "（运行事实 `parent_control` 为空、`artifact_contract.parent.parent_control_available` 为假），"
+    "需要基线就自己跑一次并计入上述预算。"
 )
 PREREGISTER_LINE = (
     "互斥候选一律先预登记：写清机制、预期方向与证伪条件，再用 batch_validate 在同一父节点下并排跑完整 Validation，"
