@@ -2132,6 +2132,10 @@ table.data.text td.nowrap {
 .issue-filter select {
  max-width: 16rem;
 }
+.issue-filter input[type="checkbox"] {
+ margin: 0;
+ cursor: pointer;
+}
 .issue-count {
  font-size: 0.82rem;
  color: var(--muted);
@@ -2180,6 +2184,25 @@ table.data.text td.nowrap {
 .issue-meta-item .k {
  margin-right: 0.4rem;
  opacity: 0.75;
+}
+/* A resolved report is shown exactly as it was filed — the log never rewrites
+   it — so only the outcome badge, a quieter ground and the researcher's note
+   below the attribution mark it as answered. */
+.issue-report.resolved {
+ background: var(--panel);
+ border-style: dashed;
+}
+.issue-resolution {
+ margin: 0.4rem 0 0;
+ color: var(--muted);
+ font-size: 0.85rem;
+ line-height: 1.6;
+ overflow-wrap: anywhere;
+}
+.issue-resolution .k {
+ margin-right: 0.5rem;
+ opacity: 0.75;
+ white-space: nowrap;
 }
 /* Evidence is raw tool, data or document output and is asked for, not read by
    default: only this small disclosure is clickable, so selecting the summary

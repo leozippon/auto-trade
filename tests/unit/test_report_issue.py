@@ -3,13 +3,19 @@
 The contract under test: a report is validated, capped, redacted, and appended
 to the owning experiment's ``ledgers/issue_reports.jsonl`` — and nothing else
 changes. It never touches the run manifest or any artifact, it never reaches a
-mounted workspace, and the console lists it read-only through the same public
-projection as every other Agent-authored string.
+mounted workspace, and the console lists it through the same public projection
+as every other Agent-authored string.
+
+The answer travels the same log: the researcher's ``resolve_issue.py`` appends
+a resolution line, the report itself is never rewritten, and the console joins
+the two and hides what is settled.
 """
 
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 import threading
 from pathlib import Path
 
@@ -25,9 +31,11 @@ from autotrade.environment.tools.report_issue import (
     ISSUE_REPORTS_NAME,
     MAX_ISSUE_EVIDENCE_CHARS,
     MAX_ISSUE_REPORTS_PER_SESSION,
+    MAX_ISSUE_RESOLUTION_NOTE_CHARS,
     MAX_ISSUE_SUMMARY_CHARS,
     ReportIssueTool,
     append_issue_report,
+    append_issue_resolution,
     issue_reports_path,
     read_issue_reports,
 )
@@ -339,3 +347,205 @@ def test_the_endpoint_serves_the_listing_read_only(tmp_path: Path) -> None:
     assert client.get("/api/issue-reports", params={"experiment_id": "expA"}).json()["total"] == 1
     assert client.get("/api/issue-reports", params={"experiment_id": "missing"}).status_code == 404
     assert client.get("/api/issue-reports", params={"limit": 0}).status_code == 422
+
+
+# ---- answering a report ----------------------------------------------------
+
+RESOLVE_SCRIPT = Path(__file__).resolve().parents[2] / "scripts/experiments/resolve_issue.py"
+
+
+def test_a_resolution_is_a_second_line_and_the_report_stays_as_filed(
+    tmp_path: Path,
+) -> None:
+    tool, _manifest, experiment_dir = _session(tmp_path)
+    filed = _report(tool, summary="回放超时被报成候选异常。")
+    path = issue_reports_path(experiment_dir)
+    original = path.read_text(encoding="utf-8")
+    resolution = append_issue_resolution(
+        path,
+        report_id=str(filed.value["report_id"]),
+        outcome="fixed",
+        note="commit abc1234：失败行改为报告宿主争用。",
+    )
+    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    assert len(lines) == 2
+    # Append-only: the session's own line is byte-identical afterwards.
+    assert lines[0] == original
+    assert json.loads(lines[1])["record_type"] == "resolution"
+    assert resolution["schema_version"] == ISSUE_REPORT_SCHEMA_VERSION
+    [report] = read_issue_reports(path)
+    assert report["report_id"] == filed.value["report_id"]
+    assert report["category"] == "tool_output"
+    assert report["outcome"] == "fixed"
+    assert report["resolution"] == "commit abc1234：失败行改为报告宿主争用。"
+    # One stamp, the log's own: the resolution time cannot disagree with it.
+    assert report["resolved_at"] == resolution["recorded_at"]
+
+
+@pytest.mark.parametrize(
+    ("overrides", "match"),
+    [
+        ({"report_id": "issue_ghost"}, "unknown issue report"),
+        ({"outcome": "wontfix"}, "outcome must be one of"),
+        ({"note": "   "}, "note must say"),
+        ({"note": "长" * (MAX_ISSUE_RESOLUTION_NOTE_CHARS + 1)}, "exceeds"),
+    ],
+)
+def test_a_resolution_that_cannot_be_trusted_is_refused_and_nothing_is_written(
+    tmp_path: Path, overrides: dict[str, str], match: str
+) -> None:
+    tool, _manifest, experiment_dir = _session(tmp_path)
+    filed = _report(tool)
+    path = issue_reports_path(experiment_dir)
+    before = path.read_text(encoding="utf-8")
+    arguments = {
+        "report_id": str(filed.value["report_id"]),
+        "outcome": "fixed",
+        "note": "commit abc1234。",
+        **overrides,
+    }
+    with pytest.raises(ValueError, match=match):
+        append_issue_resolution(path, **arguments)
+    assert path.read_text(encoding="utf-8") == before
+
+
+def test_a_report_is_answered_once(tmp_path: Path) -> None:
+    tool, _manifest, experiment_dir = _session(tmp_path)
+    report_id = str(_report(tool).value["report_id"])
+    path = issue_reports_path(experiment_dir)
+    append_issue_resolution(
+        path, report_id=report_id, outcome="fixed", note="commit abc1234。"
+    )
+    with pytest.raises(ValueError, match="already resolved as fixed"):
+        append_issue_resolution(
+            path, report_id=report_id, outcome="not_a_defect", note="改判。"
+        )
+    assert len(path.read_text(encoding="utf-8").splitlines()) == 2
+
+
+def test_the_reader_fails_fast_on_a_resolution_naming_no_report(
+    tmp_path: Path,
+) -> None:
+    """Within schema 1 an orphan resolution is corruption, not history."""
+
+    path = tmp_path / ISSUE_REPORTS_NAME
+    append_issue_report(
+        path,
+        {"report_id": "issue_1", "category": "other", "summary": "s", "evidence": "e"},
+    )
+    append_issue_report(
+        path,
+        {
+            "record_type": "resolution",
+            "report_id": "issue_ghost",
+            "outcome": "fixed",
+            "note": "n",
+        },
+    )
+    with pytest.raises(ValueError, match="no filed issue report"):
+        read_issue_reports(path)
+
+
+def test_resolved_reports_leave_the_default_page_and_come_back_on_request(
+    tmp_path: Path,
+) -> None:
+    experiments = tmp_path / "experiments"
+    directory = _console_experiment(experiments, "expA")
+    _file_report(directory, report_id="issue_open", summary="未处置的一条。")
+    _file_report(directory, report_id="issue_done", summary="已处置的一条。")
+    append_issue_resolution(
+        issue_reports_path(directory),
+        report_id="issue_done",
+        outcome="not_a_defect",
+        note="按设计：244 是固定年化常数，窗口长度不是年化因子。",
+    )
+    default = issues.issue_reports(experiments)
+    assert [item["report_id"] for item in default["reports"]] == ["issue_open"]
+    assert default["total"] == 1 and default["resolved"] == 1
+    assert default["reports"][0]["outcome"] == ""
+    full = issues.issue_reports(experiments, include_resolved=True)
+    assert full["total"] == 2 and full["resolved"] == 1
+    done = next(item for item in full["reports"] if item["report_id"] == "issue_done")
+    assert done["outcome"] == "not_a_defect"
+    assert str(done["resolution"]).startswith("按设计")
+    assert done["resolved_at"]
+
+
+def test_the_endpoint_serves_the_resolution_the_page_reads_and_takes_no_writes(
+    tmp_path: Path,
+) -> None:
+    experiments = tmp_path / "experiments"
+    directory = _console_experiment(experiments, "expA")
+    _file_report(directory, report_id="issue_done")
+    append_issue_resolution(
+        issue_reports_path(directory),
+        report_id="issue_done",
+        outcome="accepted_limitation",
+        note="合同如此，代价与影响都已记录。",
+    )
+    client = TestClient(create_app(tmp_path, experiments))
+    default = client.get("/api/issue-reports").json()
+    assert default["reports"] == [] and default["total"] == 0
+    assert default["resolved"] == 1
+    payload = client.get(
+        "/api/issue-reports", params={"include_resolved": "true"}
+    ).json()
+    report = payload["reports"][0]
+    assert report["outcome"] == "accepted_limitation"
+    assert report["resolution"].startswith("合同如此")
+    assert report["resolved_at"]
+    # The console reads; only the shell writes.
+    assert client.post("/api/issue-reports", json={}).status_code in (404, 405)
+
+
+def test_the_cli_records_a_resolution_and_refuses_the_rest(tmp_path: Path) -> None:
+    """The researcher's only entry point, run the way it is documented."""
+
+    experiments = tmp_path / "experiments"
+    directory = _console_experiment(experiments, "expA")
+    _file_report(directory, report_id="issue_cli")
+
+    def resolve(*arguments: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [
+                sys.executable,
+                str(RESOLVE_SCRIPT),
+                "--experiments-root",
+                str(experiments),
+                *arguments,
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    recorded = resolve(
+        "--experiment", "expA",
+        "--report", "issue_cli",
+        "--outcome", "fixed",
+        "--note", "commit 10e541f：Test figure 检查改为整词匹配。",
+    )
+    assert recorded.returncode == 0, recorded.stderr
+    assert json.loads(recorded.stdout)["outcome"] == "fixed"
+    [report] = read_issue_reports(issue_reports_path(directory))
+    assert report["outcome"] == "fixed"
+    assert str(report["resolution"]).startswith("commit 10e541f")
+
+    again = resolve(
+        "--experiment", "expA", "--report", "issue_cli",
+        "--outcome", "fixed", "--note", "重复一次。",
+    )
+    assert again.returncode == 2 and "already resolved" in again.stderr
+    ghost = resolve(
+        "--experiment", "expA", "--report", "issue_nope",
+        "--outcome", "fixed", "--note", "不存在的报告。",
+    )
+    assert ghost.returncode == 2 and "unknown issue report" in ghost.stderr
+    elsewhere = resolve(
+        "--experiment", "expZ", "--report", "issue_cli",
+        "--outcome", "fixed", "--note", "不存在的实验。",
+    )
+    assert elsewhere.returncode == 2 and "unknown experiment" in elsewhere.stderr
+    # Only the one accepted resolution reached the log.
+    assert len(issue_reports_path(directory).read_text(encoding="utf-8").splitlines()) == 2
+

@@ -903,17 +903,23 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
     @app.get("/api/issue-reports")
     def get_issue_reports(
         experiment_id: str | None = Query(None),
+        include_resolved: bool = Query(False),
         limit: int = Query(
             issues.MAX_ISSUE_REPORTS_PAGE, ge=1, le=issues.MAX_ISSUE_REPORTS_PAGE
         ),
     ) -> dict[str, object]:
-        """Agent-filed issue reports across experiments, newest first. Read-only:
-        reports are operator telemetry, so the console offers no write or delete."""
+        """Agent-filed issue reports across experiments, newest first, resolved
+        ones only when asked for. Read-only: a report and its resolution are
+        append-only operator telemetry, and the resolution is recorded from the
+        shell (``scripts/experiments/resolve_issue.py``), never from a browser."""
 
         if experiment_id is not None:
             _experiment_dir(experiment_id)
         return issues.issue_reports(
-            experiment_root, experiment_id=experiment_id, limit=limit
+            experiment_root,
+            experiment_id=experiment_id,
+            include_resolved=include_resolved,
+            limit=limit,
         )
 
     @app.post("/api/experiments/{experiment_id}/prompt-preview")

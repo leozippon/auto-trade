@@ -11,6 +11,11 @@ the researcher.
 Host-side telemetry only: a report changes no artifact, budget, or result, and
 is never mounted or projected back into any session's inputs — it is operator
 telemetry, not memory and not a results channel.
+
+The researcher answers a report in the same log: ``resolve_issue.py`` appends a
+``record_type: "resolution"`` line naming the report, the outcome and a short
+note. Nothing is rewritten — the filed report stays exactly as the session
+wrote it, and the console joins the two on read.
 """
 
 from __future__ import annotations
@@ -31,6 +36,14 @@ from .base import ToolError, ToolResult, ToolSpec
 # Stamped on every appended report; bump when the record shape changes.
 ISSUE_REPORT_SCHEMA_VERSION = 1
 ISSUE_CATEGORIES = ("tool_output", "environment", "data", "docs", "other")
+# The researcher's verdict on one report. ``fixed`` names the repair, the other
+# two close a report that needed no code change; the note carries the reason
+# (and, for a fix, the commit).
+ISSUE_OUTCOMES = ("fixed", "not_a_defect", "accepted_limitation")
+MAX_ISSUE_RESOLUTION_NOTE_CHARS = 500
+# Within schema 1 this key is the discriminator: a line without it is a report,
+# because every line written before resolutions existed is one.
+RESOLUTION_RECORD_TYPE = "resolution"
 MAX_ISSUE_SUMMARY_CHARS = 500
 MAX_ISSUE_EVIDENCE_CHARS = 4_000
 MAX_ISSUE_REPORTS_PER_SESSION = 16
@@ -64,10 +77,78 @@ def append_issue_report(
 
 
 def read_issue_reports(path: str | Path) -> list[dict[str, object]]:
-    """All reports in append order; a foreign or newer format fails fast."""
+    """All reports in append order, each carrying its resolution when it has one.
 
-    return read_versioned_jsonl(
+    A resolved report gains ``resolved_at`` (the resolution line's own log
+    stamp, so the two can never disagree), ``outcome`` and ``resolution``. A
+    foreign or newer format, or a resolution that names no report or the same
+    report twice, fails fast: within schema 1 that is corruption, not history.
+    """
+
+    records = read_versioned_jsonl(
         path, schema_version=ISSUE_REPORT_SCHEMA_VERSION, label="issue report"
+    )
+    reports = [
+        record
+        for record in records
+        if record.get("record_type") != RESOLUTION_RECORD_TYPE
+    ]
+    by_id = {str(record.get("report_id") or ""): record for record in reports}
+    for record in records:
+        if record.get("record_type") != RESOLUTION_RECORD_TYPE:
+            continue
+        report_id = str(record.get("report_id") or "")
+        report = by_id.get(report_id) if report_id else None
+        if report is None:
+            raise ValueError(f"resolution names no filed issue report: {report_id!r}")
+        if report.get("outcome"):
+            raise ValueError(f"issue report resolved twice: {report_id}")
+        outcome = str(record.get("outcome") or "")
+        if outcome not in ISSUE_OUTCOMES:
+            raise ValueError(f"unknown issue outcome: {outcome!r}")
+        report["resolved_at"] = record.get("recorded_at")
+        report["outcome"] = outcome
+        report["resolution"] = record.get("note")
+    return reports
+
+
+def append_issue_resolution(
+    path: str | Path, *, report_id: str, outcome: str, note: str
+) -> dict[str, object]:
+    """Record how one filed report was answered; refuse anything else.
+
+    The write goes through the same versioned append — and therefore the same
+    ``flock`` — as a report, so a session filing a report while the researcher
+    resolves one cannot interleave with this line.
+    """
+
+    if outcome not in ISSUE_OUTCOMES:
+        raise ValueError("outcome must be one of " + ", ".join(ISSUE_OUTCOMES))
+    text = note.strip()
+    if not text:
+        raise ValueError("note must say how the report was answered")
+    if len(text) > MAX_ISSUE_RESOLUTION_NOTE_CHARS:
+        raise ValueError(f"note exceeds {MAX_ISSUE_RESOLUTION_NOTE_CHARS} characters")
+    reports = read_issue_reports(path)
+    match = next(
+        (item for item in reports if str(item.get("report_id") or "") == report_id),
+        None,
+    )
+    if match is None:
+        raise ValueError(f"unknown issue report: {report_id!r}")
+    if match.get("outcome"):
+        raise ValueError(
+            f"issue report {report_id} is already resolved as {match['outcome']}"
+        )
+    return append_versioned_jsonl(
+        path,
+        {
+            "record_type": RESOLUTION_RECORD_TYPE,
+            "report_id": report_id,
+            "outcome": outcome,
+            "note": text,
+        },
+        schema_version=ISSUE_REPORT_SCHEMA_VERSION,
     )
 
 
@@ -183,13 +264,16 @@ class ReportIssueTool:
 
 __all__ = [
     "ISSUE_CATEGORIES",
+    "ISSUE_OUTCOMES",
     "ISSUE_REPORTS_NAME",
     "ISSUE_REPORT_SCHEMA_VERSION",
     "MAX_ISSUE_EVIDENCE_CHARS",
     "MAX_ISSUE_REPORTS_PER_SESSION",
+    "MAX_ISSUE_RESOLUTION_NOTE_CHARS",
     "MAX_ISSUE_SUMMARY_CHARS",
     "ReportIssueTool",
     "append_issue_report",
+    "append_issue_resolution",
     "issue_reports_path",
     "read_issue_reports",
 ]

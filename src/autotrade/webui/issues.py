@@ -1,4 +1,4 @@
-"""Read-only console projection of Agent-filed issue reports.
+"""Console projection of Agent-filed issue reports and their resolutions.
 
 Sessions file suspected environment/tool/data/docs defects with the
 ``report_issue`` tool; each report is one redacted JSON line in the owning
@@ -7,6 +7,11 @@ they are read back together — for the researcher, never for a session. Like
 every other projection, Agent-authored text leaves the host through
 :class:`PublicIdentity`, and an experiment whose log cannot be read is named
 rather than silently dropped.
+
+A report the researcher has answered (``scripts/experiments/resolve_issue.py``
+appends the resolution line) carries its outcome and note here. Resolved
+reports leave the default page: what is still open is the working list, and the
+resolved count says how much the toggle would add back.
 """
 
 from __future__ import annotations
@@ -66,6 +71,12 @@ def _experiment_reports(directory: Path) -> list[dict[str, object]]:
                 "summary": identity.public_text(str(record.get("summary") or "")),
                 "evidence": identity.public_text(str(record.get("evidence") or "")),
                 "recorded_at": str(record.get("recorded_at") or ""),
+                # The resolution is the researcher's own text, written on the
+                # host and read on the host: it carries no Agent identity and
+                # is shown as written, commit hashes and paths included.
+                "resolved_at": str(record.get("resolved_at") or ""),
+                "outcome": str(record.get("outcome") or ""),
+                "resolution": str(record.get("resolution") or ""),
             }
         )
     return rows
@@ -75,9 +86,16 @@ def issue_reports(
     experiments_root: Path,
     *,
     experiment_id: str | None = None,
+    include_resolved: bool = False,
     limit: int = MAX_ISSUE_REPORTS_PAGE,
 ) -> dict[str, object]:
-    """Reports across experiments (or one), newest first, bounded to one page."""
+    """Reports across experiments (or one), newest first, bounded to one page.
+
+    ``total`` counts what the listing is drawn from, so it follows the resolved
+    filter; ``resolved`` counts the resolved reports in scope either way, which
+    is what tells an empty open list apart from an experiment that never filed
+    anything.
+    """
 
     if not 1 <= limit <= MAX_ISSUE_REPORTS_PAGE:
         raise ValueError(f"limit must be between 1 and {MAX_ISSUE_REPORTS_PAGE}")
@@ -108,9 +126,13 @@ def issue_reports(
                 }
             )
     reports.sort(key=lambda item: str(item.get("recorded_at")), reverse=True)
+    resolved = sum(1 for item in reports if item["outcome"])
+    if not include_resolved:
+        reports = [item for item in reports if not item["outcome"]]
     return {
         "reports": reports[:limit],
         "total": len(reports),
+        "resolved": resolved,
         "limit": limit,
         "unreadable": unreadable,
     }

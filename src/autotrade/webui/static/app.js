@@ -6988,6 +6988,7 @@ async function renderMemoryPage() {
     source: null,
     dirty: false,
     issueExperiment: "",
+    issueResolved: false,
     countHost: el("span", {}, ""),
     listHost: el("div", { class: "session-list" }),
     candidateHost: el("div", { class: "session-list" }),
@@ -7032,7 +7033,7 @@ async function renderMemoryPage() {
       memorySection(
         "memory-issues",
         "问题反馈",
-        "Fold 与元学习父会话用 report_issue 报告的环境、工具输出、数据与文档缺陷，跨实验按时间倒序。只读：会话读不回这些报告，处置由研究者完成。",
+        "Fold 与元学习父会话用 report_issue 报告的环境、工具输出、数据与文档缺陷，跨实验按时间倒序。默认只列未处置的；已处置的用 resolve_issue.py 记回同一账本，勾选后才显示。会话读不回报告，也读不回处置。",
         el("div", { class: "panel" }, issueFilterBar(), memoryView.issuesHost),
       ),
     ),
@@ -7069,6 +7070,13 @@ const ISSUE_CATEGORY_LABELS = {
   other: "其他",
 };
 
+/* The researcher's verdict, recorded from the shell into the same log. */
+const ISSUE_OUTCOME_LABELS = {
+  fixed: "已修复",
+  not_a_defect: "非缺陷",
+  accepted_limitation: "接受的限制",
+};
+
 /* The list is one bounded newest-first page across every experiment, so
    narrowing to a single experiment is how an older report is reached at all.
    The options are the experiment directories the memory bundle already listed
@@ -7088,10 +7096,17 @@ function issueFilterBar() {
       el("option", { value: row.experiment_id }, row.experiment_id),
     ),
   );
+  const resolved = el("input", { type: "checkbox" });
+  if (memoryView.issueResolved) resolved.checked = true;
+  resolved.addEventListener("change", (event) => {
+    memoryView.issueResolved = event.target.checked;
+    renderIssueReports();
+  });
   return el(
     "div",
     { class: "control-bar" },
     el("label", { class: "issue-filter" }, el("span", {}, "实验"), select),
+    el("label", { class: "issue-filter" }, resolved, el("span", {}, "显示已处置")),
     el("span", { class: "spacer" }),
     memoryView.issueCountHost,
   );
@@ -7100,14 +7115,24 @@ function issueFilterBar() {
 /* One card per report, read top to bottom: the category badge opens the
    summary line so every card's prose keeps the same left edge, the attribution
    follows as one quiet line, and the raw evidence stays folded behind its own
-   small disclosure instead of making the whole card a click target. */
+   small disclosure instead of making the whole card a click target. A resolved
+   report keeps its own text untouched and gains the outcome badge plus the
+   researcher's note — the two are read together or the card lies. */
 function issueReportRow(report) {
+  const resolved = Boolean(report.outcome);
   return el(
     "article",
-    { class: "issue-report" },
+    { class: resolved ? "issue-report resolved" : "issue-report" },
     el(
       "p",
       { class: "issue-line" },
+      resolved
+        ? el(
+            "span",
+            { class: "badge state-completed" },
+            ISSUE_OUTCOME_LABELS[report.outcome] || report.outcome,
+          )
+        : null,
       el(
         "span",
         { class: "badge kind" },
@@ -7122,6 +7147,14 @@ function issueReportRow(report) {
       issueMetaItem("实验", report.experiment_id || "—"),
       issueMetaItem("会话", report.session_label || "—"),
     ),
+    resolved
+      ? el(
+          "p",
+          { class: "issue-resolution" },
+          el("span", { class: "k" }, `处置于 ${fmtTs(report.resolved_at)}`),
+          report.resolution || "—",
+        )
+      : null,
     el(
       "details",
       { class: "issue-evidence" },
@@ -7146,18 +7179,21 @@ function issueMetaItem(label, value) {
 async function renderIssueReports() {
   const host = memoryView.issuesHost;
   const experiment = memoryView.issueExperiment;
+  const withResolved = memoryView.issueResolved;
   // A filter change and a page leave both land here while a fetch is open.
   const stale = () =>
     !memoryView ||
     memoryView.issuesHost !== host ||
-    memoryView.issueExperiment !== experiment;
+    memoryView.issueExperiment !== experiment ||
+    memoryView.issueResolved !== withResolved;
   host.replaceChildren(el("div", { class: "loading" }, "加载问题反馈…"));
   memoryView.issueCountHost.textContent = "";
   let payload;
   try {
-    const query = experiment
-      ? `?experiment_id=${encodeURIComponent(experiment)}`
-      : "";
+    const params = new URLSearchParams();
+    if (experiment) params.set("experiment_id", experiment);
+    if (withResolved) params.set("include_resolved", "true");
+    const query = params.toString() ? `?${params}` : "";
     payload = await api(`/api/issue-reports${query}`);
   } catch (error) {
     if (stale()) return;
@@ -7169,15 +7205,30 @@ async function renderIssueReports() {
   if (stale()) return;
   const reports = payload.reports || [];
   const total = payload.total || 0;
-  memoryView.issueCountHost.textContent =
+  const resolved = payload.resolved || 0;
+  // The resolved count rides along in both modes: without it, a page whose
+  // every report has been answered reads exactly like one that never had any.
+  const listed =
     total > reports.length
       ? `最近 ${reports.length} 条，共 ${total} 条`
-      : `共 ${total} 条`;
+      : `${total} 条`;
+  memoryView.issueCountHost.textContent = withResolved
+    ? `共 ${listed}，其中已处置 ${resolved} 条`
+    : `未处置 ${listed}，已处置 ${resolved} 条`;
   const nodes = (payload.unreadable || []).map((item) =>
     el("div", { class: "hint warn" }, `${item.experiment_id}：${item.error}`),
   );
   if (reports.length) nodes.push(...reports.map(issueReportRow));
-  else nodes.push(el("div", { class: "empty compact" }, "会话没有报告过问题"));
+  else
+    nodes.push(
+      el(
+        "div",
+        { class: "empty compact" },
+        resolved && !withResolved
+          ? `没有未处置的报告（已处置 ${resolved} 条，勾选上方可显示）`
+          : "会话没有报告过问题",
+      ),
+    );
   host.replaceChildren(...nodes);
 }
 
