@@ -3,8 +3,10 @@ new Fold's Validation window before the Agent starts.
 
 At the session level it must land in the step tree as an in-session node the
 Agent can keep as the explicit keep-parent, charge no Validation slot and no
-Step, and reach the run manifest; at the ledger level the final Epoch's
-transitions must count exactly the way graduation term (b) reads them.
+Step, and reach the run manifest projected exactly like the Fold's own
+candidates -- that manifest row is what the next Meta session reads the parent
+baseline from; at the ledger level the final Epoch's transitions must count
+exactly the way graduation term (b) reads them.
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ from autotrade.environment.time_budget import InferenceTimeBudget
 from autotrade.environment.tools.base import ToolError
 from autotrade.environment.tools.finish_fold import FinishFoldTool
 from autotrade.environment.tools.modification_check import ModificationCheckTool
+from autotrade.pipelines.agent_views import compact_fold_history
 from autotrade.pipelines.config import (
     BrokerProfile,
     EvaluationResult,
@@ -63,7 +66,15 @@ class _Evaluator:
     def evaluate(self, request, max_days=None):
         del max_days
         self.calls += 1
-        summary = {"total_return": 0.03, "sharpe": 0.9, "max_drawdown": 0.04}
+        summary = {
+            "total_return": 0.03,
+            "sharpe": 0.9,
+            "max_drawdown": 0.04,
+            # One structured block that belongs in the manifest row and one
+            # replay-scaled block that must stay in the referenced result.json.
+            "benchmark": {"beta": 0.664, "neutralized_excess_return": -0.1815},
+            "per_stock": {"000001.SZ": [0.1] * 8},
+        }
         target = self.root / f"valid_{self.calls:03d}" / "result.json"
         write_json_atomic(target, {"stats": summary})
         return EvaluationResult(summary=dict(summary), result_ref=str(target))
@@ -136,7 +147,13 @@ def _session(root: Path, *, max_backtests: int = 2, max_steps: int = 2):
 
 def _control_result(root: Path) -> EvaluationResult:
     target = root / "host_results" / "parent_control" / "result.json"
-    summary = {"total_return": 0.02, "sharpe": 0.5, "max_drawdown": 0.03}
+    summary = {
+        "total_return": 0.02,
+        "sharpe": 0.5,
+        "max_drawdown": 0.03,
+        "benchmark": {"beta": 0.645, "neutralized_excess_return": -0.2975},
+        "per_stock": {"000001.SZ": [0.2] * 8},
+    }
     write_json_atomic(target, {"stats": summary})
     return EvaluationResult(summary=summary, result_ref=str(target))
 
@@ -168,6 +185,84 @@ def test_the_control_is_an_in_session_step_node_that_charges_no_budget(tmp_path:
     assert manifest.summaries[-1]["total_return"] == 0.02
     # The Agent still has its whole budget: two full Validations fit.
     assert backtest.reserve_validations(2) == ["valid_001", "valid_002"]
+
+
+def test_the_control_row_is_projected_into_the_manifest_like_any_candidate(tmp_path: Path):
+    """The control contributes the same summary projection as a candidate.
+
+    ``compact_fold_history`` reads these rows into the next Meta session's Fold
+    history, where the control sits beside the Fold's own Validations. A control
+    row that drops the ``benchmark`` block every sibling carries leaves the
+    parent baseline with no neutralized-excess anchor, and a reader then takes a
+    neighbour's block for it.
+    """
+    backtest, _tree, _finish, manifest, output = _session(tmp_path)
+    record_parent_control(
+        backtest, _control_result(tmp_path), output_dir=output, models_dir=output.parent / "models"
+    )
+    (output / "main.py").write_text(CHALLENGER_SOURCE, encoding="utf-8")
+    assert backtest.invoke({}).ok
+    control_row, candidate_row = manifest.summaries
+    assert control_row["result_name"] == PARENT_CONTROL_RESULT_NAME
+    # Its own block, never the candidate's, and the same fields as a candidate.
+    assert control_row["benchmark"] == {"beta": 0.645, "neutralized_excess_return": -0.2975}
+    assert candidate_row["benchmark"] == {"beta": 0.664, "neutralized_excess_return": -0.1815}
+    assert set(control_row) - {"parent_control"} == set(candidate_row)
+    # Replay-scaled series stay in the referenced result.json for both.
+    assert "per_stock" not in control_row and "per_stock" not in candidate_row
+
+
+def test_meta_fold_history_never_borrows_another_nodes_benchmark_block(tmp_path: Path):
+    """Every Meta-visible row is built from that row's own manifest entry.
+
+    A run whose control row has no ``benchmark`` must stay without one: filling
+    it from the Fold's selected node would hand Meta the challenger's
+    neutralized excess as the parent's baseline.
+    """
+    manifest_ref = tmp_path / "artifacts" / "run_1" / "run_manifest.json"
+    selected = {"beta": 0.664, "neutralized_excess_return": -0.1815}
+    write_json_atomic(
+        manifest_ref,
+        {
+            "backtest_summaries": [
+                {
+                    "result_name": PARENT_CONTROL_RESULT_NAME,
+                    "mode": "valid",
+                    "status": "ok",
+                    "complete_validation": True,
+                    "total_return": -0.2315,
+                },
+                {
+                    "result_name": "valid_001",
+                    "mode": "valid",
+                    "status": "ok",
+                    "complete_validation": True,
+                    "total_return": -0.1317,
+                    "benchmark": selected,
+                },
+            ]
+        },
+    )
+    compact = compact_fold_history(
+        {
+            "record_type": "fold",
+            "epoch_id": "epoch_001",
+            "fold_id": "fold_2024",
+            "fold_status": "frozen",
+            "run_manifest_ref": str(manifest_ref),
+            "validation_period": "20240101..20241231",
+            "validation_result": {"total_return": -0.1317, "benchmark": selected},
+        },
+        ref_store=AgentRefStore(tmp_path / "experiment"),
+    )
+    control_row, candidate_row = compact["backtest_summaries"]
+    assert control_row["result_name"] == PARENT_CONTROL_RESULT_NAME
+    assert control_row["total_return"] == -0.2315
+    assert "benchmark" not in control_row
+    assert candidate_row["benchmark"] == selected
+    # The Fold-level ``validation_result`` is the selected node's own block too
+    # (``agent_visible_metrics`` keeps its own narrower field whitelist).
+    assert compact["validation_result"]["benchmark"]["beta"] == 0.664
 
 
 def test_the_control_node_is_the_explicit_keep_parent_after_a_different_hypothesis(tmp_path: Path):

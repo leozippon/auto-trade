@@ -42,6 +42,25 @@ def metrics(summary: dict[str, object] | None) -> dict[str, object] | None:
     return compact
 
 
+# The benchmark fields one compact metric block keeps. Raw excess alone cannot
+# separate real edge from a small-cap or high-beta tilt, so the size/beta
+# neutralized excess -- the tie-breaker both the Fold and the Meta guidance name
+# -- and the caliber it was computed under ride beside it. Descriptive
+# attribution only: nothing here is Test or Held-out evidence, which the
+# ``include_frozen_test_metrics`` gate governs, not this whitelist.
+_BENCHMARK_TEXT_KEYS = frozenset({"label", "neutralized_excess_method"})
+_BENCHMARK_KEYS = (
+    "label",
+    "benchmark_return",
+    "excess_return",
+    "beta",
+    "n_days",
+    "size_tilt",
+    "neutralized_excess_return",
+    "neutralized_excess_method",
+)
+
+
 def _visible_metrics(value: object) -> dict[str, object] | None:
     return agent_visible_metrics(value if isinstance(value, dict) else None)
 
@@ -62,15 +81,13 @@ def agent_visible_metrics(summary: dict[str, object] | None) -> dict[str, object
     if isinstance(benchmark, dict):
         compact["benchmark"] = {
             key: benchmark.get(key)
-            for key in ("label", "benchmark_return", "excess_return", "beta", "n_days", "size_tilt")
+            for key in _BENCHMARK_KEYS
             if key in benchmark
             and (
-                (key == "label" and isinstance(benchmark.get(key), str))
-                or (
-                    key != "label"
-                    and isinstance(benchmark.get(key), (int, float))
-                    and not isinstance(benchmark.get(key), bool)
-                )
+                isinstance(benchmark.get(key), str)
+                if key in _BENCHMARK_TEXT_KEYS
+                else isinstance(benchmark.get(key), (int, float))
+                and not isinstance(benchmark.get(key), bool)
             )
         }
     else:

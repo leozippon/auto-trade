@@ -833,6 +833,25 @@ def inline_backtest_stats(summary: Mapping[str, object]) -> dict[str, object]:
     }
 
 
+def manifest_backtest_stats(summary: Mapping[str, object]) -> dict[str, object]:
+    """The metrics one completed Validation contributes to the run manifest.
+
+    Scalars are cheap enough to keep wholesale for host audit; structured
+    values only earn their place when the Agent-visible projection actually
+    carries them. Every completed Validation of a Fold projects through this
+    one function -- the host's parent control included -- so no row is missing
+    a block its siblings carry. A parent-control row that silently lost its
+    ``benchmark`` block once left the next Meta session reading the selected
+    challenger's neutralized excess as the parent's baseline.
+    """
+    return {
+        key: value
+        for key, value in summary.items()
+        if not isinstance(value, (dict, list))
+        or key in AGENT_VISIBLE_BACKTEST_SUMMARY_KEYS
+    }
+
+
 PARENT_CONTROL_RESULT_NAME = "parent_control"
 
 
@@ -875,11 +894,7 @@ def record_parent_control(
             "status": "ok",
             "complete_validation": True,
             "parent_control": True,
-            **{
-                key: value
-                for key, value in control.summary.items()
-                if not isinstance(value, (dict, list))
-            },
+            **manifest_backtest_stats(control.summary),
         }
     )
     return StepResult(node_id, typed.revision_id, control, parent_control=True)
@@ -923,7 +938,8 @@ class FoldBacktestTool(SessionTimeBudgetAware):
         self.spec = ToolSpec(
             self.spec.name,
             "Commit the current output as an immutable revision and run the Fold "
-            "Validation replay. One trading day's generate_orders inference over "
+            "Validation replay; the call starts only after every background "
+            "sub-agent has finished. One trading day's generate_orders inference over "
             f"{self.decision_timeout_seconds:g}s fails the whole backtest "
             "(strategy_inference_timeout_seconds); smoke-test timing on a few days first.",
             self.spec.input_schema,
@@ -1172,15 +1188,7 @@ class FoldBacktestTool(SessionTimeBudgetAware):
                 "mode": "valid",
                 "status": "ok",
                 "complete_validation": True,
-                # Scalars are cheap enough to keep wholesale for host audit;
-                # structured values only earn their place in the manifest when
-                # the Agent-visible projection actually carries them.
-                **{
-                    key: value
-                    for key, value in evaluation.summary.items()
-                    if not isinstance(value, (dict, list))
-                    or key in AGENT_VISIBLE_BACKTEST_SUMMARY_KEYS
-                },
+                **manifest_backtest_stats(evaluation.summary),
             }
         )
         # A returned EvaluationResult is by construction a full-window replay;
@@ -1338,7 +1346,8 @@ class BatchValidateTool(SessionTimeBudgetAware):
         "the Fold budget; the whole batch is refused before anything runs if "
         "it does not fit the budget, if two candidates are byte-identical, if "
         "one has the parent strategy's executable structure, or if one fails "
-        "modification_check. Candidates replay concurrently on the same "
+        "modification_check. The call starts only after every background "
+        "sub-agent has finished; candidates then replay concurrently on the same "
         "Validation window. Returns one row per candidate: node id, headline "
         "metrics, the per-quarter return/excess/Sharpe of sub_windows, wall "
         "seconds, and the exact failure text for any that failed — one failure "
@@ -1766,12 +1775,7 @@ class BatchValidateTool(SessionTimeBudgetAware):
                 "batch_id": batch_id,
                 "candidate": candidate.name,
                 "hypothesis": candidate.hypothesis,
-                **{
-                    key: value
-                    for key, value in evaluation.summary.items()
-                    if not isinstance(value, (dict, list))
-                    or key in AGENT_VISIBLE_BACKTEST_SUMMARY_KEYS
-                },
+                **manifest_backtest_stats(evaluation.summary),
             }
         )
         public_result_ref = f"{node_id}/{VALIDATION_RESULT_ATTACHMENT}"

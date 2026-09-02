@@ -297,6 +297,55 @@ def test_compact_fold_history_keeps_metrics_and_drops_per_stock_series(
     assert "000001.SZ" not in rendered
 
 
+def test_the_compact_benchmark_block_keeps_the_neutralized_excess(tmp_path: Path):
+    """The neutralized excess is the tie-breaker, so the projection must keep it.
+
+    Raw excess alone cannot separate real edge from a small-cap or high-beta
+    tilt. The whitelist is a field filter, not the Test reveal gate: no Test or
+    Held-out value can enter through it, and non-numeric noise still cannot.
+    """
+    compact = compact_fold_history(
+        {
+            "record_type": "fold",
+            "epoch_id": "epoch_001",
+            "fold_id": "fold_2024",
+            "validation_result": {
+                "total_return": -0.2315,
+                "benchmark": {
+                    "label": "沪深300",
+                    "benchmark_return": 0.146831,
+                    "excess_return": -0.37831,
+                    "beta": 0.645,
+                    "size_tilt": 0.322,
+                    "neutralized_excess_return": -0.2975,
+                    "neutralized_excess_method": "日度策略收益对沪深300与规模因子的二元 OLS",
+                    "ts_code": "000300.SH",
+                },
+            },
+        },
+        ref_store=AgentRefStore(tmp_path / "experiment"),
+    )
+    benchmark = compact["validation_result"]["benchmark"]
+    assert benchmark["neutralized_excess_return"] == -0.2975
+    assert benchmark["neutralized_excess_method"].startswith("日度策略收益")
+    assert benchmark["excess_return"] == -0.37831
+    # Not whitelisted, and a non-finite/absent neutralization stays absent
+    # rather than being reported as a zero excess.
+    assert "ts_code" not in benchmark
+    blank = compact_fold_history(
+        {
+            "record_type": "fold",
+            "epoch_id": "epoch_001",
+            "fold_id": "fold_2024",
+            "validation_result": {
+                "benchmark": {"beta": 0.645, "neutralized_excess_return": None}
+            },
+        },
+        ref_store=AgentRefStore(tmp_path / "experiment"),
+    )
+    assert "neutralized_excess_return" not in blank["validation_result"]["benchmark"]
+
+
 def test_meta_learning_prompt_does_not_inline_development_history():
     from autotrade.agent.prompts import build_meta_learning_prompt
 
