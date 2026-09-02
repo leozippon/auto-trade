@@ -134,6 +134,28 @@ class AcceptanceRulesTest(unittest.TestCase):
         self.assertEqual(hard, [])
         self.assertEqual(warnings, ["return_below_target", "sharpe_below_target"])
 
+    def test_a_zero_trade_replay_freezes_with_a_warning_not_in_silence(self) -> None:
+        """The observed silent-success case: a strategy that submits no order
+        scores 0.0 everywhere, so both soft targets pass (0.0 < 0.0 is False)
+        and the fold used to freeze with an empty warning list."""
+
+        rules = AcceptanceRules()
+        flat = {
+            "total_return": 0.0,
+            "sharpe": 0.0,
+            "max_drawdown": 0.0,
+            "turnover": 0.0,
+            "order_count": 0,
+            "trade_count": 0,
+        }
+        hard, warnings = rules.evaluate(flat)
+        # Still warn-only: the fold freezes what it honestly found.
+        self.assertEqual(hard, [])
+        self.assertEqual(warnings, ["no_trades"])
+        # One realized trade is a result, however small; it must not warn.
+        traded = {**flat, "trade_count": 1, "total_return": 0.01, "sharpe": 0.1}
+        self.assertEqual(rules.evaluate(traded), ([], []))
+
     def test_absent_sharpe_is_not_an_integrity_failure(self) -> None:
         rules = AcceptanceRules()
         hard, warnings = rules.evaluate({"total_return": 0.02, "max_drawdown": 0.1})

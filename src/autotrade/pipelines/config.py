@@ -72,7 +72,8 @@ class StrategyExperimentConfig:
 # ``acceptance_semantics`` fact. It lives beside the rules it describes so the
 # projection cannot drift from the behavior.
 ACCEPTANCE_SEMANTICS_SUMMARY = (
-    "max_drawdown+finite_metrics=hard; return/sharpe=warn-only targets"
+    "max_drawdown+finite_metrics=hard; return/sharpe=warn-only targets; "
+    "trade_count=0 warns no_trades"
 )
 
 
@@ -197,7 +198,10 @@ class AcceptanceRules:
         metric would otherwise pass all thresholds). The max_drawdown cap stays a
         hard risk limit. Return/Sharpe shortfalls are WARNINGS only — the fold
         still freezes its validated update; a weak step recorded with a warning
-        beats silently resetting the fold chain. Only a summary from a completed
+        beats silently resetting the fold chain. A zero ``trade_count`` warns the
+        same way: it clears every threshold without having traded, so the
+        warning is the only thing distinguishing it from a real result. Only a
+        summary from a completed
         full-window evaluation reaches here; an aborted replay never produces
         one."""
         hard: list[str] = []
@@ -229,6 +233,13 @@ class AcceptanceRules:
             warnings.append("return_below_target")
         if "sharpe" in values and values["sharpe"] < self.min_sharpe:
             warnings.append("sharpe_below_target")
+        if summary.get("trade_count") == 0:
+            # A strategy that submits no order scores 0.0 on every metric and
+            # therefore clears both soft targets (0.0 < 0.0 is False), freezing
+            # a candidate that proved nothing with an empty warning list. The
+            # freeze stays — the fold honestly found nothing — but the ledger
+            # must not read like a validated result.
+            warnings.append("no_trades")
         return hard, warnings
 
 
