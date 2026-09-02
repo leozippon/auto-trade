@@ -56,6 +56,7 @@ _ALLOWED_PUBLIC_PATH_PREFIXES = (
     "/mnt/artifacts",
     "/mnt/snapshot",
     "/mnt/snapshots",
+    "/mnt/tools",
     # Container FHS roots: fixed by the sandbox image, identical on every
     # machine, so they carry no host identity. Keeping them readable preserves
     # traceback frames (`/usr/local/lib/python3.11/...`) and `2>/dev/null`

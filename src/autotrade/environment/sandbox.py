@@ -28,6 +28,13 @@ from .runtime import (
 
 DEFAULT_IMAGE = "autotrade-sandbox:latest"
 
+# Trusted research tooling bind-mounted read-only into the Agent session: the
+# signal screen is a self-contained script (numpy/pandas/pyarrow, all in the
+# image), so shipping it is a mount, not an image rebuild. The mount path is
+# the single source the experiment facts and docs quote.
+SCREENING_TOOL_SOURCE = Path(__file__).resolve().parent / "screening" / "screen.py"
+SCREENING_TOOL_MOUNT = "/mnt/tools/screen.py"
+
 RUNTIME_ENV_SCHEMA_VERSION = 2
 _MEMORY_LIMIT = re.compile(r"^[1-9][0-9]*(?:[kKmMgG])?$")
 _IMAGE_TAG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,200}$")
@@ -302,6 +309,7 @@ class DockerSandbox:
             "--mount", f"type=bind,src={paths.valid},dst=/mnt/snapshots/valid,readonly",
             "--mount", f"type=bind,src={paths.current_snapshot},dst=/mnt/snapshot,readonly",
             "--mount", f"type=bind,src={paths.artifacts},dst=/mnt/artifacts,readonly",
+            "--mount", f"type=bind,src={SCREENING_TOOL_SOURCE},dst={SCREENING_TOOL_MOUNT},readonly",
             "--mount", f"type=bind,src={paths.agent},dst=/mnt/agent",
             "--workdir", "/mnt/agent/workspace", self.spec.image, "sleep", "infinity",
         ])
@@ -518,7 +526,7 @@ def _validate_explicit_image_tag(image: str) -> None:
 
 
 __all__ = [
-    "DEFAULT_IMAGE", "DockerSandbox",
+    "DEFAULT_IMAGE", "SCREENING_TOOL_MOUNT", "SCREENING_TOOL_SOURCE", "DockerSandbox",
     "LocalSandbox", "SandboxConfig", "SandboxLimits", "SandboxSpec", "hide_snapshot_slots_from_agent",
     "link_copytree", "probe_image_runtime",
 ]

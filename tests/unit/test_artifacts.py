@@ -108,6 +108,15 @@ class ArtifactContractTest(unittest.TestCase):
             with self.assertRaisesRegex(ArtifactError, "stage directories"):
                 load_strategy_artifact(root)
 
+        # The signal screen is session tooling; the strategy worker never mounts it.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = write_artifact(
+                Path(tmp),
+                main='import subprocess\n\n\ndef generate_orders(context):\n    subprocess.run(["python", "/mnt/tools/screen.py"])\n    return []\n',
+            )
+            with self.assertRaisesRegex(ArtifactError, "stage directories"):
+                load_strategy_artifact(root)
+
     def test_forbidden_path_scan_ignores_docstrings(self):
         main = '''
 """Documentation may mention /mnt/artifacts without becoming executable access."""

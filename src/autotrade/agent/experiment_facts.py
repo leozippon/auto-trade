@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 from autotrade.environment.identity import AgentRefStore
+from autotrade.environment.sandbox import SCREENING_TOOL_MOUNT
 
 EXPERIMENT_FACTS_SCHEMA_VERSION = 1
 
@@ -75,6 +76,11 @@ def build_experiment_facts(
             "skills_index_ref": str(
                 _as_mapping(manifest.get("skills")).get("index_path")
                 or "inputs/skills_index.json"
+            ),
+            # The read-only signal screen is a Docker bind mount; a local-dev
+            # session has no such path, so the fact stays out rather than lie.
+            "signal_screen_ref": (
+                SCREENING_TOOL_MOUNT if not is_meta and runtime_env.get("mode") == "docker" else None
             ),
         },
         "visibility_policy": {

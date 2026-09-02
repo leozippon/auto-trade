@@ -36,6 +36,8 @@ from autotrade.environment.executor import (
 )
 from autotrade.environment.replay import DailyMarketData
 from autotrade.environment.sandbox import (
+    SCREENING_TOOL_MOUNT,
+    SCREENING_TOOL_SOURCE,
     DockerSandbox,
     LocalSandbox,
     SandboxConfig,
@@ -145,6 +147,11 @@ def test_persistent_sandbox_command_has_bounded_explicit_identity_mounts(tmp_pat
     assert "/var/run/docker.sock" not in rendered
     assert ".git" not in rendered
     assert "adm.experiment=exp1" in command
+    # The signal screen rides in as a read-only bind of the repo file, so the
+    # Agent can run it without an image rebuild and cannot alter it.
+    assert SCREENING_TOOL_SOURCE.is_file()
+    assert f"type=bind,src={SCREENING_TOOL_SOURCE},dst={SCREENING_TOOL_MOUNT},readonly" in command
+    assert SCREENING_TOOL_MOUNT == "/mnt/tools/screen.py"
 
 
 def test_local_sandbox_runtime_contract_has_no_git_and_no_image_record(tmp_path: Path):

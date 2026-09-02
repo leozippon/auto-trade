@@ -85,6 +85,29 @@ def test_regular_fold_facts_name_the_yearly_folds_and_the_meta_between_them() ->
     assert "fold_2022" not in rendered
 
 
+def test_the_signal_screen_path_is_a_fact_only_where_the_mount_exists() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        store = AgentRefStore(Path(tmp) / "experiment")
+        docker_fold = build_experiment_facts(
+            manifest={"kind": "fold", "experiment_id": "exp", "run_id": "run_x"},
+            ref_store=store,
+            runtime_env={"mode": "docker"},
+        )
+        local_fold = build_experiment_facts(
+            manifest={"kind": "fold", "experiment_id": "exp", "run_id": "run_x"},
+            ref_store=store,
+            runtime_env={"mode": "local"},
+        )
+        meta = build_experiment_facts(
+            manifest={"kind": "meta_learning", "experiment_id": "exp"},
+            ref_store=store,
+            runtime_env={"mode": "docker"},
+        )
+    assert docker_fold["source_refs"]["signal_screen_ref"] == "/mnt/tools/screen.py"
+    assert "signal_screen_ref" not in local_fold["source_refs"]
+    assert "signal_screen_ref" not in meta["source_refs"]
+
+
 def test_rolling_facts_keep_the_cadence_and_a_screened_universe_is_described() -> None:
     screened = SnapshotConfig(
         screen_exclude_st=True, screen_exclude_new_listed_days=180, screen_boards=("main",)

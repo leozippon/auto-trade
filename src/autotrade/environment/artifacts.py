@@ -70,13 +70,16 @@ MODEL_ARTIFACT_ALLOWED_SUFFIXES = frozenset(
 # the staged alias root) is not mounted into the formal run. "/mnt/runtime/"
 # subpaths ARE mounted there, but they are per-run ephemeral host-managed paths
 # reachable only via the context surfaces, so hardcoding them must fail fast
-# just the same. The singular "/mnt/snapshot" is intentionally absent: it is the
-# legitimate formal read root (see sandbox.py formal_strategy_read_roots).
+# just the same. "/mnt/tools" is the Agent session's research tooling (the
+# signal screen), never mounted into the strategy worker. The singular
+# "/mnt/snapshot" is intentionally absent: it is the legitimate formal read
+# root (see sandbox.py formal_strategy_read_roots).
 FORBIDDEN_CODE_REFERENCES = (
     "/mnt/snapshots/",
     "/mnt/runtime/",
     "/mnt/artifacts",
     "/mnt/agent/workspace",
+    "/mnt/tools",
 )
 
 
