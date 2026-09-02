@@ -151,9 +151,11 @@ class AcceptanceRulesTest(unittest.TestCase):
         hard, warnings = rules.evaluate(flat)
         # Still warn-only: the fold freezes what it honestly found.
         self.assertEqual(hard, [])
-        self.assertEqual(warnings, ["no_trades"])
-        # One realized trade is a result, however small; it must not warn.
-        traded = {**flat, "trade_count": 1, "total_return": 0.01, "sharpe": 0.1}
+        self.assertEqual(warnings, ["no_orders"])
+        # One filled order is a result, however small; it must not warn. A
+        # buy-and-hold book has orders but no closed round trip, so
+        # trade_count stays 0 and must not be the trigger.
+        traded = {**flat, "order_count": 1, "total_return": 0.01, "sharpe": 0.1}
         self.assertEqual(rules.evaluate(traded), ([], []))
 
     def test_absent_sharpe_is_not_an_integrity_failure(self) -> None:
