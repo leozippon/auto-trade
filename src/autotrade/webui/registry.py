@@ -19,6 +19,7 @@ from pathlib import Path
 
 from autotrade.environment.replay.style import STYLE_ARTIFACT_NAME, STYLE_SCHEMA_VERSION
 from autotrade.pipelines.agent_inbox import INBOX_NAME, inbox_public_view
+from autotrade.pipelines.config import AcceptanceRules
 from autotrade.pipelines.fold_analysis import analysis_paths
 from autotrade.pipelines.hitl_state import (
     ANALYSIS_DIR_NAME,
@@ -313,7 +314,9 @@ def _walk_forward_view(
     Without a Test stage the transitions are the host's parent controls, which
     are development evidence and readable while the experiment runs. With a
     Test stage they are the frozen Test results, so the counts stay sealed
-    until the reveal like every other Test number.
+    until the reveal like every other Test number. ``required`` is the same
+    two-thirds bar the acceptance rules apply, served so the console states the
+    threshold without restating the rule (``None`` without transitions).
     """
     if test_stage and not revealed:
         return None
@@ -322,6 +325,7 @@ def _walk_forward_view(
         "source": counts["source"],
         "transitions": counts["transitions"],
         "positive_excess": counts["positive_excess"],
+        "required": AcceptanceRules.walk_forward_consistency(counts).get("required"),
     }
 
 
@@ -629,7 +633,12 @@ def summarize_experiment(directory: Path) -> dict[str, object]:
                         # Development evidence: the Fold's baseline, never sealed.
                         "parent_control": _parent_control_view(record),
                     }
-                    for record in folds
+                    # Ordered like ledger.walk_forward_transitions, by
+                    # validation window, so labels cannot mis-pair with the
+                    # transition counts above.
+                    for record in sorted(
+                        folds, key=lambda row: str(row.get("validation_period") or "")
+                    )
                 ],
             }
         )

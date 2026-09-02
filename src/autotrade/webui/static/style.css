@@ -2118,9 +2118,9 @@ table.data.text td.nowrap {
  margin: 0;
 }
 
-/* Agent-filed issue reports: one folded card per report — the summary is the
-   line that gets read, the attribution sits under it in its own columns, and
-   the evidence only appears when it is asked for. */
+/* Agent-filed issue reports: one card per report, read top to bottom — a
+   category badge opening the summary line, one quiet attribution line under
+   it, and the raw evidence folded behind its own small disclosure. */
 .issue-filter {
  display: flex;
  align-items: center;
@@ -2139,75 +2139,86 @@ table.data.text td.nowrap {
 .issue-list {
  display: flex;
  flex-direction: column;
- gap: 0.5rem;
+ gap: 0.55rem;
  margin-top: 0.85rem;
 }
-details.issue-report {
+.issue-report {
  border: 1px solid var(--row-border);
  border-radius: 10px;
  background: var(--panel-2);
- padding: 0.5rem 0.75rem;
+ padding: 0.7rem 0.85rem;
 }
-/* Two rows beside one disclosure column, so every card's summary and metadata
-   start on the same left edge. */
-details.issue-report summary {
- display: grid;
- grid-template-columns: 1rem minmax(0, 1fr);
- gap: 0.15rem 0.45rem;
- cursor: pointer;
- list-style: none;
-}
-/* A grid summary drops the native marker, so the disclosure is drawn here. */
-details.issue-report summary::-webkit-details-marker {
- display: none;
-}
-details.issue-report summary::before {
- content: "▸";
- grid-column: 1;
- grid-row: 1 / span 2;
- color: var(--muted);
- font-size: 0.8rem;
- line-height: 1.7;
-}
-details.issue-report[open] summary::before {
- content: "▾";
-}
+/* The badge sits in the text flow rather than in a column of its own, so a
+   summary that runs past one line wraps back to the card's own left edge and
+   every card's prose block starts on the same edge. */
 .issue-line {
- display: flex;
- align-items: baseline;
- flex-wrap: wrap;
- gap: 0.5rem;
- min-width: 0;
-}
-.issue-summary {
- min-width: 0;
+ margin: 0;
  font-weight: 600;
+ line-height: 1.65;
  overflow-wrap: anywhere;
 }
+.issue-line .badge {
+ margin-right: 0.45rem;
+}
+/* One attribution line: it wraps between pairs when the card is narrow, and
+   never inside a pair. */
 .issue-meta {
- display: grid;
- grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
- gap: 0.1rem 0.9rem;
+ display: flex;
+ flex-wrap: wrap;
+ gap: 0.1rem 1.3rem;
+ margin-top: 0.35rem;
  color: var(--muted);
  font-size: 0.82rem;
+ line-height: 1.7;
 }
 .issue-meta-item {
- display: flex;
- gap: 0.4rem;
  min-width: 0;
+ white-space: nowrap;
+ overflow: hidden;
+ text-overflow: ellipsis;
 }
 .issue-meta-item .k {
- flex: none;
+ margin-right: 0.4rem;
+ opacity: 0.75;
 }
-.issue-meta-item .v {
- min-width: 0;
- overflow-wrap: anywhere;
+/* Evidence is raw tool, data or document output and is asked for, not read by
+   default: only this small disclosure is clickable, so selecting the summary
+   text above never folds the card open. */
+details.issue-evidence {
+ margin-top: 0.5rem;
 }
-/* Evidence is raw tool, data or document output: long paths and stack frames
-   wrap, and whatever still cannot wrap scrolls inside this box rather than
-   being clipped by the page's own overflow-x: hidden. */
-.issue-evidence {
- margin: 0.5rem 0 0.15rem;
+details.issue-evidence > summary {
+ display: inline-block;
+ cursor: pointer;
+ list-style: none;
+ /* The negative margin cancels the padding on the left, so the disclosure
+    starts on the same edge as the summary and the attribution above it while
+    its hover chip still has room around the text. */
+ margin-left: -0.4rem;
+ padding: 0.1rem 0.4rem;
+ border-radius: 6px;
+ color: var(--muted);
+ font-size: 0.8rem;
+}
+details.issue-evidence > summary::-webkit-details-marker {
+ display: none;
+}
+details.issue-evidence > summary::before {
+ content: "▸";
+ margin-right: 0.3rem;
+ font-size: 0.78rem;
+}
+details.issue-evidence[open] > summary::before {
+ content: "▾";
+}
+details.issue-evidence > summary:hover {
+ color: var(--text);
+ background: var(--hover-bg);
+}
+/* Long paths and stack frames wrap, and whatever still cannot wrap scrolls
+   inside this box rather than being clipped by the page's overflow-x: hidden. */
+.issue-evidence-body {
+ margin: 0.35rem 0 0.1rem;
  padding: 0.5rem 0.65rem;
  border: 1px solid var(--border);
  border-radius: 8px;
@@ -2430,9 +2441,5 @@ details.issue-report[open] summary::before {
  }
  .memory-section {
   margin-top: 1.2rem;
- }
- /* One labelled attribution per line. */
- .issue-meta {
-  grid-template-columns: minmax(0, 1fr);
  }
 }

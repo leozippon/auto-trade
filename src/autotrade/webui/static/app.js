@@ -1429,7 +1429,7 @@ function verdictBadge(verdict) {
 }
 
 /* Graduation term (b) beside the verdict badge: how many of the final Epoch's
-   walk-forward transitions kept a positive excess return, and the count they
+   out-of-sample transitions kept a positive excess return, and the count they
    had to reach. The failing reason itself rides in verdict.reasons. */
 function walkForwardTerm(verdict) {
   const term = (verdict || {}).walk_forward;
@@ -1438,24 +1438,28 @@ function walkForwardTerm(verdict) {
     return el(
       "span",
       { class: "mode-note" },
-      "走向前：本排程没有转移，裁决只看 Held-out",
+      "本排程没有样本外过渡，裁决只看 Held-out",
     );
   const consistent = term.status === "consistent";
   return el(
     "span",
     {
       class: `badge state-${consistent ? "completed" : "failed"}`,
-      title: `走向前一致性（${WALK_FORWARD_SOURCES[term.source] || term.source || "—"}）：${term.positive_excess}/${term.transitions} 个转移超额为正，需 ≥ ${term.required}`,
+      title: `前向一致性：末个 Epoch 的 ${term.transitions} 次样本外过渡（${WALK_FORWARD_SOURCES[term.source] || term.source || "—"}）里 ${term.positive_excess} 次超额为正，毕业需 ≥ ${term.required} 次`,
     },
-    `走向前 ${term.positive_excess}/${term.transitions}`,
+    `前向一致 ${term.positive_excess}/${term.transitions}`,
   );
 }
 
-/* Walk-forward per Epoch: without a Test stage every Fold after the Epoch's
-   first opens with the previous Fold's frozen strategy replayed on this Fold's
-   Validation window, and graduation term (b) counts how many of those kept a
-   positive excess return. The counts come from the ledger, the rows from the
-   same parent-control metrics the fold panel reads. */
+/* Out-of-sample transitions per Epoch. Without a Test stage every Fold after
+   the Epoch's first opens with the previous Fold's frozen strategy replayed
+   unchanged on this Fold's Validation window (the host's parent control), and
+   graduation term (b) counts how many of those replays kept a positive excess
+   return. The counts come from the ledger, the rows from the same
+   parent-control metrics the fold panel reads: the Epoch's first Fold opens no
+   transition, so its row is dropped here and the table lists exactly what the
+   count counts — including a control that failed, which is a transition that
+   proved nothing rather than a missing row. */
 function walkForwardPanel(detail) {
   const epochs = (detail.metrics_by_epoch || []).filter(
     (epoch) => (epoch.walk_forward || {}).transitions > 0,
@@ -1464,7 +1468,19 @@ function walkForwardPanel(detail) {
   const panel = el(
     "div",
     { class: "panel section-gap" },
-    el("h4", { class: "subsection-title" }, "走向前转移（父本对照）"),
+    el(
+      "h4",
+      { class: "subsection-title" },
+      "样本外过渡：父本策略在下一个窗口的表现",
+    ),
+    el(
+      "div",
+      { class: "hint" },
+      "每个 Fold 开始前，宿主把上一 Fold 冻结的策略原样放进本 Fold 的验证区间重跑一次（父本对照），这一次重放就是一次样本外过渡。" +
+        "下表给的全是这个父本策略在新窗口的成绩，不是本 Fold 新策略的成绩。" +
+        "毕业裁决只看末个 Epoch：超额为正的过渡至少要占 ⌈2/3⌉。" +
+        "首个 Epoch 的过渡是真正的前向样本外证据，之后的 Epoch 重访血缘已经见过的年份。",
+    ),
   );
   for (const epoch of epochs) {
     const term = epoch.walk_forward || {};
@@ -1472,14 +1488,26 @@ function walkForwardPanel(detail) {
       el(
         "div",
         { class: "meta-line" },
-        `${epochShort(epoch.epoch_id)} ｜ 来源 ${WALK_FORWARD_SOURCES[term.source] || term.source || "—"} ｜ 转移 ${term.transitions} ｜ 超额为正 ${term.positive_excess}/${term.transitions}`,
+        `${epochShort(epoch.epoch_id)}：${term.transitions} 次过渡，其中 ${term.positive_excess} 次父本超额为正`,
+        term.required ? `（按 ⌈2/3⌉ 需 ${term.required} 次）` : null,
       ),
     );
-    if (term.source !== "parent_control") continue;
-    const rows = (detail.fold_returns || []).filter(
-      (row) => row.epoch_id === epoch.epoch_id && row.parent_control,
+    if (term.source !== "parent_control") {
+      panel.append(
+        el(
+          "div",
+          { class: "mode-note" },
+          `本排程的过渡取自各 Fold 的${WALK_FORWARD_SOURCES[term.source] || term.source || "—"}，明细在对应 Fold 面板`,
+        ),
+      );
+      continue;
+    }
+    // Same Fold order the ledger counts in; the first Fold inherits from the
+    // previous Epoch and is not one of this Epoch's transitions.
+    const folds = (detail.fold_returns || []).filter(
+      (row) => row.epoch_id === epoch.epoch_id,
     );
-    if (!rows.length) continue;
+    if (folds.length < 2) continue;
     panel.append(
       el(
         "table",
@@ -1487,20 +1515,38 @@ function walkForwardPanel(detail) {
         el(
           "tr",
           {},
-          el("th", {}, "Fold"),
-          el("th", { title: "对照未完成时没有数字" }, "状态"),
-          el("th", {}, "收益"),
-          el("th", { title: "相对沪深300的超额收益" }, "超额"),
-          el("th", {}, "Sharpe"),
-          el("th", {}, "回撤"),
+          el(
+            "th",
+            { title: "上一 Fold 冻结的策略，被原样放进下一个 Fold 的验证区间重跑" },
+            "过渡",
+          ),
+          el("th", { title: "父本策略在该验证区间的区间收益" }, "父本收益"),
+          el(
+            "th",
+            { title: "父本相对沪深300的超额收益，> 0 才算这次过渡通过" },
+            "父本超额",
+          ),
+          el("th", { title: "父本在该区间日收益的年化 Sharpe" }, "父本 Sharpe"),
+          el("th", { title: "父本在该区间的峰谷回撤" }, "父本回撤"),
         ),
-        ...rows.map((row) => {
+        ...folds.slice(1).map((row, index) => {
           const control = row.parent_control || {};
+          const failed = control.status !== "ok";
           return el(
             "tr",
             {},
-            el("td", {}, foldPeriodLabel(detail, row.fold_ref)),
-            el("td", {}, control.status === "ok" ? "完成" : "失败"),
+            el(
+              "td",
+              {},
+              `${foldPeriodLabel(detail, folds[index].fold_ref)} 冻结的策略 → ${foldPeriodLabel(detail, row.fold_ref)} 窗口`,
+              failed
+                ? el(
+                    "span",
+                    { class: "mode-note" },
+                    "（对照未完成，这次过渡不算通过）",
+                  )
+                : null,
+            ),
             el("td", { class: signCls(control.return) }, fmtPct(control.return)),
             el(
               "td",
@@ -6989,42 +7035,47 @@ function issueFilterBar() {
   );
 }
 
-/* One folded card per report: the summary is the line that gets read, and the
-   attribution sits under it as labelled metadata in its own columns instead of
-   one nowrap run that eats the row before the summary gets any width. */
+/* One card per report, read top to bottom: the category badge opens the
+   summary line so every card's prose keeps the same left edge, the attribution
+   follows as one quiet line, and the raw evidence stays folded behind its own
+   small disclosure instead of making the whole card a click target. */
 function issueReportRow(report) {
   return el(
-    "details",
+    "article",
     { class: "issue-report" },
     el(
-      "summary",
-      {},
+      "p",
+      { class: "issue-line" },
       el(
         "span",
-        { class: "issue-line" },
-        el(
-          "span",
-          { class: "badge mini kind" },
-          ISSUE_CATEGORY_LABELS[report.category] || report.category || "—",
-        ),
-        el("span", { class: "issue-summary" }, report.summary || "—"),
+        { class: "badge kind" },
+        ISSUE_CATEGORY_LABELS[report.category] || report.category || "—",
       ),
-      el(
-        "span",
-        { class: "issue-meta" },
-        issueMetaItem("时间", fmtTs(report.recorded_at)),
-        issueMetaItem("实验", report.experiment_id || "—"),
-        issueMetaItem("会话", report.session_label || "—"),
-      ),
+      report.summary || "—",
     ),
-    el("div", { class: "issue-evidence" }, report.evidence || "—"),
+    el(
+      "div",
+      { class: "issue-meta" },
+      issueMetaItem("时间", fmtTs(report.recorded_at)),
+      issueMetaItem("实验", report.experiment_id || "—"),
+      issueMetaItem("会话", report.session_label || "—"),
+    ),
+    el(
+      "details",
+      { class: "issue-evidence" },
+      el("summary", {}, "证据"),
+      el("pre", { class: "issue-evidence-body" }, report.evidence || "—"),
+    ),
   );
 }
 
+/* Label and value are one unbreakable run: the metadata line wraps between
+   pairs, never inside one, and a pathological value ends in an ellipsis with
+   the full text still on the element. */
 function issueMetaItem(label, value) {
   return el(
     "span",
-    { class: "issue-meta-item" },
+    { class: "issue-meta-item", title: `${label} ${value}` },
     el("span", { class: "k" }, label),
     el("span", { class: "v" }, value),
   );

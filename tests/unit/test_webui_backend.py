@@ -2566,11 +2566,22 @@ class WebuiBackendTest(unittest.TestCase):
         )
 
     def test_epoch_metrics_carry_the_walk_forward_transition_counts(self) -> None:
+        """The per-Epoch counts carry the two-thirds bar the acceptance rules
+        apply, so the console states the threshold instead of restating the
+        rule in the frontend."""
+
         self._build_walk_forward_experiment("exp_wf")
         detail = self.client.get("/api/experiments/exp_wf").json()
         self.assertEqual(
             [epoch["walk_forward"] for epoch in detail["metrics_by_epoch"]],
-            [{"source": "parent_control", "transitions": 3, "positive_excess": 1}],
+            [
+                {
+                    "source": "parent_control",
+                    "transitions": 3,
+                    "positive_excess": 1,
+                    "required": 2,
+                }
+            ],
         )
 
     def test_parent_control_is_development_evidence_and_survives_the_guard(
