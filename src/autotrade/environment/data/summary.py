@@ -135,6 +135,12 @@ def _write_unit_reference(path: Path, views: Mapping[str, tuple[Path, str]]) -> 
     payload = {
         "generated_at": utc_now_iso(),
         "identity_rule": AGENT_UNIT_CONTRACT["identity_rule"],
+        # Without this clause a record reads as a claim about the file: an Agent
+        # that measures daily.parquet in CNY and shares sees ``source_unit``
+        # thousand_CNY/hands and concludes the table is wrong, when the factor is
+        # exactly what was already applied. This file is read standalone, so the
+        # disambiguation has to be in it and not only in data_summary.json.
+        "normalized_files": AGENT_UNIT_CONTRACT["normalized_files"],
         "unknown_unit_policy": AGENT_UNIT_CONTRACT["unknown_unit_policy"],
         "records": records,
     }

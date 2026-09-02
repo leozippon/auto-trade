@@ -811,6 +811,52 @@ class UnitRegistryProjectionTest(unittest.TestCase):
                 for record in records:
                     self.assertIn(record, registry_records)
 
+    def test_unit_reference_states_that_the_files_are_already_normalized(self):
+        """`source_unit` is the vendor unit, not the unit in the file. A Fold
+        that read `unit_reference.json` standalone measured daily.parquet in
+        CNY/shares, saw `thousand_CNY`/`hands`, and filed the correct data
+        contract as a defect; the standalone file must carry the clause that
+        resolves it."""
+
+        from autotrade.environment.data.summary import write_agent_data_summary
+
+        with tempfile.TemporaryDirectory() as tmp:
+            view = Path(tmp) / "decision"
+            view.mkdir()
+            pd.DataFrame(
+                {
+                    "ts_code": ["000957.SZ"],
+                    "trade_date": ["20200102"],
+                    "close": [6.73],
+                    "vol": [10_693_000.0],
+                    "amount": [71_948_000.0],
+                }
+            ).to_parquet(view / "daily.parquet", index=False)
+            (view / "manifest.json").write_text('{"kind": "decision"}', encoding="utf-8")
+            write_agent_data_summary(
+                Path(tmp) / "data_summary.json",
+                kind="decision",
+                fold_id=None,
+                views={"snapshot": (view, "/mnt/snapshot")},
+            )
+            payload = json.loads(
+                (Path(tmp) / "unit_reference.json").read_text(encoding="utf-8")
+            )
+
+        from autotrade.environment.data.units import AGENT_UNIT_CONTRACT
+
+        self.assertEqual(
+            payload["normalized_files"], AGENT_UNIT_CONTRACT["normalized_files"]
+        )
+        amount = next(
+            record
+            for record in payload["records"]
+            if record["file"] == "daily.parquet" and record["column"] == "amount"
+        )
+        # The record itself keeps stating the vendor unit and the applied factor.
+        self.assertEqual(amount["source_unit"], "thousand_CNY")
+        self.assertEqual(amount["normalized_unit"], "CNY")
+
     def test_agent_contract_is_a_pointer_not_a_copy(self):
         from autotrade.environment.data.units import AGENT_UNIT_CONTRACT
 
