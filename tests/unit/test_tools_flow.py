@@ -1113,6 +1113,62 @@ class ToolResultContractTest(unittest.TestCase):
             self.assertIn("correct call example", refused.error)
             self.assertEqual((paths.artifacts / "x.txt").read_text(encoding="utf-8"), "evidence\n")
 
+    def test_a_leading_workspace_segment_is_dropped_under_every_writable_root(
+        self,
+    ) -> None:
+        """The documented rule holds whichever root the call names.
+
+        ``root`` plus ``path`` is a virtual address, and the tool descriptions
+        promise a leading ``workspace/`` is read as the root name and dropped.
+        Applying the strip only to the workspace root turned
+        ``{root: output, path: workspace/output/main.py}`` into
+        ``output/workspace/output/main.py``: the formal entrypoint stayed
+        untouched while the Agent believed it had rewritten it.
+        """
+
+        with tempfile.TemporaryDirectory() as tmp:
+            paths, registry = self._layout(tmp)
+            written = registry.invoke(
+                "write_file",
+                {
+                    "root": "output",
+                    "path": "workspace/output/main.py",
+                    "content": "def generate_orders(context):\n    return []\n",
+                },
+            )
+            self.assertTrue(written.ok, written.error)
+            self.assertEqual(written.value["path"], "output/main.py")
+            self.assertTrue((paths.workspace / "output" / "main.py").is_file())
+            self.assertFalse((paths.workspace / "workspace").exists())
+            edited = registry.invoke(
+                "edit_file",
+                {
+                    "root": "output",
+                    "path": "workspace/output/main.py",
+                    "old_text": "return []",
+                    "new_text": "return list()",
+                },
+            )
+            self.assertTrue(edited.ok, edited.error)
+            self.assertEqual(edited.value["path"], "output/main.py")
+            self.assertIn(
+                "return list()",
+                (paths.workspace / "output" / "main.py").read_text(encoding="utf-8"),
+            )
+            models = registry.invoke(
+                "write_file",
+                {"root": "models", "path": "workspace/models/w.txt", "content": "w"},
+            )
+            self.assertTrue(models.ok, models.error)
+            self.assertEqual(models.value["path"], "models/w.txt")
+            # Unchanged for the default root, and a real workspace/ directory
+            # still keeps the literal form.
+            bare = registry.invoke(
+                "write_file", {"path": "workspace/notes.md", "content": "x"}
+            )
+            self.assertTrue(bare.ok, bare.error)
+            self.assertEqual(bare.value["path"], "notes.md")
+
     def test_schema_errors_carry_one_correct_example(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             _, registry = self._layout(tmp)

@@ -42,7 +42,12 @@ class StepRollbackTool:
 
     def invoke(self, arguments: Mapping[str, object]) -> ToolResult:
         node_id = str(arguments["node_id"])
-        node = self.tree.get_node(node_id)
+        try:
+            node = self.tree.get_node(node_id)
+        except ValueError as exc:
+            # Same shaping as finish_fold: a typed tool error carries an
+            # error_type the model can act on, an escaping ValueError does not.
+            raise ToolError("step_rollback cannot restore an absent Step") from exc
         # Same session rule as finish_fold: the tree carries earlier Folds'
         # nodes as read-only evidence, and restoring one would rebase this
         # Fold's work copy and lineage onto an artifact it may not select.

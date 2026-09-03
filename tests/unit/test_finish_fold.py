@@ -23,6 +23,23 @@ DOCSTRING_ONLY = (
     "    return []\n"
 )
 LOGIC = "def generate_orders(context):\n    threshold = 0.02\n    return []\n"
+CLASS_PARENT = (
+    "class Signal:\n"
+    "    def score(self, row):\n"
+    "        return 0.0\n"
+    "\n"
+    "def generate_orders(context):\n"
+    "    return []\n"
+)
+CLASS_DOCSTRING_ONLY = (
+    "class Signal:\n"
+    '    """still parent"""\n'
+    "    def score(self, row):\n"
+    "        return 0.0\n"
+    "\n"
+    "def generate_orders(context):\n"
+    "    return []\n"
+)
 
 
 def test_structure_ignores_comments_docstrings_and_whitespace():
@@ -31,6 +48,11 @@ def test_structure_ignores_comments_docstrings_and_whitespace():
     assert executable_source_structure(DOCSTRING_ONLY) == parent
     assert executable_source_structure("def generate_orders(context):\n\n    return []\n") == parent
     assert executable_source_structure(LOGIC) != parent
+    # A class docstring is documentation like the other two: adding one must
+    # not let a parent-identical package pass the different-hypothesis gate.
+    assert executable_source_structure(CLASS_DOCSTRING_ONLY) == (
+        executable_source_structure(CLASS_PARENT)
+    )
 
 
 def _record(

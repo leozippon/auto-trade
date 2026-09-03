@@ -68,8 +68,8 @@ class FoldBudgetStatus:
 def executable_source_structure(source: str) -> str:
     """Return the directly comparable executable structure of one module.
 
-    Comments, module/function docstrings, and whitespace are ignored so a
-    comment-only harvest has the parent's structure, while a logic or signal
+    Comments, module/class/function docstrings, and whitespace are ignored so
+    a comment-only harvest has the parent's structure, while a logic or signal
     change does not.
     """
 
@@ -108,7 +108,9 @@ def _tree_bytes(root: Path | None) -> dict[str, bytes]:
 
 def _strip_docstrings(tree: ast.AST) -> None:
     for node in ast.walk(tree):
-        if not isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef)):
+        if not isinstance(
+            node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+        ):
             continue
         body = node.body
         if (

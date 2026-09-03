@@ -104,6 +104,14 @@ def test_step_rollback_refuses_a_node_outside_the_current_fold_session(tmp_path:
         assert not finished.ok
         assert "current Fold session" in finished.error
 
+    # An absent node is shaped like its finish_fold sibling: a typed tool error
+    # the model can act on, not an untyped ValueError leaking through.
+    for tool in ("step_rollback", "finish_fold"):
+        absent = registry.invoke(tool, {"node_id": "step_missing"})
+        assert not absent.ok, tool
+        assert absent.value["error_type"] == "tool_error", tool
+        assert "absent Step" in absent.error, tool
+
 
 def test_modification_check_keeps_daily_json_entry(tmp_path: Path):
     output = tmp_path / "output"
