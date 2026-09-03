@@ -62,6 +62,7 @@ from .hitl_state import (
     WEB_INTERNAL_PARAMS,
     StatusReporter,
     build_session_plan,
+    epoch_ids,
     iter_development_sessions,
     read_control,
     read_json,
@@ -74,6 +75,7 @@ from .ledger import (
     RunMarkers,
     assert_no_frozen_artifact_mutation,
     experiment_verdict,
+    latest_fold_records,
 )
 from .local_backend import (
     DeterministicBaselineDeveloper,
@@ -1098,7 +1100,7 @@ def run_local_interactive_worker(
     )
     try:
         heldout_runs = pipeline.run_heldout(
-            f"epoch_{options.rolling.epochs:03d}",
+            _heldout_epoch_id(ledger, options.rolling.epochs),
             final,
             trading_days,
             replay=bool(result.get("reran_sessions")),
@@ -1119,6 +1121,17 @@ def run_local_interactive_worker(
     )
     write_json_atomic(hitl / "status.json", payload)
     return payload
+
+
+def _heldout_epoch_id(ledger: ExperimentLedger, configured_epochs: int) -> str:
+    """Epoch that graduation term (b) is scored on: the last one that actually
+    produced a Fold. Development can stop before the configured last Epoch (the
+    console's skip-to-Held-out), and an Epoch with no fold record has no
+    walk-forward transition, which would waive the requirement instead of
+    failing it. Without any fold record the configured last Epoch is the only
+    answer available, and it is equally empty."""
+    epochs = {epoch for epoch, _ in latest_fold_records(ledger.read("fold"))}
+    return max(epochs) if epochs else epoch_ids(configured_epochs)[-1]
 
 
 def _latest_artifact(

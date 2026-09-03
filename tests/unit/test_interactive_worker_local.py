@@ -33,6 +33,7 @@ from autotrade.pipelines.ledger import ExperimentLedger
 from autotrade.pipelines.local_backend import SessionBudgetLLM, SessionCallBudget
 from autotrade.pipelines.worker import (
     NL_REASONING_EFFORT,
+    _heldout_epoch_id,
     load_worker_options,
     run_local_interactive_worker,
 )
@@ -1176,6 +1177,38 @@ def test_second_llm_fold_prompt_excludes_prior_test_diagnostic(
     assert '"validation_result"' in second_fold_context
     assert "test_diagnostic" not in second_fold_context
     assert "test_result" not in second_fold_context
+
+
+def test_early_finish_grades_the_epoch_that_actually_ran(tmp_path: Path):
+    """Skip-to-Held-out ends development inside Epoch 1 of a three-Epoch
+    schedule. Graduation term (b) must be scored on the Epoch that produced the
+    Folds: scoring the configured last Epoch finds no fold record, reports zero
+    transitions, and silently waives the walk-forward requirement."""
+    repo, experiment = _experiment(tmp_path)
+    path = experiment / "hitl/params.json"
+    params = json.loads(path.read_text(encoding="utf-8"))
+    params["epochs"] = 3
+    path.write_text(json.dumps(params), encoding="utf-8")
+    (experiment / "hitl/control.json").write_text(
+        json.dumps({"schema_version": 1, "mode": "auto", "skip_to_heldout": True}),
+        encoding="utf-8",
+    )
+    options = load_worker_options(experiment, repo_root=repo)
+    result = run_local_interactive_worker(options)
+    assert result["state"] == "completed"
+    records = ExperimentLedger(options.rolling.ledger_path).read()
+    folds = [row for row in records if row["record_type"] == "fold"]
+    assert [row["epoch_id"] for row in folds] == ["epoch_001"]
+    heldout = [row for row in records if row["record_type"] == "heldout"]
+    assert [row["epoch_id"] for row in heldout] == ["epoch_001"]
+    # The one frozen Test that ran is a transition, and holding cash does not
+    # beat the benchmark: the term fails instead of reporting itself absent.
+    walk_forward = heldout[0]["verdict"]["walk_forward"]
+    assert walk_forward["status"] == "inconsistent"
+    assert walk_forward["transitions"] == 1
+    assert "walkforward_excess_inconsistent(0/1<1)" in heldout[0]["verdict"]["reasons"]
+    # No fold record at all leaves only the configured schedule to name.
+    assert _heldout_epoch_id(ExperimentLedger(tmp_path / "empty.jsonl"), 3) == "epoch_003"
 
 
 def test_local_worker_resume_skips_durable_sessions_and_heldout(tmp_path: Path):
