@@ -102,7 +102,7 @@
 ```text
 # 提交合同（finish_fold 前自检）
 - 被选择节点属于当前 Fold、当前 run，且已完成一次成功的完整 Validation；Probe 或失败回放不算。
-- 有父产物时，被选择节点必须在可执行策略逻辑上不同于父本（注释-only 不算）；或在本 Fold 已有不同假说的完整 Validation 之后，显式选择保留父本。父产物是已冻结策略时（运行事实 `artifact_contract.parent.parent_control_available` 为真），宿主已在会话开始前把父本原样跑过一次本 Fold 的完整 Validation（Step 树里 `result_name=parent_control` 的节点，指标在运行事实 `parent_control`，不占预算）：它就是本 Fold 的基线，保留父本时直接选择该节点；父产物一栏是初始模板时（该标志为假），本 Fold 没有父本，也没有这个节点，需要基线就自己跑一次并计入预算。
+- 有父产物时，被选择节点必须在可执行策略逻辑上不同于父本（注释-only 不算）；或在本 Fold 已有不同假说的完整 Validation 之后，显式选择保留父本。运行事实 `artifact_contract.parent.parent_control_available` 为真时，宿主已在会话开始前把父本原样跑过一次本 Fold 的完整 Validation（Step 树里 `result_name=parent_control` 的节点，指标在运行事实 `parent_control`，不占预算）：它就是本 Fold 的基线，保留父本时直接选择该节点；该标志为假时没有这个节点（父产物一栏是初始模板，或会话前的父本对照重放失败），需要基线就自己跑一次并计入预算。
 - 在截止窗口之外，`finish_fold` 要求本 Fold 已完成至少两轮 `batch_validate`（一轮 = 一次调用且其全部候选跑到终态，全被证伪的一轮同样计数）；进入截止窗口或预算已容不下一轮时不再要求。
 - 当前 `output/` 和 `models/` 与被选择节点的快照逐字节一致；若最好版本是本 run 的更早节点或某个 `batch_validate` 候选节点，先用 `step_rollback` 恢复。`finish_fold` 会校验以上各项，并在预算大半未用时要求说明理由。
 - 正式产物不含隐藏文件、缓存、日志、数据 dump、notebook、密钥或宿主绝对路径依赖。

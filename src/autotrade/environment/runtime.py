@@ -99,6 +99,10 @@ AGENT_VISIBLE_BACKTEST_SUMMARY_KEYS = (
     "order_lifecycle",
     "reject_counts",
     "benchmark",
+    # Overfitting tell: turnover cost can drive the held-out loss while the
+    # development metrics still look healthy, so every Validation carries it
+    # into the compact Fold history a later Fold and Meta read back.
+    "turnover",
     # Net-of-cost robustness and how few trades/names carried the gains: an
     # excess that dies at twice the modelled slippage, or a return one name
     # produced, must be as visible as the return itself.
@@ -106,6 +110,9 @@ AGENT_VISIBLE_BACKTEST_SUMMARY_KEYS = (
     "pnl_concentration",
     "strategy_exit_fill_count",
     "trade_count",
+    # Selection evidence the Fold tool layer writes beside the replay block:
+    # this candidate minus the Fold's own parent control on the same window.
+    "vs_parent",
     "decision_calls",
     "started_at",
     "finished_at",

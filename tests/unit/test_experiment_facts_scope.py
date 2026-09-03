@@ -14,7 +14,7 @@ from autotrade.environment.data.snapshot import SnapshotConfig
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.llm import ProviderResponse, ScriptedLLM, ToolCall
 from autotrade.environment.replay.style import NEUTRALIZATION_METHOD
-from autotrade.environment.runtime import write_json_atomic
+from autotrade.environment.runtime import RunManifest, write_json_atomic
 from autotrade.pipelines.agent_views import compact_fold_history
 from autotrade.pipelines.local_backend import LLMMetaLearner
 
@@ -189,7 +189,8 @@ def test_the_session_deadline_names_the_wrap_up_grace_inside_it() -> None:
 def test_the_facts_say_whether_a_parent_control_baseline_exists() -> None:
     """An initial template is a mounted starting point, not a parent artifact.
 
-    The host seeds a ``parent_control`` node only for an inherited strategy.
+    The host seeds a ``parent_control`` node only when the pre-session parent
+    replay produced a result, and records that outcome on the run manifest.
     Left implicit, four first-Fold sessions read the missing block as a fault
     and either spent a backtest reproducing the template or silently redefined
     their baseline, so the absence is a stated fact.
@@ -197,18 +198,78 @@ def test_the_facts_say_whether_a_parent_control_baseline_exists() -> None:
 
     inherited = _facts(
         is_initial_artifact=False,
+        parent_control_available=True,
         parent_strategy_artifact_id="strategy_epoch_001_fold_2022",
     )["artifact_contract"]["parent"]
     assert inherited["kind"] == "frozen_artifact"
     assert inherited["parent_control_available"] is True
 
     template = _facts(
-        is_initial_artifact=True, template_ref="agent_output_template"
+        is_initial_artifact=True,
+        parent_control_available=False,
+        template_ref="agent_output_template",
     )["artifact_contract"]["parent"]
     assert template["kind"] == "initial_template"
     # False, not absent: compact_mapping drops empty values, so the fact has to
     # survive as a bool for the submit contract's clause to have a referent.
     assert template["parent_control_available"] is False
+
+    # A parent whose pre-session control replay failed: the artifact is still
+    # inherited (kind stays frozen_artifact) but no parent_control node exists,
+    # and the submit contract tells the Agent to select that node by id.
+    failed = _facts(
+        is_initial_artifact=False,
+        parent_control_available=False,
+        parent_strategy_artifact_id="strategy_epoch_001_fold_2022",
+    )["artifact_contract"]["parent"]
+    assert failed["kind"] == "frozen_artifact"
+    assert failed["parent_control_available"] is False
+
+    # Manifests written before the field, and Meta sessions, fall back to
+    # "an inherited parent exists".
+    legacy = _facts(is_initial_artifact=False)["artifact_contract"]["parent"]
+    assert legacy["parent_control_available"] is True
+
+
+def test_the_compact_history_carries_turnover_and_the_parent_delta(
+    tmp_path: Path,
+) -> None:
+    """Both are named Meta evidence, so the Agent-visible manifest must keep them.
+
+    ``turnover`` is the overfitting tell behind a healthy-looking development
+    metric and ``vs_parent`` is the per-candidate selection evidence; the run
+    manifest the Agent and the next Meta session read is the projected copy, so
+    a key missing from that projection never reaches the compact history at all.
+    """
+
+    manifest = RunManifest.create(
+        tmp_path / "artifacts" / "run_manifest.json",
+        {"kind": "fold", "run_id": "run_x"},
+        ref_store=AgentRefStore(tmp_path / "experiment"),
+    )
+    manifest.append_backtest_summary(
+        {
+            "result_name": "valid_001",
+            "mode": "valid",
+            "status": "ok",
+            "complete_validation": True,
+            "total_return": 0.02,
+            "turnover": 8.5,
+            "vs_parent": {"total_return": 0.01, "excess_return": 0.004},
+        }
+    )
+    compact = compact_fold_history(
+        {
+            "record_type": "fold",
+            "epoch_id": "epoch_001",
+            "fold_id": "fold_2022",
+            "run_manifest_ref": str(manifest.path),
+        },
+        ref_store=AgentRefStore(tmp_path / "experiment"),
+    )
+    published = compact["backtest_summaries"][0]
+    assert published["turnover"] == 8.5
+    assert published["vs_parent"]["total_return"] == 0.01
 
 
 def test_the_neutralization_caliber_is_stated_once_not_once_per_result(

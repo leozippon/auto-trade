@@ -312,6 +312,23 @@ def _budget_facts(
     )
 
 
+def _parent_control_available(
+    manifest: Mapping[str, object], *, is_initial: bool
+) -> bool:
+    """Whether this session has a ``parent_control`` Step node to select.
+
+    The Fold manifest records the pre-session control outcome directly. A
+    manifest that carries no such field — an older Fold manifest, a Meta
+    session, or the console's prompt preview, which runs before any control
+    exists — falls back to "an inherited parent exists".
+    """
+
+    recorded = manifest.get("parent_control_available")
+    if recorded is None:
+        return not is_initial
+    return bool(recorded)
+
+
 def _artifact_contract_facts(
     manifest: Mapping[str, object],
     *,
@@ -332,15 +349,17 @@ def _artifact_contract_facts(
         "id": (
             ref_store.get_or_create("strategy", str(parent_id)) if parent_id else None
         ),
-        # An initial template is a mounted starting point, not an inherited
-        # artifact: the host replays a parent before the session, and seeds the
-        # ``parent_control`` node, exactly when one exists — the same condition
-        # this manifest records as ``is_initial_artifact``. Stating the absence
-        # is not optional prose: four first-Fold sessions read the missing
-        # ``parent_control`` block as a pipeline fault and either spent a
-        # backtest reproducing the template or silently redefined their
-        # baseline. False must survive compaction, so it is a bool.
-        "parent_control_available": not is_initial,
+        # Whether the host seeded a ``parent_control`` Step node for this
+        # session, which the run manifest records as the outcome of the
+        # pre-session parent replay: an inherited parent whose control replay
+        # failed leaves no node. Stating the absence is not optional prose:
+        # four first-Fold sessions read the missing ``parent_control`` block as
+        # a pipeline fault and either spent a backtest reproducing the template
+        # or silently redefined their baseline. False must survive compaction,
+        # so it is a bool.
+        "parent_control_available": _parent_control_available(
+            manifest, is_initial=is_initial
+        ),
         "model_artifacts_empty": model_artifacts_empty,
     }
     return compact_mapping(

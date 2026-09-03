@@ -35,6 +35,7 @@ from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.llm.model_profiles import AGENT_MAX_OUTPUT_TOKENS
 from autotrade.environment.replay.stats import (
     PhaseTimer,
+    attach_cost_sensitivity,
     attach_sub_window_benchmark,
     finalize_summary_timing,
 )
@@ -258,6 +259,7 @@ class LocalDailyEvaluationBackend:
         if benchmark is not None:
             summary["benchmark"] = benchmark
         attach_sub_window_benchmark(summary, style)
+        attach_cost_sensitivity(summary, request.broker_profile.slippage_bps)
         finalize_summary_timing(
             summary, started_at=started_at, setup_phases=timer.to_record()
         )
@@ -2129,6 +2131,13 @@ class LLMFoldDeveloper:
                 },
                 "valid_decision_time": request.fold.valid_decision_time.isoformat(),
                 "is_initial_artifact": request.parent is None,
+                # Whether the host actually seeded the ``parent_control`` Step
+                # node below, which needs the pre-session parent replay to have
+                # produced a result: an inherited parent whose control replay
+                # failed leaves the Agent no baseline node. Recorded here so
+                # ``build_experiment_facts`` states the same thing the session
+                # can find, instead of inferring it from "a parent exists".
+                "parent_control_available": request.parent_control is not None,
                 "parent_strategy_artifact_id": (
                     request.parent.artifact_id if request.parent is not None else None
                 ),
