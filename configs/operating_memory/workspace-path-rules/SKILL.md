@@ -9,7 +9,7 @@
 | --- | --- | --- |
 | 工作区里的探数脚本 | `notes/probe.py` | `root="workspace"`, `path="notes/probe.py"` |
 | 正式策略入口 | `output/main.py` | `root="output"`, `path="main.py"` |
-| 快照里的日线域 | `/mnt/snapshot/daily.parquet` | `root="snapshot"`, `path="daily.parquet"` |
+| 快照里的日线域 | `/mnt/snapshot/daily.parquet` | `root="snapshot"`, `path="daily.parquet"`（挂载根只在挂载且非空时提供：Fold 会话有 `snapshot`，Meta 会话没有；策略代码里一律用 `context.snapshot_dir`） |
 
 ## 做法
 
