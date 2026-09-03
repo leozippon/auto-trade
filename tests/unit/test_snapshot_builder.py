@@ -243,36 +243,6 @@ CONFIG = SnapshotConfig(
 )
 
 
-def build_incremental_events_fixture(
-    tmp: Path, prior_available_at: str
-) -> tuple[SnapshotBuilder, SnapshotConfig, Path]:
-    """Raw fixture plus a one-row prior decision events table in builder schema."""
-    raw = tmp / "raw"
-    events_root = tmp / "fund_events"
-    status_path = tmp / "fundamental_events_status.json"
-    build_raw(raw)
-    build_fundamental_events(events_root)
-    write_fundamental_status(status_path)
-    prior_path = tmp / "prior_events.parquet"
-    write(
-        prior_path,
-        pd.DataFrame([{
-            "dataset": "margin_secs",
-            "trade_date": prior_available_at[:10].replace("-", ""),
-            "ts_code": "600000.SH",
-            "available_at": prior_available_at,
-            "available_at_rule": "same_day_preopen",
-        }]),
-    )
-    config = replace(
-        CONFIG,
-        events_datasets=("margin_secs",),
-        events_window_months=6,
-        include_intraday=False,
-    )
-    return SnapshotBuilder(raw, events_root, status_path), config, prior_path
-
-
 class SnapshotBuilderTest(unittest.TestCase):
     def test_domain_scheduler_bounds_concurrency_and_respects_dependencies(self):
         lock = threading.Lock()
@@ -2198,7 +2168,7 @@ class SnapshotBuilderTest(unittest.TestCase):
             manifest = load_snapshot_manifest(out)
             self.assertTrue(manifest["domains"]["events"].get("skipped"))
 
-    def test_later_decision_reuses_prior_events_and_unions_only_the_new_slice(self):
+    def test_later_decision_rebuilds_events_from_raw(self):
         with tempfile.TemporaryDirectory() as tmp:
             raw = Path(tmp) / "raw"
             events_root = Path(tmp) / "fund_events"
@@ -2268,7 +2238,7 @@ class SnapshotBuilderTest(unittest.TestCase):
                 config,
                 prior_events=(first / "events.parquet", DECISION),
             )
-            self.assertTrue(manifest["domains"]["events"].get("incremental"))
+            self.assertFalse(manifest["domains"]["events"].get("incremental"))
             events = pd.read_parquet(second / "events.parquet")
             dates = set(events["trade_date"].astype(str))
             self.assertIn("20211008", dates)
@@ -2324,102 +2294,112 @@ class SnapshotBuilderTest(unittest.TestCase):
                     ("share_float_complete",), DECISION, window_start, forward_events=True
                 )
 
-    def test_forward_unlock_events_survive_incremental_prior_reuse(self):
-        # Incremental reuse must not drop a long-announced unlock whose
-        # float_date is still in the decision window. The delta scan cannot
-        # resurrect it: available_at is years before prior_time.
+    def test_prior_event_hint_uses_revision_safe_cold_build(self):
         with tempfile.TemporaryDirectory() as tmp:
-            raw = Path(tmp) / "raw"
-            events_root = Path(tmp) / "fund_events"
-            status_path = Path(tmp) / "fundamental_events_status.json"
-            build_raw(raw)
-            build_fundamental_events(events_root)
-            write_fundamental_status(status_path)
+            tmp = Path(tmp)
+            raw = tmp / "raw"
             write(
-                raw / "share_float_complete" / "share_float_complete.parquet",
+                raw / "margin_secs" / "events.parquet",
                 pd.DataFrame([
-                    {"ts_code": "688001.SH", "ann_date": "20190715", "float_date": "20211105",
-                     "float_share": 1e8, "available_at": "2019-07-15 23:59:59+08:00", "available_at_rule": "r"},
-                    {"ts_code": "600000.SH", "ann_date": "20190110", "float_date": "20200110",
-                     "float_share": 1e6, "available_at": "2019-01-10 23:59:59+08:00", "available_at_rule": "r"},
-                    {"ts_code": "000001.SZ", "ann_date": "20210901", "float_date": "20210910",
-                     "float_share": 1e6, "available_at": "2021-09-01 23:59:59+08:00", "available_at_rule": "r"},
+                    {
+                        "trade_date": "20191008",
+                        "ts_code": "600001.SH",
+                        "revision": "window_boundary",
+                        "available_at": "2019-10-08T09:25:00+08:00",
+                        "available_at_rule": "same_day_preopen",
+                    },
+                    {
+                        "trade_date": "20191008",
+                        "ts_code": "600002.SH",
+                        "revision": "before_window",
+                        "available_at": "2019-10-08T09:24:59+08:00",
+                        "available_at_rule": "same_day_preopen",
+                    },
+                    {
+                        "trade_date": "20211001",
+                        "ts_code": "600003.SH",
+                        "revision": "corrected",
+                        "available_at": "2021-10-01T09:00:00+08:00",
+                        "available_at_rule": "same_day_preopen",
+                    },
+                    {
+                        "trade_date": "20211001",
+                        "ts_code": "600003.SH",
+                        "revision": "corrected",
+                        "available_at": "2021-10-01T09:00:00+08:00",
+                        "available_at_rule": "same_day_preopen",
+                    },
+                    {
+                        "trade_date": "20211008",
+                        "ts_code": "600004.SH",
+                        "revision": "after_decision",
+                        "available_at": "2021-10-08T09:25:01+08:00",
+                        "available_at_rule": "same_day_preopen",
+                    },
                 ]),
             )
-            prior_path = Path(tmp) / "prior_events.parquet"
-            pd.DataFrame([
-                {"dataset": "share_float_complete", "ts_code": "688001.SH", "ann_date": "20190715",
-                 "float_date": "20211105", "float_share": 1e8,
-                 "available_at": "2019-07-15 23:59:59+08:00", "available_at_rule": "r"},
-                {"dataset": "share_float_complete", "ts_code": "600000.SH", "ann_date": "20190110",
-                 "float_date": "20200110", "float_share": 1e6,
-                 "available_at": "2019-01-10 23:59:59+08:00", "available_at_rule": "r"},
-                {"dataset": "share_float_complete", "ts_code": "000001.SZ", "ann_date": "20210901",
-                 "float_date": "20210910", "float_share": 1e6,
-                 "available_at": "2021-09-01 23:59:59+08:00", "available_at_rule": "r"},
-            ]).to_parquet(prior_path, index=False)
-            config = replace(
-                CONFIG,
-                events_datasets=("share_float_complete",),
-                events_window_months=6,
-                include_intraday=False,
+            prior_path = tmp / "prior_events.parquet"
+            write(
+                prior_path,
+                pd.DataFrame([
+                    {
+                        "dataset": "margin_secs",
+                        "trade_date": "20211001",
+                        "ts_code": "600003.SH",
+                        "revision": "stale",
+                        "available_at": "2021-10-01T09:00:00+08:00",
+                        "available_at_rule": "same_day_preopen",
+                    },
+                    {
+                        "dataset": "margin_secs",
+                        "trade_date": "20211006",
+                        "ts_code": "600005.SH",
+                        "revision": "prior_only",
+                        "available_at": "2021-10-06T09:00:00+08:00",
+                        "available_at_rule": "same_day_preopen",
+                    },
+                ]),
             )
-            prior_time = datetime(2021, 10, 7, 9, 25, tzinfo=CN_TZ)
-            builder = SnapshotBuilder(raw, events_root, status_path)
-            manifest = builder.build_decision_snapshot(
-                DECISION, Path(tmp) / "snap", config, prior_events=(prior_path, prior_time)
+            builder = SnapshotBuilder(raw, tmp / "missing_fundamental_events")
+            window_start = SnapshotConfig(events_window_months=24).window_start_for(
+                DECISION, "events"
             )
-            self.assertTrue(manifest["domains"]["events"].get("incremental"))
-            events = pd.read_parquet(Path(tmp) / "snap" / "events.parquet")
-            self.assertEqual(set(events["ts_code"]), {"688001.SH", "000001.SZ"})
+            cold, _ = builder._build_available_at_domain(
+                ("margin_secs",),
+                DECISION,
+                window_start,
+                forward_events=True,
+            )
+            original_drop_duplicates = pd.DataFrame.drop_duplicates
+            dedup_columns: list[tuple[str, ...]] = []
 
-            with self.assertRaises(ValueError):
-                builder._extend_prior_events(
-                    pd.DataFrame([
-                        {"dataset": "share_float_complete", "ts_code": "688001.SH",
-                         "available_at": "2019-07-15 23:59:59+08:00", "available_at_rule": "r"},
-                    ]),
-                    prior_time,
-                    ("share_float_complete",),
+            def track_drop_duplicates(frame, *args, **kwargs):
+                dedup_columns.append(tuple(frame.columns))
+                return original_drop_duplicates(frame, *args, **kwargs)
+
+            with patch.object(pd.DataFrame, "drop_duplicates", track_drop_duplicates):
+                rebuilt, meta = builder._build_events_domain(
+                    ("margin_secs",),
                     DECISION,
-                    pd.Timestamp("2021-04-08", tz=CN_TZ),
+                    window_start,
                     screen=None,
+                    prior_events=(
+                        prior_path,
+                        datetime(2021, 10, 7, 9, 25, tzinfo=CN_TZ),
+                    ),
                 )
 
-    def test_prior_events_older_than_the_window_fall_back_to_a_full_rebuild(self):
-        # Nothing from a prior snapshot older than window_start survives the new
-        # window, while extending would scan gap + window and then dedupe the
-        # whole frame: a four-year gap ran over two hours at 80 GB RSS.
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp = Path(tmp)
-            builder, config, prior_path = build_incremental_events_fixture(
-                tmp, "2017-09-29T09:00:00+08:00"
+            pd.testing.assert_frame_equal(rebuilt, cold)
+            self.assertEqual(
+                dict(zip(rebuilt["ts_code"], rebuilt["revision"], strict=True)),
+                {"600001.SH": "window_boundary", "600003.SH": "corrected"},
             )
-            manifest = builder.build_decision_snapshot(
-                DECISION,
-                tmp / "snap",
-                config,
-                prior_events=(prior_path, datetime(2017, 9, 30, 9, 25, tzinfo=CN_TZ)),
-            )
-            events = manifest["domains"]["events"]
-            self.assertFalse(events.get("incremental"))
-            self.assertNotIn("prior_decision_time", events)
-
-    def test_prior_events_inside_the_window_extend_incrementally(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp = Path(tmp)
-            builder, config, prior_path = build_incremental_events_fixture(
-                tmp, "2021-09-30T09:00:00+08:00"
-            )
-            prior_time = datetime(2021, 10, 7, 9, 25, tzinfo=CN_TZ)
-            manifest = builder.build_decision_snapshot(
-                DECISION, tmp / "snap", config, prior_events=(prior_path, prior_time)
-            )
-            meta = manifest["domains"]["events"]
-            self.assertTrue(meta.get("incremental"))
-            self.assertEqual(meta["prior_decision_time"], prior_time.isoformat())
-            events = pd.read_parquet(tmp / "snap" / "events.parquet")
-            self.assertEqual(set(events["ts_code"]), {"600000.SH", "000001.SZ"})
+            self.assertEqual(meta["datasets"], ["margin_secs"])
+            self.assertEqual(meta["units"], "source")
+            self.assertFalse(meta.get("incremental"))
+            self.assertNotIn("prior_decision_time", meta)
+            self.assertEqual(len(dedup_columns), 1)
+            self.assertNotIn("dataset", dedup_columns[0])
 
 
 def test_external_union_snapshot_fixture_finalizes_under_the_unit_contract(tmp_path):

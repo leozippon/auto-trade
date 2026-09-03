@@ -1599,34 +1599,15 @@ class SnapshotBuilder:
         screen: frozenset[str] | None,
         prior_events: tuple[Path, datetime] | None,
     ) -> tuple[pd.DataFrame, dict[str, object]]:
-        if prior_events is not None:
-            prior_path, prior_time = prior_events
-            prior_time = (
-                prior_time
-                if prior_time.tzinfo
-                else prior_time.replace(tzinfo=CN_TZ)
-            ).astimezone(CN_TZ)
-            # Extending pays off only when the prior snapshot lies inside the new
-            # window: otherwise nothing of it survives ``window_start`` and the
-            # delta rebuild covers gap + window, then dedupes the whole frame.
-            if (
-                prior_path.is_file()
-                and prior_time < decision_time
-                and pd.Timestamp(prior_time) >= window_start
-            ):
-                try:
-                    prior = pd.read_parquet(prior_path)
-                except (OSError, ValueError):
-                    prior = None
-                if prior is not None and "available_at" in prior.columns:
-                    return self._extend_prior_events(
-                        prior,
-                        prior_time,
-                        datasets,
-                        decision_time,
-                        window_start,
-                        screen=screen,
-                    )
+        """Build events from the immutable raw release for every decision.
+
+        ``prior_events`` is only a cache hint and is intentionally ignored.
+        Reusing prior rows misses historical revisions whose ``available_at``
+        is unchanged, while joining the wide prior and delta tables requires a
+        pathological full-frame deduplication. The cold path below preserves
+        revision and window semantics and deduplicates each narrow dataset
+        before constructing the union.
+        """
         return self._build_available_at_domain(
             datasets,
             decision_time,
@@ -1634,77 +1615,6 @@ class SnapshotBuilder:
             forward_events=True,
             screen=screen,
         )
-
-    def _extend_prior_events(
-        self,
-        prior: pd.DataFrame,
-        prior_time: datetime,
-        datasets: tuple[str, ...],
-        decision_time: datetime,
-        window_start: pd.Timestamp,
-        *,
-        screen: frozenset[str] | None,
-    ) -> tuple[pd.DataFrame, dict[str, object]]:
-        """Reuse an earlier decision events table and union only the new as-of slice.
-
-        Kept prior rows use the same availability / forward-event window as a
-        full rebuild. Newly screened-in names do not receive events from before
-        ``prior_time``; the manifest records that limitation.
-        """
-
-        prior_at = to_cn_timestamps(prior["available_at"])
-        keep = prior_at >= window_start
-        start_day = window_start.strftime("%Y%m%d")
-        for dataset in datasets:
-            event_column = FORWARD_EVENT_DATE_COLUMNS.get(dataset)
-            if event_column is None:
-                continue
-            if event_column not in prior.columns:
-                raise ValueError(
-                    f"prior events file has no {event_column} column; cannot window forward events"
-                )
-            event_in_window = prior[event_column].fillna("").astype(str) >= start_day
-            if "dataset" in prior.columns:
-                event_in_window = event_in_window & (prior["dataset"].astype(str) == dataset)
-            keep = keep | event_in_window
-        kept = prior[keep].copy()
-        delta, meta = self._build_available_at_domain(
-            datasets,
-            decision_time,
-            pd.Timestamp(prior_time),
-            forward_events=True,
-            screen=screen,
-        )
-        if not delta.empty and "available_at" in delta.columns:
-            delta_at = to_cn_timestamps(delta["available_at"])
-            delta = delta[delta_at > prior_time].reset_index(drop=True)
-        # Do not drop all-NA columns: they are schema contributed by empty
-        # datasets in this slice. Stripping them made dataset_columns declare
-        # fields that the written parquet no longer had.
-        frames = [frame for frame in (kept, delta) if not frame.empty]
-        merged = concat_rows(frames) if frames else pd.DataFrame()
-        if not merged.empty:
-            merged = merged.drop_duplicates(ignore_index=True)
-            merged = self._apply_screen(merged, screen)
-        physical = set(merged.columns)
-        dataset_columns = meta.get("dataset_columns")
-        if isinstance(dataset_columns, dict):
-            meta = {
-                **meta,
-                "dataset_columns": {
-                    dataset: [column for column in columns if column in physical]
-                    for dataset, columns in dataset_columns.items()
-                    if isinstance(columns, list)
-                },
-            }
-        return merged, {
-            **meta,
-            "incremental": True,
-            "prior_decision_time": prior_time.isoformat(),
-            "prior_rows_kept": int(len(kept)),
-            "delta_rows": int(len(delta)),
-            "new_universe_names_lack_pre_prior_events": True,
-        }
 
     def _build_available_at_domain(
         self,
