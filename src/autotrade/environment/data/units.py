@@ -266,12 +266,17 @@ AGENT_UNIT_CONTRACT: dict[str, str] = {
     # one namespace, looked up a source dataset (suspend_d) that contributes only a
     # derived column, found no record, and filed the missing entry as a broken
     # contract. Stating the scope is the only thing that separates "not a snapshot
-    # column" from the real defect the next clause defines.
+    # column" from the real defect the next clause defines. The text_library/ body
+    # shards reach the same loop from the other side: the view summary rglobs and
+    # lists them, while the column map globs top-level parquets only, so `body`
+    # resolves to no record and is not a snapshot column either.
     "coverage": (
         "this table lists every column of every snapshot file in the view. The "
         "`datasets` list of a domain in data_summary.json names the vendor sources "
         "joined to build those files, not readable tables: a source such as suspend_d "
-        "reaches the Agent only through derived columns and has no entry of its own"
+        "reaches the Agent only through derived columns and has no entry of its own. "
+        "The text_library/ body shards are outside it as well: they hold document "
+        "text (text_id, body), which carries no unit"
     ),
     "unknown_unit_policy": (
         "status 'unknown' columns may be used only for scale-agnostic operations inside "

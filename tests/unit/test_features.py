@@ -877,6 +877,69 @@ class UnitRegistryProjectionTest(unittest.TestCase):
             [record for record in payload["records"] if record["dataset"] == "suspend_d"], []
         )
 
+    def test_the_contract_scopes_out_the_text_library_body_shards(self):
+        """The view summary rglobs, so the Agent sees `text_library/<dataset>.parquet`;
+        the unit table globs top-level files only, so those shards have no record.
+        Without the scope clause the contract tells the Agent that a column it can
+        see and cannot look up is a broken contract — the false-defect loop the
+        clause exists to prevent."""
+
+        from autotrade.environment.data.summary import write_agent_data_summary
+        from autotrade.environment.data.units import (
+            AGENT_UNIT_CONTRACT,
+            UnresolvedUnitError,
+            resolve_field,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            view = Path(tmp) / "decision"
+            (view / "text_library").mkdir(parents=True)
+            pd.DataFrame(
+                {"ts_code": ["000957.SZ"], "trade_date": ["20200102"], "close": [6.73]}
+            ).to_parquet(view / "daily.parquet", index=False)
+            pd.DataFrame(
+                {
+                    "text_id": ["anns_d:2020-01-02T08:00:00+08:00:0"],
+                    "dataset": ["anns_d"],
+                    "ts_codes": ["000957.SZ"],
+                    "title": ["公告"],
+                    "available_at": ["2020-01-02T08:00:00+08:00"],
+                    "library_file": ["anns_d.parquet"],
+                }
+            ).to_parquet(view / "text.parquet", index=False)
+            pd.DataFrame(
+                {
+                    "text_id": ["anns_d:2020-01-02T08:00:00+08:00:0"],
+                    "body": ["公告正文"],
+                }
+            ).to_parquet(view / "text_library" / "anns_d.parquet", index=False)
+            (view / "manifest.json").write_text('{"kind": "decision"}', encoding="utf-8")
+            summary = write_agent_data_summary(
+                Path(tmp) / "data_summary.json",
+                kind="decision",
+                fold_id=None,
+                views={"snapshot": (view, "/mnt/snapshot")},
+            )
+            payload = json.loads(
+                (Path(tmp) / "unit_reference.json").read_text(encoding="utf-8")
+            )
+
+        # The Agent is shown the shard ...
+        self.assertIn(
+            "text_library/anns_d.parquet",
+            [item["path"] for item in summary["views"]["snapshot"]["files"]],
+        )
+        # ... and cannot resolve its body column anywhere.
+        self.assertEqual(
+            [record for record in payload["records"] if record["file"] == "anns_d.parquet"],
+            [],
+        )
+        with self.assertRaises(UnresolvedUnitError):
+            resolve_field("anns_d.parquet", None, "body")
+        # So the scope clause, not the defect clause, is what covers it.
+        self.assertEqual(payload["coverage"], AGENT_UNIT_CONTRACT["coverage"])
+        self.assertIn("text_library/", payload["coverage"])
+
     def test_is_suspended_record_states_what_the_flag_marks(self):
         """`daily.is_suspended` is set from the presence of a suspend_d row, so
         it marks resumption days and intraday halts — never a full-day
