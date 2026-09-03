@@ -198,6 +198,55 @@ def test_null_quantities_follow_the_star_declaration_ladder():
     assert [order["quantity"] for order in orders[DAYS[2]]] == [200]
 
 
+def test_a_round_trip_too_small_to_buy_a_lot_is_counted_not_hidden():
+    """A partial exit splits one entry into independent round trips, so each
+    exit's share of the money is rounded down to a board lot on its own. A
+    share that cannot buy one lot deploys nothing, and the null then runs with
+    less capital than the result it is ranked against; the block reports it
+    instead of letting the null distribution shrink silently."""
+    script = {
+        DAYS[2]: (("000001.SZ", "buy", 1000, _at(DAYS[2], "09:30")),),
+        DAYS[9]: (("000001.SZ", "sell", 900, _at(DAYS[9], "15:00")),),
+        DAYS[12]: (("000001.SZ", "sell", 100, _at(DAYS[12], "15:00")),),
+    }
+
+    def strategy(context):
+        day = context.inference_at.strftime("%Y%m%d")
+        return [
+            {
+                "symbol": symbol,
+                "action": action,
+                "quantity": quantity,
+                "execute_at": when.isoformat(),
+            }
+            for symbol, action, quantity, when in script.get(day, ())
+        ]
+
+    result = run_daily_replay(
+        daily=_frame(),
+        strategy=strategy,
+        schedule=StrategySchedule("day", "08:30"),
+        profile=BrokerProfile(),
+    )
+    skeleton = trade_skeleton(result.executions)
+    assert [trip.quantity for trip in skeleton] == [900, 100]
+
+    block = run_null_control(
+        result,
+        _frame(),
+        BENCHMARK,
+        BrokerProfile(),
+        StrategySchedule("day", "08:30"),
+        k=3,
+        seed=17,
+    )
+
+    # Both replacements in the decile open above 000001.SZ, so the 100-share
+    # tail (about 1 020 CNY) never reaches one lot: one trip of two is dropped
+    # in every draw.
+    assert block["dropped_trips_mean"] == 1.0
+
+
 def test_excess_percentile_is_the_share_of_null_runs_at_or_below_the_observed():
     null = [-0.10, -0.05, 0.0, 0.05, 0.20]
 
@@ -236,6 +285,7 @@ def test_run_null_control_replays_scripted_nulls_and_reports_one_block():
     assert block["null_excess_p05"] <= block["null_excess_mean"] <= block["null_excess_p95"]
     assert 0.0 <= block["excess_percentile"] <= 1.0
     assert block["rejects_mean"] == 0.0
+    assert block["dropped_trips_mean"] == 0.0
     assert "step" not in block
 
     assert (

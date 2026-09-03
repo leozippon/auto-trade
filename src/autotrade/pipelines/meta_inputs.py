@@ -96,6 +96,7 @@ _NULL_CONTROL_KEYS = (
     "excess_percentile",
     "null_excess_p95",
     "rejects_mean",
+    "dropped_trips_mean",
     "step",
 )
 _VS_PARENT_KEYS = (

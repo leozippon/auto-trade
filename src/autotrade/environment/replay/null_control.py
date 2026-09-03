@@ -33,7 +33,7 @@ from autotrade.environment.strategy import CN_TZ, StrategyContext, StrategySched
 
 from .engine import run_daily_replay
 from .market import DailyMarketData
-from .stats import ReplayResult, compute_return_stats
+from .stats import ReplayResult, total_return_from_curve
 
 # How a replacement name is drawn: uniformly inside the original's circulating
 # market-cap decile of the entry day's own cross-section.
@@ -133,7 +133,7 @@ def sample_null_orders(
 
     universe = _Universe(frame)
     pools = [_candidate_pool(trip, universe) for trip in skeleton]
-    return _orders_from_pools(skeleton, pools, rng)
+    return _orders_from_pools(skeleton, pools, rng)[0]
 
 
 def run_null_control(
@@ -170,7 +170,7 @@ def run_null_control(
     rng = np.random.default_rng(seed)
 
     window_benchmark = _benchmark_return(dates, benchmark)
-    observed = _total_return(result) - window_benchmark
+    observed = total_return_from_curve(result.equity_curve) - window_benchmark
     bounds = None if step is None else _step_bounds(step)
     if bounds is not None:
         start, end = bounds
@@ -187,15 +187,17 @@ def run_null_control(
     excesses: list[float] = []
     step_excesses: list[float] = []
     rejects: list[int] = []
+    dropped: list[int] = []
     for _ in range(k):
-        orders = _orders_from_pools(skeleton, pools, rng)
+        orders, dropped_trips = _orders_from_pools(skeleton, pools, rng)
+        dropped.append(dropped_trips)
         run = run_daily_replay(
             daily=market,
             strategy=_scripted_strategy(orders),
             schedule=null_schedule,
             profile=profile,
         )
-        excesses.append(_total_return(run) - window_benchmark)
+        excesses.append(total_return_from_curve(run.equity_curve) - window_benchmark)
         rejects.append(sum(1 for record in run.executions if record["status"] != "filled"))
         if bounds is not None:
             step_excesses.append(
@@ -208,6 +210,10 @@ def run_null_control(
         "matched": MATCHING,
         **_distribution(observed, excesses),
         "rejects_mean": round(sum(rejects) / k, 3),
+        # Round trips the draw could not deploy: the replacement's price made
+        # this trip's share of the money smaller than one board lot, so the
+        # null ran with less capital than the result it is compared against.
+        "dropped_trips_mean": round(sum(dropped) / k, 3),
     }
     if bounds is not None:
         block["step"] = {
@@ -296,14 +302,23 @@ def _orders_from_pools(
     skeleton: Sequence[RoundTrip],
     pools: Sequence[tuple[tuple[str, float], ...]],
     rng: np.random.Generator,
-) -> dict[str, list[dict[str, object]]]:
+) -> tuple[dict[str, list[dict[str, object]]], int]:
+    """One draw, and how many round trips it could not deploy.
+
+    A trip whose money cannot buy one board lot of its replacement is dropped;
+    the count travels with the draw so an under-deployed null is reported
+    instead of silently shrinking the null distribution.
+    """
+
     orders: dict[str, list[dict[str, object]]] = {}
+    dropped = 0
     for trip, pool in zip(skeleton, pools, strict=True):
         symbol, entry_open = pool[int(rng.integers(len(pool)))]
         # Sized from the entry day's open only: the null learns nothing the
         # original position did not already know when it was opened.
         quantity = _lot_quantity(symbol, int(trip.notional // entry_open))
         if quantity <= 0:
+            dropped += 1
             continue
         _queue(orders, symbol, "buy", quantity, trip.entry_at)
         if trip.exit_at is not None:
@@ -312,7 +327,7 @@ def _orders_from_pools(
         # Exits before entries at one instant, so a cash-bound null is not
         # rejected for money its own sales are about to release.
         day.sort(key=lambda order: (str(order["execute_at"]), order["action"] == "buy"))
-    return orders
+    return orders, dropped
 
 
 def _queue(
@@ -375,10 +390,6 @@ def _distribution(observed: float, values: Sequence[float]) -> dict[str, object]
         "null_excess_p95": round(float(np.percentile(array, 95)), _DIGITS),
         "excess_percentile": round(float((array <= observed).mean()), _DIGITS),
     }
-
-
-def _total_return(result: ReplayResult) -> float:
-    return float(compute_return_stats(result)["total_return"])
 
 
 def _sub_window_return(

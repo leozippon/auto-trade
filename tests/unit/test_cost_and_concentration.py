@@ -10,13 +10,25 @@ unstatable field stays ``None`` with a reason instead of becoming zero.
 
 from __future__ import annotations
 
+import tempfile
 import unittest
+from pathlib import Path
 
+import pandas as pd
+
+from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.replay.stats import (
     ReplayResult,
     attach_cost_sensitivity,
     compute_return_stats,
 )
+from autotrade.environment.strategy import StrategySchedule
+from autotrade.pipelines.config import (
+    ArtifactRevision,
+    EvaluationRequest,
+    SnapshotBundle,
+)
+from autotrade.pipelines.local_backend import LocalDailyEvaluationBackend
 
 _CURVE = (
     {"trade_date": "20220104", "initial_equity": 1000.0, "equity": 1100.0, "cash": 0.0},
@@ -67,6 +79,22 @@ class PnlConcentrationTest(unittest.TestCase):
         self.assertAlmostEqual(block["top5_share_of_gross_gains"], 140.0 / 144.0)
         # Top name sums both of A's exits, which a per-trade view would miss.
         self.assertAlmostEqual(block["top_name_share_of_gross_gains"], 120.0 / 144.0)
+
+    def test_fewer_than_five_winners_never_pulls_a_loser_into_the_top_five(
+        self,
+    ) -> None:
+        """The metric flags a gain resting on a handful of trades, so the slice
+        must be the largest gains. Signed sorting fills a short slice with
+        losses and deflates the share exactly in the sparse windows the metric
+        exists to catch."""
+        executions = tuple(
+            row
+            for row in _REALIZED
+            if row["symbol"] in ("A", "F")  # +100, +20, -20: two winners
+        )
+        block = self.block(executions)
+        self.assertAlmostEqual(block["gross_gains"], 120.0)
+        self.assertAlmostEqual(block["top5_share_of_gross_gains"], 1.0)
 
     def test_a_window_that_realized_no_gain_reports_no_share(self) -> None:
         for executions in ((), _REALIZED[-1:]):
@@ -119,6 +147,66 @@ class CostSensitivityTest(unittest.TestCase):
         self.assertIsNone(block["breakeven_extra_slippage_bps"])
         # Nothing was traded, so no amount of slippage can touch the excess.
         self.assertAlmostEqual(block["excess_at_2x_slippage"], 0.05)
+
+
+class EveryEvaluationBackendPricesTheBlockTest(unittest.TestCase):
+    """The block is a property of a completed Validation, not of one backend.
+
+    ``AcceptanceRules`` fails closed on a missing ``cost_sensitivity`` whenever
+    ``cost_stress_multiplier > 1``, so a backend that skips it makes every
+    stressed experiment unpassable and advertises a summary block it never
+    produces.
+    """
+
+    STRATEGY = """def generate_orders(context):
+    if context.account.cash <= 0 or dict(context.account.positions):
+        return []
+    return [{
+        "symbol": "000001.SZ",
+        "action": "buy",
+        "quantity": 100,
+        "execute_at": context.inference_at.replace(hour=15, minute=0).isoformat(),
+    }]
+"""
+
+    def test_the_local_daily_backend_prices_the_block_like_the_pit_backend(
+        self,
+    ) -> None:
+        days = [stamp.strftime("%Y%m%d") for stamp in pd.bdate_range("2025-10-01", periods=6)]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            daily = root / "daily.parquet"
+            pd.DataFrame(
+                {
+                    "trade_date": days,
+                    "symbol": ["000001.SZ"] * len(days),
+                    "open": [10.0] * len(days),
+                    "close": [10.5] * len(days),
+                }
+            ).to_parquet(daily, index=False)
+            revision = root / "revision"
+            revision.mkdir()
+            (revision / "main.py").write_text(self.STRATEGY, encoding="utf-8")
+
+            result = LocalDailyEvaluationBackend(
+                daily, root / "results", execution_mode="trusted"
+            ).evaluate(
+                EvaluationRequest(
+                    ArtifactRevision("revision_cost", revision),
+                    SnapshotBundle("snap_cost", str(daily), str(daily)),
+                    "valid",
+                    days[0],
+                    days[-1],
+                    StrategySchedule("day", "09:00"),
+                    BrokerProfile(initial_cash=100_000, slippage_bps=5.0),
+                )
+            )
+
+        block = result.summary["cost_sensitivity"]
+        self.assertEqual(block["slippage_bps"], 5.0)
+        self.assertAlmostEqual(
+            block["cost_per_bp_per_side"], float(result.summary["turnover"]) * 1e-4
+        )
 
 
 if __name__ == "__main__":

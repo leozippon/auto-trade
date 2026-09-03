@@ -34,7 +34,7 @@ import pandas as pd
 
 from autotrade.environment.runtime import utc_now_iso, write_json_atomic
 
-from .stats import TRADING_DAYS_PER_YEAR, ReplayResult, compute_return_stats
+from .stats import TRADING_DAYS_PER_YEAR, ReplayResult, total_return_from_curve
 
 BENCHMARK_LABEL = "沪深300"
 BENCHMARK_TS_CODE = "000300.SH"
@@ -422,7 +422,7 @@ def replay_style_analysis(
     size = _size_factor(replay_daily)
     neutralized = _neutralized_excess(strategy, benchmark, size)
     style = _style_exposures(replay_daily, replay.equity_curve, _snapshot_industry(snapshot_dir))
-    total_return = compute_return_stats(replay).get("total_return")
+    total_return = total_return_from_curve(replay.equity_curve)
     benchmark_return = regression.get("benchmark_return")
     excess_return = (
         round(float(total_return) - float(benchmark_return), 6)

@@ -581,7 +581,7 @@
    "gross_gains": 246.89873957444524,
    "gross_losses": -300.5819379866657,
    "net_realized": -53.68319841222046,
-   "top5_share_of_gross_gains": 0.6603552052302745,
+   "top5_share_of_gross_gains": 1.0,
    "top_name_share_of_gross_gains": 0.4436286159613007
   },
   "exposure": {

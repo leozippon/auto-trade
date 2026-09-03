@@ -78,6 +78,20 @@ class ReplayResult:
         }
 
 
+def total_return_from_curve(curve: Sequence[Mapping[str, object]]) -> float:
+    """Whole-window return of one equity curve against day 0's initial equity.
+
+    The single definition of the number: ``compute_return_stats`` reports it,
+    and callers that need only this one figure (the style sidecar, the null
+    control's per-draw ranking) read it here instead of building the whole
+    projection to discard everything else.
+    """
+    if not curve:
+        return 0.0
+    initial = float(curve[0]["initial_equity"])
+    return (float(curve[-1]["equity"]) / initial - 1.0) if initial > 0 else 0.0
+
+
 def compute_return_stats(
     result: ReplayResult, *, start: str = "", end: str = ""
 ) -> dict[str, object]:
@@ -91,7 +105,7 @@ def compute_return_stats(
     orders = result.executions
     initial = float(curve[0]["initial_equity"]) if curve else 0.0
     values = [float(row["equity"]) for row in curve]
-    total_return = (values[-1] / initial - 1.0) if values and initial > 0 else 0.0
+    total_return = total_return_from_curve(curve)
     # Day-0 baseline: daily returns and drawdown are measured against the initial
     # equity, so the first day's return (initial -> day-1 close) and a peak below
     # the initial level are never dropped. The persisted equity_curve and the
@@ -245,7 +259,7 @@ def _pnl_concentration(realized: Sequence[Mapping[str, object]]) -> dict[str, ob
         by_symbol[symbol] = by_symbol.get(symbol, 0.0) + float(order["realized_pnl"])
     gains = sum(value for value in values if value > 0)
     losses = sum(value for value in values if value < 0)
-    top5 = sum(sorted(values, reverse=True)[:5])
+    top5 = sum(sorted((value for value in values if value > 0), reverse=True)[:5])
     top_name = max(by_symbol.values(), default=0.0)
     return {
         "gross_gains": gains,
