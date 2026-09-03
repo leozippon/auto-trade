@@ -16,7 +16,6 @@ from .config import (
 )
 from .experiment import (
     DailyStrategyPipeline,
-    ExperimentPipeline,
     RollingExperimentPipeline,
 )
 from .folds import (
@@ -62,7 +61,6 @@ __all__ = [
     "ExecutionMode",
     "ExperimentSkillsStore",
     "ExperimentLedger",
-    "ExperimentPipeline",
     "FoldOutcome",
     "FoldSessionRequest",
     "FoldSessionResult",

@@ -335,6 +335,4 @@ def _price_limit_reject(action: str, price: float, bar: Mapping[str, object]) ->
     return "daily_price_limit" if blocked else None
 
 
-Broker = DailyBroker
-
-__all__ = ["Broker", "BrokerProfile", "DailyBroker", "Execution", "Position"]
+__all__ = ["BrokerProfile", "DailyBroker", "Execution", "Position"]

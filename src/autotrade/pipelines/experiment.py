@@ -1645,6 +1645,3 @@ def _session_budgets(
     )
     limits["deadline_grace_seconds"] = float(config.deadline_grace_minutes) * 60.0
     return limits
-
-
-ExperimentPipeline = DailyStrategyPipeline
