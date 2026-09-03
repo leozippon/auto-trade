@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Create the 2026-09-10 round: four research directions on the quarterly walk-forward design.
+"""Create the 2026-09-10 round: five research directions on the quarterly walk-forward design.
 
 This script lives in scripts/experiments/ and supersedes the gitignored
 logs/launch/ location where earlier round definitions were stranded. One round
@@ -246,6 +246,33 @@ ROUND: dict[str, dict[str, object]] = {
                 ROBUSTNESS_LINE,
                 "禁止把 refs 拷进 output、禁止写死路径与股票代码；每一行输入都必须满足 available_at <= 推断时点。"
                 "可执行指纹必须不同于父策略。",
+            ]
+        ),
+    },
+    "corner_cases_20260910": {
+        # Same direction text as corner_cases_20260907; the strategy is not
+        # inherited, so the arm restarts from the template on the quarterly
+        # schedule while that run's artifacts stay archived in its own directory.
+        "workspace_reference": "configs/workspace_refs/corner_cases_20260907",
+        "fold_exploration_directive": "\n".join(
+            [
+                "方向：专注 A 股市场的角落状态——涨跌停板动力学、停牌复牌再定价、ST 与摘帽戴帽、新股上市初期、"
+                "除权除息、解禁事件窗、极端市场日宽度——把普通截面策略过滤掉或处理错的边缘状态写成可证伪的最小机制，"
+                "每一步只推进一个机制，正式产物写在 output/ 包内。",
+                "先读 refs/README.md 与 exploration-plan.md，再按 pit-field-map.md 核对每个字段的可见时间与单位；"
+                "先在输入窗做各家族的可交易事件数普查，事件数不足的机制如实判「不可测」，诚实的零结果与被证伪的方向"
+                "都是本方向的合格产出。",
+                "角落状态的可执行性必须显式论证：封死的涨停买不进、复牌当日常被拒单、跌停票出不去、新股首日没有可见行情；"
+                "每个候选都要写明真实可达的入场与出场路径并汇报拒单。角落组合天然集中，仓位上限、篮子分散与无信号日持币"
+                "必须把最大回撤守在硬限之内。",
+                "股票池不做任何 ST、板块、次新、市值或价格筛选；可交易性、停牌与涨跌停由策略自己处理并说明理由。",
+                SESSION_LINE,
+                PARENT_CONTROL_LINE,
+                PREREGISTER_LINE,
+                FITTING_LINE,
+                ROBUSTNESS_LINE,
+                "禁止克隆父策略、禁止把 refs 拷进 output、禁止写死路径与股票代码；每一行输入都必须满足"
+                " available_at <= 推断时点，财务用 available_at。可执行指纹必须不同于父策略。",
             ]
         ),
     },
