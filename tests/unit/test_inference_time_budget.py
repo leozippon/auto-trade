@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from autotrade.agent.compact import ContextCompactionConfig, ContextCompactor
+from autotrade.agent.prompts import WRAP_UP_PROMPT
 from autotrade.agent.subagent import SubAgentEngine
 from autotrade.agent.runner import AgentSessionConfig, AgentSessionRunner
 from autotrade.environment.artifacts import FilesystemArtifactStore
@@ -405,6 +406,103 @@ def test_complete_node_enters_hard_finalization_without_compaction_or_research(
         and "unavailable" in str(payload["result"])
         for event, payload in events
     )
+
+
+def test_a_validation_completing_inside_the_grace_keeps_the_conversation(
+    tmp_path: Path,
+) -> None:
+    """Past the main deadline the wrap-up window owns the session.
+
+    A turn that starts outside every window can still end inside the grace,
+    because the backtest it dispatched burns wall clock. Activating hard
+    finalization there would replace the whole conversation with the two-message
+    finalization context and skip WRAP_UP_PROMPT entirely, so the session would
+    lose both its context and the last-modification autonomy the grace promises.
+    """
+
+    clock = FakeClock()
+    budget_seconds = 3600.0
+    grace_seconds = 600.0
+    time_budget = InferenceTimeBudget(duration_seconds=budget_seconds, clock=clock)
+    output = tmp_path / "output"
+    output.mkdir()
+    (output / "main.py").write_text(
+        "def generate_orders(context):\n    return []\n", encoding="utf-8"
+    )
+    tree = StepTree(tmp_path / "steps")
+    node_id = tree.record_step(
+        output,
+        epoch_id="epoch_001",
+        fold_id="fold_grace",
+        run_id="run_grace",
+        result_name="valid_001",
+        revision_id="revision_grace",
+        metrics={"total_return": 0.01},
+    )
+
+    class SlowValidation:
+        spec = ToolSpec(
+            "daily_backtest",
+            "complete Validation",
+            {"type": "object", "properties": {}, "additionalProperties": False},
+            mutating=True,
+        )
+
+        def invoke(self, arguments):
+            # The turn started with 650 s left (outside grace) and this replay
+            # ends with 500 s left, i.e. past the main deadline.
+            clock.advance(150.0)
+            return ToolResult(
+                True,
+                value={
+                    "node_id": node_id,
+                    "revision_id": "revision_grace",
+                    "stats": {"total_return": 0.01},
+                },
+            )
+
+    scripted = ScriptedLLM(
+        [
+            ProviderResponse(tool_calls=(ToolCall("b1", "daily_backtest", {}),)),
+            ProviderResponse(tool_calls=(ToolCall("f1", "finish_fold", {"node_id": node_id}),)),
+        ],
+        context_window_tokens=128_000,
+    )
+    events: list[tuple[str, dict[str, object]]] = []
+    runner = AgentSessionRunner(
+        llm=scripted,
+        tools=ToolRegistry(
+            [
+                SlowValidation(),
+                FinishFoldTool(tree, fold_id="fold_grace", run_id="run_grace"),
+            ]
+        ),
+        system_prompt="fold system prompt",
+        config=AgentSessionConfig(
+            mode="fold",
+            max_llm_calls=4,
+            deadline_seconds=budget_seconds,
+            deadline_grace_seconds=grace_seconds,
+            finalize_before_deadline_seconds=300.0,
+        ),
+        time_budget=time_budget,
+        event_sink=lambda event, payload: events.append((event, payload)),
+    )
+    clock.advance(budget_seconds - 650.0)
+    assert time_budget.remaining() == 650.0
+
+    result = runner.run("go")
+
+    assert result.status == "finished"
+    assert not [event for event, _ in events if event == "hard_finalization_started"]
+    wrap_up = [payload for event, payload in events if event == "wrap_up_started"]
+    assert wrap_up and wrap_up[0]["remaining_seconds"] == 500.0
+    # The conversation survives: the wrap-up prompt is appended to it, it is not
+    # a fresh two-message finalization context.
+    second = scripted.calls[1]["messages"]
+    assert [message.role for message in second[:2]] == ["system", "user"]
+    assert {message.role for message in second} == {"system", "user", "assistant", "tool"}
+    assert second[-1].content == WRAP_UP_PROMPT
 
 
 def test_reserve_without_complete_node_keeps_research_and_compaction_available() -> (

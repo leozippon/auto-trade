@@ -273,11 +273,6 @@ META_SUBAGENT_SYSTEM_PROMPT = """\
 用简洁中文说明结论、关键证据、限制和建议；不要复制 raw traces 或写逐 Fold Test 数字。\
 """
 
-SUBAGENT_SYSTEM_PROMPT = _FOLD_WRITE_PROMPT.format(
-    role="developer",
-    mission=subagent_role("developer").fold_mission,
-)
-
 # The single place the sub-agent mechanism is explained to the model; the
 # system prompt only points here. Modeled on Pi's Agent tool description.
 AGENT_TOOL_DESCRIPTION = (
@@ -498,7 +493,9 @@ def normalize_subagent_thinking(value: object, role: str | None = None) -> str:
     Precedence: the call argument, then the role default, then
     ``DEFAULT_SUBAGENT_THINKING``. Omitted, empty, or inherit aliases fall
     through to the defaults; a child never inherits the parent session's
-    reasoning intensity.
+    reasoning intensity. The legacy aliases are already canonical here: the
+    launch tool maps them in ``normalize_arguments``, before the schema enum
+    that would otherwise reject them.
     """
 
     default = subagent_role(role).default_thinking if role is not None else DEFAULT_SUBAGENT_THINKING
@@ -509,7 +506,6 @@ def normalize_subagent_thinking(value: object, role: str | None = None) -> str:
     text = value.strip().lower()
     if text in {"", "inherit", "parent"}:
         return default
-    text = _LEGACY_THINKING_ALIASES.get(text, text)
     if text not in SUBAGENT_THINKING_LEVELS:
         raise ValueError(
             "agent.thinking must be one of: " + ", ".join(SUBAGENT_THINKING_LEVELS)
@@ -648,9 +644,6 @@ class SubAgentEngine(SessionTimeBudgetAware):
         if mode not in SUBAGENT_MODES:
             raise ValueError("Sub-agent mode must be fold or meta")
         self.mode = mode
-        self.system_prompt = (
-            META_SUBAGENT_SYSTEM_PROMPT if mode == "meta" else SUBAGENT_SYSTEM_PROMPT
-        )
         self.llm = llm
         self.tools = tools
         self.config = config or SubAgentConfig()

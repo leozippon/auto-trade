@@ -1201,14 +1201,16 @@ def test_general_prompts_explain_mode_and_role() -> None:
     assert "不能写策略、models、skills 或 PRIOR" in meta
 
 
-def test_normalize_subagent_thinking_accepts_aliases() -> None:
+def test_normalize_subagent_thinking_resolves_the_launch_precedence() -> None:
+    """The canonical levels only: the legacy aliases are mapped one layer up,
+    by the launch tool, so the schema enum never sees them
+    (test_legacy_thinking_values_launch_at_xhigh_through_the_registry)."""
+
     assert DEFAULT_SUBAGENT_THINKING == "xhigh"
     assert normalize_subagent_thinking(None) == "xhigh"
     assert normalize_subagent_thinking("inherit") == "xhigh"
-    assert normalize_subagent_thinking("minimal") == "low"
+    assert normalize_subagent_thinking("low") == "low"
     assert normalize_subagent_thinking("xhigh") == "xhigh"
-    assert normalize_subagent_thinking("high") == "xhigh"
-    assert normalize_subagent_thinking("max") == "xhigh"
     assert SUBAGENT_THINKING_LEVELS == ("off", "low", "medium", "xhigh")
     with pytest.raises(ValueError, match="agent.thinking"):
         normalize_subagent_thinking("turbo")

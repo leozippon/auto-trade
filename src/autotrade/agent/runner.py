@@ -76,13 +76,9 @@ from .prompts import (
 )
 
 _LLM_FAILURE_CIRCUIT = 3
+# How long a teardown or a terminal-tool barrier waits for the children still
+# running. Read at each call site, so a test can shorten it on the module.
 SUBAGENT_TEARDOWN_WAIT_SECONDS = 30.0
-
-
-def _subagent_teardown_timeout(requested: float | None = None) -> float:
-    if requested is None:
-        return SUBAGENT_TEARDOWN_WAIT_SECONDS
-    return min(max(0.0, requested), SUBAGENT_TEARDOWN_WAIT_SECONDS)
 
 # Default wrap-up grace shared with RollingExperimentConfig.deadline_grace_minutes:
 # the pipeline hands the session a budget of main deadline + grace and the runner
@@ -894,11 +890,12 @@ class AgentSessionRunner:
 
         The window is anchored to the MAIN deadline (budget end minus the
         wrap-up grace): ``finalize_before_deadline_seconds`` before it, exactly
-        as before the grace existed. Once the main deadline has passed and the
-        wrap-up prompt was injected, the session keeps its full capability
-        surface through the grace window — a Validation completing during
-        grace does not yank the context anymore; the wrap-up prompt already
-        asks the model to finish on its own.
+        as before the grace existed. Once the main deadline has passed the
+        session keeps its full capability surface through the grace window — a
+        Validation completing during grace does not yank the context anymore;
+        the wrap-up prompt (injected at the next loop top, and possibly not yet
+        sent when a turn is still in flight) already asks the model to finish
+        on its own.
         """
         if (
             self._hard_finalization
@@ -908,7 +905,10 @@ class AgentSessionRunner:
         ):
             return False
         main_remaining = remaining - self.config.deadline_grace_seconds
-        if main_remaining > self.config.finalize_before_deadline_seconds:
+        if (
+            main_remaining <= 0
+            or main_remaining > self.config.finalize_before_deadline_seconds
+        ):
             return False
         tool_names = self._finalization_tool_names()
         self._hard_finalization = True
@@ -917,7 +917,7 @@ class AgentSessionRunner:
             "hard_finalization_started",
             {
                 "remaining_seconds": round(max(remaining, 0.0), 6),
-                "main_deadline_remaining_seconds": round(max(main_remaining, 0.0), 6),
+                "main_deadline_remaining_seconds": round(main_remaining, 6),
                 "reserve_seconds": self.config.finalize_before_deadline_seconds,
                 "grace_seconds": self.config.deadline_grace_seconds,
                 "candidate_node_ids": [
@@ -1326,7 +1326,7 @@ class AgentSessionRunner:
         """Collect finished children and deliver each result once as a message."""
 
         self._collect_finished_subagents(
-            wait=wait, timeout=_subagent_teardown_timeout() if wait else None
+            wait=wait, timeout=SUBAGENT_TEARDOWN_WAIT_SECONDS if wait else None
         )
         for job in self._subagent_jobs:
             if job.record is None or job.delivered:
@@ -1402,11 +1402,9 @@ class AgentSessionRunner:
                 return
             completed.wait(timeout=min(0.05, remaining))
 
-    def _wait_subagent_jobs(
-        self, timeout: float = SUBAGENT_TEARDOWN_WAIT_SECONDS
-    ) -> list[dict[str, object]]:
+    def _wait_subagent_jobs(self) -> list[dict[str, object]]:
         return self._collect_finished_subagents(
-            wait=True, timeout=_subagent_teardown_timeout(timeout)
+            wait=True, timeout=SUBAGENT_TEARDOWN_WAIT_SECONDS
         )
 
     def _collect_finished_subagents(
@@ -1416,7 +1414,7 @@ class AgentSessionRunner:
         conversation observation later via ``_append_subagent_observations``."""
 
         finished: list[dict[str, object]] = []
-        wait_timeout = _subagent_teardown_timeout(timeout) if wait else None
+        wait_timeout = timeout if wait else None
         deadline = (
             time.monotonic() + wait_timeout if wait_timeout is not None else None
         )
@@ -1538,7 +1536,7 @@ class AgentSessionRunner:
         # After an uncancelable LLM returns, the child checks this event and
         # exits without dispatching. Pending (not started) jobs are cancelled.
         self._collect_finished_subagents(
-            wait=True, timeout=_subagent_teardown_timeout()
+            wait=True, timeout=SUBAGENT_TEARDOWN_WAIT_SECONDS
         )
         self._cancel_pending_subagents()
         payload = dict(payload)

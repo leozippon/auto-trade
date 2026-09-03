@@ -6,7 +6,7 @@ import json
 import re
 from pathlib import Path
 
-from autotrade.agent.subagent import SUBAGENT_SYSTEM_PROMPT, META_SUBAGENT_SYSTEM_PROMPT
+from autotrade.agent.subagent import META_SUBAGENT_SYSTEM_PROMPT, subagent_system_prompt
 from autotrade.agent.prompts import build_system_prompt
 
 REPO = Path(__file__).resolve().parents[2]
@@ -72,13 +72,15 @@ def test_pyrightconfig_is_basic_and_excludes_pit_roots() -> None:
 def test_agent_prompts_leave_pyright_how_to_out_of_system_text() -> None:
     fold = build_system_prompt(mode="fold", experiment_facts={})
     meta = build_system_prompt(mode="meta", experiment_facts={})
+    # The writing child is the one that would be tempted to type-check.
+    child = subagent_system_prompt("fold", "developer")
     assert COMMAND not in fold
-    assert COMMAND not in SUBAGENT_SYSTEM_PROMPT
+    assert COMMAND not in child
     assert COMMAND not in meta
     assert COMMAND not in META_SUBAGENT_SYSTEM_PROMPT
     assert "pyright" not in fold
-    assert "pyright" not in SUBAGENT_SYSTEM_PROMPT
+    assert "pyright" not in child
     assert "pyright" not in meta
     assert "pi-lens" not in fold
-    assert "pi-lens" not in SUBAGENT_SYSTEM_PROMPT
+    assert "pi-lens" not in child
     assert "pi-lens" not in meta
