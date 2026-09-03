@@ -234,7 +234,6 @@ class ResearchPITSnapshotProvider:
                     decision,
                     staging,
                     self.config,
-                    prior_events=self._prior_decision_events(decision),
                 )
                 target.parent.mkdir(parents=True, exist_ok=True)
                 os.replace(staging, target)
@@ -243,35 +242,6 @@ class ResearchPITSnapshotProvider:
             finally:
                 if staging.exists():
                     shutil.rmtree(staging)
-
-    def _prior_decision_events(
-        self, decision: datetime
-    ) -> tuple[Path, datetime] | None:
-        root = self.cache_root / "decision"
-        if not root.is_dir():
-            return None
-        best_path: Path | None = None
-        best_time: datetime | None = None
-        for path in root.iterdir():
-            if path.name.startswith(".") or not path.is_dir():
-                continue
-            events = path / "events.parquet"
-            if not events.is_file():
-                continue
-            try:
-                manifest = load_snapshot_manifest(path)
-                when = _cn_datetime(
-                    datetime.fromisoformat(str(manifest.get("decision_time")))
-                )
-            except (OSError, TypeError, ValueError):
-                continue
-            if manifest.get("kind") != "decision_input" or when >= decision:
-                continue
-            if best_time is None or when > best_time:
-                best_path, best_time = events, when
-        if best_path is None or best_time is None:
-            return None
-        return best_path, best_time
 
     def _replay_view(
         self,

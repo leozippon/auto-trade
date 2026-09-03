@@ -2168,82 +2168,6 @@ class SnapshotBuilderTest(unittest.TestCase):
             manifest = load_snapshot_manifest(out)
             self.assertTrue(manifest["domains"]["events"].get("skipped"))
 
-    def test_later_decision_rebuilds_events_from_raw(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            raw = Path(tmp) / "raw"
-            events_root = Path(tmp) / "fund_events"
-            status_path = Path(tmp) / "fundamental_events_status.json"
-            build_raw(raw)
-            build_fundamental_events(events_root)
-            write_fundamental_status(status_path)
-            first = Path(tmp) / "first"
-            builder = SnapshotBuilder(raw, events_root, status_path)
-            config = replace(CONFIG, include_intraday=False)
-            builder.build_decision_snapshot(DECISION, first, config)
-            later = datetime(2021, 10, 11, 9, 25, tzinfo=CN_TZ)
-            write(
-                raw / "daily" / "trade_date=20211011.parquet",
-                pd.DataFrame(
-                    [
-                        {
-                            "trade_date": "20211011",
-                            "ts_code": "000001.SZ",
-                            "open": 10.0,
-                            "high": 11.0,
-                            "low": 9.5,
-                            "close": 10.6,
-                            "pre_close": 10.5,
-                            "pct_chg": 1.0,
-                            "vol": 1000.0,
-                            "amount": 1060.0,
-                        }
-                    ]
-                ),
-            )
-            write(
-                raw / "daily_basic" / "trade_date=20211011.parquet",
-                pd.DataFrame(
-                    [
-                        {
-                            "trade_date": "20211011",
-                            "ts_code": "000001.SZ",
-                            "turnover_rate": 2.0,
-                            "dv_ttm": 3.0,
-                            "pe": 10.0,
-                            "total_share": 100.0,
-                            "total_mv": 1000.0,
-                            "close": 10.6,
-                            "circ_mv": 2_000_000.0,
-                        }
-                    ]
-                ),
-            )
-            write(
-                raw / "margin_secs" / "trade_date=20211011.parquet",
-                pd.DataFrame(
-                    [
-                        {
-                            "trade_date": "20211011",
-                            "ts_code": "000001.SZ",
-                            "available_at": "2021-10-11T09:00:00+08:00",
-                            "available_at_rule": "same_day_preopen",
-                        }
-                    ]
-                ),
-            )
-            second = Path(tmp) / "second"
-            manifest = builder.build_decision_snapshot(
-                later,
-                second,
-                config,
-                prior_events=(first / "events.parquet", DECISION),
-            )
-            self.assertFalse(manifest["domains"]["events"].get("incremental"))
-            events = pd.read_parquet(second / "events.parquet")
-            dates = set(events["trade_date"].astype(str))
-            self.assertIn("20211008", dates)
-            self.assertIn("20211011", dates)
-
     def test_forward_unlock_events_survive_the_decision_window(self):
         # IPO lockups announce years ahead: windowing on announcement recency
         # alone hid the largest near-term unlocks (measured 56.8% of the
@@ -2294,7 +2218,11 @@ class SnapshotBuilderTest(unittest.TestCase):
                     ("share_float_complete",), DECISION, window_start, forward_events=True
                 )
 
-    def test_prior_event_hint_uses_revision_safe_cold_build(self):
+    def test_events_keep_one_row_per_revision_inside_the_window(self):
+        """Every decision cold-builds the events union from the raw release:
+        rows outside the window or published after the decision instant stay
+        out, and a re-ingested revision collapses to one row. Each narrow
+        dataset is deduplicated before the union, never the wide frame."""
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
             raw = tmp / "raw"
@@ -2338,37 +2266,9 @@ class SnapshotBuilderTest(unittest.TestCase):
                     },
                 ]),
             )
-            prior_path = tmp / "prior_events.parquet"
-            write(
-                prior_path,
-                pd.DataFrame([
-                    {
-                        "dataset": "margin_secs",
-                        "trade_date": "20211001",
-                        "ts_code": "600003.SH",
-                        "revision": "stale",
-                        "available_at": "2021-10-01T09:00:00+08:00",
-                        "available_at_rule": "same_day_preopen",
-                    },
-                    {
-                        "dataset": "margin_secs",
-                        "trade_date": "20211006",
-                        "ts_code": "600005.SH",
-                        "revision": "prior_only",
-                        "available_at": "2021-10-06T09:00:00+08:00",
-                        "available_at_rule": "same_day_preopen",
-                    },
-                ]),
-            )
             builder = SnapshotBuilder(raw, tmp / "missing_fundamental_events")
             window_start = SnapshotConfig(events_window_months=24).window_start_for(
                 DECISION, "events"
-            )
-            cold, _ = builder._build_available_at_domain(
-                ("margin_secs",),
-                DECISION,
-                window_start,
-                forward_events=True,
             )
             original_drop_duplicates = pd.DataFrame.drop_duplicates
             dedup_columns: list[tuple[str, ...]] = []
@@ -2378,26 +2278,19 @@ class SnapshotBuilderTest(unittest.TestCase):
                 return original_drop_duplicates(frame, *args, **kwargs)
 
             with patch.object(pd.DataFrame, "drop_duplicates", track_drop_duplicates):
-                rebuilt, meta = builder._build_events_domain(
+                events, meta = builder._build_events_domain(
                     ("margin_secs",),
                     DECISION,
                     window_start,
                     screen=None,
-                    prior_events=(
-                        prior_path,
-                        datetime(2021, 10, 7, 9, 25, tzinfo=CN_TZ),
-                    ),
                 )
 
-            pd.testing.assert_frame_equal(rebuilt, cold)
             self.assertEqual(
-                dict(zip(rebuilt["ts_code"], rebuilt["revision"], strict=True)),
+                dict(zip(events["ts_code"], events["revision"], strict=True)),
                 {"600001.SH": "window_boundary", "600003.SH": "corrected"},
             )
             self.assertEqual(meta["datasets"], ["margin_secs"])
             self.assertEqual(meta["units"], "source")
-            self.assertFalse(meta.get("incremental"))
-            self.assertNotIn("prior_decision_time", meta)
             self.assertEqual(len(dedup_columns), 1)
             self.assertNotIn("dataset", dedup_columns[0])
 

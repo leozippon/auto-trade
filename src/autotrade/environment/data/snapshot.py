@@ -554,8 +554,6 @@ class SnapshotBuilder:
         decision_time: datetime,
         output_dir: str | Path,
         config: SnapshotConfig | None = None,
-        *,
-        prior_events: tuple[Path, datetime] | None = None,
     ) -> dict[str, object]:
         with self._raw_lake_guard() as raw_generation:
             manifest = self._build_decision_snapshot_impl(
@@ -563,7 +561,6 @@ class SnapshotBuilder:
                 output_dir,
                 config,
                 raw_generation,
-                prior_events=prior_events,
             )
         return manifest
 
@@ -573,8 +570,6 @@ class SnapshotBuilder:
         output_dir: str | Path,
         config: SnapshotConfig | None,
         raw_generation: dict[str, object] | None,
-        *,
-        prior_events: tuple[Path, datetime] | None = None,
     ) -> dict[str, object]:
         config = config or SnapshotConfig()
         decision_time = decision_time if decision_time.tzinfo else decision_time.replace(tzinfo=CN_TZ)
@@ -673,7 +668,6 @@ class SnapshotBuilder:
                 decision_time,
                 events_window_start,
                 screen=screened,
-                prior_events=prior_events,
             )
             meta = {**meta, "rows": int(len(events))}
             profile = _write_with_profile(
@@ -1597,16 +1591,14 @@ class SnapshotBuilder:
         window_start: pd.Timestamp,
         *,
         screen: frozenset[str] | None,
-        prior_events: tuple[Path, datetime] | None,
     ) -> tuple[pd.DataFrame, dict[str, object]]:
         """Build events from the immutable raw release for every decision.
 
-        ``prior_events`` is only a cache hint and is intentionally ignored.
-        Reusing prior rows misses historical revisions whose ``available_at``
-        is unchanged, while joining the wide prior and delta tables requires a
-        pathological full-frame deduplication. The cold path below preserves
-        revision and window semantics and deduplicates each narrow dataset
-        before constructing the union.
+        Reusing a previous decision's rows misses historical revisions whose
+        ``available_at`` is unchanged, while joining the wide prior and delta
+        tables requires a pathological full-frame deduplication. The cold path
+        below preserves revision and window semantics and deduplicates each
+        narrow dataset before constructing the union.
         """
         return self._build_available_at_domain(
             datasets,

@@ -200,8 +200,8 @@ def iter_plan_pit_jobs(
     times and replay windows. Several phases routinely share one region — meta
     and valid always do, and on a contiguous calendar the previous fold's test
     does too — so the returned tuples repeat a region once per phase while the
-    provider builds it once. Jobs are ordered by decision time so later
-    decision snapshots can reuse the previous one's events.
+    provider builds it once. Jobs are sorted by decision time, then region and
+    phase, so the plan and a prebuild's progress log are the same on every run.
     """
 
     folds = build_fold_schedule(
