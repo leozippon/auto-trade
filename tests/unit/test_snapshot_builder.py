@@ -164,17 +164,19 @@ def write_quality_status(
     created_at: str = "2026-01-01T00:00:00+00:00",
     scope_start_date: str = "20200101",
     scope_datasets: tuple[str, ...] = ("fixture",),
+    checks: tuple[str, ...] = ("fixture_status",),
 ) -> None:
     findings = []
     if status != "ok":
-        findings.append(
+        findings = [
             {
                 "severity": status,
-                "check": "fixture_status",
+                "check": check,
                 "message": "fixture quality status",
                 "details": {},
             }
-        )
+            for check in checks
+        ]
     report = build_quality_report(
         report_type=report_type,
         scope={
@@ -2053,6 +2055,41 @@ class SnapshotBuilderTest(unittest.TestCase):
             self.assertIn("audit status is error", warnings["macro"])
             self.assertIn("status file missing", warnings["events"])
             self.assertNotIn("text", warnings)
+
+    def test_audit_warning_names_the_flagged_checks(self):
+        # The audit reports stay on the host, so the manifest text is the only
+        # place a sandboxed Agent learns WHICH dataset an audit flagged: a bare
+        # domain verdict makes every dataset of that domain look suspect.
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = Path(tmp) / "raw"
+            events_root = Path(tmp) / "fund_events"
+            status_path = Path(tmp) / "fundamental_events_status.json"
+            build_raw(raw)
+            build_fundamental_events(events_root)
+            write_fundamental_status(status_path)
+            write_domain_statuses(Path(tmp))
+            write_quality_status(
+                Path(tmp) / "event_flow_status.json",
+                "event_flow",
+                status="error",
+                checks=(
+                    "margin_secs_exchange_completeness",
+                    "margin_secs_event_partitions",
+                    "margin_secs_event_payload",
+                    "margin_secs_event_keys",
+                ),
+            )
+
+            manifest = SnapshotBuilder(raw, events_root, status_path).build_decision_snapshot(
+                DECISION, Path(tmp) / "snap", CONFIG
+            )
+            events = manifest["data_quality_warnings"]["events"]
+            self.assertIn("audit status is error (event_flow_status.json)", events)
+            self.assertIn("4 error findings", events)
+            self.assertIn("margin_secs_exchange_completeness: fixture quality status", events)
+            self.assertIn("margin_secs_event_payload", events)
+            self.assertNotIn("margin_secs_event_keys", events)  # capped digest
+            self.assertIn("(+1 more)", events)
 
     def test_board_trading_audit_is_an_independent_warning(self):
         with tempfile.TemporaryDirectory() as tmp:

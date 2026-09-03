@@ -780,6 +780,10 @@ class SnapshotBuilder:
     # sparsity and calibration artifacts that should not block an experiment.
     # A report whose own status is "warning" is recorded (manifest + build log)
     # for every domain, so the semantic risks it names stay visible downstream.
+    # Every recorded status carries a digest of the findings that set it: the
+    # status files stay on the host, so the manifest is the only place a
+    # sandboxed Agent can learn WHICH dataset and check an audit flagged, and a
+    # bare domain-level verdict makes an unrelated dataset look suspect.
     _DOMAIN_STATUS_FILES: tuple[tuple[str, str, bool], ...] = (
         ("daily", DOMAIN_STATUS_FILES["daily"], True),
         ("intraday_1min", DOMAIN_STATUS_FILES["intraday_1min"], True),
@@ -820,6 +824,7 @@ class SnapshotBuilder:
                 continue
             path = self.data_quality_dir / filename
             problem = ""
+            detail = ""
             stale = ""
             warning_status = ""
             if not path.exists():
@@ -835,24 +840,26 @@ class SnapshotBuilder:
                     status = str(payload.get("status", "")).lower()
                     if status == "error":
                         problem = "audit status is error"
+                        detail = _finding_digest(payload, "error")
                     elif status == "warning":
                         # data docs §3.1: warning reports must be explicitly
                         # handled downstream — record them so they leave a
                         # trace in the manifest instead of vanishing.
-                        counts = payload.get("finding_counts") or {}
                         warning_status = (
                             f"audit status is warning ({filename}): "
-                            f"{int(counts.get('warning', 0))} warning findings"
+                            f"{_finding_digest(payload, 'warning')}"
                         )
                     created_at = str(payload.get("created_at", ""))
                     if generation_at and created_at and created_at < generation_at:
                         stale = f"audit status predates current raw generation ({filename})"
             if problem:
+                suffix = f": {detail}" if detail else ""
                 if critical:
                     raise ValueError(
-                        f"data-quality gate failed for execution-critical domain {domain!r}: {problem} ({path})"
+                        f"data-quality gate failed for execution-critical domain {domain!r}: "
+                        f"{problem} ({path}){suffix}"
                     )
-                warnings[domain] = f"{problem} ({filename})"
+                warnings[domain] = f"{problem} ({filename}){suffix}"
             elif stale:
                 warnings[domain] = stale
             elif warning_status:
@@ -2585,6 +2592,29 @@ def _apply_fundamental_exclusions(
 # the config identity (host interpreter path). The snapshot manifest is
 # mounted read-only into the Agent sandbox, so it keeps only the identity the
 # PIT contract checks; the full stamp stays in the lake's own record.
+_FINDING_DIGEST_LIMIT = 3
+
+
+def _finding_digest(payload: Mapping[str, object], severity: str) -> str:
+    """One line naming the findings that set a report's status: how many, then
+    the first few by check and message. The check name carries the dataset, so
+    a reader of the manifest alone can tell whether the flagged data is data it
+    consumes."""
+    findings = [
+        finding
+        for finding in payload.get("findings") or ()
+        if isinstance(finding, Mapping) and str(finding.get("severity")) == severity
+    ]
+    parts = [f"{len(findings)} {severity} findings"]
+    parts += [
+        f"{finding.get('check')}: {finding.get('message')}"
+        for finding in findings[:_FINDING_DIGEST_LIMIT]
+    ]
+    if len(findings) > _FINDING_DIGEST_LIMIT:
+        parts.append(f"(+{len(findings) - _FINDING_DIGEST_LIMIT} more)")
+    return "; ".join(parts)
+
+
 _RAW_GENERATION_IDENTITY_KEYS = ("schema_version", "state", "generation_id", "completed_at")
 
 
