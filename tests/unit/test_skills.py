@@ -11,6 +11,8 @@ import pytest
 from autotrade.environment.tools import SafeWorkspace, ToolRegistry, WriteFileTool
 from autotrade.pipelines.local_backend import _assert_skills_absent_from_formal
 from autotrade.pipelines.skills import (
+    MAX_SKILL_CHARS,
+    MAX_SKILL_FILE_BYTES,
     DeleteSkillTool,
     ExperimentSkillsStore,
     SkillsSnapshot,
@@ -161,6 +163,52 @@ def test_write_skill_states_and_enforces_the_front_matter_contract(
     assert plain.ok, plain.error
 
 
+def test_write_skill_declares_its_size_caps_and_refuses_with_the_measured_length(
+    tmp_path: Path,
+) -> None:
+    """The caps are in the tool's own description and parameter schema, and the
+    refusal names both the limit and what was sent, so a session maintaining a
+    growing SKILL.md can plan the compression instead of discovering the wall."""
+
+    description = WriteSkillTool.spec.description
+    content_schema = WriteSkillTool.spec.input_schema["properties"]["content"]
+    assert str(MAX_SKILL_CHARS) in description
+    assert str(MAX_SKILL_FILE_BYTES) in description
+    assert str(MAX_SKILL_CHARS) in content_schema["description"]
+    assert str(MAX_SKILL_FILE_BYTES) in content_schema["description"]
+
+    workspace = _workspace(tmp_path)
+    registry = ToolRegistry([WriteSkillTool(SafeWorkspace(workspace))])
+    head = "# 记录\n\n"
+    # Exactly at the cap in characters, and well over it in UTF-8 bytes: the
+    # limit the description states is the limit that is enforced.
+    at_cap = head + "记" * (MAX_SKILL_CHARS - len(head))
+    assert len(at_cap) == MAX_SKILL_CHARS
+    assert len(at_cap.encode("utf-8")) > MAX_SKILL_CHARS
+    accepted = registry.invoke(
+        "write_skill", {"name": "long-notes", "path": "SKILL.md", "content": at_cap}
+    )
+    assert accepted.ok, accepted.error
+
+    over_cap = at_cap + "记"
+    refused = registry.invoke(
+        "write_skill", {"name": "long-notes", "path": "SKILL.md", "content": over_cap}
+    )
+    assert not refused.ok
+    assert refused.value["error_type"] == "skill_policy"
+    assert str(MAX_SKILL_CHARS) in refused.error
+    assert str(len(over_cap)) in refused.error
+
+    oversized_file = "# script\n" + "x" * MAX_SKILL_FILE_BYTES
+    too_many_bytes = registry.invoke(
+        "write_skill",
+        {"name": "long-notes", "path": "scripts/run.py", "content": oversized_file},
+    )
+    assert not too_many_bytes.ok
+    assert str(MAX_SKILL_FILE_BYTES) in too_many_bytes.error
+    assert str(len(oversized_file.encode("utf-8"))) in too_many_bytes.error
+
+
 def test_skill_content_uses_prior_boundary_but_allows_dates_and_security_knowledge(
     tmp_path: Path,
 ) -> None:
@@ -256,7 +304,7 @@ def test_tree_validation_rejects_missing_skill_hidden_symlink_binary_and_limits(
     (root / "schema-notes" / "references" / "large.txt").write_text(
         "x" * (64 * 1024 + 1), encoding="utf-8"
     )
-    with pytest.raises(ValueError, match="65536 bytes"):
+    with pytest.raises(ValueError, match="is 65537 bytes; keep it to 65536"):
         validate_skills_tree(root)
 
 

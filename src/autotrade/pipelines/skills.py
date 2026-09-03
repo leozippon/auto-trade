@@ -212,7 +212,8 @@ def validate_skill_path(path: str) -> PurePosixPath:
 def _decode_skill_file(path: Path, payload: bytes) -> str:
     if len(payload) > MAX_SKILL_FILE_BYTES:
         raise ValueError(
-            f"skill file exceeds {MAX_SKILL_FILE_BYTES} bytes: {path.as_posix()}"
+            f"skill file {path.as_posix()} is {len(payload)} bytes; "
+            f"keep it to {MAX_SKILL_FILE_BYTES}"
         )
     try:
         text = payload.decode("utf-8")
@@ -1130,13 +1131,28 @@ class WriteSkillTool:
         "'# Title' and no front matter; the only front matter accepted is a "
         "'---' block whose single key is 'supersedes: <source>/<name>' naming a "
         "mounted memory entry — any other key (name, description, version, ...) "
-        "or a block left unclosed is rejected.",
+        "or a block left unclosed is rejected. "
+        f"SKILL.md holds at most {MAX_SKILL_CHARS} characters (characters, not "
+        f"bytes) and every other item file at most {MAX_SKILL_FILE_BYTES} bytes; "
+        "a write over its limit is refused with the measured length, so compress "
+        "an item that is filling up instead of appending to it.",
         {
             "type": "object",
             "properties": {
                 "name": {"type": "string", "minLength": 1, "maxLength": MAX_SKILL_NAME_CHARS},
                 "path": {"type": "string", "minLength": 1, "maxLength": 500},
-                "content": {"type": "string"},
+                # No schema maxLength: the cap depends on path (characters for
+                # SKILL.md, bytes for every other file), so one declared bound
+                # would misstate the other and hide the measured length the
+                # refusal reports.
+                "content": {
+                    "type": "string",
+                    "description": (
+                        f"File text. SKILL.md is capped at {MAX_SKILL_CHARS} "
+                        f"characters, any other item file at "
+                        f"{MAX_SKILL_FILE_BYTES} bytes."
+                    ),
+                },
             },
             "required": ["name", "path", "content"],
             "additionalProperties": False,
@@ -1158,7 +1174,10 @@ class WriteSkillTool:
             _decode_skill_file(Path(name) / Path(relative.as_posix()), payload)
             if relative == PurePosixPath(SKILL_FILENAME):
                 if len(content) > MAX_SKILL_CHARS:
-                    raise ValueError(f"SKILL.md exceeds {MAX_SKILL_CHARS} characters")
+                    raise ValueError(
+                        f"SKILL.md is {len(content)} characters; "
+                        f"keep it to {MAX_SKILL_CHARS}"
+                    )
                 fields, _body = skill_front_matter(content)
                 if fields.get("supersedes"):
                     _require_mounted_memory_entry(
