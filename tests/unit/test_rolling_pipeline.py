@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from dataclasses import replace
 from pathlib import Path
 
 import pandas as pd
@@ -22,7 +23,7 @@ from autotrade.pipelines.config import (
     MetaSessionResult,
     fold_session_deadline_seconds,
 )
-from autotrade.pipelines.experiment import _session_budgets
+from autotrade.pipelines.experiment import _null_seed, _session_budgets
 from autotrade.pipelines.folds import build_fold_schedule
 from autotrade.pipelines.hitl_state import fold_session_key
 from autotrade.pipelines.ledger import (
@@ -1242,6 +1243,12 @@ def test_single_window_fold_has_no_frozen_test_and_held_out_graduates(tmp_path: 
         "sharpe": 1.2,
         "max_drawdown": -0.05,
         "max_drawdown_limit": 0.25,
+        # The optional cost-stress and trade-floor terms are off by default, so
+        # they record their thresholds without deciding anything.
+        "cost_stress_multiplier": 1.0,
+        "excess_at_cost_stress": None,
+        "trade_count": None,
+        "heldout_min_trades": 0,
         # A single development Fold has no walk-forward transition: term (b)
         # is not applicable and Held-out alone decides.
         "walk_forward": {"status": "not_applicable", "transitions": 0},
@@ -1804,9 +1811,10 @@ def test_an_unreadable_result_record_is_not_reported_as_a_short_window(
     assert statistics["unavailable_reason"] == "return_series_too_short"
 
 
-def test_keeping_the_parent_leaves_no_deflated_sharpe_to_report(tmp_path: Path):
-    """Nominating the control node is not a selection out of the search, so the
-    trial count still stands but the probability stays None."""
+def test_keeping_the_parent_deflates_the_parents_own_sharpe(tmp_path: Path):
+    """Keeping the parent is a selection too: the parent won a search it was part
+    of, so it joins the trial pool and its own Sharpe is the deflated one. Only a
+    Fold that replayed no candidate at all was no search."""
     pipeline, folds, ledger, _requests = _selection_fold_pipeline(tmp_path)
     first = pipeline.run_fold("epoch_001", folds[0], parent=None)
     pipeline.evaluator.returns[first.frozen.artifact_id] = 0.06
@@ -1840,6 +1848,136 @@ def test_keeping_the_parent_leaves_no_deflated_sharpe_to_report(tmp_path: Path):
     pipeline.developer = developer
     pipeline.run_fold("epoch_001", folds[1], parent=first.frozen)
     statistics = ledger.read("fold")[1]["selection_statistics"]
+    # The parent is not counted as a candidate the session spent budget on, but
+    # it is one of the two trials its own Sharpe was the maximum of.
     assert statistics["candidates_evaluated"] == 1
+    assert statistics["parent_included"] is True
+    assert statistics["trials"] == 2
+    assert statistics["observed_sharpe"] == 1.0
+    # This fixture's control result is not a readable record, so only the
+    # return series is missing — the selection itself is measurable.
+    assert statistics["unavailable_reason"] == "return_series_missing"
+
+    def only_the_parent(request):
+        return FoldSessionResult(
+            "conversation",
+            (
+                StepResult(
+                    "control", "revision_1", request.parent_control, parent_control=True
+                ),
+            ),
+            "control",
+        )
+
+    pipeline.developer = only_the_parent
+    pipeline.run_fold("epoch_001", folds[1], parent=first.frozen)
+    statistics = ledger.read("fold")[2]["selection_statistics"]
+    assert statistics["candidates_evaluated"] == 0
+    assert statistics["parent_included"] is False
     assert statistics["deflated_sharpe_probability"] is None
     assert statistics["unavailable_reason"] == "no_nominated_candidate"
+
+
+def _canned_null(calls: list[dict[str, object]]):
+    """A backend null control that records how the pipeline asked for it."""
+
+    def null_control(result_ref, *, start, end, profile, schedule, seed, step=None):
+        calls.append(
+            {"result_ref": result_ref, "start": start, "end": end, "seed": seed, "step": step}
+        )
+        return {"k": 500, "seed": seed, "excess_percentile": 0.94, "rejects_mean": 3.0}
+
+    return null_control
+
+
+def test_the_null_control_of_the_parent_and_of_the_frozen_node_reach_the_ledger(
+    tmp_path: Path,
+):
+    """Both nulls are measured on results the Fold already produced: the parent
+    control on the Fold's new period when it has one, the selected node on the
+    whole Validation window. Their seeds differ so the two are separate draws."""
+    pipeline, folds, ledger, _requests = _selection_fold_pipeline(tmp_path)
+    first = pipeline.run_fold("epoch_001", folds[0], parent=None)
+    pipeline.evaluator.returns[first.frozen.artifact_id] = 0.06
+    calls: list[dict[str, object]] = []
+    pipeline.evaluator.null_control = _canned_null(calls)
+    stepped = replace(folds[1], step_start="20220401", step_end="20220630")
+    pipeline.run_fold("epoch_001", stepped, parent=first.frozen)
+
+    record = ledger.read("fold")[1]
+    assert record["parent_control"]["null_control"]["excess_percentile"] == 0.94
+    assert record["null_control"]["excess_percentile"] == 0.94
+    # The parent control is ranked on the new period; the frozen node on the
+    # window it was selected on.
+    assert [call["step"] for call in calls] == [("20220401", "20220630"), None]
+    assert {call["start"] for call in calls} == {stepped.validation_start}
+    assert len({call["seed"] for call in calls}) == 2
+    # Stable across runs, so a re-run of the Fold draws the same null.
+    assert calls[0]["seed"] == _null_seed(stepped.fold_id, "parent")
+
+
+def test_a_failed_null_control_is_recorded_and_the_fold_still_freezes(tmp_path: Path):
+    """A diagnostic must never cost an expensive Fold: the failure is a record."""
+    pipeline, folds, ledger, _requests = _selection_fold_pipeline(tmp_path)
+    first = pipeline.run_fold("epoch_001", folds[0], parent=None)
+    pipeline.evaluator.returns[first.frozen.artifact_id] = 0.06
+
+    def boom(result_ref, **kwargs):
+        raise RuntimeError("null control ran out of names")
+
+    pipeline.evaluator.null_control = boom
+    outcome = pipeline.run_fold("epoch_001", folds[1], parent=first.frozen)
+
+    assert outcome.frozen is not None
+    record = ledger.read("fold")[1]
+    assert record["fold_status"] == "frozen"
+    failure = {"status": "failed", "error": "RuntimeError: null control ran out of names"}
+    assert record["null_control"] == failure
+    assert record["parent_control"]["null_control"] == failure
+
+
+def test_keeping_the_parent_reuses_the_controls_null_control(tmp_path: Path):
+    """The kept parent is the control node itself, whose null already ran on
+    this window: the Fold record carries that block and draws no second one."""
+    pipeline, folds, ledger, _requests = _selection_fold_pipeline(tmp_path)
+    first = pipeline.run_fold("epoch_001", folds[0], parent=None)
+    pipeline.evaluator.returns[first.frozen.artifact_id] = 0.06
+    calls: list[dict[str, object]] = []
+    pipeline.evaluator.null_control = _canned_null(calls)
+
+    def keep_parent(request):
+        return FoldSessionResult(
+            "conversation",
+            (
+                StepResult(
+                    "control", "revision_1", request.parent_control, parent_control=True
+                ),
+                StepResult(
+                    "step_a",
+                    "revision_1",
+                    EvaluationResult(
+                        _candidate_summary(
+                            total_return=0.03, sharpe=0.2, excess=0.01, neutralized=0.00
+                        ),
+                        "results/missing.json",
+                    ),
+                ),
+            ),
+            "control",
+        )
+
+    pipeline.developer = keep_parent
+    pipeline.run_fold("epoch_001", folds[1], parent=first.frozen)
+    record = ledger.read("fold")[1]
+    assert len(calls) == 1
+    assert record["null_control"] == record["parent_control"]["null_control"]
+
+
+def test_a_backend_without_a_null_control_records_no_block(tmp_path: Path):
+    pipeline, folds, ledger, _requests = _selection_fold_pipeline(tmp_path)
+    first = pipeline.run_fold("epoch_001", folds[0], parent=None)
+    pipeline.evaluator.returns[first.frozen.artifact_id] = 0.06
+    pipeline.run_fold("epoch_001", folds[1], parent=first.frozen)
+    record = ledger.read("fold")[1]
+    assert record["null_control"] is None
+    assert "null_control" not in record["parent_control"]

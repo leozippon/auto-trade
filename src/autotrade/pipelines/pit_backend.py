@@ -26,6 +26,7 @@ from time import perf_counter
 import pandas as pd
 import pyarrow.parquet as pq
 
+from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.data.contracts import domain_visible_cutoff
 from autotrade.environment.data.pit import PITDataStore, to_cn_timestamps
 from autotrade.environment.data.research_release import (
@@ -44,12 +45,16 @@ from autotrade.environment.executor import (
 )
 from autotrade.environment.nl import NLConfig, NLService
 from autotrade.environment.replay.engine import StrategyDataView
+from autotrade.environment.replay.null_control import run_null_control
 from autotrade.environment.replay.stats import (
     PhaseTimer,
+    ReplayResult,
+    attach_cost_sensitivity,
     attach_sub_window_benchmark,
     finalize_summary_timing,
 )
 from autotrade.environment.replay.style import (
+    _slot_benchmark,
     benchmark_summary_block,
     replay_style_analysis,
     write_style_rollup,
@@ -727,6 +732,7 @@ class PITDailyEvaluationBackend:
             if benchmark is not None:
                 summary["benchmark"] = benchmark
             attach_sub_window_benchmark(summary, style)
+            attach_cost_sensitivity(summary, request.broker_profile.slippage_bps)
             finalize_summary_timing(
                 summary,
                 started_at=started_at,
@@ -743,6 +749,57 @@ class PITDailyEvaluationBackend:
             _discard_strategy_state(state_dir)
             if not keep_result_dir:
                 shutil.rmtree(result_dir, ignore_errors=True)
+
+    def null_control(
+        self,
+        result_path: str | Path,
+        *,
+        start: str,
+        end: str,
+        profile: BrokerProfile,
+        schedule: StrategySchedule,
+        seed: int,
+        step: tuple[str, str] | None = None,
+        k: int = 500,
+    ) -> dict[str, object]:
+        """Random-portfolio null control for one completed evaluation.
+
+        Replays ``k`` random-name copies of the result's own trade skeleton
+        through the same slot, Broker and window, and ranks the observed excess
+        inside them (``replay/null_control.py``). Host-side and read-only: the
+        result's own ``pit`` block names the replay slot, so the frame comes
+        from the same cache the evaluation filled and no snapshot is rebuilt.
+        Informational — nothing gates on it.
+        """
+
+        record = _read_json(_result_json(result_path))
+        pit = record.get("pit")
+        if not isinstance(pit, Mapping) or not pit.get("replay_ref"):
+            raise ValueError(f"result has no PIT replay slot: {result_path}")
+        replay_dir = Path(str(pit["replay_ref"])).resolve(strict=True)
+        daily = _load_replay_frames(
+            replay_dir,
+            generation_id=str(pit.get("generation_id") or ""),
+            replay_manifest=load_snapshot_manifest(replay_dir),
+            cache=self._replay_frame_cache,
+        )["daily"]
+        window = daily["trade_date"].map(_date_key)
+        daily = daily[(window >= _date_key(start)) & (window <= _date_key(end))].copy()
+        return run_null_control(
+            ReplayResult(
+                equity_curve=tuple(record.get("equity_curve") or ()),
+                executions=tuple(record.get("executions") or ()),
+                inference_dates=(),
+                pending_orders=(),
+            ),
+            daily,
+            _slot_benchmark(replay_dir),
+            profile,
+            schedule,
+            k=k,
+            seed=seed,
+            step=step,
+        )
 
     @staticmethod
     def _validate_bundle(
@@ -1491,6 +1548,13 @@ def _cn_timestamp(value: object) -> pd.Timestamp:
 
 def _date_key(value: object) -> str:
     return pd.Timestamp(str(value)).strftime("%Y%m%d")
+
+
+def _result_json(result_ref: str | Path) -> Path:
+    """The ``result.json`` a result reference names, directory or file."""
+
+    path = Path(str(result_ref))
+    return path / "result.json" if path.is_dir() else path
 
 
 def _read_json(path: Path) -> dict[str, object]:

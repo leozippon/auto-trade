@@ -412,6 +412,94 @@ class ReportingTest(unittest.TestCase):
         self.assertEqual(transitions[1]["status"], "failed")
         self.assertIsNone(transitions[1]["excess_return"])
         self.assertAlmostEqual(walk[0]["mean_excess_return"], 0.04)
+        # A failed control cannot be chained: it stays a transition that proved
+        # nothing, visible as the gap to scored_transitions.
+        chain = walk[0]["chain"]
+        self.assertEqual(chain["transitions"], 2)
+        self.assertEqual(chain["scored_transitions"], 1)
+        self.assertEqual(chain["positive_transitions"], 1)
+        self.assertAlmostEqual(chain["return"], 0.06)
+        self.assertIsNone(chain["excess_at_2x_slippage_sum"])
+        # The walk-forward record leads the summary; the fold table follows it.
+        self.assertEqual(next(iter(summary)), "walk_forward")
+
+    def test_the_walk_forward_chain_compounds_the_transitions_it_scored(self):
+        # Three quarterly steps of a trailing window, each scored on its own new
+        # quarter: the chain is what the process actually earned walking forward.
+        def fold(label, period, step, step_return, benchmark, stressed):
+            return {
+                "record_type": "fold",
+                "experiment_id": "e",
+                "epoch_id": "epoch_001",
+                "fold_id": f"fold_{label}",
+                "run_id": f"run_{label}",
+                "fold_status": "frozen",
+                "validation_period": period,
+                "test_period": None,
+                "validation_result": {"total_return": 0.5, "sharpe": 1.0, "max_drawdown": 0.05},
+                "test_result": None,
+                "parent_control": {
+                    "status": "ok",
+                    "parent_strategy_artifact_id": "strategy_a",
+                    # The whole four-quarter window looks far better than the
+                    # quarter that was actually new; the chain must ignore it.
+                    "validation_result": {
+                        "total_return": 0.40,
+                        "benchmark": {"benchmark_return": 0.01},
+                    },
+                    "step_result": {
+                        "label": label,
+                        "start": step[0],
+                        "end": step[1],
+                        "total_return": step_return,
+                        "benchmark": {"benchmark_return": benchmark},
+                        "sharpe": 0.5,
+                        "max_drawdown": 0.02,
+                        "cost_sensitivity": {"excess_at_2x_slippage": stressed},
+                    },
+                    # The window's null control looks decisive; only the step's
+                    # own percentile describes the transition.
+                    "null_control": {
+                        "k": 500,
+                        "excess_percentile": 1.0,
+                        "step": {"excess_percentile": 0.5 + step_return},
+                    },
+                },
+            }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            ledger = ExperimentLedger(tmp / "ledger.jsonl")
+            ledger.append(
+                fold("2023Q2", "20220701..20230630", ("20230403", "20230630"), 0.10, 0.02, 0.06)
+            )
+            ledger.append(
+                fold("2023Q3", "20221001..20230930", ("20230703", "20230928"), -0.05, 0.01, -0.08)
+            )
+            ledger.append(
+                fold("2023Q4", "20230101..20231231", ("20231009", "20231229"), 0.03, 0.01, -0.01)
+            )
+            summary = build_experiment_report(tmp / "ledger.jsonl", tmp / "reports")
+        chain = summary["walk_forward"][0]["chain"]
+        rows = summary["walk_forward"][0]["transitions"]
+        # Every row is scored on its step, spans the step, and says so.
+        self.assertEqual({row["source"] for row in rows}, {"step_result"})
+        self.assertEqual((rows[0]["period_start"], rows[0]["period_end"]), ("20230403", "20230630"))
+        self.assertEqual(chain["transitions"], 3)
+        self.assertEqual(chain["scored_transitions"], 3)
+        self.assertEqual(chain["positive_transitions"], 2)
+        strategy = 1.10 * 0.95 * 1.03 - 1.0
+        benchmark = 1.02 * 1.01 * 1.01 - 1.0
+        self.assertAlmostEqual(chain["return"], strategy)
+        self.assertAlmostEqual(chain["benchmark_return"], benchmark)
+        self.assertAlmostEqual(
+            chain["excess_return"], (1.0 + strategy) / (1.0 + benchmark) - 1.0
+        )
+        # Cost-stressed excess adds up over the steps, not over overlapping windows.
+        self.assertAlmostEqual(chain["excess_at_2x_slippage_sum"], -0.03)
+        # Each row is ranked against the null of the span it was scored on.
+        self.assertAlmostEqual(rows[0]["excess_percentile"], 0.6)
+        self.assertAlmostEqual(chain["mean_excess_percentile"], (0.6 + 0.45 + 0.53) / 3)
 
     def test_a_held_out_row_without_a_verdict_is_refused(self):
         with tempfile.TemporaryDirectory() as tmp:

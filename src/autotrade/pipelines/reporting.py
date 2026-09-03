@@ -35,6 +35,8 @@ from .ledger import (
     experiment_verdict,
     latest_fold_records,
     latest_heldout_records,
+    transition_null_control,
+    transition_result,
 )
 
 DEV_COLOR = "#1f77b4"
@@ -69,13 +71,15 @@ def build_experiment_report(ledger_path: str | Path, output_dir: str | Path) -> 
     epoch_files = _plot_epoch_returns(rows, output_dir / "epoch_returns")
     epoch_comparison = output_dir / "epoch_comparison_returns.png"
     _plot_epoch_comparison(rows, epoch_comparison)
-    summary = _summarize(rows)
+    # Walk-forward record first: each Fold's inherited strategy replayed
+    # unchanged on that Fold's new period by the host before the session
+    # (docs/pipeline-design.md §2.2). It is the only out-of-sample number the
+    # pipeline produces, so it leads the summary; the fold table below it is
+    # selection statistics, and later Epochs revisit windows the lineage has
+    # already seen.
+    summary: dict[str, object] = {"walk_forward": walk_forward_report(folds)}
+    summary.update(_summarize(rows))
     summary["benchmark"] = benchmark_info
-    # Walk-forward record: each Fold's inherited strategy replayed unchanged on
-    # that Fold's window by the host before the session (docs/pipeline-design.md
-    # §2.2). Genuine out-of-sample evidence in Epoch 1; later Epochs revisit
-    # windows the lineage has already seen.
-    summary["walk_forward"] = _walk_forward(folds)
     # Graduation verdict of the frozen strategy on Held-out; None until recorded.
     summary["verdict"] = experiment_verdict(heldout)
     # Flag the whole report when frozen benchmark blocks are missing for scored
@@ -136,8 +140,16 @@ def _fold_row(record: dict[str, object]) -> dict[str, object]:
     }
 
 
-def _walk_forward(folds: list[dict[str, object]]) -> list[dict[str, object]]:
-    """Per-Epoch transitions previous Fold -> this Fold from ``parent_control``."""
+def walk_forward_report(folds: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Per-Epoch transitions previous Fold -> this Fold from ``parent_control``.
+
+    Each transition is scored on the result ``ledger.transition_result`` names:
+    the Fold's new period when the Validation window trails over several,
+    otherwise the whole window. The ``chain`` block is the record the process is
+    judged by — the transitions compounded as one account against the benchmark
+    compounded the same way — so it reads as an equity curve rather than a list
+    of unrelated windows.
+    """
     by_epoch: dict[str, list[dict[str, object]]] = {}
     ordered = sorted(
         folds,
@@ -147,15 +159,24 @@ def _walk_forward(folds: list[dict[str, object]]) -> list[dict[str, object]]:
         control = record.get("parent_control")
         if not isinstance(control, dict):
             continue
-        result = control.get("validation_result") or {}
+        result = transition_result(control) or {}
         benchmark_return, _label = _frozen_benchmark(result)
         total = _num(result.get("total_return"))
         period = record.get("validation_period")
+        stepped = "step_result" in control
+        cost = result.get("cost_sensitivity")
         by_epoch.setdefault(str(record.get("epoch_id", "")), []).append(
             {
                 "fold": str(record.get("fold_id", "")).replace("fold_", ""),
-                "period_start": _period_part(period, "start"),
-                "period_end": _period_part(period, "end"),
+                # The span actually scored: the new period alone once the
+                # Validation window trails over several.
+                "source": "step_result" if stepped else "validation_result",
+                "period_start": (
+                    str(result.get("start")) if stepped else _period_part(period, "start")
+                ),
+                "period_end": (
+                    str(result.get("end")) if stepped else _period_part(period, "end")
+                ),
                 "parent_strategy_artifact_id": control.get("parent_strategy_artifact_id"),
                 "status": control.get("status"),
                 "error": control.get("error"),
@@ -166,6 +187,15 @@ def _walk_forward(folds: list[dict[str, object]]) -> list[dict[str, object]]:
                     if total is not None and benchmark_return is not None
                     else None
                 ),
+                "excess_at_2x_slippage": (
+                    _num(cost.get("excess_at_2x_slippage")) if isinstance(cost, dict) else None
+                ),
+                # Where this transition's excess sits inside random-name replays
+                # of its own trade skeleton, measured on the same span it is
+                # scored on. None for a control that ran no null control.
+                "excess_percentile": _num(
+                    (transition_null_control(control) or {}).get("excess_percentile")
+                ),
                 "sharpe": _num(result.get("sharpe")),
                 "max_drawdown": _num(result.get("max_drawdown")),
             }
@@ -173,6 +203,7 @@ def _walk_forward(folds: list[dict[str, object]]) -> list[dict[str, object]]:
     return [
         {
             "epoch_id": epoch_id,
+            "chain": _transition_chain(transitions),
             "transitions": transitions,
             "mean_excess_return": _mean(
                 [row["excess_return"] for row in transitions if row["excess_return"] is not None]
@@ -183,6 +214,61 @@ def _walk_forward(folds: list[dict[str, object]]) -> list[dict[str, object]]:
         }
         for epoch_id, transitions in by_epoch.items()
     ]
+
+
+def _transition_chain(transitions: list[dict[str, object]]) -> dict[str, object]:
+    """The transitions compounded as one walk-forward account.
+
+    Only transitions carrying both a strategy and a benchmark return are
+    compounded (``scored_transitions``); a failed control cannot be chained and
+    is left visible as the gap between it and ``transitions``. The excess is the
+    equity ratio ∏(1+r)/∏(1+b)−1, the same standard as the fold table's
+    ``compound_active_return``. ``sharpe_per_transition`` is the mean/stdev of
+    the per-transition returns and is deliberately NOT annualized: the cadence
+    of a transition is a schedule choice, and annualizing three of them would
+    read as a year of evidence.
+    """
+    scored = [
+        row
+        for row in transitions
+        if row["return"] is not None and row["benchmark_return"] is not None
+    ]
+    returns = [float(row["return"]) for row in scored]
+    benchmarks = [float(row["benchmark_return"]) for row in scored]
+    stressed = [
+        float(row["excess_at_2x_slippage"])
+        for row in transitions
+        if row["excess_at_2x_slippage"] is not None
+    ]
+    percentiles = [
+        float(row["excess_percentile"])
+        for row in transitions
+        if row["excess_percentile"] is not None
+    ]
+    strategy = _compound_return(returns)
+    benchmark = _compound_return(benchmarks)
+    std = _std(returns)
+    return {
+        "transitions": len(transitions),
+        "scored_transitions": len(scored),
+        "positive_transitions": sum(
+            1
+            for row in transitions
+            if row["excess_return"] is not None and float(row["excess_return"]) > 0
+        ),
+        "return": strategy,
+        "benchmark_return": benchmark,
+        "excess_return": (
+            (1.0 + strategy) / (1.0 + benchmark) - 1.0
+            if strategy is not None and benchmark is not None and benchmark != -1.0
+            else None
+        ),
+        "sharpe_per_transition": (
+            sum(returns) / len(returns) / std if std else None
+        ),
+        "excess_at_2x_slippage_sum": sum(stressed) if stressed else None,
+        "mean_excess_percentile": _mean(percentiles),
+    }
 
 
 def _heldout_row(record: dict[str, object]) -> dict[str, object]:

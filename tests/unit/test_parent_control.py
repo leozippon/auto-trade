@@ -6,7 +6,8 @@ Agent can keep as the explicit keep-parent, charge no Validation slot and no
 Step, and reach the run manifest projected exactly like the Fold's own
 candidates -- that manifest row is what the next Meta session reads the parent
 baseline from; at the ledger level the final Epoch's transitions must count
-exactly the way graduation term (b) reads them.
+exactly the way graduation term (b) reads them, scored on the Fold's new period
+alone once the Validation window trails over several.
 """
 
 from __future__ import annotations
@@ -37,6 +38,7 @@ from autotrade.pipelines.config import (
     SnapshotBundle,
     StrategySchedule,
 )
+from autotrade.pipelines.experiment import _step_result
 from autotrade.pipelines.ledger import walk_forward_transitions
 from autotrade.pipelines.local_backend import (
     PARENT_CONTROL_RESULT_NAME,
@@ -353,3 +355,110 @@ def test_walk_forward_transitions_use_frozen_tests_with_a_test_stage():
     records[0]["test_result"] = {"total_return": 0.05}
     assert walk_forward_transitions(records, epoch_id="epoch_001", test_stage=True)["positive_excess"] == 0
     assert json.dumps(walk_forward_transitions(records, epoch_id="epoch_001", test_stage=True))
+
+
+def _sub_window(label, start, end, *, ret, benchmark, turnover=5.0):
+    return {
+        "kind": "quarter",
+        "label": label,
+        "start": start,
+        "end": end,
+        "trade_days": 60,
+        "partial": False,
+        "return": ret,
+        "benchmark_return": benchmark,
+        "excess_return": ret - benchmark,
+        "sharpe": 0.5,
+        "max_drawdown": 0.03,
+        "turnover": turnover,
+        "trade_count": 7,
+    }
+
+
+_TRAILING_SUMMARY = {
+    "total_return": 0.20,
+    "turnover": 20.0,
+    "benchmark": {"benchmark_return": 0.05, "excess_return": 0.15},
+    "sub_windows": [
+        _sub_window("2022Q3", "20220701", "20220930", ret=0.10, benchmark=0.01),
+        _sub_window("2022Q4", "20221010", "20221230", ret=0.06, benchmark=0.01),
+        _sub_window("2023Q1", "20230103", "20230331", ret=0.05, benchmark=0.01),
+        _sub_window("2023Q2", "20230403", "20230630", ret=0.02, benchmark=0.01),
+    ],
+}
+
+
+def _rolling_fold(*, step: bool):
+    """One Fold of a trailing four-quarter window, or the single-period default."""
+    return FoldSpec(
+        fold_id="fold_2023Q2",
+        input_window_start="20200701",
+        input_window_end="20220630",
+        validation_start="20220701" if step else "20230401",
+        validation_end="20230630",
+        valid_decision_time=datetime(2022, 6, 30, 23, 59, 59, tzinfo=UTC),
+        step_start="20230401" if step else None,
+        step_end="20230630" if step else None,
+    )
+
+
+def test_the_step_result_is_the_new_periods_sub_window_priced_like_a_result():
+    # The parent was developed on the first three quarters of this window; only
+    # 2023Q2 is new, and it is already in the control's own sub-window table.
+    step = _step_result(_TRAILING_SUMMARY, _rolling_fold(step=True), 5.0)
+    assert step["label"] == "2023Q2"
+    assert (step["start"], step["end"]) == ("20230403", "20230630")
+    # Result-shaped, so the ledger and the report read it like any other result.
+    assert step["total_return"] == 0.02
+    assert step["benchmark"] == {"benchmark_return": 0.01, "excess_return": 0.01}
+    assert step["trade_count"] == 7
+    # Priced on the step's own turnover, not the whole window's.
+    cost = step["cost_sensitivity"]
+    assert cost["cost_per_bp_per_side"] == pytest.approx(0.0005)
+    assert cost["excess_at_2x_slippage"] == pytest.approx(0.01 - 5.0 * 0.0005)
+    assert json.dumps(step)
+
+
+def test_a_single_period_fold_has_no_separate_step():
+    # Nothing to project: the whole window is the transition, exactly as before.
+    assert _step_result(_TRAILING_SUMMARY, _rolling_fold(step=False), 5.0) is None
+    # A window whose sub-window table does not cover the step is not invented.
+    narrowed = {**_TRAILING_SUMMARY, "sub_windows": _TRAILING_SUMMARY["sub_windows"][:3]}
+    assert _step_result(narrowed, _rolling_fold(step=True), 5.0) is None
+
+
+def test_a_transition_is_graded_on_the_step_when_the_window_carries_one():
+    # The four-quarter window beat the benchmark, its new quarter did not: the
+    # transition must count the quarter, which is the only out-of-sample part.
+    control = {
+        "status": "ok",
+        "parent_strategy_artifact_id": "strategy_a",
+        "validation_result": {
+            "total_return": 0.20,
+            "benchmark": {"benchmark_return": 0.05},
+        },
+        "step_result": {
+            "label": "2023Q2",
+            "total_return": 0.02,
+            "benchmark": {"benchmark_return": 0.04},
+        },
+    }
+    records = [
+        _fold("epoch_001", "fold_2023Q1", "20220401..20230331"),
+        _fold("epoch_001", "fold_2023Q2", "20220701..20230630", control=control),
+    ]
+    counted = walk_forward_transitions(records, epoch_id="epoch_001", test_stage=False)
+    assert counted == {
+        "source": "parent_control",
+        "epoch_id": "epoch_001",
+        "transitions": 1,
+        "positive_excess": 0,
+    }
+    # An older ledger has no step_result: the whole window stays the transition.
+    del control["step_result"]
+    assert (
+        walk_forward_transitions(records, epoch_id="epoch_001", test_stage=False)[
+            "positive_excess"
+        ]
+        == 1
+    )

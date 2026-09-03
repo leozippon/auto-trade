@@ -20,6 +20,7 @@ from .engine import (
     run_daily_replay,
 )
 from .market import DailyMarketData
+from .null_control import run_null_control
 from .stats import (
     PhaseTimer,
     ReplayResult,
@@ -40,5 +41,6 @@ __all__ = [
     "compute_return_stats",
     "finalize_summary_timing",
     "run_daily_replay",
+    "run_null_control",
     "resolve_execution_price",
 ]

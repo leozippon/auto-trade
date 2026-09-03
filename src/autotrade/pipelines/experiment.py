@@ -8,6 +8,7 @@ strategy content; it only accepts, freezes, falls back, and records.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 import uuid
@@ -38,6 +39,7 @@ from autotrade.environment.replay import (
     ReplayResult,
     run_daily_replay,
 )
+from autotrade.environment.replay.stats import attach_cost_sensitivity
 from autotrade.environment.replay.style import daily_returns_from_curve
 from autotrade.environment.runtime import agent_trace_path, chmod_tree
 from autotrade.environment.strategy import NLQuery
@@ -242,7 +244,7 @@ class RollingExperimentPipeline:
                 end=fold.validation_end,
                 decision_time=fold.valid_decision_time,
             )
-            control, control_error = self._parent_control(
+            control, control_error, control_null = self._parent_control(
                 parent, fold, valid_snapshot, progress=progress, run_id=run_id
             )
             try:
@@ -422,6 +424,17 @@ class RollingExperimentPipeline:
                 generation_id=f"{epoch_id}_{fold.fold_id}_{run_id}",
                 run_id=run_id,
             )
+            # The selected node ranked against random-name copies of its own
+            # trades on the whole window. A kept parent is the control itself,
+            # whose null already ran.
+            if selected is None:
+                frozen_null = None
+            elif selected.parent_control:
+                frozen_null = control_null
+            else:
+                frozen_null = self._null_control(
+                    selected.validation.result_ref, fold=fold, role="frozen"
+                )
             record = {
                 "record_type": "fold",
                 "experiment_id": self.config.experiment_id,
@@ -432,7 +445,13 @@ class RollingExperimentPipeline:
                 **fold.to_record(),
                 "parent_strategy_artifact_id": parent.artifact_id if parent else None,
                 "parent_control": _parent_control_record(
-                    parent, control, control_error, session.steps
+                    parent,
+                    control,
+                    control_error,
+                    session.steps,
+                    fold=fold,
+                    slippage_bps=self.config.broker_profile.slippage_bps,
+                    null_control=control_null,
                 ),
                 "conversation_id": session.conversation_id,
                 "finish_reason": session.finish_reason,
@@ -457,6 +476,7 @@ class RollingExperimentPipeline:
                 "selection_statistics": _selection_statistics(
                     session.steps, selected
                 ),
+                "null_control": frozen_null,
                 "test_result": test_summary,
                 "test_result_ref": test_result_ref,
                 "run_manifest_ref": session.run_manifest_ref,
@@ -903,7 +923,7 @@ class RollingExperimentPipeline:
         *,
         progress,
         run_id: str,
-    ) -> tuple[EvaluationResult | None, str]:
+    ) -> tuple[EvaluationResult | None, str, dict[str, object] | None]:
         """Replay the inherited parent unchanged on this Fold's Validation window.
 
         Runs before the Agent session through the same evaluator, snapshot and
@@ -911,27 +931,72 @@ class RollingExperimentPipeline:
         session budget. The result is the walk-forward evidence for the
         previous Fold's frozen strategy and the parent's completed Validation
         in this Fold; a failure is recorded explicitly and the Fold proceeds.
+        The random-portfolio null control of that same result is measured here
+        too, on the Fold's new period when the window trails over several.
         """
         if parent is None:
-            return None, ""
+            return None, "", None
         _publish_progress(progress, "parent_control", run_id=run_id)
         try:
-            return (
-                self.evaluator.evaluate(
-                    EvaluationRequest(
-                        revision=_frozen_revision(parent),
-                        snapshot=snapshot,
-                        mode="valid",
-                        start=fold.validation_start,
-                        end=fold.validation_end,
-                        schedule=self.config.schedule,
-                        broker_profile=self.config.broker_profile,
-                    )
-                ),
-                "",
+            control = self.evaluator.evaluate(
+                EvaluationRequest(
+                    revision=_frozen_revision(parent),
+                    snapshot=snapshot,
+                    mode="valid",
+                    start=fold.validation_start,
+                    end=fold.validation_end,
+                    schedule=self.config.schedule,
+                    broker_profile=self.config.broker_profile,
+                )
             )
         except Exception as exc:  # noqa: BLE001 - recorded, the Fold still runs
-            return None, f"{type(exc).__name__}: {exc}"
+            return None, f"{type(exc).__name__}: {exc}", None
+        return (
+            control,
+            "",
+            self._null_control(
+                control.result_ref,
+                fold=fold,
+                role="parent",
+                step=(fold.step_start, fold.step_end) if fold.has_step else None,
+            ),
+        )
+
+    def _null_control(
+        self,
+        result_ref: str,
+        *,
+        fold: FoldSpec,
+        role: str,
+        step: tuple[str, str] | None = None,
+    ) -> dict[str, object] | None:
+        """Rank one completed result against random-name copies of its own trades.
+
+        Informational evidence beside the return: it says whether the excess
+        came from WHICH names were picked or only from the timing, sizing and
+        exposure the skeleton already fixed. The seed is derived from the Fold
+        and the role, so a re-run of the same Fold draws the same null. The
+        null is not part of any verdict, so a backend that cannot run it
+        (the local development backend) leaves the block absent and a failure
+        is recorded rather than raised -- an expensive Fold must never be lost
+        to a diagnostic.
+        """
+
+        runner = getattr(self.evaluator, "null_control", None)
+        if not callable(runner):
+            return None
+        try:
+            return runner(
+                result_ref,
+                start=fold.validation_start,
+                end=fold.validation_end,
+                profile=self.config.broker_profile,
+                schedule=self.config.schedule,
+                seed=_null_seed(fold.fold_id, role),
+                step=step,
+            )
+        except Exception as exc:  # noqa: BLE001 - recorded, the Fold still runs
+            return {"status": "failed", "error": f"{type(exc).__name__}: {exc}"}
 
     def _assert_parent_validated_in_fold(
         self,
@@ -1180,27 +1245,37 @@ def _selection_statistics(
     trial in it.
 
     That same count is N for :func:`ledger.deflated_sharpe`, computed for the
-    candidate ``finish_fold`` nominated. ``trials`` is the subset of those
-    candidates carrying a finite Sharpe, i.e. the N the formula actually used.
-    Keeping the parent (nominating the control node) or finishing with no
-    candidate leaves the probability ``None``: nothing was selected out of the
-    search, so there is no selection bias to correct.
+    node ``finish_fold`` nominated. ``trials`` is the subset of the trial
+    Sharpes that are finite, i.e. the N the formula actually used.
+
+    Keeping the parent is also a selection: the parent won a search it was part
+    of, so the parent control joins the candidates as a trial, its own Sharpe is
+    the observed one, and ``parent_included`` says so. Only a Fold with no
+    candidate at all was no search, and leaves the probability ``None`` with
+    ``no_nominated_candidate``.
     """
 
     candidates = [step for step in steps if not step.parent_control]
+    # A kept parent with no candidate beside it was no search at all.
     nominated = (
-        selected if selected is not None and not selected.parent_control else None
+        None
+        if selected is None or (selected.parent_control and not candidates)
+        else selected
     )
+    kept_parent = nominated is not None and nominated.parent_control
     series = (
         _validation_daily_returns(nominated.validation.result_ref)
         if nominated
         else None
     )
+    trial_sharpes = [step.validation.summary.get("sharpe") for step in candidates]
+    if kept_parent:
+        trial_sharpes.append(nominated.validation.summary.get("sharpe"))
     statistics = deflated_sharpe(
         observed_sharpe=(
             nominated.validation.summary.get("sharpe") if nominated else None
         ),
-        trial_sharpes=[step.validation.summary.get("sharpe") for step in candidates],
+        trial_sharpes=trial_sharpes,
         returns=series if series is not None else (),
     )
     if nominated is None:
@@ -1209,7 +1284,13 @@ def _selection_statistics(
         # The record could not be read at all; saying the window was short
         # would send a reader looking at the calendar instead of the file.
         statistics["unavailable_reason"] = "return_series_missing"
-    return {"candidates_evaluated": len(candidates), **statistics}
+    return {
+        "candidates_evaluated": len(candidates),
+        # Whether the trial pool this probability deflates includes the parent
+        # control, which it does exactly when the parent was the one kept.
+        "parent_included": kept_parent,
+        **statistics,
+    }
 
 
 def _validation_daily_returns(result_ref: str) -> list[float] | None:
@@ -1245,6 +1326,10 @@ def _parent_control_record(
     control: EvaluationResult | None,
     error: str,
     steps: tuple[StepResult, ...],
+    *,
+    fold: FoldSpec,
+    slippage_bps: float,
+    null_control: dict[str, object] | None = None,
 ) -> dict[str, object] | None:
     """Ledger projection of the host's parent control; None without a parent."""
     if parent is None:
@@ -1255,6 +1340,7 @@ def _parent_control_record(
             "parent_strategy_artifact_id": parent.artifact_id,
             "error": error,
         }
+    step_result = _step_result(control.summary, fold, slippage_bps)
     return {
         "status": "ok",
         "parent_strategy_artifact_id": parent.artifact_id,
@@ -1265,7 +1351,75 @@ def _parent_control_record(
         ),
         "validation_result": control.summary,
         "validation_result_ref": control.result_ref,
+        # The walk-forward transition itself, when the window is wider than the
+        # step; absent otherwise, and the whole window is the transition.
+        **({"step_result": step_result} if step_result is not None else {}),
+        # Random-name replays of this control's own trade skeleton; absent when
+        # the backend cannot run one.
+        **({"null_control": null_control} if null_control is not None else {}),
     }
+
+
+def _step_result(
+    summary: Mapping[str, object], fold: FoldSpec, slippage_bps: float
+) -> dict[str, object] | None:
+    """The parent's result on this Fold's new period alone.
+
+    A trailing validation window is mostly ground the inherited parent was
+    already developed on; only the Fold's own period (``FoldSpec.step_start``
+    /``step_end``) is new, so that period alone is the honest walk-forward
+    transition. It needs no second replay: the control's result already carries
+    one sub-window row per calendar quarter, and the step is the row inside the
+    step bounds. The row is projected into the shape a result has -- so the
+    ledger, the graduation term and the report read a transition the same way
+    whether it is a step or a whole window -- and priced with the same
+    cost-sensitivity function. None when the Fold has no separate step (a
+    single-period window) or the row is missing.
+    """
+
+    if not fold.has_step:
+        return None
+    rows = summary.get("sub_windows")
+    if not isinstance(rows, list):
+        return None
+    matched = [
+        row
+        for row in rows
+        if isinstance(row, Mapping)
+        and str(fold.step_start) <= str(row.get("start"))
+        and str(row.get("end")) <= str(fold.step_end)
+    ]
+    if len(matched) != 1:
+        return None
+    row = matched[0]
+    step = {
+        "label": row.get("label"),
+        "start": row.get("start"),
+        "end": row.get("end"),
+        "partial": row.get("partial"),
+        "total_return": row.get("return"),
+        "benchmark": {
+            "benchmark_return": row.get("benchmark_return"),
+            "excess_return": row.get("excess_return"),
+        },
+        "sharpe": row.get("sharpe"),
+        "max_drawdown": row.get("max_drawdown"),
+        "turnover": row.get("turnover"),
+        "trade_count": row.get("trade_count"),
+    }
+    return attach_cost_sensitivity(step, slippage_bps)
+
+
+def _null_seed(fold_id: str, role: str) -> int:
+    """A stable 32-bit seed per Fold and role.
+
+    Stable across processes and runs (``hash`` is not), so re-running a Fold
+    re-draws the same null and its percentile can be compared with the one the
+    ledger already holds.
+    """
+
+    digest = hashlib.blake2b(f"{fold_id}:{role}".encode(), digest_size=4).digest()
+    return int.from_bytes(digest, "big")
 
 
 def _frozen_revision(artifact: FrozenArtifact) -> ArtifactRevision:

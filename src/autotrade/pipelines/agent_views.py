@@ -41,6 +41,18 @@ def metrics(summary: dict[str, object] | None) -> dict[str, object] | None:
             for key in ("avg_gross", "max_gross", "zero_position_days", "replay_days")
             if key in exposure
         }
+    # One scalar each from the cost-sensitivity and concentration blocks: this
+    # block rides in every ledger record and Meta view, so it keeps the two
+    # numbers that change a judgement — whether the excess survives twice the
+    # modelled slippage, and how much of the gain one name produced — and
+    # leaves the full blocks in the backtest summary.
+    for source, field in (
+        ("cost_sensitivity", "excess_at_2x_slippage"),
+        ("pnl_concentration", "top_name_share_of_gross_gains"),
+    ):
+        block = summary.get(source)
+        if isinstance(block, dict) and field in block:
+            compact[field] = block.get(field)
     return compact
 
 
@@ -203,6 +215,11 @@ _SUMMARY_KEYS = (
     # held-out loss while the dev metrics looked healthy — meta-learning must
     # see it, not just returns.
     "turnover",
+    # The same tell priced out: what one more bp of slippage per side costs and
+    # what the excess is worth at twice it, beside how few trades and names
+    # produced the gains.
+    "cost_sensitivity",
+    "pnl_concentration",
     # Cost of the Validation itself, so Meta can weigh a direction's replay and
     # NL spend against its evidence.
     "replay_wall_seconds",

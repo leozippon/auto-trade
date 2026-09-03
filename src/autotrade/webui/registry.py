@@ -40,6 +40,8 @@ from autotrade.pipelines.ledger import (
     is_frozen_artifact_mutation,
     latest_fold_records,
     latest_heldout_records,
+    transition_null_control,
+    transition_result,
     walk_forward_transitions,
 )
 from autotrade.pipelines.worker import _ALLOWED_PARAMS
@@ -278,14 +280,17 @@ def _parent_control_view(record: Mapping[str, object]) -> dict[str, object] | No
 
     The parent control replays the inherited parent unchanged on this Fold's
     Validation window, so it is the Fold's baseline and the previous Fold's
-    walk-forward evidence. ``None`` for a Fold that inherited no parent; a
-    failed control keeps its status and carries no numbers.
+    walk-forward evidence. The numbers are the ones that transition is graded
+    on (``ledger.transition_result``): the Fold's new period alone when the
+    window trails over several, the whole window otherwise — so this row and
+    the transition counts above it can never tell different stories. ``None``
+    for a Fold that inherited no parent; a failed control keeps its status and
+    carries no numbers.
     """
     control = record.get("parent_control")
     if not isinstance(control, Mapping):
         return None
-    result = control.get("validation_result")
-    result = result if isinstance(result, Mapping) else {}
+    result = transition_result(control) or {}
     benchmark = result.get("benchmark")
     total = _number(result.get("total_return"))
     bench = (
@@ -299,6 +304,11 @@ def _parent_control_view(record: Mapping[str, object]) -> dict[str, object] | No
         ),
         "sharpe": _number(result.get("sharpe")),
         "max_drawdown": _number(result.get("max_drawdown")),
+        # Where that excess sits inside random-name replays of the control's own
+        # trade skeleton, on the same span. None when no null control ran.
+        "excess_percentile": _number(
+            (transition_null_control(control) or {}).get("excess_percentile")
+        ),
     }
 
 

@@ -137,6 +137,7 @@ def compute_return_stats(
         }
         for order in realized
     ]
+    pnl_concentration = _pnl_concentration(realized)
 
     status_counts: dict[str, int] = {}
     reject_counts: dict[str, int] = {}
@@ -200,6 +201,7 @@ def compute_return_stats(
         "sharpe": sharpe,
         "max_drawdown": max_drawdown,
         "win_rate": float(wins / len(realized)) if realized else 0.0,
+        "pnl_concentration": pnl_concentration,
         "exposure": exposure,
         # Fixed-cost (four rows per replayed year) and therefore inline, unlike
         # weekly_returns / per_stock which scale with the window and the book.
@@ -222,6 +224,35 @@ def compute_return_stats(
         "replay_wall_seconds": round(float(result.wall_seconds), 3),
         "replayed_trade_days": len(curve),
         "phase_seconds": dict(result.phase_seconds),
+    }
+
+
+def _pnl_concentration(realized: Sequence[Mapping[str, object]]) -> dict[str, object]:
+    """How much of the realized gain rests on a few trades and one name.
+
+    A window whose gains come from five trades, or from a single name, has not
+    demonstrated a repeatable edge however good its total return looks (audited
+    2026 Held-out: the top five trades carried 37.8% of the gross gains and one
+    name nearly all of them). ``gross_losses`` is signed, so gains + losses is
+    exactly ``net_realized``; the shares stay ``None`` rather than 0 when the
+    window realized no gain at all.
+    """
+
+    values = [float(order["realized_pnl"]) for order in realized]
+    by_symbol: dict[str, float] = {}
+    for order in realized:
+        symbol = str(order.get("symbol"))
+        by_symbol[symbol] = by_symbol.get(symbol, 0.0) + float(order["realized_pnl"])
+    gains = sum(value for value in values if value > 0)
+    losses = sum(value for value in values if value < 0)
+    top5 = sum(sorted(values, reverse=True)[:5])
+    top_name = max(by_symbol.values(), default=0.0)
+    return {
+        "gross_gains": gains,
+        "gross_losses": losses,
+        "net_realized": gains + losses,
+        "top5_share_of_gross_gains": top5 / gains if gains > 0 else None,
+        "top_name_share_of_gross_gains": top_name / gains if gains > 0 else None,
     }
 
 
@@ -351,6 +382,60 @@ def attach_sub_window_benchmark(
         row["benchmark_return"] = _round(benchmark)
         if isinstance(own, (int, float)) and not isinstance(own, bool):
             row["excess_return"] = _round(float(own) - benchmark)
+    return summary
+
+
+def attach_cost_sensitivity(
+    summary: dict[str, object], slippage_bps: float
+) -> dict[str, object]:
+    """State what one more basis point of slippage per side costs, in place.
+
+    A backtest is priced at one assumed slippage; the audited failure mode is an
+    edge that only exists at that assumption. ``cost_per_bp_per_side`` is the
+    equity fraction one extra bp per side costs at this window's turnover, so
+    ``breakeven_extra_slippage_bps`` is how much worse execution the excess
+    return survives and ``excess_at_2x_slippage`` is the excess left if the
+    modelled slippage doubles. The block is always written — turnover and the
+    profile's slippage are always known — but the two excess-derived fields
+    stay ``None`` with a ``reason`` when they cannot be stated, rather than
+    reporting a fabricated zero. The evaluation backend owns the broker profile,
+    so it closes this block here, beside the benchmark join.
+    """
+
+    turnover = summary.get("turnover")
+    cost_per_bp = (
+        float(turnover) * 1e-4
+        if isinstance(turnover, (int, float)) and not isinstance(turnover, bool)
+        else 0.0
+    )
+    benchmark = summary.get("benchmark")
+    excess = benchmark.get("excess_return") if isinstance(benchmark, Mapping) else None
+    if not isinstance(excess, (int, float)) or isinstance(excess, bool):
+        block: dict[str, object] = {
+            "breakeven_extra_slippage_bps": None,
+            "excess_at_2x_slippage": None,
+            "reason": "no_benchmark_excess",
+        }
+    elif cost_per_bp == 0.0:
+        block = {
+            "breakeven_extra_slippage_bps": None,
+            "excess_at_2x_slippage": float(excess),
+            "reason": "no_turnover",
+        }
+    else:
+        block = {
+            "breakeven_extra_slippage_bps": (
+                float(excess) / cost_per_bp if float(excess) > 0 else None
+            ),
+            "excess_at_2x_slippage": float(excess) - float(slippage_bps) * cost_per_bp,
+        }
+        if block["breakeven_extra_slippage_bps"] is None:
+            block["reason"] = "excess_not_positive"
+    summary["cost_sensitivity"] = {
+        "slippage_bps": float(slippage_bps),
+        "cost_per_bp_per_side": cost_per_bp,
+        **block,
+    }
     return summary
 
 

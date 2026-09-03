@@ -139,10 +139,11 @@ def walk_forward_transitions(
 
     Without a Test stage a transition is the host's ``parent_control`` of every
     Fold after the Epoch's first: the previous Fold's frozen strategy replayed
-    on this Fold's Validation window. With a Test stage it is each Fold's
-    frozen Test. A transition counts as positive only when its result exists
-    and its excess return over the benchmark is > 0; a failed or missing
-    result is a transition that proved nothing.
+    on this Fold's Validation window, scored on its new period alone when the
+    window trails over several (``transition_result``). With a Test stage it is
+    each Fold's frozen Test. A transition counts as positive only when its
+    result exists and its excess return over the benchmark is > 0; a failed or
+    missing result is a transition that proved nothing.
     """
     folds = sorted(
         (
@@ -158,9 +159,7 @@ def walk_forward_transitions(
     else:
         source = "parent_control"
         results = [
-            (record.get("parent_control") or {}).get("validation_result")
-            if isinstance(record.get("parent_control"), Mapping)
-            else None
+            transition_result(record.get("parent_control"))
             for record in folds[1:]
         ]
     return {
@@ -169,6 +168,45 @@ def walk_forward_transitions(
         "transitions": len(results),
         "positive_excess": sum(1 for result in results if _excess_positive(result)),
     }
+
+
+def transition_result(control: object) -> Mapping[str, object] | None:
+    """The result one parent control is graded on: its new period, else the window.
+
+    A Fold whose Validation window trails over several periods has already seen
+    all but its last one, so its ``parent_control`` records ``step_result`` --
+    that last period alone -- and the transition is scored on it. A single-period
+    window (and every ledger written before the rolling schedule) has none, and
+    the whole ``validation_result`` is the transition. The single source for
+    both the graduation term and the report, so the two can never disagree.
+    """
+
+    if not isinstance(control, Mapping):
+        return None
+    step = control.get("step_result")
+    if isinstance(step, Mapping):
+        return step
+    result = control.get("validation_result")
+    return result if isinstance(result, Mapping) else None
+
+
+def transition_null_control(control: object) -> Mapping[str, object] | None:
+    """The null-control block of the span ``transition_result`` scores.
+
+    A control graded on its ``step_result`` is ranked against the ``step``
+    sub-block of its null control, never the whole window's; otherwise the
+    window's block is the one. None when no null control ran.
+    """
+
+    if not isinstance(control, Mapping):
+        return None
+    null = control.get("null_control")
+    if not isinstance(null, Mapping):
+        return None
+    if isinstance(control.get("step_result"), Mapping):
+        step = null.get("step")
+        return step if isinstance(step, Mapping) else None
+    return null
 
 
 def _excess_positive(result: object) -> bool:

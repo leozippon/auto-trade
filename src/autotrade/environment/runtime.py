@@ -99,6 +99,11 @@ AGENT_VISIBLE_BACKTEST_SUMMARY_KEYS = (
     "order_lifecycle",
     "reject_counts",
     "benchmark",
+    # Net-of-cost robustness and how few trades/names carried the gains: an
+    # excess that dies at twice the modelled slippage, or a return one name
+    # produced, must be as visible as the return itself.
+    "cost_sensitivity",
+    "pnl_concentration",
     "strategy_exit_fill_count",
     "trade_count",
     "decision_calls",

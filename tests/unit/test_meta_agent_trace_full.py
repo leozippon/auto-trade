@@ -422,6 +422,18 @@ def test_review_carries_the_selection_statistics_and_the_parent_comparison(
         "unavailable_reason": None,
         "host_only_note": "/host/path/should/never/cross",
     }
+    record["null_control"] = {
+        "k": 500,
+        "seed": 7,
+        "observed_excess": 0.12,
+        "null_excess_mean": -0.01,
+        "null_excess_p05": -0.09,
+        "null_excess_p95": 0.08,
+        "excess_percentile": 0.97,
+        "rejects_mean": 12.5,
+        "step": {"start": "20230403", "end": "20230630", "excess_percentile": 0.61},
+        "host_only_note": "/host/path/should/never/cross",
+    }
     record["vs_parent"] = {
         "excess_return_delta": 0.06,
         "neutralized_excess_return_delta": 0.04,
@@ -437,6 +449,16 @@ def test_review_carries_the_selection_statistics_and_the_parent_comparison(
     assert statistics["deflated_sharpe_probability"] == 0.42
     assert statistics["sharpe_star"] == 0.61
     assert "host_only_note" not in statistics
+    # The null control crosses as the four numbers a reader judges it by, plus
+    # the step's own percentile; the seed and the raw distribution stay host-side.
+    null = _as_map(review["null_control"])
+    assert null == {
+        "observed_excess": 0.12,
+        "excess_percentile": 0.97,
+        "null_excess_p95": 0.08,
+        "rejects_mean": 12.5,
+        "step": {"start": "20230403", "end": "20230630", "excess_percentile": 0.61},
+    }
     assert _as_map(review["vs_parent"]) == {
         "excess_return_delta": 0.06,
         "neutralized_excess_return_delta": 0.04,
@@ -452,6 +474,7 @@ def test_review_carries_the_selection_statistics_and_the_parent_comparison(
     )
     assert bare_review["selection_statistics"] is None
     assert bare_review["vs_parent"] is None
+    assert bare_review["null_control"] is None
 
 
 def test_atomic_tmp_fsync_replace_and_cleanup(

@@ -1777,16 +1777,32 @@ class WebuiBackendTest(unittest.TestCase):
                     "benchmark": {"benchmark_return": 0.03},
                 },
             },
-            # Lost to the benchmark.
+            # Lost to the benchmark. A trailing window, so the console must
+            # read the new period alone and its own null control, not the
+            # window's flattering numbers.
             "2024": {
                 "status": "ok",
                 "parent_strategy_artifact_id": "strategy_epoch_001_fold_2023",
                 "step_id": "step_control",
                 "validation_result": {
+                    "total_return": 0.30,
+                    "sharpe": 1.50,
+                    "max_drawdown": 0.09,
+                    "benchmark": {"benchmark_return": 0.04},
+                },
+                "step_result": {
+                    "label": "2024Q4",
+                    "start": "20241008",
+                    "end": "20241231",
                     "total_return": 0.01,
                     "sharpe": 0.10,
                     "max_drawdown": 0.09,
                     "benchmark": {"benchmark_return": 0.04},
+                },
+                "null_control": {
+                    "k": 500,
+                    "excess_percentile": 0.99,
+                    "step": {"excess_percentile": 0.42},
                 },
             },
             # Never completed: a transition that proved nothing.
@@ -2581,8 +2597,14 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertAlmostEqual(beat["excess_return"], 0.05)
         self.assertAlmostEqual(beat["sharpe"], 0.60)
         self.assertAlmostEqual(beat["max_drawdown"], 0.07)
+        self.assertIsNone(beat["excess_percentile"])
+        # A trailing window is read on its new period, and against that
+        # period's own null control -- not the window's.
         lost = rows[self._fold_ref("fold_2024", "exp_wf")]["parent_control"]
+        self.assertAlmostEqual(lost["return"], 0.01)
         self.assertAlmostEqual(lost["excess_return"], -0.03)
+        self.assertAlmostEqual(lost["sharpe"], 0.10)
+        self.assertAlmostEqual(lost["excess_percentile"], 0.42)
         # A failed control keeps its status and carries no numbers at all.
         self.assertEqual(
             rows[self._fold_ref("fold_2025", "exp_wf")]["parent_control"],
@@ -2592,6 +2614,7 @@ class WebuiBackendTest(unittest.TestCase):
                 "excess_return": None,
                 "sharpe": None,
                 "max_drawdown": None,
+                "excess_percentile": None,
             },
         )
 

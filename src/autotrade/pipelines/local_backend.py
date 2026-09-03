@@ -1300,6 +1300,11 @@ BATCH_CANDIDATE_SUMMARY_KEYS = (
     "replayed_trade_days",
     "exposure",
     "benchmark",
+    # Whether the excess survives worse execution, and how few trades and names
+    # produced the gains: a screening decision made without them buys a result
+    # that only exists at the modelled slippage or rests on one lucky name.
+    "cost_sensitivity",
+    "pnl_concentration",
     "sub_windows",
 )
 # A multi-year Validation window has one sub-window row per quarter, and a

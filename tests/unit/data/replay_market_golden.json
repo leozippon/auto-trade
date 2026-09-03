@@ -577,6 +577,13 @@
   "sharpe": 1.3511857388632542,
   "max_drawdown": 0.0013373064841987596,
   "win_rate": 0.5,
+  "pnl_concentration": {
+   "gross_gains": 246.89873957444524,
+   "gross_losses": -300.5819379866657,
+   "net_realized": -53.68319841222046,
+   "top5_share_of_gross_gains": 0.6603552052302745,
+   "top_name_share_of_gross_gains": 0.4436286159613007
+  },
   "exposure": {
    "avg_gross": 0.03275549134028979,
    "max_gross": 0.05596544739594809,

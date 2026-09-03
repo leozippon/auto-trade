@@ -70,6 +70,10 @@ _LEAK_KEYS = frozenset(
 # Host-computed development statistics only — no Test or Held-out evidence.
 _SELECTION_STATISTICS_KEYS = (
     "candidates_evaluated",
+    # Whether the deflated trial pool includes the parent control, which it
+    # does exactly when the Fold kept the parent: without it a kept-parent
+    # probability reads as if a challenger had won the search.
+    "parent_included",
     "deflated_sharpe_probability",
     "trials",
     "sharpe_star",
@@ -79,6 +83,20 @@ _SELECTION_STATISTICS_KEYS = (
     "return_skew",
     "return_kurtosis",
     "unavailable_reason",
+)
+# The random-portfolio null control as a Meta session reads it back
+# (environment/replay/null_control.py): where the observed excess sits inside
+# replays of the Fold's own trade skeleton with random names of the same size.
+# ``rejects_mean`` rides along because a null whose orders are mostly rejected
+# is a weaker comparison, and ``status`` because a failed null must not read as
+# a missing one. Informational: nothing in the pipeline gates on it.
+_NULL_CONTROL_KEYS = (
+    "status",
+    "observed_excess",
+    "excess_percentile",
+    "null_excess_p95",
+    "rejects_mean",
+    "step",
 )
 _VS_PARENT_KEYS = (
     "excess_return_delta",
@@ -605,6 +623,11 @@ def build_meta_fold_review_bundle(
                 ),
                 "selection_statistics": _allowed_keys(
                     record.get("selection_statistics"), _SELECTION_STATISTICS_KEYS
+                ),
+                # Whether the names carried the excess, or only the timing and
+                # sizing the trade skeleton already fixed.
+                "null_control": _allowed_keys(
+                    record.get("null_control"), _NULL_CONTROL_KEYS
                 ),
                 "test_result": agent_visible_metrics(
                     test_result if isinstance(test_result, dict) else None
