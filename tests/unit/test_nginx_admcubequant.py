@@ -10,6 +10,9 @@ DOMAIN_CONF = REPO / "ops/nginx/aliyun/admcubequant-https.conf"
 IP_CONF = REPO / "ops/nginx/aliyun/admcube-https.conf"
 INSTALL_SCRIPT = REPO / "ops/nginx/install-admcubequant.sh"
 INDEX_HTML = REPO / "src/autotrade/webui/static/index.html"
+LIMITS_CONF = REPO / "ops/nginx/aliyun/admcube-http-limits.conf"
+APP_JS = REPO / "src/autotrade/webui/static/app.js"
+EDGE_ORIGINS = ("https://121.41.5.179", "https://admcubequant.tj.cn")
 DOMAIN_FULLCHAIN = "/etc/letsencrypt/live/admcubequant.tj.cn/fullchain.pem"
 DOMAIN_AVAILABLE_CP = "sudo cp ~/admcube-nginx/admcubequant-https.conf /etc/nginx/sites-available/admcubequant-https"
 DOMAIN_ENABLED_LN = "sudo ln -sfn /etc/nginx/sites-available/admcubequant-https /etc/nginx/sites-enabled/admcubequant-https"
@@ -118,6 +121,42 @@ def test_ip_vhost_serves_filing_badge_without_auth() -> None:
     _assert_login_rewrites_badge_src(blocks)
     _assert_catch_all_is_authenticated(blocks)
     assert "location /static/" not in text
+
+
+def _console_methods() -> set[str]:
+    """Every HTTP method the SPA can send: explicit `method:` plus the default GET."""
+
+    script = APP_JS.read_text(encoding="utf-8")
+    return {"GET", *re.findall(r"""method:\s*["']([A-Z]+)["']""", script)}
+
+
+def _safe_method_alternation(text: str) -> set[str]:
+    match = re.search(r"~\^\(([A-Z|]+)\):\s*1;", text)
+    assert match is not None
+    return set(match.group(1).split("|"))
+
+
+def _missing_origin_alternations(text: str) -> list[set[str]]:
+    return [
+        set(group.split("|"))
+        for group in re.findall(r"~\^\(([A-Z|]+)\)::https", text)
+    ]
+
+
+def test_edge_admits_every_method_the_console_sends() -> None:
+    text = LIMITS_CONF.read_text(encoding="utf-8")
+    safe = _safe_method_alternation(text)
+    missing_origin = _missing_origin_alternations(text)
+    assert len(missing_origin) == len(EDGE_ORIGINS)
+    methods = _console_methods()
+    assert {"POST", "PUT", "DELETE"} <= methods
+    for method in methods:
+        if method in safe:
+            continue
+        for origin in EDGE_ORIGINS:
+            assert f'"{method}:{origin}" 1;' in text
+        for alternation in missing_origin:
+            assert method in alternation
 
 
 def test_console_footer_uses_the_same_absolute_badge_url() -> None:
