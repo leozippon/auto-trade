@@ -5,10 +5,11 @@ This script lives in scripts/experiments/ and supersedes the gitignored
 logs/launch/ location where earlier round definitions were stranded. One round
 definition is kept here at a time; superseded rounds stay in git history.
 
-The slate is the same four arms as the previous round: factor_cs,
-explore_platform, explore_github and open_mechanism are stopped and restarted
-here under the new schedule, each keeping its reference pack and model settings;
-corner_cases keeps running untouched and is not part of this round.
+The slate is five arms: factor_cs, explore_platform, explore_github,
+open_mechanism and corner_cases are all stopped and restarted here under the new
+schedule, each keeping its reference pack and model settings. Nothing is
+inherited: corner_cases restarts from the template too, and the previous run
+(corner_cases_20260907) stays archived in its own directory.
 
 What this round changes is the research design. The Development window is read
 in quarters and every Fold is validated on the trailing four quarters ending at
@@ -29,7 +30,7 @@ fit(context) and 180 s per decision, local Qwen for every role, xhigh, auto).
 
 WEB_CREATE_DEFAULTS is the base -- no stale params template is read -- and
 EXPECTED_DEFAULTS pins the values this round depends on, so a drift in the
-console defaults stops the script instead of silently re-scoping four
+console defaults stops the script instead of silently re-scoping five
 experiments.
 
 Every parameter set is validated offline with every request-level check the
@@ -37,12 +38,14 @@ console applies on POST /api/experiments (ExperimentManager.create_experiment's
 key, id and stamp rules plus the worker's own resolve_worker_options
 pre-flight), and additionally refuses a directive the PRIOR calendar policy
 would reject. The console's deployment-state checks -- an experiment directory
-that already exists and a free running slot (corner_cases_20260907 holds one of
-the five) -- can only be decided against the live server and still happen at
-POST time, so --dry-run answers whether the parameters are acceptable, not
-whether the server will take the experiment now. It needs no PIT views either:
-the pre-flight deliberately skips the calendar-dependent fold schedule and every
-data root, so building the quarterly views is a separate step
+that already exists and a free running slot (five arms fill
+webui.manager.MAX_RUNNING_EXPERIMENTS exactly, so every experiment of the
+previous round, corner_cases_20260907 included, has to be stopped first) -- can
+only be decided against the live server and still happen at POST time, so
+--dry-run answers whether the parameters are acceptable, not whether the server
+will take the experiment now. It needs no PIT views either: the pre-flight
+deliberately skips the calendar-dependent fold schedule and every data root, so
+building the quarterly views is a separate step
 (scripts/data/prebuild_pit_views_seed.py) and never a hidden requirement here.
 
 Usage:
@@ -114,7 +117,7 @@ EXPECTED_DEFAULTS: dict[str, object] = {
     "compact_model": "qwen-3.8-27b-fp8",
 }
 
-# What this round decides for all four arms. Values, not commentary: the
+# What this round decides for all five arms. Values, not commentary: the
 # schedule, the account, the graduation gates and the per-step budgets.
 COMMON_OVERRIDES: dict[str, object] = {
     # No experiment takes an L20.

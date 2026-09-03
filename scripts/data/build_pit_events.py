@@ -3,7 +3,7 @@
 
 Subcommands are used by the nightly PIT event job:
 build-fundamental-events and audit-fundamental-events.
-Experiment orchestration lives in scripts/experiments/run_experiment.py.
+Experiment orchestration lives in scripts/experiments/run_interactive_experiment.py.
 """
 from __future__ import annotations
 

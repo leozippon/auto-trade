@@ -133,7 +133,6 @@ def _remove_sandbox_tree(path: Path) -> bool:
     files map to a host subuid, so directories it created cannot be removed
     by the host user directly. A root-in-userns container maps those subuids
     and can delete them. Returns True when the tree is gone."""
-    import shutil
 
     shutil.rmtree(path, ignore_errors=True)
     if not path.exists():

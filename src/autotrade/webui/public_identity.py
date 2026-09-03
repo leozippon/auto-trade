@@ -381,16 +381,6 @@ class PublicIdentity:
         safe = self._safe_value(text)
         return safe if isinstance(safe, str) else ""
 
-    def public_value(self, value: object) -> object | None:
-        """Project one nested block that carries no record-level identities.
-
-        The record/status/control projections above key off field names they
-        know. A block the console republishes verbatim (a run manifest's
-        mounted-memory record) has none of them and still must not carry host
-        paths out, so it goes through the same generic projector."""
-
-        return self._safe_value(value)
-
     def public_analysis_meta(self, payload: Mapping[str, object]) -> dict[str, object]:
         return {
             key: self._safe_value(value)
