@@ -43,9 +43,12 @@ PLAN_PARAMETERS: tuple[str, ...] = (
     "heldout_first_period",
     "heldout_last_period",
     "window_months",
+    "validation_periods",
     "min_region_trade_days",
 )
-_INT_PLAN_PARAMETERS = frozenset({"window_months", "min_region_trade_days"})
+_INT_PLAN_PARAMETERS = frozenset(
+    {"window_months", "validation_periods", "min_region_trade_days"}
+)
 _BOOL_PLAN_PARAMETERS = frozenset({"test_stage"})
 
 
@@ -184,6 +187,7 @@ def iter_plan_pit_jobs(
     window_months: int,
     min_region_trade_days: int,
     test_stage: bool,
+    validation_periods: int = 1,
 ) -> tuple[tuple[str, str, str, datetime], ...]:
     """Unique Meta/Fold/frozen_test/held-out prepare jobs for one fold plan.
 
@@ -208,6 +212,7 @@ def iter_plan_pit_jobs(
         period=fold_period,
         min_region_trade_days=min_region_trade_days,
         test_stage=test_stage,
+        validation_periods=validation_periods,
     )
     jobs: list[tuple[str, str, str, datetime]] = []
     for fold in folds:

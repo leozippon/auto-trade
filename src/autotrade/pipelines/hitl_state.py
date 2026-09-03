@@ -50,6 +50,9 @@ WEB_CREATE_DEFAULTS: dict[str, object] = {
     "development_first_period": "2022",
     "development_last_period": "2025",
     "test_stage": rolling_default("test_stage"),
+    # 1: each Fold is validated on its own period. N > 1 validates the trailing
+    # N periods ending at the Fold's period (walk-forward steps, quarterly only).
+    "validation_periods": rolling_default("validation_periods"),
     # One explicit range, not a cadence label: held-out is the part of 2026 the
     # data lake actually covers, and naming it directly keeps the window fixed
     # as the lake grows.
@@ -109,6 +112,8 @@ WEB_CREATE_DEFAULTS: dict[str, object] = {
     "min_return": 0.0,
     "min_sharpe": 0.0,
     "max_drawdown": 0.25,
+    "cost_stress_multiplier": 1.0,
+    "heldout_min_trades": 0,
     "initial_cash": 1_000_000.0,
     "max_total_holdings": None,
     "max_single_name_weight": None,

@@ -507,8 +507,8 @@ def test_default_plan_is_the_console_calendar_and_shares_regions() -> None:
     jobs = iter_plan_pit_jobs(_business_days(), **plan)
     assert jobs
     assert {phase for phase, *_rest in jobs} <= {"meta", "valid", "frozen_test", "heldout"}
-    # Decision-time order is what lets each decision snapshot extend the
-    # previous one's events instead of rebuilding the whole window.
+    # Decision-time order lets later jobs reuse published decision views.
+    # Events snapshots are always cold-built from the pinned release.
     decisions = [decision for *_rest, decision in jobs]
     assert decisions == sorted(decisions)
     # Meta and Validation always name the same region, so the plan always has
@@ -559,6 +559,41 @@ def test_yearly_regular_folds_plan_one_shared_region_per_year_and_no_frozen_test
     ]
     regions = {(start, end, decision) for _phase, start, end, decision in jobs}
     assert len(regions) == 5
+
+
+def test_quarterly_trailing_windows_plan_one_shared_region_per_step() -> None:
+    """Walk-forward steps: 13 Folds over 2022Q1..2025Q4, one region each.
+
+    The seed must plan the same regions the pipeline will ask for, so a
+    schedule knob that the plan ignored would leave the experiment cold-building
+    every window it was supposed to hardlink.
+    """
+
+    jobs = iter_plan_pit_jobs(
+        _business_days(),
+        development_first_period="2022Q1",
+        development_last_period="2025Q4",
+        heldout_first_period="20260101..20260630",
+        heldout_last_period="20260101..20260630",
+        fold_period="quarter",
+        window_months=24,
+        min_region_trade_days=2,
+        test_stage=False,
+        validation_periods=4,
+    )
+    assert [phase for phase, *_rest in jobs] == ["meta", "valid"] * 13 + ["heldout"]
+    windows = [(start, end) for _phase, start, end, _d in jobs][::2]
+    assert windows[:2] == [("20220101", "20221231"), ("20220401", "20230331")]
+    assert windows[-2:] == [("20250101", "20251231"), ("20260101", "20260630")]
+    regions = {(start, end, decision) for _phase, start, end, decision in jobs}
+    assert len(regions) == 14
+    # The four year-end steps repeat the yearly schedule's regions and anchors,
+    # so an existing seed carries them over instead of rebuilding them.
+    anchors = {
+        (start, end, decision.isoformat())
+        for _phase, start, end, decision in jobs
+    }
+    assert ("20250101", "20251231", "2024-12-31T23:59:59+08:00") in anchors
 
 
 def test_an_explicit_range_window_plans_a_single_development_region() -> None:

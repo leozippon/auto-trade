@@ -1,24 +1,31 @@
 #!/usr/bin/env python
-"""Create the 2026-09-08 round: four research directions on the four-Fold design.
+"""Create the 2026-09-10 round: four research directions on the quarterly walk-forward design.
 
 This script lives in scripts/experiments/ and supersedes the gitignored
 logs/launch/ location where earlier round definitions were stranded. One round
 definition is kept here at a time; superseded rounds stay in git history.
 
-The slate is the previous round minus corner_cases: that arm is still running as
-corner_cases_20260907 and is deliberately left untouched, while factor_cs,
-explore_platform, explore_github and open_mechanism are terminated, archived and
-restarted here on the current code and the current v9 seed. Each of the four
-keeps the reference pack, budgets and model settings it had in the previous
-round; only the experiment id moves.
+The slate is the same four arms as the previous round: factor_cs,
+explore_platform, explore_github and open_mechanism are stopped and restarted
+here under the new schedule, each keeping its reference pack and model settings;
+corner_cases keeps running untouched and is not part of this round.
 
-The round keeps every console creation default (Development window cut into four
-regular yearly Folds, no Test stage, 3 Epochs, Meta before every Fold, explicit
-held-out range, unfiltered universe, intraday domain off, curated+graduated
-operating memory, 720 min / 30 steps / 30 backtests / 1600 calls per Fold, one
-hour per fit(context) and 180 s per decision, local Qwen for every role, xhigh,
-auto) and overrides only what the round itself decides: the experiment id, the
-mounted reference pack, the exploration directive, and CPU-only sandboxes.
+What this round changes is the research design. The Development window is read
+in quarters and every Fold is validated on the trailing four quarters ending at
+its own quarter, so the window steps forward one quarter at a time
+(fold_2022Q4 ... fold_2025Q4: 13 Folds, 12 walk-forward transitions) and only
+the last quarter of each window is new. One Epoch is enough because the chain
+never revisits a window it has already seen. The account is the researcher's
+real capital (CNY 100k, where the CNY 5 minimum commission and lot sizes bite),
+graduation additionally requires the Held-out excess to survive twice the
+profile slippage and at least 20 closed round trips, and the per-Fold budgets
+are halved because three of the four quarters and the parent's own result are
+already known at each step.
+
+Everything else stays on the console creation defaults (no Test stage, explicit
+held-out range, Meta between every two Folds, 24-month input window, unfiltered
+universe, intraday domain off, curated+graduated operating memory, one hour per
+fit(context) and 180 s per decision, local Qwen for every role, xhigh, auto).
 
 WEB_CREATE_DEFAULTS is the base -- no stale params template is read -- and
 EXPECTED_DEFAULTS pins the values this round depends on, so a drift in the
@@ -33,11 +40,14 @@ would reject. The console's deployment-state checks -- an experiment directory
 that already exists and a free running slot (corner_cases_20260907 holds one of
 the five) -- can only be decided against the live server and still happen at
 POST time, so --dry-run answers whether the parameters are acceptable, not
-whether the server will take the experiment now.
+whether the server will take the experiment now. It needs no PIT views either:
+the pre-flight deliberately skips the calendar-dependent fold schedule and every
+data root, so building the quarterly views is a separate step
+(scripts/data/prebuild_pit_views_seed.py) and never a hidden requirement here.
 
 Usage:
   PYTHONPATH=src ~/miniconda3/envs/quant/bin/python \
-      scripts/experiments/create_round_20260908.py <port> [--dry-run] [experiment_id ...]
+      scripts/experiments/create_round_20260910.py <port> [--dry-run] [experiment_id ...]
 """
 
 from __future__ import annotations
@@ -74,13 +84,9 @@ EXPERIMENTS_ROOT = REPO_ROOT / "experiments"
 # Console defaults this round relies on. Values, not commentary: if the console
 # changes any of them the round has to be re-decided, not silently re-run.
 EXPECTED_DEFAULTS: dict[str, object] = {
-    "fold_period": "year",
-    "development_first_period": "2022",
-    "development_last_period": "2025",
     "test_stage": False,
     "heldout_first_period": "20260101..20260630",
     "heldout_last_period": "20260101..20260630",
-    "epochs": 3,
     "meta_learning_fold_interval": 1,
     "window_months": 24,
     "include_fundamentals": True,
@@ -93,10 +99,6 @@ EXPECTED_DEFAULTS: dict[str, object] = {
     "screen_boards": (),
     "screen_min_circ_mv_yi": None,
     "screen_max_circ_mv_yi": None,
-    "max_fold_minutes": 720,
-    "max_steps_per_fold": 30,
-    "max_backtests_per_fold": 30,
-    "max_llm_calls": 1600,
     # Derived from SandboxLimits.fit_timeout_seconds; the directives promise the
     # Agent a fit budget of this size.
     "strategy_fit_timeout_seconds": 3600,
@@ -112,8 +114,35 @@ EXPECTED_DEFAULTS: dict[str, object] = {
     "compact_model": "qwen-3.8-27b-fp8",
 }
 
-# The single common override: no experiment takes an L20.
-COMMON_OVERRIDES: dict[str, object] = {"gpu_count": 0}
+# What this round decides for all four arms. Values, not commentary: the
+# schedule, the account, the graduation gates and the per-step budgets.
+COMMON_OVERRIDES: dict[str, object] = {
+    # No experiment takes an L20.
+    "gpu_count": 0,
+    # Quarterly walk-forward: 13 Folds, each validated on the trailing four
+    # quarters ending at its own quarter, so every step adds exactly one new
+    # quarter and the chain never revisits a window.
+    "fold_period": "quarter",
+    "validation_periods": 4,
+    "development_first_period": "2022Q1",
+    "development_last_period": "2025Q4",
+    # One pass: with 12 forward transitions there is nothing a second pass over
+    # the same windows could add that would still be out of sample.
+    "epochs": 1,
+    # The researcher's real account, where the CNY 5 minimum commission and lot
+    # sizes are a real cost rather than a rounding error.
+    "initial_cash": 100_000,
+    # Graduation must survive twice the profile slippage and rest on more than a
+    # handful of trades.
+    "cost_stress_multiplier": 2.0,
+    "heldout_min_trades": 20,
+    # Halved per-step budgets: at each step three of the four quarters and the
+    # parent's own result on the window are already known.
+    "max_fold_minutes": 360,
+    "max_steps_per_fold": 15,
+    "max_backtests_per_fold": 15,
+    "max_llm_calls": 800,
+}
 
 # Five lines shared by every directive. They say how the session should be
 # spent, what the host already ran, how candidates are pre-registered and
@@ -121,16 +150,18 @@ COMMON_OVERRIDES: dict[str, object] = {"gpu_count": 0}
 # between two candidates. Direction, not procedure: no calendar labels, no
 # per-tool recipes.
 SESSION_LINE = (
-    "本 Fold 的预算是推理墙钟 730 分钟（运行事实 `budgets.deadline_seconds`：720 分钟主截止加最后 "
-    "10 分钟收尾宽限 `deadline_grace_seconds`）、30 个 Step、30 次回测、1600 次模型调用"
+    "本 Fold 的预算是推理墙钟 370 分钟（运行事实 `budgets.deadline_seconds`：360 分钟主截止加最后 "
+    "10 分钟收尾宽限 `deadline_grace_seconds`）、15 个 Step、15 次回测、800 次模型调用"
     "（回测墙钟独立计时并回补）。"
     "预算是用来持续探索的：一批候选跑出好结果，意味着可以进入下一轮细化与加固，而不是提前收工；"
     "把整段预算花在一条不断收敛的探索链上，直到时间或回测次数真的用完。"
 )
 PARENT_CONTROL_LINE = (
-    "父产物是已冻结策略时，宿主已在会话开始前把它在本 Fold 的验证窗口上自动跑完一次完整 Validation，"
-    "它是 Step 树的第一个节点、不占用上述预算，也是父策略在这一窗口的样本外记录；"
-    "直接把它当作对照基线，不要再花一次回测重跑父本。父产物是初始模板时没有这个节点"
+    "本 Fold 的验证窗口是截至本季的连续四个季度，其中只有最后一个季度是上一 Fold 之后新出现的。"
+    "父产物是已冻结策略时，宿主已在会话开始前把它原样在这整个窗口上跑完一次完整 Validation，"
+    "它是 Step 树的第一个节点、不占用上述预算；它的最后一个子窗口就是父策略在这个新季度上的样本外记录，"
+    "更早的子窗口父策略已经见过。直接把它当作对照基线，不要再花一次回测重跑父本。"
+    "父产物是初始模板时没有这个节点"
     "（运行事实 `parent_control` 为空、`artifact_contract.parent.parent_control_available` 为假），"
     "需要基线就自己跑一次并计入上述预算。"
 )
@@ -160,7 +191,7 @@ OPEN_MECHANISM_PRIOR_DIRECTIVE = (
 )
 
 ROUND: dict[str, dict[str, object]] = {
-    "factor_cs_20260908": {
+    "factor_cs_20260910": {
         "workspace_reference": "configs/workspace_refs/factor_cs_20260826",
         "fold_exploration_directive": "\n".join(
             [
@@ -179,7 +210,7 @@ ROUND: dict[str, dict[str, object]] = {
             ]
         ),
     },
-    "explore_platform_strategies_20260908": {
+    "explore_platform_strategies_20260910": {
         "workspace_reference": "configs/workspace_refs/explore_platform_strategies",
         "fold_exploration_directive": "\n".join(
             [
@@ -198,7 +229,7 @@ ROUND: dict[str, dict[str, object]] = {
             ]
         ),
     },
-    "explore_github_strategies_20260908": {
+    "explore_github_strategies_20260910": {
         "workspace_reference": "configs/workspace_refs/explore_github_strategies",
         "fold_exploration_directive": "\n".join(
             [
@@ -218,7 +249,7 @@ ROUND: dict[str, dict[str, object]] = {
             ]
         ),
     },
-    "open_mechanism_20260908": {
+    "open_mechanism_20260910": {
         # No workspace_reference and no inherit_from: the arm starts from the
         # empty template with nothing mounted but the operating memory.
         "fold_exploration_directive": "\n".join(
@@ -248,6 +279,7 @@ REPORT_KEYS = (
     "fold_period",
     "development_first_period",
     "development_last_period",
+    "validation_periods",
     "test_stage",
     "heldout_first_period",
     "heldout_last_period",
@@ -260,6 +292,9 @@ REPORT_KEYS = (
     "max_steps_per_fold",
     "max_backtests_per_fold",
     "max_llm_calls",
+    "initial_cash",
+    "cost_stress_multiplier",
+    "heldout_min_trades",
     "strategy_fit_timeout_seconds",
     "inference_time",
     "strategy_period",

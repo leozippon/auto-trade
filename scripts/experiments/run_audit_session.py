@@ -145,6 +145,7 @@ def main() -> int:
         period=options.rolling.fold_period,
         min_region_trade_days=options.rolling.min_region_trade_days,
         test_stage=options.rolling.test_stage,
+        validation_periods=options.rolling.validation_periods,
     )
     if not 0 <= args.fold_index < len(folds):
         raise SystemExit(f"--fold-index {args.fold_index} out of range for {len(folds)} folds")

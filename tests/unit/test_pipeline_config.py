@@ -18,8 +18,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from autotrade.environment.broker import BrokerProfile
-from autotrade.environment.strategy import StrategySchedule
 from autotrade.environment.llm import LOCAL_QWEN_MODEL
+from autotrade.environment.strategy import StrategySchedule
 from autotrade.pipelines.config import AcceptanceRules, RollingExperimentConfig
 from autotrade.pipelines.hitl_state import WEB_CREATE_DEFAULTS
 
@@ -234,12 +234,96 @@ class AcceptanceRulesTest(unittest.TestCase):
             ["sharpe_not_positive", "walkforward_excess_inconsistent(1/2<2)"],
         )
 
-    def test_record_round_trips_the_three_thresholds(self) -> None:
-        rules = AcceptanceRules(min_return=0.01, min_sharpe=0.2, max_drawdown=0.3)
+    def test_record_round_trips_every_threshold(self) -> None:
+        rules = AcceptanceRules(
+            min_return=0.01,
+            min_sharpe=0.2,
+            max_drawdown=0.3,
+            cost_stress_multiplier=2.0,
+            heldout_min_trades=20,
+        )
         self.assertEqual(
             rules.to_record(),
-            {"min_return": 0.01, "min_sharpe": 0.2, "max_drawdown": 0.3},
+            {
+                "min_return": 0.01,
+                "min_sharpe": 0.2,
+                "max_drawdown": 0.3,
+                "cost_stress_multiplier": 2.0,
+                "heldout_min_trades": 20,
+            },
         )
+
+
+class HeldOutCostAndTradeGateTest(unittest.TestCase):
+    """The two optional graduation terms: cost stress and a trade floor.
+
+    Both are off by default, so a running experiment's verdict is unchanged;
+    switched on they must reject on the arithmetic, and must also reject when
+    the input they need is missing rather than passing something unproven.
+    """
+
+    # Excess 0.01 with turnover 30 (cost_per_bp_per_side = 30 x 1e-4 = 0.003)
+    # and 5 bp slippage: doubling the slippage costs 0.015, more than the edge.
+    SUMMARY = {
+        "total_return": 0.06,
+        "sharpe": 1.0,
+        "max_drawdown": -0.05,
+        "benchmark": {"benchmark_return": 0.05},
+        "trade_count": 40,
+        "cost_sensitivity": {
+            "slippage_bps": 5.0,
+            "cost_per_bp_per_side": 0.003,
+            "breakeven_extra_slippage_bps": 3.33,
+            "excess_at_2x_slippage": -0.005,
+        },
+    }
+
+    def test_the_defaults_leave_the_verdict_untouched(self) -> None:
+        verdict = AcceptanceRules().heldout_verdict({**self.SUMMARY, "trade_count": 1})
+        self.assertEqual((verdict["status"], verdict["reasons"]), ("graduated", []))
+        self.assertEqual(verdict["cost_stress_multiplier"], 1.0)
+        self.assertIsNone(verdict["excess_at_cost_stress"])
+        self.assertEqual(verdict["heldout_min_trades"], 0)
+
+    def test_an_edge_thinner_than_the_stressed_cost_does_not_graduate(self) -> None:
+        verdict = AcceptanceRules(cost_stress_multiplier=2.0).heldout_verdict(self.SUMMARY)
+        self.assertEqual(verdict["status"], "discarded")
+        self.assertEqual(verdict["reasons"], ["excess_not_positive_at_cost_stress"])
+        self.assertAlmostEqual(float(verdict["excess_at_cost_stress"]), -0.005)
+        self.assertEqual(verdict["cost_stress_multiplier"], 2.0)
+
+    def test_an_edge_that_survives_the_stress_still_graduates(self) -> None:
+        summary = {**self.SUMMARY, "total_return": 0.09}  # excess 0.04 > 0.015
+        verdict = AcceptanceRules(cost_stress_multiplier=2.0).heldout_verdict(summary)
+        self.assertEqual((verdict["status"], verdict["reasons"]), ("graduated", []))
+        self.assertAlmostEqual(float(verdict["excess_at_cost_stress"]), 0.025)
+
+    def test_a_summary_without_the_cost_block_cannot_prove_the_stress(self) -> None:
+        summary = {key: value for key, value in self.SUMMARY.items() if key != "cost_sensitivity"}
+        verdict = AcceptanceRules(cost_stress_multiplier=2.0).heldout_verdict(summary)
+        self.assertEqual(verdict["reasons"], ["missing_cost_sensitivity"])
+        self.assertIsNone(verdict["excess_at_cost_stress"])
+        # An old summary is only judged on the stress when it is switched on.
+        self.assertEqual(AcceptanceRules().heldout_verdict(summary)["reasons"], [])
+
+    def test_too_few_closed_round_trips_do_not_graduate(self) -> None:
+        rules = AcceptanceRules(heldout_min_trades=20)
+        verdict = rules.heldout_verdict({**self.SUMMARY, "trade_count": 10})
+        self.assertEqual(verdict["reasons"], ["insufficient_trades"])
+        self.assertEqual((verdict["trade_count"], verdict["heldout_min_trades"]), (10, 20))
+        self.assertEqual(rules.heldout_verdict(self.SUMMARY)["reasons"], [])
+        # The floor is only provable with a count: absent, it fails closed.
+        missing = {key: value for key, value in self.SUMMARY.items() if key != "trade_count"}
+        self.assertEqual(rules.heldout_verdict(missing)["reasons"], ["missing_trade_count"])
+        self.assertEqual(AcceptanceRules().heldout_verdict(missing)["reasons"], [])
+
+    def test_the_thresholds_are_refused_when_they_are_not_thresholds(self) -> None:
+        with self.assertRaisesRegex(ValueError, "cost_stress_multiplier must be at least one"):
+            AcceptanceRules(cost_stress_multiplier=0.5)
+        with self.assertRaisesRegex(ValueError, "cost_stress_multiplier must be finite"):
+            AcceptanceRules(cost_stress_multiplier=float("nan"))
+        with self.assertRaisesRegex(ValueError, "heldout_min_trades must be a non-negative integer"):
+            AcceptanceRules(heldout_min_trades=-1)
 
 
 class RollingExperimentConfigValidationTest(unittest.TestCase):
@@ -265,6 +349,7 @@ class RollingExperimentConfigValidationTest(unittest.TestCase):
         for name in (
             "epochs",
             "window_months",
+            "validation_periods",
             "min_region_trade_days",
             "max_steps_per_fold",
             "max_backtests_per_fold",
@@ -325,7 +410,13 @@ class DefaultsDriftTest(unittest.TestCase):
                 continue
             self.assertEqual(WEB_CREATE_DEFAULTS[key], getattr(profile, key), key)
         rules = AcceptanceRules()
-        for key in ("min_return", "min_sharpe", "max_drawdown"):
+        for key in (
+            "min_return",
+            "min_sharpe",
+            "max_drawdown",
+            "cost_stress_multiplier",
+            "heldout_min_trades",
+        ):
             self.assertEqual(WEB_CREATE_DEFAULTS[key], getattr(rules, key), key)
         schedule = StrategySchedule()
         self.assertEqual(WEB_CREATE_DEFAULTS["strategy_period"], schedule.period)
@@ -373,6 +464,64 @@ class DefaultsDriftTest(unittest.TestCase):
                     field_obj.default,
                     field_obj.name,
                 )
+
+    def test_the_new_schedule_and_gate_knobs_reach_the_configuration(self) -> None:
+        """A knob accepted and never forwarded is the defect class here.
+
+        `validation_periods` must reach the schedule and the two graduation
+        gates must reach `AcceptanceRules`, or a round created with them would
+        silently run the old design.
+        """
+        import tempfile
+
+        import pandas as pd
+
+        from autotrade.pipelines.folds import build_fold_schedule
+        from autotrade.pipelines.worker import resolve_worker_options
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            (repo_root / "experiments").mkdir()
+            options = resolve_worker_options(
+                {
+                    "experiment_id": "walk_forward_demo",
+                    "fold_period": "quarter",
+                    "validation_periods": 4,
+                    "development_first_period": "2022Q1",
+                    "development_last_period": "2025Q4",
+                    "heldout_first_period": "20260101..20260630",
+                    "heldout_last_period": "20260101..20260630",
+                    "cost_stress_multiplier": 2.0,
+                    "heldout_min_trades": 20,
+                    "strategy_path": "configs/agent_output_template/main.py",
+                    "data_backend": "pit",
+                    "raw_dir": "data/raw",
+                    "fundamental_events_root": "data/pit/fundamental_events",
+                    "fundamental_events_status": (
+                        "results/data_quality/fundamental_events_status.json"
+                    ),
+                },
+                experiment_dir=repo_root / "experiments/walk_forward_demo",
+                repo_root=repo_root,
+                preflight=True,
+            )
+        self.assertEqual(options.rolling.validation_periods, 4)
+        self.assertEqual(options.rolling.acceptance.cost_stress_multiplier, 2.0)
+        self.assertEqual(options.rolling.acceptance.heldout_min_trades, 20)
+        # The schedule the worker would build from it: 13 quarterly steps.
+        days = [
+            stamp.strftime("%Y%m%d") for stamp in pd.bdate_range("2019-01-01", "2026-06-30")
+        ]
+        folds = build_fold_schedule(
+            options.rolling.development_first_period,
+            options.rolling.development_last_period,
+            days,
+            window_months=options.rolling.window_months,
+            period=options.rolling.fold_period,
+            validation_periods=options.rolling.validation_periods,
+        )
+        self.assertEqual(len(folds), 13)
+        self.assertEqual(folds[0].fold_id, "fold_2022Q4")
 
     def test_the_console_create_form_is_seeded_with_the_research_preset(self) -> None:
         """The create defaults the owner set from a real launch.

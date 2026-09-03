@@ -80,6 +80,12 @@ def build_parser() -> argparse.ArgumentParser:
     calendar.add_argument("--heldout-first-period", default=None)
     calendar.add_argument("--heldout-last-period", default=None)
     calendar.add_argument("--window-months", type=int, default=None)
+    calendar.add_argument(
+        "--validation-periods",
+        type=int,
+        default=None,
+        help="periods in each Fold's trailing validation window (1 = the Fold's own period)",
+    )
     calendar.add_argument("--min-region-trade-days", type=int, default=None)
     calendar.add_argument(
         "--test-stage",

@@ -16,7 +16,7 @@ from autotrade.environment.sandbox import SandboxConfig, SandboxLimits
 from autotrade.environment.strategy import StrategySchedule
 
 from .skills import DEFAULT_OPERATING_MEMORY
-from .folds import FoldSpec, assert_no_overlap
+from .folds import FoldSpec, assert_no_overlap, normalize_period
 
 ExecutionMode = Literal["sandbox", "trusted"]
 
@@ -68,6 +68,19 @@ class StrategyExperimentConfig:
             object.__setattr__(self, "models_dir", models)
 
 
+def _finite_number(value: object) -> float | None:
+    """``value`` as a float, or None when it is not a finite number.
+
+    Booleans are not numbers here, and every IEEE comparison against NaN is
+    False, so a NaN metric would otherwise clear every threshold.
+    """
+
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) else None
+
+
 # The one-line summary of AcceptanceRules.evaluate handed to the Agent as the
 # ``acceptance_semantics`` fact. It lives beside the rules it describes so the
 # projection cannot drift from the behavior.
@@ -86,19 +99,35 @@ class AcceptanceRules:
     min_return: float = 0.0
     min_sharpe: float = 0.0
     max_drawdown: float = 0.25
+    # Graduation-only stress: the Held-out excess must survive this multiple of
+    # the profile's slippage. 1.0 (the default) leaves the verdict unchanged.
+    cost_stress_multiplier: float = 1.0
+    # Graduation-only floor on closed round trips: a Held-out result carried by
+    # a handful of trades proves nothing. 0 disables the check.
+    heldout_min_trades: int = 0
 
     def __post_init__(self) -> None:
-        for name in ("min_return", "min_sharpe", "max_drawdown"):
+        for name in ("min_return", "min_sharpe", "max_drawdown", "cost_stress_multiplier"):
             if not math.isfinite(float(getattr(self, name))):
                 raise ValueError(f"{name} must be finite")
         if not 0 <= self.max_drawdown <= 1:
             raise ValueError("max_drawdown must be between zero and one")
+        if self.cost_stress_multiplier < 1:
+            raise ValueError("cost_stress_multiplier must be at least one")
+        if (
+            isinstance(self.heldout_min_trades, bool)
+            or not isinstance(self.heldout_min_trades, int)
+            or self.heldout_min_trades < 0
+        ):
+            raise ValueError("heldout_min_trades must be a non-negative integer")
 
     def to_record(self) -> dict[str, object]:
         return {
             "min_return": self.min_return,
             "min_sharpe": self.min_sharpe,
             "max_drawdown": self.max_drawdown,
+            "cost_stress_multiplier": self.cost_stress_multiplier,
+            "heldout_min_trades": self.heldout_min_trades,
         }
 
     def heldout_verdict(
@@ -117,6 +146,14 @@ class AcceptanceRules:
         non-finite input is itself a failing reason: a replay that cannot
         prove the conditions did not pass. Term (b) is ``not_applicable`` when
         the schedule has no transitions, and the verdict then rests on (a).
+
+        Two optional terms are off by default and only tighten (a). With
+        ``cost_stress_multiplier > 1`` the excess must still be positive after
+        paying that multiple of the profile's slippage (the summary's
+        ``cost_sensitivity`` block prices one basis point per side); with
+        ``heldout_min_trades > 0`` the replay must have closed at least that
+        many round trips. Both fail closed when the input they need is absent,
+        and the thresholds used are recorded in the verdict.
         """
         reasons: list[str] = []
         values: dict[str, float | None] = {}
@@ -133,15 +170,9 @@ class AcceptanceRules:
             ("sharpe", source.get("sharpe")),
             ("max_drawdown", source.get("max_drawdown")),
         ):
-            if (
-                isinstance(value, bool)
-                or not isinstance(value, (int, float))
-                or not math.isfinite(float(value))
-            ):
-                values[name] = None
+            values[name] = _finite_number(value)
+            if values[name] is None:
                 reasons.append(f"missing_{name}")
-            else:
-                values[name] = float(value)
         total_return, bench, sharpe, drawdown = (
             values["total_return"],
             values["benchmark_return"],
@@ -157,6 +188,29 @@ class AcceptanceRules:
             reasons.append("sharpe_not_positive")
         if drawdown is not None and abs(drawdown) > self.max_drawdown:
             reasons.append("max_drawdown_exceeded")
+        stressed_excess: float | None = None
+        if self.cost_stress_multiplier > 1:
+            sensitivity = source.get("cost_sensitivity")
+            sensitivity = sensitivity if isinstance(sensitivity, Mapping) else {}
+            slippage = _finite_number(sensitivity.get("slippage_bps"))
+            per_bp = _finite_number(sensitivity.get("cost_per_bp_per_side"))
+            if excess is None or slippage is None or per_bp is None:
+                # Without the priced cost the stress cannot be evaluated, and an
+                # unprovable condition is a failing one.
+                reasons.append("missing_cost_sensitivity")
+            else:
+                stressed_excess = excess - (self.cost_stress_multiplier - 1) * slippage * per_bp
+                if stressed_excess <= 0:
+                    reasons.append("excess_not_positive_at_cost_stress")
+        trades = source.get("trade_count")
+        trade_count = (
+            trades if isinstance(trades, int) and not isinstance(trades, bool) else None
+        )
+        if self.heldout_min_trades > 0:
+            if trade_count is None:
+                reasons.append("missing_trade_count")
+            elif trade_count < self.heldout_min_trades:
+                reasons.append("insufficient_trades")
         consistency = self.walk_forward_consistency(walk_forward)
         if consistency["status"] == "inconsistent":
             reasons.append(
@@ -171,6 +225,10 @@ class AcceptanceRules:
             "sharpe": sharpe,
             "max_drawdown": drawdown,
             "max_drawdown_limit": self.max_drawdown,
+            "cost_stress_multiplier": self.cost_stress_multiplier,
+            "excess_at_cost_stress": stressed_excess,
+            "trade_count": trade_count,
+            "heldout_min_trades": self.heldout_min_trades,
             "walk_forward": consistency,
         }
 
@@ -267,6 +325,12 @@ class RollingExperimentConfig:
     # The macro data floor is 2020-01, so 24 months before the default 2022-01
     # development start is the most history available.
     window_months: int = 24
+    # Length of a Fold's validation window in cadence periods. 1 validates the
+    # Fold's own period; N > 1 (quarterly cadence only, no Test stage) validates
+    # the trailing N periods ending at it, so the Folds step forward one period
+    # at a time and only the last period of each window is new (walk-forward
+    # steps, not disjoint blocks).
+    validation_periods: int = 1
     min_region_trade_days: int = 2
     # Per-Fold budgets sized for a one-year Validation region with
     # ``batch_validate`` available; the host's parent control before the
@@ -345,6 +409,7 @@ class RollingExperimentConfig:
         for name in (
             "epochs",
             "window_months",
+            "validation_periods",
             "min_region_trade_days",
             "max_steps_per_fold",
             "max_backtests_per_fold",
@@ -371,6 +436,20 @@ class RollingExperimentConfig:
                 raise ValueError(f"{name} must be a non-negative integer")
         if not isinstance(self.test_stage, bool):
             raise ValueError("test_stage must be boolean")
+        if self.validation_periods > 1:
+            # Same two rules as build_fold_schedule, checked here so a
+            # params.json is refused at load instead of at the first schedule.
+            if normalize_period(self.fold_period) != "quarter":
+                raise ValueError(
+                    "a multi-period validation window is only supported at quarterly "
+                    f"cadence: fold_period={self.fold_period!r} with "
+                    f"validation_periods={self.validation_periods}"
+                )
+            if self.test_stage:
+                raise ValueError(
+                    "a rolling Test stage does not support a multi-period validation "
+                    f"window: test_stage=True with validation_periods={self.validation_periods}"
+                )
         assert_no_overlap(
             self.development_last_period, self.heldout_first_period, period=self.fold_period
         )

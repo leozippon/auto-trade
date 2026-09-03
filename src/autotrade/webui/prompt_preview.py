@@ -375,6 +375,7 @@ def _fold_spec(options: InteractiveWorkerOptions, fold_id: str) -> FoldSpec:
         period=options.rolling.fold_period,
         min_region_trade_days=options.rolling.min_region_trade_days,
         test_stage=options.rolling.test_stage,
+        validation_periods=options.rolling.validation_periods,
     )
     for fold in folds:
         if fold.fold_id == fold_id:

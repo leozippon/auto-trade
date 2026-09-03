@@ -145,6 +145,7 @@ _ALLOWED_PARAMS = {
     "heldout_last_period",
     "epochs",
     "window_months",
+    "validation_periods",
     "min_region_trade_days",
     "max_steps_per_fold",
     "max_backtests_per_fold",
@@ -154,6 +155,8 @@ _ALLOWED_PARAMS = {
     "min_return",
     "min_sharpe",
     "max_drawdown",
+    "cost_stress_multiplier",
+    "heldout_min_trades",
     "meta_learning_fold_interval",
     "meta_memory_max_epochs",
     "inherit_from",
@@ -567,6 +570,9 @@ def resolve_worker_options(
         test_stage=_strict_bool(knob("test_stage"), "test_stage"),
         epochs=_positive_int(knob("epochs"), "epochs"),
         window_months=_positive_int(knob("window_months"), "window_months"),
+        validation_periods=_positive_int(
+            knob("validation_periods"), "validation_periods"
+        ),
         min_region_trade_days=_positive_int(
             knob("min_region_trade_days"), "min_region_trade_days"
         ),
@@ -634,6 +640,12 @@ def resolve_worker_options(
             max_drawdown=_bounded_float(
                 params.get("max_drawdown", 0.25), "max_drawdown", 0.0, 1.0
             ),
+            cost_stress_multiplier=_finite_float(
+                params.get("cost_stress_multiplier", 1.0), "cost_stress_multiplier"
+            ),
+            heldout_min_trades=_nonnegative_int(
+                params.get("heldout_min_trades", 0), "heldout_min_trades"
+            ),
         ),
         schedule=schedule,
         broker_profile=BrokerProfile(
@@ -662,6 +674,7 @@ def resolve_worker_options(
             period=rolling.fold_period,
             min_region_trade_days=rolling.min_region_trade_days,
             test_stage=rolling.test_stage,
+            validation_periods=rolling.validation_periods,
         )
     analysis_enabled = _strict_bool(
         params.get("analysis_enabled", WEB_CREATE_DEFAULTS["analysis_enabled"]),
@@ -976,6 +989,7 @@ def run_local_interactive_worker(
         period=options.rolling.fold_period,
         min_region_trade_days=options.rolling.min_region_trade_days,
         test_stage=options.rolling.test_stage,
+        validation_periods=options.rolling.validation_periods,
     )
     heldout = heldout_periods(
         options.rolling.heldout_first_period,

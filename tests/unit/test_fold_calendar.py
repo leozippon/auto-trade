@@ -66,6 +66,7 @@ def schedule(config: RollingExperimentConfig) -> list[FoldSpec]:
         period=config.fold_period,
         min_region_trade_days=config.min_region_trade_days,
         test_stage=config.test_stage,
+        validation_periods=config.validation_periods,
     )
 
 
@@ -183,6 +184,161 @@ class RegularFoldScheduleTest(unittest.TestCase):
                 valid_decision_time=anchor("20211231"),
                 test_start="20230101",
             )
+
+
+class TrailingValidationWindowTest(unittest.TestCase):
+    """`validation_periods > 1` turns the Folds into walk-forward steps."""
+
+    def test_one_period_reproduces_the_schedule_this_repository_runs_today(self) -> None:
+        # The pinned yearly snapshot lives in RegularFoldScheduleTest; what
+        # matters here is that asking for it explicitly changes nothing, so the
+        # running arms keep their calendar when the knob appears.
+        config = default_config()
+        self.assertEqual(config.validation_periods, 1)
+        explicit = build_fold_schedule(
+            config.development_first_period,
+            config.development_last_period,
+            TRADING_DAYS,
+            window_months=config.window_months,
+            period=config.fold_period,
+            validation_periods=1,
+        )
+        self.assertEqual(explicit, schedule(config))
+        self.assertEqual([fold.fold_id for fold in explicit], ["fold_2022", "fold_2023", "fold_2024", "fold_2025"])
+
+    def test_quarterly_folds_validate_the_trailing_four_quarters(self) -> None:
+        folds = build_fold_schedule(
+            "2022Q1", "2025Q4", TRADING_DAYS, window_months=24, period="quarter", validation_periods=4
+        )
+        # The first three quarters only ever serve as history: a Fold exists
+        # for every label whose trailing four-quarter window fits inside the
+        # development window, so 16 quarters give 13 Folds (12 transitions).
+        self.assertEqual(len(folds), 13)
+        self.assertEqual(folds[0].fold_id, "fold_2022Q4")
+        self.assertEqual(folds[-1].fold_id, "fold_2025Q4")
+        self.assertEqual(
+            (folds[0].validation_start, folds[0].validation_end), ("20220101", "20221231")
+        )
+        # Input window and decision anchor still hang off validation_start, so
+        # a 24-month window reaches the macro data floor exactly as before.
+        self.assertEqual(
+            (folds[0].input_window_start, folds[0].input_window_end), ("20200101", "20211231")
+        )
+        self.assertEqual(folds[0].valid_decision_time, anchor("20211231"))
+        self.assertEqual(
+            (folds[-1].validation_start, folds[-1].validation_end), ("20250101", "20251231")
+        )
+        self.assertEqual(folds[-1].valid_decision_time, anchor("20241231"))
+        # Every step moves the whole window forward by exactly one quarter, and
+        # only the last quarter of a window is new.
+        self.assertEqual(
+            [(fold.validation_start, fold.validation_end) for fold in folds[:3]],
+            [
+                ("20220101", "20221231"),
+                ("20220401", "20230331"),
+                ("20220701", "20230630"),
+            ],
+        )
+        self.assertTrue(all(not fold.has_test for fold in folds))
+
+    def test_each_fold_carries_its_own_quarter_as_the_step_region(self) -> None:
+        # The step is the only part of the window the inherited parent has not
+        # been developed on, so the walk-forward record is read from it.
+        folds = build_fold_schedule(
+            "2022Q1", "2025Q4", TRADING_DAYS, window_months=24, period="quarter", validation_periods=4
+        )
+        self.assertEqual(
+            [(fold.step_start, fold.step_end) for fold in folds[:2]],
+            [("20221001", "20221231"), ("20230101", "20230331")],
+        )
+        self.assertEqual((folds[-1].step_start, folds[-1].step_end), ("20251001", "20251231"))
+        for fold in folds:
+            self.assertTrue(fold.has_step)
+            self.assertEqual(fold.step_end, fold.validation_end)
+
+    def test_a_single_period_window_has_no_separate_step(self) -> None:
+        # The whole validation region is the step; a copy of the same bounds
+        # would be a second source for it.
+        for fold in schedule(default_config()):
+            self.assertFalse(fold.has_step)
+            self.assertIsNone(fold.step_start)
+            self.assertIsNone(fold.step_end)
+        for fold in schedule(default_config(test_stage=True)):
+            self.assertFalse(fold.has_step)
+
+    def test_a_step_region_needs_both_bounds(self) -> None:
+        with self.assertRaisesRegex(ValueError, "step region needs start and end together"):
+            FoldSpec(
+                fold_id="fold_x",
+                input_window_start="20200101",
+                input_window_end="20211231",
+                validation_start="20220101",
+                validation_end="20221231",
+                valid_decision_time=anchor("20211231"),
+                step_start="20221001",
+            )
+
+    def test_a_trailing_window_is_quarterly_only(self) -> None:
+        for period, first, last in (
+            ("year", "2022", "2025"),
+            ("month", "202201", "202512"),
+        ):
+            with self.subTest(period=period):
+                with self.assertRaisesRegex(ValueError, "only supported at quarterly cadence"):
+                    build_fold_schedule(
+                        first, last, TRADING_DAYS, window_months=24, period=period, validation_periods=4
+                    )
+        with self.assertRaisesRegex(ValueError, "only supported at quarterly cadence"):
+            default_config(validation_periods=4)  # the console default is yearly
+        # The config accepts it at quarterly cadence and refuses the Test stage.
+        config = default_config(
+            fold_period="quarter",
+            development_first_period="2022Q1",
+            development_last_period="2025Q4",
+            validation_periods=4,
+        )
+        self.assertEqual(len(schedule(config)), 13)
+        with self.assertRaisesRegex(ValueError, "does not support a multi-period"):
+            default_config(
+                fold_period="quarter",
+                development_first_period="2022Q1",
+                development_last_period="2025Q4",
+                validation_periods=4,
+                test_stage=True,
+            )
+
+    def test_a_window_shorter_than_the_trailing_window_is_refused(self) -> None:
+        with self.assertRaisesRegex(ValueError, "validation_periods=4 needs at least"):
+            build_fold_schedule(
+                "2022Q1", "2022Q3", TRADING_DAYS, window_months=24, period="quarter", validation_periods=4
+            )
+
+    def test_a_test_stage_cannot_take_a_multi_period_window(self) -> None:
+        with self.assertRaisesRegex(ValueError, "does not support a multi-period"):
+            build_fold_schedule(
+                "2022Q1",
+                "2025Q4",
+                TRADING_DAYS,
+                window_months=24,
+                period="quarter",
+                test_stage=True,
+                validation_periods=4,
+            )
+
+    def test_validation_periods_must_be_a_positive_integer(self) -> None:
+        for value in (0, -1, 1.5, True):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "validation_periods must be a positive integer"):
+                    build_fold_schedule(
+                        "2022Q1",
+                        "2025Q4",
+                        TRADING_DAYS,
+                        window_months=24,
+                        period="quarter",
+                        validation_periods=value,  # type: ignore[arg-type]
+                    )
+        with self.assertRaisesRegex(ValueError, "validation_periods must be a positive integer"):
+            default_config(validation_periods=0)
 
 
 class TestStageScheduleTest(unittest.TestCase):
