@@ -853,16 +853,41 @@ def test_meta_review_window_rollback_and_resume_recompute_deterministically(
     assert [record["run_id"] for record in second[0]] == ["run_a", "run_b"]
     assert select_meta_review_folds(rewound, ref_store=ref_store) == second
     history, _sidecars = _development_inputs(rewound, ref_store=ref_store)
-    summaries = history["fold_backtest_summaries"]
     reviews = history["fold_reviews"]
     assert history["review_window"] == second[1]
-    assert isinstance(summaries, list)
     assert isinstance(reviews, list)
-    assert [row["fold_id"] for row in summaries] == [
+    assert [row["fold_id"] for row in reviews] == [
         ref_store.get_or_create("fold", "fold_a"),
         ref_store.get_or_create("fold", "fold_b"),
     ]
-    assert len(reviews) == 2
+
+
+def test_development_history_lists_each_fold_once(tmp_path: Path) -> None:
+    """One completed Fold must never occupy two rows of ``development_history``.
+
+    The review window is a slice of the accumulated history, so a second
+    window-scoped copy of the same ``compact_fold_history`` projection makes a
+    single Fold look like two to a Meta that counts rows.
+    """
+
+    ref_store = AgentRefStore(tmp_path / "experiment")
+    records = [
+        _meta_record("run_m1"),
+        _fold_record("fold_a", "run_a", status="baseline_missing"),
+    ]
+    history, _sidecars = _development_inputs(records, ref_store=ref_store)
+    fold_ref = ref_store.get_or_create("fold", "fold_a")
+    assert history["review_window"]["fold_count"] == 1
+    assert [row["fold_id"] for row in history["fold_validation_history"]] == [fold_ref]
+    assert [row["fold_id"] for row in history["fold_reviews"]] == [fold_ref]
+    compact_rows = [
+        row
+        for key, value in history.items()
+        if isinstance(value, list)
+        for row in value
+        if isinstance(row, dict) and "backtest_summaries" in row
+    ]
+    assert len(compact_rows) == 1
 
 
 def test_agent_process_summary_counts_are_bounded_and_redacted() -> None:
@@ -905,7 +930,11 @@ def test_agent_process_summary_counts_are_bounded_and_redacted() -> None:
     assert summary["subagent"] == {"attempts": 2, "completed": 1, "failed": 1}
     assert summary["daily_backtest"] == 1
     assert summary["tool_failures"] == 3
-    assert summary["repeated_failures"] == [
+    # The by-tool tally is the complete breakdown and sums back to the total;
+    # only the signature list drops the one-off read_file error.
+    assert summary["tool_failures_by_tool"] == {"grep": 2, "read_file": 1}
+    assert sum(summary["tool_failures_by_tool"].values()) == summary["tool_failures"]
+    assert summary["repeated_failure_signatures"] == [
         {"tool": "grep", "count": 2, "error": "boom at [host_path]"}
     ]
     rendered = str(summary)
@@ -913,7 +942,7 @@ def test_agent_process_summary_counts_are_bounded_and_redacted() -> None:
     assert "inspect daily schema" not in rendered
 
 
-def test_agent_process_summary_caps_repeated_failures() -> None:
+def test_agent_process_summary_caps_repeated_failure_signatures() -> None:
     events = [
         {
             "event_type": "tool_call",
@@ -926,7 +955,39 @@ def test_agent_process_summary_caps_repeated_failures() -> None:
     ]
     summary = build_agent_process_summary(events)
     assert summary["tool_failures"] == 24
-    assert len(summary["repeated_failures"]) == 8
+    # The signature list is capped; the by-tool tally stays complete, so the
+    # two can never be read as the same breakdown.
+    assert len(summary["repeated_failure_signatures"]) == 8
+    assert len(summary["tool_failures_by_tool"]) == 12
+    assert sum(summary["tool_failures_by_tool"].values()) == 24
+
+
+def test_agent_process_summary_by_tool_covers_one_off_and_subagent_failures() -> None:
+    """Every failed call reaches the by-tool tally, repeated or not.
+
+    A one-off error and a sub-agent tool failure are exactly what the
+    ``repeated_failure_signatures`` rule drops, and reading that list as the
+    failure breakdown is what makes the block look self-contradictory.
+    """
+
+    events = [
+        {"event_type": "tool_call", "tool": "shell", "ok": False, "error": "bad argv"},
+        {"event_type": "tool_call", "tool": "shell", "ok": False, "error": "bad argv"},
+        {"event_type": "tool_call", "tool": "shell", "ok": False, "error": "no such cwd"},
+        {"event_type": "tool_call", "tool": "agent", "ok": False, "error": "resume is not an action"},
+        {
+            "event_type": "subagent_tool",
+            "tool": "read_file",
+            "result": {"ok": False, "error": "path must be relative"},
+        },
+    ]
+    summary = build_agent_process_summary(events)
+    assert summary["tool_failures"] == 5
+    assert summary["tool_failures_by_tool"] == {"shell": 3, "agent": 1, "read_file": 1}
+    assert sum(summary["tool_failures_by_tool"].values()) == summary["tool_failures"]
+    assert summary["repeated_failure_signatures"] == [
+        {"tool": "shell", "count": 2, "error": "bad argv"}
+    ]
 
 
 def test_prior_content_allows_boundary_sentences_and_rejects_leaks() -> None:

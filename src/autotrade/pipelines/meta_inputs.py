@@ -441,6 +441,14 @@ def build_agent_process_summary(
     events are both accepted -- a tool outcome lives in ``result`` before
     compaction and at the top level after it.
 
+    ``tool_failures`` counts every failed call; ``tool_failures_by_tool`` splits
+    that same total by tool and therefore sums back to it. Only
+    ``repeated_failure_signatures`` is a subset: it groups failures by
+    (tool, truncated error text), keeps the groups that occurred more than once
+    and stops at the top ``_SUMMARY_FAILURE_LIMIT`` groups, so one-off errors
+    never appear there. It is diagnostic detail, never the failure breakdown --
+    that is what the by-tool tally is for.
+
     Counts only; no task body, paths, Test, or Held-out values.
     """
     llm_calls = 0
@@ -449,12 +457,15 @@ def build_agent_process_summary(
     subagent_failed = 0
     daily_backtest = 0
     tool_failures = 0
+    failures_by_tool: dict[str, int] = {}
     failure_counts: dict[tuple[str, str], int] = {}
 
     def add_failure(tool: str, error: object) -> None:
         nonlocal tool_failures
         tool_failures += 1
-        key = (tool or "unknown", _redact_text(error, limit=_SUMMARY_ERROR_CHARS))
+        name = tool or "unknown"
+        failures_by_tool[name] = failures_by_tool.get(name, 0) + 1
+        key = (name, _redact_text(error, limit=_SUMMARY_ERROR_CHARS))
         failure_counts[key] = failure_counts.get(key, 0) + 1
 
     session_end_attempts: int | None = None
@@ -521,8 +532,11 @@ def build_agent_process_summary(
             "failed": subagent_failed,
         },
         "tool_failures": tool_failures,
+        "tool_failures_by_tool": dict(
+            sorted(failures_by_tool.items(), key=lambda item: (-item[1], item[0]))
+        ),
         "daily_backtest": daily_backtest,
-        "repeated_failures": repeated,
+        "repeated_failure_signatures": repeated,
     }
 
 
