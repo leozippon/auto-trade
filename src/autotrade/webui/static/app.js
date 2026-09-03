@@ -1462,6 +1462,26 @@ function walkForwardTerm(verdict) {
   );
 }
 
+/* The span a parent control is actually scored on. Once a Fold's Validation
+   window trails over several periods the control is graded on the Fold's new
+   period alone (registry._parent_control_view serves that span beside the
+   numbers), so the label has to travel with them: numbers from two different
+   spans must never sit under one header. */
+const CONTROL_SPAN_LABELS = {
+  step_result: "新季度",
+  validation_result: "整个验证区间",
+};
+
+function controlSpanLabel(control) {
+  const span = CONTROL_SPAN_LABELS[control.source] || null;
+  const dates =
+    control.period_start && control.period_end
+      ? `${fmtDate(control.period_start)} ～ ${fmtDate(control.period_end)}`
+      : null;
+  if (!span) return dates || "—";
+  return dates ? `${span} ${dates}` : span;
+}
+
 /* Out-of-sample transitions per Epoch. Without a Test stage every Fold after
    the Epoch's first opens with the previous Fold's frozen strategy replayed
    unchanged on this Fold's Validation window (the host's parent control), and
@@ -1489,6 +1509,7 @@ function walkForwardPanel(detail) {
       { class: "hint" },
       "每个 Fold 开始前，宿主把上一 Fold 冻结的策略原样放进本 Fold 的验证区间重跑一次（父本对照），这一次重放就是一次样本外过渡。" +
         "下表给的全是这个父本策略在新窗口的成绩，不是本 Fold 新策略的成绩。" +
+        "验证区间跨多个周期时，本 Fold 只有新的那个周期是没见过的地面，过渡就只按它计分（计分区间列）。" +
         "毕业裁决只看末个 Epoch：超额为正的过渡至少要占 ⌈2/3⌉。" +
         "首个 Epoch 的过渡是真正的前向样本外证据，之后的 Epoch 重访血缘已经见过的年份。",
     ),
@@ -1531,14 +1552,25 @@ function walkForwardPanel(detail) {
             { title: "上一 Fold 冻结的策略，被原样放进下一个 Fold 的验证区间重跑" },
             "过渡",
           ),
-          el("th", { title: "父本策略在该验证区间的区间收益" }, "父本收益"),
           el(
             "th",
-            { title: "父本相对沪深300的超额收益，> 0 才算这次过渡通过" },
+            {
+              title:
+                "这次过渡实际计分的区间：验证区间跨多个周期时只算本 Fold 的新周期，否则就是整个验证区间",
+            },
+            "计分区间",
+          ),
+          el("th", { title: "父本策略在计分区间的区间收益" }, "父本收益"),
+          el(
+            "th",
+            {
+              title:
+                "父本在计分区间相对沪深300的超额收益，> 0 才算这次过渡通过",
+            },
             "父本超额",
           ),
-          el("th", { title: "父本在该区间日收益的年化 Sharpe" }, "父本 Sharpe"),
-          el("th", { title: "父本在该区间的峰谷回撤" }, "父本回撤"),
+          el("th", { title: "父本在计分区间日收益的年化 Sharpe" }, "父本 Sharpe"),
+          el("th", { title: "父本在计分区间的峰谷回撤" }, "父本回撤"),
         ),
         ...folds.slice(1).map((row, index) => {
           const control = row.parent_control || {};
@@ -1558,6 +1590,7 @@ function walkForwardPanel(detail) {
                   )
                 : null,
             ),
+            el("td", { class: "mode-note" }, controlSpanLabel(control)),
             el("td", { class: signCls(control.return) }, fmtPct(control.return)),
             el(
               "td",
@@ -6046,9 +6079,13 @@ function selectionSection(detail, session) {
 /* This Fold's baseline: before the session starts the host replays the
    inherited parent unchanged over this Fold's Validation window, so the Fold's
    own Validation is read against it rather than on its own. The first Fold of
-   the first Epoch inherits nothing and has no control. Metrics come from the
-   same fold_returns row the walk-forward table uses; the failure text only
-   exists on the ledger record. */
+   the first Epoch inherits nothing and has no control. The baseline rows are
+   the whole window on both sides — the only like-for-like reading against the
+   Fold's own Validation row. The walk-forward transition is graded on the
+   narrower span registry._parent_control_view names (the Fold's new period
+   once the window trails over several), so it gets its own labelled row rather
+   than being read as the window. The failure text only exists on the ledger
+   record. */
 function parentControlSection(detail, session, validation) {
   const record = session.record || {};
   const control = record.parent_control;
@@ -6059,12 +6096,17 @@ function parentControlSection(detail, session, validation) {
       "父本对照：本 Fold 没有继承父产物，因此没有基线",
     );
   const metrics = (foldReturnsRow(detail, session) || {}).parent_control || {};
+  const wholeWindow = control.validation_result || {};
   const failed = control.status !== "ok";
-  const metricRow = (label, values) =>
+  const period = fmtPeriodRange(
+    record.validation_period || session.validation_period,
+  );
+  const metricRow = (label, span, values) =>
     el(
       "tr",
       {},
       el("td", {}, label),
+      el("td", { class: "mode-note" }, span),
       el("td", { class: signCls(values.total) }, fmtPct(values.total)),
       el("td", { class: signCls(values.excess) }, fmtPct(values.excess)),
       el("td", { class: signCls(values.sharpe) }, fmtSharpe(values.sharpe)),
@@ -6086,12 +6128,13 @@ function parentControlSection(detail, session, validation) {
         "tr",
         {},
         el("th", {}, "对照"),
-        el("th", { title: "整个验证区间的区间收益" }, "收益"),
-        el("th", { title: "相对沪深300的超额收益" }, "超额"),
-        el("th", { title: "验证区间日收益的年化 Sharpe" }, "Sharpe"),
-        el("th", { title: "验证区间峰谷回撤" }, "回撤"),
+        el("th", { title: "该行数字所覆盖的区间" }, "区间"),
+        el("th", { title: "该行区间的区间收益" }, "收益"),
+        el("th", { title: "该行区间相对沪深300的超额收益" }, "超额"),
+        el("th", { title: "该行区间日收益的年化 Sharpe" }, "Sharpe"),
+        el("th", { title: "该行区间的峰谷回撤" }, "回撤"),
       ),
-      metricRow("本 Fold 验证", {
+      metricRow("本 Fold 验证", period, {
         total: validation.total_return,
         excess: (validation.benchmark || {}).excess_return,
         sharpe: validation.sharpe,
@@ -6108,13 +6151,35 @@ function parentControlSection(detail, session, validation) {
             ` ${control.parent_strategy_artifact_ref || "—"}`,
           ),
         ),
+        period,
         {
-          total: metrics.return,
-          excess: metrics.excess_return,
-          sharpe: metrics.sharpe,
-          drawdown: metrics.max_drawdown,
+          total: wholeWindow.total_return,
+          excess: (wholeWindow.benchmark || {}).excess_return,
+          sharpe: wholeWindow.sharpe,
+          drawdown: wholeWindow.max_drawdown,
         },
       ),
+      metrics.source === "step_result"
+        ? metricRow(
+            el(
+              "span",
+              {},
+              "父本原样重跑",
+              el(
+                "span",
+                { class: "mode-note" },
+                " 走查过渡按这一行计分",
+              ),
+            ),
+            controlSpanLabel(metrics),
+            {
+              total: metrics.return,
+              excess: metrics.excess_return,
+              sharpe: metrics.sharpe,
+              drawdown: metrics.max_drawdown,
+            },
+          )
+        : null,
     ),
   );
   if (failed)

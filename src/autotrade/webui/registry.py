@@ -283,14 +283,24 @@ def _parent_control_view(record: Mapping[str, object]) -> dict[str, object] | No
     walk-forward evidence. The numbers are the ones that transition is graded
     on (``ledger.transition_result``): the Fold's new period alone when the
     window trails over several, the whole window otherwise — so this row and
-    the transition counts above it can never tell different stories. ``None``
-    for a Fold that inherited no parent; a failed control keeps its status and
-    carries no numbers.
+    the transition counts above it can never tell different stories. That span
+    travels with them (``source`` and its bounds, the same three fields
+    ``reporting.walk_forward_report`` publishes), because a trailing window
+    scores the control on less ground than the Fold's own Validation row covers
+    and the console must not present the two as one span. ``None`` for a Fold
+    that inherited no parent; a failed control keeps its status and carries no
+    numbers.
     """
     control = record.get("parent_control")
     if not isinstance(control, Mapping):
         return None
     result = transition_result(control) or {}
+    # The branch transition_result took: the step row carries its own bounds,
+    # the whole window is the fold record's validation period.
+    stepped = isinstance(control.get("step_result"), Mapping)
+    window_start, _, window_end = str(record.get("validation_period") or "").partition("..")
+    scored_start = result.get("start") if stepped else window_start
+    scored_end = result.get("end") if stepped else window_end
     benchmark = result.get("benchmark")
     total = _number(result.get("total_return"))
     bench = (
@@ -298,6 +308,9 @@ def _parent_control_view(record: Mapping[str, object]) -> dict[str, object] | No
     )
     return {
         "status": control.get("status"),
+        "source": "step_result" if stepped else "validation_result",
+        "period_start": str(scored_start) if scored_start else None,
+        "period_end": str(scored_end) if scored_end else None,
         "return": total,
         "excess_return": (
             total - bench if total is not None and bench is not None else None

@@ -2592,6 +2592,11 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertIsNone(first)
         beat = rows[self._fold_ref("fold_2023", "exp_wf")]["parent_control"]
         self.assertEqual(beat["status"], "ok")
+        # A single-period window is scored whole, and says so.
+        self.assertEqual(
+            (beat["source"], beat["period_start"], beat["period_end"]),
+            ("validation_result", "20230104", "20231230"),
+        )
         self.assertAlmostEqual(beat["return"], 0.08)
         # Excess is measured against the control's own benchmark.
         self.assertAlmostEqual(beat["excess_return"], 0.05)
@@ -2601,6 +2606,12 @@ class WebuiBackendTest(unittest.TestCase):
         # A trailing window is read on its new period, and against that
         # period's own null control -- not the window's.
         lost = rows[self._fold_ref("fold_2024", "exp_wf")]["parent_control"]
+        # ... and the row names that period, so the console cannot present a
+        # quarter's numbers under the whole window's header.
+        self.assertEqual(
+            (lost["source"], lost["period_start"], lost["period_end"]),
+            ("step_result", "20241008", "20241231"),
+        )
         self.assertAlmostEqual(lost["return"], 0.01)
         self.assertAlmostEqual(lost["excess_return"], -0.03)
         self.assertAlmostEqual(lost["sharpe"], 0.10)
@@ -2610,6 +2621,10 @@ class WebuiBackendTest(unittest.TestCase):
             rows[self._fold_ref("fold_2025", "exp_wf")]["parent_control"],
             {
                 "status": "failed",
+                # No numbers, but the window the control was meant to cover.
+                "source": "validation_result",
+                "period_start": "20250104",
+                "period_end": "20251230",
                 "return": None,
                 "excess_return": None,
                 "sharpe": None,

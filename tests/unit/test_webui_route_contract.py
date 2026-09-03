@@ -361,6 +361,69 @@ def test_the_parent_control_fields_the_console_reads_are_served() -> None:
     assert read <= served, sorted(read - served)
 
 
+def test_the_parent_control_view_names_the_span_it_scored() -> None:
+    """A Validation window that trails over several periods grades the control
+    on the Fold's new period alone. The console must be able to say which span
+    a number covers, or it reads a quarter as the whole window and the baseline
+    comparison beside the Fold's own Validation row becomes meaningless."""
+
+    from autotrade.webui.registry import _parent_control_view
+
+    whole_window = {
+        "total_return": 0.08,
+        "sharpe": 0.6,
+        "max_drawdown": 0.07,
+        "benchmark": {"benchmark_return": 0.03},
+    }
+    step = {
+        "start": "20231001",
+        "end": "20231231",
+        "total_return": 0.02,
+        "sharpe": 0.2,
+        "max_drawdown": 0.03,
+        "benchmark": {"benchmark_return": 0.01},
+    }
+    single = _parent_control_view(
+        {
+            "validation_period": "20230101..20231231",
+            "parent_control": {"status": "ok", "validation_result": whole_window},
+        }
+    )
+    assert single["source"] == "validation_result"
+    assert (single["period_start"], single["period_end"]) == ("20230101", "20231231")
+    assert single["return"] == 0.08
+
+    trailing = _parent_control_view(
+        {
+            "validation_period": "20230101..20231231",
+            "parent_control": {
+                "status": "ok",
+                "validation_result": whole_window,
+                "step_result": step,
+            },
+        }
+    )
+    assert trailing["source"] == "step_result"
+    assert (trailing["period_start"], trailing["period_end"]) == (
+        "20231001",
+        "20231231",
+    )
+    # The numbers are the step's, so the served span must be the step's too.
+    assert trailing["return"] == 0.02
+
+    # Both tables label the span from those fields, and the baseline row keeps
+    # the parent's whole-window numbers to read against the Fold's own row.
+    label = _js_function_body("controlSpanLabel")
+    assert set(re.findall(r"\bcontrol\.([a-z_]+)", label)) == {
+        "source",
+        "period_start",
+        "period_end",
+    }
+    for name in ("walkForwardPanel", "parentControlSection"):
+        assert "controlSpanLabel(" in _js_function_body(name)
+    assert "control.validation_result" in _js_function_body("parentControlSection")
+
+
 def test_the_walk_forward_counts_the_console_reads_are_served() -> None:
     """Two producers, two shapes: the per-Epoch table reads the registry's
     transition counts, the term beside the graduation badge reads the block
