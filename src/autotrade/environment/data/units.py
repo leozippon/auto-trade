@@ -261,12 +261,24 @@ AGENT_UNIT_CONTRACT: dict[str, str] = {
         "daily/intraday_1min/auction/corporate_actions files store normalized values; "
         "records carrying a factor show the applied source->normalized conversion"
     ),
+    # Scope clause. The table enumerates snapshot-file columns; data_summary.json
+    # separately names each domain's vendor source datasets. A Fold read the two as
+    # one namespace, looked up a source dataset (suspend_d) that contributes only a
+    # derived column, found no record, and filed the missing entry as a broken
+    # contract. Stating the scope is the only thing that separates "not a snapshot
+    # column" from the real defect the next clause defines.
+    "coverage": (
+        "this table lists every column of every snapshot file in the view. The "
+        "`datasets` list of a domain in data_summary.json names the vendor sources "
+        "joined to build those files, not readable tables: a source such as suspend_d "
+        "reaches the Agent only through derived columns and has no entry of its own"
+    ),
     "unknown_unit_policy": (
         "status 'unknown' columns may be used only for scale-agnostic operations inside "
         "their own dataset, such as ranking or quantiles; absolute thresholds, unit "
         "conversion, and cross-dataset arithmetic require explicitly resolving the unit "
-        "first. A column absent from this table is a broken data contract: do not use it "
-        "at all and report it"
+        "first. A snapshot column absent from this table is a broken data contract: do "
+        "not use it at all and report it"
     ),
 }
 

@@ -141,6 +141,9 @@ def _write_unit_reference(path: Path, views: Mapping[str, tuple[Path, str]]) -> 
         # exactly what was already applied. This file is read standalone, so the
         # disambiguation has to be in it and not only in data_summary.json.
         "normalized_files": AGENT_UNIT_CONTRACT["normalized_files"],
+        # Same reason as above: "a column absent from this table is broken" is only
+        # actionable next to the scope of the table, and this file is read standalone.
+        "coverage": AGENT_UNIT_CONTRACT["coverage"],
         "unknown_unit_policy": AGENT_UNIT_CONTRACT["unknown_unit_policy"],
         "records": records,
     }

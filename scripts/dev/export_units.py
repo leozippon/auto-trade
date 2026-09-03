@@ -63,6 +63,7 @@ _DATASET_NOT_DEFAULT = "该数据集默认不加载，可在创建实验时通�
 _COLUMNS_NOT_IN_SNAPSHOT = "这些字段不进入快照，只保留在原始湖与数据审计中"
 
 DOC_REFERENCE_LINKS = {
+    "data docs §1.3": "[数据文档 §1.3](data-documentation.md#13-核心行情与基础维表)",
     "data docs §3.3": "[数据文档 §3.3](data-documentation.md#33-原始数据何时可见)",
     "data docs §4": "[数据文档 §4](data-documentation.md#4-已知数据风险与限制)",
 }

@@ -857,6 +857,74 @@ class UnitRegistryProjectionTest(unittest.TestCase):
         self.assertEqual(amount["source_unit"], "thousand_CNY")
         self.assertEqual(amount["normalized_unit"], "CNY")
 
+    def test_unit_reference_scopes_itself_to_snapshot_columns(self):
+        """A Fold looked up `suspend_d` — a vendor source named in the daily
+        domain's `datasets` provenance, not a snapshot file — found no record,
+        and filed the missing entry as a broken unit contract. The standalone
+        file must say what it covers before it says that an absent column is
+        broken."""
+
+        from autotrade.environment.data.summary import write_agent_data_summary
+        from autotrade.environment.data.units import AGENT_UNIT_CONTRACT
+
+        payload = self._unit_reference_payload(write_agent_data_summary)
+        self.assertEqual(payload["coverage"], AGENT_UNIT_CONTRACT["coverage"])
+        self.assertIn("suspend_d", payload["coverage"])
+        # The defect clause stays, but scoped: only a snapshot column can be missing.
+        self.assertIn("snapshot column absent", payload["unknown_unit_policy"])
+        # A source dataset genuinely has no record; that is the contract, not a gap.
+        self.assertEqual(
+            [record for record in payload["records"] if record["dataset"] == "suspend_d"], []
+        )
+
+    def test_is_suspended_record_states_what_the_flag_marks(self):
+        """`daily.is_suspended` is set from the presence of a suspend_d row, so
+        it marks resumption days and intraday halts — never a full-day
+        suspension, which has no daily bar at all. A Fold pre-registered four
+        candidates on "consecutive suspended bars >= 5", an event set that is
+        empty by construction. The Agent-visible record must carry that."""
+
+        from autotrade.environment.data.summary import write_agent_data_summary
+        from autotrade.environment.data.units import resolve_field
+
+        payload = self._unit_reference_payload(write_agent_data_summary)
+        record = next(
+            item
+            for item in payload["records"]
+            if item["file"] == "daily.parquet" and item["column"] == "is_suspended"
+        )
+        note = record["note"]
+        self.assertEqual(note, resolve_field("daily.parquet", None, "is_suspended")["note"])
+        for fragment in ("suspend_d", "NO daily row", "trading-day gaps"):
+            self.assertIn(fragment, note)
+
+    @staticmethod
+    def _unit_reference_payload(write_agent_data_summary) -> dict:
+        """`unit_reference.json` as an Agent reads it, for a minimal daily view."""
+        with tempfile.TemporaryDirectory() as tmp:
+            view = Path(tmp) / "decision"
+            view.mkdir()
+            pd.DataFrame(
+                {
+                    "ts_code": ["000957.SZ"],
+                    "trade_date": ["20200102"],
+                    "close": [6.73],
+                    "is_suspended": [False],
+                }
+            ).to_parquet(view / "daily.parquet", index=False)
+            (view / "manifest.json").write_text(
+                '{"kind": "decision", "domains": {"daily": '
+                '{"datasets": ["daily", "daily_basic", "adj_factor", "stk_limit", "suspend_d"]}}}',
+                encoding="utf-8",
+            )
+            write_agent_data_summary(
+                Path(tmp) / "data_summary.json",
+                kind="decision",
+                fold_id=None,
+                views={"snapshot": (view, "/mnt/snapshot")},
+            )
+            return json.loads((Path(tmp) / "unit_reference.json").read_text(encoding="utf-8"))
+
     def test_agent_contract_is_a_pointer_not_a_copy(self):
         from autotrade.environment.data.units import AGENT_UNIT_CONTRACT
 
