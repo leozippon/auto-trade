@@ -56,7 +56,11 @@ from autotrade.pipelines import (
 )
 from autotrade.pipelines.local_backend import LLMFoldDeveloper, LLMMetaLearner
 from autotrade.pipelines.pit_views_seed import DEFAULT_PIT_VIEWS_SEED
-from autotrade.pipelines.worker import _parent_from_step_node
+from autotrade.pipelines.skills import OPERATING_MEMORY_MODES
+from autotrade.pipelines.worker import (
+    _parent_from_step_node,
+    _strategy_sandbox_from_spec,
+)
 
 
 def main() -> int:
@@ -77,6 +81,18 @@ def main() -> int:
     parser.add_argument("--no-thinking", action="store_true")
     add_meta_directive_arguments(parser)
     add_fold_exploration_directive_arguments(parser)
+    parser.add_argument(
+        "--workspace-reference",
+        help=(
+            "Repo-relative reference pack mounted read-only into the session, "
+            "the way the console mounts an experiment's refs; none by default."
+        ),
+    )
+    parser.add_argument(
+        "--operating-memory",
+        choices=OPERATING_MEMORY_MODES,
+        help="Operating-memory mode for this session; the console default when omitted.",
+    )
     parser.add_argument(
         "--prior-file",
         type=Path,
@@ -128,6 +144,12 @@ def main() -> int:
     overrides: dict[str, object] = {"epochs": 1}
     if args.sandbox_image:
         overrides["agent_sandbox_image"] = args.sandbox_image
+    # What the console mounts into a session and _cli's shared parameter set
+    # does not carry; the worker's loader validates both.
+    if args.workspace_reference:
+        overrides["workspace_reference"] = args.workspace_reference
+    if args.operating_memory:
+        overrides["operating_memory"] = args.operating_memory
     options = build_worker_options(
         args,
         repo_root=repo_root,
@@ -205,7 +227,13 @@ def _build_pipeline(options) -> tuple[RollingExperimentPipeline, list[str]]:
 
     The audit entrypoint deliberately reuses the worker's validated options so a
     session run here is configured identically to the same session run by the
-    console; only the driving loop differs.
+    console: the same Agent and strategy sandboxes, the same workspace
+    reference, operating memory and repo root, the same regularization
+    constraints and the same strategy wall clocks. Only the driving loop
+    differs, and with it the three things a single audited session has no place
+    for: the worker's per-experiment derived image (this entrypoint takes
+    ``--sandbox-image`` instead), its smoke-test command runner, and the sink
+    that would hand a Meta session's rebuilt image to later Folds.
     """
     ledger = ExperimentLedger(options.rolling.ledger_path)
     store = FilesystemArtifactStore(options.experiment_dir / "artifacts" / "strategy")
@@ -215,6 +243,13 @@ def _build_pipeline(options) -> tuple[RollingExperimentPipeline, list[str]]:
     meta_gateway = options.llm.build_gateway("meta")
     nl_gateway = options.llm.build_gateway("nl")
     compact_gateway = options.llm.build_gateway("compact") if options.llm.compact_enabled else None
+    # The wall clocks the formal executor gives one strategy: the Fold developer
+    # reads them off the evaluator, the Meta learner is told them directly, and
+    # both are published to the Agent as its fit budget.
+    strategy_sandbox = _strategy_sandbox_from_spec(
+        options.agent_sandbox,
+        fit_timeout_seconds=options.rolling.strategy_fit_timeout_seconds,
+    )
 
     if options.data_backend == "pit":
         if options.raw_dir is None or options.fundamental_events_root is None or options.fundamental_events_status is None:
@@ -233,7 +268,9 @@ def _build_pipeline(options) -> tuple[RollingExperimentPipeline, list[str]]:
             execution_mode=options.execution_mode,
             nl_llm=nl_gateway,
             nl_config=options.nl_config,
+            nl_failure_policy=options.rolling.nl_failure_policy,
             max_intraday_row_group_rows=options.max_intraday_row_group_rows,
+            sandbox=strategy_sandbox,
         )
         trading_days = snapshots.trading_days
     else:
@@ -244,6 +281,7 @@ def _build_pipeline(options) -> tuple[RollingExperimentPipeline, list[str]]:
             options.daily_path,
             options.experiment_dir / "artifacts" / "results",
             execution_mode=options.execution_mode,
+            sandbox=strategy_sandbox,
         )
         trading_days = evaluator.trading_days
 
@@ -262,9 +300,12 @@ def _build_pipeline(options) -> tuple[RollingExperimentPipeline, list[str]]:
         experiment_dir=options.experiment_dir,
         runtime_root=runtime_root,
         sandbox_spec=options.agent_sandbox,
-        max_response_tokens=options.llm.max_response_tokens,
+        max_response_tokens=options.llm.max_tokens_for("main"),
         step_tree_enabled=options.rolling.step_tree_enabled,
         fold_exploration_directive=options.rolling.fold_exploration_directive,
+        workspace_reference=options.rolling.workspace_reference,
+        operating_memory=options.rolling.operating_memory,
+        repo_root=options.repo_root,
     )
     meta_learner = LLMMetaLearner(
         llm=meta_gateway,
@@ -277,9 +318,21 @@ def _build_pipeline(options) -> tuple[RollingExperimentPipeline, list[str]]:
         runtime_root=runtime_root,
         max_llm_calls=options.rolling.max_llm_calls,
         deadline_seconds=options.rolling.max_fold_minutes * 60,
-        max_response_tokens=options.llm.max_response_tokens,
+        decision_timeout_seconds=strategy_sandbox.limits.timeout_seconds,
+        fit_timeout_seconds=strategy_sandbox.limits.fit_timeout_seconds,
+        max_response_tokens=options.llm.max_tokens_for("meta"),
         meta_learning_directive=options.rolling.meta_learning_directive,
         fold_exploration_directive=options.rolling.fold_exploration_directive,
+        workspace_reference=options.rolling.workspace_reference,
+        operating_memory=options.rolling.operating_memory,
+        repo_root=options.repo_root,
+        regularization_constraints=options.rolling.regularization_constraints,
+        # --sandbox-image has to reach the Meta session too, or the audit runs
+        # the default image while claiming to audit the one that was asked for.
+        sandbox_spec=options.agent_sandbox,
+        rebuild_enabled=options.rolling.meta_sandbox_rebuild_enabled,
+        rebuild_timeout_seconds=options.rolling.meta_sandbox_rebuild_timeout_seconds,
+        image_keep=options.rolling.meta_sandbox_image_keep,
     )
     pipeline = RollingExperimentPipeline(
         options.rolling,
