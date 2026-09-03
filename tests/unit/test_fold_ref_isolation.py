@@ -351,7 +351,7 @@ def test_meta_learning_prompt_does_not_inline_development_history():
 
     prompt = build_meta_learning_prompt(
         {
-            "fold_backtest_summaries": [
+            "fold_validation_history": [
                 {
                     "fold_id": "fold_ref_deadbeef",
                     "validation_result": {"per_stock": {"000001.SZ": [0.1] * 80}},
@@ -362,7 +362,7 @@ def test_meta_learning_prompt_does_not_inline_development_history():
     assert "inputs/meta_context.json" in prompt
     assert "PRIOR.md" in prompt
     assert "per_stock" not in prompt
-    assert "fold_backtest_summaries" not in prompt
+    assert "fold_validation_history" not in prompt
 
 
 def test_meta_visible_projections_opaque_the_fold_id(fold_session):

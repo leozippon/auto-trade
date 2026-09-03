@@ -324,14 +324,14 @@ def test_meta_session_retains_only_the_authorized_test_diagnostic(tmp_path: Path
     assert isinstance(history, dict)
     assert set(history) == {
         "evaluation_contract",
-        "fold_backtest_summaries",
         "fold_reviews",
         "fold_validation_history",
         "review_window",
         "meta_learning",
     }
     # Every completed Fold so far, not only the review window, reaches Meta as
-    # a compact Validation summary.
+    # a compact Validation summary -- and exactly once: the window is named by
+    # ``review_window``/``fold_reviews``, never re-listed as a second copy.
     assert len(history["fold_validation_history"]) == len(latest_fold_records(ledger.read("fold")))
     window = history["review_window"]
     assert isinstance(window, dict)
@@ -347,7 +347,7 @@ def test_meta_session_retains_only_the_authorized_test_diagnostic(tmp_path: Path
         "max_drawdown": -0.08,
     }
     assert "private_detail" not in str(reviews)
-    summaries = history["fold_backtest_summaries"]
+    summaries = history["fold_validation_history"]
     assert isinstance(summaries, list)
     # Only the compact frozen-test metric whitelist crosses into Meta.
     assert summaries[0]["test_result"] == {
@@ -427,7 +427,6 @@ def test_first_meta_session_has_empty_review_window(tmp_path: Path):
     history = captured["development_history"]
     assert isinstance(history, dict)
     assert history["fold_reviews"] == []
-    assert history["fold_backtest_summaries"] == []
     window = history["review_window"]
     assert window == {
         "previous_meta_ref": None,
@@ -505,10 +504,8 @@ def test_meta_session_window_skips_folds_before_previous_meta(tmp_path: Path):
     assert "fold_old" not in str(window)
     assert "fold_new" not in str(window)
     reviews = history["fold_reviews"]
-    summaries = history["fold_backtest_summaries"]
     assert isinstance(reviews, list) and len(reviews) == 1
-    assert isinstance(summaries, list) and len(summaries) == 1
-    assert summaries[0]["validation_result"]["total_return"] == 0.04
+    assert reviews[0]["validation_result"]["total_return"] == 0.04
 
 
 def _pipeline_capturing_fold_requests(tmp_path: Path, captured: list, **config_overrides):

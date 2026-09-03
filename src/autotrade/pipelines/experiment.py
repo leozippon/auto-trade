@@ -1339,16 +1339,22 @@ def _development_inputs(
     Every public field crosses the Agent boundary, so it is built exclusively
     from ``agent_views``: raw fold ids become opaque refs and Test evidence is
     limited to the compact frozen-test metric whitelist of already-completed
-    Folds. Held-out never appears. ``fold_reviews`` and
-    ``fold_backtest_summaries`` only cover regular Folds completed after the
-    previous Meta; ``fold_validation_history`` carries the compact Validation
-    summaries of every completed Fold so far, across Epochs, so Meta sees the
-    whole accumulated Validation record next to the PRIOR that absorbed it.
-    ``fold_reviews`` carries frozen strategy source, a bounded Agent Trace
-    index, ``agent_process_summary``, and ``agent_trace_full`` sidecar metadata.
-    Each sidecar is a byte-exact copy of the raw Fold AgentTraceWriter JSONL; its
-    bytes stay in the internal sidecar list and never enter ordinary Fold
-    prompts or ``meta_context``.
+    Folds. Held-out never appears.
+
+    ``fold_validation_history`` is the one list of compact Fold histories: the
+    ``compact_fold_history`` projection of every completed Fold so far, across
+    Epochs, so Meta sees the whole accumulated Validation record next to the
+    PRIOR that absorbed it. The review window is named, not re-listed --
+    ``review_window`` and ``fold_reviews`` identify the Folds completed after
+    the previous Meta by the same opaque ``fold_id``. A second window-scoped
+    copy of the same projection would put one Fold in ``development_history``
+    twice, which a Meta counting rows reads as two Folds.
+
+    ``fold_reviews`` covers only the review-window Folds, and carries frozen
+    strategy source, a bounded Agent Trace index, ``agent_process_summary``,
+    and ``agent_trace_full`` sidecar metadata. Each sidecar is a byte-exact copy
+    of the raw Fold AgentTraceWriter JSONL; its bytes stay in the internal
+    sidecar list and never enter ordinary Fold prompts or ``meta_context``.
     """
 
     folds, review_window = select_meta_review_folds(
@@ -1363,14 +1369,6 @@ def _development_inputs(
             "frozen_test": "compact completed-Fold metrics are adaptive meta-development feedback",
             "heldout": "never visible; sole final untouched evaluation",
         },
-        "fold_backtest_summaries": [
-            _compact_fold_history(
-                record,
-                ref_store=ref_store,
-                include_frozen_test_metrics=True,
-            )
-            for record in folds
-        ],
         "fold_reviews": reviews,
         "review_window": review_window,
         "fold_validation_history": [
