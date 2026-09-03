@@ -9,6 +9,8 @@ from autotrade.pipelines.config import AcceptanceRules
 from autotrade.pipelines.ledger import ExperimentLedger
 from autotrade.pipelines.reporting import (
     _compound_active_return,
+    _epoch_metric_row,
+    _fold_row,
     _std,
     _tstat,
     build_experiment_report,
@@ -351,6 +353,19 @@ class ReportingTest(unittest.TestCase):
             self.assertIsNone(summary["development"]["mean_return"])
             self.assertIsNone(summary["development"]["mean_active_return"])
             self.assertEqual(summary["benchmark"]["status"], "missing_frozen_benchmark")
+
+    def test_the_worst_fold_cell_names_a_fold_that_produced_a_return(self):
+        """A Fold whose frozen Test failed scores nothing, so its row carries no
+        return. Every comparison against a missing return is False, so leaving
+        such a row in the candidate set makes it the reported worst Fold."""
+        failed = fold_record("fold_2022Q1", 0.03, 0.02)
+        failed["test_result"] = {"status": "failed", "error": "boom"}
+        rows = [_fold_row(failed), _fold_row(fold_record("fold_2022Q2", 0.01, -0.1))]
+        self.assertIsNone(rows[0]["return"])
+        # Columns: ... "Worst max loss", "Worst fold", "Held-out ret".
+        self.assertEqual(_epoch_metric_row("epoch_001", rows, [])[-2], "2022Q2")
+        # Nothing scored at all leaves the cell empty rather than naming a fold.
+        self.assertEqual(_epoch_metric_row("epoch_001", rows[:1], [])[-2], "-")
 
     def test_the_walk_forward_record_lists_each_epochs_parent_controls(self):
         # The inherited strategy replayed on the next Fold's window, per Epoch;

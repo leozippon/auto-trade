@@ -543,7 +543,13 @@ def _epoch_metric_row(
     returns = [_num(row["return"]) for row in epoch_rows if _num(row["return"]) is not None]
     sharpes = [_num(row["sharpe"]) for row in epoch_rows if _num(row["sharpe"]) is not None]
     drawdowns = [_num(row["drawdown"]) for row in epoch_rows if _num(row["drawdown"]) is not None]
-    worst = min(epoch_rows, key=lambda row: _plot_num(row["return"])) if returns else None
+    # Every comparison against NaN is False, so a return-less row left in the
+    # candidate set stays the minimum and names itself the worst Fold.
+    worst = min(
+        (row for row in epoch_rows if not _is_nan(_plot_num(row["return"]))),
+        key=lambda row: _plot_num(row["return"]),
+        default=None,
+    )
     heldout_returns = [_num(row["return"]) for row in heldout_rows if _num(row["return"]) is not None]
     return [
         epoch_id,
