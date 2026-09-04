@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -837,3 +838,383 @@ def test_session_call_budget_claims_are_serialized() -> None:
     assert budget.subagent_calls <= budget.subagent_cap
     assert budget.main_calls >= 0
     assert len(errors) == 40
+
+
+def _no_op_strategy(path: Path) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "main.py").write_text(
+        "def generate_orders(context):\n    return []\n", encoding="utf-8"
+    )
+    return path
+
+
+def _drawdown_rules():
+    from autotrade.pipelines.local_backend import acceptance_hard_rule_check
+
+    check = acceptance_hard_rule_check({"max_drawdown": 0.25})
+    assert check is not None
+    return check
+
+
+def test_hard_finalization_offers_parent_control_with_its_acceptance_verdict(
+    tmp_path: Path,
+) -> None:
+    """Keeping the parent means selecting the host's control node.
+
+    A reviewed Fold reached hard finalization intending to keep the parent and
+    could not: the candidate list was built only from the session's own
+    recorded Validations. The list now leads with ``parent_control`` and every
+    entry says whether the Pipeline's hard rules would accept it.
+    """
+
+    clock = FakeClock()
+    time_budget = InferenceTimeBudget(duration_seconds=10.0, clock=clock)
+    output = _no_op_strategy(tmp_path / "output")
+    models = tmp_path / "models"
+    models.mkdir()
+    tree = StepTree(tmp_path / "steps")
+    control_id = tree.record_step(
+        _no_op_strategy(tmp_path / "control"),
+        epoch_id="epoch_001",
+        fold_id="fold_ref_current",
+        run_id="run_current",
+        result_name="parent_control",
+        revision_id="revision_control",
+        metrics={"total_return": -0.02, "max_drawdown": 0.11, "sharpe": -0.1},
+    )
+    challenger_id = tree.record_step(
+        _no_op_strategy(tmp_path / "challenger"),
+        epoch_id="epoch_001",
+        fold_id="fold_ref_current",
+        run_id="run_current",
+        result_name="valid_001",
+        revision_id="revision_challenger",
+        metrics={"total_return": 0.03, "max_drawdown": 0.41, "sharpe": 0.2},
+    )
+
+    class BreachingValidation:
+        spec = ToolSpec(
+            "daily_backtest",
+            "return one completed current-run validation",
+            {"type": "object", "properties": {}, "required": []},
+        )
+
+        def invoke(self, _arguments):
+            return ToolResult(
+                True,
+                value={
+                    "node_id": challenger_id,
+                    "revision_id": "revision_challenger",
+                    "stats": {
+                        "total_return": 0.03,
+                        "max_drawdown": 0.41,
+                        "sharpe": 0.2,
+                    },
+                },
+            )
+
+    scripted = ScriptedLLM(
+        [
+            ProviderResponse(tool_calls=(ToolCall("valid", "daily_backtest", {}),)),
+            ProviderResponse(
+                tool_calls=(
+                    ToolCall("finish", "finish_fold", {"node_id": control_id}),
+                )
+            ),
+        ]
+    )
+    shared = SessionCallBudget(max_calls=4, time_budget=time_budget)
+    main = SessionBudgetLLM(
+        ScheduledTimedLLM(scripted, clock, [5.0, 0.1]), budget=shared
+    )
+    events: list[tuple[str, dict[str, object]]] = []
+    runner = AgentSessionRunner(
+        llm=main,
+        tools=ToolRegistry(
+            [
+                BreachingValidation(),
+                StepRollbackTool(
+                    tree,
+                    output,
+                    models,
+                    fold_id="fold_ref_current",
+                    run_id="run_current",
+                ),
+                FinishFoldTool(
+                    tree,
+                    fold_id="fold_ref_current",
+                    run_id="run_current",
+                    hard_rule_check=_drawdown_rules(),
+                ),
+            ]
+        ),
+        system_prompt="finish this fold",
+        config=AgentSessionConfig(
+            max_llm_calls=2,
+            deadline_seconds=10.0,
+            finalize_before_deadline_seconds=6.0,
+            deadline_grace_seconds=0.0,
+            max_response_tokens=500,
+        ),
+        time_budget=time_budget,
+        event_sink=lambda event, payload: events.append((event, payload)),
+        control_validation_node={
+            "node_id": control_id,
+            "revision_id": "revision_control",
+            "result_name": "parent_control",
+            "stats": {"total_return": -0.02, "max_drawdown": 0.11, "sharpe": -0.1},
+        },
+        hard_rule_check=_drawdown_rules(),
+    )
+
+    result = runner.run("finish")
+
+    assert result.status == "finished"
+    assert result.finish_value["node_id"] == control_id
+    payload = json.loads(scripted.calls[1]["messages"][1].content or "{}")
+    candidates = payload["complete_validation_candidates"]
+    assert [candidate["node_id"] for candidate in candidates] == [
+        control_id,
+        challenger_id,
+    ]
+    assert candidates[0]["result_name"] == "parent_control"
+    assert candidates[0]["passes_hard_rules"] is True
+    assert candidates[1]["passes_hard_rules"] is False
+    assert candidates[1]["hard_reject_reasons"] == ["max_drawdown_exceeded"]
+    # The node_id enum the model may answer with covers the control node too.
+    finish_schema = next(
+        item
+        for item in scripted.calls[1]["tools"]
+        if item["function"]["name"] == "finish_fold"
+    )
+    assert finish_schema["function"]["parameters"]["properties"]["node_id"]["enum"] == [
+        control_id,
+        challenger_id,
+    ]
+    assert any(
+        event == "hard_finalization_started"
+        and payload["candidate_node_ids"] == [control_id, challenger_id]
+        for event, payload in events
+    )
+
+
+class CountingChildLLM:
+    """A child model that records every call it is asked to make."""
+
+    model = "child"
+    provider = "test"
+    context_window_tokens = 128_000
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def complete(self, messages, **kwargs):
+        del messages, kwargs
+        self.calls += 1
+        return ProviderResponse(content="done")
+
+
+def _reserved_fold_config() -> AgentSessionConfig:
+    """A session whose finalization tail is 200s of a 1000s budget."""
+
+    return AgentSessionConfig(
+        mode="fold",
+        deadline_seconds=1000.0,
+        finalize_before_deadline_seconds=100.0,
+        deadline_grace_seconds=100.0,
+        max_llm_calls=8,
+        max_response_tokens=500,
+    )
+
+
+def test_a_child_is_bounded_by_the_parents_finalization_tail(tmp_path: Path) -> None:
+    """A sub-agent shares the session clock and must stop before the parent's
+    finalization window opens.
+
+    The reviewed Fold's last developer child ran until the session deadline and
+    was cancelled there, having spent shared LLM calls on a report nobody could
+    receive. Its share now ends ``finalize + grace`` before the session's does.
+    """
+
+    del tmp_path
+    clock = FakeClock()
+    time_budget = InferenceTimeBudget(duration_seconds=1000.0, clock=clock)
+    child_llm = CountingChildLLM()
+    engine = SubAgentEngine(
+        llm=child_llm,
+        tools=ToolRegistry([RecordingShell()]),
+        time_budget=time_budget,
+    )
+    runner = AgentSessionRunner(
+        llm=ScriptedLLM([]),
+        tools=ToolRegistry(),
+        system_prompt="fold",
+        config=_reserved_fold_config(),
+        subagent=engine,
+        time_budget=time_budget,
+    )
+    assert engine.parent_reserve_seconds == 200.0
+
+    # Outside the tail the child runs normally.
+    clock.advance(400.0)
+    assert runner.tools.invoke("agent", {"agent": "auditor", "task": "early"}).ok
+    early = runner._wait_subagent_jobs()[-1]
+    assert early["value"]["status"] == "completed" and child_llm.calls == 1
+
+    # 150s left is inside the 200s tail: the child stops without spending a
+    # call, even though the session clock still shows time.
+    clock.advance(450.0)
+    assert time_budget.remaining() == 150.0
+    assert runner.tools.invoke("agent", {"agent": "auditor", "task": "late"}).ok
+    late = runner._wait_subagent_jobs()[-1]
+    assert late["value"]["status"] == "timeout"
+    assert child_llm.calls == 1
+
+
+def test_a_short_session_keeps_no_tail_it_cannot_afford() -> None:
+    """A budget no larger than the tail belongs to a session that starts inside
+    its own wrap-up window; withholding the tail there would leave children no
+    time at all."""
+
+    time_budget = InferenceTimeBudget(duration_seconds=150.0, clock=FakeClock())
+    engine = SubAgentEngine(
+        llm=CountingChildLLM(),
+        tools=ToolRegistry([RecordingShell()]),
+        time_budget=time_budget,
+    )
+    AgentSessionRunner(
+        llm=ScriptedLLM([]),
+        tools=ToolRegistry(),
+        system_prompt="fold",
+        config=_reserved_fold_config(),
+        subagent=engine,
+        time_budget=time_budget,
+    )
+    assert engine.parent_reserve_seconds == 0.0
+
+
+def test_the_parent_stops_waiting_for_a_child_at_the_finalization_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The corner_cases loss: a text-only turn while a child ran yielded the
+    rest of the session.
+
+    The parent waited from 02:25 to its 03:20 deadline, crossing the finalize
+    window, the main deadline and the whole grace without reaching the loop
+    top, and ended ``deadline_exceeded`` with three complete Validations and no
+    selection. The wait now ends at the tail it must not spend.
+    """
+
+    from autotrade.agent import runner as runner_module
+
+    monkeypatch.setattr(runner_module, "SUBAGENT_TEARDOWN_WAIT_SECONDS", 0.2)
+    clock = FakeClock()
+    time_budget = InferenceTimeBudget(duration_seconds=1000.0, clock=clock)
+    output = _no_op_strategy(tmp_path / "output")
+    models = tmp_path / "models"
+    models.mkdir()
+    tree = StepTree(tmp_path / "steps")
+    node_id = tree.record_step(
+        _no_op_strategy(tmp_path / "snapshot"),
+        epoch_id="epoch_001",
+        fold_id="fold_ref_current",
+        run_id="run_current",
+        result_name="valid_001",
+        revision_id="revision_current",
+        metrics={"total_return": 0.03, "max_drawdown": 0.12},
+    )
+
+    class ExistingValidation:
+        spec = ToolSpec(
+            "daily_backtest",
+            "return one completed current-run validation",
+            {"type": "object", "properties": {}, "required": []},
+        )
+
+        def invoke(self, _arguments):
+            return ToolResult(
+                True,
+                value={
+                    "node_id": node_id,
+                    "revision_id": "revision_current",
+                    "stats": {"total_return": 0.03, "max_drawdown": 0.12},
+                },
+            )
+
+    release = threading.Event()
+    started = threading.Event()
+
+    class BlockingChildLLM:
+        model = "child"
+        provider = "test"
+        context_window_tokens = 128_000
+
+        def complete(self, messages, **kwargs):
+            del messages, kwargs
+            started.set()
+            release.wait(10)
+            return ProviderResponse(content="late")
+
+    scripted = ScriptedLLM(
+        [
+            ProviderResponse(tool_calls=(ToolCall("valid", "daily_backtest", {}),)),
+            ProviderResponse(
+                tool_calls=(
+                    ToolCall("spawn", "agent", {"agent": "developer", "task": "slow"}),
+                )
+            ),
+            # A turn of pure text while the child is still running: the trap.
+            ProviderResponse(content="等子代理返回后再收尾"),
+            ProviderResponse(
+                tool_calls=(ToolCall("finish", "finish_fold", {"node_id": node_id}),)
+            ),
+        ]
+    )
+    shared = SessionCallBudget(max_calls=8, time_budget=time_budget)
+    main = SessionBudgetLLM(
+        ScheduledTimedLLM(scripted, clock, [10.0, 690.0, 150.0, 1.0]), budget=shared
+    )
+    engine = SubAgentEngine(
+        llm=BlockingChildLLM(),
+        tools=ToolRegistry([RecordingShell()]),
+        time_budget=time_budget,
+    )
+    events: list[tuple[str, dict[str, object]]] = []
+    runner = AgentSessionRunner(
+        llm=main,
+        tools=ToolRegistry(
+            [
+                ExistingValidation(),
+                StepRollbackTool(
+                    tree,
+                    output,
+                    models,
+                    fold_id="fold_ref_current",
+                    run_id="run_current",
+                ),
+                FinishFoldTool(tree, fold_id="fold_ref_current", run_id="run_current"),
+            ]
+        ),
+        system_prompt="fold",
+        config=_reserved_fold_config(),
+        subagent=engine,
+        time_budget=time_budget,
+        event_sink=lambda event, payload: events.append((event, payload)),
+    )
+
+    started_at = time.monotonic()
+    try:
+        result = runner.run("validate, delegate, then finish")
+    finally:
+        release.set()
+    elapsed = time.monotonic() - started_at
+
+    assert started.is_set()
+    assert result.status == "finished"
+    assert result.finish_value["node_id"] == node_id
+    # The child is released only after the session returned, so finishing
+    # quickly is the proof that the parent never yielded the tail to it.
+    assert elapsed < 3.0
+    assert [event for event, _ in events if event == "subagent_wait_started"] == []
+    # Having kept its tail, the loop reached its next top and finalized there.
+    assert any(event == "hard_finalization_started" for event, _ in events)

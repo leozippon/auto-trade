@@ -137,7 +137,14 @@ def test_finish_fold_rejects_when_current_output_differs_from_selected_revision(
     assert selected.ok and selected.value["node_id"] == changed
 
 
-def _record_round(tree: StepTree, root: Path, *, batch_id: str, marker: str) -> str:
+def _record_round(
+    tree: StepTree,
+    root: Path,
+    *,
+    batch_id: str,
+    marker: str,
+    metrics: dict[str, object] | None = None,
+) -> str:
     """One recorded batch candidate: a Step node carrying the batch id."""
     output = root / f"cand_{batch_id}_{marker}"
     output.mkdir(parents=True, exist_ok=True)
@@ -152,7 +159,7 @@ def _record_round(tree: StepTree, root: Path, *, batch_id: str, marker: str) -> 
         run_id="run_x",
         result_name=f"valid_{batch_id}_{marker}",
         revision_id=new_revision_id("revision"),
-        metrics={},
+        metrics=metrics or {},
         metadata={"batch_id": batch_id, "candidate": marker, "hypothesis": "h"},
     )
 
@@ -358,3 +365,176 @@ def test_finish_fold_rejects_an_absent_or_snapshotless_node(tmp_path: Path):
     (snapshot_dir / "main.py").unlink()
     with pytest.raises(ToolError, match="snapshot is absent"):
         finish.invoke({"node_id": node_id})
+
+
+def _written(directory: Path, source: str) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "main.py").write_text(source, encoding="utf-8")
+    return directory
+
+
+def _acceptance_check():
+    """The Pipeline's own hard rules, wired the way the Fold session wires them."""
+    from autotrade.pipelines.local_backend import acceptance_hard_rule_check
+
+    check = acceptance_hard_rule_check({"max_drawdown": 0.25})
+    assert check is not None
+    return check
+
+
+def _metrics(max_drawdown: float) -> dict[str, object]:
+    return {"total_return": 0.1, "max_drawdown": max_drawdown, "sharpe": 0.4}
+
+
+def test_finish_fold_refuses_a_hard_reject_while_another_node_passes(tmp_path: Path):
+    """The reviewed failure: a 28.5 % drawdown node was accepted, the Pipeline
+    then refused to freeze it and recorded baseline_missing while a sibling at
+    24.7 % would have frozen. Outside the deadline window that is a refusal
+    naming the nodes that pass, not a silent nomination."""
+
+    tree = StepTree(tmp_path / "steps")
+    breaching = _record_round(
+        tree, tmp_path, batch_id="b1", marker="1", metrics=_metrics(0.285)
+    )
+    passing = _record_round(
+        tree, tmp_path, batch_id="b2", marker="2", metrics=_metrics(0.2469)
+    )
+    finish = FinishFoldTool(
+        tree,
+        fold_id="fold_ref_ab",
+        run_id="run_x",
+        hard_rule_check=_acceptance_check(),
+    )
+    with pytest.raises(ToolError, match="hard acceptance rules") as refused:
+        finish.invoke({"node_id": breaching})
+    assert refused.value.error_type == "acceptance_hard_reject"
+    assert passing in str(refused.value)
+    assert refused.value.details["hard_reject_reasons"] == ["max_drawdown_exceeded"]
+    verdicts = {
+        row["node_id"]: row["passes_hard_rules"]
+        for row in refused.value.details["candidates"]
+    }
+    assert verdicts == {breaching: False, passing: True}
+    # The node that passes goes through untouched.
+    accepted = finish.invoke({"node_id": passing})
+    assert accepted.finish and "acceptance_hard_reject_reasons" not in accepted.value
+
+
+def test_finish_fold_lists_parent_control_among_the_passing_nodes(tmp_path: Path):
+    """Keeping the parent is done by selecting the host's control node, so it
+    has to appear in the refusal exactly like the session's own Validations."""
+
+    tree = StepTree(tmp_path / "steps")
+    control = tree.record_step(
+        _written(tmp_path / "control", PARENT),
+        epoch_id="epoch_001",
+        fold_id="fold_ref_ab",
+        run_id="run_x",
+        result_name="parent_control",
+        revision_id=new_revision_id("revision"),
+        metrics=_metrics(0.12),
+    )
+    breaching = _record_round(
+        tree, tmp_path, batch_id="b1", marker="1", metrics=_metrics(0.4)
+    )
+    finish = FinishFoldTool(
+        tree,
+        fold_id="fold_ref_ab",
+        run_id="run_x",
+        hard_rule_check=_acceptance_check(),
+    )
+    with pytest.raises(ToolError) as refused:
+        finish.invoke({"node_id": breaching})
+    listed = {
+        row["node_id"]: row
+        for row in refused.value.details["candidates"]
+        if row["passes_hard_rules"]
+    }
+    assert set(listed) == {control}
+    assert listed[control]["result_name"] == "parent_control"
+    assert listed[control]["max_drawdown"] == 0.12
+    assert control in str(refused.value)
+
+
+def test_finish_fold_accepts_a_hard_reject_and_states_what_the_pipeline_will_do(
+    tmp_path: Path,
+):
+    """Inside the deadline window, or with nothing recorded that passes, the
+    nomination stands — but the result says the Pipeline will not freeze it, so
+    the session's own early_stop_reason and the Meta review read the truth."""
+
+    tree = StepTree(tmp_path / "steps")
+    breaching = _record_round(
+        tree, tmp_path, batch_id="b1", marker="1", metrics=_metrics(0.373)
+    )
+    passing = _record_round(
+        tree, tmp_path, batch_id="b2", marker="2", metrics=_metrics(0.1)
+    )
+    check = _acceptance_check()
+    in_window = FinishFoldTool(
+        tree,
+        fold_id="fold_ref_ab",
+        run_id="run_x",
+        hard_rule_check=check,
+        another_round_fits=lambda: False,
+    )
+    accepted = in_window.invoke({"node_id": breaching})
+    assert accepted.finish
+    assert accepted.value["acceptance_hard_reject_reasons"] == ["max_drawdown_exceeded"]
+    assert accepted.value["pipeline_will_freeze"] is False
+    # No parent artifact was wired, so there is nothing to fall back to.
+    assert accepted.value["pipeline_fold_status"] == "baseline_missing"
+    # With a parent the Pipeline keeps it instead of recording nothing.
+    parent_main = _written(tmp_path / "parent", PARENT) / "main.py"
+    with_parent = FinishFoldTool(
+        tree,
+        fold_id="fold_ref_ab",
+        run_id="run_x",
+        parent_main_py=parent_main,
+        hard_rule_check=check,
+        another_round_fits=lambda: False,
+    )
+    assert (
+        with_parent.invoke({"node_id": breaching}).value["pipeline_fold_status"]
+        == "no_update"
+    )
+    # Outside the window the sibling that passes still forces the refusal.
+    outside = FinishFoldTool(
+        tree, fold_id="fold_ref_ab", run_id="run_x", hard_rule_check=check
+    )
+    with pytest.raises(ToolError, match="hard acceptance rules"):
+        outside.invoke({"node_id": breaching})
+    assert outside.invoke({"node_id": passing}).finish
+
+
+def test_finish_fold_accepts_a_hard_reject_when_nothing_recorded_passes(
+    tmp_path: Path,
+):
+    """open_mechanism fold_2022Q4/2023Q1: every candidate breached the cap.
+    There is nothing to redirect the session to, so the nomination is accepted
+    with the notice rather than refused into a dead end."""
+
+    tree = StepTree(tmp_path / "steps")
+    first = _record_round(
+        tree, tmp_path, batch_id="b1", marker="1", metrics=_metrics(0.373)
+    )
+    _record_round(tree, tmp_path, batch_id="b2", marker="2", metrics=_metrics(0.344))
+    finish = FinishFoldTool(
+        tree,
+        fold_id="fold_ref_ab",
+        run_id="run_x",
+        hard_rule_check=_acceptance_check(),
+    )
+    accepted = finish.invoke({"node_id": first})
+    assert accepted.finish
+    assert accepted.value["pipeline_fold_status"] == "baseline_missing"
+
+
+def test_finish_fold_without_wired_rules_checks_nothing(tmp_path: Path):
+    tree = StepTree(tmp_path / "steps")
+    node = _record_round(
+        tree, tmp_path, batch_id="b1", marker="1", metrics=_metrics(0.9)
+    )
+    finish = FinishFoldTool(tree, fold_id="fold_ref_ab", run_id="run_x")
+    accepted = finish.invoke({"node_id": node})
+    assert accepted.finish and "pipeline_fold_status" not in accepted.value

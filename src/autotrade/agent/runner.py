@@ -187,6 +187,46 @@ class AgentInboxHook(Protocol):
     def consume(self, message_id: str) -> str: ...
 
 
+def _candidate_entry(
+    value: Mapping[str, object], *, index: int
+) -> dict[str, object] | None:
+    """One selectable Validation node as the finalization list carries it.
+
+    Shared by the session's own Validations and by the host's parent control
+    so both reach the model in the same shape. ``stats`` keeps only bounded
+    scalars: the finalization context replaces the conversation, so it must
+    not be able to grow with the size of a backtest summary.
+    """
+
+    node_id = value.get("node_id")
+    revision_id = value.get("revision_id")
+    if not isinstance(node_id, str) or not node_id:
+        return None
+    if not isinstance(revision_id, str) or not revision_id:
+        return None
+    raw_stats = value.get("stats")
+    stats: dict[str, object] = {}
+    if isinstance(raw_stats, Mapping):
+        for key, metric in raw_stats.items():
+            if len(stats) >= 32:
+                break
+            if metric is None or isinstance(metric, (str, int, float, bool)):
+                stats[str(key)] = sanitize_for_log(metric)
+    entry: dict[str, object] = {
+        "node_id": node_id,
+        "revision_id": revision_id,
+        "stats": stats,
+    }
+    if index > 0:
+        # The host's parent control is not one of the session's Validations
+        # and carries no index; the session's own are numbered from one.
+        entry["validation_index"] = index
+    result_name = value.get("result_name")
+    if isinstance(result_name, str) and result_name:
+        entry["result_name"] = result_name
+    return entry
+
+
 def _inbox_trace_text(text: str) -> str:
     redacted = sanitize_for_log(text)
     if not isinstance(redacted, str):
@@ -279,6 +319,8 @@ class AgentSessionRunner:
         conversation_id: str | None = None,
         event_sink: Callable[[str, dict[str, object]], None] | None = None,
         inbox: AgentInboxHook | None = None,
+        control_validation_node: Mapping[str, object] | None = None,
+        hard_rule_check: Callable[[Mapping[str, object]], Sequence[str]] | None = None,
     ) -> None:
         self.llm = llm
         self.tools = tools
@@ -320,10 +362,27 @@ class AgentSessionRunner:
         self.time_budget = validate_time_budget_bindings(
             time_budget, tuple(bindings), owner="Agent runner"
         )
+        # The tail of the session clock the parent keeps for its own
+        # finalization; children and the parent's waits for them stop there.
+        self._child_reserve_seconds = self._child_reserve_for_budget()
+        if self.subagent is not None:
+            self.subagent.parent_reserve_seconds = self._child_reserve_seconds
         self.conversation_id = conversation_id or f"conversation_{uuid.uuid4().hex}"
         self.event_sink = event_sink
         self.inbox = inbox
         self._complete_validation_nodes: list[dict[str, object]] = []
+        # The host's pre-session parent control, when it recorded one. It is
+        # not one of the session's own Validations (it charges no Step and no
+        # backtest), but it is a selectable node of this run: keeping the
+        # parent is done by selecting it, so hard finalization has to offer it.
+        self._control_validation_node = (
+            _candidate_entry(control_validation_node, index=0)
+            if control_validation_node is not None
+            else None
+        )
+        # The Pipeline's hard acceptance rules, wired in as metrics -> reasons
+        # so each enumerated candidate says whether the Pipeline would freeze it.
+        self._hard_rule_check = hard_rule_check
         self._hard_finalization = False
         self._hard_finalization_context_initialized = False
         self._wrap_up_sent = False
@@ -799,7 +858,7 @@ class AgentSessionRunner:
             )
             candidate_ids = [
                 str(candidate["node_id"])
-                for candidate in self._complete_validation_nodes
+                for candidate in self._finalization_candidates()
             ]
             for record in records:
                 function = record["function"]
@@ -828,7 +887,7 @@ class AgentSessionRunner:
             return f"tool is unavailable in the current session phase: {call.name}"
         node_id = call.arguments.get("node_id")
         candidates = {
-            str(candidate["node_id"]) for candidate in self._complete_validation_nodes
+            str(candidate["node_id"]) for candidate in self._finalization_candidates()
         }
         if not isinstance(node_id, str) or node_id not in candidates:
             return (
@@ -858,32 +917,51 @@ class AgentSessionRunner:
 
     def _record_complete_validation(self, value: Mapping[str, object]) -> None:
         node_id = value.get("node_id")
-        revision_id = value.get("revision_id")
         if not isinstance(node_id, str) or not node_id:
-            return
-        if not isinstance(revision_id, str) or not revision_id:
             return
         if any(
             candidate.get("node_id") == node_id
             for candidate in self._complete_validation_nodes
         ):
             return
-        raw_stats = value.get("stats")
-        stats: dict[str, object] = {}
-        if isinstance(raw_stats, Mapping):
-            for key, metric in raw_stats.items():
-                if len(stats) >= 32:
-                    break
-                if metric is None or isinstance(metric, (str, int, float, bool)):
-                    stats[str(key)] = sanitize_for_log(metric)
-        self._complete_validation_nodes.append(
-            {
-                "node_id": node_id,
-                "revision_id": revision_id,
-                "validation_index": len(self._complete_validation_nodes) + 1,
-                "stats": stats,
-            }
+        entry = _candidate_entry(
+            value, index=len(self._complete_validation_nodes) + 1
         )
+        if entry is not None:
+            self._complete_validation_nodes.append(entry)
+
+    def _finalization_candidates(self) -> list[dict[str, object]]:
+        """The nodes hard finalization may select, with their acceptance verdict.
+
+        The host's ``parent_control`` node leads the list when the session has
+        one. Enumerating only the session's own Validations left a reviewed
+        Fold unable to nominate the node its own degradation plan had chosen —
+        selecting ``parent_control`` is the documented way to keep the parent.
+        Each entry says whether the Pipeline's hard rules would accept it, so
+        the selection is not made blind to the freeze decision that follows.
+        """
+
+        candidates = list(self._complete_validation_nodes)
+        if self._control_validation_node is not None:
+            candidates.insert(0, self._control_validation_node)
+        check = self._hard_rule_check
+        if check is None:
+            return candidates
+        annotated: list[dict[str, object]] = []
+        for candidate in candidates:
+            stats = candidate.get("stats")
+            reasons = [
+                str(reason)
+                for reason in check(stats if isinstance(stats, Mapping) else {})
+            ]
+            annotated.append(
+                {
+                    **candidate,
+                    "passes_hard_rules": not reasons,
+                    **({"hard_reject_reasons": reasons} if reasons else {}),
+                }
+            )
+        return annotated
 
     def _activate_hard_finalization_if_ready(self, remaining: float) -> bool:
         """Switch to the restricted finalization view inside the finalize window.
@@ -922,7 +1000,7 @@ class AgentSessionRunner:
                 "grace_seconds": self.config.deadline_grace_seconds,
                 "candidate_node_ids": [
                     str(candidate["node_id"])
-                    for candidate in self._complete_validation_nodes
+                    for candidate in self._finalization_candidates()
                 ],
                 "available_tools": sorted(tool_names),
             },
@@ -938,9 +1016,11 @@ class AgentSessionRunner:
                 "Choose one listed complete Validation node yourself. The Runner "
                 "does not rank or auto-submit candidates. Call finish_fold with "
                 "its node_id; step_rollback is optional when the workspace should "
-                "be restored first."
+                "be restored first. passes_hard_rules=false means the Pipeline "
+                "will not freeze that node; the parent_control entry, when "
+                "listed, is how this Fold keeps the parent."
             ),
-            "complete_validation_candidates": list(self._complete_validation_nodes),
+            "complete_validation_candidates": self._finalization_candidates(),
             "available_tools": sorted(self._finalization_tool_names()),
         }
         return [
@@ -979,6 +1059,10 @@ class AgentSessionRunner:
                 # Barrier: a formal backtest or finish must not overlap a
                 # developer child that may still be writing the workspace.
                 self._wait_subagent_jobs()
+                if call.name in _TERMINAL_TOOLS:
+                    in_flight = self._in_flight_subagent_error()
+                    if in_flight:
+                        return call, in_flight
             self._call_context.call_id = call.id
             record = self.tools.invoke(
                 call.name,
@@ -1043,6 +1127,50 @@ class AgentSessionRunner:
             if call.name in _TERMINAL_TOOLS and self.tools.finished:
                 terminal_seen = True
         return results, None
+
+    def _in_flight_subagent_error(self) -> dict[str, object] | None:
+        """Refuse a terminal tool while a child launched by this session runs.
+
+        The barrier before this already waited ``SUBAGENT_TEARDOWN_WAIT_SECONDS``
+        for the children to return. Whatever is still running would be cancelled
+        by the session close that a successful finish triggers: a Meta session
+        launched three sub-agents and called ``finish_meta`` in the same turn,
+        and all three were discarded with PRIOR left unchanged.
+
+        Two exemptions, because a refusal that cannot be satisfied loses more
+        than the reports it protects. The session's own tail (hard finalization,
+        or the wrap-up grace, which hard finalization never enters) is where
+        finishing is the only remaining move. And whatever the phase, a child
+        that outlives the teardown barrier's own window is one the session no
+        longer has time to wait for — a Meta session has neither tail and would
+        otherwise refuse every ``finish_meta`` until its deadline and silently
+        keep the previous PRIOR.
+        """
+
+        if self._subagent_wait_floor() is None:
+            return None
+        remaining = self.time_budget.remaining() if self.time_budget is not None else None
+        if remaining is not None and remaining <= SUBAGENT_TEARDOWN_WAIT_SECONDS:
+            return None
+        with self._subagent_lock:
+            picture = self._subagent_live_picture()
+        running = picture["running_children"]
+        queued = picture["queued_children"]
+        if not running and not queued:
+            return None
+        return {
+            "ok": False,
+            "error": (
+                "terminal tool refused: "
+                f"{len(running) + len(queued)} sub-agent(s) launched by this "
+                "session have not returned. Their results would be discarded "
+                "with the session. Wait for their subagent_completed "
+                "observations, or steer them to report now with "
+                "agent(action=\"message\"), then call this tool again."
+            ),
+            "error_type": "subagents_in_flight",
+            **picture,
+        }
 
     def _is_parallel_batch(self, calls: tuple[ToolCall, ...]) -> bool:
         return len(calls) > 1 and not any(
@@ -1369,16 +1497,78 @@ class AgentSessionRunner:
     def _uncollected_subagent_jobs(self) -> list[_SubAgentJob]:
         return [job for job in self._subagent_jobs if job.record is None]
 
+    def _child_time_reserve_seconds(self) -> float:
+        """The tail of the session budget that belongs to the parent alone.
+
+        The finalize reserve plus the wrap-up grace: the window in which the
+        parent has to enter hard finalization, pick a node and call
+        finish_fold. Nothing else may consume it — neither the parent's own
+        wait for a child nor the child's own loop, which the engine bounds with
+        the same figure. Meta sessions have neither window and keep the plain
+        session deadline as their only bound.
+        """
+
+        if self.config.mode != "fold":
+            return 0.0
+        return (
+            self.config.finalize_before_deadline_seconds
+            + self.config.deadline_grace_seconds
+        )
+
+    def _child_reserve_for_budget(self) -> float:
+        """The tail to withhold from the children of THIS session.
+
+        A child shares the session clock, so it must stop before the parent's
+        finalization window opens: the child cancelled at the parent's deadline
+        had spent shared LLM calls on a report nobody could receive. The tail
+        is withheld only while there is a session outside it — a budget no
+        larger than the tail belongs to a session that starts inside its own
+        wrap-up window and has no tail left to reserve.
+        """
+
+        reserve = self._child_time_reserve_seconds()
+        total = (
+            self.time_budget.remaining()
+            if self.time_budget is not None
+            else self.config.deadline_seconds
+        )
+        return reserve if reserve < total else 0.0
+
+    def _subagent_wait_floor(self) -> float | None:
+        """Remaining seconds at which the parent stops waiting for a child.
+
+        ``None`` means it must not wait at all: once the wrap-up prompt is out
+        or hard finalization is active, what is left is finishing time. A Fold
+        with three complete Validations spent 55 minutes inside one such wait,
+        crossed the finalize window, the main deadline and the whole grace
+        without ever reaching the loop top, and ended selecting none of them.
+        """
+
+        if self._hard_finalization or self._wrap_up_sent:
+            return None
+        return self._child_reserve_seconds
+
     def _yield_for_pending_subagent(self, time_budget: InferenceTimeBudget) -> bool:
-        """Skip no_tool_call when a sub-agent is still running; wait for progress."""
+        """Skip no_tool_call when a sub-agent is still running; wait for progress.
+
+        Returns False once the wait floor is reached, so the turn falls through
+        to the ordinary nudge and the loop reaches its next top — where hard
+        finalization starts — instead of yielding the rest of the session.
+        """
         uncollected = self._uncollected_subagent_jobs()
         if not uncollected:
             return False
-        if not any(job.future.done() for job in uncollected):
-            self._wait_first_pending_subagent(time_budget)
+        if any(job.future.done() for job in uncollected):
+            return True
+        floor = self._subagent_wait_floor()
+        if floor is None or time_budget.remaining() <= floor:
+            return False
+        self._wait_first_pending_subagent(time_budget, floor)
         return True
 
-    def _wait_first_pending_subagent(self, time_budget: InferenceTimeBudget) -> None:
+    def _wait_first_pending_subagent(
+        self, time_budget: InferenceTimeBudget, floor: float = 0.0
+    ) -> None:
         completed = threading.Event()
 
         def _on_done(_future: Future) -> None:
@@ -1391,16 +1581,19 @@ class AgentSessionRunner:
         ]
         if not pending:
             return
-        self._emit("subagent_wait_started", {"pending": len(pending)})
+        self._emit(
+            "subagent_wait_started",
+            {"pending": len(pending), "wait_floor_seconds": round(floor, 6)},
+        )
         for future in pending:
             future.add_done_callback(_on_done)
             if future.done():
                 return
         while not completed.is_set() and not self._cancelled.is_set():
-            remaining = time_budget.remaining()
-            if remaining <= 0:
+            waitable = time_budget.remaining() - floor
+            if waitable <= 0:
                 return
-            completed.wait(timeout=min(0.05, remaining))
+            completed.wait(timeout=min(0.05, waitable))
 
     def _wait_subagent_jobs(self) -> list[dict[str, object]]:
         return self._collect_finished_subagents(
@@ -1608,6 +1801,7 @@ class AgentSessionRunner:
             messages,
             tools=provider_tools,
             max_tokens=self.config.max_response_tokens,
+            result_store=self.tools.result_store(),
         )
         if edit:
             self._emit("context_edit", edit)
@@ -1651,6 +1845,7 @@ class AgentSessionRunner:
             tools=provider_tools,
             max_tokens=self.config.max_response_tokens,
             force=not compacted,
+            result_store=self.tools.result_store(),
         )
         if edit:
             self._emit(

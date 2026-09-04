@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import ast
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -32,6 +32,15 @@ FINISH_FOLD_MIN_BATCH_ROUNDS = 2
 # block, and like the round floor it lapses once another round cannot fit.
 FINISH_FOLD_EARLY_STOP_BUDGET_FRACTION = 1 / 3
 EARLY_STOP_REASON_MAX_CHARS = 500
+
+# The Pipeline's hard acceptance rules, handed over as a callable that maps one
+# node's recorded metrics to its hard-reject reasons (empty = passes). The
+# Environment never imports the Pipeline; the rules live there and the freeze
+# decision stays there, but a nomination the Pipeline will certainly reject has
+# to be visible to the session that makes it — reviewed Folds nominated a node
+# over the drawdown cap, were recorded ``baseline_missing``, and only learned
+# it in the next Meta session while a sibling node would have frozen.
+HardRuleCheck = Callable[[Mapping[str, object]], Sequence[str]]
 
 
 @dataclass(frozen=True)
@@ -96,6 +105,11 @@ def executable_output_structure(root: Path) -> str:
     return "\n".join(parts)
 
 
+def _node_metrics(node: Mapping[str, object]) -> Mapping[str, object]:
+    metrics = node.get("metrics")
+    return metrics if isinstance(metrics, Mapping) else {}
+
+
 def _tree_bytes(root: Path | None) -> dict[str, bytes]:
     if root is None or not root.is_dir():
         return {}
@@ -133,9 +147,15 @@ class FinishFoldTool:
         "completed batch_validate rounds, and one that leaves more than a third of "
         "the backtest budget unused must carry early_stop_reason (which hypotheses "
         "stay untested and why they are not worth the remaining budget); the reason "
-        "is recorded with the Fold result for the Meta review. The call starts only "
-        "after every background sub-agent has finished, and once it succeeds the "
-        "remaining tool calls of this assistant turn are cancelled.",
+        "is recorded with the Fold result for the Meta review. The nominated node is "
+        "also checked against the Pipeline's hard acceptance rules (finite metrics "
+        "and the max_drawdown cap in the acceptance_rules fact): outside the deadline "
+        "window a breaching node is refused while another recorded node still passes, "
+        "and the refusal lists which ones do; inside the window, or when nothing "
+        "recorded passes, the nomination is accepted and the result states that the "
+        "Pipeline will not freeze it. The call starts only after every background "
+        "sub-agent has finished, is refused while one is still running, and once it "
+        "succeeds the remaining tool calls of this assistant turn are cancelled.",
         {
             "type": "object",
             "properties": {
@@ -169,6 +189,7 @@ class FinishFoldTool:
         min_batch_rounds: int = 0,
         another_round_fits: Callable[[], bool] | None = None,
         budget_status: Callable[[], FoldBudgetStatus] | None = None,
+        hard_rule_check: HardRuleCheck | None = None,
     ) -> None:
         self.tree = tree
         self.fold_id = fold_id
@@ -181,6 +202,7 @@ class FinishFoldTool:
         self.min_batch_rounds = min_batch_rounds
         self._another_round_fits = another_round_fits or (lambda: True)
         self._budget_status = budget_status
+        self._hard_rule_check = hard_rule_check
         self._parent_structure: str | None = None
         if parent_main_py is not None:
             # The parent package is the directory that holds its main.py.
@@ -202,6 +224,10 @@ class FinishFoldTool:
             raise ToolError("finish_fold can select only a Step from the current Fold session")
         if not node.get("complete_validation") or not node.get("revision_id"):
             raise ToolError("finish_fold requires successful complete validation")
+        # Ahead of the working-copy check: a node the Pipeline would reject has
+        # to be replaced rather than restored, so the refusal that names the
+        # passing nodes must not cost a step_rollback to the wrong one first.
+        acceptance = self._check_hard_acceptance(node_id, node)
         # The working-copy check comes before the budget gates so a winner
         # nominated without step_rollback costs one refusal, not two.
         self._require_current_matches_revision(node_id)
@@ -224,9 +250,108 @@ class FinishFoldTool:
                 # The Agent's own account of an early finish and the budget it
                 # left, for the fold ledger and the Meta review.
                 **early_stop,
+                # Present only when the Pipeline will reject this nomination.
+                **acceptance,
             },
             finish=True,
         )
+
+    def _check_hard_acceptance(
+        self, node_id: str, node: Mapping[str, object]
+    ) -> dict[str, object]:
+        """Hard acceptance verdict for the nominated node.
+
+        Empty when the node passes, or when no rules are wired. A breach is
+        refused while another recorded node passes and another round still
+        fits, so the session can select that one or run a risk-reduced round
+        instead of learning in the next Meta session that its Fold froze
+        nothing. Inside the deadline window, or with nothing recorded that
+        passes, the nomination is accepted and the record states what the
+        Pipeline will do with it — the session's ``early_stop_reason`` and the
+        Meta review then read the same outcome the fold ledger will carry.
+        """
+
+        check = self._hard_rule_check
+        if check is None:
+            return {}
+        reasons = [str(reason) for reason in check(_node_metrics(node))]
+        if not reasons:
+            return {}
+        candidates = self._hard_rule_candidates(check)
+        passing = [
+            row
+            for row in candidates
+            if row["node_id"] != node_id and row["passes_hard_rules"]
+        ]
+        if passing and self._another_round_fits():
+            listed = "; ".join(
+                f"{row['node_id']} ({row['result_name']}"
+                + (
+                    f", max_drawdown={row['max_drawdown']:.4f})"
+                    if isinstance(row.get("max_drawdown"), float)
+                    else ")"
+                )
+                for row in passing
+            )
+            raise ToolError(
+                f"finish_fold refused: {node_id} fails the Pipeline's hard "
+                f"acceptance rules ({', '.join(reasons)}), so the Fold would "
+                "freeze nothing. These recorded nodes pass them: "
+                f"{listed}. Select one of those (step_rollback to it first), or "
+                "pre-register a risk-reduced round and run batch_validate.",
+                error_type="acceptance_hard_reject",
+                retry_hint=(
+                    "step_rollback(<passing node_id>) then "
+                    "finish_fold({\"node_id\": <passing node_id>})"
+                ),
+                details={
+                    "hard_reject_reasons": reasons,
+                    "candidates": candidates,
+                },
+            )
+        return {
+            "acceptance_hard_reject_reasons": reasons,
+            # The fold status the Pipeline will record, in its own words: it
+            # falls back to the inherited parent, or — with no parent to fall
+            # back to — records the Fold with no frozen artifact at all. The
+            # Agent's early_stop_reason and the Meta review then read what the
+            # ledger reads.
+            "pipeline_fold_status": (
+                "no_update" if self._parent_structure is not None else "baseline_missing"
+            ),
+            "pipeline_will_freeze": False,
+        }
+
+    def _hard_rule_candidates(self, check: HardRuleCheck) -> list[dict[str, object]]:
+        """Every complete Validation of this session with its hard-rule verdict.
+
+        The host's ``parent_control`` node is one of them: selecting it is the
+        documented way to keep the parent, so it must be visible here exactly
+        like the session's own Validations.
+        """
+
+        rows: list[dict[str, object]] = []
+        for node in self.tree.nodes():
+            if (
+                not node_in_session(node, fold_id=self.fold_id, run_id=self.run_id)
+                or not node.get("complete_validation")
+                or not node.get("revision_id")
+            ):
+                continue
+            metrics = _node_metrics(node)
+            reasons = [str(reason) for reason in check(metrics)]
+            row: dict[str, object] = {
+                "node_id": str(node["node_id"]),
+                "result_name": str(node.get("result_name") or ""),
+                "passes_hard_rules": not reasons,
+            }
+            drawdown = metrics.get("max_drawdown")
+            if isinstance(drawdown, (int, float)) and not isinstance(drawdown, bool):
+                row["max_drawdown"] = float(drawdown)
+            if reasons:
+                row["hard_reject_reasons"] = reasons
+            rows.append(row)
+        return rows
 
     def _resolve_node_id(self, arguments: Mapping[str, object]) -> str:
         """The nominated node: the argument, or the tree position when no
@@ -428,6 +553,7 @@ __all__ = [
     "FINISH_FOLD_MIN_BATCH_ROUNDS",
     "FinishFoldTool",
     "FoldBudgetStatus",
+    "HardRuleCheck",
     "executable_output_structure",
     "executable_source_structure",
 ]

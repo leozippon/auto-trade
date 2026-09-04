@@ -11,6 +11,12 @@ fitting, which is the fail-closed overflow recovery.
 Compaction rewrites history only: the conversation's system prompt is carried
 over verbatim, so the session (or child) keeps the exact contract it was
 composed with and the provider's prefix cache still covers it.
+
+What compaction drops is not lost: the raw dropped messages are archived
+through the session's ordinary tool-result spill store, and the summary
+message carries the ``root`` + ``path`` reference, so the Agent recovers exact
+earlier content with the same ``read_file``/``grep`` calls it uses for any
+other spilled result.
 """
 
 from __future__ import annotations
@@ -20,7 +26,7 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from autotrade.environment.llm import (
     AGENT_MAX_OUTPUT_TOKENS,
@@ -37,6 +43,9 @@ from autotrade.environment.time_budget import (
     InferenceTimeBudget,
     SessionTimeBudgetAware,
 )
+
+if TYPE_CHECKING:
+    from autotrade.environment.tools.base import ToolResultStore
 
 COMPACT_SUMMARY_HEADINGS = (
     "## 目标",
@@ -63,6 +72,20 @@ COMPACT_SYSTEM_PROMPT = (
 _TOOL_CONTEXT_EXCERPT_CHARS = 500
 _TOOL_CONTEXT_MIN_CHARS = 512
 _FILES_TRAIL_LIMIT = 40
+# One archive holds the messages a single compaction drops. The cap is a
+# whole-file character budget: comfortably above a full pre-compaction window
+# (a ~128k-token conversation is a few hundred thousand characters, JSON
+# overhead included) and well under ``read_file``'s 10 MiB refusal, so an
+# archive the Agent is pointed at can always be read back. Records are taken
+# newest first and one that does not fit is skipped rather than ending the
+# archive, so an over-budget compaction keeps the messages nearest the
+# retained window and is not defeated by a single huge one among them.
+_ARCHIVE_MAX_CHARS = 1_000_000
+# Archive references carried forward in the summary message, newest last: one
+# per successful compaction, kept to the default ``max_calls`` so a session
+# configured for more compactions still spends a bounded slice of its window
+# on the trail.
+_ARCHIVE_TRAIL_LIMIT = 8
 _READ_TOOLS = frozenset({"read_file", "grep", "glob"})
 _WRITE_TOOLS = frozenset({"write_file", "edit_file", "write_skill", "delete_skill"})
 _THINK_BLOCK = re.compile(r"\A\s*<think>.*?</think>\s*", re.DOTALL)
@@ -115,10 +138,23 @@ class ContextCompactor(SessionTimeBudgetAware):
     """Semantic compactor that uses a dedicated low-cost LLM proxy."""
 
     def __init__(
-        self, llm: LLMProxy, config: ContextCompactionConfig | None = None
+        self,
+        llm: LLMProxy,
+        config: ContextCompactionConfig | None = None,
+        *,
+        result_store: ToolResultStore | None = None,
+        archive_messages: bool = True,
     ) -> None:
         self.llm = llm
         self.config = config or ContextCompactionConfig()
+        # Where dropped messages and oversized tool bodies go so the session
+        # can read them back: the search tools' spill store, the one place a
+        # payload too large for the conversation already lands.
+        self.result_store = result_store
+        # The session's content-elision mode. A Meta session traces no message
+        # content (``include_content=False``), so it archives none either: its
+        # summary is then the only record of what was dropped.
+        self.archive_messages = archive_messages
         self._consecutive_failures = 0
         self.compaction_count = 0
         self.compaction_attempts = 0
@@ -137,7 +173,12 @@ class ContextCompactor(SessionTimeBudgetAware):
         session derives its own instance instead of sharing the parent's.
         """
 
-        return ContextCompactor(self.llm, self.config)
+        return ContextCompactor(
+            self.llm,
+            self.config,
+            result_store=self.result_store,
+            archive_messages=self.archive_messages,
+        )
 
     def should_compact(
         self,
@@ -247,19 +288,32 @@ class ContextCompactor(SessionTimeBudgetAware):
 
         self._consecutive_failures = 0
         self.compaction_count += 1
-        non_summary = [
-            message
-            for message in compact_messages[1:]
-            if not is_compaction_message(message)
+        # ``_fit_compact_request`` only replaces message contents in place, so
+        # a position indexes the same turn in both lists: the fitted copies
+        # feed the summarizer and stay in the retained tail, while the archive
+        # keeps the caller's raw originals.
+        non_summary_positions = [
+            position
+            for position in range(1, len(compact_messages))
+            if not is_compaction_message(compact_messages[position])
         ]
+        non_summary = [compact_messages[position] for position in non_summary_positions]
         files = _merge_touched_files(
             _latest_compaction_files(compact_messages), _touched_files(non_summary)
         )
-        summary_message = _build_compaction_summary_message(
-            summary_text, self.compaction_count, files
-        )
         recent_messages = drop_leading_orphan_tools(
             non_summary[-self.config.keep_recent_messages :]
+        )
+        retained = set(
+            non_summary_positions[len(non_summary_positions) - len(recent_messages) :]
+        )
+        archive, archive_skipped = self._archive_dropped_messages(messages, retained)
+        archives = _latest_compaction_archives(compact_messages)
+        if archive:
+            archives.append(archive)
+        archives = archives[-_ARCHIVE_TRAIL_LIMIT:]
+        summary_message = _build_compaction_summary_message(
+            summary_text, self.compaction_count, files, archives
         )
         # The system prompt is reused as the same object, never re-rendered.
         compacted_messages = (messages[0], summary_message, *recent_messages)
@@ -280,9 +334,67 @@ class ContextCompactor(SessionTimeBudgetAware):
             "compaction_index": self.compaction_count,
             "step_id_at_compaction": step_id,
         }
+        if archive:
+            event["archive"] = archive
+        elif archive_skipped:
+            event["archive_skipped"] = archive_skipped
         if request_context_edit:
             event["request_context_edit"] = request_context_edit
         return ContextCompactionResult(messages=compacted_messages, event=event)
+
+    def _archive_dropped_messages(
+        self, messages: Sequence[ChatMessage], retained: set[int]
+    ) -> tuple[dict[str, object], str]:
+        """Persist the raw messages this compaction drops, and reference them.
+
+        The summary is a lossy handoff; the archive is the exact record behind
+        it. It is written through the same spill store an oversized tool result
+        uses, so the Agent recovers earlier tool output, code it wrote or a
+        number with an ordinary ``read_file``/``grep`` call on the returned
+        root and path. Returns the reference, or the reason there is none.
+        """
+
+        if not self.archive_messages:
+            return {}, "content_elided"
+        if self.result_store is None:
+            return {}, "store_unavailable"
+        dropped = [
+            position for position in range(1, len(messages)) if position not in retained
+        ]
+        if not dropped:
+            return {}, "nothing_dropped"
+        lines: list[str] = []
+        budget = _ARCHIVE_MAX_CHARS
+        for position in reversed(dropped):
+            line = json.dumps(
+                sanitize_for_log(
+                    {"position": position, **messages[position].to_record()}
+                ),
+                ensure_ascii=False,
+                default=str,
+                allow_nan=False,
+            )
+            if len(line) + 1 > budget:
+                # Skip the record, not the rest: one huge tool result at the
+                # newest end must not cost the Agent every older message.
+                continue
+            lines.append(line)
+            budget -= len(line) + 1
+        if not lines:
+            return {}, "size_cap"
+        lines.reverse()
+        stored = self.result_store.store_tool_result(
+            tool="compaction", kind="archive", content="\n".join(lines) + "\n"
+        )
+        if not stored:
+            return {}, "write_failed"
+        return {
+            "compaction_index": self.compaction_count,
+            "root": stored["result_root"],
+            "path": stored["result_ref"],
+            "messages": len(lines),
+            "dropped_messages": len(dropped),
+        }, ""
 
     def _fit_compact_request(
         self, messages: Sequence[ChatMessage]
@@ -310,6 +422,7 @@ class ContextCompactor(SessionTimeBudgetAware):
                 prepared,
                 max_tokens=self.config.max_response_tokens,
                 force=True,
+                result_store=self.result_store,
             )
             if not edit:
                 # The Provider performs the final fail-fast check. Returning the
@@ -379,6 +492,7 @@ def fit_tool_results_to_context(
     tools: Sequence[Mapping[str, object]] = (),
     max_tokens: int,
     force: bool = False,
+    result_store: ToolResultStore | None = None,
 ) -> tuple[list[ChatMessage], dict[str, object]]:
     """Summarize the largest tool results until one request fits.
 
@@ -387,6 +501,8 @@ def fit_tool_results_to_context(
     provenance and bounded evidence excerpts while explicitly marking that the
     source was omitted. ``force`` guarantees one edit when possible and is
     used only for recovery after an authoritative provider overflow.
+    ``result_store`` is the session's spill store: given one, the replaced body
+    is persisted and referenced instead of being dropped.
     """
 
     edited = list(messages)
@@ -410,11 +526,21 @@ def fit_tool_results_to_context(
         if fits_after and (not force or summarized > 0):
             break
         original = edited[index]
-        replacement = summarize_tool_result_for_context(original)
         original_chars = len(original.content or "")
+        replacement = summarize_tool_result_for_context(original)
         replacement_chars = len(replacement.content or "")
         if replacement_chars >= original_chars:
             continue
+        if result_store is not None:
+            # Spill only a body this edit actually removes, and only while the
+            # reference still leaves a saving: a replacement decided first
+            # means no unreferenced file is written for one that is discarded.
+            spilled = summarize_tool_result_for_context(
+                original, result_store=result_store
+            )
+            spilled_chars = len(spilled.content or "")
+            if spilled_chars < original_chars:
+                replacement, replacement_chars = spilled, spilled_chars
         edited[index] = replacement
         summarized += 1
         chars_freed += original_chars - replacement_chars
@@ -435,7 +561,9 @@ def fit_tool_results_to_context(
     }
 
 
-def summarize_tool_result_for_context(message: ChatMessage) -> ChatMessage:
+def summarize_tool_result_for_context(
+    message: ChatMessage, *, result_store: ToolResultStore | None = None
+) -> ChatMessage:
     if message.role != "tool" or message.tool_call_id is None:
         raise ValueError("only a protocol-bound tool result can be summarized")
     content = message.content or ""
@@ -453,6 +581,15 @@ def summarize_tool_result_for_context(message: ChatMessage) -> ChatMessage:
     }
     if retained_fields:
         payload["retained_fields"] = retained_fields
+    if result_store is not None:
+        # The body leaves the conversation, not the session: spilled through
+        # the same store the tools themselves use, it is read back by root and
+        # path rather than re-produced by a narrower query.
+        payload.update(
+            result_store.store_tool_result(
+                tool="context_edit", kind="tool_result", content=content
+            )
+        )
     return ChatMessage(
         "tool",
         json.dumps(payload, ensure_ascii=False, default=str, allow_nan=False),
@@ -547,6 +684,26 @@ def _latest_compaction_files(messages: Sequence[ChatMessage]) -> dict[str, list[
     }
 
 
+def _latest_compaction_archives(
+    messages: Sequence[ChatMessage],
+) -> list[dict[str, object]]:
+    """Archive references carried by the previous summary, oldest first.
+
+    Every compaction drops the summary it is updating, so the trail has to
+    travel in the new summary or earlier archives become unreachable.
+    """
+
+    payload = _latest_compaction_payload(messages)
+    archives = payload.get("archives") if payload is not None else None
+    if not isinstance(archives, list):
+        return []
+    return [
+        item
+        for item in archives
+        if isinstance(item, dict) and item.get("root") and item.get("path")
+    ]
+
+
 def _touched_files(messages: Sequence[ChatMessage]) -> dict[str, list[str]]:
     """Files the summarized turns read or modified, from their tool calls.
 
@@ -592,9 +749,12 @@ def _extract_summary_text(response: ProviderResponse) -> str:
 
 
 def _build_compaction_summary_message(
-    summary_text: str, compaction_index: int, files: dict[str, list[str]]
+    summary_text: str,
+    compaction_index: int,
+    files: dict[str, list[str]],
+    archives: Sequence[dict[str, object]] = (),
 ) -> ChatMessage:
-    payload = {
+    payload: dict[str, object] = {
         "observation": "context_compaction",
         "summary_kind": "markdown",
         "compaction_index": compaction_index,
@@ -602,6 +762,19 @@ def _build_compaction_summary_message(
         "summary": summary_text,
         "files": files,
     }
+    if archives:
+        payload["archives"] = list(archives)
+        payload["archive_hint"] = (
+            "Each archive holds the messages that compaction dropped, in order, one JSON "
+            "record per line; grep or read_file it with its root and path to recover exact "
+            "earlier content (tool output, code you wrote, numbers) instead of working from "
+            "the summary alone."
+        )
+    else:
+        payload["archive_hint"] = (
+            "The dropped messages were not archived in this session, so the summary above "
+            "is the only record of them."
+        )
     return ChatMessage(
         "user", json.dumps(payload, ensure_ascii=False, default=str, allow_nan=False)
     )

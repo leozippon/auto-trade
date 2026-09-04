@@ -32,6 +32,7 @@ from autotrade.agent import subagent as subagent_module
 from autotrade.agent.prompts import FOLD_WORKFLOW_SECTION, build_system_prompt
 from autotrade.environment.tools.base import SessionInterrupt
 from autotrade.agent.runner import (
+    SUBAGENT_TEARDOWN_WAIT_SECONDS,
     AgentSessionConfig,
     AgentSessionDeadlineExceeded,
     AgentSessionRunner,
@@ -1889,18 +1890,147 @@ def test_runner_close_cancels_subagent_without_infinite_wait(
         llm=Parent(),
         tools=ToolRegistry([finish]),
         system_prompt="fold",
+        # The whole budget is wrap-up grace, so the session is past its main
+        # deadline from the first turn: finishing is the only move left and the
+        # in-flight-child refusal is exempt there.
+        config=_fold_config(deadline_seconds=600.0, deadline_grace_seconds=600.0),
+        subagent=SubAgentEngine(
+            llm=BlockingChild(),
+            tools=ToolRegistry([shell]),
+        ),
+        time_budget=InferenceTimeBudget(duration_seconds=600.0),
+    ).run("go")
+    elapsed = time.monotonic() - t0
+    assert result.status == "finished"
+    # The barrier gave up (0.2s) long before the child could return, so the
+    # finish went through with it still in flight: that is the wrap-up
+    # exemption, and the session close is what cancels the child.
+    assert elapsed < 2.0
+    from autotrade.agent.prompts import WRAP_UP_PROMPT
+
+    assert any(
+        message.content == WRAP_UP_PROMPT for message in inner.calls[1]["messages"]
+    )
+    release.set()
+    time.sleep(0.2)
+    assert shell.calls == []
+
+
+def test_meta_terminal_tool_stops_refusing_once_the_deadline_is_at_hand() -> None:
+    """A Meta session has neither hard finalization nor a wrap-up grace.
+
+    Refusing `finish_meta` for as long as a child runs would therefore hold the
+    session to its deadline and silently keep the previous PRIOR, so the
+    refusal lifts once the remaining time is inside the teardown barrier's own
+    window — there is no longer time to wait for that child anyway.
+    """
+
+    release = threading.Event()
+    started = threading.Event()
+
+    class BlockingChild:
+        model = "child"
+        provider = "test"
+        context_window_tokens = 128000
+
+        def complete(self, messages, **kwargs):
+            del messages, kwargs
+            started.set()
+            release.wait(10)
+            return ProviderResponse(content="late")
+
+    def meta_runner(duration: float) -> AgentSessionRunner:
+        return AgentSessionRunner(
+            llm=ScriptedLLM([]),
+            tools=ToolRegistry([_FinishStub("finish_meta")]),
+            system_prompt="meta",
+            config=_meta_config(),
+            subagent=SubAgentEngine(
+                llm=BlockingChild(),
+                tools=ToolRegistry([_NamedTool("read_file")]),
+                mode="meta",
+            ),
+            time_budget=InferenceTimeBudget(duration_seconds=duration),
+        )
+
+    runners = [meta_runner(600.0), meta_runner(SUBAGENT_TEARDOWN_WAIT_SECONDS / 2)]
+    try:
+        for runner in runners:
+            assert runner.tools.invoke(
+                "agent", {"agent": "auditor", "task": "read"}
+            ).ok
+        assert started.wait(3)
+        # Time to spare: the child's report is worth more than finishing now.
+        refused = runners[0]._in_flight_subagent_error()
+        assert refused is not None
+        assert refused["error_type"] == "subagents_in_flight"
+        assert [child["role"] for child in refused["running_children"]] == ["auditor"]
+        # Inside the teardown window: waiting on would only lose the PRIOR.
+        assert runners[1]._in_flight_subagent_error() is None
+    finally:
+        release.set()
+        for runner in runners:
+            runner._close_session({"status": "finished", "llm_calls": 1})
+
+
+def test_terminal_tool_is_refused_while_a_launched_child_still_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """finish_fold must not discard the children of its own turn.
+
+    A Meta session launched three sub-agents and called ``finish_meta`` in the
+    same turn; all three were cancelled and the artifact was left unchanged.
+    The barrier waits, then the terminal call is refused with the live picture
+    so the session can wait for or steer the children instead.
+    """
+
+    from autotrade.agent import runner as runner_module
+
+    monkeypatch.setattr(runner_module, "SUBAGENT_TEARDOWN_WAIT_SECONDS", 0.2)
+    started = threading.Event()
+    release = threading.Event()
+    shell = DeclaredReadOnlyShell()
+    finish = _FinishStub("finish_fold")
+
+    class BlockingChild:
+        model = "child"
+        provider = "test"
+        context_window_tokens = 128000
+
+        def complete(self, messages, **kwargs):
+            del messages, kwargs
+            started.set()
+            release.wait(5)
+            return ProviderResponse(content="late")
+
+    runner = AgentSessionRunner(
+        llm=ScriptedLLM([]),
+        tools=ToolRegistry([finish]),
+        system_prompt="fold",
         config=_fold_config(),
         subagent=SubAgentEngine(
             llm=BlockingChild(),
             tools=ToolRegistry([shell]),
         ),
-    ).run("go")
-    elapsed = time.monotonic() - t0
-    assert result.status == "finished"
-    assert elapsed < 2.0
-    release.set()
-    time.sleep(0.2)
-    assert shell.calls == []
+    )
+    try:
+        results, _ = runner._dispatch_tool_calls(
+            (
+                ToolCall("e1", "agent", {"agent": "developer", "task": "slow"}),
+                ToolCall("f1", "finish_fold", {}),
+            ),
+            InferenceTimeBudget(duration_seconds=600),
+        )
+        assert started.wait(3)
+        record = results[-1][1]
+        assert record["ok"] is False
+        assert record["error_type"] == "subagents_in_flight"
+        assert [child["role"] for child in record["running_children"]] == ["developer"]
+        # Refused, not silently swallowed: the session is not finished.
+        assert runner.tools.finished is False
+    finally:
+        release.set()
+        runner._close_session({"status": "finished", "llm_calls": 1})
 
 
 class _OverlapProbe:

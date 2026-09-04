@@ -12,6 +12,11 @@ from autotrade.agent import (
     ContextCompactor,
     SubAgentEngine,
 )
+from autotrade.agent import compact as compact_module
+from autotrade.agent.compact import (
+    fit_tool_results_to_context,
+    summarize_tool_result_for_context,
+)
 from autotrade.agent.experiment_facts import build_experiment_facts
 from autotrade.agent.prompts import (
     FOLD_STATIC_SECTIONS,
@@ -36,7 +41,9 @@ from autotrade.environment.step_tree import StepTree
 from autotrade.environment.time_budget import InferenceTimeBudget
 from autotrade.environment.tools import (
     FinishFoldTool,
+    ReadFileTool,
     SafeWorkspace,
+    SearchRoots,
     ToolRegistry,
     ToolResult,
     ToolSpec,
@@ -182,6 +189,234 @@ def test_compactor_bounds_one_huge_recent_tool_result_before_local_request():
     }
     fits, _, _ = context_request_fits(llm, request, max_tokens=500)
     assert fits is True
+
+
+def _spill_roots(tmp_path: Path) -> SearchRoots:
+    """A real spill store over a temporary workspace.
+
+    Without a sandbox layout the search roots spill under the workspace, so an
+    archive reference is ``root='workspace'`` plus a relative path — the same
+    ``root`` + ``path`` pair a session reads back with ``read_file``."""
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    return SearchRoots(SafeWorkspace(workspace))
+
+
+def _read_archive(roots: SearchRoots, reference: dict) -> list[dict]:
+    result = ReadFileTool(roots).invoke(
+        {"root": reference["root"], "path": reference["path"], "limit": 5_000}
+    )
+    assert result.ok
+    lines = str(result.value["content"]).splitlines()
+    # ``read_file`` numbers lines cat -n style; the archive itself is JSON lines.
+    return [json.loads(line.split("\t", 1)[1]) for line in lines]
+
+
+def test_compaction_archives_dropped_messages_and_the_agent_can_read_them_back(
+    tmp_path: Path,
+):
+    roots = _spill_roots(tmp_path)
+    llm = ScriptedLLM(
+        [
+            ProviderResponse(content="## 目标\nfirst"),
+            ProviderResponse(content="## 目标\nsecond"),
+        ]
+    )
+    compactor = ContextCompactor(
+        llm,
+        ContextCompactionConfig(
+            token_threshold=1, min_messages=5, keep_recent_messages=2
+        ),
+        result_store=roots,
+    )
+    messages = [ChatMessage("system", "system")]
+    messages.extend(ChatMessage("user", f"message {index}") for index in range(6))
+
+    first = compactor.compact(messages)
+
+    assert first is not None and first.event["status"] == "ok"
+    payload = json.loads(first.messages[1].content or "{}")
+    reference = payload["archives"][0]
+    assert reference["compaction_index"] == 1
+    assert reference["messages"] == reference["dropped_messages"] == 4
+    assert "grep or read_file" in payload["archive_hint"]
+    assert first.event["archive"] == reference
+    # The four dropped messages are archived in conversation order, and the two
+    # kept as recent raw turns are not duplicated into the archive.
+    archived = _read_archive(roots, reference)
+    assert [record["content"] for record in archived] == [
+        f"message {index}" for index in range(4)
+    ]
+    assert [record["position"] for record in archived] == [1, 2, 3, 4]
+    assert [message.content for message in first.messages[2:]] == [
+        "message 4",
+        "message 5",
+    ]
+
+    # A second compaction drops the first summary as well, so its archive
+    # reference has to travel forward or the earlier content becomes
+    # unreachable.
+    continued = [*first.messages]
+    continued.extend(ChatMessage("user", f"later {index}") for index in range(4))
+    second = compactor.compact(continued)
+
+    assert second is not None and second.event["status"] == "ok"
+    trail = json.loads(second.messages[1].content or "{}")["archives"]
+    assert [item["compaction_index"] for item in trail] == [1, 2]
+    assert trail[0] == reference
+    assert _read_archive(roots, trail[0])[0]["content"] == "message 0"
+    assert any(
+        record["content"] == "later 0" for record in _read_archive(roots, trail[1])
+    )
+
+
+def test_compaction_archives_nothing_when_the_session_elides_message_content(
+    tmp_path: Path,
+):
+    """A Meta session traces no message content and archives none either."""
+
+    roots = _spill_roots(tmp_path)
+    compactor = ContextCompactor(
+        ScriptedLLM([ProviderResponse(content="## 目标\nmeta")]),
+        ContextCompactionConfig(
+            token_threshold=1, min_messages=5, keep_recent_messages=2
+        ),
+        result_store=roots,
+        archive_messages=False,
+    )
+    messages = [ChatMessage("system", "system")]
+    messages.extend(ChatMessage("user", f"secret {index}") for index in range(6))
+
+    result = compactor.compact(messages)
+
+    assert result is not None and result.event["status"] == "ok"
+    payload = json.loads(result.messages[1].content or "{}")
+    assert "archives" not in payload
+    assert "not archived in this session" in payload["archive_hint"]
+    assert result.event["archive_skipped"] == "content_elided"
+    assert not list((tmp_path / "workspace" / "logs").rglob("*.txt"))
+
+
+def test_compaction_archive_size_cap_keeps_the_newest_dropped_messages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(compact_module, "_ARCHIVE_MAX_CHARS", 900)
+    roots = _spill_roots(tmp_path)
+    compactor = ContextCompactor(
+        ScriptedLLM([ProviderResponse(content="## 目标\ncapped")]),
+        ContextCompactionConfig(
+            token_threshold=1, min_messages=5, keep_recent_messages=1
+        ),
+        result_store=roots,
+    )
+    messages = [ChatMessage("system", "system")]
+    messages.extend(ChatMessage("user", f"{index}" * 400) for index in range(6))
+
+    result = compactor.compact(messages)
+
+    assert result is not None
+    reference = result.event["archive"]
+    assert reference["dropped_messages"] == 5
+    assert 0 < reference["messages"] < 5
+    archived = _read_archive(roots, reference)
+    assert len(archived) == reference["messages"]
+    # The archive is bounded and keeps the turns nearest the retained window.
+    assert archived[-1]["position"] == 5
+    assert archived[-1]["content"] == "4" * 400
+    spilled = next((tmp_path / "workspace" / "logs").rglob("archive.txt"))
+    assert spilled.stat().st_size <= 900
+
+
+def test_compaction_archive_skips_one_oversized_message_and_keeps_the_others(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """One huge tool result must not cost the Agent every older message."""
+
+    monkeypatch.setattr(compact_module, "_ARCHIVE_MAX_CHARS", 900)
+    roots = _spill_roots(tmp_path)
+    compactor = ContextCompactor(
+        ScriptedLLM([ProviderResponse(content="## 目标\nskipped")]),
+        ContextCompactionConfig(
+            token_threshold=1, min_messages=5, keep_recent_messages=1
+        ),
+        result_store=roots,
+    )
+    messages = [ChatMessage("system", "system")]
+    messages.extend(ChatMessage("user", f"small {index}") for index in range(4))
+    # The newest dropped message alone exceeds the whole archive budget.
+    messages.append(ChatMessage("user", "huge" * 400))
+    messages.append(ChatMessage("user", "kept recent"))
+
+    result = compactor.compact(messages)
+
+    assert result is not None
+    reference = result.event["archive"]
+    assert reference["dropped_messages"] == 5 and reference["messages"] == 4
+    assert [record["content"] for record in _read_archive(roots, reference)] == [
+        f"small {index}" for index in range(4)
+    ]
+
+
+def test_emergency_tool_result_summary_spills_the_body_it_removes(tmp_path: Path):
+    roots = _spill_roots(tmp_path)
+    body = json.dumps({"status": "ok", "rows": ["row"] * 4_000})
+    messages = [
+        ChatMessage("system", "system"),
+        ChatMessage(
+            "assistant",
+            tool_calls=(ToolCall("shell-1", "shell", {"argv": ["rg", "x"]}),),
+        ),
+        ChatMessage("tool", body, tool_call_id="shell-1"),
+    ]
+
+    edited, edit = fit_tool_results_to_context(
+        ScriptedLLM([], context_window_tokens=3_000),
+        messages,
+        max_tokens=500,
+        result_store=roots,
+    )
+
+    assert edit["summarized_tool_results"] == 1
+    summary = json.loads(edited[2].content or "{}")
+    assert summary["source_omitted"] is True
+    assert "read_file" in summary["result_hint"]
+    result = ReadFileTool(roots).invoke(
+        {"root": summary["result_root"], "path": summary["result_ref"], "limit": 5_000}
+    )
+    assert result.ok
+    assert body[:200] in str(result.value["content"])
+    # Without a store the replacement stays purely lossy, as before.
+    assert "result_ref" not in json.loads(
+        summarize_tool_result_for_context(messages[2]).content or "{}"
+    )
+
+
+def test_emergency_summary_spills_nothing_for_a_replacement_it_discards(
+    tmp_path: Path,
+):
+    """A result too small to shrink keeps its body and leaves no orphan file."""
+
+    roots = _spill_roots(tmp_path)
+    messages = [
+        ChatMessage("system", "system"),
+        ChatMessage(
+            "assistant",
+            tool_calls=(ToolCall("shell-1", "shell", {"argv": ["rg", "x"]}),),
+        ),
+        ChatMessage("tool", "x" * 600, tool_call_id="shell-1"),
+    ]
+
+    edited, edit = fit_tool_results_to_context(
+        ScriptedLLM([], context_window_tokens=10),
+        messages,
+        max_tokens=5,
+        force=True,
+        result_store=roots,
+    )
+
+    assert edit == {} and edited[2].content == "x" * 600
+    assert not list((tmp_path / "workspace" / "logs").rglob("tool_result.txt"))
 
 
 def test_context_token_estimate_includes_reasoning_content():

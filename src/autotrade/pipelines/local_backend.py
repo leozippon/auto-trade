@@ -86,6 +86,7 @@ from autotrade.environment.tools.finish_fold import (
     FINISH_FOLD_MIN_BATCH_ROUNDS,
     FinishFoldTool,
     FoldBudgetStatus,
+    HardRuleCheck,
     executable_output_structure,
 )
 from autotrade.environment.tools.hitl import AskUserTool
@@ -107,6 +108,7 @@ from autotrade.environment.tools.workspace import SafeWorkspace
 
 from .agent_views import compact_fold_history, vs_parent_metrics
 from .config import (
+    AcceptanceRules,
     ArtifactRevision,
     EvaluationBackend,
     EvaluationRequest,
@@ -1915,6 +1917,24 @@ def another_batch_round_fits(backtest: FoldBacktestTool) -> bool:
     return request.max_steps - len(backtest.steps) >= BATCH_VALIDATE_MIN_CANDIDATES
 
 
+def acceptance_hard_rule_check(
+    acceptance_rules: Mapping[str, object],
+) -> HardRuleCheck | None:
+    """The Pipeline's hard acceptance rules as one metrics -> reasons callable.
+
+    ``finish_fold`` checks its nomination against the same rules the freeze
+    decision applies, without the Environment importing the Pipeline: the rules
+    are rebuilt here from the run's own record and handed over as a callable,
+    like the round floor and the budget counters. A request that carries no
+    rules gets no check rather than a guessed one.
+    """
+
+    if not acceptance_rules:
+        return None
+    rules = AcceptanceRules(**dict(acceptance_rules))
+    return lambda metrics: rules.evaluate(dict(metrics))[0]
+
+
 def fold_budget_status(backtest: FoldBacktestTool) -> FoldBudgetStatus:
     """What this Fold session still has when ``finish_fold`` is called.
 
@@ -2338,6 +2358,11 @@ class LLMFoldDeveloper:
             parent_main_py = (
                 (source / "main.py") if request.parent is not None else None
             )
+            # One rule check for the session: ``finish_fold`` refuses or annotates
+            # a nomination with it, and the Runner labels every hard-finalization
+            # candidate with it, so the two never disagree about which node the
+            # Pipeline would freeze.
+            hard_rule_check = acceptance_hard_rule_check(request.acceptance_rules)
             tools: list[Tool] = [
                 ReadFileTool(search_roots),
                 GrepTool(search_roots),
@@ -2396,6 +2421,7 @@ class LLMFoldDeveloper:
                     min_batch_rounds=FINISH_FOLD_MIN_BATCH_ROUNDS,
                     another_round_fits=lambda: another_batch_round_fits(backtest),
                     budget_status=lambda: fold_budget_status(backtest),
+                    hard_rule_check=hard_rule_check,
                 )
             )
             budgeted = SessionBudgetLLM(self.llm, budget=shared_budget, role="main")
@@ -2447,7 +2473,13 @@ class LLMFoldDeveloper:
                     max_response_tokens=self.max_response_tokens,
                 ),
                 compactor=(
-                    ContextCompactor(compact_budgeted, self.context_compaction)
+                    ContextCompactor(
+                        compact_budgeted,
+                        self.context_compaction,
+                        # Dropped messages are archived under the session's own
+                        # logs and read back with the search tools.
+                        result_store=search_roots,
+                    )
                     if compact_budgeted is not None
                     else None
                 ),
@@ -2461,6 +2493,22 @@ class LLMFoldDeveloper:
                     session_key=request.session_key,
                     run_id=request.run_id,
                 ),
+                # Selecting it is how this Fold keeps the parent, so hard
+                # finalization must be able to offer it alongside the
+                # session's own Validations.
+                control_validation_node=(
+                    {
+                        "node_id": control_step.step_id,
+                        "revision_id": self.ref_store.get_or_create(
+                            "strategy", control_step.revision_id
+                        ),
+                        "result_name": PARENT_CONTROL_RESULT_NAME,
+                        "stats": inline_backtest_stats(control_step.validation.summary),
+                    }
+                    if control_step is not None
+                    else None
+                ),
+                hard_rule_check=hard_rule_check,
             )
             result = runner.run(self._fold_instruction(request))
             chmod_tree(inputs_dir, file_mode=0o644, dir_mode=0o755)
@@ -3067,7 +3115,16 @@ class LLMMetaLearner:
                 max_response_tokens=self.max_response_tokens,
             ),
             compactor=(
-                ContextCompactor(compact_budgeted, self.context_compaction)
+                ContextCompactor(
+                    compact_budgeted,
+                    self.context_compaction,
+                    # The session's own tool-result spill, already used by its
+                    # search tools; only the dropped-message archive is off.
+                    result_store=search_roots,
+                    # A Meta session elides message content from its trace
+                    # (below) and archives none of it either.
+                    archive_messages=False,
+                )
                 if compact_budgeted is not None
                 else None
             ),

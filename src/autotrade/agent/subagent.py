@@ -653,6 +653,12 @@ class SubAgentEngine(SessionTimeBudgetAware):
         # runs a fresh instance of it over its own conversation. The runner
         # hands its own compactor down when none is given here.
         self.compactor = compactor
+        # Seconds of the shared session budget reserved for the parent alone:
+        # a child's deadline is the session's remaining time minus this tail,
+        # so every child returns before the parent's finalization window opens.
+        # The runner sets it from its own session config; zero means the plain
+        # session deadline is the only bound.
+        self.parent_reserve_seconds = 0.0
         self._cancel_event = cancel_event or threading.Event()
         bindings: list[TimeBudgetBinding] = []
         if isinstance(llm, SessionTimeBudgetAware):
@@ -747,6 +753,10 @@ class SubAgentEngine(SessionTimeBudgetAware):
             started["description"] = description
         if resumed_from:
             started["resumed_from"] = resumed_from
+        if self.parent_reserve_seconds > 0:
+            # Why a child can end while the session clock still shows time:
+            # the tail is the parent's finalization window.
+            started["parent_reserve_seconds"] = self.parent_reserve_seconds
         self._emit("subagent_task", started)
         if transcript:
             # Resume: the child's own conversation continues; a transcript cut
@@ -1196,7 +1206,11 @@ class SubAgentEngine(SessionTimeBudgetAware):
                 messages = list(result.messages)
                 output_tokens = self._output_tokens(llm, messages, provider_tools)
         messages, edit = fit_tool_results_to_context(
-            llm, messages, tools=provider_tools, max_tokens=output_tokens
+            llm,
+            messages,
+            tools=provider_tools,
+            max_tokens=output_tokens,
+            result_store=self.tools.result_store(),
         )
         if edit:
             self._emit("subagent_context_edit", {**identity, "context_edit": edit})
@@ -1245,6 +1259,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
             tools=provider_tools,
             max_tokens=self._output_tokens(llm, recovered, provider_tools),
             force=not compacted,
+            result_store=self.tools.result_store(),
         )
         if edit:
             self._emit(
@@ -1262,7 +1277,9 @@ class SubAgentEngine(SessionTimeBudgetAware):
     def _remaining_seconds(self, local_deadline: float) -> float:
         remaining = local_deadline - time.monotonic()
         if self.time_budget is not None:
-            remaining = min(remaining, self.time_budget.remaining())
+            remaining = min(
+                remaining, self.time_budget.remaining() - self.parent_reserve_seconds
+            )
         return max(remaining, 0.0)
 
     def _output_tokens(
@@ -1354,8 +1371,17 @@ class SubAgentEngine(SessionTimeBudgetAware):
         return time.monotonic() + max(remaining, 0.0)
 
     def _deadline_reached(self, local_deadline: float) -> bool:
+        """Whether this child must stop.
+
+        The session budget is shared, so the child's share ends
+        ``parent_reserve_seconds`` before the session's does: the tail belongs
+        to the parent's finalization. A child that ran to the very end of the
+        budget once took the parent's whole selection window with it.
+        """
+
         return time.monotonic() >= local_deadline or (
-            self.time_budget is not None and self.time_budget.remaining() <= 0
+            self.time_budget is not None
+            and self.time_budget.remaining() <= self.parent_reserve_seconds
         )
 
     def _validate_tools(self) -> None:
