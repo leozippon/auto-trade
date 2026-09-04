@@ -3197,6 +3197,41 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertEqual(response.json()["removed_work_root"], str(sandbox))
         self.assertEqual(marker.read_text(encoding="utf-8"), "keep")
 
+    def test_delete_removes_console_sandbox_tree_under_shared_work_root(self) -> None:
+        # Console-created experiments record the shared sandbox root in
+        # params.json and the worker runs under <work_root>/<experiment_id>.
+        # Deletion must reclaim exactly that subtree and nothing around it.
+        experiment_id = "exp_console_layout"
+        directory = self._build_hitl_experiment(experiment_id)
+        write_json_atomic(
+            directory / "hitl/status.json",
+            {"schema_version": 1, "pid": 999_999_999, "state": "failed"},
+        )
+        params_path = directory / "hitl/params.json"
+        shared_root = self.repo_root / ".runtime/sandboxes"
+        params = json.loads(params_path.read_text(encoding="utf-8"))
+        params["work_root"] = str(shared_root)
+        write_json_atomic(params_path, params)
+        sandbox = shared_root / experiment_id
+        (sandbox / "run_0001").mkdir(parents=True)
+        (sandbox / "run_0001/runtime.txt").write_text("remove", encoding="utf-8")
+        sibling = shared_root / "exp_other_layout"
+        sibling.mkdir()
+        keep = sibling / "keep.txt"
+        keep.write_text("keep", encoding="utf-8")
+
+        response = self.client.delete(
+            f"/api/experiments/{experiment_id}",
+            params={"confirm": experiment_id},
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["removed_work_root"], str(sandbox))
+        self.assertFalse(sandbox.exists())
+        self.assertFalse(directory.exists())
+        self.assertTrue(shared_root.is_dir())
+        self.assertEqual(keep.read_text(encoding="utf-8"), "keep")
+
     def test_delete_rejects_symlink_alias_to_another_experiment(self) -> None:
         target = self.experiments_root / "exp_target"
         target.mkdir()

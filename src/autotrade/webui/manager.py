@@ -1530,15 +1530,23 @@ class ExperimentManager:
             # never adopts an unreadable file's explicit work_root.
             params = _read_json(directory / "hitl/params.json")
             work_root = params.get("work_root")
-            # The per-experiment sandbox dir is derived from the experiment id, so
-            # it is removed even when params.json is unreadable; an explicit
-            # work_root is honored only when it IS that dir (never a shared root).
+            # work_root is the shared sandbox root: the worker runs this
+            # experiment under work_root/<experiment_id> (pipelines.worker), and
+            # relative values resolve against the repository there. Apply the
+            # same derivation here, then remove that directory only when it is
+            # the validated per-experiment dir under <repo>/.runtime/sandboxes —
+            # never the shared root itself and never a sibling experiment. A
+            # missing or unreadable params.json falls back to that same path.
             expected = _derived_sandbox_tree(self.repo_root, experiment_id)
             if expected is not None:
                 try:
-                    work_path = (
-                        Path(str(work_root)).resolve() if work_root else expected
-                    )
+                    if work_root:
+                        configured = Path(str(work_root))
+                        if not configured.is_absolute():
+                            configured = self.repo_root / configured
+                        work_path = (configured / experiment_id).resolve()
+                    else:
+                        work_path = expected
                 except (OSError, RuntimeError) as exc:
                     raise ManagerDeleteError(
                         f"cannot validate configured sandbox path: {type(exc).__name__}: {exc}"
