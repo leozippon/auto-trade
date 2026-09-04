@@ -16,6 +16,7 @@ import pandas as pd
 import pytest
 
 from autotrade.agent import prompts
+from autotrade.agent.experiment_facts import DEADLINE_SECONDS_NOTE
 from autotrade.agent.prompts import (
     FOLD_DEFAULT_INSTRUCTION,
     FOLD_DYNAMIC_CONTEXT_HEADER,
@@ -180,6 +181,7 @@ def test_fold_preview_states_the_pipeline_budgets_and_scope(tmp_path: Path):
         "deadline_seconds": fold_session_deadline_seconds(
             rolling_default("max_fold_minutes"), DEFAULT_DEADLINE_GRACE_MINUTES
         ),
+        "deadline_seconds_note": DEADLINE_SECONDS_NOTE,
         "deadline_grace_seconds": DEFAULT_DEADLINE_GRACE_MINUTES * 60.0,
         "finalize_before_deadline_seconds": rolling_default(
             "finalize_before_deadline_seconds"

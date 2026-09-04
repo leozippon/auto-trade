@@ -16,6 +16,15 @@ from autotrade.environment.sandbox import SCREENING_TOOL_MOUNT
 
 EXPERIMENT_FACTS_SCHEMA_VERSION = 1
 
+# Agent-visible clock contract for ``budgets.deadline_seconds``. Fold and Meta
+# both read this from the injected facts; smoke_backtest, shell, and sub-agent
+# waits are not exemptions and must not be named here.
+DEADLINE_SECONDS_NOTE = (
+    "`deadline_seconds` 统计可暂停的有效推理时间；"
+    "`daily_backtest`、`batch_validate` 和 `ask_user` 调用期间暂停计时，"
+    "因此会话总墙钟可能更长。"
+)
+
 
 def build_experiment_facts(
     *,
@@ -282,13 +291,14 @@ def _budget_facts(
     budgets = _as_mapping(manifest.get("budgets"))
     return compact_mapping(
         {
-            # Total session wall clock. For a Fold this is the main
+            # Pausable effective reasoning time. For a Fold this is the main
             # deadline PLUS the trailing wrap-up grace, so the grace rides
             # beside it: without the split a session plans against a
             # deadline that is already ``deadline_grace_seconds`` later
             # than the one its directive and wrap-up prompt talk about.
             # Meta has no wrap-up window and carries no grace.
             "deadline_seconds": manifest.get("deadline_seconds") or budgets.get("deadline_seconds"),
+            "deadline_seconds_note": DEADLINE_SECONDS_NOTE,
             "deadline_grace_seconds": budgets.get("deadline_grace_seconds"),
             "finalize_before_deadline_seconds": manifest.get("finalize_before_deadline_seconds"),
             "max_steps": manifest.get("max_steps") or budgets.get("max_steps"),
