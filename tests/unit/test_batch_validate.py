@@ -158,7 +158,6 @@ class _Session:
         record_failed_attempts: bool = True,
         deadline_seconds: float = 600.0,
         readonly_template: bool = False,
-        min_batch_rounds: int = 0,
     ) -> None:
         self.root = root
         self.workspace_root = root / "workspace"
@@ -238,7 +237,6 @@ class _Session:
             parent_main_py=self.parent / "main.py",
             current_output=self.output,
             current_models=self.models,
-            min_batch_rounds=min_batch_rounds,
             another_round_fits=lambda: another_batch_round_fits(self.backtest),
         )
 
@@ -655,46 +653,42 @@ class BatchTemplateFilesTest(unittest.TestCase):
             self.assertEqual(session.backtest.backtests, 0)
 
 
-class BatchRoundFloorTest(unittest.TestCase):
-    """``finish_fold`` insists on two completed rounds while another round
-    could still run; the wiring waives it exactly when one cannot."""
+class AnotherRoundFitsTest(unittest.TestCase):
+    """``another_batch_round_fits`` is the waiver every remaining ``finish_fold``
+    gate shares: true while the session could still run one more round, false
+    once the backtest/Step budget or the deadline window rules one out."""
 
     def _finish_winner(self, session: _Session, value: dict) -> object:
         winner = value["candidates"][0]["node_id"]
         session.rollback.invoke({"node_id": winner})
         return session.finish.invoke({"node_id": winner})
 
-    def test_one_round_is_refused_and_two_are_accepted(self) -> None:
+    def test_a_round_still_fits_while_budget_and_time_allow(self) -> None:
         with TemporaryDirectory() as tmp:
-            session = _Session(Path(tmp), min_batch_rounds=2, max_backtests=6, max_steps=6)
+            session = _Session(Path(tmp), max_backtests=6, max_steps=6)
             session.candidate("a", _strategy("1"))
             session.candidate("b", _strategy("22"))
-            first = session.call("a", "b").value
-            with self.assertRaises(ToolError) as caught:
-                self._finish_winner(session, first)
-            self.assertIn("1 of the 2 batch_validate rounds", str(caught.exception))
-            session.candidate("c", _strategy("333"))
-            session.candidate("d", _strategy("4444"))
-            second = session.call("c", "d").value
-            finished = self._finish_winner(session, second)
-            self.assertTrue(finished.finish)
+            value = session.call("a", "b").value
+            self.assertTrue(another_batch_round_fits(session.backtest))
+            # One completed round is a legal finish: no round floor remains.
+            self.assertTrue(self._finish_winner(session, value).finish)
 
-    def test_the_floor_is_waived_when_the_budget_cannot_fit_another_round(self) -> None:
+    def test_no_round_fits_when_the_budget_cannot_hold_another(self) -> None:
         with TemporaryDirectory() as tmp:
             # Three backtests: one two-candidate round leaves a single slot,
             # fewer than the smallest batch.
-            session = _Session(Path(tmp), min_batch_rounds=2, max_backtests=3, max_steps=6)
+            session = _Session(Path(tmp), max_backtests=3, max_steps=6)
             session.candidate("a", _strategy("1"))
             session.candidate("b", _strategy("22"))
             value = session.call("a", "b").value
             self.assertFalse(another_batch_round_fits(session.backtest))
             self.assertTrue(self._finish_winner(session, value).finish)
 
-    def test_the_floor_is_waived_inside_the_deadline_window(self) -> None:
+    def test_no_round_fits_inside_the_deadline_window(self) -> None:
         with TemporaryDirectory() as tmp:
             # 80 s of budget minus the 60 s grace leaves 20 s before the main
             # deadline, inside the 30 s finalize reserve.
-            session = _Session(Path(tmp), min_batch_rounds=2, deadline_seconds=80.0)
+            session = _Session(Path(tmp), deadline_seconds=80.0)
             session.candidate("a", _strategy("1"))
             session.candidate("b", _strategy("22"))
             value = session.call("a", "b").value

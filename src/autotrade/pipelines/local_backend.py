@@ -83,7 +83,6 @@ from autotrade.environment.tools.base import (
 )
 from autotrade.environment.tools.files import EditFileTool, WriteFileTool
 from autotrade.environment.tools.finish_fold import (
-    FINISH_FOLD_MIN_BATCH_ROUNDS,
     FinishFoldTool,
     FoldBudgetStatus,
     HardRuleCheck,
@@ -1901,11 +1900,12 @@ class BatchValidateTool(SessionTimeBudgetAware):
 def another_batch_round_fits(backtest: FoldBacktestTool) -> bool:
     """Whether the session could still run one more ``batch_validate`` round.
 
-    ``finish_fold`` insists on a minimum number of rounds only while this is
-    true. It stops being true inside the deadline window — the finalize
-    reserve before the main deadline, and the wrap-up grace behind it, where
-    the Runner itself asks the session to finish — and once the Step or
-    backtest budget has fewer slots left than the smallest batch.
+    ``finish_fold`` asks for an early-stop reason, and refuses a nomination the
+    Pipeline would reject while a sibling passes, only while this is true. It
+    stops being true inside the deadline window — the finalize reserve before
+    the main deadline, and the wrap-up grace behind it, where the Runner itself
+    asks the session to finish — and once the Step or backtest budget has fewer
+    slots left than the smallest batch.
     """
 
     request = backtest.request
@@ -1925,13 +1925,13 @@ def acceptance_hard_rule_check(
     ``finish_fold`` checks its nomination against the same rules the freeze
     decision applies, without the Environment importing the Pipeline: the rules
     are rebuilt here from the run's own record and handed over as a callable,
-    like the round floor and the budget counters. A request that carries no
-    rules gets no check rather than a guessed one.
+    like the budget counters. A request that carries no rules gets no check
+    rather than a guessed one.
     """
 
     if not acceptance_rules:
         return None
-    rules = AcceptanceRules(**dict(acceptance_rules))
+    rules = AcceptanceRules.from_record(acceptance_rules)
     return lambda metrics: rules.evaluate(dict(metrics))[0]
 
 
@@ -2011,6 +2011,9 @@ class LLMFoldDeveloper:
         subagent_llm: LLMProxy | None = None,
         compact_llm: LLMProxy | None = None,
         context_compaction: ContextCompactionConfig | None = None,
+        # The children's compaction budget, derived from their own model's
+        # window; defaults to the parent's.
+        subagent_compaction: ContextCompactionConfig | None = None,
         baseline_strategy: str | Path,
         artifact_store: FilesystemArtifactStore,
         evaluator: EvaluationBackend,
@@ -2033,6 +2036,7 @@ class LLMFoldDeveloper:
         self.subagent_llm = subagent_llm or llm
         self.compact_llm = compact_llm
         self.context_compaction = context_compaction or ContextCompactionConfig()
+        self.subagent_compaction = subagent_compaction or self.context_compaction
         self.baseline_strategy = Path(baseline_strategy).resolve(strict=True)
         self.artifact_store = artifact_store
         self.experiment_dir = Path(experiment_dir).resolve()
@@ -2131,6 +2135,10 @@ class LLMFoldDeveloper:
                 "llm": {
                     "provider": str(getattr(self.llm, "provider", "")),
                     "model": str(getattr(self.llm, "model", "")),
+                    "subagent": {
+                        "provider": str(getattr(self.subagent_llm, "provider", "")),
+                        "model": str(getattr(self.subagent_llm, "model", "")),
+                    },
                 },
                 "conversation_id": request.run_id,
                 "runtime_env_ref": "/mnt/artifacts/runtime_env.json",
@@ -2418,7 +2426,6 @@ class LLMFoldDeveloper:
                     parent_main_py=parent_main_py,
                     current_output=output_dir,
                     current_models=models_dir,
-                    min_batch_rounds=FINISH_FOLD_MIN_BATCH_ROUNDS,
                     another_round_fits=lambda: another_batch_round_fits(backtest),
                     budget_status=lambda: fold_budget_status(backtest),
                     hard_rule_check=hard_rule_check,
@@ -2447,6 +2454,17 @@ class LLMFoldDeveloper:
                 tools=subagent_tools,
                 config=SubAgentConfig(max_tokens=self.max_response_tokens),
                 time_budget=time_budget,
+                # The parent's compaction gateway and archive, at the
+                # threshold the children's own model window allows.
+                compactor=(
+                    ContextCompactor(
+                        compact_budgeted,
+                        self.subagent_compaction,
+                        result_store=search_roots,
+                    )
+                    if compact_budgeted is not None
+                    else None
+                ),
             )
             runner = AgentSessionRunner(
                 llm=budgeted,
@@ -2720,6 +2738,9 @@ class LLMMetaLearner:
         subagent_llm: LLMProxy | None = None,
         compact_llm: LLMProxy | None = None,
         context_compaction: ContextCompactionConfig | None = None,
+        # The children's compaction budget, derived from their own model's
+        # window; defaults to the parent's.
+        subagent_compaction: ContextCompactionConfig | None = None,
         baseline_strategy: str | Path,
         artifact_store: FilesystemArtifactStore,
         experiment_dir: str | Path,
@@ -2749,6 +2770,7 @@ class LLMMetaLearner:
         self.subagent_llm = subagent_llm or llm
         self.compact_llm = compact_llm
         self.context_compaction = context_compaction or ContextCompactionConfig()
+        self.subagent_compaction = subagent_compaction or self.context_compaction
         self.baseline_strategy = Path(baseline_strategy).resolve(strict=True)
         self.artifact_store = artifact_store
         self.experiment_dir = Path(experiment_dir).resolve()
@@ -2956,6 +2978,10 @@ class LLMMetaLearner:
                 "llm": {
                     "provider": str(getattr(self.llm, "provider", "")),
                     "model": str(getattr(self.llm, "model", "")),
+                    "subagent": {
+                        "provider": str(getattr(self.subagent_llm, "provider", "")),
+                        "model": str(getattr(self.subagent_llm, "model", "")),
+                    },
                 },
                 "runtime_env_ref": "/mnt/artifacts/runtime_env.json",
                 # Never advertise a path the session cannot read: a Meta run
@@ -3007,9 +3033,7 @@ class LLMMetaLearner:
                     "files": skills_stats.files,
                     "bytes": skills_stats.bytes,
                 },
-                "modification_constraints": replace(
-                    self.regularization_constraints, is_initial_artifact=not parent_id
-                ).to_record(),
+                "modification_constraints": self.regularization_constraints.to_record(),
                 "meta_learning_directive": self.meta_learning_directive.strip(),
                 "fold_exploration_directive": self.fold_exploration_directive.strip(),
                 "review_window": (
@@ -3052,15 +3076,25 @@ class LLMMetaLearner:
             config=SubAgentConfig(max_tokens=self.max_response_tokens),
             time_budget=time_budget,
             mode="meta",
+            # The parent's compaction gateway at the threshold the children's
+            # own model window allows; a Meta session archives nothing.
+            compactor=(
+                ContextCompactor(
+                    compact_budgeted,
+                    self.subagent_compaction,
+                    result_store=search_roots,
+                    archive_messages=False,
+                )
+                if compact_budgeted is not None
+                else None
+            ),
         )
         modification = ModificationCheckTool(
             output_dir,
             parent_dir=parent,
             models_dir=models_dir,
             parent_models_dir=parent_models,
-            constraints=replace(
-                self.regularization_constraints, is_initial_artifact=not parent_id
-            ),
+            constraints=self.regularization_constraints,
         )
         tools: list[Tool] = [
             ReadFileTool(search_roots),

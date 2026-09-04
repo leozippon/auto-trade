@@ -347,8 +347,8 @@ def _artifact_contract_facts(
     is_meta: bool,
 ) -> dict[str, object]:
     # Local import: the pipelines package imports this module, so binding the
-    # acceptance constant at module scope would close an import cycle.
-    from autotrade.pipelines.config import ACCEPTANCE_SEMANTICS_SUMMARY
+    # acceptance rules at module scope would close an import cycle.
+    from autotrade.pipelines.config import AcceptanceRules
 
     is_initial = bool(manifest.get("is_initial_artifact", manifest.get("template_ref") is not None))
     parent_id = manifest.get("parent_strategy_artifact_id") or manifest.get("parent_artifact_id")
@@ -372,6 +372,11 @@ def _artifact_contract_facts(
         ),
         "model_artifacts_empty": model_artifacts_empty,
     }
+    # What freezes this Fold and what graduates the experiment, both derived
+    # from the run's own rules: the freeze block marks every rule hard or warn,
+    # and the graduation block names the Held-out bar the session is really
+    # optimizing toward. Meta sees neither — it does not freeze or graduate.
+    acceptance = _as_mapping(manifest.get("acceptance_rules"))
     return compact_mapping(
         {
             "required_entry": "output/main.py",
@@ -381,12 +386,11 @@ def _artifact_contract_facts(
             "workspace_frozen": False,
             "parent": compact_mapping(parent),
             "modification_constraints": manifest.get("modification_constraints"),
-            "acceptance_rules": None if is_meta else manifest.get("acceptance_rules"),
-            # Semantics (AcceptanceRules.evaluate): the max_drawdown cap and
-            # non-finite total_return/max_drawdown/sharpe are HARD rejects;
-            # min_return / min_sharpe are targets — shortfalls freeze WITH a
-            # recorded warning instead of resetting the fold.
-            "acceptance_semantics": None if is_meta else ACCEPTANCE_SEMANTICS_SUMMARY,
+            "acceptance_rules": (
+                None
+                if is_meta or not acceptance
+                else AcceptanceRules.from_record(acceptance).agent_facts()
+            ),
             "step_tree_enabled": manifest.get("step_tree_enabled"),
             "record_failed_attempts": manifest.get("record_failed_attempts"),
             "nl_failure_policy": manifest.get("nl_failure_policy"),

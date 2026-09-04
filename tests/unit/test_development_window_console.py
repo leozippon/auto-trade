@@ -118,7 +118,11 @@ def test_the_verdict_reaches_the_listing_only_after_the_reveal(tmp_path: Path):
         "total_return": 0.06,
         "sharpe": 1.1,
         "max_drawdown": -0.08,
-        "benchmark": {"label": "CSI 300", "benchmark_return": 0.02},
+        "benchmark": {
+            "label": "CSI 300",
+            "benchmark_return": 0.02,
+            "neutralized_excess_return": 0.01,
+        },
     }
     ledger.append(
         {

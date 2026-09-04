@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 import unittest
-from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -42,9 +41,9 @@ def _artifact(root: Path, *, extra_lines: int = 0) -> Path:
 
 
 class ModificationConstraintsReachTheToolTest(unittest.TestCase):
-    """The configured limits are enforced, not three hardcoded literals."""
+    """The configured limits are enforced, not hardcoded literals."""
 
-    def test_a_configured_diff_cap_actually_rejects(self) -> None:
+    def test_a_configured_size_cap_actually_rejects(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             parent = _artifact(root / "parent")
@@ -57,57 +56,25 @@ class ModificationConstraintsReachTheToolTest(unittest.TestCase):
                                        constraints=ModificationConstraints())]
             ).invoke("modification_check", {})
             self.assertTrue(generous.ok, generous.error)
+            # The rewrite is reported, never refused: the delta is information.
+            self.assertEqual(generous.value["delta"]["diff_lines"], 50)
 
             strict = ToolRegistry(
                 [
                     ModificationCheckTool(
                         work,
                         parent_dir=parent,
-                        constraints=ModificationConstraints(max_diff_lines=5, max_code_diff_lines=5),
+                        constraints=ModificationConstraints(max_strategy_bytes=10),
                     )
                 ]
             ).invoke("modification_check", {})
             self.assertFalse(strict.ok)
-            self.assertIn("diff lines 50 > 5", strict.error)
+            self.assertIn("exceeds 10 bytes", strict.error)
 
     def test_the_default_is_the_dataclass_not_a_literal(self) -> None:
         with TemporaryDirectory() as tmp:
             tool = ModificationCheckTool(_artifact(Path(tmp) / "output"))
             self.assertEqual(tool.constraints, ModificationConstraints())
-
-    def test_an_early_epoch_relaxation_reaches_the_tool(self) -> None:
-        with TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            parent = _artifact(root / "parent")
-            work = root / "work"
-            copy_artifact(parent, work)
-            _artifact(work, extra_lines=20)
-            base = ModificationConstraints(max_diff_lines=5, max_code_diff_lines=5,
-                                           early_max_diff_lines=500, early_max_code_diff_lines=500)
-            early = ToolRegistry(
-                [ModificationCheckTool(work, parent_dir=parent, constraints=base.for_epoch(1))]
-            ).invoke("modification_check", {})
-            self.assertTrue(early.ok, early.error)
-            late = ToolRegistry(
-                [ModificationCheckTool(work, parent_dir=parent, constraints=base.for_epoch(5))]
-            ).invoke("modification_check", {})
-            self.assertFalse(late.ok)
-
-    def test_an_initial_artifact_is_exempt_from_the_change_budget(self) -> None:
-        with TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            parent = _artifact(root / "parent")
-            work = root / "work"
-            copy_artifact(parent, work)
-            _artifact(work, extra_lines=50)
-            constraints = replace(
-                ModificationConstraints(max_diff_lines=1, max_code_diff_lines=1),
-                is_initial_artifact=True,
-            )
-            result = ToolRegistry(
-                [ModificationCheckTool(work, parent_dir=parent, constraints=constraints)]
-            ).invoke("modification_check", {})
-            self.assertTrue(result.ok, result.error)
 
 
 class RecordFailedAttemptsTest(unittest.TestCase):

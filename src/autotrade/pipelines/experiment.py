@@ -278,10 +278,7 @@ class RollingExperimentPipeline:
                             else "exploration"
                         ),
                         acceptance_rules=self.config.acceptance.to_record(),
-                        modification_constraints=replace(
-                            self.config.step_constraints,
-                            is_initial_artifact=parent is None,
-                        ).for_epoch(_epoch_index(epoch_id)),
+                        modification_constraints=self.config.step_constraints,
                         snapshot_config=_snapshot_config_record(self.snapshots),
                         record_failed_attempts=self.config.record_failed_attempts,
                         nl_failure_policy=self.config.nl_failure_policy,

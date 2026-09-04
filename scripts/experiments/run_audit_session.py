@@ -241,6 +241,7 @@ def _build_pipeline(options) -> tuple[RollingExperimentPipeline, list[str]]:
         raise SystemExit("audit sessions require the LLM developer configuration")
     fold_gateway = options.llm.build_gateway("main")
     meta_gateway = options.llm.build_gateway("meta")
+    subagent_gateway = options.llm.build_gateway("subagent")
     nl_gateway = options.llm.build_gateway("nl")
     compact_gateway = options.llm.build_gateway("compact") if options.llm.compact_enabled else None
     # The wall clocks the formal executor gives one strategy: the Fold developer
@@ -288,9 +289,10 @@ def _build_pipeline(options) -> tuple[RollingExperimentPipeline, list[str]]:
     runtime_root = options.work_root / options.experiment_id
     developer = LLMFoldDeveloper(
         llm=fold_gateway,
-        subagent_llm=fold_gateway,
+        subagent_llm=subagent_gateway,
         compact_llm=compact_gateway,
         context_compaction=options.llm.compaction,
+        subagent_compaction=options.llm.compaction_for("subagent"),
         baseline_strategy=options.baseline_strategy,
         artifact_store=store,
         evaluator=evaluator,
@@ -309,9 +311,10 @@ def _build_pipeline(options) -> tuple[RollingExperimentPipeline, list[str]]:
     )
     meta_learner = LLMMetaLearner(
         llm=meta_gateway,
-        subagent_llm=meta_gateway,
+        subagent_llm=subagent_gateway,
         compact_llm=compact_gateway,
-        context_compaction=options.llm.compaction,
+        context_compaction=options.llm.compaction_for("meta"),
+        subagent_compaction=options.llm.compaction_for("subagent"),
         baseline_strategy=options.baseline_strategy,
         artifact_store=store,
         experiment_dir=options.experiment_dir,

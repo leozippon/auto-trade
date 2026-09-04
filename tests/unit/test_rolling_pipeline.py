@@ -904,12 +904,23 @@ def test_frozen_restore_copy_failure_is_fail_closed(
 class BenchmarkedEvaluator:
     """Replay summaries carrying the frozen benchmark block Held-out is judged on."""
 
-    def __init__(self, total_return: float, sharpe: float, max_drawdown: float, benchmark: float):
+    def __init__(
+        self,
+        total_return: float,
+        sharpe: float,
+        max_drawdown: float,
+        benchmark: float,
+        neutralized: float = 0.01,
+    ):
         self.summary = {
             "total_return": total_return,
             "sharpe": sharpe,
             "max_drawdown": max_drawdown,
-            "benchmark": {"label": "CSI 300", "benchmark_return": benchmark},
+            "benchmark": {
+                "label": "CSI 300",
+                "benchmark_return": benchmark,
+                "neutralized_excess_return": neutralized,
+            },
         }
 
     def evaluate(self, request):
@@ -984,7 +995,11 @@ class RecordingEvaluator:
                 "total_return": self.returns[revision_id],
                 "sharpe": 1.0,
                 "max_drawdown": -0.05,
-                "benchmark": {"label": "CSI 300", "benchmark_return": 0.02},
+                "benchmark": {
+                    "label": "CSI 300",
+                    "benchmark_return": 0.02,
+                    "neutralized_excess_return": 0.01,
+                },
             },
             f"result/{request.mode}/{revision_id}",
         )
@@ -1240,6 +1255,7 @@ def test_single_window_fold_has_no_frozen_test_and_held_out_graduates(tmp_path: 
         "status": "graduated",
         "reasons": [],
         "excess_return": pytest.approx(0.05),
+        "neutralized_excess_return": 0.01,
         "sharpe": 1.2,
         "max_drawdown": -0.05,
         "max_drawdown_limit": 0.25,
@@ -1278,9 +1294,16 @@ def test_a_frozen_test_never_runs_without_a_test_stage(tmp_path: Path):
         ((0.02, 0.5, -0.10, 0.03), ["excess_return_not_positive"]),
         ((0.08, 0.0, -0.10, 0.03), ["sharpe_not_positive"]),
         ((0.08, 0.9, -0.30, 0.03), ["max_drawdown_exceeded"]),
+        # A raw excess that neutralization takes away is a tilt, not an edge.
+        ((0.08, 0.9, -0.10, 0.03, -0.02), ["neutralized_excess_return_not_positive"]),
         (
-            (-0.02, -0.4, -0.40, 0.03),
-            ["excess_return_not_positive", "sharpe_not_positive", "max_drawdown_exceeded"],
+            (-0.02, -0.4, -0.40, 0.03, 0.0),
+            [
+                "excess_return_not_positive",
+                "neutralized_excess_return_not_positive",
+                "sharpe_not_positive",
+                "max_drawdown_exceeded",
+            ],
         ),
     ),
 )
@@ -1303,7 +1326,10 @@ def test_held_out_without_a_benchmark_block_cannot_graduate():
     rules = AcceptanceRules()
     verdict = rules.heldout_verdict({"total_return": 0.2, "sharpe": 2.0, "max_drawdown": -0.01})
     assert verdict["status"] == "discarded"
-    assert verdict["reasons"] == ["missing_benchmark_return"]
+    assert verdict["reasons"] == [
+        "missing_benchmark_return",
+        "missing_neutralized_excess_return",
+    ]
     assert verdict["excess_return"] is None
     failed = rules.heldout_verdict({"status": "failed", "error": "boom"})
     assert failed["status"] == "discarded"

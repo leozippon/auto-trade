@@ -2934,7 +2934,7 @@ def test_child_turns_default_to_48_with_grace_wrap_up() -> None:
     assert "48 轮" in max_turns_field and "自动压缩" in max_turns_field
     # Parents learn that a child has their context window, and that several
     # bounded parallel children still beat one long serial child.
-    assert "相同的上下文窗口" in AGENT_TOOL_DESCRIPTION
+    assert "自己模型的完整上下文窗口" in AGENT_TOOL_DESCRIPTION
     assert "并行的有界子代理仍好过一个很长的串行子代理" in AGENT_TOOL_DESCRIPTION
     assert "并行的有界子代理仍好过一个很长的串行子代理" in FOLD_WORKFLOW_SECTION
     assert "并行的有界子代理仍好过一个很长的串行子代理" in build_system_prompt(
@@ -4014,3 +4014,124 @@ def test_steer_the_child_never_read_is_reported_undelivered() -> None:
     completed = json.loads(str(runner._append_subagent_observations([])[0].content))
     assert completed["status"] == "completed" and completed["steers_undelivered"] == 1
     assert "steers" not in completed
+
+
+def test_children_run_on_their_own_gateway_inside_the_shared_session_quota() -> None:
+    """``subagent_model`` is a second gateway, not a second budget: a child's
+    calls count against the session's shared quota and sub-agent cap, and the
+    trace records the provider and model the child actually used."""
+    shared = SessionCallBudget(
+        max_calls=4, time_budget=InferenceTimeBudget(duration_seconds=600)
+    )
+    assert (shared.subagent_cap, shared.parent_reserve) == (2, 0)
+    parent_llm = ScriptedLLM([ProviderResponse(content="parent")], context_window_tokens=128_000)
+    parent_llm.provider, parent_llm.model = "deepseek", "deepseek-v4-flash"
+    child_llm = ScriptedLLM(
+        [
+            ProviderResponse(
+                tool_calls=(ToolCall("s0", "shell", {"argv": ["ls"]}),),
+                model="qwen-3.8-27b-fp8",
+            ),
+            ProviderResponse(content="done", model="qwen-3.8-27b-fp8"),
+            ProviderResponse(content="must remain unused"),
+        ],
+        context_window_tokens=262_144,
+    )
+    child_llm.provider, child_llm.model = "vllm", "qwen-3.8-27b-fp8"
+    events: list[tuple[str, dict[str, object]]] = []
+    engine = SubAgentEngine(
+        llm=SessionBudgetLLM(child_llm, budget=shared, role="subagent"),
+        tools=ToolRegistry([DeclaredReadOnlyShell()]),
+        event_sink=lambda event, payload: events.append((event, payload)),
+    )
+    # The engine's context arithmetic follows the child's own window.
+    assert (engine.llm.provider, engine.llm.model, engine.llm.context_window_tokens) == (
+        "vllm",
+        "qwen-3.8-27b-fp8",
+        262_144,
+    )
+    result = engine.run("dig", role="auditor")
+    assert result["status"] == "completed" and result["summary"] == "done"
+    assert (result["provider"], result["model"]) == ("vllm", "qwen-3.8-27b-fp8")
+    started = next(payload for event, payload in events if event == "subagent_task")
+    assert started["model"] == "qwen-3.8-27b-fp8"
+    assert [
+        (payload["provider"], payload["model"])
+        for event, payload in events
+        if event == "subagent_llm"
+    ] == [("vllm", "qwen-3.8-27b-fp8")] * 2
+    # Both child calls came out of the one session budget; the cap is spent.
+    assert (shared.calls, shared.subagent_calls) == (2, 2)
+    with pytest.raises(RuntimeError, match="budget exhausted"):
+        engine.llm.complete([ChatMessage("user", "one more")])
+    assert len(child_llm.calls) == 2
+    # The parent's own gateway still has the remaining total.
+    SessionBudgetLLM(parent_llm, budget=shared, role="main").complete(
+        [ChatMessage("user", "go on")]
+    )
+    assert (shared.calls, shared.main_calls) == (3, 1)
+
+
+def test_children_compact_at_their_own_models_threshold_not_the_parents() -> None:
+    """A child on another model gets a compactor derived from that model's
+    window: the runner keeps the engine's own compactor, the child compacts
+    at its threshold while the parent's compactor and threshold stay as they
+    are, and the child's event records the threshold that applied."""
+    from autotrade.agent.compact import ContextCompactionConfig, ContextCompactor
+
+    shared = SessionCallBudget(
+        max_calls=40, time_budget=InferenceTimeBudget(duration_seconds=600)
+    )
+    summary = "## 目标\ncontinue\n\n## 下一步\n- finish"
+    compact_llm = ScriptedLLM([ProviderResponse(content=summary)] * 4)
+    compact_budgeted = SessionBudgetLLM(compact_llm, budget=shared, role="compact")
+    parent_compactor = ContextCompactor(
+        compact_budgeted,
+        ContextCompactionConfig(token_threshold=87_040, min_messages=4, keep_recent_messages=2),
+    )
+    child_compactor = ContextCompactor(
+        compact_budgeted,
+        ContextCompactionConfig(token_threshold=1, min_messages=4, keep_recent_messages=2),
+    )
+    events: list[tuple[str, dict[str, object]]] = []
+    engine = SubAgentEngine(
+        llm=SessionBudgetLLM(
+            ScriptedLLM(
+                [*(_tool_round(index) for index in range(3)), ProviderResponse(content="done")],
+                context_window_tokens=262_144,
+            ),
+            budget=shared,
+            role="subagent",
+        ),
+        tools=ToolRegistry([DeclaredReadOnlyShell()]),
+        compactor=child_compactor,
+    )
+    runner = AgentSessionRunner(
+        llm=SessionBudgetLLM(ScriptedLLM([]), budget=shared, role="main"),
+        tools=ToolRegistry(),
+        system_prompt="fold",
+        config=_fold_config(),
+        compactor=parent_compactor,
+        subagent=engine,
+        event_sink=lambda event, payload: events.append((event, payload)),
+    )
+    assert engine.compactor is child_compactor
+    assert runner.compactor is parent_compactor
+    started = runner.tools.invoke("agent", {"agent": "auditor", "task": "dig"})
+    assert started.ok is True
+    assert runner._wait_subagent_jobs()[-1]["ok"] is True
+    compactions = [
+        payload["compaction"]
+        for event, payload in events
+        if event == "subagent_context_compaction"
+    ]
+    # Rounds 2-4 each crossed the child's threshold of 1 token; the parent's
+    # 87,040 never applied to the child.
+    assert [record["token_threshold"] for record in compactions] == [1, 1, 1]
+    assert [record["status"] for record in compactions] == ["ok"] * 3
+    assert compactions[0]["messages_before"] == 4
+    # One fresh instance per child; neither shared compactor's counters moved,
+    # and the parent's threshold is untouched.
+    assert len(compact_llm.calls) == 3
+    assert parent_compactor.compaction_count == child_compactor.compaction_count == 0
+    assert parent_compactor.config.token_threshold == 87_040

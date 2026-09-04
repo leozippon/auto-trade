@@ -219,9 +219,17 @@ class UnvalidatedParentFallbackTest(unittest.TestCase):
             pipeline, _artifacts, parent, _ = self._guard(Path(tmp), steps=())
             control = EvaluationResult({"total_return": 0.02, "max_drawdown": 0.03}, "result/valid")
             pipeline._assert_parent_validated_in_fold(parent, (), control=control)  # does not raise
-            breached = EvaluationResult({"total_return": 0.02, "max_drawdown": 0.9}, "result/valid")
+            # Only a hard reject disqualifies the control; a drawdown over the
+            # cap now warns, so the unprovable case is a non-finite metric.
+            broken = EvaluationResult(
+                {"total_return": float("nan"), "max_drawdown": 0.03}, "result/valid"
+            )
             with self.assertRaisesRegex(RuntimeError, "refusing unvalidated fallback"):
-                pipeline._assert_parent_validated_in_fold(parent, (), control=breached)
+                pipeline._assert_parent_validated_in_fold(parent, (), control=broken)
+            over_cap = EvaluationResult(
+                {"total_return": 0.02, "max_drawdown": 0.9}, "result/valid"
+            )
+            pipeline._assert_parent_validated_in_fold(parent, (), control=over_cap)
 
     def test_a_step_validating_identical_content_is_allowed(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -243,7 +251,8 @@ class UnvalidatedParentFallbackTest(unittest.TestCase):
                 artifacts,
                 "revision_same",
                 MAIN,
-                summary={"total_return": 0.02, "max_drawdown": 0.9},  # breaches the cap
+                # Nothing was proven: the metric cannot even be compared.
+                summary={"total_return": float("nan"), "max_drawdown": 0.03},
             )
             with self.assertRaisesRegex(RuntimeError, "refusing unvalidated fallback"):
                 pipeline._assert_parent_validated_in_fold(parent, (step,))

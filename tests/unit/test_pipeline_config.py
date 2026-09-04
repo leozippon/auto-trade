@@ -122,11 +122,13 @@ class AcceptanceRulesTest(unittest.TestCase):
         rules = AcceptanceRules()
         ok = {"total_return": 0.02, "sharpe": 0.5, "max_drawdown": 0.1}
         self.assertEqual(rules.evaluate(ok), ([], []))
-        # Drawdown breach stays a HARD reject (risk limit), sign-independent.
+        # A drawdown breach WARNS, sign-independent: the fold still freezes its
+        # validated work and the cap decides at graduation instead.
         for drawdown in (0.30, -0.30):
             with self.subTest(drawdown=drawdown):
-                hard, _ = rules.evaluate({**ok, "max_drawdown": drawdown})
-                self.assertIn("max_drawdown_exceeded", hard)
+                hard, warnings = rules.evaluate({**ok, "max_drawdown": drawdown})
+                self.assertEqual(hard, [])
+                self.assertIn("drawdown_above_target", warnings)
         # Return/Sharpe shortfalls only WARN: the fold freezes instead of resetting.
         hard, warnings = rules.evaluate(
             {"total_return": -0.01, "sharpe": -0.2, "max_drawdown": 0.1}
@@ -203,7 +205,7 @@ class AcceptanceRulesTest(unittest.TestCase):
             "total_return": 0.10,
             "sharpe": 1.0,
             "max_drawdown": -0.05,
-            "benchmark": {"benchmark_return": 0.02},
+            "benchmark": {"benchmark_return": 0.02, "neutralized_excess_return": 0.03},
         }
         # Held-out passes but only 1 of 3 walk-forward transitions beat the
         # benchmark: term (b) fails and the reason carries the counts.
@@ -268,7 +270,7 @@ class HeldOutCostAndTradeGateTest(unittest.TestCase):
         "total_return": 0.06,
         "sharpe": 1.0,
         "max_drawdown": -0.05,
-        "benchmark": {"benchmark_return": 0.05},
+        "benchmark": {"benchmark_return": 0.05, "neutralized_excess_return": 0.02},
         "trade_count": 40,
         "cost_sensitivity": {
             "slippage_bps": 5.0,
@@ -316,6 +318,83 @@ class HeldOutCostAndTradeGateTest(unittest.TestCase):
         missing = {key: value for key, value in self.SUMMARY.items() if key != "trade_count"}
         self.assertEqual(rules.heldout_verdict(missing)["reasons"], ["missing_trade_count"])
         self.assertEqual(AcceptanceRules().heldout_verdict(missing)["reasons"], [])
+
+    def test_a_raw_excess_that_is_only_a_tilt_does_not_graduate(self) -> None:
+        """The neutralized excess is a criterion of its own.
+
+        A raw excess a size or beta exposure could have produced proves no
+        edge, and a replay whose neutralization could not be computed proves
+        nothing either — both are failing reasons, named alongside the rest.
+        """
+
+        rules = AcceptanceRules()
+        tilted = {
+            **self.SUMMARY,
+            "benchmark": {"benchmark_return": 0.05, "neutralized_excess_return": -0.01},
+        }
+        verdict = rules.heldout_verdict(tilted)
+        self.assertEqual(verdict["status"], "discarded")
+        self.assertEqual(verdict["reasons"], ["neutralized_excess_return_not_positive"])
+        self.assertAlmostEqual(float(verdict["neutralized_excess_return"]), -0.01)
+        # Zero is not positive either.
+        flat = {**self.SUMMARY, "benchmark": {**tilted["benchmark"], "neutralized_excess_return": 0.0}}
+        self.assertEqual(
+            rules.heldout_verdict(flat)["reasons"],
+            ["neutralized_excess_return_not_positive"],
+        )
+        # Missing (too few overlapping days to regress) fails closed, and every
+        # other failing criterion is still named beside it.
+        missing = {
+            **self.SUMMARY,
+            "sharpe": -0.1,
+            "benchmark": {"benchmark_return": 0.05},
+        }
+        self.assertEqual(
+            rules.heldout_verdict(missing)["reasons"],
+            ["missing_neutralized_excess_return", "sharpe_not_positive"],
+        )
+
+    def test_the_agent_facts_state_enforcement_and_the_configured_bar(self) -> None:
+        """The ``acceptance_rules`` fact is derived, never retyped: it marks
+        each freeze rule hard or warn and lists only the graduation criteria
+        this experiment actually switched on."""
+
+        default = AcceptanceRules().agent_facts()
+        freeze = default["fold_freeze"]
+        self.assertEqual(freeze["finite_metrics"]["enforcement"], "hard")
+        self.assertEqual(
+            {name: rule["enforcement"] for name, rule in freeze.items() if name != "finite_metrics"},
+            {name: "warn" for name in ("max_drawdown", "min_return", "min_sharpe", "order_count")},
+        )
+        self.assertEqual(freeze["max_drawdown"]["target"], 0.25)
+        required = default["graduation"]["all_required"]
+        self.assertNotIn("excess_at_cost_stress", required)
+        self.assertNotIn("trade_count", required)
+
+        configured = AcceptanceRules(
+            max_drawdown=0.2, cost_stress_multiplier=2.0, heldout_min_trades=20
+        ).agent_facts()["graduation"]["all_required"]
+        self.assertEqual(
+            list(configured),
+            [
+                "excess_return",
+                "neutralized_excess_return",
+                "sharpe",
+                "max_drawdown",
+                "excess_at_cost_stress",
+                "trade_count",
+                "walk_forward_positive_excess",
+            ],
+        )
+        self.assertIn("0.2", configured["max_drawdown"])
+        self.assertIn("2.0", configured["excess_at_cost_stress"])
+        self.assertIn("20", configured["trade_count"])
+
+    def test_a_record_with_a_retired_key_still_rebuilds_the_rules(self) -> None:
+        rules = AcceptanceRules.from_record(
+            {"max_drawdown": 0.2, "heldout_min_trades": 5, "max_diff_lines": 600}
+        )
+        self.assertEqual((rules.max_drawdown, rules.heldout_min_trades), (0.2, 5))
 
     def test_the_thresholds_are_refused_when_they_are_not_thresholds(self) -> None:
         with self.assertRaisesRegex(ValueError, "cost_stress_multiplier must be at least one"):

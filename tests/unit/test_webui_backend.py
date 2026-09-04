@@ -178,6 +178,7 @@ def test_local_webui_health_schema_and_brand(tmp_path: Path):
     assert model_fields == [
         "model",
         "meta_model",
+        "subagent_model",
         "nl_model",
         "compact_model",
         "reasoning_effort",
@@ -192,6 +193,8 @@ def test_local_webui_health_schema_and_brand(tmp_path: Path):
     assert fields["meta_model"]["choices"] == fields["model"]["choices"]
     assert fields["model"]["default"] == LOCAL_QWEN_MODEL
     assert fields["meta_model"]["default"] == LOCAL_QWEN_MODEL
+    assert fields["subagent_model"]["choices"] == fields["model"]["choices"]
+    assert fields["subagent_model"]["default"] == LOCAL_QWEN_MODEL
     assert fields["nl_model"]["default"] == LOCAL_QWEN_MODEL
     assert fields["compact_model"]["default"] == LOCAL_QWEN_MODEL
     assert fields["reasoning_effort"]["default"] == "xhigh"
@@ -297,16 +300,19 @@ def test_cli_exposes_distinct_fold_and_meta_model_choices() -> None:
     add_model_arguments(parser)
     defaults = parser.parse_args([])
     assert defaults.model == defaults.meta_model == LOCAL_QWEN_MODEL
+    assert defaults.subagent_model == LOCAL_QWEN_MODEL
     mixed = parser.parse_args(
         [
             "--model",
             "deepseek-v4-flash",
             "--meta-model",
+            "deepseek-v4-flash",
+            "--subagent-model",
             LOCAL_QWEN_MODEL,
         ]
     )
-    assert mixed.model == "deepseek-v4-flash"
-    assert mixed.meta_model == LOCAL_QWEN_MODEL
+    assert mixed.model == mixed.meta_model == "deepseek-v4-flash"
+    assert mixed.subagent_model == LOCAL_QWEN_MODEL
 
 
 def test_agent_trace_is_redacted_bounded_and_private(tmp_path: Path):
@@ -417,6 +423,7 @@ def test_experiment_endpoint_creates_only_persistent_sandbox_research(tmp_path: 
                 "screen_boards": ["main", "gem"],
                 "model": "deepseek-v4-flash",
                 "meta_model": "deepseek-v4-pro",
+                "subagent_model": LOCAL_QWEN_MODEL,
                 "nl_model": "deepseek-v4-pro",
                 "compact_model": "deepseek-v4-pro",
                 "reasoning_effort": "high",
@@ -449,6 +456,7 @@ def test_experiment_endpoint_creates_only_persistent_sandbox_research(tmp_path: 
     assert params["screen_boards"] == ["main", "gem"]
     assert params["model"] == "deepseek-v4-flash"
     assert params["meta_model"] == "deepseek-v4-pro"
+    assert params["subagent_model"] == LOCAL_QWEN_MODEL
     assert params["nl_model"] == "deepseek-v4-pro"
     assert params["compact_model"] == "deepseek-v4-pro"
     assert params["reasoning_effort"] == "high"
@@ -1863,7 +1871,7 @@ class WebuiBackendTest(unittest.TestCase):
             "total_return": 0.05,
             "sharpe": 0.80,
             "max_drawdown": 0.10,
-            "benchmark": {"benchmark_return": 0.02},
+            "benchmark": {"benchmark_return": 0.02, "neutralized_excess_return": 0.01},
         }
         records.append(
             {
@@ -1934,6 +1942,7 @@ class WebuiBackendTest(unittest.TestCase):
         for model_field in (
             "model",
             "meta_model",
+            "subagent_model",
             "nl_model",
             "compact_model",
             "analysis_model",

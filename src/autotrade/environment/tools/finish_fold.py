@@ -8,28 +8,16 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from autotrade.environment.runtime import redact_host_paths
-from autotrade.environment.step_tree import (
-    StepTree,
-    node_in_session,
-    session_batch_rounds,
-)
+from autotrade.environment.step_tree import StepTree, node_in_session
 
 from .base import ToolError, ToolResult, ToolSpec
 
-# Voluntary finishes are refused until this many ``batch_validate`` rounds
-# completed in the session. Reviewed sessions finished after exactly one round
-# at 14-21 % of every budget — hypothesis exhaustion, not budget pressure — so
-# the floor is the one place the environment insists on sustained exploration;
-# it is waived once another round can no longer fit (deadline window, Step or
-# backtest budget), where finishing is the only correct move.
-FINISH_FOLD_MIN_BATCH_ROUNDS = 2
-
 # A voluntary finish that leaves more than this share of the backtest budget
-# unused must say why. With the round floor in place, reviewed Folds still
-# finished at 27-50 % backtest usage with open hypotheses listed, and Meta only
-# caught it afterwards; the reason is recorded with the Fold result so the
-# review sees the Agent's own justification. It is a justification, not a
-# block, and like the round floor it lapses once another round cannot fit.
+# unused must say why. Reviewed Folds finished at 27-50 % backtest usage with
+# open hypotheses listed, and Meta only caught it afterwards; the reason is
+# recorded with the Fold result so the review sees the Agent's own
+# justification. It is a justification, not a block, and it lapses once another
+# round cannot fit.
 FINISH_FOLD_EARLY_STOP_BUDGET_FRACTION = 1 / 3
 EARLY_STOP_REASON_MAX_CHARS = 500
 
@@ -38,8 +26,9 @@ EARLY_STOP_REASON_MAX_CHARS = 500
 # Environment never imports the Pipeline; the rules live there and the freeze
 # decision stays there, but a nomination the Pipeline will certainly reject has
 # to be visible to the session that makes it — reviewed Folds nominated a node
-# over the drawdown cap, were recorded ``baseline_missing``, and only learned
-# it in the next Meta session while a sibling node would have frozen.
+# the rules rejected, were recorded ``baseline_missing``, and only learned it in
+# the next Meta session while a sibling node would have frozen. Which rules are
+# hard is the Pipeline's to say; the tool only reports what the callable returns.
 HardRuleCheck = Callable[[Mapping[str, object]], Sequence[str]]
 
 
@@ -143,13 +132,13 @@ class FinishFoldTool:
         "run (its node_id comes from daily_backtest or a batch_validate row). Pass "
         "node_id explicitly: after a batch_validate round the tree position is the "
         "round's parent, so a bare call there is refused instead of silently keeping "
-        "the parent. Outside the deadline window a voluntary finish needs two "
-        "completed batch_validate rounds, and one that leaves more than a third of "
-        "the backtest budget unused must carry early_stop_reason (which hypotheses "
-        "stay untested and why they are not worth the remaining budget); the reason "
-        "is recorded with the Fold result for the Meta review. The nominated node is "
-        "also checked against the Pipeline's hard acceptance rules (finite metrics "
-        "and the max_drawdown cap in the acceptance_rules fact): outside the deadline "
+        "the parent. Outside the deadline window a voluntary finish that leaves more "
+        "than a third of the backtest budget unused must carry early_stop_reason "
+        "(which hypotheses stay untested and why they are not worth the remaining "
+        "budget); the reason is recorded with the Fold result for the Meta review. "
+        "The nominated node is also checked against the Pipeline's hard acceptance "
+        "rules (the acceptance_rules fact marks which rules are hard and which only "
+        "warn): outside the deadline "
         "window a breaching node is refused while another recorded node still passes, "
         "and the refusal lists which ones do; inside the window, or when nothing "
         "recorded passes, the nomination is accepted and the result states that the "
@@ -186,7 +175,6 @@ class FinishFoldTool:
         parent_main_py: str | Path | None = None,
         current_output: str | Path | None = None,
         current_models: str | Path | None = None,
-        min_batch_rounds: int = 0,
         another_round_fits: Callable[[], bool] | None = None,
         budget_status: Callable[[], FoldBudgetStatus] | None = None,
         hard_rule_check: HardRuleCheck | None = None,
@@ -196,10 +184,10 @@ class FinishFoldTool:
         self.run_id = run_id
         self._current_output = Path(current_output) if current_output is not None else None
         self._current_models = Path(current_models) if current_models is not None else None
-        # The round floor and the early-stop justification apply only while
-        # the session could still run a round; the caller says whether time
-        # and budget allow one, and (when wired) what is left of each budget.
-        self.min_batch_rounds = min_batch_rounds
+        # The early-stop justification and the hard-rule refusal apply only
+        # while the session could still run a round; the caller says whether
+        # time and budget allow one, and (when wired) what is left of each
+        # budget.
         self._another_round_fits = another_round_fits or (lambda: True)
         self._budget_status = budget_status
         self._hard_rule_check = hard_rule_check
@@ -231,7 +219,6 @@ class FinishFoldTool:
         # The working-copy check comes before the budget gates so a winner
         # nominated without step_rollback costs one refusal, not two.
         self._require_current_matches_revision(node_id)
-        self._require_batch_rounds()
         early_stop = self._require_early_stop_reason(arguments)
         nominated_structure = self._node_structure(node_id)
         if self._parent_structure is not None:
@@ -454,26 +441,6 @@ class FinishFoldTool:
             details=status.to_record(),
         )
 
-    def _require_batch_rounds(self) -> None:
-        required = self.min_batch_rounds
-        if required <= 0 or not self._another_round_fits():
-            return
-        completed = session_batch_rounds(
-            self.tree, fold_id=self.fold_id, run_id=self.run_id
-        )
-        if completed >= required:
-            return
-        raise ToolError(
-            f"finish_fold refused: {completed} of the {required} batch_validate "
-            "rounds required before a voluntary finish have completed in this "
-            "Fold session (a round is one batch_validate call whose candidates "
-            "all reached a terminal state; a round whose candidates were all "
-            "falsified counts). Pre-register another set of candidates and run "
-            "batch_validate; the requirement is waived once the deadline "
-            "window is reached or the Step/backtest budget cannot fit another "
-            "round."
-        )
-
     def _require_different_hypothesis(self, node_id: str, nominated_structure: str) -> None:
         parent_structure = self._parent_structure
         if parent_structure is None:
@@ -550,7 +517,6 @@ class FinishFoldTool:
 __all__ = [
     "EARLY_STOP_REASON_MAX_CHARS",
     "FINISH_FOLD_EARLY_STOP_BUDGET_FRACTION",
-    "FINISH_FOLD_MIN_BATCH_ROUNDS",
     "FinishFoldTool",
     "FoldBudgetStatus",
     "HardRuleCheck",

@@ -849,10 +849,26 @@ def _no_op_strategy(path: Path) -> Path:
 
 
 def _drawdown_rules():
+    """A stand-in for the Pipeline's hard rules: metrics -> reject reasons.
+
+    Hard finalization annotates candidates with whatever the injected callable
+    returns; the Pipeline's own hard rule (a non-finite metric) cannot be
+    staged in a recorded node, since tree.json refuses to serialize one, so
+    this keeps the same shape with a rule that can be. That the real wiring
+    builds a callable is asserted here; which rules it makes hard belongs to
+    test_pipeline_config.
+    """
+
     from autotrade.pipelines.local_backend import acceptance_hard_rule_check
 
-    check = acceptance_hard_rule_check({"max_drawdown": 0.25})
-    assert check is not None
+    assert acceptance_hard_rule_check({"max_drawdown": 0.25}) is not None
+
+    def check(metrics: dict[str, object]) -> list[str]:
+        drawdown = metrics.get("max_drawdown")
+        if isinstance(drawdown, (int, float)) and abs(float(drawdown)) > 0.25:
+            return ["max_drawdown_exceeded"]
+        return []
+
     return check
 
 

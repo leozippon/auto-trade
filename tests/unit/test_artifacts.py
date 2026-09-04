@@ -202,7 +202,7 @@ def generate_orders(context):
             self.assertGreaterEqual(delta.code_diff_lines, 1)
             self.assertEqual(delta.total_files, 3)
 
-    def test_constraints_ignore_factor_prior_counts_and_tighten_after_early_epochs(self):
+    def test_a_modified_readonly_file_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             parent = write_artifact(Path(tmp) / "parent")
             work = Path(tmp) / "work"
@@ -213,12 +213,13 @@ def generate_orders(context):
             self.assertFalse(allowed)
             self.assertTrue(any("readonly" in reason for reason in reasons))
 
-            loose = ModificationConstraints(max_diff_lines=1, early_max_diff_lines=100).for_epoch(1)
-            strict = ModificationConstraints(max_diff_lines=1, early_max_diff_lines=100).for_epoch(3)
-            self.assertEqual(loose.max_diff_lines, 100)
-            self.assertEqual(strict.max_diff_lines, 1)
+    def test_a_large_rewrite_is_allowed_and_only_size_caps_reject(self):
+        """How much one Step rewrites is research judgment, not a limit.
 
-    def test_evaluate_reports_the_offending_numbers_not_a_bare_verdict(self):
+        The constraints keep only sandbox hygiene, so a wholesale rewrite
+        passes while the file-count cap still rejects.
+        """
+
         with tempfile.TemporaryDirectory() as tmp:
             parent = write_artifact(Path(tmp) / "parent")
             work = Path(tmp) / "work"
@@ -226,9 +227,10 @@ def generate_orders(context):
             for index in range(4):
                 (work / f"extra_{index}.py").write_text(f"VALUE = {index}\n", encoding="utf-8")
             delta = modification_delta(parent, work)
-            allowed, reasons = ModificationConstraints(max_changed_files=2).evaluate(delta)
+            self.assertEqual(ModificationConstraints().evaluate(delta), (True, []))
+            allowed, reasons = ModificationConstraints(max_strategy_files=3).evaluate(delta)
             self.assertFalse(allowed)
-            self.assertIn("changed files 4 > 2", reasons)
+            self.assertIn(f"strategy files {delta.total_files} > 3", reasons)
 
     def test_model_artifacts_are_separate_revisioned_directories(self):
         with tempfile.TemporaryDirectory() as tmp:

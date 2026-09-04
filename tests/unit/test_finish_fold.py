@@ -164,61 +164,16 @@ def _record_round(
     )
 
 
-def test_finish_fold_requires_two_batch_rounds_while_another_fits(tmp_path: Path):
-    tree = StepTree(tmp_path / "steps")
-    first = _record_round(tree, tmp_path, batch_id="b1", marker="1")
-    finish = FinishFoldTool(tree, fold_id="fold_ref_ab", run_id="run_x", min_batch_rounds=2)
-    with pytest.raises(ToolError, match="1 of the 2 batch_validate rounds"):
-        finish.invoke({"node_id": first})
-    # A second candidate of the SAME batch is still one round.
-    _record_round(tree, tmp_path, batch_id="b1", marker="2")
-    with pytest.raises(ToolError, match="1 of the 2 batch_validate rounds"):
-        finish.invoke({"node_id": first})
-    second = _record_round(tree, tmp_path, batch_id="b2", marker="3")
-    assert finish.invoke({"node_id": second}).finish
-    # Selecting the first round's node after two rounds is equally fine.
-    assert finish.invoke({"node_id": first}).finish
+def test_one_completed_round_is_enough_to_finish(tmp_path: Path):
+    """No round floor: the environment counts no rounds before a finish.
 
+    Sustained exploration is asked for in the prompts, not enforced here, so a
+    node from the session's first round is a legal nomination.
+    """
 
-def test_finish_fold_waives_the_round_floor_when_no_round_fits(tmp_path: Path):
     tree = StepTree(tmp_path / "steps")
     node = _record_round(tree, tmp_path, batch_id="b1", marker="1")
-    finish = FinishFoldTool(
-        tree,
-        fold_id="fold_ref_ab",
-        run_id="run_x",
-        min_batch_rounds=2,
-        another_round_fits=lambda: False,
-    )
-    assert finish.invoke({"node_id": node}).finish
-
-
-def test_a_falsified_round_counts_and_other_sessions_rounds_do_not(tmp_path: Path):
-    tree = StepTree(tmp_path / "steps")
-    node = _record_round(tree, tmp_path, batch_id="b1", marker="1")
-    # Another session's batch is evidence, not one of this session's rounds.
-    tree.record_step(
-        tree.node_output_dir(node),
-        epoch_id="epoch_001",
-        fold_id="fold_ref_other",
-        run_id="run_y",
-        result_name="valid_other",
-        revision_id=new_revision_id("revision"),
-        metrics={},
-        metadata={"batch_id": "foreign"},
-    )
-    finish = FinishFoldTool(tree, fold_id="fold_ref_ab", run_id="run_x", min_batch_rounds=2)
-    with pytest.raises(ToolError, match="1 of the 2 batch_validate rounds"):
-        finish.invoke({"node_id": node})
-    # A round whose candidates all failed their replay still completed.
-    tree.record_failed_attempt(
-        epoch_id="epoch_001",
-        fold_id="fold_ref_ab",
-        run_id="run_x",
-        result_name="valid_b2_dead",
-        error="generate_orders exceeded the per-decision timeout",
-        metadata={"batch_id": "b2", "candidate": "dead", "hypothesis": "h"},
-    )
+    finish = FinishFoldTool(tree, fold_id="fold_ref_ab", run_id="run_x")
     assert finish.invoke({"node_id": node}).finish
 
 
@@ -374,11 +329,26 @@ def _written(directory: Path, source: str) -> Path:
 
 
 def _acceptance_check():
-    """The Pipeline's own hard rules, wired the way the Fold session wires them."""
+    """A stand-in for the Pipeline's hard rules: metrics -> reject reasons.
+
+    ``finish_fold`` reports whatever the injected callable returns, whichever
+    rules the Pipeline treats as hard at the time. Its current hard rule — a
+    non-finite metric — cannot be staged here, because tree.json refuses to
+    serialize one, so these paths use a same-shaped stub. That the real wiring
+    builds a callable is asserted below; which rules it makes hard belongs to
+    test_pipeline_config.
+    """
+
     from autotrade.pipelines.local_backend import acceptance_hard_rule_check
 
-    check = acceptance_hard_rule_check({"max_drawdown": 0.25})
-    assert check is not None
+    assert acceptance_hard_rule_check({"max_drawdown": 0.25}) is not None
+
+    def check(metrics: dict[str, object]) -> list[str]:
+        drawdown = metrics.get("max_drawdown")
+        if isinstance(drawdown, (int, float)) and abs(float(drawdown)) > 0.25:
+            return ["max_drawdown_exceeded"]
+        return []
+
     return check
 
 
@@ -387,9 +357,9 @@ def _metrics(max_drawdown: float) -> dict[str, object]:
 
 
 def test_finish_fold_refuses_a_hard_reject_while_another_node_passes(tmp_path: Path):
-    """The reviewed failure: a 28.5 % drawdown node was accepted, the Pipeline
-    then refused to freeze it and recorded baseline_missing while a sibling at
-    24.7 % would have frozen. Outside the deadline window that is a refusal
+    """The reviewed failure: a node the hard rules reject was accepted, the
+    Pipeline then refused to freeze it and recorded baseline_missing while a
+    sibling would have frozen. Outside the deadline window that is a refusal
     naming the nodes that pass, not a silent nomination."""
 
     tree = StepTree(tmp_path / "steps")
@@ -510,7 +480,7 @@ def test_finish_fold_accepts_a_hard_reject_and_states_what_the_pipeline_will_do(
 def test_finish_fold_accepts_a_hard_reject_when_nothing_recorded_passes(
     tmp_path: Path,
 ):
-    """open_mechanism fold_2022Q4/2023Q1: every candidate breached the cap.
+    """open_mechanism fold_2022Q4/2023Q1: every candidate failed the rules.
     There is nothing to redirect the session to, so the nomination is accepted
     with the notice rather than refused into a dead end."""
 
@@ -518,7 +488,9 @@ def test_finish_fold_accepts_a_hard_reject_when_nothing_recorded_passes(
     first = _record_round(
         tree, tmp_path, batch_id="b1", marker="1", metrics=_metrics(0.373)
     )
-    _record_round(tree, tmp_path, batch_id="b2", marker="2", metrics=_metrics(0.344))
+    _record_round(
+        tree, tmp_path, batch_id="b2", marker="2", metrics=_metrics(0.344)
+    )
     finish = FinishFoldTool(
         tree,
         fold_id="fold_ref_ab",

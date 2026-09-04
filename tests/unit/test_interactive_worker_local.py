@@ -164,11 +164,12 @@ def test_local_worker_regular_folds_go_straight_to_held_out(tmp_path: Path):
     plan = json.loads((experiment / "hitl/schedule.json").read_text(encoding="utf-8"))
     assert [row["kind"] for row in plan["sessions"]] == ["fold", "fold", "heldout"]
     # The deterministic baseline holds cash (zero Sharpe) and the local daily
-    # fixture carries no benchmark series, so the verdict names both, and the
+    # fixture carries no benchmark series (so no neutralized excess either), so the verdict names all three, and the
     # one walk-forward transition (cash vs no benchmark) proves nothing.
     assert heldout["verdict"]["status"] == "discarded"
     assert heldout["verdict"]["reasons"] == [
         "missing_benchmark_return",
+        "missing_neutralized_excess_return",
         "sharpe_not_positive",
         "walkforward_excess_inconsistent(0/1<1)",
     ]
@@ -250,6 +251,7 @@ def test_worker_maps_model_context_params_to_role_gateways_and_compactor(
     settings = load_worker_options(experiment, repo_root=repo).llm
     assert settings is not None
     assert settings.meta_model == settings.model
+    assert settings.subagent_model == settings.model
     main = settings.build_gateway("main").config
     nl = settings.build_gateway("nl").config
     compact = settings.build_gateway("compact").config
@@ -313,6 +315,7 @@ def test_worker_canonicalizes_all_legacy_model_roles_without_rewriting_params(
         {
             "model": LEGACY_LOCAL_QWEN_MODEL,
             "meta_model": LEGACY_LOCAL_QWEN_MODEL,
+            "subagent_model": LEGACY_LOCAL_QWEN_MODEL,
             "nl_model": LEGACY_LOCAL_QWEN_MODEL,
             "compact_model": LEGACY_LOCAL_QWEN_MODEL,
             "analysis_model": LEGACY_LOCAL_QWEN_MODEL,
@@ -330,10 +333,11 @@ def test_worker_canonicalizes_all_legacy_model_roles_without_rewriting_params(
     assert (
         options.llm.model,
         options.llm.meta_model,
+        options.llm.subagent_model,
         options.llm.nl_model,
         options.llm.compact_model,
         options.analysis_model,
-    ) == (LOCAL_QWEN_MODEL,) * 5
+    ) == (LOCAL_QWEN_MODEL,) * 6
     assert path.read_bytes() == persisted
 
 
@@ -504,6 +508,75 @@ def test_worker_default_threshold_fits_deepseek_and_compaction_can_be_disabled(
     path.write_text(json.dumps(params), encoding="utf-8")
     disabled = load_worker_options(experiment, repo_root=repo)
     assert disabled.llm.compact_enabled is False
+
+
+def test_worker_gives_subagents_their_own_gateway_and_compaction_budget(
+    tmp_path: Path,
+    monkeypatch,
+):
+    """``subagent_model`` is a second gateway with the parent's quota, and
+    every conversation role compacts at its own model's window − output
+    budget − margin, bounded by what the compaction model can read."""
+    from autotrade.pipelines.worker import resolve_worker_options
+
+    repo, experiment = _experiment(tmp_path, developer_mode="llm")
+    path = experiment / "hitl/params.json"
+    params = json.loads(path.read_text(encoding="utf-8"))
+    params.update(
+        {
+            "model": "deepseek-v4-flash",
+            "meta_model": "deepseek-v4-flash",
+            "subagent_model": LOCAL_QWEN_MODEL,
+            "nl_model": LOCAL_QWEN_MODEL,
+            "compact_model": LOCAL_QWEN_MODEL,
+            "compact_max_tokens": 1_600,
+        }
+    )
+    params.pop("compact_token_threshold", None)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "deepseek-test-key")
+    monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
+
+    def settings_for(**overrides: object):
+        params.update(overrides)
+        path.write_text(json.dumps(params), encoding="utf-8")
+        return load_worker_options(experiment, repo_root=repo).llm
+
+    settings = settings_for()
+    assert settings.subagent_model == LOCAL_QWEN_MODEL
+    child = settings.build_gateway("subagent")
+    assert isinstance(child, OpenAICompatibleProxy)
+    assert (child.provider, child.model) == ("vllm", LOCAL_QWEN_MODEL)
+    assert child.config.thinking_enabled and child.config.reasoning_effort == "xhigh"
+    assert child.config.max_tokens == 32_768
+    assert settings.build_gateway("main").provider == "deepseek"
+    assert settings.build_gateway("meta").provider == "deepseek"
+    # Parents on the 128,000 window, children on the 262,144 one.
+    assert settings.compaction.token_threshold == 87_040
+    assert settings.compaction_for("main") == settings.compaction
+    assert settings.compaction_for("meta").token_threshold == 87_040
+    assert settings.compaction_for("subagent").token_threshold == 221_184
+    with pytest.raises(ValueError, match="unknown conversation role"):
+        settings.compaction_for("nl")
+    # A DeepSeek compaction model reads the whole child conversation:
+    # 128,000 − 1,600 − 8,192 bounds the children too.
+    settings = settings_for(compact_model="deepseek-v4-flash")
+    assert settings.compaction.token_threshold == 87_040
+    assert settings.compaction_for("subagent").token_threshold == 118_208
+    # A configured threshold is clamped per role.
+    settings = settings_for(compact_model=LOCAL_QWEN_MODEL, compact_token_threshold=100_000)
+    assert settings.compaction.token_threshold == 87_040
+    assert settings.compaction_for("subagent").token_threshold == 100_000
+    # Every gateway is validated at create preflight without credentials.
+    monkeypatch.delenv("DEEPSEEK_API_KEY")
+    monkeypatch.delenv("VLLM_API_KEY")
+    with pytest.raises(ValueError, match="API key"):
+        load_worker_options(experiment, repo_root=repo)
+    assert (
+        resolve_worker_options(
+            params, experiment_dir=experiment, repo_root=repo, preflight=True
+        ).llm.subagent_model
+        == LOCAL_QWEN_MODEL
+    )
 
 
 def test_model_roles_share_one_session_call_budget():
@@ -700,6 +773,7 @@ def test_session_boundary_restart_is_taken_before_the_next_session_starts(
     [
         ("model", "unknown-model", "unsupported DeepSeek model"),
         ("meta_model", "unknown-model", "unsupported DeepSeek model"),
+        ("subagent_model", "unknown-model", "unsupported DeepSeek model"),
         ("reasoning_effort", "ultra", "reasoning_effort"),
         ("no_thinking", 1, "must be a boolean"),
         ("compact_token_threshold", 0, "must be a positive integer"),
@@ -830,10 +904,12 @@ def test_llm_worker_runs_real_meta_fold_validation_and_heldout(
     assert fold_host_manifest["llm"] == {
         "provider": "scripted",
         "model": "scripted",
+        "subagent": {"provider": "scripted", "model": "scripted"},
     }
     assert meta_host_manifest["llm"] == {
         "provider": "scripted",
         "model": "scripted",
+        "subagent": {"provider": "scripted", "model": "scripted"},
     }
     # The property the path assertion was only ever a proxy for.
     summaries = compact_fold_history(

@@ -121,6 +121,7 @@ WEB_CREATE_DEFAULTS: dict[str, object] = {
     "slippage_bps": BrokerProfile().slippage_bps,
     "model": MODEL_CHOICES[0],
     "meta_model": MODEL_CHOICES[0],
+    "subagent_model": MODEL_CHOICES[0],
     "nl_model": MODEL_CHOICES[0],
     "compact_model": MODEL_CHOICES[0],
     "reasoning_effort": "xhigh",

@@ -168,6 +168,7 @@ def test_the_audited_session_mounts_the_image_refs_and_memory_it_was_given(
         llm=SimpleNamespace(
             compact_enabled=False,
             compaction=object(),
+            compaction_for=lambda role: object(),
             build_gateway=lambda role: object(),
             max_tokens_for=lambda role: 4096,
         ),

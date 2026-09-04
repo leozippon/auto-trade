@@ -27,6 +27,7 @@ from autotrade.pipelines.worker import (
 
 DEFAULT_AGENT_MODEL = MODEL_CHOICES[0]
 DEFAULT_META_MODEL = DEFAULT_AGENT_MODEL
+DEFAULT_SUBAGENT_MODEL = DEFAULT_AGENT_MODEL
 DEFAULT_NL_MODEL = DEFAULT_AGENT_MODEL
 DEFAULT_COMPACT_MODEL = DEFAULT_AGENT_MODEL
 
@@ -278,6 +279,12 @@ def add_model_arguments(parser: argparse.ArgumentParser) -> None:
         help="Meta-learning Agent main-conversation model.",
     )
     parser.add_argument(
+        "--subagent-model",
+        default=DEFAULT_SUBAGENT_MODEL,
+        choices=MODEL_CHOICES,
+        help="Model the Fold/Meta `agent` sub-agents run on (shared session quota).",
+    )
+    parser.add_argument(
         "--nl-model",
         default=DEFAULT_NL_MODEL,
         choices=MODEL_CHOICES,
@@ -450,6 +457,7 @@ def build_worker_params(
         "screen_boards": list(args.screen_boards),
         "model": args.model,
         "meta_model": args.meta_model,
+        "subagent_model": args.subagent_model,
         "nl_model": args.nl_model,
         "compact_model": args.compact_model,
         "reasoning_effort": args.reasoning_effort,

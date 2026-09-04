@@ -81,20 +81,13 @@ def _finite_number(value: object) -> float | None:
     return number if math.isfinite(number) else None
 
 
-# The one-line summary of AcceptanceRules.evaluate handed to the Agent as the
-# ``acceptance_semantics`` fact. It lives beside the rules it describes so the
-# projection cannot drift from the behavior.
-ACCEPTANCE_SEMANTICS_SUMMARY = (
-    "max_drawdown+finite_metrics=hard; return/sharpe=warn-only targets; "
-    "order_count=0 warns no_orders"
-)
-
-
 @dataclass(frozen=True)
 class AcceptanceRules:
-    """Validation acceptance checks (docs/pipeline-design.md §2.2): drawdown and
-    finiteness are HARD rejects; min_return/min_sharpe are warn-only targets — a
-    shortfall records a warning and never resets the fold."""
+    """Validation acceptance checks (docs/pipeline-design.md §2.2): only a
+    non-finite metric is a HARD reject at Fold freeze; the drawdown cap and
+    min_return/min_sharpe are warn-only targets there — a shortfall records a
+    warning and never resets the fold. The drawdown cap is enforced where it
+    decides the outcome, in ``heldout_verdict``."""
 
     min_return: float = 0.0
     min_sharpe: float = 0.0
@@ -130,6 +123,63 @@ class AcceptanceRules:
             "heldout_min_trades": self.heldout_min_trades,
         }
 
+    @classmethod
+    def from_record(cls, record: Mapping[str, object]) -> AcceptanceRules:
+        """These rules from a ``to_record`` mapping, ignoring unknown keys.
+
+        Run manifests are read back long after they were written, so a record
+        that carries a retired key must still rebuild the rules it does name.
+        """
+
+        allowed = set(cls().to_record())
+        return cls(**{key: record[key] for key in allowed if key in record})  # type: ignore[arg-type]
+
+    def agent_facts(self) -> dict[str, object]:
+        """The ``acceptance_rules`` run fact: what freezes a Fold, what graduates.
+
+        Single source for what the session is told about acceptance. Every
+        entry is derived from these rules, so no prompt restates a threshold
+        and the projection cannot drift from ``evaluate``/``heldout_verdict``:
+        the freeze block marks each rule ``hard`` or ``warn``, and the
+        graduation block lists exactly the Held-out criteria this experiment
+        configured — the two optional ones only when they are switched on.
+        """
+
+        required: dict[str, object] = {
+            "excess_return": "> 0 (total_return - benchmark_return)",
+            "neutralized_excess_return": "> 0 (benchmark+size neutralized)",
+            "sharpe": "> 0",
+            "max_drawdown": f"<= {self.max_drawdown}",
+        }
+        if self.cost_stress_multiplier > 1:
+            required["excess_at_cost_stress"] = (
+                f"> 0 with slippage multiplied by {self.cost_stress_multiplier}"
+            )
+        if self.heldout_min_trades > 0:
+            required["trade_count"] = f">= {self.heldout_min_trades}"
+        required["walk_forward_positive_excess"] = (
+            ">= ceil(2/3) of the final Epoch's out-of-sample transitions"
+        )
+        return {
+            "fold_freeze": {
+                "finite_metrics": {
+                    "enforcement": "hard",
+                    "rule": "total_return/max_drawdown/sharpe must be finite",
+                },
+                "max_drawdown": {"enforcement": "warn", "target": self.max_drawdown},
+                "min_return": {"enforcement": "warn", "target": self.min_return},
+                "min_sharpe": {"enforcement": "warn", "target": self.min_sharpe},
+                "order_count": {
+                    "enforcement": "warn",
+                    "rule": "order_count=0 records no_orders",
+                },
+            },
+            "graduation": {
+                "evaluated_on": "held_out_replay_after_all_development_ends",
+                "all_required": required,
+            },
+        }
+
     def heldout_verdict(
         self,
         summary: Mapping[str, object] | None,
@@ -138,8 +188,11 @@ class AcceptanceRules:
         """Graduation verdict of one Held-out replay (docs/pipeline-design.md §3.3).
 
         ``graduated`` iff (a) the frozen strategy beat its benchmark on
-        Held-out (excess return > 0), earned a positive annualized Sharpe, and
-        stayed within the experiment's ``max_drawdown``, and (b) the final
+        Held-out both raw (excess return > 0) and after neutralization
+        (``benchmark.neutralized_excess_return > 0``, so a raw excess that is
+        only a size tilt does not graduate), earned a positive annualized
+        Sharpe, and stayed within the experiment's ``max_drawdown`` — the one
+        place that cap decides an outcome — and (b) the final
         Epoch's walk-forward transitions (``ledger.walk_forward_transitions``)
         show a positive excess return in at least two thirds of them (rounded
         up). Otherwise ``discarded`` with every failing reason. A missing or
@@ -160,22 +213,21 @@ class AcceptanceRules:
         source = summary if isinstance(summary, Mapping) else {}
         if not source or source.get("status") == "failed":
             reasons.append("heldout_failed")
-        benchmark = source.get("benchmark")
-        benchmark_return = (
-            benchmark.get("benchmark_return") if isinstance(benchmark, Mapping) else None
-        )
+        benchmark = source.get("benchmark") if isinstance(source.get("benchmark"), Mapping) else {}
         for name, value in (
             ("total_return", source.get("total_return")),
-            ("benchmark_return", benchmark_return),
+            ("benchmark_return", benchmark.get("benchmark_return")),
+            ("neutralized_excess_return", benchmark.get("neutralized_excess_return")),
             ("sharpe", source.get("sharpe")),
             ("max_drawdown", source.get("max_drawdown")),
         ):
             values[name] = _finite_number(value)
             if values[name] is None:
                 reasons.append(f"missing_{name}")
-        total_return, bench, sharpe, drawdown = (
+        total_return, bench, neutralized, sharpe, drawdown = (
             values["total_return"],
             values["benchmark_return"],
+            values["neutralized_excess_return"],
             values["sharpe"],
             values["max_drawdown"],
         )
@@ -184,6 +236,10 @@ class AcceptanceRules:
         )
         if excess is not None and excess <= 0:
             reasons.append("excess_return_not_positive")
+        # A raw excess a size or beta tilt could have produced is not an edge:
+        # the neutralized excess has to clear zero on its own.
+        if neutralized is not None and neutralized <= 0:
+            reasons.append("neutralized_excess_return_not_positive")
         if sharpe is not None and sharpe <= 0:
             reasons.append("sharpe_not_positive")
         if drawdown is not None and abs(drawdown) > self.max_drawdown:
@@ -222,6 +278,7 @@ class AcceptanceRules:
             "status": "discarded" if reasons else "graduated",
             "reasons": reasons,
             "excess_return": excess,
+            "neutralized_excess_return": neutralized,
             "sharpe": sharpe,
             "max_drawdown": drawdown,
             "max_drawdown_limit": self.max_drawdown,
@@ -251,18 +308,18 @@ class AcceptanceRules:
         }
 
     def evaluate(self, summary: dict[str, object]) -> tuple[list[str], list[str]]:
-        """(hard_reasons, warnings). Integrity failures are hard rejects:
-        non-finite metrics (every IEEE comparison against NaN is False, so a NaN
-        metric would otherwise pass all thresholds). The max_drawdown cap stays a
-        hard risk limit. Return/Sharpe shortfalls are WARNINGS only — the fold
-        still freezes its validated update; a weak step recorded with a warning
-        beats silently resetting the fold chain. A zero ``order_count`` warns the
-        same way: it clears every threshold without ever placing an order, so
-        the warning is the only thing distinguishing it from a real result
-        (``trade_count`` counts closed round trips and is 0 for buy-and-hold). Only a
-        summary from a completed
-        full-window evaluation reaches here; an aborted replay never produces
-        one."""
+        """(hard_reasons, warnings). The only hard rejects are integrity
+        failures: non-finite metrics (every IEEE comparison against NaN is
+        False, so a NaN metric would otherwise pass all thresholds). Drawdown,
+        return and Sharpe shortfalls are WARNINGS — the fold still freezes its
+        validated update; a weak step recorded with a warning beats silently
+        resetting the fold chain, and the drawdown cap decides where it matters,
+        in ``heldout_verdict``. A zero ``order_count`` warns the same way: it
+        clears every threshold without ever placing an order, so the warning is
+        the only thing distinguishing it from a real result (``trade_count``
+        counts closed round trips and is 0 for buy-and-hold). Only a summary
+        from a completed full-window evaluation reaches here; an aborted replay
+        never produces one."""
         hard: list[str] = []
         warnings: list[str] = []
         values: dict[str, float] = {}
@@ -287,7 +344,7 @@ class AcceptanceRules:
             else:
                 values["sharpe"] = float(sharpe)
         if abs(values.get("max_drawdown", 0.0)) > self.max_drawdown:
-            hard.append("max_drawdown_exceeded")
+            warnings.append("drawdown_above_target")
         if values.get("total_return", float("-inf")) < self.min_return:
             warnings.append("return_below_target")
         if "sharpe" in values and values["sharpe"] < self.min_sharpe:
@@ -707,7 +764,6 @@ class FoldOutcome:
 
 
 __all__ = [
-    "ACCEPTANCE_SEMANTICS_SUMMARY",
     "DEFAULT_DEADLINE_GRACE_MINUTES",
     "DEFAULT_FOLD_PERIOD",
     "AcceptanceRules",

@@ -82,7 +82,11 @@ class ReportingTest(unittest.TestCase):
                     {
                         "total_return": 0.015, "sharpe": 0.5, "max_drawdown": 0.04,
                         "order_count": 3,
-                        "benchmark": {"label": "沪深300", "benchmark_return": 121.0 / 110.0 - 1.0},
+                        "benchmark": {
+                            "label": "沪深300",
+                            "benchmark_return": 121.0 / 110.0 - 1.0,
+                            "neutralized_excess_return": 0.01,
+                        },
                     }
                 )
             )
@@ -172,7 +176,11 @@ class ReportingTest(unittest.TestCase):
                         {
                             "total_return": total, "sharpe": 0.5, "max_drawdown": 0.04,
                             "order_count": 3,
-                            "benchmark": {"label": "沪深300", "benchmark_return": 0.01},
+                            "benchmark": {
+                                "label": "沪深300",
+                                "benchmark_return": 0.01,
+                                "neutralized_excess_return": 0.01,
+                            },
                         },
                         run_id=f"run_ho_{total}",
                         epoch_id="epoch_001",

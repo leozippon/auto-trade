@@ -20,8 +20,9 @@ never revisits a window it has already seen. The account is the researcher's
 real capital (CNY 100k, where the CNY 5 minimum commission and lot sizes bite),
 graduation additionally requires the Held-out excess to survive twice the
 profile slippage and at least 20 closed round trips, and the per-Fold budgets
-are halved because three of the four quarters and the parent's own result are
-already known at each step.
+sit below the yearly-window defaults -- at each step three of the four quarters
+and the parent's own result are already known -- while staying wide enough for
+several pre-registered rounds in one Fold.
 
 Everything else stays on the console creation defaults (no Test stage, explicit
 held-out range, Meta between every two Folds, 24-month input window, unfiltered
@@ -111,8 +112,6 @@ EXPECTED_DEFAULTS: dict[str, object] = {
     "inference_time": "08:30",
     "strategy_period": "day",
     "inherit_from": "",
-    "model": "qwen-3.8-27b-fp8",
-    "meta_model": "qwen-3.8-27b-fp8",
     "nl_model": "qwen-3.8-27b-fp8",
     "compact_model": "qwen-3.8-27b-fp8",
 }
@@ -122,6 +121,11 @@ EXPECTED_DEFAULTS: dict[str, object] = {
 COMMON_OVERRIDES: dict[str, object] = {
     # No experiment takes an L20.
     "gpu_count": 0,
+    # Fold and Meta parents on DeepSeek; their sub-agents on the local Qwen.
+    # NL and compaction stay on the console's local default.
+    "model": "deepseek-v4-flash",
+    "meta_model": "deepseek-v4-flash",
+    "subagent_model": "qwen-3.8-27b-fp8",
     # Quarterly walk-forward: 13 Folds, each validated on the trailing four
     # quarters ending at its own quarter, so every step adds exactly one new
     # quarter and the chain never revisits a window.
@@ -139,58 +143,40 @@ COMMON_OVERRIDES: dict[str, object] = {
     # handful of trades.
     "cost_stress_multiplier": 2.0,
     "heldout_min_trades": 20,
-    # Halved per-step budgets: at each step three of the four quarters and the
-    # parent's own result on the window are already known.
-    "max_fold_minutes": 360,
-    "max_steps_per_fold": 15,
-    "max_backtests_per_fold": 15,
-    "max_llm_calls": 800,
+    # Per-Fold budgets: under the yearly-window defaults because at each step
+    # three of the four quarters and the parent's own result on the window are
+    # already known, but wide enough for several pre-registered rounds -- no
+    # code gate forces a round count any more, so the budget has to leave room
+    # for the rounds the prompts ask for.
+    "max_fold_minutes": 600,
+    "max_steps_per_fold": 24,
+    "max_backtests_per_fold": 24,
+    "max_llm_calls": 1600,
 }
 
-# Five lines shared by every directive. They say how the session should be
-# spent, what the host already ran, how candidates are pre-registered and
-# compared, that a hypothesis with parameters gets fitted, and what decides
-# between two candidates. Direction, not procedure: no calendar labels, no
-# per-tool recipes.
-SESSION_LINE = (
-    "本 Fold 的预算是推理墙钟 370 分钟（运行事实 `budgets.deadline_seconds`：360 分钟主截止加最后 "
-    "10 分钟收尾宽限 `deadline_grace_seconds`）、15 个 Step、15 次回测、800 次模型调用"
-    "（回测墙钟独立计时并回补）。"
-    "预算是用来持续探索的：一批候选跑出好结果，意味着可以进入下一轮细化与加固，而不是提前收工；"
-    "把整段预算花在一条不断收敛的探索链上，直到时间或回测次数真的用完。"
-)
+# Two lines shared by every directive: what this round's own schedule makes of
+# the host's parent control, and the one selection criterion the static prompt
+# does not already state. Everything else the directives used to repeat -- the
+# budget figures, pre-registration, fitting parameters in fit(context) -- is in
+# the static system prompt or the injected run facts, and is not restated here.
 PARENT_CONTROL_LINE = (
-    "本 Fold 的验证窗口是截至本季的连续四个季度，其中只有最后一个季度是上一 Fold 之后新出现的。"
-    "父产物是已冻结策略时，宿主已在会话开始前把它原样在这整个窗口上跑完一次完整 Validation，"
-    "它是 Step 树的第一个节点、不占用上述预算；它的最后一个子窗口就是父策略在这个新季度上的样本外记录，"
-    "更早的子窗口父策略已经见过。直接把它当作对照基线，不要再花一次回测重跑父本。"
-    "父产物是初始模板时没有这个节点"
-    "（运行事实 `parent_control` 为空、`artifact_contract.parent.parent_control_available` 为假），"
-    "需要基线就自己跑一次并计入上述预算。"
-)
-PREREGISTER_LINE = (
-    "互斥候选一律先预登记：写清机制、预期方向与证伪条件，再用 batch_validate 在同一父节点下并排跑完整 Validation，"
-    "看到结果之后才做取舍；下一批候选从上一批的结论里长出来，被证伪的方向如实结束并换下一条。"
-)
-FITTING_LINE = (
-    "假设里有参数就把参数拟合出来，而不是手调常数：训练写在 fit(context) 里、只用当时可见的 PIT 窗口，"
-    "结果经 context.state_dir 交给 generate_orders。output/ 是一个可以拆分模块的包，运行时库含 scipy、"
-    "sklearn、lightgbm、xgboost、statsmodels 与 CPU 版 torch；调仓与重训的节奏（模块级 REFIT_PERIOD）"
-    "由策略自己决定并在设计中给出依据，环境只规定何时询问策略。"
+    "本 Fold 的验证窗口是截至本季的连续四个季度，其中只有最后一个季度是上一 Fold 之后新出现的："
+    "父本对照节点的最后一个子窗口才是父策略在这个新季度上的样本外记录，更早的子窗口它已经见过。"
+    "比较对照与候选时按这个口径读 `sub_windows`。"
 )
 ROBUSTNESS_LINE = (
-    "并列候选之间的取舍看稳健，而不是看简单：子窗口内的一致性、中性化后的超额、对参数与阈值的敏感度，"
-    "比单一总量指标更有说服力；不同口径不一致时如实说明，不得只挑有利口径。"
+    "并列候选之间还要看对参数与阈值的敏感度：结论在邻域里翻转的候选不算稳健。"
 )
 
-# Verbatim from experiments/open_mechanism_20260903/hitl/params.json
+# From experiments/open_mechanism_20260903/hitl/params.json
 # ("fold_exploration_directive"), copied here because that experiment is
-# archived out of the repository before this round starts.
+# archived out of the repository before this round starts; only the drawdown
+# clause is updated, since the cap is now enforced at graduation.
 OPEN_MECHANISM_PRIOR_DIRECTIVE = (
     "跳开因子库、横截面打分、线性排序和常规技术指标堆叠。本实验无参考仓库。只根据当前 PIT 可见结构自行提出"
     "一种不同机制，写成最小可执行策略，并用完整 Validation 证伪。事件状态、微观结构、制度约束、行为路径、"
     "非对称执行只是类型，不是指定答案。本轮以机制新颖与可证伪为目标，不要求稳定或正收益；证伪后如实结束该方向。"
-    "仍须遵守 PIT、禁止硬编码股票或日期、真实回测 ABI 与诚实失败。本指令不放宽提交合同、回撤硬限制或 finish_fold。"
+    "仍须遵守 PIT、禁止硬编码股票或日期、真实回测 ABI 与诚实失败。本指令不放宽提交合同、毕业裁决的回撤上限或 finish_fold。"
 )
 
 ROUND: dict[str, dict[str, object]] = {
@@ -203,10 +189,7 @@ ROUND: dict[str, dict[str, object]] = {
                 "先读 refs/README.md 与 exploration-plan.md，再用 PIT parquet 自算因子并核对覆盖率与单位；"
                 "参考包阅读、因子重算与 IC 统计适合交给子代理并行完成，你的精力放在设计、决策与验收上。",
                 "股票池不做任何 ST、板块、次新、市值或价格筛选；可交易性、停牌与涨跌停由策略自己处理并说明理由。",
-                SESSION_LINE,
                 PARENT_CONTROL_LINE,
-                PREREGISTER_LINE,
-                FITTING_LINE,
                 ROBUSTNESS_LINE,
                 "禁止克隆父策略、禁止把 refs 拷进 output、禁止写死路径与股票代码；每一行输入都必须满足"
                 " available_at <= 推断时点，财务用 available_at。可执行指纹必须不同于父策略。",
@@ -222,10 +205,7 @@ ROUND: dict[str, dict[str, object]] = {
                 "预登记的机制先过离线筛查：事件计数、覆盖窗口、各组前瞻收益的符号都要看过，"
                 "再决定它值不值得一次完整 Validation；不要一开始就把几个弱机制堆成不透明打分。",
                 "股票池未经任何筛选，可交易性、停牌与涨跌停由策略自理。沙箱无网络，任何时候都不得抓取站点数据。",
-                SESSION_LINE,
                 PARENT_CONTROL_LINE,
-                PREREGISTER_LINE,
-                FITTING_LINE,
                 ROBUSTNESS_LINE,
                 "禁止把 refs 拷进 output、禁止写死路径与股票代码；每一行输入都必须满足 available_at <= 推断时点。"
                 "可执行指纹必须不同于父策略。",
@@ -242,10 +222,7 @@ ROUND: dict[str, dict[str, object]] = {
                 "撮合、T+1、费用与涨跌停属于环境，策略只发订单意图。",
                 "不要把源仓库 README 的收益数字当成预期，只用本项目的 Validation 复现其行为。"
                 "股票池未经任何筛选，可交易性、停牌与涨跌停由策略自理。",
-                SESSION_LINE,
                 PARENT_CONTROL_LINE,
-                PREREGISTER_LINE,
-                FITTING_LINE,
                 ROBUSTNESS_LINE,
                 "禁止把 refs 拷进 output、禁止写死路径与股票代码；每一行输入都必须满足 available_at <= 推断时点。"
                 "可执行指纹必须不同于父策略。",
@@ -267,12 +244,9 @@ ROUND: dict[str, dict[str, object]] = {
                 "都是本方向的合格产出。",
                 "角落状态的可执行性必须显式论证：封死的涨停买不进、复牌当日常被拒单、跌停票出不去、新股首日没有可见行情；"
                 "每个候选都要写明真实可达的入场与出场路径并汇报拒单。角落组合天然集中，仓位上限、篮子分散与无信号日持币"
-                "必须把最大回撤守在硬限之内。",
+                "必须把最大回撤守在毕业裁决的回撤上限之内。",
                 "股票池不做任何 ST、板块、次新、市值或价格筛选；可交易性、停牌与涨跌停由策略自己处理并说明理由。",
-                SESSION_LINE,
                 PARENT_CONTROL_LINE,
-                PREREGISTER_LINE,
-                FITTING_LINE,
                 ROBUSTNESS_LINE,
                 "禁止克隆父策略、禁止把 refs 拷进 output、禁止写死路径与股票代码；每一行输入都必须满足"
                 " available_at <= 推断时点，财务用 available_at。可执行指纹必须不同于父策略。",
@@ -287,10 +261,7 @@ ROUND: dict[str, dict[str, object]] = {
                 OPEN_MECHANISM_PRIOR_DIRECTIVE,
                 "本轮环境提供 output/ 包结构、可选的 fit(context) 与并排跑完整 Validation 的 batch_validate，"
                 "可按需使用；它们只是手段，不改变本方向对机制新颖与可证伪的要求。",
-                SESSION_LINE,
                 PARENT_CONTROL_LINE,
-                PREREGISTER_LINE,
-                FITTING_LINE,
                 ROBUSTNESS_LINE,
             ]
         ),
@@ -329,6 +300,8 @@ REPORT_KEYS = (
     "inference_time",
     "strategy_period",
     "model",
+    "meta_model",
+    "subagent_model",
 )
 
 

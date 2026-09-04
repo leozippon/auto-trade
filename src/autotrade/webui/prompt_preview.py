@@ -20,7 +20,7 @@ of being invented.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -192,11 +192,7 @@ def _fold_prompt(
         "phase": _phase(epoch_index, rolling.convergence_start_epoch),
         "is_initial_artifact": context.is_initial,
         "template_ref": "agent_output_template" if context.is_initial else None,
-        "modification_constraints": replace(
-            rolling.step_constraints, is_initial_artifact=context.is_initial
-        )
-        .for_epoch(epoch_index)
-        .to_record(),
+        "modification_constraints": rolling.step_constraints.to_record(),
         "acceptance_rules": rolling.acceptance.to_record(),
         "schedule": rolling.schedule.to_record(),
         "broker_profile": rolling.broker_profile.to_record(),
@@ -300,9 +296,7 @@ def _meta_prompt(
         "prior_output": "/mnt/agent/workspace/PRIOR.md",
         "is_initial_artifact": context.is_initial,
         "template_ref": "agent_output_template" if context.is_initial else None,
-        "modification_constraints": replace(
-            rolling.regularization_constraints, is_initial_artifact=context.is_initial
-        ).to_record(),
+        "modification_constraints": rolling.regularization_constraints.to_record(),
         "meta_learning_directive": rolling.meta_learning_directive,
         "fold_exploration_directive": rolling.fold_exploration_directive,
         "budgets": {

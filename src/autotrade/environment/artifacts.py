@@ -16,7 +16,7 @@ import json
 import shutil
 import stat
 import uuid
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -536,30 +536,19 @@ def model_artifact_delta(parent_root: str | Path, work_root: str | Path) -> Mode
 
 @dataclass(frozen=True)
 class ModificationConstraints:
-    """Per-Step/Fold limits over ``output`` and optional model parameters."""
+    """Sandbox hygiene limits over ``output`` and optional model parameters.
 
-    max_changed_files: int = 8
-    max_diff_lines: int = 600
-    max_code_diff_lines: int = 500
+    Deliberately only size and integrity: how large the formal artifact and its
+    model parameters may grow, and that read-only files stay untouched. How much
+    of the strategy one Step may rewrite is research judgment the prompts ask
+    for, not something the environment counts — a per-Step diff ceiling made a
+    genuinely different hypothesis look like a violation.
+    """
+
     max_strategy_files: int = 64
     max_strategy_bytes: int = 2_000_000
     max_model_artifact_files: int = 64
     max_model_artifact_bytes: int = 1024 * 1024 * 1024
-    early_epoch_count: int = 2
-    early_max_changed_files: int = 12
-    early_max_diff_lines: int = 1200
-    early_max_code_diff_lines: int = 1000
-    is_initial_artifact: bool = False
-
-    def for_epoch(self, epoch_index: int) -> ModificationConstraints:
-        if self.is_initial_artifact or epoch_index <= self.early_epoch_count:
-            return replace(
-                self,
-                max_changed_files=self.early_max_changed_files,
-                max_diff_lines=self.early_max_diff_lines,
-                max_code_diff_lines=self.early_max_code_diff_lines,
-            )
-        return self
 
     def evaluate(
         self,
@@ -569,13 +558,6 @@ class ModificationConstraints:
         reasons: list[str] = []
         if delta.readonly_violations:
             reasons.append(f"readonly files modified: {list(delta.readonly_violations)}")
-        if not self.is_initial_artifact:
-            if len(delta.changed_files) > self.max_changed_files:
-                reasons.append(f"changed files {len(delta.changed_files)} > {self.max_changed_files}")
-            if delta.diff_lines > self.max_diff_lines:
-                reasons.append(f"diff lines {delta.diff_lines} > {self.max_diff_lines}")
-            if delta.code_diff_lines > self.max_code_diff_lines:
-                reasons.append(f"code diff lines {delta.code_diff_lines} > {self.max_code_diff_lines}")
         if delta.total_files > self.max_strategy_files:
             reasons.append(f"strategy files {delta.total_files} > {self.max_strategy_files}")
         if delta.total_bytes > self.max_strategy_bytes:
@@ -589,22 +571,17 @@ class ModificationConstraints:
 
     def to_record(self) -> dict[str, object]:
         return {
-            "max_changed_files": self.max_changed_files,
-            "max_diff_lines": self.max_diff_lines,
-            "max_code_diff_lines": self.max_code_diff_lines,
             "max_strategy_files": self.max_strategy_files,
             "max_strategy_bytes": self.max_strategy_bytes,
             "max_model_artifact_files": self.max_model_artifact_files,
             "max_model_artifact_bytes": self.max_model_artifact_bytes,
-            "early_epoch_count": self.early_epoch_count,
-            "early_max_changed_files": self.early_max_changed_files,
-            "early_max_diff_lines": self.early_max_diff_lines,
-            "early_max_code_diff_lines": self.early_max_code_diff_lines,
-            "is_initial_artifact": self.is_initial_artifact,
         }
 
     @classmethod
     def from_record(cls, record: dict[str, object]) -> ModificationConstraints:
+        """These limits from a ``to_record`` mapping, ignoring unknown keys, so
+        a manifest written when the diff ceilings existed still reads back."""
+
         allowed = set(cls().to_record())
         return cls(**{key: record[key] for key in allowed if key in record})
 

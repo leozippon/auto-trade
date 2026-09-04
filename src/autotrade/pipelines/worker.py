@@ -193,6 +193,7 @@ _ALLOWED_PARAMS = {
     "llm_max_response_tokens",
     "model",
     "meta_model",
+    "subagent_model",
     "nl_model",
     "compact_model",
     "reasoning_effort",
@@ -237,6 +238,9 @@ class LLMWorkerSettings:
     env_file: Path
     model: str
     meta_model: str
+    # The ``agent`` sub-agents of both Fold and Meta sessions; they keep the
+    # parent's call quota, budget wrapper and time budget on this gateway.
+    subagent_model: str
     nl_model: str
     compact_model: str
     timeout_seconds: float
@@ -247,7 +251,24 @@ class LLMWorkerSettings:
     thinking_enabled: bool
     reasoning_effort: str
     compact_enabled: bool
+    # The Fold parent conversation's compaction budget; ``compaction_for``
+    # derives the other conversation roles' from the same knobs.
     compaction: ContextCompactionConfig
+    # The console's ``compact_token_threshold``; None = derived per role.
+    compact_token_threshold: int | None = None
+
+    def model_for(self, role: str) -> str:
+        models = {
+            "main": self.model,
+            "meta": self.meta_model,
+            "subagent": self.subagent_model,
+            "nl": self.nl_model,
+            "compact": self.compact_model,
+            "analysis": self.model,
+        }
+        if role not in models:
+            raise ValueError(f"unknown model role: {role}")
+        return models[role]
 
     def max_tokens_for(
         self,
@@ -256,18 +277,7 @@ class LLMWorkerSettings:
         model: str | None = None,
         requested: int | None = None,
     ) -> int:
-        if role not in {"main", "meta", "nl", "compact", "analysis"}:
-            raise ValueError(f"unknown model role: {role}")
-        selected_model = (
-            model
-            or {
-                "main": self.model,
-                "meta": self.meta_model,
-                "nl": self.nl_model,
-                "compact": self.compact_model,
-                "analysis": self.model,
-            }[role]
-        )
+        selected_model = model or self.model_for(role)
         configured = (
             requested
             if requested is not None
@@ -286,18 +296,7 @@ class LLMWorkerSettings:
         require_credentials: bool = True,
         max_retries: int | None = None,
     ) -> LLMProxy:
-        if role not in {"main", "meta", "nl", "compact", "analysis"}:
-            raise ValueError(f"unknown model role: {role}")
-        selected_model = (
-            model
-            or {
-                "main": self.model,
-                "meta": self.meta_model,
-                "nl": self.nl_model,
-                "compact": self.compact_model,
-                "analysis": self.model,
-            }[role]
-        )
+        selected_model = model or self.model_for(role)
         effective_max_tokens = self.max_tokens_for(
             role, model=selected_model, requested=max_tokens
         )
@@ -329,6 +328,42 @@ class LLMWorkerSettings:
             # deliberately lower effort than the strategy-design dialogues.
             return NL_REASONING_EFFORT
         return self.reasoning_effort
+
+    def compaction_for(self, role: str) -> ContextCompactionConfig:
+        """One conversation role's compaction budget (main, meta or subagent).
+
+        Its threshold is ``window − that role's output budget −
+        COMPACTION_SAFETY_MARGIN_TOKENS`` for the role's own model, so prompt
+        plus output never exceeds the window, and the same bound for the
+        compaction model, which must read the whole conversation; a configured
+        ``compact_token_threshold`` is clamped to them. The value reaches the
+        run facts (parents) and the compaction events (children). Only a
+        window with no room for the output budget at all is a launch error.
+        """
+
+        if role not in {"main", "meta", "subagent"}:
+            raise ValueError(f"unknown conversation role: {role}")
+        bounds = [self.compact_token_threshold] if self.compact_token_threshold else []
+        for bound_role in (role, "compact") if self.compact_enabled else (role,):
+            window = model_profile(self.model_for(bound_role)).context_window_tokens
+            if window is None:
+                continue
+            bound = (
+                window
+                - self.max_tokens_for(bound_role)
+                - COMPACTION_SAFETY_MARGIN_TOKENS
+            )
+            if bound <= 0:
+                raise ValueError(
+                    f"{bound_role} model output budget leaves no context capacity"
+                )
+            bounds.append(bound)
+        if not bounds:
+            raise ValueError(
+                "compact_token_threshold is required when no model role declares "
+                "a context window"
+            )
+        return replace(self.compaction, token_threshold=min(bounds))
 
 
 @dataclass(frozen=True)
@@ -838,6 +873,11 @@ def run_local_interactive_worker(
         if options.developer_mode == "llm" and options.llm
         else None
     )
+    subagent_gateway = llm or (
+        options.llm.build_gateway("subagent")
+        if options.developer_mode == "llm" and options.llm
+        else None
+    )
     nl_gateway = llm or (
         options.llm.build_gateway("nl")
         if options.developer_mode == "llm" and options.llm
@@ -905,9 +945,10 @@ def run_local_interactive_worker(
         runtime_root = options.work_root / options.experiment_id
         developer = LLMFoldDeveloper(
             llm=fold_gateway,
-            subagent_llm=fold_gateway,
+            subagent_llm=subagent_gateway,
             compact_llm=compact_gateway,
             context_compaction=options.llm.compaction,
+            subagent_compaction=options.llm.compaction_for("subagent"),
             baseline_strategy=options.baseline_strategy,
             artifact_store=store,
             evaluator=evaluator,
@@ -928,9 +969,10 @@ def run_local_interactive_worker(
         )
         meta_learner = LLMMetaLearner(
             llm=meta_gateway,
-            subagent_llm=meta_gateway,
+            subagent_llm=subagent_gateway,
             compact_llm=compact_gateway,
-            context_compaction=options.llm.compaction,
+            context_compaction=options.llm.compaction_for("meta"),
+            subagent_compaction=options.llm.compaction_for("subagent"),
             baseline_strategy=options.baseline_strategy,
             artifact_store=store,
             experiment_dir=options.experiment_dir,
@@ -1550,6 +1592,9 @@ def _llm_settings(
         str(params.get("model") or params.get("llm_model") or LOCAL_QWEN_MODEL)
     )
     meta_model = canonicalize_model_name(str(params.get("meta_model") or fold_model))
+    subagent_model = canonicalize_model_name(
+        str(params.get("subagent_model") or fold_model)
+    )
     nl_model = canonicalize_model_name(
         str(params.get("nl_model") or LOCAL_QWEN_MODEL)
     )
@@ -1560,8 +1605,8 @@ def _llm_settings(
         params.get("compact_max_tokens", 1_600),
         "compact_max_tokens",
     )
-    # None = derived from the model windows; ``_resolve_compaction_threshold``
-    # sets the effective value on the settings either way.
+    # None = derived from the model windows; ``compaction_for`` sets the
+    # effective per-role value either way.
     configured_threshold = _optional_positive_int(
         params.get("compact_token_threshold"), "compact_token_threshold"
     )
@@ -1584,6 +1629,7 @@ def _llm_settings(
         env_file=env_file,
         model=fold_model,
         meta_model=meta_model,
+        subagent_model=subagent_model,
         nl_model=nl_model,
         compact_model=compact_model,
         timeout_seconds=_positive_float(
@@ -1618,13 +1664,18 @@ def _llm_settings(
             "disable_context_compact",
         ),
         compaction=compaction,
+        compact_token_threshold=configured_threshold,
     )
     # Whether the host holds a credential is deployment state, not a property
     # of a WebUI create request.  Every model/role combination is still
     # validated at preflight with a non-secret placeholder.
-    for role in ("main", "meta", "nl", "compact"):
+    for role in ("main", "meta", "subagent", "nl", "compact"):
         settings.build_gateway(role, require_credentials=not preflight)
-    settings = _resolve_compaction_threshold(settings, configured_threshold)
+    # Every conversation role must leave room for its output budget; the Fold
+    # parent's derived budget becomes the settings' own.
+    for role in ("meta", "subagent"):
+        settings.compaction_for(role)
+    settings = replace(settings, compaction=settings.compaction_for("main"))
     gpu_count = _gpu_count(params.get("gpu_count", SandboxSpec().gpu_count))
     sandbox = SandboxSpec(
         image=str(params.get("agent_sandbox_image") or DEFAULT_IMAGE),
@@ -1652,45 +1703,6 @@ def _llm_settings(
 # so the margin lets one such addition ride along without a forced
 # compaction; the gateway keeps its own 2,048-token tokenizer slack on top.
 COMPACTION_SAFETY_MARGIN_TOKENS = 8_192
-
-
-def _resolve_compaction_threshold(
-    settings: LLMWorkerSettings, configured: int | None
-) -> LLMWorkerSettings:
-    """The effective compaction threshold: derived from the windows, clamped.
-
-    Every model role with a known context window bounds the threshold at
-    ``window − that role's output budget − COMPACTION_SAFETY_MARGIN_TOKENS``,
-    so prompt plus output never exceeds the window; the smallest bound is the
-    default, and a configured value is clamped to it. The result reaches the
-    run facts through the compaction budget. Only a window with no room for
-    the output budget at all is a launch error.
-    """
-
-    roles = [("main", settings.model), ("meta", settings.meta_model)]
-    if settings.compact_enabled:
-        roles.append(("compact", settings.compact_model))
-    bounds: list[int] = []
-    for role, model in roles:
-        window = model_profile(model).context_window_tokens
-        if window is None:
-            continue
-        maximum = window - settings.max_tokens_for(role) - COMPACTION_SAFETY_MARGIN_TOKENS
-        if maximum <= 0:
-            raise ValueError(
-                f"{role} model output budget leaves no context capacity"
-            )
-        bounds.append(maximum)
-    if not bounds and configured is None:
-        raise ValueError(
-            "compact_token_threshold is required when no model role declares "
-            "a context window"
-        )
-    effective = min([*bounds, *([configured] if configured is not None else [])])
-    return replace(
-        settings,
-        compaction=replace(settings.compaction, token_threshold=effective),
-    )
 
 
 def _optional_workspace_reference(value: object, repo_root: Path) -> str:

@@ -47,26 +47,6 @@ def node_in_session(node: Mapping[str, object], *, fold_id: str, run_id: str) ->
     return node.get("fold_id") == fold_id and node.get("run_id") == run_id
 
 
-def session_batch_rounds(tree: StepTree, *, fold_id: str, run_id: str) -> int:
-    """Completed ``batch_validate`` rounds recorded by this Fold session.
-
-    A batch writes its nodes — recorded Validations and failed attempts alike,
-    each carrying ``metadata.batch_id`` — only after every candidate reached a
-    terminal state, so each distinct batch id among the session's nodes is one
-    completed round. A round whose every candidate was falsified counts the
-    same as a round with a winner.
-    """
-
-    batch_ids: set[str] = set()
-    for node in tree.nodes():
-        if not node_in_session(node, fold_id=fold_id, run_id=run_id):
-            continue
-        metadata = node.get("metadata")
-        if isinstance(metadata, Mapping) and metadata.get("batch_id"):
-            batch_ids.add(str(metadata["batch_id"]))
-    return len(batch_ids)
-
-
 class StepTree:
     def __init__(self, root: str | Path) -> None:
         self.root = Path(root)

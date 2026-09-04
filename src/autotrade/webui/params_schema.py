@@ -444,7 +444,7 @@ _FIELDS: list[dict[str, object]] = [
     {"key": "convergence_start_epoch", "group": "预算与验收", "label": "收敛起始 Epoch", "type": "int",
      "help": "从该 Epoch（1 起）开始 Fold 提示词进入收敛阶段：优先更小更稳的策略。"},
     {"key": "min_return", "group": "预算与验收", "label": "验收目标验证收益", "type": "float",
-     "help": "验证总收益目标值：低于只记警告，不阻止冻结（AcceptanceRules.min_return；硬校验为回撤/非有限/完整验证）。"},
+     "help": "验证总收益目标值：低于只记警告，不阻止冻结（AcceptanceRules.min_return；冻结的硬校验只剩非有限指标与完整验证）。"},
     {"key": "min_sharpe", "group": "预算与验收", "label": "验收目标 Sharpe", "type": "float",
      "help": "验证 Sharpe 目标值：低于只记警告，不阻止冻结。"},
     {
@@ -452,7 +452,7 @@ _FIELDS: list[dict[str, object]] = [
         "group": "预算与验收",
         "label": "验收最大回撤",
         "type": "float",
-        "help": "冻结策略允许的最大验证回撤（0.25 = 25%）。",
+        "help": "回撤上限（0.25 = 25%）：Validation 超限只记警告、不阻止冻结，毕业裁决要求 Held-out 回撤不超过它。",
     },
     {
         "key": "cost_stress_multiplier",
@@ -558,6 +558,14 @@ _FIELDS: list[dict[str, object]] = [
         "type": "choice",
         "choices": list(MODEL_CHOICES),
         "help": "元学习阶段 Agent 主对话模型；可与普通 Fold 不同。",
+    },
+    {
+        "key": "subagent_model",
+        "group": "模型与上下文",
+        "label": "子代理模型",
+        "type": "choice",
+        "choices": list(MODEL_CHOICES),
+        "help": "Fold 与元学习会话用 agent 工具启动的子代理所用模型；共享父会话的调用配额与时间预算，压缩阈值按该模型的上下文窗口推导。",
     },
     {
         "key": "nl_model",
