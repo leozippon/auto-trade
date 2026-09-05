@@ -162,8 +162,14 @@ def _visible_timeline(
 ) -> dict[str, object]:
     execution_policy = _execution_policy(data_summary)
     snapshot_windows = _snapshot_windows(snapshot_config)
+    # A Fold manifest carries the geometry itself; a Meta manifest carries it
+    # in ``experiment_parameters`` (it has no Fold of its own).
+    parameters = _as_mapping(manifest.get("experiment_parameters")) if is_meta else manifest
     timeline = {
         "fold_period": fold_period,
+        # Cadence periods per Validation window: 1 is the Fold's own period,
+        # N > 1 the trailing N ending at it, only the last of which is new.
+        "validation_periods": parameters.get("validation_periods"),
         "snapshot_windows": snapshot_windows,
         "decision_snapshot_intraday_lookback_trade_days": snapshot_windows.get("intraday_trade_days"),
         "validation_intraday_scope": "historical_pit_features_and_exact_execution_prices",

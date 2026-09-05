@@ -152,7 +152,8 @@ def test_meta_facts_carry_universe_and_cadence_but_no_fold_window() -> None:
         kind="meta_learning",
         meta_learning_id="epoch_001",
         experiment_parameters={
-            "fold_period": "year",
+            "fold_period": "quarter",
+            "validation_periods": 4,
             "schedule": {"period": "day", "inference_time": "08:30"},
             "snapshot_config": SnapshotConfig().to_record(),
         },
@@ -163,6 +164,16 @@ def test_meta_facts_carry_universe_and_cadence_but_no_fold_window() -> None:
     assert "development_window" not in scope
     assert scope["universe"].startswith("The universe is unfiltered")
     assert "every trading day at 08:30" in scope["strategy_cadence"]
+    # The geometry a Meta reviews Folds against comes from the same block; a
+    # live Meta once read "every trading day at None" and no fold_period at all
+    # because the pipeline never wrote it.
+    assert facts["visible_timeline"]["fold_period"] == "quarter"
+    assert facts["visible_timeline"]["validation_periods"] == 4
+
+
+def test_the_validation_window_length_is_a_fold_fact() -> None:
+    assert _facts(validation_periods=4)["visible_timeline"]["validation_periods"] == 4
+    assert "validation_periods" not in _facts()["visible_timeline"]
 
 
 def test_both_strategy_wall_clocks_reach_the_session() -> None:
@@ -311,16 +322,16 @@ def test_the_compact_history_carries_turnover_and_the_parent_delta(
     assert published["vs_parent"]["total_return"] == 0.01
 
 
-def test_the_neutralization_caliber_is_stated_once_not_once_per_result(
+def test_each_historical_result_keeps_the_caliber_it_was_scored_with(
     tmp_path: Path,
 ) -> None:
-    """One constant sentence belongs in the facts, not in every summary.
+    """The facts state the current caliber; every summary keeps its own.
 
-    ``development_history`` grows with every completed Fold, so repeating the
-    ~130-char caliber in each of its backtest summaries spends prompt budget
-    that the shared prefix never releases. The NL counters are different: a
-    zero under a mounted text corpus is a real reading (the strategy never
-    asked), and only a run with the corpus switched off drops them.
+    The size-factor rule changed once mid-round, so a number in the history
+    must carry the method it was actually computed with rather than read as if
+    under the current sentence. The NL counters are different: a zero under a
+    mounted text corpus is a real reading (the strategy never asked), and only
+    a run with the corpus switched off drops them.
     """
 
     assert _facts()["neutralized_excess_method"] == NEUTRALIZATION_METHOD
@@ -361,7 +372,7 @@ def test_the_neutralization_caliber_is_stated_once_not_once_per_result(
         )
 
     with_text = history(include_text=True)["backtest_summaries"][0]
-    assert "neutralized_excess_method" not in with_text["benchmark"]
+    assert with_text["benchmark"]["neutralized_excess_method"] == NEUTRALIZATION_METHOD
     assert with_text["benchmark"]["neutralized_excess_return"] == 0.1554
     assert with_text["nl_calls"] == 0 and with_text["nl_wall_seconds"] == 0.0
 
@@ -669,8 +680,8 @@ def test_fold_development_history_is_the_verdict_and_does_not_grow_with_candidat
     assert "test_result" not in two
     for leak in ("20230401", "fold_2023Q1", "per_stock", "000001.SZ", "/host/", "strategy_raw_id", "node_raw", "seed", "matched"):
         assert leak not in rendered, leak
-    # The caliber is one constant sentence the facts state once, not once per Fold.
-    assert "neutralized_excess_method" not in rendered
+    # The frozen node's number keeps the caliber it was scored with.
+    assert two["validation_result"]["benchmark"]["neutralized_excess_method"] == NEUTRALIZATION_METHOD
     assert two["fold_id"] == store.get_or_create("fold", "fold_2023Q1")
 
 
@@ -685,3 +696,43 @@ def test_fold_development_history_without_a_parent_or_null_is_honest(tmp_path: P
     assert summary["vs_parent"] is None
     assert summary["null_control"] is None
     assert summary["selection_statistics"]["candidates_evaluated"] == 17
+
+
+def test_the_current_folds_parent_control_fact_carries_the_hosts_null(tmp_path: Path) -> None:
+    """The host measured the parent control's null beside its replay; the Fold
+    reads it (whitelisted, step included) next to the control's metrics, so
+    the keep-parent decision sees the parent's forward evidence. No control,
+    no block; a backend that ran no null leaves ``null_control`` None."""
+
+    from dataclasses import replace
+
+    from autotrade.pipelines.config import EvaluationResult
+    from autotrade.pipelines.local_backend import parent_control_facts
+    from tests.unit.test_batch_validate import _Session
+
+    request = _Session(tmp_path).backtest.request
+    assert parent_control_facts(request) is None
+
+    control = EvaluationResult(
+        {"total_return": 0.0071, "benchmark": {"excess_return": -0.0392}, "per_stock": {"x": [1]}},
+        "result/parent_control",
+    )
+    null = {
+        "status": "ok",
+        "excess_percentile": 0.496,
+        "k": 500,
+        "seed": 57050769,
+        "matched": "circ_mv_decile",
+        "step": {"start": "20230103", "end": "20230331", "excess_percentile": 0.11},
+    }
+    facts = parent_control_facts(
+        replace(request, parent_control=control, parent_control_null=null)
+    )
+    assert facts["total_return"] == 0.0071 and "per_stock" not in facts
+    assert facts["null_control"] == {
+        "status": "ok",
+        "excess_percentile": 0.496,
+        "k": 500,
+        "step": {"start": "20230103", "end": "20230331", "excess_percentile": 0.11},
+    }
+    assert parent_control_facts(replace(request, parent_control=control))["null_control"] is None

@@ -2380,6 +2380,86 @@ def test_daily_backtest_waits_for_running_subagent() -> None:
     assert any('"observation": "subagent_completed"' in (m.content or "") for m in third)
 
 
+@pytest.mark.parametrize("role", ["auditor", "Explore"])
+def test_a_backtest_does_not_wait_for_a_read_only_child(role: str) -> None:
+    """A read-only audit is off the Validation critical path: the backtest
+    barrier waits only for children whose role can write the workspace."""
+
+    release = threading.Event()
+
+    class _Child:
+        model = "child"
+        provider = "test"
+        context_window_tokens = 128000
+
+        def complete(self, messages, **kwargs):
+            del messages, kwargs
+            release.wait(timeout=1)
+            return ProviderResponse(content="audit done")
+
+    seen: list[bool] = []
+
+    class _Backtest:
+        spec = ToolSpec(
+            "batch_validate", "gate", {"type": "object", "properties": {}, "required": []}
+        )
+
+        def invoke(self, arguments: Mapping[str, object]) -> ToolResult:
+            del arguments
+            seen.append(all(job.future.done() for job in runner._subagent_jobs))
+            release.set()
+            return ToolResult(True, value={"status": "probe"})
+
+    llm = ScriptedLLM(
+        [
+            ProviderResponse(
+                tool_calls=(ToolCall("a", "agent", {"agent": role, "task": "audit"}),)
+            ),
+            ProviderResponse(tool_calls=(ToolCall("b", "batch_validate", {}),)),
+            ProviderResponse(tool_calls=(ToolCall("f", "finish_fold", {}),)),
+        ]
+    )
+    runner = AgentSessionRunner(
+        llm=llm,
+        tools=ToolRegistry([_Backtest(), _FinishStub("finish_fold")]),
+        system_prompt="fold",
+        config=_fold_config(),
+        subagent=SubAgentEngine(llm=_Child(), tools=ToolRegistry()),
+    )
+    try:
+        assert runner.run("go").status == "finished"
+    finally:
+        release.set()
+    # The backtest ran while the auditor was still pending; finish_fold then
+    # waited for it as before.
+    assert seen == [False]
+
+
+@pytest.mark.parametrize("role", ["developer", "general-purpose"])
+def test_a_backtest_refuses_a_writer_that_outlives_the_barrier(monkeypatch, role: str) -> None:
+    """After the brief wait a child that can still write the workspace makes
+    the backtest refuse instead of snapshotting candidates it may be changing."""
+
+    from concurrent.futures import Future
+
+    from autotrade.agent import runner as runner_module
+
+    monkeypatch.setattr(runner_module, "SUBAGENT_TEARDOWN_WAIT_SECONDS", 0)
+    runner = AgentSessionRunner(
+        llm=ScriptedLLM([]), tools=ToolRegistry(), system_prompt="fold", config=_fold_config()
+    )
+    writer = runner_module._SubAgentJob("pending", "call", role, 1, Future())
+    runner._subagent_jobs.append(writer)
+    try:
+        results, _ = runner._dispatch_tool_calls(
+            (ToolCall("b", "daily_backtest", {}),), InferenceTimeBudget(duration_seconds=100)
+        )
+    finally:
+        writer.future.cancel()
+    assert results[0][1]["error_type"] == "subagent_writers_in_flight"
+    assert results[0][1]["writers"] == [{"task_id": "pending", "role": role}]
+
+
 def test_agent_tool_schema_through_the_registry() -> None:
     runner = AgentSessionRunner(
         llm=ScriptedLLM([]),

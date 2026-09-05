@@ -18,6 +18,7 @@ from autotrade.pipelines.agent_views import (
     VS_PARENT_DELTA_KEYS,
     agent_visible_metrics,
     allowed_keys,
+    parent_control_summary,
 )
 from autotrade.pipelines.fold_analysis import read_strategy_files
 
@@ -594,6 +595,10 @@ def build_meta_fold_review_bundle(
                 "null_control": allowed_keys(
                     record.get("null_control"), NULL_CONTROL_KEYS
                 ),
+                # The inherited parent on this Fold's new period: the one
+                # forward result a trailing window holds, which the PRIOR is
+                # asked to cite per reviewed Fold.
+                "parent_control": parent_control_summary(record.get("parent_control")),
                 "test_result": agent_visible_metrics(
                     test_result if isinstance(test_result, dict) else None
                 ),

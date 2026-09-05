@@ -193,9 +193,9 @@ def _finite(value: object) -> float | None:
 
 
 # One completed Validation as a later Fold or the Meta session reads it back.
-# ``neutralized_excess_method`` is deliberately absent: the caliber is one
-# constant sentence, and the session facts state it once
-# (``build_experiment_facts``) instead of once per summary per fold.
+# ``benchmark`` keeps its ``neutralized_excess_method``: the session facts state
+# the current caliber, but a historical number must carry the rule it was
+# actually scored with (the size-factor rule changed once mid-round).
 _SUMMARY_KEYS = (
     "result_name",
     "mode",
@@ -269,11 +269,7 @@ def compact_fold_history(
         for summary in raw_backtests:
             if not isinstance(summary, dict):
                 continue
-            backtests.append(
-                _without_benchmark_method(
-                    {key: summary.get(key) for key in keys if key in summary}
-                )
-            )
+            backtests.append({key: summary.get(key) for key in keys if key in summary})
     compact = {
         "epoch_id": record.get("epoch_id"),
         "fold_id": ref_store.get_or_create("fold", str(record.get("fold_id"))),
@@ -297,24 +293,6 @@ def compact_fold_history(
     if include_frozen_test_metrics and record.get("record_type") == "fold":
         compact["test_result"] = _visible_metrics(record.get("test_result"))
     return compact
-
-
-def _without_benchmark_method(metrics: dict[str, object] | None) -> dict[str, object] | None:
-    """Drop the neutralization caliber sentence: the session facts state it once."""
-
-    if metrics is None:
-        return None
-    benchmark = metrics.get("benchmark")
-    if isinstance(benchmark, dict) and "neutralized_excess_method" in benchmark:
-        return {
-            **metrics,
-            "benchmark": {
-                key: value
-                for key, value in benchmark.items()
-                if key != "neutralized_excess_method"
-            },
-        }
-    return metrics
 
 
 # Host-computed selection evidence a later Fold or a Meta review reads verbatim
@@ -341,12 +319,14 @@ SELECTION_STATISTICS_KEYS = (
     "unavailable_reason",
 )
 # ``rejects_mean`` rides along because a null whose orders are mostly rejected
-# is a weaker comparison, ``status`` because a failed null must not read as a
-# missing one, and the null's own centre and spread over its ``k`` draws
-# because a percentile alone does not say how far the observed excess sits
-# from them. Informational: nothing in the pipeline gates on it.
+# is a weaker comparison, ``status``/``reason`` because a failed or unavailable
+# null (a result with no filled trade) must not read as a missing one, and the
+# null's own centre and spread over its ``k`` draws because a percentile alone
+# does not say how far the observed excess sits from them. Informational:
+# nothing in the pipeline gates on it.
 NULL_CONTROL_KEYS = (
     "status",
+    "reason",
     "observed_excess",
     "excess_percentile",
     "null_excess_mean",
@@ -387,19 +367,11 @@ def fold_development_summary(
     tree and in the Meta history (``compact_fold_history``), and a system
     prompt that carried them grew by ~25k characters per completed Fold, so
     this projection's size does not depend on how many candidates a Fold ran.
-    Test metrics never enter it.
+    Test metrics never enter it. Each result keeps the ``neutralized_excess_method``
+    it was scored with: the caliber has changed once already, and a number
+    computed under the old rule must not read as if under the current one.
     """
 
-    control = record.get("parent_control")
-    parent_control = None
-    if isinstance(control, Mapping):
-        parent_control = {
-            "status": control.get("status"),
-            "step_result": _visible_step_result(control.get("step_result")),
-            "null_control": allowed_keys(
-                control.get("null_control"), NULL_CONTROL_KEYS
-            ),
-        }
     return {
         "epoch_id": record.get("epoch_id"),
         "fold_id": ref_store.get_or_create("fold", str(record.get("fold_id"))),
@@ -414,15 +386,32 @@ def fold_development_summary(
         "early_stop_reason": record.get("early_stop_reason"),
         "accept_reasons": record.get("accept_reasons"),
         "accept_warnings": record.get("accept_warnings"),
-        "validation_result": _without_benchmark_method(
-            _visible_metrics(record.get("validation_result"))
-        ),
+        "validation_result": _visible_metrics(record.get("validation_result")),
         "vs_parent": allowed_keys(record.get("vs_parent"), VS_PARENT_DELTA_KEYS),
         "selection_statistics": allowed_keys(
             record.get("selection_statistics"), SELECTION_STATISTICS_KEYS
         ),
         "null_control": allowed_keys(record.get("null_control"), NULL_CONTROL_KEYS),
-        "parent_control": parent_control,
+        "parent_control": parent_control_summary(record.get("parent_control")),
+    }
+
+
+def parent_control_summary(control: object) -> dict[str, object] | None:
+    """The ledger's ``parent_control`` block as a later Fold or Meta reads it.
+
+    The inherited parent's fate on the Fold: its status, its result on the
+    Fold's new period alone (``step_result`` — the only forward evidence a
+    trailing window holds) and its null control. Whole-window metrics stay
+    out: on a trailing window they are mostly ground the parent was developed
+    on. None without a parent.
+    """
+
+    if not isinstance(control, Mapping):
+        return None
+    return {
+        "status": control.get("status"),
+        "step_result": _visible_step_result(control.get("step_result")),
+        "null_control": allowed_keys(control.get("null_control"), NULL_CONTROL_KEYS),
     }
 
 

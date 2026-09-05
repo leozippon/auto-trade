@@ -641,5 +641,58 @@ def test_prompt_contract_leaves_sidecar_exploration_to_meta() -> None:
     assert "逐个读取" not in META_SYSTEM_PROMPT
 
 
+def test_review_carries_the_parent_controls_new_period_result_and_null(tmp_path: Path) -> None:
+    """The PRIOR is asked to cite, per reviewed Fold, how the inherited parent
+    fared on the Fold's new period; the review therefore carries that step
+    result and the control's null, and nothing host-side or Test-shaped."""
+
+    record, _ = _fold(tmp_path, _raw_trace("P"))
+    record["parent_control"] = {
+        "status": "ok",
+        "parent_strategy_artifact_id": "strategy_raw_id",
+        "step_id": "node_raw",
+        "validation_result": {"total_return": -0.1, "per_stock": {"000001.SZ": [0.1]}},
+        "validation_result_ref": "/host/private/result.json",
+        "step_result": {
+            "label": "2024Q1",
+            "start": "20240102",
+            "end": "20240329",
+            "partial": False,
+            "total_return": -0.03,
+            "benchmark": {"benchmark_return": 0.01, "excess_return": -0.04},
+            "cost_sensitivity": {"excess_at_2x_slippage": -0.05},
+            "per_stock": {"000001.SZ": [0.1]},
+        },
+        "null_control": {
+            "status": "ok",
+            "k": 500,
+            "seed": 7,
+            "excess_percentile": 0.4,
+            "step": {"start": "20240102", "end": "20240329", "excess_percentile": 0.2},
+        },
+    }
+    record["test_result"] = {"total_return": 0.7, "sub_windows": [{"label": "hidden_test"}]}
+    ref_store = AgentRefStore(tmp_path / "experiment")
+    review = _as_map(build_meta_fold_review_bundle([record], ref_store=ref_store)[0][0])
+    parent = _as_map(review["parent_control"])
+    assert parent["status"] == "ok"
+    step = _as_map(parent["step_result"])
+    assert step["label"] == "2024Q1" and step["total_return"] == -0.03
+    assert _as_map(step["benchmark"])["excess_return"] == -0.04
+    assert step["excess_at_2x_slippage"] == -0.05
+    assert parent["null_control"] == {
+        "status": "ok",
+        "k": 500,
+        "excess_percentile": 0.4,
+        "step": {"start": "20240102", "end": "20240329", "excess_percentile": 0.2},
+    }
+    rendered = json.dumps(review, ensure_ascii=False)
+    for leak in ("hidden_test", "/host/private", "strategy_raw_id", "node_raw", "per_stock", '"seed"'):
+        assert leak not in rendered, leak
+
+    bare, _ = _fold(tmp_path, _raw_trace("B"), run_id="run_bare")
+    assert build_meta_fold_review_bundle([bare], ref_store=ref_store)[0][0]["parent_control"] is None
+
+
 def _stat_mode(path: Path) -> int:
     return path.stat().st_mode & 0o777

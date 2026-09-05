@@ -712,6 +712,8 @@ class FoldSessionRequest:
     # manifest the pipeline writes; here the pipeline hands them to the
     # sandbox owner, which is the component that writes the manifest.
     fold_period: str = DEFAULT_FOLD_PERIOD
+    # Cadence periods in this Fold's Validation window (RollingExperimentConfig).
+    validation_periods: int = 1
     # Whether a frozen Test follows this Fold (rolling development) or the
     # Held-out replay is the next and final evaluation (regular Folds).
     test_stage: bool = False
@@ -719,6 +721,9 @@ class FoldSessionRequest:
     # host before the session; None without a parent or when it failed. The
     # developer records it as the session's first Step node.
     parent_control: EvaluationResult | None = None
+    # That control's random-portfolio null, measured by the host beside the
+    # replay (None when the backend runs none); forwarded, never recomputed.
+    parent_control_null: Mapping[str, object] | None = None
     epoch_index: int = 1
     phase: str = "exploration"
     acceptance_rules: Mapping[str, object] = field(default_factory=dict)

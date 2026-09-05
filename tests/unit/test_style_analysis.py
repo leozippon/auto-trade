@@ -461,6 +461,34 @@ def test_size_legs_are_formed_on_the_prior_days_cap():
     rows.append({"ts_code": "301999.SZ", "trade_date": "20240103", "circ_mv": 1.0, "pct_chg": 2.0})
     assert _size_factor(pd.DataFrame(rows))["20240103"] == pytest.approx(0.5 / 18)
 
+    # The legs do not depend on how the slot's rows happen to be stored.
+    shuffled = pd.DataFrame(rows).sample(frac=1, random_state=9).reset_index(drop=True)
+    assert _size_factor(shuffled) == _size_factor(pd.DataFrame(rows))
+
+
+@pytest.mark.parametrize("exposure", [0.0, 0.2])
+def test_cash_and_a_constant_low_beta_book_have_no_alpha_in_a_bear_market(exposure: float):
+    """A book that only scales the market shows no neutralized excess, however
+    much its raw excess flatters it because less capital was exposed."""
+
+    dates = [stamp.strftime("%Y%m%d") for stamp in pd.bdate_range("2024-01-02", periods=24)]
+    market = {day: (-0.012, 0.004, -0.006)[i % 3] for i, day in enumerate(dates)}
+    size = {day: (0.005, -0.003, 0.002, -0.002)[i % 4] for i, day in enumerate(dates)}
+    strategy = [(day, exposure * market[day]) for day in dates]
+    block = _neutralized_excess(strategy, market, size)
+    assert block["available"] is True
+    assert block["neutralized_excess_return"] == 0.0
+    assert block["market_beta"] == exposure
+    assert block["size_beta"] == 0.0
+    # The raw benchmark excess is positive solely because less capital was exposed.
+    raw = 1.0
+    for _, value in strategy:
+        raw *= 1.0 + value
+    benchmark = 1.0
+    for value in market.values():
+        benchmark *= 1.0 + value
+    assert raw > benchmark
+
 
 def test_neutralized_excess_reports_missing_factors_instead_of_zero(tmp_path: Path):
     days = [stamp.strftime("%Y%m%d") for stamp in pd.bdate_range("2024-01-02", periods=20)]

@@ -493,6 +493,7 @@ def _agent_visible_manifest(
             "runtime_env_ref",
             "data_summary_ref",
             "fold_period",
+            "validation_periods",
             "schedule",
             "snapshot_config",
             "valid_decision_time",

@@ -67,6 +67,7 @@ from .subagent import (
     AgentTool,
     _copy_chat_message,
     _output_truncated,
+    allowed_subagent_tools,
     deliver_subagent_report,
     normalize_subagent_thinking,
     resolve_subagent_max_turns,
@@ -1059,12 +1060,35 @@ class AgentSessionRunner:
                 }
             if call.name in _TERMINAL_TOOLS or call.name in _PHASE_GATE_TOOLS:
                 # Barrier: a formal backtest or finish must not overlap a
-                # developer child that may still be writing the workspace.
-                self._wait_subagent_jobs()
+                # developer child that may still be writing the workspace. A
+                # finish waits for every child (the close discards their
+                # reports); a backtest waits only for children whose role can
+                # write, so a read-only audit never delays a ready round, and
+                # refuses rather than snapshot candidates a writer may still
+                # be changing.
+                self._wait_subagent_jobs(writers_only=call.name in _PHASE_GATE_TOOLS)
                 if call.name in _TERMINAL_TOOLS:
                     in_flight = self._in_flight_subagent_error()
                     if in_flight:
                         return call, in_flight
+                else:
+                    writers = [
+                        {"task_id": job.task_id, "role": job.role}
+                        for job in self._subagent_jobs
+                        if not job.future.done() and self._subagent_can_write(job)
+                    ]
+                    if writers:
+                        return call, {
+                            "ok": False,
+                            "error_type": "subagent_writers_in_flight",
+                            "error": (
+                                "a formal backtest cannot start while a child "
+                                "that can write the workspace is still running; "
+                                "wait for its subagent_completed or message it "
+                                "to report now"
+                            ),
+                            "writers": writers,
+                        }
             self._call_context.call_id = call.id
             record = self.tools.invoke(
                 call.name,
@@ -1597,16 +1621,31 @@ class AgentSessionRunner:
                 return
             completed.wait(timeout=min(0.05, waitable))
 
-    def _wait_subagent_jobs(self) -> list[dict[str, object]]:
+    def _subagent_can_write(self, job: _SubAgentJob) -> bool:
+        """Whether the child's role holds a tool that mutates the workspace."""
+
+        return bool(
+            allowed_subagent_tools(self.config.mode, job.role)
+            & {"write_file", "edit_file", "shell", "write_skill", "delete_skill"}
+        )
+
+    def _wait_subagent_jobs(self, *, writers_only: bool = False) -> list[dict[str, object]]:
         return self._collect_finished_subagents(
-            wait=True, timeout=SUBAGENT_TEARDOWN_WAIT_SECONDS
+            wait=True, timeout=SUBAGENT_TEARDOWN_WAIT_SECONDS, writers_only=writers_only
         )
 
     def _collect_finished_subagents(
-        self, *, wait: bool = False, timeout: float | None = None
+        self,
+        *,
+        wait: bool = False,
+        timeout: float | None = None,
+        writers_only: bool = False,
     ) -> list[dict[str, object]]:
         """The one place a child's result is taken: usage and Trace here, the
-        conversation observation later via ``_append_subagent_observations``."""
+        conversation observation later via ``_append_subagent_observations``.
+
+        ``writers_only`` limits the wait to children whose role can write;
+        finished read-only children are still collected, running ones skipped."""
 
         finished: list[dict[str, object]] = []
         wait_timeout = timeout if wait else None
@@ -1617,6 +1656,8 @@ class AgentSessionRunner:
             if job.record is not None:
                 continue
             result: object
+            if wait and not job.future.done() and writers_only and not self._subagent_can_write(job):
+                continue
             if wait:
                 remaining = (
                     None if deadline is None else max(0.0, deadline - time.monotonic())

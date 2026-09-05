@@ -106,7 +106,12 @@ from autotrade.environment.tools.shell import SandboxShellTool
 from autotrade.environment.tools.step_rollback import StepRollbackTool
 from autotrade.environment.tools.workspace import SafeWorkspace
 
-from .agent_views import fold_development_summary, vs_parent_metrics
+from .agent_views import (
+    NULL_CONTROL_KEYS,
+    allowed_keys,
+    fold_development_summary,
+    vs_parent_metrics,
+)
 from .config import (
     AcceptanceRules,
     ArtifactRevision,
@@ -860,6 +865,25 @@ def manifest_backtest_stats(summary: Mapping[str, object]) -> dict[str, object]:
 PARENT_CONTROL_RESULT_NAME = "parent_control"
 
 
+def parent_control_facts(request: FoldSessionRequest) -> dict[str, object] | None:
+    """The host's parent control as the Fold session reads it in its run facts.
+
+    The inherited parent's completed Validation on this very window, replayed
+    by the host before the session: the Agent's baseline, already a Step node
+    in the tree and charged to no budget. Its random-portfolio null rides
+    along (``step`` inside it is the Fold's new period alone), so the
+    keep-parent decision sees whether the parent's names beat random ones on
+    the one span that is forward evidence. None without a parent control.
+    """
+
+    if request.parent_control is None:
+        return None
+    return {
+        **inline_backtest_stats(request.parent_control.summary),
+        "null_control": allowed_keys(request.parent_control_null, NULL_CONTROL_KEYS),
+    }
+
+
 def record_parent_control(
     backtest: FoldBacktestTool,
     control: EvaluationResult,
@@ -943,8 +967,9 @@ class FoldBacktestTool(SessionTimeBudgetAware):
         self.spec = ToolSpec(
             self.spec.name,
             "Commit the current output as an immutable revision and run the Fold "
-            "Validation replay; the call starts only after every background "
-            "sub-agent has finished. One trading day's generate_orders inference over "
+            "Validation replay; the call waits briefly for background sub-agents "
+            "that can write and is refused while one is still running, while "
+            "read-only audits keep running. One trading day's generate_orders inference over "
             f"{self.decision_timeout_seconds:g}s fails the whole backtest "
             "(strategy_inference_timeout_seconds); smoke-test timing on a few days first.",
             self.spec.input_schema,
@@ -1372,8 +1397,9 @@ class BatchValidateTool(SessionTimeBudgetAware):
         "the Fold budget; the whole batch is refused before anything runs if "
         "it does not fit the budget, if two candidates are byte-identical, if "
         "one has the parent strategy's executable structure, or if one fails "
-        "modification_check. The call starts only after every background "
-        "sub-agent has finished; candidates then replay concurrently on the same "
+        "modification_check. The call waits briefly for background sub-agents "
+        "that can write and is refused while one is still running; read-only "
+        "audits keep running while the candidates replay concurrently on the same "
         "Validation window. Returns one row per candidate: node id, headline "
         "metrics, the per-quarter return/excess/Sharpe of sub_windows, the "
         "vs_parent deltas against this Fold's parent control (excess, "
@@ -2218,6 +2244,7 @@ class LLMFoldDeveloper:
                     "valid_decision_time": request.fold.valid_decision_time.isoformat(),
                 },
                 "fold_period": request.fold_period,
+                "validation_periods": request.validation_periods,
                 "test_stage": request.test_stage,
                 "snapshot_config": dict(request.snapshot_config),
                 "snapshots": {
@@ -2772,14 +2799,7 @@ class LLMFoldDeveloper:
                 ),
             ),
             "development_history": history,
-            # The inherited parent's completed Validation on this very window,
-            # replayed by the host before this session: the Agent's baseline,
-            # already a Step node in the tree and charged to no budget.
-            "parent_control": (
-                inline_backtest_stats(request.parent_control.summary)
-                if request.parent_control is not None
-                else None
-            ),
+            "parent_control": parent_control_facts(request),
             "workspace": fold_workspace_map(paths.workspace),
             "forbidden": [
                 "current_test",
@@ -3066,6 +3086,10 @@ class LLMMetaLearner:
                     else {}
                 ),
                 "meta_learning_visible_fold": dict(host_visible_fold),
+                # Effective public geometry, cadence and Broker settings; the
+                # Meta run facts (fold_period, validation_periods, strategy
+                # cadence, snapshot windows, Broker profile) are read from here.
+                "experiment_parameters": dict(public.get("experiment_parameters") or {}),
                 "valid_decision_time": host_visible_fold.get("valid_decision_time"),
                 "snapshots": {
                     "valid_decision_input": {"snapshot_id": facts.get("snapshot_id")},

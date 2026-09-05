@@ -276,6 +276,8 @@ class InteractiveRunnerTest(RunnerTestCase):
             ).run()
         self.assertEqual(len(executor.calls), 3)
         self.assertEqual(read_status(self.status)["state"], "failed")
+        # The final failure keeps its text, without an attempt suffix.
+        self.assertEqual(read_status(self.status)["error"], "RuntimeError: still broken")
 
     def test_a_positive_poll_interval_is_required(self) -> None:
         for bad in (0, -1.0):

@@ -269,8 +269,10 @@ class RollingExperimentPipeline:
                             context.get("sandbox_gpu_count")
                         ),
                         fold_period=self.config.fold_period,
+                        validation_periods=self.config.validation_periods,
                         test_stage=self.config.test_stage,
                         parent_control=control,
+                        parent_control_null=control_null,
                         epoch_index=_epoch_index(epoch_id),
                         phase=(
                             "convergence"
@@ -760,6 +762,16 @@ class RollingExperimentPipeline:
                         "run_id": run_id,
                         "meta_learning_id": session_id,
                         "trigger_after_folds": completed_folds,
+                        # The effective public settings the Meta run facts are
+                        # built from (build_experiment_facts reads them here for
+                        # a Meta manifest); no Test or Held-out dates.
+                        "experiment_parameters": {
+                            "fold_period": self.config.fold_period,
+                            "validation_periods": self.config.validation_periods,
+                            "schedule": self.config.schedule.to_record(),
+                            "broker_profile": self.config.broker_profile.to_record(),
+                            "snapshot_config": _snapshot_config_record(self.snapshots),
+                        },
                         "visible_fold": _agent_visible_fold(
                             visible_fold, ref_store=self.ref_store
                         ),

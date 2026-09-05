@@ -22,6 +22,7 @@ from autotrade.environment.replay.null_control import (
     sample_null_orders,
     trade_skeleton,
 )
+from autotrade.environment.replay.stats import ReplayResult
 from autotrade.environment.strategy import CN_TZ, StrategySchedule
 
 DAYS = tuple(pd.bdate_range("2026-01-05", periods=20).strftime("%Y%m%d"))
@@ -338,6 +339,40 @@ def test_run_null_control_rejects_a_frame_from_another_window():
             k=1,
             seed=1,
         )
+
+
+def test_a_result_with_no_filled_trade_has_no_null_and_runs_no_replay(monkeypatch):
+    """An idle cash account picked no names: every null draw would be the same
+    empty replay and the right-inclusive percentile would read 1.0, the mark of
+    a result that beat every random portfolio. The block says unavailable and
+    spends no replay."""
+
+    def unexpected_replay(**_kwargs):
+        raise AssertionError("an empty skeleton must not spend a null replay")
+
+    monkeypatch.setattr(
+        "autotrade.environment.replay.null_control.run_daily_replay", unexpected_replay
+    )
+    result = ReplayResult(
+        equity_curve=tuple(
+            {"trade_date": day, "initial_equity": 1_000_000.0, "equity": 1_000_000.0}
+            for day in DAYS
+        ),
+        executions=(),
+        inference_dates=(),
+        pending_orders=(),
+    )
+    block = run_null_control(
+        result, _frame(), BENCHMARK, BrokerProfile(), StrategySchedule("day", "08:30"), k=500, seed=3
+    )
+    assert block == {
+        "status": "unavailable",
+        "reason": "no_filled_trades",
+        "k": 0,
+        "seed": 3,
+        "matched": "circ_mv_decile",
+        "excess_percentile": None,
+    }
 
 
 def _fill(

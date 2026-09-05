@@ -165,6 +165,18 @@ def run_null_control(
     if tuple(dates) != market.trade_dates:
         raise ValueError("result equity curve and replay frame cover different trading days")
     skeleton = trade_skeleton(result.executions)
+    if not skeleton:
+        # Nothing was ever filled: every random-name replay would be the same
+        # idle cash account, and the right-inclusive percentile would read 1.0
+        # for a result that picked no names at all.
+        return {
+            "status": "unavailable",
+            "reason": "no_filled_trades",
+            "k": 0,
+            "seed": seed,
+            "matched": MATCHING,
+            "excess_percentile": None,
+        }
     universe = _Universe(frame)
     pools = [_candidate_pool(trip, universe) for trip in skeleton]
     rng = np.random.default_rng(seed)

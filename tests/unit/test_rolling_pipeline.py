@@ -431,6 +431,15 @@ def test_first_meta_session_has_empty_review_window(tmp_path: Path):
     captured: dict[str, object] = {}
     pipeline, visible_fold = _meta_only_pipeline(tmp_path, ledger, captured)
     pipeline.run_meta_session("epoch_001", 0, visible_fold, parent=None, previous_prior="")
+    # The effective public settings the Meta run facts are built from; never
+    # the Test or Held-out dates.
+    parameters = captured["experiment_parameters"]
+    assert parameters["fold_period"] == "quarter"
+    assert parameters["validation_periods"] == 1
+    assert parameters["schedule"]["inference_time"] and parameters["broker_profile"]
+    assert set(parameters) == {
+        "fold_period", "validation_periods", "schedule", "broker_profile", "snapshot_config"
+    }
     history = captured["development_history"]
     assert isinstance(history, dict)
     assert history["fold_reviews"] == []
@@ -1947,7 +1956,7 @@ def test_the_null_control_of_the_parent_and_of_the_frozen_node_reach_the_ledger(
     """Both nulls are measured on results the Fold already produced: the parent
     control on the Fold's new period when it has one, the selected node on the
     whole Validation window. Their seeds differ so the two are separate draws."""
-    pipeline, folds, ledger, _requests = _selection_fold_pipeline(tmp_path)
+    pipeline, folds, ledger, requests = _selection_fold_pipeline(tmp_path)
     first = pipeline.run_fold("epoch_001", folds[0], parent=None)
     pipeline.evaluator.returns[first.frozen.artifact_id] = 0.06
     calls: list[dict[str, object]] = []
@@ -1956,6 +1965,10 @@ def test_the_null_control_of_the_parent_and_of_the_frozen_node_reach_the_ledger(
     pipeline.run_fold("epoch_001", stepped, parent=first.frozen)
 
     record = ledger.read("fold")[1]
+    # The session was handed the very null the ledger records for its parent
+    # control, computed once by the host beside the replay.
+    assert requests[-1].parent_control_null == record["parent_control"]["null_control"]
+    assert requests[-1].validation_periods == 1
     assert record["parent_control"]["null_control"]["excess_percentile"] == 0.94
     assert record["null_control"]["excess_percentile"] == 0.94
     # The parent control is ranked on the new period; the frozen node on the
