@@ -156,17 +156,78 @@ def walk_forward_transitions(
     if test_stage:
         source = "frozen_test"
         results = [record.get("test_result") for record in folds]
+        percentiles: list[float] = []
     else:
         source = "parent_control"
         results = [
             transition_result(record.get("parent_control"))
             for record in folds[1:]
         ]
+        # The null percentile of each counted transition on the span it is
+        # scored on; a control that ran no null control contributes nothing.
+        percentiles = [
+            value
+            for value in (
+                _finite(
+                    (transition_null_control(record.get("parent_control")) or {}).get(
+                        "excess_percentile"
+                    )
+                )
+                for record in folds[1:]
+            )
+            if value is not None
+        ]
     return {
         "source": source,
         "epoch_id": epoch_id,
         "transitions": len(results),
         "positive_excess": sum(1 for result in results if _excess_positive(result)),
+        # Diagnostic beside the count: where the transitions sat inside
+        # random-name replays of their own trade skeletons, on average. Never
+        # part of the term; None when no transition carried a null control.
+        "mean_excess_percentile": (
+            sum(percentiles) / len(percentiles) if percentiles else None
+        ),
+    }
+
+
+def frozen_selection(
+    fold_records: list[dict[str, object]], *, artifact_id: str
+) -> dict[str, object] | None:
+    """Selection evidence of the Fold that froze ``artifact_id``.
+
+    The strategy a Held-out replays was nominated out of one Fold's search,
+    and that Fold's record is the only place the search's deflated-Sharpe
+    probability (§2.4) and the frozen node's own null percentile live. Both
+    are diagnostics; the verdict carries them beside its gating metrics so a
+    graduation is read together with how much of it selection alone explains.
+    ``None`` when no Fold record froze the artifact (a Meta-regularized
+    artifact that never went through a Fold), and each field is ``None`` when
+    the record predates its block.
+    """
+
+    matches = [
+        record
+        for record in latest_fold_records(fold_records).values()
+        if record.get("frozen_strategy_artifact_id") == artifact_id
+    ]
+    if not matches:
+        return None
+    record = matches[-1]
+    selection = record.get("selection_statistics")
+    selection = selection if isinstance(selection, Mapping) else {}
+    null = record.get("null_control")
+    null = null if isinstance(null, Mapping) else {}
+    candidates = selection.get("candidates_evaluated")
+    return {
+        "fold_id": record.get("fold_id"),
+        "candidates_evaluated": (
+            candidates
+            if isinstance(candidates, int) and not isinstance(candidates, bool)
+            else None
+        ),
+        "deflated_sharpe_probability": _finite(selection.get("deflated_sharpe_probability")),
+        "validation_excess_percentile": _finite(null.get("excess_percentile")),
     }
 
 

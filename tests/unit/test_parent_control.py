@@ -330,6 +330,8 @@ def test_walk_forward_transitions_count_the_final_epochs_parent_controls():
         "epoch_id": "epoch_002",
         "transitions": 3,
         "positive_excess": 1,
+        # No control here ran a null control.
+        "mean_excess_percentile": None,
     }
     # A rerun appends a superseding record; only the latest counts.
     records.append(_fold("epoch_002", "fold_2025", "20250101..20251231", control=_ok(0.09)))
@@ -350,6 +352,8 @@ def test_walk_forward_transitions_use_frozen_tests_with_a_test_stage():
         "epoch_id": "epoch_001",
         "transitions": 3,
         "positive_excess": 1,
+        # A frozen Test is never ranked against a null control.
+        "mean_excess_percentile": None,
     }
     # Without a benchmark block an excess return cannot be shown at all.
     records[0]["test_result"] = {"total_return": 0.05}
@@ -442,6 +446,9 @@ def test_a_transition_is_graded_on_the_step_when_the_window_carries_one():
             "total_return": 0.02,
             "benchmark": {"benchmark_return": 0.04},
         },
+        # The window's null looks decisive; the step's own percentile is the
+        # one that describes the transition.
+        "null_control": {"k": 500, "excess_percentile": 0.98, "step": {"excess_percentile": 0.31}},
     }
     records = [
         _fold("epoch_001", "fold_2023Q1", "20220401..20230331"),
@@ -453,12 +460,10 @@ def test_a_transition_is_graded_on_the_step_when_the_window_carries_one():
         "epoch_id": "epoch_001",
         "transitions": 1,
         "positive_excess": 0,
+        "mean_excess_percentile": 0.31,
     }
-    # An older ledger has no step_result: the whole window stays the transition.
+    # An older ledger has no step_result: the whole window stays the transition,
+    # ranked against the whole window's null.
     del control["step_result"]
-    assert (
-        walk_forward_transitions(records, epoch_id="epoch_001", test_stage=False)[
-            "positive_excess"
-        ]
-        == 1
-    )
+    counted = walk_forward_transitions(records, epoch_id="epoch_001", test_stage=False)
+    assert (counted["positive_excess"], counted["mean_excess_percentile"]) == (1, 0.98)

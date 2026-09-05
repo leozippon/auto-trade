@@ -44,13 +44,15 @@ STYLE_SCHEMA_VERSION = 1
 _STYLE_COLUMNS = ("circ_mv", "pb", "turnover_rate")
 # Size-factor proxy for the neutralized excess return: the small-minus-big
 # daily spread of the replay slot's OWN cross-section, equal-weighted inside
-# each leg. The audited edge read as a small-cap / low-beta tilt rather than
-# proven alpha, and a raw excess return cannot tell those apart. This is not a
-# Barra or Fama-French factor and the result says so in ``method``.
+# each leg, the legs formed on the previous trading day's float cap. The
+# audited edge read as a small-cap / low-beta tilt rather than proven alpha,
+# and a raw excess return cannot tell those apart. This is not a Barra or
+# Fama-French factor and the result says so in ``method``.
 _SIZE_FACTOR_QUANTILE = 0.3
 _SIZE_FACTOR_MIN_NAMES = 30
 NEUTRALIZATION_METHOD = (
-    "日度策略收益对沪深300收益与规模因子（本回放槽流通市值最小 30% 等权减最大 30% 等权）"
+    "日度策略收益对沪深300收益与规模因子（本回放槽按前一交易日流通市值分组："
+    "最小 30% 等权减最大 30% 等权）"
     f"的二元 OLS，截距按 {TRADING_DAYS_PER_YEAR} 个交易日年化"
 )
 
@@ -189,6 +191,10 @@ def _benchmark_regression(
     return result
 
 
+def _symbol_column(frame: pd.DataFrame) -> str:
+    return "ts_code" if "ts_code" in frame.columns else "symbol"
+
+
 def _size_factor(replay_daily: pd.DataFrame) -> dict[str, float]:
     """Daily small-minus-big spread built from the replay slot's own universe.
 
@@ -198,25 +204,36 @@ def _size_factor(replay_daily: pd.DataFrame) -> dict[str, float]:
     decimal fraction (the unit registry applies the percent->decimal factor at
     snapshot load), matching the strategy and benchmark return scale, so the
     spread is used as-is.
+
+    A name joins a leg by the float cap it had at the PREVIOUS trading day's
+    close. The same day's ``circ_mv`` is the end-of-day cap and already embeds
+    the day's return, so sorting on it moves the day's winners into the big
+    leg and its losers into the small leg and biases the spread negative
+    whatever the true size premium (2022 replay: -17% sorted on the same day,
+    +8% on the prior day). A name's first row in the slot -- the window's first
+    day, or an IPO's listing day -- has no prior cap and sits out that day.
     """
 
-    required = {"trade_date", "circ_mv", "pct_chg"}
+    symbol = _symbol_column(replay_daily)
+    required = {symbol, "trade_date", "circ_mv", "pct_chg"}
     if not required.issubset(replay_daily.columns):
         return {}
-    frame = replay_daily[["trade_date", "circ_mv", "pct_chg"]].copy()
+    frame = replay_daily[[symbol, "trade_date", "circ_mv", "pct_chg"]].copy()
     frame["circ_mv"] = pd.to_numeric(frame["circ_mv"], errors="coerce")
     frame["pct_chg"] = pd.to_numeric(frame["pct_chg"], errors="coerce")
-    frame = frame.dropna(subset=["circ_mv", "pct_chg"])
+    frame = frame.sort_values([symbol, "trade_date"], kind="stable")
+    frame["prior_cap"] = frame.groupby(symbol, sort=False)["circ_mv"].shift(1)
+    frame = frame.dropna(subset=["prior_cap", "pct_chg"])
     result: dict[str, float] = {}
     for date, group in frame.groupby("trade_date"):
         if len(group) < _SIZE_FACTOR_MIN_NAMES:
             continue
         small = group.loc[
-            group["circ_mv"] <= group["circ_mv"].quantile(_SIZE_FACTOR_QUANTILE),
+            group["prior_cap"] <= group["prior_cap"].quantile(_SIZE_FACTOR_QUANTILE),
             "pct_chg",
         ]
         big = group.loc[
-            group["circ_mv"] >= group["circ_mv"].quantile(1.0 - _SIZE_FACTOR_QUANTILE),
+            group["prior_cap"] >= group["prior_cap"].quantile(1.0 - _SIZE_FACTOR_QUANTILE),
             "pct_chg",
         ]
         if small.empty or big.empty:
@@ -236,7 +253,11 @@ def _neutralized_excess(
 
     Two-regressor OLS through the normal equations, so a collinear or degenerate
     pair is reported as a reason instead of raising: attribution is advisory and
-    must never fail a backtest.
+    must never fail a backtest. The figure is the daily intercept times the
+    trading days of a year -- an arithmetic, annualized number, not the
+    compounded window excess beside it: a book with a large loading on a factor
+    that moved a lot in the window shows a large intercept the raw excess does
+    not, and on a short window the annualization scales the intercept up.
     """
 
     rows = [
@@ -347,7 +368,7 @@ def _style_exposures(
     curve: Sequence[Mapping[str, object]],
     industry_by_code: Mapping[str, str],
 ) -> dict[str, object]:
-    symbol_column = "ts_code" if "ts_code" in replay_daily.columns else "symbol"
+    symbol_column = _symbol_column(replay_daily)
     required = {symbol_column, "trade_date", "close", *_STYLE_COLUMNS}
     if not required.issubset(replay_daily.columns):
         return _empty_style("style_columns_unavailable")

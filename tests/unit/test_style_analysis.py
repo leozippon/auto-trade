@@ -12,6 +12,7 @@ from autotrade.environment.replay.style import (
     BENCHMARK_TS_CODE,
     _benchmark_regression,
     _neutralized_excess,
+    _size_factor,
     benchmark_summary_block,
     daily_returns_from_curve,
     replay_style_analysis,
@@ -318,11 +319,14 @@ def test_neutralized_excess_removes_the_market_and_size_contributions(tmp_path: 
     )
     block = analysis["neutralized_excess"]
     assert block["available"] is True
-    assert block["n_days"] == len(days)
+    # The size legs are formed on the prior day's cap, so the window's first
+    # day has no factor and the regression runs on the remaining days.
+    assert block["n_days"] == len(days) - 1
     assert block["market_beta"] is not None
     assert block["size_beta"] is not None
     # The method is stated with the number, not left to the reader.
     assert "沪深300" in block["method"] and "244" in block["method"]
+    assert "前一交易日" in block["method"]
     assert analysis["size_factor_daily"]
     compact = benchmark_summary_block(analysis)
     assert compact["neutralized_excess_return"] == block["neutralized_excess_return"]
@@ -403,11 +407,12 @@ def test_size_beta_is_measured_on_the_decimal_pct_chg_scale(tmp_path: Path):
         mode="valid",
     )
 
-    # The published factor series is the raw decimal spread, not a percent.
-    assert analysis["size_factor_daily"][0] == [days[0], pytest.approx(smb[0])]
+    # The published factor series is the raw decimal spread, not a percent. It
+    # starts on the second day: the legs are formed on the prior day's cap.
+    assert analysis["size_factor_daily"][0] == [days[1], pytest.approx(smb[1])]
 
     block = analysis["neutralized_excess"]
-    assert block["available"] is True and block["n_days"] == len(days)
+    assert block["available"] is True and block["n_days"] == len(days) - 1
     assert block["market_beta"] == 0.8
     assert block["size_beta"] == 0.5
     assert block["r2"] == 1.0
@@ -424,6 +429,37 @@ def test_size_beta_is_measured_on_the_decimal_pct_chg_scale(tmp_path: Path):
     assert rescaled["market_beta"] == block["market_beta"]
     assert rescaled["r2"] == block["r2"]
     assert rescaled["neutralized_excess_return"] == block["neutralized_excess_return"]
+
+
+def test_size_legs_are_formed_on_the_prior_days_cap():
+    """A name's leg is decided by the cap it had before earning the day's return.
+
+    ``circ_mv`` is the end-of-day cap and already embeds ``pct_chg``: sorting on
+    it moved the day's winners into the big leg and its losers into the small
+    leg, which biased the 2022 replay's spread to -17% when the prior-day sort
+    gives +8%, and inflated the neutralized excess of every small-loading book
+    (the untouched template read +31%, corrected -4%). Here one name sits at
+    the top of the small leg on day one and gains 50%: on the prior-day cap it
+    stays in the small leg and the spread is 0.5/18; sorted on the same day's
+    cap it would have left the leg and the spread would be exactly 0.
+    """
+    caps = [float(index + 1) for index in range(30)] + [100.0 + index for index in range(30)]
+    winner = "000018.SZ"  # cap 18: the 18th smallest, the last name inside the bottom 30%
+    rows = []
+    for index, cap in enumerate(caps):
+        code = f"{index + 1:06d}.SZ"
+        gain = 0.5 if code == winner else 0.0
+        rows.append({"ts_code": code, "trade_date": "20240102", "circ_mv": cap, "pct_chg": 0.001})
+        rows.append({"ts_code": code, "trade_date": "20240103", "circ_mv": cap * (1.0 + gain), "pct_chg": gain})
+    factor = _size_factor(pd.DataFrame(rows))
+    # Day one has no prior cap for anyone and therefore no spread.
+    assert list(factor) == ["20240103"]
+    assert factor["20240103"] == pytest.approx(0.5 / 18)
+
+    # An IPO's listing day is the same situation: no prior cap, so its listing
+    # return (quoted against the issue price) never enters a leg.
+    rows.append({"ts_code": "301999.SZ", "trade_date": "20240103", "circ_mv": 1.0, "pct_chg": 2.0})
+    assert _size_factor(pd.DataFrame(rows))["20240103"] == pytest.approx(0.5 / 18)
 
 
 def test_neutralized_excess_reports_missing_factors_instead_of_zero(tmp_path: Path):

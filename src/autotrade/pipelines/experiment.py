@@ -83,6 +83,7 @@ from .ledger import (
     RunMarkers,
     assert_no_frozen_artifact_mutation,
     deflated_sharpe,
+    frozen_selection,
     is_frozen_artifact_mutation,
     latest_fold_records,
     walk_forward_transitions,
@@ -573,11 +574,15 @@ class RollingExperimentPipeline:
         # Graduation term (b): the final Epoch's walk-forward transitions
         # (docs/pipeline-design.md §3.3), read once from the ledger and applied
         # to every Held-out period's verdict.
+        fold_records = self.ledger.read("fold")
         walk_forward = walk_forward_transitions(
-            self.ledger.read("fold"),
+            fold_records,
             epoch_id=epoch_id,
             test_stage=self.config.test_stage,
         )
+        # Diagnostics of the Fold that froze the strategy under test, carried
+        # beside the verdict's gating metrics without deciding anything.
+        selection = frozen_selection(fold_records, artifact_id=final.artifact_id)
         for period in heldout_periods(
             self.config.heldout_first_period,
             self.config.heldout_last_period,
@@ -681,7 +686,7 @@ class RollingExperimentPipeline:
                         # Graduation verdict of this period; the experiment-level
                         # verdict (ledger.experiment_verdict) needs every period.
                         "verdict": self.config.acceptance.heldout_verdict(
-                            result.summary, walk_forward
+                            result.summary, walk_forward, selection
                         ),
                     }
                 )
@@ -757,6 +762,15 @@ class RollingExperimentPipeline:
                         "trigger_after_folds": completed_folds,
                         "visible_fold": _agent_visible_fold(
                             visible_fold, ref_store=self.ref_store
+                        ),
+                        # Three Meta sessions read this window against the
+                        # reviewed Fold's and filed the difference as a data
+                        # defect; the note names which Fold each describes.
+                        "visible_fold_note": (
+                            "visible_fold, run_manifest.meta_learning_visible_fold and "
+                            "data_summary_ref describe the Fold that starts after this "
+                            "Meta; the reviewed Folds are development_history."
+                            "fold_reviews[], each labelled by its own validation_period"
                         ),
                         # Host-only raw identity for the audit manifest. The Meta
                         # learner removes it before writing Agent-visible facts.

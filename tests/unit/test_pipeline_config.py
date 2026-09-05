@@ -236,6 +236,52 @@ class AcceptanceRulesTest(unittest.TestCase):
             ["sharpe_not_positive", "walkforward_excess_inconsistent(1/2<2)"],
         )
 
+    def test_the_verdict_carries_selection_diagnostics_without_gating_on_them(self) -> None:
+        """DSR, the frozen node's Validation null percentile and the mean null
+        percentile of the walk-forward transitions ride beside the gating
+        metrics; however weak they are, they never become a reason."""
+        rules = AcceptanceRules()
+        passing = {
+            "total_return": 0.10,
+            "sharpe": 1.0,
+            "max_drawdown": -0.05,
+            "benchmark": {"benchmark_return": 0.02, "neutralized_excess_return": 0.03},
+        }
+        verdict = rules.heldout_verdict(
+            passing,
+            {"source": "parent_control", "transitions": 3, "positive_excess": 3, "mean_excess_percentile": 0.42},
+            {
+                "fold_id": "fold_2025Q4",
+                "candidates_evaluated": 17,
+                "deflated_sharpe_probability": 0.004,
+                "validation_excess_percentile": 0.11,
+            },
+        )
+        self.assertEqual((verdict["status"], verdict["reasons"]), ("graduated", []))
+        self.assertEqual(
+            verdict["diagnostics"],
+            {
+                "frozen_fold_id": "fold_2025Q4",
+                "candidates_evaluated": 17,
+                "deflated_sharpe_probability": 0.004,
+                "validation_excess_percentile": 0.11,
+                "walk_forward_mean_excess_percentile": 0.42,
+            },
+        )
+        # The term (b) block keeps its shape: the console reads it as is.
+        self.assertNotIn("mean_excess_percentile", verdict["walk_forward"])
+        # Nothing computed: every field is None, never a fabricated number.
+        self.assertEqual(
+            rules.heldout_verdict(passing)["diagnostics"],
+            {
+                "frozen_fold_id": None,
+                "candidates_evaluated": None,
+                "deflated_sharpe_probability": None,
+                "validation_excess_percentile": None,
+                "walk_forward_mean_excess_percentile": None,
+            },
+        )
+
     def test_record_round_trips_every_threshold(self) -> None:
         rules = AcceptanceRules(
             min_return=0.01,
@@ -367,6 +413,15 @@ class HeldOutCostAndTradeGateTest(unittest.TestCase):
             {name: "warn" for name in ("max_drawdown", "min_return", "min_sharpe", "order_count")},
         )
         self.assertEqual(freeze["max_drawdown"]["target"], 0.25)
+        # The absolute warn targets decided one bear-year Fold (a style overlay
+        # chosen for min_return>0 over a higher neutralized excess); the fact
+        # labels them as informational, not as selection criteria.
+        for name in ("min_return", "min_sharpe"):
+            self.assertEqual(
+                freeze[name]["role"],
+                "informational_absolute_target_not_a_selection_criterion",
+            )
+        self.assertNotIn("role", freeze["max_drawdown"])
         required = default["graduation"]["all_required"]
         self.assertNotIn("excess_at_cost_stress", required)
         self.assertNotIn("trade_count", required)

@@ -101,10 +101,12 @@ def _fold_row(record: dict[str, object]) -> dict[str, object]:
     validation = record.get("validation_result") or {}
     test = record.get("test_result") or {}
     selection = record.get("selection_statistics") or {}
+    null = record.get("null_control") if isinstance(record.get("null_control"), dict) else {}
     scored = test or validation
     source = "frozen_test" if test else "validation"
     period = record.get("test_period") if test else record.get("validation_period")
     benchmark_return, benchmark_label = _frozen_benchmark(scored)
+    benchmark_block = scored.get("benchmark") if isinstance(scored.get("benchmark"), dict) else {}
     scored_return = _num(scored.get("total_return"))
     return {
         "epoch_id": str(record.get("epoch_id", "")),
@@ -126,6 +128,15 @@ def _fold_row(record: dict[str, object]) -> dict[str, object]:
         "candidates_evaluated": selection.get("candidates_evaluated"),
         "deflated_sharpe_probability": _num(
             selection.get("deflated_sharpe_probability")
+        ),
+        # Where the frozen node's whole-window excess sits inside random-name
+        # replays of its own trades (the record's null_control); in-sample by
+        # construction, the transition table above is the forward evidence.
+        "excess_percentile": _num(null.get("excess_percentile")),
+        # The size/beta-neutralized excess the graduation term reads, beside
+        # the raw active return.
+        "neutralized_excess_return": _num(
+            benchmark_block.get("neutralized_excess_return")
         ),
         "finish_reason": record.get("finish_reason"),
         "period_start": _period_part(period, "start"),

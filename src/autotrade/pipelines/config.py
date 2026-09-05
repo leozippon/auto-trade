@@ -81,6 +81,28 @@ def _finite_number(value: object) -> float | None:
     return number if math.isfinite(number) else None
 
 
+def _verdict_diagnostics(
+    selection: Mapping[str, object] | None,
+    walk_forward: Mapping[str, object] | None,
+) -> dict[str, object]:
+    """The non-gating evidence a Held-out verdict carries beside its metrics."""
+
+    source = selection if isinstance(selection, Mapping) else {}
+    return {
+        "frozen_fold_id": source.get("fold_id"),
+        "candidates_evaluated": source.get("candidates_evaluated"),
+        "deflated_sharpe_probability": _finite_number(
+            source.get("deflated_sharpe_probability")
+        ),
+        "validation_excess_percentile": _finite_number(
+            source.get("validation_excess_percentile")
+        ),
+        "walk_forward_mean_excess_percentile": _finite_number(
+            (walk_forward or {}).get("mean_excess_percentile")
+        ),
+    }
+
+
 @dataclass(frozen=True)
 class AcceptanceRules:
     """Validation acceptance checks (docs/pipeline-design.md §2.2): only a
@@ -167,8 +189,20 @@ class AcceptanceRules:
                     "rule": "total_return/max_drawdown/sharpe must be finite",
                 },
                 "max_drawdown": {"enforcement": "warn", "target": self.max_drawdown},
-                "min_return": {"enforcement": "warn", "target": self.min_return},
-                "min_sharpe": {"enforcement": "warn", "target": self.min_sharpe},
+                # Absolute informational targets: they only record a warning and
+                # never rank candidates, which is judged on excess and
+                # neutralized excess against the parent control and the new
+                # step quarter.
+                "min_return": {
+                    "enforcement": "warn",
+                    "target": self.min_return,
+                    "role": "informational_absolute_target_not_a_selection_criterion",
+                },
+                "min_sharpe": {
+                    "enforcement": "warn",
+                    "target": self.min_sharpe,
+                    "role": "informational_absolute_target_not_a_selection_criterion",
+                },
                 "order_count": {
                     "enforcement": "warn",
                     "rule": "order_count=0 records no_orders",
@@ -184,6 +218,7 @@ class AcceptanceRules:
         self,
         summary: Mapping[str, object] | None,
         walk_forward: Mapping[str, object] | None = None,
+        selection: Mapping[str, object] | None = None,
     ) -> dict[str, object]:
         """Graduation verdict of one Held-out replay (docs/pipeline-design.md §3.3).
 
@@ -207,6 +242,12 @@ class AcceptanceRules:
         ``heldout_min_trades > 0`` the replay must have closed at least that
         many round trips. Both fail closed when the input they need is absent,
         and the thresholds used are recorded in the verdict.
+
+        ``diagnostics`` rides beside the gating metrics and never becomes a
+        reason: the deflated-Sharpe probability and the Validation null
+        percentile of the Fold that froze this strategy (``selection``, from
+        ``ledger.frozen_selection``) and the mean null percentile of term
+        (b)'s transitions. Each is ``None`` when it was not computed.
         """
         reasons: list[str] = []
         values: dict[str, float | None] = {}
@@ -287,6 +328,7 @@ class AcceptanceRules:
             "trade_count": trade_count,
             "heldout_min_trades": self.heldout_min_trades,
             "walk_forward": consistency,
+            "diagnostics": _verdict_diagnostics(selection, walk_forward),
         }
 
     @staticmethod

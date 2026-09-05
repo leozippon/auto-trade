@@ -4,7 +4,12 @@
 Read-only over each experiment's ledger: the same ``walk_forward_report`` and
 ``experiment_verdict`` the per-experiment report uses, so a row here can never
 disagree with that report. One row per Epoch, because the graduation term reads
-the last Epoch's transitions.
+the last Epoch's transitions. Every chain figure is a forward figure: each
+transition is the inherited strategy on ground it was not developed on, and
+``scored on`` says whether that ground was the Fold's new quarter alone (a
+trailing window) or the whole Validation window. ``DSR (last)`` is the
+deflated-Sharpe probability of the Epoch's latest frozen node, the one a
+Held-out would replay.
 """
 from __future__ import annotations
 
@@ -31,6 +36,7 @@ from autotrade.pipelines.reporting import walk_forward_report
 _COLUMNS = (
     "experiment",
     "epoch",
+    "scored on",
     "transitions",
     "positive",
     "chain return",
@@ -39,8 +45,10 @@ _COLUMNS = (
     "sharpe/step",
     "excess@2x slip",
     "null pctile",
+    "DSR (last)",
     "held-out",
 )
+_SCORED_ON = {"step_result": "step quarter", "validation_result": "full window"}
 
 
 def main() -> int:
@@ -88,6 +96,7 @@ def _rows(ledger_path: Path) -> list[list[str]]:
             [
                 experiment_id,
                 str(epoch["epoch_id"]),
+                _scored_on(epoch["transitions"]),
                 str(chain["transitions"]),
                 str(chain["positive_transitions"]),
                 _pct(chain["return"]),
@@ -96,12 +105,40 @@ def _rows(ledger_path: Path) -> list[list[str]]:
                 _ratio(chain["sharpe_per_transition"]),
                 _pct(chain["excess_at_2x_slippage_sum"]),
                 _share(chain["mean_excess_percentile"]),
+                _share(_last_deflated_sharpe(folds, str(epoch["epoch_id"]))),
                 heldout,
             ]
         )
     if not rows:
-        rows.append([experiment_id, "-", "0", "0", *["-"] * 6, heldout])
+        rows.append([experiment_id, "-", "-", "0", "0", *["-"] * 7, heldout])
     return rows
+
+
+def _scored_on(transitions: list[dict[str, object]]) -> str:
+    sources = {str(row.get("source")) for row in transitions}
+    if not sources:
+        return "-"
+    if len(sources) > 1:
+        return "mixed"
+    return _SCORED_ON.get(sources.pop(), "-")
+
+
+def _last_deflated_sharpe(folds: list[dict[str, object]], epoch_id: str) -> float | None:
+    """Deflated-Sharpe probability of the Epoch's latest frozen node, or None."""
+    frozen = sorted(
+        (
+            record
+            for record in folds
+            if str(record.get("epoch_id")) == epoch_id
+            and record.get("frozen_strategy_artifact_id")
+            and isinstance(record.get("selection_statistics"), dict)
+        ),
+        key=lambda record: str(record.get("validation_period") or ""),
+    )
+    if not frozen:
+        return None
+    value = frozen[-1]["selection_statistics"].get("deflated_sharpe_probability")
+    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
 
 
 def _pct(value: object) -> str:

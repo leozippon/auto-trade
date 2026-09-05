@@ -330,6 +330,12 @@ def test_meta_session_retains_only_the_authorized_test_diagnostic(tmp_path: Path
         "review_window",
         "meta_learning",
     }
+    # ``visible_fold`` is the Fold that starts after this Meta, not the reviewed
+    # one; three Meta sessions filed that difference as a data defect, so the
+    # context says so next to the window.
+    assert captured["visible_fold"]["validation_period"] == "20260101..20260331"
+    assert "starts after this Meta" in captured["visible_fold_note"]
+    assert "fold_reviews[]" in captured["visible_fold_note"]
     # Every completed Fold so far, not only the review window, reaches Meta as
     # a compact Validation summary -- and exactly once: the window is named by
     # ``review_window``/``fold_reviews``, never re-listed as a second copy.
@@ -1182,6 +1188,15 @@ def test_walk_forward_term_reaches_the_held_out_verdict(tmp_path: Path):
         "positive_excess": 0,
         "required": 1,
     }
+    # The verdict names the Fold that froze the strategy under test and carries
+    # its selection diagnostics; this fake developer's single candidate has no
+    # deflated Sharpe and the fake evaluator runs no null control.
+    diagnostics = verdict["periods"][0]["diagnostics"]
+    assert diagnostics["frozen_fold_id"] == folds[1].fold_id
+    assert diagnostics["candidates_evaluated"] == 1
+    assert diagnostics["deflated_sharpe_probability"] is None
+    assert diagnostics["validation_excess_percentile"] is None
+    assert diagnostics["walk_forward_mean_excess_percentile"] is None
 
 
 def test_a_positive_walk_forward_transition_lets_a_passing_held_out_graduate(tmp_path: Path):
@@ -1268,6 +1283,16 @@ def test_single_window_fold_has_no_frozen_test_and_held_out_graduates(tmp_path: 
         # A single development Fold has no walk-forward transition: term (b)
         # is not applicable and Held-out alone decides.
         "walk_forward": {"status": "not_applicable", "transitions": 0},
+        # Selection diagnostics of the Fold that froze the strategy, carried
+        # beside the metrics: one candidate here, no deflated Sharpe, and this
+        # fake evaluator runs no null control.
+        "diagnostics": {
+            "frozen_fold_id": fold.fold_id,
+            "candidates_evaluated": 1,
+            "deflated_sharpe_probability": None,
+            "validation_excess_percentile": None,
+            "walk_forward_mean_excess_percentile": None,
+        },
     }
     verdict = experiment_verdict(ledger.read())
     assert verdict is not None

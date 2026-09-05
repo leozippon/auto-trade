@@ -347,6 +347,41 @@ class ReportingTest(unittest.TestCase):
             self.assertIsNone(development["mean_candidates_evaluated"])
             self.assertIsNone(development["mean_deflated_sharpe_probability"])
 
+    def test_fold_rows_carry_the_null_percentile_and_the_neutralized_excess(self):
+        """Beside the raw active return a Fold row shows the two figures a
+        reader needs to discount it: the frozen node's null percentile and
+        the neutralized excess the graduation term reads. A record written
+        before either block reports None, not 0."""
+        record = {
+            "epoch_id": "epoch_001",
+            "fold_id": "fold_2022Q4",
+            "fold_status": "frozen",
+            "validation_period": "20220101..20221231",
+            "validation_result": {
+                "total_return": -0.16,
+                "sharpe": -0.39,
+                "max_drawdown": 0.37,
+                "order_count": 10,
+                "benchmark": {
+                    "label": "沪深300",
+                    "benchmark_return": -0.2163,
+                    "excess_return": 0.0563,
+                    "neutralized_excess_return": -0.0385,
+                },
+            },
+            "test_result": None,
+            "null_control": {"k": 500, "excess_percentile": 0.65, "observed_excess": 0.0563},
+            "selection_statistics": {"candidates_evaluated": 10, "deflated_sharpe_probability": 0.0047},
+        }
+        row = _fold_row(record)
+        self.assertAlmostEqual(row["active_return"], -0.16 + 0.2163)
+        self.assertAlmostEqual(row["neutralized_excess_return"], -0.0385)
+        self.assertAlmostEqual(row["excess_percentile"], 0.65)
+        self.assertAlmostEqual(row["deflated_sharpe_probability"], 0.0047)
+        bare = _fold_row({**record, "null_control": None, "validation_result": {"total_return": 0.1}})
+        self.assertIsNone(bare["excess_percentile"])
+        self.assertIsNone(bare["neutralized_excess_return"])
+
     def test_a_failed_frozen_test_scores_nothing_and_never_falls_back(self):
         # With a Test stage the frozen Test is the scored result: when it failed
         # the Fold contributes no numbers rather than borrowing its Validation.
