@@ -160,6 +160,27 @@ class InteractiveRunnerTest(RunnerTestCase):
         self.assertEqual(len(executor.calls), 3)
         self.assertEqual(read_status(self.status)["state"], "development_complete")
 
+    def test_a_successful_retry_clears_the_recorded_attempt_error(self) -> None:
+        seen: list[object] = []
+        status_path = self.status
+
+        class Flaky(RecordingExecutor):
+            def __call__(self, session, context):
+                seen.append(read_status(status_path).get("error"))
+                if len(self.calls) < 1:
+                    self.calls.append((session.session_key, dict(context)))
+                    raise RuntimeError("boom")
+                return super().__call__(session, context)
+
+        result = self.runner(
+            sessions_for("fold_a", "fold_b"), Flaky(self.ledger), session_max_attempts=3
+        ).run()
+        self.assertEqual(result["status"], "complete")
+        # The failure stays visible while its retry runs; the next session
+        # starts without fold_a's stale attempt text.
+        self.assertEqual(seen, [None, "RuntimeError: boom (attempt 1/3)", None])
+        self.assertIsNone(read_status(self.status)["error"])
+
     def test_each_attempt_refreshes_session_timing(self) -> None:
         started: list[str] = []
         walls: list[float] = []

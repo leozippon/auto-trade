@@ -202,7 +202,7 @@ class InteractiveExperimentRunner:
         for attempt in range(1, self.session_max_attempts + 1):
             self._begin_session(session)
             try:
-                return self.execute_session(session, context)
+                result = self.execute_session(session, context)
             except (ExperimentStopped, AgentSessionDeadlineExceeded, FrozenArtifactMutated):
                 raise
             except Exception as exc:
@@ -216,6 +216,12 @@ class InteractiveExperimentRunner:
                         f"(attempt {attempt}/{self.session_max_attempts})"
                     ),
                 )
+            else:
+                # A retried failure stays visible while its retry is in
+                # flight; only a successful attempt clears it, so status.json
+                # never carries a stale "(attempt N/M)" after recovery.
+                self.status.set(error=None)
+                return result
         assert last_error is not None
         raise last_error
 
