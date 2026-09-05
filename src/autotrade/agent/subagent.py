@@ -239,6 +239,7 @@ _FOLD_WRITE_PROMPT = """\
 # 边界
 - 先读 `inputs/skills_index.json`，再从已挂载数据、单位引用、制品和参考材料中自主发现任务所需证据；skill 脚本不自动执行。把有复用价值的知识写入 skill，而不是堆入策略或汇报。
 - 只完成父任务；不得再委托子代理、读取 Test/Held-out、改变权威 PRIOR、安装依赖、替父 Agent 提问或伪造结果。分钟和竞价不是策略时钟。
+- 工具路径合同：`read_file`/`grep`/`glob`/`write_file`/`edit_file` 用 `root` 名加相对路径寻址（如 root=`workspace`、path=`notes/x.md`；root=`artifacts`、path=`data_summary.json`），不接受 `/mnt/...` 绝对路径；`shell` 的 `argv` 是字符串数组（如 `["python", "notes/probe.py"]`），不是整行命令字符串，单个元素过长时先用 `write_file` 写成脚本再运行；只读信号筛选脚本 `/mnt/tools/screen.py` 只能经 `shell` 运行；同一文件在同一轮只 `edit_file` 一次，第二次编辑必须匹配前一次编辑之后的内容。
 - 工具 schema 决定实际能力。同一轮的只读调用并发执行；写、检查与 shell 按因果顺序分轮调用。shell 只做有界前台工作，不启动后台任务、sleep/等待包装、轮询状态或隐藏错误；shell 写入工作区的文件会保留。全市场逐股或全历史的计算先在抽样上验证脚本，再分块运行并把中间结果落盘，每块都要在 shell 超时内完成。
 - 工作区是父 Agent 与并行子代理共用的同一棵实时目录树：没有各自的副本，也没有结束时的回并，你的写入即时生效且不可撤销。只在 task 给定的路径下创建、修改与删除；不要用 `rm -rf`、`mv` 或整目录覆盖去清理 task 范围之外的路径（例如候选目录的公共父目录），并行的兄弟子代理可能正在其中写入。删除目录要在汇报里写明删了什么。
 - 运行中收到以 `[父代理指令]` 开头的消息时，它是父 Agent 的补充要求，优先于原 task。
@@ -253,6 +254,7 @@ _FOLD_READ_PROMPT = """\
 
 # 边界
 - 先读 `inputs/skills_index.json`，再从已挂载数据、单位引用、制品和参考材料中自主发现任务所需证据；skill 脚本不自动执行。
+- 工具路径合同：`read_file`/`grep`/`glob` 用 `root` 名加相对路径寻址（如 root=`workspace`、path=`notes/x.md`；root=`artifacts`、path=`data_summary.json`），不接受 `/mnt/...` 绝对路径；只读信号筛选脚本 `/mnt/tools/screen.py` 不在任何读文件根内，只能由父 Agent 或可执行子代理经 `shell` 运行。
 - 工具 schema 决定实际能力；同一轮的多个只读调用并发执行。不得再委托子代理、读取 Test/Held-out、安装依赖或伪造结果；分钟和竞价不是策略时钟。
 - 运行中收到以 `[父代理指令]` 开头的消息时，它是父 Agent 的补充要求，优先于原 task。
 

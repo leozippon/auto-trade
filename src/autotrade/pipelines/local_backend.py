@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import shutil
 import threading
 import time
@@ -105,7 +106,7 @@ from autotrade.environment.tools.shell import SandboxShellTool
 from autotrade.environment.tools.step_rollback import StepRollbackTool
 from autotrade.environment.tools.workspace import SafeWorkspace
 
-from .agent_views import compact_fold_history, vs_parent_metrics
+from .agent_views import fold_development_summary, vs_parent_metrics
 from .config import (
     AcceptanceRules,
     ArtifactRevision,
@@ -558,8 +559,9 @@ class SmokeBacktestTool:
     fakes an account object exercises the flat frozen snapshot and a dict-like
     account, while the replay hands the strategy a rolling directory-per-domain
     as-of view and a real ``AccountSnapshot``. This tool removes the reason to
-    hand-roll one: same executor, same 30 s per-decision cap, same as-of layout,
-    same account object, same modification gate — only the window is short.
+    hand-roll one: same executor, same per-decision wall clock
+    (``SandboxLimits.timeout_seconds``), same as-of layout, same account
+    object, same modification gate — only the window is short.
 
     It is deliberately NOT an evaluation: no revision is committed, no step-tree
     node is written, nothing here can be selected at freeze time, and it does
@@ -1404,7 +1406,9 @@ class BatchValidateTool(SessionTimeBudgetAware):
                                 "maxLength": BATCH_HYPOTHESIS_MAX_CHARS,
                                 "description": (
                                     "Falsifiable statement registered before "
-                                    "the result exists."
+                                    "the result exists; at most "
+                                    f"{BATCH_HYPOTHESIS_MAX_CHARS} characters "
+                                    "(keep the detail in your own notes)."
                                 ),
                             },
                             "path": {
@@ -1554,11 +1558,7 @@ class BatchValidateTool(SessionTimeBudgetAware):
                 "steps_used": len(self.backtest.steps),
                 "step_directive": self._step_gate(batch_id, rows),
                 "result_root": STEP_TREE_SEARCH_ROOT,
-                "select_hint": (
-                    "compare the rows (whole window AND sub_windows), then "
-                    "step_rollback(node_id=<winner>) followed by "
-                    "finish_fold(node_id=<winner>); nothing is selected for you"
-                ),
+                "select_hint": self._select_hint(rows),
             },
         )
 
@@ -1875,6 +1875,11 @@ class BatchValidateTool(SessionTimeBudgetAware):
         )
         return {"status": "failed", "error": public_error}
 
+    def _select_hint(self, rows: Sequence[Mapping[str, object]]) -> str:
+        return batch_select_hint(
+            rows, versus_parent=self.backtest.parent_control_summary is not None
+        )
+
     def _step_gate(self, batch_id: str, rows: Sequence[Mapping[str, object]]) -> str:
         """One gate for the whole batch: the replays are already done, and the
         gate's own rule (approving step N approves everything up to N) makes a
@@ -1895,6 +1900,69 @@ class BatchValidateTool(SessionTimeBudgetAware):
                 },
             )
         )
+
+
+def batch_select_hint(
+    rows: Sequence[Mapping[str, object]], *, versus_parent: bool
+) -> str:
+    """Name the row leading on the design's tie-breaker; select nothing.
+
+    The neutralized excess is the figure the Fold guidance ranks candidates
+    on — against the parent control when the Fold has one, absolute otherwise —
+    so the hint says which row leads on it and on nothing else. A winning
+    round is the starting point of the next pre-registered round, not the end
+    of the Fold: the hint never instructs ``finish_fold``, it states when
+    finishing is warranted.
+    """
+
+    label = (
+        "neutralized excess vs parent control"
+        if versus_parent
+        else "neutralized excess"
+    )
+    ranked = [
+        (_batch_row_neutralized_excess(row, versus_parent=versus_parent), row)
+        for row in rows
+        if row.get("status") == "ok"
+    ]
+    leading = max(ranked, key=lambda item: item[0], default=(float("-inf"), None))
+    lead = (
+        f"leading on {label}: {leading[1].get('name')} "
+        f"(node_id={leading[1].get('node_id')}); "
+        if leading[1] is not None and math.isfinite(leading[0])
+        else f"no row carries a {label} figure; "
+    )
+    return (
+        f"{lead}read every row yourself (whole window AND sub_windows, "
+        "vs_parent) — nothing is selected for you. A winning round is the start "
+        "of the next pre-registered round: step_rollback(node_id=<chosen>) "
+        "restores it as the working copy; finish_fold is warranted only once "
+        "the pre-registered hypotheses are resolved or the remaining budget no "
+        "longer fits another round."
+    )
+
+
+def _batch_row_neutralized_excess(
+    row: Mapping[str, object], *, versus_parent: bool
+) -> float:
+    if versus_parent:
+        block = row.get("vs_parent")
+        value = (
+            block.get("neutralized_excess_return_delta")
+            if isinstance(block, Mapping)
+            else None
+        )
+    else:
+        stats = row.get("stats")
+        benchmark = stats.get("benchmark") if isinstance(stats, Mapping) else None
+        value = (
+            benchmark.get("neutralized_excess_return")
+            if isinstance(benchmark, Mapping)
+            else None
+        )
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return float("-inf")
+    return float(value) if math.isfinite(value) else float("-inf")
 
 
 def another_batch_round_fits(backtest: FoldBacktestTool) -> bool:
@@ -2258,9 +2326,13 @@ class LLMFoldDeveloper:
             repo_root=self.repo_root,
         )
         # Fold sessions never see frozen Test metrics: only the meta session is
-        # allowed that adaptive feedback (docs/pipeline-design.md §3.2).
+        # allowed that adaptive feedback (docs/pipeline-design.md §3.2). They
+        # get each completed Fold's verdict, not its per-candidate trial log:
+        # the system prompt carries this for the whole session and is never
+        # compacted, so its size must not grow with how many candidates a Fold
+        # ran (the trial log stays in the Step tree and the Meta history).
         history = [
-            compact_fold_history(record, ref_store=self.ref_store)
+            fold_development_summary(record, ref_store=self.ref_store)
             for record in latest_fold_records(self.ledger.read()).values()
         ]
         _environment_phase(request.progress_hook, "pit_view", request.run_id)
@@ -2678,9 +2750,10 @@ class LLMFoldDeveloper:
 
         ``build_experiment_facts`` is the single visibility contract: it reads
         the run manifest, the runtime env and the data summary and projects the
-        raw fold id through the experiment reference store. The Fold-side development
-        history rides alongside it — the only cross-fold evidence a Fold
-        session gets besides the step tree.
+        raw fold id through the experiment reference store. The Fold-side
+        development history rides alongside it — one bounded verdict per
+        completed Fold (``fold_development_summary``), the only cross-fold
+        evidence a Fold session gets besides the step tree.
         """
         return {
             **build_experiment_facts(
@@ -3138,8 +3211,13 @@ class LLMMetaLearner:
             tools=ToolRegistry(tools),
             system_prompt=build_system_prompt(
                 mode="meta",
+                # The same data contract a Fold's facts read: without the
+                # summary the execution policy reports every text/event
+                # domain as unavailable while data_summary.json lists them.
                 experiment_facts=build_experiment_facts(
-                    manifest=manifest.data, ref_store=self.ref_store
+                    manifest=manifest.data,
+                    ref_store=self.ref_store,
+                    data_summary=_read_json_if_exists(paths.data_summary),
                 ),
             ),
             config=AgentSessionConfig(
@@ -3557,6 +3635,12 @@ def _safe_meta_trace_payload(
         },
         "delegation_reminder": {"own_work_calls", "running_children", "queued_children"},
         "output_truncated": {"call_index", "completion_tokens", "max_tokens"},
+        "context_output_clamped": {
+            "estimated_prompt_tokens",
+            "context_window",
+            "requested_max_output_tokens",
+            "available_output_tokens",
+        },
         "llm_call_started": {"call_index", "status"},
         "llm_call": {
             "call_index",

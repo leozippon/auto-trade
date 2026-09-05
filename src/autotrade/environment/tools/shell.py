@@ -16,6 +16,7 @@ from .base import (
     ToolSchemaError,
     ToolSpec,
 )
+from ..sandbox import SCREENING_TOOL_MOUNT
 from .workspace import SafeWorkspace
 
 # Advisory (not enforced): nudge the Agent away from hiding stderr, which breaks audit.
@@ -134,6 +135,9 @@ def _shell_description(
         '(e.g. notes/probe.py) and run ["python", "notes/probe.py"]. '
         "`cwd` and every path must stay inside the workspace (relative, no `..`); "
         "`skills/` is read-only for shell too (write_skill/delete_skill are its only writers). "
+        "The one path outside the workspace this tool may run is the read-only signal screen "
+        f"`{SCREENING_TOOL_MOUNT}` (e.g. [\"python\", \"{SCREENING_TOOL_MOUNT}\", \"--help\"]); "
+        "it is a bind mount outside every file-tool root, so read_file/grep/glob cannot open it. "
         "These are real sandbox filesystem paths under the workspace root, which the "
         "sandbox mounts at /mnt/agent/workspace and this tool enters as `.`; the file "
         "tools (read_file/write_file/edit_file/grep/glob) address the same files as a "

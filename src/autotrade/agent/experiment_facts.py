@@ -87,10 +87,21 @@ def build_experiment_facts(
                 _as_mapping(manifest.get("skills")).get("index_path")
                 or "inputs/skills_index.json"
             ),
-            # The read-only signal screen is a Docker bind mount; a local-dev
-            # session has no such path, so the fact stays out rather than lie.
+            # The read-only signal screen is a Docker bind mount outside every
+            # file-tool root, so the fact carries its argv contract next to the
+            # path; a local-dev session has no such path, so the fact stays out
+            # rather than lie.
             "signal_screen_ref": (
-                SCREENING_TOOL_MOUNT if not is_meta and runtime_env.get("mode") == "docker" else None
+                {
+                    "path": SCREENING_TOOL_MOUNT,
+                    "usage": (
+                        "shell only, e.g. argv "
+                        f'["python", "{SCREENING_TOOL_MOUNT}", "--help"]; '
+                        "not under any read_file/grep/glob root"
+                    ),
+                }
+                if not is_meta and runtime_env.get("mode") == "docker"
+                else None
             ),
         },
         "visibility_policy": {

@@ -548,11 +548,57 @@ class BatchValidateRunTest(unittest.TestCase):
             self.assertNotIn("winner", value)
             self.assertNotIn("selected", value)
             self.assertIn("step_rollback", value["select_hint"])
+            # A winning round starts the next one; the hint states when
+            # finishing is warranted and never instructs it.
+            self.assertNotIn("finish_fold(", value["select_hint"])
             # The working copy is untouched by the batch.
             self.assertEqual(
                 (session.output / "main.py").read_text(encoding="utf-8"),
                 PARENT_SOURCE,
             )
+
+
+class BatchSelectHintTest(unittest.TestCase):
+    """The hint names the row leading on the neutralized excess — against the
+    parent control when the Fold has one — and selects nothing."""
+
+    def test_names_the_leader_on_the_parent_delta_when_a_control_exists(self) -> None:
+        from autotrade.pipelines.local_backend import batch_select_hint
+
+        rows = [
+            {"name": "a", "node_id": "n_a", "status": "ok",
+             "vs_parent": {"neutralized_excess_return_delta": 0.01, "beats_parent": True}},
+            {"name": "b", "node_id": "n_b", "status": "ok",
+             "vs_parent": {"neutralized_excess_return_delta": 0.04, "beats_parent": True}},
+            {"name": "c", "node_id": "n_c", "status": "failed", "error": "boom"},
+        ]
+        hint = batch_select_hint(rows, versus_parent=True)
+        self.assertIn("leading on neutralized excess vs parent control: b (node_id=n_b)", hint)
+        self.assertIn("step_rollback(node_id=<chosen>)", hint)
+        self.assertNotIn("finish_fold(", hint)
+        self.assertIn("pre-registered hypotheses are resolved", hint)
+
+    def test_falls_back_to_the_absolute_figure_without_a_control(self) -> None:
+        from autotrade.pipelines.local_backend import batch_select_hint
+
+        rows = [
+            {"name": "a", "node_id": "n_a", "status": "ok",
+             "stats": {"benchmark": {"neutralized_excess_return": 0.12}}},
+            {"name": "b", "node_id": "n_b", "status": "ok",
+             "stats": {"benchmark": {"neutralized_excess_return": float("nan")}}},
+        ]
+        hint = batch_select_hint(rows, versus_parent=False)
+        self.assertIn("leading on neutralized excess: a (node_id=n_a)", hint)
+        self.assertNotIn("vs parent control", hint)
+
+    def test_names_nobody_when_no_row_carries_the_figure(self) -> None:
+        from autotrade.pipelines.local_backend import batch_select_hint
+
+        rows = [{"name": "a", "node_id": "n_a", "status": "ok", "stats": {"total_return": 0.2}}]
+        hint = batch_select_hint(rows, versus_parent=False)
+        self.assertIn("no row carries a neutralized excess figure", hint)
+        self.assertNotIn("leading on", hint)
+        self.assertNotIn("finish_fold(", hint)
 
 
 class BatchValidateContractTest(unittest.TestCase):

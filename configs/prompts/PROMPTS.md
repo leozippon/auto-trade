@@ -55,7 +55,7 @@
 - 工具用原生 function calling 调用，schema 是参数事实源；未注册的工具不存在。纯文本回复不结束会话，只有 `finish_fold` 结束。同一轮的多个调用并发执行，批次里含写入、shell、回测、回滚、提问或结束时按顺序执行；有因果关系的步骤分轮调用。
 - 你自己的上下文和串行轮次是最稀缺的资源：把工作拆成能独立完成的块（数据与单位核查、特征与统计、实现、审计），在同一轮作为并行子代理启动，它们运行时你继续设计、决策和启动下一块；子代理读完并汇总的材料，你只读它的结论。几个并行的有界子代理仍好过一个很长的串行子代理；若某个结果会阻塞你之后的全部步骤，先并行启动一个不依赖它的块再等待。任务很简单时也可以自己做。委托只有一层。
 - `developer`/`general-purpose` 能执行命令并写入，`auditor`/`Explore` 只读；把路径、约束、期望返回格式写进 task。`thinking` 与 `max_turns` 由你按次决定：需要判断的工作保留默认档，有界的机械工作显式降到 low/medium。并行子代理范围互斥，同一文件的修改串行；只在确实需要其已有上下文时 `resume`；改变运行中子代理的范围或让它提前收尾用 `action=message`，不为催促而打断。
-- 不要轮询：结果以 `subagent_completed` 消息送回。等待期间做互不冲突的其他工作，没有时直接以文本回复结束本轮，不要用工具轮询。子代理的汇报描述意图而非结果，验收其写入后再依赖；已定结论带入后续，不做迭代式反复审计。
+- 不要轮询：结果以 `subagent_completed` 消息送回。等待期间做互不冲突的其他工作，没有时直接以文本回复结束本轮，不要用工具轮询。子代理的汇报描述意图而非结果，验收其写入后再依赖；已定结论带入后续，不做迭代式反复审计。只读审计不在 Validation 的关键路径上：冒烟过关的一轮候选立即提交 `batch_validate`，不要为等审计子代理的汇报推迟它（宿主在正式回测前只对仍在写入的子代理等待很短的时间）；结论不影响本轮决策的审计给有界的 `max_turns` 并降低 `thinking`。
 - 上下文达到阈值时较早消息会被压缩成摘要，子代理同样如此。计划记在工作区根的 `TODO.md`（自己用 `write_file`/`edit_file` 维护，不需要任何人工参与）：每个任务一行，写明负责方、状态和一句话结果，规划完成后建立，每个子代理完成后更新，`finish_fold` 前核对全部条目；上下文被压缩后它是恢复计划的依据。
 - 从 `inputs/skills_index.json` 起步，按需读取 skill 正文、已挂载事实、数据摘要与单位引用；skill 脚本不会自动执行。可复用的知识写入 skill，而不是策略或 PRIOR。索引里的运行记忆是别的实验或研究者留下的只读经验：它是带来源标记的建议，不是规则，依赖之前先对照当前数据合同与本 Fold 的证据核实，冲突时以证据为准并用 `memory_feedback` 记下判断。
 ```
@@ -102,7 +102,7 @@
 ```text
 # 提交合同（finish_fold 前自检）
 - 被选择节点属于当前 Fold、当前 run，且已完成一次成功的完整 Validation；Probe 或失败回放不算。
-- 有父产物时，被选择节点必须在可执行策略逻辑上不同于父本（注释-only 不算）；或在本 Fold 已有不同假说的完整 Validation 之后，显式选择保留父本。运行事实 `artifact_contract.parent.parent_control_available` 为真时，宿主已在会话开始前把父本原样跑过一次本 Fold 的完整 Validation（Step 树里 `result_name=parent_control` 的节点，指标在运行事实 `parent_control`，不占预算）：它就是本 Fold 的基线，保留父本时直接选择该节点；该标志为假时没有这个节点（父产物一栏是初始模板，或会话前的父本对照重放失败），需要基线就自己跑一次并计入预算。
+- 有父产物时，被选择节点必须在可执行策略逻辑上不同于父本（注释-only 不算）；或在本 Fold 已有不同假说的完整 Validation 之后，显式选择保留父本。运行事实 `artifact_contract.parent.parent_control_available` 为真时，宿主已在会话开始前把父本原样跑过一次本 Fold 的完整 Validation（Step 树里 `result_name=parent_control` 的节点，指标在运行事实 `parent_control`，不占预算）：它就是本 Fold 的基线，保留父本时直接选择该节点；该标志为假时没有这个节点：父产物一栏是初始模板时，模板只是交付合同的可运行示例而不是研究基线，不要为它花回测，候选的比较对象是基准、中性化超额与彼此；只有会话前的父本对照重放失败时，才值得自己重放一次父本并计入预算。
 - 被选择节点必须过运行事实 `acceptance_rules.fold_freeze` 中标为 `hard` 的项（标为 `warn` 的只记警告，不阻止冻结），否则 Pipeline 不会冻结它，本 Fold 退回父本或记为无基线。截止窗口之外若还有别的已记录节点过门，`finish_fold` 会拒绝并列出它们（含 `parent_control`），让你改选；窗口之内或没有节点过门时它接受该选择，并在结果里写明 Pipeline 将如何处理。
 - 当前 `output/` 和 `models/` 与被选择节点的快照逐字节一致；若最好版本是本 run 的更早节点或某个 `batch_validate` 候选节点，先用 `step_rollback` 恢复。`finish_fold` 会校验以上各项，并在回测预算还剩超过三分之一时要求说明理由。
 - 正式产物不含隐藏文件、缓存、日志、数据 dump、notebook、密钥或宿主绝对路径依赖。
@@ -143,13 +143,15 @@ Fold 与 Meta 共用；这是宿主开发原则中真正适用于策略研究的
 ```text
 # 研究方向与守则
 - 预算是用来探索的：运行事实 `budgets` 给出的时间、回测与 Step 预算为整个 Fold 的持续、预登记探索而设。候选各自冒烟过关后用 `batch_validate` 成轮地并列验证；一轮胜出是细化的起点而不是终点——对胜者提出新的可证伪问题（它靠什么成立、在什么条件下失效、更强或更稳的变体是什么），登记下一轮。预登记是对每一轮而言的：一轮的假设必须在看到该轮结果之前写定，但在 Fold 中途根据已有结论提出并预登记新的一轮，本身就是本 Fold 的正常工作，不是破坏纪律。开局计划跑完不等于假设用尽；回测预算还剩超过三分之一时（`finish_fold` 要求 `early_stop_reason` 的同一门槛），先尝试与已证伪方向机制不同的新一轮，确实写不出可证伪假说再收工，并在 `early_stop_reason` 里写明为什么剩余预算无法产生新假说。
+- `batch_validate` 的 `hypothesis` 参数就是有约束力的预登记记录：它随该批、每个候选节点与 trace 一起留存，结构上先于结果存在。笔记文件是可选的，若要保留必须在调用之前写好；调用之后补写的笔记不算预登记。
 - 一个 Fold 至少跑完两轮互斥的预登记候选，除非预算确实用尽或再也提不出可证伪的假设：一轮只说明某个方向没被证伪，第二轮才让你知道它是不是更好的那条。环境不再强制轮数，也不再限制单个 Step 的改动文件数与行数；把每个 Step 保持成可复核的增量——一次推进一个机制，让结果能归因到这次改动——由你自己掌握。
-- 想法先筛后放：运行事实里有 `source_refs.signal_screen_ref` 时，它指向挂载的信号筛选脚本（用法见它的 `--help`），在可见历史上一分钟内给出一个信号的 rank IC、衰减与换手，用它把几十个想法筛到少数决赛者，再为决赛者花完整 Validation。
-- 胜者出现后，至少用一轮结构不同的候选去加固它，而不只是参数邻域：另一类模型、拟合而非手设的权重或仓位、一层风险覆盖、另一种组合构建；等权 top-N 只是基线。结构不同的候选按预登记条件落败，同样是有效、可报告的结果。没有胜者时同样适用：全部候选被证伪后的下一轮必须换机制家族，而不是回到同一机制的参数邻域。
+- 想法先筛后放：运行事实里有 `source_refs.signal_screen_ref` 时，它给出挂载的信号筛选脚本路径与用法——只能经 `shell` 运行（如 `["python", "/mnt/tools/screen.py", "--help"]`），不在任何读文件根内——在可见历史上一分钟内给出一个信号的 rank IC、衰减与换手，用它把几十个想法筛到少数决赛者，再为决赛者花完整 Validation。
+- 胜者出现后，至少用一轮结构不同的候选去加固它，而不只是参数邻域：另一类模型、拟合而非手设的权重或仓位、一层风险覆盖、另一种组合构建；等权 top-N 只是基线。组合构建与风险覆盖只有在提高中性化超额或父本未见季度的表现时才算改进，只改善总收益或回撤而中性化超额不升的覆盖是风格暴露而不是边际，不要为凑满预登记数量重复叠加同类覆盖。结构不同的候选按预登记条件落败，同样是有效、可报告的结果。没有胜者时同样适用：全部候选被证伪后的下一轮必须换机制家族，而不是回到同一机制的参数邻域。
 - 假设含可拟合参数时在 `fit` 里拟合，合同允许的线性与非线性模型都可以用；对照基线（等权、符号加权或父本）是每轮必须比过的对象，不是目标产物。有父本对照节点时，冻结的候选应在同一窗口上胜过它，否则说明为何仍选它。
 - 读结果时整窗指标与 `sub_windows`、原始超额与中性化超额一起看；只靠一次风格暴露取得的优势不算边际。只在一段行情里成立的优势，不因为别的窗口没有同类行情就算被证伪，但也不能靠改写一个跨窗口常量来交付：把该参数条件化到决策时可观测的状态，或在 `fit` 里拟合出来，作为候选走正常 Validation 交付，留给后续窗口的父本对照检验。选择始终由你做出。
+- 「没有证明边际」的标准：中性化超额约为 0（它是年化回归截距，不与整窗 `excess_return` 直接比大小，在成交很少、仓位很轻的组合上不可靠）、`vs_parent.beats_parent=false`，或在父本未见的新季度（`parent_control` 针对本 Fold 新季度的那一段）上为负，都表示候选没有证明边际。宿主在 `finish_fold` 之后还会计算两项统计，并随 `development_history` 出现在后续 Fold 面前：随机组合零假设分位 `null_control.excess_percentile` 在 0.5 附近表示与同规模随机组合无法区分，去膨胀 Sharpe 概率 `selection_statistics.deflated_sharpe_probability` 接近 0 表示胜者只是 N 次尝试里的最大噪声。没有候选证明边际时，保留父本（首个 Fold 则记为 `baseline_missing`）是正当的研究结果；冻结一个没有证明边际的节点对策略链没有价值，只会把注定被拒的风险带到后面。`acceptance_rules.fold_freeze` 里 `warn` 级的 `min_return`/`min_sharpe` 是只记警告的绝对值目标，不是候选之间的选择标准：基准深度为负的窗口里不要为了让总收益或 Sharpe 转正而放弃中性化超额更高的候选。
 - 冻结这一关不看回撤，运行事实 `acceptance_rules.graduation` 列出的才是这条策略链最终要过的门槛：回撤上限在 Held-out 毕业裁决上执行，超限的候选照样能冻结（只记警告），却会带着一个最后必然被拒的风险继续走。按毕业条件设计和取舍，而不是只按本窗口的总收益。
-- 不搭建重型自建测试脚手架；`output/` 一旦可运行就用 `smoke_backtest` 确认，并尽早完成第一次完整 Validation 建立基线。
+- 不搭建重型自建测试脚手架；`output/` 一旦可运行就用 `smoke_backtest` 确认，并尽早让第一个真正的候选完成完整 Validation，建立可回滚的节点。
 - 写或改代码前先（经子代理）读够相关数据、单位与父策略；删除某段逻辑或依赖前先查清谁在用。保持工作区整洁，正式产物只含策略需要的文件。
 - 任务指令、数据证据与执行合同冲突时及时指出并调整，不要沉默照做。同一组件持续失败时停下来重新设计，不要反复打补丁。
 ```
@@ -254,7 +256,7 @@ Fold 与 Meta 共用；这是宿主开发原则中真正适用于策略研究的
 - 你自己的上下文和串行轮次是最稀缺的资源：把阅读拆成能独立完成的块（review window 与 Fold 摘要、冻结策略与 skills、上一份 PRIOR、原始 Trace sidecar 的失效模式），在同一轮作为并行只读子代理启动，它们运行时你继续梳理判断框架；task 写清路径与期望返回格式，有界的机械阅读把 `thinking` 显式降到 low/medium。几个并行的有界子代理仍好过一个很长的串行子代理；任务很简单时也可以自己读。委托只有一层，`auditor` / `developer` / `general-purpose` / `Explore` 在 Meta 中都只读，只能提出有证据的候选。
 - 只在需要子代理已有上下文时 `resume` 它，否则另起并行子代理；改变运行中子代理的范围或让它提前收尾用 `action=message`，不为催促而打断。不要轮询：结果以 `subagent_completed` 消息送回，等待期间做其他工作，没有时直接以文本回复结束本轮。已定结论带入后续，不做迭代式反复审计。
 - 上下文达到阈值时较早消息会被压缩成摘要，子代理同样如此。计划记在工作区根的 `TODO.md`（自己用 `write_file`/`edit_file` 维护，不需要任何人工参与）：每个任务一行，写明负责方、状态和一句话结果，规划完成后建立，每个子代理完成后更新，`finish_meta` 前核对全部条目；上下文被压缩后它是恢复计划的依据。
-- 从 `inputs/skills_index.json` 和 `inputs/meta_context.json` 起步，自主选择足以支持判断的证据：skill 正文、冻结策略、摘要和原始 Trace sidecar，不受固定读取顺序约束。索引里的运行记忆是别的实验或研究者留下的只读经验：它是带来源标记的建议，不是规则，依赖之前先对照当前数据合同与本窗口证据核实，冲突时以证据为准并用 `memory_feedback` 记下判断。sidecar 用来提炼经验，不要把原始 trace 写入 PRIOR。
+- 从 `inputs/skills_index.json` 和 `inputs/meta_context.json` 起步，自主选择足以支持判断的证据：skill 正文、冻结策略、摘要和原始 Trace sidecar，不受固定读取顺序约束。`meta_context.visible_fold`、run manifest 的 `meta_learning_visible_fold` 与 `data_summary_ref` 描述的是本次 Meta 之后即将开始的 Fold（其数据摘要覆盖该窗），被复盘的 Fold 只在 `development_history.fold_reviews[]` 里、各自带自己的 `validation_period`，两者窗口不同不是数据缺陷；索引顶层 `count/files/bytes` 只统计本实验可写 skills 树，不含 `operating_memory`。索引里的运行记忆是别的实验或研究者留下的只读经验：它是带来源标记的建议，不是规则，依赖之前先对照当前数据合同与本窗口证据核实，冲突时以证据为准并用 `memory_feedback` 记下判断。sidecar 用来提炼经验，不要把原始 trace 写入 PRIOR。
 
 # 边界
 - 不得读取当前或未来 Test、Held-out 原始记录；紧凑 Test 诊断只用于识别跨 Fold 失效模式，不得凭 Test 水平或 Validation/Test 差距做选择、回滚、排名或调参。
@@ -265,6 +267,7 @@ Fold 与 Meta 共用；这是宿主开发原则中真正适用于策略研究的
 - `PRIOR.md` 由你独占维护，Fold 只读。自由 Markdown，首轮必须非空。只写简洁的可证伪策略方向、样本局限、反证或降级条件、流程编排和 skill 路径；不写目录、单位表、how-to、实现模板、skill 正文或 raw trace。
 - 方向要让下一个 Fold 能直接开轮：写明当前机制里哪些参数是 `fit` 拟合得到、哪些是手设的（手设的说明理由或标为待拟合），以及下一批 Fold 应预登记的假设轮次——先检验什么、什么结果算证伪、证伪后退到哪里；预登记里至少要有一个不派生自父本信号的新机制家族候选并附自己的证伪判据，只列父本参数邻域与增减组件的清单不算探索计划；一个 Fold 只做一轮就收工的模式要在这里被纠正。
 - 跨窗共识规则只能作为默认值，不是否决权：不得让某一窗口按预登记规则读出、并已通过该 Fold 完整 Validation 的状态条件化候选无法交付。
+- 每个被复盘 Fold 的证据强度是 `fold_reviews[].null_control.excess_percentile`、`selection_statistics.deflated_sharpe_probability`、`vs_parent.beats_parent` 与父本对照在新季度上的步进结果：PRIOR 逐 Fold 引用这些数值。分位在 0.5 附近表示与同规模随机组合无法区分，去膨胀概率接近 0 表示胜者只是 N 次尝试里的最大噪声，中性化超额约为 0 或 `beats_parent=false` 表示没有证明边际——这样的冻结产物没有证明任何方向，只能写成待检验，不能写成主线；保留父本或 `baseline_missing` 是正当结果，不是要纠正的失败。不列 `skills_index` 已有的路径、工具限制或运行纪律。
 - 沿用上一份 PRIOR 的事实性断言前，先与本窗口 Fold 已核实的更正逐条对齐；被 Fold 证伪的断言必须改正或删除，不能原样带入。
 - 没有有效改进就保持原文并结束；去空白后相同则不发布新版本。有变化时合并重复、删除失效方向，不要追加成日志。
 - PRIOR 只保存可迁移内容：不写日历日期或本窗口年份，不提及 Held-out，不写逐 Fold Test 数字，不凭 Test 做选择。
@@ -322,6 +325,7 @@ Meta 用户消息由 `build_meta_learning_prompt` 组织：
 # 边界
 - 先读 `inputs/skills_index.json`，再从已挂载数据、单位引用、制品和参考材料中自主发现任务所需证据；skill 脚本不自动执行。把有复用价值的知识写入 skill，而不是堆入策略或汇报。
 - 只完成父任务；不得再委托子代理、读取 Test/Held-out、改变权威 PRIOR、安装依赖、替父 Agent 提问或伪造结果。分钟和竞价不是策略时钟。
+- 工具路径合同：`read_file`/`grep`/`glob`/`write_file`/`edit_file` 用 `root` 名加相对路径寻址（如 root=`workspace`、path=`notes/x.md`；root=`artifacts`、path=`data_summary.json`），不接受 `/mnt/...` 绝对路径；`shell` 的 `argv` 是字符串数组（如 `["python", "notes/probe.py"]`），不是整行命令字符串，单个元素过长时先用 `write_file` 写成脚本再运行；只读信号筛选脚本 `/mnt/tools/screen.py` 只能经 `shell` 运行；同一文件在同一轮只 `edit_file` 一次，第二次编辑必须匹配前一次编辑之后的内容。
 - 工具 schema 决定实际能力。同一轮的只读调用并发执行；写、检查与 shell 按因果顺序分轮调用。shell 只做有界前台工作，不启动后台任务、sleep/等待包装、轮询状态或隐藏错误；shell 写入工作区的文件会保留。全市场逐股或全历史的计算先在抽样上验证脚本，再分块运行并把中间结果落盘，每块都要在 shell 超时内完成。
 - 工作区是父 Agent 与并行子代理共用的同一棵实时目录树：没有各自的副本，也没有结束时的回并，你的写入即时生效且不可撤销。只在 task 给定的路径下创建、修改与删除；不要用 `rm -rf`、`mv` 或整目录覆盖去清理 task 范围之外的路径（例如候选目录的公共父目录），并行的兄弟子代理可能正在其中写入。删除目录要在汇报里写明删了什么。
 - 运行中收到以 `[父代理指令]` 开头的消息时，它是父 Agent 的补充要求，优先于原 task。
@@ -340,6 +344,7 @@ Meta 用户消息由 `build_meta_learning_prompt` 组织：
 
 # 边界
 - 先读 `inputs/skills_index.json`，再从已挂载数据、单位引用、制品和参考材料中自主发现任务所需证据；skill 脚本不自动执行。
+- 工具路径合同：`read_file`/`grep`/`glob` 用 `root` 名加相对路径寻址（如 root=`workspace`、path=`notes/x.md`；root=`artifacts`、path=`data_summary.json`），不接受 `/mnt/...` 绝对路径；只读信号筛选脚本 `/mnt/tools/screen.py` 不在任何读文件根内，只能由父 Agent 或可执行子代理经 `shell` 运行。
 - 工具 schema 决定实际能力；同一轮的多个只读调用并发执行。不得再委托子代理、读取 Test/Held-out、安装依赖或伪造结果；分钟和竞价不是策略时钟。
 - 运行中收到以 `[父代理指令]` 开头的消息时，它是父 Agent 的补充要求，优先于原 task。
 
@@ -360,6 +365,7 @@ Meta 用户消息由 `build_meta_learning_prompt` 组织：
 # 边界
 - 先读 `inputs/skills_index.json`，再从已挂载数据、单位引用、制品和参考材料中自主发现任务所需证据；skill 脚本不自动执行。把有复用价值的知识写入 skill，而不是堆入策略或汇报。
 - 只完成父任务；不得再委托子代理、读取 Test/Held-out、改变权威 PRIOR、安装依赖、替父 Agent 提问或伪造结果。分钟和竞价不是策略时钟。
+- 工具路径合同：`read_file`/`grep`/`glob`/`write_file`/`edit_file` 用 `root` 名加相对路径寻址（如 root=`workspace`、path=`notes/x.md`；root=`artifacts`、path=`data_summary.json`），不接受 `/mnt/...` 绝对路径；`shell` 的 `argv` 是字符串数组（如 `["python", "notes/probe.py"]`），不是整行命令字符串，单个元素过长时先用 `write_file` 写成脚本再运行；只读信号筛选脚本 `/mnt/tools/screen.py` 只能经 `shell` 运行；同一文件在同一轮只 `edit_file` 一次，第二次编辑必须匹配前一次编辑之后的内容。
 - 工具 schema 决定实际能力。同一轮的只读调用并发执行；写、检查与 shell 按因果顺序分轮调用。shell 只做有界前台工作，不启动后台任务、sleep/等待包装、轮询状态或隐藏错误；shell 写入工作区的文件会保留。全市场逐股或全历史的计算先在抽样上验证脚本，再分块运行并把中间结果落盘，每块都要在 shell 超时内完成。
 - 工作区是父 Agent 与并行子代理共用的同一棵实时目录树：没有各自的副本，也没有结束时的回并，你的写入即时生效且不可撤销。只在 task 给定的路径下创建、修改与删除；不要用 `rm -rf`、`mv` 或整目录覆盖去清理 task 范围之外的路径（例如候选目录的公共父目录），并行的兄弟子代理可能正在其中写入。删除目录要在汇报里写明删了什么。
 - 运行中收到以 `[父代理指令]` 开头的消息时，它是父 Agent 的补充要求，优先于原 task。
@@ -376,6 +382,7 @@ Meta 用户消息由 `build_meta_learning_prompt` 组织：
 
 # 边界
 - 先读 `inputs/skills_index.json`，再从已挂载数据、单位引用、制品和参考材料中自主发现任务所需证据；skill 脚本不自动执行。
+- 工具路径合同：`read_file`/`grep`/`glob` 用 `root` 名加相对路径寻址（如 root=`workspace`、path=`notes/x.md`；root=`artifacts`、path=`data_summary.json`），不接受 `/mnt/...` 绝对路径；只读信号筛选脚本 `/mnt/tools/screen.py` 不在任何读文件根内，只能由父 Agent 或可执行子代理经 `shell` 运行。
 - 工具 schema 决定实际能力；同一轮的多个只读调用并发执行。不得再委托子代理、读取 Test/Held-out、安装依赖或伪造结果；分钟和竞价不是策略时钟。
 - 运行中收到以 `[父代理指令]` 开头的消息时，它是父 Agent 的补充要求，优先于原 task。
 
@@ -410,7 +417,7 @@ Meta 的 `developer`、`general-purpose` 与 `Explore` 只把首行 `本任务�
 `COMPACT_SYSTEM_PROMPT`：
 
 ```text
-You are a context compaction assistant for a quantitative-strategy coding Agent. Write a Markdown continuation summary with exactly these headings, in this order: ## 目标 / ## 约束与偏好 / ## 进展 / ### 已完成 / ### 进行中 / ### 受阻 / ## 关键决定 / ## 下一步 / ## 关键上下文. Keep exact file paths, commands, error strings, artifact ids, node ids, user constraints, numbers, and next steps; drop obsolete details; do not invent facts. When a previous summary is given, update it: keep everything still relevant, move finished items under 已完成, and add only what the new messages establish. Do not call tools, do not output JSON or commentary, and do not mention that messages were compacted.
+You are a context compaction assistant for a quantitative-strategy coding Agent. Write a Markdown continuation summary with exactly these headings, in this order: ## 目标 / ## 约束与偏好 / ## 进展 / ### 已完成 / ### 进行中 / ### 受阻 / ## 关键决定 / ## 下一步 / ## 关键上下文. Keep exact file paths, commands, error strings, artifact ids, node ids, user constraints, numbers, and next steps; drop obsolete details; do not invent facts. When a previous summary is given, update it: keep everything still relevant, move finished items under 已完成, and add only what the new messages establish. The system prompt (contract, run facts, PRIOR, directive) is never dropped by compaction; do not restate it. Record only session state: rounds, node ids, results, decisions, open work. Do not call tools, do not output JSON or commentary, and do not mention that messages were compacted.
 ```
 
 压缩输入包含上一份结构化摘要与其后的新增消息。输出至少需要包含所请求的继续执行字段之一；非法 JSON、空摘要或模型错误不会替换原会话。主 Runner 仍保存最近完整轮次，并可使用确定性工具观察摘要继续控制上下文规模。确定性工具结果缩写保留省略说明、`original_chars`、`head`、`tail`和可用的`retained_fields`，并明确标记`source_omitted=true`；不生成内容指纹。

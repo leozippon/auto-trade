@@ -19,7 +19,10 @@ from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.llm import ProviderResponse, ScriptedLLM, ToolCall
 from autotrade.environment.replay.style import NEUTRALIZATION_METHOD
 from autotrade.environment.runtime import RunManifest, write_json_atomic
-from autotrade.pipelines.agent_views import compact_fold_history
+from autotrade.pipelines.agent_views import (
+    compact_fold_history,
+    fold_development_summary,
+)
 from autotrade.pipelines.local_backend import LLMMetaLearner
 
 
@@ -110,7 +113,13 @@ def test_the_signal_screen_path_is_a_fact_only_where_the_mount_exists() -> None:
             ref_store=store,
             runtime_env={"mode": "docker"},
         )
-    assert docker_fold["source_refs"]["signal_screen_ref"] == "/mnt/tools/screen.py"
+    screen = docker_fold["source_refs"]["signal_screen_ref"]
+    assert screen["path"] == "/mnt/tools/screen.py"
+    # Sub-agents kept handing the bare path to read_file; the fact now carries
+    # the argv contract and says which tools cannot open it.
+    assert '["python", "/mnt/tools/screen.py", "--help"]' in screen["usage"]
+    assert "shell only" in screen["usage"]
+    assert "read_file" in screen["usage"]
     assert "signal_screen_ref" not in local_fold["source_refs"]
     assert "signal_screen_ref" not in meta["source_refs"]
 
@@ -452,3 +461,227 @@ def test_a_meta_run_manifest_publishes_both_strategy_wall_clocks(tmp_path: Path)
         manifest=manifest, ref_store=AgentRefStore(tmp_path / "experiment")
     )
     assert facts["budgets"]["strategy_fit_timeout_seconds"] == 1800.0
+
+
+def test_meta_facts_read_the_data_summary_the_session_is_given(tmp_path: Path) -> None:
+    """The Meta system prompt must not call text/events unavailable while the
+    data_summary.json installed for the same session lists their rows."""
+
+    baseline = tmp_path / "baseline" / "main.py"
+    baseline.parent.mkdir()
+    baseline.write_text(
+        "def generate_orders(context):\n    return []\n", encoding="utf-8"
+    )
+    bundle_summary = tmp_path / "bundle" / "data_summary.json"
+    write_json_atomic(
+        bundle_summary,
+        _data_summary({"events.parquet": 12_600_000, "text_index.parquet": 0}),
+    )
+    llm = ScriptedLLM(
+        [ProviderResponse(tool_calls=(ToolCall("f", "finish_meta", {}),))]
+    )
+    LLMMetaLearner(
+        llm=llm,
+        baseline_strategy=baseline,
+        artifact_store=FilesystemArtifactStore(tmp_path / "artifacts"),
+        experiment_dir=tmp_path / "experiment",
+        runtime_root=tmp_path / "runtime",
+        max_llm_calls=2,
+        deadline_seconds=30.0,
+        use_docker=False,
+        rebuild_enabled=False,
+    )(
+        {
+            "run_id": "run_facts",
+            "experiment_id": "exp",
+            "epoch_id": "epoch_002",
+            "meta_learning_id": "epoch_002",
+            "previous_prior": "keep the current transferable direction",
+            "data_summary_ref": str(bundle_summary),
+        }
+    )
+    system_prompt = llm.calls[0]["messages"][0].content or ""
+    assert '"events_available": true' in system_prompt
+    assert '"text_available": false' in system_prompt
+
+
+def _completed_fold_record(tmp_path: Path, *, candidates: int) -> dict[str, object]:
+    """A ledger fold record shaped like the host writes it, with a run manifest
+    carrying ``candidates`` per-candidate backtest summaries."""
+
+    manifest_ref = tmp_path / f"run_{candidates}" / "run_manifest.json"
+    write_json_atomic(
+        manifest_ref,
+        {
+            "backtest_summaries": [
+                {
+                    "result_name": f"valid_{index:03d}",
+                    "mode": "valid",
+                    "status": "ok",
+                    "complete_validation": True,
+                    "total_return": 0.01 * index,
+                    "sharpe": 0.1 * index,
+                    "sub_windows": [{"label": "2023Q1", "return": 0.01}],
+                }
+                for index in range(candidates)
+            ]
+        },
+    )
+    return {
+        "record_type": "fold",
+        "epoch_id": "epoch_001",
+        "fold_id": "fold_2023Q1",
+        "run_id": "run_x",
+        "run_manifest_ref": str(manifest_ref),
+        "validation_period": "20220401..20230331",
+        "fold_status": "frozen",
+        "finish_reason": "llm_agent_finish_fold",
+        "early_stop_reason": None,
+        "accept_reasons": [],
+        "accept_warnings": ["min_sharpe"],
+        "validation_result": {
+            "total_return": 0.1229,
+            "sharpe": 0.8118,
+            "per_stock": {"000001.SZ": [0.1] * 80},
+            "benchmark": {
+                "excess_return": 0.0836,
+                "neutralized_excess_return": 0.1725,
+                "neutralized_excess_method": NEUTRALIZATION_METHOD,
+            },
+        },
+        "vs_parent": {
+            "excess_return_delta": 0.1229,
+            "neutralized_excess_return_delta": 0.2117,
+            "max_drawdown_delta": 0.0647,
+            "beats_parent": True,
+        },
+        "selection_statistics": {
+            "candidates_evaluated": 17,
+            "parent_included": False,
+            "deflated_sharpe_probability": 0.3479,
+            "trials": 17,
+            "sharpe_star": 1.209,
+            "unavailable_reason": None,
+        },
+        "null_control": {
+            "dropped_trips_mean": 12.016,
+            "excess_percentile": 0.966,
+            "k": 500,
+            "matched": "circ_mv_decile",
+            "null_excess_mean": 0.0427,
+            "null_excess_p05": -0.0459,
+            "null_excess_p95": 0.1585,
+            "observed_excess": 0.1775,
+            "rejects_mean": 0.316,
+            "seed": 1668853636,
+        },
+        "parent_control": {
+            "status": "ok",
+            "parent_strategy_artifact_id": "strategy_raw_id",
+            "step_id": "node_raw",
+            "validation_result": {"total_return": 0.0, "per_stock": {"000001.SZ": [0.1]}},
+            "validation_result_ref": "/host/results/parent_control/result.json",
+            "step_result": {
+                "label": "2023Q1",
+                "start": "20230103",
+                "end": "20230331",
+                "partial": False,
+                "total_return": 0.0071,
+                "benchmark": {"benchmark_return": 0.0463, "excess_return": -0.0392},
+                "cost_sensitivity": {
+                    "excess_at_2x_slippage": -0.0401,
+                    "reason": "excess_not_positive",
+                    "slippage_bps": 5.0,
+                },
+                "sharpe": 0.3109,
+                "max_drawdown": 0.0639,
+                "turnover": 1.819,
+                "trade_count": 20,
+            },
+            "null_control": {
+                "excess_percentile": 0.496,
+                "observed_excess": 0.0547,
+                "seed": 57050769,
+                "step": {"start": "20230101", "end": "20230331", "excess_percentile": 0.11},
+            },
+        },
+        "test_period": "20230401..20230630",
+        "test_result": {"total_return": 0.5, "sharpe": 2.0},
+    }
+
+
+def test_fold_development_history_is_the_verdict_and_does_not_grow_with_candidates(
+    tmp_path: Path,
+) -> None:
+    """A Fold session's system prompt carries every completed Fold and is never
+    compacted, so the per-Fold projection must not scale with how many
+    candidates that Fold ran; the trial log stays in the Meta projection."""
+
+    store = AgentRefStore(tmp_path / "experiment")
+    two = fold_development_summary(_completed_fold_record(tmp_path, candidates=2), ref_store=store)
+    forty = fold_development_summary(_completed_fold_record(tmp_path, candidates=40), ref_store=store)
+    assert two == forty
+    assert "backtest_summaries" not in two
+    # Meta still reads the whole trial log through its own projection.
+    meta = compact_fold_history(_completed_fold_record(tmp_path, candidates=40), ref_store=store)
+    assert len(meta["backtest_summaries"]) == 40
+
+    assert two["fold_status"] == "frozen"
+    assert two["early_stop_reason"] is None
+    assert two["accept_warnings"] == ["min_sharpe"]
+    assert two["validation_result"]["benchmark"]["neutralized_excess_return"] == 0.1725
+    assert two["vs_parent"] == {
+        "excess_return_delta": 0.1229,
+        "neutralized_excess_return_delta": 0.2117,
+        "max_drawdown_delta": 0.0647,
+        "beats_parent": True,
+    }
+    assert two["selection_statistics"]["candidates_evaluated"] == 17
+    assert two["selection_statistics"]["deflated_sharpe_probability"] == 0.3479
+    assert two["null_control"] == {
+        "observed_excess": 0.1775,
+        "excess_percentile": 0.966,
+        "null_excess_mean": 0.0427,
+        "null_excess_p05": -0.0459,
+        "null_excess_p95": 0.1585,
+        "k": 500,
+        "rejects_mean": 0.316,
+        "dropped_trips_mean": 12.016,
+    }
+    control = two["parent_control"]
+    assert control["status"] == "ok"
+    assert control["step_result"] == {
+        "label": "2023Q1",
+        "start": "20230103",
+        "end": "20230331",
+        "partial": False,
+        "total_return": 0.0071,
+        "sharpe": 0.3109,
+        "max_drawdown": 0.0639,
+        "trade_count": 20,
+        "turnover": 1.819,
+        "benchmark": {"benchmark_return": 0.0463, "excess_return": -0.0392},
+        "excess_at_2x_slippage": -0.0401,
+    }
+    assert control["null_control"]["step"]["excess_percentile"] == 0.11
+
+    rendered = json.dumps(two, ensure_ascii=False)
+    assert "test_result" not in two
+    for leak in ("20230401", "fold_2023Q1", "per_stock", "000001.SZ", "/host/", "strategy_raw_id", "node_raw", "seed", "matched"):
+        assert leak not in rendered, leak
+    # The caliber is one constant sentence the facts state once, not once per Fold.
+    assert "neutralized_excess_method" not in rendered
+    assert two["fold_id"] == store.get_or_create("fold", "fold_2023Q1")
+
+
+def test_fold_development_history_without_a_parent_or_null_is_honest(tmp_path: Path) -> None:
+    """A first Fold has no parent control and a backend may run no null: those
+    blocks are absent, never invented from a neighbour."""
+
+    record = _completed_fold_record(tmp_path, candidates=1)
+    record.update(parent_control=None, vs_parent=None, null_control=None)
+    summary = fold_development_summary(record, ref_store=AgentRefStore(tmp_path / "experiment"))
+    assert summary["parent_control"] is None
+    assert summary["vs_parent"] is None
+    assert summary["null_control"] is None
+    assert summary["selection_statistics"]["candidates_evaluated"] == 17

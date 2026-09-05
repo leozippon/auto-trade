@@ -31,10 +31,12 @@ from typing import Protocol
 
 from autotrade.environment.llm import (
     AGENT_MAX_OUTPUT_TOKENS,
+    CONTEXT_OUTPUT_MIN_TOKENS,
     ChatMessage,
     LLMProxy,
     MalformedToolCallError,
     ToolCall,
+    clamp_requested_max_tokens,
     context_overflow_error,
     context_request_fits,
     is_context_overflow_error,
@@ -827,8 +829,8 @@ class AgentSessionRunner:
                 f"daily_backtest {backtests['daily_backtest']} 次、"
                 f"batch_validate {backtests['batch_validate']} 次、"
                 f"完整 Validation {complete} 个。"
-                "完整 Validation 的耗时随 Validation 区间的交易日数增长："
-                "请在剩余时间内完成正式回测并 finish_fold。"
+                "完整 Validation 的耗时随 Validation 区间的交易日数增长，为仍要跑的正式回测预留时间；"
+                "到达主截止时宿主另行注入收尾提示。"
             )
         else:
             payload["message"] = (
@@ -1817,6 +1819,27 @@ class AgentSessionRunner:
             raise RuntimeError(
                 "context window is unavailable after the request did not fit"
             )
+        # Nothing more can be freed. The gateway does not insist on the whole
+        # output budget: it clamps ``max_tokens`` to what the window leaves
+        # and refuses only a prompt that leaves none, so the send/fail line
+        # here is the same clamp — the turn goes out with a smaller output
+        # ceiling unless not even a usable minimum remains.
+        available, prompt_fits = clamp_requested_max_tokens(
+            requested_max_tokens=self.config.max_response_tokens,
+            estimated_prompt_tokens=prompt_tokens,
+            context_window=context_window,
+        )
+        if prompt_fits and available >= CONTEXT_OUTPUT_MIN_TOKENS:
+            self._emit(
+                "context_output_clamped",
+                {
+                    "estimated_prompt_tokens": prompt_tokens,
+                    "context_window": context_window,
+                    "requested_max_output_tokens": self.config.max_response_tokens,
+                    "available_output_tokens": available,
+                },
+            )
+            return messages
         raise context_overflow_error(
             estimated_prompt_tokens=prompt_tokens,
             max_tokens=self.config.max_response_tokens,

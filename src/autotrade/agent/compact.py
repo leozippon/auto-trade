@@ -66,8 +66,10 @@ COMPACT_SYSTEM_PROMPT = (
     "numbers, and next steps; drop obsolete details; do not invent facts. When a "
     "previous summary is given, update it: keep everything still relevant, move "
     "finished items under 已完成, and add only what the new messages establish. "
-    "Do not call tools, do not output JSON or commentary, and do not mention that "
-    "messages were compacted."
+    "The system prompt (contract, run facts, PRIOR, directive) is never dropped by "
+    "compaction; do not restate it. Record only session state: rounds, node ids, "
+    "results, decisions, open work. Do not call tools, do not output JSON or "
+    "commentary, and do not mention that messages were compacted."
 )
 _TOOL_CONTEXT_EXCERPT_CHARS = 500
 _TOOL_CONTEXT_MIN_CHARS = 512
@@ -104,6 +106,9 @@ class ContextCompactionConfig:
     # run's model windows (``window − role output budget − margin``); the
     # default only serves a session assembled without that derivation.
     token_threshold: int = DEFAULT_COMPACTION_TOKEN_THRESHOLD
+    # ``min_messages`` and ``max_calls`` bound threshold-triggered compaction
+    # only; a forced compaction (the next request does not fit) proceeds past
+    # both while messages older than the retained tail remain.
     min_messages: int = 20
     keep_recent_messages: int = 12
     max_response_tokens: int = 1_600
@@ -190,8 +195,12 @@ class ContextCompactor(SessionTimeBudgetAware):
     ) -> tuple[bool, dict[str, object]]:
         """Return the decision and its auditable reason.
 
-        ``force`` bypasses only size heuristics. Structural guards and the
-        failure/call circuits remain active.
+        ``force`` is the send-side request: the next request does not fit, so
+        compaction is the only way forward. It bypasses the size heuristics —
+        the token threshold, the call cap and the minimum message count. The
+        structural guard (nothing older than the retained tail) and the
+        failure and remaining-time circuits stay: they say compaction cannot
+        help, not that it is not yet warranted.
         """
 
         # The request the provider will see: messages plus the tool schemas,
@@ -210,7 +219,7 @@ class ContextCompactor(SessionTimeBudgetAware):
             "compaction_attempts": self.compaction_attempts,
             "max_calls": self.config.max_calls,
         }
-        if self.compaction_attempts >= self.config.max_calls:
+        if not force and self.compaction_attempts >= self.config.max_calls:
             return False, {**reason, "skip_reason": "call_limit_reached"}
         if (
             self.config.max_failures
@@ -219,7 +228,7 @@ class ContextCompactor(SessionTimeBudgetAware):
             return False, {**reason, "skip_reason": "failure_circuit_open"}
         if remaining_seconds < self.config.min_remaining_seconds:
             return False, {**reason, "skip_reason": "insufficient_remaining_time"}
-        if len(messages) < self.config.min_messages:
+        if not force and len(messages) < self.config.min_messages:
             return False, {**reason, "skip_reason": "not_enough_messages"}
         if non_summary_count <= self.config.keep_recent_messages:
             return False, {**reason, "skip_reason": "nothing_to_compact"}

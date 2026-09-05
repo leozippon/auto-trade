@@ -1202,6 +1202,25 @@ def test_general_prompts_explain_mode_and_role() -> None:
     assert "不能写策略、models、skills 或 PRIOR" in meta
 
 
+def test_fold_subagent_prompts_carry_the_path_and_argv_contract() -> None:
+    """Both sub-agent models failed the same two tool contracts in ~3% of
+    calls (absolute /mnt paths to read_file, argv as one string, stale
+    edit_file old_text): the role prompt states them, whatever the task says."""
+
+    writer = subagent_system_prompt("fold", "developer")
+    reader = subagent_system_prompt("fold", "auditor")
+    for prompt in (writer, reader):
+        assert "root=`artifacts`、path=`data_summary.json`" in prompt
+        assert "不接受 `/mnt/...` 绝对路径" in prompt
+        assert "/mnt/tools/screen.py" in prompt
+    assert '`["python", "notes/probe.py"]`' in writer
+    assert "第二次编辑必须匹配前一次编辑之后的内容" in writer
+    # A read-only role has no shell, so it is told who runs the screen instead.
+    assert "argv" not in reader
+    assert "只能由父 Agent 或可执行子代理经 `shell` 运行" in reader
+    assert "argv" not in META_SUBAGENT_SYSTEM_PROMPT
+
+
 def test_normalize_subagent_thinking_resolves_the_launch_precedence() -> None:
     """The canonical levels only: the legacy aliases are mapped one layer up,
     by the launch tool, so the schema enum never sees them
@@ -3568,7 +3587,11 @@ def test_time_budget_notice_states_remaining_minutes_and_backtests() -> None:
         if '"time_budget_notice"' in str(message.content or "")
     ]
     assert len(delivered) == 3
-    assert "smoke_backtest 1 次" in delivered[1]["message"] and "finish_fold" in delivered[1]["message"]
+    assert "smoke_backtest 1 次" in delivered[1]["message"]
+    # The notice reports the budget; it is not a wrap-up cue. A Fold that read
+    # "finish_fold" at 50% finished with 280 minutes and 7 backtests unused.
+    assert all("finish_fold" not in item["message"] for item in delivered)
+    assert all("收尾提示" in item["message"] for item in delivered)
 
     # Crossing several fractions at once yields one notice, and Meta has no
     # backtests to report.

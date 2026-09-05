@@ -26,6 +26,8 @@ from autotrade.agent.prompts import (
 from autotrade.environment.artifacts import new_revision_id
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.llm import (
+    CONTEXT_OUTPUT_MIN_TOKENS,
+    CONTEXT_OUTPUT_TOKEN_MARGIN,
     LOCAL_QWEN_MODEL,
     ChatMessage,
     LLMProxyError,
@@ -33,6 +35,7 @@ from autotrade.environment.llm import (
     ProviderResponse,
     ScriptedLLM,
     ToolCall,
+    clamp_requested_max_tokens,
     context_request_fits,
     estimate_chat_request_tokens,
     is_context_overflow_error,
@@ -1333,6 +1336,115 @@ def test_prepare_context_request_raises_context_overflow_error():
         )
     assert is_context_overflow_error(excinfo.value)
     assert "context window 200" in str(excinfo.value)
+
+
+def test_prepare_context_request_sends_with_the_gateway_clamp_when_only_the_output_budget_overflows():
+    """Parity with the gateway: a prompt that leaves output room short of the
+    configured ceiling goes out with a clamped budget instead of failing the
+    session, and the room reported is the gateway's own clamp arithmetic."""
+
+    window = 10_000
+    events: list[tuple[str, dict[str, object]]] = []
+    llm = ScriptedLLM([], context_window_tokens=window)
+    runner = AgentSessionRunner(
+        llm=llm,
+        tools=ToolRegistry([]),
+        system_prompt="test",
+        config=AgentSessionConfig(max_response_tokens=5_000),
+        event_sink=lambda event, payload: events.append((event, payload)),
+    )
+    messages = [ChatMessage("user", "word " * 3_600)]
+    fits, prompt_tokens, _window = context_request_fits(llm, messages, max_tokens=5_000)
+    assert not fits
+    assert prompt_tokens + CONTEXT_OUTPUT_TOKEN_MARGIN + CONTEXT_OUTPUT_MIN_TOKENS <= window
+
+    # Untouched content: no compactor is attached and there is no tool result
+    # to summarize, so the emergency fit hands back an unedited copy.
+    assert (
+        runner._prepare_context_request(
+            messages, (), 30.0, allow_semantic_compaction=False
+        )
+        == messages
+    )
+    ((_event, payload),) = [
+        (event, payload) for event, payload in events if event == "context_output_clamped"
+    ]
+    clamped, prompt_fits = clamp_requested_max_tokens(
+        requested_max_tokens=5_000,
+        estimated_prompt_tokens=prompt_tokens,
+        context_window=window,
+    )
+    assert prompt_fits and clamped == window - prompt_tokens - CONTEXT_OUTPUT_TOKEN_MARGIN
+    assert payload == {
+        "estimated_prompt_tokens": prompt_tokens,
+        "context_window": window,
+        "requested_max_output_tokens": 5_000,
+        "available_output_tokens": clamped,
+    }
+
+    # One token short of a usable minimum output: refused before the network,
+    # as the gateway refuses a prompt that leaves no room.
+    tight = ScriptedLLM(
+        [],
+        context_window_tokens=prompt_tokens
+        + CONTEXT_OUTPUT_TOKEN_MARGIN
+        + CONTEXT_OUTPUT_MIN_TOKENS
+        - 1,
+    )
+    with pytest.raises(LLMProxyError) as excinfo:
+        _context_runner(tight, max_response_tokens=5_000)._prepare_context_request(
+            messages, (), 30.0, allow_semantic_compaction=False
+        )
+    assert is_context_overflow_error(excinfo.value)
+
+
+def test_forced_compaction_proceeds_past_the_call_cap_and_message_floor():
+    """A request that does not fit has no other way forward: the cap and the
+    floor bound threshold-triggered compaction only. The structural guard —
+    nothing older than the retained tail — and the failure circuit still hold
+    under force, because then compaction cannot help."""
+
+    llm = ScriptedLLM([ProviderResponse(content="## 目标\nkeep going")] * 3)
+    compactor = ContextCompactor(
+        llm,
+        ContextCompactionConfig(
+            token_threshold=10**9, min_messages=20, keep_recent_messages=2, max_calls=0
+        ),
+    )
+    messages = [ChatMessage("system", "system")]
+    messages.extend(ChatMessage("user", f"m{index}") for index in range(6))
+    assert compactor.should_compact(messages)[1]["skip_reason"] == "call_limit_reached"
+    forced, reason = compactor.should_compact(messages, force=True)
+    assert forced and reason["trigger_reason"] == "forced_context_overflow"
+
+    first = compactor.compact(messages, force=True)
+    assert first is not None and first.event["status"] == "ok"
+    assert len(first.messages) == 4
+    # Attempts now exceed the cap and the conversation sits below the floor:
+    # a forced compaction still proceeds while older messages remain.
+    second = compactor.compact(
+        [*first.messages, ChatMessage("user", "m6"), ChatMessage("user", "m7")],
+        force=True,
+    )
+    assert second is not None and second.event["status"] == "ok"
+    assert compactor.should_compact(list(second.messages), force=True)[1][
+        "skip_reason"
+    ] == "nothing_to_compact"
+    assert compactor.compact(list(second.messages), force=True) is None
+
+    class BrokenLLM:
+        def complete(self, *args, **kwargs):
+            raise RuntimeError("compaction model down")
+
+    broken = ContextCompactor(
+        BrokenLLM(),
+        ContextCompactionConfig(
+            token_threshold=1, min_messages=4, keep_recent_messages=2, max_failures=1
+        ),
+    )
+    failed = broken.compact(messages)
+    assert failed is not None and failed.event["status"] == "error"
+    assert broken.should_compact(messages, force=True)[1]["skip_reason"] == "failure_circuit_open"
 
 
 def test_prepare_context_request_rejects_missing_window_without_assert(monkeypatch):

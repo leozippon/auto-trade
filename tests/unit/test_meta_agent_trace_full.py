@@ -449,13 +449,18 @@ def test_review_carries_the_selection_statistics_and_the_parent_comparison(
     assert statistics["deflated_sharpe_probability"] == 0.42
     assert statistics["sharpe_star"] == 0.61
     assert "host_only_note" not in statistics
-    # The null control crosses as the four numbers a reader judges it by, plus
-    # the step's own percentile; the seed and the raw distribution stay host-side.
+    # The null control crosses as the numbers a reader judges it by — the
+    # observed excess, its percentile, and the null's centre and spread over
+    # its k draws — plus the step's own percentile; the seed and the raw
+    # distribution stay host-side.
     null = _as_map(review["null_control"])
     assert null == {
         "observed_excess": 0.12,
         "excess_percentile": 0.97,
+        "null_excess_mean": -0.01,
+        "null_excess_p05": -0.09,
         "null_excess_p95": 0.08,
+        "k": 500,
         "rejects_mean": 12.5,
         "step": {"start": "20230403", "end": "20230630", "excess_percentile": 0.61},
     }

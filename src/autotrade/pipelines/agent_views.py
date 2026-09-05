@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 import math
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from autotrade.environment.identity import AgentRefStore
@@ -269,15 +269,11 @@ def compact_fold_history(
         for summary in raw_backtests:
             if not isinstance(summary, dict):
                 continue
-            projected = {key: summary.get(key) for key in keys if key in summary}
-            benchmark = projected.get("benchmark")
-            if isinstance(benchmark, dict) and "neutralized_excess_method" in benchmark:
-                projected["benchmark"] = {
-                    key: value
-                    for key, value in benchmark.items()
-                    if key != "neutralized_excess_method"
-                }
-            backtests.append(projected)
+            backtests.append(
+                _without_benchmark_method(
+                    {key: summary.get(key) for key in keys if key in summary}
+                )
+            )
     compact = {
         "epoch_id": record.get("epoch_id"),
         "fold_id": ref_store.get_or_create("fold", str(record.get("fold_id"))),
@@ -301,6 +297,145 @@ def compact_fold_history(
     if include_frozen_test_metrics and record.get("record_type") == "fold":
         compact["test_result"] = _visible_metrics(record.get("test_result"))
     return compact
+
+
+def _without_benchmark_method(metrics: dict[str, object] | None) -> dict[str, object] | None:
+    """Drop the neutralization caliber sentence: the session facts state it once."""
+
+    if metrics is None:
+        return None
+    benchmark = metrics.get("benchmark")
+    if isinstance(benchmark, dict) and "neutralized_excess_method" in benchmark:
+        return {
+            **metrics,
+            "benchmark": {
+                key: value
+                for key, value in benchmark.items()
+                if key != "neutralized_excess_method"
+            },
+        }
+    return metrics
+
+
+# Host-computed selection evidence a later Fold or a Meta review reads verbatim
+# from the Fold record: how wide the search was and how much of the winner's
+# Sharpe that width alone explains (pipelines/ledger.deflated_sharpe), where
+# the observed excess sits inside random-name replays of the Fold's own trade
+# skeleton (environment/replay/null_control.py), and how the frozen candidate
+# stood against the Fold's parent control (``vs_parent_metrics``). Development
+# statistics only — no Test or Held-out evidence enters through these.
+SELECTION_STATISTICS_KEYS = (
+    "candidates_evaluated",
+    # Whether the deflated trial pool includes the parent control, which it
+    # does exactly when the Fold kept the parent: without it a kept-parent
+    # probability reads as if a challenger had won the search.
+    "parent_included",
+    "deflated_sharpe_probability",
+    "trials",
+    "sharpe_star",
+    "trial_sharpe_std",
+    "observed_sharpe",
+    "return_days",
+    "return_skew",
+    "return_kurtosis",
+    "unavailable_reason",
+)
+# ``rejects_mean`` rides along because a null whose orders are mostly rejected
+# is a weaker comparison, ``status`` because a failed null must not read as a
+# missing one, and the null's own centre and spread over its ``k`` draws
+# because a percentile alone does not say how far the observed excess sits
+# from them. Informational: nothing in the pipeline gates on it.
+NULL_CONTROL_KEYS = (
+    "status",
+    "observed_excess",
+    "excess_percentile",
+    "null_excess_mean",
+    "null_excess_p05",
+    "null_excess_p95",
+    "k",
+    "rejects_mean",
+    "dropped_trips_mean",
+    "step",
+)
+VS_PARENT_DELTA_KEYS = (
+    "excess_return_delta",
+    "neutralized_excess_return_delta",
+    "max_drawdown_delta",
+    "beats_parent",
+)
+
+
+def allowed_keys(block: object, keys: Sequence[str]) -> dict[str, object] | None:
+    """Whitelisted projection of one host-computed block; None when absent."""
+
+    if not isinstance(block, Mapping):
+        return None
+    return {key: block.get(key) for key in keys if key in block}
+
+
+def fold_development_summary(
+    record: dict[str, object], *, ref_store: AgentRefStore
+) -> dict[str, object]:
+    """One completed Fold as a later Fold session reads it in its run facts.
+
+    The verdict rather than the trial log: the frozen node's metrics, how it
+    stood against the Fold's own parent control (``vs_parent``) and against
+    random-name replays of its trades (``null_control``), how wide the search
+    was that it won (``selection_statistics``), and how the inherited parent
+    itself fared on the Fold's new period (``parent_control.step_result``).
+    Per-candidate backtest summaries stay out: they are already in the Step
+    tree and in the Meta history (``compact_fold_history``), and a system
+    prompt that carried them grew by ~25k characters per completed Fold, so
+    this projection's size does not depend on how many candidates a Fold ran.
+    Test metrics never enter it.
+    """
+
+    control = record.get("parent_control")
+    parent_control = None
+    if isinstance(control, Mapping):
+        parent_control = {
+            "status": control.get("status"),
+            "step_result": _visible_step_result(control.get("step_result")),
+            "null_control": allowed_keys(
+                control.get("null_control"), NULL_CONTROL_KEYS
+            ),
+        }
+    return {
+        "epoch_id": record.get("epoch_id"),
+        "fold_id": ref_store.get_or_create("fold", str(record.get("fold_id"))),
+        "validation_period": record.get("validation_period"),
+        "run_id": (
+            ref_store.get_or_create("run", str(record["run_id"]))
+            if record.get("run_id")
+            else None
+        ),
+        "fold_status": record.get("fold_status"),
+        "finish_reason": record.get("finish_reason"),
+        "early_stop_reason": record.get("early_stop_reason"),
+        "accept_reasons": record.get("accept_reasons"),
+        "accept_warnings": record.get("accept_warnings"),
+        "validation_result": _without_benchmark_method(
+            _visible_metrics(record.get("validation_result"))
+        ),
+        "vs_parent": allowed_keys(record.get("vs_parent"), VS_PARENT_DELTA_KEYS),
+        "selection_statistics": allowed_keys(
+            record.get("selection_statistics"), SELECTION_STATISTICS_KEYS
+        ),
+        "null_control": allowed_keys(record.get("null_control"), NULL_CONTROL_KEYS),
+        "parent_control": parent_control,
+    }
+
+
+def _visible_step_result(value: object) -> dict[str, object] | None:
+    """The parent control's new-period row: its window labels plus the compact
+    metric block every other result is read through."""
+
+    if not isinstance(value, Mapping):
+        return None
+    labels = {
+        key: value.get(key) for key in ("label", "start", "end", "partial") if key in value
+    }
+    return {**labels, **(agent_visible_metrics(dict(value)) or {})}
 
 
 def agent_visible_ledger_record(

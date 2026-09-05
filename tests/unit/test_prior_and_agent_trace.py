@@ -47,6 +47,50 @@ def test_fold_system_prompt_injects_prior_full_text(tmp_path: Path) -> None:
     assert "工作区根的 `PRIOR.md`" in meta
 
 
+def test_prompts_define_no_edge_pre_registration_and_meta_fold_labels() -> None:
+    """Round 20260910: two first Folds froze nodes with no demonstrated edge
+    (neutralized excess +0.07%; a style overlay picked for min_return>0), one
+    Fold burned backtests on the untouched template, and three Meta sessions
+    misread the upcoming Fold's window as a data defect. The prompts now state
+    each standard where the Agent reads it."""
+
+    fold = build_system_prompt(mode="fold", experiment_facts={})
+    guardrails = fold[fold.index("# 研究方向与守则") :]
+    # What "no edge" looks like, in the host's own field names.
+    for clause in (
+        "「没有证明边际」的标准",
+        "`vs_parent.beats_parent=false`",
+        "`null_control.excess_percentile`",
+        "`selection_statistics.deflated_sharpe_probability`",
+        "保留父本（首个 Fold 则记为 `baseline_missing`）是正当的研究结果",
+        "不是候选之间的选择标准",
+    ):
+        assert clause in guardrails, clause
+    # The hypothesis argument is the binding pre-registration; notes are optional
+    # and only count when written before the call.
+    assert "`hypothesis` 参数就是有约束力的预登记记录" in guardrails
+    assert "调用之后补写的笔记不算预登记" in guardrails
+    # The template is not a comparator; audits do not gate a ready batch.
+    contract = fold[fold.index("# 提交合同") : fold.index("# 禁止事项")]
+    assert "模板只是交付合同的可运行示例而不是研究基线" in contract
+    assert "需要基线就自己跑一次" not in fold
+    assert "只读审计不在 Validation 的关键路径上" in fold
+    assert '`["python", "/mnt/tools/screen.py", "--help"]`' in guardrails
+
+    meta = build_system_prompt(mode="meta")
+    assert "描述的是本次 Meta 之后即将开始的 Fold" in meta
+    assert "`development_history.fold_reviews[]`" in meta
+    assert "两者窗口不同不是数据缺陷" in meta
+    prior_rules = meta[meta.index("# PRIOR") : meta.index("# 守则")]
+    for clause in (
+        "`fold_reviews[].null_control.excess_percentile`",
+        "`selection_statistics.deflated_sharpe_probability`",
+        "PRIOR 逐 Fold 引用这些数值",
+        "只能写成待检验，不能写成主线",
+    ):
+        assert clause in prior_rules, clause
+
+
 def test_fold_write_tools_cannot_overwrite_authoritative_prior(tmp_path: Path) -> None:
     experiment = tmp_path / "experiment"
     store = ExperimentPriorStore(experiment)

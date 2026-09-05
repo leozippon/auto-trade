@@ -12,7 +12,13 @@ from pathlib import Path
 
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.runtime import sanitize_for_log
-from autotrade.pipelines.agent_views import agent_visible_metrics
+from autotrade.pipelines.agent_views import (
+    NULL_CONTROL_KEYS,
+    SELECTION_STATISTICS_KEYS,
+    VS_PARENT_DELTA_KEYS,
+    agent_visible_metrics,
+    allowed_keys,
+)
 from autotrade.pipelines.fold_analysis import read_strategy_files
 
 _AGENT_TRACE_EVENT_TYPES = frozenset(
@@ -62,48 +68,6 @@ _LEAK_KEYS = frozenset(
         "per_stock",
         "weekly_returns",
     }
-)
-# Selection evidence a Meta review carries verbatim from the Fold record: how
-# wide the search was, how much of the winner's Sharpe that width alone
-# explains, and how the frozen candidate stood against the Fold's own baseline
-# (pipelines/ledger.deflated_sharpe, pipelines/agent_views.vs_parent_metrics).
-# Host-computed development statistics only — no Test or Held-out evidence.
-_SELECTION_STATISTICS_KEYS = (
-    "candidates_evaluated",
-    # Whether the deflated trial pool includes the parent control, which it
-    # does exactly when the Fold kept the parent: without it a kept-parent
-    # probability reads as if a challenger had won the search.
-    "parent_included",
-    "deflated_sharpe_probability",
-    "trials",
-    "sharpe_star",
-    "trial_sharpe_std",
-    "observed_sharpe",
-    "return_days",
-    "return_skew",
-    "return_kurtosis",
-    "unavailable_reason",
-)
-# The random-portfolio null control as a Meta session reads it back
-# (environment/replay/null_control.py): where the observed excess sits inside
-# replays of the Fold's own trade skeleton with random names of the same size.
-# ``rejects_mean`` rides along because a null whose orders are mostly rejected
-# is a weaker comparison, and ``status`` because a failed null must not read as
-# a missing one. Informational: nothing in the pipeline gates on it.
-_NULL_CONTROL_KEYS = (
-    "status",
-    "observed_excess",
-    "excess_percentile",
-    "null_excess_p95",
-    "rejects_mean",
-    "dropped_trips_mean",
-    "step",
-)
-_VS_PARENT_KEYS = (
-    "excess_return_delta",
-    "neutralized_excess_return_delta",
-    "max_drawdown_delta",
-    "beats_parent",
 )
 _COMPLETED_FOLD_STATUSES = frozenset(
     {
@@ -619,16 +583,16 @@ def build_meta_fold_review_bundle(
                 ),
                 # The frozen candidate against this Fold's parent control, and
                 # the trial count its Sharpe was the maximum of.
-                "vs_parent": _allowed_keys(
-                    record.get("vs_parent"), _VS_PARENT_KEYS
+                "vs_parent": allowed_keys(
+                    record.get("vs_parent"), VS_PARENT_DELTA_KEYS
                 ),
-                "selection_statistics": _allowed_keys(
-                    record.get("selection_statistics"), _SELECTION_STATISTICS_KEYS
+                "selection_statistics": allowed_keys(
+                    record.get("selection_statistics"), SELECTION_STATISTICS_KEYS
                 ),
                 # Whether the names carried the excess, or only the timing and
                 # sizing the trade skeleton already fixed.
-                "null_control": _allowed_keys(
-                    record.get("null_control"), _NULL_CONTROL_KEYS
+                "null_control": allowed_keys(
+                    record.get("null_control"), NULL_CONTROL_KEYS
                 ),
                 "test_result": agent_visible_metrics(
                     test_result if isinstance(test_result, dict) else None
@@ -649,16 +613,6 @@ def build_meta_fold_review_bundle(
         max_window_bytes=max_window_bytes,
     )
     return reviews, sidecars
-
-
-def _allowed_keys(
-    block: object, keys: Sequence[str]
-) -> dict[str, object] | None:
-    """Whitelisted projection of one host-computed block; None when absent."""
-
-    if not isinstance(block, Mapping):
-        return None
-    return {key: block.get(key) for key in keys if key in block}
 
 
 def _build_full_sidecar(
