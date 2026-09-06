@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import fnmatch
 import os
+import re
 import selectors
 import subprocess
 import time
@@ -48,6 +49,9 @@ MAX_RESULT_CHARS = 20_000
 # roots); large/binary files belong to shell head/tail or DuckDB/pyarrow reads.
 MAX_READ_BYTES = 10 * 1024 * 1024
 RG_TIMEOUT_SECONDS = 20.0
+# How many unlistable paths a partial result names inline. ``skipped_count`` is
+# always exact, so a longer list is still reported honestly.
+MAX_SKIPPED_LISTED = 20
 VCS_DIRS = (".git", ".hg", ".svn", ".bzr", ".jj", ".sl")
 SEARCH_ROOTS = (
     "workspace",
@@ -139,10 +143,12 @@ class SearchRoots:
         A path that repeats the root as its first segment (``artifacts:artifacts/x``,
         or the bare ``artifacts:artifacts``) is accepted as the stripped form
         (``artifacts:x``, the root itself) when only that form exists, and the
-        accepted form is echoed so the model learns the convention. No host
-        path is ever returned: ``root`` plus the relative path identify the
-        target, and the host layout (repository root, sandbox tree, raw run
-        id) must stay invisible to the model.
+        accepted form is echoed so the model learns the convention. A leading
+        ``workspace/`` is dropped the same way under any root, matching the
+        write tools; the bare name is not, because ``artifacts:workspace``
+        names no obvious target. No host path is ever returned: ``root`` plus
+        the relative path identify the target, and the host layout (repository
+        root, sandbox tree, raw run id) must stay invisible to the model.
         """
         base = self.base(root)
         if not base.is_dir():
@@ -156,7 +162,7 @@ class SearchRoots:
         if target.exists():
             return target, path
         parts = PurePosixPath(path).parts
-        if parts and parts[0] == root:
+        if parts and (parts[0] == root or (parts[0] == "workspace" and len(parts) > 1)):
             # ``root=output path=output`` — listing or globbing the whole root —
             # is the most natural form of the repeated-root mistake, so the
             # repair has to cover the bare root name as well as a prefixed
@@ -171,7 +177,8 @@ class SearchRoots:
             error_type="not_found",
             retry_hint=(
                 f"path is relative to root {root!r}; do not repeat the root name and do not "
-                f'use a colon, e.g. {{"root": "{root}", "path": "<relative/file>"}}'
+                f'use a colon, e.g. {{"root": "{root}", "path": "<relative/file>"}}. '
+                f"A file that lives elsewhere needs its own root: {', '.join(self.names)}"
             ),
         )
 
@@ -195,6 +202,18 @@ class SearchRoots:
                 f"full result spilled; read it back with: read_file root='{self._spill_root}' path='{ref}'"
             ),
         }
+
+
+def _partial_fields(skipped: list[str]) -> dict[str, object]:
+    """Mark a page the walk could not cover in full.
+
+    Absent when nothing was skipped, so an ordinary result stays lean and the
+    presence of ``skipped`` alone means the answer is partial."""
+
+    if not skipped:
+        return {}
+    names = sorted(set(skipped))
+    return {"skipped": names[:MAX_SKIPPED_LISTED], "skipped_count": len(names)}
 
 
 def _has_entries(directory: Path) -> bool:
@@ -277,7 +296,10 @@ class GrepTool(_SearchToolBase):
             "Command-line flags belong in the typed arguments, not in `pattern`: use case_insensitive, "
             "multiline, glob, context, head_limit and offset instead of -i, -U, -g, -C or -n. "
             "Results come back as `filenames` (mode 'files'), 'path:count' lines (mode 'count') or "
-            "always line-numbered 'path:line:text' lines in `content` (mode 'content'). "
+            "always path-prefixed, line-numbered 'path:line:text' lines in `content` (mode 'content'), "
+            "whose `filenames` lists the distinct files of that page. "
+            "A path the host cannot read is skipped instead of failing the call: the answer then "
+            "carries `skipped`/`skipped_count`, and its counts cover only what could be read. "
             + ROOT_RELATIVE_PATH_RULE,
             {
                 "type": "object",
@@ -320,6 +342,11 @@ class GrepTool(_SearchToolBase):
         cwd, target_arg = (target.parent, target.name) if target.is_file() else (target, ".")
         args = [
             "rg", "--no-heading", "--color", "never", "--max-columns", "500",
+            # ripgrep omits the path prefix when it is given a single file, so
+            # a search scoped to one file emitted bare `line:text` and every
+            # line number was read back as a file name. Forcing the prefix keeps
+            # one output shape for both targets, which is what the tool promises.
+            "--with-filename",
             # Search roots are data/artifact trees, not repositories: a stray
             # .ignore/.rgignore file must not silently filter results out of
             # sync with the glob walker (VCS dirs are excluded explicitly).
@@ -347,16 +374,26 @@ class GrepTool(_SearchToolBase):
         completed = self._run_rg(args, cwd, max_lines=offset + head_limit + 1)
         raw_lines = _clean_rg_lines(completed["stdout_lines"])
         stderr = str(completed["stderr"])
+        skipped: list[str] = []
         if completed["exit_code"] not in (0, 1) and not completed["line_limited"]:
-            raise ToolError(
-                stderr.strip() or f"ripgrep failed with exit code {completed['exit_code']}",
-                error_type="timeout" if completed["timeout"] else "tool_error",
-                details={"exit_code": completed["exit_code"]},
-            )
+            # ripgrep names an unreadable path on stderr and still exits 2 after
+            # searching everything else, so those matches are real. A failure it
+            # could not attribute to a path (a bad pattern) makes the whole
+            # answer untrustworthy, and so does a timeout: the walk was killed
+            # mid-tree, so no page from it may claim to be complete, whatever
+            # stderr happens to hold.
+            skipped, unattributed = _split_rg_path_errors(stderr)
+            if unattributed or not skipped or completed["timeout"]:
+                raise ToolError(
+                    stderr.strip() or f"ripgrep failed with exit code {completed['exit_code']}",
+                    error_type="timeout" if completed["timeout"] else "tool_error",
+                    details={"exit_code": completed["exit_code"]},
+                )
 
         common = {
             "mode": output_mode, "root": root, "path": path,
             "pattern": pattern, "glob": glob, "stderr": stderr, "timeout": completed["timeout"],
+            **_partial_fields(skipped),
         }
         if output_mode == "count":
             visible_lines, paging = _apply_paging(
@@ -414,6 +451,8 @@ class GlobTool(_SearchToolBase):
             "glob",
             "List files under an allowlisted sandbox root with structured pagination. "
             "Use to discover files by name/pattern before reading or grepping them. "
+            "A directory the host cannot list is skipped instead of failing the call: the answer "
+            "then carries `skipped`/`skipped_count`, and its counts cover only what could be read. "
             + ROOT_RELATIVE_PATH_RULE,
             {
                 "type": "object",
@@ -444,9 +483,10 @@ class GlobTool(_SearchToolBase):
         if not target.is_dir():
             raise ToolError(f"glob path must be a directory under root {root!r}: {path!r}", error_type="path_error")
         files: list[str] = []
+        skipped: list[str] = []
         seen_matches = 0
         source_truncated = False
-        for candidate in _iter_glob_matches(target, pattern):
+        for candidate in _iter_glob_matches(target, pattern, skipped=skipped):
             seen_matches += 1
             if seen_matches <= offset:
                 continue
@@ -466,7 +506,8 @@ class GlobTool(_SearchToolBase):
             paging["truncated"] = True
         return ToolResult(True, value={
             "root": root, "path": path, "pattern": pattern,
-            "num_files": paging["total"], "filenames": filenames, **paging, **budget,
+            "num_files": paging["total"], "filenames": filenames,
+            **paging, **budget, **_partial_fields(skipped),
         })
 
 
@@ -561,7 +602,16 @@ def _safe_subpath(base: Path, path: str) -> Path:
     return target
 
 
-def _iter_glob_matches(root: Path, pattern: str):
+def _iter_glob_matches(root: Path, pattern: str, *, skipped: list[str]):
+    """Walk ``root`` yielding matches, collecting unlistable subdirectories.
+
+    A sandbox workspace collects debris the host cannot read (a 0700 scratch
+    directory left by the Agent's own harness, owned by the container user), and
+    one such node used to abort the whole listing. Skipping the node keeps the
+    matches found elsewhere; ``skipped`` names what was left out so the caller
+    can say the page is partial rather than complete. The requested directory
+    itself still fails: nothing about that answer would be true."""
+
     pattern_parts = PurePosixPath(pattern).parts
     stack = [root]
     while stack:
@@ -569,8 +619,10 @@ def _iter_glob_matches(root: Path, pattern: str):
         try:
             entries = sorted(directory.iterdir(), key=lambda item: item.name)
         except OSError as exc:
-            shown = directory.relative_to(root).as_posix() if directory != root else "."
-            raise ToolError(f"glob failed to list directory: {shown!r}", error_type="tool_error") from exc
+            if directory == root:
+                raise ToolError("glob failed to list directory: '.'", error_type="tool_error") from exc
+            skipped.append(directory.relative_to(root).as_posix())
+            continue
         subdirs: list[Path] = []
         for candidate in entries:
             if candidate.is_symlink():
@@ -662,6 +714,29 @@ def _clean_rg_lines(lines: list[str]) -> list[str]:
     return [line[2:] if line.startswith("./") else line for line in lines]
 
 
+# ``rg: <path>: <reason> (os error N)`` is ripgrep's per-path I/O failure. The
+# path is reported relative to the search target it was given, so it is already
+# in the Agent's own address space.
+_RG_PATH_ERROR_RE = re.compile(r"^rg: (?P<path>.+?): .*\(os error \d+\)$")
+
+
+def _split_rg_path_errors(stderr: str) -> tuple[list[str], list[str]]:
+    """Split ripgrep stderr into per-path I/O failures and everything else."""
+
+    skipped: list[str] = []
+    unattributed: list[str] = []
+    for line in stderr.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        match = _RG_PATH_ERROR_RE.match(line)
+        if match:
+            skipped.append(match.group("path").removeprefix("./"))
+        else:
+            unattributed.append(line)
+    return skipped, unattributed
+
+
 def _sum_count_lines(lines: list[str]) -> int:
     total = 0
     for line in lines:
@@ -673,15 +748,18 @@ def _sum_count_lines(lines: list[str]) -> int:
     return total
 
 
+# A content line is `path:line:text` for a match and `path-line-text` for a
+# context line, and the text itself routinely contains colons (JSON), so the
+# path ends at the first `<sep><line number><sep>`, not at the first colon.
+_RG_CONTENT_PATH_RE = re.compile(r"^(?P<path>.+?)[:-]\d+[:-]")
+
+
 def _filenames_from_content(lines: list[str]) -> set[str]:
     filenames: set[str] = set()
     for line in lines:
-        if not line or line == "--":
-            continue
-        separator = line.find(":")
-        if separator <= 0:
-            continue
-        filenames.add(line[:separator])
+        match = _RG_CONTENT_PATH_RE.match(line)
+        if match:
+            filenames.add(match.group("path"))
     return filenames
 
 

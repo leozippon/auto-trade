@@ -66,6 +66,9 @@ def synthetic_daily() -> pd.DataFrame:
                     "high": max(open_price, close[symbol]),
                     "low": min(open_price, close[symbol]),
                     "close": close[symbol],
+                    # The exchange reference price is the previous close
+                    # throughout: no ex-date, so the golden record is unchanged.
+                    "pre_close": pre_close,
                     "vol": float(1_000_000 + 1_000 * day_index + index),
                     "up_limit": up_limit,
                     "down_limit": down_limit,

@@ -44,11 +44,13 @@ from autotrade.pipelines.config import (
     SnapshotBundle,
     StrategySchedule,
 )
+from autotrade.pipelines.experiment import null_control_seed
 from autotrade.pipelines.local_backend import (
     BATCH_VALIDATE_MAX_CANDIDATES,
     BATCH_VALIDATE_MAX_CONCURRENCY,
     BatchValidateTool,
     FoldBacktestTool,
+    NullControlTool,
     another_batch_round_fits,
 )
 
@@ -136,7 +138,19 @@ class _Evaluator:
                     raise TimeoutError(f"generate_orders exceeded 30s ({marker})")
             summary = _summary(0.01 * len(source))
             target = self.results_root / f"valid_{call_index:03d}" / "result.json"
-            write_json_atomic(target, {"stats": summary})
+            # The equity curve the selection statistics read: 40 days of
+            # returns alternating around a positive mean (skew 0, kurtosis 1).
+            equity, curve = 1_000_000.0, []
+            for index in range(40):
+                equity *= 1.0 + (0.012 if index % 2 == 0 else -0.008)
+                curve.append(
+                    {
+                        "trade_date": f"2022{index + 1:04d}",
+                        "initial_equity": 1_000_000.0,
+                        "equity": equity,
+                    }
+                )
+            write_json_atomic(target, {"stats": summary, "equity_curve": curve})
             return EvaluationResult(summary=dict(summary), result_ref=str(target))
         finally:
             with self._lock:
@@ -521,6 +535,35 @@ class BatchValidateRunTest(unittest.TestCase):
                 record = json.loads(attachment.read_text(encoding="utf-8"))
                 self.assertIn("sub_windows", record["stats"])
 
+    def test_each_row_carries_provisional_selection_statistics_over_the_round(
+        self,
+    ) -> None:
+        """Every completed Validation of the session so far is the trial pool,
+        the whole batch included, so the rows of one round deflate against the
+        same N and say how many that was; a Fold without a parent control
+        states the comparison absent instead of omitting it."""
+        with TemporaryDirectory() as tmp:
+            session = _Session(Path(tmp))
+            first = session.backtest.invoke({}).value
+            statistics = first["selection_statistics"]
+            self.assertEqual(statistics["trials_so_far"], 1)
+            # One trial has no dispersion to deflate against.
+            self.assertIsNone(statistics["deflated_sharpe_probability"])
+            self.assertEqual(statistics["unavailable_reason"], "fewer_than_two_trials")
+            self.assertIsNone(first["vs_parent"])
+            self.assertEqual(first["vs_parent_note"], "first Fold: no parent control")
+            session.candidate("a", _strategy("1"))
+            session.candidate("b", _strategy("22"))
+            value = session.call("a", "b").value
+            for row in value["candidates"]:
+                statistics = row["selection_statistics"]
+                self.assertEqual(statistics["trials_so_far"], 3)
+                self.assertIsNone(statistics["unavailable_reason"])
+                self.assertTrue(0.0 < statistics["deflated_sharpe_probability"] <= 1.0)
+                self.assertIn("ledger recomputes", statistics["note"])
+                self.assertIsNone(row["vs_parent"])
+                self.assertIn("vs_parent_note", row)
+
     def test_a_batch_node_can_be_restored_and_selected(self) -> None:
         with TemporaryDirectory() as tmp:
             session = _Session(Path(tmp))
@@ -697,6 +740,111 @@ class BatchTemplateFilesTest(unittest.TestCase):
                 session.call("a", "b")
             self.assertIn("readonly files modified", str(caught.exception))
             self.assertEqual(session.backtest.backtests, 0)
+
+
+def _canned_null(calls: list[dict[str, object]]):
+    """A backend null control that records how the tool asked for it."""
+
+    def null_control(result_ref, *, start, end, profile, schedule, seed, step=None):
+        calls.append(
+            {"result_ref": result_ref, "start": start, "end": end, "seed": seed, "step": step}
+        )
+        return {
+            "k": 500,
+            "seed": seed,
+            "matched": "circ_mv_decile",
+            "observed_excess": 0.01,
+            "excess_percentile": 0.62,
+            "rejects_mean": 1.0,
+        }
+
+    return null_control
+
+
+class NullControlToolTest(unittest.TestCase):
+    """The session's null control is the freeze's null control: the same
+    backend call with the same seed, cached per node and capped per Fold."""
+
+    def test_a_validated_node_is_ranked_once_and_the_block_is_reused(self) -> None:
+        with TemporaryDirectory() as tmp:
+            session = _Session(Path(tmp))
+            calls: list[dict[str, object]] = []
+            session.evaluator.null_control = _canned_null(calls)
+            node = session.backtest.invoke({}).value["node_id"]
+            tool = NullControlTool(session.backtest, max_calls=2)
+            first = tool.invoke({"node_id": node}).value
+            self.assertFalse(first["cached"])
+            self.assertEqual(first["null_control"]["excess_percentile"], 0.62)
+            # The Agent-visible block is the same whitelist the run facts use.
+            self.assertNotIn("seed", first["null_control"])
+            self.assertEqual((first["null_controls_used"], first["null_controls_remaining"]), (1, 1))
+            # Drawn exactly as the freeze would draw it: whole window, frozen role.
+            self.assertIsNone(calls[0]["step"])
+            self.assertEqual(calls[0]["seed"], null_control_seed("fold_2022Q1", "frozen"))
+            self.assertEqual((calls[0]["start"], calls[0]["end"]), ("20220101", "20220331"))
+            self.assertEqual(calls[0]["result_ref"], session.backtest.steps[0].validation.result_ref)
+            again = tool.invoke({"node_id": node}).value
+            self.assertTrue(again["cached"])
+            self.assertEqual((len(calls), again["null_controls_used"]), (1, 1))
+            # The block handed to the Pipeline is the backend's own, whole.
+            self.assertEqual(tool.blocks[node]["seed"], calls[0]["seed"])
+
+    def test_the_cap_the_node_check_and_a_missing_backend_refuse_clearly(self) -> None:
+        with TemporaryDirectory() as tmp:
+            session = _Session(Path(tmp))
+            session.evaluator.null_control = _canned_null([])
+            first = session.backtest.invoke({}).value["node_id"]
+            (session.output / "main.py").write_text(_strategy("2"), encoding="utf-8")
+            second = session.backtest.invoke({}).value["node_id"]
+            tool = NullControlTool(session.backtest, max_calls=1)
+            with self.assertRaises(ToolError) as refused:
+                tool.invoke({"node_id": "not_a_node"})
+            self.assertIn("complete Validation of this session", str(refused.exception))
+            self.assertEqual(refused.exception.details["candidates"], [first, second])
+            self.assertTrue(tool.invoke({"node_id": first}).ok)
+            with self.assertRaises(ToolError) as exhausted:
+                tool.invoke({"node_id": second})
+            self.assertEqual(exhausted.exception.error_type, "null_control_budget_exhausted")
+            # A node already ranked still answers after the cap.
+            self.assertTrue(tool.invoke({"node_id": first}).value["cached"])
+            del session.evaluator.null_control
+            with self.assertRaises(ToolError) as missing:
+                NullControlTool(session.backtest, max_calls=1).invoke({"node_id": second})
+            self.assertIn("not available", str(missing.exception))
+
+    def test_a_failed_null_control_is_an_error_that_still_costs_a_call(self) -> None:
+        with TemporaryDirectory() as tmp:
+            session = _Session(Path(tmp))
+
+            def boom(result_ref, **kwargs):
+                raise RuntimeError("no replacement name for 000001.SZ entered 20220104")
+
+            session.evaluator.null_control = boom
+            node = session.backtest.invoke({}).value["node_id"]
+            tool = NullControlTool(session.backtest, max_calls=1)
+            with self.assertRaises(ToolError) as failed:
+                tool.invoke({"node_id": node})
+            self.assertEqual(failed.exception.error_type, "null_control_failed")
+            self.assertEqual(failed.exception.details["null_controls_remaining"], 0)
+            # A failure is not a result the freeze may reuse.
+            self.assertNotIn(node, tool.blocks)
+
+    def test_the_tool_is_fold_only_sequential_and_behind_the_writer_barrier(self) -> None:
+        from autotrade.agent.runner import (
+            _FOLD_TOOLS,
+            _META_TOOLS,
+            _VALIDATION_TOOLS,
+            _WRITER_BARRIER_TOOLS,
+        )
+        from autotrade.environment.tools.base import is_sequential_tool
+
+        name = NullControlTool.spec.name
+        self.assertTrue(is_sequential_tool(NullControlTool.spec))
+        self.assertIn(name, _FOLD_TOOLS)
+        self.assertNotIn(name, _META_TOOLS)
+        self.assertIn(name, _WRITER_BARRIER_TOOLS)
+        # It is not a Validation: its result never registers a candidate node.
+        self.assertNotIn(name, _VALIDATION_TOOLS)
 
 
 class AnotherRoundFitsTest(unittest.TestCase):

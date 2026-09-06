@@ -125,8 +125,8 @@ from .config import (
     StepResult,
     StrategyExperimentConfig,
 )
-from .experiment import DailyStrategyPipeline
-from .ledger import ExperimentLedger, latest_fold_records
+from .experiment import DailyStrategyPipeline, null_control_seed
+from .ledger import ExperimentLedger, candidate_deflated_sharpe, latest_fold_records
 from .skills import (
     SKILLS_INDEX_PATH,
     DeleteSkillTool,
@@ -863,6 +863,12 @@ def manifest_backtest_stats(summary: Mapping[str, object]) -> dict[str, object]:
 
 
 PARENT_CONTROL_RESULT_NAME = "parent_control"
+# What a candidate row's provisional deflated Sharpe is, and is not.
+SELECTION_STATISTICS_NOTE = (
+    "provisional: the trial pool is every Validation this session has "
+    "completed so far (the parent control excluded); the ledger recomputes "
+    "the frozen node's deflated Sharpe with the final count"
+)
 
 
 def parent_control_facts(request: FoldSessionRequest) -> dict[str, object] | None:
@@ -1003,6 +1009,44 @@ class FoldBacktestTool(SessionTimeBudgetAware):
         """
         control = self.request.parent_control
         return control.summary if control is not None else None
+
+    def vs_parent_fields(self, evaluation: EvaluationResult) -> dict[str, object]:
+        """One candidate's ``vs_parent``, stated as absent -- not omitted --
+        when this Fold has no parent control to compare against."""
+
+        vs_parent = vs_parent_metrics(evaluation.summary, self.parent_control_summary)
+        if vs_parent is not None:
+            return {"vs_parent": vs_parent}
+        return {
+            "vs_parent": None,
+            "vs_parent_note": (
+                "first Fold: no parent control"
+                if self.request.parent is None
+                else "no parent control: the host's parent replay failed"
+            ),
+        }
+
+    def selection_statistics(self, evaluation: EvaluationResult) -> dict[str, object]:
+        """The provisional selection evidence one candidate row carries.
+
+        The deflated Sharpe is the ledger's own function over the trial pool
+        so far -- every completed Validation of this session, the parent
+        control excluded -- so the Agent reads the figure the freeze would
+        record for this node today; the ledger recomputes it with the final
+        trial count.
+        """
+
+        block = candidate_deflated_sharpe(
+            observed_sharpe=evaluation.summary.get("sharpe"),
+            trial_sharpes=[step.validation.summary.get("sharpe") for step in self.steps],
+            result_ref=evaluation.result_ref,
+        )
+        return {
+            "deflated_sharpe_probability": block["deflated_sharpe_probability"],
+            "trials_so_far": len(self.steps),
+            "unavailable_reason": block["unavailable_reason"],
+            "note": SELECTION_STATISTICS_NOTE,
+        }
 
     def append_manifest_summary(self, summary: dict[str, object]) -> None:
         """Every backtest attempt, successful or not, lands in the run manifest.
@@ -1222,9 +1266,7 @@ class FoldBacktestTool(SessionTimeBudgetAware):
         assert node_id is not None and evaluation is not None and check is not None
         step = StepResult(node_id, revision_id, evaluation)
         self.steps.append(step)
-        vs_parent = vs_parent_metrics(
-            evaluation.summary, self.parent_control_summary
-        )
+        vs_parent = self.vs_parent_fields(evaluation)
         self.append_manifest_summary(
             {
                 "result_name": result_name,
@@ -1232,7 +1274,11 @@ class FoldBacktestTool(SessionTimeBudgetAware):
                 "status": "ok",
                 "complete_validation": True,
                 **manifest_backtest_stats(evaluation.summary),
-                **({"vs_parent": vs_parent} if vs_parent is not None else {}),
+                **(
+                    {"vs_parent": vs_parent["vs_parent"]}
+                    if vs_parent["vs_parent"] is not None
+                    else {}
+                ),
             }
         )
         # A returned EvaluationResult is by construction a full-window replay;
@@ -1243,9 +1289,10 @@ class FoldBacktestTool(SessionTimeBudgetAware):
             "node_id": node_id,
             "revision_id": self.ref_store.get_or_create("strategy", revision_id),
             "stats": inline_backtest_stats(evaluation.summary),
+            **vs_parent,
+            # Selection evidence the Agent can read before it selects.
+            "selection_statistics": self.selection_statistics(evaluation),
         }
-        if vs_parent is not None:
-            summary["vs_parent"] = vs_parent
         directive = ""
         if self.request.step_gate_hook is not None:
             directive = self.request.step_gate_hook(
@@ -1404,8 +1451,10 @@ class BatchValidateTool(SessionTimeBudgetAware):
         "metrics, the per-quarter return/excess/Sharpe of sub_windows, the "
         "vs_parent deltas against this Fold's parent control (excess, "
         "neutralized excess, drawdown, and beats_parent = both excess deltas "
-        "> 0), wall "
-        "seconds, and the exact failure text for any that failed — one failure "
+        "> 0; null with vs_parent_note when the Fold has no parent control), "
+        "the provisional selection_statistics (the deflated Sharpe over every "
+        "Validation completed so far, which the ledger recomputes at freeze), "
+        "wall seconds, and the exact failure text for any that failed — one failure "
         "never hides the others; each row's result_ref reads back that "
         "candidate's full replay record. Selection stays yours: "
         "step_rollback(node_id) the winner, then finish_fold(node_id). Use "
@@ -1521,7 +1570,7 @@ class BatchValidateTool(SessionTimeBudgetAware):
         # because the clock ran out during them would destroy real evidence. The
         # session deadline is enforced at the next dispatch and LLM call.
         rows: list[dict[str, object]] = []
-        recorded = 0
+        recorded: list[tuple[dict[str, object], EvaluationResult]] = []
         try:
             for candidate, revision, result_name, outcome in zip(
                 candidates, revisions, result_names, outcomes, strict=True
@@ -1551,7 +1600,7 @@ class BatchValidateTool(SessionTimeBudgetAware):
                             batch_id=batch_id,
                         )
                     )
-                    recorded += 1
+                    recorded.append((row, evaluation))
                 rows.append(row)
         finally:
             # The batch never touched the working copy, so the tree position
@@ -1559,6 +1608,10 @@ class BatchValidateTool(SessionTimeBudgetAware):
             # the Agent moves it deliberately with step_rollback once it picks
             # a winner.
             self.backtest.tree.set_position(parent_node_id)
+        # Every row of the round deflates against the same trial pool: the
+        # whole batch is complete by the time the table is returned.
+        for row, evaluation in recorded:
+            row["selection_statistics"] = self.backtest.selection_statistics(evaluation)
         if not recorded:
             raise ToolError(
                 f"batch_validate: all {len(rows)} candidates failed their "
@@ -1575,8 +1628,8 @@ class BatchValidateTool(SessionTimeBudgetAware):
                 ),
                 "parent_node_id": parent_node_id,
                 "candidates": rows,
-                "complete_validations": recorded,
-                "failed": len(rows) - recorded,
+                "complete_validations": len(recorded),
+                "failed": len(rows) - len(recorded),
                 "backtests_used": self.backtest.backtests,
                 "backtests_remaining": (
                     self.backtest.request.max_backtests - self.backtest.backtests
@@ -1807,11 +1860,9 @@ class BatchValidateTool(SessionTimeBudgetAware):
     ) -> dict[str, object]:
         # The screening decision is against the Fold's baseline, not against
         # zero: ``vs_parent`` is this candidate minus the host's parent control
-        # on the same window (agent_views.vs_parent_metrics), absent when the
-        # Fold inherited no parent.
-        vs_parent = vs_parent_metrics(
-            evaluation.summary, self.backtest.parent_control_summary
-        )
+        # on the same window (agent_views.vs_parent_metrics), stated as null
+        # when the Fold has no control.
+        vs_parent = self.backtest.vs_parent_fields(evaluation)
         node_id = self.backtest.record_validation(
             revision,
             evaluation,
@@ -1836,7 +1887,11 @@ class BatchValidateTool(SessionTimeBudgetAware):
                 "candidate": candidate.name,
                 "hypothesis": candidate.hypothesis,
                 **manifest_backtest_stats(evaluation.summary),
-                **({"vs_parent": vs_parent} if vs_parent is not None else {}),
+                **(
+                    {"vs_parent": vs_parent["vs_parent"]}
+                    if vs_parent["vs_parent"] is not None
+                    else {}
+                ),
             }
         )
         public_result_ref = f"{node_id}/{VALIDATION_RESULT_ATTACHMENT}"
@@ -1852,7 +1907,7 @@ class BatchValidateTool(SessionTimeBudgetAware):
                 "strategy", revision.revision_id
             ),
             "stats": batch_candidate_stats(evaluation.summary),
-            **({"vs_parent": vs_parent} if vs_parent is not None else {}),
+            **vs_parent,
             "result_ref": public_result_ref,
         }
 
@@ -2047,6 +2102,156 @@ def fold_budget_status(backtest: FoldBacktestTool) -> FoldBudgetStatus:
             backtest.time_budget.remaining() - request.deadline_grace_seconds
         ),
     )
+
+
+NULL_CONTROL_NOTE = (
+    "descriptive only: excess_percentile near 0.5 means the names carried no "
+    "information the timing and sizing did not; nothing gates on it"
+)
+
+
+class NullControlTool(SessionTimeBudgetAware):
+    """Rank one complete Validation against random-name replays of its trades.
+
+    The same K=500 null control the Pipeline runs for the frozen node at
+    freeze (``experiment._null_control``), drawn with the same seed through
+    the same backend, so the figure the Agent reads before selecting is the
+    figure the ledger records: the block is cached per node and handed to the
+    Pipeline, which reuses it for the frozen node instead of drawing again.
+    Each call is minutes of host replay, hence the per-Fold cap.
+    """
+
+    spec = ToolSpec(
+        # The tool is a verb (like ``batch_validate``): ``null_control`` alone
+        # is the result/ledger block it produces, and one name for both made
+        # every mention of the block read as a tool reference.
+        "run_null_control",
+        "Random-portfolio null control of one complete Validation node.",
+        {
+            "type": "object",
+            "properties": {
+                "node_id": {"type": "string", "minLength": 1, "maxLength": 500},
+            },
+            "required": ["node_id"],
+            "additionalProperties": False,
+        },
+        # Sequential, and locked after finish, like a formal backtest: it
+        # pauses the session clock and spends a capped budget.
+        mutating=True,
+        example={"node_id": "<complete Validation node_id>"},
+    )
+
+    def __init__(
+        self,
+        backtest: FoldBacktestTool,
+        *,
+        max_calls: int,
+        control_step_id: str | None = None,
+    ) -> None:
+        if isinstance(max_calls, bool) or not isinstance(max_calls, int) or max_calls <= 0:
+            raise ValueError("run_null_control max_calls must be a positive integer")
+        self.backtest = backtest
+        self.max_calls = max_calls
+        self.control_step_id = control_step_id
+        self.used = 0
+        # Successful blocks by node id, exactly as the ledger records them.
+        self.blocks: dict[str, dict[str, object]] = {}
+        self.spec = ToolSpec(
+            self.spec.name,
+            "Rank one complete Validation node of this session against K=500 host "
+            "replays of its own trade skeleton with random same-size names: the "
+            "same null control the Pipeline runs for the frozen node at freeze. "
+            "Returns the null_control block the ledger will carry (observed_excess, "
+            "excess_percentile — near 0.5 means the names added nothing the timing "
+            "and sizing did not — the null's mean and p05/p95, rejects_mean, "
+            "dropped_trips_mean). Costs minutes of host replay per call (about "
+            "3.5 min on a one-year window; the session clock pauses like a formal "
+            f"backtest) and is capped at {max_calls} per Fold "
+            "(max_null_controls_per_fold in the run facts; every result reports "
+            "null_controls_remaining); a node's block is cached, and the frozen "
+            "node's block is reused at freeze instead of being drawn again. Use it "
+            "on the finalists before finish_fold, not on every candidate; the "
+            "parent control's null is already in the run facts. Refused for a node "
+            "that is not a complete Validation of this session, once the cap is "
+            "spent, and while a background sub-agent that can write is still "
+            "running.",
+            self.spec.input_schema,
+            mutating=True,
+            example=self.spec.example,
+        )
+
+    @property
+    def session_time_budget(self) -> InferenceTimeBudget:
+        return self.backtest.time_budget
+
+    def invoke(self, arguments: Mapping[str, object]) -> ToolResult:
+        node_id = str(arguments.get("node_id") or "")
+        self.backtest.check_deadline()
+        step = next((item for item in self.backtest.steps if item.step_id == node_id), None)
+        if step is None:
+            if self.control_step_id is not None and node_id == self.control_step_id:
+                raise ToolError(
+                    "run_null_control: the parent control's null already ran on "
+                    "the host before this session; read it in the run facts "
+                    "(parent_control.null_control)"
+                )
+            raise ToolError(
+                "run_null_control requires the node_id of a complete Validation of "
+                f"this session; {node_id or '<empty>'} is not one",
+                details={"candidates": [item.step_id for item in self.backtest.steps]},
+            )
+        if node_id in self.blocks:
+            return ToolResult(True, value=self._report(node_id, self.blocks[node_id], cached=True))
+        if self.used >= self.max_calls:
+            raise ToolError(
+                f"run_null_control budget exhausted: {self.max_calls} per Fold "
+                "(max_null_controls_per_fold). The frozen node's null control "
+                "still runs at freeze and reaches the next Fold and Meta through "
+                "development_history.",
+                error_type="null_control_budget_exhausted",
+            )
+        runner = getattr(self.backtest.evaluator, "null_control", None)
+        if not callable(runner):
+            raise ToolError("run_null_control is not available on this evaluation backend")
+        fold = self.backtest.request.fold
+        # The attempt is charged before it runs: the compute is spent either way.
+        self.used += 1
+        with self.backtest.time_budget.pause():
+            try:
+                block = runner(
+                    step.validation.result_ref,
+                    start=fold.validation_start,
+                    end=fold.validation_end,
+                    profile=self.backtest.broker_profile,
+                    schedule=self.backtest.schedule,
+                    seed=null_control_seed(fold.fold_id, "frozen"),
+                )
+            except SessionInterrupt:
+                raise
+            except Exception as exc:
+                raise ToolError(
+                    "run_null_control failed: "
+                    + _public_error_text(exc, hidden=_hidden_calendar(fold)),
+                    error_type="null_control_failed",
+                    details={
+                        "null_controls_used": self.used,
+                        "null_controls_remaining": self.max_calls - self.used,
+                    },
+                ) from exc
+        self.blocks[node_id] = dict(block)
+        return ToolResult(True, value=self._report(node_id, block, cached=False))
+
+    def _report(
+        self, node_id: str, block: Mapping[str, object], *, cached: bool
+    ) -> dict[str, object]:
+        return {
+            "node_id": node_id,
+            "null_control": allowed_keys(block, NULL_CONTROL_KEYS),
+            "cached": cached,
+            "null_controls_used": self.used,
+            "null_controls_remaining": self.max_calls - self.used,
+            "note": NULL_CONTROL_NOTE,
+        }
 
 
 def _batch_text(
@@ -2286,6 +2491,7 @@ class LLMFoldDeveloper:
                 "budgets": {
                     "max_steps": request.max_steps,
                     "max_backtests": request.max_backtests,
+                    "max_null_controls_per_fold": request.max_null_controls,
                     "max_llm_calls": request.max_llm_calls,
                     # deadline_seconds is the whole session wall clock;
                     # the grace is the trailing wrap-up slice of it, so
@@ -2505,6 +2711,20 @@ class LLMFoldDeveloper:
                     parent_main_py=parent_main_py,
                 ),
             ]
+            # Fold sessions only: Meta, Test and Held-out never replay a null.
+            null_control_tool = (
+                NullControlTool(
+                    backtest,
+                    max_calls=request.max_null_controls,
+                    control_step_id=(
+                        control_step.step_id if control_step is not None else None
+                    ),
+                )
+                if request.max_null_controls > 0
+                else None
+            )
+            if null_control_tool is not None:
+                tools.append(null_control_tool)
             if self.step_tree_enabled:
                 tools.append(
                     StepRollbackTool(
@@ -2641,21 +2861,20 @@ class LLMFoldDeveloper:
                     "bytes": final_skills.bytes,
                 }
             )
-            selected_node = str(result.finish_value.get("node_id") or "")
-            selected_revision_ref = str(
-                result.finish_value.get("revision_id") or ""
-            )
-            if not selected_node or not selected_revision_ref:
+            finish = result.finish_value
+            # An explicit no-edge finish nominates nothing: the Pipeline keeps
+            # the parent (if any) as the lineage head and freezes no candidate.
+            abstained = str(finish.get("outcome") or "select") == "no_edge"
+            selected_node = "" if abstained else str(finish.get("node_id") or "")
+            selected_revision_ref = str(finish.get("revision_id") or "")
+            if not abstained and (not selected_node or not selected_revision_ref):
                 raise RuntimeError("Fold Agent did not select a validated revision")
-            selected_revision = self.ref_store.resolve(
-                "strategy", selected_revision_ref
-            )
             steps = tuple(
                 StepResult(
                     step.step_id,
                     step.revision_id,
                     step.validation,
-                    selected=step.step_id == selected_node,
+                    selected=bool(selected_node) and step.step_id == selected_node,
                     parent_control=step.parent_control,
                 )
                 for step in (
@@ -2663,12 +2882,18 @@ class LLMFoldDeveloper:
                     *backtest.steps,
                 )
             )
-            if selected_revision not in {step.revision_id for step in steps}:
-                raise RuntimeError(
-                    "finish_fold selected a revision absent from this Fold result"
+            if not abstained:
+                selected_revision = self.ref_store.resolve(
+                    "strategy", selected_revision_ref
                 )
+                if selected_revision not in {step.revision_id for step in steps}:
+                    raise RuntimeError(
+                        "finish_fold selected a revision absent from this Fold result"
+                    )
             manifest.update(
-                conversation_id=result.conversation_id, selected_step_id=selected_node
+                conversation_id=result.conversation_id,
+                selected_step_id=selected_node or None,
+                finish_outcome="no_edge" if abstained else "select",
             )
             if self.step_tree_enabled and paths.steps.exists():
                 link_copytree(paths.steps, self.experiment_dir / "steps")
@@ -2678,10 +2903,15 @@ class LLMFoldDeveloper:
             return FoldSessionResult(
                 result.conversation_id,
                 steps,
-                selected_node,
+                selected_node or None,
                 "llm_agent_finish_fold",
-                early_stop_reason=str(
-                    result.finish_value.get("early_stop_reason") or ""
+                early_stop_reason=str(finish.get("early_stop_reason") or ""),
+                no_edge_reason=str(finish.get("reason") or "") if abstained else "",
+                # The nulls the session already drew, for the freeze to reuse.
+                null_controls=(
+                    dict(null_control_tool.blocks)
+                    if null_control_tool is not None
+                    else {}
                 ),
                 # The collected copy, not the live sandbox tree: the fold ledger
                 # record carries it so a later Meta session can still read this

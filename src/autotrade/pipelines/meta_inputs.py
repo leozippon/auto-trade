@@ -18,6 +18,7 @@ from autotrade.pipelines.agent_views import (
     VS_PARENT_DELTA_KEYS,
     agent_visible_metrics,
     allowed_keys,
+    hard_reject_reasons,
     parent_control_summary,
 )
 from autotrade.pipelines.fold_analysis import read_strategy_files
@@ -574,6 +575,12 @@ def build_meta_fold_review_bundle(
                 # period so its metrics are never read against another node's.
                 "validation_period": record.get("validation_period"),
                 "fold_status": record.get("fold_status"),
+                # How the status was reached: a nominated node, the Agent's
+                # explicit no-edge finish (with its evidence), or no nomination.
+                "finish_reason": record.get("finish_reason"),
+                "finish_mode": record.get("finish_mode"),
+                "no_edge_reason": record.get("no_edge_reason"),
+                "hard_reject_reasons": hard_reject_reasons(record),
                 "frozen_strategy_artifact_id": (
                     ref_store.get_or_create("strategy", str(artifact_id))
                     if artifact_id

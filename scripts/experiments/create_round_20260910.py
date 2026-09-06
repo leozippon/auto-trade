@@ -1,22 +1,36 @@
 #!/usr/bin/env python
-"""Create the 2026-09-10 round: five research directions plus one model control on the quarterly walk-forward design.
+"""Create the 2026-09-10 round: six research directions plus one model control on the quarterly walk-forward design.
 
 This script lives in scripts/experiments/ and supersedes the gitignored
 logs/launch/ location where earlier round definitions were stranded. One round
 definition is kept here at a time; superseded rounds stay in git history.
 
-The slate is five arms: factor_cs, explore_platform, explore_github,
-open_mechanism and corner_cases are all stopped and restarted here under the new
-schedule, each keeping its reference pack and model settings. Nothing is
-inherited: corner_cases restarts from the template too, and the previous run
-(corner_cases_20260907) stays archived in its own directory.
+The slate is six regular arms. factor_cs, explore_platform and explore_github
+were rebuilt on refreshed reference packs (the *_20260912 packs: A-share
+anomaly families instead of the value/reversal/growth ridge, previous-day
+mechanisms instead of the falsified limit-up playbooks, and an Alpha158 +
+LightGBM baseline to innovate on) after every arm's first-fold winner proved
+statistically weak; open_mechanism and corner_cases keep their earlier
+definitions. ml_ranker is new: a GPU-assisted machine-learning ranker arm on
+the same budgets, and the only regular arm driven end to end by the hosted
+deepseek-v4-flash (the running slots below say why). Nothing is inherited:
+every arm starts from the template.
 
-A sixth arm, factor_cs_allflash, is derived from the factor_cs entry: same
+ml_ranker is the only arm with gpu_count=1, and that request travels with the
+experiment: it attaches a GPU to the Agent's persistent session sandbox
+(exploration shell: offline screening and hyper-parameter pre-selection) and to
+the strategy container of every formal replay, fit worker included, so fit()
+may really train on the GPU. The card is shared with the concurrent replays,
+and the same strategy has to replay unchanged in an experiment without one, so
+the directive and the pack require the code to probe the device and keep a
+working CPU path.
+
+A seventh arm, factor_cs_allflash, is derived from the factor_cs entry: same
 reference pack and same direction text, but every model role on
-deepseek-v4-flash. It is the control for the model split the other five arms
-run (DeepSeek parents, local Qwen sub-agents, NL and compaction), so a
-difference between the two factor_cs arms is a difference of models, not of
-direction.
+deepseek-v4-flash. It is the control for the model split the five locally
+served arms run (only the Meta parent on DeepSeek; Fold, sub-agent, analysis,
+NL and compaction on local Qwen), so a difference between the two factor_cs
+arms is a difference of models, not of direction.
 
 What this round changes is the research design. The Development window is read
 in quarters and every Fold is validated on the trailing four quarters ending at
@@ -46,10 +60,13 @@ console applies on POST /api/experiments (ExperimentManager.create_experiment's
 key, id and stamp rules plus the worker's own resolve_worker_options
 pre-flight), and additionally refuses a directive the PRIOR calendar policy
 would reject. The console's deployment-state checks -- an experiment directory
-that already exists and a free running slot (six arms fill
-webui.manager.MAX_RUNNING_EXPERIMENTS exactly, so every experiment of the
-previous round, corner_cases_20260907 included, has to be stopped first) -- can
-only be decided against the live server and still happen at POST time, so
+that already exists and a free running slot (the five locally served arms and
+the hosted ml_ranker arm fill webui.manager.MAX_RUNNING_EXPERIMENTS exactly:
+five is the measured band of the local vLLM gateway and the sixth slot is
+meant for an experiment that opens no local stream, so the allflash control
+cannot run beside them and every experiment of the previous round has to be
+stopped first) -- can only be decided against the live server and still happen
+at POST time, so
 --dry-run answers whether the parameters are acceptable, not whether the server
 will take the experiment now. It needs no PIT views either: the pre-flight
 deliberately skips the calendar-dependent fold schedule and every data root, so
@@ -119,18 +136,23 @@ EXPECTED_DEFAULTS: dict[str, object] = {
     "inference_time": "08:30",
     "strategy_period": "day",
     "inherit_from": "",
+    "analysis_model": "qwen-3.8-27b-fp8",
     "nl_model": "qwen-3.8-27b-fp8",
     "compact_model": "qwen-3.8-27b-fp8",
 }
 
-# What this round decides for all six arms. Values, not commentary: the
+# What this round decides for every arm. Values, not commentary: the
 # schedule, the account, the graduation gates and the per-step budgets.
 COMMON_OVERRIDES: dict[str, object] = {
-    # No experiment takes an L20.
+    # No GPU. The request travels with the experiment: it reaches the Agent
+    # session sandbox and the strategy container of every formal replay alike;
+    # ml_ranker overrides this with 1.
     "gpu_count": 0,
-    # Fold and Meta parents on DeepSeek; their sub-agents on the local Qwen.
-    # NL and compaction stay on the console's local default.
-    "model": "deepseek-v4-flash",
+    # Six roles: Meta parent on DeepSeek; Fold parent and sub-agents on local
+    # Qwen. Analysis, NL and compaction stay on the console's local default
+    # (pinned in EXPECTED_DEFAULTS so a default drift cannot silently move them).
+    # ml_ranker and the allflash control put every role on ALL_FLASH_ROLES.
+    "model": "qwen-3.8-27b-fp8",
     "meta_model": "deepseek-v4-flash",
     "subagent_model": "qwen-3.8-27b-fp8",
     # Quarterly walk-forward: 13 Folds, each validated on the trailing four
@@ -186,15 +208,35 @@ OPEN_MECHANISM_PRIOR_DIRECTIVE = (
     "仍须遵守 PIT、禁止硬编码股票或日期、真实回测 ABI 与诚实失败。本指令不放宽提交合同、毕业裁决的回撤上限或 finish_fold。"
 )
 
+# Every model role on the hosted deepseek-v4-flash. Such an experiment opens no
+# local vLLM stream, which is what the console's sixth running slot is for
+# (webui.manager.MAX_RUNNING_EXPERIMENTS): the cap cannot tell local from
+# hosted, so exactly one of the six running arms may be an all-hosted one.
+ALL_FLASH_ROLES: dict[str, str] = {
+    role: "deepseek-v4-flash"
+    for role in (
+        "model",
+        "meta_model",
+        "subagent_model",
+        "analysis_model",
+        "compact_model",
+        "nl_model",
+    )
+}
+
 ROUND: dict[str, dict[str, object]] = {
     "factor_cs_20260910": {
-        "workspace_reference": "configs/workspace_refs/factor_cs_20260826",
+        "workspace_reference": "configs/workspace_refs/factor_cs_20260912",
         "fold_exploration_directive": "\n".join(
             [
-                "方向：在未筛选的全 A 股票池上做截面多因子选股，每一步只推进一个可分离的因子家族，"
+                "方向：在未筛选的全 A 股票池上做截面选股，但只测 refs 登记的 A 股特有异象家族（流动性与换手、"
+                "彩票需求、隔夜-日内分解、筹码浮盈、资金拥挤、基本面动量），每一步只推进一个可分离的家族，"
                 "正式产物写在 output/ 包内。",
-                "先读 refs/README.md 与 exploration-plan.md，再用 PIT parquet 自算因子并核对覆盖率与单位；"
-                "参考包阅读、因子重算与 IC 统计适合交给子代理并行完成，你的精力放在设计、决策与验收上。",
+                "先读 refs/README.md、exploration-plan.md 与 families.md，再按 pit-field-map.md 核对字段的可见时间与单位；"
+                "参考包阅读、因子重算与 IC 筛查适合交给子代理并行完成，你的精力放在设计、决策与验收上。",
+                "价值/反转/成长的线性打分与小市值暴露已在前几轮被证伪，本轮不得作为候选；所有信号先做规模与 β 中性，"
+                "只按中性化超额与规模倾斜判定。家族合成只在 fit(context) 里做（固定 λ 的 ridge 或树模型排序器，"
+                "带禁运的时间序列验证），持有期与篮子按 refs 的手数与成本纪律。",
                 "股票池不做任何 ST、板块、次新、市值或价格筛选；可交易性、停牌与涨跌停由策略自己处理并说明理由。",
                 PARENT_CONTROL_LINE,
                 ROBUSTNESS_LINE,
@@ -204,14 +246,16 @@ ROUND: dict[str, dict[str, object]] = {
         ),
     },
     "explore_platform_strategies_20260910": {
-        "workspace_reference": "configs/workspace_refs/explore_platform_strategies",
+        "workspace_reference": "configs/workspace_refs/platform_20260912",
         "fold_exploration_directive": "\n".join(
             [
-                "方向：把 refs 里已筛好的股票讨论平台机制重写成本项目 ABI 下的可执行策略；先读 refs/README.md、"
-                "pit-field-map.md 与 playbooks.md，按其中的优先级推进，一次只验证一个机制。",
-                "预登记的机制先过离线筛查：事件计数、覆盖窗口、各组前瞻收益的符号都要看过，"
-                "再决定它值不值得一次完整 Validation；不要一开始就把几个弱机制堆成不透明打分。",
-                "股票池未经任何筛选，可交易性、停牌与涨跌停由策略自理。沙箱无网络，任何时候都不得抓取站点数据。",
+                "方向：股票讨论平台的涨停板类机制已在日频 08:30 决策下被整体证伪，本轮只测 refs 重新登记的六个"
+                "用前一日信息就能执行的机制（板块领涨-跟涨溢出、市场宽度情绪周期门控、跌停超卖开盘反转、"
+                "解禁后压力释放、放量滞涨与地量、大宗折溢价），一次只验证一个机制，每个机制必须与其无机制的匹配对照同批比较。",
+                "先读 refs/README.md、exploration-plan.md 与 playbooks.md，按 pit-field-map.md 核对可见时间、单位与本轮快照里"
+                "没有的数据集；预登记的机制先过离线筛查（事件计数、覆盖窗口、各组前瞻收益的符号），再决定值不值得一次完整 Validation。",
+                "机制落败后的剩余预算只能用于本包的其他机制或其门控与持有期变体，不得改成通用因子打分，除非该打分在假说里"
+                "被登记为对照。股票池未经任何筛选，可交易性、停牌与涨跌停由策略自理。沙箱无网络，任何时候都不得抓取站点数据。",
                 PARENT_CONTROL_LINE,
                 ROBUSTNESS_LINE,
                 "禁止把 refs 拷进 output、禁止写死路径与股票代码；每一行输入都必须满足 available_at <= 推断时点。"
@@ -220,19 +264,53 @@ ROUND: dict[str, dict[str, object]] = {
         ),
     },
     "explore_github_strategies_20260910": {
-        "workspace_reference": "configs/workspace_refs/explore_github_strategies",
+        "workspace_reference": "configs/workspace_refs/github_20260912",
         "fold_exploration_directive": "\n".join(
             [
-                "方向：把 refs 里已筛好的 GitHub A 股策略思路在本项目 ABI 下重写（是重写，不是移植代码）；"
-                "先读 refs/README.md、playbook.md 与 screening.md，再看 vendor/*/SOURCE.md 与相邻公式摘录。",
-                "一次只验证一个思路；源仓库的数据库、下载器、调度器、broker、日志与框架适配一律删除，"
-                "撮合、T+1、费用与涨跌停属于环境，策略只发订单意图。",
-                "不要把源仓库 README 的收益数字当成预期，只用本项目的 Validation 复现其行为。"
+                "方向：在本项目 ABI 内重写 Qlib 风格的 Alpha158 特征 + LightGBM 截面排序器作为有据可查的强基线，"
+                "再在它之上做 refs 登记的创新家族（标签口径、特征中性化、跨重训日集成、WorldQuant-101 与国泰君安-191 算子族），"
+                "一次只验证一个改动；是重写，不是移植代码。",
+                "先读 refs/README.md、exploration-plan.md、alpha158.md 与 families.md；源仓库的数据层、训练器、Recorder 与回测器"
+                "一律不搬，撮合、T+1、费用与涨跌停属于环境，策略只发订单意图。不要把 Qlib 文档里的收益表当成预期，"
+                "只用本项目的 Validation 复现其行为。",
+                "拟合全部放在 fit(context) 内，标签只用推断时已实现的开盘到开盘收益并留禁运，超参网格预先写死并在 fit 内选点；"
                 "股票池未经任何筛选，可交易性、停牌与涨跌停由策略自理。",
                 PARENT_CONTROL_LINE,
                 ROBUSTNESS_LINE,
                 "禁止把 refs 拷进 output、禁止写死路径与股票代码；每一行输入都必须满足 available_at <= 推断时点。"
                 "可执行指纹必须不同于父策略。",
+            ]
+        ),
+    },
+    "ml_ranker_20260910": {
+        # The only arm with a GPU. The request reaches the Agent's session
+        # sandbox and the strategy container (fit worker included) of every
+        # formal replay, so fit() may train on the device; the card is shared
+        # with concurrent replays and the strategy must replay unchanged in an
+        # experiment without one, so the directive demands a device probe and
+        # a working CPU path.
+        "gpu_count": 1,
+        # The hosted arm: every model role on deepseek-v4-flash, so it takes
+        # the running slot the local gateway cannot serve.
+        **ALL_FLASH_ROLES,
+        "workspace_reference": "configs/workspace_refs/ml_ranker_20260912",
+        "fold_exploration_directive": "\n".join(
+            [
+                "方向：用机器学习与深度学习做截面排序器：先在 fit(context) 里训出 LightGBM 基线，再比较 MLP 与序列模型"
+                "（GRU 或小型 Transformer，读 20–60 日 K 线与特征序列），每一步只改一个可分离的组件（模型族、标签口径、"
+                "中性化、集成、换手控制），正式产物写在 output/ 包内。",
+                "先读 refs/README.md、exploration-plan.md、models.md 与 protocol.md。本臂挂了一块 GPU：开发沙箱用它做"
+                "离线筛查与超参预选，正式回放的策略容器（含 fit worker）同样能看到它，fit 可以真的在 GPU 上训练；"
+                "但这块卡与并发回放共享，同一份策略还要能在没有 GPU 的实验里原样回放，因此代码必须探测设备并保留"
+                "可用的 CPU 路径，fit 的墙钟先在沙箱实测、落在 fit 预算内，模型状态只能以 NumPy 数组或 booster 文件"
+                "写入 context.state_dir。",
+                "反过拟合是硬纪律：滚动重训、带禁运的清洗时间序列验证、预先写死的小网格并在 fit 内选点、按候选数读去膨胀 Sharpe；"
+                "标签只用推断时已实现的开盘到开盘收益。持有期与篮子按 refs 的手数与成本纪律。",
+                "股票池不做任何 ST、板块、次新、市值或价格筛选；可交易性、停牌与涨跌停由策略自己处理并说明理由。",
+                PARENT_CONTROL_LINE,
+                ROBUSTNESS_LINE,
+                "禁止克隆父策略、禁止把 refs 拷进 output、禁止写死路径与股票代码；每一行输入都必须满足"
+                " available_at <= 推断时点。可执行指纹必须不同于父策略。",
             ]
         ),
     },
@@ -280,17 +358,7 @@ ROUND: dict[str, dict[str, object]] = {
 # can only differ in their models.
 ROUND["factor_cs_allflash_20260910"] = {
     **ROUND["factor_cs_20260910"],
-    **{
-        role: "deepseek-v4-flash"
-        for role in (
-            "model",
-            "meta_model",
-            "subagent_model",
-            "analysis_model",
-            "compact_model",
-            "nl_model",
-        )
-    },
+    **ALL_FLASH_ROLES,
 }
 
 # Reported for every arm on --dry-run: what this round decides, plus the

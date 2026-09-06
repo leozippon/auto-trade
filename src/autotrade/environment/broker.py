@@ -17,6 +17,11 @@ from autotrade.environment.broker_core import (
 )
 from autotrade.environment.strategy import StrategyOrder
 
+# A-share prices are quoted to 0.01 CNY, so a ``pre_close`` that differs from
+# the last close by more than half a tick is an exchange price reset (an
+# ex-date), never rounding.
+EX_DATE_PRICE_TOLERANCE = 0.005
+
 
 @dataclass(frozen=True)
 class BrokerProfile:
@@ -98,6 +103,32 @@ class Position:
 
 
 @dataclass(frozen=True)
+class CorporateAction:
+    """One ex-date settlement of a held position, as the Broker applied it."""
+
+    trade_date: str
+    symbol: str
+    last_close: float
+    pre_close: float
+    cash_per_share: float
+    quantity_before: int
+    quantity_after: int
+    cash_credit: float
+
+    def to_record(self) -> dict[str, object]:
+        return {
+            "trade_date": self.trade_date,
+            "symbol": self.symbol,
+            "last_close": self.last_close,
+            "pre_close": self.pre_close,
+            "cash_per_share": self.cash_per_share,
+            "quantity_before": self.quantity_before,
+            "quantity_after": self.quantity_after,
+            "cash_credit": self.cash_credit,
+        }
+
+
+@dataclass(frozen=True)
 class Execution:
     symbol: str
     action: str
@@ -142,6 +173,9 @@ class DailyBroker:
         self.initial_equity = float(self.profile.initial_cash)
         self.positions: dict[str, Position] = {}
         self.executions: list[Execution] = []
+        # Ex-date settlements, in order: the only way a quantity or the cash
+        # balance changes without a fill, so they are kept as auditable records.
+        self.corporate_actions: list[CorporateAction] = []
         # Cost feedback for the return statistics: gross traded notional drives
         # turnover, the fee totals separate cost from alpha, and the rejection
         # tally names the failure modes a strategy has to fix.
@@ -151,12 +185,103 @@ class DailyBroker:
         self.reject_counts: dict[str, int] = {}
         self._current_day: str | None = None
 
-    def open_day(self, trade_date: str) -> None:
+    def open_day(
+        self,
+        trade_date: str,
+        bars: Mapping[str, Mapping[str, object]],
+        cash_dividends: Mapping[str, float] | None = None,
+    ) -> None:
+        """Enter ``trade_date``: release the T+1 locks, then settle ex-dates.
+
+        ``bars`` is the day's market frame and ``cash_dividends`` maps a symbol
+        to the cash dividend per share going ex on this day. The exchange's
+        ex-rights reference price (the bar's ``pre_close``) is the truth for the
+        share leg: a held name whose ``pre_close`` differs from its last close
+        is reset so that its value at ``pre_close`` equals its value at the
+        last close, with the cash dividend credited and any fractional share
+        paid out in cash. Shares created on the ex-date stay locked until the
+        next day, exactly like a same-day buy.
+        """
         if self._current_day == trade_date:
             return
         self._current_day = str(trade_date)
-        for position in self.positions.values():
+        dividends = cash_dividends or {}
+        for symbol, position in self.positions.items():
             position.available_quantity = position.quantity
+            bar = bars.get(symbol)
+            # No bar today (full-day suspension or delisting): nothing marks or
+            # resets the name, so there is no ex-date to settle either.
+            if bar is not None:
+                self._settle_ex_date(position, bar, dividends.get(symbol, 0.0))
+
+    def _settle_ex_date(
+        self, position: Position, bar: Mapping[str, object], cash_per_share: object
+    ) -> None:
+        symbol, day = position.symbol, self._current_day
+        pre_close = _price(bar.get("pre_close"))
+        if pre_close is None:
+            raise ValueError(
+                f"{symbol} on {day}: the day's bar has no usable pre_close, so a held "
+                "position cannot be carried across the day"
+            )
+        if (
+            isinstance(cash_per_share, bool)
+            or not isinstance(cash_per_share, (int, float))
+            or not math.isfinite(cash_per_share)
+            or cash_per_share < 0
+        ):
+            raise ValueError(f"{symbol} on {day}: invalid cash dividend per share {cash_per_share!r}")
+        cash_per_share = float(cash_per_share)
+        last_close = position.last_price
+        quantity_before = position.quantity
+        # Quotes are two-decimal, so the gap is compared at a precision well
+        # below a tick: binary noise (10.005 - 10.0 > 0.005) must not count.
+        if round(abs(pre_close - last_close), 6) <= EX_DATE_PRICE_TOLERANCE:
+            # No exchange price reset means no share change; a cash dividend
+            # the table records for today is still credited.
+            if cash_per_share == 0.0:
+                return
+            quantity_after = quantity_before
+            credit = quantity_before * cash_per_share
+        else:
+            # pre_close = (last_close - cash) / (1 + r): the share multiplier is
+            # recovered from the exchange's own reset, never from a ratio table.
+            ratio = (last_close - cash_per_share) / pre_close
+            if not math.isfinite(ratio) or ratio <= 0.0:
+                raise ValueError(
+                    f"{symbol} on {day}: ex-date reset from {last_close} to {pre_close} with "
+                    f"cash {cash_per_share} implies an invalid share multiplier {ratio!r}"
+                )
+            quantity_after = math.floor(round(quantity_before * ratio, 6))
+            if quantity_after <= 0:
+                raise ValueError(
+                    f"{symbol} on {day}: ex-date reset leaves no whole share of {quantity_before}"
+                )
+            # Whole shares only: the account is worth at pre_close exactly what
+            # it was worth at the last close once the dividend and the
+            # fractional share are paid in cash.
+            credit = quantity_before * last_close - quantity_after * pre_close
+            position.quantity = quantity_after
+            position.available_quantity = min(position.available_quantity, quantity_after)
+            position.last_price = pre_close
+        # The cost basis carries over and the cash paid out is a return of
+        # capital, so a later sale's realized P&L still closes the loop.
+        position.average_cost = (
+            position.average_cost * quantity_before - credit
+        ) / quantity_after
+        self.cash += credit
+        self.corporate_actions.append(
+            CorporateAction(
+                trade_date=str(day),
+                symbol=symbol,
+                last_close=last_close,
+                pre_close=pre_close,
+                cash_per_share=cash_per_share,
+                quantity_before=quantity_before,
+                quantity_after=quantity_after,
+                cash_credit=credit,
+            )
+        )
 
     def account_snapshot(self) -> tuple[float, Mapping[str, int]]:
         return self.cash, MappingProxyType(
@@ -335,4 +460,11 @@ def _price_limit_reject(action: str, price: float, bar: Mapping[str, object]) ->
     return "daily_price_limit" if blocked else None
 
 
-__all__ = ["BrokerProfile", "DailyBroker", "Execution", "Position"]
+__all__ = [
+    "EX_DATE_PRICE_TOLERANCE",
+    "BrokerProfile",
+    "CorporateAction",
+    "DailyBroker",
+    "Execution",
+    "Position",
+]

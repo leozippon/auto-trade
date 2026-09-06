@@ -73,6 +73,7 @@ def _tool(root: Path, strategy: str, *, check=None, evaluator=None) -> SmokeBack
             "symbol": ["000001.SZ"] * len(DAYS),
             "open": [10.0] * len(DAYS),
             "close": [10.5] * len(DAYS),
+            "pre_close": [10.5] * len(DAYS),
         }
     ).to_parquet(daily, index=False)
     output = root / "output"

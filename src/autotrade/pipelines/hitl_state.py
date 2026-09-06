@@ -99,6 +99,7 @@ WEB_CREATE_DEFAULTS: dict[str, object] = {
     "min_region_trade_days": rolling_default("min_region_trade_days"),
     "max_steps_per_fold": rolling_default("max_steps_per_fold"),
     "max_backtests_per_fold": rolling_default("max_backtests_per_fold"),
+    "max_null_controls_per_fold": rolling_default("max_null_controls_per_fold"),
     "max_llm_calls": rolling_default("max_llm_calls"),
     "session_max_attempts": rolling_default("session_max_attempts"),
     "max_fold_minutes": rolling_default("max_fold_minutes"),

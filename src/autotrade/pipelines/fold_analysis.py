@@ -40,7 +40,11 @@ _RECORD_FIELDS = (
     "validation_period",
     "fold_status",
     "finish_reason",
-    "accept_reasons",
+    # Why the Fold ended where it did: the finish mode, the Agent's own no-edge
+    # rationale, and the hard rejections that can leave a Fold freezing nothing.
+    "finish_mode",
+    "no_edge_reason",
+    "hard_reject_reasons",
     "accept_warnings",
     "selected_step_id",
     "step_id",

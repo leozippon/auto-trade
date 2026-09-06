@@ -51,7 +51,11 @@ from autotrade.environment.tools.modification_check import ModificationCheckTool
 from autotrade.pipelines.config import ArtifactRevision, EvaluationRequest, SnapshotBundle
 from autotrade.pipelines.pit_backend import PITDailyEvaluationBackend
 
-from tests.unit.test_pit_daily_backend import _pit_slot_paths, _write_domains
+from tests.unit.test_pit_daily_backend import (
+    _pit_slot_paths,
+    _write_corporate_actions,
+    _write_domains,
+)
 from tests.unit.test_sandbox_runtime import _executor_for_process
 
 TEMPLATE = Path(__file__).resolve().parents[2] / "configs" / "agent_output_template"
@@ -160,7 +164,14 @@ def test_fit_schedule_is_due_at_start_and_on_period_rollover_only():
 def _daily(dates: list[str]) -> pd.DataFrame:
     return pd.DataFrame(
         [
-            {"trade_date": day, "symbol": "000001.SZ", "open": 10.0, "close": 10.0 + index}
+            {
+                "trade_date": day,
+                "symbol": "000001.SZ",
+                "open": 10.0,
+                "close": 10.0 + index,
+                # The prior close: no ex-date anywhere in the window.
+                "pre_close": 10.0 + max(index - 1, 0),
+            }
             for index, day in enumerate(dates)
         ]
     )
@@ -261,6 +272,39 @@ def test_docker_command_binds_state_read_only_for_orders_and_read_write_for_fit(
     record = orders_worker._context_record(context)
     assert record["state_dir"] == CONTAINER_STATE_DIR
     assert record["models_dir"] == "/strategy-data/models"
+
+
+def test_fit_worker_shares_the_inference_container_gpu_devices(tmp_path: Path):
+    """Training happens in the fit worker, so the experiment's GPU request has
+    to reach that container — and reach the SAME devices: a second selection
+    would make one `gpu_count=1` evaluation occupy two cards."""
+
+    path = tmp_path / "main.py"
+    path.write_text(FIT_STRATEGY, encoding="utf-8")
+    state = tmp_path / "state"
+    state.mkdir()
+    config = SandboxConfig(limits=SandboxLimits(gpu_count=1, gpu_name_filter="L20"))
+    context = StrategyContext(
+        inference_at=datetime(2024, 3, 28, 8, 30, tzinfo=CN_TZ),
+        bars=(),
+        account=AccountSnapshot(cash=1.0, positions={}),
+    )
+    with (
+        patch.object(DockerStrategyExecutor, "_start"),
+        patch.object(DockerStrategyExecutor, "_roundtrip") as roundtrip,
+        patch("autotrade.environment.executor.select_gpus", return_value=[3]) as select,
+    ):
+        executor = DockerStrategyExecutor(path, config, state_dir=state)
+        executor.fit(context)
+    roundtrip.assert_called_once()
+    select.assert_called_once_with(1, require_name="L20")
+    fit_worker = executor._fit_worker
+    assert fit_worker is not None
+    assert fit_worker.gpu_indices == executor.gpu_indices == [3]
+    command = fit_worker.docker_command()
+    assert command[command.index("--gpus") + 1] == '"device=3"'
+    assert f"type=bind,src={state.resolve()},dst={CONTAINER_STATE_DIR}" in command
+    executor.close()
 
 
 def test_worker_answers_fit_with_fitted_and_writes_state(tmp_path: Path):
@@ -407,24 +451,31 @@ def _pit_bundle(tmp_path: Path, replay_days: list[str]) -> tuple[Path, Path]:
         rows = []
         for symbol_index, symbol in enumerate(symbols):
             price = start_price + symbol_index
+            pre_close = None
             for day in days:
                 price *= float(np.exp(rng.normal(0.0, 0.02)))
+                if pre_close is None:
+                    pre_close = round(price, 2)
                 rows.append(
                     {
                         "ts_code": symbol,
                         "trade_date": day,
                         "open": round(price, 2),
                         "close": round(price, 2),
+                        # The prior close: no ex-date anywhere in the window.
+                        "pre_close": pre_close,
                         "up_limit": round(price * 1.1, 2),
                         "down_limit": round(price * 0.9, 2),
                         "adj_factor": 1.0,
                         "available_at": f"{day[:4]}-{day[4:6]}-{day[6:]}T17:30:00+08:00",
                     }
                 )
+                pre_close = round(price, 2)
         return pd.DataFrame(rows)
 
     frame(history, 10.0).to_parquet(snapshot / "daily.parquet", index=False)
     frame(replay_days, 12.0).to_parquet(replay / "daily.parquet", index=False)
+    _write_corporate_actions(replay)
     (snapshot / "manifest.json").write_text(
         json.dumps(
             {
@@ -445,6 +496,7 @@ def _pit_bundle(tmp_path: Path, replay_days: list[str]) -> tuple[Path, Path]:
                 "period_end": replay_days[-1],
                 "available_from": "2024-03-27T23:59:59+08:00",
                 "raw_generation": {"generation_id": "generation_fit"},
+                "domains": {"corporate_actions": {"rows": 0}},
             }
         ),
         encoding="utf-8",

@@ -472,6 +472,8 @@ _FIELDS: list[dict[str, object]] = [
      "help": "单 Fold 完整验证回测驱动的 Step 数上限。"},
     {"key": "max_backtests_per_fold", "group": "预算与验收", "label": "单 Fold 回测次数上限", "type": "int",
      "help": "回测独立计时（墙钟回补推理 deadline），该值限制其总次数。"},
+    {"key": "max_null_controls_per_fold", "group": "预算与验收", "label": "单 Fold 按需空对照次数上限", "type": "int",
+     "help": "Fold 会话内 run_null_control 工具的调用上限（每次约 3.5 分钟，冻结节点复用其结果）；0 表示不注册该工具。"},
     {"key": "max_llm_calls", "group": "预算与验收", "label": "单 Fold 模型调用上限", "type": "int",
      "help": "每个 Fold 和元学习会话的模型调用总次数上限；主循环、子代理与上下文压缩共享同一计数。"},
     {"key": "nl_failure_policy", "group": "预算与验收", "label": "NL 失败策略", "type": "choice",

@@ -15,6 +15,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .gpu import device_request
 from .runtime import (
     ARTIFACT_TOP_LEVEL,
     RUNTIME_CACHE_DIR_NAMES,
@@ -66,6 +67,19 @@ class SandboxLimits:
     startup_timeout_seconds: float = 900.0
     max_output_chars: int = 1_000_000
     tmpfs_size: str = "64m"
+    # The experiment's own GPU request, carried over from its ``SandboxSpec``
+    # (``pipelines.worker._strategy_sandbox_from_spec``). ``fit(context)`` runs
+    # in THIS container rather than in the Agent session, so an experiment that
+    # asked for GPUs must reach it; 0 attaches no device and keeps the formal
+    # replay CPU-only, which is what ``gpu_count=0`` experiments get. The
+    # devices themselves are chosen at container start by the same free-memory
+    # selector the session container uses (``environment.gpu.select_gpus``).
+    gpu_count: int = 0
+    gpu_name_filter: str | None = None
+    # Devices already selected for this evaluation. The inference container
+    # runs the selector once and pins its result here for the fit worker, so
+    # one ``gpu_count=1`` evaluation occupies one device rather than two.
+    gpu_devices: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         if isinstance(self.cpus, bool) or not math.isfinite(self.cpus) or self.cpus <= 0:
@@ -91,6 +105,19 @@ class SandboxLimits:
             raise ValueError("sandbox max_output_chars must be a positive integer")
         if not _MEMORY_LIMIT.fullmatch(self.tmpfs_size):
             raise ValueError("sandbox tmpfs_size must be a positive Docker memory limit")
+        if (
+            isinstance(self.gpu_count, bool)
+            or not isinstance(self.gpu_count, int)
+            or self.gpu_count < 0
+        ):
+            raise ValueError("sandbox gpu_count must be a non-negative integer")
+        if not isinstance(self.gpu_devices, tuple) or any(
+            isinstance(index, bool) or not isinstance(index, int) or index < 0
+            for index in self.gpu_devices
+        ):
+            raise ValueError("sandbox gpu_devices must be a tuple of device indexes")
+        if self.gpu_devices and len(self.gpu_devices) != self.gpu_count:
+            raise ValueError("sandbox gpu_devices must pin exactly gpu_count devices")
 
 
 @dataclass(frozen=True)
@@ -298,7 +325,7 @@ class DockerSandbox:
         for key, value in sorted(self.labels.items()):
             command.extend(["--label", f"{key}={value}"])
         if self.gpu_indices:
-            command.extend(["--gpus", f"device={','.join(map(str, self.gpu_indices))}"])
+            command.extend(["--gpus", device_request(self.gpu_indices)])
         for key, value in (
             ("XDG_CACHE_HOME", "/tmp/cache"), ("PIP_CACHE_DIR", "/tmp/cache/pip"),
             ("HF_HOME", "/tmp/cache/hf"), ("MPLCONFIGDIR", "/tmp/cache/mpl"),

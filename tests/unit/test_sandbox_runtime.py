@@ -34,6 +34,7 @@ from autotrade.environment.executor import (
     StrategyExecutionError,
     docker_available,
 )
+from autotrade.environment.gpu import GpuUnavailableError
 from autotrade.environment.replay import DailyMarketData
 from autotrade.environment.sandbox import (
     SCREENING_TOOL_MOUNT,
@@ -60,7 +61,10 @@ from autotrade.environment.strategy_loader import StrategyLoadError
 from autotrade.environment.strategy_worker import BarStream, WorkerProtocolError
 from autotrade.environment.tools.base import CommandResult
 from autotrade.pipelines import DailyStrategyPipeline, StrategyExperimentConfig
-from autotrade.pipelines.worker import _activate_experiment_sandbox
+from autotrade.pipelines.worker import (
+    _activate_experiment_sandbox,
+    _strategy_sandbox_from_spec,
+)
 
 
 def _strategy(tmp_path: Path, source: str = "def generate_orders(context):\n    return []\n") -> Path:
@@ -152,6 +156,18 @@ def test_persistent_sandbox_command_has_bounded_explicit_identity_mounts(tmp_pat
     assert SCREENING_TOOL_SOURCE.is_file()
     assert f"type=bind,src={SCREENING_TOOL_SOURCE},dst={SCREENING_TOOL_MOUNT},readonly" in command
     assert SCREENING_TOOL_MOUNT == "/mnt/tools/screen.py"
+
+
+def test_persistent_sandbox_renders_a_quoted_device_list(tmp_path: Path):
+    """Docker parses an unquoted ``device=0,1`` as one id plus a device count
+    and refuses the request; the quotes are part of the argument."""
+
+    local = LocalSandbox(tmp_path / "session")
+    local.prepare_layout()
+    sandbox = DockerSandbox(local, SandboxSpec(gpu="auto", gpu_count=2))
+    sandbox.gpu_indices = [0, 1]
+    command = sandbox.docker_command()
+    assert command[command.index("--gpus") + 1] == '"device=0,1"'
 
 
 def test_local_sandbox_runtime_contract_has_no_git_and_no_image_record(tmp_path: Path):
@@ -705,6 +721,25 @@ def test_active_sandbox_update_reaches_agent_and_formal_evaluator() -> None:
     assert evaluator.sandbox.docker_executable == active.docker_executable
 
 
+def test_experiment_gpu_request_reaches_the_formal_strategy_container() -> None:
+    """The session spec is the single source of the experiment's GPU request;
+    the strategy container of every formal replay carries the same one."""
+
+    requested = _strategy_sandbox_from_spec(
+        SandboxSpec(gpu="auto", gpu_count=2, gpu_name_filter="L20"),
+        fit_timeout_seconds=3600,
+    )
+    assert (requested.limits.gpu_count, requested.limits.gpu_name_filter) == (2, "L20")
+    assert requested.limits.fit_timeout_seconds == 3600.0
+    cpu_only = _strategy_sandbox_from_spec(
+        SandboxSpec(gpu=None, gpu_count=0), fit_timeout_seconds=3600
+    )
+    assert cpu_only.limits.gpu_count == 0
+    assert (
+        _strategy_sandbox_from_spec(None, fit_timeout_seconds=3600).limits.gpu_count == 0
+    )
+
+
 def test_filesystem_artifact_store_freezes_explicit_revision_identity(tmp_path: Path):
     output = tmp_path / "output"
     output.mkdir()
@@ -904,6 +939,69 @@ def test_docker_command_has_fail_closed_boundary(tmp_path: Path):
     assert str(tmp_path / "data") not in command
     assert command[-1] == "/strategy/main.py"
     executor.close()
+
+
+def test_strategy_container_attaches_only_a_requested_gpu(tmp_path: Path):
+    """``fit(context)`` trains inside this container, so an experiment that
+    asked for GPUs must reach it — with the session container's own selector —
+    while an experiment that asked for none never consults nvidia-smi and runs
+    exactly the CPU-only boundary it ran before."""
+
+    strategy = _strategy(tmp_path)
+    with (
+        patch.object(DockerStrategyExecutor, "_start"),
+        patch("autotrade.environment.executor.select_gpus", return_value=[2]) as select,
+    ):
+        executor = DockerStrategyExecutor(
+            strategy,
+            SandboxConfig(limits=SandboxLimits(gpu_count=1, gpu_name_filter="L20")),
+        )
+    command = executor.docker_command()
+    # The quotes belong to the value: Docker splits an unquoted device= list on
+    # commas and reads the second field as a device count.
+    assert command[command.index("--gpus") + 1] == '"device=2"'
+    select.assert_called_once_with(1, require_name="L20")
+    executor.close()
+
+    with (
+        patch.object(DockerStrategyExecutor, "_start"),
+        patch("autotrade.environment.executor.select_gpus", return_value=[0, 1]),
+    ):
+        two = DockerStrategyExecutor(
+            strategy, SandboxConfig(limits=SandboxLimits(gpu_count=2))
+        )
+    assert two.docker_command()[two.docker_command().index("--gpus") + 1] == '"device=0,1"'
+    two.close()
+
+    with (
+        patch.object(DockerStrategyExecutor, "_start"),
+        patch("autotrade.environment.executor.select_gpus") as unused,
+    ):
+        cpu_only = DockerStrategyExecutor(strategy)
+    assert "--gpus" not in cpu_only.docker_command()
+    unused.assert_not_called()
+    cpu_only.close()
+
+
+def test_strategy_container_gpu_request_fails_instead_of_falling_back_to_cpu(
+    tmp_path: Path,
+):
+    """An unavailable device must abort the replay: training on CPU would be a
+    different computation reported under the same result."""
+
+    strategy = _strategy(tmp_path)
+    with (
+        patch.object(DockerStrategyExecutor, "_start") as start,
+        patch(
+            "autotrade.environment.executor.select_gpus",
+            side_effect=GpuUnavailableError("requested 1 GPU(s), available matching GPUs: none"),
+        ),
+        pytest.raises(GpuUnavailableError, match="available matching GPUs: none"),
+    ):
+        DockerStrategyExecutor(
+            strategy, SandboxConfig(limits=SandboxLimits(gpu_count=1))
+        )
+    start.assert_not_called()
 
 
 @pytest.mark.parametrize(("cpus", "expected"), [(0.25, "1"), (1.5, "2"), (32.0, "16")])
@@ -1218,12 +1316,14 @@ def test_incremental_worker_receives_only_delta_and_rebuilds_full_history(tmp_pa
                     "symbol": "000001.SZ",
                     "open": 10.0,
                     "close": 11.0,
+                    "pre_close": 11.0,
                 },
                 {
                     "trade_date": "20260105",
                     "symbol": "000001.SZ",
                     "open": 12.0,
                     "close": 13.0,
+                    "pre_close": 11.0,
                 },
             ]
         )
@@ -1572,7 +1672,7 @@ def test_close_reaps_worker_closes_pipes_and_is_idempotent():
 def test_pipeline_factory_reuses_replay_and_always_closes(tmp_path: Path):
     strategy = _strategy(tmp_path)
     daily = pd.DataFrame(
-        [{"trade_date": "20260102", "symbol": "000001.SZ", "open": 10.0, "close": 11.0}]
+        [{"trade_date": "20260102", "symbol": "000001.SZ", "open": 10.0, "close": 11.0, "pre_close": 11.0}]
     )
 
     class FakeExecutor:
@@ -1653,7 +1753,7 @@ def test_persistent_sandbox_start_pins_the_selected_gpus_on_the_container(tmp_pa
         sandbox.start()
     assert sandbox.gpu_indices == [1, 5]
     command = run.call_args_list[0][0][0]
-    assert command[command.index("--gpus") + 1] == "device=1,5"
+    assert command[command.index("--gpus") + 1] == '"device=1,5"'
     assert sandbox.allocation_record()["allocated_gpu_indices"] == [1, 5]
 
 

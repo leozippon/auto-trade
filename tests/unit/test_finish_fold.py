@@ -9,6 +9,7 @@ from autotrade.environment.step_tree import StepTree
 from autotrade.environment.tools.base import ToolError, ToolRegistry
 from autotrade.environment.tools.finish_fold import (
     EARLY_STOP_REASON_MAX_CHARS,
+    NO_EDGE_REASON_MIN_CHARS,
     FinishFoldTool,
     FoldBudgetStatus,
     executable_source_structure,
@@ -509,4 +510,135 @@ def test_finish_fold_without_wired_rules_checks_nothing(tmp_path: Path):
     )
     finish = FinishFoldTool(tree, fold_id="fold_ref_ab", run_id="run_x")
     accepted = finish.invoke({"node_id": node})
-    assert accepted.finish and "pipeline_fold_status" not in accepted.value
+    assert accepted.finish and "acceptance_hard_reject_reasons" not in accepted.value
+    # No rule to breach: the Pipeline freezes the nomination, and the result
+    # says so instead of staying silent.
+    assert accepted.value["pipeline_fold_status"] == "frozen"
+    assert accepted.value["pipeline_will_freeze"] is True
+
+
+def test_every_accepted_nomination_states_what_the_pipeline_will_freeze(tmp_path: Path):
+    """The reviewed defect: a session nominated "the least-bad node" believing
+    nothing would be frozen, and the Pipeline froze it. Every accepted call now
+    states the fold status and what will be frozen, in the ledger's words."""
+
+    tree = StepTree(tmp_path / "steps")
+    passing = _record_round(
+        tree, tmp_path, batch_id="b1", marker="1", metrics=_metrics(0.1)
+    )
+    finish = FinishFoldTool(
+        tree, fold_id="fold_ref_ab", run_id="run_x", hard_rule_check=_acceptance_check()
+    )
+    accepted = finish.invoke({"node_id": passing})
+    assert accepted.value["outcome"] == "select"
+    assert accepted.value["pipeline_fold_status"] == "frozen"
+    assert accepted.value["pipeline_will_freeze"] is True
+    assert accepted.value["pipeline_outcome"] == (
+        f"Fold will freeze {passing} (valid_b1_1) as this Fold's strategy"
+    )
+    # A hard-rejected nomination accepted inside the window says the same
+    # thing the ledger will: nothing frozen, and why.
+    breaching = _record_round(
+        tree, tmp_path, batch_id="b2", marker="2", metrics=_metrics(0.4)
+    )
+    in_window = FinishFoldTool(
+        tree,
+        fold_id="fold_ref_ab",
+        run_id="run_x",
+        hard_rule_check=_acceptance_check(),
+        another_round_fits=lambda: False,
+    )
+    rejected = in_window.invoke({"node_id": breaching})
+    assert rejected.value["pipeline_will_freeze"] is False
+    assert rejected.value["pipeline_fold_status"] == "baseline_missing"
+    assert rejected.value["pipeline_outcome"].startswith("No candidate frozen: ")
+    assert "max_drawdown_exceeded" in rejected.value["pipeline_outcome"]
+    assert "baseline_missing" in rejected.value["pipeline_outcome"]
+
+
+NO_EDGE_REASON = (
+    "all four candidates: neutralized excess about 0 and beats_parent=false; "
+    "the new quarter is negative for every one of them"
+)
+
+
+def test_finish_fold_no_edge_records_the_fallback_status_without_a_nomination(
+    tmp_path: Path,
+):
+    """A Fold that found no edge finishes without nominating anything: the
+    parent, when there is one, stays the lineage head (no_update); a parentless
+    Fold records baseline_missing. Neither path freezes a node."""
+
+    tree = StepTree(tmp_path / "steps")
+    _record_round(tree, tmp_path, batch_id="b1", marker="1", metrics=_metrics(0.1))
+    parentless = FinishFoldTool(tree, fold_id="fold_ref_ab", run_id="run_x")
+    result = parentless.invoke({"outcome": "no_edge", "reason": NO_EDGE_REASON})
+    assert result.ok and result.finish
+    assert "node_id" not in result.value and "revision_id" not in result.value
+    assert result.value["outcome"] == "no_edge"
+    assert result.value["reason"] == NO_EDGE_REASON
+    assert result.value["candidates_evaluated"] == 1
+    assert result.value["fold_status"] == "pending_pipeline_review"
+    assert result.value["pipeline_fold_status"] == "baseline_missing"
+    assert result.value["pipeline_will_freeze"] is False
+    assert result.value["pipeline_outcome"].startswith(
+        "No candidate frozen; there is no parent"
+    )
+    parent_main = _written(tmp_path / "parent", PARENT) / "main.py"
+    with_parent = FinishFoldTool(
+        tree, fold_id="fold_ref_ab", run_id="run_x", parent_main_py=parent_main
+    )
+    kept = with_parent.invoke({"outcome": "no_edge", "reason": NO_EDGE_REASON})
+    assert kept.value["pipeline_fold_status"] == "no_update"
+    assert kept.value["pipeline_outcome"] == (
+        "No candidate frozen; the inherited parent stays the lineage head (no_update)"
+    )
+
+
+def test_finish_fold_no_edge_refuses_a_node_a_thin_reason_or_an_empty_session(
+    tmp_path: Path,
+):
+    tree = StepTree(tmp_path / "steps")
+    finish = FinishFoldTool(tree, fold_id="fold_ref_ab", run_id="run_x")
+    # Nothing validated yet: there is no evidence to have found no edge in,
+    # and the host's parent control is the baseline, not a candidate.
+    tree.record_step(
+        _written(tmp_path / "control", PARENT),
+        epoch_id="epoch_001",
+        fold_id="fold_ref_ab",
+        run_id="run_x",
+        result_name="parent_control",
+        revision_id=new_revision_id("revision"),
+        metrics=_metrics(0.1),
+        metadata={"parent_control": True},
+    )
+    with pytest.raises(ToolError, match="at least one complete Validation"):
+        finish.invoke({"outcome": "no_edge", "reason": NO_EDGE_REASON})
+    node = _record_round(tree, tmp_path, batch_id="b1", marker="1", metrics=_metrics(0.1))
+    with pytest.raises(ToolError, match="requires reason"):
+        finish.invoke({"outcome": "no_edge"})
+    with pytest.raises(ToolError, match="requires reason"):
+        finish.invoke({"outcome": "no_edge", "reason": "no edge"})
+    with pytest.raises(ToolError, match="node_id must be absent"):
+        finish.invoke({"outcome": "no_edge", "node_id": node, "reason": NO_EDGE_REASON})
+    # A nomination does not take the no-edge reason, and the schema refuses
+    # any other outcome before the tool runs.
+    with pytest.raises(ToolError, match='belongs to outcome="no_edge"'):
+        finish.invoke({"node_id": node, "reason": NO_EDGE_REASON})
+    registry = ToolRegistry([finish])
+    assert registry.invoke("finish_fold", {"outcome": "abstain"}).ok is False
+    # The early-finish gate applies to an abstention exactly as to a nomination.
+    budgeted = FinishFoldTool(
+        tree, fold_id="fold_ref_ab", run_id="run_x", budget_status=lambda: _budget(20)
+    )
+    with pytest.raises(ToolError, match="early_stop_reason"):
+        budgeted.invoke({"outcome": "no_edge", "reason": NO_EDGE_REASON})
+    finished = budgeted.invoke(
+        {
+            "outcome": "no_edge",
+            "reason": "x" * NO_EDGE_REASON_MIN_CHARS,
+            "early_stop_reason": "H3 untested: the events domain is empty this window",
+        }
+    )
+    assert finished.finish and finished.value["early_stop_reason"]
+    assert finished.value["budget_at_finish"]["backtests_remaining"] == 20

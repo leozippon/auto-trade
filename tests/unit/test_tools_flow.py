@@ -475,6 +475,79 @@ class StructuredSearchToolTest(unittest.TestCase):
             self.assertEqual(traversal.value["error_type"], "path_error")
             hidden = registry.invoke("glob", {"pattern": "workspace/.hidden.txt", "root": "workspace"})
             self.assertFalse(hidden.ok)
+            # Addressing another root's tree from `workspace` is the recurring
+            # root mistake, so the refusal has to name the roots that exist.
+            misrooted = registry.invoke(
+                "read_file", {"root": "workspace", "path": "steps/node/result.json"}
+            )
+            self.assertFalse(misrooted.ok)
+            self.assertEqual(misrooted.value["error_type"], "not_found")
+            self.assertIn("steps", misrooted.value["retry_hint"])
+
+    @unittest.skipIf(os.geteuid() == 0, "root can list a directory with no permission bits")
+    def test_an_unreadable_directory_leaves_a_partial_page_not_a_failed_call(self) -> None:
+        """The Agent's own test harnesses leave 0700 scratch directories owned
+        by the sandbox user under the workspace. One of them used to fail every
+        glob and grep over the whole tree; the readable part must still come
+        back, explicitly marked partial."""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            paths, _, registry = self._tools(Path(tmp))
+            (paths.workspace / "keep.py").write_text("alpha\n", encoding="utf-8")
+            clean = registry.invoke("glob", {"pattern": "**/*.py", "root": "workspace"})
+            self.assertTrue(clean.ok, clean.error)
+            self.assertNotIn("skipped", clean.value)
+            blocked = paths.workspace / "mockctx_1sujqrue"
+            blocked.mkdir()
+            (blocked / "inner.py").write_text("alpha\n", encoding="utf-8")
+            blocked.chmod(0o000)
+            try:
+                listing = registry.invoke("glob", {"pattern": "**/*.py", "root": "workspace"})
+                self.assertTrue(listing.ok, listing.error)
+                self.assertEqual(listing.value["filenames"], ["workspace/keep.py"])
+                self.assertEqual(listing.value["skipped"], ["workspace/mockctx_1sujqrue"])
+                self.assertEqual(listing.value["skipped_count"], 1)
+                matched = registry.invoke(
+                    "grep", {"pattern": "alpha", "root": "workspace", "output_mode": "files"}
+                )
+                self.assertTrue(matched.ok, matched.error)
+                self.assertEqual(matched.value["filenames"], ["workspace/keep.py"])
+                self.assertEqual(matched.value["skipped"], ["workspace/mockctx_1sujqrue"])
+                # A pattern ripgrep cannot compile is not a skippable path: the
+                # call must still fail rather than report an empty tree.
+                broken = registry.invoke(
+                    "grep", {"pattern": "alpha(", "root": "workspace", "output_mode": "files"}
+                )
+                self.assertFalse(broken.ok)
+            finally:
+                blocked.chmod(0o700)
+
+    def test_a_timed_out_grep_is_never_reported_as_a_complete_answer(self) -> None:
+        """A timeout kills ripgrep mid-walk, so its partial output covers an
+        unknown part of the tree. When stderr happens to hold only per-path I/O
+        errors there is nothing unattributed left to catch it, and the call used
+        to come back as a complete, non-truncated page with a side `timeout`
+        flag. It has to fail instead."""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            paths, _, registry = self._tools(Path(tmp))
+            (paths.workspace / "keep.py").write_text("alpha\n", encoding="utf-8")
+            timed_out = {
+                "exit_code": 124,
+                "stdout_lines": ["./workspace/keep.py"],
+                # Every stderr line is attributable to a path ripgrep could not
+                # read; the kill leaves no message of its own.
+                "stderr": "rg: ./workspace/blocked: Permission denied (os error 13)\n",
+                "timeout": True,
+                "line_limited": False,
+            }
+            with patch.object(search_module.GrepTool, "_run_rg", return_value=timed_out):
+                result = registry.invoke(
+                    "grep", {"pattern": "alpha", "root": "workspace", "output_mode": "files"}
+                )
+            self.assertFalse(result.ok)
+            self.assertEqual(result.value["error_type"], "timeout")
+            self.assertEqual(result.value["details"]["exit_code"], 124)
 
     def test_read_returns_line_numbered_paginated_and_guarded(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -577,6 +650,32 @@ class StructuredSearchToolTest(unittest.TestCase):
                 # file appears in the visible content and really exists.
                 self.assertIn(name, record["content"])
                 self.assertIn(name, names)
+
+    def test_grep_of_a_single_file_reports_file_names(self) -> None:
+        # ripgrep prints no path prefix when its target is one file, so a
+        # content page came back as bare `line:text` and every line number was
+        # read back as a "filename"; a context line's own colons split it too.
+        with tempfile.TemporaryDirectory() as tmp:
+            paths, _, registry = self._tools(Path(tmp))
+            (paths.workspace / "result.json").write_text(
+                '{\n  "cash": 1.0,\n  "equity": 2.0,\n  "note": "flat"\n}\n', encoding="utf-8"
+            )
+            single = {"root": "workspace", "path": "workspace/result.json"}
+            content = registry.invoke(
+                "grep",
+                {"pattern": '"(cash|equity)":', "output_mode": "content", "context": 1, **single},
+            ).value
+            self.assertEqual(content["filenames"], ["result.json"])
+            self.assertIn('result.json:2:  "cash": 1.0,', content["content"])
+            self.assertIn('result.json-4-  "note": "flat"', content["content"])
+            counts = registry.invoke(
+                "grep", {"pattern": '"(cash|equity)":', "output_mode": "count", **single}
+            ).value
+            self.assertEqual(counts["content"], "result.json:2")
+            files = registry.invoke(
+                "grep", {"pattern": '"(cash|equity)":', "output_mode": "files", **single}
+            ).value
+            self.assertEqual(files["filenames"], ["result.json"])
 
     def test_grep_does_not_honor_stray_ignore_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -808,6 +907,47 @@ class ArtifactIOToolTest(unittest.TestCase):
                 with self.subTest(path=path), self.assertRaises(ToolError):
                     safe.resolve(path, must_exist=path == "link")
 
+    def test_path_refusals_name_the_relative_form_and_a_visible_scratch_dir(self) -> None:
+        """A refused path costs a whole round unless the refusal says what the
+        accepted form is. Traces show exactly two mistakes: spelling the mount
+        out, and reaching for a dot-prefixed scratch directory."""
+
+        from autotrade.environment.tools.workspace import WORKSPACE_MOUNT
+
+        with tempfile.TemporaryDirectory() as tmp:
+            _, registry = self._registry(Path(tmp))
+            mounted = registry.invoke(
+                "write_file",
+                {"path": f"{WORKSPACE_MOUNT}/candidates/x/main.py", "content": "x"},
+            )
+            self.assertFalse(mounted.ok)
+            self.assertEqual(mounted.value["error_type"], "path_error")
+            self.assertIn(f"drop the {WORKSPACE_MOUNT} prefix", mounted.value["retry_hint"])
+            self.assertIn("'candidates/x/main.py'", mounted.value["retry_hint"])
+            root_itself = registry.invoke(
+                "write_file", {"path": WORKSPACE_MOUNT, "content": "x"}
+            )
+            self.assertFalse(root_itself.ok)
+            self.assertIn(
+                f"drop the {WORKSPACE_MOUNT} prefix and pass '.'", root_itself.value["retry_hint"]
+            )
+            # An escape is a different mistake and gets the rule, not a repair.
+            for escape in ("/etc/passwd", f"{WORKSPACE_MOUNT}/../../etc/passwd"):
+                refused = registry.invoke("write_file", {"path": escape, "content": "x"})
+                self.assertFalse(refused.ok, escape)
+                self.assertNotIn("drop the", refused.value["retry_hint"], escape)
+            hidden = registry.invoke(
+                "write_file", {"path": "candidates/x/.dryrun/probe.py", "content": "x"}
+            )
+            self.assertFalse(hidden.ok)
+            self.assertEqual(hidden.value["error_type"], "path_error")
+            self.assertIn("scratch", hidden.value["retry_hint"])
+            # The hint has to name a location that actually works.
+            allowed = registry.invoke(
+                "write_file", {"path": "candidates/x/scratch/probe.py", "content": "x"}
+            )
+            self.assertTrue(allowed.ok, allowed.error)
+
 
 class TerminalToolWriteLockTest(unittest.TestCase):
     """Finishing locks the workspace: after a terminal tool succeeds, the
@@ -899,7 +1039,7 @@ class StrategyOrderContractTest(unittest.TestCase):
         from autotrade.environment.strategy import StrategySchedule
 
         daily = pd.DataFrame(
-            [{"trade_date": "20260102", "symbol": "000001.SZ", "open": 10.0, "close": 11.0}]
+            [{"trade_date": "20260102", "symbol": "000001.SZ", "open": 10.0, "close": 11.0, "pre_close": 11.0}]
         )
 
         def rogue(_context):
@@ -1074,10 +1214,23 @@ class ToolResultContractTest(unittest.TestCase):
                 self.assertTrue(listed.ok, (root, listed.error))
                 self.assertEqual(listed.value["path"], "")
                 self.assertIn(expected, listed.value["filenames"], root)
+            # `workspace/` is the other prefix the model carries over from shell,
+            # and the write tools already drop it under any root: the read tools
+            # must address the same file the same way.
+            prefixed = registry.invoke("read_file", {"root": "artifacts", "path": "workspace/x.txt"})
+            self.assertTrue(prefixed.ok, prefixed.error)
+            self.assertEqual(prefixed.value["path"], "x.txt")
+            # The bare name is not a prefix, so it must not silently become the
+            # selected root.
+            bare = registry.invoke("read_file", {"root": "artifacts", "path": "workspace"})
+            self.assertFalse(bare.ok)
+            self.assertEqual(bare.value["error_type"], "not_found")
             missing = registry.invoke("read_file", {"root": "artifacts", "path": "artifacts/nope.txt"})
             self.assertFalse(missing.ok)
             self.assertEqual(missing.value["error_type"], "not_found")
             self.assertIn("do not repeat the root name", missing.value["retry_hint"])
+            # A file under a different root needs that root, so the hint lists them.
+            self.assertIn("workspace", missing.value["retry_hint"])
             # The repair never widens the root: an unknown root and a path that
             # climbs out of one stay rejected.
             escaping = registry.invoke("glob", {"pattern": "*", "root": "artifacts", "path": "artifacts/.."})

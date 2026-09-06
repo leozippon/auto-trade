@@ -25,6 +25,7 @@ from pathlib import Path
 from statistics import NormalDist
 
 from autotrade.environment.replay.stats import TRADING_DAYS_PER_YEAR
+from autotrade.environment.replay.style import daily_returns_from_curve
 from autotrade.environment.runtime import (
     append_versioned_jsonl,
     read_versioned_jsonl,
@@ -392,6 +393,60 @@ def deflated_sharpe(
     )
     block["deflated_sharpe_probability"] = normal.cdf(statistic)
     return block
+
+
+def candidate_deflated_sharpe(
+    *,
+    observed_sharpe: object,
+    trial_sharpes: Sequence[object],
+    result_ref: str,
+) -> dict[str, object]:
+    """Deflated-Sharpe block of one completed Validation out of ``trial_sharpes``.
+
+    The single source for the Fold record's ``selection_statistics`` and for
+    the provisional block a session sees on each candidate row: both read the
+    candidate's daily returns from its own replay record and hand the same
+    inputs to :func:`deflated_sharpe`. A record that cannot be read at all is
+    reported as ``return_series_missing``, which is a different fact from a
+    window that is genuinely too short.
+    """
+
+    series = validation_daily_returns(result_ref)
+    block = deflated_sharpe(
+        observed_sharpe=observed_sharpe,
+        trial_sharpes=trial_sharpes,
+        returns=series if series is not None else (),
+    )
+    if series is None and block["unavailable_reason"] == "return_series_too_short":
+        block["unavailable_reason"] = "return_series_missing"
+    return block
+
+
+def validation_daily_returns(result_ref: str) -> list[float] | None:
+    """Daily returns of one completed Validation, read from its own record.
+
+    The equity curve lives in the replay's ``result.json``, never in the
+    summary, and it is the only place the return series exists. ``None`` says
+    the series could not be read at all -- an absent, unreadable or
+    curve-less record.
+    """
+
+    path = Path(str(result_ref or ""))
+    if path.is_dir():
+        path = path / "result.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    curve = payload.get("equity_curve") if isinstance(payload, dict) else None
+    if not isinstance(curve, list):
+        return None
+    return [
+        value
+        for _day, value in daily_returns_from_curve(
+            [row for row in curve if isinstance(row, Mapping)]
+        )
+    ]
 
 
 def _finite(value: object) -> float | None:

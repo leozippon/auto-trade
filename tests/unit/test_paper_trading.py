@@ -38,6 +38,7 @@ def _engine(tmp_path: Path, executor: _Executor) -> DailyPaperEngine:
             "symbol": "000001.SZ",
             "open": 10.0,
             "close": 11.0,
+            "pre_close": 11.0,
             "up_limit": 12.0,
             "down_limit": 8.0,
         }
@@ -158,10 +159,15 @@ def test_paper_refuses_to_skip_a_fixed_market_day_and_preserves_t_plus_one(tmp_p
             "symbol": "000001.SZ",
             "open": price,
             "close": price,
+            "pre_close": pre_close,
             "up_limit": price * 1.2,
             "down_limit": price * 0.8,
         }
-        for day, price in (("20260102", 10.0), ("20260105", 11.0), ("20260106", 12.0))
+        for day, price, pre_close in (
+            ("20260102", 10.0, 9.0),
+            ("20260105", 11.0, 10.0),
+            ("20260106", 12.0, 11.0),
+        )
     ])
     executor = RebalanceExecutor()
     engine = DailyPaperEngine(
@@ -201,7 +207,7 @@ def test_paper_persists_and_freezes_schedule_and_strategy_path(tmp_path: Path):
     engine = _engine(tmp_path, executor)
     engine.run_day("20260102")
     daily = pd.DataFrame([
-        {"trade_date": "20260102", "symbol": "000001.SZ", "open": 10.0, "close": 11.0}
+        {"trade_date": "20260102", "symbol": "000001.SZ", "open": 10.0, "close": 11.0, "pre_close": 11.0}
     ])
     state = json.loads((tmp_path / "paper/.paper_state.json").read_text(encoding="utf-8"))
     assert state["schema_version"] == 3
@@ -259,6 +265,7 @@ def test_paper_refits_every_day_from_an_empty_state_dir(tmp_path: Path):
             "symbol": "000001.SZ",
             "open": 10.0,
             "close": 11.0,
+            "pre_close": 11.0,
             "up_limit": 12.0,
             "down_limit": 8.0,
         }

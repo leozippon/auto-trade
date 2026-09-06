@@ -8,6 +8,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from autotrade.agent.runner import AgentSessionDeadlineExceeded
 from autotrade.environment.identity import AgentRefStore
 from autotrade.pipelines import (
     ArtifactRevision,
@@ -18,12 +19,12 @@ from autotrade.pipelines import (
     RollingExperimentPipeline,
     StepResult,
 )
-from autotrade.pipelines.agent_views import vs_parent_metrics
+from autotrade.pipelines.agent_views import fold_development_summary, vs_parent_metrics
 from autotrade.pipelines.config import (
     MetaSessionResult,
     fold_session_deadline_seconds,
 )
-from autotrade.pipelines.experiment import _null_seed, _session_budgets
+from autotrade.pipelines.experiment import _session_budgets, null_control_seed
 from autotrade.pipelines.folds import build_fold_schedule
 from autotrade.pipelines.hitl_state import fold_session_key
 from autotrade.pipelines.ledger import (
@@ -39,6 +40,7 @@ from autotrade.pipelines.ledger import (
     latest_fold_records,
     latest_heldout_records,
 )
+from autotrade.pipelines.meta_inputs import build_meta_fold_review_bundle
 from autotrade.pipelines.skills import install_workspace_skills
 
 
@@ -363,6 +365,11 @@ def test_meta_session_retains_only_the_authorized_test_diagnostic(tmp_path: Path
         "max_drawdown": -0.08,
     }
     assert summaries[0]["fold_id"].startswith("fold_ref_")
+    # A row written under the retired ``accept_reasons`` key still projects
+    # its hard-reject reasons under the current name.
+    assert summaries[0]["hard_reject_reasons"] == []
+    assert "accept_reasons" not in summaries[0]
+    assert reviews[0]["hard_reject_reasons"] == []
     # Each summary names the window it was replayed on, so a benchmark figure
     # is never read against a neighbouring node's period.
     assert summaries[0]["validation_period"] == "20251001..20251231"
@@ -1977,7 +1984,132 @@ def test_the_null_control_of_the_parent_and_of_the_frozen_node_reach_the_ledger(
     assert {call["start"] for call in calls} == {stepped.validation_start}
     assert len({call["seed"] for call in calls}) == 2
     # Stable across runs, so a re-run of the Fold draws the same null.
-    assert calls[0]["seed"] == _null_seed(stepped.fold_id, "parent")
+    assert calls[0]["seed"] == null_control_seed(stepped.fold_id, "parent")
+
+
+def test_a_null_control_the_session_already_drew_is_reused_at_freeze(tmp_path: Path):
+    """The session's ``null_control`` tool draws the frozen role's null through
+    the same backend; the freeze reuses that block instead of drawing again,
+    so the number the Agent read is the number the ledger records."""
+    pipeline, folds, ledger, _requests = _selection_fold_pipeline(tmp_path)
+    calls: list[dict[str, object]] = []
+    pipeline.evaluator.null_control = _canned_null(calls)
+    drawn = {"k": 500, "seed": 7, "excess_percentile": 0.31, "rejects_mean": 2.0}
+
+    def developer(request, *, selected: str, ranked: str):
+        summary = _candidate_summary(total_return=0.12, sharpe=0.5, excess=0.10, neutralized=0.06)
+        steps = (
+            StepResult("step_a", "revision_1", EvaluationResult(summary, "results/missing.json")),
+            StepResult("step_b", "revision_1", EvaluationResult(summary, "results/missing.json")),
+        )
+        return FoldSessionResult(
+            "conversation", steps, selected, null_controls={ranked: drawn}
+        )
+
+    pipeline.developer = lambda request: developer(request, selected="step_a", ranked="step_a")
+    outcome = pipeline.run_fold("epoch_001", folds[0], parent=None)
+    assert outcome.fold_status == "frozen"
+    assert ledger.read("fold")[0]["null_control"] == drawn
+    assert calls == []
+    # A frozen node the session did not rank is still drawn at freeze.
+    pipeline.developer = lambda request: developer(request, selected="step_b", ranked="step_a")
+    pipeline.run_fold("epoch_001", folds[0], parent=None)
+    assert len(calls) == 1
+    assert ledger.read("fold")[1]["null_control"]["excess_percentile"] == 0.94
+
+
+NO_EDGE_REASON = (
+    "every candidate: neutralized excess about 0, beats_parent=false, and the "
+    "new quarter negative; no edge to freeze"
+)
+
+
+def _abstaining_developer(request):
+    """A session that validated one candidate and finished with no_edge."""
+    steps = [
+        StepResult(
+            "step_a",
+            "revision_1",
+            EvaluationResult(
+                _candidate_summary(total_return=0.12, sharpe=0.5, excess=0.10, neutralized=0.06),
+                "results/missing.json",
+            ),
+        )
+    ]
+    if request.parent_control is not None:
+        steps.insert(
+            0,
+            StepResult("control", "revision_1", request.parent_control, parent_control=True),
+        )
+    return FoldSessionResult("conversation", tuple(steps), None, no_edge_reason=NO_EDGE_REASON)
+
+
+def test_a_parentless_no_edge_finish_records_baseline_missing_and_freezes_nothing(
+    tmp_path: Path,
+):
+    """The reviewed defect: a parentless Fold could reach baseline_missing only
+    through a timeout, so a session that found no edge nominated "the least-bad
+    node" and the Pipeline froze it. An explicit no-edge finish records the
+    fallback with the Agent's evidence, whatever the candidate's metrics say."""
+    pipeline, folds, ledger, _requests = _selection_fold_pipeline(tmp_path)
+    pipeline.developer = _abstaining_developer
+    outcome = pipeline.run_fold("epoch_001", folds[0], parent=None)
+    assert outcome.fold_status == "baseline_missing" and outcome.frozen is None
+    record = ledger.read("fold")[0]
+    assert record["finish_mode"] == "agent_no_edge"
+    assert record["finish_reason"] == "fold_finished"
+    assert record["no_edge_reason"] == NO_EDGE_REASON
+    assert record["selected_step_id"] is None
+    assert record["frozen_strategy_artifact_id"] is None
+    assert record["validation_result"] is None
+    assert record["null_control"] is None
+    # Nothing was rejected: the Agent abstained. New rows carry the renamed key only.
+    assert record["hard_reject_reasons"] == []
+    assert "accept_reasons" not in record
+    assert record["selection_statistics"]["candidates_evaluated"] == 1
+    assert record["selection_statistics"]["unavailable_reason"] == "no_nominated_candidate"
+
+
+def test_a_no_edge_finish_with_a_parent_keeps_it_and_is_not_read_as_a_timeout(
+    tmp_path: Path,
+):
+    pipeline, folds, ledger, _requests = _selection_fold_pipeline(tmp_path)
+    first = pipeline.run_fold("epoch_001", folds[0], parent=None)
+    assert first.frozen is not None
+    pipeline.evaluator.returns[first.frozen.artifact_id] = 0.06
+    pipeline.developer = _abstaining_developer
+    second = pipeline.run_fold("epoch_001", folds[1], parent=first.frozen)
+    assert second.fold_status == "no_update"
+    assert second.frozen is not None
+    assert second.frozen.artifact_id == first.frozen.artifact_id
+    record = ledger.read("fold")[1]
+    assert record["finish_mode"] == "agent_no_edge"
+    assert record["frozen_strategy_artifact_id"] == first.frozen.artifact_id
+    assert record["parent_control"]["status"] == "ok"
+    # The next Fold and the Meta review read the abstention and its evidence.
+    ref_store = AgentRefStore(pipeline.config.experiment_dir)
+    summary = fold_development_summary(record, ref_store=ref_store)
+    assert (summary["fold_status"], summary["finish_mode"]) == ("no_update", "agent_no_edge")
+    assert summary["no_edge_reason"] == NO_EDGE_REASON
+    assert summary["hard_reject_reasons"] == []
+    reviews, _sidecars = build_meta_fold_review_bundle([record], ref_store=ref_store)
+    assert reviews[0]["finish_mode"] == "agent_no_edge"
+    assert reviews[0]["no_edge_reason"] == NO_EDGE_REASON
+    # A session that ran out of time is a different fact, and reads as one.
+
+    def timing_out(request):
+        raise AgentSessionDeadlineExceeded(conversation_id="conversation")
+
+    pipeline.developer = timing_out
+    pipeline.run_fold("epoch_001", folds[1], parent=first.frozen)
+    timed_out = ledger.read("fold")[2]
+    assert (timed_out["fold_status"], timed_out["finish_mode"]) == (
+        "no_valid_backtest",
+        "no_nomination",
+    )
+    assert timed_out["finish_reason"] == "deadline_grace_exhausted"
+    assert timed_out["no_edge_reason"] is None
+    assert timed_out["hard_reject_reasons"] == ["no_complete_validation"]
 
 
 def test_a_failed_null_control_is_recorded_and_the_fold_still_freezes(tmp_path: Path):

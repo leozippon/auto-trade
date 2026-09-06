@@ -121,11 +121,16 @@ _VALIDATION_TOOLS = frozenset({"daily_backtest", "batch_validate"})
 # turn are then refused. That only holds when the batch runs in order, so the
 # backtest gate is sequential by name regardless of how its spec is declared.
 _PHASE_GATE_TOOLS = _VALIDATION_TOOLS
+# Host jobs that pause the session clock like a formal backtest take the same
+# writer barrier: the null control is a multi-minute host replay of a recorded
+# result, dispatched in order and never beside a child still writing.
+_WRITER_BARRIER_TOOLS = _PHASE_GATE_TOOLS | frozenset({"run_null_control"})
 _FOLD_TOOLS = frozenset(
     {
         "ask_user",
         "batch_validate",
         "daily_backtest",
+        "run_null_control",
         "agent",
         "finish_fold",
         "glob",
@@ -868,7 +873,9 @@ class AgentSessionRunner:
                 parameters = function["parameters"]
                 node_schema = parameters["properties"]["node_id"]
                 node_schema["enum"] = candidate_ids
-                parameters["required"] = ["node_id"]
+                if function["name"] != "finish_fold":
+                    # finish_fold may also abstain (outcome="no_edge") here.
+                    parameters["required"] = ["node_id"]
             return tuple(records)
         return self.tools.provider_tools()
 
@@ -889,6 +896,14 @@ class AgentSessionRunner:
         if call.name not in self._active_tool_names():
             return f"tool is unavailable in the current session phase: {call.name}"
         node_id = call.arguments.get("node_id")
+        if (
+            call.name == "finish_fold"
+            and call.arguments.get("outcome") == "no_edge"
+            and not node_id
+        ):
+            # Abstaining is a legal finish in the finalize window too: the
+            # tool itself records why nothing is frozen.
+            return ""
         candidates = {
             str(candidate["node_id"]) for candidate in self._finalization_candidates()
         }
@@ -896,6 +911,11 @@ class AgentSessionRunner:
             return (
                 f"{call.name} requires one node_id from the current run's "
                 "complete Validation candidates"
+                + (
+                    ' (or outcome="no_edge" with a reason)'
+                    if call.name == "finish_fold"
+                    else ""
+                )
             )
         return ""
 
@@ -1016,12 +1036,15 @@ class AgentSessionRunner:
             "observation": "fold_hard_finalization",
             "remaining_inference_seconds": round(max(remaining, 0.0), 6),
             "selection_contract": (
-                "Choose one listed complete Validation node yourself. The Runner "
-                "does not rank or auto-submit candidates. Call finish_fold with "
-                "its node_id; step_rollback is optional when the workspace should "
-                "be restored first. passes_hard_rules=false means the Pipeline "
-                "will not freeze that node; the parent_control entry, when "
-                "listed, is how this Fold keeps the parent."
+                "Choose one listed complete Validation node yourself, or finish "
+                'with outcome="no_edge" and a reason when no listed node proved '
+                "an edge (nothing is frozen; the parent, when there is one, stays "
+                "the lineage head). The Runner does not rank or auto-submit "
+                "candidates. Call finish_fold with its node_id; step_rollback is "
+                "optional when the workspace should be restored first. "
+                "passes_hard_rules=false means the Pipeline will not freeze that "
+                "node; the parent_control entry, when listed, is how this Fold "
+                "keeps the parent."
             ),
             "complete_validation_candidates": self._finalization_candidates(),
             "available_tools": sorted(self._finalization_tool_names()),
@@ -1058,15 +1081,17 @@ class AgentSessionRunner:
                     "ok": False,
                     "error": "Agent session deadline reached before tool dispatch",
                 }
-            if call.name in _TERMINAL_TOOLS or call.name in _PHASE_GATE_TOOLS:
-                # Barrier: a formal backtest or finish must not overlap a
-                # developer child that may still be writing the workspace. A
-                # finish waits for every child (the close discards their
-                # reports); a backtest waits only for children whose role can
-                # write, so a read-only audit never delays a ready round, and
-                # refuses rather than snapshot candidates a writer may still
-                # be changing.
-                self._wait_subagent_jobs(writers_only=call.name in _PHASE_GATE_TOOLS)
+            if call.name in _TERMINAL_TOOLS or call.name in _WRITER_BARRIER_TOOLS:
+                # Barrier: a formal backtest, null control or finish must not
+                # overlap a developer child that may still be writing the
+                # workspace. A finish waits for every child (the close discards
+                # their reports); a backtest waits only for children whose role
+                # can write, so a read-only audit never delays a ready round,
+                # and refuses rather than snapshot candidates a writer may
+                # still be changing.
+                self._wait_subagent_jobs(
+                    writers_only=call.name in _WRITER_BARRIER_TOOLS
+                )
                 if call.name in _TERMINAL_TOOLS:
                     in_flight = self._in_flight_subagent_error()
                     if in_flight:
@@ -1082,8 +1107,9 @@ class AgentSessionRunner:
                             "ok": False,
                             "error_type": "subagent_writers_in_flight",
                             "error": (
-                                "a formal backtest cannot start while a child "
-                                "that can write the workspace is still running; "
+                                "a formal backtest or null control cannot start "
+                                "while a child that can write the workspace is "
+                                "still running; "
                                 "wait for its subagent_completed or message it "
                                 "to report now"
                             ),

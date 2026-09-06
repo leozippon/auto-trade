@@ -20,6 +20,9 @@ from .base import ToolError, ToolResult, ToolSpec
 # round cannot fit.
 FINISH_FOLD_EARLY_STOP_BUDGET_FRACTION = 1 / 3
 EARLY_STOP_REASON_MAX_CHARS = 500
+# A finish that nominates nothing must cite the evidence that showed no edge;
+# a one-word reason is not evidence.
+NO_EDGE_REASON_MIN_CHARS = 40
 
 # The Pipeline's hard acceptance rules, handed over as a callable that maps one
 # node's recorded metrics to its hard-reject reasons (empty = passes). The
@@ -128,27 +131,57 @@ def _strip_docstrings(tree: ast.AST) -> None:
 class FinishFoldTool:
     spec = ToolSpec(
         "finish_fold",
-        "Finish this Fold by nominating one complete Validation node of the current "
-        "run (its node_id comes from daily_backtest or a batch_validate row). Pass "
-        "node_id explicitly: after a batch_validate round the tree position is the "
-        "round's parent, so a bare call there is refused instead of silently keeping "
-        "the parent. Outside the deadline window a voluntary finish that leaves more "
-        "than a third of the backtest budget unused must carry early_stop_reason "
-        "(which hypotheses stay untested and why they are not worth the remaining "
-        "budget); the reason is recorded with the Fold result for the Meta review. "
-        "The nominated node is also checked against the Pipeline's hard acceptance "
-        "rules (the acceptance_rules fact marks which rules are hard and which only "
-        "warn): outside the deadline "
-        "window a breaching node is refused while another recorded node still passes, "
-        "and the refusal lists which ones do; inside the window, or when nothing "
-        "recorded passes, the nomination is accepted and the result states that the "
-        "Pipeline will not freeze it. The call starts only after every background "
+        "Finish this Fold. outcome=\"select\" (the default) nominates one complete "
+        "Validation node of the current run by node_id (from daily_backtest or a "
+        "batch_validate row); pass node_id explicitly: after a batch_validate round "
+        "the tree position is the round's parent, so a bare call there is refused "
+        "instead of silently keeping the parent, and keeping the parent is done by "
+        "nominating the parent_control node. outcome=\"no_edge\" nominates nothing "
+        "(node_id must be absent) and requires reason, citing the evidence that no "
+        "candidate proved an edge; the Fold then records no_update with a parent "
+        "(the parent stays the lineage head) or baseline_missing without one. Use "
+        "it instead of nominating a node you do not want frozen: the Pipeline "
+        "freezes every nomination whose metrics are finite. Outside the deadline "
+        "window a voluntary finish that leaves more than a third of the backtest "
+        "budget unused must also carry early_stop_reason (which hypotheses stay "
+        "untested and why they are not worth the remaining budget). Both reasons "
+        f"are capped at {EARLY_STOP_REASON_MAX_CHARS} characters -- write them "
+        "compactly, an over-long one is refused -- and are recorded with the Fold "
+        "result for the Meta review. A nominated node "
+        "is checked against the Pipeline's hard acceptance rules (the "
+        "acceptance_rules fact marks which rules are hard and which only warn): "
+        "outside the deadline window a breaching node is refused while another "
+        "recorded node still passes, and the refusal lists which ones do; inside "
+        "the window, or when nothing recorded passes, the nomination is accepted "
+        "and the result states that the Pipeline will not freeze it. Every accepted "
+        "call returns pipeline_fold_status and a one-line pipeline_outcome saying "
+        "what the Pipeline will freeze. The call starts only after every background "
         "sub-agent has finished, is refused while one is still running, and once it "
         "succeeds the remaining tool calls of this assistant turn are cancelled.",
         {
             "type": "object",
             "properties": {
                 "node_id": {"type": "string", "minLength": 1, "maxLength": 500},
+                "outcome": {
+                    "type": "string",
+                    "enum": ["select", "no_edge"],
+                    "description": (
+                        "select (default): freeze node_id. no_edge: nominate "
+                        "nothing; requires reason and no node_id."
+                    ),
+                },
+                "reason": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": EARLY_STOP_REASON_MAX_CHARS,
+                    "description": (
+                        "outcome=\"no_edge\" only: the evidence that no candidate "
+                        "proved an edge (neutralized excess, vs_parent.beats_parent, "
+                        "the new-quarter sub_window, any null_control or deflated "
+                        f"Sharpe figure read); {NO_EDGE_REASON_MIN_CHARS}-"
+                        f"{EARLY_STOP_REASON_MAX_CHARS} characters."
+                    ),
+                },
                 "early_stop_reason": {
                     "type": "string",
                     "minLength": 1,
@@ -156,7 +189,8 @@ class FinishFoldTool:
                     "description": (
                         "Why this Fold stops while more than a third of its backtest "
                         "budget remains: the untested hypotheses and why the remaining "
-                        "budget is better left unused. Required only in that case."
+                        "budget is better left unused. Required only in that case; at "
+                        f"most {EARLY_STOP_REASON_MAX_CHARS} characters."
                     ),
                 },
             },
@@ -203,6 +237,17 @@ class FinishFoldTool:
                 raise ValueError(f"parent strategy structure is invalid: {exc}") from exc
 
     def invoke(self, arguments: Mapping[str, object]) -> ToolResult:
+        if str(arguments.get("outcome") or "select") == "no_edge":
+            return self._finish_no_edge(arguments)
+        if str(arguments.get("reason") or "").strip():
+            raise ToolError(
+                'finish_fold: reason belongs to outcome="no_edge"; a nomination '
+                "explains an early finish with early_stop_reason instead",
+                retry_hint=(
+                    'finish_fold({"node_id": ...}) or '
+                    'finish_fold({"outcome": "no_edge", "reason": "<evidence>"})'
+                ),
+            )
         node_id = self._resolve_node_id(arguments)
         try:
             node = self.tree.get_node(node_id)
@@ -215,7 +260,7 @@ class FinishFoldTool:
         # Ahead of the working-copy check: a node the Pipeline would reject has
         # to be replaced rather than restored, so the refusal that names the
         # passing nodes must not cost a step_rollback to the wrong one first.
-        acceptance = self._check_hard_acceptance(node_id, node)
+        hard_reject_reasons = self._check_hard_acceptance(node_id, node)
         # The working-copy check comes before the budget gates so a winner
         # nominated without step_rollback costs one refusal, not two.
         self._require_current_matches_revision(node_id)
@@ -230,6 +275,7 @@ class FinishFoldTool:
                 "node_id": node_id,
                 "revision_id": str(node["revision_id"]),
                 "status": "fold_finished",
+                "outcome": "select",
                 # Candidate selection, AcceptanceRules and the final freeze are
                 # the Pipeline's, not the Agent's: finishing only nominates.
                 "fold_status": "pending_pipeline_review",
@@ -237,33 +283,140 @@ class FinishFoldTool:
                 # The Agent's own account of an early finish and the budget it
                 # left, for the fold ledger and the Meta review.
                 **early_stop,
-                # Present only when the Pipeline will reject this nomination.
-                **acceptance,
+                # What the Pipeline will do with this nomination, in its words.
+                **self._nomination_verdict(node_id, node, hard_reject_reasons),
             },
             finish=True,
         )
 
+    def _finish_no_edge(self, arguments: Mapping[str, object]) -> ToolResult:
+        """Finish without a nomination: no candidate proved an edge.
+
+        The Pipeline freezes every nomination whose metrics are finite, so a
+        session that found nothing worth freezing has to say so here instead
+        of nominating "the least bad node"; the reason is recorded with the
+        Fold result so the Meta review reads the evidence, not a guess. The
+        inherited parent, when there is one, stays the lineage head.
+        """
+
+        if str(arguments.get("node_id") or ""):
+            raise ToolError(
+                'finish_fold: outcome="no_edge" nominates nothing, so node_id must be '
+                "absent; to freeze a node call finish_fold with node_id alone, to keep "
+                "the parent nominate the parent_control node",
+                retry_hint='finish_fold({"outcome": "no_edge", "reason": "<evidence>"})',
+            )
+        reason = str(arguments.get("reason") or "").strip()
+        if len(reason) < NO_EDGE_REASON_MIN_CHARS:
+            raise ToolError(
+                'finish_fold: outcome="no_edge" requires reason (between '
+                f"{NO_EDGE_REASON_MIN_CHARS} and {EARLY_STOP_REASON_MAX_CHARS} chars) "
+                "citing the evidence that no candidate proved an edge: the "
+                "neutralized excess, vs_parent.beats_parent, the new-quarter "
+                "sub_window, and any null_control or deflated Sharpe figure read; "
+                "it is recorded with the Fold result for the Meta review",
+                retry_hint='finish_fold({"outcome": "no_edge", "reason": "<evidence>"})',
+            )
+        candidates = self._session_candidates()
+        if not candidates:
+            raise ToolError(
+                'finish_fold: outcome="no_edge" needs at least one complete '
+                "Validation of this session to have found no edge in; run "
+                "daily_backtest or batch_validate first"
+            )
+        early_stop = self._require_early_stop_reason(arguments)
+        return ToolResult(
+            True,
+            value={
+                "status": "fold_finished",
+                "outcome": "no_edge",
+                "reason": reason,
+                "fold_status": "pending_pipeline_review",
+                "write_locked": True,
+                "candidates_evaluated": len(candidates),
+                **early_stop,
+                "pipeline_fold_status": self._fallback_status(),
+                "pipeline_will_freeze": False,
+                "pipeline_outcome": f"No candidate frozen; {self._fallback_sentence()}",
+            },
+            finish=True,
+        )
+
+    def _session_candidates(self) -> list[str]:
+        """Complete Validations of this session that are the Agent's own, not
+        the host's parent control."""
+
+        return [
+            str(node["node_id"])
+            for node in self.tree.nodes()
+            if node_in_session(node, fold_id=self.fold_id, run_id=self.run_id)
+            and node.get("complete_validation")
+            and node.get("revision_id")
+            and not (
+                isinstance(node.get("metadata"), Mapping)
+                and node["metadata"].get("parent_control")
+            )
+        ]
+
+    def _nomination_verdict(
+        self, node_id: str, node: Mapping[str, object], reasons: list[str]
+    ) -> dict[str, object]:
+        """The fold status the Pipeline will record for this nomination, and
+        one line saying what it will freeze: the session's early_stop_reason
+        and the Meta review then read what the ledger reads."""
+
+        label = f"{node_id} ({node.get('result_name') or 'validation'})"
+        if reasons:
+            return {
+                "acceptance_hard_reject_reasons": reasons,
+                "pipeline_fold_status": self._fallback_status(),
+                "pipeline_will_freeze": False,
+                "pipeline_outcome": (
+                    f"No candidate frozen: {label} fails the Pipeline's hard "
+                    f"acceptance rules ({', '.join(reasons)}); "
+                    f"{self._fallback_sentence()}"
+                ),
+            }
+        return {
+            "pipeline_fold_status": "frozen",
+            "pipeline_will_freeze": True,
+            "pipeline_outcome": f"Fold will freeze {label} as this Fold's strategy",
+        }
+
+    def _fallback_status(self) -> str:
+        # Without a node to freeze the Pipeline falls back to the inherited
+        # parent, or -- with no parent to fall back to -- records the Fold
+        # with no frozen artifact at all.
+        return "no_update" if self._parent_structure is not None else "baseline_missing"
+
+    def _fallback_sentence(self) -> str:
+        if self._parent_structure is not None:
+            return "the inherited parent stays the lineage head (no_update)"
+        return (
+            "there is no parent, so the Fold records baseline_missing and the "
+            "next Fold starts from the template again"
+        )
+
     def _check_hard_acceptance(
         self, node_id: str, node: Mapping[str, object]
-    ) -> dict[str, object]:
-        """Hard acceptance verdict for the nominated node.
+    ) -> list[str]:
+        """Hard-reject reasons of the nominated node; empty when it passes or
+        no rules are wired.
 
-        Empty when the node passes, or when no rules are wired. A breach is
-        refused while another recorded node passes and another round still
-        fits, so the session can select that one or run a risk-reduced round
-        instead of learning in the next Meta session that its Fold froze
-        nothing. Inside the deadline window, or with nothing recorded that
-        passes, the nomination is accepted and the record states what the
-        Pipeline will do with it — the session's ``early_stop_reason`` and the
-        Meta review then read the same outcome the fold ledger will carry.
+        A breach is refused while another recorded node passes and another
+        round still fits, so the session can select that one or run a
+        risk-reduced round instead of learning in the next Meta session that
+        its Fold froze nothing. Inside the deadline window, or with nothing
+        recorded that passes, the nomination is accepted and the reasons ride
+        into the result's verdict.
         """
 
         check = self._hard_rule_check
         if check is None:
-            return {}
+            return []
         reasons = [str(reason) for reason in check(_node_metrics(node))]
         if not reasons:
-            return {}
+            return []
         candidates = self._hard_rule_candidates(check)
         passing = [
             row
@@ -296,18 +449,7 @@ class FinishFoldTool:
                     "candidates": candidates,
                 },
             )
-        return {
-            "acceptance_hard_reject_reasons": reasons,
-            # The fold status the Pipeline will record, in its own words: it
-            # falls back to the inherited parent, or — with no parent to fall
-            # back to — records the Fold with no frozen artifact at all. The
-            # Agent's early_stop_reason and the Meta review then read what the
-            # ledger reads.
-            "pipeline_fold_status": (
-                "no_update" if self._parent_structure is not None else "baseline_missing"
-            ),
-            "pipeline_will_freeze": False,
-        }
+        return reasons
 
     def _hard_rule_candidates(self, check: HardRuleCheck) -> list[dict[str, object]]:
         """Every complete Validation of this session with its hard-rule verdict.
@@ -517,6 +659,7 @@ class FinishFoldTool:
 __all__ = [
     "EARLY_STOP_REASON_MAX_CHARS",
     "FINISH_FOLD_EARLY_STOP_BUDGET_FRACTION",
+    "NO_EDGE_REASON_MIN_CHARS",
     "FinishFoldTool",
     "FoldBudgetStatus",
     "HardRuleCheck",

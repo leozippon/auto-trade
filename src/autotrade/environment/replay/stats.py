@@ -63,6 +63,9 @@ class ReplayResult:
     executions: tuple[dict[str, object], ...]
     inference_dates: tuple[str, ...]
     pending_orders: tuple[dict[str, object], ...]
+    # Ex-date settlements the Broker applied (``CorporateAction.to_record``):
+    # the only quantity or cash changes that are not fills.
+    corporate_actions: tuple[dict[str, object], ...] = ()
     # Replay-loop wall clock. Backend setup phases are merged in by the
     # evaluation backend, which is the only component that sees them.
     wall_seconds: float = 0.0
@@ -72,6 +75,7 @@ class ReplayResult:
         return {
             "equity_curve": list(self.equity_curve),
             "executions": list(self.executions),
+            "corporate_actions": list(self.corporate_actions),
             "inference_dates": list(self.inference_dates),
             "pending_orders": list(self.pending_orders),
             "stats": compute_return_stats(self, start=start, end=end),

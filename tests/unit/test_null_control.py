@@ -48,6 +48,8 @@ def _frame() -> pd.DataFrame:
                     "trade_date": day,
                     "open": price,
                     "close": price * 1.01,
+                    # The previous day's close: no ex-date anywhere in the window.
+                    "pre_close": (10.0 + 2.0 * index + 0.1 * (offset - 1)) * 1.01,
                     "up_limit": price * 1.5,
                     "down_limit": price * 0.5,
                     "is_suspended": False,
@@ -101,8 +103,9 @@ def test_trade_skeleton_pairs_fills_fifo_and_keeps_the_open_position():
         _fill("000001.SZ", "sell", 700, DAYS[6], "15:00", 13.0),
     ]
 
-    skeleton = trade_skeleton(executions)
+    skeleton, unpaired = trade_skeleton(executions)
 
+    assert unpaired == 0
     assert [
         (trip.symbol, trip.quantity, trip.price, trip.entry_date, trip.exit_date)
         for trip in skeleton
@@ -117,19 +120,23 @@ def test_trade_skeleton_pairs_fills_fifo_and_keeps_the_open_position():
     assert skeleton[0].exit_at == _at(DAYS[4], "15:00")
 
 
-def test_trade_skeleton_rejects_a_sell_without_a_matching_buy():
+def test_trade_skeleton_counts_sold_shares_no_filled_buy_accounts_for():
+    """Shares an ex-date settlement created are sold without a buy of their
+    own: they are not a round trip, only counted, so the null stays available."""
     executions = [
         _fill("000001.SZ", "buy", 500, DAYS[0], "09:30", 10.0),
         _fill("000001.SZ", "sell", 900, DAYS[2], "15:00", 11.0),
     ]
 
-    with pytest.raises(ValueError, match="exceeds its filled buys"):
-        trade_skeleton(executions)
+    skeleton, unpaired = trade_skeleton(executions)
+
+    assert [(trip.quantity, trip.exit_date) for trip in skeleton] == [(500, DAYS[2])]
+    assert unpaired == 400
 
 
 def test_null_draws_replace_each_name_inside_its_size_decile():
     frame = _frame()
-    skeleton = trade_skeleton(_observed_result().executions)
+    skeleton, _unpaired = trade_skeleton(_observed_result().executions)
     assert [(trip.symbol, trip.entry_date, trip.exit_date) for trip in skeleton] == [
         ("000001.SZ", DAYS[2], DAYS[9]),
         ("600001.SH", DAYS[4], None),
@@ -229,7 +236,7 @@ def test_a_round_trip_too_small_to_buy_a_lot_is_counted_not_hidden():
         schedule=StrategySchedule("day", "08:30"),
         profile=BrokerProfile(),
     )
-    skeleton = trade_skeleton(result.executions)
+    skeleton, _unpaired = trade_skeleton(result.executions)
     assert [trip.quantity for trip in skeleton] == [900, 100]
 
     block = run_null_control(
@@ -287,6 +294,7 @@ def test_run_null_control_replays_scripted_nulls_and_reports_one_block():
     assert 0.0 <= block["excess_percentile"] <= 1.0
     assert block["rejects_mean"] == 0.0
     assert block["dropped_trips_mean"] == 0.0
+    assert block["unpaired_sell_shares"] == 0
     assert "step" not in block
 
     assert (

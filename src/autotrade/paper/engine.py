@@ -75,6 +75,7 @@ class DailyPaperEngine:
         *,
         strategy_path: str | Path,
         daily: pd.DataFrame | str | Path,
+        corporate_actions: pd.DataFrame | None = None,
         state_root: str | Path = "data/trading/paper",
         models_dir: str | Path | None = None,
         strategy_revision: str | None = None,
@@ -93,7 +94,11 @@ class DailyPaperEngine:
         frame = pd.read_parquet(daily) if isinstance(daily, (str, Path)) else daily
         if not isinstance(frame, pd.DataFrame):
             raise TypeError("daily must be a DataFrame or parquet path")
-        self.market = DailyMarketData(frame)
+        # The ex-date table of the same replay slot: the PIT launcher always
+        # passes it; None is only for the single-file daily backend and unit
+        # tests, where a cash dividend going ex today cannot be credited (its
+        # price reset is still settled).
+        self.market = DailyMarketData(frame, corporate_actions)
         self.state_root = Path(state_root).resolve()
         # The activated revision's frozen models/ tree, mounted read-only for
         # both fit and generate_orders exactly as a replay mounts it.
@@ -260,7 +265,19 @@ class DailyPaperEngine:
             "last_error": "",
         })
         broker = self._restore_broker(state)
-        broker.open_day(trade_date)
+        broker.open_day(
+            trade_date,
+            self.market.bars_for_day(trade_date),
+            self.market.cash_dividends_for_day(trade_date),
+        )
+        # Opening the day is the only step that changes the account without a
+        # fill, so its ex-date settlements are journaled like executions.
+        for action in broker.corporate_actions:
+            self._queue_emission(
+                state,
+                f"corporate_actions_{trade_date}.jsonl",
+                {"kind": "corporate_action", **action.to_record()},
+            )
         self._checkpoint(state, broker, self._restore_orders(state))
         return state
 

@@ -77,6 +77,7 @@ def test_real_sandbox_daily_evaluation_reads_parquet_with_default_limits(
                 "period_end": "20240103",
                 "available_from": "2024-01-01T23:59:59+08:00",
                 "raw_generation": {"generation_id": "generation_sandbox"},
+                "domains": {"corporate_actions": {"rows": 0}},
             }
         ),
         encoding="utf-8",
@@ -155,6 +156,7 @@ def test_pit_daily_evaluation_rolls_all_domains_once_without_loading_future_minu
                 "period_end": "20240103",
                 "available_from": "2024-01-01T23:59:59+08:00",
                 "raw_generation": {"generation_id": "generation_test"},
+                "domains": {"corporate_actions": {"rows": 0}},
             }
         ),
         encoding="utf-8",
@@ -276,6 +278,7 @@ def test_first_month_inference_can_have_empty_bars_with_long_pit_daily_history(
             "ts_code": ["600000.SH"] * len(history_days),
             "open": [10.0] * len(history_days),
             "close": [10.0] * len(history_days),
+            "pre_close": [10.0] * len(history_days),
             "available_at": [
                 f"{stamp.strftime('%Y-%m-%d')}T17:30:00+08:00" for stamp in history_days
             ],
@@ -287,12 +290,14 @@ def test_first_month_inference_can_have_empty_bars_with_long_pit_daily_history(
             "ts_code": ["600000.SH", "600000.SH"],
             "open": [10.0, 10.0],
             "close": [10.0, 10.0],
+            "pre_close": [10.0, 10.0],
             "available_at": [
                 "2024-02-01T17:30:00+08:00",
                 "2024-02-02T17:30:00+08:00",
             ],
         }
     ).to_parquet(replay / "daily.parquet", index=False)
+    _write_corporate_actions(replay)
     (snapshot / "manifest.json").write_text(
         json.dumps(
             {
@@ -313,6 +318,7 @@ def test_first_month_inference_can_have_empty_bars_with_long_pit_daily_history(
                 "period_end": "20240202",
                 "available_from": "2024-01-31T23:59:59+08:00",
                 "raw_generation": {"generation_id": "generation_history"},
+                "domains": {"corporate_actions": {"rows": 0}},
             }
         ),
         encoding="utf-8",
@@ -399,6 +405,7 @@ def test_evaluation_summary_carries_the_whole_agent_visible_field_set(
                 "period_end": "20240103",
                 "available_from": "2024-01-01T23:59:59+08:00",
                 "raw_generation": {"generation_id": "generation_timing"},
+                "domains": {"corporate_actions": {"rows": 0}},
             }
         ),
         encoding="utf-8",
@@ -496,6 +503,144 @@ def test_evaluation_summary_carries_the_whole_agent_visible_field_set(
         + summary["nl_search_calls"]
         + summary["nl_evidence_gated_calls"]
     )
+
+
+def test_pit_evaluation_credits_a_cash_dividend_from_the_slot_table(
+    tmp_path: Path,
+) -> None:
+    """The formal replay settles both ex-date legs from the slot.
+
+    ``000001.SZ`` goes ex a 0.5 CNY cash dividend on the second day: the bar's
+    ``pre_close`` drops by exactly the dividend, so the share count stays and
+    the slot's ``corporate_actions.parquet`` cash is credited. The table is
+    Broker truth only and never becomes an as-of domain; a slot whose manifest
+    declares it but lacks the file is refused.
+    """
+    snapshot, replay = _pit_slot_paths(
+        tmp_path, decision="dividend", replay="dividend", generation_id="generation_dividend"
+    )
+
+    def _daily(rows: list[tuple[str, float, float]]) -> pd.DataFrame:
+        frame = []
+        for day, pre_close, close in rows:
+            stamp = f"{day[:4]}-{day[4:6]}-{day[6:]}T17:30:00+08:00"
+            frame.append(
+                {
+                    "trade_date": day, "ts_code": "000001.SZ", "open": pre_close, "close": close,
+                    "pre_close": pre_close, "up_limit": round(pre_close * 1.1, 2),
+                    "down_limit": round(pre_close * 0.9, 2), "available_at": stamp,
+                }
+            )
+            # A second, action-free name: the null control needs a replacement.
+            frame.append(
+                {
+                    "trade_date": day, "ts_code": "000002.SZ", "open": 5.0, "close": 5.0,
+                    "pre_close": 5.0, "up_limit": 5.5, "down_limit": 4.5, "available_at": stamp,
+                }
+            )
+        return pd.DataFrame(frame)
+
+    _daily([("20240101", 10.0, 10.0)]).to_parquet(snapshot / "daily.parquet", index=False)
+    _daily([("20240102", 10.0, 10.0), ("20240103", 9.5, 9.5)]).to_parquet(
+        replay / "daily.parquet", index=False
+    )
+    pd.DataFrame(
+        [
+            {
+                "ts_code": "000001.SZ", "ex_date": "20240103", "record_date": "20240102",
+                "pay_date": "20240103", "div_listdate": "", "cash_per_share": 0.5,
+                "stock_per_share": 0.0,
+            }
+        ]
+    ).to_parquet(replay / "corporate_actions.parquet", index=False)
+    (snapshot / "manifest.json").write_text(
+        json.dumps(
+            {
+                "snapshot_id": "snap_dividend",
+                "kind": "decision_input",
+                "raw_generation": {"generation_id": "generation_dividend"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    replay_manifest = {
+        "snapshot_id": "replay_dividend",
+        "kind": "replay_slot",
+        "label": "valid",
+        "period_start": "20240102",
+        "period_end": "20240103",
+        "available_from": "2024-01-01T23:59:59+08:00",
+        "raw_generation": {"generation_id": "generation_dividend"},
+        "domains": {"daily": {"rows": 4}, "corporate_actions": {"rows": 1}},
+    }
+    (replay / "manifest.json").write_text(json.dumps(replay_manifest), encoding="utf-8")
+    chmod_tree(snapshot, file_mode=0o444, dir_mode=0o555)
+    revision = tmp_path / "revision"
+    revision.mkdir()
+    (revision / "main.py").write_text(
+        """def generate_orders(context):
+    if context.account.positions:
+        return []
+    return [{
+        "symbol": "000001.SZ",
+        "action": "buy",
+        "quantity": 100,
+        "execute_at": context.inference_at.replace(hour=15, minute=0).isoformat(),
+    }]
+""",
+        encoding="utf-8",
+    )
+    request = EvaluationRequest(
+        ArtifactRevision("revision_dividend", revision),
+        SnapshotBundle(
+            "snap_dividend", str(snapshot), str(replay), generation_id="generation_dividend"
+        ),
+        "valid",
+        "20240102",
+        "20240103",
+        StrategySchedule("day", "09:28"),
+        BrokerProfile(initial_cash=100_000),
+    )
+    backend = PITDailyEvaluationBackend(tmp_path / "results", execution_mode="trusted")
+    result = backend.evaluate(request)
+
+    record = json.loads(Path(result.result_ref).read_text(encoding="utf-8"))
+    first, second = record["equity_curve"]
+    assert first["positions"] == {"000001.SZ": 100}
+    assert second["positions"] == {"000001.SZ": 100}
+    assert second["cash"] == pytest.approx(first["cash"] + 100 * 0.5)
+    [action] = record["corporate_actions"]
+    assert (action["trade_date"], action["symbol"]) == ("20240103", "000001.SZ")
+    assert (action["quantity_before"], action["quantity_after"]) == (100, 100)
+    assert action["cash_per_share"] == 0.5
+    assert action["cash_credit"] == pytest.approx(50.0)
+    assert "corporate_actions" not in record["pit"]["asof_domains"]
+
+    # The null control replays its draws through the same slot table.
+    block = backend.null_control(
+        result.result_ref,
+        start="20240102",
+        end="20240103",
+        profile=BrokerProfile(initial_cash=100_000),
+        schedule=StrategySchedule("day", "09:28"),
+        seed=1,
+        k=1,
+    )
+    assert block["k"] == 1 and block["rejects_mean"] == 0.0
+
+    (replay / "corporate_actions.parquet").unlink()
+    with pytest.raises(FileNotFoundError, match="declares corporate_actions"):
+        PITDailyEvaluationBackend(tmp_path / "results_missing", execution_mode="trusted").evaluate(
+            request
+        )
+    # A slot cached before ex-dates were settled declares no such domain: it
+    # is refused as stale rather than replayed without dividends.
+    del replay_manifest["domains"]["corporate_actions"]
+    (replay / "manifest.json").write_text(json.dumps(replay_manifest), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="must be rebuilt"):
+        PITDailyEvaluationBackend(tmp_path / "results_stale", execution_mode="trusted").evaluate(
+            request
+        )
 
 
 def test_research_pit_provider_reuses_completed_semantic_views(tmp_path: Path) -> None:
@@ -1298,6 +1443,18 @@ def _stash_manifests(
     )
 
 
+def _write_corporate_actions(replay: Path, rows: list[dict[str, object]] | None = None) -> None:
+    """The slot's ex-date table; every built slot carries it, dividends or not."""
+
+    columns = [
+        "ts_code", "ex_date", "record_date", "pay_date", "div_listdate",
+        "cash_per_share", "stock_per_share",
+    ]
+    pd.DataFrame(rows or [], columns=columns).to_parquet(
+        replay / "corporate_actions.parquet", index=False
+    )
+
+
 def _write_domains(snapshot: Path, replay: Path) -> None:
     pd.DataFrame(
         {
@@ -1305,6 +1462,7 @@ def _write_domains(snapshot: Path, replay: Path) -> None:
             "ts_code": ["000001.SZ"],
             "open": [10.0],
             "close": [10.0],
+            "pre_close": [10.0],
             "available_at": ["2024-01-01T17:30:00+08:00"],
         }
     ).to_parquet(snapshot / "daily.parquet", index=False)
@@ -1314,9 +1472,11 @@ def _write_domains(snapshot: Path, replay: Path) -> None:
             "ts_code": ["000001.SZ", "000001.SZ"],
             "open": [10.0, 10.0],
             "close": [10.0, 10.0],
+            "pre_close": [10.0, 10.0],
             "available_at": ["2024-01-02T17:30:00+08:00", "2024-01-03T17:30:00+08:00"],
         }
     ).to_parquet(replay / "daily.parquet", index=False)
+    _write_corporate_actions(replay)
     minute_columns = {
         "trade_date": ["20240101"],
         "ts_code": ["000001.SZ"],
@@ -1555,6 +1715,7 @@ def test_asof_view_is_a_directory_per_domain_and_truncates_to_max_days(
                 "period_end": "20240103",
                 "available_from": "2024-01-01T23:59:59+08:00",
                 "raw_generation": {"generation_id": "generation_layout"},
+                "domains": {"corporate_actions": {"rows": 0}},
             }
         ),
         encoding="utf-8",

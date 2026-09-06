@@ -105,18 +105,22 @@ class DailyReplayEngine:
         initial_equity = self.broker.profile.initial_cash
         started = perf_counter()
         for trade_date in market.trade_dates:
-            self.broker.open_day(trade_date)
             day = date.fromisoformat(f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:8]}")
             day_end = datetime.combine(day, time.max, tzinfo=CN_TZ)
             inference_at = self.schedule.at(trade_date)
             bars = market.bars_for_day(trade_date)
             due = self.schedule.is_due(trade_date, previous_trade_date)
 
-            # Existing orders at or before the scheduled inference point settle
-            # first, so the strategy receives the account that actually existed
-            # at its decision time. Newly returned orders can still request that
-            # exact timestamp and are handled by the end-of-day pass below.
+            # The day opens with the T+1 release and any ex-date settlement of
+            # held names, then existing orders at or before the scheduled
+            # inference point settle, so the strategy receives the account that
+            # actually existed at its decision time. Newly returned orders can
+            # still request that exact timestamp and are handled by the
+            # end-of-day pass below.
             with self.timer.phase("broker"):
+                self.broker.open_day(
+                    trade_date, bars, market.cash_dividends_for_day(trade_date)
+                )
                 self._match_due(inference_at, market)
             if due:
                 self._infer(market, trade_date, inference_at)
@@ -140,6 +144,9 @@ class DailyReplayEngine:
         return ReplayResult(
             equity_curve=tuple(equity_curve),
             executions=tuple(execution.to_record() for execution in self.broker.executions),
+            corporate_actions=tuple(
+                action.to_record() for action in self.broker.corporate_actions
+            ),
             inference_dates=tuple(inference_dates),
             pending_orders=self.inbox.records(),
             wall_seconds=perf_counter() - started,
@@ -247,12 +254,25 @@ def run_daily_replay(
     nl_query: NLQuery | None = None,
     context_data: ContextDataProvider | None = None,
     execution_price: ExecutionPriceProvider | None = None,
+    corporate_actions=None,
 ) -> ReplayResult:
+    """``corporate_actions`` is the replay slot's ex-date table (see
+    ``DailyMarketData``); it travels with a bar frame, so a prebuilt market
+    must already carry it. A formal slot always passes it; None is only for
+    synthetic frames in unit tests."""
+
     # One timer spans the market build and the replay loop, so a single
     # phase_seconds breakdown covers the whole call.
     timer = PhaseTimer()
     with timer.phase("market_build"):
-        market = daily if isinstance(daily, DailyMarketData) else DailyMarketData(daily)
+        if isinstance(daily, DailyMarketData):
+            if corporate_actions is not None:
+                raise ValueError(
+                    "corporate_actions must be given to DailyMarketData when the market is prebuilt"
+                )
+            market = daily
+        else:
+            market = DailyMarketData(daily, corporate_actions)
     return DailyReplayEngine(
         schedule=schedule,
         strategy=strategy,

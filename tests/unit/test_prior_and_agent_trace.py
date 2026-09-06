@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from autotrade.agent.prompts import build_system_prompt
+from autotrade.agent.prompts import build_meta_learning_prompt, build_system_prompt
 from autotrade.environment.tools import (
     FinishMetaTool,
     SafeWorkspace,
@@ -58,20 +58,28 @@ def test_prompts_define_no_edge_pre_registration_and_meta_fold_labels() -> None:
     guardrails = fold[fold.index("# 研究方向与守则") :]
     # What "no edge" looks like, in the host's own field names.
     for clause in (
-        "「没有证明边际」的标准",
+        "「没有证明边际」的三项检验",
         "`vs_parent.beats_parent=false`",
-        "`null_control.excess_percentile`",
+        "没有父本对照时为 null，附 `vs_parent_note`",
+        "验证窗口跨多个周期时",
+        "`run_null_control(node_id)` 按需算出 `excess_percentile`",
         "`selection_statistics.deflated_sharpe_probability`",
-        "保留父本（首个 Fold 则记为 `baseline_missing`）是正当的研究结果",
-        "不是候选之间的选择标准",
+        "以 `outcome=\"no_edge\"` 结束是诚实的结果",
+        "不是选择标准",
     ):
         assert clause in guardrails, clause
+    # The abstention route and its ledger outcome sit in the submit contract.
+    contract = fold[fold.index("# 提交合同") : fold.index("# 禁止事项")]
+    assert "过硬门的提名一律被冻结" in contract
+    assert '`finish_fold(outcome="no_edge", reason=<证据>)`' in contract
+    assert "有父产物记 `no_update`" in contract and "`baseline_missing`" in contract
+    assert "才可显式提名 `parent_control` 保留父本" in contract
+    assert "否则 Pipeline 不会冻结它" not in fold
     # The hypothesis argument is the binding pre-registration; notes are optional
     # and only count when written before the call.
     assert "`hypothesis` 参数就是有约束力的预登记记录" in guardrails
     assert "调用之后补写的笔记不算预登记" in guardrails
     # The template is not a comparator; audits do not gate a ready batch.
-    contract = fold[fold.index("# 提交合同") : fold.index("# 禁止事项")]
     assert "模板只是交付合同的可运行示例而不是研究基线" in contract
     assert "需要基线就自己跑一次" not in fold
     assert "只读审计不在 Validation 的关键路径上" in fold
@@ -83,12 +91,20 @@ def test_prompts_define_no_edge_pre_registration_and_meta_fold_labels() -> None:
     assert "两者窗口不同不是数据缺陷" in meta
     prior_rules = meta[meta.index("# PRIOR") : meta.index("# 守则")]
     for clause in (
-        "`fold_reviews[].null_control.excess_percentile`",
+        # What each reviewed Fold froze is read from the ledger, never from the
+        # Fold session's own narrative (a Meta once asserted "nothing frozen"
+        # while the ledger said frozen).
+        "`fold_reviews[]` 的 `fold_status`、`finish_mode`",
+        "`agent_no_edge`",
+        "`hard_reject_reasons`",
+        "`null_control.excess_percentile`",
         "`selection_statistics.deflated_sharpe_probability`",
         "PRIOR 逐 Fold 引用这些数值",
         "只能写成待检验，不能写成主线",
+        "`no_update` 或 `baseline_missing` 是正当结果",
     ):
         assert clause in prior_rules, clause
+    assert "`fold_status` 与 `finish_mode`" in build_meta_learning_prompt()
 
 
 def test_fold_write_tools_cannot_overwrite_authoritative_prior(tmp_path: Path) -> None:

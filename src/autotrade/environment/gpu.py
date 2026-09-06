@@ -10,6 +10,20 @@ without changing Docker plumbing.
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Sequence
+
+
+def device_request(indices: Sequence[int]) -> str:
+    """The ``--gpus`` value that pins exactly ``indices``.
+
+    Docker splits this value on commas, so a bare ``device=0,1`` is read as one
+    device id plus a device *count* and the request is refused ("cannot set
+    both Count and DeviceIDs on device request"). The documented form quotes
+    the whole value; the quotes belong to the argument itself, not to a shell,
+    so they stay in the argv element. Single-device requests use the same form.
+    """
+
+    return f'"device={",".join(str(int(index)) for index in indices)}"'
 
 
 def _int_or_none(value: str) -> int | None:

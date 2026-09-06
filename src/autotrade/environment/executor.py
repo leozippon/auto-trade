@@ -13,13 +13,14 @@ import time
 import uuid
 from collections import deque
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, Self, runtime_checkable
 
+from .gpu import device_request, select_gpus
 from .runtime import SandboxPaths, chmod_tree
-from .sandbox import DockerSandbox, SandboxConfig
+from .sandbox import DockerSandbox, SandboxConfig, SandboxLimits
 from .strategy import BarTable, FitSchedule, StrategyContext, StrategyFunction
 from .strategy_loader import load_strategy_module, validate_strategy_package
 
@@ -161,6 +162,11 @@ class DockerStrategyExecutor:
     whose only difference is a read-write bind of the state directory; the
     inference worker binds the same directory read-only, so the kernel — not
     the strategy — decides that ``generate_orders`` cannot write state.
+
+    Both workers attach the experiment's GPU request (``SandboxLimits``): the
+    inference container selects the devices once at start and the fit worker
+    inherits exactly those, so one evaluation holds one allocation and a
+    replay whose experiment asked for no GPU stays CPU-only.
     """
 
     def __init__(
@@ -191,6 +197,10 @@ class DockerStrategyExecutor:
         self.context_models_dir = CONTAINER_MODELS_DIR if self.models_dir is not None else ""
         self._state_writable = state_writable
         self._fit_worker: DockerStrategyExecutor | None = None
+        # Resolved before the container exists and rendered into its run
+        # arguments below. An unsatisfiable request fails right here, so a
+        # replay never silently trains on CPU instead of the GPU it asked for.
+        self.gpu_indices: list[int] = _select_strategy_gpus(self.config.limits)
         self.container_name = f"autotrade-strategy-{uuid.uuid4().hex}"
         self._process: subprocess.Popen[bytes] | None = None
         self._stdout_buffer = bytearray()
@@ -235,6 +245,8 @@ class DockerStrategyExecutor:
             "--security-opt",
             "no-new-privileges",
         ]
+        if self.gpu_indices:
+            command.extend(["--gpus", device_request(self.gpu_indices)])
         thread_limit = str(max(1, min(_MAX_STRATEGY_THREADS, math.ceil(limits.cpus))))
         strategy_env = {
             "MKL_NUM_THREADS": thread_limit,
@@ -276,7 +288,15 @@ class DockerStrategyExecutor:
         if self._fit_worker is None:
             self._fit_worker = DockerStrategyExecutor(
                 self.strategy_path,
-                self.config,
+                # Same boundary, plus this evaluation's already-selected
+                # devices: the fit worker shares the inference container's
+                # GPUs instead of selecting a second set of its own.
+                replace(
+                    self.config,
+                    limits=replace(
+                        self.config.limits, gpu_devices=tuple(self.gpu_indices)
+                    ),
+                ),
                 snapshot_dir=self.snapshot_dir,
                 asof_dir=self.asof_dir,
                 models_dir=self.models_dir,
@@ -1039,6 +1059,26 @@ def _existing_dir(value: str | Path | None, name: str) -> Path | None:
     if not path.is_dir():
         raise StrategyExecutionError(f"{name} does not exist: {path}")
     return path
+
+
+def _select_strategy_gpus(limits: SandboxLimits) -> list[int]:
+    """Device indexes this strategy container attaches; empty when none is asked.
+
+    Already-selected devices (``gpu_devices``, how the fit worker inherits the
+    inference container's allocation) are used as they are. Otherwise the Agent
+    session container's policy applies unchanged: the requested number of
+    devices matching ``gpu_name_filter`` with the most free video memory at
+    container start. There is no CPU fallback — ``fit(context)`` training on a
+    device the experiment did not get would be a different computation reported
+    as the same result, so an unsatisfiable request raises
+    ``GpuUnavailableError`` instead.
+    """
+
+    if limits.gpu_count <= 0:
+        return []
+    if limits.gpu_devices:
+        return list(limits.gpu_devices)
+    return select_gpus(limits.gpu_count, require_name=limits.gpu_name_filter)
 
 
 def _require_local_image(config: SandboxConfig) -> str:

@@ -65,8 +65,16 @@ class RoundTrip:
         return None if self.exit_at is None else self.exit_at.strftime("%Y%m%d")
 
 
-def trade_skeleton(executions: Sequence[Mapping[str, object]]) -> list[RoundTrip]:
-    """Filled buys and sells paired FIFO per symbol, splitting partial exits."""
+def trade_skeleton(
+    executions: Sequence[Mapping[str, object]],
+) -> tuple[list[RoundTrip], int]:
+    """Filled buys and sells paired FIFO per symbol, splitting partial exits.
+
+    Also returns the sold shares no filled buy accounts for: shares an ex-date
+    settlement created (bonus or transfer issues) are not a round trip of their
+    own — the null's replacement names receive their own settlements in the
+    replay — so they are left unpaired and only counted, never raised on.
+    """
 
     fills = [
         (
@@ -83,6 +91,7 @@ def trade_skeleton(executions: Sequence[Mapping[str, object]]) -> list[RoundTrip
     fills.sort(key=lambda fill: fill[0])
     open_lots: dict[str, list[list[object]]] = {}
     trips: list[RoundTrip] = []
+    unpaired_sell_shares = 0
     for matched_at, symbol, action, quantity, price in fills:
         if action == "buy":
             open_lots.setdefault(symbol, []).append([quantity, price, matched_at])
@@ -91,9 +100,8 @@ def trade_skeleton(executions: Sequence[Mapping[str, object]]) -> list[RoundTrip
         remaining = quantity
         while remaining > 0:
             if not lots:
-                raise ValueError(
-                    f"sell of {symbol} at {matched_at.isoformat()} exceeds its filled buys"
-                )
+                unpaired_sell_shares += remaining
+                break
             lot = lots[0]
             taken = min(remaining, int(lot[0]))
             trips.append(
@@ -121,7 +129,7 @@ def trade_skeleton(executions: Sequence[Mapping[str, object]]) -> list[RoundTrip
                 )
             )
     trips.sort(key=lambda trip: (trip.entry_at, trip.symbol))
-    return trips
+    return trips, unpaired_sell_shares
 
 
 def sample_null_orders(
@@ -146,6 +154,7 @@ def run_null_control(
     k: int = 500,
     seed: int,
     step: tuple[str, str] | None = None,
+    corporate_actions: pd.DataFrame | None = None,
 ) -> dict[str, object]:
     """Replay ``k`` random-name copies of ``result``'s skeleton and rank it.
 
@@ -155,16 +164,19 @@ def run_null_control(
     the observed run and every null run. ``schedule`` contributes the decision
     clock the replayed strategy used — the null's orders are drawn up front, so
     its cadence is not reused. ``step`` is an inclusive ``(start, end)``
-    sub-window measured from the equity curves.
+    sub-window measured from the equity curves. ``corporate_actions`` is the
+    slot's ex-date table, so a null holding is settled through the same
+    ex-dates as the observed one; a formal slot always passes it, and None is
+    only for synthetic frames in unit tests.
     """
 
     if k < 1:
         raise ValueError("k must be a positive integer")
     dates = [str(row["trade_date"]) for row in result.equity_curve]
-    market = DailyMarketData(frame)
+    market = DailyMarketData(frame, corporate_actions)
     if tuple(dates) != market.trade_dates:
         raise ValueError("result equity curve and replay frame cover different trading days")
-    skeleton = trade_skeleton(result.executions)
+    skeleton, unpaired_sell_shares = trade_skeleton(result.executions)
     if not skeleton:
         # Nothing was ever filled: every random-name replay would be the same
         # idle cash account, and the right-inclusive percentile would read 1.0
@@ -226,6 +238,10 @@ def run_null_control(
         # this trip's share of the money smaller than one board lot, so the
         # null ran with less capital than the result it is compared against.
         "dropped_trips_mean": round(sum(dropped) / k, 3),
+        # Sold shares no filled buy accounts for: created by the observed
+        # run's ex-date settlements, so the skeleton carries only the bought
+        # shares and each null name earns its own settlements instead.
+        "unpaired_sell_shares": unpaired_sell_shares,
     }
     if bounds is not None:
         block["step"] = {

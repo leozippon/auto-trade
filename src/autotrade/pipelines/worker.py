@@ -151,6 +151,7 @@ _ALLOWED_PARAMS = {
     "min_region_trade_days",
     "max_steps_per_fold",
     "max_backtests_per_fold",
+    "max_null_controls_per_fold",
     "max_llm_calls",
     "session_max_attempts",
     "max_fold_minutes",
@@ -619,6 +620,9 @@ def resolve_worker_options(
         max_backtests_per_fold=_positive_int(
             knob("max_backtests_per_fold"), "max_backtests_per_fold"
         ),
+        max_null_controls_per_fold=_nonnegative_int(
+            knob("max_null_controls_per_fold"), "max_null_controls_per_fold"
+        ),
         max_llm_calls=_positive_int(knob("max_llm_calls"), "max_llm_calls"),
         session_max_attempts=_positive_int(
             knob("session_max_attempts"), "session_max_attempts"
@@ -784,12 +788,30 @@ def resolve_worker_options(
 def _strategy_sandbox_from_spec(
     spec: SandboxSpec | None, *, fit_timeout_seconds: float
 ) -> SandboxConfig:
-    limits = SandboxLimits(fit_timeout_seconds=float(fit_timeout_seconds))
+    """The strategy container's boundary, derived from the Agent session's spec.
+
+    The experiment's GPU request travels with it: ``fit(context)`` is where a
+    model is trained, and it runs in the strategy container of every formal
+    replay (Validation, parent control, frozen Test, Held-out), not in the
+    session. The request is the experiment-level one — a per-session HITL
+    ``sandbox_gpu_count`` override moves only that session's own container.
+    The strategy container always uses the free-memory selector, so a spec that
+    pins explicit device indexes is honoured as a device count, not as those
+    exact devices.
+    """
+
     if spec is None:
-        return SandboxConfig(image=DEFAULT_IMAGE, limits=limits)
+        return SandboxConfig(
+            image=DEFAULT_IMAGE,
+            limits=SandboxLimits(fit_timeout_seconds=float(fit_timeout_seconds)),
+        )
     return SandboxConfig(
         image=spec.image,
-        limits=limits,
+        limits=SandboxLimits(
+            fit_timeout_seconds=float(fit_timeout_seconds),
+            gpu_count=spec.gpu_count if spec.gpu is not None else 0,
+            gpu_name_filter=spec.gpu_name_filter,
+        ),
         docker_executable=spec.docker_executable,
     )
 
@@ -1394,13 +1416,17 @@ def _build_post_fold_hook(
         strategy_dir = record.get("frozen_strategy_artifact_path")
         if not strategy_dir:
             raise ValueError("fold record has no frozen strategy artifact to analyse")
-        model_dir = record.get("frozen_model_artifact_path")
+        strategy_path = Path(str(strategy_dir))
+        # A frozen artifact is ``frozen/<id>/output`` plus a sibling
+        # ``frozen/<id>/models`` (docs/pipeline-design.md §2.3); the ledger
+        # records only the output path, so derive the models one from it.
+        # analyze_fold lists the directory only when it exists.
         analyze_fold(
             proxy,
             ledger_record=record,
             ref_store=ref_store,
-            strategy_dir=Path(str(strategy_dir)),
-            model_dir=Path(str(model_dir)) if model_dir else None,
+            strategy_dir=strategy_path,
+            model_dir=strategy_path.parent / "models",
             out_dir=out_dir,
             max_tokens=effective_analysis_max_tokens,
             output_identity=(

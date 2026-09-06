@@ -101,6 +101,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     pit: PaperPITData | None = None
+    corporate_actions = None
     if args.data_backend == "daily":
         if args.daily_path is None:
             raise ValueError("--daily-path is required with --data-backend daily")
@@ -141,6 +142,7 @@ def main(argv: list[str] | None = None) -> int:
             max_intraday_row_group_rows=args.max_intraday_row_group_rows,
         )
         daily = pit.daily
+        corporate_actions = pit.corporate_actions
         nl_query = pit.nl_service.query
         context_data = pit.context_data
         execution_price = pit.execution_price
@@ -148,6 +150,7 @@ def main(argv: list[str] | None = None) -> int:
         strategy_path=args.strategy,
         strategy_revision=args.strategy_revision,
         daily=daily,
+        corporate_actions=corporate_actions,
         state_root=args.state_root,
         models_dir=args.models_dir,
         schedule=StrategySchedule(

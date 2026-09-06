@@ -72,6 +72,40 @@ class FoldAnalysisTest(unittest.TestCase):
         self.assertEqual(view["validation_result"], {"total_return": 0.01})
         self.assertEqual(view["fold_status"], "frozen")
 
+    def test_guarded_view_carries_why_the_fold_froze_nothing(self) -> None:
+        """A Fold that freezes nothing is the case the reviewer most needs
+        explained, so the ledger's finish and rejection fields must survive the
+        guard next to the validation evidence."""
+        rejected = guarded_record_view(
+            {
+                **RECORD,
+                "fold_status": "no_update",
+                "finish_mode": "nominated",
+                "hard_reject_reasons": ["max_drawdown_over_cap"],
+                "accept_warnings": ["low_trade_count"],
+            },
+            ref_store=self.ref_store,
+        )
+        self.assertEqual(rejected["finish_mode"], "nominated")
+        self.assertEqual(rejected["hard_reject_reasons"], ["max_drawdown_over_cap"])
+        self.assertEqual(rejected["accept_warnings"], ["low_trade_count"])
+        self.assertNotIn("test_result", rejected)
+        abstained = guarded_record_view(
+            {
+                **RECORD,
+                "fold_status": "no_update",
+                "finish_mode": "agent_no_edge",
+                "no_edge_reason": "no candidate beat the parent control",
+                "hard_reject_reasons": [],
+            },
+            ref_store=self.ref_store,
+        )
+        self.assertEqual(abstained["finish_mode"], "agent_no_edge")
+        self.assertEqual(
+            abstained["no_edge_reason"], "no candidate beat the parent control"
+        )
+        self.assertEqual(abstained["hard_reject_reasons"], [])
+
     def test_prompt_never_carries_the_test_number_or_window(self) -> None:
         messages = build_fold_analysis_messages(
             RECORD,
@@ -125,6 +159,54 @@ class FoldAnalysisTest(unittest.TestCase):
             self.assertEqual(proxy.calls[0]["tool_choice"], "none")
             self.assertEqual(proxy.calls[0]["max_tokens"], DEFAULT_MAX_TOKENS)
             self.assertNotIn("0.09", json.dumps(meta, ensure_ascii=False))
+
+    def test_a_sibling_models_directory_is_listed_by_name_only(self) -> None:
+        """A frozen artifact is ``<id>/output`` beside ``<id>/models``, and the
+        caller derives the second from the first. Model parameters are binary,
+        so the prompt names the files and never inlines them."""
+        with tempfile.TemporaryDirectory() as tmp:
+            frozen = Path(tmp) / "frozen" / "artifact"
+            strategy = frozen / "output"
+            strategy.mkdir(parents=True)
+            (strategy / "main.py").write_text("pass\n", encoding="utf-8")
+            models = frozen / "models"
+            (models / "nested").mkdir(parents=True)
+            (models / "scaler.json").write_text('{"mu": 0}', encoding="utf-8")
+            (models / "nested" / "booster.txt").write_text("tree", encoding="utf-8")
+            proxy = FakeProxy()
+            analyze_fold(
+                proxy,
+                ledger_record=RECORD,
+                ref_store=self.ref_store,
+                strategy_dir=strategy,
+                model_dir=strategy.parent / "models",
+                out_dir=Path(tmp) / "analysis",
+                output_identity=("epoch_001", self.fold_ref),
+            )
+            user = proxy.calls[0]["messages"][1].content
+            self.assertIn("models/", user)
+            self.assertIn("scaler.json", user)
+            self.assertIn("nested/booster.txt", user)
+            self.assertNotIn('{"mu": 0}', user)
+
+    def test_a_missing_models_directory_adds_no_section(self) -> None:
+        """Most strategies carry no trained parameters: the derived path simply
+        does not exist, and that is not an error."""
+        with tempfile.TemporaryDirectory() as tmp:
+            strategy = Path(tmp) / "frozen" / "artifact" / "output"
+            strategy.mkdir(parents=True)
+            (strategy / "main.py").write_text("pass\n", encoding="utf-8")
+            proxy = FakeProxy()
+            analyze_fold(
+                proxy,
+                ledger_record=RECORD,
+                ref_store=self.ref_store,
+                strategy_dir=strategy,
+                model_dir=strategy.parent / "models",
+                out_dir=Path(tmp) / "analysis",
+                output_identity=("epoch_001", self.fold_ref),
+            )
+            self.assertNotIn("models/", proxy.calls[0]["messages"][1].content)
 
     def test_provider_failure_records_an_error_sidecar_and_re_raises(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

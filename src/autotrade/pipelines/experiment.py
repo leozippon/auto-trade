@@ -9,7 +9,6 @@ strategy content; it only accepts, freezes, falls back, and records.
 from __future__ import annotations
 
 import hashlib
-import json
 import time
 import uuid
 from collections.abc import Callable, Mapping
@@ -40,7 +39,6 @@ from autotrade.environment.replay import (
     run_daily_replay,
 )
 from autotrade.environment.replay.stats import attach_cost_sensitivity
-from autotrade.environment.replay.style import daily_returns_from_curve
 from autotrade.environment.runtime import agent_trace_path, chmod_tree
 from autotrade.environment.strategy import NLQuery
 
@@ -82,6 +80,7 @@ from .ledger import (
     FrozenArtifactRestoreFailed,
     RunMarkers,
     assert_no_frozen_artifact_mutation,
+    candidate_deflated_sharpe,
     deflated_sharpe,
     frozen_selection,
     is_frozen_artifact_mutation,
@@ -131,7 +130,16 @@ class DailyStrategyPipeline:
         self.execution_price = execution_price
         self.executor_factory = executor_factory
 
-    def run(self, daily: pd.DataFrame | str | Path) -> ReplayResult:
+    def run(
+        self,
+        daily: pd.DataFrame | str | Path,
+        corporate_actions: pd.DataFrame | None = None,
+    ) -> ReplayResult:
+        """``corporate_actions`` is the replay slot's ex-date table; the Broker
+        credits its cash dividends on the ex-date (the share leg comes from the
+        daily frame's ``pre_close``). The PIT backend always passes it; None is
+        only for the local ``daily`` development backend and unit tests."""
+
         frame = pd.read_parquet(daily) if isinstance(daily, (str, Path)) else daily
         if not isinstance(frame, pd.DataFrame):
             raise TypeError("daily must be a pandas DataFrame or parquet path")
@@ -152,6 +160,7 @@ class DailyStrategyPipeline:
                     nl_query=self.nl_query,
                     context_data=self.context_data,
                     execution_price=self.execution_price,
+                    corporate_actions=corporate_actions,
                 )
             finally:
                 executor.close()
@@ -286,6 +295,7 @@ class RollingExperimentPipeline:
                         record_failed_attempts=self.config.record_failed_attempts,
                         nl_failure_policy=self.config.nl_failure_policy,
                         finalize_before_deadline_seconds=self.config.finalize_before_deadline_seconds,
+                        max_null_controls=self.config.max_null_controls_per_fold,
                         step_gate_hook=_optional_hook(
                             context.get("step_gate_hook"), "step_gate_hook"
                         ),
@@ -319,8 +329,16 @@ class RollingExperimentPipeline:
             # The parent control is the host's Step, never the Agent's.
             if sum(not step.parent_control for step in session.steps) > budgets["max_steps"]:
                 raise RuntimeError("Fold developer exceeded the Step budget")
-            selected = _select_step(session.steps, session.selected_step_id)
-            hard: list[str] = ["no_complete_validation"]
+            # An explicit no-edge finish nominates nothing: no candidate is
+            # frozen whatever the last Step's metrics say, and the parent (if
+            # any) stays the lineage head.
+            abstained = bool(session.no_edge_reason)
+            selected = (
+                None
+                if abstained
+                else _select_step(session.steps, session.selected_step_id)
+            )
+            hard: list[str] = [] if abstained else ["no_complete_validation"]
             warnings: list[str] = []
             if selected is not None:
                 hard, warnings = self.config.acceptance.evaluate(
@@ -348,7 +366,11 @@ class RollingExperimentPipeline:
                     )
                     parent = replace(parent, requires_validation=False)
                 frozen = parent
-                status = "no_update" if selected is not None else "no_valid_backtest"
+                status = (
+                    "no_update"
+                    if selected is not None or abstained
+                    else "no_valid_backtest"
+                )
                 validation = (
                     selected.validation.summary if selected is not None else None
                 )
@@ -431,6 +453,10 @@ class RollingExperimentPipeline:
                 frozen_null = None
             elif selected.parent_control:
                 frozen_null = control_null
+            elif selected.step_id in session.null_controls:
+                # The session already drew this node's null through the
+                # run_null_control tool; the ledger carries that very block.
+                frozen_null = dict(session.null_controls[selected.step_id])
             else:
                 frozen_null = self._null_control(
                     selected.validation.result_ref, fold=fold, role="frozen"
@@ -455,9 +481,20 @@ class RollingExperimentPipeline:
                 ),
                 "conversation_id": session.conversation_id,
                 "finish_reason": session.finish_reason,
+                # How fold_status was reached: a nominated node, the Agent's
+                # explicit no-edge finish, or no nomination at all (a session
+                # that ended at its deadline, or a developer that named none).
+                "finish_mode": (
+                    "agent_no_edge"
+                    if abstained
+                    else "nominated"
+                    if selected is not None
+                    else "no_nomination"
+                ),
                 "early_stop_reason": session.early_stop_reason or None,
+                "no_edge_reason": session.no_edge_reason or None,
                 "fold_status": status,
-                "accept_reasons": hard,
+                "hard_reject_reasons": hard,
                 "accept_warnings": warnings,
                 "selected_step_id": selected.step_id if selected is not None else None,
                 "steps": [_step_record(step) for step in session.steps],
@@ -719,6 +756,11 @@ class RollingExperimentPipeline:
         session_context: dict[str, object] | None = None,
         previous_prior: str = "",
     ) -> tuple[str, FrozenArtifact | None]:
+        # Same entry guard as run_fold/run_heldout: a Meta session reads the
+        # frozen lineage and may republish a regularized parent, so it must
+        # refuse to start while an unresolved integrity row remains. The check
+        # only reads the ledger, so a clean run's own publication is unaffected.
+        assert_no_frozen_artifact_mutation(self.ledger.read())
         if self.meta_learner is None:
             return previous_prior, parent
         run_started = time.monotonic()
@@ -1015,7 +1057,7 @@ class RollingExperimentPipeline:
                 end=fold.validation_end,
                 profile=self.config.broker_profile,
                 schedule=self.config.schedule,
-                seed=_null_seed(fold.fold_id, role),
+                seed=null_control_seed(fold.fold_id, role),
                 step=step,
             )
         except Exception as exc:  # noqa: BLE001 - recorded, the Fold still runs
@@ -1286,27 +1328,22 @@ def _selection_statistics(
         else selected
     )
     kept_parent = nominated is not None and nominated.parent_control
-    series = (
-        _validation_daily_returns(nominated.validation.result_ref)
-        if nominated
-        else None
-    )
     trial_sharpes = [step.validation.summary.get("sharpe") for step in candidates]
     if kept_parent:
         trial_sharpes.append(nominated.validation.summary.get("sharpe"))
-    statistics = deflated_sharpe(
-        observed_sharpe=(
-            nominated.validation.summary.get("sharpe") if nominated else None
-        ),
-        trial_sharpes=trial_sharpes,
-        returns=series if series is not None else (),
-    )
     if nominated is None:
+        statistics = deflated_sharpe(
+            observed_sharpe=None, trial_sharpes=trial_sharpes, returns=()
+        )
         statistics["unavailable_reason"] = "no_nominated_candidate"
-    elif series is None and statistics["unavailable_reason"] == "return_series_too_short":
-        # The record could not be read at all; saying the window was short
-        # would send a reader looking at the calendar instead of the file.
-        statistics["unavailable_reason"] = "return_series_missing"
+    else:
+        # The same function the session's candidate rows read their
+        # provisional figure from, now over the final trial pool.
+        statistics = candidate_deflated_sharpe(
+            observed_sharpe=nominated.validation.summary.get("sharpe"),
+            trial_sharpes=trial_sharpes,
+            result_ref=nominated.validation.result_ref,
+        )
     return {
         "candidates_evaluated": len(candidates),
         # Whether the trial pool this probability deflates includes the parent
@@ -1314,34 +1351,6 @@ def _selection_statistics(
         "parent_included": kept_parent,
         **statistics,
     }
-
-
-def _validation_daily_returns(result_ref: str) -> list[float] | None:
-    """Daily returns of one completed Validation, read from its own record.
-
-    The equity curve lives in the replay's ``result.json``, never in the
-    summary, and it is the only place the return series exists. ``None`` says
-    the series could not be read at all -- an absent, unreadable or
-    curve-less record -- which is a different fact from a window that is
-    genuinely too short, and the two must not share one reason.
-    """
-
-    path = Path(str(result_ref or ""))
-    if path.is_dir():
-        path = path / "result.json"
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    curve = payload.get("equity_curve") if isinstance(payload, dict) else None
-    if not isinstance(curve, list):
-        return None
-    return [
-        value
-        for _day, value in daily_returns_from_curve(
-            [row for row in curve if isinstance(row, Mapping)]
-        )
-    ]
 
 
 def _parent_control_record(
@@ -1433,12 +1442,13 @@ def _step_result(
     return attach_cost_sensitivity(step, slippage_bps)
 
 
-def _null_seed(fold_id: str, role: str) -> int:
+def null_control_seed(fold_id: str, role: str) -> int:
     """A stable 32-bit seed per Fold and role.
 
     Stable across processes and runs (``hash`` is not), so re-running a Fold
     re-draws the same null and its percentile can be compared with the one the
-    ledger already holds.
+    ledger already holds. The session's ``run_null_control`` tool draws with the
+    ``frozen`` role, so its block is the one the freeze would have drawn.
     """
 
     digest = hashlib.blake2b(f"{fold_id}:{role}".encode(), digest_size=4).digest()

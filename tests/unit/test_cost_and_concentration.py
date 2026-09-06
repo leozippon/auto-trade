@@ -182,6 +182,7 @@ class EveryEvaluationBackendPricesTheBlockTest(unittest.TestCase):
                     "symbol": ["000001.SZ"] * len(days),
                     "open": [10.0] * len(days),
                     "close": [10.5] * len(days),
+                    "pre_close": [10.5] * len(days),
                 }
             ).to_parquet(daily, index=False)
             revision = root / "revision"

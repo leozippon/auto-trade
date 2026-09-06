@@ -1265,7 +1265,7 @@ class SnapshotBuilder:
     ) -> tuple[pd.DataFrame, dict[str, object]]:
         """Implemented dividend events with an ex-date inside the replay window,
         one row per (ts_code, ex_date): SimBroker's ex-date corporate-action truth
-        (docs/environment-design.md §3.2). Not an agent input — agent visibility of
+        (docs/environment-design.md §1.2). Not an agent input — agent visibility of
         dividends stays announcement-gated via the PIT fundamental events.
 
         ``cash_per_share`` is the gross (税前) per-share cash amount and

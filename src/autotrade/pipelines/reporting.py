@@ -103,6 +103,9 @@ def _fold_row(record: dict[str, object]) -> dict[str, object]:
     selection = record.get("selection_statistics") or {}
     null = record.get("null_control") if isinstance(record.get("null_control"), dict) else {}
     scored = test or validation
+    # Names the stage the row is scored on, not whether that stage produced
+    # numbers: a skipped or failed Test keeps the label because the row is
+    # still its, and the absent ``return`` is what says it scored nothing.
     source = "frozen_test" if test else "validation"
     period = record.get("test_period") if test else record.get("validation_period")
     benchmark_return, benchmark_label = _frozen_benchmark(scored)
@@ -139,6 +142,8 @@ def _fold_row(record: dict[str, object]) -> dict[str, object]:
             benchmark_block.get("neutralized_excess_return")
         ),
         "finish_reason": record.get("finish_reason"),
+        # How fold_status was reached: nominated, agent_no_edge, no_nomination.
+        "finish_mode": record.get("finish_mode"),
         "period_start": _period_part(period, "start"),
         "period_end": _period_part(period, "end"),
         "benchmark_return": benchmark_return,

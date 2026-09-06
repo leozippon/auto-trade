@@ -29,7 +29,12 @@ from autotrade.agent.subagent import (
     normalize_subagent_thinking,
 )
 from autotrade.agent import subagent as subagent_module
-from autotrade.agent.prompts import FOLD_WORKFLOW_SECTION, build_system_prompt
+from autotrade.agent.prompts import (
+    FOLD_WORKFLOW_SECTION,
+    TOOL_PATH_CHEAT_SHEET,
+    TOOL_WRITE_CHEAT_SHEET,
+    build_system_prompt,
+)
 from autotrade.environment.tools.base import SessionInterrupt
 from autotrade.agent.runner import (
     SUBAGENT_TEARDOWN_WAIT_SECONDS,
@@ -1019,6 +1024,9 @@ def test_role_tool_visibility_hides_writes_from_audits(tmp_path: Path) -> None:
         # Same shape for defect reports: children report findings to the
         # parent, the parent files them with the operators.
         "report_issue",
+        # A capped, minutes-long host job on a recorded Validation: the parent
+        # spends that budget, like the formal backtests.
+        "run_null_control",
         "step_rollback",
     }
     assert audit == {"glob", "grep", "read_file"}
@@ -1205,15 +1213,22 @@ def test_general_prompts_explain_mode_and_role() -> None:
 def test_fold_subagent_prompts_carry_the_path_and_argv_contract() -> None:
     """Both sub-agent models failed the same two tool contracts in ~3% of
     calls (absolute /mnt paths to read_file, argv as one string, stale
-    edit_file old_text): the role prompt states them, whatever the task says."""
+    edit_file old_text), 6-12 times per Fold despite the curated skills: the
+    role prompt carries an example-based cheat sheet with one source in
+    prompts.py, whatever the task says."""
 
     writer = subagent_system_prompt("fold", "developer")
     reader = subagent_system_prompt("fold", "auditor")
     for prompt in (writer, reader):
-        assert "root=`artifacts`、path=`data_summary.json`" in prompt
+        assert TOOL_PATH_CHEAT_SHEET in prompt
+        assert '{"root": "artifacts", "path": "data_summary.json"}' in prompt
         assert "不接受 `/mnt/...` 绝对路径" in prompt
+        assert "`workspace/notes/x.md` 即 root=`workspace`、path=`notes/x.md`" in prompt
         assert "/mnt/tools/screen.py" in prompt
-    assert '`["python", "notes/probe.py"]`' in writer
+    assert TOOL_WRITE_CHEAT_SHEET in writer
+    assert '{"argv": ["python", "notes/probe.py"], "cwd": "."}' in writer
+    assert "整行命令字符串会被拒绝" in writer
+    assert "`notes/<topic>/`" in writer
     assert "第二次编辑必须匹配前一次编辑之后的内容" in writer
     # A read-only role has no shell, so it is told who runs the screen instead.
     assert "argv" not in reader
@@ -3921,8 +3936,9 @@ def test_prompts_carry_the_todo_convention_and_per_launch_knobs() -> None:
     fold = build_system_prompt(mode="fold", experiment_facts={})
     meta = build_system_prompt(mode="meta", experiment_facts={})
     for prompt, finish in ((fold, "finish_fold"), (meta, "finish_meta")):
-        assert "`TODO.md`" in prompt and "不需要任何人工参与" in prompt
+        assert "`TODO.md`（用 `write_file`/`edit_file` 维护）" in prompt
         assert "每个任务一行，写明负责方、状态和一句话结果" in prompt
+        assert "上下文被压缩后它是恢复计划的依据" in prompt
         assert f"`{finish}` 前核对全部条目" in prompt
     assert "`thinking` 与 `max_turns` 由你按次决定" in FOLD_WORKFLOW_SECTION
 

@@ -566,6 +566,9 @@ class PITDailyEvaluationBackend:
                 (daily["trade_date"].map(_date_key) >= _date_key(request.start))
                 & (daily["trade_date"].map(_date_key) <= _date_key(request.end))
             ].copy()
+            # Broker-side ex-date truth only: it is not a Timeview domain and
+            # never reaches the strategy.
+            corporate_actions = load_slot_corporate_actions(replay_dir, replay_manifest)
             replay_end = _date_key(request.end)
             if max_days is not None:
                 kept = sorted({_date_key(value) for value in daily["trade_date"]})[:max_days]
@@ -659,7 +662,7 @@ class PITDailyEvaluationBackend:
                     context_data=context_data,
                     execution_price=minute_source.price_at if minute_source is not None else None,
                     executor_factory=executor_factory,
-                ).run(daily)
+                ).run(daily, corporate_actions=corporate_actions)
                 record = replay.to_record(
                     start=_date_key(request.start), end=replay_end
                 )
@@ -747,10 +750,11 @@ class PITDailyEvaluationBackend:
         if not isinstance(pit, Mapping) or not pit.get("replay_ref"):
             raise ValueError(f"result has no PIT replay slot: {result_path}")
         replay_dir = Path(str(pit["replay_ref"])).resolve(strict=True)
+        replay_manifest = load_snapshot_manifest(replay_dir)
         daily = _load_replay_frames(
             replay_dir,
             generation_id=str(pit.get("generation_id") or ""),
-            replay_manifest=load_snapshot_manifest(replay_dir),
+            replay_manifest=replay_manifest,
             cache=self._replay_frame_cache,
         )["daily"]
         window = daily["trade_date"].map(_date_key)
@@ -769,6 +773,7 @@ class PITDailyEvaluationBackend:
             k=k,
             seed=seed,
             step=step,
+            corporate_actions=load_slot_corporate_actions(replay_dir, replay_manifest),
         )
 
     @staticmethod
@@ -834,6 +839,9 @@ class PaperPITData:
         self.daily = self.daily[self.daily["trade_date"].map(_date_key) == day].copy()
         if self.daily.empty:
             raise RuntimeError(f"Paper PIT replay slot has no daily market rows for {day}")
+        # The slot's ex-date truth for the Paper Broker, refused for a slot that
+        # predates ex-date settlement exactly as a formal replay refuses it.
+        self.corporate_actions = load_slot_corporate_actions(self.replay_dir, replay_manifest)
         runtime = Path(runtime_root).resolve() / day
         runtime.mkdir(parents=True, exist_ok=True)
         self.asof_dir = runtime / "asof"
@@ -1375,6 +1383,32 @@ def _load_replay_frames(
     frames = dict(cached)
     frames["daily"] = cached["daily"].copy()
     return frames
+
+
+def load_slot_corporate_actions(
+    replay_dir: Path, replay_manifest: Mapping[str, object]
+) -> pd.DataFrame:
+    """The slot's ex-date table for the Broker.
+
+    Every slot the builder writes carries the file and declares the domain in
+    its manifest. A manifest without the domain is a slot cached before
+    ex-dates were settled and must be rebuilt; a declared domain whose file is
+    missing is a broken slot. Neither is a slot without dividends. The table is
+    host-side Broker truth and is never a Timeview domain.
+    """
+
+    domains = replay_manifest.get("domains")
+    if not isinstance(domains, Mapping) or "corporate_actions" not in domains:
+        raise RuntimeError(
+            "replay slot manifest declares no corporate_actions domain; the slot predates "
+            f"ex-date settlement and must be rebuilt: {replay_dir}"
+        )
+    path = replay_dir / "corporate_actions.parquet"
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"replay slot declares corporate_actions but has no corporate_actions.parquet: {replay_dir}"
+        )
+    return pd.read_parquet(path)
 
 
 def _require_read_only_tree(root: Path) -> None:

@@ -436,6 +436,10 @@ class RollingExperimentConfig:
     # session is never charged against them.
     max_steps_per_fold: int = 30
     max_backtests_per_fold: int = 30
+    # Host-side random-portfolio null controls (K=500 replays, minutes each)
+    # a Fold session may request through ``run_null_control`` before it selects;
+    # the frozen node's block is reused at freeze. 0 leaves the tool out.
+    max_null_controls_per_fold: int = 3
     max_llm_calls: int = 1600
     session_max_attempts: int = 3
     max_fold_minutes: int = 720
@@ -525,6 +529,7 @@ class RollingExperimentConfig:
         for name in (
             "meta_learning_fold_interval",
             "meta_memory_max_epochs",
+            "max_null_controls_per_fold",
             "deadline_grace_minutes",
             "finalize_before_deadline_seconds",
             "meta_sandbox_rebuild_timeout_seconds",
@@ -734,6 +739,9 @@ class FoldSessionRequest:
     record_failed_attempts: bool = True
     nl_failure_policy: str = "return_error_with_audit"
     finalize_before_deadline_seconds: int = 300
+    # Cap on the session's own ``run_null_control`` calls; the experiment default
+    # is the single source (RollingExperimentConfig.max_null_controls_per_fold).
+    max_null_controls: int = RollingExperimentConfig.max_null_controls_per_fold
     step_gate_hook: Callable[[int, dict[str, object]], str] | None = field(
         default=None,
         repr=False,
@@ -773,6 +781,13 @@ class FoldSessionResult:
     run_manifest_ref: str = ""
     # Trusted host path to this run's collected workspace/skills audit copy.
     skills_source_ref: str = ""
+    # The Agent's evidence for finishing with ``outcome="no_edge"``: no node
+    # is nominated, the parent (if any) stays the lineage head. Empty when a
+    # node was nominated or the session ended without a finish.
+    no_edge_reason: str = ""
+    # Null-control blocks the session already computed, keyed by step id; the
+    # Pipeline reuses the frozen node's block instead of drawing it again.
+    null_controls: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

@@ -324,6 +324,9 @@ def _budget_facts(
             or budgets.get("max_llm_calls"),
             "max_backtests_per_fold": manifest.get("max_backtests_per_fold")
             or budgets.get("max_backtests"),
+            # Host null controls the session may request before it selects,
+            # minutes of replay each; every run_null_control result says what is left.
+            "max_null_controls_per_fold": budgets.get("max_null_controls_per_fold"),
             # The formal executor's per-trading-day inference wall clock; a
             # slower generate_orders fails the whole backtest.
             "strategy_inference_timeout_seconds": budgets.get(

@@ -15,7 +15,11 @@ import math
 import unittest
 from datetime import datetime
 
-from autotrade.environment.broker import BrokerProfile, DailyBroker
+from autotrade.environment.broker import (
+    EX_DATE_PRICE_TOLERANCE,
+    BrokerProfile,
+    DailyBroker,
+)
 from autotrade.environment.broker_core import (
     LOT_SIZE,
     STAMP_DUTY_CUTOVER,
@@ -41,14 +45,21 @@ def _order(action: str = "buy", *, symbol: str = "000001.SZ", quantity: int = 10
 
 
 def _bar(**overrides: object) -> dict[str, object]:
-    bar = {"open": 10.0, "close": 10.0, "up_limit": 11.0, "down_limit": 9.0, "is_suspended": False}
+    bar = {
+        "open": 10.0,
+        "close": 10.0,
+        "pre_close": 10.0,
+        "up_limit": 11.0,
+        "down_limit": 9.0,
+        "is_suspended": False,
+    }
     bar.update(overrides)
     return bar
 
 
 def _broker(**profile_fields: object) -> DailyBroker:
     broker = DailyBroker(BrokerProfile(**profile_fields))
-    broker.open_day("20260105")
+    broker.open_day("20260105", {})
     return broker
 
 
@@ -64,7 +75,7 @@ class BrokerEligibilityTest(unittest.TestCase):
         self.assertEqual(same_day.status, "rejected")
         self.assertEqual(same_day.reason, "insufficient_available_position")
         # The next trading day releases it.
-        broker.open_day("20260106")
+        broker.open_day("20260106", {"000001.SZ": _bar()})
         self.assertEqual(broker.positions["000001.SZ"].available_quantity, 100)
         closed = broker.execute(_order("sell"), _bar(), matched_at=MATCHED_AT, raw_price=10.0)
         self.assertEqual(closed.status, "filled")
@@ -93,7 +104,7 @@ class BrokerEligibilityTest(unittest.TestCase):
         )
         self.assertEqual((blocked.status, blocked.reason), ("rejected", "daily_price_limit"))
         broker.execute(_order(), _bar(), matched_at=MATCHED_AT, raw_price=10.0)
-        broker.open_day("20260106")
+        broker.open_day("20260106", {"000001.SZ": _bar()})
         sell_blocked = broker.execute(
             _order("sell"), _bar(down_limit=10.0), matched_at=MATCHED_AT, raw_price=10.0
         )
@@ -123,7 +134,7 @@ class BrokerEligibilityTest(unittest.TestCase):
             _order(), _bar(down_limit=None), matched_at=MATCHED_AT, raw_price=10.0
         )
         self.assertEqual(filled.status, "filled")
-        broker.open_day("20260106")
+        broker.open_day("20260106", {"000001.SZ": _bar()})
         for label, bar in (
             ("none", _bar(down_limit=None)),
             ("nan", _bar(down_limit=float("nan"))),
@@ -237,11 +248,11 @@ class CostModelTest(unittest.TestCase):
                 broker = DailyBroker(
                     BrokerProfile(initial_cash=1_000_000, slippage_bps=0, min_commission_cny=0)
                 )
-                broker.open_day(trade_date)
+                broker.open_day(trade_date, {})
                 broker.execute(
                     _order(quantity=10_000), _bar(up_limit=99.0), matched_at=MATCHED_AT, raw_price=10.0
                 )
-                broker.open_day(trade_date)
+                broker.open_day(trade_date, {})
                 broker.positions["000001.SZ"].available_quantity = 10_000
                 sold = broker.execute(
                     _order("sell", quantity=10_000),
@@ -314,7 +325,7 @@ class BrokerAccountingTest(unittest.TestCase):
         commission = 1_000.0 * 1.0 / 10_000.0
         self.assertAlmostEqual(bought.commission, commission)
         self.assertAlmostEqual(broker.cash, 100_000 - 1_000.0 - commission)
-        broker.open_day("20260106")
+        broker.open_day("20260106", {"000001.SZ": _bar()})
         sold = broker.execute(_order("sell"), _bar(), matched_at=MATCHED_AT, raw_price=10.0)
         self.assertAlmostEqual(sold.stamp_duty, 1_000.0 * 5.0 / 10_000.0)
         self.assertAlmostEqual(
@@ -346,6 +357,142 @@ class BrokerAccountingTest(unittest.TestCase):
         cash, positions = broker.account_snapshot()
         self.assertAlmostEqual(cash, broker.cash)
         self.assertEqual(positions, {"000001.SZ": 100})
+
+
+class BrokerCorporateActionTest(unittest.TestCase):
+    """Ex-dates are settled from the exchange's reference price (``pre_close``).
+
+    A held name whose ``pre_close`` differs from its last close is reset so the
+    account is worth at ``pre_close`` exactly what it was worth at the last
+    close: the cash dividend is credited, the share count follows the reset,
+    fractional shares are paid in cash, and created shares stay locked until
+    the next day. Without this, every bonus issue read as a loss and every cash
+    dividend vanished.
+    """
+
+    def _holding(self, quantity: int = 1000) -> DailyBroker:
+        broker = _broker(initial_cash=100_000, min_commission_cny=0, slippage_bps=0, transfer_fee_bps=0)
+        filled = broker.execute(_order(quantity=quantity), _bar(), matched_at=MATCHED_AT, raw_price=10.0)
+        self.assertEqual(filled.status, "filled")
+        broker.mark({"000001.SZ": _bar(close=10.0)})
+        return broker
+
+    def test_bonus_issue_with_a_cash_dividend_preserves_equity_at_pre_close(self) -> None:
+        # 10 送 10 plus 0.5 CNY cash: pre_close = (10 - 0.5) / 2 = 4.75.
+        broker = self._holding(1000)
+        cash_before, equity_before = broker.cash, broker.equity()
+        broker.open_day("20260106", {"000001.SZ": _bar(pre_close=4.75)}, {"000001.SZ": 0.5})
+        position = broker.positions["000001.SZ"]
+        self.assertEqual(position.quantity, 2000)
+        self.assertAlmostEqual(broker.cash, cash_before + 0.5 * 1000)
+        self.assertAlmostEqual(position.last_price, 4.75)
+        self.assertAlmostEqual(broker.equity(), equity_before, places=6)
+        self.assertAlmostEqual(broker.cash + 2000 * 4.75, equity_before, places=6)
+        [action] = broker.corporate_actions
+        self.assertEqual(
+            (action.trade_date, action.symbol, action.quantity_before, action.quantity_after),
+            ("20260106", "000001.SZ", 1000, 2000),
+        )
+        self.assertAlmostEqual(action.cash_credit, 500.0)
+        self.assertEqual(action.cash_per_share, 0.5)
+
+    def test_created_shares_are_locked_until_the_next_day(self) -> None:
+        broker = self._holding(1000)
+        broker.open_day("20260106", {"000001.SZ": _bar(pre_close=4.75)}, {"000001.SZ": 0.5})
+        self.assertEqual(broker.positions["000001.SZ"].available_quantity, 1000)
+        ex_day = _bar(pre_close=4.75, up_limit=5.2, down_limit=4.3)
+        blocked = broker.execute(_order("sell", quantity=2000), ex_day, matched_at=MATCHED_AT, raw_price=4.8)
+        self.assertEqual((blocked.status, blocked.reason), ("rejected", "insufficient_available_position"))
+        allowed = broker.execute(_order("sell", quantity=1000), ex_day, matched_at=MATCHED_AT, raw_price=4.8)
+        self.assertEqual(allowed.status, "filled")
+        self.assertEqual(broker.positions["000001.SZ"].quantity, 1000)
+        broker.open_day("20260107", {"000001.SZ": _bar(pre_close=4.8)})
+        self.assertEqual(broker.positions["000001.SZ"].available_quantity, 1000)
+
+    def test_realized_pnl_after_an_ex_date_closes_the_cash_loop(self) -> None:
+        # The basis carries into the new share count and the payout reduces
+        # it, so selling everything realizes exactly the account's cash change.
+        broker = _broker(initial_cash=100_000, slippage_bps=0)
+        broker.execute(_order(quantity=1000), _bar(), matched_at=MATCHED_AT, raw_price=10.0)
+        broker.mark({"000001.SZ": _bar(close=10.0)})
+        broker.open_day("20260106", {"000001.SZ": _bar(pre_close=4.75)}, {"000001.SZ": 0.5})
+        broker.open_day("20260107", {"000001.SZ": _bar(pre_close=4.75)})
+        sold = broker.execute(
+            _order("sell", quantity=2000),
+            _bar(pre_close=4.75, up_limit=5.2, down_limit=4.3),
+            matched_at=MATCHED_AT,
+            raw_price=5.0,
+        )
+        self.assertEqual(sold.status, "filled")
+        self.assertNotIn("000001.SZ", broker.positions)
+        self.assertAlmostEqual(sold.realized_pnl, broker.cash - 100_000, places=6)
+
+    def test_pure_cash_dividend_credits_cash_and_keeps_the_shares(self) -> None:
+        broker = self._holding(1000)
+        cash_before, equity_before = broker.cash, broker.equity()
+        broker.open_day("20260106", {"000001.SZ": _bar(pre_close=9.5)}, {"000001.SZ": 0.5})
+        self.assertEqual(broker.positions["000001.SZ"].quantity, 1000)
+        self.assertAlmostEqual(broker.cash, cash_before + 500.0)
+        self.assertAlmostEqual(broker.equity(), equity_before, places=6)
+
+    def test_a_day_without_a_reset_changes_nothing(self) -> None:
+        broker = self._holding(1000)
+        cash_before = broker.cash
+        for day, pre_close in (
+            ("20260106", 10.0),
+            ("20260107", 10.0 + EX_DATE_PRICE_TOLERANCE),
+            ("20260108", 10.0 - EX_DATE_PRICE_TOLERANCE),
+        ):
+            with self.subTest(pre_close=pre_close):
+                broker.open_day(day, {"000001.SZ": _bar(pre_close=pre_close)})
+                self.assertEqual(broker.positions["000001.SZ"].quantity, 1000)
+                self.assertEqual(broker.cash, cash_before)
+        self.assertEqual(broker.corporate_actions, [])
+
+    def test_a_recorded_dividend_without_a_reset_credits_only_the_cash(self) -> None:
+        broker = self._holding(1000)
+        cash_before = broker.cash
+        broker.open_day("20260106", {"000001.SZ": _bar(pre_close=10.0)}, {"000001.SZ": 0.2})
+        self.assertEqual(broker.positions["000001.SZ"].quantity, 1000)
+        self.assertAlmostEqual(broker.cash, cash_before + 200.0)
+        self.assertEqual(broker.corporate_actions[0].quantity_after, 1000)
+
+    def test_fractional_shares_are_paid_out_in_cash(self) -> None:
+        # 10 转 5 on 100 shares: the exchange rounds 10 / 1.5 to 6.67, so the
+        # implied 149.925 shares become 149 whole shares plus their cash value.
+        broker = self._holding(100)
+        equity_before = broker.equity()
+        broker.open_day("20260106", {"000001.SZ": _bar(pre_close=6.67)})
+        position = broker.positions["000001.SZ"]
+        self.assertEqual(position.quantity, 149)
+        [action] = broker.corporate_actions
+        self.assertAlmostEqual(action.cash_credit, 100 * 10.0 - 149 * 6.67, places=6)
+        self.assertGreater(action.cash_credit, 0.0)
+        self.assertAlmostEqual(broker.cash + 149 * 6.67, equity_before, places=6)
+
+    def test_a_held_name_without_pre_close_fails_fast(self) -> None:
+        for label, bar in (
+            ("missing_key", {key: value for key, value in _bar().items() if key != "pre_close"}),
+            ("none", _bar(pre_close=None)),
+            ("nan", _bar(pre_close=float("nan"))),
+            ("zero", _bar(pre_close=0.0)),
+        ):
+            with self.subTest(pre_close=label):
+                broker = self._holding(1000)
+                with self.assertRaisesRegex(ValueError, "pre_close"):
+                    broker.open_day("20260106", {"000001.SZ": bar})
+        # A name with no bar at all today (suspended) is simply carried.
+        broker = self._holding(1000)
+        broker.open_day("20260106", {})
+        self.assertEqual(broker.positions["000001.SZ"].quantity, 1000)
+
+    def test_an_impossible_reset_fails_fast(self) -> None:
+        broker = self._holding(1000)
+        with self.assertRaisesRegex(ValueError, "share multiplier"):
+            broker.open_day("20260106", {"000001.SZ": _bar(pre_close=4.75)}, {"000001.SZ": 12.0})
+        broker = self._holding(1000)
+        with self.assertRaisesRegex(ValueError, "cash dividend"):
+            broker.open_day("20260106", {"000001.SZ": _bar(pre_close=4.75)}, {"000001.SZ": float("nan")})
 
 
 class PositionCapTest(unittest.TestCase):

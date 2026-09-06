@@ -64,6 +64,7 @@ def _experiment(
             "symbol": ["000001.SZ"] * len(days),
             "open": [10.0] * len(days),
             "close": [10.0] * len(days),
+            "pre_close": [10.0] * len(days),
         }
     ).to_parquet(daily, index=False)
     (hitl / "params.json").write_text(
@@ -1985,7 +1986,7 @@ def test_batch_rows_compare_every_candidate_to_this_folds_own_control(tmp_path: 
     session.candidate("a", _strategy("1"))
     session.candidate("b", _strategy("22222"))
     rows = session.call("a", "b").value["candidates"]
-    assert all("vs_parent" not in row for row in rows)
+    assert all(row["vs_parent"] is None and row["vs_parent_note"] for row in rows)
 
     session = _Session(tmp_path / "with_control")
     session.backtest.evaluator = _benchmarked(session.evaluator, benchmark_return=0.01)

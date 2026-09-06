@@ -1146,7 +1146,7 @@ def test_fold_prompt_keeps_hard_boundaries_and_leaves_how_tos_mounted():
     prompt = build_system_prompt(mode="fold", experiment_facts={})
     for rule in (
         "自由检查已挂载的事实",
-        "不得从名称、日期或路径推断隐藏区间",
+        "从日期、路径、元数据和模型常识推断隐藏行情",
         "正式回测不能由自建回放替代",
         "不得用它修改策略产物、启动后台任务、sleep/等待包装或轮询状态",
     ):
@@ -1230,6 +1230,7 @@ def _all_registrable_tool_names() -> set[str]:
     from autotrade.pipelines.local_backend import (
         BatchValidateTool,
         FoldBacktestTool,
+        NullControlTool,
         SmokeBacktestTool,
     )
 
@@ -1240,6 +1241,7 @@ def _all_registrable_tool_names() -> set[str]:
         TEXT_RETRIEVE_TOOL,
         BatchValidateTool.spec.name,
         FoldBacktestTool.spec.name,
+        NullControlTool.spec.name,
         SmokeBacktestTool.spec.name,
     }
     with tempfile.TemporaryDirectory() as tmp:

@@ -387,10 +387,16 @@ def _validate_value(name: str, value: object, schema: Mapping[str, object]) -> o
     if "enum" in schema and value not in schema["enum"]:
         raise ToolSchemaError(f"{name} must be one of {schema['enum']}")
     if isinstance(value, str):
+        # The bound and the length actually sent: a bare "too long" leaves the
+        # model guessing how much to cut, so it retries blind.
         if "minLength" in schema and len(value) < int(schema["minLength"]):
-            raise ToolSchemaError(f"{name} is too short")
+            raise ToolSchemaError(
+                f"{name} is too short: {len(value)} characters, minimum {schema['minLength']}"
+            )
         if "maxLength" in schema and len(value) > int(schema["maxLength"]):
-            raise ToolSchemaError(f"{name} is too long")
+            raise ToolSchemaError(
+                f"{name} is too long: {len(value)} characters, limit {schema['maxLength']}"
+            )
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         if "minimum" in schema and value < float(schema["minimum"]):
             raise ToolSchemaError(f"{name} is below its minimum")

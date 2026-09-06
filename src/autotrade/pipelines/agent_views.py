@@ -253,6 +253,13 @@ def _nl_service_disabled(manifest: Mapping[str, object]) -> bool:
     return isinstance(replay, Mapping) and replay.get("include_text") is False
 
 
+def hard_reject_reasons(record: Mapping[str, object]) -> object:
+    """The Fold record's hard-reject reasons; rows written before the field
+    was renamed carry them as ``accept_reasons``."""
+
+    return record.get("hard_reject_reasons", record.get("accept_reasons"))
+
+
 def compact_fold_history(
     record: dict[str, object],
     *,
@@ -284,9 +291,11 @@ def compact_fold_history(
         ),
         "fold_status": record.get("fold_status"),
         "finish_reason": record.get("finish_reason"),
+        "finish_mode": record.get("finish_mode"),
         "early_stop_reason": record.get("early_stop_reason"),
+        "no_edge_reason": record.get("no_edge_reason"),
         "validation_result": _visible_metrics(record.get("validation_result")),
-        "accept_reasons": record.get("accept_reasons"),
+        "hard_reject_reasons": hard_reject_reasons(record),
         "accept_warnings": record.get("accept_warnings"),
         "backtest_summaries": backtests,
     }
@@ -383,8 +392,12 @@ def fold_development_summary(
         ),
         "fold_status": record.get("fold_status"),
         "finish_reason": record.get("finish_reason"),
+        # How the status was reached: a nominated node, the Agent's explicit
+        # no-edge finish (with its evidence), or no nomination at all.
+        "finish_mode": record.get("finish_mode"),
         "early_stop_reason": record.get("early_stop_reason"),
-        "accept_reasons": record.get("accept_reasons"),
+        "no_edge_reason": record.get("no_edge_reason"),
+        "hard_reject_reasons": hard_reject_reasons(record),
         "accept_warnings": record.get("accept_warnings"),
         "validation_result": _visible_metrics(record.get("validation_result")),
         "vs_parent": allowed_keys(record.get("vs_parent"), VS_PARENT_DELTA_KEYS),
@@ -445,8 +458,10 @@ def agent_visible_ledger_record(
         "run_id",
         "parent_strategy_artifact_id",
         "finish_reason",
+        "finish_mode",
+        "no_edge_reason",
         "fold_status",
-        "accept_reasons",
+        "hard_reject_reasons",
         "accept_warnings",
         "selected_step_id",
         "steps",
@@ -467,6 +482,8 @@ def agent_visible_ledger_record(
         "valid_decision_time",
     }
     public = {key: value for key, value in public.items() if key in allowed}
+    if "hard_reject_reasons" not in public and "accept_reasons" in record:
+        public["hard_reject_reasons"] = hard_reject_reasons(record)
     if "validation_result" in public:
         public["validation_result"] = _visible_metrics(public.get("validation_result"))
     if include_frozen_test_metrics and record.get("record_type") == "fold":
