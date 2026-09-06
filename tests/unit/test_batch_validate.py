@@ -476,7 +476,10 @@ class BatchValidateRunTest(unittest.TestCase):
             self.assertEqual(rows["also_good"]["status"], "ok")
             self.assertEqual(rows["bad"]["status"], "failed")
             self.assertIn("generate_orders exceeded", rows["bad"]["error"])
+            # No node, no result_ref and no Step: exactly what the tool
+            # description promises a failed candidate leaves behind.
             self.assertNotIn("node_id", rows["bad"])
+            self.assertNotIn("result_ref", rows["bad"])
             self.assertEqual(result.value["complete_validations"], 2)
             self.assertEqual(result.value["failed"], 1)
             # A failed attempt is recorded as a dead end and never becomes a

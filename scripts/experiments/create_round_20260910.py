@@ -1,20 +1,26 @@
 #!/usr/bin/env python
-"""Create the 2026-09-10 round: six research directions plus one model control on the quarterly walk-forward design.
+"""Create the 2026-09-10 round: six research directions on the quarterly walk-forward design.
 
 This script lives in scripts/experiments/ and supersedes the gitignored
 logs/launch/ location where earlier round definitions were stranded. One round
 definition is kept here at a time; superseded rounds stay in git history.
 
-The slate is six regular arms. factor_cs, explore_platform and explore_github
-were rebuilt on refreshed reference packs (the *_20260912 packs: A-share
-anomaly families instead of the value/reversal/growth ridge, previous-day
-mechanisms instead of the falsified limit-up playbooks, and an Alpha158 +
-LightGBM baseline to innovate on) after every arm's first-fold winner proved
-statistically weak; open_mechanism and corner_cases keep their earlier
-definitions. ml_ranker is new: a GPU-assisted machine-learning ranker arm on
-the same budgets, and the only regular arm driven end to end by the hosted
-deepseek-v4-flash (the running slots below say why). Nothing is inherited:
-every arm starts from the template.
+The slate is six arms, which fill the console's running slots exactly.
+factor_cs, explore_platform and explore_github were rebuilt on refreshed
+reference packs (the *_20260912 packs: A-share anomaly families instead of the
+value/reversal/growth ridge, previous-day mechanisms instead of the falsified
+limit-up playbooks, and an Alpha158 + LightGBM baseline to innovate on) after
+every arm's first-fold winner proved statistically weak; open_mechanism and
+corner_cases keep their earlier definitions. ml_ranker is new: a GPU-assisted
+machine-learning ranker arm on the same budgets. Nothing is inherited: every
+arm starts from the template.
+
+Every model role of every arm runs on the local qwen-3.8-27b-fp8: Fold parent,
+Meta parent, sub-agents, strategy analysis, NL and compaction alike. That is
+already the console creation default for all six roles, so this round overrides
+none of them and pins them in EXPECTED_DEFAULTS instead. The hosted DeepSeek
+models stay selectable in the catalog, but no arm uses one; the arms differ
+only in direction, reference pack and GPU request.
 
 ml_ranker is the only arm with gpu_count=1, and that request travels with the
 experiment: it attaches a GPU to the Agent's persistent session sandbox
@@ -24,13 +30,6 @@ may really train on the GPU. The card is shared with the concurrent replays,
 and the same strategy has to replay unchanged in an experiment without one, so
 the directive and the pack require the code to probe the device and keep a
 working CPU path.
-
-A seventh arm, factor_cs_allflash, is derived from the factor_cs entry: same
-reference pack and same direction text, but every model role on
-deepseek-v4-flash. It is the control for the model split the five locally
-served arms run (only the Meta parent on DeepSeek; Fold, sub-agent, analysis,
-NL and compaction on local Qwen), so a difference between the two factor_cs
-arms is a difference of models, not of direction.
 
 What this round changes is the research design. The Development window is read
 in quarters and every Fold is validated on the trailing four quarters ending at
@@ -60,15 +59,12 @@ console applies on POST /api/experiments (ExperimentManager.create_experiment's
 key, id and stamp rules plus the worker's own resolve_worker_options
 pre-flight), and additionally refuses a directive the PRIOR calendar policy
 would reject. The console's deployment-state checks -- an experiment directory
-that already exists and a free running slot (the five locally served arms and
-the hosted ml_ranker arm fill webui.manager.MAX_RUNNING_EXPERIMENTS exactly:
-five is the measured band of the local vLLM gateway and the sixth slot is
-meant for an experiment that opens no local stream, so the allflash control
-cannot run beside them and every experiment of the previous round has to be
-stopped first) -- can only be decided against the live server and still happen
-at POST time, so
---dry-run answers whether the parameters are acceptable, not whether the server
-will take the experiment now. It needs no PIT views either: the pre-flight
+that already exists and a free running slot (the six arms fill
+webui.manager.MAX_RUNNING_EXPERIMENTS exactly, so every experiment of the
+previous round has to be stopped first) -- can only be decided against the
+live server and still happen at POST time, so --dry-run answers whether the
+parameters are acceptable, not whether the server will take the experiment
+now. It needs no PIT views either: the pre-flight
 deliberately skips the calendar-dependent fold schedule and every data root, so
 building the quarterly views is a separate step
 (scripts/data/prebuild_pit_views_seed.py) and never a hidden requirement here.
@@ -136,6 +132,13 @@ EXPECTED_DEFAULTS: dict[str, object] = {
     "inference_time": "08:30",
     "strategy_period": "day",
     "inherit_from": "",
+    # All six model roles. The round runs entirely on the local model and
+    # overrides none of them, so the console default is what actually decides
+    # them; spelled out as literals on purpose, since a rename of the local
+    # model is exactly the drift this has to catch.
+    "model": "qwen-3.8-27b-fp8",
+    "meta_model": "qwen-3.8-27b-fp8",
+    "subagent_model": "qwen-3.8-27b-fp8",
     "analysis_model": "qwen-3.8-27b-fp8",
     "nl_model": "qwen-3.8-27b-fp8",
     "compact_model": "qwen-3.8-27b-fp8",
@@ -148,13 +151,9 @@ COMMON_OVERRIDES: dict[str, object] = {
     # session sandbox and the strategy container of every formal replay alike;
     # ml_ranker overrides this with 1.
     "gpu_count": 0,
-    # Six roles: Meta parent on DeepSeek; Fold parent and sub-agents on local
-    # Qwen. Analysis, NL and compaction stay on the console's local default
-    # (pinned in EXPECTED_DEFAULTS so a default drift cannot silently move them).
-    # ml_ranker and the allflash control put every role on ALL_FLASH_ROLES.
-    "model": "qwen-3.8-27b-fp8",
-    "meta_model": "deepseek-v4-flash",
-    "subagent_model": "qwen-3.8-27b-fp8",
+    # No model role is overridden: every one of the six already defaults to the
+    # local model, and EXPECTED_DEFAULTS pins that so a default drift cannot
+    # silently move an arm onto a hosted model.
     # Quarterly walk-forward: 13 Folds, each validated on the trailing four
     # quarters ending at its own quarter, so every step adds exactly one new
     # quarter and the chain never revisits a window.
@@ -207,22 +206,6 @@ OPEN_MECHANISM_PRIOR_DIRECTIVE = (
     "非对称执行只是类型，不是指定答案。本轮以机制新颖与可证伪为目标，不要求稳定或正收益；证伪后如实结束该方向。"
     "仍须遵守 PIT、禁止硬编码股票或日期、真实回测 ABI 与诚实失败。本指令不放宽提交合同、毕业裁决的回撤上限或 finish_fold。"
 )
-
-# Every model role on the hosted deepseek-v4-flash. Such an experiment opens no
-# local vLLM stream, which is what the console's sixth running slot is for
-# (webui.manager.MAX_RUNNING_EXPERIMENTS): the cap cannot tell local from
-# hosted, so exactly one of the six running arms may be an all-hosted one.
-ALL_FLASH_ROLES: dict[str, str] = {
-    role: "deepseek-v4-flash"
-    for role in (
-        "model",
-        "meta_model",
-        "subagent_model",
-        "analysis_model",
-        "compact_model",
-        "nl_model",
-    )
-}
 
 ROUND: dict[str, dict[str, object]] = {
     "factor_cs_20260910": {
@@ -290,9 +273,6 @@ ROUND: dict[str, dict[str, object]] = {
         # experiment without one, so the directive demands a device probe and
         # a working CPU path.
         "gpu_count": 1,
-        # The hosted arm: every model role on deepseek-v4-flash, so it takes
-        # the running slot the local gateway cannot serve.
-        **ALL_FLASH_ROLES,
         "workspace_reference": "configs/workspace_refs/ml_ranker_20260912",
         "fold_exploration_directive": "\n".join(
             [
@@ -351,14 +331,6 @@ ROUND: dict[str, dict[str, object]] = {
             ]
         ),
     },
-}
-
-# The model control: the factor_cs direction and reference pack, driven end to
-# end by deepseek-v4-flash. Derived from the factor_cs entry so the two arms
-# can only differ in their models.
-ROUND["factor_cs_allflash_20260910"] = {
-    **ROUND["factor_cs_20260910"],
-    **ALL_FLASH_ROLES,
 }
 
 # Reported for every arm on --dry-run: what this round decides, plus the

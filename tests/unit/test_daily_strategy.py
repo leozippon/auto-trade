@@ -380,7 +380,7 @@ def test_strategy_loader_blocks_environment_and_network_modules(tmp_path: Path):
         "import pandas as pd\ndef generate_orders(context):\n"
         "    pd.read_parquet(context.asof_dir + '/daily.parquet')\n    return []"
     )
-    with pytest.raises(StrategyLoadError, match="only below"):
+    with pytest.raises(StrategyLoadError, match="absolute path literal to read_parquet"):
         validate_strategy_source(
             "import pandas as pd\ndef generate_orders(context):\n"
             "    pd.read_parquet('/etc/passwd')\n    return []"

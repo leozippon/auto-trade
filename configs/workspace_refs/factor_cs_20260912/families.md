@@ -88,7 +88,7 @@ rz_chg_20 = (rzye_{T-2} / rzye_{T-22} - 1)，再除以同期 circ_mv 变化以�
 | 名称 | 来源（`fundamentals` 域，按各版本自己的 `ann_date` 可见） | 方向 |
 | --- | --- | ---: |
 | `q_np_yoy` | `fina_indicator_vip.q_netprofit_yoy`（单季净利同比，百分数）最新可见值 | + |
-| `express_yoy` | `express_vip.yoy_net_profit` 最新可见值 | + |
+| `express_yoy` | `express_vip` 最新可见值的 `n_income / yoy_net_profit - 1`（`yoy_net_profit` 列实为上年同期净利润水平，单位元，不是同比百分数；直接排序它得到的是盈利规模代理） | + |
 | `forecast_mid` | `forecast_vip` 的 `(p_change_min + p_change_max)/2`，只取 `available_at` 最新版本 | + |
 | `age` | 距最新公告的交易日数，超过 60 日的值降权或置空 | — |
 

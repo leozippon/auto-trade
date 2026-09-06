@@ -33,6 +33,8 @@ from autotrade.environment.tools import (
     WriteFileTool,
 )
 from autotrade.environment.tools.shell import (
+    ARGV_ALIAS_NOTE,
+    ARGV_SPLIT_NOTE,
     ARGV_STRING_NOTE,
     ARGV_TOO_LONG_HINT,
     DEFAULT_SHELL_TIMEOUT_SECONDS,
@@ -251,24 +253,59 @@ class ShellToolTest(unittest.TestCase):
             self.assertTrue(plain.ok, plain.error)
             self.assertNotIn("argv_normalized", plain.value)
 
-    def test_shell_refuses_a_command_string_with_that_command_as_an_array(self) -> None:
+    def test_shell_splits_a_command_string_and_names_the_repair(self) -> None:
+        """The command line and the command under `cmd` are the same call in a
+        different wrapper: both run, and the result says what was rewritten."""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            _, _, workspace = build_sandbox(Path(tmp))
+            runner = FakeRunner(CommandResult(0, stdout="ok"))
+            registry = ToolRegistry([SandboxShellTool(workspace, runner)])
+            result = registry.invoke("shell", {"argv": "grep -n 'a b' notes.txt"})
+            self.assertTrue(result.ok, result.error)
+            self.assertEqual(runner.calls[0][0], ("grep", "-n", "a b", "notes.txt"))
+            self.assertEqual(result.value["argv_normalized"], ARGV_SPLIT_NOTE)
+            aliased = registry.invoke("shell", {"cmd": "ls -la output"})
+            self.assertTrue(aliased.ok, aliased.error)
+            self.assertEqual(runner.calls[1][0], ("ls", "-la", "output"))
+            self.assertIn(ARGV_ALIAS_NOTE.format(key="cmd"), aliased.value["argv_normalized"])
+            self.assertIn(ARGV_SPLIT_NOTE, aliased.value["argv_normalized"])
+            listed = registry.invoke("shell", {"command": ["ls", "output"]})
+            self.assertTrue(listed.ok, listed.error)
+            self.assertEqual(runner.calls[2][0], ("ls", "output"))
+            # An alias that does not resolve the call on its own keeps the
+            # schema's own error, which names the fields this tool has.
+            ambiguous = registry.invoke("shell", {"cmd": "ls", "command": "ls"})
+            self.assertFalse(ambiguous.ok)
+            self.assertIn("command", ambiguous.error)
+
+    def test_shell_refuses_a_command_string_it_cannot_run_faithfully(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             _, _, workspace = build_sandbox(Path(tmp))
             runner = FakeRunner()
             registry = ToolRegistry([SandboxShellTool(workspace, runner)])
-            result = registry.invoke("shell", {"argv": "ls -la output"})
-            self.assertFalse(result.ok)
-            self.assertIn('send argv: ["ls", "-la", "output"]', result.error)
-            self.assertIn("correct call example", result.value["retry_hint"])
+            # No shell is involved, so an operator would become a literal word.
+            for command, operator in (
+                ("ls output | wc -l", "|"),
+                ("python probe.py > out.txt", ">"),
+                ("python probe.py 2>/dev/null", "2>/dev/null"),
+                ("mkdir a && mkdir b", "&&"),
+            ):
+                refused = registry.invoke("shell", {"argv": command})
+                self.assertFalse(refused.ok, command)
+                self.assertIn(f"shell operator `{operator}`", refused.error)
+                self.assertIn('["bash", "-lc"', refused.value["retry_hint"])
+            unbalanced = registry.invoke("shell", {"argv": "echo 'unbalanced"})
+            self.assertFalse(unbalanced.ok)
+            self.assertIn("cannot be split", unbalanced.error)
             # A JSON array of anything but non-empty strings is not repairable,
             # and splitting it as a command line would suggest nonsense, so the
             # refusal states what the array must hold instead.
             for argv in ('["ls", 3]', "[]", "[1, 2]", '["ls"', '{"argv": ["ls"]}'):
                 refused = registry.invoke("shell", {"argv": argv})
                 self.assertFalse(refused.ok, argv)
-                self.assertIn("must be an array of separate strings", refused.error)
+                self.assertIn("array of separate strings", refused.error)
                 self.assertIn("elements are all non-empty strings", refused.error)
-                self.assertNotIn("send argv:", refused.error)
             self.assertEqual(runner.calls, [])
 
     def test_shell_answers_an_over_long_argv_element_with_the_file_recipe(self) -> None:
@@ -1354,7 +1391,7 @@ class ToolResultContractTest(unittest.TestCase):
             _, _, workspace = build_sandbox(Path(tmp + "/shell"))
             registry = ToolRegistry([*registry._tools.values(), SandboxShellTool(workspace, FakeRunner())])
             for name, arguments, needle in (
-                ("shell", {"argv": "ls -la"}, '"argv": ["python", "-c", "print(1)"]'),
+                ("shell", {"argv": "ls -la | wc -l"}, '"argv": ["python", "-c", "print(1)"]'),
                 ("shell", {"argv": ["python", "-c", "x" * 1001]}, "argv[2] is too long; correct call example"),
                 ("shell", {"argv": ["ls"], "timeout_seconds": 900}, "above its maximum; correct call example"),
                 ("edit_file", {"path": "output/main.py", "old_text": "a", "new_text": "b", "offset": 3}, "unknown argument(s): ['offset']; correct call example: {\"path\": \"output/main.py\""),

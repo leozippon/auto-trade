@@ -220,7 +220,7 @@ def test_local_worker_runs_real_baseline_valid_test_and_heldout(tmp_path: Path):
 
 def test_worker_rejects_llm_mode_without_provider_credentials(tmp_path: Path):
     repo, experiment = _experiment(tmp_path, developer_mode="llm")
-    with pytest.raises(ValueError, match="requires the gateway API key"):
+    with pytest.raises(ValueError, match="requires an API key: set VLLM_API_KEY"):
         load_worker_options(experiment, repo_root=repo)
 
 
@@ -342,28 +342,41 @@ def test_worker_canonicalizes_all_legacy_model_roles_without_rewriting_params(
     assert path.read_bytes() == persisted
 
 
-def test_worker_ignores_historical_endpoint_param_and_uses_trusted_env(
+def test_worker_ignores_historical_endpoint_and_credential_params(
     tmp_path: Path,
     monkeypatch,
 ):
+    """Neither endpoint nor credential can be redirected by a params file.
+
+    Both keys are retired operator overrides that historical snapshots may
+    still carry. A ``llm_api_key_env`` naming any other variable in the
+    process environment would otherwise send that secret to the provider as a
+    bearer token, which is exactly what the trusted profile exists to prevent.
+    """
+
     from autotrade.pipelines.worker import _ALLOWED_PARAMS, NON_PERSISTABLE_PARAMS
 
     repo, experiment = _experiment(tmp_path, developer_mode="llm")
     path = experiment / "hitl/params.json"
     params = json.loads(path.read_text(encoding="utf-8"))
     params["llm_base_url"] = "https://untrusted-snapshot.example.test/v1"
+    params["llm_api_key_env"] = "UNRELATED_SECRET"
+    params["meta_model"] = "deepseek-v4-pro"
     path.write_text(json.dumps(params), encoding="utf-8")
+    monkeypatch.setenv("UNRELATED_SECRET", "not-a-provider-credential")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "deepseek-test-key")
     monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
     monkeypatch.setenv("VLLM_BASE_URL", "https://trusted-runtime.example.test/v1")
 
     settings = load_worker_options(experiment, repo_root=repo).llm
     assert settings is not None
-    assert "llm_base_url" in NON_PERSISTABLE_PARAMS
-    assert "llm_base_url" not in _ALLOWED_PARAMS
-    assert (
-        settings.build_gateway("main").config.base_url
-        == "https://trusted-runtime.example.test/v1"
-    )
+    for key in ("llm_base_url", "llm_api_key_env"):
+        assert key in NON_PERSISTABLE_PARAMS
+        assert key not in _ALLOWED_PARAMS
+    main = settings.build_gateway("main").config
+    assert main.base_url == "https://trusted-runtime.example.test/v1"
+    assert main.api_key == "local-test-key"
+    assert settings.build_gateway("meta").config.api_key == "deepseek-test-key"
 
 
 def test_worker_resolves_mixed_local_and_deepseek_roles_with_real_timeout(
@@ -409,6 +422,10 @@ def test_worker_resolves_mixed_local_and_deepseek_roles_with_real_timeout(
     assert analysis.config.max_tokens == 6_000
     assert main.config.timeout_seconds == 120
     assert main.config.reasoning_effort == "xhigh"
+    # The analysis model is not one of this dataclass's roles: both call sites
+    # pass it, and any default here could only be another role's model.
+    with pytest.raises(ValueError, match="unknown model role: analysis"):
+        options.llm.model_for("analysis")
 
 
 def test_worker_applies_local_output_cap_to_each_role_budget(
@@ -1713,7 +1730,7 @@ def test_preflight_narrows_exactly_three_things_and_nothing_else(
 
     # (2) the API key: deployment state, reported by /api/health.
     assert resolve(True) is not None
-    with pytest.raises(ValueError, match="requires the gateway API key"):
+    with pytest.raises(ValueError, match="requires an API key: set VLLM_API_KEY"):
         resolve(False)
 
     monkeypatch.setenv("VLLM_API_KEY", "local-test-key")

@@ -16,7 +16,7 @@
 - 写脚本和运行脚本用同一个不带 `workspace/` 前缀的相对路径。`write_file` 会把多余的 `workspace/` 前缀吃掉，`shell` 不会：两边写法不一致，写入成功、运行时却「文件不存在」。以 `write_file` 返回的那个路径为准。
 - 可写根只有 `workspace` / `output` / `models`；快照、父产物、结果、步骤树等根都是只读的，填给写入工具会被直接拒。
 - 先用 `glob` 在授权根内定位，再用 `read_file` 分页读。大结果会落盘并返回可续读的根与路径，按它续读，不要重跑一遍再截断一次。
-- 正式策略里不写死任何宿主路径：运行时只用 `context.snapshot_dir` / `context.asof_dir` / `context.state_dir` / `context.models_dir` 拼出域名目录，且这个拼接必须是读写调用的首个位置参数。
+- 正式策略里不写死任何宿主路径：运行时只用 `context.snapshot_dir` / `context.asof_dir` / `context.state_dir` / `context.models_dir` 拼出域名目录，怎么拼（辅助函数、变量、f-string 都行）不受限制，但静态检查会直接拒绝写死的绝对路径字面量，以及写到只读根上的写调用。
 - 委派时留意：描述子代理可写范围时用的是沙箱绝对路径，而它的第一次 `read_file` 很容易照抄那个前缀。task 里要么把两套写法都写清，要么只给相对路径。
 
 ## 教训

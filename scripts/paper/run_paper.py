@@ -81,11 +81,6 @@ def build_parser() -> argparse.ArgumentParser:
         default=MODEL_CHOICES[0],
         help="Set to enable evidence-grounded NL answers; empty keeps local search only.",
     )
-    parser.add_argument(
-        "--nl-api-key-env",
-        default=None,
-        help="Optional override of the DeepSeek credential variable; unset resolves the key from the NL model's profile.",
-    )
     parser.add_argument("--nl-env-file", type=Path, default=Path(".env"))
     parser.add_argument("--nl-max-results", type=int, default=8)
     parser.add_argument("--nl-max-calls-per-decision", type=int, default=10)
@@ -115,7 +110,6 @@ def main(argv: list[str] | None = None) -> int:
             nl_llm = build_model_gateway(
                 args.nl_model,
                 env_file=args.nl_env_file,
-                deepseek_api_key_env=args.nl_api_key_env or "DEEPSEEK_API_KEY",
                 thinking_enabled=False,
             )
         provider = ResearchPITSnapshotProvider(

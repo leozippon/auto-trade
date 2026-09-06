@@ -184,7 +184,6 @@ _ALLOWED_PARAMS = {
     "meta_sandbox_image_keep",
     "experiments_root",
     "work_root",
-    "llm_api_key_env",
     "llm_env_file",
     "llm_model",
     "llm_timeout_seconds",
@@ -227,15 +226,15 @@ REASONING_EFFORTS = ("low", "medium", "xhigh")
 DEFAULT_REASONING_EFFORT = "xhigh"
 LEGACY_REASONING_EFFORTS = {"high": "xhigh", "max": "xhigh"}
 
-# Historical snapshots may contain this former operator override.  It is
+# Historical snapshots may contain these former operator overrides. They are
 # deliberately ignored rather than interpreted or exposed: provider endpoints
-# now come only from the trusted model profile's fixed environment key.
-NON_PERSISTABLE_PARAMS = frozenset({"llm_base_url"})
+# and credentials now come only from the trusted model profile's fixed
+# environment keys, so no experiment parameter can redirect either.
+NON_PERSISTABLE_PARAMS = frozenset({"llm_api_key_env", "llm_base_url"})
 
 
 @dataclass(frozen=True)
 class LLMWorkerSettings:
-    api_key_env: str
     env_file: Path
     model: str
     meta_model: str
@@ -259,13 +258,19 @@ class LLMWorkerSettings:
     compact_token_threshold: int | None = None
 
     def model_for(self, role: str) -> str:
+        """The model of a role this dataclass owns.
+
+        ``analysis`` is deliberately absent: its model lives on
+        ``InteractiveWorkerOptions``, and both call sites pass it explicitly.
+        A default here could only be another role's model.
+        """
+
         models = {
             "main": self.model,
             "meta": self.meta_model,
             "subagent": self.subagent_model,
             "nl": self.nl_model,
             "compact": self.compact_model,
-            "analysis": self.model,
         }
         if role not in models:
             raise ValueError(f"unknown model role: {role}")
@@ -304,7 +309,6 @@ class LLMWorkerSettings:
         return build_model_gateway(
             selected_model,
             env_file=self.env_file,
-            deepseek_api_key_env=self.api_key_env,
             timeout_seconds=self.timeout_seconds,
             max_retries=self.max_retries if max_retries is None else max_retries,
             retry_backoff_seconds=self.retry_backoff_seconds,
@@ -1607,9 +1611,6 @@ def _llm_settings(
     *,
     preflight: bool = False,
 ) -> tuple[LLMWorkerSettings, SandboxSpec]:
-    api_key_env = str(params.get("llm_api_key_env") or "DEEPSEEK_API_KEY")
-    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", api_key_env):
-        raise ValueError("llm_api_key_env must be an environment variable name")
     env_file = _path_value(
         params.get("llm_env_file", ".env"), repository, "llm_env_file"
     )
@@ -1652,7 +1653,6 @@ def _llm_settings(
         ),
     )
     settings = LLMWorkerSettings(
-        api_key_env=api_key_env,
         env_file=env_file,
         model=fold_model,
         meta_model=meta_model,

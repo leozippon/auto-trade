@@ -1,12 +1,13 @@
-"""2026-09-10 arms: the five locally served arms put only the Meta parent on
-DeepSeek-v4-flash, the ML ranker arm and the allflash control put every role
-on it, only the ML ranker arm takes a GPU, and every reference pack exists."""
+"""2026-09-10 arms: every model role of every arm is the local Qwen, the six
+arms fill the console's running slots exactly, only the ML ranker arm takes a
+GPU, and every reference pack exists."""
 
 from __future__ import annotations
 
 from autotrade.environment.llm.model_profiles import LOCAL_QWEN_MODEL
+from autotrade.webui.manager import MAX_RUNNING_EXPERIMENTS
 from scripts.experiments.create_round_20260910 import (
-    ALL_FLASH_ROLES,
+    COMMON_OVERRIDES,
     EXPECTED_DEFAULTS,
     REPO_ROOT,
     ROUND,
@@ -15,15 +16,8 @@ from scripts.experiments.create_round_20260910 import (
     request_params,
 )
 
-FLASH = "deepseek-v4-flash"
-ALLFLASH_ID = "factor_cs_allflash_20260910"
 ML_ID = "ml_ranker_20260910"
-HOSTED_IDS = (ML_ID, ALLFLASH_ID)
-LOCAL_IDS = tuple(
-    experiment_id for experiment_id in ROUND if experiment_id not in HOSTED_IDS
-)
-# Every model role a create request carries; a hosted arm must cover them all,
-# or it opens a local stream the console's sixth slot cannot afford.
+# Every model role a create request carries.
 MODEL_ROLES = (
     "model",
     "meta_model",
@@ -34,42 +28,32 @@ MODEL_ROLES = (
 )
 
 
-def _assert_local_roles(params: dict[str, object]) -> None:
-    assert params["meta_model"] == FLASH
-    for role in MODEL_ROLES:
-        if role != "meta_model":
-            assert params[role] == LOCAL_QWEN_MODEL, role
+def test_every_arm_runs_every_role_on_the_local_model() -> None:
+    """Cost policy: no arm may open a hosted stream.
 
-
-def _assert_hosted_roles(params: dict[str, object]) -> None:
-    for role in MODEL_ROLES:
-        assert params[role] == FLASH, role
-
-
-def test_local_arms_use_flash_only_for_meta() -> None:
-    """Five locally served arms sit at the top of the local gateway's measured
-    band; webui.manager.MAX_RUNNING_EXPERIMENTS keeps the sixth slot for an
-    experiment that opens no local stream."""
+    The round overrides no model role, so the guarantee rests entirely on the
+    console defaults -- which is why EXPECTED_DEFAULTS pins all six and
+    check_console_defaults refuses a drift. Asserting on request_params (what
+    is POSTed) and on normalize (what the worker pre-flight accepts) checks
+    the value that actually reaches params.json, not just the constant.
+    """
     assert LOCAL_QWEN_MODEL == "qwen-3.8-27b-fp8"
-    assert len(LOCAL_IDS) == 5
-    assert EXPECTED_DEFAULTS["analysis_model"] == LOCAL_QWEN_MODEL
+    assert set(MODEL_ROLES).isdisjoint(COMMON_OVERRIDES)
     check_console_defaults()
-    for experiment_id in LOCAL_IDS:
+    for role in MODEL_ROLES:
+        assert EXPECTED_DEFAULTS[role] == LOCAL_QWEN_MODEL, role
+    for experiment_id in ROUND:
         params = request_params(experiment_id)
-        _assert_local_roles(params)
-        _assert_local_roles(normalize(params))
+        merged = normalize(params)
+        for role in MODEL_ROLES:
+            assert params[role] == LOCAL_QWEN_MODEL, (experiment_id, role)
+            assert merged[role] == LOCAL_QWEN_MODEL, (experiment_id, role)
 
 
-def test_hosted_arms_put_every_role_on_flash() -> None:
-    """The ML ranker arm is the sixth running arm, so every role -- not only
-    the conversation ones -- is hosted; the allflash control follows the same
-    mapping. The offline pre-flight must accept a hosted arm that also asks
-    for a GPU: model choice and gpu_count are independent knobs."""
-    assert set(ALL_FLASH_ROLES) == set(MODEL_ROLES)
-    for experiment_id in HOSTED_IDS:
-        params = request_params(experiment_id)
-        _assert_hosted_roles(params)
-        _assert_hosted_roles(normalize(params))
+def test_the_round_fills_the_consoles_running_slots_exactly() -> None:
+    """A seventh arm could not be started beside the other six: the console
+    refuses a create or resume past MAX_RUNNING_EXPERIMENTS."""
+    assert len(ROUND) == MAX_RUNNING_EXPERIMENTS
 
 
 def test_only_the_ml_ranker_arm_takes_a_gpu_and_every_pack_exists() -> None:

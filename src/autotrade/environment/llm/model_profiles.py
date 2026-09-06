@@ -102,15 +102,17 @@ def _qwen_reasoning_effort(value: str | None) -> str:
     }.get(value or "", "xhigh")
 
 
-def _gateway_api_key(env_file: str | Path, *, required: bool) -> str:
-    """Resolve the local gateway key from the environment variable or env file."""
+def _profile_api_key(
+    profile: ModelProfile, model: str, env_file: str | Path, *, required: bool
+) -> str:
+    """Resolve a provider's credential from the name its profile fixes."""
 
-    key = load_env_value(_VLLM_PROFILE.api_key_env, env_file)
+    key = load_env_value(profile.api_key_env, env_file)
     if key or not required:
         return key
     raise ValueError(
-        f"model {LOCAL_QWEN_MODEL} requires the gateway API key: set "
-        f"{_VLLM_PROFILE.api_key_env} in the environment or {env_file}"
+        f"model {model} requires an API key: set {profile.api_key_env} in the "
+        f"environment or {env_file}"
     )
 
 
@@ -136,7 +138,6 @@ def build_model_gateway(
     model: str,
     *,
     env_file: str | Path = ".env",
-    deepseek_api_key_env: str = "DEEPSEEK_API_KEY",
     timeout_seconds: float = 600.0,
     max_retries: int = DEFAULT_LLM_MAX_RETRIES,
     retry_backoff_seconds: float = DEFAULT_LLM_RETRY_BACKOFF_SECONDS,
@@ -149,23 +150,19 @@ def build_model_gateway(
 ) -> LLMProxy:
     """Build one role gateway from a catalog model name.
 
-    Endpoint environment keys and local credential names are fixed by the
-    trusted model profile; neither can be supplied by experiment parameters.
+    Endpoint and credential environment keys are fixed by the trusted model
+    profile for every provider; neither can be supplied by experiment
+    parameters, so no configuration can point the Authorization header at a
+    secret the profile did not name.
     """
 
     model = canonicalize_model_name(model)
     profile = model_profile(model)
     effective_max_tokens = effective_max_output_tokens(model, max_tokens)
-    if profile.provider == "deepseek":
-        key = load_env_value(deepseek_api_key_env, env_file)
-        if not key and require_credentials:
-            raise ValueError(
-                f"model {model} requires an API key in "
-                f"{deepseek_api_key_env} or {env_file}"
-            )
-        key = key or "preflight"
-    else:
-        key = _gateway_api_key(env_file, required=require_credentials) or "preflight"
+    key = (
+        _profile_api_key(profile, model, env_file, required=require_credentials)
+        or "preflight"
+    )
     base_url = (
         load_env_value(profile.base_url_env, env_file)
         if profile.base_url_env is not None

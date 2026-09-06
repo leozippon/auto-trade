@@ -84,12 +84,41 @@ def test_prompts_define_no_edge_pre_registration_and_meta_fold_labels() -> None:
     assert "需要基线就自己跑一次" not in fold
     assert "只读审计不在 Validation 的关键路径上" in fold
     assert '`["python", "/mnt/tools/screen.py", "--help"]`' in guardrails
+    # The objective is stated once, at the top of the role section, and the
+    # procedure is framed as protecting that judgement, not replacing it.
+    role = fold[: fold.index("# 工具")]
+    assert "目标是找到真实、可部署的边际" in role and "不是替代它" in role
+    # Mechanism family is defined once; a different estimator on the same
+    # features no longer counts as structurally different.
+    assert "机制家族指收益来源的经济解释" in guardrails
+    assert "同一特征集换个估计器不算结构不同" in guardrails
+    assert "另一类模型" not in fold
+    # One worked pre-registration example, structurally unlike the template.
+    assert "示例（只示形式）" in guardrails and "无预告的匹配组" in guardrails
+    # Enforced preconditions sit where the tool is described.
+    assert "每条不超过 500 字符" in guardrails
+    assert "弃权同样要求本会话至少有一次完整 Validation" in contract
+    assert "本实验自己的 skills 不是目标" in fold
+    # Each shared rule has one home: the tie-break, the one-third threshold
+    # and the warn-is-not-selection sentence each appear exactly once.
+    assert fold.count("子区间一致性") == 1
+    assert fold.count("三分之一") == 1
+    assert fold.count("不是选择标准") == 1
+    # Delegating a candidate carries its hypothesis and falsification rule.
+    assert "再写进它的假设与证伪条件" in fold
 
     meta = build_system_prompt(mode="meta")
+    assert "目标是真实、可部署的边际" in meta
+    assert "子区间一致性" not in meta
     assert "描述的是本次 Meta 之后即将开始的 Fold" in meta
     assert "`development_history.fold_reviews[]`" in meta
     assert "两者窗口不同不是数据缺陷" in meta
     prior_rules = meta[meta.index("# PRIOR") : meta.index("# 守则")]
+    # Every history entry carries the host statistics: earlier Folds are
+    # verifiable and their figures are carried forward or corrected, never
+    # dropped as outside the review window.
+    assert "`fold_validation_history[]`" in prior_rules
+    assert "不得以不在审查窗口或「不可核」为由丢弃" in prior_rules
     for clause in (
         # What each reviewed Fold froze is read from the ledger, never from the
         # Fold session's own narrative (a Meta once asserted "nothing frozen"
@@ -948,6 +977,79 @@ def test_development_history_lists_each_fold_once(tmp_path: Path) -> None:
         if isinstance(row, dict) and "backtest_summaries" in row
     ]
     assert len(compact_rows) == 1
+
+
+def test_history_keeps_each_fold_statistics_after_its_review_window_closes(
+    tmp_path: Path,
+) -> None:
+    """An older Fold's statistics stay readable once its window has passed.
+
+    While only ``fold_reviews`` carried ``null_control`` /
+    ``selection_statistics`` / ``vs_parent`` / ``parent_control``, two
+    consecutive Meta generations discarded their predecessor's (correct)
+    figures for an earlier Fold as unverifiable, and the record of how an
+    edge decays across Folds was lost every cycle.
+    """
+
+    ref_store = AgentRefStore(tmp_path / "experiment")
+    older = _fold_record("fold_a", "run_a")
+    older.update(
+        {
+            "frozen_strategy_artifact_id": "raw_strategy_id_a",
+            "null_control": {"excess_percentile": 0.48, "observed_excess": 0.2},
+            "selection_statistics": {
+                "candidates_evaluated": 10,
+                "deflated_sharpe_probability": 0.23,
+                "trials": 10,
+            },
+            "vs_parent": {"beats_parent": False, "excess_return_delta": -0.01},
+            "parent_control": {
+                "status": "ok",
+                "step_result": {
+                    "label": "2023Q1",
+                    "sharpe": 0.2,
+                    "benchmark": {"excess_return": -0.0417},
+                },
+                "null_control": {
+                    "excess_percentile": 0.596,
+                    "step": {"excess_percentile": 0.592},
+                },
+            },
+        }
+    )
+    records = [
+        _meta_record("run_m1"),
+        older,
+        _meta_record("run_m2", "epoch_001_after_fold_001"),
+        _fold_record("fold_b", "run_b"),
+    ]
+
+    history, _sidecars = _development_inputs(records, ref_store=ref_store)
+
+    # The window holds only the newer Fold; the older one is history alone.
+    assert [row["fold_id"] for row in history["fold_reviews"]] == [
+        ref_store.get_or_create("fold", "fold_b")
+    ]
+    entry = next(
+        row
+        for row in history["fold_validation_history"]
+        if row["fold_id"] == ref_store.get_or_create("fold", "fold_a")
+    )
+    assert entry["null_control"]["excess_percentile"] == 0.48
+    assert entry["selection_statistics"]["deflated_sharpe_probability"] == 0.23
+    assert entry["selection_statistics"]["trials"] == 10
+    assert entry["vs_parent"]["beats_parent"] is False
+    assert entry["frozen_strategy_artifact_id"] == ref_store.get_or_create(
+        "strategy", "raw_strategy_id_a"
+    )
+    # The inherited parent's new-period row and the null percentile of that
+    # same span: the one forward result a trailing window holds.
+    parent_control = entry["parent_control"]
+    assert parent_control["step_result"]["benchmark"]["excess_return"] == -0.0417
+    assert parent_control["null_control"]["step"]["excess_percentile"] == 0.592
+    # Host ids never cross the boundary, here as anywhere else.
+    assert "raw_strategy_id_a" not in str(entry)
+    assert "fold_a" not in str(entry)
 
 
 def test_agent_process_summary_counts_are_bounded_and_redacted() -> None:

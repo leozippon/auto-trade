@@ -1423,6 +1423,75 @@ def test_a_failing_fold_run_records_attempt_failed_and_clears_its_marker(tmp_pat
     assert markers.recover(ledger) == []
 
 
+def test_a_terminated_fold_run_records_attempt_failed_before_it_exits(tmp_path: Path):
+    """A killed worker must not take its session out of the ledger with it.
+
+    ``run_interactive_experiment`` turns SIGTERM into ``SystemExit`` so the
+    pipeline can unwind, and ``SystemExit`` is not an ``Exception``: while the
+    handler caught only ``Exception``, a terminated session appended no
+    ``attempt_failed`` and the ``finally`` still deleted its marker, so hours
+    of work left no trace anywhere in the ledger. Two real sessions were lost
+    this way.
+    """
+
+    pipeline, fold, ledger = _pipeline_with_evaluator(tmp_path, Evaluator())
+
+    def terminated_developer(_request):
+        raise SystemExit(143)
+
+    pipeline.developer = terminated_developer
+    with pytest.raises(SystemExit):
+        pipeline.run_fold("epoch_001", fold, parent=None)
+
+    failed = [row for row in ledger.read() if row["record_type"] == "attempt_failed"]
+    assert len(failed) == 1
+    assert failed[0]["phase"] == "fold"
+    assert failed[0]["session_key"] == fold_session_key("epoch_001", fold.fold_id)
+    assert failed[0]["error"] == "SystemExit: 143"
+    markers = RunMarkers(pipeline.config.experiment_dir)
+    assert sorted(markers.root.glob("*.json")) == []
+    # The in-process record is the only one; recovery must not add a second.
+    assert markers.recover(ledger) == []
+
+
+def test_a_fold_run_keeps_its_marker_when_its_failure_cannot_be_recorded(
+    tmp_path: Path,
+):
+    """The marker outlives a run whose ledger record never became durable.
+
+    Dropping it in the ``finally`` regardless would leave the next worker
+    start nothing to recover, which is how a session becomes invisible.
+    """
+
+    pipeline, fold, ledger = _pipeline_with_evaluator(tmp_path, Evaluator())
+    original_append = ledger.append
+
+    def refusing_append(record):
+        if record.get("record_type") == "attempt_failed":
+            raise OSError("ledger is read-only")
+        return original_append(record)
+
+    def crashing_developer(_request):
+        raise RuntimeError("session crashed")
+
+    pipeline.developer = crashing_developer
+    ledger.append = refusing_append  # type: ignore[method-assign]
+    try:
+        with pytest.raises(OSError, match="ledger is read-only"):
+            pipeline.run_fold("epoch_001", fold, parent=None)
+    finally:
+        del ledger.append
+
+    markers = RunMarkers(pipeline.config.experiment_dir)
+    assert len(sorted(markers.root.glob("*.json"))) == 1
+    assert not any(row["record_type"] == "attempt_failed" for row in ledger.read())
+
+    # The next worker start turns the surviving marker into the missing row.
+    appended = markers.recover(ledger)
+    assert [row["error"] for row in appended] == [INTERRUPTED_RUN_ERROR]
+    assert [row["phase"] for row in appended] == ["fold"]
+
+
 def test_a_failing_heldout_run_records_attempt_failed_and_clears_its_marker(
     tmp_path: Path,
 ):
@@ -2111,6 +2180,28 @@ def test_a_parentless_no_edge_finish_records_baseline_missing_and_freezes_nothin
     assert "accept_reasons" not in record
     assert record["selection_statistics"]["candidates_evaluated"] == 1
     assert record["selection_statistics"]["unavailable_reason"] == "no_nominated_candidate"
+
+
+def test_a_fold_that_ran_candidates_but_nominated_none_is_refused(tmp_path: Path):
+    """No candidate is ever frozen by position.
+
+    ``finish_fold`` takes either a node_id or an explicit no-edge outcome, so
+    a session that ran candidates always names the one it nominated. Falling
+    back to the last Step would freeze a node the Agent never chose -- and on
+    a parentless first Fold make it the lineage head.
+    """
+    pipeline, folds, ledger, _requests = _selection_fold_pipeline(tmp_path)
+
+    def nameless_developer(request):
+        return replace(_abstaining_developer(request), no_edge_reason="")
+
+    pipeline.developer = nameless_developer
+    with pytest.raises(RuntimeError, match="nominated none"):
+        pipeline.run_fold("epoch_001", folds[0], parent=None)
+    assert ledger.read("fold") == []
+    failed = [row for row in ledger.read() if row["record_type"] == "attempt_failed"]
+    assert len(failed) == 1
+    assert "refusing to freeze a candidate" in failed[0]["error"]
 
 
 def test_a_no_edge_finish_with_a_parent_keeps_it_and_is_not_read_as_a_timeout(

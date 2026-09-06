@@ -110,16 +110,27 @@ def test_loader_accepts_fit_with_a_declared_refit_period_and_rooted_state_io():
         (
             "import numpy as np\ndef fit(context): np.save('/tmp/x.npy', [])\n"
             "def generate_orders(context): return []",
-            "save only below context.state_dir",
+            "absolute path literal to save",
         ),
         (
-            "import numpy as np\ndef generate_orders(context): return np.load('x.npy')",
-            "load only below",
+            (
+                "import numpy as np\n"
+                "def generate_orders(context): return np.load('/mnt/agent/workspace/x.npy')"
+            ),
+            "absolute path literal to load",
         ),
         (
             "import numpy as np\ndef fit(context): np.save(context.models_dir + '/w.npy', [])\n"
             "def generate_orders(context): return []",
-            "save only below context.state_dir",
+            "may not save below context.models_dir",
+        ),
+        (
+            (
+                "import numpy as np\n"
+                "def fit(context): np.savez(f'{context.snapshot_dir}/w.npz', w=[])\n"
+                "def generate_orders(context): return []"
+            ),
+            "may not savez below context.snapshot_dir",
         ),
     ],
 )

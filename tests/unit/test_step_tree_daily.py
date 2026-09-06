@@ -129,8 +129,7 @@ def test_strategy_path_violation_is_repairable_at_agent_tool_boundary(tmp_path: 
     strategy.write_text(
         "import pandas as pd\n"
         "def generate_orders(context):\n"
-        "    path = context.asof_dir\n"
-        "    pd.read_parquet(path + '/daily')\n"
+        "    pd.read_parquet('/mnt/snapshot/daily.parquet')\n"
         "    return []\n",
         encoding="utf-8",
     )
@@ -138,12 +137,15 @@ def test_strategy_path_violation_is_repairable_at_agent_tool_boundary(tmp_path: 
 
     result = registry.invoke("modification_check", {})
     assert not result.ok
-    assert "only below context.snapshot_dir or context.asof_dir" in result.error
+    assert "absolute path literal to read_parquet" in result.error
 
+    # The repair only has to root the path at a context directory; how the
+    # strategy builds it from there is its own business.
     strategy.write_text(
         "import pandas as pd\n"
         "def generate_orders(context):\n"
-        "    pd.read_parquet(context.asof_dir + '/daily')\n"
+        "    path = context.asof_dir\n"
+        "    pd.read_parquet(path + '/daily')\n"
         "    return []\n",
         encoding="utf-8",
     )

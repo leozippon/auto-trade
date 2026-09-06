@@ -18,10 +18,12 @@ from autotrade.pipelines.agent_views import (
     VS_PARENT_DELTA_KEYS,
     agent_visible_metrics,
     allowed_keys,
+    compact_fold_history,
     hard_reject_reasons,
     parent_control_summary,
 )
 from autotrade.pipelines.fold_analysis import read_strategy_files
+from autotrade.pipelines.ledger import latest_fold_records
 
 _AGENT_TRACE_EVENT_TYPES = frozenset(
     {
@@ -525,6 +527,51 @@ def build_agent_process_summary(
     }
 
 
+def build_meta_fold_history(
+    records: list[dict[str, object]],
+    *,
+    ref_store: AgentRefStore,
+) -> list[dict[str, object]]:
+    """Every completed Fold across Epochs, each carrying its own statistics.
+
+    Meta is the reader asked to judge whether an edge holds up from Fold to
+    Fold, and the only Folds it can re-derive numbers for are the ones in its
+    review window. When the older entries carried the per-backtest summaries
+    but none of the host's decision statistics, a generation could only repeat
+    -- or, as two consecutive PRIOR generations did, discard as unverifiable --
+    the figures its predecessor had cited, and the experiment lost the one
+    record that shows decay. Every entry therefore also carries the blocks
+    ``build_meta_fold_review_bundle`` gives the window: the frozen node, how it
+    stood against the Fold's parent control, how wide the search was that it
+    won, where its excess sat inside random-name replays of its own trades (or,
+    for an abstention, the nulls its session drew for the candidates it
+    declined), and how the inherited parent fared on the Fold's new period.
+
+    Every number here is copied from the Fold's ledger row, never re-derived,
+    so it stands wherever a session's own narrative disagrees. Each block is a
+    fixed whitelist, so an entry's size does not grow with the Fold's candidate
+    count.
+    """
+
+    history: list[dict[str, object]] = []
+    for record in latest_fold_records(records).values():
+        entry = compact_fold_history(
+            record,
+            ref_store=ref_store,
+            include_frozen_test_metrics=True,
+        )
+        entry.update(
+            {
+                "frozen_strategy_artifact_id": _frozen_strategy_ref(
+                    record, ref_store=ref_store
+                ),
+                **_fold_decision_statistics(record),
+            }
+        )
+        history.append(entry)
+    return history
+
+
 def build_meta_fold_review_bundle(
     records: Sequence[Mapping[str, object]],
     *,
@@ -543,7 +590,6 @@ def build_meta_fold_review_bundle(
             continue
         fold_count += 1
         path = record.get("frozen_strategy_artifact_path")
-        artifact_id = record.get("frozen_strategy_artifact_id")
         validation = record.get("validation_result")
         test_result = record.get("test_result")
         strategy_files: list[dict[str, object]] = []
@@ -581,35 +627,13 @@ def build_meta_fold_review_bundle(
                 "finish_mode": record.get("finish_mode"),
                 "no_edge_reason": record.get("no_edge_reason"),
                 "hard_reject_reasons": hard_reject_reasons(record),
-                "frozen_strategy_artifact_id": (
-                    ref_store.get_or_create("strategy", str(artifact_id))
-                    if artifact_id
-                    else None
+                "frozen_strategy_artifact_id": _frozen_strategy_ref(
+                    record, ref_store=ref_store
                 ),
                 "validation_result": agent_visible_metrics(
                     validation if isinstance(validation, dict) else None
                 ),
-                # The frozen candidate against this Fold's parent control, and
-                # the trial count its Sharpe was the maximum of.
-                "vs_parent": allowed_keys(
-                    record.get("vs_parent"), VS_PARENT_DELTA_KEYS
-                ),
-                "selection_statistics": allowed_keys(
-                    record.get("selection_statistics"), SELECTION_STATISTICS_KEYS
-                ),
-                # Whether the names carried the excess, or only the timing and
-                # sizing the trade skeleton already fixed.
-                "null_control": allowed_keys(
-                    record.get("null_control"), NULL_CONTROL_KEYS
-                ),
-                # A Fold that froze nothing has no ``null_control``; these are
-                # the nulls its session drew for the candidates it then judged
-                # to show no edge, so the abstention can be read on evidence.
-                "candidate_null_controls": _candidate_null_controls(record),
-                # The inherited parent on this Fold's new period: the one
-                # forward result a trailing window holds, which the PRIOR is
-                # asked to cite per reviewed Fold.
-                "parent_control": parent_control_summary(record.get("parent_control")),
+                **_fold_decision_statistics(record),
                 "test_result": agent_visible_metrics(
                     test_result if isinstance(test_result, dict) else None
                 ),
@@ -629,6 +653,46 @@ def build_meta_fold_review_bundle(
         max_window_bytes=max_window_bytes,
     )
     return reviews, sidecars
+
+
+def _frozen_strategy_ref(
+    record: Mapping[str, object], *, ref_store: AgentRefStore
+) -> str | None:
+    """The Fold's frozen strategy as an Agent-visible ref, or None."""
+
+    artifact_id = record.get("frozen_strategy_artifact_id")
+    return (
+        ref_store.get_or_create("strategy", str(artifact_id)) if artifact_id else None
+    )
+
+
+def _fold_decision_statistics(record: Mapping[str, object]) -> dict[str, object]:
+    """The statistics a Fold's decision has to be read against.
+
+    One projection for both Meta inputs: the review window's per-Fold index and
+    the longer history behind it must show the same numbers under the same
+    keys, or a reviewed Fold cannot be compared with an older one.
+    """
+
+    return {
+        # The frozen candidate against this Fold's parent control, and the
+        # trial count its Sharpe was the maximum of.
+        "vs_parent": allowed_keys(record.get("vs_parent"), VS_PARENT_DELTA_KEYS),
+        "selection_statistics": allowed_keys(
+            record.get("selection_statistics"), SELECTION_STATISTICS_KEYS
+        ),
+        # Whether the names carried the excess, or only the timing and sizing
+        # the trade skeleton already fixed.
+        "null_control": allowed_keys(record.get("null_control"), NULL_CONTROL_KEYS),
+        # A Fold that froze nothing has no ``null_control``; these are the nulls
+        # its session drew for the candidates it then judged to show no edge, so
+        # the abstention can be read on evidence.
+        "candidate_null_controls": _candidate_null_controls(record),
+        # The inherited parent on this Fold's new period: the one forward result
+        # a trailing window holds, which the PRIOR is asked to cite per reviewed
+        # Fold.
+        "parent_control": parent_control_summary(record.get("parent_control")),
+    }
 
 
 def _candidate_null_controls(

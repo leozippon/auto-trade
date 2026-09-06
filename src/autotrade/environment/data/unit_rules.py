@@ -381,7 +381,12 @@ FIELD_RULES: tuple[FieldRule, ...] = (
               evidence="float_share/(float_ratio%) matches daily_basic total share capital",
               note="NOT 10k shares: 386-share unlock rows exist and reconcile only as shares"),
     FieldRule("events.parquet", "share_float_complete", ("float_ratio",),
-              source_unit="percent"),
+              source_unit="percent", status="verified",
+              evidence="scan 2026-09: float_share/(float_ratio%) over daily_basic total share "
+                       "capital has median 0.99 and 99.95% of rows within 0.5-2.0 (n=781,800); "
+                       "a decimal-fraction reading misses by 100x in every magnitude band",
+              note="per-tranche unlock share of total capital, so the median row is only 0.0003% "
+                   "(99.3% of rows are below 1) — small values are tiny unlocks, not a decimal scale"),
     FieldRule("events.parquet", "top_list", ("close",), source_unit="CNY_per_share"),
     FieldRule("events.parquet", "top_list",
               ("pct_change", "turnover_rate", "net_rate", "amount_rate"),
@@ -739,8 +744,15 @@ FIELD_RULES: tuple[FieldRule, ...] = (
               evidence="revenue equals income_vip same period (ratio 1.0000, n=82)"),
     FieldRule("fundamentals.parquet", "express_vip",
               ("diluted_eps", "bps", "open_bps"), source_unit="CNY_per_share"),
-    FieldRule("fundamentals.parquet", "express_vip", ("diluted_roe", "yoy_net_profit"),
+    FieldRule("fundamentals.parquet", "express_vip", ("diluted_roe",),
               source_unit="percent"),
+    FieldRule("fundamentals.parquet", "express_vip", ("yoy_net_profit",),
+              source_unit="CNY",
+              status="verified",
+              evidence="scan 2026-09: equals prior-year income_vip n_income_attr_p (ratio 1.0000, "
+                       "95.4% within 1%, corr 0.9996, n=25,335); correlation with "
+                       "fina_indicator_vip.netprofit_yoy is 0.005",
+              note="prior-year same-period net profit level despite the name, NOT a growth rate"),
     FieldRule("fundamentals.parquet", "dividend", ("cash_div", "cash_div_tax"),
               source_unit="CNY_per_share",
               status="verified", evidence="median 0.095 per share"),

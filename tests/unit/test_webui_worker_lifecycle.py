@@ -26,6 +26,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -284,6 +285,67 @@ class WorkerLifecycleTest(unittest.TestCase):
         self.assertLess(elapsed, 9.0)
         # Proof the worker really acquired the lock while terminate was waiting.
         self.assertEqual(read_control(self.control_path).directives, {})
+
+    def test_a_slow_terminate_does_not_block_another_experiment(self) -> None:
+        """The console-wide lock this replaced.
+
+        `terminate` waits out a SIGTERM grace, `restart` waits longer still and
+        `delete` can spend minutes escalating a stuck rmtree through docker.
+        The researcher runs the whole round at once, so while one experiment
+        sits in such a wait every other experiment's create, start, pause,
+        resume, set_directive and approve has to keep being served. One
+        manager-wide mutation lock made all of them queue behind the wait.
+
+        Real child, real SIGTERM, real escalation; only the grace is shortened,
+        because its true length is already pinned by the escalation test below
+        and what this one needs is a wait long enough to observe.
+        """
+        other = self.experiments_root / "exp_other"
+        AgentRefStore(other)
+        (other / "hitl").mkdir(parents=True)
+        write_json_atomic(other / "hitl/params.json", {"experiment_id": "exp_other"})
+        write_control(other / "hitl/control.json", ControlState(mode="auto"))
+        write_json_atomic(
+            other / "hitl/status.json",
+            {"schema_version": 1, "pid": 999_999_999, "state": "stopped"},
+        )
+        process = self._spawn(_STUBBORN)
+        self._publish(process, session_key="epoch_001/fold_2022Q2")
+
+        waiting = threading.Event()
+        real_await = manager_module._await_worker_exit
+
+        def announce_the_wait(status_path, timeout):
+            waiting.set()
+            return real_await(status_path, timeout)
+
+        terminated: dict[str, object] = {}
+
+        def terminate() -> None:
+            terminated.update(self._post(action="terminate").json())
+
+        with patch.object(manager_module, "_TERMINATE_GRACE_SECONDS", 4.0), patch.object(
+            manager_module, "_await_worker_exit", announce_the_wait
+        ):
+            caller = threading.Thread(target=terminate)
+            caller.start()
+            self.addCleanup(caller.join)
+            self.assertTrue(waiting.wait(20.0), "terminate never reached its grace")
+            started = time.monotonic()
+            response = TestClient(self.client.app).post(
+                "/api/experiments/exp_other/control",
+                json={"action": "set_mode", "mode": "manual"},
+            )
+            elapsed = time.monotonic() - started
+            still_waiting = caller.is_alive()
+            caller.join(timeout=30.0)
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(read_control(other / "hitl/control.json").mode, "manual")
+        self.assertTrue(still_waiting, "the terminate had already returned")
+        self.assertLess(elapsed, 2.0, "the other experiment queued behind the grace")
+        # The wait was real: the stubborn child never handled SIGTERM.
+        self.assertIs(terminated["escalated"], True)
 
     def test_terminate_returns_an_unsettled_session_to_its_approval_gate(self) -> None:
         write_control(
@@ -757,3 +819,109 @@ class CreatePreflightTest(unittest.TestCase):
             os.waitpid(pid, 0)
         except ChildProcessError:
             pass
+
+
+class RestartSlotRaceTest(unittest.TestCase):
+    """At the parallel cap, a restart owns the slot it is about to free.
+
+    `restart` terminates the worker and then spawns a new one, and for as long
+    as the SIGTERM grace lasts this experiment holds no running slot. While the
+    slot lock was taken only inside `start_worker`, a create arriving in that
+    window took the freed slot and the restart came back with "parallel
+    experiment cap reached": the researcher asked for a restart and was left
+    with a stopped experiment. What is asserted is that outcome, not an
+    ordering -- whatever the create does, the restarted experiment runs.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.repo_root = Path(self._tmp.name)
+        self.experiments_root = self.repo_root / "experiments"
+        self.experiments_root.mkdir(parents=True)
+        script = self.repo_root / "scripts/experiments/run_interactive_experiment.py"
+        script.parent.mkdir(parents=True, exist_ok=True)
+        # A real detached child that exits on SIGTERM, as the worker does.
+        script.write_text(
+            "import signal, sys, time\n"
+            "signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))\n"
+            "time.sleep(300)\n",
+            encoding="utf-8",
+        )
+        self.client = TestClient(create_app(self.repo_root, self.experiments_root))
+
+    def _create(self, experiment_id: str, client: TestClient | None = None):
+        response = (client or self.client).post(
+            "/api/experiments",
+            json={
+                "experiment_id": experiment_id,
+                "fold_period": "quarter",
+                "development_first_period": "2026Q1",
+                "development_last_period": "2026Q1",
+                "heldout_first_period": "2026Q2",
+                "heldout_last_period": "2026Q2",
+            },
+        )
+        if response.status_code == 200:
+            self.addCleanup(self._kill_pid, int(response.json()["spawned_pid"]))
+        return response
+
+    def _kill_pid(self, pid: int) -> None:
+        try:
+            os.killpg(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            return
+        try:
+            os.waitpid(pid, 0)
+        except ChildProcessError:
+            pass
+
+    def test_a_restart_at_the_cap_is_not_robbed_of_its_slot_by_a_create(self) -> None:
+        first = self._create("exp_a")
+        self.assertEqual(first.status_code, 200, first.text)
+
+        gap = threading.Event()
+        created = threading.Event()
+        second: dict[str, object] = {}
+
+        def create_the_other() -> None:
+            # Deliberately in the window the restart used to leave open: its
+            # worker is gone and its replacement has not been spawned yet.
+            if not gap.wait(60.0):  # pragma: no cover - the restart never ran
+                return
+            response = self._create("exp_b", client=TestClient(self.client.app))
+            second["status"] = response.status_code
+            second["detail"] = response.text
+            created.set()
+
+        real_reclaim = manager_module._reclaim_sandbox_containers
+
+        def announce_the_gap(experiment_id: str) -> list[str]:
+            gap.set()
+            # Holding the slot across the restart, the create cannot get past
+            # its slot check at all and this wait expires; without it, the
+            # create finishes here and the respawn below finds no free slot.
+            created.wait(5.0)
+            return real_reclaim(experiment_id)
+
+        caller = threading.Thread(target=create_the_other)
+        caller.start()
+        self.addCleanup(caller.join)
+        with patch.object(manager_module, "MAX_RUNNING_EXPERIMENTS", 1), patch.object(
+            manager_module, "_reclaim_sandbox_containers", announce_the_gap
+        ):
+            restarted = self.client.post(
+                "/api/experiments/exp_a/control", json={"action": "restart"}
+            )
+            self.assertTrue(gap.is_set(), "the restart never terminated its worker")
+            caller.join(timeout=60.0)
+
+        self.assertEqual(restarted.status_code, 200, restarted.text)
+        self.assertIs(restarted.json()["restarted"], True)
+        self.addCleanup(self._kill_pid, int(restarted.json()["spawned_pid"]))
+        # The invariant: exp_a is running again, and the create that raced it
+        # was refused rather than served out of exp_a's slot.
+        self.assertEqual(self.client.get("/api/experiments").json()["running"], ["exp_a"])
+        self.assertEqual(second.get("status"), 400, second.get("detail"))
+        self.assertIn("parallel experiment cap reached", str(second.get("detail")))
+        self.assertFalse((self.experiments_root / "exp_b").exists())

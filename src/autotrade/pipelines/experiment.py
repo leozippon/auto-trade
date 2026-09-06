@@ -47,9 +47,6 @@ from .agent_views import (
     agent_visible_ledger_record as _agent_visible_ledger_record,
 )
 from .agent_views import (
-    compact_fold_history as _compact_fold_history,
-)
-from .agent_views import (
     vs_parent_metrics as _vs_parent_metrics,
 )
 from .config import (
@@ -89,6 +86,7 @@ from .ledger import (
 )
 from .meta_inputs import (
     AgentTraceFullSidecar,
+    build_meta_fold_history,
     build_meta_fold_review_bundle,
     select_meta_review_folds,
 )
@@ -232,7 +230,7 @@ class RollingExperimentPipeline:
             self.ledger.read(), experiment_dir=self.config.experiment_dir
         )
         retained_artifact_id = parent.artifact_id if parent is not None else None
-        wrote_business_record = False
+        wrote_ledger_record = False
         attempt = {
             "experiment_id": self.config.experiment_id,
             "epoch_id": epoch_id,
@@ -561,7 +559,7 @@ class RollingExperimentPipeline:
             if state_changed_during_test:
                 record["state_changed_during_test"] = True
             self.ledger.append(record)
-            wrote_business_record = True
+            wrote_ledger_record = True
             expire_experiment_session_inbox(
                 self.config.experiment_dir,
                 str(record["session_key"]),
@@ -582,8 +580,14 @@ class RollingExperimentPipeline:
             )
         except FrozenArtifactMutated:
             raise
-        except Exception as exc:
-            if not wrote_business_record:
+        except BaseException as exc:
+            # BaseException, not Exception: a terminated worker unwinds this
+            # session through SystemExit (the entrypoint's SIGTERM handler) or
+            # KeyboardInterrupt, and those must leave the same evidence as any
+            # other failure. Catching only Exception lost the whole session --
+            # no ledger row, and no marker either, because the finally below
+            # removed it.
+            if not wrote_ledger_record:
                 self.ledger.append(
                     {
                         **attempt,
@@ -591,11 +595,14 @@ class RollingExperimentPipeline:
                         "error": f"{type(exc).__name__}: {exc}",
                     }
                 )
+                wrote_ledger_record = True
             raise
         finally:
-            # Either a business record or an attempt_failed is now durable, so
-            # this run is no longer an interrupted one.
-            self.run_markers.finish(run_id)
+            # The marker is this run's only evidence until one of its ledger
+            # records is durable, so it is dropped only once one is; otherwise
+            # it stays for the next worker start to record.
+            if wrote_ledger_record:
+                self.run_markers.finish(run_id)
             prune = getattr(self.artifacts, "prune_transient", None)
             if callable(prune):
                 prune(
@@ -660,7 +667,7 @@ class RollingExperimentPipeline:
             }
             # Evidence for a period that never gets to run its own except branch.
             self.run_markers.begin(attempt)
-            wrote_business_record = False
+            wrote_ledger_record = False
             try:
                 snapshot = self.snapshots.prepare(
                     fold=None,
@@ -712,7 +719,7 @@ class RollingExperimentPipeline:
                     )
                     # The integrity row is this run's business record: the
                     # fail-fast below must not also log a failed attempt.
-                    wrote_business_record = True
+                    wrote_ledger_record = True
                     if restore_error is not None:
                         raise FrozenArtifactRestoreFailed(
                             "strategy or model artifacts changed during held-out "
@@ -746,9 +753,12 @@ class RollingExperimentPipeline:
                         ),
                     }
                 )
-                wrote_business_record = True
-            except Exception as exc:
-                if not wrote_business_record:
+                wrote_ledger_record = True
+            except BaseException as exc:
+                # See run_fold: a terminated worker unwinds through SystemExit
+                # or KeyboardInterrupt, which must be recorded like any other
+                # failure rather than vanishing with the marker.
+                if not wrote_ledger_record:
                     self.ledger.append(
                         {
                             **attempt,
@@ -756,11 +766,13 @@ class RollingExperimentPipeline:
                             "error": f"{type(exc).__name__}: {exc}",
                         }
                     )
+                    wrote_ledger_record = True
                 raise
             finally:
-                # Either a held-out record or an attempt_failed is now durable,
-                # so this run is no longer an interrupted one.
-                self.run_markers.finish(run_id)
+                # The marker is dropped only once one of this run's ledger
+                # records is durable; otherwise it stays for the next start.
+                if wrote_ledger_record:
+                    self.run_markers.finish(run_id)
             count += 1
         return count
 
@@ -794,6 +806,7 @@ class RollingExperimentPipeline:
         }
         # Evidence for a run that never gets to run its own except branch.
         self.run_markers.begin(attempt)
+        wrote_ledger_record = False
         try:
             context = dict(session_context or {})
             current_skills = latest_skills_snapshot(
@@ -977,25 +990,32 @@ class RollingExperimentPipeline:
                     **_session_timing(context, run_started),
                 }
             )
+            wrote_ledger_record = True
             expire_experiment_session_inbox(
                 self.config.experiment_dir,
                 meta_session_key(epoch_id, completed_folds),
                 expired_by=run_id,
             )
             return prior_text, frozen
-        except Exception as exc:
-            self.ledger.append(
-                {
-                    **attempt,
-                    "record_type": "attempt_failed",
-                    "error": f"{type(exc).__name__}: {exc}",
-                }
-            )
+        except BaseException as exc:
+            # See run_fold: a terminated worker unwinds through SystemExit or
+            # KeyboardInterrupt, which must be recorded like any other failure
+            # rather than vanishing with the marker.
+            if not wrote_ledger_record:
+                self.ledger.append(
+                    {
+                        **attempt,
+                        "record_type": "attempt_failed",
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                )
+                wrote_ledger_record = True
             raise
         finally:
-            # Either a meta_learning record or an attempt_failed is now durable,
-            # so this run is no longer an interrupted one.
-            self.run_markers.finish(run_id)
+            # The marker is dropped only once one of this run's ledger records
+            # is durable; otherwise it stays for the next worker start.
+            if wrote_ledger_record:
+                self.run_markers.finish(run_id)
 
     def _parent_control(
         self,
@@ -1277,7 +1297,18 @@ def _select_step(
 ) -> StepResult | None:
     # Only completed full-window validations ever become a StepResult.
     if selected_id is None:
-        return steps[-1] if steps else None
+        # A session that ran candidates always names the one it nominated:
+        # ``finish_fold`` takes either a node_id or an explicit no-edge
+        # outcome (which never reaches here, the caller reads
+        # ``no_edge_reason`` first). Nominating the last Step for it would
+        # freeze a candidate the Agent did not choose, so the only nameless
+        # case left is the deadline path, which produces no Step at all.
+        if steps:
+            raise RuntimeError(
+                "Fold session produced Steps but nominated none; refusing to "
+                "freeze a candidate the session did not select"
+            )
+        return None
     selected = next((step for step in steps if step.step_id == selected_id), None)
     if selected is None:
         raise RuntimeError(f"selected Step is absent: {selected_id}")
@@ -1545,14 +1576,16 @@ def _development_inputs(
     limited to the compact frozen-test metric whitelist of already-completed
     Folds. Held-out never appears.
 
-    ``fold_validation_history`` is the one list of compact Fold histories: the
-    ``compact_fold_history`` projection of every completed Fold so far, across
-    Epochs, so Meta sees the whole accumulated Validation record next to the
-    PRIOR that absorbed it. The review window is named, not re-listed --
-    ``review_window`` and ``fold_reviews`` identify the Folds completed after
-    the previous Meta by the same opaque ``fold_id``. A second window-scoped
-    copy of the same projection would put one Fold in ``development_history``
-    twice, which a Meta counting rows reads as two Folds.
+    ``fold_validation_history`` is the one list of compact Fold histories
+    (``build_meta_fold_history``): every completed Fold so far, across Epochs,
+    each with its own host-computed statistics, so Meta sees the whole
+    accumulated Validation record next to the PRIOR that absorbed it and can
+    still read an older Fold's evidence once it leaves the review window. The
+    window is named, not re-listed -- ``review_window`` and ``fold_reviews``
+    identify the Folds completed after the previous Meta by the same opaque
+    ``fold_id``. A second window-scoped copy of the same projection would put
+    one Fold in ``development_history`` twice, which a Meta counting rows reads
+    as two Folds.
 
     ``fold_reviews`` covers only the review-window Folds, and carries frozen
     strategy source, a bounded Agent Trace index, ``agent_process_summary``,
@@ -1575,14 +1608,9 @@ def _development_inputs(
         },
         "fold_reviews": reviews,
         "review_window": review_window,
-        "fold_validation_history": [
-            _compact_fold_history(
-                record,
-                ref_store=ref_store,
-                include_frozen_test_metrics=True,
-            )
-            for record in latest_fold_records(records).values()
-        ],
+        "fold_validation_history": build_meta_fold_history(
+            records, ref_store=ref_store
+        ),
         "meta_learning": [
             _agent_visible_ledger_record(
                 record,

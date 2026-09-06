@@ -79,12 +79,16 @@ FORBIDDEN_ATTRIBUTES = frozenset(
         "urlopen",
     }
 )
-# The only file I/O a strategy may perform, and only when the FIRST positional
-# argument is a path expression rooted at one of the context directories:
-# reads below any read-only data root, writes below the per-replay state
-# directory that ``fit`` owns. ``save_model``/``load_model`` are the LightGBM
-# and XGBoost booster files; ``torch.save(obj, path)`` puts the path second
-# and is therefore rejected — persist tensors as NumPy arrays instead.
+# The only file I/O a strategy may perform: reads below a read-only data root,
+# writes below the per-replay state directory that ``fit`` owns.
+# ``save_model``/``load_model`` are the LightGBM and XGBoost booster files.
+# The static check on their path arguments is a denylist, not a shape rule: a
+# path may be built by a helper, a variable, a loop or an f-string, and which
+# positional argument holds it differs per API (``np.save(path, obj)`` against
+# ``torch.save(obj, path)``), so only what the source itself proves wrong is
+# refused — a literal absolute path, and a write aimed at a read-only context
+# root. The replay container's mounts and ``StrategyContext`` are the real
+# boundary; this check only reports the mistakes it can see before the replay.
 ROOTED_READS = frozenset({"read_parquet", "load", "load_model"})
 ROOTED_WRITES = frozenset({"to_parquet", "save", "savez", "savez_compressed", "save_model"})
 READ_ROOTS = ("snapshot_dir", "asof_dir", "state_dir", "models_dir")
@@ -122,8 +126,11 @@ def validate_strategy_source(
     ``fit`` schedule (``None`` when there is no ``fit``). Helper modules pass
     ``entrypoints=False`` and get the same import and I/O rules only.
 
-    This denylist is a convenience check for trusted, reviewed strategies,
-    not a sandbox or a security boundary.
+    This is a convenience check for trusted, reviewed strategies, not a
+    sandbox or a security boundary: it names mistakes the source proves
+    (unsupported imports, direct capability calls, external I/O methods,
+    absolute path literals, writes at a read-only root) and leaves everything
+    it cannot judge to the replay container's mounts and ``StrategyContext``.
     """
     try:
         tree = ast.parse(source, filename=filename)
@@ -165,12 +172,7 @@ def validate_strategy_source(
             roots = WRITE_ROOTS
         else:
             continue
-        if not node.args or not _is_context_data_path(node.args[0], roots=roots):
-            allowed_roots = " or ".join(f"context.{root}" for root in roots)
-            raise StrategyLoadError(
-                f"strategy may {method} only below {allowed_roots} "
-                "(the path must be the first positional argument)"
-            )
+        _reject_unusable_paths(node, method=method, roots=roots)
     return fit_schedule
 
 
@@ -279,18 +281,55 @@ def _refit_period(tree: ast.Module, *, has_fit: bool) -> str | None:
     return value.value
 
 
-def _is_context_data_path(node: ast.AST, *, roots: tuple[str, ...]) -> bool:
-    """Recognize ``<name>.<root>`` optionally followed by ``+ "<literal>"``."""
+def _reject_unusable_paths(node: ast.Call, *, method: str, roots: tuple[str, ...]) -> None:
+    """Refuse the path arguments the source itself shows cannot work.
 
-    if isinstance(node, ast.Attribute):
-        return isinstance(node.value, ast.Name) and node.attr in roots
-    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
-        return (
-            _is_context_data_path(node.left, roots=roots)
-            and isinstance(node.right, ast.Constant)
-            and isinstance(node.right.value, str)
-        )
-    return False
+    Every positional argument and every keyword value is read as a possible
+    path, because the path sits first in ``np.save(path, obj)``, second in
+    ``torch.save(obj, path)`` and behind a name in ``np.load(file=...)``, and
+    two errors are refused: a literal absolute path, which
+    addresses the host or the Agent sandbox instead of the replay container,
+    and a write rooted at a context directory that is mounted read-only.
+    Everything else — a name, a helper call, a constant, a loop variable —
+    passes, since the source cannot say where it points.
+    """
+
+    allowed = ", ".join(f"context.{root}" for root in roots)
+    for argument in (*node.args, *(keyword.value for keyword in node.keywords)):
+        head = _leading_path_atom(argument)
+        if isinstance(head, ast.Constant) and isinstance(head.value, str):
+            if head.value.startswith("/") or "/mnt/" in head.value:
+                raise StrategyLoadError(
+                    f"strategy passes an absolute path literal to {method}: "
+                    f"{head.value!r}; a strategy reaches files only through the "
+                    f"directories on its context ({allowed}), and may build that "
+                    "path any way it likes"
+                )
+        elif isinstance(head, ast.Attribute) and head.attr in READ_ROOTS and head.attr not in roots:
+            raise StrategyLoadError(
+                f"strategy may not {method} below context.{head.attr}: that "
+                f"directory is mounted read-only; write below {allowed}"
+            )
+
+
+def _leading_path_atom(node: ast.AST) -> ast.AST:
+    """The leftmost atom of a path expression.
+
+    Concatenations and f-strings are followed to whatever starts the string,
+    so ``context.state_dir + "/w.npy"`` and ``f"{context.state_dir}/w.npy"``
+    both resolve to the ``state_dir`` attribute and ``"/tmp/" + name`` to the
+    literal that starts it. Anything else is its own atom.
+    """
+
+    while True:
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            node = node.left
+        elif isinstance(node, ast.JoinedStr) and node.values:
+            node = node.values[0]
+        elif isinstance(node, ast.FormattedValue):
+            node = node.value
+        else:
+            return node
 
 
 def load_strategy_module(path: str | Path) -> LoadedStrategy:

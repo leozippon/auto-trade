@@ -627,6 +627,11 @@ def test_finish_fold_no_edge_refuses_a_node_a_thin_reason_or_an_empty_session(
         finish.invoke({"node_id": node, "reason": NO_EDGE_REASON})
     registry = ToolRegistry([finish])
     assert registry.invoke("finish_fold", {"outcome": "abstain"}).ok is False
+    # The schema carries the same floor as the runtime check, so a thin reason
+    # is refused with the field rule instead of reaching the tool.
+    thin = registry.invoke("finish_fold", {"outcome": "no_edge", "reason": "no edge"})
+    assert thin.ok is False
+    assert f"minimum {NO_EDGE_REASON_MIN_CHARS}" in thin.error
     # The early-finish gate applies to an abstention exactly as to a nomination.
     budgeted = FinishFoldTool(
         tree, fold_id="fold_ref_ab", run_id="run_x", budget_status=lambda: _budget(20)

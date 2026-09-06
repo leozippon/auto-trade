@@ -60,14 +60,13 @@ from .registry import (
     worker_log_ref,
 )
 
-# Concurrency ceiling for the shared vLLM gateway: measured aggregate
-# throughput still rises to ~16-20 concurrent streams before per-stream
-# decode degrades sharply, and each experiment drives at most 4 sub-agent
-# streams, so 5 locally served experiments sit at the top of the measured
-# band. The sixth slot exists for an experiment whose every model role is on
-# a hosted API and which therefore opens no local stream; the cap cannot tell
-# the two apart, so a sixth locally served experiment would oversubscribe the
-# gateway.
+# Parallel-run ceiling for the console: a create or a resume past this is
+# refused. Every model role now runs on the shared local vLLM gateway, so six
+# experiments can peak at six parent conversations plus their sub-agent
+# fan-out (at most 4 concurrent each). Measured aggregate throughput stops
+# rising at roughly 16-20 concurrent streams, so a full round trades
+# per-stream decode speed for parallel coverage; the hard edge is the
+# gateway's own in-flight and queue admission, not this cap.
 MAX_RUNNING_EXPERIMENTS = 6
 # SIGTERM graces before the worker's process group is SIGKILLed. Terminate is
 # an explicit stop, so it stays short; restart has to outwait the in-flight
@@ -382,34 +381,68 @@ class ExperimentManager:
         # while such a write may still be in flight. Standalone managers (tests,
         # scripts) have no background analyses to guard against.
         self._analysis_pending = analysis_pending
-        self._mutate = threading.RLock()
+        # One mutation lock per experiment, not one for the console. Mutating
+        # calls that touch the SAME experiment's worker, control state or
+        # directory still serialize, but terminate and restart wait out a
+        # SIGTERM grace (10 s / 35 s) and delete can spend minutes escalating a
+        # stuck rmtree through docker; under a console-wide lock every one of
+        # those waits blocked every other experiment's create, start, pause,
+        # resume, set_directive and approve.
+        self._experiment_locks: dict[str, threading.RLock] = {}
+        self._locks_guard = threading.Lock()
+        # The one genuinely console-wide invariant left: MAX_RUNNING_EXPERIMENTS.
+        # A holder keeps it from the running-slot count through the spawn that
+        # consumes the slot, so two callers can never claim the same one:
+        # create_experiment holds it across its pre-flight, the inherited
+        # artifact copy and the operating-memory snapshot as well, and restart
+        # holds it across the terminate that frees the slot it is about to
+        # retake. Creates and starts therefore wait for each other, and for a
+        # restart's SIGTERM grace; control actions on other experiments never
+        # take it. Reentrant because both paths end in the start_worker that
+        # takes it again on the same thread.
+        self._slots = threading.RLock()
+
+    def _experiment_lock(self, experiment_id: str) -> threading.RLock:
+        """The mutation lock for one experiment, created on first use.
+
+        Keyed by the validated id rather than by the resolved directory, so
+        the lock is taken before the directory is read: a delete racing a
+        control call on the same experiment still resolves in one order.
+        """
+        if not _ID.fullmatch(experiment_id):
+            raise ManagerError("invalid experiment ID")
+        with self._locks_guard:
+            lock = self._experiment_locks.get(experiment_id)
+            if lock is None:
+                lock = self._experiment_locks[experiment_id] = threading.RLock()
+            return lock
 
     def create_experiment(self, params: dict[str, object]) -> dict[str, object]:
-        with self._mutate:
-            console_managed = sorted(set(params) & WEB_CLOSED_PARAMS)
-            if console_managed:
-                raise ManagerError(
-                    "console-managed parameters are not accepted: "
-                    + ", ".join(console_managed)
-                )
-            unknown = sorted(set(params) - set(WEB_CREATE_DEFAULTS))
-            if unknown:
-                raise ManagerError(
-                    "unknown experiment parameters: " + ", ".join(unknown)
-                )
-            merged = {**WEB_CREATE_DEFAULTS, **params}
-            missing = sorted(
-                key for key in WEB_REQUIRED_PARAMS if merged.get(key) in (None, "")
+        # Request-shape validation is a pure function of params and needs no
+        # lock; only the id has to be valid before one can be taken.
+        console_managed = sorted(set(params) & WEB_CLOSED_PARAMS)
+        if console_managed:
+            raise ManagerError(
+                "console-managed parameters are not accepted: "
+                + ", ".join(console_managed)
             )
-            if missing:
-                raise ManagerError(
-                    "missing required experiment parameters: " + ", ".join(missing)
-                )
-            experiment_id = str(params.get("experiment_id") or "").strip()
-            if not _ID.fullmatch(experiment_id):
-                raise ManagerError(
-                    "experiment_id must match [A-Za-z0-9][A-Za-z0-9_-]{0,99} (letters, digits, _ and -)"
-                )
+        unknown = sorted(set(params) - set(WEB_CREATE_DEFAULTS))
+        if unknown:
+            raise ManagerError("unknown experiment parameters: " + ", ".join(unknown))
+        merged = {**WEB_CREATE_DEFAULTS, **params}
+        missing = sorted(
+            key for key in WEB_REQUIRED_PARAMS if merged.get(key) in (None, "")
+        )
+        if missing:
+            raise ManagerError(
+                "missing required experiment parameters: " + ", ".join(missing)
+            )
+        experiment_id = str(params.get("experiment_id") or "").strip()
+        if not _ID.fullmatch(experiment_id):
+            raise ManagerError(
+                "experiment_id must match [A-Za-z0-9][A-Za-z0-9_-]{0,99} (letters, digits, _ and -)"
+            )
+        with self._experiment_lock(experiment_id), self._slots:
             directory = self.experiments_root / experiment_id
             if directory.exists():
                 raise ManagerError(f"experiment {experiment_id!r} already exists")
@@ -600,7 +633,10 @@ class ExperimentManager:
         return broken
 
     def start_worker(self, experiment_id: str) -> dict[str, object]:
-        with self._mutate:
+        # Slot lock as well as the experiment's own: the spawn below is what
+        # consumes a running slot, and it only becomes visible to
+        # running_experiments() once the status write at the end lands.
+        with self._experiment_lock(experiment_id), self._slots:
             directory = self._experiment_dir(experiment_id)
             _modern_ref_store(directory)
             status_path = directory / "hitl/status.json"
@@ -692,7 +728,7 @@ class ExperimentManager:
             raise ManagerError(f"unknown control action: {action!r}")
         if at is not None and action != "restart":
             raise ManagerError("at is only accepted by restart")
-        with self._mutate:
+        with self._experiment_lock(experiment_id):
             directory = self._experiment_dir(experiment_id)
             _modern_ref_store(directory)
             try:
@@ -1484,29 +1520,39 @@ class ExperimentManager:
                 "restart_pending": True,
             }
         escalated = False
-        if status_pid_alive(status):
-            pid = int(status["pid"])
-            _signal_worker_group(pid, signal.SIGTERM)
-            escalated = not _await_worker_exit(status_path, _RESTART_GRACE_SECONDS)
-            if escalated:
-                try:
-                    _signal_worker_group(pid, signal.SIGKILL)
-                except ProcessLookupError:  # exited just after the last poll
-                    pass
-                if not _await_worker_exit(status_path, _SIGKILL_EXIT_SECONDS):
-                    raise ManagerError(
-                        f"worker pid {pid} 未响应 SIGKILL；请先排查该进程再重启"
-                    )
-        _reclaim_sandbox_containers(experiment_id)
-        return {
-            "restarted": True,
-            "at": "immediate",
-            "escalated": escalated,
-            **self.start_worker(experiment_id),
-        }
+        # The slot lock spans the terminate AND the respawn, because the
+        # terminate below frees this experiment's own running slot: taking it
+        # only in start_worker let a concurrent create claim that slot while
+        # the old worker was exiting, and the restart then failed on the
+        # parallel-experiment cap, leaving the experiment stopped. The price is
+        # that a create or start begun during a restart waits out its grace;
+        # control actions on other experiments still take no slot lock. Lock
+        # order stays experiment -> slots: control() already holds this
+        # experiment's lock.
+        with self._slots:
+            if status_pid_alive(status):
+                pid = int(status["pid"])
+                _signal_worker_group(pid, signal.SIGTERM)
+                escalated = not _await_worker_exit(status_path, _RESTART_GRACE_SECONDS)
+                if escalated:
+                    try:
+                        _signal_worker_group(pid, signal.SIGKILL)
+                    except ProcessLookupError:  # exited just after the last poll
+                        pass
+                    if not _await_worker_exit(status_path, _SIGKILL_EXIT_SECONDS):
+                        raise ManagerError(
+                            f"worker pid {pid} 未响应 SIGKILL；请先排查该进程再重启"
+                        )
+            _reclaim_sandbox_containers(experiment_id)
+            return {
+                "restarted": True,
+                "at": "immediate",
+                "escalated": escalated,
+                **self.start_worker(experiment_id),
+            }
 
     def delete_experiment(self, experiment_id: str) -> dict[str, object]:
-        with self._mutate:
+        with self._experiment_lock(experiment_id):
             directory = self._experiment_dir(experiment_id)
             _modern_ref_store(directory)
             state = experiment_state(directory)

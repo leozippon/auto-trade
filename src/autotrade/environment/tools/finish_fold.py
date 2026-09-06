@@ -172,7 +172,7 @@ class FinishFoldTool:
                 },
                 "reason": {
                     "type": "string",
-                    "minLength": 1,
+                    "minLength": NO_EDGE_REASON_MIN_CHARS,
                     "maxLength": EARLY_STOP_REASON_MAX_CHARS,
                     "description": (
                         "outcome=\"no_edge\" only: the evidence that no candidate "

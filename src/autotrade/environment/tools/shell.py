@@ -38,22 +38,35 @@ SHELL_ARGV_MAX_CHARS = 1000
 # more than the capture cap loses the rest, explicitly.
 DEFAULT_SHELL_OUTPUT_CHARS = 40_000
 SHELL_CAPTURE_MAX_CHARS = 1_000_000
-# Longest command string still echoed back as its argv form in a shape error:
-# past this the suggestion stops being readable and the rule alone is clearer.
-_ARGV_SUGGESTION_MAX_CHARS = 300
-# Trace audits show two argv shapes recurring in every Fold, mostly on a fresh
-# sub-agent's first shell call: a JSON-encoded array (repaired below, with the
-# repair named in the result so the next call is a real array) and a long
-# ``python -c`` script inlined as one element (refused with the file recipe).
+# Trace audits show the same argv shapes recurring in every Fold, mostly on a
+# fresh sub-agent's first shell call: the command under ``cmd``/``command``,
+# the whole command line as one string, a JSON-encoded array, and a long
+# ``python -c`` script inlined as one element. The first three are the same
+# command in a different wrapper, so they are repaired here and the repair is
+# named in the result; only the over-long element is refused, with the recipe
+# that replaces it.
 ARGV_STRING_NOTE = (
     "argv arrived as a JSON-encoded string and was parsed into an array; "
     "send argv as a real JSON array of strings, not a string containing one"
 )
+ARGV_SPLIT_NOTE = (
+    "argv arrived as one command string and was split into an array the way a "
+    "POSIX shell splits words (quotes honoured, nothing else): no shell ran "
+    "it, so send argv as a JSON array of strings"
+)
+ARGV_ALIAS_NOTE = "the command arrived under `{key}`; this tool's command field is argv"
 ARGV_TOO_LONG_HINT = (
     f"each argv element is at most {SHELL_ARGV_MAX_CHARS} chars: write the "
     "script to a file with write_file (e.g. notes/probe.py) and run "
     '["python", "notes/probe.py"] instead of inlining it after -c'
 )
+SHELL_PIPELINE_HINT = (
+    "this tool runs argv directly, with no shell: run a pipeline, a "
+    "redirection or a glob through one explicitly, as "
+    '["bash", "-lc", "<the whole command line>"]'
+)
+# Keys an Agent reaches for instead of ``argv``; the value is the same command.
+_COMMAND_ALIASES = ("cmd", "command")
 FORBIDDEN_WAIT = "forbidden_wait"
 _WAIT_COMMANDS = frozenset({"sleep", "usleep"})
 _WAIT_WRAPPERS = frozenset({"env", "timeout", "nice", "stdbuf", "nohup", "time"})
@@ -129,8 +142,12 @@ def _shell_description(
     return (
         "Run one bounded foreground argv command in the injected network-disabled "
         "Agent sandbox. `argv` is a JSON array of strings, e.g. "
-        '["python", "-c", "print(1)"] or ["bash", "-lc", "ls output"]; a single '
-        "command-line string is rejected. Each argv element is at most "
+        '["python", "-c", "print(1)"] or ["bash", "-lc", "ls output"]. One command '
+        "string is accepted too and is split into that array the way a POSIX shell "
+        "splits words (quotes honoured), but no shell ever runs it: pipes, "
+        "redirections, globs, `&&` and $VAR are not interpreted, so a command line "
+        'that needs them must be sent as ["bash", "-lc", "<the command line>"]. '
+        "Each argv element is at most "
         f"{SHELL_ARGV_MAX_CHARS} chars: put longer code in a file with write_file "
         '(e.g. notes/probe.py) and run ["python", "notes/probe.py"]. '
         "`cwd` and every path must stay inside the workspace (relative, no `..`); "
@@ -212,24 +229,27 @@ class SandboxShellTool:
     def normalize_arguments(self, arguments: Mapping[str, object]) -> Mapping[str, object]:
         """Repair or refuse the call shape before the schema sees it.
 
-        A JSON-encoded array is the same command with one layer of quoting too
-        many, so it is parsed and the repair is reported back in the result. A
-        plain command line is a different call and stays refused, now with that
-        very command written as an array; an element over the per-element cap is
-        refused with the write_file recipe instead of a bare length error.
+        The command under ``cmd``/``command``, a JSON-encoded array and a plain
+        command line are the same command in a different wrapper: each is
+        rewritten into the argv array and the repair is reported back in the
+        result, so the next call can be the canonical shape. What stays refused
+        is what cannot be rewritten faithfully: an element over the per-element
+        cap (refused with the write_file recipe instead of a bare length error)
+        and a command line carrying a shell operator, which nothing here would
+        interpret.
         """
 
         self._repair.note = None
+        notes: list[str] = []
+        arguments = _canonical_command_key(arguments, notes)
         argv = arguments.get("argv")
         if isinstance(argv, str):
-            parsed = _json_string_argv(argv)
-            if parsed is None:
-                raise _argv_shape_error(argv)
-            self._repair.note = ARGV_STRING_NOTE
-            arguments = {**arguments, "argv": parsed}
-            argv = parsed
+            argv, note = _argv_from_string(argv)
+            notes.append(note)
+            arguments = {**arguments, "argv": argv}
         if isinstance(argv, list):
             _reject_long_argv_elements(argv)
+        self._repair.note = "; ".join(notes) or None
         return arguments
 
     def invoke(self, arguments: Mapping[str, object]) -> ToolResult:
@@ -344,32 +364,81 @@ def _json_string_argv(value: str) -> list[str] | None:
     return None
 
 
-def _argv_shape_error(value: str) -> ToolSchemaError:
-    """Refuse a command line, showing that same command as an argv array.
+def _canonical_command_key(
+    arguments: Mapping[str, object], notes: list[str]
+) -> Mapping[str, object]:
+    """Move a command sent under ``cmd``/``command`` to ``argv``.
 
-    A value that already looks like a JSON array failed to parse as one of
-    non-empty strings, so splitting it as a command line would suggest
-    nonsense (``"[1, 2]"`` -> ``["[1,", "2]"]``): it is told what the array
-    must hold instead.
+    Only the unambiguous case is repaired: no ``argv`` of its own, and an
+    alias that actually holds a command. Anything left over -- a second alias,
+    an unusable value -- reaches the schema, whose error names the fields this
+    tool has.
     """
 
+    if "argv" in arguments:
+        return arguments
+    for alias in _COMMAND_ALIASES:
+        value = arguments.get(alias)
+        if isinstance(value, str) or (isinstance(value, list) and value):
+            notes.append(ARGV_ALIAS_NOTE.format(key=alias))
+            rest = {key: item for key, item in arguments.items() if key != alias}
+            return {**rest, "argv": value}
+    return arguments
+
+
+def _argv_from_string(value: str) -> tuple[list[str], str]:
+    """The argv array one string form holds, and the note naming the repair.
+
+    A JSON-encoded array is the same command with one layer of quoting too
+    many; anything else is a command line and is split the way a POSIX shell
+    splits words. A value that already looks like JSON but is not an array of
+    non-empty strings is refused instead of split, because splitting it would
+    suggest nonsense (``"[1, 2]"`` -> ``["[1,", "2]"]``).
+    """
+
+    parsed = _json_string_argv(value)
+    if parsed is not None:
+        return parsed, ARGV_STRING_NOTE
     text = value.strip()
     if text.startswith(("[", "{")):
-        return ToolSchemaError(
-            "argv must be an array of separate strings, not one command string; "
-            "this value parses as neither, so send a real JSON array whose "
-            "elements are all non-empty strings"
+        raise ToolSchemaError(
+            "argv must be an array of separate strings, or one command string "
+            "this tool can split; this value parses as neither, so send a real "
+            "JSON array whose elements are all non-empty strings"
         )
-    message = "argv must be an array of separate strings, not one command string"
     try:
         tokens = shlex.split(value, posix=True)
-    except ValueError:
-        tokens = []
-    if tokens:
-        suggestion = json.dumps(tokens, ensure_ascii=False)
-        if len(suggestion) <= _ARGV_SUGGESTION_MAX_CHARS:
-            message = f"{message}; send argv: {suggestion}"
-    return ToolSchemaError(message)
+    except ValueError as exc:
+        raise ToolSchemaError(
+            f"argv arrived as a command string that cannot be split ({exc}); "
+            "send argv as a JSON array of strings",
+            retry_hint=SHELL_PIPELINE_HINT,
+        ) from exc
+    if not tokens:
+        raise ToolSchemaError("argv is empty")
+    operator = _shell_operator_token(tokens)
+    if operator is not None:
+        raise ToolSchemaError(
+            f"argv arrived as a command string carrying the shell operator "
+            f"`{operator}`, which this tool would pass to the command as a "
+            "literal argument",
+            retry_hint=SHELL_PIPELINE_HINT,
+        )
+    return tokens, ARGV_SPLIT_NOTE
+
+
+def _shell_operator_token(tokens: Sequence[str]) -> str | None:
+    """The shell operator a split command line still carries, if any.
+
+    argv is executed directly, so an operator that survived the split would
+    become a literal word of the command: refusing says what happened, while
+    running the mangled command does not.
+    """
+
+    for token in tokens:
+        if token in _SHELL_SEPARATORS or token == "<" or token.startswith((">", "1>", "2>", "&>")):
+            return token
+    return None
 
 
 def _reject_long_argv_elements(argv: Sequence[object]) -> None:
@@ -558,6 +627,8 @@ def _basename(token: str) -> str:
 
 
 __all__ = [
+    "ARGV_ALIAS_NOTE",
+    "ARGV_SPLIT_NOTE",
     "ARGV_STRING_NOTE",
     "ARGV_TOO_LONG_HINT",
     "DEFAULT_SHELL_OUTPUT_CHARS",
@@ -566,6 +637,7 @@ __all__ = [
     "MAX_SHELL_TIMEOUT_SECONDS",
     "SHELL_ARGV_MAX_CHARS",
     "SHELL_CAPTURE_MAX_CHARS",
+    "SHELL_PIPELINE_HINT",
     "SandboxShellTool",
     "argv_is_forbidden_wait",
     "reject_forbidden_wait",

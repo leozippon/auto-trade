@@ -102,7 +102,7 @@ def test_package_loads_in_host_and_helper_modules_do_not_leak_between_strategies
         ("from . import other\n", "lib/features.py: strategy uses a relative import"),
         (
             "import numpy as np\ndef dump(ctx):\n    np.save('/tmp/x.npy', [])\n",
-            "lib/features.py: strategy may save only below context.state_dir",
+            "lib/features.py: strategy passes an absolute path literal to save",
         ),
         (
             "import pandas as pd\ndef dump(ctx):\n    pd.read_pickle(ctx.models_dir + '/m.pkl')\n",
@@ -120,16 +120,54 @@ def test_a_sibling_module_is_held_to_the_same_rules_everywhere(tmp_path: Path, h
         TrustedStrategyExecutor.from_path(main, state_dir=tmp_path)
 
 
-def test_helper_reads_are_rooted_by_attribute_not_by_parameter_name(tmp_path: Path):
-    """A helper receives the context under any name; the root attribute is the rule."""
+def test_a_path_may_be_built_any_way_the_strategy_likes(tmp_path: Path):
+    """The check cannot see where a computed path points, so it does not guess.
+
+    Reviewed Folds lost rounds to the old shape rule, which only recognized
+    ``context.<root> + "<literal>"`` and rejected every helper, variable,
+    f-string and named constant that builds the same path.
+    """
 
     helper = (
-        "import pandas as pd\n\n"
+        "import pandas as pd\nimport numpy as np\n\n"
+        "DOMAIN = '/daily'\n\n"
+        "def _path(ctx, name):\n    return ctx.state_dir + '/' + name\n\n"
         "def daily(ctx, columns):\n"
-        "    return pd.read_parquet(ctx.asof_dir + '/daily', columns=columns)\n\n"
+        "    return pd.read_parquet(ctx.asof_dir + DOMAIN, columns=columns)\n\n"
+        "def cache(ctx, frames):\n"
+        "    for index, frame in enumerate(frames):\n"
+        "        frame.to_parquet(f'{ctx.state_dir}/part_{index}.parquet')\n"
+        "    np.save(_path(ctx, 'w.npy'), np.zeros(3))\n\n"
         "def scaled(value):\n    return value\n"
     )
     assert validate_strategy_package(_write_package(tmp_path / "output", helper=helper)) is not None
+
+
+def test_a_path_passed_by_keyword_is_read_like_a_positional_one():
+    """``np.load(file=...)`` is the same call as ``np.load(...)``.
+
+    Reading only the positional arguments let the real parameter names --
+    ``file``, ``path``, ``filename`` -- carry an absolute literal, or a write
+    below a read-only root, straight past both rules.
+    """
+
+    with pytest.raises(StrategyLoadError, match="absolute path literal to load"):
+        validate_strategy_source(
+            "import numpy as np\ndef generate_orders(context):\n"
+            "    np.load(file='/mnt/snapshot/daily.parquet')\n    return []\n"
+        )
+    with pytest.raises(StrategyLoadError, match="may not save below context.models_dir"):
+        validate_strategy_source(
+            "import numpy as np\ndef fit(context):\n"
+            "    np.save(file=context.models_dir + '/w.npy', arr=1)\n"
+            "def generate_orders(context): return []\n"
+        )
+    # The same call below a writable root still passes.
+    validate_strategy_source(
+        "import numpy as np\ndef fit(context):\n"
+        "    np.save(file=context.state_dir + '/w.npy', arr=1)\n"
+        "def generate_orders(context): return []\n"
+    )
 
 
 def test_package_shadowing_a_library_and_missing_entry_are_rejected(tmp_path: Path):
@@ -168,15 +206,20 @@ def test_library_imports_and_booster_files_follow_the_rooted_io_rule():
         "def generate_orders(context):\n"
         "    xgboost.Booster().load_model(context.state_dir + '/m.json')\n    return []\n"
     )
-    with pytest.raises(StrategyLoadError, match="save_model only below context.state_dir"):
+    with pytest.raises(StrategyLoadError, match="absolute path literal to save_model"):
         validate_strategy_source(
             "import lightgbm as lgb\ndef fit(context):\n    lgb.Booster().save_model('/tmp/m.txt')\n"
             "def generate_orders(context): return []\n"
         )
-    # torch.save puts the path second: rejected, tensors go through NumPy.
-    with pytest.raises(StrategyLoadError, match="first positional argument"):
+    # torch.save puts the path second: the check reads every positional
+    # argument, so the rooted call passes and the absolute literal does not.
+    validate_strategy_source(
+        "import torch\ndef fit(context):\n    torch.save({}, context.state_dir + '/m.pt')\n"
+        "def generate_orders(context): return []\n"
+    )
+    with pytest.raises(StrategyLoadError, match="absolute path literal to save"):
         validate_strategy_source(
-            "import torch\ndef fit(context):\n    torch.save({}, context.state_dir + '/m.pt')\n"
+            "import torch\ndef fit(context):\n    torch.save({}, '/mnt/agent/workspace/m.pt')\n"
             "def generate_orders(context): return []\n"
         )
     with pytest.raises(StrategyLoadError, match="unsupported module: joblib"):
