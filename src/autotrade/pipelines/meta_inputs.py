@@ -602,6 +602,10 @@ def build_meta_fold_review_bundle(
                 "null_control": allowed_keys(
                     record.get("null_control"), NULL_CONTROL_KEYS
                 ),
+                # A Fold that froze nothing has no ``null_control``; these are
+                # the nulls its session drew for the candidates it then judged
+                # to show no edge, so the abstention can be read on evidence.
+                "candidate_null_controls": _candidate_null_controls(record),
                 # The inherited parent on this Fold's new period: the one
                 # forward result a trailing window holds, which the PRIOR is
                 # asked to cite per reviewed Fold.
@@ -625,6 +629,24 @@ def build_meta_fold_review_bundle(
         max_window_bytes=max_window_bytes,
     )
     return reviews, sidecars
+
+
+def _candidate_null_controls(
+    record: Mapping[str, object],
+) -> dict[str, dict[str, object]] | None:
+    """The session's own null controls, kept only when nothing was frozen.
+
+    Same whitelist as the frozen block, keyed by the candidate Step the
+    session ranked."""
+
+    blocks = record.get("candidate_null_controls")
+    if not isinstance(blocks, Mapping) or not blocks:
+        return None
+    projected = {
+        str(step_id): allowed_keys(block, NULL_CONTROL_KEYS)
+        for step_id, block in blocks.items()
+    }
+    return {step_id: block for step_id, block in projected.items() if block} or None
 
 
 def _build_full_sidecar(

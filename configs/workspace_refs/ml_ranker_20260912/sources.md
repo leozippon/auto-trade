@@ -25,6 +25,6 @@
 
 - 日线（含复权因子、换手、市值、涨跌停、停牌标记）已落为 PIT parquet；正式策略从这些原料重算。
 - 唯一总闸是 `available_at <= inference_at`；可见时间规则见 `docs/data-documentation.md §3.3`，单位见 `docs/units-reference.md`（沙箱里以 `unit_reference.json` 为准）。
-- 正式 ABI、允许的库、`fit(context)`/`context.state_dir`、booster 的 `save_model`/`load_model`、`np.savez` 持久化、`models/` 只读挂载见只读 `output/README.md`；该文件里「The strategy container has no GPU」一句已过时，GPU 以本包和运行事实为准。
-- 本臂的 GPU 由实验参数 `gpu_count` 分配，会话容器（8 核、8 GiB 内存、1 GiB `/tmp`）与正式回放的策略容器取同一个值：大于 0 时两者都挂 GPU，各自在启动时按空闲显存挑卡，同一实验的容器共享这些卡；为 0 时都没有。`runtime_env.json` 的 `sandbox_spec` 记录本会话实际的 GPU 配置，策略代码一律探测 `torch.cuda.is_available()`，不得写死。
+- 正式 ABI、允许的库、`fit(context)`/`context.state_dir`、booster 的 `save_model`/`load_model`、`np.savez` 持久化、`models/` 只读挂载见只读 `output/README.md`。
+- 本臂的 GPU 由实验参数 `gpu_count` 分配，会话容器（8 核、8 GiB 内存、1 GiB `/tmp`）与正式回放的策略容器取同一个值：大于 0 时两者都挂 GPU，各自在启动时按空闲显存挑卡，同一实验的容器共享这些卡；为 0 时都没有。策略容器的生效数量是运行事实 `budgets.strategy_gpu_count`；`runtime_env.json` 的 `sandbox_spec` 只记本会话自己的容器（Meta 会话无容器，为 `null`）。策略代码一律探测 `torch.cuda.is_available()`，不得写死。
 - 离线筛查脚本 `/mnt/tools/screen.py`（只经 `shell` 运行）给单信号的 rank IC、ICIR、衰减、规模中性 IC、头部十分位超额、换手与可交易性；模型验证 IC 用自己的脚本在 `/mnt/snapshot` 上算，不碰验证区间。

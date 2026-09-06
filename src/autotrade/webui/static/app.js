@@ -5871,7 +5871,19 @@ function foldResultPanel(detail, session) {
     frozen: "已冻结新产物",
     no_update: "沿用父产物（有验证未获接受）",
     no_valid_backtest: "沿用父产物（无完整验证）",
+    baseline_missing: "无产物可沿用（下一 Fold 从模板开始）",
   };
+  // `agent_no_edge` is a deliberate abstention, not a validation that failed
+  // acceptance, so it gets its own label and shows the Agent's evidence below.
+  const abstained = record.finish_mode === "agent_no_edge";
+  const statusLabel = abstained
+    ? record.fold_status === "baseline_missing"
+      ? "弃权（无边际），无产物可沿用"
+      : "弃权（无边际），沿用父产物"
+    : statusLabels[record.fold_status] || record.fold_status || "—";
+  // Records written before the rename carry `accept_reasons`.
+  const rejectReasons =
+    record.hard_reject_reasons || record.accept_reasons || [];
   const panel = el(
     "div",
     { class: "panel" },
@@ -5896,7 +5908,7 @@ function foldResultPanel(detail, session) {
         },
         record.fold_status === "frozen" && (record.accept_warnings || []).length
           ? "已冻结（有验收警告）"
-          : statusLabels[record.fold_status] || record.fold_status || "—",
+          : statusLabel,
       ),
       record.finish_reason
         ? el("span", { class: "mode-note" }, `结束原因 ${record.finish_reason}`)
@@ -5969,8 +5981,11 @@ function foldResultPanel(detail, session) {
         ? kvRow("总耗时", fmtDuration(record.run_wall_seconds))
         : null,
       kvRow("冻结产物", record.frozen_strategy_artifact_ref || "—"),
-      (record.accept_reasons || []).length
-        ? kvRow("未接受原因", (record.accept_reasons || []).join("；"))
+      rejectReasons.length
+        ? kvRow("未接受原因", rejectReasons.join("；"))
+        : null,
+      record.no_edge_reason
+        ? kvRow("弃权理由", record.no_edge_reason)
         : null,
       (record.accept_warnings || []).length
         ? kvRow(

@@ -216,6 +216,7 @@ def _fold_prompt(
             "deadline_grace_seconds": budgets["deadline_grace_seconds"],
             "strategy_inference_timeout_seconds": limits.timeout_seconds,
             "strategy_fit_timeout_seconds": limits.fit_timeout_seconds,
+            "strategy_gpu_count": limits.gpu_count,
         },
     }
     workspace = fold_workspace_map(_NO_WORKSPACE)
@@ -304,6 +305,7 @@ def _meta_prompt(
             "deadline_seconds": rolling.max_fold_minutes * 60,
             "strategy_inference_timeout_seconds": limits.timeout_seconds,
             "strategy_fit_timeout_seconds": limits.fit_timeout_seconds,
+            "strategy_gpu_count": limits.gpu_count,
         },
     }
     facts = build_experiment_facts(manifest=manifest, ref_store=context.ref_store)

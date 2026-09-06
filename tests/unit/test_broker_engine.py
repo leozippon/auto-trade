@@ -435,6 +435,36 @@ class BrokerCorporateActionTest(unittest.TestCase):
         self.assertAlmostEqual(broker.cash, cash_before + 500.0)
         self.assertAlmostEqual(broker.equity(), equity_before, places=6)
 
+    def test_a_rounded_pure_cash_dividend_keeps_every_share(self) -> None:
+        # Quoted references: 12.34 - 0.25 = 12.09 exactly, and 12.34 - 0.123 =
+        # 12.217 quoted as 12.22. Flooring a price-derived multiplier would
+        # read the second as 0.99975 and pay one share out as cash.
+        for cash, pre_close in ((0.25, 12.09), (0.123, 12.22)):
+            with self.subTest(cash=cash):
+                broker = self._holding(1000)
+                broker.mark({"000001.SZ": _bar(close=12.34)})
+                cash_before = broker.cash
+                broker.open_day("20260106", {"000001.SZ": _bar(pre_close=pre_close)}, {"000001.SZ": cash})
+                position = broker.positions["000001.SZ"]
+                self.assertEqual(position.quantity, 1000)
+                self.assertAlmostEqual(broker.cash, cash_before + 1000 * cash)
+                self.assertAlmostEqual(position.last_price, pre_close)
+                [action] = broker.corporate_actions
+                self.assertEqual((action.quantity_before, action.quantity_after), (1000, 1000))
+
+    def test_a_cash_adjusted_reference_that_still_implies_a_bonus_floors(self) -> None:
+        # 10 送 3 with 0.25 cash: (12.35 - 0.25) / 1.3 = 9.3077 quoted as 9.31,
+        # so the exchange's own reset implies 1299.68 shares: 1299 whole ones
+        # and the rest, with the dividend, paid in cash.
+        broker = self._holding(1000)
+        broker.mark({"000001.SZ": _bar(close=12.35)})
+        cash_before = broker.cash
+        broker.open_day("20260106", {"000001.SZ": _bar(pre_close=9.31)}, {"000001.SZ": 0.25})
+        position = broker.positions["000001.SZ"]
+        self.assertEqual(position.quantity, 1299)
+        self.assertAlmostEqual(broker.cash, cash_before + 1000 * 12.35 - 1299 * 9.31, places=6)
+        self.assertAlmostEqual(broker.cash + 1299 * 9.31, cash_before + 1000 * 12.35, places=6)
+
     def test_a_day_without_a_reset_changes_nothing(self) -> None:
         broker = self._holding(1000)
         cash_before = broker.cash

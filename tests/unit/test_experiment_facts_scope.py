@@ -430,9 +430,13 @@ def test_a_zero_row_domain_file_is_reported_as_unavailable() -> None:
     assert populated["events_available"] is False
 
 
-def test_a_meta_run_manifest_publishes_both_strategy_wall_clocks(tmp_path: Path) -> None:
+def test_a_meta_run_manifest_publishes_the_strategy_container_contract(
+    tmp_path: Path,
+) -> None:
     """Meta may rewrite main.py, ``fit`` included, so its own run facts must
-    carry the same strategy wall clocks an ordinary Fold is given."""
+    carry the same strategy wall clocks and GPU allocation an ordinary Fold is
+    given. A Meta session runs no container of its own, so ``runtime_env.json``
+    has no ``sandbox_spec`` to read the device count from."""
 
     baseline = tmp_path / "baseline" / "main.py"
     baseline.parent.mkdir()
@@ -451,6 +455,7 @@ def test_a_meta_run_manifest_publishes_both_strategy_wall_clocks(tmp_path: Path)
         deadline_seconds=30.0,
         decision_timeout_seconds=30.0,
         fit_timeout_seconds=1800.0,
+        strategy_gpu_count=2,
         use_docker=False,
         rebuild_enabled=False,
     )
@@ -468,10 +473,33 @@ def test_a_meta_run_manifest_publishes_both_strategy_wall_clocks(tmp_path: Path)
     )
     assert manifest["budgets"]["strategy_inference_timeout_seconds"] == 30.0
     assert manifest["budgets"]["strategy_fit_timeout_seconds"] == 1800.0
+    assert manifest["budgets"]["strategy_gpu_count"] == 2
+    runtime_env = json.loads(
+        (tmp_path / "runtime" / "run_budgets" / "artifacts" / "runtime_env.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert runtime_env["sandbox_spec"] is None
     facts = build_experiment_facts(
         manifest=manifest, ref_store=AgentRefStore(tmp_path / "experiment")
     )
     assert facts["budgets"]["strategy_fit_timeout_seconds"] == 1800.0
+    assert facts["budgets"]["strategy_gpu_count"] == 2
+
+
+def test_a_cpu_only_experiment_still_states_its_strategy_gpu_count() -> None:
+    """0 is the answer "every formal replay runs on CPU", not a missing fact:
+    dropping it would leave the session unable to tell a CPU-only arm from an
+    older manifest that never published the field."""
+
+    budgets = _facts(
+        budgets={
+            "strategy_fit_timeout_seconds": 3600.0,
+            "strategy_gpu_count": 0,
+        }
+    )["budgets"]
+    assert budgets["strategy_gpu_count"] == 0
+    assert "strategy_gpu_count" not in _facts(budgets={})["budgets"]
 
 
 def test_meta_facts_read_the_data_summary_the_session_is_given(tmp_path: Path) -> None:

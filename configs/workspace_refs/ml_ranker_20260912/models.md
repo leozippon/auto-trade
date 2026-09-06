@@ -34,7 +34,7 @@ target(T)   = 截面 rank(excess_h) 映射到 [-0.5, 0.5]
 - 可行性：180 万行、batch 4096 每 epoch 约 440 步，16 线程 CPU 下每 epoch 约 1–3 分钟；10 个 epoch 加网格约 30–60 分钟，逼近预算。有 GPU 时同一配置快得多，但卡是共享的，仍要实测。两种设备都先在会话沙箱里计时（CPU 用 `CUDA_VISIBLE_DEVICES=""`），正式回放所用设备上超过预算一半就把网格缩到 2 点或 epoch 缩到 5。
 - 持久化：`np.savez(context.state_dir + "/mlp.npz", **{name: p.detach().cpu().numpy() for name, p in model.state_dict().items()})`，另存标准化参数与网格选择；推断时 `np.load` 后 `model.load_state_dict({k: torch.from_numpy(v) ...})`，`model.eval()`，`torch.no_grad()`。
 - 线程：容器已设 `OMP_NUM_THREADS`，torch 的 intra-op 线程随之生效；不要在策略里调用 `torch.set_num_threads` 设更大值。
-- 设备：`output/` 里也用 `device = "cuda" if torch.cuda.is_available() else "cpu"`，`fit` 与 `generate_orders` 各自探测一次。本臂 `gpu_count>0` 时策略容器有卡，但同一份策略必须在没有卡的实验里原样跑通，所以不要写死 `.cuda()`、不要按 GPU 存在与否改变模型结构或超参。参数一律以 `p.detach().cpu().numpy()` 落盘，装载后再 `.to(device)`。
+- 设备：`output/` 里也用 `device = "cuda" if torch.cuda.is_available() else "cpu"`，`fit` 与 `generate_orders` 各自探测一次。运行事实 `budgets.strategy_gpu_count` 大于 0 时策略容器有卡，但同一份策略必须在没有卡的实验里原样跑通，所以不要写死 `.cuda()`、不要按 GPU 存在与否改变模型结构或超参。参数一律以 `p.detach().cpu().numpy()` 落盘，装载后再 `.to(device)`。
 
 ## 模型族三：序列模型（GRU 或小型 Transformer，torch）
 

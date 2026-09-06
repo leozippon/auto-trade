@@ -337,6 +337,13 @@ def _budget_facts(
             "strategy_fit_timeout_seconds": budgets.get(
                 "strategy_fit_timeout_seconds"
             ),
+            # GPUs the formal strategy container (fit worker included) is
+            # started with; 0 means every formal replay runs on CPU. This is
+            # the authoritative device fact for every session kind — a Meta
+            # session has no container of its own, so runtime_env.json's
+            # sandbox_spec is null there, and a per-Fold GPU override moves
+            # only that session's container, never this number.
+            "strategy_gpu_count": budgets.get("strategy_gpu_count"),
             "context_compaction": context_compaction,
         }
     )

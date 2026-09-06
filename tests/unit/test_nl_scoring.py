@@ -1,4 +1,4 @@
-"""JSON extraction, company context, and the PIT text retriever's internals.
+"""Company context and the PIT text retriever's internals.
 
 ``TextRetriever`` is the single retrieval implementation behind ``ctx.nl()``:
 its candidate cache, incremental body loading and rolling index re-read are
@@ -13,36 +13,10 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-from autotrade.environment.llm import ExtractionError, extract_json_object
 from autotrade.environment.nl import TextRetriever
 
 CN_TZ = ZoneInfo("Asia/Shanghai")
 INDEX_COLUMNS = ["text_id", "dataset", "ts_codes", "title", "available_at", "library_file"]
-
-
-class ExtractionTest(unittest.TestCase):
-    def test_accepts_plain_json_object(self):
-        extracted = extract_json_object('{"a": 1}')
-        self.assertEqual(extracted.payload, {"a": 1})
-
-    def test_accepts_one_json_fence(self):
-        extracted = extract_json_object('```json\n{"a": 1}\n```')
-        self.assertEqual(extracted.payload, {"a": 1})
-
-    def test_strips_closed_think_block_and_keeps_it_for_logging(self):
-        extracted = extract_json_object('<think>internal reasoning</think>{"a": 1}')
-        self.assertEqual(extracted.payload, {"a": 1})
-        self.assertEqual(extracted.stripped_think, "internal reasoning")
-
-    def test_rejects_unclosed_think(self):
-        with self.assertRaisesRegex(ExtractionError, "unclosed"):
-            extract_json_object('<think>still thinking {"a": 1}')
-
-    def test_rejects_multiple_json_objects_or_trailing_text(self):
-        with self.assertRaisesRegex(ExtractionError, "beyond a single JSON object"):
-            extract_json_object('{"a": 1}{"b": 2}')
-        with self.assertRaisesRegex(ExtractionError, "beyond a single JSON object"):
-            extract_json_object('{"a": 1} trailing')
 
 
 class CompanyContextStoreTest(unittest.TestCase):

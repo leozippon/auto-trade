@@ -651,10 +651,36 @@ class StructuredSearchToolTest(unittest.TestCase):
                 self.assertIn(name, record["content"])
                 self.assertIn(name, names)
 
+    def test_grep_content_names_the_files_of_the_page(self) -> None:
+        # A hyphenated name and a match-free context line both used to split at
+        # the wrong place: `alpha-158-notes.md:12:x` read as the file `alpha`,
+        # and a context line's own colons cut the path mid-text.
+        with tempfile.TemporaryDirectory() as tmp:
+            paths, _, registry = self._tools(Path(tmp))
+            body = '{\n  "cash": 1.0,\n  "equity": 2.0,\n  "note": "flat"\n}\n'
+            for name in ("alpha-158-notes.md", "plain_report.txt"):
+                (paths.workspace / name).write_text(body, encoding="utf-8")
+            page = registry.invoke(
+                "grep",
+                {
+                    "pattern": '"(cash|equity)":',
+                    "root": "workspace",
+                    "output_mode": "content",
+                    "context": 1,
+                },
+            ).value
+            self.assertEqual(
+                page["filenames"],
+                ["workspace/alpha-158-notes.md", "workspace/plain_report.txt"],
+            )
+            self.assertIn('workspace/alpha-158-notes.md:2:  "cash": 1.0,', page["content"])
+            self.assertIn('workspace/plain_report.txt-4-  "note": "flat"', page["content"])
+            self.assertNotIn("\x00", page["content"])
+
     def test_grep_of_a_single_file_reports_file_names(self) -> None:
         # ripgrep prints no path prefix when its target is one file, so a
         # content page came back as bare `line:text` and every line number was
-        # read back as a "filename"; a context line's own colons split it too.
+        # read back as a "filename".
         with tempfile.TemporaryDirectory() as tmp:
             paths, _, registry = self._tools(Path(tmp))
             (paths.workspace / "result.json").write_text(

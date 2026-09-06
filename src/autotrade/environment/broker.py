@@ -243,6 +243,17 @@ class DailyBroker:
                 return
             quantity_after = quantity_before
             credit = quantity_before * cash_per_share
+        elif (
+            round(abs(pre_close - (last_close - cash_per_share)), 6)
+            <= EX_DATE_PRICE_TOLERANCE
+        ):
+            # A pure cash dividend: the reset is the dividend itself, quoted to
+            # a tick by the exchange. The multiplier is exactly one — flooring
+            # a price-derived 0.9997 would shave shares into cash on most
+            # dividends — so only the cash leg moves.
+            quantity_after = quantity_before
+            credit = quantity_before * cash_per_share
+            position.last_price = pre_close
         else:
             # pre_close = (last_close - cash) / (1 + r): the share multiplier is
             # recovered from the exchange's own reset, never from a ratio table.

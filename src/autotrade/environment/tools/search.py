@@ -362,7 +362,14 @@ class GrepTool(_SearchToolBase):
         elif output_mode == "count":
             args.append("--count-matches")
         else:
-            args.append("--line-number")
+            # `--null` ends the path with a NUL instead of the field separator,
+            # so the page's file list is exact for any name: `:` and `-` both
+            # occur inside paths and inside matched text, and a name like
+            # `alpha-158-notes.md` is otherwise indistinguishable from a
+            # context line's own `path-line-` prefix. The NUL is replaced by
+            # the separator ripgrep would have printed before the content is
+            # returned, so the observation keeps the documented shape.
+            args.extend(["--line-number", "--null"])
             if context:
                 args.extend(["-C", str(context)])
         if bool(arguments.get("case_insensitive")):
@@ -425,17 +432,19 @@ class GrepTool(_SearchToolBase):
             visible_lines, paging = _apply_paging(
                 raw_lines, offset=offset, head_limit=head_limit, source_truncated=completed["line_limited"]
             )
-            content, budget = self._apply_result_budget("\n".join(visible_lines), tool_kind="grep_content")
-            # Derive the page's file list from the budgeted visible content
-            # (dropping a char-cut partial last line), not from the raw lines:
-            # every observation field must respect the same inline budget.
-            content_lines = content.split("\n")
-            if budget.get("truncated_by_chars"):
-                content_lines = content_lines[:-1]
+            # Rendering the NUL back to ripgrep's own separator is
+            # length-preserving, so the char budget applies to exactly what the
+            # Agent will read, and the spilled full page carries no NUL either.
+            rendered = [_render_content_line(line) for line in visible_lines]
+            content, budget = self._apply_result_budget("\n".join(rendered), tool_kind="grep_content")
+            # Derive the page's file list from the lines that survived the
+            # budget (a char-cut partial last line is not one of them), not
+            # from the raw lines: every observation field respects the budget.
+            kept = len(content.split("\n")) - (1 if budget.get("truncated_by_chars") else 0)
             value = {
                 **common,
                 "num_lines": len(raw_lines),
-                "filenames": sorted(_filenames_from_content(content_lines)),
+                "filenames": sorted(_filenames_from_content(visible_lines[:kept])),
                 "content": content,
                 **paging, **budget,
             }
@@ -748,19 +757,28 @@ def _sum_count_lines(lines: list[str]) -> int:
     return total
 
 
-# A content line is `path:line:text` for a match and `path-line-text` for a
-# context line, and the text itself routinely contains colons (JSON), so the
-# path ends at the first `<sep><line number><sep>`, not at the first colon.
-_RG_CONTENT_PATH_RE = re.compile(r"^(?P<path>.+?)[:-]\d+[:-]")
+# With `--null` a content line is `path\0<line number><sep>text`, where `sep`
+# is `:` for a match and `-` for a context line. Multiline matches continue on
+# lines with no prefix at all, which name no new file.
+_RG_NULL_LINE_RE = re.compile(r"^(?P<path>[^\x00]*)\x00(?P<rest>\d+(?P<sep>[:-]).*)$")
+
+
+def _render_content_line(line: str) -> str:
+    """The line as ripgrep prints it without ``--null``: same length, so the
+    inline char budget is unaffected."""
+
+    match = _RG_NULL_LINE_RE.match(line)
+    if match is None:
+        return line
+    return f"{match['path']}{match['sep']}{match['rest']}"
 
 
 def _filenames_from_content(lines: list[str]) -> set[str]:
-    filenames: set[str] = set()
-    for line in lines:
-        match = _RG_CONTENT_PATH_RE.match(line)
-        if match:
-            filenames.add(match.group("path"))
-    return filenames
+    return {
+        match["path"]
+        for match in (_RG_NULL_LINE_RE.match(line) for line in lines)
+        if match is not None and match["path"]
+    }
 
 
 def _collect_rg_lines(

@@ -6,7 +6,6 @@ from .deepseek import (
     load_api_key,
     load_env_value,
 )
-from .extraction import ExtractionError, extract_json_object
 from .model_profiles import (
     AGENT_MAX_OUTPUT_TOKENS,
     DEFAULT_LLM_MAX_RETRIES,
@@ -50,7 +49,6 @@ __all__ = [
     "ChatMessage",
     "DeepSeekConfig",
     "DeepSeekProxy",
-    "ExtractionError",
     "LLMProxy",
     "LLMProxyError",
     "MalformedToolCallError",
@@ -69,7 +67,6 @@ __all__ = [
     "context_window_tokens",
     "effective_max_output_tokens",
     "estimate_chat_request_tokens",
-    "extract_json_object",
     "is_context_overflow_error",
     "load_api_key",
     "load_env_value",

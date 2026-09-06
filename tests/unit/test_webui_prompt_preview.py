@@ -193,6 +193,9 @@ def test_fold_preview_states_the_pipeline_budgets_and_scope(tmp_path: Path):
             rolling_default("strategy_fit_timeout_seconds")
         ),
         "strategy_inference_timeout_seconds": limits.timeout_seconds,
+        # The formal strategy container's GPU allocation; 0 is published as
+        # "every formal replay runs on CPU", not omitted.
+        "strategy_gpu_count": limits.gpu_count,
     }
     # The calendar the console configures: one yearly Fold, no frozen Test.
     assert facts["visible_timeline"]["fold_period"] == "year"

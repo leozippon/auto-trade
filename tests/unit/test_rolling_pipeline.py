@@ -2044,6 +2044,49 @@ def _abstaining_developer(request):
     return FoldSessionResult("conversation", tuple(steps), None, no_edge_reason=NO_EDGE_REASON)
 
 
+def test_an_abstention_keeps_the_null_controls_the_session_paid_for(tmp_path: Path):
+    """An abstention freezes nothing, so there is no ``null_control`` to record;
+    the nulls the session drew for its candidates are the evidence the Meta
+    review is asked to cite, so they stay in the record and reach the review."""
+    pipeline, folds, ledger, _requests = _selection_fold_pipeline(tmp_path)
+    drawn = {"k": 500, "seed": 7, "excess_percentile": 0.48, "rejects_mean": 2.0}
+
+    def abstaining_with_nulls(request):
+        session = _abstaining_developer(request)
+        return replace(session, null_controls={"step_a": drawn})
+
+    pipeline.developer = abstaining_with_nulls
+    assert pipeline.run_fold("epoch_001", folds[0], parent=None).frozen is None
+    record = ledger.read("fold")[0]
+    assert record["null_control"] is None
+    assert record["candidate_null_controls"] == {"step_a": drawn}
+    ref_store = AgentRefStore(pipeline.config.experiment_dir)
+    reviews, _sidecars = build_meta_fold_review_bundle([record], ref_store=ref_store)
+    # Same whitelist as the frozen block: the draw's seed stays host-side.
+    assert reviews[0]["candidate_null_controls"] == {
+        "step_a": {"excess_percentile": 0.48, "k": 500, "rejects_mean": 2.0}
+    }
+    # A Fold that froze a node records that node's null instead; the candidate
+    # blocks are not a second copy of it.
+    def nominating_with_nulls(request):
+        session = _abstaining_developer(request)
+        return replace(
+            session,
+            selected_step_id="step_a",
+            no_edge_reason="",
+            null_controls={"step_a": drawn},
+        )
+
+    pipeline.developer = nominating_with_nulls
+    assert pipeline.run_fold("epoch_001", folds[0], parent=None).frozen is not None
+    frozen_record = ledger.read("fold")[1]
+    assert frozen_record["null_control"] == drawn
+    assert "candidate_null_controls" not in frozen_record
+    assert build_meta_fold_review_bundle([frozen_record], ref_store=ref_store)[0][0][
+        "candidate_null_controls"
+    ] is None
+
+
 def test_a_parentless_no_edge_finish_records_baseline_missing_and_freezes_nothing(
     tmp_path: Path,
 ):

@@ -1003,6 +1003,7 @@ def run_local_interactive_worker(
             deadline_seconds=options.rolling.max_fold_minutes * 60,
             decision_timeout_seconds=strategy_sandbox.limits.timeout_seconds,
             fit_timeout_seconds=strategy_sandbox.limits.fit_timeout_seconds,
+            strategy_gpu_count=strategy_sandbox.limits.gpu_count,
             max_response_tokens=options.llm.max_tokens_for("meta"),
             meta_learning_directive=options.rolling.meta_learning_directive,
             fold_exploration_directive=options.rolling.fold_exploration_directive,

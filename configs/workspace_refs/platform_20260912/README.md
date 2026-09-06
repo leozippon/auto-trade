@@ -14,7 +14,7 @@
 ## 硬合同
 
 - 正式策略写在 `output/` 包内：入口固定为 `output/main.py` 的 `generate_orders(context)`，返回严格 JSON 订单数组；辅助模块可放在 `output/` 下并用绝对导入，每个 `.py` 都受同一套静态检查。
-- 正式 import 只允许：纯计算标准库（`__future__`、`collections`、`dataclasses`、`datetime`、`decimal`、`functools`、`itertools`、`math`、`statistics`、`typing`）、`numpy`、`pandas`、`scipy`、`sklearn`、`lightgbm`、`xgboost`、`statsmodels`、`torch`（策略容器无 GPU，只跑 CPU）及其子模块，以及 `output/` 内自己的模块。qlib / joblib / pickle 不得 import；拟合结果用 NumPy 数组或 booster 的 `save_model(context.state_dir + ...)` 持久化。
+- 正式 import 只允许：纯计算标准库（`__future__`、`collections`、`dataclasses`、`datetime`、`decimal`、`functools`、`itertools`、`math`、`statistics`、`typing`）、`numpy`、`pandas`、`scipy`、`sklearn`、`lightgbm`、`xgboost`、`statsmodels`、`torch`（本臂 gpu_count=0，策略容器无 GPU，只跑 CPU；以运行事实 `budgets.strategy_gpu_count` 为准）及其子模块，以及 `output/` 内自己的模块。qlib / joblib / pickle 不得 import；拟合结果用 NumPy 数组或 booster 的 `save_model(context.state_dir + ...)` 持久化。
 - 需要拟合的量放在 `fit(context)` 并写入 `context.state_dir`；`generate_orders` 只读它。`models/` 以只读 `context.models_dir` 挂载。
 - 沙箱无网络，任何时候都不得抓取站点数据；平台原文只是机制来源，不是数据。
 - 每一行必须 `available_at <= context.inference_at`。默认 08:30 决策时，当日日线、竞价、当日 `stk_limit`/`suspend_d`、当日榜单都不存在。

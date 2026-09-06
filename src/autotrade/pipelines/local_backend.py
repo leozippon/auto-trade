@@ -2174,7 +2174,8 @@ class NullControlTool(SessionTimeBudgetAware):
             "parent control's null is already in the run facts. Refused for a node "
             "that is not a complete Validation of this session, once the cap is "
             "spent, and while a background sub-agent that can write is still "
-            "running.",
+            "running; it is also unavailable once the session enters hard "
+            "finalization, so rank the finalists before that, not while finishing.",
             self.spec.input_schema,
             mutating=True,
             example=self.spec.example,
@@ -2371,6 +2372,21 @@ class LLMFoldDeveloper:
         limits = getattr(sandbox, "limits", None) or SandboxLimits()
         return float(limits.fit_timeout_seconds)
 
+    @property
+    def strategy_gpu_count(self) -> int:
+        """GPUs attached to the formal executor's strategy container.
+
+        Read from the evaluator's own limits, so it is the number ``fit`` and
+        ``generate_orders`` will actually see rather than a second derivation
+        of the experiment request. It can differ from this session's container
+        (``runtime_env.json``'s ``sandbox_spec``), which a per-Fold HITL
+        override may move on its own.
+        """
+
+        sandbox = getattr(self.evaluator, "sandbox", None)
+        limits = getattr(sandbox, "limits", None) or SandboxLimits()
+        return int(limits.gpu_count)
+
     def set_sandbox_spec(self, spec: SandboxSpec) -> None:
         """Adopt the derived image a Meta session just built, for later Folds."""
         self.sandbox_spec = spec
@@ -2501,6 +2517,11 @@ class LLMFoldDeveloper:
                     "deadline_grace_seconds": request.deadline_grace_seconds,
                     "strategy_inference_timeout_seconds": self.decision_timeout_seconds,
                     "strategy_fit_timeout_seconds": self.fit_timeout_seconds,
+                    # What ``fit`` may spend those wall clocks on: the formal
+                    # strategy container's own GPU allocation, published to
+                    # every session kind because both Fold and Meta write the
+                    # code that runs in it.
+                    "strategy_gpu_count": self.strategy_gpu_count,
                 },
             },
             ref_store=self.ref_store,
@@ -3070,10 +3091,12 @@ class LLMMetaLearner:
         runtime_root: str | Path,
         max_llm_calls: int,
         deadline_seconds: float,
-        # The formal executor's strategy wall clocks, published in the run
-        # manifest: Meta rewrites main.py, fit(context) included.
+        # The formal executor's strategy wall clocks and GPU allocation,
+        # published in the run manifest: Meta rewrites main.py, fit(context)
+        # included, and a Meta session has no container of its own to probe.
         decision_timeout_seconds: float = SandboxLimits().timeout_seconds,
         fit_timeout_seconds: float = SandboxLimits().fit_timeout_seconds,
+        strategy_gpu_count: int = SandboxLimits().gpu_count,
         # One completion ceiling for the parent conversation and its children.
         max_response_tokens: int = AGENT_MAX_OUTPUT_TOKENS,
         meta_learning_directive: str = "",
@@ -3103,6 +3126,7 @@ class LLMMetaLearner:
         self.deadline_seconds = deadline_seconds
         self.decision_timeout_seconds = float(decision_timeout_seconds)
         self.fit_timeout_seconds = float(fit_timeout_seconds)
+        self.strategy_gpu_count = int(strategy_gpu_count)
         # Derived-image rebuild: a Meta session may declare stable dependencies
         # that later ordinary Folds inherit. The new tag reaches those folds
         # through ``sandbox_spec_sink``.
@@ -3373,12 +3397,15 @@ class LLMMetaLearner:
                     }
                 ),
                 # Meta may rewrite main.py, fit(context) included, so it is
-                # told the same strategy wall clocks an ordinary Fold gets.
+                # told the same strategy wall clocks and GPU allocation an
+                # ordinary Fold gets. A Meta session runs no container itself,
+                # so this manifest is its only source for the latter.
                 "budgets": {
                     "max_llm_calls": self.max_llm_calls,
                     "deadline_seconds": self.deadline_seconds,
                     "strategy_inference_timeout_seconds": self.decision_timeout_seconds,
                     "strategy_fit_timeout_seconds": self.fit_timeout_seconds,
+                    "strategy_gpu_count": self.strategy_gpu_count,
                 },
             },
             ref_store=self.ref_store,

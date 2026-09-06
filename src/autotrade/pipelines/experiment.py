@@ -461,6 +461,18 @@ class RollingExperimentPipeline:
                 frozen_null = self._null_control(
                     selected.validation.result_ref, fold=fold, role="frozen"
                 )
+            # A Fold that nominates nothing still paid for the nulls it drew,
+            # and they are the evidence the Meta review is asked to cite for an
+            # abstention. Without a frozen node they have nowhere else to go, so
+            # the record keeps them by candidate instead of discarding them.
+            candidate_nulls = (
+                {
+                    step_id: dict(block)
+                    for step_id, block in session.null_controls.items()
+                }
+                if selected is None
+                else {}
+            )
             record = {
                 "record_type": "fold",
                 "experiment_id": self.config.experiment_id,
@@ -514,6 +526,11 @@ class RollingExperimentPipeline:
                     session.steps, selected
                 ),
                 "null_control": frozen_null,
+                **(
+                    {"candidate_null_controls": candidate_nulls}
+                    if candidate_nulls
+                    else {}
+                ),
                 "test_result": test_summary,
                 "test_result_ref": test_result_ref,
                 "run_manifest_ref": session.run_manifest_ref,

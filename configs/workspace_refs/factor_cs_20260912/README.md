@@ -14,7 +14,7 @@
 ## 硬合同
 
 - 正式策略写在 `output/` 包内：入口固定为 `output/main.py` 的 `generate_orders(context)`，返回严格 JSON 订单数组；辅助模块可放在 `output/` 下并用绝对导入（如 `from lib.features import x`），每个 `.py` 都受同一套静态检查。
-- 正式 import 只允许：纯计算标准库（`__future__`、`collections`、`dataclasses`、`datetime`、`decimal`、`functools`、`itertools`、`math`、`statistics`、`typing`）、`numpy`、`pandas`、`scipy`、`sklearn`、`lightgbm`、`xgboost`、`statsmodels`、`torch`（策略容器无 GPU，只跑 CPU）及其子模块，以及 `output/` 内自己的模块。qlib / joblib / pickle 不得 import；模型参数用 NumPy 数组（`np.save`/`np.savez`）或 booster 的 `save_model(context.state_dir + ...)` 持久化，`torch.save` 被静态拒绝。
+- 正式 import 只允许：纯计算标准库（`__future__`、`collections`、`dataclasses`、`datetime`、`decimal`、`functools`、`itertools`、`math`、`statistics`、`typing`）、`numpy`、`pandas`、`scipy`、`sklearn`、`lightgbm`、`xgboost`、`statsmodels`、`torch`（策略容器的 GPU 数量见运行事实 `budgets.strategy_gpu_count`，本臂为 0，即只跑 CPU）及其子模块，以及 `output/` 内自己的模块。qlib / joblib / pickle 不得 import；模型参数用 NumPy 数组（`np.save`/`np.savez`）或 booster 的 `save_model(context.state_dir + ...)` 持久化，`torch.save` 被静态拒绝。
 - 需要拟合的量放在 `fit(context)` 并写入 `context.state_dir`（一次 `fit` 有 `budgets.strategy_fit_timeout_seconds` 的独立预算，按模块级 `REFIT_PERIOD` 重训）；`generate_orders` 只读它，且受单次决策上限 `budgets.strategy_inference_timeout_seconds` 约束。`models/` 以只读 `context.models_dir` 挂载。
 - 沙箱无网络，不要抓网页。
 - 每一行必须 `available_at <= context.inference_at`；财务与事件用 `available_at`，不用 `end_date`/`trade_date` 偷看。
