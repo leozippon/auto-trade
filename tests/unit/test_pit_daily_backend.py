@@ -770,6 +770,72 @@ def test_research_pit_provider_reuses_completed_semantic_views(tmp_path: Path) -
     assert fake.calls == ["decision", "replay"]
 
 
+def test_cached_bundle_yields_the_current_unit_registry_on_the_next_take(
+    tmp_path: Path,
+) -> None:
+    """A Meta session mounts the bundle copy of ``unit_reference.json`` verbatim.
+
+    The bundle is cached for the life of the experiment, so a copy written under
+    an older unit registry kept telling Meta a column was ``percent``/official
+    while every Fold, which regenerates the file, read the corrected unit.
+    """
+    from autotrade.environment.data.snapshot import load_snapshot_manifest
+    from autotrade.environment.data.units import (
+        AGENT_UNIT_CONTRACT,
+        build_unit_reference,
+        snapshot_column_map,
+    )
+
+    provider, _fake = _provider_with_fake_builder(tmp_path)
+    decision = datetime.fromisoformat("2024-01-01T23:59:59+08:00")
+    first = provider.prepare(
+        fold=None,
+        phase="meta",
+        start="20240102",
+        end="20240103",
+        decision_time=decision,
+    )
+    bundle = Path(first.data_summary_ref).parent
+    unit_path = bundle / "unit_reference.json"
+    summary_before = (bundle / "data_summary.json").read_text(encoding="utf-8")
+
+    # What a bundle built under an older registry holds, published read-only in
+    # a read-only directory exactly as the provider publishes its own.
+    stale = {"generated_at": "2000-01-01T00:00:00Z", "records": [{"column": "close", "source_unit": "percent"}]}
+    unit_path.chmod(0o644)
+    unit_path.write_text(json.dumps(stale), encoding="utf-8")
+    unit_path.chmod(0o444)
+    # The seed hardlinks one file into every experiment that reused it.
+    seed_link = tmp_path / "seed_unit_reference.json"
+    os.link(unit_path, seed_link)
+
+    second = provider.prepare(
+        fold=None,
+        phase="meta",
+        start="20240102",
+        end="20240103",
+        decision_time=decision,
+    )
+
+    assert second.data_summary_ref == first.data_summary_ref
+    decision_dir = Path(first.decision_ref)
+    expected = build_unit_reference(
+        snapshot_column_map(decision_dir, load_snapshot_manifest(decision_dir))
+    )
+    refreshed = json.loads(unit_path.read_text(encoding="utf-8"))
+    assert refreshed["records"] == expected
+    assert refreshed["identity_rule"] == AGENT_UNIT_CONTRACT["identity_rule"]
+    # Only the registry-derived file is rebuilt; the summary stays cached.
+    assert (bundle / "data_summary.json").read_text(encoding="utf-8") == summary_before
+    # Replaced, not rewritten in place: the shared seed link keeps its own
+    # content, so the provider never writes outside this experiment's cache.
+    assert json.loads(seed_link.read_text(encoding="utf-8")) == stale
+    assert os.stat(unit_path).st_ino != os.stat(seed_link).st_ino
+    assert stat.S_IMODE(os.stat(unit_path).st_mode) == 0o444
+    assert stat.S_IMODE(os.stat(bundle).st_mode) == 0o555
+    assert not [child for child in bundle.iterdir() if child.name.startswith(".")]
+
+
 def test_unphased_meta_replay_is_cloned_into_valid_phase(tmp_path: Path) -> None:
     provider, fake = _provider_with_fake_builder(tmp_path)
     decision = datetime.fromisoformat("2024-01-01T23:59:59+08:00")

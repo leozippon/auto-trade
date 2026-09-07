@@ -403,6 +403,23 @@ def _public_verdict(records: list[dict[str, object]]) -> dict[str, object] | Non
     return {**verdict, "walk_forward": walk_forward}
 
 
+def walk_forward_folds(folds: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Folds in walk-forward order: by Validation window, then by Fold id.
+
+    The one ordering everything that walks a Fold calendar uses — the read
+    model's per-Fold rows, the chained equity series and
+    ``ledger.walk_forward_transitions`` — so a curve, the tile above it and the
+    transition table can never pair the same Folds differently.
+    """
+    return sorted(
+        folds,
+        key=lambda row: (
+            str(row.get("validation_period") or ""),
+            str(row.get("fold_id") or ""),
+        ),
+    )
+
+
 def _epoch_folds(folds: list[dict[str, object]], epoch_id: str | None) -> list[dict[str, object]]:
     return [record for record in folds if str(record.get("epoch_id")) == epoch_id]
 
@@ -598,8 +615,7 @@ def summarize_experiment(directory: Path) -> dict[str, object]:
         identity = PublicIdentity(directory)
         state = experiment_state(directory)
         records = read_ledger_records(directory)
-        folds = list(latest_fold_records(records).values())
-        folds.sort(key=lambda row: (str(row.get("epoch_id")), str(row.get("test_period") or row.get("fold_id"))))
+        folds = walk_forward_folds(list(latest_fold_records(records).values()))
         heldout = latest_heldout_records(records)
         skills_snapshot = latest_skills_snapshot(records, experiment_dir=directory)
         params = read_json(directory / HITL_DIR_NAME / PARAMS_NAME)
@@ -611,6 +627,22 @@ def summarize_experiment(directory: Path) -> dict[str, object]:
         epochs = sorted({str(row.get("epoch_id")) for row in folds if row.get("epoch_id")})
         latest_epoch = epochs[-1] if epochs else None
         completed_sessions, total_sessions = _durable_session_progress(sessions, records)
+        # Cumulative Validation/Test return is the final value of the very
+        # series the console draws, not a product of per-Fold window returns:
+        # a rolling Validation window trails over several quarters, so
+        # compounding whole windows counts the shared quarters again and again.
+        # One function serves both, so the tile and the chart cannot diverge.
+        from . import equity  # deferred: equity reads this module's read model
+
+        cumulative = {
+            epoch: {
+                key: equity.walk_forward_final(
+                    directory, records, epoch_id=epoch, key=key
+                )
+                for key in ("valid", *(("test",) if revealed else ()))
+            }
+            for epoch in epochs
+        }
         raw_status = state.get("status")
         status = identity.public_status(raw_status) if isinstance(raw_status, Mapping) else {}
         public_state = identity.public_record(
@@ -644,12 +676,8 @@ def summarize_experiment(directory: Path) -> dict[str, object]:
                 "verdict": _public_verdict(records) if revealed else None,
                 "metrics": {
                     "epoch_id": latest_epoch,
-                    "cum_valid_return": _compound(
-                        _metric_series(_epoch_folds(folds, latest_epoch), "validation_result", "total_return")
-                    ),
-                    "cum_test_return": _compound(
-                        _metric_series(_epoch_folds(folds, latest_epoch), "test_result", "total_return")
-                    ) if revealed else None,
+                    "cum_valid_return": cumulative.get(latest_epoch, {}).get("valid"),
+                    "cum_test_return": cumulative.get(latest_epoch, {}).get("test"),
                     "mean_test_sharpe": _mean(
                         _metric_series(_epoch_folds(folds, latest_epoch), "test_result", "sharpe")
                     ) if revealed else None,
@@ -661,12 +689,8 @@ def summarize_experiment(directory: Path) -> dict[str, object]:
                     {
                         "epoch_id": epoch,
                         "folds": len(epoch_folds),
-                        "cum_valid_return": _compound(
-                            _metric_series(epoch_folds, "validation_result", "total_return")
-                        ),
-                        "cum_test_return": _compound(
-                            _metric_series(epoch_folds, "test_result", "total_return")
-                        ) if revealed else None,
+                        "cum_valid_return": cumulative[epoch].get("valid"),
+                        "cum_test_return": cumulative[epoch].get("test"),
                         "mean_test_sharpe": _mean(
                             _metric_series(epoch_folds, "test_result", "sharpe")
                         ) if revealed else None,
@@ -689,12 +713,10 @@ def summarize_experiment(directory: Path) -> dict[str, object]:
                         # alone explains.
                         "selection": _selection_view(record),
                     }
-                    # Ordered like ledger.walk_forward_transitions, by
-                    # validation window, so labels cannot mis-pair with the
-                    # transition counts above.
-                    for record in sorted(
-                        folds, key=lambda row: str(row.get("validation_period") or "")
-                    )
+                    # ``folds`` is already in walk-forward order, the same
+                    # order ledger.walk_forward_transitions counts in, so
+                    # labels cannot mis-pair with the transition counts above.
+                    for record in folds
                 ],
             }
         )
@@ -896,23 +918,44 @@ def fold_run_id(root: Path, experiment_id: str, epoch_id: str, fold_ref: str) ->
     return run_id
 
 
-def selected_validation_ref(record: Mapping[str, object]) -> object:
-    """The Validation result the Fold actually selected, else its last one."""
+# A Fold that froze nothing keeps its inherited parent as the lineage head, so
+# the host's parent control -- that parent replayed on this Fold's Validation
+# window -- is the strategy the Fold left in force.
+_PARENT_KEPT_STATUSES = frozenset({"no_update", "no_valid_backtest"})
 
-    steps = [
-        item
-        for item in record.get("steps", [])
-        if isinstance(item, Mapping) and item.get("validation_result_ref")
-    ]
-    selected = str(record.get("selected_step_id") or "")
-    return next(
-        (
-            step.get("validation_result_ref")
-            for step in steps
-            if str(step.get("step_id") or "") == selected
-        ),
-        steps[-1].get("validation_result_ref") if steps else None,
-    )
+
+def strategy_in_force_ref(record: Mapping[str, object]) -> object:
+    """The Validation result of the strategy one Fold left in force.
+
+    A ``frozen`` Fold nominated a Step -- possibly the host's parent control,
+    when it re-froze its parent -- and that Step's replay is the answer.
+    ``no_update`` and ``no_valid_backtest`` froze nothing, so the parent stays
+    the lineage head and the host's parent control is the answer; a nominated
+    but hard-rejected candidate never is, even though the record still names
+    it in ``selected_step_id``. ``baseline_missing`` left no strategy at all
+    and returns None, as does a Fold whose result reference is missing.
+    """
+
+    status = str(record.get("fold_status") or "")
+    if status == "frozen":
+        selected = str(record.get("selected_step_id") or "")
+        return next(
+            (
+                step.get("validation_result_ref")
+                for step in record.get("steps", [])
+                if isinstance(step, Mapping)
+                and str(step.get("step_id") or "") == selected
+            ),
+            None,
+        )
+    if status in _PARENT_KEPT_STATUSES:
+        control = record.get("parent_control")
+        return (
+            control.get("validation_result_ref")
+            if isinstance(control, Mapping)
+            else None
+        )
+    return None
 
 
 def style_payload(
@@ -949,7 +992,7 @@ def style_payload(
             None,
         )
         if fold is not None:
-            reference = selected_validation_ref(fold)
+            reference = strategy_in_force_ref(fold)
     elif prefix == "test":
         fold = next(
             (

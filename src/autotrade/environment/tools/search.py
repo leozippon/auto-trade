@@ -52,6 +52,9 @@ RG_TIMEOUT_SECONDS = 20.0
 # How many unlistable paths a partial result names inline. ``skipped_count`` is
 # always exact, so a longer list is still reported honestly.
 MAX_SKIPPED_LISTED = 20
+# How many sibling names a ``not_found`` hint lists from the nearest existing
+# directory; the overflow is counted, not named.
+MAX_HINT_ENTRIES = 20
 VCS_DIRS = (".git", ".hg", ".svn", ".bzr", ".jj", ".sl")
 SEARCH_ROOTS = (
     "workspace",
@@ -179,6 +182,7 @@ class SearchRoots:
                 f"path is relative to root {root!r}; do not repeat the root name and do not "
                 f'use a colon, e.g. {{"root": "{root}", "path": "<relative/file>"}}. '
                 f"A file that lives elsewhere needs its own root: {', '.join(self.names)}"
+                + _nearest_existing_listing(base, path)
             ),
         )
 
@@ -214,6 +218,41 @@ def _partial_fields(skipped: list[str]) -> dict[str, object]:
         return {}
     names = sorted(set(skipped))
     return {"skipped": names[:MAX_SKIPPED_LISTED], "skipped_count": len(names)}
+
+
+def _nearest_existing_listing(base: Path, path: str) -> str:
+    """Name what the nearest existing ancestor of ``path`` actually holds.
+
+    The repeated-root advice repairs the wrong *shape* of a path; the other
+    recurring mistake is a mistyped or truncated leaf (one dropped segment of a
+    spilled-result reference), which the model can only otherwise repair with a
+    separate glob call. Hidden entries stay out because the read tools refuse
+    them anyway, and a directory the host cannot list simply adds no clause."""
+
+    parts = PurePosixPath(path).parts
+    for depth in range(len(parts) - 1, -1, -1):
+        relative = PurePosixPath(*parts[:depth]).as_posix() if depth else ""
+        try:
+            directory = _safe_subpath(base, relative)
+        except ToolError:
+            return ""
+        if not directory.is_dir():
+            continue
+        try:
+            entries = sorted(
+                f"{entry.name}/" if entry.is_dir() else entry.name
+                for entry in directory.iterdir()
+                if not entry.name.startswith(".")
+            )
+        except OSError:
+            return ""
+        if not entries:
+            return ""
+        overflow = len(entries) - MAX_HINT_ENTRIES
+        listed = ", ".join(entries[:MAX_HINT_ENTRIES])
+        more = f" (+{overflow} more)" if overflow > 0 else ""
+        return f". The nearest existing directory {relative or '.'!r} holds: {listed}{more}"
+    return ""
 
 
 def _has_entries(directory: Path) -> bool:
@@ -531,6 +570,10 @@ class ReadFileTool(_SearchToolBase):
             "Prefer this over `shell cat`/`head` for code you will edit (line-numbered, bounded output); "
             "`cat`/`head` stay available for pipelines. Rejects files over the size cap "
             "(use shell or DuckDB/pyarrow for large data files). "
+            "`content` is line-numbered and line-normalized, so it carries neither the original line "
+            "endings nor a trailing newline (`final_newline` reports whether the file ends with one): "
+            "never reconstruct a file by pasting it back through `write_file`; copy bytes with shell "
+            "`cp` and check with `sha256sum`. "
             + ROOT_RELATIVE_PATH_RULE,
             {
                 "type": "object",
@@ -584,7 +627,11 @@ class ReadFileTool(_SearchToolBase):
         content, budget = self._apply_result_budget("\n".join(visible), tool_kind="read")
         return ToolResult(True, value={
             "root": root, "path": path,
-            "line_count": len(numbered), "content": content, **paging, **budget,
+            # Whole-file facts, like ``line_count``: the numbered rendering cannot
+            # express a trailing newline, so an Agent copying content through
+            # ``write_file`` would silently drop it without being told.
+            "line_count": len(numbered), "final_newline": text.endswith("\n"),
+            "content": content, **paging, **budget,
         })
 
 

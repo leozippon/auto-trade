@@ -430,6 +430,12 @@ function fmtSharpe(value) {
     : Number(value).toFixed(2);
 }
 
+// The cumulative validation tile is the final value of the curve below it,
+// never a product of per-Fold window returns: rolling Validation windows
+// overlap, so compounding whole windows counts the shared quarters again.
+const CUM_VALID_HINT =
+  "按各 Fold 实际沿用的策略日收益前向串联（重叠日只计最早的 Fold），与曲线终值同源";
+
 function sealedMetricTile(revealed, label, value, format = fmtPct) {
   if (!revealed) return { label, value: "未揭示", cls: "" };
   return { label, value: format(value), cls: signCls(value) };
@@ -1231,7 +1237,7 @@ function statTilesRow(tiles) {
     ...tiles.map((tile) =>
       el(
         "div",
-        { class: "tile" },
+        { class: "tile", title: tile.title || null },
         el("div", { class: "tile-label" }, tile.label),
         el("div", { class: `tile-value ${tile.cls || ""}` }, tile.value),
       ),
@@ -1716,6 +1722,7 @@ function experimentCard(item) {
         label: `累计验证收益${epochTag}`,
         value: fmtPct(metrics.cum_valid_return),
         cls: signCls(metrics.cum_valid_return),
+        title: CUM_VALID_HINT,
       },
     ]),
   );
@@ -1861,6 +1868,7 @@ function heroPanel(item) {
           label: `累计验证收益${metrics.epoch_id ? `（${epochShort(metrics.epoch_id)}）` : ""}`,
           value: fmtPct(metrics.cum_valid_return),
           cls: signCls(metrics.cum_valid_return),
+          title: CUM_VALID_HINT,
         },
         sealedMetricTile(
           item.test_revealed,
@@ -2520,6 +2528,7 @@ async function renderDetailPage(experimentId, selectedKey) {
             label: `累计验证收益${epochTag}`,
             value: fmtPct(metrics.cum_valid_return),
             cls: signCls(metrics.cum_valid_return),
+            title: CUM_VALID_HINT,
           },
           sealedMetricTile(
             detail.test_revealed,

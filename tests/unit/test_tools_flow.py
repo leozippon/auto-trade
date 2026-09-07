@@ -588,7 +588,7 @@ class StructuredSearchToolTest(unittest.TestCase):
 
     def test_read_returns_line_numbered_paginated_and_guarded(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            paths, _, registry = self._tools(Path(tmp))
+            paths, roots, registry = self._tools(Path(tmp))
             (paths.workspace / "f.txt").write_text("l1\nl2\nl3\nl4\n", encoding="utf-8")
             full = registry.invoke("read_file", {"root": "workspace", "path": "workspace/f.txt"}).value
             self.assertEqual(full["line_count"], 4)
@@ -600,6 +600,17 @@ class StructuredSearchToolTest(unittest.TestCase):
             self.assertIn("2\tl2", page["content"])
             self.assertNotIn("1\tl1", page["content"])
             self.assertNotIn("4\tl4", page["content"])
+            # The line-numbered rendering cannot express a trailing newline, so
+            # the result states it as a whole-file fact on every page: an Agent
+            # copying content through write_file would otherwise silently drop
+            # the final byte of the file it just read.
+            (paths.workspace / "bare.txt").write_text("l1\nl2", encoding="utf-8")
+            bare = registry.invoke("read_file", {"root": "workspace", "path": "workspace/bare.txt"}).value
+            self.assertTrue(full["final_newline"])
+            self.assertTrue(page["final_newline"])
+            self.assertFalse(bare["final_newline"])
+            self.assertEqual(full["content"], bare["content"] + "\n3\tl3\n4\tl4")
+            self.assertIn("final_newline", ReadFileTool(roots).spec.description)
             # Guards: empty path, directories, unknown roots and hidden paths.
             self.assertFalse(registry.invoke("read_file", {"root": "workspace", "path": ""}).ok)
             (paths.workspace / "sub").mkdir()
@@ -1302,6 +1313,46 @@ class ToolResultContractTest(unittest.TestCase):
             unknown = registry.invoke("glob", {"pattern": "*", "root": "steps", "path": "steps"})
             self.assertFalse(unknown.ok)
             self.assertIn(unknown.value["error_type"], ("path_error", "schema_error"))
+
+    def test_not_found_hint_lists_the_nearest_existing_directory(self) -> None:
+        from autotrade.environment.runtime import HOST_PATH_RE
+
+        with tempfile.TemporaryDirectory() as tmp:
+            paths, registry = self._layout(tmp)
+            spill = paths.logs / "tool_results" / "agent_report_085265a200e6"
+            spill.mkdir(parents=True, exist_ok=True)
+            (spill / "report.txt").write_text("report\n", encoding="utf-8")
+            (paths.logs / "tool_results" / ".scratch").mkdir()
+            # One dropped segment in a spilled-result reference must be
+            # repairable from the refusal itself, without a second glob call.
+            missing = registry.invoke(
+                "read_file",
+                {"root": "artifacts", "path": "logs/tool_results/agent_085265a200e6/report.txt"},
+            )
+            self.assertFalse(missing.ok)
+            self.assertEqual(missing.value["error_type"], "not_found")
+            hint = missing.value["retry_hint"]
+            self.assertIn("'logs/tool_results' holds: agent_report_085265a200e6/", hint)
+            # Hidden entries are unaddressable through these tools, so the hint
+            # never advertises them, and no host path rides along.
+            self.assertNotIn(".scratch", hint)
+            self.assertIsNone(HOST_PATH_RE.search(hint), hint)
+            self.assertNotIn(tmp, hint)
+            # A mistyped leaf directly under a root is listed the same way.
+            self.assertIn(
+                "'.' holds: logs/, x.txt",
+                registry.invoke("read_file", {"root": "artifacts", "path": "nope.txt"}).value["retry_hint"],
+            )
+            # The listing stays bounded; the overflow is counted, not named.
+            for index in range(search_module.MAX_HINT_ENTRIES):
+                (spill / f"part_{index:02d}.txt").write_text("x", encoding="utf-8")
+            bounded = registry.invoke(
+                "glob",
+                {"pattern": "*", "root": "artifacts", "path": "logs/tool_results/agent_report_085265a200e6/nope"},
+            ).value["retry_hint"]
+            # report.txt plus MAX_HINT_ENTRIES parts: exactly one over the bound.
+            self.assertIn("(+1 more)", bounded)
+            self.assertEqual(bounded.count(".txt"), search_module.MAX_HINT_ENTRIES)
 
     def test_write_and_edit_accept_the_writable_root_convention(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

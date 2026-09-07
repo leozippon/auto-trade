@@ -6,6 +6,7 @@ import json
 import math
 from collections.abc import Mapping
 from pathlib import Path
+from typing import NamedTuple
 
 from autotrade.environment.replay.stats import TRADING_DAYS_PER_YEAR
 from autotrade.environment.replay.style import (
@@ -193,6 +194,34 @@ def _local_result_refs(experiment_dir: Path, prefix: str) -> list[str]:
     return [str(path) for path in paths]
 
 
+def _result_order(records: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Folds in the order their results were written.
+
+    Only used to pair a Fold with the on-disk result directories, which
+    ``_local_result_refs`` returns oldest first, when the ledger names none.
+    """
+    return sorted(
+        latest_fold_records(records).values(),
+        key=lambda row: str(row.get("recorded_at") or ""),
+    )
+
+
+def _test_result_ref(
+    experiment_dir: Path,
+    record: Mapping[str, object],
+    order: list[dict[str, object]],
+    local_refs: list[str],
+) -> object:
+    reference = _run_result_ref(experiment_dir, record, "test")
+    if reference:
+        return reference
+    try:
+        index = order.index(record)
+    except ValueError:
+        return None
+    return local_refs[index] if index < len(local_refs) else None
+
+
 def _chain(parts: list[list[tuple[str, float]]]) -> list[tuple[str, float]]:
     by_day: dict[str, float] = {}
     for part in parts:
@@ -220,6 +249,86 @@ def _curve_entry(key: str, rows: list[tuple[str, float]]) -> dict[str, object]:
         "drawdown": drawdown,
         "final": cumulative[-1] if cumulative else None,
     }
+
+
+class WalkForward(NamedTuple):
+    """One Epoch's walk-forward record for one result key.
+
+    ``references`` are the contributing result artifacts in walk-forward
+    order, ``rows`` their daily returns chained with each overlapping day kept
+    once, ``curve`` the compounded series the console draws (None when nothing
+    contributed) and ``missing`` the Folds that owed a series but whose result
+    artifact could not be read.
+    """
+
+    references: list[object]
+    rows: list[tuple[str, float]]
+    curve: dict[str, object] | None
+    missing: list[str]
+
+
+def walk_forward_curve(
+    experiment_dir: Path,
+    records: list[dict[str, object]],
+    *,
+    epoch_id: str | None,
+    key: str,
+) -> WalkForward:
+    """Chain one Epoch's Folds into the record of the strategy in force.
+
+    Each Fold contributes the replay of the strategy it left in force — its
+    frozen node's Validation result, or the host's parent control when the
+    Fold kept its parent (``registry.strategy_in_force_ref``) — and for
+    ``test`` its frozen Test result. A rolling Validation window trails over
+    several quarters, so an overlapping day is kept from the earliest Fold
+    that saw it: every Fold after the first adds only its new days, the span
+    ``ledger.transition_result`` grades, and no quarter is counted twice.
+
+    A Fold that left no strategy (``baseline_missing``) contributes nothing
+    and owes nothing. A Fold whose artifact cannot be read is dropped from the
+    chain and named in ``missing``, so the curve and the tile computed from it
+    omit exactly the same Folds instead of quietly disagreeing.
+    """
+    ordered = registry.walk_forward_folds(list(latest_fold_records(records).values()))
+    order = _result_order(records) if key == "test" else []
+    local_refs = _local_result_refs(experiment_dir, "test") if key == "test" else []
+    references: list[object] = []
+    parts: list[list[tuple[str, float]]] = []
+    missing: list[str] = []
+    for record in ordered:
+        if str(record.get("epoch_id")) != epoch_id:
+            continue
+        if str(record.get("fold_status") or "") == "baseline_missing":
+            continue
+        reference = (
+            registry.strategy_in_force_ref(record)
+            if key == "valid"
+            else _test_result_ref(experiment_dir, record, order, local_refs)
+        )
+        rows = _returns(experiment_dir, reference)
+        if not rows:
+            missing.append(str(record.get("fold_id") or ""))
+            continue
+        references.append(reference)
+        parts.append(rows)
+    chained = _chain(parts)
+    return WalkForward(
+        references, chained, _curve_entry(key, chained) if chained else None, missing
+    )
+
+
+def walk_forward_final(
+    experiment_dir: Path,
+    records: list[dict[str, object]],
+    *,
+    epoch_id: str | None,
+    key: str,
+) -> float | None:
+    """Compounded final value of ``walk_forward_curve`` — the console's tile."""
+    curve = walk_forward_curve(
+        experiment_dir, records, epoch_id=epoch_id, key=key
+    ).curve
+    return curve["final"] if curve else None
 
 
 def _cycle_stats(
@@ -298,7 +407,7 @@ def fold_equity_payload(root: Path, experiment_id: str, epoch_id: str, fold_ref:
     experiment_dir, _identity, records, record = registry.resolve_fold_record(
         root, experiment_id, epoch_id, fold_ref
     )
-    validation_ref = registry.selected_validation_ref(record)
+    validation_ref = registry.strategy_in_force_ref(record)
     valid_rows = _returns(experiment_dir, validation_ref)
     bench_parts = [_benchmark_returns(experiment_dir, validation_ref)]
     series = [_curve_entry("valid", valid_rows)] if valid_rows else []
@@ -308,16 +417,13 @@ def fold_equity_payload(root: Path, experiment_id: str, epoch_id: str, fold_ref:
     # P1-7: test curves stay hidden until the researcher reveals (seals) the
     # experiment; the UI's collapsed test section never renders without them.
     if registry.test_results_revealed(experiment_dir, records):
-        test_reference = _run_result_ref(experiment_dir, record, "test")
+        test_reference = _test_result_ref(
+            experiment_dir,
+            record,
+            _result_order(records),
+            _local_result_refs(experiment_dir, "test"),
+        )
         test_rows = _returns(experiment_dir, test_reference)
-        if not test_rows:
-            candidates = _local_result_refs(experiment_dir, "test")
-            ordered = sorted(latest_fold_records(records).values(), key=lambda row: str(row.get("recorded_at") or ""))
-            try:
-                test_reference = candidates[ordered.index(record)]
-                test_rows = _returns(experiment_dir, test_reference)
-            except (ValueError, IndexError):
-                pass
         if test_rows:
             series.append(_curve_entry("test", test_rows))
             exposure_rows["test"] = _exposures(experiment_dir, test_reference)
@@ -343,27 +449,30 @@ def experiment_equity_payload(root: Path, experiment_id: str, *, epoch_id: str |
     selected_epoch = epoch_id or (epochs[-1] if epochs else None)
     if selected_epoch is not None and selected_epoch not in epochs:
         raise KeyError(f"unknown epoch: {selected_epoch}")
-    ordered_folds = sorted(folds, key=lambda row: str(row.get("recorded_at") or row.get("fold_id") or ""))
-    selected = [record for record in ordered_folds if str(record.get("epoch_id")) == selected_epoch]
-    validation_refs = [registry.selected_validation_ref(record) for record in selected]
-    valid_rows = _chain([_returns(experiment_dir, reference) for reference in validation_refs])
-    bench_parts = [_benchmark_returns(experiment_dir, reference) for reference in validation_refs]
-    rows_by_key: dict[str, list[tuple[str, float]]] = {"valid": valid_rows}
-    exposure_by_key: dict[str, list[tuple[str, float]]] = {
-        "valid": _chain([_exposures(experiment_dir, reference) for reference in validation_refs])
+    revealed = registry.test_results_revealed(experiment_dir, records)
+    # The Epoch's walk-forward record per key. These are the very curves whose
+    # final value the console's cumulative-return tiles report
+    # (registry.summarize_experiment), so the two cannot drift apart.
+    chains = {
+        key: walk_forward_curve(
+            experiment_dir, records, epoch_id=selected_epoch, key=key
+        )
+        for key in ("valid", *(("test",) if revealed else ()))
     }
-    if registry.test_results_revealed(experiment_dir, records):
-        test_refs = _local_result_refs(experiment_dir, "test")
-        test_parts: list[list[tuple[str, float]]] = []
-        test_exposure_parts: list[list[tuple[str, float]]] = []
-        for record in selected:
-            result_index = ordered_folds.index(record)
-            reference = _run_result_ref(experiment_dir, record, "test") or (test_refs[result_index] if result_index < len(test_refs) else None)
-            test_parts.append(_returns(experiment_dir, reference))
-            test_exposure_parts.append(_exposures(experiment_dir, reference))
-            bench_parts.append(_benchmark_returns(experiment_dir, reference))
-        rows_by_key["test"] = _chain(test_parts)
-        exposure_by_key["test"] = _chain(test_exposure_parts)
+    rows_by_key = {key: chain.rows for key, chain in chains.items()}
+    exposure_by_key = {
+        key: _chain(
+            [_exposures(experiment_dir, reference) for reference in chain.references]
+        )
+        for key, chain in chains.items()
+    }
+    bench_parts = [
+        _benchmark_returns(experiment_dir, reference)
+        for chain in chains.values()
+        for reference in chain.references
+    ]
+    series = [chain.curve for chain in chains.values() if chain.curve]
+    if revealed:
         heldout_refs = [record.get("result_ref") for record in latest_heldout_records(records)]
         heldout_rows = _chain([_returns(experiment_dir, reference) for reference in heldout_refs])
         rows_by_key["heldout"] = heldout_rows
@@ -372,14 +481,24 @@ def experiment_equity_payload(root: Path, experiment_id: str, *, epoch_id: str |
         )
         for reference in heldout_refs:
             bench_parts.append(_benchmark_returns(experiment_dir, reference))
-    series = [_curve_entry(key, rows) for key, rows in rows_by_key.items() if rows]
+        if heldout_rows:
+            series.append(_curve_entry("heldout", heldout_rows))
     benchmark = _chain(bench_parts)
+    identity = registry.PublicIdentity(experiment_dir)
     return {
         "experiment_id": experiment_id,
         "epoch_id": selected_epoch,
         "epochs": epochs,
         "series": series,
         "benchmark": _curve_entry("benchmark", benchmark) if benchmark else None,
+        # Folds of this Epoch that owed a series but whose result artifact is
+        # unreadable: the curve and the cumulative-return tile drop exactly
+        # these, so the omission is stated rather than inferred from a gap.
+        "missing": {
+            key: [identity.fold_ref(fold_id) for fold_id in chain.missing]
+            for key, chain in chains.items()
+            if chain.missing
+        },
         # Daily position weight (EOD gross market value / equity) per series,
         # rendered as a linked pane under the return curves.
         "exposure": {

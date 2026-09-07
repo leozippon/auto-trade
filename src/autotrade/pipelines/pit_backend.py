@@ -38,7 +38,10 @@ from autotrade.environment.data.snapshot import (
     SnapshotConfig,
     load_snapshot_manifest,
 )
-from autotrade.environment.data.summary import write_agent_data_summary
+from autotrade.environment.data.summary import (
+    write_agent_data_summary,
+    write_unit_reference,
+)
 from autotrade.environment.executor import (
     DockerStrategyExecutor,
     TrustedStrategyExecutor,
@@ -183,6 +186,7 @@ class ResearchPITSnapshotProvider:
         replay_dir = self._replay_view(replay_dir, start_key, end_key, decision, phase)
         summary_dir = self.cache_root / "bundles" / phase / f"{start_key}_{end_key}_{decision_key}"
         summary_path = summary_dir / "data_summary.json"
+        views = {"snapshot": (decision_dir, "/mnt/snapshot")}
         with _exclusive_lock(summary_dir.with_suffix(".lock")):
             if not summary_path.exists():
                 summary_dir.mkdir(parents=True, exist_ok=True)
@@ -190,9 +194,27 @@ class ResearchPITSnapshotProvider:
                     summary_path,
                     kind=phase,
                     fold_id=None,
-                    views={"snapshot": (decision_dir, "/mnt/snapshot")},
+                    views=views,
                 )
-                chmod_tree(summary_dir, file_mode=0o444, dir_mode=0o555)
+            else:
+                # The bundle summary describes a frozen decision view, so it is
+                # cached for the life of the experiment. Its sibling unit
+                # reference is not: it is a pure function of the unit registry,
+                # and a Meta session mounts this copy verbatim while a Fold
+                # regenerates its own. Rebuild it on every take so both session
+                # kinds read the units the current registry defines (~0.05 s for
+                # a thousand-column view).
+                summary_dir.chmod(0o755)
+                staging = summary_dir / f".unit_reference.{uuid.uuid4().hex}.json"
+                try:
+                    write_unit_reference(staging, views)
+                    # Replace, never rewrite in place: this file is hardlinked to
+                    # the PIT view seed and to every experiment seeded from it,
+                    # and the provider must not write outside its own cache.
+                    staging.replace(summary_dir / "unit_reference.json")
+                finally:
+                    staging.unlink(missing_ok=True)
+            chmod_tree(summary_dir, file_mode=0o444, dir_mode=0o555)
         return SnapshotBundle(
             snapshot_id=str(decision_manifest.get("snapshot_id") or ""),
             decision_ref=str(decision_dir),

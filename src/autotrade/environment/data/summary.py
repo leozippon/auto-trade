@@ -111,7 +111,7 @@ def write_agent_data_summary(
         )
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    _write_unit_reference(output_path.parent / "unit_reference.json", views)
+    write_unit_reference(output_path.parent / "unit_reference.json", views)
     # Compact (un-indented) JSON keeps this index a single cat-able, low-token
     # read; use jq for ad-hoc human formatting.
     output_path.write_text(
@@ -121,8 +121,13 @@ def write_agent_data_summary(
     return summary
 
 
-def _write_unit_reference(path: Path, views: Mapping[str, tuple[Path, str]]) -> None:
-    """Per-column unit records for every (file, dataset, column) in the views."""
+def write_unit_reference(path: Path, views: Mapping[str, tuple[Path, str]]) -> None:
+    """Per-column unit records for every (file, dataset, column) in the views.
+
+    Public because the PIT bundle refreshes its cached copy from here: the file
+    is a pure function of the unit registry and the views' columns, so one
+    writer keeps every session kind on the same units.
+    """
     column_map: dict[tuple[str, str | None], list[str]] = {}
     for view_dir, _mount in views.values():
         view_dir = Path(view_dir)

@@ -920,6 +920,227 @@ def test_revealed_equity_includes_test_and_heldout_csi300(tmp_path: Path):
     assert {series["key"] for series in curve["series"]} >= {"valid", "test", "heldout"}
 
 
+def _result_artifact(directory: Path, name: str, days: list[tuple[str, float]]) -> str:
+    """One replay result whose equity curve starts from 100."""
+    path = directory / "artifacts/results" / name / "result.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "equity_curve": [
+                    {"trade_date": day, "initial_equity": 100.0, "equity": equity}
+                    for day, equity in days
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    return str(path)
+
+
+def _walk_forward_experiment(tmp_path: Path, folds: list[dict[str, object]]) -> Path:
+    """A console experiment whose ledger is exactly ``folds``."""
+    directory = tmp_path / "experiments/walk"
+    AgentRefStore(directory)
+    (directory / "hitl").mkdir(parents=True, exist_ok=True)
+    write_control(directory / "hitl/control.json", ControlState(mode="manual"))
+    (directory / "hitl/status.json").write_text(
+        json.dumps({"schema_version": 1, "state": "created"}), encoding="utf-8"
+    )
+    _write_ledger(
+        directory,
+        [
+            {
+                "record_type": "fold",
+                "experiment_id": "walk",
+                "epoch_id": "epoch_001",
+                **fold,
+            }
+            for fold in folds
+        ],
+    )
+    return directory
+
+
+def test_cumulative_validation_return_is_the_chained_curve_over_rolling_windows(
+    tmp_path: Path,
+):
+    """The tile is the final value of the curve, over overlapping windows.
+
+    Rolling Validation windows trail over several quarters, so every Fold
+    after the first re-scores quarters its predecessors already scored:
+    compounding whole windows counts them again and again. The chain keeps
+    each day once, from the earliest Fold that saw it. And a Fold that froze
+    nothing (``no_update``) is represented by the parent it left in force, not
+    by the candidate its own session nominated and the rules rejected.
+    """
+    from autotrade.webui import equity, registry
+
+    directory = tmp_path / "experiments/walk"
+    first = _result_artifact(
+        directory,
+        "valid_first",
+        [("20220701", 110.0), ("20221003", 121.0), ("20230103", 133.1)],
+    )
+    second = _result_artifact(
+        directory,
+        "valid_second",
+        [("20221003", 200.0), ("20230103", 400.0), ("20230403", 440.0)],
+    )
+    parent = _result_artifact(
+        directory,
+        "valid_parent",
+        [("20230103", 50.0), ("20230403", 25.0), ("20230703", 20.0)],
+    )
+    rejected = _result_artifact(
+        directory,
+        "valid_rejected",
+        [("20230103", 100.0), ("20230403", 100.0), ("20230703", 300.0)],
+    )
+    _walk_forward_experiment(
+        tmp_path,
+        [
+            {
+                "fold_id": "fold_2023Q1",
+                "validation_period": "20220701..20230331",
+                "fold_status": "frozen",
+                "selected_step_id": "step_1",
+                "steps": [{"step_id": "step_1", "validation_result_ref": first}],
+                "validation_result": {"total_return": 0.331},
+            },
+            {
+                "fold_id": "fold_2023Q2",
+                "validation_period": "20221001..20230630",
+                "fold_status": "frozen",
+                "selected_step_id": "step_2",
+                "steps": [{"step_id": "step_2", "validation_result_ref": second}],
+                "validation_result": {"total_return": 3.40},
+            },
+            {
+                # Nominated a candidate, the rules rejected it: the parent
+                # stays the lineage head, so the parent control is the series.
+                "fold_id": "fold_2023Q3",
+                "validation_period": "20230101..20230930",
+                "fold_status": "no_update",
+                "selected_step_id": "step_3",
+                "steps": [{"step_id": "step_3", "validation_result_ref": rejected}],
+                "parent_control": {"status": "ok", "validation_result_ref": parent},
+            },
+        ],
+    )
+
+    payload = equity.experiment_equity_payload(tmp_path / "experiments", "walk")
+    curve = next(series for series in payload["series"] if series["key"] == "valid")
+    # Each Fold after the first adds only its new days, and the last of them
+    # is the parent's -20%, never the rejected candidate's +200%.
+    assert curve["dates"] == [
+        "20220701",
+        "20221003",
+        "20230103",
+        "20230403",
+        "20230703",
+    ]
+    assert curve["cum"] == [0.1, 0.21, 0.331, 0.4641, 0.17128]
+    assert payload["missing"] == {}
+
+    summary = registry.summarize_experiment(directory)
+    assert summary["metrics"]["cum_valid_return"] == curve["final"]
+    assert summary["metrics_by_epoch"][0]["cum_valid_return"] == curve["final"]
+
+
+def test_a_baseline_missing_fold_contributes_nothing_to_curve_or_tile(tmp_path: Path):
+    """A Fold that never froze an artifact left no strategy in force.
+
+    Its session's rejected candidates are not evidence of anything the
+    experiment carried forward, so neither the curve nor the tile may borrow
+    them — and the Fold is not missing evidence either, so it is not reported.
+    """
+    from autotrade.webui import equity, registry
+
+    directory = tmp_path / "experiments/walk"
+    rejected = _result_artifact(directory, "valid_rejected", [("20220701", 900.0)])
+    frozen = _result_artifact(directory, "valid_frozen", [("20221003", 150.0)])
+    _walk_forward_experiment(
+        tmp_path,
+        [
+            {
+                "fold_id": "fold_2022Q3",
+                "validation_period": "20220701..20220930",
+                "fold_status": "baseline_missing",
+                "selected_step_id": "step_1",
+                "steps": [{"step_id": "step_1", "validation_result_ref": rejected}],
+            },
+            {
+                "fold_id": "fold_2022Q4",
+                "validation_period": "20221001..20221231",
+                "fold_status": "frozen",
+                "selected_step_id": "step_2",
+                "steps": [{"step_id": "step_2", "validation_result_ref": frozen}],
+                "validation_result": {"total_return": 0.5},
+            },
+        ],
+    )
+
+    payload = equity.experiment_equity_payload(tmp_path / "experiments", "walk")
+    curve = next(series for series in payload["series"] if series["key"] == "valid")
+    assert curve["dates"] == ["20221003"]
+    assert curve["final"] == 0.5
+    # Nothing was owed, so nothing is reported unavailable.
+    assert payload["missing"] == {}
+    assert registry.summarize_experiment(directory)["metrics"]["cum_valid_return"] == 0.5
+
+
+def test_a_fold_without_a_readable_result_is_named_not_silently_dropped(
+    tmp_path: Path,
+):
+    """A Fold that owed a series but has no readable artifact is stated.
+
+    The tile and the curve drop it together — they are the same series — and
+    the payload names it, so a gap in the record reads as missing evidence
+    instead of as a quarter the strategy sat out.
+    """
+    from autotrade.webui import equity, registry
+
+    directory = tmp_path / "experiments/walk"
+    frozen = _result_artifact(directory, "valid_frozen", [("20220701", 150.0)])
+    _walk_forward_experiment(
+        tmp_path,
+        [
+            {
+                "fold_id": "fold_2022Q3",
+                "validation_period": "20220701..20220930",
+                "fold_status": "frozen",
+                "selected_step_id": "step_1",
+                "steps": [{"step_id": "step_1", "validation_result_ref": frozen}],
+                "validation_result": {"total_return": 0.5},
+            },
+            {
+                "fold_id": "fold_2022Q4",
+                "validation_period": "20221001..20221231",
+                "fold_status": "frozen",
+                "selected_step_id": "step_2",
+                "steps": [
+                    {
+                        "step_id": "step_2",
+                        "validation_result_ref": str(
+                            directory / "artifacts/results/valid_gone/result.json"
+                        ),
+                    }
+                ],
+                "validation_result": {"total_return": 0.25},
+            },
+        ],
+    )
+
+    payload = equity.experiment_equity_payload(tmp_path / "experiments", "walk")
+    curve = next(series for series in payload["series"] if series["key"] == "valid")
+    assert curve["final"] == 0.5
+    assert payload["missing"] == {
+        "valid": [PublicIdentity(directory).fold_ref("fold_2022Q4")]
+    }
+    assert registry.summarize_experiment(directory)["metrics"]["cum_valid_return"] == 0.5
+
+
 def test_experiment_progress_comes_from_schedule_and_durable_ledger(tmp_path: Path):
     directory = _persistent_experiment(tmp_path)
     client = TestClient(create_app(tmp_path))
@@ -1549,6 +1770,25 @@ class WebuiBackendTest(unittest.TestCase):
                             "trade_date": "20211001",
                             "initial_equity": 100.0,
                             "equity": 110.0,
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        # The frozen Test replay behind the ledger's test_result: the console's
+        # cumulative returns are the final value of the chained daily series,
+        # so the summary and the artifact have to tell the same story (+0.20).
+        test_result = valid_result.parent.parent / TEST_RESULT_DIR / "result.json"
+        test_result.parent.mkdir(parents=True)
+        test_result.write_text(
+            json.dumps(
+                {
+                    "equity_curve": [
+                        {
+                            "trade_date": "20220104",
+                            "initial_equity": 100.0,
+                            "equity": 120.0,
                         }
                     ]
                 }
