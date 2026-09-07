@@ -6,13 +6,20 @@ writes completed decision/replay views into ``data/pit_views_seed/explore/``.
 That tree is not a live worker cache_root. New experiments hardlink it when
 ``provider.json`` matches.
 
-The calendar comes from the console creation defaults (one source); every field
-can be overridden so a seed can be prebuilt for a plan before it becomes the
-default. ``--dry-run`` prints the plan and exits without building anything,
+The calendar and the snapshot configuration both come from the console creation
+defaults (one source); every field of either can be overridden so a seed can be
+prebuilt for a plan before it becomes the default. The calendar decides which
+views a seed carries; the snapshot configuration decides what is inside them,
+and therefore which experiments may reuse the seed at all — an experiment
+selecting datasets the seed was not built for finds no matching contract and
+cold-builds every view. A seed for another snapshot configuration therefore
+needs its own ``--seed``/``--workspace`` directory: one tree binds one
+contract. ``--dry-run`` prints the plan and exits without building anything,
 using a scratch cache root so it never touches the seed.
 
-Reuses ``ResearchPITSnapshotProvider`` / ``SnapshotBuilder``; does not fork a
-second builder.
+Reuses ``ResearchPITSnapshotProvider`` / ``SnapshotBuilder`` and the worker's
+own ``_snapshot_config``; does not fork a second builder or a second reading of
+the experiment parameters.
 """
 from __future__ import annotations
 
@@ -32,15 +39,18 @@ from _bootstrap import add_repo_src
 
 REPO_ROOT = add_repo_src(__file__)
 
+from autotrade.environment.data.snapshot import DEFAULT_DATASETS
 from autotrade.environment.strategy import StrategySchedule
+from autotrade.pipelines.config import (
+    DEFAULT_PIT_VIEWS_SEED,
+    DEFAULT_PIT_VIEWS_SEED_WORKSPACE,
+)
 from autotrade.pipelines.hitl_state import WEB_CREATE_DEFAULTS
 from autotrade.pipelines.pit_backend import (
     ResearchPITSnapshotProvider,
     prebuild_asof_stash,
 )
 from autotrade.pipelines.pit_views_seed import (
-    DEFAULT_PIT_VIEWS_SEED,
-    DEFAULT_PIT_VIEWS_SEED_WORKSPACE,
     PLAN_PARAMETERS,
     iter_plan_pit_jobs,
     plan_parameters,
@@ -50,6 +60,48 @@ from autotrade.pipelines.worker import _snapshot_config
 # Scratch cache_root for --dry-run: planning must not bind or create views in
 # the real seed, and a stale seed contract must not block printing the plan.
 DRY_RUN_CACHE_NAME = "dry_run_cache"
+
+# The snapshot-identity parameters a seed can be prebuilt for, by the shape
+# their override takes on the command line. Names, types and semantics are the
+# experiment parameters' own: `_snapshot_config` reads both, so a seed built
+# with these overrides carries exactly the contract that experiment writes.
+# `window_months` is already a calendar override and feeds both.
+DATASET_DOMAINS = {
+    "fundamental_datasets": "fundamentals",
+    "macro_datasets": "macro",
+    "events_datasets": "events",
+    "text_datasets": "text",
+}
+DOMAIN_TOGGLES = (
+    "include_fundamentals",
+    "include_macro",
+    "include_events",
+    "include_text",
+    "include_intraday",
+)
+WINDOW_PARAMETERS = (
+    "daily_window_months",
+    "fundamentals_window_months",
+    "events_window_months",
+    "macro_window_months",
+    "text_window_months",
+    "intraday_trade_days",
+)
+SNAPSHOT_PARAMETERS = (*DATASET_DOMAINS, *DOMAIN_TOGGLES, *WINDOW_PARAMETERS)
+
+
+def _flag(name: str) -> str:
+    return "--" + name.replace("_", "-")
+
+
+def _dataset_list(text: str) -> tuple[str, ...]:
+    """A comma-separated dataset selection; membership is checked downstream.
+
+    `_snapshot_config` rejects empty names, duplicates and names outside the
+    domain's SELECTABLE_DATASETS, so this parses and never validates twice.
+    """
+
+    return tuple(item.strip() for item in text.split(","))
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -94,6 +146,35 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="cut the development window into rolling Folds with a test region",
     )
+    snapshot = parser.add_argument_group(
+        "snapshot overrides",
+        "default: the console creation defaults. These decide the seed's "
+        "provider contract, so a seed built with any of them is reusable only "
+        "by an experiment created with the same values, and needs its own "
+        "--seed/--workspace directory.",
+    )
+    for name, domain in DATASET_DOMAINS.items():
+        snapshot.add_argument(
+            _flag(name),
+            type=_dataset_list,
+            default=None,
+            metavar="NAME,NAME",
+            help=f"comma-separated {domain} datasets. REPLACES this domain's "
+            "default set, exactly as the experiment parameter of the same name "
+            "does, so to ADD a dataset pass the whole default set plus the "
+            f"extras. Unknown names are rejected. Default set: "
+            + ",".join(DEFAULT_DATASETS[domain]),
+        )
+    for name in DOMAIN_TOGGLES:
+        snapshot.add_argument(
+            _flag(name),
+            action=argparse.BooleanOptionalAction,
+            default=None,
+            help="load this domain at all; off drops it from both the decision "
+            "snapshot and the replay slots",
+        )
+    for name in WINDOW_PARAMETERS:
+        snapshot.add_argument(_flag(name), type=int, default=None)
     parser.add_argument(
         "--asof-stash",
         action=argparse.BooleanOptionalAction,
@@ -110,15 +191,17 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def create_parameters(args: argparse.Namespace) -> dict[str, object]:
-    """Console creation defaults with the calendar overrides applied.
+    """Console creation defaults with the command-line overrides applied.
 
     One parameter set feeds both the snapshot configuration and the calendar,
     exactly as creating an experiment does: ``window_months``, for instance, is
-    the data window AND the Fold input window.
+    the data window AND the Fold input window. The result is a creation
+    parameter mapping, not a second dialect, so the seed identity it produces
+    is byte-for-byte the one an experiment created with these values writes.
     """
 
     params = dict(WEB_CREATE_DEFAULTS)
-    for name in PLAN_PARAMETERS:
+    for name in (*PLAN_PARAMETERS, *SNAPSHOT_PARAMETERS):
         override = getattr(args, name, None)
         if override is not None:
             params[name] = override
@@ -179,6 +262,10 @@ def main(argv: list[str] | None = None) -> int:
                 "calendar": {
                     name: str(value) for name, value in sorted(plan.items())
                 },
+                # The contract an experiment has to match to reuse this tree;
+                # logging it makes the run self-describing next to the
+                # provider.json the build writes.
+                "snapshot_config": config.to_record(),
             },
             ensure_ascii=False,
             sort_keys=True,

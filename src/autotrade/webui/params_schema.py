@@ -376,6 +376,19 @@ _FIELDS: list[dict[str, object]] = [
             + "。"
         ),
     },
+    {
+        "key": "pit_views_seed",
+        "group": "数据域",
+        "label": "PIT 视图种子目录",
+        "type": "string",
+        "advanced": True,
+        "help": (
+            "仓库相对路径，指向本实验硬链接决策/回放视图的预构建种子。默认种子只按默认数据集集合构建："
+            "改动上面任一数据集子集、数据域开关或窗口后，必须先用 scripts/data/prebuild_pit_views_seed.py "
+            "以同一套参数预构建一棵新种子并填在这里，否则本实验会逐个区间冷构建（数小时）。"
+            "填写的目录必须存在，且其记录的快照配置与本实验逐字一致，否则创建直接失败。"
+        ),
+    },
     # 股票筛选
     {
         "key": "screen_exclude_st",

@@ -41,6 +41,15 @@ DEFAULT_DEADLINE_GRACE_MINUTES = 10
 # contain more than one market state.
 DEFAULT_FOLD_PERIOD = "year"
 
+# The exploration PIT view seed an experiment hardlinks completed views from
+# unless its ``pit_views_seed`` parameter names another tree, and the scratch
+# directory the offline prebuild pins its research release in. Repo-relative
+# and gitignored; the contract that decides reuse lives in
+# ``autotrade.pipelines.pit_views_seed``. Defined here because both the console
+# creation defaults and that module need the path.
+DEFAULT_PIT_VIEWS_SEED = Path("data/pit_views_seed/explore")
+DEFAULT_PIT_VIEWS_SEED_WORKSPACE = Path("data/pit_views_seed/explore_workspace")
+
 
 @dataclass(frozen=True)
 class StrategyExperimentConfig:

@@ -22,7 +22,7 @@ universe = pd.read_parquet(context.asof_dir + "/universe")   # 决策日冻结�
 | `events.moneyflow` | `buy_lg_amount`、`sell_lg_amount`、`buy_elg_amount`、`sell_elg_amount`、`net_mf_amount` | 交易日 19:00 可见，T-1 可用；金额单位万元，除以元计的 `amount` 前先乘 1e4；结构性缺北交所 |
 | `events.margin_detail` | `rzye`（融资余额，元）、`rzmre`、`rzche`、`rqye` | 行级 `available_at` 为下一日 09:00，08:30 只能用 **T-2** 及更早；只覆盖两融标的 |
 | `events.cyq_perf` | `weight_avg`、`cost_15pct`/`cost_50pct`/`cost_85pct`（元/股）、`winner_rate`（百分数） | 2018 年起，晚间节点后 T-1 可见；覆盖约 91%，缺行不能填 0 |
-| `fundamentals.fina_indicator_vip` | `q_netprofit_yoy`、`q_sales_yoy`、`roe`（百分数） | 按公告日 18:00 可见；同一 `(ts_code, end_date)` 取 `available_at` 最新版本 |
+| `fundamentals.fina_indicator_vip` | `netprofit_yoy`（无单季 `q_netprofit_yoy`）、`q_sales_yoy`、`roe`（百分数） | 按公告日 18:00 可见；同一 `(ts_code, end_date)` 取 `available_at` 最新版本 |
 | `fundamentals.express_vip` | `n_income`（本期净利润，元）、`yoy_net_profit`（上年同期净利润水平，元——列名有误导，不是百分数）、`ann_date` | 每个版本按自身 `ann_date` 可见；同比要自己算 `n_income / yoy_net_profit - 1` |
 | `fundamentals.forecast_vip` | `type`、`p_change_min`、`p_change_max`、`ann_date` | 同上；`first_ann_date` 不是可见时间 |
 | `macro.index_daily` | `000300.SH` 的 `pct_chg`（百分数）、`close` | T-1 可见；用于 β 与 `ivol` |

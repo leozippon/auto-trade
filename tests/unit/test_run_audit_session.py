@@ -10,7 +10,6 @@ from scripts.experiments import run_audit_session
 from autotrade.environment.sandbox import SandboxSpec
 from autotrade.pipelines import worker as worker_module
 from autotrade.pipelines.config import ModificationConstraints
-from autotrade.pipelines.pit_views_seed import DEFAULT_PIT_VIEWS_SEED
 
 # Constructor arguments the console's session loop supplies and a single audited
 # session has no place for: the smoke-test command runner, and the sink that
@@ -24,9 +23,16 @@ class _ProviderConstructed(RuntimeError):
     pass
 
 
-def test_audit_pipeline_uses_the_default_pit_view_seed(
+def test_audit_pipeline_uses_the_experiments_own_pit_view_seed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The seed is the experiment's resolved one, not a hardcoded default.
+
+    An arm whose dataset selection needs its own prebuilt tree must read that
+    tree here too, and on the same terms: an explicitly chosen seed has to
+    apply rather than fall back to a cold build.
+    """
+
     captured: dict[str, object] = {}
 
     def build_provider(**kwargs: object) -> object:
@@ -60,13 +66,16 @@ def test_audit_pipeline_uses_the_default_pit_view_seed(
         fundamental_events_status=tmp_path / "fundamentals-status.json",
         snapshot_config=object(),
         pit_cache_root=tmp_path / "pit-cache",
+        pit_views_seed=tmp_path / "data/pit_views_seed_ext",
+        pit_views_seed_required=True,
         repo_root=tmp_path,
     )
 
     with pytest.raises(_ProviderConstructed):
         run_audit_session._build_pipeline(options)
 
-    assert captured["pit_views_seed"] == tmp_path / DEFAULT_PIT_VIEWS_SEED
+    assert captured["pit_views_seed"] == tmp_path / "data/pit_views_seed_ext"
+    assert captured["pit_views_seed_required"] is True
 
 
 def _constructor_arguments(path: Path, class_name: str) -> set[str]:
@@ -84,11 +93,15 @@ def _constructor_arguments(path: Path, class_name: str) -> set[str]:
     return names
 
 
-@pytest.mark.parametrize("class_name", ("LLMFoldDeveloper", "LLMMetaLearner"))
+@pytest.mark.parametrize(
+    "class_name",
+    ("LLMFoldDeveloper", "LLMMetaLearner", "ResearchPITSnapshotProvider"),
+)
 def test_the_audit_session_is_built_like_the_console_session(class_name: str) -> None:
     """The module promises a session configured identically to the console's.
     An argument the worker passes and this script drops is a silently different
-    session: a different image, no refs pack, no operating memory."""
+    session: a different image, no refs pack, no operating memory, or a PIT
+    view seed chosen on different terms than the experiment's own."""
 
     worker_arguments = _constructor_arguments(
         Path(worker_module.__file__), class_name

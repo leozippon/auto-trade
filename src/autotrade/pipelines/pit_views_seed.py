@@ -4,6 +4,11 @@ The seed tree is a repo-adjacent, gitignored snapshot of completed ``decision/``
 ``replay/``, and tiny ``bundles/`` views. It is not a live worker ``cache_root``.
 New experiments hardlink those views into ``experiments/<id>/pit_views/`` only
 when ``provider.json`` matches the contract this experiment would write.
+
+Which tree an experiment reads is its ``pit_views_seed`` parameter: the default
+one carries the default dataset selection, and an arm that selects other
+datasets points at a tree prebuilt for exactly its own selection
+(``scripts/data/prebuild_pit_views_seed.py``).
 """
 
 from __future__ import annotations
@@ -23,9 +28,6 @@ from autotrade.environment.runtime import chmod_tree
 from autotrade.pipelines.config import SNAPSHOT_CACHE_FORMAT_VERSION
 from autotrade.pipelines.folds import build_fold_schedule, heldout_periods
 from autotrade.pipelines.hitl_state import WEB_CREATE_DEFAULTS
-
-DEFAULT_PIT_VIEWS_SEED = Path("data/pit_views_seed/explore")
-DEFAULT_PIT_VIEWS_SEED_WORKSPACE = Path("data/pit_views_seed/explore_workspace")
 
 # What a finished view carries: a snapshot restates its manifest and a bundle
 # its data summary. Any other directory in the layout is a level the provider
@@ -90,6 +92,31 @@ def pit_cache_provider_record(
         "release_raw_dir": str(release_raw_dir),
         "snapshot_config": snapshot_config.to_record(),
     }
+
+
+def assert_seed_snapshot_config(seed: Path, snapshot_config: SnapshotConfig) -> None:
+    """Refuse a seed prebuilt for a different snapshot configuration.
+
+    The create-time half of the contract check. Two of the three other fields
+    of ``pit_cache_provider_record`` — the pinned generation and its release
+    path — exist only once the experiment runs, so what a create request can be
+    judged against is the part the seed was prebuilt for: the snapshot
+    configuration, which is exactly what decides whether a dataset selection
+    has views here at all. ``seed_pit_views`` still compares the whole record
+    before it links anything.
+    """
+
+    provider_path = Path(seed) / "provider.json"
+    if not provider_path.is_file() or provider_path.is_symlink():
+        raise ValueError(f"PIT view seed is missing provider.json: {provider_path}")
+    recorded = _load_json(provider_path).get("snapshot_config")
+    expected = snapshot_config.to_record()
+    if recorded != expected:
+        raise ValueError(
+            f"PIT view seed {seed} was prebuilt for a different snapshot "
+            f"configuration: seed has {json.dumps(recorded, ensure_ascii=False, sort_keys=True)}, "
+            f"this experiment needs {json.dumps(expected, ensure_ascii=False, sort_keys=True)}"
+        )
 
 
 def seed_pit_views(
@@ -345,9 +372,8 @@ def _load_json(path: Path) -> dict[str, object]:
 
 
 __all__ = [
-    "DEFAULT_PIT_VIEWS_SEED",
-    "DEFAULT_PIT_VIEWS_SEED_WORKSPACE",
     "PLAN_PARAMETERS",
+    "assert_seed_snapshot_config",
     "iter_plan_pit_jobs",
     "pit_cache_provider_record",
     "plan_parameters",

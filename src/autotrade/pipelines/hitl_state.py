@@ -19,7 +19,7 @@ from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.llm.model_profiles import MODEL_CHOICES
 from autotrade.environment.sandbox import SandboxSpec
 
-from .config import rolling_default
+from .config import DEFAULT_PIT_VIEWS_SEED, rolling_default
 from .folds import FoldSpec
 from .meta_schedule import meta_learning_trigger_counts, meta_session_key
 
@@ -87,6 +87,11 @@ WEB_CREATE_DEFAULTS: dict[str, object] = {
     "macro_datasets": (),
     "events_datasets": (),
     "text_datasets": (),
+    # Which prebuilt PIT view tree this experiment hardlinks from. The default
+    # one carries the default dataset selection; an experiment that selects
+    # other datasets needs a tree prebuilt for exactly its own selection, and
+    # naming one that was not makes the create fail instead of cold-building.
+    "pit_views_seed": str(DEFAULT_PIT_VIEWS_SEED),
     # The universe reaches the agent unfiltered (all boards, ST included, no
     # new-listing exclusion); the strategy applies its own filters.
     "screen_exclude_st": False,

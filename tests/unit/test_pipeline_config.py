@@ -959,3 +959,140 @@ class WorkerEntryPointTest(unittest.TestCase):
             repo_root / "scripts/experiments/run_interactive_experiment.py"
         ).read_text(encoding="utf-8")
         self.assertIn("poll_seconds=", source)
+
+
+PIT_SEED_BASE_PARAMS = {
+    "experiment_id": "seed_demo",
+    "development_first_period": "2023",
+    "development_last_period": "2025",
+    "heldout_first_period": "20260101..20260630",
+    "heldout_last_period": "20260101..20260630",
+    "strategy_path": "configs/agent_output_template/main.py",
+    "data_backend": "pit",
+    "raw_dir": "data/raw",
+    "fundamental_events_root": "data/pit/fundamental_events",
+    "fundamental_events_status": "results/data_quality/fundamental_events_status.json",
+}
+
+
+class PitViewsSeedParameterTest(unittest.TestCase):
+    """Which prebuilt PIT views an experiment may reuse is its own parameter.
+
+    The default tree is an optimisation and stays lenient; a tree named
+    explicitly is the only way an arm with a non-default dataset selection gets
+    prebuilt views at all, so it is checked at create time instead of turning
+    into hours of silent cold building.
+    """
+
+    def _resolve(self, repo_root: Path, params: dict):
+        from autotrade.pipelines.worker import resolve_worker_options
+
+        return resolve_worker_options(
+            {**PIT_SEED_BASE_PARAMS, **params},
+            experiment_dir=repo_root / "experiments/seed_demo",
+            repo_root=repo_root,
+            preflight=True,
+        )
+
+    def _seed(self, repo_root: Path, name: str, params: dict) -> Path:
+        """A prebuilt seed tree carrying the contract `params` resolve to.
+
+        Built through the same `_snapshot_config` the prebuild script calls, so
+        the tree here is the one that script would leave behind.
+        """
+
+        from autotrade.pipelines.pit_views_seed import pit_cache_provider_record
+        from autotrade.pipelines.worker import _snapshot_config
+
+        seed = repo_root / "data" / name
+        seed.mkdir(parents=True)
+        (seed / "provider.json").write_text(
+            json.dumps(
+                pit_cache_provider_record(
+                    generation_id="generation_test",
+                    release_raw_dir=repo_root / "raw",
+                    snapshot_config=_snapshot_config({**PIT_SEED_BASE_PARAMS, **params}),
+                )
+            ),
+            encoding="utf-8",
+        )
+        return seed
+
+    def test_the_default_seed_is_optional_and_an_explicit_one_is_required(self) -> None:
+        import tempfile
+
+        from autotrade.pipelines.config import DEFAULT_PIT_VIEWS_SEED
+
+        selection = {"macro_datasets": ["cn_gdp", "fut_daily"]}
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            (repo_root / "experiments").mkdir()
+            # Absent parameter: the default tree, which need not exist here.
+            options = self._resolve(repo_root, {})
+            self.assertEqual(
+                options.pit_views_seed, repo_root / DEFAULT_PIT_VIEWS_SEED
+            )
+            self.assertFalse(options.pit_views_seed_required)
+            # Naming the default explicitly must not turn it into a demand.
+            options = self._resolve(
+                repo_root, {"pit_views_seed": str(DEFAULT_PIT_VIEWS_SEED)}
+            )
+            self.assertEqual(
+                options.pit_views_seed, repo_root / DEFAULT_PIT_VIEWS_SEED
+            )
+            self.assertFalse(options.pit_views_seed_required)
+            # A matching tree named explicitly: resolved and mandatory.
+            seed = self._seed(repo_root, "pit_views_seed_ext", selection)
+            options = self._resolve(
+                repo_root, {**selection, "pit_views_seed": "data/pit_views_seed_ext"}
+            )
+            self.assertEqual(options.pit_views_seed, seed)
+            self.assertTrue(options.pit_views_seed_required)
+
+    def test_a_seed_that_cannot_apply_fails_the_create(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            (repo_root / "experiments").mkdir()
+            with self.assertRaisesRegex(ValueError, "existing directory"):
+                self._resolve(repo_root, {"pit_views_seed": "data/never_built"})
+            with self.assertRaisesRegex(ValueError, "must stay inside the repository"):
+                self._resolve(repo_root, {"pit_views_seed": "../elsewhere"})
+            # Built for the default selection, asked for by an arm that adds a
+            # dataset: the mismatch names both contracts instead of silently
+            # cold-building every view.
+            self._seed(repo_root, "pit_views_seed_default", {})
+            with self.assertRaises(ValueError) as caught:
+                self._resolve(
+                    repo_root,
+                    {
+                        "macro_datasets": ["cn_gdp", "fut_daily"],
+                        "pit_views_seed": "data/pit_views_seed_default",
+                    },
+                )
+            message = str(caught.exception)
+            self.assertIn("fut_daily", message)
+            self.assertIn("sw_daily", message)
+
+    def test_the_daily_backend_needs_no_pit_seed(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            (repo_root / "experiments").mkdir()
+            (repo_root / "configs" / "agent_output_template").mkdir(parents=True)
+            template = repo_root / "configs/agent_output_template/main.py"
+            template.write_text("def generate_orders(context):\n    return []\n")
+            daily = repo_root / "daily.parquet"
+            daily.write_text("not read at preflight", encoding="utf-8")
+            options = self._resolve(
+                repo_root,
+                {
+                    "data_backend": "daily",
+                    "daily_path": "daily.parquet",
+                    "developer_mode": "baseline",
+                },
+            )
+            self.assertIsNone(options.pit_views_seed)
+            self.assertFalse(options.pit_views_seed_required)

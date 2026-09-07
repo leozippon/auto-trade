@@ -118,6 +118,10 @@ EXPECTED_DEFAULTS: dict[str, object] = {
     "include_events": True,
     "include_text": True,
     "include_intraday": False,
+    # No arm changes the dataset selection, so all six reuse the default seed
+    # the quarterly views were prebuilt into. A drift here would not fail them,
+    # it would cold-build every view of every arm.
+    "pit_views_seed": "data/pit_views_seed/explore",
     "screen_exclude_st": False,
     "screen_exclude_new_listed_days": 0,
     "screen_boards": (),
@@ -353,6 +357,7 @@ REPORT_KEYS = (
     "meta_learning_fold_interval",
     "window_months",
     "include_intraday",
+    "pit_views_seed",
     "operating_memory",
     "max_fold_minutes",
     "max_steps_per_fold",

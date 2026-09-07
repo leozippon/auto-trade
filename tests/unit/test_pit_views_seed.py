@@ -650,3 +650,151 @@ def test_replay_manifest_matches_requires_phase_label():
         decision=decision,
         phase=None,
     )
+
+
+def _prebuild_identity(argv: list[str]) -> dict[str, object]:
+    """The seed contract `prebuild_pit_views_seed.py` would write for `argv`."""
+
+    from scripts.data import prebuild_pit_views_seed as prebuild
+
+    args = prebuild.build_parser().parse_args(argv)
+    return prebuild._snapshot_config(prebuild.create_parameters(args)).to_record()
+
+
+def _experiment_identity(params: dict[str, object]) -> dict[str, object]:
+    """The seed contract an experiment created with `params` would write."""
+
+    from autotrade.pipelines.hitl_state import WEB_CREATE_DEFAULTS
+    from autotrade.pipelines.worker import _snapshot_config
+
+    return _snapshot_config({**WEB_CREATE_DEFAULTS, **params}).to_record()
+
+
+# The 2026-09-14 derivatives arm: eight macro series and one events series on
+# top of the default scope. Spelled out because the selection REPLACES the
+# domain default rather than adding to it.
+EXTRA_MACRO = (
+    "fut_basic",
+    "fut_mapping",
+    "fut_daily",
+    "opt_basic",
+    "opt_daily",
+    "cb_basic",
+    "cb_daily",
+    "cb_call",
+)
+
+
+def test_prebuild_overrides_build_the_identity_the_experiment_asks_for() -> None:
+    """A seed is reusable only on whole-record equality, so the prebuild's
+    parameters and the experiment's must resolve through one function, not two
+    readings that agree today. Asserted on the record itself, and against the
+    default identity, so an override that silently did nothing would fail."""
+
+    from autotrade.environment.data.snapshot import DEFAULT_DATASETS
+
+    macro = tuple(DEFAULT_DATASETS["macro"]) + EXTRA_MACRO
+    events = tuple(DEFAULT_DATASETS["events"]) + ("stk_surv",)
+    prebuilt = _prebuild_identity(
+        [
+            "--macro-datasets",
+            ",".join(macro),
+            "--events-datasets",
+            ",".join(events),
+            "--no-include-intraday",
+        ]
+    )
+    assert prebuilt == _experiment_identity(
+        {
+            "macro_datasets": list(macro),
+            "events_datasets": list(events),
+            "include_intraday": False,
+        }
+    )
+    assert prebuilt["datasets"]["macro"] == list(macro)  # type: ignore[index]
+    assert prebuilt["datasets"]["events"] == list(events)  # type: ignore[index]
+    assert prebuilt != _prebuild_identity([])
+
+
+def test_prebuild_carries_every_snapshot_identity_knob_it_offers() -> None:
+    """Each override has to reach the record; one that parsed but never
+    resolved would build a seed no experiment can use."""
+
+    prebuilt = _prebuild_identity(
+        [
+            "--no-include-text",
+            "--include-intraday",
+            "--intraday-trade-days",
+            "5",
+            "--macro-window-months",
+            "36",
+        ]
+    )
+    assert prebuilt == _experiment_identity(
+        {
+            "include_text": False,
+            "include_intraday": True,
+            "intraday_trade_days": 5,
+            "macro_window_months": 36,
+        }
+    )
+    assert prebuilt["datasets"]["text"] == []  # type: ignore[index]
+    assert prebuilt["include_intraday"] is True
+    assert prebuilt["replay"]["include_minutes"] is True  # type: ignore[index]
+    assert prebuilt["decision_windows"]["macro_months"] == 36  # type: ignore[index]
+
+
+def test_prebuild_refuses_a_dataset_name_the_domain_cannot_load() -> None:
+    """Fail at parameter resolution, not after hours of building views."""
+
+    with pytest.raises(ValueError, match="unknown macro_datasets"):
+        _prebuild_identity(["--macro-datasets", "cn_gdp,not_a_dataset"])
+    with pytest.raises(ValueError, match="unknown macro_datasets"):
+        # A macro-domain name is still wrong for the events domain.
+        _prebuild_identity(["--macro-datasets", "stk_surv"])
+
+
+def test_a_seed_built_for_another_selection_is_refused_by_name(tmp_path: Path) -> None:
+    """The create-time half of the contract check.
+
+    Its whole point is that a mismatch is loud: an experiment silently
+    cold-building every view is hours of runtime that looks like slowness
+    rather than a wrong parameter."""
+
+    from autotrade.pipelines.pit_views_seed import assert_seed_snapshot_config
+
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    wanted = SnapshotConfig(macro_datasets=("cn_gdp", "fut_daily"))
+    (seed / "provider.json").write_text(
+        json.dumps(_record(tmp_path / "raw")), encoding="utf-8"
+    )
+    with pytest.raises(ValueError) as excinfo:
+        assert_seed_snapshot_config(seed, wanted)
+    message = str(excinfo.value)
+    # Both identities, so the operator can see which one to rebuild.
+    assert "fut_daily" in message and "margin" in message
+
+    (seed / "provider.json").write_text(
+        json.dumps(
+            pit_cache_provider_record(
+                generation_id="other_generation",
+                release_raw_dir=tmp_path / "elsewhere",
+                snapshot_config=wanted,
+            )
+        ),
+        encoding="utf-8",
+    )
+    # Only the snapshot configuration is decidable before the release is
+    # pinned; generation and release path are checked when views are linked,
+    # so a seed pinned to another generation still passes here.
+    assert_seed_snapshot_config(seed, wanted)
+
+
+def test_a_seed_without_a_contract_is_refused(tmp_path: Path) -> None:
+    from autotrade.pipelines.pit_views_seed import assert_seed_snapshot_config
+
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    with pytest.raises(ValueError, match="missing provider.json"):
+        assert_seed_snapshot_config(seed, SnapshotConfig())

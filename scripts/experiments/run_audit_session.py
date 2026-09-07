@@ -55,7 +55,6 @@ from autotrade.pipelines import (
     build_fold_schedule,
 )
 from autotrade.pipelines.local_backend import LLMFoldDeveloper, LLMMetaLearner
-from autotrade.pipelines.pit_views_seed import DEFAULT_PIT_VIEWS_SEED
 from autotrade.pipelines.skills import OPERATING_MEMORY_MODES
 from autotrade.pipelines.worker import (
     _parent_from_step_node,
@@ -262,7 +261,8 @@ def _build_pipeline(options) -> tuple[RollingExperimentPipeline, list[str]]:
             fundamental_events_status=options.fundamental_events_status,
             config=options.snapshot_config,
             cache_root=options.pit_cache_root,
-            pit_views_seed=options.repo_root / DEFAULT_PIT_VIEWS_SEED,
+            pit_views_seed=options.pit_views_seed,
+            pit_views_seed_required=options.pit_views_seed_required,
         )
         evaluator = PITDailyEvaluationBackend(
             options.experiment_dir / "artifacts" / "results",

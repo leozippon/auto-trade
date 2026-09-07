@@ -50,6 +50,7 @@ from autotrade.environment.strategy import StrategySchedule
 from autotrade.environment.tools.base import CommandRunner
 
 from .config import (
+    DEFAULT_PIT_VIEWS_SEED,
     AcceptanceRules,
     FrozenArtifact,
     RollingExperimentConfig,
@@ -89,7 +90,7 @@ from .pit_backend import (
     ResearchPITSnapshotProvider,
     required_release_raw_datasets,
 )
-from .pit_views_seed import DEFAULT_PIT_VIEWS_SEED
+from .pit_views_seed import assert_seed_snapshot_config
 from .prior import latest_prior_text, restore_current_from_records
 from .skills import latest_skills_snapshot, resolve_operating_memory
 
@@ -103,6 +104,7 @@ _ALLOWED_PARAMS = {
     "fundamental_events_root",
     "fundamental_events_status",
     "pit_cache_root",
+    "pit_views_seed",
     "execution_mode",
     "strategy_period",
     "inference_time",
@@ -388,6 +390,10 @@ class InteractiveWorkerOptions:
     fundamental_events_root: Path | None = None
     fundamental_events_status: Path | None = None
     pit_cache_root: Path | None = None
+    pit_views_seed: Path | None = None
+    # An explicitly chosen seed must apply or the run fails; the default one is
+    # an optimisation, so a missing or non-matching default cold-builds.
+    pit_views_seed_required: bool = False
     snapshot_config: SnapshotConfig = field(default_factory=SnapshotConfig)
     nl_config: NLConfig = field(default_factory=NLConfig)
     max_intraday_row_group_rows: int = 2_000_000
@@ -559,6 +565,11 @@ def resolve_worker_options(
         pit_cache_root == directory or pit_cache_root.is_relative_to(directory)
     ):
         raise ValueError("pit_cache_root must stay inside the experiment directory")
+    pit_views_seed, pit_views_seed_required = (
+        _pit_views_seed(params.get("pit_views_seed"), repository, snapshot_config)
+        if data_backend == "pit"
+        else (None, False)
+    )
     trading_days: list[str] = []
     if preflight:
         pass  # the release pin writes into the experiment dir; see the docstring
@@ -754,6 +765,8 @@ def resolve_worker_options(
         fundamental_events_root=events_root,
         fundamental_events_status=events_status,
         pit_cache_root=pit_cache_root,
+        pit_views_seed=pit_views_seed,
+        pit_views_seed_required=pit_views_seed_required,
         snapshot_config=snapshot_config,
         # NLConfig owns the NL budget defaults; an absent parameter keeps the
         # shipped default rather than a second copy of it living here.
@@ -936,7 +949,8 @@ def run_local_interactive_worker(
             fundamental_events_status=options.fundamental_events_status,
             config=options.snapshot_config,
             cache_root=options.pit_cache_root,
-            pit_views_seed=options.repo_root / DEFAULT_PIT_VIEWS_SEED,
+            pit_views_seed=options.pit_views_seed,
+            pit_views_seed_required=options.pit_views_seed_required,
         )
         evaluator = PITDailyEvaluationBackend(
             options.experiment_dir / "artifacts" / "results",
@@ -1730,6 +1744,35 @@ def _llm_settings(
 # so the margin lets one such addition ride along without a forced
 # compaction; the gateway keeps its own 2,048-token tokenizer slack on top.
 COMPACTION_SAFETY_MARGIN_TOKENS = 8_192
+
+
+def _pit_views_seed(
+    value: object, repo_root: Path, snapshot_config: SnapshotConfig
+) -> tuple[Path, bool]:
+    """The PIT view seed this experiment hardlinks from, and whether it must apply.
+
+    The default seed is an optimisation over cold-building: it carries the
+    default dataset selection, and an experiment that asks for anything else
+    simply finds no matching contract and builds its own views. A seed named
+    explicitly is a decision — the only way an arm whose selection differs from
+    the default gets prebuilt views at all — so it is checked here, at create
+    time: the tree must exist and must already carry exactly this snapshot
+    configuration. Silently cold-building instead would cost hours and look
+    like a slow experiment rather than a wrong parameter.
+    """
+
+    default = repo_root / DEFAULT_PIT_VIEWS_SEED
+    if value in (None, ""):
+        return default, False
+    if not isinstance(value, str):
+        raise ValueError("pit_views_seed must be a string")  # noqa: TRY004
+    seed = _repo_path(repo_root, value.strip(), "pit_views_seed")
+    if seed == default:
+        return default, False
+    if not seed.is_dir() or seed.is_symlink():
+        raise ValueError(f"pit_views_seed must be an existing directory: {seed}")
+    assert_seed_snapshot_config(seed, snapshot_config)
+    return seed, True
 
 
 def _optional_workspace_reference(value: object, repo_root: Path) -> str:
