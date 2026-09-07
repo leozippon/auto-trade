@@ -30,6 +30,7 @@ from autotrade.environment.llm import (
     ChatMessage,
     LLMProxy,
     MalformedToolCallError,
+    ProviderResponse,
     ToolCall,
     clamp_requested_max_tokens,
     context_request_fits,
@@ -118,6 +119,15 @@ SUBAGENT_MAX_TRUNCATION_CONTINUATIONS = 1
 OUTPUT_TRUNCATED_CONTINUATION = (
     "上一轮输出在 {limit} token 上限被截断且没有工具调用。"
     "请把已有结论压缩成几句话，然后直接调用下一步工具；不要重新展开完整推理。"
+)
+# The forced final summary came back with no content (a reply that spent its
+# budget on reasoning). The whole child run is not worth discarding over the
+# last call: the reply's own reasoning, else the last assistant text still in
+# the transcript, is delivered under this marker with status ``exhausted`` —
+# ``ok`` stays False at the parent, so it is never read as a full report.
+SUBAGENT_DEGRADED_SUMMARY_MARKER = "[轮次用尽：以下内容由{source}恢复，不是子代理的正式汇报]"
+SUBAGENT_DEGRADED_SUMMARY_ERROR = (
+    "Sub-agent rounds exhausted; summary recovered without a final report"
 )
 
 _FOLD_READ_TOOLS = frozenset({"glob", "grep", "read_file"})
@@ -1115,7 +1125,28 @@ class SubAgentEngine(SessionTimeBudgetAware):
                 )
                 llm_calls += 1
                 _add_usage(usage, response.usage)
+                self._emit(
+                    "subagent_llm",
+                    {
+                        "task_id": task_id,
+                        "role": role,
+                        "round": rounds,
+                        "provider": getattr(llm, "provider", ""),
+                        "model": response.model,
+                        "usage": dict(response.usage),
+                        "content": response.content,
+                        "tool_names": [],
+                        # The forced finalize is not one of the child's rounds;
+                        # without this the trace loses the call entirely.
+                        "finalize": True,
+                        "parent_call_id": parent_call_id,
+                    },
+                )
                 summary = response.content.strip()
+                if not summary:
+                    summary = _recovered_summary(response, messages)
+                    if summary:
+                        status, error = "exhausted", SUBAGENT_DEGRADED_SUMMARY_ERROR
                 if _output_truncated(response.usage, output_tokens):
                     truncated_rounds += 1
                     summary = (
@@ -1430,6 +1461,39 @@ def _output_truncated(usage: object, max_tokens: int) -> bool:
         and not isinstance(completion, bool)
         and completion >= max_tokens
     )
+
+
+def _recovered_summary(
+    response: ProviderResponse, messages: Sequence[ChatMessage]
+) -> str:
+    """The degraded report to deliver when the forced finalize returned no
+    content: that reply's own reasoning, else the last assistant text still in
+    the transcript, behind a marker naming where it came from.
+
+    Long text is clipped from its head, because a conclusion sits at the end;
+    marker included, the result stays inside the inline report bound, so the
+    parent reads it whole in the ``subagent_completed`` observation. Returns
+    ``""`` when the child produced no text anywhere — that is the genuinely
+    empty case, and it stays an error.
+    """
+
+    text, source = (response.reasoning_content or "").strip(), "本轮推理内容"
+    if not text:
+        source = "最后一条助手正文"
+        for message in reversed(messages):
+            if message.role != "assistant":
+                continue
+            candidate = (message.content or "").strip()
+            if candidate:
+                text = candidate
+                break
+    if not text:
+        return ""
+    marker = SUBAGENT_DEGRADED_SUMMARY_MARKER.format(source=source)
+    budget = SUBAGENT_REPORT_MAX_CHARS - len(marker) - 1
+    if len(text) > budget:
+        text = f"…{text[-(budget - 1) :]}"
+    return f"{marker}\n{text}"
 
 
 # The exact RuntimeError a ThreadPoolExecutor raises once the interpreter has

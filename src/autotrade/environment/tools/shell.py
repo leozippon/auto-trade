@@ -31,7 +31,11 @@ STDERR_SUPPRESSION_REMINDER = (
 # command while no longer starving a child of its numbers.
 DEFAULT_SHELL_TIMEOUT_SECONDS = 60.0
 MAX_SHELL_TIMEOUT_SECONDS = 600.0
-SHELL_ARGV_MAX_CHARS = 1000
+# Per-element cap. Trace audits show legitimate `bash -lc` heredocs and
+# `python -c` probes running 1-2k chars, so a 1000-char cap refused work that
+# was already written correctly; 4000 admits those while still pushing a real
+# script into a file.
+SHELL_ARGV_MAX_CHARS = 4000
 # Per-stream inline budget for one observation, and the host-side capture cap
 # behind it: a stream over the inline budget keeps a head and a tail inline
 # and spills the whole capture to the result store; a command that produces
@@ -40,11 +44,11 @@ DEFAULT_SHELL_OUTPUT_CHARS = 40_000
 SHELL_CAPTURE_MAX_CHARS = 1_000_000
 # Trace audits show the same argv shapes recurring in every Fold, mostly on a
 # fresh sub-agent's first shell call: the command under ``cmd``/``command``,
-# the whole command line as one string, a JSON-encoded array, and a long
-# ``python -c`` script inlined as one element. The first three are the same
-# command in a different wrapper, so they are repaired here and the repair is
-# named in the result; only the over-long element is refused, with the recipe
-# that replaces it.
+# the whole command line as one string (bare, or as the single element of a
+# one-element array), a JSON-encoded array, and a long ``python -c`` script
+# inlined as one element. All but the last are the same command in a different
+# wrapper, so they are repaired here and the repair is named in the result;
+# only the over-long element is refused, with the recipe that replaces it.
 ARGV_STRING_NOTE = (
     "argv arrived as a JSON-encoded string and was parsed into an array; "
     "send argv as a real JSON array of strings, not a string containing one"
@@ -53,6 +57,11 @@ ARGV_SPLIT_NOTE = (
     "argv arrived as one command string and was split into an array the way a "
     "POSIX shell splits words (quotes honoured, nothing else): no shell ran "
     "it, so send argv as a JSON array of strings"
+)
+ARGV_ONE_ELEMENT_NOTE = (
+    "argv held a single element that was itself a whole command line, so the "
+    "one-element array was unwrapped; send each word of the command as its "
+    "own argv element"
 )
 ARGV_ALIAS_NOTE = "the command arrived under `{key}`; this tool's command field is argv"
 ARGV_TOO_LONG_HINT = (
@@ -142,9 +151,13 @@ def _shell_description(
     return (
         "Run one bounded foreground argv command in the injected network-disabled "
         "Agent sandbox. `argv` is a JSON array of strings, e.g. "
-        '["python", "-c", "print(1)"] or ["bash", "-lc", "ls output"]. One command '
-        "string is accepted too and is split into that array the way a POSIX shell "
-        "splits words (quotes honoured), but no shell ever runs it: pipes, "
+        '["python", "-c", "print(1)"] or ["bash", "-lc", "ls output"]. Three other '
+        "shapes are repaired rather than refused, and the result names the repair: "
+        "that array sent as one JSON-encoded string, one command string (split into "
+        "the array the way a POSIX shell splits words, quotes honoured), and a "
+        "one-element array whose only element contains whitespace, which is read as "
+        "that command string and split the same way. No shell ever runs any of "
+        "them: pipes, "
         "redirections, globs, `&&` and $VAR are not interpreted, so a command line "
         'that needs them must be sent as ["bash", "-lc", "<the command line>"]. '
         "Each argv element is at most "
@@ -229,14 +242,14 @@ class SandboxShellTool:
     def normalize_arguments(self, arguments: Mapping[str, object]) -> Mapping[str, object]:
         """Repair or refuse the call shape before the schema sees it.
 
-        The command under ``cmd``/``command``, a JSON-encoded array and a plain
-        command line are the same command in a different wrapper: each is
-        rewritten into the argv array and the repair is reported back in the
-        result, so the next call can be the canonical shape. What stays refused
-        is what cannot be rewritten faithfully: an element over the per-element
-        cap (refused with the write_file recipe instead of a bare length error)
-        and a command line carrying a shell operator, which nothing here would
-        interpret.
+        The command under ``cmd``/``command``, a JSON-encoded array, a plain
+        command line and that command line wrapped in a one-element array are
+        the same command in a different wrapper: each is rewritten into the
+        argv array and the repair is reported back in the result, so the next
+        call can be the canonical shape. What stays refused is what cannot be
+        rewritten faithfully: an element over the per-element cap (refused with
+        the write_file recipe instead of a bare length error) and a command
+        line carrying a shell operator, which nothing here would interpret.
         """
 
         self._repair.note = None
@@ -246,6 +259,10 @@ class SandboxShellTool:
         if isinstance(argv, str):
             argv, note = _argv_from_string(argv)
             notes.append(note)
+            arguments = {**arguments, "argv": argv}
+        elif (lone := _lone_command_line(argv)) is not None:
+            argv, note = _argv_from_string(lone)
+            notes.extend((ARGV_ONE_ELEMENT_NOTE, note))
             arguments = {**arguments, "argv": argv}
         if isinstance(argv, list):
             _reject_long_argv_elements(argv)
@@ -346,13 +363,19 @@ class SandboxShellTool:
 
 
 def _json_string_argv(value: str) -> list[str] | None:
-    """The argv array a JSON-encoded array string holds, else ``None``."""
+    """The argv array a JSON-encoded array string holds, else ``None``.
+
+    Parsed with ``strict=False`` because the recurring shape carries a
+    multi-line ``python -c`` body whose newlines were never escaped: strict
+    JSON rejects those raw control characters, yet the array around them is
+    unambiguous and rewrites faithfully, element for element.
+    """
 
     text = value.strip()
     if not text.startswith("["):
         return None
     try:
-        parsed = json.loads(text)
+        parsed = json.loads(text, strict=False)
     except ValueError:
         return None
     if (
@@ -384,6 +407,22 @@ def _canonical_command_key(
             rest = {key: item for key, item in arguments.items() if key != alias}
             return {**rest, "argv": value}
     return arguments
+
+
+def _lone_command_line(argv: object) -> str | None:
+    """The whole command line a one-element argv array holds, else ``None``.
+
+    ``["python -c 'print(1)'"]`` names no executable -- nothing is called that
+    -- so the element can only be a command line the model failed to split.
+    Internal whitespace is the whole test: a genuine one-element argv is a bare
+    program name, and a program whose own path carries a space is the accepted
+    cost of repairing the shape that actually recurs.
+    """
+
+    if not (isinstance(argv, list) and len(argv) == 1 and isinstance(argv[0], str)):
+        return None
+    element: str = argv[0]
+    return element if any(char.isspace() for char in element.strip()) else None
 
 
 def _argv_from_string(value: str) -> tuple[list[str], str]:
@@ -628,6 +667,7 @@ def _basename(token: str) -> str:
 
 __all__ = [
     "ARGV_ALIAS_NOTE",
+    "ARGV_ONE_ELEMENT_NOTE",
     "ARGV_SPLIT_NOTE",
     "ARGV_STRING_NOTE",
     "ARGV_TOO_LONG_HINT",

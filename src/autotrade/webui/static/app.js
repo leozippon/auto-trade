@@ -4527,12 +4527,14 @@ const SUBAGENT_STATUS_LABELS = new Map([
   ["started", "已启动"],
   ["running", "进行中"],
   ["completed", "已完成"],
+  ["exhausted", "轮次用尽"],
   ["timeout", "超时"],
   ["error", "失败"],
   ["cancelled", "已取消"],
 ]);
 const TERMINAL_SUBAGENT_STATUS = new Set([
   "completed",
+  "exhausted",
   "timeout",
   "error",
   "cancelled",

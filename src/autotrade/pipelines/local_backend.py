@@ -3300,7 +3300,14 @@ class LLMMetaLearner:
         # atomic context index, so a crash cannot leave metadata pointing at a
         # missing or partially-written file.
         write_meta_agent_trace_sidecars(paths.workspace, sidecars)
-        write_json_atomic(inputs / "meta_context.json", public)
+        # sort_keys=False: this file is read in chunks and its builders order
+        # every ``fold_reviews`` / ``fold_validation_history`` entry identity
+        # first, statistics next, trace and summary bulk last. Sorting keys
+        # alphabetically puts ``agent_process_summary`` and ``agent_trace``
+        # hundreds of lines ahead of ``fold_id`` and pushes
+        # ``validation_period`` to the end of the entry, which is how two Meta
+        # sessions read a review against another Fold's window.
+        write_json_atomic(inputs / "meta_context.json", public, sort_keys=False)
         # Raw prior Meta traces, bounded by meta_memory_max_epochs: a JSONL file
         # rather than a prompt field, because it is line-oriented and can be
         # long. Empty memory still writes the file so a first Epoch reads an

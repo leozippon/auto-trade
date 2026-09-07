@@ -25,7 +25,9 @@ _BLOCK_ERROR_CHARS = 240
 _BLOCK_ARGUMENT_CHARS = 600
 _BLOCK_RESULT_CHARS = 1_200
 SUBAGENT_TASK_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
-_TERMINAL_SUBAGENT = frozenset({"completed", "timeout", "error", "cancelled"})
+_TERMINAL_SUBAGENT = frozenset(
+    {"completed", "exhausted", "timeout", "error", "cancelled"}
+)
 
 
 def resolve_trace_path(experiment_dir: Path, run_id: str | None) -> Path | None:

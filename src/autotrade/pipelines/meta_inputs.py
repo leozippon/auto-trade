@@ -481,7 +481,7 @@ def build_agent_process_summary(
             status = str(event.get("status") or "")
             if status == "completed":
                 subagent_completed += 1
-            elif status in {"error", "timeout"}:
+            elif status in {"error", "timeout", "exhausted"}:
                 subagent_failed += 1
         elif event_type == "tool_call":
             tool = str(event.get("tool") or "")
@@ -555,20 +555,31 @@ def build_meta_fold_history(
 
     history: list[dict[str, object]] = []
     for record in latest_fold_records(records).values():
-        entry = compact_fold_history(
+        compact = compact_fold_history(
             record,
             ref_store=ref_store,
             include_frozen_test_metrics=True,
         )
-        entry.update(
+        backtests = compact.pop("backtest_summaries")
+        history.append(
             {
+                # Same identity-first shape as ``fold_reviews``: ``section`` is
+                # the only key that distinguishes the two arrays for a reader
+                # that entered this one at a chunk boundary.
+                "section": "fold_history",
+                "fold_id": compact.pop("fold_id"),
+                "validation_period": compact.pop("validation_period"),
+                "fold_status": compact.pop("fold_status"),
+                "finish_mode": compact.pop("finish_mode"),
+                **compact,
                 "frozen_strategy_artifact_id": _frozen_strategy_ref(
                     record, ref_store=ref_store
                 ),
                 **_fold_decision_statistics(record),
+                # The one block that grows with the Fold's candidate count.
+                "backtest_summaries": backtests,
             }
         )
-        history.append(entry)
     return history
 
 
@@ -615,7 +626,13 @@ def build_meta_fold_review_bundle(
         )
         reviews.append(
             {
-                "epoch_id": record.get("epoch_id"),
+                # Identity first, bulk last: this array is thousands of lines
+                # long and sits next to ``fold_validation_history``, whose
+                # entries carry the same statistics blocks. A reader taking the
+                # file in chunks lands mid-entry, so every entry has to name
+                # itself before its evidence -- ``section`` says which array it
+                # belongs to and the four identity keys say which Fold.
+                "section": "fold_review",
                 "fold_id": fold_ref,
                 # Self-labelling window: the review carries its own Validation
                 # period so its metrics are never read against another node's.
@@ -623,8 +640,9 @@ def build_meta_fold_review_bundle(
                 "fold_status": record.get("fold_status"),
                 # How the status was reached: a nominated node, the Agent's
                 # explicit no-edge finish (with its evidence), or no nomination.
-                "finish_reason": record.get("finish_reason"),
                 "finish_mode": record.get("finish_mode"),
+                "epoch_id": record.get("epoch_id"),
+                "finish_reason": record.get("finish_reason"),
                 "no_edge_reason": record.get("no_edge_reason"),
                 "hard_reject_reasons": hard_reject_reasons(record),
                 "frozen_strategy_artifact_id": _frozen_strategy_ref(
@@ -637,12 +655,12 @@ def build_meta_fold_review_bundle(
                 "test_result": agent_visible_metrics(
                     test_result if isinstance(test_result, dict) else None
                 ),
+                "agent_trace_full": sidecar.metadata(),
                 "strategy_files": strategy_files,
-                "agent_trace": agent_trace,
-                # Counted over the whole trace: ``agent_trace`` above is the
+                # Counted over the whole trace: ``agent_trace`` below is the
                 # context-bounded view, not a statistically complete one.
                 "agent_process_summary": build_agent_process_summary(source_events),
-                "agent_trace_full": sidecar.metadata(),
+                "agent_trace": agent_trace,
             }
         )
         sidecars.append(sidecar)

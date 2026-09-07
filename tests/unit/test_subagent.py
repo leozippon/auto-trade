@@ -17,6 +17,8 @@ from autotrade.agent.subagent import (
     DEFAULT_SUBAGENT_MAX_CONCURRENT,
     DEFAULT_SUBAGENT_THINKING,
     STEER_MESSAGE_LABEL,
+    SUBAGENT_DEGRADED_SUMMARY_ERROR,
+    SUBAGENT_DEGRADED_SUMMARY_MARKER,
     SUBAGENT_DESCRIPTION_MAX_CHARS,
     SUBAGENT_ROLES,
     SUBAGENT_STEER_MAX_CHARS,
@@ -3551,12 +3553,14 @@ def test_child_cut_short_by_worker_shutdown_is_cancelled_not_failed(monkeypatch)
 
 
 def test_child_without_a_report_is_not_completed() -> None:
-    """``completed`` means a report reached the parent: a child whose rounds
-    ran out and whose forced summary came back empty is an error."""
+    """``completed`` means a report reached the parent: a child whose rounds ran
+    out, whose forced summary came back blank, and which left no text anywhere
+    to recover is an error — the one case that stays empty."""
     silent = ScriptedLLM(
         [
+            # The tool-calling round carries no assistant text either.
             ProviderResponse(tool_calls=(ToolCall("s", "shell", {"argv": ["ls"]}),)),
-            ProviderResponse(content="", reasoning_content="nothing to report"),
+            ProviderResponse(content="   "),
         ],
         context_window_tokens=128_000,
     )
@@ -3568,6 +3572,128 @@ def test_child_without_a_report_is_not_completed() -> None:
     assert result["status"] == "error" and result["summary"] == ""
     assert result["error"] == "Sub-agent ended without a report"
     assert result["tool_calls"] == 1 and result["llm_calls"] == 2
+
+
+def test_exhausted_child_reports_what_the_empty_finalize_left_behind() -> None:
+    """A finalize that spent its budget on reasoning used to discard the whole
+    run as an empty ``error``. The reply's reasoning — else the last assistant
+    text in the transcript — is delivered under the degraded marker as
+    ``exhausted``, which is never ``ok`` at the parent."""
+
+    events: list[tuple[str, dict[str, object]]] = []
+    reasoning_only = ScriptedLLM(
+        [
+            ProviderResponse(
+                content="已抽样 3 只标的",
+                tool_calls=(ToolCall("s", "shell", {"argv": ["ls"]}),),
+            ),
+            ProviderResponse(
+                content="",
+                reasoning_content="结论：2024 年行情缺 3 只标的，建议补数后重跑。",
+            ),
+        ],
+        context_window_tokens=128_000,
+    )
+    result = SubAgentEngine(
+        llm=reasoning_only,
+        tools=ToolRegistry([DeclaredReadOnlyShell()]),
+        config=SubAgentConfig(max_rounds=1),
+        event_sink=lambda event, payload: events.append((event, payload)),
+    ).run("dig", role="developer")
+
+    assert result["status"] == "exhausted"
+    assert result["error"] == SUBAGENT_DEGRADED_SUMMARY_ERROR
+    summary = str(result["summary"])
+    assert summary.startswith(
+        SUBAGENT_DEGRADED_SUMMARY_MARKER.format(source="本轮推理内容")
+    )
+    assert "建议补数后重跑" in summary
+    assert result["rounds"] == 1 and result["llm_calls"] == 2
+    # The finalize call is traced like any round instead of vanishing.
+    finalize = [
+        payload
+        for event, payload in events
+        if event == "subagent_llm" and payload.get("finalize")
+    ]
+    assert len(finalize) == 1
+    assert finalize[0]["round"] == 1 and finalize[0]["tool_names"] == []
+    assert [payload["status"] for event, payload in events if event == "subagent"] == [
+        "exhausted"
+    ]
+
+    # No reasoning either: the last assistant text is what remains of the run.
+    quiet = ScriptedLLM(
+        [
+            ProviderResponse(
+                content="已核对 2024 年行情缺口",
+                tool_calls=(ToolCall("s", "shell", {"argv": ["ls"]}),),
+            ),
+            ProviderResponse(content=" "),
+        ],
+        context_window_tokens=128_000,
+    )
+    fallback = SubAgentEngine(
+        llm=quiet,
+        tools=ToolRegistry([DeclaredReadOnlyShell()]),
+        config=SubAgentConfig(max_rounds=1),
+    ).run("dig", role="developer")
+    assert fallback["status"] == "exhausted"
+    assert str(fallback["summary"]) == (
+        f"{SUBAGENT_DEGRADED_SUMMARY_MARKER.format(source='最后一条助手正文')}\n"
+        "已核对 2024 年行情缺口"
+    )
+
+    # What the parent receives: the degraded report, the status unchanged, not ok.
+    finish = _FinishStub("finish_fold")
+    llm = ScriptedLLM(
+        [
+            ProviderResponse(
+                tool_calls=(
+                    ToolCall("a1", "agent", {"agent": "developer", "task": "dig"}),
+                )
+            ),
+            ProviderResponse(content="waiting"),
+            ProviderResponse(tool_calls=(ToolCall("f1", "finish_fold", {}),)),
+        ]
+    )
+    attempts: list[dict[str, object]] = []
+    runner = AgentSessionRunner(
+        llm=llm,
+        tools=ToolRegistry([finish]),
+        system_prompt="fold",
+        config=_fold_config(),
+        subagent=SubAgentEngine(
+            llm=ScriptedLLM(
+                [
+                    ProviderResponse(
+                        content="已抽样 3 只标的",
+                        tool_calls=(ToolCall("s", "shell", {"argv": ["ls"]}),),
+                    ),
+                    ProviderResponse(
+                        content="",
+                        reasoning_content="结论：2024 年行情缺 3 只标的，建议补数后重跑。",
+                    ),
+                ],
+                context_window_tokens=128_000,
+            ),
+            tools=ToolRegistry([DeclaredReadOnlyShell()]),
+            config=SubAgentConfig(max_rounds=1),
+        ),
+        event_sink=lambda event, payload: attempts.append(payload)
+        if event == "subagent_attempt"
+        else None,
+    )
+    assert runner.run("go").status == "finished"
+    assert [payload["status"] for payload in attempts] == ["exhausted"]
+    assert attempts[0]["ok"] is False
+    observation = next(
+        json.loads(str(message.content))
+        for message in llm.calls[-1]["messages"]
+        if '"subagent_completed"' in str(message.content or "")
+    )
+    assert observation["status"] == "exhausted" and observation["ok"] is False
+    assert "建议补数后重跑" in str(observation["summary"])
+    assert observation["error"] == SUBAGENT_DEGRADED_SUMMARY_ERROR
 
 
 def test_child_thinking_level_reaches_the_budget_wrapped_gateway() -> None:

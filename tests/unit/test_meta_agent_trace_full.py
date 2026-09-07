@@ -77,6 +77,56 @@ def _fold(
     return record, source
 
 
+def _counted_trace(*, llm_calls: int, failures: int) -> bytes:
+    """A raw trace whose ``agent_process_summary`` counts identify the Fold."""
+
+    events: list[dict[str, object]] = [
+        {"event_type": "llm_call", "content": f"plan {index}"}
+        for index in range(llm_calls)
+    ]
+    events += [
+        {
+            "event_type": "tool_call",
+            "tool": "daily_backtest",
+            "result": {"ok": False, "error": f"backtest failed {index}"},
+        }
+        for index in range(failures)
+    ]
+    return "".join(
+        json.dumps(event, ensure_ascii=False) + "\n" for event in events
+    ).encode("utf-8")
+
+
+def _scripted_meta_learner(tmp_path: Path) -> LLMMetaLearner:
+    baseline = tmp_path / "baseline" / "main.py"
+    baseline.parent.mkdir(parents=True, exist_ok=True)
+    baseline.write_text(
+        "def generate_orders(context):\n    return []\n", encoding="utf-8"
+    )
+    return LLMMetaLearner(
+        llm=ScriptedLLM(
+            [
+                *_agent_then(
+                    ToolCall(
+                        "prior",
+                        "write_file",
+                        {"path": "PRIOR.md", "content": "prefer simple signals"},
+                    ),
+                    ToolCall("finish_meta", "finish_meta", {}),
+                )
+            ]
+        ),
+        baseline_strategy=baseline,
+        artifact_store=FilesystemArtifactStore(tmp_path / "artifacts"),
+        experiment_dir=tmp_path / "experiment",
+        runtime_root=tmp_path / "runtime",
+        max_llm_calls=2,
+        deadline_seconds=30.0,
+        use_docker=False,
+        rebuild_enabled=False,
+    )
+
+
 def test_raw_sidecar_is_byte_exact_and_retains_every_recorded_field(
     tmp_path: Path,
 ) -> None:
@@ -540,32 +590,7 @@ def test_llm_meta_publishes_raw_sidecar_before_context(
     reviews, sidecars = build_meta_fold_review_bundle(
         [record], ref_store=AgentRefStore(tmp_path / "experiment")
     )
-    baseline = tmp_path / "baseline" / "main.py"
-    baseline.parent.mkdir()
-    baseline.write_text("def generate_orders(context):\n    return []\n", encoding="utf-8")
-    store = FilesystemArtifactStore(tmp_path / "artifacts")
-    learner = LLMMetaLearner(
-        llm=ScriptedLLM(
-            [
-                *_agent_then(
-                    ToolCall(
-                        "prior",
-                        "write_file",
-                        {"path": "PRIOR.md", "content": "prefer simple signals"},
-                    ),
-                    ToolCall("finish_meta", "finish_meta", {}),
-                )
-            ]
-        ),
-        baseline_strategy=baseline,
-        artifact_store=store,
-        experiment_dir=tmp_path / "experiment",
-        runtime_root=tmp_path / "runtime",
-        max_llm_calls=2,
-        deadline_seconds=30.0,
-        use_docker=False,
-        rebuild_enabled=False,
-    )
+    learner = _scripted_meta_learner(tmp_path)
     real_writer = meta_inputs.write_meta_agent_trace_sidecars
     publication_order: list[str] = []
 
@@ -692,6 +717,130 @@ def test_review_carries_the_parent_controls_new_period_result_and_null(tmp_path:
 
     bare, _ = _fold(tmp_path, _raw_trace("B"), run_id="run_bare")
     assert build_meta_fold_review_bundle([bare], ref_store=ref_store)[0][0]["parent_control"] is None
+
+
+def test_each_review_entry_carries_only_its_own_folds_evidence(tmp_path: Path) -> None:
+    """With more than one Fold in the window, entry ``i`` is Fold ``i``.
+
+    Every review-window projection -- opaque id, the Fold's own Validation
+    period, the counts derived from its whole trace, the compact trace index
+    and the raw sidecar bytes -- has to come from the same record. A single
+    misaligned pair would let Meta read one Fold's numbers under another
+    Fold's period, which is exactly the attribution error the arrays are
+    labelled to prevent.
+    """
+
+    payloads = [
+        _counted_trace(llm_calls=2, failures=1),
+        _counted_trace(llm_calls=5, failures=3),
+    ]
+    first, _ = _fold(tmp_path, payloads[0], fold_id="fold_2024Q1", run_id="run_a")
+    second, _ = _fold(
+        tmp_path,
+        payloads[1],
+        epoch_id="epoch_002",
+        fold_id="fold_2024Q2",
+        run_id="run_b",
+    )
+    first["validation_period"] = "20230401..20240331"
+    second["validation_period"] = "20230701..20240630"
+    records = [first, second]
+
+    ref_store = AgentRefStore(tmp_path / "experiment")
+    reviews, sidecars = build_meta_fold_review_bundle(records, ref_store=ref_store)
+
+    assert len(reviews) == len(sidecars) == 2
+    expected = [{"llm_calls": 2, "failures": 1}, {"llm_calls": 5, "failures": 3}]
+    for index, record in enumerate(records):
+        review = _as_map(reviews[index])
+        assert review["fold_id"] == ref_store.get_or_create(
+            "fold", str(record["fold_id"])
+        )
+        assert review["validation_period"] == record["validation_period"]
+        assert review["epoch_id"] == record["epoch_id"]
+        summary = _as_map(review["agent_process_summary"])
+        assert summary["llm_calls"] == expected[index]["llm_calls"]
+        assert summary["tool_failures"] == expected[index]["failures"]
+        assert _as_map(summary["tool_failures_by_tool"]) == {
+            "daily_backtest": expected[index]["failures"]
+        }
+        assert summary["daily_backtest"] == expected[index]["failures"]
+        trace = cast(list[object], review["agent_trace"])
+        assert len(trace) == expected[index]["llm_calls"] + expected[index]["failures"]
+        assert sidecars[index].fold_ref == review["fold_id"]
+        assert sidecars[index].payload == payloads[index]
+        assert _as_map(review["agent_trace_full"])["bytes"] == len(payloads[index])
+    assert reviews[0]["fold_id"] != reviews[1]["fold_id"]
+    assert sidecars[0].relative_path != sidecars[1].relative_path
+
+
+def test_meta_context_entries_lead_with_their_identity_keys(tmp_path: Path) -> None:
+    """Each written entry names itself before its evidence.
+
+    ``fold_reviews`` and ``fold_validation_history`` are adjacent and share
+    every statistics block, and the file is long enough that Meta reads it in
+    chunks. Two sessions renumbered history rows as reviews, so the published
+    file must not be key-sorted: each entry leads with ``section`` and its
+    identity keys, and the bulky trace blocks come last.
+    """
+
+    lead = ["section", "fold_id", "validation_period", "fold_status", "finish_mode"]
+    first, _ = _fold(tmp_path, _counted_trace(llm_calls=2, failures=1), run_id="run_a")
+    second, _ = _fold(
+        tmp_path,
+        _counted_trace(llm_calls=3, failures=0),
+        epoch_id="epoch_002",
+        fold_id="fold_2024Q2",
+        run_id="run_b",
+    )
+    first["validation_period"] = "20230401..20240331"
+    second["validation_period"] = "20230701..20240630"
+    records: list[dict[str, object]] = [
+        {
+            "record_type": "meta_learning",
+            "meta_learning_id": "meta_previous",
+            "run_id": "run_meta_previous",
+        },
+        first,
+        second,
+    ]
+    ref_store = AgentRefStore(tmp_path / "experiment")
+    history, sidecars = _development_inputs(records, ref_store=ref_store)
+
+    _scripted_meta_learner(tmp_path)(
+        {
+            "run_id": "run_meta",
+            "experiment_id": "exp",
+            "epoch_id": "epoch_002",
+            "meta_learning_id": "epoch_002_after_fold",
+            "development_history": history,
+            "agent_trace_sidecars": sidecars,
+        }
+    )
+
+    public = json.loads(
+        (tmp_path / "run_meta" / "workspace" / "inputs" / "meta_context.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    written = _as_map(public["development_history"])
+    reviews = cast(list[object], written["fold_reviews"])
+    rows = cast(list[object], written["fold_validation_history"])
+    assert len(reviews) == 2 and len(rows) == 2
+    for entry, section, bulk in [
+        (row, "fold_review", "agent_trace") for row in reviews
+    ] + [(row, "fold_history", "backtest_summaries") for row in rows]:
+        keys = list(_as_map(entry))
+        assert keys[:5] == lead, keys[:5]
+        assert _as_map(entry)["section"] == section
+        # Statistics before bulk: the blocks that dwarf an entry must not push
+        # its identity out of a reader's chunk.
+        assert keys[-1] == bulk, keys
+        for statistic in ("selection_statistics", "null_control", "vs_parent"):
+            assert keys.index(statistic) < keys.index(bulk)
+    assert list(_as_map(reviews[0])).index("agent_process_summary") > list(
+        _as_map(reviews[0])
+    ).index("test_result")
 
 
 def _stat_mode(path: Path) -> int:

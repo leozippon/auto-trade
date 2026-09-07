@@ -382,7 +382,15 @@ def _default_host_manifest_path(public_path: Path) -> Path:
     return public_path.with_name("host_run_manifest.json")
 
 
-def write_json_atomic(path: Path, payload: object) -> None:
+def write_json_atomic(path: Path, payload: object, *, sort_keys: bool = True) -> None:
+    """Publish one JSON file atomically.
+
+    ``sort_keys`` defaults to True so manifests stay diffable. Pass False for a
+    file whose builder orders keys deliberately -- a long Agent-visible index
+    read in chunks needs its identifying keys at the top of each entry, and
+    alphabetical order buries them under whatever bulky block sorts first.
+    """
+
     path.parent.mkdir(parents=True, exist_ok=True)
     # Unique temp name: concurrent writers must never share a temp file, or
     # interleaved chunks get os.replace'd into place.
@@ -390,7 +398,14 @@ def write_json_atomic(path: Path, payload: object) -> None:
     try:
         # allow_nan=False: a NaN in a run manifest is an upstream bug — fail here.
         tmp.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True, default=str, allow_nan=False),
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=sort_keys,
+                default=str,
+                allow_nan=False,
+            ),
             encoding="utf-8",
         )
         tmp.replace(path)

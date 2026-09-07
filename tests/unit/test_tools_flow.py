@@ -34,6 +34,7 @@ from autotrade.environment.tools import (
 )
 from autotrade.environment.tools.shell import (
     ARGV_ALIAS_NOTE,
+    ARGV_ONE_ELEMENT_NOTE,
     ARGV_SPLIT_NOTE,
     ARGV_STRING_NOTE,
     ARGV_TOO_LONG_HINT,
@@ -230,7 +231,9 @@ class ShellToolTest(unittest.TestCase):
             _, _, workspace = build_sandbox(Path(tmp))
             runner = FakeRunner()
             registry = ToolRegistry([SandboxShellTool(workspace, runner)])
-            for argv in ([], [""], ["ls", 3]):
+            # A nested array and an object are not one-element command lines:
+            # neither can be rewritten, so the schema's own error stands.
+            for argv in ([], [""], ["ls", 3], [["ls", "-la"]], {"cmd": "ls"}):
                 self.assertFalse(registry.invoke("shell", {"argv": argv}).ok, argv)
             self.assertEqual(runner.calls, [])
 
@@ -248,6 +251,16 @@ class ShellToolTest(unittest.TestCase):
             self.assertTrue(result.ok, result.error)
             self.assertEqual(runner.calls[0][0], ("python", "-c", "print(1)"))
             self.assertEqual(result.value["argv_normalized"], ARGV_STRING_NOTE)
+            # The shape the traces actually carry: a multi-line `python -c`
+            # body whose newlines were never escaped. Strict JSON rejects those
+            # raw control characters, but the array around them is unambiguous.
+            script = "\nimport sys\nprint('a b', sys.version)\n"
+            raw = '["python", "-c", "' + script + '"]'
+            self.assertRaises(ValueError, json.loads, raw)
+            multiline = registry.invoke("shell", {"argv": raw})
+            self.assertTrue(multiline.ok, multiline.error)
+            self.assertEqual(runner.calls[1][0], ("python", "-c", script))
+            self.assertEqual(multiline.value["argv_normalized"], ARGV_STRING_NOTE)
             # The repair note belongs to that call only.
             plain = registry.invoke("shell", {"argv": ["echo", "ok"]})
             self.assertTrue(plain.ok, plain.error)
@@ -279,6 +292,40 @@ class ShellToolTest(unittest.TestCase):
             self.assertFalse(ambiguous.ok)
             self.assertIn("command", ambiguous.error)
 
+    def test_shell_unwraps_a_command_line_sent_as_a_one_element_array(self) -> None:
+        """`["python -c 'print(1)'"]` names no executable, so the element can
+        only be a command line: it is split, and the guards that follow
+        normalization still see the array that will actually run."""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            _, _, workspace = build_sandbox(Path(tmp))
+            runner = FakeRunner(CommandResult(0, stdout="1"))
+            registry = ToolRegistry([SandboxShellTool(workspace, runner)])
+            result = registry.invoke("shell", {"argv": ["python -c 'print(1)'"]})
+            self.assertTrue(result.ok, result.error)
+            self.assertEqual(runner.calls[0][0], ("python", "-c", "print(1)"))
+            self.assertIn(ARGV_ONE_ELEMENT_NOTE, result.value["argv_normalized"])
+            self.assertIn(ARGV_SPLIT_NOTE, result.value["argv_normalized"])
+            # A lone program name is a real one-element argv, not a command line.
+            bare = registry.invoke("shell", {"argv": ["pwd"]})
+            self.assertTrue(bare.ok, bare.error)
+            self.assertEqual(runner.calls[1][0], ("pwd",))
+            self.assertNotIn("argv_normalized", bare.value)
+            # The wait guard runs on the normalized argv, not the wrapper.
+            waited = registry.invoke("shell", {"argv": ["sleep 30"]})
+            self.assertFalse(waited.ok)
+            self.assertEqual(waited.value["error_type"], FORBIDDEN_WAIT)
+            # So does the per-element cap, and the operator refusal.
+            long_element = registry.invoke(
+                "shell", {"argv": [f"python -c {'x' * (SHELL_ARGV_MAX_CHARS + 1)}"]}
+            )
+            self.assertFalse(long_element.ok)
+            self.assertIn("argv[2] is too long", long_element.error)
+            piped = registry.invoke("shell", {"argv": ["ls output | wc -l"]})
+            self.assertFalse(piped.ok)
+            self.assertIn("shell operator `|`", piped.error)
+            self.assertEqual(len(runner.calls), 2)
+
     def test_shell_refuses_a_command_string_it_cannot_run_faithfully(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             _, _, workspace = build_sandbox(Path(tmp))
@@ -301,7 +348,19 @@ class ShellToolTest(unittest.TestCase):
             # A JSON array of anything but non-empty strings is not repairable,
             # and splitting it as a command line would suggest nonsense, so the
             # refusal states what the array must hold instead.
-            for argv in ('["ls", 3]', "[]", "[1, 2]", '["ls"', '{"argv": ["ls"]}'):
+            for argv in (
+                '["ls", 3]',
+                "[]",
+                "[1, 2]",
+                '["ls"',
+                '{"argv": ["ls"]}',
+                '[["ls", "-la"]]',
+                '["ls", null]',
+                '["ls", ""]',
+                # The whole arguments object leaked into argv: the leading array
+                # parses, but running it would silently drop the rest.
+                '["python", "probe.py"], "cwd": "notes"}',
+            ):
                 refused = registry.invoke("shell", {"argv": argv})
                 self.assertFalse(refused.ok, argv)
                 self.assertIn("array of separate strings", refused.error)
@@ -313,7 +372,8 @@ class ShellToolTest(unittest.TestCase):
             _, _, workspace = build_sandbox(Path(tmp))
             runner = FakeRunner()
             registry = ToolRegistry([SandboxShellTool(workspace, runner)])
-            script = "print(1)\n" * 200
+            line = "print(1)\n"
+            script = line * (SHELL_ARGV_MAX_CHARS // len(line) + 1)
             self.assertGreater(len(script), SHELL_ARGV_MAX_CHARS)
             for argv in (["python", "-c", script], json.dumps(["python", "-c", script])):
                 result = registry.invoke("shell", {"argv": argv})
@@ -324,6 +384,13 @@ class ShellToolTest(unittest.TestCase):
                 self.assertIn('["python", "notes/probe.py"]', hint)
                 self.assertIn("correct call example", hint)
             self.assertEqual(runner.calls, [])
+            # The cap has to clear the `bash -lc` heredocs and `python -c`
+            # probes the Agent legitimately writes, which run to a few kB.
+            fits = registry.invoke(
+                "shell", {"argv": ["python", "-c", script[:SHELL_ARGV_MAX_CHARS]]}
+            )
+            self.assertTrue(fits.ok, fits.error)
+            self.assertGreaterEqual(SHELL_ARGV_MAX_CHARS, 2000)
 
     def test_shell_is_declared_mutating_so_the_finish_lock_reaches_it(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1443,7 +1510,7 @@ class ToolResultContractTest(unittest.TestCase):
             registry = ToolRegistry([*registry._tools.values(), SandboxShellTool(workspace, FakeRunner())])
             for name, arguments, needle in (
                 ("shell", {"argv": "ls -la | wc -l"}, '"argv": ["python", "-c", "print(1)"]'),
-                ("shell", {"argv": ["python", "-c", "x" * 1001]}, "argv[2] is too long; correct call example"),
+                ("shell", {"argv": ["python", "-c", "x" * (SHELL_ARGV_MAX_CHARS + 1)]}, "argv[2] is too long; correct call example"),
                 ("shell", {"argv": ["ls"], "timeout_seconds": 900}, "above its maximum; correct call example"),
                 ("edit_file", {"path": "output/main.py", "old_text": "a", "new_text": "b", "offset": 3}, "unknown argument(s): ['offset']; correct call example: {\"path\": \"output/main.py\""),
                 ("read_file", {"path": ""}, '"path": "inputs/skills_index.json"'),
@@ -1453,7 +1520,7 @@ class ToolResultContractTest(unittest.TestCase):
                 self.assertIn(needle, result.error, name)
                 self.assertIn("correct call example", result.value["retry_hint"], name)
             shell_description = SandboxShellTool(workspace, FakeRunner()).spec.description
-            self.assertIn("at most 1000 chars", shell_description)
+            self.assertIn(f"at most {SHELL_ARGV_MAX_CHARS} chars", shell_description)
             self.assertIn('["python", "notes/probe.py"]', shell_description)
             self.assertIn("over 40000 chars come back as an inline head", shell_description)
             self.assertIn("`<stream>_spill.result_hint`", shell_description)
