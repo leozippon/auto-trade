@@ -6,9 +6,12 @@ import ast
 import importlib.util
 import os
 import sys
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from types import ModuleType
+from typing import cast
 
 from .strategy import FitSchedule, StrategyContext, StrategyContractError, StrategyFunction
 
@@ -332,14 +335,66 @@ def _leading_path_atom(node: ast.AST) -> ast.AST:
             return node
 
 
+# Loading a strategy package and calling into one both borrow process-global
+# import state (``sys.path``, ``sys.modules``, ``sys.dont_write_bytecode``).
+# One lock covers both windows, so two strategies loaded into one host process
+# can never see each other's helper modules.
+_IMPORT_LOCK = threading.RLock()
+
+
+class _PackageImports:
+    """The package's own modules, re-installed for the duration of each call.
+
+    The package directory is importable and its modules sit in ``sys.modules``
+    only while strategy code runs; outside that window both are taken back out,
+    so several strategies whose helper modules share names can be loaded into
+    one host process. An ``import`` written inside a function body is resolved
+    when that function runs, which is outside the entry module's own import,
+    and it must still find the module the package already holds: without this
+    it raises ``ModuleNotFoundError`` on the host and, in the replay container
+    (whose working directory is the package root), silently executes the file a
+    second time into a separate module whose module-level state starts empty.
+    Bytecode caches are never written next to the artifact.
+    """
+
+    def __init__(self, root: str, modules: dict[str, ModuleType]) -> None:
+        self._root = root
+        self._modules = modules
+
+    def bind(self, function: Callable[[StrategyContext], object]):
+        def call(context: StrategyContext) -> object:
+            return self.call(function, context)
+
+        return call
+
+    def call(
+        self, function: Callable[[StrategyContext], object], context: StrategyContext
+    ) -> object:
+        with _IMPORT_LOCK:
+            shadowed = {
+                name: sys.modules[name] for name in self._modules if name in sys.modules
+            }
+            write_bytecode = sys.dont_write_bytecode
+            sys.dont_write_bytecode = True
+            sys.path.insert(0, self._root)
+            sys.modules.update(self._modules)
+            try:
+                return function(context)
+            finally:
+                sys.path.remove(self._root)
+                sys.dont_write_bytecode = write_bytecode
+                # A call may import a package module the entry module never
+                # did; from here on that module belongs to this strategy too.
+                self._modules = _forget_package_modules(self._root)
+                sys.modules.update(shadowed)
+
+
 def load_strategy_module(path: str | Path) -> LoadedStrategy:
     """Validate the package around ``main.py`` and import its entry module.
 
-    The package directory is importable only while the entry module executes,
-    and the modules it pulled in are forgotten from ``sys.modules`` afterwards
-    (the entry module keeps its own references), so several strategies whose
-    helper modules share names can be loaded into one host process. Bytecode
-    caches are never written next to the artifact.
+    The returned entrypoints carry the package's own modules with them (see
+    ``_PackageImports``), so the package behaves like any other Python package
+    while it runs and like nothing at all in between.
     """
     strategy_path = Path(path).resolve()
     if not strategy_path.is_file():
@@ -350,17 +405,18 @@ def load_strategy_module(path: str | Path) -> LoadedStrategy:
         raise StrategyLoadError(f"cannot load strategy: {strategy_path}")
     module = importlib.util.module_from_spec(spec)
     root = str(strategy_path.parent)
-    write_bytecode = sys.dont_write_bytecode
-    sys.dont_write_bytecode = True
-    sys.path.insert(0, root)
-    try:
-        spec.loader.exec_module(module)
-    except Exception as exc:
-        raise StrategyLoadError(f"strategy import failed: {exc}") from exc
-    finally:
-        sys.path.remove(root)
-        sys.dont_write_bytecode = write_bytecode
-        _forget_package_modules(root)
+    with _IMPORT_LOCK:
+        write_bytecode = sys.dont_write_bytecode
+        sys.dont_write_bytecode = True
+        sys.path.insert(0, root)
+        try:
+            spec.loader.exec_module(module)
+        except Exception as exc:
+            raise StrategyLoadError(f"strategy import failed: {exc}") from exc
+        finally:
+            sys.path.remove(root)
+            sys.dont_write_bytecode = write_bytecode
+            imports = _PackageImports(root, _forget_package_modules(root))
     strategy = getattr(module, "generate_orders", None)
     if not callable(strategy):
         raise StrategyLoadError("strategy does not expose generate_orders")
@@ -369,11 +425,18 @@ def load_strategy_module(path: str | Path) -> LoadedStrategy:
         fit = getattr(module, "fit", None)
         if not callable(fit):
             raise StrategyLoadError("strategy does not expose fit")
-    return LoadedStrategy(strategy, fit, fit_schedule)
+    return LoadedStrategy(
+        cast(StrategyFunction, imports.bind(strategy)),
+        imports.bind(fit) if fit is not None else None,
+        fit_schedule,
+    )
 
 
-def _forget_package_modules(root: str) -> None:
+def _forget_package_modules(root: str) -> dict[str, ModuleType]:
+    """Take the package's own modules out of ``sys.modules`` and return them."""
+
     prefix = root + os.sep
+    forgotten = {}
     for name, module in list(sys.modules.items()):
         # Read the module's own namespace: some library modules answer any
         # attribute lookup (torch._classes), so getattr would fabricate a path.
@@ -384,7 +447,8 @@ def _forget_package_modules(root: str) -> None:
         except TypeError:
             pass
         if any(isinstance(location, str) and location.startswith(prefix) for location in locations):
-            del sys.modules[name]
+            forgotten[name] = sys.modules.pop(name)
+    return forgotten
 
 
 def load_strategy(path: str | Path) -> StrategyFunction:

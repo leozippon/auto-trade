@@ -95,6 +95,68 @@ def test_package_loads_in_host_and_helper_modules_do_not_leak_between_strategies
     assert executor.execute(context)[0]["live"] == 4.0
 
 
+DEFERRED_MAIN = '''import scorer
+import state
+
+
+def generate_orders(context):
+    state.remember(context.inference_at.strftime("%Y%m%d"))
+    return [{"seen": scorer.seen()}]
+'''
+DEFERRED_SCORER = '''def seen():
+    import state  # inside the call, the way a package breaks an import cycle
+
+    return {tag}state.seen()
+'''
+DEFERRED_STATE = '''SEEN = None
+
+
+def remember(value):
+    global SEEN
+    SEEN = value
+
+
+def seen():
+    return SEEN
+'''
+
+
+def _write_deferred_package(root: Path, *, tag: str = "") -> Path:
+    root.mkdir(parents=True)
+    (root / "state.py").write_text(DEFERRED_STATE, encoding="utf-8")
+    (root / "scorer.py").write_text(DEFERRED_SCORER.format(tag=tag), encoding="utf-8")
+    (root / "main.py").write_text(DEFERRED_MAIN, encoding="utf-8")
+    return root / "main.py"
+
+
+def test_a_module_imported_inside_a_call_is_the_one_the_package_already_holds(tmp_path: Path):
+    """A package module is one module, wherever the import statement sits.
+
+    Python resolves an import written inside a function body when that function
+    runs, which is after the entry module finished importing. A Fold lost a
+    Validation to this: the sibling module its ``generate_orders`` had just
+    written to was not the one the scoring module imported and read back --
+    on the host that import raises, and in the replay container (whose working
+    directory is the package root) it silently executes the file a second time
+    into a module whose module-level state is still empty.
+    """
+
+    first = TrustedStrategyExecutor.from_path(_write_deferred_package(tmp_path / "first"))
+    second = TrustedStrategyExecutor.from_path(
+        _write_deferred_package(tmp_path / "second", tag="'second:' + ")
+    )
+    context = _context("")
+
+    assert first.execute(context) == [{"seen": "20260102"}]
+    # Each strategy keeps its own sibling modules, before and after the other
+    # one runs, and neither leaves anything behind between calls.
+    assert second.execute(context) == [{"seen": "second:20260102"}]
+    assert first.execute(context) == [{"seen": "20260102"}]
+    assert "state" not in sys.modules and "scorer" not in sys.modules
+    assert str(tmp_path / "first") not in sys.path and str(tmp_path / "second") not in sys.path
+    assert not list(tmp_path.rglob("__pycache__"))
+
+
 @pytest.mark.parametrize(
     ("helper", "message"),
     [
@@ -291,3 +353,26 @@ def test_real_sandbox_runs_a_package_with_the_shipped_libraries(tmp_path: Path):
         executor.close()
     assert np.load(state / "w.npy").tolist() == [2.0]
     assert (order["weight"], order["live"]) == (2.0, 4.0)
+
+
+@pytest.mark.skipif(not docker_available(), reason="Docker is unavailable")
+def test_real_sandbox_resolves_a_deferred_package_import_to_the_same_module(tmp_path: Path):
+    """The container is where a split module used to go unnoticed.
+
+    Its working directory is the package root, so an import inside a call
+    found the file again instead of failing, and executed a second copy of it
+    whose module-level state was empty.
+    """
+
+    image = "autotrade-sandbox:latest"
+    if subprocess.run(["docker", "image", "inspect", image], capture_output=True, check=False).returncode:
+        pytest.skip(f"local sandbox image is unavailable: {image}")
+    package = tmp_path / "output"
+    strategy = _write_deferred_package(package)
+    package.chmod(0o755)
+    executor = DockerStrategyExecutor(strategy)
+    try:
+        orders = executor.execute(_context(""))
+    finally:
+        executor.close()
+    assert orders == [{"seen": "20260102"}]

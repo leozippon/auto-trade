@@ -47,6 +47,7 @@ from autotrade.environment.strategy_loader import (
     load_strategy_module,
     validate_strategy_source,
 )
+from autotrade.environment.tools import ToolError
 from autotrade.environment.tools.modification_check import ModificationCheckTool
 from autotrade.pipelines.config import ArtifactRevision, EvaluationRequest, SnapshotBundle
 from autotrade.pipelines.pit_backend import PITDailyEvaluationBackend
@@ -245,6 +246,69 @@ def test_a_fit_strategy_cannot_run_without_a_state_dir(tmp_path: Path):
     path.write_text(FIT_STRATEGY, encoding="utf-8")
     with pytest.raises(StrategyExecutionError, match="has no state_dir"):
         TrustedStrategyExecutor.from_path(path)
+
+
+def test_a_fit_that_delegates_to_a_sibling_module_runs_and_its_state_reaches_orders(
+    tmp_path: Path,
+):
+    """``fit`` is the function ``main.py`` declares, not the code in its body.
+
+    A Fold lost a Validation to a candidate whose ``main.py`` read
+    ``def fit(context): return trainer.fit(context)``: nothing about the
+    delegation is special, and the replay must fit and hand the state to
+    ``generate_orders`` exactly as it does for an inline body.
+    """
+
+    package = tmp_path / "output"
+    package.mkdir()
+    (package / "trainer.py").write_text(
+        'import numpy as np\n\n\n'
+        'def fit(context):\n'
+        '    np.save(context.state_dir + "/seen.npy", np.array([len(context.bars)]))\n\n\n'
+        'def orders(context):\n'
+        '    seen = int(np.load(context.state_dir + "/seen.npy")[0])\n'
+        '    return [{\n'
+        '        "symbol": "000001.SZ",\n'
+        '        "action": "buy",\n'
+        '        "quantity": 100,\n'
+        '        "execute_at": "2099-01-01T09:30:00+08:00",\n'
+        '        "fitted_on": seen,\n'
+        '    }]\n',
+        encoding="utf-8",
+    )
+    (package / "main.py").write_text(
+        'import trainer\n\nREFIT_PERIOD = "quarter"\n\n\n'
+        'def fit(context):\n    return trainer.fit(context)\n\n\n'
+        'def generate_orders(context):\n    return trainer.orders(context)\n',
+        encoding="utf-8",
+    )
+    state = tmp_path / "state"
+    state.mkdir()
+    executor = TrustedStrategyExecutor.from_path(package / "main.py", state_dir=state)
+    assert executor.fit_schedule == FitSchedule("quarter")
+
+    result = run_daily_replay(
+        daily=_daily(["20240328", "20240329"]),
+        strategy=executor,
+        schedule=StrategySchedule("day", "18:00"),
+    )
+    assert "fit" in result.phase_seconds
+    assert (state / "seen.npy").is_file()
+    assert [order["fitted_on"] for order in result.pending_orders] == [1, 1]
+
+
+def test_modification_check_refuses_a_fit_the_environment_could_not_call(tmp_path: Path):
+    """A wrong ``fit`` signature is named before any replay reserves a budget."""
+
+    package = tmp_path / "output"
+    package.mkdir()
+    (package / "main.py").write_text(
+        "def fit(context, extra):\n    return None\n\n\n"
+        "def generate_orders(context):\n    return []\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ToolError, match="fit must accept exactly one context argument"):
+        ModificationCheckTool(package).invoke({})
 
 
 # --- Docker executor and worker protocol -----------------------------------
