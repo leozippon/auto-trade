@@ -1009,7 +1009,9 @@ class SnapshotBuilderTest(unittest.TestCase):
 
     def test_replay_slot_available_from_floors_pre_period_rows(self):
         # A row published on the weekend between the decision anchor (Friday
-        # 23:59:59) and the Monday period start must enter the replay slot.
+        # 23:59:59) and the Monday period start must enter the replay slot; a
+        # row stamped exactly at the anchor must not, because the decision
+        # snapshot already carries it and the Timeview unions the two.
         from datetime import datetime as dt
         from zoneinfo import ZoneInfo
 
@@ -1023,6 +1025,8 @@ class SnapshotBuilderTest(unittest.TestCase):
             weekend = pd.DataFrame([
                 {"trade_date": "20211007", "ts_code": "000001.SZ", "net_mf_amount": 9.0,
                  "available_at": "2021-10-07T23:59:59+08:00", "available_at_rule": "same_day_evening"},
+                {"trade_date": "20211007", "ts_code": "000001.SZ", "net_mf_amount": 8.0,
+                 "available_at": "2021-10-09T10:00:00+08:00", "available_at_rule": "same_day_evening"},
             ])
             (raw / "moneyflow").mkdir(parents=True, exist_ok=True)
             weekend.to_parquet(raw / "moneyflow" / "trade_date=20211007.parquet", index=False)
@@ -1034,14 +1038,62 @@ class SnapshotBuilderTest(unittest.TestCase):
                 config=CONFIG, available_from=anchor,
             )
             events = pd.read_parquet(Path(tmp) / "with_anchor" / "events.parquet")
-            self.assertIn(9.0, set(events.get("net_mf_amount", pd.Series(dtype=float)).dropna()))
+            amounts = set(events.get("net_mf_amount", pd.Series(dtype=float)).dropna())
+            self.assertIn(8.0, amounts)  # strictly after the anchor: first pre-open refresh
+            self.assertNotIn(9.0, amounts)  # at the anchor: frozen snapshot only
             self.assertEqual(floored["available_from"], anchor.isoformat())
 
             builder.build_replay_slot(
                 "20211008", "20211011", Path(tmp) / "no_anchor", label="valid", config=CONFIG,
             )
             events_plain = pd.read_parquet(Path(tmp) / "no_anchor" / "events.parquet")
-            self.assertNotIn(9.0, set(events_plain.get("net_mf_amount", pd.Series(dtype=float)).dropna()))
+            self.assertNotIn(8.0, set(events_plain.get("net_mf_amount", pd.Series(dtype=float)).dropna()))
+
+    def test_timeview_union_of_snapshot_and_replay_slot_has_no_duplicate_rows(self):
+        # The decision snapshot keeps available_at <= anchor and the replay slot
+        # starts strictly after it, so the rolling view's union of parts never
+        # repeats a row: an anchor-stamped row lives exactly once, in part_0000.
+        from datetime import datetime as dt
+        from zoneinfo import ZoneInfo
+
+        from autotrade.environment.replay.timeview import Timeview
+
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = Path(tmp) / "raw"
+            events_root = Path(tmp) / "fund_events"
+            build_raw(raw)
+            build_fundamental_events(events_root)
+            status_path = Path(tmp) / "fundamental_events_status.json"
+            write_fundamental_status(status_path)
+            (raw / "moneyflow").mkdir(parents=True, exist_ok=True)
+            pd.DataFrame([
+                {"trade_date": "20211007", "ts_code": "000001.SZ", "net_mf_amount": 9.0,
+                 "available_at": "2021-10-07T23:59:59+08:00", "available_at_rule": "same_day_evening"},
+            ]).to_parquet(raw / "moneyflow" / "trade_date=20211007.parquet", index=False)
+            anchor = dt(2021, 10, 7, 23, 59, 59, tzinfo=ZoneInfo("Asia/Shanghai"))
+            builder = SnapshotBuilder(raw, events_root, status_path)
+            snapshot = Path(tmp) / "decision"
+            slot = Path(tmp) / "replay"
+            builder.build_decision_snapshot(anchor, snapshot, CONFIG)
+            builder.build_replay_slot(
+                "20211008", "20211011", slot, label="valid", config=CONFIG, available_from=anchor,
+            )
+
+            timeview = Timeview(
+                host_dir=Path(tmp) / "asof",
+                snapshot_dir=snapshot,
+                replay_frames={"events": pd.read_parquet(slot / "events.parquet")},
+            )
+            asof_dir, _ = timeview.refresh(pd.Timestamp("2021-10-12 08:30", tz="Asia/Shanghai"))
+            events_dir = Path(asof_dir) / "events"
+            parts = sorted(events_dir.glob("part_*.parquet"))
+            self.assertGreater(len(parts), 1)  # frozen part plus a rolled replay part
+            union = pd.read_parquet(events_dir)
+            self.assertEqual(len(union), len(union.drop_duplicates()))
+            self.assertEqual(int((union["net_mf_amount"] == 9.0).sum()), 1)
+            frozen = pd.read_parquet(parts[0])
+            self.assertEqual(int((frozen["net_mf_amount"] == 9.0).sum()), 1)
+            self.assertIn(1.0, set(union["net_mf_amount"].dropna()))  # the in-period row rolled in
 
     def test_decision_windows_are_configurable_by_domain(self):
         with tempfile.TemporaryDirectory() as tmp:

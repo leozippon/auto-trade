@@ -15,7 +15,7 @@
 
 - 正式策略写在 `output/` 包内：入口固定为 `output/main.py` 的 `generate_orders(context)`，返回严格 JSON 订单数组；辅助模块可放在 `output/` 下并用绝对导入（如 `from lib.features import x`），每个 `.py` 都受同一套静态检查。
 - 正式 import 只允许：纯计算标准库（`__future__`、`collections`、`dataclasses`、`datetime`、`decimal`、`functools`、`itertools`、`math`、`statistics`、`typing`）、`numpy`、`pandas`、`scipy`、`sklearn`、`lightgbm`、`xgboost`、`statsmodels`、`torch`（仅 CPU）及其子模块，以及 `output/` 内自己的模块。qlib / vnpy / joinquant / joblib / pickle 仍不得 import；模型参数用 NumPy 数组或 booster 的 `save_model(context.state_dir + ...)` 持久化。
-- 拟合放在 `fit(context)`（回放开始前调用一次，按 `REFIT_PERIOD` 重训），系数用 `np.save` 写到 `context.state_dir`，`generate_orders` 只读它；`models/` 以只读 `context.models_dir` 挂载。不要加载 `.pkl` / `.pt`（pickle / torch 加载被静态拒绝）。
+- 拟合放在 `fit(context)`（回放开始前调用一次，按 `REFIT_PERIOD` 重训），系数用 `np.save` 写到 `context.state_dir`，`generate_orders` 只读它；`models/` 以只读 `context.models_dir` 挂载。不要加载 `.pkl`（pickle / joblib 不得 import）；`.pt` 可用 `torch.load(context.models_dir + ...)` 读回，静态检查只拒绝绝对路径字面量与只读根写入，以 `output/README.md` 的合同为准。
 - 沙箱无网络，不要 `pip install`，不要抓 GitHub。
 - 每一行必须 `available_at <= context.inference_at`。默认 08:30 只用 T-1 及更早日线。
 - 不要写死 `/mnt/agent/workspace`。先核对本轮 manifest / `data_summary.json`，再经 `context.asof_dir` / `context.snapshot_dir` 读数。

@@ -26,6 +26,7 @@ from tempfile import TemporaryDirectory
 from autotrade.environment.artifacts import (
     FilesystemArtifactStore,
     ModificationConstraints,
+    readonly_baseline,
 )
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.runtime import write_json_atomic
@@ -186,6 +187,9 @@ class _Session:
             # The read-only contract README travels with every formal artifact.
             for directory in (self.parent, self.output):
                 (directory / "README.md").write_text(TEMPLATE_README, encoding="utf-8")
+        # As the host does at seeding: the read-only files are pinned to the
+        # bytes the workspace received, not to whatever the parent holds later.
+        self.seeded_readonly = readonly_baseline(self.output)
         moment = datetime(2021, 12, 31, 23, 59, 59, tzinfo=UTC)
         request = FoldSessionRequest(
             experiment_id="exp",
@@ -260,6 +264,7 @@ class _Session:
             parent_dir=self.parent,
             models_dir=self.models,
             constraints=ModificationConstraints(),
+            readonly_baseline=self.seeded_readonly,
         )
 
     def candidate(self, name: str, source: str) -> None:
@@ -729,6 +734,31 @@ class BatchTemplateFilesTest(unittest.TestCase):
             self.assertEqual(
                 sorted(p.name for p in (session.workspace_root / "candidates" / "a").iterdir()),
                 ["README.md", "main.py"],
+            )
+
+    def test_a_template_edited_after_seeding_does_not_refuse_the_batch(self) -> None:
+        """The host template is a live file; a session is judged on its own copy.
+
+        Editing ``configs/agent_output_template/README.md`` while sessions run
+        used to refuse every candidate of every session seeded from the older
+        template, because the read-only comparison read that file at check time.
+        """
+
+        with TemporaryDirectory() as tmp:
+            session = _Session(Path(tmp), readonly_template=True)
+            (session.parent / "README.md").write_text(
+                TEMPLATE_README + "\nA new contract section.\n", encoding="utf-8"
+            )
+            session.candidate("a", _strategy("1"))
+            session.candidate("b", _strategy("22"))
+            value = session.call("a", "b").value
+            self.assertEqual(value["complete_validations"], 2)
+            # Candidates are supplied the seeded copy, not the edited template.
+            self.assertEqual(
+                (session.workspace_root / "candidates" / "a" / "README.md").read_text(
+                    encoding="utf-8"
+                ),
+                TEMPLATE_README,
             )
 
     def test_a_candidate_with_an_edited_readme_is_still_refused(self) -> None:

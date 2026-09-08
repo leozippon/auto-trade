@@ -14,7 +14,7 @@
 ## 硬合同
 
 - 正式策略写在 `output/` 包内：入口固定为 `output/main.py` 的 `generate_orders(context)`，返回严格 JSON 订单数组；辅助模块可放在 `output/` 下并用绝对导入，每个 `.py` 都受同一套静态检查。
-- 正式 import 只允许：纯计算标准库（`__future__`、`collections`、`dataclasses`、`datetime`、`decimal`、`functools`、`itertools`、`math`、`statistics`、`typing`）、`numpy`、`pandas`、`scipy`、`sklearn`、`lightgbm`、`xgboost`、`statsmodels`、`torch`（本臂 gpu_count=0，策略容器无 GPU，只跑 CPU；以运行事实 `budgets.strategy_gpu_count` 为准）及其子模块，以及 `output/` 内自己的模块。qlib / joblib / pickle 不得 import；模型用 booster 的 `save_model(context.state_dir + "/model.txt")` 与 `lgb.Booster(model_file=context.state_dir + "/model.txt")` 持久化，数组用 `np.save`/`np.savez`，`torch.save` 被静态拒绝。
+- 正式 import 只允许：纯计算标准库（`__future__`、`collections`、`dataclasses`、`datetime`、`decimal`、`functools`、`itertools`、`math`、`statistics`、`typing`）、`numpy`、`pandas`、`scipy`、`sklearn`、`lightgbm`、`xgboost`、`statsmodels`、`torch`（本臂 gpu_count=0，策略容器无 GPU，只跑 CPU；以运行事实 `budgets.strategy_gpu_count` 为准）及其子模块，以及 `output/` 内自己的模块。qlib / joblib / pickle 不得 import；模型用 booster 的 `save_model(context.state_dir + "/model.txt")` 与 `lgb.Booster(model_file=context.state_dir + "/model.txt")` 持久化，数组用 `np.save`/`np.savez`；`torch.save(obj, context.state_dir + ...)` 也可用，静态检查只拒绝绝对路径字面量与只读根写入，以 `output/README.md` 的合同为准。
 - 拟合全部放在 `fit(context)`（一次 `fit` 有 `budgets.strategy_fit_timeout_seconds` 的独立预算，按模块级 `REFIT_PERIOD` 重训），结果写入 `context.state_dir`；`generate_orders` 只读它，且受单次决策上限 `budgets.strategy_inference_timeout_seconds` 约束。`models/` 以只读 `context.models_dir` 挂载。
 - 沙箱无网络，不要 `pip install`，不要抓 GitHub。
 - 每一行必须 `available_at <= context.inference_at`；默认 08:30 只用 T-1 及更早日线。标签只用推断时已经实现的收益。

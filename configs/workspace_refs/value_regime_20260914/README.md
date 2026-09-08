@@ -22,7 +22,7 @@
 ## 硬合同
 
 - 正式策略写在 `output/` 包内：入口固定为 `output/main.py` 的 `generate_orders(context)`，返回严格 JSON 订单数组；辅助模块可放在 `output/` 下并用绝对导入（如 `from lib.value import score`），每个 `.py` 都受同一套静态检查。
-- 正式 import 只允许：纯计算标准库（`__future__`、`collections`、`dataclasses`、`datetime`、`decimal`、`functools`、`itertools`、`math`、`statistics`、`typing`）、`numpy`、`pandas`、`scipy`、`sklearn`、`lightgbm`、`xgboost`、`statsmodels`、`torch`（本臂 `budgets.strategy_gpu_count=0`，只跑 CPU）及其子模块，以及 `output/` 内自己的模块。qlib / joblib / pickle 不得 import；参数用 `np.save`/`np.savez` 持久化，`torch.save` 被静态拒绝。
+- 正式 import 只允许：纯计算标准库（`__future__`、`collections`、`dataclasses`、`datetime`、`decimal`、`functools`、`itertools`、`math`、`statistics`、`typing`）、`numpy`、`pandas`、`scipy`、`sklearn`、`lightgbm`、`xgboost`、`statsmodels`、`torch`（本臂 `budgets.strategy_gpu_count=0`，只跑 CPU）及其子模块，以及 `output/` 内自己的模块。qlib / joblib / pickle 不得 import；参数用 `np.save`/`np.savez`、booster 的 `save_model(context.state_dir + ...)` 或 `torch.save(obj, context.state_dir + ...)` 持久化；静态检查只拒绝绝对路径字面量与只读根写入，以 `output/README.md` 的合同为准。
 - 需要拟合的量（复合权重、状态阈值所用的季节均值与标准差）放在 `fit(context)` 并写入 `context.state_dir`，`REFIT_PERIOD="quarter"`；`generate_orders` 只读它。`models/` 以只读 `context.models_dir` 挂载。
 - 沙箱无网络，不要抓网页。
 - 每一行必须 `available_at <= context.inference_at`。估值列随 `daily_basic` 在 T-1 18:00 可见；财务与派现按各自 `ann_date`（派现优先 `imp_ann_date`）18:00 可见；`fut_*`/`opt_*` 按交易日收盘后盖章，08:30 只能用 T-1 及更早。
@@ -40,7 +40,7 @@
 
 100 股整手：3,333 元的单只预算在股价 33.3 元以上连一手都买不起，实际权重是 `floor(3333/(100*P))*100*P`。价格上限对本包几乎不花代价——2024-06-28 剔除科创板/北交所与最小 30% 市值后的 3,335 只里，收盘价中位数 10.22 元，≤25 元占 83.3%，而 EP 前 200 名里 189 只、股息率前 200 名里 182 只都在 25 元以下（便宜的票本来就便宜）。因此默认宇宙加一条 T-1 收盘价 ≤ 25 元，并逐决策汇报被这条剔除的候选数与欠配现金比例；若某个家族的头部被它砍掉超过 40%，改成 20 只篮子（单只 5,000 元）并写进 `hypothesis`，不要默默接受权重偏离。科创板 200 股起、北交所 100 股起，直接剔除并说明。
 
-默认 `inference_time=08:30`：当日日线、`daily_basic`、复权因子都不可见；成交只有次日 09:30 开盘价与 15:00 收盘价两个时点。
+默认 `inference_time=08:30`：当日日线、`daily_basic`、复权因子都不可见；成交只有决策日当天 09:30 开盘价与 15:00 收盘价两个时点（相对 T-1 数据日是次日；`execute_at` ≥ 决策时刻即可）。
 
 ## 「没有边际」的读法
 

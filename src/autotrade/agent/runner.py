@@ -185,6 +185,15 @@ _OWN_WORK_TOOLS = frozenset(
 # Fold, how many backtests have run so far.
 TIME_BUDGET_NOTICE_FRACTIONS = (0.5, 0.75, 0.9)
 _BACKTEST_TOOLS = ("smoke_backtest", "daily_backtest", "batch_validate")
+# The trace events that carry one tool outcome. The session_end tool_failures
+# scalar and the Agent Trace summary must count the same events, or an audit
+# that reads only the scalar undercounts a session whose children did the work.
+_TOOL_OUTCOME_EVENTS = frozenset({"tool_call", "subagent_tool"})
+
+
+def _failed_tool_event(payload: Mapping[str, object]) -> bool:
+    result = payload.get("result")
+    return isinstance(result, Mapping) and result.get("ok") is False
 
 
 class AgentInboxHook(Protocol):
@@ -396,8 +405,10 @@ class AgentSessionRunner:
         self._wrap_up_sent = False
         self._subagent_attempts = 0
         self._subagent_roles: set[str] = set()
-        # The parent's own failed tool calls, so a session_end-only audit
-        # sees them without walking every tool_call event.
+        # Failed tool calls of the session, the parent's and its children's, so
+        # a session_end-only audit sees the same total the trace summary counts
+        # without walking every event. Both kinds of event pass through
+        # ``_locked_event_sink``, which is where they are counted.
         self._tool_failures = 0
         self._subagent_jobs: list[_SubAgentJob] = []
         self._subagent_pool: ThreadPoolExecutor | None = None
@@ -683,8 +694,6 @@ class AgentSessionRunner:
                 else:
                     apply_point = INBOX_SAFE_AFTER_TOOLS_BEFORE_LLM
             for call, record in results:
-                if record.get("ok") is False:
-                    self._tool_failures += 1
                 messages.append(
                     ChatMessage(
                         "tool",
@@ -1968,6 +1977,8 @@ class AgentSessionRunner:
 
     def _locked_event_sink(self, event: str, payload: dict[str, object]) -> None:
         with self._event_lock:
+            if event in _TOOL_OUTCOME_EVENTS and _failed_tool_event(payload):
+                self._tool_failures += 1
             if self.event_sink is not None:
                 self.event_sink(event, payload)
 

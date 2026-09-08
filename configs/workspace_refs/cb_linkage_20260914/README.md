@@ -29,7 +29,7 @@
 ## 硬合同
 
 - 正式策略写在 `output/` 包内：入口固定为 `output/main.py` 的 `generate_orders(context)`，返回严格 JSON 订单数组；辅助模块可放在 `output/` 下并用绝对导入（如 `from lib.features import x`），每个 `.py` 都受同一套静态检查。
-- 正式 import 只允许：纯计算标准库（`__future__`、`collections`、`dataclasses`、`datetime`、`decimal`、`functools`、`itertools`、`math`、`statistics`、`typing`）、`numpy`、`pandas`、`scipy`、`sklearn`、`lightgbm`、`xgboost`、`statsmodels`、`torch`（本臂 gpu_count=0，策略容器无 GPU，只跑 CPU；以运行事实 `budgets.strategy_gpu_count` 为准）及其子模块，以及 `output/` 内自己的模块。qlib / joblib / pickle 不得 import；拟合结果用 NumPy 数组或 booster 的 `save_model(context.state_dir + ...)` 持久化，`torch.save` 被静态拒绝。
+- 正式 import 只允许：纯计算标准库（`__future__`、`collections`、`dataclasses`、`datetime`、`decimal`、`functools`、`itertools`、`math`、`statistics`、`typing`）、`numpy`、`pandas`、`scipy`、`sklearn`、`lightgbm`、`xgboost`、`statsmodels`、`torch`（本臂 gpu_count=0，策略容器无 GPU，只跑 CPU；以运行事实 `budgets.strategy_gpu_count` 为准）及其子模块，以及 `output/` 内自己的模块。qlib / joblib / pickle 不得 import；拟合结果用 NumPy 数组、booster 的 `save_model(context.state_dir + ...)` 或 `torch.save(obj, context.state_dir + ...)` 持久化；静态检查只拒绝绝对路径字面量与只读根写入，以 `output/README.md` 的合同为准。
 - 需要拟合的量放在 `fit(context)` 并写入 `context.state_dir`（一次 `fit` 有 `budgets.strategy_fit_timeout_seconds` 的独立预算，按模块级 `REFIT_PERIOD` 重训）；`generate_orders` 只读它，且受单次决策上限 `budgets.strategy_inference_timeout_seconds` 约束。`models/` 以只读 `context.models_dir` 挂载。
 - 沙箱无网络，不要抓网页。
 - 每一行必须 `available_at <= context.inference_at`；转债与公告用 `available_at`，不用 `trade_date`/`ann_date`/`call_date` 偷看。
@@ -41,7 +41,7 @@
 
 开发窗口按季度步进切成常规 Fold：每折的验证区间是截至本折季度的连续四个季度（滚动四季窗），相邻两折只相差一个季度，因此只有最后一个季度是父本没见过的新数据段，父本对照也只在这一段上真正是样本外；没有 Test 阶段，相邻两折之间跑一次元学习；本折输入窗是验证区间之前约 24 个月，精确窗口以运行事实为准。`cb_daily` 自 2018-01-02 起、`cb_call` 自 2019 年起基本完整，开发窗口 2022Q1–2025Q4 的输入窗全部覆盖，没有日历缺口；可用的完整 Validation 次数远多于家族数量（上限以本轮事实为准）。
 
-账户是 10 万元真实资金：佣金万一、最低 5 元/笔，过户费 0.1 bp，卖出印花税按成交日切换（切换前万十，切换后万五），方向滑点 5 bp。单只 7,000–10,000 元时最低佣金就是 5–7 bp/边，一次完整换仓的往返成本约 25–35 bp；5 日持有的家族一年要付几十次往返，超额必须显著大于成本才算数。100 股整手：股价 40 元的一手占单只预算四成以上，本包把 T-1 收盘 ≤ 40 元写成声明过滤；科创板 200 股起、北交所 100 股起，通常买不起一手，本池科创板占 8%、无北交所，默认剔除科创板并说明。默认 `inference_time=08:30`：当日日线、`daily_basic`、`adj_factor`、当日转债行情都不可见，只能用 T-1 及更早；成交只有次日 09:30 开盘价与 15:00 收盘价两个时点。
+账户是 10 万元真实资金：佣金万一、最低 5 元/笔，过户费 0.1 bp，卖出印花税按成交日切换（切换前万十，切换后万五），方向滑点 5 bp。单只 7,000–10,000 元时最低佣金就是 5–7 bp/边，一次完整换仓的往返成本约 25–35 bp；5 日持有的家族一年要付几十次往返，超额必须显著大于成本才算数。100 股整手：股价 40 元的一手占单只预算四成以上，本包把 T-1 收盘 ≤ 40 元写成声明过滤；科创板 200 股起、北交所 100 股起，通常买不起一手，本池科创板占 8%、无北交所，默认剔除科创板并说明。默认 `inference_time=08:30`：当日日线、`daily_basic`、`adj_factor`、当日转债行情都不可见，只能用 T-1 及更早；成交只有决策日当天 09:30 开盘价与 15:00 收盘价两个时点（相对 T-1 数据日是次日；`execute_at` ≥ 决策时刻即可）。
 
 ## 「没有边际」的读法
 

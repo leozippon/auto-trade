@@ -157,7 +157,21 @@ COPY src/autotrade/environment/__init__.py /opt/autotrade/autotrade/environment/
 COPY src/autotrade/environment/strategy.py /opt/autotrade/autotrade/environment/strategy.py
 COPY src/autotrade/environment/strategy_loader.py /opt/autotrade/autotrade/environment/strategy_loader.py
 COPY src/autotrade/environment/strategy_worker.py /opt/autotrade/autotrade/environment/strategy_worker.py
+COPY src/autotrade/environment/contract_fingerprint.py /opt/autotrade/autotrade/environment/contract_fingerprint.py
 COPY ops/docker/pyrightconfig.json /opt/autotrade/pyrightconfig.json
+
+# Build-time fingerprint of the Agent-facing strategy contract: the three
+# modules baked above plus the output template README the session mounts. The
+# host recomputes it from the same repository files before every strategy
+# container starts and refuses an image whose baked contract has drifted, so an
+# unrebuilt image can no longer enforce a rule the Agent was never told. The
+# sources are staged in repository layout only so both sides run the same
+# function, and are deleted again — the image keeps the digest, not the copies.
+COPY src/autotrade/environment/strategy.py src/autotrade/environment/strategy_loader.py src/autotrade/environment/strategy_worker.py /opt/autotrade/contract/src/autotrade/environment/
+COPY configs/agent_output_template/README.md /opt/autotrade/contract/configs/agent_output_template/README.md
+RUN python -c 'from pathlib import Path; from autotrade.environment.contract_fingerprint import IMAGE_FINGERPRINT_PATH, compute_contract_fingerprint; Path(IMAGE_FINGERPRINT_PATH).write_text(compute_contract_fingerprint("/opt/autotrade/contract"), encoding="utf-8")' \
+    && rm -rf /opt/autotrade/contract
+
 # COPY preserves the source mode (0600 on the host), so make the trusted modules
 # world-readable for the non-root `agent` user that runs them.
 RUN chmod -R a+rX /opt/autotrade

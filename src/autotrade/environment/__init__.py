@@ -23,6 +23,8 @@ single-purpose components:
 - ``broker.py``/``broker_core.py``: simulated Broker and its pure fill math.
 - ``sandbox.py``/``sandbox_images.py``/``executor.py``/``gpu.py``: sandbox
   lifecycle, derived images, command executors, GPU selection.
+- ``contract_fingerprint.py``: digest of the strategy-contract sources baked
+  into the sandbox image, checked before every strategy container start.
 - ``runtime.py``/``identity.py``/``artifacts.py``/``step_tree.py``:
   cross-cutting run primitives (paths/manifest/trace, agent-visible refs,
   artifact contracts, validated-step lineage).

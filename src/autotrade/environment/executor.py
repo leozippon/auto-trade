@@ -18,6 +18,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, Self, runtime_checkable
 
+from .contract_fingerprint import (
+    SandboxImageContractMismatch,
+    assert_image_contract_current,
+)
 from .gpu import device_request, select_gpus
 from .runtime import SandboxPaths, chmod_tree
 from .sandbox import DockerSandbox, SandboxConfig, SandboxLimits
@@ -1082,7 +1086,14 @@ def _select_strategy_gpus(limits: SandboxLimits) -> list[int]:
 
 
 def _require_local_image(config: SandboxConfig) -> str:
-    """Resolve Docker and reject absent local images without any pull attempt."""
+    """Resolve Docker and reject an absent or stale image without any pull attempt.
+
+    The image carries its own copy of the strategy loader, so an image built
+    before a contract change would enforce superseded rules against a strategy
+    written to the rules the session's mounted README states. That divergence
+    is invisible from inside the container, so it is checked here — once per
+    strategy worker start, before the worker exists.
+    """
 
     executable = shutil.which(config.docker_executable)
     if executable is None:
@@ -1104,6 +1115,12 @@ def _require_local_image(config: SandboxConfig) -> str:
             f"sandbox image is unavailable locally: {config.image}"
             + (f" ({detail})" if detail else "")
         )
+    try:
+        assert_image_contract_current(config.image, docker_executable=executable)
+    except SandboxImageContractMismatch as exc:
+        raise StrategyExecutionError(str(exc)) from exc
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise StrategyExecutionError(f"Docker is unavailable: {exc}") from exc
     return executable
 
 

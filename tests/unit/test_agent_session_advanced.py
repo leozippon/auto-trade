@@ -457,8 +457,8 @@ def test_fold_session_tracks_calls_and_finish_value(tmp_path: Path):
 
 
 def test_session_end_counts_the_parents_failed_tool_calls(tmp_path: Path):
-    """A summary-only audit reads ``session_end``; the parent's own failed
-    tool calls are counted there, and the finish payload rides along."""
+    """A summary-only audit reads ``session_end``; a failed tool call is
+    counted there, and the finish payload rides along."""
     finish, node_id = finish_fold_tool(tmp_path)
     events: list[tuple[str, dict]] = []
     llm = ScriptedLLM(
@@ -488,6 +488,77 @@ def test_session_end_counts_the_parents_failed_tool_calls(tmp_path: Path):
     end = [payload for event, payload in events if event == "session_end"][-1]
     assert end["status"] == "finished" and end["tool_failures"] == 1
     assert end["finish"]["early_stop_reason"] == "H2 untestable here"
+
+
+def test_session_end_tool_failures_include_the_childrens(tmp_path: Path):
+    """``session_end`` must agree with the trace it summarizes.
+
+    Almost every tool call of a long Fold is made by a sub-agent, so counting
+    only the parent's made the scalar report a fraction of the failures the
+    Agent Trace summary counts from the same events, and a Meta session reading
+    the two side by side saw them contradict each other.
+    """
+
+    workspace = tmp_path / "agent"
+    (workspace / "output").mkdir(parents=True)
+    (workspace / "output" / "README.md").write_text("contract\n", encoding="utf-8")
+    finish, node_id = finish_fold_tool(tmp_path)
+    events: list[tuple[str, dict]] = []
+    subagent = SubAgentEngine(
+        llm=ScriptedLLM(
+            [
+                ProviderResponse(
+                    tool_calls=(
+                        ToolCall(
+                            "w",
+                            "write_file",
+                            {"path": "output/README.md", "content": "tamper"},
+                        ),
+                    )
+                ),
+                ProviderResponse(content="写入被拒绝，README 是只读合同。"),
+            ]
+        ),
+        tools=ToolRegistry([WriteFileTool(SafeWorkspace(workspace))]),
+    )
+    runner = AgentSessionRunner(
+        llm=ScriptedLLM(
+            [
+                ProviderResponse(
+                    tool_calls=(
+                        ToolCall(
+                            "e1",
+                            "agent",
+                            {"agent": "developer", "task": "rewrite the contract"},
+                        ),
+                    )
+                ),
+                ProviderResponse(content="等子代理返回。"),
+                ProviderResponse(
+                    tool_calls=(ToolCall("bad", "finish_fold", {"node_id": "missing"}),)
+                ),
+                ProviderResponse(
+                    tool_calls=(ToolCall("f", "finish_fold", {"node_id": node_id}),)
+                ),
+            ]
+        ),
+        tools=ToolRegistry([finish]),
+        system_prompt="daily JSON only",
+        config=AgentSessionConfig(max_llm_calls=5),
+        subagent=subagent,
+        event_sink=lambda event, payload: events.append((event, payload)),
+    )
+    assert runner.run("delegate, then finish").status == "finished"
+    failed = [
+        event
+        for event, payload in events
+        if event in {"tool_call", "subagent_tool"}
+        and payload.get("result", {}).get("ok") is False
+    ]
+    # One refused write by the child, one bad node id by the parent.
+    assert sorted(failed) == ["subagent_tool", "tool_call"]
+    end = [payload for event, payload in events if event == "session_end"][-1]
+    assert end["tool_failures"] == len(failed)
 
 
 def test_fold_session_nudges_text_only_turn_then_requires_finish(tmp_path: Path):

@@ -16,6 +16,7 @@ import json
 import shutil
 import stat
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -447,6 +448,25 @@ def restore_working_artifacts_writable(
         _assert_working_tree_permissions(models)
 
 
+def readonly_baseline(output_root: str | Path) -> dict[str, str]:
+    """Digest the read-only artifact files a workspace was just seeded with.
+
+    The Agent may not edit these files, so a session must be held to the bytes
+    it received. An inherited artifact seeds them from a frozen parent, but an
+    initial artifact seeds them from the live repository template, which
+    maintainers edit while sessions run. Comparing a running session's working
+    copy against that moving file fails it for a change it could not have made,
+    so the baseline is pinned here, once, at seeding time.
+    """
+
+    root = Path(output_root)
+    return {
+        relpath: _file_digest(root / relpath)
+        for relpath in sorted(READONLY_FILES)
+        if (root / relpath).is_file()
+    }
+
+
 @dataclass(frozen=True)
 class ModificationDelta:
     changed_files: tuple[str, ...]
@@ -454,6 +474,8 @@ class ModificationDelta:
     code_diff_lines: int
     total_files: int
     total_bytes: int
+    # One entry per read-only file that no longer matches its baseline, each
+    # naming the file and both digests so the mismatch can be diagnosed.
     readonly_violations: tuple[str, ...]
 
     def to_record(self) -> dict[str, object]:
@@ -483,8 +505,20 @@ class ModelArtifactDelta:
         }
 
 
-def modification_delta(parent_root: str | Path, work_root: str | Path) -> ModificationDelta:
-    """Deterministic file and line counts for ``output`` changes."""
+def modification_delta(
+    parent_root: str | Path,
+    work_root: str | Path,
+    *,
+    readonly_baseline: Mapping[str, str] | None = None,
+) -> ModificationDelta:
+    """Deterministic file and line counts for ``output`` changes.
+
+    ``readonly_baseline`` holds the read-only files to the digests the session
+    was seeded with (see the function of that name) instead of to ``parent_root``,
+    which is the live template for an initial artifact and therefore not a fixed
+    baseline. Omit it only where the parent tree is itself immutable, such as
+    comparing a frozen artifact with its own snapshot.
+    """
     parent_root = Path(parent_root)
     work_root = Path(work_root)
     parent_files = _artifact_files(parent_root) if parent_root.is_dir() and any(parent_root.iterdir()) else set()
@@ -494,17 +528,34 @@ def modification_delta(parent_root: str | Path, work_root: str | Path) -> Modifi
     code_diff_lines = 0
     readonly_violations: list[str] = []
     for relpath in sorted(parent_files | work_files):
+        if readonly_baseline is not None and relpath in READONLY_FILES:
+            # Judged against the seeded baseline below, not against the parent.
+            continue
         parent_text = _read_text(parent_root / relpath) if relpath in parent_files else None
         work_text = _read_text(work_root / relpath) if relpath in work_files else None
         if parent_text == work_text:
             continue
         changed.append(relpath)
         if relpath in READONLY_FILES:
-            readonly_violations.append(relpath)
+            readonly_violations.append(
+                _readonly_violation(
+                    relpath,
+                    _optional_digest(parent_root / relpath),
+                    _optional_digest(work_root / relpath),
+                )
+            )
         line_delta = _changed_line_count(parent_text or "", work_text or "")
         diff_lines += line_delta
         if relpath.endswith(".py"):
             code_diff_lines += line_delta
+    if readonly_baseline is not None:
+        for relpath in sorted(READONLY_FILES):
+            seeded = readonly_baseline.get(relpath)
+            current = _optional_digest(work_root / relpath)
+            if current != seeded:
+                readonly_violations.append(
+                    _readonly_violation(relpath, seeded, current)
+                )
     return ModificationDelta(
         changed_files=tuple(changed),
         diff_lines=diff_lines,
@@ -557,7 +608,9 @@ class ModificationConstraints:
     ) -> tuple[bool, list[str]]:
         reasons: list[str] = []
         if delta.readonly_violations:
-            reasons.append(f"readonly files modified: {list(delta.readonly_violations)}")
+            reasons.append(
+                "readonly files modified: " + "; ".join(delta.readonly_violations)
+            )
         if delta.total_files > self.max_strategy_files:
             reasons.append(f"strategy files {delta.total_files} > {self.max_strategy_files}")
         if delta.total_bytes > self.max_strategy_bytes:
@@ -762,6 +815,27 @@ def _changed_line_count(before: str, after: str) -> int:
 
 def _read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8", errors="replace")
+
+
+def _file_digest(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _optional_digest(path: Path) -> str | None:
+    return _file_digest(path) if path.is_file() else None
+
+
+def _readonly_violation(relpath: str, seeded: str | None, current: str | None) -> str:
+    """One read-only file's violation, stated so it can be diagnosed."""
+
+    def label(digest: str | None) -> str:
+        return f"sha256:{digest[:12]}" if digest else "absent"
+
+    return f"{relpath} (seeded {label(seeded)}, now {label(current)})"
 
 
 def _files_equal(left: Path, right: Path, *, chunk_size: int = 1024 * 1024) -> bool:

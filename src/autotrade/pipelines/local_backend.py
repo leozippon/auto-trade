@@ -28,6 +28,7 @@ from autotrade.environment.artifacts import (
     copy_artifact,
     copy_artifact_snapshot,
     copy_model_artifacts,
+    readonly_baseline,
     restore_working_artifacts_writable,
 )
 from autotrade.environment.data.summary import HOST_PATH_RE, write_agent_data_summary
@@ -2551,6 +2552,12 @@ class LLMFoldDeveloper:
         copy_artifact(source, output_dir)
         copy_model_artifacts(source_models, models_dir)
         restore_working_artifacts_writable(output_dir, models_dir)
+        # Pin the read-only contract files to what this session actually
+        # received, and record it for the audit: an initial artifact seeds them
+        # from the live repository template, and editing that template must not
+        # retroactively fail a session already running against the old bytes.
+        seeded_readonly = readonly_baseline(output_dir)
+        manifest.update(readonly_baseline=seeded_readonly)
         inputs_dir.mkdir()
         # Mount before the index is written: the curated entries and this
         # experiment's own skills reach the Agent through the same index.
@@ -2648,6 +2655,7 @@ class LLMFoldDeveloper:
                 models_dir=models_dir,
                 parent_models_dir=source_models,
                 constraints=request.modification_constraints,
+                readonly_baseline=seeded_readonly,
             )
             time_budget = InferenceTimeBudget(duration_seconds=request.deadline_seconds)
             shared_budget = SessionCallBudget(
@@ -2734,6 +2742,7 @@ class LLMFoldDeveloper:
                         models_dir=models_dir,
                         parent_models_dir=source_models,
                         constraints=request.modification_constraints,
+                        readonly_baseline=seeded_readonly,
                     ),
                     parent_main_py=parent_main_py,
                 ),
@@ -3253,6 +3262,9 @@ class LLMMetaLearner:
         copy_artifact(parent, output_dir)
         copy_model_artifacts(parent_models, models_dir)
         restore_working_artifacts_writable(output_dir, models_dir)
+        # Same rule as a Fold session: the read-only contract files are judged
+        # against the bytes seeded here, never against a template edited since.
+        seeded_readonly = readonly_baseline(output_dir)
         previous_prior = str(facts.get("previous_prior") or "").strip()
         # PRIOR.md is the sole writable Meta direction/memory channel. Seed the
         # current published body before the Agent starts; the first session gets
@@ -3363,6 +3375,7 @@ class LLMMetaLearner:
                 },
                 "parent_strategy_artifact_id": parent_id or None,
                 "template_ref": None if parent_id else "agent_output_template",
+                "readonly_baseline": seeded_readonly,
                 "is_initial_artifact": not parent_id,
                 # Agent-facing manifest: sandbox mount paths, never host paths.
                 "development_inputs": {
@@ -3462,6 +3475,7 @@ class LLMMetaLearner:
             models_dir=models_dir,
             parent_models_dir=parent_models,
             constraints=self.regularization_constraints,
+            readonly_baseline=seeded_readonly,
         )
         tools: list[Tool] = [
             ReadFileTool(search_roots),

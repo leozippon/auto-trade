@@ -50,12 +50,19 @@ class ModificationCheckTool:
         models_dir: str | Path | None = None,
         parent_models_dir: str | Path | None = None,
         constraints: ModificationConstraints | None = None,
+        readonly_baseline: Mapping[str, str] | None = None,
     ) -> None:
         self.output_dir = Path(output_dir)
         self.parent_dir = Path(parent_dir) if parent_dir is not None else None
         self.models_dir = Path(models_dir) if models_dir is not None else None
         self.parent_models_dir = (
             Path(parent_models_dir) if parent_models_dir is not None else None
+        )
+        # The read-only files as this session was seeded, not as the parent
+        # directory reads now: an initial artifact's parent IS the live
+        # repository template, and editing it must not fail a running session.
+        self.readonly_baseline = (
+            dict(readonly_baseline) if readonly_baseline is not None else None
         )
         # The researcher-configured limits, not literals: the same constraint
         # set the run manifest publishes is the one enforced here.
@@ -81,7 +88,11 @@ class ModificationCheckTool:
             raise ToolError(str(exc)) from exc
         _reject_flat_asof_reads(files, self.output_dir)
         try:
-            delta = modification_delta(self.parent_dir or self.output_dir, self.output_dir)
+            delta = modification_delta(
+                self.parent_dir or self.output_dir,
+                self.output_dir,
+                readonly_baseline=self.readonly_baseline,
+            )
             model_delta = (
                 model_artifact_delta(
                     self.parent_models_dir or self.models_dir, self.models_dir

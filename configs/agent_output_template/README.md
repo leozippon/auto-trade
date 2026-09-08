@@ -69,7 +69,7 @@ The strategy receives no Broker, Shell, experiment controls or previous results.
 
 ## Reading PIT data
 
-`context.bars` is an evaluation-interval market surface, not the complete strategy input history. For a long daily lookback, use the PIT `daily` domain under `context.asof_dir`; it contains the frozen input history plus rows that have become visible by the current inference time. Read only confirmed columns and bound the strategy's date window after inspecting the current schema. Additional configured domains may use the same context-rooted pandas access.
+`context.bars` is an evaluation-interval market surface, not the complete strategy input history. For a long daily lookback, use the PIT `daily` domain under `context.asof_dir`; it contains the frozen input history plus rows that have become visible by the current inference time. The parts never repeat a row: the frozen first part holds everything available at or before the decision time and later parts only rows published strictly after it, so reading the directory needs no deduplication. Read only confirmed columns and bound the strategy's date window after inspecting the current schema. Additional configured domains may use the same context-rooted pandas access.
 
 The two path strings have **different layouts**, and mixing them up is the single most common way a backtest dies on its first decision:
 

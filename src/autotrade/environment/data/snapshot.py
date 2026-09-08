@@ -933,7 +933,9 @@ class SnapshotBuilder:
         the period, 23:59:59). Rows published between that anchor and calendar
         midnight of the period start — weekend/holiday news, events, macro —
         belong to the replay's first pre-open refresh, so the availability floor
-        uses the anchor, not period-start midnight."""
+        is the instant after the anchor, not period-start midnight. Rows stamped
+        at the anchor itself stay out: the decision snapshot already carries them
+        and the Timeview unions that snapshot with this slot."""
         with self._raw_lake_guard() as raw_generation:
             manifest = self._build_replay_slot_impl(
                 start_date, end_date, output_dir, label, config, raw_generation, available_from
@@ -959,8 +961,12 @@ class SnapshotBuilder:
         anchor = pd.Timestamp(available_from) if available_from is not None else None
         if anchor is not None and anchor.tzinfo is None:
             anchor = anchor.tz_localize(CN_TZ)
-        # Availability floor for the published-inside-the-period domains.
-        window_floor = anchor if anchor is not None and anchor < period_start else period_start
+        # Availability floor for the published-inside-the-period domains:
+        # strictly after the anchor. The decision snapshot already carries
+        # every row with available_at <= anchor and the Timeview unions it
+        # with this slot, so an inclusive floor published every anchor-stamped
+        # row twice.
+        window_floor = anchor + pd.Timedelta(nanoseconds=1) if anchor is not None else period_start
         domains: dict[str, dict[str, object]] = {}
         profiles: dict[str, dict[str, object]] = {}
         total_started = time.perf_counter()

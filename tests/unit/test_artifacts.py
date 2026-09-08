@@ -17,6 +17,7 @@ from autotrade.environment.artifacts import (
     modification_delta,
     model_artifact_delta,
     new_revision_id,
+    readonly_baseline,
     restore_frozen_artifact_trees,
 )
 
@@ -212,6 +213,54 @@ def generate_orders(context):
             allowed, reasons = ModificationConstraints().evaluate(delta)
             self.assertFalse(allowed)
             self.assertTrue(any("readonly" in reason for reason in reasons))
+
+    def test_editing_the_host_template_does_not_fail_a_seeded_session(self):
+        """The read-only baseline is what the session was seeded with.
+
+        An initial artifact's parent IS the live repository template, which a
+        maintainer may edit while the session runs. The working copy still
+        holds the bytes it was given, so the check must pass; only the seeded
+        digest, never the template's current one, decides.
+        """
+
+        with tempfile.TemporaryDirectory() as tmp:
+            template = write_artifact(Path(tmp) / "template")
+            work = Path(tmp) / "work"
+            copy_artifact(template, work)
+            seeded = readonly_baseline(work)
+
+            (template / "README.md").write_text(
+                "readonly, with a new contract section", encoding="utf-8"
+            )
+            (work / "main.py").write_text(VALID_MAIN + "\n# new condition\n", encoding="utf-8")
+
+            delta = modification_delta(template, work, readonly_baseline=seeded)
+            self.assertEqual(ModificationConstraints().evaluate(delta), (True, []))
+            # The moved template is not the Agent's change either.
+            self.assertEqual(set(delta.changed_files), {"main.py"})
+
+    def test_the_seeded_baseline_still_rejects_an_edited_or_deleted_readonly_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            template = write_artifact(Path(tmp) / "template")
+            work = Path(tmp) / "work"
+            copy_artifact(template, work)
+            seeded = readonly_baseline(work)
+
+            (work / "README.md").write_text("rewritten by the Agent", encoding="utf-8")
+            delta = modification_delta(template, work, readonly_baseline=seeded)
+            allowed, reasons = ModificationConstraints().evaluate(delta)
+            self.assertFalse(allowed)
+            # The message names the file and both digests, so a mismatch can be
+            # diagnosed without re-deriving it from the trees.
+            self.assertIn("README.md", reasons[0])
+            self.assertIn(f"seeded sha256:{seeded['README.md'][:12]}", reasons[0])
+            self.assertIn("now sha256:", reasons[0])
+
+            (work / "README.md").unlink()
+            delta = modification_delta(template, work, readonly_baseline=seeded)
+            allowed, reasons = ModificationConstraints().evaluate(delta)
+            self.assertFalse(allowed)
+            self.assertIn("now absent", reasons[0])
 
     def test_a_large_rewrite_is_allowed_and_only_size_caps_reject(self):
         """How much one Step rewrites is research judgment, not a limit.
