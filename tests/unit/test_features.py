@@ -16,6 +16,7 @@ from autotrade.environment.data import (
     audit_fundamental_events,
     month_aligned_replace_window,
 )
+from autotrade.environment.data.fundamental_events import read_fundamental_events
 from autotrade.environment.data.auction import (
     AuctionCorrectionConfig,
     apply_open_auction_correction,
@@ -214,6 +215,115 @@ class FundamentalEventsBuilderTest(unittest.TestCase):
                 FundamentalEventsConfig(start_date="20200101", end_date="20200131", datasets=("income_vip", "dividend", "fina_mainbz_vip")),
             )
             self.assertEqual(report["status"], "warning")
+
+    def test_event_stamps_and_business_keys_are_byte_exact_per_rule(self):
+        """Every availability rule and business key, pinned to the exact bytes.
+
+        The build is frame-level (statement history is millions of rows wide by
+        ~100 vendor columns); this fixture covers each rule branch, including the
+        fallback columns, the joined-statement fallback and its `max` over two
+        announcements, and the rows that stay invisible for want of any date.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = Path(tmp) / "raw"
+            (raw / "income_vip").mkdir(parents=True)
+            (raw / "dividend").mkdir(parents=True)
+            (raw / "fina_mainbz_vip").mkdir(parents=True)
+            (raw / "disclosure_date").mkdir(parents=True)
+            income = [
+                {"ts_code": "000001.SZ", "ann_date": "20200103", "f_ann_date": "20200102",
+                 "end_date": "20191231", "report_type": "1", "comp_type": "1", "end_type": "4"},
+                {"ts_code": "000001.SZ", "ann_date": "20200105", "f_ann_date": "",
+                 "end_date": "20191231", "report_type": "2", "comp_type": "1", "end_type": "4"},
+            ]
+            pd.DataFrame(income).to_parquet(raw / "income_vip" / "period=20191231.parquet", index=False)
+            dividend = [
+                {"ts_code": "000001.SZ", "end_date": "20191231", "ann_date": "", "imp_ann_date": "20200104",
+                 "div_proc": "实施", "record_date": "20200109", "ex_date": "20200110", "pay_date": "20200111"},
+                {"ts_code": "000002.SZ", "end_date": "20191231", "ann_date": "20200106", "imp_ann_date": "",
+                 "div_proc": "预案", "record_date": "", "ex_date": "", "pay_date": ""},
+                {"ts_code": "000003.SZ", "end_date": "20191231", "ann_date": "", "imp_ann_date": "",
+                 "div_proc": "预案", "record_date": "", "ex_date": "", "pay_date": ""},
+            ]
+            pd.DataFrame(dividend).to_parquet(raw / "dividend" / "ts_code=000001.SZ.parquet", index=False)
+            mainbz = [
+                # A quoted, non-ASCII business item: the key is JSON, so quoting
+                # stays the encoder's business however the column is assembled.
+                {"ts_code": "000001.SZ", "end_date": "20191231", "ann_date": "",
+                 "bz_item": '产品"A"', "bz_code": "A", "curr_type": "CNY"},
+                {"ts_code": "000009.SZ", "end_date": "20191231", "ann_date": "",
+                 "bz_item": "产品B", "bz_code": "B", "curr_type": "CNY"},
+            ]
+            pd.DataFrame(mainbz).to_parquet(raw / "fina_mainbz_vip" / "ts_code=000001.SZ.parquet", index=False)
+            disclosure = [
+                {"ts_code": "000001.SZ", "end_date": "20191231", "ann_date": "", "pre_date": "20200107",
+                 "actual_date": ""},
+            ]
+            pd.DataFrame(disclosure).to_parquet(raw / "disclosure_date" / "period=20191231.parquet", index=False)
+
+            events = FundamentalEventsBuilder(raw).build(FundamentalEventsConfig(
+                start_date="20200101",
+                end_date="20200131",
+                datasets=("income_vip", "dividend", "fina_mainbz_vip", "disclosure_date"),
+            ))
+
+            def key(dataset: str, values: dict[str, str]) -> str:
+                return json.dumps(
+                    {"dataset": dataset, "values": values},
+                    ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+                )
+
+            expected = [
+                ("income_vip", "2020-01-02T18:00:00+08:00", "source:f_ann_date_or_ann_date",
+                 key("income_vip", {"ts_code": "000001.SZ", "ann_date": "20200103", "f_ann_date": "20200102",
+                                    "end_date": "20191231", "report_type": "1", "comp_type": "1", "end_type": "4"})),
+                ("dividend", "2020-01-04T18:00:00+08:00", "source:imp_ann_date_or_ann_date",
+                 key("dividend", {"ts_code": "000001.SZ", "end_date": "20191231", "ann_date": "",
+                                  "div_proc": "实施", "record_date": "20200109", "ex_date": "20200110",
+                                  "pay_date": "20200111"})),
+                # The join takes the LATEST of the two income announcements.
+                ("fina_mainbz_vip", "2020-01-05T18:00:00+08:00", "fallback_joined_statement_available_at",
+                 key("fina_mainbz_vip", {"ts_code": "000001.SZ", "end_date": "20191231", "bz_item": '产品"A"',
+                                         "bz_code": "A", "curr_type": "CNY"})),
+                ("income_vip", "2020-01-05T18:00:00+08:00", "source:f_ann_date_or_ann_date:ann_date",
+                 key("income_vip", {"ts_code": "000001.SZ", "ann_date": "20200105", "f_ann_date": "",
+                                    "end_date": "20191231", "report_type": "2", "comp_type": "1", "end_type": "4"})),
+                ("dividend", "2020-01-06T18:00:00+08:00", "source:imp_ann_date_or_ann_date:ann_date",
+                 key("dividend", {"ts_code": "000002.SZ", "end_date": "20191231", "ann_date": "20200106",
+                                  "div_proc": "预案", "record_date": "", "ex_date": "", "pay_date": ""})),
+                ("disclosure_date", "2020-01-07T18:00:00+08:00", "source:ann_or_conservative_disclosure_date:pre_date",
+                 key("disclosure_date", {"ts_code": "000001.SZ", "end_date": "20191231", "ann_date": "",
+                                         "pre_date": "20200107", "actual_date": ""})),
+            ]
+            self.assertEqual(
+                list(zip(events["dataset"], events["available_at"], events["available_at_rule"], events["business_key"])),
+                expected,
+            )
+            self.assertTrue((events["available_month"] == "202001").all())
+            # No announcement date anywhere: the row never becomes visible.
+            self.assertNotIn("000003.SZ", set(events["ts_code"]))
+            self.assertNotIn("000009.SZ", set(events["ts_code"]))
+
+    def test_unparseable_available_at_is_dropped_and_counted(self):
+        """A corrupt PIT stamp is hidden (never leaked) but never silent."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "fundamental_events"
+            (root / "income_vip").mkdir(parents=True)
+            pd.DataFrame([
+                {"dataset": "income_vip", "ts_code": "000001.SZ", "available_at": "2020-01-02T18:00:00+08:00",
+                 "available_at_rule": "source:f_ann_date_or_ann_date", "available_month": "202001",
+                 "business_key": "good", "source_path": "x", "source_write_id": "w", "source_row_id": 0},
+                {"dataset": "income_vip", "ts_code": "000002.SZ", "available_at": "not-a-timestamp",
+                 "available_at_rule": "source:f_ann_date_or_ann_date", "available_month": "202001",
+                 "business_key": "corrupt", "source_path": "x", "source_write_id": "w", "source_row_id": 1},
+            ]).to_parquet(root / "income_vip" / "available_month=202001.parquet", index=False)
+
+            counts: dict[str, int] = {}
+            events = read_fundamental_events(
+                root, "2020-02-01T09:25:00+08:00", datasets=("income_vip",), nat_counts=counts,
+            )
+            self.assertEqual(events["business_key"].tolist(), ["good"])
+            self.assertEqual(counts, {"income_vip": 1})
 
     def test_corrupt_sidecar_raises_instead_of_blanking_source_write_id(self):
         """A present-but-unparseable .meta.json is torn-write evidence; the
@@ -967,11 +1077,12 @@ class UnitRegistryProjectionTest(unittest.TestCase):
         self.assertIn("text_library/", payload["coverage"])
 
     def test_is_suspended_record_states_what_the_flag_marks(self):
-        """`daily.is_suspended` is set from the presence of a suspend_d row, so
-        it marks resumption days and intraday halts — never a full-day
-        suspension, which has no daily bar at all. A Fold pre-registered four
-        candidates on "consecutive suspended bars >= 5", an event set that is
-        empty by construction. The Agent-visible record must carry that."""
+        """`daily.is_suspended` is set from a suspend_d halt row (suspend_type
+        "S"), so on a daily bar it marks an intraday halt only — never a
+        full-day suspension, which has no daily bar at all. A Fold
+        pre-registered four candidates on "consecutive suspended bars >= 5", an
+        event set that is empty by construction. The Agent-visible record must
+        carry that."""
 
         from autotrade.environment.data.summary import write_agent_data_summary
         from autotrade.environment.data.units import resolve_field

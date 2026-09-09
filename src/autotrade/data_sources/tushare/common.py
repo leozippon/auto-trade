@@ -15,6 +15,7 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Iterable, Sequence
+from urllib.parse import quote
 import numpy as np
 import pandas as pd
 
@@ -2756,11 +2757,21 @@ def as_datetime_window(value: str, *, end: bool = False) -> str:
     return f"{value[:4]}-{value[4:6]}-{value[6:8]} {suffix}"
 
 def safe_partition_value(value: str) -> str:
-    cleaned = re.sub(r"[^0-9A-Za-z_.-]+", "_", str(value).strip())
-    if cleaned.strip("_"):
-        return cleaned.strip("_")
-    encoded = str(value).encode("utf-8").hex()
-    return encoded[:96] or "empty"
+    """The single authority for raw-lake partition directory names.
+
+    Percent-encoding is reversible and injective: distinct vendor values map to
+    distinct directories and every directory decodes back to its value, so the
+    downloader, the skip check and the audit's expected-path builder all resolve
+    the same tree. It is also what the lake already holds for the Chinese board
+    labels (`market=%E7%83%AD%E8%82%A1`, `tag=%E6%B6%A8%E5%81%9C`, ...).
+
+    ASCII values that need no escaping (ts_code, exchange, news src, `all`) keep
+    their plain names, so only the CJK partitions are affected by this rule.
+    """
+    text = str(value).strip()
+    if not text:
+        return "empty"
+    return quote(text, safe="")
 
 # A source timestamp is a credible publication time only when it sits near the
 # announcement/report date. Backfilled history carries collection timestamps

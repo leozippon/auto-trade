@@ -96,6 +96,9 @@ LEGACY_STATUS_REPORT_TYPES: dict[str, str] = {
 }
 
 # Datasets forming the board-trading (打板) research domain in the raw lake.
+# This is the DOWNLOAD and AUDIT scope, not a selectability list: `hm_list` is
+# still fetched and audited even though it can never enter a snapshot (it has no
+# historical PIT stamp), so the snapshot's board gate simply never matches it.
 BOARD_TRADING_DATASETS = [
     "kpl_list",
     "kpl_concept_cons",
@@ -347,7 +350,6 @@ EVENT_DATASET_REFRESH_NODES: dict[str, tuple[str, ...]] = {
     "top10_floatholders": ("cn_nightly_disclosure_full",),
     "stk_holdernumber": ("cn_nightly_disclosure_full",),
     "stk_holdertrade": ("cn_nightly_disclosure_full",),
-    "repurchase": ("cn_nightly_disclosure_full",),
     # The sell-side forecast slice is the text dataset of the same name read
     # by the events domain: its rows land with the natural-day text job, so
     # the numbers and the title of one report become visible together.

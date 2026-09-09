@@ -15,6 +15,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+from urllib.parse import unquote
 
 import pandas as pd
 from pyarrow.lib import ArrowInvalid
@@ -5262,6 +5263,73 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             # The reference table must re-pull on every run, not skip once downloaded.
             self.assertEqual(download.download_board_trading(args), 0)
         self.assertEqual(client.calls.count("hm_list"), 2)
+
+    def test_partition_names_are_reversible_and_never_truncate(self):
+        """`safe_partition_value` is the single raw-lake naming authority.
+
+        The pre-2026-09 sanitiser truncated `A股市场` to `A` and hex-digested
+        all-CJK values, so post-2026-08-14 board downloads landed in a second
+        tree that `should_skip_existing_partition` and the audit's expected-path
+        builder could not see. Percent-encoding must stay reversible (the name
+        decodes back to the vendor value) and injective (no two values share a
+        directory), and must keep reproducing the names the lake already holds.
+        """
+        values = [
+            *common.BOARD_KPL_TAGS,
+            *common.BOARD_THS_LIMIT_TYPES,
+            *common.BOARD_THS_HOT_MARKETS,
+            *common.BOARD_DC_HOT_MARKETS,
+            *common.BOARD_DC_HOT_TYPES,
+            *common.NEWS_SOURCES,
+            "000001.SH",
+            "CFFEX",
+            "all",
+        ]
+        names = [common.safe_partition_value(value) for value in values]
+        self.assertEqual(len(set(names)), len(set(values)))
+        for value, name in zip(values, names):
+            self.assertEqual(unquote(name), value)
+            self.assertNotIn("/", name)
+        # Pinned against the history on disk (data docs §4).
+        self.assertEqual(common.safe_partition_value("热股"), "%E7%83%AD%E8%82%A1")
+        self.assertEqual(common.safe_partition_value("A股市场"), "A%E8%82%A1%E5%B8%82%E5%9C%BA")
+        self.assertEqual(common.safe_partition_value("涨停"), "%E6%B6%A8%E5%81%9C")
+        # ASCII values that need no escaping keep their plain directory name.
+        self.assertEqual(common.safe_partition_value("000001.SH"), "000001.SH")
+        self.assertEqual(common.safe_partition_value("  "), "empty")
+
+    def test_cjk_partitioned_board_rerun_reuses_the_same_tree(self):
+        """A second unforced run must skip, not fetch into a parallel tree."""
+        class CountingBoardClient(BoardClient):
+            def __init__(self):
+                self.calls = []
+
+            def query(self, api_name, params=None, fields="", retries=5):
+                self.calls.append(api_name)
+                return super().query(api_name, params, fields, retries)
+
+        self._write_trade_cal("20231101")
+        args = argparse.Namespace(
+            raw_dir=str(self.raw_dir),
+            start_date="20231101",
+            end_date="20231101",
+            datasets=["ths_hot", "kpl_list"],
+            force=False,
+            page_limit=None,
+            min_interval_seconds=0,
+            timeout_seconds=1,
+            kpl_tag=["涨停"],
+            ths_hot_market=["热股"],
+            hot_is_new=["N"],
+        )
+        client = CountingBoardClient()
+        with patch.object(download, "load_token", return_value="token"), patch.object(download, "TuShareClient", return_value=client):
+            self.assertEqual(download.download_board_trading(args), 0)
+            self.assertEqual(download.download_board_trading(args), 0)
+        self.assertEqual(client.calls.count("ths_hot"), 1)
+        self.assertEqual(client.calls.count("kpl_list"), 1)
+        self.assertEqual([path.name for path in sorted((self.raw_dir / "ths_hot").iterdir())], ["market=%E7%83%AD%E8%82%A1"])
+        self.assertEqual([path.name for path in sorted((self.raw_dir / "kpl_list").iterdir())], ["tag=%E6%B6%A8%E5%81%9C"])
 
     def test_board_trading_skips_non_trading_window(self):
         self._write_trade_cal("20260530", is_open="0")

@@ -257,6 +257,20 @@ class RefreshNodeDriftGuardTest(unittest.TestCase):
             datetime(2022, 1, 6, 3, 5, tzinfo=CN_TZ),
         )
 
+    def test_dataset_overrides_only_name_selectable_datasets(self) -> None:
+        """An override for a dataset no snapshot can select is never consulted.
+
+        `repurchase` carried one for months while sitting on the never-selectable
+        list, so the mapping silently drifted away from the datasets it governs.
+        """
+        for domain, mapping in (
+            ("events", EVENT_DATASET_REFRESH_NODES),
+            ("macro", MACRO_DATASET_REFRESH_NODES),
+            ("text", TEXT_DATASET_REFRESH_NODES),
+        ):
+            unreachable = sorted(set(mapping) - set(SELECTABLE_DATASETS[domain]))
+            self.assertEqual(unreachable, [], f"{domain} refresh-node overrides for unselectable datasets")
+
     def test_dataset_overrides_reference_real_nodes(self) -> None:
         for mapping in (
             DOMAIN_REFRESH_NODES,

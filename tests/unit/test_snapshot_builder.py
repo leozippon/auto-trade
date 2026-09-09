@@ -1204,6 +1204,54 @@ class SnapshotBuilderTest(unittest.TestCase):
             self.assertEqual(manifest["window_config"]["macro_months"], 2)
             self.assertEqual(manifest["domain_windows"]["macro"]["window_months"], 2)
 
+    def test_unparseable_fundamental_stamps_are_dropped_and_counted(self):
+        # Same contract as the raw-window reader: a stamp that will not parse
+        # fails both PIT bounds and is hidden, but the manifest names it under
+        # the one key so an ingestion defect cannot pass as an empty window.
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = Path(tmp) / "raw"
+            events_root = Path(tmp) / "fund_events"
+            build_raw(raw)
+            build_fundamental_events(events_root)
+            status_path = Path(tmp) / "fundamental_events_status.json"
+            write_fundamental_status(status_path)
+            config = SnapshotConfig(
+                window_months=2,
+                events_datasets=(),
+                macro_datasets=(),
+                text_datasets=(),
+                fundamental_datasets=("income_vip",),
+                include_intraday=False,
+                include_industry=False,
+            )
+
+            clean = SnapshotBuilder(raw, events_root, status_path).build_decision_snapshot(
+                DECISION, Path(tmp) / "clean", config
+            )
+            self.assertEqual(clean["domains"]["fundamentals"]["rows"], 1)
+            self.assertNotIn("unparseable_available_at_dropped", clean["domains"]["fundamentals"])
+
+            write(
+                events_root / "income_vip" / "available_month=202109.parquet",
+                pd.DataFrame([
+                    {"dataset": "income_vip", "ts_code": "000001.SZ", "available_at": "2021-09-10T18:00:00+08:00",
+                     "available_at_rule": "source:f_ann_date_or_ann_date", "available_month": "202109",
+                     "business_key": "k1", "source_path": "x", "source_write_id": "w", "source_row_id": 0},
+                    {"dataset": "income_vip", "ts_code": "000002.SZ", "available_at": "not-a-timestamp",
+                     "available_at_rule": "source:f_ann_date_or_ann_date", "available_month": "202109",
+                     "business_key": "k2", "source_path": "x", "source_write_id": "w", "source_row_id": 1},
+                ]),
+            )
+            out = Path(tmp) / "snap"
+            manifest = SnapshotBuilder(raw, events_root, status_path).build_decision_snapshot(
+                DECISION, out, config
+            )
+            fundamentals = pd.read_parquet(out / "fundamentals.parquet")
+            self.assertEqual(list(fundamentals["business_key"]), ["k1"])
+            self.assertEqual(
+                manifest["domains"]["fundamentals"]["unparseable_available_at_dropped"], {"income_vip": 1}
+            )
+
     def test_macro_registry_datasets_are_exempt_from_the_window_floor(self):
         # Instrument registries (fut_basic/opt_basic/cb_basic) stay valid for the
         # instrument's whole life: an old list_date must survive the macro window

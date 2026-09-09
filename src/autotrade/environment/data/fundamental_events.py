@@ -6,11 +6,12 @@ from pathlib import Path
 import json
 
 import pandas as pd
+import pyarrow.parquet as pq
 
 from autotrade.data_quality import build_quality_report, write_quality_report
 
 from autotrade.environment.data.contracts import CN_TZ
-from autotrade.environment.data.pit import concat_rows, parquet_meta, yyyymmdd
+from autotrade.environment.data.pit import concat_rows, parquet_meta, to_cn_timestamps, yyyymmdd
 
 
 # Provenance/PIT columns the store stamps onto every fundamental event row on
@@ -46,6 +47,10 @@ BUSINESS_KEYS = {
     "fina_mainbz_vip": ("ts_code", "end_date", "bz_item", "bz_code", "curr_type"),
     "disclosure_date": ("ts_code", "end_date", "ann_date", "pre_date", "actual_date"),
 }
+
+# Fundamental events are stamped at the CN evening clock: the vendor gives a
+# date, not a time, and 18:00 is after the disclosure cut-off for that date.
+_EVENT_CLOCK = time(18, 0)
 
 RAW_PATTERNS = {
     "income_vip": "period=*.parquet",
@@ -85,13 +90,14 @@ class FundamentalEventsBuilder:
         events = events[events["available_at"].astype(str).str.strip().ne("")].copy()
         if events.empty:
             return pd.DataFrame(columns=self._event_columns())
-        parsed = pd.to_datetime(events["available_at"], errors="coerce")
+        parsed = to_cn_timestamps(events["available_at"])
         start = pd.Timestamp(yyyymmdd(config.start_date)).tz_localize(CN_TZ)
         end = pd.Timestamp(yyyymmdd(config.end_date)).tz_localize(CN_TZ) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
-        events = events[(parsed >= start) & (parsed <= end)].copy()
+        window = (parsed >= start) & (parsed <= end)
+        events = events[window].copy()
         if events.empty:
             return pd.DataFrame(columns=self._event_columns())
-        events["available_month"] = pd.to_datetime(events["available_at"], errors="coerce").dt.strftime("%Y%m")
+        events["available_month"] = parsed[window].dt.strftime("%Y%m")
         # Same-timestamp statement corrections share the entire business key
         # (update_flag is deliberately not part of statement keys), and the
         # write-side collapse keeps the LAST row per key: rank vendor versions
@@ -188,31 +194,49 @@ class FundamentalEventsBuilder:
             df["source_path"] = str(path)
             df["source_write_id"] = str(parquet_meta(path).get("write_id", ""))
             df["source_row_id"] = range(len(df))
-            df["available_at"], df["available_at_rule"] = zip(*[
-                _available_at_for_row(dataset, row, statement_availability) for row in df.to_dict("records")
-            ])
-            df["business_key"] = [_business_key(dataset, row) for row in df.to_dict("records")]
+            df["available_at"], df["available_at_rule"] = _available_at_for_frame(
+                dataset, df, statement_availability
+            )
+            df["business_key"] = _business_key_frame(dataset, df)
             frames.append(df)
         if not frames:
             return pd.DataFrame(columns=self._event_columns())
         return concat_rows(frames)
 
     def _statement_availability(self) -> dict[tuple[str, str], str]:
-        availability: dict[tuple[str, str], str] = {}
+        """Latest statement announcement per ``(ts_code, end_date)``.
+
+        The fina_audit / fina_mainbz_vip rules join against this when the vendor
+        left their own ann_date blank.
+        """
+        keyed: list[pd.DataFrame] = []
         for dataset in ("income_vip", "balancesheet_vip", "cashflow_vip", "fina_indicator_vip"):
             dataset_dir = self.raw_dir / dataset
             if not dataset_dir.exists():
                 continue
             for path in sorted(dataset_dir.glob("period=*.parquet")):
-                df = pd.read_parquet(path)
-                for row in df.to_dict("records"):
-                    key = (str(row.get("ts_code", "")), _clean_date(row.get("end_date", "")))
-                    if not key[0] or not key[1]:
-                        continue
-                    value, _rule = _available_at_for_row(dataset, row, {})
-                    if value and (key not in availability or value > availability[key]):
-                        availability[key] = value
-        return availability
+                # The lookup needs the key and the announcement dates only; the
+                # full ~100-column statement schema is read once, by
+                # _read_dataset. Statement files carry no other rule input.
+                wanted = ("ts_code", "end_date", "f_ann_date", "ann_date")
+                present = set(pq.read_schema(path).names)
+                df = pd.read_parquet(path, columns=[column for column in wanted if column in present])
+                if df.empty:
+                    continue
+                available, _rules = _available_at_for_frame(dataset, df, {})
+                frame = pd.DataFrame({
+                    "ts_code": _column_text(df, "ts_code"),
+                    "end_date": _clean_date_frame(df, "end_date"),
+                    "available_at": available,
+                })
+                keyed.append(frame[frame["ts_code"].ne("") & frame["end_date"].ne("") & frame["available_at"].ne("")])
+        combined = concat_rows(keyed) if keyed else pd.DataFrame()
+        if combined.empty:
+            return {}
+        # Latest stamp wins per key, resolved once over the whole history: every
+        # stamp is a same-clock ISO value, so a string sort is chronological.
+        combined = combined.sort_values("available_at").drop_duplicates(["ts_code", "end_date"], keep="last")
+        return dict(zip(zip(combined["ts_code"], combined["end_date"]), combined["available_at"]))
 
     @staticmethod
     def _event_columns() -> list[str]:
@@ -261,7 +285,7 @@ def audit_fundamental_events(events_root: str | Path, config: FundamentalEventsC
             if missing:
                 checks.append({"severity": "error", "check": f"{dataset}_schema", "message": f"missing columns in {path}", "details": {"missing": sorted(missing)}})
                 continue
-            parsed = pd.to_datetime(df["available_at"], errors="coerce", utc=True).dt.tz_convert(CN_TZ)
+            parsed = to_cn_timestamps(df["available_at"])
             unparseable += int(parsed.isna().sum())
             outside_window += int(((parsed < start_ts) | (parsed > end_ts)).sum())
             expected_month = path.stem.split("=", 1)[1]
@@ -354,7 +378,16 @@ def read_fundamental_events(
     *,
     min_available_at: str | None = None,
     require_partitions: bool = False,
+    nat_counts: dict[str, int] | None = None,
 ) -> pd.DataFrame:
+    """Read the PIT event store up to ``max_available_at``.
+
+    ``nat_counts`` is the same out-parameter the snapshot's raw-window reader
+    takes: an unparseable stamp fails both bounds and is dropped in the
+    conservative direction (hidden, never leaked), and the per-dataset count is
+    accumulated here so the caller can publish it as the domain manifest's
+    ``unparseable_available_at_dropped``.
+    """
     root = Path(events_root)
     datasets = tuple(datasets or ())
     if not datasets:
@@ -401,48 +434,114 @@ def read_fundamental_events(
     if not frames:
         return pd.DataFrame()
     events = concat_rows(frames)
-    parsed = pd.to_datetime(events["available_at"], errors="coerce")
+    parsed = to_cn_timestamps(events["available_at"])
+    if nat_counts is not None:
+        unparseable = parsed.isna()
+        if unparseable.any():
+            for dataset, count in events.loc[unparseable, "dataset"].astype(str).value_counts().items():
+                nat_counts[str(dataset)] = nat_counts.get(str(dataset), 0) + int(count)
     visible = parsed <= max_ts
     if min_ts is not None:
         visible &= parsed >= min_ts
     return events[visible].copy()
 
 
-def _available_at_for_row(dataset: str, row: dict[str, object], statement_availability: dict[tuple[str, str], str]) -> tuple[str, str]:
+# Statement history is millions of rows wide by ~100 vendor columns, so every
+# rule below is a frame operation: a per-row dict of the whole vendor schema
+# cost 18 minutes of the nightly PIT event build on its own.
+def _available_at_for_frame(
+    dataset: str, frame: pd.DataFrame, statement_availability: dict[tuple[str, str], str]
+) -> tuple[pd.Series, pd.Series]:
+    """``(available_at, available_at_rule)`` for one raw dataset's frame."""
     if dataset in {"income_vip", "balancesheet_vip", "cashflow_vip"}:
-        return _first_available(row, ("f_ann_date", "ann_date"), "source:f_ann_date_or_ann_date")
+        return _first_available_frame(frame, ("f_ann_date", "ann_date"), "source:f_ann_date_or_ann_date")
     if dataset == "fina_indicator_vip":
-        return _first_available(row, ("ann_date",), "source:ann_date")
+        return _first_available_frame(frame, ("ann_date",), "source:ann_date")
     if dataset in {"forecast_vip", "express_vip"}:
         # Each VERSION becomes visible at its OWN announcement date. Using
         # first_ann_date backdated revised figures to the first announcement
         # (a Jan-2026 revision was visible at Aug-2024 in a real snapshot) —
         # determinate PIT lookahead. first_ann_date stays as a series attribute.
-        return _first_available(row, ("ann_date",), "source:ann_date")
+        return _first_available_frame(frame, ("ann_date",), "source:ann_date")
     if dataset == "dividend":
-        value = _first_available(row, ("imp_ann_date", "ann_date"), "source:imp_ann_date_or_ann_date")
-        if value[0]:
-            return value
-        return "", "missing_announcement_date_not_pit_visible"
+        available, rules = _first_available_frame(frame, ("imp_ann_date", "ann_date"), "source:imp_ann_date_or_ann_date")
+        rules = rules.mask(available.eq(""), "missing_announcement_date_not_pit_visible")
+        return available, rules
     if dataset in {"fina_audit", "fina_mainbz_vip"}:
-        value = _first_available(row, ("ann_date",), "source:ann_date")
-        if value[0]:
-            return value
-        key = (str(row.get("ts_code", "")), _clean_date(row.get("end_date", "")))
-        if key in statement_availability:
-            return statement_availability[key], "fallback_joined_statement_available_at"
-        return "", "missing_source_date"
+        available, rules = _first_available_frame(frame, ("ann_date",), "source:ann_date")
+        missing = available.eq("")
+        if missing.any() and statement_availability:
+            keys = zip(_column_text(frame, "ts_code")[missing], _clean_date_frame(frame, "end_date")[missing])
+            joined = pd.Series(
+                [statement_availability.get(key, "") for key in keys],
+                index=frame.index[missing],
+                dtype=object,
+            )
+            available = available.mask(missing, joined)
+            rules = rules.mask(missing & available.ne(""), "fallback_joined_statement_available_at")
+        return available, rules
     if dataset == "disclosure_date":
-        return _first_available(row, ("ann_date", "actual_date", "pre_date"), "source:ann_or_conservative_disclosure_date")
-    return "", "unsupported_dataset"
+        return _first_available_frame(frame, ("ann_date", "actual_date", "pre_date"), "source:ann_or_conservative_disclosure_date")
+    return (
+        pd.Series("", index=frame.index, dtype=object),
+        pd.Series("unsupported_dataset", index=frame.index, dtype=object),
+    )
 
 
-def _first_available(row: dict[str, object], columns: tuple[str, ...], rule: str) -> tuple[str, str]:
+def _first_available_frame(frame: pd.DataFrame, columns: tuple[str, ...], rule: str) -> tuple[pd.Series, pd.Series]:
+    """First non-blank date across ``columns``, stamped at the event clock.
+
+    A column the vendor never wrote is all-blank, exactly as a missing dict key
+    was; the rule string names the fallback column whenever it is not the first.
+    """
+    dates = pd.Series("", index=frame.index, dtype=object)
+    rules = pd.Series("missing_source_date", index=frame.index, dtype=object)
+    unresolved = pd.Series(True, index=frame.index)
     for column in columns:
-        value = _clean_date(row.get(column, ""))
-        if value:
-            return _date_at(value, time(18, 0)), rule if column == columns[0] else f"{rule}:{column}"
-    return "", "missing_source_date"
+        if not unresolved.any():
+            break
+        candidate = _clean_date_frame(frame, column)
+        take = unresolved & candidate.ne("")
+        dates = dates.mask(take, candidate)
+        rules = rules.mask(take, rule if column == columns[0] else f"{rule}:{column}")
+        unresolved &= ~take
+    return _stamp_event_clock(dates), rules
+
+
+def _stamp_event_clock(dates: pd.Series) -> pd.Series:
+    """``_date_at`` over a cleaned YYYYMMDD series.
+
+    Applied to the DISTINCT dates so the CN offset stays whatever the zone says
+    for that day (China ran DST 1986-1991); a literal "+08:00" would not.
+    """
+    stamps = {value: _date_at(value, _EVENT_CLOCK) for value in dates.unique() if value}
+    stamps[""] = ""
+    return dates.map(stamps)
+
+
+def _column_text(frame: pd.DataFrame, column: str) -> pd.Series:
+    if column not in frame.columns:
+        return pd.Series("", index=frame.index, dtype=object)
+    return frame[column].astype(str)
+
+
+def _clean_date_frame(frame: pd.DataFrame, column: str) -> pd.Series:
+    """``_clean_date`` over a column, absent columns reading as blank."""
+    if column not in frame.columns:
+        return pd.Series("", index=frame.index, dtype=object)
+    values = frame[column]
+    text = values.astype(str).str.strip()
+    blank = text.eq("") | text.str.lower().isin({"nan", "none", "nat"})
+    dated = ~blank & text.str.fullmatch(r"\d{8}").fillna(False)
+    out = pd.Series("", index=values.index, dtype=object)
+    out = out.mask(dated, text)
+    # Anything that is neither blank nor a bare YYYYMMDD (a vendor timestamp,
+    # a date object) is rare: resolve those through the scalar rule on the
+    # ORIGINAL value so the two paths cannot diverge on an odd form.
+    odd = ~blank & ~dated
+    if odd.any():
+        out = out.mask(odd, values[odd].map(_clean_date))
+    return out
 
 
 def _is_allowed_available_at_rule(rule: str) -> bool:
@@ -496,10 +595,22 @@ def _clean_date(value: object) -> str:
         return ""
 
 
-def _business_key(dataset: str, row: dict[str, object]) -> str:
+def _business_key_frame(dataset: str, frame: pd.DataFrame) -> pd.Series:
+    """The canonical business-key JSON for every row of one dataset.
+
+    Same bytes as ``json.dumps({"dataset": ..., "values": {...}},
+    ensure_ascii=False, sort_keys=True, separators=(",", ":"))``: the object is
+    assembled from sorted keys, and each column's DISTINCT values are escaped by
+    ``json.dumps`` itself, so quoting stays the encoder's business.
+    """
     keys = BUSINESS_KEYS.get(dataset, ("ts_code",))
-    payload = {"dataset": dataset, "values": {key: str(row.get(key, "")) for key in keys}}
-    return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    key_json = json.dumps(dataset, ensure_ascii=False)
+    out = pd.Series(f'{{"dataset":{key_json},"values":{{', index=frame.index, dtype=object)
+    for position, key in enumerate(sorted(set(keys))):
+        values = _column_text(frame, key)
+        escaped = values.map({value: json.dumps(value, ensure_ascii=False) for value in values.unique()})
+        out = out + (("," if position else "") + json.dumps(key, ensure_ascii=False) + ":") + escaped
+    return out + "}}"
 
 
 def _source_path_matches_dataset(source_path: str, dataset: str) -> bool:

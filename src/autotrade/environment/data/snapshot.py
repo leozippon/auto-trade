@@ -652,12 +652,14 @@ class SnapshotBuilder:
                 self._assert_fundamental_event_status_ok(
                     fundamentals_window_start, tuple(config.fundamental_datasets)
                 )
+            nat_counts: dict[str, int] = {}
             fundamentals = read_fundamental_events(
                 self.fundamental_events_root,
                 decision_time.isoformat(),
                 datasets=config.fundamental_datasets,
                 min_available_at=fundamentals_window_start.isoformat(),
                 require_partitions=bool(config.fundamental_datasets),
+                nat_counts=nat_counts,
             )
             fundamentals = self._apply_screen(fundamentals, screened)
             fundamentals, dataset_columns = _apply_fundamental_exclusions(
@@ -669,12 +671,15 @@ class SnapshotBuilder:
                 fundamentals,
                 build_seconds=time.perf_counter() - started,
             )
-            return {
+            meta: dict[str, object] = {
                 "rows": int(len(fundamentals)),
                 "datasets": list(config.fundamental_datasets),
                 "units": "source",
                 "dataset_columns": dataset_columns,
-            }, profile
+            }
+            if nat_counts:
+                meta["unparseable_available_at_dropped"] = nat_counts
+            return meta, profile
 
         def build_events(_: Mapping[str, DomainBuildResult]) -> DomainBuildResult:
             started = time.perf_counter()
@@ -1018,12 +1023,14 @@ class SnapshotBuilder:
             # Not the formal PIT decision boundary: take fundamentals published
             # inside the period without requiring partitions or the audit status,
             # so a slot still builds where a fundamental window happens to be empty.
+            nat_counts: dict[str, int] = {}
             fundamentals = read_fundamental_events(
                 self.fundamental_events_root,
                 period_end.isoformat(),
                 datasets=config.fundamental_datasets,
                 min_available_at=window_floor.isoformat(),
                 require_partitions=False,
+                nat_counts=nat_counts,
             )
             fundamentals = self._apply_screen(fundamentals, screened)
             fundamentals, dataset_columns = _apply_fundamental_exclusions(
@@ -1033,11 +1040,14 @@ class SnapshotBuilder:
             profile = _write_with_profile(
                 output_dir / "fundamentals.parquet", fundamentals, build_seconds=time.perf_counter() - started
             )
-            return {
+            meta: dict[str, object] = {
                 "rows": int(len(fundamentals)),
                 "datasets": list(config.fundamental_datasets),
                 "dataset_columns": dataset_columns,
-            }, profile
+            }
+            if nat_counts:
+                meta["unparseable_available_at_dropped"] = nat_counts
+            return meta, profile
 
         def build_events(_: Mapping[str, DomainBuildResult]) -> DomainBuildResult:
             started = time.perf_counter()
