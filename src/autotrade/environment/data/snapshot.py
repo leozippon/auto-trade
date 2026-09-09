@@ -1534,7 +1534,9 @@ class SnapshotBuilder:
         basic = self.store.read_trade_range("daily_basic", start, end)
         limits = self.store.read_trade_range("stk_limit", start, end)
         adj = self.store.read_trade_range("adj_factor", start, end)
-        suspend = self.store.read_trade_range("suspend_d", start, end, columns=["trade_date", "ts_code"])
+        suspend = self.store.read_trade_range(
+            "suspend_d", start, end, columns=["trade_date", "ts_code", "suspend_type"]
+        )
         if visible_dates_by_dataset is not None:
             daily = _filter_trade_dates(daily, visible_dates_by_dataset.get("daily", []))
             basic = _filter_trade_dates(basic, visible_dates_by_dataset.get("daily_basic", []))
@@ -1558,7 +1560,13 @@ class SnapshotBuilder:
         out = out.merge(limits, on=["trade_date", "ts_code"], how="left", suffixes=("", "_limit"))
         if not adj.empty:
             out = out.merge(adj[["trade_date", "ts_code", "adj_factor"]], on=["trade_date", "ts_code"], how="left")
-        suspended = set(zip(suspend.get("trade_date", []), suspend.get("ts_code", [])))
+        # suspend_d records both halts (suspend_type "S") and resumptions ("R"), and
+        # the vendor's `daily` has no row at all on a full-day halt, so the only halt
+        # this join can mark is an intraday one (an "S" row carrying a suspend_timing
+        # window). Resumptions are normally traded sessions and must stay unflagged:
+        # over 2022-2023 they were 747 of the 946 rows a presence-only test marked.
+        halted = suspend[suspend["suspend_type"] == "S"]
+        suspended = set(zip(halted["trade_date"], halted["ts_code"]))
         out["is_suspended"] = [(d, c) in suspended for d, c in zip(out["trade_date"], out["ts_code"])]
         out["trade_date"] = out["trade_date"].astype(str)
         out["ts_code"] = out["ts_code"].astype(str)

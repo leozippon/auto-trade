@@ -72,7 +72,10 @@ def build_raw(raw: Path) -> None:
             raw / "adj_factor" / f"trade_date={trade_date}.parquet",
             pd.DataFrame([{"trade_date": trade_date, "ts_code": "000001.SZ", "adj_factor": 1.0}]),
         )
-        write(raw / "suspend_d" / f"trade_date={trade_date}.parquet", pd.DataFrame(columns=["trade_date", "ts_code"]))
+        write(
+            raw / "suspend_d" / f"trade_date={trade_date}.parquet",
+            pd.DataFrame(columns=["trade_date", "ts_code", "suspend_timing", "suspend_type"]),
+        )
         write(
             raw / "stk_auction" / f"trade_date={trade_date}.parquet",
             pd.DataFrame([{
@@ -964,6 +967,54 @@ class SnapshotBuilderTest(unittest.TestCase):
             manifest = load_snapshot_manifest(out)
             self.assertIn("20211008", manifest["domains"]["daily"]["visible_trade_dates_by_dataset"]["daily"])
             self.assertNotIn("20211008", manifest["domains"]["daily"]["visible_trade_dates_by_dataset"]["daily_basic"])
+
+    def test_daily_suspension_flag_marks_only_intraday_halts(self):
+        """`is_suspended` follows suspend_d halts, never resumptions.
+
+        suspend_d records both halts (``suspend_type`` "S") and resumptions ("R"),
+        and the vendor writes no `daily` row at all on a full-day halt. So a
+        resumption day is a normally traded session that must stay unflagged, and
+        the only halt a daily bar can carry is an intraday one.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = Path(tmp) / "raw"
+            build_raw(raw)
+            write(
+                raw / "suspend_d" / "trade_date=20210930.parquet",
+                pd.DataFrame([
+                    {"trade_date": "20210930", "ts_code": "000001.SZ",
+                     "suspend_timing": "13:00-13:30", "suspend_type": "S"},
+                ]),
+            )
+            write(
+                raw / "suspend_d" / "trade_date=20211008.parquet",
+                pd.DataFrame([
+                    {"trade_date": "20211008", "ts_code": "000001.SZ",
+                     "suspend_timing": None, "suspend_type": "R"},
+                    # Full-day halt: the vendor publishes no daily bar for it.
+                    {"trade_date": "20211008", "ts_code": "000010.SZ",
+                     "suspend_timing": None, "suspend_type": "S"},
+                ]),
+            )
+            out = Path(tmp) / "snap_suspend"
+            config = SnapshotConfig(
+                events_datasets=(),
+                macro_datasets=(),
+                text_datasets=(),
+                fundamental_datasets=(),
+                include_intraday=False,
+                include_industry=False,
+            )
+            decision = datetime(2021, 10, 8, 17, 45, tzinfo=CN_TZ)
+
+            SnapshotBuilder(raw, Path(tmp) / "fund_events").build_decision_snapshot(decision, out, config)
+
+            daily = pd.read_parquet(out / "daily.parquet").set_index(["trade_date", "ts_code"])
+            self.assertTrue(bool(daily.loc[("20210930", "000001.SZ"), "is_suspended"]))
+            self.assertFalse(bool(daily.loc[("20211008", "000001.SZ"), "is_suspended"]))
+            # A full-day halt never reaches the join, so it can only be read as a
+            # missing row - the flag is not the way to detect it.
+            self.assertNotIn(("20211008", "000010.SZ"), daily.index)
 
     def test_universe_screening_restricts_per_stock_domains(self):
         from dataclasses import replace as dc_replace

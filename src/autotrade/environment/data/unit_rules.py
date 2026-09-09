@@ -194,13 +194,13 @@ FIELD_RULES: tuple[FieldRule, ...] = (
               source_unit="multiple", note="dimensionless valuation/liquidity multiples"),
     FieldRule("daily.parquet", None, ("adj_factor",), source_unit="dimensionless_ratio"),
     FieldRule("daily.parquet", None, ("is_suspended",), semantic="categorical",
-              note="episode boundary marker, not a suspension state: True where a "
-                   "suspend_d row exists for (trade_date, ts_code), which on a day "
-                   "that has a daily bar can only be a resumption day or an "
-                   "intraday halt — both trade with full vol/amount. A full-day "
-                   "suspension has NO daily row at all, so consecutive True bars "
-                   "never form a suspension episode; build episodes from "
-                   "trading-day gaps in a stock's own daily bars (data docs §1.3)"),
+              note="intraday-halt marker, not a suspension state: True where a "
+                   "suspend_d halt row (suspend_type=S) exists for (trade_date, "
+                   "ts_code). A full-day suspension has NO daily row at all, so on "
+                   "a day that has a daily bar this can only be an intraday halt, "
+                   "and the bar still carries full vol/amount. Consecutive True "
+                   "bars therefore never form a suspension episode; build episodes "
+                   "from trading-day gaps in a stock's own daily bars (data docs §1.3)"),
     # ================== intraday_1min.parquet (source==normalized) ==========
     FieldRule("intraday_1min.parquet", None, ("open", "high", "low", "close"),
               source_unit="CNY_per_share"),

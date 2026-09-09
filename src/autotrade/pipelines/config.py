@@ -33,7 +33,9 @@ ExecutionMode = Literal["sandbox", "trusted"]
 # v10: same-day macro tables carry the close contract stamp
 # (MACRO_DATASET_CONTRACTS) instead of the raw date-EOD placeholder, so a v9
 # macro view shows T rows a trading day later than a v10 one.
-SNAPSHOT_CACHE_FORMAT_VERSION = 10
+# v11: daily.is_suspended counts only suspend_d halts (suspend_type "S"); v10
+# also flagged resumption rows ("R"), i.e. normally traded sessions.
+SNAPSHOT_CACHE_FORMAT_VERSION = 11
 
 # Trailing wrap-up grace added to the Fold session budget. Not a console/worker
 # HITL knob; FoldSessionRequest carries the seconds to AgentSessionConfig.
