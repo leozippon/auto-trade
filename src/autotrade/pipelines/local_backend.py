@@ -1013,11 +1013,20 @@ class FoldBacktestTool(SessionTimeBudgetAware):
 
     def vs_parent_fields(self, evaluation: EvaluationResult) -> dict[str, object]:
         """One candidate's ``vs_parent``, stated as absent -- not omitted --
-        when this Fold has no parent control to compare against."""
+        when this Fold has no parent control to compare against.
+
+        ``vs_parent_note`` is the one row-level place a reason for the block is
+        stated: no control to compare against, or a block of exact zeros
+        because the candidate placed the parent's own order stream.
+        """
 
         vs_parent = vs_parent_metrics(evaluation.summary, self.parent_control_summary)
         if vs_parent is not None:
-            return {"vs_parent": vs_parent}
+            note = vs_parent.pop("vs_parent_note", None)
+            return {
+                "vs_parent": vs_parent,
+                **({"vs_parent_note": note} if note is not None else {}),
+            }
         return {
             "vs_parent": None,
             "vs_parent_note": (
@@ -1457,7 +1466,10 @@ class BatchValidateTool(SessionTimeBudgetAware):
         "metrics, the per-quarter return/excess/Sharpe of sub_windows, the "
         "vs_parent deltas against this Fold's parent control (excess, "
         "neutralized excess, drawdown, and beats_parent = both excess deltas "
-        "> 0; null with vs_parent_note when the Fold has no parent control), "
+        "> 0; null with vs_parent_note when the Fold has no parent control, "
+        "and identical_to_parent with a vs_parent_note when the candidate "
+        "reproduced the parent's result exactly -- an overlay that never "
+        "fired, not a failed comparison), "
         "the provisional selection_statistics (the deflated Sharpe over every "
         "Validation completed so far, which the ledger recomputes at freeze), "
         "and wall seconds; a failed candidate's row carries its exact failure text "

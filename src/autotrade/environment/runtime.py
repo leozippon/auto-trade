@@ -25,8 +25,12 @@ from autotrade.environment.identity import AgentRefStore
 SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"(?i)bearer\s+[A-Za-z0-9._~+/=-]+"), "Bearer [redacted]"),
     (re.compile(r"(?i)(authorization\s*[:=]\s*)[^\s,;]+"), r"\1[redacted]"),
-    (re.compile(r"sk-[A-Za-z0-9_-]{8,}"), "sk-[redacted]"),
-    (re.compile(r"hf_[A-Za-z0-9]{8,}"), "hf_[redacted]"),
+    # A left boundary and a realistic key length keep ordinary words out:
+    # without them "risk-controls", "disk-usage" and a "…-task-…" skill name
+    # came back as "risk-[redacted]" from every sanitized tool result. A
+    # hyphen still counts as a boundary, so "resp-sk-<key>" stays redacted.
+    (re.compile(r"(?<![A-Za-z0-9_])sk-[A-Za-z0-9_-]{16,}"), "sk-[redacted]"),
+    (re.compile(r"(?<![A-Za-z0-9_])hf_[A-Za-z0-9]{8,}"), "hf_[redacted]"),
     (re.compile(r"vless:" + r"//[^\s'\"<>]+"), "vless:" + "//[redacted]"),
     (
         re.compile(r"\b((?:https?|socks5h?|socks4)://)[^/\s'\"<>:@]+:[^@\s'\"<>]+@"),

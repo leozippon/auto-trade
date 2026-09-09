@@ -31,6 +31,7 @@ from autotrade.pipelines.config import (
     fold_session_deadline_seconds,
     rolling_default,
 )
+from autotrade.pipelines.local_backend import BATCH_VALIDATE_MAX_CONCURRENCY
 from autotrade.webui.prompt_preview import RUNTIME_PLACEHOLDER, build_prompt_preview
 
 FOLD_KEY = "epoch_001/fold_2022"
@@ -196,6 +197,10 @@ def test_fold_preview_states_the_pipeline_budgets_and_scope(tmp_path: Path):
         # The formal strategy container's GPU allocation; 0 is published as
         # "every formal replay runs on CPU", not omitted.
         "strategy_gpu_count": limits.gpu_count,
+        # Its CPU quota, which is also the thread count its numeric libraries
+        # are pinned to, and how many replays one batch runs at once.
+        "strategy_cpus": limits.cpus,
+        "batch_validate_max_concurrency": BATCH_VALIDATE_MAX_CONCURRENCY,
     }
     # The calendar the console configures: one yearly Fold, no frozen Test.
     assert facts["visible_timeline"]["fold_period"] == "year"

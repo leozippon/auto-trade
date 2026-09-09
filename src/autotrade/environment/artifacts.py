@@ -428,6 +428,22 @@ def restore_frozen_artifact_trees(
         _assert_readonly_tree(live_models)
 
 
+def readonly_copy_hint(target: str) -> str:
+    """Retry hint for a work-copy path stuck at a snapshot's read-only mode.
+
+    Step-node snapshots and frozen artifacts are locked 0o444/0o555, and a
+    ``cp -r`` out of them reproduces those bits in the work copy. Such a copy
+    is made inside the sandbox and belongs to the container user, so the host
+    cannot chmod it back (:func:`chmod_tree` skips the EPERM paths): only the
+    sandbox can clear the lock, which is why this is a hint and not a repair.
+    """
+
+    return (
+        f'run shell argv ["chmod", "-R", "u+w", "{target}"] and retry: a tree copied '
+        "from steps/ or a frozen artifact keeps that snapshot's read-only mode"
+    )
+
+
 def restore_working_artifacts_writable(
     output_root: str | Path,
     models_root: str | Path | None = None,

@@ -39,7 +39,10 @@ from autotrade.pipelines.config import (
     StrategySchedule,
 )
 from autotrade.pipelines.experiment import _step_result
-from autotrade.pipelines.ledger import walk_forward_transitions
+from autotrade.pipelines.ledger import (
+    final_artifact_transitions,
+    walk_forward_transitions,
+)
 from autotrade.pipelines.local_backend import (
     PARENT_CONTROL_RESULT_NAME,
     FoldBacktestTool,
@@ -289,7 +292,7 @@ def test_the_control_node_is_the_explicit_keep_parent_after_a_different_hypothes
     assert tree.current_node_id == control.step_id
 
 
-def _fold(epoch_id, fold_id, period, *, control=None, test=None):
+def _fold(epoch_id, fold_id, period, *, control=None, test=None, frozen=None):
     return {
         "record_type": "fold",
         "experiment_id": "e",
@@ -300,12 +303,14 @@ def _fold(epoch_id, fold_id, period, *, control=None, test=None):
         "validation_period": period,
         "parent_control": control,
         "test_result": test,
+        "frozen_strategy_artifact_id": frozen,
     }
 
 
-def _ok(total_return: float, benchmark: float = 0.02):
+def _ok(total_return: float, benchmark: float = 0.02, *, parent=None):
     return {
         "status": "ok",
+        "parent_strategy_artifact_id": parent,
         "validation_result": {
             "total_return": total_return,
             "benchmark": {"benchmark_return": benchmark},
@@ -359,6 +364,55 @@ def test_walk_forward_transitions_use_frozen_tests_with_a_test_stage():
     records[0]["test_result"] = {"total_return": 0.05}
     assert walk_forward_transitions(records, epoch_id="epoch_001", test_stage=True)["positive_excess"] == 0
     assert json.dumps(walk_forward_transitions(records, epoch_id="epoch_001", test_stage=True))
+
+
+def test_final_artifact_transitions_count_only_the_shipped_artifacts_own():
+    """Graduation term (c) reads the same rows as term (b), filtered to the
+    artifact each transition actually replayed.
+
+    The lineage here is the shipping shape of a long arm: one strategy carried
+    forward over several Folds, then replaced in the last one. The chain has
+    three transitions, the replacement has none of them.
+    """
+
+    records = [
+        _fold("epoch_001", "fold_2022", "20220101..20221231", frozen="strategy_a"),
+        _fold("epoch_001", "fold_2023", "20230101..20231231", control=_ok(0.10, parent="strategy_a"), frozen="strategy_a"),
+        _fold("epoch_001", "fold_2024", "20240101..20241231", control=_ok(0.01, parent="strategy_a"), frozen="strategy_a"),
+        _fold("epoch_001", "fold_2025", "20250101..20251231", control=_ok(0.09, parent="strategy_a"), frozen="strategy_b"),
+    ]
+    chain = walk_forward_transitions(records, epoch_id="epoch_001", test_stage=False)
+    assert (chain["transitions"], chain["positive_excess"]) == (3, 2)
+    # Every one of those transitions replayed the strategy the last Fold threw
+    # away, so the artifact Held-out would ship has no forward record at all.
+    assert final_artifact_transitions(
+        records, epoch_id="epoch_001", test_stage=False, artifact_id="strategy_b"
+    ) == {
+        "artifact_id": "strategy_b",
+        "epoch_id": "epoch_001",
+        "transitions": 0,
+        "positive_excess": 0,
+    }
+    own = final_artifact_transitions(
+        records, epoch_id="epoch_001", test_stage=False, artifact_id="strategy_a"
+    )
+    assert (own["transitions"], own["positive_excess"]) == (3, 2)
+    # With a Test stage the transition is the Fold's own frozen Test, so it
+    # belongs to that Fold's frozen artifact.
+    tested = [
+        _fold("epoch_001", "fold_2024", "20240101..20241231", test={"total_return": 0.05, "benchmark": {"benchmark_return": 0.02}}, frozen="strategy_a"),
+        _fold("epoch_001", "fold_2025", "20250101..20251231", test={"total_return": 0.05, "benchmark": {"benchmark_return": 0.02}}, frozen="strategy_b"),
+    ]
+    assert final_artifact_transitions(
+        tested, epoch_id="epoch_001", test_stage=True, artifact_id="strategy_b"
+    )["positive_excess"] == 1
+    # A record that names no artifact matches nothing, not everything.
+    assert final_artifact_transitions(
+        [_fold("epoch_001", "f1", "p1"), _fold("epoch_001", "f2", "p2", control=_ok(0.10))],
+        epoch_id="epoch_001",
+        test_stage=False,
+        artifact_id="",
+    )["transitions"] == 0
 
 
 def _sub_window(label, start, end, *, ret, benchmark, turnover=5.0):

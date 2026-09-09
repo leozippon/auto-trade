@@ -481,6 +481,13 @@ _FIELDS: list[dict[str, object]] = [
         "type": "int",
         "help": "毕业裁决要求 Held-out 完成的回合交易数下限（trade_count），低于则记 insufficient_trades。0 关闭该项。",
     },
+    {
+        "key": "heldout_min_final_transitions",
+        "group": "预算与验收",
+        "label": "毕业最少自有前向过渡数",
+        "type": "int",
+        "help": "毕业裁决要求末个 Epoch 的样本外过渡里，回放交付产物本身的「自有过渡」不少于该数，且这些过渡单独也要满足同样的 ⌈2/3⌉ 正超额规则；末个 Fold 才首次冻结的新机制自有过渡为 0，不能靠被它取代的祖先的链条成绩毕业。0 关闭该项。",
+    },
     {"key": "max_steps_per_fold", "group": "预算与验收", "label": "单 Fold Step 数上限", "type": "int",
      "help": "单 Fold 完整验证回测驱动的 Step 数上限。"},
     {"key": "max_backtests_per_fold", "group": "预算与验收", "label": "单 Fold 回测次数上限", "type": "int",

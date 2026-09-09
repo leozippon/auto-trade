@@ -133,6 +133,60 @@ def latest_heldout_records(records: list[dict[str, object]]) -> list[dict[str, o
     return [latest[key] for key in sorted(latest)]
 
 
+def _artifact_id(value: object) -> str | None:
+    """A non-empty artifact id, or None when the record names none."""
+
+    return value if isinstance(value, str) and value else None
+
+
+def _epoch_folds(
+    fold_records: list[dict[str, object]], *, epoch_id: str
+) -> list[dict[str, object]]:
+    """One Epoch's latest Fold records, in schedule order."""
+
+    return sorted(
+        (
+            record
+            for record in latest_fold_records(fold_records).values()
+            if str(record.get("epoch_id")) == epoch_id
+        ),
+        key=lambda record: str(record.get("validation_period") or ""),
+    )
+
+
+def _transition_rows(
+    folds: list[dict[str, object]], *, test_stage: bool
+) -> list[tuple[str | None, object]]:
+    """``(artifact the transition scores, its result)`` for one Epoch, in order.
+
+    Without a Test stage a transition is the host's ``parent_control`` of every
+    Fold after the Epoch's first, and the artifact it scores is the parent that
+    control replayed. With a Test stage it is each Fold's frozen Test, which
+    scores that Fold's own frozen artifact. The single source for both the
+    chain-wide count (:func:`walk_forward_transitions`) and the shipped
+    artifact's own count (:func:`final_artifact_transitions`), so the two can
+    never disagree about which artifact a transition belongs to. The id is
+    ``None`` when the record names none, which matches no artifact.
+    """
+
+    if test_stage:
+        return [
+            (_artifact_id(record.get("frozen_strategy_artifact_id")), record.get("test_result"))
+            for record in folds
+        ]
+    rows: list[tuple[str | None, object]] = []
+    for record in folds[1:]:
+        control = record.get("parent_control")
+        control = control if isinstance(control, Mapping) else {}
+        rows.append(
+            (
+                _artifact_id(control.get("parent_strategy_artifact_id")),
+                transition_result(record.get("parent_control")),
+            )
+        )
+    return rows
+
+
 def walk_forward_transitions(
     fold_records: list[dict[str, object]], *, epoch_id: str, test_stage: bool
 ) -> dict[str, object]:
@@ -145,25 +199,19 @@ def walk_forward_transitions(
     each Fold's frozen Test. A transition counts as positive only when its
     result exists and its excess return over the benchmark is > 0; a failed or
     missing result is a transition that proved nothing.
+
+    This is the development *chain's* record: the transitions it counts mostly
+    replay earlier artifacts of the lineage, not the one Held-out ships. What
+    that shipped artifact proved forward on its own is
+    :func:`final_artifact_transitions`.
     """
-    folds = sorted(
-        (
-            record
-            for record in latest_fold_records(fold_records).values()
-            if str(record.get("epoch_id")) == epoch_id
-        ),
-        key=lambda record: str(record.get("validation_period") or ""),
-    )
+    folds = _epoch_folds(fold_records, epoch_id=epoch_id)
+    results = [result for _, result in _transition_rows(folds, test_stage=test_stage)]
     if test_stage:
         source = "frozen_test"
-        results = [record.get("test_result") for record in folds]
         percentiles: list[float] = []
     else:
         source = "parent_control"
-        results = [
-            transition_result(record.get("parent_control"))
-            for record in folds[1:]
-        ]
         # The null percentile of each counted transition on the span it is
         # scored on; a control that ran no null control contributes nothing.
         percentiles = [
@@ -189,6 +237,36 @@ def walk_forward_transitions(
         "mean_excess_percentile": (
             sum(percentiles) / len(percentiles) if percentiles else None
         ),
+    }
+
+
+def final_artifact_transitions(
+    fold_records: list[dict[str, object]],
+    *,
+    epoch_id: str,
+    test_stage: bool,
+    artifact_id: str,
+) -> dict[str, object]:
+    """The transitions of one Epoch that scored ``artifact_id`` itself.
+
+    Graduation's walk-forward term counts the whole chain, and a mechanism
+    first frozen in the Epoch's last Fold inherits none of that record: every
+    transition replayed the parent it replaced. This is the subset that
+    actually replayed the artifact Held-out ships, counted the same way
+    (:func:`_transition_rows`), so an artifact with no forward quarter of its
+    own is visible as ``transitions == 0`` rather than hidden behind the
+    chain's average.
+    """
+
+    rows = _transition_rows(
+        _epoch_folds(fold_records, epoch_id=epoch_id), test_stage=test_stage
+    )
+    own = [result for owner, result in rows if owner == artifact_id]
+    return {
+        "artifact_id": artifact_id,
+        "epoch_id": epoch_id,
+        "transitions": len(own),
+        "positive_excess": sum(1 for result in own if _excess_positive(result)),
     }
 
 
@@ -219,15 +297,15 @@ def frozen_selection(
     selection = selection if isinstance(selection, Mapping) else {}
     null = record.get("null_control")
     null = null if isinstance(null, Mapping) else {}
-    candidates = selection.get("candidates_evaluated")
     return {
         "fold_id": record.get("fold_id"),
-        "candidates_evaluated": (
-            candidates
-            if isinstance(candidates, int) and not isinstance(candidates, bool)
-            else None
-        ),
+        "candidates_evaluated": _count(selection.get("candidates_evaluated")),
         "deflated_sharpe_probability": _finite(selection.get("deflated_sharpe_probability")),
+        # N as the formula actually used it: the finite trial Sharpes, which is
+        # not always ``candidates_evaluated`` (a kept parent joins the trials,
+        # a non-finite Sharpe drops out). A probability from two trials barely
+        # deflates anything, so the count has to be read beside it.
+        "deflated_sharpe_trials": _count(selection.get("trials")),
         "validation_excess_percentile": _finite(null.get("excess_percentile")),
     }
 
@@ -454,6 +532,12 @@ def _finite(value: object) -> float | None:
         return None
     number = float(value)
     return number if math.isfinite(number) else None
+
+
+def _count(value: object) -> int | None:
+    """``value`` as a count, or None when the record does not carry one."""
+
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
 def experiment_verdict(

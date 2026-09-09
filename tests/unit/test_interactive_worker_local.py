@@ -20,7 +20,9 @@ from autotrade.environment.llm import (
 )
 from autotrade.environment.nl import NLConfig
 from autotrade.environment.tools import CommandResult
+from autotrade.pipelines import worker
 from autotrade.pipelines.agent_views import compact_fold_history
+from autotrade.pipelines.config import FoldSessionResult
 from autotrade.pipelines.hitl_state import (
     ControlState,
     DevelopmentSession,
@@ -157,6 +159,12 @@ def test_local_worker_regular_folds_go_straight_to_held_out(tmp_path: Path):
         "beats_parent": None,
     }
     assert second["parent_strategy_artifact_id"] == first["frozen_strategy_artifact_id"]
+    # The deterministic local developer edits nothing, so the second Fold's
+    # nomination is the inherited parent itself: the lineage head is retained
+    # rather than reissued under a second id, and the row says why.
+    assert (first["fold_status"], second["fold_status"]) == ("frozen", "no_update")
+    assert second["nominated_identical_to_parent"] is True
+    assert second["frozen_strategy_artifact_id"] == first["frozen_strategy_artifact_id"]
     control = second["parent_control"]
     assert control["status"] == "ok"
     assert control["parent_strategy_artifact_id"] == first["frozen_strategy_artifact_id"]
@@ -166,13 +174,16 @@ def test_local_worker_regular_folds_go_straight_to_held_out(tmp_path: Path):
     assert [row["kind"] for row in plan["sessions"]] == ["fold", "fold", "heldout"]
     # The deterministic baseline holds cash (zero Sharpe) and the local daily
     # fixture carries no benchmark series (so no neutralized excess either), so the verdict names all three, and the
-    # one walk-forward transition (cash vs no benchmark) proves nothing.
+    # one walk-forward transition (cash vs no benchmark) proves nothing. That
+    # transition replayed the very artifact Held-out ships (the second Fold
+    # kept it), so term (c) has evidence to read and finds it unproven.
     assert heldout["verdict"]["status"] == "discarded"
     assert heldout["verdict"]["reasons"] == [
         "missing_benchmark_return",
         "missing_neutralized_excess_return",
         "sharpe_not_positive",
         "walkforward_excess_inconsistent(0/1<1)",
+        "final_artifact_forward_excess_inconsistent(0/1<1)",
     ]
     assert result["verdict"]["status"] == "discarded"
     assert result["verdict"]["periods"][0]["period"] == "2026Q2"
@@ -1320,6 +1331,65 @@ def test_local_worker_resume_skips_durable_sessions_and_heldout(tmp_path: Path):
     assert resumed["state"] == "completed"
     assert resumed["heldout_runs"] == 0
     assert after == before
+
+
+def test_development_that_freezes_nothing_fails_and_stays_terminal(
+    tmp_path: Path, monkeypatch
+):
+    """The documented zero-freeze end of development, and its resume.
+
+    Every Fold abstains, so nothing is ever frozen: the run must fail (there is
+    no artifact to evaluate), the message must name the reason already in the
+    ledger, and a restart must republish that same terminal failure instead of
+    walking the finished plan only to raise again.
+    """
+    repo, experiment = _experiment(tmp_path)
+    path = experiment / "hitl/params.json"
+    params = json.loads(path.read_text(encoding="utf-8"))
+    params["test_stage"] = False
+    path.write_text(json.dumps(params), encoding="utf-8")
+    ran: list[str] = []
+    assembled: list[str] = []
+
+    class Abstaining:
+        """A developer that finishes every Fold with an explicit no-edge."""
+
+        def __init__(self, **_options: object) -> None:
+            assembled.append("developer")
+
+        def __call__(self, request):
+            ran.append(request.fold.fold_id)
+            return FoldSessionResult(
+                conversation_id=f"conv_{request.fold.fold_id}",
+                steps=(),
+                no_edge_reason="nothing beat holding cash",
+            )
+
+    monkeypatch.setattr(worker, "DeterministicBaselineDeveloper", Abstaining)
+    options = load_worker_options(experiment, repo_root=repo)
+    expected = (
+        "Development completed without a frozen baseline artifact: "
+        "2/2 folds ended agent_no_edge (baseline_missing)"
+    )
+    with pytest.raises(RuntimeError, match=re.escape(expected)):
+        run_local_interactive_worker(options)
+    assert ran == ["fold_2025Q4", "fold_2026Q1"]
+    ledger = ExperimentLedger(options.rolling.ledger_path)
+    before = ledger.read()
+    assert [record["fold_status"] for record in before] == ["baseline_missing"] * 2
+    status = read_status(experiment / "hitl/status.json")
+    assert status["state"] == "failed"
+    assert status["error"] == f"RuntimeError: {expected}"
+
+    with pytest.raises(RuntimeError, match=re.escape(expected)):
+        run_local_interactive_worker(options)
+    # Republished, not re-run: the second invocation never even assembled the
+    # pipeline, so no session executed and no record was appended.
+    assert assembled == ["developer"]
+    assert ran == ["fold_2025Q4", "fold_2026Q1"]
+    assert ledger.read() == before
+    republished = read_status(experiment / "hitl/status.json")
+    assert (republished["state"], republished["error"]) == ("failed", status["error"])
 
 
 def test_webui_worker_output_is_recoverable_from_a_per_experiment_log(

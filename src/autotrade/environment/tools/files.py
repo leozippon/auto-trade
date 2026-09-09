@@ -15,7 +15,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from pathlib import Path
 
-from autotrade.environment.artifacts import READONLY_FILES
+from autotrade.environment.artifacts import READONLY_FILES, readonly_copy_hint
 
 from .base import ToolError, ToolResult, ToolSpec
 from .workspace import ROOT_RELATIVE_PATH_RULE, SafeWorkspace
@@ -92,10 +92,22 @@ class _WorkspaceWriteTool:
         while not parent.exists() and parent != parent.parent:
             created.append(parent)
             parent = parent.parent
-        target.parent.mkdir(parents=True, exist_ok=True)
-        for directory in created:
-            directory.chmod(_SANDBOX_DIR_MODE)
-        target.write_text(content, encoding="utf-8")
+        relative = self.workspace.relative(target)
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            for directory in created:
+                directory.chmod(_SANDBOX_DIR_MODE)
+            target.write_text(content, encoding="utf-8")
+        except PermissionError as exc:
+            # Not a host bug: the Agent copied this path out of a locked Step
+            # snapshot or frozen artifact, so it carries 0o444/0o555. Say so
+            # instead of handing back a bare "[Errno 13]".
+            raise ToolError(
+                f"{relative} is not writable",
+                error_type="readonly",
+                blocked_target=relative,
+                retry_hint=readonly_copy_hint(relative.split("/", 1)[0]),
+            ) from exc
         try:
             target.chmod(_SANDBOX_FILE_MODE)
         except PermissionError:

@@ -96,7 +96,7 @@ FOLD_ENV_SECTION = """\
 - Pipeline 按 `Epoch → Fold → Step` 运行。当前 Fold 只用 Validation 开发；冻结后的策略由宿主在不可见区间评估，Held-out 只在全部开发结束后运行。
 - `snapshot_dir` 与 `asof_dir` 是只读 PIT 输入，以实际挂载清单、schema、单位引用和 `available_at` 为准；Broker、调度、精确查价和预算以本次挂载事实为准。未知字段或单位在用于阈值和跨表计算前先核实。
 - 决策期读取必须加窗：`generate_orders` 每次只读需要的列与所需交易日区间，不加过滤地读完全历史必然超出单次推断超时，任一次超时即整场回测失败；重的拟合放进 `fit`。
-- `output/` 和 `models/` 是正式产物；`workspace/` 与 `skills/` 不进入 revision、frozen 或后续评估。\
+- `output/` 和 `models/` 是正式产物；`workspace/` 与 `skills/` 不进入 revision、frozen 或后续评估。从 `steps`、`parent_output` 等只读产物树拷进工作区的文件保留只读位，编辑前先用 `shell` 跑 `chmod -R u+w <目标>`。\
 """
 
 FOLD_SUBMIT_CONTRACT = """\
@@ -104,7 +104,7 @@ FOLD_SUBMIT_CONTRACT = """\
 - 被提名节点属于当前 Fold、当前 run，且已完成一次成功的完整 Validation；Probe 或失败回放不算。
 - 有父产物时，被提名节点必须在可执行策略逻辑上不同于父本（注释-only 不算）；本 Fold 已有一次不同假说的完整 Validation 后，才可显式提名 `parent_control` 保留父本。运行事实 `artifact_contract.parent.parent_control_available` 为真时，宿主已在会话前把父本原样跑过一次本 Fold 的完整 Validation（Step 树里 `result_name=parent_control` 的节点，不占预算），它就是本 Fold 的基线；为假时没有这个节点：父产物是初始模板时，模板只是交付合同的可运行示例而不是研究基线，不要为它花回测，候选比的是基准、中性化超额与彼此；只有会话前的父本对照重放失败时才值得自己重放父本并计入预算。
 - 过硬门的提名一律被冻结：`acceptance_rules.fold_freeze` 里只有标 `hard` 的项阻止冻结，`warn` 只记警告；截止窗口之外，不过硬门的提名在别的已记录节点（含 `parent_control`）过门时被拒绝并列出它们。被接受的调用都返回 `pipeline_fold_status`、`pipeline_will_freeze` 与一句 `pipeline_outcome`，以它为准。
-- 没有候选证明边际时用 `finish_fold(outcome="no_edge", reason=<证据>)` 弃权，不提名最不差的节点；弃权同样要求本会话至少有一次完整 Validation。有父产物记 `no_update`（父本仍是血缘头），首个 Fold 记 `baseline_missing`；显式提名 `parent_control` 节点则把父本重新冻结为本 Fold 的产物。
+- 没有候选证明边际时用 `finish_fold(outcome="no_edge", reason=<证据>)` 弃权，不提名最不差的节点；弃权同样要求本会话至少有一次完整 Validation。有父产物记 `no_update`（父本仍是血缘头），首个 Fold 记 `baseline_missing`；显式提名 `parent_control` 或任何与父本逐字节相同的节点是被接受的提名，宿主不发第二个产物 id 而是沿用父本，记 `fold_status="no_update"`、`finish_mode="nominated"`、`nominated_identical_to_parent=true`、`hard_reject_reasons` 为空——同一份内容的前向记录（毕业条件里的 `final_artifact_forward_transitions` 按 id 计数）因此不被清零。
 - 当前 `output/` 和 `models/` 与被提名节点的快照逐字节一致，不一致时先用 `step_rollback` 恢复。`finish_fold` 会校验以上各项；截止窗口之外、回测预算还剩超过三分之一的自愿结束（提名或弃权）须带 `early_stop_reason`，写明哪些假设未检验、为何不值得剩余预算。\
 """
 
@@ -150,6 +150,7 @@ FOLD_GUARDRAILS_SECTION = """\
   - 组合构建与风险覆盖只有提高中性化超额或父本未见季度的表现才算改进，只改善总收益或回撤的是风格暴露而不是边际；不要为凑数重复叠加同类覆盖。
   - 结构不同的候选按预登记条件落败，同样是有效、可报告的结果。全部候选被证伪后的下一轮必须换机制家族，而不是回到同一机制的参数邻域。
 - 对照基线（等权、符号加权或父本）是每轮必须比过的对象，不是目标产物。
+- 预登记的机制归因对照（同一载体去掉登记的机制，或把门换成随机、置换的安慰剂）追平或胜过候选，就证伪了登记的机制：该候选不得再以这个假设提名，它已过自身的父本对照合同也不例外，只做披露不算处理；要交付得改以对照本身为候选或换一个机制家族，重新走完整 Validation。
 - 读结果时整窗指标与 `sub_windows`、原始超额与中性化超额一起看；证据接近时按子区间一致性与中性化超额取舍，仍分不出则保留已验证版本；只靠一次风格暴露取得的优势不算边际。只在一段行情里成立的优势不算被别的窗口证伪，但也不能靠改写跨窗口常量交付：把该参数条件化到决策时可观测的状态或在 `fit` 里拟合，作为候选走正常 Validation，留给后续窗口的父本对照检验。
 - 「没有证明边际」的三项检验，任一不过即未证明：
   1. 中性化超额约为 0（年化回归截距，不与整窗 `excess_return` 比大小，轻仓少成交时不可靠）；
@@ -244,7 +245,7 @@ META_SYSTEM_PROMPT = """\
 - `PRIOR.md` 由你独占维护，Fold 只读。自由 Markdown，首轮必须非空。只写简洁的可证伪策略方向、样本局限、反证或降级条件、流程编排和 skill 路径；不写目录、单位表、how-to、实现模板、skill 正文或 raw trace。
 - 方向要让下一个 Fold 能直接开轮：写明当前机制里哪些参数是 `fit` 拟合得到、哪些是手设的（手设的说明理由或标为待拟合），以及下一批 Fold 应预登记的假设轮次——先检验什么、什么结果算证伪、证伪后退到哪里；预登记里至少要有一个不派生自父本信号的新机制家族候选并附自己的证伪判据，只列父本参数邻域与增减组件的清单不算探索计划；一个 Fold 只做一轮就收工的模式要在这里被纠正。
 - 跨窗共识规则只能作为默认值，不是否决权：不得让某一窗口按预登记规则读出、并已通过该 Fold 完整 Validation 的状态条件化候选无法交付。
-- 每个被复盘 Fold 冻结了什么以 `fold_reviews[]` 的 `fold_status`、`finish_mode`（`agent_no_edge`：Agent 明确弃权并附 `no_edge_reason`；`no_nomination`：未提名即结束，如超时）与 `hard_reject_reasons` 为准，不以该 Fold 会话自己的叙述为准。证据强度是 `null_control.excess_percentile`、`selection_statistics.deflated_sharpe_probability`、`vs_parent.beats_parent` 与父本对照 `parent_control` 在新季度上的步进结果：这些块连同冻结产物 id 由宿主从账本逐字复制到跨 Epoch 的 `fold_validation_history[]` 每一条与本窗口的 `fold_reviews[]`，窗口之外的 Fold 同样可核；PRIOR 逐 Fold 引用这些数值，上一份 PRIOR 引用过的只能沿用或按它们更正，不得以不在审查窗口或「不可核」为由丢弃。分位在 0.5 附近表示与同规模随机组合无法区分，去膨胀概率接近 0 表示胜者只是 N 次尝试里的最大噪声，中性化超额约为 0 或 `beats_parent=false` 表示没有证明边际——这样的冻结产物只能写成待检验，不能写成主线；`no_update` 或 `baseline_missing` 是正当结果，不是要纠正的失败。不列 `skills_index` 已有的路径、工具限制或运行纪律。
+- 每个被复盘 Fold 冻结了什么以 `fold_reviews[]` 的 `fold_status`、`finish_mode`（`agent_no_edge`：Agent 明确弃权并附 `no_edge_reason`；`no_nomination`：未提名即结束，如超时）与 `hard_reject_reasons` 为准，不以该 Fold 会话自己的叙述为准。证据强度是 `null_control.excess_percentile`、`selection_statistics.deflated_sharpe_probability`、`vs_parent.beats_parent` 与父本对照 `parent_control` 在新季度上的步进结果：这些块连同冻结产物 id 由宿主从账本逐字复制到跨 Epoch 的 `fold_validation_history[]` 每一条与本窗口的 `fold_reviews[]`，窗口之外的 Fold 同样可核；PRIOR 逐 Fold 引用这些数值，上一份 PRIOR 引用过的只能沿用或按它们更正，不得以不在审查窗口或「不可核」为由丢弃。分位在 0.5 附近表示与同规模随机组合无法区分，去膨胀概率接近 0 表示胜者只是 N 次尝试里的最大噪声，中性化超额约为 0 或 `beats_parent=false` 表示没有证明边际——这样的冻结产物只能写成待检验，不能写成主线；`no_update` 或 `baseline_missing` 是正当结果，不是要纠正的失败。带 `nominated_identical_to_parent=true` 的 `no_update`（`finish_mode="nominated"`、`hard_reject_reasons` 为空）更要读成一次通过验收的提名：被提名内容就是父本自身，宿主沿用父本 id 而不是拒绝它，父本的前向记录因此连续。不列 `skills_index` 已有的路径、工具限制或运行纪律。
 - 沿用上一份 PRIOR 的事实性断言前，先与本窗口 Fold 已核实的更正逐条对齐；被 Fold 证伪的断言必须改正或删除，不能原样带入。
 - 没有有效改进就保持原文并结束；去空白后相同则不发布新版本。有变化时合并重复、删除失效方向，不要追加成日志。
 - PRIOR 只保存可迁移内容：不写日历日期或本窗口年份，不提及 Held-out，不写逐 Fold Test 数字，不凭 Test 做选择。

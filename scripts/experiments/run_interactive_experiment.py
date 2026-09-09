@@ -25,7 +25,7 @@ from _bootstrap import add_repo_src
 REPO_ROOT = add_repo_src(__file__)
 
 from autotrade.environment.runtime import utc_now_iso, write_json_atomic
-from autotrade.pipelines.hitl_state import StatusReporter
+from autotrade.pipelines.hitl_state import StatusReporter, read_json
 from autotrade.pipelines.worker import load_worker_options, run_local_interactive_worker
 
 
@@ -89,6 +89,28 @@ def main(argv: list[str] | None = None) -> int:
             # Never returns; a failure to exec falls through to the handler
             # below and is recorded as a failed run rather than a silent exit.
             _exec_self()
+    except SystemExit as exc:
+        # The SIGTERM handler above is the only thing that raises SystemExit in
+        # here, and the console's terminate stamps a terminal state itself only
+        # when it has to escalate to SIGKILL. Without this branch a worker that
+        # exits gracefully within the grace window leaves status.json on its
+        # live session state with a dead pid, and the page keeps showing a run
+        # that ended. Merge, as the escalated path does, so where the run
+        # stopped survives; the ledger record of the interrupted session is
+        # written by the pipeline while this unwinds.
+        bootstrap.stop()
+        status = read_json(status_path)
+        status.update(
+            {
+                "schema_version": 1,
+                "state": "terminated",
+                "error": None,
+                "terminated_at": utc_now_iso(),
+            }
+        )
+        write_json_atomic(status_path, status)
+        print(f"interactive experiment terminated: exit {exc.code}", file=sys.stderr)
+        return exc.code if isinstance(exc.code, int) else 1
     except Exception as exc:  # noqa: BLE001 - CLI must persist every terminal failure
         bootstrap.stop()
         write_json_atomic(

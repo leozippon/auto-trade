@@ -79,6 +79,7 @@ from .ledger import (
     assert_no_frozen_artifact_mutation,
     candidate_deflated_sharpe,
     deflated_sharpe,
+    final_artifact_transitions,
     frozen_selection,
     is_frozen_artifact_mutation,
     latest_fold_records,
@@ -342,20 +343,38 @@ class RollingExperimentPipeline:
                 hard, warnings = self.config.acceptance.evaluate(
                     selected.validation.summary
                 )
+            nominated_identical_to_parent = False
             if selected is not None and not hard:
-                artifact_id = (
-                    f"strategy_{epoch_id}_{fold.fold_id}_{uuid.uuid4().hex[:12]}"
-                )
-                frozen = self.artifacts.freeze_revision(
-                    selected.revision_id,
-                    artifact_id=artifact_id,
-                    experiment_id=self.config.experiment_id,
-                    epoch_id=epoch_id,
-                    fold_id=fold.fold_id,
-                    run_id=run_id,
-                    step_id=selected.step_id,
-                )
-                status = "frozen"
+                if parent is not None and self._matches_parent_content(
+                    parent, selected.revision_id
+                ):
+                    # The nominated node IS the inherited parent (the host's
+                    # own parent_control node, or an edit the Agent reverted).
+                    # Minting a second artifact id for the same bytes would
+                    # restart that strategy's forward record at zero, and
+                    # graduation term (c) reads it by id (§3.3): the lineage
+                    # head stays, and this Fold records that its nomination
+                    # changed nothing. The complete Validation just accepted is
+                    # also the Validation a meta-regularized parent still owed.
+                    if parent.requires_validation:
+                        parent = replace(parent, requires_validation=False)
+                    frozen = parent
+                    status = "no_update"
+                    nominated_identical_to_parent = True
+                else:
+                    artifact_id = (
+                        f"strategy_{epoch_id}_{fold.fold_id}_{uuid.uuid4().hex[:12]}"
+                    )
+                    frozen = self.artifacts.freeze_revision(
+                        selected.revision_id,
+                        artifact_id=artifact_id,
+                        experiment_id=self.config.experiment_id,
+                        epoch_id=epoch_id,
+                        fold_id=fold.fold_id,
+                        run_id=run_id,
+                        step_id=selected.step_id,
+                    )
+                    status = "frozen"
                 validation = selected.validation.summary
             elif parent is not None:
                 if parent.requires_validation:
@@ -504,6 +523,14 @@ class RollingExperimentPipeline:
                 "early_stop_reason": session.early_stop_reason or None,
                 "no_edge_reason": session.no_edge_reason or None,
                 "fold_status": status,
+                # Why this `no_update` is not a rejection: the nominated node
+                # passed acceptance and was the parent's own content, so the
+                # parent artifact id was retained instead of reissued.
+                **(
+                    {"nominated_identical_to_parent": True}
+                    if nominated_identical_to_parent
+                    else {}
+                ),
                 "hard_reject_reasons": hard,
                 "accept_warnings": warnings,
                 "selected_step_id": selected.step_id if selected is not None else None,
@@ -643,6 +670,15 @@ class RollingExperimentPipeline:
             epoch_id=epoch_id,
             test_stage=self.config.test_stage,
         )
+        # Graduation term (c): the subset of those transitions that replayed
+        # this very artifact, which is the only walk-forward evidence about the
+        # strategy Held-out is about to score.
+        final_transitions = final_artifact_transitions(
+            fold_records,
+            epoch_id=epoch_id,
+            test_stage=self.config.test_stage,
+            artifact_id=final.artifact_id,
+        )
         # Diagnostics of the Fold that froze the strategy under test, carried
         # beside the verdict's gating metrics without deciding anything.
         selection = frozen_selection(fold_records, artifact_id=final.artifact_id)
@@ -749,7 +785,10 @@ class RollingExperimentPipeline:
                         # Graduation verdict of this period; the experiment-level
                         # verdict (ledger.experiment_verdict) needs every period.
                         "verdict": self.config.acceptance.heldout_verdict(
-                            result.summary, walk_forward, selection
+                            result.summary,
+                            walk_forward,
+                            selection,
+                            final_transitions,
                         ),
                     }
                 )
@@ -1100,6 +1139,29 @@ class RollingExperimentPipeline:
         except Exception as exc:  # noqa: BLE001 - recorded, the Fold still runs
             return {"status": "failed", "error": f"{type(exc).__name__}: {exc}"}
 
+    def _matches_parent_content(
+        self, parent: FrozenArtifact, revision_id: str
+    ) -> bool:
+        """Whether one Step revision holds exactly the parent artifact's content.
+
+        Single source for "this node is the parent itself": the freeze site
+        keeps the lineage head instead of reissuing an id for the same bytes,
+        and the meta-regularized fallback proves the parent was validated in
+        this Fold. Compares the trees the artifact store actually carries --
+        no digest is persisted, so a missing ``models/`` on either side is not
+        a difference.
+        """
+
+        revision = self.artifacts.revision(revision_id)
+        if modification_delta(parent.path, revision.output_path).changed_files:
+            return False
+        models = getattr(revision, "models_path", None)
+        return not (
+            models is not None
+            and parent.model_path is not None
+            and model_artifact_delta(parent.model_path, models).changed_files
+        )
+
     def _assert_parent_validated_in_fold(
         self,
         parent: FrozenArtifact,
@@ -1119,15 +1181,7 @@ class RollingExperimentPipeline:
         if control is not None and not self.config.acceptance.evaluate(control.summary)[0]:
             return
         for step in steps:
-            revision = self.artifacts.revision(step.revision_id)
-            if modification_delta(parent.path, revision.output_path).changed_files:
-                continue
-            models = getattr(revision, "models_path", None)
-            if (
-                models is not None
-                and parent.model_path is not None
-                and model_artifact_delta(parent.model_path, models).changed_files
-            ):
+            if not self._matches_parent_content(parent, step.revision_id):
                 continue
             hard, _ = self.config.acceptance.evaluate(step.validation.summary)
             if not hard:

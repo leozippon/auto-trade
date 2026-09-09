@@ -12,7 +12,7 @@ from collections.abc import Mapping
 
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.replay.style import NEUTRALIZATION_METHOD
-from autotrade.environment.sandbox import SCREENING_TOOL_MOUNT
+from autotrade.environment.sandbox import SCREENING_TOOL_MOUNT, SandboxLimits
 
 EXPERIMENT_FACTS_SCHEMA_VERSION = 1
 
@@ -128,7 +128,12 @@ def build_experiment_facts(
             fold_period=fold_period,
             is_meta=is_meta,
         ),
-        "budgets": _budget_facts(manifest, max_llm_calls=max_llm_calls, context_compaction=context_compaction),
+        "budgets": _budget_facts(
+            manifest,
+            max_llm_calls=max_llm_calls,
+            context_compaction=context_compaction,
+            is_meta=is_meta,
+        ),
         # No "paths" table and no per-file "data_profile": every production
         # consumer of this object is the prompt renderer, which dropped both
         # unconditionally (the same information lives in data_summary.json and
@@ -304,7 +309,12 @@ def _budget_facts(
     *,
     max_llm_calls: int | None,
     context_compaction: Mapping[str, object] | None,
+    is_meta: bool,
 ) -> dict[str, object]:
+    # Local import: the pipelines package imports this module, so binding the
+    # batch cap at module scope would close an import cycle.
+    from autotrade.pipelines.local_backend import BATCH_VALIDATE_MAX_CONCURRENCY
+
     budgets = _as_mapping(manifest.get("budgets"))
     return compact_mapping(
         {
@@ -344,6 +354,24 @@ def _budget_facts(
             # sandbox_spec is null there, and a per-Fold GPU override moves
             # only that session's container, never this number.
             "strategy_gpu_count": budgets.get("strategy_gpu_count"),
+            # CPU quota that same container is started with, and therefore the
+            # value its OMP/MKL/OPENBLAS/NUMEXPR thread variables carry. Read
+            # from the environment's own SandboxLimits, the single source the
+            # executor builds the `--cpus` flag from, so a strategy that sets
+            # its own thread count has the real number instead of a guess: a
+            # session that guessed low spent two backtest slots on fit
+            # timeouts it had the cores to avoid.
+            "strategy_cpus": SandboxLimits().cpus,
+            # Replays one batch_validate call runs at once, each with its own
+            # strategy container (two when the candidate declares fit). The
+            # host is shared with the other running experiments, so wall clock
+            # per replay is not exclusive; the two strategy timeouts above are
+            # measured on the strategy's own call and start only once the
+            # worker holds the decision inputs, so neither bills container
+            # scheduling or host contention to the strategy.
+            "batch_validate_max_concurrency": (
+                None if is_meta else BATCH_VALIDATE_MAX_CONCURRENCY
+            ),
             "context_compaction": context_compaction,
         }
     )

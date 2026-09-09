@@ -997,6 +997,52 @@ class ArtifactIOToolTest(unittest.TestCase):
             self.assertFalse(result.ok)
             self.assertFalse((outside / "x.py").exists())
 
+    @unittest.skipIf(os.geteuid() == 0, "mode bits do not restrict root")
+    def test_a_snapshot_locked_directory_is_a_typed_readonly_error(self) -> None:
+        """The Agent branches by copying out of ``steps/<node>/output``, and
+        ``cp -r`` reproduces that snapshot's 0o444/0o555 lock in the work copy.
+        Only the sandbox can clear it, so the refusal has to name the recovery
+        instead of returning a bare ``[Errno 13]``."""
+        with tempfile.TemporaryDirectory() as tmp:
+            paths, registry = self._registry(Path(tmp))
+            locked = paths.agent / "output" / "lib"
+            locked.mkdir()
+            (locked / "__init__.py").write_text("x = 1\n", encoding="utf-8")
+            (locked / "__init__.py").chmod(0o444)
+            locked.chmod(0o555)
+            try:
+                for tool, arguments in (
+                    ("write_file", {"path": "output/lib/new.py", "content": "x = 2\n"}),
+                    (
+                        "edit_file",
+                        {
+                            "path": "output/lib/__init__.py",
+                            "old_text": "x = 1",
+                            "new_text": "x = 3",
+                        },
+                    ),
+                ):
+                    blocked = registry.invoke(tool, arguments)
+                    self.assertFalse(blocked.ok, tool)
+                    self.assertEqual(blocked.value["error_type"], "readonly", tool)
+                    self.assertIn("chmod", blocked.value["retry_hint"], tool)
+                    self.assertIn("u+w", blocked.value["retry_hint"], tool)
+                # Nothing was created or changed behind either refusal.
+                self.assertFalse((locked / "new.py").exists())
+                self.assertEqual(
+                    (locked / "__init__.py").read_text(encoding="utf-8"), "x = 1\n"
+                )
+                # And the recovery the hint names is the one that works.
+                locked.chmod(0o755)
+                (locked / "__init__.py").chmod(0o644)
+                repaired = registry.invoke(
+                    "edit_file",
+                    {"path": "output/lib/__init__.py", "old_text": "x = 1", "new_text": "x = 3"},
+                )
+                self.assertTrue(repaired.ok, repaired.error)
+            finally:
+                locked.chmod(0o755)
+
     def test_write_rejects_oversized_content(self) -> None:
         from autotrade.environment.tools.files import MAX_WRITE_CHARS
 
@@ -1152,6 +1198,103 @@ class TerminalToolWriteLockTest(unittest.TestCase):
             assert not denied.ok
             assert "locked" in denied.error
             assert len(runner.calls) == 1  # the locked call never reached the sandbox
+
+
+class StepRollbackTest(unittest.TestCase):
+    """Rollback rebuilds the work copy from an immutable Step snapshot.
+
+    The snapshot is locked 0o444/0o555 and the Agent branches from it with
+    ``cp -r``, so the work copy can arrive read-only; emptying it then fails
+    part way through, which used to destroy the tree the rollback was meant
+    to restore. The restore has to refuse before it deletes anything.
+    """
+
+    def _rollback(self, root: Path):
+        from autotrade.environment.artifacts import new_revision_id
+        from autotrade.environment.step_tree import StepTree
+        from autotrade.environment.tools.step_rollback import StepRollbackTool
+
+        paths, _, _ = build_sandbox(root)
+        output = paths.agent / "output"
+        (output / "main.py").write_text("VERSION = 1\n", encoding="utf-8")
+        (output / "lib").mkdir()
+        (output / "lib" / "__init__.py").write_text("HELPER = 1\n", encoding="utf-8")
+        tree = StepTree(paths.steps)
+        node_id = tree.record_step(
+            output,
+            epoch_id="epoch_001",
+            fold_id="fold_a",
+            run_id="run_a",
+            result_name="valid_000",
+            revision_id=new_revision_id("revision"),
+            metrics={},
+            models_root=paths.agent / "models",
+        )
+        tool = StepRollbackTool(
+            tree, output, paths.agent / "models", fold_id="fold_a", run_id="run_a"
+        )
+        return output, node_id, ToolRegistry([tool])
+
+    def test_rollback_restores_the_recorded_revision(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            output, node_id, registry = self._rollback(Path(tmp))
+            (output / "main.py").write_text("VERSION = 2\n", encoding="utf-8")
+            (output / "lib" / "__init__.py").unlink()
+            restored = registry.invoke("step_rollback", {"node_id": node_id})
+            self.assertTrue(restored.ok, restored.error)
+            self.assertEqual(restored.value["node_id"], node_id)
+            self.assertEqual((output / "main.py").read_text(encoding="utf-8"), "VERSION = 1\n")
+            self.assertTrue((output / "lib" / "__init__.py").exists())
+            # The restored copy is writable again, README.md excepted.
+            self.assertEqual((output / "lib").stat().st_mode & 0o777, 0o777)
+            self.assertEqual((output / "main.py").stat().st_mode & 0o777, 0o666)
+            self.assertEqual((output / "README.md").stat().st_mode & 0o777, 0o444)
+
+    def test_a_work_copy_the_host_cannot_unlock_is_refused_before_any_deletion(self) -> None:
+        # The real condition is a work copy owned by the container user: the
+        # host chmod returns EPERM and ``chmod_tree`` skips that path. A host
+        # test cannot own a file it may not chmod, so only the failing chmod is
+        # stubbed — with chmod_tree's own tolerant policy, minus the subtree the
+        # host would not be allowed to unlock. Everything after it is real.
+        from autotrade.environment.tools import step_rollback as rollback_module
+
+        def chmod_tree_without(locked: Path):
+            def fake(root: Path, *, file_mode: int, dir_mode: int) -> None:
+                for path in (root, *root.rglob("*")):
+                    if path == locked or locked in path.parents:
+                        continue
+                    path.chmod(dir_mode if path.is_dir() else file_mode)
+
+            return fake
+
+        with tempfile.TemporaryDirectory() as tmp:
+            output, node_id, registry = self._rollback(Path(tmp))
+            (output / "main.py").write_text("VERSION = 2\n", encoding="utf-8")
+            (output / "lib" / "__init__.py").chmod(0o444)
+            (output / "lib").chmod(0o555)
+            try:
+                with patch.object(
+                    rollback_module, "chmod_tree", chmod_tree_without(output / "lib")
+                ):
+                    refused = registry.invoke("step_rollback", {"node_id": node_id})
+                self.assertFalse(refused.ok)
+                self.assertEqual(refused.value["error_type"], "readonly")
+                self.assertEqual(refused.value["blocked_target"], "output/lib")
+                self.assertIn("chmod", refused.value["retry_hint"])
+                self.assertIn("u+w", refused.value["retry_hint"])
+                # Nothing was deleted: the work copy is exactly as it was.
+                self.assertEqual(
+                    (output / "main.py").read_text(encoding="utf-8"), "VERSION = 2\n"
+                )
+                self.assertEqual(
+                    (output / "lib" / "__init__.py").read_text(encoding="utf-8"), "HELPER = 1\n"
+                )
+            finally:
+                (output / "lib").chmod(0o755)
+            # Once the lock is cleared the same call goes through.
+            (output / "lib" / "__init__.py").chmod(0o644)
+            self.assertTrue(registry.invoke("step_rollback", {"node_id": node_id}).ok)
+            self.assertEqual((output / "main.py").read_text(encoding="utf-8"), "VERSION = 1\n")
 
 
 class StrategyOrderContractTest(unittest.TestCase):

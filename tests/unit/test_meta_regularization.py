@@ -20,6 +20,7 @@ import pandas as pd
 from autotrade.pipelines import (
     ArtifactRevision,
     EvaluationResult,
+    FoldSessionResult,
     FrozenArtifact,
     RollingExperimentConfig,
     RollingExperimentPipeline,
@@ -27,6 +28,7 @@ from autotrade.pipelines import (
 )
 from autotrade.pipelines.config import MetaSessionResult, SnapshotBundle
 from autotrade.pipelines.folds import build_fold_schedule
+from autotrade.pipelines.hitl_state import iter_development_sessions
 from autotrade.pipelines.ledger import ExperimentLedger
 
 MAIN = "def generate_orders(context):\n    return []\n"
@@ -269,6 +271,96 @@ class UnvalidatedParentFallbackTest(unittest.TestCase):
             step = self._step(artifacts, "revision_same", MAIN)
             pipeline._assert_parent_validated_in_fold(parent, (step,))
             self.assertFalse(replace(parent, requires_validation=False).requires_validation)
+
+
+class RegularizedParentKeepsItsIdentityTest(unittest.TestCase):
+    """The Fold that re-validates a regularized parent must not rename it.
+
+    A regularized artifact reaches the next Fold unbacktested, and that Fold
+    normally hands it straight back — the host's parent control replayed it,
+    and the Agent nominates that node. Freezing the same bytes under a third id
+    would throw away the forward transition the control just produced, which is
+    the only evidence graduation term (c) has about the artifact Held-out
+    ships.
+    """
+
+    def test_a_fold_that_renominates_the_regularized_parent_keeps_its_id(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            regularized = MAIN + "# regularized\n"
+            session = MetaSessionResult(
+                prior="prefer simple", revision_id="revision_meta", allowed=True
+            )
+
+            def developer(request):
+                return FoldSessionResult(
+                    "conversation",
+                    (
+                        StepResult(
+                            "control",
+                            "revision_same",
+                            request.parent_control,
+                            parent_control=True,
+                        ),
+                    ),
+                    "control",
+                )
+
+            pipeline, artifacts, config = _pipeline(
+                root, meta_learner=lambda facts: session, developer=developer
+            )
+            artifacts.add_revision("revision_meta", regularized)
+            fold = build_fold_schedule("2026Q1", "2026Q1", DAYS, window_months=24)[0]
+            _prior, meta_parent = pipeline.run_meta_session(
+                "epoch_001", 0, fold, parent=_parent(artifacts), previous_prior=""
+            )
+            self.assertTrue(meta_parent.requires_validation)
+            # The Fold nominates the content the Meta published, byte for byte.
+            artifacts.add_revision("revision_same", regularized)
+
+            outcome = pipeline.run_fold("epoch_001", fold, parent=meta_parent)
+
+            self.assertEqual(outcome.fold_status, "no_update")
+            self.assertEqual(outcome.frozen.artifact_id, meta_parent.artifact_id)
+            # This Fold's complete Validation is the one the Meta artifact owed.
+            self.assertFalse(outcome.frozen.requires_validation)
+            record = ExperimentLedger(config.ledger_path).read("fold")[-1]
+            self.assertTrue(record["nominated_identical_to_parent"])
+            self.assertEqual(
+                record["frozen_strategy_artifact_id"], meta_parent.artifact_id
+            )
+            self.assertEqual(record["hard_reject_reasons"], [])
+
+
+class MetaAlwaysHasAFollowingFoldTest(unittest.TestCase):
+    """No Meta session is ever scheduled after the last development Fold.
+
+    This is what makes a regularized artifact safe to publish: it is never the
+    last thing a run produces. The Fold that follows re-validates it (the guard
+    above) and replays it as that Fold's parent control, which is the forward
+    transition graduation term (c) asks of the artifact Held-out ships. A
+    schedule that ended on a Meta would ship a strategy no Fold ever backtested
+    and no transition ever scored.
+    """
+
+    def test_every_meta_session_is_followed_by_the_fold_it_prepares(self) -> None:
+        folds = build_fold_schedule("2025Q4", "2026Q2", DAYS, window_months=24)
+        self.assertEqual(len(folds), 3)
+        for interval in range(len(folds) + 2):
+            sessions = iter_development_sessions(
+                2, folds, meta_enabled=True, meta_learning_fold_interval=interval
+            )
+            kinds = [session.kind for session in sessions]
+            self.assertEqual(kinds[-1], "fold", f"interval={interval}")
+            for index, session in enumerate(sessions):
+                if session.kind != "meta":
+                    continue
+                following = sessions[index + 1]
+                # The Meta's own visible_fold is that very Fold, so run_meta
+                # cannot be reached without a Fold left to re-validate it.
+                self.assertEqual(following.kind, "fold")
+                self.assertEqual(following.fold.fold_id, session.fold.fold_id)
+                self.assertEqual(following.epoch_id, session.epoch_id)
 
 
 if __name__ == "__main__":

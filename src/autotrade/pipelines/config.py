@@ -90,25 +90,49 @@ def _finite_number(value: object) -> float | None:
     return number if math.isfinite(number) else None
 
 
+def _count(value: object) -> int | None:
+    """``value`` as a count, or None when it is not one."""
+
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
 def _verdict_diagnostics(
     selection: Mapping[str, object] | None,
     walk_forward: Mapping[str, object] | None,
+    final_artifact: Mapping[str, object] | None,
 ) -> dict[str, object]:
-    """The non-gating evidence a Held-out verdict carries beside its metrics."""
+    """The evidence a Held-out verdict carries beside its gating metrics.
+
+    Everything here is context rather than a threshold, and only the two
+    ``final_artifact_forward_*`` counts also feed a graduation term — they are
+    reported here because they are what tells a reader that
+    ``walk_forward_mean_excess_percentile`` describes the development chain and
+    not the artifact Held-out just replayed.
+    """
 
     source = selection if isinstance(selection, Mapping) else {}
+    own = final_artifact if isinstance(final_artifact, Mapping) else {}
     return {
         "frozen_fold_id": source.get("fold_id"),
         "candidates_evaluated": source.get("candidates_evaluated"),
         "deflated_sharpe_probability": _finite_number(
             source.get("deflated_sharpe_probability")
         ),
+        # N behind that probability: from two trials it barely deflates
+        # anything, so the count belongs beside the number, not in the Fold
+        # record only.
+        "deflated_sharpe_trials": _count(source.get("deflated_sharpe_trials")),
         "validation_excess_percentile": _finite_number(
             source.get("validation_excess_percentile")
         ),
+        # The development chain's statistic, over transitions that mostly
+        # replayed earlier artifacts of the lineage.
         "walk_forward_mean_excess_percentile": _finite_number(
             (walk_forward or {}).get("mean_excess_percentile")
         ),
+        # The shipped artifact's own share of those transitions.
+        "final_artifact_forward_transitions": _count(own.get("transitions")),
+        "final_artifact_forward_positive": _count(own.get("positive_excess")),
     }
 
 
@@ -129,6 +153,12 @@ class AcceptanceRules:
     # Graduation-only floor on closed round trips: a Held-out result carried by
     # a handful of trades proves nothing. 0 disables the check.
     heldout_min_trades: int = 0
+    # Graduation-only floor on the shipped artifact's OWN walk-forward record:
+    # how many of the Epoch's transitions must have replayed that exact
+    # artifact. The chain's two-thirds rule scores the lineage, so a mechanism
+    # first frozen in the last Fold would otherwise reach Held-out carrying
+    # only the record of the parent it replaced. 0 disables the check.
+    heldout_min_final_transitions: int = 1
 
     def __post_init__(self) -> None:
         for name in ("min_return", "min_sharpe", "max_drawdown", "cost_stress_multiplier"):
@@ -138,12 +168,10 @@ class AcceptanceRules:
             raise ValueError("max_drawdown must be between zero and one")
         if self.cost_stress_multiplier < 1:
             raise ValueError("cost_stress_multiplier must be at least one")
-        if (
-            isinstance(self.heldout_min_trades, bool)
-            or not isinstance(self.heldout_min_trades, int)
-            or self.heldout_min_trades < 0
-        ):
-            raise ValueError("heldout_min_trades must be a non-negative integer")
+        for name in ("heldout_min_trades", "heldout_min_final_transitions"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
 
     def to_record(self) -> dict[str, object]:
         return {
@@ -152,6 +180,7 @@ class AcceptanceRules:
             "max_drawdown": self.max_drawdown,
             "cost_stress_multiplier": self.cost_stress_multiplier,
             "heldout_min_trades": self.heldout_min_trades,
+            "heldout_min_final_transitions": self.heldout_min_final_transitions,
         }
 
     @classmethod
@@ -191,6 +220,13 @@ class AcceptanceRules:
         required["walk_forward_positive_excess"] = (
             ">= ceil(2/3) of the final Epoch's out-of-sample transitions"
         )
+        if self.heldout_min_final_transitions > 0:
+            required["final_artifact_forward_transitions"] = (
+                f">= {self.heldout_min_final_transitions} of those transitions must have "
+                "replayed the artifact Held-out ships, with the same >= ceil(2/3) "
+                "positive rule on them alone: a mechanism first frozen in the last "
+                "Fold has none of its own and cannot graduate"
+            )
         return {
             "fold_freeze": {
                 "finite_metrics": {
@@ -228,6 +264,7 @@ class AcceptanceRules:
         summary: Mapping[str, object] | None,
         walk_forward: Mapping[str, object] | None = None,
         selection: Mapping[str, object] | None = None,
+        final_artifact: Mapping[str, object] | None = None,
     ) -> dict[str, object]:
         """Graduation verdict of one Held-out replay (docs/pipeline-design.md §3.3).
 
@@ -244,6 +281,15 @@ class AcceptanceRules:
         prove the conditions did not pass. Term (b) is ``not_applicable`` when
         the schedule has no transitions, and the verdict then rests on (a).
 
+        Term (b) scores the development chain, most of whose transitions
+        replayed artifacts this one replaced. So whenever the schedule produced
+        transitions at all, (c) requires ``heldout_min_final_transitions`` of
+        them (``ledger.final_artifact_transitions``) to have replayed the
+        shipped artifact itself, and those to clear the same two-thirds rule:
+        an artifact frozen in the Epoch's last Fold has none of its own, and
+        the chain's record is not evidence about it. Set the knob to 0 to drop
+        (c).
+
         Two optional terms are off by default and only tighten (a). With
         ``cost_stress_multiplier > 1`` the excess must still be positive after
         paying that multiple of the profile's slippage (the summary's
@@ -252,11 +298,13 @@ class AcceptanceRules:
         many round trips. Both fail closed when the input they need is absent,
         and the thresholds used are recorded in the verdict.
 
-        ``diagnostics`` rides beside the gating metrics and never becomes a
-        reason: the deflated-Sharpe probability and the Validation null
+        ``diagnostics`` rides beside the gating metrics: the deflated-Sharpe
+        probability, the trial count behind it and the Validation null
         percentile of the Fold that froze this strategy (``selection``, from
-        ``ledger.frozen_selection``) and the mean null percentile of term
-        (b)'s transitions. Each is ``None`` when it was not computed.
+        ``ledger.frozen_selection``), the mean null percentile of term (b)'s
+        transitions, and the shipped artifact's own two counts from term (c).
+        Each is ``None`` when it was not computed, and only the term (c) counts
+        also decide anything.
         """
         reasons: list[str] = []
         values: dict[str, float | None] = {}
@@ -324,6 +372,9 @@ class AcceptanceRules:
                 f"{consistency['positive_excess']}/{consistency['transitions']}"
                 f"<{consistency['required']})"
             )
+        reasons.extend(
+            self._final_artifact_reasons(final_artifact, chain=consistency)
+        )
         return {
             "status": "discarded" if reasons else "graduated",
             "reasons": reasons,
@@ -337,8 +388,47 @@ class AcceptanceRules:
             "trade_count": trade_count,
             "heldout_min_trades": self.heldout_min_trades,
             "walk_forward": consistency,
-            "diagnostics": _verdict_diagnostics(selection, walk_forward),
+            "heldout_min_final_transitions": self.heldout_min_final_transitions,
+            "diagnostics": _verdict_diagnostics(
+                selection, walk_forward, final_artifact
+            ),
         }
+
+    def _final_artifact_reasons(
+        self,
+        final_artifact: Mapping[str, object] | None,
+        *,
+        chain: Mapping[str, object],
+    ) -> list[str]:
+        """Term (c): the shipped artifact's own walk-forward record.
+
+        Silent while the knob is 0, and while the schedule produced no
+        transitions at all — nothing in the run could have confirmed any
+        artifact forward, which term (b) already reports as
+        ``not_applicable``. Otherwise the counts must be there and must clear
+        both the floor and the same two-thirds rule; counts that were never
+        computed fail the term rather than pass it by default.
+        """
+
+        required = self.heldout_min_final_transitions
+        if required <= 0 or chain.get("status") == "not_applicable":
+            return []
+        own = final_artifact if isinstance(final_artifact, Mapping) else {}
+        transitions = _count(own.get("transitions"))
+        positive = _count(own.get("positive_excess"))
+        if transitions is None or positive is None:
+            return ["missing_final_artifact_transitions"]
+        if transitions < required:
+            return [f"final_artifact_unconfirmed({transitions}/{required})"]
+        needed = math.ceil(2 * transitions / 3)
+        if positive < needed:
+            return [
+                (
+                    "final_artifact_forward_excess_inconsistent("
+                    f"{positive}/{transitions}<{needed})"
+                )
+            ]
+        return []
 
     @staticmethod
     def walk_forward_consistency(

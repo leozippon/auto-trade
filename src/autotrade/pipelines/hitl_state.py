@@ -120,6 +120,7 @@ WEB_CREATE_DEFAULTS: dict[str, object] = {
     "max_drawdown": 0.25,
     "cost_stress_multiplier": 1.0,
     "heldout_min_trades": 0,
+    "heldout_min_final_transitions": 1,
     "initial_cash": 1_000_000.0,
     "max_total_holdings": None,
     "max_single_name_weight": None,

@@ -764,3 +764,55 @@ def test_the_current_folds_parent_control_fact_carries_the_hosts_null(tmp_path: 
         "step": {"start": "20230103", "end": "20230331", "excess_percentile": 0.11},
     }
     assert parent_control_facts(replace(request, parent_control=control))["null_control"] is None
+
+
+def test_the_fold_facts_say_a_last_fold_mechanism_cannot_graduate_on_its_own() -> None:
+    """Graduation term (c) has to be visible before the Fold freezes anything.
+
+    The Agent chooses what to nominate without ever seeing Held-out, so the
+    rule that a brand-new mechanism frozen with no Fold left to confirm it
+    forward cannot graduate is only actionable if it is stated in the run
+    facts. It rides in the derived ``acceptance_rules`` block, so it can never
+    drift from the verdict that enforces it.
+    """
+
+    from autotrade.pipelines.config import AcceptanceRules
+
+    facts = _facts(acceptance_rules=AcceptanceRules().to_record())
+    required = facts["artifact_contract"]["acceptance_rules"]["graduation"][
+        "all_required"
+    ]
+    fact = required["final_artifact_forward_transitions"]
+    assert ">= 1" in fact
+    assert "cannot graduate" in fact
+    # It reaches the Fold session's own prompt, not only the facts object.
+    assert "final_artifact_forward_transitions" in build_system_prompt(
+        mode="fold", experiment_facts=facts
+    )
+    # Meta neither freezes nor graduates: it is told none of this.
+    meta = _facts(kind="meta_learning", acceptance_rules=AcceptanceRules().to_record())
+    assert "acceptance_rules" not in meta["artifact_contract"]
+
+
+def test_the_facts_publish_the_strategy_containers_cpu_quota_and_batch_width() -> None:
+    """A session sizing its own thread pools must not have to guess.
+
+    The formal strategy container is started with a fixed CPU quota and has its
+    OMP/MKL/OPENBLAS/NUMEXPR variables set from it; one session guessed half of
+    it and lost two backtest slots to fit timeouts. Both this quota and how many
+    replays a batch runs at once are read from the code that enforces them, so
+    the fact cannot drift from the container.
+    """
+
+    from autotrade.environment.sandbox import SandboxLimits
+    from autotrade.pipelines.local_backend import BATCH_VALIDATE_MAX_CONCURRENCY
+
+    fold = _facts()["budgets"]
+    assert fold["strategy_cpus"] == SandboxLimits().cpus
+    assert fold["batch_validate_max_concurrency"] == BATCH_VALIDATE_MAX_CONCURRENCY
+    assert "strategy_cpus" in build_system_prompt(mode="fold", experiment_facts=_facts())
+    # Meta runs no replay of its own, so the batch width is not its fact; the
+    # container quota still is, because fit(context) runs in that container.
+    meta = _facts(kind="meta_learning")["budgets"]
+    assert meta["strategy_cpus"] == SandboxLimits().cpus
+    assert "batch_validate_max_concurrency" not in meta

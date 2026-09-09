@@ -25,7 +25,7 @@ universe = pd.read_parquet(context.asof_dir + "/universe")               # ts_co
 | 合并日线 `daily` | `close`（复权用）、`amount`（元）、`turnover_rate`（小数）、`circ_mv`（元）、`adj_factor`、`up_limit`/`down_limit`、`is_suspended` | 当日行 17:30 才可见，08:30 只有 T-1 及更早；`adj_factor` 当日 09:30 盖章 |
 | `events.stk_surv` | `surv_date`、`ts_code`、`rece_org`、`org_type`、`rece_mode`、`comp_rece`、`rece_place`、`name`、`fund_visitors` | 行级 `available_at = surv_date + 5 自然日 23:59:59`（规则名 `conservative_plus_5d_eod_from:surv_date`）；覆盖自 2022-01-04；主键 `(ts_code, surv_date, rece_org)` |
 | `events.top10_floatholders` | `ann_date`、`end_date`、`holder_name`、`holder_type`、`hold_amount`（股）、`hold_ratio`/`hold_float_ratio`（百分数）、`hold_change`（股） | 行级 `available_at` 按 `ann_date` EOD（`conservative_date_eod`）；覆盖自 2020-01；季报滞后见下 |
-| `macro.index_daily` | `000300.SH` 的 `close`、`pct_chg`（百分数，先除以 100） | T-1 可见；只用于基准与 β |
+| `macro.index_daily` | `000300.SH` 的 `close`、`pct_chg`（百分数，先除以 100） | T-2 可见（macro 域比日线晚一天放行，见 README 的可见边界一条）；只用于基准与 β |
 | `universe` | `ts_code`、`name`（含 ST 标记）、`list_date`、`l1_code`/`l1_name` | 决策日冻结；行业与 ST 只从这里取，不回填今天的状态 |
 
 ## `stk_surv` 的 +5 日规则及其后果
@@ -33,7 +33,7 @@ universe = pd.read_parquet(context.asof_dir + "/universe")               # ts_co
 源表没有公告时间列，记录在调研后数日内陆续入库（深交所要求两个交易日内披露），所以可见时间取 `surv_date` 后第 5 个自然日 23:59:59，比强制披露口径更保守。对 08:30 决策的直接后果：
 
 - 一次调研最快在 `surv_date` 之后第 6 个自然日的 08:30 才可见，当日 09:30 才可能成交。实测 2023-01 至 2026-06 的 843 个调研日：6 个自然日 634 天、7 个自然日 161 天，长假尾部最长 15 个自然日；换算成交易日为 4 日 625 天、5 日 151 天，节前样本 1–3 日 67 天。
-- 因此**任何 5 日以内的调研事件窗都不可交易**，本包只做 20 日持有的月度漂移。写窗口时要意识到 `[T-5, T-1]` 这一段在 08:30 永远是空的。
+- 因此**任何 5 日以内的调研事件窗都不可交易**，本包只做 20 日持有的月度漂移。写窗口时要意识到 `[T-5, T-1]` 这一段在 08:30 几乎总是空的，只有上面那 67 个节前样本例外。
 - 春节等长假期间迟到披露的记录仍可能提前可见，这是已记录并接受的残余风险（数据文档 §4），不要据此设计跨假期的抢跑逻辑。
 
 ## 落库缺口：2025 年的行数下滑不是「调研冷却」
@@ -71,7 +71,8 @@ universe = pd.read_parquet(context.asof_dir + "/universe")               # ts_co
 - 对 `stk_surv` 的行直接计数，让一场几百家机构的说明会主导排序。
 - 把 `fund_visitors` 当人数（它是逗号分隔的到访人姓名，54.41% 为 `--`）。
 - 零行日与「零调研股票」混为一谈，在 2025Q4 造出全市场调研冷却。
-- 把 `top10_floatholders` 的单期水平当变化，或忽略 28/57/113 天的公告滞后。
+- 把 `top10_floatholders` 的单期水平当变化，或忽略 28/57/113 天的公告滞后；也不要把 `end_date` 当成规整报告期：除 0331/0630/0930/1231 外还混着 0205/0206/0208 这类非报告期日期（种子回放槽实测 223 个不同月日、约 10% 的行不落在四个报告期上），按期分组或做相邻两期差分前必须先过滤。
+- 按 `ts_code` 把 `stk_surv` 关联到 `daily`/`universe` 时把北交所整块丢掉：本表的北交所旧代码（83x/43x 开头）带的是 `.SZ` 后缀（种子回放槽实测 4,456 行、210 只、零 `.BJ`），而 `daily`/`universe` 的北交所是 `92xxxx.BJ`，两边逐字符对不上，join 后这些行直接消失——这是代码口径不一致，不是「北交所没有调研」。
 - 混单位：`hold_float_ratio` 与 `index_daily.pct_chg` 是百分数，`daily.turnover_rate`/`pct_chg` 是小数，`amount`/`circ_mv` 已归一为元。
 - 在 `generate_orders` 里每天全量重读全部事件域并重算滚动量。
 

@@ -1031,19 +1031,26 @@ def _regular_fold_pipeline(tmp_path: Path, evaluator, *, max_steps: int = 1, tes
     """Two regular quarterly Folds (or two rolling Folds) driven by a fake developer.
 
     The developer freezes its own revision on every Fold and echoes the parent
-    control it was handed, so the test can see exactly what reached it.
+    control it was handed, so the test can see exactly what reached it. Each
+    Fold nominates a DIFFERENT edit (``revision_1`` then ``revision_2``): a
+    nominated node whose bytes are the parent's own is not a new artifact, and
+    the Pipeline keeps the lineage head instead of reissuing an id for it.
     """
-    revision_dir = tmp_path / "revision"
-    revision_dir.mkdir()
-    (revision_dir / "main.py").write_text(
-        "def generate_orders(context):\n    return []\n", encoding="utf-8"
-    )
-    revision = ArtifactRevision("revision_1", revision_dir)
+    revisions = []
+    for index in (1, 2):
+        revision_dir = tmp_path / f"revision_{index}"
+        revision_dir.mkdir()
+        (revision_dir / "main.py").write_text(
+            f"# edit {index}\ndef generate_orders(context):\n    return []\n",
+            encoding="utf-8",
+        )
+        revisions.append(ArtifactRevision(f"revision_{index}", revision_dir))
     seen: list[FoldSessionResult | None] = []
     requests: list = []
 
     def developer(request):
         requests.append(request)
+        revision = revisions[min(len(requests), len(revisions)) - 1]
         steps = [
             StepResult(
                 f"step_{len(requests)}_{index}",
@@ -1082,10 +1089,13 @@ def _regular_fold_pipeline(tmp_path: Path, evaluator, *, max_steps: int = 1, tes
         max_steps_per_fold=max_steps,
     )
     ledger = ExperimentLedger(config.ledger_path)
+    artifacts = Artifacts(revisions[0], tmp_path / "frozen")
+    for revision in revisions[1:]:
+        artifacts.revisions[revision.revision_id] = revision
     pipeline = RollingExperimentPipeline(
         config,
         snapshots=Snapshots(),
-        artifacts=Artifacts(revision, tmp_path / "frozen"),
+        artifacts=artifacts,
         evaluator=evaluator,
         developer=developer,
         meta_learner=None,
@@ -1196,7 +1206,12 @@ def test_walk_forward_term_reaches_the_held_out_verdict(tmp_path: Path):
     verdict = experiment_verdict(ledger.read())
     assert verdict is not None
     assert verdict["status"] == "discarded"
-    assert verdict["reasons"] == ["walkforward_excess_inconsistent(0/1<1)"]
+    # Term (b) fails on the chain, and term (c) fails because the artifact the
+    # last Fold froze has no transition of its own at all.
+    assert verdict["reasons"] == [
+        "walkforward_excess_inconsistent(0/1<1)",
+        "final_artifact_unconfirmed(0/1)",
+    ]
     assert verdict["periods"][0]["walk_forward"] == {
         "status": "inconsistent",
         "source": "parent_control",
@@ -1213,9 +1228,21 @@ def test_walk_forward_term_reaches_the_held_out_verdict(tmp_path: Path):
     assert diagnostics["deflated_sharpe_probability"] is None
     assert diagnostics["validation_excess_percentile"] is None
     assert diagnostics["walk_forward_mean_excess_percentile"] is None
+    # The chain's percentile is not the shipped artifact's record; its own is
+    # reported beside it, and here it is empty.
+    assert diagnostics["final_artifact_forward_transitions"] == 0
+    assert diagnostics["final_artifact_forward_positive"] == 0
 
 
-def test_a_positive_walk_forward_transition_lets_a_passing_held_out_graduate(tmp_path: Path):
+def test_a_new_mechanism_frozen_in_the_last_fold_cannot_graduate(tmp_path: Path):
+    """Graduation term (c) end to end: the chain's record is not the shipped
+    artifact's.
+
+    Both Folds freeze, so the only transition replays the FIRST Fold's
+    strategy and is positive — the chain passes. Held-out passes on its own
+    too. What reaches Held-out is nevertheless a mechanism the last Fold minted
+    with zero forward quarters of its own, and it must not graduate on its
+    predecessor's history."""
     from autotrade.pipelines.ledger import experiment_verdict
 
     evaluator = RecordingEvaluator({"revision_1": 0.05})
@@ -1223,11 +1250,103 @@ def test_a_positive_walk_forward_transition_lets_a_passing_held_out_graduate(tmp
     first = pipeline.run_fold("epoch_001", folds[0], parent=None)
     evaluator.returns[first.frozen.artifact_id] = 0.03  # beats the 0.02 benchmark
     second = pipeline.run_fold("epoch_001", folds[1], parent=first.frozen)
+    assert second.frozen is not None and second.frozen.artifact_id != first.frozen.artifact_id
     evaluator.returns[second.frozen.artifact_id] = 0.10
     pipeline.run_heldout("epoch_001", second.frozen, _days())
     verdict = experiment_verdict(ledger.read())
-    assert verdict["status"] == "graduated"
     assert verdict["periods"][0]["walk_forward"]["status"] == "consistent"
+    assert verdict["status"] == "discarded"
+    assert verdict["reasons"] == ["final_artifact_unconfirmed(0/1)"]
+
+
+def test_a_last_fold_that_nominates_the_parent_keeps_the_artifact_id(tmp_path: Path):
+    """A Fold may nominate the host's parent_control node — the inherited parent
+    replayed unchanged. Minting a second artifact id for those same bytes would
+    restart the shipped strategy's own forward record at zero, and graduation
+    term (c) reads that record by id: a strategy the chain confirmed quarter
+    after quarter would be discarded because the last Fold renamed it. The
+    lineage head is retained instead, and the Fold row says so plainly."""
+    from autotrade.pipelines.ledger import experiment_verdict
+
+    evaluator = RecordingEvaluator({"revision_1": 0.05})
+    pipeline, folds, ledger, _requests = _regular_fold_pipeline(tmp_path, evaluator)
+    first = pipeline.run_fold("epoch_001", folds[0], parent=None)
+    assert first.frozen is not None
+    evaluator.returns[first.frozen.artifact_id] = 0.03  # beats the 0.02 benchmark
+
+    def keeps_the_parent(request):
+        # ``revision_1`` is what the first Fold froze: the control node's tree.
+        return FoldSessionResult(
+            "conversation",
+            (
+                StepResult(
+                    "control", "revision_1", request.parent_control, parent_control=True
+                ),
+            ),
+            "control",
+        )
+
+    pipeline.developer = keeps_the_parent
+    second = pipeline.run_fold("epoch_001", folds[1], parent=first.frozen)
+    assert second.fold_status == "no_update"
+    assert second.frozen is not None
+    assert second.frozen.artifact_id == first.frozen.artifact_id
+    record = ledger.read("fold")[1]
+    assert record["frozen_strategy_artifact_id"] == first.frozen.artifact_id
+    assert record["nominated_identical_to_parent"] is True
+    # Not a rejection and not an abstention: the nomination passed acceptance,
+    # it simply was the parent itself.
+    assert (record["finish_mode"], record["hard_reject_reasons"]) == ("nominated", [])
+    assert record["selected_step_id"] == "control"
+    assert record["validation_result"]["total_return"] == 0.03
+    # The field is recorded only where it happened: the first Fold froze a
+    # genuinely new artifact and carries nothing.
+    assert "nominated_identical_to_parent" not in ledger.read("fold")[0]
+
+    evaluator.returns[first.frozen.artifact_id] = 0.10
+    pipeline.run_heldout("epoch_001", second.frozen, _days())
+    verdict = experiment_verdict(ledger.read())
+    assert verdict is not None
+    # The second Fold's parent control replayed this very artifact forward and
+    # beat the benchmark, so terms (b) and (c) both count it.
+    assert verdict["status"] == "graduated"
+    assert verdict["reasons"] == []
+    diagnostics = verdict["periods"][0]["diagnostics"]
+    assert diagnostics["final_artifact_forward_transitions"] == 1
+    assert diagnostics["final_artifact_forward_positive"] == 1
+
+
+def test_a_positive_walk_forward_transition_lets_a_passing_held_out_graduate(tmp_path: Path):
+    """The graduating shape: the second Fold confirms the first Fold's
+    strategy forward and keeps it, so the artifact Held-out replays owns the
+    transition that term (b) counts."""
+    from autotrade.pipelines.ledger import experiment_verdict
+
+    evaluator = RecordingEvaluator({"revision_1": 0.05})
+    pipeline, folds, ledger, _requests = _regular_fold_pipeline(tmp_path, evaluator)
+    first = pipeline.run_fold("epoch_001", folds[0], parent=None)
+    evaluator.returns[first.frozen.artifact_id] = 0.03  # beats the 0.02 benchmark
+    developer = pipeline.developer
+
+    def abstaining(request):
+        result = developer(request)
+        return replace(result, selected_step_id=None, no_edge_reason="no candidate beat the parent")
+
+    pipeline.developer = abstaining
+    second = pipeline.run_fold("epoch_001", folds[1], parent=first.frozen)
+    assert (second.fold_status, second.frozen.artifact_id) == (
+        "no_update",
+        first.frozen.artifact_id,
+    )
+    evaluator.returns[first.frozen.artifact_id] = 0.10
+    pipeline.run_heldout("epoch_001", second.frozen, _days())
+    verdict = experiment_verdict(ledger.read())
+    assert verdict["status"] == "graduated"
+    assert verdict["reasons"] == []
+    assert verdict["periods"][0]["walk_forward"]["status"] == "consistent"
+    diagnostics = verdict["periods"][0]["diagnostics"]
+    assert diagnostics["final_artifact_forward_transitions"] == 1
+    assert diagnostics["final_artifact_forward_positive"] == 1
 
 
 def test_a_test_stage_schedule_uses_the_frozen_tests_as_walk_forward_evidence(tmp_path: Path):
@@ -1252,10 +1371,18 @@ def test_a_test_stage_schedule_uses_the_frozen_tests_as_walk_forward_evidence(tm
     pipeline.run_heldout("epoch_001", outcome.frozen, _days())
     verdict = experiment_verdict(ledger.read())
     assert verdict["status"] == "discarded"
-    assert verdict["reasons"] == ["walkforward_excess_inconsistent(0/1<1)"]
+    # With a Test stage the transition scores the Fold's own frozen artifact,
+    # so this one transition is both the chain's and the shipped artifact's.
+    assert verdict["reasons"] == [
+        "walkforward_excess_inconsistent(0/1<1)",
+        "final_artifact_forward_excess_inconsistent(0/1<1)",
+    ]
     block = verdict["periods"][0]["walk_forward"]
     assert block["source"] == "frozen_test"
     assert (block["transitions"], block["positive_excess"], block["required"]) == (1, 0, 1)
+    diagnostics = verdict["periods"][0]["diagnostics"]
+    assert diagnostics["final_artifact_forward_transitions"] == 1
+    assert diagnostics["final_artifact_forward_positive"] == 0
 
 
 def test_single_window_fold_has_no_frozen_test_and_held_out_graduates(tmp_path: Path):
@@ -1297,8 +1424,10 @@ def test_single_window_fold_has_no_frozen_test_and_held_out_graduates(tmp_path: 
         "trade_count": None,
         "heldout_min_trades": 0,
         # A single development Fold has no walk-forward transition: term (b)
-        # is not applicable and Held-out alone decides.
+        # is not applicable, and term (c) with it — nothing in this schedule
+        # could confirm any artifact forward — so Held-out alone decides.
         "walk_forward": {"status": "not_applicable", "transitions": 0},
+        "heldout_min_final_transitions": 1,
         # Selection diagnostics of the Fold that froze the strategy, carried
         # beside the metrics: one candidate here, no deflated Sharpe, and this
         # fake evaluator runs no null control.
@@ -1306,8 +1435,11 @@ def test_single_window_fold_has_no_frozen_test_and_held_out_graduates(tmp_path: 
             "frozen_fold_id": fold.fold_id,
             "candidates_evaluated": 1,
             "deflated_sharpe_probability": None,
+            "deflated_sharpe_trials": 0,
             "validation_excess_percentile": None,
             "walk_forward_mean_excess_percentile": None,
+            "final_artifact_forward_transitions": 0,
+            "final_artifact_forward_positive": 0,
         },
     }
     verdict = experiment_verdict(ledger.read())
@@ -1788,6 +1920,50 @@ def test_vs_parent_is_the_candidate_minus_the_control_it_is_given():
     assert partial["beats_parent"] is None
 
 
+def test_a_candidate_that_replayed_the_parent_order_stream_says_so():
+    """An overlay that never fires reproduces the parent control's own result.
+
+    Its ``vs_parent`` is then a row of exact zeros, which a session has already
+    read as a broken or substituted comparison. The flag names what it is, and
+    it is claimed only when the two results agree on what was actually traded:
+    one order more is a different strategy on the same window.
+    """
+
+    def summary(wall_seconds: float) -> dict[str, object]:
+        result = _candidate_summary(
+            total_return=0.08, sharpe=0.4, excess=0.03, neutralized=0.02
+        )
+        result.update(
+            {
+                "final_equity": 108_000.0,
+                "order_count": 42,
+                "trade_count": 19,
+                # Wall clock differs between two replays of the same orders.
+                "replay_wall_seconds": wall_seconds,
+            }
+        )
+        return result
+
+    block = vs_parent_metrics(summary(311.4), summary(298.7))
+    assert block["identical_to_parent"] is True
+    assert block["excess_return_delta"] == 0.0
+    assert block["beats_parent"] is False
+    assert "order stream" in block["vs_parent_note"]
+
+    one_order_more = summary(298.7)
+    one_order_more["order_count"] = 43
+    changed = vs_parent_metrics(summary(311.4), one_order_more)
+    assert "identical_to_parent" not in changed
+    assert "vs_parent_note" not in changed
+
+    # Summaries that never carried the counts cannot prove the claim, so it is
+    # not made even though every delta is zero.
+    bare = _candidate_summary(
+        total_return=0.08, sharpe=0.4, excess=0.03, neutralized=0.02
+    )
+    assert "identical_to_parent" not in vs_parent_metrics(bare, dict(bare))
+
+
 def _selection_fold_pipeline(tmp_path: Path):
     evaluator = ControlBenchmarkEvaluator({"revision_1": 0.05})
     return _regular_fold_pipeline(tmp_path, evaluator, max_steps=3)
@@ -1826,7 +2002,7 @@ def test_a_fold_counts_its_own_trials_and_deflates_the_frozen_candidates_sharpe(
                 ),
                 StepResult(
                     "step_a",
-                    "revision_1",
+                    "revision_2",
                     EvaluationResult(
                         _candidate_summary(
                             total_return=0.12, sharpe=0.5, excess=0.10, neutralized=0.06
@@ -1836,7 +2012,7 @@ def test_a_fold_counts_its_own_trials_and_deflates_the_frozen_candidates_sharpe(
                 ),
                 StepResult(
                     "step_b",
-                    "revision_1",
+                    "revision_2",
                     EvaluationResult(
                         _candidate_summary(
                             total_return=0.06, sharpe=0.1, excess=0.04, neutralized=0.01
@@ -1846,7 +2022,7 @@ def test_a_fold_counts_its_own_trials_and_deflates_the_frozen_candidates_sharpe(
                 ),
                 StepResult(
                     "step_c",
-                    "revision_1",
+                    "revision_2",
                     EvaluationResult(
                         _candidate_summary(
                             total_return=0.08, sharpe=0.3, excess=0.06, neutralized=0.03

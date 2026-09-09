@@ -2123,8 +2123,8 @@ class WebuiBackendTest(unittest.TestCase):
                 "session_key": "heldout",
                 "period": "2026",
                 "result": heldout_result,
-                # The verdict the pipeline stamps: term (a) passes, term (b)
-                # does not, so the failing reason is the walk-forward one.
+                # The verdict the pipeline stamps: terms (a) and (c) pass, term
+                # (b) does not, so the failing reason is the walk-forward one.
                 "verdict": AcceptanceRules().heldout_verdict(
                     heldout_result,
                     {
@@ -2132,6 +2132,18 @@ class WebuiBackendTest(unittest.TestCase):
                         "epoch_id": "epoch_001",
                         "transitions": 3,
                         "positive_excess": 1,
+                    },
+                    None,
+                    # The shipped artifact's own share of those transitions,
+                    # shaped exactly as ledger.final_artifact_transitions
+                    # returns it to run_heldout: the last Fold kept the parent,
+                    # so the artifact Held-out replays was confirmed forward
+                    # twice before it got there.
+                    {
+                        "artifact_id": "strategy_epoch_001_fold_2023",
+                        "epoch_id": "epoch_001",
+                        "transitions": 2,
+                        "positive_excess": 2,
                     },
                 ),
             }

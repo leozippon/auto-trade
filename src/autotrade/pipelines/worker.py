@@ -5,9 +5,11 @@ from __future__ import annotations
 import math
 import os
 import re
+from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import NoReturn
 
 import pandas as pd
 
@@ -59,6 +61,7 @@ from .config import (
 from .experiment import RollingExperimentPipeline
 from .folds import build_fold_schedule, heldout_periods, load_sse_trading_days
 from .hitl_state import (
+    SCHEDULE_NAME,
     WEB_CREATE_DEFAULTS,
     WEB_INTERNAL_PARAMS,
     StatusReporter,
@@ -76,6 +79,7 @@ from .ledger import (
     RunMarkers,
     assert_no_frozen_artifact_mutation,
     experiment_verdict,
+    is_durable_success_record,
     latest_fold_records,
 )
 from .local_backend import (
@@ -162,6 +166,7 @@ _ALLOWED_PARAMS = {
     "max_drawdown",
     "cost_stress_multiplier",
     "heldout_min_trades",
+    "heldout_min_final_transitions",
     "meta_learning_fold_interval",
     "meta_memory_max_epochs",
     "inherit_from",
@@ -702,6 +707,10 @@ def resolve_worker_options(
             heldout_min_trades=_nonnegative_int(
                 params.get("heldout_min_trades", 0), "heldout_min_trades"
             ),
+            heldout_min_final_transitions=_nonnegative_int(
+                params.get("heldout_min_final_transitions", 1),
+                "heldout_min_final_transitions",
+            ),
         ),
         schedule=schedule,
         broker_profile=BrokerProfile(
@@ -890,6 +899,17 @@ def run_local_interactive_worker(
         )
         write_json_atomic(hitl / "status.json", payload)
         return payload
+    # Development that already walked its whole plan without freezing anything
+    # is terminal: a resume could only re-walk the finished plan and end at the
+    # same failure, so republish it here instead -- before any snapshot,
+    # sandbox or gateway preparation, and without re-running a single session.
+    if (
+        _development_is_exhausted(hitl, ledger)
+        and not _pending_rerun(hitl, ledger)
+        and _latest_artifact(ledger, store) is None
+        and _load_inherited_parent(options.experiment_dir) is None
+    ):
+        _fail_without_frozen_artifact(hitl, ledger)
     if (
         command_runner_factory is None
         and (options.execution_mode == "sandbox" or options.developer_mode == "llm")
@@ -1096,7 +1116,7 @@ def run_local_interactive_worker(
         meta_enabled=meta_enabled,
         meta_learning_fold_interval=options.rolling.meta_learning_fold_interval,
     )
-    write_json_atomic(hitl / "schedule.json", plan)
+    write_json_atomic(hitl / SCHEDULE_NAME, plan)
     # Inherited seed (from another experiment's frozen output) replaces the
     # blank template as the first fold's parent; a resumed experiment takes its
     # parent from its own ledger instead.
@@ -1162,7 +1182,7 @@ def run_local_interactive_worker(
         return result
     final = state["parent"] or _latest_artifact(ledger, store)
     if final is None:
-        raise RuntimeError("Development completed without a frozen baseline artifact")
+        _fail_without_frozen_artifact(hitl, ledger)
     final_status = StatusReporter(hitl / "status.json")
     final_status.start()
     completed_development = len(
@@ -1306,19 +1326,87 @@ def _has_outstanding_work(hitl: Path, ledger: ExperimentLedger) -> bool:
     rerun request leaves a token no fold record has absorbed yet. In both cases
     the worker must resume instead of republishing the terminal status, or the
     console operation would look accepted and silently do nothing."""
-    records = ledger.read()
-    if not any(record.get("record_type") == "heldout" for record in records):
+    if not ledger.read("heldout"):
         return True
+    return _pending_rerun(hitl, ledger)
+
+
+def _pending_rerun(hitl: Path, ledger: ExperimentLedger) -> bool:
+    """Whether a console re-run request is still waiting for its fold record."""
     pending = read_control(hitl / "control.json").rerun_sessions
     if not pending:
         return False
-    absorbed: dict[str, str] = {}
-    for record in records:
-        if record.get("record_type") == "fold":
-            absorbed[str(record.get("session_key") or "")] = str(
-                record.get("rerun_id") or ""
-            )
+    absorbed = {
+        str(record.get("session_key") or ""): str(record.get("rerun_id") or "")
+        for record in ledger.read("fold")
+    }
     return any(absorbed.get(key) != token for key, token in pending.items())
+
+
+def _development_is_exhausted(hitl: Path, ledger: ExperimentLedger) -> bool:
+    """Whether every planned development session already has a durable record.
+
+    The plan of record is the worker's own ``schedule.json``, the same plan the
+    console resolves its session operations against, so the question is settled
+    without rebuilding the calendar or touching any data."""
+    sessions = read_json(hitl / SCHEDULE_NAME).get("sessions")
+    if not isinstance(sessions, list):
+        return False
+    planned = {
+        str(item.get("session_key") or "")
+        for item in sessions
+        if isinstance(item, dict) and item.get("kind") in {"fold", "meta"}
+    }
+    if not planned or "" in planned:
+        return False
+    completed = {
+        str(record.get("session_key") or "")
+        for record in ledger.read()
+        if is_durable_success_record(record, record_types=("fold", "meta_learning"))
+    }
+    return planned <= completed
+
+
+def _fail_without_frozen_artifact(hitl: Path, ledger: ExperimentLedger) -> NoReturn:
+    """The documented zero-freeze end of development (§4.3): development ran
+    out of folds without ever freezing an artifact, so there is nothing to
+    evaluate and the run fails. The status is published here as well as raised
+    so the terminal state is the same whichever caller drove the worker."""
+    error = _development_end_error(ledger)
+    write_json_atomic(
+        hitl / "status.json",
+        {
+            "schema_version": 1,
+            "state": "failed",
+            "pid": os.getpid(),
+            "failed_at": utc_now_iso(),
+            "error": f"RuntimeError: {error}",
+        },
+    )
+    raise RuntimeError(error)
+
+
+def _development_end_error(ledger: ExperimentLedger) -> str:
+    """Name the research cause the ledger already holds. The bare sentence left
+    the reader to reconstruct by hand whether every Fold abstained, every
+    nomination was hard-rejected, or no session ever nominated anything."""
+    folds = latest_fold_records(ledger.read("fold"))
+    outcomes = Counter(
+        (
+            str(record.get("finish_mode") or "unknown"),
+            str(record.get("fold_status") or "unknown"),
+        )
+        for record in folds.values()
+    )
+    detail = (
+        ", ".join(
+            f"{count}/{len(folds)} folds ended {mode} ({status})"
+            for (mode, status), count in outcomes.most_common()
+        )
+        if outcomes
+        else "no fold recorded a result"
+    )
+    return f"Development completed without a frozen baseline artifact: {detail}"
 
 
 def _load_inherited_parent(experiment_dir: Path) -> FrozenArtifact | None:

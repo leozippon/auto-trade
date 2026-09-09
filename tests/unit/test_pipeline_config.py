@@ -207,17 +207,26 @@ class AcceptanceRulesTest(unittest.TestCase):
             "max_drawdown": -0.05,
             "benchmark": {"benchmark_return": 0.02, "neutralized_excess_return": 0.03},
         }
+        # The shipped artifact's own forward record, so term (c) holds and
+        # these assertions stay about term (b).
+        own = {"transitions": 2, "positive_excess": 2}
         # Held-out passes but only 1 of 3 walk-forward transitions beat the
         # benchmark: term (b) fails and the reason carries the counts.
         verdict = rules.heldout_verdict(
-            passing, {"source": "parent_control", "transitions": 3, "positive_excess": 1}
+            passing,
+            {"source": "parent_control", "transitions": 3, "positive_excess": 1},
+            None,
+            own,
         )
         self.assertEqual(verdict["status"], "discarded")
         self.assertEqual(verdict["reasons"], ["walkforward_excess_inconsistent(1/3<2)"])
         self.assertEqual(verdict["walk_forward"]["status"], "inconsistent")
         # 2 of 3 suffice; both terms then hold.
         verdict = rules.heldout_verdict(
-            passing, {"source": "parent_control", "transitions": 3, "positive_excess": 2}
+            passing,
+            {"source": "parent_control", "transitions": 3, "positive_excess": 2},
+            None,
+            own,
         )
         self.assertEqual((verdict["status"], verdict["reasons"]), ("graduated", []))
         self.assertEqual(verdict["walk_forward"]["status"], "consistent")
@@ -230,11 +239,79 @@ class AcceptanceRulesTest(unittest.TestCase):
         verdict = rules.heldout_verdict(
             {**passing, "sharpe": -0.1},
             {"source": "frozen_test", "transitions": 2, "positive_excess": 1},
+            None,
+            own,
         )
         self.assertEqual(
             verdict["reasons"],
             ["sharpe_not_positive", "walkforward_excess_inconsistent(1/2<2)"],
         )
+
+    def test_the_shipped_artifact_needs_forward_transitions_of_its_own(self) -> None:
+        """Graduation term (c): the chain's record is not this artifact's.
+
+        A mechanism first frozen in the Epoch's last Fold has zero transitions
+        that replayed it, however long and however positive the lineage's own
+        record is. That is exactly what a new mechanism shipped straight to
+        Held-out looks like, and it must not graduate on the parent's history.
+        """
+
+        rules = AcceptanceRules()
+        passing = {
+            "total_return": 0.10,
+            "sharpe": 1.0,
+            "max_drawdown": -0.05,
+            "benchmark": {"benchmark_return": 0.02, "neutralized_excess_return": 0.03},
+        }
+        chain = {"source": "parent_control", "transitions": 12, "positive_excess": 12}
+        self.assertEqual(rules.heldout_min_final_transitions, 1)
+        # Everything else passes; the artifact itself was never confirmed.
+        verdict = rules.heldout_verdict(
+            passing, chain, None, {"artifact_id": "strategy_x", "transitions": 0, "positive_excess": 0}
+        )
+        self.assertEqual(verdict["status"], "discarded")
+        self.assertEqual(verdict["reasons"], ["final_artifact_unconfirmed(0/1)"])
+        self.assertEqual(verdict["heldout_min_final_transitions"], 1)
+        self.assertEqual(
+            (
+                verdict["diagnostics"]["final_artifact_forward_transitions"],
+                verdict["diagnostics"]["final_artifact_forward_positive"],
+            ),
+            (0, 0),
+        )
+        # One confirming transition, positive: it graduates.
+        verdict = rules.heldout_verdict(
+            passing, chain, None, {"transitions": 1, "positive_excess": 1}
+        )
+        self.assertEqual((verdict["status"], verdict["reasons"]), ("graduated", []))
+        # Confirmed but negative: the same two-thirds rule applies to its own.
+        verdict = rules.heldout_verdict(
+            passing, chain, None, {"transitions": 3, "positive_excess": 1}
+        )
+        self.assertEqual(
+            verdict["reasons"], ["final_artifact_forward_excess_inconsistent(1/3<2)"]
+        )
+        # Counts that were never computed cannot prove the term.
+        self.assertEqual(
+            rules.heldout_verdict(passing, chain)["reasons"],
+            ["missing_final_artifact_transitions"],
+        )
+        # A schedule with no transitions confirms nothing about any artifact:
+        # term (b) is not applicable there and (c) follows it.
+        self.assertEqual(
+            rules.heldout_verdict(passing, {"transitions": 0})["reasons"], []
+        )
+        # A higher floor demands more confirming Folds; 0 drops the term.
+        strict = AcceptanceRules(heldout_min_final_transitions=2)
+        self.assertEqual(
+            strict.heldout_verdict(passing, chain, None, {"transitions": 1, "positive_excess": 1})[
+                "reasons"
+            ],
+            ["final_artifact_unconfirmed(1/2)"],
+        )
+        off = AcceptanceRules(heldout_min_final_transitions=0)
+        self.assertEqual(off.heldout_verdict(passing, chain)["reasons"], [])
+        self.assertEqual(off.heldout_verdict(passing, chain)["heldout_min_final_transitions"], 0)
 
     def test_the_verdict_carries_selection_diagnostics_without_gating_on_them(self) -> None:
         """DSR, the frozen node's Validation null percentile and the mean null
@@ -254,8 +331,10 @@ class AcceptanceRulesTest(unittest.TestCase):
                 "fold_id": "fold_2025Q4",
                 "candidates_evaluated": 17,
                 "deflated_sharpe_probability": 0.004,
+                "deflated_sharpe_trials": 18,
                 "validation_excess_percentile": 0.11,
             },
+            {"artifact_id": "strategy_x", "transitions": 2, "positive_excess": 2},
         )
         self.assertEqual((verdict["status"], verdict["reasons"]), ("graduated", []))
         self.assertEqual(
@@ -264,8 +343,11 @@ class AcceptanceRulesTest(unittest.TestCase):
                 "frozen_fold_id": "fold_2025Q4",
                 "candidates_evaluated": 17,
                 "deflated_sharpe_probability": 0.004,
+                "deflated_sharpe_trials": 18,
                 "validation_excess_percentile": 0.11,
                 "walk_forward_mean_excess_percentile": 0.42,
+                "final_artifact_forward_transitions": 2,
+                "final_artifact_forward_positive": 2,
             },
         )
         # The term (b) block keeps its shape: the console reads it as is.
@@ -277,8 +359,11 @@ class AcceptanceRulesTest(unittest.TestCase):
                 "frozen_fold_id": None,
                 "candidates_evaluated": None,
                 "deflated_sharpe_probability": None,
+                "deflated_sharpe_trials": None,
                 "validation_excess_percentile": None,
                 "walk_forward_mean_excess_percentile": None,
+                "final_artifact_forward_transitions": None,
+                "final_artifact_forward_positive": None,
             },
         )
 
@@ -289,6 +374,7 @@ class AcceptanceRulesTest(unittest.TestCase):
             max_drawdown=0.3,
             cost_stress_multiplier=2.0,
             heldout_min_trades=20,
+            heldout_min_final_transitions=2,
         )
         self.assertEqual(
             rules.to_record(),
@@ -298,6 +384,7 @@ class AcceptanceRulesTest(unittest.TestCase):
                 "max_drawdown": 0.3,
                 "cost_stress_multiplier": 2.0,
                 "heldout_min_trades": 20,
+                "heldout_min_final_transitions": 2,
             },
         )
 
@@ -425,6 +512,17 @@ class HeldOutCostAndTradeGateTest(unittest.TestCase):
         required = default["graduation"]["all_required"]
         self.assertNotIn("excess_at_cost_stress", required)
         self.assertNotIn("trade_count", required)
+        # Term (c) is on by default, so the session is told before it freezes
+        # anything that a last-Fold mechanism cannot graduate on its own.
+        self.assertIn(
+            "cannot graduate", required["final_artifact_forward_transitions"]
+        )
+        self.assertNotIn(
+            "final_artifact_forward_transitions",
+            AcceptanceRules(heldout_min_final_transitions=0).agent_facts()[
+                "graduation"
+            ]["all_required"],
+        )
 
         configured = AcceptanceRules(
             max_drawdown=0.2, cost_stress_multiplier=2.0, heldout_min_trades=20
@@ -439,6 +537,7 @@ class HeldOutCostAndTradeGateTest(unittest.TestCase):
                 "excess_at_cost_stress",
                 "trade_count",
                 "walk_forward_positive_excess",
+                "final_artifact_forward_transitions",
             ],
         )
         self.assertIn("0.2", configured["max_drawdown"])
@@ -627,6 +726,7 @@ class DefaultsDriftTest(unittest.TestCase):
                     "heldout_last_period": "20260101..20260630",
                     "cost_stress_multiplier": 2.0,
                     "heldout_min_trades": 20,
+                    "heldout_min_final_transitions": 2,
                     "strategy_path": "configs/agent_output_template/main.py",
                     "data_backend": "pit",
                     "raw_dir": "data/raw",
@@ -642,6 +742,7 @@ class DefaultsDriftTest(unittest.TestCase):
         self.assertEqual(options.rolling.validation_periods, 4)
         self.assertEqual(options.rolling.acceptance.cost_stress_multiplier, 2.0)
         self.assertEqual(options.rolling.acceptance.heldout_min_trades, 20)
+        self.assertEqual(options.rolling.acceptance.heldout_min_final_transitions, 2)
         # The schedule the worker would build from it: 13 quarterly steps.
         days = [
             stamp.strftime("%Y%m%d") for stamp in pd.bdate_range("2019-01-01", "2026-06-30")

@@ -149,7 +149,8 @@ def vs_parent_metrics(
     magnitudes, so it is positive when the candidate drew down more than the
     parent whichever sign convention the summary uses. ``beats_parent`` is
     True only when both excess deltas are > 0, and ``None`` when either delta
-    could not be computed.
+    could not be computed. ``identical_to_parent`` and its note are added only
+    when the candidate reproduced the parent control's result exactly.
     """
 
     if not isinstance(summary, Mapping) or not isinstance(control_summary, Mapping):
@@ -177,7 +178,46 @@ def vs_parent_metrics(
         if isinstance(excess, float) and isinstance(neutralized, float)
         else None
     )
+    if _same_result_as_parent(summary, control_summary, deltas):
+        deltas["identical_to_parent"] = True
+        deltas["vs_parent_note"] = (
+            "identical to the parent control: this candidate placed the same "
+            "order stream as the parent, so every delta is exactly zero. An "
+            "order-level no-op, not a failed or substituted comparison."
+        )
     return deltas
+
+
+def _same_result_as_parent(
+    summary: Mapping[str, object],
+    control_summary: Mapping[str, object],
+    deltas: Mapping[str, object],
+) -> bool:
+    """Whether the candidate reproduced the parent control's result exactly.
+
+    An overlay that never fires -- an exclusion filter that excluded none of
+    the parent's buys, a threshold no day reached -- replays to the parent's
+    own order stream, and its ``vs_parent`` is then a row of exact zeros. Read
+    as deltas alone that is indistinguishable from a broken or substituted
+    comparison, and a session has already misread one as a silent host
+    fallback. So the deltas must all be exactly zero AND the two summaries must
+    agree on what was actually traded: without ``final_equity``, ``order_count``
+    and ``trade_count`` on both sides the claim is not proven and is not made.
+    """
+
+    for key in (
+        "excess_return_delta",
+        "neutralized_excess_return_delta",
+        "max_drawdown_delta",
+    ):
+        value = deltas.get(key)
+        if not isinstance(value, float) or value != 0.0:
+            return False
+    for key in ("final_equity", "order_count", "trade_count"):
+        candidate = summary.get(key)
+        if candidate is None or candidate != control_summary.get(key):
+            return False
+    return True
 
 
 def _benchmark_number(summary: Mapping[str, object], key: str) -> float | None:
@@ -351,6 +391,9 @@ VS_PARENT_DELTA_KEYS = (
     "neutralized_excess_return_delta",
     "max_drawdown_delta",
     "beats_parent",
+    # Present only on an order-level no-op: a later reader must not take that
+    # Fold's row of exact zeros for a missing comparison.
+    "identical_to_parent",
 )
 
 

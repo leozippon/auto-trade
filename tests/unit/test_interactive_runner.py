@@ -11,9 +11,11 @@ executor so each branch is observed, including the ones that must NOT fire.
 from __future__ import annotations
 
 import json
+import os
 import signal
 import subprocess
 import sys
+import time
 import unittest
 from datetime import UTC, datetime
 from pathlib import Path
@@ -555,6 +557,67 @@ class WorkerEntrypointTest(unittest.TestCase):
             self.assertEqual(restored.returncode, 7)
         finally:
             signal.signal(signal.SIGCHLD, previous)
+
+    def test_the_entrypoint_stamps_a_terminal_state_when_sigterm_unwinds_it(
+        self,
+    ) -> None:
+        """A graceful terminate must not leave a live state behind a dead pid.
+
+        The console stamps a terminal state itself only when it has to escalate
+        to SIGKILL. A worker that honours SIGTERM inside the grace window
+        unwinds through the handler's `SystemExit`, which is not an `Exception`:
+        while this entrypoint caught only `Exception`, `status.json` kept
+        `running_session` and its dead pid for good, and the console showed a
+        finished arm as live.
+        """
+        sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
+        from experiments import run_interactive_experiment
+
+        previous = signal.getsignal(signal.SIGTERM)
+        with TemporaryDirectory() as tmp:
+            experiment_dir = Path(tmp) / "exp"
+            (experiment_dir / "hitl").mkdir(parents=True)
+            status_path = experiment_dir / "hitl/status.json"
+
+            def live_session(_options, **_kwargs):
+                # What the runner leaves on disk while a session is running.
+                status_path.write_text(
+                    json.dumps(
+                        {
+                            "schema_version": 1,
+                            "state": "running_session",
+                            "pid": os.getpid(),
+                            "session_key": "epoch_003/fold_2022",
+                            "completed_sessions": 17,
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                os.kill(os.getpid(), signal.SIGTERM)
+                time.sleep(5)  # the handler unwinds this sleep
+                raise AssertionError("SIGTERM was never delivered")
+
+            try:
+                with patch.object(
+                    run_interactive_experiment, "load_worker_options"
+                ), patch.object(
+                    run_interactive_experiment,
+                    "run_local_interactive_worker",
+                    live_session,
+                ):
+                    code = run_interactive_experiment.main(
+                        ["--experiment-dir", str(experiment_dir)]
+                    )
+            finally:
+                signal.signal(signal.SIGTERM, previous)
+            self.assertEqual(code, 143)
+            status = json.loads(status_path.read_text(encoding="utf-8"))
+            self.assertEqual(status["state"], "terminated")
+            self.assertIsNone(status["error"])
+            self.assertTrue(status["terminated_at"])
+            # Where the run stopped survives, as on the escalated path.
+            self.assertEqual(status["session_key"], "epoch_003/fold_2022")
+            self.assertEqual(status["completed_sessions"], 17)
 
     def test_the_entrypoint_persists_a_terminal_failure_status(self) -> None:
         sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
