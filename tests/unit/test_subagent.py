@@ -1251,9 +1251,9 @@ def test_normalize_subagent_thinking_resolves_the_launch_precedence() -> None:
     by the launch tool, so the schema enum never sees them
     (test_legacy_thinking_values_launch_at_xhigh_through_the_registry)."""
 
-    assert DEFAULT_SUBAGENT_THINKING == "xhigh"
-    assert normalize_subagent_thinking(None) == "xhigh"
-    assert normalize_subagent_thinking("inherit") == "xhigh"
+    assert DEFAULT_SUBAGENT_THINKING == "medium"
+    assert normalize_subagent_thinking(None) == "medium"
+    assert normalize_subagent_thinking("inherit") == "medium"
     assert normalize_subagent_thinking("low") == "low"
     assert normalize_subagent_thinking("xhigh") == "xhigh"
     assert SUBAGENT_THINKING_LEVELS == ("off", "low", "medium", "xhigh")
@@ -1261,14 +1261,23 @@ def test_normalize_subagent_thinking_resolves_the_launch_precedence() -> None:
         normalize_subagent_thinking("turbo")
 
 
-def test_subagent_defaults_are_xhigh_thinking_and_four_concurrent() -> None:
+def test_subagent_defaults_are_medium_thinking_and_four_concurrent() -> None:
+    """``medium`` is the default a launch that says nothing gets; the per-launch
+    override still reaches the child, which is what keeps a judgement-heavy
+    delegation able to ask for ``xhigh``."""
+
     assert DEFAULT_SUBAGENT_MAX_CONCURRENT == 4
     assert SubAgentConfig().max_concurrent == 4
     result = SubAgentEngine(
         llm=ScriptedLLM([ProviderResponse(content="ok")]),
         tools=ToolRegistry([DeclaredReadOnlyShell()]),
     ).run("summarize", role="auditor")
-    assert result["thinking"] == "xhigh"
+    assert result["thinking"] == "medium"
+    raised = SubAgentEngine(
+        llm=ScriptedLLM([ProviderResponse(content="ok")]),
+        tools=ToolRegistry([DeclaredReadOnlyShell()]),
+    ).run("design the ranker", role="developer", thinking="xhigh")
+    assert raised["thinking"] == "xhigh"
     assert "默认同时运行 4 个，超出排队" in AGENT_TOOL_DESCRIPTION
     assert "subagent_completed" in FOLD_WORKFLOW_SECTION
     assert "不要用工具轮询" in FOLD_WORKFLOW_SECTION
@@ -2745,9 +2754,9 @@ def test_agent_description_states_role_capabilities_and_thinking_tiers() -> None
         "smoke_backtest",
         "不能执行",
         "general-purpose 或 developer",
-        "thinking 默认 xhigh",
+        "thinking 默认 medium",
+        "显式抬到 xhigh",
         "机械工作",
-        "low/medium",
         f"{AGENT_MAX_OUTPUT_TOKENS} token",
         continuations,
         "不要串成 resume 链",
@@ -2756,9 +2765,10 @@ def test_agent_description_states_role_capabilities_and_thinking_tiers() -> None
     ):
         assert phrase in AGENT_TOOL_DESCRIPTION
     thinking_field = AGENT_TOOL_SPEC.input_schema["properties"]["thinking"]["description"]
-    assert "均为 xhigh" in thinking_field and continuations in thinking_field
+    assert "均为 medium" in thinking_field and continuations in thinking_field
+    assert "显式给 xhigh" in thinking_field
     for prompt in (FOLD_WORKFLOW_SECTION, build_system_prompt(mode="meta", experiment_facts={})):
-        assert "low/medium" in prompt and "action=message" in prompt
+        assert "action=message" in prompt
         assert "xhigh 只给纯文本" not in prompt
         assert "优先 `resume`" not in prompt
     agent_field = AGENT_TOOL_SPEC.input_schema["properties"]["agent"]

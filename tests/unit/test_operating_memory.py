@@ -182,7 +182,37 @@ def test_the_curated_library_is_a_valid_skill_tree_of_operational_entries() -> N
         "subagent-delegation-pattern",
         "dead-code-sweep",
         "verify-parsed-counts",
+        "fold-opening-digest",
     } <= set(entries)
+
+
+def test_a_new_experiment_mounts_the_fold_opening_digest(tmp_path: Path) -> None:
+    """The digest a Fold otherwise re-derives every opening reaches a session
+    that mounts this checkout's curated tier: dropping the directory into the
+    library is the whole registration, and the index is what the Agent reads."""
+
+    workspace, _ = _workspace(tmp_path, mode="curated", repo_root=REPO_ROOT)
+    entry_path = (
+        workspace / OPERATING_MEMORY_DIRNAME / CURATED_MEMORY_SOURCE
+        / "fold-opening-digest" / "SKILL.md"
+    )
+    body = entry_path.read_text(encoding="utf-8")
+    assert len(body) <= 6_000
+    index = json.loads(
+        (workspace / "inputs" / "skills_index.json").read_text(encoding="utf-8")
+    )
+    digest = {
+        entry["name"]: entry for entry in index["operating_memory"]
+    }["fold-opening-digest"]
+    assert digest["origin"] == "curated"
+    assert digest["path"] == (
+        f"memory/{CURATED_MEMORY_SOURCE}/fold-opening-digest/SKILL.md"
+    )
+    # It carries the facts the opening survey re-derived, and it points at the
+    # per-session unit tables rather than restating numbers that move.
+    for phrase in ("generate_orders", "REFIT_PERIOD", "context.state_dir",
+                   "chmod -R u+w", "unit_reference.json", "vs_parent"):
+        assert phrase in body
 
 
 def test_the_mode_parameter_defaults_to_both_tiers() -> None:

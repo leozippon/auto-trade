@@ -47,6 +47,8 @@ from autotrade.pipelines.config import (
 )
 from autotrade.pipelines.experiment import null_control_seed
 from autotrade.pipelines.local_backend import (
+    BATCH_REJECTION_CHARGE_AFTER,
+    BATCH_REJECTION_ESCALATE_AT,
     BATCH_VALIDATE_MAX_CANDIDATES,
     BATCH_VALIDATE_MAX_CONCURRENCY,
     BatchValidateTool,
@@ -173,8 +175,10 @@ class _Session:
         record_failed_attempts: bool = True,
         deadline_seconds: float = 600.0,
         readonly_template: bool = False,
+        trace: list[tuple[str, dict[str, object]]] | None = None,
     ) -> None:
         self.root = root
+        self.trace_events = trace
         self.workspace_root = root / "workspace"
         self.output = self.workspace_root / "output"
         self.models = self.workspace_root / "models"
@@ -240,6 +244,11 @@ class _Session:
             workspace=self.workspace,
             modification_check_factory=self._check,
             parent_main_py=(self.parent / "main.py") if with_parent else None,
+            trace_emit=(
+                (lambda event, payload: trace.append((event, payload)))
+                if trace is not None
+                else None
+            ),
         )
         self.rollback = StepRollbackTool(
             self.tree,
@@ -772,6 +781,105 @@ class BatchTemplateFilesTest(unittest.TestCase):
             with self.assertRaises(ToolError) as caught:
                 session.call("a", "b")
             self.assertIn("readonly files modified", str(caught.exception))
+            self.assertEqual(session.backtest.backtests, 0)
+
+
+class RepeatedRejectionTest(unittest.TestCase):
+    """A refused batch is free, so nothing used to bound repeating one.
+
+    One audited Fold spent 3.89 h on 128 consecutive rejections carrying the
+    same error. The counter keys on the signature — error type plus the target
+    the rejection names — so the escalation cannot be dodged by a message whose
+    text moves, and cannot be triggered by a genuinely different mistake.
+    """
+
+    def _readonly_loop(self, tmp: str, trace=None) -> _Session:
+        """A session whose next batch always fails on the read-only baseline."""
+
+        session = _Session(Path(tmp), readonly_template=True, trace=trace)
+        session.candidate("a", _strategy("1"))
+        session.candidate("b", _strategy("22"))
+        (session.workspace_root / "candidates" / "a" / "README.md").write_text(
+            "rewritten contract\n", encoding="utf-8"
+        )
+        return session
+
+    def _refuse(self, session: _Session) -> str:
+        with self.assertRaises(ToolError) as caught:
+            session.call("a", "b")
+        return str(caught.exception)
+
+    def test_the_third_identical_rejection_escalates_and_names_the_recovery(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as tmp:
+            trace: list[tuple[str, dict[str, object]]] = []
+            session = self._readonly_loop(tmp, trace=trace)
+            for attempt in range(1, BATCH_REJECTION_ESCALATE_AT):
+                message = self._refuse(session)
+                self.assertIn("readonly files modified", message)
+                self.assertNotIn("repeated rejection", message)
+                self.assertEqual(trace, [], attempt)
+            escalated = self._refuse(session)
+            # Says how often, that retrying is pointless, and what to do.
+            self.assertIn("readonly files modified", escalated)
+            self.assertIn(
+                f"refused this exact rejection {BATCH_REJECTION_ESCALATE_AT} times",
+                escalated,
+            )
+            self.assertIn("calling it again unchanged", escalated)
+            self.assertIn("modification_check", escalated)
+            self.assertIn("delta.readonly_violations", escalated)
+            # An escalation is not a charge: the budget is still untouched.
+            self.assertEqual(session.backtest.backtests, 0)
+            self.assertEqual([event for event, _ in trace], ["batch_rejection_escalated"])
+            payload = trace[0][1]
+            self.assertEqual(payload["error_type"], "readonly_baseline")
+            self.assertEqual(payload["blocked_target"], "candidates/a")
+            self.assertEqual(payload["repeat_count"], BATCH_REJECTION_ESCALATE_AT)
+            self.assertIs(payload["charged_backtest"], False)
+
+    def test_every_attempt_past_the_sixth_consumes_a_backtest_slot(self) -> None:
+        with TemporaryDirectory() as tmp:
+            session = self._readonly_loop(tmp)
+            for _ in range(BATCH_REJECTION_CHARGE_AFTER):
+                self._refuse(session)
+            self.assertEqual(session.backtest.backtests, 0)
+            charged = self._refuse(session)
+            self.assertEqual(session.backtest.backtests, 1)
+            self.assertIn("consumed one Validation slot", charged)
+            self._refuse(session)
+            self.assertEqual(session.backtest.backtests, 2)
+            # The bound is the budget: once it is gone, so is any further batch.
+            while session.backtest.backtests < session.backtest.request.max_backtests:
+                self._refuse(session)
+            self.assertIn("Validation budget is already spent", self._refuse(session))
+            self.assertEqual(
+                session.backtest.backtests, session.backtest.request.max_backtests
+            )
+
+    def test_a_different_signature_is_counted_on_its_own(self) -> None:
+        with TemporaryDirectory() as tmp:
+            session = self._readonly_loop(tmp)
+            reserved = {
+                "candidates": [
+                    {"name": "a", "hypothesis": "h", "path": "candidates/a"},
+                    {"name": "live", "hypothesis": "h", "path": "output"},
+                ]
+            }
+            for _ in range(BATCH_REJECTION_ESCALATE_AT - 1):
+                self._refuse(session)
+                with self.assertRaises(ToolError) as caught:
+                    session.batch.invoke(reserved)
+                self.assertNotIn("repeated rejection", str(caught.exception))
+            # The interleaved rejections neither reset nor advance each other.
+            self.assertIn("repeated rejection", self._refuse(session))
+            with self.assertRaises(ToolError) as caught:
+                session.batch.invoke(reserved)
+            escalated = str(caught.exception)
+            self.assertIn("reserved workspace root", escalated)
+            self.assertIn("repeated rejection", escalated)
+            self.assertIn("change the input it names", escalated)
             self.assertEqual(session.backtest.backtests, 0)
 
 

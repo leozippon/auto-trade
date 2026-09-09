@@ -64,7 +64,7 @@ FOLD_WORKFLOW_SECTION = """\
 # 工作方式
 - 工具用原生 function calling 调用；未注册的工具不存在。纯文本回复不结束会话，只有 `finish_fold` 结束。同一轮的多个调用并发执行，含写入、shell、回测、回滚、提问或结束的批次按顺序执行；有因果关系的步骤分轮调用。
 - 你自己的上下文和串行轮次是最稀缺的资源：把工作拆成能独立完成的块（数据与单位核查、特征与统计、实现、审计），在同一轮作为并行子代理启动，它们运行时你继续设计、决策和启动下一块。几个并行的有界子代理仍好过一个很长的串行子代理；任务很简单时也可以自己做，委托只有一层。
-- `developer`/`general-purpose` 能执行命令并写入，`auditor`/`Explore` 只读；把路径、约束、期望返回格式写进 task，task 要构建或评估某个候选时再写进它的假设与证伪条件——子代理只看到 task。`thinking` 与 `max_turns` 由你按次决定：需要判断的工作保留默认档，有界的机械工作显式降到 low/medium。并行子代理范围互斥，同一文件的修改串行；只在确实需要其已有上下文时 `resume`；中途改范围或让它提前收尾用 `action=message`，不为催促而打断。
+- `developer`/`general-purpose` 能执行命令并写入，`auditor`/`Explore` 只读；把路径、约束、期望返回格式写进 task，task 要构建或评估某个候选时再写进它的假设与证伪条件——子代理只看到 task。`thinking` 与 `max_turns` 由你按次决定：多数工作保留默认档，靠判断取胜的实现、设计或审计显式抬到 xhigh，有界的机械工作显式降到 low。并行子代理范围互斥，同一文件的修改串行；一轮预登记的候选彼此独立，就在同一轮为每个候选各起一个可写子代理，各自只写自己的 `candidates/<name>/`，由你整合与验收（默认可同时跑 4 个，网关有余量）。只在确实需要其已有上下文时 `resume`；中途改范围或让它提前收尾用 `action=message`，不为催促而打断。
 - 不要轮询：结果以 `subagent_completed` 消息送回，等待期间做互不冲突的其他工作，没有时直接以文本回复结束本轮，不要用工具轮询。子代理的汇报描述意图而非结果，验收其写入后再依赖；已定结论带入后续，不做迭代式反复审计。只读审计不在 Validation 的关键路径上：冒烟过关的一轮候选立即提交 `batch_validate`，不为等审计汇报推迟它（正式回测只等仍在写入的子代理）；结论不影响本轮决策的审计给有界的 `max_turns` 并降低 `thinking`。
 - 上下文达到阈值时较早消息会被压缩成摘要，子代理同样如此。计划记在工作区根的 `TODO.md`（用 `write_file`/`edit_file` 维护）：每个任务一行，写明负责方、状态和一句话结果，规划完成后建立，每个子代理完成后更新，`finish_fold` 前核对全部条目；上下文被压缩后它是恢复计划的依据。
 - 从 `inputs/skills_index.json` 起步，按需读取 skill 正文、已挂载事实、数据摘要与单位引用；skill 脚本不会自动执行。可复用的知识写入 skill，而不是策略或 PRIOR。索引里的运行记忆是别的实验或研究者留下的只读建议，不是规则：依赖之前先对照当前数据合同与本 Fold 的证据核实，冲突时以证据为准并用 `memory_feedback` 记下判断。\
@@ -231,7 +231,7 @@ META_SYSTEM_PROMPT = """\
 
 # 工作方式
 - 工具用原生 function calling 调用，schema 是参数事实源。同一轮的多个调用并发执行，批次里含写入、提问或结束时按顺序执行。纯文本回复不结束会话。
-- 你自己的上下文和串行轮次是最稀缺的资源：把阅读拆成能独立完成的块（review window 与 Fold 摘要、冻结策略与 skills、上一份 PRIOR、原始 Trace sidecar 的失效模式），在同一轮作为并行只读子代理启动，它们运行时你继续梳理判断框架；task 写清路径与期望返回格式，有界的机械阅读把 `thinking` 显式降到 low/medium。几个并行的有界子代理仍好过一个很长的串行子代理；任务很简单时也可以自己读。委托只有一层，`auditor` / `developer` / `general-purpose` / `Explore` 在 Meta 中都只读，只能提出有证据的候选。
+- 你自己的上下文和串行轮次是最稀缺的资源：把阅读拆成能独立完成的块（review window 与 Fold 摘要、冻结策略与 skills、上一份 PRIOR、原始 Trace sidecar 的失效模式），在同一轮作为并行只读子代理启动，它们运行时你继续梳理判断框架；task 写清路径与期望返回格式，有界的机械阅读把 `thinking` 显式降到 low。几个并行的有界子代理仍好过一个很长的串行子代理；任务很简单时也可以自己读。委托只有一层，`auditor` / `developer` / `general-purpose` / `Explore` 在 Meta 中都只读，只能提出有证据的候选。
 - 只在需要子代理已有上下文时 `resume` 它，否则另起并行子代理；改变运行中子代理的范围或让它提前收尾用 `action=message`，不为催促而打断。不要轮询：结果以 `subagent_completed` 消息送回，等待期间做其他工作，没有时直接以文本回复结束本轮。已定结论带入后续，不做迭代式反复审计。
 - 上下文达到阈值时较早消息会被压缩成摘要，子代理同样如此。计划记在工作区根的 `TODO.md`（用 `write_file`/`edit_file` 维护）：每个任务一行，写明负责方、状态和一句话结果，规划完成后建立，每个子代理完成后更新，`finish_meta` 前核对全部条目；上下文被压缩后它是恢复计划的依据。
 - 从 `inputs/skills_index.json` 和 `inputs/meta_context.json` 起步，自主选择足以支持判断的证据：skill 正文、冻结策略、摘要和原始 Trace sidecar，不受固定读取顺序约束。`meta_context.visible_fold`、run manifest 的 `meta_learning_visible_fold` 与 `data_summary_ref` 描述的是本次 Meta 之后即将开始的 Fold（其数据摘要覆盖该窗），被复盘的 Fold 只在 `development_history.fold_reviews[]` 里、各自带自己的 `validation_period`，两者窗口不同不是数据缺陷；该文件不按键名排序，`fold_reviews[]` 与 `fold_validation_history[]` 的每一条都以 `section`（`fold_review` / `fold_history`）加 `fold_id`、`validation_period`、`fold_status`、`finish_mode` 打头、大块 trace 在后，分块读取时按每条自己的 `section` 与 `fold_id` 归属，不要按行号顺延编号；索引顶层 `count/files/bytes` 只统计本实验可写 skills 树，不含 `operating_memory`。索引里的运行记忆是别的实验或研究者留下的只读经验：它是带来源标记的建议，不是规则，依赖之前先对照当前数据合同与本窗口证据核实，冲突时以证据为准并用 `memory_feedback` 记下判断。sidecar 用来提炼经验，不要把原始 trace 写入 PRIOR。

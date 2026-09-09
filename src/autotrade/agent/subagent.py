@@ -83,9 +83,16 @@ DEFAULT_SUBAGENT_MAX_CONCURRENT = 4
 DEFAULT_SUBAGENT_MAX_ROUNDS = 48
 SUBAGENT_GRACE_ROUNDS = 2
 # Global default thinking level; a child never inherits the parent's level.
-# The parent lowers it per launch for bounded mechanical work, where a round
-# that spends the whole completion cap on reasoning costs more than it adds.
-DEFAULT_SUBAGENT_THINKING = "xhigh"
+# ``medium`` because a sub-agent round is the Fold's critical path: measured
+# over one full round, xhigh rounds cost 1,928 output tokens and 109.5 s
+# against 1,239 and 70.2 s at medium, and 80-88% of a round's generated tokens
+# are reasoning, while the developer and general-purpose tasks that already ran
+# at medium in that same round produced candidates that reached
+# ``batch_validate``. The parent raises it per launch for the launches whose
+# value is judgement (a design or audit call, a hard implementation) and lowers
+# it to ``low`` for bounded mechanical work; the parent's own reasoning effort
+# is a separate session parameter and is unaffected.
+DEFAULT_SUBAGENT_THINKING = "medium"
 SUBAGENT_DESCRIPTION_MAX_CHARS = 200
 # A parent's mid-run instruction to a child (``action="message"``): bounded
 # like a brief, queued on the job, and delivered as one labelled user message
@@ -320,8 +327,9 @@ AGENT_TOOL_DESCRIPTION = (
     "轮次与思考：子代理拥有自己模型的完整上下文窗口、按该窗口推导的压缩阈值和与你相同的输出上限（达到阈值时自动压缩，不会因上下文写满而失败），"
     f"可以承担较大的有界块；省略 max_turns 时最多 {DEFAULT_SUBAGENT_MAX_ROUNDS} 轮：倒数第 {SUBAGENT_GRACE_ROUNDS} 轮起收到收尾提示，"
     "到上限后强制一次简洁总结。几个并行的有界子代理仍好过一个很长的串行子代理；确需更多轮次时显式给 max_turns。"
-    f"thinking 默认 {DEFAULT_SUBAGENT_THINKING}，适合需要判断的审计、设计与实现；"
-    "有界的机械工作（按给定路径读取并摘录、跑一段已写好的脚本、逐文件核对）显式降到 low/medium："
+    f"thinking 默认 {DEFAULT_SUBAGENT_THINKING}，适合绝大多数委托；"
+    "只有真正靠判断取胜的委托（难点未定的实现、有取舍的设计、结论会改变本轮决策的审计）显式抬到 xhigh，"
+    "有界的机械工作（按给定路径读取并摘录、跑一段已写好的脚本、逐文件核对）显式降到 low："
     f"每轮输出上限 {AGENT_MAX_OUTPUT_TOKENS} token，把它全部耗在思考里而发不出工具调用的一轮只得到最多 "
     f"{SUBAGENT_MAX_TRUNCATION_CONTINUATIONS} 次强制简洁续写，之后该次委托记为 error。"
     "thinking 与 max_turns 由你按次决定，生效顺序：本次调用参数 > 角色默认（见 agent 字段） > 全局默认"
@@ -391,7 +399,7 @@ AGENT_TOOL_SPEC = ToolSpec(
                 "enum": list(SUBAGENT_THINKING_LEVELS),
                 "description": (
                     f"子代理思考强度 off/low/medium/xhigh；省略时按角色默认（当前各角色均为 {DEFAULT_SUBAGENT_THINKING}），不继承父会话。"
-                    "需要判断的任务保留默认；有界的机械工作显式给 low/medium，"
+                    "多数任务保留默认；靠判断取胜的实现、设计或审计显式给 xhigh，有界的机械工作显式给 low，"
                     f"因为把 {AGENT_MAX_OUTPUT_TOKENS} token 的输出预算全部耗在思考里而发不出工具调用的一轮"
                     f"只得到最多 {SUBAGENT_MAX_TRUNCATION_CONTINUATIONS} 次强制简洁续写，之后记为 error。"
                     "high 与 max 是 xhigh 的别名（本机模型没有独立的 high 档），会被接受并记为 xhigh；off 关闭扩展思考。"

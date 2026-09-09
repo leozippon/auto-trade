@@ -1184,6 +1184,21 @@ class FoldBacktestTool(SessionTimeBudgetAware):
         """Refund slots for attempts whose snapshot never held (no replay ran)."""
         self.backtests = max(0, self.backtests - count)
 
+    def charge_validation_slot(self) -> bool:
+        """Spend one Validation slot on something that produced no Step.
+
+        The only caller is ``batch_validate``'s repeated-rejection breaker, and
+        it is the whole bounding mechanism there: a refused batch is otherwise
+        free, so the budget is the only clock a retry loop can run down. No
+        Step is created, so the Step budget is not consulted. False means the
+        backtest budget is already spent and there is nothing left to charge.
+        """
+
+        if self.backtests >= self.request.max_backtests:
+            return False
+        self.backtests += 1
+        return True
+
     def _invoke_exempt(self) -> ToolResult:
         # The attempt begins here and costs one Validation slot; only a snapshot
         # that never held is refunded below.
@@ -1369,6 +1384,17 @@ BATCH_PATH_MAX_CHARS = 200
 # strategy trees. A candidate is a separate directory, so the bytes a batch
 # freezes cannot change while the Agent keeps editing the working copy.
 _BATCH_RESERVED_ROOTS = frozenset({"output", "models", "inputs", "skills", "refs"})
+# Repeated identical rejections. A refused batch is free by design — nothing is
+# committed and no slot is spent — which is also why nothing bounded the retry
+# loop: one audited Fold spent 3.89 h of a 10.17-h session on 128 consecutive
+# rejections carrying the same error, 393 parent LLM calls apart. A rejection is
+# counted per session by its signature (error type plus the target it names,
+# never the message text, which carries digests and so changes with the file);
+# the third identical one says so and names the recovery for that signature, and
+# from the seventh on each identical attempt consumes one Validation slot, so
+# the loop is bounded by the Fold's backtest budget instead of by nothing.
+BATCH_REJECTION_ESCALATE_AT = 3
+BATCH_REJECTION_CHARGE_AFTER = 6
 # The per-candidate projection an observation carries. ``daily_backtest`` ships
 # the whole fixed-size summary for its single node; a batch multiplies that by
 # N, so a row keeps what a screening decision is actually made on and points at
@@ -1459,7 +1485,12 @@ class BatchValidateTool(SessionTimeBudgetAware):
         "authoritative counters. The whole batch is refused before anything runs if "
         "it does not fit the budget, if two candidates are byte-identical, if "
         "one has the parent strategy's executable structure, or if one fails "
-        "modification_check. The call waits briefly for background sub-agents "
+        "modification_check. A refusal is free the first times, but the same "
+        "refusal repeated is not: the third identical one states the recovery "
+        f"for it, and from the {BATCH_REJECTION_CHARGE_AFTER + 1}th on each "
+        "identical attempt consumes one backtest of the Fold budget, so fix "
+        "what the error names instead of calling again unchanged. "
+        "The call waits briefly for background sub-agents "
         "that can write and is refused while one is still running; read-only "
         "audits keep running while the candidates replay concurrently on the same "
         "Validation window. Returns one row per candidate: node id, headline "
@@ -1547,10 +1578,15 @@ class BatchValidateTool(SessionTimeBudgetAware):
         workspace: SafeWorkspace,
         modification_check_factory: Callable[[Path], ModificationCheckTool],
         parent_main_py: str | Path | None = None,
+        trace_emit: Callable[[str, dict[str, object]], object] | None = None,
     ) -> None:
         self.backtest = backtest
         self.workspace = workspace
         self.modification_check_factory = modification_check_factory
+        self._trace_emit = trace_emit
+        # Per-session rejection counter, keyed by signature. Not persisted:
+        # the loop it bounds is one session's retry loop.
+        self._rejections: dict[tuple[str, str], int] = {}
         self._parent_structure: str | None = None
         if parent_main_py is not None:
             # The parent package is the directory holding its main.py; the
@@ -1573,12 +1609,19 @@ class BatchValidateTool(SessionTimeBudgetAware):
             return self._invoke_exempt(arguments)
 
     def _invoke_exempt(self, arguments: Mapping[str, object]) -> ToolResult:
-        candidates = self._parse(arguments)
-        self._supply_readonly_files(candidates)
         # Everything that can refuse the batch runs before a single slot is
         # spent, so a rejected batch costs nothing and the Agent can fix the
-        # offending candidate and call again.
-        checks = self._precheck(candidates)
+        # offending candidate and call again. Because it costs nothing, the
+        # same rejection can also repeat forever: ``_rejected`` counts it.
+        try:
+            candidates = self._parse(arguments)
+            self._supply_readonly_files(candidates)
+            checks = self._precheck(candidates)
+        except ToolError as exc:
+            escalated = self._rejected(exc)
+            if escalated is exc:
+                raise
+            raise escalated from exc
         result_names = self.backtest.reserve_validations(len(candidates))
         batch_id = uuid.uuid4().hex[:12]
         parent_node_id = self.backtest.tree.current_node_id
@@ -1665,7 +1708,10 @@ class BatchValidateTool(SessionTimeBudgetAware):
     def _parse(self, arguments: Mapping[str, object]) -> list[_BatchCandidate]:
         raw = arguments.get("candidates")
         if not isinstance(raw, list):
-            raise ToolError("batch_validate candidates must be an array")
+            raise ToolError(
+                "batch_validate candidates must be an array",
+                error_type="schema_error",
+            )
         if not (
             BATCH_VALIDATE_MIN_CANDIDATES
             <= len(raw)
@@ -1673,7 +1719,8 @@ class BatchValidateTool(SessionTimeBudgetAware):
         ):
             raise ToolError(
                 f"batch_validate takes {BATCH_VALIDATE_MIN_CANDIDATES} to "
-                f"{BATCH_VALIDATE_MAX_CANDIDATES} candidates, got {len(raw)}"
+                f"{BATCH_VALIDATE_MAX_CANDIDATES} candidates, got {len(raw)}",
+                error_type="schema_error",
             )
         names: set[str] = set()
         directories: set[str] = set()
@@ -1682,18 +1729,28 @@ class BatchValidateTool(SessionTimeBudgetAware):
             if not isinstance(item, dict):
                 raise ToolError(
                     f"candidate {index} must be an object with name, "
-                    "hypothesis and path"
+                    "hypothesis and path",
+                    error_type="schema_error",
+                    blocked_target=str(index),
                 )
             unknown = sorted(set(item) - {"name", "hypothesis", "path"})
             if unknown:
-                raise ToolError(f"candidate {index} has unknown field(s): {unknown}")
+                raise ToolError(
+                    f"candidate {index} has unknown field(s): {unknown}",
+                    error_type="schema_error",
+                    blocked_target=str(index),
+                )
             name = _batch_text(item, "name", index, BATCH_NAME_MAX_CHARS)
             hypothesis = _batch_text(
                 item, "hypothesis", index, BATCH_HYPOTHESIS_MAX_CHARS
             )
             path = _batch_text(item, "path", index, BATCH_PATH_MAX_CHARS)
             if name in names:
-                raise ToolError(f"duplicate candidate name: {name}")
+                raise ToolError(
+                    f"duplicate candidate name: {name}",
+                    error_type="schema_error",
+                    blocked_target=name,
+                )
             names.add(name)
             directory = self.workspace.resolve(path, must_exist=True, directory=True)
             if directory == self.workspace.root or PurePosixPath(path).parts[
@@ -1702,10 +1759,16 @@ class BatchValidateTool(SessionTimeBudgetAware):
                 raise ToolError(
                     f"candidate {name} points at a reserved workspace root "
                     f"({path}); copy the tree to its own directory, e.g. "
-                    "candidates/<name>/"
+                    "candidates/<name>/",
+                    error_type="path_error",
+                    blocked_target=path,
                 )
             if str(directory) in directories:
-                raise ToolError(f"duplicate candidate path: {path}")
+                raise ToolError(
+                    f"duplicate candidate path: {path}",
+                    error_type="schema_error",
+                    blocked_target=path,
+                )
             directories.add(str(directory))
             parsed.append(_BatchCandidate(name, hypothesis, path, directory))
         return parsed
@@ -1726,8 +1789,22 @@ class BatchValidateTool(SessionTimeBudgetAware):
             for name in READONLY_FILES:
                 source = self.backtest.output_dir / name
                 target = candidate.directory / name
-                if source.is_file() and not target.exists():
+                if not source.is_file() or target.exists():
+                    continue
+                try:
                     shutil.copyfile(source, target)
+                except PermissionError as exc:
+                    # A candidate directory copied out of a read-only artifact
+                    # tree keeps mode 0444/0555, and the template cannot land
+                    # in it. Say so with the remedy instead of failing as an
+                    # unhandled host error.
+                    raise ToolError(
+                        f"candidate {candidate.name} ({candidate.path}) is not "
+                        f"writable, so the read-only template {name} cannot be "
+                        f"supplied: {_public_error_text(exc)}",
+                        error_type="permission_denied",
+                        blocked_target=candidate.path,
+                    ) from exc
 
     def _precheck(self, candidates: Sequence[_BatchCandidate]) -> list[dict[str, object]]:
         """Static gate for every candidate, plus the two batch-only rules:
@@ -1741,9 +1818,18 @@ class BatchValidateTool(SessionTimeBudgetAware):
             try:
                 check = self.modification_check_factory(candidate.directory).invoke({})
             except ToolError as exc:
+                # A read-only baseline violation is its own signature: the
+                # repeated-rejection breaker names a different recovery for it
+                # than for the size and validity failures.
+                readonly = bool(exc.details.get("readonly_violations"))
                 raise ToolError(
                     f"candidate {candidate.name} ({candidate.path}) failed "
-                    f"modification_check: {exc}"
+                    f"modification_check: {exc}",
+                    error_type=(
+                        "readonly_baseline" if readonly else "modification_check_failed"
+                    ),
+                    blocked_target=candidate.path,
+                    details=dict(exc.details) or None,
                 ) from exc
             value = dict(check.value)
             fingerprint = str(value.get("fingerprint") or "")
@@ -1751,7 +1837,9 @@ class BatchValidateTool(SessionTimeBudgetAware):
                 raise ToolError(
                     f"candidates {fingerprints[fingerprint]} and "
                     f"{candidate.name} are byte-identical; every candidate "
-                    "must carry a distinct hypothesis"
+                    "must carry a distinct hypothesis",
+                    error_type="duplicate_candidate",
+                    blocked_target=candidate.path,
                 )
             fingerprints[fingerprint] = candidate.name
             self._reject_parent_structure(candidate)
@@ -1763,17 +1851,97 @@ class BatchValidateTool(SessionTimeBudgetAware):
             return
         try:
             structure = executable_output_structure(candidate.directory)
+        except PermissionError as exc:
+            raise ToolError(
+                f"candidate {candidate.name} ({candidate.path}) has a module "
+                f"this session cannot read: {_public_error_text(exc)}",
+                error_type="permission_denied",
+                blocked_target=candidate.path,
+            ) from exc
         except (OSError, SyntaxError) as exc:
             raise ToolError(
                 f"candidate {candidate.name} has an unreadable module: "
-                f"{_public_error_text(exc)}"
+                f"{_public_error_text(exc)}",
+                error_type="modification_check_failed",
+                blocked_target=candidate.path,
             ) from exc
         if structure == self._parent_structure:
             raise ToolError(
                 f"candidate {candidate.name} has the parent strategy's "
                 "executable logic (comment-only changes do not count), and "
-                "finish_fold could not select it; batch distinct hypotheses"
+                "finish_fold could not select it; batch distinct hypotheses",
+                error_type="parent_structure",
+                blocked_target=candidate.path,
             )
+
+    # ---- repeated rejections ----
+
+    def _rejected(self, exc: ToolError) -> ToolError:
+        """Count one pre-slot rejection and escalate a repeating signature.
+
+        A first-time rejection is returned untouched: nothing about the free,
+        fix-and-retry path changes. Only repetition is treated as evidence that
+        retrying is not the fix.
+        """
+
+        signature = (exc.error_type, str(exc.blocked_target or ""))
+        count = self._rejections.get(signature, 0) + 1
+        self._rejections[signature] = count
+        if count < BATCH_REJECTION_ESCALATE_AT:
+            return exc
+        charged = (
+            self.backtest.charge_validation_slot()
+            if count > BATCH_REJECTION_CHARGE_AFTER
+            else False
+        )
+        remaining = self.backtest.request.max_backtests - self.backtest.backtests
+        if count > BATCH_REJECTION_CHARGE_AFTER:
+            cost = (
+                f"This attempt consumed one Validation slot ({remaining} left); "
+                "so does every further identical one."
+                if charged
+                else "The Validation budget is already spent; nothing is left "
+                "to charge and no further batch can run."
+            )
+        else:
+            cost = (
+                f"From the {BATCH_REJECTION_CHARGE_AFTER + 1}th identical "
+                "attempt on, each one consumes a Validation slot."
+            )
+        recovery = _rejection_recovery(exc.error_type)
+        message = (
+            f"{exc}\n[repeated rejection] batch_validate has now refused this "
+            f"exact rejection {count} times; calling it again unchanged returns "
+            f"the same refusal. {recovery} {cost}"
+        )
+        if self._trace_emit is not None:
+            self._trace_emit(
+                "batch_rejection_escalated",
+                {
+                    "tool": "batch_validate",
+                    "error_type": exc.error_type,
+                    "blocked_target": signature[1],
+                    "repeat_count": count,
+                    "charged_backtest": charged,
+                    "backtests_used": self.backtest.backtests,
+                },
+            )
+        details = dict(exc.details)
+        details.update(
+            {
+                "repeat_count": count,
+                "charged_backtest": charged,
+                "backtests_remaining": remaining,
+            }
+        )
+        return ToolError(
+            message,
+            error_type=exc.error_type,
+            reason=exc.reason,
+            retry_hint=recovery,
+            blocked_target=exc.blocked_target,
+            details=details,
+        )
 
     # ---- execution ----
 
@@ -2274,16 +2442,50 @@ class NullControlTool(SessionTimeBudgetAware):
         }
 
 
+def _rejection_recovery(error_type: str) -> str:
+    """What to actually do about a ``batch_validate`` rejection that repeats.
+
+    The first rejection already names the offending candidate; what it does not
+    name is the remedy, which is why the audited loop kept re-sending the same
+    batch. One sentence per signature class, concrete enough to act on.
+    """
+
+    if error_type == "readonly_baseline":
+        return (
+            "Recovery: call modification_check on that candidate directory and "
+            "read delta.readonly_violations — the named file no longer holds "
+            "the bytes this session was seeded with. Delete your copy of it "
+            "from the candidate directory; batch_validate supplies the "
+            "read-only template itself."
+        )
+    if error_type == "permission_denied":
+        return (
+            "Recovery: files copied out of a read-only tree keep mode 0444, so "
+            "run chmod -R u+w on that candidate directory through shell before "
+            "calling again."
+        )
+    return (
+        "Recovery: read the error text above and change the input it names; "
+        "the call shape is not the problem."
+    )
+
+
 def _batch_text(
     item: Mapping[str, object], field_name: str, index: int, limit: int
 ) -> str:
     value = item.get(field_name)
     if not isinstance(value, str) or not value.strip():
-        raise ToolError(f"candidate {index} needs a non-empty {field_name} string")
+        raise ToolError(
+            f"candidate {index} needs a non-empty {field_name} string",
+            error_type="schema_error",
+            blocked_target=field_name,
+        )
     text = value.strip()
     if len(text) > limit:
         raise ToolError(
-            f"candidate {index} {field_name} exceeds {limit} characters"
+            f"candidate {index} {field_name} exceeds {limit} characters",
+            error_type="schema_error",
+            blocked_target=field_name,
         )
     return text
 
@@ -2757,6 +2959,7 @@ class LLMFoldDeveloper:
                         readonly_baseline=seeded_readonly,
                     ),
                     parent_main_py=parent_main_py,
+                    trace_emit=trace.emit,
                 ),
             ]
             # Fold sessions only: Meta, Test and Held-out never replay a null.

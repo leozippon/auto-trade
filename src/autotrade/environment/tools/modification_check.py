@@ -104,7 +104,19 @@ class ModificationCheckTool:
             raise ToolError(f"artifact format invalid: {exc}") from exc
         allowed, reasons = constraints.evaluate(delta, model_delta)
         if not allowed:
-            raise ToolError("; ".join(reasons))
+            # The read-only violations travel structurally: a caller that has
+            # to tell this rejection class from the others (``batch_validate``
+            # bounds a repeating one) must not parse the sentence, whose text
+            # carries digests and therefore changes with the file's content.
+            raise ToolError(
+                "; ".join(reasons),
+                error_type="artifact_constraint",
+                details=(
+                    {"readonly_violations": list(delta.readonly_violations)}
+                    if delta.readonly_violations
+                    else None
+                ),
+            )
         self.check_index += 1
         return ToolResult(
             True,
