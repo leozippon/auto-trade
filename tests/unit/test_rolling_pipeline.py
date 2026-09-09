@@ -19,6 +19,11 @@ from autotrade.pipelines import (
     RollingExperimentPipeline,
     StepResult,
 )
+from autotrade.pipelines.agent_inbox import (
+    enqueue_inbox_message,
+    inbox_path,
+    list_unconsumed_messages,
+)
 from autotrade.pipelines.agent_views import fold_development_summary, vs_parent_metrics
 from autotrade.pipelines.config import (
     MetaSessionResult,
@@ -41,6 +46,7 @@ from autotrade.pipelines.ledger import (
     latest_heldout_records,
 )
 from autotrade.pipelines.meta_inputs import build_meta_fold_review_bundle
+from autotrade.pipelines.meta_schedule import meta_session_key
 from autotrade.pipelines.skills import install_workspace_skills
 
 
@@ -125,6 +131,14 @@ def test_rolling_pipeline_runs_meta_fold_test_and_heldout(tmp_path: Path):
     fold = build_fold_schedule(
         "2025Q4", "2026Q1", days, window_months=24, test_stage=True
     )[0]
+    # A researcher message left unconsumed by each of the two sessions, plus one
+    # addressed to a session that has not run: the ledger append that completes
+    # a session is what expires its inbox, and it must expire only its own.
+    inbox = inbox_path(config.experiment_dir)
+    meta_key = meta_session_key("epoch_001", 0)
+    fold_key = fold_session_key("epoch_001", fold.fold_id)
+    for key in (meta_key, fold_key, "epoch_001/fold_2026Q2"):
+        enqueue_inbox_message(inbox, session_key=key, text=f"{key} 未消费")
     # The same call order the interactive worker drives: epoch-start Meta, then
     # the Fold, then one Held-out pass over the resulting frontier.
     prior, parent = pipeline.run_meta_session("epoch_001", 0, fold, parent=None)
@@ -143,6 +157,11 @@ def test_rolling_pipeline_runs_meta_fold_test_and_heldout(tmp_path: Path):
     fold_record = next(record for record in records if record["record_type"] == "fold")
     assert "state_changed_during_test" not in fold_record
     assert "state_changed_during_test" not in heldout
+    assert list_unconsumed_messages(inbox, meta_key) == ()
+    assert list_unconsumed_messages(inbox, fold_key) == ()
+    assert [
+        message.text for message in list_unconsumed_messages(inbox, "epoch_001/fold_2026Q2")
+    ] == ["epoch_001/fold_2026Q2 未消费"]
 
 
 def test_successful_fold_publishes_skills_and_next_fold_noops_by_bytes(

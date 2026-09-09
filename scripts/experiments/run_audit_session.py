@@ -44,21 +44,13 @@ from _cli import (
 )
 
 from autotrade.environment.artifacts import FilesystemArtifactStore
+from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.sandbox import DEFAULT_IMAGE
-from autotrade.pipelines import (
-    ExperimentLedger,
-    LocalDailyEvaluationBackend,
-    LocalDailySnapshotProvider,
-    PITDailyEvaluationBackend,
-    ResearchPITSnapshotProvider,
-    RollingExperimentPipeline,
-    build_fold_schedule,
-)
-from autotrade.pipelines.local_backend import LLMFoldDeveloper, LLMMetaLearner
+from autotrade.pipelines import ExperimentLedger, build_fold_schedule
 from autotrade.pipelines.skills import OPERATING_MEMORY_MODES
 from autotrade.pipelines.worker import (
-    _parent_from_step_node,
-    _strategy_sandbox_from_spec,
+    build_experiment_pipeline,
+    parent_from_step_node,
 )
 
 
@@ -157,7 +149,21 @@ def main() -> int:
         overrides=overrides,
     )
 
-    pipeline, trading_days = _build_pipeline(options)
+    # The console's own assembly, so a session audited here is configured
+    # exactly like the same session run by the worker. Only the driving loop
+    # differs, and with it the two things a single audited session has no place
+    # for: the worker's per-experiment derived image (this entrypoint takes
+    # ``--sandbox-image`` instead) and its smoke-test command runner.
+    pipeline, trading_days, _meta_enabled, _developer_label = (
+        build_experiment_pipeline(
+            options,
+            ledger=ExperimentLedger(options.rolling.ledger_path),
+            store=FilesystemArtifactStore(
+                options.experiment_dir / "artifacts" / "strategy"
+            ),
+            ref_store=AgentRefStore(options.experiment_dir),
+        )
+    )
     folds = build_fold_schedule(
         options.rolling.development_first_period,
         options.rolling.development_last_period,
@@ -221,135 +227,6 @@ def main() -> int:
     return 0
 
 
-def _build_pipeline(options) -> tuple[RollingExperimentPipeline, list[str]]:
-    """Assemble the same pipeline the interactive worker builds, for one session.
-
-    The audit entrypoint deliberately reuses the worker's validated options so a
-    session run here is configured identically to the same session run by the
-    console: the same Agent and strategy sandboxes, the same workspace
-    reference, operating memory and repo root, the same regularization
-    constraints and the same strategy wall clocks. Only the driving loop
-    differs, and with it the three things a single audited session has no place
-    for: the worker's per-experiment derived image (this entrypoint takes
-    ``--sandbox-image`` instead), its smoke-test command runner, and the sink
-    that would hand a Meta session's rebuilt image to later Folds.
-    """
-    ledger = ExperimentLedger(options.rolling.ledger_path)
-    store = FilesystemArtifactStore(options.experiment_dir / "artifacts" / "strategy")
-    if options.llm is None or options.agent_sandbox is None:
-        raise SystemExit("audit sessions require the LLM developer configuration")
-    fold_gateway = options.llm.build_gateway("main")
-    meta_gateway = options.llm.build_gateway("meta")
-    subagent_gateway = options.llm.build_gateway("subagent")
-    nl_gateway = options.llm.build_gateway("nl")
-    compact_gateway = options.llm.build_gateway("compact") if options.llm.compact_enabled else None
-    # The wall clocks the formal executor gives one strategy: the Fold developer
-    # reads them off the evaluator, the Meta learner is told them directly, and
-    # both are published to the Agent as its fit budget.
-    strategy_sandbox = _strategy_sandbox_from_spec(
-        options.agent_sandbox,
-        fit_timeout_seconds=options.rolling.strategy_fit_timeout_seconds,
-    )
-
-    if options.data_backend == "pit":
-        if options.raw_dir is None or options.fundamental_events_root is None or options.fundamental_events_status is None:
-            raise SystemExit("data_backend=pit is missing validated raw/PIT paths")
-        snapshots = ResearchPITSnapshotProvider(
-            experiment_dir=options.experiment_dir,
-            raw_dir=options.raw_dir,
-            fundamental_events_root=options.fundamental_events_root,
-            fundamental_events_status=options.fundamental_events_status,
-            config=options.snapshot_config,
-            cache_root=options.pit_cache_root,
-            pit_views_seed=options.pit_views_seed,
-            pit_views_seed_required=options.pit_views_seed_required,
-        )
-        evaluator = PITDailyEvaluationBackend(
-            options.experiment_dir / "artifacts" / "results",
-            execution_mode=options.execution_mode,
-            nl_llm=nl_gateway,
-            nl_config=options.nl_config,
-            nl_failure_policy=options.rolling.nl_failure_policy,
-            max_intraday_row_group_rows=options.max_intraday_row_group_rows,
-            sandbox=strategy_sandbox,
-        )
-        trading_days = snapshots.trading_days
-    else:
-        if options.daily_path is None:
-            raise SystemExit("data_backend=daily requires daily_path")
-        snapshots = LocalDailySnapshotProvider(options.daily_path)
-        evaluator = LocalDailyEvaluationBackend(
-            options.daily_path,
-            options.experiment_dir / "artifacts" / "results",
-            execution_mode=options.execution_mode,
-            sandbox=strategy_sandbox,
-        )
-        trading_days = evaluator.trading_days
-
-    runtime_root = options.work_root / options.experiment_id
-    developer = LLMFoldDeveloper(
-        llm=fold_gateway,
-        subagent_llm=subagent_gateway,
-        compact_llm=compact_gateway,
-        context_compaction=options.llm.compaction,
-        subagent_compaction=options.llm.compaction_for("subagent"),
-        baseline_strategy=options.baseline_strategy,
-        artifact_store=store,
-        evaluator=evaluator,
-        schedule=options.rolling.schedule,
-        broker_profile=options.rolling.broker_profile,
-        ledger=ledger,
-        experiment_dir=options.experiment_dir,
-        runtime_root=runtime_root,
-        sandbox_spec=options.agent_sandbox,
-        max_response_tokens=options.llm.max_tokens_for("main"),
-        step_tree_enabled=options.rolling.step_tree_enabled,
-        fold_exploration_directive=options.rolling.fold_exploration_directive,
-        workspace_reference=options.rolling.workspace_reference,
-        operating_memory=options.rolling.operating_memory,
-        repo_root=options.repo_root,
-    )
-    meta_learner = LLMMetaLearner(
-        llm=meta_gateway,
-        subagent_llm=subagent_gateway,
-        compact_llm=compact_gateway,
-        context_compaction=options.llm.compaction_for("meta"),
-        subagent_compaction=options.llm.compaction_for("subagent"),
-        baseline_strategy=options.baseline_strategy,
-        artifact_store=store,
-        experiment_dir=options.experiment_dir,
-        runtime_root=runtime_root,
-        max_llm_calls=options.rolling.max_llm_calls,
-        deadline_seconds=options.rolling.max_fold_minutes * 60,
-        decision_timeout_seconds=strategy_sandbox.limits.timeout_seconds,
-        fit_timeout_seconds=strategy_sandbox.limits.fit_timeout_seconds,
-        strategy_gpu_count=strategy_sandbox.limits.gpu_count,
-        max_response_tokens=options.llm.max_tokens_for("meta"),
-        meta_learning_directive=options.rolling.meta_learning_directive,
-        fold_exploration_directive=options.rolling.fold_exploration_directive,
-        workspace_reference=options.rolling.workspace_reference,
-        operating_memory=options.rolling.operating_memory,
-        repo_root=options.repo_root,
-        regularization_constraints=options.rolling.regularization_constraints,
-        # --sandbox-image has to reach the Meta session too, or the audit runs
-        # the default image while claiming to audit the one that was asked for.
-        sandbox_spec=options.agent_sandbox,
-        rebuild_enabled=options.rolling.meta_sandbox_rebuild_enabled,
-        rebuild_timeout_seconds=options.rolling.meta_sandbox_rebuild_timeout_seconds,
-        image_keep=options.rolling.meta_sandbox_image_keep,
-    )
-    pipeline = RollingExperimentPipeline(
-        options.rolling,
-        snapshots=snapshots,
-        artifacts=store,
-        evaluator=evaluator,
-        developer=developer,
-        meta_learner=meta_learner,
-        ledger=ledger,
-    )
-    return pipeline, trading_days
-
-
 def _parent_artifact(args: argparse.Namespace, options):
     """Resolve the optional session parent through a validated identity check.
 
@@ -359,7 +236,7 @@ def _parent_artifact(args: argparse.Namespace, options):
     artifact that was edited after it was frozen.
     """
     if args.parent_step_node:
-        return _parent_from_step_node(
+        return parent_from_step_node(
             options.experiment_dir,
             args.parent_step_node,
             f"{args.epoch_id}/audit",

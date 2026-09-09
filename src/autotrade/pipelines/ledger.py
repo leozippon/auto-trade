@@ -133,6 +133,44 @@ def latest_heldout_records(records: list[dict[str, object]]) -> list[dict[str, o
     return [latest[key] for key in sorted(latest)]
 
 
+def latest_meta_records(
+    records: list[dict[str, object]],
+) -> dict[str, dict[str, object]]:
+    """Latest successful meta-learning record per session key. A re-run appends
+    a superseding record, so only the last one describes what that session
+    left behind -- its published PRIOR, and any artifact it regularized."""
+    latest: dict[str, dict[str, object]] = {}
+    for record in records:
+        if not is_durable_success_record(record, record_types=("meta_learning",)):
+            continue
+        session_key = str(record.get("session_key") or "")
+        if session_key:
+            latest[session_key] = record
+    return latest
+
+
+def rerun_absorbed(
+    records: list[dict[str, object]], session_key: str, token: str
+) -> bool:
+    """Whether one console re-run request already has its fold record.
+
+    The single definition of "this token is spent", for the runner deciding
+    whether to re-run the session and for the worker deciding whether a
+    completed experiment still owes work. An integrity-flagged row is not a
+    completed re-run, so a token it carries stays outstanding.
+    """
+    latest = next(
+        (
+            record
+            for record in reversed(records)
+            if str(record.get("session_key") or "") == session_key
+            and is_durable_success_record(record, record_types=("fold",))
+        ),
+        None,
+    )
+    return latest is not None and str(latest.get("rerun_id") or "") == token
+
+
 def _artifact_id(value: object) -> str | None:
     """A non-empty artifact id, or None when the record names none."""
 
@@ -217,7 +255,7 @@ def walk_forward_transitions(
         percentiles = [
             value
             for value in (
-                _finite(
+                finite_number(
                     (transition_null_control(record.get("parent_control")) or {}).get(
                         "excess_percentile"
                     )
@@ -300,13 +338,13 @@ def frozen_selection(
     return {
         "fold_id": record.get("fold_id"),
         "candidates_evaluated": _count(selection.get("candidates_evaluated")),
-        "deflated_sharpe_probability": _finite(selection.get("deflated_sharpe_probability")),
+        "deflated_sharpe_probability": finite_number(selection.get("deflated_sharpe_probability")),
         # N as the formula actually used it: the finite trial Sharpes, which is
         # not always ``candidates_evaluated`` (a kept parent joins the trials,
         # a non-finite Sharpe drops out). A probability from two trials barely
         # deflates anything, so the count has to be read beside it.
         "deflated_sharpe_trials": _count(selection.get("trials")),
-        "validation_excess_percentile": _finite(null.get("excess_percentile")),
+        "validation_excess_percentile": finite_number(null.get("excess_percentile")),
     }
 
 
@@ -410,14 +448,14 @@ def deflated_sharpe(
     """
 
     scale = math.sqrt(float(periods_per_year))
-    trials = [value for value in map(_finite, trial_sharpes) if value is not None]
-    series = [value for value in map(_finite, returns) if value is not None]
+    trials = [value for value in map(finite_number, trial_sharpes) if value is not None]
+    series = [value for value in map(finite_number, returns) if value is not None]
     block: dict[str, object] = {
         "deflated_sharpe_probability": None,
         "trials": len(trials),
         "sharpe_star": None,
         "trial_sharpe_std": None,
-        "observed_sharpe": _finite(observed_sharpe),
+        "observed_sharpe": finite_number(observed_sharpe),
         "return_days": len(series),
         "return_skew": None,
         "return_kurtosis": None,
@@ -527,7 +565,9 @@ def validation_daily_returns(result_ref: str) -> list[float] | None:
     ]
 
 
-def _finite(value: object) -> float | None:
+def finite_number(value: object) -> float | None:
+    """``value`` as a finite float, or None when it is not a real number."""
+
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
     number = float(value)

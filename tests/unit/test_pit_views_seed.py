@@ -3,6 +3,7 @@ from __future__ import annotations
 import errno
 import json
 import os
+import shutil
 import stat
 import uuid
 from pathlib import Path
@@ -821,3 +822,54 @@ def test_a_seed_without_a_contract_is_refused(tmp_path: Path) -> None:
     seed.mkdir()
     with pytest.raises(ValueError, match="missing provider.json"):
         assert_seed_snapshot_config(seed, SnapshotConfig())
+
+
+def test_a_seed_whose_build_is_still_staging_a_slot_is_refused(tmp_path: Path) -> None:
+    """A create must not accept a tree a prebuild is still filling.
+
+    ``provider.json`` is written when the build binds its cache root, so the
+    contract matches from the first minute of a three-hour build: the round
+    script's dry-run passed against a seed that had one of its fourteen
+    regions. The provider's own staging directory is the evidence, and it
+    outlives a killed build too.
+    """
+
+    from autotrade.pipelines.pit_views_seed import assert_seed_snapshot_config
+
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    wanted = SnapshotConfig()
+    (seed / "provider.json").write_text(
+        json.dumps(
+            pit_cache_provider_record(
+                generation_id="generation_test",
+                release_raw_dir=tmp_path / "raw",
+                snapshot_config=wanted,
+            )
+        ),
+        encoding="utf-8",
+    )
+    finished = seed / "decision" / SEED_DECISION_KEY
+    finished.mkdir(parents=True)
+    (finished / "manifest.json").write_text('{"kind": "decision"}', encoding="utf-8")
+    finished.with_suffix(".lock").touch()
+    # A finished tree is accepted; the same tree with the slot the provider is
+    # writing right now is not.
+    assert_seed_snapshot_config(seed, wanted)
+
+    staging = seed / "decision" / f".{SEED_SLOT}.{uuid.uuid4().hex}.tmp"
+    (staging / "daily").mkdir(parents=True)
+    with pytest.raises(ValueError) as excinfo:
+        assert_seed_snapshot_config(seed, wanted)
+    message = str(excinfo.value)
+    assert str(seed) in message
+    assert staging.name in message
+    assert "unfinished build" in message
+
+    # A staged view deeper in the layout is the same evidence.
+    shutil.rmtree(staging)
+    assert_seed_snapshot_config(seed, wanted)
+    deep = seed / "replay" / "meta" / f".{SEED_SLOT}.{uuid.uuid4().hex}.tmp"
+    deep.mkdir(parents=True)
+    with pytest.raises(ValueError, match="unfinished build"):
+        assert_seed_snapshot_config(seed, wanted)

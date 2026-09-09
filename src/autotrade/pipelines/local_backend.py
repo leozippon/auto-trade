@@ -127,6 +127,7 @@ from .config import (
     StrategyExperimentConfig,
 )
 from .experiment import DailyStrategyPipeline, null_control_seed
+from .folds import yyyymmdd
 from .ledger import ExperimentLedger, candidate_deflated_sharpe, latest_fold_records
 from .skills import (
     SKILLS_INDEX_PATH,
@@ -195,7 +196,7 @@ class LocalDailyEvaluationBackend:
         if "trade_date" not in self._daily.columns:
             raise ValueError("daily Parquet must contain trade_date")
         self._daily = self._daily.copy()
-        self._daily["trade_date"] = self._daily["trade_date"].map(_date_key)
+        self._daily["trade_date"] = self._daily["trade_date"].map(yyyymmdd)
 
     @property
     def trading_days(self) -> list[str]:
@@ -203,8 +204,8 @@ class LocalDailyEvaluationBackend:
 
     def frame_between(self, start: str, end: str) -> pd.DataFrame:
         return self._daily[
-            (self._daily["trade_date"] >= _date_key(start))
-            & (self._daily["trade_date"] <= _date_key(end))
+            (self._daily["trade_date"] >= yyyymmdd(start))
+            & (self._daily["trade_date"] <= yyyymmdd(end))
         ].copy()
 
     def evaluate(
@@ -359,9 +360,9 @@ class DeterministicBaselineDeveloper:
         )
 
 
-SESSION_CALL_BUDGET_REFERENCE_MAX = 400
-SESSION_SUBAGENT_CALL_CAP_AT_REFERENCE = 200
-SESSION_PARENT_MAIN_RESERVE_AT_REFERENCE = 50
+_SESSION_CALL_BUDGET_REFERENCE_MAX = 400
+_SESSION_SUBAGENT_CALL_CAP_AT_REFERENCE = 200
+_SESSION_PARENT_MAIN_RESERVE_AT_REFERENCE = 50
 SESSION_LLM_CALL_ROLES = ("main", "subagent", "compact")
 
 
@@ -371,13 +372,13 @@ def session_role_quotas(max_calls: int) -> tuple[int, int]:
         raise ValueError("max_calls must be positive")
     subagent_cap = (
         max_calls
-        * SESSION_SUBAGENT_CALL_CAP_AT_REFERENCE
-        // SESSION_CALL_BUDGET_REFERENCE_MAX
+        * _SESSION_SUBAGENT_CALL_CAP_AT_REFERENCE
+        // _SESSION_CALL_BUDGET_REFERENCE_MAX
     )
     parent_reserve = (
         max_calls
-        * SESSION_PARENT_MAIN_RESERVE_AT_REFERENCE
-        // SESSION_CALL_BUDGET_REFERENCE_MAX
+        * _SESSION_PARENT_MAIN_RESERVE_AT_REFERENCE
+        // _SESSION_CALL_BUDGET_REFERENCE_MAX
     )
     if max_calls >= 2:
         subagent_cap = max(subagent_cap, 1)
@@ -3226,8 +3227,8 @@ class LLMFoldDeveloper:
                 {
                     "snapshot_id": request.snapshot.snapshot_id,
                     "kind": "local_daily",
-                    "period_start": _date_key(start),
-                    "period_end": _date_key(end),
+                    "period_start": yyyymmdd(start),
+                    "period_end": yyyymmdd(end),
                 },
             )
             chmod_tree(target, file_mode=0o444, dir_mode=0o555)
@@ -4274,10 +4275,6 @@ def _read_json_if_exists(path: Path) -> dict[str, object]:
     return payload if isinstance(payload, dict) else {}
 
 
-def _date_key(value: object) -> str:
-    return pd.Timestamp(str(value)).strftime("%Y%m%d")
-
-
 __all__ = [
     "DeterministicBaselineDeveloper",
     "FilesystemArtifactStore",
@@ -4286,9 +4283,6 @@ __all__ = [
     "LLMMetaLearner",
     "LocalDailyEvaluationBackend",
     "LocalDailySnapshotProvider",
-    "SESSION_CALL_BUDGET_REFERENCE_MAX",
-    "SESSION_SUBAGENT_CALL_CAP_AT_REFERENCE",
-    "SESSION_PARENT_MAIN_RESERVE_AT_REFERENCE",
     "SessionBudgetLLM",
     "SessionCallBudget",
     "session_role_quotas",

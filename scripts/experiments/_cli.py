@@ -1,14 +1,16 @@
-"""Shared CLI plumbing for the rolling-experiment entrypoints (docs/pipeline-design.md).
+"""Argument groups for ``run_audit_session.py`` (docs/pipeline-design.md).
 
-Single-sources the argparse argument groups and ``--help`` wording so a thin
-wrapper cannot drift away from the parameters the worker actually accepts. The
-provider and session wiring itself lives in ``autotrade.pipelines.worker``, also
-used by the interactive HITL worker; this module only renders the validated
-parameter file ``worker.load_worker_options`` consumes, so a CLI run and a
-console run are configured through exactly the same validation.
+Holds the audit entrypoint's argparse groups and ``--help`` wording, and
+renders them as the validated parameter file ``worker.load_worker_options``
+consumes, so a CLI run and a console run are configured through exactly the
+same validation. The provider and session wiring itself lives in
+``autotrade.pipelines.worker``, which both surfaces then assemble through
+``worker.build_experiment_pipeline``.
 
-``run_experiment.py`` does not use these groups: it drives a single
-``DailyStrategyPipeline`` strategy replay, not a rolling Fold/Epoch experiment.
+The other two scripts do not use these groups: ``run_experiment.py`` drives a
+single ``DailyStrategyPipeline`` strategy replay rather than a rolling
+Fold/Epoch experiment, and ``run_interactive_experiment.py`` only resumes an
+experiment whose parameters already exist.
 """
 
 from __future__ import annotations
@@ -315,8 +317,11 @@ def add_model_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--compact-token-threshold",
         type=int,
-        default=200_000,
-        help="Estimated context tokens that trigger semantic compaction; default 200000.",
+        help=(
+            "Estimated context tokens that trigger semantic compaction. Omitted "
+            "by default, exactly like the console: the worker then derives one "
+            "threshold per conversation role from that role's model window."
+        ),
     )
     parser.add_argument(
         "--compact-keep-recent-messages",
@@ -400,7 +405,7 @@ def _relative(repo_root: Path, value: Path | None) -> str | None:
     )
 
 
-def build_worker_params(
+def _build_worker_params(
     args: argparse.Namespace,
     *,
     repo_root: Path,
@@ -497,7 +502,7 @@ def build_worker_options(
     exactly the configuration this invocation used.
     """
     experiment_dir = Path(args.experiments_root).resolve() / args.experiment_id
-    params = build_worker_params(
+    params = _build_worker_params(
         args,
         repo_root=repo_root,
         meta_learning_directive=meta_learning_directive,

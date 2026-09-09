@@ -682,13 +682,18 @@ def test_interactive_runner_publishes_current_session_timing(tmp_path: Path):
         timing = context["session_timing"]
         assert callable(timing)
         captured["timing"] = timing()
-        return {
-            "record_type": "fold",
-            "experiment_id": "demo",
-            "epoch_id": session.epoch_id,
-            "fold_id": "fold_2026Q1",
-            "run_id": "run_001",
-        }
+        # The real executor records the session through the pipeline, which is
+        # also what stamps the session key; the runner never appends for it.
+        ledger.append(
+            {
+                "record_type": "fold",
+                "experiment_id": "demo",
+                "epoch_id": session.epoch_id,
+                "fold_id": "fold_2026Q1",
+                "run_id": "run_001",
+                "session_key": session.session_key,
+            }
+        )
 
     runner = InteractiveExperimentRunner(
         experiment_id="demo",
@@ -733,13 +738,16 @@ def test_session_boundary_restart_keeps_the_finished_session_and_stops_the_next(
         pending = read_control(control_path)
         pending.restart_pending = True
         write_control(control_path, pending)
-        return {
-            "record_type": "fold",
-            "experiment_id": "demo",
-            "epoch_id": session.epoch_id,
-            "fold_id": session.session_key.rsplit("/", 1)[-1],
-            "run_id": f"run_{len(ran):03d}",
-        }
+        ledger.append(
+            {
+                "record_type": "fold",
+                "experiment_id": "demo",
+                "epoch_id": session.epoch_id,
+                "fold_id": session.session_key.rsplit("/", 1)[-1],
+                "run_id": f"run_{len(ran):03d}",
+                "session_key": session.session_key,
+            }
+        )
 
     runner = InteractiveExperimentRunner(
         experiment_id="demo",
@@ -1643,6 +1651,30 @@ def test_console_gpu_allocation_reaches_the_run_manifests_sandbox_spec(
     assert not hasattr(meta_configs[0], "required_subagent_roles")
     # One-shot, like every other per-session control.
     assert read_control(experiment / "hitl/control.json").gpu_counts == {}
+
+
+def test_a_cpu_only_allocation_survives_the_control_round_trip(tmp_path: Path) -> None:
+    """0 GPUs is a request, not an unset value.
+
+    The console accepts 0..4 and every layer below honours 0 explicitly
+    (``_optional_gpu_count``, the developer's ``gpu=None, gpu_count=0``), so a
+    reader that drops it silently runs the CPU-only fold on the experiment
+    default. Step indexes are the opposite case: they start at 1, so a 0 there
+    addresses no step and stays dropped.
+    """
+
+    control = tmp_path / "control.json"
+    write_control(
+        control,
+        ControlState(
+            mode="auto",
+            gpu_counts={"epoch_001/fold_a": 0, "epoch_001/fold_b": 2},
+            step_go={"epoch_001/fold_a": 0, "epoch_001/fold_b": 2},
+        ),
+    )
+    state = read_control(control)
+    assert state.gpu_counts == {"epoch_001/fold_a": 0, "epoch_001/fold_b": 2}
+    assert state.step_go == {"epoch_001/fold_b": 2}
 
 
 #: (params.json key, offending value, worker error message). Every entry is a

@@ -11,11 +11,12 @@ evidence except through the explicit frozen-test metric whitelist.
 from __future__ import annotations
 
 import json
-import math
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from autotrade.environment.identity import AgentRefStore
+
+from .ledger import finite_number
 
 
 def metrics(summary: dict[str, object] | None) -> dict[str, object] | None:
@@ -164,8 +165,8 @@ def vs_parent_metrics(
             if candidate is not None and control is not None
             else None
         )
-    candidate_drawdown = _finite(summary.get("max_drawdown"))
-    control_drawdown = _finite(control_summary.get("max_drawdown"))
+    candidate_drawdown = finite_number(summary.get("max_drawdown"))
+    control_drawdown = finite_number(control_summary.get("max_drawdown"))
     deltas["max_drawdown_delta"] = (
         abs(candidate_drawdown) - abs(control_drawdown)
         if candidate_drawdown is not None and control_drawdown is not None
@@ -222,14 +223,7 @@ def _same_result_as_parent(
 
 def _benchmark_number(summary: Mapping[str, object], key: str) -> float | None:
     benchmark = summary.get("benchmark")
-    return _finite(benchmark.get(key)) if isinstance(benchmark, Mapping) else None
-
-
-def _finite(value: object) -> float | None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    number = float(value)
-    return number if math.isfinite(number) else None
+    return finite_number(benchmark.get(key)) if isinstance(benchmark, Mapping) else None
 
 
 # One completed Validation as a later Fold or the Meta session reads it back.
@@ -306,7 +300,7 @@ def compact_fold_history(
     ref_store: AgentRefStore,
     include_frozen_test_metrics: bool = False,
 ) -> dict[str, object]:
-    manifest = _read_json(Path(str(record.get("run_manifest_ref", ""))))
+    manifest, manifest_unavailable = _read_run_manifest(record.get("run_manifest_ref"))
     keys = _SUMMARY_KEYS
     if _nl_service_disabled(manifest):
         keys = tuple(key for key in keys if key not in _NL_SUMMARY_KEYS)
@@ -339,6 +333,11 @@ def compact_fold_history(
         "accept_warnings": record.get("accept_warnings"),
         "backtest_summaries": backtests,
     }
+    # An empty list means the Fold ran no backtest; it must not also mean its
+    # evidence could not be read. The Meta session is asked to reason over
+    # exactly these summaries, so an unreadable manifest states itself.
+    if manifest_unavailable:
+        compact["backtest_summaries_unavailable"] = manifest_unavailable
     if include_frozen_test_metrics and record.get("record_type") == "fold":
         compact["test_result"] = _visible_metrics(record.get("test_result"))
     return compact
@@ -517,7 +516,6 @@ def agent_visible_ledger_record(
         "prior_chars",
         "prior_published",
         "prior_generation_id",
-        "agent_session_summary",
         "meta_learning_directive",
         "fold_exploration_directive",
         "input_window",
@@ -559,27 +557,42 @@ def agent_visible_ledger_record(
 
 
 def agent_visible_step_record(record: dict[str, object]) -> dict[str, object]:
-    allowed = {
-        "step_id",
-        "status",
-        "strategy_artifact_ref",
-        "model_artifact_ref",
-        "combined_artifact_ref",
-        "modification_delta_summary",
-        "timing",
-        "decision_reason",
-        "summary",
-    }
+    """One Step of a Fold as history: its id and its compact metrics.
+
+    ``experiment._step_record`` is the only producer, and its remaining fields
+    are host identity (revision id, result ref) or host bookkeeping the session
+    must not read back.
+    """
+
+    allowed = {"step_id", "summary"}
     public = {key: value for key, value in record.items() if key in allowed}
     if "summary" in public:
         public["summary"] = _visible_metrics(public.get("summary"))
     return public
 
 
-def _read_json(path: Path) -> dict[str, object]:
-    if not path.exists():
-        return {}
+def _read_run_manifest(ref: object) -> tuple[dict[str, object], str]:
+    """One Fold's run manifest, and why it could not be read.
+
+    An empty ref is a Fold that never opened a run (the deadline path) and has
+    nothing to report. A ref that does not read back is missing evidence and
+    says so, because the caller's reader cannot otherwise tell it apart from a
+    Fold that ran no backtest.
+
+    Reported rather than raised: archived experiments carry absolute refs into
+    trees that have since moved, and one such row must not take down every
+    later Meta session, report and console preview. The reason names the
+    failure but never the path -- this is an Agent-visible projection, and the
+    entry already identifies its run through the reference store.
+    """
+
+    text = str(ref or "")
+    if not text:
+        return {}, ""
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
+        payload = json.loads(Path(text).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return {}, f"run manifest could not be read ({type(exc).__name__})"
+    if not isinstance(payload, dict):
+        return {}, "run manifest is not a JSON object"
+    return payload, ""

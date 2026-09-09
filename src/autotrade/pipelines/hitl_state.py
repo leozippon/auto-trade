@@ -274,11 +274,11 @@ def read_control(path: str | Path) -> ControlState:
         prompt_overrides=_string_map(payload.get("prompt_overrides")),
         skip_to_heldout=bool(payload.get("skip_to_heldout")),
         step_gate=_bool_map(payload.get("step_gate")),
-        step_go=_positive_int_map(payload.get("step_go")),
+        step_go=_int_map(payload.get("step_go"), minimum=1),
         step_directives=_string_map(payload.get("step_directives")),
         user_replies=_string_map(payload.get("user_replies")),
         resource_overrides=_object_map(payload.get("resource_overrides")),
-        gpu_counts=_positive_int_map(payload.get("gpu_counts")),
+        gpu_counts=_int_map(payload.get("gpu_counts"), minimum=0),
         rerun_sessions=_string_map(payload.get("rerun_sessions")),
         parent_overrides=_string_map(payload.get("parent_overrides")),
         test_revealed=bool(payload.get("test_revealed")),
@@ -707,12 +707,20 @@ def _bool_map(value: object) -> dict[str, bool]:
     )
 
 
-def _positive_int_map(value: object) -> dict[str, int]:
+def _int_map(value: object, *, minimum: int) -> dict[str, int]:
+    """Integer control map, keeping only values at or above ``minimum``.
+
+    Step indexes start at 1, so a step_go of 0 says nothing. A GPU count of 0
+    is a real request -- the CPU-only fold the console offers -- and must
+    survive the round trip, or the worker silently runs the session on the
+    experiment default.
+    """
+
     if not isinstance(value, dict):
         return {}
     result: dict[str, int] = {}
     for key, item in value.items():
-        if isinstance(item, int) and not isinstance(item, bool) and item > 0:
+        if isinstance(item, int) and not isinstance(item, bool) and item >= minimum:
             result[str(key)] = item
     return result
 

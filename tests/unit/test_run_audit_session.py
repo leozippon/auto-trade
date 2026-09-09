@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import ast
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -11,149 +10,14 @@ from autotrade.environment.sandbox import SandboxSpec
 from autotrade.pipelines import worker as worker_module
 from autotrade.pipelines.config import ModificationConstraints
 
-# Constructor arguments the console's session loop supplies and a single audited
-# session has no place for: the smoke-test command runner, and the sink that
-# hands a Meta session's rebuilt image to the Folds that would come after it.
-# Everything else must reach the audited session, or the audit reports on a
-# session the console never runs.
-WORKER_LOOP_ONLY = {"command_runner_factory", "use_docker", "sandbox_spec_sink"}
-
 
 class _ProviderConstructed(RuntimeError):
     pass
 
 
-def test_audit_pipeline_uses_the_experiments_own_pit_view_seed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The seed is the experiment's resolved one, not a hardcoded default.
+def _options(tmp_path: Path, **overrides: object) -> SimpleNamespace:
+    """One options set, shaped like the worker's validated options."""
 
-    An arm whose dataset selection needs its own prebuilt tree must read that
-    tree here too, and on the same terms: an explicitly chosen seed has to
-    apply rather than fall back to a cold build.
-    """
-
-    captured: dict[str, object] = {}
-
-    def build_provider(**kwargs: object) -> object:
-        captured.update(kwargs)
-        raise _ProviderConstructed
-
-    monkeypatch.setattr(run_audit_session, "ExperimentLedger", lambda path: object())
-    monkeypatch.setattr(
-        run_audit_session, "FilesystemArtifactStore", lambda path: object()
-    )
-    monkeypatch.setattr(
-        run_audit_session, "ResearchPITSnapshotProvider", build_provider
-    )
-
-    llm = SimpleNamespace(
-        compact_enabled=False,
-        build_gateway=lambda role: object(),
-    )
-    options = SimpleNamespace(
-        rolling=SimpleNamespace(
-            ledger_path=tmp_path / "ledger.jsonl",
-            strategy_fit_timeout_seconds=3600,
-            nl_failure_policy="fail",
-        ),
-        experiment_dir=tmp_path / "experiments" / "audit",
-        llm=llm,
-        agent_sandbox=SandboxSpec(),
-        data_backend="pit",
-        raw_dir=tmp_path / "raw",
-        fundamental_events_root=tmp_path / "fundamentals",
-        fundamental_events_status=tmp_path / "fundamentals-status.json",
-        snapshot_config=object(),
-        pit_cache_root=tmp_path / "pit-cache",
-        pit_views_seed=tmp_path / "data/pit_views_seed_ext",
-        pit_views_seed_required=True,
-        repo_root=tmp_path,
-    )
-
-    with pytest.raises(_ProviderConstructed):
-        run_audit_session._build_pipeline(options)
-
-    assert captured["pit_views_seed"] == tmp_path / "data/pit_views_seed_ext"
-    assert captured["pit_views_seed_required"] is True
-
-
-def _constructor_arguments(path: Path, class_name: str) -> set[str]:
-    """Keyword names one module passes to ``class_name(...)``."""
-
-    tree = ast.parse(path.read_text(encoding="utf-8"))
-    names: set[str] = set()
-    for node in ast.walk(tree):
-        if (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Name)
-            and node.func.id == class_name
-        ):
-            names |= {kw.arg for kw in node.keywords if kw.arg}
-    return names
-
-
-@pytest.mark.parametrize(
-    "class_name",
-    ("LLMFoldDeveloper", "LLMMetaLearner", "ResearchPITSnapshotProvider"),
-)
-def test_the_audit_session_is_built_like_the_console_session(class_name: str) -> None:
-    """The module promises a session configured identically to the console's.
-    An argument the worker passes and this script drops is a silently different
-    session: a different image, no refs pack, no operating memory, or a PIT
-    view seed chosen on different terms than the experiment's own."""
-
-    worker_arguments = _constructor_arguments(
-        Path(worker_module.__file__), class_name
-    ) - WORKER_LOOP_ONLY
-    audit_arguments = _constructor_arguments(
-        Path(run_audit_session.__file__), class_name
-    )
-    assert worker_arguments
-    assert worker_arguments <= audit_arguments, sorted(
-        worker_arguments - audit_arguments
-    )
-
-
-def test_the_audited_session_mounts_the_image_refs_and_memory_it_was_given(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """--sandbox-image has to reach the Meta learner as well as the Fold
-    developer, and the strategy wall clocks the Agent is promised have to be the
-    ones the options carry rather than library defaults."""
-
-    captured: dict[str, dict[str, object]] = {}
-
-    def capture(name: str):
-        def build(**kwargs: object) -> object:
-            captured[name] = kwargs
-            return object()
-
-        return build
-
-    monkeypatch.setattr(run_audit_session, "ExperimentLedger", lambda path: object())
-    monkeypatch.setattr(
-        run_audit_session, "FilesystemArtifactStore", lambda path: object()
-    )
-    monkeypatch.setattr(
-        run_audit_session, "LocalDailySnapshotProvider", lambda path: object()
-    )
-    monkeypatch.setattr(
-        run_audit_session,
-        "LocalDailyEvaluationBackend",
-        lambda *args, **kwargs: SimpleNamespace(
-            trading_days=["20240102"], sandbox=kwargs.get("sandbox")
-        ),
-    )
-    monkeypatch.setattr(run_audit_session, "LLMFoldDeveloper", capture("developer"))
-    monkeypatch.setattr(run_audit_session, "LLMMetaLearner", capture("meta"))
-    monkeypatch.setattr(
-        run_audit_session,
-        "RollingExperimentPipeline",
-        lambda *args, **kwargs: SimpleNamespace(**kwargs),
-    )
-
-    spec = SandboxSpec(image="audit-image:test")
     options = SimpleNamespace(
         rolling=SimpleNamespace(
             ledger_path=tmp_path / "ledger.jsonl",
@@ -178,29 +42,155 @@ def test_the_audited_session_mounts_the_image_refs_and_memory_it_was_given(
         work_root=tmp_path / "work",
         repo_root=tmp_path,
         baseline_strategy=tmp_path / "strategy",
+        developer_mode="llm",
         llm=SimpleNamespace(
-            compact_enabled=False,
+            compact_enabled=True,
             compaction=object(),
             compaction_for=lambda role: object(),
-            build_gateway=lambda role: object(),
+            build_gateway=lambda role, **kwargs: object(),
             max_tokens_for=lambda role: 4096,
         ),
-        agent_sandbox=spec,
+        agent_sandbox=SandboxSpec(image="audit-image:test"),
         data_backend="daily",
         daily_path=tmp_path / "daily.parquet",
         execution_mode="sandbox",
+        max_intraday_row_group_rows=2_000_000,
+        nl_config=object(),
+    )
+    for key, value in overrides.items():
+        setattr(options, key, value)
+    return options
+
+
+def _build(options: SimpleNamespace):
+    return worker_module.build_experiment_pipeline(
+        options,
+        ledger=object(),
+        store=object(),
+        ref_store=object(),
     )
 
-    pipeline, trading_days = run_audit_session._build_pipeline(options)
 
-    assert trading_days == ["20240102"]
-    assert pipeline.evaluator.sandbox.image == "audit-image:test"
-    assert pipeline.evaluator.sandbox.limits.fit_timeout_seconds == 1800
+def test_the_audit_entrypoint_assembles_through_the_shared_builder() -> None:
+    """The audit script must not grow a second assembly.
+
+    A hand-written copy is what drifted last time: the console built the
+    compaction gateway without retries and the audit path did not, so the
+    audited session was not the session the console runs. The script may
+    therefore name the Agent adapters and the backends nowhere.
+    """
+
+    source = Path(run_audit_session.__file__).read_text(encoding="utf-8")
+    assert "build_experiment_pipeline(" in source
+    for name in (
+        "LLMFoldDeveloper",
+        "LLMMetaLearner",
+        "RollingExperimentPipeline",
+        "ResearchPITSnapshotProvider",
+        "PITDailyEvaluationBackend",
+        "LocalDailySnapshotProvider",
+        "LocalDailyEvaluationBackend",
+    ):
+        assert name not in source, name
+
+
+def test_the_compaction_gateway_is_built_without_provider_retries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed compaction falls through to the emergency fit path by design,
+    so provider retries would only add their full latency to that failure.
+    Every surface that assembles an experiment gets that decision, because
+    there is exactly one assembly."""
+
+    roles: list[tuple[str, dict[str, object]]] = []
+
+    def build_gateway(role: str, **kwargs: object) -> object:
+        roles.append((role, kwargs))
+        return object()
+
+    monkeypatch.setattr(
+        worker_module, "LocalDailySnapshotProvider", lambda path: object()
+    )
+    monkeypatch.setattr(
+        worker_module,
+        "LocalDailyEvaluationBackend",
+        lambda *args, **kwargs: SimpleNamespace(
+            trading_days=["20240102"], sandbox=kwargs.get("sandbox")
+        ),
+    )
+    monkeypatch.setattr(
+        worker_module, "LLMFoldDeveloper", lambda **kwargs: SimpleNamespace(**kwargs)
+    )
+    monkeypatch.setattr(
+        worker_module, "LLMMetaLearner", lambda **kwargs: SimpleNamespace(**kwargs)
+    )
+    monkeypatch.setattr(
+        worker_module,
+        "RollingExperimentPipeline",
+        lambda *args, **kwargs: SimpleNamespace(**kwargs),
+    )
+    options = _options(tmp_path)
+    options.llm.build_gateway = build_gateway
+
+    build = _build(options)
+
+    assert build.meta_enabled is True
+    assert build.developer_label == "llm_fold_meta_agent"
+    assert dict(roles)["compact"] == {"max_retries": 0}
+    assert [role for role, _kwargs in roles] == [
+        "main",
+        "meta",
+        "subagent",
+        "nl",
+        "compact",
+    ]
+
+
+def test_the_assembled_session_mounts_the_image_refs_and_memory_it_was_given(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--sandbox-image has to reach the Meta learner as well as the Fold
+    developer, and the strategy wall clocks the Agent is promised have to be the
+    ones the options carry rather than library defaults."""
+
+    captured: dict[str, dict[str, object]] = {}
+
+    def capture(name: str):
+        def build(**kwargs: object) -> object:
+            captured[name] = kwargs
+            return object()
+
+        return build
+
+    monkeypatch.setattr(
+        worker_module, "LocalDailySnapshotProvider", lambda path: object()
+    )
+    monkeypatch.setattr(
+        worker_module,
+        "LocalDailyEvaluationBackend",
+        lambda *args, **kwargs: SimpleNamespace(
+            trading_days=["20240102"], sandbox=kwargs.get("sandbox")
+        ),
+    )
+    monkeypatch.setattr(worker_module, "LLMFoldDeveloper", capture("developer"))
+    monkeypatch.setattr(worker_module, "LLMMetaLearner", capture("meta"))
+    monkeypatch.setattr(
+        worker_module,
+        "RollingExperimentPipeline",
+        lambda *args, **kwargs: SimpleNamespace(**kwargs),
+    )
+
+    options = _options(tmp_path)
+    build = _build(options)
+
+    assert build.trading_days == ["20240102"]
+    assert build.pipeline.evaluator.sandbox.image == "audit-image:test"
+    assert build.pipeline.evaluator.sandbox.limits.fit_timeout_seconds == 1800
     developer, meta = captured["developer"], captured["meta"]
-    assert developer["sandbox_spec"] is spec
+    assert developer["sandbox_spec"] is options.agent_sandbox
     # The regression the audit memo reported: the Meta session fell back to the
     # default image while the Fold developer used the requested one.
-    assert meta["sandbox_spec"] is spec
+    assert meta["sandbox_spec"] is options.agent_sandbox
     assert meta["fit_timeout_seconds"] == 1800
     for session in (developer, meta):
         assert session["workspace_reference"] == "configs/workspace_refs/pack"
@@ -208,6 +198,44 @@ def test_the_audited_session_mounts_the_image_refs_and_memory_it_was_given(
         assert session["repo_root"] == tmp_path
     assert meta["regularization_constraints"] is options.rolling.regularization_constraints
     assert meta["rebuild_enabled"] is False
+
+
+def test_the_pipeline_uses_the_experiments_own_pit_view_seed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The seed is the experiment's resolved one, not a hardcoded default.
+
+    An arm whose dataset selection needs its own prebuilt tree must read that
+    tree here too, and on the same terms: an explicitly chosen seed has to
+    apply rather than fall back to a cold build.
+    """
+
+    captured: dict[str, object] = {}
+
+    def build_provider(**kwargs: object) -> object:
+        captured.update(kwargs)
+        raise _ProviderConstructed
+
+    monkeypatch.setattr(
+        worker_module, "ResearchPITSnapshotProvider", build_provider
+    )
+    options = _options(
+        tmp_path,
+        data_backend="pit",
+        raw_dir=tmp_path / "raw",
+        fundamental_events_root=tmp_path / "fundamentals",
+        fundamental_events_status=tmp_path / "fundamentals-status.json",
+        snapshot_config=object(),
+        pit_cache_root=tmp_path / "pit-cache",
+        pit_views_seed=tmp_path / "data/pit_views_seed_ext",
+        pit_views_seed_required=True,
+    )
+
+    with pytest.raises(_ProviderConstructed):
+        _build(options)
+
+    assert captured["pit_views_seed"] == tmp_path / "data/pit_views_seed_ext"
+    assert captured["pit_views_seed_required"] is True
 
 
 def test_the_default_cadence_fills_the_console_period_labels() -> None:

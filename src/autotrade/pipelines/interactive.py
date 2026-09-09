@@ -37,7 +37,6 @@ from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.runtime import AgentTraceWriter
 from autotrade.environment.tools.base import SessionInterrupt
 
-from .agent_inbox import expire_experiment_session_inbox
 from .hitl_state import (
     DevelopmentSession,
     StatusReporter,
@@ -52,6 +51,7 @@ from .ledger import (
     FrozenArtifactMutated,
     assert_no_frozen_artifact_mutation,
     is_durable_success_record,
+    rerun_absorbed,
 )
 from .meta_schedule import meta_learning_id
 
@@ -64,7 +64,7 @@ class ExperimentStopped(SessionInterrupt):
     being swallowed into an error observation."""
 
 
-SessionExecutor = Callable[[DevelopmentSession, dict[str, object]], dict[str, object] | None]
+SessionExecutor = Callable[[DevelopmentSession, dict[str, object]], None]
 
 
 class InteractiveExperimentRunner:
@@ -140,33 +140,15 @@ class InteractiveExperimentRunner:
                     "rerun_id": rerun_id or "",
                     "session_key": session.session_key,
                 }
-                record = self._execute_with_retries(session, context)
-                if record is not None:
-                    record = {
-                        **record,
-                        "session_key": session.session_key,
-                    }
-                    self.ledger.append(record)
+                self._execute_with_retries(session, context)
+                # The session's own ledger append is what completes it, and the
+                # same append expires its inbox (pipelines/experiment.py).
                 self._require_completed_record(session, rerun_id=rerun_id)
                 if session.kind == "fold":
                     self._run_post_fold_hook(session)
                 consume_session_controls(
                     self.control_path,
                     session.session_key,
-                )
-                latest = next(
-                    (
-                        row
-                        for row in reversed(self.ledger.read())
-                        if row.get("session_key") == session.session_key
-                        and row.get("record_type") in ("fold", "meta_learning")
-                    ),
-                    None,
-                )
-                expire_experiment_session_inbox(
-                    Path(self.control_path).resolve().parent.parent,
-                    session.session_key,
-                    expired_by=str((latest or {}).get("run_id") or session.session_key),
                 )
                 completed.add(session.session_key)
                 ran += 1
@@ -197,12 +179,12 @@ class InteractiveExperimentRunner:
 
     def _execute_with_retries(
         self, session: DevelopmentSession, context: dict[str, object]
-    ) -> dict[str, object] | None:
+    ) -> None:
         last_error: Exception | None = None
         for attempt in range(1, self.session_max_attempts + 1):
             self._begin_session(session)
             try:
-                result = self.execute_session(session, context)
+                self.execute_session(session, context)
             except (ExperimentStopped, AgentSessionDeadlineExceeded, FrozenArtifactMutated):
                 raise
             except Exception as exc:
@@ -221,7 +203,7 @@ class InteractiveExperimentRunner:
                 # flight; only a successful attempt clears it, so status.json
                 # never carries a stale "(attempt N/M)" after recovery.
                 self.status.set(error=None)
-                return result
+                return
         assert last_error is not None
         raise last_error
 
@@ -473,16 +455,9 @@ class InteractiveExperimentRunner:
         been absorbed by its latest ledger record yet."""
         if not rerun_id or session.kind != "fold":
             return False
-        latest = next(
-            (
-                row
-                for row in reversed(self.ledger.read("fold"))
-                if row.get("session_key") == session.session_key
-                and is_durable_success_record(row, record_types=("fold",))
-            ),
-            None,
+        return not rerun_absorbed(
+            self.ledger.read("fold"), session.session_key, rerun_id
         )
-        return latest is None or str(latest.get("rerun_id") or "") != rerun_id
 
     def _completed_sessions(self) -> set[str]:
         return {

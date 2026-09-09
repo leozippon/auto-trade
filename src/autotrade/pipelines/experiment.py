@@ -83,6 +83,7 @@ from .ledger import (
     frozen_selection,
     is_frozen_artifact_mutation,
     latest_fold_records,
+    latest_meta_records,
     walk_forward_transitions,
 )
 from .meta_inputs import (
@@ -1330,14 +1331,7 @@ def _keep_frozen_artifact_ids(
             artifact_id = str(record.get(key) or "")
             if artifact_id:
                 keep.add(artifact_id)
-    latest_meta: dict[str, dict[str, object]] = {}
-    for record in records:
-        if record.get("record_type") != "meta_learning":
-            continue
-        session_key = str(record.get("session_key") or "")
-        if session_key:
-            latest_meta[session_key] = record
-    for record in latest_meta.values():
+    for record in latest_meta_records(records).values():
         if record.get("status") != "meta_regularized":
             continue
         artifact_id = str(record.get("frozen_strategy_artifact_id") or "")

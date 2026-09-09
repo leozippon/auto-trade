@@ -394,22 +394,6 @@ class InteractiveRunnerTest(RunnerTestCase):
             self.runner(sessions_for("fold_a"), executor).run()
         self.assertEqual(read_status(self.status)["state"], "failed")
 
-    def test_a_record_returned_by_the_executor_is_appended_with_its_session_key(self) -> None:
-        ledger = self.ledger
-
-        def execute(session, _context):
-            return {
-                "record_type": "fold",
-                "experiment_id": "exp",
-                "epoch_id": session.epoch_id,
-                "fold_id": session.fold.fold_id,
-                "run_id": "run_1",
-            }
-
-        self.runner(sessions_for("fold_a"), execute).run()
-        rows = ledger.read("fold")
-        self.assertEqual([row["session_key"] for row in rows], ["epoch_001/fold_a"])
-
     def test_resume_skips_sessions_already_recorded_in_the_ledger(self) -> None:
         first = RecordingExecutor(self.ledger)
         self.runner(sessions_for("fold_a", "fold_b"), first).run()

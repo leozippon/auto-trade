@@ -1,15 +1,17 @@
+"""Rolling-experiment pipeline package (docs/pipeline-design.md).
+
+The facade re-exports only what callers outside the package actually import
+through it; everything else is reached from its own module (``from
+autotrade.pipelines import worker``). Keeping the list to its consumers also
+keeps ``import autotrade.pipelines`` from pulling the worker's provider
+gateways and sandbox-image machinery into every reader of a ledger.
+"""
+
 from .config import (
-    AcceptanceRules,
     ArtifactRevision,
-    EvaluationRequest,
     EvaluationResult,
-    ExecutionMode,
-    FoldOutcome,
-    FoldSessionRequest,
     FoldSessionResult,
     FrozenArtifact,
-    MetaLearner,
-    MetaSessionResult,
     RollingExperimentConfig,
     StepResult,
     StrategyExperimentConfig,
@@ -18,76 +20,25 @@ from .experiment import (
     DailyStrategyPipeline,
     RollingExperimentPipeline,
 )
-from .folds import (
-    FoldSpec,
-    build_fold_schedule,
-    heldout_periods,
-    load_sse_trading_days,
-    period_bounds,
-    period_range,
-)
+from .folds import build_fold_schedule
 from .ledger import ExperimentLedger
-from .local_backend import (
-    DeterministicBaselineDeveloper,
-    LocalDailyEvaluationBackend,
-    LocalDailySnapshotProvider,
-)
 from .pit_backend import (
     PaperPITData,
-    PITDailyEvaluationBackend,
     ResearchPITSnapshotProvider,
-)
-from .skills import (
-    DeleteSkillTool,
-    ExperimentSkillsStore,
-    SkillsSnapshot,
-    SkillsStats,
-    WriteSkillTool,
-    latest_skills_snapshot,
-)
-from .worker import (
-    InteractiveWorkerOptions,
-    load_worker_options,
-    run_local_interactive_worker,
 )
 
 __all__ = [
-    "AcceptanceRules",
     "ArtifactRevision",
     "DailyStrategyPipeline",
-    "DeterministicBaselineDeveloper",
-    "EvaluationRequest",
     "EvaluationResult",
-    "ExecutionMode",
-    "ExperimentSkillsStore",
     "ExperimentLedger",
-    "FoldOutcome",
-    "FoldSessionRequest",
     "FoldSessionResult",
-    "FoldSpec",
     "FrozenArtifact",
-    "InteractiveWorkerOptions",
-    "LocalDailyEvaluationBackend",
-    "LocalDailySnapshotProvider",
-    "MetaLearner",
-    "MetaSessionResult",
-    "PITDailyEvaluationBackend",
     "PaperPITData",
     "ResearchPITSnapshotProvider",
-    "SkillsSnapshot",
-    "SkillsStats",
     "RollingExperimentConfig",
     "RollingExperimentPipeline",
     "StepResult",
     "StrategyExperimentConfig",
     "build_fold_schedule",
-    "heldout_periods",
-    "load_sse_trading_days",
-    "load_worker_options",
-    "period_bounds",
-    "period_range",
-    "run_local_interactive_worker",
-    "latest_skills_snapshot",
-    "WriteSkillTool",
-    "DeleteSkillTool",
 ]

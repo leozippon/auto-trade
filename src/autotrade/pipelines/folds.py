@@ -452,7 +452,7 @@ def _period_label(start: pd.Timestamp, period: str) -> str:
     return start.strftime("%Y%m%d")
 
 
-def yyyymmdd(value: str) -> str:
-    text = str(value).strip()
-    parsed = pd.Timestamp(text)
-    return parsed.strftime("%Y%m%d")
+def yyyymmdd(value: object) -> str:
+    """One calendar date as the ``YYYYMMDD`` key every layer stores it under."""
+
+    return pd.Timestamp(str(value).strip()).strftime("%Y%m%d")

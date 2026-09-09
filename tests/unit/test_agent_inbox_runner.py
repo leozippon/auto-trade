@@ -32,12 +32,8 @@ from autotrade.pipelines.agent_inbox import (
     inbox_path,
     list_unconsumed_messages,
 )
-from autotrade.pipelines.hitl_state import ControlState, write_control
-from autotrade.pipelines.interactive import InteractiveExperimentRunner
-from autotrade.pipelines.ledger import ExperimentLedger
 from autotrade.pipelines.meta_inputs import compact_agent_trace
 from autotrade.webui.traces import project_trace_blocks
-from tests.unit.test_interactive_runner import RecordingExecutor, sessions_for
 
 SESSION_A = "epoch_001/fold_2022Q2"
 SESSION_B = "epoch_001/fold_2022Q1"
@@ -463,29 +459,3 @@ def test_fold_and_meta_backends_bind_inbox_hooks() -> None:
     assert source.count("inbox=bind_session_inbox(") == 2
     assert "session_key=request.session_key" in source
     assert 'session_key=str(facts.get("session_key") or "")' in source
-
-
-def test_completed_interactive_session_expires_leftover(tmp_path: Path) -> None:
-    hitl = tmp_path / "hitl"
-    hitl.mkdir()
-    control = hitl / "control.json"
-    status = hitl / "status.json"
-    write_control(control, ControlState(mode="auto"))
-    ledger = ExperimentLedger(tmp_path / "ledgers" / "experiment_ledger.jsonl")
-    path = inbox_path(tmp_path)
-    enqueue_inbox_message(path, session_key="epoch_001/fold_a", text="会话结束前未消费")
-    enqueue_inbox_message(path, session_key="epoch_001/fold_b", text="下一会话")
-    executor = RecordingExecutor(ledger)
-    InteractiveExperimentRunner(
-        experiment_id="exp",
-        sessions=sessions_for("fold_a"),
-        execute_session=executor,
-        ledger=ledger,
-        control_path=control,
-        status_path=status,
-        poll_seconds=0.01,
-    ).run()
-    assert list_unconsumed_messages(path, "epoch_001/fold_a") == ()
-    assert [item.text for item in list_unconsumed_messages(path, "epoch_001/fold_b")] == [
-        "下一会话"
-    ]

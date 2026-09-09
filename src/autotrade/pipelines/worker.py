@@ -9,7 +9,7 @@ from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import NoReturn
+from typing import NamedTuple, NoReturn
 
 import pandas as pd
 
@@ -59,7 +59,12 @@ from .config import (
     rolling_default,
 )
 from .experiment import RollingExperimentPipeline
-from .folds import build_fold_schedule, heldout_periods, load_sse_trading_days
+from .folds import (
+    build_fold_schedule,
+    heldout_periods,
+    load_sse_trading_days,
+    yyyymmdd,
+)
 from .hitl_state import (
     SCHEDULE_NAME,
     WEB_CREATE_DEFAULTS,
@@ -81,6 +86,7 @@ from .ledger import (
     experiment_verdict,
     is_durable_success_record,
     latest_fold_records,
+    rerun_absorbed,
 )
 from .local_backend import (
     DeterministicBaselineDeveloper,
@@ -581,7 +587,7 @@ def resolve_worker_options(
     elif data_backend == "daily":
         assert daily is not None
         frame = pd.read_parquet(daily, columns=["trade_date"])
-        trading_days = sorted(set(frame["trade_date"].map(_date_key).tolist()))
+        trading_days = sorted(set(frame["trade_date"].map(yyyymmdd).tolist()))
     else:
         assert (
             raw_dir is not None
@@ -858,70 +864,43 @@ def _activate_experiment_sandbox(
     )
 
 
-def run_local_interactive_worker(
+class ExperimentPipelineBuild(NamedTuple):
+    """One assembled experiment, as either driver of it needs to see it."""
+
+    pipeline: RollingExperimentPipeline
+    trading_days: list[str]
+    meta_enabled: bool
+    developer_label: str
+
+
+def build_experiment_pipeline(
     options: InteractiveWorkerOptions,
     *,
+    ledger: ExperimentLedger,
+    store: FilesystemArtifactStore,
+    ref_store: AgentRefStore,
     llm: LLMProxy | None = None,
     command_runner_factory: Callable[[Path], CommandRunner] | None = None,
-    poll_seconds: float = 2.0,
-) -> dict[str, object]:
-    ref_store = AgentRefStore(options.experiment_dir)
-    hitl = options.experiment_dir / "hitl"
-    ledger = ExperimentLedger(options.rolling.ledger_path)
-    store = FilesystemArtifactStore(options.experiment_dir / "artifacts" / "strategy")
-    try:
-        assert_no_frozen_artifact_mutation(ledger.read())
-    except FrozenArtifactMutated as exc:
-        write_json_atomic(
-            hitl / "status.json",
-            {
-                "schema_version": 1,
-                "state": "failed",
-                "pid": os.getpid(),
-                "error": f"{type(exc).__name__}: {exc}",
-            },
-        )
-        raise
-    # A run killed outright (SIGKILL, OOM kill, host reset) cannot append its
-    # own attempt_failed record. Worker start is the only moment at which no run
-    # of this experiment is in flight, so the markers those runs left behind
-    # become their ledger evidence here, before any new session begins.
-    RunMarkers(options.experiment_dir).recover(ledger)
-    completed = read_status(hitl / "status.json")
-    if str(completed.get("state")) == "completed" and not _has_outstanding_work(
-        hitl, ledger
-    ):
-        # A finished experiment is terminal: every session and the held-out
-        # evaluation are already durable in the ledger, so a resume must
-        # republish the completion status instead of re-running anything.
-        payload = _terminal_status(
-            completed, verdict=experiment_verdict(ledger.read())
-        )
-        write_json_atomic(hitl / "status.json", payload)
-        return payload
-    # Development that already walked its whole plan without freezing anything
-    # is terminal: a resume could only re-walk the finished plan and end at the
-    # same failure, so republish it here instead -- before any snapshot,
-    # sandbox or gateway preparation, and without re-running a single session.
-    if (
-        _development_is_exhausted(hitl, ledger)
-        and not _pending_rerun(hitl, ledger)
-        and _latest_artifact(ledger, store) is None
-        and _load_inherited_parent(options.experiment_dir) is None
-    ):
-        _fail_without_frozen_artifact(hitl, ledger)
-    if (
-        command_runner_factory is None
-        and (options.execution_mode == "sandbox" or options.developer_mode == "llm")
-    ):
-        options = replace(
-            options,
-            agent_sandbox=prepare_experiment_sandbox_image(
-                options.agent_sandbox or SandboxSpec(gpu=None),
-                experiment_id=options.experiment_id,
-                experiment_dir=options.experiment_dir,
-            ),
-        )
+) -> ExperimentPipelineBuild:
+    """Assemble one experiment's providers, backends, Agents and pipeline.
+
+    The single assembly for both drivers: the console's session loop
+    (``run_local_interactive_worker``) and the single-session audit entrypoint
+    (``scripts/experiments/run_audit_session.py``). A second hand-written
+    assembly is a session configured differently from the one the console runs
+    while reported as the same, so everything that shapes a session lives here
+    -- the gateway roles and their retry policy, the snapshot provider and
+    evaluator selection, the strategy sandbox wall clocks, and both Agent
+    adapters.
+
+    ``command_runner_factory`` replaces the Fold sandbox with a trusted
+    in-process runner (the non-Docker test path) and, being sandboxless, also
+    keeps the Meta session from shelling out to ``docker build``. The one step
+    that is not shared is the worker's per-experiment derived image: it is
+    applied to ``options`` before this call, because the audit entrypoint takes
+    an explicit ``--sandbox-image`` instead.
+    """
+
     fold_gateway = llm or (
         options.llm.build_gateway("main")
         if options.developer_mode == "llm" and options.llm
@@ -1086,6 +1065,86 @@ def run_local_interactive_worker(
         meta_learner=meta_learner,
         ledger=ledger,
     )
+    return ExperimentPipelineBuild(
+        pipeline=pipeline,
+        trading_days=trading_days,
+        meta_enabled=meta_enabled,
+        developer_label=developer_label,
+    )
+
+
+def run_local_interactive_worker(
+    options: InteractiveWorkerOptions,
+    *,
+    llm: LLMProxy | None = None,
+    command_runner_factory: Callable[[Path], CommandRunner] | None = None,
+    poll_seconds: float = 2.0,
+) -> dict[str, object]:
+    ref_store = AgentRefStore(options.experiment_dir)
+    hitl = options.experiment_dir / "hitl"
+    ledger = ExperimentLedger(options.rolling.ledger_path)
+    store = FilesystemArtifactStore(options.experiment_dir / "artifacts" / "strategy")
+    try:
+        assert_no_frozen_artifact_mutation(ledger.read())
+    except FrozenArtifactMutated as exc:
+        write_json_atomic(
+            hitl / "status.json",
+            {
+                "schema_version": 1,
+                "state": "failed",
+                "pid": os.getpid(),
+                "error": f"{type(exc).__name__}: {exc}",
+            },
+        )
+        raise
+    # A run killed outright (SIGKILL, OOM kill, host reset) cannot append its
+    # own attempt_failed record. Worker start is the only moment at which no run
+    # of this experiment is in flight, so the markers those runs left behind
+    # become their ledger evidence here, before any new session begins.
+    RunMarkers(options.experiment_dir).recover(ledger)
+    completed = read_status(hitl / "status.json")
+    if str(completed.get("state")) == "completed" and not _has_outstanding_work(
+        hitl, ledger
+    ):
+        # A finished experiment is terminal: every session and the held-out
+        # evaluation are already durable in the ledger, so a resume must
+        # republish the completion status instead of re-running anything.
+        payload = _terminal_status(
+            completed, verdict=experiment_verdict(ledger.read())
+        )
+        write_json_atomic(hitl / "status.json", payload)
+        return payload
+    # Development that already walked its whole plan without freezing anything
+    # is terminal: a resume could only re-walk the finished plan and end at the
+    # same failure, so republish it here instead -- before any snapshot,
+    # sandbox or gateway preparation, and without re-running a single session.
+    if (
+        _development_is_exhausted(hitl, ledger)
+        and not _pending_rerun(hitl, ledger)
+        and _latest_artifact(ledger, store) is None
+        and _load_inherited_parent(options.experiment_dir) is None
+    ):
+        _fail_without_frozen_artifact(hitl, ledger)
+    if (
+        command_runner_factory is None
+        and (options.execution_mode == "sandbox" or options.developer_mode == "llm")
+    ):
+        options = replace(
+            options,
+            agent_sandbox=prepare_experiment_sandbox_image(
+                options.agent_sandbox or SandboxSpec(gpu=None),
+                experiment_id=options.experiment_id,
+                experiment_dir=options.experiment_dir,
+            ),
+        )
+    pipeline, trading_days, meta_enabled, developer_label = build_experiment_pipeline(
+        options,
+        ledger=ledger,
+        store=store,
+        ref_store=ref_store,
+        llm=llm,
+        command_runner_factory=command_runner_factory,
+    )
     folds = build_fold_schedule(
         options.rolling.development_first_period,
         options.rolling.development_last_period,
@@ -1149,7 +1208,7 @@ def run_local_interactive_worker(
             raise RuntimeError(f"unsupported local session kind: {session.kind}")
         override_node = str(context.get("parent_override") or "")
         session_parent = (
-            _parent_from_step_node(
+            parent_from_step_node(
                 options.experiment_dir, override_node, session.session_key
             )
             if override_node
@@ -1336,11 +1395,10 @@ def _pending_rerun(hitl: Path, ledger: ExperimentLedger) -> bool:
     pending = read_control(hitl / "control.json").rerun_sessions
     if not pending:
         return False
-    absorbed = {
-        str(record.get("session_key") or ""): str(record.get("rerun_id") or "")
-        for record in ledger.read("fold")
-    }
-    return any(absorbed.get(key) != token for key, token in pending.items())
+    records = ledger.read("fold")
+    return any(
+        not rerun_absorbed(records, key, token) for key, token in pending.items()
+    )
 
 
 def _development_is_exhausted(hitl: Path, ledger: ExperimentLedger) -> bool:
@@ -1444,7 +1502,7 @@ def _load_inherited_parent(experiment_dir: Path) -> FrozenArtifact | None:
     )
 
 
-def _parent_from_step_node(
+def parent_from_step_node(
     experiment_dir: Path, node_id: str, session_key: str
 ) -> FrozenArtifact:
     """Build the session parent from a validated step-tree node snapshot.
@@ -2008,13 +2066,12 @@ def _memory_limit(value: object, name: str) -> str:
     return text
 
 
-def _date_key(value: object) -> str:
-    return pd.Timestamp(str(value)).strftime("%Y%m%d")
-
-
 __all__ = [
+    "ExperimentPipelineBuild",
     "InteractiveWorkerOptions",
     "LLMWorkerSettings",
+    "build_experiment_pipeline",
     "load_worker_options",
+    "parent_from_step_node",
     "run_local_interactive_worker",
 ]

@@ -127,6 +127,19 @@ def assert_seed_snapshot_config(seed: Path, snapshot_config: SnapshotConfig) -> 
             f"configuration: seed has {json.dumps(recorded, ensure_ascii=False, sort_keys=True)}, "
             f"this experiment needs {json.dumps(expected, ensure_ascii=False, sort_keys=True)}"
         )
+    # ``provider.json`` is written when the build binds its cache root, not when
+    # it finishes, so the contract above says nothing about how much of the tree
+    # exists yet. A staged slot does: it is the view the provider is writing
+    # right now, and it is renamed into place only once that view is complete.
+    staged = _staged_seed_slots(Path(seed))
+    if staged:
+        raise ValueError(
+            f"PIT view seed {seed} has an unfinished build: "
+            f"{len(staged)} staged slot(s) still present, first "
+            f"{staged[0].relative_to(seed)}. Wait for "
+            "scripts/data/prebuild_pit_views_seed.py to report status ok for "
+            "this seed, or remove the staged slots a killed build left behind"
+        )
 
 
 def seed_pit_views(
@@ -300,6 +313,40 @@ def _completed_seed_views(seed: Path) -> list[Path]:
     for name in ("decision", "replay", "bundles"):
         views.extend(_marked_seed_views(seed / name))
     return views
+
+
+def _staged_seed_slots(seed: Path, root: Path | None = None, *, depth: int = 4) -> list[Path]:
+    """Slots a build is still writing into this seed, if any.
+
+    The provider stages a slot as ``.<slot>.<uuid>.tmp`` beside its destination
+    and renames it in only when the view is complete, so a staged directory is
+    on-disk evidence that a prebuild is running here or was killed part way.
+
+    This proves an unfinished build; it cannot prove a finished one. The
+    prebuild reports its own completion only on stdout (``{"status": "ok"}``),
+    leaving nothing in the tree for a later reader, so a build stopped between
+    two jobs still looks like a complete seed here. Walks exactly as far as
+    ``_marked_seed_views``: down the layout levels, stopping at any published
+    view.
+    """
+
+    if root is None:
+        return [
+            path
+            for name in ("decision", "replay", "bundles", "asof_stash")
+            for path in _staged_seed_slots(seed, seed / name, depth=depth)
+        ]
+    if depth <= 0 or not root.is_dir() or root.is_symlink():
+        return []
+    staged: list[Path] = []
+    for path in sorted(root.iterdir()):
+        if path.is_symlink() or not path.is_dir():
+            continue
+        if ".tmp" in path.name.lower():
+            staged.append(path)
+        elif not any((path / marker).is_file() for marker in _VIEW_MARKERS):
+            staged.extend(_staged_seed_slots(seed, path, depth=depth - 1))
+    return staged
 
 
 def _marked_seed_views(root: Path) -> list[Path]:
