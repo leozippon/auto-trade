@@ -791,6 +791,29 @@ def test_a_seed_built_for_another_selection_is_refused_by_name(tmp_path: Path) -
     assert_seed_snapshot_config(seed, wanted)
 
 
+def test_a_seed_from_an_older_cache_format_is_refused_at_create_time(tmp_path: Path) -> None:
+    """A seed built under an older on-disk contract holds views this code would
+    never link (seed_pit_views refuses them at run time); naming it must fail
+    the create instead of cold-building every view after a misleading accept."""
+
+    from autotrade.pipelines.pit_views_seed import assert_seed_snapshot_config
+
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    wanted = SnapshotConfig(macro_datasets=("cn_gdp", "fut_daily"))
+    stale = pit_cache_provider_record(
+        generation_id="generation_test", release_raw_dir=tmp_path / "raw", snapshot_config=wanted
+    ) | {"schema_version": SNAPSHOT_CACHE_FORMAT_VERSION - 1}
+    (seed / "provider.json").write_text(json.dumps(stale), encoding="utf-8")
+    with pytest.raises(ValueError, match="cache format") as excinfo:
+        assert_seed_snapshot_config(seed, wanted)
+    message = str(excinfo.value)
+    assert str(SNAPSHOT_CACHE_FORMAT_VERSION - 1) in message and str(SNAPSHOT_CACHE_FORMAT_VERSION) in message
+    assert seed_pit_views(tmp_path / "exp" / "pit_views", seed, expected_provider=stale | {
+        "schema_version": SNAPSHOT_CACHE_FORMAT_VERSION
+    }) is False
+
+
 def test_a_seed_without_a_contract_is_refused(tmp_path: Path) -> None:
     from autotrade.pipelines.pit_views_seed import assert_seed_snapshot_config
 

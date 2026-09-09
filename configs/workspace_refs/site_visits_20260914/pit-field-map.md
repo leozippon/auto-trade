@@ -25,7 +25,7 @@ universe = pd.read_parquet(context.asof_dir + "/universe")               # ts_co
 | 合并日线 `daily` | `close`（复权用）、`amount`（元）、`turnover_rate`（小数）、`circ_mv`（元）、`adj_factor`、`up_limit`/`down_limit`、`is_suspended` | 当日行 17:30 才可见，08:30 只有 T-1 及更早；`adj_factor` 当日 09:30 盖章 |
 | `events.stk_surv` | `surv_date`、`ts_code`、`rece_org`、`org_type`、`rece_mode`、`comp_rece`、`rece_place`、`name`、`fund_visitors` | 行级 `available_at = surv_date + 5 自然日 23:59:59`（规则名 `conservative_plus_5d_eod_from:surv_date`）；覆盖自 2022-01-04；主键 `(ts_code, surv_date, rece_org)` |
 | `events.top10_floatholders` | `ann_date`、`end_date`、`holder_name`、`holder_type`、`hold_amount`（股）、`hold_ratio`/`hold_float_ratio`（百分数）、`hold_change`（股） | 行级 `available_at` 按 `ann_date` EOD（`conservative_date_eod`）；覆盖自 2020-01；季报滞后见下 |
-| `macro.index_daily` | `000300.SH` 的 `close`、`pct_chg`（百分数，先除以 100） | T-2 可见（macro 域比日线晚一天放行，见 README 的可见边界一条）；只用于基准与 β |
+| `macro.index_daily` | `000300.SH` 的 `close`、`pct_chg`（百分数，先除以 100） | `contract_1730_from:trade_date`（数据日 17:30），T-1 可见、与日线同步（见 README 的可见边界一条）；只用于基准与 β |
 | `universe` | `ts_code`、`name`（含 ST 标记）、`list_date`、`l1_code`/`l1_name` | 决策日冻结；行业与 ST 只从这里取，不回填今天的状态 |
 
 ## `stk_surv` 的 +5 日规则及其后果

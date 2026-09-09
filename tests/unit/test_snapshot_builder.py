@@ -145,6 +145,19 @@ def build_raw(raw: Path) -> None:
     )
 
 
+def write_index_daily(raw: Path, trade_dates: tuple[str, ...]) -> None:
+    """CSI300 index bars carrying the ingest adapter's raw date-EOD placeholder."""
+    write(
+        raw / "index_daily" / "ts_code=000300.SH" / "year=2021.parquet",
+        pd.DataFrame([
+            {"ts_code": "000300.SH", "trade_date": trade_date, "close": 4800.0 + index,
+             "available_at": f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]} 23:59:59+08:00",
+             "available_at_rule": "conservative_date_eod"}
+            for index, trade_date in enumerate(trade_dates)
+        ]),
+    )
+
+
 def build_fundamental_events(root: Path) -> None:
     write(
         root / "income_vip" / "available_month=202109.parquet",
@@ -1159,6 +1172,10 @@ class SnapshotBuilderTest(unittest.TestCase):
                      "available_at": "2010-04-16T23:59:59+08:00", "available_at_rule": "conservative_date_eod"},
                     {"ts_code": "IF2299.CFX", "exchange": "CFFEX", "list_date": "20220916",
                      "available_at": "2022-09-16T23:59:59+08:00", "available_at_rule": "conservative_date_eod"},
+                    # Continuous contract without a listing day: no contract
+                    # stamp can be derived, so it is hidden and counted.
+                    {"ts_code": "IF.CFX", "exchange": "CFFEX", "list_date": None,
+                     "available_at": "", "available_at_rule": "missing_source_date"},
                 ]),
             )
             write(
@@ -1178,10 +1195,14 @@ class SnapshotBuilderTest(unittest.TestCase):
                 include_intraday=False,
                 include_industry=False,
             )
-            SnapshotBuilder(raw, events_root, status_path).build_decision_snapshot(DECISION, out, config)
+            manifest = SnapshotBuilder(raw, events_root, status_path).build_decision_snapshot(DECISION, out, config)
             macro = pd.read_parquet(out / "macro.parquet")
             registry = macro[macro["dataset"] == "fut_basic"]
             self.assertEqual(sorted(registry["ts_code"]), ["IF1005.CFX"])  # old kept, future hidden
+            # Registries stamp on the listing day's close contract, not the raw EOD placeholder.
+            self.assertEqual(list(registry["available_at"]), ["2010-04-16 17:30:00+08:00"])
+            self.assertEqual(list(registry["available_at_rule"]), ["contract_1730_from:list_date"])
+            self.assertEqual(manifest["domains"]["macro"]["unparseable_available_at_dropped"], {"fut_basic": 1})
             self.assertTrue(macro[macro["dataset"] == "fut_daily"].empty)  # window floor still applies
             # Replay slots must NOT apply the exemption: the Timeview unions the
             # slot with the frozen snapshot, so a second full-life registry copy
@@ -1192,6 +1213,90 @@ class SnapshotBuilderTest(unittest.TestCase):
             )
             slot_macro = pd.read_parquet(slot / "macro.parquet")
             self.assertTrue(slot_macro.empty or slot_macro[slot_macro["dataset"] == "fut_basic"].empty)
+
+    def test_same_day_macro_tables_are_stamped_on_the_close_contract(self):
+        # index_daily is public at the close of its trade date, so the snapshot
+        # replaces the raw date-EOD placeholder with the daily core's 17:30
+        # contract: the prior close is decision input at 09:25, the same day's
+        # close is not, and datasets outside the contract table keep their raw
+        # stamp and rule.
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = Path(tmp) / "raw"
+            events_root = Path(tmp) / "fund_events"
+            build_raw(raw)
+            build_fundamental_events(events_root)
+            status_path = Path(tmp) / "fundamental_events_status.json"
+            write_fundamental_status(status_path)
+            write_index_daily(raw, ("20210930", "20211008"))
+            config = replace(CONFIG, macro_datasets=("cn_gdp", "index_daily"))
+            out = Path(tmp) / "snap"
+            manifest = SnapshotBuilder(raw, events_root, status_path).build_decision_snapshot(DECISION, out, config)
+            macro = pd.read_parquet(out / "macro.parquet")
+            index = macro[macro["dataset"] == "index_daily"]
+            self.assertEqual(list(index["trade_date"]), ["20210930"])
+            self.assertEqual(list(index["available_at"]), ["2021-09-30 17:30:00+08:00"])
+            self.assertEqual(list(index["available_at_rule"]), ["contract_1730_from:trade_date"])
+            gdp = macro[macro["dataset"] == "cn_gdp"]
+            self.assertEqual(list(gdp["available_at_rule"]), ["release"])
+            self.assertEqual(
+                manifest["domains"]["macro"]["availability_rules"],
+                {"cn_gdp": "raw available_at column", "index_daily": "contract_1730_from:trade_date"},
+            )
+
+    def test_frozen_and_rolling_macro_parts_agree_on_the_close_contract(self):
+        # The rolling view must show a contract-stamped T row from T+1 pre-open
+        # (the T 23:35 evening node has landed it), and the frozen first part of
+        # a fold anchored at T 23:59:59 must carry exactly the rows the rolling
+        # view of the previous fold shows at that point: no anchor-day surplus.
+        # Rows still on the raw date-EOD placeholder keep their one-day lag in
+        # the rolling parts; that residual is documented, not hidden.
+        from datetime import datetime as dt
+
+        from autotrade.environment.replay.timeview import Timeview
+
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = Path(tmp) / "raw"
+            events_root = Path(tmp) / "fund_events"
+            build_raw(raw)
+            build_fundamental_events(events_root)
+            status_path = Path(tmp) / "fundamental_events_status.json"
+            write_fundamental_status(status_path)
+            write_index_daily(raw, ("20210930", "20211008", "20211011"))
+            write(
+                raw / "cn_gdp" / "range=2021Q4.parquet",
+                pd.DataFrame([{"quarter": "2021Q3", "gdp": 1.15, "available_at": "2021-10-08 23:59:59+08:00",
+                               "available_at_rule": "conservative_date_eod"}]),
+            )
+            config = replace(CONFIG, macro_datasets=("cn_gdp", "index_daily"), include_intraday=False, replay_include_minutes=False)
+            builder = SnapshotBuilder(raw, events_root, status_path)
+            anchor_a = dt(2021, 9, 30, 23, 59, 59, tzinfo=CN_TZ)
+            snapshot_a = Path(tmp) / "decision_a"
+            slot = Path(tmp) / "replay"
+            builder.build_decision_snapshot(anchor_a, snapshot_a, config)
+            builder.build_replay_slot("20211008", "20211011", slot, label="valid", config=config, available_from=anchor_a)
+            timeview = Timeview(
+                host_dir=Path(tmp) / "asof",
+                snapshot_dir=snapshot_a,
+                replay_frames={"macro": pd.read_parquet(slot / "macro.parquet")},
+            )
+
+            def index_dates(asof_dir: str) -> list[str]:
+                macro = pd.read_parquet(Path(asof_dir) / "macro")
+                return sorted(macro[macro["dataset"] == "index_daily"]["trade_date"])
+
+            first, _ = timeview.refresh(pd.Timestamp("2021-10-08 08:30", tz="Asia/Shanghai"))
+            self.assertEqual(index_dates(first), ["20210930"])
+            later, _ = timeview.refresh(pd.Timestamp("2021-10-11 08:30", tz="Asia/Shanghai"))
+            self.assertEqual(index_dates(later), ["20210930", "20211008"])  # T-1 rolled in, T hidden
+            rolling = pd.read_parquet(Path(later) / "macro")
+            self.assertNotIn("2021Q3", set(rolling[rolling["dataset"] == "cn_gdp"]["quarter"]))
+
+            anchor_b = dt(2021, 10, 8, 23, 59, 59, tzinfo=CN_TZ)
+            snapshot_b = Path(tmp) / "decision_b"
+            builder.build_decision_snapshot(anchor_b, snapshot_b, config)
+            frozen = pd.read_parquet(snapshot_b / "macro.parquet")
+            self.assertEqual(sorted(frozen[frozen["dataset"] == "index_daily"]["trade_date"]), ["20210930", "20211008"])
+            self.assertIn("2021Q3", set(frozen[frozen["dataset"] == "cn_gdp"]["quarter"]))  # the documented residual
 
     def test_fundamental_event_reader_filters_partitions_by_min_available_at(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1519,6 +1624,11 @@ class SnapshotBuilderTest(unittest.TestCase):
             self.assertIn(dataset, SELECTABLE_DATASETS["macro"], dataset)
         self.assertIn("news", SELECTABLE_DATASETS["text"])
         self.assertNotIn("cn_schedule", SELECTABLE_DATASETS["macro"])
+        # The sell-side forecast numbers are an opt-in events slice of the
+        # default text dataset of the same name.
+        self.assertIn("report_rc", SELECTABLE_DATASETS["events"])
+        self.assertIn("report_rc", DEFAULT_DATASETS["text"])
+        self.assertNotIn("report_rc", DEFAULT_DATASETS["events"])
         # Never selectable (see the SELECTABLE_DATASETS comment): contradictory
         # duplicate versions (pledge_detail, repurchase), no PIT timestamps
         # (hm_list), decommissioned sources (slb_len_mm, slb_len).
@@ -1545,6 +1655,57 @@ class SnapshotBuilderTest(unittest.TestCase):
         # Default text is the per-stock corpus only.
         self.assertNotIn("news", config.text_datasets)
         self.assertIn("anns_d", config.text_datasets)
+
+    def test_report_rc_events_slice_keeps_numbers_and_leaves_the_title_to_text(self):
+        # The events slice carries the raw forecast/rating/coverage columns
+        # under their raw names with the raw create_time stamp; the title,
+        # stock name and the never-populated imp_dg stay out (the text domain
+        # still projects the same rows' titles). Two vendor versions of one
+        # report (same business key, different create_time) are both kept;
+        # only byte-identical rows collapse.
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = Path(tmp) / "raw"
+            build_raw(raw)
+            report = {
+                "ts_code": "000001.SZ", "name": "平安银行", "report_date": "20211007",
+                "report_title": "平安银行：零售转型", "report_type": "点评", "classify": "首次关注",
+                "org_name": "示例证券", "author_name": "张三", "quarter": "2021Q4",
+                "op_rt": 1_500_000.0, "op_pr": None, "tp": 400_000.0, "np": 300_000.0, "eps": 1.55,
+                "pe": 8.5, "rd": 3.2, "roe": 11.0, "ev_ebitda": None, "rating": "买入",
+                "max_price": None, "min_price": 20.0, "imp_dg": None,
+                "create_time": "2021-10-07 19:13:22",
+                "available_at": "2021-10-07 19:13:22+08:00", "available_at_rule": "source:create_time",
+            }
+            revised = {**report, "eps": 1.6, "create_time": "2021-10-07 22:37:06",
+                       "available_at": "2021-10-07 22:37:06+08:00"}
+            same_day = {**report, "quarter": "2022Q4", "eps": 1.8, "create_time": "2021-10-08 10:00:00",
+                        "available_at": "2021-10-08 10:00:00+08:00"}
+            write(raw / "report_rc" / "month=202110.parquet", pd.DataFrame([report, report, revised, same_day]))
+            config = replace(
+                CONFIG,
+                events_datasets=("report_rc",),
+                macro_datasets=(),
+                text_datasets=("report_rc",),
+                fundamental_datasets=(),
+                include_intraday=False,
+                replay_include_minutes=False,
+            )
+            out = Path(tmp) / "snap"
+            manifest = SnapshotBuilder(raw, Path(tmp) / "fund_events").build_decision_snapshot(DECISION, out, config)
+            events = pd.read_parquet(out / "events.parquet")
+            rows = events[events["dataset"] == "report_rc"].sort_values("create_time")
+            self.assertEqual(list(rows["eps"]), [1.55, 1.6])  # byte-identical duplicate collapsed, revision kept, 10-08 hidden
+            self.assertEqual(list(rows["available_at"]), ["2021-10-07 19:13:22+08:00", "2021-10-07 22:37:06+08:00"])
+            self.assertEqual(set(rows["available_at_rule"]), {"source:create_time"})
+            for column in ("quarter", "np", "rating", "org_name", "author_name", "classify", "report_type", "create_time"):
+                self.assertIn(column, rows.columns, column)
+            for column in ("report_title", "name", "imp_dg"):
+                self.assertNotIn(column, events.columns, column)
+            self.assertEqual(manifest["domains"]["events"]["availability_rules"]["report_rc"], "raw available_at column")
+            self.assertNotIn("imp_dg", manifest["domains"]["events"]["dataset_columns"]["report_rc"])
+            text_index = pd.read_parquet(out / "text_index.parquet")
+            titles = text_index[text_index["dataset"] == "report_rc"]["title"]
+            self.assertEqual(set(titles), {"平安银行：零售转型"})
 
     def test_events_limit_list_d_rows_gate_on_the_16_00_stamp(self):
         # The official limit list becomes visible at trade-date 16:00: the prior

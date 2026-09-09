@@ -95,15 +95,15 @@ score3  = 0.5 * rank(bp) + 0.5 * rank(quality)          方向 +
 
 机制：IC/IM 的当季年化贴水是中性策略、雪球与 DMA 的对冲成本，也是小微盘拥挤度的外生价格。深贴水意味着对冲盘要么在被迫平空、要么在为对冲付极高代价，两种情况下小盘的承接力都最弱。本家族因此把同一本账在深贴水时倾向大盘价值腿，其余时间保持全宇宙——始终满仓 long-only，不清仓。
 
-状态变量（macro 域比日线晚一天放行，见 README：下面的 T-2 就是回放里最新可见的 macro 交易日）：
+状态变量（`fut_*`/`index_daily` 与日线同步到 T-1，见 README 的可见边界一条）：
 
 ```text
 对 root ∈ {IC, IM}：
   cont = f"{root}L2.CFX"                                        # 当季合约的连续代码
-  act  = macro[dataset=="fut_mapping"] 中 T-2 的 mapping_ts_code
-  F    = macro[dataset=="fut_daily"]   中 T-2 的 (ts_code==act) close      # 指数点
-  S    = macro[dataset=="index_daily"] 中 T-2 的 close：IC→000905.SH，IM→000852.SH
-  ttm  = macro[dataset=="fut_basic"] 中 act 的 delist_date − T-2（自然日）
+  act  = macro[dataset=="fut_mapping"] 中 T-1 的 mapping_ts_code
+  F    = macro[dataset=="fut_daily"]   中 T-1 的 (ts_code==act) close      # 指数点
+  S    = macro[dataset=="index_daily"] 中 T-1 的 close：IC→000905.SH，IM→000852.SH
+  ttm  = macro[dataset=="fut_basic"] 中 act 的 delist_date − T-1（自然日）
   b    = (F/S - 1) * 365 / ttm                                  # 年化基差，贴水为负
 ```
 
@@ -137,12 +137,12 @@ else:          在整个 U 内取同一复合分数前 30 只                   
 
 机制：期权是同一件事的第二个价格。若两个来自不同市场的状态读数给出一致的切换，状态本身才可信；给出相反结论时两者一起淘汰，不挑好的那个。
 
-两个可算的量，都取最新可见的 macro 行（回放里是 T-2 及更早，见 README）：
+两个可算的量，都取最新可见的 macro 行（回放里是 T-1 及更早，见 README）：
 
 ```text
 PCR_oi(u) = sum(oi | call_put=="P") / sum(oi | call_put=="C")        u ∈ {OP510050.SH, OP510300.SH}
 skew(u)   = mean(close | 虚值认沽, 0.90S <= K < 0.98S) / mean(close | 虚值认购, 1.02S < K <= 1.10S)
-            仅取 maturity_date 落在 T-2 之后 20–60 个自然日的到期月；u ∈ {OP000300.SH, OP000852.SH}，S 取同日指数收盘
+            仅取 maturity_date 落在 T-1 之后 20–60 个自然日的到期月；u ∈ {OP000300.SH, OP000852.SH}，S 取同日指数收盘
             这是权利金比值的粗代理，不是隐波偏度；口径固定即可，不追求跨日绝对可比
 ```
 

@@ -30,7 +30,10 @@ ExecutionMode = Literal["sandbox", "trusted"]
 # (SNAPSHOT_EXCLUDED_COLUMNS in environment.data.snapshot), so a v7 view still
 # carries fields the Agent must no longer see.
 # v9: the daily join drops its duplicate close_basic/pre_close_limit columns.
-SNAPSHOT_CACHE_FORMAT_VERSION = 9
+# v10: same-day macro tables carry the close contract stamp
+# (MACRO_DATASET_CONTRACTS) instead of the raw date-EOD placeholder, so a v9
+# macro view shows T rows a trading day later than a v10 one.
+SNAPSHOT_CACHE_FORMAT_VERSION = 10
 
 # Trailing wrap-up grace added to the Fold session budget. Not a console/worker
 # HITL knob; FoldSessionRequest carries the seconds to AgentSessionConfig.

@@ -27,7 +27,7 @@
 - 正式 import 只允许：纯计算标准库（`__future__`、`collections`、`dataclasses`、`datetime`、`decimal`、`functools`、`itertools`、`math`、`statistics`、`typing`）、`numpy`、`pandas`、`scipy`、`sklearn`、`lightgbm`、`xgboost`、`statsmodels`、`torch`（本臂 `budgets.strategy_gpu_count` 为 0，只跑 CPU）及其子模块，以及 `output/` 内自己的模块。`pickle`/`joblib`/`read_pickle`/`to_pickle` 与 qlib 一律拒绝；拟合结果用 NumPy 数组、booster 的 `save_model(...)` 或 `torch.save` 检查点写进 `context.state_dir`。
 - 需要拟合的量放在 `fit(context)` 并写入 `context.state_dir`（一次 `fit` 有 `budgets.strategy_fit_timeout_seconds` 的独立预算，按模块级 `REFIT_PERIOD` 重训）；`generate_orders` 每次调用重新读取它，且受 `budgets.strategy_inference_timeout_seconds` 约束。`models/` 以只读 `context.models_dir` 挂载。
 - 沙箱无网络，不要抓网页；调研纪要原文不在快照里，`stk_surv` 只有结构化字段。
-- 每一行必须 `available_at <= context.inference_at`。**`stk_surv` 不看 `surv_date` 判可见，只看 `available_at`**，两者相差至少 5 个自然日。macro 域（本包只用 `index_daily`）的行盖章在数据日 23:59:59，放行却按前一个工作日 23:35 的晚间落库节点，因此回放里它最新只到 T-2，比日线晚一天；只有本折第一个决策日因冻结首片按锚点 23:59:59 收行而拿得到 T-1。基准与 β 按 T-2 对齐。
+- 每一行必须 `available_at <= context.inference_at`。**`stk_surv` 不看 `surv_date` 判可见，只看 `available_at`**，两者相差至少 5 个自然日。macro 域（本包只用 `index_daily`）的行在快照里按数据日 17:30 盖章（规则名 `contract_1730_from:trade_date`，与 `daily` 同一收盘合同），随当晚的晚间落库节点放行，因此回放里它和日线一样到 T-1。基准与 β 按 T-1 对齐。
 - 不要写死 `/mnt/agent/workspace`。先核对本轮 `data_summary.json` 与单位表，再经 `context.asof_dir` / `context.snapshot_dir` 读数，每次读取都给 `columns=` 与日期窗口；`asof_dir` 下每个域是 parquet parts 目录，读失败不得回退 `snapshot_dir`。
 - 不要把 refs 拷进 `output`。
 - Broker 负责 T+1、费用、涨跌停、停牌与成交；策略只发订单草图。

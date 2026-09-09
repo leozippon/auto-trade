@@ -82,20 +82,30 @@ def to_cn_timestamps(series: pd.Series) -> pd.Series:
     wall-clock strings (e.g. anns_d rec_time); naive values must be localized
     to CN, never treated as UTC.
 
-    Fast path first: replay/snapshot columns are usually uniform
-    "YYYY-MM-DDTHH:MM:SS+08:00" strings, and pandas' generic tz-aware parser
-    costs ~5µs/row — a quarter of minute bars is tens of millions of rows.
-    The fixed-format naive parse plus one localize is ~10x faster and applies
-    only when a vectorized suffix check proves the offset is uniform CN.
+    Stamp forms are normalised first: the raw lake writes
+    "YYYY-MM-DD HH:MM:SS+08:00", builder stamps write the "T" form, and a bare
+    wall-clock value is CN by contract. A union column mixing forms must not
+    lose any of them — pandas infers one format from the first value and
+    coerces the others to NaT, which the PIT wall would then hide silently.
+
+    Fast path next: replay/snapshot columns are usually uniform CN-offset
+    strings, and pandas' generic tz-aware parser costs ~5µs/row — a quarter
+    of minute bars is tens of millions of rows. The fixed-format naive parse
+    plus one localize is ~10x faster and applies only when a vectorized
+    suffix check proves the offset is uniform CN.
     """
     if series.dtype == object and len(series):
         text = series.astype(str)
-        if text.str.endswith("+08:00").all():
-            fast = pd.to_datetime(text.str.slice(0, 19), format="%Y-%m-%dT%H:%M:%S", errors="coerce")
+        separated = text.str.replace("T", " ", n=1, regex=False)
+        naive = separated.str.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}")
+        separated = separated.where(~naive, separated + "+08:00")
+        if separated.str.endswith("+08:00").all():
+            fast = pd.to_datetime(separated.str.slice(0, 19), format="%Y-%m-%d %H:%M:%S", errors="coerce")
             if not fast.isna().any():
                 # Localize via a UTC shift: tz_localize(CN_TZ) with a ZoneInfo
                 # walks rows one by one, the UTC route is metadata-only.
                 return (fast - pd.Timedelta(hours=8)).dt.tz_localize("UTC").dt.tz_convert(CN_TZ)
+        series = separated
     try:
         parsed = pd.to_datetime(series, errors="coerce")
     except (ValueError, TypeError):

@@ -330,6 +330,26 @@ FIELD_RULES: tuple[FieldRule, ...] = (
     FieldRule("events.parquet", "block_trade", ("amount",), source_unit="10k_CNY",
               status="verified", evidence="price*vol == amount",
               note="sparse; zero-row dates expected"),
+    # report_rc: sell-side earnings forecasts, the numeric slice of the text
+    # dataset of the same name (the title stays in text_index).
+    FieldRule("events.parquet", "report_rc", ("quarter",), semantic="datetime",
+              note="fiscal YEAR the forecast targets (2024Q4 = FY2024), not a calendar quarter; "
+                   "one report carries one row per target year"),
+    FieldRule("events.parquet", "report_rc", ("op_rt", "op_pr", "tp", "np"), source_unit="10k_CNY",
+              status="verified",
+              evidence="np/eps == daily_basic.total_share (10k shares): median ratio 1.00, "
+                       "98.6% within +-25% on 976 FY2026 forecasts of 2026-08"),
+    FieldRule("events.parquet", "report_rc", ("eps", "max_price", "min_price"),
+              source_unit="CNY_per_share"),
+    FieldRule("events.parquet", "report_rc", ("pe", "ev_ebitda"), source_unit="multiple"),
+    FieldRule("events.parquet", "report_rc", ("rd", "roe"), source_unit="percent",
+              note="forecast dividend yield and ROE; 17.9 arrives as 17.9"),
+    FieldRule("events.parquet", "report_rc", ("rating", "classify"), semantic="categorical",
+              note="rating is the broker's own vocabulary (买入/增持/推荐/Buy...); classify is "
+                   "the vendor's coverage class (首次关注/深度...)"),
+    FieldRule("events.parquet", "report_rc", ("imp_dg",), source_unit="unknown", status="unknown",
+              evidence="null-typed and all-NA in every sampled partition 2022-2026",
+              note="institutional-attention flag never populated; excluded from the snapshot"),
     FieldRule("events.parquet", "stk_holdernumber", ("holder_num",), source_unit="count"),
     FieldRule("events.parquet", "top10_holders", ("hold_amount", "hold_change"),
               source_unit="shares",

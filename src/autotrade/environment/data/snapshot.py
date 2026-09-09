@@ -8,7 +8,8 @@ Builds the seven domain files plus universe and manifest for one decision time:
 
 Every row satisfies ``available_at <= decision_time``. Datasets whose raw rows
 carry an ``available_at`` column (events/macro/text/minute) are filtered on it;
-the daily core uses the dataset contracts. The normalized trading-file unit
+the daily core and the same-day macro tables (``MACRO_DATASET_CONTRACTS``) are
+stamped from the dataset contracts first. The normalized trading-file unit
 contract covers daily, minute and auction data — every conversion is recorded
 in the manifest; events/macro/fundamentals/text keep TuShare per-source units
 and their domain meta carries ``units="source"`` (env docs §1.4). Replay slots
@@ -44,7 +45,9 @@ from autotrade.environment.data.auction import (
 from autotrade.environment.data.contracts import (
     BOARD_TRADING_DATASETS,
     CN_TZ,
+    MACRO_DATASET_CONTRACTS,
     STK_AUCTION_PRICE_ABS_TOLERANCE,
+    DatasetContract,
     read_committed_raw_generation,
 )
 from autotrade.environment.data.fundamental_events import (
@@ -116,7 +119,7 @@ _AUCTION_PUBLISH_CLOCK = "09:29:00"
 # them and the unit registry still classifies them for the data audit; they
 # are dropped per dataset before the domain union, so a same-named column of
 # another dataset (limit_list_ths.limit_amount, daily_info.total_share) is
-# unaffected. Two removal reasons, both permanent:
+# unaffected. Three removal reasons, all permanent:
 #
 # leakage — the column would carry post-decision state into history.
 # unusable — the column is dead, dead for the recent years, mostly zero with
@@ -126,6 +129,8 @@ _AUCTION_PUBLISH_CLOCK = "09:29:00"
 #   are merely sparse by nature (block_trade.amount) or populated per vendor
 #   category (kpl_list bid_*, the limit_list_ths pool fields) are NOT removed:
 #   they are complete within the rows they describe.
+# projected — a dataset read by two domains keeps each column in one of them
+#   (report_rc: the title is the text domain's, the numbers the events slice's).
 SNAPSHOT_EXCLUDED_COLUMNS: dict[str, tuple[str, ...]] = {
     # avg_turnover: always present but 95.9% zeros, max 0.04, semantics
     # undocumented. interval_3/interval_6: last populated 2018-09, all-NA in
@@ -164,6 +169,11 @@ SNAPSHOT_EXCLUDED_COLUMNS: dict[str, tuple[str, ...]] = {
     # Declared a CNY impairment amount, but 96.4% of values are |x| < 10 with
     # a median of 0.0005 — the unit contradicts the declared meaning.
     "fina_indicator_vip": ("impai_ttm",),
+    # Events slice of the sell-side forecast table: the title is projected by
+    # the text domain (same rows, same text_id), the stock name by universe,
+    # and imp_dg (institutional attention) is null-typed and all-NA in every
+    # sampled partition 2022-2026.
+    "report_rc": ("report_title", "name", "imp_dg"),
 }
 DomainBuildResult = tuple[dict[str, object], dict[str, object]]
 DomainBuildTask = tuple[
@@ -239,6 +249,11 @@ SELECTABLE_DATASETS: dict[str, tuple[str, ...]] = {
         "ths_hot",
         "dc_hot",
         "hm_detail",
+        # sell-side earnings forecasts: the numeric/rating/coverage slice of
+        # the text dataset of the same name (raw available_at from
+        # create_time; the title stays in the text domain). ``quarter`` is the
+        # fiscal YEAR the forecast targets (2024Q4 = FY2024).
+        "report_rc",
     ),
     "macro": (
         # CN macro releases
@@ -1640,9 +1655,15 @@ class SnapshotBuilder:
             exempt = lifetime_registries and dataset in MACRO_REGISTRY_DATASETS
             floor = _REGISTRY_WINDOW_FLOOR if exempt else window_start
             forward_column = FORWARD_EVENT_DATE_COLUMNS.get(dataset) if forward_events else None
+            contract = MACRO_DATASET_CONTRACTS.get(dataset)
             local_nat: dict[str, int] = {}
             rows, read_profile = self._read_dataset_window(
-                dataset_dir, decision_time, floor, local_nat, forward_event_column=forward_column
+                dataset_dir,
+                decision_time,
+                floor,
+                local_nat,
+                forward_event_column=forward_column,
+                contract=contract,
             )
             excluded = SNAPSHOT_EXCLUDED_COLUMNS.get(dataset, ())
             if excluded:
@@ -1685,6 +1706,7 @@ class SnapshotBuilder:
                 "frame": frame,
                 "schema": schema,
                 "columns": columns,
+                "rule": contract.rule if contract is not None else "raw available_at column",
                 "nat": local_nat.get(dataset, 0),
                 "duplicate_count": duplicate_count,
                 "profile": {
@@ -1719,7 +1741,7 @@ class SnapshotBuilder:
         nat_counts: dict[str, int] = {}
         for item in loaded:
             dataset = str(item["dataset"])
-            rules[dataset] = "raw available_at column"
+            rules[dataset] = str(item["rule"])
             dataset_columns[dataset] = list(item["columns"])
             dataset_build_profile[dataset] = item["profile"]  # type: ignore[assignment]
             if int(item["duplicate_count"]):
@@ -1764,6 +1786,7 @@ class SnapshotBuilder:
         window_start: pd.Timestamp,
         nat_counts: dict[str, int] | None = None,
         forward_event_column: str | None = None,
+        contract: DatasetContract | None = None,
     ) -> tuple[pd.DataFrame, dict[str, object]]:
         started = time.perf_counter()
         start_day = window_start.strftime("%Y%m%d")
@@ -1780,6 +1803,8 @@ class SnapshotBuilder:
             source_rows = len(frame)
             if frame.empty:
                 return None, 0, source_rows
+            if contract is not None:
+                frame = _stamp_contract_available_at(frame, contract, path)
             if "available_at" not in frame.columns:
                 raise ValueError(f"{path} has no available_at column; cannot enforce the PIT wall")
             available = to_cn_timestamps(frame["available_at"])
@@ -2144,6 +2169,27 @@ def _stamp_daily_available_at(daily: pd.DataFrame, contract) -> pd.DataFrame:
         contract.available_at(datetime.strptime(str(date), "%Y%m%d").date()).isoformat()
         for date in out["trade_date"].astype(str)
     ]
+    return out
+
+
+def _stamp_contract_available_at(frame: pd.DataFrame, contract: DatasetContract, path: Path) -> pd.DataFrame:
+    """Replace a union-domain row's raw stamp with its dataset contract's
+    (partition date at the contract clock; ``MACRO_DATASET_CONTRACTS``), in the
+    raw lake's ``YYYY-MM-DD HH:MM:SS+08:00`` form so the union column stays
+    uniform. An unparseable partition date leaves ``available_at`` empty: the
+    PIT wall then drops the row in the conservative direction and counts it,
+    exactly like an unparseable raw stamp."""
+    key = contract.partition_key
+    if key not in frame.columns:
+        raise ValueError(f"{path} has no {key} column; cannot apply the {contract.dataset} contract stamp")
+    out = frame.copy()
+    dates = pd.to_datetime(out[key].astype(str).str.strip(), format="%Y%m%d", errors="coerce")
+    clock = contract.available_time
+    stamped = dates + pd.Timedelta(
+        days=contract.lag_days, hours=clock.hour, minutes=clock.minute, seconds=clock.second
+    )
+    out["available_at"] = stamped.dt.strftime("%Y-%m-%d %H:%M:%S+08:00").fillna("")
+    out["available_at_rule"] = contract.rule
     return out
 
 

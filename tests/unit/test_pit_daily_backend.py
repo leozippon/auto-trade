@@ -24,6 +24,7 @@ from autotrade.environment.runtime import (
     chmod_tree,
 )
 from autotrade.environment.strategy import StrategySchedule
+from autotrade.paper import DailyPaperEngine
 from autotrade.pipelines.config import (
     SNAPSHOT_CACHE_FORMAT_VERSION,
     ArtifactRevision,
@@ -34,6 +35,7 @@ from autotrade.pipelines.pit_backend import (
     REPLAY_SOURCE_LABEL,
     HistoricalMinuteSource,
     _AsOfReadOnlyView,
+    PaperPITData,
     PITDailyEvaluationBackend,
     ResearchPITSnapshotProvider,
     _asof_stash_dir,
@@ -1895,3 +1897,84 @@ def test_incremental_asof_lock_matches_a_full_chmod_tree(tmp_path: Path) -> None
     )
     chmod_tree(incremental, file_mode=0o644, dir_mode=0o755)
     chmod_tree(reference, file_mode=0o644, dir_mode=0o755)
+
+
+def test_paper_day_sees_the_prior_close_of_a_same_day_macro_table(tmp_path: Path) -> None:
+    """Paper for day T reads T-1's index bar and not T's own close.
+
+    The cron-completed state before a T pre-open: the T-1 23:35 evening job has
+    landed T-1's macro tier (and, because Paper runs after T's update, T's rows
+    sit in the lake too). The one-day Paper adapter anchors its frozen view at
+    T-1 23:59:59 and gates the slot on the evening node, so the strategy sees
+    exactly what a replay shows at T 08:30: T-1 on the close contract, T hidden.
+    """
+
+    from .test_snapshot_builder import (
+        build_fundamental_events,
+        build_raw,
+        write,
+        write_fundamental_status,
+        write_index_daily,
+    )
+
+    raw = tmp_path / "data" / "raw"
+    build_raw(raw)
+    # The fixture's daily core stops at 20211008; Paper's target day needs its
+    # own market rows, so the 20211008 partitions are repeated for 20211011.
+    for dataset in ("daily", "daily_basic", "stk_limit", "adj_factor", "suspend_d", "stk_auction"):
+        rows = pd.read_parquet(raw / dataset / "trade_date=20211008.parquet")
+        rows["trade_date"] = "20211011"
+        write(raw / dataset / "trade_date=20211011.parquet", rows)
+    write_index_daily(raw, ("20210930", "20211008", "20211011"))
+    events_root = tmp_path / "data" / "pit" / "fundamental_events"
+    build_fundamental_events(events_root)
+    status = tmp_path / "results" / "data_quality" / "fundamental_events_status.json"
+    status.parent.mkdir(parents=True)
+    write_fundamental_status(status)
+    provider = ResearchPITSnapshotProvider(
+        experiment_dir=tmp_path / "research",
+        raw_dir=raw,
+        fundamental_events_root=events_root,
+        fundamental_events_status=status,
+        config=SnapshotConfig(
+            events_datasets=(),
+            macro_datasets=("index_daily",),
+            text_datasets=("cctv_news",),
+            fundamental_datasets=("income_vip",),
+            include_intraday=False,
+            include_industry=False,
+        ),
+    )
+    pit = PaperPITData(provider, trade_date="20211011", runtime_root=tmp_path / "pit_runtime")
+    seen: dict[str, object] = {}
+
+    class MacroReader:
+        def execute(self, context):
+            macro = pd.read_parquet(Path(context.asof_dir) / "macro")
+            seen["index_dates"] = sorted(macro[macro["dataset"] == "index_daily"]["trade_date"])
+            seen["inference_at"] = context.inference_at.isoformat()
+            return []
+
+        def close(self) -> None:
+            pass
+
+    strategy = tmp_path / "main.py"
+    strategy.write_text("def generate_orders(context):\n    return []\n", encoding="utf-8")
+    engine = DailyPaperEngine(
+        strategy_path=strategy,
+        strategy_revision="revision_1",
+        daily=pit.daily,
+        corporate_actions=pit.corporate_actions,
+        state_root=tmp_path / "paper",
+        context_data=pit.context_data,
+        execution_price=pit.execution_price,
+        executor_factory=lambda *_mounts: MacroReader(),
+    )
+    try:
+        result = engine.run_day("20211011")
+    finally:
+        engine.close()
+        pit.close()
+    assert result["day_complete"] is True
+    assert seen["inference_at"] == "2021-10-11T08:30:00+08:00"
+    assert seen["index_dates"] == ["20210930", "20211008"]

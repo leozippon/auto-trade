@@ -25,9 +25,9 @@ universe = pd.read_parquet(context.asof_dir + "/universe")   # 决策日冻结�
 
 | 数据 | 本包所需字段与单位 | `available_at` 规则 | 08:30 的后果 |
 | --- | --- | --- | --- |
-| `macro.cb_daily` | `ts_code`（转债代码，110/111/113/118 .SH，123/127/128 .SZ）、`trade_date`、`close`/`pre_close`/`open`/`high`/`low`（元/100 面值）、`pct_chg`（百分数）、`vol`（手，1 手 = 10 张 = 1,000 元面值）、`amount`（万元）、`cb_value`（转股价值，元/100 面值）、`cb_over_rate`（转股溢价率，百分数）、`bond_value`（纯债价值，元/100 面值）、`bond_over_rate`（纯债溢价率，百分数） | `conservative_date_eod`：`trade_date` 当日 23:59:59 | 回放里 T-2 行可见、T-1 与当日行不可见（macro 域比日线晚一天放行，见 README 的可见边界一条）；受 `macro_window_months`（默认随 `window_months`，24 个月）窗口，回放期间新行按日进入 |
-| `macro.cb_basic` | `ts_code`、`stk_code`（正股代码，与 `daily.ts_code` 同格式）、`cb_type`（`CB` 可转债 / `EB` 可交换债）、`issue_size`（元，推断）、`list_date`、`conv_start_date`/`conv_end_date`/`maturity_date`（静态条款，上市即知，未来日期 PIT 合法）、`first_conv_price`（元/股，初始转股价）、`coupon_rate`（百分数）、`issue_rating`（发行时评级，静态）、`call_clause`/`reset_clause`/`put_clause`（条款文本） | `conservative_date_eod` 按 `list_date`：上市日 23:59:59 | 上市次日起可见；决策快照里是全生命周期注册表，不受月窗截断。`conv_price`、`remain_size`、`newest_rating`、`delist_date` 是每晚刷新的当前状态，已被快照剔除（读不到，也不得用替代来源）；无 `list_date` 的 24 行没有 `available_at`、不进快照；3 行无 `stk_code` |
-| `macro.cb_call` | `ts_code`、`call_type`（`强赎`/`到赎`）、`is_call`（`公告提示强赎`/`公告实施强赎`/`公告不强赎`/`已满足强赎条件`/`公告到期赎回`）、`ann_date`、`call_date`/`call_reg_date`/`payment_date`（公告里的未来日程，PIT 合法）、`call_price`（元/100 面值）、`call_vol`（张）、`call_amount`（万元） | `conservative_date_eod` 按 `ann_date`：公告日 23:59:59 | 回放里 T-2 的公告在 T 08:30 才可见（同上），T 09:30 开盘是可见后首个可成交价；同一只券的各状态是不同公告行，不能 `drop_duplicates(ts_code)`；按 `available_at` 受 24 个月窗口（不是注册表） |
+| `macro.cb_daily` | `ts_code`（转债代码，110/111/113/118 .SH，123/127/128 .SZ）、`trade_date`、`close`/`pre_close`/`open`/`high`/`low`（元/100 面值）、`pct_chg`（百分数）、`vol`（手，1 手 = 10 张 = 1,000 元面值）、`amount`（万元）、`cb_value`（转股价值，元/100 面值）、`cb_over_rate`（转股溢价率，百分数）、`bond_value`（纯债价值，元/100 面值）、`bond_over_rate`（纯债溢价率，百分数） | `contract_1730_from:trade_date`：`trade_date` 当日 17:30（快照构建时覆盖原始层的 23:59:59） | 回放里 T-1 行可见、当日行不可见，与日线同步（见 README 的可见边界一条）；受 `macro_window_months`（默认随 `window_months`，24 个月）窗口，回放期间新行按日进入 |
+| `macro.cb_basic` | `ts_code`、`stk_code`（正股代码，与 `daily.ts_code` 同格式）、`cb_type`（`CB` 可转债 / `EB` 可交换债）、`issue_size`（元，推断）、`list_date`、`conv_start_date`/`conv_end_date`/`maturity_date`（静态条款，上市即知，未来日期 PIT 合法）、`first_conv_price`（元/股，初始转股价）、`coupon_rate`（百分数）、`issue_rating`（发行时评级，静态）、`call_clause`/`reset_clause`/`put_clause`（条款文本） | `contract_1730_from:list_date`：上市日 17:30 | 上市次日起可见；决策快照里是全生命周期注册表，不受月窗截断。`conv_price`、`remain_size`、`newest_rating`、`delist_date` 是每晚刷新的当前状态，已被快照剔除（读不到，也不得用替代来源）；无 `list_date` 的 24 行没有 `available_at`、不进快照；3 行无 `stk_code` |
+| `macro.cb_call` | `ts_code`、`call_type`（`强赎`/`到赎`）、`is_call`（`公告提示强赎`/`公告实施强赎`/`公告不强赎`/`已满足强赎条件`/`公告到期赎回`）、`ann_date`、`call_date`/`call_reg_date`/`payment_date`（公告里的未来日程，PIT 合法）、`call_price`（元/100 面值）、`call_vol`（张）、`call_amount`（万元） | `conservative_date_eod` 按 `ann_date`：公告日 23:59:59 | 回放里 T-2 的公告在 T 08:30 才可见（盖章晚于晚间节点的开始时刻，见 README 的可见边界一条），T 09:30 开盘是可见后首个可成交价；同一只券的各状态是不同公告行，不能 `drop_duplicates(ts_code)`；按 `available_at` 受 24 个月窗口（不是注册表） |
 
 `stk_code` 到正股：1,163 只里 1,160 只非空，99% 能在股票列表里找到，其余是无正股或老三板代码，直接丢弃；27 只 `EB` 的 `stk_code` 是被交换的股票而非发行人，剔除。一只正股同时有多只存续转债的情况 2024 年末有 10 例。
 
@@ -36,10 +36,10 @@ universe = pd.read_parquet(context.asof_dir + "/universe")   # 决策日冻结�
 | 数据 | 本包所需字段 | 08:30 可见边界与单位 |
 | --- | --- | --- |
 | 合并日线 `daily` | `open/high/low/close`、`vol`（股）、`amount`（元）、`pct_chg`（小数）、`adj_factor`、`turnover_rate`（小数）、`circ_mv`（元）、`pb`、`up_limit`/`down_limit`、`is_suspended` | 当日行 17:30 才可见，08:30 只有 T-1 及更早；`adj_factor` 当日 09:30 盖章，同样只能用 T-1；反推转股价用未复权 `close` |
-| `macro.index_daily` | `000300.SH` 的 `pct_chg`（百分数）、`close` | T-2 可见（同上）；用于 β |
+| `macro.index_daily` | `000300.SH` 的 `pct_chg`（百分数）、`close` | `contract_1730_from:trade_date`，T-1 可见（与 `cb_daily` 同）；用于 β |
 | `universe` | `ts_code`、`name`（当时名称，含 ST 标记）、`list_date`、`l1_code`/`l1_name` | 决策日冻结；匹配对照的行业从这里取，不回填今天的行业 |
 
-本包不用两融、资金流、筹码等数据集。日线是 T-1、转债与其余 macro 域是 T-2，两条时间线要显式对齐，不要用同一个日期索引串起来；转债或正股在该边界上停牌时用最近一行，且要把「最近一行的日期」当作特征的一部分记录。
+本包不用两融、资金流、筹码等数据集。日线、转债行情与 `index_daily` 都到 T-1，`cb_call` 公告只到 T-2，两条时间线要显式对齐，不要用同一个日期索引串起来；转债或正股在该边界上停牌时用最近一行，且要把「最近一行的日期」当作特征的一部分记录。
 
 ## 覆盖（本地核对）
 
@@ -52,7 +52,7 @@ universe = pd.read_parquet(context.asof_dir + "/universe")   # 决策日冻结�
 
 推断时冻结前复权锚：`anchor = adj_factor(T-1)`，`qfq(t) = raw(t) * adj_factor(t) / anchor`，正股收益用 qfq 收盘；转股价值与转股价用未复权 `close`（分红除权时转股价同步调整，`cb_value` 与未复权价一致）；转债价格不复权，付息日 `pct_chg` 有约 −1% 的跳变。
 
-截面处理顺序见 `families.md`。截面只含当时已上市、未退市、T-1 未停牌、值有限且 T-2 有 `cb_daily` 行的发行人；行业中性与匹配对照只用本次 PIT `universe`。
+截面处理顺序见 `families.md`。截面只含当时已上市、未退市、T-1 未停牌、值有限且 T-1 有 `cb_daily` 行的发行人；行业中性与匹配对照只用本次 PIT `universe`。
 
 ## 执行
 
@@ -64,7 +64,7 @@ universe = pd.read_parquet(context.asof_dir + "/universe")   # 决策日冻结�
 
 ## 常见失败
 
-- 用当日 `cb_daily`、当日日线、当日复权，或用 `ann_date`/`call_date` 而非 `available_at` 判断公告可见；把转债行情按 T-1 而不是 T-2 与日线对齐同样是前视。
+- 用当日 `cb_daily`、当日日线、当日复权，或用 `ann_date`/`call_date` 而非 `available_at` 判断公告可见；把强赎公告按 T-1 而不是 T-2 对齐同样是前视。
 - 把 `cb_daily.pct_chg`/`cb_over_rate` 的百分数与 `daily.pct_chg` 的小数混算；把 `amount` 的万元与 `daily.amount` 的元混算；把 `vol` 的手当张。
 - 用 `first_conv_price` 当当前转股价（下修与分红后已变），或试图从别处补 `conv_price`。
 - 用 `cb_basic` 判断存续（没有 `delist_date`），或对 `cb_call` 按 `ts_code` 去重。

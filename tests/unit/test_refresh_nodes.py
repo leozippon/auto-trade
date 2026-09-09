@@ -25,15 +25,21 @@ from autotrade.data_sources.tushare.common import (
 
 from autotrade.environment.data.contracts import (
     DOMAIN_REFRESH_NODES,
+    EVENING_NODE,
     EVENT_DATASET_REFRESH_NODES,
+    MACRO_DATASET_CONTRACTS,
+    MACRO_DATASET_REFRESH_NODES,
     REFRESH_NODES,
     TEXT_DATASET_REFRESH_NODES,
+    default_tushare_contracts,
     domain_visible_cutoff,
     event_dataset_visible_cutoff,
+    macro_dataset_visible_cutoff,
     next_visible_boundary,
     text_dataset_visible_cutoff,
     visible_cutoff,
 )
+from autotrade.environment.data.snapshot import SELECTABLE_DATASETS
 
 CN_TZ = ZoneInfo("Asia/Shanghai")
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -252,7 +258,12 @@ class RefreshNodeDriftGuardTest(unittest.TestCase):
         )
 
     def test_dataset_overrides_reference_real_nodes(self) -> None:
-        for mapping in (DOMAIN_REFRESH_NODES, EVENT_DATASET_REFRESH_NODES, TEXT_DATASET_REFRESH_NODES):
+        for mapping in (
+            DOMAIN_REFRESH_NODES,
+            EVENT_DATASET_REFRESH_NODES,
+            MACRO_DATASET_REFRESH_NODES,
+            TEXT_DATASET_REFRESH_NODES,
+        ):
             for key, node_names in mapping.items():
                 for name in node_names:
                     self.assertIn(name, REFRESH_NODES, f"{key!r} maps to unknown node {name!r}")
@@ -294,7 +305,7 @@ class RefreshNodeDriftGuardTest(unittest.TestCase):
 
     def test_dataset_refresh_overrides_are_landed_by_their_jobs(self) -> None:
         jobs = json.loads(CRON_SCHEDULE.read_text(encoding="utf-8"))["jobs"]
-        for mapping in (EVENT_DATASET_REFRESH_NODES, TEXT_DATASET_REFRESH_NODES):
+        for mapping in (EVENT_DATASET_REFRESH_NODES, MACRO_DATASET_REFRESH_NODES, TEXT_DATASET_REFRESH_NODES):
             for dataset, node_names in mapping.items():
                 for node_name in node_names:
                     selected = self._job_datasets(jobs[node_name])
@@ -305,6 +316,41 @@ class RefreshNodeDriftGuardTest(unittest.TestCase):
                         selected,
                         f"{dataset!r} claims {node_name!r}, but that job does not download it",
                     )
+
+
+    def test_close_contract_macro_tables_are_landed_by_the_evening_job(self) -> None:
+        # Replay releases a contract-stamped T row from T+1 pre-open because the
+        # T 23:35 evening job lands it; live must give Paper the same guarantee,
+        # so every such table has to ride that job's default macro tier (no
+        # --macro-datasets restriction) and no other node.
+        schedule = json.loads(CRON_SCHEDULE.read_text(encoding="utf-8"))
+        evening = schedule["jobs"][EVENING_NODE]
+        self.assertNotIn("--macro-datasets", evening["extra_args"])
+        self.assertTrue(MACRO_DATASET_CONTRACTS)
+        self.assertLessEqual(set(MACRO_DATASET_CONTRACTS), set(SELECTABLE_DATASETS["macro"]))
+        daily_close = default_tushare_contracts()["daily"].available_time
+        launch = REFRESH_NODES[EVENING_NODE].start
+        for dataset, contract in MACRO_DATASET_CONTRACTS.items():
+            with self.subTest(dataset=dataset):
+                self.assertIn(dataset, MACRO_REGIME_DEFAULT_DATASETS)
+                self.assertNotIn(dataset, MACRO_DATASET_REFRESH_NODES)
+                self.assertEqual(contract.available_time, daily_close)
+                self.assertLess(contract.available_time, launch)
+                stamp = contract.available_at(date(2022, 1, 5))
+                self.assertGreater(stamp, macro_dataset_visible_cutoff(dataset, datetime(2022, 1, 5, 9, 0, tzinfo=CN_TZ)))
+                self.assertLessEqual(stamp, macro_dataset_visible_cutoff(dataset, datetime(2022, 1, 6, 8, 30, tzinfo=CN_TZ)))
+        self.assertEqual(MACRO_DATASET_CONTRACTS["cb_daily"].rule, "contract_1730_from:trade_date")
+        self.assertEqual(MACRO_DATASET_CONTRACTS["cb_basic"].rule, "contract_1730_from:list_date")
+
+    def test_delayed_and_global_macro_datasets_keep_the_raw_stamp(self) -> None:
+        # Monthly/quarterly releases, announcement tables keyed by ann_date and
+        # the global tier (whose data date closes after the evening launch and
+        # lands a night later) must not be pulled forward by the close contract.
+        for dataset in (
+            "cn_gdp", "cn_cpi", "cn_ppi", "cn_pmi", "cn_m", "sf_month", "broker_recommend",
+            "cb_call", "cn_schedule", *GLOBAL_CONTEXT_DEFAULT_DATASETS,
+        ):
+            self.assertNotIn(dataset, MACRO_DATASET_CONTRACTS, dataset)
 
 
 class VisibilityCutoffTest(unittest.TestCase):
@@ -375,6 +421,25 @@ class VisibilityCutoffTest(unittest.TestCase):
         self.assertEqual(
             domain_visible_cutoff("daily", sunday_night),
             datetime(2022, 1, 7, 23, 35, tzinfo=CN_TZ),
+        )
+
+    def test_report_rc_events_slice_rolls_with_the_text_landing_job(self) -> None:
+        # The forecast numbers are the text dataset read by the events domain:
+        # the natural-day text job lands them, so a Saturday-night report is
+        # visible Monday pre-open in both domains — not a day later under the
+        # weekday evening node, and not before the 23:15 launch.
+        saturday_night = datetime(2022, 1, 8, 23, 40, tzinfo=CN_TZ)
+        self.assertEqual(
+            event_dataset_visible_cutoff("report_rc", saturday_night),
+            text_dataset_visible_cutoff("report_rc", saturday_night),
+        )
+        self.assertEqual(
+            event_dataset_visible_cutoff("report_rc", saturday_night),
+            datetime(2022, 1, 8, 23, 15, tzinfo=CN_TZ),
+        )
+        self.assertNotEqual(
+            event_dataset_visible_cutoff("report_rc", saturday_night),
+            event_dataset_visible_cutoff("block_trade", saturday_night),
         )
 
     def test_text_datasets_without_an_override_use_the_text_node(self) -> None:

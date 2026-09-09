@@ -114,6 +114,12 @@ BOARD_TRADING_DATASETS = [
 ]
 
 
+# Close-published daily tables: the row is public on its data date, after the
+# close at the latest, so the daily core and the same-day macro tables below
+# share one stamp (docs/data-documentation.md §3.3).
+CLOSE_PUBLISHED_TIME = time(17, 30)
+
+
 @dataclass(frozen=True)
 class DatasetContract:
     dataset: str
@@ -125,13 +131,19 @@ class DatasetContract:
     def available_at(self, partition_date: date) -> datetime:
         return datetime.combine(partition_date + timedelta(days=self.lag_days), self.available_time, tzinfo=CN_TZ)
 
+    @property
+    def rule(self) -> str:
+        """``available_at_rule`` label for rows stamped by this contract."""
+        lag = f"+{self.lag_days}d" if self.lag_days else ""
+        return f"contract_{self.available_time:%H%M}{lag}_from:{self.partition_key}"
+
 
 def default_tushare_contracts() -> dict[str, DatasetContract]:
     return {
         "daily": DatasetContract(
             dataset="daily",
             partition_key="trade_date",
-            available_time=time(17, 30),
+            available_time=CLOSE_PUBLISHED_TIME,
             pit_notes="Use for close-to-close research or next-trade-date decisions, not same-day 09:25 decisions.",
         ),
         "daily_basic": DatasetContract(
@@ -159,6 +171,50 @@ def default_tushare_contracts() -> dict[str, DatasetContract]:
             pit_notes="Use as a trading constraint; zero rows mean no suspended names for that partition.",
         ),
     }
+
+
+# Same-day published macro tables. The ingest adapter stamps every macro row
+# on the conservative date-EOD placeholder (23:59:59), which the 23:35 evening
+# node can only release a day late (T rows first visible at T+2). These tables
+# are public on their data date -- exchange index/industry bars, exchange
+# statistics and market money flow, repo and derivative settlements after the
+# close, SHIBOR/LPR fixings before noon -- and the same night's evening job
+# (cn_evening_full, macro tier) lands them, so the snapshot re-stamps their rows
+# on the daily core's close contract: T rows roll in at T+1, exactly as Paper
+# sees them once that job has landed. Registries stamp on the listing day; the
+# listing notice precedes it, so its close is still conservative. Delayed
+# releases (monthly/quarterly statistics, broker_recommend), announcement
+# tables keyed by ann_date (cb_call) and the global tier (its data date closes
+# after the evening launch and lands a night later) keep the adapter's stamp.
+MACRO_DATASET_CONTRACTS: dict[str, DatasetContract] = {
+    dataset: DatasetContract(
+        dataset=dataset,
+        partition_key=partition_key,
+        available_time=CLOSE_PUBLISHED_TIME,
+        pit_notes="Published on the data date; visible from the next trading day's pre-open.",
+    )
+    for dataset, partition_key in (
+        ("shibor", "date"),
+        ("shibor_quote", "date"),
+        ("shibor_lpr", "date"),
+        ("repo_daily", "trade_date"),
+        ("index_daily", "trade_date"),
+        ("index_dailybasic", "trade_date"),
+        ("sw_daily", "trade_date"),
+        ("ci_daily", "trade_date"),
+        ("ths_daily", "trade_date"),
+        ("daily_info", "trade_date"),
+        ("sz_daily_info", "trade_date"),
+        ("moneyflow_mkt_dc", "trade_date"),
+        ("fut_basic", "list_date"),
+        ("fut_mapping", "trade_date"),
+        ("fut_daily", "trade_date"),
+        ("opt_basic", "list_date"),
+        ("opt_daily", "trade_date"),
+        ("cb_basic", "list_date"),
+        ("cb_daily", "trade_date"),
+    )
+}
 
 
 # ---- Timeview refresh nodes (docs/environment-design.md) ----
@@ -292,6 +348,10 @@ EVENT_DATASET_REFRESH_NODES: dict[str, tuple[str, ...]] = {
     "stk_holdernumber": ("cn_nightly_disclosure_full",),
     "stk_holdertrade": ("cn_nightly_disclosure_full",),
     "repurchase": ("cn_nightly_disclosure_full",),
+    # The sell-side forecast slice is the text dataset of the same name read
+    # by the events domain: its rows land with the natural-day text job, so
+    # the numbers and the title of one report become visible together.
+    "report_rc": (TEXT_NODE,),
 }
 
 # Per-dataset overrides inside the text domain (default = TEXT_NODE). The

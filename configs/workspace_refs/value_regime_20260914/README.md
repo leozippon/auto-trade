@@ -25,7 +25,7 @@
 - 正式 import 只允许：纯计算标准库（`__future__`、`collections`、`dataclasses`、`datetime`、`decimal`、`functools`、`itertools`、`math`、`statistics`、`typing`）、`numpy`、`pandas`、`scipy`、`sklearn`、`lightgbm`、`xgboost`、`statsmodels`、`torch`（本臂 `budgets.strategy_gpu_count=0`，只跑 CPU）及其子模块，以及 `output/` 内自己的模块。qlib / joblib / pickle 不得 import；参数用 `np.save`/`np.savez`、booster 的 `save_model(context.state_dir + ...)` 或 `torch.save(obj, context.state_dir + ...)` 持久化；静态检查只拒绝绝对路径字面量与只读根写入，以 `output/README.md` 的合同为准。
 - 需要拟合的量（复合权重、状态阈值所用的季节均值与标准差）放在 `fit(context)` 并写入 `context.state_dir`，`REFIT_PERIOD="quarter"`；`generate_orders` 只读它。`models/` 以只读 `context.models_dir` 挂载。
 - 沙箱无网络，不要抓网页。
-- 每一行必须 `available_at <= context.inference_at`。估值列随 `daily_basic` 在 T-1 18:00 可见；财务与派现按各自 `ann_date`（派现优先 `imp_ann_date`）18:00 可见；`fut_*`/`opt_*` 与其余 macro 域的行盖章在数据日 23:59:59，放行却按前一个工作日 23:35 的晚间落库节点，因此回放里 macro 最新只到 T-2、比日线晚一天（长假后的首个交易日才重新看到节前最后一日）；只有本折第一个决策日例外——冻结首片按锚点 23:59:59 收行，带着锚点当天的 macro。基差状态量按 T-2 对齐，不要假定 T-1 macro。
+- 每一行必须 `available_at <= context.inference_at`。估值列随 `daily_basic` 在 T-1 18:00 可见；财务与派现按各自 `ann_date`（派现优先 `imp_ann_date`）18:00 可见；`fut_daily`/`fut_mapping`/`opt_daily`/`index_daily` 等当日发布的宏观日频表在快照里按数据日 17:30 盖章（规则名 `contract_1730_from:trade_date`，与 `daily` 同一收盘合同；`fut_basic`/`opt_basic` 注册表按 `list_date` 17:30），随当晚的晚间落库节点放行，因此回放里这些表和日线一样到 T-1；月度、季度宏观统计仍按保守延后规则盖章在 23:59:59，比按前一个工作日 23:35 放行的节点晚一天，且只在本折第一个决策日因冻结首片按锚点 23:59:59 收行而多看到锚点当天的行。基差状态量按 T-1 对齐。
 - 不要写死 `/mnt/agent/workspace`。先核对本轮 `data_summary.json` 与单位表，再经 `context.asof_dir` / `context.snapshot_dir` 读数，每次读取都给 `columns=` 与日期窗口。
 - 不要把 refs 拷进 `output`。
 - Broker 负责 T+1、费用、涨跌停、停牌、除权现金红利与成交；策略只发订单草图。

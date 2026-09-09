@@ -20,11 +20,11 @@ universe = pd.read_parquet(context.asof_dir + "/universe")   # 决策日冻结�
 | 合并日线 `daily` | `open/high/low/close`、`amount`（元）、`pct_chg`（小数）、`adj_factor`、`turnover_rate`（小数）、`circ_mv`/`total_mv`（元）、`pe_ttm`/`pb`/`ps_ttm`（无量纲倍数）、`dv_ttm`/`dv_ratio`（小数）、`up_limit`/`down_limit`、`is_suspended` | `daily` 行 17:30、`daily_basic` 行 18:00 才可见，`adj_factor` 09:30 盖章，08:30 一律只能用 T-1 及更早。估值与市值列由 `daily_basic` 合并进同一文件，不需要单独取数 |
 | `fundamentals.fina_indicator_vip` | `roe`/`roe_waa`/`roe_dt`（百分数）、`debt_to_assets`（百分数）、`eps`/`bps`（元/股）、`grossprofit_margin`、`netprofit_yoy` | 按 `ann_date` 18:00 可见；同一 `(ts_code, end_date)` 取 `available_at` 最新版本，跨 `end_date` 取 `ann_date` 最近一期。**本仓库没有 `q_netprofit_yoy` 列**；`impai_ttm` 被快照剔除 |
 | `fundamentals.dividend` | `div_proc`、`cash_div_tax`/`cash_div`（元/股）、`stk_div`（每股送转股数）、`ann_date`、`imp_ann_date`、`ex_date`、`record_date`、`end_date` | 行级可见时间取 `imp_ann_date`，缺则 `ann_date`，当日 18:00。已可见行里的 `ex_date` 可以读，但不能用它去看未公告的安排。同一次派现在 `预案`/`股东大会通过`/`实施` 三个阶段各有一行，只有 `实施` 行带 `ex_date` |
-| `macro.index_daily` | `000300.SH`/`000905.SH`/`000852.SH` 的 `close`（指数点）、`pct_chg`（百分数，5% 存成 5.0） | T-2 可见（macro 域比日线晚一天放行，见 README 的可见边界一条）；仓库只落七只核心指数，覆盖自 2020 年起 |
-| `macro.fut_daily` | `ts_code`、`close`/`settle`（指数点）、`vol`/`oi`（手）、`oi_chg` | `conservative_date_eod`（数据日 23:59:59），回放里 T-2 可见，见 README。CFFEX 的 `IF/IH/IC/IM` 每日各 8 行：4 个实际月合约 + `X.CFX`/`XL.CFX`/`XL1`/`XL2`/`XL3` 连续代码 |
+| `macro.index_daily` | `000300.SH`/`000905.SH`/`000852.SH` 的 `close`（指数点）、`pct_chg`（百分数，5% 存成 5.0） | `contract_1730_from:trade_date`（数据日 17:30），T-1 可见、与日线同步（见 README 的可见边界一条）；仓库只落七只核心指数，覆盖自 2020 年起 |
+| `macro.fut_daily` | `ts_code`、`close`/`settle`（指数点）、`vol`/`oi`（手）、`oi_chg` | `contract_1730_from:trade_date`（数据日 17:30，快照构建时覆盖原始层的 23:59:59），回放里 T-1 可见，见 README。CFFEX 的 `IF/IH/IC/IM` 每日各 8 行：4 个实际月合约 + `X.CFX`/`XL.CFX`/`XL1`/`XL2`/`XL3` 连续代码 |
 | `macro.fut_mapping` | `ts_code`、`mapping_ts_code` | 同上。连续代码是指针：`XL.CFX`/`X.CFX`→当月、`XL1`→次月、`XL2`→当季、`XL3`→下季，实测连续行的 `close`/`oi` 与被指向合约逐行完全相等 |
 | `macro.fut_basic` | `ts_code`、`fut_code`、`d_month`、`list_date`、`delist_date`、`last_ddate`、`multiplier` | 注册表，按 `list_date` 盖章，决策快照豁免窗口下限（全生命周期可见）。只有实际月合约有 `delist_date`；五个连续代码的 `delist_date`/`multiplier` 为空，剩余期限必须先经 `fut_mapping` 换成实际合约再查。IM 最早 `list_date` 2022-07-22 |
-| `macro.opt_daily` | `ts_code`、`close`/`settle`（权利金）、`vol`/`oi`（张） | 同 `fut_daily`，回放里 T-2 可见。SSE 自 2015-02-09、SZSE 与 CFFEX 自 2019-12-23；只落金融期权（ETF + 股指），无商品期权 |
+| `macro.opt_daily` | `ts_code`、`close`/`settle`（权利金）、`vol`/`oi`（张） | 同 `fut_daily`，回放里 T-1 可见。SSE 自 2015-02-09、SZSE 与 CFFEX 自 2019-12-23；只落金融期权（ETF + 股指），无商品期权 |
 | `macro.opt_basic` | `ts_code`、`opt_code`、`call_put`、`exercise_price`、`maturity_date`、`per_unit`、`list_date` | 注册表，同 `fut_basic` 的可见规则。`opt_code` 形如 `OP510050.SH`/`OP000852.SH`；`exercise_price` 与标的同量纲（ETF 是元/份，股指是指数点） |
 | `universe` | `ts_code`、`name`、`list_date`、`exchange`、`market`、`l1_code`/`l1_name` | 决策日冻结，`name` 是决策日在册名称（ST 判定只用它）。行业中性只用它，不回填今天的行业 |
 

@@ -22,7 +22,7 @@ from autotrade.environment.data.auction import (
     is_open_auction_time,
     market_bucket,
 )
-from autotrade.environment.data.pit import CorruptSidecarError
+from autotrade.environment.data.pit import CorruptSidecarError, to_cn_timestamps
 
 
 class AuctionCorrectionTest(unittest.TestCase):
@@ -112,6 +112,29 @@ class PITDataStoreTest(unittest.TestCase):
             frame = store.read_trade_range("daily", "20200103", "20200101", columns=["trade_date", "ts_code"])
             self.assertTrue(frame.empty)
             self.assertEqual(list(frame.columns), ["trade_date", "ts_code"])
+
+
+class AvailableAtParsingTest(unittest.TestCase):
+    def test_mixed_stamp_forms_parse_to_the_same_instant(self):
+        # The raw lake writes "YYYY-MM-DD HH:MM:SS+08:00", builder stamps the
+        # "T" form and a bare wall clock is CN by contract. A union column that
+        # mixes them must parse every row: pandas alone infers one format from
+        # the first value and coerces the rest to NaT, and a NaT row is hidden
+        # by the PIT wall without any error.
+        forms = pd.Series([
+            "2021-10-08T17:30:00+08:00",
+            "2021-10-08 17:30:00+08:00",
+            "2021-10-08 17:30:00",
+        ])
+        parsed = to_cn_timestamps(forms)
+        expected = pd.Timestamp("2021-10-08 17:30:00", tz="Asia/Shanghai")
+        self.assertEqual(parsed.tolist(), [expected] * 3)
+        self.assertEqual(to_cn_timestamps(forms.iloc[::-1].reset_index(drop=True)).tolist(), [expected] * 3)
+        # Values that are not stamps at all still fail closed to NaT.
+        self.assertTrue(to_cn_timestamps(pd.Series(["2021-10-08T17:30:00+08:00", "", "garbage"])).isna().tolist()[1:] == [True, True])
+        # Already-parsed tz-aware values are returned in CN time unchanged.
+        aware = pd.Series([pd.Timestamp("2021-10-08 09:30:00", tz="UTC")])
+        self.assertEqual(to_cn_timestamps(aware).tolist(), [pd.Timestamp("2021-10-08 17:30:00", tz="Asia/Shanghai")])
 
 
 class FundamentalEventsBuilderTest(unittest.TestCase):
@@ -664,6 +687,9 @@ class UnitRegistryProjectionTest(unittest.TestCase):
             ("events.parquet", "repurchase", "high_limit", "CNY_per_share"),
             ("events.parquet", "cyq_perf", "cost_5pct", "CNY_per_share"),
             ("events.parquet", "cyq_perf", "winner_rate", "percent"),
+            ("events.parquet", "report_rc", "np", "10k_CNY"),
+            ("events.parquet", "report_rc", "eps", "CNY_per_share"),
+            ("events.parquet", "report_rc", "roe", "percent"),
             ("fundamentals.parquet", "fina_indicator_vip", "current_ratio", "multiple"),
             ("fundamentals.parquet", "fina_indicator_vip", "assets_turn", "times_per_period"),
             ("fundamentals.parquet", "fina_indicator_vip", "roe", "percent"),

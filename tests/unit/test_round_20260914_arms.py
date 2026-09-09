@@ -9,6 +9,7 @@ import json
 import pytest
 
 from autotrade.environment.llm.model_profiles import LOCAL_QWEN_MODEL
+from autotrade.pipelines.config import SNAPSHOT_CACHE_FORMAT_VERSION
 from autotrade.webui.manager import MAX_RUNNING_EXPERIMENTS
 from scripts.experiments.create_round_20260910 import ROUND as ROUND_20260910
 from scripts.experiments.create_round_20260914 import (
@@ -43,12 +44,30 @@ MODEL_ROLES = (
 )
 
 SEED_DIR = REPO_ROOT / PIT_VIEWS_SEED
+
+
+def _seed_cache_format() -> object | None:
+    try:
+        return json.loads((SEED_DIR / "provider.json").read_text(encoding="utf-8")).get("schema_version")
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
 # The seed tree is a gitignored operator artifact built by
 # scripts/data/prebuild_pit_views_seed.py, so the checks that read it are
-# skipped where it was never built rather than failing a fresh checkout.
+# skipped where it was never built rather than failing a fresh checkout. A
+# tree left over from an older cache format is skipped the same way: the
+# pre-flight refuses it by design, and this round's arms were created on it
+# before the format moved.
+_SEED_CACHE_FORMAT = _seed_cache_format()
 needs_seed = pytest.mark.skipif(
-    not (SEED_DIR / "provider.json").is_file(),
-    reason=f"prebuilt PIT view seed {PIT_VIEWS_SEED} is not present",
+    _SEED_CACHE_FORMAT != SNAPSHOT_CACHE_FORMAT_VERSION,
+    reason=(
+        f"prebuilt PIT view seed {PIT_VIEWS_SEED} is not present"
+        if _SEED_CACHE_FORMAT is None
+        else f"prebuilt PIT view seed {PIT_VIEWS_SEED} was built under snapshot cache format "
+        f"{_SEED_CACHE_FORMAT}; this code writes {SNAPSHOT_CACHE_FORMAT_VERSION}"
+    ),
 )
 
 

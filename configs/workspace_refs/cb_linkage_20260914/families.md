@@ -1,6 +1,6 @@
 # 五个假说家族与一个对照家族
 
-记号。正股 s 用归一化 `daily`：`C/O/A/V` 为截至 T-1 的收盘、开盘、成交额（元）、成交量（股），`qfq` 为按 T-1 冻结锚前复权的价格，`r_s = qfq_C/qfq_C.shift(1) − 1`，`circ_mv` 为元，`turnover_rate` 为小数。转债 k 取截至 T-2 的最近可见行（macro 域比日线晚一天放行，见 README），用 `macro` 域 `dataset == "cb_daily"` 的来源单位：`P = close`（元/100 面值）、`g = pct_chg / 100`（源是百分数）、`Amt = amount × 1e4`（源是万元）、`Par = cb_value`（转股价值，元/100 面值）、`Prem = cb_over_rate`（转股溢价率，%）、`BPrem = bond_over_rate`（纯债溢价率，%）。`r_m` 为沪深 300（`index_daily` 的 `000300.SH`，`pct_chg` 是百分数）。缺值、零分母、无穷值保持为空，不填 0。「方向」是合成前乘号，使高分做多。
+记号。正股 s 用归一化 `daily`：`C/O/A/V` 为截至 T-1 的收盘、开盘、成交额（元）、成交量（股），`qfq` 为按 T-1 冻结锚前复权的价格，`r_s = qfq_C/qfq_C.shift(1) − 1`，`circ_mv` 为元，`turnover_rate` 为小数。转债 k 取截至 T-1 的最近可见行（与日线同步，见 README 的可见边界一条），用 `macro` 域 `dataset == "cb_daily"` 的来源单位：`P = close`（元/100 面值）、`g = pct_chg / 100`（源是百分数）、`Amt = amount × 1e4`（源是万元）、`Par = cb_value`（转股价值，元/100 面值）、`Prem = cb_over_rate`（转股溢价率，%）、`BPrem = bond_over_rate`（纯债溢价率，%）。`r_m` 为沪深 300（`index_daily` 的 `000300.SH`，`pct_chg` 是百分数）。缺值、零分母、无穷值保持为空，不填 0。「方向」是合成前乘号，使高分做多。
 
 基础恒等式（对 2024 年逐行核对，误差 < 0.01 个百分点）：
 
@@ -18,8 +18,8 @@ M_t          = Par_t / 100 = 正股close_t / conv_price_t  价内程度；强赎
 ```text
 basic  = macro[dataset == "cb_basic"][["ts_code", "stk_code", "cb_type", "issue_size", "list_date", "conv_start_date", "issue_rating"]]
 basic  = basic[basic.cb_type == "CB"]           # 剔除可交换债 EB（27 只，stk_code 不是发行人自身）
-alive  = k 在 T-2（转债行比日线晚一天可见；停牌时放宽到最近 5 个交易日）有 cb_daily 行   # 不用被剔除的 delist_date
-pool   = {stk_code : 存在 alive 的 k} ∩ 可交易过滤；一只正股多只转债时取 T-2 Amt 最大的一只
+alive  = k 在 T-1（停牌时放宽到最近 5 个交易日）有 cb_daily 行   # 不用被剔除的 delist_date
+pool   = {stk_code : 存在 alive 的 k} ∩ 可交易过滤；一只正股多只转债时取 T-1 Amt 最大的一只
 ```
 
 可交易过滤是声明值，不是拟合参数：T-1 未停牌、`universe.name` 不含 ST、剔除 688/689（或说明保留）、ADV20 ≥ 3,000 万元、T-1 收盘 ≤ 40 元。按 20 日均成交额、收盘价、科创板与 ST 联合过滤后，2024-06 基准日 519 只发行人剩 340 只，2022-06 的 407 只剩 300 只。

@@ -95,21 +95,31 @@ def pit_cache_provider_record(
 
 
 def assert_seed_snapshot_config(seed: Path, snapshot_config: SnapshotConfig) -> None:
-    """Refuse a seed prebuilt for a different snapshot configuration.
+    """Refuse a seed prebuilt for a different snapshot configuration or cache format.
 
-    The create-time half of the contract check. Two of the three other fields
-    of ``pit_cache_provider_record`` — the pinned generation and its release
+    The create-time half of the contract check. Two of the four fields of
+    ``pit_cache_provider_record`` — the pinned generation and its release
     path — exist only once the experiment runs, so what a create request can be
-    judged against is the part the seed was prebuilt for: the snapshot
-    configuration, which is exactly what decides whether a dataset selection
-    has views here at all. ``seed_pit_views`` still compares the whole record
-    before it links anything.
+    judged against is the part the seed was prebuilt for: the cache format and
+    the snapshot configuration, which is exactly what decides whether a dataset
+    selection has views here at all. ``seed_pit_views`` still compares the
+    whole record before it links anything.
     """
 
     provider_path = Path(seed) / "provider.json"
     if not provider_path.is_file() or provider_path.is_symlink():
         raise ValueError(f"PIT view seed is missing provider.json: {provider_path}")
-    recorded = _load_json(provider_path).get("snapshot_config")
+    record = _load_json(provider_path)
+    # The on-disk contract version is also known at create time: a seed built
+    # under an older one holds views this code would never link, so naming it
+    # would only fail at worker start after a misleading acceptance.
+    version = record.get("schema_version")
+    if version != SNAPSHOT_CACHE_FORMAT_VERSION:
+        raise ValueError(
+            f"PIT view seed {seed} was prebuilt under snapshot cache format {version!r}; "
+            f"this code writes {SNAPSHOT_CACHE_FORMAT_VERSION}, so rebuild the seed under a new directory"
+        )
+    recorded = record.get("snapshot_config")
     expected = snapshot_config.to_record()
     if recorded != expected:
         raise ValueError(
