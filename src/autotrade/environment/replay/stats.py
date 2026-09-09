@@ -115,26 +115,10 @@ def compute_return_stats(
     # the initial level are never dropped. The persisted equity_curve and the
     # trade-day count stay end-of-day-based; style_analysis.daily_returns_from_curve
     # seeds the same baseline for attribution.
-    baselined = [initial, *values]
-    daily_returns = [
-        later / earlier - 1.0
-        for earlier, later in zip(baselined, baselined[1:])
-        if earlier > 0
-    ]
-    sharpe = 0.0
-    if len(daily_returns) > 1:
-        mean = sum(daily_returns) / len(daily_returns)
-        stdev = math.sqrt(
-            sum((value - mean) ** 2 for value in daily_returns) / (len(daily_returns) - 1)
-        )
-        if stdev > 0:
-            sharpe = mean / stdev * math.sqrt(TRADING_DAYS_PER_YEAR)
-    peak = initial
-    max_drawdown = 0.0
-    for value in baselined:
-        peak = max(peak, value)
-        if peak > 0:
-            max_drawdown = max(max_drawdown, (peak - value) / peak)
+    # The whole window is the one-bucket case of the sub-window statistics:
+    # same day-0 opening, same n-1 variance, same 0.0-on-degenerate rule.
+    sharpe = _annualized_sharpe(initial, values)
+    max_drawdown = _max_drawdown(initial, values)
     years = max(len(values), 1) / TRADING_DAYS_PER_YEAR
     annualized = float((1.0 + total_return) ** (1.0 / years) - 1.0) if total_return > -1.0 else -1.0
 
@@ -184,7 +168,7 @@ def compute_return_stats(
         if status != "filled":
             continue
         price = order.get("price")
-        if isinstance(price, (int, float)):
+        if isinstance(price, (int, float)) and not isinstance(price, bool):
             traded_notional += float(price) * int(order.get("quantity") or 0)
         fees_paid += float(order.get("commission") or 0.0)
         stamp_duty_paid += float(order.get("stamp_duty") or 0.0)

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Literal
@@ -149,25 +149,24 @@ class NLService:
 
     def __init__(
         self,
-        retriever: TextRetriever,
+        retriever_factory: Callable[[], TextRetriever],
         *,
         llm: LLMProxy | None = None,
         config: NLConfig | None = None,
         company_context_store: CompanyContextStore | None = None,
         failure_policy: str = "return_error_with_audit",
     ) -> None:
-        if retriever is None:
-            raise ValueError("NL service requires a snapshot text retriever")
+        if not callable(retriever_factory):
+            raise TypeError("NL service requires a snapshot text retriever factory")
         if failure_policy not in {"fail", "return_error_with_audit"}:
             raise ValueError(f"unsupported failure_policy={failure_policy}")
-        self.retriever = retriever
+        self._retriever_factory = retriever_factory
+        self._retriever: TextRetriever | None = None
+        self._engine: NLSubAgentEngine | None = None
         self.llm = llm
         self.config = config or NLConfig()
         self.company_context_store = company_context_store
         self.failure_policy = failure_policy
-        self.engine = (
-            NLSubAgentEngine(llm, retriever) if llm is not None else None
-        )
         self.calls = 0
         self.event_filter_calls = 0
         self.no_evidence_skips = 0
@@ -180,6 +179,28 @@ class NLService:
         self.budget_rejected_calls = 0
         self.wall_seconds = 0.0
         self._calls_by_decision: dict[str, int] = {}
+
+    @property
+    def retriever(self) -> TextRetriever:
+        """The snapshot text retriever, built on the first NL call.
+
+        Loading the decision snapshot's whole text index costs seconds and
+        gigabytes of resident memory, and a replay whose strategy never calls
+        ``context.nl()`` must not pay it. The first call absorbs the load: the
+        NL wait extends the strategy deadline by its own duration.
+        """
+
+        if self._retriever is None:
+            self._retriever = self._retriever_factory()
+        return self._retriever
+
+    @property
+    def engine(self) -> NLSubAgentEngine | None:
+        if self.llm is None:
+            return None
+        if self._engine is None:
+            self._engine = NLSubAgentEngine(self.llm, self.retriever)
+        return self._engine
 
     def counters(self) -> dict[str, object]:
         """NL cost accounting for one backtest, merged into its summary.
@@ -219,7 +240,7 @@ class NLService:
         settings = config or NLConfig()
         index_path = root / "text_index" if (root / "text_index").is_dir() else root / "text_index.parquet"
         return cls(
-            TextRetriever(
+            lambda: TextRetriever(
                 index_path,
                 root / "text_library",
                 snippet_chars=settings.max_record_chars,
@@ -231,7 +252,10 @@ class NLService:
         )
 
     def close(self) -> None:
-        self.retriever.close()
+        # A replay that never called nl() built no retriever; closing must not
+        # be the thing that constructs one.
+        if self._retriever is not None:
+            self._retriever.close()
 
     def query(
         self,

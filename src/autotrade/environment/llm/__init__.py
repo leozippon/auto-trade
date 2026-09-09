@@ -1,9 +1,7 @@
-from .deepseek import (
-    DeepSeekConfig,
-    DeepSeekProxy,
+from .deepseek import DeepSeekConfig, DeepSeekProxy
+from .openai_compatible import (
     OpenAICompatibleConfig,
     OpenAICompatibleProxy,
-    load_api_key,
     load_env_value,
 )
 from .model_profiles import (
@@ -68,7 +66,6 @@ __all__ = [
     "effective_max_output_tokens",
     "estimate_chat_request_tokens",
     "is_context_overflow_error",
-    "load_api_key",
     "load_env_value",
     "malformed_tool_call_messages",
     "model_profile",

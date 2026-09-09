@@ -191,6 +191,25 @@ class SubWindowBenchmarkTest(unittest.TestCase):
                 self.assertIsNone(row["benchmark_return"], sidecar)
                 self.assertIsNone(row["excess_return"], sidecar)
 
+    def test_a_single_quarter_window_agrees_with_the_whole_window(self) -> None:
+        """The whole window is the one-bucket case, so the two must not be two
+        implementations that can drift apart."""
+
+        curve = tuple(row for row in _CURVE if row["trade_date"].startswith("2022"))
+        executions = tuple(
+            order for order in _EXECUTIONS if order["matched_at"].startswith("2022")
+        )
+        summary = compute_return_stats(
+            ReplayResult(curve, executions, ("20220104",), ()),
+            start="20220104",
+            end="20220331",
+        )
+        [row] = summary["sub_windows"]
+        self.assertEqual(row["label"], "2022Q1")
+        self.assertAlmostEqual(row["return"], summary["total_return"], places=6)
+        for key in ("sharpe", "max_drawdown"):
+            self.assertAlmostEqual(row[key], summary[key], places=6, msg=key)
+
     def test_the_block_rides_in_the_persisted_replay_record(self) -> None:
         record = ReplayResult(_CURVE, _EXECUTIONS, ("20211201",), ()).to_record()
         self.assertEqual(

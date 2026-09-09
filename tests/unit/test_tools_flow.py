@@ -1071,6 +1071,11 @@ class ArtifactIOToolTest(unittest.TestCase):
                 ("path_error", "write_file", {"path": "workspace/escape/x.py", "content": "x"}),
                 ("too_large", "write_file", {"path": "b.txt", "content": "x" * (MAX_WRITE_CHARS + 1)}),
                 ("not_found", "edit_file", {"path": "nope.py", "old_text": "a", "new_text": "b"}),
+                # The repeated-root shape the read tools repair: under a write
+                # root it addresses the directory itself, and used to escape as
+                # an untyped IsADirectoryError with no error_type at all.
+                ("path_error", "write_file", {"root": "output", "path": "output", "content": "x"}),
+                ("path_error", "write_file", {"path": ".", "content": "x"}),
             )
             observed = {}
             for expected, tool, arguments in cases:

@@ -144,6 +144,39 @@ def test_future_evidence_is_invisible_and_a_search_miss_skips_the_model(tmp_path
     service.close()
 
 
+def test_the_text_retriever_is_built_only_when_nl_is_actually_called(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """613 recorded replays report ``nl_calls = 0``; none of them may pay for
+    loading the snapshot's whole text index (seconds and gigabytes)."""
+
+    from autotrade.environment.nl import service as service_module
+
+    built: list[Path] = []
+    real = service_module.TextRetriever
+
+    def counting(index_path, *args, **kwargs):
+        built.append(Path(index_path))
+        return real(index_path, *args, **kwargs)
+
+    monkeypatch.setattr(service_module, "TextRetriever", counting)
+
+    quiet = NLService.from_snapshot(stock_snapshot(tmp_path / "quiet"))
+    quiet.close()
+    assert built == []
+    assert quiet.counters()["nl_calls"] == 0
+
+    used = NLService.from_snapshot(stock_snapshot(tmp_path / "used"))
+    result = used.query({"query": "利润", "mode": "search"}, inference_at=NOW)
+    assert [item["record_id"] for item in result["evidence"]] == ["t3"]
+    assert len(built) == 1
+    # A second call reuses the one retriever; the quota still counts both.
+    used.query({"query": "成交", "mode": "search"}, inference_at=NOW)
+    assert len(built) == 1
+    assert used.counters()["nl_calls"] == 2
+    used.close()
+
+
 def test_stock_scope_bounds_retrieval_to_company_linked_candidates(tmp_path: Path):
     service = NLService.from_snapshot(stock_snapshot(tmp_path / "snap"))
     scoped = service.query({"query": "减持", "ts_code": "000001.SZ"}, inference_at=NOW)
@@ -729,6 +762,6 @@ def test_nl_config_rejects_non_integer_and_non_finite_budgets():
         NLConfig(deadline_seconds=float("nan"))
 
 
-def test_service_requires_a_retriever():
-    with pytest.raises(ValueError, match="retriever"):
+def test_service_requires_a_retriever_factory():
+    with pytest.raises(TypeError, match="retriever factory"):
         NLService(None)  # type: ignore[arg-type]

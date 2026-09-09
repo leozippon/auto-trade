@@ -7,11 +7,9 @@ import math
 import os
 import re
 import shutil
-import stat
 import subprocess
 import uuid
-from collections.abc import Iterator, Sequence
-from contextlib import contextmanager
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -39,6 +37,31 @@ SCREENING_TOOL_MOUNT = "/mnt/tools/screen.py"
 RUNTIME_ENV_SCHEMA_VERSION = 2
 _MEMORY_LIMIT = re.compile(r"^[1-9][0-9]*(?:[kKmMgG])?$")
 _IMAGE_TAG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,200}$")
+
+
+# Numeric-thread ceiling for BOTH containers. Without an explicit cap
+# NumPy/OpenBLAS size their pools by the number of cores the HOST exposes
+# (192 here), fill the container's PID slot and leave PyArrow/jemalloc unable
+# to create the threads they need. The CPU quota is the real bound; this is
+# the ceiling above which more threads only cost PIDs.
+MAX_CONTAINER_THREADS = 16
+
+
+def container_thread_env(cpus: float) -> dict[str, str]:
+    """Numeric-library thread caps for a container with ``cpus`` of quota.
+
+    One source for the Agent session container and the strategy container:
+    the Agent runs the same pandas/pyarrow/duckdb stack under ``shell`` that a
+    strategy runs under ``fit``, and the mounted refs promise both are capped.
+    """
+
+    limit = str(max(1, min(MAX_CONTAINER_THREADS, math.ceil(cpus))))
+    return {
+        "MKL_NUM_THREADS": limit,
+        "NUMEXPR_NUM_THREADS": limit,
+        "OMP_NUM_THREADS": limit,
+        "OPENBLAS_NUM_THREADS": limit,
+    }
 
 
 @dataclass(frozen=True)
@@ -329,6 +352,7 @@ class DockerSandbox:
         for key, value in (
             ("XDG_CACHE_HOME", "/tmp/cache"), ("PIP_CACHE_DIR", "/tmp/cache/pip"),
             ("HF_HOME", "/tmp/cache/hf"), ("MPLCONFIGDIR", "/tmp/cache/mpl"),
+            *sorted(container_thread_env(self.spec.cpus).items()),
         ):
             command.extend(["--env", f"{key}={value}"])
         command.extend([
@@ -531,20 +555,6 @@ def _replace_dir_contents(source: Path, dest: Path) -> None:
     chmod_tree(dest, file_mode=0o444, dir_mode=0o555)
 
 
-@contextmanager
-def hide_snapshot_slots_from_agent(paths: SandboxPaths) -> Iterator[None]:
-    previous: list[tuple[Path, int]] = []
-    for path in (paths.train, paths.valid, paths.test, paths.artifacts):
-        if path.exists():
-            previous.append((path, stat.S_IMODE(path.stat().st_mode)))
-            path.chmod(0o700)
-    try:
-        yield
-    finally:
-        for path, mode in previous:
-            path.chmod(mode)
-
-
 def _validate_explicit_image_tag(image: str) -> None:
     value = image.strip()
     final_segment = value.rsplit("/", maxsplit=1)[-1]
@@ -553,7 +563,7 @@ def _validate_explicit_image_tag(image: str) -> None:
 
 
 __all__ = [
-    "DEFAULT_IMAGE", "SCREENING_TOOL_MOUNT", "SCREENING_TOOL_SOURCE", "DockerSandbox",
-    "LocalSandbox", "SandboxConfig", "SandboxLimits", "SandboxSpec", "hide_snapshot_slots_from_agent",
-    "link_copytree", "probe_image_runtime",
+    "DEFAULT_IMAGE", "MAX_CONTAINER_THREADS", "SCREENING_TOOL_MOUNT", "SCREENING_TOOL_SOURCE",
+    "DockerSandbox", "LocalSandbox", "SandboxConfig", "SandboxLimits", "SandboxSpec",
+    "container_thread_env", "link_copytree", "probe_image_runtime",
 ]

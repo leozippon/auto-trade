@@ -26,7 +26,6 @@ from autotrade.environment.llm import (
     OpenAICompatibleProxy,
     build_model_gateway,
     estimate_chat_request_tokens,
-    load_api_key,
     load_env_value,
     malformed_tool_call_messages,
     model_profile,
@@ -265,13 +264,6 @@ INVALID_COMPLETE_TOOL_CALLS = (
 )
 
 
-def test_load_api_key_from_env_file_without_printing_secret(tmp_path: Path):
-    path = tmp_path / ".env"
-    path.write_text("DEEPSEEK_API_KEY='secret-value'\n", encoding="utf-8")
-    assert load_api_key(env_file=path) == "secret-value"
-    assert load_api_key(env_file=tmp_path / "absent.env") == ""
-
-
 def test_env_loader_accepts_export_without_evaluating_shell(tmp_path: Path):
     path = tmp_path / ".env"
     path.write_text(
@@ -280,6 +272,7 @@ def test_env_loader_accepts_export_without_evaluating_shell(tmp_path: Path):
     )
     assert load_env_value("HF_TOKEN", path) == "hf-test-value"
     assert load_env_value("ABSENT", path) == ""
+    assert load_env_value("HF_TOKEN", tmp_path / "absent.env") == ""
 
 
 def test_config_repr_redacts_api_key():

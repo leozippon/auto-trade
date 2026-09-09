@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import math
 import os
 import selectors
 import shutil
@@ -23,8 +22,8 @@ from .contract_fingerprint import (
     assert_image_contract_current,
 )
 from .gpu import device_request, select_gpus
-from .runtime import SandboxPaths, chmod_tree
-from .sandbox import DockerSandbox, SandboxConfig, SandboxLimits
+from .runtime import chmod_tree
+from .sandbox import DockerSandbox, SandboxConfig, SandboxLimits, container_thread_env
 from .strategy import BarTable, FitSchedule, StrategyContext, StrategyFunction
 from .strategy_loader import load_strategy_module, validate_strategy_package
 
@@ -32,7 +31,6 @@ if TYPE_CHECKING:
     from .tools.base import CommandResult
 
 _HOST_TIMEOUT_BUFFER_SECONDS = 15.0
-_MAX_STRATEGY_THREADS = 16
 _PROCESS_STOP_TIMEOUT_SECONDS = 2.0
 # Readiness handshake sequence. Request sequences are non-negative, so a worker
 # that echoes this one is answering the probe and nothing else. The worker
@@ -251,14 +249,7 @@ class DockerStrategyExecutor:
         ]
         if self.gpu_indices:
             command.extend(["--gpus", device_request(self.gpu_indices)])
-        thread_limit = str(max(1, min(_MAX_STRATEGY_THREADS, math.ceil(limits.cpus))))
-        strategy_env = {
-            "MKL_NUM_THREADS": thread_limit,
-            "NUMEXPR_NUM_THREADS": thread_limit,
-            "OMP_NUM_THREADS": thread_limit,
-            "OPENBLAS_NUM_THREADS": thread_limit,
-        }
-        for key, value in sorted(strategy_env.items()):
+        for key, value in sorted(container_thread_env(limits.cpus).items()):
             command.extend(["--env", f"{key}={value}"])
         command.extend(["--mount", strategy_mount])
         for source, target in (
@@ -429,7 +420,8 @@ class DockerStrategyExecutor:
 
         return (
             {
-                "type": "execute",
+                # The caller sets "type": this request serves both fit and
+                # generate_orders and only the caller knows which.
                 "sequence": sequence,
                 "reset": reset,
                 "base_count": base_count,
@@ -767,147 +759,6 @@ class ExecResult:
     stderr_truncated: bool = False
 
 
-class ExecutorError(RuntimeError):
-    pass
-
-
-class LocalExecutor:
-    """Host executor for explicit local development and unit tests."""
-
-    name = "local"
-
-    def __init__(self, paths: SandboxPaths, *, python: str | None = None) -> None:
-        import sys
-        self.paths = paths
-        self.python = python or sys.executable
-
-    def map_path(self, host_path: Path | str) -> str:
-        return str(host_path)
-
-    def runtime_path(self, host_path: Path | str) -> str:
-        return str(host_path)
-
-    def _base_env(self, env: dict[str, str] | None) -> dict[str, str]:
-        base = {
-            "PATH": (
-                f"{self.paths.workspace}/.local/bin:"
-                f"{self.paths.workspace}/.npm-global/bin:/usr/local/bin:/usr/bin:/bin"
-            ),
-            "HOME": str(self.paths.workspace),
-            "PYTHONUSERBASE": str(self.paths.workspace / ".local"),
-            "PIP_USER": "1",
-            "npm_config_prefix": str(self.paths.workspace / ".npm-global"),
-            "PYTHONDONTWRITEBYTECODE": "1",
-        }
-        if "PYTHONPATH" in os.environ:
-            base["PYTHONPATH"] = os.environ["PYTHONPATH"]
-        base.update(env or {})
-        return base
-
-    def run(self, argv: list[str], *, env: dict[str, str] | None = None, cwd: Path | None = None, timeout_seconds: float = 120.0, user: str = "agent", max_output_chars: int | None = None) -> ExecResult:
-        del user
-        if max_output_chars is not None:
-            if isinstance(max_output_chars, bool) or max_output_chars <= 0:
-                raise ValueError("max_output_chars must be a positive integer")
-            return _run_limited_capture(
-                argv,
-                cwd=cwd or self.paths.agent,
-                env=self._base_env(env),
-                timeout_seconds=timeout_seconds,
-                max_output_chars=max_output_chars,
-            )
-        try:
-            completed = subprocess.run(argv, cwd=str(cwd or self.paths.agent), env=self._base_env(env), capture_output=True, text=True, errors="replace", timeout=timeout_seconds, check=False)
-        except subprocess.TimeoutExpired as exc:
-            return ExecResult(124, _limited_text(exc.stdout, 1_000_000), f"timeout after {timeout_seconds}s")
-        return ExecResult(completed.returncode, completed.stdout, completed.stderr)
-
-    def popen(self, argv: list[str], *, env: dict[str, str] | None = None, cwd: Path | None = None, user: str = "agent") -> subprocess.Popen[str]:
-        del user
-        return subprocess.Popen(argv, cwd=str(cwd or self.paths.agent), env=self._base_env(env), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
-
-    def kill_marker(self, marker: str, *, user: str = "agent") -> None:
-        del marker, user
-
-    def cleanup_user_processes(self, *, user: str = "agent") -> None:
-        del user
-
-
-class DockerExecutor:
-    """Pipeline executor inside an existing persistent Sandbox container."""
-
-    name = "docker"
-
-    def __init__(self, container: str, host_paths: SandboxPaths, *, docker_executable: str = "docker", python: str = "python3", **_kwargs: object) -> None:
-        self.container = container
-        self.host_paths = host_paths
-        self.docker_executable = docker_executable
-        self.python = python
-
-    def map_path(self, host_path: Path | str) -> str:
-        path = Path(host_path).resolve()
-        for base in (self.host_paths.current_snapshot, self.host_paths.snapshot):
-            try:
-                return str(Path("/mnt/snapshot") / path.relative_to(base.resolve()))
-            except ValueError:
-                pass
-        try:
-            return str(Path("/mnt") / path.relative_to(self.host_paths.root))
-        except ValueError as exc:
-            raise ExecutorError(f"path is outside sandbox root: {path}") from exc
-
-    def runtime_path(self, host_path: Path | str) -> str:
-        return str(Path("/opt/autotrade_runtime") / Path(host_path).name)
-
-    @staticmethod
-    def _merged_env(env: Mapping[str, str] | None) -> dict[str, str]:
-        return {
-            "PATH": "/mnt/agent/workspace/.local/bin:/mnt/agent/workspace/.npm-global/bin:/usr/local/bin:/usr/bin:/bin",
-            "HOME": "/mnt/agent/workspace",
-            "PYTHONUSERBASE": "/mnt/agent/workspace/.local",
-            "PIP_USER": "1",
-            "npm_config_prefix": "/mnt/agent/workspace/.npm-global",
-            "PYTHONDONTWRITEBYTECODE": "1",
-            **dict(env or {}),
-        }
-
-    def _command(self, argv: Sequence[str], *, env: Mapping[str, str] | None, cwd: Path | None, user: str) -> list[str]:
-        command = [self.docker_executable, "exec", "-i", "--user", user]
-        for key, value in sorted(self._merged_env(env).items()):
-            command.extend(["--env", f"{key}={value}"])
-        command.extend(["--workdir", self.map_path(cwd) if cwd else "/mnt/agent", self.container, *argv])
-        return command
-
-    def run(self, argv: list[str], *, env: dict[str, str] | None = None, cwd: Path | None = None, timeout_seconds: float = 120.0, user: str = "61000:61000", max_output_chars: int | None = None) -> ExecResult:
-        command = self._command(
-            _with_container_timeout(argv, timeout_seconds), env=env, cwd=cwd, user=user
-        )
-        host_timeout = timeout_seconds + _HOST_TIMEOUT_BUFFER_SECONDS
-        if max_output_chars is not None:
-            if isinstance(max_output_chars, bool) or max_output_chars <= 0:
-                raise ValueError("max_output_chars must be a positive integer")
-            return _run_limited_capture(
-                command,
-                timeout_seconds=host_timeout,
-                max_output_chars=max_output_chars,
-            )
-        try:
-            completed = subprocess.run(command, capture_output=True, text=True, errors="replace", timeout=host_timeout, check=False)
-        except subprocess.TimeoutExpired as exc:
-            return ExecResult(124, _limited_text(exc.stdout, 1_000_000), f"timeout after {timeout_seconds}s")
-        return ExecResult(completed.returncode, completed.stdout, completed.stderr)
-
-    def popen(self, argv: list[str], *, env: dict[str, str] | None = None, cwd: Path | None = None, user: str = "61000:61000") -> subprocess.Popen[str]:
-        return subprocess.Popen(self._command(argv, env=env, cwd=cwd, user=user), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
-
-    def kill_marker(self, marker: str, *, user: str = "61000") -> None:
-        subprocess.run([self.docker_executable, "exec", "--user", "0", self.container, "pkill", "-f", marker], capture_output=True, timeout=15, check=False)
-        self.cleanup_user_processes(user=user)
-
-    def cleanup_user_processes(self, *, user: str = "61000") -> None:
-        subprocess.run([self.docker_executable, "exec", "--user", "0", self.container, "pkill", "-KILL", "-u", user], capture_output=True, timeout=15, check=False)
-
-
 def docker_available(docker_executable: str = "docker") -> bool:
     executable = shutil.which(docker_executable)
     if executable is None:
@@ -1130,12 +981,9 @@ __all__ = [
     "CONTAINER_SNAPSHOT_DIR",
     "CONTAINER_STATE_DIR",
     "CONTAINER_STRATEGY_DIR",
-    "DockerExecutor",
     "DockerStrategyExecutor",
     "ExecResult",
-    "ExecutorError",
     "FittableStrategyExecutor",
-    "LocalExecutor",
     "PersistentCommandRunner",
     "StrategyExecutionError",
     "StrategyExecutor",

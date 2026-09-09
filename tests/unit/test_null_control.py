@@ -17,9 +17,11 @@ from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.replay import run_daily_replay
 from autotrade.environment.replay.null_control import (
     RoundTrip,
+    _candidate_pool,
     _distribution,
+    _orders_from_pools,
+    _Universe,
     run_null_control,
-    sample_null_orders,
     trade_skeleton,
 )
 from autotrade.environment.replay.stats import ReplayResult
@@ -30,6 +32,14 @@ SMALL = ("000001.SZ", "000002.SZ", "000003.SZ")
 LARGE = ("600001.SH", "600002.SH")
 CIRC_MV = {**{name: 1.0e9 for name in SMALL}, **{name: 5.0e10 for name in LARGE}}
 BENCHMARK = {day: 0.001 for day in DAYS}
+
+
+def _sample_null_orders(skeleton, frame: pd.DataFrame, rng) -> dict[str, list[dict]]:
+    """One null draw of the whole skeleton, as ``run_null_control`` draws it."""
+
+    universe = _Universe(frame)
+    pools = [_candidate_pool(trip, universe) for trip in skeleton]
+    return _orders_from_pools(skeleton, pools, rng)[0]
 
 
 def _at(day: str, clock: str) -> datetime:
@@ -145,7 +155,7 @@ def test_null_draws_replace_each_name_inside_its_size_decile():
 
     seen: set[str] = set()
     for _ in range(50):
-        orders = sample_null_orders(skeleton, frame, rng)
+        orders = _sample_null_orders(skeleton, frame, rng)
         assert sorted(orders) == [DAYS[2], DAYS[4], DAYS[9]]
         entry, holding, exit_ = orders[DAYS[2]][0], orders[DAYS[4]][0], orders[DAYS[9]][0]
         assert entry["symbol"] in set(SMALL) - {"000001.SZ"}
@@ -190,7 +200,7 @@ def test_null_quantities_follow_the_star_declaration_ladder():
         RoundTrip("000001.SZ", 20, 500.0, _at(DAYS[1], "09:30"), _at(DAYS[2], "15:00")),
     ]
 
-    orders = sample_null_orders(skeleton, pd.DataFrame(rows), np.random.default_rng(3))
+    orders = _sample_null_orders(skeleton, pd.DataFrame(rows), np.random.default_rng(3))
 
     # 10 000 / 50 = 200 shares clears the STAR minimum declaration; the second
     # trip buys at 100 and its 100 shares do not, so it places no order at all.

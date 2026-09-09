@@ -132,18 +132,6 @@ def trade_skeleton(
     return trips, unpaired_sell_shares
 
 
-def sample_null_orders(
-    skeleton: Sequence[RoundTrip],
-    frame: pd.DataFrame,
-    rng: np.random.Generator,
-) -> dict[str, list[dict[str, object]]]:
-    """One null draw of the whole skeleton, as orders keyed by execution date."""
-
-    universe = _Universe(frame)
-    pools = [_candidate_pool(trip, universe) for trip in skeleton]
-    return _orders_from_pools(skeleton, pools, rng)[0]
-
-
 def run_null_control(
     result: ReplayResult,
     frame: pd.DataFrame,
@@ -471,6 +459,5 @@ __all__ = [
     "MATCHING",
     "RoundTrip",
     "run_null_control",
-    "sample_null_orders",
     "trade_skeleton",
 ]

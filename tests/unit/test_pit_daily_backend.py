@@ -20,6 +20,7 @@ from autotrade.environment.executor import docker_available
 from autotrade.environment.nl import NLConfig
 from autotrade.environment.runtime import (
     AGENT_VISIBLE_BACKTEST_SUMMARY_KEYS,
+    HOST_PATH_RE,
     _agent_visible_backtest_summary,
     chmod_tree,
 )
@@ -494,8 +495,17 @@ def test_evaluation_summary_carries_the_whole_agent_visible_field_set(
     assert summary["nl_wall_seconds"] >= 0.0
 
     # The same block reaches the persisted result and the Agent-visible view.
-    record = json.loads(Path(result.result_ref).read_text(encoding="utf-8"))
+    attachment = Path(result.result_ref).read_text(encoding="utf-8")
+    record = json.loads(attachment)
     assert record["stats"]["phase_seconds"] == phases
+    # This file IS the Step attachment the Agent reads through the mounted
+    # `steps` root (local_backend.VALIDATION_RESULT_ATTACHMENT), so the host
+    # layout must not appear anywhere in it. The slots are named opaquely.
+    assert HOST_PATH_RE.search(attachment) is None, attachment
+    assert str(tmp_path) not in attachment
+    assert record["pit"]["decision_slot"] == snapshot.name
+    assert record["pit"]["replay_slot"] == replay.name
+    assert not {"decision_ref", "replay_ref"} & set(record["pit"])
     assert set(_agent_visible_backtest_summary(dict(summary))) == expected
 
     # Every charged NL call is explained by exactly one outcome bucket.

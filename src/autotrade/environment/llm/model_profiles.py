@@ -7,9 +7,8 @@ from pathlib import Path
 from typing import cast
 
 from . import deepseek as _deepseek
-from .deepseek import (
-    DeepSeekConfig,
-    DeepSeekProxy,
+from .deepseek import DeepSeekConfig, DeepSeekProxy
+from .openai_compatible import (
     OpenAICompatibleConfig,
     OpenAICompatibleProxy,
     load_env_value,

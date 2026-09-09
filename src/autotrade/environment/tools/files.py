@@ -65,7 +65,11 @@ class _WorkspaceWriteTool:
             root = str(root)
             if root != "workspace" and not (path == root or path.startswith(f"{root}/")):
                 path = f"{root}/{path}"
-        target = self.workspace.resolve(path, must_exist=must_exist, directory=False if must_exist else None)
+        # ``directory=False`` for a write that creates as well as one that
+        # edits: ``{root: output, path: output}`` addresses the directory
+        # itself and must come back as a typed path_error, not as the bare
+        # IsADirectoryError the untyped OSError branch would return.
+        target = self.workspace.resolve(path, must_exist=must_exist, directory=False)
         relative = self.workspace.relative(target)
         if relative == "skills" or relative.startswith("skills/"):
             raise ToolError(

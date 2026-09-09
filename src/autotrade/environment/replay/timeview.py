@@ -37,6 +37,7 @@ import warnings
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 
 import numpy as np
@@ -155,7 +156,6 @@ class Timeview:
         self,
         *,
         host_dir: Path,
-        executor=None,
         snapshot_dir: Path,
         replay_frames: dict[str, pd.DataFrame],
         replay_text_library_dir: Path | None = None,
@@ -163,7 +163,6 @@ class Timeview:
         stash_dir: Path | None = None,
     ) -> None:
         self.host_dir = Path(host_dir)
-        self.executor = executor
         self.snapshot_dir = Path(snapshot_dir)
         # Fresh per backtest: no stale parts from an earlier run leak in. Keep
         # the root inode because formal Docker mounts this directory read-only
@@ -180,10 +179,6 @@ class Timeview:
         # the earliest pending row or refresh-node boundary.
         self._boundary_gate_ready = False
         self._next_boundary: np.datetime64 | None = None
-        # The container mapping of host_dir is invariant for the whole replay;
-        # resolving it on every refresh costs several filesystem walks (map_path does
-        # multiple Path.resolve() calls), so it is computed once, lazily.
-        self._mapped_dir: str | None = None
         self._domains: dict[str, _DomainView] = {}
         stash_root = Path(stash_dir) if stash_dir is not None else None
         if stash_root is not None and not (stash_root / "contract.json").is_file():
@@ -209,6 +204,8 @@ class Timeview:
             frozen_library_dir=self.snapshot_dir / "text_library",
             replay_index=replay_frames.get("text_index", pd.DataFrame()),
             replay_library_dir=Path(replay_text_library_dir) if replay_text_library_dir is not None else None,
+            stash_index_dir=(stash_root / "text_index") if stash_root is not None else None,
+            stash_library_dir=(stash_root / "text_library") if stash_root is not None else None,
         )
         # The universe never rolls. Expose it as a parts directory so
         # ``asof_dir + "/universe"`` matches every other domain.
@@ -250,13 +247,7 @@ class Timeview:
         return self._result()
 
     def _result(self) -> tuple[str, str]:
-        if self._mapped_dir is None:
-            self._mapped_dir = (
-                self.executor.map_path(self.host_dir)
-                if self.executor is not None
-                else str(self.host_dir)
-            )
-        return self._mapped_dir, str(self._version)
+        return str(self.host_dir), str(self._version)
 
 
 class _DomainView:
@@ -506,29 +497,18 @@ class _DomainView:
         """
         name = f"part_{self._part_seq:04d}.parquet"
         out = self.out_dir / name
-        stash = self._stash_dir / name if self._stash_dir is not None else None
-        if stash is not None:
-            stash.parent.mkdir(parents=True, exist_ok=True)
-            lock = stash.parent / f".{name}.lock"
-            with _exclusive_part_lock(lock):
-                if stash.exists():
-                    stashed_rows = int(pq.ParquetFile(stash).metadata.num_rows)
-                    if stashed_rows != row_count:
-                        raise RuntimeError(
-                            f"Timeview stash mismatch for domain {self.name!r} {name}: stashed "
-                            f"{stashed_rows} rows, expected {row_count}"
-                        )
-                else:
-                    tmp = stash.parent / f".{name}.{uuid.uuid4().hex}.tmp"
-                    try:
-                        pq.write_table(build(), tmp)
-                        os.replace(tmp, stash)
-                    finally:
-                        if tmp.exists():
-                            tmp.unlink()
-                os.link(stash, out)
-        else:
+        if self._stash_dir is None:
             pq.write_table(build(), out)
+        else:
+            self._stash_dir.mkdir(parents=True, exist_ok=True)
+            with _exclusive_part_lock(self._stash_dir / f".{name}.lock"):
+                _publish_checked_part(
+                    self._stash_dir / name,
+                    out,
+                    row_count=row_count,
+                    build=build,
+                    label=f"domain {self.name!r} {name}",
+                )
         self._part_seq += 1
 
     def _newly_visible(self, when: pd.Timestamp) -> np.ndarray:
@@ -591,6 +571,10 @@ class _TextView:
     bodies are only copied into the view once their matching text_index rows pass
     the text refresh-node gate. This lets strategies do their own NLP from
     ``ctx.asof_dir`` without exposing future text bodies.
+
+    Both part kinds go through the run-level stash under their own
+    ``text_index``/``text_library`` names, so the filtered library read that
+    cuts a body part is paid once per slot rather than once per candidate.
     """
 
     def __init__(
@@ -602,11 +586,17 @@ class _TextView:
         frozen_library_dir: Path,
         replay_index: pd.DataFrame,
         replay_library_dir: Path | None,
+        stash_index_dir: Path | None = None,
+        stash_library_dir: Path | None = None,
     ) -> None:
         self.out_index_dir = out_index_dir
         self.out_library_dir = out_library_dir
         self.out_index_dir.mkdir(parents=True, exist_ok=True)
         self.out_library_dir.mkdir(parents=True, exist_ok=True)
+        # Own stash names, so a stash written by an earlier code version holds
+        # only the numeric domains and is neither read nor invalidated here.
+        self._stash_index_dir = stash_index_dir
+        self._stash_library_dir = stash_library_dir
         self.replay_index = replay_index.reset_index(drop=True) if replay_index is not None else pd.DataFrame()
         self.replay_library_dir = replay_library_dir
         self._part_seq = 0
@@ -650,24 +640,70 @@ class _TextView:
         newly = np.concatenate(parts)
         newly.sort()  # original frame order: parts read back exactly as the frame slice
         rows = self.replay_index.iloc[newly].copy()
-        if "library_file" not in rows.columns:
-            rows["library_file"] = rows["dataset"].astype(str) + ".parquet"
-        library_files: dict[tuple[str, str], str] = {}
-        for dataset, group in rows.groupby(rows["dataset"].astype(str), sort=True):
-            part_name = f"{dataset}__part_{self._part_seq:04d}.parquet"
-            self._write_body_part(dataset, set(group["text_id"].astype(str)), part_name)
-            for source_file in group["library_file"].astype(str).unique():
-                library_files[(dataset, source_file)] = part_name
-        rows["library_file"] = [
-            library_files.get(
-                (str(row.get("dataset", "")), str(row.get("library_file", ""))),
-                str(row.get("library_file", "")),
-            )
-            for _, row in rows.iterrows()
+        datasets = rows["dataset"].astype(str)
+        # Every row this roll makes visible is relabelled onto the body part
+        # this roll writes for its dataset, so the whole column is one string
+        # concatenation instead of a per-row lookup (0.30 s/day measured on a
+        # real slot, ~73 s per replay).
+        suffix = f"__part_{self._part_seq:04d}.parquet"
+        rows["library_file"] = datasets + suffix
+        groups = [
+            (str(dataset), group) for dataset, group in rows.groupby(datasets, sort=True)
         ]
-        rows.to_parquet(self.out_index_dir / f"part_{self._part_seq:04d}.parquet", index=False)
+        index_name = f"part_{self._part_seq:04d}.parquet"
+        if self._stash_index_dir is None or self._stash_library_dir is None:
+            for dataset, group in groups:
+                pq.write_table(
+                    self._body_table(dataset, group),
+                    self.out_library_dir / f"{dataset}{suffix}",
+                )
+            pq.write_table(
+                pa.Table.from_pandas(rows, preserve_index=False),
+                self.out_index_dir / index_name,
+            )
+        else:
+            self._publish_roll(rows, groups, index_name=index_name, suffix=suffix)
         self._part_seq += 1
         return True
+
+    def _publish_roll(
+        self,
+        rows: pd.DataFrame,
+        groups: list[tuple[str, pd.DataFrame]],
+        *,
+        index_name: str,
+        suffix: str,
+    ) -> None:
+        """Publish one roll's body parts and its index part through the stash.
+
+        Each part is a pure function of the semantic contract the PIT backend
+        already bound, so a part an earlier backtest encoded is hardlinked
+        instead of re-read and re-encoded. The whole roll is published under
+        one lock, and the index part -- which fixes the visibility slice the
+        body parts are cut from -- carries the same footer row-count check the
+        numeric domains use.
+        """
+
+        stash_index = self._stash_index_dir
+        stash_library = self._stash_library_dir
+        assert stash_index is not None and stash_library is not None
+        stash_index.mkdir(parents=True, exist_ok=True)
+        stash_library.mkdir(parents=True, exist_ok=True)
+        with _exclusive_part_lock(stash_index / f".{index_name}.lock"):
+            for dataset, group in groups:
+                name = f"{dataset}{suffix}"
+                _publish_part(
+                    stash_library / name,
+                    self.out_library_dir / name,
+                    build=partial(self._body_table, dataset, group),
+                )
+            _publish_checked_part(
+                stash_index / index_name,
+                self.out_index_dir / index_name,
+                row_count=len(rows),
+                build=partial(pa.Table.from_pandas, rows, preserve_index=False),
+                label=f"text index {index_name}",
+            )
 
     def next_boundary(self, when: pd.Timestamp) -> np.datetime64 | None:
         """Earliest pending text refresh-node boundary after ``when``."""
@@ -679,13 +715,15 @@ class _TextView:
         ]
         return min(map(_cutoff_ns, boundaries)) if boundaries else None
 
-    def _write_body_part(self, dataset: str, text_ids: set[str], part_name: str) -> None:
-        body = self._read_body_rows(dataset, text_ids)
+    def _body_table(self, dataset: str, group: pd.DataFrame) -> pa.Table:
+        """The visible body rows one dataset contributes to one roll."""
+
+        body = self._read_body_rows(dataset, set(group["text_id"].astype(str)))
         if body.empty or "text_id" not in body.columns:
-            pd.DataFrame(columns=["text_id", "body"]).to_parquet(self.out_library_dir / part_name, index=False)
-            return
-        part = body[[c for c in ("text_id", "body") if c in body.columns]]
-        part.to_parquet(self.out_library_dir / part_name, index=False)
+            body = pd.DataFrame(columns=["text_id", "body"])
+        else:
+            body = body[[c for c in ("text_id", "body") if c in body.columns]]
+        return pa.Table.from_pandas(body, preserve_index=False)
 
     def _read_body_rows(self, dataset: str, text_ids: set[str]) -> pd.DataFrame:
         path = self.replay_library_dir / f"{dataset}.parquet" if self.replay_library_dir is not None else None
@@ -701,6 +739,49 @@ class _TextView:
             if body.empty or "text_id" not in body.columns:
                 return pd.DataFrame(columns=["text_id", "body"])
             return body.loc[body["text_id"].astype(str).isin(text_ids)]
+
+
+def _publish_part(stash: Path, out: Path, *, build: Callable[[], pa.Table]) -> None:
+    """Materialise ``stash`` if it is absent and hardlink it to ``out``.
+
+    The caller holds the publication lock. A part already in the stash was
+    written under the same bound semantic contract and is therefore identical,
+    so it is linked rather than re-encoded.
+    """
+
+    if not stash.exists():
+        tmp = stash.parent / f".{stash.name}.{uuid.uuid4().hex}.tmp"
+        try:
+            pq.write_table(build(), tmp)
+            os.replace(tmp, stash)
+        finally:
+            if tmp.exists():
+                tmp.unlink()
+    os.link(stash, out)
+
+
+def _publish_checked_part(
+    stash: Path,
+    out: Path,
+    *,
+    row_count: int,
+    build: Callable[[], pa.Table],
+    label: str,
+) -> None:
+    """Publish one stash part whose newly-visible row count is known.
+
+    The footer row count of a reused part is compared against the fresh slice:
+    any mismatch must fail rather than expose a wrong visibility slice.
+    """
+
+    if stash.exists():
+        stashed_rows = int(pq.ParquetFile(stash).metadata.num_rows)
+        if stashed_rows != row_count:
+            raise RuntimeError(
+                f"Timeview stash mismatch for {label}: stashed {stashed_rows} rows, "
+                f"expected {row_count}"
+            )
+    _publish_part(stash, out, build=build)
 
 
 @contextmanager

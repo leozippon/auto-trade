@@ -21,11 +21,6 @@ CN_TZ = ZoneInfo("Asia/Shanghai")
 TS = "000001.SZ"
 
 
-class FakeExecutor:
-    def map_path(self, path) -> str:
-        return str(path)
-
-
 def _when(text: str) -> pd.Timestamp:
     return pd.Timestamp(text, tz=CN_TZ)
 
@@ -122,7 +117,6 @@ class TimeviewTest(unittest.TestCase):
         )
         return Timeview(
             host_dir=root / "asof",
-            executor=FakeExecutor(),
             snapshot_dir=_frozen_snapshot(root),
             replay_frames=_replay_frames(),
             replay_text_library_dir=replay_library,
@@ -163,7 +157,7 @@ class TimeviewTest(unittest.TestCase):
                 "ts_code": TS, "hot_num": 7.0,
             }])
             tv = Timeview(
-                host_dir=root / "asof", executor=FakeExecutor(),
+                host_dir=root / "asof",
                 snapshot_dir=snapshot, replay_frames={"events": replay},
             )
             with warnings.catch_warnings():
@@ -189,7 +183,7 @@ class TimeviewTest(unittest.TestCase):
                 "available_at": "2022-01-04T17:30:00+08:00",
             }])
             tv = Timeview(
-                host_dir=root / "asof", executor=FakeExecutor(),
+                host_dir=root / "asof",
                 snapshot_dir=snapshot, replay_frames={"daily": replay},
             )
             asof, _ = tv.refresh(_when("2022-01-05 09:10:00"))
@@ -219,7 +213,7 @@ class TimeviewTest(unittest.TestCase):
             with warnings.catch_warnings(record=True) as caught:
                 warnings.simplefilter("always")
                 Timeview(
-                    host_dir=root / "asof", executor=FakeExecutor(),
+                    host_dir=root / "asof",
                     snapshot_dir=snapshot, replay_frames={"daily": replay},
                 )
             runtime = [w for w in caught if issubclass(w.category, RuntimeWarning)]
@@ -265,13 +259,11 @@ class TimeviewTest(unittest.TestCase):
             )
             eager = Timeview(
                 host_dir=root / "eager",
-                executor=FakeExecutor(),
                 snapshot_dir=snapshot,
                 replay_frames={"intraday_1min": pd.concat([day1, day2], ignore_index=True)},
             )
             incremental = Timeview(
                 host_dir=root / "incremental",
-                executor=FakeExecutor(),
                 snapshot_dir=snapshot,
                 replay_frames={},
                 incremental_domains={"intraday_1min"},
@@ -428,7 +420,6 @@ class TimeviewTest(unittest.TestCase):
             def build(index: int) -> pd.DataFrame:
                 view = Timeview(
                     host_dir=root / f"asof_{index}",
-                    executor=FakeExecutor(),
                     snapshot_dir=snapshot,
                     replay_frames=_replay_frames(),
                     stash_dir=stash,
@@ -448,6 +439,120 @@ class TimeviewTest(unittest.TestCase):
             self.assertTrue(published.is_file())
             self.assertEqual(len(pd.read_parquet(published)), 1)
             self.assertEqual(list(stash.rglob("*.tmp")), [])
+
+    def _text_stash(self, root: Path) -> Path:
+        """A stash directory with the contract the PIT backend publishes."""
+
+        stash = root / "stash"
+        stash.mkdir(parents=True, exist_ok=True)
+        (stash / "contract.json").write_text(json.dumps({"validated": True}), encoding="utf-8")
+        return stash
+
+    def _text_replay_library(self, root: Path) -> Path:
+        library = root / "replay" / "text_library"
+        _write(
+            library / "news.parquet",
+            pd.DataFrame(
+                [
+                    {"text_id": "news_early", "body": "early body"},
+                    {"text_id": "news_late", "body": "late body"},
+                ]
+            ),
+        )
+        return library
+
+    def _rolled_text(self, root: Path, name: str, *, stash: Path | None) -> Path:
+        view = Timeview(
+            host_dir=root / name,
+            snapshot_dir=_frozen_snapshot(root),
+            replay_frames=_replay_frames(),
+            replay_text_library_dir=self._text_replay_library(root),
+            stash_dir=stash,
+        )
+        # One refresh past every text node of the window: the whole replay
+        # index becomes visible in a single roll.
+        asof, _ = view.refresh(_when("2022-01-06 09:10:00"))
+        return Path(asof)
+
+    def test_text_parts_are_stashed_once_and_reused_by_the_next_candidate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            stash = self._text_stash(root)
+            first = self._rolled_text(root, "asof_1", stash=stash)
+            index_part = stash / "text_index" / "part_0001.parquet"
+            body_part = stash / "text_library" / "news__part_0001.parquet"
+            self.assertTrue(index_part.is_file() and body_part.is_file())
+            self.assertEqual(len(pd.read_parquet(index_part)), 2)
+            published = (index_part.stat().st_ino, body_part.stat().st_ino)
+
+            second = self._rolled_text(root, "asof_2", stash=stash)
+            # The second candidate hardlinks the very same parts: nothing in
+            # the stash was rewritten, and no library read happened at all.
+            self.assertEqual(
+                (index_part.stat().st_ino, body_part.stat().st_ino), published
+            )
+            for run in (first, second):
+                self.assertEqual(
+                    (run / "text_index" / "part_0001.parquet").stat().st_ino,
+                    index_part.stat().st_ino,
+                )
+                self.assertEqual(
+                    (run / "text_library" / "news__part_0001.parquet").stat().st_ino,
+                    body_part.stat().st_ino,
+                )
+            pd.testing.assert_frame_equal(
+                pd.read_parquet(first / "text_index"), pd.read_parquet(second / "text_index")
+            )
+            self.assertEqual(list(stash.rglob("*.tmp")), [])
+
+    def test_a_stashed_text_index_part_with_the_wrong_row_count_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            stash = self._text_stash(root)
+            self._rolled_text(root, "asof_1", stash=stash)
+            index_part = stash / "text_index" / "part_0001.parquet"
+            # A stash bound to different semantics would cut a different
+            # visibility slice; the footer row count must fail, not be read.
+            pd.read_parquet(index_part).head(1).to_parquet(index_part, index=False)
+            with self.assertRaisesRegex(RuntimeError, "text index part_0001"):
+                self._rolled_text(root, "asof_2", stash=stash)
+
+    def test_stashed_text_parts_are_byte_identical_to_the_per_row_writer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            asof = self._rolled_text(root, "asof", stash=None)
+            index_part = asof / "text_index" / "part_0001.parquet"
+            body_part = asof / "text_library" / "news__part_0001.parquet"
+
+            # The writer this replaced: a per-row library_file relabel and two
+            # pandas.to_parquet calls over the same newly-visible slice.
+            rows = _replay_frames()["text_index"].reset_index(drop=True)
+            self.assertEqual(len(pd.read_parquet(index_part)), len(rows))
+            legacy = root / "legacy"
+            legacy.mkdir()
+            library_files: dict[tuple[str, str], str] = {}
+            for dataset, group in rows.groupby(rows["dataset"].astype(str), sort=True):
+                part_name = f"{dataset}__part_0001.parquet"
+                body = pd.read_parquet(
+                    self._text_replay_library(root) / f"{dataset}.parquet",
+                    filters=[("text_id", "in", sorted(set(group["text_id"].astype(str))))],
+                )
+                body[["text_id", "body"]].to_parquet(legacy / part_name, index=False)
+                for source_file in group["library_file"].astype(str).unique():
+                    library_files[(dataset, source_file)] = part_name
+            rows["library_file"] = [
+                library_files.get(
+                    (str(row.get("dataset", "")), str(row.get("library_file", ""))),
+                    str(row.get("library_file", "")),
+                )
+                for _, row in rows.iterrows()
+            ]
+            rows.to_parquet(legacy / "part_0001.parquet", index=False)
+
+            self.assertEqual(index_part.read_bytes(), (legacy / "part_0001.parquet").read_bytes())
+            self.assertEqual(
+                body_part.read_bytes(), (legacy / "news__part_0001.parquet").read_bytes()
+            )
 
     def test_auction_rolls_at_observed_row_time_not_evening_node(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -491,7 +596,6 @@ class TimeviewTest(unittest.TestCase):
             )
             tv = Timeview(
                 host_dir=root / "asof",
-                executor=FakeExecutor(),
                 snapshot_dir=snapshot,
                 replay_frames=frames,
             )
@@ -537,7 +641,7 @@ class TimeviewMacroDatasetGatingTest(unittest.TestCase):
                     {"dataset": "index_global", "ts_code": "SPX", "available_at": saturday_eod},
                 ]),
             }
-            tv = Timeview(host_dir=root / "asof", executor=FakeExecutor(), snapshot_dir=snap, replay_frames=replay)
+            tv = Timeview(host_dir=root / "asof", snapshot_dir=snap, replay_frames=replay)
 
             # Sunday, after the Sunday-evening global landing completed: the
             # global row is visible, the domestic row must not be.
@@ -580,7 +684,7 @@ class TimeviewIntradaySchemaTest(unittest.TestCase):
                 # Replay intraday keeps available_at as the row-level Timeview gate.
                 "intraday_1min": self._minute("20220104", available_at="2022-01-04T09:30:00+08:00"),
             }
-            tv = Timeview(host_dir=root / "asof", executor=FakeExecutor(), snapshot_dir=snap, replay_frames=replay)
+            tv = Timeview(host_dir=root / "asof", snapshot_dir=snap, replay_frames=replay)
             # After the 20220104 evening node completes (fallback ~03:05 on 0105) the replay bar rolls in.
             asof, _ = tv.refresh(_when("2022-01-05 09:10:00"))
             intraday = pd.read_parquet(Path(asof) / "intraday_1min")

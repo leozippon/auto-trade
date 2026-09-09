@@ -29,9 +29,9 @@ from autotrade.environment.artifacts import (
 from autotrade.environment.executor import (
     DockerStrategyExecutor,
     ExecResult,
-    LocalExecutor,
     PersistentCommandRunner,
     StrategyExecutionError,
+    _run_limited_capture,
     docker_available,
 )
 from autotrade.environment.gpu import GpuUnavailableError
@@ -158,6 +158,46 @@ def test_persistent_sandbox_command_has_bounded_explicit_identity_mounts(tmp_pat
     assert SCREENING_TOOL_MOUNT == "/mnt/tools/screen.py"
 
 
+def test_both_containers_cap_numeric_threads_from_the_same_cpu_quota(tmp_path: Path):
+    """Without the cap NumPy/OpenBLAS size their pools by the host's 192 cores
+    and fill the container's PID slot. The Agent runs the same stack under
+    ``shell`` that a strategy runs under ``fit``, and the mounted model refs
+    promise the session container is capped too."""
+
+    local = LocalSandbox(tmp_path / "session")
+    local.prepare_layout()
+
+    def env_of(command: list[str]) -> dict[str, str]:
+        pairs = [command[i + 1] for i, value in enumerate(command) if value == "--env"]
+        return dict(pair.split("=", 1) for pair in pairs)
+
+    session = env_of(DockerSandbox(local, SandboxSpec(cpus=8.0, gpu=None)).docker_command())
+    assert {key: session[key] for key in sorted(session) if key.endswith("_NUM_THREADS")} == {
+        "MKL_NUM_THREADS": "8",
+        "NUMEXPR_NUM_THREADS": "8",
+        "OMP_NUM_THREADS": "8",
+        "OPENBLAS_NUM_THREADS": "8",
+    }
+    # The caches the session container also needs are untouched.
+    assert session["XDG_CACHE_HOME"] == "/tmp/cache"
+
+    package = tmp_path / "package"
+    package.mkdir()
+    strategy = _strategy(package)
+    with patch.object(DockerStrategyExecutor, "_start"):
+        executor = DockerStrategyExecutor(strategy, SandboxConfig(limits=SandboxLimits(cpus=8.0)))
+    assert env_of(executor.docker_command()) == {
+        key: value for key, value in session.items() if key.endswith("_NUM_THREADS")
+    }
+    executor.close()
+
+    # A fractional quota rounds up, and the ceiling holds above it.
+    capped = env_of(DockerSandbox(local, SandboxSpec(cpus=64.0, gpu=None)).docker_command())
+    assert capped["OMP_NUM_THREADS"] == "16"
+    tiny = env_of(DockerSandbox(local, SandboxSpec(cpus=0.5, gpu=None)).docker_command())
+    assert tiny["OMP_NUM_THREADS"] == "1"
+
+
 def test_persistent_sandbox_renders_a_quoted_device_list(tmp_path: Path):
     """Docker parses an unquoted ``device=0,1`` as one id plus a device count
     and refuses the request; the quotes are part of the argument."""
@@ -185,10 +225,14 @@ def test_local_sandbox_runtime_contract_has_no_git_and_no_image_record(tmp_path:
     }
 
 
-def test_local_executor_bounds_streamed_output_without_communicate_buffer(tmp_path: Path):
-    paths = LocalSandbox(tmp_path / "session").prepare_layout()
-    result = LocalExecutor(paths).run(
+def test_bounded_capture_streams_output_without_a_communicate_buffer(tmp_path: Path):
+    """The reader every sandbox command goes through (``exec_limited`` ->
+    ``PersistentCommandRunner``) must cap each stream as it arrives."""
+
+    result = _run_limited_capture(
         [sys.executable, "-c", "import sys; print('x' * 10000); print('y' * 10000, file=sys.stderr)"],
+        cwd=tmp_path,
+        timeout_seconds=30.0,
         max_output_chars=64,
     )
     assert result.exit_code == 0

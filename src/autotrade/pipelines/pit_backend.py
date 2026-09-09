@@ -525,6 +525,11 @@ class PITDailyEvaluationBackend:
         self.nl_failure_policy = nl_failure_policy
         self.max_intraday_row_group_rows = int(max_intraday_row_group_rows)
         self._replay_frame_cache: _ReplayFrameCache = {}
+        # Host-side slot of each completed result, by ``result.json`` path. The
+        # Agent-readable record names its slots opaquely, so the null control
+        # takes the replay directory from the bundle this backend evaluated
+        # rather than reading a host path back out of an Agent-visible file.
+        self._result_replay_dirs: dict[str, Path] = {}
 
     def evaluate(
         self, request: EvaluationRequest, *, max_days: int | None = None
@@ -694,8 +699,11 @@ class PITDailyEvaluationBackend:
             record["pit"] = {
                 "snapshot_id": request.snapshot.snapshot_id,
                 "generation_id": request.snapshot.generation_id,
-                "decision_ref": str(snapshot_dir),
-                "replay_ref": str(replay_dir),
+                # Slot NAMES, never host paths: this record is copied verbatim
+                # into the Agent-readable Step attachment, and the decision
+                # anchor and replay window are already known to the session.
+                "decision_slot": snapshot_dir.name,
+                "replay_slot": replay_dir.name,
                 "refresh_calls": len(refreshed),
                 "minute_row_groups_loaded": minute_source.loaded_groups if minute_source is not None else 0,
                 "minute_rows_loaded": minute_source.loaded_rows if minute_source is not None else 0,
@@ -736,6 +744,7 @@ class PITDailyEvaluationBackend:
             )
             target = result_dir / "result.json"
             write_json_atomic(target, record)
+            self._result_replay_dirs[str(target)] = replay_dir
             write_style_rollup(result_dir, style)
             keep_result_dir = True
             return EvaluationResult(dict(summary), str(target))
@@ -762,16 +771,22 @@ class PITDailyEvaluationBackend:
         Replays ``k`` random-name copies of the result's own trade skeleton
         through the same slot, Broker and window, and ranks the observed excess
         inside them (``replay/null_control.py``). Host-side and read-only: the
-        result's own ``pit`` block names the replay slot, so the frame comes
-        from the same cache the evaluation filled and no snapshot is rebuilt.
-        Informational — nothing gates on it.
+        slot is the one THIS backend evaluated the result against, so the frame
+        comes from the same cache the evaluation filled and no snapshot is
+        rebuilt. Informational — nothing gates on it.
         """
 
-        record = _read_json(_result_json(result_path))
+        result_json = _result_json(result_path)
+        replay_dir = self._result_replay_dirs.get(str(result_json))
+        if replay_dir is None:
+            raise ValueError(
+                f"result was not evaluated by this backend, so its PIT replay "
+                f"slot is unknown: {result_path}"
+            )
+        record = _read_json(result_json)
         pit = record.get("pit")
-        if not isinstance(pit, Mapping) or not pit.get("replay_ref"):
-            raise ValueError(f"result has no PIT replay slot: {result_path}")
-        replay_dir = Path(str(pit["replay_ref"])).resolve(strict=True)
+        if not isinstance(pit, Mapping):
+            raise TypeError(f"result has no PIT block: {result_path}")
         replay_manifest = load_snapshot_manifest(replay_dir)
         daily = _load_replay_frames(
             replay_dir,
@@ -1305,7 +1320,9 @@ def _stash_part_counts(stash_dir: Path) -> dict[str, int]:
     """How many parts each domain of the stash holds right now."""
 
     return {
-        domain.name: len(list(domain.glob("part_*.parquet")))
+        # Text body parts are named ``<dataset>__part_NNNN.parquet``; every
+        # other domain writes a bare ``part_NNNN.parquet``.
+        domain.name: len(list(domain.glob("*part_*.parquet")))
         for domain in sorted(stash_dir.iterdir())
         if domain.is_dir() and not domain.is_symlink()
     }
