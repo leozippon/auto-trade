@@ -2513,8 +2513,11 @@ def test_agent_tool_schema_through_the_registry() -> None:
         "description", "max_turns", "thinking", "inherit_context", "resume",
     }
     assert schema["properties"]["agent"]["enum"] == list(SUBAGENT_ROLES)
-    for phrase in ("subagent_completed", "resume", "不能嵌套", "不要轮询", "action=message"):
+    for phrase in ("subagent_completed", "resume", "不要轮询", "action=message"):
         assert phrase in spec.description
+    # Role capabilities ride on the ``agent`` property, generated from the role
+    # table; the description does not carry a second, hand-written copy.
+    assert "不能执行" in schema["properties"]["agent"]["description"]
     # The old parameter name is a schema error, not a silent fallback.
     stale = runner.tools.invoke("agent", {"role": "auditor", "task": "x"})
     assert stale.ok is False and "role" in stale.error
@@ -2750,10 +2753,6 @@ def test_agent_description_states_role_capabilities_and_thinking_tiers() -> None
 
     continuations = f"最多 {SUBAGENT_MAX_TRUNCATION_CONTINUATIONS} 次强制简洁续写"
     for phrase in (
-        "shell",
-        "smoke_backtest",
-        "不能执行",
-        "general-purpose 或 developer",
         "thinking 默认 medium",
         "显式抬到 xhigh",
         "机械工作",
@@ -2771,8 +2770,15 @@ def test_agent_description_states_role_capabilities_and_thinking_tiers() -> None
         assert "action=message" in prompt
         assert "xhigh 只给纯文本" not in prompt
         assert "优先 `resume`" not in prompt
+    # The role/write matrix reaches the model once per payload, generated from
+    # SUBAGENT_ROLE_TABLE on the ``agent`` property. A second hand-written copy
+    # in the description could only drift from the table.
     agent_field = AGENT_TOOL_SPEC.input_schema["properties"]["agent"]
-    assert "不能执行" in agent_field["description"] and "shell" in agent_field["description"]
+    for phrase in ("Sandbox shell", "smoke_backtest", "不能执行", "Meta 会话中全部角色只读"):
+        assert phrase in agent_field["description"]
+        assert phrase not in AGENT_TOOL_DESCRIPTION
+    for role in SUBAGENT_ROLES:
+        assert f"{role}：" in agent_field["description"]
     # The three call shapes are separate, labelled parts carrying their exact
     # argument names; resume is a launch parameter, never an action.
     for shape in (
@@ -3709,11 +3715,11 @@ def test_exhausted_child_reports_what_the_empty_finalize_left_behind() -> None:
 def test_child_thinking_level_reaches_the_budget_wrapped_gateway() -> None:
     """Production hands the child a budget wrapper around the gateway; the
     per-child ``thinking`` must still change the request that goes out."""
-    from autotrade.environment.llm.deepseek import (
+    from autotrade.environment.llm.model_profiles import LOCAL_QWEN_MODEL
+    from autotrade.environment.llm.openai_compatible import (
         OpenAICompatibleConfig,
         OpenAICompatibleProxy,
     )
-    from autotrade.environment.llm.model_profiles import LOCAL_QWEN_MODEL
 
     class Transport:
         def __init__(self) -> None:

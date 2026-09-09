@@ -31,10 +31,7 @@ def _result_file(experiment_dir: Path, reference: object) -> Path | None:
     if not candidate.is_relative_to(experiment_dir.resolve()):
         return None
     if candidate.is_dir():
-        for name in ("result.json", "detailed_return.json"):
-            if (candidate / name).is_file():
-                return candidate / name
-        return None
+        candidate = candidate / "result.json"
     return candidate if candidate.is_file() else None
 
 

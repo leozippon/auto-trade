@@ -26,13 +26,10 @@ _PATH_KEYS = frozenset(
     {
         "agent_trace_ref",
         "analysis_path",
-        "combined_artifact_ref",
         "frozen_model_artifact_path",
         "frozen_strategy_artifact_path",
-        "model_artifact_ref",
         "result_ref",
         "run_manifest_ref",
-        "strategy_artifact_ref",
         "strategy_dir",
         "test_result_ref",
         "validation_result_ref",

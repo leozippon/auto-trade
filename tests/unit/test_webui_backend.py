@@ -4717,6 +4717,10 @@ class HitlControlActionTest(unittest.TestCase):
         zero = self._post(action="set_gpu_count", session_key=key, directive="0")
         self.assertEqual(zero.status_code, 200, zero.text)
         self.assertEqual(zero.json()["control"]["gpu_counts"], {public_key: 0})
+        # 0 is a CPU-only allocation, not an absent one: it must survive the
+        # write/read round trip through control.json, or the session silently
+        # falls back to the experiment default the researcher just overrode.
+        self.assertEqual(self._control().gpu_counts, {key: 0})
         cleared = self._post(action="set_gpu_count", session_key=key, directive="")
         self.assertEqual(cleared.json()["control"]["gpu_counts"], {})
         for directive, fragment in (("5", "0..4"), ("abc", "整数")):

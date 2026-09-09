@@ -1,27 +1,27 @@
 # 开局不必重新普查合同
 
-每折开局都会派两三个只读子代理去重新导出同一批固定事实：产物入口、`context` 面、只读根、工具预算、单位查法、结果字段。它们每折都得出同样的答案，却落在第一次完整 Validation 之前的关键路径上，还把结论塞进此后每一次 prompt。下面是那批答案。有疑问时读权威件的对应段（只读 `output/README.md`、运行事实、`inputs/` 下的摘要），不要派子代理去重新概括它。
+每折开局都会派两三个只读子代理去重新导出同一批固定事实：产物入口、`context` 面、只读根、工具预算、单位查法、结果字段。它们每折都得出同样的答案，却落在第一次完整 Validation 之前的关键路径上，还把结论塞进此后每一次 prompt。这些答案本来就已经在会话里。下面只写它们各自躺在哪一份权威件的哪一段，以及读错时的代价——权威件随版本变，这份条目不复述它们的内容。
 
 ## 产物合同
 
-- `output/` 是以 `main.py` 为入口的 Python 包。`main.py` 必须定义恰好一个同步单参数 `generate_orders(context)`，最多再定义一个同步单参数 `fit(context)`，`REFIT_PERIOD` 若存在必须是模块级的 `day`/`month`/`quarter`/`year` 或 `None`（省略或 `None` = 每次回放只拟合一次）。
-- `fit` 在每次回放第一次决策前调用一次，并在落入新 `REFIT_PERIOD` 的第一次决策再调用，拿到的是当天 `generate_orders` 同一个 context，因此看不到决策看不到的行。`fit` 可写 `context.state_dir`，`generate_orders` 只能读它；该目录每次回放都从空开始重建，不进 revision、不进冻结产物。重的计算放 `fit`（独立且宽得多的超时），`generate_orders` 只读系数、算当日特征。
-- 包内用绝对导入引用兄弟模块（`from lib.features import momentum` 对应 `output/lib/features.py`），相对导入被拒；每个 `.py` 都是产物，计入文件数、字节上限与指纹。
-- 跨 Fold 继承的静态资产放 `models/`，运行时以只读 `context.models_dir` 出现（`np.load`、`pd.read_parquet`、`torch.load`、booster 的 `load_model` 可读；pickle/joblib 不可）。回放期拟合出来的东西只写 `context.state_dir`，两者都不进 `output/`。
-- `context.asof_dir` 每个域是一个 **parts 目录**（`pd.read_parquet(context.asof_dir + "/daily")`），`context.snapshot_dir` 每个域是一个**扁平文件**（`.../daily.parquet`）。写错这一处是回放死在第一天最常见的原因，`modification_check` 会静态拦下扁平写法；as-of 读失败不得回退到 snapshot，那是 PIT 违规而不是补救。
-- 订单是严格 JSON 数组（无单可交空数组），每单必须有 `symbol`/`action`/`quantity`/`execute_at`；`09:30` 用当日 open、`15:00` 用当日 close，其余时刻要求同一分钟的历史分钟行，缺价整单被拒。
+只读 `output/README.md` 是产物合同的唯一权威：`main.py` 的入口与 `generate_orders`／`fit` 的签名和调用时机、`REFIT_PERIOD` 的取值、包内导入形式、`models/` 与 `context.state_dir` 的分工、`context` 的输入面、订单字段与 `execute_at` 的取价规则、允许的库、文件与字节上限，都在那一份里逐条写着。读它的对应小节，不要凭上一折的记忆，也不要派子代理去重述它。
+
+两处读错的代价最高，值得开局自查：
+
+- `context.asof_dir` 与 `context.snapshot_dir` 的目录形状不同，README 的数据根一节给出各自的读法。写错这一处是回放死在第一天最常见的原因，`modification_check` 会静态拦下其中一种写法；as-of 读失败不得回退到 snapshot，那是 PIT 违规而不是补救。
+- `fit` 拿到的是当天 `generate_orders` 同一个 context，因此看不到决策看不到的行；它的产物只写 `context.state_dir`，该目录每次回放都从空开始重建，不进 revision、不进冻结产物。重的计算放 `fit`（超时独立且宽得多），`generate_orders` 只读系数、算当日特征。
 
 ## 只读根与拷贝
 
-- 可写根只有 `workspace`、`output`、`models`；`snapshot`、`asof`、`steps`、`parent_output`、`inputs`、`refs`、`memory` 都是只读。
-- 只读产物树里的文件是 0444，`cp` 会照抄这个模式：从 `steps`/`parent_output` 拷进可写树后，必须先在 `shell` 里 `chmod -R u+w <目标>` 才能编辑，否则第一次 `edit_file`/写入就失败。
-- `batch_validate` 会把只读模板文件（`README.md`）补进每个缺它的 `candidates/<name>/`。不要自己拷、改或删它：它属于只读基线，一旦与播种时的字节不同，整批在预检就被拒，而错误指向的是那个文件，不是策略逻辑。
+- 哪些根可写、哪些只读，以工具说明和它们的报错为准；哪些树进入冻结产物见 `output/README.md`。
+- 只读产物树里的文件是 0444，`cp` 会照抄这个模式：从只读树拷进可写树后，必须先在 `shell` 里 `chmod -R u+w <目标>` 才能编辑，否则第一次 `edit_file`／写入就失败。
+- `batch_validate` 会把只读模板文件补进每个缺它的候选目录。不要自己拷、改或删它：它属于只读基线，一旦与播种时的字节不同，整批在预检就被拒，而错误指向的是那个文件，不是策略逻辑。
 
 ## 工具与预算的固定事实
 
-- `smoke_backtest` 走真实回放路径但不占回测名额、不产生可选择节点；`daily_backtest` 与 `batch_validate` 是唯一产生节点的调用。`batch_validate` 一次 2–6 个候选，每个候选各占一次回测与一个 Step，整批在任何东西开跑之前一次性过预检。
-- `daily_backtest`、`batch_validate`、`run_null_control`、`ask_user` 期间推理时钟暂停；**等待子代理不暂停**，它照常计入本折的有效推理时间。
-- 被拒的批次不消耗名额，但同一签名（错误类型加被拦目标）重复出现会升级提示，再重复开始按次扣回测名额：同一个调用连拒三次时，问题在输入而不在重试。
+- 哪些调用产生可被选择的 Step 节点、一次可提交几个候选、整批如何预检，以工具自身的 schema 与说明为准；`smoke_backtest` 走真实回放路径，但不占回测名额、不产生节点。
+- 被拒的批次不消耗名额，但同一签名（错误类型加被拦目标）重复出现会升级提示，再重复开始按次扣回测名额：同一个调用连着被拒，问题在输入而不在重试。
+- 推理时钟在哪些调用期间暂停，以运行事实 `budgets` 的 `deadline_seconds_note` 为准；**等待子代理不在其列**，它照常计入本折的有效推理时间。
 - 具体数字（推理时限、回测与 Step 上限、单次决策与 `fit` 超时、`run_null_control` 每折次数、文件与字节上限）只以运行事实 `budgets`、`acceptance_rules` 和只读 `output/README.md` 为准，不要凭上一折的记忆。
 
 ## 单位

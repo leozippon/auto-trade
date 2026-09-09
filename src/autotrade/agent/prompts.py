@@ -64,12 +64,17 @@ FOLD_WORKFLOW_SECTION = """\
 # 工作方式
 - 工具用原生 function calling 调用；未注册的工具不存在。纯文本回复不结束会话，只有 `finish_fold` 结束。同一轮的多个调用并发执行，含写入、shell、回测、回滚、提问或结束的批次按顺序执行；有因果关系的步骤分轮调用。
 - 你自己的上下文和串行轮次是最稀缺的资源：把工作拆成能独立完成的块（数据与单位核查、特征与统计、实现、审计），在同一轮作为并行子代理启动，它们运行时你继续设计、决策和启动下一块。几个并行的有界子代理仍好过一个很长的串行子代理；任务很简单时也可以自己做，委托只有一层。
-- `developer`/`general-purpose` 能执行命令并写入，`auditor`/`Explore` 只读；把路径、约束、期望返回格式写进 task，task 要构建或评估某个候选时再写进它的假设与证伪条件——子代理只看到 task。`thinking` 与 `max_turns` 由你按次决定：多数工作保留默认档，靠判断取胜的实现、设计或审计显式抬到 xhigh，有界的机械工作显式降到 low。并行子代理范围互斥，同一文件的修改串行；一轮预登记的候选彼此独立，就在同一轮为每个候选各起一个可写子代理，各自只写自己的 `candidates/<name>/`，由你整合与验收（默认可同时跑 4 个，网关有余量）。只在确实需要其已有上下文时 `resume`；中途改范围或让它提前收尾用 `action=message`，不为催促而打断。
+- `developer`/`general-purpose` 能执行命令并写入，`auditor`/`Explore` 只读；把路径、约束、期望返回格式写进 task，task 要构建或评估某个候选时再写进它的假设与证伪条件——子代理只看到 task。`thinking` 与 `max_turns` 由你按次决定：多数工作保留默认档，靠判断取胜的实现、设计或审计显式抬到 xhigh，有界的机械工作显式降到 low。并行子代理范围互斥，同一文件的修改串行；一轮预登记的候选彼此独立，就在同一轮为每个候选各起一个可写子代理，各自只写自己的 `candidates/<name>/`，由你整合与验收（同时运行的上限见 `agent` 工具说明，网关有余量）。只在确实需要其已有上下文时 `resume`；中途改范围或让它提前收尾用 `action=message`，不为催促而打断。
 - 不要轮询：结果以 `subagent_completed` 消息送回，等待期间做互不冲突的其他工作，没有时直接以文本回复结束本轮，不要用工具轮询。子代理的汇报描述意图而非结果，验收其写入后再依赖；已定结论带入后续，不做迭代式反复审计。只读审计不在 Validation 的关键路径上：冒烟过关的一轮候选立即提交 `batch_validate`，不为等审计汇报推迟它（正式回测只等仍在写入的子代理）；结论不影响本轮决策的审计给有界的 `max_turns` 并降低 `thinking`。
 - 上下文达到阈值时较早消息会被压缩成摘要，子代理同样如此。计划记在工作区根的 `TODO.md`（用 `write_file`/`edit_file` 维护）：每个任务一行，写明负责方、状态和一句话结果，规划完成后建立，每个子代理完成后更新，`finish_fold` 前核对全部条目；上下文被压缩后它是恢复计划的依据。
 - 从 `inputs/skills_index.json` 起步，按需读取 skill 正文、已挂载事实、数据摘要与单位引用；skill 脚本不会自动执行。可复用的知识写入 skill，而不是策略或 PRIOR。索引里的运行记忆是别的实验或研究者留下的只读建议，不是规则：依赖之前先对照当前数据合同与本 Fold 的证据核实，冲突时以证据为准并用 `memory_feedback` 记下判断。\
 """
 
+# What a role may actually do is decided by ``subagent.SUBAGENT_ROLE_TABLE``
+# and rendered from it by ``subagent._role_schema_text()`` into the ``agent``
+# tool payload; this section is the prose view the system prompt carries and
+# must be updated with that table. It is not generated from it because
+# ``subagent`` imports this module.
 ROLE_MATRIX_SECTION = """\
 # 角色与写权
 

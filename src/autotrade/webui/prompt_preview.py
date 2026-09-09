@@ -187,6 +187,7 @@ def _fold_prompt(
         },
         "valid_decision_time": fold.valid_decision_time.isoformat(),
         "fold_period": rolling.fold_period,
+        "validation_periods": rolling.validation_periods,
         "test_stage": rolling.test_stage,
         "snapshot_config": context.options.snapshot_config.to_record(),
         "phase": _phase(epoch_index, rolling.convergence_start_epoch),
@@ -281,6 +282,18 @@ def _meta_prompt(
         "trigger_after_folds": trigger_after_folds,
         "fold_id": session_id,
         "kind": "meta_learning",
+        # A Meta manifest has no Fold of its own, so the experiment's effective
+        # public settings ride here instead; build_experiment_facts reads the
+        # geometry, the universe screen, the cadence and the broker profile
+        # from this block for a Meta session and would otherwise publish the
+        # unscreened-universe default rather than this experiment's screen.
+        "experiment_parameters": {
+            "fold_period": rolling.fold_period,
+            "validation_periods": rolling.validation_periods,
+            "schedule": rolling.schedule.to_record(),
+            "broker_profile": rolling.broker_profile.to_record(),
+            "snapshot_config": context.options.snapshot_config.to_record(),
+        },
         "development_inputs": {
             "meta_context": "/mnt/agent/workspace/inputs/meta_context.json",
             "meta_learning_memory": "/mnt/agent/workspace/inputs/meta_learning_memory.jsonl",

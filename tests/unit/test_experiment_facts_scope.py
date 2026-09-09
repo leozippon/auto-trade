@@ -322,6 +322,53 @@ def test_the_compact_history_carries_turnover_and_the_parent_delta(
     assert published["vs_parent"]["total_return"] == 0.01
 
 
+def test_a_fold_that_ran_nothing_and_one_whose_evidence_is_gone_read_apart(
+    tmp_path: Path,
+) -> None:
+    """The Meta session is asked to reason over these summaries.
+
+    An empty list is a Fold that opened no run at all (the deadline path); a
+    Fold whose manifest cannot be read has evidence and lost it, and reading
+    the two as the same thing is how a missing history passes for an honest
+    one. The reason names the failure without the host path, because this is
+    an Agent-visible projection.
+    """
+
+    ref_store = AgentRefStore(tmp_path / "experiment")
+    ran_nothing = compact_fold_history(
+        {"record_type": "fold", "fold_id": "fold_2022", "run_manifest_ref": ""},
+        ref_store=ref_store,
+    )
+    assert ran_nothing["backtest_summaries"] == []
+    assert "backtest_summaries_unavailable" not in ran_nothing
+
+    missing = tmp_path / "gone" / "run_manifest.json"
+    unreadable = compact_fold_history(
+        {
+            "record_type": "fold",
+            "fold_id": "fold_2023",
+            "run_manifest_ref": str(missing),
+        },
+        ref_store=ref_store,
+    )
+    assert unreadable["backtest_summaries"] == []
+    reason = unreadable["backtest_summaries_unavailable"]
+    assert "FileNotFoundError" in reason
+    assert str(tmp_path) not in reason
+
+    corrupt = tmp_path / "corrupt_run_manifest.json"
+    corrupt.write_text("{not json", encoding="utf-8")
+    broken = compact_fold_history(
+        {
+            "record_type": "fold",
+            "fold_id": "fold_2024",
+            "run_manifest_ref": str(corrupt),
+        },
+        ref_store=ref_store,
+    )
+    assert "JSONDecodeError" in broken["backtest_summaries_unavailable"]
+
+
 def test_each_historical_result_keeps_the_caliber_it_was_scored_with(
     tmp_path: Path,
 ) -> None:

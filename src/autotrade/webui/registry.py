@@ -1041,11 +1041,8 @@ def _result_file(experiment_dir: Path, reference: object) -> Path | None:
         return None
     if path.is_file():
         return path
-    for name in ("result.json", "detailed_return.json"):
-        candidate = path / name
-        if candidate.is_file():
-            return candidate
-    return None
+    candidate = path / "result.json"
+    return candidate if candidate.is_file() else None
 
 
 def _result_name(experiment_dir: Path, reference: object) -> str | None:

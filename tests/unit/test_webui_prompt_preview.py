@@ -16,7 +16,10 @@ import pandas as pd
 import pytest
 
 from autotrade.agent import prompts
-from autotrade.agent.experiment_facts import DEADLINE_SECONDS_NOTE
+from autotrade.agent.experiment_facts import (
+    DEADLINE_SECONDS_NOTE,
+    build_experiment_facts,
+)
 from autotrade.agent.prompts import (
     FOLD_DEFAULT_INSTRUCTION,
     FOLD_DYNAMIC_CONTEXT_HEADER,
@@ -81,7 +84,9 @@ def _repo(tmp_path: Path) -> Path:
     return repo
 
 
-def _experiment(tmp_path: Path, **overrides: object) -> tuple[Path, Path]:
+def _experiment(
+    tmp_path: Path, *, fold_id: str = "fold_2022", **overrides: object
+) -> tuple[Path, Path]:
     """One console-shaped experiment ready for a preview, minus the worker."""
     repo = _repo(tmp_path)
     experiment_id = "preview_exp"
@@ -124,14 +129,14 @@ def _experiment(tmp_path: Path, **overrides: object) -> tuple[Path, Path]:
                         "session_key": META_KEY,
                         "kind": "meta",
                         "epoch_id": "epoch_001",
-                        "fold_id": "fold_2022",
+                        "fold_id": fold_id,
                         "fold_index": 0,
                     },
                     {
-                        "session_key": FOLD_KEY,
+                        "session_key": f"epoch_001/{fold_id}",
                         "kind": "fold",
                         "epoch_id": "epoch_001",
-                        "fold_id": "fold_2022",
+                        "fold_id": fold_id,
                         "fold_index": 0,
                     },
                     {"key": "heldout", "kind": "heldout", "epoch_id": "epoch_001"},
@@ -146,6 +151,10 @@ def _experiment(tmp_path: Path, **overrides: object) -> tuple[Path, Path]:
 def _preview(tmp_path: Path, session_key: str = FOLD_KEY, directive: str = "", **overrides):
     directory, repo = _experiment(tmp_path, **overrides)
     return build_prompt_preview(directory, session_key, directive, repo_root=repo)
+
+
+def _preview_of(directory: Path, repo: Path, session_key: str) -> str:
+    return str(build_prompt_preview(directory, session_key, "", repo_root=repo)["prompt"])
 
 
 def test_fold_preview_carries_every_current_prompt_section(tmp_path: Path):
@@ -332,6 +341,72 @@ def test_inherited_parent_is_stated_without_inventing_the_artifact(tmp_path: Pat
     # The host replays the parent on this window before the session starts.
     assert facts["parent_control"] == RUNTIME_PLACEHOLDER
     assert "strategy_epoch_001_fold_2022" not in prompt
+
+
+def test_preview_manifests_carry_the_session_s_own_experiment_parameters(tmp_path: Path):
+    """A preview that drops a parameter publishes a different fact, not a gap.
+
+    A Meta manifest has no Fold of its own, so the geometry, the universe
+    screen, the cadence and the broker profile ride in ``experiment_parameters``
+    (``pipelines/experiment.py``). Building the preview's manifest without that
+    block silently rendered the unscreened-universe sentence, an empty cadence
+    and a broker profile missing its costs, which is worse than the
+    ``RUNTIME_PLACEHOLDER`` the preview promises for facts it cannot know.
+    """
+    from autotrade.pipelines.meta_schedule import meta_learning_id
+    from autotrade.pipelines.worker import load_worker_options
+
+    screened_quarterly = {
+        "fold_period": "quarter",
+        "validation_periods": 4,
+        "development_first_period": "2022Q1",
+        "development_last_period": "2025Q4",
+        "screen_exclude_st": True,
+        "screen_exclude_new_listed_days": 60,
+    }
+    directory, repo = _experiment(tmp_path, fold_id="fold_2022Q4", **screened_quarterly)
+    options = load_worker_options(directory, repo_root=repo)
+    rolling = options.rolling
+    # The Meta manifest a session writes, assembled as the pipeline does.
+    session_facts = build_experiment_facts(
+        manifest={
+            "experiment_id": rolling.experiment_id,
+            "epoch_id": "epoch_001",
+            "run_id": "run_001",
+            "meta_learning_id": meta_learning_id("epoch_001", 0),
+            "trigger_after_folds": 0,
+            "kind": "meta_learning",
+            "experiment_parameters": {
+                "fold_period": rolling.fold_period,
+                "validation_periods": rolling.validation_periods,
+                "schedule": rolling.schedule.to_record(),
+                "broker_profile": rolling.broker_profile.to_record(),
+                "snapshot_config": options.snapshot_config.to_record(),
+            },
+            "is_initial_artifact": True,
+            "template_ref": "agent_output_template",
+            "budgets": {"max_llm_calls": rolling.max_llm_calls},
+        },
+        ref_store=AgentRefStore(directory),
+    )
+    meta = _facts(str(_preview_of(directory, repo, META_KEY)))
+    assert set(meta) == set(session_facts)
+    assert set(meta["visible_timeline"]) == set(session_facts["visible_timeline"])
+    assert set(meta["broker_replay"]) == set(session_facts["broker_replay"])
+    assert meta["research_scope"] == session_facts["research_scope"]
+    assert meta["broker_replay"]["profile_id"] == session_facts["broker_replay"]["profile_id"]
+    # The two facts the missing block used to invert: a screened universe read
+    # as unfiltered, and the geometry that separates this round from the
+    # console default.
+    assert "screened at the decision anchor" in meta["research_scope"]["universe"]
+    assert "exclude_st=True" in meta["research_scope"]["universe"]
+    assert meta["visible_timeline"]["fold_period"] == "quarter"
+    assert meta["visible_timeline"]["validation_periods"] == 4
+    # A Fold session carries the same geometry on the manifest itself.
+    fold = _facts(str(_preview_of(directory, repo, "epoch_001/fold_2022Q4")))
+    assert fold["visible_timeline"]["validation_periods"] == 4
+    assert fold["research_scope"]["universe"] == meta["research_scope"]["universe"]
+    assert fold["research_scope"]["strategy_cadence"] == meta["research_scope"]["strategy_cadence"]
 
 
 def test_unknown_and_heldout_sessions_are_rejected(tmp_path: Path):
