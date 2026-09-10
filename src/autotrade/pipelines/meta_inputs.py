@@ -19,6 +19,7 @@ from autotrade.pipelines.agent_views import (
     agent_visible_metrics,
     allowed_keys,
     compact_fold_history,
+    freeze_flags,
     hard_reject_reasons,
     parent_control_summary,
 )
@@ -644,6 +645,7 @@ def build_meta_fold_review_bundle(
                 "epoch_id": record.get("epoch_id"),
                 "finish_reason": record.get("finish_reason"),
                 "no_edge_reason": record.get("no_edge_reason"),
+                **freeze_flags(record),
                 "hard_reject_reasons": hard_reject_reasons(record),
                 "frozen_strategy_artifact_id": _frozen_strategy_ref(
                     record, ref_store=ref_store

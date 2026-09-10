@@ -65,6 +65,7 @@ WEB_CREATE_DEFAULTS: dict[str, object] = {
     "workspace_reference": rolling_default("workspace_reference"),
     "operating_memory": rolling_default("operating_memory"),
     "inherit_from": "",
+    "inherit_memory_from": "",
     "strategy_period": "day",
     "inference_time": "08:30",
     "initial_control_mode": "auto",

@@ -144,6 +144,9 @@ def _fold_row(record: dict[str, object]) -> dict[str, object]:
         "finish_reason": record.get("finish_reason"),
         # How fold_status was reached: nominated, agent_no_edge, no_nomination.
         "finish_mode": record.get("finish_mode"),
+        # Frozen with no parent to beat: a weak baseline in force, not an
+        # evidenced edge, for the console to read as such.
+        "baseline_anchor": record.get("baseline_anchor") is True,
         "period_start": _period_part(period, "start"),
         "period_end": _period_part(period, "end"),
         "benchmark_return": benchmark_return,

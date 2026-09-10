@@ -35,6 +35,29 @@ NO_EDGE_REASON_MIN_CHARS = 40
 HardRuleCheck = Callable[[Mapping[str, object]], Sequence[str]]
 
 
+def baseline_anchor_required(
+    *, has_parent: bool, passing_candidates: Sequence[object]
+) -> bool:
+    """Whether this Fold must freeze one of ``passing_candidates`` as the
+    lineage's baseline anchor instead of abstaining.
+
+    An experiment with no frozen parent has no parent control, no ``vs_parent``
+    and no walk-forward transition, so every Fold that abstains leaves the Meta
+    review without forward evidence; reviewed arms spent every Fold that way.
+    Without a parent, a Fold that completed at least one Validation the hard
+    acceptance rules accept therefore has to freeze one of them -- the Agent's
+    own choice, normally the best by neutralized excess; warnings are accepted
+    as for any nomination -- and the ledger labels that freeze
+    ``baseline_anchor``: a weak baseline in force, to be replaced once a later
+    Fold beats it, not an evidenced edge. Abstaining stays valid while nothing
+    passes, and once a parent exists (``no_update`` then keeps the parent's
+    forward record growing). The tool refuses with this predicate and the
+    Pipeline labels the row with it, so the two never disagree.
+    """
+
+    return not has_parent and bool(passing_candidates)
+
+
 @dataclass(frozen=True)
 class FoldBudgetStatus:
     """What the Fold session has left when ``finish_fold`` is called.
@@ -139,8 +162,13 @@ class FinishFoldTool:
         "nominating the parent_control node. outcome=\"no_edge\" nominates nothing "
         "(node_id must be absent) and requires reason, citing the evidence that no "
         "candidate proved an edge; the Fold then records no_update with a parent "
-        "(the parent stays the lineage head) or baseline_missing without one. Use "
-        "it instead of nominating a node you do not want frozen: the Pipeline "
+        "(the parent stays the lineage head) or baseline_missing without one. "
+        "Without a frozen parent (parent_control_available=false, the parent is "
+        "the template) no_edge is refused while a complete Validation passes the "
+        "hard rules: nominate one as the baseline anchor (your choice, normally "
+        "the best by neutralized excess), recorded baseline_anchor=true and "
+        "replaced once a later Fold beats it. Otherwise use no_edge "
+        "instead of nominating a node you do not want frozen: the Pipeline "
         "freezes every nomination whose metrics are finite. Outside the deadline "
         "window a voluntary finish that leaves more than a third of the backtest "
         "budget unused must also carry early_stop_reason (which hypotheses stay "
@@ -212,6 +240,7 @@ class FinishFoldTool:
         another_round_fits: Callable[[], bool] | None = None,
         budget_status: Callable[[], FoldBudgetStatus] | None = None,
         hard_rule_check: HardRuleCheck | None = None,
+        null_controls: Callable[[], Mapping[str, Mapping[str, object]]] | None = None,
     ) -> None:
         self.tree = tree
         self.fold_id = fold_id
@@ -225,6 +254,9 @@ class FinishFoldTool:
         self._another_round_fits = another_round_fits or (lambda: True)
         self._budget_status = budget_status
         self._hard_rule_check = hard_rule_check
+        # The null-control blocks the session already drew, by node id, so a
+        # candidate listing can show the percentile the Agent has read.
+        self._null_controls = null_controls or dict
         self._parent_structure: str | None = None
         if parent_main_py is not None:
             # The parent package is the directory that holds its main.py.
@@ -324,6 +356,7 @@ class FinishFoldTool:
                 "Validation of this session to have found no edge in; run "
                 "daily_backtest or batch_validate first"
             )
+        self._require_baseline_anchor(candidates)
         early_stop = self._require_early_stop_reason(arguments)
         return ToolResult(
             True,
@@ -357,6 +390,53 @@ class FinishFoldTool:
                 and node["metadata"].get("parent_control")
             )
         ]
+
+    def _require_baseline_anchor(self, candidates: Sequence[str]) -> None:
+        """Refuse an abstention that would leave a parentless experiment
+        without a baseline while a candidate passes the hard rules.
+
+        The refusal lists those candidates with the figures the choice is
+        made on; which one to anchor is the Agent's, not the tool's.
+        """
+
+        own = set(candidates)
+        rows = [
+            row
+            for row in self._hard_rule_candidates(self._hard_rule_check)
+            if row["node_id"] in own
+        ]
+        passing = [row for row in rows if row["passes_hard_rules"]]
+        if not baseline_anchor_required(
+            has_parent=self._parent_structure is not None, passing_candidates=passing
+        ):
+            return
+        listed = "; ".join(
+            f"{row['node_id']} ({row['result_name']}"
+            + "".join(
+                f", {key}={row[key]:.4f}"
+                for key in ("neutralized_excess_return", "null_excess_percentile")
+                if isinstance(row.get(key), float)
+            )
+            + ")"
+            for row in passing
+        )
+        raise ToolError(
+            "finish_fold refused: this experiment has no frozen parent, and a "
+            "Fold that completed a Validation passing the Pipeline's hard "
+            "acceptance rules may not abstain -- without a baseline the next "
+            "Fold has no parent_control, no vs_parent and no walk-forward "
+            f"evidence. Passing candidates: {listed}. Nominate one of them as "
+            "the baseline anchor (your choice, normally the best by neutralized "
+            "excess; warnings are accepted): step_rollback to it, then "
+            "finish_fold with its node_id. The ledger records it as "
+            "baseline_anchor=true, a weak baseline to replace once a later Fold "
+            "beats it, not an evidenced edge.",
+            error_type="baseline_anchor_required",
+            retry_hint=(
+                "step_rollback(<node_id>) then finish_fold({\"node_id\": <node_id>})"
+            ),
+            details={"candidates": rows},
+        )
 
     def _nomination_verdict(
         self, node_id: str, node: Mapping[str, object], reasons: list[str]
@@ -451,14 +531,19 @@ class FinishFoldTool:
             )
         return reasons
 
-    def _hard_rule_candidates(self, check: HardRuleCheck) -> list[dict[str, object]]:
-        """Every complete Validation of this session with its hard-rule verdict.
+    def _hard_rule_candidates(
+        self, check: HardRuleCheck | None
+    ) -> list[dict[str, object]]:
+        """Every complete Validation of this session with its hard-rule verdict
+        and the figures a choice between them is made on.
 
         The host's ``parent_control`` node is one of them: selecting it is the
         documented way to keep the parent, so it must be visible here exactly
-        like the session's own Validations.
+        like the session's own Validations. Without wired rules every node
+        passes, as the Pipeline would then freeze any of them.
         """
 
+        null_controls = self._null_controls()
         rows: list[dict[str, object]] = []
         for node in self.tree.nodes():
             if (
@@ -467,16 +552,31 @@ class FinishFoldTool:
                 or not node.get("revision_id")
             ):
                 continue
+            node_id = str(node["node_id"])
             metrics = _node_metrics(node)
-            reasons = [str(reason) for reason in check(metrics)]
+            reasons = [] if check is None else [str(reason) for reason in check(metrics)]
             row: dict[str, object] = {
-                "node_id": str(node["node_id"]),
+                "node_id": node_id,
                 "result_name": str(node.get("result_name") or ""),
                 "passes_hard_rules": not reasons,
             }
-            drawdown = metrics.get("max_drawdown")
-            if isinstance(drawdown, (int, float)) and not isinstance(drawdown, bool):
-                row["max_drawdown"] = float(drawdown)
+            benchmark = metrics.get("benchmark")
+            null = null_controls.get(node_id)
+            for key, value in (
+                ("max_drawdown", metrics.get("max_drawdown")),
+                (
+                    "neutralized_excess_return",
+                    benchmark.get("neutralized_excess_return")
+                    if isinstance(benchmark, Mapping)
+                    else None,
+                ),
+                (
+                    "null_excess_percentile",
+                    null.get("excess_percentile") if isinstance(null, Mapping) else None,
+                ),
+            ):
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    row[key] = float(value)
             if reasons:
                 row["hard_reject_reasons"] = reasons
             rows.append(row)
@@ -663,6 +763,7 @@ __all__ = [
     "FinishFoldTool",
     "FoldBudgetStatus",
     "HardRuleCheck",
+    "baseline_anchor_required",
     "executable_output_structure",
     "executable_source_structure",
 ]

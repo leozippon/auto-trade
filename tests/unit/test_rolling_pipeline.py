@@ -1169,6 +1169,48 @@ def test_parent_control_replays_the_inherited_parent_once_per_fold_off_budget(tm
     assert record["test_period"] is None and record["test_result"] is None
 
 
+def test_a_parentless_freeze_is_the_baseline_anchor_the_next_fold_controls_against(
+    tmp_path: Path,
+):
+    """The other side of the anchor rule: a Fold that freezes with no parent to
+    beat is labelled ``baseline_anchor`` -- a weak baseline in force, not an
+    evidenced edge -- the label reaches the next Fold's facts and the Meta
+    review, and the next Fold replays that anchor as its parent control, so
+    the lineage now accrues forward evidence. A parentless Fold that never
+    validated anything still records ``baseline_missing`` with no anchor."""
+    evaluator = RecordingEvaluator({"revision_1": 0.05})
+    pipeline, folds, ledger, requests = _regular_fold_pipeline(tmp_path, evaluator, max_steps=1)
+    first = pipeline.run_fold("epoch_001", folds[0], parent=None)
+    anchor = ledger.read("fold")[0]
+    assert (anchor["fold_status"], anchor["finish_mode"]) == ("frozen", "nominated")
+    assert anchor["baseline_anchor"] is True
+    ref_store = AgentRefStore(pipeline.config.experiment_dir)
+    assert fold_development_summary(anchor, ref_store=ref_store)["baseline_anchor"] is True
+    reviews, _sidecars = build_meta_fold_review_bundle([anchor], ref_store=ref_store)
+    assert reviews[0]["baseline_anchor"] is True
+
+    evaluator.returns[first.frozen.artifact_id] = 0.04
+    second = pipeline.run_fold("epoch_001", folds[1], parent=first.frozen)
+    assert requests[1].parent_control is not None
+    later = ledger.read("fold")[1]
+    assert later["parent_control"]["parent_strategy_artifact_id"] == first.frozen.artifact_id
+    assert later["parent_control"]["status"] == "ok"
+    assert second.fold_status == "frozen" and "baseline_anchor" not in later
+    assert "baseline_anchor" not in fold_development_summary(later, ref_store=ref_store)
+
+    def timing_out(request):
+        raise AgentSessionDeadlineExceeded(conversation_id="conversation")
+
+    pipeline.developer = timing_out
+    pipeline.run_fold("epoch_001", folds[0], parent=None)
+    timed_out = ledger.read("fold")[2]
+    assert (timed_out["fold_status"], timed_out["finish_mode"]) == (
+        "baseline_missing",
+        "no_nomination",
+    )
+    assert "baseline_anchor" not in timed_out
+
+
 def test_a_failed_parent_control_is_recorded_and_the_fold_proceeds(tmp_path: Path):
     evaluator = RecordingEvaluator({"revision_1": 0.05})
     pipeline, folds, ledger, requests = _regular_fold_pipeline(tmp_path, evaluator)
@@ -2313,15 +2355,21 @@ def test_an_abstention_keeps_the_null_controls_the_session_paid_for(tmp_path: Pa
     the nulls the session drew for its candidates are the evidence the Meta
     review is asked to cite, so they stay in the record and reach the review."""
     pipeline, folds, ledger, _requests = _selection_fold_pipeline(tmp_path)
+    first = pipeline.run_fold("epoch_001", folds[0], parent=None)
+    pipeline.evaluator.returns[first.frozen.artifact_id] = 0.06
     drawn = {"k": 500, "seed": 7, "excess_percentile": 0.48, "rejects_mean": 2.0}
 
     def abstaining_with_nulls(request):
         session = _abstaining_developer(request)
         return replace(session, null_controls={"step_a": drawn})
 
+    # Abstaining with a parent (a parentless Fold with a passing candidate has
+    # to anchor instead): the parent stays, and its own null is not the
+    # candidate's.
     pipeline.developer = abstaining_with_nulls
-    assert pipeline.run_fold("epoch_001", folds[0], parent=None).frozen is None
-    record = ledger.read("fold")[0]
+    kept = pipeline.run_fold("epoch_001", folds[1], parent=first.frozen)
+    assert kept.frozen is not None and kept.frozen.artifact_id == first.frozen.artifact_id
+    record = ledger.read("fold")[1]
     assert record["null_control"] is None
     assert record["candidate_null_controls"] == {"step_a": drawn}
     ref_store = AgentRefStore(pipeline.config.experiment_dir)
@@ -2343,7 +2391,7 @@ def test_an_abstention_keeps_the_null_controls_the_session_paid_for(tmp_path: Pa
 
     pipeline.developer = nominating_with_nulls
     assert pipeline.run_fold("epoch_001", folds[0], parent=None).frozen is not None
-    frozen_record = ledger.read("fold")[1]
+    frozen_record = ledger.read("fold")[2]
     assert frozen_record["null_control"] == drawn
     assert "candidate_null_controls" not in frozen_record
     assert build_meta_fold_review_bundle([frozen_record], ref_store=ref_store)[0][0][
@@ -2354,12 +2402,22 @@ def test_an_abstention_keeps_the_null_controls_the_session_paid_for(tmp_path: Pa
 def test_a_parentless_no_edge_finish_records_baseline_missing_and_freezes_nothing(
     tmp_path: Path,
 ):
-    """The reviewed defect: a parentless Fold could reach baseline_missing only
-    through a timeout, so a session that found no edge nominated "the least-bad
-    node" and the Pipeline froze it. An explicit no-edge finish records the
-    fallback with the Agent's evidence, whatever the candidate's metrics say."""
+    """A parentless Fold whose only candidate fails the hard rules has nothing
+    to anchor its lineage on: an explicit no-edge finish records the fallback
+    with the Agent's evidence, and freezes nothing."""
     pipeline, folds, ledger, _requests = _selection_fold_pipeline(tmp_path)
-    pipeline.developer = _abstaining_developer
+
+    def hard_rejected_candidate(request):
+        session = _abstaining_developer(request)
+        step = session.steps[-1]
+        summary = dict(step.validation.summary)
+        del summary["max_drawdown"]  # non_finite_max_drawdown: a hard reject
+        return replace(
+            session,
+            steps=(*session.steps[:-1], replace(step, validation=EvaluationResult(summary, step.validation.result_ref))),
+        )
+
+    pipeline.developer = hard_rejected_candidate
     outcome = pipeline.run_fold("epoch_001", folds[0], parent=None)
     assert outcome.fold_status == "baseline_missing" and outcome.frozen is None
     record = ledger.read("fold")[0]
@@ -2370,11 +2428,28 @@ def test_a_parentless_no_edge_finish_records_baseline_missing_and_freezes_nothin
     assert record["frozen_strategy_artifact_id"] is None
     assert record["validation_result"] is None
     assert record["null_control"] is None
+    assert "baseline_anchor" not in record
     # Nothing was rejected: the Agent abstained. New rows carry the renamed key only.
     assert record["hard_reject_reasons"] == []
     assert "accept_reasons" not in record
     assert record["selection_statistics"]["candidates_evaluated"] == 1
     assert record["selection_statistics"]["unavailable_reason"] == "no_nominated_candidate"
+
+
+def test_a_parentless_abstention_with_a_passing_candidate_is_a_contract_breach(
+    tmp_path: Path,
+):
+    """The baseline anchor rule is enforced by ``finish_fold``; a session that
+    abstains anyway while a candidate passes the hard rules and no parent
+    exists bypassed that contract, and the Pipeline refuses to record it as a
+    Fold result (the same predicate decides both)."""
+    pipeline, folds, ledger, _requests = _selection_fold_pipeline(tmp_path)
+    pipeline.developer = _abstaining_developer
+    with pytest.raises(RuntimeError, match="baseline anchor"):
+        pipeline.run_fold("epoch_001", folds[0], parent=None)
+    assert ledger.read("fold") == []
+    failed = [row for row in ledger.read() if row["record_type"] == "attempt_failed"]
+    assert len(failed) == 1 and "baseline anchor" in failed[0]["error"]
 
 
 def test_a_fold_that_ran_candidates_but_nominated_none_is_refused(tmp_path: Path):

@@ -567,11 +567,16 @@ def test_finish_fold_no_edge_records_the_fallback_status_without_a_nomination(
 ):
     """A Fold that found no edge finishes without nominating anything: the
     parent, when there is one, stays the lineage head (no_update); a parentless
-    Fold records baseline_missing. Neither path freezes a node."""
+    Fold whose every candidate fails the hard rules records baseline_missing.
+    Neither path freezes a node."""
 
     tree = StepTree(tmp_path / "steps")
-    _record_round(tree, tmp_path, batch_id="b1", marker="1", metrics=_metrics(0.1))
-    parentless = FinishFoldTool(tree, fold_id="fold_ref_ab", run_id="run_x")
+    # Beyond the stand-in drawdown cap: hard-rejected, so nothing a parentless
+    # Fold could anchor its lineage on.
+    _record_round(tree, tmp_path, batch_id="b1", marker="1", metrics=_metrics(0.4))
+    parentless = FinishFoldTool(
+        tree, fold_id="fold_ref_ab", run_id="run_x", hard_rule_check=_acceptance_check()
+    )
     result = parentless.invoke({"outcome": "no_edge", "reason": NO_EDGE_REASON})
     assert result.ok and result.finish
     assert "node_id" not in result.value and "revision_id" not in result.value
@@ -593,6 +598,59 @@ def test_finish_fold_no_edge_records_the_fallback_status_without_a_nomination(
     assert kept.value["pipeline_outcome"] == (
         "No candidate frozen; the inherited parent stays the lineage head (no_update)"
     )
+
+
+def test_finish_fold_no_edge_is_refused_without_a_parent_while_a_candidate_passes(
+    tmp_path: Path,
+):
+    """The baseline anchor rule. Three arms spent every Fold on abstentions:
+    with no frozen parent there was never a parent_control, a vs_parent or a
+    walk-forward transition, so the Meta review saw no forward evidence at all.
+    Without a parent, an abstention is refused while a complete Validation
+    passes the hard rules, and the refusal lists those candidates with the
+    figures the choice is made on; the choice itself stays the Agent's."""
+
+    tree = StepTree(tmp_path / "steps")
+    passing = _record_round(
+        tree,
+        tmp_path,
+        batch_id="b1",
+        marker="1",
+        metrics={**_metrics(0.1), "benchmark": {"neutralized_excess_return": 0.0123}},
+    )
+    rejected = _record_round(tree, tmp_path, batch_id="b1", marker="2", metrics=_metrics(0.4))
+    finish = FinishFoldTool(
+        tree,
+        fold_id="fold_ref_ab",
+        run_id="run_x",
+        hard_rule_check=_acceptance_check(),
+        null_controls=lambda: {passing: {"excess_percentile": 0.62}},
+        # The anchor refusal comes before the early-stop justification: no
+        # reason could make this abstention legal.
+        budget_status=lambda: _budget(20),
+    )
+    with pytest.raises(ToolError) as error:
+        finish.invoke({"outcome": "no_edge", "reason": NO_EDGE_REASON})
+    assert error.value.error_type == "baseline_anchor_required"
+    message = str(error.value)
+    assert "no frozen parent" in message and "baseline anchor" in message
+    listed = message.split("Passing candidates: ")[1]
+    assert listed.startswith(
+        f"{passing} (valid_b1_1, neutralized_excess_return=0.0123, "
+        "null_excess_percentile=0.6200)"
+    )
+    assert rejected not in listed
+    rows = {row["node_id"]: row for row in error.value.details["candidates"]}
+    assert rows[passing]["passes_hard_rules"] is True
+    assert rows[rejected]["hard_reject_reasons"] == ["max_drawdown_exceeded"]
+    # Nominating the passing node is the way out, and the Pipeline freezes it.
+    selected = finish.invoke({"node_id": passing, "early_stop_reason": "anchor"})
+    assert selected.finish and selected.value["pipeline_fold_status"] == "frozen"
+    # Without wired rules every complete Validation passes, so a bare
+    # parentless tool refuses the same way.
+    bare = FinishFoldTool(tree, fold_id="fold_ref_ab", run_id="run_x")
+    with pytest.raises(ToolError, match="baseline anchor"):
+        bare.invoke({"outcome": "no_edge", "reason": NO_EDGE_REASON})
 
 
 def test_finish_fold_no_edge_refuses_a_node_a_thin_reason_or_an_empty_session(
@@ -632,9 +690,14 @@ def test_finish_fold_no_edge_refuses_a_node_a_thin_reason_or_an_empty_session(
     thin = registry.invoke("finish_fold", {"outcome": "no_edge", "reason": "no edge"})
     assert thin.ok is False
     assert f"minimum {NO_EDGE_REASON_MIN_CHARS}" in thin.error
-    # The early-finish gate applies to an abstention exactly as to a nomination.
+    # The early-finish gate applies to an abstention exactly as to a nomination
+    # (with a parent: without one the anchor rule refuses the abstention first).
     budgeted = FinishFoldTool(
-        tree, fold_id="fold_ref_ab", run_id="run_x", budget_status=lambda: _budget(20)
+        tree,
+        fold_id="fold_ref_ab",
+        run_id="run_x",
+        parent_main_py=_written(tmp_path / "parent", PARENT) / "main.py",
+        budget_status=lambda: _budget(20),
     )
     with pytest.raises(ToolError, match="early_stop_reason"):
         budgeted.invoke({"outcome": "no_edge", "reason": NO_EDGE_REASON})

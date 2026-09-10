@@ -294,6 +294,20 @@ def hard_reject_reasons(record: Mapping[str, object]) -> object:
     return record.get("hard_reject_reasons", record.get("accept_reasons"))
 
 
+def freeze_flags(record: Mapping[str, object]) -> dict[str, bool]:
+    """The Fold record's freeze labels, present only when set, as the ledger
+    writes them: ``baseline_anchor`` (frozen with no parent to beat -- a weak
+    baseline in force, not an evidenced edge) and
+    ``nominated_identical_to_parent`` (a passing nomination that was the
+    parent's own content, so the parent's id was retained)."""
+
+    return {
+        key: True
+        for key in ("baseline_anchor", "nominated_identical_to_parent")
+        if record.get(key) is True
+    }
+
+
 def compact_fold_history(
     record: dict[str, object],
     *,
@@ -328,6 +342,7 @@ def compact_fold_history(
         "finish_mode": record.get("finish_mode"),
         "early_stop_reason": record.get("early_stop_reason"),
         "no_edge_reason": record.get("no_edge_reason"),
+        **freeze_flags(record),
         "validation_result": _visible_metrics(record.get("validation_result")),
         "hard_reject_reasons": hard_reject_reasons(record),
         "accept_warnings": record.get("accept_warnings"),
@@ -439,6 +454,7 @@ def fold_development_summary(
         "finish_mode": record.get("finish_mode"),
         "early_stop_reason": record.get("early_stop_reason"),
         "no_edge_reason": record.get("no_edge_reason"),
+        **freeze_flags(record),
         "hard_reject_reasons": hard_reject_reasons(record),
         "accept_warnings": record.get("accept_warnings"),
         "validation_result": _visible_metrics(record.get("validation_result")),

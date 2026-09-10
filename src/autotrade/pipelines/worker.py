@@ -77,6 +77,7 @@ from .hitl_state import (
     read_json,
     read_status,
 )
+from .inherited_memory import load_inherited_memory
 from .interactive import InteractiveExperimentRunner
 from .ledger import (
     ExperimentLedger,
@@ -176,6 +177,7 @@ _ALLOWED_PARAMS = {
     "meta_learning_fold_interval",
     "meta_memory_max_epochs",
     "inherit_from",
+    "inherit_memory_from",
     "meta_learning_directive",
     "fold_exploration_directive",
     "workspace_reference",
@@ -1056,6 +1058,9 @@ def build_experiment_pipeline(
         meta_learner = None
         meta_enabled = False
         developer_label = "deterministic_baseline_no_agent_improvement"
+    # Memory seeded at creation from another experiment: its skills are the
+    # head until the first session row, for either driver of this assembly.
+    inherited_memory = load_inherited_memory(options.experiment_dir)
     pipeline = RollingExperimentPipeline(
         options.rolling,
         snapshots=snapshots,
@@ -1064,6 +1069,9 @@ def build_experiment_pipeline(
         developer=developer,
         meta_learner=meta_learner,
         ledger=ledger,
+        inherited_skills=(
+            inherited_memory.skills if inherited_memory is not None else None
+        ),
     )
     return ExperimentPipelineBuild(
         pipeline=pipeline,
@@ -1176,17 +1184,28 @@ def run_local_interactive_worker(
         meta_learning_fold_interval=options.rolling.meta_learning_fold_interval,
     )
     write_json_atomic(hitl / SCHEDULE_NAME, plan)
-    # Inherited seed (from another experiment's frozen output) replaces the
-    # blank template as the first fold's parent; a resumed experiment takes its
-    # parent from its own ledger instead.
-    _restore_prior_store(options.experiment_dir, ledger)
+    # Inherited seeds (another experiment's frozen output, another's PRIOR and
+    # skills) stand in for the blank template and the empty memory only until
+    # this experiment's own ledger rows exist; a resumed experiment takes its
+    # parent, PRIOR and skills from its own ledger instead.
+    memory = load_inherited_memory(options.experiment_dir)
+    _restore_prior_store(
+        options.experiment_dir,
+        ledger,
+        fallback_generation_id=memory.prior_generation_id if memory else "",
+    )
     # Skills have no mutable CURRENT pointer: validating the final remaining
     # successful Fold/Meta row is the complete resume/rollback restore step.
-    latest_skills_snapshot(ledger.read(), experiment_dir=options.experiment_dir)
+    latest_skills_snapshot(
+        ledger.read(),
+        experiment_dir=options.experiment_dir,
+        inherited=memory.skills if memory else None,
+    )
     state = {
         "parent": _latest_artifact(ledger, store)
         or _load_inherited_parent(options.experiment_dir),
-        "prior": latest_prior_text(ledger.read("meta_learning")),
+        "prior": latest_prior_text(ledger.read("meta_learning"))
+        or (memory.prior_text if memory else ""),
     }
 
     def execute(session, context):
@@ -1603,9 +1622,16 @@ def _build_post_fold_hook(
     return post_fold_hook
 
 
-def _restore_prior_store(experiment_dir: Path, ledger: ExperimentLedger) -> None:
-    """Align CURRENT with the last remaining Meta generation after resume/rollback."""
-    restore_current_from_records(experiment_dir, ledger.read("meta_learning"))
+def _restore_prior_store(
+    experiment_dir: Path, ledger: ExperimentLedger, *, fallback_generation_id: str = ""
+) -> None:
+    """Align CURRENT with the last remaining Meta generation after resume/rollback,
+    or with the inherited generation before the first Meta."""
+    restore_current_from_records(
+        experiment_dir,
+        ledger.read("meta_learning"),
+        fallback_generation_id=fallback_generation_id,
+    )
 
 
 def _repo_file(repo_root: Path, value: object, label: str) -> Path:

@@ -30,9 +30,12 @@ from autotrade.pipelines.hitl_state import (
     read_status,
     write_control,
 )
+from autotrade.pipelines.inherited_memory import import_inherited_memory
 from autotrade.pipelines.interactive import InteractiveExperimentRunner
 from autotrade.pipelines.ledger import ExperimentLedger
 from autotrade.pipelines.local_backend import SessionBudgetLLM, SessionCallBudget
+from autotrade.pipelines.prior import ExperimentPriorStore
+from autotrade.pipelines.skills import ExperimentSkillsStore
 from autotrade.pipelines.worker import (
     NL_REASONING_EFFORT,
     _heldout_epoch_id,
@@ -1130,6 +1133,91 @@ def _batch_round(names: tuple[str, str]) -> tuple[ToolCall, ...]:
             },
         ),
     )
+
+
+INHERITED_PRIOR = (
+    "Closed: small-cap reversal (null percentile near 0.5). "
+    "Next round: post-event drift against a matched control."
+)
+
+
+def test_llm_worker_starts_from_inherited_memory(tmp_path: Path, monkeypatch):
+    """``inherit_memory_from``: the first Meta reads the inherited PRIOR as the
+    previous generation and may keep it, the first Fold's system prompt
+    carries that PRIOR and its workspace mounts the inherited skills -- the
+    same view either session has after a Meta publication -- and the Fold,
+    having no frozen parent, anchors the lineage on its nomination."""
+    repo, experiment = _experiment(tmp_path, developer_mode="llm")
+    source = repo / "experiments" / "src"
+    ExperimentPriorStore(source).publish(INHERITED_PRIOR, generation_id="gen_1")
+    tree = tmp_path / "skills_src" / "skills"
+    (tree / "closed-families").mkdir(parents=True)
+    (tree / "closed-families" / "SKILL.md").write_text(
+        "# Closed Families\n\nSmall-cap reversal is closed; do not re-test it.\n",
+        encoding="utf-8",
+    )
+    skills = ExperimentSkillsStore(source).publish(tree, generation_id="gen_1")
+    ExperimentLedger(source / "ledgers" / "experiment_ledger.jsonl").append(
+        {
+            "record_type": "meta_learning",
+            "experiment_id": "src",
+            "epoch_id": "epoch_001",
+            "fold_id": "meta_001",
+            "run_id": "run_m",
+            "prior": INHERITED_PRIOR,
+            "prior_generation_id": "gen_1",
+            "skills_ref": skills.skills_ref,
+            "skills_generation_id": skills.generation_id,
+            **skills.stats.ledger_fields(),
+            "skills_published": True,
+        }
+    )
+    payload = import_inherited_memory(experiment, source, source_id="src")
+    params_path = experiment / "hitl/params.json"
+    params = json.loads(params_path.read_text(encoding="utf-8"))
+    params.update({"inherit_memory_from": "src", "_inherited_memory": payload})
+    params_path.write_text(json.dumps(params), encoding="utf-8")
+    monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
+    options = load_worker_options(experiment, repo_root=repo)
+    llm = ScriptedLLM(
+        [
+            # The Meta keeps the inherited PRIOR as it stands.
+            *_agent_then(ToolCall("finish_meta", "finish_meta", {})),
+            *_agent_then(
+                ToolCall("check", "modification_check", {}),
+                ToolCall("valid", "daily_backtest", {}),
+                ToolCall("finish_fold", "finish_fold", {}),
+                roles=_FOLD_DELEGATION_ROLES,
+                implement={
+                    "path": "output/main.py",
+                    "content": "def generate_orders(context):\n    return []\n",
+                },
+            ),
+        ]
+    )
+    result = run_local_interactive_worker(
+        options,
+        llm=llm,
+        command_runner_factory=lambda _workspace: _NoShellRunner(),
+    )
+    assert result["state"] == "completed"
+    meta, fold, _heldout = ExperimentLedger(options.rolling.ledger_path).read()
+    assert meta["prior"] == INHERITED_PRIOR
+    assert meta["prior_generation_id"] == "inherited_src"
+    assert meta["prior_published"] is False
+    assert fold["skills_ref"] == payload["skills_ref"] and fold["skills_count"] == 1
+    assert fold["fold_status"] == "frozen" and fold["baseline_anchor"] is True
+    fold_prompts = [
+        message.content or ""
+        for call in llm.calls
+        for message in call["messages"]
+        if message.role == "system" and "# 提交合同" in (message.content or "")
+    ]
+    assert fold_prompts and all(INHERITED_PRIOR in prompt for prompt in fold_prompts)
+    manifest = json.loads(Path(fold["run_manifest_ref"]).read_text(encoding="utf-8"))
+    assert manifest["skills"]["count"] == 1
+    collected = Path(fold["run_manifest_ref"]).parent / "workspace" / "skills"
+    assert (collected / "closed-families" / "SKILL.md").is_file()
 
 
 def test_a_voluntary_early_finish_must_justify_itself_and_reaches_the_ledger(

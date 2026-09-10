@@ -1048,10 +1048,43 @@ def _optional_ledger_count(record: Mapping[str, object], key: str) -> int | None
     return raw
 
 
-def latest_skills_snapshot(
-    records: Sequence[Mapping[str, object]], *, experiment_dir: str | Path
+def skills_snapshot_from_ref(
+    experiment_dir: str | Path, raw_ref: str, *, generation_id: str = ""
 ) -> SkillsSnapshot:
-    """Resolve skills from the final remaining successful Fold/Meta ledger row."""
+    """Resolve one experiment-relative published generation ref, validating
+    that it is a read-only generation of this experiment's own store."""
+
+    pure = PurePosixPath(raw_ref)
+    if pure.is_absolute() or any(part in {"", ".", ".."} or part.startswith(".") for part in pure.parts):
+        raise ValueError("skills_ref must be a non-hidden experiment-relative path")
+    experiment = Path(experiment_dir).resolve()
+    root = experiment.joinpath(*pure.parts).resolve(strict=True)
+    expected_parent = experiment / "artifacts" / SKILLS_DIRNAME / "generations"
+    if not root.is_relative_to(expected_parent) or root.name != SKILLS_DIRNAME:
+        raise ValueError("skills_ref is outside the experiment skills store")
+    stats = validate_skills_tree(root, require_writable=False)
+    _assert_skills_tree_read_only(root)
+    generation = generation_id.strip() or root.parent.name
+    if (
+        Path(generation).name != generation
+        or generation.startswith(".")
+        or generation != root.parent.name
+    ):
+        raise ValueError("skills_generation_id does not match skills_ref")
+    return SkillsSnapshot(raw_ref, generation, stats, root)
+
+
+def latest_skills_snapshot(
+    records: Sequence[Mapping[str, object]],
+    *,
+    experiment_dir: str | Path,
+    inherited: SkillsSnapshot | None = None,
+) -> SkillsSnapshot:
+    """Resolve skills from the final remaining successful Fold/Meta ledger row.
+
+    Before the first such row the head is ``inherited`` -- the generation
+    seeded at creation from another experiment's memory -- or empty.
+    """
 
     successful = [
         record
@@ -1059,7 +1092,7 @@ def latest_skills_snapshot(
         if record.get("record_type") in {"fold", "meta_learning"}
     ]
     if not successful:
-        return SkillsSnapshot()
+        return inherited or SkillsSnapshot()
     record = successful[-1]
     raw_ref = str(record.get("skills_ref") or "").strip()
     recorded_generation = str(record.get("skills_generation_id") or "").strip()
@@ -1078,32 +1111,40 @@ def latest_skills_snapshot(
         ):
             raise ValueError("ledger empty skills_ref has non-empty skills metadata")
         return SkillsSnapshot()
-    pure = PurePosixPath(raw_ref)
-    if pure.is_absolute() or any(part in {"", ".", ".."} or part.startswith(".") for part in pure.parts):
-        raise ValueError("ledger skills_ref must be a non-hidden experiment-relative path")
-    experiment = Path(experiment_dir).resolve()
-    root = experiment.joinpath(*pure.parts).resolve(strict=True)
-    expected_parent = experiment / "artifacts" / SKILLS_DIRNAME / "generations"
-    if not root.is_relative_to(expected_parent) or root.name != SKILLS_DIRNAME:
-        raise ValueError("ledger skills_ref is outside the experiment skills store")
-    stats = validate_skills_tree(root, require_writable=False)
-    _assert_skills_tree_read_only(root)
-    generation = recorded_generation or root.parent.name
-    if (
-        Path(generation).name != generation
-        or generation.startswith(".")
-        or generation != root.parent.name
-    ):
-        raise ValueError("ledger skills_generation_id does not match skills_ref")
+    try:
+        snapshot = skills_snapshot_from_ref(
+            experiment_dir, raw_ref, generation_id=recorded_generation
+        )
+    except ValueError as exc:
+        raise ValueError(f"ledger {exc}") from exc
     actual_counts = {
-        "skills_count": stats.count,
-        "skills_files": stats.files,
-        "skills_bytes": stats.bytes,
+        "skills_count": snapshot.stats.count,
+        "skills_files": snapshot.stats.files,
+        "skills_bytes": snapshot.stats.bytes,
     }
     for key, recorded in recorded_counts.items():
         if recorded is not None and recorded != actual_counts[key]:
             raise ValueError(f"ledger {key} does not match the published skills tree")
-    return SkillsSnapshot(raw_ref, generation, stats, root)
+    return snapshot
+
+
+def import_skills_generation(
+    experiment_dir: str | Path, source_root: str | Path, *, generation_id: str
+) -> SkillsPublication:
+    """Publish a copy of another experiment's read-only skills generation as
+    one immutable generation of this experiment's own store.
+
+    The publication path validates a writable working tree, so the source is
+    staged through one first; the staging copy never outlives the call.
+    """
+
+    store = ExperimentSkillsStore(experiment_dir)
+    staging = store.root / f".import.{os.getpid()}.{uuid.uuid4().hex[:8]}"
+    try:
+        _copy_skills_tree(Path(source_root).resolve(strict=True), staging / SKILLS_DIRNAME)
+        return store.publish(staging / SKILLS_DIRNAME, generation_id=generation_id)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
 
 
 def resolve_collected_skills_source(
@@ -1300,6 +1341,7 @@ __all__ = [
     "experiment_graduated",
     "graduated_exclusion_record",
     "graduated_memory_sources",
+    "import_skills_generation",
     "install_operating_memory",
     "install_workspace_skills",
     "latest_skills_snapshot",
@@ -1312,6 +1354,7 @@ __all__ = [
     "resolve_operating_memory",
     "resolve_collected_skills_source",
     "skill_front_matter",
+    "skills_snapshot_from_ref",
     "skills_trees_equal",
     "snapshot_memory_sources",
     "validate_memory_entry_ref",

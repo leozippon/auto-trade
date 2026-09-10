@@ -41,6 +41,7 @@ from autotrade.environment.replay import (
 from autotrade.environment.replay.stats import attach_cost_sensitivity
 from autotrade.environment.runtime import agent_trace_path, chmod_tree
 from autotrade.environment.strategy import NLQuery
+from autotrade.environment.tools.finish_fold import baseline_anchor_required
 
 from .agent_inbox import expire_experiment_session_inbox
 from .agent_views import (
@@ -202,6 +203,7 @@ class RollingExperimentPipeline:
         developer: FoldDeveloper,
         meta_learner: MetaLearner | None = None,
         ledger: ExperimentLedger | None = None,
+        inherited_skills: SkillsSnapshot | None = None,
     ) -> None:
         self.config = config
         self.ref_store = AgentRefStore(config.experiment_dir)
@@ -212,6 +214,17 @@ class RollingExperimentPipeline:
         self.meta_learner = meta_learner
         self.ledger = ledger or ExperimentLedger(config.ledger_path)
         self.run_markers = RunMarkers(config.experiment_dir)
+        # The skills generation seeded at creation from another experiment's
+        # memory (``inherit_memory_from``): the head until the first session
+        # row, exactly as a Meta publication would be.
+        self.inherited_skills = inherited_skills
+
+    def _current_skills(self) -> SkillsSnapshot:
+        return latest_skills_snapshot(
+            self.ledger.read(),
+            experiment_dir=self.config.experiment_dir,
+            inherited=self.inherited_skills,
+        )
 
     def run_fold(
         self,
@@ -228,9 +241,7 @@ class RollingExperimentPipeline:
         context = dict(session_context or {})
         progress = _optional_hook(context.get("progress_hook"), "progress_hook")
         budgets = _session_budgets(self.config, context.get("resource_override"))
-        current_skills = latest_skills_snapshot(
-            self.ledger.read(), experiment_dir=self.config.experiment_dir
-        )
+        current_skills = self._current_skills()
         retained_artifact_id = parent.artifact_id if parent is not None else None
         wrote_ledger_record = False
         attempt = {
@@ -333,6 +344,26 @@ class RollingExperimentPipeline:
             # frozen whatever the last Step's metrics say, and the parent (if
             # any) stays the lineage head.
             abstained = bool(session.no_edge_reason)
+            # The baseline anchor rule, read through the same predicate
+            # ``finish_fold`` refuses with: without a frozen parent, a Fold whose
+            # own Validation passes the hard rules has to freeze one as the
+            # lineage's anchor. An abstention reaching here anyway is a session
+            # that bypassed the tool's contract, not a fold result.
+            anchor_required = baseline_anchor_required(
+                has_parent=parent is not None,
+                passing_candidates=[
+                    step
+                    for step in session.steps
+                    if not step.parent_control
+                    and not self.config.acceptance.evaluate(step.validation.summary)[0]
+                ],
+            )
+            if abstained and anchor_required:
+                raise RuntimeError(
+                    "Fold session abstained (no_edge) with no frozen parent while a "
+                    "complete Validation passes the hard acceptance rules; finish_fold "
+                    "must nominate a baseline anchor instead"
+                )
             selected = (
                 None
                 if abstained
@@ -532,6 +563,10 @@ class RollingExperimentPipeline:
                     if nominated_identical_to_parent
                     else {}
                 ),
+                # Frozen with no parent to beat: the lineage's baseline anchor,
+                # a weak baseline in force until a later Fold replaces it, not
+                # an evidenced edge (finish_fold.baseline_anchor_required).
+                **({"baseline_anchor": True} if status == "frozen" and anchor_required else {}),
                 "hard_reject_reasons": hard,
                 "accept_warnings": warnings,
                 "selected_step_id": selected.step_id if selected is not None else None,
@@ -849,9 +884,7 @@ class RollingExperimentPipeline:
         wrote_ledger_record = False
         try:
             context = dict(session_context or {})
-            current_skills = latest_skills_snapshot(
-                self.ledger.read(), experiment_dir=self.config.experiment_dir
-            )
+            current_skills = self._current_skills()
             progress = _optional_hook(context.get("progress_hook"), "progress_hook")
             _publish_progress(progress, "pit_snapshot", run_id=run_id, phase="meta")
             history, agent_trace_sidecars = _development_inputs(

@@ -3048,6 +3048,11 @@ class LLMFoldDeveloper:
                     another_round_fits=lambda: another_batch_round_fits(backtest),
                     budget_status=lambda: fold_budget_status(backtest),
                     hard_rule_check=hard_rule_check,
+                    null_controls=(
+                        (lambda: null_control_tool.blocks)
+                        if null_control_tool is not None
+                        else None
+                    ),
                 )
             )
             budgeted = SessionBudgetLLM(self.llm, budget=shared_budget, role="main")
