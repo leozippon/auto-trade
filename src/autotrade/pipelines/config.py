@@ -270,6 +270,7 @@ class AcceptanceRules:
         walk_forward: Mapping[str, object] | None = None,
         selection: Mapping[str, object] | None = None,
         final_artifact: Mapping[str, object] | None = None,
+        window: Mapping[str, object] | None = None,
     ) -> dict[str, object]:
         """Graduation verdict of one Held-out replay (docs/pipeline-design.md §3.3).
 
@@ -310,6 +311,11 @@ class AcceptanceRules:
         transitions, and the shipped artifact's own two counts from term (c).
         Each is ``None`` when it was not computed, and only the term (c) counts
         also decide anything.
+
+        ``window`` is the replay window the figures were measured on, as the
+        Held-out runner states it (``folds.heldout_periods``): the replayed
+        bounds, the configured end and the truncation reason when the release
+        ended before it. Carried verbatim so the verdict says what it judged.
         """
         reasons: list[str] = []
         values: dict[str, float | None] = {}
@@ -397,6 +403,7 @@ class AcceptanceRules:
             "diagnostics": _verdict_diagnostics(
                 selection, walk_forward, final_artifact
             ),
+            "window": dict(window) if window is not None else None,
         }
 
     def _final_artifact_reasons(

@@ -570,6 +570,8 @@ def build_session_plan(
                     "label": period["label"],
                     "start": period["start"],
                     "end": period["end"],
+                    "requested_end": period["requested_end"],
+                    "truncation_reason": period["truncation_reason"],
                 }
                 for period in heldout
             ],

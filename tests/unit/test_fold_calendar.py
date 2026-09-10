@@ -421,6 +421,8 @@ class HeldOutRangeTest(unittest.TestCase):
                     "label": "20260101..20260630",
                     "start": "20260101",
                     "end": "20260630",
+                    "requested_end": "20260630",
+                    "truncation_reason": None,
                     "decision_time": anchor("20251231"),
                 }
             ],
@@ -428,6 +430,33 @@ class HeldOutRangeTest(unittest.TestCase):
         # The regression this guards: re-deriving a cadence label from the
         # range's start would replay the whole of 2026.
         self.assertNotEqual(periods[0]["end"], "20261231")
+
+    def test_a_held_out_range_past_the_release_end_is_clipped_explicitly(self) -> None:
+        """Creation validates the range against the exchange calendar, which
+        covers the whole year; the release's daily partitions stop earlier.
+        The replay end is the release's last trading day, the label and the
+        configured end are kept, and the truncation is named."""
+        periods = heldout_periods(
+            "20260601..20260930", "20260601..20260930", TRADING_DAYS, period="year"
+        )
+        self.assertEqual(
+            periods,
+            [
+                {
+                    "label": "20260601..20260930",
+                    "start": "20260601",
+                    "end": "20260630",
+                    "requested_end": "20260930",
+                    "truncation_reason": "release_ends_20260630",
+                    "decision_time": anchor("20260529"),
+                }
+            ],
+        )
+        # A range that starts after the release end has nothing to replay.
+        with self.assertRaisesRegex(ValueError, "at least 2"):
+            heldout_periods(
+                "20260701..20260930", "20260701..20260930", TRADING_DAYS, period="year"
+            )
 
     def test_a_held_out_range_that_overlaps_development_is_refused(self) -> None:
         for test_stage in (False, True):

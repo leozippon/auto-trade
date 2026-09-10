@@ -228,7 +228,13 @@ def test_local_worker_runs_real_baseline_valid_test_and_heldout(tmp_path: Path):
     )
     assert [row["kind"] for row in schedule["sessions"]] == ["fold", "heldout"]
     assert schedule["sessions"][-1]["periods"] == [
-        {"label": "2026Q2", "start": "20260401", "end": "20260630"}
+        {
+            "label": "2026Q2",
+            "start": "20260401",
+            "end": "20260630",
+            "requested_end": "20260630",
+            "truncation_reason": None,
+        }
     ]
 
 

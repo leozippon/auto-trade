@@ -849,6 +849,47 @@ def test_heldout_omits_state_changed_when_trees_are_stable(tmp_path: Path):
     assert sorted(RunMarkers(pipeline.config.experiment_dir).root.glob("*.json")) == []
 
 
+def test_heldout_past_the_release_end_records_the_clipped_window(tmp_path: Path):
+    """A Held-out range configured past the release's last trading day replays
+    up to that day and says so: the row and the verdict carry the replayed
+    bounds, the configured end and the truncation reason, and the evaluator is
+    asked for the clipped window rather than one it cannot cover."""
+
+    class WindowEvaluator:
+        def __init__(self) -> None:
+            self.windows: list[tuple[str, str, str]] = []
+
+        def evaluate(self, request):
+            self.windows.append((request.mode, request.start, request.end))
+            return EvaluationResult(
+                {"total_return": 0.02, "max_drawdown": -0.03, "filled_orders": 1},
+                f"result/{request.mode}",
+            )
+
+    evaluator = WindowEvaluator()
+    pipeline, fold, ledger = _pipeline_with_evaluator(tmp_path, evaluator)
+    pipeline.config = replace(
+        pipeline.config,
+        heldout_first_period="20260401..20260930",
+        heldout_last_period="20260401..20260930",
+    )
+    frozen = pipeline.run_fold("epoch_001", fold, parent=None).frozen
+    assert frozen is not None
+    assert pipeline.run_heldout("epoch_001", frozen, _days()) == 1
+    assert evaluator.windows[-1] == ("heldout", "20260401", "20260630")
+    heldout = ledger.read("heldout")[0]
+    window = {
+        "replay_start": "20260401",
+        "replay_end": "20260630",
+        "requested_end": "20260930",
+        "truncation_reason": "release_ends_20260630",
+    }
+    assert heldout["period"] == "20260401..20260930"
+    assert {key: heldout[key] for key in window} == window
+    assert heldout["verdict"]["window"] == window
+    assert latest_heldout_records(ledger.read())[0]["fold_id"] == "heldout_20260401..20260930"
+
+
 def _add_output_file(request) -> None:
     (request.revision.output_path / "extra.py").write_text("x = 1\n", encoding="utf-8")
 
@@ -1501,6 +1542,14 @@ def test_single_window_fold_has_no_frozen_test_and_held_out_graduates(tmp_path: 
             "walk_forward_mean_excess_percentile": None,
             "final_artifact_forward_transitions": 0,
             "final_artifact_forward_positive": 0,
+        },
+        # The window the figures were measured on: the whole configured
+        # quarter, which the release covers, so nothing was truncated.
+        "window": {
+            "replay_start": "20260401",
+            "replay_end": "20260630",
+            "requested_end": "20260630",
+            "truncation_reason": None,
         },
     }
     verdict = experiment_verdict(ledger.read())

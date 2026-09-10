@@ -729,6 +729,16 @@ class RollingExperimentPipeline:
             label = str(period["label"])
             if label in completed:
                 continue
+            # The window the replay covers, as the calendar states it: the
+            # end is the release's last trading day when the configured range
+            # runs past it, and the row says so instead of a replay that
+            # stops early under the full label.
+            window = {
+                "replay_start": str(period["start"]),
+                "replay_end": str(period["end"]),
+                "requested_end": str(period["requested_end"]),
+                "truncation_reason": period["truncation_reason"],
+            }
             attempt = {
                 "experiment_id": self.config.experiment_id,
                 "epoch_id": epoch_id,
@@ -814,6 +824,7 @@ class RollingExperimentPipeline:
                         "run_id": run_id,
                         "session_key": "heldout",
                         "period": label,
+                        **window,
                         "strategy_artifact_id": final.artifact_id,
                         "snapshot_id": snapshot.snapshot_id,
                         "result": result.summary,
@@ -825,6 +836,7 @@ class RollingExperimentPipeline:
                             walk_forward,
                             selection,
                             final_transitions,
+                            window=window,
                         ),
                     }
                 )

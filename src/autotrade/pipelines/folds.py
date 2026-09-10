@@ -333,17 +333,34 @@ def heldout_periods(
     Cadence labels enumerate; a single explicit ``YYYYMMDD..YYYYMMDD`` label
     replays exactly that region, which is how a held-out window shorter than one
     cadence period is configured.
+
+    A period may be configured past the end of the pinned release: creation
+    validates the range against the exchange calendar, which covers the whole
+    year, while the release's daily partitions stop at its last trading day.
+    The replay can only cover what exists, so ``end`` is clipped to that day
+    and the truncation is stated explicitly (``requested_end`` keeps the
+    configured bound, ``truncation_reason`` names the release end) instead of
+    a replay that stops early under a label claiming the whole range. The
+    label is unchanged, so latest-per-label readers are unaffected.
     """
     periods = []
     period = normalize_period(period)
+    if not trading_days:
+        raise ValueError("held-out periods need the release's trading days")
+    release_end = max(trading_days)
     for label in period_range(first_period, last_period, period=period):
-        start, end = period_bounds(label, period=period)
+        start, requested_end = period_bounds(label, period=period)
+        end = min(requested_end, release_end)
         _require_min_trade_days(f"held-out {label}", start, end, trading_days, min_region_trade_days)
         periods.append(
             {
                 "label": label,
                 "start": start,
                 "end": end,
+                "requested_end": requested_end,
+                "truncation_reason": (
+                    f"release_ends_{release_end}" if end != requested_end else None
+                ),
                 "decision_time": _decision_time(start, end, trading_days),
             }
         )
