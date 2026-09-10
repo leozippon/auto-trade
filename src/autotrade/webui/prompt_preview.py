@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING
 
 from autotrade.agent.experiment_facts import build_experiment_facts
 from autotrade.agent.prompts import (
+    DEPLOYMENT_DEFAULT_INSTRUCTION,
     FOLD_DEFAULT_INSTRUCTION,
     build_meta_learning_prompt,
     build_system_prompt,
@@ -80,7 +81,7 @@ def build_prompt_preview(
     directory = Path(experiment_dir)
     entry = _session_entry(directory, session_key)
     kind = str(entry.get("kind") or "")
-    if kind not in {"fold", "meta", "meta_learning"}:
+    if kind not in {"fold", "deployment_adjustment", "meta", "meta_learning"}:
         raise ValueError(f"unsupported session kind: {kind}")
     # The same store a session projects its identities through, constructed
     # before anything else so a legacy experiment fails here exactly as a real
@@ -107,13 +108,14 @@ def build_prompt_preview(
         epoch_id=epoch_id,
         is_initial=is_initial,
     )
-    if kind == "fold":
+    if kind in {"fold", "deployment_adjustment"}:
         system, instruction = _fold_prompt(
             context,
             fold_id=str(entry.get("fold_id") or ""),
             directive=directive,
             resource_override=control.resource_overrides.get(session_key),
             prompt_override=control.prompt_overrides.get(session_key, ""),
+            session_kind=kind,
         )
     else:
         system, instruction = _meta_prompt(
@@ -171,20 +173,33 @@ def _fold_prompt(
     directive: str,
     resource_override: object,
     prompt_override: str,
+    session_kind: str = "fold",
 ) -> tuple[str, str]:
+    from dataclasses import replace
+
     from autotrade.pipelines.experiment import _epoch_index, _session_budgets
-    from autotrade.pipelines.local_backend import fold_workspace_map
+    from autotrade.pipelines.local_backend import fold_forbidden, fold_workspace_map
 
     rolling = context.rolling
+    deployment = session_kind == "deployment_adjustment"
     fold = _fold_spec(context.options, fold_id)
     epoch_index = _epoch_index(context.epoch_id)
-    budgets = _session_budgets(rolling, resource_override)
+    budgets = _session_budgets(
+        replace(
+            rolling,
+            max_steps_per_fold=rolling.deployment_max_backtests,
+            max_backtests_per_fold=rolling.deployment_max_backtests,
+        )
+        if deployment
+        else rolling,
+        resource_override,
+    )
     limits = context.strategy_limits
     manifest: dict[str, object] = {
         "experiment_id": rolling.experiment_id,
         "epoch_id": context.epoch_id,
         "fold_id": fold.fold_id,
-        "kind": "fold",
+        "kind": session_kind,
         "fold": {
             "input_window": f"{fold.input_window_start}..{fold.input_window_end}",
             "validation_period": f"{fold.validation_start}..{fold.validation_end}",
@@ -194,7 +209,11 @@ def _fold_prompt(
         "validation_periods": rolling.validation_periods,
         "test_stage": rolling.test_stage,
         "snapshot_config": context.options.snapshot_config.to_record(),
-        "phase": _phase(epoch_index, rolling.convergence_start_epoch),
+        "phase": (
+            "deployment"
+            if deployment
+            else _phase(epoch_index, rolling.convergence_start_epoch)
+        ),
         "is_initial_artifact": context.is_initial,
         "template_ref": "agent_output_template" if context.is_initial else None,
         "modification_constraints": rolling.step_constraints.to_record(),
@@ -243,20 +262,14 @@ def _fold_prompt(
         "development_history": _development_history(context),
         "parent_control": None if context.is_initial else RUNTIME_PLACEHOLDER,
         "workspace": workspace,
-        "forbidden": [
-            "current_test",
-            "future_data",
-            "heldout",
-            "external_network",
-            "host_control",
-        ],
+        "forbidden": fold_forbidden(session_kind),
     }
     _mark_runtime_only(facts)
     if not context.is_initial:
         _mark_runtime_parent(facts, model_artifacts=True)
     system = build_system_prompt(
         rolling.schedule,
-        mode="fold",
+        mode=session_kind,
         experiment_facts=facts,
         phase=str(manifest["phase"]),
         step_tree_enabled=rolling.step_tree_enabled,
@@ -264,7 +277,8 @@ def _fold_prompt(
         fold_exploration_directive=rolling.fold_exploration_directive,
         fold_directive=directive,
     )
-    return system, prompt_override.strip() or FOLD_DEFAULT_INSTRUCTION
+    default = DEPLOYMENT_DEFAULT_INSTRUCTION if deployment else FOLD_DEFAULT_INSTRUCTION
+    return system, prompt_override.strip() or default
 
 
 def _meta_prompt(
@@ -367,7 +381,7 @@ def _fold_spec(options: InteractiveWorkerOptions, fold_id: str) -> FoldSpec:
     """
     from autotrade.environment.data.pit import PITDataStore
     from autotrade.environment.data.research_release import pin_research_release
-    from autotrade.pipelines.folds import build_fold_schedule
+    from autotrade.pipelines.folds import build_fold_schedule, deployment_fold
     from autotrade.pipelines.pit_backend import required_release_raw_datasets
 
     if options.data_backend != "pit":
@@ -380,6 +394,13 @@ def _fold_spec(options: InteractiveWorkerOptions, fold_id: str) -> FoldSpec:
         required_raw_datasets=required_release_raw_datasets(options.snapshot_config),
     )
     trading_days = PITDataStore(release.raw_dir).trade_dates("daily")
+    if fold_id.startswith("deployment_"):
+        return deployment_fold(
+            options.rolling.deployment_adjustment_start,
+            trading_days,
+            window_months=options.rolling.window_months,
+            min_region_trade_days=options.rolling.min_region_trade_days,
+        )
     folds = build_fold_schedule(
         options.rolling.development_first_period,
         options.rolling.development_last_period,

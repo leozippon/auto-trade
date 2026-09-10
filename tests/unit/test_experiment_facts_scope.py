@@ -75,6 +75,59 @@ def _data_summary(rows: dict[str, int]) -> dict[str, object]:
     }
 
 
+def test_deployment_adjustment_facts_say_the_held_out_is_visible() -> None:
+    """The post-Held-out deployment adjustment is the one session kind that
+    replays a window including the Held-out, and its facts and prompt say so
+    instead of restating the development session's contract."""
+    from autotrade.agent.prompts import (
+        DEPLOYMENT_DEFAULT_INSTRUCTION,
+        DEPLOYMENT_SECTION,
+        EXPLORATION_PHASE_PROMPT,
+        FOLD_GUARDRAILS_SECTION,
+        FOLD_PROHIBITIONS,
+        FOLD_STATIC_SECTIONS,
+    )
+    from autotrade.pipelines.local_backend import fold_forbidden
+
+    facts = _facts(
+        kind="deployment_adjustment",
+        fold_id="deployment_20250901..20260909",
+        fold={
+            "input_window": "20230901..20250831",
+            "validation_period": "20250901..20260909",
+            "valid_decision_time": "2025-08-29T23:59:59+08:00",
+        },
+        phase="deployment",
+    )
+    assert facts["identity"]["session_kind"] == "deployment_adjustment"
+    assert facts["identity"]["phase"] == "deployment"
+    assert facts["visibility_policy"]["heldout_visible"] is True
+    assert facts["visibility_policy"]["test_visible"] is False
+    assert _facts()["visibility_policy"]["heldout_visible"] is False
+    assert "heldout" not in fold_forbidden("deployment_adjustment")
+    assert "heldout" in fold_forbidden("fold")
+
+    prompt = build_system_prompt(
+        mode="deployment_adjustment",
+        experiment_facts=facts,
+        prior_prompt="PRIOR text",
+        fold_exploration_directive="explore events",
+        fold_directive="retrain the ranker",
+    )
+    assert DEPLOYMENT_SECTION.strip() in prompt
+    assert FOLD_GUARDRAILS_SECTION.strip() not in prompt
+    for section in FOLD_STATIC_SECTIONS[:-1]:
+        assert section.strip() in prompt
+    assert FOLD_PROHIBITIONS.strip() in prompt
+    assert "PRIOR text" in prompt
+    assert "retrain the ranker" in prompt
+    # No research phase advice and no experiment-level exploration direction.
+    assert EXPLORATION_PHASE_PROMPT.strip() not in prompt
+    assert "explore events" not in prompt
+    assert "阶段策略与防过拟合" not in prompt
+    assert DEPLOYMENT_DEFAULT_INSTRUCTION.strip()
+
+
 def test_regular_fold_facts_name_the_yearly_folds_and_the_meta_between_them() -> None:
     facts = _facts()
     scope = facts["research_scope"]

@@ -120,7 +120,9 @@ def build_experiment_facts(
             # metrics from already-completed frozen Fold tests via workspace.
             "test_visible": False,
             "historical_frozen_test_metrics_visible": is_meta,
-            "heldout_visible": False,
+            # Only the post-Held-out deployment adjustment replays a window
+            # that includes the Held-out; every development session never does.
+            "heldout_visible": kind == "deployment_adjustment",
             "hidden_schedule_redacted": True,
             "formal_strategy_read_roots": ["snapshot_dir", "asof_dir"],
         },

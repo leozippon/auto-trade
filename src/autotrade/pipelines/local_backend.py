@@ -2674,6 +2674,16 @@ class LLMFoldDeveloper:
         root = self.runtime_root / request.run_id
         if root.exists():
             raise FileExistsError(f"Fold runtime already exists: {request.run_id}")
+        kind = request.session_kind
+        if kind not in {"fold", "deployment_adjustment"}:
+            raise ValueError(f"unsupported Fold session kind: {kind}")
+        # The post-Held-out deployment adjustment runs on this very scaffold
+        # with the graduated mechanism frozen: the modification check and
+        # finish_fold compare against the parent's mechanism, no null control
+        # is offered, and the prompt carries the deployment contract.
+        deployment = kind == "deployment_adjustment"
+        if deployment and request.parent is None:
+            raise ValueError("a deployment adjustment needs the graduated parent")
         fold_ref = self.ref_store.get_or_create("fold", request.fold.fold_id)
         run_ref = self.ref_store.get_or_create("run", request.run_id)
         trace = AgentTraceWriter(
@@ -2683,7 +2693,7 @@ class LLMFoldDeveloper:
                 "epoch_id": request.epoch_id,
                 "fold_id": fold_ref,
                 "run_id": run_ref,
-                "session_kind": "fold",
+                "session_kind": kind,
             },
         )
         _environment_phase(request.progress_hook, "sandbox_layout", request.run_id)
@@ -2716,7 +2726,7 @@ class LLMFoldDeveloper:
                 "fold_id": request.fold.fold_id,
                 "run_id": request.run_id,
                 "session_key": request.session_key,
-                "kind": "fold",
+                "kind": kind,
                 "llm": {
                     "provider": str(getattr(self.llm, "provider", "")),
                     "model": str(getattr(self.llm, "model", "")),
@@ -2919,6 +2929,7 @@ class LLMFoldDeveloper:
                 parent_models_dir=source_models,
                 constraints=request.modification_constraints,
                 readonly_baseline=seeded_readonly,
+                mechanism_parent=source if deployment else None,
             )
             time_budget = InferenceTimeBudget(duration_seconds=request.deadline_seconds)
             shared_budget = SessionCallBudget(
@@ -3006,6 +3017,7 @@ class LLMFoldDeveloper:
                         parent_models_dir=source_models,
                         constraints=request.modification_constraints,
                         readonly_baseline=seeded_readonly,
+                        mechanism_parent=source if deployment else None,
                     ),
                     parent_main_py=parent_main_py,
                     trace_emit=trace.emit,
@@ -3053,6 +3065,7 @@ class LLMFoldDeveloper:
                         if null_control_tool is not None
                         else None
                     ),
+                    same_mechanism=deployment,
                 )
             )
             budgeted = SessionBudgetLLM(self.llm, budget=shared_budget, role="main")
@@ -3095,7 +3108,7 @@ class LLMFoldDeveloper:
                 tools=ToolRegistry(tools),
                 system_prompt=build_system_prompt(
                     self.schedule,
-                    mode="fold",
+                    mode=kind,
                     experiment_facts=facts,
                     phase=request.phase,
                     step_tree_enabled=self.step_tree_enabled,
@@ -3336,13 +3349,7 @@ class LLMFoldDeveloper:
             "development_history": history,
             "parent_control": parent_control_facts(request),
             "workspace": fold_workspace_map(paths.workspace),
-            "forbidden": [
-                "current_test",
-                "future_data",
-                "heldout",
-                "external_network",
-                "host_control",
-            ],
+            "forbidden": fold_forbidden(request.session_kind),
         }
 
     @staticmethod
@@ -3351,9 +3358,30 @@ class LLMFoldDeveloper:
         # (build_fold_directive_section), not an instruction suffix: it must
         # carry the framing and precedence rules every session sees, and must
         # not be re-stated in the user turn.
-        from autotrade.agent.prompts import FOLD_DEFAULT_INSTRUCTION
+        from autotrade.agent.prompts import (
+            DEPLOYMENT_DEFAULT_INSTRUCTION,
+            FOLD_DEFAULT_INSTRUCTION,
+        )
 
-        return request.prompt_override.strip() or FOLD_DEFAULT_INSTRUCTION
+        default = (
+            DEPLOYMENT_DEFAULT_INSTRUCTION
+            if request.session_kind == "deployment_adjustment"
+            else FOLD_DEFAULT_INSTRUCTION
+        )
+        return request.prompt_override.strip() or default
+
+
+def fold_forbidden(session_kind: str) -> list[str]:
+    """The ``forbidden`` fact of a Fold-scaffold session. The deployment
+    adjustment replays a window that includes the Held-out, so it is the one
+    session whose facts do not list the Held-out as forbidden."""
+    return [
+        "current_test",
+        "future_data",
+        *(() if session_kind == "deployment_adjustment" else ("heldout",)),
+        "external_network",
+        "host_control",
+    ]
 
 
 class LLMMetaLearner:

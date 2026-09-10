@@ -447,6 +447,46 @@ def test_inherited_prior_reaches_the_preview_before_the_first_meta(tmp_path: Pat
     assert meta_facts["meta_learning"]["previous_prior_available"] is True
 
 
+def test_deployment_adjustment_preview_is_the_deployment_prompt(tmp_path: Path):
+    """The post-Held-out session previews through the same chain: its window
+    runs from the configured start to the release's last trading day, the
+    facts say the Held-out is visible, and the deployment contract replaces
+    the research guardrails."""
+    from autotrade.agent.prompts import (
+        DEPLOYMENT_DEFAULT_INSTRUCTION,
+        DEPLOYMENT_SECTION,
+        FOLD_GUARDRAILS_SECTION,
+    )
+
+    directory, repo = _experiment(tmp_path, deployment_adjustment_start="20190301")
+    schedule_path = directory / "hitl" / "schedule.json"
+    schedule = json.loads(schedule_path.read_text(encoding="utf-8"))
+    schedule["sessions"].append(
+        {
+            "key": "deployment_adjustment",
+            "kind": "deployment_adjustment",
+            "epoch_id": "epoch_001",
+            "fold_id": "deployment_20190301..20191231",
+        }
+    )
+    schedule_path.write_text(json.dumps(schedule), encoding="utf-8")
+    preview = build_prompt_preview(directory, "deployment_adjustment", "", repo_root=repo)
+    prompt = str(preview["prompt"])
+    assert DEPLOYMENT_SECTION.strip() in prompt
+    assert FOLD_GUARDRAILS_SECTION.strip() not in prompt
+    assert DEPLOYMENT_DEFAULT_INSTRUCTION.strip() in prompt
+    facts = _facts(prompt)
+    assert facts["identity"]["session_kind"] == "deployment_adjustment"
+    assert facts["visibility_policy"]["heldout_visible"] is True
+    assert "heldout" not in facts["forbidden"]
+    assert facts["budgets"]["max_backtests_per_fold"] == rolling_default("deployment_max_backtests")
+    assert facts["budgets"]["max_steps"] == rolling_default("deployment_max_backtests")
+    # From the configured start to the release's last trading day.
+    assert facts["research_scope"]["development_window"].startswith(
+        f"This Fold's validation period is 20190301..{_trading_days()[-1]}."
+    )
+
+
 def test_unknown_and_heldout_sessions_are_rejected(tmp_path: Path):
     directory, repo = _experiment(tmp_path)
     with pytest.raises(ValueError, match="held-out"):

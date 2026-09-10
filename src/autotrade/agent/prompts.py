@@ -168,6 +168,19 @@ FOLD_GUARDRAILS_SECTION = """\
 - 写或改代码前先（经子代理）读够相关数据、单位与父策略；删除某段逻辑或依赖前先查清谁在用；保持工作区整洁，正式产物只含策略需要的文件。任务指令、数据证据与执行合同冲突时及时指出并调整，不要沉默照做。\
 """
 
+DEPLOYMENT_SECTION = """\
+# 部署调整：机制冻结的重拟合
+- 本会话不是开发 Fold：实验已完成 Held-out 并毕业，本会话在封存之后对毕业产物做一次部署前的重拟合。回放窗口从部署起点到已固定发布的最后一个交易日，整个 Held-out 都在其中，因此窗口上不再有任何无偏证据；毕业裁决由冻结的机制继承，不在这里重新建立，调整后产物唯一的无偏检验是 Paper。
+- 机制冻结。允许改的只有：`models/`（重新训练的参数）、任意位置的数值/布尔/`None` 字面量（阈值、持有期、top-N、市值截断、用数字表示的重拟合节奏；带符号的数也算一个字面量）、以及模块级 `UPPER_CASE = <字面量>` 声明常量的值（`REFIT_PERIOD`、`HOLD`、`TOP_N`、写成常量的板块或列名列表等，值可以是任意形状的字面量）。其余一律视为机制变更并被拒绝：增删改名任何 `.py` 文件；新增或删除函数、类、分支、循环、调用、比较、import、装饰器或参数；把常量从字面量改成表达式；逻辑内联的字符串字面量（列名、数据集名、板块代码）——毕业代码没有声明为模块常量的过滤条件或特征名在本轮不能调，这是已接受的限制。
+- 执行合同：`modification_check`、`daily_backtest` 与 `batch_validate` 在任何回放之前就按上述规则比对毕业产物，机制变更不会花掉一次回放；`finish_fold` 拒绝机制变更的提名，提名 `parent_control` 节点（毕业产物本身）是正常的「不调整」结果；Pipeline 在冻结时再次比对，不一致记 `mechanism_changed` 并保持毕业产物不变。本会话没有空对照工具。
+- 取舍：运行事实 `parent_control` 是毕业产物在同一窗口的整窗与逐季记录。除非重拟合在中性化超额上更好、并且在最新的季度（`sub_windows` 末尾几行）也更好，否则提名 `parent_control`。窗口上的数字是含 Held-out 的样本内选择，`vs_parent`、`selection_statistics` 与逐季行只说明重拟合改变了多少、其中多少是搜索本身，不是检验；候选越多，胜者越可能只是噪声。
+- 机制含 `fit(context)` 与 `models/` 时优先重新训练而不是手调；Paper 每天从空状态重新 `fit`，按周期重拟合的常量在 Paper 里不起作用，本轮真正决定部署行为的是 `models/` 与阈值类常量。\
+"""
+
+DEPLOYMENT_DEFAULT_INSTRUCTION = """\
+开始部署调整。先（经子代理）读毕业策略、其 `models/`、运行事实 `parent_control`（整窗与 `sub_windows`）与 PRIOR，返回机制里声明了哪些常量、`fit` 训练什么、父本在最新季度的表现。据此决定是否重训 `models/` 或调整已声明常量；每个候选先 `smoke_backtest`，再 `daily_backtest` 或成轮 `batch_validate`；只有在中性化超额与最新季度都更好时才提名该节点，否则提名 `parent_control`，最后 `finish_fold`。\
+"""
+
 FOLD_STATIC_SECTIONS = (
     FOLD_ROLE_SECTION,
     FOLD_TOOLS_SECTION,
@@ -185,6 +198,13 @@ FOLD_DEFAULT_INSTRUCTION = """\
 开始本 Fold。先并行委托开局工作，例如：读参考笔记（若挂载）与只读 `output/README.md`，返回研究主线、参考的适用边界与合同要点；读运行事实 `source_refs` 指向的数据摘要、单位引用与快照清单，返回可用字段、单位、`available_at` 规则与大表访问方式；读父策略、相关 skill 与 PRIOR，返回现有逻辑、已知失效模式与可复用知识。怎样拆分由你按任务决定。结果送回后规划本 Fold 的多轮预登记假设，把计算与实现交给子代理，它们运行时你继续规划下一轮，写入由你验收；候选各自冒烟过关后用 `batch_validate` 成轮验证，按轮次细化，最后 `finish_fold`。\
 """
 PROTOCOL_INSTRUCTION = "\n\n".join(FOLD_STATIC_SECTIONS)
+# The deployment adjustment session: the Fold sections with the research
+# guardrails replaced by the deployment contract.
+DEPLOYMENT_STATIC_SECTIONS = tuple(
+    DEPLOYMENT_SECTION if section is FOLD_GUARDRAILS_SECTION else section
+    for section in FOLD_STATIC_SECTIONS
+)
+DEPLOYMENT_PROTOCOL_INSTRUCTION = "\n\n".join(DEPLOYMENT_STATIC_SECTIONS)
 
 FOLD_DYNAMIC_CONTEXT_HEADER = """\
 # 本 Fold 动态上下文
@@ -312,8 +332,11 @@ def build_system_prompt(
         if experiment_facts:
             sections.append(render_experiment_facts_section(experiment_facts))
         return "\n\n".join(sections)
-    if mode != "fold":
-        raise ValueError("mode must be fold, meta, or meta_learning")
+    if mode not in {"fold", "deployment_adjustment"}:
+        raise ValueError(
+            "mode must be fold, deployment_adjustment, meta, or meta_learning"
+        )
+    deployment = mode == "deployment_adjustment"
 
     context_parts: list[str] = []
     if experiment_facts:
@@ -343,21 +366,26 @@ def build_system_prompt(
     prior_section = build_prior_section(prior_prompt, role="fold")
     if prior_section:
         context_parts.append(prior_section)
-    exploration_section = build_fold_exploration_section(fold_exploration_directive)
+    # The experiment-level exploration direction and the phase advice are
+    # about developing mechanisms; a deployment adjustment develops none.
+    exploration_section = (
+        "" if deployment else build_fold_exploration_section(fold_exploration_directive)
+    )
     if exploration_section:
         context_parts.append(exploration_section)
     directive_section = build_fold_directive_section(fold_directive)
     if directive_section:
         context_parts.append(directive_section)
-    phase_body = (
-        f"{convergence_prompt.strip()}\n\n{CONVERGENCE_PHASE_PROMPT.strip()}"
-        if phase == "convergence"
-        else EXPLORATION_PHASE_PROMPT.strip()
-    )
-    context_parts.append(
-        f"## 阶段策略与防过拟合\n{anti_overfit_prompt.strip()}\n\n{phase_body}"
-    )
-    static_parts = [PROTOCOL_INSTRUCTION]
+    if not deployment:
+        phase_body = (
+            f"{convergence_prompt.strip()}\n\n{CONVERGENCE_PHASE_PROMPT.strip()}"
+            if phase == "convergence"
+            else EXPLORATION_PHASE_PROMPT.strip()
+        )
+        context_parts.append(
+            f"## 阶段策略与防过拟合\n{anti_overfit_prompt.strip()}\n\n{phase_body}"
+        )
+    static_parts = [DEPLOYMENT_PROTOCOL_INSTRUCTION if deployment else PROTOCOL_INSTRUCTION]
     if step_tree_enabled:
         # A per-experiment knob, so the prefix stays stable within an experiment.
         static_parts.append(STEP_TREE_SECTION)

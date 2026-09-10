@@ -29,6 +29,9 @@ from autotrade.agent.prompts import (
     DEFAULT_ANTI_OVERFIT_PROMPT,
     DEFAULT_CONVERGENCE_PROMPT,
     EXPLORATION_PHASE_PROMPT,
+    DEPLOYMENT_DEFAULT_INSTRUCTION,
+    DEPLOYMENT_SECTION,
+    DEPLOYMENT_STATIC_SECTIONS,
     FOLD_DEFAULT_INSTRUCTION,
     FOLD_DYNAMIC_CONTEXT_HEADER,
     FOLD_ENV_SECTION,
@@ -83,6 +86,10 @@ def render() -> str:
         ROLE_MATRIX_SECTION,
         PRINCIPLES_SECTION,
     ), "META_STATIC_SECTIONS order changed; update the snapshot layout"
+    assert DEPLOYMENT_STATIC_SECTIONS == (
+        *FOLD_STATIC_SECTIONS[:-1],
+        DEPLOYMENT_SECTION,
+    ), "DEPLOYMENT_STATIC_SECTIONS layout changed; update the snapshot layout"
 
     parts = [
         "# Prompt 模板审计快照",
@@ -164,6 +171,16 @@ def render() -> str:
         "`FOLD_DEFAULT_INSTRUCTION`（首条用户消息：具体的开局委托计划）：",
         "",
         _block(FOLD_DEFAULT_INSTRUCTION),
+        "",
+        "### 1.13 部署调整会话",
+        "",
+        "毕业实验封存后的一次机制冻结重拟合（`mode=\"deployment_adjustment\"`）复用 Fold 的静态区块，只把 §1.10 换成 `DEPLOYMENT_SECTION`；动态上下文不含实验级探索方向与阶段策略区块，运行事实里 `visibility_policy.heldout_visible=true`、`forbidden` 不含 `heldout`。",
+        "",
+        _block(DEPLOYMENT_SECTION),
+        "",
+        "`DEPLOYMENT_DEFAULT_INSTRUCTION`（首条用户消息）：",
+        "",
+        _block(DEPLOYMENT_DEFAULT_INSTRUCTION),
         "",
         "## 2. 收尾提示",
         "",
