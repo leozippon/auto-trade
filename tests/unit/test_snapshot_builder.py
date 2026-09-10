@@ -1728,6 +1728,11 @@ class SnapshotBuilderTest(unittest.TestCase):
         self.assertIn("report_rc", SELECTABLE_DATASETS["events"])
         self.assertIn("report_rc", DEFAULT_DATASETS["text"])
         self.assertNotIn("report_rc", DEFAULT_DATASETS["events"])
+        # The locally derived daily order-flow table is opt-in: it lets a
+        # strategy read signed flow without mounting the minute domain, but it
+        # earns its place only in a strategy that models order flow.
+        self.assertIn("intraday_flow", SELECTABLE_DATASETS["events"])
+        self.assertNotIn("intraday_flow", DEFAULT_DATASETS["events"])
         # Never selectable (see the SELECTABLE_DATASETS comment): contradictory
         # duplicate versions (pledge_detail, repurchase), no PIT timestamps
         # (hm_list), decommissioned sources (slb_len_mm, slb_len).

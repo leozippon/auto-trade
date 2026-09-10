@@ -288,6 +288,26 @@ FIELD_RULES: tuple[FieldRule, ...] = (
     FieldRule("events.parquet", "moneyflow_cnt_ths",
               ("net_buy_amount", "net_sell_amount", "net_amount"), source_unit="100m_CNY",
               status="inferred", evidence="concept medians ~162 only plausible as 100m CNY"),
+    # Locally derived from the minute lake, so both ratios are already
+    # dimensionless: numerator and denominator are the same day's minute
+    # volume (or turnover) and the vendor scale cancels.
+    FieldRule("events.parquet", "intraday_flow", ("ofi_1d", "ofi_amt_1d"),
+              source_unit="dimensionless_ratio",
+              status="verified",
+              evidence="signed minute volume / total minute volume; the 20200102-20260818 "
+                       "build (7,623,673 stock-days) spans [-1.000, +0.953]",
+              note="minute-close tick-rule signed imbalance of one stock-day"),
+    FieldRule("events.parquet", "intraday_flow", ("zero_share",),
+              source_unit="dimensionless_ratio",
+              note="share of the session's 241 one-minute bars with no trade"),
+    FieldRule("events.parquet", "intraday_flow", ("nret",), source_unit="count",
+              status="verified",
+              evidence="239 on every one of the 7,623,673 stock-days built from "
+                       "20200102-20260818: the published set holds no partial session",
+              note="signed minutes the day produced; a complete 241-bar session gives 239"),
+    FieldRule("events.parquet", "intraday_flow", ("sealed_limit",), semantic="categorical",
+              note="True where zero_share >= 0.5: a sealed limit board, whose "
+                   "imbalance is a queue artefact rather than order flow"),
     FieldRule("events.parquet", "cyq_perf",
               ("his_low", "his_high", "cost_5pct", "cost_15pct", "cost_50pct",
                "cost_85pct", "cost_95pct", "weight_avg"),

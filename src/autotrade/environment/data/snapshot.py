@@ -223,6 +223,12 @@ SELECTABLE_DATASETS: dict[str, tuple[str, ...]] = {
         "cyq_perf",
         "bak_daily",
         "block_trade",
+        # locally derived daily order flow: one tick-rule signed-imbalance row
+        # per stock-day, reduced from that day's own minute bars so a strategy
+        # can use signed flow without mounting the minute domain. Opt-in, never
+        # default: it duplicates no vendor series but only pays for itself in a
+        # strategy that actually models order flow.
+        "intraday_flow",
         # shareholder structure and share supply
         "stk_holdernumber",
         "stk_holdertrade",

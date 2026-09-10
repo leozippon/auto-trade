@@ -48,6 +48,15 @@ QUANT_PYTHON=/home/lzp/miniconda3/envs/quant/bin/python
 # domains clamp their expectations internally, so weekend runs stay honest.
 30 2 * * * cd $REPO_ROOT && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_nightly_full_audit
 
+# Reduce the minute partitions the evening job just landed to the derived
+# daily order-flow table (data/raw/intraday_flow). Not a TuShare job: it
+# fetches nothing and only reads the lake, so it is a plain line rather than a
+# runner job. It is incremental (one trade date per night, seconds) and must
+# finish before the evening node's conservative 03:05 completion boundary,
+# which is when the Timeview exposes that trade date's events rows. A night
+# the evening job overruns simply leaves the day to the next run.
+45 2 * * * cd $REPO_ROOT && $QUANT_PYTHON scripts/data/build_intraday_flow.py
+
 # Rebuild and audit ALL PIT-ready financial event availability partitions
 # after raw status refresh. Snapshot construction uses this layer to enforce
 # financial statement visibility without precomputing alpha columns. Same

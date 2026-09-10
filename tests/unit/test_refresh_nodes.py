@@ -27,6 +27,7 @@ from autotrade.environment.data.contracts import (
     DOMAIN_REFRESH_NODES,
     EVENING_NODE,
     EVENT_DATASET_REFRESH_NODES,
+    INTRADAY_FLOW_CONTRACT,
     MACRO_DATASET_CONTRACTS,
     MACRO_DATASET_REFRESH_NODES,
     REFRESH_NODES,
@@ -355,6 +356,41 @@ class RefreshNodeDriftGuardTest(unittest.TestCase):
                 self.assertLessEqual(stamp, macro_dataset_visible_cutoff(dataset, datetime(2022, 1, 6, 8, 30, tzinfo=CN_TZ)))
         self.assertEqual(MACRO_DATASET_CONTRACTS["cb_daily"].rule, "contract_1730_from:trade_date")
         self.assertEqual(MACRO_DATASET_CONTRACTS["cb_basic"].rule, "contract_1730_from:list_date")
+
+    def test_derived_intraday_flow_rides_the_evening_minute_job(self) -> None:
+        # intraday_flow is reduced from the minute partitions cn_evening_full
+        # lands, so it must keep the events default node (no override) and its
+        # rows must roll in exactly like `daily`: invisible during day D's
+        # session, visible at D+1 pre-open.
+        self.assertIn("intraday_flow", SELECTABLE_DATASETS["events"])
+        self.assertNotIn("intraday_flow", EVENT_DATASET_REFRESH_NODES)
+        self.assertEqual(
+            INTRADAY_FLOW_CONTRACT.available_time,
+            default_tushare_contracts()["daily"].available_time,
+        )
+        self.assertEqual(INTRADAY_FLOW_CONTRACT.rule, "contract_1730_from:trade_date")
+        # The build must also finish inside that night's window; the crontab
+        # line is the operational half of this contract.
+        self.assertLess(
+            INTRADAY_FLOW_CONTRACT.available_time, REFRESH_NODES[EVENING_NODE].start
+        )
+        self.assertIn(
+            "scripts/data/build_intraday_flow.py",
+            CRONTAB.read_text(encoding="utf-8"),
+        )
+        stamp = INTRADAY_FLOW_CONTRACT.available_at(date(2022, 1, 5))
+        self.assertGreater(
+            stamp,
+            event_dataset_visible_cutoff(
+                "intraday_flow", datetime(2022, 1, 5, 14, 0, tzinfo=CN_TZ)
+            ),
+        )
+        self.assertLessEqual(
+            stamp,
+            event_dataset_visible_cutoff(
+                "intraday_flow", datetime(2022, 1, 6, 8, 30, tzinfo=CN_TZ)
+            ),
+        )
 
     def test_delayed_and_global_macro_datasets_keep_the_raw_stamp(self) -> None:
         # Monthly/quarterly releases, announcement tables keyed by ann_date and

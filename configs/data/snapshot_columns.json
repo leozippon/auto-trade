@@ -225,6 +225,18 @@
     "ts_code",
     "vol"
    ],
+   "intraday_flow": [
+    "available_at",
+    "available_at_rule",
+    "dataset",
+    "nret",
+    "ofi_1d",
+    "ofi_amt_1d",
+    "sealed_limit",
+    "trade_date",
+    "ts_code",
+    "zero_share"
+   ],
    "stk_holdernumber": [
     "ann_date",
     "available_at",

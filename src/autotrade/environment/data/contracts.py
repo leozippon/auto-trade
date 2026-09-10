@@ -141,6 +141,21 @@ class DatasetContract:
         return f"contract_{self.available_time:%H%M}{lag}_from:{self.partition_key}"
 
 
+# Locally derived events dataset: one order-flow row per stock-day, reduced
+# from that trade date's own 1-minute bars (``intraday_flow.py``). Its content
+# is fully determined by the session it summarises, so it is public on its data
+# date exactly like the daily core and carries the same close stamp. The
+# builder writes ``available_at``/``available_at_rule`` into every partition
+# from this contract, so the events reader keeps its one raw-stamp path and
+# this table stays the single source of the rule.
+INTRADAY_FLOW_CONTRACT = DatasetContract(
+    dataset="intraday_flow",
+    partition_key="trade_date",
+    available_time=CLOSE_PUBLISHED_TIME,
+    pit_notes="Derived from the trade date's own minute bars; lands with the evening minute job, so rows roll in from the next pre-open like daily.",
+)
+
+
 def default_tushare_contracts() -> dict[str, DatasetContract]:
     return {
         "daily": DatasetContract(
@@ -344,6 +359,10 @@ EVENT_DATASET_REFRESH_NODES: dict[str, tuple[str, ...]] = {
     "limit_cpt_list": (EVENING_NODE, "cn_preopen_board_backfill_0850"),
     # limit_list_ths / ths_hot / dc_hot / hm_detail / hm_list land in the
     # evening window only — the default node is already correct for them.
+    # intraday_flow keeps the default node too: it is derived from the minute
+    # partitions cn_evening_full lands, and its own build runs inside that
+    # night's window (ops/cron/tushare_update.cron), so its rows become
+    # queryable on the same boundary as the minutes they summarise.
     # Ann-date disclosure tables land via their own natural-day job (weekend
     # announcements become visible the following pre-open, matching live).
     "top10_holders": ("cn_nightly_disclosure_full",),
