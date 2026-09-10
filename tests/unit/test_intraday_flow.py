@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import importlib.util
 import unittest
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -17,12 +15,6 @@ from autotrade.environment.data.intraday_flow import (
     aggregate_intraday_flow,
 )
 from autotrade.environment.data.pit import to_cn_timestamps
-
-REPO_ROOT = Path(__file__).resolve().parents[2]
-REFERENCE_FLOW = (
-    REPO_ROOT
-    / "configs/workspace_refs/order_flow_ranker_20260917/starter/lib/flow.py"
-)
 
 TRADE_DATE = "20260818"
 # The 241-bar A-share grid: 09:30 auction, 09:31-11:30, 13:01-15:00.
@@ -51,6 +43,65 @@ def _session_frame(ts_code: str, closes, volumes) -> pd.DataFrame:
             "amount": [float(close) * float(vol) for close, vol in zip(closes, volumes)],
         }
     )
+
+
+def _study_aggregation(minutes: pd.DataFrame) -> pd.DataFrame:
+    """The probe's own stock-day aggregation, transcribed as an oracle.
+
+    Deliberately NOT the shape of the implementation under test: contiguity is
+    a minute-of-day difference of one (which excludes the lunch gap and any
+    absent bar) and the sign comes from a log return. On the complete 241-bar
+    grid the two formulations must agree bit for bit, and its published
+    thresholds (`nret >= 200`, `zero_share < 0.5`) are applied as filters here
+    because that is what the study did with them.
+    """
+    frame = minutes[~minutes["ts_code"].str.endswith(".BJ")].copy()
+    minute_of_day = (
+        frame["trade_time"].str.slice(11, 13).astype(int) * 60
+        + frame["trade_time"].str.slice(14, 16).astype(int)
+    )
+    frame = frame.assign(m=minute_of_day).sort_values(
+        ["ts_code", "trade_date", "m"], kind="stable"
+    )
+    code = frame["ts_code"].to_numpy()
+    date = frame["trade_date"].to_numpy()
+    m = frame["m"].to_numpy()
+    price = frame["close"].to_numpy(dtype="float64")
+    volume = frame["vol"].to_numpy(dtype="float64")
+    amount = frame["amount"].to_numpy(dtype="float64")
+    same = np.r_[False, (code[1:] == code[:-1]) & (date[1:] == date[:-1])]
+    previous_m = np.r_[0, m[:-1]]
+    previous_price = np.r_[np.nan, price[:-1]]
+    contiguous = same & ((m - previous_m) == 1) & (price > 0) & (previous_price > 0)
+    log_return = np.zeros(len(price))
+    log_return[contiguous] = np.log(price[contiguous] / previous_price[contiguous])
+    sign = np.sign(log_return)
+    sums = (
+        pd.DataFrame(
+            {
+                "ts_code": code,
+                "trade_date": date,
+                "sv": sign * volume,
+                "tv": volume,
+                "sa": sign * amount,
+                "ta": amount,
+                "nret": contiguous.astype("float64"),
+                "nzero": (volume <= 0).astype("float64"),
+            }
+        )
+        .groupby(["ts_code", "trade_date"], sort=False)
+        .sum()
+        .reset_index()
+    )
+    kept = sums[
+        (sums["nret"] >= 200)
+        & (sums["nzero"] / BARS_PER_DAY < 0.5)
+        & (sums["tv"] > 0)
+    ].copy()
+    kept["ofi"] = kept["sv"] / kept["tv"]
+    kept["ofi_amt"] = kept["sa"] / kept["ta"].clip(lower=1e-12)
+    kept["zero_share"] = kept["nzero"] / BARS_PER_DAY
+    return kept[["ts_code", "trade_date", "ofi", "ofi_amt", "nret", "zero_share"]]
 
 
 class IntradayFlowAggregationTest(unittest.TestCase):
@@ -166,18 +217,12 @@ class IntradayFlowAggregationTest(unittest.TestCase):
         pd.testing.assert_frame_equal(together, apart)
         self.assertAlmostEqual(float(together.iloc[1]["ofi_1d"]), -239 / 241)
 
-    @unittest.skipUnless(
-        REFERENCE_FLOW.exists(),
-        "reference research pack retired; the byte-exactness oracle is gone",
-    )
-    def test_matches_the_reference_study_aggregation_bit_for_bit(self):
+    def test_matches_the_study_aggregation_bit_for_bit(self):
         # The dataset exists to replace an in-strategy minute pass, so its
-        # per-stock-day values must be the SAME numbers that pass computed.
-        # `lib/flow.py` is the frozen reference implementation of the probe.
-        spec = importlib.util.spec_from_file_location("reference_flow", REFERENCE_FLOW)
-        reference = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(reference)
-
+        # per-stock-day values must be the SAME numbers that pass produced.
+        # `_study_aggregation` below is the probe's own formulation
+        # (minute-of-day arithmetic, log returns) rather than a copy of the
+        # implementation under test, so agreement is evidence, not a tautology.
         rng = np.random.default_rng(20260917)
         frames = []
         for index, code in enumerate(("000001.SZ", "300750.SZ", "600000.SH", "920627.BJ")):
@@ -189,11 +234,12 @@ class IntradayFlowAggregationTest(unittest.TestCase):
         minutes = pd.concat(frames, ignore_index=True)
 
         mine = aggregate_intraday_flow(minutes)
-        theirs = reference.aggregate_minutes(minutes[list(MINUTE_COLUMNS)])
-        merged = theirs.merge(mine, on=["ts_code", "trade_date"], how="left")
-        self.assertEqual(len(merged), len(theirs))
+        study = _study_aggregation(minutes[list(MINUTE_COLUMNS)])
+        merged = study.merge(mine, on=["ts_code", "trade_date"], how="left")
+        self.assertEqual(len(merged), len(study))
+        self.assertEqual(len(merged), 3)  # the .BJ name is out on both sides
         self.assertTrue(merged["ofi_1d"].notna().all())
-        for reference_column, column in (
+        for study_column, column in (
             ("ofi", "ofi_1d"),
             ("ofi_amt", "ofi_amt_1d"),
             ("nret_x", "nret_y"),
@@ -202,7 +248,7 @@ class IntradayFlowAggregationTest(unittest.TestCase):
             with self.subTest(column=column):
                 self.assertTrue(
                     np.array_equal(
-                        merged[reference_column].to_numpy(dtype="float64"),
+                        merged[study_column].to_numpy(dtype="float64"),
                         merged[column].to_numpy(dtype="float64"),
                     )
                 )

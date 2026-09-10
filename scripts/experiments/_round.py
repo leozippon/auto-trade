@@ -69,6 +69,7 @@ from autotrade.pipelines.hitl_state import (
     WEB_INTERNAL_PARAMS,
     WEB_REQUIRED_PARAMS,
 )
+from autotrade.pipelines.ledger import latest_fold_records
 from autotrade.pipelines.worker import resolve_worker_options
 
 # The console's own id rule and roots; importing them keeps this module from
@@ -232,6 +233,11 @@ BASE_REPORT_KEYS: tuple[str, ...] = (
 # every record that survives it. Kept here because `logs/archive/` is
 # gitignored, so a fresh checkout can still enforce this; `archived_ids` reads
 # the archive where it exists so the two can be compared.
+# The two ways an arm can start from another experiment: a parent artifact
+# copied in read-only, and that experiment's PRIOR and skills imported as this
+# one's own first generation.
+INHERITANCE_KEYS: tuple[str, ...] = ("inherit_from", "inherit_memory_from")
+
 RETIRED_IDS: frozenset[str] = frozenset(
     {
         "cb_linkage_20260914",
@@ -244,6 +250,60 @@ RETIRED_IDS: frozenset[str] = frozenset(
         "value_regime_20260914",
     }
 )
+
+
+def quarter_key(period: str) -> tuple[int, int]:
+    """``"2024Q3"`` -> ``(2024, 3)``; raises on anything else."""
+    text = str(period).strip().upper()
+    if len(text) != 6 or text[4] != "Q" or not text[:4].isdigit() or text[5] not in "1234":
+        raise ValueError(f"not a quarter: {period!r}")
+    return int(text[:4]), int(text[5])
+
+
+def quarter_shift(period: str, quarters: int) -> str:
+    """The quarter ``quarters`` steps after ``period`` (negative steps go back)."""
+    year, quarter = quarter_key(period)
+    index = year * 4 + (quarter - 1) + quarters
+    return f"{index // 4}Q{index % 4 + 1}"
+
+
+def quarters_between(first: str, last: str) -> int:
+    """How many quarters ``first..last`` spans, both ends included; 0 when empty."""
+    start, end = quarter_key(first), quarter_key(last)
+    span = (end[0] * 4 + end[1]) - (start[0] * 4 + start[1]) + 1
+    return max(span, 0)
+
+
+def last_completed_fold(experiment_id: str, experiments_root: Path | None = None) -> str:
+    """The quarter of the last Fold ``experiment_id`` finished, e.g. ``"2024Q3"``.
+
+    Read from that experiment's own ledger when the round is created, so a
+    round planned to continue where another one froze is planned against what
+    the source has actually done rather than against a quarter typed into a
+    round file and gone stale by the time it is launched.
+    """
+
+    root = experiments_root if experiments_root is not None else EXPERIMENTS_ROOT
+    ledger = Path(root) / experiment_id / "ledgers" / "experiment_ledger.jsonl"
+    if not ledger.is_file():
+        raise ValueError(
+            f"{experiment_id} has no ledger at {ledger}, so there is no completed "
+            "Fold to continue from"
+        )
+    records = [
+        json.loads(line)
+        for line in ledger.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    quarters = sorted(
+        (fold_id.removeprefix("fold_") for _epoch, fold_id in latest_fold_records(records)),
+        key=quarter_key,
+    )
+    if not quarters:
+        raise ValueError(
+            f"{experiment_id} has completed no Fold yet, so there is nothing to continue from"
+        )
+    return quarters[-1]
 
 
 def archived_ids() -> set[str]:
@@ -364,6 +424,25 @@ class Round:
                 "experiment ids that were already used and archived cannot be "
                 "reused: " + ", ".join(reused)
             )
+        # An arm may inherit a parent artifact or another experiment's memory,
+        # and both are read out of the source's live directory at create time.
+        # A retired id names a tree that only exists in the archive now, so it
+        # can never be a source; whether a non-retired source is still there is
+        # operator state and is answered in `validated`.
+        retired_sources = sorted(
+            {
+                source
+                for arm in self.arms.values()
+                for key in INHERITANCE_KEYS
+                for source in (str(arm.get(key) or "").strip(),)
+                if source in RETIRED_IDS
+            }
+        )
+        if retired_sources:
+            raise ValueError(
+                "cannot inherit from an experiment that was retired and archived: "
+                + ", ".join(retired_sources)
+            )
 
     @property
     def common_overrides(self) -> dict[str, object]:
@@ -413,10 +492,18 @@ class Round:
             key: (list(value) if isinstance(value, tuple) else value)
             for key, value in WEB_CREATE_DEFAULTS.items()
         }
+        # An arm value may be a zero-argument callable when the round can only
+        # decide it against live state -- reading where another experiment got
+        # to, say. It is resolved here, at create time, so the dry-run and the
+        # POST see the same answer and a refusal surfaces as a rejection.
+        arm = {
+            key: (value() if callable(value) else value)
+            for key, value in self.arms[experiment_id].items()
+        }
         return {
             **base,
             **self.common_overrides,
-            **self.arms[experiment_id],
+            **arm,
             "experiment_id": experiment_id,
         }
 
@@ -428,7 +515,14 @@ class Round:
         arm's refusal says nothing about whether the others are well-formed.
         """
         try:
-            return normalize(self.request_params(experiment_id)), ""
+            merged = normalize(self.request_params(experiment_id))
+            missing = self.missing_sources(merged)
+            if missing:
+                raise ValueError(
+                    "inheritance source is not an experiment on this console: "
+                    + ", ".join(missing)
+                )
+            return merged, ""
         except ValueError as exc:
             reason = f"{experiment_id}: parameters rejected, nothing was sent: {exc}"
             if "unfinished build" in str(exc):
@@ -446,6 +540,26 @@ class Round:
                     " the round"
                 )
             return None, reason
+
+    def missing_sources(self, merged: Mapping[str, object]) -> list[str]:
+        """Inheritance sources this arm names that are not on the console.
+
+        The console reads the source's directory while it creates the
+        experiment and discards the half-created tree when that fails, so a
+        source that has already been retired out of `experiments/` is a create
+        error worth catching offline. Deployment state, not a request-level
+        rule: where `experiments/` does not exist at all -- a fresh checkout --
+        there is nothing to judge and nothing is reported.
+        """
+
+        if not EXPERIMENTS_ROOT.is_dir():
+            return []
+        return [
+            source
+            for key in INHERITANCE_KEYS
+            for source in (str(merged.get(key) or "").strip(),)
+            if source and not (EXPERIMENTS_ROOT / source).is_dir()
+        ]
 
     def seed_status(self) -> str:
         """One line on the shared seed, printed before the arms.

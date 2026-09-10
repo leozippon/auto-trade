@@ -19,12 +19,22 @@ from autotrade.pipelines.config import SNAPSHOT_CACHE_FORMAT_VERSION
 from autotrade.webui.manager import MAX_RUNNING_EXPERIMENTS
 from scripts.experiments._round import (
     BASE_EXPECTED_DEFAULTS,
+    EXPERIMENTS_ROOT,
+    INHERITANCE_KEYS,
     PARENT_CONTROL_LINE,
     REPO_ROOT,
     RETIRED_IDS,
     ROBUSTNESS_LINE,
     Round,
     archived_ids,
+    quarter_shift,
+)
+from scripts.experiments.create_round_20260917 import (
+    DEVELOPMENT_LAST_PERIOD,
+    GITHUB_SOURCE,
+    MIN_REMAINING_FOLDS,
+    VALIDATION_PERIODS,
+    github_confirm_development_start,
 )
 
 # Every model role a create request carries.
@@ -256,9 +266,95 @@ def test_no_round_reuses_an_experiment_id() -> None:
     )
 
 
-def test_the_console_could_hold_every_arm_the_round_files_define() -> None:
-    """The console refuses a create or resume past MAX_RUNNING_EXPERIMENTS, so
-    the checked-in rounds together must not describe more arms than it can
-    run."""
-    total = sum(len(rnd.arms) for rnd in ROUNDS.values())
-    assert total <= MAX_RUNNING_EXPERIMENTS
+@pytest.mark.parametrize("round_name", ROUND_IDS)
+def test_the_console_could_hold_a_whole_round(round_name: str) -> None:
+    """A round is launched as a batch, and the console refuses a create past
+    MAX_RUNNING_EXPERIMENTS.
+
+    The bound is per round, not over all round files together: a file outlives
+    its arms -- it stays in the tree as the definition of what was created,
+    including arms that have since finished or been retired -- so the sum
+    across files says nothing about what is running. Whether the slots are free
+    when a particular round is launched is deployment state and is decided at
+    POST time.
+    """
+    assert len(ROUNDS[round_name].arms) <= MAX_RUNNING_EXPERIMENTS
+
+
+@pytest.mark.parametrize(("round_name", "experiment_id"), ARMS)
+def test_every_inheritance_source_is_a_live_experiment(round_name: str, experiment_id: str) -> None:
+    """An arm that continues another experiment reads the source at create time.
+
+    `inherit_from` copies the source's frozen output/ and models/ in read-only
+    and `inherit_memory_from` imports its PRIOR and skills, both out of the
+    source's live directory, so a source that has already been retired out of
+    `experiments/` fails the create and leaves a half-built tree behind. The
+    id check holds anywhere; the directory check only where `experiments/`
+    exists at all.
+    """
+    params = ROUNDS[round_name].request_params(experiment_id)
+    sources = [str(params.get(key) or "").strip() for key in INHERITANCE_KEYS]
+    for source in filter(None, sources):
+        assert source not in RETIRED_IDS, (experiment_id, source)
+        if EXPERIMENTS_ROOT.is_dir():
+            assert (EXPERIMENTS_ROOT / source).is_dir(), (experiment_id, source)
+
+
+def test_a_retired_experiment_cannot_be_an_inheritance_source() -> None:
+    """The negative path of the guard above: the archive is not a source.
+
+    A retired id names a tree that exists only under `logs/archive/` now, so
+    the console could not copy an artifact or a PRIOR out of it.
+    """
+    retired = min(RETIRED_IDS)
+    with pytest.raises(ValueError, match="retired and archived"):
+        Round(arms={"probe_arm": {"inherit_memory_from": retired}})
+
+
+def _fixture_ledger(root, experiment_id: str, fold_quarters: list[str]) -> None:
+    """A source experiment whose ledger records these Folds as completed."""
+    ledger = root / experiment_id / "ledgers"
+    ledger.mkdir(parents=True, exist_ok=True)
+    (ledger / "experiment_ledger.jsonl").write_text(
+        "\n".join(
+            json.dumps({"record_type": "fold", "epoch_id": "epoch_001", "fold_id": f"fold_{quarter}"})
+            for quarter in fold_quarters
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def test_the_continuation_arm_starts_the_quarter_after_its_source_froze(tmp_path) -> None:
+    """github_confirm exists to record a forward transition on every quarter its
+    source has NOT already frozen, so its first Fold must be the one after the
+    source's latest freeze -- and a Development window starting at Q first
+    validates at Q + validation_periods - 1."""
+    _fixture_ledger(tmp_path, GITHUB_SOURCE, ["2023Q4", "2024Q1", "2024Q2", "2024Q3"])
+    start = github_confirm_development_start(tmp_path)
+    assert quarter_shift(start, VALIDATION_PERIODS - 1) == "2024Q4"
+    assert start == "2024Q1"
+
+
+def test_the_continuation_arm_reads_the_ledger_rather_than_a_typed_quarter(tmp_path) -> None:
+    """A source that has moved on moves the arm's Development start with it."""
+    _fixture_ledger(tmp_path, GITHUB_SOURCE, ["2024Q3", "2024Q4"])
+    assert github_confirm_development_start(tmp_path) == "2024Q2"
+
+
+def test_the_continuation_arm_refuses_when_too_few_folds_remain(tmp_path) -> None:
+    """A confirmation arm with almost no Folds left would ship an artifact with
+    too few forward transitions of its own to mean anything, which is the whole
+    failure it exists to fix."""
+    last = quarter_shift(DEVELOPMENT_LAST_PERIOD, -(MIN_REMAINING_FOLDS - 2))
+    _fixture_ledger(tmp_path, GITHUB_SOURCE, [last])
+    with pytest.raises(ValueError, match="needs at least"):
+        github_confirm_development_start(tmp_path)
+
+
+def test_the_continuation_arm_refuses_a_source_that_has_frozen_nothing(tmp_path) -> None:
+    """No completed Fold means there is nothing to continue from, and an empty
+    ledger must say that rather than resolving to some default quarter."""
+    _fixture_ledger(tmp_path, GITHUB_SOURCE, [])
+    with pytest.raises(ValueError, match="no ledger|completed no Fold"):
+        github_confirm_development_start(tmp_path)
