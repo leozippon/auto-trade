@@ -13,7 +13,10 @@ from autotrade.environment.tools.finish_fold import (
     FinishFoldTool,
     FoldBudgetStatus,
     executable_source_structure,
+    mechanism_difference,
+    mechanism_structure,
 )
+from autotrade.environment.tools.modification_check import ModificationCheckTool
 
 PARENT = "def generate_orders(context):\n    return []\n"
 COMMENT_ONLY = "def generate_orders(context):\n    # try a new idea\n    return []\n"
@@ -54,6 +57,153 @@ def test_structure_ignores_comments_docstrings_and_whitespace():
     assert executable_source_structure(CLASS_DOCSTRING_ONLY) == (
         executable_source_structure(CLASS_PARENT)
     )
+
+
+# A graduated mechanism with its declared knobs: the values a deployment
+# refit may change without changing what the mechanism is.
+MECHANISM = (
+    "import numpy as np\n"
+    "TOP_N = 20\n"
+    "BOARDS = ['main', 'gem']\n"
+    "HOLD_DAYS: int | None = None\n"
+    "def score(rows):\n"
+    "    if rows['pct_chg'] > 0.02 and rows['turnover'] < -1.5:\n"
+    "        return np.log(rows['amount']) * 0.5\n"
+    "    return 0.0\n"
+    "def generate_orders(context):\n"
+    "    use_cap = True\n"
+    "    return [] if use_cap else None\n"
+)
+
+
+def _mechanism(**edits: str) -> str:
+    source = MECHANISM
+    for before, after in edits.items():
+        assert before in source, before
+        source = source.replace(before, after)
+    return source
+
+
+def _package(root: Path, source: str, *, extra: dict[str, str] | None = None) -> Path:
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "main.py").write_text(source, encoding="utf-8")
+    for name, body in (extra or {}).items():
+        (root / name).write_text(body, encoding="utf-8")
+    return root
+
+
+@pytest.mark.parametrize(
+    "edits",
+    (
+        {"0.02": "0.035"},  # a threshold
+        {"< -1.5": "< 1.5"},  # a signed threshold's sign
+        {"TOP_N = 20": "TOP_N = 35"},  # a declared knob
+        {"['main', 'gem']": "['main', 'gem', 'star']"},  # a declared list knob
+        {"HOLD_DAYS: int | None = None": "HOLD_DAYS: int | None = 3"},  # None -> int knob
+        {"TOP_N = 20": "TOP_N = 20.0"},  # a declared knob is one placeholder whatever its shape
+        {"use_cap = True": "use_cap = False"},  # a boolean
+        {"* 0.5": "* 0.5  # damped"},  # comment only
+    ),
+)
+def test_mechanism_structure_ignores_declared_knobs(tmp_path: Path, edits: dict[str, str]):
+    parent = _package(tmp_path / "parent", MECHANISM)
+    child = _package(tmp_path / "child", _mechanism(**edits))
+    assert mechanism_structure(child) == mechanism_structure(parent)
+    assert mechanism_difference(parent, child) is None
+
+
+@pytest.mark.parametrize(
+    "edits",
+    (
+        {"rows['pct_chg']": "rows['pct_change']"},  # an inline column name
+        {"and rows['turnover'] < -1.5": ""},  # a dropped comparison
+        {"np.log(rows['amount'])": "np.sqrt(rows['amount'])"},  # another call
+        {"import numpy as np": "import numpy as np\nimport pandas as pd"},  # an import
+        {"    return 0.0\n": "    if rows['amount'] > 1e8:\n        return 1.0\n    return 0.0\n"},  # a branch
+        {"* 0.5": "* 1"},  # an inline literal of another type
+        {"TOP_N = 20": "TOP_N = len(BOARDS)"},  # a knob that is no longer a literal
+        {"BOARDS = ['main', 'gem']": "boards = ['main', 'gem']"},  # an undeclared list
+    ),
+)
+def test_mechanism_structure_sees_every_logic_change(tmp_path: Path, edits: dict[str, str]):
+    parent = _package(tmp_path / "parent", MECHANISM)
+    child = _package(tmp_path / "child", _mechanism(**edits))
+    assert mechanism_structure(child) != mechanism_structure(parent)
+    assert mechanism_difference(parent, child) is not None
+
+
+def test_mechanism_difference_names_a_file_added_removed_or_changed(tmp_path: Path):
+    parent = _package(tmp_path / "parent", MECHANISM, extra={"lib.py": "K = 1\n"})
+    same = _package(tmp_path / "same", MECHANISM, extra={"lib.py": "K = 2\n"})
+    assert mechanism_difference(parent, same) is None
+    added = _package(tmp_path / "added", MECHANISM, extra={"lib.py": "K = 1\n", "more.py": "x = 1\n"})
+    assert mechanism_difference(parent, added) == "more.py added"
+    removed = _package(tmp_path / "removed", MECHANISM)
+    assert mechanism_difference(parent, removed) == "lib.py removed"
+    changed = _package(tmp_path / "changed", MECHANISM, extra={"lib.py": "K = 1\ndef f():\n    return K\n"})
+    assert mechanism_difference(parent, changed) == (
+        "lib.py changes the executable logic beyond its declared knobs"
+    )
+
+
+def test_finish_fold_same_mechanism_accepts_knob_edits_and_the_parent_only(tmp_path: Path):
+    """A deployment adjustment nominates a refit of the graduated mechanism:
+    a knob-only node or the parent itself is accepted, a node that changes the
+    mechanism is refused, and the different-hypothesis rule does not apply."""
+    parent_main = tmp_path / "parent" / "main.py"
+    _package(parent_main.parent, MECHANISM)
+    tree = StepTree(tmp_path / "steps")
+    kept = _record(tree, tmp_path / "kept", source=MECHANISM, result_name="valid_000")
+    refit = _record(tree, tmp_path / "refit", source=_mechanism(**{"0.02": "0.03"}), result_name="valid_001")
+    changed = _record(
+        tree,
+        tmp_path / "changed",
+        source=_mechanism(**{"rows['pct_chg']": "rows['pct_change']"}),
+        result_name="valid_002",
+    )
+    finish = FinishFoldTool(
+        tree,
+        fold_id="fold_ref_ab",
+        run_id="run_x",
+        parent_main_py=parent_main,
+        same_mechanism=True,
+    )
+    assert finish.invoke({"node_id": refit}).value["node_id"] == refit
+    assert finish.invoke({"node_id": kept}).value["node_id"] == kept
+    with pytest.raises(ToolError, match="changes the graduated mechanism") as refused:
+        finish.invoke({"node_id": changed})
+    assert refused.value.error_type == "mechanism_changed"
+    # Without a parent there is no mechanism to keep.
+    with pytest.raises(ValueError, match="same_mechanism"):
+        FinishFoldTool(tree, fold_id="fold_ref_ab", run_id="run_x", same_mechanism=True)
+
+
+def test_modification_check_refuses_a_mechanism_change_before_any_replay(tmp_path: Path):
+    parent = _package(tmp_path / "parent", MECHANISM)
+    parent_models = tmp_path / "parent_models"
+    parent_models.mkdir()
+    (parent_models / "weights.json").write_text('{"w": 1}\n', encoding="utf-8")
+    work = _package(tmp_path / "work", _mechanism(**{"TOP_N = 20": "TOP_N = 30"}))
+    models = tmp_path / "models"
+    models.mkdir()
+    (models / "weights.json").write_text('{"w": 2}\n', encoding="utf-8")
+    tool = ModificationCheckTool(
+        work,
+        parent_dir=parent,
+        models_dir=models,
+        parent_models_dir=parent_models,
+        mechanism_parent=parent,
+    )
+    # A retrained models/ tree beside a knob edit is exactly the refit.
+    accepted = ToolRegistry([tool]).invoke("modification_check", {})
+    assert accepted.ok, accepted.error
+    (work / "main.py").write_text(
+        _mechanism(**{"np.log(rows['amount'])": "np.sqrt(rows['amount'])"}), encoding="utf-8"
+    )
+    refused = ToolRegistry([tool]).invoke("modification_check", {})
+    assert not refused.ok
+    assert refused.value["error_type"] == "artifact_constraint"
+    assert "keeps the graduated mechanism" in str(refused.error)
 
 
 def _record(

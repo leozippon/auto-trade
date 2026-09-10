@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -118,6 +119,119 @@ def executable_output_structure(root: Path) -> str:
             f"{relative.as_posix()}\0{executable_source_structure(path.read_text(encoding='utf-8'))}"
         )
     return "\n".join(parts)
+
+
+# The declared-knob convention of the strategy contract: a module-level
+# ``UPPER_CASE`` name bound to a literal (``REFIT_PERIOD``, ``HOLD``, ``TOP_N``,
+# a board or column list written as a constant).
+_KNOB_NAME = re.compile(r"_*[A-Z][A-Z0-9_]*")
+_KNOB_PLACEHOLDER = "<knob>"
+
+
+def mechanism_structure(root: Path) -> str:
+    """The strategy package's structure with every declared knob blanked.
+
+    Two packages are the same mechanism iff their strings are equal. Same
+    reading as :func:`executable_output_structure` (every ``.py`` below
+    ``root``, keyed by relative path, comments and docstrings ignored) except
+    that what a deployment refit may change is replaced by a placeholder:
+    every numeric, boolean or ``None`` literal anywhere (a signed number
+    counts as one literal) by a placeholder of its type, and the value of
+    every module-level ``UPPER_CASE`` assignment whose value is a literal of
+    any shape by one placeholder. Anything else -- a file added, removed or
+    renamed, a function, class, branch, loop, call, comparison, import,
+    decorator or argument, or a string literal used inline in the logic -- is
+    the mechanism, and changing it changes the string.
+    """
+
+    return "\n".join(
+        f"{relative}\0{structure}"
+        for relative, structure in _mechanism_parts(root).items()
+    )
+
+
+def mechanism_difference(parent: Path, candidate: Path) -> str | None:
+    """The first file whose mechanism differs, or None when both are the same
+    mechanism; the same reading as :func:`mechanism_structure`, file by file."""
+
+    before = _mechanism_parts(parent)
+    after = _mechanism_parts(candidate)
+    for relative in sorted(set(before) | set(after)):
+        if relative not in after:
+            return f"{relative} removed"
+        if relative not in before:
+            return f"{relative} added"
+        if before[relative] != after[relative]:
+            return f"{relative} changes the executable logic beyond its declared knobs"
+    return None
+
+
+def _mechanism_parts(root: Path) -> dict[str, str]:
+    parts: dict[str, str] = {}
+    for path in sorted(root.rglob("*.py")):
+        relative = path.relative_to(root)
+        if any(part.startswith(".") or part == "__pycache__" for part in relative.parts):
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        _strip_docstrings(tree)
+        _blank_declared_knobs(tree)
+        parts[relative.as_posix()] = ast.dump(
+            tree, annotate_fields=True, include_attributes=False
+        )
+    return parts
+
+
+def _blank_declared_knobs(tree: ast.Module) -> None:
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+            value = node.value
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            targets = [node.target]
+            value = node.value
+        else:
+            continue
+        if all(
+            isinstance(target, ast.Name) and _KNOB_NAME.fullmatch(target.id)
+            for target in targets
+        ) and _is_literal(value):
+            node.value = ast.Constant(value=_KNOB_PLACEHOLDER)
+    for node in ast.walk(tree):
+        for field, child in ast.iter_fields(node):
+            if isinstance(child, list):
+                for index, item in enumerate(child):
+                    if _is_scalar_knob(item):
+                        child[index] = _typed_placeholder(item)
+            elif _is_scalar_knob(child):
+                setattr(node, field, _typed_placeholder(child))
+
+
+def _is_literal(node: ast.AST) -> bool:
+    """A literal of any shape: what ``ast.literal_eval`` accepts."""
+
+    try:
+        ast.literal_eval(node)
+    except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+        return False
+    return True
+
+
+def _is_scalar_knob(node: object) -> bool:
+    """A numeric, boolean or ``None`` literal, optionally signed."""
+
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+        node = node.operand
+    return isinstance(node, ast.Constant) and (
+        node.value is None or isinstance(node.value, (bool, int, float, complex))
+    )
+
+
+def _typed_placeholder(node: ast.AST) -> ast.Constant:
+    inner = node.operand if isinstance(node, ast.UnaryOp) else node
+    assert isinstance(inner, ast.Constant)
+    value = inner.value
+    kind = "none" if value is None else "bool" if isinstance(value, bool) else type(value).__name__
+    return ast.Constant(value=f"<{kind}>")
 
 
 def _node_metrics(node: Mapping[str, object]) -> Mapping[str, object]:
@@ -241,10 +355,16 @@ class FinishFoldTool:
         budget_status: Callable[[], FoldBudgetStatus] | None = None,
         hard_rule_check: HardRuleCheck | None = None,
         null_controls: Callable[[], Mapping[str, Mapping[str, object]]] | None = None,
+        same_mechanism: bool = False,
     ) -> None:
         self.tree = tree
         self.fold_id = fold_id
         self.run_id = run_id
+        # A deployment adjustment refits the graduated mechanism: the nominated
+        # node must be the parent's mechanism (mechanism_structure), and
+        # nominating the parent itself is the normal no-adjustment outcome, so
+        # the different-hypothesis rule does not apply.
+        self.same_mechanism = same_mechanism
         self._current_output = Path(current_output) if current_output is not None else None
         self._current_models = Path(current_models) if current_models is not None else None
         # The early-stop justification and the hard-rule refusal apply only
@@ -258,6 +378,7 @@ class FinishFoldTool:
         # candidate listing can show the percentile the Agent has read.
         self._null_controls = null_controls or dict
         self._parent_structure: str | None = None
+        self._parent_dir: Path | None = None
         if parent_main_py is not None:
             # The parent package is the directory that holds its main.py.
             path = Path(parent_main_py)
@@ -267,6 +388,9 @@ class FinishFoldTool:
                 self._parent_structure = executable_output_structure(path.parent)
             except (OSError, SyntaxError) as exc:
                 raise ValueError(f"parent strategy structure is invalid: {exc}") from exc
+            self._parent_dir = path.parent
+        if same_mechanism and self._parent_dir is None:
+            raise ValueError("same_mechanism needs the parent package to compare against")
 
     def invoke(self, arguments: Mapping[str, object]) -> ToolResult:
         if str(arguments.get("outcome") or "select") == "no_edge":
@@ -298,7 +422,9 @@ class FinishFoldTool:
         self._require_current_matches_revision(node_id)
         early_stop = self._require_early_stop_reason(arguments)
         nominated_structure = self._node_structure(node_id)
-        if self._parent_structure is not None:
+        if self.same_mechanism:
+            self._require_same_mechanism(node_id)
+        elif self._parent_structure is not None:
             self._require_different_hypothesis(node_id, nominated_structure)
         self.tree.set_position(node_id)
         return ToolResult(
@@ -704,6 +830,28 @@ class FinishFoldTool:
             "or an explicit keep-parent after one existed"
         )
 
+    def _require_same_mechanism(self, node_id: str) -> None:
+        assert self._parent_dir is not None
+        try:
+            difference = mechanism_difference(
+                self._parent_dir, self.tree.node_output_dir(node_id)
+            )
+        except (OSError, SyntaxError) as exc:
+            raise ToolError(
+                f"finish_fold cannot compare {node_id}: {redact_host_paths(str(exc))}"
+            ) from exc
+        if difference is None:
+            return
+        raise ToolError(
+            f"finish_fold refused: {node_id} changes the graduated mechanism "
+            f"({difference}). A deployment adjustment may only change models/, "
+            "numeric/bool/None literals and module-level UPPER_CASE literal "
+            "constants; nominate the parent_control node or a node that keeps "
+            "the mechanism.",
+            error_type="mechanism_changed",
+            retry_hint='finish_fold({"node_id": "<parent_control or knob-only node>"})',
+        )
+
     def _session_complete_structures(self) -> list[tuple[str, str]]:
         found: list[tuple[str, str]] = []
         for node in self.tree.nodes():
@@ -766,4 +914,6 @@ __all__ = [
     "baseline_anchor_required",
     "executable_output_structure",
     "executable_source_structure",
+    "mechanism_difference",
+    "mechanism_structure",
 ]

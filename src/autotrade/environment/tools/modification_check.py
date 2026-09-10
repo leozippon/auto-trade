@@ -20,6 +20,7 @@ from autotrade.environment.strategy_loader import (
 )
 
 from .base import ToolError, ToolResult, ToolSpec
+from .finish_fold import mechanism_difference
 
 # ``ctx.asof_dir/<domain>/`` is a DIRECTORY of parquet parts; only the frozen
 # decision snapshot is flat ``<domain>.parquet``. Reading the rolling view with
@@ -51,9 +52,16 @@ class ModificationCheckTool:
         parent_models_dir: str | Path | None = None,
         constraints: ModificationConstraints | None = None,
         readonly_baseline: Mapping[str, str] | None = None,
+        mechanism_parent: str | Path | None = None,
     ) -> None:
         self.output_dir = Path(output_dir)
         self.parent_dir = Path(parent_dir) if parent_dir is not None else None
+        # A deployment adjustment: the output must keep this package's
+        # mechanism (finish_fold.mechanism_structure), refused here -- before
+        # any replay -- so a structural change never costs a backtest.
+        self.mechanism_parent = (
+            Path(mechanism_parent) if mechanism_parent is not None else None
+        )
         self.models_dir = Path(models_dir) if models_dir is not None else None
         self.parent_models_dir = (
             Path(parent_models_dir) if parent_models_dir is not None else None
@@ -87,6 +95,15 @@ class ModificationCheckTool:
         except StrategyLoadError as exc:
             raise ToolError(str(exc)) from exc
         _reject_flat_asof_reads(files, self.output_dir)
+        if self.mechanism_parent is not None:
+            difference = mechanism_difference(self.mechanism_parent, self.output_dir)
+            if difference is not None:
+                raise ToolError(
+                    f"deployment adjustment keeps the graduated mechanism: {difference}. "
+                    "Only models/, numeric/bool/None literals and module-level "
+                    "UPPER_CASE literal constants may change",
+                    error_type="artifact_constraint",
+                )
         try:
             delta = modification_delta(
                 self.parent_dir or self.output_dir,
