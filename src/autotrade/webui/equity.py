@@ -275,16 +275,20 @@ def walk_forward_curve(
 
     Each Fold contributes the replay of the strategy it left in force — its
     frozen node's Validation result, or the host's parent control when the
-    Fold kept its parent (``registry.strategy_in_force_ref``) — and for
+    Fold kept its parent (``registry.strategy_in_force``) — and for
     ``test`` its frozen Test result. A rolling Validation window trails over
     several quarters, so an overlapping day is kept from the earliest Fold
     that saw it: every Fold after the first adds only its new days, the span
     ``ledger.transition_result`` grades, and no quarter is counted twice.
 
     A Fold that left no strategy (``baseline_missing``) contributes nothing
-    and owes nothing. A Fold whose artifact cannot be read is dropped from the
-    chain and named in ``missing``, so the curve and the tile computed from it
-    omit exactly the same Folds instead of quietly disagreeing.
+    and owes nothing, and neither does a Fold with no Test window of its own
+    when the key is ``test`` — a schedule without a Test stage gives every
+    Fold ``test_period: None``, and a series that was never scheduled is not
+    a series that went missing. A Fold whose artifact cannot be read is
+    dropped from the chain and named in ``missing``, so the curve and the tile
+    computed from it omit exactly the same Folds instead of quietly
+    disagreeing.
     """
     ordered = registry.walk_forward_folds(list(latest_fold_records(records).values()))
     order = _result_order(records) if key == "test" else []
@@ -297,8 +301,10 @@ def walk_forward_curve(
             continue
         if str(record.get("fold_status") or "") == "baseline_missing":
             continue
+        if key == "test" and not record.get("test_period"):
+            continue
         reference = (
-            registry.strategy_in_force_ref(record)
+            registry.strategy_in_force(record).reference
             if key == "valid"
             else _test_result_ref(experiment_dir, record, order, local_refs)
         )
@@ -404,7 +410,8 @@ def fold_equity_payload(root: Path, experiment_id: str, epoch_id: str, fold_ref:
     experiment_dir, _identity, records, record = registry.resolve_fold_record(
         root, experiment_id, epoch_id, fold_ref
     )
-    validation_ref = registry.strategy_in_force_ref(record)
+    in_force = registry.strategy_in_force(record)
+    validation_ref = in_force.reference
     valid_rows = _returns(experiment_dir, validation_ref)
     bench_parts = [_benchmark_returns(experiment_dir, validation_ref)]
     series = [_curve_entry("valid", valid_rows)] if valid_rows else []
@@ -430,6 +437,12 @@ def fold_equity_payload(root: Path, experiment_id: str, epoch_id: str, fold_ref:
         "experiment_id": experiment_id,
         "epoch_id": epoch_id,
         "fold_ref": fold_ref,
+        # Whose replay the ``valid`` series is (``registry.strategy_in_force``).
+        # A Fold's candidate curve and the inherited parent's curve are drawn
+        # the same way, so the console has to be told which one it received;
+        # ``none`` is a Fold that left no strategy, whose own rejected
+        # candidates are deliberately not drawn here or chained into the tile.
+        "strategy_in_force": in_force.source,
         "series": series,
         "benchmark": _curve_entry("benchmark", benchmark) if benchmark else None,
         # Daily position weight (EOD gross market value / equity) per series,

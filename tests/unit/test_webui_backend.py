@@ -18,6 +18,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pandas as pd
+import pytest
 from fastapi.testclient import TestClient
 
 from autotrade.environment.identity import AgentRefStore
@@ -688,6 +689,10 @@ def _persistent_experiment(tmp_path: Path) -> Path:
                 "max_drawdown": -0.01,
                 "filled_orders": 2,
             },
+            # The Test window this Fold was scheduled on. A Fold record always
+            # carries it (``None`` on a schedule without a Test stage), and it
+            # is what says the Fold owed a frozen-Test series at all.
+            "test_period": "20260201..20260228",
             "test_result": {"total_return": 0.01, "max_drawdown": -0.02},
         }
     )
@@ -939,13 +944,34 @@ def _result_artifact(directory: Path, name: str, days: list[tuple[str, float]]) 
 
 
 def _walk_forward_experiment(tmp_path: Path, folds: list[dict[str, object]]) -> Path:
-    """A console experiment whose ledger is exactly ``folds``."""
+    """A console experiment whose ledger is exactly ``folds``.
+
+    The schedule lists the same Folds, because public Fold identity is minted
+    from it: without it no ``fold_ref_`` resolves back to a record and the
+    per-Fold routes cannot be exercised at all.
+    """
     directory = tmp_path / "experiments/walk"
     AgentRefStore(directory)
     (directory / "hitl").mkdir(parents=True, exist_ok=True)
     write_control(directory / "hitl/control.json", ControlState(mode="manual"))
     (directory / "hitl/status.json").write_text(
         json.dumps({"schema_version": 1, "state": "created"}), encoding="utf-8"
+    )
+    write_json_atomic(
+        directory / "hitl/schedule.json",
+        {
+            "schema_version": 1,
+            "epochs": 1,
+            "sessions": [
+                {
+                    "key": f"epoch_001/{fold['fold_id']}",
+                    "kind": "fold",
+                    "epoch_id": "epoch_001",
+                    "fold_id": fold["fold_id"],
+                }
+                for fold in folds
+            ],
+        },
     )
     _write_ledger(
         directory,
@@ -1088,6 +1114,221 @@ def test_a_baseline_missing_fold_contributes_nothing_to_curve_or_tile(tmp_path: 
     # Nothing was owed, so nothing is reported unavailable.
     assert payload["missing"] == {}
     assert registry.summarize_experiment(directory)["metrics"]["cum_valid_return"] == 0.5
+
+
+def test_every_fold_states_which_strategy_its_numbers_and_curve_belong_to(
+    tmp_path: Path,
+):
+    """A Fold's own candidate, the inherited parent and nothing at all.
+
+    All three used to reach the console as the same unlabelled Validation
+    series (or as a bare "no data"), so a Fold that kept its parent looked like
+    a Fold with no result and a Fold that left no strategy looked like a Fold
+    that never traded. The read model now projects which strategy each Fold
+    left in force, the per-Fold curve carries the same label, and the two come
+    from one function so they cannot disagree.
+    """
+    from autotrade.webui import equity, registry
+
+    directory = tmp_path / "experiments/walk"
+    candidate = _result_artifact(directory, "valid_candidate", [("20220701", 150.0)])
+    parent = _result_artifact(directory, "valid_parent", [("20221010", 90.0)])
+    rejected = _result_artifact(directory, "valid_rejected", [("20221010", 900.0)])
+    abandoned = _result_artifact(directory, "valid_abandoned", [("20220401", 800.0)])
+    _walk_forward_experiment(
+        tmp_path,
+        [
+            {
+                # Real candidate replays with real trades, but the run carried
+                # nothing out of this window: no parent to keep, nothing frozen.
+                "fold_id": "fold_2022Q2",
+                "validation_period": "20220401..20220630",
+                "fold_status": "baseline_missing",
+                "steps": [{"step_id": "s0", "validation_result_ref": abandoned}],
+            },
+            {
+                "fold_id": "fold_2022Q3",
+                "validation_period": "20220701..20220930",
+                "fold_status": "frozen",
+                "selected_step_id": "s1",
+                "steps": [{"step_id": "s1", "validation_result_ref": candidate}],
+                "validation_result": {"total_return": 0.5},
+            },
+            {
+                # Nominated a candidate, the rules rejected it: the parent
+                # stays the lineage head, so the parent's replay is the Fold's
+                # curve AND its headline numbers.
+                "fold_id": "fold_2022Q4",
+                "validation_period": "20220701..20221231",
+                "fold_status": "no_update",
+                "selected_step_id": "s2",
+                "steps": [{"step_id": "s2", "validation_result_ref": rejected}],
+                "parent_control": {
+                    "status": "ok",
+                    "validation_result_ref": parent,
+                    "validation_result": {"total_return": -0.1},
+                },
+            },
+        ],
+    )
+
+    root = tmp_path / "experiments"
+    identity = PublicIdentity(directory)
+    rows = {
+        row["fold_ref"]: row
+        for row in registry.summarize_experiment(directory)["fold_returns"]
+    }
+    expected = {
+        "fold_2022Q2": "none",
+        "fold_2022Q3": "frozen_candidate",
+        "fold_2022Q4": "parent_control",
+    }
+    for fold_id, source in expected.items():
+        ref = identity.fold_ref(fold_id)
+        assert rows[ref]["strategy_in_force"] == source, fold_id
+        payload = equity.fold_equity_payload(root, "walk", "epoch_001", ref)
+        # The curve pane is told the same thing the Fold row was told.
+        assert payload["strategy_in_force"] == source, fold_id
+        series = {entry["key"]: entry for entry in payload["series"]}
+        if source == "none":
+            # It traded, and the console must say why there is no curve rather
+            # than draw a replay the experiment never carried forward.
+            assert series == {}
+        else:
+            assert series["valid"]["dates"], fold_id
+    # ... and the kept-parent Fold draws the parent's -10%, never the rejected
+    # candidate's +800%.
+    kept = equity.fold_equity_payload(
+        root, "walk", "epoch_001", identity.fold_ref("fold_2022Q4")
+    )
+    assert kept["series"][0]["final"] == -0.1
+
+
+def test_a_fold_that_kept_its_parent_still_publishes_return_numbers(
+    tmp_path: Path,
+):
+    """An abstaining Fold has no Validation of its own — but it has a result.
+
+    The host replayed the inherited parent over this very window before the
+    session opened, and that replay is what the Fold left in force. The payload
+    therefore has to carry it whole: the window's numbers for the headline, and
+    the new quarter alone — the only ground the parent had not seen — with the
+    excess and the null percentile the walk-forward transition is scored on.
+    """
+    from autotrade.webui import registry
+
+    directory = tmp_path / "experiments/walk"
+    _walk_forward_experiment(
+        tmp_path,
+        [
+            {
+                "fold_id": "fold_2023Q1",
+                "validation_period": "20220401..20230331",
+                "fold_status": "frozen",
+                "steps": [],
+            },
+            {
+                "fold_id": "fold_2023Q2",
+                "validation_period": "20220701..20230630",
+                "fold_status": "no_update",
+                "finish_mode": "agent_no_edge",
+                "no_edge_reason": "no candidate cleared the pre-registered gate",
+                # The Fold nominated nothing, so it has no Validation row.
+                "validation_result": None,
+                "steps": [],
+                "parent_control": {
+                    "status": "ok",
+                    "validation_result": {
+                        "total_return": -0.033,
+                        "sharpe": -0.14,
+                        "max_drawdown": 0.12,
+                        "long_return": -0.054,
+                        "benchmark": {
+                            "benchmark_return": -0.143,
+                            "excess_return": 0.110,
+                            "neutralized_excess_return": -0.022,
+                        },
+                    },
+                    "step_result": {
+                        "label": "2023Q2",
+                        "start": "20230403",
+                        "end": "20230630",
+                        "total_return": 0.022,
+                        "sharpe": 0.84,
+                        "max_drawdown": 0.035,
+                        "benchmark": {"benchmark_return": -0.051},
+                    },
+                    "null_control": {
+                        "excess_percentile": 0.352,
+                        "step": {"excess_percentile": 0.794},
+                    },
+                },
+            },
+        ],
+    )
+    detail = registry.experiment_detail(tmp_path / "experiments", "walk")
+    ref = PublicIdentity(directory).fold_ref("fold_2023Q2")
+    row = next(item for item in detail["fold_returns"] if item["fold_ref"] == ref)
+    assert row["strategy_in_force"] == "parent_control"
+    # The whole window, for the Fold's headline numbers.
+    record = next(
+        entry["record"] for entry in detail["sessions"] if entry.get("fold_ref") == ref
+    )
+    assert record["validation_result"] is None
+    whole = record["parent_control"]["validation_result"]
+    assert whole["total_return"] == -0.033
+    assert whole["benchmark"]["excess_return"] == 0.110
+    # The new quarter alone, which is what the transition is graded on, ranked
+    # against that quarter's own null control rather than the window's 0.352.
+    assert row["parent_control"] == {
+        "status": "ok",
+        "source": "step_result",
+        "period_start": "20230403",
+        "period_end": "20230630",
+        "return": 0.022,
+        "excess_return": pytest.approx(0.073),
+        "sharpe": 0.84,
+        "max_drawdown": 0.035,
+        "excess_percentile": 0.794,
+    }
+
+
+def test_a_fold_whose_in_force_replay_is_unreadable_still_names_its_source(
+    tmp_path: Path,
+):
+    """An unreadable artifact is not a Fold that left no strategy.
+
+    The two are one blank pane apart, and only the source tells them apart:
+    the label stands on what the ledger says the Fold left in force, so the
+    console can say the replay is missing instead of that nothing traded.
+    """
+    from autotrade.webui import equity
+
+    directory = tmp_path / "experiments/walk"
+    _walk_forward_experiment(
+        tmp_path,
+        [
+            {
+                "fold_id": "fold_2022Q3",
+                "validation_period": "20220701..20220930",
+                "fold_status": "no_update",
+                "parent_control": {
+                    "status": "ok",
+                    "validation_result_ref": str(
+                        directory / "artifacts/results/valid_gone/result.json"
+                    ),
+                },
+            }
+        ],
+    )
+    payload = equity.fold_equity_payload(
+        tmp_path / "experiments",
+        "walk",
+        "epoch_001",
+        PublicIdentity(directory).fold_ref("fold_2022Q3"),
+    )
+    assert payload["strategy_in_force"] == "parent_control"
+    assert payload["series"] == []
 
 
 def test_a_fold_without_a_readable_result_is_named_not_silently_dropped(
@@ -2133,7 +2374,17 @@ class WebuiBackendTest(unittest.TestCase):
                         "transitions": 3,
                         "positive_excess": 1,
                     },
-                    None,
+                    # Selection evidence of the Fold that froze the shipped
+                    # artifact, shaped exactly as ledger.frozen_selection
+                    # returns it — including the raw Fold token the console
+                    # must never echo back out.
+                    {
+                        "fold_id": "fold_2023",
+                        "candidates_evaluated": 4,
+                        "deflated_sharpe_probability": 0.55,
+                        "deflated_sharpe_trials": 4,
+                        "validation_excess_percentile": 0.61,
+                    },
                     # The shipped artifact's own share of those transitions,
                     # shaped exactly as ledger.final_artifact_transitions
                     # returns it to run_heldout: the last Fold kept the parent,
@@ -2833,12 +3084,19 @@ class WebuiBackendTest(unittest.TestCase):
             e for e in payload["experiments"] if e["experiment_id"] == "exp_hitl"
         )
         self.assertAlmostEqual(hitl["metrics"]["cum_heldout_return"], -0.03)
-        # A fold row carries identity, status, the Fold's baseline and its
-        # selection statistics; the returns themselves are read from each
-        # session's own record.
+        # A fold row carries identity, status, which strategy the Fold left in
+        # force, the Fold's baseline and its selection statistics; the returns
+        # themselves are read from each session's own record.
         self.assertEqual(
             sorted(hitl["fold_returns"][0]),
-            ["epoch_id", "fold_ref", "fold_status", "parent_control", "selection"],
+            [
+                "epoch_id",
+                "fold_ref",
+                "fold_status",
+                "parent_control",
+                "selection",
+                "strategy_in_force",
+            ],
         )
         # This ledger predates the block, so the row says so instead of
         # publishing zeros.
@@ -2942,6 +3200,75 @@ class WebuiBackendTest(unittest.TestCase):
                 }
             ],
         )
+
+    def test_the_transition_rows_are_exactly_the_counted_transitions(self) -> None:
+        """The table and the count are one record, read two ways.
+
+        The console draws one row per Fold after the Epoch's first and heads it
+        with the ledger's counts; if the two were assembled separately a table
+        could show four rows under "3 transitions", or quietly drop the failed
+        control that is precisely what a transition proving nothing looks like.
+        """
+        from autotrade.pipelines.ledger import walk_forward_transitions
+        from autotrade.webui import registry
+
+        directory = self._build_walk_forward_experiment("exp_wf")
+        detail = self.client.get("/api/experiments/exp_wf").json()
+        counts = walk_forward_transitions(
+            registry.read_ledger_records(directory),
+            epoch_id="epoch_001",
+            test_stage=False,
+        )
+        term = detail["metrics_by_epoch"][0]["walk_forward"]
+        self.assertEqual(term["transitions"], counts["transitions"])
+        self.assertEqual(term["positive_excess"], counts["positive_excess"])
+        self.assertEqual(term["source"], counts["source"])
+        # Rows: every Fold of the Epoch except its first, in walk-forward order.
+        rows = [
+            row for row in detail["fold_returns"] if row["epoch_id"] == "epoch_001"
+        ][1:]
+        self.assertEqual(len(rows), counts["transitions"])
+        self.assertEqual(
+            sum(1 for row in rows if (row["parent_control"]["excess_return"] or 0) > 0),
+            counts["positive_excess"],
+        )
+        # A trailing window is scored on its new period and ranked against that
+        # period's own null control, so the row carries 0.42, not the window's
+        # flattering 0.99.
+        trailing = rows[1]["parent_control"]
+        self.assertEqual(trailing["source"], "step_result")
+        self.assertAlmostEqual(trailing["excess_percentile"], 0.42)
+        # The failed control stays a row: a transition that proved nothing is
+        # not a missing transition.
+        self.assertEqual(rows[2]["parent_control"]["status"], "failed")
+        self.assertIsNone(rows[2]["parent_control"]["excess_return"])
+
+    def test_verdict_publishes_the_shipped_artifacts_own_forward_record(self) -> None:
+        """Term (b) counts the chain; only term (c) is about this artifact.
+
+        The pipeline stamps both into every Held-out period, so the console
+        lifts them once beside the verdict — with the Fold that froze the
+        artifact named by its public ref, never by the host token the ledger
+        uses.
+        """
+        self._build_walk_forward_experiment("exp_wf")
+        self._reveal("exp_wf")
+        response = self.client.get("/api/experiments/exp_wf")
+        verdict = response.json()["verdict"]
+        diagnostics = verdict["diagnostics"]
+        self.assertEqual(diagnostics["final_artifact_forward_transitions"], 2)
+        self.assertEqual(diagnostics["final_artifact_forward_positive"], 2)
+        self.assertAlmostEqual(diagnostics["deflated_sharpe_probability"], 0.55)
+        self.assertAlmostEqual(diagnostics["validation_excess_percentile"], 0.61)
+        self.assertEqual(
+            diagnostics["frozen_fold_ref"],
+            self._fold_ref("fold_2023", "exp_wf"),
+        )
+        # Both the lifted block and the per-period one are redacted, and the
+        # raw Fold token never reaches the wire.
+        self.assertNotIn("frozen_fold_id", diagnostics)
+        self.assertEqual(verdict["periods"][0]["diagnostics"], diagnostics)
+        self.assertNotIn("fold_2023", response.text)
 
     def test_parent_control_is_development_evidence_and_survives_the_guard(
         self,

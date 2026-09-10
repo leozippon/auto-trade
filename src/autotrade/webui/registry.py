@@ -16,6 +16,7 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 from io import StringIO
 from pathlib import Path
+from typing import NamedTuple
 
 from autotrade.environment.replay.style import STYLE_ARTIFACT_NAME, STYLE_SCHEMA_VERSION
 from autotrade.pipelines.agent_inbox import INBOX_NAME, inbox_public_view
@@ -381,26 +382,59 @@ def _walk_forward_view(
     }
 
 
-def _public_verdict(records: list[dict[str, object]]) -> dict[str, object] | None:
-    """Graduation verdict with term (b) surfaced beside it.
+def _public_diagnostics(
+    block: object, identity: PublicIdentity
+) -> dict[str, object] | None:
+    """Verdict diagnostics with the raw Fold token swapped for its public ref.
 
-    The pipeline computes the walk-forward term once over the final Epoch and
-    stamps the same block into every Held-out period's verdict, so the console
-    publishes it once next to the verdict instead of only inside the periods.
+    ``ledger.frozen_selection`` names the Fold that froze the shipped artifact
+    by its host id (``fold_2025Q4``), which is exactly the token the console
+    never returns: Fold identity leaves here as ``fold_ref_`` and is shown to
+    people as the period label the session list already carries.
+    """
+    if not isinstance(block, Mapping):
+        return None
+    fold_id = block.get("frozen_fold_id")
+    return {
+        **{key: value for key, value in block.items() if key != "frozen_fold_id"},
+        "frozen_fold_ref": identity.fold_ref(fold_id) if fold_id else None,
+    }
+
+
+def _public_verdict(
+    records: list[dict[str, object]], identity: PublicIdentity
+) -> dict[str, object] | None:
+    """Graduation verdict with term (b) and its diagnostics surfaced beside it.
+
+    The pipeline computes the walk-forward term and the verdict diagnostics
+    once over the final Epoch and stamps the same blocks into every Held-out
+    period's verdict, so the console publishes them once next to the verdict
+    instead of only inside the periods. The diagnostics carry the shipped
+    artifact's own forward record (``ledger.final_artifact_transitions``),
+    which is the only thing that says whether term (b)'s chain-wide count is
+    about this strategy or about the ones it replaced.
     """
     verdict = experiment_verdict(records, strict=False)
     if verdict is None:
         return None
-    walk_forward = next(
-        (
-            dict(period["walk_forward"])
-            for period in verdict.get("periods") or ()
-            if isinstance(period, Mapping)
-            and isinstance(period.get("walk_forward"), Mapping)
-        ),
-        None,
-    )
-    return {**verdict, "walk_forward": walk_forward}
+    periods = [
+        {**period, "diagnostics": _public_diagnostics(period["diagnostics"], identity)}
+        if isinstance(period, Mapping) and isinstance(period.get("diagnostics"), Mapping)
+        else period
+        for period in verdict.get("periods") or ()
+    ]
+    stamped = {
+        key: next(
+            (
+                dict(period[key])
+                for period in periods
+                if isinstance(period, Mapping) and isinstance(period.get(key), Mapping)
+            ),
+            None,
+        )
+        for key in ("walk_forward", "diagnostics")
+    }
+    return {**verdict, "periods": periods, **stamped}
 
 
 def walk_forward_folds(folds: list[dict[str, object]]) -> list[dict[str, object]]:
@@ -673,7 +707,7 @@ def summarize_experiment(directory: Path) -> dict[str, object]:
                 "test_revealed": revealed,
                 # Graduation verdict from the Held-out records; sealed like
                 # every other Held-out number until the reveal.
-                "verdict": _public_verdict(records) if revealed else None,
+                "verdict": _public_verdict(records, identity) if revealed else None,
                 "metrics": {
                     "epoch_id": latest_epoch,
                     "cum_valid_return": cumulative.get(latest_epoch, {}).get("valid"),
@@ -706,6 +740,11 @@ def summarize_experiment(directory: Path) -> dict[str, object]:
                         "epoch_id": record.get("epoch_id"),
                         "fold_ref": identity.fold_ref(record.get("fold_id")),
                         "fold_status": record.get("fold_status"),
+                        # Which strategy this Fold left in force. The Fold's
+                        # headline numbers and its curve are both that
+                        # strategy's, so both read this one label instead of
+                        # re-deriving the branch from fold_status.
+                        "strategy_in_force": strategy_in_force(record).source,
                         # Development evidence: the Fold's baseline, never sealed.
                         "parent_control": _parent_control_view(record),
                         # How wide the search behind this Fold's frozen
@@ -924,8 +963,22 @@ def fold_run_id(root: Path, experiment_id: str, epoch_id: str, fold_ref: str) ->
 _PARENT_KEPT_STATUSES = frozenset({"no_update", "no_valid_backtest"})
 
 
-def strategy_in_force_ref(record: Mapping[str, object]) -> object:
-    """The Validation result of the strategy one Fold left in force.
+class StrategyInForce(NamedTuple):
+    """The strategy one Fold left in force, and the replay that records it.
+
+    ``source`` is the single label everything downstream reads: the Fold's own
+    ``frozen_candidate``, the inherited ``parent_control``, or ``none``. The
+    console labels its Fold numbers and its Fold curve with it, so the two can
+    never claim different strategies. ``reference`` is that replay's result
+    artifact, ``None`` when the record names none.
+    """
+
+    source: str
+    reference: object
+
+
+def strategy_in_force(record: Mapping[str, object]) -> StrategyInForce:
+    """Which strategy one Fold left in force, and its Validation replay.
 
     A ``frozen`` Fold nominated a Step -- possibly the host's parent control,
     when it re-froze its parent -- and that Step's replay is the answer.
@@ -933,29 +986,37 @@ def strategy_in_force_ref(record: Mapping[str, object]) -> object:
     the lineage head and the host's parent control is the answer; a nominated
     but hard-rejected candidate never is, even though the record still names
     it in ``selected_step_id``. ``baseline_missing`` left no strategy at all
-    and returns None, as does a Fold whose result reference is missing.
+    and answers ``none``, and so does an unknown status.
+
+    A named artifact that cannot be read is still the strategy in force: the
+    source stands and the reference is the one that failed, so the console can
+    say the replay is unreadable instead of that the Fold traded nothing.
     """
 
     status = str(record.get("fold_status") or "")
     if status == "frozen":
         selected = str(record.get("selected_step_id") or "")
-        return next(
-            (
-                step.get("validation_result_ref")
-                for step in record.get("steps", [])
-                if isinstance(step, Mapping)
-                and str(step.get("step_id") or "") == selected
+        return StrategyInForce(
+            "frozen_candidate",
+            next(
+                (
+                    step.get("validation_result_ref")
+                    for step in record.get("steps", [])
+                    if isinstance(step, Mapping)
+                    and str(step.get("step_id") or "") == selected
+                ),
+                None,
             ),
-            None,
         )
     if status in _PARENT_KEPT_STATUSES:
         control = record.get("parent_control")
-        return (
+        return StrategyInForce(
+            "parent_control",
             control.get("validation_result_ref")
             if isinstance(control, Mapping)
-            else None
+            else None,
         )
-    return None
+    return StrategyInForce("none", None)
 
 
 def style_payload(
@@ -992,7 +1053,7 @@ def style_payload(
             None,
         )
         if fold is not None:
-            reference = strategy_in_force_ref(fold)
+            reference = strategy_in_force(fold).reference
     elif prefix == "test":
         fold = next(
             (

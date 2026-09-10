@@ -755,6 +755,28 @@ function cycleStatsTable(payload) {
   return el("table", { class: "data cycle-stats" }, head, ...rows);
 }
 
+/* Folds the chain owed a series but could not read (equity.walk_forward_curve
+   reports them in `missing`). The curve and the cumulative tile above it drop
+   exactly these together, so the omission is stated here rather than left to
+   be read out of a gap in the line. */
+function missingFoldsNote(payload, detail) {
+  const groups = Object.entries(payload.missing || {});
+  if (!groups.length) return null;
+  const text = groups
+    .map(([key, refs]) => {
+      const names = refs.map((ref) =>
+        detail ? foldPeriodLabel(detail, ref) : ref,
+      );
+      return `${CYCLE_SERIES_SHORT[key] || key}：${names.join("、")}`;
+    })
+    .join("；");
+  return el(
+    "div",
+    { class: "meta-line" },
+    `以下 Fold 的回放结果读不出来，曲线与上方累计收益同时略过它们（${text}）。`,
+  );
+}
+
 /* Async host: renders the chart (plus, on full-size charts, the epoch switcher
    and the full-cycle stats table) when the series payload arrives. Each epoch
    is charted alone — epochs re-run the same fold calendar and must not blend. */
@@ -790,6 +812,8 @@ function equityHost(expId, fp, opts) {
         }
         host.append(equityChart(payload, opts));
         if (!opts?.mini) {
+          const dropped = missingFoldsNote(payload, opts?.detail);
+          if (dropped) host.append(dropped);
           const statsTable = cycleStatsTable(payload);
           if (statsTable) host.append(statsTable);
         }
@@ -1468,6 +1492,47 @@ function walkForwardTerm(verdict) {
   );
 }
 
+/* The graduation terms behind the badge, in the order the rules apply them.
+
+   Term (b) counts the whole development chain, and most of its transitions
+   replayed artifacts the shipped one replaced — so term (c), the shipped
+   artifact's own share of those transitions, has to be read beside it or a
+   consistent chain gets credited to a strategy that never went forward once.
+   The diagnostics after them decide nothing and say so. */
+function verdictTerms(verdict) {
+  if (!verdict) return null;
+  const term = verdict.walk_forward || {};
+  const diag = verdict.diagnostics || {};
+  const number = (value, digits) =>
+    value === null || value === undefined ? null : Number(value).toFixed(digits);
+  const parts = [];
+  if (term.transitions !== null && term.transitions !== undefined)
+    parts.push(
+      `前向一致性（末个 Epoch 整条链）${term.positive_excess}/${term.transitions} 超额为正，需 ≥ ${term.required ?? "—"}`,
+    );
+  const own = diag.final_artifact_forward_transitions;
+  if (own !== null && own !== undefined)
+    parts.push(
+      own === 0
+        ? "本次交付产物自身的前向过渡 0 次：链上其余过渡跑的都是它替换掉的上游产物"
+        : `本次交付产物自身的前向过渡 ${diag.final_artifact_forward_positive}/${own} 超额为正`,
+    );
+  const mean = number(diag.walk_forward_mean_excess_percentile, 3);
+  if (mean) parts.push(`链上过渡平均 null 分位 ${mean}`);
+  const deflated = number(diag.deflated_sharpe_probability, 2);
+  const frozenPercentile = number(diag.validation_excess_percentile, 3);
+  if (deflated || frozenPercentile)
+    parts.push(
+      `冻结该产物的 Fold：候选 ${diag.candidates_evaluated ?? "—"} 个 · 去偏 Sharpe 概率 ${deflated || "—"} · 验证 null 分位 ${frozenPercentile || "—"}`,
+    );
+  if (!parts.length) return null;
+  return el(
+    "div",
+    { class: "meta-line" },
+    `毕业条件：Held-out 门（超额 > 0、Sharpe > 0、回撤在限内）· ${parts.join(" · ")}`,
+  );
+}
+
 /* The span a parent control is actually scored on. Once a Fold's Validation
    window trails over several periods the control is graded on the Fold's new
    period alone (registry._parent_control_view serves that span beside the
@@ -1577,6 +1642,14 @@ function walkForwardPanel(detail) {
           ),
           el("th", { title: "父本在计分区间日收益的年化 Sharpe" }, "父本 Sharpe"),
           el("th", { title: "父本在计分区间的峰谷回撤" }, "父本回撤"),
+          el(
+            "th",
+            {
+              title:
+                "这次过渡的超额在同规模随机换名重放里的分位（与计分区间同一段）：接近 0.5 表示与随机组合无法区分。只作阅读参考，不参与毕业判定",
+            },
+            "null 分位",
+          ),
         ),
         ...folds.slice(1).map((row, index) => {
           const control = row.parent_control || {};
@@ -1605,6 +1678,14 @@ function walkForwardPanel(detail) {
             ),
             el("td", { class: signCls(control.sharpe) }, fmtSharpe(control.sharpe)),
             el("td", {}, fmtPct(control.max_drawdown)),
+            el(
+              "td",
+              { class: "mode-note" },
+              control.excess_percentile === null ||
+                control.excess_percentile === undefined
+                ? "—"
+                : Number(control.excess_percentile).toFixed(3),
+            ),
           );
         }),
       ),
@@ -2503,6 +2584,9 @@ async function renderDetailPage(experimentId, selectedKey) {
         width: 980,
         height: 240,
         ddH: 90,
+        // Names the Folds the chain had to drop, in the period labels the rest
+        // of the page uses rather than in opaque refs.
+        detail,
       }),
     );
     // Tile order standardized with the homepage hero: Held-out → test → valid.
@@ -5875,9 +5959,35 @@ function openStepParentOverrideModal(detail, payload, node) {
   ]);
 }
 
+/* What a Fold left in force decides whose numbers its headline carries.
+
+   A Fold that froze nothing is NOT a Fold without a Validation record: before
+   the session started the host replayed the inherited parent over this very
+   window, and that replay is both the strategy the experiment carried forward
+   and the curve drawn below. So the tiles show it — labelled as the parent,
+   never as a new candidate. The label comes from the server
+   (registry.strategy_in_force, projected once per Fold into fold_returns), so
+   the panel and the chart can never disagree about which strategy they show. */
+const IN_FORCE_NOTES = {
+  frozen_candidate:
+    "本 Fold 冻结了新产物：下面的验证数字与收益曲线，都是这个新候选在本 Fold 验证区间的回放。",
+  parent_control:
+    "本 Fold 没有冻结新产物，继续沿用继承的父产物：下面的验证数字与收益曲线，都是宿主把这个父产物原样放进本 Fold 验证区间重跑的结果，不是本 Fold 的新候选。",
+  none:
+    "本 Fold 没有留下任何策略，也没有父产物可沿用：实验没有从这个窗口带走任何东西，因此没有沿用中的验证数字与收益曲线。本 Fold 自己评估过的候选只是证据，另见下方。",
+};
+
 function foldResultPanel(detail, session) {
   const record = session.record || {};
   const validation = record.validation_result || {};
+  const inForce = (foldReturnsRow(detail, session) || {}).strategy_in_force;
+  const inherited = inForce === "parent_control";
+  // The strategy in force on this window: the Fold's own frozen candidate, or
+  // the inherited parent exactly as the host replayed it over the same window.
+  const headline = inherited
+    ? (record.parent_control || {}).validation_result || {}
+    : validation;
+  const headLabel = (name) => (inherited ? `父本${name}` : name);
   const statusLabels = {
     frozen: "已冻结新产物",
     no_update: "沿用父产物（有验证未获接受）",
@@ -5926,30 +6036,40 @@ function foldResultPanel(detail, session) {
         : null,
     ),
   );
-  // Headline validation metrics as tiles, metadata as a compact kv block.
+  // Which strategy the numbers below belong to, stated before they are read.
+  if (IN_FORCE_NOTES[inForce])
+    panel.append(el("div", { class: "meta-line" }, IN_FORCE_NOTES[inForce]));
+  // Headline metrics of the strategy in force, metadata as a compact kv block.
+  const inForceTitle = inherited
+    ? "继承的父产物在本 Fold 验证区间的原样重跑（不是本 Fold 的新候选）"
+    : "本 Fold 冻结候选在验证区间的回放";
   panel.append(
     el(
       "div",
       { class: "section-gap" },
       statTilesRow([
         {
-          label: "验证收益",
-          value: fmtPct(validation.total_return),
-          cls: signCls(validation.total_return),
+          label: headLabel("验证收益"),
+          title: inForceTitle,
+          value: fmtPct(headline.total_return),
+          cls: signCls(headline.total_return),
         },
         {
-          label: "验证 Sharpe",
-          value:
-            validation.sharpe === undefined || validation.sharpe === null
-              ? "—"
-              : Number(validation.sharpe).toFixed(2),
-          cls: signCls(validation.sharpe),
+          label: headLabel("验证 Sharpe"),
+          title: inForceTitle,
+          value: fmtSharpe(headline.sharpe),
+          cls: signCls(headline.sharpe),
         },
-        { label: "验证回撤", value: fmtPct(validation.max_drawdown) },
         {
-          label: "多头收益",
-          value: fmtPct(validation.long_return),
-          cls: signCls(validation.long_return),
+          label: headLabel("验证回撤"),
+          title: inForceTitle,
+          value: fmtPct(headline.max_drawdown),
+        },
+        {
+          label: headLabel("多头收益"),
+          title: inForceTitle,
+          value: fmtPct(headline.long_return),
+          cls: signCls(headline.long_return),
         },
       ]),
     ),
@@ -5957,7 +6077,7 @@ function foldResultPanel(detail, session) {
   const selection = selectionSection(detail, session);
   if (selection) panel.append(selection);
   panel.append(parentControlSection(detail, session, validation));
-  const benchmark = validation.benchmark || {};
+  const benchmark = headline.benchmark || {};
   panel.append(
     el(
       "table",
@@ -5969,7 +6089,7 @@ function foldResultPanel(detail, session) {
       // The raw excess cannot separate an edge from a small-cap or high-beta
       // tilt, so the neutralized figure is read beside it, never alone.
       kvRow(
-        "超额收益（vs 沪深300）",
+        headLabel("超额收益（vs 沪深300）"),
         el(
           "span",
           { class: numClass(benchmark.excess_return) },
@@ -5980,7 +6100,7 @@ function foldResultPanel(detail, session) {
         el(
           "span",
           { title: benchmark.neutralized_excess_method || "" },
-          "规模/β 中性化超额（年化）",
+          headLabel("规模/β 中性化超额（年化）"),
         ),
         el(
           "span",
@@ -6011,8 +6131,8 @@ function foldResultPanel(detail, session) {
     ),
   );
   const validationSubWindows = subWindowSection(
-    "验证期分季度表现",
-    validation.sub_windows,
+    headLabel("验证期分季度表现"),
+    headline.sub_windows,
   );
   if (validationSubWindows) panel.append(validationSubWindows);
   if (record.run_ref) {
@@ -6110,8 +6230,11 @@ function selectionSection(detail, session) {
    Fold's own Validation row. The walk-forward transition is graded on the
    narrower span registry._parent_control_view names (the Fold's new period
    once the window trails over several), so it gets its own labelled row rather
-   than being read as the window. The failure text only exists on the ledger
-   record. */
+   than being read as the window. Every row carries the null percentile of its
+   OWN span (the projection already picked the right null block for the scored
+   row), and the Fold's row carries the ledger's `vs_parent.beats_parent`, so
+   "did the candidate beat this baseline" is read off the record rather than
+   subtracted by eye. The failure text only exists on the ledger record. */
 function parentControlSection(detail, session, validation) {
   const record = session.record || {};
   const control = record.parent_control;
@@ -6127,6 +6250,11 @@ function parentControlSection(detail, session, validation) {
   const period = fmtPeriodRange(
     record.validation_period || session.validation_period,
   );
+  const percentile = (block) => {
+    const value = (block || {}).excess_percentile;
+    return value === null || value === undefined ? "—" : Number(value).toFixed(3);
+  };
+  const beatsParent = (record.vs_parent || {}).beats_parent;
   const metricRow = (label, span, values) =>
     el(
       "tr",
@@ -6137,6 +6265,7 @@ function parentControlSection(detail, session, validation) {
       el("td", { class: signCls(values.excess) }, fmtPct(values.excess)),
       el("td", { class: signCls(values.sharpe) }, fmtSharpe(values.sharpe)),
       el("td", {}, fmtPct(values.drawdown)),
+      el("td", { class: "mode-note" }, values.percentile),
     );
   const section = el(
     "div",
@@ -6159,13 +6288,39 @@ function parentControlSection(detail, session, validation) {
         el("th", { title: "该行区间相对沪深300的超额收益" }, "超额"),
         el("th", { title: "该行区间日收益的年化 Sharpe" }, "Sharpe"),
         el("th", { title: "该行区间的峰谷回撤" }, "回撤"),
+        el(
+          "th",
+          {
+            title:
+              "该行超额在同规模随机换名重放里的分位：接近 0.5 表示与随机组合无法区分",
+          },
+          "null 分位",
+        ),
       ),
-      metricRow("本 Fold 验证", period, {
-        total: validation.total_return,
-        excess: (validation.benchmark || {}).excess_return,
-        sharpe: validation.sharpe,
-        drawdown: validation.max_drawdown,
-      }),
+      metricRow(
+        el(
+          "span",
+          {},
+          "本 Fold 验证",
+          // The frozen candidate's whole-window verdict against this very
+          // baseline, as the ledger recorded it — not re-derived here.
+          beatsParent === true || beatsParent === false
+            ? el(
+                "span",
+                { class: "mode-note" },
+                beatsParent ? " vs 父本：胜" : " vs 父本：负",
+              )
+            : null,
+        ),
+        period,
+        {
+          total: validation.total_return,
+          excess: (validation.benchmark || {}).excess_return,
+          sharpe: validation.sharpe,
+          drawdown: validation.max_drawdown,
+          percentile: percentile(record.null_control),
+        },
+      ),
       metricRow(
         el(
           "span",
@@ -6183,6 +6338,7 @@ function parentControlSection(detail, session, validation) {
           excess: (wholeWindow.benchmark || {}).excess_return,
           sharpe: wholeWindow.sharpe,
           drawdown: wholeWindow.max_drawdown,
+          percentile: percentile(control.null_control),
         },
       ),
       metrics.source === "step_result"
@@ -6203,6 +6359,9 @@ function parentControlSection(detail, session, validation) {
               excess: metrics.excess_return,
               sharpe: metrics.sharpe,
               drawdown: metrics.max_drawdown,
+              // The projection already picked the null block of the span this
+              // row is scored on (ledger.transition_null_control).
+              percentile: percentile(metrics),
             },
           )
         : null,
@@ -6426,6 +6585,25 @@ function styleCard(expId, runId, prefix) {
   return host;
 }
 
+/* Which curve the Validation pane is showing, and — when it shows none — why.
+
+   The Fold's own candidate and the inherited parent are drawn identically, and
+   a Fold that left no strategy still ran candidate replays with real trades.
+   Both cases used to render as one unlabelled line or as a bare "暂无日度收益
+   数据", so the pane now states its own provenance from the server's
+   strategy_in_force label instead of leaving it to be inferred. */
+function foldCurveCaption(source, drawn) {
+  if (source === "none")
+    return "本 Fold 没有留下任何策略（未冻结新产物，也没有父产物可沿用），因此没有曲线。本 Fold 评估过的候选回放不是实验带走的东西，不画在这里，也不进入累计验证收益。";
+  if (!drawn)
+    return source === "parent_control"
+      ? "沿用中的父本重跑结果读不出来，因此没有曲线；累计验证收益同样略过本 Fold。"
+      : "本 Fold 冻结候选的回放结果读不出来，因此没有曲线；累计验证收益同样略过本 Fold。";
+  return source === "parent_control"
+    ? "曲线：继承的父产物在本 Fold 验证区间的原样重跑（本 Fold 未冻结新产物），不是本 Fold 的新候选。"
+    : "曲线：本 Fold 冻结候选在验证区间的回放。";
+}
+
 /* Per-fold daily equity (validation and guarded test parts share one fetch). */
 const FOLD_EQUITY_CACHE = new Map(); // `${exp}/${epoch}/${fold}/${run}` -> promise
 function foldEquityHost(expId, epochId, foldId, runId, part, opts) {
@@ -6445,6 +6623,19 @@ function foldEquityHost(expId, epochId, foldId, runId, part, opts) {
       const selected = (payload.series || []).filter(
         (series) => series.key === part,
       );
+      // Only the Validation pane draws "whichever strategy this Fold left in
+      // force"; the guarded Test pane is always the frozen artifact's own.
+      if (part === "valid")
+        host.append(
+          el(
+            "div",
+            { class: "meta-line" },
+            foldCurveCaption(
+              payload.strategy_in_force,
+              selected.some((series) => (series.dates || []).length),
+            ),
+          ),
+        );
       host.append(equityChart({ ...payload, series: selected }, opts));
     })
     .catch((error) => {
@@ -6896,6 +7087,8 @@ function heldoutPanel(detail, session) {
         `未达标：${detail.verdict.reasons.join("、")}`,
       ),
     );
+  const terms = verdictTerms(detail.verdict);
+  if (terms) panel.append(terms);
   panel.append(
     el(
       "div",
