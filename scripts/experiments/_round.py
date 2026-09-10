@@ -115,6 +115,7 @@ BASE_EXPECTED_DEFAULTS: dict[str, object] = {
     "inference_time": "08:30",
     "strategy_period": "day",
     "inherit_from": "",
+    "inherit_memory_from": "",
     # All six model roles. Every round runs entirely on the local model and
     # overrides none of them, so the console default is what actually decides
     # them; spelled out as literals on purpose, since a rename of the local
@@ -184,6 +185,7 @@ BASE_REPORT_KEYS: tuple[str, ...] = (
     "experiment_id",
     "workspace_reference",
     "inherit_from",
+    "inherit_memory_from",
     "gpu_count",
     "reasoning_effort",
     "initial_control_mode",

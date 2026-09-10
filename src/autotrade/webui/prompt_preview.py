@@ -39,6 +39,7 @@ from autotrade.pipelines.hitl_state import (
     read_control,
     read_json,
 )
+from autotrade.pipelines.inherited_memory import load_inherited_memory
 from autotrade.pipelines.prior import latest_prior_text
 
 from .registry import read_ledger_records
@@ -88,7 +89,10 @@ def build_prompt_preview(
     options = load_worker_options(directory, repo_root=repo_root)
     control = read_control(directory / HITL_DIR_NAME / CONTROL_NAME)
     records = read_ledger_records(directory)
-    prior = latest_prior_text(records)
+    # Before this experiment's first Meta the PRIOR is the one seeded at
+    # creation from another experiment's memory, exactly as the worker reads it.
+    memory = load_inherited_memory(directory)
+    prior = latest_prior_text(records) or (memory.prior_text if memory else "")
     epoch_id = str(entry.get("epoch_id") or "")
     # What the worker would inherit as this session's parent: the console's
     # imported seed, or any frozen artifact the ledger already carries. Which

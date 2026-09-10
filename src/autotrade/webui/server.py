@@ -37,6 +37,7 @@ from autotrade.pipelines.hitl_state import (
     read_status,
 )
 from autotrade.pipelines.ledger import latest_fold_records
+from autotrade.pipelines.prior import latest_prior_text
 
 from . import equity, issues, memory, registry, steps, traces, trading
 from .analysis import AnalysisService
@@ -275,9 +276,29 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
                 continue  # it stays visible (state=unreadable) in the list instead
         return sources
 
+    def _memory_sources() -> list[str]:
+        """Experiments whose ledger carries a published PRIOR (inherit_memory_from
+        choices): the same reading the creation's import applies."""
+        if not experiment_root.is_dir():
+            return []
+        sources = []
+        for entry in sorted(experiment_root.iterdir()):
+            if not entry.is_dir() or entry.name.startswith("."):
+                continue
+            try:
+                if latest_prior_text(registry.read_ledger_records(entry)):
+                    sources.append(entry.name)
+            except Exception:  # noqa: BLE001 - a broken experiment cannot seed a new one
+                continue
+        return sources
+
     @app.get("/api/parameter-schema")
     def get_parameter_schema() -> dict[str, object]:
-        return parameter_schema(trading_days=_trading_days(), inherit_sources=_inherit_sources())
+        return parameter_schema(
+            trading_days=_trading_days(),
+            inherit_sources=_inherit_sources(),
+            memory_sources=_memory_sources(),
+        )
 
     @app.get("/api/gpus")
     def get_gpus() -> dict[str, object]:

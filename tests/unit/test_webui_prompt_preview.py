@@ -412,6 +412,41 @@ def test_preview_manifests_carry_the_session_s_own_experiment_parameters(tmp_pat
     assert fold["research_scope"]["strategy_cadence"] == meta["research_scope"]["strategy_cadence"]
 
 
+def test_inherited_prior_reaches_the_preview_before_the_first_meta(tmp_path: Path):
+    """An experiment created with ``inherit_memory_from`` starts from another
+    experiment's PRIOR; until its own first Meta row exists the preview shows
+    that PRIOR, exactly as the worker hands it to the first session."""
+    from autotrade.pipelines.inherited_memory import import_inherited_memory
+    from autotrade.pipelines.ledger import ExperimentLedger
+    from autotrade.pipelines.prior import ExperimentPriorStore
+
+    prior = "Closed: small-cap reversal (null percentile 0.5). Next: post-event drift."
+    source = tmp_path / "experiments" / "src"
+    ExperimentPriorStore(source).publish(prior, generation_id="gen_1")
+    ExperimentLedger(source / "ledgers" / "experiment_ledger.jsonl").append(
+        {
+            "record_type": "meta_learning",
+            "experiment_id": "src",
+            "epoch_id": "epoch_001",
+            "fold_id": "meta_001",
+            "run_id": "run_m",
+            "prior": prior,
+            "prior_generation_id": "gen_1",
+        }
+    )
+    directory, repo = _experiment(tmp_path)
+    params_path = directory / "hitl" / "params.json"
+    params = json.loads(params_path.read_text(encoding="utf-8"))
+    params["_inherited_memory"] = import_inherited_memory(directory, source, source_id="src")
+    params_path.write_text(json.dumps(params), encoding="utf-8")
+
+    # The Fold session reads the PRIOR in its prompt; the Meta session reads
+    # it from its workspace and is told only that a previous PRIOR exists.
+    assert prior in _preview_of(directory, repo, FOLD_KEY)
+    meta_facts = _facts(_preview_of(directory, repo, META_KEY))
+    assert meta_facts["meta_learning"]["previous_prior_available"] is True
+
+
 def test_unknown_and_heldout_sessions_are_rejected(tmp_path: Path):
     directory, repo = _experiment(tmp_path)
     with pytest.raises(ValueError, match="held-out"):

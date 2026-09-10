@@ -134,6 +134,25 @@ def test_every_directive_is_usable_by_the_worker(round_name: str, experiment_id:
 
 
 @pytest.mark.parametrize(("round_name", "experiment_id"), ARMS)
+def test_an_inherited_source_exists_before_the_round_is_created(
+    round_name: str, experiment_id: str
+) -> None:
+    """``inherit_from`` and ``inherit_memory_from`` are resolved at create time
+    against the console's experiment root, so a source must already be there:
+    an arm of the same round is not created yet and a retired id is archived
+    away. Both stay empty by console default, which a round may rely on."""
+    rnd = ROUNDS[round_name]
+    params = rnd.request_params(experiment_id)
+    for key in ("inherit_from", "inherit_memory_from"):
+        assert BASE_EXPECTED_DEFAULTS[key] == ""
+        source = str(params.get(key) or "")
+        if not source:
+            continue
+        assert source not in rnd.arms, (experiment_id, key, source)
+        assert source not in RETIRED_IDS, (experiment_id, key, source)
+
+
+@pytest.mark.parametrize(("round_name", "experiment_id"), ARMS)
 def test_every_reference_pack_a_round_names_exists(round_name: str, experiment_id: str) -> None:
     """A workspace_reference that does not exist fails the session at start.
 

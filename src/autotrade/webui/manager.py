@@ -41,6 +41,10 @@ from autotrade.pipelines.hitl_state import (
     status_pid_alive,
     write_control,
 )
+from autotrade.pipelines.inherited_memory import (
+    INHERITED_MEMORY_PARAM,
+    import_inherited_memory,
+)
 from autotrade.pipelines.skills import create_operating_memory_snapshot
 from autotrade.pipelines.ledger import (
     ExperimentLedger,
@@ -468,6 +472,22 @@ class ExperimentManager:
                     )
                 except Exception:
                     self._discard_half_created(directory)
+                    raise
+            # Another experiment's PRIOR and skills, copied as this one's own
+            # read-only generations; a source that never published a PRIOR has
+            # no memory to inherit and the create is refused.
+            memory_source = str(merged.get("inherit_memory_from") or "").strip()
+            if memory_source:
+                try:
+                    merged[INHERITED_MEMORY_PARAM] = import_inherited_memory(
+                        directory,
+                        self._experiment_dir(memory_source),
+                        source_id=memory_source,
+                    )
+                except Exception as exc:
+                    self._discard_half_created(directory)
+                    if isinstance(exc, ValueError):
+                        raise ManagerError(str(exc)) from exc
                     raise
             # Operating memory is fixed for the life of the experiment, like the
             # inherited parent above: resolve the library and the graduated tier

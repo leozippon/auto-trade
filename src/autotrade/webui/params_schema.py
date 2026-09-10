@@ -175,6 +175,10 @@ _FIELDS: list[dict[str, object]] = [
      "optional": True,
      "choices": [],  # filled at request time with experiments that have >=1 recorded fold
      "help": "留空=从空白模板开始。选择后，新实验的首个 Fold 以该实验最新冻结的策略产物（output+models）为父产物起步；创建时拷贝为只读快照，源实验之后删除也不受影响。"},
+    {"key": "inherit_memory_from", "group": "基本与排程", "label": "继承已有实验的 PRIOR 与 skills", "type": "choice",
+     "optional": True,
+     "choices": [],  # filled at request time with experiments whose ledger carries a published PRIOR
+     "help": "留空=从空记忆开始。与继承产物无关、可单独使用。选择后，新实验以该实验最新 Meta 记录的 PRIOR 与当前 skills 世代起步：创建时拷成本实验的只读世代，首次 Meta 把它当上一份 PRIOR，首个 Fold 与 Meta 挂载这份 skills；源实验没有发布过 PRIOR 则创建失败。"},
     {"key": "meta_memory_max_epochs", "group": "基本与排程", "label": "元学习原始记忆 Epoch 数", "type": "int",
      "advanced": True,
      "help": "拼接给下一次元学习的最近 Epoch 完整对话数（0 关闭原始记忆）。"},
@@ -740,14 +744,18 @@ def suggest_period_defaults(options: dict[str, list[str]]) -> dict[str, dict[str
 
 
 def parameter_schema(
-    trading_days: list[str] | None = None, inherit_sources: list[str] | None = None
+    trading_days: list[str] | None = None,
+    inherit_sources: list[str] | None = None,
+    memory_sources: list[str] | None = None,
 ) -> dict[str, object]:
     """Grouped field schema with live defaults for the creation modal.
 
     With a trading calendar the four period fields become dependent dropdowns
     (``type: period`` + top-level ``period_options``/``period_defaults``);
     without one they degrade to required text inputs. ``inherit_sources``
-    fills the inherit_from dropdown (experiments with >=1 recorded fold).
+    fills the inherit_from dropdown (experiments with >=1 recorded fold) and
+    ``memory_sources`` the inherit_memory_from dropdown (experiments whose
+    ledger carries a published PRIOR).
     """
 
     period_options = build_period_options(trading_days or [])
@@ -784,6 +792,8 @@ def parameter_schema(
                 entry["type"] = "string"
         if key == "inherit_from":
             entry["choices"] = ["", *(inherit_sources or [])]
+        elif key == "inherit_memory_from":
+            entry["choices"] = ["", *(memory_sources or [])]
         entry["default"] = default
         groups[str(entry.pop("group"))].append(entry)
     return {

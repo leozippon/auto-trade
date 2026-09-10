@@ -42,6 +42,7 @@ from autotrade.pipelines.hitl_state import (
     write_control,
 )
 from autotrade.pipelines.ledger import ExperimentLedger
+from autotrade.pipelines.prior import ExperimentPriorStore
 from autotrade.pipelines.skills import ExperimentSkillsStore
 from autotrade.webui.manager import (
     MAX_RUNNING_EXPERIMENTS,
@@ -4521,6 +4522,114 @@ class InheritFromTest(unittest.TestCase):
         choices = fields["inherit_from"]["choices"]
         self.assertEqual(choices[0], "")  # blank = start from the template
         self.assertIn("exp_source", choices)
+        self.assertNotIn("exp_bare", choices)
+
+
+class InheritMemoryFromTest(unittest.TestCase):
+    """Creating an experiment with ``inherit_memory_from`` seeds its memory.
+
+    The console copies the source's latest published PRIOR (and skills) into
+    the new experiment as read-only generations and records them in
+    params.json; a source without a published PRIOR is refused before anything
+    is left on disk; the dropdown lists exactly the experiments that can seed
+    one.
+    """
+
+    PRIOR = "Closed: small-cap reversal (null percentile 0.5). Next: post-event drift."
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.repo_root = Path(self._tmp.name)
+        self.experiments_root = self.repo_root / "experiments"
+        self.experiments_root.mkdir(parents=True)
+        self.manager = ExperimentManager(self.repo_root, self.experiments_root)
+
+    def _source_experiment(self, experiment_id: str, *, prior: str) -> Path:
+        """A source as its own ledger leaves it: one Meta row naming the PRIOR
+        generation it published (or none when it published nothing)."""
+        directory = self.experiments_root / experiment_id
+        (directory / "hitl").mkdir(parents=True)
+        write_json_atomic(directory / "hitl/params.json", {"experiment_id": experiment_id})
+        write_json_atomic(
+            directory / "hitl/status.json", {"schema_version": 1, "state": "completed"}
+        )
+        if prior:
+            ExperimentPriorStore(directory).publish(prior, generation_id="gen_1")
+        _write_ledger(
+            directory,
+            [
+                {
+                    "record_type": "meta_learning",
+                    "experiment_id": experiment_id,
+                    "epoch_id": "epoch_001",
+                    "fold_id": "meta_001",
+                    "run_id": "run_m",
+                    "prior": prior,
+                    "prior_generation_id": "gen_1" if prior else None,
+                }
+            ],
+        )
+        return directory
+
+    def _create(self, **params: object) -> None:
+        with patch.object(
+            ExperimentManager, "start_worker", return_value={"spawned": False}
+        ):
+            self.manager.create_experiment(
+                {
+                    "experiment_id": "exp_child",
+                    "fold_period": "quarter",
+                    "development_first_period": "2024Q1",
+                    "development_last_period": "2024Q1",
+                    "heldout_first_period": "2024Q2",
+                    "heldout_last_period": "2024Q2",
+                    **params,
+                }
+            )
+
+    def test_created_experiment_seeds_the_inherited_memory(self) -> None:
+        from autotrade.pipelines.inherited_memory import load_inherited_memory
+
+        self._source_experiment("exp_memory", prior=self.PRIOR)
+        self._create(inherit_memory_from="exp_memory")
+        child = self.experiments_root / "exp_child"
+        params = json.loads((child / "hitl/params.json").read_text(encoding="utf-8"))
+        memory = params["_inherited_memory"]
+        self.assertEqual(memory["source_experiment_id"], "exp_memory")
+        self.assertEqual(memory["prior_generation_id"], "inherited_exp_memory")
+        self.assertEqual(memory["prior_source_generation_id"], "gen_1")
+        self.assertEqual(ExperimentPriorStore(child).current_text().strip(), self.PRIOR)
+        # Immutable evidence, and what the worker reads back at start.
+        self.assertEqual(Path(str(memory["prior_ref"])).stat().st_mode & 0o222, 0)
+        loaded = load_inherited_memory(child)
+        self.assertIsNotNone(loaded)
+        self.assertEqual(loaded.prior_text, self.PRIOR)
+
+    def test_a_source_without_a_published_prior_is_refused_and_leaves_nothing(
+        self,
+    ) -> None:
+        self._source_experiment("exp_bare", prior="")
+        with self.assertRaisesRegex(ManagerError, "no published PRIOR"):
+            self._create(inherit_memory_from="exp_bare")
+        self.assertFalse((self.experiments_root / "exp_child").exists())
+        with self.assertRaisesRegex(ManagerError, "unknown experiment"):
+            self._create(inherit_memory_from="exp_missing")
+        self.assertFalse((self.experiments_root / "exp_child").exists())
+
+    def test_memory_choices_list_only_sources_with_a_published_prior(self) -> None:
+        self._source_experiment("exp_memory", prior=self.PRIOR)
+        self._source_experiment("exp_bare", prior="")
+        client = TestClient(create_app(self.repo_root, self.experiments_root))
+        schema = client.get("/api/parameter-schema").json()
+        fields = {
+            field["key"]: field
+            for group in schema["groups"]
+            for field in group["fields"]
+        }
+        choices = fields["inherit_memory_from"]["choices"]
+        self.assertEqual(choices[0], "")  # blank = start from an empty memory
+        self.assertIn("exp_memory", choices)
         self.assertNotIn("exp_bare", choices)
 
 
