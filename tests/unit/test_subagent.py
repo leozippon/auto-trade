@@ -1251,34 +1251,39 @@ def test_normalize_subagent_thinking_resolves_the_launch_precedence() -> None:
     by the launch tool, so the schema enum never sees them
     (test_legacy_thinking_values_launch_at_xhigh_through_the_registry)."""
 
-    assert DEFAULT_SUBAGENT_THINKING == "medium"
-    assert normalize_subagent_thinking(None) == "medium"
-    assert normalize_subagent_thinking("inherit") == "medium"
+    assert DEFAULT_SUBAGENT_THINKING == "xhigh"
+    assert normalize_subagent_thinking(None) == "xhigh"
+    assert normalize_subagent_thinking("inherit") == "xhigh"
     assert normalize_subagent_thinking("low") == "low"
-    assert normalize_subagent_thinking("xhigh") == "xhigh"
+    assert normalize_subagent_thinking("medium") == "medium"
     assert SUBAGENT_THINKING_LEVELS == ("off", "low", "medium", "xhigh")
     with pytest.raises(ValueError, match="agent.thinking"):
         normalize_subagent_thinking("turbo")
 
 
-def test_subagent_defaults_are_medium_thinking_and_four_concurrent() -> None:
-    """``medium`` is the default a launch that says nothing gets; the per-launch
-    override still reaches the child, which is what keeps a judgement-heavy
-    delegation able to ask for ``xhigh``."""
+def test_subagent_defaults_are_xhigh_thinking_and_six_concurrent() -> None:
+    """``xhigh`` is the default a launch that says nothing gets, because a
+    delegation is judgement work; the per-launch override still reaches the
+    child, which is what keeps bounded mechanical work able to ask for a
+    cheaper tier. The tool text the model sees names the concurrency cap."""
 
-    assert DEFAULT_SUBAGENT_MAX_CONCURRENT == 4
-    assert SubAgentConfig().max_concurrent == 4
+    assert DEFAULT_SUBAGENT_MAX_CONCURRENT == 6
+    assert SubAgentConfig().max_concurrent == 6
     result = SubAgentEngine(
         llm=ScriptedLLM([ProviderResponse(content="ok")]),
         tools=ToolRegistry([DeclaredReadOnlyShell()]),
     ).run("summarize", role="auditor")
-    assert result["thinking"] == "medium"
-    raised = SubAgentEngine(
+    assert result["thinking"] == "xhigh"
+    lowered = SubAgentEngine(
         llm=ScriptedLLM([ProviderResponse(content="ok")]),
         tools=ToolRegistry([DeclaredReadOnlyShell()]),
-    ).run("design the ranker", role="developer", thinking="xhigh")
-    assert raised["thinking"] == "xhigh"
-    assert "默认同时运行 4 个，超出排队" in AGENT_TOOL_DESCRIPTION
+    ).run("quote the config lines", role="developer", thinking="medium")
+    assert lowered["thinking"] == "medium"
+    assert (
+        f"默认同时运行 {DEFAULT_SUBAGENT_MAX_CONCURRENT} 个，超出排队"
+        in AGENT_TOOL_SPEC.description
+    )
+    assert "可写的子代理同样可以并行" in AGENT_TOOL_SPEC.description
     assert "subagent_completed" in FOLD_WORKFLOW_SECTION
     assert "不要用工具轮询" in FOLD_WORKFLOW_SECTION
     assert "Sleep" not in FOLD_WORKFLOW_SECTION
@@ -2753,8 +2758,8 @@ def test_agent_description_states_role_capabilities_and_thinking_tiers() -> None
 
     continuations = f"最多 {SUBAGENT_MAX_TRUNCATION_CONTINUATIONS} 次强制简洁续写"
     for phrase in (
-        "thinking 默认 medium",
-        "显式抬到 xhigh",
+        "thinking 默认 xhigh",
+        "显式降到 low/medium",
         "机械工作",
         f"{AGENT_MAX_OUTPUT_TOKENS} token",
         continuations,
@@ -2764,8 +2769,8 @@ def test_agent_description_states_role_capabilities_and_thinking_tiers() -> None
     ):
         assert phrase in AGENT_TOOL_DESCRIPTION
     thinking_field = AGENT_TOOL_SPEC.input_schema["properties"]["thinking"]["description"]
-    assert "均为 medium" in thinking_field and continuations in thinking_field
-    assert "显式给 xhigh" in thinking_field
+    assert "均为 xhigh" in thinking_field and continuations in thinking_field
+    assert "显式给 low/medium" in thinking_field
     for prompt in (FOLD_WORKFLOW_SECTION, build_system_prompt(mode="meta", experiment_facts={})):
         assert "action=message" in prompt
         assert "xhigh 只给纯文本" not in prompt
@@ -2852,6 +2857,54 @@ def test_agent_result_echoes_running_and_queued_children_with_descriptions() -> 
         "running_children": [],
         "queued_children": [],
     }
+
+
+def test_a_full_round_of_writable_children_runs_concurrently() -> None:
+    """Nothing serialises write-capable children: a whole round of
+    ``DEFAULT_SUBAGENT_MAX_CONCURRENT`` ``developer`` launches is accepted, all
+    of them reach the model before any returns, and none is queued. Path
+    confinement (one candidate directory each) is the correctness guard, not a
+    limit on how many may run."""
+
+    scopes = tuple(f"candidate-{index}" for index in range(DEFAULT_SUBAGENT_MAX_CONCURRENT))
+    gates = {
+        scope: (threading.Event(), threading.Event(), f"done-{scope}") for scope in scopes
+    }
+    runner = AgentSessionRunner(
+        llm=ScriptedLLM([]),
+        tools=ToolRegistry(),
+        system_prompt="fold",
+        config=_fold_config(),
+        subagent=SubAgentEngine(
+            llm=_TaskGatedLLM(gates),
+            tools=ToolRegistry([DeclaredReadOnlyShell()]),
+        ),
+    )
+    try:
+        results = [
+            runner.tools.invoke(
+                "agent",
+                {
+                    "agent": "developer",
+                    "task": f"build {scope} under candidates/{scope}/",
+                    "description": scope,
+                },
+            )
+            for scope in scopes
+        ]
+        assert all(result.ok for result in results)
+        assert all("queued" not in result.value for result in results)
+        last = results[-1].value
+        assert last["queued_children"] == []
+        assert [child["description"] for child in last["running_children"]] == list(scopes)
+        # The pool admits the whole round: every child reached its model call
+        # while all the others were still blocked on their own gate.
+        for started, _release, _summary in gates.values():
+            assert started.wait(5)
+    finally:
+        for _started, release, _summary in gates.values():
+            release.set()
+    assert all(record["ok"] for record in runner._wait_subagent_jobs())
 
 
 def test_delegation_reminder_carries_the_live_picture() -> None:
