@@ -1553,6 +1553,96 @@ function controlSpanLabel(control) {
   return dates ? `${span} ${dates}` : span;
 }
 
+/* The walk-forward record, read above the fold.
+
+   A future quarter is the only thing this pipeline can be judged on, and a
+   transition is the only place the console sees one: the previous Fold's
+   frozen strategy replayed unchanged on ground it had never seen. Graduation
+   term (b) counts exactly those, so the numbers the verdict reads sit beside
+   the cumulative-validation tile instead of only under the table far below —
+   how many transitions kept a positive excess and how many they had to,
+   how much excess they carried on average, and where those excesses sat inside
+   random-name replays of their own trade skeletons. The shipped artifact's own
+   share rides beside the chain's, because most of a chain's transitions
+   replayed artifacts that one replaced.
+
+   Every figure is the ledger's own (registry._walk_forward_view over
+   ledger.walk_forward_transitions, and ledger.final_artifact_transitions
+   through the verdict diagnostics); nothing is recomputed here. The 样本外过渡
+   table lists the transitions these four numbers summarize. */
+function transitionsStrip(detail) {
+  const epochId = (detail.metrics || {}).epoch_id;
+  const term = (
+    (detail.metrics_by_epoch || []).find((row) => row.epoch_id === epochId) || {}
+  ).walk_forward;
+  // Null only where the counts are Test-stage evidence still under seal; the
+  // sealed tiles beside this strip already say so.
+  if (!term) return null;
+  const strip = el("div", { class: "strip" });
+  strip.append(el("span", { class: "strip-title" }, "未来季度证据 · 样本外过渡"));
+  if (!term.transitions) {
+    strip.append(
+      el(
+        "span",
+        { class: "mode-note" },
+        "本 Epoch 还没有样本外过渡：每个 Epoch 的首个 Fold 不开启过渡，从第二个 Fold 起才有。",
+      ),
+    );
+    return strip;
+  }
+  const source = WALK_FORWARD_SOURCES[term.source] || term.source || "—";
+  const required = term.required ?? null;
+  const percentile =
+    term.mean_excess_percentile === null ||
+    term.mean_excess_percentile === undefined
+      ? null
+      : Number(term.mean_excess_percentile).toFixed(3);
+  const diagnostics = (detail.verdict || {}).diagnostics || {};
+  const own = diagnostics.final_artifact_forward_transitions;
+  const items = [
+    {
+      label: `超额为正（${epochShort(epochId)}）`,
+      value: `${term.positive_excess}/${term.transitions}${required === null ? "" : `　需 ≥${required}`}`,
+      cls: required === null ? "" : term.positive_excess >= required ? "pos" : "neg",
+      title: `末个 Epoch 的 ${term.transitions} 次样本外过渡（取自各 Fold 的${source}）里，${term.positive_excess} 次相对沪深300的超额为正。毕业按 ⌈2/3⌉ 需 ${required ?? "—"} 次。`,
+    },
+    {
+      label: "平均新季超额",
+      value: fmtPct(term.mean_excess),
+      cls: signCls(term.mean_excess),
+      title:
+        "这些过渡在各自计分区间（验证窗口跨多个季度时只算本 Fold 的新季度）相对沪深300的平均超额收益。只作阅读参考，不参与毕业判定。",
+    },
+    {
+      label: "平均 null 分位",
+      value: percentile || "—",
+      cls: "",
+      title:
+        "这些过渡的超额在同规模随机换名重放里的平均分位：接近 0.5 表示与随机组合无法区分。只作阅读参考，不参与毕业判定。",
+    },
+    own === null || own === undefined
+      ? null
+      : {
+          label: "交付产物自身过渡",
+          value: `${diagnostics.final_artifact_forward_positive ?? "—"}/${own}`,
+          cls: own ? "" : "neg",
+          title: own
+            ? "本次 Held-out 交付的那一份产物自己走过的前向过渡，以及其中超额为正的次数；链上其余过渡跑的是它替换掉的上游产物。"
+            : "本次 Held-out 交付的产物自己一次前向过渡都没走过：链上的过渡跑的全是它替换掉的上游产物。",
+        },
+  ].filter(Boolean);
+  for (const item of items)
+    strip.append(
+      el(
+        "span",
+        { class: "strip-item", title: item.title },
+        el("span", { class: "strip-label" }, item.label),
+        el("span", { class: `strip-value ${item.cls}` }, item.value),
+      ),
+    );
+  return strip;
+}
+
 /* Out-of-sample transitions per Epoch. Without a Test stage every Fold after
    the Epoch's first opens with the previous Fold's frozen strategy replayed
    unchanged on this Fold's Validation window (the host's parent control), and
@@ -2625,6 +2715,7 @@ async function renderDetailPage(experimentId, selectedKey) {
             value: `${detail.completed_sessions ?? 0} / ${detail.total_sessions ?? "?"}`,
           },
         ]),
+        transitionsStrip(detail),
         charts,
       ),
     );
@@ -3020,6 +3111,97 @@ function controlBar(detail) {
   return bar;
 }
 
+/* What one session line reports, and the second line under it.
+
+   A Fold line has to answer "what did this session leave behind" without
+   opening it. That is the return of the strategy the Fold left in force — its
+   own frozen candidate, or the inherited parent under the same 父本 prefix the
+   Fold panel uses — with that replay's excess over 沪深300 and its size/β
+   neutralized excess, and the walk-forward transition's new-quarter excess
+   beside its null percentile. The transition belongs to the PREVIOUS Fold's
+   strategy, so it is labelled 过渡 and never folded into this line's own
+   numbers. A Held-out line carries the graduation verdict.
+
+   Everything here is read off the payload the Fold panel reads
+   (foldInForce → registry.strategy_in_force and the fold_returns projection),
+   so a Fold quoted in the list and the same Fold opened on the right can never
+   show different numbers. A session with no result names which nothing it is —
+   not yet run, running, unreadable, or a Fold that left no strategy at all. */
+function sessionListLine(detail, session, pending) {
+  if (session.kind === "heldout") return heldoutSessionLine(detail, session, pending);
+  if (session.kind !== "fold" || !session.record)
+    return { text: pending, cls: "", note: null };
+  const inForce = foldInForce(detail, session);
+  if (inForce.source === "none")
+    return {
+      text: "无产物",
+      cls: "",
+      note: "没有冻结新产物，也没有父产物可沿用",
+      noteTitle:
+        "本 Fold 没有给实验留下任何策略，下一 Fold 从模板重新开始，因此没有沿用中的验证数字",
+    };
+  if (!inForce.result)
+    return {
+      text: "读不到",
+      cls: "",
+      note: `沿用中的${inForce.inherited ? "父产物" : "冻结候选"}回放结果读不到`,
+    };
+  const benchmark = inForce.result.benchmark || {};
+  const transition = inForce.transition || {};
+  const percentile =
+    transition.excess_percentile === null ||
+    transition.excess_percentile === undefined
+      ? null
+      : Number(transition.excess_percentile).toFixed(2);
+  const hasTransition =
+    transition.excess_return !== null && transition.excess_return !== undefined;
+  return {
+    text: `${inForce.inherited ? "父本 " : ""}${fmtPct(inForce.result.total_return)}`,
+    cls: numClass(inForce.result.total_return),
+    note: [
+      `超额 ${fmtPct(benchmark.excess_return)}`,
+      `中性 ${fmtPct(benchmark.neutralized_excess_return)}`,
+      hasTransition
+        ? `过渡 ${fmtPct(transition.excess_return)}${percentile ? `(${percentile})` : ""}`
+        : null,
+    ]
+      .filter(Boolean)
+      .join(" · "),
+    noteTitle:
+      `${inForce.label("验证区间收益")}相对沪深300的超额，以及规模/β 中性化后的年化超额。` +
+      "过渡 = 上一 Fold 冻结的策略被原样放进本 Fold 新季度重跑的超额（父本对照），括号内是它在同规模随机换名重放里的分位；" +
+      "这一项计的是走查一致性，不是本行策略的成绩。",
+  };
+}
+
+function heldoutSessionLine(detail, session, pending) {
+  const verdict = detail.verdict;
+  if (verdict && verdict.status) {
+    const graduated = verdict.status === "graduated";
+    const reasons = verdict.reasons || [];
+    return {
+      text: verdict.status,
+      cls: graduated ? "num pos" : "num neg",
+      note: graduated
+        ? "Held-out 门全部通过"
+        : `未通过 ${reasons.length} 项：${reasons[0] || "见账本"}`,
+      noteTitle: reasons.join("、") || null,
+    };
+  }
+  const ran = (session.records || []).length > 0;
+  if (!detail.test_revealed)
+    return {
+      text: ran ? "未揭示" : pending,
+      cls: "",
+      note: "测试与 Held-out 尚未揭示，揭示后才会显示样本外数字与毕业裁决",
+    };
+  return {
+    text: ran ? "无裁决" : pending,
+    cls: "",
+    note: ran ? "账本没有记录毕业裁决" : null,
+  };
+}
+
 function sessionListPanel(detail, selectedKey) {
   const panel = el(
     "div",
@@ -3050,10 +3232,6 @@ function sessionListPanel(detail, selectedKey) {
         : isCurrent
           ? "running"
           : "pending";
-    const validReturn =
-      session.record && session.record.validation_result
-        ? session.record.validation_result.total_return
-        : null;
     const stateText =
       isCurrent && status.state === "waiting_step_user"
         ? `Step ${status.step_index ?? "?"} 待批准`
@@ -3072,25 +3250,17 @@ function sessionListPanel(detail, selectedKey) {
                 : isCurrent
                   ? formatStageLine(status, { elapsed: false }) || "运行中"
                   : "";
+    // A session that has not produced a result says which nothing it is
+    // rather than leaving the column blank; a finished one has its own line.
+    const line = sessionListLine(
+      detail,
+      session,
+      stateText || (isDone ? "" : "未运行"),
+    );
     const ret =
-      session.kind === "fold" || session.kind === "meta_learning"
-        ? foldDurationNode(
-            detail,
-            session,
-            session.kind === "fold" &&
-              validReturn !== null &&
-              validReturn !== undefined
-              ? fmtPct(validReturn)
-              : stateText,
-            session.kind === "fold" &&
-              validReturn !== null &&
-              validReturn !== undefined
-              ? numClass(validReturn)
-              : "",
-          )
-        : validReturn !== null && validReturn !== undefined
-          ? el("span", { class: numClass(validReturn) }, fmtPct(validReturn))
-          : el("span", {}, stateText);
+      session.kind === "heldout"
+        ? el("span", { class: line.cls }, line.text)
+        : foldDurationNode(detail, session, line.text, line.cls);
     ret.classList.add("ret");
     const item = el(
       "div",
@@ -3108,6 +3278,13 @@ function sessionListPanel(detail, selectedKey) {
         sessionListLabel(session),
       ),
       ret,
+      line.note
+        ? el(
+            "span",
+            { class: "session-note", title: line.noteTitle || null },
+            line.note,
+          )
+        : null,
     );
     list.append(item);
   }
@@ -5980,14 +6157,16 @@ const IN_FORCE_NOTES = {
 function foldResultPanel(detail, session) {
   const record = session.record || {};
   const validation = record.validation_result || {};
-  const inForce = (foldReturnsRow(detail, session) || {}).strategy_in_force;
-  const inherited = inForce === "parent_control";
   // The strategy in force on this window: the Fold's own frozen candidate, or
   // the inherited parent exactly as the host replayed it over the same window.
-  const headline = inherited
-    ? (record.parent_control || {}).validation_result || {}
-    : validation;
-  const headLabel = (name) => (inherited ? `父本${name}` : name);
+  // Read through foldInForce, the one place the branch is taken.
+  const {
+    source: inForce,
+    inherited,
+    label: headLabel,
+    result: inForceResult,
+  } = foldInForce(detail, session);
+  const headline = inForceResult || {};
   const statusLabels = {
     frozen: "已冻结新产物",
     no_update: "沿用父产物（有验证未获接受）",
@@ -6178,6 +6357,37 @@ function foldReturnsRow(detail, session) {
       item.epoch_id === session.epoch_id &&
       item.fold_ref === (session.fold_ref || record.fold_ref),
   );
+}
+
+/* The strategy one Fold left in force, and the replay that records it.
+
+   Which strategy that is gets decided once on the server
+   (registry.strategy_in_force) and projected into the Fold's fold_returns row,
+   so every surface quoting a Fold — the session line, the result panel, the
+   curve — asks this one function and none of them re-derives the branch from
+   fold_status. `result` is that strategy's Validation replay, null when the
+   Fold left no strategy at all or when the record names a replay the console
+   cannot read; `transition` is the parent-control row on the span the
+   walk-forward term is scored on, which belongs to the PREVIOUS Fold's
+   strategy and is labelled as such wherever it is shown. `label` prefixes a
+   metric name with 父本 exactly when the numbers are the inherited parent's. */
+function foldInForce(detail, session) {
+  const record = session.record || {};
+  const row = foldReturnsRow(detail, session) || {};
+  const source = row.strategy_in_force || null;
+  const result =
+    source === "frozen_candidate"
+      ? record.validation_result
+      : source === "parent_control"
+        ? (record.parent_control || {}).validation_result
+        : null;
+  return {
+    source,
+    inherited: source === "parent_control",
+    result: result || null,
+    transition: row.parent_control || null,
+    label: (name) => (source === "parent_control" ? `父本${name}` : name),
+  };
 }
 
 /* Selection bias: the Fold picks its winner among candidates all quoted on the

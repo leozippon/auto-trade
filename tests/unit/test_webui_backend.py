@@ -1293,6 +1293,118 @@ def test_a_fold_that_kept_its_parent_still_publishes_return_numbers(
     }
 
 
+def test_every_fold_session_can_be_quoted_without_opening_it(tmp_path: Path):
+    """The session list quotes a Fold from the payload, or it quotes nothing.
+
+    One Fold line answers "what did this session leave behind" out of a single
+    payload: the ``fold_returns`` row names the strategy the Fold left in force,
+    the session record carries that strategy's Validation replay with its
+    excess and neutralized excess, and the row's ``parent_control`` carries the
+    new quarter the walk-forward transition is scored on with its null
+    percentile. The list used to read ``record.validation_result`` alone, so
+    every Fold that kept its parent — the common outcome — showed a blank
+    return column, and a Fold that left nothing at all looked exactly like one
+    still queued.
+    """
+    from autotrade.webui import registry
+
+    directory = tmp_path / "experiments/walk"
+    _walk_forward_experiment(
+        tmp_path,
+        [
+            {
+                # Froze its own candidate; the Epoch's first Fold, so it opens
+                # no transition.
+                "fold_id": "fold_2023Q1",
+                "validation_period": "20230103..20230331",
+                "fold_status": "frozen",
+                "selected_step_id": "s1",
+                "steps": [{"step_id": "s1", "validation_result_ref": "unused"}],
+                "validation_result": {
+                    "total_return": 0.12,
+                    "benchmark": {
+                        "benchmark_return": 0.05,
+                        "excess_return": 0.07,
+                        "neutralized_excess_return": 0.03,
+                    },
+                },
+            },
+            {
+                # Kept its parent: no Validation row of its own, so the line's
+                # numbers are the host's replay of the parent on this window.
+                "fold_id": "fold_2023Q2",
+                "validation_period": "20230103..20230630",
+                "fold_status": "no_update",
+                "validation_result": None,
+                "steps": [],
+                "parent_control": {
+                    "status": "ok",
+                    "validation_result": {
+                        "total_return": -0.04,
+                        "benchmark": {
+                            "benchmark_return": -0.13,
+                            "excess_return": 0.09,
+                            "neutralized_excess_return": -0.01,
+                        },
+                    },
+                    "step_result": {
+                        "start": "20230403",
+                        "end": "20230630",
+                        "total_return": 0.02,
+                        "benchmark": {"benchmark_return": -0.04},
+                    },
+                    "null_control": {
+                        "excess_percentile": 0.33,
+                        "step": {"excess_percentile": 0.71},
+                    },
+                },
+            },
+            {
+                # Left nothing at all: the line must say so, not go blank.
+                "fold_id": "fold_2023Q3",
+                "validation_period": "20230103..20230930",
+                "fold_status": "baseline_missing",
+                "validation_result": None,
+                "steps": [],
+            },
+        ],
+    )
+    detail = registry.experiment_detail(tmp_path / "experiments", "walk")
+    identity = PublicIdentity(directory)
+    rows = {row["fold_ref"]: row for row in detail["fold_returns"]}
+    sessions = {
+        entry["fold_ref"]: entry
+        for entry in detail["sessions"]
+        if entry.get("kind") == "fold"
+    }
+
+    frozen = identity.fold_ref("fold_2023Q1")
+    assert rows[frozen]["strategy_in_force"] == "frozen_candidate"
+    headline = sessions[frozen]["record"]["validation_result"]
+    assert headline["total_return"] == 0.12
+    assert headline["benchmark"]["excess_return"] == 0.07
+    assert headline["benchmark"]["neutralized_excess_return"] == 0.03
+    assert rows[frozen]["parent_control"] is None
+
+    kept = identity.fold_ref("fold_2023Q2")
+    assert rows[kept]["strategy_in_force"] == "parent_control"
+    assert sessions[kept]["record"]["validation_result"] is None
+    parent = sessions[kept]["record"]["parent_control"]["validation_result"]
+    assert parent["total_return"] == -0.04
+    assert parent["benchmark"]["excess_return"] == 0.09
+    assert parent["benchmark"]["neutralized_excess_return"] == -0.01
+    # The new quarter alone, scored against that quarter's own null control.
+    assert rows[kept]["parent_control"]["excess_return"] == pytest.approx(0.06)
+    assert rows[kept]["parent_control"]["excess_percentile"] == 0.71
+
+    nothing = identity.fold_ref("fold_2023Q3")
+    assert rows[nothing]["strategy_in_force"] == "none"
+    assert sessions[nothing]["record"]["validation_result"] is None
+    assert sessions[nothing]["record"].get("parent_control") is None
+    # Nothing in force means nothing to quote — from either side of the join.
+    assert rows[nothing]["parent_control"] is None
+
+
 def test_a_fold_whose_in_force_replay_is_unreadable_still_names_its_source(
     tmp_path: Path,
 ):
@@ -3185,7 +3297,8 @@ class WebuiBackendTest(unittest.TestCase):
     def test_epoch_metrics_carry_the_walk_forward_transition_counts(self) -> None:
         """The per-Epoch counts carry the two-thirds bar the acceptance rules
         apply, so the console states the threshold instead of restating the
-        rule in the frontend."""
+        rule in the frontend — and the two diagnostics that say how much ground
+        those transitions actually won, which a bare 1/3 does not."""
 
         self._build_walk_forward_experiment("exp_wf")
         detail = self.client.get("/api/experiments/exp_wf").json()
@@ -3197,6 +3310,13 @@ class WebuiBackendTest(unittest.TestCase):
                     "transitions": 3,
                     "positive_excess": 1,
                     "required": 2,
+                    # +5% and −3% on the two scored transitions; the failed one
+                    # carries no excess and cannot be averaged as a zero.
+                    "mean_excess": pytest.approx(0.01),
+                    # Only the trailing transition ran a null control, and it is
+                    # ranked on the span it is scored on (0.42, not the window's
+                    # flattering 0.99).
+                    "mean_excess_percentile": pytest.approx(0.42),
                 }
             ],
         )
@@ -3223,6 +3343,12 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertEqual(term["transitions"], counts["transitions"])
         self.assertEqual(term["positive_excess"], counts["positive_excess"])
         self.assertEqual(term["source"], counts["source"])
+        # The strip above the fold summarizes the same record: its mean null
+        # percentile is the ledger's own figure, not a second average over a
+        # differently chosen set of rows.
+        self.assertEqual(
+            term["mean_excess_percentile"], counts["mean_excess_percentile"]
+        )
         # Rows: every Fold of the Epoch except its first, in walk-forward order.
         rows = [
             row for row in detail["fold_returns"] if row["epoch_id"] == "epoch_001"
@@ -3242,6 +3368,14 @@ class WebuiBackendTest(unittest.TestCase):
         # not a missing transition.
         self.assertEqual(rows[2]["parent_control"]["status"], "failed")
         self.assertIsNone(rows[2]["parent_control"]["excess_return"])
+        # And the strip's mean excess is the mean of exactly these rows' own
+        # excesses — the failed one contributing nothing rather than a zero.
+        scored = [
+            row["parent_control"]["excess_return"]
+            for row in rows
+            if row["parent_control"]["excess_return"] is not None
+        ]
+        self.assertEqual(term["mean_excess"], pytest.approx(sum(scored) / len(scored)))
 
     def test_verdict_publishes_the_shipped_artifacts_own_forward_record(self) -> None:
         """Term (b) counts the chain; only term (c) is about this artifact.
@@ -3302,6 +3436,39 @@ class WebuiBackendTest(unittest.TestCase):
         ).json()
         self.assertEqual(fold["record"]["parent_control"]["status"], "ok")
         self.assertEqual(fold["test_audit"], {"hidden": True})
+
+    def test_the_heldout_session_states_its_verdict_or_states_the_seal(self) -> None:
+        """The Held-out line reports the graduation verdict once it exists.
+
+        It is the one session whose result is a verdict rather than a return,
+        and the payload has to say which of the two situations it is in: before
+        the reveal the session's records come through sealed and no verdict
+        exists, so the line can only say the numbers are still sealed; after it,
+        the same session carries its records and the experiment carries the
+        verdict — with the failing reasons the line names.
+        """
+        self._build_walk_forward_experiment("exp_wf")
+        detail = self.client.get("/api/experiments/exp_wf").json()
+        session = next(
+            entry for entry in detail["sessions"] if entry["kind"] == "heldout"
+        )
+        self.assertTrue(session["hidden"])
+        self.assertTrue(all(record["hidden"] for record in session["records"]))
+        self.assertIsNone(detail["verdict"])
+
+        self._reveal("exp_wf")
+        detail = self.client.get("/api/experiments/exp_wf").json()
+        session = next(
+            entry for entry in detail["sessions"] if entry["kind"] == "heldout"
+        )
+        self.assertNotIn("hidden", session)
+        self.assertEqual(
+            [record["result"]["total_return"] for record in session["records"]], [0.05]
+        )
+        self.assertEqual(detail["verdict"]["status"], "discarded")
+        self.assertEqual(
+            detail["verdict"]["reasons"], ["walkforward_excess_inconsistent(1/3<2)"]
+        )
 
     def test_verdict_surfaces_the_walk_forward_term_beside_it(self) -> None:
         self._build_walk_forward_experiment("exp_wf")

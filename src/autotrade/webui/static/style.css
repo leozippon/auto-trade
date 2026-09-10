@@ -500,6 +500,43 @@ progress.progress.done::-moz-progress-bar {
 .tile-value.hero-key {
  font-size: 1.7rem;
 }
+
+/* Walk-forward strip under the tiles: the tiles are what the account is worth,
+   these are the future quarters behind it. Inline label:value chips rather than
+   a second row of tiles, so the count reads as one line and wraps on narrow
+   screens instead of stealing the tiles' weight. */
+.strip {
+ display: flex;
+ flex-wrap: wrap;
+ align-items: baseline;
+ gap: 0.45rem 1.15rem;
+ margin-top: 0.85rem;
+ padding-top: 0.75rem;
+ border-top: 1px solid var(--row-border);
+}
+.strip-title {
+ font-size: 0.875rem;
+ font-weight: 650;
+}
+.strip-item {
+ display: flex;
+ align-items: baseline;
+ gap: 0.35rem;
+ font-size: 0.875rem;
+}
+.strip-label {
+ color: var(--muted);
+}
+.strip-value {
+ font-weight: 650;
+ font-variant-numeric: tabular-nums;
+}
+.strip-value.pos {
+ color: var(--gain);
+}
+.strip-value.neg {
+ color: var(--loss);
+}
 .orders-table-box {
  max-height: 24rem;
  overflow: auto;
@@ -640,8 +677,9 @@ h4.subsection-title,
 }
 .session-item {
  display: flex;
+ flex-wrap: wrap;
  align-items: center;
- gap: 0.6rem;
+ gap: 0.15rem 0.6rem;
  padding: 0.45rem 0.7rem;
  border-radius: 9px;
  cursor: pointer;
@@ -685,6 +723,21 @@ h4.subsection-title,
  font-variant-numeric: tabular-nums;
  font-size: 0.875rem;
  white-space: nowrap;
+}
+/* Second line of a session row: what the session left behind, under the label
+   it belongs to. It wraps onto its own line (order puts it last in both the
+   ordinary and the phase-head order) and is indented past the status dot, so
+   the dot/label/return line above it is untouched. */
+.session-item .session-note {
+ order: 9;
+ flex-basis: 100%;
+ padding-left: 1.22rem;
+ font-size: 0.78rem;
+ color: var(--muted);
+ font-variant-numeric: tabular-nums;
+ white-space: nowrap;
+ overflow: hidden;
+ text-overflow: ellipsis;
 }
 .epoch-head {
  margin: 0.7rem 4px 4px;

@@ -276,6 +276,23 @@ def _mean(values: list[float]) -> float | None:
     return sum(values) / len(values) if values else None
 
 
+def _excess_return(result: object) -> float | None:
+    """One replay result's return over its benchmark, ``None`` without both.
+
+    The same subtraction ``ledger._excess_positive`` grades a transition on, so
+    an excess the console prints and the count the graduation term reads can
+    never come from different arithmetic.
+    """
+    if not isinstance(result, Mapping):
+        return None
+    benchmark = result.get("benchmark")
+    total = _number(result.get("total_return"))
+    bench = (
+        _number(benchmark.get("benchmark_return")) if isinstance(benchmark, Mapping) else None
+    )
+    return total - bench if total is not None and bench is not None else None
+
+
 def _parent_control_view(record: Mapping[str, object]) -> dict[str, object] | None:
     """Console metrics of one Fold's host parent control.
 
@@ -302,20 +319,13 @@ def _parent_control_view(record: Mapping[str, object]) -> dict[str, object] | No
     window_start, _, window_end = str(record.get("validation_period") or "").partition("..")
     scored_start = result.get("start") if stepped else window_start
     scored_end = result.get("end") if stepped else window_end
-    benchmark = result.get("benchmark")
-    total = _number(result.get("total_return"))
-    bench = (
-        _number(benchmark.get("benchmark_return")) if isinstance(benchmark, Mapping) else None
-    )
     return {
         "status": control.get("status"),
         "source": "step_result" if stepped else "validation_result",
         "period_start": str(scored_start) if scored_start else None,
         "period_end": str(scored_end) if scored_end else None,
-        "return": total,
-        "excess_return": (
-            total - bench if total is not None and bench is not None else None
-        ),
+        "return": _number(result.get("total_return")),
+        "excess_return": _excess_return(result),
         "sharpe": _number(result.get("sharpe")),
         "max_drawdown": _number(result.get("max_drawdown")),
         # Where that excess sits inside random-name replays of the control's own
@@ -358,6 +368,7 @@ def _count(value: object) -> int | None:
 def _walk_forward_view(
     records: list[dict[str, object]],
     epoch_id: str,
+    epoch_folds: list[dict[str, object]],
     *,
     test_stage: bool,
     revealed: bool,
@@ -370,15 +381,34 @@ def _walk_forward_view(
     until the reveal like every other Test number. ``required`` is the same
     two-thirds bar the acceptance rules apply, served so the console states the
     threshold without restating the rule (``None`` without transitions).
+
+    Two diagnostics ride beside the count, because a bare 5/7 says nothing
+    about how much ground those five won: ``mean_excess`` is the average excess
+    the counted transitions carried, and ``mean_excess_percentile`` is where
+    those excesses sat inside random-name replays of their own trade skeletons
+    (the ledger's own figure, the one the verdict diagnostics publish). Neither
+    gates anything. The excesses are read off exactly the transitions the
+    ledger counted — each Fold's frozen Test with a Test stage, otherwise every
+    Fold after the Epoch's first (``ledger._transition_rows``) — so the mean
+    can never average a wider set than the count it sits next to.
     """
     if test_stage and not revealed:
         return None
     counts = walk_forward_transitions(records, epoch_id=epoch_id, test_stage=test_stage)
+    scored = (
+        [record.get("test_result") for record in epoch_folds]
+        if test_stage
+        else [transition_result(record.get("parent_control")) for record in epoch_folds[1:]]
+    )
     return {
         "source": counts["source"],
         "transitions": counts["transitions"],
         "positive_excess": counts["positive_excess"],
         "required": AcceptanceRules.walk_forward_consistency(counts).get("required"),
+        "mean_excess": _mean(
+            [value for value in map(_excess_return, scored) if value is not None]
+        ),
+        "mean_excess_percentile": _number(counts["mean_excess_percentile"]),
     }
 
 
@@ -729,7 +759,11 @@ def summarize_experiment(directory: Path) -> dict[str, object]:
                             _metric_series(epoch_folds, "test_result", "sharpe")
                         ) if revealed else None,
                         "walk_forward": _walk_forward_view(
-                            records, epoch, test_stage=test_stage, revealed=revealed
+                            records,
+                            epoch,
+                            epoch_folds,
+                            test_stage=test_stage,
+                            revealed=revealed,
                         ),
                     }
                     for epoch in epochs
