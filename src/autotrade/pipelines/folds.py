@@ -367,6 +367,42 @@ def heldout_periods(
     return periods
 
 
+def deployment_fold(
+    start: str,
+    trading_days: list[str],
+    *,
+    window_months: int,
+    min_region_trade_days: int = MIN_REGION_TRADE_DAYS,
+) -> FoldSpec:
+    """The deployment adjustment window as one Fold: ``start`` through the
+    release's last trading day, decided on the trading day before ``start``.
+
+    The end is the release's last daily partition, so the seed prebuild and
+    every arm pinning that release build the same slot. The window includes
+    the Held-out by construction; docs/pipeline-design.md §3.4 says what may
+    change on it.
+    """
+
+    if not trading_days:
+        raise ValueError("the deployment window needs the release's trading days")
+    start = yyyymmdd(start)
+    end = max(trading_days)
+    if start > end:
+        raise ValueError(
+            f"deployment_adjustment_start {start} is after the release's last trading day {end}"
+        )
+    _require_min_trade_days(
+        "deployment adjustment", start, end, trading_days, min_region_trade_days
+    )
+    return _fold_spec(
+        f"deployment_{start}..{end}",
+        start,
+        end,
+        trading_days,
+        window_months=window_months,
+    )
+
+
 def assert_no_overlap(development_last_period: str, heldout_first_period: str, *, period: str = "quarter") -> None:
     """Held-out must be configured upfront and not overlap development."""
     dev_end = period_bounds(development_last_period, period=period)[1]

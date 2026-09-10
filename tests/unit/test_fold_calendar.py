@@ -21,6 +21,7 @@ import pandas as pd
 from autotrade.environment.data.contracts import CN_TZ
 from autotrade.pipelines.config import RollingExperimentConfig
 from autotrade.pipelines.folds import (
+    deployment_fold,
     FoldSpec,
     build_fold_schedule,
     heldout_periods,
@@ -402,6 +403,33 @@ class TestStageScheduleTest(unittest.TestCase):
     def test_test_stage_must_be_boolean(self) -> None:
         with self.assertRaisesRegex(ValueError, "test_stage must be boolean"):
             default_config(test_stage=1)
+
+
+class DeploymentWindowTest(unittest.TestCase):
+    def test_the_deployment_window_runs_to_the_release_end(self) -> None:
+        fold = deployment_fold("20250901", TRADING_DAYS, window_months=24)
+        self.assertEqual(fold.fold_id, "deployment_20250901..20260630")
+        self.assertEqual((fold.validation_start, fold.validation_end), ("20250901", "20260630"))
+        # Decided on the last trading day before the window, like every Fold.
+        self.assertEqual(fold.valid_decision_time, anchor("20250829"))
+        self.assertEqual((fold.input_window_start, fold.input_window_end), ("20230901", "20250831"))
+        self.assertFalse(fold.has_test)
+        self.assertFalse(fold.has_step)
+
+    def test_a_start_past_the_release_end_is_refused(self) -> None:
+        with self.assertRaisesRegex(ValueError, "after the release"):
+            deployment_fold("20260701", TRADING_DAYS, window_months=24)
+        with self.assertRaisesRegex(ValueError, "at least 2"):
+            deployment_fold("20260630", TRADING_DAYS, window_months=24)
+
+    def test_the_knobs_are_validated_by_the_config(self) -> None:
+        config = default_config(deployment_adjustment_start="20250901")
+        self.assertEqual(config.deployment_max_backtests, 6)
+        self.assertEqual(default_config().deployment_adjustment_start, "")
+        with self.assertRaisesRegex(ValueError, "YYYYMMDD"):
+            default_config(deployment_adjustment_start="2025-09-01")
+        with self.assertRaisesRegex(ValueError, "deployment_max_backtests"):
+            default_config(deployment_max_backtests=0)
 
 
 class HeldOutRangeTest(unittest.TestCase):

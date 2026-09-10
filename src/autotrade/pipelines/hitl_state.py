@@ -122,6 +122,11 @@ WEB_CREATE_DEFAULTS: dict[str, object] = {
     "cost_stress_multiplier": 1.0,
     "heldout_min_trades": 0,
     "heldout_min_final_transitions": 1,
+    "deployment_adjustment_start": rolling_default("deployment_adjustment_start"),
+    "deployment_max_backtests": rolling_default("deployment_max_backtests"),
+    # The tree the deployment adjustment's two views are hardlinked from;
+    # empty falls back to an explicitly named pit_views_seed, else cold-builds.
+    "deployment_pit_views_seed": "",
     "initial_cash": 1_000_000.0,
     "max_total_holdings": None,
     "max_single_name_weight": None,

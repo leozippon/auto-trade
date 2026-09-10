@@ -174,6 +174,9 @@ _ALLOWED_PARAMS = {
     "cost_stress_multiplier",
     "heldout_min_trades",
     "heldout_min_final_transitions",
+    "deployment_adjustment_start",
+    "deployment_max_backtests",
+    "deployment_pit_views_seed",
     "meta_learning_fold_interval",
     "meta_memory_max_epochs",
     "inherit_from",
@@ -407,6 +410,10 @@ class InteractiveWorkerOptions:
     # An explicitly chosen seed must apply or the run fails; the default one is
     # an optimisation, so a missing or non-matching default cold-builds.
     pit_views_seed_required: bool = False
+    # The tree the deployment adjustment takes its two views from when the
+    # experiment's own views cannot be extended (docs/pipeline-design.md §3.4);
+    # None falls back to an explicitly named pit_views_seed, else a cold build.
+    deployment_pit_views_seed: Path | None = None
     snapshot_config: SnapshotConfig = field(default_factory=SnapshotConfig)
     nl_config: NLConfig = field(default_factory=NLConfig)
     max_intraday_row_group_rows: int = 2_000_000
@@ -583,6 +590,13 @@ def resolve_worker_options(
         if data_backend == "pit"
         else (None, False)
     )
+    deployment_seed = (
+        _deployment_pit_views_seed(
+            params.get("deployment_pit_views_seed"), repository, snapshot_config
+        )
+        if data_backend == "pit"
+        else None
+    )
     trading_days: list[str] = []
     if preflight:
         pass  # the release pin writes into the experiment dir; see the docstring
@@ -680,6 +694,12 @@ def resolve_worker_options(
         ),
         convergence_start_epoch=_positive_int(
             knob("convergence_start_epoch"), "convergence_start_epoch"
+        ),
+        deployment_adjustment_start=_deployment_start(
+            knob("deployment_adjustment_start")
+        ),
+        deployment_max_backtests=_positive_int(
+            knob("deployment_max_backtests"), "deployment_max_backtests"
         ),
         nl_failure_policy=_nl_failure_policy(knob("nl_failure_policy")),
         finalize_before_deadline_seconds=_nonnegative_int(
@@ -784,6 +804,7 @@ def resolve_worker_options(
         pit_cache_root=pit_cache_root,
         pit_views_seed=pit_views_seed,
         pit_views_seed_required=pit_views_seed_required,
+        deployment_pit_views_seed=deployment_seed,
         snapshot_config=snapshot_config,
         # NLConfig owns the NL budget defaults; an absent parameter keeps the
         # shipped default rather than a second copy of it living here.
@@ -1945,6 +1966,38 @@ def _pit_views_seed(
         raise ValueError(f"pit_views_seed must be an existing directory: {seed}")
     assert_seed_snapshot_config(seed, snapshot_config)
     return seed, True
+
+
+def _deployment_pit_views_seed(
+    value: object, repo_root: Path, snapshot_config: SnapshotConfig
+) -> Path | None:
+    """The seed the deployment adjustment links its two views from, if named.
+
+    Checked like an explicit ``pit_views_seed``: the tree must exist and carry
+    this experiment's snapshot configuration under the current cache format,
+    because the two slots are read by this code, whatever format the
+    experiment's own views were built under.
+    """
+
+    if value in (None, ""):
+        return None
+    if not isinstance(value, str):
+        raise ValueError("deployment_pit_views_seed must be a string")  # noqa: TRY004
+    seed = _repo_path(repo_root, value.strip(), "deployment_pit_views_seed")
+    if not seed.is_dir() or seed.is_symlink():
+        raise ValueError(
+            f"deployment_pit_views_seed must be an existing directory: {seed}"
+        )
+    assert_seed_snapshot_config(seed, snapshot_config)
+    return seed
+
+
+def _deployment_start(value: object) -> str:
+    if value in (None, ""):
+        return ""
+    if not isinstance(value, str):
+        raise ValueError("deployment_adjustment_start must be a YYYYMMDD string")  # noqa: TRY004
+    return yyyymmdd(value.strip())
 
 
 def _optional_workspace_reference(value: object, repo_root: Path) -> str:

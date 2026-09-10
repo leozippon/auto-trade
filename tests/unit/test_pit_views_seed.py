@@ -524,6 +524,25 @@ def test_default_plan_is_the_console_calendar_and_shares_regions() -> None:
     assert heldout[0][1], heldout[0][2]
 
 
+def test_the_deployment_adjustment_slot_is_planned_with_the_knob() -> None:
+    """With ``deployment_adjustment_start`` set the seed also carries the
+    deployment session's Validation slot: that day through the release's
+    last trading day, decided the trading day before; without it, nothing."""
+    from autotrade.pipelines.pit_views_seed import plan_parameters
+
+    plan = plan_parameters()
+    assert plan["deployment_adjustment_start"] == ""
+    without = iter_plan_pit_jobs(_business_days(), **plan)
+    with_slot = iter_plan_pit_jobs(
+        _business_days(), **{**plan, "deployment_adjustment_start": "20250901"}
+    )
+    added = set(with_slot) - set(without)
+    assert len(added) == 1
+    phase, start, end, decision = next(iter(added))
+    assert (phase, start, end) == ("valid", "20250901", "20260630")
+    assert decision.strftime("%Y%m%d") == "20250829"
+
+
 def test_yearly_regular_folds_plan_one_shared_region_per_year_and_no_frozen_test() -> None:
     """One regular Fold per year, judged by Held-out alone.
 

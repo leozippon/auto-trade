@@ -26,7 +26,7 @@ from pathlib import Path
 from autotrade.environment.data.snapshot import SnapshotConfig
 from autotrade.environment.runtime import chmod_tree
 from autotrade.pipelines.config import SNAPSHOT_CACHE_FORMAT_VERSION
-from autotrade.pipelines.folds import build_fold_schedule, heldout_periods
+from autotrade.pipelines.folds import build_fold_schedule, deployment_fold, heldout_periods
 from autotrade.pipelines.hitl_state import WEB_CREATE_DEFAULTS
 
 # What a finished view carries: a snapshot restates its manifest and a bundle
@@ -47,6 +47,7 @@ PLAN_PARAMETERS: tuple[str, ...] = (
     "window_months",
     "validation_periods",
     "min_region_trade_days",
+    "deployment_adjustment_start",
 )
 _INT_PLAN_PARAMETERS = frozenset(
     {"window_months", "validation_periods", "min_region_trade_days"}
@@ -238,6 +239,7 @@ def iter_plan_pit_jobs(
     min_region_trade_days: int,
     test_stage: bool,
     validation_periods: int = 1,
+    deployment_adjustment_start: str = "",
 ) -> tuple[tuple[str, str, str, datetime], ...]:
     """Unique Meta/Fold/frozen_test/held-out prepare jobs for one fold plan.
 
@@ -252,6 +254,10 @@ def iter_plan_pit_jobs(
     does too — so the returned tuples repeat a region once per phase while the
     provider builds it once. Jobs are sorted by decision time, then region and
     phase, so the plan and a prebuild's progress log are the same on every run.
+
+    With ``deployment_adjustment_start`` set, the deployment adjustment's
+    Validation slot (that start through the release's last trading day,
+    ``folds.deployment_fold``) is planned too.
     """
 
     folds = build_fold_schedule(
@@ -291,6 +297,21 @@ def iter_plan_pit_jobs(
                 str(period["start"]),
                 str(period["end"]),
                 period["decision_time"],  # type: ignore[arg-type]
+            )
+        )
+    if deployment_adjustment_start:
+        deployment = deployment_fold(
+            deployment_adjustment_start,
+            trading_days,
+            window_months=window_months,
+            min_region_trade_days=min_region_trade_days,
+        )
+        jobs.append(
+            (
+                "valid",
+                deployment.validation_start,
+                deployment.validation_end,
+                deployment.valid_decision_time,
             )
         )
     jobs.sort(key=lambda job: (job[3], job[1], job[0]))

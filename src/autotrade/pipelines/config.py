@@ -600,6 +600,14 @@ class RollingExperimentConfig:
     # Keep at most this many derived sandbox images for this experiment; older ones
     # are best-effort pruned after a successful rebuild (0 disables GC).
     meta_sandbox_image_keep: int = 3
+    # The post-Held-out deployment adjustment (docs/pipeline-design.md §3.4):
+    # a mechanism-frozen refit of the graduated artifact on the window from
+    # this ``YYYYMMDD`` start to the release's last trading day. Empty = no
+    # such session; only a graduated experiment runs one.
+    deployment_adjustment_start: str = ""
+    # Its replay budget (Steps are the same number); wall clock and LLM calls
+    # reuse max_fold_minutes and max_llm_calls.
+    deployment_max_backtests: int = 6
     # Step artifact tree (lineage across folds); toggleable for ablations.
     step_tree_enabled: bool = True
     # Also record failed validation attempts as lightweight dead-end nodes
@@ -633,10 +641,15 @@ class RollingExperimentConfig:
             "per_call_timeout_seconds",
             "strategy_fit_timeout_seconds",
             "convergence_start_epoch",
+            "deployment_max_backtests",
         ):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 raise ValueError(f"{name} must be a positive integer")
+        if self.deployment_adjustment_start and not re.fullmatch(
+            r"\d{8}", self.deployment_adjustment_start
+        ):
+            raise ValueError("deployment_adjustment_start must be YYYYMMDD or empty")
         for name in (
             "meta_learning_fold_interval",
             "meta_memory_max_epochs",

@@ -140,6 +140,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     calendar.add_argument("--min-region-trade-days", type=int, default=None)
     calendar.add_argument(
+        "--deployment-adjustment-start",
+        default=None,
+        help="YYYYMMDD; also plan the deployment adjustment's Validation slot "
+        "(that day through the release's last trading day)",
+    )
+    calendar.add_argument(
         "--test-stage",
         dest="test_stage",
         action=argparse.BooleanOptionalAction,

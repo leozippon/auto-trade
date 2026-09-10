@@ -1565,6 +1565,34 @@ def test_worker_params_reject_unknown_and_partial_periods(tmp_path: Path):
         load_worker_options(experiment, repo_root=repo)
 
 
+def test_worker_parses_the_deployment_adjustment_knobs(tmp_path: Path):
+    from autotrade.pipelines.worker import _deployment_pit_views_seed
+
+    repo, experiment = _experiment(tmp_path)
+    path = experiment / "hitl/params.json"
+    params = json.loads(path.read_text(encoding="utf-8"))
+    options = load_worker_options(experiment, repo_root=repo)
+    assert options.rolling.deployment_adjustment_start == ""
+    assert options.rolling.deployment_max_backtests == 6
+    assert options.deployment_pit_views_seed is None
+    params.update({"deployment_adjustment_start": "2026-04-01", "deployment_max_backtests": 3})
+    path.write_text(json.dumps(params), encoding="utf-8")
+    options = load_worker_options(experiment, repo_root=repo)
+    assert options.rolling.deployment_adjustment_start == "20260401"
+    assert options.rolling.deployment_max_backtests == 3
+    params["deployment_max_backtests"] = 0
+    path.write_text(json.dumps(params), encoding="utf-8")
+    with pytest.raises(ValueError, match="deployment_max_backtests"):
+        load_worker_options(experiment, repo_root=repo)
+    # A named deployment seed is a decision: it must exist and carry this
+    # experiment's snapshot configuration under the current cache format.
+    with pytest.raises(ValueError, match="existing directory"):
+        _deployment_pit_views_seed("data/pit_views_seed/absent", repo, options.snapshot_config)
+    (repo / "data/pit_views_seed/bare").mkdir(parents=True)
+    with pytest.raises(ValueError, match="provider.json"):
+        _deployment_pit_views_seed("data/pit_views_seed/bare", repo, options.snapshot_config)
+
+
 def test_worker_maps_data_domain_controls_to_snapshot_config(tmp_path: Path):
     repo, experiment = _experiment(tmp_path)
     path = experiment / "hitl" / "params.json"
