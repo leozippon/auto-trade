@@ -21,9 +21,9 @@ import pandas as pd
 from autotrade.environment.data.contracts import CN_TZ
 from autotrade.pipelines.config import RollingExperimentConfig
 from autotrade.pipelines.folds import (
-    deployment_fold,
     FoldSpec,
     build_fold_schedule,
+    deployment_fold,
     heldout_periods,
     period_range,
 )

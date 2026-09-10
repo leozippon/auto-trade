@@ -8,9 +8,8 @@ import stat
 import uuid
 from pathlib import Path
 
-import pytest
-
 import pandas as pd
+import pytest
 
 from autotrade.environment.data.snapshot import SnapshotConfig
 from autotrade.environment.runtime import chmod_tree

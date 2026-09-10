@@ -961,7 +961,7 @@ def test_frozen_test_records_integrity_failure_for_tree_mutations(
 def test_frozen_restore_copy_failure_is_fail_closed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    import autotrade.pipelines.experiment as experiment
+    from autotrade.pipelines import experiment
 
     def boom(**_kwargs):
         raise OSError("copy failed")
@@ -2820,7 +2820,10 @@ def test_deployment_adjustment_freezes_a_knob_refit_as_the_paper_candidate(tmp_p
     }
     # The row is not a Fold: it never enters the Fold history, the Meta
     # history or the transition chain.
-    from autotrade.pipelines.experiment import _development_inputs, _keep_frozen_artifact_ids
+    from autotrade.pipelines.experiment import (
+        _development_inputs,
+        _keep_frozen_artifact_ids,
+    )
     from autotrade.pipelines.ledger import walk_forward_transitions
 
     assert set(latest_fold_records(ledger.read())) == {("epoch_001", "fold_2026Q1")}

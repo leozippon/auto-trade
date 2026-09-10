@@ -548,5 +548,5 @@ class PromptCompositionTest(unittest.TestCase):
         self.assertNotIn("偏好小步修改", prompt.split("# 本 Fold 动态上下文", 1)[0])
 
     def test_an_unknown_mode_is_refused(self) -> None:
-        with self.assertRaisesRegex(ValueError, "mode must be fold, meta, or meta_learning"):
+        with self.assertRaisesRegex(ValueError, "mode must be fold, deployment_adjustment, meta, or meta_learning"):
             build_system_prompt(mode="authoring")

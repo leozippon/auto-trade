@@ -26,7 +26,11 @@ from pathlib import Path
 from autotrade.environment.data.snapshot import SnapshotConfig
 from autotrade.environment.runtime import chmod_tree
 from autotrade.pipelines.config import SNAPSHOT_CACHE_FORMAT_VERSION
-from autotrade.pipelines.folds import build_fold_schedule, deployment_fold, heldout_periods
+from autotrade.pipelines.folds import (
+    build_fold_schedule,
+    deployment_fold,
+    heldout_periods,
+)
 from autotrade.pipelines.hitl_state import WEB_CREATE_DEFAULTS
 
 # What a finished view carries: a snapshot restates its manifest and a bundle

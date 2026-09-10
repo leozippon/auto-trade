@@ -23,15 +23,14 @@ from _bootstrap import add_repo_src
 add_repo_src(__file__)
 
 from autotrade.agent.compact import COMPACT_SYSTEM_PROMPT
-from autotrade.agent.subagent import AGENT_TOOL_DESCRIPTION, subagent_system_prompt
 from autotrade.agent.prompts import (
     CONVERGENCE_PHASE_PROMPT,
     DEFAULT_ANTI_OVERFIT_PROMPT,
     DEFAULT_CONVERGENCE_PROMPT,
-    EXPLORATION_PHASE_PROMPT,
     DEPLOYMENT_DEFAULT_INSTRUCTION,
     DEPLOYMENT_SECTION,
     DEPLOYMENT_STATIC_SECTIONS,
+    EXPLORATION_PHASE_PROMPT,
     FOLD_DEFAULT_INSTRUCTION,
     FOLD_DYNAMIC_CONTEXT_HEADER,
     FOLD_ENV_SECTION,
@@ -54,6 +53,7 @@ from autotrade.agent.prompts import (
     build_meta_learning_prompt,
     build_prior_section,
 )
+from autotrade.agent.subagent import AGENT_TOOL_DESCRIPTION, subagent_system_prompt
 from autotrade.environment.nl.engine import (
     FINAL_AFTER_TOOL_BUDGET,
     SUB_AGENT_SYSTEM_PROMPT,
