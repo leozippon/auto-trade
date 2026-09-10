@@ -1423,6 +1423,182 @@ def test_early_finish_grades_the_epoch_that_actually_ran(tmp_path: Path):
     assert _heldout_epoch_id(ExperimentLedger(tmp_path / "empty.jsonl"), 3) == "epoch_003"
 
 
+def _graduate_every_heldout(monkeypatch) -> None:
+    """The deterministic baseline holds cash and never graduates; the
+    deployment path needs a graduated verdict, which is the ledger's word."""
+    from autotrade.pipelines.config import AcceptanceRules
+
+    monkeypatch.setattr(
+        AcceptanceRules,
+        "heldout_verdict",
+        lambda self, summary, *args, window=None, **kwargs: {
+            "status": "graduated",
+            "reasons": [],
+            "window": window,
+        },
+    )
+
+
+def _deployment_experiment(tmp_path: Path, **params: object) -> tuple[Path, Path]:
+    repo, experiment = _experiment(tmp_path)
+    path = experiment / "hitl/params.json"
+    current = json.loads(path.read_text(encoding="utf-8"))
+    current.update(
+        {
+            "development_first_period": "2025Q4",
+            "development_last_period": "2026Q1",
+            "test_stage": False,
+            "deployment_adjustment_start": "20260401",
+            **params,
+        }
+    )
+    path.write_text(json.dumps(current), encoding="utf-8")
+    return repo, experiment
+
+
+def test_local_worker_runs_the_deployment_adjustment_after_graduation(
+    tmp_path: Path, monkeypatch
+):
+    """A graduated experiment runs the post-seal deployment adjustment on the
+    window from the configured start to the release end, records one row,
+    names the Paper candidate in the terminal status, and a resume republishes
+    without re-running anything."""
+    _graduate_every_heldout(monkeypatch)
+    repo, experiment = _deployment_experiment(tmp_path)
+    options = load_worker_options(experiment, repo_root=repo)
+    result = run_local_interactive_worker(options)
+    assert result["state"] == "completed"
+    assert result["verdict"]["status"] == "graduated"
+    records = ExperimentLedger(options.rolling.ledger_path).read()
+    assert [record["record_type"] for record in records] == [
+        "fold",
+        "fold",
+        "heldout",
+        "deployment_adjustment",
+    ]
+    graduated = records[1]["frozen_strategy_artifact_id"]
+    adjustment = records[-1]
+    assert adjustment["session_key"] == "deployment_adjustment"
+    assert adjustment["fold_id"] == "deployment_20260401..20260930"
+    assert adjustment["validation_period"] == "20260401..20260930"
+    assert adjustment["valid_decision_time"].startswith("2026-03-31T23:59:59")
+    assert adjustment["parent_strategy_artifact_id"] == graduated
+    # The host replayed the graduate on the window; the deterministic
+    # developer nominated the graduate's own content, so nothing was adjusted.
+    assert adjustment["parent_control"]["status"] == "ok"
+    assert adjustment["status"] == "no_update"
+    assert adjustment["nominated_identical_to_parent"] is True
+    assert adjustment["adjusted_strategy_artifact_id"] is None
+    assert result["paper_candidate"]["source"] == "graduated"
+    assert result["paper_candidate"]["artifact_id"] == graduated
+    assert result["final_strategy_artifact"] == graduated
+    status = read_status(experiment / "hitl/status.json")
+    assert status["paper_candidate"] == result["paper_candidate"]
+    plan = json.loads((experiment / "hitl/schedule.json").read_text(encoding="utf-8"))
+    assert [row["kind"] for row in plan["sessions"]] == [
+        "fold",
+        "fold",
+        "heldout",
+        "deployment_adjustment",
+    ]
+    assert plan["sessions"][-1]["period"] == {"start": "20260401", "end": "20260930"}
+    assert result["total_sessions"] == 4
+    # Nothing outstanding: a resume republishes the same terminal status.
+    resumed = run_local_interactive_worker(options)
+    assert resumed["state"] == "completed"
+    assert resumed["heldout_runs"] == 0
+    assert resumed["paper_candidate"] == result["paper_candidate"]
+    assert ExperimentLedger(options.rolling.ledger_path).read() == records
+
+
+def test_a_discarded_experiment_runs_no_deployment_adjustment(tmp_path: Path):
+    repo, experiment = _deployment_experiment(tmp_path)
+    options = load_worker_options(experiment, repo_root=repo)
+    result = run_local_interactive_worker(options)
+    assert result["state"] == "completed"
+    assert result["verdict"]["status"] == "discarded"
+    assert result["paper_candidate"] is None
+    records = ExperimentLedger(options.rolling.ledger_path).read()
+    assert [record["record_type"] for record in records] == ["fold", "fold", "heldout"]
+    resumed = run_local_interactive_worker(options)
+    assert resumed["state"] == "completed"
+    assert ExperimentLedger(options.rolling.ledger_path).read() == records
+
+
+def test_a_crashed_deployment_adjustment_is_recorded_and_resumed(
+    tmp_path: Path, monkeypatch
+):
+    """A crash leaves attempt_failed and the session stays due; the next
+    worker start goes straight to it without re-running development or the
+    Held-out."""
+    from autotrade.pipelines.local_backend import DeterministicBaselineDeveloper
+
+    _graduate_every_heldout(monkeypatch)
+    repo, experiment = _deployment_experiment(tmp_path, session_max_attempts=1)
+    options = load_worker_options(experiment, repo_root=repo)
+    original = DeterministicBaselineDeveloper.__call__
+
+    def crash_on_deployment(self, request):
+        if request.session_kind == "deployment_adjustment":
+            raise RuntimeError("sandbox died")
+        return original(self, request)
+
+    monkeypatch.setattr(DeterministicBaselineDeveloper, "__call__", crash_on_deployment)
+    with pytest.raises(RuntimeError, match="sandbox died"):
+        run_local_interactive_worker(options)
+    records = ExperimentLedger(options.rolling.ledger_path).read()
+    assert [record["record_type"] for record in records] == [
+        "fold",
+        "fold",
+        "heldout",
+        "attempt_failed",
+    ]
+    assert records[-1]["session_key"] == "deployment_adjustment"
+    assert read_status(experiment / "hitl/status.json")["state"] == "failed"
+
+    monkeypatch.setattr(DeterministicBaselineDeveloper, "__call__", original)
+    resumed = run_local_interactive_worker(options)
+    assert resumed["state"] == "completed"
+    after = ExperimentLedger(options.rolling.ledger_path).read()
+    assert after[:4] == records
+    assert [record["record_type"] for record in after] == [
+        "fold",
+        "fold",
+        "heldout",
+        "attempt_failed",
+        "deployment_adjustment",
+    ]
+    assert resumed["paper_candidate"]["source"] == "graduated"
+
+
+def test_a_deployment_adjustment_requested_after_completion_runs_on_resume(
+    tmp_path: Path, monkeypatch
+):
+    """An experiment that graduated before the knob existed: setting the
+    start on its params and resuming runs just the adjustment."""
+    _graduate_every_heldout(monkeypatch)
+    repo, experiment = _deployment_experiment(tmp_path, deployment_adjustment_start="")
+    options = load_worker_options(experiment, repo_root=repo)
+    completed = run_local_interactive_worker(options)
+    assert completed["state"] == "completed"
+    assert completed["paper_candidate"]["source"] == "graduated"
+    records = ExperimentLedger(options.rolling.ledger_path).read()
+    assert [record["record_type"] for record in records] == ["fold", "fold", "heldout"]
+
+    path = experiment / "hitl/params.json"
+    params = json.loads(path.read_text(encoding="utf-8"))
+    params["deployment_adjustment_start"] = "20260401"
+    path.write_text(json.dumps(params), encoding="utf-8")
+    options = load_worker_options(experiment, repo_root=repo)
+    resumed = run_local_interactive_worker(options)
+    assert resumed["state"] == "completed"
+    after = ExperimentLedger(options.rolling.ledger_path).read()
+    assert after[:3] == records
+    assert after[-1]["record_type"] == "deployment_adjustment"
+    plan = json.loads((experiment / "hitl/schedule.json").read_text(encoding="utf-8"))
+    assert plan["sessions"][-1]["kind"] == "deployment_adjustment"
+
+
 def test_local_worker_resume_skips_durable_sessions_and_heldout(tmp_path: Path):
     repo, experiment = _experiment(tmp_path)
     options = load_worker_options(experiment, repo_root=repo)

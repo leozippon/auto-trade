@@ -116,7 +116,7 @@ class PublicIdentity:
             kind = str(entry.get("kind") or "")
             if kind == "meta_learning":
                 kind = "meta"
-            if not raw_key or kind not in {"fold", "meta", "heldout"}:
+            if not raw_key or kind not in {"fold", "meta", "heldout", "deployment_adjustment"}:
                 raise ValueError("experiment session plan contains an invalid session")
             public_key = self._project_session_key(entry, raw_key, kind)
             if raw_key in self._raw_to_public or public_key in self._public_to_raw:
@@ -224,6 +224,10 @@ class PublicIdentity:
             out["display_key"] = "heldout"
             if not heldout_revealed:
                 out["hidden"] = True
+        elif kind == "deployment_adjustment":
+            # Runs after the Held-out sealed the experiment, so its window
+            # (which includes the Held-out) is never hidden.
+            out["display_key"] = "deployment_adjustment"
         for key, value in entry.items():
             if key in {
                 "_raw_key",
@@ -388,8 +392,8 @@ class PublicIdentity:
     def _project_session_key(
         self, entry: Mapping[str, object], raw_key: str, kind: str
     ) -> str:
-        if kind == "heldout":
-            return "heldout"
+        if kind in {"heldout", "deployment_adjustment"}:
+            return kind
         epoch_id = str(entry.get("epoch_id") or raw_key.partition("/")[0])
         if not epoch_id:
             raise ValueError("planned session has no epoch")

@@ -60,15 +60,19 @@ from .config import (
 )
 from .experiment import RollingExperimentPipeline
 from .folds import (
+    FoldSpec,
     build_fold_schedule,
+    deployment_fold,
     heldout_periods,
     load_sse_trading_days,
     yyyymmdd,
 )
 from .hitl_state import (
+    DEPLOYMENT_SESSION_KEY,
     SCHEDULE_NAME,
     WEB_CREATE_DEFAULTS,
     WEB_INTERNAL_PARAMS,
+    DevelopmentSession,
     StatusReporter,
     build_session_plan,
     epoch_ids,
@@ -84,9 +88,12 @@ from .ledger import (
     FrozenArtifactMutated,
     RunMarkers,
     assert_no_frozen_artifact_mutation,
+    deployment_adjustment_due,
     experiment_verdict,
     is_durable_success_record,
     latest_fold_records,
+    latest_heldout_records,
+    paper_candidate,
     rerun_absorbed,
 )
 from .local_backend import (
@@ -1133,16 +1140,37 @@ def run_local_interactive_worker(
     RunMarkers(options.experiment_dir).recover(ledger)
     completed = read_status(hitl / "status.json")
     if str(completed.get("state")) == "completed" and not _has_outstanding_work(
-        hitl, ledger
+        hitl, ledger, options.rolling
     ):
         # A finished experiment is terminal: every session and the held-out
         # evaluation are already durable in the ledger, so a resume must
         # republish the completion status instead of re-running anything.
+        records = ledger.read()
         payload = _terminal_status(
-            completed, verdict=experiment_verdict(ledger.read())
+            completed,
+            verdict=experiment_verdict(records),
+            paper_candidate=paper_candidate(records),
         )
         write_json_atomic(hitl / "status.json", payload)
         return payload
+    if (
+        str(completed.get("state")) == "completed"
+        and ledger.read("heldout")
+        and not _pending_rerun(hitl, ledger)
+    ):
+        # Only the post-seal deployment adjustment is outstanding (a crashed
+        # attempt, or a request made after completion): nothing before the
+        # Held-out may run again, so the worker goes straight to it.
+        return _run_deployment_adjustment(
+            options,
+            ledger=ledger,
+            store=store,
+            ref_store=ref_store,
+            llm=llm,
+            command_runner_factory=command_runner_factory,
+            poll_seconds=poll_seconds,
+            heldout_runs=0,
+        )
     # Development that already walked its whole plan without freezing anything
     # is terminal: a resume could only re-walk the finished plan and end at the
     # same failure, so republish it here instead -- before any snapshot,
@@ -1184,27 +1212,9 @@ def run_local_interactive_worker(
         test_stage=options.rolling.test_stage,
         validation_periods=options.rolling.validation_periods,
     )
-    heldout = heldout_periods(
-        options.rolling.heldout_first_period,
-        options.rolling.heldout_last_period,
-        trading_days,
-        period=options.rolling.fold_period,
-        min_region_trade_days=options.rolling.min_region_trade_days,
+    sessions, plan = _write_session_plan(
+        options, hitl, folds, trading_days, meta_enabled=meta_enabled
     )
-    sessions = iter_development_sessions(
-        options.rolling.epochs,
-        folds,
-        meta_enabled=meta_enabled,
-        meta_learning_fold_interval=options.rolling.meta_learning_fold_interval,
-    )
-    plan = build_session_plan(
-        options.rolling.epochs,
-        folds,
-        heldout,
-        meta_enabled=meta_enabled,
-        meta_learning_fold_interval=options.rolling.meta_learning_fold_interval,
-    )
-    write_json_atomic(hitl / SCHEDULE_NAME, plan)
     # Inherited seeds (another experiment's frozen output, another's PRIOR and
     # skills) stand in for the blank template and the empty memory only until
     # this experiment's own ledger rows exist; a resumed experiment takes its
@@ -1309,17 +1319,224 @@ def run_local_interactive_worker(
         )
     finally:
         final_status.stop()
+    records = ledger.read()
     payload = _terminal_status(
         {
             "completed_at": utc_now_iso(),
             "developer_mode": developer_label,
             "completed_sessions": completed_development + 1,
-            "total_sessions": len(sessions) + 1,
+            "total_sessions": len(plan["sessions"]),
             "final_strategy_artifact": final.artifact_id,
         },
         developer_mode=developer_label,
         heldout_runs=heldout_runs,
-        verdict=experiment_verdict(ledger.read()),
+        verdict=experiment_verdict(records),
+        paper_candidate=paper_candidate(records),
+    )
+    write_json_atomic(hitl / "status.json", payload)
+    if deployment_adjustment_due(
+        records, start=options.rolling.deployment_adjustment_start
+    ):
+        return _run_deployment_adjustment(
+            options,
+            ledger=ledger,
+            store=store,
+            ref_store=ref_store,
+            llm=llm,
+            command_runner_factory=command_runner_factory,
+            poll_seconds=poll_seconds,
+            heldout_runs=heldout_runs,
+        )
+    return payload
+
+
+def _write_session_plan(
+    options: InteractiveWorkerOptions,
+    hitl: Path,
+    folds: list[FoldSpec],
+    trading_days: list[str],
+    *,
+    meta_enabled: bool,
+) -> tuple[tuple[DevelopmentSession, ...], dict[str, object]]:
+    """The plan of record (``schedule.json``): development sessions, the
+    Held-out, and the deployment adjustment when its start is configured."""
+    heldout = heldout_periods(
+        options.rolling.heldout_first_period,
+        options.rolling.heldout_last_period,
+        trading_days,
+        period=options.rolling.fold_period,
+        min_region_trade_days=options.rolling.min_region_trade_days,
+    )
+    sessions = iter_development_sessions(
+        options.rolling.epochs,
+        folds,
+        meta_enabled=meta_enabled,
+        meta_learning_fold_interval=options.rolling.meta_learning_fold_interval,
+    )
+    plan = build_session_plan(
+        options.rolling.epochs,
+        folds,
+        heldout,
+        meta_enabled=meta_enabled,
+        meta_learning_fold_interval=options.rolling.meta_learning_fold_interval,
+        deployment=_deployment_fold(options, trading_days),
+    )
+    write_json_atomic(hitl / SCHEDULE_NAME, plan)
+    return sessions, plan
+
+
+def _deployment_fold(
+    options: InteractiveWorkerOptions, trading_days: list[str]
+) -> FoldSpec | None:
+    start = options.rolling.deployment_adjustment_start
+    if not start:
+        return None
+    return deployment_fold(
+        start,
+        trading_days,
+        window_months=options.rolling.window_months,
+        min_region_trade_days=options.rolling.min_region_trade_days,
+    )
+
+
+def _run_deployment_adjustment(
+    options: InteractiveWorkerOptions,
+    *,
+    ledger: ExperimentLedger,
+    store: FilesystemArtifactStore,
+    ref_store: AgentRefStore,
+    llm: LLMProxy | None,
+    command_runner_factory: Callable[[Path], CommandRunner] | None,
+    poll_seconds: float,
+    heldout_runs: int,
+) -> dict[str, object]:
+    """The post-Held-out deployment adjustment (docs/pipeline-design.md §3.4).
+
+    Assembled on its own PIT cache root, ``pit_views/deployment``: the
+    graduate's own views may have been built under an older cache format,
+    which this code can neither extend nor read, so the session's two views
+    are hardlinked there from the named seed (or cold-built when none is
+    named) and the rest of the experiment's views stay as they are. The
+    session runs through the interactive runner past the reveal, and the
+    terminal status names the Paper candidate.
+    """
+    hitl = options.experiment_dir / "hitl"
+    graduated = _latest_artifact(ledger, store)
+    if graduated is None:
+        raise RuntimeError("the deployment adjustment needs the graduated artifact")
+    scored = {
+        str(row.get("strategy_artifact_id") or "")
+        for row in latest_heldout_records(ledger.read())
+    }
+    if scored != {graduated.artifact_id}:
+        raise RuntimeError(
+            f"the Held-out scored {sorted(scored)}, not the ledger's latest "
+            f"artifact {graduated.artifact_id}; refusing to adjust it"
+        )
+    if command_runner_factory is None and (
+        options.execution_mode == "sandbox" or options.developer_mode == "llm"
+    ):
+        options = replace(
+            options,
+            agent_sandbox=prepare_experiment_sandbox_image(
+                options.agent_sandbox or SandboxSpec(gpu=None),
+                experiment_id=options.experiment_id,
+                experiment_dir=options.experiment_dir,
+            ),
+        )
+    deployment_options = replace(
+        options,
+        pit_cache_root=(
+            options.experiment_dir / "pit_views" / "deployment"
+            if options.data_backend == "pit"
+            else None
+        ),
+        pit_views_seed=None,
+        pit_views_seed_required=False,
+    )
+    pipeline, trading_days, meta_enabled, developer_label = build_experiment_pipeline(
+        deployment_options,
+        ledger=ledger,
+        store=store,
+        ref_store=ref_store,
+        llm=llm,
+        command_runner_factory=command_runner_factory,
+    )
+    folds = build_fold_schedule(
+        options.rolling.development_first_period,
+        options.rolling.development_last_period,
+        trading_days,
+        window_months=options.rolling.window_months,
+        period=options.rolling.fold_period,
+        min_region_trade_days=options.rolling.min_region_trade_days,
+        test_stage=options.rolling.test_stage,
+        validation_periods=options.rolling.validation_periods,
+    )
+    _sessions, plan = _write_session_plan(
+        options, hitl, folds, trading_days, meta_enabled=meta_enabled
+    )
+    fold = _deployment_fold(options, trading_days)
+    assert fold is not None  # the caller checked deployment_adjustment_due
+    seed = options.deployment_pit_views_seed or (
+        options.pit_views_seed if options.pit_views_seed_required else None
+    )
+    if seed is not None and options.data_backend == "pit":
+        pipeline.snapshots.link_seed_slots(
+            seed,
+            phase="valid",
+            start=fold.validation_start,
+            end=fold.validation_end,
+            decision_time=fold.valid_decision_time,
+        )
+    memory = load_inherited_memory(options.experiment_dir)
+    prior = latest_prior_text(ledger.read("meta_learning")) or (
+        memory.prior_text if memory else ""
+    )
+    session = DevelopmentSession(
+        DEPLOYMENT_SESSION_KEY,
+        "deployment_adjustment",
+        _heldout_epoch_id(ledger, options.rolling.epochs),
+        fold,
+    )
+
+    def execute(session: DevelopmentSession, context: dict[str, object]) -> None:
+        assert session.fold is not None
+        pipeline.run_deployment_adjustment(
+            session.epoch_id,
+            session.fold,
+            graduated=graduated,
+            prior=prior,
+            session_context=context,
+        )
+
+    interactive = InteractiveExperimentRunner(
+        experiment_id=options.experiment_id,
+        sessions=(session,),
+        execute_session=execute,
+        ledger=ledger,
+        control_path=hitl / "control.json",
+        status_path=hitl / "status.json",
+        ref_store=ref_store,
+        poll_seconds=poll_seconds,
+        session_max_attempts=options.rolling.session_max_attempts,
+        after_reveal=True,
+    )
+    result = interactive.run()
+    if result["status"] != "complete":
+        return result
+    records = ledger.read()
+    payload = _terminal_status(
+        {
+            "completed_at": utc_now_iso(),
+            "developer_mode": developer_label,
+            "completed_sessions": len(plan["sessions"]),
+            "total_sessions": len(plan["sessions"]),
+            "final_strategy_artifact": graduated.artifact_id,
+        },
+        developer_mode=developer_label,
+        heldout_runs=heldout_runs,
+        verdict=experiment_verdict(records),
+        paper_candidate=paper_candidate(records),
     )
     write_json_atomic(hitl / "status.json", payload)
     return payload
@@ -1398,12 +1615,14 @@ def _terminal_status(
     developer_mode: str | None = None,
     heldout_runs: int = 0,
     verdict: Mapping[str, object] | None = None,
+    paper_candidate: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """Durable completion status. The experiment's own evidence stays in the
     append-only ledger; status.json only records that the run reached its end,
     so a resume republishes it without re-running or re-recording anything
     (``heldout_runs`` counts what THIS invocation executed). ``verdict`` is the
-    ledger-derived graduation verdict, re-read on every publish."""
+    ledger-derived graduation verdict and ``paper_candidate`` the artifact
+    Paper pins (``ledger.paper_candidate``), both re-read on every publish."""
     return {
         "schema_version": 1,
         "state": "completed",
@@ -1415,17 +1634,25 @@ def _terminal_status(
         "heldout_runs": heldout_runs,
         "final_strategy_artifact": source.get("final_strategy_artifact"),
         "verdict": dict(verdict) if verdict is not None else None,
+        "paper_candidate": dict(paper_candidate) if paper_candidate is not None else None,
     }
 
 
-def _has_outstanding_work(hitl: Path, ledger: ExperimentLedger) -> bool:
+def _has_outstanding_work(
+    hitl: Path, ledger: ExperimentLedger, rolling: RollingExperimentConfig
+) -> bool:
     """Whether a completed experiment still has console-requested work.
 
-    A rollback drops every held-out record (the frontier moved back) and a
-    rerun request leaves a token no fold record has absorbed yet. In both cases
-    the worker must resume instead of republishing the terminal status, or the
-    console operation would look accepted and silently do nothing."""
-    if not ledger.read("heldout"):
+    A rollback drops every held-out record (the frontier moved back), a
+    rerun request leaves a token no fold record has absorbed yet, and a
+    graduated experiment whose deployment adjustment is configured but not
+    recorded still owes that session. In each case the worker must resume
+    instead of republishing the terminal status, or the console operation
+    would look accepted and silently do nothing."""
+    records = ledger.read()
+    if not any(record.get("record_type") == "heldout" for record in records):
+        return True
+    if deployment_adjustment_due(records, start=rolling.deployment_adjustment_start):
         return True
     return _pending_rerun(hitl, ledger)
 

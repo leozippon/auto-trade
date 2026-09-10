@@ -549,6 +549,7 @@ def build_session_plan(
     *,
     meta_enabled: bool,
     meta_learning_fold_interval: int = 0,
+    deployment: FoldSpec | None = None,
 ) -> dict[str, object]:
     sessions = iter_development_sessions(
         epochs,
@@ -583,6 +584,22 @@ def build_session_plan(
             ],
         }
     )
+    if deployment is not None:
+        # The one post-seal session: the mechanism-frozen deployment refit
+        # of the graduated artifact, run only when the experiment graduates.
+        plan.append(
+            {
+                "key": DEPLOYMENT_SESSION_KEY,
+                "kind": "deployment_adjustment",
+                "epoch_id": epoch_ids(epochs)[-1],
+                "fold_id": deployment.fold_id,
+                "period": {
+                    "start": deployment.validation_start,
+                    "end": deployment.validation_end,
+                },
+                "decision_time": deployment.valid_decision_time.isoformat(),
+            }
+        )
     return {
         "schema_version": HITL_STATE_SCHEMA_VERSION,
         "sessions": plan,

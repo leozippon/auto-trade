@@ -28,6 +28,7 @@ from autotrade.pipelines.agent_inbox import (
     enqueue_inbox_message,
 )
 from autotrade.pipelines.hitl_state import (
+    DEPLOYMENT_SESSION_KEY,
     LIVE_RUN_STATES,
     WEB_CLOSED_PARAMS,
     WEB_CREATE_DEFAULTS,
@@ -50,6 +51,7 @@ from autotrade.pipelines.ledger import (
     ExperimentLedger,
     FrozenArtifactMutated,
     assert_no_frozen_artifact_mutation,
+    deployment_adjustment_due,
     is_durable_success_record,
     is_frozen_artifact_mutation,
     latest_fold_records,
@@ -60,6 +62,7 @@ from .public_identity import PublicIdentity
 from .registry import (
     experiment_state,
     heldout_complete,
+    read_ledger_records,
     test_results_revealed,
     worker_log_ref,
 )
@@ -767,7 +770,13 @@ class ExperimentManager:
             # Effective seal: manual reveal OR held-out completed
             # (auto-reveal). Reading only the control flag left every
             # auto-revealed experiment unsealed.
-            if action in _SEALED_BLOCKED_ACTIONS and test_results_revealed(directory):
+            if (
+                action in _SEALED_BLOCKED_ACTIONS
+                and test_results_revealed(directory)
+                and not self._deployment_adjustment_exempt(
+                    action, raw_session_key, directory
+                )
+            ):
                 raise ManagerError(
                     "测试结果已揭示，实验已封存：不能再进行影响后续学习的控制操作"
                 )
@@ -813,13 +822,46 @@ class ExperimentManager:
                 }
             if action in {"resume", "rollback_fold", "rerun_fold"}:
                 state = experiment_state(directory)
+                resumable = state.get("state") in _TERMINAL_RESUMABLE_STATES or (
+                    action == "resume"
+                    and state.get("state") == "completed"
+                    and self._deployment_adjustment_pending(directory)
+                )
                 if (
                     not state.get("worker_alive")
-                    and state.get("state") in _TERMINAL_RESUMABLE_STATES
+                    and resumable
                     and self.worker_script.is_file()
                 ):
                     return {**response, **self.start_worker(experiment_id)}
             return response
+
+    def _deployment_adjustment_exempt(
+        self, action: str, raw_session_key: str | None, directory: Path
+    ) -> bool:
+        """The one post-seal session (docs/pipeline-design.md §3.4): approving
+        or directing it, and resuming a completed experiment that still owes
+        it, are the only learning controls the seal lets through."""
+        if action in {"approve", "set_directive"}:
+            return raw_session_key == DEPLOYMENT_SESSION_KEY
+        if action == "resume":
+            return self._deployment_adjustment_pending(directory)
+        return False
+
+    @staticmethod
+    def _deployment_adjustment_pending(directory: Path) -> bool:
+        """Whether a graduated experiment still owes its configured deployment
+        adjustment (``ledger.deployment_adjustment_due``)."""
+        start = str(
+            read_json(directory / "hitl/params.json").get("deployment_adjustment_start")
+            or ""
+        )
+        if not start:
+            return False
+        try:
+            records = read_ledger_records(directory)
+        except Exception:  # noqa: BLE001 - an unreadable ledger owes nothing readable
+            return False
+        return deployment_adjustment_due(records, start=start)
 
     def _inject_message(
         self,
@@ -1393,7 +1435,7 @@ class ExperimentManager:
             kind = str(item.get("kind") or "")
             if kind == "meta_learning":
                 kind = "meta"
-            if not key or kind not in {"fold", "meta", "heldout"}:
+            if not key or kind not in {"fold", "meta", "heldout", "deployment_adjustment"}:
                 raise ManagerError(
                     "experiment session plan contains an invalid session"
                 )

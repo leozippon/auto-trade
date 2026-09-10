@@ -147,6 +147,72 @@ def test_matching_seed_hardlinks_views_and_prebuilt_stash(tmp_path: Path) -> Non
         )
 
 
+def test_deployment_slots_are_linked_alone_and_a_missing_slot_fails(tmp_path: Path) -> None:
+    """The deployment adjustment takes exactly its decision view and phase
+    replay slot (with that pair's bundle and stash parts) from a seed; the
+    rest of the seed stays out, and a seed without the slot is refused."""
+    from autotrade.pipelines.pit_views_seed import seed_pit_view_slots
+
+    raw_dir = tmp_path / "raw"
+    record = _record(raw_dir)
+    seed = tmp_path / "seed"
+    _write_seed(seed, record)
+    _freeze_seed(seed)
+    dest = tmp_path / "experiment" / "pit_views" / "deployment"
+    seed_pit_view_slots(
+        dest,
+        seed,
+        expected_provider=record,
+        decision_key=SEED_DECISION_KEY,
+        phase="valid",
+        replay_slot=SEED_SLOT,
+    )
+    linked = sorted(
+        str(path.relative_to(dest))
+        for path in dest.rglob("*")
+        if path.is_file() and not path.name.endswith(".lock")
+    )
+    assert linked == [
+        f"{SEED_STASH_LEAF}/contract.json",
+        f"{SEED_STASH_LEAF}/daily/part_0001.parquet",
+        f"bundles/valid/{SEED_SLOT}/data_summary.json",
+        f"decision/{SEED_DECISION_KEY}/daily.parquet",
+        f"decision/{SEED_DECISION_KEY}/manifest.json",
+        f"replay/valid/{SEED_SLOT}/daily.parquet",
+        f"replay/valid/{SEED_SLOT}/manifest.json",
+    ]
+    source = seed / f"decision/{SEED_DECISION_KEY}/daily.parquet"
+    assert (dest / f"decision/{SEED_DECISION_KEY}/daily.parquet").stat().st_ino == source.stat().st_ino
+    # Idempotent, and the seed's other views never come across.
+    seed_pit_view_slots(
+        dest, seed, expected_provider=record, decision_key=SEED_DECISION_KEY, phase="valid", replay_slot=SEED_SLOT
+    )
+    assert not (dest / "replay" / "meta").exists()
+    assert not (dest / "replay" / "heldout").exists()
+    with pytest.raises(RuntimeError, match="lacks the deployment slot"):
+        seed_pit_view_slots(
+            dest,
+            seed,
+            expected_provider=record,
+            decision_key=SEED_DECISION_KEY,
+            phase="valid",
+            replay_slot="20250901_20260909_" + SEED_DECISION_KEY,
+        )
+    with pytest.raises(RuntimeError, match="does not match"):
+        seed_pit_view_slots(
+            dest,
+            seed,
+            expected_provider={**record, "generation_id": "other"},
+            decision_key=SEED_DECISION_KEY,
+            phase="valid",
+            replay_slot=SEED_SLOT,
+        )
+    with pytest.raises(RuntimeError, match="does not exist"):
+        seed_pit_view_slots(
+            dest, tmp_path / "absent", expected_provider=record, decision_key=SEED_DECISION_KEY, phase="valid", replay_slot=SEED_SLOT
+        )
+
+
 def test_seeded_tree_is_indistinguishable_from_a_cold_build(tmp_path: Path) -> None:
     """A seeded cache must still be a cache the provider can write into.
 

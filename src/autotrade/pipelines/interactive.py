@@ -66,6 +66,9 @@ class ExperimentStopped(SessionInterrupt):
 
 SessionExecutor = Callable[[DevelopmentSession, dict[str, object]], None]
 
+# The record types that complete a runner session, by kind.
+_SESSION_RECORD_TYPES = ("fold", "meta_learning", "deployment_adjustment")
+
 
 class InteractiveExperimentRunner:
     def __init__(
@@ -81,6 +84,7 @@ class InteractiveExperimentRunner:
         poll_seconds: float = 2.0,
         post_fold_hook: Callable[[dict[str, object]], None] | None = None,
         session_max_attempts: int = 3,
+        after_reveal: bool = False,
     ) -> None:
         if poll_seconds <= 0:
             raise ValueError("poll_seconds must be positive")
@@ -88,6 +92,11 @@ class InteractiveExperimentRunner:
             raise ValueError("session_max_attempts must be positive")
         self.experiment_id = experiment_id
         self.sessions = sessions
+        # The deployment adjustment is by definition the one session that
+        # runs after the Held-out sealed the experiment: the reveal stops do
+        # not apply to it, everything else (gating, retries, the durable
+        # record) does.
+        self.after_reveal = after_reveal
         self.execute_session = execute_session
         self.post_fold_hook = post_fold_hook
         self.session_max_attempts = session_max_attempts
@@ -115,7 +124,7 @@ class InteractiveExperimentRunner:
             assert_no_frozen_artifact_mutation(self.ledger.read())
             for session in self.sessions:
                 control = read_control(self.control_path)
-                if control.test_revealed:
+                if control.test_revealed and not self.after_reveal:
                     raise ExperimentStopped("the experiment is sealed after out-of-sample reveal")
                 rerun_id = control.rerun_sessions.get(session.session_key)
                 if session.session_key in completed:
@@ -309,7 +318,7 @@ class InteractiveExperimentRunner:
 
         while True:
             control = read_control(self.control_path)
-            if control.test_revealed:
+            if control.test_revealed and not self.after_reveal:
                 raise ExperimentStopped("the experiment is sealed")
             if control.request == "stop":
                 raise ExperimentStopped("stop requested")
@@ -463,9 +472,7 @@ class InteractiveExperimentRunner:
         return {
             str(record["session_key"])
             for record in self.ledger.read()
-            if is_durable_success_record(
-                record, record_types=("fold", "meta_learning")
-            )
+            if is_durable_success_record(record, record_types=_SESSION_RECORD_TYPES)
             and record.get("session_key")
         }
 
@@ -478,9 +485,7 @@ class InteractiveExperimentRunner:
         records = [
             row
             for row in self.ledger.read()
-            if is_durable_success_record(
-                row, record_types=("fold", "meta_learning")
-            )
+            if is_durable_success_record(row, record_types=_SESSION_RECORD_TYPES)
             and row.get("session_key") == session.session_key
         ]
         if not records:

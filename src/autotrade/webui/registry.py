@@ -40,7 +40,9 @@ from autotrade.pipelines.ledger import (
     is_durable_success_record,
     is_frozen_artifact_mutation,
     latest_fold_records,
+    latest_deployment_record,
     latest_heldout_records,
+    paper_candidate,
     transition_null_control,
     transition_result,
     walk_forward_transitions,
@@ -467,6 +469,45 @@ def _public_verdict(
     return {**verdict, "periods": periods, **stamped}
 
 
+def _paper_candidate_view(
+    directory: Path, records: list[dict[str, object]]
+) -> dict[str, object] | None:
+    """The Paper candidate with the launch command that pins it.
+
+    Paths are written relative to the repository root the console serves
+    (``experiments/<id>/...``), which is where ``run_paper.py`` is run from;
+    an experiment tree outside it keeps absolute paths.
+    """
+    candidate = paper_candidate(records)
+    if candidate is None:
+        return None
+    repo_root = directory.parent.parent
+
+    def relative(value: object) -> str | None:
+        if not value:
+            return None
+        path = Path(str(value))
+        return str(path.relative_to(repo_root)) if path.is_relative_to(repo_root) else str(path)
+
+    strategy = relative(candidate["output_path"])
+    models = relative(candidate["models_path"])
+    models_dir = models if models and Path(str(candidate["models_path"])).is_dir() else None
+    command = [
+        "python scripts/paper/run_paper.py",
+        f"--strategy {strategy}/main.py" if strategy else "--strategy <missing>",
+        f"--strategy-revision {candidate['artifact_id']}",
+        *([f"--models-dir {models_dir}"] if models_dir else []),
+    ]
+    return {
+        "artifact_id": candidate["artifact_id"],
+        "source": candidate["source"],
+        "graduated_artifact_id": candidate["graduated_artifact_id"],
+        "strategy_path": f"{strategy}/main.py" if strategy else None,
+        "models_dir": models_dir,
+        "command": " ".join(command),
+    }
+
+
 def walk_forward_folds(folds: list[dict[str, object]]) -> list[dict[str, object]]:
     """Folds in walk-forward order: by Validation window, then by Fold id.
 
@@ -595,7 +636,9 @@ def _durable_session_progress(
     completed_keys = {
         str(record.get("session_key"))
         for record in records
-        if is_durable_success_record(record, record_types=("fold", "meta_learning"))
+        if is_durable_success_record(
+            record, record_types=("fold", "meta_learning", "deployment_adjustment")
+        )
         and record.get("session_key")
     }
     completed_heldout = _completed_heldout_labels(records)
@@ -738,6 +781,9 @@ def summarize_experiment(directory: Path) -> dict[str, object]:
                 # Graduation verdict from the Held-out records; sealed like
                 # every other Held-out number until the reveal.
                 "verdict": _public_verdict(records, identity) if revealed else None,
+                # The artifact Paper pins and the command that pins it
+                # (ledger.paper_candidate); None unless graduated.
+                "paper_candidate": _paper_candidate_view(directory, records) if revealed else None,
                 "metrics": {
                     "epoch_id": latest_epoch,
                     "cum_valid_return": cumulative.get(latest_epoch, {}).get("valid"),
@@ -884,6 +930,12 @@ def experiment_detail(root: Path, experiment_id: str) -> dict[str, object]:
                 identity.public_record(row, heldout_revealed=revealed)
                 for row in heldout
             ]
+        elif kind == "deployment_adjustment":
+            record = latest_deployment_record(records)
+            if record is not None:
+                entry["record"] = identity.public_record(
+                    record, heldout_revealed=revealed
+                )
         sessions.append(entry)
     control = read_control(hitl / CONTROL_NAME)
     raw_state = experiment_state(directory)

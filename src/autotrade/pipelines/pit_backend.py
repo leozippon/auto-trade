@@ -81,7 +81,11 @@ from .config import (
     StrategyExperimentConfig,
 )
 from .experiment import DailyStrategyPipeline
-from .pit_views_seed import pit_cache_provider_record, seed_pit_views
+from .pit_views_seed import (
+    pit_cache_provider_record,
+    seed_pit_view_slots,
+    seed_pit_views,
+)
 
 _PHASES = frozenset({"meta", "valid", "frozen_test", "heldout", "paper"})
 # Manifest label of the unphased replay store. Never a phase, so a store can
@@ -221,6 +225,30 @@ class ResearchPITSnapshotProvider:
             replay_ref=str(replay_dir),
             data_summary_ref=str(summary_path),
             generation_id=self.release.generation_id,
+        )
+
+    def link_seed_slots(
+        self,
+        seed: str | Path,
+        *,
+        phase: str,
+        start: str,
+        end: str,
+        decision_time: datetime,
+    ) -> None:
+        """Hardlink one region's decision view and phase replay slot from a
+        seed into this cache root, under the slot names ``prepare`` will ask
+        for; fails explicitly when the seed cannot provide them."""
+        if phase not in _PHASES:
+            raise ValueError(f"unsupported PIT snapshot phase: {phase}")
+        decision_key = _cn_datetime(decision_time).strftime("%Y%m%dT%H%M%S%z")
+        seed_pit_view_slots(
+            self.cache_root,
+            Path(seed),
+            expected_provider=self._bind_cache_contract(),
+            decision_key=decision_key,
+            phase=phase,
+            replay_slot=f"{_date_key(start)}_{_date_key(end)}_{decision_key}",
         )
 
     def _bind_cache_contract(self) -> dict[str, object]:

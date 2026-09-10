@@ -200,6 +200,62 @@ def seed_pit_views(
     return True
 
 
+def seed_pit_view_slots(
+    experiment_pit_views: Path,
+    seed: Path,
+    *,
+    expected_provider: Mapping[str, object],
+    decision_key: str,
+    phase: str,
+    replay_slot: str,
+) -> None:
+    """Hardlink exactly one decision view and one phase replay slot from a seed.
+
+    The deployment adjustment's two views (docs/pipeline-design.md §3.4): an
+    experiment whose own views were built under an older cache format cannot
+    extend them with this code, so its deployment session takes just these
+    two slots -- plus the bundle and the prebuilt as-of parts of that pair,
+    when the seed carries them -- into its own cache root. The contract check
+    is the whole-record comparison ``seed_pit_views`` applies, and it fails
+    explicitly on a missing tree, a mismatch, or a seed that lacks either
+    slot: cold-building here would cost hours and look like a slow session.
+    """
+
+    seed = Path(seed)
+    if not seed.is_dir() or seed.is_symlink():
+        raise RuntimeError(f"PIT view seed does not exist: {seed}")
+    provider_path = seed / "provider.json"
+    if not provider_path.is_file() or provider_path.is_symlink():
+        raise RuntimeError(f"PIT view seed is missing provider.json: {provider_path}")
+    if _load_json(provider_path) != dict(expected_provider):
+        raise RuntimeError(
+            f"PIT view seed {seed} does not match this experiment's provider "
+            "contract; refusing to mix views"
+        )
+    required = (seed / "decision" / decision_key, seed / "replay" / phase / replay_slot)
+    missing = [
+        view
+        for view in required
+        if not any((view / marker).is_file() for marker in _VIEW_MARKERS)
+    ]
+    if missing:
+        raise RuntimeError(
+            f"PIT view seed {seed} lacks the deployment slot(s): "
+            + ", ".join(str(view.relative_to(seed)) for view in missing)
+        )
+    dest_root = Path(experiment_pit_views).resolve()
+    dest_root.mkdir(parents=True, exist_ok=True)
+    for view in required:
+        _publish_seed_entry(view, seed, dest_root, dir_mode=0o555)
+    bundle = seed / "bundles" / phase / replay_slot
+    if any((bundle / marker).is_file() for marker in _VIEW_MARKERS):
+        _publish_seed_entry(bundle, seed, dest_root, dir_mode=0o555)
+    stash_root = seed / "asof_stash" / "decision" / decision_key / "replay" / replay_slot
+    for contract in sorted(stash_root.rglob("contract.json")):
+        if contract.is_file() and not contract.is_symlink():
+            _publish_seed_entry(contract.parent, seed, dest_root, dir_mode=0o755)
+
+
 def _publish_seed_entry(
     source: Path, seed: Path, dest_root: Path, *, dir_mode: int
 ) -> None:
@@ -455,5 +511,6 @@ __all__ = [
     "iter_plan_pit_jobs",
     "pit_cache_provider_record",
     "plan_parameters",
+    "seed_pit_view_slots",
     "seed_pit_views",
 ]

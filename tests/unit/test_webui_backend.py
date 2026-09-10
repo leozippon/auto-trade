@@ -2851,6 +2851,155 @@ class WebuiBackendTest(unittest.TestCase):
         )
         self.assertEqual(ok.status_code, 200)
 
+    def test_deployment_adjustment_is_the_one_session_the_seal_lets_through(self) -> None:
+        """The post-Held-out deployment adjustment (docs/pipeline-design.md
+        §3.4) is approved, directed and resumed on a sealed experiment; every
+        other learning control stays sealed; the console shows its row and the
+        Paper candidate with the command that pins it."""
+        experiment_dir = self.experiments_root / "exp_hitl"
+        hitl = experiment_dir / "hitl"
+        params = json.loads((hitl / "params.json").read_text(encoding="utf-8"))
+        params["deployment_adjustment_start"] = "20230401"
+        write_json_atomic(hitl / "params.json", params)
+        schedule = json.loads((hitl / "schedule.json").read_text(encoding="utf-8"))
+        schedule["sessions"].append(
+            {
+                "key": "deployment_adjustment",
+                "kind": "deployment_adjustment",
+                "epoch_id": "epoch_001",
+                "fold_id": "deployment_20230401..20231229",
+                "period": {"start": "20230401", "end": "20231229"},
+            }
+        )
+        write_json_atomic(hitl / "schedule.json", schedule)
+        self._reveal()
+        # Not graduated yet: approving the post-seal session is harmless (the
+        # worker never runs it while it is not due), but resuming the sealed
+        # experiment is still refused because nothing is owed.
+        approved = self.client.post(
+            "/api/experiments/exp_hitl/control",
+            json={"action": "approve", "session_key": "deployment_adjustment"},
+        )
+        self.assertEqual(approved.status_code, 200, approved.text)
+        refused = self.client.post(
+            "/api/experiments/exp_hitl/control", json={"action": "resume"}
+        )
+        self.assertEqual(refused.status_code, 400)
+        self.assertIn("封存", refused.json()["detail"])
+        detail = self.client.get("/api/experiments/exp_hitl").json()
+        self.assertTrue(detail["test_revealed"])
+        self.assertIsNone(detail["paper_candidate"])
+
+        ledger_path = experiment_dir / "ledgers" / "experiment_ledger.jsonl"
+        with ledger_path.open("a", encoding="utf-8") as handle:
+            handle.write(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "record_type": "heldout",
+                        "experiment_id": "exp_hitl",
+                        "epoch_id": "epoch_001",
+                        "fold_id": "heldout_2023Q1",
+                        "run_id": "run_heldout_graduated",
+                        "session_key": "heldout",
+                        "period": "2023Q1",
+                        "strategy_artifact_id": "strategy_epoch_001_fold_2022Q1",
+                        "result": {"total_return": 0.05, "sharpe": 1.0, "max_drawdown": -0.02},
+                        "verdict": {"status": "graduated", "reasons": []},
+                    }
+                )
+                + "\n"
+            )
+        for action, extra in (
+            ("approve", {}),
+            ("set_directive", {"directive": "retrain the ranker"}),
+            ("resume", {}),
+        ):
+            with patch.object(
+                ExperimentManager, "start_worker", return_value={"spawned": False}
+            ):
+                allowed = self.client.post(
+                    "/api/experiments/exp_hitl/control",
+                    json={"action": action, "session_key": "deployment_adjustment", **extra},
+                )
+            self.assertEqual(allowed.status_code, 200, (action, allowed.text))
+        still_sealed = self.client.post(
+            "/api/experiments/exp_hitl/control",
+            json={
+                "action": "approve",
+                "session_key": self._session_ref("epoch_001/fold_2022Q2"),
+            },
+        )
+        self.assertEqual(still_sealed.status_code, 400)
+        self.assertIn("封存", still_sealed.json()["detail"])
+        detail = self.client.get("/api/experiments/exp_hitl").json()
+        candidate = detail["paper_candidate"]
+        self.assertEqual(candidate["source"], "graduated")
+        self.assertEqual(candidate["artifact_id"], "strategy_epoch_001_fold_2022Q1")
+        self.assertEqual(
+            candidate["command"],
+            "python scripts/paper/run_paper.py --strategy experiments/exp_hitl/artifacts/"
+            "strategy/frozen/strategy_epoch_001_fold_2022Q1/output/main.py "
+            "--strategy-revision strategy_epoch_001_fold_2022Q1",
+        )
+        session = next(
+            row for row in detail["sessions"] if row["kind"] == "deployment_adjustment"
+        )
+        self.assertEqual(session["key"], "deployment_adjustment")
+        self.assertEqual(session["period"], {"start": "20230401", "end": "20231229"})
+        self.assertNotIn("record", session)
+        listing = self.client.get("/api/experiments").json()
+        completed_before = {
+            item["experiment_id"]: item for item in listing["experiments"]
+        }["exp_hitl"]["completed_sessions"]
+
+        adjusted_dir = experiment_dir / "artifacts/strategy/frozen/strategy_deployment_abc"
+        (adjusted_dir / "output").mkdir(parents=True)
+        (adjusted_dir / "models").mkdir()
+        with ledger_path.open("a", encoding="utf-8") as handle:
+            handle.write(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "record_type": "deployment_adjustment",
+                        "experiment_id": "exp_hitl",
+                        "epoch_id": "epoch_001",
+                        "fold_id": "deployment_20230401..20231229",
+                        "run_id": "run_deployment",
+                        "session_key": "deployment_adjustment",
+                        "status": "adjusted",
+                        "parent_strategy_artifact_id": "strategy_epoch_001_fold_2022Q1",
+                        "adjusted_strategy_artifact_id": "strategy_deployment_abc",
+                        "adjusted_strategy_artifact_path": str(adjusted_dir / "output"),
+                        "adjusted_model_artifact_path": str(adjusted_dir / "models"),
+                        "hard_reject_reasons": [],
+                    }
+                )
+                + "\n"
+            )
+        # The adjustment is recorded: nothing is owed, so resume is sealed
+        # again, and the row and the adjusted candidate are on the page.
+        refused = self.client.post(
+            "/api/experiments/exp_hitl/control", json={"action": "resume"}
+        )
+        self.assertEqual(refused.status_code, 400)
+        detail = self.client.get("/api/experiments/exp_hitl").json()
+        candidate = detail["paper_candidate"]
+        self.assertEqual(candidate["source"], "adjusted")
+        self.assertEqual(candidate["artifact_id"], "strategy_deployment_abc")
+        self.assertIn("--models-dir experiments/exp_hitl/artifacts/strategy/frozen/strategy_deployment_abc/models", candidate["command"])
+        session = next(
+            row for row in detail["sessions"] if row["kind"] == "deployment_adjustment"
+        )
+        self.assertEqual(session["record"]["status"], "adjusted")
+        self.assertEqual(session["record"]["record_type"], "deployment_adjustment")
+        self.assertNotIn("adjusted_strategy_artifact_path", session["record"])
+        listing = self.client.get("/api/experiments").json()
+        entry = {item["experiment_id"]: item for item in listing["experiments"]}["exp_hitl"]
+        self.assertEqual(entry["paper_candidate"]["artifact_id"], "strategy_deployment_abc")
+        # The durable row completes the planned session in the progress count.
+        self.assertEqual(entry["completed_sessions"], completed_before + 1)
+
     def test_the_sealed_test_calendar_stays_sealed_until_the_reveal(self) -> None:
         """The fold record names the window the Test evaluation will use.
 

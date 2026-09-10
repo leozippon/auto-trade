@@ -28,7 +28,13 @@ const KIND_LABELS = {
   fold: "Fold",
   meta_learning: "元学习",
   heldout: "Held-out",
+  deployment_adjustment: "部署调整",
 };
+// The two post-development sessions: rendered under the last Epoch as phase
+// heads rather than as Epoch members.
+function isPhaseHead(session) {
+  return session.kind === "heldout" || session.kind === "deployment_adjustment";
+}
 
 function sessionDisplayKey(session) {
   if (!session) return "";
@@ -46,6 +52,7 @@ function sessionDisplayKey(session) {
     return epoch ? `${epoch}/元学习` : "元学习";
   }
   if (session.kind === "heldout") return "Held-out";
+  if (session.kind === "deployment_adjustment") return "部署调整";
   const display = String(session.display_key || session.label || "");
   return display.includes("fold_ref_") || display.includes("meta_ref_")
     ? ""
@@ -3129,6 +3136,8 @@ function controlBar(detail) {
    not yet run, running, unreadable, or a Fold that left no strategy at all. */
 function sessionListLine(detail, session, pending) {
   if (session.kind === "heldout") return heldoutSessionLine(detail, session, pending);
+  if (session.kind === "deployment_adjustment")
+    return deploymentSessionLine(detail, session, pending);
   if (session.kind !== "fold" || !session.record)
     return { text: pending, cls: "", note: null };
   const inForce = foldInForce(detail, session);
@@ -3174,6 +3183,43 @@ function sessionListLine(detail, session, pending) {
   };
 }
 
+/* The deployment adjustment line: what the refit left behind and which
+   artifact Paper pins (registry.paper_candidate, from ledger.paper_candidate). */
+const DEPLOYMENT_STATUS_LABELS = {
+  adjusted: "已调整",
+  no_update: "沿用毕业产物",
+  no_valid_backtest: "无有效回放",
+};
+function deploymentSessionLine(detail, session, pending) {
+  const record = session.record;
+  if (!record) {
+    const verdict = detail.verdict || {};
+    return {
+      text: pending,
+      cls: "",
+      note:
+        verdict.status === "graduated"
+          ? "毕业后运行的部署前重拟合"
+          : verdict.status
+            ? "只有毕业的实验才做部署调整"
+            : "待 Held-out 裁决",
+    };
+  }
+  const status = String(record.status || "");
+  const candidate = detail.paper_candidate || {};
+  const reasons = record.hard_reject_reasons || [];
+  return {
+    text: DEPLOYMENT_STATUS_LABELS[status] || status,
+    cls: status === "adjusted" ? "num pos" : "",
+    note: candidate.artifact_id
+      ? `Paper 候选：${candidate.source === "adjusted" ? "调整后产物" : "毕业产物"}`
+      : reasons.length
+        ? `未采用：${reasons.join("、")}`
+        : null,
+    noteTitle: candidate.artifact_id || null,
+  };
+}
+
 function heldoutSessionLine(detail, session, pending) {
   const verdict = detail.verdict;
   if (verdict && verdict.status) {
@@ -3212,7 +3258,7 @@ function sessionListPanel(detail, selectedKey) {
   const status = detail.status || {};
   let currentEpoch = null;
   for (const session of detail.sessions || []) {
-    if (session.epoch_id !== currentEpoch && session.kind !== "heldout") {
+    if (session.epoch_id !== currentEpoch && !isPhaseHead(session)) {
       currentEpoch = session.epoch_id;
       list.append(
         el(
@@ -3258,14 +3304,14 @@ function sessionListPanel(detail, selectedKey) {
       stateText || (isDone ? "" : "未运行"),
     );
     const ret =
-      session.kind === "heldout"
+      isPhaseHead(session)
         ? el("span", { class: line.cls }, line.text)
         : foldDurationNode(detail, session, line.text, line.cls);
     ret.classList.add("ret");
     const item = el(
       "div",
       {
-        class: `session-item${session.kind === "heldout" ? " phase-head" : ""}${session.key === selectedKey ? " selected" : ""}`,
+        class: `session-item${isPhaseHead(session) ? " phase-head" : ""}${session.key === selectedKey ? " selected" : ""}`,
         "data-key": session.key,
         onclick: () => {
           location.hash = `#/exp/${encodeURIComponent(detail.experiment_id)}/${sessionKeyToUrl(session.key)}`;
@@ -3342,7 +3388,8 @@ function sessionDetailPanel(detail, selectedKey) {
   if (
     session.kind === "fold" ||
     session.kind === "meta_learning" ||
-    session.kind === "heldout"
+    session.kind === "heldout" ||
+    session.kind === "deployment_adjustment"
   )
     panel.append(injectMessagePanel(detail, session));
   if (session.kind === "fold" && done) {
@@ -3381,6 +3428,8 @@ function sessionDetailPanel(detail, selectedKey) {
     panel.append(metaResultPanel(detail, session));
   if (session.kind === "heldout" && done)
     panel.append(heldoutPanel(detail, session));
+  if (session.kind === "deployment_adjustment" && done)
+    panel.append(deploymentPanel(detail, session));
   if (done && session.record && session.record.run_ref) {
     const statsHost = el("div", {});
     panel.append(
@@ -7233,6 +7282,79 @@ function metaResultPanel(detail, session) {
     panel.append(
       el("h4", { class: "section-gap" }, "PRIOR（后续 Fold 的方向与经验）"),
       renderMarkdown(record.prior),
+    );
+  }
+  return panel;
+}
+
+/* The deployment adjustment panel (docs/pipeline-design.md §3.4): what the
+   mechanism-frozen refit changed on the window, whether the mechanism stayed
+   the graduate's, how wide the search was, and the artifact Paper pins with
+   the exact command. Window figures include the Held-out and are in-sample
+   selections, never a test. */
+function deploymentPanel(detail, session) {
+  const record = session.record || {};
+  const validation = record.validation_result || {};
+  const control = (record.parent_control || {}).validation_result || {};
+  const vs = record.vs_parent || {};
+  const selection = record.selection_statistics || {};
+  const mechanism = record.mechanism_check;
+  const candidate = detail.paper_candidate;
+  const status = String(record.status || "");
+  const panel = el(
+    "div",
+    { class: "panel section-gap" },
+    el(
+      "h4",
+      { class: "subsection-title" },
+      "部署调整（机制冻结的重拟合）",
+      el(
+        "span",
+        { class: `badge ${status === "adjusted" ? "pos" : ""}` },
+        DEPLOYMENT_STATUS_LABELS[status] || status,
+      ),
+    ),
+    el(
+      "div",
+      { class: "meta-line" },
+      `窗口 ${record.validation_period || record.period || "—"}（含 Held-out，窗口数字是样本内选择，不是检验）`,
+    ),
+  );
+  if ((record.hard_reject_reasons || []).length)
+    panel.append(el("div", { class: "meta-line" }, `未采用：${record.hard_reject_reasons.join("、")}`));
+  if (record.no_edge_reason)
+    panel.append(el("div", { class: "meta-line" }, `弃权理由：${record.no_edge_reason}`));
+  const pct = (value) => (value === null || value === undefined ? "—" : fmtPct(value));
+  panel.append(
+    el(
+      "div",
+      { class: "section-gap" },
+      statTilesRow([
+        { label: "毕业产物 整窗收益", value: pct(control.total_return), cls: signCls(control.total_return) },
+        { label: "调整候选 整窗收益", value: pct(validation.total_return), cls: signCls(validation.total_return) },
+        { label: "中性化超额 差值", value: pct(vs.neutralized_excess_return_delta), cls: signCls(vs.neutralized_excess_return_delta) },
+        { label: "回撤 差值", value: pct(vs.max_drawdown_delta), cls: "" },
+      ]),
+    ),
+    el(
+      "div",
+      { class: "meta-line" },
+      `机制比对：${mechanism ? (mechanism.equal ? "与毕业产物一致" : "已改变（拒绝冻结）") : "未提名新节点"} ｜ 候选 ${selection.candidates_evaluated ?? "—"} 个 ｜ 去偏 Sharpe 概率 ${
+        selection.deflated_sharpe_probability === null || selection.deflated_sharpe_probability === undefined
+          ? "—"
+          : Number(selection.deflated_sharpe_probability).toFixed(2)
+      }`,
+    ),
+  );
+  if (candidate) {
+    panel.append(
+      el("h5", { class: "section-gap" }, `Paper 候选：${candidate.source === "adjusted" ? "调整后产物" : "毕业产物"} ${candidate.artifact_id}`),
+      el("pre", { class: "code-block", style: "white-space:pre-wrap" }, candidate.command),
+      el(
+        "div",
+        { class: "hint" },
+        "Paper 不自动启动：在仓库根目录运行上面的命令，首日即把该产物冻结进 .paper_state.json；调整后产物唯一的无偏检验是 Paper。",
+      ),
     );
   }
   return panel;
