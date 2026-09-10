@@ -60,6 +60,8 @@ from autotrade.environment.strategy import (
 from autotrade.environment.strategy_loader import StrategyLoadError
 from autotrade.environment.strategy_worker import BarStream, WorkerProtocolError
 from autotrade.environment.tools.base import CommandResult
+from autotrade.environment.tools.files import EditFileTool, WriteFileTool
+from autotrade.environment.tools.workspace import SafeWorkspace
 from autotrade.pipelines import DailyStrategyPipeline, StrategyExperimentConfig
 from autotrade.pipelines.worker import (
     _activate_experiment_sandbox,
@@ -935,6 +937,91 @@ def test_real_inherited_fold_workspace_is_writable_only_inside_agent_boundary(tm
     assert (Path(frozen.path) / "main.py").read_text(encoding="utf-8") == original_strategy
     assert (Path(frozen.path) / "README.md").read_text(encoding="utf-8") == "read only\n"
     assert (Path(frozen.model_path) / "weights.bin").read_bytes() == b"parent"
+
+
+@pytest.mark.skipif(not docker_available(), reason="Docker is unavailable")
+def test_real_shell_created_workspace_files_stay_writable_for_the_typed_writers(
+    tmp_path: Path,
+):
+    """The two sides of the bind mount are different users, both ways.
+
+    ``shell`` runs as the container user, the typed writers run as the host
+    project user, and neither can chmod the other's files. The host already
+    creates 0o666/0o777 for the sandbox; without the matching zero umask on the
+    container side a file the Agent wrote in ``shell`` arrives 0o644 and every
+    later ``write_file``/``edit_file`` on it is refused as "not writable" —
+    eleven such refusals across two arms, and the published ``u+w`` recovery
+    cannot repair any of them.
+    """
+
+    image = "autotrade-sandbox:latest"
+    inspected = subprocess.run(
+        ["docker", "image", "inspect", image],
+        capture_output=True,
+        check=False,
+    )
+    if inspected.returncode != 0:
+        pytest.skip(f"local sandbox image is unavailable: {image}")
+
+    local = LocalSandbox(tmp_path / "session")
+    paths = local.prepare_layout()
+    # As the host seeds it: the formal tree is created host-side and opened to
+    # the sandbox user, the same 0o777 restore_working_artifacts_writable sets.
+    (paths.workspace / "output").mkdir()
+    (paths.workspace / "output").chmod(0o777)
+    sandbox = DockerSandbox(
+        local,
+        SandboxSpec(
+            image=image,
+            gpu=None,
+            cpus=1,
+            memory="1g",
+            pids_limit=64,
+            tmpfs_size="64m",
+        ),
+    )
+    sandbox.start()
+    runner = PersistentCommandRunner(sandbox)
+    try:
+        created = runner.run(
+            [
+                "python",
+                "-c",
+                (
+                    "from pathlib import Path\n"
+                    "Path('output/lib').mkdir(parents=True)\n"
+                    "Path('output/lib/features.py').write_text('VALUE = 1\\n')\n"
+                ),
+            ],
+            cwd=".",
+            timeout_seconds=30,
+            max_output_chars=4_000,
+        )
+        assert created.exit_code == 0, created.stderr
+    finally:
+        sandbox.stop()
+
+    directory = paths.workspace / "output" / "lib"
+    target = directory / "features.py"
+    # The container user owns both, which is exactly why the mode has to grant
+    # write to others rather than to the owner.
+    assert target.stat().st_uid != os.getuid()
+    assert stat.S_IMODE(target.stat().st_mode) == 0o666
+    assert stat.S_IMODE(directory.stat().st_mode) == 0o777
+
+    workspace = SafeWorkspace(paths.workspace)
+    edited = EditFileTool(workspace).invoke(
+        {"path": "output/lib/features.py", "old_text": "VALUE = 1", "new_text": "VALUE = 2"}
+    )
+    assert edited.ok, edited.value
+    assert target.read_text(encoding="utf-8") == "VALUE = 2\n"
+    # A new file inside the container-created directory too: the audited arm
+    # lost that case as well, not only in-place edits.
+    written = WriteFileTool(workspace).invoke(
+        {"path": "output/lib/probe.txt", "content": "ok\n"}
+    )
+    assert written.ok, written.value
+    assert (directory / "probe.txt").read_text(encoding="utf-8") == "ok\n"
 
 
 def test_docker_command_has_fail_closed_boundary(tmp_path: Path):

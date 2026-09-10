@@ -436,11 +436,17 @@ def readonly_copy_hint(target: str) -> str:
     is made inside the sandbox and belongs to the container user, so the host
     cannot chmod it back (:func:`chmod_tree` skips the EPERM paths): only the
     sandbox can clear the lock, which is why this is a hint and not a repair.
+
+    For the same ownership reason the mode must grant write to *others*: the
+    typed writers run as the host user, which is neither the copy's owner nor
+    in its group, so ``u+w`` leaves them exactly as locked out as before.
     """
 
     return (
-        f'run shell argv ["chmod", "-R", "u+w", "{target}"] and retry: a tree copied '
-        "from steps/ or a frozen artifact keeps that snapshot's read-only mode"
+        f'run shell argv ["chmod", "-R", "a+w", "{target}"] and retry: a tree copied '
+        "from steps/ or a frozen artifact keeps that snapshot's read-only mode, and "
+        "the copy belongs to the sandbox user, so u+w alone does not give the typed "
+        "writers access"
     )
 
 

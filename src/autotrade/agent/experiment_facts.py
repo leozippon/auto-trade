@@ -25,6 +25,15 @@ DEADLINE_SECONDS_NOTE = (
     "因此会话总墙钟可能更长。"
 )
 
+# Agent-visible rule for the fit clock under batch fan-out. The environment,
+# not the strategy, creates the contention a batch adds, so the cap it is
+# measured against moves with it (pipelines.local_backend._batch_fit_timeout).
+BATCH_VALIDATE_FIT_TIMEOUT_NOTE = (
+    "`batch_validate` 并发回放期间，`strategy_fit_timeout_seconds` 按本批实际并发路数成倍放大"
+    "（并发 3 路即 3 倍），因为并发是环境引入的、不该记到策略头上；"
+    "单次推断超时不变，串行的 `daily_backtest` 用基准值。"
+)
+
 
 def build_experiment_facts(
     *,
@@ -371,6 +380,9 @@ def _budget_facts(
             # scheduling or host contention to the strategy.
             "batch_validate_max_concurrency": (
                 None if is_meta else BATCH_VALIDATE_MAX_CONCURRENCY
+            ),
+            "batch_validate_fit_timeout_note": (
+                None if is_meta else BATCH_VALIDATE_FIT_TIMEOUT_NOTE
             ),
             "context_compaction": context_compaction,
         }

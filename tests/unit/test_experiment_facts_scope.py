@@ -8,7 +8,10 @@ import json
 import tempfile
 from pathlib import Path
 
-from autotrade.agent.experiment_facts import build_experiment_facts
+from autotrade.agent.experiment_facts import (
+    BATCH_VALIDATE_FIT_TIMEOUT_NOTE,
+    build_experiment_facts,
+)
 from autotrade.agent.prompts import (
     build_meta_learning_prompt,
     build_system_prompt,
@@ -857,9 +860,13 @@ def test_the_facts_publish_the_strategy_containers_cpu_quota_and_batch_width() -
     fold = _facts()["budgets"]
     assert fold["strategy_cpus"] == SandboxLimits().cpus
     assert fold["batch_validate_max_concurrency"] == BATCH_VALIDATE_MAX_CONCURRENCY
+    # The width alone would mislead: the fit clock the batch is judged against
+    # scales with it, so the rule travels with the number.
+    assert fold["batch_validate_fit_timeout_note"] == BATCH_VALIDATE_FIT_TIMEOUT_NOTE
     assert "strategy_cpus" in build_system_prompt(mode="fold", experiment_facts=_facts())
     # Meta runs no replay of its own, so the batch width is not its fact; the
     # container quota still is, because fit(context) runs in that container.
     meta = _facts(kind="meta_learning")["budgets"]
     assert meta["strategy_cpus"] == SandboxLimits().cpus
     assert "batch_validate_max_concurrency" not in meta
+    assert "batch_validate_fit_timeout_note" not in meta

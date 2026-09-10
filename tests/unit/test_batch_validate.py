@@ -30,6 +30,7 @@ from autotrade.environment.artifacts import (
 )
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.runtime import write_json_atomic
+from autotrade.environment.sandbox import SandboxConfig
 from autotrade.environment.step_tree import StepTree
 from autotrade.environment.time_budget import InferenceTimeBudget
 from autotrade.environment.tools.base import ToolError, ToolRegistry
@@ -120,6 +121,11 @@ class _Evaluator:
         # than the concurrency bound still completes.
         self._barrier = threading.Barrier(rendezvous, timeout=10) if rendezvous else None
         self._arrived = 0
+        # The real evaluators carry the strategy container's boundary here and
+        # read it at evaluate() time; batch_validate widens the fit clock on it
+        # for the pool's lifetime, so each replay records what it was handed.
+        self.sandbox = SandboxConfig()
+        self.fit_timeouts: list[float] = []
 
     def evaluate(self, request, max_days=None):
         del max_days
@@ -129,6 +135,7 @@ class _Evaluator:
         with self._lock:
             self.calls += 1
             self._arrived += 1
+            self.fit_timeouts.append(self.sandbox.limits.fit_timeout_seconds)
             call_index = self.calls
             arrival = self._arrived
             self.active += 1
@@ -460,6 +467,41 @@ class BatchValidateRunTest(unittest.TestCase):
                 [row["result_name"] for row in result.value["candidates"]],
                 [f"valid_{index + 1:03d}" for index in range(len(names))],
             )
+
+    def test_the_fit_deadline_scales_with_the_batch_replay_width(self) -> None:
+        """The contention a batch adds is the environment's, not the strategy's.
+
+        ``fit_timeout_seconds`` is a fixed per-call host wall clock, so with a
+        fixed cap a candidate's verdict depended on how many siblings happened
+        to share the host: two explore_github folds lost both batch candidates
+        to `strategy fit exceeded 3600s` while solo reruns of the same code did
+        the same four refits in 1,550-2,027 s. The cap therefore moves with the
+        batch's own width, and only for the pool's lifetime.
+        """
+
+        base = SandboxConfig().limits.fit_timeout_seconds
+        with TemporaryDirectory() as tmp:
+            session = _Session(Path(tmp), max_backtests=6, max_steps=6)
+            # One serial replay: nothing else is running, so nothing is scaled.
+            self.assertTrue(session.backtest.invoke({}).ok)
+            self.assertEqual(session.evaluator.fit_timeouts, [base])
+
+            for count in (2, 3):
+                names = [f"w{count}{index}" for index in range(count)]
+                for index, name in enumerate(names):
+                    session.candidate(name, _strategy(f"{count}{index}"))
+                session.evaluator.fit_timeouts.clear()
+                self.assertTrue(session.call(*names).ok)
+                self.assertEqual(
+                    session.evaluator.fit_timeouts, [base * count] * count
+                )
+                # Restored the moment the pool is done, so the next serial
+                # replay is not evaluated against a widened clock.
+                self.assertEqual(
+                    session.evaluator.sandbox.limits.fit_timeout_seconds, base
+                )
+            # Everything else about the boundary is untouched.
+            self.assertEqual(session.evaluator.sandbox, SandboxConfig())
 
     def test_each_candidate_costs_one_backtest_and_one_step(self) -> None:
         with TemporaryDirectory() as tmp:

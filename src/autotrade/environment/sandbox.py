@@ -322,6 +322,20 @@ def probe_image_runtime(image: str, *, docker_executable: str = "docker", timeou
     return value
 
 
+# The workspace is shared through a bind mount, but the two sides are
+# different users: `shell` runs as the container's `agent` (a subuid the host
+# does not own), the typed writers (`tools.files`) run as the host project
+# user. The host already keeps its own creations reachable from the container
+# (0o666/0o777, `tools.files._SANDBOX_FILE_MODE`); a zero umask closes the
+# reverse direction, so a file the Agent creates in `shell` stays editable by
+# `write_file`/`edit_file` instead of arriving 0o644 and refusing them.
+# `exec "$0" "$@"` keeps the argv-only contract: the payload is handed to `sh`
+# as positional parameters and is never re-parsed, and the exec replaces the
+# shell, so the payload itself owns the pid, the stdio and the exit status
+# (`timeout`'s 124 included).
+_ZERO_UMASK = ("sh", "-c", 'umask 0000; exec "$0" "$@"')
+
+
 class DockerSandbox:
     """One persistent, network-disabled container for an Agent session."""
 
@@ -457,6 +471,7 @@ class DockerSandbox:
             str(work),
             "-i",
             self.container,
+            *_ZERO_UMASK,
             *map(str, argv),
         ]
 

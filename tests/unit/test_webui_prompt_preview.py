@@ -17,6 +17,7 @@ import pytest
 
 from autotrade.agent import prompts
 from autotrade.agent.experiment_facts import (
+    BATCH_VALIDATE_FIT_TIMEOUT_NOTE,
     DEADLINE_SECONDS_NOTE,
     build_experiment_facts,
 )
@@ -207,9 +208,11 @@ def test_fold_preview_states_the_pipeline_budgets_and_scope(tmp_path: Path):
         # "every formal replay runs on CPU", not omitted.
         "strategy_gpu_count": limits.gpu_count,
         # Its CPU quota, which is also the thread count its numeric libraries
-        # are pinned to, and how many replays one batch runs at once.
+        # are pinned to, and how many replays one batch runs at once — plus the
+        # rule that the fit clock scales with that width.
         "strategy_cpus": limits.cpus,
         "batch_validate_max_concurrency": BATCH_VALIDATE_MAX_CONCURRENCY,
+        "batch_validate_fit_timeout_note": BATCH_VALIDATE_FIT_TIMEOUT_NOTE,
     }
     # The calendar the console configures: one yearly Fold, no frozen Test.
     assert facts["visible_timeline"]["fold_period"] == "year"

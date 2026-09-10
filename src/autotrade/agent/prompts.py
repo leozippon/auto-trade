@@ -101,7 +101,7 @@ FOLD_ENV_SECTION = """\
 - Pipeline 按 `Epoch → Fold → Step` 运行。当前 Fold 只用 Validation 开发；冻结后的策略由宿主在不可见区间评估，Held-out 只在全部开发结束后运行。
 - `snapshot_dir` 与 `asof_dir` 是只读 PIT 输入，以实际挂载清单、schema、单位引用和 `available_at` 为准；Broker、调度、精确查价和预算以本次挂载事实为准。未知字段或单位在用于阈值和跨表计算前先核实。
 - 决策期读取必须加窗：`generate_orders` 每次只读需要的列与所需交易日区间，不加过滤地读完全历史必然超出单次推断超时，任一次超时即整场回测失败；重的拟合放进 `fit`。
-- `output/` 和 `models/` 是正式产物；`workspace/` 与 `skills/` 不进入 revision、frozen 或后续评估。从 `steps`、`parent_output` 等只读产物树拷进工作区的文件保留只读位，编辑前先用 `shell` 跑 `chmod -R u+w <目标>`。\
+- `output/` 和 `models/` 是正式产物；`workspace/` 与 `skills/` 不进入 revision、frozen 或后续评估。从 `steps`、`parent_output` 等只读产物树拷进工作区的文件保留只读位，且属于沙箱用户，编辑前先用 `shell` 跑 `chmod -R a+w <目标>`（`u+w` 不足以让类型化写工具改动它）。\
 """
 
 FOLD_SUBMIT_CONTRACT = """\

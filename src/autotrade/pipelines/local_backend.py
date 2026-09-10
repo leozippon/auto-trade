@@ -9,8 +9,9 @@ import shutil
 import threading
 import time
 import uuid
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path, PurePosixPath
@@ -1375,7 +1376,10 @@ BATCH_VALIDATE_MAX_CANDIDATES = 6
 # and its own strategy container — two when the candidate declares fit, whose
 # read-write state bind needs a second worker — and the Timeview stash
 # serializes part publication across evaluations, so the bound is host capacity
-# (up to two containers per replay at SandboxLimits.cpus), not correctness.
+# (up to two containers per replay at SandboxLimits.cpus), not correctness —
+# which only holds because the fit deadline scales with the batch's own width
+# (``_batch_fit_timeout``); a fixed fit clock made the outcome depend on how
+# many siblings happened to share the host.
 BATCH_VALIDATE_MAX_CONCURRENCY = 3
 BATCH_NAME_MAX_CHARS = 40
 BATCH_HYPOTHESIS_MAX_CHARS = 500
@@ -1442,6 +1446,46 @@ def batch_candidate_stats(summary: Mapping[str, object]) -> dict[str, object]:
             if isinstance(row, Mapping)
         ]
     return stats
+
+
+@contextmanager
+def _batch_fit_timeout(evaluator: object, workers: int) -> Iterator[None]:
+    """Widen the fit deadline to the replay width this batch itself creates.
+
+    ``SandboxLimits.fit_timeout_seconds`` is a runaway-fit guard measured on
+    host wall clock. Fanning ``workers`` replays out over the same host makes
+    the same ``fit(context)`` take longer without the strategy doing anything
+    different, so a fixed cap makes the verdict depend on how many siblings a
+    candidate happened to be batched with — the failure mode that cost
+    explore_github four Validation slots to fits solo reruns finished in
+    1,550-2,027 s. Scaling the cap by ``workers`` keeps the guard (a runaway
+    fit still dies) while removing that scheduling dependence.
+
+    Only the fit clock moves: ``timeout_seconds`` bounds one ``generate_orders``
+    call, of which a Validation makes hundreds, so widening it would let a
+    single slow batch stretch the whole replay instead of failing it.
+
+    The batch owns the evaluator for the pool's lifetime — a Fold session runs
+    one tool at a time — so mutating and restoring the shared config here is
+    safe. An evaluator without sandbox limits (trusted mode, test doubles) has
+    no fit clock to scale and is left alone.
+    """
+
+    config = getattr(evaluator, "sandbox", None)
+    limits = getattr(config, "limits", None)
+    if limits is None:
+        yield
+        return
+    evaluator.sandbox = replace(  # type: ignore[attr-defined]
+        config,
+        limits=replace(
+            limits, fit_timeout_seconds=limits.fit_timeout_seconds * workers
+        ),
+    )
+    try:
+        yield
+    finally:
+        evaluator.sandbox = config  # type: ignore[attr-defined]
 
 
 @dataclass(frozen=True)
@@ -2016,9 +2060,12 @@ class BatchValidateTool(SessionTimeBudgetAware):
         if workers <= 1:
             return [run_one(index) for index in range(len(revisions))]
         interrupt: SessionInterrupt | None = None
-        with ThreadPoolExecutor(
-            max_workers=workers, thread_name_prefix="batch-validate"
-        ) as pool:
+        with (
+            _batch_fit_timeout(self.backtest.evaluator, workers),
+            ThreadPoolExecutor(
+                max_workers=workers, thread_name_prefix="batch-validate"
+            ) as pool,
+        ):
             futures = {
                 pool.submit(run_one, index): index for index in range(len(revisions))
             }
@@ -2461,9 +2508,10 @@ def _rejection_recovery(error_type: str) -> str:
         )
     if error_type == "permission_denied":
         return (
-            "Recovery: files copied out of a read-only tree keep mode 0444, so "
-            "run chmod -R u+w on that candidate directory through shell before "
-            "calling again."
+            "Recovery: files copied out of a read-only tree keep mode 0444 and "
+            "belong to the sandbox user, so run chmod -R a+w on that candidate "
+            "directory through shell before calling again; u+w leaves the host-"
+            "side writer locked out."
         )
     return (
         "Recovery: read the error text above and change the input it names; "

@@ -295,8 +295,13 @@ def _rc_prepare(rc):
     if rc.empty:
         return rc
     out = rc.copy()
-    out["fy_off"] = (out["quarter"].astype(str).str[:4].astype(float)
-                     - out["report_date"].astype(str).str[:4].astype(float))
+    # `quarter` is a fiscal-year label ("2024Q4"), but the raw table also
+    # carries bare "Q" and NULL (about 0.3% of rows); a hard cast raises there,
+    # so coerce and let the NaN fall out of the fy_off filter downstream.
+    out["fy_off"] = (
+        pd.to_numeric(out["quarter"].astype(str).str[:4], errors="coerce")
+        - pd.to_numeric(out["report_date"].astype(str).str[:4], errors="coerce")
+    )
     out["rating_score"] = out["rating"].map(RATING_MAP)
     return out
 

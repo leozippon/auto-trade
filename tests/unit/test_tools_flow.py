@@ -1002,7 +1002,9 @@ class ArtifactIOToolTest(unittest.TestCase):
         """The Agent branches by copying out of ``steps/<node>/output``, and
         ``cp -r`` reproduces that snapshot's 0o444/0o555 lock in the work copy.
         Only the sandbox can clear it, so the refusal has to name the recovery
-        instead of returning a bare ``[Errno 13]``."""
+        instead of returning a bare ``[Errno 13]`` — and the recovery has to be
+        ``a+w``: the copy belongs to the container user, so ``u+w`` moves a bit
+        the host-side writer does not benefit from at all."""
         with tempfile.TemporaryDirectory() as tmp:
             paths, registry = self._registry(Path(tmp))
             locked = paths.agent / "output" / "lib"
@@ -1025,8 +1027,9 @@ class ArtifactIOToolTest(unittest.TestCase):
                     blocked = registry.invoke(tool, arguments)
                     self.assertFalse(blocked.ok, tool)
                     self.assertEqual(blocked.value["error_type"], "readonly", tool)
-                    self.assertIn("chmod", blocked.value["retry_hint"], tool)
-                    self.assertIn("u+w", blocked.value["retry_hint"], tool)
+                    self.assertIn(
+                        '["chmod", "-R", "a+w"', blocked.value["retry_hint"], tool
+                    )
                 # Nothing was created or changed behind either refusal.
                 self.assertFalse((locked / "new.py").exists())
                 self.assertEqual(
