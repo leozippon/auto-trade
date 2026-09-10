@@ -41,7 +41,10 @@ from autotrade.environment.replay import (
 from autotrade.environment.replay.stats import attach_cost_sensitivity
 from autotrade.environment.runtime import agent_trace_path, chmod_tree
 from autotrade.environment.strategy import NLQuery
-from autotrade.environment.tools.finish_fold import baseline_anchor_required
+from autotrade.environment.tools.finish_fold import (
+    baseline_anchor_required,
+    mechanism_structure,
+)
 
 from .agent_inbox import expire_experiment_session_inbox
 from .agent_views import (
@@ -71,7 +74,7 @@ from .config import (
     fold_session_deadline_seconds,
 )
 from .folds import FoldSpec, heldout_periods
-from .hitl_state import fold_session_key
+from .hitl_state import DEPLOYMENT_SESSION_KEY, fold_session_key
 from .ledger import (
     ExperimentLedger,
     FrozenArtifactMutated,
@@ -86,6 +89,9 @@ from .ledger import (
     latest_fold_records,
     latest_meta_records,
     walk_forward_transitions,
+)
+from .ledger import (
+    latest_deployment_record as _latest_deployment_record,
 )
 from .meta_inputs import (
     AgentTraceFullSidecar,
@@ -863,6 +869,259 @@ class RollingExperimentPipeline:
             count += 1
         return count
 
+    def run_deployment_adjustment(
+        self,
+        epoch_id: str,
+        fold: FoldSpec,
+        *,
+        graduated: FrozenArtifact,
+        prior: str = "",
+        session_context: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        """The post-Held-out deployment refit (docs/pipeline-design.md §3.4).
+
+        The Fold scaffold with the mechanism frozen: the graduated artifact is
+        the parent, the host replays it on the window first, the session may
+        change only declared knobs and ``models/`` (the tools refuse the
+        rest before any replay), and the freeze here is the authority -- a
+        nomination whose mechanism differs is ``no_update`` with
+        ``mechanism_changed``. The row never enters Meta or Fold history and
+        never counts as a transition; ``ledger.paper_candidate`` reads it.
+        """
+        assert_no_frozen_artifact_mutation(self.ledger.read())
+        run_started = time.monotonic()
+        run_id = f"run_{uuid.uuid4().hex}"
+        context = dict(session_context or {})
+        progress = _optional_hook(context.get("progress_hook"), "progress_hook")
+        budgets = _session_budgets(
+            replace(
+                self.config,
+                max_steps_per_fold=self.config.deployment_max_backtests,
+                max_backtests_per_fold=self.config.deployment_max_backtests,
+            ),
+            context.get("resource_override"),
+        )
+        current_skills = self._current_skills()
+        wrote_ledger_record = False
+        attempt = {
+            "experiment_id": self.config.experiment_id,
+            "epoch_id": epoch_id,
+            "fold_id": fold.fold_id,
+            "run_id": run_id,
+            "session_key": DEPLOYMENT_SESSION_KEY,
+            "phase": "deployment_adjustment",
+        }
+        self.run_markers.begin(attempt)
+        try:
+            _publish_progress(
+                progress, "pit_snapshot", run_id=run_id, phase="validation"
+            )
+            snapshot = self.snapshots.prepare(
+                fold=fold,
+                phase="valid",
+                start=fold.validation_start,
+                end=fold.validation_end,
+                decision_time=fold.valid_decision_time,
+            )
+            control, control_error, _ = self._parent_control(
+                graduated, fold, snapshot, progress=progress, run_id=run_id, null=False
+            )
+            try:
+                session = self.developer(
+                    FoldSessionRequest(
+                        experiment_id=self.config.experiment_id,
+                        epoch_id=epoch_id,
+                        fold=fold,
+                        run_id=run_id,
+                        parent=graduated,
+                        prior=prior,
+                        snapshot=snapshot,
+                        max_steps=budgets["max_steps"],
+                        max_backtests=budgets["max_backtests"],
+                        max_llm_calls=budgets["max_llm_calls"],
+                        deadline_seconds=budgets["deadline_seconds"],
+                        deadline_grace_seconds=budgets["deadline_grace_seconds"],
+                        directive=str(context.get("directive") or ""),
+                        prompt_override=str(context.get("prompt_override") or ""),
+                        sandbox_gpu_count=_optional_gpu_count(
+                            context.get("sandbox_gpu_count")
+                        ),
+                        fold_period=self.config.fold_period,
+                        test_stage=False,
+                        parent_control=control,
+                        epoch_index=_epoch_index(epoch_id),
+                        phase="deployment",
+                        session_kind="deployment_adjustment",
+                        acceptance_rules=self.config.acceptance.to_record(),
+                        modification_constraints=self.config.step_constraints,
+                        snapshot_config=_snapshot_config_record(self.snapshots),
+                        record_failed_attempts=self.config.record_failed_attempts,
+                        nl_failure_policy=self.config.nl_failure_policy,
+                        finalize_before_deadline_seconds=self.config.finalize_before_deadline_seconds,
+                        max_null_controls=0,
+                        step_gate_hook=_optional_hook(
+                            context.get("step_gate_hook"), "step_gate_hook"
+                        ),
+                        user_question_hook=_optional_hook(
+                            context.get("user_question_hook"), "user_question_hook"
+                        ),
+                        progress_hook=progress,
+                        session_key=DEPLOYMENT_SESSION_KEY,
+                        skills_source_ref=(
+                            str(current_skills.root)
+                            if current_skills.root is not None
+                            else ""
+                        ),
+                    )
+                )
+            except AgentSessionDeadlineExceeded as exc:
+                session = FoldSessionResult(
+                    conversation_id=exc.conversation_id,
+                    steps=(),
+                    selected_step_id=None,
+                    finish_reason="deadline_grace_exhausted",
+                )
+            if sum(not step.parent_control for step in session.steps) > budgets["max_steps"]:
+                raise RuntimeError("deployment adjustment exceeded the Step budget")
+            abstained = bool(session.no_edge_reason)
+            selected = (
+                None
+                if abstained
+                else _select_step(session.steps, session.selected_step_id)
+            )
+            hard: list[str] = [] if abstained else ["no_complete_validation"]
+            warnings: list[str] = []
+            if selected is not None:
+                hard, warnings = self.config.acceptance.evaluate(
+                    selected.validation.summary
+                )
+            adjusted: FrozenArtifact | None = None
+            nominated_identical_to_parent = False
+            mechanism_check: dict[str, object] | None = None
+            if selected is not None and not hard:
+                if self._matches_parent_content(graduated, selected.revision_id):
+                    # The graduate itself: the normal no-adjustment outcome.
+                    status = "no_update"
+                    nominated_identical_to_parent = True
+                else:
+                    mechanism_check = _mechanism_check(
+                        graduated.path,
+                        self.artifacts.revision(selected.revision_id).output_path,
+                    )
+                    if mechanism_check["equal"]:
+                        adjusted = self.artifacts.freeze_revision(
+                            selected.revision_id,
+                            artifact_id=f"strategy_deployment_{uuid.uuid4().hex[:12]}",
+                            experiment_id=self.config.experiment_id,
+                            epoch_id=epoch_id,
+                            fold_id=fold.fold_id,
+                            run_id=run_id,
+                            step_id=selected.step_id,
+                        )
+                        status = "adjusted"
+                    else:
+                        status = "no_update"
+                        hard = ["mechanism_changed"]
+            elif selected is not None or abstained:
+                status = "no_update"
+            else:
+                status = "no_valid_backtest"
+            validation = selected.validation.summary if selected is not None else None
+            record = {
+                "record_type": "deployment_adjustment",
+                "experiment_id": self.config.experiment_id,
+                "epoch_id": epoch_id,
+                "fold_id": fold.fold_id,
+                "run_id": run_id,
+                "session_key": DEPLOYMENT_SESSION_KEY,
+                "period": f"{fold.validation_start}..{fold.validation_end}",
+                **fold.to_record(),
+                "parent_strategy_artifact_id": graduated.artifact_id,
+                "parent_control": _parent_control_record(
+                    graduated,
+                    control,
+                    control_error,
+                    session.steps,
+                    fold=fold,
+                    slippage_bps=self.config.broker_profile.slippage_bps,
+                ),
+                "conversation_id": session.conversation_id,
+                "finish_reason": session.finish_reason,
+                "finish_mode": (
+                    "agent_no_edge"
+                    if abstained
+                    else "nominated"
+                    if selected is not None
+                    else "no_nomination"
+                ),
+                "early_stop_reason": session.early_stop_reason or None,
+                "no_edge_reason": session.no_edge_reason or None,
+                "status": status,
+                **(
+                    {"nominated_identical_to_parent": True}
+                    if nominated_identical_to_parent
+                    else {}
+                ),
+                "hard_reject_reasons": hard,
+                "accept_warnings": warnings,
+                "mechanism_check": mechanism_check,
+                "selected_step_id": selected.step_id if selected is not None else None,
+                "steps": [_step_record(step) for step in session.steps],
+                "adjusted_strategy_artifact_id": (
+                    adjusted.artifact_id if adjusted is not None else None
+                ),
+                "adjusted_strategy_artifact_path": (
+                    str(adjusted.path) if adjusted is not None else None
+                ),
+                "adjusted_model_artifact_path": (
+                    str(adjusted.model_path)
+                    if adjusted is not None and adjusted.model_path is not None
+                    else None
+                ),
+                "validation_result": validation,
+                "vs_parent": _vs_parent_metrics(
+                    validation, control.summary if control is not None else None
+                ),
+                "selection_statistics": _selection_statistics(session.steps, selected),
+                "run_manifest_ref": session.run_manifest_ref,
+                "agent_trace_ref": str(
+                    agent_trace_path(self.config.experiment_dir / "artifacts", run_id)
+                )
+                if agent_trace_path(
+                    self.config.experiment_dir / "artifacts", run_id
+                ).exists()
+                else None,
+                "snapshot_ids": {"valid_decision_input": snapshot.snapshot_id},
+                **_session_timing(context, run_started),
+            }
+            self.ledger.append(record)
+            wrote_ledger_record = True
+            expire_experiment_session_inbox(
+                self.config.experiment_dir, DEPLOYMENT_SESSION_KEY, expired_by=run_id
+            )
+            return record
+        except BaseException as exc:
+            if not wrote_ledger_record:
+                self.ledger.append(
+                    {
+                        **attempt,
+                        "record_type": "attempt_failed",
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                )
+                wrote_ledger_record = True
+            raise
+        finally:
+            if wrote_ledger_record:
+                self.run_markers.finish(run_id)
+            prune = getattr(self.artifacts, "prune_transient", None)
+            if callable(prune):
+                prune(
+                    keep_frozen_ids=_keep_frozen_artifact_ids(
+                        self.ledger.read(), extra_id=graduated.artifact_id
+                    )
+                )
+
     def _run_meta(
         self,
         epoch_id: str,
@@ -1110,6 +1369,7 @@ class RollingExperimentPipeline:
         *,
         progress,
         run_id: str,
+        null: bool = True,
     ) -> tuple[EvaluationResult | None, str, dict[str, object] | None]:
         """Replay the inherited parent unchanged on this Fold's Validation window.
 
@@ -1138,6 +1398,8 @@ class RollingExperimentPipeline:
             )
         except Exception as exc:  # noqa: BLE001 - recorded, the Fold still runs
             return None, f"{type(exc).__name__}: {exc}", None
+        if not null:
+            return control, "", None
         return (
             control,
             "",
@@ -1382,7 +1644,24 @@ def _keep_frozen_artifact_ids(
         artifact_id = str(record.get("frozen_strategy_artifact_id") or "")
         if artifact_id:
             keep.add(artifact_id)
+    adjustment = _latest_deployment_record(records)
+    if adjustment is not None:
+        artifact_id = str(adjustment.get("adjusted_strategy_artifact_id") or "")
+        if artifact_id:
+            keep.add(artifact_id)
     return tuple(sorted(keep))
+
+
+def _mechanism_check(parent_output: Path, candidate_output: Path) -> dict[str, object]:
+    """Whether a nominated package is the graduated mechanism, by the same
+    reading the session's tools enforce (``mechanism_structure``)."""
+    parent = mechanism_structure(Path(parent_output))
+    candidate = mechanism_structure(Path(candidate_output))
+    return {
+        "parent_structure_sha256": hashlib.sha256(parent.encode()).hexdigest(),
+        "adjusted_structure_sha256": hashlib.sha256(candidate.encode()).hexdigest(),
+        "equal": parent == candidate,
+    }
 
 
 def _select_step(

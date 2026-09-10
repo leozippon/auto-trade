@@ -32,6 +32,7 @@ STATUS_NAME = "status.json"
 SCHEDULE_NAME = "schedule.json"
 ANALYSIS_DIR_NAME = "analysis"
 HELDOUT_SESSION_KEY = "heldout"
+DEPLOYMENT_SESSION_KEY = "deployment_adjustment"
 LIVE_RUN_STATES = {"running_session", "waiting_step_user", "waiting_user_reply"}
 
 # The persistent WebUI creation contract.  The form and manager both read

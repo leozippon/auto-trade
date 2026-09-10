@@ -30,7 +30,7 @@ from autotrade.pipelines.config import (
     fold_session_deadline_seconds,
 )
 from autotrade.pipelines.experiment import _session_budgets, null_control_seed
-from autotrade.pipelines.folds import build_fold_schedule
+from autotrade.pipelines.folds import build_fold_schedule, deployment_fold
 from autotrade.pipelines.hitl_state import fold_session_key
 from autotrade.pipelines.ledger import (
     DEFLATED_SHARPE_MIN_RETURN_DAYS,
@@ -42,8 +42,10 @@ from autotrade.pipelines.ledger import (
     FrozenArtifactRestoreFailed,
     RunMarkers,
     deflated_sharpe,
+    deployment_adjustment_due,
     latest_fold_records,
     latest_heldout_records,
+    paper_candidate,
 )
 from autotrade.pipelines.meta_inputs import build_meta_fold_review_bundle
 from autotrade.pipelines.meta_schedule import meta_session_key
@@ -2630,3 +2632,286 @@ def test_a_backend_without_a_null_control_records_no_block(tmp_path: Path):
     record = ledger.read("fold")[1]
     assert record["null_control"] is None
     assert "null_control" not in record["parent_control"]
+
+
+# ---- the post-Held-out deployment adjustment (docs/pipeline-design.md §3.4)
+
+GRADUATED_MAIN = "TOP_N = 5\ndef generate_orders(context):\n    return []\n"
+# The same mechanism with one declared knob changed, and a changed mechanism.
+KNOB_MAIN = "TOP_N = 7\ndef generate_orders(context):\n    return []\n"
+MECHANISM_MAIN = (
+    "TOP_N = 5\ndef generate_orders(context):\n"
+    "    if context is None:\n        return None\n    return []\n"
+)
+
+
+def _deployment_pipeline(
+    tmp_path: Path,
+    evaluator,
+    *,
+    candidate: str | None = KNOB_MAIN,
+    nominate: str = "candidate",
+    developer_error: Exception | None = None,
+):
+    """A graduated experiment as the Held-out left it, plus a fake developer.
+
+    The ledger already carries the Fold that froze the graduate and a
+    graduated Held-out row scoring it. The developer echoes the parent control
+    it was handed, replays ``candidate`` (when given) and nominates per
+    ``nominate``: the candidate, the parent_control node, nothing, or an
+    explicit no_edge.
+    """
+    graduated_dir = tmp_path / "graduated"
+    graduated_dir.mkdir(parents=True)
+    (graduated_dir / "main.py").write_text(GRADUATED_MAIN, encoding="utf-8")
+    artifacts = Artifacts(ArtifactRevision("revision_graduated", graduated_dir), tmp_path / "frozen")
+    graduated = artifacts.freeze_revision(
+        "revision_graduated",
+        artifact_id="strategy_epoch_001_fold_2026Q1_graduate",
+        experiment_id="experiment_a",
+        epoch_id="epoch_001",
+        fold_id="fold_2026Q1",
+        run_id="run_f",
+        step_id="step_f",
+    )
+    artifacts.revisions["revision_parent_copy"] = ArtifactRevision("revision_parent_copy", graduated.path)
+    if candidate is not None:
+        candidate_dir = tmp_path / "candidate"
+        candidate_dir.mkdir()
+        (candidate_dir / "main.py").write_text(candidate, encoding="utf-8")
+        artifacts.revisions["revision_candidate"] = ArtifactRevision("revision_candidate", candidate_dir)
+    config = RollingExperimentConfig(
+        "experiment_a",
+        tmp_path / "experiments",
+        "2025Q4",
+        "2026Q1",
+        "2026Q2",
+        "2026Q2",
+        fold_period="quarter",
+        deployment_adjustment_start="20260401",
+        deployment_max_backtests=2,
+    )
+    # The console seeds the reference store at creation; a directory without
+    # one reads as a legacy experiment.
+    AgentRefStore(config.experiment_dir)
+    ledger = ExperimentLedger(config.ledger_path)
+    ledger.append(
+        {
+            "record_type": "fold",
+            "experiment_id": "experiment_a",
+            "epoch_id": "epoch_001",
+            "fold_id": "fold_2026Q1",
+            "run_id": "run_f",
+            "session_key": "epoch_001/fold_2026Q1",
+            "fold_status": "frozen",
+            "validation_period": "20260101..20260331",
+            "frozen_strategy_artifact_id": graduated.artifact_id,
+            "frozen_strategy_artifact_path": str(graduated.path),
+        }
+    )
+    ledger.append(
+        {
+            "record_type": "heldout",
+            "experiment_id": "experiment_a",
+            "epoch_id": "epoch_001",
+            "fold_id": "heldout_2026Q2",
+            "run_id": "run_h",
+            "session_key": "heldout",
+            "period": "2026Q2",
+            "strategy_artifact_id": graduated.artifact_id,
+            "result": {"total_return": 0.04},
+            "verdict": {"status": "graduated", "reasons": []},
+        }
+    )
+    requests: list = []
+
+    def developer(request):
+        requests.append(request)
+        if developer_error is not None:
+            raise developer_error
+        steps = []
+        if request.parent_control is not None:
+            steps.append(
+                StepResult("parent_control_1", "revision_parent_copy", request.parent_control, parent_control=True)
+            )
+        if candidate is not None:
+            steps.append(
+                StepResult(
+                    "step_1",
+                    "revision_candidate",
+                    EvaluationResult(
+                        {"total_return": 0.06, "max_drawdown": -0.03, "sharpe": 1.1,
+                         "benchmark": {"benchmark_return": 0.02, "excess_return": 0.04,
+                                       "neutralized_excess_return": 0.02}},
+                        "result/valid/candidate",
+                    ),
+                )
+            )
+        if nominate == "no_edge":
+            return FoldSessionResult(
+                "conversation", tuple(steps), None, no_edge_reason="the refit is not better on the newest quarters, keep the graduate"
+            )
+        selected = {
+            "candidate": "step_1",
+            "parent_control": "parent_control_1",
+            "none": None,
+        }[nominate]
+        return FoldSessionResult("conversation", tuple(steps), selected)
+
+    pipeline = RollingExperimentPipeline(
+        config,
+        snapshots=Snapshots(),
+        artifacts=artifacts,
+        evaluator=evaluator,
+        developer=developer,
+        meta_learner=None,
+        ledger=ledger,
+    )
+    fold = deployment_fold("20260401", _days(), window_months=24)
+    return pipeline, fold, ledger, graduated, requests
+
+
+def test_deployment_adjustment_freezes_a_knob_refit_as_the_paper_candidate(tmp_path: Path):
+    evaluator = RecordingEvaluator({"strategy_epoch_001_fold_2026Q1_graduate": 0.03})
+    pipeline, fold, ledger, graduated, requests = _deployment_pipeline(tmp_path, evaluator)
+    assert deployment_adjustment_due(ledger.read(), start="20260401")
+    assert paper_candidate(ledger.read()) == {
+        "artifact_id": graduated.artifact_id,
+        "output_path": str(graduated.path),
+        "models_path": str(graduated.path.parent / "models"),
+        "source": "graduated",
+        "graduated_artifact_id": graduated.artifact_id,
+    }
+
+    record = pipeline.run_deployment_adjustment("epoch_001", fold, graduated=graduated, prior="PRIOR")
+    # The host replayed the graduate on the whole window first, without a
+    # null control, and the session saw it as its parent control.
+    assert evaluator.calls == [("valid", graduated.artifact_id, "20260401", "20260630")]
+    request = requests[0]
+    assert request.session_kind == "deployment_adjustment"
+    assert request.parent is graduated and request.parent_control is not None
+    assert request.parent_control_null is None
+    assert request.max_null_controls == 0
+    assert (request.max_steps, request.max_backtests) == (2, 2)
+    assert request.prior == "PRIOR"
+    assert record["record_type"] == "deployment_adjustment"
+    assert record["session_key"] == "deployment_adjustment"
+    assert record["fold_id"] == "deployment_20260401..20260630"
+    assert record["period"] == "20260401..20260630"
+    assert record["status"] == "adjusted"
+    assert record["hard_reject_reasons"] == []
+    assert record["mechanism_check"]["equal"] is True
+    assert record["parent_strategy_artifact_id"] == graduated.artifact_id
+    assert record["parent_control"]["status"] == "ok"
+    assert record["parent_control"]["step_id"] == "parent_control_1"
+    assert record["vs_parent"]["neutralized_excess_return_delta"] == pytest.approx(0.01)
+    assert record["selection_statistics"]["candidates_evaluated"] == 1
+    adjusted_id = record["adjusted_strategy_artifact_id"]
+    assert adjusted_id.startswith("strategy_deployment_")
+    adjusted_path = Path(record["adjusted_strategy_artifact_path"])
+    assert (adjusted_path / "main.py").read_text(encoding="utf-8") == KNOB_MAIN
+    assert not deployment_adjustment_due(ledger.read(), start="20260401")
+    assert paper_candidate(ledger.read()) == {
+        "artifact_id": adjusted_id,
+        "output_path": str(adjusted_path),
+        "models_path": None,
+        "source": "adjusted",
+        "graduated_artifact_id": graduated.artifact_id,
+    }
+    # The row is not a Fold: it never enters the Fold history, the Meta
+    # history or the transition chain.
+    from autotrade.pipelines.experiment import _development_inputs, _keep_frozen_artifact_ids
+    from autotrade.pipelines.ledger import walk_forward_transitions
+
+    assert set(latest_fold_records(ledger.read())) == {("epoch_001", "fold_2026Q1")}
+    assert walk_forward_transitions(ledger.read("fold"), epoch_id="epoch_001", test_stage=False)["transitions"] == 0
+    history, _sidecars = _development_inputs(ledger.read(), ref_store=AgentRefStore(pipeline.config.experiment_dir))
+    assert "deployment" not in json.dumps(history, default=str)
+    assert adjusted_id in _keep_frozen_artifact_ids(ledger.read())
+    assert sorted(RunMarkers(pipeline.config.experiment_dir).root.glob("*.json")) == []
+
+
+def test_deployment_adjustment_refuses_a_mechanism_change_at_freeze(tmp_path: Path):
+    evaluator = RecordingEvaluator({"strategy_epoch_001_fold_2026Q1_graduate": 0.03})
+    pipeline, fold, ledger, graduated, _requests = _deployment_pipeline(
+        tmp_path, evaluator, candidate=MECHANISM_MAIN
+    )
+    record = pipeline.run_deployment_adjustment("epoch_001", fold, graduated=graduated)
+    assert record["status"] == "no_update"
+    assert record["hard_reject_reasons"] == ["mechanism_changed"]
+    assert record["mechanism_check"]["equal"] is False
+    assert record["adjusted_strategy_artifact_id"] is None
+    assert paper_candidate(ledger.read())["artifact_id"] == graduated.artifact_id
+    assert not deployment_adjustment_due(ledger.read(), start="20260401")
+
+
+def test_deployment_adjustment_keeps_the_graduate_on_no_edge_or_parent_nomination(tmp_path: Path):
+    for nominate in ("parent_control", "no_edge"):
+        evaluator = RecordingEvaluator({"strategy_epoch_001_fold_2026Q1_graduate": 0.03})
+        pipeline, fold, ledger, graduated, _requests = _deployment_pipeline(
+            tmp_path / nominate, evaluator, nominate=nominate
+        )
+        record = pipeline.run_deployment_adjustment("epoch_001", fold, graduated=graduated)
+        assert record["status"] == "no_update", nominate
+        assert record["adjusted_strategy_artifact_id"] is None
+        if nominate == "parent_control":
+            assert record["nominated_identical_to_parent"] is True
+            assert record["finish_mode"] == "nominated"
+        else:
+            assert record["finish_mode"] == "agent_no_edge"
+            assert record["no_edge_reason"]
+        assert paper_candidate(ledger.read())["source"] == "graduated"
+
+
+def test_deployment_adjustment_without_a_valid_replay_pins_the_graduate(tmp_path: Path):
+    """A failed parent replay is recorded and the session still runs; a session
+    that nominates nothing leaves no_valid_backtest, and the graduated tree is
+    untouched: only the ledger pointer decides what Paper pins."""
+    evaluator = RecordingEvaluator({}, fail_on={"strategy_epoch_001_fold_2026Q1_graduate"})
+    pipeline, fold, ledger, graduated, requests = _deployment_pipeline(
+        tmp_path, evaluator, candidate=None, nominate="none"
+    )
+    before = (graduated.path / "main.py").read_bytes()
+    record = pipeline.run_deployment_adjustment("epoch_001", fold, graduated=graduated)
+    assert requests[0].parent_control is None
+    assert record["parent_control"]["status"] == "failed"
+    assert "exceeded its wall clock" in record["parent_control"]["error"]
+    assert record["status"] == "no_valid_backtest"
+    assert record["finish_mode"] == "no_nomination"
+    assert record["hard_reject_reasons"] == ["no_complete_validation"]
+    assert (graduated.path / "main.py").read_bytes() == before
+    assert paper_candidate(ledger.read())["artifact_id"] == graduated.artifact_id
+
+
+def test_deployment_adjustment_crash_is_an_attempt_failed_and_stays_due(tmp_path: Path):
+    evaluator = RecordingEvaluator({"strategy_epoch_001_fold_2026Q1_graduate": 0.03})
+    pipeline, fold, ledger, graduated, _requests = _deployment_pipeline(
+        tmp_path, evaluator, developer_error=RuntimeError("sandbox died")
+    )
+    with pytest.raises(RuntimeError, match="sandbox died"):
+        pipeline.run_deployment_adjustment("epoch_001", fold, graduated=graduated)
+    failed = ledger.read("attempt_failed")
+    assert len(failed) == 1
+    assert failed[0]["session_key"] == "deployment_adjustment"
+    assert failed[0]["fold_id"] == fold.fold_id
+    assert "sandbox died" in failed[0]["error"]
+    assert sorted(RunMarkers(pipeline.config.experiment_dir).root.glob("*.json")) == []
+    assert deployment_adjustment_due(ledger.read(), start="20260401")
+    assert paper_candidate(ledger.read())["source"] == "graduated"
+
+
+def test_paper_candidate_is_none_unless_the_experiment_graduated(tmp_path: Path):
+    evaluator = RecordingEvaluator({"strategy_epoch_001_fold_2026Q1_graduate": 0.03})
+    pipeline, fold, ledger, graduated, _requests = _deployment_pipeline(tmp_path, evaluator)
+    pipeline.run_deployment_adjustment("epoch_001", fold, graduated=graduated)
+    records = ledger.read()
+    assert paper_candidate(records)["source"] == "adjusted"
+    # A superseding discarded Held-out (a rollback replays it) drops the candidate.
+    ledger.append({**records[1], "run_id": "run_h2", "verdict": {"status": "discarded", "reasons": ["sharpe_not_positive"]}})
+    assert paper_candidate(ledger.read()) is None
+    assert not deployment_adjustment_due(ledger.read(), start="20260401")
+    # A Held-out scoring another artifact leaves the adjustment orphaned:
+    # the graduate itself is the candidate again.
+    ledger.append({**records[1], "run_id": "run_h3", "strategy_artifact_id": "strategy_other"})
+    assert paper_candidate(ledger.read())["artifact_id"] == "strategy_other"
+    assert paper_candidate([]) is None

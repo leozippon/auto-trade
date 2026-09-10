@@ -35,9 +35,15 @@ from autotrade.environment.runtime import (
 
 # Stamped on every appended record; bump when the record shape changes.
 LEDGER_RECORD_SCHEMA_VERSION = 1
-RECORD_TYPES = ("fold", "meta_learning", "heldout", "attempt_failed")
+RECORD_TYPES = (
+    "fold",
+    "meta_learning",
+    "heldout",
+    "deployment_adjustment",
+    "attempt_failed",
+)
 LINK_KEYS = ("experiment_id", "epoch_id", "fold_id", "run_id")
-DURABLE_SUCCESS_TYPES = ("fold", "meta_learning", "heldout")
+DURABLE_SUCCESS_TYPES = ("fold", "meta_learning", "heldout", "deployment_adjustment")
 _INTEGRITY_RECORD_TYPES = frozenset({"fold", "heldout"})
 
 # Host-only, never mounted into a sandbox and never Agent-visible.
@@ -619,6 +625,81 @@ def experiment_verdict(
         "status": "graduated" if graduated else "discarded",
         "reasons": reasons,
         "periods": periods,
+    }
+
+
+def latest_deployment_record(
+    records: list[dict[str, object]],
+) -> dict[str, object] | None:
+    """The latest ``deployment_adjustment`` row (append-only, latest wins)."""
+    latest = None
+    for record in records:
+        if is_durable_success_record(record, record_types=("deployment_adjustment",)):
+            latest = record
+    return latest
+
+
+def deployment_adjustment_due(records: list[dict[str, object]], *, start: str) -> bool:
+    """Whether the post-Held-out deployment adjustment still has to run: the
+    knob names a window, the experiment graduated, and no adjustment row is
+    durable yet. A crashed attempt (``attempt_failed`` only) is still due."""
+    if not start:
+        return False
+    verdict = experiment_verdict(records, strict=False)
+    if verdict is None or verdict.get("status") != "graduated":
+        return False
+    return latest_deployment_record(records) is None
+
+
+def paper_candidate(records: list[dict[str, object]]) -> dict[str, object] | None:
+    """The one artifact Paper pins (docs/pipeline-design.md §3.4).
+
+    None unless the experiment graduated. The adjusted artifact when the
+    latest deployment adjustment recorded ``status="adjusted"`` and refit the
+    very artifact the latest Held-out rows scored; otherwise the graduated
+    artifact -- a failed or abstained adjustment, or one whose parent is not
+    the current graduate (a rollback moved the frontier), leaves the graduate
+    as the candidate. The single source for the terminal status, the console
+    and the report.
+    """
+    verdict = experiment_verdict(records, strict=False)
+    if verdict is None or verdict.get("status") != "graduated":
+        return None
+    heldout = latest_heldout_records(records)
+    graduated_id = str(heldout[-1].get("strategy_artifact_id") or "")
+    if not graduated_id:
+        return None
+    adjustment = latest_deployment_record(records)
+    if (
+        adjustment is not None
+        and adjustment.get("status") == "adjusted"
+        and str(adjustment.get("parent_strategy_artifact_id") or "") == graduated_id
+        and adjustment.get("adjusted_strategy_artifact_id")
+    ):
+        return {
+            "artifact_id": str(adjustment["adjusted_strategy_artifact_id"]),
+            "output_path": str(adjustment.get("adjusted_strategy_artifact_path") or ""),
+            "models_path": str(adjustment.get("adjusted_model_artifact_path") or "") or None,
+            "source": "adjusted",
+            "graduated_artifact_id": graduated_id,
+        }
+    frozen = next(
+        (
+            record
+            for record in reversed(records)
+            if is_durable_success_record(record, record_types=("fold", "meta_learning"))
+            and str(record.get("frozen_strategy_artifact_id") or "") == graduated_id
+        ),
+        None,
+    )
+    output = str((frozen or {}).get("frozen_strategy_artifact_path") or "")
+    return {
+        "artifact_id": graduated_id,
+        "output_path": output,
+        # The store freezes ``output/`` and ``models/`` side by side.
+        "models_path": str(Path(output).parent / "models") if output else None,
+        "source": "graduated",
+        "graduated_artifact_id": graduated_id,
     }
 
 

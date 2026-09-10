@@ -855,6 +855,11 @@ class FoldSessionRequest:
     parent_control_null: Mapping[str, object] | None = None
     epoch_index: int = 1
     phase: str = "exploration"
+    # ``fold`` for a development Fold; ``deployment_adjustment`` for the
+    # post-Held-out refit of the graduated artifact (docs/pipeline-design.md
+    # §3.4), which the developer runs on the Fold scaffold with the mechanism
+    # frozen, no null controls and the Held-out visible.
+    session_kind: str = "fold"
     acceptance_rules: Mapping[str, object] = field(default_factory=dict)
     modification_constraints: ModificationConstraints = field(
         default_factory=ModificationConstraints
