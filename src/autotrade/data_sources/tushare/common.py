@@ -2214,12 +2214,58 @@ def combine_date_time_available(date_value: str, time_value: str) -> str:
         return ""
     return f"{date_text[:4]}-{date_text[4:6]}-{date_text[6:8]} {hour:02d}:{minute:02d}:{second:02d}+08:00"
 
+def normalize_macro_columns(df: pd.DataFrame, spec: MacroDataset) -> pd.DataFrame:
+    """Map one macro API response onto the dataset's declared field contract.
+
+    ``spec.fields`` is the single source for a macro table's column names, but
+    the vendor does not always answer in them: since 2026-08-13 cn_pmi has
+    flapped between the documented lowercase fields and its own database schema
+    (uppercase ``MONTH``/``PMI...`` plus ``ID``/``CREATE_*``/``UPDATE_*`` row
+    bookkeeping), and the uppercase form costs every row its ``month`` key and
+    therefore its availability stamp. Declared fields are matched
+    case-insensitively and everything undeclared is dropped, so one dataset
+    keeps one column contract whatever casing the API returns."""
+
+    declared = [name.strip() for name in spec.fields.split(",") if name.strip()]
+    if not declared:
+        return df
+    lowered: dict[str, str] = {}
+    for column in df.columns:
+        lowered.setdefault(str(column).lower(), str(column))
+    keep: list[str] = []
+    renamed: dict[str, str] = {}
+    for name in declared:
+        source = lowered.get(name.lower())
+        if source is None:
+            continue
+        keep.append(source)
+        if source != name:
+            renamed[source] = name
+    dropped = [str(column) for column in df.columns if str(column) not in keep]
+    if not renamed and not dropped:
+        return df
+    print(json.dumps(
+        {"note": "macro_vendor_schema_normalized", "dataset": spec.api_name,
+         "renamed": renamed, "dropped": dropped},
+        ensure_ascii=False, sort_keys=True,
+    ))
+    return df[keep].rename(columns=renamed)
+
 def augment_macro_frame(df: pd.DataFrame, spec: MacroDataset) -> pd.DataFrame:
-    out = df.copy()
+    out = normalize_macro_columns(df, spec).copy()
     if "available_at" not in out.columns:
         out["available_at"] = ""
     if "available_at_rule" not in out.columns:
         out["available_at_rule"] = "missing_source_date"
+    if spec.date_column and len(out) and spec.date_column not in out.columns:
+        # Without the date column every row silently keeps the empty
+        # "missing_source_date" stamp and the whole table becomes invisible to
+        # PIT replay: refuse the write instead of landing unstamped rows.
+        raise RuntimeError(
+            f"{spec.api_name} returned no {spec.date_column!r} column "
+            f"(got {sorted(str(column) for column in df.columns)[:20]}); "
+            "rows cannot be stamped with an availability time"
+        )
     if spec.date_column and spec.date_column in out.columns:
         date_values = out[spec.date_column].astype(str).str.strip()
         if spec.time_column and spec.time_column in out.columns:

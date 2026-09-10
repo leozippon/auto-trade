@@ -390,6 +390,20 @@
       "lock_wait_seconds": 1800,
       "skip_if_already_ok": false
     },
+    "manual_macro_schema_repair": {
+      "description": "Manual (not scheduled): forced full-window re-request of cn_pmi after the vendor answered its declared lowercase field list with its own database schema (uppercase MONTH/PMI... plus ID/CREATE_*/UPDATE_* bookkeeping, first seen 2026-08-13 and flapping since), which left every row without a month key and therefore unstamped. The download now normalizes any response onto the declared contract, so this job republishes the table with its key and availability rule restored.",
+      "operation": "download_tier",
+      "tier": "macro",
+      "end_date_offset_days": 0,
+      "end_date_mode": "sse_open_on_or_before",
+      "extra_args": [
+        "--datasets",
+        "cn_pmi",
+        "--force"
+      ],
+      "lock_wait_seconds": 1800,
+      "skip_if_already_ok": false
+    },
     "manual_global_coverage_repair": {
       "description": "Manual (not scheduled): no-force full-window global-tier re-request. Already-covered partitions skip via coverage sidecars; only genuine gaps download and merge. Run after a coverage incident, optionally with --start-date/--end-date.",
       "operation": "download_tier",
@@ -946,6 +960,15 @@
       "official_update": "大宗交易；权限表为每日21:00更新。",
       "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
       "doc_ref": "https://tushare.pro/document/2?doc_id=161"
+    },
+    {
+      "dataset": "intraday_flow",
+      "derived_from": "stk_mins_1min_by_date",
+      "builder": "scripts/data/build_intraday_flow.py",
+      "domain": "event_flow",
+      "frequency": "trade_date",
+      "official_update": "日频订单流（派生）；本地派生表，没有供应商接口和官方入库时刻；构建在晚间分钟数据落地之后运行。",
+      "cron_policy": "derived_build_after_evening_minute_update"
     },
     {
       "dataset": "kpl_list",

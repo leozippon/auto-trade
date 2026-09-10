@@ -1213,6 +1213,54 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         )
         self.assertEqual(client.calls, [])
 
+    def test_uppercase_vendor_macro_schema_lands_as_the_declared_contract(self):
+        # cn_pmi has answered its lowercase field request with the vendor's own
+        # database schema since 2026-08-13 (uppercase columns plus ID/CREATE_*/
+        # UPDATE_* row bookkeeping), flapping back and forth. Whatever casing
+        # arrives, the partition must hold the declared contract: otherwise
+        # `month` is absent, every row keeps the empty "missing_source_date"
+        # stamp, and the whole table drops out of PIT replay.
+        spec = common.MACRO_SPECS["cn_pmi"]
+        declared = spec.fields.split(",")
+        series = declared[1:]
+
+        class UppercaseVendorClient:
+            def query(self, api_name, params=None, fields="", retries=5):
+                columns = ["ID", "MONTH", "CREATE_TIME", "CREATE_BY", "UPDATE_TIME", "UPDATE_BY",
+                           "PMI010100", *(name.upper() for name in series)]
+                row = [553, "202607", "2026-09-03 12:39:39", None, "2026-09-03 12:39:39", None,
+                       49.1, *(50.0 + index for index in range(len(series)))]
+                return common.ApiResult(columns, [row])
+
+        with redirect_stdout(io.StringIO()):
+            download.download_macro_month_once(
+                UppercaseVendorClient(), self.raw_dir, spec, "20260701", "20260731", False,
+            )
+
+        written = pd.read_parquet(self.raw_dir / "cn_pmi" / "range=202607_latest.parquet")
+        self.assertEqual(list(written.columns), [*declared, "available_at", "available_at_rule"])
+        self.assertEqual(written["month"].tolist(), ["202607"])
+        self.assertEqual(
+            written[series].iloc[0].tolist(), [50.0 + index for index in range(len(series))]
+        )
+        # Stamped like every other monthly macro release (cn_cpi 202607).
+        self.assertEqual(written["available_at"].tolist(), ["2026-08-31 23:59:59+08:00"])
+        self.assertEqual(written["available_at_rule"].tolist(), ["conservative_month_end_plus_31d"])
+
+    def test_macro_response_without_the_date_column_is_refused(self):
+        # Nothing downstream can repair an unstamped macro row, so a response
+        # that carries no date column at all must fail the write, not land.
+        class NoMonthClient:
+            def query(self, api_name, params=None, fields="", retries=5):
+                return common.ApiResult(["ID", "PMI010000"], [[553, 49.8]])
+
+        with redirect_stdout(io.StringIO()), self.assertRaisesRegex(RuntimeError, "returned no 'month' column"):
+            download.download_macro_month_once(
+                NoMonthClient(), self.raw_dir, common.MACRO_SPECS["cn_pmi"],
+                "20260701", "20260731", False,
+            )
+        self.assertFalse((self.raw_dir / "cn_pmi").exists())
+
     def test_window_merged_partition_preserves_rows_outside_refresh_window(self):
         path = self.raw_dir / "repurchase" / "month=202605.parquet"
         existing = pd.DataFrame([
@@ -6262,7 +6310,7 @@ class FullPortContractTest(unittest.TestCase):
     def test_schedule_retains_full_job_set_and_uuid_migration(self) -> None:
         root = Path(__file__).resolve().parents[2]
         config = json.loads((root / "configs/tushare_update_schedule.json").read_text(encoding="utf-8"))
-        self.assertEqual(len(config["jobs"]), 29)
+        self.assertEqual(len(config["jobs"]), 30)
         self.assertEqual(
             config["jobs"]["manual_commit_identity_migration"]["operation"],
             "commit_identity_migration",
@@ -6332,6 +6380,19 @@ class FullPortContractTest(unittest.TestCase):
         )
         scheduled = {item["dataset"] for item in schedule["interfaces"]}
         self.assertEqual(set(common.REFERENCE_DATASETS) - scheduled, set())
+
+    def test_every_selectable_snapshot_dataset_is_registered(self) -> None:
+        # The creation form renders one chip per selectable dataset and reads
+        # its Chinese label from interfaces[], so a dataset the console can
+        # offer but the registry omits (a locally derived table included)
+        # reaches the user as a bare table name.
+        root = Path(__file__).resolve().parents[2]
+        schedule = json.loads(
+            (root / "configs/tushare_update_schedule.json").read_text(encoding="utf-8")
+        )
+        scheduled = {item["dataset"] for item in schedule["interfaces"]}
+        selectable = set().union(*SELECTABLE_DATASETS.values())
+        self.assertEqual(selectable - scheduled, set())
 
     def test_active_macro_registries_are_consistent(self) -> None:
         root = Path(__file__).resolve().parents[2]
