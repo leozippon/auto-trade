@@ -124,6 +124,7 @@ def select_meta_review_folds(
     records: Sequence[Mapping[str, object]],
     *,
     ref_store: AgentRefStore,
+    inherited_prior: Mapping[str, object] | None = None,
 ) -> tuple[list[dict[str, object]], dict[str, object]]:
     """Completed regular Folds after the latest ``meta_learning`` ledger record.
 
@@ -131,6 +132,13 @@ def select_meta_review_folds(
     row is the previous Meta. No previous Meta yields an empty window. Held-out,
     ``attempt_failed``, and in-progress rows are excluded. Duplicate Fold ids
     keep the latest record in window order.
+
+    ``inherited_prior`` is the provenance of a PRIOR seeded from another
+    experiment (``inherited_memory.prior_provenance``) when that is still the
+    one in force. It rides beside the window and, before this experiment has a
+    Meta row of its own, names the generation the PRIOR came from instead of
+    leaving ``previous_meta_ref`` null next to a PRIOR that plainly has a
+    predecessor.
     """
 
     last_meta_index = -1
@@ -156,9 +164,12 @@ def select_meta_review_folds(
         identity = str(
             last_meta.get("meta_learning_id") or last_meta.get("run_id") or ""
         )
+    inherited = dict(inherited_prior or {})
     return folds, {
         "previous_meta_ref": (
-            ref_store.get_or_create("meta", identity) if identity else None
+            ref_store.get_or_create("meta", identity)
+            if identity
+            else (str(inherited.get("source_generation_id") or "") or None)
         ),
         "fold_run_refs": [
             ref_store.get_or_create("run", str(record["run_id"]))
@@ -166,6 +177,7 @@ def select_meta_review_folds(
             if record.get("run_id")
         ],
         "fold_count": len(folds),
+        **({"prior_provenance": inherited} if inherited else {}),
     }
 
 

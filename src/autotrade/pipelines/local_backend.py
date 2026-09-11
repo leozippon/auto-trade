@@ -130,6 +130,12 @@ from .config import (
 )
 from .experiment import DailyStrategyPipeline, null_control_seed
 from .folds import yyyymmdd
+from .inherited_memory import (
+    inherited_prior_header,
+    load_inherited_memory,
+    prior_provenance,
+    skills_provenance,
+)
 from .ledger import ExperimentLedger, candidate_deflated_sharpe, latest_fold_records
 from .skills import (
     SKILLS_INDEX_PATH,
@@ -2848,6 +2854,17 @@ class LLMFoldDeveloper:
         manifest.update(
             operating_memory=_operating_memory_record(memory_snapshot, mounted_memory)
         )
+        # Memory this experiment was created from rather than earned: while the
+        # PRIOR and the skills are still that seed, every surface that shows
+        # them says so, because the foreign fold and artifact ids they cite are
+        # not in this experiment's ledger.
+        memory = load_inherited_memory(self.experiment_dir)
+        prior_origin = prior_provenance(
+            memory, request.prior, ref_store=self.ref_store
+        )
+        skills_origin = skills_provenance(
+            memory, request.skills_source_ref, ref_store=self.ref_store
+        )
         skills_stats = install_workspace_skills(
             request.skills_source_ref or None,
             workspace_root,
@@ -2909,9 +2926,21 @@ class LLMFoldDeveloper:
                 command_runner = PersistentCommandRunner(sandbox)
             # Built once, after the runtime env and the data summary exist, so
             # the prompt and the workspace copy state the same facts.
-            if request.prior.strip():
+            # One body for both surfaces the session reads the PRIOR through:
+            # the read-only mount and the system-prompt fence state the same
+            # provenance, and the inherited generation on disk is untouched.
+            prior_text = request.prior.strip()
+            if prior_text and prior_origin is not None:
+                prior_text = (
+                    inherited_prior_header(
+                        prior_origin, has_parent=request.parent is not None
+                    )
+                    + "\n\n"
+                    + prior_text
+                )
+            if prior_text:
                 (inputs_dir / "PRIOR.md").write_text(
-                    request.prior.strip() + "\n", encoding="utf-8"
+                    prior_text + "\n", encoding="utf-8"
                 )
             facts = self._fold_facts(
                 request,
@@ -2919,6 +2948,8 @@ class LLMFoldDeveloper:
                 manifest=manifest,
                 paths=paths,
                 models_dir=models_dir,
+                prior_provenance=prior_origin,
+                skills_provenance=skills_origin,
             )
             write_json_atomic(inputs_dir / "fold_context.json", facts)
             chmod_tree(inputs_dir, file_mode=0o444, dir_mode=0o555)
@@ -3113,7 +3144,7 @@ class LLMFoldDeveloper:
                     experiment_facts=facts,
                     phase=request.phase,
                     step_tree_enabled=self.step_tree_enabled,
-                    prior_prompt=request.prior,
+                    prior_prompt=prior_text,
                     fold_exploration_directive=self.fold_exploration_directive,
                     fold_directive=request.directive,
                 ),
@@ -3321,6 +3352,8 @@ class LLMFoldDeveloper:
         manifest: RunManifest,
         paths,
         models_dir: Path,
+        prior_provenance: Mapping[str, object] | None = None,
+        skills_provenance: Mapping[str, object] | None = None,
     ) -> dict[str, object]:
         """The Agent-visible operational-facts block for this Fold session.
 
@@ -3346,6 +3379,8 @@ class LLMFoldDeveloper:
                 model_artifacts_empty=(
                     not any(models_dir.iterdir()) if models_dir.exists() else True
                 ),
+                prior_provenance=prior_provenance,
+                skills_provenance=skills_provenance,
             ),
             "development_history": history,
             "parent_control": parent_control_facts(request),
@@ -3532,6 +3567,14 @@ class LLMMetaLearner:
         search_roots = SearchRoots(safe, paths=paths)
         inputs = paths.workspace / "inputs"
         inputs.mkdir()
+        # The PRIOR's provenance rides on the review window the Pipeline built
+        # (``select_meta_review_folds``), which is also where it reaches
+        # meta_context.json; only the skills generation is resolved here.
+        skills_origin = skills_provenance(
+            load_inherited_memory(self.experiment_dir),
+            str(facts.get("skills_source_ref") or ""),
+            ref_store=self.ref_store,
+        )
         skills_stats = install_workspace_skills(
             str(facts.get("skills_source_ref") or "") or None,
             paths.workspace,
@@ -3607,6 +3650,14 @@ class LLMMetaLearner:
             write_meta_agent_trace_sidecars,
         )
 
+        # One review window for meta_context.json, the run facts and the audit
+        # manifest: it carries ``previous_meta_ref`` and, when this experiment's
+        # PRIOR is still the one it inherited, that PRIOR's provenance.
+        review_window = (
+            public["review_window"]
+            if isinstance(public.get("review_window"), dict)
+            else {"previous_meta_ref": None, "fold_run_refs": [], "fold_count": 0}
+        )
         raw_sidecars = facts.get("agent_trace_sidecars") or ()
         if not isinstance(raw_sidecars, (list, tuple)):
             raise TypeError("agent_trace_sidecars must be a sequence")
@@ -3722,15 +3773,7 @@ class LLMMetaLearner:
                 "modification_constraints": self.regularization_constraints.to_record(),
                 "meta_learning_directive": self.meta_learning_directive.strip(),
                 "fold_exploration_directive": self.fold_exploration_directive.strip(),
-                "review_window": (
-                    dict(public["review_window"])
-                    if isinstance(public.get("review_window"), dict)
-                    else {
-                        "previous_meta_ref": None,
-                        "fold_run_refs": [],
-                        "fold_count": 0,
-                    }
-                ),
+                "review_window": dict(review_window),
                 # Meta may rewrite main.py, fit(context) included, so it is
                 # told the same strategy wall clocks and GPU allocation an
                 # ordinary Fold gets. A Meta session runs no container itself,
@@ -3835,6 +3878,12 @@ class LLMMetaLearner:
                     manifest=manifest.data,
                     ref_store=self.ref_store,
                     data_summary=_read_json_if_exists(paths.data_summary),
+                    prior_provenance=(
+                        review_window.get("prior_provenance")
+                        if isinstance(review_window, dict)
+                        else None
+                    ),
+                    skills_provenance=skills_origin,
                 ),
             ),
             config=AgentSessionConfig(

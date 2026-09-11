@@ -1087,7 +1087,8 @@ def build_experiment_pipeline(
         meta_enabled = False
         developer_label = "deterministic_baseline_no_agent_improvement"
     # Memory seeded at creation from another experiment: its skills are the
-    # head until the first session row, for either driver of this assembly.
+    # head until the first session row, and its provenance is what a Meta
+    # reading the inherited PRIOR needs, for either driver of this assembly.
     inherited_memory = load_inherited_memory(options.experiment_dir)
     pipeline = RollingExperimentPipeline(
         options.rolling,
@@ -1097,9 +1098,7 @@ def build_experiment_pipeline(
         developer=developer,
         meta_learner=meta_learner,
         ledger=ledger,
-        inherited_skills=(
-            inherited_memory.skills if inherited_memory is not None else None
-        ),
+        inherited_memory=inherited_memory,
     )
     return ExperimentPipelineBuild(
         pipeline=pipeline,

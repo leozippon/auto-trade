@@ -30,7 +30,12 @@ from autotrade.pipelines.hitl_state import (
     read_status,
     write_control,
 )
-from autotrade.pipelines.inherited_memory import import_inherited_memory
+from autotrade.pipelines.inherited_memory import (
+    import_inherited_memory,
+    inherited_prior_header,
+    load_inherited_memory,
+    prior_provenance,
+)
 from autotrade.pipelines.interactive import InteractiveExperimentRunner
 from autotrade.pipelines.ledger import ExperimentLedger
 from autotrade.pipelines.local_backend import SessionBudgetLLM, SessionCallBudget
@@ -1274,8 +1279,49 @@ def test_llm_worker_starts_from_inherited_memory(tmp_path: Path, monkeypatch):
     assert fold_prompts and all(INHERITED_PRIOR in prompt for prompt in fold_prompts)
     manifest = json.loads(Path(fold["run_manifest_ref"]).read_text(encoding="utf-8"))
     assert manifest["skills"]["count"] == 1
-    collected = Path(fold["run_manifest_ref"]).parent / "workspace" / "skills"
-    assert (collected / "closed-families" / "SKILL.md").is_file()
+    fold_workspace = Path(fold["run_manifest_ref"]).parent / "workspace"
+    assert (fold_workspace / "skills" / "closed-families" / "SKILL.md").is_file()
+
+    # Provenance: both sessions are told the PRIOR and the skills came from
+    # another experiment's ledger, so the fold and artifact ids that PRIOR
+    # cites are not read as this experiment's own missing records.
+    memory = load_inherited_memory(experiment)
+    refs = AgentRefStore(experiment)
+    origin = prior_provenance(memory, INHERITED_PRIOR, ref_store=refs)
+    assert origin is not None and origin["source_experiment"] == "src"
+    meta_workspace = experiment / "artifacts" / str(meta["run_id"]) / "workspace"
+    meta_context = json.loads(
+        (meta_workspace / "inputs" / "meta_context.json").read_text(encoding="utf-8")
+    )
+    assert meta_context["review_window"]["fold_count"] == 0
+    assert (
+        meta_context["review_window"]["previous_meta_ref"]
+        == origin["source_generation_id"]
+    )
+    assert meta_context["review_window"]["prior_provenance"] == origin
+    meta_facts = [
+        message.content or ""
+        for call in llm.calls
+        for message in call["messages"]
+        if message.role == "system" and "prior_provenance" in (message.content or "")
+    ]
+    assert meta_facts and all("skills_provenance" in prompt for prompt in meta_facts)
+
+    # The Fold reads the same body through the mount and the prompt, both with
+    # the mount-time header; the read-only inherited generation keeps the exact
+    # bytes the source published.
+    header = inherited_prior_header(origin, has_parent=False)
+    mounted = (fold_workspace / "inputs" / "PRIOR.md").read_text(encoding="utf-8")
+    assert mounted == f"{header}\n\n{INHERITED_PRIOR}\n"
+    assert all(header in prompt for prompt in fold_prompts)
+    assert Path(str(payload["prior_ref"])).read_text(
+        encoding="utf-8"
+    ) == INHERITED_PRIOR + "\n"
+    fold_facts = json.loads(
+        (fold_workspace / "inputs" / "fold_context.json").read_text(encoding="utf-8")
+    )
+    assert fold_facts["prior_provenance"] == origin
+    assert fold_facts["skills_provenance"]["source_experiment"] == "src"
 
 
 def _inherited_artifact_llm() -> ScriptedLLM:
@@ -1392,6 +1438,17 @@ def test_llm_worker_inherits_an_artifact_and_a_memory_together(
     assert meta["prior"] == "prefer small daily changes"
     assert meta["prior_published"] is True
     assert fold["skills_ref"] == memory["skills_ref"]
+    # Provenance follows the body: this experiment's first Meta replaced the
+    # inherited PRIOR, so the Fold mounts a PRIOR of its own -- no inherited
+    # header, no ``prior_provenance``.
+    fold_workspace = Path(fold["run_manifest_ref"]).parent / "workspace"
+    assert (fold_workspace / "inputs" / "PRIOR.md").read_text(
+        encoding="utf-8"
+    ) == "prefer small daily changes\n"
+    fold_facts = json.loads(
+        (fold_workspace / "inputs" / "fold_context.json").read_text(encoding="utf-8")
+    )
+    assert "prior_provenance" not in fold_facts
     # Artifact: the same run's parent chain starts at the inherited seed.
     meta_run = experiment / "artifacts" / str(meta["run_id"])
     assert (meta_run / "workspace/output/main.py").read_text(

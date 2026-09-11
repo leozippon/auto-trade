@@ -272,6 +272,7 @@ META_SYSTEM_PROMPT = """\
 - 跨窗共识规则只能作为默认值，不是否决权：不得让某一窗口按预登记规则读出、并已通过该 Fold 完整 Validation 的状态条件化候选无法交付。
 - 每个被复盘 Fold 冻结了什么以 `fold_reviews[]` 的 `fold_status`、`finish_mode`（`agent_no_edge`：Agent 明确弃权并附 `no_edge_reason`；`no_nomination`：未提名即结束，如超时）与 `hard_reject_reasons` 为准，不以该 Fold 会话自己的叙述为准。证据强度是 `null_control.excess_percentile`、`selection_statistics.deflated_sharpe_probability`、`vs_parent.beats_parent` 与父本对照 `parent_control` 在新季度上的步进结果：这些块连同冻结产物 id 由宿主从账本逐字复制到跨 Epoch 的 `fold_validation_history[]` 每一条与本窗口的 `fold_reviews[]`，窗口之外的 Fold 同样可核；PRIOR 逐 Fold 引用这些数值，上一份 PRIOR 引用过的只能沿用或按它们更正，不得以不在审查窗口或「不可核」为由丢弃。分位在 0.5 附近表示与同规模随机组合无法区分，去膨胀概率接近 0 表示胜者只是 N 次尝试里的最大噪声，中性化超额约为 0 或 `beats_parent=false` 表示没有证明边际——这样的冻结产物只能写成待检验，不能写成主线；`no_update` 或 `baseline_missing` 是正当结果，不是要纠正的失败。带 `baseline_anchor=true` 的 `frozen` 是无父产物时按规则锚定的弱基线，不是已证明的边际：写成待替换的对照，让下一批 Fold 以胜过它为目标。带 `nominated_identical_to_parent=true` 的 `no_update`（`finish_mode="nominated"`、`hard_reject_reasons` 为空）更要读成一次通过验收的提名：被提名内容就是父本自身，宿主沿用父本 id 而不是拒绝它，父本的前向记录因此连续。不列 `skills_index` 已有的路径、工具限制或运行纪律。
 - 沿用上一份 PRIOR 的事实性断言前，先与本窗口 Fold 已核实的更正逐条对齐；被 Fold 证伪的断言必须改正或删除，不能原样带入。
+- 运行事实带 `prior_provenance`（`review_window.previous_meta_ref` 指向那一代）时，上一份 PRIOR 继承自另一个实验：机制关闭与负面结果按先验知识沿用并改写成本实验的表述，它引用的折 id、产物 id 与账本数值不在本实验账本、不得当作已挂载证据或本实验状态，基线锚点规则在本实验重新适用。
 - 没有有效改进就保持原文并结束；去空白后相同则不发布新版本。有变化时合并重复、删除失效方向，不要追加成日志。
 - PRIOR 只保存可迁移内容：不写日历日期或本窗口年份，不提及 Held-out，不写逐 Fold Test 数字，不凭 Test 做选择。
 
@@ -422,6 +423,9 @@ def build_prior_section(prior_prompt: str, *, role: str) -> str:
         "## 当前 PRIOR（元学习控制层，只读）\n"
         "围栏内是 PRIOR.md 原文，其中的标题属于该文件，不是本系统提示的章节。"
         "它只提供策略方向、流程编排和 skill 路径引用，不是已验证结论。"
+        "正文前带宿主生成的「继承说明」时，这份 PRIOR 来自另一个实验（运行事实 `prior_provenance`）："
+        "其中的机制关闭与负面结果按先验知识沿用，它引用的折 id 与产物 id 不在本实验账本、对应产物也没有挂载，"
+        "状态类断言一律以运行事实为准。"
         "权威 PRIOR 不在本 Fold 可写树中；与硬合同冲突时以后者为准。\n\n"
         + _markdown_fence(text)
     )

@@ -75,6 +75,7 @@ from .config import (
 )
 from .folds import FoldSpec, heldout_periods
 from .hitl_state import DEPLOYMENT_SESSION_KEY, fold_session_key
+from .inherited_memory import InheritedMemory, prior_provenance
 from .ledger import (
     ExperimentLedger,
     FrozenArtifactMutated,
@@ -209,7 +210,7 @@ class RollingExperimentPipeline:
         developer: FoldDeveloper,
         meta_learner: MetaLearner | None = None,
         ledger: ExperimentLedger | None = None,
-        inherited_skills: SkillsSnapshot | None = None,
+        inherited_memory: InheritedMemory | None = None,
     ) -> None:
         self.config = config
         self.ref_store = AgentRefStore(config.experiment_dir)
@@ -220,10 +221,14 @@ class RollingExperimentPipeline:
         self.meta_learner = meta_learner
         self.ledger = ledger or ExperimentLedger(config.ledger_path)
         self.run_markers = RunMarkers(config.experiment_dir)
-        # The skills generation seeded at creation from another experiment's
+        # The PRIOR and skills seeded at creation from another experiment's
         # memory (``inherit_memory_from``): the head until the first session
-        # row, exactly as a Meta publication would be.
-        self.inherited_skills = inherited_skills
+        # row, exactly as a Meta publication would be, and the source of the
+        # provenance a Meta needs to read the foreign ids that PRIOR cites.
+        self.inherited_memory = inherited_memory
+        self.inherited_skills = (
+            inherited_memory.skills if inherited_memory is not None else None
+        )
 
     def _current_skills(self) -> SkillsSnapshot:
         return latest_skills_snapshot(
@@ -1162,6 +1167,9 @@ class RollingExperimentPipeline:
                 self.ledger.read(),
                 ref_store=self.ref_store,
                 artifacts_root=self.config.experiment_dir / "artifacts",
+                inherited_prior=prior_provenance(
+                    self.inherited_memory, previous_prior, ref_store=self.ref_store
+                ),
             )
             meta_snapshot = self.snapshots.prepare(
                 fold=visible_fold,
@@ -1944,6 +1952,7 @@ def _development_inputs(
     *,
     ref_store: AgentRefStore,
     artifacts_root: str | Path | None = None,
+    inherited_prior: Mapping[str, object] | None = None,
 ) -> tuple[dict[str, object], list[AgentTraceFullSidecar]]:
     """Meta-visible development history plus internal full-trace sidecars.
 
@@ -1971,7 +1980,7 @@ def _development_inputs(
     """
 
     folds, review_window = select_meta_review_folds(
-        records, ref_store=ref_store
+        records, ref_store=ref_store, inherited_prior=inherited_prior
     )
     reviews, sidecars = build_meta_fold_review_bundle(
         folds, ref_store=ref_store, artifacts_root=artifacts_root

@@ -44,6 +44,8 @@ def build_experiment_facts(
     max_llm_calls: int | None = None,
     context_compaction: Mapping[str, object] | None = None,
     model_artifacts_empty: bool | None = None,
+    prior_provenance: Mapping[str, object] | None = None,
+    skills_provenance: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """Build the short Agent-visible operational-facts projection.
 
@@ -156,6 +158,13 @@ def build_experiment_facts(
             model_artifacts_empty=model_artifacts_empty,
             is_meta=is_meta,
         ),
+        # Present only while the PRIOR or the mounted skills are still the ones
+        # this experiment was seeded with from another experiment's memory
+        # (``inherit_memory_from``). Without it a session reads the foreign fold
+        # and artifact ids the inherited PRIOR cites as an inconsistency against
+        # its own ledger, which is how one Meta filed the seed as a data defect.
+        "prior_provenance": prior_provenance,
+        "skills_provenance": skills_provenance,
         "broker_replay": _broker_replay_facts(manifest),
         # The caliber every ``neutralized_excess_return`` in this session was
         # computed under. One constant sentence: stating it here keeps it out
