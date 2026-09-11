@@ -47,7 +47,7 @@
 | `lib/trade.py` | `ADV20_MIN` / `MAX_CLOSE` / `MIN_BARS` / 板块白名单 | `3e7` / `40.0` / `60` / 见上 | 冻结（可交易性约定，不是待拟合参数） |
 | `lib/common.py` | `VALID_DAYS` / `EMBARGO_DAYS` / `MIN_SAMPLES` | `60` / `10` / `200` | 冻结 |
 | `lib/data.py` | `HOLD_DAYS` | `10` | 冻结（标签口径在关闭清单里） |
-| `lib/data.py` | `DECISION_LOOKBACK_DAYS` | `100` 日历天 | 冻结 |
+| `lib/data.py` | `DECISION_LOOKBACK_DAYS` | `100` 日历天 | **首折必须一次性提到 `130`**（见下） |
 | `lib/data.py` | `build_fit_samples(block_days, overlap_days)` | `120` / `60` | 冻结（分块只影响内存，不影响取值） |
 | `lib/vipf2.py` | `DECISION_LOOKBACK_DAYS` | `1100` 日历天 | 冻结 |
 | `lib/mfflow.py` | `DECISION_LOOKBACK_DAYS` | `120` 日历天 | 冻结 |
@@ -57,6 +57,12 @@
 | `lib/score_lgbm.py` | `FIXED_PARAMS` | `objective=regression`、`feature_fraction=0.8`、`bagging_fraction=0.8`、`bagging_freq=1`、`min_data_in_leaf=200`、`lambda_l2=10`、`num_threads=8` | 冻结 |
 | `lib/score_lgbm.py` | `FEATURE_NAMES` | 173 列 | 冻结 |
 | `lib/features.py` | `WINDOWS` / clip | `(5,10,20,30,60)` / `±3` | 冻结 |
+
+**唯一一处必须改的常量：`lib/data.py` 的 `DECISION_LOOKBACK_DAYS`。** 注释写着「100 日历天 ≥ 63 个交易日」，但这不成立：上交所日历在 2011–2026 年上任意 100 个日历日里的交易日数**最少只有 59** （2024-05-06 与 2024-05-13 两个决策日），而 `lib/features.py` 的 `_win(a, 60)` 需要 60 根。这次读取在打分器的 try/except 之外，因此不会退化成 `fallback_ewsign`，而是整个决策直接失败——源实验的 fold-10 父本对照就是在这一天上挂掉的；它的工作副本已改成 130，但**所有冻结产物仍然读 100**，本臂继承到的就是 100。
+
+因此首折必须把它**一次性提到 `130`**：保证 60 根的最小值是 101，取 130 留出约 79 根的余量，让基于 shift 的 60 日算子远离全 NaN。这是本臂唯一被授权的机制改动，改完即冻结，此后不得再动。
+
+副作用要在首折记录：窗口变长会让 `W["n_bars"]` 变大，一批很新的上市票因此越过 `MIN_BARS = 60` 进入可选池，池子会再宽一点点——和 `is_suspended` 的 v11 变更叠在同一折里，两者都要分别记数，不要混成一个读数。若继承到的副本已经读 130，则本臂不做任何改动，只在首折验证并记录这一事实。
 
 `num_threads=8` 是必须保留的：沙箱报出的逻辑 CPU 数远多于实际可用核，LightGBM 的自动线程数会过订阅并造成病态慢。
 
