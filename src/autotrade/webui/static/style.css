@@ -675,8 +675,14 @@ h4.subsection-title,
  max-height: 70vh;
  overflow: auto;
 }
+/* The list scrolls, so a row never trades its own height for the container's:
+   flex: none keeps every row at its content height. Without it a row that sets
+   its own min-height (.phase-head) loses the automatic minimum size and is
+   shrunk to one line inside the max-height list, spilling its second line
+   below its own box. */
 .session-item {
  display: flex;
+ flex: none;
  flex-wrap: wrap;
  align-items: center;
  gap: 0.15rem 0.6rem;
@@ -726,13 +732,17 @@ h4.subsection-title,
 }
 /* Second line of a session row: what the session left behind, under the label
    it belongs to. It wraps onto its own line (order puts it last in both the
-   ordinary and the phase-head order) and is indented past the status dot, so
-   the dot/label/return line above it is untouched. */
+   ordinary and the phase-head order) and starts at the label's left edge, so
+   the dot/label/return line above it is untouched. The indent clears the
+   status dot, which only precedes the label in the ordinary order — a
+   phase-head row moves the dot to the far right and drops it. Weight is fixed
+   here so every note reads the same, whatever the row above it weighs. */
 .session-item .session-note {
  order: 9;
  flex-basis: 100%;
  padding-left: 1.22rem;
  font-size: 0.78rem;
+ font-weight: 400;
  color: var(--muted);
  font-variant-numeric: tabular-nums;
  white-space: nowrap;
@@ -774,6 +784,15 @@ h4.subsection-title,
 }
 .session-item.phase-head .ret {
  order: 3;
+}
+.session-item.phase-head .session-note {
+ padding-left: 0;
+}
+/* The phase heads are one post-development block: the 0.75rem break belongs
+   between them and the Epoch above, not between the heads, which keep the
+   list's own row gap. */
+.session-item.phase-head + .session-item.phase-head {
+ margin-top: 0;
 }
 
 .control-bar {
