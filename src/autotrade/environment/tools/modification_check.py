@@ -12,6 +12,7 @@ from autotrade.environment.artifacts import (
     artifact_fingerprint,
     model_artifact_delta,
     modification_delta,
+    reject_forbidden_code_references,
 )
 from autotrade.environment.replay.timeview import ASOF_DOMAIN_NAMES
 from autotrade.environment.strategy_loader import (
@@ -95,6 +96,13 @@ class ModificationCheckTool:
         except StrategyLoadError as exc:
             raise ToolError(str(exc)) from exc
         _reject_flat_asof_reads(files, self.output_dir)
+        # The same scan the artifact store runs when a frozen artifact is
+        # reloaded as a later Fold's parent: run it here so a hardcoded stage
+        # path is reported to the Agent before any formal replay.
+        try:
+            reject_forbidden_code_references(files)
+        except ArtifactError as exc:
+            raise ToolError(str(exc)) from exc
         if self.mechanism_parent is not None:
             difference = mechanism_difference(self.mechanism_parent, self.output_dir)
             if difference is not None:

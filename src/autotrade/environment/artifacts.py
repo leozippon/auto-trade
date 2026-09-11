@@ -16,7 +16,7 @@ import json
 import shutil
 import stat
 import uuid
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -293,14 +293,26 @@ def load_strategy_artifact(root: str | Path, *, revision_id: str | None = None) 
     main = root / "main.py"
     if "generate_orders" not in defined_function_names(main):
         raise ArtifactError("main.py must define generate_orders(context)")
-    for relpath in files:
-        if not relpath.endswith(".py"):
+    reject_forbidden_code_references(root / relpath for relpath in files)
+    return StrategyArtifact(root, tuple(sorted(files)), revision_id or new_revision_id())
+
+
+def reject_forbidden_code_references(paths: Iterable[Path]) -> None:
+    """Reject formal strategy code that names a stage or host-only mount path.
+
+    ``modification_check`` runs this before any formal replay, and loading a
+    frozen artifact runs it again when that artifact is reloaded as a later
+    Fold's parent. A path that only ever appears as a string constant is
+    therefore refused while the Agent can still fix it, instead of failing a
+    later Fold's startup.
+    """
+    for path in paths:
+        if path.suffix != ".py":
             continue
-        for literal in _runtime_string_constants(root / relpath):
+        for literal in _runtime_string_constants(path):
             for forbidden in FORBIDDEN_CODE_REFERENCES:
                 if forbidden in literal:
                     raise ArtifactError(f"formal strategy code must not reference stage directories: {forbidden}")
-    return StrategyArtifact(root, tuple(sorted(files)), revision_id or new_revision_id())
 
 
 def load_model_artifacts(root: str | Path, *, revision_id: str | None = None) -> ModelArtifacts:

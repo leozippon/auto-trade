@@ -182,6 +182,22 @@ def test_a_sibling_module_is_held_to_the_same_rules_everywhere(tmp_path: Path, h
         TrustedStrategyExecutor.from_path(main, state_dir=tmp_path)
 
 
+def test_a_hardcoded_stage_path_is_refused_before_any_formal_replay(tmp_path: Path):
+    """A stage path in a plain constant fails the check, not a later Fold.
+
+    The loader's path rules only look at what a strategy passes to an I/O
+    method, so a bare stage-path constant passes them. Without this scan such
+    an artifact cleared modification_check, every Validation replay and the
+    freeze, and first failed when the next Fold loaded it as its parent.
+    """
+
+    helper = "PREFIX = '/mnt/agent/workspace/debug'\n\n\ndef scaled(value):\n    return value\n"
+    main = _write_package(tmp_path / "output", helper=helper)
+    validate_strategy_package(main)
+    with pytest.raises(ToolError, match="stage directories"):
+        ModificationCheckTool(tmp_path / "output").invoke({})
+
+
 def test_a_path_may_be_built_any_way_the_strategy_likes(tmp_path: Path):
     """The check cannot see where a computed path points, so it does not guess.
 
