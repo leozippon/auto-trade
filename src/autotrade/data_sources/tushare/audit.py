@@ -1826,6 +1826,14 @@ def text_pit_rules() -> dict[str, dict[str, str]]:
 
 def expected_text_paths(raw_dir: Path, spec: TextDataset, start_date: str, end_date: str, args: argparse.Namespace) -> set[Path]:
     start = max(start_date, spec.start_date)
+    # A frozen interface can never gain a partition past the day its access
+    # was withdrawn. Expecting one turns an accepted, documented loss into a
+    # nightly error that grows by one day forever, which buries the findings
+    # that still mean something. The history it does hold stays audited.
+    if spec.frozen_through:
+        end_date = min(end_date, spec.frozen_through)
+        if end_date < start:
+            return set()
     if spec.strategy in {"range_month", "time_range_month"}:
         months = [month for _, _, month in month_windows(start, end_date)]
         if spec.strategy == "time_range_month":
@@ -1856,6 +1864,13 @@ def audit_text_completeness(raw_dir: Path, args: argparse.Namespace, add) -> Non
         "datasets": datasets,
         "start_date": args.text_start_date,
         "end_date": text_end,
+        # Datasets whose access the vendor withdrew: history retained and
+        # audited, no partition expected past the stated day.
+        "frozen_through": {
+            dataset: TEXT_SPECS[dataset].frozen_through
+            for dataset in datasets
+            if TEXT_SPECS[dataset].frozen_through
+        },
         "dataset_pit_rules": text_pit_rules(),
     })
     for dataset in datasets:
@@ -2764,7 +2779,7 @@ def add_core_market_parser(sub: argparse._SubParsersAction) -> None:
     parser.add_argument("--end-date")
     parser.add_argument("--datasets", nargs="+", choices=core.DAILY_REQUIRED_DATASETS)
     parser.add_argument("--sample-limit", type=int, default=10)
-    core.add_runtime_args(parser, min_interval=0.18, timeout=60)
+    core.add_runtime_args(parser, min_interval=core.MIN_REQUEST_INTERVAL_SECONDS, timeout=60)
     parser.add_argument("--output", help=f"Defaults to {core.CORE_MARKET_STATUS_PATH}.")
 
 
@@ -2777,7 +2792,7 @@ def add_fundamental_raw_parser(sub: argparse._SubParsersAction) -> None:
     parser.add_argument("--fundamental-end-date")
     parser.add_argument("--fundamental-datasets", nargs="+", choices=core.FUNDAMENTAL_DATASETS, dest="fundamental_datasets")
     parser.add_argument("--sample-limit", type=int, default=10)
-    core.add_runtime_args(parser, min_interval=0.18, timeout=60)
+    core.add_runtime_args(parser, min_interval=core.MIN_REQUEST_INTERVAL_SECONDS, timeout=60)
     parser.add_argument("--output", help=f"Defaults to {core.FUNDAMENTAL_RAW_STATUS_PATH}.")
 
 def add_intraday_parser(sub: argparse._SubParsersAction) -> None:
@@ -2804,7 +2819,7 @@ def add_intraday_parser(sub: argparse._SubParsersAction) -> None:
     auction.add_argument("--output-dataset", default=core.STK_MINS_BY_DATE_DATASET)
     auction.add_argument("--max-trade-dates", type=int, default=8, help="Use the latest N open dates in the requested window; <=0 means all.")
     auction.add_argument("--output", help="Defaults to results/data_quality/process/auction_alignment_status.json.")
-    core.add_runtime_args(auction, min_interval=0.25, timeout=120)
+    core.add_runtime_args(auction, min_interval=core.MIN_REQUEST_INTERVAL_SECONDS, timeout=120)
 
 def add_event_macro_parsers(sub: argparse._SubParsersAction) -> None:
     event = sub.add_parser("event-flow", help="audit only event/flow raw data")
@@ -2858,7 +2873,7 @@ def add_revision_parser(sub: argparse._SubParsersAction) -> None:
     revision.add_argument("--revision-ledger", default=core.REVISION_EVENTS_PATH)
     revision.add_argument("--output", default=core.REVISION_SUMMARY_PATH)
     revision.add_argument("--fail-on-revision", action="store_true", help="Return nonzero when source revisions are found.")
-    core.add_runtime_args(revision, min_interval=0.22, timeout=120)
+    core.add_runtime_args(revision, min_interval=core.MIN_REQUEST_INTERVAL_SECONDS, timeout=120)
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)

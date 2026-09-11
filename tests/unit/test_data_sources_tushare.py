@@ -1526,6 +1526,88 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self.assertTrue(did_write)
         self.assertEqual(len(pd.read_parquet(path)), 115)
 
+    def test_vendor_backfill_of_a_key_field_is_not_a_retraction(self):
+        # End of the H1-2026 reporting season: TuShare populated actual_date on
+        # rows that had carried none. actual_date is part of disclosure_date's
+        # business key, so the enrichment read as a mass key removal and the
+        # shrink guard refused the write -- with no row and no company lost.
+        path = self.raw_dir / "disclosure_date" / "period=20260630.parquet"
+        keys = ["ts_code", "end_date", "ann_date", "pre_date", "actual_date"]
+        original = pd.DataFrame([
+            {
+                "ts_code": f"{index:06d}.SZ",
+                "end_date": "20260630",
+                "ann_date": "20260415",
+                "pre_date": "20260828",
+                "actual_date": "",
+                "modify_date": "",
+            }
+            for index in range(120)
+        ])
+        common.write_parquet(
+            path, original, api_name="disclosure_date", params={}, fields=list(original.columns)
+        )
+        backfilled = original.assign(actual_date="20260826")
+        ledger = self.root / "backfill_revision_events.jsonl"
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            did_write = common.write_parquet_revision_aware(
+                path,
+                backfilled,
+                api_name="disclosure_date",
+                params={},
+                fields=list(backfilled.columns),
+                key_columns=keys,
+                revision_ledger=ledger,
+                allow_key_removal_overwrite=True,
+            )
+        self.assertTrue(did_write)
+        self.assertNotIn("blocked_shrink_overwrite", output.getvalue())
+        self.assertEqual(set(pd.read_parquet(path)["actual_date"]), {"20260826"})
+        # The ledger still records the full-key diff: the guard changed what it
+        # decides on, not what it reports.
+        event = json.loads(ledger.read_text(encoding="utf-8").splitlines()[0])
+        self.assertEqual(event["removed_keys"], 120)
+        self.assertEqual(event["write_action"], "overwrite")
+
+    def test_real_retraction_still_blocks_on_the_immutable_key_subset(self):
+        # Same dataset, same guard: when the stable identity itself disappears
+        # the shrink is real and must still be refused.
+        path = self.raw_dir / "disclosure_date" / "period=20260331.parquet"
+        keys = ["ts_code", "end_date", "ann_date", "pre_date", "actual_date"]
+        original = pd.DataFrame([
+            {
+                "ts_code": f"{index:06d}.SZ",
+                "end_date": "20260331",
+                "ann_date": "20260115",
+                "pre_date": "20260428",
+                "actual_date": "",
+                "modify_date": "",
+            }
+            for index in range(120)
+        ])
+        common.write_parquet(
+            path, original, api_name="disclosure_date", params={}, fields=list(original.columns)
+        )
+        truncated = original.head(10).assign(actual_date="20260426")
+        ledger = self.root / "retraction_revision_events.jsonl"
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            did_write = common.write_parquet_revision_aware(
+                path,
+                truncated,
+                api_name="disclosure_date",
+                params={},
+                fields=list(truncated.columns),
+                key_columns=keys,
+                revision_ledger=ledger,
+                allow_key_removal_overwrite=True,
+            )
+        self.assertFalse(did_write)
+        self.assertIn("blocked_shrink_overwrite", output.getvalue())
+        self.assertTrue(pd.read_parquet(path).equals(original))
 
     def test_daily_audit_warns_on_exact_limit_without_pagination_probe(self):
         path = self.raw_dir / "daily" / "trade_date=20200102.parquet"
@@ -3618,7 +3700,11 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         # resolves a new end date instead of skipping as an unchanged range.
         self.assertNotIn("end_date_mode", text_job)
         self.assertNotIn("end_date_mode", jobs["cn_nightly_text_audit"])
-        self.assertNotIn("--datasets", text_job["extra_args"])
+        # Scope is report_rc alone: every other text interface is frozen, and
+        # naming one fails the run and leaves the raw lake dirty.
+        self.assertEqual(
+            text_job["extra_args"], ["--datasets", "report_rc", "--force"]
+        )
         # The global tier and the ann-date disclosure tables are natural-day
         # domains too: overseas sessions and weekend announcements must not
         # wait for the next trading evening.
@@ -5223,6 +5309,28 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             [f["check"] for f in landed["findings"] if f["severity"] == "error"],
         )
 
+    def test_frozen_text_interface_expects_nothing_past_its_last_day(self):
+        # irm_qa_sh lost vendor access on 2026-09-10 and stops at 20260813.
+        # A window running past that must stay clean: an accepted, documented
+        # loss reported as an error that grows by one day every night buries
+        # the findings that still mean something.
+        self.assertEqual(common.TEXT_SPECS["irm_qa_sh"].frozen_through, "20260813")
+        qa = pd.DataFrame([{
+            "trade_date": "20260813", "ts_code": "000001.SZ", "q": "问题", "a": "回答",
+            "pub_time": "2026-08-13 18:00:00",
+        }])
+        for day in ("20260812", "20260813"):
+            common.write_parquet(
+                self.raw_dir / "irm_qa_sh" / f"date={day}.parquet",
+                qa, api_name="irm_qa_sh", params={}, fields=list(qa.columns),
+            )
+        status = self._audit_text_window("20260812", "20260820", "text_status_frozen.json")
+        partitions = next(f for f in status["findings"] if f["check"] == "irm_qa_sh_text_partitions")
+        self.assertEqual(partitions["details"]["missing_expected_files"], 0)
+        self.assertEqual(partitions["details"]["extra_files"], 0)
+        scope = next(f for f in status["findings"] if f["check"] == "text_expected_scope")
+        self.assertEqual(scope["details"]["frozen_through"], {"irm_qa_sh": "20260813"})
+
     def test_board_trading_download_and_audit_use_dedicated_dimension(self):
         self._write_trade_cal("20231101")
         args = argparse.Namespace(
@@ -6310,7 +6418,8 @@ class FullPortContractTest(unittest.TestCase):
     def test_schedule_retains_full_job_set_and_uuid_migration(self) -> None:
         root = Path(__file__).resolve().parents[2]
         config = json.loads((root / "configs/tushare_update_schedule.json").read_text(encoding="utf-8"))
-        self.assertEqual(len(config["jobs"]), 30)
+        # 29 since cn_preopen_text_backfill_0855 was retired (2026-09-10).
+        self.assertEqual(len(config["jobs"]), 29)
         self.assertEqual(
             config["jobs"]["manual_commit_identity_migration"]["operation"],
             "commit_identity_migration",
@@ -6393,6 +6502,33 @@ class FullPortContractTest(unittest.TestCase):
         scheduled = {item["dataset"] for item in schedule["interfaces"]}
         selectable = set().union(*SELECTABLE_DATASETS.values())
         self.assertEqual(selectable - scheduled, set())
+
+    def test_frozen_text_interfaces_agree_across_registries(self) -> None:
+        # Two registries state the same fact: the spec drives the download
+        # default and the audit's expectations, the schedule row drives the
+        # operator/console view. A dataset frozen in one and live in the other
+        # means either a scheduled job that always fails or an audit that
+        # expects partitions nobody can fetch.
+        root = Path(__file__).resolve().parents[2]
+        schedule = json.loads(
+            (root / "configs/tushare_update_schedule.json").read_text(encoding="utf-8")
+        )
+        registry = {
+            row["dataset"]: row.get("frozen_through", "")
+            for row in schedule["interfaces"]
+            if row["domain"] == "text_evidence"
+        }
+        specs = {name: spec.frozen_through for name, spec in common.TEXT_SPECS.items()}
+        self.assertEqual(registry, specs)
+        self.assertEqual(common.TEXT_FETCHABLE_DATASETS, ["report_rc"])
+        for row in schedule["interfaces"]:
+            frozen = bool(row.get("frozen_through"))
+            self.assertEqual(
+                frozen,
+                row["cron_policy"] == "frozen_history_no_refresh",
+                row["dataset"],
+            )
+            self.assertEqual(frozen, bool(row.get("status")), row["dataset"])
 
     def test_active_macro_registries_are_consistent(self) -> None:
         root = Path(__file__).resolve().parents[2]

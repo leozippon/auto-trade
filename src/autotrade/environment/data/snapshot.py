@@ -304,6 +304,12 @@ SELECTABLE_DATASETS: dict[str, tuple[str, ...]] = {
         "cb_daily",
         "cb_call",
     ),
+    # Every text dataset but ``report_rc`` is 历史冻结（权限已失）：截至
+    # 2026-08-13 — the vendor withdrew the token's access on 2026-09-10 and no
+    # row after that day will ever exist. They stay selectable because the
+    # retained history is real and usable for any window that ends inside it;
+    # what an experiment must weigh is the asymmetry a window crossing the
+    # freeze introduces (data docs §4).
     "text": (
         # per-stock text (every row carries ts_code)
         "anns_d",
@@ -369,6 +375,12 @@ DEFAULT_DATASETS: dict[str, tuple[str, ...]] = {
         "index_dailybasic",
         "sw_daily",
     ),
+    # Four of these five are frozen at 2026-08-13 (see SELECTABLE_DATASETS).
+    # The set is deliberately unchanged: every running experiment persists an
+    # empty ``text_datasets`` and therefore resolves to this tuple, which is
+    # recorded in its prebuilt PIT view seed's ``provider.json``. Narrowing it
+    # would change that record and make ``assert_seed_snapshot_config`` reject
+    # the seed, blocking the restart of every live arm.
     "text": (
         "anns_d",
         "research_report",

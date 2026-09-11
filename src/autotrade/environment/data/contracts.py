@@ -293,8 +293,6 @@ REFRESH_NODES: dict[str, RefreshNode] = {
     "cn_nightly_pit_event_build": RefreshNode("cn_nightly_pit_event_build", time(3, 35), 30),
     # Pre-open board-trading backfill (kpl_list etc.).
     "cn_preopen_board_backfill_0850": RefreshNode("cn_preopen_board_backfill_0850", time(8, 50), 5),
-    # Pre-open short-text backfill (cctv_news / news).
-    "cn_preopen_text_backfill_0855": RefreshNode("cn_preopen_text_backfill_0855", time(8, 55), 5),
     # Same-day margin_secs (shortable universe) first attempt + retry.
     "cn_preopen_margin_secs_backfill_0903": RefreshNode("cn_preopen_margin_secs_backfill_0903", time(9, 3), 2),
     "cn_preopen_margin_secs_retry_0913": RefreshNode("cn_preopen_margin_secs_retry_0913", time(9, 13), 2),
@@ -375,12 +373,13 @@ EVENT_DATASET_REFRESH_NODES: dict[str, tuple[str, ...]] = {
     "report_rc": (TEXT_NODE,),
 }
 
-# Per-dataset overrides inside the text domain (default = TEXT_NODE). The
-# pre-open backfill refines the same natural day's short text before the open.
-TEXT_DATASET_REFRESH_NODES: dict[str, tuple[str, ...]] = {
-    "cctv_news": (TEXT_NODE, "cn_preopen_text_backfill_0855"),
-    "news": (TEXT_NODE, "cn_preopen_text_backfill_0855"),
-}
+# Per-dataset overrides inside the text domain (default = TEXT_NODE). Empty
+# since the 08:55 pre-open short-text backfill was retired: the token lost
+# access to cctv_news and news, so no text table gains rows between the
+# evening text job and the open, and both now follow the evening node for
+# their whole retained history (a later boundary than the 08:55 one they used
+# to get, i.e. conservative, never a look-ahead).
+TEXT_DATASET_REFRESH_NODES: dict[str, tuple[str, ...]] = {}
 
 # Per-dataset overrides inside the macro domain (default = cn_evening_full).
 # The global tier lands via its own natural-day job; every other macro dataset

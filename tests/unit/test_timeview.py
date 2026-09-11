@@ -87,7 +87,9 @@ def _replay_frames() -> dict[str, pd.DataFrame]:
                 "dataset": "news",
                 "ts_codes": TS,
                 "title": "early",
-                "available_at": "2022-01-04T08:55:00+08:00",
+                # Text rolls only on the 23:15 evening text node (ready 23:30):
+                # this row lands that evening, the next one the evening after.
+                "available_at": "2022-01-04T22:00:00+08:00",
                 "library_file": "news.parquet",
             },
             {
@@ -95,7 +97,7 @@ def _replay_frames() -> dict[str, pd.DataFrame]:
                 "dataset": "news",
                 "ts_codes": TS,
                 "title": "late",
-                "available_at": "2022-01-04T09:05:00+08:00",
+                "available_at": "2022-01-05T22:00:00+08:00",
                 "library_file": "news.parquet",
             },
         ]
@@ -323,7 +325,7 @@ class TimeviewTest(unittest.TestCase):
             self.assertEqual(set(index["text_id"].astype(str)), {"frozen_news"})
             self.assertEqual(set(bodies["text_id"].astype(str)), {"frozen_news"})
 
-            asof2, _ = tv.refresh(_when("2022-01-04 09:01:00"))
+            asof2, _ = tv.refresh(_when("2022-01-04 23:31:00"))
             index2 = pd.read_parquet(Path(asof2) / "text_index")
             bodies2 = pd.concat(pd.read_parquet(path) for path in sorted((Path(asof2) / "text_library").glob("*.parquet")))
             self.assertEqual(set(index2["text_id"].astype(str)), {"frozen_news", "news_early"})
@@ -374,9 +376,11 @@ class TimeviewTest(unittest.TestCase):
             tv = self._build(Path(tmp))
             tv.refresh(_when("2022-01-04 08:59:00"))
 
-            # One clock jump crosses the 09:00 text and 09:05 margin nodes. Both
-            # cursors catch up to the latest eligible cutoff in a single refresh.
-            asof, _ = tv.refresh(_when("2022-01-04 09:10:00"))
+            # One clock jump crosses the 09:05 margin node and the 23:30
+            # evening text node. Both cursors catch up to the latest eligible
+            # cutoff in a single refresh, while the evening events node (next
+            # day 03:05) has not completed, so block_trade stays invisible.
+            asof, _ = tv.refresh(_when("2022-01-04 23:31:00"))
             events = pd.read_parquet(Path(asof) / "events")
             text = pd.read_parquet(Path(asof) / "text_index")
             self.assertEqual(events["dataset"].tolist(), ["margin_secs"])

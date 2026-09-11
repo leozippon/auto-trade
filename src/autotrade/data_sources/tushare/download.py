@@ -51,6 +51,7 @@ from .common import (
     committed_partition_intact,
     STK_MINS_PAGE_LIMIT,
     STK_MINS_REQUIRED_COLUMNS,
+    TEXT_FETCHABLE_DATASETS,
     TEXT_SPECS,
     TRADE_DATE_PAGE_LIMIT,
     BoardTradingDataset,
@@ -3148,7 +3149,11 @@ def download_text(args: argparse.Namespace) -> int:
     allow_empty_revision_overwrite = getattr(args, "allow_empty_revision_overwrite", False)
     windows = month_windows(args.start_date, args.end_date)
     days = date_range_days(args.start_date, args.end_date)
-    for dataset in selected_text_datasets(args.datasets, news_src=args.news_src):
+    # The tier default is what the token can still fetch; the frozen
+    # interfaces stay nameable so a historical repair can still target one.
+    for dataset in selected_text_datasets(
+        args.datasets, news_src=args.news_src, default=TEXT_FETCHABLE_DATASETS
+    ):
         spec = TEXT_SPECS[dataset]
         start_date = max(args.start_date, spec.start_date)
         dataset_windows = [(s, e, m) for s, e, m in windows if e >= start_date]
@@ -3331,17 +3336,10 @@ def download_text_day(client: TuShareClient, raw_dir: Path, spec: TextDataset, d
 
 def set_download_defaults(args: argparse.Namespace) -> None:
     if args.min_interval_seconds is None:
-        args.min_interval_seconds = {
-            "reference": 0.12,
-            "daily": 0.18,
-            "fundamental": 0.22,
-            "intraday": 0.22,
-            "event_flow": 0.22,
-            "board_trading": 0.22,
-            "text_evidence": 0.22,
-            "macro": 0.22,
-            "global": 0.22,
-        }[args.tier]
+        # One rate for every tier: the vendor cooldown is global, so the old
+        # per-tier table (0.12s on reference, 0.18s on daily) only meant the
+        # lighter tiers tripped it first.
+        args.min_interval_seconds = core.MIN_REQUEST_INTERVAL_SECONDS
     if args.timeout_seconds is None:
         args.timeout_seconds = 120 if args.tier == "intraday" else 90 if args.tier in {"fundamental", "event_flow", "board_trading", "text_evidence", "macro", "global"} else 60
     if args.page_limit is None:
@@ -3692,7 +3690,7 @@ def update_all_dimensions(args: argparse.Namespace, summary: list[dict[str, Any]
 
 def update_data(args: argparse.Namespace) -> int:
     if args.min_interval_seconds is None:
-        args.min_interval_seconds = 0.22
+        args.min_interval_seconds = core.MIN_REQUEST_INTERVAL_SECONDS
     if args.timeout_seconds is None:
         args.timeout_seconds = 120
     summary: list[dict[str, Any]] = []
@@ -3879,7 +3877,7 @@ def add_auction_recheck_parser(sub: argparse._SubParsersAction) -> None:
     parser.add_argument("--landing-job", default="cn_evening_auction_backfill")
     parser.add_argument("--page-limit", type=int, default=TRADE_DATE_PAGE_LIMIT)
     parser.add_argument("--revision-ledger", default=REVISION_EVENTS_PATH)
-    parser.add_argument("--min-interval-seconds", type=float, default=0.35)
+    parser.add_argument("--min-interval-seconds", type=float, default=core.MIN_REQUEST_INTERVAL_SECONDS)
     parser.add_argument("--timeout-seconds", type=int, default=60)
 
 
@@ -3894,7 +3892,7 @@ def add_auction_capture_parser(sub: argparse._SubParsersAction) -> None:
     parser.add_argument("--min-rows", type=int, default=AUCTION_CAPTURE_MIN_ROWS_FLOOR)
     parser.add_argument("--min-previous-day-ratio", type=float, default=AUCTION_CAPTURE_MIN_PREVIOUS_DAY_RATIO)
     parser.add_argument("--revision-ledger", default=REVISION_EVENTS_PATH)
-    core.add_runtime_args(parser, min_interval=0.22, timeout=30)
+    core.add_runtime_args(parser, min_interval=core.MIN_REQUEST_INTERVAL_SECONDS, timeout=30)
 
 def add_intraday_parsers(sub: argparse._SubParsersAction) -> None:
     compact = sub.add_parser("compact-intraday-by-date", help="build final full-market daily minute files from stock-year source partitions")
@@ -3912,7 +3910,7 @@ def add_intraday_parsers(sub: argparse._SubParsersAction) -> None:
     update.add_argument("--page-limit", type=int)
     update.add_argument("--revision-ledger", default=REVISION_EVENTS_PATH)
     update.add_argument("--allow-empty-revision-overwrite", action="store_true")
-    core.add_runtime_args(update, min_interval=0.22, timeout=120)
+    core.add_runtime_args(update, min_interval=core.MIN_REQUEST_INTERVAL_SECONDS, timeout=120)
 
 def add_share_float_parser(sub: argparse._SubParsersAction) -> None:
     parser = sub.add_parser("download-share-float-complete", help="download share_float through ann_date and targeted ts_code rescue paths")
@@ -3939,7 +3937,7 @@ def add_share_float_parser(sub: argparse._SubParsersAction) -> None:
     parser.add_argument("--union-output", default="data/raw/share_float_complete/share_float_complete.parquet")
     parser.add_argument("--revision-ledger", default=REVISION_EVENTS_PATH)
     parser.add_argument("--allow-empty-revision-overwrite", action="store_true")
-    core.add_runtime_args(parser, min_interval=0.22, timeout=90)
+    core.add_runtime_args(parser, min_interval=core.MIN_REQUEST_INTERVAL_SECONDS, timeout=90)
     parser.add_argument("--output", help="Optional process report path. No status file is written by default; event-flow audit checks the union artifact.")
 
 def add_repair_text_parser(sub: argparse._SubParsersAction) -> None:

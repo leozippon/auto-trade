@@ -1,12 +1,10 @@
 """Timeview refresh-node table: cron drift guard + visibility-cutoff helpers."""
 
-import argparse
 import json
 import re
 import unittest
 from datetime import date, datetime, time
 from pathlib import Path
-from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 from autotrade.data_sources.tushare import cron_update
@@ -20,7 +18,8 @@ from autotrade.data_sources.tushare.common import (
     INTRADAY_DATASETS,
     MACRO_REGIME_DEFAULT_DATASETS,
     REFERENCE_DATASETS,
-    TEXT_DATASETS,
+    TEXT_FETCHABLE_DATASETS,
+    TEXT_SPECS,
 )
 
 from autotrade.environment.data.contracts import (
@@ -94,7 +93,7 @@ TIER_DATASETS = {
     "intraday": INTRADAY_DATASETS,
     "event_flow": EVENT_FLOW_DATASETS,
     "board_trading": BOARD_TRADING_DEFAULT_DATASETS,
-    "text_evidence": TEXT_DATASETS,
+    "text_evidence": TEXT_FETCHABLE_DATASETS,
     "macro": MACRO_REGIME_DEFAULT_DATASETS,
     "global": GLOBAL_CONTEXT_DEFAULT_DATASETS,
 }
@@ -289,34 +288,29 @@ class RefreshNodeDriftGuardTest(unittest.TestCase):
             domain_visible_cutoff("auction", datetime(2022, 1, 5, 20, 0, tzinfo=CN_TZ))
         )
 
-    def test_preopen_text_backfill_resolves_a_same_day_window(self) -> None:
-        # Timeview grants replay visibility of news with available_at <= 08:55
-        # of day D once the 08:55 node completes, so live ingestion must land
-        # the same morning's news before the open: the job window ends at D
-        # itself (natural-day, no trading-calendar clamp), looking back 2 days.
-        schedule = json.loads(CRON_SCHEDULE.read_text(encoding="utf-8"))
-        job = schedule["jobs"]["cn_preopen_text_backfill_0855"]
-        self.assertEqual(job["end_date_offset_days"], 0)
-        self.assertNotIn("end_date_mode", job)
+    def test_no_job_requests_a_frozen_text_interface(self) -> None:
+        # The token lost access to every text interface but report_rc, so a
+        # scheduled job naming one of the others fails the whole run and leaves
+        # the raw lake dirty. The text tier default must not name one either.
+        frozen = {name for name, spec in TEXT_SPECS.items() if spec.frozen_through}
+        self.assertTrue(frozen)
+        self.assertEqual(set(TEXT_FETCHABLE_DATASETS) & frozen, set())
+        jobs = json.loads(CRON_SCHEDULE.read_text(encoding="utf-8"))["jobs"]
+        for name, job in jobs.items():
+            selected = self._job_datasets(job)
+            if selected is None:
+                continue
+            self.assertEqual(
+                selected & frozen, set(), f"job {name!r} requests frozen text interfaces"
+            )
 
-        class FrozenDatetime(datetime):
-            @classmethod
-            def now(cls, tz=None):
-                return datetime(2026, 8, 7, 8, 55, tzinfo=tz)
-
-        args = argparse.Namespace(
-            config=str(CRON_SCHEDULE),
-            job="cn_preopen_text_backfill_0855",
-            start_date=None,
-            end_date=None,
-        )
-        with (
-            patch.object(cron_update, "datetime", FrozenDatetime),
-            patch.dict(cron_update.os.environ, {"TUSHARE_UPDATE_START_DATE": ""}),
-        ):
-            ctx = cron_update.build_context(args)
-        self.assertEqual(ctx.end_date, "20260807")
-        self.assertEqual(ctx.start_date, "20260805")
+    def test_retired_text_backfill_leaves_no_node_behind(self) -> None:
+        # The 08:55 short-text backfill only ever landed cctv_news and news.
+        # With both frozen the job is gone, and so must its node be: a node
+        # without a job would grant replay visibility no ingestion produces.
+        self.assertNotIn("cn_preopen_text_backfill_0855", REFRESH_NODES)
+        self.assertNotIn("cn_preopen_text_backfill_0855", _cron_jobs())
+        self.assertEqual(TEXT_DATASET_REFRESH_NODES, {})
 
     def test_dataset_refresh_overrides_are_landed_by_their_jobs(self) -> None:
         jobs = json.loads(CRON_SCHEDULE.read_text(encoding="utf-8"))["jobs"]
@@ -504,12 +498,18 @@ class VisibilityCutoffTest(unittest.TestCase):
                 dataset,
             )
 
-    def test_cctv_news_refined_by_preopen_text_node(self) -> None:
-        # The evening node lands the bulk; the 08:55 pre-open backfill refines the
-        # same-day short text, so by 09:00 the later (08:55) cutoff wins.
+    def test_every_text_dataset_follows_the_evening_node(self) -> None:
+        # With the 08:55 pre-open backfill retired, no text table gains rows
+        # between the evening job and the open: at 09:00 the newest visible
+        # text is still what the PREVIOUS evening landed, cctv_news and news
+        # included (they used to be refined at 08:55).
         when = datetime(2022, 1, 5, 9, 0, tzinfo=CN_TZ)
-        cutoff = text_dataset_visible_cutoff("cctv_news", when)
-        self.assertEqual(cutoff, datetime(2022, 1, 5, 8, 55, tzinfo=CN_TZ))
+        for dataset in ("cctv_news", "news", "anns_d", "report_rc"):
+            self.assertEqual(
+                text_dataset_visible_cutoff(dataset, when),
+                datetime(2022, 1, 4, 23, 15, tzinfo=CN_TZ),
+                dataset,
+            )
 
     def test_unknown_dataset_defaults_to_evening_node(self) -> None:
         when = datetime(2022, 1, 5, 9, 31, tzinfo=CN_TZ)

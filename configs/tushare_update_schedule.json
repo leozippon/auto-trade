@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "source_verified_at": "2026-07-13",
+  "source_verified_at": "2026-09-10",
   "timezone": "Asia/Shanghai",
   "repo_root": ".",
   "python": "/home/lzp/miniconda3/envs/quant/bin/python",
@@ -10,7 +10,7 @@
   "default_lock_wait_seconds": 900,
   "default_update_args": [
     "--min-interval-seconds",
-    "0.22",
+    "0.80",
     "--timeout-seconds",
     "120"
   ],
@@ -35,7 +35,7 @@
       "start_date_lookback_days": 30,
       "extra_args": [
         "--reference-min-interval-seconds",
-        "0.50",
+        "1.00",
         "--refresh-open-window",
         "--no-include-text",
         "--no-include-global",
@@ -97,12 +97,14 @@
       "skip_if_already_ok": true
     },
     "cn_nightly_text_full": {
-      "description": "Land the text-evidence tier every calendar evening. Text publishes on weekends and holidays, so its window is natural-day (no end_date_mode) and never resolves to an unchanged range: the job runs on Saturdays and Sundays like any other day. Same rolling window and forced refresh the evening update used to apply to this tier, so late vendor corrections in the trailing month are still picked up.",
+      "description": "Land the text-evidence tier every calendar evening. Text publishes on weekends and holidays, so its window is natural-day (no end_date_mode) and never resolves to an unchanged range: the job runs on Saturdays and Sundays like any other day. Rolling window with a forced refresh, so late vendor corrections in the trailing month are still picked up. Scope is report_rc alone since 2026-09-10: the token lost access to every other text interface (major_news answers only inside a 40-request/day complimentary trial that one monthly page loop already exceeds), and their history is frozen at 20260813.",
       "operation": "download_tier",
       "tier": "text_evidence",
       "end_date_offset_days": 0,
       "start_date_lookback_days": 30,
       "extra_args": [
+        "--datasets",
+        "report_rc",
         "--force"
       ],
       "skip_if_already_ok": true
@@ -238,21 +240,6 @@
       "lock_wait_seconds": 180,
       "skip_if_already_ok": true
     },
-    "cn_preopen_text_backfill_0855": {
-      "description": "Pre-open short text refresh over the trailing natural days including today: lands same-morning news before the open, matching the 08:55 Timeview text boundary. cctv_news airs in the evening, so its same-day morning fetch is legitimately empty; the evening full text refresh force-overwrites it with the real transcript.",
-      "operation": "download_tier",
-      "tier": "text_evidence",
-      "end_date_offset_days": 0,
-      "start_date_lookback_days": 2,
-      "extra_args": [
-        "--datasets",
-        "cctv_news",
-        "news",
-        "--force"
-      ],
-      "lock_wait_seconds": 180,
-      "skip_if_already_ok": true
-    },
     "cn_preopen_margin_backfill_0905": {
       "description": "Pre-open targeted first attempt for previous-day margin data. Keep it light so downstream audit, snapshot freeze, and Agent decisions can finish before 09:25.",
       "operation": "download_event_flow",
@@ -351,9 +338,7 @@
       "extra_args": [
         "--refresh-reference-datasets",
         "namechange",
-        "ths_index",
-        "--min-interval-seconds",
-        "0.50"
+        "ths_index"
       ],
       "lock_wait_seconds": 1800,
       "skip_if_already_ok": true
@@ -1101,8 +1086,11 @@
       "api": "irm_qa_sh",
       "domain": "text_evidence",
       "frequency": "trade_date",
-      "official_update": "投资者互动问答；随发布滚动更新。",
-      "cron_policy": "same_day_evening_recent_force_refresh",
+      "official_update": "投资者互动问答；随发布滚动更新。历史冻结（权限已失）：截至 2026-08-13。",
+      "cron_policy": "frozen_history_no_refresh",
+      "status": "permission_denied",
+      "status_since": "2026-09-10",
+      "frozen_through": "20260813",
       "doc_ref": "https://tushare.pro/document/2?doc_id=364"
     },
     {
@@ -1110,8 +1098,11 @@
       "api": "irm_qa_sz",
       "domain": "text_evidence",
       "frequency": "trade_date",
-      "official_update": "投资者互动问答；随发布滚动更新。",
-      "cron_policy": "same_day_evening_recent_force_refresh",
+      "official_update": "投资者互动问答；随发布滚动更新。历史冻结（权限已失）：截至 2026-08-13。",
+      "cron_policy": "frozen_history_no_refresh",
+      "status": "permission_denied",
+      "status_since": "2026-09-10",
+      "frozen_through": "20260813",
       "doc_ref": "https://tushare.pro/document/2?doc_id=365"
     },
     {
@@ -1119,8 +1110,11 @@
       "api": "anns_d",
       "domain": "text_evidence",
       "frequency": "event_driven",
-      "official_update": "全量公告；官方页面提供发布时间字段rec_time，未标固定入库时刻。",
-      "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "official_update": "全量公告；官方页面提供发布时间字段rec_time，未标固定入库时刻。历史冻结（权限已失）：截至 2026-08-13。",
+      "cron_policy": "frozen_history_no_refresh",
+      "status": "permission_denied",
+      "status_since": "2026-09-10",
+      "frozen_through": "20260813",
       "doc_ref": "https://tushare.pro/document/2?doc_id=176"
     },
     {
@@ -1128,8 +1122,11 @@
       "api": "major_news",
       "domain": "text_evidence",
       "frequency": "near_realtime",
-      "official_update": "新闻通讯；官方页面提供pub_time，未标固定入库时刻。",
-      "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "official_update": "新闻通讯；官方页面提供pub_time，未标固定入库时刻。历史冻结（仅 40 次/天官方赠送试用额度，不在购买范围内）：截至 2026-08-13。",
+      "cron_policy": "frozen_history_no_refresh",
+      "status": "trial_quota_only",
+      "status_since": "2026-09-10",
+      "frozen_through": "20260813",
       "doc_ref": "https://tushare.pro/document/2?doc_id=195"
     },
     {
@@ -1137,8 +1134,11 @@
       "api": "cctv_news",
       "domain": "text_evidence",
       "frequency": "daily",
-      "official_update": "新闻联播文字稿；按日期提取，官方未标具体入库时刻。",
-      "cron_policy": "next_morning_force_refresh_recent",
+      "official_update": "新闻联播文字稿；按日期提取，官方未标具体入库时刻。历史冻结（权限已失）：截至 2026-08-13。",
+      "cron_policy": "frozen_history_no_refresh",
+      "status": "permission_denied",
+      "status_since": "2026-09-10",
+      "frozen_through": "20260813",
       "doc_ref": "https://tushare.pro/document/2?doc_id=154"
     },
     {
@@ -1146,8 +1146,11 @@
       "api": "npr",
       "domain": "text_evidence",
       "frequency": "event_driven",
-      "official_update": "国家政策法规库；官方页面提供pubtime，未标固定入库时刻。",
-      "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "official_update": "国家政策法规库；官方页面提供pubtime，未标固定入库时刻。历史冻结（权限已失）：截至 2026-08-13。",
+      "cron_policy": "frozen_history_no_refresh",
+      "status": "permission_denied",
+      "status_since": "2026-09-10",
+      "frozen_through": "20260813",
       "doc_ref": "https://tushare.pro/document/2?doc_id=406"
     },
     {
@@ -1155,8 +1158,11 @@
       "api": "research_report",
       "domain": "text_evidence",
       "frequency": "daily",
-      "official_update": "券商研究报告；增量每天两次更新。",
-      "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "official_update": "券商研究报告；增量每天两次更新。历史冻结（权限已失）：截至 2026-08-13。",
+      "cron_policy": "frozen_history_no_refresh",
+      "status": "permission_denied",
+      "status_since": "2026-09-10",
+      "frozen_through": "20260813",
       "doc_ref": "https://tushare.pro/document/2?doc_id=415"
     },
     {
@@ -1173,8 +1179,11 @@
       "api": "news",
       "domain": "text_evidence",
       "frequency": "near_realtime",
-      "official_update": "新闻快讯；官方页面提供datetime，未标固定入库时刻。",
-      "cron_policy": "same_day_evening_open_window_plus_next_morning_recent_force_refresh",
+      "official_update": "新闻快讯；官方页面提供datetime，未标固定入库时刻。历史冻结（权限已失）：截至 2026-08-13。",
+      "cron_policy": "frozen_history_no_refresh",
+      "status": "permission_denied",
+      "status_since": "2026-09-10",
+      "frozen_through": "20260813",
       "doc_ref": "https://www.tushare.pro/document/41?doc_id=143"
     },
     {

@@ -45,6 +45,15 @@ TEXT_EVIDENCE_STATUS_PATH = "results/data_quality/" + DOMAIN_STATUS_FILES["text"
 
 INTRADAY_MINUTES_STATUS_PATH = "results/data_quality/" + DOMAIN_STATUS_FILES["intraday_1min"]
 
+# Minimum seconds between vendor requests, for every entry point that talks to
+# TuShare. 0.80s (75 req/min) is the rate the 2026-09-10 catch-up sustained for
+# ~2.5 hours without incident. The former 0.22s (272 req/min) was inside the
+# stated 400/min ceiling but now trips a SIX-MINUTE vendor cooldown, and
+# ``TuShareClient.query`` retries five times over ~20 seconds — a budget no
+# cooldown can fit inside, so every request in the window fails and the step
+# dies. Anything faster than this must be a deliberate, supervised override.
+MIN_REQUEST_INTERVAL_SECONDS = 0.80
+
 REVISION_EVENTS_PATH = "results/data_quality/revision_events.jsonl"
 
 REVISION_SUMMARY_PATH = "results/data_quality/revision_summary.json"
@@ -164,18 +173,6 @@ FUNDAMENTAL_DATASETS = [
     "fina_audit",
     "fina_mainbz_vip",
     "disclosure_date",
-]
-
-TEXT_DATASETS = [
-    "anns_d",
-    "major_news",
-    "cctv_news",
-    "npr",
-    "research_report",
-    "report_rc",
-    "irm_qa_sh",
-    "irm_qa_sz",
-    "news",
 ]
 
 INTRADAY_DATASETS = ["stk_mins_1min"]
@@ -515,6 +512,11 @@ class TextDataset:
     zero_rows_ok: bool = True
     time_column: str = ""
     date_column: str = ""
+    # Last day this interface can ever cover, set when the vendor withdrew
+    # access. The lake keeps and audits the history it already holds, and a
+    # snapshot can still select it; nothing new will ever land, so the download
+    # default drops it and the audit expects no partition past this day.
+    frozen_through: str = ""
 
 @dataclass
 class MacroDataset:
@@ -666,9 +668,17 @@ FUNDAMENTAL_SPECS = {
     ),
 }
 
+# 2026-09-10: the TuShare token lost access to every text interface but
+# ``report_rc``; each of the others answers "没有接口访问权限". ``major_news``
+# still answers, yet the vendor states it is a 40-request/day complimentary
+# trial outside the purchased plan and one monthly page loop alone exceeds
+# that, so it cannot be scheduled either. All of them stop at this day.
+TEXT_ACCESS_LOST_THROUGH = "20260813"
+
 TEXT_SPECS = {
     "anns_d": TextDataset(
         api_name="anns_d",
+        frozen_through=TEXT_ACCESS_LOST_THROUGH,
         strategy="range_month",
         fields="ann_date,ts_code,name,title,url,rec_time",
         page_limit=2000,
@@ -679,6 +689,7 @@ TEXT_SPECS = {
     ),
     "major_news": TextDataset(
         api_name="major_news",
+        frozen_through=TEXT_ACCESS_LOST_THROUGH,
         strategy="time_range_month",
         fields="title,pub_time,src,content",
         page_limit=400,
@@ -688,6 +699,7 @@ TEXT_SPECS = {
     ),
     "cctv_news": TextDataset(
         api_name="cctv_news",
+        frozen_through=TEXT_ACCESS_LOST_THROUGH,
         strategy="day",
         fields="date,title,content",
         key_columns=("date", "title"),
@@ -696,6 +708,7 @@ TEXT_SPECS = {
     ),
     "npr": TextDataset(
         api_name="npr",
+        frozen_through=TEXT_ACCESS_LOST_THROUGH,
         strategy="range_month",
         fields="pubtime,title,pcode,puborg,ptype,url,content_html",
         page_limit=500,
@@ -705,6 +718,7 @@ TEXT_SPECS = {
     ),
     "research_report": TextDataset(
         api_name="research_report",
+        frozen_through=TEXT_ACCESS_LOST_THROUGH,
         strategy="range_month",
         fields="trade_date,abstr,title,report_type,author,name,ts_code,inst_csname,ind_name,url",
         page_limit=1000,
@@ -724,6 +738,7 @@ TEXT_SPECS = {
     ),
     "irm_qa_sh": TextDataset(
         api_name="irm_qa_sh",
+        frozen_through=TEXT_ACCESS_LOST_THROUGH,
         strategy="day",
         fields="ts_code,name,trade_date,q,a,pub_time",
         key_columns=("trade_date", "ts_code", "q"),
@@ -733,6 +748,7 @@ TEXT_SPECS = {
     ),
     "irm_qa_sz": TextDataset(
         api_name="irm_qa_sz",
+        frozen_through=TEXT_ACCESS_LOST_THROUGH,
         strategy="day",
         fields="ts_code,name,trade_date,q,a,pub_time,industry",
         key_columns=("trade_date", "ts_code", "q"),
@@ -742,6 +758,7 @@ TEXT_SPECS = {
     ),
     "news": TextDataset(
         api_name="news",
+        frozen_through=TEXT_ACCESS_LOST_THROUGH,
         strategy="news_src_day",
         fields="datetime,content,title,channels",
         page_limit=1500,
@@ -750,6 +767,14 @@ TEXT_SPECS = {
         time_column="datetime",
     ),
 }
+
+# Two scopes over one registry. ``TEXT_DATASETS`` is every text table the lake
+# holds — what the text audit inventories, keys and PIT-checks, frozen history
+# included. ``TEXT_FETCHABLE_DATASETS`` is what a download can still land, so
+# it is the tier default; naming a frozen dataset there only buys a vendor
+# permission error.
+TEXT_DATASETS = list(TEXT_SPECS)
+TEXT_FETCHABLE_DATASETS = [name for name, spec in TEXT_SPECS.items() if not spec.frozen_through]
 
 MACRO_SPECS = {
     "cn_schedule": MacroDataset(
@@ -981,7 +1006,9 @@ MACRO_SPECS = {
     "fut_basic": MacroDataset(
         api_name="fut_basic",
         strategy="static_full",
-        fields="ts_code,symbol,exchange,name,fut_code,multiplier,trade_unit,per_unit,quote_unit,d_month,list_date,delist_date,last_ddate,trade_time_desc",
+        # ``trade_time_desc`` was dropped from the request on 2026-09-10: the
+        # vendor stopped returning it and nothing reads it.
+        fields="ts_code,symbol,exchange,name,fut_code,multiplier,trade_unit,per_unit,quote_unit,d_month,list_date,delist_date,last_ddate",
         page_limit=10000,
         key_columns=("ts_code",),
         date_column="list_date",
@@ -1350,7 +1377,14 @@ BOARD_TRADING_SPECS = {
         strategy="trade_date_by_limit_type",
         fields="trade_date,ts_code,name,price,pct_chg,open_num,lu_desc,limit_type,tag,status,limit_order,limit_amount,turnover_rate,free_float,lu_limit_order,limit_up_suc_rate,turnover,market_type,rise_rate,sum_float,first_lu_time,last_lu_time,first_ld_time,last_ld_time",
         page_limit=8000,
-        key_columns=("trade_date", "ts_code", "limit_type", "tag", "status", "first_lu_time", "last_lu_time", "first_ld_time", "last_ld_time"),
+        # The four ``first_lu_time``/``last_ld_time`` columns are still
+        # requested and stored but are NOT part of the identity: the vendor
+        # stopped returning them on 2026-08-14, and over the whole table
+        # (128,998 rows, 3,475 partitions) this five-column key has zero
+        # duplicates. Keeping them in the key made every post-2026-08-14
+        # partition read as "missing key columns", which also blinded the
+        # revision guard to real key removals.
+        key_columns=("trade_date", "ts_code", "limit_type", "tag", "status"),
         start_date="20231101",
         availability=OFFICIAL_16,
     ),
@@ -1472,7 +1506,7 @@ class TuShareClient:
     def __init__(
         self,
         token: str,
-        min_interval: float = 0.2,
+        min_interval: float = MIN_REQUEST_INTERVAL_SECONDS,
         timeout: int = 60,
         relay_url: str | None = None,
     ) -> None:
@@ -1729,6 +1763,47 @@ def compare_keyed_frames(old_df: pd.DataFrame, new_df: pd.DataFrame, key_columns
         "removed_rows_sample": removed_rows_sample,
     }
 
+# Business-key fields the vendor legitimately fills in later. They stay in the
+# key for the diff and the audit (two rows of one filing differ by them), but
+# the retraction guard must not read a backfill as a mass removal: when the
+# H1 reporting season closed TuShare populated ``disclosure_date.actual_date``
+# on 330 rows of period=20260630 and backfilled ``dividend.ann_date`` on 1990s
+# records across 51 ts_code partitions, and both re-pulls were refused as
+# destructive shrinks although no row and no company had disappeared. The
+# guard therefore decides on the key minus these fields.
+VENDOR_BACKFILLED_KEY_FIELDS: dict[str, tuple[str, ...]] = {
+    "disclosure_date": ("actual_date",),
+    "dividend": ("ann_date",),
+}
+
+
+def retraction_key_columns(dataset: str, key_columns: Iterable[str]) -> list[str]:
+    """The immutable subset of a business key, used to decide retractions."""
+    backfilled = VENDOR_BACKFILLED_KEY_FIELDS.get(dataset, ())
+    return [column for column in key_columns if column not in backfilled]
+
+
+def removed_business_keys(old_df: pd.DataFrame, new_df: pd.DataFrame, key_columns: list[str]) -> int | None:
+    """Business keys present in ``old_df`` and absent from ``new_df``.
+
+    A set difference rather than a keyed row diff, so it stays decidable on
+    keys that repeat. ``None`` means undecidable (a key column is absent from
+    one of the frames); the caller must then keep the conservative full-key
+    count rather than assume nothing was removed."""
+    if any(column not in old_df.columns or column not in new_df.columns for column in key_columns):
+        return None
+
+    def key_set(df: pd.DataFrame) -> set[tuple[str, ...]]:
+        if df.empty:
+            return set()
+        return {
+            tuple(canonical_revision_value(record[column]) for column in key_columns)
+            for record in df[key_columns].to_dict("records")
+        }
+
+    return len(key_set(old_df) - key_set(new_df))
+
+
 def revision_severity(dataset: str) -> str:
     if dataset in {"daily", "stk_limit", "suspend_d"}:
         return "high"
@@ -1864,12 +1939,14 @@ def write_parquet_revision_aware(
             old_meta = {}
         if len(old_df) > 0 and df.empty and not allow_empty_revision_overwrite:
             write_action = "skipped_empty_revision_overwrite"
+        compare_old = revision_comparison_old_df if revision_comparison_old_df is not None else old_df
+        compare_new = revision_comparison_new_df if revision_comparison_new_df is not None else df
         event = build_revision_event(
             dataset=api_name,
             partition=path.with_suffix("").name,
             path=path,
-            old_df=revision_comparison_old_df if revision_comparison_old_df is not None else old_df,
-            new_df=revision_comparison_new_df if revision_comparison_new_df is not None else df,
+            old_df=compare_old,
+            new_df=compare_new,
             key_columns=key_columns,
             source=source,
         )
@@ -1881,21 +1958,23 @@ def write_parquet_revision_aware(
         # A re-pull that DROPS existing keys is destructive (the ann_month
         # truncated-window class silently deleted announcements). Blocked by
         # default; accepting a genuine source retraction means deleting the
-        # partition file first or passing allow_key_removal_overwrite.
-        if write_action == "overwrite" and event and event["removed_keys"] and not allow_key_removal_overwrite:
+        # partition file first or passing allow_key_removal_overwrite. The
+        # decision runs on the immutable subset of the key, so a vendor
+        # backfill of a key field is not mistaken for a retraction.
+        guard_keys = retraction_key_columns(api_name, key_columns)
+        removed = event["removed_keys"] if event else 0
+        removed_count = removed if isinstance(removed, int) else len(removed)
+        if removed_count and guard_keys != list(key_columns):
+            decided = removed_business_keys(compare_old, compare_new, guard_keys)
+            if decided is not None:
+                removed_count = decided
+        if write_action == "overwrite" and removed_count and not allow_key_removal_overwrite:
             write_action = "skipped_key_removal_overwrite"
-        if (
-            write_action == "overwrite"
-            and event
-            and event["removed_keys"]
-            and allow_key_removal_overwrite
-        ):
+        if write_action == "overwrite" and removed_count and allow_key_removal_overwrite:
             # Full-partition pulls accept key removals as source corrections, but a
             # transiently truncated (non-empty) response must not wipe a partition:
             # a disproportionate shrink (>20 keys AND >20% of existing keys) blocks.
-            removed = event["removed_keys"]
-            removed_count = removed if isinstance(removed, int) else len(removed)
-            existing_cols = [col for col in key_columns if col in old_df.columns]
+            existing_cols = [col for col in guard_keys if col in old_df.columns]
             old_key_count = len(old_df.drop_duplicates(existing_cols)) if existing_cols else len(old_df)
             if removed_count > 20 and old_key_count > 0 and removed_count > 0.2 * old_key_count:
                 write_action = "blocked_shrink_overwrite"
@@ -1920,7 +1999,7 @@ def write_parquet_revision_aware(
                 )
                 append_jsonl_unique(Path(revision_ledger), record, key="event_id")
             print(
-                f"{api_name} {path} new pull removes {event['removed_keys']} existing keys; "
+                f"{api_name} {path} new pull removes {removed_count} existing keys; "
                 "skipped_key_removal_overwrite (delete the partition to accept a source retraction)"
             )
             return False
@@ -2777,8 +2856,18 @@ def intraday_expected_codes_for_day(raw_dir: Path, args: argparse.Namespace, tra
         codes = set(sorted(codes)[: int(args.max_codes)])
     return codes
 
-def selected_text_datasets(values: Iterable[str] | None, *, news_src: list[str] | None = None) -> list[str]:
-    datasets = select_datasets(values, default=TEXT_DATASETS, allowed=TEXT_SPECS, label="text")
+def selected_text_datasets(
+    values: Iterable[str] | None,
+    *,
+    news_src: list[str] | None = None,
+    default: Iterable[str] | None = None,
+) -> list[str]:
+    datasets = select_datasets(
+        values,
+        default=TEXT_DATASETS if default is None else default,
+        allowed=TEXT_SPECS,
+        label="text",
+    )
     if news_src is not None and "news" in datasets:
         selected_news_sources(news_src)
     return datasets
