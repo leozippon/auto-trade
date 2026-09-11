@@ -2,11 +2,15 @@
 
 只列继承产物**实际读取**的列。它一共只碰四个 as-of 域，其余全部不读。本臂不许加列，所以这张表同时也是「允许读的全集」——出现任何不在表里的读取，就是改了特征，属于禁止行为。
 
+**本文件是列合同的唯一来源。** `exploration-plan.md` 第 0 步的列合同复核按本文件逐表核对，别处不复述列数或列名。核对时以宿主 `data_summary.json` 的实际列名**逐字对齐**；键列与盖章列（`dataset` / `ts_code` / `trade_date` / `available_at`）缺失一律按缺列处置。
+
 判可见只看 `available_at <= context.inference_at`，推断时点是决策日 08:30+08:00。所有读取都要带 `columns=`、`dataset` 过滤与日期窗口；as-of 域读失败**不得**回退 `snapshot_dir`。
 
 ## `asof_dir/daily`
 
 一张已经归一化并联结好的日频表（日线 + 估值 + 交易约束）。日频域没有 `available_at` 列，可见性就是 `trade_date < T`（as-of 视图本身已经按时点切好，代码里再显式过滤一次）。底层各来源的盖章合同分别是 `daily` 交易日 17:30、`daily_basic` 18:00、`adj_factor` 09:30、`stk_limit` 与 `suspend_d` 08:45——在 08:30 的决策上，**全部只到 T-1**。
+
+两处投影、去重后 12 个列名：`lib/data.py` 的 11 列（`ts_code`、`trade_date`、`open`、`high`、`low`、`close`、`vol`、`amount`、`adj_factor`、`is_suspended`、`up_limit`）与 `lib/mfflow.py` 的 4 列（`ts_code`、`trade_date`、`circ_mv`、`amount`），下表逐列列全。
 
 | 列 | 谁读 | 单位（快照已归一化） | 备注 |
 | --- | --- | --- | --- |
@@ -40,8 +44,13 @@
 
 行级 `available_at` = `trade_date` 当日 19:00（规则名 `official_19_from:trade_date`），因此在 08:30 的决策上只到 T-1，当日盘中不可见。过滤只看 `available_at`，**绝不用 `trade_date < T` 的捷径**：一条 `trade_date == T` 的行被排除，唯一理由是它的 `available_at`（T 19:00）晚于推断时点。同 `(ts_code, trade_date)` 多版本时取 `available_at <= t` 里最大的那一版，去重发生在开窗之前。
 
+投影 9 列，下表逐列列全；前四列是键与盖章列，不带业务单位，缺任何一列同样按缺列处置。
+
 | 列 | 单位 | 用途 |
 | --- | --- | --- |
+| `dataset` | — | 事件域是并表，用它把行钉到 `moneyflow` |
+| `ts_code` / `trade_date` | — | 业务键；`trade_date` 是 `YYYYMMDD` 字符串 |
+| `available_at` | — | 唯一的可见性判据（见上） |
 | `net_mf_amount` | 万元（×1e4 → 元） | `mf_amt_5`、`mf_amt_20`、`mf_pos20`、`mf_trend520`、`mf_vola5_20`、`mf_amtturn20` |
 | `buy_elg_amount` / `sell_elg_amount` | 万元 | `mf_elg_net5`（特大单净额） |
 | `buy_lg_amount` / `sell_lg_amount` | 万元 | `mf_lg_net20`（大单净额） |

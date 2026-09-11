@@ -8,7 +8,7 @@
 
 顺序固定，先做完再谈变体。
 
-1. **列合同复核。** 读本轮 `data_summary.json` 与 `unit_reference.json`，按 `pit-field-map.md` 逐表核对：`daily` 的 11 列投影（含 `is_suspended`、`up_limit`、`adj_factor`）与 `circ_mv`/`amount`；`events` 的 `moneyflow` 九列投影；`fundamentals` 的四个 `*_vip` 数据集；`universe` 的 `list_date`。**缺任何一列，机制就不能原样跑**：显式失败、`report_issue`、本折 `no_edge`，不要靠改特征把它绕过去。
+1. **列合同复核。** 读本轮 `data_summary.json` 与 `unit_reference.json`，按 `pit-field-map.md` 的四张表**逐列**核对（列清单只在那份文件里，这里不复述）：`daily`、`events` 的 `moneyflow`、`fundamentals` 的四个 `*_vip`、`universe`。核对以宿主 `data_summary.json` 的实际列名逐字对齐，键列与盖章列缺失按缺列处置。**缺任何一列，机制就不能原样跑**：显式失败、`report_issue`、本折 `no_edge`，不要靠改特征把它绕过去。
 2. **原样冒烟。** 对**未经改动**的父产物跑一次 `smoke_backtest`，确认两件事：跑得通；订单的 `reason` 是 `a158_lgbm_rebal` 而**不是** `fallback_ewsign_rebal`，且订单 metadata 带有 `num_leaves`/`learning_rate`/`best_iter`/`n_boosters=1`。落在退化路径上就等于 booster 没训出来，这时的任何回测成绩都不是这份机制的成绩——查清楚原因再往下走，绝不把退化结果当成读数。
 3. **父本对照读数。** 读宿主已经跑好的 `parent_control` 节点：全窗 `benchmark.neutralized_excess_return`、`cost_sensitivity.excess_at_2x_slippage`、`turnover`、`trade_count`，以及 `sub_windows` **最后一行**（本折新季度，这份产物真正的样本外前向记录）与它的 `null_control`。这一条是本臂每折的头条结论，写进折记录。
 4. **可选池宽度审计（首折必做，之后只在读数异常时重做）。** 在会话沙箱里按决策日统计通过 `universe()` 的名字数，并单独统计被 `is_suspended` 剔除的只数。v11 只标盘中临时停牌，v9 连复牌日一起标（审计窗 946 个置位行里 747 行是正常交易日），因此这里应当看到**被剔除的只数明显偏少、可选池偏宽**。看到的和这个方向相反，说明视图或读取路径有问题，先查清再往下。
@@ -29,9 +29,7 @@
 
 ## 第二折与第三折：只在还有悬案时开批
 
-默认是只做第 0 步然后 `no_edge`。只有当上一折留下了**一个真正的悬案**才开批，且至多一个候选、一个槽：某个变体过了大部分门、只在一条上落败，而本折的诊断把这条落败归因于那个季度而不是机制本身（典型情形是父本自己的新季度超额也为负、两边一起负）。除此之外一律不开批。
-
-在两折里都落在自己否证表上的变体，对本臂关闭，不得再登记。
+默认是只做第 0 步然后 `no_edge`。开批的准入条件与变体的关闭条件都只写在 `families.md` 的「臂级规则」一节，按那里执行：落败者仅在归因于季度状态时可重开，胜者可再确认，两条都不成立就不开批；某变体在**连续两折**都落在自己的否证表上即对本臂关闭。
 
 ## 交付截止：末三折不再提名
 
