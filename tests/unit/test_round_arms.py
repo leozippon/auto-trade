@@ -26,6 +26,7 @@ from scripts.experiments._round import (
     RETIRED_IDS,
     ROBUSTNESS_LINE,
     Round,
+    already_created,
     archived_ids,
     quarter_shift,
 )
@@ -63,6 +64,9 @@ def _rounds() -> dict[str, Round]:
 ROUNDS = _rounds()
 ROUND_IDS = sorted(ROUNDS)
 ARMS = [(name, arm) for name, rnd in sorted(ROUNDS.items()) for arm in rnd.arms]
+# Any round object will do for the source-lifecycle checks: the rule is the
+# launcher's, not a particular round's data.
+ROUND_WITH_SOURCE = ROUNDS[ROUND_IDS[0]]
 
 
 def _seed_not_ready(rnd: Round) -> str:
@@ -282,22 +286,33 @@ def test_the_console_could_hold_a_whole_round(round_name: str) -> None:
 
 
 @pytest.mark.parametrize(("round_name", "experiment_id"), ARMS)
-def test_every_inheritance_source_is_a_live_experiment(round_name: str, experiment_id: str) -> None:
-    """An arm that continues another experiment reads the source at create time.
+def test_an_inheritance_source_must_exist_until_its_arm_is_created(
+    round_name: str, experiment_id: str
+) -> None:
+    """`inherit_from` and `inherit_memory_from` are copied once, at creation.
 
-    `inherit_from` copies the source's frozen output/ and models/ in read-only
-    and `inherit_memory_from` imports its PRIOR and skills, both out of the
-    source's live directory, so a source that has already been retired out of
-    `experiments/` fails the create and leaves a half-built tree behind. The
-    id check holds anywhere; the directory check only where `experiments/`
-    exists at all.
+    The source's frozen output/ and models/, or its PRIOR and skills, are read
+    out of its live directory while the console creates the arm, so a source
+    that is not there fails the create. Afterwards the copy is the arm's own
+    read-only tree, and the source may be retired -- which is how a round
+    succeeds its own predecessors: create the successors, archive the sources
+    after. So this is asserted only for an arm still to be created.
     """
     params = ROUNDS[round_name].request_params(experiment_id)
-    sources = [str(params.get(key) or "").strip() for key in INHERITANCE_KEYS]
-    for source in filter(None, sources):
+    sources = [source for key in INHERITANCE_KEYS if (source := str(params.get(key) or "").strip())]
+    if not sources or not EXPERIMENTS_ROOT.is_dir() or already_created(experiment_id):
+        return
+    for source in sources:
         assert source not in RETIRED_IDS, (experiment_id, source)
-        if EXPERIMENTS_ROOT.is_dir():
-            assert (EXPERIMENTS_ROOT / source).is_dir(), (experiment_id, source)
+        assert (EXPERIMENTS_ROOT / source).is_dir(), (experiment_id, source)
+
+
+def test_a_missing_source_is_refused_only_for_an_arm_not_yet_created() -> None:
+    """The negative path of the lifecycle above, both ways round."""
+    probe = {"experiment_id": "not_created_yet", "inherit_memory_from": "gone_source"}
+    assert ROUND_WITH_SOURCE.missing_sources(probe) == ["gone_source"]
+    created = next(arm for arm in (a for _r, a in ARMS) if already_created(arm))
+    assert ROUND_WITH_SOURCE.missing_sources({**probe, "experiment_id": created}) == []
 
 
 def test_a_retired_experiment_cannot_be_an_inheritance_source() -> None:

@@ -325,6 +325,20 @@ def archived_ids() -> set[str]:
     }
 
 
+def already_created(experiment_id: str) -> bool:
+    """Whether this experiment has been created at least once on this console.
+
+    Inheritance -- a parent artifact, another experiment's PRIOR and skills --
+    is copied once, while the console creates the experiment. After that the
+    copy is this experiment's own read-only tree and the source is free to be
+    retired and archived. So the experiment's own directory, live or archived,
+    is the evidence that whatever it inherited has already been taken, and its
+    sources no longer have to be anywhere.
+    """
+
+    return (EXPERIMENTS_ROOT / experiment_id).is_dir() or experiment_id in archived_ids()
+
+
 def normalize(params: dict[str, object]) -> dict[str, object]:
     """Run the console's create-time validation offline and return params.json.
 
@@ -427,12 +441,14 @@ class Round:
         # An arm may inherit a parent artifact or another experiment's memory,
         # and both are read out of the source's live directory at create time.
         # A retired id names a tree that only exists in the archive now, so it
-        # can never be a source; whether a non-retired source is still there is
-        # operator state and is answered in `validated`.
+        # cannot be a source for an arm still to be created; an arm that was
+        # already created took its copy while the source was live, and the
+        # source is allowed to have been retired since.
         retired_sources = sorted(
             {
                 source
-                for arm in self.arms.values()
+                for experiment_id, arm in self.arms.items()
+                if not already_created(experiment_id)
                 for key in INHERITANCE_KEYS
                 for source in (str(arm.get(key) or "").strip(),)
                 if source in RETIRED_IDS
@@ -546,13 +562,18 @@ class Round:
 
         The console reads the source's directory while it creates the
         experiment and discards the half-created tree when that fails, so a
-        source that has already been retired out of `experiments/` is a create
-        error worth catching offline. Deployment state, not a request-level
+        source that is not there is a create error worth catching offline --
+        but only for an arm that has still to be created. Once the arm exists
+        the copy has been taken and is its own, which is exactly how a round
+        retires the predecessors it inherited from: create the successors
+        first, archive the sources after. Deployment state, not a request-level
         rule: where `experiments/` does not exist at all -- a fresh checkout --
         there is nothing to judge and nothing is reported.
         """
 
         if not EXPERIMENTS_ROOT.is_dir():
+            return []
+        if already_created(str(merged.get("experiment_id") or "").strip()):
             return []
         return [
             source
