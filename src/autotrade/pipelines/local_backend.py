@@ -122,6 +122,7 @@ from .config import (
     EvaluationResult,
     FoldSessionRequest,
     FoldSessionResult,
+    FrozenArtifact,
     MetaSessionResult,
     SnapshotBundle,
     StepResult,
@@ -3536,19 +3537,26 @@ class LLMMetaLearner:
             paths.workspace,
             index_path=inputs / "skills_index.json",
         )
-        parent_id = str(facts.get("parent_artifact_id") or "")
-        if parent_id:
-            if Path(parent_id).name != parent_id or parent_id.startswith("."):
-                raise ValueError("parent_artifact_id must be one local path component")
-            parent_root = (self.artifact_store.frozen_root / parent_id).resolve(
-                strict=True
+        # The artifact record the Pipeline holds is the single source for where
+        # the parent lives: only a Fold's own freeze sits under ``frozen/``,
+        # while the console's inherited seed and a HITL step-node override live
+        # elsewhere in the experiment. Re-deriving the tree from the id would
+        # look for those two under ``frozen/`` and find nothing.
+        parent_artifact = facts.get("parent_artifact")
+        if parent_artifact is not None and not isinstance(
+            parent_artifact, FrozenArtifact
+        ):
+            raise TypeError("parent_artifact must be a FrozenArtifact")
+        if parent_artifact is not None:
+            parent_id = parent_artifact.artifact_id
+            parent = Path(parent_artifact.path).resolve(strict=True)
+            models = parent_artifact.model_path
+            parent_models = Path(models) if models is not None else None
+            parent_models = (
+                parent_models if parent_models and parent_models.is_dir() else None
             )
-            if not parent_root.is_relative_to(self.artifact_store.frozen_root):
-                raise ValueError("parent artifact escaped the configured store")
-            parent = (parent_root / "output").resolve(strict=True)
-            parent_models = parent_root / "models"
-            parent_models = parent_models if parent_models.is_dir() else None
         else:
+            parent_id = ""
             parent = self.baseline_strategy.parent
             parent_models = None
         # The parent is the Meta session's WORKING copy, not a read-only input:
@@ -3582,6 +3590,10 @@ class LLMMetaLearner:
                 "agent_trace_sidecars",
                 "skills_source_ref",
                 "host_visible_fold",
+                # The parent reaches meta_context.json only as the opaque
+                # strategy ref issued below, never as a raw id or host path.
+                "parent_artifact",
+                "parent_artifact_id",
             }
         }
         public["run_id"] = run_ref

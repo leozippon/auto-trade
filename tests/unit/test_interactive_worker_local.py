@@ -1145,18 +1145,24 @@ INHERITED_PRIOR = (
     "Closed: small-cap reversal (null percentile near 0.5). "
     "Next round: post-event drift against a matched control."
 )
+INHERITED_STRATEGY = (
+    "SOURCE_ARM = 'src'\n\n\ndef generate_orders(context):\n    return []\n"
+)
+INHERITED_ARTIFACT_ID = "strategy_epoch_001_fold_2025Q3"
 
 
-def test_llm_worker_starts_from_inherited_memory(tmp_path: Path, monkeypatch):
-    """``inherit_memory_from``: the first Meta reads the inherited PRIOR as the
-    previous generation and may keep it, the first Fold's system prompt
-    carries that PRIOR and its workspace mounts the inherited skills -- the
-    same view either session has after a Meta publication -- and the Fold,
-    having no frozen parent, anchors the lineage on its nomination."""
-    repo, experiment = _experiment(tmp_path, developer_mode="llm")
-    source = repo / "experiments" / "src"
+def _update_params(experiment: Path, values: dict[str, object]) -> None:
+    path = experiment / "hitl/params.json"
+    params = json.loads(path.read_text(encoding="utf-8"))
+    params.update(values)
+    path.write_text(json.dumps(params), encoding="utf-8")
+
+
+def _memory_source(repo: Path, source_id: str = "src") -> Path:
+    """A source experiment whose ledger published a PRIOR and a skills tree."""
+    source = repo / "experiments" / source_id
     ExperimentPriorStore(source).publish(INHERITED_PRIOR, generation_id="gen_1")
-    tree = tmp_path / "skills_src" / "skills"
+    tree = repo / "skills_src" / source_id / "skills"
     (tree / "closed-families").mkdir(parents=True)
     (tree / "closed-families" / "SKILL.md").write_text(
         "# Closed Families\n\nSmall-cap reversal is closed; do not re-test it.\n",
@@ -1166,7 +1172,7 @@ def test_llm_worker_starts_from_inherited_memory(tmp_path: Path, monkeypatch):
     ExperimentLedger(source / "ledgers" / "experiment_ledger.jsonl").append(
         {
             "record_type": "meta_learning",
-            "experiment_id": "src",
+            "experiment_id": source_id,
             "epoch_id": "epoch_001",
             "fold_id": "meta_001",
             "run_id": "run_m",
@@ -1178,11 +1184,57 @@ def test_llm_worker_starts_from_inherited_memory(tmp_path: Path, monkeypatch):
             "skills_published": True,
         }
     )
+    return source
+
+
+def _artifact_source(repo: Path, source_id: str = "src") -> Path:
+    """A source experiment whose latest Fold froze a strategy and its models."""
+    source = repo / "experiments" / source_id
+    frozen = source / "artifacts/strategy/frozen" / INHERITED_ARTIFACT_ID
+    (frozen / "output").mkdir(parents=True)
+    (frozen / "output" / "main.py").write_text(INHERITED_STRATEGY, encoding="utf-8")
+    (frozen / "models").mkdir()
+    (frozen / "models" / "params.json").write_text('{"alpha": 1}\n', encoding="utf-8")
+    ExperimentLedger(source / "ledgers" / "experiment_ledger.jsonl").append(
+        {
+            "record_type": "fold",
+            "experiment_id": source_id,
+            "epoch_id": "epoch_001",
+            "fold_id": "fold_2025Q3",
+            "run_id": "run_f",
+            "session_key": "epoch_001/fold_2025Q3",
+            "fold_status": "frozen",
+            "test_period": "20250701..20250930",
+            "frozen_strategy_artifact_id": INHERITED_ARTIFACT_ID,
+            "frozen_strategy_artifact_path": str(frozen / "output"),
+            "frozen_model_artifact_path": str(frozen / "models"),
+        }
+    )
+    return source
+
+
+def _inherit_artifact(repo: Path, experiment: Path, source_id: str) -> dict:
+    """Seed the child through the console's own copier, the way create does."""
+    manager = ExperimentManager(repo, repo / "experiments")
+    payload = manager._import_inherited_artifact(experiment, source_id)
+    _update_params(
+        experiment, {"inherit_from": source_id, "_inherited_artifact": payload}
+    )
+    return payload
+
+
+def test_llm_worker_starts_from_inherited_memory(tmp_path: Path, monkeypatch):
+    """``inherit_memory_from``: the first Meta reads the inherited PRIOR as the
+    previous generation and may keep it, the first Fold's system prompt
+    carries that PRIOR and its workspace mounts the inherited skills -- the
+    same view either session has after a Meta publication -- and the Fold,
+    having no frozen parent, anchors the lineage on its nomination."""
+    repo, experiment = _experiment(tmp_path, developer_mode="llm")
+    source = _memory_source(repo)
     payload = import_inherited_memory(experiment, source, source_id="src")
-    params_path = experiment / "hitl/params.json"
-    params = json.loads(params_path.read_text(encoding="utf-8"))
-    params.update({"inherit_memory_from": "src", "_inherited_memory": payload})
-    params_path.write_text(json.dumps(params), encoding="utf-8")
+    _update_params(
+        experiment, {"inherit_memory_from": "src", "_inherited_memory": payload}
+    )
     monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
     options = load_worker_options(experiment, repo_root=repo)
     llm = ScriptedLLM(
@@ -1224,6 +1276,130 @@ def test_llm_worker_starts_from_inherited_memory(tmp_path: Path, monkeypatch):
     assert manifest["skills"]["count"] == 1
     collected = Path(fold["run_manifest_ref"]).parent / "workspace" / "skills"
     assert (collected / "closed-families" / "SKILL.md").is_file()
+
+
+def _inherited_artifact_llm() -> ScriptedLLM:
+    """One Meta that only writes a PRIOR, then one Fold that edits the parent."""
+    return ScriptedLLM(
+        [
+            *_agent_then(
+                ToolCall(
+                    "prior",
+                    "write_file",
+                    {"path": "PRIOR.md", "content": "prefer small daily changes"},
+                ),
+                ToolCall("finish_meta", "finish_meta", {}),
+            ),
+            *_agent_then(
+                ToolCall("check", "modification_check", {}),
+                ToolCall("valid", "daily_backtest", {}),
+                ToolCall("finish_fold", "finish_fold", {}),
+                roles=_FOLD_DELEGATION_ROLES,
+                implement={
+                    "path": "output/main.py",
+                    # A real logic change: finish_fold refuses a candidate that
+                    # differs from the parent only in comments.
+                    "content": INHERITED_STRATEGY.replace("'src'", "'child'"),
+                },
+            ),
+        ]
+    )
+
+
+def test_llm_worker_starts_from_the_inherited_artifact(tmp_path: Path, monkeypatch):
+    """``inherit_from``: the seed the console copied into ``_inherited/`` is the
+    parent of BOTH sessions that precede this experiment's first freeze.
+
+    The Epoch-start Meta opens its working copy on it and the first Fold's
+    host parent control replays it on that Fold's Validation window -- neither
+    may look for it under this experiment's own ``frozen/``, where a seed
+    copied from another experiment never lives. The seed itself stays the
+    read-only snapshot it was created as."""
+    repo, experiment = _experiment(tmp_path, developer_mode="llm")
+    _artifact_source(repo)
+    payload = _inherit_artifact(repo, experiment, "src")
+    seed = Path(str(payload["path"]))
+    monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
+    options = load_worker_options(experiment, repo_root=repo)
+    result = run_local_interactive_worker(
+        options,
+        llm=_inherited_artifact_llm(),
+        command_runner_factory=lambda _workspace: _NoShellRunner(),
+    )
+    assert result["state"] == "completed"
+    meta, fold, _heldout = ExperimentLedger(options.rolling.ledger_path).read()
+
+    # The Meta session took the inherited seed as its working copy instead of
+    # the blank template, and its host manifest names the inherited artifact.
+    meta_run = experiment / "artifacts" / str(meta["run_id"])
+    assert (meta_run / "workspace/output/main.py").read_text(
+        encoding="utf-8"
+    ) == INHERITED_STRATEGY
+    meta_manifest = json.loads(
+        (meta_run / "host_run_manifest.json").read_text(encoding="utf-8")
+    )
+    assert meta_manifest["parent_strategy_artifact_id"] == payload["artifact_id"]
+    assert meta_manifest["is_initial_artifact"] is False
+    assert meta_manifest["template_ref"] is None
+    # The Meta only published a PRIOR, so the seed is still the Fold's parent.
+    assert meta["status"] == "prior_only_kept_parent"
+
+    # The Fold's host parent control replayed the seed on this Fold's window,
+    # so the first Fold already has walk-forward evidence for its parent and
+    # does not have to anchor the lineage on its own nomination.
+    control = fold["parent_control"]
+    assert control["status"] == "ok"
+    assert control["parent_strategy_artifact_id"] == payload["artifact_id"]
+    assert Path(control["validation_result_ref"]).is_file()
+    assert fold["parent_strategy_artifact_id"] == payload["artifact_id"]
+    assert "baseline_anchor" not in fold
+    assert fold["fold_status"] == "frozen"
+    assert fold["frozen_strategy_artifact_id"] != payload["artifact_id"]
+
+    # A snapshot the source experiment can no longer influence: still whole,
+    # still read-only, still outside the store the run prunes.
+    assert (seed / "main.py").read_text(encoding="utf-8") == INHERITED_STRATEGY
+    assert (seed / "main.py").stat().st_mode & 0o222 == 0
+    assert seed.parent.name == "_inherited"
+    assert not (experiment / "artifacts/strategy/frozen" / seed.name).exists()
+
+
+def test_llm_worker_inherits_an_artifact_and_a_memory_together(
+    tmp_path: Path, monkeypatch
+):
+    """``inherit_from`` and ``inherit_memory_from`` are independent seeds and a
+    console create may set both: the run then starts from the source's frozen
+    artifact AND from its PRIOR and skills."""
+    repo, experiment = _experiment(tmp_path, developer_mode="llm")
+    source = _memory_source(repo)
+    _artifact_source(repo)
+    memory = import_inherited_memory(experiment, source, source_id="src")
+    _update_params(
+        experiment, {"inherit_memory_from": "src", "_inherited_memory": memory}
+    )
+    payload = _inherit_artifact(repo, experiment, "src")
+    monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
+    options = load_worker_options(experiment, repo_root=repo)
+    result = run_local_interactive_worker(
+        options,
+        llm=_inherited_artifact_llm(),
+        command_runner_factory=lambda _workspace: _NoShellRunner(),
+    )
+    assert result["state"] == "completed"
+    meta, fold, _heldout = ExperimentLedger(options.rolling.ledger_path).read()
+    # Memory: the inherited PRIOR was the Meta's previous generation, and the
+    # Fold mounted the inherited skills.
+    assert meta["prior"] == "prefer small daily changes"
+    assert meta["prior_published"] is True
+    assert fold["skills_ref"] == memory["skills_ref"]
+    # Artifact: the same run's parent chain starts at the inherited seed.
+    meta_run = experiment / "artifacts" / str(meta["run_id"])
+    assert (meta_run / "workspace/output/main.py").read_text(
+        encoding="utf-8"
+    ) == INHERITED_STRATEGY
+    assert fold["parent_control"]["parent_strategy_artifact_id"] == payload[
+        "artifact_id"
+    ]
 
 
 def test_a_voluntary_early_finish_must_justify_itself_and_reaches_the_ledger(

@@ -31,6 +31,7 @@ from autotrade.pipelines.agent_views import (
     agent_visible_ledger_record,
     compact_fold_history,
 )
+from autotrade.pipelines.config import FrozenArtifact
 from autotrade.pipelines.ledger import ExperimentLedger
 from autotrade.pipelines.local_backend import LLMMetaLearner
 from autotrade.pipelines.worker import load_worker_options, run_local_interactive_worker
@@ -542,6 +543,15 @@ def test_meta_context_parent_artifact_id_is_an_opaque_strategy_ref(tmp_path: Pat
             "experiment_id": "exp",
             "epoch_id": "epoch_002",
             "meta_learning_id": "epoch_002_after_fold",
+            "parent_artifact": FrozenArtifact(
+                artifact_id=parent_id,
+                path=parent_output,
+                model_path=None,
+                source_run_id="run_001",
+                source_fold_id="fold_2025Q2",
+                source_step_id="step_001",
+            ),
+            # A raw id in the facts never reaches the Agent-visible context.
             "parent_artifact_id": parent_id,
         }
     )

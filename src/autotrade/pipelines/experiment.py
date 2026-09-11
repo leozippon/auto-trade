@@ -1205,7 +1205,11 @@ class RollingExperimentPipeline:
                         "host_visible_fold": visible_fold.to_record(),
                         "snapshot_id": meta_snapshot.snapshot_id,
                         "data_summary_ref": meta_snapshot.data_summary_ref,
-                        "parent_artifact_id": parent.artifact_id if parent else None,
+                        # Host-only, like host_visible_fold: the whole artifact
+                        # record, so the session reads the parent's own trees
+                        # instead of guessing them from its id. The Meta learner
+                        # publishes only the opaque strategy ref of its id.
+                        "parent_artifact": parent,
                         "previous_prior": previous_prior,
                         # Internal host source; LLMMetaLearner removes it before
                         # writing Agent-visible meta_context or manifests.
