@@ -5671,6 +5671,113 @@ class HitlControlActionTest(unittest.TestCase):
         assert_no_frozen_artifact_mutation(remaining)
         self.assertTrue(shared_path.is_dir())
 
+    def _install_inherited_seed(
+        self, artifact_id: str = "strategy_inherited_src"
+    ) -> Path:
+        """The read-only copy the console makes at creation for ``inherit_from``."""
+        from autotrade.environment.artifacts import chmod_tree
+
+        seed = self.directory / "artifacts/strategy/_inherited" / artifact_id
+        seed.mkdir(parents=True)
+        (seed / "main.py").write_text(
+            "def generate_orders(context):\n    return []\n", encoding="utf-8"
+        )
+        chmod_tree(seed, file_mode=0o444, dir_mode=0o555)
+        write_json_atomic(
+            self.directory / "hitl/params.json",
+            {
+                "experiment_id": "exp_ctl",
+                "inherit_from": "src",
+                "_inherited_artifact": {
+                    "artifact_id": artifact_id,
+                    "path": str(seed),
+                    "model_path": None,
+                    "revision_id": "revision_src",
+                    "source_fold_id": "fold_2021Q4",
+                },
+            },
+        )
+        return seed
+
+    def _archived_names(self) -> set[str]:
+        return {
+            path.name
+            for archive in (self.directory / "artifacts/strategy/_archive").glob(
+                "rollback_*"
+            )
+            for path in archive.iterdir()
+        }
+
+    def test_rollback_keeps_the_inherited_seed_a_withdrawn_fold_kept(self) -> None:
+        """Folds that never beat their inherited parent record the seed's own
+        ``_inherited/`` path, so withdrawing one hands that path to the
+        archiver. Matching kept records by ``frozen/<id>`` alone never matches
+        the seed back, and moving it away leaves the resumed worker with no
+        parent at all."""
+        seed = self._install_inherited_seed()
+        ledger = ExperimentLedger(self.directory / "ledgers/experiment_ledger.jsonl")
+        kept = ledger.read()[0] | {
+            "fold_status": "no_update",
+            "frozen_strategy_artifact_id": "strategy_inherited_src",
+            "frozen_strategy_artifact_path": str(seed),
+        }
+        ledger.rewrite([kept])
+        ledger.append(
+            {
+                "record_type": "fold",
+                "experiment_id": "exp_ctl",
+                "epoch_id": "epoch_001",
+                "fold_id": "fold_2022Q2",
+                "run_id": "run_002",
+                "session_key": "epoch_001/fold_2022Q2",
+                "fold_status": "no_update",
+                "parent_strategy_artifact_id": "strategy_inherited_src",
+                "frozen_strategy_artifact_id": "strategy_inherited_src",
+                "frozen_strategy_artifact_path": str(seed),
+            }
+        )
+
+        response = self._post(
+            action="rollback_fold", session_key="epoch_001/fold_2022Q1"
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(
+            [record["fold_id"] for record in ledger.read()], ["fold_2022Q1"]
+        )
+        self.assertTrue((seed / "main.py").is_file())
+        self.assertEqual((seed / "main.py").stat().st_mode & 0o222, 0)
+        self.assertNotIn(seed.name, self._archived_names())
+
+    def test_rollback_keeps_the_inherited_seed_no_record_names_any_more(self) -> None:
+        """The seed is creation state, not rollback output. Unlocking an
+        integrity-flagged Fold that kept it withdraws the only record that
+        named it; archiving it there would leave the experiment with neither a
+        ledger artifact nor the seed its resume falls back to."""
+        seed = self._install_inherited_seed()
+        ledger = ExperimentLedger(self.directory / "ledgers/experiment_ledger.jsonl")
+        ledger.rewrite(
+            [
+                ledger.read()[0]
+                | {
+                    "fold_status": "no_update",
+                    "frozen_strategy_artifact_id": "strategy_inherited_src",
+                    "frozen_strategy_artifact_path": str(seed),
+                    "state_changed_during_test": True,
+                }
+            ]
+        )
+
+        response = self._post(
+            action="rollback_fold", session_key="epoch_001/fold_2022Q1"
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(ledger.read(), [])
+        self.assertTrue((seed / "main.py").is_file())
+        self.assertEqual((seed / "main.py").stat().st_mode & 0o222, 0)
+        self.assertNotIn(seed.name, self._archived_names())
+
     def test_set_gpu_count_round_trips_and_refuses_everything_else(self) -> None:
         """The console's per-session GPU allocation, and its four refusals.
 

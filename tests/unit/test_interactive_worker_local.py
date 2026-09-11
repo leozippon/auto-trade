@@ -1410,6 +1410,73 @@ def test_llm_worker_starts_from_the_inherited_artifact(tmp_path: Path, monkeypat
     assert not (experiment / "artifacts/strategy/frozen" / seed.name).exists()
 
 
+def test_a_kept_inherited_seed_survives_a_restart_and_the_resume_continues(
+    tmp_path: Path, monkeypatch
+):
+    """An arm that inherits a seed and never beats it must still be resumable.
+
+    Every Fold here abstains, so the seed stays the parent and each fold record
+    names its ``_inherited/`` tree. The console restarts the worker at a session
+    boundary; the resume rebuilds the parent from that record. Deriving
+    ``frozen/<id>`` from the recorded id instead looked for the seed in the
+    store of this experiment's own freezes and killed the restarted worker
+    before it could run a single remaining session.
+    """
+    repo, experiment = _experiment(tmp_path)
+    _update_params(experiment, {"test_stage": False})
+    _artifact_source(repo)
+    payload = _inherit_artifact(repo, experiment, "src")
+    seed = Path(str(payload["path"]))
+    control_path = experiment / "hitl/control.json"
+    ran: list[str] = []
+
+    class Abstaining:
+        """Abstains on every Fold; the console asks for a restart during the
+        first one, exactly as the arm that failed was restarted."""
+
+        def __init__(self, **_options: object) -> None:
+            pass
+
+        def __call__(self, request):
+            ran.append(request.fold.fold_id)
+            if len(ran) == 1:
+                pending = read_control(control_path)
+                pending.restart_pending = True
+                write_control(control_path, pending)
+            return FoldSessionResult(
+                conversation_id=f"conv_{request.fold.fold_id}",
+                steps=(),
+                no_edge_reason="nothing beat the inherited parent",
+            )
+
+    monkeypatch.setattr(worker, "DeterministicBaselineDeveloper", Abstaining)
+    options = load_worker_options(experiment, repo_root=repo)
+
+    interrupted = run_local_interactive_worker(options)
+
+    assert interrupted["status"] == "restart"
+    assert ran == ["fold_2025Q4"]
+    kept = ExperimentLedger(options.rolling.ledger_path).read()[0]
+    assert kept["fold_status"] == "no_update"
+    assert kept["frozen_strategy_artifact_id"] == payload["artifact_id"]
+    assert Path(str(kept["frozen_strategy_artifact_path"])) == seed
+
+    resumed = run_local_interactive_worker(options)
+
+    assert resumed["state"] == "completed"
+    # The finished Fold is not re-run, the remaining one is, and the Held-out
+    # scores the seed the ledger still names as the graduate.
+    assert ran == ["fold_2025Q4", "fold_2026Q1"]
+    records = ExperimentLedger(options.rolling.ledger_path).read()
+    assert [record["record_type"] for record in records] == ["fold", "fold", "heldout"]
+    assert [record["fold_status"] for record in records[:2]] == ["no_update"] * 2
+    assert records[2]["strategy_artifact_id"] == payload["artifact_id"]
+    # The seed is still the console's read-only snapshot, and resolving it
+    # never copied it into this experiment's own store.
+    assert (seed / "main.py").stat().st_mode & 0o222 == 0
+    assert not (experiment / "artifacts/strategy/frozen" / seed.name).exists()
+
+
 def test_llm_worker_inherits_an_artifact_and_a_memory_together(
     tmp_path: Path, monkeypatch
 ):

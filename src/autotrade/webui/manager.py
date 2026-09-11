@@ -1222,7 +1222,11 @@ class ExperimentManager:
         kept_records: list[dict[str, object]],
         archive_root: Path,
     ) -> None:
-        """Move dropped frozen trees that kept records do not still name."""
+        """Move dropped frozen trees nothing still needs.
+
+        Spared: a tree a kept record still names, and the experiment's
+        inherited seed, which the console installed at creation and a resume
+        falls back to."""
         artifact_root = (directory / "artifacts").resolve()
         kept_ids = _ledger_frozen_ids(kept_records)
         kept_dirs = []
@@ -1230,6 +1234,20 @@ class ExperimentManager:
             frozen_dir = artifact_root / "strategy" / "frozen" / artifact_id
             if frozen_dir.is_dir():
                 kept_dirs.append(frozen_dir.resolve())
+        # A Fold that kept its parent records the seed's own ``_inherited/``
+        # path, so the seed is among the dropped records' trees -- and no
+        # ``frozen/<id>`` ever matches it back. It is creation state rather
+        # than rollback output: it stays whether or not a record still names
+        # it, because the resume falls back to it once the ledger has no
+        # artifact of this experiment's own left.
+        inherited = _read_json(directory / "hitl/params.json").get(
+            "_inherited_artifact"
+        )
+        if isinstance(inherited, dict):
+            for key in ("path", "model_path"):
+                raw = inherited.get(key)
+                if raw and Path(str(raw)).is_dir():
+                    kept_dirs.append(Path(str(raw)).resolve())
 
         def _referenced(path: Path) -> bool:
             resolved = path.resolve()

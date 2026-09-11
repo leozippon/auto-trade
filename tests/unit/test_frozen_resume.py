@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from autotrade.environment.artifacts import FilesystemArtifactStore
+from autotrade.environment.artifacts import FilesystemArtifactStore, chmod_tree
 from autotrade.pipelines.experiment import _keep_frozen_artifact_ids
 from autotrade.pipelines.ledger import (
     ExperimentLedger,
@@ -195,7 +195,7 @@ def test_latest_artifact_walks_back_from_baseline_missing(tmp_path: Path) -> Non
         status="baseline_missing",
     )
 
-    parent = _latest_artifact(ledger, store)
+    parent = _latest_artifact(ledger, store, tmp_path)
 
     assert parent is not None
     assert parent.artifact_id == previous.artifact_id
@@ -239,7 +239,7 @@ def test_latest_artifact_uses_meta_regularized_parent(tmp_path: Path) -> None:
         fold_id="epoch_001_after_fold_001",
     )
 
-    parent = _latest_artifact(ledger, store)
+    parent = _latest_artifact(ledger, store, tmp_path)
 
     assert parent is not None
     assert parent.artifact_id == meta.artifact_id
@@ -252,6 +252,103 @@ def test_latest_artifact_uses_meta_regularized_parent(tmp_path: Path) -> None:
     assert parent.source_step_id == meta.source_step_id
     assert parent.revision_id == meta.revision_id
     assert parent.requires_validation is True
+
+
+def _install_inherited_seed(
+    tmp_path: Path, store: FilesystemArtifactStore, artifact_id: str
+) -> Path:
+    """The console's creation-time copy: a read-only tree outside ``frozen/``."""
+    seed = store.root / "_inherited" / artifact_id
+    seed.mkdir(parents=True)
+    (seed / "main.py").write_text(MAIN, encoding="utf-8")
+    chmod_tree(seed, file_mode=0o444, dir_mode=0o555)
+    (tmp_path / "hitl").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "hitl/params.json").write_text(
+        json.dumps(
+            {
+                "_inherited_artifact": {
+                    "artifact_id": artifact_id,
+                    "path": str(seed),
+                    "model_path": None,
+                    "revision_id": "revision_src",
+                    "source_fold_id": "fold_2025Q3",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    return seed
+
+
+def test_latest_artifact_takes_a_kept_parent_from_the_recorded_path(
+    tmp_path: Path,
+) -> None:
+    """A Fold that kept its parent records the inherited seed's own path.
+
+    The seed lives in ``_inherited/`` because ``frozen/`` holds only what this
+    experiment froze itself, so resuming such an arm may not re-derive
+    ``frozen/<id>`` from the recorded id: the tree is not there, and the run
+    died at start-up instead of continuing on its parent.
+    """
+    store = FilesystemArtifactStore(tmp_path / "store")
+    ledger = ExperimentLedger(tmp_path / "ledger.jsonl")
+    seed = _install_inherited_seed(tmp_path, store, "strategy_inherited_src")
+    _append_fold(
+        ledger,
+        fold_id="fold_001",
+        artifact_id="strategy_inherited_src",
+        path=str(seed),
+        run_id="run_fold_001",
+        status="no_update",
+    )
+
+    parent = _latest_artifact(ledger, store, tmp_path)
+
+    assert parent is not None
+    assert parent.artifact_id == "strategy_inherited_src"
+    assert parent.path == seed
+    assert parent.model_path is None
+    assert parent.requires_validation is False
+    # Resolving the seed must not mint a copy of it in this experiment's store.
+    assert not any(store.frozen_root.iterdir())
+
+
+def test_latest_artifact_refuses_a_recorded_path_that_is_not_the_seed(
+    tmp_path: Path,
+) -> None:
+    """Neither validator may be skipped: a path outside ``frozen/`` is accepted
+    only as the seed this experiment actually inherited, and the seed is
+    accepted only while it is still the read-only snapshot the console made."""
+    store = FilesystemArtifactStore(tmp_path / "store")
+    seed = _install_inherited_seed(tmp_path, store, "strategy_inherited_src")
+
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "main.py").write_text(MAIN, encoding="utf-8")
+    impostor = ExperimentLedger(tmp_path / "impostor.jsonl")
+    _append_fold(
+        impostor,
+        fold_id="fold_001",
+        artifact_id="strategy_inherited_src",
+        path=str(elsewhere),
+        run_id="run_fold_001",
+        status="no_update",
+    )
+    with pytest.raises(RuntimeError, match="nor its inherited seed"):
+        _latest_artifact(impostor, store, tmp_path)
+
+    ledger = ExperimentLedger(tmp_path / "ledger.jsonl")
+    _append_fold(
+        ledger,
+        fold_id="fold_001",
+        artifact_id="strategy_inherited_src",
+        path=str(seed),
+        run_id="run_fold_001",
+        status="no_update",
+    )
+    (seed / "main.py").chmod(0o644)
+    with pytest.raises(RuntimeError, match="ledger artifact failed validation"):
+        _latest_artifact(ledger, store, tmp_path)
 
 
 def test_latest_artifact_refuses_a_flagged_fold(tmp_path: Path) -> None:
@@ -278,7 +375,7 @@ def test_latest_artifact_refuses_a_flagged_fold(tmp_path: Path) -> None:
     assert set(latest) == {("epoch_001", "fold_001")}
     assert latest[("epoch_001", "fold_001")]["run_id"] == "run_fold_001"
     with pytest.raises(FrozenArtifactMutated):
-        _latest_artifact(ledger, store)
+        _latest_artifact(ledger, store, tmp_path)
 
 
 def test_latest_heldout_records_skip_flagged_and_parent_selection_refuses(
@@ -312,7 +409,7 @@ def test_latest_heldout_records_skip_flagged_and_parent_selection_refuses(
     assert latest[0]["run_id"] == "run_heldout_ok"
     assert "state_changed_during_test" not in latest[0]
     with pytest.raises(FrozenArtifactMutated):
-        _latest_artifact(ledger, store)
+        _latest_artifact(ledger, store, tmp_path)
 
 
 def _console_experiment(

@@ -1177,7 +1177,7 @@ def run_local_interactive_worker(
     if (
         _development_is_exhausted(hitl, ledger)
         and not _pending_rerun(hitl, ledger)
-        and _latest_artifact(ledger, store) is None
+        and _latest_artifact(ledger, store, options.experiment_dir) is None
         and _load_inherited_parent(options.experiment_dir) is None
     ):
         _fail_without_frozen_artifact(hitl, ledger)
@@ -1232,7 +1232,7 @@ def run_local_interactive_worker(
         inherited=memory.skills if memory else None,
     )
     state = {
-        "parent": _latest_artifact(ledger, store)
+        "parent": _latest_artifact(ledger, store, options.experiment_dir)
         or _load_inherited_parent(options.experiment_dir),
         "prior": latest_prior_text(ledger.read("meta_learning"))
         or (memory.prior_text if memory else ""),
@@ -1288,7 +1288,7 @@ def run_local_interactive_worker(
     result = interactive.run()
     if result["status"] != "complete":
         return result
-    final = state["parent"] or _latest_artifact(ledger, store)
+    final = state["parent"] or _latest_artifact(ledger, store, options.experiment_dir)
     if final is None:
         _fail_without_frozen_artifact(hitl, ledger)
     final_status = StatusReporter(hitl / "status.json")
@@ -1420,7 +1420,7 @@ def _run_deployment_adjustment(
     terminal status names the Paper candidate.
     """
     hitl = options.experiment_dir / "hitl"
-    graduated = _latest_artifact(ledger, store)
+    graduated = _latest_artifact(ledger, store, options.experiment_dir)
     if graduated is None:
         raise RuntimeError("the deployment adjustment needs the graduated artifact")
     scored = {
@@ -1552,9 +1552,58 @@ def _heldout_epoch_id(ledger: ExperimentLedger, configured_epochs: int) -> str:
     return max(epochs) if epochs else epoch_ids(configured_epochs)[-1]
 
 
+def _artifact_from_record(
+    artifact_id: str,
+    recorded_path: str,
+    record: Mapping[str, object],
+    *,
+    store: FilesystemArtifactStore,
+    experiment_dir: Path,
+) -> FrozenArtifact:
+    """Rebuild the artifact a ledger record names, from the path it recorded.
+
+    ``frozen/`` holds only what this experiment froze itself, so a Fold that
+    kept its parent records the console-installed seed's own ``_inherited/``
+    tree (docs/pipeline-design.md §3.1) and deriving ``frozen/<id>`` from the
+    id would look for that seed where it never lives. The recorded path decides
+    which tree is loaded; each tree keeps the validator that owns it -- the
+    store's manifest and immutability check for this experiment's own freezes,
+    the seed's read-only snapshot check for the inherited one.
+    """
+    if recorded_path and not Path(recorded_path).resolve().is_relative_to(
+        store.frozen_root.resolve()
+    ):
+        inherited = _load_inherited_parent(experiment_dir)
+        if (
+            inherited is None
+            or inherited.artifact_id != artifact_id
+            or inherited.path.resolve() != Path(recorded_path).resolve()
+        ):
+            raise RuntimeError(
+                "the recorded path is neither this experiment's own frozen "
+                f"artifact nor its inherited seed: {recorded_path}"
+            )
+        return inherited
+    frozen = store.frozen(
+        artifact_id,
+        expected_path=recorded_path or None,
+        experiment_id=str(record.get("experiment_id") or ""),
+    )
+    return FrozenArtifact(
+        artifact_id,
+        Path(frozen.path),
+        Path(frozen.model_path) if frozen.model_path is not None else None,
+        str(frozen.source_run_id),
+        str(frozen.source_fold_id),
+        str(frozen.source_step_id),
+        str(frozen.revision_id),
+    )
+
+
 def _latest_artifact(
     ledger: ExperimentLedger,
     store: FilesystemArtifactStore,
+    experiment_dir: Path,
 ) -> FrozenArtifact | None:
     records = ledger.read()
     assert_no_frozen_artifact_mutation(records)
@@ -1587,25 +1636,18 @@ def _latest_artifact(
     if not current_id or current_record is None:
         return None
     try:
-        frozen = store.frozen(
+        artifact = _artifact_from_record(
             current_id,
-            expected_path=current_path or None,
-            experiment_id=str(current_record.get("experiment_id") or ""),
+            current_path,
+            current_record,
+            store=store,
+            experiment_dir=experiment_dir,
         )
     except Exception as exc:
         raise RuntimeError(
             f"ledger artifact failed validation: {current_id}: {exc}"
         ) from exc
-    return FrozenArtifact(
-        current_id,
-        Path(frozen.path),
-        Path(frozen.model_path) if frozen.model_path is not None else None,
-        str(frozen.source_run_id),
-        str(frozen.source_fold_id),
-        str(frozen.source_step_id),
-        str(frozen.revision_id),
-        requires_validation=requires_validation,
-    )
+    return replace(artifact, requires_validation=requires_validation)
 
 
 def _terminal_status(
