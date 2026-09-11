@@ -6,12 +6,14 @@
 
 ## 步骤
 
-1. **数据合同核对。** 读本轮 `data_summary.json`、`unit_reference.json` 与 events/daily/universe 的 schema：确认 `margin_secs` **和** `margin_detail` 都在本轮 `events.datasets` 里；确认两者的 `available_at_rule` 分别是 `official_preopen_09_from:trade_date` 与 `official_next_day_09_from:trade_date`；确认 `margin_secs` 没有数值列、`margin_detail` 的 `rzye` 是元而 `rqyl` 是股；确认输入窗里两张表的分区天数与日历交易日数一致。`margin_secs` 不在数据集列表里时，家族 1、2、5 判「不可测」，只剩拥挤度方向；两张都缺则整臂 `finish_fold(outcome="no_edge")` 并说明。
+1. **数据合同核对（含覆盖实测）。** 读本轮 `data_summary.json`、`unit_reference.json` 与 events/daily/universe 的 schema：确认 `margin_secs` **和** `margin_detail` 都在本轮 `events.datasets` 里；确认两者的 `available_at_rule` 分别是 `official_preopen_09_from:trade_date` 与 `official_next_day_09_from:trade_date`；确认 `margin_secs` 没有数值列、`margin_detail` 的 `rzye` 是元而 `rqyl` 是股。
+
+   然后在本折决策视图上实测两张表的 `trade_date` 最小值、最大值与不同交易日数，与 `pit-field-map.md`「两融三表的覆盖」对表。**预期值**：24 个月输入窗里两张表各有 484–486 个交易日；名册最新到锚点当天、明细最新到锚点前一个交易日；最早那一折（验证 2022Q1–2022Q4、锚点 2021-12-31）的明细少 1 个交易日。**普查窗一律取实测窗**，不要拿明细在视图里的第一天当成表的起点——那是 24 个月窗口的边界，逐折漂移。实测与预期值不符时，把两组数字一起写进笔记并按实测继续，不要静默改口径。`margin_secs` 不在数据集列表里时，家族 1、2、5 判「不可测」，只剩拥挤度方向；两张都缺则整臂 `finish_fold(outcome="no_edge")` 并说明。
 
 2. **第 0 轮离线普查（不占回测预算，只用输入窗，绝不碰验证区间）。** 用自己的脚本经 `shell` 在 `/mnt/snapshot` 决策视图上一次跑完，数字写进工作区笔记：
 
    *名册侧*
-   - 逐日名册规模，**按 `exchange` 分开**；标出任一交易所切片单日变动超过 ±3% 的日子（本地在 2022–2025 有 6 个：20221024 与 2024-04/05 的五天）。
+   - 逐日名册规模，**按 `exchange` 分开**；标出任一交易所切片单日变动超过 ±3% 的日子（本地在 2022–2025 有 6 个：20221024 与 2024-04/05 的五天）。窗口伸进 2026 年时先按「两融三表的覆盖」列的缺日清单核对分区是否齐全：名册差分的两个端点必须是相邻两个**存在**的分区，跨缺日会把几天的累积变化读成一次事件。
    - 逐日 `raw_add` / `raw_drop`，并按 `universe` 成员资格拆成「A 股非北交所 / `.BJ` / 非股票代码」三类。
    - 依次施加 F1（宇宙）、F2（60 日往返）、F3（上市满 120 天）、F4（`margin_detail` 三日确认）与 2024-04/05 剔除，报每一步之后剩下多少事件、多少不同事件日。
    - 最终队列的逐季事件数、逐季事件日数、批量腿（单日 ≥ 50）与常规腿的拆分。
@@ -20,7 +22,7 @@
 
    *拥挤度侧*
    - `margin_detail` 逐月行数、A 股非北交所名字数、`rzye` 的零值率与分位、`rqyl > 0` 的月度占比曲线。
-   - `chg20 = rzye(T-2)/rzye(T-22) − 1` 的覆盖率（名册内可交易全集里有多少只能算出有限值）与逐月分布。
+   - `chg20 = rzye(T-2)/rzye(T-22) − 1` 的覆盖率（名册内可交易全集里有多少只能算出有限值）与逐月分布。分母从输入窗第 23 个交易日起算：最前面 22 个交易日取不到 `rzye(T-22)`，那是窗口边界不是数据缺口，把它们计进分母会把覆盖率压低约 4.5 个百分点。
    - 5 / 10 / 20 日持有的规模中性与四项全控 rank IC、逐季符号一致性、**低融资增速五分位多头端相对截面均值的超额**（这是唯一可交易的读数）。
    - 同样的 IC 在「名册内」与「全 ADV 宇宙」两个候选池上各算一遍。
 

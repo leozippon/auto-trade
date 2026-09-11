@@ -23,7 +23,7 @@
 - **融资融券标的 `margin_secs`**：按交易日拉取，字段 `trade_date`/`ts_code`/`name`/`exchange`，无数值列。本地 `data/raw/margin_secs/trade_date=YYYYMMDD.parquet`，2020-01-02 起。
 - **融资融券明细 `margin_detail`**：按交易日拉取，字段 `rzye`/`rqye`/`rzmre`/`rqyl`/`rzche`/`rqchl`/`rqmcl`/`rzrqye`。本地 `data/raw/margin_detail/`，2020-01-02 起。
 - **融资融券汇总 `margin`**：按交易日拉取，每日 3 行（`exchange_id` ∈ {SSE, SZSE, BSE}）。本包只用于单位与口径核对。
-- 三张表的分区完整性由下载器与审计共同保证：每个交易日分区必须同时包含上交所与深交所，2023-02-13 之后还必须包含北交所；汇总表与标的表按交易所字段识别来源，明细表按证券代码后缀识别（数据文档 §2.2）。
+- 三张表的分区完整性由下载器与审计共同保证：每个交易日分区必须同时包含上交所与深交所，2023-02-13 之后还必须包含北交所；汇总表与标的表按交易所字段识别来源，明细表按证券代码后缀识别（数据文档 §2.2）。实测到的分区、起止与缺日见 `pit-field-map.md` 的「两融三表的覆盖」。
 
 ## 本仓库
 
@@ -51,7 +51,7 @@
 | `p3_block.py` | 20240401 剔除 251 只与 20240423 新增 248 只重合 226 只；全样本「60 个交易日内往返」计数（2,705 次新增里 745 次、1,479 次剔除里 774 次）；逐月再纳入占比（2024-04 81.5%、2024-05 99.4%） |
 | `p4_events.py` | 按 `stock_basic` 拆出 A 股非北交所 1,375 次新增 / 610 次剔除（另有 552 次 `.BJ` 新增与 778 次非股票代码新增）；剔除 2024-04/05 与 60 日往返后的 948 次新增 / 102 次剔除与逐季表 |
 | `p5_more.py` | 2025-10 的 369 次新增按类别拆分（`.BJ` 248 / 非股票 109 / 股票 12）；2023-02-13 的 169 次全为 `.BJ`；2022-10-24 的 400 次里 399 次是股票；20/40/60 日持有下的并发持仓与空仓日 |
-| `p6_detail.py` | `margin_detail` 992 个分区、无重复键、`available_at_rule` 单一；A 股非北交所每日约 3,101 只；`rzye` 零值率与分位；`rqyl > 0` 的月度占比曲线 |
+| `p6_detail.py` | `margin_detail` 无重复键、`available_at_rule` 单一；`rzye` 零值率与分位；`rqyl > 0` 的月度占比曲线。**这个脚本从 2021-12-01 起扫，因此它报的 992 个分区与「每日 3,101 只」是那一段的数字，不是全表**——覆盖以下面一组探针为准 |
 | `p7_cross.py` | 纳入事件的 `margin_detail` 交叉验证：真实纳入里 4.7% 事件前三日已有明细行、98.2% 在 T..T+5 出现且 `rzye > 0`；2024-04/05 的假新增里 50.8% 事件前三日仍有明细行；`rqyl` 5 日转正比例逐年 52.4%/28.0%/10.6%/0.7% |
 | `p8_gaps.py` | 名册分区与 SSE 交易日历逐日比对（无缺日）；逐年缺交易所切片的天数（2023-02-13 之后为 0） |
 | `p9_units.py` | `rzye / (circ_mv × 1e4)` 中位 3.85%；`margin_detail.rzye` 求和 2.511e12 vs `margin` 汇总 2.524e12，比值 0.9948 |
@@ -61,6 +61,18 @@
 | `p17_ic.py` | 拥挤度信号的独立复算：`rzye` 20 日变化的规模中性 rank IC H=5 −0.0358（t −7.39）、H=20 −0.0313（t −3.64）；加 mom20 后 H=5 −0.0270（t −6.46） |
 
 复算时的注意点：`data/raw/stock_basic/` 与 `data/raw/trade_cal/` 是分片目录且与 sidecar 同名前缀，`pd.read_parquet(目录)` 会因为 `.meta.json` 报错，必须按 `*.parquet` 逐个读再拼接；`daily.amount` 在原始层是千元、`daily_basic.circ_mv` 是万元，快照里才归一到元。
+
+### 覆盖探针（`pit-field-map.md`「两融三表的覆盖」的出处）
+
+2026-09-10 重测，脚本留在 `logs/scratch/fix_margin_refs_20260910/`，同样在仓库根目录用 `~/miniconda3/envs/quant/bin/python` 运行，全部只读。
+
+| 脚本 | 做了什么、产出什么 |
+| --- | --- |
+| `p_counts.py` | 列 `data/raw/{margin_secs,margin_detail,margin}/` 与两个 release 的 `raw/` 下的 `trade_date=*.parquet` 文件名，给出分区数、首末分区、≤ 2025-12-31 的分区数，并按 sidecar 的 `row_count` 查空分区（三层都是 0）。这是「≤ 2025-12-31 各 1,455 分区、2026 年三处缺口」的出处 |
+| `p_coverage.py` | 逐分区只读 `margin_secs.exchange` 与 `margin_detail.ts_code`，与 `data/raw/trade_cal/exchange=SSE` 的开市日逐日比对：缺的交易日、每个交易所切片的首末日与零行日、逐年日均行数。输出 `margin_secs_daily.csv` / `margin_detail_daily.csv`。这是「无缺日、BSE 自 2023-02-13、名册 2026-07-27..2026-08-05 缺北交所行」的出处 |
+| `p_detail_rows.py` | 明细表逐日成分与 `stock_basic` 求交集，按窗口给日均行数、股票占比、`.BJ` 占比与 A 股非北交所只数。它复算出 2021-12-01..2025-12-31 恰好是 992 天、3,544 行/日、88.1% / 4.2%、3,101 只/日，从而确认 `p6_detail.py` 的数字是窗口值 |
+| `p_early.py` | 只扫 2020-01-02..2021-11-30 的 463 个分区：A 股非北交所 870,218 行、列与之后一致、`rzye` 空值率与零值率都是 0.000000。这是「表头那一段是真数据」的出处 |
+| `p_decision.py` | 用 `pyarrow.dataset` 只读本臂 `pit_views/decision/<锚点>/events.parquet` 的 `dataset`/`trade_date` 两列，按 `dataset` 过滤后给两张表的行数、`trade_date` 首末与不同交易日数。这是三个锚点上 484–486 天那组读数的出处 |
 
 ## 前几轮的相邻臂
 
