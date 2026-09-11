@@ -15,11 +15,20 @@ from autotrade.environment.replay.style import (
     STYLE_SCHEMA_VERSION,
     _slot_benchmark,
 )
-from autotrade.pipelines.ledger import latest_fold_records, latest_heldout_records
+from autotrade.pipelines.ledger import (
+    latest_fold_records,
+    latest_heldout_records,
+    transition_result,
+)
 
 from . import registry
 
-SERIES_LABELS = {"valid": "策略（验证）", "test": "策略（测试）", "heldout": "策略（Held-out）"}
+SERIES_LABELS = {
+    "valid": "策略（验证）",
+    "test": "策略（测试）",
+    "heldout": "策略（Held-out）",
+    "forward": "父本对照前向（样本外过渡）",
+}
 _LABELS = {"benchmark": BENCHMARK_LABEL, **SERIES_LABELS}
 
 
@@ -320,6 +329,67 @@ def walk_forward_curve(
     )
 
 
+def parent_control_forward(
+    experiment_dir: Path,
+    records: list[dict[str, object]],
+    *,
+    epoch_id: str | None,
+) -> WalkForward:
+    """The Epoch's purely out-of-sample forward record, day by day.
+
+    ``walk_forward_curve`` chains the strategy each Fold left in force, so a
+    Fold that froze a new candidate contributes a quarter that candidate was
+    *selected* on -- in-sample with respect to the choice. This chains the
+    other leg instead: every Fold after the Epoch's first opens with the
+    inherited parent replayed unchanged, and the span that replay is graded on
+    (``ledger.transition_result``: the Fold's new quarter when the Validation
+    window trails over several, the whole window otherwise) is ground no one
+    chose the parent on. Those spans are exactly the walk-forward transitions
+    ``ledger.walk_forward_transitions`` counts and they do not overlap, so
+    chaining them compounds the forward record and nothing else.
+
+    A Fold that inherited no parent had nothing to replay and owes nothing. A
+    Fold that did but whose replay yields no days -- a control that failed
+    outright, or a result artifact that cannot be read -- is dropped and named
+    in ``missing``, so the line states which transitions it is not drawing
+    instead of leaving the shortfall to be read out of where it stops.
+    """
+    ordered = registry.walk_forward_folds(list(latest_fold_records(records).values()))
+    epoch = [row for row in ordered if str(row.get("epoch_id")) == epoch_id]
+    references: list[object] = []
+    parts: list[list[tuple[str, float]]] = []
+    missing: list[str] = []
+    for record in epoch[1:]:
+        control = record.get("parent_control")
+        if not isinstance(control, Mapping):
+            continue
+        reference = control.get("validation_result_ref")
+        rows = _returns(experiment_dir, reference)
+        # The branch ``ledger.transition_result`` took, read from it rather
+        # than re-decided here: a stepped control is graded on its new quarter
+        # alone, so only that slice of its daily replay is the transition; an
+        # unstepped one is graded on the whole window, which is the whole
+        # replay.
+        if isinstance(control.get("step_result"), Mapping):
+            scored = transition_result(control) or {}
+            start = str(scored.get("start") or "")
+            end = str(scored.get("end") or "")
+            rows = (
+                [(day, value) for day, value in rows if start <= day <= end]
+                if start and end
+                else []
+            )
+        if not rows:
+            missing.append(str(record.get("fold_id") or ""))
+            continue
+        references.append(reference)
+        parts.append(rows)
+    chained = _chain(parts)
+    return WalkForward(
+        references, chained, _curve_entry("forward", chained) if chained else None, missing
+    )
+
+
 def walk_forward_final(
     experiment_dir: Path,
     records: list[dict[str, object]],
@@ -481,7 +551,14 @@ def experiment_equity_payload(root: Path, experiment_id: str, *, epoch_id: str |
         for chain in chains.values()
         for reference in chain.references
     ]
-    series = [chain.curve for chain in chains.values() if chain.curve]
+    # The same Epoch read the other way: the inherited parent replayed on each
+    # Fold's new ground. Development evidence like every parent control, so it
+    # is drawn before the reveal exactly like the Validation chain, and it is
+    # drawn beside it -- the two answer the same question on the same calendar.
+    forward = parent_control_forward(experiment_dir, records, epoch_id=selected_epoch)
+    rows_by_key["forward"] = forward.rows
+    curves = {key: chain.curve for key, chain in chains.items()} | {"forward": forward.curve}
+    series = [curve for key in ("valid", "forward", "test") if (curve := curves.get(key))]
     if revealed:
         heldout_refs = [record.get("result_ref") for record in latest_heldout_records(records)]
         heldout_rows = _chain([_returns(experiment_dir, reference) for reference in heldout_refs])
@@ -502,11 +579,12 @@ def experiment_equity_payload(root: Path, experiment_id: str, *, epoch_id: str |
         "series": series,
         "benchmark": _curve_entry("benchmark", benchmark) if benchmark else None,
         # Folds of this Epoch that owed a series but whose result artifact is
-        # unreadable: the curve and the cumulative-return tile drop exactly
-        # these, so the omission is stated rather than inferred from a gap.
+        # unreadable: the curve and, for the chained keys, the cumulative-return
+        # tile computed from it drop exactly these, so the omission is stated
+        # rather than inferred from a gap.
         "missing": {
             key: [identity.fold_ref(fold_id) for fold_id in chain.missing]
-            for key, chain in chains.items()
+            for key, chain in {**chains, "forward": forward}.items()
             if chain.missing
         },
         # Daily position weight (EOD gross market value / equity) per series,

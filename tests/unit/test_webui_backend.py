@@ -1075,6 +1075,185 @@ def test_cumulative_validation_return_is_the_chained_curve_over_rolling_windows(
     assert summary["metrics_by_epoch"][0]["cum_valid_return"] == curve["final"]
 
 
+def test_the_forward_line_chains_the_parent_controls_on_their_scored_spans(
+    tmp_path: Path,
+):
+    """The out-of-sample counterpart of the Validation chain, day by day.
+
+    The Validation chain's new quarter is the strategy the Fold left in force,
+    which for a Fold that froze is a candidate selected on that very quarter.
+    The forward line chains the other leg -- the inherited parent replayed on
+    ground nobody chose it on -- over exactly the spans
+    ``ledger.transition_result`` grades and the graduation term counts. A
+    trailing window must contribute its new quarter alone: taking the whole
+    parent replay would compound the quarters its predecessors already scored.
+    """
+    import math
+
+    from autotrade.pipelines.ledger import latest_fold_records, transition_result
+    from autotrade.webui import equity, registry
+
+    directory = tmp_path / "experiments/walk"
+    first = _result_artifact(
+        directory,
+        "valid_first",
+        [("20220701", 110.0), ("20221003", 121.0), ("20230103", 133.1), ("20230331", 146.41)],
+    )
+    second = _result_artifact(
+        directory, "valid_second", [("20230403", 150.0), ("20230630", 300.0)]
+    )
+    fourth = _result_artifact(
+        directory, "valid_fourth", [("20231009", 90.0), ("20231229", 45.0)]
+    )
+    # The parent of Fold 2 replayed over Fold 2's whole trailing window: only
+    # 2023Q2 is ground it had never seen.
+    control_second = _result_artifact(
+        directory,
+        "control_second",
+        [("20221003", 200.0), ("20230103", 400.0), ("20230403", 440.0), ("20230630", 484.0)],
+    )
+    control_third = _result_artifact(
+        directory,
+        "control_third",
+        [("20230103", 50.0), ("20230403", 25.0), ("20230703", 20.0), ("20230929", 10.0)],
+    )
+    _walk_forward_experiment(
+        tmp_path,
+        [
+            {
+                "fold_id": "fold_2023Q1",
+                "validation_period": "20220701..20230331",
+                "fold_status": "frozen",
+                "selected_step_id": "step_1",
+                "steps": [{"step_id": "step_1", "validation_result_ref": first}],
+            },
+            {
+                "fold_id": "fold_2023Q2",
+                "validation_period": "20221001..20230630",
+                "fold_status": "frozen",
+                "selected_step_id": "step_2",
+                "steps": [{"step_id": "step_2", "validation_result_ref": second}],
+                "parent_control": {
+                    "status": "ok",
+                    "validation_result_ref": control_second,
+                    "validation_result": {"total_return": 3.84},
+                    "step_result": {"start": "20230403", "end": "20230630", "total_return": 0.21},
+                },
+            },
+            {
+                # Kept its parent, so this Fold's new quarter is the same
+                # replay on both lines -- the honest case.
+                "fold_id": "fold_2023Q3",
+                "validation_period": "20230101..20230930",
+                "fold_status": "no_update",
+                "parent_control": {
+                    "status": "ok",
+                    "validation_result_ref": control_third,
+                    "validation_result": {"total_return": -0.90},
+                    "step_result": {"start": "20230703", "end": "20230930", "total_return": -0.60},
+                },
+            },
+            {
+                # The control never completed: a transition that proved
+                # nothing, and a quarter the forward line cannot draw.
+                "fold_id": "fold_2023Q4",
+                "validation_period": "20230401..20231231",
+                "fold_status": "frozen",
+                "selected_step_id": "step_4",
+                "steps": [{"step_id": "step_4", "validation_result_ref": fourth}],
+                "parent_control": {
+                    "status": "failed",
+                    "error": "TimeoutError: parent control exceeded the deadline",
+                },
+            },
+        ],
+    )
+
+    payload = equity.experiment_equity_payload(tmp_path / "experiments", "walk")
+    forward = next(row for row in payload["series"] if row["key"] == "forward")
+    assert forward["label"] == "父本对照前向（样本外过渡）"
+    # Only the scored spans, and each exactly once: the shared 2022Q4/2023Q1
+    # quarters of the second control never reach the line.
+    assert forward["dates"] == ["20230403", "20230630", "20230703", "20230929"]
+    assert forward["cum"] == [0.1, 0.21, -0.032, -0.516]
+    # ... and the line compounds to the product of the very returns the ledger
+    # grades those transitions on, so the chart and the transition table are
+    # one record read two ways.
+    records = registry.read_ledger_records(directory)
+    scored = [
+        transition_result(record.get("parent_control"))
+        for record in registry.walk_forward_folds(
+            list(latest_fold_records(records).values())
+        )[1:]
+    ]
+    drawn = math.prod(
+        1.0 + row["total_return"] for row in scored if row is not None
+    )
+    assert forward["final"] == pytest.approx(drawn - 1.0)
+
+    # The Validation chain is a different record over the same calendar: its
+    # 2023Q2 is the candidate frozen on it, worth +100%, not the parent's +21%.
+    valid = next(row for row in payload["series"] if row["key"] == "valid")
+    assert valid["dates"][-1] == "20231229"
+    assert valid["final"] != forward["final"]
+    # The Fold whose control failed is named, so the line's early stop is
+    # stated rather than left to be read off the axis.
+    identity = registry.PublicIdentity(directory)
+    assert payload["missing"] == {"forward": [identity.fold_ref("fold_2023Q4")]}
+    # Full-cycle statistics are served for it like every other chained series.
+    assert payload["stats"]["forward"]["n_days"] == 4
+
+
+def test_an_experiment_without_folds_carries_no_walk_forward_term(tmp_path: Path):
+    """Nothing recorded yet is not a walk-forward record of zero positives.
+
+    A freshly started arm must be able to say 「尚无过渡」 on its card rather
+    than 「0/0 正」 under a floor it has not been measured against, so the list
+    payload offers no Epoch row to read at all.
+    """
+    from autotrade.webui import registry
+
+    _walk_forward_experiment(tmp_path, [])
+    listed = registry.list_experiments(tmp_path / "experiments")
+    assert [row["experiment_id"] for row in listed] == ["walk"]
+    assert listed[0]["metrics_by_epoch"] == []
+    assert listed[0]["metrics"]["epoch_id"] is None
+
+
+def test_an_epoch_with_no_transition_yet_draws_no_forward_line(tmp_path: Path):
+    """A first Fold opens no transition, so there is nothing forward to draw.
+
+    The console must not invent a forward line out of the one window the Epoch
+    has: an empty series and an empty ``missing`` is the truthful answer, and
+    it is what the card's 「过渡 0/0」 reads beside.
+    """
+    from autotrade.webui import equity, registry
+
+    directory = tmp_path / "experiments/walk"
+    only = _result_artifact(directory, "valid_only", [("20220701", 110.0)])
+    _walk_forward_experiment(
+        tmp_path,
+        [
+            {
+                "fold_id": "fold_2022Q3",
+                "validation_period": "20220701..20220930",
+                "fold_status": "frozen",
+                "selected_step_id": "step_1",
+                "steps": [{"step_id": "step_1", "validation_result_ref": only}],
+            }
+        ],
+    )
+
+    payload = equity.experiment_equity_payload(tmp_path / "experiments", "walk")
+    assert [row["key"] for row in payload["series"]] == ["valid"]
+    assert payload["missing"] == {}
+    assert "forward" not in payload["stats"]
+    term = registry.summarize_experiment(directory)["metrics_by_epoch"][0][
+        "walk_forward"
+    ]
+    assert (term["transitions"], term["required"]) == (0, None)
+
+
 def test_a_baseline_missing_fold_contributes_nothing_to_curve_or_tile(tmp_path: Path):
     """A Fold that never froze an artifact left no strategy in force.
 
@@ -3470,6 +3649,49 @@ class WebuiBackendTest(unittest.TestCase):
                 }
             ],
         )
+
+    def test_the_experiment_list_carries_the_walk_forward_term_for_the_cards(
+        self,
+    ) -> None:
+        """The card reads the same projection the verdict does.
+
+        Cards render from the list payload, the detail page's strip from the
+        detail payload. Three cumulative-return tiles over ground the lineage
+        was developed on, with no future-quarter evidence beside them, is
+        exactly the comparison the graduation verdict refuses to make -- so the
+        list has to serve the walk-forward block rather than leave the card to
+        recount the transitions out of the Fold rows.
+        """
+        from autotrade.pipelines.ledger import walk_forward_transitions
+        from autotrade.webui import registry
+
+        directory = self._build_walk_forward_experiment("exp_wf")
+        listed = next(
+            row
+            for row in self.client.get("/api/experiments").json()["experiments"]
+            if row["experiment_id"] == "exp_wf"
+        )
+        detail = self.client.get("/api/experiments/exp_wf").json()
+        self.assertEqual(listed["metrics_by_epoch"], detail["metrics_by_epoch"])
+        term = next(
+            row["walk_forward"]
+            for row in listed["metrics_by_epoch"]
+            if row["epoch_id"] == listed["metrics"]["epoch_id"]
+        )
+        counts = walk_forward_transitions(
+            registry.read_ledger_records(directory),
+            epoch_id="epoch_001",
+            test_stage=False,
+        )
+        # Positives, total, and the ⌈2/3⌉ floor the card states -- the ledger's
+        # own numbers, so the card can never round a failing 1/3 up.
+        self.assertEqual(term["transitions"], counts["transitions"])
+        self.assertEqual(term["positive_excess"], counts["positive_excess"])
+        self.assertEqual(
+            (term["transitions"], term["positive_excess"], term["required"]),
+            (3, 1, 2),
+        )
+        self.assertAlmostEqual(term["mean_excess"], 0.01)
 
     def test_the_transition_rows_are_exactly_the_counted_transitions(self) -> None:
         """The table and the count are one record, read two ways.

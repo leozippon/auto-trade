@@ -578,11 +578,12 @@ function renderMarkdown(text) {
 function themeInk() {
   if (currentTheme() === "dark") {
     return {
-      // Categorical slots 1-3 (dark steps; validated with the dataviz checker
+      // Categorical slots 1-4 (dark steps; validated with the dataviz checker
       // on the dark panel #1b1f28 — all pass incl. contrast).
       validColor: "#3987e5",
       testColor: "#199e70",
       heldoutColor: "#c98500",
+      forwardColor: "#9b76e8",
       validLight: "#7fb2ef",
       testLight: "#5ec49a",
       grid: "#2b303c",
@@ -593,11 +594,12 @@ function themeInk() {
     };
   }
   return {
-    // Light slots 1-3 validated on white; aqua/yellow sit in the sub-3:1
+    // Light slots 1-4 validated on white; aqua/yellow sit in the sub-3:1
     // relief band — carried by the result tables and rich tooltips.
     validColor: "#2a78d6",
     testColor: "#1baf7a",
     heldoutColor: "#eda100",
+    forwardColor: "#7a54c7",
     validLight: "#86b6ef",
     testLight: "#66cfa4",
     grid: "#e9ebf1",
@@ -714,15 +716,21 @@ const CYCLE_STAT_COLUMNS = [
   ],
   ["n_days", "天数", "交易日数", (v) => String(v), false],
 ];
-const CYCLE_SERIES_SHORT = { valid: "验证", test: "测试", heldout: "Held-out" };
+const CYCLE_SERIES_SHORT = {
+  valid: "验证",
+  forward: "父本前向",
+  test: "测试",
+  heldout: "Held-out",
+};
 
 function cycleStatsTable(payload) {
   const stats = payload.stats || {};
-  const keys = ["valid", "test", "heldout"].filter((k) => stats[k]);
+  const keys = ["valid", "forward", "test", "heldout"].filter((k) => stats[k]);
   if (!keys.length) return null;
   const INK = themeInk();
   const seriesColor = {
     valid: INK.validColor,
+    forward: INK.forwardColor,
     test: INK.testColor,
     heldout: INK.heldoutColor,
   };
@@ -762,10 +770,11 @@ function cycleStatsTable(payload) {
   return el("table", { class: "data cycle-stats" }, head, ...rows);
 }
 
-/* Folds the chain owed a series but could not read (equity.walk_forward_curve
-   reports them in `missing`). The curve and the cumulative tile above it drop
-   exactly these together, so the omission is stated here rather than left to
-   be read out of a gap in the line. */
+/* Folds a chained line owed a series but could not read (walk_forward_curve
+   and parent_control_forward report them in `missing`). The line and, where
+   there is one, the cumulative tile above it drop exactly these together, so
+   the omission is stated here rather than left to be read out of a gap — or,
+   for the forward line, out of where it stops. */
 function missingFoldsNote(payload, detail) {
   const groups = Object.entries(payload.missing || {});
   if (!groups.length) return null;
@@ -780,8 +789,40 @@ function missingFoldsNote(payload, detail) {
   return el(
     "div",
     { class: "meta-line" },
-    `以下 Fold 的回放结果读不出来，曲线与上方累计收益同时略过它们（${text}）。`,
+    `以下 Fold 没有可读的回放结果，对应曲线与同源的累计收益一并略过它们（${text}）。`,
   );
+}
+
+/* What the chained line on this chart actually is.
+
+   The solid Validation line is not one strategy's track record and not a
+   walk-forward equity curve: it is a chain, and which Fold a given day comes
+   from decides whether that day is out-of-sample at all. A reader who is not
+   told the rule will read the line as the second thing, so the rule is stated
+   under the chart rather than left to the tile's hover text.
+
+   The dashed forward line is the same calendar read out-of-sample end to end
+   (equity.parent_control_forward), so it is named here too; Folds it had to
+   drop are named separately by `missingFoldsNote`. */
+const CHAIN_RULE_NOTE =
+  "实线「策略（验证）」按 Fold 前向串联：重叠的交易日只记最早覆盖它的 Fold，" +
+  "所以首个 Fold 出整个验证窗口、其后每个 Fold 只补自己的新季度，滚出窗口的日子不会再被后来的 Fold 改写；" +
+  "补进来的是该 Fold 实际沿用的策略——冻结了新产物的 Fold 补的是刚在这段新季度上被选中的候选（对这次选择并非样本外），" +
+  "未更新（no_update）的 Fold 补的是原样重跑的父本（对父本才是样本外）。";
+const FORWARD_SERIES_NOTE =
+  "虚线「父本对照前向（样本外过渡）」串联的是各 Fold 新季度上的父本对照重放，" +
+  "即走查过渡计分的那些区间，因此它是这条日历上纯样本外的前向权益（从第二个 Fold 起算，起点归零）。";
+
+function chainingCaption(payload, opts) {
+  const keys = opts?.keys || null;
+  const shown = (payload.series || []).filter(
+    (s) => (s.dates || []).length && (!keys || keys.includes(s.key)),
+  );
+  if (!shown.some((s) => s.key === "valid")) return null;
+  const text = shown.some((s) => s.key === "forward")
+    ? `${CHAIN_RULE_NOTE}${FORWARD_SERIES_NOTE}`
+    : CHAIN_RULE_NOTE;
+  return el("div", { class: "mode-note section-gap" }, text);
 }
 
 /* Async host: renders the chart (plus, on full-size charts, the epoch switcher
@@ -819,6 +860,8 @@ function equityHost(expId, fp, opts) {
         }
         host.append(equityChart(payload, opts));
         if (!opts?.mini) {
+          const caption = chainingCaption(payload, opts);
+          if (caption) host.append(caption);
           const dropped = missingFoldsNote(payload, opts?.detail);
           if (dropped) host.append(dropped);
           const statsTable = cycleStatsTable(payload);
@@ -843,7 +886,12 @@ function fmtDateTick(date, withYear) {
 
 function rebaseBenchmarkToStrategyWindows(seriesList) {
   const bench = seriesList.find((s) => s.key === "benchmark");
-  const strategies = seriesList.filter((s) => s.key !== "benchmark");
+  const drawn = seriesList.filter((s) => s.key !== "benchmark");
+  // The forward line runs inside the Validation chain's own window and is read
+  // against it, so it gets no second rebased 沪深300 of its own: one grey
+  // dashed reference per chart stays readable, and the forward line's excess
+  // over the index is served as a number in the full-cycle table instead.
+  const strategies = drawn.filter((s) => s.key !== "forward");
   if (!bench || !strategies.length) return seriesList;
   const benchDates = [...bench.cum.keys()].sort();
   const segments = [];
@@ -874,7 +922,7 @@ function rebaseBenchmarkToStrategyWindows(seriesList) {
       dash: "6 4",
     });
   }
-  return segments.length ? [...segments, ...strategies] : seriesList;
+  return segments.length ? [...segments, ...drawn] : seriesList;
 }
 
 /* Server series are already compounded. The CSI 300 overlay is rebased to each
@@ -887,6 +935,7 @@ function equityChart(
   const INK = themeInk();
   const colorOf = {
     valid: INK.validColor,
+    forward: INK.forwardColor,
     test: INK.testColor,
     heldout: INK.heldoutColor,
     benchmark: INK.muted,
@@ -913,7 +962,10 @@ function equityChart(
     cum: new Map(s.dates.map((d, i) => [d, s.cum[i]])),
     dd: new Map(s.dates.map((d, i) => [d, s.drawdown[i]])),
     color: colorOf[s.key] || INK.validColor,
-    dash: s.key === "benchmark" ? "6 4" : null,
+    // The forward line is dashed like the benchmark because it is a reference
+    // against the solid chained series, not a fourth strategy: same calendar,
+    // different basis (equity.parent_control_forward).
+    dash: s.key === "benchmark" ? "6 4" : s.key === "forward" ? "5 3" : null,
   }));
   const seriesList = rebaseBenchmarkToStrategyWindows(mapped);
   const dates = [...new Set(seriesList.flatMap((s) => s.dates))].sort();
@@ -1903,6 +1955,9 @@ function experimentCard(item) {
         title: CUM_VALID_HINT,
       },
     ]),
+    // The tiles above are development ground; this is the future-quarter
+    // record the verdict actually reads, and it belongs on the same card.
+    transitionCardLine(item),
   );
   if ((item.fold_returns || []).length) {
     const fingerprint = equityFingerprint(item);
@@ -1989,6 +2044,102 @@ function pickBestExperiment(list) {
 
 /* Cache key: equity only changes when new records land (or a rerun replaces
    results — caught by the cumulative-return components). */
+/* The walk-forward evidence, in one line on the experiment card.
+
+   The three tiles beside it are cumulative returns over ground the lineage was
+   largely developed on; the only future-quarter evidence a card carries is the
+   transition count the graduation verdict reads, so a card that shows the
+   returns without it invites exactly the comparison the verdict refuses to
+   make. Same projection as the detail page's strip and the verdict itself
+   (registry._walk_forward_view over ledger.walk_forward_transitions, and
+   ledger.final_artifact_transitions through the verdict diagnostics); nothing
+   is counted or averaged here. */
+function transitionCardLine(item) {
+  const epochId = (item.metrics || {}).epoch_id;
+  const row = (item.metrics_by_epoch || []).find((r) => r.epoch_id === epochId);
+  if (!row)
+    return el(
+      "div",
+      {
+        class: "meta-line",
+        title: "本实验还没有记录 Fold，也就没有任何过渡。",
+      },
+      "尚无过渡",
+    );
+  const term = row.walk_forward;
+  // Null only where the transitions are Test-stage evidence still under seal;
+  // the sealed tiles beside this line already say so.
+  if (!term)
+    return el(
+      "div",
+      {
+        class: "meta-line",
+        title:
+          "本排程的过渡取自各 Fold 的冻结 Test 结果，揭示前与其他 Test 数字一同封存。",
+      },
+      "过渡未揭示",
+    );
+  const required = term.required ?? null;
+  const source = WALK_FORWARD_SOURCES[term.source] || term.source || "—";
+  if (!term.transitions)
+    return el(
+      "div",
+      {
+        class: "meta-line",
+        title:
+          "每个 Epoch 的首个 Fold 不开启过渡，从第二个 Fold 起才有，因此本 Epoch 目前一次都还没有。",
+      },
+      `过渡 0/0（${epochShort(epochId)}）`,
+    );
+  const own = ((item.verdict || {}).diagnostics || {})
+    .final_artifact_forward_transitions;
+  const parts = [
+    el("span", {}, `过渡（${epochShort(epochId)}）`),
+    el(
+      "span",
+      {
+        class: `num ${required === null ? "" : term.positive_excess >= required ? "pos" : "neg"}`,
+      },
+      ` ${term.positive_excess}/${term.transitions} 正`,
+    ),
+    el(
+      "span",
+      {},
+      `${required === null ? "" : ` · 需 ≥${required}`} · 新季均 `,
+    ),
+    el(
+      "span",
+      { class: `num ${signCls(term.mean_excess)}` },
+      fmtPct(term.mean_excess),
+    ),
+  ];
+  if (own !== null && own !== undefined)
+    parts.push(
+      el("span", {}, " · 交付产物自身 "),
+      el(
+        "span",
+        { class: own ? "" : "num neg" },
+        `${(item.verdict || {}).diagnostics.final_artifact_forward_positive ?? "—"}/${own}`,
+      ),
+    );
+  return el(
+    "div",
+    {
+      class: "meta-line",
+      title:
+        `末个 Epoch 的 ${term.transitions} 次样本外过渡（取自各 Fold 的${source}）里，` +
+        `${term.positive_excess} 次相对沪深300的超额为正，毕业按 ⌈2/3⌉ 需 ${required ?? "—"} 次；` +
+        "「新季均」是这些过渡在各自计分区间上的平均超额，只作阅读参考。" +
+        (own === null || own === undefined
+          ? ""
+          : own
+            ? "「交付产物自身」是本次交付的那一份产物自己走过的前向过渡。"
+            : "本次交付的产物自己一次前向过渡都没走过：链上的过渡跑的全是它替换掉的上游产物。"),
+    },
+    ...parts,
+  );
+}
+
 function equityFingerprint(item) {
   const metrics = item.metrics || {};
   return `${item.folds_recorded}|${item.heldout_recorded}|${metrics.cum_test_return}|${metrics.cum_valid_return}|${metrics.cum_heldout_return}`;
