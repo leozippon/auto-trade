@@ -31,6 +31,7 @@ FRESHNESS = ((10, 1.0), (20, 0.5), (40, 0.25), (120, 0.10))
 MAX_AGE = FRESHNESS[-1][0]
 EVENT_LOOKBACK_DAYS = 700
 CONSENSUS_LOOKBACK_DAYS = 150
+PERIOD_RECENCY_DAYS = 400
 
 
 def _visible(frame, context):
@@ -49,6 +50,10 @@ def read_statements(context):
     frame = _visible(frame, context).copy()
     frame["stamp"] = pd.to_datetime(frame["available_at"], utc=True)
     frame["end_date"] = frame["end_date"].astype(str)
+    # only a period that ended recently can be an event (old-period restatements are not)
+    ann_day = frame["stamp"].dt.tz_convert("Asia/Shanghai").dt.tz_localize(None)
+    period_end = pd.to_datetime(frame["end_date"], format="%Y%m%d", errors="coerce")
+    frame = frame[period_end >= ann_day - pd.Timedelta(days=PERIOD_RECENCY_DAYS)]
     income = frame[(frame["dataset"] == "income_vip") & (frame["report_type"] == "1")
                    & frame["n_income_attr_p"].notna()]
     income = income.sort_values("stamp").drop_duplicates(["ts_code", "end_date"], keep="first")
@@ -109,16 +114,17 @@ def quarterly_events(income):
 
 
 def latest_with_age(events, trading_days, latest_day):
+    """Latest event per name by stamp; an event announced before the daily window is dead
+    (the window is longer than MAX_AGE trading days)."""
     if events.empty:
         return events.assign(age=np.nan).iloc[0:0]
+    latest = events.sort_values("stamp").drop_duplicates("ts_code", keep="last").copy()
     days = np.array(trading_days)
-    ann_day = events["stamp"].dt.tz_convert("Asia/Shanghai").dt.strftime("%Y%m%d").to_numpy()
+    ann_day = latest["stamp"].dt.tz_convert("Asia/Shanghai").dt.strftime("%Y%m%d").to_numpy()
     idx = np.searchsorted(days, ann_day, side="left")
     latest_idx = int(np.searchsorted(days, latest_day, side="left"))
-    out = events.copy()
-    out["age"] = latest_idx - idx
-    out = out[out["age"] >= 0]
-    return out.sort_values(["ts_code", "age"]).drop_duplicates("ts_code", keep="first")
+    latest["age"] = np.where(ann_day < days[0], len(days), latest_idx - idx)
+    return latest[latest["age"] >= 0]
 
 
 def freshness(age):

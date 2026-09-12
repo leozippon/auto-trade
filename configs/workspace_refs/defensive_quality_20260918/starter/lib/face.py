@@ -53,8 +53,9 @@ CANDIDATES = {
 VOL_WINDOW = 60
 MIN_VOL_DAYS = 40
 STATE_MAX_AGE = 130           # trading days a statement stays live (about two quarters)
-DAILY_LOOKBACK_DAYS = 150     # calendar days of daily rows read per decision (>= 60 trading days + mom_60)
+DAILY_LOOKBACK_DAYS = 220     # calendar days of daily rows read per decision: longer than STATE_MAX_AGE trading days, so a statement announced before the window is dead
 STATEMENT_LOOKBACK_DAYS = 700 # calendar days of statements read per decision (the year-ago quarter of a 130-day-old statement)
+PERIOD_RECENCY_DAYS = 400     # a statement whose period ended earlier than this before its announcement is a restatement of an old period, not an event
 INDEX_CODE = "000300.SH"
 ASSET_FLOOR = 1.0             # CNY, total_assets floor
 GROWTH_FLOOR = 1.0e6          # CNY, |year-ago profit| floor for yoy_np
@@ -132,6 +133,11 @@ def read_statements(context):
     frame = frame[frame["report_type"] == "1"]
     frame["stamp"] = pd.to_datetime(frame["available_at"], utc=True)
     frame["end_date"] = frame["end_date"].astype(str)
+    # A restatement of an old period whose first version predates the read window
+    # looks like a first version; only a period that ended recently can be an event.
+    ann_day = frame["stamp"].dt.tz_convert("Asia/Shanghai").dt.tz_localize(None)
+    period_end = pd.to_datetime(frame["end_date"], format="%Y%m%d", errors="coerce")
+    frame = frame[period_end >= ann_day - pd.Timedelta(days=PERIOD_RECENCY_DAYS)]
     parts = {}
     for dataset, column in (("income_vip", "n_income_attr_p"), ("cashflow_vip", "n_cashflow_act"),
                             ("balancesheet_vip", "total_assets")):
@@ -164,22 +170,26 @@ def statement_values(statements):
 
 
 def latest_with_age(events, trading_days, latest_day):
-    """Each name's most recent event, with its age in visible trading days.
+    """Each name's most recent event (by stamp), with its age in visible trading days.
 
     An event stamped 18:00 on day d is first usable at the next trading day's
     decision; its signal date is the first trading day on or after d, and
-    age = index(latest_day) - index(signal date).
+    age = index(latest_day) - index(signal date). The latest event is chosen by
+    stamp, never by age: every event announced before the window's first day
+    would tie at the same age, and a tie-break by row order picks an arbitrary
+    -- in practice the oldest -- statement. Such an event is older than the
+    window, which DAILY_LOOKBACK_DAYS keeps longer than STATE_MAX_AGE trading
+    days, so its age is reported as the window length and it is dead.
     """
     if events.empty:
         return events.assign(age=np.nan).iloc[0:0]
+    latest = events.sort_values("stamp").drop_duplicates("ts_code", keep="last").copy()
     days = np.array(trading_days)
-    ann_day = events["stamp"].dt.tz_convert("Asia/Shanghai").dt.strftime("%Y%m%d").to_numpy()
+    ann_day = latest["stamp"].dt.tz_convert("Asia/Shanghai").dt.strftime("%Y%m%d").to_numpy()
     idx = np.searchsorted(days, ann_day, side="left")
     latest_idx = int(np.searchsorted(days, latest_day, side="left"))
-    out = events.copy()
-    out["age"] = latest_idx - idx
-    out = out[out["age"] >= 0]
-    return out.sort_values(["ts_code", "age"]).drop_duplicates("ts_code", keep="first")
+    latest["age"] = np.where(ann_day < days[0], len(days), latest_idx - idx)
+    return latest[latest["age"] >= 0]
 
 
 # ------------------------------------------------------------------- daily context
