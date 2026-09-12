@@ -21,7 +21,7 @@ index = pd.read_parquet(context.asof_dir + "/macro",
 universe = pd.read_parquet(context.asof_dir + "/universe")   # ts_code、name、list_date、l1_code
 ```
 
-`asof_dir` 下每个域是 parquet parts 目录（传目录名），`snapshot_dir` 下是平铺文件；读失败**不得**回退 `snapshot_dir`。`fundamentals` 与 `macro` 都是多个数据集的列并集：同名列在不同数据集里含义与单位不同（`pct_chg` 在 `daily` 是小数、在 `macro.index_daily` 是百分数；`n_income` 在 `income_vip` 含少数股东损益），**必须先按 `dataset` 过滤再谈字段与单位**。判可见只看 `available_at`（字符串，`pd.to_datetime(..., utc=True)` 后与 `context.inference_at` 比），不从 `ann_date`/`trade_date` 推。
+`asof_dir` 下每个域是 parquet parts 目录（传目录名），`snapshot_dir` 下是平铺文件；读失败**不得**回退 `snapshot_dir`。`fundamentals` 与 `macro` 都是多个数据集的列并集：同名列在不同数据集里含义与单位不同（`pct_chg` 在 `daily` 是小数、在 `macro.index_daily` 是百分数；`n_income` 在 `income_vip` 含少数股东损益），**必须先按 `dataset` 过滤再谈字段与单位**。两类表要分开：`fundamentals`、`macro` 与 `events` 的行带**行级 `available_at` 列**，判可见只看它（字符串，`pd.to_datetime(..., utc=True)` 后与 `context.inference_at` 比），不从 `ann_date`/`trade_date` 推；`daily` 与 `universe` **没有 `available_at` 列**（决策视图的 `daily.parquet` 30 列，按它过滤会 KeyError），它们的可见性由 as-of 视图本身给定——模板 `output/README.md`「Reading PIT data」：冻结首片只含决策时刻之前可见的行，后续片只含之后发布的行，所以 08:30 决策时 `daily` 的最新一行就是 T-1，不需要也不能再按时间戳过滤；快照给这些行盖的 17:30 / 18:00 / 09:30 收盘合同只是视图的构建规则（`docs/data-documentation.md` §4 日级默认合同），不是策略可读的列。
 
 ## 逐表可见边界
 
@@ -31,8 +31,8 @@ universe = pd.read_parquet(context.asof_dir + "/universe")   # ts_code、name、
 | `fundamentals.cashflow_vip` | 同上键；`n_cashflow_act`（**元**，经营活动现金流量净额，年初至今累计） | 同上 | T-1 |
 | `fundamentals.balancesheet_vip` | 同上键；`total_assets`（**元**，期末时点值） | 同上 | T-1 |
 | `macro.index_daily` | `ts_code = 000300.SH`、`trade_date`、`pct_chg`（**百分数**，÷ 100 后才是日收益） | `contract_1730_from:trade_date` 17:30 | T-1 |
-| `daily` | `close`（元）、`pct_chg`（小数）、`amount`、`circ_mv`（**元**，已归一化）、`turnover_rate`（小数）、`adj_factor`、`pe_ttm`（倍）、`is_suspended` | 17:30 / 18:00 / 09:30 合同 | T-1 |
-| `universe` | `name`（ST 筛选）、`list_date`、`l1_code` | 决策日冻结 | 当日 |
+| `daily` | `close`（元）、`pct_chg`（小数）、`amount`、`circ_mv`（**元**，已归一化）、`turnover_rate`（小数）、`adj_factor`、`pe_ttm`（倍）、`is_suspended` | **无 `available_at` 列**；可见性由 as-of 视图隐含（视图按 17:30 / 18:00 / 09:30 收盘合同构建） | 最新一行 = T-1 |
+| `universe` | `name`（ST 筛选）、`list_date`、`l1_code` | **无 `available_at` 列**；决策日冻结 | 当日 |
 | `events.report_rc`、`fundamentals.express_vip`（仅 `c_es`） | 按盈利意外包的字段图：`quarter` 财年标签、`np` **万元**、`n_income` 元 | `source:create_time` / 每版 `ann_date` 18:00 | T-1 |
 
 原始湖 `data/raw/daily` 的 `amount` 是**千元**、`circ_mv` 是**万元**；离线普查直接读原始湖会差 1000 倍 / 1 万倍，快照里已归一化为元。快照决策视图里三张报表只含 `report_type = "1"` 的行，过滤仍要写，别的视图不保证。
