@@ -18,6 +18,7 @@ import pytest
 
 from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.strategy import StrategySchedule
+from autotrade.environment.time_budget import InferenceTimeBudget
 from autotrade.environment.tools import ToolError
 from autotrade.environment.tools.modification_check import ModificationCheckTool
 from autotrade.pipelines.config import FoldSessionRequest, SnapshotBundle
@@ -27,6 +28,8 @@ from autotrade.pipelines.local_backend import (
     LocalDailyEvaluationBackend,
     SmokeBacktestTool,
 )
+
+from .test_inference_time_budget import FakeClock
 
 DAYS = [stamp.strftime("%Y%m%d") for stamp in pd.bdate_range("2025-10-01", periods=12)]
 
@@ -65,7 +68,14 @@ def _fold() -> FoldSpec:
     )
 
 
-def _tool(root: Path, strategy: str, *, check=None, evaluator=None) -> SmokeBacktestTool:
+def _tool(
+    root: Path,
+    strategy: str,
+    *,
+    check=None,
+    evaluator=None,
+    time_budget: InferenceTimeBudget | None = None,
+) -> SmokeBacktestTool:
     daily = root / "daily.parquet"
     pd.DataFrame(
         {
@@ -106,6 +116,7 @@ def _tool(root: Path, strategy: str, *, check=None, evaluator=None) -> SmokeBack
         broker_profile=BrokerProfile(initial_cash=100_000),
         # Host-only in production; a sibling of the workspace here.
         scratch_root=root / "runtime" / "smoke",
+        time_budget=time_budget or InferenceTimeBudget(duration_seconds=1200.0),
     )
 
 
@@ -264,6 +275,51 @@ def test_modification_check_rejects_reading_an_asof_domain_as_a_flat_file(
         encoding="utf-8",
     )
     assert check.invoke({}).ok
+
+
+def test_a_rehearsal_does_not_spend_the_session_thinking_clock(tmp_path: Path) -> None:
+    """The negative path of the clock contract: a smoke costs no thinking time.
+
+    A 5-day rehearsal is dominated by the same full ``fit`` a Validation runs,
+    and the prompt requires one before every batch, so charging it to the
+    session deadline priced the rehearsal in the one currency the session
+    cannot refill while the formal verdict stayed free. The failure case is
+    the one that hurt (an hour-long smoke dying at the fit cap), so it must
+    both leave the clock alone and still hand the Agent the reason.
+    """
+
+    class FitCapEvaluator:
+        """An hour of host wall clock, then the fit-cap failure."""
+
+        def __init__(self, clock: FakeClock) -> None:
+            self.clock = clock
+
+        def evaluate(self, _request, max_days=None):
+            self.clock.advance(3600.0)
+            raise RuntimeError("strategy fit exceeded 3600s")
+
+    clock = FakeClock()
+    budget = InferenceTimeBudget(duration_seconds=1200.0, clock=clock)
+    tool = _tool(
+        tmp_path,
+        WORKING_STRATEGY,
+        evaluator=FitCapEvaluator(clock),
+        time_budget=budget,
+    )
+    assert tool.session_time_budget is budget
+
+    remaining_before = budget.remaining()
+    result = tool.invoke({"days": 5})
+
+    # The hour the host spent is not taken out of the session's thinking time,
+    # and the deadline the Runner checks moved with it.
+    assert budget.remaining() == pytest.approx(remaining_before)
+    assert budget.remaining() > 0.0
+    # The failure is still the Agent's to read and act on.
+    assert result.ok
+    assert result.value["status"] == "failed"
+    assert "fit exceeded 3600s" in str(result.value["error"])
+    assert result.value["counts_against_backtest_budget"] is False
 
 
 def test_smoke_backtest_is_registered_for_fold_sessions() -> None:

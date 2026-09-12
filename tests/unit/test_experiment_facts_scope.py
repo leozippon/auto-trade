@@ -269,14 +269,14 @@ def test_the_session_deadline_names_the_wrap_up_grace_inside_it() -> None:
 def test_fold_and_meta_are_told_deadline_seconds_is_pausable_effective_time() -> None:
     """Both sessions must see the pause clock next to ``deadline_seconds``.
 
-    ``daily_backtest``, ``batch_validate`` and ``ask_user`` pause the budget;
-    ``smoke_backtest``, shell and sub-agent waits do not, and must not be
+    Every replay tool -- ``smoke_backtest`` included -- pauses the budget, as
+    does ``ask_user``; shell and sub-agent waits do not, and must not be
     written as exemptions in the sentence the sessions actually read.
     """
 
     expected = (
         "`deadline_seconds` 统计可暂停的有效推理时间；"
-        "`daily_backtest`、`batch_validate` 和 `ask_user` 调用期间暂停计时，"
+        "`smoke_backtest`、`daily_backtest`、`batch_validate` 和 `ask_user` 调用期间暂停计时，"
         "因此会话总墙钟可能更长。"
     )
     fold = _facts(
@@ -285,7 +285,7 @@ def test_fold_and_meta_are_told_deadline_seconds_is_pausable_effective_time() ->
     meta = _facts(kind="meta_learning", budgets={"deadline_seconds": 43200.0})
     assert fold["budgets"]["deadline_seconds_note"] == expected
     assert meta["budgets"]["deadline_seconds_note"] == expected
-    for name in ("smoke_backtest", "shell", "subagent", "sub-agent", "子代理"):
+    for name in ("shell", "subagent", "sub-agent", "子代理"):
         assert name not in fold["budgets"]["deadline_seconds_note"]
     assert expected in build_system_prompt(mode="fold", experiment_facts=fold)
     assert expected in build_system_prompt(mode="meta", experiment_facts=meta)

@@ -17,11 +17,11 @@ from autotrade.environment.sandbox import SCREENING_TOOL_MOUNT, SandboxLimits
 EXPERIMENT_FACTS_SCHEMA_VERSION = 1
 
 # Agent-visible clock contract for ``budgets.deadline_seconds``. Fold and Meta
-# both read this from the injected facts; smoke_backtest, shell, and sub-agent
-# waits are not exemptions and must not be named here.
+# both read this from the injected facts; every replay tool pauses the clock,
+# while shell and sub-agent waits do not and must not be named here.
 DEADLINE_SECONDS_NOTE = (
     "`deadline_seconds` 统计可暂停的有效推理时间；"
-    "`daily_backtest`、`batch_validate` 和 `ask_user` 调用期间暂停计时，"
+    "`smoke_backtest`、`daily_backtest`、`batch_validate` 和 `ask_user` 调用期间暂停计时，"
     "因此会话总墙钟可能更长。"
 )
 

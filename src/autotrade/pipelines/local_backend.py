@@ -566,7 +566,7 @@ SMOKE_BACKTEST_DEFAULT_DAYS = 3
 SMOKE_BACKTEST_MAX_DAYS = 5
 
 
-class SmokeBacktestTool:
+class SmokeBacktestTool(SessionTimeBudgetAware):
     """Run the CURRENT working copy through the real replay for a few days.
 
     Hand-rolled shell smoke tests are what let seven of nine official backtests
@@ -581,6 +581,18 @@ class SmokeBacktestTool:
     It is deliberately NOT an evaluation: no revision is committed, no step-tree
     node is written, nothing here can be selected at freeze time, and it does
     not consume the Fold's backtest budget.
+
+    Like every other replay tool it pauses the session's thinking clock. A
+    5-day rehearsal is dominated by the same full ``fit`` a Validation runs,
+    so charging it to the one budget the session cannot refill priced the
+    cheap rehearsal the prompt requires before every batch in the scarce
+    currency while the expensive verdict stayed free: 9.5 h across 48 audited
+    folds, three hour-long smokes dying at the fit cap costing one fold ~3 h
+    of its 10.17 h. The rehearsal still costs real host wall clock; it no
+    longer costs the Agent its time to think. A sub-agent shares this tool
+    object and this budget, so a smoke it starts pauses the parent's clock
+    too -- the same union-of-pauses semantics an in-flight sub-agent already
+    gets while the parent's own Validation is paused.
     """
 
     spec = ToolSpec(
@@ -625,6 +637,7 @@ class SmokeBacktestTool:
         schedule,
         broker_profile,
         scratch_root: Path,
+        time_budget: InferenceTimeBudget,
     ) -> None:
         self.request = request
         self.output_dir = output_dir
@@ -634,10 +647,21 @@ class SmokeBacktestTool:
         self.schedule = schedule
         self.broker_profile = broker_profile
         self.scratch_root = Path(scratch_root)
+        self.time_budget = time_budget
         self.runs = 0
 
+    @property
+    def session_time_budget(self) -> InferenceTimeBudget:
+        return self.time_budget
+
     def invoke(self, arguments: Mapping[str, object]) -> ToolResult:
+        # Argument validation is the Agent's own mistake and stays on its
+        # clock; the replay itself does not.
         days = self._days(arguments)
+        with self.time_budget.pause():
+            return self._invoke_exempt(days)
+
+    def _invoke_exempt(self, days: int) -> ToolResult:
         self.runs += 1
         check = self.modification_check.invoke({})
         if not check.ok:
@@ -3018,6 +3042,7 @@ class LLMFoldDeveloper:
                 # Agent mount, so nothing in the session can reach the bytes it
                 # is replaying.
                 scratch_root=paths.runtime / "smoke",
+                time_budget=time_budget,
             )
             parent_main_py = (
                 (source / "main.py") if request.parent is not None else None
