@@ -135,11 +135,12 @@ def test_every_directive_is_usable_by_the_worker(round_name: str, experiment_id:
     """A directive must be non-empty, carry the two shared readings, and hold
     no literal calendar date.
 
-    worker.resolve_worker_options runs fold_exploration_directive through
-    prior_policy.calendar_policy_violation, so a date written into one is not a
-    style issue: the arm would be refused at every start. Data windows that
-    must be excluded are named by their cause and defined in the reference pack
-    instead.
+    The directive is copied verbatim into every Fold of the arm, whose visible
+    window advances one quarter at a time, so a date written into one is wrong
+    at all but one Fold. Nothing refuses it any more -- the operator defines
+    the PIT policy -- which is exactly why the round files, the only place an
+    arm's directive is authored, keep the rule: data windows that must be
+    excluded are named by their cause and defined in the reference pack.
     """
     directive = str(ROUNDS[round_name].request_params(experiment_id)["fold_exploration_directive"])
     assert directive.strip(), experiment_id

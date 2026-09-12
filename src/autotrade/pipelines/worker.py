@@ -684,11 +684,9 @@ def resolve_worker_options(
         meta_memory_max_epochs=_nonnegative_int(
             knob("meta_memory_max_epochs"), "meta_memory_max_epochs"
         ),
-        meta_learning_directive=_calendar_free_text(
-            params.get("meta_learning_directive"), "meta_learning_directive"
-        ),
-        fold_exploration_directive=_calendar_free_text(
-            params.get("fold_exploration_directive"), "fold_exploration_directive"
+        meta_learning_directive=str(params.get("meta_learning_directive") or ""),
+        fold_exploration_directive=str(
+            params.get("fold_exploration_directive") or ""
         ),
         workspace_reference=_optional_workspace_reference(
             params.get("workspace_reference"), repository
@@ -2379,18 +2377,6 @@ def _optional_positive_float(value: object, name: str) -> float | None:
     if value in (None, ""):
         return None
     return _positive_float(value, name)
-
-
-def _calendar_free_text(value: object, name: str) -> str:
-    text = str(value or "")
-    if not text.strip():
-        return ""
-    from autotrade.environment.tools.prior_policy import calendar_policy_violation
-
-    reason = calendar_policy_violation(text)
-    if reason:
-        raise ValueError(f"{name} contains a non-transferable calendar date: {reason}")
-    return text
 
 
 def _nl_failure_policy(value: object) -> str:

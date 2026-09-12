@@ -22,13 +22,10 @@ anything it states there stops being an expected default.
 `normalize` runs the request-level checks the console applies on POST
 /api/experiments (ExperimentManager.create_experiment's closed, unknown,
 required, id and stamp rules, then the worker's own resolve_worker_options
-pre-flight, which is what actually type-checks every knob) and additionally
-refuses a directive the PRIOR calendar policy would reject -- which
-resolve_worker_options enforces on fold_exploration_directive too, so a
-directive carrying a literal calendar date fails the worker at start rather
-than merely reading badly. The console's deployment-state checks -- an
-experiment directory that already exists and a free running slot -- can only be
-decided against the live server and stay at POST time.
+pre-flight, which is what actually type-checks every knob). The console's
+deployment-state checks -- an experiment directory that already exists and a
+free running slot -- can only be decided against the live server and stay at
+POST time.
 
 A round that names a PIT view seed explicitly makes that seed required: the
 tree must exist, its recorded snapshot configuration must be exactly this
@@ -61,7 +58,6 @@ from _bootstrap import add_repo_src
 
 REPO_ROOT = add_repo_src(__file__)
 
-from autotrade.environment.tools.prior_policy import calendar_policy_violation
 from autotrade.pipelines.config import SNAPSHOT_CACHE_FORMAT_VERSION
 from autotrade.pipelines.hitl_state import (
     WEB_CLOSED_PARAMS,
@@ -361,8 +357,7 @@ def normalize(params: dict[str, object]) -> dict[str, object]:
     Same order and same request-level checks as
     ExperimentManager.create_experiment, then the worker's own
     resolve_worker_options pre-flight. The console's duplicate-directory and
-    running-slot checks need the live deployment and stay at POST time; the
-    calendar-policy gate below is stricter than create.
+    running-slot checks need the live deployment and stay at POST time.
     """
     closed = sorted(set(params) & WEB_CLOSED_PARAMS)
     if closed:
@@ -377,13 +372,6 @@ def normalize(params: dict[str, object]) -> dict[str, object]:
     experiment_id = str(params.get("experiment_id") or "").strip()
     if not EXPERIMENT_ID_RE.fullmatch(experiment_id):
         raise ValueError("experiment_id must match [A-Za-z0-9][A-Za-z0-9_-]{0,99}")
-    directive = str(merged.get("fold_exploration_directive") or "")
-    # Not enforced on create, but the same text is injected into PRIOR-facing
-    # prompts, is re-sendable through set_directive, and is refused by
-    # resolve_worker_options itself.
-    violation = calendar_policy_violation(directive)
-    if violation:
-        raise ValueError(f"fold_exploration_directive {violation}")
     merged.update(
         {
             **WEB_INTERNAL_PARAMS,

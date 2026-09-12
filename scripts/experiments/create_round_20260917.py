@@ -198,13 +198,6 @@ ARMS: dict[str, dict[str, object]] = {
         "workspace_reference": "configs/workspace_refs/margin_flow_20260916",
         "fold_exploration_directive": "\n".join(
             [
-                # The vendor-truncation window this line excludes is named by
-                # its cause, not by its dates: resolve_worker_options refuses a
-                # fold_exploration_directive carrying a literal calendar date
-                # (prior_policy.calendar_policy_violation), so writing the two
-                # months out would fail the arm at worker start. The exact range
-                # is declared once in the pack the previous sentence orders the
-                # Agent to read.
                 "方向：以两融管道为信息源只做多——margin_secs 名册的老股纳入事件与 margin_detail 的融资余额拥挤度，"
                 "一次只推进一个可分离家族，正式产物写在 output/ 包内。"
                 "先读 refs 的 README、exploration-plan 与 families.md，按 pit-field-map.md 核对："

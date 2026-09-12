@@ -5181,14 +5181,19 @@ class HitlControlActionTest(unittest.TestCase):
             action="set_directive", session_key="epoch_001/fold_2022Q2", directive=""
         )
         self.assertNotIn("epoch_001/fold_2022Q2", self._control().directives)
+        # The operator defines the PIT policy, so a directive that names a date
+        # is stored as written: the rule against it is written guidance (see
+        # docs/agent-design.md), not a server-side refusal. The calendar gate
+        # stays on Agent-authored memory (PRIOR, skills, memory_feedback).
         dated = self._post(
             action="set_directive",
             session_key="epoch_001/fold_2022Q2",
             directive="在 2022Q1 减仓",
         )
-        self.assertEqual(dated.status_code, 400, dated.text)
-        self.assertIn("日历日期", dated.json()["detail"])
-        self.assertNotIn("epoch_001/fold_2022Q2", self._control().directives)
+        self.assertEqual(dated.status_code, 200, dated.text)
+        self.assertEqual(
+            self._control().directives["epoch_001/fold_2022Q2"], "在 2022Q1 减仓"
+        )
 
     def test_set_prompt_override_stores_and_clears_a_replacement_prompt(self) -> None:
         self.assertEqual(

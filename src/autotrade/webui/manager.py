@@ -900,8 +900,6 @@ class ExperimentManager:
             raise ManagerError(
                 "inject_message session_key must match the current Agent session"
             )
-        if isinstance(text, str):
-            _reject_calendar_text(text)
         try:
             return enqueue_inbox_message(
                 directory / "hitl" / INBOX_NAME,
@@ -952,7 +950,6 @@ class ExperimentManager:
                 dict.fromkeys([*control.approved_sessions, session_key])
             )
             if directive:
-                _reject_calendar_text(directive)
                 control.directives[session_key] = directive
         elif action == "approve_step":
             if not session_key:
@@ -976,7 +973,6 @@ class ExperimentManager:
             if directive in {None, ""}:
                 control.step_directives.pop(directive_key, None)
             else:
-                _reject_calendar_text(str(directive))
                 control.step_directives[directive_key] = str(directive)
         elif action == "reply_question":
             if not session_key:
@@ -995,7 +991,6 @@ class ExperimentManager:
             if session_key in control.user_replies:
                 raise ManagerError("the current question was already answered")
             reply = str(directive or "")
-            _reject_calendar_text(reply)
             control.user_replies[session_key] = reply
         elif action == "set_gpu_count":
             if not session_key:
@@ -1038,7 +1033,6 @@ class ExperimentManager:
                 if directive in {None, ""}:
                     target.pop(session_key, None)
                 else:
-                    _reject_calendar_text(str(directive))
                     target[session_key] = str(directive)
         elif action == "skip_to_heldout":
             if not latest_fold_records(
@@ -1711,16 +1705,6 @@ class ExperimentManager:
         ):
             raise ManagerError(f"unknown experiment: {experiment_id}")
         return directory
-
-
-def _reject_calendar_text(text: str) -> None:
-    if not text.strip():
-        return
-    from autotrade.environment.tools.prior_policy import calendar_policy_violation
-
-    reason = calendar_policy_violation(text)
-    if reason:
-        raise ManagerError(f"指令含有不可迁移的日历日期：{reason}")
 
 
 def _read_json(path: Path) -> dict[str, object]:
