@@ -1295,6 +1295,44 @@ def test_a_parentless_freeze_is_the_baseline_anchor_the_next_fold_controls_again
     assert "baseline_anchor" not in timed_out
 
 
+def test_a_frozen_fold_record_names_the_models_tree_beside_the_output(
+    tmp_path: Path,
+):
+    """A frozen artifact is ``output/`` plus ``models/``; the record names both.
+
+    ``frozen_model_artifact_path`` had four readers and no writer, so the one
+    that cannot derive the path -- the console's ``inherit_from`` import, which
+    copies the source's last frozen Fold as the new experiment's parent --
+    silently seeded ``output/`` alone, against the promise in
+    docs/pipeline-design.md that both trees travel. A pre-fitted model could
+    therefore never cross an experiment boundary.
+    """
+
+    evaluator = RecordingEvaluator({"revision_1": 0.05})
+    pipeline, folds, ledger, _requests = _regular_fold_pipeline(tmp_path, evaluator)
+    revision = pipeline.artifacts.revisions["revision_1"]
+    models = Path(revision.output_path).parent / "revision_1_models"
+    models.mkdir()
+    (models / "params.json").write_text('{"alpha": 1}\n', encoding="utf-8")
+    pipeline.artifacts.revisions["revision_1"] = ArtifactRevision(
+        "revision_1", revision.output_path, models
+    )
+
+    first = pipeline.run_fold("epoch_001", folds[0], parent=None)
+    assert first.frozen is not None and first.frozen.model_path is not None
+    record = ledger.read("fold")[0]
+    assert record["frozen_strategy_artifact_path"] == str(first.frozen.path)
+    recorded = Path(str(record["frozen_model_artifact_path"]))
+    assert recorded == first.frozen.model_path
+    assert (recorded / "params.json").is_file()
+
+    # A revision without a models tree records the absence, not a path to a
+    # directory that is not there.
+    second = pipeline.run_fold("epoch_001", folds[1], parent=first.frozen)
+    assert second.frozen is not None and second.frozen.model_path is None
+    assert ledger.read("fold")[1]["frozen_model_artifact_path"] is None
+
+
 def test_a_failed_parent_control_is_recorded_and_the_fold_proceeds(tmp_path: Path):
     evaluator = RecordingEvaluator({"revision_1": 0.05})
     pipeline, folds, ledger, requests = _regular_fold_pipeline(tmp_path, evaluator)

@@ -601,6 +601,14 @@ class RollingExperimentPipeline:
                 "frozen_strategy_artifact_path": (
                     str(frozen.path) if frozen is not None else None
                 ),
+                # Its sibling ``models/``. An inherit_from copies both trees
+                # out of the source's last Fold record, and a pre-fitted model
+                # can only cross that boundary if the record names it.
+                "frozen_model_artifact_path": (
+                    str(frozen.model_path)
+                    if frozen is not None and frozen.model_path is not None
+                    else None
+                ),
                 "validation_result": validation,
                 # How the frozen candidate stands against this Fold's own
                 # baseline, and how wide a search it won (§2.4).
@@ -1353,6 +1361,13 @@ class RollingExperimentPipeline:
                     "frozen_strategy_artifact_path": (
                         str(frozen.path)
                         if status == "meta_regularized" and frozen
+                        else None
+                    ),
+                    "frozen_model_artifact_path": (
+                        str(frozen.model_path)
+                        if status == "meta_regularized"
+                        and frozen
+                        and frozen.model_path is not None
                         else None
                     ),
                     "agent_trace_ref": str(trace_ref) if trace_ref.exists() else None,
