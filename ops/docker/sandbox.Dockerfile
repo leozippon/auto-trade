@@ -150,7 +150,9 @@ assert torch.ops.torch_cluster.cuda_version() > 0, 'torch_cluster built without 
 # the Broker stays on the host, so the worker never needs broker_core. The
 # formal strategy allowlist (strategy_loader.ALLOWED_MODULES) names numpy,
 # pandas, scipy, scikit-learn, LightGBM, XGBoost, statsmodels and torch from
-# the pip layer above; the strategy container runs them CPU-only (no --gpus).
+# the pip layer above; the strategy container gets --gpus only when the
+# experiment asked for a device (executor.DockerStrategyExecutor), else
+# CPU-only.
 WORKDIR /opt/autotrade
 COPY src/autotrade/__init__.py /opt/autotrade/autotrade/__init__.py
 COPY src/autotrade/environment/__init__.py /opt/autotrade/autotrade/environment/__init__.py

@@ -26,9 +26,9 @@ STDERR_SUPPRESSION_REMINDER = (
 )
 # Default per-call timeout when the Agent omits ``timeout_seconds``, and the
 # hard cap it may request. Data checks over PIT parquet (IC tables, coverage
-# scans) regularly need more than 30 s, and a full-market pass in the 4-CPU
-# sandbox did not fit 300 s; 600 s keeps every call a bounded foreground
-# command while no longer starving a child of its numbers.
+# scans) regularly need more than 30 s, and a full-market pass in the session
+# sandbox (``SandboxSpec.cpus``, 8) did not fit 300 s; 600 s keeps every call a
+# bounded foreground command while no longer starving a child of its numbers.
 DEFAULT_SHELL_TIMEOUT_SECONDS = 60.0
 MAX_SHELL_TIMEOUT_SECONDS = 600.0
 # Per-element cap. Trace audits show legitimate `bash -lc` heredocs and
