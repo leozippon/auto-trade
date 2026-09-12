@@ -211,7 +211,7 @@ def test_a_new_experiment_mounts_the_fold_opening_digest(tmp_path: Path) -> None
     # It carries the facts the opening survey re-derived, and it points at the
     # per-session unit tables rather than restating numbers that move.
     for phrase in ("generate_orders", "REFIT_PERIOD", "context.state_dir",
-                   "chmod -R u+w", "unit_reference.json", "vs_parent"):
+                   "chmod -R a+w", "unit_reference.json", "vs_parent"):
         assert phrase in body
 
 

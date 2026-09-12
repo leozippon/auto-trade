@@ -21,7 +21,8 @@ EXPERIMENT_FACTS_SCHEMA_VERSION = 1
 # while shell and sub-agent waits do not and must not be named here.
 DEADLINE_SECONDS_NOTE = (
     "`deadline_seconds` 统计可暂停的有效推理时间；"
-    "`smoke_backtest`、`daily_backtest`、`batch_validate` 和 `ask_user` 调用期间暂停计时，"
+    "`smoke_backtest`、`daily_backtest`、`batch_validate`、`run_null_control` 和 `ask_user` "
+    "调用期间暂停计时，"
     "因此会话总墙钟可能更长。"
 )
 

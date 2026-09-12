@@ -274,14 +274,16 @@ def test_the_session_deadline_names_the_wrap_up_grace_inside_it() -> None:
 def test_fold_and_meta_are_told_deadline_seconds_is_pausable_effective_time() -> None:
     """Both sessions must see the pause clock next to ``deadline_seconds``.
 
-    Every replay tool -- ``smoke_backtest`` included -- pauses the budget, as
-    does ``ask_user``; shell and sub-agent waits do not, and must not be
-    written as exemptions in the sentence the sessions actually read.
+    Every replay tool -- ``smoke_backtest`` and ``run_null_control`` included
+    -- pauses the budget, as does ``ask_user``; shell and sub-agent waits do
+    not, and must not be written as exemptions in the sentence the sessions
+    actually read.
     """
 
     expected = (
         "`deadline_seconds` 统计可暂停的有效推理时间；"
-        "`smoke_backtest`、`daily_backtest`、`batch_validate` 和 `ask_user` 调用期间暂停计时，"
+        "`smoke_backtest`、`daily_backtest`、`batch_validate`、`run_null_control` 和 `ask_user` "
+        "调用期间暂停计时，"
         "因此会话总墙钟可能更长。"
     )
     fold = _facts(

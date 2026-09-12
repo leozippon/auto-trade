@@ -2451,7 +2451,7 @@ class NullControlTool(SessionTimeBudgetAware):
             "excess_percentile — near 0.5 means the names added nothing the timing "
             "and sizing did not — the null's mean and p05/p95, rejects_mean, "
             "dropped_trips_mean). Costs minutes of host replay per call (about "
-            "3.5 min on a one-year window; the session clock pauses like a formal "
+            "1.5 min on a one-year window; the session clock pauses like a formal "
             f"backtest) and is capped at {max_calls} per Fold "
             "(max_null_controls_per_fold in the run facts; every result reports "
             "null_controls_remaining); a node's block is cached, and the frozen "
