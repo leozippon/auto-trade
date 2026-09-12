@@ -421,10 +421,9 @@ class RollingExperimentPipeline:
                     artifact_id = (
                         f"strategy_{epoch_id}_{fold.fold_id}_{uuid.uuid4().hex[:12]}"
                     )
-                    frozen = self.artifacts.freeze_revision(
+                    frozen = self._freeze(
                         selected.revision_id,
                         artifact_id=artifact_id,
-                        experiment_id=self.config.experiment_id,
                         epoch_id=epoch_id,
                         fold_id=fold.fold_id,
                         run_id=run_id,
@@ -1036,10 +1035,9 @@ class RollingExperimentPipeline:
                         self.artifacts.revision(selected.revision_id).output_path,
                     )
                     if mechanism_check["equal"]:
-                        adjusted = self.artifacts.freeze_revision(
+                        adjusted = self._freeze(
                             selected.revision_id,
                             artifact_id=f"strategy_deployment_{uuid.uuid4().hex[:12]}",
-                            experiment_id=self.config.experiment_id,
                             epoch_id=epoch_id,
                             fold_id=fold.fold_id,
                             run_id=run_id,
@@ -1296,23 +1294,13 @@ class RollingExperimentPipeline:
             if deadline_exceeded:
                 status = "deadline_exceeded_kept_previous"
             elif parent is not None and session.allowed and session.revision_id:
-                frozen = self.artifacts.freeze_revision(
+                frozen = self._freeze(
                     session.revision_id,
                     artifact_id=f"strategy_{session_id}_meta_learning",
-                    experiment_id=self.config.experiment_id,
                     epoch_id=epoch_id,
                     fold_id=session_id,
                     run_id=run_id,
                     step_id="meta_learning",
-                )
-                frozen = FrozenArtifact(
-                    frozen.artifact_id,
-                    Path(frozen.path),
-                    Path(frozen.model_path) if frozen.model_path is not None else None,
-                    run_id,
-                    session_id,
-                    "meta_learning",
-                    session.revision_id,
                     # Never backtested: the next Fold may only fall back to it
                     # after validating identical content itself.
                     requires_validation=True,
@@ -1487,6 +1475,47 @@ class RollingExperimentPipeline:
             )
         except Exception as exc:  # noqa: BLE001 - recorded, the Fold still runs
             return {"status": "failed", "error": f"{type(exc).__name__}: {exc}"}
+
+    def _freeze(
+        self,
+        revision_id: str,
+        *,
+        artifact_id: str,
+        epoch_id: str,
+        fold_id: str,
+        run_id: str,
+        step_id: str,
+        requires_validation: bool = False,
+    ) -> FrozenArtifact:
+        """Freeze one Step revision and return the lineage's artifact record.
+
+        An ``ArtifactStore`` answers with whatever record its own storage
+        produces (the filesystem store returns a plain namespace), so the one
+        place a revision becomes part of the lineage is also the one place that
+        normalizes it. Everything downstream -- the next Fold's parent, the
+        Meta session's parent, the ledger row -- then holds a ``FrozenArtifact``
+        whatever store froze it.
+        """
+
+        record = self.artifacts.freeze_revision(
+            revision_id,
+            artifact_id=artifact_id,
+            experiment_id=self.config.experiment_id,
+            epoch_id=epoch_id,
+            fold_id=fold_id,
+            run_id=run_id,
+            step_id=step_id,
+        )
+        return FrozenArtifact(
+            record.artifact_id,
+            Path(record.path),
+            Path(record.model_path) if record.model_path is not None else None,
+            run_id,
+            fold_id,
+            step_id,
+            revision_id,
+            requires_validation=requires_validation,
+        )
 
     def _matches_parent_content(
         self, parent: FrozenArtifact, revision_id: str

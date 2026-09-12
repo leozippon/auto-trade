@@ -1769,6 +1769,103 @@ def test_second_llm_fold_prompt_excludes_prior_test_diagnostic(
     assert "test_result" not in second_fold_context
 
 
+def test_the_meta_after_an_anchor_fold_opens_the_anchor_as_its_parent(
+    tmp_path: Path,
+    monkeypatch,
+):
+    """The Meta that follows the lineage's FIRST freeze gets that freeze as its
+    parent, and opens its working copy on the artifact's own tree.
+
+    A baseline anchor is a control rather than a deliverable, but it is the
+    lineage head all the same: the session that follows it must be handed the
+    same kind of artifact record an inherited seed or a later freeze produces,
+    or it cannot resolve the parent at all."""
+    repo, experiment = _experiment(tmp_path, developer_mode="llm")
+    _update_params(
+        experiment,
+        {
+            # Two rolling Folds with the default meta cadence between them:
+            # 2025Q4 -> 2026Q1 and 2026Q1 -> 2026Q2.
+            "development_first_period": "2025Q4",
+            "development_last_period": "2026Q2",
+            "test_stage": True,
+            "heldout_first_period": "2026Q3",
+            "heldout_last_period": "2026Q3",
+        },
+    )
+    monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
+
+    def _meta_script(prior: str) -> tuple[ProviderResponse, ...]:
+        return _agent_then(
+            ToolCall("prior", "write_file", {"path": "PRIOR.md", "content": prior}),
+            ToolCall("finish_meta", "finish_meta", {}),
+        )
+
+    def _fold_script(source: str) -> tuple[ProviderResponse, ...]:
+        return _agent_then(
+            ToolCall("check", "modification_check", {}),
+            ToolCall("valid", "daily_backtest", {}),
+            ToolCall("finish_fold", "finish_fold", {}),
+            roles=_FOLD_DELEGATION_ROLES,
+            implement={"path": "output/main.py", "content": source},
+        )
+
+    anchor_source = "def generate_orders(context):\n    return []\n"
+    llm = ScriptedLLM(
+        [
+            *_meta_script("prefer simple signals"),
+            # No parent exists, so a passing nomination anchors the lineage.
+            *_fold_script(anchor_source),
+            *_meta_script("keep the anchor under review"),
+            *_fold_script(
+                "def generate_orders(context):\n    _ = context.inference_at\n    return []\n"
+            ),
+        ]
+    )
+    options = load_worker_options(experiment, repo_root=repo)
+    result = run_local_interactive_worker(
+        options,
+        llm=llm,
+        command_runner_factory=lambda _workspace: _NoShellRunner(),
+    )
+
+    assert result["state"] == "completed"
+    records = ExperimentLedger(options.rolling.ledger_path).read()
+    assert [record["record_type"] for record in records] == [
+        "meta_learning",
+        "fold",
+        "meta_learning",
+        "fold",
+        "heldout",
+    ]
+    _, anchor_fold, meta, second_fold, _heldout = records
+    assert anchor_fold["fold_status"] == "frozen"
+    assert anchor_fold["baseline_anchor"] is True
+
+    # The Meta session resolved the anchor from the artifact record it was
+    # handed: its manifest names it and its working copy carries its bytes.
+    manifest = json.loads(
+        (
+            experiment / "artifacts" / str(meta["run_id"]) / "host_run_manifest.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert manifest["parent_strategy_artifact_id"] == (
+        anchor_fold["frozen_strategy_artifact_id"]
+    )
+    assert (
+        experiment / "artifacts" / str(meta["run_id"]) / "workspace/output/main.py"
+    ).read_text(encoding="utf-8") == anchor_source
+
+    # An anchor is a valid parent for what follows; it is only kept out of
+    # graduation and delivery. The next Fold controls against it and replaces
+    # it, so the run reaches Held-out with a candidate rather than the anchor.
+    assert second_fold["parent_strategy_artifact_id"] == (
+        anchor_fold["frozen_strategy_artifact_id"]
+    )
+    assert second_fold["fold_status"] == "frozen"
+    assert "baseline_anchor" not in second_fold
+
+
 def test_early_finish_grades_the_epoch_that_actually_ran(tmp_path: Path):
     """Skip-to-Held-out ends development inside Epoch 1 of a three-Epoch
     schedule. Graduation term (b) must be scored on the Epoch that produced the

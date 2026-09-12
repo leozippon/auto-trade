@@ -789,6 +789,15 @@ class FrozenArtifact:
 
 
 class ArtifactStore(Protocol):
+    """What the Pipeline may read off an artifact store's records.
+
+    Structural, not nominal: a store answers with its own record type (the
+    filesystem store returns a plain namespace), so these annotations name the
+    fields a caller may rely on, never an ``isinstance``. The Pipeline turns a
+    freeze into the lineage's own ``FrozenArtifact`` at the one site that
+    freezes (``RollingExperimentPipeline._freeze``).
+    """
+
     def revision(self, revision_id: str) -> ArtifactRevision: ...
 
     def freeze_revision(
