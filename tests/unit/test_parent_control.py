@@ -40,6 +40,7 @@ from autotrade.pipelines.config import (
 )
 from autotrade.pipelines.experiment import _step_result
 from autotrade.pipelines.ledger import (
+    epoch_transitions,
     final_artifact_transitions,
     walk_forward_transitions,
 )
@@ -307,13 +308,24 @@ def _fold(epoch_id, fold_id, period, *, control=None, test=None, frozen=None):
     }
 
 
-def _ok(total_return: float, benchmark: float = 0.02, *, parent=None):
+def _ok(total_return: float, benchmark: float = 0.02, *, parent=None, neutralized=...):
+    """One ``parent_control`` block whose window is the whole transition.
+
+    ``neutralized`` is what the transition is actually graded on; it defaults
+    to the raw excess so a fixture only has to state it where the two disagree.
+    """
+
     return {
         "status": "ok",
         "parent_strategy_artifact_id": parent,
         "validation_result": {
             "total_return": total_return,
-            "benchmark": {"benchmark_return": benchmark},
+            "benchmark": {
+                "benchmark_return": benchmark,
+                "neutralized_excess_return": (
+                    round(total_return - benchmark, 6) if neutralized is ... else neutralized
+                ),
+            },
         },
     }
 
@@ -335,6 +347,8 @@ def test_walk_forward_transitions_count_the_final_epochs_parent_controls():
         "epoch_id": "epoch_002",
         "transitions": 3,
         "positive_excess": 1,
+        # The failed control proved nothing; it is not an unmeasured grade.
+        "unmeasured": 0,
         # No control here ran a null control.
         "mean_excess_percentile": None,
     }
@@ -348,8 +362,8 @@ def test_walk_forward_transitions_count_the_final_epochs_parent_controls():
 
 def test_walk_forward_transitions_use_frozen_tests_with_a_test_stage():
     records = [
-        _fold("epoch_001", "fold_2023", "20220101..20221231", test={"total_return": 0.05, "benchmark": {"benchmark_return": 0.02}}),
-        _fold("epoch_001", "fold_2024", "20230101..20231231", test={"total_return": 0.01, "benchmark": {"benchmark_return": 0.02}}),
+        _fold("epoch_001", "fold_2023", "20220101..20221231", test={"total_return": 0.05, "benchmark": {"benchmark_return": 0.02, "neutralized_excess_return": 0.03}}),
+        _fold("epoch_001", "fold_2024", "20230101..20231231", test={"total_return": 0.01, "benchmark": {"benchmark_return": 0.02, "neutralized_excess_return": -0.01}}),
         _fold("epoch_001", "fold_2025", "20240101..20241231", test={"status": "failed", "error": "boom"}),
     ]
     assert walk_forward_transitions(records, epoch_id="epoch_001", test_stage=True) == {
@@ -357,12 +371,15 @@ def test_walk_forward_transitions_use_frozen_tests_with_a_test_stage():
         "epoch_id": "epoch_001",
         "transitions": 3,
         "positive_excess": 1,
+        "unmeasured": 0,
         # A frozen Test is never ranked against a null control.
         "mean_excess_percentile": None,
     }
-    # Without a benchmark block an excess return cannot be shown at all.
+    # Without a benchmark block the grade cannot be established at all: the
+    # transition is not positive AND is reported as unmeasured.
     records[0]["test_result"] = {"total_return": 0.05}
-    assert walk_forward_transitions(records, epoch_id="epoch_001", test_stage=True)["positive_excess"] == 0
+    counted = walk_forward_transitions(records, epoch_id="epoch_001", test_stage=True)
+    assert (counted["positive_excess"], counted["unmeasured"]) == (0, 1)
     assert json.dumps(walk_forward_transitions(records, epoch_id="epoch_001", test_stage=True))
 
 
@@ -392,6 +409,7 @@ def test_final_artifact_transitions_count_only_the_shipped_artifacts_own():
         "epoch_id": "epoch_001",
         "transitions": 0,
         "positive_excess": 0,
+        "unmeasured": 0,
     }
     own = final_artifact_transitions(
         records, epoch_id="epoch_001", test_stage=False, artifact_id="strategy_a"
@@ -400,8 +418,8 @@ def test_final_artifact_transitions_count_only_the_shipped_artifacts_own():
     # With a Test stage the transition is the Fold's own frozen Test, so it
     # belongs to that Fold's frozen artifact.
     tested = [
-        _fold("epoch_001", "fold_2024", "20240101..20241231", test={"total_return": 0.05, "benchmark": {"benchmark_return": 0.02}}, frozen="strategy_a"),
-        _fold("epoch_001", "fold_2025", "20250101..20251231", test={"total_return": 0.05, "benchmark": {"benchmark_return": 0.02}}, frozen="strategy_b"),
+        _fold("epoch_001", "fold_2024", "20240101..20241231", test={"total_return": 0.05, "benchmark": {"benchmark_return": 0.02, "neutralized_excess_return": 0.03}}, frozen="strategy_a"),
+        _fold("epoch_001", "fold_2025", "20250101..20251231", test={"total_return": 0.05, "benchmark": {"benchmark_return": 0.02, "neutralized_excess_return": 0.03}}, frozen="strategy_b"),
     ]
     assert final_artifact_transitions(
         tested, epoch_id="epoch_001", test_stage=True, artifact_id="strategy_b"
@@ -415,7 +433,7 @@ def test_final_artifact_transitions_count_only_the_shipped_artifacts_own():
     )["transitions"] == 0
 
 
-def _sub_window(label, start, end, *, ret, benchmark, turnover=5.0):
+def _sub_window(label, start, end, *, ret, benchmark, turnover=5.0, neutralized=None):
     return {
         "kind": "quarter",
         "label": label,
@@ -426,6 +444,11 @@ def _sub_window(label, start, end, *, ret, benchmark, turnover=5.0):
         "return": ret,
         "benchmark_return": benchmark,
         "excess_return": ret - benchmark,
+        # Joined in by attach_sub_window_benchmark from the window's own style
+        # analysis; the transition is graded on it.
+        "neutralized_excess_return": (
+            round(ret - benchmark, 6) if neutralized is None else neutralized
+        ),
         "sharpe": 0.5,
         "max_drawdown": 0.03,
         "turnover": turnover,
@@ -468,7 +491,11 @@ def test_the_step_result_is_the_new_periods_sub_window_priced_like_a_result():
     assert (step["start"], step["end"]) == ("20230403", "20230630")
     # Result-shaped, so the ledger and the report read it like any other result.
     assert step["total_return"] == 0.02
-    assert step["benchmark"] == {"benchmark_return": 0.01, "excess_return": 0.01}
+    assert step["benchmark"] == {
+        "benchmark_return": 0.01,
+        "excess_return": 0.01,
+        "neutralized_excess_return": 0.01,
+    }
     assert step["trade_count"] == 7
     # Priced on the step's own turnover, not the whole window's.
     cost = step["cost_sensitivity"]
@@ -493,12 +520,18 @@ def test_a_transition_is_graded_on_the_step_when_the_window_carries_one():
         "parent_strategy_artifact_id": "strategy_a",
         "validation_result": {
             "total_return": 0.20,
-            "benchmark": {"benchmark_return": 0.05},
+            "benchmark": {
+                "benchmark_return": 0.05,
+                "neutralized_excess_return": 0.15,
+            },
         },
         "step_result": {
             "label": "2023Q2",
             "total_return": 0.02,
-            "benchmark": {"benchmark_return": 0.04},
+            "benchmark": {
+                "benchmark_return": 0.04,
+                "neutralized_excess_return": -0.02,
+            },
         },
         # The window's null looks decisive; the step's own percentile is the
         # one that describes the transition.
@@ -514,6 +547,7 @@ def test_a_transition_is_graded_on_the_step_when_the_window_carries_one():
         "epoch_id": "epoch_001",
         "transitions": 1,
         "positive_excess": 0,
+        "unmeasured": 0,
         "mean_excess_percentile": 0.31,
     }
     # An older ledger has no step_result: the whole window stays the transition,
@@ -521,3 +555,105 @@ def test_a_transition_is_graded_on_the_step_when_the_window_carries_one():
     del control["step_result"]
     counted = walk_forward_transitions(records, epoch_id="epoch_001", test_stage=False)
     assert (counted["positive_excess"], counted["mean_excess_percentile"]) == (1, 0.98)
+
+
+def test_a_transition_is_graded_on_the_neutralized_excess_not_the_raw_one(tmp_path: Path):
+    """CSI 300 fell 21.6% in 2022 and rose 16-18% in 2024Q3/2025Q3, so a raw
+    excess over it grades a transition partly on which quarter it landed in.
+    The sign therefore comes from the size/beta-neutralized figure, and the raw
+    one stays in the record for reading only.
+    """
+
+    from autotrade.pipelines.ledger import transition_neutralized_excess
+
+    beta = _fold(
+        "epoch_001",
+        "fold_a",
+        "p1",
+        control=_ok(0.10, -0.10, parent="strategy_a", neutralized=-0.04),
+    )
+    real = _fold(
+        "epoch_001",
+        "fold_b",
+        "p2",
+        control=_ok(0.01, 0.02, parent="strategy_a", neutralized=0.03),
+    )
+    records = [_fold("epoch_001", "fold_0", "p0", frozen="strategy_a"), beta, real]
+    counted = walk_forward_transitions(records, epoch_id="epoch_001", test_stage=False)
+    # Raw would read 2/2 positive (+20pp and -1pp); neutralized reads 1/2.
+    assert (counted["transitions"], counted["positive_excess"]) == (2, 1)
+    assert transition_neutralized_excess(
+        epoch_transitions(records, epoch_id="epoch_001", test_stage=False)[0]
+    ) == -0.04
+
+
+def test_a_transition_without_a_recorded_neutralized_excess_is_derived_then_failed(
+    tmp_path: Path,
+):
+    """Compatibility, and its limit.
+
+    Records written before results carried a per-quarter neutralized excess
+    still reference the replay their result came from, and the style sidecar
+    beside it holds the three daily series the attribution ran on -- so the
+    same figure is recomputed for the graded span. When even that is
+    unavailable the transition is reported as ``unmeasured`` and the verdict
+    fails on it; it is never graded on the raw excess instead.
+    """
+
+    from autotrade.environment.replay.style import STYLE_ARTIFACT_NAME
+    from autotrade.pipelines.config import AcceptanceRules
+
+    result_dir = tmp_path / "valid_abc"
+    result_dir.mkdir()
+    days = [f"202301{day:02d}" for day in range(3, 27)]
+    (result_dir / STYLE_ARTIFACT_NAME).write_text(
+        json.dumps(
+            {
+                # A book that simply rode a rising benchmark: raw excess is
+                # positive, the neutralized intercept is not.
+                "strategy_daily": [[day, 0.004] for day in days],
+                "benchmark_daily": [[day, 0.003] for day in days],
+                "size_factor_daily": [
+                    [day, 0.001 if index % 2 else -0.001] for index, day in enumerate(days)
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    control = {
+        "status": "ok",
+        "parent_strategy_artifact_id": "strategy_a",
+        "validation_result_ref": str(result_dir / "result.json"),
+        "validation_result": {"total_return": 0.20, "benchmark": {"benchmark_return": 0.05}},
+        "step_result": {
+            "label": "2023Q1",
+            "start": days[0],
+            "end": days[-1],
+            "total_return": 0.02,
+            "benchmark": {"benchmark_return": 0.01},
+        },
+    }
+    records = [
+        _fold("epoch_001", "fold_0", "p0", frozen="strategy_a"),
+        _fold("epoch_001", "fold_1", "p1", control=control),
+    ]
+    derived = walk_forward_transitions(records, epoch_id="epoch_001", test_stage=False)
+    assert (derived["transitions"], derived["unmeasured"]) == (1, 0)
+    # Derived from the sidecar, and it disagrees with the raw +1pp excess.
+    assert derived["positive_excess"] == 0
+
+    # No sidecar to fall back on: unmeasured, and the verdict says so instead
+    # of grading the transition on its raw excess.
+    control["validation_result_ref"] = str(tmp_path / "gone" / "result.json")
+    unmeasured = walk_forward_transitions(records, epoch_id="epoch_001", test_stage=False)
+    assert (unmeasured["transitions"], unmeasured["unmeasured"]) == (1, 1)
+    passing = {
+        "total_return": 0.10,
+        "sharpe": 1.0,
+        "max_drawdown": -0.05,
+        "benchmark": {"benchmark_return": 0.02, "neutralized_excess_return": 0.03},
+    }
+    reasons = AcceptanceRules(confirmation_folds=0).heldout_verdict(passing, unmeasured)[
+        "reasons"
+    ]
+    assert "missing_transition_neutralized_excess(1/1)" in reasons

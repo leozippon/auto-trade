@@ -480,6 +480,61 @@ def replay_style_analysis(
     }
 
 
+def _series_pairs(value: object) -> list[tuple[str, float]]:
+    """``[[date, value], ...]`` from a stored analysis series, skipping junk."""
+
+    rows: list[tuple[str, float]] = []
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        return rows
+    for item in value:
+        if (
+            not isinstance(item, Sequence)
+            or isinstance(item, (str, bytes))
+            or len(item) != 2
+        ):
+            continue
+        try:
+            rows.append((_date_text(item[0]), float(item[1])))
+        except (TypeError, ValueError):
+            continue
+    return rows
+
+
+def window_neutralized_excess(
+    analysis: Mapping[str, object], *, start: str = "", end: str = ""
+) -> float | None:
+    """The neutralized excess of one span of an existing style analysis.
+
+    The sidecar stores the three daily series the attribution was run on, so
+    any sub-span of it can be re-regressed without replaying anything: the same
+    two-regressor OLS, the same annualization, just fewer days. This is the one
+    computation point for a span narrower than the whole window -- the
+    per-quarter figure ``attach_sub_window_benchmark`` writes into a result, and
+    the same figure the ledger derives for a transition recorded before results
+    carried it. ``None`` when the span has too few overlapping days to regress
+    (a transition graded on an unmeasurable number must not silently fall back
+    to the raw excess). An empty ``start``/``end`` takes the whole window.
+    """
+
+    strategy = [
+        (date, value)
+        for date, value in _series_pairs(analysis.get("strategy_daily"))
+        if (not start or date >= start) and (not end or date <= end)
+    ]
+    benchmark = dict(_series_pairs(analysis.get("benchmark_daily")))
+    size = dict(_series_pairs(analysis.get("size_factor_daily")))
+    if not strategy or not benchmark or not size:
+        return None
+    value = _neutralized_excess(strategy, benchmark, size).get("neutralized_excess_return")
+    return (
+        float(value)
+        if isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+        else None
+    )
+
+
 def benchmark_summary_block(analysis: Mapping[str, object]) -> dict[str, object] | None:
     """The compact benchmark projection an evaluation summary carries.
 
@@ -522,5 +577,6 @@ __all__ = [
     "benchmark_summary_block",
     "daily_returns_from_curve",
     "replay_style_analysis",
+    "window_neutralized_excess",
     "write_style_rollup",
 ]

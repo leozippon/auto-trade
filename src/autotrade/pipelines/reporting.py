@@ -35,6 +35,7 @@ from .ledger import (
     experiment_verdict,
     latest_fold_records,
     latest_heldout_records,
+    parent_control_excess,
     transition_null_control,
     transition_result,
 )
@@ -164,7 +165,9 @@ def walk_forward_report(folds: list[dict[str, object]]) -> list[dict[str, object
 
     Each transition is scored on the result ``ledger.transition_result`` names:
     the Fold's new period when the Validation window trails over several,
-    otherwise the whole window. The ``chain`` block is the record the process is
+    otherwise the whole window. ``neutralized_excess_return`` is the figure the
+    graduation term counts a transition as positive on; the raw excess rides
+    beside it as description. The ``chain`` block is the record the process is
     judged by — the transitions compounded as one account against the benchmark
     compounded the same way — so it reads as an equity curve rather than a list
     of unrelated windows.
@@ -206,6 +209,10 @@ def walk_forward_report(folds: list[dict[str, object]]) -> list[dict[str, object
                     if total is not None and benchmark_return is not None
                     else None
                 ),
+                # The figure the graduation term grades this transition on
+                # (``ledger.parent_control_excess``); the raw excess beside it
+                # carries whatever the benchmark itself did in the span.
+                "neutralized_excess_return": _num(parent_control_excess(control)),
                 "excess_at_2x_slippage": (
                     _num(cost.get("excess_at_2x_slippage")) if isinstance(cost, dict) else None
                 ),
@@ -226,6 +233,13 @@ def walk_forward_report(folds: list[dict[str, object]]) -> list[dict[str, object
             "transitions": transitions,
             "mean_excess_return": _mean(
                 [row["excess_return"] for row in transitions if row["excess_return"] is not None]
+            ),
+            "mean_neutralized_excess_return": _mean(
+                [
+                    row["neutralized_excess_return"]
+                    for row in transitions
+                    if row["neutralized_excess_return"] is not None
+                ]
             ),
             "mean_sharpe": _mean(
                 [row["sharpe"] for row in transitions if row["sharpe"] is not None]

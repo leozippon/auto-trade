@@ -286,11 +286,14 @@ class AcceptanceRules:
         Sharpe, and stayed within the experiment's ``max_drawdown`` — the one
         place that cap decides an outcome — and (b) the final
         Epoch's walk-forward transitions (``ledger.walk_forward_transitions``)
-        show a positive excess return in at least two thirds of them (rounded
-        up). Otherwise ``discarded`` with every failing reason. A missing or
+        show a positive *neutralized* excess in at least two thirds of them
+        (rounded up), on the same caliber (a) applies to Held-out itself.
+        Otherwise ``discarded`` with every failing reason. A missing or
         non-finite input is itself a failing reason: a replay that cannot
-        prove the conditions did not pass. Term (b) is ``not_applicable`` when
-        the schedule has no transitions, and the verdict then rests on (a).
+        prove the conditions did not pass, and a transition whose neutralized
+        excess could not be established at all is named in its own reason
+        rather than graded on the raw number. Term (b) is ``not_applicable``
+        when the schedule has no transitions, and the verdict then rests on (a).
 
         Term (b) scores the development chain, most of whose transitions
         replayed artifacts this one replaced. So whenever the schedule produced
@@ -389,6 +392,17 @@ class AcceptanceRules:
                 "walkforward_excess_inconsistent("
                 f"{consistency['positive_excess']}/{consistency['transitions']}"
                 f"<{consistency['required']})"
+            )
+        # A transition whose neutralized excess could not be established at all
+        # has no sign, and the terms below count it as not positive. Say so as
+        # its own reason: the alternative readings are grading it on the raw
+        # excess, which this gate exists to stop, or letting an unknown sign
+        # pass as a measured negative.
+        unmeasured = _count((walk_forward or {}).get("unmeasured")) or 0
+        if unmeasured:
+            reasons.append(
+                "missing_transition_neutralized_excess("
+                f"{unmeasured}/{consistency['transitions']})"
             )
         reasons.extend(
             self._final_artifact_reasons(final_artifact, chain=consistency)

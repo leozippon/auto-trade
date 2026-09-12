@@ -1436,7 +1436,12 @@ def test_a_fold_that_kept_its_parent_still_publishes_return_numbers(
                         "total_return": 0.022,
                         "sharpe": 0.84,
                         "max_drawdown": 0.035,
-                        "benchmark": {"benchmark_return": -0.051},
+                        "benchmark": {
+                            "benchmark_return": -0.051,
+                            # The quarter's own neutralized excess: the raw
+                            # +7.3pp is mostly the benchmark's -5.1pp quarter.
+                            "neutralized_excess_return": 0.008,
+                        },
                     },
                     "null_control": {
                         "excess_percentile": 0.352,
@@ -1467,6 +1472,7 @@ def test_a_fold_that_kept_its_parent_still_publishes_return_numbers(
         "period_end": "20230630",
         "return": 0.022,
         "excess_return": pytest.approx(0.073),
+        "neutralized_excess_return": 0.008,
         "sharpe": 0.84,
         "max_drawdown": 0.035,
         "excess_percentile": 0.794,
@@ -2555,7 +2561,10 @@ class WebuiBackendTest(unittest.TestCase):
                     "total_return": 0.08,
                     "sharpe": 0.60,
                     "max_drawdown": 0.07,
-                    "benchmark": {"benchmark_return": 0.03},
+                    "benchmark": {
+                        "benchmark_return": 0.03,
+                        "neutralized_excess_return": 0.05,
+                    },
                 },
             },
             # Lost to the benchmark. A trailing window, so the console must
@@ -2578,7 +2587,10 @@ class WebuiBackendTest(unittest.TestCase):
                     "total_return": 0.01,
                     "sharpe": 0.10,
                     "max_drawdown": 0.09,
-                    "benchmark": {"benchmark_return": 0.04},
+                    "benchmark": {
+                        "benchmark_return": 0.04,
+                        "neutralized_excess_return": -0.03,
+                    },
                 },
                 "null_control": {
                     "k": 500,
@@ -3560,6 +3572,8 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertAlmostEqual(beat["return"], 0.08)
         # Excess is measured against the control's own benchmark.
         self.assertAlmostEqual(beat["excess_return"], 0.05)
+        # The graded figure rides beside the raw one on the same row.
+        self.assertAlmostEqual(beat["neutralized_excess_return"], 0.05)
         self.assertAlmostEqual(beat["sharpe"], 0.60)
         self.assertAlmostEqual(beat["max_drawdown"], 0.07)
         self.assertIsNone(beat["excess_percentile"])
@@ -3574,6 +3588,7 @@ class WebuiBackendTest(unittest.TestCase):
         )
         self.assertAlmostEqual(lost["return"], 0.01)
         self.assertAlmostEqual(lost["excess_return"], -0.03)
+        self.assertAlmostEqual(lost["neutralized_excess_return"], -0.03)
         self.assertAlmostEqual(lost["sharpe"], 0.10)
         self.assertAlmostEqual(lost["excess_percentile"], 0.42)
         # A failed control keeps its status and carries no numbers at all.
@@ -3587,6 +3602,7 @@ class WebuiBackendTest(unittest.TestCase):
                 "period_end": "20251230",
                 "return": None,
                 "excess_return": None,
+                "neutralized_excess_return": None,
                 "sharpe": None,
                 "max_drawdown": None,
                 "excess_percentile": None,
@@ -3638,10 +3654,14 @@ class WebuiBackendTest(unittest.TestCase):
                     "source": "parent_control",
                     "transitions": 3,
                     "positive_excess": 1,
+                    # A counted transition whose neutralized excess cannot be
+                    # established at all fails the verdict; none here does.
+                    "unmeasured": 0,
                     "required": 2,
-                    # +5% and −3% on the two scored transitions; the failed one
+                    # +5% and −3% neutralized on the two scored transitions —
+                    # the caliber the count itself was taken on; the failed one
                     # carries no excess and cannot be averaged as a zero.
-                    "mean_excess": pytest.approx(0.01),
+                    "mean_neutralized_excess": pytest.approx(0.01),
                     # Only the trailing transition ran a null control, and it is
                     # ranked on the span it is scored on (0.42, not the window's
                     # flattering 0.99).
@@ -3691,7 +3711,7 @@ class WebuiBackendTest(unittest.TestCase):
             (term["transitions"], term["positive_excess"], term["required"]),
             (3, 1, 2),
         )
-        self.assertAlmostEqual(term["mean_excess"], 0.01)
+        self.assertAlmostEqual(term["mean_neutralized_excess"], 0.01)
 
     def test_the_transition_rows_are_exactly_the_counted_transitions(self) -> None:
         """The table and the count are one record, read two ways.
@@ -3727,7 +3747,11 @@ class WebuiBackendTest(unittest.TestCase):
         ][1:]
         self.assertEqual(len(rows), counts["transitions"])
         self.assertEqual(
-            sum(1 for row in rows if (row["parent_control"]["excess_return"] or 0) > 0),
+            sum(
+                1
+                for row in rows
+                if (row["parent_control"]["neutralized_excess_return"] or 0) > 0
+            ),
             counts["positive_excess"],
         )
         # A trailing window is scored on its new period and ranked against that
@@ -3740,14 +3764,18 @@ class WebuiBackendTest(unittest.TestCase):
         # not a missing transition.
         self.assertEqual(rows[2]["parent_control"]["status"], "failed")
         self.assertIsNone(rows[2]["parent_control"]["excess_return"])
-        # And the strip's mean excess is the mean of exactly these rows' own
-        # excesses — the failed one contributing nothing rather than a zero.
+        # And the strip's mean is the mean of exactly these rows' own graded
+        # figures — the failed one contributing nothing rather than a zero, and
+        # the raw excess riding beside it without deciding anything.
         scored = [
-            row["parent_control"]["excess_return"]
+            row["parent_control"]["neutralized_excess_return"]
             for row in rows
-            if row["parent_control"]["excess_return"] is not None
+            if row["parent_control"]["neutralized_excess_return"] is not None
         ]
-        self.assertEqual(term["mean_excess"], pytest.approx(sum(scored) / len(scored)))
+        self.assertEqual(
+            term["mean_neutralized_excess"], pytest.approx(sum(scored) / len(scored))
+        )
+        self.assertIsNotNone(rows[0]["parent_control"]["excess_return"])
 
     def test_verdict_publishes_the_shipped_artifacts_own_forward_record(self) -> None:
         """Term (b) counts the chain; only term (c) is about this artifact.

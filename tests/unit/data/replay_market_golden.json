@@ -540,6 +540,7 @@
    }
   }
  ],
+ "corporate_actions": [],
  "inference_dates": [
   "2023-08-21T08:30:00+08:00",
   "2023-08-22T08:30:00+08:00",
@@ -601,6 +602,7 @@
     "return": 0.000685,
     "benchmark_return": null,
     "excess_return": null,
+    "neutralized_excess_return": null,
     "sharpe": 1.351186,
     "max_drawdown": 0.001337,
     "turnover": 0.189256,

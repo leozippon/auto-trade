@@ -190,16 +190,21 @@ def test_local_worker_regular_folds_go_straight_to_held_out(tmp_path: Path):
     plan = json.loads((experiment / "hitl/schedule.json").read_text(encoding="utf-8"))
     assert [row["kind"] for row in plan["sessions"]] == ["fold", "fold", "heldout"]
     # The deterministic baseline holds cash (zero Sharpe) and the local daily
-    # fixture carries no benchmark series (so no neutralized excess either), so the verdict names all three, and the
-    # one walk-forward transition (cash vs no benchmark) proves nothing. That
-    # transition replayed the very artifact Held-out ships (the second Fold
-    # kept it), so term (c) has evidence to read and finds it unproven.
+    # fixture carries no benchmark series (so no neutralized excess either), so
+    # the verdict names all three, and the one walk-forward transition (cash vs
+    # no benchmark) proves nothing: with neither a recorded neutralized excess
+    # nor a style sidecar to derive one from, its grade is unmeasurable and the
+    # verdict says so in its own reason rather than reading the raw excess
+    # instead. That transition replayed the very artifact Held-out ships (the
+    # second Fold kept it), so term (c) has evidence to read and finds it
+    # unproven.
     assert heldout["verdict"]["status"] == "discarded"
     assert heldout["verdict"]["reasons"] == [
         "missing_benchmark_return",
         "missing_neutralized_excess_return",
         "sharpe_not_positive",
         "walkforward_excess_inconsistent(0/1<1)",
+        "missing_transition_neutralized_excess(1/1)",
         "final_artifact_forward_excess_inconsistent(0/1<1)",
     ]
     assert result["verdict"]["status"] == "discarded"

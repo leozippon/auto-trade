@@ -1663,14 +1663,14 @@ function transitionsStrip(detail) {
       label: `超额为正（${epochShort(epochId)}）`,
       value: `${term.positive_excess}/${term.transitions}${required === null ? "" : `　需 ≥${required}`}`,
       cls: required === null ? "" : term.positive_excess >= required ? "pos" : "neg",
-      title: `末个 Epoch 的 ${term.transitions} 次样本外过渡（取自各 Fold 的${source}）里，${term.positive_excess} 次相对沪深300的超额为正。毕业按 ⌈2/3⌉ 需 ${required ?? "—"} 次。`,
+      title: `末个 Epoch 的 ${term.transitions} 次样本外过渡（取自各 Fold 的${source}）里，${term.positive_excess} 次的中性化超额为正。毕业按 ⌈2/3⌉ 需 ${required ?? "—"} 次；原始超额只作展示，不参与计数。${term.unmeasured ? `其中 ${term.unmeasured} 次算不出中性化超额，按未证明计并使毕业不通过。` : ""}`,
     },
     {
-      label: "平均新季超额",
-      value: fmtPct(term.mean_excess),
-      cls: signCls(term.mean_excess),
+      label: "平均新季中性化超额",
+      value: fmtPct(term.mean_neutralized_excess),
+      cls: signCls(term.mean_neutralized_excess),
       title:
-        "这些过渡在各自计分区间（验证窗口跨多个季度时只算本 Fold 的新季度）相对沪深300的平均超额收益。只作阅读参考，不参与毕业判定。",
+        "这些过渡在各自计分区间（验证窗口跨多个季度时只算本 Fold 的新季度）中性化后的平均超额：与计数同口径。只作阅读参考，不参与毕业判定。",
     },
     {
       label: "平均 null 分位",
@@ -1785,9 +1785,17 @@ function walkForwardPanel(detail) {
             "th",
             {
               title:
-                "父本在计分区间相对沪深300的超额收益，> 0 才算这次过渡通过",
+                "父本在计分区间相对沪深300的原始超额收益，只作展示：沪深300 自身的涨跌会直接进入这个数",
             },
             "父本超额",
+          ),
+          el(
+            "th",
+            {
+              title:
+                "父本在计分区间中性化（基准 + 规模）后的超额，> 0 才算这次过渡通过；算不出来时按未证明计，不退回原始超额",
+            },
+            "中性化超额",
           ),
           el("th", { title: "父本在计分区间日收益的年化 Sharpe" }, "父本 Sharpe"),
           el("th", { title: "父本在计分区间的峰谷回撤" }, "父本回撤"),
@@ -1822,8 +1830,17 @@ function walkForwardPanel(detail) {
             el("td", { class: signCls(control.return) }, fmtPct(control.return)),
             el(
               "td",
-              { class: signCls(control.excess_return) },
+              { class: "mode-note" },
               fmtPct(control.excess_return),
+            ),
+            el(
+              "td",
+              { class: signCls(control.neutralized_excess_return) },
+              control.status === "ok" &&
+                (control.neutralized_excess_return === null ||
+                  control.neutralized_excess_return === undefined)
+                ? "未证明"
+                : fmtPct(control.neutralized_excess_return),
             ),
             el("td", { class: signCls(control.sharpe) }, fmtSharpe(control.sharpe)),
             el("td", {}, fmtPct(control.max_drawdown)),
@@ -2105,12 +2122,12 @@ function transitionCardLine(item) {
     el(
       "span",
       {},
-      `${required === null ? "" : ` · 需 ≥${required}`} · 新季均 `,
+      `${required === null ? "" : ` · 需 ≥${required}`} · 新季中性化均 `,
     ),
     el(
       "span",
-      { class: `num ${signCls(term.mean_excess)}` },
-      fmtPct(term.mean_excess),
+      { class: `num ${signCls(term.mean_neutralized_excess)}` },
+      fmtPct(term.mean_neutralized_excess),
     ),
   ];
   if (own !== null && own !== undefined)

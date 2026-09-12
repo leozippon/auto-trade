@@ -1877,6 +1877,10 @@ def _step_result(
         "benchmark": {
             "benchmark_return": row.get("benchmark_return"),
             "excess_return": row.get("excess_return"),
+            # The figure the transition is actually graded on: the quarter's
+            # own size/beta-neutralized excess, computed with the window's
+            # attribution rather than re-derived here.
+            "neutralized_excess_return": row.get("neutralized_excess_return"),
         },
         "sharpe": row.get("sharpe"),
         "max_drawdown": row.get("max_drawdown"),

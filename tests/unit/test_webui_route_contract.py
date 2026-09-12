@@ -434,7 +434,7 @@ def test_the_walk_forward_counts_the_console_reads_are_served() -> None:
 
     counts = {"source": "parent_control", "transitions": 3, "positive_excess": 1}
     epoch_served = set(
-        _walk_forward_view([], "epoch_001", [], test_stage=False, revealed=False)
+        _walk_forward_view([], "epoch_001", test_stage=False, revealed=False)
     )
     verdict_served = set(AcceptanceRules.walk_forward_consistency(counts))
     # The table below the fold and the strip above it read the same block.

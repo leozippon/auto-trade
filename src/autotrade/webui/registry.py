@@ -44,6 +44,9 @@ from autotrade.pipelines.ledger import (
     latest_heldout_records,
     paper_candidate,
     transition_null_control,
+    epoch_transitions,
+    parent_control_excess,
+    transition_neutralized_excess,
     transition_result,
     walk_forward_transitions,
 )
@@ -279,11 +282,12 @@ def _mean(values: list[float]) -> float | None:
 
 
 def _excess_return(result: object) -> float | None:
-    """One replay result's return over its benchmark, ``None`` without both.
+    """One replay result's raw return over its benchmark, ``None`` without both.
 
-    The same subtraction ``ledger._excess_positive`` grades a transition on, so
-    an excess the console prints and the count the graduation term reads can
-    never come from different arithmetic.
+    Descriptive only: a transition's sign is decided on the neutralized excess
+    (``ledger.transition_neutralized_excess``), which is what the counts beside
+    this figure report, so the raw number is shown as context and never as the
+    grade.
     """
     if not isinstance(result, Mapping):
         return None
@@ -328,6 +332,9 @@ def _parent_control_view(record: Mapping[str, object]) -> dict[str, object] | No
         "period_end": str(scored_end) if scored_end else None,
         "return": _number(result.get("total_return")),
         "excess_return": _excess_return(result),
+        # The figure this transition is graded on, beside the raw one it is not:
+        # the same function the counts above the table are taken with.
+        "neutralized_excess_return": _number(parent_control_excess(control)),
         "sharpe": _number(result.get("sharpe")),
         "max_drawdown": _number(result.get("max_drawdown")),
         # Where that excess sits inside random-name replays of the control's own
@@ -370,7 +377,6 @@ def _count(value: object) -> int | None:
 def _walk_forward_view(
     records: list[dict[str, object]],
     epoch_id: str,
-    epoch_folds: list[dict[str, object]],
     *,
     test_stage: bool,
     revealed: bool,
@@ -384,31 +390,37 @@ def _walk_forward_view(
     two-thirds bar the acceptance rules apply, served so the console states the
     threshold without restating the rule (``None`` without transitions).
 
-    Two diagnostics ride beside the count, because a bare 5/7 says nothing
-    about how much ground those five won: ``mean_excess`` is the average excess
-    the counted transitions carried, and ``mean_excess_percentile`` is where
-    those excesses sat inside random-name replays of their own trade skeletons
-    (the ledger's own figure, the one the verdict diagnostics publish). Neither
-    gates anything. The excesses are read off exactly the transitions the
-    ledger counted — each Fold's frozen Test with a Test stage, otherwise every
-    Fold after the Epoch's first (``ledger._transition_rows``) — so the mean
-    can never average a wider set than the count it sits next to.
+    Three diagnostics ride beside the count, because a bare 5/7 says nothing
+    about how much ground those five won: ``mean_neutralized_excess`` is the
+    average of the very figures the count was taken on,
+    ``mean_excess_percentile`` is where those transitions sat inside
+    random-name replays of their own trade skeletons (the ledger's own figure,
+    the one the verdict diagnostics publish), and ``unmeasured`` is how many
+    counted transitions carry no establishable neutralized excess at all — the
+    one diagnostic here that does fail the verdict. None of the means gates
+    anything. Every figure comes from the ledger's own transition rows, so the
+    mean can never average a wider set than the count it sits next to.
     """
     if test_stage and not revealed:
         return None
     counts = walk_forward_transitions(records, epoch_id=epoch_id, test_stage=test_stage)
-    scored = (
-        [record.get("test_result") for record in epoch_folds]
-        if test_stage
-        else [transition_result(record.get("parent_control")) for record in epoch_folds[1:]]
-    )
     return {
         "source": counts["source"],
         "transitions": counts["transitions"],
         "positive_excess": counts["positive_excess"],
+        "unmeasured": counts["unmeasured"],
         "required": AcceptanceRules.walk_forward_consistency(counts).get("required"),
-        "mean_excess": _mean(
-            [value for value in map(_excess_return, scored) if value is not None]
+        "mean_neutralized_excess": _mean(
+            [
+                value
+                for value in (
+                    transition_neutralized_excess(row)
+                    for row in epoch_transitions(
+                        records, epoch_id=epoch_id, test_stage=test_stage
+                    )
+                )
+                if value is not None
+            ]
         ),
         "mean_excess_percentile": _number(counts["mean_excess_percentile"]),
     }
@@ -807,7 +819,6 @@ def summarize_experiment(directory: Path) -> dict[str, object]:
                         "walk_forward": _walk_forward_view(
                             records,
                             epoch,
-                            epoch_folds,
                             test_stage=test_stage,
                             revealed=revealed,
                         ),

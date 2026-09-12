@@ -282,9 +282,10 @@ def sub_window_stats(
     leaves both empty and gets the replayed span instead, which reports the two
     end quarters partial unless the replay itself reaches the calendar bounds.
 
-    ``benchmark_return`` / ``excess_return`` stay ``None`` until the evaluation
-    backend joins the benchmark series in (``attach_sub_window_benchmark``):
-    the replay itself never reads an index.
+    ``benchmark_return`` / ``excess_return`` / ``neutralized_excess_return``
+    stay ``None`` until the evaluation backend joins the benchmark and size
+    series in (``attach_sub_window_benchmark``): the replay itself never reads
+    an index or a cross-section.
     """
 
     rows = sorted(
@@ -323,6 +324,7 @@ def sub_window_stats(
                 "return": _round(closing / opening - 1.0 if opening > 0 else 0.0),
                 "benchmark_return": None,
                 "excess_return": None,
+                "neutralized_excess_return": None,
                 "sharpe": _round(_annualized_sharpe(opening, equities)),
                 "max_drawdown": _round(_max_drawdown(opening, equities)),
                 "turnover": _round(
@@ -338,14 +340,27 @@ def sub_window_stats(
 def attach_sub_window_benchmark(
     summary: dict[str, object], style_analysis: Mapping[str, object]
 ) -> dict[str, object]:
-    """Fill each sub-window's benchmark and excess return, in place.
+    """Fill each sub-window's benchmark, excess and neutralized excess, in place.
 
-    ``compute_return_stats`` sees only the replay; the benchmark series is read
-    once, host-side, by ``replay_style_analysis``. The evaluation backend owns
-    both, so it closes the sub-window block here rather than each backend — or
-    each reader — re-deriving the join. A slot without a usable benchmark
-    leaves both fields ``None`` rather than reporting a fabricated zero.
+    ``compute_return_stats`` sees only the replay; the benchmark and size-factor
+    series are read once, host-side, by ``replay_style_analysis``. The
+    evaluation backend owns both, so it closes the sub-window block here rather
+    than each backend — or each reader — re-deriving the join. A slot without a
+    usable benchmark leaves the fields ``None`` rather than reporting a
+    fabricated zero.
+
+    The neutralized figure is the same two-regressor attribution the whole
+    window carries, re-run on the quarter's own days
+    (``style.window_neutralized_excess``). A walk-forward transition is graded
+    on one quarter and on that figure, so the quarter has to carry it: the raw
+    excess of a single quarter cannot separate an edge from a size or beta tilt
+    any better than a whole window's can.
     """
+
+    # Deferred: ``style`` imports this module for the trading-day constant and
+    # the equity-curve helpers, so the attribution function it owns can only be
+    # reached from here at call time.
+    from .style import window_neutralized_excess
 
     rows = summary.get("sub_windows")
     if not isinstance(rows, list):
@@ -384,6 +399,9 @@ def attach_sub_window_benchmark(
         row["benchmark_return"] = _round(benchmark)
         if isinstance(own, (int, float)) and not isinstance(own, bool):
             row["excess_return"] = _round(float(own) - benchmark)
+        row["neutralized_excess_return"] = window_neutralized_excess(
+            style_analysis, start=start, end=end
+        )
     return summary
 
 

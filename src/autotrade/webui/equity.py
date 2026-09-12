@@ -346,7 +346,10 @@ def parent_control_forward(
     window trails over several, the whole window otherwise) is ground no one
     chose the parent on. Those spans are exactly the walk-forward transitions
     ``ledger.walk_forward_transitions`` counts and they do not overlap, so
-    chaining them compounds the forward record and nothing else.
+    chaining them compounds the forward record and nothing else. It is a P&L
+    record, not the graduation term: the term counts a transition only when its
+    size/beta-neutralized excess is positive, while this line compounds the
+    actual returns of every span, including the benchmark move inside them.
 
     A Fold that inherited no parent had nothing to replay and owes nothing. A
     Fold that did but whose replay yields no days -- a control that failed

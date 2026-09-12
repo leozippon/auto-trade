@@ -21,11 +21,17 @@ from __future__ import annotations
 import json
 import math
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from statistics import NormalDist
 
 from autotrade.environment.replay.stats import TRADING_DAYS_PER_YEAR
-from autotrade.environment.replay.style import daily_returns_from_curve
+from autotrade.environment.replay.style import (
+    STYLE_ARTIFACT_NAME,
+    daily_returns_from_curve,
+    window_neutralized_excess,
+)
 from autotrade.environment.runtime import (
     append_versioned_jsonl,
     read_versioned_jsonl,
@@ -198,10 +204,24 @@ def _epoch_folds(
     )
 
 
+@dataclass(frozen=True)
+class Transition:
+    """One walk-forward transition: whose it is, its result, and where it lives.
+
+    ``result_ref`` points at the replay record the result was projected from,
+    which is where the neutralized excess of a span is recomputed when the
+    record itself does not carry one (:func:`transition_neutralized_excess`).
+    """
+
+    artifact_id: str | None
+    result: object
+    result_ref: str
+
+
 def _transition_rows(
     folds: list[dict[str, object]], *, test_stage: bool
-) -> list[tuple[str | None, object]]:
-    """``(artifact the transition scores, its result)`` for one Epoch, in order.
+) -> list[Transition]:
+    """The transitions of one Epoch, in schedule order.
 
     Without a Test stage a transition is the host's ``parent_control`` of every
     Fold after the Epoch's first, and the artifact it scores is the parent that
@@ -215,20 +235,51 @@ def _transition_rows(
 
     if test_stage:
         return [
-            (_artifact_id(record.get("frozen_strategy_artifact_id")), record.get("test_result"))
+            Transition(
+                _artifact_id(record.get("frozen_strategy_artifact_id")),
+                record.get("test_result"),
+                str(record.get("test_result_ref") or ""),
+            )
             for record in folds
         ]
-    rows: list[tuple[str | None, object]] = []
-    for record in folds[1:]:
-        control = record.get("parent_control")
-        control = control if isinstance(control, Mapping) else {}
-        rows.append(
-            (
-                _artifact_id(control.get("parent_strategy_artifact_id")),
-                transition_result(record.get("parent_control")),
-            )
-        )
-    return rows
+    return [
+        _parent_control_transition(record.get("parent_control")) for record in folds[1:]
+    ]
+
+
+def _parent_control_transition(control: object) -> Transition:
+    """One host parent control as the transition it is."""
+
+    control = control if isinstance(control, Mapping) else {}
+    return Transition(
+        _artifact_id(control.get("parent_strategy_artifact_id")),
+        transition_result(control),
+        str(control.get("validation_result_ref") or ""),
+    )
+
+
+def parent_control_excess(control: object) -> float | None:
+    """The neutralized excess one parent control is graded on, for readers that
+    hold a single Fold record rather than an Epoch's rows (the console row, the
+    report). Same function, same number as the count above it."""
+
+    return transition_neutralized_excess(_parent_control_transition(control))
+
+
+def epoch_transitions(
+    fold_records: list[dict[str, object]], *, epoch_id: str, test_stage: bool
+) -> list[Transition]:
+    """One Epoch's transitions as the counts were taken on them.
+
+    The public seam over :func:`_transition_rows` for readers that need the
+    transitions themselves rather than the totals -- the console averages the
+    same figures the count is taken on, so a tile and the number above it
+    cannot describe different sets.
+    """
+
+    return _transition_rows(
+        _epoch_folds(fold_records, epoch_id=epoch_id), test_stage=test_stage
+    )
 
 
 def walk_forward_transitions(
@@ -241,8 +292,10 @@ def walk_forward_transitions(
     on this Fold's Validation window, scored on its new period alone when the
     window trails over several (``transition_result``). With a Test stage it is
     each Fold's frozen Test. A transition counts as positive only when its
-    result exists and its excess return over the benchmark is > 0; a failed or
-    missing result is a transition that proved nothing.
+    size/beta-neutralized excess is > 0 (``transition_neutralized_excess``); a
+    failed or missing result is a transition that proved nothing, and one whose
+    neutralized excess cannot be established at all is reported as
+    ``unmeasured`` rather than graded on its raw excess.
 
     This is the development *chain's* record: the transitions it counts mostly
     replay earlier artifacts of the lineage, not the one Held-out ships. What
@@ -250,7 +303,7 @@ def walk_forward_transitions(
     :func:`final_artifact_transitions`.
     """
     folds = _epoch_folds(fold_records, epoch_id=epoch_id)
-    results = [result for _, result in _transition_rows(folds, test_stage=test_stage)]
+    rows = _transition_rows(folds, test_stage=test_stage)
     if test_stage:
         source = "frozen_test"
         percentiles: list[float] = []
@@ -273,8 +326,7 @@ def walk_forward_transitions(
     return {
         "source": source,
         "epoch_id": epoch_id,
-        "transitions": len(results),
-        "positive_excess": sum(1 for result in results if _excess_positive(result)),
+        **_counts(rows),
         # Diagnostic beside the count: where the transitions sat inside
         # random-name replays of their own trade skeletons, on average. Never
         # part of the term; None when no transition carried a null control.
@@ -305,12 +357,11 @@ def final_artifact_transitions(
     rows = _transition_rows(
         _epoch_folds(fold_records, epoch_id=epoch_id), test_stage=test_stage
     )
-    own = [result for owner, result in rows if owner == artifact_id]
+    own = [row for row in rows if row.artifact_id == artifact_id]
     return {
         "artifact_id": artifact_id,
         "epoch_id": epoch_id,
-        "transitions": len(own),
-        "positive_excess": sum(1 for result in own if _excess_positive(result)),
+        **_counts(own),
     }
 
 
@@ -393,17 +444,87 @@ def transition_null_control(control: object) -> Mapping[str, object] | None:
     return null
 
 
-def _excess_positive(result: object) -> bool:
+def transition_neutralized_excess(transition: Transition) -> float | None:
+    """The size/beta-neutralized excess one transition is graded on.
+
+    The single source for every reader of a transition's sign: the graduation
+    terms, the report and the console all call it, so none of them can grade on
+    a different number. CSI 300 fell 21.6% in 2022 and rose 16-18% in the 2024
+    and 2025 quarters, so a raw excess over it says as much about which quarter
+    a transition landed in as about the strategy; the neutralized figure is the
+    one that survives that.
+
+    Read in this order, and never past it: the figure the record carries; else
+    the same figure recomputed on the graded span from the replay's own style
+    sidecar (records written before results carried a per-quarter figure);
+    else ``None``. ``None`` means the transition's sign is unknown, which the
+    counts report as ``unmeasured`` and the verdict fails on -- falling back to
+    the raw excess would silently grade graduation on the number this rule
+    exists to stop using.
+    """
+
+    result = transition.result
     if not isinstance(result, Mapping) or result.get("status") == "failed":
-        return False
+        return None
     benchmark = result.get("benchmark")
-    total = result.get("total_return")
-    bench = benchmark.get("benchmark_return") if isinstance(benchmark, Mapping) else None
-    if isinstance(total, bool) or isinstance(bench, bool):
-        return False
-    if not isinstance(total, (int, float)) or not isinstance(bench, (int, float)):
-        return False
-    return float(total) - float(bench) > 0
+    recorded = finite_number(
+        benchmark.get("neutralized_excess_return") if isinstance(benchmark, Mapping) else None
+    )
+    if recorded is not None:
+        return recorded
+    return _derived_excess(
+        transition.result_ref,
+        str(result.get("start") or ""),
+        str(result.get("end") or ""),
+    )
+
+
+@lru_cache(maxsize=512)
+def _derived_excess(result_ref: str, start: str, end: str) -> float | None:
+    """The neutralized excess of one span, recomputed from the style sidecar.
+
+    Cached because the console re-reads the same transitions on every list and
+    detail request and a replay result never changes once written (a re-run
+    writes a new result directory): without it one experiment's twelve
+    transitions cost ~40 ms of sidecar parsing and regression per pass.
+    """
+
+    path = Path(result_ref or "")
+    if not result_ref:
+        return None
+    if path.name == "result.json":
+        path = path.parent
+    try:
+        analysis = json.loads((path / STYLE_ARTIFACT_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(analysis, Mapping):
+        return None
+    return window_neutralized_excess(analysis, start=start, end=end)
+
+
+def _counts(rows: Sequence[Transition]) -> dict[str, int]:
+    """How many transitions were counted, positive, and unmeasurable.
+
+    A failed or absent result proved nothing and is simply not positive, as it
+    always was. ``unmeasured`` is the narrower case this rule introduces: a
+    result that exists but whose neutralized excess could not be established
+    at all, which must fail the gate explicitly rather than be graded on the
+    raw excess instead.
+    """
+
+    measured = [transition_neutralized_excess(row) for row in rows]
+    return {
+        "transitions": len(rows),
+        "positive_excess": sum(1 for value in measured if value is not None and value > 0),
+        "unmeasured": sum(
+            1
+            for row, value in zip(rows, measured, strict=True)
+            if value is None
+            and isinstance(row.result, Mapping)
+            and row.result.get("status") != "failed"
+        ),
+    }
 
 
 # --- selection statistics (docs/pipeline-design.md §2.4) ---------------------

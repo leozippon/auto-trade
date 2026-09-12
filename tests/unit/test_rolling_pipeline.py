@@ -1083,7 +1083,10 @@ class RecordingEvaluator:
                 "benchmark": {
                     "label": "CSI 300",
                     "benchmark_return": 0.02,
-                    "neutralized_excess_return": 0.01,
+                    # Tracks the raw excess so a fixture that says "below the
+                    # benchmark" is below it on the figure transitions are
+                    # actually graded on.
+                    "neutralized_excess_return": round(self.returns[revision_id] - 0.02, 6),
                 },
             },
             f"result/{request.mode}/{revision_id}",

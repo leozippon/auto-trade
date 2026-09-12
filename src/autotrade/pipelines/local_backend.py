@@ -1435,7 +1435,17 @@ BATCH_CANDIDATE_SUMMARY_KEYS = (
 # A multi-year Validation window has one sub-window row per quarter, and a
 # batch multiplies that by the number of candidates. A row keeps the columns a
 # screening comparison is made on; the node's result.json keeps the full table.
-BATCH_SUB_WINDOW_KEYS = ("label", "return", "excess_return", "sharpe")
+# ``neutralized_excess_return`` rides with the raw one because a walk-forward
+# transition is graded on the new quarter's neutralized figure: a screening
+# comparison made on the raw column alone reads a different number than the
+# gate will.
+BATCH_SUB_WINDOW_KEYS = (
+    "label",
+    "return",
+    "excess_return",
+    "neutralized_excess_return",
+    "sharpe",
+)
 
 
 def batch_candidate_stats(summary: Mapping[str, object]) -> dict[str, object]:
