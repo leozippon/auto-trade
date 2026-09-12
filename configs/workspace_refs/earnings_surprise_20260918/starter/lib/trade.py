@@ -44,7 +44,7 @@ def run(context, candidate):
         return []
     if not _is_review(decision, latest_day, positions):
         return []
-    section["score"] = surprise.neutralize(section)
+    section["score"] = surprise.neutralize(section, candidate)
     ranked = section.sort_values(["score", "ts_code"], ascending=[False, True]).reset_index(drop=True)
     rank = {code: index for index, code in enumerate(ranked["ts_code"])}
     prices = ranked.set_index("ts_code")["close"]
