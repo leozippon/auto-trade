@@ -340,6 +340,21 @@ def already_created(experiment_id: str) -> bool:
     return (EXPERIMENTS_ROOT / experiment_id).is_dir() or experiment_id in archived_ids()
 
 
+def created_params(experiment_id: str) -> dict[str, object]:
+    """What this experiment was created with, or ``{}`` when it was not.
+
+    A round file's live-state decisions are taken once, while the console
+    creates the arm, and the arm then runs on the answer recorded here. So for
+    an arm that exists this file is the decision, and re-deriving it reads
+    state that has moved on since -- the source experiment has kept running.
+    """
+
+    path = EXPERIMENTS_ROOT / experiment_id / "hitl" / "params.json"
+    if not path.is_file():
+        return {}
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
 def normalize(params: dict[str, object]) -> dict[str, object]:
     """Run the console's create-time validation offline and return params.json.
 
@@ -512,11 +527,17 @@ class Round:
         # An arm value may be a zero-argument callable when the round can only
         # decide it against live state -- reading where another experiment got
         # to, say. It is resolved here, at create time, so the dry-run and the
-        # POST see the same answer and a refusal surfaces as a rejection.
-        arm = {
-            key: (value() if callable(value) else value)
-            for key, value in self.arms[experiment_id].items()
-        }
+        # POST see the same answer and a refusal surfaces as a rejection. An
+        # arm that already exists took that decision at ITS create and is
+        # running on it: its own params.json answers, so a round file stays
+        # readable as the definition of what was created, and a guard on live
+        # state judges the next arm rather than refusing history.
+        recorded = created_params(experiment_id)
+        arm: dict[str, object] = {}
+        for key, value in self.arms[experiment_id].items():
+            if callable(value):
+                value = recorded[key] if key in recorded else value()
+            arm[key] = value
         return {
             **base,
             **self.common_overrides,

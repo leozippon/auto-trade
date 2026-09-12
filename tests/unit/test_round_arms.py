@@ -17,6 +17,7 @@ from autotrade.environment.llm.model_profiles import LOCAL_QWEN_MODEL
 from autotrade.environment.tools.prior_policy import calendar_policy_violation
 from autotrade.pipelines.config import SNAPSHOT_CACHE_FORMAT_VERSION
 from autotrade.webui.manager import MAX_RUNNING_EXPERIMENTS
+from scripts.experiments import _round
 from scripts.experiments._round import (
     BASE_EXPECTED_DEFAULTS,
     EXPERIMENTS_ROOT,
@@ -383,3 +384,29 @@ def test_the_continuation_arm_refuses_a_source_that_has_frozen_nothing(tmp_path)
     _fixture_ledger(tmp_path, GITHUB_SOURCE, [])
     with pytest.raises(ValueError, match="no ledger|completed no Fold"):
         github_confirm_development_start(tmp_path)
+
+
+def test_a_created_arm_keeps_the_decision_it_was_created_with(tmp_path, monkeypatch) -> None:
+    """A live-state decision is taken once, while the console creates the arm.
+
+    The source keeps running afterwards, so re-deriving the decision later
+    answers for a source that has moved on -- and the create-time guard that
+    protects the NEXT arm would eventually refuse an arm that has been running
+    for days. The created params.json is what the arm is running on, and it is
+    what the round file reports; an arm still to be created is still decided,
+    and still refused, against live state.
+    """
+    monkeypatch.setattr(_round, "EXPERIMENTS_ROOT", tmp_path / "experiments")
+    created = tmp_path / "experiments" / "github_confirm_20260917" / "hitl"
+    created.mkdir(parents=True)
+    (created / "params.json").write_text(
+        json.dumps({"development_first_period": "2024Q2"}), encoding="utf-8"
+    )
+    params = ROUNDS["create_round_20260917"].request_params("github_confirm_20260917")
+    assert params["development_first_period"] == "2024Q2"
+
+    # Nothing created: the round file decides against live state again, and
+    # says why it cannot when the source is not there to read.
+    (created / "params.json").unlink()
+    with pytest.raises(ValueError, match="no ledger|completed no Fold|needs at least"):
+        ROUNDS["create_round_20260917"].request_params("github_confirm_20260917")
