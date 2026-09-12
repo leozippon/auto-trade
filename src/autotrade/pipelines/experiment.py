@@ -244,8 +244,18 @@ class RollingExperimentPipeline:
         *,
         parent: FrozenArtifact | None,
         prior: str = "",
+        confirmation: bool = False,
         session_context: dict[str, object] | None = None,
     ) -> FoldOutcome:
+        """Run one Fold session and freeze what it nominated.
+
+        ``confirmation`` marks one of the Folds that close the development
+        window (``AcceptanceRules.confirmation_folds``, decided by the schedule
+        in ``hitl_state.iter_development_sessions``): the session may only keep
+        the artifact in force, so ``finish_fold`` refuses a nomination that
+        would freeze new content and the baseline-anchor requirement is waived.
+        """
+
         assert_no_frozen_artifact_mutation(self.ledger.read())
         run_started = time.monotonic()
         run_id = f"run_{uuid.uuid4().hex}"
@@ -302,6 +312,7 @@ class RollingExperimentPipeline:
                         fold_period=self.config.fold_period,
                         validation_periods=self.config.validation_periods,
                         test_stage=self.config.test_stage,
+                        confirmation_fold=confirmation,
                         parent_control=control,
                         parent_control_null=control_null,
                         epoch_index=_epoch_index(epoch_id),
@@ -362,6 +373,7 @@ class RollingExperimentPipeline:
             # that bypassed the tool's contract, not a fold result.
             anchor_required = baseline_anchor_required(
                 has_parent=parent is not None,
+                confirmation_fold=confirmation,
                 passing_candidates=[
                     step
                     for step in session.steps

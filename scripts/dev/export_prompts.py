@@ -24,6 +24,7 @@ add_repo_src(__file__)
 
 from autotrade.agent.compact import COMPACT_SYSTEM_PROMPT
 from autotrade.agent.prompts import (
+    CONFIRMATION_FOLD_SECTION,
     CONVERGENCE_PHASE_PROMPT,
     DEFAULT_ANTI_OVERFIT_PROMPT,
     DEFAULT_CONVERGENCE_PROMPT,
@@ -315,6 +316,8 @@ def render() -> str:
         "",
         _block(
             f"{FOLD_DYNAMIC_CONTEXT_HEADER.strip()}\n\n"
+            f"{CONFIRMATION_FOLD_SECTION.strip()}\n"
+            "[只在 Development 窗口末尾保留的确认折注入，排在动态上下文最前]\n\n"
             "## 当前实验事实（可信运行事实，不是交易证据）\n"
             "{experiment_facts JSON，含 inputs/skills_index.json 引用}\n\n"
             "## 日级策略调度\n"

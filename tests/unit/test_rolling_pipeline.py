@@ -26,6 +26,7 @@ from autotrade.pipelines.agent_inbox import (
 )
 from autotrade.pipelines.agent_views import fold_development_summary, vs_parent_metrics
 from autotrade.pipelines.config import (
+    AcceptanceRules,
     MetaSessionResult,
     fold_session_deadline_seconds,
 )
@@ -1149,6 +1150,11 @@ def _regular_fold_pipeline(tmp_path: Path, evaluator, *, max_steps: int = 1, tes
         fold_period="quarter",
         test_stage=test_stage,
         max_steps_per_fold=max_steps,
+        # Two Folds give at most one transition, so the confirmation term is
+        # set to one here: these tests are about what reaches the verdict, not
+        # about how many confirmation Folds a real 13-Fold window reserves
+        # (test_fold_calendar and test_finish_fold cover that).
+        acceptance=AcceptanceRules(confirmation_folds=1),
     )
     ledger = ExperimentLedger(config.ledger_path)
     artifacts = Artifacts(revisions[0], tmp_path / "frozen")
@@ -1531,7 +1537,7 @@ def test_single_window_fold_has_no_frozen_test_and_held_out_graduates(tmp_path: 
         # is not applicable, and term (c) with it — nothing in this schedule
         # could confirm any artifact forward — so Held-out alone decides.
         "walk_forward": {"status": "not_applicable", "transitions": 0},
-        "heldout_min_final_transitions": 1,
+        "confirmation_folds": 2,
         # Selection diagnostics of the Fold that froze the strategy, carried
         # beside the metrics: one candidate here, no deflated Sharpe, and this
         # fake evaluator runs no null control.
@@ -1606,8 +1612,6 @@ def test_held_out_discards_with_every_failing_reason(tmp_path: Path, summary, re
 
 
 def test_held_out_without_a_benchmark_block_cannot_graduate():
-    from autotrade.pipelines.config import AcceptanceRules
-
     rules = AcceptanceRules()
     verdict = rules.heldout_verdict({"total_return": 0.2, "sharpe": 2.0, "max_drawdown": -0.01})
     assert verdict["status"] == "discarded"

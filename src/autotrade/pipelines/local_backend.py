@@ -3098,6 +3098,8 @@ class LLMFoldDeveloper:
                         else None
                     ),
                     same_mechanism=deployment,
+                    parent_models=source_models,
+                    confirmation_fold=request.confirmation_fold,
                 )
             )
             budgeted = SessionBudgetLLM(self.llm, budget=shared_budget, role="main")
@@ -3147,6 +3149,7 @@ class LLMFoldDeveloper:
                     prior_prompt=prior_text,
                     fold_exploration_directive=self.fold_exploration_directive,
                     fold_directive=request.directive,
+                    confirmation_fold=request.confirmation_fold,
                 ),
                 config=AgentSessionConfig(
                     mode="fold",

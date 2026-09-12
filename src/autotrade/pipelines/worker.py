@@ -180,7 +180,7 @@ _ALLOWED_PARAMS = {
     "max_drawdown",
     "cost_stress_multiplier",
     "heldout_min_trades",
-    "heldout_min_final_transitions",
+    "confirmation_folds",
     "deployment_adjustment_start",
     "deployment_max_backtests",
     "deployment_pit_views_seed",
@@ -742,9 +742,9 @@ def resolve_worker_options(
             heldout_min_trades=_nonnegative_int(
                 params.get("heldout_min_trades", 0), "heldout_min_trades"
             ),
-            heldout_min_final_transitions=_nonnegative_int(
-                params.get("heldout_min_final_transitions", 1),
-                "heldout_min_final_transitions",
+            confirmation_folds=_nonnegative_int(
+                params.get("confirmation_folds", AcceptanceRules().confirmation_folds),
+                "confirmation_folds",
             ),
         ),
         schedule=schedule,
@@ -1268,6 +1268,7 @@ def run_local_interactive_worker(
             session.fold,
             parent=session_parent,
             prior=str(state["prior"]),
+            confirmation=session.confirmation,
             session_context=context,
         )
         state["parent"] = outcome.frozen
@@ -1371,6 +1372,7 @@ def _write_session_plan(
         folds,
         meta_enabled=meta_enabled,
         meta_learning_fold_interval=options.rolling.meta_learning_fold_interval,
+        confirmation_folds=options.rolling.acceptance.confirmation_folds,
     )
     plan = build_session_plan(
         options.rolling.epochs,
@@ -1378,6 +1380,7 @@ def _write_session_plan(
         heldout,
         meta_enabled=meta_enabled,
         meta_learning_fold_interval=options.rolling.meta_learning_fold_interval,
+        confirmation_folds=options.rolling.acceptance.confirmation_folds,
         deployment=_deployment_fold(options, trading_days),
     )
     write_json_atomic(hitl / SCHEDULE_NAME, plan)

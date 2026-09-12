@@ -19,7 +19,7 @@ from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.llm.model_profiles import MODEL_CHOICES
 from autotrade.environment.sandbox import SandboxSpec
 
-from .config import DEFAULT_PIT_VIEWS_SEED, rolling_default
+from .config import DEFAULT_PIT_VIEWS_SEED, AcceptanceRules, rolling_default
 from .folds import FoldSpec
 from .meta_schedule import meta_learning_trigger_counts, meta_session_key
 
@@ -122,7 +122,7 @@ WEB_CREATE_DEFAULTS: dict[str, object] = {
     "max_drawdown": 0.25,
     "cost_stress_multiplier": 1.0,
     "heldout_min_trades": 0,
-    "heldout_min_final_transitions": 1,
+    "confirmation_folds": AcceptanceRules().confirmation_folds,
     "deployment_adjustment_start": rolling_default("deployment_adjustment_start"),
     "deployment_max_backtests": rolling_default("deployment_max_backtests"),
     # The tree the deployment adjustment's two views are hardlinked from;
@@ -503,6 +503,11 @@ class DevelopmentSession:
     epoch_id: str
     fold: FoldSpec | None
     fold_index: int = 0
+    # A Fold session inside the reserved confirmation tail of the last Epoch
+    # (``AcceptanceRules.confirmation_folds``). Decided here, with the whole
+    # schedule in hand, and carried into the plan of record so the worker, the
+    # session and the console prompt preview all read one answer.
+    confirmation: bool = False
 
 
 def iter_development_sessions(
@@ -511,9 +516,29 @@ def iter_development_sessions(
     *,
     meta_enabled: bool,
     meta_learning_fold_interval: int = 0,
+    confirmation_folds: int = 0,
 ) -> tuple[DevelopmentSession, ...]:
+    """The development sessions in schedule order.
+
+    ``confirmation_folds`` marks the last N Fold sessions of the LAST Epoch as
+    confirmation Folds (docs/pipeline-design.md §2.2): only there can the
+    artifact in force still collect the forward transitions graduation term (c)
+    asks for, so only there is a new nomination refused. Earlier Epochs revisit
+    windows the chain has already seen and reserve nothing.
+    """
+
     result: list[DevelopmentSession] = []
-    for epoch_id in epoch_ids(epochs):
+    all_epochs = epoch_ids(epochs)
+    reserved = max(int(confirmation_folds), 0)
+    if folds and reserved >= epochs * len(folds):
+        # Every Fold session reserved is a window that can never freeze
+        # anything, so the experiment could only ever end without a deliverable
+        # artifact. Refuse the schedule instead of running it to that end.
+        raise ValueError(
+            f"confirmation_folds={reserved} leaves no Fold able to freeze an "
+            f"artifact ({epochs} epoch(s) x {len(folds)} folds)"
+        )
+    for epoch_id in all_epochs:
         triggers = (
             set(meta_learning_trigger_counts(len(folds), meta_learning_fold_interval))
             if meta_enabled
@@ -537,6 +562,11 @@ def iter_development_sessions(
                     epoch_id,
                     fold,
                     fold_index,
+                    confirmation=(
+                        reserved > 0
+                        and epoch_id == all_epochs[-1]
+                        and fold_index >= len(folds) - reserved
+                    ),
                 )
             )
     return tuple(result)
@@ -549,6 +579,7 @@ def build_session_plan(
     *,
     meta_enabled: bool,
     meta_learning_fold_interval: int = 0,
+    confirmation_folds: int = 0,
     deployment: FoldSpec | None = None,
 ) -> dict[str, object]:
     sessions = iter_development_sessions(
@@ -556,6 +587,7 @@ def build_session_plan(
         folds,
         meta_enabled=meta_enabled,
         meta_learning_fold_interval=meta_learning_fold_interval,
+        confirmation_folds=confirmation_folds,
     )
     plan: list[dict[str, object]] = [
         {
@@ -564,6 +596,8 @@ def build_session_plan(
             "epoch_id": session.epoch_id,
             "fold_id": session.fold.fold_id if session.fold else None,
             "fold_index": session.fold_index,
+            # Confirmation Fold: no new nomination is accepted here.
+            "confirmation": session.confirmation,
         }
         for session in sessions
     ]

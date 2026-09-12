@@ -96,6 +96,11 @@ def _experiment(
                 # waives its batch-round floor only when no round fits. A test
                 # that exercises the floor or the early-stop gate raises it.
                 "max_backtests_per_fold": max_backtests,
+                # Two-Fold windows: these sessions script their own nomination
+                # in every Fold, so the confirmation tail is switched off here
+                # and covered by its own tests (test_fold_calendar,
+                # test_finish_fold, and the regular-Fold worker test below).
+                "confirmation_folds": 0,
                 "fold_period": "quarter",
                 # Rolling design: validation 2025Q4, frozen Test 2026Q1. The
                 # default single-window design is exercised separately.
@@ -127,6 +132,10 @@ def test_local_worker_regular_folds_go_straight_to_held_out(tmp_path: Path):
             "development_first_period": "2025Q4",
             "development_last_period": "2026Q1",
             "test_stage": False,
+            # One confirmation Fold: the second Fold may only keep the parent,
+            # which is what this stub developer nominates anyway, and term (c)
+            # then reads that one transition in the verdict below.
+            "confirmation_folds": 1,
         }
     )
     path.write_text(json.dumps(params), encoding="utf-8")

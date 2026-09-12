@@ -153,10 +153,11 @@ BASE_OVERRIDES: dict[str, object] = {
     "initial_cash": 100_000,
     # Graduation must survive twice the profile slippage, rest on more than a
     # handful of trades, and the artifact that ships must carry its own forward
-    # evidence rather than inheriting the parent's.
+    # evidence rather than inheriting the parent's -- which the reserved
+    # confirmation Folds at the end of the window are what makes possible.
     "cost_stress_multiplier": 2.0,
     "heldout_min_trades": 20,
-    "heldout_min_final_transitions": 1,
+    "confirmation_folds": 2,
     # Per-Fold budgets: under the yearly-window defaults because at each step
     # three of the four quarters and the parent's own result on the window are
     # already known, but wide enough for several pre-registered rounds.
@@ -211,7 +212,7 @@ BASE_REPORT_KEYS: tuple[str, ...] = (
     "initial_cash",
     "cost_stress_multiplier",
     "heldout_min_trades",
-    "heldout_min_final_transitions",
+    "confirmation_folds",
     "deployment_adjustment_start",
     "deployment_max_backtests",
     "deployment_pit_views_seed",

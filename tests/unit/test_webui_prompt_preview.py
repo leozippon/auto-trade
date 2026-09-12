@@ -487,6 +487,31 @@ def test_deployment_adjustment_preview_is_the_deployment_prompt(tmp_path: Path):
     )
 
 
+def test_a_confirmation_fold_preview_states_the_rule_before_anything_else(tmp_path: Path):
+    """The plan of record decides which Folds are confirmation Folds, and the
+    preview shows exactly the prompt that session will get: the rule and its
+    reason open the dynamic context, ahead of the facts and the PRIOR."""
+
+    from autotrade.agent.prompts import (
+        CONFIRMATION_FOLD_SECTION,
+        FOLD_DYNAMIC_CONTEXT_HEADER,
+    )
+
+    directory, repo = _experiment(tmp_path)
+    assert CONFIRMATION_FOLD_SECTION.strip() not in _preview_of(directory, repo, FOLD_KEY)
+    schedule_path = directory / "hitl" / "schedule.json"
+    schedule = json.loads(schedule_path.read_text(encoding="utf-8"))
+    for session in schedule["sessions"]:
+        if session.get("kind") == "fold":
+            session["confirmation"] = True
+    schedule_path.write_text(json.dumps(schedule), encoding="utf-8")
+    prompt = _preview_of(directory, repo, FOLD_KEY)
+    assert CONFIRMATION_FOLD_SECTION.strip() in prompt
+    assert prompt.index(FOLD_DYNAMIC_CONTEXT_HEADER.strip()) < prompt.index(
+        CONFIRMATION_FOLD_SECTION.strip()
+    ) < prompt.index("## 当前实验事实")
+
+
 def test_unknown_and_heldout_sessions_are_rejected(tmp_path: Path):
     directory, repo = _experiment(tmp_path)
     with pytest.raises(ValueError, match="held-out"):

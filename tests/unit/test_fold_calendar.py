@@ -174,6 +174,56 @@ class RegularFoldScheduleTest(unittest.TestCase):
                 self.assertEqual(kinds[index - 1], "meta")
         self.assertEqual(plan["sessions"][-1]["periods"][0]["label"], "20260101..20260630")
 
+    def test_confirmation_folds_are_the_last_folds_of_the_last_epoch_only(self) -> None:
+        """The reserved tail the plan of record marks, and nothing else.
+
+        Earlier Epochs revisit windows the chain has already walked, so nothing
+        frozen there is the delivered artifact and nothing needs reserving; the
+        last Epoch's last ``confirmation_folds`` Folds are the only ones in
+        which the artifact in force can still earn its own transitions.
+        """
+
+        config = default_config()
+        folds = schedule(config)
+        heldout = heldout_periods(
+            config.heldout_first_period,
+            config.heldout_last_period,
+            TRADING_DAYS,
+            period=config.fold_period,
+        )
+        plan = build_session_plan(
+            config.epochs,
+            folds,
+            heldout,
+            meta_enabled=True,
+            meta_learning_fold_interval=config.meta_learning_fold_interval,
+            confirmation_folds=2,
+        )
+        reserved = [
+            (row["epoch_id"], row["fold_id"])
+            for row in plan["sessions"]
+            if row.get("kind") == "fold" and row.get("confirmation")
+        ]
+        self.assertEqual(
+            reserved, [("epoch_003", "fold_2024"), ("epoch_003", "fold_2025")]
+        )
+        # Meta sessions are never confirmation Folds, and the knob at 0 marks
+        # nothing at all.
+        self.assertEqual(
+            {row.get("confirmation") for row in plan["sessions"] if row.get("kind") == "meta"},
+            {False},
+        )
+        off = build_session_plan(
+            config.epochs,
+            folds,
+            heldout,
+            meta_enabled=True,
+            meta_learning_fold_interval=config.meta_learning_fold_interval,
+        )
+        self.assertFalse(
+            any(row.get("confirmation") for row in off["sessions"])
+        )
+
     def test_a_fold_test_region_is_all_or_nothing(self) -> None:
         with self.assertRaisesRegex(ValueError, "together"):
             FoldSpec(

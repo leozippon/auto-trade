@@ -869,25 +869,27 @@ def test_the_current_folds_parent_control_fact_carries_the_hosts_null(tmp_path: 
     assert parent_control_facts(replace(request, parent_control=control))["null_control"] is None
 
 
-def test_the_fold_facts_say_a_last_fold_mechanism_cannot_graduate_on_its_own() -> None:
+def test_the_fold_facts_say_the_shipped_artifact_needs_its_own_transitions() -> None:
     """Graduation term (c) has to be visible before the Fold freezes anything.
 
     The Agent chooses what to nominate without ever seeing Held-out, so the
-    rule that a brand-new mechanism frozen with no Fold left to confirm it
-    forward cannot graduate is only actionable if it is stated in the run
-    facts. It rides in the derived ``acceptance_rules`` block, so it can never
-    drift from the verdict that enforces it.
+    rule that the artifact it ships must have replayed forward on its own --
+    and that the confirmation Folds at the end of the window exist to let it --
+    is only actionable if it is stated in the run facts. It rides in the
+    derived ``acceptance_rules`` block, so it can never drift from the verdict
+    that enforces it or from the number of Folds the schedule reserves.
     """
 
     from autotrade.pipelines.config import AcceptanceRules
 
-    facts = _facts(acceptance_rules=AcceptanceRules().to_record())
+    rules = AcceptanceRules()
+    facts = _facts(acceptance_rules=rules.to_record())
     required = facts["artifact_contract"]["acceptance_rules"]["graduation"][
         "all_required"
     ]
     fact = required["final_artifact_forward_transitions"]
-    assert ">= 1" in fact
-    assert "cannot graduate" in fact
+    assert f">= {rules.confirmation_folds} " in fact
+    assert "refuse a new nomination" in fact
     # It reaches the Fold session's own prompt, not only the facts object.
     assert "final_artifact_forward_transitions" in build_system_prompt(
         mode="fold", experiment_facts=facts

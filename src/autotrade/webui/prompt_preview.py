@@ -116,6 +116,8 @@ def build_prompt_preview(
             resource_override=control.resource_overrides.get(session_key),
             prompt_override=control.prompt_overrides.get(session_key, ""),
             session_kind=kind,
+            # The plan of record decided it; the preview must not re-derive it.
+            confirmation_fold=bool(entry.get("confirmation")),
         )
     else:
         system, instruction = _meta_prompt(
@@ -174,6 +176,7 @@ def _fold_prompt(
     resource_override: object,
     prompt_override: str,
     session_kind: str = "fold",
+    confirmation_fold: bool = False,
 ) -> tuple[str, str]:
     from dataclasses import replace
 
@@ -276,6 +279,7 @@ def _fold_prompt(
         prior_prompt=context.prior,
         fold_exploration_directive=rolling.fold_exploration_directive,
         fold_directive=directive,
+        confirmation_fold=confirmation_fold,
     )
     default = DEPLOYMENT_DEFAULT_INSTRUCTION if deployment else FOLD_DEFAULT_INSTRUCTION
     return system, prompt_override.strip() or default

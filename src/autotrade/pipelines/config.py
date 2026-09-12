@@ -158,12 +158,17 @@ class AcceptanceRules:
     # Graduation-only floor on closed round trips: a Held-out result carried by
     # a handful of trades proves nothing. 0 disables the check.
     heldout_min_trades: int = 0
-    # Graduation-only floor on the shipped artifact's OWN walk-forward record:
-    # how many of the Epoch's transitions must have replayed that exact
-    # artifact. The chain's two-thirds rule scores the lineage, so a mechanism
-    # first frozen in the last Fold would otherwise reach Held-out carrying
-    # only the record of the parent it replaced. 0 disables the check.
-    heldout_min_final_transitions: int = 1
+    # Confirmation folds: the tail of the development window reserved for
+    # confirming the artifact already in force. One knob, two consumers --
+    # ``finish_fold`` refuses a new frozen nomination in the last
+    # ``confirmation_folds`` regular Fold sessions, and graduation term (c)
+    # requires the shipped artifact to carry at least that many of the Epoch's
+    # transitions itself. The two are the same number because an artifact
+    # frozen just before the reserved tail collects exactly one transition per
+    # reserved Fold; the chain's two-thirds rule scores the lineage, so without
+    # this a mechanism first frozen in the last Fold reaches Held-out carrying
+    # only the record of the parent it replaced. 0 disables both.
+    confirmation_folds: int = 2
 
     def __post_init__(self) -> None:
         for name in ("min_return", "min_sharpe", "max_drawdown", "cost_stress_multiplier"):
@@ -173,7 +178,7 @@ class AcceptanceRules:
             raise ValueError("max_drawdown must be between zero and one")
         if self.cost_stress_multiplier < 1:
             raise ValueError("cost_stress_multiplier must be at least one")
-        for name in ("heldout_min_trades", "heldout_min_final_transitions"):
+        for name in ("heldout_min_trades", "confirmation_folds"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError(f"{name} must be a non-negative integer")
@@ -185,7 +190,7 @@ class AcceptanceRules:
             "max_drawdown": self.max_drawdown,
             "cost_stress_multiplier": self.cost_stress_multiplier,
             "heldout_min_trades": self.heldout_min_trades,
-            "heldout_min_final_transitions": self.heldout_min_final_transitions,
+            "confirmation_folds": self.confirmation_folds,
         }
 
     @classmethod
@@ -225,12 +230,12 @@ class AcceptanceRules:
         required["walk_forward_positive_excess"] = (
             ">= ceil(2/3) of the final Epoch's out-of-sample transitions"
         )
-        if self.heldout_min_final_transitions > 0:
+        if self.confirmation_folds > 0:
             required["final_artifact_forward_transitions"] = (
-                f">= {self.heldout_min_final_transitions} of those transitions must have "
+                f">= {self.confirmation_folds} of those transitions must have "
                 "replayed the artifact Held-out ships, with the same >= ceil(2/3) "
-                "positive rule on them alone: a mechanism first frozen in the last "
-                "Fold has none of its own and cannot graduate"
+                f"positive rule on them alone; the last {self.confirmation_folds} "
+                "Folds refuse a new nomination so the artifact in force earns them"
             )
         return {
             "fold_freeze": {
@@ -289,12 +294,14 @@ class AcceptanceRules:
 
         Term (b) scores the development chain, most of whose transitions
         replayed artifacts this one replaced. So whenever the schedule produced
-        transitions at all, (c) requires ``heldout_min_final_transitions`` of
+        transitions at all, (c) requires ``confirmation_folds`` of
         them (``ledger.final_artifact_transitions``) to have replayed the
         shipped artifact itself, and those to clear the same two-thirds rule:
         an artifact frozen in the Epoch's last Fold has none of its own, and
-        the chain's record is not evidence about it. Set the knob to 0 to drop
-        (c).
+        the chain's record is not evidence about it. The same knob reserves
+        that many Folds at the end of development, in which ``finish_fold``
+        refuses a new nomination, so the artifact in force can actually earn
+        the transitions this term asks for. Set the knob to 0 to drop both.
 
         Two optional terms are off by default and only tighten (a). With
         ``cost_stress_multiplier > 1`` the excess must still be positive after
@@ -399,7 +406,7 @@ class AcceptanceRules:
             "trade_count": trade_count,
             "heldout_min_trades": self.heldout_min_trades,
             "walk_forward": consistency,
-            "heldout_min_final_transitions": self.heldout_min_final_transitions,
+            "confirmation_folds": self.confirmation_folds,
             "diagnostics": _verdict_diagnostics(
                 selection, walk_forward, final_artifact
             ),
@@ -422,7 +429,7 @@ class AcceptanceRules:
         computed fail the term rather than pass it by default.
         """
 
-        required = self.heldout_min_final_transitions
+        required = self.confirmation_folds
         if required <= 0 or chain.get("status") == "not_applicable":
             return []
         own = final_artifact if isinstance(final_artifact, Mapping) else {}
@@ -846,6 +853,12 @@ class FoldSessionRequest:
     # Whether a frozen Test follows this Fold (rolling development) or the
     # Held-out replay is the next and final evaluation (regular Folds).
     test_stage: bool = False
+    # One of the ``confirmation_folds`` Folds that close the development
+    # window: ``finish_fold`` refuses a nomination that would freeze new
+    # content here (it could never collect the own transitions graduation
+    # term (c) asks for) and waives the baseline-anchor requirement, and the
+    # prompt says so up front.
+    confirmation_fold: bool = False
     # The parent's completed Validation on this Fold's window, replayed by the
     # host before the session; None without a parent or when it failed. The
     # developer records it as the session's first Step node.

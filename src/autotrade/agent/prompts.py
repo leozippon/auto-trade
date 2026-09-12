@@ -110,6 +110,7 @@ FOLD_SUBMIT_CONTRACT = """\
 - 有父产物时，被提名节点必须在可执行策略逻辑上不同于父本（注释-only 不算）；本 Fold 已有一次不同假说的完整 Validation 后，才可显式提名 `parent_control` 保留父本。运行事实 `artifact_contract.parent.parent_control_available` 为真时，宿主已在会话前把父本原样跑过一次本 Fold 的完整 Validation（Step 树里 `result_name=parent_control` 的节点，不占预算），它就是本 Fold 的基线；为假时没有这个节点：父产物是初始模板时，模板只是交付合同的可运行示例而不是研究基线，不要为它花回测，候选比的是基准、中性化超额与彼此；只有会话前的父本对照重放失败时才值得自己重放父本并计入预算。
 - 过硬门的提名一律被冻结：`acceptance_rules.fold_freeze` 里只有标 `hard` 的项阻止冻结，`warn` 只记警告；截止窗口之外，不过硬门的提名在别的已记录节点（含 `parent_control`）过门时被拒绝并列出它们。被接受的调用都返回 `pipeline_fold_status`、`pipeline_will_freeze` 与一句 `pipeline_outcome`，以它为准。
 - 没有候选证明边际时用 `finish_fold(outcome="no_edge", reason=<证据>)` 弃权，不提名最不差的节点；弃权同样要求本会话至少有一次完整 Validation。有父产物记 `no_update`（父本仍是血缘头），首个 Fold 记 `baseline_missing`。基线锚点例外：实验尚无冻结父产物时，只要本会话有一个过硬门的完整 Validation，弃权就被拒绝并列出这些候选，必须提名其一作基线锚点（自行选择，通常取中性化超额最高者，警告照常接受），账本记 `baseline_anchor=true`——它是待替换的弱基线，不是已证明的边际；没有过门候选时弃权照常记 `baseline_missing`。显式提名 `parent_control` 或任何与父本逐字节相同的节点是被接受的提名，宿主不发第二个产物 id 而是沿用父本，记 `fold_status="no_update"`、`finish_mode="nominated"`、`nominated_identical_to_parent=true`、`hard_reject_reasons` 为空——同一份内容的前向记录（毕业条件里的 `final_artifact_forward_transitions` 按 id 计数）因此不被清零。
+- Development 窗口末尾的若干个 Fold 是确认折（是否属于确认折由本 Fold 动态上下文说明）：交付产物必须自己走过前向过渡才能毕业，因此确认折里改动了策略内容的提名一律被拒，保留父本（提名 `parent_control` 或与父本逐字节相同的节点）与 `no_edge` 照常可用，无父产物时的基线锚点要求也一并豁免。
 - 当前 `output/` 和 `models/` 与被提名节点的快照逐字节一致，不一致时先用 `step_rollback` 恢复。`finish_fold` 会校验以上各项；截止窗口之外、回测预算还剩超过三分之一的自愿结束（提名或弃权）须带 `early_stop_reason`，写明哪些假设未检验、为何不值得剩余预算。\
 """
 
@@ -285,6 +286,12 @@ META_SYSTEM_PROMPT = """\
 META_STATIC_SECTIONS = (META_SYSTEM_PROMPT, ROLE_MATRIX_SECTION, PRINCIPLES_SECTION)
 
 
+CONFIRMATION_FOLD_SECTION = """\
+## 本 Fold 是确认折（宿主判定）
+本 Fold 属于 Development 窗口末尾保留的确认折。毕业裁决要求被交付的那份产物自己在这些折里走过前向过渡并且多数为正，所以现在冻结新内容只会把它的前向记录清零、必然无法毕业：`finish_fold` 会拒绝任何改动了策略内容的提名，只接受保留父本（提名 `parent_control` 或与父本逐字节相同的节点）或 `outcome="no_edge"`，无父产物时的基线锚点要求也已豁免。把本折的预算用在确认在位产物上：复算它的中性化超额与新季度表现、用预登记的对照或安慰剂检验它靠什么成立、跑变体看它在什么条件下失效——这些都可以正常回测，只是不作为提名交付；结论写进 `early_stop_reason` 或 `no_edge` 的 `reason`，供 Meta 与最终复盘阅读。\
+"""
+
+
 def build_fold_directive_section(fold_directive: str) -> str:
     directive = fold_directive.strip()
     if not directive:
@@ -322,6 +329,7 @@ def build_system_prompt(
     fold_exploration_directive: str = "",
     fold_directive: str = "",
     prior_prompt: str = "",
+    confirmation_fold: bool = False,
 ) -> str:
     if mode in {"meta", "meta_learning"}:
         sections = list(META_STATIC_SECTIONS)
@@ -340,6 +348,10 @@ def build_system_prompt(
     deployment = mode == "deployment_adjustment"
 
     context_parts: list[str] = []
+    # First in the dynamic context: it changes what this session may submit at
+    # all, so it must be read before the facts, the PRIOR and the directives.
+    if confirmation_fold and not deployment:
+        context_parts.append(CONFIRMATION_FOLD_SECTION)
     if experiment_facts:
         context_parts.append(render_experiment_facts_section(experiment_facts))
     else:
