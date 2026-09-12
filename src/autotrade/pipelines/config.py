@@ -885,10 +885,10 @@ class FoldSessionRequest:
     # Held-out replay is the next and final evaluation (regular Folds).
     test_stage: bool = False
     # One of the ``confirmation_folds`` Folds that close the development
-    # window: ``finish_fold`` refuses a nomination that would freeze new
-    # content here (it could never collect the own transitions graduation
-    # term (c) asks for) and waives the baseline-anchor requirement, and the
-    # prompt says so up front.
+    # window. The session's prompt opens with the arithmetic: content frozen
+    # here mints a new artifact id that could never collect the own
+    # transitions graduation term (c) asks for, so these Folds confirm the
+    # artifact in force.
     confirmation_fold: bool = False
     # The parent's completed Validation on this Fold's window, replayed by the
     # host before the session; None without a parent or when it failed. The
