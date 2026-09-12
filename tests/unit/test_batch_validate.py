@@ -122,10 +122,12 @@ class _Evaluator:
         self._barrier = threading.Barrier(rendezvous, timeout=10) if rendezvous else None
         self._arrived = 0
         # The real evaluators carry the strategy container's boundary here and
-        # read it at evaluate() time; batch_validate widens the fit clock on it
-        # for the pool's lifetime, so each replay records what it was handed.
+        # read it at evaluate() time; batch_validate widens both strategy
+        # clocks on it for the pool's lifetime, so each replay records what it
+        # was handed.
         self.sandbox = SandboxConfig()
         self.fit_timeouts: list[float] = []
+        self.inference_timeouts: list[float] = []
 
     def evaluate(self, request, max_days=None):
         del max_days
@@ -136,6 +138,7 @@ class _Evaluator:
             self.calls += 1
             self._arrived += 1
             self.fit_timeouts.append(self.sandbox.limits.fit_timeout_seconds)
+            self.inference_timeouts.append(self.sandbox.limits.timeout_seconds)
             call_index = self.calls
             arrival = self._arrived
             self.active += 1
@@ -468,37 +471,51 @@ class BatchValidateRunTest(unittest.TestCase):
                 [f"valid_{index + 1:03d}" for index in range(len(names))],
             )
 
-    def test_the_fit_deadline_scales_with_the_batch_replay_width(self) -> None:
+    def test_both_strategy_deadlines_scale_with_the_batch_replay_width(self) -> None:
         """The contention a batch adds is the environment's, not the strategy's.
 
-        ``fit_timeout_seconds`` is a fixed per-call host wall clock, so with a
-        fixed cap a candidate's verdict depended on how many siblings happened
-        to share the host: two explore_github folds lost both batch candidates
-        to `strategy fit exceeded 3600s` while solo reruns of the same code did
-        the same four refits in 1,550-2,027 s. The cap therefore moves with the
-        batch's own width, and only for the pool's lifetime.
+        Both caps are a fixed per-call host wall clock, so with a fixed value a
+        candidate's verdict depended on how many siblings happened to share the
+        host: two explore_github folds lost both batch candidates to `strategy
+        fit exceeded 3600s` while solo reruns of the same code did the same four
+        refits in 1,550-2,027 s, and three arms lost slots to `strategy
+        inference exceeded 180s` inside a batch -- one with a byte-identical
+        serial control that replayed 243 decision days at ~2.0 s/day. Both caps
+        therefore move with the batch's own width, and only for the pool's
+        lifetime.
         """
 
-        base = SandboxConfig().limits.fit_timeout_seconds
+        limits = SandboxConfig().limits
+        fit_base = limits.fit_timeout_seconds
+        inference_base = limits.timeout_seconds
         with TemporaryDirectory() as tmp:
             session = _Session(Path(tmp), max_backtests=6, max_steps=6)
             # One serial replay: nothing else is running, so nothing is scaled.
             self.assertTrue(session.backtest.invoke({}).ok)
-            self.assertEqual(session.evaluator.fit_timeouts, [base])
+            self.assertEqual(session.evaluator.fit_timeouts, [fit_base])
+            self.assertEqual(session.evaluator.inference_timeouts, [inference_base])
 
             for count in (2, 3):
                 names = [f"w{count}{index}" for index in range(count)]
                 for index, name in enumerate(names):
                     session.candidate(name, _strategy(f"{count}{index}"))
                 session.evaluator.fit_timeouts.clear()
+                session.evaluator.inference_timeouts.clear()
                 self.assertTrue(session.call(*names).ok)
                 self.assertEqual(
-                    session.evaluator.fit_timeouts, [base * count] * count
+                    session.evaluator.fit_timeouts, [fit_base * count] * count
+                )
+                self.assertEqual(
+                    session.evaluator.inference_timeouts,
+                    [inference_base * count] * count,
                 )
                 # Restored the moment the pool is done, so the next serial
                 # replay is not evaluated against a widened clock.
                 self.assertEqual(
-                    session.evaluator.sandbox.limits.fit_timeout_seconds, base
+                    session.evaluator.sandbox.limits.fit_timeout_seconds, fit_base
+                )
+                self.assertEqual(
+                    session.evaluator.sandbox.limits.timeout_seconds, inference_base
                 )
             # Everything else about the boundary is untouched.
             self.assertEqual(session.evaluator.sandbox, SandboxConfig())

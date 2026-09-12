@@ -1408,9 +1408,9 @@ BATCH_VALIDATE_MAX_CANDIDATES = 6
 # read-write state bind needs a second worker — and the Timeview stash
 # serializes part publication across evaluations, so the bound is host capacity
 # (up to two containers per replay at SandboxLimits.cpus), not correctness —
-# which only holds because the fit deadline scales with the batch's own width
-# (``_batch_fit_timeout``); a fixed fit clock made the outcome depend on how
-# many siblings happened to share the host.
+# which only holds because both strategy deadlines scale with the batch's own
+# width (``_batch_replay_timeouts``); a fixed clock made the outcome depend on
+# how many siblings happened to share the host.
 BATCH_VALIDATE_MAX_CONCURRENCY = 3
 BATCH_NAME_MAX_CHARS = 40
 BATCH_HYPOTHESIS_MAX_CHARS = 500
@@ -1490,26 +1490,33 @@ def batch_candidate_stats(summary: Mapping[str, object]) -> dict[str, object]:
 
 
 @contextmanager
-def _batch_fit_timeout(evaluator: object, workers: int) -> Iterator[None]:
-    """Widen the fit deadline to the replay width this batch itself creates.
+def _batch_replay_timeouts(evaluator: object, workers: int) -> Iterator[None]:
+    """Widen both strategy deadlines to the replay width this batch creates.
 
-    ``SandboxLimits.fit_timeout_seconds`` is a runaway-fit guard measured on
-    host wall clock. Fanning ``workers`` replays out over the same host makes
-    the same ``fit(context)`` take longer without the strategy doing anything
-    different, so a fixed cap makes the verdict depend on how many siblings a
-    candidate happened to be batched with — the failure mode that cost
-    explore_github four Validation slots to fits solo reruns finished in
-    1,550-2,027 s. Scaling the cap by ``workers`` keeps the guard (a runaway
-    fit still dies) while removing that scheduling dependence.
+    ``SandboxLimits.fit_timeout_seconds`` and ``timeout_seconds`` are
+    runaway guards measured on host wall clock. Fanning ``workers`` replays
+    out over the same host makes the same ``fit(context)`` and the same
+    ``generate_orders(context)`` take longer without the strategy doing
+    anything different, so a fixed cap makes the verdict depend on how many
+    siblings a candidate happened to be batched with — the failure mode that
+    cost explore_github four Validation slots to fits solo reruns finished in
+    1,550-2,027 s. Scaling both caps by ``workers`` keeps the guards (a
+    runaway fit or decision still dies) while removing that dependence.
 
-    Only the fit clock moves: ``timeout_seconds`` bounds one ``generate_orders``
-    call, of which a Validation makes hundreds, so widening it would let a
-    single slow batch stretch the whole replay instead of failing it.
+    The inference cap was deliberately left fixed when the fit cap was
+    scaled, on the argument that a Validation makes hundreds of decision
+    calls and widening the per-call cap would stretch a slow batch instead of
+    failing it. Three arms then filed the counter-example on one day: a
+    candidate measured at ~2.0 s/day over 243 serial decision days died at
+    ``strategy inference exceeded 180s`` on one rebalance day inside a 2-way
+    batch. Both caps bound ONE call, so both are equally distorted by the
+    fan-out, and the whole-replay runaway is bounded elsewhere (the backtest
+    budget and the session's own deadline).
 
     The batch owns the evaluator for the pool's lifetime — a Fold session runs
     one tool at a time — so mutating and restoring the shared config here is
     safe. An evaluator without sandbox limits (trusted mode, test doubles) has
-    no fit clock to scale and is left alone.
+    no clock to scale and is left alone.
     """
 
     config = getattr(evaluator, "sandbox", None)
@@ -1520,7 +1527,9 @@ def _batch_fit_timeout(evaluator: object, workers: int) -> Iterator[None]:
     evaluator.sandbox = replace(  # type: ignore[attr-defined]
         config,
         limits=replace(
-            limits, fit_timeout_seconds=limits.fit_timeout_seconds * workers
+            limits,
+            fit_timeout_seconds=limits.fit_timeout_seconds * workers,
+            timeout_seconds=limits.timeout_seconds * workers,
         ),
     )
     try:
@@ -2102,7 +2111,7 @@ class BatchValidateTool(SessionTimeBudgetAware):
             return [run_one(index) for index in range(len(revisions))]
         interrupt: SessionInterrupt | None = None
         with (
-            _batch_fit_timeout(self.backtest.evaluator, workers),
+            _batch_replay_timeouts(self.backtest.evaluator, workers),
             ThreadPoolExecutor(
                 max_workers=workers, thread_name_prefix="batch-validate"
             ) as pool,
