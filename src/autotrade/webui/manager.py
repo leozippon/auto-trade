@@ -77,9 +77,9 @@ from .registry import (
 # strategies as Validation verdicts. Four parent conversations plus their
 # sub-agent fan-out (at most 4 concurrent each) also sit inside the gateway's
 # measured 16-20 concurrent-stream throughput plateau, so the gateway was
-# never the reason for a higher number. Five since 2026-09-12: four arms hold
-# roughly 130-180 GiB of runner RSS, which leaves one slot for a new direction.
-MAX_RUNNING_EXPERIMENTS = 5
+# never the reason for a higher number. The operator holds concurrency at four;
+# a new direction therefore replaces the weakest running arm rather than adding one.
+MAX_RUNNING_EXPERIMENTS = 4
 # SIGTERM graces before the worker's process group is SIGKILLed. Terminate is
 # an explicit stop, so it stays short; restart has to outwait the in-flight
 # work a worker cannot interrupt (a model call runs minutes) before forcing it.
