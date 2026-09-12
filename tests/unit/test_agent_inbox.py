@@ -297,7 +297,10 @@ def test_api_queues_without_claiming_interrupt_and_hides_bodies(
     public_session = _public_session(directory, SESSION_A)
     _mark_live(directory, session_key=SESSION_A)
     client = TestClient(create_app(tmp_path))
-    secret = "unique-inbox-secret-body"
+    # A calendar date in it: operator-authored text is not calendar-gated (the
+    # operator defines the PIT policy; the gate stays on Agent-authored memory),
+    # so this queues like any other message.
+    secret = "unique-inbox-secret-body 2022Q1"
     response = client.post(
         "/api/experiments/exp_in/control",
         json={
@@ -362,16 +365,6 @@ def test_api_refuses_empty_text_bad_id_dead_worker_and_stale_session(
         },
     )
     assert oversized.status_code == 400
-    dated = client.post(
-        "/api/experiments/exp_in/control",
-        json={
-            "action": "inject_message",
-            "session_key": public_a,
-            "text": "在 2022Q1 减仓",
-        },
-    )
-    assert dated.status_code == 400
-    assert "日历日期" in dated.json()["detail"]
     wrong = client.post(
         "/api/experiments/exp_in/control",
         json={
