@@ -41,10 +41,7 @@ from autotrade.environment.replay import (
 from autotrade.environment.replay.stats import attach_cost_sensitivity
 from autotrade.environment.runtime import agent_trace_path, chmod_tree
 from autotrade.environment.strategy import NLQuery
-from autotrade.environment.tools.finish_fold import (
-    baseline_anchor_required,
-    mechanism_structure,
-)
+from autotrade.environment.tools.finish_fold import mechanism_structure
 
 from .agent_inbox import expire_experiment_session_inbox
 from .agent_views import (
@@ -253,7 +250,7 @@ class RollingExperimentPipeline:
         window (``AcceptanceRules.confirmation_folds``, decided by the schedule
         in ``hitl_state.iter_development_sessions``): the session may only keep
         the artifact in force, so ``finish_fold`` refuses a nomination that
-        would freeze new content and the baseline-anchor requirement is waived.
+        would freeze new content there.
         """
 
         assert_no_frozen_artifact_mutation(self.ledger.read())
@@ -367,27 +364,6 @@ class RollingExperimentPipeline:
             # frozen whatever the last Step's metrics say, and the parent (if
             # any) stays the lineage head.
             abstained = bool(session.no_edge_reason)
-            # The baseline anchor rule, read through the same predicate
-            # ``finish_fold`` refuses with: without a frozen parent, a Fold whose
-            # own Validation passes the hard rules has to freeze one as the
-            # lineage's anchor. An abstention reaching here anyway is a session
-            # that bypassed the tool's contract, not a fold result.
-            anchor_required = baseline_anchor_required(
-                has_parent=parent is not None,
-                confirmation_fold=confirmation,
-                passing_candidates=[
-                    step
-                    for step in session.steps
-                    if not step.parent_control
-                    and not self.config.acceptance.evaluate(step.validation.summary)[0]
-                ],
-            )
-            if abstained and anchor_required:
-                raise RuntimeError(
-                    "Fold session abstained (no_edge) with no frozen parent while a "
-                    "complete Validation passes the hard acceptance rules; finish_fold "
-                    "must nominate a baseline anchor instead"
-                )
             selected = (
                 None
                 if abstained
@@ -587,9 +563,10 @@ class RollingExperimentPipeline:
                     else {}
                 ),
                 # Frozen with no parent to beat: the lineage's baseline anchor,
-                # a weak baseline in force until a later Fold replaces it, not
-                # an evidenced edge (finish_fold.baseline_anchor_required).
-                **({"baseline_anchor": True} if status == "frozen" and anchor_required else {}),
+                # a control in force until a later Fold replaces it, not an
+                # evidenced edge. It is the freeze that had no parent, so the
+                # label is read off that and nothing else (§2.2).
+                **({"baseline_anchor": True} if status == "frozen" and parent is None else {}),
                 "hard_reject_reasons": hard,
                 "accept_warnings": warnings,
                 "selected_step_id": selected.step_id if selected is not None else None,

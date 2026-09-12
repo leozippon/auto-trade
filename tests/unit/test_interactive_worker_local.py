@@ -1193,8 +1193,8 @@ INHERITED_ARTIFACT_ID = "strategy_epoch_001_fold_2025Q3"
 def _seed_parent(experiment: Path) -> str:
     """Start the experiment from a read-only inherited artifact.
 
-    A parentless first Fold must freeze a baseline anchor, and an anchor is a
-    control the experiment refuses to deliver (docs/pipeline-design.md §2.2):
+    A parentless first Fold can only freeze a baseline anchor, and an anchor
+    is a control the experiment refuses to deliver (docs/pipeline-design.md §2.2):
     a run whose developer never improves on it therefore has nothing to send
     to Held-out. These tests are about the orchestration around the delivery,
     not about earning one, so they inherit a real artifact the way the console

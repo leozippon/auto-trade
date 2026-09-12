@@ -1185,7 +1185,7 @@ def _regular_fold_pipeline(tmp_path: Path, evaluator, *, max_steps: int = 1, tes
 def _seed_artifact(pipeline, evaluator, revision_id: str = "revision_seed"):
     """An inherited artifact for the first Fold to start from.
 
-    A parentless first Fold must freeze a baseline anchor, and an anchor's
+    A parentless first Fold can only freeze a baseline anchor, and an anchor's
     transitions are a control's: they are excluded from the graduation terms
     and the anchor is never delivered. A test about what the transitions do
     therefore needs a lineage that starts from a real artifact, the way an
@@ -2491,8 +2491,7 @@ def test_an_abstention_keeps_the_null_controls_the_session_paid_for(tmp_path: Pa
         session = _abstaining_developer(request)
         return replace(session, null_controls={"step_a": drawn})
 
-    # Abstaining with a parent (a parentless Fold with a passing candidate has
-    # to anchor instead): the parent stays, and its own null is not the
+    # Abstaining with a parent: the parent stays, and its own null is not the
     # candidate's.
     pipeline.developer = abstaining_with_nulls
     kept = pipeline.run_fold("epoch_001", folds[1], parent=first.frozen)
@@ -2564,20 +2563,20 @@ def test_a_parentless_no_edge_finish_records_baseline_missing_and_freezes_nothin
     assert record["selection_statistics"]["unavailable_reason"] == "no_nominated_candidate"
 
 
-def test_a_parentless_abstention_with_a_passing_candidate_is_a_contract_breach(
-    tmp_path: Path,
-):
-    """The baseline anchor rule is enforced by ``finish_fold``; a session that
-    abstains anyway while a candidate passes the hard rules and no parent
-    exists bypassed that contract, and the Pipeline refuses to record it as a
-    Fold result (the same predicate decides both)."""
+def test_a_parentless_abstention_is_recorded_as_baseline_missing(tmp_path: Path):
+    """Anchoring a parentless lineage is guidance now, so a session that
+    abstains with a passing candidate in hand is a Fold result, not a contract
+    breach: the Fold records ``baseline_missing`` with the Agent's evidence and
+    freezes nothing."""
     pipeline, folds, ledger, _requests = _selection_fold_pipeline(tmp_path)
     pipeline.developer = _abstaining_developer
-    with pytest.raises(RuntimeError, match="baseline anchor"):
-        pipeline.run_fold("epoch_001", folds[0], parent=None)
-    assert ledger.read("fold") == []
-    failed = [row for row in ledger.read() if row["record_type"] == "attempt_failed"]
-    assert len(failed) == 1 and "baseline anchor" in failed[0]["error"]
+    outcome = pipeline.run_fold("epoch_001", folds[0], parent=None)
+    assert outcome.fold_status == "baseline_missing" and outcome.frozen is None
+    record = ledger.read("fold")[0]
+    assert record["finish_mode"] == "agent_no_edge"
+    assert record["no_edge_reason"] == NO_EDGE_REASON
+    assert "baseline_anchor" not in record
+    assert [row for row in ledger.read() if row["record_type"] == "attempt_failed"] == []
 
 
 def test_a_fold_that_ran_candidates_but_nominated_none_is_refused(tmp_path: Path):

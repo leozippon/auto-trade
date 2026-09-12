@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from autotrade.agent.prompts import FOLD_SUBMIT_CONTRACT
 from autotrade.environment.artifacts import new_revision_id
 from autotrade.environment.step_tree import StepTree
 from autotrade.environment.tools.base import ToolError, ToolRegistry
@@ -750,15 +751,15 @@ def test_finish_fold_no_edge_records_the_fallback_status_without_a_nomination(
     )
 
 
-def test_finish_fold_no_edge_is_refused_without_a_parent_while_a_candidate_passes(
-    tmp_path: Path,
-):
-    """The baseline anchor rule. Three arms spent every Fold on abstentions:
-    with no frozen parent there was never a parent_control, a vs_parent or a
-    walk-forward transition, so the Meta review saw no forward evidence at all.
-    Without a parent, an abstention is refused while a complete Validation
-    passes the hard rules, and the refusal lists those candidates with the
-    figures the choice is made on; the choice itself stays the Agent's."""
+def test_finish_fold_no_edge_without_a_parent_is_accepted(tmp_path: Path):
+    """The baseline anchor is guidance, not a gate.
+
+    The refusal that used to stand here fired three times in 271 traces and
+    minted a placebo lineage head every time, so the submit contract now tells
+    the session what anchoring buys and the tool accepts either outcome: a
+    parentless abstention with a passing candidate finishes and records
+    ``baseline_missing``, and nominating that candidate freezes it as the
+    anchor."""
 
     tree = StepTree(tmp_path / "steps")
     passing = _record_round(
@@ -775,32 +776,20 @@ def test_finish_fold_no_edge_is_refused_without_a_parent_while_a_candidate_passe
         run_id="run_x",
         hard_rule_check=_acceptance_check(),
         null_controls=lambda: {passing: {"excess_percentile": 0.62}},
-        # The anchor refusal comes before the early-stop justification: no
-        # reason could make this abstention legal.
-        budget_status=lambda: _budget(20),
     )
-    with pytest.raises(ToolError) as error:
-        finish.invoke({"outcome": "no_edge", "reason": NO_EDGE_REASON})
-    assert error.value.error_type == "baseline_anchor_required"
-    message = str(error.value)
-    assert "no frozen parent" in message and "baseline anchor" in message
-    listed = message.split("Passing candidates: ")[1]
-    assert listed.startswith(
-        f"{passing} (valid_b1_1, neutralized_excess_return=0.0123, "
-        "null_excess_percentile=0.6200)"
-    )
-    assert rejected not in listed
-    rows = {row["node_id"]: row for row in error.value.details["candidates"]}
-    assert rows[passing]["passes_hard_rules"] is True
-    assert rows[rejected]["hard_reject_reasons"] == ["max_drawdown_exceeded"]
-    # Nominating the passing node is the way out, and the Pipeline freezes it.
-    selected = finish.invoke({"node_id": passing, "early_stop_reason": "anchor"})
+    abstained = finish.invoke({"outcome": "no_edge", "reason": NO_EDGE_REASON})
+    assert abstained.finish
+    assert abstained.value["pipeline_fold_status"] == "baseline_missing"
+    assert abstained.value["pipeline_will_freeze"] is False
+    assert abstained.value["candidates_evaluated"] == 2
+    # Nominating the passing candidate stays available and freezes it; the
+    # Pipeline labels that parentless freeze the baseline anchor.
+    selected = finish.invoke({"node_id": passing})
     assert selected.finish and selected.value["pipeline_fold_status"] == "frozen"
-    # Without wired rules every complete Validation passes, so a bare
-    # parentless tool refuses the same way.
-    bare = FinishFoldTool(tree, fold_id="fold_ref_ab", run_id="run_x")
-    with pytest.raises(ToolError, match="baseline anchor"):
-        bare.invoke({"outcome": "no_edge", "reason": NO_EDGE_REASON})
+    assert rejected != passing
+    # The Fold prompt carries the guidance the refusal used to carry.
+    assert "基线锚点" in FOLD_SUBMIT_CONTRACT
+    assert "baseline_anchor=true" in FOLD_SUBMIT_CONTRACT
 
 
 def test_finish_fold_no_edge_refuses_a_node_a_thin_reason_or_an_empty_session(
@@ -840,8 +829,7 @@ def test_finish_fold_no_edge_refuses_a_node_a_thin_reason_or_an_empty_session(
     thin = registry.invoke("finish_fold", {"outcome": "no_edge", "reason": "no edge"})
     assert thin.ok is False
     assert f"minimum {NO_EDGE_REASON_MIN_CHARS}" in thin.error
-    # The early-finish gate applies to an abstention exactly as to a nomination
-    # (with a parent: without one the anchor rule refuses the abstention first).
+    # The early-finish gate applies to an abstention exactly as to a nomination.
     budgeted = FinishFoldTool(
         tree,
         fold_id="fold_ref_ab",
@@ -946,24 +934,11 @@ def test_confirmation_fold_sees_a_retrained_models_tree_as_new_content(tmp_path:
     assert same.invoke({"node_id": node}).finish is True
 
 
-def test_confirmation_fold_waives_the_baseline_anchor_requirement(tmp_path: Path):
-    """Precedence: the confirmation Fold rule wins over the anchor rule.
+def test_a_parentless_confirmation_fold_can_still_abstain(tmp_path: Path):
+    """An anchor frozen in a confirmation Fold could not collect the own
+    forward transitions graduation asks of it, so the abstention is the honest
+    outcome there and nothing stands in its way."""
 
-    An anchor frozen in a confirmation Fold could not collect the own forward
-    transitions graduation asks of it, so refusing the abstention would force a
-    freeze that cannot graduate. The waiver lives in the one predicate the tool
-    refuses with and the Pipeline labels the ledger row with.
-    """
-
-    from autotrade.environment.tools.finish_fold import baseline_anchor_required
-
-    assert baseline_anchor_required(has_parent=False, passing_candidates=["n1"]) is True
-    assert (
-        baseline_anchor_required(
-            has_parent=False, passing_candidates=["n1"], confirmation_fold=True
-        )
-        is False
-    )
     tree = StepTree(tmp_path / "steps")
     passing = _record_round(tree, tmp_path, batch_id="b1", marker="1", metrics=_metrics(0.1))
     finish = FinishFoldTool(
