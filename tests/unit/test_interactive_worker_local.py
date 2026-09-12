@@ -19,6 +19,7 @@ from autotrade.environment.llm import (
     ToolCall,
 )
 from autotrade.environment.nl import NLConfig
+from autotrade.environment.runtime import chmod_tree
 from autotrade.environment.tools import CommandResult
 from autotrade.pipelines import worker
 from autotrade.pipelines.agent_views import compact_fold_history
@@ -139,6 +140,7 @@ def test_local_worker_regular_folds_go_straight_to_held_out(tmp_path: Path):
         }
     )
     path.write_text(json.dumps(params), encoding="utf-8")
+    seed = _seed_parent(experiment)
     options = load_worker_options(experiment, repo_root=repo)
     assert options.rolling.test_stage is False
     result = run_local_interactive_worker(options)
@@ -162,13 +164,13 @@ def test_local_worker_regular_folds_go_straight_to_held_out(tmp_path: Path):
         assert statistics["candidates_evaluated"] == 1
         assert statistics["deflated_sharpe_probability"] is None
         assert statistics["unavailable_reason"] == "fewer_than_two_trials"
-    # Parent carry-forward: the second Fold inherits the first Fold's frozen
-    # strategy, and the host replayed it on the second window first.
-    assert first["parent_control"] is None
-    # No parent, no baseline: the first Fold carries no comparison at all,
-    # while the second has one. The local daily fixture ships no benchmark
-    # series, so its excess deltas stay unavailable instead of invented.
-    assert first["vs_parent"] is None
+    # Parent carry-forward: this experiment starts from an inherited seed (a
+    # parentless first Fold could only freeze a baseline anchor, which is a
+    # control the run refuses to deliver), so the host replayed a parent
+    # control before both Folds and the lineage head is a real artifact.
+    assert first["parent_control"]["parent_strategy_artifact_id"] == seed
+    # The local daily fixture ships no benchmark series, so the excess deltas
+    # stay unavailable instead of invented.
     assert second["vs_parent"] == {
         "excess_return_delta": None,
         "neutralized_excess_return_delta": None,
@@ -176,11 +178,13 @@ def test_local_worker_regular_folds_go_straight_to_held_out(tmp_path: Path):
         "beats_parent": None,
     }
     assert second["parent_strategy_artifact_id"] == first["frozen_strategy_artifact_id"]
-    # The deterministic local developer edits nothing, so the second Fold's
+    # The deterministic local developer edits nothing, so every Fold's
     # nomination is the inherited parent itself: the lineage head is retained
     # rather than reissued under a second id, and the row says why.
-    assert (first["fold_status"], second["fold_status"]) == ("frozen", "no_update")
+    assert (first["fold_status"], second["fold_status"]) == ("no_update", "no_update")
+    assert first["nominated_identical_to_parent"] is True
     assert second["nominated_identical_to_parent"] is True
+    assert first["frozen_strategy_artifact_id"] == seed
     assert second["frozen_strategy_artifact_id"] == first["frozen_strategy_artifact_id"]
     control = second["parent_control"]
     assert control["status"] == "ok"
@@ -228,6 +232,7 @@ def test_analysis_enabled_defaults_off_and_can_be_enabled(tmp_path: Path):
 
 def test_local_worker_runs_real_baseline_valid_test_and_heldout(tmp_path: Path):
     repo, experiment = _experiment(tmp_path)
+    _seed_parent(experiment)
     options = load_worker_options(experiment, repo_root=repo)
     result = run_local_interactive_worker(options)
     assert result["state"] == "completed"
@@ -906,10 +911,14 @@ def test_llm_worker_runs_real_meta_fold_validation_and_heldout(
 ):
     repo, experiment = _experiment(tmp_path, developer_mode="llm")
     monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
+    _seed_parent(experiment)
     options = load_worker_options(experiment, repo_root=repo)
     assert options.llm is not None
     assert isinstance(options.llm.build_gateway(), OpenAICompatibleProxy)
-    source = "def generate_orders(context):\n    return []\n"
+    # Different executable logic from the inherited seed: a Fold with a
+    # parent may only nominate a different hypothesis (or an explicit
+    # keep-parent after one existed).
+    source = "def generate_orders(context):\n    if context is None:\n        return []\n    return []\n"
     llm = ScriptedLLM(
         [
             *_agent_then(
@@ -985,12 +994,23 @@ def test_llm_worker_runs_real_meta_fold_validation_and_heldout(
     )
     assert summaries[0]["mode"] == "valid"
     assert summaries[0]["status"] == "ok"
-    # The cross-fold step tree is published where the console and the worker read it.
+    # The cross-fold step tree is published where the console and the worker
+    # read it: the host's parent control of the inherited seed, then the
+    # candidate this Fold nominated.
     tree = json.loads((experiment / "steps/tree.json").read_text(encoding="utf-8"))
-    assert [node["node_id"] for node in tree["nodes"]] == [fold["selected_step_id"]]
+    assert [node["node_id"] for node in tree["nodes"]][-1] == fold["selected_step_id"]
+    assert [node["result_name"] for node in tree["nodes"]] == [
+        "parent_control",
+        "valid_001",
+    ]
     assert heldout["result"]["total_return"] == 0.0
     assert heldout["strategy_artifact_id"] == result["final_strategy_artifact"]
-    validation_ref = Path(fold["steps"][0]["validation_result_ref"])
+    # The nominated candidate's own result, not the host's parent control that
+    # opened the session.
+    selected = next(
+        step for step in fold["steps"] if step["step_id"] == fold["selected_step_id"]
+    )
+    validation_ref = Path(selected["validation_result_ref"])
     style = json.loads(
         (validation_ref.parent / "style_analysis.json").read_text(encoding="utf-8")
     )
@@ -1170,6 +1190,38 @@ INHERITED_STRATEGY = (
 INHERITED_ARTIFACT_ID = "strategy_epoch_001_fold_2025Q3"
 
 
+def _seed_parent(experiment: Path) -> str:
+    """Start the experiment from a read-only inherited artifact.
+
+    A parentless first Fold must freeze a baseline anchor, and an anchor is a
+    control the experiment refuses to deliver (docs/pipeline-design.md §2.2):
+    a run whose developer never improves on it therefore has nothing to send
+    to Held-out. These tests are about the orchestration around the delivery,
+    not about earning one, so they inherit a real artifact the way the console
+    seeds ``inherit_from`` and the lineage starts from a deliverable.
+    """
+
+    root = experiment / "inherited" / "output"
+    root.mkdir(parents=True)
+    (root / "main.py").write_text(
+        "def generate_orders(context):\n    return []\n", encoding="utf-8"
+    )
+    chmod_tree(root, file_mode=0o444, dir_mode=0o555)
+    artifact_id = "strategy_inherited_seed"
+    _update_params(
+        experiment,
+        {
+            "_inherited_artifact": {
+                "artifact_id": artifact_id,
+                "path": str(root),
+                "revision_id": "revision_inherited_seed",
+                "source_fold_id": "fold_seed",
+            }
+        },
+    )
+    return artifact_id
+
+
 def _update_params(experiment: Path, values: dict[str, object]) -> None:
     path = experiment / "hitl/params.json"
     params = json.loads(path.read_text(encoding="utf-8"))
@@ -1247,7 +1299,12 @@ def test_llm_worker_starts_from_inherited_memory(tmp_path: Path, monkeypatch):
     previous generation and may keep it, the first Fold's system prompt
     carries that PRIOR and its workspace mounts the inherited skills -- the
     same view either session has after a Meta publication -- and the Fold,
-    having no frozen parent, anchors the lineage on its nomination."""
+    having no frozen parent, anchors the lineage on its nomination.
+
+    That anchor is also where this arm stops: an anchor is the lineage's
+    control, so a development window that ends with one still in force has
+    nothing to deliver and the run fails explicitly instead of spending a
+    Held-out on the placebo. Every record written before that stays."""
     repo, experiment = _experiment(tmp_path, developer_mode="llm")
     source = _memory_source(repo)
     payload = import_inherited_memory(experiment, source, source_id="src")
@@ -1272,13 +1329,19 @@ def test_llm_worker_starts_from_inherited_memory(tmp_path: Path, monkeypatch):
             ),
         ]
     )
-    result = run_local_interactive_worker(
-        options,
-        llm=llm,
-        command_runner_factory=lambda _workspace: _NoShellRunner(),
-    )
-    assert result["state"] == "completed"
-    meta, fold, _heldout = ExperimentLedger(options.rolling.ledger_path).read()
+    with pytest.raises(RuntimeError, match="baseline anchor in force"):
+        run_local_interactive_worker(
+            options,
+            llm=llm,
+            command_runner_factory=lambda _workspace: _NoShellRunner(),
+        )
+    status = read_status(experiment / "hitl/status.json")
+    assert status["state"] == "failed"
+    assert "an anchor is the lineage's control" in status["error"]
+    records = ExperimentLedger(options.rolling.ledger_path).read()
+    # Development ran in full; only the delivery is refused.
+    assert [record["record_type"] for record in records] == ["meta_learning", "fold"]
+    meta, fold = records
     assert meta["prior"] == INHERITED_PRIOR
     assert meta["prior_generation_id"] == "inherited_src"
     assert meta["prior_published"] is False
@@ -1554,6 +1617,7 @@ def test_a_voluntary_early_finish_must_justify_itself_and_reaches_the_ledger(
 
     repo, experiment = _experiment(tmp_path, developer_mode="llm", max_backtests=9)
     monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
+    _seed_parent(experiment)
     options = load_worker_options(experiment, repo_root=repo)
     llm = ScriptedLLM(
         [
@@ -1719,6 +1783,7 @@ def test_early_finish_grades_the_epoch_that_actually_ran(tmp_path: Path):
         json.dumps({"schema_version": 1, "mode": "auto", "skip_to_heldout": True}),
         encoding="utf-8",
     )
+    _seed_parent(experiment)
     options = load_worker_options(experiment, repo_root=repo)
     result = run_local_interactive_worker(options)
     assert result["state"] == "completed"
@@ -1779,6 +1844,7 @@ def test_local_worker_runs_the_deployment_adjustment_after_graduation(
     without re-running anything."""
     _graduate_every_heldout(monkeypatch)
     repo, experiment = _deployment_experiment(tmp_path)
+    _seed_parent(experiment)
     options = load_worker_options(experiment, repo_root=repo)
     result = run_local_interactive_worker(options)
     assert result["state"] == "completed"
@@ -1827,6 +1893,7 @@ def test_local_worker_runs_the_deployment_adjustment_after_graduation(
 
 def test_a_discarded_experiment_runs_no_deployment_adjustment(tmp_path: Path):
     repo, experiment = _deployment_experiment(tmp_path)
+    _seed_parent(experiment)
     options = load_worker_options(experiment, repo_root=repo)
     result = run_local_interactive_worker(options)
     assert result["state"] == "completed"
@@ -1849,6 +1916,7 @@ def test_a_crashed_deployment_adjustment_is_recorded_and_resumed(
 
     _graduate_every_heldout(monkeypatch)
     repo, experiment = _deployment_experiment(tmp_path, session_max_attempts=1)
+    _seed_parent(experiment)
     options = load_worker_options(experiment, repo_root=repo)
     original = DeterministicBaselineDeveloper.__call__
 
@@ -1892,6 +1960,7 @@ def test_a_deployment_adjustment_requested_after_completion_runs_on_resume(
     start on its params and resuming runs just the adjustment."""
     _graduate_every_heldout(monkeypatch)
     repo, experiment = _deployment_experiment(tmp_path, deployment_adjustment_start="")
+    _seed_parent(experiment)
     options = load_worker_options(experiment, repo_root=repo)
     completed = run_local_interactive_worker(options)
     assert completed["state"] == "completed"
@@ -1915,6 +1984,7 @@ def test_a_deployment_adjustment_requested_after_completion_runs_on_resume(
 
 def test_local_worker_resume_skips_durable_sessions_and_heldout(tmp_path: Path):
     repo, experiment = _experiment(tmp_path)
+    _seed_parent(experiment)
     options = load_worker_options(experiment, repo_root=repo)
     run_local_interactive_worker(options)
     before = ExperimentLedger(options.rolling.ledger_path).read()
@@ -2216,8 +2286,12 @@ def test_console_gpu_allocation_reaches_the_run_manifests_sandbox_spec(
         experiment / "hitl/control.json",
         ControlState(mode="auto", gpu_counts={"epoch_001/fold_2026Q1": 3}),
     )
+    _seed_parent(experiment)
     options = load_worker_options(experiment, repo_root=repo)
-    source = "def generate_orders(context):\n    return []\n"
+    # Different executable logic from the inherited seed: a Fold with a
+    # parent may only nominate a different hypothesis (or an explicit
+    # keep-parent after one existed).
+    source = "def generate_orders(context):\n    if context is None:\n        return []\n    return []\n"
     llm = ScriptedLLM(
         [
             *_agent_then(

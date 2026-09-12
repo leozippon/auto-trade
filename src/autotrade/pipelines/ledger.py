@@ -218,6 +218,24 @@ class Transition:
     result_ref: str
 
 
+def baseline_anchor_artifacts(fold_records: list[dict[str, object]]) -> frozenset[str]:
+    """Every artifact frozen as a baseline anchor (docs/pipeline-design.md §2.2).
+
+    An anchor is the lineage's control -- the weak baseline a parentless Fold
+    must freeze so the next Fold has something to beat -- not a candidate
+    anyone judged worth shipping. Its id is the single handle on that: the
+    transitions it replayed score a control and are excluded from graduation,
+    and the experiment refuses to deliver one to Held-out.
+    """
+
+    return frozenset(
+        str(record["frozen_strategy_artifact_id"])
+        for record in latest_fold_records(fold_records).values()
+        if record.get("baseline_anchor") is True
+        and _artifact_id(record.get("frozen_strategy_artifact_id"))
+    )
+
+
 def _transition_rows(
     folds: list[dict[str, object]], *, test_stage: bool
 ) -> list[Transition]:
@@ -231,6 +249,11 @@ def _transition_rows(
     artifact's own count (:func:`final_artifact_transitions`), so the two can
     never disagree about which artifact a transition belongs to. The id is
     ``None`` when the record names none, which matches no artifact.
+
+    Every transition the schedule produced, anchors included: the callers drop
+    the ones that replayed an anchor (:func:`_counted`) but still need the full
+    row count to tell "this schedule confirmed nothing" from "this schedule
+    could confirm nothing".
     """
 
     if test_stage:
@@ -245,6 +268,17 @@ def _transition_rows(
     return [
         _parent_control_transition(record.get("parent_control")) for record in folds[1:]
     ]
+
+
+def _counted(rows: list[Transition], anchors: frozenset[str]) -> list[Transition]:
+    """The transitions that score something: an anchor's do not.
+
+    A baseline anchor is a control the experiment never delivers, so its
+    forward record leaves the numerator and the denominator alike -- counting
+    it either way would let a placebo's record stand in for a candidate's.
+    """
+
+    return [row for row in rows if row.artifact_id not in anchors]
 
 
 def _parent_control_transition(control: object) -> Transition:
@@ -277,8 +311,11 @@ def epoch_transitions(
     cannot describe different sets.
     """
 
-    return _transition_rows(
-        _epoch_folds(fold_records, epoch_id=epoch_id), test_stage=test_stage
+    return _counted(
+        _transition_rows(
+            _epoch_folds(fold_records, epoch_id=epoch_id), test_stage=test_stage
+        ),
+        baseline_anchor_artifacts(fold_records),
     )
 
 
@@ -300,10 +337,13 @@ def walk_forward_transitions(
     This is the development *chain's* record: the transitions it counts mostly
     replay earlier artifacts of the lineage, not the one Held-out ships. What
     that shipped artifact proved forward on its own is
-    :func:`final_artifact_transitions`.
+    :func:`final_artifact_transitions`. Transitions that replayed a baseline
+    anchor are not part of either: an anchor is a control the experiment never
+    delivers, so its forward record says nothing about a graduating strategy.
     """
     folds = _epoch_folds(fold_records, epoch_id=epoch_id)
-    rows = _transition_rows(folds, test_stage=test_stage)
+    scheduled = _transition_rows(folds, test_stage=test_stage)
+    rows = _counted(scheduled, baseline_anchor_artifacts(fold_records))
     if test_stage:
         source = "frozen_test"
         percentiles: list[float] = []
@@ -326,6 +366,10 @@ def walk_forward_transitions(
     return {
         "source": source,
         "epoch_id": epoch_id,
+        # What the schedule produced, before the anchors came out: a term that
+        # counts nothing because every transition replayed a control is not the
+        # same as a schedule with no transitions to count.
+        "scheduled": len(scheduled),
         **_counts(rows),
         # Diagnostic beside the count: where the transitions sat inside
         # random-name replays of their own trade skeletons, on average. Never
@@ -354,8 +398,11 @@ def final_artifact_transitions(
     chain's average.
     """
 
-    rows = _transition_rows(
-        _epoch_folds(fold_records, epoch_id=epoch_id), test_stage=test_stage
+    rows = _counted(
+        _transition_rows(
+            _epoch_folds(fold_records, epoch_id=epoch_id), test_stage=test_stage
+        ),
+        baseline_anchor_artifacts(fold_records),
     )
     own = [row for row in rows if row.artifact_id == artifact_id]
     return {

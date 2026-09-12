@@ -467,12 +467,20 @@ class AcceptanceRules:
     def walk_forward_consistency(
         walk_forward: Mapping[str, object] | None,
     ) -> dict[str, object]:
-        """Term (b) of graduation: positive excess in >= ceil(2/3) of transitions."""
+        """Term (b) of graduation: positive excess in >= ceil(2/3) of transitions.
+
+        ``not_applicable`` means the schedule produced no transition at all (a
+        single-period window), not that none of them counted: a chain whose
+        every transition replayed a baseline anchor confirmed nothing, and
+        reading that as "not applicable" would let term (c) fall silent with
+        it and an unconfirmed artifact graduate on Held-out alone.
+        """
         transitions = int((walk_forward or {}).get("transitions") or 0)
-        if transitions <= 0:
+        scheduled = int((walk_forward or {}).get("scheduled") or transitions)
+        if scheduled <= 0:
             return {"status": "not_applicable", "transitions": 0}
         positive = int((walk_forward or {}).get("positive_excess") or 0)
-        required = math.ceil(2 * transitions / 3)
+        required = math.ceil(2 * transitions / 3) or 1
         return {
             "status": "consistent" if positive >= required else "inconsistent",
             "source": str((walk_forward or {}).get("source") or ""),

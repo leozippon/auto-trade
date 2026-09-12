@@ -88,6 +88,7 @@ from .ledger import (
     FrozenArtifactMutated,
     RunMarkers,
     assert_no_frozen_artifact_mutation,
+    baseline_anchor_artifacts,
     deployment_adjustment_due,
     experiment_verdict,
     is_durable_success_record,
@@ -1174,13 +1175,15 @@ def run_local_interactive_worker(
     # is terminal: a resume could only re-walk the finished plan and end at the
     # same failure, so republish it here instead -- before any snapshot,
     # sandbox or gateway preparation, and without re-running a single session.
-    if (
-        _development_is_exhausted(hitl, ledger)
-        and not _pending_rerun(hitl, ledger)
-        and _latest_artifact(ledger, store, options.experiment_dir) is None
-        and _load_inherited_parent(options.experiment_dir) is None
-    ):
-        _fail_without_frozen_artifact(hitl, ledger)
+    if _development_is_exhausted(hitl, ledger) and not _pending_rerun(hitl, ledger):
+        # Nothing to deliver means no frozen artifact at all, or only the
+        # baseline anchor the first Fold was forced to freeze -- a control, not
+        # a candidate (docs/pipeline-design.md §2.2).
+        in_force = _latest_artifact(
+            ledger, store, options.experiment_dir
+        ) or _load_inherited_parent(options.experiment_dir)
+        if in_force is None or _is_baseline_anchor(ledger, in_force):
+            _fail_without_frozen_artifact(hitl, ledger, artifact=in_force)
     if (
         command_runner_factory is None
         and (options.execution_mode == "sandbox" or options.developer_mode == "llm")
@@ -1290,8 +1293,12 @@ def run_local_interactive_worker(
     if result["status"] != "complete":
         return result
     final = state["parent"] or _latest_artifact(ledger, store, options.experiment_dir)
-    if final is None:
-        _fail_without_frozen_artifact(hitl, ledger)
+    # A baseline anchor is the lineage's control, never the deliverable: an
+    # experiment whose last word is the placebo it was forced to freeze takes
+    # the same explicit exit as one that froze nothing at all, rather than
+    # spending a Held-out on it (docs/pipeline-design.md §2.2).
+    if final is None or _is_baseline_anchor(ledger, final):
+        _fail_without_frozen_artifact(hitl, ledger, artifact=final)
     final_status = StatusReporter(hitl / "status.json")
     final_status.start()
     completed_development = len(
@@ -1736,12 +1743,26 @@ def _development_is_exhausted(hitl: Path, ledger: ExperimentLedger) -> bool:
     return planned <= completed
 
 
-def _fail_without_frozen_artifact(hitl: Path, ledger: ExperimentLedger) -> NoReturn:
-    """The documented zero-freeze end of development (§4.3): development ran
-    out of folds without ever freezing an artifact, so there is nothing to
-    evaluate and the run fails. The status is published here as well as raised
-    so the terminal state is the same whichever caller drove the worker."""
-    error = _development_end_error(ledger)
+def _is_baseline_anchor(ledger: ExperimentLedger, artifact: FrozenArtifact) -> bool:
+    """Whether the artifact in force is the lineage's baseline anchor."""
+
+    return artifact.artifact_id in baseline_anchor_artifacts(ledger.read("fold"))
+
+
+def _fail_without_frozen_artifact(
+    hitl: Path, ledger: ExperimentLedger, *, artifact: FrozenArtifact | None = None
+) -> NoReturn:
+    """The documented zero-deliverable end of development (§4.3): development
+    ran out of folds without ever freezing an artifact worth evaluating, so
+    there is nothing to evaluate and the run fails. ``artifact`` is the
+    baseline anchor left in force, when that is why there is nothing to
+    deliver. The status is published here as well as raised so the terminal
+    state is the same whichever caller drove the worker."""
+    error = (
+        _baseline_anchor_end_error(artifact)
+        if artifact is not None
+        else _development_end_error(ledger)
+    )
     write_json_atomic(
         hitl / "status.json",
         {
@@ -1753,6 +1774,21 @@ def _fail_without_frozen_artifact(hitl: Path, ledger: ExperimentLedger) -> NoRet
         },
     )
     raise RuntimeError(error)
+
+
+def _baseline_anchor_end_error(artifact: FrozenArtifact) -> str:
+    """Name the anchor, so the failure is not read as a lost artifact.
+
+    The experiment did freeze something; what it never did is replace the weak
+    baseline the anchor rule forced on its first Fold with a candidate anyone
+    judged worth shipping."""
+
+    return (
+        "Development ended with a baseline anchor in force "
+        f"({artifact.artifact_id}): an anchor is the lineage's control, not a "
+        "deliverable, and no candidate ever replaced it, so there is nothing "
+        "to evaluate on Held-out"
+    )
 
 
 def _development_end_error(ledger: ExperimentLedger) -> str:

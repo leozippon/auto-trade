@@ -1199,3 +1199,47 @@ class PitViewsSeedParameterTest(unittest.TestCase):
             )
             self.assertIsNone(options.pit_views_seed)
             self.assertFalse(options.pit_views_seed_required)
+
+
+class WalkForwardApplicabilityTest(unittest.TestCase):
+    """Term (b) is only "not applicable" when the schedule produced nothing.
+
+    Excluding the anchors' transitions can empty the count, and reading that as
+    "not applicable" would take term (c) down with it and graduate an artifact
+    on Held-out alone. A schedule that produced transitions and confirmed none
+    of them is inconsistent, not inapplicable.
+    """
+
+    def test_an_empty_count_over_a_real_schedule_is_inconsistent(self) -> None:
+        rules = AcceptanceRules()
+        none_scheduled = rules.walk_forward_consistency(
+            {"source": "parent_control", "scheduled": 0, "transitions": 0}
+        )
+        self.assertEqual(none_scheduled["status"], "not_applicable")
+        all_anchors = rules.walk_forward_consistency(
+            {"source": "parent_control", "scheduled": 4, "transitions": 0}
+        )
+        self.assertEqual(
+            (all_anchors["status"], all_anchors["required"]), ("inconsistent", 1)
+        )
+        # And term (c) still applies, so the artifact cannot pass unconfirmed.
+        passing = {
+            "total_return": 0.10,
+            "sharpe": 1.0,
+            "max_drawdown": -0.05,
+            "benchmark": {"benchmark_return": 0.02, "neutralized_excess_return": 0.03},
+        }
+        reasons = rules.heldout_verdict(
+            passing,
+            {"source": "parent_control", "scheduled": 4, "transitions": 0},
+            None,
+            {"transitions": 0, "positive_excess": 0},
+        )["reasons"]
+        self.assertIn("walkforward_excess_inconsistent(0/0<1)", reasons)
+        self.assertIn("final_artifact_unconfirmed(0/2)", reasons)
+        # A ledger written before the field exists reads its own count, as it
+        # always did: no transitions recorded, nothing to apply.
+        self.assertEqual(
+            rules.walk_forward_consistency({"transitions": 0})["status"],
+            "not_applicable",
+        )

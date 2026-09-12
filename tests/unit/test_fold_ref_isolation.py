@@ -39,8 +39,8 @@ from autotrade.pipelines.worker import load_worker_options, run_local_interactiv
 from .test_interactive_worker_local import (
     _FOLD_DELEGATION_ROLES,
     _NoShellRunner,
-    _experiment,
     _agent_then,
+    _experiment,
 )
 
 TEST_LABEL = "2026Q1"
@@ -151,10 +151,15 @@ def fold_session(tmp_path_factory, provider_key):
         ],
         work_root=options.work_root / options.experiment_id,
     )
-    result = run_local_interactive_worker(
-        options, llm=llm, command_runner_factory=lambda _workspace: _NoShellRunner()
-    )
-    assert result["state"] == "completed"
+    # The parentless Fold anchors the lineage, and an anchor is a control the
+    # run never delivers, so development ends without a deliverable instead of
+    # reaching Held-out. Everything these tests read -- the model calls, the
+    # sandbox trees, the manifests and the Fold record -- is written by the
+    # sessions themselves, before that.
+    with pytest.raises(RuntimeError, match="baseline anchor in force"):
+        run_local_interactive_worker(
+            options, llm=llm, command_runner_factory=lambda _workspace: _NoShellRunner()
+        )
     records = ExperimentLedger(options.rolling.ledger_path).read()
     return {
         "llm": llm,

@@ -345,6 +345,7 @@ def test_walk_forward_transitions_count_the_final_epochs_parent_controls():
     assert walk_forward_transitions(records, epoch_id="epoch_002", test_stage=False) == {
         "source": "parent_control",
         "epoch_id": "epoch_002",
+        "scheduled": 3,
         "transitions": 3,
         "positive_excess": 1,
         # The failed control proved nothing; it is not an unmeasured grade.
@@ -369,6 +370,7 @@ def test_walk_forward_transitions_use_frozen_tests_with_a_test_stage():
     assert walk_forward_transitions(records, epoch_id="epoch_001", test_stage=True) == {
         "source": "frozen_test",
         "epoch_id": "epoch_001",
+        "scheduled": 3,
         "transitions": 3,
         "positive_excess": 1,
         "unmeasured": 0,
@@ -545,6 +547,7 @@ def test_a_transition_is_graded_on_the_step_when_the_window_carries_one():
     assert counted == {
         "source": "parent_control",
         "epoch_id": "epoch_001",
+        "scheduled": 1,
         "transitions": 1,
         "positive_excess": 0,
         "unmeasured": 0,
@@ -657,3 +660,42 @@ def test_a_transition_without_a_recorded_neutralized_excess_is_derived_then_fail
         "reasons"
     ]
     assert "missing_transition_neutralized_excess(1/1)" in reasons
+
+
+def test_transitions_that_replayed_a_baseline_anchor_are_not_counted():
+    """A baseline anchor is the lineage's control, not a candidate.
+
+    Three arms of the reviewed round had nothing frozen but the placebo the
+    anchor rule forced on their first Fold. Counting the transitions that
+    replayed it would let that control's forward record stand in for a real
+    candidate's, so they leave both the numerator and the denominator: term
+    (b) scores only what the lineage actually proposed.
+    """
+
+    from autotrade.pipelines.ledger import baseline_anchor_artifacts
+
+    records = [
+        {
+            **_fold("epoch_001", "fold_2022", "p0", frozen="strategy_anchor"),
+            "baseline_anchor": True,
+        },
+        # Two Folds kept the anchor: replays of a control, not of a candidate.
+        _fold("epoch_001", "fold_2023", "p1", control=_ok(0.10, parent="strategy_anchor"), frozen="strategy_anchor"),
+        _fold("epoch_001", "fold_2024", "p2", control=_ok(0.10, parent="strategy_anchor"), frozen="strategy_real"),
+        # The first transition of the real candidate that replaced it.
+        _fold("epoch_001", "fold_2025", "p3", control=_ok(0.09, parent="strategy_real"), frozen="strategy_real"),
+    ]
+    assert baseline_anchor_artifacts(records) == frozenset({"strategy_anchor"})
+    counted = walk_forward_transitions(records, epoch_id="epoch_001", test_stage=False)
+    assert (counted["transitions"], counted["positive_excess"]) == (1, 1)
+    # The anchor's own record is not readable as a shipped artifact's either.
+    assert final_artifact_transitions(
+        records, epoch_id="epoch_001", test_stage=False, artifact_id="strategy_anchor"
+    )["transitions"] == 0
+    assert final_artifact_transitions(
+        records, epoch_id="epoch_001", test_stage=False, artifact_id="strategy_real"
+    )["transitions"] == 1
+    # Without the anchor label the same rows are ordinary transitions again, so
+    # the exclusion is the label's doing and not the shape of the fixture.
+    plain = [{key: value for key, value in record.items() if key != "baseline_anchor"} for record in records]
+    assert walk_forward_transitions(plain, epoch_id="epoch_001", test_stage=False)["transitions"] == 3

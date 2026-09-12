@@ -1663,7 +1663,7 @@ function transitionsStrip(detail) {
       label: `超额为正（${epochShort(epochId)}）`,
       value: `${term.positive_excess}/${term.transitions}${required === null ? "" : `　需 ≥${required}`}`,
       cls: required === null ? "" : term.positive_excess >= required ? "pos" : "neg",
-      title: `末个 Epoch 的 ${term.transitions} 次样本外过渡（取自各 Fold 的${source}）里，${term.positive_excess} 次的中性化超额为正。毕业按 ⌈2/3⌉ 需 ${required ?? "—"} 次；原始超额只作展示，不参与计数。${term.unmeasured ? `其中 ${term.unmeasured} 次算不出中性化超额，按未证明计并使毕业不通过。` : ""}`,
+      title: `末个 Epoch 计入的 ${term.transitions} 次样本外过渡（取自各 Fold 的${source}，回放基线锚点的不计）里，${term.positive_excess} 次的中性化超额为正。毕业按 ⌈2/3⌉ 需 ${required ?? "—"} 次；原始超额只作展示，不参与计数。${term.unmeasured ? `其中 ${term.unmeasured} 次算不出中性化超额，按未证明计并使毕业不通过。` : ""}`,
     },
     {
       label: "平均新季中性化超额",
@@ -1823,6 +1823,13 @@ function walkForwardPanel(detail) {
                     "span",
                     { class: "mode-note" },
                     "（对照未完成，这次过渡不算通过）",
+                  )
+                : null,
+              control.baseline_anchor
+                ? el(
+                    "span",
+                    { class: "mode-note" },
+                    "（回放的是基线锚点，对照参考而非交付产物：这次过渡不计入毕业条件）",
                   )
                 : null,
             ),

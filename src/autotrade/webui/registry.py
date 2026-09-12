@@ -36,6 +36,8 @@ from autotrade.pipelines.hitl_state import (
 )
 from autotrade.pipelines.ledger import (
     ExperimentLedger,
+    baseline_anchor_artifacts,
+    epoch_transitions,
     experiment_verdict,
     is_durable_success_record,
     is_frozen_artifact_mutation,
@@ -43,10 +45,9 @@ from autotrade.pipelines.ledger import (
     latest_fold_records,
     latest_heldout_records,
     paper_candidate,
-    transition_null_control,
-    epoch_transitions,
     parent_control_excess,
     transition_neutralized_excess,
+    transition_null_control,
     transition_result,
     walk_forward_transitions,
 )
@@ -299,7 +300,9 @@ def _excess_return(result: object) -> float | None:
     return total - bench if total is not None and bench is not None else None
 
 
-def _parent_control_view(record: Mapping[str, object]) -> dict[str, object] | None:
+def _parent_control_view(
+    record: Mapping[str, object], anchors: frozenset[str]
+) -> dict[str, object] | None:
     """Console metrics of one Fold's host parent control.
 
     The parent control replays the inherited parent unchanged on this Fold's
@@ -327,6 +330,10 @@ def _parent_control_view(record: Mapping[str, object]) -> dict[str, object] | No
     scored_end = result.get("end") if stepped else window_end
     return {
         "status": control.get("status"),
+        # This transition replayed a baseline anchor: a control the experiment
+        # never delivers, so the counts above the table leave it out entirely
+        # and the row has to say why it is not among them.
+        "baseline_anchor": control.get("parent_strategy_artifact_id") in anchors,
         "source": "step_result" if stepped else "validation_result",
         "period_start": str(scored_start) if scored_start else None,
         "period_end": str(scored_end) if scored_end else None,
@@ -736,6 +743,10 @@ def summarize_experiment(directory: Path) -> dict[str, object]:
         records = read_ledger_records(directory)
         folds = walk_forward_folds(list(latest_fold_records(records).values()))
         heldout = latest_heldout_records(records)
+        # Which frozen artifacts are the lineage's controls rather than
+        # candidates: the transitions that replayed one are not counted, so the
+        # rows that show them have to say so.
+        anchors = baseline_anchor_artifacts(records)
         skills_snapshot = latest_skills_snapshot(records, experiment_dir=directory)
         params = read_json(directory / HITL_DIR_NAME / PARAMS_NAME)
         _require_supported_params(params)
@@ -837,7 +848,7 @@ def summarize_experiment(directory: Path) -> dict[str, object]:
                         # re-deriving the branch from fold_status.
                         "strategy_in_force": strategy_in_force(record).source,
                         # Development evidence: the Fold's baseline, never sealed.
-                        "parent_control": _parent_control_view(record),
+                        "parent_control": _parent_control_view(record, anchors),
                         # How wide the search behind this Fold's frozen
                         # candidate was, and how much of its Sharpe that width
                         # alone explains.

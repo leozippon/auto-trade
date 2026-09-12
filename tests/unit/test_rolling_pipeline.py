@@ -1182,6 +1182,38 @@ def _regular_fold_pipeline(tmp_path: Path, evaluator, *, max_steps: int = 1, tes
     return pipeline, folds, ledger, requests
 
 
+def _seed_artifact(pipeline, evaluator, revision_id: str = "revision_seed"):
+    """An inherited artifact for the first Fold to start from.
+
+    A parentless first Fold must freeze a baseline anchor, and an anchor's
+    transitions are a control's: they are excluded from the graduation terms
+    and the anchor is never delivered. A test about what the transitions do
+    therefore needs a lineage that starts from a real artifact, the way an
+    experiment created with ``inherit_from`` does.
+    """
+
+    store = pipeline.artifacts
+    source = next(iter(store.revisions.values()))
+    seed_dir = Path(source.output_path).parent / revision_id
+    seed_dir.mkdir(exist_ok=True)
+    # Its own content, so a Fold's nomination is a real change rather than the
+    # seed handed back unchanged.
+    (seed_dir / "main.py").write_text(
+        "# seed\ndef generate_orders(context):\n    return []\n", encoding="utf-8"
+    )
+    store.revisions[revision_id] = ArtifactRevision(revision_id, seed_dir)
+    evaluator.returns.setdefault(revision_id, 0.02)
+    return store.freeze_revision(
+        revision_id,
+        artifact_id="strategy_seed",
+        experiment_id="experiment_a",
+        epoch_id="epoch_000",
+        fold_id="fold_seed",
+        run_id="run_seed",
+        step_id="step_seed",
+    )
+
+
 def test_parent_control_replays_the_inherited_parent_once_per_fold_off_budget(tmp_path: Path):
     """Regular Folds without a Test stage: the host replays the previous Fold's
     frozen strategy on the next Fold's Validation window before the session,
@@ -1309,7 +1341,7 @@ def test_walk_forward_term_reaches_the_held_out_verdict(tmp_path: Path):
 
     evaluator = RecordingEvaluator({"revision_1": 0.05})
     pipeline, folds, ledger, _requests = _regular_fold_pipeline(tmp_path, evaluator)
-    first = pipeline.run_fold("epoch_001", folds[0], parent=None)
+    first = pipeline.run_fold("epoch_001", folds[0], parent=_seed_artifact(pipeline, evaluator))
     assert first.frozen is not None
     evaluator.returns[first.frozen.artifact_id] = 0.01  # below the 0.02 benchmark
     second = pipeline.run_fold("epoch_001", folds[1], parent=first.frozen)
@@ -1360,7 +1392,7 @@ def test_a_new_mechanism_frozen_in_the_last_fold_cannot_graduate(tmp_path: Path)
 
     evaluator = RecordingEvaluator({"revision_1": 0.05})
     pipeline, folds, ledger, _requests = _regular_fold_pipeline(tmp_path, evaluator)
-    first = pipeline.run_fold("epoch_001", folds[0], parent=None)
+    first = pipeline.run_fold("epoch_001", folds[0], parent=_seed_artifact(pipeline, evaluator))
     evaluator.returns[first.frozen.artifact_id] = 0.03  # beats the 0.02 benchmark
     second = pipeline.run_fold("epoch_001", folds[1], parent=first.frozen)
     assert second.frozen is not None and second.frozen.artifact_id != first.frozen.artifact_id
@@ -1383,7 +1415,7 @@ def test_a_last_fold_that_nominates_the_parent_keeps_the_artifact_id(tmp_path: P
 
     evaluator = RecordingEvaluator({"revision_1": 0.05})
     pipeline, folds, ledger, _requests = _regular_fold_pipeline(tmp_path, evaluator)
-    first = pipeline.run_fold("epoch_001", folds[0], parent=None)
+    first = pipeline.run_fold("epoch_001", folds[0], parent=_seed_artifact(pipeline, evaluator))
     assert first.frozen is not None
     evaluator.returns[first.frozen.artifact_id] = 0.03  # beats the 0.02 benchmark
 
@@ -1437,7 +1469,7 @@ def test_a_positive_walk_forward_transition_lets_a_passing_held_out_graduate(tmp
 
     evaluator = RecordingEvaluator({"revision_1": 0.05})
     pipeline, folds, ledger, _requests = _regular_fold_pipeline(tmp_path, evaluator)
-    first = pipeline.run_fold("epoch_001", folds[0], parent=None)
+    first = pipeline.run_fold("epoch_001", folds[0], parent=_seed_artifact(pipeline, evaluator))
     evaluator.returns[first.frozen.artifact_id] = 0.03  # beats the 0.02 benchmark
     developer = pipeline.developer
 
@@ -1478,7 +1510,7 @@ def test_a_test_stage_schedule_uses_the_frozen_tests_as_walk_forward_evidence(tm
     evaluator = FrozenTestEvaluator({"revision_1": 0.05})
     pipeline, folds, ledger, _requests = _regular_fold_pipeline(tmp_path, evaluator, test_stage=True)
     assert [(fold.fold_id, fold.has_test) for fold in folds] == [("fold_2026Q1", True)]
-    outcome = pipeline.run_fold("epoch_001", folds[0], parent=None)
+    outcome = pipeline.run_fold("epoch_001", folds[0], parent=_seed_artifact(pipeline, evaluator))
     assert outcome.frozen is not None
     evaluator.returns[outcome.frozen.artifact_id] = 0.10
     pipeline.run_heldout("epoch_001", outcome.frozen, _days())

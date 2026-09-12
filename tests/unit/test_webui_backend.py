@@ -1467,6 +1467,7 @@ def test_a_fold_that_kept_its_parent_still_publishes_return_numbers(
     # against that quarter's own null control rather than the window's 0.352.
     assert row["parent_control"] == {
         "status": "ok",
+        "baseline_anchor": False,
         "source": "step_result",
         "period_start": "20230403",
         "period_end": "20230630",
@@ -3596,6 +3597,9 @@ class WebuiBackendTest(unittest.TestCase):
             rows[self._fold_ref("fold_2025", "exp_wf")]["parent_control"],
             {
                 "status": "failed",
+                # This lineage never froze an anchor, so nothing here replayed
+                # a control the counts would leave out.
+                "baseline_anchor": False,
                 # No numbers, but the window the control was meant to cover.
                 "source": "validation_result",
                 "period_start": "20250104",

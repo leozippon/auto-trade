@@ -348,7 +348,8 @@ def test_the_parent_control_fields_the_console_reads_are_served() -> None:
                         "benchmark": {"benchmark_return": 0.03},
                     },
                 }
-            }
+            },
+            frozenset(),
         )
     )
     read = set(
@@ -387,7 +388,8 @@ def test_the_parent_control_view_names_the_span_it_scored() -> None:
         {
             "validation_period": "20230101..20231231",
             "parent_control": {"status": "ok", "validation_result": whole_window},
-        }
+        },
+        frozenset(),
     )
     assert single["source"] == "validation_result"
     assert (single["period_start"], single["period_end"]) == ("20230101", "20231231")
@@ -401,7 +403,8 @@ def test_the_parent_control_view_names_the_span_it_scored() -> None:
                 "validation_result": whole_window,
                 "step_result": step,
             },
-        }
+        },
+        frozenset(),
     )
     assert trailing["source"] == "step_result"
     assert (trailing["period_start"], trailing["period_end"]) == (
