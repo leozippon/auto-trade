@@ -490,7 +490,7 @@ _FIELDS: list[dict[str, object]] = [
         "group": "预算与验收",
         "label": "确认折数",
         "type": "int",
-        "help": "Development 窗口末尾保留为确认折的 Fold 数，同时也是毕业裁决对交付产物「自有过渡」的下限。这些折里 finish_fold 拒绝改动了策略内容的提名（保留父本与 no_edge 照常，基线锚点要求豁免），交付产物因此正好能攒够同样多的自有过渡，并须单独满足 ⌈2/3⌉ 正超额规则。0 同时关闭两者。",
+        "help": "Development 窗口末尾保留为确认折的 Fold 数，同时也是毕业裁决对交付产物「自有过渡」的下限。这些折的 Fold 提示说明这笔算术——在确认折里新冻的产物本轮攒不满该下限，必然无法毕业——因此它们用来确认在位产物；交付产物正好能攒够同样多的自有过渡，并须单独满足 ⌈2/3⌉ 正超额规则。0 同时关闭两者。",
     },
     {"key": "deployment_adjustment_start", "group": "预算与验收", "label": "部署调整窗口起点", "type": "string",
      "optional": True,
