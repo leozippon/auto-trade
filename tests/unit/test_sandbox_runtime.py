@@ -1044,13 +1044,20 @@ def test_docker_command_has_fail_closed_boundary(tmp_path: Path):
         offset = command.index(pair[0])
         assert command[offset : offset + 2] == pair
     assert "--read-only" in command
-    assert "--tmpfs" in command
     assert "--cpus" in command
     assert "--memory" in command
     assert "--pids-limit" in command
     assert command[command.index("--cpus") + 1] == "16"
     assert command[command.index("--memory") + 1] == "32g"
     assert command[command.index("--pids-limit") + 1] == "256"
+    # Scratch large enough for the 16 CPUs the container is given: a 64 MB
+    # /tmp and Docker's 64 MB default /dev/shm rule out multi-process training
+    # inside fit() whatever else the boundary allows. Both are charged to the
+    # container's own memory cap.
+    assert command[command.index("--tmpfs") + 1] == (
+        "/tmp:rw,noexec,nosuid,nodev,size=2g"
+    )
+    assert command[command.index("--shm-size") + 1] == "2g"
     env_pairs = [
         command[index + 1]
         for index, value in enumerate(command)

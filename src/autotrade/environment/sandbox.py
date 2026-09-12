@@ -89,7 +89,16 @@ class SandboxLimits:
     # still fails explicitly instead of blocking the replay forever.
     startup_timeout_seconds: float = 900.0
     max_output_chars: int = 1_000_000
-    tmpfs_size: str = "64m"
+    # Scratch inside the read-only container: ``/tmp`` and ``/dev/shm``. Both
+    # were sized for the single-threaded NumPy era (64 MB, and Docker's 64 MB
+    # default for shared memory), which rules out multi-process training inside
+    # ``fit`` altogether -- a torch ``DataLoader(num_workers>0)`` and joblib's
+    # memmapped parallel backend both fail on a 64 MB ``/dev/shm``, and any
+    # spill or intermediate parquet fails on a 64 MB ``/tmp``. They are charged
+    # to the container's own ``memory`` cap, so 2 GB each is 4 GB of the 32 GB
+    # a strategy container may use, and only what it actually writes.
+    tmpfs_size: str = "2g"
+    shm_size: str = "2g"
     # The experiment's own GPU request, carried over from its ``SandboxSpec``
     # (``pipelines.worker._strategy_sandbox_from_spec``). ``fit(context)`` runs
     # in THIS container rather than in the Agent session, so an experiment that
@@ -128,6 +137,8 @@ class SandboxLimits:
             raise ValueError("sandbox max_output_chars must be a positive integer")
         if not _MEMORY_LIMIT.fullmatch(self.tmpfs_size):
             raise ValueError("sandbox tmpfs_size must be a positive Docker memory limit")
+        if not _MEMORY_LIMIT.fullmatch(self.shm_size):
+            raise ValueError("sandbox shm_size must be a positive Docker memory limit")
         if (
             isinstance(self.gpu_count, bool)
             or not isinstance(self.gpu_count, int)
