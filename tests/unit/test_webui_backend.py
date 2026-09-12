@@ -33,8 +33,6 @@ from autotrade.pipelines.hitl_state import (
     WEB_CREATE_DEFAULTS,
     ControlState,
     StatusReporter,
-    consume_step_approval,
-    consume_user_reply,
     proc_start_ticks,
     read_control,
     read_status,
@@ -55,19 +53,13 @@ from autotrade.webui.server import create_app, is_loopback_host
 #: Every control action blocked once Test/Held-out numbers are on screen —
 #: `manager._SEALED_BLOCKED_ACTIONS`, verbatim and in sorted order.
 _SEALED_AFTER_REVEAL = (
-    "approve",
-    "approve_step",
     "cancel_skip_to_heldout",
     "inject_message",
-    "reply_question",
     "rerun_fold",
     "restart",
     "resume",
     "rollback_fold",
     "set_directive",
-    "set_parent_override",
-    "set_prompt_override",
-    "set_step_gate",
     "skip_to_heldout",
 )
 
@@ -1760,199 +1752,6 @@ def test_experiment_progress_comes_from_schedule_and_durable_ledger(tmp_path: Pa
     assert home_progress() == (2, 2)
 
 
-def test_current_question_and_step_controls_use_exact_one_shot_keys(tmp_path: Path):
-    directory = _persistent_experiment(tmp_path)
-    client = TestClient(create_app(tmp_path))
-    session_key = "epoch_001/fold_2026Q1"
-    question_key = f"{session_key}#q1"
-    public_session_key = _session_ref(directory, session_key)
-    public_question_key = f"{public_session_key}#q1"
-    status_path = directory / "hitl/status.json"
-    status_path.write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                **_live_pid_fields(),
-                "state": "waiting_user_reply",
-                "session_key": session_key,
-                "question_key": question_key,
-                "question": "继续当前假设吗？",
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    wrong_question = client.post(
-        "/api/experiments/demo/control",
-        json={
-            "action": "reply_question",
-            "session_key": public_session_key,
-            "directive": "",
-        },
-    )
-    assert wrong_question.status_code == 400
-    assert "current question key" in wrong_question.json()["detail"]
-
-    replied = client.post(
-        "/api/experiments/demo/control",
-        json={
-            "action": "reply_question",
-            "session_key": public_question_key,
-            "directive": "",
-        },
-    )
-    assert replied.status_code == 200
-    assert replied.json()["control"]["user_replies"] == {public_question_key: ""}
-    assert consume_user_reply(directory / "hitl/control.json", question_key) == (
-        True,
-        "",
-    )
-    assert read_control(directory / "hitl/control.json").user_replies == {}
-
-    status_path.write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                **_live_pid_fields(),
-                "state": "waiting_step_user",
-                "session_key": session_key,
-                "step_index": 2,
-            }
-        ),
-        encoding="utf-8",
-    )
-    wrong_step = client.post(
-        "/api/experiments/demo/control",
-        json={
-            "action": "approve_step",
-            "session_key": public_session_key,
-            "step_index": 1,
-            "directive": "继续控制回撤",
-        },
-    )
-    assert wrong_step.status_code == 400
-    assert "current waiting Step" in wrong_step.json()["detail"]
-    malformed_step = client.post(
-        "/api/experiments/demo/control",
-        json={
-            "action": "approve_step",
-            "session_key": public_session_key,
-            "step_index": 2,
-            "directive": {"text": "继续"},
-        },
-    )
-    assert malformed_step.status_code == 400
-    assert malformed_step.json()["detail"] == "approve_step directive must be a string"
-
-    approved = client.post(
-        "/api/experiments/demo/control",
-        json={
-            "action": "approve_step",
-            "session_key": public_session_key,
-            "step_index": 2,
-            "directive": "继续控制回撤",
-        },
-    )
-    assert approved.status_code == 200
-    control = approved.json()["control"]
-    assert control["step_go"] == {public_session_key: 2}
-    assert control["step_directives"] == {
-        f"{public_session_key}#2": "继续控制回撤"
-    }
-    assert consume_step_approval(directory / "hitl/control.json", session_key, 2) == (
-        True,
-        "继续控制回撤",
-    )
-    consumed = read_control(directory / "hitl/control.json")
-    assert consumed.step_go == {}
-    assert consumed.step_directives == {}
-
-
-def test_dead_pid_hitl_wait_actions_fail_closed(tmp_path: Path):
-    directory = _persistent_experiment(tmp_path)
-    client = TestClient(create_app(tmp_path))
-    session_key = "epoch_001/fold_2026Q1"
-    question_key = f"{session_key}#q1"
-    public_session_key = _session_ref(directory, session_key)
-    public_question_key = f"{public_session_key}#q1"
-    status_path = directory / "hitl/status.json"
-    control_path = directory / "hitl/control.json"
-    corpse = {
-        "schema_version": 1,
-        "pid": 999_999_999,
-        "pid_start_ticks": 1,
-        "state": "waiting_step_user",
-        "session_key": session_key,
-        "step_index": 2,
-        "run_id": "run_001",
-    }
-    status_path.write_text(json.dumps(corpse), encoding="utf-8")
-
-    approved = client.post(
-        "/api/experiments/demo/control",
-        json={
-            "action": "approve_step",
-            "session_key": public_session_key,
-            "step_index": 2,
-            "directive": "继续控制回撤",
-        },
-    )
-    assert approved.status_code == 400
-    assert "live worker" in approved.json()["detail"]
-    assert read_control(control_path).step_go == {}
-    assert read_control(control_path).step_directives == {}
-
-    current = client.get("/api/experiments/demo/current-step")
-    assert current.status_code == 200
-    assert current.json()["available"] is False
-    analysis = client.post("/api/experiments/demo/current-step/analysis")
-    assert analysis.status_code == 409
-    assert "live worker" in analysis.json()["detail"]
-    source = client.get("/api/experiments/demo/current-step/source.zip")
-    assert source.status_code == 404
-
-    corpse["state"] = "waiting_user_reply"
-    corpse["question_key"] = question_key
-    corpse["question"] = "继续当前假设吗？"
-    status_path.write_text(json.dumps(corpse), encoding="utf-8")
-    replied = client.post(
-        "/api/experiments/demo/control",
-        json={
-            "action": "reply_question",
-            "session_key": public_question_key,
-            "directive": "",
-        },
-    )
-    assert replied.status_code == 400
-    assert "live worker" in replied.json()["detail"]
-    assert read_control(control_path).user_replies == {}
-
-
-def test_status_reporter_keeps_only_the_current_wait_payload(tmp_path: Path):
-    path = tmp_path / "status.json"
-    reporter = StatusReporter(path)
-    reporter.set(
-        state="waiting_user_reply",
-        question_key="epoch_001/fold_2026Q1#q1",
-        question="继续吗？",
-        question_summary="当前假设",
-    )
-    reporter.set(
-        state="waiting_step_user",
-        step_index=1,
-        step_summary={"node_id": "step_001"},
-    )
-    status = read_status(path)
-    assert status["step_index"] == 1
-    assert not {"question_key", "question", "question_summary"} & status.keys()
-
-    reporter.set(state="running_session")
-    status = read_status(path)
-    assert (
-        not {"step_index", "step_summary", "question_key", "question"} & status.keys()
-    )
-
-
 def test_partial_heldout_does_not_reveal_out_of_sample_results(tmp_path: Path):
     directory = _persistent_experiment(tmp_path)
     schedule_path = directory / "hitl/schedule.json"
@@ -2035,8 +1834,6 @@ def test_static_console_keeps_macro_style_surfaces_without_closed_capabilities(
     assert 'el("div", { class: "empty" }, "后端未连接")' in qmt_source
     assert "status.awaiting_question" not in script
     assert "status.awaiting_step" not in script
-    assert "session_key: questionKey" in script
-    assert "step_index: stepIndex" in script
     assert "gpus" in client.get("/api/gpus").json()
 
 
@@ -2733,10 +2530,6 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertEqual(
             fields["meta_model"]["default"], WEB_CREATE_DEFAULTS["meta_model"]
         )
-        self.assertEqual(
-            fields["initial_control_mode"]["default"],
-            WEB_CREATE_DEFAULTS["initial_control_mode"],
-        )
         for hidden in (
             "experiments_root",
             "work_root",
@@ -3008,7 +2801,11 @@ class WebuiBackendTest(unittest.TestCase):
         # read test_results_revealed(), not only the control flag.
         response = self.client.post(
             "/api/experiments/exp_hitl/control",
-            json={"action": "approve", "session_key": "heldout"},
+            json={
+                "action": "set_directive",
+                "session_key": "heldout",
+                "directive": "x",
+            },
         )
         self.assertEqual(response.status_code, 400)
         self.assertIn("封存", response.json()["detail"])
@@ -3018,12 +2815,8 @@ class WebuiBackendTest(unittest.TestCase):
         # `resume` restarts learning on a sealed experiment, so it is blocked
         # together with the rest of the learning-affecting control set.
         for action in (
-            "approve",
             "rerun_fold",
             "rollback_fold",
-            "approve_step",
-            "reply_question",
-            "set_step_gate",
             "set_directive",
             "resume",
         ):
@@ -3045,9 +2838,9 @@ class WebuiBackendTest(unittest.TestCase):
 
     def test_deployment_adjustment_is_the_one_session_the_seal_lets_through(self) -> None:
         """The post-Held-out deployment adjustment (docs/pipeline-design.md
-        §3.4) is approved, directed and resumed on a sealed experiment; every
-        other learning control stays sealed; the console shows its row and the
-        Paper candidate with the command that pins it."""
+        §3.4) is directed and resumed on a sealed experiment; every other
+        learning control stays sealed; the console shows its row and the Paper
+        candidate with the command that pins it."""
         experiment_dir = self.experiments_root / "exp_hitl"
         hitl = experiment_dir / "hitl"
         params = json.loads((hitl / "params.json").read_text(encoding="utf-8"))
@@ -3065,14 +2858,18 @@ class WebuiBackendTest(unittest.TestCase):
         )
         write_json_atomic(hitl / "schedule.json", schedule)
         self._reveal()
-        # Not graduated yet: approving the post-seal session is harmless (the
+        # Not graduated yet: directing the post-seal session is harmless (the
         # worker never runs it while it is not due), but resuming the sealed
         # experiment is still refused because nothing is owed.
-        approved = self.client.post(
+        directed = self.client.post(
             "/api/experiments/exp_hitl/control",
-            json={"action": "approve", "session_key": "deployment_adjustment"},
+            json={
+                "action": "set_directive",
+                "session_key": "deployment_adjustment",
+                "directive": "hold the mechanism",
+            },
         )
-        self.assertEqual(approved.status_code, 200, approved.text)
+        self.assertEqual(directed.status_code, 200, directed.text)
         refused = self.client.post(
             "/api/experiments/exp_hitl/control", json={"action": "resume"}
         )
@@ -3103,7 +2900,6 @@ class WebuiBackendTest(unittest.TestCase):
                 + "\n"
             )
         for action, extra in (
-            ("approve", {}),
             ("set_directive", {"directive": "retrain the ranker"}),
             ("resume", {}),
         ):
@@ -3118,8 +2914,9 @@ class WebuiBackendTest(unittest.TestCase):
         still_sealed = self.client.post(
             "/api/experiments/exp_hitl/control",
             json={
-                "action": "approve",
+                "action": "set_directive",
                 "session_key": self._session_ref("epoch_001/fold_2022Q2"),
+                "directive": "x",
             },
         )
         self.assertEqual(still_sealed.status_code, 400)
@@ -4089,20 +3886,20 @@ class WebuiBackendTest(unittest.TestCase):
             self.assertNotIn(str(directory), public_text)
         self.assertEqual(store_path.read_text(encoding="utf-8"), "{broken")
 
-    def test_dead_question_wait_degrades_to_interrupted(self) -> None:
+    def test_dead_live_session_degrades_to_interrupted(self) -> None:
         write_json_atomic(
             self.experiments_root / "exp_hitl" / "hitl" / "status.json",
             {
                 "schema_version": 1,
                 "pid": 999_999_999,
-                "state": "waiting_user_reply",
+                "state": "running_session",
                 "session_key": "epoch_001/fold_2022Q2",
             },
         )
         status = self.client.get("/api/experiments/exp_hitl/status").json()
         self.assertEqual(status["state"], "interrupted")
         self.assertFalse(status["worker_alive"])
-        self.assertEqual(status["status"]["state"], "waiting_user_reply")
+        self.assertEqual(status["status"]["state"], "running_session")
         self.assertEqual(
             status["status"]["session_key"],
             self._session_ref("epoch_001/fold_2022Q2"),
@@ -5195,44 +4992,6 @@ class HitlControlActionTest(unittest.TestCase):
             self._control().directives["epoch_001/fold_2022Q2"], "在 2022Q1 减仓"
         )
 
-    def test_set_prompt_override_stores_and_clears_a_replacement_prompt(self) -> None:
-        self.assertEqual(
-            self._post(
-                action="set_prompt_override",
-                session_key="epoch_001/fold_2022Q2",
-                directive="完整替换提示词",
-            ).status_code,
-            200,
-        )
-        self.assertEqual(
-            self._control().prompt_overrides["epoch_001/fold_2022Q2"], "完整替换提示词"
-        )
-        self._post(
-            action="set_prompt_override",
-            session_key="epoch_001/fold_2022Q2",
-            directive="",
-        )
-        self.assertNotIn("epoch_001/fold_2022Q2", self._control().prompt_overrides)
-
-    def test_set_step_gate_toggles_per_session_step_holding(self) -> None:
-        self.assertEqual(
-            self._post(
-                action="set_step_gate",
-                session_key="epoch_001/fold_2022Q2",
-                directive="on",
-            ).status_code,
-            200,
-        )
-        self.assertIs(self._control().step_gate["epoch_001/fold_2022Q2"], True)
-        self._post(
-            action="set_step_gate", session_key="epoch_001/fold_2022Q2", directive="off"
-        )
-        self.assertIs(self._control().step_gate["epoch_001/fold_2022Q2"], False)
-        self._post(
-            action="set_step_gate", session_key="epoch_001/fold_2022Q2", directive=""
-        )
-        self.assertNotIn("epoch_001/fold_2022Q2", self._control().step_gate)
-
     def test_skip_to_heldout_and_its_cancellation_round_trip(self) -> None:
         self.assertEqual(self._post(action="skip_to_heldout").status_code, 200)
         control = self._control()
@@ -5250,74 +5009,10 @@ class HitlControlActionTest(unittest.TestCase):
         self.assertEqual(refused.status_code, 400)
         self.assertFalse(read_control(bare / "hitl/control.json").skip_to_heldout)
 
-    def test_set_parent_override_records_and_clears_a_validated_node(self) -> None:
-        node_id = self._step_tree()
-        response = self._post(
-            action="set_parent_override",
-            session_key="epoch_001/fold_2022Q2",
-            directive=node_id,
-        )
-        self.assertEqual(response.status_code, 200, response.text)
-        self.assertEqual(
-            self._control().parent_overrides["epoch_001/fold_2022Q2"], node_id
-        )
-        self._post(
-            action="set_parent_override",
-            session_key="epoch_001/fold_2022Q2",
-            directive="",
-        )
-        self.assertNotIn("epoch_001/fold_2022Q2", self._control().parent_overrides)
-
-    def test_set_parent_override_refuses_a_later_fold_node(self) -> None:
-        later = self._step_tree(fold_id="fold_2022Q2", run_id="run_002")
-        refused = self._post(
-            action="set_parent_override",
-            session_key="epoch_001/fold_2022Q1",
-            directive=later,
-        )
-        self.assertEqual(refused.status_code, 400)
-        self.assertIn(
-            "future validation information would leak", refused.json()["detail"]
-        )
-        self.assertEqual(self._control().parent_overrides, {})
-
-    def test_rerun_fold_issues_a_token_and_resets_the_session_gates(self) -> None:
-        control = self._control()
-        control.approved_sessions = ("epoch_001/fold_2022Q1",)
-        control.step_go["epoch_001/fold_2022Q1"] = 3
-        write_control(self.directory / "hitl/control.json", control)
-
+    def test_rerun_fold_issues_a_token_for_the_latest_completed_fold(self) -> None:
         response = self._post(action="rerun_fold", session_key="epoch_001/fold_2022Q1")
         self.assertEqual(response.status_code, 200, response.text)
-        updated = self._control()
-        self.assertTrue(updated.rerun_sessions["epoch_001/fold_2022Q1"])
-        # The re-run must be re-approved and its step gating starts afresh.
-        self.assertNotIn("epoch_001/fold_2022Q1", updated.approved_sessions)
-        self.assertNotIn("epoch_001/fold_2022Q1", updated.step_go)
-
-    def test_rerun_fold_in_auto_mode_returns_the_fold_to_a_real_gate(self) -> None:
-        """A re-run must actually wait for the researcher, in every mode.
-
-        `rerun_fold`'s own comment promises "the re-run must be re-approved
-        (prompt edits land first)". Dropping the session from
-        `approved_sessions` delivers that in manual/step mode only:
-        `InteractiveExperimentRunner._gate` returns immediately when
-        `control.mode == "auto"`, so an auto-mode re-run starts before the
-        researcher can edit anything -- which is the entire point of the
-        action. `terminate` already routes through
-        `_require_session_reapproval`, which drops the approval AND falls back
-        to manual; `rerun_fold` inlines only the first half.
-        """
-        control = self._control()
-        control.mode = "auto"
-        control.approved_sessions = ("epoch_001/fold_2022Q1",)
-        write_control(self.directory / "hitl/control.json", control)
-
-        response = self._post(action="rerun_fold", session_key="epoch_001/fold_2022Q1")
-        self.assertEqual(response.status_code, 200, response.text)
-        updated = self._control()
-        self.assertNotIn("epoch_001/fold_2022Q1", updated.approved_sessions)
-        self.assertEqual(updated.mode, "manual")
+        self.assertTrue(self._control().rerun_sessions["epoch_001/fold_2022Q1"])
 
     def test_rerun_fold_refuses_a_fold_that_is_not_the_latest_completed(self) -> None:
         refused = self._post(action="rerun_fold", session_key="epoch_001/fold_2022Q2")
@@ -5363,7 +5058,6 @@ class HitlControlActionTest(unittest.TestCase):
         self.assertIsNone(control.request)
         self.assertFalse(control.skip_to_heldout)
         self.assertEqual(control.rerun_sessions, {})
-        self.assertEqual(control.parent_overrides, {})
         self.assertTrue(node_id)
 
     def test_rollback_fold_restores_prior_current_immediately(self) -> None:
@@ -5602,18 +5296,6 @@ class HitlControlActionTest(unittest.TestCase):
         self.assertFalse(frozen.is_dir())
         self.assertTrue(
             list((self.directory / "artifacts/strategy/_archive").glob("rollback_*"))
-        )
-
-    def test_flagged_fold_is_not_settled(self) -> None:
-        ledger = ExperimentLedger(self.directory / "ledgers/experiment_ledger.jsonl")
-        records = ledger.read()
-        records[0]["state_changed_during_test"] = True
-        ledger.rewrite(records)
-        manager = ExperimentManager(self.repo_root, self.experiments_root)
-        self.assertFalse(
-            manager._session_is_settled(
-                self.directory, "epoch_001/fold_2022Q1", self._control()
-            )
         )
 
     def test_rollback_drops_same_fold_flagged_rerun(self) -> None:
@@ -5884,7 +5566,6 @@ class HitlControlActionTest(unittest.TestCase):
                 "pause",
                 "reveal_test_results",
                 "set_gpu_count",
-                "set_mode",
                 "stop",
                 "terminate",
             ],
@@ -5904,12 +5585,9 @@ class HitlControlActionTest(unittest.TestCase):
         self.assertEqual(
             sorted(_ACTIONS),
             [
-                "approve",
-                "approve_step",
                 "cancel_skip_to_heldout",
                 "inject_message",
                 "pause",
-                "reply_question",
                 "rerun_fold",
                 "restart",
                 "resume",
@@ -5917,10 +5595,6 @@ class HitlControlActionTest(unittest.TestCase):
                 "rollback_fold",
                 "set_directive",
                 "set_gpu_count",
-                "set_mode",
-                "set_parent_override",
-                "set_prompt_override",
-                "set_step_gate",
                 "skip_to_heldout",
                 "stop",
                 "terminate",
@@ -5955,15 +5629,12 @@ class HitlControlActionTest(unittest.TestCase):
                 "pause",
                 "reveal_test_results",
                 "set_gpu_count",
-                "set_mode",
                 "stop",
                 "terminate",
             ],
         )
         self.assertEqual(self._post(action="pause").status_code, 200)
         self.assertEqual(self._control().request, "pause")
-        self.assertEqual(self._post(action="set_mode", mode="step").status_code, 200)
-        self.assertEqual(self._control().mode, "step")
         allocated = self._post(
             action="set_gpu_count", session_key="epoch_001/fold_2022Q2", directive="2"
         )

@@ -265,7 +265,7 @@ def test_old_control_schema_is_unchanged_by_inject(tmp_path: Path) -> None:
                 "schema_version": 1,
                 "mode": "auto",
                 "request": None,
-                "approved_sessions": [],
+                "directives": {},
             }
         )
         + "\n",

@@ -139,8 +139,7 @@ SUBAGENT_DEGRADED_SUMMARY_ERROR = (
 
 _FOLD_READ_TOOLS = frozenset({"glob", "grep", "read_file"})
 # The parent's Fold surface minus what it keeps by design: the formal
-# backtest (Validation quota and Step tree), finish, rollback, ask_user and
-# nesting. The unofficial ``smoke_backtest`` is included so a child verifies
+# backtest (Validation quota and Step tree), finish, rollback and nesting. The unofficial ``smoke_backtest`` is included so a child verifies
 # its implementation on the real replay path instead of hand-rolling a shell
 # smoke test.
 _FOLD_WRITE_TOOLS = frozenset(
@@ -1441,8 +1440,8 @@ class SubAgentEngine(SessionTimeBudgetAware):
         )
 
     def _validate_tools(self) -> None:
-        # The role tables are the single allowlist: nesting, backtest, finish,
-        # rollback, and ask_user are absent from every role by construction.
+        # The role tables are the single allowlist: nesting, backtest, finish
+        # and rollback are absent from every role by construction.
         allowed = allowed_subagent_tools(self.mode)
         for spec in self.tools.specs():
             if spec.name not in allowed:

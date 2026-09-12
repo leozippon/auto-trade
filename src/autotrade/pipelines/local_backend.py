@@ -91,7 +91,6 @@ from autotrade.environment.tools.finish_fold import (
     HardRuleCheck,
     executable_output_structure,
 )
-from autotrade.environment.tools.hitl import AskUserTool
 from autotrade.environment.tools.memory_feedback import MemoryFeedbackTool
 from autotrade.environment.tools.modification_check import ModificationCheckTool
 from autotrade.environment.tools.report_issue import (
@@ -1352,11 +1351,6 @@ class FoldBacktestTool(SessionTimeBudgetAware):
             # Selection evidence the Agent can read before it selects.
             "selection_statistics": self.selection_statistics(evaluation),
         }
-        directive = ""
-        if self.request.step_gate_hook is not None:
-            directive = self.request.step_gate_hook(
-                len(self.steps), dict(summary)
-            )
         # The full record — per-position rows, executions, equity curve — is the
         # attachment ``record_step`` just wrote under the node tree, which the
         # Agent reads through the ``steps`` root. A reference the Agent cannot
@@ -1379,7 +1373,6 @@ class FoldBacktestTool(SessionTimeBudgetAware):
                     f"path='{public_result_ref}'"
                 ),
                 "modification_check": dict(check.value),
-                "step_directive": str(directive),
                 "backtests_used": self.backtests,
                 "backtests_remaining": self.request.max_backtests - self.backtests,
             },
@@ -1793,7 +1786,6 @@ class BatchValidateTool(SessionTimeBudgetAware):
                     self.backtest.request.max_backtests - self.backtest.backtests
                 ),
                 "steps_used": len(self.backtest.steps),
-                "step_directive": self._step_gate(batch_id, rows),
                 "result_root": STEP_TREE_SEARCH_ROOT,
                 "select_hint": self._select_hint(rows),
             },
@@ -2246,28 +2238,6 @@ class BatchValidateTool(SessionTimeBudgetAware):
         return batch_select_hint(
             rows, versus_parent=self.backtest.parent_control_summary is not None
         )
-
-    def _step_gate(self, batch_id: str, rows: Sequence[Mapping[str, object]]) -> str:
-        """One gate for the whole batch: the replays are already done, and the
-        gate's own rule (approving step N approves everything up to N) makes a
-        per-candidate wait meaningless."""
-
-        hook = self.backtest.request.step_gate_hook
-        if hook is None:
-            return ""
-        return str(
-            hook(
-                len(self.backtest.steps),
-                {
-                    "run_id": self.backtest.ref_store.get_or_create(
-                        "run", self.backtest.request.run_id
-                    ),
-                    "batch_id": batch_id,
-                    "candidates": [dict(row) for row in rows],
-                },
-            )
-        )
-
 
 def batch_select_hint(
     rows: Sequence[Mapping[str, object]], *, versus_parent: bool
@@ -3128,10 +3098,6 @@ class LLMFoldDeveloper:
                         tree, output_dir, models_dir, fold_id=fold_ref, run_id=run_ref
                     )
                 )
-            if request.user_question_hook is not None:
-                tools.append(
-                    AskUserTool(request.user_question_hook, time_budget=time_budget)
-                )
             # Matches the opaque fold ref the step tree stores, so the
             # current-session check compares like with like.
             tools.append(
@@ -3453,12 +3419,11 @@ class LLMFoldDeveloper:
             FOLD_DEFAULT_INSTRUCTION,
         )
 
-        default = (
+        return (
             DEPLOYMENT_DEFAULT_INSTRUCTION
             if request.session_kind == "deployment_adjustment"
             else FOLD_DEFAULT_INSTRUCTION
         )
-        return request.prompt_override.strip() or default
 
 
 def fold_forbidden(session_kind: str) -> list[str]:
@@ -3679,7 +3644,6 @@ class LLMMetaLearner:
             for key, value in facts.items()
             if key
             not in {
-                "user_question_hook",
                 "progress_hook",
                 "meta_learning_memory",
                 "previous_prior",
@@ -3897,20 +3861,13 @@ class LLMMetaLearner:
             ReportIssueTool(issue_reports_path(self.experiment_dir), manifest),
             modification,
         ]
-        hook = facts.get("user_question_hook")
-        if hook is not None:
-            if not callable(hook):
-                raise TypeError("user_question_hook must be callable")
-            tools.append(AskUserTool(hook, time_budget=time_budget))
         tools.append(
             FinishMetaTool(
                 safe,
                 window_dates=visible_window_dates(manifest.data),
             )
         )
-        instruction = str(
-            public.get("prompt_override") or ""
-        ).strip() or build_meta_learning_prompt(
+        instruction = build_meta_learning_prompt(
             public.get("development_history")
             if isinstance(public.get("development_history"), dict)
             else {},

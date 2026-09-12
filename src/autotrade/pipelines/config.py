@@ -869,7 +869,6 @@ class FoldSessionRequest:
     deadline_grace_seconds: float = DEFAULT_DEADLINE_GRACE_MINUTES * 60.0
     directive: str = ""
     prior: str = ""
-    prompt_override: str = ""
     # Per-session HITL override of the experiment's default sandbox GPU count;
     # None keeps the experiment default. The "auto" selector still picks which
     # devices by free memory at container start.
@@ -920,16 +919,6 @@ class FoldSessionRequest:
     # Cap on the session's own ``run_null_control`` calls; the experiment default
     # is the single source (RollingExperimentConfig.max_null_controls_per_fold).
     max_null_controls: int = RollingExperimentConfig.max_null_controls_per_fold
-    step_gate_hook: Callable[[int, dict[str, object]], str] | None = field(
-        default=None,
-        repr=False,
-        compare=False,
-    )
-    user_question_hook: Callable[[str, str], str] | None = field(
-        default=None,
-        repr=False,
-        compare=False,
-    )
     progress_hook: Callable[[str, dict[str, object] | None], None] | None = field(
         default=None,
         repr=False,

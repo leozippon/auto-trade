@@ -302,7 +302,6 @@ class RollingExperimentPipeline:
                         deadline_seconds=budgets["deadline_seconds"],
                         deadline_grace_seconds=budgets["deadline_grace_seconds"],
                         directive=str(context.get("directive") or ""),
-                        prompt_override=str(context.get("prompt_override") or ""),
                         sandbox_gpu_count=_optional_gpu_count(
                             context.get("sandbox_gpu_count")
                         ),
@@ -327,13 +326,6 @@ class RollingExperimentPipeline:
                         nl_failure_policy=self.config.nl_failure_policy,
                         finalize_before_deadline_seconds=self.config.finalize_before_deadline_seconds,
                         max_null_controls=self.config.max_null_controls_per_fold,
-                        step_gate_hook=_optional_hook(
-                            context.get("step_gate_hook"), "step_gate_hook"
-                        ),
-                        user_question_hook=_optional_hook(
-                            context.get("user_question_hook"),
-                            "user_question_hook",
-                        ),
                         progress_hook=progress,
                         session_key=str(
                             context.get("session_key")
@@ -614,11 +606,9 @@ class RollingExperimentPipeline:
                     self.config.experiment_dir / "artifacts", run_id
                 ).exists()
                 else None,
-                # HITL re-run tag and the step-node parent override that started
-                # this session: recorded for audit and for the runner's
+                # HITL re-run tag: recorded for audit and for the runner's
                 # "this rerun request is absorbed" check.
                 "rerun_id": str(context.get("rerun_id") or "") or None,
-                "parent_override": str(context.get("parent_override") or "") or None,
                 "snapshot_ids": {
                     "valid_decision_input": valid_snapshot.snapshot_id,
                     "test_decision_input": (
@@ -944,7 +934,6 @@ class RollingExperimentPipeline:
                         deadline_seconds=budgets["deadline_seconds"],
                         deadline_grace_seconds=budgets["deadline_grace_seconds"],
                         directive=str(context.get("directive") or ""),
-                        prompt_override=str(context.get("prompt_override") or ""),
                         sandbox_gpu_count=_optional_gpu_count(
                             context.get("sandbox_gpu_count")
                         ),
@@ -962,12 +951,6 @@ class RollingExperimentPipeline:
                         nl_failure_policy=self.config.nl_failure_policy,
                         finalize_before_deadline_seconds=self.config.finalize_before_deadline_seconds,
                         max_null_controls=0,
-                        step_gate_hook=_optional_hook(
-                            context.get("step_gate_hook"), "step_gate_hook"
-                        ),
-                        user_question_hook=_optional_hook(
-                            context.get("user_question_hook"), "user_question_hook"
-                        ),
                         progress_hook=progress,
                         session_key=DEPLOYMENT_SESSION_KEY,
                         skills_source_ref=(
@@ -1230,11 +1213,6 @@ class RollingExperimentPipeline:
                             session_id
                         ),
                         "directive": str(context.get("directive") or ""),
-                        "prompt_override": str(context.get("prompt_override") or ""),
-                        "user_question_hook": _optional_hook(
-                            context.get("user_question_hook"),
-                            "user_question_hook",
-                        ),
                         "progress_hook": progress,
                         "session_key": str(
                             context.get("session_key")
@@ -2070,16 +2048,11 @@ def _session_timing(
         if not isinstance(value, Mapping):
             raise TypeError("session_timing must return a mapping")
         wall = float(value.get("run_wall_seconds", 0.0))
-        wait = float(value.get("researcher_wait_seconds", 0.0))
-        if wall < 0 or wait < 0:
+        if wall < 0:
             raise ValueError("session timing values must be non-negative")
-        return {
-            "run_wall_seconds": round(wall, 1),
-            "researcher_wait_seconds": round(wait, 1),
-        }
+        return {"run_wall_seconds": round(wall, 1)}
     return {
-        "run_wall_seconds": round(max(0.0, time.monotonic() - fallback_started), 1),
-        "researcher_wait_seconds": 0.0,
+        "run_wall_seconds": round(max(0.0, time.monotonic() - fallback_started), 1)
     }
 
 

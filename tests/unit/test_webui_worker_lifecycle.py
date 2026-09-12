@@ -269,8 +269,6 @@ class WorkerLifecycleTest(unittest.TestCase):
         write_control(
             self.control_path,
             ControlState(
-                mode="manual",
-                approved_sessions=("epoch_001/fold_2022Q2",),
                 directives={"epoch_001/fold_2022Q2": "keep the turnover down"},
             ),
         )
@@ -334,51 +332,18 @@ class WorkerLifecycleTest(unittest.TestCase):
             started = time.monotonic()
             response = TestClient(self.client.app).post(
                 "/api/experiments/exp_other/control",
-                json={"action": "set_mode", "mode": "manual"},
+                json={"action": "pause"},
             )
             elapsed = time.monotonic() - started
             still_waiting = caller.is_alive()
             caller.join(timeout=30.0)
 
         self.assertEqual(response.status_code, 200, response.text)
-        self.assertEqual(read_control(other / "hitl/control.json").mode, "manual")
+        self.assertEqual(read_control(other / "hitl/control.json").request, "pause")
         self.assertTrue(still_waiting, "the terminate had already returned")
         self.assertLess(elapsed, 2.0, "the other experiment queued behind the grace")
         # The wait was real: the stubborn child never handled SIGTERM.
         self.assertIs(terminated["escalated"], True)
-
-    def test_terminate_returns_an_unsettled_session_to_its_approval_gate(self) -> None:
-        write_control(
-            self.control_path,
-            ControlState(mode="auto", approved_sessions=("epoch_001/fold_2022Q2",)),
-        )
-        process = self._spawn(_COOPERATIVE)
-        self._publish(process, session_key="epoch_001/fold_2022Q2")
-        body = self._post(action="terminate").json()
-        expected_public_session = (
-            "epoch_001/"
-            + AgentRefStore(self.directory).get_or_create("fold", "fold_2022Q2")
-        )
-        self.assertEqual(body["approval_revoked_session"], expected_public_session)
-        self.assertNotIn("fold_2022Q2", str(body))
-        control = read_control(self.control_path)
-        self.assertEqual(control.approved_sessions, ())
-        # Without the auto -> manual flip the revocation is meaningless: auto
-        # mode does not gate, so the resumed worker would run straight past it.
-        self.assertEqual(control.mode, "manual")
-
-    def test_terminate_leaves_a_settled_folds_approval_alone(self) -> None:
-        write_control(
-            self.control_path,
-            ControlState(mode="auto", approved_sessions=("epoch_001/fold_2022Q1",)),
-        )
-        process = self._spawn(_COOPERATIVE)
-        self._publish(process, session_key="epoch_001/fold_2022Q1")
-        body = self._post(action="terminate").json()
-        self.assertNotIn("approval_revoked_session", body)
-        control = read_control(self.control_path)
-        self.assertEqual(control.approved_sessions, ("epoch_001/fold_2022Q1",))
-        self.assertEqual(control.mode, "auto")
 
     def test_terminate_refuses_when_no_worker_is_alive(self) -> None:
         refused = self._post(action="terminate")
@@ -474,12 +439,13 @@ class WorkerLifecycleTest(unittest.TestCase):
         self.assertEqual(control.directives, {}, "the exiting worker never got the lock")
         self.assertIsNone(control.request)
 
-    def test_start_worker_clears_a_stale_stop_request_but_keeps_mode_and_approvals(self) -> None:
+    def test_start_worker_clears_a_stale_stop_request_but_keeps_the_directives(self) -> None:
         self._install_worker_script()
         write_control(
             self.control_path,
             ControlState(
-                mode="step", request="stop", approved_sessions=("epoch_001/fold_2022Q2",)
+                request="stop",
+                directives={"epoch_001/fold_2022Q2": "keep the turnover down"},
             ),
         )
         spawned = manager_module.ExperimentManager(
@@ -488,8 +454,9 @@ class WorkerLifecycleTest(unittest.TestCase):
         self.addCleanup(self._kill_pid, int(spawned["spawned_pid"]))
         control = read_control(self.control_path)
         self.assertIsNone(control.request)
-        self.assertEqual(control.mode, "step")
-        self.assertEqual(control.approved_sessions, ("epoch_001/fold_2022Q2",))
+        self.assertEqual(
+            control.directives, {"epoch_001/fold_2022Q2": "keep the turnover down"}
+        )
 
     def test_deferred_restart_swaps_code_in_place_without_killing_the_session(
         self,

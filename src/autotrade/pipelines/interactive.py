@@ -18,11 +18,10 @@ files (atomic replace, no locking needed):
   schedule.json  written by the worker at startup (planned sessions)
 
 Pausing always lands at a session boundary: the worker finishes the session in
-flight, then blocks at the next gate. ``mode="manual"`` additionally requires an
-explicit per-session approval before each session starts. A deferred restart
-lands at the same boundary: the run returns ``status="restart"`` so the worker
-entrypoint can re-execute itself on the new code without discarding the
-session it was running.
+flight, then blocks at the next gate. A deferred restart lands at the same
+boundary: the run returns ``status="restart"`` so the worker entrypoint can
+re-execute itself on the new code without discarding the session it was
+running.
 """
 
 from __future__ import annotations
@@ -42,8 +41,6 @@ from .hitl_state import (
     StatusReporter,
     consume_restart_request,
     consume_session_controls,
-    consume_step_approval,
-    consume_user_reply,
     read_control,
 )
 from .ledger import (
@@ -57,11 +54,7 @@ from .meta_schedule import meta_learning_id
 
 
 class ExperimentStopped(SessionInterrupt):
-    """Raised at a gate when the controller requested a durable stop.
-
-    Subclasses SessionInterrupt so a stop issued while a fold is held at a
-    step gate re-raises through the Agent runner's tool dispatch instead of
-    being swallowed into an error observation."""
+    """Raised at a session gate: a durable stop, or a sealed experiment."""
 
 
 SessionExecutor = Callable[[DevelopmentSession, dict[str, object]], None]
@@ -107,9 +100,6 @@ class InteractiveExperimentRunner:
         self.poll_seconds = poll_seconds
         self._session_started_monotonic: float | None = None
         self._session_started_at: str | None = None
-        self._researcher_wait_seconds = 0.0
-        self._wait_started_monotonic: float | None = None
-        self._wait_started_at: str | None = None
 
     def run(self) -> dict[str, object]:
         completed = self._completed_sessions()
@@ -131,21 +121,15 @@ class InteractiveExperimentRunner:
                     if not self._needs_rerun(session, rerun_id):
                         continue
                     reran.append(session.session_key)
-                if self._gate(session):
+                if self._gate():
                     return self._restart_result(ran, reran)
                 control = read_control(self.control_path)
                 context = {
                     "directive": control.directives.get(session.session_key, ""),
-                    "prompt_override": control.prompt_overrides.get(session.session_key, ""),
                     "resource_override": control.resource_overrides.get(session.session_key, {}),
                     "sandbox_gpu_count": control.gpu_counts.get(session.session_key),
-                    "step_gate_hook": self.step_gate_hook(session.session_key),
-                    "user_question_hook": self.user_question_hook(session.session_key),
                     "session_timing": self._session_timing,
                     "progress_hook": self.progress_hook(session),
-                    # User-side step rollback: a control-plane override replaces
-                    # the inherited frozen chain with a validated step-tree node.
-                    "parent_override": control.parent_overrides.get(session.session_key, ""),
                     "rerun_id": rerun_id or "",
                     "session_key": session.session_key,
                 }
@@ -239,70 +223,6 @@ class InteractiveExperimentRunner:
         except Exception as exc:  # noqa: BLE001 - analysis is advisory, never fatal
             self.status.set(analysis_error=f"{type(exc).__name__}: {exc}")
 
-    def step_gate_hook(self, session_key: str):
-        def wait_for_step(step_index: int, summary: dict[str, object]) -> str:
-            while True:
-                control = read_control(self.control_path)
-                enabled = control.step_gate.get(session_key, control.mode == "step")
-                if not enabled:
-                    self._resume_session(session_key)
-                    return ""
-                if control.step_go.get(session_key, 0) >= step_index:
-                    self._resume_session(session_key)
-                    approved, directive = consume_step_approval(
-                        self.control_path,
-                        session_key,
-                        step_index,
-                    )
-                    if approved:
-                        return directive
-                if control.request == "stop":
-                    raise ExperimentStopped("stop requested at Step gate")
-                self._wait(
-                    state="waiting_step_user",
-                    session_key=session_key,
-                    step_index=step_index,
-                    step_summary=summary,
-                    run_id=summary.get("run_id"),
-                )
-                time.sleep(self.poll_seconds)
-
-        return wait_for_step
-
-    def user_question_hook(self, session_key: str):
-        # In auto mode nobody answers: no hook means no ``ask_user`` tool, so
-        # the session cannot spend turns on a question that returns "".
-        if read_control(self.control_path).mode == "auto":
-            return None
-        question_index = 0
-
-        def ask(question: str, summary: str = "") -> str:
-            nonlocal question_index
-            question_index += 1
-            reply_key = f"{session_key}#q{question_index}"
-            while True:
-                control = read_control(self.control_path)
-                if control.mode == "auto":
-                    self._resume_session(session_key)
-                    return ""
-                if reply_key in control.user_replies:
-                    self._resume_session(session_key)
-                    replied, reply = consume_user_reply(self.control_path, reply_key)
-                    if replied:
-                        return reply
-                if control.request == "stop":
-                    raise ExperimentStopped("stop requested while waiting for a reply")
-                self._wait(
-                    state="waiting_user_reply",
-                    session_key=session_key,
-                    question_key=reply_key,
-                    question=question,
-                    question_summary=summary,
-                )
-                time.sleep(self.poll_seconds)
-
-        return ask
-
     def _restart_result(self, ran: int, reran: list[str]) -> dict[str, object]:
         """Hand a consumed session-boundary restart back to the entrypoint.
 
@@ -313,49 +233,28 @@ class InteractiveExperimentRunner:
         self.status.set(state="launching")
         return {"status": "restart", "sessions_run": ran, "reran_sessions": reran}
 
-    def _gate(self, session: DevelopmentSession) -> bool:
-        """Hold until the session may start; True asks for a restart instead."""
+    def _gate(self) -> bool:
+        """Check the pre-session controls; True asks for a restart instead."""
 
-        while True:
-            control = read_control(self.control_path)
-            if control.test_revealed and not self.after_reveal:
-                raise ExperimentStopped("the experiment is sealed")
-            if control.request == "stop":
-                raise ExperimentStopped("stop requested")
-            # Before starting the next session, not only after finishing one:
-            # a worker parked at an approval gate must swap code before it
-            # spends hours running the old one.
-            if control.restart_pending and consume_restart_request(self.control_path):
-                return True
-            if control.mode == "auto" or session.session_key in control.approved_sessions:
-                return False
-            self.status.set(
-                state="waiting_user",
-                session_key=session.session_key,
-                session_kind=session.kind,
-                run_id=None,
-                session_started_at=None,
-                researcher_wait_seconds=0.0,
-                wait_started_at=datetime.now(UTC).isoformat(),
-                environment_stage=None,
-                environment_progress=None,
-            )
-            time.sleep(self.poll_seconds)
+        control = read_control(self.control_path)
+        if control.test_revealed and not self.after_reveal:
+            raise ExperimentStopped("the experiment is sealed")
+        if control.request == "stop":
+            raise ExperimentStopped("stop requested")
+        # Before starting the next session, not only after finishing one: a
+        # worker that has just finished one must swap code before it spends
+        # hours running the old one.
+        return control.restart_pending and consume_restart_request(self.control_path)
 
     def _begin_session(self, session: DevelopmentSession) -> None:
         self._session_started_monotonic = time.monotonic()
         self._session_started_at = datetime.now(UTC).isoformat()
-        self._researcher_wait_seconds = 0.0
-        self._wait_started_monotonic = None
-        self._wait_started_at = None
         self.status.set(
             state="running_session",
             session_key=session.session_key,
             session_kind=session.kind,
             session_started_at=self._session_started_at,
             run_id=None,
-            researcher_wait_seconds=0.0,
-            wait_started_at=None,
             environment_stage="preparing_session",
             environment_progress=None,
         )
@@ -412,51 +311,13 @@ class InteractiveExperimentRunner:
 
         return publish
 
-    def _wait(self, **values: object) -> None:
-        if self._wait_started_monotonic is None:
-            self._wait_started_monotonic = time.monotonic()
-            self._wait_started_at = datetime.now(UTC).isoformat()
-        self.status.set(
-            **values,
-            session_started_at=self._session_started_at,
-            researcher_wait_seconds=round(self._researcher_wait_seconds, 3),
-            wait_started_at=self._wait_started_at,
-        )
-
-    def _resume_session(self, session_key: str) -> None:
-        if self._wait_started_monotonic is not None:
-            self._researcher_wait_seconds += max(
-                0.0,
-                time.monotonic() - self._wait_started_monotonic,
-            )
-        self._wait_started_monotonic = None
-        self._wait_started_at = None
-        self.status.set(
-            state="running_session",
-            session_key=session_key,
-            session_started_at=self._session_started_at,
-            researcher_wait_seconds=round(self._researcher_wait_seconds, 3),
-            wait_started_at=None,
-        )
-
     def _session_timing(self) -> dict[str, float]:
         if self._session_started_monotonic is None:
-            return {"run_wall_seconds": 0.0, "researcher_wait_seconds": 0.0}
-        active_wait = (
-            max(0.0, time.monotonic() - self._wait_started_monotonic)
-            if self._wait_started_monotonic is not None
-            else 0.0
-        )
-        researcher_wait = self._researcher_wait_seconds + active_wait
+            return {"run_wall_seconds": 0.0}
         return {
             "run_wall_seconds": round(
-                max(
-                    0.0,
-                    time.monotonic() - self._session_started_monotonic - researcher_wait,
-                ),
-                1,
-            ),
-            "researcher_wait_seconds": round(researcher_wait, 1),
+                max(0.0, time.monotonic() - self._session_started_monotonic), 1
+            )
         }
 
     def _needs_rerun(self, session: DevelopmentSession, rerun_id: str | None) -> bool:

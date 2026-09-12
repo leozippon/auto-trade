@@ -27,7 +27,6 @@ from starlette.background import BackgroundTask
 
 from autotrade.environment.data.contracts import RAW_GENERATION_FILENAME
 from autotrade.environment.llm.model_profiles import model_profile
-from autotrade.environment.step_tree import StepTree
 from autotrade.pipelines.fold_analysis import analysis_paths
 from autotrade.pipelines.hitl_state import (
     ANALYSIS_DIR_NAME,
@@ -454,9 +453,7 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
                 experiment_id,
                 str(payload.get("action") or ""),
                 session_key=payload.get("session_key"),
-                step_index=payload.get("step_index"),
                 directive=payload.get("directive"),
-                mode=payload.get("mode"),
                 text=payload.get("text"),
                 interrupt=payload.get("interrupt", False),
                 at=payload.get("at"),
@@ -580,84 +577,6 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
             ),
             f"{experiment_id}__{node_id}.zip",
         )
-
-    def current_step(experiment_id: str) -> tuple[Path, dict[str, object], dict[str, object], Path]:
-        directory = _experiment_dir(experiment_id)
-        state = registry.experiment_state(directory)
-        if not state.get("worker_alive"):
-            raise ValueError("current-step requires a live worker")
-        status = state.get("status")
-        if not isinstance(status, dict) or status.get("state") not in {
-            "waiting_step_user",
-            "waiting_user_reply",
-        }:
-            raise ValueError("experiment is not waiting for researcher input")
-        run_id = str(status.get("run_id") or "")
-        if not run_id or Path(run_id).name != run_id or run_id.startswith("."):
-            raise ValueError("live Step run is unavailable")
-        tree_root = root / ".runtime/sandboxes" / experiment_id / run_id / "artifacts/steps"
-        node_id, node_dir = steps.current_node_export_dir(tree_root)
-        return directory, status, StepTree(tree_root).get_node(node_id), node_dir
-
-    @app.get("/api/experiments/{experiment_id}/current-step")
-    def get_current_step(experiment_id: str) -> dict[str, object]:
-        _directory, identity = _public_identity(experiment_id)
-        try:
-            _directory, _status, node, _node_dir = current_step(experiment_id)
-        except (OSError, ValueError):
-            return {"available": False}
-        return {
-            "available": True,
-            "node": steps.public_step_node(node, identity=identity),
-        }
-
-    @app.get("/api/experiments/{experiment_id}/current-step/source.zip")
-    def get_current_step_source(experiment_id: str) -> FileResponse:
-        _public_identity(experiment_id)
-        try:
-            _directory, _status, node, node_dir = current_step(experiment_id)
-        except (OSError, ValueError) as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-        return _zip_response(
-            ((file_path.relative_to(node_dir), file_path) for file_path in sorted(node_dir.rglob("*")) if file_path.is_file()),
-            f"{experiment_id}__{node['node_id']}.zip",
-        )
-
-    @app.get("/api/experiments/{experiment_id}/current-step/analysis")
-    def get_current_step_analysis(experiment_id: str) -> dict[str, object]:
-        try:
-            directory, status, node, _node_dir = current_step(experiment_id)
-        except (OSError, ValueError) as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-        node_id = str(node["node_id"])
-        md_path, meta_path = analysis_paths(directory / HITL_DIR_NAME / ANALYSIS_DIR_NAME, "step", node_id)
-        meta = read_json(meta_path) if meta_path.exists() else None
-        _unused_directory, identity = _public_identity(experiment_id)
-        identity.public_status(status)
-        return {
-            "available": md_path.exists(),
-            "pending": analysis_service.pending(experiment_id, "step", node_id),
-            "content": identity.public_text(md_path.read_text(encoding="utf-8"))
-            if md_path.exists()
-            else None,
-            "meta": identity.public_analysis_meta(meta) if isinstance(meta, dict) else None,
-        }
-
-    @app.post("/api/experiments/{experiment_id}/current-step/analysis")
-    def post_current_step_analysis(experiment_id: str) -> dict[str, object]:
-        _public_identity(experiment_id)
-        try:
-            directory, status, node, node_dir = current_step(experiment_id)
-            analysis_service.regenerate_step(
-                experiment_dir=directory,
-                experiment_id=experiment_id,
-                node_id=str(node["node_id"]),
-                node_dir=node_dir,
-                status=status,
-            )
-        except (ManagerError, OSError, ValueError) as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        return {"status": "started"}
 
     @app.get("/api/experiments/{experiment_id}/equity")
     def get_equity(experiment_id: str, epoch_id: str | None = Query(None)) -> dict[str, object]:

@@ -26,7 +26,6 @@ from autotrade.environment.step_tree import StepTree
 from autotrade.environment.strategy import StrategySchedule
 from autotrade.environment.time_budget import InferenceTimeBudget
 from autotrade.environment.tools import (
-    AskUserTool,
     FinishFoldTool,
     StepRollbackTool,
     ToolRegistry,
@@ -560,7 +559,7 @@ def test_reserve_without_complete_node_keeps_research_and_compaction_available()
     assert second_tool_names == {"shell"}
 
 
-def test_evaluation_and_ask_user_waits_are_refunded_on_success_and_failure() -> None:
+def test_evaluation_waits_are_refunded_on_success_and_failure() -> None:
     clock = FakeClock()
     budget = InferenceTimeBudget(duration_seconds=5.0, clock=clock)
 
@@ -570,13 +569,6 @@ def test_evaluation_and_ask_user_waits_are_refunded_on_success_and_failure() -> 
         with pytest.raises(RuntimeError, match="evaluation failed"), budget.pause():
             clock.advance(10.0)
             raise RuntimeError("evaluation failed")
-    assert budget.remaining() == pytest.approx(before)
-
-    ask = AskUserTool(
-        lambda _question, _summary: (clock.advance(30.0), "continue")[1],
-        time_budget=budget,
-    )
-    assert ask.invoke({"question": "continue?"}).value["reply"] == "continue"
     assert budget.remaining() == pytest.approx(before)
 
 
@@ -694,26 +686,6 @@ def test_runner_rejects_mismatched_compactor_budget() -> None:
             tools=ToolRegistry(),
             system_prompt="mismatch",
             compactor=ContextCompactor(compact_llm),
-            time_budget=main_budget,
-        )
-
-
-def test_runner_rejects_mismatched_ask_user_budget() -> None:
-    clock = FakeClock()
-    main_budget = InferenceTimeBudget(duration_seconds=5.0, clock=clock)
-    ask_budget = InferenceTimeBudget(duration_seconds=5.0, clock=clock)
-    main = SessionBudgetLLM(
-        ScriptedLLM([]),
-        budget=SessionCallBudget(max_calls=2, time_budget=main_budget),
-    )
-
-    with pytest.raises(ValueError, match="tool:ask_user is bound to another budget"):
-        AgentSessionRunner(
-            llm=main,
-            tools=ToolRegistry(
-                [AskUserTool(lambda _question, _summary: "ok", time_budget=ask_budget)]
-            ),
-            system_prompt="mismatch",
             time_budget=main_budget,
         )
 

@@ -214,7 +214,6 @@ def test_subagent_rejects_nested_agent_and_fold_control_specs() -> None:
         "daily_backtest",
         "finish_fold",
         "step_rollback",
-        "ask_user",
         "unknown_tool",
     ):
         with pytest.raises(ValueError, match="not allowed"):
@@ -999,7 +998,7 @@ def test_role_tool_visibility_hides_writes_from_audits(tmp_path: Path) -> None:
         for record in engine._provider_tools(allowed_subagent_tools("fold", "auditor"))
     }
     # The parent's Fold surface minus what it keeps by design (both formal
-    # validation tools, finish, rollback, ask_user, agent): the unofficial
+    # validation tools, finish, rollback, agent): the unofficial
     # smoke run is a child's tool too, so it verifies its own implementation
     # on the real replay path instead of hand-rolling a shell smoke test.
     assert impl == {
@@ -1016,7 +1015,6 @@ def test_role_tool_visibility_hides_writes_from_audits(tmp_path: Path) -> None:
     }
     assert impl == _FOLD_TOOLS - {
         "agent",
-        "ask_user",
         "batch_validate",
         "daily_backtest",
         "finish_fold",

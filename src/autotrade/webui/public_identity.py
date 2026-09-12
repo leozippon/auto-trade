@@ -281,30 +281,18 @@ class PublicIdentity:
                 out["session_label"] = self.session_display_key(session_key)
             except (KeyError, ValueError):
                 pass
-        question_key = status.get("question_key")
-        if isinstance(question_key, str) and question_key:
-            out["question_key"] = self.public_session_key(question_key)
         return out
 
     def public_control(self, control: Mapping[str, object]) -> dict[str, object]:
-        session_lists = {"approved_sessions"}
         session_maps = {
             "directives",
             "gpu_counts",
-            "parent_overrides",
-            "prompt_overrides",
             "rerun_sessions",
             "resource_overrides",
-            "step_directives",
-            "step_gate",
-            "step_go",
-            "user_replies",
         }
         out: dict[str, object] = {}
         for key, value in control.items():
-            if key in session_lists and isinstance(value, (list, tuple)):
-                out[key] = [self.public_session_key(item) for item in value]
-            elif key in session_maps and isinstance(value, Mapping):
+            if key in session_maps and isinstance(value, Mapping):
                 out[key] = {
                     self.public_session_key(raw_key): self._safe_value(item)
                     for raw_key, item in value.items()

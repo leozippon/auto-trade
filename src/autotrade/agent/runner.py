@@ -127,7 +127,6 @@ _PHASE_GATE_TOOLS = _VALIDATION_TOOLS
 _WRITER_BARRIER_TOOLS = _PHASE_GATE_TOOLS | frozenset({"run_null_control"})
 _FOLD_TOOLS = frozenset(
     {
-        "ask_user",
         "batch_validate",
         "daily_backtest",
         "run_null_control",
@@ -150,7 +149,6 @@ _FOLD_TOOLS = frozenset(
 )
 _META_TOOLS = frozenset(
     {
-        "ask_user",
         "edit_file",
         "agent",
         "finish_meta",

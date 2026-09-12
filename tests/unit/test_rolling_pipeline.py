@@ -332,10 +332,7 @@ def test_meta_session_retains_only_the_authorized_test_diagnostic(tmp_path: Path
         parent=None,
         previous_prior="initial",
         session_context={
-            "session_timing": lambda: {
-                "run_wall_seconds": 12.34,
-                "researcher_wait_seconds": 1.26,
-            }
+            "session_timing": lambda: {"run_wall_seconds": 12.34}
         },
     )
 
@@ -344,7 +341,6 @@ def test_meta_session_retains_only_the_authorized_test_diagnostic(tmp_path: Path
     assert prior == ("prefer robust signals", None)
     meta_record = ledger.read("meta_learning")[-1]
     assert meta_record["run_wall_seconds"] == 12.3
-    assert meta_record["researcher_wait_seconds"] == 1.3
     history = captured["development_history"]
     assert isinstance(history, dict)
     assert set(history) == {

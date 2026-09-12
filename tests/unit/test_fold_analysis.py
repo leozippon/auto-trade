@@ -20,7 +20,6 @@ from autotrade.pipelines.fold_analysis import (
     analysis_key,
     analysis_paths,
     analyze_fold,
-    analyze_step,
     build_fold_analysis_messages,
     guarded_record_view,
     read_strategy_files,
@@ -248,34 +247,6 @@ class FoldAnalysisTest(unittest.TestCase):
             )
             self.assertEqual(meta["status"], "error")
             self.assertFalse((out_dir / f"epoch_001__{self.fold_ref}.md").exists())
-
-    def test_analyze_step_writes_under_its_node_identity(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            strategy = Path(tmp) / "strategy"
-            strategy.mkdir()
-            (strategy / "main.py").write_text("pass\n", encoding="utf-8")
-            out_dir = Path(tmp) / "analysis"
-            node_id = "epoch_001__fold_ref_ab__run_x__valid_000"
-            proxy = FakeProxy(content="## 步骤解读\nok")
-            md_path = analyze_step(
-                proxy,
-                step_record={"epoch_id": "epoch_001", "fold_id": "fold_2022Q1",
-                             "validation_result": {"total_return": 0.01}},
-                ref_store=self.ref_store,
-                strategy_dir=strategy,
-                model_dir=None,
-                out_dir=out_dir,
-                node_id=node_id,
-            )
-            self.assertEqual(md_path.name, f"step__{node_id}.md")
-            meta = json.loads(md_path.with_suffix(".json").read_text(encoding="utf-8"))
-            self.assertEqual(meta["analysis_kind"], "step")
-            # Only public record identities survive in the sidecar; the output
-            # itself is keyed by the immutable Step node.
-            self.assertEqual(meta["epoch_id"], "step")
-            self.assertEqual(meta["fold_ref"], self.fold_ref)
-            self.assertEqual(meta["output_ref"], node_id)
-            self.assertNotIn("fold_id", meta)
 
     def test_analysis_paths_are_derived_from_one_key(self) -> None:
         self.assertEqual(analysis_key("epoch_001", "fold_2022Q1"), "epoch_001__fold_2022Q1")

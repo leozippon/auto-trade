@@ -655,49 +655,6 @@ def test_model_roles_share_one_session_call_budget():
     assert shared.calls == 1
 
 
-def test_interactive_hooks_consume_current_controls_without_retaining_content(
-    tmp_path: Path,
-):
-    session_key = "epoch_001/fold_2026Q1"
-    control_path = tmp_path / "control.json"
-    status_path = tmp_path / "status.json"
-    ledger = ExperimentLedger(tmp_path / "ledger.jsonl")
-    runner = InteractiveExperimentRunner(
-        experiment_id="demo",
-        sessions=(),
-        execute_session=lambda _session, _context: None,
-        ledger=ledger,
-        control_path=control_path,
-        status_path=status_path,
-        poll_seconds=0.01,
-    )
-
-    write_control(
-        control_path,
-        ControlState(
-            mode="step",
-            step_go={session_key: 2},
-            step_directives={f"{session_key}#2": "继续控制回撤"},
-        ),
-    )
-    assert runner.step_gate_hook(session_key)(2, {"complete": True}) == "继续控制回撤"
-    consumed = read_control(control_path)
-    assert consumed.step_go == {}
-    assert consumed.step_directives == {}
-    assert read_status(status_path)["state"] == "running_session"
-
-    write_control(
-        control_path,
-        ControlState(mode="manual", user_replies={f"{session_key}#q1": ""}),
-    )
-    assert runner.user_question_hook(session_key)("继续吗？") == ""
-    assert read_control(control_path).user_replies == {}
-    assert read_status(status_path)["state"] == "running_session"
-    # Auto mode has nobody to answer: no hook, so no ask_user tool is registered.
-    write_control(control_path, ControlState(mode="auto"))
-    assert runner.user_question_hook(session_key) is None
-
-
 def test_interactive_runner_publishes_current_session_timing(tmp_path: Path):
     session_key = "epoch_001/fold_2026Q1"
     control_path = tmp_path / "control.json"
@@ -742,14 +699,12 @@ def test_interactive_runner_publishes_current_session_timing(tmp_path: Path):
     assert captured["state"] == "running_session"
     assert captured["session_key"] == session_key
     assert captured["session_started_at"]
-    assert captured["researcher_wait_seconds"] == 0.0
     assert captured["run_id"] == "run_001"
     assert captured["environment_stage"] == "pit_snapshot"
     assert captured["environment_stage_started_at"]
     timing = captured["timing"]
     assert isinstance(timing, dict)
     assert timing["run_wall_seconds"] >= 0.0
-    assert timing["researcher_wait_seconds"] == 0.0
 
 
 def test_session_boundary_restart_keeps_the_finished_session_and_stops_the_next(
@@ -930,11 +885,6 @@ def test_llm_worker_runs_real_meta_fold_validation_and_heldout(
                 ToolCall("finish_meta", "finish_meta", {}),
             ),
             *_agent_then(
-                ToolCall(
-                    "ask",
-                    "ask_user",
-                    {"question": "Continue with the bounded validation?"},
-                ),
                 ToolCall("check", "modification_check", {}),
                 ToolCall("valid", "daily_backtest", {}),
                 ToolCall("finish_fold", "finish_fold", {}),
@@ -1118,8 +1068,6 @@ def test_llm_worker_runs_real_meta_fold_validation_and_heldout(
         "step_rollback",
         "write_file",
     }.issubset(fold_tool_names)
-    # Auto mode registers no ask_user: nobody would answer it.
-    assert "ask_user" not in fold_tool_names
     assert all(
         "test_period" not in (message.content or "")
         for call in llm.calls
@@ -2442,8 +2390,7 @@ def test_a_cpu_only_allocation_survives_the_control_round_trip(tmp_path: Path) -
     The console accepts 0..4 and every layer below honours 0 explicitly
     (``_optional_gpu_count``, the developer's ``gpu=None, gpu_count=0``), so a
     reader that drops it silently runs the CPU-only fold on the experiment
-    default. Step indexes are the opposite case: they start at 1, so a 0 there
-    addresses no step and stays dropped.
+    default.
     """
 
     control = tmp_path / "control.json"
@@ -2452,12 +2399,10 @@ def test_a_cpu_only_allocation_survives_the_control_round_trip(tmp_path: Path) -
         ControlState(
             mode="auto",
             gpu_counts={"epoch_001/fold_a": 0, "epoch_001/fold_b": 2},
-            step_go={"epoch_001/fold_a": 0, "epoch_001/fold_b": 2},
         ),
     )
     state = read_control(control)
     assert state.gpu_counts == {"epoch_001/fold_a": 0, "epoch_001/fold_b": 2}
-    assert state.step_go == {"epoch_001/fold_b": 2}
 
 
 #: (params.json key, offending value, worker error message). Every entry is a

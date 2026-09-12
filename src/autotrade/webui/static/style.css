@@ -354,8 +354,6 @@ main {
  }
 }
 .badge.state-waiting_user,
-.badge.state-waiting_step_user,
-.badge.state-waiting_user_reply,
 .badge.state-paused {
  background: var(--warn-soft);
  color: var(--warn);
@@ -580,8 +578,8 @@ progress.progress.done::-moz-progress-bar {
 /* Right column of the detail grid. Cards keep one rhythm via the flex gap;
    per-card .section-gap top margins (meant for stacked flow layouts) are
    neutralized so the first visible card tops out flush with the left panel,
-   and empty placeholder spans (ask-user/step-gate when inactive) are removed
-   from the flow so they cannot double the gap or become the "first" child. */
+   and empty placeholder spans are removed from the flow so they cannot double
+   the gap or become the "first" child. */
 .session-detail {
  display: flex;
  flex-direction: column;
@@ -1956,18 +1954,6 @@ details.advanced .form-grid {
 .step-tip-line .k {
  color: var(--muted);
  flex: none;
-}
-
-/* ask_user question card */
-.ask-user-question {
- white-space: pre-wrap;
- background: color-mix(in srgb, var(--accent, #3572e8) 7%, transparent);
- border-left: 3px solid var(--accent, #3572e8);
- border-radius: 6px;
- padding: 0.6rem 0.8rem;
- margin: 0.45rem 0 0.55rem;
- font-size: 0.92rem;
- line-height: 1.55;
 }
 
 /* ---------------- 运行记忆 ----------------

@@ -534,15 +534,6 @@ _FIELDS: list[dict[str, object]] = [
     {"key": "slippage_bps", "group": "Broker 账户", "label": "市价滑点（bp）", "type": "float", "advanced": True,
      "help": "市价 taker 成交滑点；限价/竞价成交不计滑点。"},
     # 运行控制
-    {
-        "key": "initial_control_mode",
-        "group": "运行控制",
-        "label": "初始运行模式",
-        "type": "choice",
-        "choices": ["manual", "step", "auto"],
-        "choice_labels": {"manual": "逐会话批准", "step": "逐 Step 批准（最细）", "auto": "自动运行"},
-        "help": "manual：每个会话（元学习/Fold/Held-out）开始前等待批准并可注入指令；step：在 manual 基础上，每次正式验证回测后再挂起等待批准，可注入 Step 级指令（逐 Fold 可单独覆盖开关）；auto：全自动连续执行，可随时暂停。",
-    },
     {"key": "analysis_model", "group": "运行控制", "label": "策略分析模型", "type": "choice",
      "choices": list(MODEL_CHOICES),
      "help": "生成 Fold 与 Step 策略分析所用的模型。"},

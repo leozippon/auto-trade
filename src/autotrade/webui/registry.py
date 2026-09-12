@@ -102,9 +102,6 @@ ACTIVE_STATES = (
     "initializing",
     "running_session",
     "running_heldout",
-    "waiting_user",
-    "waiting_step_user",
-    "waiting_user_reply",
     "paused",
 )
 # Manager-written stub state between spawn and the worker's first status write

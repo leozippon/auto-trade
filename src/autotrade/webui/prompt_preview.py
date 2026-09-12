@@ -1,6 +1,6 @@
-"""Pre-approval Prompt preview for Fold and Meta sessions.
+"""Pre-session Prompt preview for Fold and Meta sessions.
 
-The console shows this text before it approves a session, so it has to be the
+The console shows this text before a session starts, so it has to be the
 prompt the session will actually receive rather than a second description of
 it. Nothing here restates prompt text, budgets or contract wording: the
 experiment is resolved by the worker's own ``load_worker_options`` over the
@@ -114,7 +114,6 @@ def build_prompt_preview(
             fold_id=str(entry.get("fold_id") or ""),
             directive=directive,
             resource_override=control.resource_overrides.get(session_key),
-            prompt_override=control.prompt_overrides.get(session_key, ""),
             session_kind=kind,
             # The plan of record decided it; the preview must not re-derive it.
             confirmation_fold=bool(entry.get("confirmation")),
@@ -124,7 +123,6 @@ def build_prompt_preview(
             context,
             trigger_after_folds=int(entry.get("fold_index") or 0),
             directive=directive,
-            prompt_override=control.prompt_overrides.get(session_key, ""),
         )
     prompt = f"{_SYSTEM_BANNER}\n{system}\n\n{_USER_BANNER}\n{instruction}"
     return {"prompt": prompt, "note": PREVIEW_NOTE}
@@ -174,7 +172,6 @@ def _fold_prompt(
     fold_id: str,
     directive: str,
     resource_override: object,
-    prompt_override: str,
     session_kind: str = "fold",
     confirmation_fold: bool = False,
 ) -> tuple[str, str]:
@@ -281,8 +278,9 @@ def _fold_prompt(
         fold_directive=directive,
         confirmation_fold=confirmation_fold,
     )
-    default = DEPLOYMENT_DEFAULT_INSTRUCTION if deployment else FOLD_DEFAULT_INSTRUCTION
-    return system, prompt_override.strip() or default
+    return system, (
+        DEPLOYMENT_DEFAULT_INSTRUCTION if deployment else FOLD_DEFAULT_INSTRUCTION
+    )
 
 
 def _meta_prompt(
@@ -290,7 +288,6 @@ def _meta_prompt(
     *,
     trigger_after_folds: int,
     directive: str,
-    prompt_override: str,
 ) -> tuple[str, str]:
     from autotrade.pipelines.meta_schedule import meta_learning_id
 
@@ -349,7 +346,7 @@ def _meta_prompt(
         _mark_runtime_parent(facts, model_artifacts=False)
     # A Meta session is prompted with no schedule block: it never runs a replay.
     system = build_system_prompt(mode="meta", experiment_facts=facts)
-    instruction = prompt_override.strip() or build_meta_learning_prompt(
+    instruction = build_meta_learning_prompt(
         {},
         experiment_directive=rolling.meta_learning_directive,
         fold_exploration_directive=rolling.fold_exploration_directive,

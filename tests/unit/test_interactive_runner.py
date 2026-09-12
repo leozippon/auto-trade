@@ -2,7 +2,7 @@
 
 `tests/unit/test_interactive_worker_local.py` drives the worker end to end, so
 the runner's own control-plane branches -- durable stop/pause at a session
-boundary, `skip_to_heldout`, `parent_override` delivery, the advisory post-fold
+boundary, `skip_to_heldout`, the advisory post-fold
 hook, resume, and the re-run token -- were only ever exercised incidentally.
 These tests drive `InteractiveExperimentRunner` directly against a recording
 executor so each branch is observed, including the ones that must NOT fire.
@@ -338,39 +338,21 @@ class InteractiveRunnerTest(RunnerTestCase):
         self.runner(sessions_for("meta:1", "fold_a", "fold_b"), executor).run()
         self.assertEqual(executor.keys, ["epoch_001/meta:1", "epoch_001/fold_a"])
 
-    def test_parent_override_is_delivered_to_its_own_session_and_no_other(self) -> None:
-        executor = RecordingExecutor(self.ledger)
-        self.set_control(parent_overrides={"epoch_001/fold_b": "node_42"})
-        self.runner(sessions_for("fold_a", "fold_b", "fold_c"), executor).run()
-        overrides = {key: context["parent_override"] for key, context in executor.calls}
-        self.assertEqual(
-            overrides,
-            {"epoch_001/fold_a": "", "epoch_001/fold_b": "node_42", "epoch_001/fold_c": ""},
-        )
-        # A parent override is a standing choice, not a one-shot approval: the
-        # completed-session sweep must not silently discard it.
-        self.assertEqual(read_control(self.control).parent_overrides, {"epoch_001/fold_b": "node_42"})
-
     def test_per_session_directives_and_overrides_reach_the_session_then_are_consumed(self) -> None:
         executor = RecordingExecutor(self.ledger)
         self.set_control(
             directives={"epoch_001/fold_a": "try momentum"},
-            prompt_overrides={"epoch_001/fold_a": "custom prompt"},
             resource_overrides={"epoch_001/fold_a": {"max_steps": 2}},
         )
         self.runner(sessions_for("fold_a"), executor).run()
         _key, context = executor.calls[0]
         self.assertEqual(context["directive"], "try momentum")
-        self.assertEqual(context["prompt_override"], "custom prompt")
         self.assertEqual(context["resource_override"], {"max_steps": 2})
         self.assertEqual(context["session_key"], "epoch_001/fold_a")
-        for hook in ("step_gate_hook", "progress_hook", "session_timing"):
+        for hook in ("progress_hook", "session_timing"):
             self.assertTrue(callable(context[hook]), hook)
-        # Auto mode has nobody to answer questions: no hook, no ask_user tool.
-        self.assertIsNone(context["user_question_hook"])
         control = read_control(self.control)
-        self.assertEqual((control.directives, control.prompt_overrides, control.resource_overrides),
-                         ({}, {}, {}))
+        self.assertEqual((control.directives, control.resource_overrides), ({}, {}))
 
     def test_a_per_session_gpu_count_reaches_only_its_own_session_and_is_consumed(self) -> None:
         """`set_gpu_count` is a one-shot allocation, like an approval.
@@ -440,42 +422,16 @@ class InteractiveRunnerTest(RunnerTestCase):
         self.assertEqual(self.runner(sessions_for("meta:1"), again).run()["sessions_run"], 0)
         self.assertEqual(again.keys, [])
 
-    def test_manual_mode_waits_at_the_gate_until_the_session_is_approved(self) -> None:
-        executor = RecordingExecutor(self.ledger)
-        self.set_control(mode="manual")
-        waits: list[dict[str, object]] = []
+    def test_no_session_gate_holds_a_worker_the_researcher_started(self) -> None:
+        """The session gate only checks stop/seal/restart; nothing blocks.
 
-        def approve_on_first_poll(_seconds: float) -> None:
-            # The gate polls control.json between sleeps; capture what the
-            # console would have seen, then approve.
-            waits.append(read_status(self.status))
-            self.set_control(approved_sessions=("epoch_001/fold_a",))
-
-        with patch.object(interactive.time, "sleep", approve_on_first_poll):
-            self.runner(sessions_for("fold_a"), executor).run()
-
-        self.assertEqual(len(waits), 1, "the gate did not block on an unapproved session")
-        self.assertEqual(waits[0]["state"], "waiting_user")
-        self.assertEqual(waits[0]["session_key"], "epoch_001/fold_a")
-        self.assertEqual(waits[0]["session_kind"], "fold")
-        self.assertIsNotNone(waits[0]["wait_started_at"])
-        self.assertEqual(executor.keys, ["epoch_001/fold_a"])
-        # The one-shot approval is consumed when the session completes.
-        self.assertEqual(read_control(self.control).approved_sessions, ())
-
-    def test_manual_mode_does_not_gate_a_session_approved_up_front(self) -> None:
-        self.set_control(mode="manual", approved_sessions=("epoch_001/fold_a",))
-        with patch.object(interactive.time, "sleep", side_effect=AssertionError("gate slept")):
-            self.runner(sessions_for("fold_a"), RecordingExecutor(self.ledger)).run()
-
-    def test_a_stop_arriving_while_the_gate_waits_ends_the_run(self) -> None:
-        self.set_control(mode="manual")
-        executor = RecordingExecutor(self.ledger)
+        There is no per-session approval any more: a worker the researcher
+        started runs its planned sessions, and holding it is `pause`/`stop`.
+        """
         with patch.object(
-            interactive.time, "sleep", lambda _s: self.set_control(request="stop")
-        ), self.assertRaisesRegex(ExperimentStopped, "stop requested"):
-            self.runner(sessions_for("fold_a"), executor).run()
-        self.assertEqual(executor.keys, [])
+            interactive.time, "sleep", side_effect=AssertionError("gate slept")
+        ):
+            self.runner(sessions_for("fold_a"), RecordingExecutor(self.ledger)).run()
 
 class PostFoldHookTest(RunnerTestCase):
     def test_the_hook_receives_the_folds_own_ledger_record(self) -> None:

@@ -10,9 +10,6 @@ const STATE_LABELS = {
   initializing: "初始化中",
   running_session: "运行中",
   running_heldout: "Held-out 运行中",
-  waiting_user: "等待批准",
-  waiting_step_user: "等待 Step 批准",
-  waiting_user_reply: "等待答复提问",
   paused: "已暂停",
   completed: "已完成",
   stopped: "已停止",
@@ -135,16 +132,11 @@ const RESUMABLE_STATES = [
   "terminated",
   "created",
 ];
-const LIVE_RUN_STATES = new Set([
-  "running_session",
-  "waiting_step_user",
-  "waiting_user_reply",
-]);
+// Worker states that carry a live Agent session; mirrors
+// hitl_state.LIVE_RUN_STATES. Keep in sync or the console offers message
+// injection on a session the backend will refuse.
+const LIVE_RUN_STATES = new Set(["running_session"]);
 const ACTIVE_SESSION_STATES = LIVE_RUN_STATES;
-const RESEARCHER_WAIT_STATES = new Set([
-  "waiting_step_user",
-  "waiting_user_reply",
-]);
 const INJECT_MESSAGE_MAX_CHARS = 8192;
 const INJECT_MESSAGE_QUEUED_NOTE = "已排队，将在 Agent 下一安全点生效";
 const TERMINAL_INJECT_STATES = new Set([
@@ -349,20 +341,10 @@ function foldDurationNode(detail, session, prefix = "", className = "") {
     ACTIVE_SESSION_STATES.has(status.state) &&
     Number.isFinite(startedAt);
   const update = () => {
-    const completedWait = Number(status.researcher_wait_seconds) || 0;
-    const waitStartedAt = RESEARCHER_WAIT_STATES.has(status.state)
-      ? Date.parse(status.wait_started_at || "")
-      : NaN;
-    const activeWait = Number.isFinite(waitStartedAt)
-      ? Math.max(0, (Date.now() - waitStartedAt) / 1000)
-      : 0;
     const seconds = isFixed
       ? fixed
       : isLive
-        ? Math.max(
-            0,
-            (Date.now() - startedAt) / 1000 - completedWait - activeWait,
-          )
+        ? Math.max(0, (Date.now() - startedAt) / 1000)
         : null;
     node.textContent = [prefix, seconds === null ? "" : fmtDuration(seconds)]
       .filter(Boolean)
@@ -2251,7 +2233,7 @@ function confirmRevealTests(experimentId) {
       el(
         "p",
         {},
-        "人工揭示会打开不受控的明细反馈通道，因此揭示后本实验封存：不能再批准会话、重跑、回滚、逐 Step 放行或注入任何指令。",
+        "人工揭示会打开不受控的明细反馈通道，因此揭示后本实验封存：不能再重跑、回滚或注入任何指令。",
       ),
       el("p", {}, "查看/停止/删除仍然可用。此操作不可撤销。"),
     ),
@@ -2786,7 +2768,7 @@ async function renderDetailPage(experimentId, selectedKey) {
               {
                 class: "badge state-waiting_user",
                 title:
-                  "测试/Held-out 结果已揭示：实验已封存，不能再批准、重跑、回滚或注入指令",
+                  "测试/Held-out 结果已揭示：实验已封存，不能再重跑、回滚或注入指令",
               },
               "已揭示测试（封存）",
             )
@@ -3042,27 +3024,11 @@ async function openParamsModal(detail) {
 
 function controlBar(detail) {
   const id = detail.experiment_id;
-  const control = detail.control || { mode: "manual", request: null };
+  const control = detail.control || { request: null };
   const state = detail.state;
   const alive = detail.worker_alive;
   const send = (payload, note) => sendControlAction(id, payload, note);
   const bar = el("div", { class: "panel control-bar section-gap" });
-  bar.append(el("span", { class: "mode-note" }, "运行模式："));
-  const modeSelect = el(
-    "select",
-    {
-      onchange: () =>
-        send(
-          { action: "set_mode", mode: modeSelect.value },
-          `模式已切换为 ${modeSelect.value}`,
-        ),
-    },
-    el("option", { value: "manual" }, "逐会话批准"),
-    el("option", { value: "step" }, "逐 Step 批准（最细）"),
-    el("option", { value: "auto" }, "自动运行（连续执行）"),
-  );
-  modeSelect.value = control.mode;
-  bar.append(modeSelect);
   if (control.request === "pause")
     bar.append(el("span", { class: "badge state-paused" }, "已请求暂停"));
   if (control.request === "stop")
@@ -3196,10 +3162,6 @@ function controlBar(detail) {
                             result.escalated
                               ? `已强制终止（SIGKILL，pid ${result.terminated_pid}）`
                               : `worker 已优雅退出（pid ${result.terminated_pid}）`
-                          }${
-                            result.approval_revoked_session
-                              ? "；未完成会话已退回待批准"
-                              : ""
                           }`,
                       );
                     },
@@ -3445,32 +3407,19 @@ function sessionListPanel(detail, selectedKey) {
     }
     const isDone = Boolean(session.record || (session.records || []).length);
     const isCurrent = status.session_key === session.key && detail.worker_alive;
-    const isWaiting = isCurrent && detail.state === "waiting_user";
-    const dotClass = isDone
-      ? "done"
-      : isWaiting
-        ? "waiting"
-        : isCurrent
-          ? "running"
-          : "pending";
+    const dotClass = isDone ? "done" : isCurrent ? "running" : "pending";
     const stateText =
-      isCurrent && status.state === "waiting_step_user"
-        ? `Step ${status.step_index ?? "?"} 待批准`
-        : isCurrent && status.state === "waiting_user_reply"
-          ? "提问待答复"
-          : isWaiting
-            ? "待批准"
-            : isCurrent && detail.state === "paused"
-              ? "已暂停"
-              : isCurrent &&
-                  (detail.state === "failed" ||
-                    detail.state === "interrupted" ||
-                    detail.state === "terminated" ||
-                    detail.state === "stopped")
-                ? STATE_LABELS[detail.state] || detail.state
-                : isCurrent
-                  ? formatStageLine(status, { elapsed: false }) || "运行中"
-                  : "";
+      isCurrent && detail.state === "paused"
+        ? "已暂停"
+        : isCurrent &&
+            (detail.state === "failed" ||
+              detail.state === "interrupted" ||
+              detail.state === "terminated" ||
+              detail.state === "stopped")
+          ? STATE_LABELS[detail.state] || detail.state
+          : isCurrent
+            ? formatStageLine(status, { elapsed: false }) || "运行中"
+            : "";
     // A session that has not produced a result says which nothing it is
     // rather than leaving the column blank; a finished one has its own line.
     const line = sessionListLine(
@@ -3536,28 +3485,21 @@ function sessionDetailPanel(detail, selectedKey) {
     isCurrent && detail.worker_alive && ACTIVE_SESSION_STATES.has(detail.state);
   const runningEnvironment =
     isCurrent && detail.worker_alive && detail.state === "running_heldout";
-  const waiting = isCurrent && detail.state === "waiting_user";
   const done = Boolean(session.record || (session.records || []).length);
 
-  // Directive editor for sessions that have not run yet or await approval.
-  if (detail.kind === "hitl" && (!done || waiting) && !running) {
-    panel.append(directivePanel(detail, session, waiting));
+  // Directive editor for sessions that have not run yet.
+  if (detail.kind === "hitl" && !done && !running) {
+    panel.append(directivePanel(detail, session));
   }
   const preparing = isPrepEnvironment(status, detail.state);
   if (
     (running && preparing) ||
     runningEnvironment ||
-    (isCurrent &&
-      detail.worker_alive &&
-      preparing &&
-      !waiting &&
-      !done)
+    (isCurrent && detail.worker_alive && preparing && !done)
   )
     panel.append(environmentStagePanel(detail));
   if (running && !preparing)
     panel.append(
-      askUserPanel(detail, session),
-      stepGatePanel(detail, session),
       liveTracePanel(detail, session),
     );
   if (
@@ -3640,7 +3582,7 @@ function sessionDetailPanel(detail, selectedKey) {
       }
     })();
   }
-  if (!done && !running && !runningEnvironment && !waiting) {
+  if (!done && !running && !runningEnvironment) {
     const idleLabel =
       isCurrent && detail.worker_alive
         ? STATE_LABELS[detail.state] || detail.state
@@ -3700,8 +3642,8 @@ function environmentStagePanel(detail) {
   return panel;
 }
 
-function directivePanel(detail, session, waiting) {
-  const control = detail.control || { directives: {}, approved_sessions: [] };
+function directivePanel(detail, session) {
+  const control = detail.control || { directives: {} };
   const isMeta = session.kind === "meta_learning";
   // A meta session with no per-session override inherits the experiment-level
   // directive from creation; prefill it so it never needs retyping.
@@ -3713,7 +3655,6 @@ function directivePanel(detail, session, waiting) {
       ? String((detail.params || {}).fold_exploration_directive || "").trim()
       : "";
   const existing = (control.directives || {})[session.key] ?? "";
-  const approved = (control.approved_sessions || []).includes(session.key);
   const textarea = el("textarea", {
     class: "directive",
     placeholder: foldDefault
@@ -3770,43 +3711,24 @@ function directivePanel(detail, session, waiting) {
         "指令会注入系统提示词并记入账本。已完成 Fold 的 Test 只由系统向 Meta 投影 compact 指标；请勿人工写入 Test/Held-out 明细或具体日历日期，以免绕过受控反馈边界。",
       ),
     );
-    if ((detail.control || {}).mode === "auto") {
-      panel.append(
-        el(
-          "div",
-          { class: "hint" },
-          "自动模式不会等待批准。点「保存指令」才会写入本会话；须在该会话启动前保存。",
-        ),
-      );
-    }
+    panel.append(
+      el(
+        "div",
+        { class: "hint" },
+        "会话不会等待批准。点「保存指令」才会写入本会话，须在该会话启动前保存。",
+      ),
+    );
   }
   const buttons = el("div", { class: "control-bar section-gap" });
   const send = (payload, note) =>
     sendControlAction(detail.experiment_id, payload, note);
   if (session.kind !== "heldout") {
-    if (session.kind === "fold" || session.kind === "meta_learning") {
-      buttons.append(
-        el(
-          "button",
-          {
-            class: "btn",
-            onclick: () => openPromptEditor(detail, session),
-          },
-          "编辑额外用户指令",
-        ),
-      );
-    }
     buttons.append(
       el(
         "button",
         {
           class: "btn",
-          onclick: () =>
-            openPromptPreview(detail, session, textarea.value, {
-              approved,
-              waiting,
-              send,
-            }),
+          onclick: () => openPromptPreview(detail, session, textarea.value),
         },
         "预览完整系统提示词",
       ),
@@ -3815,10 +3737,7 @@ function directivePanel(detail, session, waiting) {
       el(
         "button",
         {
-          class:
-            (detail.control || {}).mode === "auto" && !approved
-              ? "btn primary"
-              : "btn",
+          class: "btn primary",
           onclick: () =>
             send(
               {
@@ -3832,50 +3751,15 @@ function directivePanel(detail, session, waiting) {
         "保存指令",
       ),
     );
-    if ((detail.control?.prompt_overrides || {})[session.key]) {
-      buttons.append(
-        el("span", { class: "badge state-waiting_user" }, "已设置额外用户指令"),
-      );
-    }
-  }
-  if ((detail.control || {}).mode !== "auto" && !approved) {
-    buttons.append(
-      el(
-        "button",
-        {
-          class: "btn primary",
-          onclick: () =>
-            send(
-              {
-                action: "approve",
-                session_key: session.key,
-                directive: textarea.value,
-              },
-              "已批准，会话即将启动",
-            ),
-        },
-        waiting ? "批准并启动" : "预先批准",
-      ),
-    );
-  } else if (approved) {
-    buttons.append(el("span", { class: "badge state-completed" }, "已批准"));
   }
   panel.append(buttons);
   // Pre-fold GPU allocation: live nvidia-smi inventory + per-session count.
   if (session.kind === "fold" && !session.record)
     panel.append(gpuAllocationRow(detail, session, send));
-  if (waiting)
-    panel.append(
-      el(
-        "div",
-        { class: "hint" },
-        "worker 正在等待此会话的批准。建议先预览完整系统提示词，确认注入内容无误后再批准。",
-      ),
-    );
   return panel;
 }
 
-/* GPU status + per-fold allocation picker, shown at the fold approval gate.
+/* GPU status + per-fold allocation picker, shown before the fold starts.
    The chosen count rides in control.gpu_counts[session_key]; the sandbox's
    "auto" selector then picks that many GPUs by free memory at start, so rows
    are ranked by free memory, the top N are marked as the likely allocation,
@@ -3890,7 +3774,7 @@ function gpuAllocationRow(detail, session, send) {
     el(
       "div",
       { class: "hint" },
-      "批准前可查看实时资源并为本 Fold 沙箱设定 GPU 数；具体设备仍按空闲显存自动挑选，蓝条越长表示剩余显存越多。",
+      "会话启动前可查看实时资源并为本 Fold 沙箱设定 GPU 数；具体设备仍按空闲显存自动挑选，蓝条越长表示剩余显存越多。",
     ),
   );
   const statusHost = el(
@@ -4091,80 +3975,9 @@ async function refreshDetail() {
   }
 }
 
-/* Extra user-instruction editor: does not replace the runtime system prompt. */
-function openPromptEditor(detail, session) {
-  const existing = (detail.control?.prompt_overrides || {})[session.key] || "";
-  const editor = el("textarea", {
-    class: "directive prompt-editor",
-    spellcheck: "false",
-  });
-  editor.value = existing;
-  const send = (payload, note) =>
-    sendControlAction(detail.experiment_id, payload, note, { modal: true });
-  const footer = [el("button", { class: "btn", onclick: closeModal }, "取消")];
-  if (existing) {
-    footer.push(
-      el(
-        "button",
-        {
-          class: "btn danger",
-          onclick: () =>
-            send(
-              {
-                action: "set_prompt_override",
-                session_key: session.key,
-                directive: "",
-              },
-              "已清除额外用户指令",
-            ),
-        },
-        "清除额外指令",
-      ),
-    );
-  }
-  footer.push(
-    el(
-      "button",
-      {
-        class: "btn primary",
-        onclick: () =>
-          send(
-            {
-              action: "set_prompt_override",
-              session_key: session.key,
-              directive: editor.value,
-            },
-            "已保存额外用户指令",
-          ),
-      },
-      "保存额外用户指令",
-    ),
-  );
-  showModal(
-    `编辑额外用户指令 — ${sessionDisplayKey(session)}`,
-    el(
-      "div",
-      {},
-      el(
-        "div",
-        { class: "hint warn" },
-        "这段文字是额外用户指令，不会替换运行时系统提示词；build_system_prompt 仍会装配稳定合同与动态事实。请勿写入 Test/Held-out 明细或焊接的日历日期。",
-      ),
-      editor,
-    ),
-    footer,
-    "prompt-modal",
-  );
-}
-
-/* Review-then-approve: assemble the session's system prompt (with the draft
-   directive embedded) for inspection before the session is allowed to start. */
-async function openPromptPreview(
-  detail,
-  session,
-  directive,
-  { approved, waiting, send },
-) {
+/* Assemble the session's system prompt (with the draft directive embedded)
+   for inspection before the session starts. */
+async function openPromptPreview(detail, session, directive) {
   let data;
   try {
     data = await api(
@@ -4179,24 +3992,6 @@ async function openPromptPreview(
     return;
   }
   const footer = [el("button", { class: "btn", onclick: closeModal }, "关闭")];
-  if ((detail.control || {}).mode !== "auto" && !approved) {
-    footer.push(
-      el(
-        "button",
-        {
-          class: "btn primary",
-          onclick: () => {
-            closeModal();
-            send(
-              { action: "approve", session_key: session.key, directive },
-              "已批准，会话即将启动",
-            );
-          },
-        },
-        waiting ? "确认无误，批准并启动" : "确认无误，预先批准",
-      ),
-    );
-  }
   showModal(
     `系统提示词预览 — ${sessionDisplayKey(session)}`,
     el(
@@ -4263,257 +4058,6 @@ async function openInitialPrompt(detail, session) {
     [el("button", { class: "btn", onclick: closeModal }, "关闭")],
     "prompt-modal",
   );
-}
-
-/* ask_user tool: when the Agent pauses on a question (state=waiting_user_reply),
-   show it and send the researcher's reply (empty reply = proceed, Agent decides).
-   The wait is excluded from the Agent's reasoning budget. */
-function currentStrategyDownloadNode(detail) {
-  const host = el(
-    "span",
-    {},
-    el(
-      "button",
-      {
-        class: "btn",
-        disabled: "",
-        title: "正在确认是否已有正式验证 Step 快照",
-      },
-      "策略快照检查中…",
-    ),
-  );
-  api(
-    `/api/experiments/${encodeURIComponent(detail.experiment_id)}/current-step`,
-  )
-    .then((payload) => {
-      host.innerHTML = "";
-      if (payload.available) {
-        host.append(
-          el(
-            "a",
-            {
-              class: "btn",
-              href: `/api/experiments/${encodeURIComponent(detail.experiment_id)}/current-step/source.zip`,
-              title: "下载最近一次正式验证 Step 保存的只读策略快照",
-            },
-            "下载当前策略",
-          ),
-        );
-      } else {
-        host.append(
-          el(
-            "button",
-            {
-              class: "btn",
-              disabled: "",
-              title: payload.reason || "尚无正式验证 Step 快照",
-            },
-            "暂无策略快照",
-          ),
-        );
-      }
-    })
-    .catch(() => {
-      host.innerHTML = "";
-      host.append(
-        el("button", { class: "btn", disabled: "" }, "策略快照不可用"),
-      );
-    });
-  return host;
-}
-
-function askUserPanel(detail, session) {
-  const status = detail.status || {};
-  const question = String(status.question || "");
-  const questionKey = String(status.question_key || "");
-  if (
-    detail.kind !== "hitl" ||
-    status.state !== "waiting_user_reply" ||
-    status.session_key !== session.key ||
-    !question ||
-    !questionKey
-  )
-    return el("span", {});
-  const textarea = el("textarea", {
-    class: "directive",
-    placeholder:
-      "方向性指引（作为研究者答复注入对话；留空=让 Agent 自行决策）……",
-  });
-  const send = (reply, message) =>
-    sendControlAction(
-      detail.experiment_id,
-      { action: "reply_question", session_key: questionKey, directive: reply },
-      message,
-    );
-  return el(
-    "div",
-    { class: "panel section-gap" },
-    el(
-      "h4",
-      { class: "subsection-title" },
-      `Agent 提问 ${questionKey}（等待不消耗推理预算）`,
-    ),
-    el("div", { class: "ask-user-question" }, question),
-    status.question_summary
-      ? el("div", { class: "hint" }, String(status.question_summary))
-      : null,
-    textarea,
-    el(
-      "div",
-      { class: "control-bar" },
-      currentStrategyDownloadNode(detail),
-      el(
-        "button",
-        {
-          class: "btn primary",
-          onclick: () => send(textarea.value, "已答复，Agent 继续"),
-        },
-        "答复并继续",
-      ),
-      el(
-        "button",
-        { class: "btn", onclick: () => send("", "已放行（无指引）") },
-        "不给指引，继续",
-      ),
-    ),
-  );
-}
-
-/* Step-level HITL: toggle per-session gating and, when the worker is holding
-   at a step (state=waiting_step_user), show the step result and release it
-   with an optional per-step directive (injected into the tool observation). */
-function stepGatePanel(detail, session) {
-  if (session.kind !== "fold" || detail.kind !== "hitl") return el("span", {});
-  const control = detail.control || {};
-  const status = detail.status || {};
-  const override = (control.step_gate || {})[session.key];
-  const enabled =
-    override === undefined ? control.mode === "step" : Boolean(override);
-  const send = (payload, message) =>
-    sendControlAction(detail.experiment_id, payload, message);
-  const panel = el(
-    "div",
-    { class: "panel section-gap" },
-    el("h4", { class: "subsection-title" }, "逐 Step 门控"),
-    el(
-      "div",
-      { class: "hint" },
-      (detail.control || {}).mode === "step"
-        ? "运行模式为「逐 Step 批准」：所有 Fold 默认开启门控，此处仅用于为本 Fold 单独例外（关闭/恢复默认）。"
-        : "为本 Fold 单独开启：每次正式验证回测完成即暂停等待批准，可在放行时注入 Step 级指令（等待不消耗推理预算）。全局默认请用运行模式「逐 Step 批准」。",
-    ),
-    el(
-      "div",
-      { class: "control-bar" },
-      el(
-        "button",
-        {
-          class: enabled ? "btn small" : "btn small primary",
-          onclick: () =>
-            send(
-              {
-                action: "set_step_gate",
-                session_key: session.key,
-                directive: enabled ? "0" : "1",
-              },
-              enabled
-                ? "已关闭本 Fold 逐 Step 门控"
-                : "已开启本 Fold 逐 Step 门控",
-            ),
-        },
-        enabled ? "关闭门控" : "开启门控",
-      ),
-      override !== undefined && control.mode === "step"
-        ? el(
-            "button",
-            {
-              class: "btn small",
-              onclick: () =>
-                send(
-                  {
-                    action: "set_step_gate",
-                    session_key: session.key,
-                    directive: "",
-                  },
-                  "已恢复模式默认",
-                ),
-            },
-            "恢复模式默认",
-          )
-        : null,
-      enabled
-        ? el(
-            "span",
-            { class: "badge state-waiting_user" },
-            override === undefined ? "门控开启（逐 Step 模式）" : "门控已开启",
-          )
-        : null,
-    ),
-  );
-  if (
-    status.state === "waiting_step_user" &&
-    status.session_key === session.key
-  ) {
-    const stepIndex = status.step_index;
-    const summary = status.step_summary || {};
-    const stats = summary.stats || {};
-    const textarea = el("textarea", {
-      class: "directive section-gap",
-      placeholder:
-        "可选：本 Step 结果的针对性指令（作为待检验假设注入下一轮对话）……",
-    });
-    panel.append(
-      el(
-        "div",
-        { class: "section-gap" },
-        statTilesRow([
-          {
-            label: `Step ${stepIndex ?? "?"} 验证收益`,
-            value: fmtPct(stats.total_return),
-            cls: signCls(stats.total_return),
-          },
-          {
-            label: "Sharpe",
-            value:
-              stats.sharpe === null || stats.sharpe === undefined
-                ? "—"
-                : Number(stats.sharpe).toFixed(2),
-          },
-          { label: "最大回撤", value: fmtPct(stats.max_drawdown) },
-          { label: "本 Fold 已耗时", value: foldDurationNode(detail, session) },
-        ]),
-      ),
-      analysisNode(
-        `/api/experiments/${encodeURIComponent(detail.experiment_id)}/current-step/analysis`,
-        "当前 Step 策略分析（可选，仅基于验证期证据）",
-        { standalone: false },
-      ),
-      textarea,
-      el(
-        "div",
-        { class: "control-bar" },
-        currentStrategyDownloadNode(detail),
-        el(
-          "button",
-          {
-            class: "btn primary",
-            onclick: () =>
-              send(
-                {
-                  action: "approve_step",
-                  session_key: session.key,
-                  step_index: stepIndex,
-                  directive: textarea.value,
-                },
-                "已放行该 Step",
-              ),
-          },
-          "批准并继续",
-        ),
-      ),
-    );
-  }
-  return panel;
 }
 
 /* Icon labels for the operations chips. Event-type keys (llm_call)
@@ -6065,22 +5609,6 @@ function stepTreeRow(
       ),
     );
   }
-  if (node.has_snapshot && detail.kind === "hitl") {
-    actions.append(
-      el(
-        "button",
-        {
-          class: "btn small",
-          onclick: (event) => {
-            event.stopPropagation();
-            hideStepTip();
-            openStepParentOverrideModal(detail, payload, node);
-          },
-        },
-        "回滚…",
-      ),
-    );
-  }
   const row = el(
     "div",
     {
@@ -6244,120 +5772,7 @@ function openStepNodeModal(detail, payload, node) {
   const buttons = [el("button", { class: "btn", onclick: closeModal }, "关闭")];
   if (node.has_snapshot)
     buttons.push(el("a", { class: "btn", href: zipUrl }, "下载源码 + 结果"));
-  if (node.has_snapshot && detail.kind === "hitl") {
-    buttons.push(
-      el(
-        "button",
-        {
-          class: "btn primary",
-          onclick: () => openStepParentOverrideModal(detail, payload, node),
-        },
-        "从此节点回滚…",
-      ),
-    );
-  }
   showModal("Step 节点详情", body, buttons);
-}
-
-/* User-side step rollback: make this node the parent of a fold session
-   (pending fold: takes effect at its next start; completed fold: combine with
-   rerun, which stays restricted to the latest completed fold). */
-function openStepParentOverrideModal(detail, payload, node) {
-  const sessions = payload.fold_sessions || [];
-  if (!sessions.length) {
-    toast("该实验没有 Fold 会话", true);
-    return;
-  }
-  const select = el(
-    "select",
-    { class: "input" },
-    ...sessions.map((session) =>
-      el("option", { value: session.key }, sessionDisplayKey(session)),
-    ),
-  );
-  const own = sessions.find(
-    (session) =>
-      session.epoch_id === node.epoch_id && session.fold_ref === node.fold_ref,
-  );
-  if (own) select.value = own.key;
-  const send = (action, sessionKey, directive) =>
-    api(
-      `/api/experiments/${encodeURIComponent(detail.experiment_id)}/control`,
-      {
-        method: "POST",
-        body: JSON.stringify({ action, session_key: sessionKey, directive }),
-      },
-    );
-  const body = el(
-    "div",
-    {},
-    el(
-      "p",
-      {},
-      `把 ${node.node_id} 设为所选 Fold 会话的父产物起点（替代默认的冻结继承链）。`,
-    ),
-    el(
-      "p",
-      { class: "hint" },
-      "只能选不晚于该节点所属会话的目标（更晚节点携带未来验证信息会被拒绝）。尚未运行的 Fold：下次启动该会话时生效（人工控制模式下批准后）。已完成的 Fold：用「设置并重跑」" +
-        "（仅允许重跑最新完成的 Fold，且需先停止 worker）。设置持续有效：重新设置即覆盖，「清除」即恢复默认继承链。",
-    ),
-    el("label", { class: "hint" }, "目标 Fold 会话"),
-    select,
-  );
-  showModal("从此节点回滚 / 设为起点", body, [
-    el("button", { class: "btn", onclick: closeModal }, "取消"),
-    el(
-      "button",
-      {
-        class: "btn",
-        onclick: async () => {
-          try {
-            await send("set_parent_override", select.value, "");
-            toast(`已清除 ${select.value} 的起点覆盖`);
-            closeModal();
-          } catch (error) {
-            toast(error.message, true);
-          }
-        },
-      },
-      "清除该会话覆盖",
-    ),
-    el(
-      "button",
-      {
-        class: "btn primary",
-        onclick: async () => {
-          try {
-            await send("set_parent_override", select.value, node.node_id);
-            toast(`已把 ${select.value} 的起点设为该节点`);
-            closeModal();
-          } catch (error) {
-            toast(error.message, true);
-          }
-        },
-      },
-      "仅设置起点",
-    ),
-    el(
-      "button",
-      {
-        class: "btn danger",
-        onclick: async () => {
-          try {
-            await send("set_parent_override", select.value, node.node_id);
-            await send("rerun_fold", select.value, null);
-            toast("已设置起点并启动重跑（等待批准）");
-            closeModal();
-            route(true);
-          } catch (error) {
-            toast(error.message, true);
-          }
-        },
-      },
-      "设置并重跑",
-    ),
-  ]);
 }
 
 /* What a Fold left in force decides whose numbers its headline carries.

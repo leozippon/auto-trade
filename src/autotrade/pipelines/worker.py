@@ -68,6 +68,7 @@ from .folds import (
     yyyymmdd,
 )
 from .hitl_state import (
+    CONTROL_MODES,
     DEPLOYMENT_SESSION_KEY,
     SCHEDULE_NAME,
     WEB_CREATE_DEFAULTS,
@@ -551,8 +552,8 @@ def resolve_worker_options(
         else (None, None)
     )
     initial_control_mode = str(params.get("initial_control_mode") or "manual")
-    if initial_control_mode not in {"auto", "manual", "step"}:
-        raise ValueError("initial_control_mode must be auto, manual, or step")
+    if initial_control_mode not in CONTROL_MODES:
+        raise ValueError(f"initial_control_mode must be one of {CONTROL_MODES}")
     snapshot_config = _snapshot_config(params)
     raw_dir = (
         repo_dir(repository, params.get("raw_dir", "data/raw"), "raw_dir")
@@ -1256,18 +1257,10 @@ def run_local_interactive_worker(
             return
         if session.kind != "fold":
             raise RuntimeError(f"unsupported local session kind: {session.kind}")
-        override_node = str(context.get("parent_override") or "")
-        session_parent = (
-            parent_from_step_node(
-                options.experiment_dir, override_node, session.session_key
-            )
-            if override_node
-            else state["parent"]
-        )
         outcome = pipeline.run_fold(
             session.epoch_id,
             session.fold,
-            parent=session_parent,
+            parent=state["parent"],
             prior=str(state["prior"]),
             confirmation=session.confirmation,
             session_context=context,

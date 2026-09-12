@@ -24,7 +24,7 @@ from .folds import FoldSpec
 from .meta_schedule import meta_learning_trigger_counts, meta_session_key
 
 HITL_STATE_SCHEMA_VERSION = 1
-CONTROL_MODES = ("auto", "manual", "step")
+CONTROL_MODES = ("auto", "manual")
 HITL_DIR_NAME = "hitl"
 PARAMS_NAME = "params.json"
 CONTROL_NAME = "control.json"
@@ -33,7 +33,7 @@ SCHEDULE_NAME = "schedule.json"
 ANALYSIS_DIR_NAME = "analysis"
 HELDOUT_SESSION_KEY = "heldout"
 DEPLOYMENT_SESSION_KEY = "deployment_adjustment"
-LIVE_RUN_STATES = {"running_session", "waiting_step_user", "waiting_user_reply"}
+LIVE_RUN_STATES = {"running_session"}
 
 # The persistent WebUI creation contract.  The form and manager both read
 # these defaults, while the worker retains its broader file-based/CLI contract.
@@ -206,30 +206,26 @@ WEB_REQUIRED_PARAMS = frozenset(
 
 @dataclass
 class ControlState:
+    # Legacy compatibility only: no session of this code base gates on it.
+    # One still-running worker executes pre-removal code whose reader defaults
+    # a missing ``mode`` to "manual" and then holds every session at an
+    # approval gate this console can no longer release, so the key has to keep
+    # round-tripping through control.json with its recorded value ("auto").
     mode: str = "manual"
     request: str | None = None
     # One-shot: the console asked for a code swap at the next session
     # boundary. The worker consumes it and re-executes itself in place, so an
     # in-flight Fold is finished instead of replayed.
     restart_pending: bool = False
-    approved_sessions: tuple[str, ...] = ()
     directives: dict[str, str] = field(default_factory=dict)
-    prompt_overrides: dict[str, str] = field(default_factory=dict)
     skip_to_heldout: bool = False
-    step_gate: dict[str, bool] = field(default_factory=dict)
-    step_go: dict[str, int] = field(default_factory=dict)
-    step_directives: dict[str, str] = field(default_factory=dict)
-    user_replies: dict[str, str] = field(default_factory=dict)
     resource_overrides: dict[str, dict[str, object]] = field(default_factory=dict)
-    # Per-fold sandbox GPU allocation set at the approval gate; the sandbox's
-    # "auto" selector still picks which devices by free memory at start.
+    # Per-fold sandbox GPU allocation set before the fold starts; the
+    # sandbox's "auto" selector still picks which devices by free memory.
     gpu_counts: dict[str, int] = field(default_factory=dict)
     # A pending re-run token per fold session: the worker re-runs the session
     # whose latest ledger record has not absorbed this id yet.
     rerun_sessions: dict[str, str] = field(default_factory=dict)
-    # Step-tree node that replaces the inherited frozen chain as one fold
-    # session's parent (user-side step rollback).
-    parent_overrides: dict[str, str] = field(default_factory=dict)
     test_revealed: bool = False
 
     def to_record(self) -> dict[str, object]:
@@ -242,18 +238,11 @@ class ControlState:
             "mode": self.mode,
             "request": self.request,
             "restart_pending": self.restart_pending,
-            "approved_sessions": sorted(set(self.approved_sessions)),
             "directives": dict(self.directives),
-            "prompt_overrides": dict(self.prompt_overrides),
             "skip_to_heldout": self.skip_to_heldout,
-            "step_gate": dict(self.step_gate),
-            "step_go": dict(self.step_go),
-            "step_directives": dict(self.step_directives),
-            "user_replies": dict(self.user_replies),
             "resource_overrides": dict(self.resource_overrides),
             "gpu_counts": dict(self.gpu_counts),
             "rerun_sessions": dict(self.rerun_sessions),
-            "parent_overrides": dict(self.parent_overrides),
             "test_revealed": self.test_revealed,
             "updated_at": _now(),
         }
@@ -268,26 +257,17 @@ def read_control(path: str | Path) -> ControlState:
     if mode not in CONTROL_MODES:
         mode = "manual"
     request = payload.get("request")
-    raw_approved = payload.get("approved_sessions")
-    approved_sessions = raw_approved if isinstance(raw_approved, list) else []
+    # Keys no longer in the contract are ignored, so a file written before a
+    # control was removed still reads.
     return ControlState(
         mode=mode,
         request=str(request) if request in ("pause", "stop") else None,
         restart_pending=bool(payload.get("restart_pending")),
-        approved_sessions=tuple(
-            str(item) for item in approved_sessions if isinstance(item, str)
-        ),
         directives=_string_map(payload.get("directives")),
-        prompt_overrides=_string_map(payload.get("prompt_overrides")),
         skip_to_heldout=bool(payload.get("skip_to_heldout")),
-        step_gate=_bool_map(payload.get("step_gate")),
-        step_go=_int_map(payload.get("step_go"), minimum=1),
-        step_directives=_string_map(payload.get("step_directives")),
-        user_replies=_string_map(payload.get("user_replies")),
         resource_overrides=_object_map(payload.get("resource_overrides")),
-        gpu_counts=_int_map(payload.get("gpu_counts"), minimum=0),
+        gpu_counts=_int_map(payload.get("gpu_counts")),
         rerun_sessions=_string_map(payload.get("rerun_sessions")),
-        parent_overrides=_string_map(payload.get("parent_overrides")),
         test_revealed=bool(payload.get("test_revealed")),
     )
 
@@ -319,16 +299,8 @@ def consume_session_controls(
 
     with control_lock(path):
         state = read_control(path)
-        state.approved_sessions = tuple(
-            item for item in state.approved_sessions if item != session_key
-        )
         for mapping in (
             state.directives,
-            state.prompt_overrides,
-            state.step_gate,
-            state.step_go,
-            state.step_directives,
-            state.user_replies,
             state.resource_overrides,
             state.gpu_counts,
         ):
@@ -337,24 +309,6 @@ def consume_session_controls(
                     mapping.pop(key, None)
         write_control(path, state)
         return state
-
-
-def consume_step_approval(
-    path: str | Path,
-    session_key: str,
-    step_index: int,
-) -> tuple[bool, str]:
-    """Consume the one-shot directive for an approved current Step."""
-
-    directive_key = f"{session_key}#{step_index}"
-    with control_lock(path):
-        state = read_control(path)
-        if state.step_go.get(session_key, 0) < step_index:
-            return False, ""
-        state.step_go.pop(session_key, None)
-        directive = state.step_directives.pop(directive_key, "")
-        write_control(path, state)
-        return True, directive
 
 
 def consume_restart_request(path: str | Path) -> bool:
@@ -367,18 +321,6 @@ def consume_restart_request(path: str | Path) -> bool:
         state.restart_pending = False
         write_control(path, state)
         return True
-
-
-def consume_user_reply(path: str | Path, question_key: str) -> tuple[bool, str]:
-    """Consume one exact Agent-question reply, including an empty reply."""
-
-    with control_lock(path):
-        state = read_control(path)
-        if question_key not in state.user_replies:
-            return False, ""
-        reply = state.user_replies.pop(question_key)
-        write_control(path, state)
-        return True, reply
 
 
 def read_json(path: str | Path) -> dict[str, object]:
@@ -411,8 +353,6 @@ class StatusReporter:
             "session_key": None,
             "run_id": None,
             "session_started_at": None,
-            "researcher_wait_seconds": 0.0,
-            "wait_started_at": None,
             "environment_stage": None,
             "environment_stage_started_at": None,
             "environment_progress": None,
@@ -457,15 +397,6 @@ class StatusReporter:
                 if stage != self._state.get("environment_stage"):
                     # Progress counters belong to one stage instance.
                     values.setdefault("environment_progress", None)
-            if "state" in values:
-                state = values["state"]
-                if state != "waiting_step_user":
-                    self._state.pop("step_index", None)
-                    self._state.pop("step_summary", None)
-                if state != "waiting_user_reply":
-                    self._state.pop("question_key", None)
-                    self._state.pop("question", None)
-                    self._state.pop("question_summary", None)
             self._state.update(values)
             self._write_locked()
 
@@ -761,26 +692,19 @@ def _string_map(value: object) -> dict[str, str]:
     return {str(k): str(v) for k, v in value.items()} if isinstance(value, dict) else {}
 
 
-def _bool_map(value: object) -> dict[str, bool]:
-    return (
-        {str(k): bool(v) for k, v in value.items()} if isinstance(value, dict) else {}
-    )
+def _int_map(value: object) -> dict[str, int]:
+    """Non-negative integer control map (the per-session GPU count).
 
-
-def _int_map(value: object, *, minimum: int) -> dict[str, int]:
-    """Integer control map, keeping only values at or above ``minimum``.
-
-    Step indexes start at 1, so a step_go of 0 says nothing. A GPU count of 0
-    is a real request -- the CPU-only fold the console offers -- and must
-    survive the round trip, or the worker silently runs the session on the
-    experiment default.
+    A GPU count of 0 is a real request -- the CPU-only fold the console offers
+    -- and must survive the round trip, or the worker silently runs the
+    session on the experiment default.
     """
 
     if not isinstance(value, dict):
         return {}
     result: dict[str, int] = {}
     for key, item in value.items():
-        if isinstance(item, int) and not isinstance(item, bool) and item >= minimum:
+        if isinstance(item, int) and not isinstance(item, bool) and item >= 0:
             result[str(key)] = item
     return result
 

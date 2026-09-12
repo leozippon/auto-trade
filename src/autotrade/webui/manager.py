@@ -51,17 +51,14 @@ from autotrade.pipelines.ledger import (
     FrozenArtifactMutated,
     assert_no_frozen_artifact_mutation,
     deployment_adjustment_due,
-    is_durable_success_record,
     is_frozen_artifact_mutation,
     latest_fold_records,
 )
-from autotrade.pipelines.meta_schedule import meta_record_session_key
 from autotrade.pipelines.skills import create_operating_memory_snapshot
 
 from .public_identity import PublicIdentity
 from .registry import (
     experiment_state,
-    heldout_complete,
     read_ledger_records,
     test_results_revealed,
     worker_log_ref,
@@ -98,17 +95,10 @@ _ACTIONS = {
     "pause",
     "resume",
     "stop",
-    "set_mode",
-    "approve",
     "set_directive",
-    "set_prompt_override",
     "set_gpu_count",
-    "set_step_gate",
-    "approve_step",
-    "reply_question",
     "skip_to_heldout",
     "cancel_skip_to_heldout",
-    "set_parent_override",
     "rollback_fold",
     "rerun_fold",
     "reveal_test_results",
@@ -120,19 +110,13 @@ _ACTIONS = {
 # Test/Held-out numbers are on screen. `resume` and `restart` belong here:
 # putting the worker back on a sealed experiment continues development against
 # results the researcher has already seen. Lifecycle-only controls
-# (pause/stop/terminate/set_mode), the per-session GPU allocation and the
-# reveal itself stay available.
+# (pause/stop/terminate), the per-session GPU allocation and the reveal itself
+# stay available.
 _SEALED_BLOCKED_ACTIONS = frozenset(
     {
-        "approve",
         "resume",
         "restart",
         "set_directive",
-        "set_prompt_override",
-        "set_step_gate",
-        "approve_step",
-        "reply_question",
-        "set_parent_override",
         "skip_to_heldout",
         "cancel_skip_to_heldout",
         "rollback_fold",
@@ -331,19 +315,6 @@ def _signal_worker_group(pid: int, sig: signal.Signals) -> None:
         os.killpg(pid, sig)
     except (ProcessLookupError, PermissionError):
         os.kill(pid, sig)
-
-
-def _require_session_reapproval(control: ControlState, session_key: str) -> bool:
-    """Make a session wait at the existing editable approval gate."""
-
-    changed = session_key in control.approved_sessions
-    control.approved_sessions = tuple(
-        key for key in control.approved_sessions if key != session_key
-    )
-    if control.mode == "auto":
-        control.mode = "manual"
-        changed = True
-    return changed
 
 
 def _ledger_frozen_ids(records: list[dict[str, object]]) -> set[str]:
@@ -677,7 +648,7 @@ class ExperimentManager:
             if not self.worker_script.is_file():
                 raise ManagerError("interactive worker entrypoint is unavailable")
             # A stop request left behind by a previous run would immediately
-            # re-stop the resumed worker; clear it (mode and approvals are
+            # re-stop the resumed worker; clear it (the session directives are
             # preserved).
             control_path = directory / "hitl/control.json"
             with control_lock(control_path):
@@ -745,9 +716,7 @@ class ExperimentManager:
         action: str,
         *,
         session_key: str | None = None,
-        step_index: object = None,
         directive: str | None = None,
-        mode: str | None = None,
         text: object = None,
         interrupt: object = False,
         at: str | None = None,
@@ -790,13 +759,7 @@ class ExperimentManager:
             # its own session controls under that lock, and blocking it there
             # would turn a graceful shutdown into a forced kill.
             if action == "terminate":
-                result = self._terminate(experiment_id, directory)
-                revoked = result.get("approval_revoked_session")
-                if isinstance(revoked, str) and revoked:
-                    result["approval_revoked_session"] = (
-                        identity.public_session_key(revoked)
-                    )
-                return result
+                return self._terminate(experiment_id, directory)
             if action == "restart":
                 return self._restart(experiment_id, directory, at=at)
             if action == "inject_message":
@@ -817,9 +780,7 @@ class ExperimentManager:
                     control,
                     action=action,
                     session_key=raw_session_key,
-                    step_index=step_index,
                     directive=directive,
-                    mode=mode,
                 )
                 write_control(path, control)
                 response: dict[str, object] = {
@@ -843,10 +804,10 @@ class ExperimentManager:
     def _deployment_adjustment_exempt(
         self, action: str, raw_session_key: str | None, directory: Path
     ) -> bool:
-        """The one post-seal session (docs/pipeline-design.md §3.4): approving
-        or directing it, and resuming a completed experiment that still owes
-        it, are the only learning controls the seal lets through."""
-        if action in {"approve", "set_directive"}:
+        """The one post-seal session (docs/pipeline-design.md §3.4): directing
+        it, and resuming a completed experiment that still owes it, are the
+        only learning controls the seal lets through."""
+        if action == "set_directive":
             return raw_session_key == DEPLOYMENT_SESSION_KEY
         if action == "resume":
             return self._deployment_adjustment_pending(directory)
@@ -926,9 +887,7 @@ class ExperimentManager:
         *,
         action: str,
         session_key: str | None,
-        step_index: object,
         directive: str | None,
-        mode: str | None,
     ) -> None:
         if action == "pause":
             control.request = "pause"
@@ -938,60 +897,6 @@ class ExperimentManager:
             control.request = "stop"
         elif action == "reveal_test_results":
             control.test_revealed = True
-        elif action == "set_mode":
-            if mode not in {"auto", "manual", "step"}:
-                raise ManagerError("set_mode requires mode auto|manual|step")
-            control.mode = mode
-        elif action == "approve":
-            if not session_key:
-                raise ManagerError("approve requires session_key")
-            self._require_planned_session(directory, session_key)
-            control.approved_sessions = tuple(
-                dict.fromkeys([*control.approved_sessions, session_key])
-            )
-            if directive:
-                control.directives[session_key] = directive
-        elif action == "approve_step":
-            if not session_key:
-                raise ManagerError("approve_step requires session_key")
-            if directive is not None and not isinstance(directive, str):
-                raise ManagerError("approve_step directive must be a string")
-            self._require_planned_session(directory, session_key)
-            status = self._live_worker_status(directory, action="approve_step")
-            if (
-                status.get("state") != "waiting_step_user"
-                or status.get("session_key") != session_key
-                or type(step_index) is not int
-                or status.get("step_index") != step_index
-            ):
-                raise ManagerError("approve_step must match the current waiting Step")
-            current = int(control.step_go.get(session_key, 0))
-            if current >= step_index:
-                raise ManagerError("the current Step was already approved")
-            control.step_go[session_key] = step_index
-            directive_key = f"{session_key}#{step_index}"
-            if directive in {None, ""}:
-                control.step_directives.pop(directive_key, None)
-            else:
-                control.step_directives[directive_key] = str(directive)
-        elif action == "reply_question":
-            if not session_key:
-                raise ManagerError("reply_question requires session_key")
-            if directive is not None and not isinstance(directive, str):
-                raise ManagerError("reply_question directive must be a string")
-            status = self._live_worker_status(directory, action="reply_question")
-            if (
-                status.get("state") != "waiting_user_reply"
-                or status.get("question_key") != session_key
-            ):
-                raise ManagerError("reply_question must match the current question key")
-            self._require_planned_session(
-                directory, str(status.get("session_key") or "")
-            )
-            if session_key in control.user_replies:
-                raise ManagerError("the current question was already answered")
-            reply = str(directive or "")
-            control.user_replies[session_key] = reply
         elif action == "set_gpu_count":
             if not session_key:
                 raise ManagerError("set_gpu_count requires session_key")
@@ -1007,33 +912,14 @@ class ExperimentManager:
                 control.gpu_counts[session_key] = count
             else:
                 control.gpu_counts.pop(session_key, None)
-        elif action in {
-            "set_directive",
-            "set_prompt_override",
-            "set_step_gate",
-        }:
+        elif action == "set_directive":
             if not session_key:
-                raise ManagerError(f"{action} requires session_key")
-            self._require_planned_session(directory, session_key.split("#", 1)[0])
-            if action == "set_directive":
-                target = control.directives
-            elif action == "set_prompt_override":
-                target = control.prompt_overrides
-            elif action == "set_step_gate":
-                if directive in {None, ""}:
-                    control.step_gate.pop(session_key, None)
-                else:
-                    control.step_gate[session_key] = str(directive).lower() not in {
-                        "0",
-                        "false",
-                        "off",
-                    }
-                target = None
-            if target is not None:
-                if directive in {None, ""}:
-                    target.pop(session_key, None)
-                else:
-                    target[session_key] = str(directive)
+                raise ManagerError("set_directive requires session_key")
+            self._require_planned_session(directory, session_key)
+            if directive in {None, ""}:
+                control.directives.pop(session_key, None)
+            else:
+                control.directives[session_key] = str(directive)
         elif action == "skip_to_heldout":
             if not latest_fold_records(
                 ExperimentLedger(directory / "ledgers/experiment_ledger.jsonl").read()
@@ -1043,15 +929,6 @@ class ExperimentManager:
             control.request = None
         elif action == "cancel_skip_to_heldout":
             control.skip_to_heldout = False
-        elif action == "set_parent_override":
-            if not session_key:
-                raise ManagerError("set_parent_override requires session_key")
-            node_id = str(directive or "").strip()
-            if node_id:
-                self._validate_parent_override(directory, session_key, node_id)
-                control.parent_overrides[session_key] = node_id
-            else:
-                control.parent_overrides.pop(session_key, None)
         elif action == "rollback_fold":
             if not session_key:
                 raise ManagerError("rollback_fold requires session_key")
@@ -1071,18 +948,6 @@ class ExperimentManager:
                     "先停止运行中的 worker（停止/强制终止）再重跑该 Fold"
                 )
             control.rerun_sessions[session_key] = uuid.uuid4().hex[:12]
-            # The re-run must be re-approved (prompt edits land first) and its
-            # step gating starts afresh: stale step_go would auto-release the
-            # first N step holds, stale per-step directives would replay.
-            # Dropping the approval alone only gates in manual/step mode —
-            # _gate returns immediately under mode="auto" — so the helper also
-            # falls back to manual, exactly as the terminate path does.
-            _require_session_reapproval(control, session_key)
-            control.step_go.pop(session_key, None)
-            for mapping in (control.step_directives, control.user_replies):
-                for key in list(mapping):
-                    if key.split("#", 1)[0] == session_key:
-                        mapping.pop(key, None)
             control.request = None
         else:
             raise ManagerError(f"unknown control action: {action!r}")
@@ -1190,28 +1055,16 @@ class ExperimentManager:
             if session_key == "heldout"
             else dropped_fold_keys | dropped_meta_keys | {"heldout"}
         )
-        control.approved_sessions = tuple(
-            key for key in control.approved_sessions if key not in dropped_session_keys
-        )
         # Session-scoped inputs of dropped sessions are stale by definition:
-        # directives/prompt overrides describe runs that no longer exist, and
-        # leftover step_go would auto-release the re-run's early step gates.
+        # they describe runs that no longer exist.
         for mapping in (
             control.directives,
-            control.prompt_overrides,
-            control.step_gate,
-            control.step_go,
             control.rerun_sessions,
-            control.parent_overrides,
             control.resource_overrides,
             control.gpu_counts,
         ):
             for key in list(mapping):
                 if key in dropped_session_keys:
-                    mapping.pop(key, None)
-        for mapping in (control.step_directives, control.user_replies):
-            for key in list(mapping):
-                if key.split("#", 1)[0] in dropped_session_keys:
                     mapping.pop(key, None)
 
     def _archive_unreferenced_frozen(
@@ -1401,43 +1254,6 @@ class ExperimentManager:
                 f"后续元学习会话 {later_meta} 已继承该 Fold；请先回滚到目标 Fold 再重跑"
             )
 
-    def _validate_parent_override(
-        self, directory: Path, session_key: str, node_id: str
-    ) -> None:
-        """The override target must be a fold session and the node a restorable snapshot.
-
-        Past-only: a node recorded by a LATER fold session embodies strategies
-        validated on periods after the target session's window; allowing it as
-        the parent would leak future-fitted strategies backwards. The node's own
-        session (rerun-from-node) and earlier sessions are allowed. Which fold
-        may consume it is enforced where it matters: an already-run fold only
-        picks the override up through rerun_fold (itself restricted to the
-        latest fold), an unrun fold at its next start."""
-        from autotrade.environment.step_tree import StepTree
-        from autotrade.pipelines.hitl_state import assert_node_not_from_later_fold
-
-        from .steps import node_export_dir
-
-        fold_keys = [
-            key for key, kind in self._planned_sessions(directory) if kind == "fold"
-        ]
-        if session_key not in fold_keys:
-            raise ManagerError(f"{session_key!r} is not a fold session")
-        try:
-            node_export_dir(directory, node_id)
-        except ValueError as exc:
-            raise ManagerError(str(exc)) from exc
-        node = StepTree(directory / "steps").get_node(node_id)
-        try:
-            assert_node_not_from_later_fold(
-                node,
-                session_key,
-                fold_keys,
-                ref_store=_modern_ref_store(directory),
-            )
-        except ValueError as exc:
-            raise ManagerError(str(exc)) from exc
-
     @staticmethod
     def _planned_sessions(directory: Path) -> list[tuple[str, str]]:
         schedule = read_json(directory / "hitl/schedule.json")
@@ -1467,61 +1283,6 @@ class ExperimentManager:
         if session_key not in {key for key, _kind in self._planned_sessions(directory)}:
             raise ManagerError(f"unknown session: {session_key}")
 
-    def _session_is_settled(
-        self, directory: Path, session_key: str, control: ControlState
-    ) -> bool:
-        """Whether the scheduled session has a durable successful ledger record."""
-        try:
-            kind = dict(self._planned_sessions(directory)).get(session_key)
-        except ManagerError:
-            # An unreadable plan cannot prove the session finished; treat it as
-            # unsettled so the interrupted session returns to its gate.
-            return False
-        if kind is None:
-            return False
-        records = ExperimentLedger(directory / "ledgers/experiment_ledger.jsonl").read()
-        if kind == "meta":
-            return any(
-                record.get("record_type") == "meta_learning"
-                and meta_record_session_key(record) == session_key
-                for record in records
-            )
-        if kind == "fold":
-            epoch_id, _, fold_id = session_key.partition("/")
-            matching = [
-                record
-                for record in records
-                if is_durable_success_record(record, record_types=("fold",))
-                and str(record.get("epoch_id")) == epoch_id
-                and str(record.get("fold_id")) == fold_id
-            ]
-            if not matching:
-                return False
-            rerun_id = control.rerun_sessions.get(session_key)
-            return (
-                rerun_id is None or str(matching[-1].get("rerun_id") or "") == rerun_id
-            )
-        # Single source for "all planned held-out periods are recorded";
-        # registry.heldout_complete also correctly treats an (impossible)
-        # period-less held-out session as not settled.
-        return heldout_complete(directory, records)
-
-    def _revoke_unsettled_session_approval(
-        self, directory: Path, session_key: str
-    ) -> str | None:
-        """Return an interrupted session to its editable approval gate."""
-        if not session_key:
-            return None
-        path = directory / "hitl/control.json"
-        with control_lock(path):
-            control = read_control(path)
-            if self._session_is_settled(directory, session_key, control):
-                return None
-            if not _require_session_reapproval(control, session_key):
-                return None
-            write_control(path, control)
-        return session_key
-
     def _terminate(self, experiment_id: str, directory: Path) -> dict[str, object]:
         """Graceful first, then guaranteed: the worker's SIGTERM handler unwinds
         through finally blocks, but blocking work (LLM retries, derived-image
@@ -1533,7 +1294,6 @@ class ExperimentManager:
         if not status_pid_alive(status):
             raise ManagerError("no live worker to terminate")
         pid = int(status["pid"])
-        session_key = str(status.get("session_key") or "")
         try:
             _signal_worker_group(pid, signal.SIGTERM)
         except ProcessLookupError as exc:  # exited between check and signal
@@ -1555,9 +1315,6 @@ class ExperimentManager:
                 {"state": "terminated", "error": None, "terminated_at": utc_now_iso()}
             )
             write_json_atomic(status_path, status)
-        revoked = self._revoke_unsettled_session_approval(directory, session_key)
-        if revoked is not None:
-            result["approval_revoked_session"] = revoked
         return result
 
     def _restart(

@@ -181,8 +181,8 @@ class Tool(Protocol):
 
 
 # Tools whose calls must run in order even though their spec is not mutating:
-# they finish the session or wait for a human.
-SEQUENTIAL_TOOL_NAMES = frozenset({"ask_user", "finish_fold", "finish_meta"})
+# they finish the session.
+SEQUENTIAL_TOOL_NAMES = frozenset({"finish_fold", "finish_meta"})
 
 
 def is_sequential_tool(spec: ToolSpec | None) -> bool:
@@ -190,8 +190,8 @@ def is_sequential_tool(spec: ToolSpec | None) -> bool:
 
     Every tool call in one assistant turn is dispatched concurrently unless
     the batch contains a sequential tool: a mutating tool (writes, edits,
-    shell, skills, both backtests, rollback), a finish gate, a human wait, or
-    an unregistered name (its rejection keeps the batch order).
+    shell, skills, both backtests, rollback), a finish gate, or an
+    unregistered name (its rejection keeps the batch order).
     Then the whole batch runs in order.
     """
 

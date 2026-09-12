@@ -19,14 +19,11 @@ from autotrade.environment.llm import (
     canonicalize_model_name,
     model_profile,
 )
-from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.runtime import utc_now_iso
-from autotrade.environment.step_tree import StepTree
 from autotrade.pipelines.fold_analysis import (
     ANALYSIS_SCHEMA_VERSION,
     analysis_paths,
     analyze_fold,
-    analyze_step,
 )
 from autotrade.pipelines.hitl_state import (
     ANALYSIS_DIR_NAME,
@@ -62,7 +59,6 @@ class AnalysisService:
         self,
         key: tuple[str, str, str],
         out_dir: Path,
-        analysis_kind: str,
         provider: str,
         model: str,
         call,
@@ -77,8 +73,7 @@ class AnalysisService:
         error shape here so the UI's meta view surfaces the failure. The
         console process itself never crashes: the exception stops here.
 
-        ``key[1:]`` is the sidecar identity for both kinds — (epoch, fold)
-        for folds and ("step", node_id) for steps.
+        ``key[1:]`` is the sidecar identity: (epoch, fold).
         """
         _experiment_id, epoch_id, output_ref = key
         _md_path, meta_path = analysis_paths(Path(out_dir), epoch_id, output_ref)
@@ -100,7 +95,7 @@ class AnalysisService:
                                 "model": model,
                                 "created_at": utc_now_iso(),
                                 "guarded_view": "validation_only",
-                                "analysis_kind": analysis_kind,
+                                "analysis_kind": "fold",
                                 "status": "error",
                                 "error": f"{type(exc).__name__}: {exc}",
                             },
@@ -166,81 +161,7 @@ class AnalysisService:
 
         threading.Thread(
             target=self._run_recorded,
-            args=(key, out_dir, "fold", provider, model, _call),
+            args=(key, out_dir, provider, model, _call),
             name=f"analysis-{experiment_id}-{fold_id}",
-            daemon=True,
-        ).start()
-
-    def regenerate_step(
-        self,
-        *,
-        experiment_dir: Path,
-        experiment_id: str,
-        node_id: str,
-        node_dir: Path,
-        status: dict[str, object],
-    ) -> None:
-        """Generate an optional researcher-only review of the current Step snapshot."""
-        key = (experiment_id, "step", node_id)
-        with self._lock:
-            if key in self._pending:
-                raise ManagerError("analysis for this Step is already being generated")
-            self._pending.add(key)
-        try:
-            ref_store = AgentRefStore(experiment_dir)
-            strategy_dir = Path(node_dir) / "output"
-            if not strategy_dir.is_dir():
-                raise ManagerError("current Step has no strategy snapshot on disk")
-            model_dir = Path(node_dir) / "models"
-            params = read_json(Path(experiment_dir) / HITL_DIR_NAME / PARAMS_NAME)
-            model = canonicalize_model_name(
-                str(params.get("analysis_model") or LOCAL_QWEN_MODEL)
-            )
-            provider = model_profile(model).provider
-            max_tokens = int(params.get("analysis_max_tokens") or 6000)
-            node = StepTree(Path(node_dir).parent).get_node(node_id)
-            step_index = status.get("awaiting_step")
-            step_record: dict[str, object] = {
-                "epoch_id": status.get("epoch_id"),
-                "fold_id": status.get("fold_id"),
-                "step_id": f"step_{int(step_index):03d}"
-                if step_index is not None
-                else None,
-                "validation_result": dict(
-                    node.get("metrics") or status.get("step_summary") or {}
-                ),
-                "selected_step_id": node.get("result_name"),
-            }
-            out_dir = Path(experiment_dir) / HITL_DIR_NAME / ANALYSIS_DIR_NAME
-        except Exception:
-            with self._lock:
-                self._pending.discard(key)
-            raise
-
-        def _call() -> None:
-            from autotrade.environment.llm import build_model_gateway
-
-            proxy = build_model_gateway(
-                model,
-                env_file=str(self.repo_root / ".env"),
-                max_tokens=max_tokens,
-                thinking_enabled=True,
-                reasoning_effort="xhigh",
-            )
-            analyze_step(
-                proxy,
-                step_record=step_record,
-                ref_store=ref_store,
-                strategy_dir=strategy_dir,
-                model_dir=model_dir if model_dir.is_dir() else None,
-                out_dir=out_dir,
-                node_id=node_id,
-                max_tokens=max_tokens,
-            )
-
-        threading.Thread(
-            target=self._run_recorded,
-            args=(key, out_dir, "step", provider, model, _call),
-            name=f"analysis-{experiment_id}-{node_id}",
             daemon=True,
         ).start()

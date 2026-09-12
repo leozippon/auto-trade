@@ -23,7 +23,6 @@ from .base import (
 from .files import EditFileTool, WriteFileTool
 from .finish_fold import FinishFoldTool
 from .finish_meta import FinishMetaTool
-from .hitl import AskUserTool
 from .memory_feedback import (
     MAX_MEMORY_FEEDBACK_NOTE_CHARS,
     MEMORY_FEEDBACK_VERDICTS,
@@ -37,7 +36,6 @@ from .step_rollback import StepRollbackTool
 from .workspace import SafeWorkspace
 
 __all__ = [
-    "AskUserTool",
     "CommandResult",
     "CommandRunner",
     "EditFileTool",

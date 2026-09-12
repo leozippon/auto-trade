@@ -86,21 +86,6 @@ FOLD_ANALYSIS_SYSTEM_PROMPT = f"""\
 - 所有结论必须能从给定材料推出；材料不足时明确说不确定，不要脑补。\
 """
 
-STEP_ANALYSIS_SYSTEM_PROMPT = f"""\
-你是一名资深量化策略审阅人，负责帮助研究者审阅自主 Agent 刚完成一次正式验证回测的当前策略。
-你只掌握当前 Step 的策略代码与验证期证据；测试期/Held-out 结果不可见，也不得猜测。
-
-{_ENV_DATA_INVARIANTS}
-
-输出要求：
-- 用简体中文和精炼 Markdown，依次给出 `策略逻辑`、`代码与接口使用`、`验证表现与风险`、
-  `下一 Step 可检验假设` 四个 `##` 小节。
-- 最后一节给出 2-4 条适合研究者自然语言反馈给 Agent 的具体假设；不要直接宣称应采用哪一条。
-- 重点指出代码逻辑、数据使用、交易频率、未清仓或异常行为，不为策略缺陷要求 Environment 增加硬围栏。
-- 全文控制在 1200 字以内，所有判断必须能从材料推出；证据不足时明确说明不确定。\
-"""
-
-
 def analysis_key(epoch_id: str, output_ref: str) -> str:
     epoch = _identity_component(epoch_id)
     reference = _identity_component(output_ref)
@@ -230,8 +215,6 @@ def analyze_fold(
     out_dir: Path,
     max_tokens: int = DEFAULT_MAX_TOKENS,
     output_identity: tuple[str, str],
-    system_prompt: str = FOLD_ANALYSIS_SYSTEM_PROMPT,
-    analysis_kind: str = "fold",
 ) -> Path:
     """Run the analysis template against one completed fold and persist it.
 
@@ -255,7 +238,7 @@ def analyze_fold(
         ref_store=ref_store,
         model_files=model_files,
     )
-    messages[0] = ChatMessage("system", system_prompt)
+    messages[0] = ChatMessage("system", FOLD_ANALYSIS_SYSTEM_PROMPT)
     meta: dict[str, object] = {
         "schema_version": ANALYSIS_SCHEMA_VERSION,
         "epoch_id": output_epoch_id,
@@ -266,7 +249,7 @@ def analyze_fold(
         "model": getattr(proxy, "model", "unknown"),
         "created_at": utc_now_iso(),
         "guarded_view": "validation_only",
-        "analysis_kind": analysis_kind,
+        "analysis_kind": "fold",
     }
     try:
         response = proxy.complete(
@@ -288,29 +271,3 @@ def analyze_fold(
     meta.update(status="ok", usage=dict(response.usage or {}), analysis_path=md_path.name)
     meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
     return md_path
-
-
-def analyze_step(
-    proxy,
-    *,
-    step_record: Mapping[str, object],
-    ref_store: AgentRefStore,
-    strategy_dir: Path,
-    model_dir: Path | None,
-    out_dir: Path,
-    node_id: str,
-    max_tokens: int = DEFAULT_MAX_TOKENS,
-) -> Path:
-    """Analyze one immutable validation Step snapshot for researcher guidance."""
-    return analyze_fold(
-        proxy,
-        ledger_record=step_record,
-        ref_store=ref_store,
-        strategy_dir=strategy_dir,
-        model_dir=model_dir,
-        out_dir=out_dir,
-        max_tokens=max_tokens,
-        output_identity=("step", node_id),
-        system_prompt=STEP_ANALYSIS_SYSTEM_PROMPT,
-        analysis_kind="step",
-    )
