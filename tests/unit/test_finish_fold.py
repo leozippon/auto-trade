@@ -4,7 +4,11 @@ from pathlib import Path
 
 import pytest
 
-from autotrade.agent.prompts import FOLD_SUBMIT_CONTRACT
+from autotrade.agent.prompts import (
+    CONFIRMATION_FOLD_SECTION,
+    FOLD_SUBMIT_CONTRACT,
+    build_system_prompt,
+)
 from autotrade.environment.artifacts import new_revision_id
 from autotrade.environment.step_tree import StepTree
 from autotrade.environment.tools.base import ToolError, ToolRegistry
@@ -850,108 +854,34 @@ def test_finish_fold_no_edge_refuses_a_node_a_thin_reason_or_an_empty_session(
     assert finished.value["budget_at_finish"]["backtests_remaining"] == 20
 
 
-def test_finish_fold_refuses_new_content_in_a_confirmation_fold(tmp_path: Path):
+def test_a_confirmation_fold_is_guided_by_the_prompt_not_refused_by_the_tool(
+    tmp_path: Path,
+):
     """The confirmation Folds that close the development window.
 
     Both completed arms froze their final artifact in the very last regular
     Fold and entered Held-out with zero own forward transitions, which
-    graduation term (c) reads by artifact id. So in the last
-    ``confirmation_folds`` Folds a nomination that would mint a new id is
-    refused and only the keep-parent stays open. "New content" is the freeze
-    site's own rule, not the different-hypothesis one: a comment-only edit
-    keeps the executable structure but changes the bytes, so it would still
-    mint a new id and must be refused too.
+    graduation term (c) reads by artifact id. The refusal that used to stand
+    here never fired once in 271 traces, because the arithmetic decides the
+    outcome on its own: content frozen now mints a new id whose forward record
+    starts at zero and cannot reach term (c)'s floor before the window ends.
+    So the Fold's dynamic context states that arithmetic and the tool freezes
+    whatever the session nominates.
     """
 
     tree = StepTree(tmp_path / "steps")
     parent = _written(tmp_path / "parent", PARENT)
     kept = _record(tree, tmp_path / "kept", source=PARENT, result_name="valid_000")
-    commented = _record(
-        tree, tmp_path / "commented", source=COMMENT_ONLY, result_name="valid_001"
-    )
     challenger = _record(
-        tree, tmp_path / "challenger", source=LOGIC, result_name="valid_002"
+        tree, tmp_path / "challenger", source=LOGIC, result_name="valid_001"
     )
     finish = FinishFoldTool(
-        tree,
-        fold_id="fold_ref_ab",
-        run_id="run_x",
-        parent_main_py=parent / "main.py",
-        confirmation_fold=True,
-    )
-    for node in (challenger, commented):
-        with pytest.raises(ToolError) as refused:
-            finish.invoke({"node_id": node})
-        assert refused.value.error_type == "confirmation_fold"
-        assert "confirmation Folds" in str(refused.value)
-    # Keeping the parent is the way out, and the Fold records no_update.
-    accepted = finish.invoke({"node_id": kept})
-    assert accepted.finish and accepted.value["node_id"] == kept
-    # The same session in an ordinary Fold freezes the challenger.
-    ordinary = FinishFoldTool(
         tree, fold_id="fold_ref_ab", run_id="run_x", parent_main_py=parent / "main.py"
     )
-    assert ordinary.invoke({"node_id": challenger}).value["pipeline_will_freeze"] is True
-
-
-def test_confirmation_fold_sees_a_retrained_models_tree_as_new_content(tmp_path: Path):
-    """A refit with identical code still mints a new artifact id, so the
-    confirmation Fold has to refuse it on the models tree alone."""
-
-    tree = StepTree(tmp_path / "steps")
-    parent = _written(tmp_path / "parent", PARENT)
-    parent_models = tmp_path / "parent_models"
-    parent_models.mkdir()
-    (parent_models / "weights.json").write_text('{"w": 1}\n', encoding="utf-8")
-    node = _record(tree, tmp_path / "refit", source=PARENT, result_name="valid_000")
-    models = tree.node_models_dir(node)
-    models.mkdir(parents=True, exist_ok=True)
-    (models / "weights.json").write_text('{"w": 2}\n', encoding="utf-8")
-    # A different-hypothesis Validation the session also ran: the keep-parent
-    # rule needs one before the parent may be nominated back, in a confirmation
-    # Fold as anywhere else.
-    _record(tree, tmp_path / "variant", source=LOGIC, result_name="valid_001")
-    finish = FinishFoldTool(
-        tree,
-        fold_id="fold_ref_ab",
-        run_id="run_x",
-        parent_main_py=parent / "main.py",
-        parent_models=parent_models,
-        confirmation_fold=True,
-    )
-    with pytest.raises(ToolError) as refused:
-        finish.invoke({"node_id": node})
-    assert refused.value.error_type == "confirmation_fold"
-    # Without a parent models tree there is nothing to differ from, exactly as
-    # at the freeze site, so the same node is the keep-parent.
-    same = FinishFoldTool(
-        tree,
-        fold_id="fold_ref_ab",
-        run_id="run_x",
-        parent_main_py=parent / "main.py",
-        confirmation_fold=True,
-    )
-    assert same.invoke({"node_id": node}).finish is True
-
-
-def test_a_parentless_confirmation_fold_can_still_abstain(tmp_path: Path):
-    """An anchor frozen in a confirmation Fold could not collect the own
-    forward transitions graduation asks of it, so the abstention is the honest
-    outcome there and nothing stands in its way."""
-
-    tree = StepTree(tmp_path / "steps")
-    passing = _record_round(tree, tmp_path, batch_id="b1", marker="1", metrics=_metrics(0.1))
-    finish = FinishFoldTool(
-        tree,
-        fold_id="fold_ref_ab",
-        run_id="run_x",
-        hard_rule_check=_acceptance_check(),
-        confirmation_fold=True,
-    )
-    abstained = finish.invoke({"outcome": "no_edge", "reason": NO_EDGE_REASON})
-    assert abstained.finish and abstained.value["pipeline_fold_status"] == "baseline_missing"
-    # And the anchor itself cannot be frozen there either: no lineage started
-    # in a confirmation Fold could ever graduate.
-    with pytest.raises(ToolError) as refused:
-        finish.invoke({"node_id": passing})
-    assert refused.value.error_type == "confirmation_fold"
+    assert finish.invoke({"node_id": challenger}).value["pipeline_will_freeze"] is True
+    assert finish.invoke({"node_id": kept}).finish is True
+    # The guidance that replaced the refusal, and only in a confirmation Fold.
+    stated = build_system_prompt(mode="fold", confirmation_fold=True)
+    assert CONFIRMATION_FOLD_SECTION.strip() in stated
+    assert "必然无法毕业" in CONFIRMATION_FOLD_SECTION
+    assert CONFIRMATION_FOLD_SECTION.strip() not in build_system_prompt(mode="fold")

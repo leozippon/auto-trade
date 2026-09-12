@@ -8,7 +8,6 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from autotrade.environment.artifacts import model_artifact_delta, modification_delta
 from autotrade.environment.runtime import redact_host_paths
 from autotrade.environment.step_tree import StepTree, node_in_session
 
@@ -258,11 +257,7 @@ class FinishFoldTool:
         "A freeze without a frozen parent (parent_control_available=false, the "
         "parent is the template) is recorded baseline_anchor=true: the lineage "
         "gets a control the next Fold replays as its parent_control, but an "
-        "anchor is never delivered. In a confirmation Fold (the last "
-        "ones of the development window, named in the prompt) neither applies: "
-        "a nomination that changes the strategy is refused because Held-out "
-        "judges the artifact already in force, and keeping the parent and "
-        "no_edge are the outcomes. Otherwise use no_edge "
+        "anchor is never delivered. Use no_edge "
         "instead of nominating a node you do not want frozen: the Pipeline "
         "freezes every nomination whose metrics are finite. Outside the deadline "
         "window a voluntary finish that leaves more than a third of the backtest "
@@ -337,18 +332,10 @@ class FinishFoldTool:
         hard_rule_check: HardRuleCheck | None = None,
         null_controls: Callable[[], Mapping[str, Mapping[str, object]]] | None = None,
         same_mechanism: bool = False,
-        parent_models: str | Path | None = None,
-        confirmation_fold: bool = False,
     ) -> None:
         self.tree = tree
         self.fold_id = fold_id
         self.run_id = run_id
-        # One of the Folds that close the development window: the artifact in
-        # force is the one Held-out will judge, so new content frozen here
-        # could never collect the forward transitions graduation term (c)
-        # demands of it. Keeping the parent, no_update and no_edge stay open.
-        self.confirmation_fold = confirmation_fold
-        self._parent_models = Path(parent_models) if parent_models is not None else None
         # A deployment adjustment refits the graduated mechanism: the nominated
         # node must be the parent's mechanism (mechanism_structure), and
         # nominating the parent itself is the normal no-adjustment outcome, so
@@ -409,7 +396,6 @@ class FinishFoldTool:
         # The working-copy check comes before the budget gates so a winner
         # nominated without step_rollback costs one refusal, not two.
         self._require_current_matches_revision(node_id)
-        self._require_no_new_content(node_id)
         early_stop = self._require_early_stop_reason(arguments)
         nominated_structure = self._node_structure(node_id)
         if self.same_mechanism:
@@ -750,68 +736,6 @@ class FinishFoldTool:
             ),
             details=status.to_record(),
         )
-
-    def _require_no_new_content(self, node_id: str) -> None:
-        """In a confirmation Fold, refuse a nomination that freezes new content.
-
-        These are the last Folds of the development window, so whatever is in
-        force when they start is what Held-out judges. A nomination whose
-        content differs from the parent mints a new artifact id and restarts
-        that artifact's forward record at zero, which graduation term (c) reads
-        by id: it could not collect its own transitions before the window ends.
-        The comparison is the Pipeline's own -- the two delta functions the
-        freeze site decides "this node IS the parent" with -- so the refusal
-        and the freeze cannot disagree about what counts as new content.
-        """
-
-        if not self.confirmation_fold:
-            return
-        if self._parent_dir is not None and not self._new_content(node_id):
-            return
-        raise ToolError(
-            "finish_fold refused: this is one of the confirmation Folds that "
-            "close the development window, and a nomination that changes the "
-            "strategy cannot be frozen here. Held-out judges the artifact in "
-            "force, and graduation requires it to have replayed forward on its "
-            "own in these last Folds; content frozen now would start that "
-            "record at zero and could never finish it. Nominate the "
-            "parent_control node (or any node byte-identical to the parent) to "
-            'keep the parent, or finish with outcome="no_edge"; either way the '
-            "Fold records no_update and the parent's forward record keeps "
-            "growing. Use the remaining budget to confirm or stress the "
-            "artifact in force, and record what you found in early_stop_reason "
-            "or reason.",
-            error_type="confirmation_fold",
-            retry_hint=(
-                'finish_fold({"node_id": "<parent_control node_id>"}) or '
-                'finish_fold({"outcome": "no_edge", "reason": "<evidence>"})'
-            ),
-        )
-
-    def _new_content(self, node_id: str) -> bool:
-        """Whether freezing ``node_id`` would mint a new artifact id.
-
-        Mirrors ``RollingExperimentPipeline._matches_parent_content``: the
-        output trees are compared file by file and the model trees only when
-        both sides have one, so a missing ``models/`` is not a difference.
-        """
-
-        assert self._parent_dir is not None
-        try:
-            if modification_delta(
-                self._parent_dir, self.tree.node_output_dir(node_id)
-            ).changed_files:
-                return True
-            models = self.tree.node_models_dir(node_id)
-            return bool(
-                self._parent_models is not None
-                and models is not None
-                and model_artifact_delta(self._parent_models, models).changed_files
-            )
-        except OSError as exc:
-            raise ToolError(
-                f"finish_fold cannot compare {node_id}: {redact_host_paths(str(exc))}"
-            ) from exc
 
     def _require_different_hypothesis(self, node_id: str, nominated_structure: str) -> None:
         parent_structure = self._parent_structure

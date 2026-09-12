@@ -248,9 +248,9 @@ class RollingExperimentPipeline:
 
         ``confirmation`` marks one of the Folds that close the development
         window (``AcceptanceRules.confirmation_folds``, decided by the schedule
-        in ``hitl_state.iter_development_sessions``): the session may only keep
-        the artifact in force, so ``finish_fold`` refuses a nomination that
-        would freeze new content there.
+        in ``hitl_state.iter_development_sessions``): its prompt says that
+        content frozen there can no longer collect the forward transitions
+        graduation term (c) asks of it, so the Fold confirms what is in force.
         """
 
         assert_no_frozen_artifact_mutation(self.ledger.read())

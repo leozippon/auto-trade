@@ -3151,8 +3151,6 @@ class LLMFoldDeveloper:
                         else None
                     ),
                     same_mechanism=deployment,
-                    parent_models=source_models,
-                    confirmation_fold=request.confirmation_fold,
                 )
             )
             budgeted = SessionBudgetLLM(self.llm, budget=shared_budget, role="main")
