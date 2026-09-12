@@ -307,7 +307,7 @@ def test_library_imports_and_booster_files_follow_the_rooted_io_rule():
 def test_budgets_come_from_one_source_each():
     limits = SandboxLimits()
     assert (limits.cpus, limits.memory, limits.pids) == (16.0, "32g", 256)
-    assert (limits.timeout_seconds, limits.fit_timeout_seconds) == (180.0, 3600.0)
+    assert (limits.timeout_seconds, limits.fit_timeout_seconds) == (360.0, 3600.0)
     # The pipeline knob defaults to the executor's fit wall clock and the
     # WebUI defaults read the pipeline dataclass.
     assert rolling_default("strategy_fit_timeout_seconds") == limits.fit_timeout_seconds
