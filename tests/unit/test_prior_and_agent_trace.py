@@ -55,7 +55,7 @@ def test_prompts_define_no_edge_pre_registration_and_meta_fold_labels() -> None:
     each standard where the Agent reads it."""
 
     fold = build_system_prompt(mode="fold", experiment_facts={})
-    guardrails = fold[fold.index("# 研究方向与守则") :]
+    guardrails = fold[fold.index("# 研究协议") :]
     # What "no edge" looks like, in the host's own field names.
     for clause in (
         "「没有证明边际」的三项检验",
@@ -69,7 +69,7 @@ def test_prompts_define_no_edge_pre_registration_and_meta_fold_labels() -> None:
     ):
         assert clause in guardrails, clause
     # The abstention route and its ledger outcome sit in the submit contract.
-    contract = fold[fold.index("# 提交合同") : fold.index("# 禁止事项")]
+    contract = fold[fold.index("# 提交合同") : fold.index("# 证据标准")]
     assert "过硬门的提名一律被冻结" in contract
     assert '`finish_fold(outcome="no_edge", reason=<证据>)`' in contract
     assert "有父产物记 `no_update`" in contract and "`baseline_missing`" in contract
@@ -83,10 +83,13 @@ def test_prompts_define_no_edge_pre_registration_and_meta_fold_labels() -> None:
     assert "模板只是交付合同的可运行示例而不是研究基线" in contract
     assert "需要基线就自己跑一次" not in fold
     assert "只读审计不在 Validation 的关键路径上" in fold
-    assert '`["python", "/mnt/tools/screen.py", "--help"]`' in guardrails
+    # The screen script is named through the fact that carries its usage;
+    # the mount path itself belongs to the fact and the shell description.
+    assert "`source_refs.signal_screen_ref`" in guardrails
+    assert "/mnt/tools/screen.py" not in fold
     # The objective is stated once, at the top of the role section, and the
     # procedure is framed as protecting that judgement, not replacing it.
-    role = fold[: fold.index("# 工具")]
+    role = fold[: fold.index("# 研究协议")]
     assert "目标是找到真实、可部署的边际" in role and "不是替代它" in role
     # Mechanism family is defined once; a different estimator on the same
     # features no longer counts as structurally different.
@@ -95,8 +98,8 @@ def test_prompts_define_no_edge_pre_registration_and_meta_fold_labels() -> None:
     assert "另一类模型" not in fold
     # One worked pre-registration example, structurally unlike the template.
     assert "示例（只示形式）" in guardrails and "无预告的匹配组" in guardrails
-    # Enforced preconditions sit where the tool is described.
-    assert "每条不超过 500 字符" in guardrails
+    # Enforced limits sit in the tool schema, not in the prompt.
+    assert "500 字符" not in fold
     assert "弃权同样要求本会话至少有一次完整 Validation" in contract
     assert "本实验自己的 skills 不是目标" in fold
     # Each shared rule has one home: the tie-break, the one-third threshold

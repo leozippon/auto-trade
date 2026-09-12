@@ -451,11 +451,11 @@ def test_deployment_adjustment_preview_is_the_deployment_prompt(tmp_path: Path):
     """The post-Held-out session previews through the same chain: its window
     runs from the configured start to the release's last trading day, the
     facts say the Held-out is visible, and the deployment contract replaces
-    the research guardrails."""
+    the research protocol."""
     from autotrade.agent.prompts import (
         DEPLOYMENT_DEFAULT_INSTRUCTION,
         DEPLOYMENT_SECTION,
-        FOLD_GUARDRAILS_SECTION,
+        FOLD_PROTOCOL_SECTION,
     )
 
     directory, repo = _experiment(tmp_path, deployment_adjustment_start="20190301")
@@ -473,7 +473,7 @@ def test_deployment_adjustment_preview_is_the_deployment_prompt(tmp_path: Path):
     preview = build_prompt_preview(directory, "deployment_adjustment", "", repo_root=repo)
     prompt = str(preview["prompt"])
     assert DEPLOYMENT_SECTION.strip() in prompt
-    assert FOLD_GUARDRAILS_SECTION.strip() not in prompt
+    assert FOLD_PROTOCOL_SECTION.strip() not in prompt
     assert DEPLOYMENT_DEFAULT_INSTRUCTION.strip() in prompt
     facts = _facts(prompt)
     assert facts["identity"]["session_kind"] == "deployment_adjustment"

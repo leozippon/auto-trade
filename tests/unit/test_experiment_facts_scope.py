@@ -83,8 +83,9 @@ def test_deployment_adjustment_facts_say_the_held_out_is_visible() -> None:
         DEPLOYMENT_DEFAULT_INSTRUCTION,
         DEPLOYMENT_SECTION,
         EXPLORATION_PHASE_PROMPT,
-        FOLD_GUARDRAILS_SECTION,
+        FOLD_EVIDENCE_SECTION,
         FOLD_PROHIBITIONS,
+        FOLD_PROTOCOL_SECTION,
         FOLD_STATIC_SECTIONS,
     )
     from autotrade.pipelines.local_backend import fold_forbidden
@@ -115,9 +116,13 @@ def test_deployment_adjustment_facts_say_the_held_out_is_visible() -> None:
         fold_directive="retrain the ranker",
     )
     assert DEPLOYMENT_SECTION.strip() in prompt
-    assert FOLD_GUARDRAILS_SECTION.strip() not in prompt
-    for section in FOLD_STATIC_SECTIONS[:-1]:
-        assert section.strip() in prompt
+    # The open-search protocol and its evidence standards make no sense
+    # for a mechanism-frozen refit; every other Fold section still applies.
+    assert FOLD_PROTOCOL_SECTION.strip() not in prompt
+    assert FOLD_EVIDENCE_SECTION.strip() not in prompt
+    for section in FOLD_STATIC_SECTIONS:
+        if section not in (FOLD_PROTOCOL_SECTION, FOLD_EVIDENCE_SECTION):
+            assert section.strip() in prompt
     assert FOLD_PROHIBITIONS.strip() in prompt
     assert "PRIOR text" in prompt
     assert "retrain the ranker" in prompt

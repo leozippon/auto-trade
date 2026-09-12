@@ -526,16 +526,20 @@ class PromptCompositionTest(unittest.TestCase):
         self.assertEqual(first_prefix, second_prefix)
         self.assertNotEqual(first_context, second_context)
         # And the fixed half really is the contract, in order.
+        # Purpose, protocol, decision contract, evidence, constraints,
+        # facts, feedback -- then the per-run context.
         order = [
             first.index("# 身份与任务"),
-            first.index("# 工具"),
-            first.index("# 工作方式"),
-            first.index("# 角色与写权"),
-            first.index("# 核心执行合同"),
-            first.index("# 环境与边界"),
+            first.index("# 研究协议"),
             first.index("# 提交合同"),
-            first.index("# 禁止事项"),
+            first.index("# 证据标准"),
             first.index("# 原则"),
+            first.index("# 工具与工作方式"),
+            first.index("# 角色与写权"),
+            first.index("# 执行合同与边界"),
+            first.index("# 禁止事项"),
+            first.index("# 预算与事实"),
+            first.index("# 反馈通道"),
             first.index(marker),
         ]
         self.assertEqual(order, sorted(order))
