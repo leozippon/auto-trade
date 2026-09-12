@@ -37,7 +37,7 @@
 ## 本臂设计所依据的规则出处
 
 - **产物继承**：`inherit_from` 在创建时把源实验**最后一条已完成 Fold 记录**的冻结 `output/` 与 `models/` 拷进 `artifacts/strategy/_inherited/` 并锁只读；worker 使用前复核它仍只读且完整，源实验之后被删改都不影响本实验。恢复实验时不再读这颗种子。——`docs/pipeline-design.md` §3.1
-- **自有过渡**：毕业裁决（c）项要求被评产物自己至少有 `heldout_min_final_transitions` 个前向过渡（默认排程下按各折 `parent_control.parent_strategy_artifact_id` 计数），且这些自有过渡单独还要满足 ⌈2/3⌉ 正超额；末折才首次冻结的新机制自有过渡为 0，不毕业。——`docs/pipeline-design.md` §3.3
+- **自有过渡**：毕业裁决（c）项要求被评产物自己至少有 `confirmation_folds` 个前向过渡（默认排程下按各折 `parent_control.parent_strategy_artifact_id` 计数），且这些自有过渡单独还要满足 ⌈2/3⌉ 正超额；末折才首次冻结的新机制自有过渡为 0，不毕业。——`docs/pipeline-design.md` §3.3
 - **成交时点**：`resolve_execution_price` 只解析订单请求时点上的价格，09:30 与 15:00 直接取当日 `open` 与 `close`；其他时刻必须注入静态历史分钟价格源，未注入时一律 `missing_execution_price` 拒单。本轮种子没有分钟视图。——`docs/environment-design.md` §3.3–3.4
 - **Broker 约束**：T+1、整手、双边佣金最低费用、卖出印花税按成交日切换、方向滑点；滑点后成交价触及涨跌停以 `daily_price_limit` 拒单；现金不足、可卖不足、停牌、缺涨跌停均明确拒单；同一次调用的多个订单共享调用前账户快照，但 Broker 按队列顺序逐单更新真实现金。——`docs/environment-design.md` §3.4
 - **`is_suspended` 语义与 v11 修正**：该标志只标 `suspend_d` 的停牌行；全日停牌当天没有日线行，因此有日线的置位只能是盘中临时停牌。复牌行此前被一并标记（审计窗 946 个置位行中 747 行是正常交易的复牌日），已随快照缓存格式 v11 修正，v10 及更早的视图一律拒绝复用。——`docs/data-documentation.md` §1.3 与 §4
