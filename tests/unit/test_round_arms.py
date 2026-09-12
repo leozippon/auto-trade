@@ -270,6 +270,12 @@ def test_no_round_reuses_an_experiment_id() -> None:
     )
 
 
+# Round files authored while the console still ran six experiments at once,
+# before host memory lowered the cap. Their arms were created under that cap
+# and are not re-created, so the rule below is about authoring the next round.
+ROUNDS_AUTHORED_ABOVE_THE_CAP = frozenset({"create_round_20260917"})
+
+
 @pytest.mark.parametrize("round_name", ROUND_IDS)
 def test_the_console_could_hold_a_whole_round(round_name: str) -> None:
     """A round is launched as a batch, and the console refuses a create past
@@ -280,8 +286,12 @@ def test_the_console_could_hold_a_whole_round(round_name: str) -> None:
     including arms that have since finished or been retired -- so the sum
     across files says nothing about what is running. Whether the slots are free
     when a particular round is launched is deployment state and is decided at
-    POST time.
+    POST time. A file authored under an earlier, higher cap is likewise history
+    rather than a plan, and is named above instead of silently weakening the
+    bound for every round.
     """
+    if round_name in ROUNDS_AUTHORED_ABOVE_THE_CAP:
+        pytest.skip(f"{round_name} was authored and created under a higher cap")
     assert len(ROUNDS[round_name].arms) <= MAX_RUNNING_EXPERIMENTS
 
 

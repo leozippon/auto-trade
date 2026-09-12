@@ -68,13 +68,17 @@ from .registry import (
 )
 
 # Parallel-run ceiling for the console: a create or a resume past this is
-# refused. Every model role now runs on the shared local vLLM gateway, so six
-# experiments can peak at six parent conversations plus their sub-agent
-# fan-out (at most 4 concurrent each). Measured aggregate throughput stops
-# rising at roughly 16-20 concurrent streams, so a full round trades
-# per-stream decode speed for parallel coverage; the hard edge is the
-# gateway's own in-flight and queue admission, not this cap.
-MAX_RUNNING_EXPERIMENTS = 6
+# refused. Host memory is what binds, not the model gateway: six arms held
+# ~308 GiB of runner RSS between them, and with their strategy containers
+# (8-32 GiB each) and the resident vLLM on top the 503 GiB host went 245 GiB
+# into swap and stayed there. That is not a slowdown the experiments absorb
+# quietly -- 28 slot-bearing backtest calls across five arms died at the fit
+# or inference cap in one day, so host contention was being billed to the
+# strategies as Validation verdicts. Four parent conversations plus their
+# sub-agent fan-out (at most 4 concurrent each) also sit inside the gateway's
+# measured 16-20 concurrent-stream throughput plateau, so the gateway was
+# never the reason for a higher number.
+MAX_RUNNING_EXPERIMENTS = 4
 # SIGTERM graces before the worker's process group is SIGKILLed. Terminate is
 # an explicit stop, so it stays short; restart has to outwait the in-flight
 # work a worker cannot interrupt (a model call runs minutes) before forcing it.
