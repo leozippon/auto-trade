@@ -112,6 +112,7 @@ from .agent_views import (
     NULL_CONTROL_KEYS,
     allowed_keys,
     fold_development_summary,
+    parent_control_error_text,
     vs_parent_metrics,
 )
 from .config import (
@@ -2812,6 +2813,14 @@ class LLMFoldDeveloper:
                 # ``build_experiment_facts`` states the same thing the session
                 # can find, instead of inferring it from "a parent exists".
                 "parent_control_available": request.parent_control is not None,
+                # And why, when it failed: the prompt sanctions re-replaying
+                # the parent on the session's own budget in exactly this case,
+                # so the reason travels with the absence instead of staying in
+                # the ledger alone. Bounded and host-path free here because
+                # this is the Agent-visible copy.
+                "parent_control_error": parent_control_error_text(
+                    request.parent_control_error
+                ),
                 "parent_strategy_artifact_id": (
                     request.parent.artifact_id if request.parent is not None else None
                 ),

@@ -699,3 +699,62 @@ def test_transitions_that_replayed_a_baseline_anchor_are_not_counted():
     # the exclusion is the label's doing and not the shape of the fixture.
     plain = [{key: value for key, value in record.items() if key != "baseline_anchor"} for record in records]
     assert walk_forward_transitions(plain, epoch_id="epoch_001", test_stage=False)["transitions"] == 3
+
+
+def test_a_failed_control_tells_the_sessions_why_it_failed(tmp_path: Path):
+    """The absence of a baseline is not enough for the decision it drives.
+
+    ``FOLD_SUBMIT_CONTRACT`` names a failed pre-session control as the one case
+    worth re-replaying the parent on the session's own budget, so a session
+    that reads only ``parent_control_available: false`` makes that call blind:
+    the confirm arm replayed its parent three times. The reason therefore
+    reaches both surfaces that publish the control -- a later Fold's run facts
+    and Meta's fold history -- host paths redacted and length bounded, because
+    it travels in a system prompt.
+    """
+
+    from autotrade.pipelines.agent_views import (
+        PARENT_CONTROL_ERROR_MAX_CHARS,
+        fold_development_summary,
+    )
+    from autotrade.pipelines.meta_inputs import build_meta_fold_history
+
+    reason = (
+        "BacktestError: generate_orders failed at 2024-05-06T08:30:00+08:00: "
+        "window shape cannot be larger than input array shape"
+    )
+    record = _fold(
+        "epoch_001",
+        "fold_2025Q1",
+        "p0",
+        control={
+            "status": "failed",
+            "parent_strategy_artifact_id": "strategy_epoch_001_fold_2024Q4",
+            "error": f"{reason} (/Data2/lzp/ADMCubeQuant/experiments/x/result.json)",
+        },
+        frozen="strategy_epoch_001_fold_2025Q1",
+    )
+    store = AgentRefStore(tmp_path / "experiment")
+
+    fold_view = fold_development_summary(record, ref_store=store)["parent_control"]
+    meta_view = build_meta_fold_history([record], ref_store=store)[0]["parent_control"]
+
+    for view in (fold_view, meta_view):
+        assert view["status"] == "failed"
+        assert reason in view["error"]
+        # Host paths never cross the boundary, here as anywhere else.
+        assert "/Data2/" not in view["error"]
+        assert len(view["error"]) <= PARENT_CONTROL_ERROR_MAX_CHARS
+
+    # A long failure is truncated rather than dropped: the class and the first
+    # line are what the session acts on.
+    record["parent_control"]["error"] = "BacktestError: " + "x" * 4000
+    long_view = fold_development_summary(record, ref_store=store)["parent_control"]
+    assert len(long_view["error"]) == PARENT_CONTROL_ERROR_MAX_CHARS
+    assert long_view["error"].startswith("BacktestError: ")
+
+    # A control that succeeded carries no error key at all.
+    ok_record = _fold("epoch_001", "fold_2025Q2", "p1", control=_ok(0.10))
+    assert "error" not in fold_development_summary(ok_record, ref_store=store)[
+        "parent_control"
+    ]

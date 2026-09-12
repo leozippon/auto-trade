@@ -448,6 +448,16 @@ def _artifact_contract_facts(
         "parent_control_available": _parent_control_available(
             manifest, is_initial=is_initial
         ),
+        # And why, when the host's replay is what failed. The submit contract
+        # names a failed pre-session control as the one case worth re-replaying
+        # the parent on the session's own budget, so without the reason that
+        # decision is made blind and paid for in slots; the manifest already
+        # carries the bounded, host-path-free text.
+        **(
+            {"parent_control_error": error}
+            if (error := manifest.get("parent_control_error"))
+            else {}
+        ),
         "model_artifacts_empty": model_artifacts_empty,
     }
     # What freezes this Fold and what graduates the experiment, both derived

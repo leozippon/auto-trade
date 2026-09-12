@@ -315,6 +315,7 @@ class RollingExperimentPipeline:
                         confirmation_fold=confirmation,
                         parent_control=control,
                         parent_control_null=control_null,
+                        parent_control_error=control_error,
                         epoch_index=_epoch_index(epoch_id),
                         phase=(
                             "convergence"
@@ -966,6 +967,7 @@ class RollingExperimentPipeline:
                         fold_period=self.config.fold_period,
                         test_stage=False,
                         parent_control=control,
+                        parent_control_error=control_error,
                         epoch_index=_epoch_index(epoch_id),
                         phase="deployment",
                         session_kind="deployment_adjustment",

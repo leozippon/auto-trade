@@ -888,6 +888,11 @@ class FoldSessionRequest:
     # That control's random-portfolio null, measured by the host beside the
     # replay (None when the backend runs none); forwarded, never recomputed.
     parent_control_null: Mapping[str, object] | None = None
+    # Why the pre-session control produced no result, when it failed. The
+    # prompt sanctions re-replaying the parent on the session's own budget in
+    # exactly this case, so the session has to be told what went wrong rather
+    # than only that nothing is there.
+    parent_control_error: str = ""
     epoch_index: int = 1
     phase: str = "exploration"
     # ``fold`` for a development Fold; ``deployment_adjustment`` for the

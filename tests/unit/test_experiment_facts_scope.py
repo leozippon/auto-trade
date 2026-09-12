@@ -323,13 +323,23 @@ def test_the_facts_say_whether_a_parent_control_baseline_exists() -> None:
     # A parent whose pre-session control replay failed: the artifact is still
     # inherited (kind stays frozen_artifact) but no parent_control node exists,
     # and the submit contract tells the Agent to select that node by id.
+    # Because that contract also makes this the one case worth re-replaying the
+    # parent on the session's own budget, the reason is published with it --
+    # the confirm arm spent three slots re-replaying a parent it could not see
+    # the failure of.
     failed = _facts(
         is_initial_artifact=False,
         parent_control_available=False,
+        parent_control_error="BacktestError: window shape cannot be larger",
         parent_strategy_artifact_id="strategy_epoch_001_fold_2022",
     )["artifact_contract"]["parent"]
     assert failed["kind"] == "frozen_artifact"
     assert failed["parent_control_available"] is False
+    assert failed["parent_control_error"] == (
+        "BacktestError: window shape cannot be larger"
+    )
+    # Nothing failed, nothing to explain.
+    assert "parent_control_error" not in inherited
 
     # Manifests written before the field, and Meta sessions, fall back to
     # "an inherited parent exists".

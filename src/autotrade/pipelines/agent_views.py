@@ -14,6 +14,7 @@ import json
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
+from autotrade.environment.data.summary import HOST_PATH_RE
 from autotrade.environment.identity import AgentRefStore
 
 from .ledger import finite_number
@@ -470,20 +471,49 @@ def fold_development_summary(
 def parent_control_summary(control: object) -> dict[str, object] | None:
     """The ledger's ``parent_control`` block as a later Fold or Meta reads it.
 
-    The inherited parent's fate on the Fold: its status, its result on the
-    Fold's new period alone (``step_result`` — the only forward evidence a
-    trailing window holds) and its null control. Whole-window metrics stay
-    out: on a trailing window they are mostly ground the parent was developed
-    on. None without a parent.
+    The inherited parent's fate on the Fold: its status, why it failed when it
+    did, its result on the Fold's new period alone (``step_result`` — the only
+    forward evidence a trailing window holds) and its null control.
+    Whole-window metrics stay out: on a trailing window they are mostly ground
+    the parent was developed on. None without a parent.
     """
 
     if not isinstance(control, Mapping):
         return None
+    error = parent_control_error_text(control.get("error"))
     return {
         "status": control.get("status"),
+        **({"error": error} if error else {}),
         "step_result": _visible_step_result(control.get("step_result")),
         "null_control": allowed_keys(control.get("null_control"), NULL_CONTROL_KEYS),
     }
+
+
+# One line of a failed control's reason is enough to decide what to do about
+# it, and the ledger keeps the full string either way.
+PARENT_CONTROL_ERROR_MAX_CHARS = 400
+
+
+def parent_control_error_text(value: object) -> str | None:
+    """Why the host's pre-session parent replay produced no result.
+
+    The Fold prompt sanctions re-replaying the parent on the session's own
+    budget in exactly this case, so a session that is told only that the
+    baseline is missing pays for the missing reason in Validation slots — the
+    confirm arm replayed its parent three times. It is host-generated
+    ``BacktestError`` text of the same class the Agent already reads from its
+    own replays; host paths are redacted and the text is bounded, because it
+    travels in every later Fold's and every Meta session's system prompt.
+    """
+
+    if not isinstance(value, str):
+        return None
+    text = HOST_PATH_RE.sub("[host_path]", value).strip()
+    if not text:
+        return None
+    if len(text) > PARENT_CONTROL_ERROR_MAX_CHARS:
+        text = text[: PARENT_CONTROL_ERROR_MAX_CHARS - 1] + "…"
+    return text
 
 
 def _visible_step_result(value: object) -> dict[str, object] | None:
