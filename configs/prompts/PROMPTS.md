@@ -143,7 +143,7 @@ Fold 与 Meta 共用；这是宿主开发原则中真正适用于策略研究的
 
 ```text
 # 预算与事实
-数字不写在提示里：推理时限与暂停规则、回测/Step/空对照次数、策略容器的超时与 CPU/GPU 见运行事实 `budgets`；父本与对照状态、冻结的 hard/warn 规则与毕业条件见 `artifact_contract`；数据摘要、单位引用与筛选脚本见 `source_refs`；窗口、股票池、调用节奏与各数据域的可用性见 `research_scope` 与 `visible_timeline`。
+数字不写在提示里：推理时限与暂停规则、回测/Step/空对照次数、策略容器的超时与 CPU/GPU 见运行事实 `budgets`；父本与对照状态、冻结的 hard/warn 规则与毕业条件见 `artifact_contract`；数据摘要、单位引用与筛选脚本见 `source_refs`；窗口、股票池、调用节奏与各数据域的可用性见 `research_scope` 与 `visible_timeline`；已完成 Fold 的逐折结论（`development_history`）不内联，在 `workspace.fold_context` 指向的只读文件里。
 ```
 
 ### 1.11 反馈通道

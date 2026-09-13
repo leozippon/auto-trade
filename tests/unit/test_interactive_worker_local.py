@@ -1712,15 +1712,33 @@ def test_second_llm_fold_prompt_excludes_prior_test_diagnostic(
         for message in llm.calls[6]["messages"]
         if message.role in {"system", "user"}
     )
-    assert '"development_history"' in second_fold_context
-    assert '"validation_result"' in second_fold_context
+    # The per-Fold verdicts stay on disk: the prompt points at the file once.
+    assert '"development_history"' not in second_fold_context
+    assert '"fold_context": "inputs/fold_context.json"' in second_fold_context
+    last_fold = [
+        record
+        for record in ExperimentLedger(
+            experiment / "ledgers" / "experiment_ledger.jsonl"
+        ).read()
+        if record.get("record_type") == "fold"
+    ][-1]
+    on_disk = json.loads(
+        (
+            Path(last_fold["run_manifest_ref"]).parent
+            / "workspace"
+            / "inputs"
+            / "fold_context.json"
+        ).read_text(encoding="utf-8")
+    )
+    history = json.dumps(on_disk["development_history"], ensure_ascii=False)
+    assert '"validation_result"' in history
     # The second Fold reads the first Fold's verdict, never its per-candidate
-    # trial log: the system prompt is never compacted, so its size must not
-    # grow with how many candidates an earlier Fold ran.
-    assert '"selection_statistics"' in second_fold_context
-    assert '"backtest_summaries"' not in second_fold_context
-    assert "test_diagnostic" not in second_fold_context
-    assert "test_result" not in second_fold_context
+    # trial log: the history must not grow with how many candidates an earlier
+    # Fold ran.
+    assert '"selection_statistics"' in history
+    assert '"backtest_summaries"' not in history
+    assert "test_diagnostic" not in history
+    assert "test_result" not in history
 
 
 def test_the_meta_after_an_anchor_fold_opens_the_anchor_as_its_parent(

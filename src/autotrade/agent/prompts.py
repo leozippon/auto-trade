@@ -125,8 +125,15 @@ FOLD_PROHIBITIONS = """\
 
 FOLD_FACTS_SECTION = """\
 # 预算与事实
-数字不写在提示里：推理时限与暂停规则、回测/Step/空对照次数、策略容器的超时与 CPU/GPU 见运行事实 `budgets`；父本与对照状态、冻结的 hard/warn 规则与毕业条件见 `artifact_contract`；数据摘要、单位引用与筛选脚本见 `source_refs`；窗口、股票池、调用节奏与各数据域的可用性见 `research_scope` 与 `visible_timeline`。\
+数字不写在提示里：推理时限与暂停规则、回测/Step/空对照次数、策略容器的超时与 CPU/GPU 见运行事实 `budgets`；父本与对照状态、冻结的 hard/warn 规则与毕业条件见 `artifact_contract`；数据摘要、单位引用与筛选脚本见 `source_refs`；窗口、股票池、调用节奏与各数据域的可用性见 `research_scope` 与 `visible_timeline`；已完成 Fold 的逐折结论（`development_history`）不内联，在 `workspace.fold_context` 指向的只读文件里。\
 """
+
+# Run-fact blocks a Fold session reads from ``inputs/fold_context.json``
+# instead of the system prompt: the per-Fold verdicts grow with every
+# completed Fold (3.5-15k tokens by the end of a development window) and the
+# PRIOR already cites their figures, so inlining them made a Fold read each
+# number twice. The file keeps the full facts object.
+FOLD_ON_DISK_FACTS = frozenset({"development_history"})
 
 FOLD_FEEDBACK_SECTION = """\
 # 反馈通道
@@ -329,6 +336,12 @@ def build_system_prompt(
         )
     deployment = mode == "deployment_adjustment"
 
+    if experiment_facts:
+        experiment_facts = {
+            key: value
+            for key, value in experiment_facts.items()
+            if key not in FOLD_ON_DISK_FACTS
+        }
     context_parts: list[str] = []
     # First in the dynamic context: it changes what this session may submit at
     # all, so it must be read before the facts, the PRIOR and the directives.
