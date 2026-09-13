@@ -165,48 +165,32 @@ def test_the_curated_library_is_a_valid_skill_tree_of_operational_entries() -> N
         assert entry["title"], entry["name"]
         assert entry["summary"], entry["name"]
         assert entry["bytes"] > 0, entry["name"]
-    # Distilled from run traces so a later session does not rediscover them;
-    # renaming one is a deliberate library change.
-    assert {
-        "pit-read-budget",
-        "output-dir-hygiene",
-        "shell-argv-usage",
-        "redesign-after-second-failure",
-        "workspace-path-rules",
-        "subagent-delegation-pattern",
-        "dead-code-sweep",
-        "verify-parsed-counts",
-        "fold-opening-digest",
-    } <= set(entries)
+    # A small set of abstract entries, each carrying knowledge no tool
+    # description or prompt already states; renaming one is a deliberate
+    # library change.
+    assert set(entries) == {
+        "artifact-hygiene",
+        "grid-plateau-selection",
+        "verify-own-measurements",
+    }
 
 
-def test_a_new_experiment_mounts_the_fold_opening_digest(tmp_path: Path) -> None:
-    """The digest a Fold otherwise re-derives every opening reaches a session
-    that mounts this checkout's curated tier: dropping the directory into the
-    library is the whole registration, and the index is what the Agent reads."""
+def test_a_new_experiment_mounts_the_curated_library(tmp_path: Path) -> None:
+    """Dropping a directory into the library is the whole registration, and
+    the index is what the Agent reads."""
 
     workspace, _ = _workspace(tmp_path, mode="curated", repo_root=REPO_ROOT)
-    entry_path = (
-        workspace / OPERATING_MEMORY_DIRNAME / CURATED_MEMORY_SOURCE
-        / "fold-opening-digest" / "SKILL.md"
-    )
-    body = entry_path.read_text(encoding="utf-8")
-    assert len(body) <= 6_000
     index = json.loads(
         (workspace / "inputs" / "skills_index.json").read_text(encoding="utf-8")
     )
-    digest = {
-        entry["name"]: entry for entry in index["operating_memory"]
-    }["fold-opening-digest"]
-    assert digest["origin"] == "curated"
-    assert digest["path"] == (
-        f"memory/{CURATED_MEMORY_SOURCE}/fold-opening-digest/SKILL.md"
-    )
-    # It carries the facts the opening survey re-derived, and it points at the
-    # per-session unit tables rather than restating numbers that move.
-    for phrase in ("generate_orders", "REFIT_PERIOD", "context.state_dir",
-                   "chmod -R a+w", "unit_reference.json", "vs_parent"):
-        assert phrase in body
+    mounted = {entry["name"]: entry for entry in index["operating_memory"]}
+    assert set(mounted) == set(operating_memory_entries(LIBRARY))
+    hygiene = mounted["artifact-hygiene"]
+    assert hygiene["origin"] == "curated"
+    assert hygiene["path"] == f"memory/{CURATED_MEMORY_SOURCE}/artifact-hygiene/SKILL.md"
+    assert (workspace / hygiene["path"]).read_bytes() == (
+        LIBRARY / "artifact-hygiene" / "SKILL.md"
+    ).read_bytes()
 
 
 def test_the_mode_parameter_defaults_to_both_tiers() -> None:
@@ -291,10 +275,10 @@ def test_both_tiers_mount_read_only_with_their_provenance(tmp_path: Path) -> Non
         "adopted",
         CURATED_MEMORY_SOURCE,
     ]
-    curated_entry = memory / CURATED_MEMORY_SOURCE / "pit-read-budget" / "SKILL.md"
+    curated_entry = memory / CURATED_MEMORY_SOURCE / "artifact-hygiene" / "SKILL.md"
     graduated_entry = memory / "adopted" / GRADUATED_SKILL / "SKILL.md"
     assert curated_entry.read_bytes() == (
-        LIBRARY / "pit-read-budget" / "SKILL.md"
+        LIBRARY / "artifact-hygiene" / "SKILL.md"
     ).read_bytes()
     for path in (curated_entry, graduated_entry):
         assert not stat.S_IMODE(path.stat().st_mode) & 0o222
@@ -393,11 +377,11 @@ def test_the_index_lists_every_source_tagged_by_origin(tmp_path: Path) -> None:
     assert [entry["name"] for entry in index["skills"]] == ["fold-notes"]
     assert [entry["origin"] for entry in index["skills"]] == ["session"]
     memory = {entry["name"]: entry for entry in index["operating_memory"]}
-    assert memory["pit-read-budget"]["origin"] == "curated"
-    assert memory["pit-read-budget"]["source"] == CURATED_MEMORY_SOURCE
+    assert memory["artifact-hygiene"]["origin"] == "curated"
+    assert memory["artifact-hygiene"]["source"] == CURATED_MEMORY_SOURCE
     assert (
-        memory["pit-read-budget"]["path"]
-        == f"memory/{CURATED_MEMORY_SOURCE}/pit-read-budget/SKILL.md"
+        memory["artifact-hygiene"]["path"]
+        == f"memory/{CURATED_MEMORY_SOURCE}/artifact-hygiene/SKILL.md"
     )
     assert memory[GRADUATED_SKILL]["origin"] == "graduated"
     assert memory[GRADUATED_SKILL]["source"] == "adopted"
@@ -425,7 +409,7 @@ def test_a_session_can_neither_rewrite_nor_delete_mounted_memory(
         path: path.read_bytes() for path in memory.rglob("SKILL.md")
     }
     safe = SafeWorkspace(workspace)
-    for name in ("pit-read-budget", GRADUATED_SKILL):
+    for name in ("artifact-hygiene", GRADUATED_SKILL):
         for tool, arguments in (
             (WriteSkillTool(safe), {"name": name, "path": "SKILL.md", "content": "# gone\n"}),
             (
@@ -487,7 +471,7 @@ def test_a_meta_session_mounts_memory_and_records_it_in_the_run_manifest(
         collected
         / OPERATING_MEMORY_DIRNAME
         / CURATED_MEMORY_SOURCE
-        / "pit-read-budget"
+        / "artifact-hygiene"
         / "SKILL.md"
     ).is_file()
     index = json.loads(
