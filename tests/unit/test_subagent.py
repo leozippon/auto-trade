@@ -1201,7 +1201,7 @@ def test_general_prompts_explain_mode_and_role() -> None:
     for clause in (
         "共用的同一棵实时目录树",
         "只在 task 给定的路径下创建、修改与删除",
-        "删除目录要在汇报里写明删了什么",
+        "在汇报里写明删了什么",
     ):
         assert clause in fold
         assert clause not in subagent_system_prompt("fold", "auditor")

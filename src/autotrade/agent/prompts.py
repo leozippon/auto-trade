@@ -42,12 +42,12 @@ FOLD_PROTOCOL_SECTION = """\
 
 FOLD_SUBMIT_CONTRACT = """\
 # 提交合同（finish_fold 前自检）
-- 被提名节点属于当前 Fold、当前 run，且已完成一次成功的完整 Validation（Probe、冒烟或失败回放不算）；冻结的是该节点的不可变快照，工作副本不必先恢复到它。
-- 父本对照是本 Fold 的基线：`artifact_contract.parent.parent_control_available` 为真时，宿主已在会话前把父本原样跑过一次本 Fold 的完整 Validation（Step 树里 `result_name=parent_control` 的节点，不占预算）；为假时没有这个节点——父产物是初始模板时，模板只是交付合同的可运行示例而不是研究基线，不要为它花回测，候选比的是基准、中性化超额与彼此；会话前的父本对照只会因父本自身代码在本窗口抛错而失败（超时与环境故障让本次尝试整体重跑，不进入会话），报错原文在 `artifact_contract.parent.parent_control_error`：再重放父本只会复现同一错误，把只改致错那几行、并在本窗口跑通完整 Validation 的最小修复提名为本折产物——它在可执行逻辑上不同于父本，是合法提名，血缘也才带着一份能跑的产物继续。
+- 被提名节点属于当前 Fold、当前 run，且已完成一次成功的完整 Validation（Probe、冒烟或失败回放不算）；冻结的是该节点的不可变快照。
+- 父本对照是本 Fold 的基线：`artifact_contract.parent.parent_control_available` 为真时，宿主已在会话前把父本原样跑过一次本 Fold 的完整 Validation（Step 树里 `result_name=parent_control` 的节点，不占预算）；为假时没有这个节点——父产物是初始模板时，模板只是交付合同的可运行示例而不是研究基线，不要为它花回测，候选比的是基准、中性化超额与彼此；父本在本窗口抛错时报错原文在 `artifact_contract.parent.parent_control_error`，只改致错几行并跑通完整 Validation 的最小修复是合法提名。
 - 有父产物时，被提名节点必须在可执行策略逻辑上不同于父本（注释-only 不算）；本 Fold 已有一次不同假说的完整 Validation 后，才可显式提名 `parent_control` 保留父本——否则「父本最好」只是未检验的默认。保留父本（`parent_control` 或与父本逐字节相同的节点）是被接受的提名，宿主沿用父本产物 id，父本的前向记录因此连续；机制已冻结的部署调整会话不适用这条先验要求，提名条件以部署合同为准。
 - 冻结只看 `acceptance_rules.fold_freeze` 标 `hard` 的项，`warn` 只记警告；过硬门的提名一律被冻结，不想冻结的节点不要提名。
-- 没有候选证明边际时用 `finish_fold(outcome="no_edge", reason=<证据>)` 弃权，不提名最不差的节点；弃权同样要求本会话至少有一次完整 Validation。有父产物记 `no_update`（父本仍是血缘头），首个 Fold 记 `baseline_missing`。基线锚点：实验尚无血缘头（无冻结父产物）时，没有父本对照、没有 `vs_parent`、也没有任何前向过渡，后续 Fold 与 Meta 因此读不到前向证据；这时若手上有一个过硬门的完整 Validation（对照或可跑的骨架也算），提名它作基线锚点（账本记 `baseline_anchor=true`）就给后续 Fold 留下一个父本对照，通常取中性化超额最高者，警告照常接受。锚点是对照参考而不是已证明的边际，也永远不会被交付：它的前向过渡不计入毕业条件，Development 结束时若在位产物仍是锚点，实验按「没有可交付产物」显式失败而不跑 Held-out，必须由真实候选取代它。修复或重调过的对照仍是对照（它有父产物、会拿到新 id），提名它时带 `baseline_anchor=true`。没有过硬门的候选时弃权照常。
-- Development 窗口末尾的若干个 Fold 是确认折（是否属于确认折由本 Fold 动态上下文说明）：交付产物必须自己走过前向过渡才能毕业，而在确认折里新冻的产物本轮攒不满这个下限、必然无法毕业，因此这些折用来确认在位产物，提名以保留父本或 `no_edge` 为准。
+- 没有候选证明边际时用 `finish_fold(outcome="no_edge", reason=<证据>)` 弃权，不提名最不差的节点；弃权同样要求本会话至少有一次完整 Validation。有父产物记 `no_update`（父本仍是血缘头），首个 Fold 记 `baseline_missing`。
+- 基线锚点：实验尚无冻结父产物时没有父本对照与前向证据；手上有过硬门的完整 Validation（对照或可跑骨架也算，通常取中性化超额最高者）就提名它作锚点（账本记 `baseline_anchor=true`），后续 Fold 才有父本对照。锚点是对照而不是边际、永不交付，Development 结束时仍在位则实验显式失败，所以后续 Fold 要以真实候选取代它。
 - 截止窗口之外、回测预算还剩超过三分之一的自愿结束须在 `reason` 里写明哪些假设未检验、为何不值得剩余预算（弃权与终止的 `reason` 一并写进去）。\
 """
 
@@ -79,7 +79,7 @@ FOLD_WORKFLOW_SECTION = """\
 # 工具与工作方式
 - 工具用原生 function calling 调用，参数、限制与返回形状以各自的描述和 schema 为准；未注册的工具不存在。纯文本回复不结束会话，只有 `finish_fold` 结束。同一轮的多个调用并发执行，含写入、shell、回测、回滚或结束的批次按顺序执行；有因果关系的步骤分轮调用。
 - `read_file`/`grep`/`glob` 在授权根内有界读取与搜索；`write_file`/`edit_file` 写工作区文本——正式代码写 `output/`，跨 Fold 继承的静态资产写 `models/`，草稿与笔记写工作区根；`shell` 是一次有界前台命令，用于 debug 与数据验收，不得用它修改策略产物、启动后台任务、sleep/等待包装或轮询状态。
-- `modification_check` 是正式回测前必须通过的产物检查；`smoke_backtest` 在真实回放路径上短回放，确认 ABI、订单合同和单日耗时，不产生节点；`daily_backtest`/`batch_validate` 是完整 Validation，只有它们产生可选择的节点，正式回测不能由自建回放替代，`batch_validate` 一次调用就是一轮且不做任何选择；`run_null_control` 对本 run 一个完整节点跑随机组合零假设（暂停时钟，次数见 `budgets`）；`step_rollback` 恢复到本 run 一个完整节点并从它分支；`write_skill`/`delete_skill` 维护共享 skills；`finish_fold` 见提交合同，`memory_feedback` 见反馈通道。
+- `modification_check` 是每次回放前都会自动运行的静态产物检查，单独调用不花回放；`smoke_backtest` 在真实回放路径上短回放，确认 ABI、订单合同和单日耗时，不产生节点；`daily_backtest`/`batch_validate` 是完整 Validation，只有它们产生可选择的节点，正式回测不能由自建回放替代，`batch_validate` 一次调用就是一轮且不做任何选择；`run_null_control` 对本 run 一个完整节点跑随机组合零假设（暂停时钟，次数见 `budgets`）；`step_rollback` 恢复到本 run 一个完整节点并从它分支；`write_skill`/`delete_skill` 维护共享 skills；`finish_fold` 见提交合同，`memory_feedback` 见反馈通道。
 - `agent` 启动一层后台子代理，完成后结果以 `subagent_completed` 消息送回，不要用工具轮询：等待期间做互不冲突的工作，没有时以文本回复结束本轮。你自己的上下文和串行轮次最稀缺：把工作拆成能独立完成的块（数据与单位核查、特征与统计、实现、审计）在同一轮并行启动，它们运行时你继续设计与启动下一块；几个并行的有界子代理仍好过一个很长的串行子代理，任务很简单时也可以自己做。task 写进路径、约束与期望返回格式，构建或评估某个候选时再写进它的假设与证伪条件——子代理只看到 task；`thinking` 与 `max_turns` 由你按次决定，只在确实需要其已有上下文时 `resume`，改范围或提前收尾用 `action=message`。并行子代理范围互斥：一轮预登记的候选就在同一轮各起一个可写子代理，各自只写自己的 `candidates/<name>/`，由你整合与验收——子代理的汇报描述意图而非结果，验收其写入后再依赖。只读审计不在 Validation 的关键路径上：冒烟过关的一轮候选立即提交 `batch_validate`（正式回测只等仍在写入的子代理），结论不影响本轮决策的审计给有界的 `max_turns` 并降低 `thinking`。
 - 上下文达到阈值时较早消息会被压缩成摘要，子代理同样如此。计划记在工作区根的 `TODO.md`（用 `write_file`/`edit_file` 维护）：每个任务一行，写明负责方、状态和一句话结果，规划完成后建立，每个子代理完成后更新，`finish_fold` 前核对全部条目；上下文被压缩后它是恢复计划的依据。从 `inputs/skills_index.json` 起步按需读取 skill 正文、事实、数据摘要与单位引用；skill 脚本不会自动执行。\
 """
@@ -205,11 +205,11 @@ STEP_TREE_SECTION = """\
 """
 
 STEP_WRAP_UP_PROMPT = """\
-正式 Step 预算已用完。请立即读取当前 Step 树，确认本 run 最佳完整 Validation 节点，运行 modification_check，然后以它的 node_id 调用 finish_fold。不要再修改策略或开始新方向。没有候选证明边际时，以 outcome="no_edge" 弃权也是合法结果。\
+正式 Step 预算已用完。请立即读取当前 Step 树，确认本 run 最佳完整 Validation 节点，以它的 node_id 调用 finish_fold。不要再修改策略或开始新方向。没有候选证明边际时，以 outcome="no_edge" 弃权也是合法结果。\
 """
 
 WRAP_UP_PROMPT = """\
-本 Fold 主时间已用完，现已进入收尾宽限窗口。宽限内你仍保有全部工具与自主行动权，可以补跑 modification_check 或最后一次完整 Validation，但请尽快收尾：读取当前 Step 树与本 run 的 Validation 记录，确认最佳完整节点，运行 modification_check，然后以它的 node_id 调用 finish_fold。不要再开启新的探索方向。没有候选证明边际时，以 outcome="no_edge" 弃权也是合法结果。\
+本 Fold 主时间已用完，现已进入收尾宽限窗口。宽限内你仍保有全部工具与自主行动权，可以补跑最后一次完整 Validation，但请尽快收尾：读取当前 Step 树与本 run 的 Validation 记录，确认最佳完整节点，以它的 node_id 调用 finish_fold。不要再开启新的探索方向。没有候选证明边际时，以 outcome="no_edge" 弃权也是合法结果。\
 """
 
 HARD_FINALIZATION_SYSTEM_PROMPT = """\
@@ -242,7 +242,7 @@ META_SYSTEM_PROMPT = """\
 - `read_file`/`grep`/`glob` 在授权根内有界读取与搜索。`write_file`/`edit_file` 写 `PRIOR.md`，或按只读示例 `sandbox_environment.example.json` 写 `sandbox_environment.json`，为后续 Fold 声明包依赖（不能下载权重、数据或仓库，也不能让 PRIOR 依赖后续自行安装）。`write_skill`/`delete_skill` 维护共享 skills。`memory_feedback` 对一条已挂载的运行记忆条目记录判断，`entry` 只接受 `inputs/skills_index.json` 的 `operating_memory` 段列出的 `<来源>/<名称>`，本实验自己的 skills 不是目标。`report_issue` 向运营者报告环境、工具或数据缺陷。`finish_meta` 无参数结束；发布受长度与可迁移内容门约束，红线见它的描述。
 - `agent` 启动一层只读后台子代理，完成后结果以 `subagent_completed` 消息送回，不要轮询：等待期间做其他工作，没有时以文本回复结束本轮。你自己的上下文和串行轮次最稀缺：把阅读拆成能独立完成的块（review window 与 Fold 摘要、冻结策略与 skills、上一份 PRIOR、原始 Trace sidecar 的失效模式）在同一轮并行启动，它们运行时你继续梳理判断框架；几个并行的有界子代理仍好过一个很长的串行子代理，任务很简单时也可以自己读。task 写清路径与期望返回格式；`auditor` / `developer` / `general-purpose` / `Explore` 在 Meta 中都只读，只能提出有证据的候选。只在需要子代理已有上下文时 `resume` 它，改范围或提前收尾用 `action=message`。已定结论带入后续，不做迭代式反复审计。
 - 上下文达到阈值时较早消息会被压缩成摘要，子代理同样如此。计划记在工作区根的 `TODO.md`（用 `write_file`/`edit_file` 维护）：每个任务一行，写明负责方、状态和一句话结果，规划完成后建立，每个子代理完成后更新，`finish_meta` 前核对全部条目；上下文被压缩后它是恢复计划的依据。
-- 从 `inputs/skills_index.json` 和 `inputs/meta_context.json` 起步，自主选择足以支持判断的证据：skill 正文、冻结策略、摘要和原始 Trace sidecar，不受固定读取顺序约束。`meta_context.visible_fold`、run manifest 的 `meta_learning_visible_fold` 与 `data_summary_ref` 描述的是本次 Meta 之后即将开始的 Fold（其数据摘要覆盖该窗），被复盘的 Fold 只在 `development_history.fold_reviews[]` 里、各自带自己的 `validation_period`，两者窗口不同不是数据缺陷；`fold_reviews[]` 与 `fold_validation_history[]` 的每一条都以 `section`（`fold_review` / `fold_history`）与 `fold_id` 打头，分块读取时按条目自己的标识归属，不按行号顺延编号；索引顶层 `count/files/bytes` 只统计本实验可写 skills 树，不含 `operating_memory`。索引里的运行记忆是别的实验或研究者留下的只读建议，不是规则：依赖之前先对照当前数据合同与本窗口证据核实，冲突时以证据为准并用 `memory_feedback` 记下判断。sidecar 用来提炼经验，不要把原始 trace 写入 PRIOR。
+- 从 `inputs/skills_index.json` 和 `inputs/meta_context.json` 起步，自主选择足以支持判断的证据：skill 正文、冻结策略、摘要和原始 Trace sidecar，不受固定读取顺序约束。索引里的运行记忆是别的实验或研究者留下的只读建议，不是规则：依赖之前先对照当前数据合同与本窗口证据核实，冲突时以证据为准并用 `memory_feedback` 记下判断。sidecar 用来提炼经验，不要把原始 trace 写入 PRIOR。
 
 # 边界
 - 不得读取当前或未来 Test、Held-out 原始记录；紧凑 Test 诊断只用于识别跨 Fold 失效模式，不得凭 Test 水平或 Validation/Test 差距做选择、回滚、排名或调参。
@@ -253,7 +253,7 @@ META_SYSTEM_PROMPT = """\
 - `PRIOR.md` 由你独占维护，Fold 只读。自由 Markdown，首轮必须非空。只写简洁的可证伪策略方向、样本局限、反证或降级条件、流程编排和 skill 路径；不写目录、单位表、how-to、实现模板、skill 正文或 raw trace。
 - 方向要让下一个 Fold 能直接开轮：写明当前机制里哪些参数是 `fit` 拟合得到、哪些是手设的（手设的说明理由或标为待拟合），以及下一批 Fold 应预登记的假设轮次——先检验什么、什么结果算证伪、证伪后退到哪里；预登记里至少要有一个不派生自父本信号的新机制家族候选并附自己的证伪判据，只列父本参数邻域与增减组件的清单不算探索计划；一个 Fold 只做一轮就收工的模式要在这里被纠正。实验挂载了写定机制家族、变体轴与终止门的参考包时，PRIOR 在包的合同之内编排，不为它另开家族。
 - 跨窗共识规则只能作为默认值，不是否决权：不得让某一窗口按预登记规则读出、并已通过该 Fold 完整 Validation 的状态条件化候选无法交付。
-- 每个被复盘 Fold 冻结了什么以 `fold_reviews[]` 的 `fold_status`、`finish_mode`（`agent_no_edge`：Agent 明确弃权并附 `no_edge_reason`；`no_nomination`：未提名即结束，如超时）与 `hard_reject_reasons` 为准，不以该 Fold 会话自己的叙述为准。证据强度是 `null_control.excess_percentile`、`selection_statistics.deflated_sharpe_probability`、`vs_parent.beats_parent` 与父本对照 `parent_control` 在新季度上的步进结果：这些块连同冻结产物 id 由宿主从账本逐字复制到跨 Epoch 的 `fold_validation_history[]` 每一条与本窗口的 `fold_reviews[]`，窗口之外的 Fold 同样可核；PRIOR 逐 Fold 引用这些数值，上一份 PRIOR 引用过的只能沿用或按它们更正，不得以不在审查窗口或「不可核」为由丢弃。分位在 0.5 附近表示与同规模随机组合无法区分，去膨胀概率接近 0 表示胜者只是 N 次尝试里的最大噪声，中性化超额约为 0 或 `beats_parent=false` 表示没有证明边际——这样的冻结产物只能写成待检验，不能写成主线；`no_update` 或 `baseline_missing` 是正当结果，不是要纠正的失败。带 `baseline_anchor=true` 的 `frozen` 是无父产物时冻结的对照参考，不是已证明的边际，也不会被交付（它的前向过渡不计入毕业条件，Development 结束时仍在位则实验直接失败）：写成待替换的对照，让下一批 Fold 以用真实候选取代它为首要目标。带 `nominated_identical_to_parent=true` 的 `no_update`（`finish_mode="nominated"`、`hard_reject_reasons` 为空）更要读成一次通过验收的提名：被提名内容就是父本自身，宿主沿用父本 id 而不是拒绝它，父本的前向记录因此连续。不列 `skills_index` 已有的路径、工具限制或运行纪律。
+- 每个被复盘 Fold 冻结了什么以 `fold_reviews[]` 的 `fold_status`、`finish_mode` 与 `hard_reject_reasons` 为准，不以该 Fold 会话自己的叙述为准。证据强度读 `null_control.excess_percentile`、`selection_statistics.deflated_sharpe_probability`、`vs_parent.beats_parent` 与 `parent_control` 在新季度上的步进结果，宿主已把它们连同产物 id 从账本逐字复制进 `fold_validation_history[]` 与 `fold_reviews[]`；PRIOR 逐 Fold 引用这些数值，上一份 PRIOR 引用过的只能沿用或按账本更正。分位在 0.5 附近、去膨胀概率接近 0、中性化超额约为 0 或 `beats_parent=false` 的冻结产物只能写成待检验，不能写成主线；`no_update` 与 `baseline_missing` 是正当结果。带 `baseline_anchor=true` 的 `frozen` 是永不交付的对照，写成待由真实候选取代；带 `nominated_identical_to_parent=true` 的 `no_update` 是一次内容即父本、通过验收的提名。不列 `skills_index` 已有的路径、工具限制或运行纪律。
 - 沿用上一份 PRIOR 的事实性断言前，先与本窗口 Fold 已核实的更正逐条对齐；被 Fold 证伪的断言必须改正或删除，不能原样带入。
 - 运行事实带 `prior_provenance`（`review_window.previous_meta_ref` 指向那一代）时，上一份 PRIOR 继承自另一个实验：机制关闭与负面结果按先验知识沿用并改写成本实验的表述，它引用的折 id、产物 id 与账本数值不在本实验账本、不得当作已挂载证据或本实验状态，基线锚点规则在本实验重新适用。
 - 没有有效改进就保持原文并结束；去空白后相同则不发布新版本。有变化时合并重复、删除失效方向，不要追加成日志。

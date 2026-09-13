@@ -113,27 +113,26 @@ def test_prompts_define_no_edge_pre_registration_and_meta_fold_labels() -> None:
     meta = build_system_prompt(mode="meta")
     assert "目标是真实、可部署的边际" in meta
     assert "子区间一致性" not in meta
-    assert "描述的是本次 Meta 之后即将开始的 Fold" in meta
-    assert "`development_history.fold_reviews[]`" in meta
-    assert "两者窗口不同不是数据缺陷" in meta
+    # The upcoming-vs-reviewed window note lives beside the field it explains
+    # (meta_context.json's visible_fold_note), not in the prompt.
+    assert "两者窗口不同不是数据缺陷" not in meta
     prior_rules = meta[meta.index("# PRIOR") : meta.index("# 守则")]
     # Every history entry carries the host statistics: earlier Folds are
     # verifiable and their figures are carried forward or corrected, never
     # dropped as outside the review window.
     assert "`fold_validation_history[]`" in prior_rules
-    assert "不得以不在审查窗口或「不可核」为由丢弃" in prior_rules
+    assert "只能沿用或按账本更正" in prior_rules
     for clause in (
         # What each reviewed Fold froze is read from the ledger, never from the
         # Fold session's own narrative (a Meta once asserted "nothing frozen"
         # while the ledger said frozen).
         "`fold_reviews[]` 的 `fold_status`、`finish_mode`",
-        "`agent_no_edge`",
         "`hard_reject_reasons`",
         "`null_control.excess_percentile`",
         "`selection_statistics.deflated_sharpe_probability`",
         "PRIOR 逐 Fold 引用这些数值",
         "只能写成待检验，不能写成主线",
-        "`no_update` 或 `baseline_missing` 是正当结果",
+        "`no_update` 与 `baseline_missing` 是正当结果",
     ):
         assert clause in prior_rules, clause
     assert "`fold_status` 与 `finish_mode`" in build_meta_learning_prompt()
