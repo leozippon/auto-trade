@@ -5,20 +5,16 @@ from __future__ import annotations
 import math
 import os
 import re
-from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import NamedTuple, NoReturn
+from typing import NamedTuple
 
 import pandas as pd
 
 from autotrade.agent.compact import ContextCompactionConfig
 from autotrade.environment.artifacts import (
     FilesystemArtifactStore,
-    # Single source of the frozen-artifact immutability rule: enforce the
-    # read-only tree directly whenever a frozen artifact is consumed.
-    _assert_readonly_tree,
 )
 from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.data.research_release import pin_research_release
@@ -51,57 +47,44 @@ from autotrade.environment.sandbox_images import prepare_experiment_sandbox_imag
 from autotrade.environment.strategy import StrategySchedule
 from autotrade.environment.tools.base import CommandRunner
 
-from .calendar import load_sse_trading_days, yyyymmdd
+from .calendar import (
+    GEOMETRY_PARAMETERS,
+    ResearchGeometry,
+    load_sse_trading_days,
+    yyyymmdd,
+)
 from .config import (
     DEFAULT_PIT_VIEWS_SEED,
     AcceptanceRules,
-    FrozenArtifact,
     RollingExperimentConfig,
     rolling_default,
 )
 from .experiment import RollingExperimentPipeline
-from .folds import (
-    FoldSpec,
-    build_fold_schedule,
-    deployment_fold,
-    heldout_periods,
-)
 from .hitl_state import (
     CONTROL_MODES,
-    DEPLOYMENT_SESSION_KEY,
     SCHEDULE_NAME,
-    WEB_CREATE_DEFAULTS,
     WEB_INTERNAL_PARAMS,
-    DevelopmentSession,
-    StatusReporter,
+    PlannedSession,
     build_session_plan,
-    epoch_ids,
-    iter_development_sessions,
-    read_control,
+    planned_sessions,
     read_json,
     read_status,
 )
-from .inherited_memory import load_inherited_memory
 from .interactive import InteractiveExperimentRunner
 from .ledger import (
+    FOLD_ERA_RECORD_TYPES,
     ExperimentLedger,
     FrozenArtifactMutated,
     RunMarkers,
     assert_no_frozen_artifact_mutation,
-    baseline_anchor_artifacts,
-    deployment_adjustment_due,
     experiment_verdict,
-    is_durable_success_record,
-    latest_fold_records,
-    latest_heldout_records,
+    frozen_record,
     paper_candidate,
-    rerun_absorbed,
-    terminated_record,
+    research_records,
 )
 from .local_backend import (
     DeterministicBaselineDeveloper,
     LLMFoldDeveloper,
-    LLMMetaLearner,
     LocalDailyEvaluationBackend,
     LocalDailySnapshotProvider,
 )
@@ -111,11 +94,13 @@ from .pit_backend import (
     required_release_raw_datasets,
 )
 from .pit_views_seed import assert_seed_snapshot_config
-from .prior import latest_prior_text, restore_current_from_records
+from .prior import restore_current_from_records
 from .skills import latest_skills_snapshot, resolve_operating_memory
 
 _ALLOWED_PARAMS = {
     "experiment_id",
+    *GEOMETRY_PARAMETERS,
+    "research_sessions",
     "strategy_path",
     "baseline_strategy_path",
     "daily_path",
@@ -130,9 +115,6 @@ _ALLOWED_PARAMS = {
     "inference_time",
     "initial_cash",
     "initial_control_mode",
-    "analysis_enabled",
-    "analysis_model",
-    "analysis_max_tokens",
     "daily_window_months",
     "fundamentals_window_months",
     "events_window_months",
@@ -161,16 +143,7 @@ _ALLOWED_PARAMS = {
     "nl_deadline_seconds",
     "max_intraday_row_group_rows",
     "developer_mode",
-    "fold_period",
-    "development_first_period",
-    "development_last_period",
-    "test_stage",
-    "heldout_first_period",
-    "heldout_last_period",
-    "epochs",
     "window_months",
-    "validation_periods",
-    "min_region_trade_days",
     "max_steps_per_fold",
     "max_backtests_per_fold",
     "max_null_controls_per_fold",
@@ -181,22 +154,11 @@ _ALLOWED_PARAMS = {
     "min_sharpe",
     "max_drawdown",
     "cost_stress_multiplier",
-    "heldout_min_trades",
-    "confirmation_folds",
-    "deployment_adjustment_start",
-    "deployment_max_backtests",
-    "deployment_pit_views_seed",
-    "meta_learning_fold_interval",
-    "meta_memory_max_epochs",
-    "inherit_from",
-    "inherit_memory_from",
-    "meta_learning_directive",
     "fold_exploration_directive",
     "workspace_reference",
     "operating_memory",
     "disable_step_tree",
     "record_failed_attempts",
-    "convergence_start_epoch",
     "nl_failure_policy",
     "finalize_before_deadline_seconds",
     "per_call_timeout_seconds",
@@ -206,9 +168,6 @@ _ALLOWED_PARAMS = {
     "max_total_holdings",
     "max_single_name_weight",
     "gpu_count",
-    "disable_meta_sandbox_rebuild",
-    "meta_sandbox_rebuild_timeout_seconds",
-    "meta_sandbox_image_keep",
     "experiments_root",
     "work_root",
     "llm_env_file",
@@ -219,7 +178,6 @@ _ALLOWED_PARAMS = {
     "llm_temperature",
     "llm_max_response_tokens",
     "model",
-    "meta_model",
     "subagent_model",
     "nl_model",
     "compact_model",
@@ -264,9 +222,8 @@ NON_PERSISTABLE_PARAMS = frozenset({"llm_api_key_env", "llm_base_url"})
 class LLMWorkerSettings:
     env_file: Path
     model: str
-    meta_model: str
-    # The ``agent`` sub-agents of both Fold and Meta sessions; they keep the
-    # parent's call quota, budget wrapper and time budget on this gateway.
+    # The ``agent`` sub-agents of research sessions; they keep the parent's
+    # call quota, budget wrapper and time budget on this gateway.
     subagent_model: str
     nl_model: str
     compact_model: str
@@ -278,23 +235,17 @@ class LLMWorkerSettings:
     thinking_enabled: bool
     reasoning_effort: str
     compact_enabled: bool
-    # The Fold parent conversation's compaction budget; ``compaction_for``
+    # The session parent conversation's compaction budget; ``compaction_for``
     # derives the other conversation roles' from the same knobs.
     compaction: ContextCompactionConfig
     # The console's ``compact_token_threshold``; None = derived per role.
     compact_token_threshold: int | None = None
 
     def model_for(self, role: str) -> str:
-        """The model of a role this dataclass owns.
-
-        ``analysis`` is deliberately absent: its model lives on
-        ``InteractiveWorkerOptions``, and both call sites pass it explicitly.
-        A default here could only be another role's model.
-        """
+        """The model of one gateway role."""
 
         models = {
             "main": self.model,
-            "meta": self.meta_model,
             "subagent": self.subagent_model,
             "nl": self.nl_model,
             "compact": self.compact_model,
@@ -351,8 +302,6 @@ class LLMWorkerSettings:
 
         if role == "compact" or not self.thinking_enabled:
             return None
-        if role == "analysis":
-            return "high"
         if role == "nl":
             # NL extracts evidence from already-retrieved PIT text and answers
             # short or enum-bounded questions; it is also the only LLM
@@ -362,7 +311,7 @@ class LLMWorkerSettings:
         return self.reasoning_effort
 
     def compaction_for(self, role: str) -> ContextCompactionConfig:
-        """One conversation role's compaction budget (main, meta or subagent).
+        """One conversation role's compaction budget (main or subagent).
 
         Its threshold is ``window − that role's output budget −
         COMPACTION_SAFETY_MARGIN_TOKENS`` for the role's own model, so prompt
@@ -373,7 +322,7 @@ class LLMWorkerSettings:
         window with no room for the output budget at all is a launch error.
         """
 
-        if role not in {"main", "meta", "subagent"}:
+        if role not in {"main", "subagent"}:
             raise ValueError(f"unknown conversation role: {role}")
         bounds = [self.compact_token_threshold] if self.compact_token_threshold else []
         for bound_role in (role, "compact") if self.compact_enabled else (role,):
@@ -419,16 +368,9 @@ class InteractiveWorkerOptions:
     # An explicitly chosen seed must apply or the run fails; the default one is
     # an optimisation, so a missing or non-matching default cold-builds.
     pit_views_seed_required: bool = False
-    # The tree the deployment adjustment takes its two views from when the
-    # experiment's own views cannot be extended (docs/pipeline-design.md §3.4);
-    # None falls back to an explicitly named pit_views_seed, else a cold build.
-    deployment_pit_views_seed: Path | None = None
     snapshot_config: SnapshotConfig = field(default_factory=SnapshotConfig)
     nl_config: NLConfig = field(default_factory=NLConfig)
     max_intraday_row_group_rows: int = 2_000_000
-    analysis_enabled: bool = False
-    analysis_model: str = LOCAL_QWEN_MODEL
-    analysis_max_tokens: int = 6_000
     llm: LLMWorkerSettings | None = None
     agent_sandbox: SandboxSpec | None = None
 
@@ -464,8 +406,8 @@ def resolve_worker_options(
     input paths are checked for repository containment but not for existence,
     and the two steps that consume the durable data inputs are skipped — the
     immutable research-release pin (which materialises state inside the
-    experiment directory) and the trading-calendar-dependent fold schedule.
-    Every parameter check runs either way.
+    experiment directory) and the check that the release reaches into
+    Held-out. Every parameter check runs either way.
     """
     params = {
         key: value for key, value in params.items() if key not in NON_PERSISTABLE_PARAMS
@@ -599,13 +541,6 @@ def resolve_worker_options(
         if data_backend == "pit"
         else (None, False)
     )
-    deployment_seed = (
-        _deployment_pit_views_seed(
-            params.get("deployment_pit_views_seed"), repository, snapshot_config
-        )
-        if data_backend == "pit"
-        else None
-    )
     trading_days: list[str] = []
     if preflight:
         pass  # the release pin writes into the experiment dir; see the docstring
@@ -629,18 +564,17 @@ def resolve_worker_options(
         trading_days = load_sse_trading_days(release.raw_dir)
     if not trading_days and not preflight:
         raise ValueError("daily Parquet has no trading days")
-    fold_period = str(params.get("fold_period") or rolling_default("fold_period"))
-    supplied_periods = [
-        params.get("development_first_period"),
-        params.get("development_last_period"),
-        params.get("heldout_first_period"),
-        params.get("heldout_last_period"),
-    ]
-    if not all(value not in (None, "") for value in supplied_periods):
-        raise ValueError("all four Development/Held-out period fields are required")
-    first_development, last_development, first_heldout, last_heldout = (
-        str(value) for value in supplied_periods
+    default_geometry = rolling_default("geometry")
+    geometry = ResearchGeometry(
+        **{
+            name: params.get(name, getattr(default_geometry, name))
+            for name in GEOMETRY_PARAMETERS
+        }
     )
+    if not preflight:
+        # The release must reach into Held-out; the forward replay clips the
+        # Held-out slot to its last trading day.
+        geometry.heldout(trading_days)
     schedule = StrategySchedule(
         str(params.get("strategy_period") or "day"),  # type: ignore[arg-type]
         str(params.get("inference_time") or "08:30"),
@@ -651,20 +585,11 @@ def resolve_worker_options(
     rolling = RollingExperimentConfig(
         experiment_id=experiment_id,
         experiments_root=directory.parent,
-        development_first_period=first_development,
-        development_last_period=last_development,
-        heldout_first_period=first_heldout,
-        heldout_last_period=last_heldout,
-        fold_period=fold_period,
-        test_stage=_strict_bool(knob("test_stage"), "test_stage"),
-        epochs=_positive_int(knob("epochs"), "epochs"),
+        geometry=geometry,
+        research_sessions=_positive_int(
+            knob("research_sessions"), "research_sessions"
+        ),
         window_months=_positive_int(knob("window_months"), "window_months"),
-        validation_periods=_positive_int(
-            knob("validation_periods"), "validation_periods"
-        ),
-        min_region_trade_days=_positive_int(
-            knob("min_region_trade_days"), "min_region_trade_days"
-        ),
         max_steps_per_fold=_positive_int(
             knob("max_steps_per_fold"), "max_steps_per_fold"
         ),
@@ -679,13 +604,6 @@ def resolve_worker_options(
             knob("session_max_attempts"), "session_max_attempts"
         ),
         max_fold_minutes=_positive_int(knob("max_fold_minutes"), "max_fold_minutes"),
-        meta_learning_fold_interval=_nonnegative_int(
-            knob("meta_learning_fold_interval"), "meta_learning_fold_interval"
-        ),
-        meta_memory_max_epochs=_nonnegative_int(
-            knob("meta_memory_max_epochs"), "meta_memory_max_epochs"
-        ),
-        meta_learning_directive=str(params.get("meta_learning_directive") or ""),
         fold_exploration_directive=str(
             params.get("fold_exploration_directive") or ""
         ),
@@ -699,15 +617,6 @@ def resolve_worker_options(
         record_failed_attempts=_strict_bool(
             knob("record_failed_attempts"), "record_failed_attempts"
         ),
-        convergence_start_epoch=_positive_int(
-            knob("convergence_start_epoch"), "convergence_start_epoch"
-        ),
-        deployment_adjustment_start=_deployment_start(
-            knob("deployment_adjustment_start")
-        ),
-        deployment_max_backtests=_positive_int(
-            knob("deployment_max_backtests"), "deployment_max_backtests"
-        ),
         nl_failure_policy=_nl_failure_policy(knob("nl_failure_policy")),
         finalize_before_deadline_seconds=_nonnegative_int(
             knob("finalize_before_deadline_seconds"),
@@ -719,32 +628,24 @@ def resolve_worker_options(
         strategy_fit_timeout_seconds=_positive_int(
             knob("strategy_fit_timeout_seconds"), "strategy_fit_timeout_seconds"
         ),
-        meta_sandbox_rebuild_enabled=not _strict_bool(
-            params.get("disable_meta_sandbox_rebuild", False),
-            "disable_meta_sandbox_rebuild",
-        ),
-        meta_sandbox_rebuild_timeout_seconds=_nonnegative_int(
-            knob("meta_sandbox_rebuild_timeout_seconds"),
-            "meta_sandbox_rebuild_timeout_seconds",
-        ),
-        meta_sandbox_image_keep=_nonnegative_int(
-            knob("meta_sandbox_image_keep"), "meta_sandbox_image_keep"
-        ),
         acceptance=AcceptanceRules(
-            min_return=_finite_float(params.get("min_return", 0.0), "min_return"),
-            min_sharpe=_finite_float(params.get("min_sharpe", 0.0), "min_sharpe"),
+            min_return=_finite_float(
+                params.get("min_return", AcceptanceRules().min_return), "min_return"
+            ),
+            min_sharpe=_finite_float(
+                params.get("min_sharpe", AcceptanceRules().min_sharpe), "min_sharpe"
+            ),
             max_drawdown=_bounded_float(
-                params.get("max_drawdown", 0.25), "max_drawdown", 0.0, 1.0
+                params.get("max_drawdown", AcceptanceRules().max_drawdown),
+                "max_drawdown",
+                0.0,
+                1.0,
             ),
             cost_stress_multiplier=_finite_float(
-                params.get("cost_stress_multiplier", 1.0), "cost_stress_multiplier"
-            ),
-            heldout_min_trades=_nonnegative_int(
-                params.get("heldout_min_trades", 0), "heldout_min_trades"
-            ),
-            confirmation_folds=_nonnegative_int(
-                params.get("confirmation_folds", AcceptanceRules().confirmation_folds),
-                "confirmation_folds",
+                params.get(
+                    "cost_stress_multiplier", AcceptanceRules().cost_stress_multiplier
+                ),
+                "cost_stress_multiplier",
             ),
         ),
         schedule=schedule,
@@ -764,35 +665,6 @@ def resolve_worker_options(
             ),
         ),
     )
-    # Validate the derived/supplied schedule before the worker advertises it.
-    if not preflight:
-        build_fold_schedule(
-            rolling.development_first_period,
-            rolling.development_last_period,
-            trading_days,
-            window_months=rolling.window_months,
-            period=rolling.fold_period,
-            min_region_trade_days=rolling.min_region_trade_days,
-            test_stage=rolling.test_stage,
-            validation_periods=rolling.validation_periods,
-        )
-    analysis_enabled = _strict_bool(
-        params.get("analysis_enabled", WEB_CREATE_DEFAULTS["analysis_enabled"]),
-        "analysis_enabled",
-    )
-    analysis_model = canonicalize_model_name(
-        str(params.get("analysis_model") or LOCAL_QWEN_MODEL)
-    )
-    analysis_max_tokens = _positive_int(
-        params.get("analysis_max_tokens", 6_000), "analysis_max_tokens"
-    )
-    if analysis_enabled and llm_settings is not None:
-        llm_settings.build_gateway(
-            "analysis",
-            model=analysis_model,
-            max_tokens=analysis_max_tokens,
-            require_credentials=not preflight,
-        )
     return InteractiveWorkerOptions(
         experiment_id=experiment_id,
         experiment_dir=directory,
@@ -811,7 +683,6 @@ def resolve_worker_options(
         pit_cache_root=pit_cache_root,
         pit_views_seed=pit_views_seed,
         pit_views_seed_required=pit_views_seed_required,
-        deployment_pit_views_seed=deployment_seed,
         snapshot_config=snapshot_config,
         # NLConfig owns the NL budget defaults; an absent parameter keeps the
         # shipped default rather than a second copy of it living here.
@@ -835,9 +706,6 @@ def resolve_worker_options(
                 "nl_deadline_seconds",
             ),
         ),
-        analysis_enabled=analysis_enabled,
-        analysis_model=analysis_model,
-        analysis_max_tokens=analysis_max_tokens,
         max_intraday_row_group_rows=_positive_int(
             params.get("max_intraday_row_group_rows", 2_000_000),
             "max_intraday_row_group_rows",
@@ -878,28 +746,11 @@ def _strategy_sandbox_from_spec(
     )
 
 
-def _activate_experiment_sandbox(
-    spec: SandboxSpec,
-    *,
-    developer: LLMFoldDeveloper,
-    evaluator: PITDailyEvaluationBackend | LocalDailyEvaluationBackend,
-) -> None:
-    """Publish one active image to both Agent and formal evaluation paths."""
-
-    developer.set_sandbox_spec(spec)
-    evaluator.sandbox = replace(
-        evaluator.sandbox,
-        image=spec.image,
-        docker_executable=spec.docker_executable,
-    )
-
-
 class ExperimentPipelineBuild(NamedTuple):
     """One assembled experiment, as either driver of it needs to see it."""
 
     pipeline: RollingExperimentPipeline
     trading_days: list[str]
-    meta_enabled: bool
     developer_label: str
 
 
@@ -912,7 +763,7 @@ def build_experiment_pipeline(
     llm: LLMProxy | None = None,
     command_runner_factory: Callable[[Path], CommandRunner] | None = None,
 ) -> ExperimentPipelineBuild:
-    """Assemble one experiment's providers, backends, Agents and pipeline.
+    """Assemble one experiment's providers, backends, Agent and pipeline.
 
     The single assembly for both drivers: the console's session loop
     (``run_local_interactive_worker``) and the single-session audit entrypoint
@@ -920,44 +771,25 @@ def build_experiment_pipeline(
     assembly is a session configured differently from the one the console runs
     while reported as the same, so everything that shapes a session lives here
     -- the gateway roles and their retry policy, the snapshot provider and
-    evaluator selection, the strategy sandbox wall clocks, and both Agent
-    adapters.
+    evaluator selection, the strategy sandbox wall clocks, and the Agent
+    adapter.
 
-    ``command_runner_factory`` replaces the Fold sandbox with a trusted
-    in-process runner (the non-Docker test path) and, being sandboxless, also
-    keeps the Meta session from shelling out to ``docker build``. The one step
-    that is not shared is the worker's per-experiment derived image: it is
-    applied to ``options`` before this call, because the audit entrypoint takes
-    an explicit ``--sandbox-image`` instead.
+    ``command_runner_factory`` replaces the session sandbox with a trusted
+    in-process runner (the non-Docker test path). The one step that is not
+    shared is the worker's per-experiment image: it is applied to ``options``
+    before this call, because the audit entrypoint takes an explicit
+    ``--sandbox-image`` instead.
     """
 
-    fold_gateway = llm or (
-        options.llm.build_gateway("main")
-        if options.developer_mode == "llm" and options.llm
-        else None
-    )
-    meta_gateway = llm or (
-        options.llm.build_gateway("meta")
-        if options.developer_mode == "llm" and options.llm
-        else None
-    )
-    subagent_gateway = llm or (
-        options.llm.build_gateway("subagent")
-        if options.developer_mode == "llm" and options.llm
-        else None
-    )
-    nl_gateway = llm or (
-        options.llm.build_gateway("nl")
-        if options.developer_mode == "llm" and options.llm
-        else None
-    )
+    agent = options.developer_mode == "llm" and options.llm is not None
+    main_gateway = llm or (options.llm.build_gateway("main") if agent else None)
+    subagent_gateway = llm or (options.llm.build_gateway("subagent") if agent else None)
+    nl_gateway = llm or (options.llm.build_gateway("nl") if agent else None)
     # A failed compaction falls through to the emergency fit path by design;
     # provider retries would only add their full latency to that failure.
     compact_gateway = llm or (
         options.llm.build_gateway("compact", max_retries=0)
-        if options.developer_mode == "llm"
-        and options.llm
-        and options.llm.compact_enabled
+        if agent and options.llm.compact_enabled
         else None
     )
     strategy_sandbox = _strategy_sandbox_from_spec(
@@ -1007,13 +839,10 @@ def build_experiment_pipeline(
             raise ValueError(
                 "developer_mode=llm is missing validated LLM or sandbox settings"
             )
-        if fold_gateway is None or meta_gateway is None:
-            raise ValueError(
-                "developer_mode=llm requires initialized Fold and Meta LLM gateways"
-            )
-        runtime_root = options.work_root / options.experiment_id
+        if main_gateway is None:
+            raise ValueError("developer_mode=llm requires an initialized LLM gateway")
         developer = LLMFoldDeveloper(
-            llm=fold_gateway,
+            llm=main_gateway,
             subagent_llm=subagent_gateway,
             compact_llm=compact_gateway,
             context_compaction=options.llm.compaction,
@@ -1025,7 +854,7 @@ def build_experiment_pipeline(
             broker_profile=options.rolling.broker_profile,
             ledger=ledger,
             experiment_dir=options.experiment_dir,
-            runtime_root=runtime_root,
+            runtime_root=options.work_root / options.experiment_id,
             sandbox_spec=options.agent_sandbox,
             command_runner_factory=command_runner_factory,
             # One ceiling for the parent conversation and its children.
@@ -1036,43 +865,7 @@ def build_experiment_pipeline(
             operating_memory=options.rolling.operating_memory,
             repo_root=options.repo_root,
         )
-        meta_learner = LLMMetaLearner(
-            llm=meta_gateway,
-            subagent_llm=subagent_gateway,
-            compact_llm=compact_gateway,
-            context_compaction=options.llm.compaction_for("meta"),
-            subagent_compaction=options.llm.compaction_for("subagent"),
-            baseline_strategy=options.baseline_strategy,
-            artifact_store=store,
-            experiment_dir=options.experiment_dir,
-            runtime_root=runtime_root,
-            max_llm_calls=options.rolling.max_llm_calls,
-            deadline_seconds=options.rolling.max_fold_minutes * 60,
-            decision_timeout_seconds=strategy_sandbox.limits.timeout_seconds,
-            fit_timeout_seconds=strategy_sandbox.limits.fit_timeout_seconds,
-            strategy_gpu_count=strategy_sandbox.limits.gpu_count,
-            max_response_tokens=options.llm.max_tokens_for("meta"),
-            meta_learning_directive=options.rolling.meta_learning_directive,
-            fold_exploration_directive=options.rolling.fold_exploration_directive,
-            workspace_reference=options.rolling.workspace_reference,
-            operating_memory=options.rolling.operating_memory,
-            repo_root=options.repo_root,
-            sandbox_spec=options.agent_sandbox,
-            # A sandboxless smoke run must not shell out to docker build.
-            use_docker=command_runner_factory is None,
-            rebuild_enabled=options.rolling.meta_sandbox_rebuild_enabled,
-            rebuild_timeout_seconds=options.rolling.meta_sandbox_rebuild_timeout_seconds,
-            image_keep=options.rolling.meta_sandbox_image_keep,
-            # A derived image becomes the single image for both later Fold
-            # Agent sessions and every formal evaluation mode.
-            sandbox_spec_sink=lambda spec: _activate_experiment_sandbox(
-                spec,
-                developer=developer,
-                evaluator=evaluator,
-            ),
-        )
-        meta_enabled = True
-        developer_label = "llm_fold_meta_agent"
+        developer_label = "llm_research_agent"
     else:
         developer = DeterministicBaselineDeveloper(
             baseline_strategy=options.baseline_strategy,
@@ -1082,27 +875,19 @@ def build_experiment_pipeline(
             broker_profile=options.rolling.broker_profile,
             ref_store=ref_store,
         )
-        meta_learner = None
-        meta_enabled = False
         developer_label = "deterministic_baseline_no_agent_improvement"
-    # Memory seeded at creation from another experiment: its skills are the
-    # head until the first session row, and its provenance is what a Meta
-    # reading the inherited PRIOR needs, for either driver of this assembly.
-    inherited_memory = load_inherited_memory(options.experiment_dir)
     pipeline = RollingExperimentPipeline(
         options.rolling,
         snapshots=snapshots,
         artifacts=store,
         evaluator=evaluator,
         developer=developer,
-        meta_learner=meta_learner,
+        trading_days=trading_days,
         ledger=ledger,
-        inherited_memory=inherited_memory,
     )
     return ExperimentPipelineBuild(
         pipeline=pipeline,
         trading_days=trading_days,
-        meta_enabled=meta_enabled,
         developer_label=developer_label,
     )
 
@@ -1114,12 +899,25 @@ def run_local_interactive_worker(
     command_runner_factory: Callable[[Path], CommandRunner] | None = None,
     poll_seconds: float = 2.0,
 ) -> dict[str, object]:
+    """Run the arm from wherever its ledger ends: research sessions, then the
+    forward replay once an artifact froze, then the terminal status."""
+
     ref_store = AgentRefStore(options.experiment_dir)
     hitl = options.experiment_dir / "hitl"
     ledger = ExperimentLedger(options.rolling.ledger_path)
     store = FilesystemArtifactStore(options.experiment_dir / "artifacts" / "strategy")
+    records = ledger.read()
+    fold_era = sorted(
+        {str(record.get("record_type")) for record in records}
+        & set(FOLD_ERA_RECORD_TYPES)
+    )
+    if fold_era:
+        raise ValueError(
+            f"{options.experiment_id} holds a Fold-era ledger ({', '.join(fold_era)} "
+            "records); this pipeline does not resume it"
+        )
     try:
-        assert_no_frozen_artifact_mutation(ledger.read())
+        assert_no_frozen_artifact_mutation(records)
     except FrozenArtifactMutated as exc:
         write_json_atomic(
             hitl / "status.json",
@@ -1136,52 +934,13 @@ def run_local_interactive_worker(
     # of this experiment is in flight, so the markers those runs left behind
     # become their ledger evidence here, before any new session begins.
     RunMarkers(options.experiment_dir).recover(ledger)
-    completed = read_status(hitl / "status.json")
-    if str(completed.get("state")) == "completed" and not _has_outstanding_work(
-        hitl, ledger, options.rolling
-    ):
-        # A finished experiment is terminal: every session and the held-out
-        # evaluation are already durable in the ledger, so a resume must
-        # republish the completion status instead of re-running anything.
-        records = ledger.read()
-        payload = _terminal_status(
-            completed,
-            verdict=experiment_verdict(records),
-            paper_candidate=paper_candidate(records),
-        )
+    if experiment_verdict(ledger.read()) is not None:
+        # A finished arm is terminal: its verdict is durable, so a resume
+        # republishes the completion status instead of re-running anything,
+        # before any snapshot, sandbox or gateway preparation.
+        payload = _terminal_status(ledger, read_status(hitl / "status.json"))
         write_json_atomic(hitl / "status.json", payload)
         return payload
-    if (
-        str(completed.get("state")) == "completed"
-        and ledger.read("heldout")
-        and not _pending_rerun(hitl, ledger)
-    ):
-        # Only the post-seal deployment adjustment is outstanding (a crashed
-        # attempt, or a request made after completion): nothing before the
-        # Held-out may run again, so the worker goes straight to it.
-        return _run_deployment_adjustment(
-            options,
-            ledger=ledger,
-            store=store,
-            ref_store=ref_store,
-            llm=llm,
-            command_runner_factory=command_runner_factory,
-            poll_seconds=poll_seconds,
-            heldout_runs=0,
-        )
-    # Development that already walked its whole plan without freezing anything
-    # is terminal: a resume could only re-walk the finished plan and end at the
-    # same failure, so republish it here instead -- before any snapshot,
-    # sandbox or gateway preparation, and without re-running a single session.
-    if _development_is_exhausted(hitl, ledger) and not _pending_rerun(hitl, ledger):
-        # Nothing to deliver means no frozen artifact at all, or only the
-        # baseline anchor the first Fold was forced to freeze -- a control, not
-        # a candidate (docs/pipeline-design.md §2.2).
-        in_force = _latest_artifact(
-            ledger, store, options.experiment_dir
-        ) or _load_inherited_parent(options.experiment_dir)
-        if in_force is None or _is_baseline_anchor(ledger, in_force):
-            _fail_without_frozen_artifact(hitl, ledger, artifact=in_force)
     if (
         command_runner_factory is None
         and (options.execution_mode == "sandbox" or options.developer_mode == "llm")
@@ -1194,7 +953,7 @@ def run_local_interactive_worker(
                 experiment_dir=options.experiment_dir,
             ),
         )
-    pipeline, trading_days, meta_enabled, developer_label = build_experiment_pipeline(
+    pipeline, trading_days, developer_label = build_experiment_pipeline(
         options,
         ledger=ledger,
         store=store,
@@ -1202,68 +961,18 @@ def run_local_interactive_worker(
         llm=llm,
         command_runner_factory=command_runner_factory,
     )
-    folds = build_fold_schedule(
-        options.rolling.development_first_period,
-        options.rolling.development_last_period,
-        trading_days,
-        window_months=options.rolling.window_months,
-        period=options.rolling.fold_period,
-        min_region_trade_days=options.rolling.min_region_trade_days,
-        test_stage=options.rolling.test_stage,
-        validation_periods=options.rolling.validation_periods,
-    )
-    sessions, plan = _write_session_plan(
-        options, hitl, folds, trading_days, meta_enabled=meta_enabled
-    )
-    # Inherited seeds (another experiment's frozen output, another's PRIOR and
-    # skills) stand in for the blank template and the empty memory only until
-    # this experiment's own ledger rows exist; a resumed experiment takes its
-    # parent, PRIOR and skills from its own ledger instead.
-    memory = load_inherited_memory(options.experiment_dir)
-    _restore_prior_store(
-        options.experiment_dir,
-        ledger,
-        fallback_generation_id=memory.prior_generation_id if memory else "",
-    )
-    # Skills have no mutable CURRENT pointer: validating the final remaining
-    # successful Fold/Meta row is the complete resume/rollback restore step.
-    latest_skills_snapshot(
-        ledger.read(),
-        experiment_dir=options.experiment_dir,
-        inherited=memory.skills if memory else None,
-    )
-    state = {
-        "parent": _latest_artifact(ledger, store, options.experiment_dir)
-        or _load_inherited_parent(options.experiment_dir),
-        "prior": latest_prior_text(ledger.read("meta_learning"))
-        or (memory.prior_text if memory else ""),
-    }
+    sessions = _write_session_plan(options, hitl, trading_days)
+    # PRIOR has one mutable pointer; skills have none, and validating the last
+    # session's generation is their whole restore step.
+    records = ledger.read()
+    restore_current_from_records(options.experiment_dir, records)
+    latest_skills_snapshot(records, experiment_dir=options.experiment_dir)
 
-    def execute(session, context):
-        if session.fold is None:
-            raise RuntimeError(f"unsupported local session kind: {session.kind}")
-        if session.kind == "meta":
-            state["prior"] = pipeline.run_meta_session(
-                session.epoch_id,
-                session.fold_index,
-                session.fold,
-                parent=state["parent"],
-                previous_prior=str(state["prior"]),
-                session_context=context,
-            )
-            return
-        if session.kind != "fold":
-            raise RuntimeError(f"unsupported local session kind: {session.kind}")
-        outcome = pipeline.run_fold(
-            session.epoch_id,
-            session.fold,
-            parent=state["parent"],
-            prior=str(state["prior"]),
-            confirmation=session.confirmation,
-            session_context=context,
-        )
-        state["parent"] = outcome.frozen
-        return  # run_fold already appended the canonical ledger record
+    def execute(session: PlannedSession, context: dict[str, object]) -> None:
+        if session.kind == "research":
+            pipeline.run_research_session(session.index, session_context=context)
+        else:
+            pipeline.run_forward(session_context=context)
 
     interactive = InteractiveExperimentRunner(
         experiment_id=options.experiment_id,
@@ -1274,689 +983,71 @@ def run_local_interactive_worker(
         status_path=hitl / "status.json",
         ref_store=ref_store,
         poll_seconds=poll_seconds,
-        post_fold_hook=_build_post_fold_hook(options, hitl / "analysis"),
         session_max_attempts=options.rolling.session_max_attempts,
     )
     result = interactive.run()
     if result["status"] != "complete":
         return result
-    completed_development = len(
-        {
-            str(row.get("session_key") or row.get("run_id"))
-            for row in ledger.read()
-            if row.get("record_type") in {"fold", "meta_learning"}
-        }
-    )
-    if terminated_record(ledger.read()) is not None:
-        # The arm ended itself: the experiment is complete without a Held-out
-        # and without a deliverable, whatever is in force (§3.3).
-        records = ledger.read()
-        payload = _terminal_status(
-            {
-                "completed_at": utc_now_iso(),
-                "completed_sessions": completed_development,
-                "total_sessions": len(plan["sessions"]),
-            },
-            developer_mode=developer_label,
-            verdict=experiment_verdict(records),
-            paper_candidate=paper_candidate(records),
-        )
-        write_json_atomic(hitl / "status.json", payload)
-        return payload
-    final = state["parent"] or _latest_artifact(ledger, store, options.experiment_dir)
-    # A baseline anchor is the lineage's control, never the deliverable: an
-    # experiment whose last word is the placebo it was forced to freeze takes
-    # the same explicit exit as one that froze nothing at all, rather than
-    # spending a Held-out on it (docs/pipeline-design.md §2.2).
-    if final is None or _is_baseline_anchor(ledger, final):
-        _fail_without_frozen_artifact(hitl, ledger, artifact=final)
-    final_status = StatusReporter(hitl / "status.json")
-    final_status.start()
-    final_status.set(
-        state="running_heldout",
-        developer_mode=developer_label,
-        session_key="heldout",
-        session_started_at=utc_now_iso(),
-        completed_sessions=completed_development,
-        total_sessions=len(sessions) + 1,
-        environment_stage="heldout",
-    )
-    try:
-        heldout_runs = pipeline.run_heldout(
-            _heldout_epoch_id(ledger, options.rolling.epochs),
-            final,
-            trading_days,
-            replay=bool(result.get("reran_sessions")),
-        )
-    finally:
-        final_status.stop()
-    records = ledger.read()
     payload = _terminal_status(
-        {
-            "completed_at": utc_now_iso(),
-            "developer_mode": developer_label,
-            "completed_sessions": completed_development + 1,
-            "total_sessions": len(plan["sessions"]),
-            "final_strategy_artifact": final.artifact_id,
-        },
-        developer_mode=developer_label,
-        heldout_runs=heldout_runs,
-        verdict=experiment_verdict(records),
-        paper_candidate=paper_candidate(records),
+        ledger, {"completed_at": utc_now_iso()}, developer_mode=developer_label
     )
     write_json_atomic(hitl / "status.json", payload)
-    if deployment_adjustment_due(
-        records, start=options.rolling.deployment_adjustment_start
-    ):
-        return _run_deployment_adjustment(
-            options,
-            ledger=ledger,
-            store=store,
-            ref_store=ref_store,
-            llm=llm,
-            command_runner_factory=command_runner_factory,
-            poll_seconds=poll_seconds,
-            heldout_runs=heldout_runs,
-        )
     return payload
 
 
 def _write_session_plan(
-    options: InteractiveWorkerOptions,
-    hitl: Path,
-    folds: list[FoldSpec],
-    trading_days: list[str],
-    *,
-    meta_enabled: bool,
-) -> tuple[tuple[DevelopmentSession, ...], dict[str, object]]:
-    """The plan of record (``schedule.json``): development sessions, the
-    Held-out, and the deployment adjustment when its start is configured."""
-    heldout = heldout_periods(
-        options.rolling.heldout_first_period,
-        options.rolling.heldout_last_period,
-        trading_days,
-        period=options.rolling.fold_period,
-        min_region_trade_days=options.rolling.min_region_trade_days,
-    )
-    sessions = iter_development_sessions(
-        options.rolling.epochs,
-        folds,
-        meta_enabled=meta_enabled,
-        meta_learning_fold_interval=options.rolling.meta_learning_fold_interval,
-        confirmation_folds=options.rolling.acceptance.confirmation_folds,
-    )
+    options: InteractiveWorkerOptions, hitl: Path, trading_days: list[str]
+) -> tuple[PlannedSession, ...]:
+    """Write the plan of record (``schedule.json``) and return its sessions.
+
+    The forward entry states the replay span, the Held-out end clipped to the
+    release; ``geometry.heldout`` refuses a release that does not reach it.
+    """
+
+    geometry = options.rolling.geometry
+    heldout = geometry.heldout(trading_days)
     plan = build_session_plan(
-        options.rolling.epochs,
-        folds,
-        heldout,
-        meta_enabled=meta_enabled,
-        meta_learning_fold_interval=options.rolling.meta_learning_fold_interval,
-        confirmation_folds=options.rolling.acceptance.confirmation_folds,
-        deployment=_deployment_fold(options, trading_days),
+        options.rolling.research_sessions,
+        forward={
+            "start": geometry.forward_start,
+            "forward_end": geometry.forward_end,
+            "heldout_start": heldout.start,
+            "replay_end": heldout.end,
+            "requested_end": heldout.requested_end,
+            "truncation_reason": heldout.truncation_reason,
+        },
     )
     write_json_atomic(hitl / SCHEDULE_NAME, plan)
-    return sessions, plan
-
-
-def _deployment_fold(
-    options: InteractiveWorkerOptions, trading_days: list[str]
-) -> FoldSpec | None:
-    start = options.rolling.deployment_adjustment_start
-    if not start:
-        return None
-    return deployment_fold(
-        start,
-        trading_days,
-        window_months=options.rolling.window_months,
-        min_region_trade_days=options.rolling.min_region_trade_days,
-    )
-
-
-def _run_deployment_adjustment(
-    options: InteractiveWorkerOptions,
-    *,
-    ledger: ExperimentLedger,
-    store: FilesystemArtifactStore,
-    ref_store: AgentRefStore,
-    llm: LLMProxy | None,
-    command_runner_factory: Callable[[Path], CommandRunner] | None,
-    poll_seconds: float,
-    heldout_runs: int,
-) -> dict[str, object]:
-    """The post-Held-out deployment adjustment (docs/pipeline-design.md §3.4).
-
-    Assembled on its own PIT cache root, ``pit_views/deployment``: the
-    graduate's own views may have been built under an older cache format,
-    which this code can neither extend nor read, so the session's two views
-    are hardlinked there from the named seed (or cold-built when none is
-    named) and the rest of the experiment's views stay as they are. The
-    session runs through the interactive runner past the reveal, and the
-    terminal status names the Paper candidate.
-    """
-    hitl = options.experiment_dir / "hitl"
-    graduated = _latest_artifact(ledger, store, options.experiment_dir)
-    if graduated is None:
-        raise RuntimeError("the deployment adjustment needs the graduated artifact")
-    scored = {
-        str(row.get("strategy_artifact_id") or "")
-        for row in latest_heldout_records(ledger.read())
-    }
-    if scored != {graduated.artifact_id}:
-        raise RuntimeError(
-            f"the Held-out scored {sorted(scored)}, not the ledger's latest "
-            f"artifact {graduated.artifact_id}; refusing to adjust it"
-        )
-    if command_runner_factory is None and (
-        options.execution_mode == "sandbox" or options.developer_mode == "llm"
-    ):
-        options = replace(
-            options,
-            agent_sandbox=prepare_experiment_sandbox_image(
-                options.agent_sandbox or SandboxSpec(gpu=None),
-                experiment_id=options.experiment_id,
-                experiment_dir=options.experiment_dir,
-            ),
-        )
-    deployment_options = replace(
-        options,
-        pit_cache_root=(
-            options.experiment_dir / "pit_views" / "deployment"
-            if options.data_backend == "pit"
-            else None
-        ),
-        pit_views_seed=None,
-        pit_views_seed_required=False,
-    )
-    pipeline, trading_days, meta_enabled, developer_label = build_experiment_pipeline(
-        deployment_options,
-        ledger=ledger,
-        store=store,
-        ref_store=ref_store,
-        llm=llm,
-        command_runner_factory=command_runner_factory,
-    )
-    folds = build_fold_schedule(
-        options.rolling.development_first_period,
-        options.rolling.development_last_period,
-        trading_days,
-        window_months=options.rolling.window_months,
-        period=options.rolling.fold_period,
-        min_region_trade_days=options.rolling.min_region_trade_days,
-        test_stage=options.rolling.test_stage,
-        validation_periods=options.rolling.validation_periods,
-    )
-    _sessions, plan = _write_session_plan(
-        options, hitl, folds, trading_days, meta_enabled=meta_enabled
-    )
-    fold = _deployment_fold(options, trading_days)
-    assert fold is not None  # the caller checked deployment_adjustment_due
-    seed = options.deployment_pit_views_seed or (
-        options.pit_views_seed if options.pit_views_seed_required else None
-    )
-    if seed is not None and options.data_backend == "pit":
-        pipeline.snapshots.link_seed_slots(
-            seed,
-            phase="valid",
-            start=fold.validation_start,
-            end=fold.validation_end,
-            decision_time=fold.valid_decision_time,
-        )
-    memory = load_inherited_memory(options.experiment_dir)
-    prior = latest_prior_text(ledger.read("meta_learning")) or (
-        memory.prior_text if memory else ""
-    )
-    session = DevelopmentSession(
-        DEPLOYMENT_SESSION_KEY,
-        "deployment_adjustment",
-        _heldout_epoch_id(ledger, options.rolling.epochs),
-        fold,
-    )
-
-    def execute(session: DevelopmentSession, context: dict[str, object]) -> None:
-        assert session.fold is not None
-        pipeline.run_deployment_adjustment(
-            session.epoch_id,
-            session.fold,
-            graduated=graduated,
-            prior=prior,
-            session_context=context,
-        )
-
-    interactive = InteractiveExperimentRunner(
-        experiment_id=options.experiment_id,
-        sessions=(session,),
-        execute_session=execute,
-        ledger=ledger,
-        control_path=hitl / "control.json",
-        status_path=hitl / "status.json",
-        ref_store=ref_store,
-        poll_seconds=poll_seconds,
-        session_max_attempts=options.rolling.session_max_attempts,
-        after_reveal=True,
-    )
-    result = interactive.run()
-    if result["status"] != "complete":
-        return result
-    records = ledger.read()
-    payload = _terminal_status(
-        {
-            "completed_at": utc_now_iso(),
-            "developer_mode": developer_label,
-            "completed_sessions": len(plan["sessions"]),
-            "total_sessions": len(plan["sessions"]),
-            "final_strategy_artifact": graduated.artifact_id,
-        },
-        developer_mode=developer_label,
-        heldout_runs=heldout_runs,
-        verdict=experiment_verdict(records),
-        paper_candidate=paper_candidate(records),
-    )
-    write_json_atomic(hitl / "status.json", payload)
-    return payload
-
-
-def _heldout_epoch_id(ledger: ExperimentLedger, configured_epochs: int) -> str:
-    """Epoch that graduation term (b) is scored on: the last one that actually
-    produced a Fold. Development can stop before the configured last Epoch (the
-    console's skip-to-Held-out), and an Epoch with no fold record has no
-    walk-forward transition, which would waive the requirement instead of
-    failing it. Without any fold record the configured last Epoch is the only
-    answer available, and it is equally empty."""
-    epochs = {epoch for epoch, _ in latest_fold_records(ledger.read("fold"))}
-    return max(epochs) if epochs else epoch_ids(configured_epochs)[-1]
-
-
-def _artifact_from_record(
-    artifact_id: str,
-    recorded_path: str,
-    record: Mapping[str, object],
-    *,
-    store: FilesystemArtifactStore,
-    experiment_dir: Path,
-) -> FrozenArtifact:
-    """Rebuild the artifact a ledger record names, from the path it recorded.
-
-    ``frozen/`` holds only what this experiment froze itself, so a Fold that
-    kept its parent records the console-installed seed's own ``_inherited/``
-    tree (docs/pipeline-design.md §3.1) and deriving ``frozen/<id>`` from the
-    id would look for that seed where it never lives. The recorded path decides
-    which tree is loaded; each tree keeps the validator that owns it -- the
-    store's manifest and immutability check for this experiment's own freezes,
-    the seed's read-only snapshot check for the inherited one.
-    """
-    if recorded_path and not Path(recorded_path).resolve().is_relative_to(
-        store.frozen_root.resolve()
-    ):
-        inherited = _load_inherited_parent(experiment_dir)
-        if (
-            inherited is None
-            or inherited.artifact_id != artifact_id
-            or inherited.path.resolve() != Path(recorded_path).resolve()
-        ):
-            raise RuntimeError(
-                "the recorded path is neither this experiment's own frozen "
-                f"artifact nor its inherited seed: {recorded_path}"
-            )
-        return inherited
-    frozen = store.frozen(
-        artifact_id,
-        expected_path=recorded_path or None,
-        experiment_id=str(record.get("experiment_id") or ""),
-    )
-    return FrozenArtifact(
-        artifact_id,
-        Path(frozen.path),
-        Path(frozen.model_path) if frozen.model_path is not None else None,
-        str(frozen.source_run_id),
-        str(frozen.source_fold_id),
-        str(frozen.source_step_id),
-        str(frozen.revision_id),
-    )
-
-
-def _latest_artifact(
-    ledger: ExperimentLedger,
-    store: FilesystemArtifactStore,
-    experiment_dir: Path,
-) -> FrozenArtifact | None:
-    records = ledger.read()
-    assert_no_frozen_artifact_mutation(records)
-    current_id = ""
-    current_path = ""
-    current_record: dict[str, object] | None = None
-    for record in records:
-        record_type = record.get("record_type")
-        # A Fold's freeze, or -- in ledgers written before a Meta stopped
-        # freezing strategies -- a Meta-regularized artifact, which resolves as
-        # the ordinary frozen artifact it is.
-        if record_type == "fold" or (
-            record_type == "meta_learning"
-            and record.get("status") == "meta_regularized"
-        ):
-            artifact_id = str(record.get("frozen_strategy_artifact_id") or "")
-            if not artifact_id:
-                continue
-            current_id = artifact_id
-            current_path = str(record.get("frozen_strategy_artifact_path") or "")
-            current_record = record
-    if not current_id or current_record is None:
-        return None
-    try:
-        return _artifact_from_record(
-            current_id,
-            current_path,
-            current_record,
-            store=store,
-            experiment_dir=experiment_dir,
-        )
-    except Exception as exc:
-        raise RuntimeError(
-            f"ledger artifact failed validation: {current_id}: {exc}"
-        ) from exc
+    return planned_sessions(options.rolling.research_sessions)
 
 
 def _terminal_status(
+    ledger: ExperimentLedger,
     source: Mapping[str, object],
     *,
     developer_mode: str | None = None,
-    heldout_runs: int = 0,
-    verdict: Mapping[str, object] | None = None,
-    paper_candidate: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
-    """Durable completion status. The experiment's own evidence stays in the
-    append-only ledger; status.json only records that the run reached its end,
-    so a resume republishes it without re-running or re-recording anything
-    (``heldout_runs`` counts what THIS invocation executed). ``verdict`` is the
-    ledger-derived graduation verdict and ``paper_candidate`` the artifact
-    Paper pins (``ledger.paper_candidate``), both re-read on every publish."""
+    """Durable completion status. The arm's evidence stays in the append-only
+    ledger; status.json only records that the run reached its end, so a resume
+    republishes it without re-running or re-recording anything. ``verdict`` and
+    ``paper_candidate`` are re-read from the ledger on every publish."""
+
+    records = ledger.read()
+    frozen = frozen_record(records)
     return {
         "schema_version": 1,
         "state": "completed",
         "pid": os.getpid(),
         "completed_at": source.get("completed_at") or utc_now_iso(),
         "developer_mode": developer_mode or source.get("developer_mode"),
-        "completed_sessions": source.get("completed_sessions"),
-        "total_sessions": source.get("total_sessions"),
-        "heldout_runs": heldout_runs,
-        "final_strategy_artifact": source.get("final_strategy_artifact"),
-        "verdict": dict(verdict) if verdict is not None else None,
-        "paper_candidate": dict(paper_candidate) if paper_candidate is not None else None,
+        "completed_sessions": len(research_records(records))
+        + sum(1 for record in records if record.get("record_type") == "forward"),
+        "final_strategy_artifact": (
+            str(frozen["frozen"]["artifact_id"]) if frozen is not None else None  # type: ignore[index]
+        ),
+        "verdict": experiment_verdict(records),
+        "paper_candidate": paper_candidate(records),
     }
-
-
-def _has_outstanding_work(
-    hitl: Path, ledger: ExperimentLedger, rolling: RollingExperimentConfig
-) -> bool:
-    """Whether a completed experiment still has console-requested work.
-
-    A rollback drops every held-out record (the frontier moved back), a
-    rerun request leaves a token no fold record has absorbed yet, and a
-    graduated experiment whose deployment adjustment is configured but not
-    recorded still owes that session. In each case the worker must resume
-    instead of republishing the terminal status, or the console operation
-    would look accepted and silently do nothing."""
-    records = ledger.read()
-    if terminated_record(records) is None and not any(
-        record.get("record_type") == "heldout" for record in records
-    ):
-        return True
-    if deployment_adjustment_due(records, start=rolling.deployment_adjustment_start):
-        return True
-    return _pending_rerun(hitl, ledger)
-
-
-def _pending_rerun(hitl: Path, ledger: ExperimentLedger) -> bool:
-    """Whether a console re-run request is still waiting for its fold record."""
-    pending = read_control(hitl / "control.json").rerun_sessions
-    if not pending:
-        return False
-    records = ledger.read("fold")
-    return any(
-        not rerun_absorbed(records, key, token) for key, token in pending.items()
-    )
-
-
-def _development_is_exhausted(hitl: Path, ledger: ExperimentLedger) -> bool:
-    """Whether every planned development session already has a durable record.
-
-    The plan of record is the worker's own ``schedule.json``, the same plan the
-    console resolves its session operations against, so the question is settled
-    without rebuilding the calendar or touching any data."""
-    sessions = read_json(hitl / SCHEDULE_NAME).get("sessions")
-    if not isinstance(sessions, list):
-        return False
-    planned = {
-        str(item.get("session_key") or "")
-        for item in sessions
-        if isinstance(item, dict) and item.get("kind") in {"fold", "meta"}
-    }
-    if not planned or "" in planned:
-        return False
-    completed = {
-        str(record.get("session_key") or "")
-        for record in ledger.read()
-        if is_durable_success_record(record, record_types=("fold", "meta_learning"))
-    }
-    return planned <= completed
-
-
-def _is_baseline_anchor(ledger: ExperimentLedger, artifact: FrozenArtifact) -> bool:
-    """Whether the artifact in force is the lineage's baseline anchor."""
-
-    return artifact.artifact_id in baseline_anchor_artifacts(ledger.read("fold"))
-
-
-def _fail_without_frozen_artifact(
-    hitl: Path, ledger: ExperimentLedger, *, artifact: FrozenArtifact | None = None
-) -> NoReturn:
-    """The documented zero-deliverable end of development (§4.3): development
-    ran out of folds without ever freezing an artifact worth evaluating, so
-    there is nothing to evaluate and the run fails. ``artifact`` is the
-    baseline anchor left in force, when that is why there is nothing to
-    deliver. The status is published here as well as raised so the terminal
-    state is the same whichever caller drove the worker."""
-    error = (
-        _baseline_anchor_end_error(artifact)
-        if artifact is not None
-        else _development_end_error(ledger)
-    )
-    write_json_atomic(
-        hitl / "status.json",
-        {
-            "schema_version": 1,
-            "state": "failed",
-            "pid": os.getpid(),
-            "failed_at": utc_now_iso(),
-            "error": f"RuntimeError: {error}",
-        },
-    )
-    raise RuntimeError(error)
-
-
-def _baseline_anchor_end_error(artifact: FrozenArtifact) -> str:
-    """Name the anchor, so the failure is not read as a lost artifact.
-
-    The experiment did freeze something; what it never did is replace the weak
-    baseline the anchor rule forced on its first Fold with a candidate anyone
-    judged worth shipping."""
-
-    return (
-        "Development ended with a baseline anchor in force "
-        f"({artifact.artifact_id}): an anchor is the lineage's control, not a "
-        "deliverable, and no candidate ever replaced it, so there is nothing "
-        "to evaluate on Held-out"
-    )
-
-
-def _development_end_error(ledger: ExperimentLedger) -> str:
-    """Name the research cause the ledger already holds. The bare sentence left
-    the reader to reconstruct by hand whether every Fold abstained, every
-    nomination was hard-rejected, or no session ever nominated anything."""
-    folds = latest_fold_records(ledger.read("fold"))
-    outcomes = Counter(
-        (
-            str(record.get("finish_mode") or "unknown"),
-            str(record.get("fold_status") or "unknown"),
-        )
-        for record in folds.values()
-    )
-    detail = (
-        ", ".join(
-            f"{count}/{len(folds)} folds ended {mode} ({status})"
-            for (mode, status), count in outcomes.most_common()
-        )
-        if outcomes
-        else "no fold recorded a result"
-    )
-    return f"Development completed without a frozen baseline artifact: {detail}"
-
-
-def _load_inherited_parent(experiment_dir: Path) -> FrozenArtifact | None:
-    """The read-only artifact snapshot the console copied in at creation.
-
-    The snapshot is validated here rather than trusted: the console locked it
-    read-only, so a tree that is missing or has become writable again is a
-    tampered seed and must stop the run instead of silently starting from
-    unverified strategy code."""
-    payload = read_json(Path(experiment_dir) / "hitl/params.json").get(
-        "_inherited_artifact"
-    )
-    if not isinstance(payload, dict):
-        return None
-    path = Path(str(payload.get("path") or ""))
-    if not path.is_dir():
-        raise RuntimeError(f"inherited artifact directory is missing: {path}")
-    _assert_readonly_tree(path)
-    model_path = payload.get("model_path")
-    models = Path(str(model_path)) if model_path else None
-    if models is not None:
-        if not models.is_dir():
-            raise RuntimeError(
-                f"inherited model artifact directory is missing: {models}"
-            )
-        _assert_readonly_tree(models)
-    return FrozenArtifact(
-        artifact_id=str(payload.get("artifact_id") or ""),
-        path=path,
-        model_path=models,
-        source_run_id="",
-        source_fold_id=str(payload.get("source_fold_id") or ""),
-        source_step_id="",
-        revision_id=str(payload.get("revision_id") or ""),
-    )
-
-
-def parent_from_step_node(
-    experiment_dir: Path, node_id: str, session_key: str
-) -> FrozenArtifact:
-    """Build the session parent from a validated step-tree node snapshot.
-
-    The worker re-validates chronology itself: control.json is a plain file,
-    so the console-side check alone would not stop a hand-edited override
-    from leaking a later fold's validated strategy backwards."""
-    from autotrade.environment.step_tree import (
-        NODE_MODELS_DIR,
-        NODE_OUTPUT_DIR,
-        StepTree,
-    )
-
-    from .hitl_state import assert_node_not_from_later_fold
-
-    steps_root = Path(experiment_dir) / "steps"
-    tree = StepTree(steps_root)
-    node = tree.get_node(node_id)  # ValueError on unknown ids -- fail fast
-    if node.get("status") == "failed" or not node.get("complete_validation"):
-        raise RuntimeError(
-            f"parent override {node_id} is not a validated node with a snapshot"
-        )
-    schedule = read_json(Path(experiment_dir) / "hitl/schedule.json")
-    raw_sessions = schedule.get("sessions")
-    sessions: list[object] = raw_sessions if isinstance(raw_sessions, list) else []
-    fold_keys = [
-        str(item.get("session_key") or item.get("key") or "")
-        for item in sessions
-        if isinstance(item, dict) and item.get("kind") == "fold"
-    ]
-    assert_node_not_from_later_fold(
-        node,
-        session_key,
-        fold_keys,
-        ref_store=AgentRefStore(experiment_dir),
-    )
-    output_dir = steps_root / node_id / NODE_OUTPUT_DIR
-    if not output_dir.is_dir():
-        raise RuntimeError(
-            f"parent override {node_id} has no strategy snapshot on disk"
-        )
-    models_dir = steps_root / node_id / NODE_MODELS_DIR
-    return FrozenArtifact(
-        artifact_id=f"stepnode_{node_id}",
-        path=output_dir,
-        model_path=models_dir if models_dir.is_dir() else None,
-        source_run_id=str(node.get("run_id") or ""),
-        source_fold_id=str(node.get("fold_id") or ""),
-        source_step_id=node_id,
-        revision_id=str(node.get("revision_id") or ""),
-    )
-
-
-def _build_post_fold_hook(
-    options: InteractiveWorkerOptions, out_dir: Path
-) -> Callable[[dict[str, object]], None] | None:
-    """Fold-completion strategy analysis, when enabled and a provider exists."""
-
-    if not options.analysis_enabled or options.llm is None:
-        return None
-    from .fold_analysis import analyze_fold
-
-    effective_analysis_max_tokens = options.llm.max_tokens_for(
-        "analysis",
-        model=options.analysis_model,
-        requested=options.analysis_max_tokens,
-    )
-    proxy = options.llm.build_gateway(
-        "analysis",
-        model=options.analysis_model,
-        max_tokens=effective_analysis_max_tokens,
-    )
-    ref_store = AgentRefStore(options.experiment_dir)
-
-    def post_fold_hook(record: dict[str, object]) -> None:
-        strategy_dir = record.get("frozen_strategy_artifact_path")
-        if not strategy_dir:
-            raise ValueError("fold record has no frozen strategy artifact to analyse")
-        strategy_path = Path(str(strategy_dir))
-        # A frozen artifact is ``frozen/<id>/output`` plus a sibling
-        # ``frozen/<id>/models`` (docs/pipeline-design.md §2.3); the ledger
-        # records only the output path, so derive the models one from it.
-        # analyze_fold lists the directory only when it exists.
-        analyze_fold(
-            proxy,
-            ledger_record=record,
-            ref_store=ref_store,
-            strategy_dir=strategy_path,
-            model_dir=strategy_path.parent / "models",
-            out_dir=out_dir,
-            max_tokens=effective_analysis_max_tokens,
-            output_identity=(
-                str(record.get("epoch_id") or "epoch_unknown"),
-                ref_store.get_or_create("fold", str(record.get("fold_id") or "fold_unknown")),
-            ),
-        )
-
-    return post_fold_hook
-
-
-def _restore_prior_store(
-    experiment_dir: Path, ledger: ExperimentLedger, *, fallback_generation_id: str = ""
-) -> None:
-    """Align CURRENT with the last remaining Meta generation after resume/rollback,
-    or with the inherited generation before the first Meta."""
-    restore_current_from_records(
-        experiment_dir,
-        ledger.read("meta_learning"),
-        fallback_generation_id=fallback_generation_id,
-    )
 
 
 def _repo_file(repo_root: Path, value: object, label: str) -> Path:
@@ -2130,7 +1221,6 @@ def _llm_settings(
     fold_model = canonicalize_model_name(
         str(params.get("model") or params.get("llm_model") or LOCAL_QWEN_MODEL)
     )
-    meta_model = canonicalize_model_name(str(params.get("meta_model") or fold_model))
     subagent_model = canonicalize_model_name(
         str(params.get("subagent_model") or fold_model)
     )
@@ -2166,7 +1256,6 @@ def _llm_settings(
     settings = LLMWorkerSettings(
         env_file=env_file,
         model=fold_model,
-        meta_model=meta_model,
         subagent_model=subagent_model,
         nl_model=nl_model,
         compact_model=compact_model,
@@ -2207,12 +1296,11 @@ def _llm_settings(
     # Whether the host holds a credential is deployment state, not a property
     # of a WebUI create request.  Every model/role combination is still
     # validated at preflight with a non-secret placeholder.
-    for role in ("main", "meta", "subagent", "nl", "compact"):
+    for role in ("main", "subagent", "nl", "compact"):
         settings.build_gateway(role, require_credentials=not preflight)
-    # Every conversation role must leave room for its output budget; the Fold
-    # parent's derived budget becomes the settings' own.
-    for role in ("meta", "subagent"):
-        settings.compaction_for(role)
+    # Every conversation role must leave room for its output budget; the
+    # session parent's derived budget becomes the settings' own.
+    settings.compaction_for("subagent")
     settings = replace(settings, compaction=settings.compaction_for("main"))
     gpu_count = _gpu_count(params.get("gpu_count", SandboxSpec().gpu_count))
     sandbox = SandboxSpec(
@@ -2270,38 +1358,6 @@ def _pit_views_seed(
         raise ValueError(f"pit_views_seed must be an existing directory: {seed}")
     assert_seed_snapshot_config(seed, snapshot_config)
     return seed, True
-
-
-def _deployment_pit_views_seed(
-    value: object, repo_root: Path, snapshot_config: SnapshotConfig
-) -> Path | None:
-    """The seed the deployment adjustment links its two views from, if named.
-
-    Checked like an explicit ``pit_views_seed``: the tree must exist and carry
-    this experiment's snapshot configuration under the current cache format,
-    because the two slots are read by this code, whatever format the
-    experiment's own views were built under.
-    """
-
-    if value in (None, ""):
-        return None
-    if not isinstance(value, str):
-        raise ValueError("deployment_pit_views_seed must be a string")  # noqa: TRY004
-    seed = _repo_path(repo_root, value.strip(), "deployment_pit_views_seed")
-    if not seed.is_dir() or seed.is_symlink():
-        raise ValueError(
-            f"deployment_pit_views_seed must be an existing directory: {seed}"
-        )
-    assert_seed_snapshot_config(seed, snapshot_config)
-    return seed
-
-
-def _deployment_start(value: object) -> str:
-    if value in (None, ""):
-        return ""
-    if not isinstance(value, str):
-        raise ValueError("deployment_adjustment_start must be a YYYYMMDD string")  # noqa: TRY004
-    return yyyymmdd(value.strip())
 
 
 def _optional_workspace_reference(value: object, repo_root: Path) -> str:
@@ -2443,6 +1499,5 @@ __all__ = [
     "LLMWorkerSettings",
     "build_experiment_pipeline",
     "load_worker_options",
-    "parent_from_step_node",
     "run_local_interactive_worker",
 ]

@@ -1,24 +1,24 @@
-"""Experiment pipeline: Step/Fold/Epoch/Held-out orchestration.
+"""Experiment pipeline: research sessions, one freeze, one forward replay.
 
-docs/pipeline-design.md. The Pipeline schedules Data, Environment, and Agent
-in time order, freezes inputs/outputs at each boundary, and writes the single
+docs/pipeline-design.md. The Pipeline schedules Data, Environment and Agent in
+time order, freezes inputs and outputs at each boundary and writes the single
 experiment ledger. It implements no investment logic and never rewrites
-strategy content; it only accepts, freezes, falls back, and records.
+strategy content; it only prepares, freezes, replays and records.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
+import math
 import time
 import uuid
-from collections.abc import Callable, Mapping
-from dataclasses import replace
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import pandas as pd
 
-from autotrade.agent.runner import AgentSessionDeadlineExceeded
 from autotrade.environment.artifacts import (
     copy_artifact,
     copy_model_artifacts,
@@ -32,38 +32,31 @@ from autotrade.environment.executor import (
     TrustedStrategyExecutor,
     raised_by_strategy,
 )
-from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.replay import (
     ContextDataProvider,
     ExecutionPriceProvider,
     ReplayResult,
     run_daily_replay,
 )
-from autotrade.environment.replay.stats import attach_cost_sensitivity
+from autotrade.environment.replay.engine import BacktestError
+from autotrade.environment.replay.stats import window_activity
+from autotrade.environment.replay.style import STYLE_ARTIFACT_NAME
 from autotrade.environment.runtime import agent_trace_path, chmod_tree
 from autotrade.environment.strategy import NLQuery
-from autotrade.environment.tools.finish_fold import mechanism_structure
+from autotrade.environment.strategy_loader import validate_strategy_package
 
 from .agent_inbox import expire_experiment_session_inbox
-from .agent_views import (
-    agent_visible_ledger_record as _agent_visible_ledger_record,
-)
-from .agent_views import (
-    vs_parent_metrics as _vs_parent_metrics,
-)
+from .calendar import FULL_SPAN, Slot
 from .config import (
     ArtifactRevision,
     ArtifactStore,
     EvaluationBackend,
     EvaluationRequest,
     EvaluationResult,
-    FoldDeveloper,
-    FoldOutcome,
-    FoldSessionRequest,
-    FoldSessionResult,
     FrozenArtifact,
-    MetaLearner,
-    MetaSessionResult,
+    ReplaySpan,
+    ResearchDeveloper,
+    ResearchSessionRequest,
     RollingExperimentConfig,
     SnapshotBundle,
     SnapshotProvider,
@@ -71,41 +64,30 @@ from .config import (
     StrategyExperimentConfig,
     fold_session_deadline_seconds,
 )
-from .folds import FoldSpec, heldout_periods
-from .hitl_state import DEPLOYMENT_SESSION_KEY, fold_session_key
-from .inherited_memory import InheritedMemory, prior_provenance
+from .hitl_state import research_session_key
 from .ledger import (
-    LINK_KEYS,
+    FORWARD_SESSION_KEY,
+    FORWARD_STAGE,
+    RESEARCH_STAGE,
     STRATEGY_ERROR,
     ExperimentLedger,
     FrozenArtifactMutated,
     FrozenArtifactRestoreFailed,
     RunMarkers,
     assert_no_frozen_artifact_mutation,
-    candidate_deflated_sharpe,
-    deflated_sharpe,
-    final_artifact_transitions,
-    frozen_selection,
+    forward_record,
+    frozen_record,
     is_frozen_artifact_mutation,
-    latest_fold_records,
-    latest_meta_records,
-    walk_forward_transitions,
+    research_over,
+    research_records,
 )
-from .ledger import (
-    latest_deployment_record as _latest_deployment_record,
+from .pit_views_seed import FORWARD_PHASE, RESEARCH_PHASE
+from .prior import (
+    PRIOR_MAX_CHARS,
+    ExperimentPriorStore,
+    latest_prior_text,
+    restore_current_from_records,
 )
-from .meta_inputs import (
-    AgentTraceFullSidecar,
-    build_meta_fold_history,
-    build_meta_fold_review_bundle,
-    select_meta_review_folds,
-)
-from .meta_schedule import (
-    meta_learning_id,
-    meta_record_id,
-    meta_session_key,
-)
-from .prior import PRIOR_MAX_CHARS, ExperimentPriorStore
 from .skills import (
     ExperimentSkillsStore,
     SkillsPublication,
@@ -113,11 +95,19 @@ from .skills import (
     latest_skills_snapshot,
     resolve_collected_skills_source,
 )
+from .verdict import (
+    forward_mde,
+    forward_slice,
+    freeze_gate,
+    graduation_verdict,
+    heldout_slice,
+    neutralized_statistics,
+)
 
-# A per-session deadline override may raise the fold deadline above the
+# A per-session deadline override may raise the session deadline above the
 # configured maximum, bounded by this absolute ceiling in minutes: twice the
-# default Fold budget (config.max_fold_minutes), enough headroom for one slow
-# session without letting it run unattended for days.
+# default session budget (config.max_fold_minutes), enough headroom for one
+# slow session without letting it run unattended for days.
 _MAX_DEADLINE_OVERRIDE_MINUTES = 1440
 
 
@@ -198,7 +188,11 @@ class DailyStrategyPipeline:
 
 
 class RollingExperimentPipeline:
-    """Step → Fold → Epoch → Held-out orchestration over injected backends."""
+    """Research sessions → freeze → one continuous forward replay → verdict.
+
+    Every stage reads what came before it from the ledger, so a resumed worker
+    continues wherever the durable records end.
+    """
 
     def __init__(
         self,
@@ -207,473 +201,257 @@ class RollingExperimentPipeline:
         snapshots: SnapshotProvider,
         artifacts: ArtifactStore,
         evaluator: EvaluationBackend,
-        developer: FoldDeveloper,
-        meta_learner: MetaLearner | None = None,
+        developer: ResearchDeveloper,
+        trading_days: Sequence[str],
         ledger: ExperimentLedger | None = None,
-        inherited_memory: InheritedMemory | None = None,
     ) -> None:
         self.config = config
-        self.ref_store = AgentRefStore(config.experiment_dir)
         self.snapshots = snapshots
         self.artifacts = artifacts
         self.evaluator = evaluator
         self.developer = developer
-        self.meta_learner = meta_learner
+        # The pinned release's daily dates: the Held-out slot ends at its last.
+        self.trading_days = sorted(str(day) for day in trading_days)
         self.ledger = ledger or ExperimentLedger(config.ledger_path)
         self.run_markers = RunMarkers(config.experiment_dir)
-        # The PRIOR and skills seeded at creation from another experiment's
-        # memory (``inherit_memory_from``): the head until the first session
-        # row, exactly as a Meta publication would be, and the source of the
-        # provenance a Meta needs to read the foreign ids that PRIOR cites.
-        self.inherited_memory = inherited_memory
-        self.inherited_skills = (
-            inherited_memory.skills if inherited_memory is not None else None
-        )
 
-    def _current_skills(self) -> SkillsSnapshot:
-        return latest_skills_snapshot(
-            self.ledger.read(),
-            experiment_dir=self.config.experiment_dir,
-            inherited=self.inherited_skills,
-        )
+    # ---- research ------------------------------------------------------
 
-    def run_fold(
-        self,
-        epoch_id: str,
-        fold: FoldSpec,
-        *,
-        parent: FrozenArtifact | None,
-        prior: str = "",
-        confirmation: bool = False,
-        session_context: dict[str, object] | None = None,
-    ) -> FoldOutcome:
-        """Run one Fold session and freeze what it nominated.
+    def research_inputs(self) -> tuple[SnapshotBundle, ReplaySpan]:
+        """The decision view at research end and the whole research span.
 
-        ``confirmation`` marks one of the Folds that close the development
-        window (``AcceptanceRules.confirmation_folds``, decided by the schedule
-        in ``hitl_state.iter_development_sessions``): its prompt says that
-        content frozen there can no longer collect the forward transitions
-        graduation term (c) asks of it, so the Fold confirms what is in force.
+        Prepared from the research geometry alone: every slot ends by research
+        end and every anchor is at or before its decision time, so no row
+        stamped after research end reaches a research session.
         """
 
-        assert_no_frozen_artifact_mutation(self.ledger.read())
+        geometry = self.config.geometry
+        years = geometry.research_years
+        bundles = []
+        for slot in years:
+            if (
+                slot.end > geometry.research_end
+                or slot.anchor > geometry.research_decision_time
+            ):
+                raise RuntimeError(
+                    f"research slot {slot.label} {slot.start}..{slot.end} reaches past "
+                    f"research end {geometry.research_end}"
+                )
+            bundles.append(
+                self.snapshots.prepare(
+                    phase=RESEARCH_PHASE,
+                    start=slot.start,
+                    end=slot.end,
+                    decision_time=slot.anchor,
+                )
+            )
+        decision = self.snapshots.prepare_decision(
+            decision_time=geometry.research_decision_time
+        )
+        span = ReplaySpan(
+            label=FULL_SPAN,
+            mode=RESEARCH_PHASE,
+            start=years[0].start,
+            end=years[-1].end,
+            snapshot=bundles[0],
+            continuation=tuple(bundle.replay_ref for bundle in bundles[1:]),
+        )
+        return decision, span
+
+    def run_research_session(
+        self, index: int, *, session_context: dict[str, object] | None = None
+    ) -> dict[str, object]:
+        """Run research session ``index`` and record its outcome.
+
+        The session starts from the node the previous session handed on (the
+        template for the first), reads the PRIOR the last session published,
+        and ends by continuing, freezing its nominee or ending the arm. A
+        freeze passes only the freeze gate; otherwise it is recorded and
+        research continues from this session's own start. The last session
+        that does not freeze ends the arm without a deliverable.
+        """
+
+        records = self.ledger.read()
+        assert_no_frozen_artifact_mutation(records)
+        if research_over(records):
+            raise RuntimeError("research is over; no further research session runs")
+        done = research_records(records)
+        if len(done) != index - 1 or not 1 <= index <= self.config.research_sessions:
+            raise RuntimeError(
+                f"research session {index} of {self.config.research_sessions} cannot "
+                f"run after {len(done)} recorded session(s)"
+            )
+        session_id = research_session_key(index)
+        start_node_id = done[-1]["next_start_node_id"] if done else None
+        start = (
+            artifact_from_step_node(self.config.experiment_dir, str(start_node_id))
+            if start_node_id
+            else None
+        )
+        # A generation an earlier attempt published without reaching the ledger
+        # is not in force: CURRENT follows the ledger before this attempt reads
+        # or keeps it.
+        restore_current_from_records(self.config.experiment_dir, records)
+        previous_prior = latest_prior_text(records)
         run_started = time.monotonic()
         run_id = f"run_{uuid.uuid4().hex}"
         context = dict(session_context or {})
         progress = _optional_hook(context.get("progress_hook"), "progress_hook")
         budgets = _session_budgets(self.config, context.get("resource_override"))
         current_skills = self._current_skills()
-        retained_artifact_id = parent.artifact_id if parent is not None else None
+        frozen_id: str | None = None
         wrote_ledger_record = False
         attempt = {
             "experiment_id": self.config.experiment_id,
-            "epoch_id": epoch_id,
-            "fold_id": fold.fold_id,
+            "epoch_id": RESEARCH_STAGE,
+            "fold_id": session_id,
             "run_id": run_id,
-            "session_key": fold_session_key(epoch_id, fold.fold_id),
-            "phase": "fold",
+            "session_key": session_id,
+            "phase": RESEARCH_STAGE,
         }
         # Evidence for a run that never gets to run its own except branch.
         self.run_markers.begin(attempt)
         try:
-            _publish_progress(
-                progress, "pit_snapshot", run_id=run_id, phase="validation"
+            _publish_progress(progress, "pit_snapshot", run_id=run_id, phase=RESEARCH_STAGE)
+            decision, span = self.research_inputs()
+            session = self.developer(
+                ResearchSessionRequest(
+                    experiment_id=self.config.experiment_id,
+                    session_id=session_id,
+                    session_index=index,
+                    sessions_total=self.config.research_sessions,
+                    run_id=run_id,
+                    start=start,
+                    snapshot=decision,
+                    decision_time=self.config.geometry.research_decision_time,
+                    validation=span,
+                    input_window_start=_months_before(
+                        self.config.geometry.research_end, self.config.window_months
+                    ),
+                    prior=previous_prior,
+                    max_steps=int(budgets["max_steps"]),
+                    max_backtests=int(budgets["max_backtests"]),
+                    max_llm_calls=int(budgets["max_llm_calls"]),
+                    deadline_seconds=budgets["deadline_seconds"],
+                    deadline_grace_seconds=budgets["deadline_grace_seconds"],
+                    directive=str(context.get("directive") or ""),
+                    sandbox_gpu_count=_optional_gpu_count(context.get("sandbox_gpu_count")),
+                    acceptance_rules=self.config.acceptance.to_record(),
+                    modification_constraints=self.config.step_constraints,
+                    snapshot_config=_snapshot_config_record(self.snapshots),
+                    record_failed_attempts=self.config.record_failed_attempts,
+                    nl_failure_policy=self.config.nl_failure_policy,
+                    finalize_before_deadline_seconds=self.config.finalize_before_deadline_seconds,
+                    max_null_controls=self.config.max_null_controls_per_fold,
+                    progress_hook=progress,
+                    session_key=session_id,
+                    skills_source_ref=(
+                        str(current_skills.root) if current_skills.root is not None else ""
+                    ),
+                )
             )
-            valid_snapshot = self.snapshots.prepare(
-                fold=fold,
-                phase="valid",
-                start=fold.validation_start,
-                end=fold.validation_end,
-                decision_time=fold.valid_decision_time,
-            )
-            control, control_error, control_null = self._parent_control(
-                parent, fold, valid_snapshot, progress=progress, run_id=run_id
-            )
-            try:
-                session = self.developer(
-                    FoldSessionRequest(
-                        experiment_id=self.config.experiment_id,
-                        epoch_id=epoch_id,
-                        fold=fold,
-                        run_id=run_id,
-                        parent=parent,
-                        prior=prior,
-                        snapshot=valid_snapshot,
-                        max_steps=budgets["max_steps"],
-                        max_backtests=budgets["max_backtests"],
-                        max_llm_calls=budgets["max_llm_calls"],
-                        deadline_seconds=budgets["deadline_seconds"],
-                        deadline_grace_seconds=budgets["deadline_grace_seconds"],
-                        directive=str(context.get("directive") or ""),
-                        sandbox_gpu_count=_optional_gpu_count(
-                            context.get("sandbox_gpu_count")
-                        ),
-                        fold_period=self.config.fold_period,
-                        validation_periods=self.config.validation_periods,
-                        test_stage=self.config.test_stage,
-                        confirmation_fold=confirmation,
-                        parent_control=control,
-                        parent_control_null=control_null,
-                        parent_control_error=control_error,
-                        epoch_index=_epoch_index(epoch_id),
-                        phase=(
-                            "convergence"
-                            if _epoch_index(epoch_id)
-                            >= self.config.convergence_start_epoch
-                            else "exploration"
-                        ),
-                        acceptance_rules=self.config.acceptance.to_record(),
-                        modification_constraints=self.config.step_constraints,
-                        snapshot_config=_snapshot_config_record(self.snapshots),
-                        record_failed_attempts=self.config.record_failed_attempts,
-                        nl_failure_policy=self.config.nl_failure_policy,
-                        finalize_before_deadline_seconds=self.config.finalize_before_deadline_seconds,
-                        max_null_controls=self.config.max_null_controls_per_fold,
-                        progress_hook=progress,
-                        session_key=str(
-                            context.get("session_key")
-                            or fold_session_key(epoch_id, fold.fold_id)
-                        ),
-                        skills_source_ref=(
-                            str(current_skills.root)
-                            if current_skills.root is not None
-                            else ""
-                        ),
+            if len(session.steps) > budgets["max_steps"]:
+                raise RuntimeError("research session exceeded the Step budget")
+            step_rows = [research_step_record(step) for step in session.steps]
+            last = index == self.config.research_sessions
+            next_start = start_node_id
+            gate: dict[str, object] | None = None
+            frozen: dict[str, object] | None = None
+            arm_end: dict[str, object] | None = None
+            if session.outcome == "freeze":
+                nominee = next(
+                    (row for row in step_rows if row["step_id"] == session.node_id), None
+                )
+                if nominee is None:
+                    raise RuntimeError(
+                        f"the nominated node {session.node_id!r} is not a Step of this session"
                     )
+                gate = freeze_gate_for(
+                    records,
+                    step_rows,
+                    nominee,
+                    hard_reasons=self.config.acceptance.evaluate(
+                        dict(nominee["summary"])
+                    )[0],
                 )
-            except AgentSessionDeadlineExceeded as exc:
-                # Expected control flow: the session already emitted
-                # session_end{deadline_exceeded} after its wrap-up grace.
-                # Record a no-candidate fold instead of failing the run; the
-                # fallback chain below decides what the next fold inherits.
-                session = FoldSessionResult(
-                    conversation_id=exc.conversation_id,
-                    steps=(),
-                    selected_step_id=None,
-                    finish_reason="deadline_grace_exhausted",
-                )
-            # The parent control is the host's Step, never the Agent's.
-            if sum(not step.parent_control for step in session.steps) > budgets["max_steps"]:
-                raise RuntimeError("Fold developer exceeded the Step budget")
-            # An explicit no-edge finish nominates nothing: no candidate is
-            # frozen whatever the last Step's metrics say, and the parent (if
-            # any) stays the lineage head.
-            abstained = bool(session.no_edge_reason)
-            selected = (
-                None
-                if abstained
-                else _select_step(session.steps, session.selected_step_id)
-            )
-            hard: list[str] = [] if abstained else ["no_complete_validation"]
-            warnings: list[str] = []
-            if selected is not None:
-                hard, warnings = self.config.acceptance.evaluate(
-                    selected.validation.summary
-                )
-            nominated_identical_to_parent = False
-            if selected is not None and not hard:
-                if parent is not None and self._matches_parent_content(
-                    parent, selected.revision_id
-                ):
-                    # The nominated node IS the inherited parent (the host's
-                    # own parent_control node, or an edit the Agent reverted).
-                    # Minting a second artifact id for the same bytes would
-                    # restart that strategy's forward record at zero, and
-                    # graduation term (c) reads it by id (§3.3): the lineage
-                    # head stays, and this Fold records that its nomination
-                    # changed nothing.
-                    frozen = parent
-                    status = "no_update"
-                    nominated_identical_to_parent = True
-                else:
-                    artifact_id = (
-                        f"strategy_{epoch_id}_{fold.fold_id}_{uuid.uuid4().hex[:12]}"
-                    )
+                if gate["passed"]:
+                    _publish_progress(progress, "freezing", run_id=run_id)
                     frozen = self._freeze(
-                        selected.revision_id,
-                        artifact_id=artifact_id,
-                        epoch_id=epoch_id,
-                        fold_id=fold.fold_id,
+                        next(step for step in session.steps if step.step_id == nominee["step_id"]),
+                        gate=gate,
+                        session_id=session_id,
                         run_id=run_id,
-                        step_id=selected.step_id,
+                        null_controls=session.null_controls,
                     )
-                    status = "frozen"
-                validation = selected.validation.summary
-            elif parent is not None:
-                frozen = parent
-                status = (
-                    "no_update"
-                    if selected is not None or abstained
-                    else "no_valid_backtest"
+                    frozen_id = str(frozen["artifact_id"])
+            elif session.outcome == "continue":
+                next_start = session.node_id or start_node_id
+            elif session.outcome == "no_edge":
+                arm_end = {"status": "no_deliverable", "reason": f"no_edge: {session.reason}"}
+            if frozen is None and arm_end is None and last:
+                reasons = (
+                    ", ".join(str(reason) for reason in gate["reasons"])  # type: ignore[union-attr]
+                    if gate is not None
+                    else session.outcome
                 )
-                validation = (
-                    selected.validation.summary if selected is not None else None
-                )
-            else:
-                # First fold without an acceptable baseline: never terminate
-                # the run. Record baseline_missing (with the rejection
-                # reasons when a candidate existed) and continue with the
-                # later folds; the run only fails at the end if no fold ever
-                # froze an artifact.
-                frozen = None
-                status = "baseline_missing"
-                validation = (
-                    selected.validation.summary if selected is not None else None
-                )
-            if frozen is not None:
-                retained_artifact_id = frozen.artifact_id
-            test_result_ref: str | None = None
-            state_changed_during_test = False
-            restore_error: BaseException | None = None
-            test_snapshot = None
-            test_summary: dict[str, object] | None
-            if frozen is None:
-                test_summary = {"status": "skipped_no_frozen_artifact"} if fold.has_test else None
-            elif not fold.has_test:
-                # Single-window development: there is no Test stage. The frozen
-                # strategy is judged by the automatic Held-out replay instead.
-                test_summary = None
-            else:
-                assert fold.test_start is not None and fold.test_end is not None
-                assert fold.test_decision_time is not None
-                _publish_progress(progress, "frozen_test", run_id=run_id)
-                test_snapshot = self.snapshots.prepare(
-                    fold=fold,
-                    phase="frozen_test",
-                    start=fold.test_start,
-                    end=fold.test_end,
-                    decision_time=fold.test_decision_time,
-                )
-                test_result, test_error, state_changed_during_test, restore_error = (
-                    _run_guarded_evaluation(
-                        self.evaluator,
-                        EvaluationRequest(
-                            revision=_frozen_revision(frozen),
-                            snapshot=test_snapshot,
-                            mode="frozen_test",
-                            start=fold.test_start,
-                            end=fold.test_end,
-                            schedule=self.config.schedule,
-                            broker_profile=self.config.broker_profile,
-                        ),
-                        frozen,
-                    )
-                )
-                if test_result is not None:
-                    test_summary = test_result.summary
-                    test_result_ref = test_result.result_ref
-                elif (
-                    test_error is not None
-                    and not state_changed_during_test
-                    and not raised_by_strategy(test_error)
-                ):
-                    # A timeout or host failure measured nothing about the
-                    # frozen strategy: fail this attempt rather than record it
-                    # as the Fold's Test (with a Test stage, its transition).
-                    raise test_error
-                else:
-                    # The strategy's own exception is a Test result; changed
-                    # frozen trees are recorded below and end the run.
-                    test_summary = {
-                        "status": "failed",
-                        "error": (
-                            f"{type(test_error).__name__}: {test_error}"
-                            if test_error is not None
-                            else "frozen_test_failed"
-                        ),
-                        **(
-                            {"failure": STRATEGY_ERROR}
-                            if test_error is not None and raised_by_strategy(test_error)
-                            else {}
-                        ),
-                    }
+                arm_end = {
+                    "status": "no_deliverable",
+                    "reason": f"last research session ended without a freeze ({reasons})",
+                }
             _publish_progress(progress, "publishing", run_id=run_id)
+            prior = self._publish_or_keep_prior(
+                session.prior, previous=previous_prior, generation_id=f"{session_id}_{run_id}"
+            )
             skills = self._publish_or_keep_skills(
                 session.skills_source_ref,
                 current=current_skills,
-                generation_id=f"{epoch_id}_{fold.fold_id}_{run_id}",
+                generation_id=f"{session_id}_{run_id}",
                 run_id=run_id,
             )
-            # The selected node ranked against random-name copies of its own
-            # trades on the whole window. A kept parent is the control itself,
-            # whose null already ran.
-            if selected is None:
-                frozen_null = None
-            elif selected.parent_control:
-                frozen_null = control_null
-            elif selected.step_id in session.null_controls:
-                # The session already drew this node's null through the
-                # run_null_control tool; the ledger carries that very block.
-                frozen_null = dict(session.null_controls[selected.step_id])
-            else:
-                frozen_null = self._null_control(
-                    selected.validation.result_ref, fold=fold, role="frozen"
-                )
-            # A Fold that nominates nothing still paid for the nulls it drew,
-            # and they are the evidence the Meta review is asked to cite for an
-            # abstention. Without a frozen node they have nowhere else to go, so
-            # the record keeps them by candidate instead of discarding them.
-            candidate_nulls = (
-                {
-                    step_id: dict(block)
-                    for step_id, block in session.null_controls.items()
-                }
-                if selected is None
-                else {}
-            )
+            trace = agent_trace_path(self.config.experiment_dir / "artifacts", run_id)
             record = {
-                "record_type": "fold",
-                "experiment_id": self.config.experiment_id,
-                "epoch_id": epoch_id,
-                "fold_id": fold.fold_id,
-                "run_id": run_id,
-                "session_key": fold_session_key(epoch_id, fold.fold_id),
-                **fold.to_record(),
-                "parent_strategy_artifact_id": parent.artifact_id if parent else None,
-                "parent_control": _parent_control_record(
-                    parent,
-                    control,
-                    control_error,
-                    session.steps,
-                    fold=fold,
-                    slippage_bps=self.config.broker_profile.slippage_bps,
-                    null_control=control_null,
-                ),
+                "record_type": "research_session",
+                **{key: attempt[key] for key in ("experiment_id", "epoch_id", "fold_id", "run_id")},
+                "session_key": session_id,
+                "session_id": session_id,
+                "session_index": index,
+                "sessions_total": self.config.research_sessions,
+                "start_node_id": start_node_id,
                 "conversation_id": session.conversation_id,
                 "finish_reason": session.finish_reason,
-                # How fold_status was reached: a nominated node, the Agent's
-                # explicit no-edge finish, or no nomination at all (a session
-                # that ended at its deadline, or a developer that named none).
-                "finish_mode": (
-                    "agent_no_edge"
-                    if abstained
-                    else "nominated"
-                    if selected is not None
-                    else "no_nomination"
-                ),
-                "early_stop_reason": session.early_stop_reason or None,
-                "no_edge_reason": session.no_edge_reason or None,
-                "fold_status": status,
-                # Why this `no_update` is not a rejection: the nominated node
-                # passed acceptance and was the parent's own content, so the
-                # parent artifact id was retained instead of reissued.
-                **(
-                    {"nominated_identical_to_parent": True}
-                    if nominated_identical_to_parent
-                    else {}
-                ),
-                # A control in force until a later Fold replaces it, not an
-                # evidenced edge: the freeze that had no parent to beat, or a
-                # nomination the Agent declared a control -- a repaired or
-                # re-tuned anchor gets a new id and a parent, and is still one
-                # (§2.2).
-                **(
-                    {"baseline_anchor": True}
-                    if status == "frozen" and (parent is None or session.baseline_anchor)
-                    else {}
-                ),
-                "hard_reject_reasons": hard,
-                "accept_warnings": warnings,
-                "selected_step_id": selected.step_id if selected is not None else None,
-                "steps": [_step_record(step) for step in session.steps],
-                "frozen_strategy_artifact_id": frozen.artifact_id
-                if frozen is not None
-                else None,
-                "frozen_strategy_artifact_path": (
-                    str(frozen.path) if frozen is not None else None
-                ),
-                # Its sibling ``models/``. An inherit_from copies both trees
-                # out of the source's last Fold record, and a pre-fitted model
-                # can only cross that boundary if the record names it.
-                "frozen_model_artifact_path": (
-                    str(frozen.model_path)
-                    if frozen is not None and frozen.model_path is not None
-                    else None
-                ),
-                "validation_result": validation,
-                # How the frozen candidate stands against this Fold's own
-                # baseline, and how wide a search it won (§2.4).
-                "vs_parent": _vs_parent_metrics(
-                    validation, control.summary if control is not None else None
-                ),
-                "selection_statistics": _selection_statistics(
-                    session.steps, selected
-                ),
-                "null_control": frozen_null,
-                **(
-                    {"candidate_null_controls": candidate_nulls}
-                    if candidate_nulls
-                    else {}
-                ),
-                "test_result": test_summary,
-                "test_result_ref": test_result_ref,
-                "run_manifest_ref": session.run_manifest_ref,
+                "outcome": session.outcome,
+                "reason": session.reason or None,
+                "nominated_step_id": session.node_id if session.outcome == "freeze" else None,
+                "next_start_node_id": next_start,
+                "steps": step_rows,
+                "trials_to_date": len(_arm_revisions(records, step_rows)),
+                "freeze_gate": gate,
+                "frozen": frozen,
+                "arm_end": arm_end,
+                **prior,
                 "skills_ref": skills.skills_ref or None,
                 "skills_generation_id": skills.generation_id or None,
                 **skills.stats.ledger_fields(),
                 "skills_published": skills.published,
-                "agent_trace_ref": str(
-                    agent_trace_path(self.config.experiment_dir / "artifacts", run_id)
-                )
-                if agent_trace_path(
-                    self.config.experiment_dir / "artifacts", run_id
-                ).exists()
-                else None,
-                # HITL re-run tag: recorded for audit and for the runner's
-                # "this rerun request is absorbed" check.
-                "rerun_id": str(context.get("rerun_id") or "") or None,
+                "run_manifest_ref": session.run_manifest_ref or None,
+                "agent_trace_ref": str(trace) if trace.exists() else None,
                 "snapshot_ids": {
-                    "valid_decision_input": valid_snapshot.snapshot_id,
-                    "test_decision_input": (
-                        test_snapshot.snapshot_id if test_snapshot is not None else None
-                    ),
+                    "decision": decision.snapshot_id,
+                    "research_span": span.snapshot.snapshot_id,
                 },
                 **_session_timing(context, run_started),
             }
-            if state_changed_during_test:
-                record["state_changed_during_test"] = True
             self.ledger.append(record)
             wrote_ledger_record = True
             expire_experiment_session_inbox(
-                self.config.experiment_dir,
-                str(record["session_key"]),
-                expired_by=run_id,
+                self.config.experiment_dir, session_id, expired_by=run_id
             )
-            if state_changed_during_test:
-                if restore_error is not None:
-                    raise FrozenArtifactRestoreFailed(
-                        "strategy or model artifacts changed during frozen test "
-                        "and restoring the pre-evaluation trees failed: "
-                        f"{restore_error}"
-                    ) from restore_error
-                raise FrozenArtifactMutated(
-                    "strategy or model artifacts changed during frozen test"
-                )
-            if session.terminate:
-                # The arm's own termination rule fired (finish_fold
-                # outcome="terminate"): the Fold row above reads like a no-edge
-                # finish, and this row ends the experiment -- no later session
-                # runs and there is no Held-out (docs/pipeline-design.md §3.3).
-                self.ledger.append(
-                    {
-                        **{key: record[key] for key in LINK_KEYS},
-                        "record_type": "terminated",
-                        "session_key": record["session_key"],
-                        "reason": session.no_edge_reason,
-                    }
-                )
-            return FoldOutcome(
-                fold.fold_id, run_id, status, frozen, validation, test_summary
-            )
-        except FrozenArtifactMutated:
-            raise
+            return record
         except BaseException as exc:
             # BaseException, not Exception: a terminated worker unwinds this
             # session through SystemExit (the entrypoint's SIGTERM handler) or
             # KeyboardInterrupt, and those must leave the same evidence as any
-            # other failure. Catching only Exception lost the whole session --
-            # no ledger row, and no marker either, because the finally below
-            # removed it.
+            # other failure.
             if not wrote_ledger_record:
                 self.ledger.append(
                     {
@@ -694,421 +472,194 @@ class RollingExperimentPipeline:
             if callable(prune):
                 prune(
                     keep_frozen_ids=_keep_frozen_artifact_ids(
-                        self.ledger.read(),
-                        extra_id=retained_artifact_id,
+                        self.ledger.read(), extra_id=frozen_id
                     )
                 )
 
-    def run_heldout(
+    def _freeze(
         self,
-        epoch_id: str,
-        final: FrozenArtifact,
-        trading_days: list[str],
+        nominee: StepResult,
         *,
-        replay: bool = False,
-    ) -> int:
-        assert_no_frozen_artifact_mutation(self.ledger.read())
-        count = 0
-        # A re-run fold invalidates every earlier Held-out result: they scored a
-        # frontier that no longer exists, so the caller replays them against the
-        # new one (append-only ledger; consumers read latest-per-label).
-        completed = (
-            set()
-            if replay
-            else {
-                str(record.get("period"))
-                for record in self.ledger.read("heldout")
-                if record.get("period") and not is_frozen_artifact_mutation(record)
-            }
-        )
-        # Graduation term (b): the final Epoch's walk-forward transitions
-        # (docs/pipeline-design.md §3.3), read once from the ledger and applied
-        # to every Held-out period's verdict.
-        fold_records = self.ledger.read("fold")
-        walk_forward = walk_forward_transitions(
-            fold_records,
-            epoch_id=epoch_id,
-            test_stage=self.config.test_stage,
-        )
-        # Graduation term (c): the subset of those transitions that replayed
-        # this very artifact, which is the only walk-forward evidence about the
-        # strategy Held-out is about to score.
-        final_transitions = final_artifact_transitions(
-            fold_records,
-            epoch_id=epoch_id,
-            test_stage=self.config.test_stage,
-            artifact_id=final.artifact_id,
-        )
-        # Diagnostics of the Fold that froze the strategy under test, carried
-        # beside the verdict's gating metrics without deciding anything.
-        selection = frozen_selection(fold_records, artifact_id=final.artifact_id)
-        for period in heldout_periods(
-            self.config.heldout_first_period,
-            self.config.heldout_last_period,
-            trading_days,
-            period=self.config.fold_period,
-            min_region_trade_days=self.config.min_region_trade_days,
-        ):
-            run_id = f"run_{uuid.uuid4().hex}"
-            label = str(period["label"])
-            if label in completed:
-                continue
-            # The window the replay covers, as the calendar states it: the
-            # end is the release's last trading day when the configured range
-            # runs past it, and the row says so instead of a replay that
-            # stops early under the full label.
-            window = {
-                "replay_start": str(period["start"]),
-                "replay_end": str(period["end"]),
-                "requested_end": str(period["requested_end"]),
-                "truncation_reason": period["truncation_reason"],
-            }
-            attempt = {
-                "experiment_id": self.config.experiment_id,
-                "epoch_id": epoch_id,
-                "fold_id": f"heldout_{label}",
-                "run_id": run_id,
-                "session_key": "heldout",
-                "phase": "heldout",
-            }
-            # Evidence for a period that never gets to run its own except branch.
-            self.run_markers.begin(attempt)
-            wrote_ledger_record = False
-            try:
-                snapshot = self.snapshots.prepare(
-                    fold=None,
-                    phase="heldout",
-                    start=str(period["start"]),
-                    end=str(period["end"]),
-                    decision_time=period["decision_time"],  # type: ignore[arg-type]
-                )
-                result, heldout_error, state_changed, restore_error = _run_guarded_evaluation(
-                    self.evaluator,
-                    EvaluationRequest(
-                        revision=_frozen_revision(final),
-                        snapshot=snapshot,
-                        mode="heldout",
-                        start=str(period["start"]),
-                        end=str(period["end"]),
-                        schedule=self.config.schedule,
-                        broker_profile=self.config.broker_profile,
-                    ),
-                    final,
-                )
-                if state_changed:
-                    self.ledger.append(
-                        {
-                            "record_type": "heldout",
-                            "experiment_id": self.config.experiment_id,
-                            "epoch_id": epoch_id,
-                            "fold_id": f"heldout_{label}",
-                            "run_id": run_id,
-                            "session_key": "heldout",
-                            "period": label,
-                            "strategy_artifact_id": final.artifact_id,
-                            "snapshot_id": snapshot.snapshot_id,
-                            "result": (
-                                result.summary
-                                if result is not None
-                                else {
-                                    "status": "failed",
-                                    "error": (
-                                        f"{type(heldout_error).__name__}: {heldout_error}"
-                                        if heldout_error is not None
-                                        else "heldout_failed"
-                                    ),
-                                }
-                            ),
-                            "result_ref": result.result_ref if result is not None else None,
-                            "state_changed_during_test": True,
-                        }
-                    )
-                    # The integrity row is this run's business record: the
-                    # fail-fast below must not also log a failed attempt.
-                    wrote_ledger_record = True
-                    if restore_error is not None:
-                        raise FrozenArtifactRestoreFailed(
-                            "strategy or model artifacts changed during held-out "
-                            "and restoring the pre-evaluation trees failed: "
-                            f"{restore_error}"
-                        ) from restore_error
-                    raise FrozenArtifactMutated(
-                        "strategy or model artifacts changed during held-out"
-                    ) from heldout_error
-                if heldout_error is not None:
-                    raise heldout_error
-                if result is None:
-                    raise RuntimeError("held-out evaluation returned no result")
-                self.ledger.append(
-                    {
-                        "record_type": "heldout",
-                        "experiment_id": self.config.experiment_id,
-                        "epoch_id": epoch_id,
-                        "fold_id": f"heldout_{label}",
-                        "run_id": run_id,
-                        "session_key": "heldout",
-                        "period": label,
-                        **window,
-                        "strategy_artifact_id": final.artifact_id,
-                        "snapshot_id": snapshot.snapshot_id,
-                        "result": result.summary,
-                        "result_ref": result.result_ref,
-                        # Graduation verdict of this period; the experiment-level
-                        # verdict (ledger.experiment_verdict) needs every period.
-                        "verdict": self.config.acceptance.heldout_verdict(
-                            result.summary,
-                            walk_forward,
-                            selection,
-                            final_transitions,
-                            window=window,
-                        ),
-                    }
-                )
-                wrote_ledger_record = True
-            except BaseException as exc:
-                # See run_fold: a terminated worker unwinds through SystemExit
-                # or KeyboardInterrupt, which must be recorded like any other
-                # failure rather than vanishing with the marker.
-                if not wrote_ledger_record:
-                    self.ledger.append(
-                        {
-                            **attempt,
-                            "record_type": "attempt_failed",
-                            "error": f"{type(exc).__name__}: {exc}",
-                        }
-                    )
-                    wrote_ledger_record = True
-                raise
-            finally:
-                # The marker is dropped only once one of this run's ledger
-                # records is durable; otherwise it stays for the next start.
-                if wrote_ledger_record:
-                    self.run_markers.finish(run_id)
-            count += 1
-        return count
-
-    def run_deployment_adjustment(
-        self,
-        epoch_id: str,
-        fold: FoldSpec,
-        *,
-        graduated: FrozenArtifact,
-        prior: str = "",
-        session_context: dict[str, object] | None = None,
+        gate: Mapping[str, object],
+        session_id: str,
+        run_id: str,
+        null_controls: Mapping[str, Mapping[str, object]],
     ) -> dict[str, object]:
-        """The post-Held-out deployment refit (docs/pipeline-design.md §3.4).
+        """Freeze the nominee's immutable revision and state what it was frozen on."""
 
-        The Fold scaffold with the mechanism frozen: the graduated artifact is
-        the parent, the host replays it on the window first, the session may
-        change only declared knobs and ``models/`` (the tools refuse the
-        rest before any replay), and the freeze here is the authority -- a
-        nomination whose mechanism differs is ``no_update`` with
-        ``mechanism_changed``. The row never enters Meta or Fold history and
-        never counts as a transition; ``ledger.paper_candidate`` reads it.
+        artifact_id = f"strategy_{session_id}_{uuid.uuid4().hex[:12]}"
+        stored = self.artifacts.freeze_revision(
+            nominee.revision_id,
+            artifact_id=artifact_id,
+            experiment_id=self.config.experiment_id,
+            epoch_id=RESEARCH_STAGE,
+            fold_id=session_id,
+            run_id=run_id,
+            step_id=nominee.step_id,
+        )
+        output = Path(stored.path)
+        models = Path(stored.model_path) if stored.model_path is not None else None
+        forward = self.config.geometry.forward
+        forward_days = sum(1 for day in self.trading_days if forward.start <= day <= forward.end)
+        fit = validate_strategy_package(output / "main.py")
+        null_control = (
+            dict(null_controls[nominee.step_id])
+            if nominee.step_id in null_controls
+            else self._null_control(
+                nominee.validation.result_ref,
+                start=self.config.geometry.research_start,
+                end=self.config.geometry.research_end,
+                seed=null_control_seed(session_id, "frozen"),
+            )
+        )
+        return {
+            "artifact_id": artifact_id,
+            "output_path": str(output),
+            "models_path": str(models) if models is not None and models.is_dir() else None,
+            "source_step_id": nominee.step_id,
+            "revision_id": nominee.revision_id,
+            "research_result_ref": nominee.validation.result_ref,
+            "days": gate["days"],
+            "neutralized_excess": gate["neutralized_excess"],
+            "tracking_error": gate["tracking_error"],
+            "information_ratio": gate["information_ratio"],
+            "blocks": nominee.validation.summary.get("sub_windows"),
+            "null_control": null_control,
+            "deflated_sharpe": gate["deflated_sharpe"],
+            "full_span_validations": gate["full_span_validations"],
+            "forward_mde": forward_mde(float(gate["tracking_error"]), forward_days),  # type: ignore[arg-type]
+            "fit_plan": {
+                "fit": fit is not None,
+                "refit_period": fit.refit_period if fit is not None else None,
+            },
+        }
+
+    # ---- forward -------------------------------------------------------
+
+    def run_forward(
+        self, *, session_context: dict[str, object] | None = None
+    ) -> dict[str, object]:
+        """Replay the frozen artifact once over forward and Held-out, then judge it.
+
+        One continuous replay: the book is not reset at the Held-out boundary,
+        and both slices are read from its one result. The strategy's own
+        exception is a measurement and discards the arm; any other failure
+        measured nothing and fails the attempt, which the caller retries from
+        the forward start. Frozen trees that changed during the replay are
+        recorded and fail closed.
         """
-        assert_no_frozen_artifact_mutation(self.ledger.read())
-        run_started = time.monotonic()
-        run_id = f"run_{uuid.uuid4().hex}"
+
+        records = self.ledger.read()
+        assert_no_frozen_artifact_mutation(records)
+        frozen_row = frozen_record(records)
+        if frozen_row is None:
+            raise RuntimeError("the forward replay needs a frozen artifact")
+        if forward_record(records) is not None:
+            raise RuntimeError("the arm's forward verdict is already recorded")
+        artifact = self._frozen_artifact(frozen_row)
+        forward = self.config.geometry.forward
+        heldout = self.config.geometry.heldout(self.trading_days)
         context = dict(session_context or {})
         progress = _optional_hook(context.get("progress_hook"), "progress_hook")
-        budgets = _session_budgets(
-            replace(
-                self.config,
-                max_steps_per_fold=self.config.deployment_max_backtests,
-                max_backtests_per_fold=self.config.deployment_max_backtests,
-            ),
-            context.get("resource_override"),
-        )
-        current_skills = self._current_skills()
-        wrote_ledger_record = False
+        run_id = f"run_{uuid.uuid4().hex}"
         attempt = {
             "experiment_id": self.config.experiment_id,
-            "epoch_id": epoch_id,
-            "fold_id": fold.fold_id,
+            "epoch_id": FORWARD_STAGE,
+            "fold_id": FORWARD_SESSION_KEY,
             "run_id": run_id,
-            "session_key": DEPLOYMENT_SESSION_KEY,
-            "phase": "deployment_adjustment",
+            "session_key": FORWARD_SESSION_KEY,
+            "phase": FORWARD_STAGE,
         }
         self.run_markers.begin(attempt)
+        wrote_ledger_record = False
         try:
-            _publish_progress(
-                progress, "pit_snapshot", run_id=run_id, phase="validation"
+            _publish_progress(progress, "pit_snapshot", run_id=run_id, phase=FORWARD_STAGE)
+            forward_bundle = self._prepare_slot(forward)
+            heldout_bundle = self._prepare_slot(heldout)
+            span = ReplaySpan(
+                label=FORWARD_STAGE,
+                mode=FORWARD_PHASE,
+                start=forward.start,
+                end=heldout.end,
+                snapshot=forward_bundle,
+                continuation=(heldout_bundle.replay_ref,),
             )
-            snapshot = self.snapshots.prepare(
-                fold=fold,
-                phase="valid",
-                start=fold.validation_start,
-                end=fold.validation_end,
-                decision_time=fold.valid_decision_time,
+            _publish_progress(progress, "forward_replay", run_id=run_id)
+            result, error, changed, restore_error = _run_guarded_evaluation(
+                self.evaluator,
+                span.request(
+                    _frozen_revision(artifact),
+                    schedule=self.config.schedule,
+                    broker_profile=self.config.broker_profile,
+                ),
+                artifact,
             )
-            control, _, _ = self._parent_control(
-                graduated, fold, snapshot, progress=progress, run_id=run_id, deployment=True
-            )
-            try:
-                session = self.developer(
-                    FoldSessionRequest(
-                        experiment_id=self.config.experiment_id,
-                        epoch_id=epoch_id,
-                        fold=fold,
-                        run_id=run_id,
-                        parent=graduated,
-                        prior=prior,
-                        snapshot=snapshot,
-                        max_steps=budgets["max_steps"],
-                        max_backtests=budgets["max_backtests"],
-                        max_llm_calls=budgets["max_llm_calls"],
-                        deadline_seconds=budgets["deadline_seconds"],
-                        deadline_grace_seconds=budgets["deadline_grace_seconds"],
-                        directive=str(context.get("directive") or ""),
-                        sandbox_gpu_count=_optional_gpu_count(
-                            context.get("sandbox_gpu_count")
-                        ),
-                        fold_period=self.config.fold_period,
-                        test_stage=False,
-                        parent_control=control,
-                        epoch_index=_epoch_index(epoch_id),
-                        phase="deployment",
-                        session_kind="deployment_adjustment",
-                        acceptance_rules=self.config.acceptance.to_record(),
-                        modification_constraints=self.config.step_constraints,
-                        snapshot_config=_snapshot_config_record(self.snapshots),
-                        record_failed_attempts=self.config.record_failed_attempts,
-                        nl_failure_policy=self.config.nl_failure_policy,
-                        finalize_before_deadline_seconds=self.config.finalize_before_deadline_seconds,
-                        max_null_controls=0,
-                        progress_hook=progress,
-                        session_key=DEPLOYMENT_SESSION_KEY,
-                        skills_source_ref=(
-                            str(current_skills.root)
-                            if current_skills.root is not None
-                            else ""
-                        ),
-                    )
-                )
-            except AgentSessionDeadlineExceeded as exc:
-                session = FoldSessionResult(
-                    conversation_id=exc.conversation_id,
-                    steps=(),
-                    selected_step_id=None,
-                    finish_reason="deadline_grace_exhausted",
-                )
-            if sum(not step.parent_control for step in session.steps) > budgets["max_steps"]:
-                raise RuntimeError("deployment adjustment exceeded the Step budget")
-            abstained = bool(session.no_edge_reason)
-            selected = (
-                None
-                if abstained
-                else _select_step(session.steps, session.selected_step_id)
-            )
-            hard: list[str] = [] if abstained else ["no_complete_validation"]
-            warnings: list[str] = []
-            if selected is not None:
-                hard, warnings = self.config.acceptance.evaluate(
-                    selected.validation.summary
-                )
-            adjusted: FrozenArtifact | None = None
-            nominated_identical_to_parent = False
-            mechanism_check: dict[str, object] | None = None
-            if selected is not None and not hard:
-                if self._matches_parent_content(graduated, selected.revision_id):
-                    # The graduate itself: the normal no-adjustment outcome.
-                    status = "no_update"
-                    nominated_identical_to_parent = True
-                else:
-                    mechanism_check = _mechanism_check(
-                        graduated.path,
-                        self.artifacts.revision(selected.revision_id).output_path,
-                    )
-                    if mechanism_check["equal"]:
-                        adjusted = self._freeze(
-                            selected.revision_id,
-                            artifact_id=f"strategy_deployment_{uuid.uuid4().hex[:12]}",
-                            epoch_id=epoch_id,
-                            fold_id=fold.fold_id,
-                            run_id=run_id,
-                            step_id=selected.step_id,
-                        )
-                        status = "adjusted"
-                    else:
-                        status = "no_update"
-                        hard = ["mechanism_changed"]
-            elif selected is not None or abstained:
-                status = "no_update"
-            else:
-                status = "no_valid_backtest"
-            validation = selected.validation.summary if selected is not None else None
-            record = {
-                "record_type": "deployment_adjustment",
-                "experiment_id": self.config.experiment_id,
-                "epoch_id": epoch_id,
-                "fold_id": fold.fold_id,
-                "run_id": run_id,
-                "session_key": DEPLOYMENT_SESSION_KEY,
-                "period": f"{fold.validation_start}..{fold.validation_end}",
-                **fold.to_record(),
-                "parent_strategy_artifact_id": graduated.artifact_id,
-                "parent_control": _parent_control_record(
-                    graduated,
-                    control,
-                    "",
-                    session.steps,
-                    fold=fold,
-                    slippage_bps=self.config.broker_profile.slippage_bps,
-                ),
-                "conversation_id": session.conversation_id,
-                "finish_reason": session.finish_reason,
-                "finish_mode": (
-                    "agent_no_edge"
-                    if abstained
-                    else "nominated"
-                    if selected is not None
-                    else "no_nomination"
-                ),
-                "early_stop_reason": session.early_stop_reason or None,
-                "no_edge_reason": session.no_edge_reason or None,
-                "status": status,
-                **(
-                    {"nominated_identical_to_parent": True}
-                    if nominated_identical_to_parent
-                    else {}
-                ),
-                "hard_reject_reasons": hard,
-                "accept_warnings": warnings,
-                "mechanism_check": mechanism_check,
-                "selected_step_id": selected.step_id if selected is not None else None,
-                "steps": [_step_record(step) for step in session.steps],
-                "adjusted_strategy_artifact_id": (
-                    adjusted.artifact_id if adjusted is not None else None
-                ),
-                "adjusted_strategy_artifact_path": (
-                    str(adjusted.path) if adjusted is not None else None
-                ),
-                "adjusted_model_artifact_path": (
-                    str(adjusted.model_path)
-                    if adjusted is not None and adjusted.model_path is not None
-                    else None
-                ),
-                "validation_result": validation,
-                "vs_parent": _vs_parent_metrics(
-                    validation, control.summary if control is not None else None
-                ),
-                "selection_statistics": _selection_statistics(session.steps, selected),
-                "run_manifest_ref": session.run_manifest_ref,
-                "agent_trace_ref": str(
-                    agent_trace_path(self.config.experiment_dir / "artifacts", run_id)
-                )
-                if agent_trace_path(
-                    self.config.experiment_dir / "artifacts", run_id
-                ).exists()
-                else None,
-                "snapshot_ids": {"valid_decision_input": snapshot.snapshot_id},
-                **_session_timing(context, run_started),
+            base = {
+                "record_type": "forward",
+                **{key: attempt[key] for key in ("experiment_id", "epoch_id", "fold_id", "run_id")},
+                "session_key": FORWARD_SESSION_KEY,
+                "artifact_id": artifact.artifact_id,
+                "replay": {
+                    "start": forward.start,
+                    "forward_end": forward.end,
+                    "heldout_start": heldout.start,
+                    "replay_end": heldout.end,
+                    "requested_end": heldout.requested_end,
+                    "truncation_reason": heldout.truncation_reason,
+                },
+                "snapshot_ids": {
+                    "forward_decision": forward_bundle.snapshot_id,
+                    "heldout_decision": heldout_bundle.snapshot_id,
+                },
             }
+            if changed:
+                self.ledger.append(
+                    {
+                        **base,
+                        "status": "integrity_failure",
+                        "state_changed_during_test": True,
+                        "result_ref": result.result_ref if result is not None else None,
+                        "error": _error_text(error) if error is not None else None,
+                    }
+                )
+                # The integrity row is this run's record: the fail-fast below
+                # must not also log a failed attempt.
+                wrote_ledger_record = True
+                if restore_error is not None:
+                    raise FrozenArtifactRestoreFailed(
+                        "strategy or model artifacts changed during the forward replay "
+                        f"and restoring the pre-evaluation trees failed: {restore_error}"
+                    ) from restore_error
+                raise FrozenArtifactMutated(
+                    "strategy or model artifacts changed during the forward replay"
+                ) from error
+            if error is not None:
+                if not raised_by_strategy(error):
+                    raise error
+                where = (
+                    "heldout" if _failure_day(error) >= heldout.start else "forward"
+                )
+                record = {
+                    **base,
+                    "status": STRATEGY_ERROR,
+                    "error": _error_text(error),
+                    "result_ref": None,
+                    "slices": None,
+                    "refits_executed": None,
+                    "null_control": None,
+                    "verdict": graduation_verdict(
+                        forward=None, heldout=None, strategy_error=where
+                    ),
+                }
+            else:
+                assert result is not None
+                _publish_progress(progress, "verdict", run_id=run_id)
+                record = {
+                    **base,
+                    **self._judge(result, artifact, forward=forward, heldout=heldout),
+                }
             self.ledger.append(record)
             wrote_ledger_record = True
-            expire_experiment_session_inbox(
-                self.config.experiment_dir, DEPLOYMENT_SESSION_KEY, expired_by=run_id
-            )
             return record
         except BaseException as exc:
             if not wrote_ledger_record:
@@ -1124,298 +675,131 @@ class RollingExperimentPipeline:
         finally:
             if wrote_ledger_record:
                 self.run_markers.finish(run_id)
-            prune = getattr(self.artifacts, "prune_transient", None)
-            if callable(prune):
-                prune(
-                    keep_frozen_ids=_keep_frozen_artifact_ids(
-                        self.ledger.read(), extra_id=graduated.artifact_id
-                    )
-                )
 
-    def _run_meta(
-        self,
-        epoch_id: str,
-        completed_folds: int,
-        visible_fold: FoldSpec,
-        parent: FrozenArtifact | None,
-        session_context: dict[str, object] | None = None,
-        previous_prior: str = "",
-    ) -> str:
-        # Same entry guard as run_fold/run_heldout: a Meta session reads the
-        # frozen lineage, so it must refuse to start while an unresolved
-        # integrity row remains. The check only reads the ledger, so a clean
-        # run's own publication is unaffected.
-        assert_no_frozen_artifact_mutation(self.ledger.read())
-        if self.meta_learner is None:
-            return previous_prior
-        run_started = time.monotonic()
-        run_id = f"run_{uuid.uuid4().hex}"
-        session_id = meta_learning_id(epoch_id, completed_folds)
-        deadline_exceeded = False
-        attempt = {
-            "experiment_id": self.config.experiment_id,
-            "epoch_id": epoch_id,
-            "fold_id": session_id,
-            "run_id": run_id,
-            "session_key": meta_session_key(epoch_id, completed_folds),
-            "phase": "meta_learning",
-        }
-        # Evidence for a run that never gets to run its own except branch.
-        self.run_markers.begin(attempt)
-        wrote_ledger_record = False
-        try:
-            context = dict(session_context or {})
-            current_skills = self._current_skills()
-            progress = _optional_hook(context.get("progress_hook"), "progress_hook")
-            _publish_progress(progress, "pit_snapshot", run_id=run_id, phase="meta")
-            history, agent_trace_sidecars = _development_inputs(
-                self.ledger.read(),
-                ref_store=self.ref_store,
-                artifacts_root=self.config.experiment_dir / "artifacts",
-                inherited_prior=prior_provenance(
-                    self.inherited_memory, previous_prior, ref_store=self.ref_store
-                ),
-            )
-            meta_snapshot = self.snapshots.prepare(
-                fold=visible_fold,
-                phase="meta",
-                start=visible_fold.validation_start,
-                end=visible_fold.validation_end,
-                decision_time=visible_fold.valid_decision_time,
-            )
-            try:
-                session = self.meta_learner(
-                    {
-                        "experiment_id": self.config.experiment_id,
-                        "epoch_id": epoch_id,
-                        "run_id": run_id,
-                        "meta_learning_id": session_id,
-                        "trigger_after_folds": completed_folds,
-                        # The effective public settings the Meta run facts are
-                        # built from (build_experiment_facts reads them here for
-                        # a Meta manifest); no Test or Held-out dates.
-                        "experiment_parameters": {
-                            "fold_period": self.config.fold_period,
-                            "validation_periods": self.config.validation_periods,
-                            "schedule": self.config.schedule.to_record(),
-                            "broker_profile": self.config.broker_profile.to_record(),
-                            "snapshot_config": _snapshot_config_record(self.snapshots),
-                        },
-                        "visible_fold": _agent_visible_fold(
-                            visible_fold, ref_store=self.ref_store
-                        ),
-                        # Three Meta sessions read this window against the
-                        # reviewed Fold's and filed the difference as a data
-                        # defect; the note names which Fold each describes.
-                        "visible_fold_note": (
-                            "visible_fold, run_manifest.meta_learning_visible_fold and "
-                            "data_summary_ref describe the Fold that starts after this "
-                            "Meta; the reviewed Folds are development_history."
-                            "fold_reviews[], each labelled by its own validation_period"
-                        ),
-                        # Host-only raw identity for the audit manifest. The Meta
-                        # learner removes it before writing Agent-visible facts.
-                        "host_visible_fold": visible_fold.to_record(),
-                        "snapshot_id": meta_snapshot.snapshot_id,
-                        "data_summary_ref": meta_snapshot.data_summary_ref,
-                        # Host-only, like host_visible_fold: the whole artifact
-                        # record, so the session reads the parent's own trees
-                        # instead of guessing them from its id. The Meta learner
-                        # publishes only the opaque strategy ref of its id.
-                        "parent_artifact": parent,
-                        "previous_prior": previous_prior,
-                        # Internal host source; LLMMetaLearner removes it before
-                        # writing Agent-visible meta_context or manifests.
-                        "skills_source_ref": (
-                            str(current_skills.root)
-                            if current_skills.root is not None
-                            else ""
-                        ),
-                        "development_history": history,
-                        "review_window": history.get("review_window"),
-                        "agent_trace_sidecars": agent_trace_sidecars,
-                        "meta_learning_memory": self._prior_meta_learning_logs(
-                            session_id
-                        ),
-                        "directive": str(context.get("directive") or ""),
-                        "progress_hook": progress,
-                        "session_key": str(
-                            context.get("session_key")
-                            or meta_session_key(epoch_id, completed_folds)
-                        ),
-                        "network": "disabled",
-                    }
-                )
-            except AgentSessionDeadlineExceeded as exc:
-                # Expected control flow: the meta session closed gracefully at
-                # its deadline. Keep the previous PRIOR and parent, record the
-                # outcome, and let the run continue with the next session.
-                session = MetaSessionResult(
-                    prior=previous_prior,
-                    conversation_id=exc.conversation_id,
-                )
-                deadline_exceeded = True
-            prior_text, prior_published, prior_ref, prior_generation_id = (
-                self._publish_or_keep_prior(
-                    session,
-                    previous_prior=previous_prior,
-                    generation_id=f"{session_id}_{run_id}",
-                    deadline_exceeded=deadline_exceeded,
-                )
-            )
-            # A Meta session writes PRIOR and skills only: every artifact in the
-            # lineage is one a Fold validated, so the parent stays the head.
-            # Ledgers written before this rule also carry `meta_regularized`
-            # (a frozen Meta edit) and `rejected_kept_parent` rows.
-            if deadline_exceeded:
-                status = "deadline_exceeded_kept_previous"
-            elif parent is not None:
-                status = "prior_only_kept_parent"
-            else:
-                status = "prior_only"
-            _publish_progress(progress, "publishing", run_id=run_id)
-            skills = self._publish_or_keep_skills(
-                session.skills_source_ref,
-                current=current_skills,
-                generation_id=f"{session_id}_{run_id}",
-                run_id=run_id,
-            )
-            trace_ref = agent_trace_path(
-                self.config.experiment_dir / "artifacts", run_id
-            )
-            self.ledger.append(
-                {
-                    "record_type": "meta_learning",
-                    "experiment_id": self.config.experiment_id,
-                    "epoch_id": epoch_id,
-                    "fold_id": session_id,
-                    "run_id": run_id,
-                    "session_key": meta_session_key(epoch_id, completed_folds),
-                    "meta_learning_id": session_id,
-                    "trigger_after_folds": completed_folds,
-                    "prior": prior_text,
-                    "prior_published": prior_published,
-                    "prior_ref": prior_ref or None,
-                    "prior_generation_id": prior_generation_id or None,
-                    "prior_chars": len(prior_text),
-                    "skills_ref": skills.skills_ref or None,
-                    "skills_generation_id": skills.generation_id or None,
-                    **skills.stats.ledger_fields(),
-                    "skills_published": skills.published,
-                    "status": status,
-                    "agent_trace_ref": str(trace_ref) if trace_ref.exists() else None,
-                    "review_window": history.get("review_window"),
-                    **_session_timing(context, run_started),
-                }
-            )
-            wrote_ledger_record = True
-            expire_experiment_session_inbox(
-                self.config.experiment_dir,
-                meta_session_key(epoch_id, completed_folds),
-                expired_by=run_id,
-            )
-            return prior_text
-        except BaseException as exc:
-            # See run_fold: a terminated worker unwinds through SystemExit or
-            # KeyboardInterrupt, which must be recorded like any other failure
-            # rather than vanishing with the marker.
-            if not wrote_ledger_record:
-                self.ledger.append(
-                    {
-                        **attempt,
-                        "record_type": "attempt_failed",
-                        "error": f"{type(exc).__name__}: {exc}",
-                    }
-                )
-                wrote_ledger_record = True
-            raise
-        finally:
-            # The marker is dropped only once one of this run's ledger records
-            # is durable; otherwise it stays for the next worker start.
-            if wrote_ledger_record:
-                self.run_markers.finish(run_id)
-
-    def _parent_control(
-        self,
-        parent: FrozenArtifact | None,
-        fold: FoldSpec,
-        snapshot: SnapshotBundle,
-        *,
-        progress,
-        run_id: str,
-        deployment: bool = False,
-    ) -> tuple[EvaluationResult | None, str, dict[str, object] | None]:
-        """Replay the inherited parent unchanged on this Fold's Validation window.
-
-        Runs before the Agent session through the same evaluator, snapshot and
-        replay bounds the session's own Validations use, and is charged to no
-        session budget. The result is the walk-forward evidence for the
-        previous Fold's frozen strategy and the parent's completed Validation
-        in this Fold. Only the parent's own exception is recorded (it cannot
-        run on this window, which is a measurement of it) and the Fold
-        proceeds; any other failure -- a timeout, the sandbox, host IO, a result
-        without the Fold's own quarter -- measured nothing and fails this
-        attempt, before any session work is spent. The random-portfolio null
-        control of that same result is measured here too, on the Fold's new
-        period when the window trails over several.
-
-        ``deployment`` replays the graduate Paper would pin: no null control,
-        and a failure of any kind fails the attempt.
-        """
-        if parent is None:
-            return None, "", None
-        _publish_progress(progress, "parent_control", run_id=run_id)
-        try:
-            control = self.evaluator.evaluate(
-                EvaluationRequest(
-                    revision=_frozen_revision(parent),
-                    snapshot=snapshot,
-                    mode="valid",
-                    start=fold.validation_start,
-                    end=fold.validation_end,
-                    schedule=self.config.schedule,
-                    broker_profile=self.config.broker_profile,
-                )
-            )
-        except Exception as exc:
-            if deployment or not raised_by_strategy(exc):
-                raise
-            return None, f"{type(exc).__name__}: {exc}", None
-        # Refuses a stepped Fold's result that lacks its own quarter here, not
-        # after the session: grading it on the whole trailing window instead
-        # would score mostly in-sample ground.
-        _step_result(control.summary, fold, self.config.broker_profile.slippage_bps)
-        if deployment:
-            return control, "", None
-        return (
-            control,
-            "",
-            self._null_control(
-                control.result_ref,
-                fold=fold,
-                role="parent",
-                step=(fold.step_start, fold.step_end) if fold.has_step else None,
-            ),
+    def _prepare_slot(self, slot: Slot) -> SnapshotBundle:
+        return self.snapshots.prepare(
+            phase=FORWARD_PHASE,
+            start=slot.start,
+            end=slot.end,
+            decision_time=slot.anchor,
         )
+
+    def _judge(
+        self,
+        result: EvaluationResult,
+        artifact: FrozenArtifact,
+        *,
+        forward: Slot,
+        heldout: Slot,
+    ) -> dict[str, object]:
+        """The two slices of one completed replay and the verdict on them.
+
+        A slice that cannot be measured raises ``ValueError``, which fails the
+        attempt: a verdict is never read off a number that was not measured.
+        """
+
+        result_path = Path(result.result_ref)
+        replay = json.loads(result_path.read_text(encoding="utf-8"))
+        analysis = json.loads(
+            (result_path.parent / STYLE_ARTIFACT_NAME).read_text(encoding="utf-8")
+        )
+        curve = replay["equity_curve"]
+        executions = replay["executions"]
+        acceptance = self.config.acceptance
+        forward_activity = window_activity(
+            curve, executions, start=forward.start, end=forward.end
+        )
+        heldout_activity = window_activity(
+            curve, executions, start=heldout.start, end=heldout.end
+        )
+        forward_block = forward_slice(
+            analysis,
+            start=forward.start,
+            end=forward.end,
+            seed_key=artifact.artifact_id,
+            max_drawdown=acceptance.max_drawdown,
+            cost_stress_multiplier=acceptance.cost_stress_multiplier,
+            slippage_bps=self.config.broker_profile.slippage_bps,
+            turnover=float(forward_activity["turnover"]),  # type: ignore[arg-type]
+            round_trips=int(forward_activity["round_trips"]),  # type: ignore[arg-type]
+            mean_gross=float(forward_activity["mean_gross"]),  # type: ignore[arg-type]
+        )
+        heldout_block = heldout_slice(
+            analysis,
+            start=heldout.start,
+            end=heldout.end,
+            forward_tracking_error=float(forward_block["tracking_error"]),  # type: ignore[arg-type]
+            max_drawdown=acceptance.max_drawdown,
+            mean_gross=float(heldout_activity["mean_gross"]),  # type: ignore[arg-type]
+        )
+        fit = validate_strategy_package(artifact.path / "main.py")
+        inference_days = [
+            str(value)[:10].replace("-", "") for value in replay.get("inference_dates") or ()
+        ]
+        return {
+            "status": "ok",
+            "error": None,
+            "result_ref": result.result_ref,
+            "slices": {
+                "forward": {**forward_block, "activity": forward_activity},
+                "heldout": {**heldout_block, "activity": heldout_activity},
+            },
+            "refits_executed": {
+                "forward": _fits_in(fit, inference_days, forward),
+                "heldout": _fits_in(fit, inference_days, heldout),
+            },
+            # Diagnostic only: where the forward slice's excess sits among
+            # random-name replays of the same skeleton.
+            "null_control": self._null_control(
+                result.result_ref,
+                start=forward.start,
+                end=heldout.end,
+                seed=null_control_seed(artifact.artifact_id, "forward"),
+                step=(forward.start, forward.end),
+            ),
+            "verdict": graduation_verdict(forward=forward_block, heldout=heldout_block),
+        }
+
+    def _frozen_artifact(self, frozen_row: Mapping[str, object]) -> FrozenArtifact:
+        """The frozen artifact the ledger names, validated by its store."""
+
+        block = frozen_row["frozen"]
+        if not isinstance(block, Mapping):
+            raise TypeError("frozen record carries no frozen block")
+        stored = self.artifacts.frozen(
+            str(block["artifact_id"]),
+            expected_path=str(block["output_path"]),
+            experiment_id=self.config.experiment_id,
+        )
+        return FrozenArtifact(
+            str(stored.artifact_id),
+            Path(stored.path),
+            Path(stored.model_path) if stored.model_path is not None else None,
+            str(stored.source_run_id),
+            str(stored.source_fold_id),
+            str(stored.source_step_id),
+            str(stored.revision_id),
+        )
+
+    # ---- shared --------------------------------------------------------
 
     def _null_control(
         self,
         result_ref: str,
         *,
-        fold: FoldSpec,
-        role: str,
+        start: str,
+        end: str,
+        seed: int,
         step: tuple[str, str] | None = None,
     ) -> dict[str, object] | None:
         """Rank one completed result against random-name copies of its own trades.
 
         Informational evidence beside the return: it says whether the excess
         came from WHICH names were picked or only from the timing, sizing and
-        exposure the skeleton already fixed. The seed is derived from the Fold
-        and the role, so a re-run of the same Fold draws the same null. The
-        null is not part of any verdict, so a backend that cannot run it
-        (the local development backend) leaves the block absent and a failure
-        is recorded rather than raised -- an expensive Fold must never be lost
-        to a diagnostic.
+        exposure the skeleton already fixed. The null is not part of any
+        verdict, so a backend that cannot run it (the local development
+        backend) leaves the block absent and a failure is recorded rather than
+        raised.
         """
 
         runner = getattr(self.evaluator, "null_control", None)
@@ -1424,140 +808,19 @@ class RollingExperimentPipeline:
         try:
             return runner(
                 result_ref,
-                start=fold.validation_start,
-                end=fold.validation_end,
+                start=start,
+                end=end,
                 profile=self.config.broker_profile,
                 schedule=self.config.schedule,
-                seed=null_control_seed(fold.fold_id, role),
+                seed=seed,
                 step=step,
             )
-        except Exception as exc:  # noqa: BLE001 - recorded, the Fold still runs
+        except Exception as exc:  # noqa: BLE001 - recorded, the stage still runs
             return {"status": "failed", "error": f"{type(exc).__name__}: {exc}"}
 
-    def _freeze(
-        self,
-        revision_id: str,
-        *,
-        artifact_id: str,
-        epoch_id: str,
-        fold_id: str,
-        run_id: str,
-        step_id: str,
-    ) -> FrozenArtifact:
-        """Freeze one Step revision and return the lineage's artifact record.
-
-        An ``ArtifactStore`` answers with whatever record its own storage
-        produces (the filesystem store returns a plain namespace), so the one
-        place a revision becomes part of the lineage is also the one place that
-        normalizes it. Everything downstream -- the next Fold's parent, the
-        Meta session's parent, the ledger row -- then holds a ``FrozenArtifact``
-        whatever store froze it.
-        """
-
-        record = self.artifacts.freeze_revision(
-            revision_id,
-            artifact_id=artifact_id,
-            experiment_id=self.config.experiment_id,
-            epoch_id=epoch_id,
-            fold_id=fold_id,
-            run_id=run_id,
-            step_id=step_id,
-        )
-        return FrozenArtifact(
-            record.artifact_id,
-            Path(record.path),
-            Path(record.model_path) if record.model_path is not None else None,
-            run_id,
-            fold_id,
-            step_id,
-            revision_id,
-        )
-
-    def _matches_parent_content(
-        self, parent: FrozenArtifact, revision_id: str
-    ) -> bool:
-        """Whether one Step revision holds exactly the parent artifact's content.
-
-        Single source for "this node is the parent itself": the freeze site
-        keeps the lineage head instead of reissuing an id for the same bytes.
-        Compares the trees the artifact store actually carries --
-        no digest is persisted, so a missing ``models/`` on either side is not
-        a difference.
-        """
-
-        revision = self.artifacts.revision(revision_id)
-        if modification_delta(parent.path, revision.output_path).changed_files:
-            return False
-        models = getattr(revision, "models_path", None)
-        return not (
-            models is not None
-            and parent.model_path is not None
-            and model_artifact_delta(parent.model_path, models).changed_files
-        )
-
-    def _prior_meta_learning_logs(self, current_meta_learning_id: str) -> str:
-        """Latest prior Meta trace from each of the most recent N Epochs.
-
-        Periodic sessions in the current Epoch are eligible, so the immediate
-        predecessor remains visible without allowing raw-memory growth to
-        multiply by the number of interval triggers.
-        """
-        chunks: list[str] = []
-        keep = max(0, self.config.meta_memory_max_epochs)
-        if not keep:
-            return ""
-        latest_by_epoch: dict[str, dict[str, object]] = {}
-        epoch_order: list[str] = []
-        for record in self.ledger.read("meta_learning"):
-            if meta_record_id(record) == current_meta_learning_id:
-                continue
-            epoch = str(record.get("epoch_id") or "")
-            if epoch not in latest_by_epoch:
-                epoch_order.append(epoch)
-            latest_by_epoch[epoch] = record
-        for epoch in epoch_order[-keep:]:
-            trace = self._meta_learning_trace_ref(latest_by_epoch[epoch])
-            if not trace.exists():
-                continue
-            text = trace.read_text(encoding="utf-8")
-            if text.strip():
-                chunks.append(text if text.endswith("\n") else text + "\n")
-        return "".join(chunks)
-
-    def _meta_learning_trace_ref(self, record: Mapping[str, object]) -> Path:
-        ref = record.get("agent_trace_ref")
-        if ref:
-            return Path(str(ref))
-        run_id = record.get("run_id")
-        if run_id:
-            return agent_trace_path(
-                self.config.experiment_dir / "artifacts", str(run_id)
-            )
-        return Path("__missing_meta_learning_agent_trace__")
-
-    def run_meta_session(
-        self,
-        epoch_id: str,
-        completed_folds: int,
-        visible_fold: FoldSpec,
-        *,
-        parent: FrozenArtifact | None,
-        previous_prior: str = "",
-        session_context: dict[str, object] | None = None,
-    ) -> str:
-        """Run one scheduled Meta session through the canonical ledger path.
-
-        Returns the current PRIOR. ``parent`` is only read: the next Fold
-        starts from the same artifact.
-        """
-
-        return self._run_meta(
-            epoch_id,
-            completed_folds,
-            visible_fold,
-            parent,
-            session_context,
-            previous_prior=previous_prior,
+    def _current_skills(self) -> SkillsSnapshot:
+        return latest_skills_snapshot(
+            self.ledger.read(), experiment_dir=self.config.experiment_dir
         )
 
     def _publish_or_keep_skills(
@@ -1587,111 +850,221 @@ class RollingExperimentPipeline:
         )
 
     def _publish_or_keep_prior(
-        self,
-        session: MetaSessionResult,
-        *,
-        previous_prior: str,
-        generation_id: str,
-        deadline_exceeded: bool,
-    ) -> tuple[str, bool, str, str]:
-        """Publish a non-empty new PRIOR.md, otherwise keep the previous version."""
+        self, candidate: str, *, previous: str, generation_id: str
+    ) -> dict[str, object]:
+        """Publish the session's PRIOR.md when it differs, else keep the previous one."""
+
         store = ExperimentPriorStore(self.config.experiment_dir)
-        candidate = "" if deadline_exceeded else str(session.prior or "").strip()
-        previous = previous_prior.strip()
-        if candidate and len(candidate) > PRIOR_MAX_CHARS:
+        text = str(candidate or "").strip()
+        if len(text) > PRIOR_MAX_CHARS:
             raise ValueError(
-                f"PRIOR.md is {len(candidate)} characters; keep it to {PRIOR_MAX_CHARS}"
+                f"PRIOR.md is {len(text)} characters; keep it to {PRIOR_MAX_CHARS}"
             )
-        if not candidate and not previous and not deadline_exceeded:
-            raise ValueError("the first Meta session must produce a non-empty PRIOR.md")
-        if candidate and candidate != previous:
-            published = store.publish(candidate, generation_id=generation_id)
-            return published.text, True, published.prior_ref, published.generation_id
-        return (
-            previous,
-            False,
-            store.current_ref(),
-            store.current_generation_id(),
-        )
+        if text and text != previous.strip():
+            published = store.publish(text, generation_id=generation_id)
+            return {
+                "prior": published.text,
+                "prior_published": True,
+                "prior_ref": published.prior_ref,
+                "prior_generation_id": published.generation_id,
+                "prior_chars": published.chars,
+            }
+        kept = previous.strip()
+        return {
+            "prior": kept,
+            "prior_published": False,
+            "prior_ref": store.current_ref() or None,
+            "prior_generation_id": store.current_generation_id() or None,
+            "prior_chars": len(kept),
+        }
 
 
-def _keep_frozen_artifact_ids(
-    records: list[dict[str, object]],
-    extra_id: str | None = None,
-) -> tuple[str, ...]:
-    """Frozen trees still named by the latest fold/meta frontier, plus the fold now finishing."""
-    keep: set[str] = set()
-    extra = str(extra_id or "")
-    if extra:
-        keep.add(extra)
-    for record in latest_fold_records(records).values():
-        artifact_id = str(record.get("frozen_strategy_artifact_id") or "")
-        if artifact_id:
-            keep.add(artifact_id)
-    for record in records:
-        if not is_frozen_artifact_mutation(record):
-            continue
-        for key in ("frozen_strategy_artifact_id", "strategy_artifact_id"):
-            artifact_id = str(record.get(key) or "")
-            if artifact_id:
-                keep.add(artifact_id)
-    # A Meta no longer freezes anything, but a ledger written before that rule
-    # may still name a Meta-frozen artifact as its head.
-    for record in latest_meta_records(records).values():
-        if record.get("status") != "meta_regularized":
-            continue
-        artifact_id = str(record.get("frozen_strategy_artifact_id") or "")
-        if artifact_id:
-            keep.add(artifact_id)
-    adjustment = _latest_deployment_record(records)
-    if adjustment is not None:
-        artifact_id = str(adjustment.get("adjusted_strategy_artifact_id") or "")
-        if artifact_id:
-            keep.add(artifact_id)
-    return tuple(sorted(keep))
+def research_step_record(step: StepResult) -> dict[str, object]:
+    """One completed Validation as the ledger's ``steps[]`` row.
 
+    ``neutralized`` carries the span's neutralised excess, residual tracking
+    error and IR from the replay's own style sidecar (``None`` when they cannot
+    be measured), the figures the freeze gate counts.
+    """
 
-def _mechanism_check(parent_output: Path, candidate_output: Path) -> dict[str, object]:
-    """Whether a nominated package is the graduated mechanism, by the same
-    reading the session's tools enforce (``mechanism_structure``)."""
-    parent = mechanism_structure(Path(parent_output))
-    candidate = mechanism_structure(Path(candidate_output))
     return {
-        "parent_structure_sha256": hashlib.sha256(parent.encode()).hexdigest(),
-        "adjusted_structure_sha256": hashlib.sha256(candidate.encode()).hexdigest(),
-        "equal": parent == candidate,
+        "step_id": step.step_id,
+        "revision_id": step.revision_id,
+        "span": step.span,
+        "summary": step.validation.summary,
+        "validation_result_ref": step.validation.result_ref,
+        "neutralized": _neutralized(step.validation.result_ref),
     }
 
 
-def _select_step(
-    steps: tuple[StepResult, ...], selected_id: str | None
-) -> StepResult | None:
-    # Only completed full-window validations ever become a StepResult.
-    if selected_id is None:
-        # A session that ran candidates always names the one it nominated:
-        # ``finish_fold`` takes either a node_id or an explicit no-edge
-        # outcome (which never reaches here, the caller reads
-        # ``no_edge_reason`` first). Nominating the last Step for it would
-        # freeze a candidate the Agent did not choose, so the only nameless
-        # case left is the deadline path, which produces no Step at all.
-        if steps:
-            raise RuntimeError(
-                "Fold session produced Steps but nominated none; refusing to "
-                "freeze a candidate the session did not select"
-            )
-        return None
-    selected = next((step for step in steps if step.step_id == selected_id), None)
-    if selected is None:
-        raise RuntimeError(f"selected Step is absent: {selected_id}")
-    return selected
+def freeze_gate_for(
+    records: Sequence[Mapping[str, object]],
+    session_rows: Sequence[Mapping[str, object]],
+    nominee: Mapping[str, object],
+    *,
+    hard_reasons: Sequence[str] = (),
+) -> dict[str, object]:
+    """The freeze gate of one nominated Step against the whole arm (PL1 §4.1).
 
+    Trials are the distinct revisions validated anywhere in the arm, earlier
+    sessions' recorded Steps and this session's alike; the IR dispersion is
+    taken over every measurable full-span validation. A nominee that did not
+    replay the full research period, fails a hard nomination rule, or whose
+    statistics cannot be measured does not pass.
+    """
 
-def _epoch_index(epoch_id: str) -> int:
-    _, _, number = epoch_id.rpartition("_")
+    reasons = list(hard_reasons)
+    if nominee.get("span") != FULL_SPAN:
+        reasons.append("freeze_needs_full_span_validation")
+    if reasons:
+        return {"passed": False, "reasons": reasons}
+    rows = [*_recorded_steps(records), *session_rows]
+    irs = [
+        float(row["neutralized"]["information_ratio"])  # type: ignore[index]
+        for row in rows
+        if row.get("span") == FULL_SPAN and _finite_ir(row.get("neutralized"))
+    ]
+    result_ref = Path(str(nominee["validation_result_ref"]))
+    analysis = json.loads(
+        (result_ref.parent / STYLE_ARTIFACT_NAME).read_text(encoding="utf-8")
+    )
     try:
-        return int(number)
-    except ValueError:
-        return 1
+        return freeze_gate(
+            analysis, trials=len(_arm_revisions(records, session_rows)), full_span_irs=irs
+        )
+    except ValueError as exc:
+        return {"passed": False, "reasons": ["freeze_unmeasurable"], "error": str(exc)}
+
+
+def artifact_from_step_node(experiment_dir: Path, node_id: str) -> FrozenArtifact:
+    """The snapshot of one validated Step-tree node, as a session's start."""
+
+    from autotrade.environment.step_tree import (
+        NODE_MODELS_DIR,
+        NODE_OUTPUT_DIR,
+        StepTree,
+    )
+
+    steps_root = Path(experiment_dir) / "steps"
+    node = StepTree(steps_root).get_node(node_id)  # ValueError on unknown ids
+    if node.get("status") == "failed" or not node.get("complete_validation"):
+        raise RuntimeError(f"step node {node_id} is not a validated node with a snapshot")
+    output_dir = steps_root / node_id / NODE_OUTPUT_DIR
+    if not output_dir.is_dir():
+        raise RuntimeError(f"step node {node_id} has no strategy snapshot on disk")
+    models_dir = steps_root / node_id / NODE_MODELS_DIR
+    return FrozenArtifact(
+        artifact_id=f"stepnode_{node_id}",
+        path=output_dir,
+        model_path=models_dir if models_dir.is_dir() else None,
+        source_run_id=str(node.get("run_id") or ""),
+        source_fold_id=str(node.get("fold_id") or ""),
+        source_step_id=node_id,
+        revision_id=str(node.get("revision_id") or ""),
+    )
+
+
+def null_control_seed(key: str, role: str) -> int:
+    """A stable 32-bit seed per session (or artifact) and role.
+
+    Stable across processes and runs (``hash`` is not), so a re-run draws the
+    same null and its percentile can be compared with the one the ledger
+    already holds. The session's ``run_null_control`` tool draws with the
+    ``frozen`` role, so its block is the one the freeze would have drawn.
+    """
+
+    digest = hashlib.blake2b(f"{key}:{role}".encode(), digest_size=4).digest()
+    return int.from_bytes(digest, "big")
+
+
+def _recorded_steps(records: Sequence[Mapping[str, object]]) -> list[Mapping[str, object]]:
+    return [
+        row
+        for record in research_records(records)
+        for row in (record.get("steps") or ())
+        if isinstance(row, Mapping)
+    ]
+
+
+def _arm_revisions(
+    records: Sequence[Mapping[str, object]], session_rows: Sequence[Mapping[str, object]]
+) -> set[str]:
+    return {
+        str(row["revision_id"]) for row in (*_recorded_steps(records), *session_rows)
+    }
+
+
+def _neutralized(result_ref: str) -> dict[str, object] | None:
+    path = Path(result_ref).parent / STYLE_ARTIFACT_NAME
+    try:
+        analysis = json.loads(path.read_text(encoding="utf-8"))
+        return neutralized_statistics(analysis)
+    except (OSError, ValueError):
+        return None
+
+
+def _finite_ir(block: object) -> bool:
+    value = block.get("information_ratio") if isinstance(block, Mapping) else None
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+    )
+
+
+def _fits_in(fit, inference_days: Sequence[str], slot: Slot) -> int:
+    """How many ``fit`` calls of the replay fell inside ``slot``."""
+
+    if fit is None:
+        return 0
+    count = 0
+    last: str | None = None
+    for day in inference_days:
+        if fit.is_due(day, last):
+            count += slot.start <= day <= slot.end
+            last = day
+    return count
+
+
+def _failure_day(error: BaseException) -> str:
+    """``YYYYMMDD`` of the decision whose strategy call raised."""
+
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        if isinstance(current, BacktestError) and current.inference_at is not None:
+            return current.inference_at.strftime("%Y%m%d")
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+    raise RuntimeError("a strategy error carries no decision time") from error
+
+
+def _error_text(error: BaseException) -> str:
+    return f"{type(error).__name__}: {error}"
+
+
+def _months_before(end: str, months: int) -> str:
+    """The first day of the ``months``-long window that ends on ``end``."""
+
+    stamp = pd.Timestamp(end) - pd.DateOffset(months=months) + pd.Timedelta(days=1)
+    return stamp.strftime("%Y%m%d")
+
+
+def _keep_frozen_artifact_ids(
+    records: Sequence[Mapping[str, object]],
+    extra_id: str | None = None,
+) -> tuple[str, ...]:
+    """The arm's frozen artifact, any artifact an integrity row names, and the
+    freeze now being recorded."""
+
+    keep = {str(extra_id)} if extra_id else set()
+    frozen = frozen_record(records)
+    if frozen is not None:
+        keep.add(str(frozen["frozen"]["artifact_id"]))  # type: ignore[index]
+    for record in records:
+        if is_frozen_artifact_mutation(record) and record.get("artifact_id"):
+            keep.add(str(record["artifact_id"]))
+    return tuple(sorted(keep))
 
 
 def _snapshot_config_record(snapshots: SnapshotProvider) -> dict[str, object]:
@@ -1703,183 +1076,6 @@ def _snapshot_config_record(snapshots: SnapshotProvider) -> dict[str, object]:
     config = getattr(snapshots, "config", None)
     to_record = getattr(config, "to_record", None)
     return dict(to_record()) if callable(to_record) else {}
-
-
-def _step_record(step: StepResult) -> dict[str, object]:
-    return {
-        "step_id": step.step_id,
-        "revision_id": step.revision_id,
-        "complete_validation": True,
-        "parent_control": step.parent_control,
-        "summary": step.validation.summary,
-        "validation_result_ref": step.validation.result_ref,
-    }
-
-
-def _selection_statistics(
-    steps: tuple[StepResult, ...], selected: StepResult | None
-) -> dict[str, object]:
-    """How wide this Fold's search was, and how much of the winner it explains.
-
-    ``candidates_evaluated`` counts every candidate the session replayed to a
-    complete Validation on this Fold's window: one per ``batch_validate``
-    candidate that finished. A failed replay
-    never becomes a Step and never counts, and the host's parent control is
-    not a candidate — it is the baseline the search is measured against, not a
-    trial in it.
-
-    That same count is N for :func:`ledger.deflated_sharpe`, computed for the
-    node ``finish_fold`` nominated. ``trials`` is the subset of the trial
-    Sharpes that are finite, i.e. the N the formula actually used.
-
-    Keeping the parent is also a selection: the parent won a search it was part
-    of, so the parent control joins the candidates as a trial, its own Sharpe is
-    the observed one, and ``parent_included`` says so. Only a Fold with no
-    candidate at all was no search, and leaves the probability ``None`` with
-    ``no_nominated_candidate``.
-    """
-
-    candidates = [step for step in steps if not step.parent_control]
-    # A kept parent with no candidate beside it was no search at all.
-    nominated = (
-        None
-        if selected is None or (selected.parent_control and not candidates)
-        else selected
-    )
-    kept_parent = nominated is not None and nominated.parent_control
-    trial_sharpes = [step.validation.summary.get("sharpe") for step in candidates]
-    if kept_parent:
-        trial_sharpes.append(nominated.validation.summary.get("sharpe"))
-    if nominated is None:
-        statistics = deflated_sharpe(
-            observed_sharpe=None, trial_sharpes=trial_sharpes, returns=()
-        )
-        statistics["unavailable_reason"] = "no_nominated_candidate"
-    else:
-        # The same function the session's candidate rows read their
-        # provisional figure from, now over the final trial pool.
-        statistics = candidate_deflated_sharpe(
-            observed_sharpe=nominated.validation.summary.get("sharpe"),
-            trial_sharpes=trial_sharpes,
-            result_ref=nominated.validation.result_ref,
-        )
-    return {
-        "candidates_evaluated": len(candidates),
-        # Whether the trial pool this probability deflates includes the parent
-        # control, which it does exactly when the parent was the one kept.
-        "parent_included": kept_parent,
-        **statistics,
-    }
-
-
-def _parent_control_record(
-    parent: FrozenArtifact | None,
-    control: EvaluationResult | None,
-    error: str,
-    steps: tuple[StepResult, ...],
-    *,
-    fold: FoldSpec,
-    slippage_bps: float,
-    null_control: dict[str, object] | None = None,
-) -> dict[str, object] | None:
-    """Ledger projection of the host's parent control; None without a parent."""
-    if parent is None:
-        return None
-    if control is None:
-        # _parent_control returns no result only for the parent's own exception.
-        return {
-            "status": "failed",
-            "failure": STRATEGY_ERROR,
-            "parent_strategy_artifact_id": parent.artifact_id,
-            "error": error,
-        }
-    step_result = _step_result(control.summary, fold, slippage_bps)
-    return {
-        "status": "ok",
-        "parent_strategy_artifact_id": parent.artifact_id,
-        # The in-session Step node the developer recorded for it, when the
-        # session got that far (a deadline before the first call records none).
-        "step_id": next(
-            (step.step_id for step in steps if step.parent_control), None
-        ),
-        "validation_result": control.summary,
-        "validation_result_ref": control.result_ref,
-        # The walk-forward transition itself, when the window is wider than the
-        # step; absent otherwise, and the whole window is the transition.
-        **({"step_result": step_result} if step_result is not None else {}),
-        # Random-name replays of this control's own trade skeleton; absent when
-        # the backend cannot run one.
-        **({"null_control": null_control} if null_control is not None else {}),
-    }
-
-
-def _step_result(
-    summary: Mapping[str, object], fold: FoldSpec, slippage_bps: float
-) -> dict[str, object] | None:
-    """The parent's result on this Fold's new period alone.
-
-    A trailing validation window is mostly ground the inherited parent was
-    already developed on; only the Fold's own period (``FoldSpec.step_start``
-    /``step_end``) is new, so that period alone is the honest walk-forward
-    transition. It needs no second replay: the control's result already carries
-    one sub-window row per calendar quarter, and the step is the row inside the
-    step bounds. The row is projected into the shape a result has -- so the
-    ledger, the graduation term and the report read a transition the same way
-    whether it is a step or a whole window -- and priced with the same
-    cost-sensitivity function. None when the Fold has no separate step (a
-    single-period window); a stepped Fold whose result lacks exactly one row
-    for its own period raises, because no other span may stand in for it.
-    """
-
-    if not fold.has_step:
-        return None
-    rows = summary.get("sub_windows")
-    matched = [
-        row
-        for row in (rows if isinstance(rows, list) else ())
-        if isinstance(row, Mapping)
-        and str(fold.step_start) <= str(row.get("start"))
-        and str(row.get("end")) <= str(fold.step_end)
-    ]
-    if len(matched) != 1:
-        raise RuntimeError(
-            f"parent control result has {len(matched)} sub-window rows inside the "
-            f"Fold's own period {fold.step_start}..{fold.step_end}; expected exactly one"
-        )
-    row = matched[0]
-    step = {
-        "label": row.get("label"),
-        "start": row.get("start"),
-        "end": row.get("end"),
-        "partial": row.get("partial"),
-        "total_return": row.get("return"),
-        "benchmark": {
-            "benchmark_return": row.get("benchmark_return"),
-            "excess_return": row.get("excess_return"),
-            # The figure the transition is actually graded on: the quarter's
-            # own size/beta-neutralized excess, computed with the window's
-            # attribution rather than re-derived here.
-            "neutralized_excess_return": row.get("neutralized_excess_return"),
-        },
-        "sharpe": row.get("sharpe"),
-        "max_drawdown": row.get("max_drawdown"),
-        "turnover": row.get("turnover"),
-        "trade_count": row.get("trade_count"),
-    }
-    return attach_cost_sensitivity(step, slippage_bps)
-
-
-def null_control_seed(fold_id: str, role: str) -> int:
-    """A stable 32-bit seed per Fold and role.
-
-    Stable across processes and runs (``hash`` is not), so re-running a Fold
-    re-draws the same null and its percentile can be compared with the one the
-    ledger already holds. The session's ``run_null_control`` tool draws with the
-    ``frozen`` role, so its block is the one the freeze would have drawn.
-    """
-
-    digest = hashlib.blake2b(f"{fold_id}:{role}".encode(), digest_size=4).digest()
-    return int.from_bytes(digest, "big")
 
 
 def _frozen_revision(artifact: FrozenArtifact) -> ArtifactRevision:
@@ -1942,67 +1138,6 @@ def _run_guarded_evaluation(
         return result, error, changed, restore_error
 
 
-def _development_inputs(
-    records: list[dict[str, object]],
-    *,
-    ref_store: AgentRefStore,
-    artifacts_root: str | Path | None = None,
-    inherited_prior: Mapping[str, object] | None = None,
-) -> tuple[dict[str, object], list[AgentTraceFullSidecar]]:
-    """Meta-visible development history plus internal full-trace sidecars.
-
-    Every public field crosses the Agent boundary, so it is built exclusively
-    from ``agent_views``: raw fold ids become opaque refs and Test evidence is
-    limited to the compact frozen-test metric whitelist of already-completed
-    Folds. Held-out never appears.
-
-    ``fold_validation_history`` is the one list of compact Fold histories
-    (``build_meta_fold_history``): every completed Fold so far, across Epochs,
-    each with its own host-computed statistics, so Meta sees the whole
-    accumulated Validation record next to the PRIOR that absorbed it and can
-    still read an older Fold's evidence once it leaves the review window. The
-    window is named, not re-listed -- ``review_window`` and ``fold_reviews``
-    identify the Folds completed after the previous Meta by the same opaque
-    ``fold_id``. A second window-scoped copy of the same projection would put
-    one Fold in ``development_history`` twice, which a Meta counting rows reads
-    as two Folds.
-
-    ``fold_reviews`` covers only the review-window Folds, and carries frozen
-    strategy source, a bounded Agent Trace index, ``agent_process_summary``,
-    and ``agent_trace_full`` sidecar metadata. Each sidecar is a byte-exact copy
-    of the raw Fold AgentTraceWriter JSONL; its bytes stay in the internal
-    sidecar list and never enter ordinary Fold prompts or ``meta_context``.
-    """
-
-    folds, review_window = select_meta_review_folds(
-        records, ref_store=ref_store, inherited_prior=inherited_prior
-    )
-    reviews, sidecars = build_meta_fold_review_bundle(
-        folds, ref_store=ref_store, artifacts_root=artifacts_root
-    )
-    return {
-        "evaluation_contract": {
-            "validation": "Fold selection and iteration evidence",
-            "frozen_test": "compact completed-Fold metrics are adaptive meta-development feedback",
-            "heldout": "never visible; sole final untouched evaluation",
-        },
-        "fold_reviews": reviews,
-        "review_window": review_window,
-        "fold_validation_history": build_meta_fold_history(
-            records, ref_store=ref_store
-        ),
-        "meta_learning": [
-            _agent_visible_ledger_record(
-                record,
-                ref_store=ref_store,
-                include_frozen_test_metrics=True,
-            )
-            for record in records
-            if record.get("record_type") == "meta_learning"
-        ],
-    }, sidecars
-
-
 def _optional_hook(value: object, name: str):
     if value is None:
         return None
@@ -2031,19 +1166,6 @@ def _session_timing(
         return {"run_wall_seconds": round(wall, 1)}
     return {
         "run_wall_seconds": round(max(0.0, time.monotonic() - fallback_started), 1)
-    }
-
-
-def _agent_visible_fold(
-    fold: FoldSpec, *, ref_store: AgentRefStore
-) -> dict[str, object]:
-    # The raw fold id encodes the held-out test period, so the Meta session
-    # sees the same opaque ref every other agent-visible surface projects.
-    return {
-        "fold_id": ref_store.get_or_create("fold", fold.fold_id),
-        "input_window": f"{fold.input_window_start}..{fold.input_window_end}",
-        "validation_period": f"{fold.validation_start}..{fold.validation_end}",
-        "valid_decision_time": fold.valid_decision_time.isoformat(),
     }
 
 
@@ -2078,8 +1200,8 @@ def _session_budgets(
             ):
                 raise ValueError(f"{name} override must be positive")
             if name == "deadline_seconds":
-                # The fold deadline may be raised per session, bounded by the
-                # absolute ceiling above; other budgets stay downward-only.
+                # The session deadline may be raised, bounded by the absolute
+                # ceiling above; other budgets stay downward-only.
                 if float(value) > _MAX_DEADLINE_OVERRIDE_MINUTES * 60:
                     raise ValueError(
                         "deadline_seconds override cannot exceed "
@@ -2087,7 +1209,7 @@ def _session_budgets(
                     )
             elif float(value) > float(limits[name]):
                 raise ValueError(
-                    f"{name} override cannot exceed the configured Fold limit"
+                    f"{name} override cannot exceed the configured session limit"
                 )
             limits[name] = float(value) if name == "deadline_seconds" else int(value)
     # Grace is not a resource_override key: add it after the override check so
@@ -2098,3 +1220,13 @@ def _session_budgets(
     )
     limits["deadline_grace_seconds"] = float(config.deadline_grace_minutes) * 60.0
     return limits
+
+
+__all__ = [
+    "DailyStrategyPipeline",
+    "RollingExperimentPipeline",
+    "artifact_from_step_node",
+    "freeze_gate_for",
+    "null_control_seed",
+    "research_step_record",
+]

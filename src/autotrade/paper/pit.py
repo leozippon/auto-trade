@@ -103,7 +103,6 @@ class BookPITData:
             raise RuntimeError(f"the exchange calendar has fewer than two sessions before {start}")
         window_start, anchor = earlier[-1], earlier[-2]
         bundle = provider.prepare(
-            fold=None,
             phase="paper",
             start=window_start,
             end=trade_date,

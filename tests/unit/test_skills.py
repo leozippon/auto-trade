@@ -336,7 +336,7 @@ def test_ledger_is_the_only_reachability_point_and_old_rows_mean_empty(
     _write_skill(source)
     published = ExperimentSkillsStore(experiment).publish(source, generation_id="gen_1")
     row = {
-        "record_type": "fold",
+        "record_type": "research_session",
         "skills_ref": published.skills_ref,
         "skills_generation_id": published.generation_id,
     }
@@ -344,17 +344,21 @@ def test_ledger_is_the_only_reachability_point_and_old_rows_mean_empty(
     assert snapshot.generation_id == "gen_1"
     assert snapshot.stats.count == 1
     assert latest_skills_snapshot([], experiment_dir=experiment) == SkillsSnapshot()
-    # Rolling back to a legacy successful row clears reachability even though
-    # the orphan generation remains available for audit.
+    # A later session that recorded no skills clears reachability even though
+    # the orphan generation remains available for audit; other rows never count.
     assert latest_skills_snapshot(
-        [row, {"record_type": "meta_learning", "prior": "legacy"}],
+        [row, {"record_type": "research_session", "prior": "later"}],
         experiment_dir=experiment,
     ) == SkillsSnapshot()
+    assert latest_skills_snapshot(
+        [row, {"record_type": "meta_learning", "skills_ref": "ignored"}],
+        experiment_dir=experiment,
+    ) == snapshot
     with pytest.raises(ValueError, match="non-empty skills metadata"):
         latest_skills_snapshot(
             [
                 {
-                    "record_type": "fold",
+                    "record_type": "research_session",
                     "skills_generation_id": "ghost",
                     "skills_count": 1,
                 }
@@ -380,14 +384,14 @@ def test_ledger_is_the_only_reachability_point_and_old_rows_mean_empty(
     os.chmod(published_file, 0o444)
     with pytest.raises(ValueError, match="experiment-relative"):
         latest_skills_snapshot(
-            [{"record_type": "fold", "skills_ref": str(snapshot.root)}],
+            [{"record_type": "research_session", "skills_ref": str(snapshot.root)}],
             experiment_dir=experiment,
         )
     with pytest.raises(ValueError, match="does not match"):
         latest_skills_snapshot(
             [
                 {
-                    "record_type": "fold",
+                    "record_type": "research_session",
                     "skills_ref": published.skills_ref,
                     "skills_generation_id": "different-generation",
                 }

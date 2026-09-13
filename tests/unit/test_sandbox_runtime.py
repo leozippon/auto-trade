@@ -65,10 +65,7 @@ from autotrade.environment.tools.base import CommandResult
 from autotrade.environment.tools.files import EditFileTool, WriteFileTool
 from autotrade.environment.tools.workspace import SafeWorkspace
 from autotrade.pipelines import DailyStrategyPipeline, StrategyExperimentConfig
-from autotrade.pipelines.worker import (
-    _activate_experiment_sandbox,
-    _strategy_sandbox_from_spec,
-)
+from autotrade.pipelines.worker import _strategy_sandbox_from_spec
 
 
 def _strategy(tmp_path: Path, source: str = "def generate_orders(context):\n    return []\n") -> Path:
@@ -736,37 +733,6 @@ def test_image_gc_removes_only_exact_persisted_ownership_refs() -> None:
     removed_refs = [call.args[0][-1] for call in run.call_args_list]
     assert removed_refs == [owned[0]]
     assert other_experiment not in removed_refs
-
-
-def test_active_sandbox_update_reaches_agent_and_formal_evaluator() -> None:
-    class Developer:
-        sandbox_spec: SandboxSpec | None = None
-
-        def set_sandbox_spec(self, spec: SandboxSpec) -> None:
-            self.sandbox_spec = spec
-
-    class Evaluator:
-        sandbox = SandboxConfig(
-            image="autotrade-sandbox:experiment-base",
-            docker_executable="docker-old",
-        )
-
-    developer = Developer()
-    evaluator = Evaluator()
-    active = SandboxSpec(
-        image="autotrade-sandbox:experiment-derived",
-        build_generation_id="123e4567-e89b-42d3-a456-426614174000",
-        docker_executable="docker-new",
-        gpu=None,
-    )
-    _activate_experiment_sandbox(
-        active,
-        developer=developer,  # type: ignore[arg-type]
-        evaluator=evaluator,  # type: ignore[arg-type]
-    )
-    assert developer.sandbox_spec is active
-    assert evaluator.sandbox.image == active.image
-    assert evaluator.sandbox.docker_executable == active.docker_executable
 
 
 def test_experiment_gpu_request_reaches_the_formal_strategy_container() -> None:

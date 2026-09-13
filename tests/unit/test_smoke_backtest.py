@@ -21,8 +21,11 @@ from autotrade.environment.strategy import StrategySchedule
 from autotrade.environment.time_budget import InferenceTimeBudget
 from autotrade.environment.tools import ToolError
 from autotrade.environment.tools.modification_check import ModificationCheckTool
-from autotrade.pipelines.config import FoldSessionRequest, SnapshotBundle
-from autotrade.pipelines.folds import FoldSpec
+from autotrade.pipelines.config import (
+    ReplaySpan,
+    ResearchSessionRequest,
+    SnapshotBundle,
+)
 from autotrade.pipelines.local_backend import (
     SMOKE_BACKTEST_MAX_DAYS,
     LocalDailyEvaluationBackend,
@@ -53,21 +56,6 @@ SUBSCRIPT_STRATEGY = """def generate_orders(context):
 """
 
 
-def _fold() -> FoldSpec:
-    moment = datetime(2025, 9, 30, 23, 59, 59, tzinfo=UTC)
-    return FoldSpec(
-        fold_id="fold_2026Q1",
-        input_window_start="20240101",
-        input_window_end="20250930",
-        validation_start=DAYS[0],
-        validation_end=DAYS[-1],
-        test_start="20260101",
-        test_end="20260331",
-        valid_decision_time=moment,
-        test_decision_time=moment,
-    )
-
-
 def _tool(
     root: Path,
     strategy: str,
@@ -91,13 +79,18 @@ def _tool(
     (output / "main.py").write_text(strategy, encoding="utf-8")
     models = root / "models"
     models.mkdir()
-    request = FoldSessionRequest(
+    snapshot = SnapshotBundle("snap", str(daily), str(daily))
+    request = ResearchSessionRequest(
         experiment_id="exp",
-        epoch_id="epoch_001",
-        fold=_fold(),
+        session_id="s1",
+        session_index=1,
+        sessions_total=4,
         run_id="run_x",
-        parent=None,
-        snapshot=SnapshotBundle("snap", str(daily), str(daily)),
+        start=None,
+        snapshot=snapshot,
+        decision_time=datetime(2025, 9, 30, 23, 59, 59, tzinfo=UTC),
+        validation=ReplaySpan("full", "valid", DAYS[0], DAYS[-1], snapshot),
+        input_window_start="20240101",
         max_steps=10,
         max_backtests=15,
         max_llm_calls=200,

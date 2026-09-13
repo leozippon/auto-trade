@@ -1,12 +1,12 @@
-"""Configuration for one scheduled strategy experiment."""
+"""Configuration for one research arm."""
 
 from __future__ import annotations
 
 import math
 import re
 from collections.abc import Callable, Mapping
-from dataclasses import MISSING, KW_ONLY, dataclass, field, fields
-from datetime import date, datetime
+from dataclasses import KW_ONLY, MISSING, dataclass, field, fields
+from datetime import datetime
 from pathlib import Path
 from typing import Literal, Protocol
 
@@ -15,9 +15,9 @@ from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.sandbox import SandboxConfig, SandboxLimits
 from autotrade.environment.strategy import StrategySchedule
 
+from . import verdict
 from .calendar import ResearchGeometry
 from .skills import DEFAULT_OPERATING_MEMORY
-from .folds import FoldSpec, assert_no_overlap, normalize_period
 
 ExecutionMode = Literal["sandbox", "trusted"]
 
@@ -38,14 +38,9 @@ ExecutionMode = Literal["sandbox", "trusted"]
 # also flagged resumption rows ("R"), i.e. normally traded sessions.
 SNAPSHOT_CACHE_FORMAT_VERSION = 11
 
-# Trailing wrap-up grace added to the Fold session budget. Not a console/worker
-# HITL knob; FoldSessionRequest carries the seconds to AgentSessionConfig.
+# Trailing wrap-up grace added to the research session budget. Not a console or
+# worker knob; ResearchSessionRequest carries the seconds to the Agent runner.
 DEFAULT_DEADLINE_GRACE_MINUTES = 10
-
-# Research calendar cadence: the unit the development and held-out labels are
-# written in. The default development window is whole years, long enough to
-# contain more than one market state.
-DEFAULT_FOLD_PERIOD = "year"
 
 # Research on four July-June years, a twelve-month forward test after them,
 # and a Held-out quarter the replay clips to the release end
@@ -93,98 +88,23 @@ class StrategyExperimentConfig:
             object.__setattr__(self, "models_dir", models)
 
 
-def _finite_number(value: object) -> float | None:
-    """``value`` as a float, or None when it is not a finite number.
-
-    Booleans are not numbers here, and every IEEE comparison against NaN is
-    False, so a NaN metric would otherwise clear every threshold.
-    """
-
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    number = float(value)
-    return number if math.isfinite(number) else None
-
-
-def _count(value: object) -> int | None:
-    """``value`` as a count, or None when it is not one."""
-
-    return value if isinstance(value, int) and not isinstance(value, bool) else None
-
-
-def _verdict_diagnostics(
-    selection: Mapping[str, object] | None,
-    walk_forward: Mapping[str, object] | None,
-    final_artifact: Mapping[str, object] | None,
-    trade_floor: int | None,
-) -> dict[str, object]:
-    """The evidence a Held-out verdict carries beside its gating metrics.
-
-    Everything here is context rather than a threshold, and only the two
-    ``final_artifact_forward_*`` counts also feed a graduation term — they are
-    reported here because they are what tells a reader that
-    ``walk_forward_mean_excess_percentile`` describes the development chain and
-    not the artifact Held-out just replayed. ``effective_heldout_min_trades``
-    is the trade floor this period was actually held to (``None`` while the
-    knob is off).
-    """
-
-    source = selection if isinstance(selection, Mapping) else {}
-    own = final_artifact if isinstance(final_artifact, Mapping) else {}
-    return {
-        "frozen_fold_id": source.get("fold_id"),
-        "candidates_evaluated": source.get("candidates_evaluated"),
-        "deflated_sharpe_probability": _finite_number(
-            source.get("deflated_sharpe_probability")
-        ),
-        # N behind that probability: from two trials it barely deflates
-        # anything, so the count belongs beside the number, not in the Fold
-        # record only.
-        "deflated_sharpe_trials": _count(source.get("deflated_sharpe_trials")),
-        "validation_excess_percentile": _finite_number(
-            source.get("validation_excess_percentile")
-        ),
-        # The development chain's statistic, over transitions that mostly
-        # replayed earlier artifacts of the lineage.
-        "walk_forward_mean_excess_percentile": _finite_number(
-            (walk_forward or {}).get("mean_excess_percentile")
-        ),
-        # The shipped artifact's own share of those transitions.
-        "final_artifact_forward_transitions": _count(own.get("transitions")),
-        "final_artifact_forward_positive": _count(own.get("positive_excess")),
-        "effective_heldout_min_trades": trade_floor,
-    }
-
-
 @dataclass(frozen=True)
 class AcceptanceRules:
-    """Validation acceptance checks (docs/pipeline-design.md §2.2): only a
-    non-finite metric is a HARD reject at Fold freeze; the drawdown cap and
-    min_return/min_sharpe are warn-only targets there — a shortfall records a
-    warning and never resets the fold. The drawdown cap is enforced where it
-    decides the outcome, in ``heldout_verdict``."""
+    """The arm's round parameters for the nomination check and the verdict.
+
+    A nominated research node is refused only for a non-finite metric
+    (``evaluate``); the return, Sharpe and drawdown targets there only warn.
+    ``max_drawdown`` and ``cost_stress_multiplier`` decide the forward and
+    Held-out verdict (``pipelines/verdict.py``), whose remaining thresholds are
+    that module's constants.
+    """
 
     min_return: float = 0.0
     min_sharpe: float = 0.0
     max_drawdown: float = 0.25
-    # Graduation-only stress: the Held-out excess must survive this multiple of
-    # the profile's slippage. 1.0 (the default) leaves the verdict unchanged.
-    cost_stress_multiplier: float = 1.0
-    # Graduation-only floor on closed round trips: a Held-out result carried by
-    # a handful of trades proves nothing. Set per configured Held-out window; a
-    # release-clipped replay is held to its share. 0 disables the check.
-    heldout_min_trades: int = 0
-    # Confirmation folds: the tail of the development window reserved for
-    # confirming the artifact already in force. One knob, two consumers --
-    # ``finish_fold`` refuses a new frozen nomination in the last
-    # ``confirmation_folds`` regular Fold sessions, and graduation term (c)
-    # requires the shipped artifact to carry at least that many of the Epoch's
-    # transitions itself. The two are the same number because an artifact
-    # frozen just before the reserved tail collects exactly one transition per
-    # reserved Fold; the chain's two-thirds rule scores the lineage, so without
-    # this a mechanism first frozen in the last Fold reaches Held-out carrying
-    # only the record of the parent it replaced. 0 disables both.
-    confirmation_folds: int = 2
+    # The forward neutralised excess must stay positive after paying this
+    # multiple of the profile's slippage (verdict F5).
+    cost_stress_multiplier: float = 2.0
 
     def __post_init__(self) -> None:
         for name in ("min_return", "min_sharpe", "max_drawdown", "cost_stress_multiplier"):
@@ -194,10 +114,6 @@ class AcceptanceRules:
             raise ValueError("max_drawdown must be between zero and one")
         if self.cost_stress_multiplier < 1:
             raise ValueError("cost_stress_multiplier must be at least one")
-        for name in ("heldout_min_trades", "confirmation_folds"):
-            value = getattr(self, name)
-            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-                raise ValueError(f"{name} must be a non-negative integer")
 
     def to_record(self) -> dict[str, object]:
         return {
@@ -205,8 +121,6 @@ class AcceptanceRules:
             "min_sharpe": self.min_sharpe,
             "max_drawdown": self.max_drawdown,
             "cost_stress_multiplier": self.cost_stress_multiplier,
-            "heldout_min_trades": self.heldout_min_trades,
-            "confirmation_folds": self.confirmation_folds,
         }
 
     @classmethod
@@ -221,41 +135,10 @@ class AcceptanceRules:
         return cls(**{key: record[key] for key in allowed if key in record})  # type: ignore[arg-type]
 
     def agent_facts(self) -> dict[str, object]:
-        """The ``acceptance_rules`` run fact: what freezes a Fold, what graduates.
+        """The ``acceptance_rules`` run fact, derived from these rules and the
+        verdict constants so no prompt restates a threshold. Rules only: no
+        forward or Held-out date appears here."""
 
-        Single source for what the session is told about acceptance. Every
-        entry is derived from these rules, so no prompt restates a threshold
-        and the projection cannot drift from ``evaluate``/``heldout_verdict``:
-        the freeze block marks each rule ``hard`` or ``warn``, and the
-        graduation block lists exactly the Held-out criteria this experiment
-        configured — the two optional ones only when they are switched on.
-        """
-
-        required: dict[str, object] = {
-            "excess_return": "> 0 (total_return - benchmark_return)",
-            "neutralized_excess_return": "> 0 (benchmark+size neutralized)",
-            "sharpe": "> 0",
-            "max_drawdown": f"<= {self.max_drawdown}",
-        }
-        if self.cost_stress_multiplier > 1:
-            required["excess_at_cost_stress"] = (
-                f"> 0 with slippage multiplied by {self.cost_stress_multiplier}"
-            )
-        if self.heldout_min_trades > 0:
-            required["trade_count"] = (
-                f">= {self.heldout_min_trades} per configured Held-out window, "
-                "scaled to the replayed share when the release ends first"
-            )
-        required["walk_forward_positive_excess"] = (
-            ">= ceil(2/3) of the final Epoch's out-of-sample transitions"
-        )
-        if self.confirmation_folds > 0:
-            required["final_artifact_forward_transitions"] = (
-                f">= {self.confirmation_folds} of those transitions must have "
-                "replayed the artifact Held-out ships, with the same >= ceil(2/3) "
-                f"positive rule on them alone; the last {self.confirmation_folds} "
-                "Folds refuse a new nomination so the artifact in force earns them"
-            )
         return {
             "fold_freeze": {
                 "finite_metrics": {
@@ -263,10 +146,6 @@ class AcceptanceRules:
                     "rule": "total_return/max_drawdown/sharpe must be finite",
                 },
                 "max_drawdown": {"enforcement": "warn", "target": self.max_drawdown},
-                # Absolute informational targets: they only record a warning and
-                # never rank candidates, which is judged on excess and
-                # neutralized excess against the parent control and the new
-                # step quarter.
                 "min_return": {
                     "enforcement": "warn",
                     "target": self.min_return,
@@ -283,280 +162,62 @@ class AcceptanceRules:
                 },
             },
             "graduation": {
-                "evaluated_on": "held_out_replay_after_all_development_ends",
-                "all_required": required,
+                "evaluated_on": (
+                    "one continuous replay of the frozen artifact over the forward "
+                    "period and then Held-out, both after research ends"
+                ),
+                "freeze_gate": {
+                    "full_span_validations": (
+                        f">= {verdict.FREEZE_MIN_FULL_SPAN_VALIDATIONS} in the arm"
+                    ),
+                    "deflated_sharpe_probability": (
+                        f">= {verdict.FREEZE_MIN_DSR_PROBABILITY} for the nominee's "
+                        "research-period neutralized IR; trials = distinct revisions "
+                        "validated in the arm"
+                    ),
+                    "freezes_per_arm": 1,
+                },
+                "forward": {
+                    "lower_bound": (
+                        f"{verdict.FORWARD_CONFIDENCE:.0%} one-sided block-bootstrap "
+                        "lower bound of annualized neutralized excess > 0"
+                    ),
+                    "recency": (
+                        f"neutralized excess of the last {verdict.RECENCY_MONTHS} "
+                        "months >= 0"
+                    ),
+                    "max_drawdown": f"<= {self.max_drawdown}",
+                    "excess_at_cost_stress": (
+                        f"> 0 with slippage multiplied by {self.cost_stress_multiplier}"
+                    ),
+                    "round_trips": (
+                        f">= {verdict.MIN_ROUND_TRIPS_PER_MONTH} per month"
+                    ),
+                    "mean_gross": f">= {verdict.MIN_MEAN_GROSS}",
+                    "strategy_error": "none",
+                },
+                "heldout": {
+                    "neutralized_excess": (
+                        f">= -{verdict.HELDOUT_TOLERANCE_Z} x forward tracking error "
+                        "/ sqrt(years)"
+                    ),
+                    "max_drawdown": f"<= {self.max_drawdown}",
+                    "mean_gross": f">= {verdict.MIN_MEAN_GROSS}",
+                    "strategy_error": "none",
+                },
             },
-        }
-
-    def heldout_verdict(
-        self,
-        summary: Mapping[str, object] | None,
-        walk_forward: Mapping[str, object] | None = None,
-        selection: Mapping[str, object] | None = None,
-        final_artifact: Mapping[str, object] | None = None,
-        window: Mapping[str, object] | None = None,
-    ) -> dict[str, object]:
-        """Graduation verdict of one Held-out replay (docs/pipeline-design.md §3.3).
-
-        ``graduated`` iff (a) the frozen strategy beat its benchmark on
-        Held-out both raw (excess return > 0) and after neutralization
-        (``benchmark.neutralized_excess_return > 0``, so a raw excess that is
-        only a size tilt does not graduate), earned a positive annualized
-        Sharpe, and stayed within the experiment's ``max_drawdown`` — the one
-        place that cap decides an outcome — and (b) the final
-        Epoch's walk-forward transitions (``ledger.walk_forward_transitions``)
-        show a positive *neutralized* excess in at least two thirds of them
-        (rounded up), on the same caliber (a) applies to Held-out itself.
-        Otherwise ``discarded`` with every failing reason. A missing or
-        non-finite input is itself a failing reason: a replay that cannot
-        prove the conditions did not pass, and a transition with no measured
-        sign (``unmeasured``: no establishable neutralized excess, or a failed
-        replay the ledger never classified) is named in its own reason rather
-        than graded as a negative. A transition whose strategy code crashed
-        (``failed``) is a measured non-positive one. Term (b) is
-        ``not_applicable`` when the schedule has no transitions, and the
-        verdict then rests on (a).
-
-        Term (b) scores the development chain, most of whose transitions
-        replayed artifacts this one replaced. So whenever the schedule produced
-        transitions at all, (c) requires ``confirmation_folds`` of
-        them (``ledger.final_artifact_transitions``) to have replayed the
-        shipped artifact itself, and those to clear the same two-thirds rule:
-        an artifact frozen in the Epoch's last Fold has none of its own, and
-        the chain's record is not evidence about it. The same knob reserves
-        that many Folds at the end of development, in which ``finish_fold``
-        refuses a new nomination, so the artifact in force can actually earn
-        the transitions this term asks for. Set the knob to 0 to drop both.
-
-        Two optional terms are off by default and only tighten (a). With
-        ``cost_stress_multiplier > 1`` the excess must still be positive after
-        paying that multiple of the profile's slippage (the summary's
-        ``cost_sensitivity`` block prices one basis point per side); with
-        ``heldout_min_trades > 0`` the replay must have closed at least that
-        many round trips per configured window (``_heldout_trade_floor``). Both
-        fail closed when the input they need is absent, and the thresholds used
-        are recorded in the verdict.
-
-        ``diagnostics`` rides beside the gating metrics: the deflated-Sharpe
-        probability, the trial count behind it and the Validation null
-        percentile of the Fold that froze this strategy (``selection``, from
-        ``ledger.frozen_selection``), the mean null percentile of term (b)'s
-        transitions, and the shipped artifact's own two counts from term (c).
-        Each is ``None`` when it was not computed, and only the term (c) counts
-        also decide anything.
-
-        ``window`` is the replay window the figures were measured on, as the
-        Held-out runner states it (``folds.heldout_periods``): the replayed
-        bounds, the configured end and the truncation reason when the release
-        ended before it. Carried verbatim so the verdict says what it judged.
-        """
-        reasons: list[str] = []
-        values: dict[str, float | None] = {}
-        source = summary if isinstance(summary, Mapping) else {}
-        if not source or source.get("status") == "failed":
-            reasons.append("heldout_failed")
-        benchmark = source.get("benchmark") if isinstance(source.get("benchmark"), Mapping) else {}
-        for name, value in (
-            ("total_return", source.get("total_return")),
-            ("benchmark_return", benchmark.get("benchmark_return")),
-            ("neutralized_excess_return", benchmark.get("neutralized_excess_return")),
-            ("sharpe", source.get("sharpe")),
-            ("max_drawdown", source.get("max_drawdown")),
-        ):
-            values[name] = _finite_number(value)
-            if values[name] is None:
-                reasons.append(f"missing_{name}")
-        total_return, bench, neutralized, sharpe, drawdown = (
-            values["total_return"],
-            values["benchmark_return"],
-            values["neutralized_excess_return"],
-            values["sharpe"],
-            values["max_drawdown"],
-        )
-        excess = (
-            total_return - bench if total_return is not None and bench is not None else None
-        )
-        if excess is not None and excess <= 0:
-            reasons.append("excess_return_not_positive")
-        # A raw excess a size or beta tilt could have produced is not an edge:
-        # the neutralized excess has to clear zero on its own.
-        if neutralized is not None and neutralized <= 0:
-            reasons.append("neutralized_excess_return_not_positive")
-        if sharpe is not None and sharpe <= 0:
-            reasons.append("sharpe_not_positive")
-        if drawdown is not None and abs(drawdown) > self.max_drawdown:
-            reasons.append("max_drawdown_exceeded")
-        stressed_excess: float | None = None
-        if self.cost_stress_multiplier > 1:
-            sensitivity = source.get("cost_sensitivity")
-            sensitivity = sensitivity if isinstance(sensitivity, Mapping) else {}
-            slippage = _finite_number(sensitivity.get("slippage_bps"))
-            per_bp = _finite_number(sensitivity.get("cost_per_bp_per_side"))
-            if excess is None or slippage is None or per_bp is None:
-                # Without the priced cost the stress cannot be evaluated, and an
-                # unprovable condition is a failing one.
-                reasons.append("missing_cost_sensitivity")
-            else:
-                stressed_excess = excess - (self.cost_stress_multiplier - 1) * slippage * per_bp
-                if stressed_excess <= 0:
-                    reasons.append("excess_not_positive_at_cost_stress")
-        trades = source.get("trade_count")
-        trade_count = (
-            trades if isinstance(trades, int) and not isinstance(trades, bool) else None
-        )
-        trade_floor = self._heldout_trade_floor(window)
-        if trade_floor is not None:
-            if trade_count is None:
-                reasons.append("missing_trade_count")
-            elif trade_count < trade_floor:
-                reasons.append("insufficient_trades")
-        consistency = self.walk_forward_consistency(walk_forward)
-        if consistency["status"] == "inconsistent":
-            reasons.append(
-                "walkforward_excess_inconsistent("
-                f"{consistency['positive_excess']}/{consistency['transitions']}"
-                f"<{consistency['required']})"
-            )
-        # A transition with no measured sign fails the verdict as its own
-        # reason: the alternative readings are grading it on the raw excess,
-        # which this gate exists to stop, or letting an unknown sign -- a
-        # timeout in a ledger that never classified it, say -- pass as a
-        # measured negative.
-        unmeasured = _count((walk_forward or {}).get("unmeasured")) or 0
-        if unmeasured:
-            reasons.append(
-                f"unmeasured_transitions({unmeasured}/{consistency['transitions']})"
-            )
-        reasons.extend(
-            self._final_artifact_reasons(final_artifact, chain=consistency)
-        )
-        return {
-            "status": "discarded" if reasons else "graduated",
-            "reasons": reasons,
-            "excess_return": excess,
-            "neutralized_excess_return": neutralized,
-            "sharpe": sharpe,
-            "max_drawdown": drawdown,
-            "max_drawdown_limit": self.max_drawdown,
-            "cost_stress_multiplier": self.cost_stress_multiplier,
-            "excess_at_cost_stress": stressed_excess,
-            "trade_count": trade_count,
-            "heldout_min_trades": self.heldout_min_trades,
-            "walk_forward": consistency,
-            "confirmation_folds": self.confirmation_folds,
-            "diagnostics": _verdict_diagnostics(
-                selection, walk_forward, final_artifact, trade_floor
-            ),
-            "window": dict(window) if window is not None else None,
-        }
-
-    def _heldout_trade_floor(self, window: Mapping[str, object] | None) -> int | None:
-        """The closed-round-trip floor one Held-out replay is held to.
-
-        ``heldout_min_trades`` is set for the configured Held-out window. When
-        the release ends before that window does, the replay had
-        proportionally fewer days to trade, so the floor scales by the
-        replayed share of the window's calendar span, rounded up and never
-        below one. ``None`` while the knob is 0; a replay with no stated
-        window (or an untruncated one) keeps the full floor.
-        """
-
-        if self.heldout_min_trades <= 0:
-            return None
-        if window is None:
-            return self.heldout_min_trades
-        start, end, requested_end = (
-            date.fromisoformat(str(window[key]))
-            for key in ("replay_start", "replay_end", "requested_end")
-        )
-        replayed = (end - start).days + 1
-        configured = (requested_end - start).days + 1
-        return max(1, -(-self.heldout_min_trades * replayed // configured))
-
-    def _final_artifact_reasons(
-        self,
-        final_artifact: Mapping[str, object] | None,
-        *,
-        chain: Mapping[str, object],
-    ) -> list[str]:
-        """Term (c): the shipped artifact's own walk-forward record.
-
-        Silent while the knob is 0, and while the schedule produced no
-        transitions at all — nothing in the run could have confirmed any
-        artifact forward, which term (b) already reports as
-        ``not_applicable``. Otherwise the counts must be there and must clear
-        both the floor and the same two-thirds rule, on the completed
-        transitions only: an unmeasured one (already a reason of its own) can
-        neither fill the floor nor sit in the denominator. A completed one
-        whose strategy code crashed stays a non-positive transition and also
-        fails the term by itself: a shipped artifact that cannot run forward
-        does not graduate. Counts that were never computed fail the term
-        rather than pass it by default.
-        """
-
-        required = self.confirmation_folds
-        if required <= 0 or chain.get("status") == "not_applicable":
-            return []
-        own = final_artifact if isinstance(final_artifact, Mapping) else {}
-        counts = [
-            _count(own.get(key))
-            for key in ("transitions", "positive_excess", "failed", "unmeasured")
-        ]
-        if any(value is None for value in counts):
-            return ["missing_final_artifact_transitions"]
-        transitions, positive, failed, unmeasured = counts
-        completed = transitions - unmeasured
-        reasons: list[str] = []
-        if completed < required:
-            reasons.append(f"final_artifact_unconfirmed({completed}/{required})")
-        elif positive < (needed := math.ceil(2 * completed / 3)):
-            reasons.append(
-                "final_artifact_forward_excess_inconsistent("
-                f"{positive}/{completed}<{needed})"
-            )
-        if failed:
-            reasons.append(f"final_artifact_transition_failed({failed})")
-        return reasons
-
-    @staticmethod
-    def walk_forward_consistency(
-        walk_forward: Mapping[str, object] | None,
-    ) -> dict[str, object]:
-        """Term (b) of graduation: positive excess in >= ceil(2/3) of transitions.
-
-        ``not_applicable`` means the schedule produced no transition at all (a
-        single-period window), not that none of them counted: a chain whose
-        every transition replayed a baseline anchor confirmed nothing, and
-        reading that as "not applicable" would let term (c) fall silent with
-        it and an unconfirmed artifact graduate on Held-out alone.
-        """
-        transitions = int((walk_forward or {}).get("transitions") or 0)
-        scheduled = int((walk_forward or {}).get("scheduled") or transitions)
-        if scheduled <= 0:
-            return {"status": "not_applicable", "transitions": 0}
-        positive = int((walk_forward or {}).get("positive_excess") or 0)
-        required = math.ceil(2 * transitions / 3) or 1
-        return {
-            "status": "consistent" if positive >= required else "inconsistent",
-            "source": str((walk_forward or {}).get("source") or ""),
-            "transitions": transitions,
-            "positive_excess": positive,
-            "required": required,
         }
 
     def evaluate(self, summary: dict[str, object]) -> tuple[list[str], list[str]]:
         """(hard_reasons, warnings). The only hard rejects are integrity
         failures: non-finite metrics (every IEEE comparison against NaN is
         False, so a NaN metric would otherwise pass all thresholds). Drawdown,
-        return and Sharpe shortfalls are WARNINGS — the fold still freezes its
-        validated update; a weak step recorded with a warning beats silently
-        resetting the fold chain, and the drawdown cap decides where it matters,
-        in ``heldout_verdict``. A zero ``order_count`` warns the same way: it
-        clears every threshold without ever placing an order, so the warning is
-        the only thing distinguishing it from a real result (``trade_count``
-        counts closed round trips and is 0 for buy-and-hold). Only a summary
-        from a completed full-window evaluation reaches here; an aborted replay
-        never produces one."""
+        return and Sharpe shortfalls are warnings. A zero ``order_count`` warns
+        the same way: it clears every threshold without ever placing an order,
+        so the warning is the only thing distinguishing it from a real result
+        (``trade_count`` counts closed round trips and is 0 for buy-and-hold).
+        Only a summary from a completed evaluation reaches here; an aborted
+        replay never produces one."""
         hard: list[str] = []
         warnings: list[str] = []
         values: dict[str, float] = {}
@@ -587,11 +248,6 @@ class AcceptanceRules:
         if "sharpe" in values and values["sharpe"] < self.min_sharpe:
             warnings.append("sharpe_below_target")
         if summary.get("order_count") == 0:
-            # A strategy that submits no order scores 0.0 on every metric and
-            # therefore clears both soft targets (0.0 < 0.0 is False), freezing
-            # a candidate that proved nothing with an empty warning list. The
-            # freeze stays — the fold honestly found nothing — but the ledger
-            # must not read like a validated result.
             warnings.append("no_orders")
         return hard, warnings
 
@@ -600,46 +256,28 @@ class AcceptanceRules:
 class RollingExperimentConfig:
     experiment_id: str
     experiments_root: Path
-    # Development window as inclusive cadence labels (``2022``..``2025``) or one
-    # explicit ``YYYYMMDD..YYYYMMDD`` range written in both fields.
-    development_first_period: str
-    development_last_period: str
-    heldout_first_period: str
-    heldout_last_period: str
-    fold_period: str = DEFAULT_FOLD_PERIOD
-    # False: one regular Fold per cadence period of the window, no frozen
-    # Test; the last frozen strategy goes straight to Held-out, which is the
-    # verdict. True: rolling Folds inside the window (first period validation
-    # only, each later period a test with the preceding period as its
-    # validation).
-    test_stage: bool = False
-    # Passes over the whole development window; the Fold chain and the Meta
-    # cadence continue across the Epoch boundary.
-    epochs: int = 3
-    # The macro data floor is 2020-01, so 24 months before the default 2022-01
-    # development start is the most history available.
+    # Research, forward and Held-out dates of the arm (pipelines/calendar.py).
+    geometry: ResearchGeometry = DEFAULT_RESEARCH_GEOMETRY
+    # Agent sessions on the research period, run back to back; each ends by
+    # continuing, freezing its nominee or ending the arm without an edge.
+    research_sessions: int = 4
+    # The macro data floor is 2020-01, so 24 months before a July 2022
+    # decision view is the most history every domain carries.
     window_months: int = 24
-    # Length of a Fold's validation window in cadence periods. 1 validates the
-    # Fold's own period; N > 1 (quarterly cadence only, no Test stage) validates
-    # the trailing N periods ending at it, so the Folds step forward one period
-    # at a time and only the last period of each window is new (walk-forward
-    # steps, not disjoint blocks).
-    validation_periods: int = 1
-    min_region_trade_days: int = 2
-    # Per-Fold budgets sized for a one-year Validation region with
-    # ``batch_validate`` available; the host's parent control before the
-    # session is never charged against them.
+    # Per-session budgets. The host's forward replay is charged to none of them.
     max_steps_per_fold: int = 30
     max_backtests_per_fold: int = 30
     # Host-side random-portfolio null controls (K=500 replays, minutes each)
-    # a Fold session may request through ``run_null_control`` before it selects;
-    # the frozen node's block is reused at freeze. 0 leaves the tool out.
+    # a research session may request through ``run_null_control``; the frozen
+    # node's block is reused at freeze. 0 leaves the tool out.
     max_null_controls_per_fold: int = 3
     max_llm_calls: int = 1600
+    # Attempts of one session or of the forward replay before the experiment
+    # fails with the last error.
     session_max_attempts: int = 3
     max_fold_minutes: int = 720
-    # Trailing wrap-up grace added to the Fold session budget and forwarded on
-    # FoldSessionRequest.deadline_grace_seconds. Implementation default only.
+    # Trailing wrap-up grace added to the session budget and forwarded on
+    # ResearchSessionRequest.deadline_grace_seconds. Implementation default only.
     deadline_grace_minutes: int = DEFAULT_DEADLINE_GRACE_MINUTES
     finalize_before_deadline_seconds: int = 300
     per_call_timeout_seconds: int = 3600
@@ -649,53 +287,21 @@ class RollingExperimentConfig:
     # Individual NL Sub Agent failures return audited error results by default
     # so Agent code can decide whether to ignore, retry, or fail closed.
     nl_failure_policy: str = "return_error_with_audit"
-    # Epoch index (1-based) from which folds enter the convergence phase
-    # (fewer modifications while holding returns, down to zero changes).
-    convergence_start_epoch: int = 3
-    # Preserve the Epoch-start Meta session. A positive value additionally
-    # triggers Meta after every N completed Folds, before the next Fold; 0
-    # disables the within-Epoch triggers. The interval counts Folds: the
-    # default 1 puts a Meta session between every two consecutive Folds, and
-    # the Epoch-start session covers the boundary between Epochs.
-    meta_learning_fold_interval: int = 1
-    # Raw prior meta-learning traces handed to the next meta session are bounded
-    # to the most recent N epochs (0 disables raw memory). Unbounded concatenation
-    # grows O(epochs^2); older sessions persist via PRIOR and compact fold history.
-    meta_memory_max_epochs: int = 3
-    # Optional experiment-level research direction injected only into the
-    # active meta-learning prompt.
-    meta_learning_directive: str = ""
     # Optional experiment-level exploration direction injected into every
-    # automatically assembled ordinary Fold prompt. Per-Fold HITL directives
-    # remain a separate, additive control surface.
+    # research session prompt. Per-session directives are additive.
     fold_exploration_directive: str = ""
     # Optional repo-relative directory of Agent-readable notes copied into each
-    # Fold/Meta session's workspace/refs/. Empty keeps the historical no-copy
-    # behavior; a set path must exist and be a directory.
+    # session's workspace/refs/. Empty copies nothing; a set path must exist and
+    # be a directory.
     workspace_reference: str = ""
-    # Which cross-experiment memory tiers mount read-only into every Fold and
-    # Meta workspace: the curated repository library alone, plus the skills of
-    # every graduated experiment, or nothing.
+    # Which cross-experiment memory tiers mount read-only into every session:
+    # the curated repository library alone, plus the skills of every graduated
+    # experiment, or nothing.
     operating_memory: str = DEFAULT_OPERATING_MEMORY
-    # If meta-learning writes workspace/sandbox_environment.json, Pipeline can
-    # build a derived Docker image and use it for later ordinary Fold runs.
-    meta_sandbox_rebuild_enabled: bool = True
-    meta_sandbox_rebuild_timeout_seconds: int = 1800
-    # Keep at most this many derived sandbox images for this experiment; older ones
-    # are best-effort pruned after a successful rebuild (0 disables GC).
-    meta_sandbox_image_keep: int = 3
-    # The post-Held-out deployment adjustment (docs/pipeline-design.md §3.4):
-    # a mechanism-frozen refit of the graduated artifact on the window from
-    # this ``YYYYMMDD`` start to the release's last trading day. Empty = no
-    # such session; only a graduated experiment runs one.
-    deployment_adjustment_start: str = ""
-    # Its replay budget (Steps are the same number); wall clock and LLM calls
-    # reuse max_fold_minutes and max_llm_calls.
-    deployment_max_backtests: int = 6
-    # Step artifact tree (lineage across folds); toggleable for ablations.
+    # Step artifact tree (lineage across sessions); toggleable for ablations.
     step_tree_enabled: bool = True
     # Also record failed validation attempts as lightweight dead-end nodes
-    # (no output snapshot) so later folds can see what was already tried.
+    # (no output snapshot) so later sessions can see what was already tried.
     record_failed_attempts: bool = True
     schedule: StrategySchedule = field(default_factory=StrategySchedule)
     broker_profile: BrokerProfile = field(default_factory=BrokerProfile)
@@ -709,11 +315,11 @@ class RollingExperimentConfig:
             raise ValueError(
                 "experiment_id must contain only letters, digits, underscore, or dash"
             )
+        if not isinstance(self.geometry, ResearchGeometry):
+            raise TypeError("geometry must be a ResearchGeometry")
         for name in (
-            "epochs",
+            "research_sessions",
             "window_months",
-            "validation_periods",
-            "min_region_trade_days",
             "max_steps_per_fold",
             "max_backtests_per_fold",
             "max_llm_calls",
@@ -721,47 +327,18 @@ class RollingExperimentConfig:
             "max_fold_minutes",
             "per_call_timeout_seconds",
             "strategy_fit_timeout_seconds",
-            "convergence_start_epoch",
-            "deployment_max_backtests",
         ):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 raise ValueError(f"{name} must be a positive integer")
-        if self.deployment_adjustment_start and not re.fullmatch(
-            r"\d{8}", self.deployment_adjustment_start
-        ):
-            raise ValueError("deployment_adjustment_start must be YYYYMMDD or empty")
         for name in (
-            "meta_learning_fold_interval",
-            "meta_memory_max_epochs",
             "max_null_controls_per_fold",
             "deadline_grace_minutes",
             "finalize_before_deadline_seconds",
-            "meta_sandbox_rebuild_timeout_seconds",
-            "meta_sandbox_image_keep",
         ):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError(f"{name} must be a non-negative integer")
-        if not isinstance(self.test_stage, bool):
-            raise ValueError("test_stage must be boolean")
-        if self.validation_periods > 1:
-            # Same two rules as build_fold_schedule, checked here so a
-            # params.json is refused at load instead of at the first schedule.
-            if normalize_period(self.fold_period) != "quarter":
-                raise ValueError(
-                    "a multi-period validation window is only supported at quarterly "
-                    f"cadence: fold_period={self.fold_period!r} with "
-                    f"validation_periods={self.validation_periods}"
-                )
-            if self.test_stage:
-                raise ValueError(
-                    "a rolling Test stage does not support a multi-period validation "
-                    f"window: test_stage=True with validation_periods={self.validation_periods}"
-                )
-        assert_no_overlap(
-            self.development_last_period, self.heldout_first_period, period=self.fold_period
-        )
         object.__setattr__(self, "experiments_root", Path(self.experiments_root))
 
     @property
@@ -793,7 +370,7 @@ def fold_session_deadline_seconds(
     max_fold_minutes: float,
     deadline_grace_minutes: float = DEFAULT_DEADLINE_GRACE_MINUTES,
 ) -> float:
-    """Total Fold session budget: main deadline plus trailing wrap-up grace."""
+    """Total session budget: main deadline plus trailing wrap-up grace."""
     return float(max_fold_minutes) * 60.0 + float(deadline_grace_minutes) * 60.0
 
 
@@ -801,8 +378,8 @@ def fold_session_deadline_seconds(
 class SnapshotBundle:
     snapshot_id: str
     decision_ref: str
+    # Empty for a decision-only bundle (``SnapshotProvider.prepare_decision``).
     replay_ref: str
-    data_summary_ref: str = ""
     generation_id: str = ""
 
 
@@ -810,12 +387,13 @@ class SnapshotProvider(Protocol):
     def prepare(
         self,
         *,
-        fold: FoldSpec | None,
         phase: str,
         start: str,
         end: str,
         decision_time: datetime,
     ) -> SnapshotBundle: ...
+
+    def prepare_decision(self, *, decision_time: datetime) -> SnapshotBundle: ...
 
 
 @dataclass(frozen=True)
@@ -841,9 +419,7 @@ class ArtifactStore(Protocol):
 
     Structural, not nominal: a store answers with its own record type (the
     filesystem store returns a plain namespace), so these annotations name the
-    fields a caller may rely on, never an ``isinstance``. The Pipeline turns a
-    freeze into the lineage's own ``FrozenArtifact`` at the one site that
-    freezes (``RollingExperimentPipeline._freeze``).
+    fields a caller may rely on, never an ``isinstance``.
     """
 
     def revision(self, revision_id: str) -> ArtifactRevision: ...
@@ -858,6 +434,14 @@ class ArtifactStore(Protocol):
         fold_id: str,
         run_id: str,
         step_id: str,
+    ) -> FrozenArtifact: ...
+
+    def frozen(
+        self,
+        artifact_id: str,
+        *,
+        expected_path: str | Path | None = None,
+        experiment_id: str | None = None,
     ) -> FrozenArtifact: ...
 
 
@@ -877,8 +461,43 @@ class EvaluationRequest:
 
 
 @dataclass(frozen=True)
+class ReplaySpan:
+    """Consecutive replay slots replayed as one book.
+
+    ``snapshot`` carries the first slot and the decision view at its anchor;
+    ``continuation`` names the slots after it. ``label`` names the span on
+    every record (``full`` for the whole research period).
+    """
+
+    label: str
+    mode: str
+    start: str
+    end: str
+    snapshot: SnapshotBundle
+    continuation: tuple[str, ...] = ()
+
+    def request(
+        self,
+        revision: ArtifactRevision,
+        *,
+        schedule: StrategySchedule,
+        broker_profile: BrokerProfile,
+    ) -> EvaluationRequest:
+        return EvaluationRequest(
+            revision=revision,
+            snapshot=self.snapshot,
+            mode=self.mode,
+            start=self.start,
+            end=self.end,
+            schedule=schedule,
+            broker_profile=broker_profile,
+            continuation=self.continuation,
+        )
+
+
+@dataclass(frozen=True)
 class EvaluationResult:
-    """One completed full-window evaluation.
+    """One completed evaluation.
 
     A backend either returns this or raises: a partial or aborted replay never
     produces an EvaluationResult, so there is no "incomplete" variant to carry.
@@ -897,27 +516,42 @@ class StepResult:
     step_id: str
     revision_id: str
     validation: EvaluationResult
-    selected: bool = False
-    # The host's parent control recorded as an in-session Step node: the
-    # inherited parent replayed unchanged on this Fold's Validation window
-    # before the Agent started. It is never charged against the Step budget.
-    parent_control: bool = False
+    # The ``ReplaySpan.label`` the validation replayed.
+    span: str
+
+
+# How a research session ended. ``continue`` hands the next session a start
+# node, ``freeze`` nominates a node for the freeze gate, ``no_edge`` ends the
+# arm without a deliverable, and ``deadline`` is a session whose wrap-up grace
+# ran out before it finished.
+SESSION_OUTCOMES = ("continue", "freeze", "no_edge", "deadline")
 
 
 @dataclass(frozen=True)
-class FoldSessionRequest:
+class ResearchSessionRequest:
     experiment_id: str
-    epoch_id: str
-    fold: FoldSpec
+    session_id: str
+    # 1-based position among ``sessions_total`` research sessions.
+    session_index: int
+    sessions_total: int
     run_id: str
-    parent: FrozenArtifact | None
+    # The start node's snapshot the working copy is seeded from; None seeds
+    # the blank template.
+    start: FrozenArtifact | None
+    # The Agent's only data view: the decision view at research end, anchored
+    # at ``decision_time``.
     snapshot: SnapshotBundle
+    decision_time: datetime
+    # The whole research period, the span every Validation replays.
+    validation: ReplaySpan
+    # First day of the decision view's history window (``window_months``
+    # before research end), the Agent-visible input window.
+    input_window_start: str
     max_steps: int
     max_backtests: int
     max_llm_calls: int
     deadline_seconds: float
-    # Trailing wrap-up grace reserved from deadline_seconds. Live Fold sessions
-    # always set this from RollingExperimentConfig.deadline_grace_minutes.
+    # Trailing wrap-up grace reserved from deadline_seconds.
     deadline_grace_seconds: float = DEFAULT_DEADLINE_GRACE_MINUTES * 60.0
     directive: str = ""
     prior: str = ""
@@ -925,41 +559,6 @@ class FoldSessionRequest:
     # None keeps the experiment default. The "auto" selector still picks which
     # devices by free memory at container start.
     sandbox_gpu_count: int | None = None
-    # Experiment contract the session must publish in its run manifest and
-    # enforce while it runs. Closed source carries the same values on the
-    # manifest the pipeline writes; here the pipeline hands them to the
-    # sandbox owner, which is the component that writes the manifest.
-    fold_period: str = DEFAULT_FOLD_PERIOD
-    # Cadence periods in this Fold's Validation window (RollingExperimentConfig).
-    validation_periods: int = 1
-    # Whether a frozen Test follows this Fold (rolling development) or the
-    # Held-out replay is the next and final evaluation (regular Folds).
-    test_stage: bool = False
-    # One of the ``confirmation_folds`` Folds that close the development
-    # window. The session's prompt opens with the arithmetic: content frozen
-    # here mints a new artifact id that could never collect the own
-    # transitions graduation term (c) asks for, so these Folds confirm the
-    # artifact in force.
-    confirmation_fold: bool = False
-    # The parent's completed Validation on this Fold's window, replayed by the
-    # host before the session; None without a parent or when it failed. The
-    # developer records it as the session's first Step node.
-    parent_control: EvaluationResult | None = None
-    # That control's random-portfolio null, measured by the host beside the
-    # replay (None when the backend runs none); forwarded, never recomputed.
-    parent_control_null: Mapping[str, object] | None = None
-    # Why the pre-session control produced no result, when it failed: the
-    # parent's own exception (any other failure fails the attempt). The prompt
-    # asks for a minimal repair of that error, so the session has to be told
-    # what went wrong rather than only that nothing is there.
-    parent_control_error: str = ""
-    epoch_index: int = 1
-    phase: str = "exploration"
-    # ``fold`` for a development Fold; ``deployment_adjustment`` for the
-    # post-Held-out refit of the graduated artifact (docs/pipeline-design.md
-    # §3.4), which the developer runs on the Fold scaffold with the mechanism
-    # frozen, no null controls and the Held-out visible.
-    session_kind: str = "fold"
     acceptance_rules: Mapping[str, object] = field(default_factory=dict)
     modification_constraints: ModificationConstraints = field(
         default_factory=ModificationConstraints
@@ -984,72 +583,43 @@ class FoldSessionRequest:
 
 
 @dataclass(frozen=True)
-class FoldSessionResult:
+class ResearchSessionResult:
     conversation_id: str
     steps: tuple[StepResult, ...]
-    selected_step_id: str | None = None
-    finish_reason: str = "fold_finished"
-    # Keyword-only from here: these are independent optional records, so a new
-    # one must never be able to land in an older field's positional slot.
+    # One of ``SESSION_OUTCOMES``.
+    outcome: str
+    # Keyword-only from here: independent optional fields, so a new one can
+    # never land in an older field's positional slot.
     _: KW_ONLY
-    # The Agent's own account of a voluntary early finish, as ``finish_fold``
-    # recorded it. Empty when the session did not finish early.
-    early_stop_reason: str = ""
-    # Host path of this run's manifest. The fold ledger record carries it so a
-    # later Meta session can read the run's backtest summaries back out.
+    # ``freeze``: the nominated Step; ``continue``: the node the next session
+    # starts from. None starts the next session where this one started.
+    node_id: str | None = None
+    # The Agent's own account of its outcome.
+    reason: str = ""
+    finish_reason: str = ""
+    # Host path of this run's manifest.
     run_manifest_ref: str = ""
     # Trusted host path to this run's collected workspace/skills audit copy.
     skills_source_ref: str = ""
-    # The Agent's evidence for finishing with ``outcome="no_edge"``: no node
-    # is nominated, the parent (if any) stays the lineage head. Empty when a
-    # node was nominated or the session ended without a finish.
-    no_edge_reason: str = ""
-    # The Agent declared the nominated package a control (``finish_fold``
-    # ``baseline_anchor=true``): a freeze with a parent is then an anchor too.
-    baseline_anchor: bool = False
-    # ``finish_fold`` ``outcome="terminate"``: the finish is recorded like a
-    # no-edge one (``no_edge_reason`` carries the reason) and ends the arm.
-    terminate: bool = False
+    # The session's workspace PRIOR.md at its end: the handoff the next session
+    # reads. Empty when the session left none.
+    prior: str = ""
     # Null-control blocks the session already computed, keyed by step id; the
     # Pipeline reuses the frozen node's block instead of drawing it again.
     null_controls: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
 
-
-@dataclass(frozen=True)
-class MetaSessionResult:
-    """What one Meta session produced: PRIOR and skills, never a strategy.
-
-    A strategy improvement the Meta finds is written into PRIOR as a candidate
-    for the next Fold, which validates it before it can be frozen.
-    """
-
-    prior: str
-    conversation_id: str = ""
-    # Trusted host path to this run's collected workspace/skills audit copy.
-    skills_source_ref: str = ""
+    def __post_init__(self) -> None:
+        if self.outcome not in SESSION_OUTCOMES:
+            raise ValueError(f"unknown research session outcome: {self.outcome!r}")
 
 
-FoldDeveloper = Callable[[FoldSessionRequest], FoldSessionResult]
-MetaLearner = Callable[[dict[str, object]], "MetaSessionResult"]
-
-
-@dataclass(frozen=True)
-class FoldOutcome:
-    fold_id: str
-    run_id: str
-    fold_status: str
-    # None when the fold recorded no freezable outcome (first fold without an
-    # acceptable baseline): the run continues and only fails at the end if no
-    # fold ever froze an artifact.
-    frozen: FrozenArtifact | None
-    validation_summary: dict[str, object] | None
-    test_summary: dict[str, object] | None
+ResearchDeveloper = Callable[[ResearchSessionRequest], ResearchSessionResult]
 
 
 __all__ = [
     "DEFAULT_DEADLINE_GRACE_MINUTES",
-    "DEFAULT_FOLD_PERIOD",
     "DEFAULT_RESEARCH_GEOMETRY",
+    "SESSION_OUTCOMES",
     "AcceptanceRules",
     "ArtifactRevision",
     "ArtifactStore",
@@ -1057,13 +627,11 @@ __all__ = [
     "EvaluationRequest",
     "EvaluationResult",
     "ExecutionMode",
-    "FoldDeveloper",
-    "FoldOutcome",
-    "FoldSessionRequest",
-    "FoldSessionResult",
     "FrozenArtifact",
-    "MetaLearner",
-    "MetaSessionResult",
+    "ReplaySpan",
+    "ResearchDeveloper",
+    "ResearchSessionRequest",
+    "ResearchSessionResult",
     "RollingExperimentConfig",
     "SnapshotBundle",
     "SnapshotProvider",

@@ -1,7 +1,7 @@
 """Every configurable knob must change behaviour, not merely be accepted.
 
 Half this repository's defects were parameters that existed and did nothing —
-``image_keep``, ``meta_memory_max_epochs``, ``record_failed_attempts``,
+``image_keep``, ``record_failed_attempts``,
 ``step_tree_enabled``, the ``ModificationConstraints`` that never reached the
 tool. A test asserting a knob is accepted is the bug; each test here changes
 the knob and asserts the observable difference.
@@ -21,7 +21,6 @@ from autotrade.environment.artifacts import (
     new_revision_id,
 )
 from autotrade.environment.identity import AgentRefStore
-from autotrade.environment.runtime import agent_trace_path
 from autotrade.environment.step_tree import StepTree
 from autotrade.environment.tools import ModificationCheckTool, ToolRegistry
 from autotrade.pipelines.config import RollingExperimentConfig
@@ -95,8 +94,11 @@ class RecordFailedAttemptsTest(unittest.TestCase):
         from autotrade.environment.strategy import StrategySchedule
         from autotrade.environment.time_budget import InferenceTimeBudget
         from autotrade.environment.tools import SafeWorkspace
-        from autotrade.pipelines.config import FoldSessionRequest, SnapshotBundle
-        from autotrade.pipelines.folds import FoldSpec
+        from autotrade.pipelines.config import (
+            ReplaySpan,
+            ResearchSessionRequest,
+            SnapshotBundle,
+        )
         from autotrade.pipelines.local_backend import (
             BatchValidateTool,
             FoldBacktestTool,
@@ -106,26 +108,18 @@ class RecordFailedAttemptsTest(unittest.TestCase):
         models = root / "models"
         models.mkdir(parents=True, exist_ok=True)
         tree = StepTree(root / "steps")
-        moment = datetime(2025, 12, 31, 23, 59, 59, tzinfo=UTC)
-        fold = FoldSpec(
-            fold_id="fold_2026Q1",
-            input_window_start="20240101",
-            input_window_end="20250930",
-            validation_start="20251001",
-            validation_end="20251231",
-            test_start="20260101",
-            test_end="20260331",
-            valid_decision_time=moment,
-            test_decision_time=moment,
-        )
-        request = FoldSessionRequest(
+        snapshot = SnapshotBundle("snap", "decision", "replay")
+        request = ResearchSessionRequest(
             experiment_id="exp",
-            epoch_id="epoch_001",
-            fold=fold,
+            session_id="s1",
+            session_index=1,
+            sessions_total=4,
             run_id="run_x",
-            parent=None,
-            prior="",
-            snapshot=SnapshotBundle("snap", "decision", "replay"),
+            start=None,
+            snapshot=snapshot,
+            decision_time=datetime(2025, 6, 30, 23, 59, 59, tzinfo=UTC),
+            validation=ReplaySpan("full", "valid", "20210701", "20250630", snapshot),
+            input_window_start="20230701",
             max_steps=10,
             max_backtests=30,
             max_llm_calls=200,
@@ -152,6 +146,7 @@ class RecordFailedAttemptsTest(unittest.TestCase):
             broker_profile=BrokerProfile(),
             time_budget=InferenceTimeBudget(duration_seconds=300),
             ref_store=AgentRefStore(root / "experiment"),
+            ledger=ExperimentLedger(root / "ledger.jsonl"),
         )
         batch = BatchValidateTool(
             backtest=backtest,
@@ -236,10 +231,8 @@ class RecordFailedAttemptsTest(unittest.TestCase):
                 recorded,
             )
             self.assertNotIn(str(root), message)
-            self.assertNotIn("fold_2026Q1", message)
-            self.assertNotIn("heldout", message.lower())
 
-    def test_failed_validation_redacts_test_calendar_and_host_paths(self) -> None:
+    def test_failed_validation_redacts_host_paths(self) -> None:
         from autotrade.environment.tools.base import ToolError
 
         with TemporaryDirectory() as tmp:
@@ -247,91 +240,21 @@ class RecordFailedAttemptsTest(unittest.TestCase):
             tool, tree = self._tool(
                 root,
                 record_failed_attempts=True,
-                error=RuntimeError(
-                    f"fold_2026Q1 leaked 20260101..20260331 at {root / 'secret.json'}"
-                ),
+                error=RuntimeError(f"replay failed at {root / 'secret.json'}"),
             )
             with self.assertRaises(ToolError) as caught:
                 tool()
             message = str(caught.exception.details["candidates"][0]["error"])
             recorded = str(tree.nodes()[0]["error"])
-            self.assertTrue(message.startswith("daily Validation failed: RuntimeError:"))
             self.assertEqual(message, recorded)
-            self.assertNotIn("fold_2026Q1", message)
-            self.assertNotIn("20260101", message)
-            self.assertNotIn("20260331", message)
-            self.assertNotIn(str(root), message)
-            self.assertNotIn("secret.json", message)
-            self.assertIn("[host_path]", message)
-            self.assertIn("[redacted]", message)
+            self.assertEqual(
+                message, "daily Validation failed: RuntimeError: replay failed at [host_path]"
+            )
 
     def test_the_config_default_records_them(self) -> None:
-        config = RollingExperimentConfig(
-            "exp", Path("/tmp/experiments"), "2022Q1", "2022Q1", "2023Q1", "2023Q1", fold_period="quarter"
-        )
+        config = RollingExperimentConfig("exp", Path("/tmp/experiments"))
         self.assertTrue(config.record_failed_attempts)
         self.assertTrue(config.step_tree_enabled)
-
-
-class MetaMemoryBoundTest(unittest.TestCase):
-    """``meta_memory_max_epochs`` bounds the raw Meta trace concatenation:
-    unbounded, it grows O(epochs^2)."""
-
-    def _pipeline(self, root: Path, *, keep: int):
-        from autotrade.pipelines.experiment import RollingExperimentPipeline
-
-        config = RollingExperimentConfig(
-            "exp", root / "experiments", "2022Q1", "2022Q1", "2023Q1", "2023Q1", fold_period="quarter",
-            meta_memory_max_epochs=keep,
-        )
-        AgentRefStore(config.experiment_dir)
-        ledger = ExperimentLedger(config.ledger_path)
-        artifacts_root = config.experiment_dir / "artifacts"
-        for index, epoch in enumerate(("epoch_001", "epoch_002", "epoch_003"), start=1):
-            run_id = f"run_meta_{index}"
-            trace = agent_trace_path(artifacts_root, run_id)
-            trace.parent.mkdir(parents=True, exist_ok=True)
-            trace.write_text(json.dumps({"epoch": epoch}) + "\n", encoding="utf-8")
-            ledger.append(
-                {
-                    "record_type": "meta_learning",
-                    "experiment_id": "exp",
-                    "epoch_id": epoch,
-                    "fold_id": epoch,
-                    "meta_learning_id": epoch,
-                    "run_id": run_id,
-                    "agent_trace_ref": str(trace),
-                    "prior": f"prior {index}",
-                }
-            )
-        pipeline = RollingExperimentPipeline(
-            config,
-            snapshots=object(),
-            artifacts=object(),
-            evaluator=object(),
-            developer=lambda request: None,
-            meta_learner=lambda facts: None,
-            ledger=ledger,
-        )
-        return pipeline
-
-    def test_only_the_most_recent_n_epochs_are_carried(self) -> None:
-        with TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            for keep, expected in ((0, []), (1, ["epoch_003"]), (2, ["epoch_002", "epoch_003"])):
-                with self.subTest(keep=keep):
-                    pipeline = self._pipeline(root / f"keep_{keep}", keep=keep)
-                    memory = pipeline._prior_meta_learning_logs("epoch_004")
-                    epochs = [json.loads(line)["epoch"] for line in memory.splitlines() if line]
-                    self.assertEqual(epochs, expected)
-
-    def test_the_current_session_is_excluded_from_its_own_memory(self) -> None:
-        with TemporaryDirectory() as tmp:
-            pipeline = self._pipeline(Path(tmp) / "current", keep=3)
-            memory = pipeline._prior_meta_learning_logs("epoch_003")
-            epochs = [json.loads(line)["epoch"] for line in memory.splitlines() if line]
-            self.assertEqual(epochs, ["epoch_001", "epoch_002"])
-            self.assertNotIn("epoch_003", memory)
 
 
 class ConvergencePhaseTest(unittest.TestCase):
@@ -356,17 +279,6 @@ class ConvergencePhaseTest(unittest.TestCase):
         self.assertNotIn("收敛期", exploration)
         self.assertIn("收敛期", convergence)
         self.assertNotEqual(exploration, convergence)
-
-    def test_the_config_carries_closed_s_default(self) -> None:
-        config = RollingExperimentConfig(
-            "exp", Path("/tmp/experiments"), "2022Q1", "2022Q1", "2023Q1", "2023Q1", fold_period="quarter"
-        )
-        self.assertEqual(config.convergence_start_epoch, 3)
-        with self.assertRaisesRegex(ValueError, "convergence_start_epoch"):
-            RollingExperimentConfig(
-                "exp", Path("/tmp/experiments"), "2022Q1", "2022Q1", "2023Q1", "2023Q1", fold_period="quarter",
-                convergence_start_epoch=0,
-            )
 
 
 class StepTreeAblationTest(unittest.TestCase):

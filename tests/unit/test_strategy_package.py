@@ -7,7 +7,6 @@ budgets the strategy runs under come from one source each.
 
 from __future__ import annotations
 
-import inspect
 import subprocess
 import sys
 from datetime import datetime
@@ -27,7 +26,6 @@ from autotrade.environment.sandbox import SandboxLimits
 from autotrade.environment.strategy import CN_TZ, AccountSnapshot, StrategyContext
 from autotrade.environment.strategy_loader import (
     StrategyLoadError,
-    load_strategy_module,
     validate_strategy_package,
     validate_strategy_source,
 )
@@ -35,9 +33,11 @@ from autotrade.environment.tools import ToolError
 from autotrade.environment.tools.finish_fold import executable_output_structure
 from autotrade.environment.tools.modification_check import ModificationCheckTool
 from autotrade.pipelines.config import rolling_default
-from autotrade.pipelines.experiment import _MAX_DEADLINE_OVERRIDE_MINUTES, _session_budgets
+from autotrade.pipelines.experiment import (
+    _MAX_DEADLINE_OVERRIDE_MINUTES,
+    _session_budgets,
+)
 from autotrade.pipelines.hitl_state import WEB_CREATE_DEFAULTS
-from autotrade.pipelines.local_backend import LLMMetaLearner
 from autotrade.pipelines.worker import _strategy_sandbox_from_spec
 
 MAIN = '''import numpy as np
@@ -324,10 +324,6 @@ def test_budgets_come_from_one_source_each():
         rolling_default("max_llm_calls"),
     ) == (720, 30, 30, 1600)
     assert _MAX_DEADLINE_OVERRIDE_MINUTES == 2 * rolling_default("max_fold_minutes") == 1440
-    # The per-decision wall clock the Meta session publishes is the executor default.
-    meta_defaults = inspect.signature(LLMMetaLearner.__init__).parameters
-    assert meta_defaults["decision_timeout_seconds"].default == limits.timeout_seconds
-    assert meta_defaults["fit_timeout_seconds"].default == limits.fit_timeout_seconds
 
     config = SimpleNamespace(
         max_steps_per_fold=rolling_default("max_steps_per_fold"),

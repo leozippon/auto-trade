@@ -37,9 +37,11 @@ from fastapi.testclient import TestClient
 import autotrade
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.runtime import write_json_atomic
+from autotrade.pipelines.config import DEFAULT_RESEARCH_GEOMETRY
 from autotrade.pipelines.hitl_state import (
     WEB_CREATE_DEFAULTS,
     ControlState,
+    build_session_plan,
     proc_start_ticks,
     read_control,
     write_control,
@@ -114,7 +116,7 @@ write_json_atomic(
         state="running_session",
         pid=pid,
         pid_start_ticks=proc_start_ticks(pid),
-        session_key="epoch_001/fold_2022Q2",
+        session_key="s2",
     ),
 )
 open("__READY__", "w").close()
@@ -145,26 +147,15 @@ class WorkerLifecycleTest(unittest.TestCase):
         )
         write_json_atomic(
             self.hitl / "schedule.json",
-            {
-                "schema_version": 1,
-                "epochs": 1,
-                "sessions": [
-                    {"key": "epoch_001/fold_2022Q1", "kind": "fold",
-                     "epoch_id": "epoch_001", "fold_id": "fold_2022Q1"},
-                    {"key": "epoch_001/fold_2022Q2", "kind": "fold",
-                     "epoch_id": "epoch_001", "fold_id": "fold_2022Q2"},
-                    {"key": "heldout", "kind": "heldout", "epoch_id": "epoch_001",
-                     "periods": [{"label": "2023Q1"}]},
-                ],
-            },
+            build_session_plan(2, forward={}),
         )
-        # fold_2022Q1 is settled (it has a durable record); fold_2022Q2 is not.
+        # s1 is settled (it has a durable record); s2 is not.
         ExperimentLedger(self.directory / "ledgers/experiment_ledger.jsonl").append(
             {
-                "record_type": "fold", "experiment_id": "exp_ctl", "epoch_id": "epoch_001",
-                "fold_id": "fold_2022Q1", "run_id": "run_001",
-                "session_key": "epoch_001/fold_2022Q1", "fold_status": "frozen",
-                "validation_result": {"total_return": 0.1},
+                "record_type": "research_session", "experiment_id": "exp_ctl",
+                "epoch_id": "research", "fold_id": "s1", "run_id": "run_001",
+                "session_key": "s1", "session_id": "s1", "outcome": "continue",
+                "steps": [],
             }
         )
         self.client = TestClient(create_app(self.repo_root, self.experiments_root))
@@ -175,7 +166,7 @@ class WorkerLifecycleTest(unittest.TestCase):
         process = subprocess.Popen(
             [sys.executable, "-c", textwrap.dedent(source).format(
                 ready=str(ready), src=SRC_ROOT,
-                control=str(self.control_path), session="epoch_001/fold_2022Q2",
+                control=str(self.control_path), session="s2",
             )],
             start_new_session=True, stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -245,7 +236,7 @@ class WorkerLifecycleTest(unittest.TestCase):
     # ---- terminate -------------------------------------------------------
     def test_terminate_signals_the_worker_group_and_reports_a_graceful_exit(self) -> None:
         process = self._spawn(_COOPERATIVE)
-        self._publish(process, session_key="epoch_001/fold_2022Q2")
+        self._publish(process, session_key="s2")
         started = time.monotonic()
         response = self._post(action="terminate")
         elapsed = time.monotonic() - started
@@ -269,11 +260,11 @@ class WorkerLifecycleTest(unittest.TestCase):
         write_control(
             self.control_path,
             ControlState(
-                directives={"epoch_001/fold_2022Q2": "keep the turnover down"},
+                directives={"s2": "keep the turnover down"},
             ),
         )
         process = self._spawn(_CONSUMES_CONTROLS)
-        self._publish(process, session_key="epoch_001/fold_2022Q2")
+        self._publish(process, session_key="s2")
         started = time.monotonic()
         body = self._post(action="terminate").json()
         elapsed = time.monotonic() - started
@@ -308,7 +299,7 @@ class WorkerLifecycleTest(unittest.TestCase):
             {"schema_version": 1, "pid": 999_999_999, "state": "stopped"},
         )
         process = self._spawn(_STUBBORN)
-        self._publish(process, session_key="epoch_001/fold_2022Q2")
+        self._publish(process, session_key="s2")
 
         waiting = threading.Event()
         real_await = manager_module._await_worker_exit
@@ -358,7 +349,7 @@ class WorkerLifecycleTest(unittest.TestCase):
         would not prove the process ever dies.
         """
         process = self._spawn(_STUBBORN)
-        self._publish(process, session_key="epoch_001/fold_2022Q2")
+        self._publish(process, session_key="s2")
         started = time.monotonic()
         body = self._post(action="terminate").json()
         elapsed = time.monotonic() - started
@@ -387,7 +378,7 @@ class WorkerLifecycleTest(unittest.TestCase):
             ControlState(mode="manual", request="stop", restart_pending=True),
         )
         process = self._spawn(_COOPERATIVE)
-        self._publish(process, session_key="epoch_001/fold_2022Q2")
+        self._publish(process, session_key="s2")
         response = self._post(action="restart")
         self.assertEqual(response.status_code, 200, response.text)
         body = response.json()
@@ -422,11 +413,11 @@ class WorkerLifecycleTest(unittest.TestCase):
             ControlState(
                 mode="manual",
                 request="stop",
-                directives={"epoch_001/fold_2022Q2": "keep the turnover down"},
+                directives={"s2": "keep the turnover down"},
             ),
         )
         process = self._spawn(_CONSUMES_CONTROLS)
-        self._publish(process, session_key="epoch_001/fold_2022Q2")
+        self._publish(process, session_key="s2")
         started = time.monotonic()
         response = self._post(action="restart")
         elapsed = time.monotonic() - started
@@ -445,7 +436,7 @@ class WorkerLifecycleTest(unittest.TestCase):
             self.control_path,
             ControlState(
                 request="stop",
-                directives={"epoch_001/fold_2022Q2": "keep the turnover down"},
+                directives={"s2": "keep the turnover down"},
             ),
         )
         spawned = manager_module.ExperimentManager(
@@ -455,7 +446,7 @@ class WorkerLifecycleTest(unittest.TestCase):
         control = read_control(self.control_path)
         self.assertIsNone(control.request)
         self.assertEqual(
-            control.directives, {"epoch_001/fold_2022Q2": "keep the turnover down"}
+            control.directives, {"s2": "keep the turnover down"}
         )
 
     def test_start_worker_keeps_worker_temp_files_off_the_shared_tmpfs(self) -> None:
@@ -564,7 +555,7 @@ class WorkerLifecycleTest(unittest.TestCase):
         """
         self._install_worker_script()
         process = self._spawn(_STUBBORN)
-        self._publish(process, session_key="epoch_001/fold_2022Q2")
+        self._publish(process, session_key="s2")
         with patch.object(manager_module, "_RESTART_GRACE_SECONDS", 1.0):
             response = self._post(action="restart")
         self.assertEqual(response.status_code, 200, response.text)
@@ -603,7 +594,7 @@ if __name__ == "__main__":
 #: entry is a value that used to reach `params.json` and kill the worker a
 #: second later; the pre-flight turns each into an actionable HTTP 400.
 _REJECTED_CREATES = (
-    ({"epochs": -1}, "epochs must be a positive integer"),
+    ({"research_sessions": 0}, "research_sessions must be a positive integer"),
     ({"max_steps_per_fold": 0}, "max_steps_per_fold must be a positive integer"),
     ({"initial_cash": 0}, "initial_cash must be a positive finite number"),
     ({"max_drawdown": 1.5}, "max_drawdown must be between 0.0 and 1.0"),
@@ -616,8 +607,7 @@ _REJECTED_CREATES = (
     ({"reasoning_effort": "turbo"}, "reasoning_effort must be one of"),
     ({"events_datasets": ["not_a_dataset"]}, "unknown events_datasets"),
     ({"screen_min_price": -1.0}, "screen_min_price must be a non-negative finite number"),
-    ({"analysis_max_tokens": 0}, "analysis_max_tokens must be a positive integer"),
-    ({"meta_memory_max_epochs": -1}, "meta_memory_max_epochs must be a non-negative integer"),
+    ({"forward_end": "20270630"}, "forward_end must be 20260630"),
 )
 
 
@@ -651,11 +641,7 @@ class CreatePreflightTest(unittest.TestCase):
     def _create(self, **overrides):
         payload = {
             "experiment_id": "preflight_demo",
-            "fold_period": "quarter",
-            "development_first_period": "2026Q1",
-            "development_last_period": "2026Q1",
-            "heldout_first_period": "2026Q2",
-            "heldout_last_period": "2026Q2",
+            **DEFAULT_RESEARCH_GEOMETRY.to_record(),
         }
         payload.update(overrides)
         return self.client.post("/api/experiments", json=payload)
@@ -682,7 +668,7 @@ class CreatePreflightTest(unittest.TestCase):
 
     def test_a_refused_create_never_spawns_a_worker(self) -> None:
         """Spawn is not patched: the entrypoint records that it ran."""
-        response = self._create(epochs=-1)
+        response = self._create(research_sessions=0)
         self.assertEqual(response.status_code, 400)
         self._assert_nothing_was_created()
         # A worker that DID start records itself in ~0.04 s on this host under
@@ -749,11 +735,7 @@ class CreatePreflightTest(unittest.TestCase):
         self.assertTrue(manager.worker_script.is_file())
         payload = {
             "experiment_id": "shared_body",
-            "fold_period": "quarter",
-            "development_first_period": "2026Q1",
-            "development_last_period": "2026Q1",
-            "heldout_first_period": "2026Q2",
-            "heldout_last_period": "2026Q2",
+            **DEFAULT_RESEARCH_GEOMETRY.to_record(),
         }
         with patch.object(manager, "start_worker", lambda experiment_id: {"spawned": False}):
             created = manager.create_experiment(dict(payload))
@@ -765,14 +747,14 @@ class CreatePreflightTest(unittest.TestCase):
         original = worker_module._positive_int
 
         def stricter(value: object, name: str) -> int:
-            if name == "epochs" and value == WEB_CREATE_DEFAULTS["epochs"]:
-                raise ValueError("epochs is temporarily unavailable")
+            if name == "research_sessions" and value == WEB_CREATE_DEFAULTS["research_sessions"]:
+                raise ValueError("research_sessions is temporarily unavailable")
             return original(value, name)
 
         with patch.object(worker_module, "_positive_int", stricter):
-            with self.assertRaisesRegex(ValueError, "epochs is temporarily unavailable"):
+            with self.assertRaisesRegex(ValueError, "research_sessions is temporarily unavailable"):
                 worker_module.load_worker_options(directory, repo_root=repository)
-            with self.assertRaisesRegex(ManagerError, "epochs is temporarily unavailable"):
+            with self.assertRaisesRegex(ManagerError, "research_sessions is temporarily unavailable"):
                 with patch.object(manager, "start_worker", lambda experiment_id: {"spawned": False}):
                     manager.create_experiment({**payload, "experiment_id": "shared_body_2"})
         self.assertFalse((self.experiments_root / "shared_body_2").exists())
@@ -854,11 +836,7 @@ class RestartSlotRaceTest(unittest.TestCase):
             "/api/experiments",
             json={
                 "experiment_id": experiment_id,
-                "fold_period": "quarter",
-                "development_first_period": "2026Q1",
-                "development_last_period": "2026Q1",
-                "heldout_first_period": "2026Q2",
-                "heldout_last_period": "2026Q2",
+                **DEFAULT_RESEARCH_GEOMETRY.to_record(),
             },
         )
         if response.status_code == 200:

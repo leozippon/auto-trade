@@ -32,7 +32,6 @@ from autotrade.pipelines.agent_inbox import (
     inbox_path,
     list_unconsumed_messages,
 )
-from autotrade.pipelines.meta_inputs import compact_agent_trace
 from autotrade.webui.traces import project_trace_blocks
 
 SESSION_A = "epoch_001/fold_2022Q2"
@@ -423,7 +422,7 @@ def test_bind_none_without_identity_and_same_run_does_not_repeat(tmp_path: Path)
     assert again.pending() == ()
 
 
-def test_user_message_trace_projects_and_meta_compact_redacts() -> None:
+def test_user_message_trace_projects_into_a_user_block() -> None:
     events = [
         {
             "event_type": "tool_call_started",
@@ -443,19 +442,11 @@ def test_user_message_trace_projects_and_meta_compact_redacts() -> None:
     blocks = project_trace_blocks(events)
     assert [block["kind"] for block in blocks] == ["tool_group", "user", "agent_output"]
     assert "keep /mnt/agent/workspace/main.py" in str(blocks[1]["text"])
-    compact = compact_agent_trace(events)
-    assert compact[0]["event_type"] == "user_message"
-    assert compact[0]["interrupt"] is True
-    assert compact[0]["safe_point"] == INBOX_SAFE_AFTER_TOOLS_BEFORE_LLM
-    assert "/Data2/" not in str(compact)
-    assert "/mnt/agent/workspace/main.py" in str(compact[0]["content"])
-    assert "system_prompt" not in str(compact)
 
 
-def test_fold_and_meta_backends_bind_inbox_hooks() -> None:
+def test_the_research_session_backend_binds_its_inbox_hook() -> None:
     source = Path("src/autotrade/pipelines/local_backend.py").read_text(
         encoding="utf-8"
     )
-    assert source.count("inbox=bind_session_inbox(") == 2
+    assert source.count("inbox=bind_session_inbox(") == 1
     assert "session_key=request.session_key" in source
-    assert 'session_key=str(facts.get("session_key") or "")' in source

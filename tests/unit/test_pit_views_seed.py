@@ -63,18 +63,14 @@ SEED_STASH_LEAF = (
 )
 
 # The view layout a prebuild leaves behind: the decision snapshot, the unphased
-# replay source of each region, the phase views hardlinked from those sources,
-# and the tiny per-phase bundles.
+# replay source of each region and the phase views hardlinked from those sources.
 SEED_VIEWS = (
     f"decision/{SEED_DECISION_KEY}",
     f"replay/{SEED_SLOT}",
     f"replay/{SEED_HELDOUT_SLOT}",
-    f"replay/meta/{SEED_SLOT}",
+    f"replay/paper/{SEED_SLOT}",
     f"replay/valid/{SEED_SLOT}",
     f"replay/heldout/{SEED_HELDOUT_SLOT}",
-    f"bundles/meta/{SEED_SLOT}",
-    f"bundles/valid/{SEED_SLOT}",
-    f"bundles/heldout/{SEED_HELDOUT_SLOT}",
 )
 
 
@@ -87,13 +83,8 @@ def _write_seed(seed: Path, record: dict[str, object]) -> Path:
         view = seed / name
         view.mkdir(parents=True)
         kind = name.split("/", 1)[0]
-        if kind == "bundles":
-            (view / "data_summary.json").write_text("{}", encoding="utf-8")
-        else:
-            (view / "manifest.json").write_text(
-                json.dumps({"kind": kind}), encoding="utf-8"
-            )
-            (view / "daily.parquet").write_bytes(f"{kind}-bytes".encode())
+        (view / "manifest.json").write_text(json.dumps({"kind": kind}), encoding="utf-8")
+        (view / "daily.parquet").write_bytes(f"{kind}-bytes".encode())
         # The provider leaves its own slot lock beside every published view.
         view.with_suffix(".lock").touch()
     (stash / "contract.json").write_text(json.dumps({"schema_version": 2}), encoding="utf-8")
@@ -132,9 +123,6 @@ def test_matching_seed_hardlinks_views_and_prebuilt_stash(tmp_path: Path) -> Non
     assert os.stat(linked).st_ino == os.stat(source_file).st_ino
     assert os.stat(linked).st_nlink >= 2
     assert (dest / "replay" / "20240102_20240103_20240101T235959+0800" / "daily.parquet").is_file()
-    assert (
-        dest / "bundles" / "valid" / "20240102_20240103_20240101T235959+0800" / "data_summary.json"
-    ).is_file()
     # A prebuilt stash comes across so the first backtest hardlinks the as-of
     # parts; its parts stay immutable but its directories stay writable,
     # because a replay can still reach a day the prebuild did not cover.
@@ -151,72 +139,6 @@ def test_matching_seed_hardlinks_views_and_prebuilt_stash(tmp_path: Path) -> Non
         resolved = path.resolve()
         assert resolved.is_relative_to(seed.resolve()) or resolved.is_relative_to(
             experiment.resolve()
-        )
-
-
-def test_deployment_slots_are_linked_alone_and_a_missing_slot_fails(tmp_path: Path) -> None:
-    """The deployment adjustment takes exactly its decision view and phase
-    replay slot (with that pair's bundle and stash parts) from a seed; the
-    rest of the seed stays out, and a seed without the slot is refused."""
-    from autotrade.pipelines.pit_views_seed import seed_pit_view_slots
-
-    raw_dir = tmp_path / "raw"
-    record = _record(raw_dir)
-    seed = tmp_path / "seed"
-    _write_seed(seed, record)
-    _freeze_seed(seed)
-    dest = tmp_path / "experiment" / "pit_views" / "deployment"
-    seed_pit_view_slots(
-        dest,
-        seed,
-        expected_provider=record,
-        decision_key=SEED_DECISION_KEY,
-        phase="valid",
-        replay_slot=SEED_SLOT,
-    )
-    linked = sorted(
-        str(path.relative_to(dest))
-        for path in dest.rglob("*")
-        if path.is_file() and not path.name.endswith(".lock")
-    )
-    assert linked == [
-        f"{SEED_STASH_LEAF}/contract.json",
-        f"{SEED_STASH_LEAF}/daily/part_0001.parquet",
-        f"bundles/valid/{SEED_SLOT}/data_summary.json",
-        f"decision/{SEED_DECISION_KEY}/daily.parquet",
-        f"decision/{SEED_DECISION_KEY}/manifest.json",
-        f"replay/valid/{SEED_SLOT}/daily.parquet",
-        f"replay/valid/{SEED_SLOT}/manifest.json",
-    ]
-    source = seed / f"decision/{SEED_DECISION_KEY}/daily.parquet"
-    assert (dest / f"decision/{SEED_DECISION_KEY}/daily.parquet").stat().st_ino == source.stat().st_ino
-    # Idempotent, and the seed's other views never come across.
-    seed_pit_view_slots(
-        dest, seed, expected_provider=record, decision_key=SEED_DECISION_KEY, phase="valid", replay_slot=SEED_SLOT
-    )
-    assert not (dest / "replay" / "meta").exists()
-    assert not (dest / "replay" / "heldout").exists()
-    with pytest.raises(RuntimeError, match="lacks the deployment slot"):
-        seed_pit_view_slots(
-            dest,
-            seed,
-            expected_provider=record,
-            decision_key=SEED_DECISION_KEY,
-            phase="valid",
-            replay_slot="20250901_20260909_" + SEED_DECISION_KEY,
-        )
-    with pytest.raises(RuntimeError, match="does not match"):
-        seed_pit_view_slots(
-            dest,
-            seed,
-            expected_provider={**record, "generation_id": "other"},
-            decision_key=SEED_DECISION_KEY,
-            phase="valid",
-            replay_slot=SEED_SLOT,
-        )
-    with pytest.raises(RuntimeError, match="does not exist"):
-        seed_pit_view_slots(
-            dest, tmp_path / "absent", expected_provider=record, decision_key=SEED_DECISION_KEY, phase="valid", replay_slot=SEED_SLOT
         )
 
 
@@ -238,11 +160,11 @@ def test_seeded_tree_is_indistinguishable_from_a_cold_build(tmp_path: Path) -> N
     assert seed_pit_views(dest, seed, expected_provider=record) is True
 
     # A seeded view is an immutable read-only hardlink of the seed's own.
-    view = dest / "replay" / "meta" / SEED_SLOT
+    view = dest / "replay" / "paper" / SEED_SLOT
     linked = view / "daily.parquet"
     assert (
         os.stat(linked).st_ino
-        == os.stat(seed / "replay" / "meta" / SEED_SLOT / "daily.parquet").st_ino
+        == os.stat(seed / "replay" / "paper" / SEED_SLOT / "daily.parquet").st_ino
     )
     assert not os.access(view, os.W_OK)
     assert not os.access(linked, os.W_OK)
@@ -252,31 +174,28 @@ def test_seeded_tree_is_indistinguishable_from_a_cold_build(tmp_path: Path) -> N
         dest,
         dest / "decision",
         dest / "replay",
-        dest / "replay" / "meta",
+        dest / "replay" / "paper",
         dest / "replay" / "valid",
         dest / "replay" / "heldout",
-        dest / "bundles",
-        dest / "bundles" / "meta",
         (dest / SEED_STASH_LEAF).parent,
     ):
         assert os.access(directory, os.W_OK), directory
 
     # The provider's lock beside each seeded slot, in every phase directory and
-    # beside the decision snapshot and the bundle.
+    # beside the decision snapshot.
     for slot in (
-        dest / "replay" / "meta" / SEED_SLOT,
+        dest / "replay" / "paper" / SEED_SLOT,
         dest / "replay" / "valid" / SEED_SLOT,
         dest / "replay" / "heldout" / SEED_HELDOUT_SLOT,
         dest / "replay" / SEED_SLOT,
         dest / "decision" / SEED_DECISION_KEY,
-        dest / "bundles" / "valid" / SEED_SLOT,
     ):
         with pit_backend._exclusive_lock(slot.with_suffix(".lock")):
             assert slot.with_suffix(".lock").is_file()
 
     # A slot the seed does not carry still cold-builds beside the seeded ones:
     # staging directory in the same phase directory, then the atomic rename.
-    fresh = dest / "replay" / "meta" / "20240301_20240302_20240101T235959+0800"
+    fresh = dest / "replay" / "paper" / "20240301_20240302_20240101T235959+0800"
     with pit_backend._exclusive_lock(fresh.with_suffix(".lock")):
         staging = fresh.with_name(f".{fresh.name}.{uuid.uuid4().hex}.tmp")
         staging.mkdir()
@@ -624,8 +543,7 @@ class _FakeProvider:
         self.trading_days = _release_days()
         self.release = SimpleNamespace(generation_id="generation_test", raw_dir=Path("raw"))
 
-    def prepare(self, *, fold, phase, start, end, decision_time):  # noqa: ANN001
-        assert fold is None
+    def prepare(self, *, phase, start, end, decision_time):  # noqa: ANN001
         self.calls.append((phase, start, end, decision_time.isoformat()))
         return SnapshotBundle(
             snapshot_id="snapshot",
@@ -961,7 +879,7 @@ def test_a_seed_whose_build_is_still_staging_a_slot_is_refused(tmp_path: Path) -
     # A staged view deeper in the layout is the same evidence.
     shutil.rmtree(staging)
     assert_seed_snapshot_config(seed, wanted)
-    deep = seed / "replay" / "meta" / f".{SEED_SLOT}.{uuid.uuid4().hex}.tmp"
+    deep = seed / "replay" / "paper" / f".{SEED_SLOT}.{uuid.uuid4().hex}.tmp"
     deep.mkdir(parents=True)
     with pytest.raises(ValueError, match="unfinished build"):
         assert_seed_snapshot_config(seed, wanted)

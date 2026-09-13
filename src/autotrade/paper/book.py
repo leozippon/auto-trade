@@ -79,12 +79,10 @@ def create_book(
     )
     if candidate is None:
         raise ValueError(f"{experiment.name} has no Paper candidate: it did not graduate")
-    allowed = {str(candidate["graduated_artifact_id"]): "graduated"}
-    if candidate["source"] == "adjusted":
-        allowed[str(candidate["artifact_id"])] = "adjusted"
-    if artifact_id not in allowed:
+    if artifact_id != candidate["artifact_id"]:
         raise ValueError(
-            f"{artifact_id} is not a Paper candidate of {experiment.name}; choose one of {sorted(allowed)}"
+            f"{artifact_id} is not the Paper candidate of {experiment.name}; "
+            f"choose {candidate['artifact_id']}"
         )
     source = experiment / "artifacts" / "strategy" / "frozen" / artifact_id
     if not (source / "output" / "main.py").is_file():
@@ -137,7 +135,7 @@ def create_book(
         "created_at": datetime.now(CN_TZ).isoformat(),
         "experiment_id": experiment.name,
         "artifact_id": artifact_id,
-        "candidate_source": allowed[artifact_id],
+        "candidate_source": "graduated",
         "artifact_fingerprint": fingerprint,
         "note": note,
         "strategy_path": str((copy / "output" / "main.py").relative_to(root)),

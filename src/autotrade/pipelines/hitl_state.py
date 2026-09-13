@@ -15,13 +15,17 @@ from pathlib import Path
 
 from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.data.snapshot import SnapshotConfig
-from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.llm.model_profiles import MODEL_CHOICES
 from autotrade.environment.sandbox import SandboxSpec
 
-from .config import DEFAULT_PIT_VIEWS_SEED, AcceptanceRules, rolling_default
-from .folds import FoldSpec
-from .meta_schedule import meta_learning_trigger_counts, meta_session_key
+from .calendar import GEOMETRY_PARAMETERS
+from .config import (
+    DEFAULT_PIT_VIEWS_SEED,
+    DEFAULT_RESEARCH_GEOMETRY,
+    AcceptanceRules,
+    rolling_default,
+)
+from .ledger import FORWARD_SESSION_KEY
 
 HITL_STATE_SCHEMA_VERSION = 1
 CONTROL_MODES = ("auto", "manual")
@@ -31,8 +35,6 @@ CONTROL_NAME = "control.json"
 STATUS_NAME = "status.json"
 SCHEDULE_NAME = "schedule.json"
 ANALYSIS_DIR_NAME = "analysis"
-HELDOUT_SESSION_KEY = "heldout"
-DEPLOYMENT_SESSION_KEY = "deployment_adjustment"
 LIVE_RUN_STATES = {"running_session"}
 
 # The persistent WebUI creation contract.  The form and manager both read
@@ -44,35 +46,15 @@ LIVE_RUN_STATES = {"running_session"}
 # literals below are the values the console alone owns.
 WEB_CREATE_DEFAULTS: dict[str, object] = {
     "experiment_id": None,
-    "fold_period": rolling_default("fold_period"),
-    # Development window 2022..2025: one regular yearly Fold per year (no Test
-    # stage) with Meta between Folds; the frozen strategy is judged by
-    # Held-out alone.
-    "development_first_period": "2022",
-    "development_last_period": "2025",
-    "test_stage": rolling_default("test_stage"),
-    # 1: each Fold is validated on its own period. N > 1 validates the trailing
-    # N periods ending at the Fold's period (walk-forward steps, quarterly only).
-    "validation_periods": rolling_default("validation_periods"),
-    # One explicit range, not a cadence label: held-out is the part of 2026 the
-    # data lake actually covers, and naming it directly keeps the window fixed
-    # as the lake grows.
-    "heldout_first_period": "20260101..20260630",
-    "heldout_last_period": "20260101..20260630",
-    "epochs": rolling_default("epochs"),
-    "meta_learning_fold_interval": rolling_default("meta_learning_fold_interval"),
-    "meta_memory_max_epochs": rolling_default("meta_memory_max_epochs"),
+    # Research, forward and Held-out dates (pipelines/calendar.ResearchGeometry).
+    **DEFAULT_RESEARCH_GEOMETRY.to_record(),
+    "research_sessions": rolling_default("research_sessions"),
     "fold_exploration_directive": rolling_default("fold_exploration_directive"),
     "workspace_reference": rolling_default("workspace_reference"),
     "operating_memory": rolling_default("operating_memory"),
-    "inherit_from": "",
-    "inherit_memory_from": "",
     "strategy_period": "day",
     "inference_time": "08:30",
     "initial_control_mode": "auto",
-    "analysis_enabled": False,
-    "analysis_model": MODEL_CHOICES[0],
-    "analysis_max_tokens": 6000,
     "window_months": rolling_default("window_months"),
     "daily_window_months": None,
     "fundamentals_window_months": None,
@@ -103,38 +85,28 @@ WEB_CREATE_DEFAULTS: dict[str, object] = {
     "screen_min_price": None,
     "screen_max_price": None,
     "screen_boards": (),
-    "min_region_trade_days": rolling_default("min_region_trade_days"),
     "max_steps_per_fold": rolling_default("max_steps_per_fold"),
     "max_backtests_per_fold": rolling_default("max_backtests_per_fold"),
     "max_null_controls_per_fold": rolling_default("max_null_controls_per_fold"),
     "max_llm_calls": rolling_default("max_llm_calls"),
     "session_max_attempts": rolling_default("session_max_attempts"),
     "max_fold_minutes": rolling_default("max_fold_minutes"),
-    "convergence_start_epoch": rolling_default("convergence_start_epoch"),
     "nl_failure_policy": rolling_default("nl_failure_policy"),
     "finalize_before_deadline_seconds": rolling_default("finalize_before_deadline_seconds"),
     "per_call_timeout_seconds": rolling_default("per_call_timeout_seconds"),
     "strategy_fit_timeout_seconds": rolling_default("strategy_fit_timeout_seconds"),
     "disable_step_tree": False,
     "record_failed_attempts": rolling_default("record_failed_attempts"),
-    "min_return": 0.0,
-    "min_sharpe": 0.0,
-    "max_drawdown": 0.25,
-    "cost_stress_multiplier": 1.0,
-    "heldout_min_trades": 0,
-    "confirmation_folds": AcceptanceRules().confirmation_folds,
-    "deployment_adjustment_start": rolling_default("deployment_adjustment_start"),
-    "deployment_max_backtests": rolling_default("deployment_max_backtests"),
-    # The tree the deployment adjustment's two views are hardlinked from;
-    # empty falls back to an explicitly named pit_views_seed, else cold-builds.
-    "deployment_pit_views_seed": "",
+    "min_return": AcceptanceRules().min_return,
+    "min_sharpe": AcceptanceRules().min_sharpe,
+    "max_drawdown": AcceptanceRules().max_drawdown,
+    "cost_stress_multiplier": AcceptanceRules().cost_stress_multiplier,
     "initial_cash": 1_000_000.0,
     "max_total_holdings": None,
     "max_single_name_weight": None,
     "commission_bps": BrokerProfile().commission_bps,
     "slippage_bps": BrokerProfile().slippage_bps,
     "model": MODEL_CHOICES[0],
-    "meta_model": MODEL_CHOICES[0],
     "subagent_model": MODEL_CHOICES[0],
     "nl_model": MODEL_CHOICES[0],
     "compact_model": MODEL_CHOICES[0],
@@ -147,9 +119,6 @@ WEB_CREATE_DEFAULTS: dict[str, object] = {
     "compact_max_calls": 10,
     "max_intraday_row_group_rows": 2_000_000,
     "gpu_count": SandboxSpec().gpu_count,
-    "disable_meta_sandbox_rebuild": False,
-    "meta_sandbox_rebuild_timeout_seconds": rolling_default("meta_sandbox_rebuild_timeout_seconds"),
-    "meta_sandbox_image_keep": rolling_default("meta_sandbox_image_keep"),
 }
 
 # These values describe the only supported WebUI research environment.  The
@@ -193,15 +162,7 @@ WEB_CLOSED_PARAMS = frozenset(
     }
 )
 
-WEB_REQUIRED_PARAMS = frozenset(
-    {
-        "experiment_id",
-        "development_first_period",
-        "development_last_period",
-        "heldout_first_period",
-        "heldout_last_period",
-    }
-)
+WEB_REQUIRED_PARAMS = frozenset({"experiment_id", *GEOMETRY_PARAMETERS})
 
 
 @dataclass
@@ -419,152 +380,44 @@ class StatusReporter:
         )
 
 
-def fold_session_key(epoch_id: str, fold_id: str) -> str:
-    return f"{epoch_id}/{fold_id}"
-
-
-def epoch_ids(epochs: int) -> list[str]:
-    return [f"epoch_{index:03d}" for index in range(1, epochs + 1)]
-
-
 @dataclass(frozen=True)
-class DevelopmentSession:
+class PlannedSession:
+    """One entry of the plan of record: a research session or the forward replay."""
+
     session_key: str
+    # ``research`` or ``forward``.
     kind: str
-    epoch_id: str
-    fold: FoldSpec | None
-    fold_index: int = 0
-    # A Fold session inside the reserved confirmation tail of the last Epoch
-    # (``AcceptanceRules.confirmation_folds``). Decided here, with the whole
-    # schedule in hand, and carried into the plan of record so the worker, the
-    # session and the console prompt preview all read one answer.
-    confirmation: bool = False
+    # 1-based position of a research session; 0 for the forward replay.
+    index: int = 0
 
 
-def iter_development_sessions(
-    epochs: int,
-    folds: list[FoldSpec],
-    *,
-    meta_enabled: bool,
-    meta_learning_fold_interval: int = 0,
-    confirmation_folds: int = 0,
-) -> tuple[DevelopmentSession, ...]:
-    """The development sessions in schedule order.
+def research_session_key(index: int) -> str:
+    return f"s{index}"
 
-    ``confirmation_folds`` marks the last N Fold sessions of the LAST Epoch as
-    confirmation Folds (docs/pipeline-design.md §2.2): only there can the
-    artifact in force still collect the forward transitions graduation term (c)
-    asks for, so only there is a new nomination refused. Earlier Epochs revisit
-    windows the chain has already seen and reserve nothing.
-    """
 
-    result: list[DevelopmentSession] = []
-    all_epochs = epoch_ids(epochs)
-    reserved = max(int(confirmation_folds), 0)
-    if folds and reserved >= epochs * len(folds):
-        # Every Fold session reserved is a window that can never freeze
-        # anything, so the experiment could only ever end without a deliverable
-        # artifact. Refuse the schedule instead of running it to that end.
-        raise ValueError(
-            f"confirmation_folds={reserved} leaves no Fold able to freeze an "
-            f"artifact ({epochs} epoch(s) x {len(folds)} folds)"
-        )
-    for epoch_id in all_epochs:
-        triggers = (
-            set(meta_learning_trigger_counts(len(folds), meta_learning_fold_interval))
-            if meta_enabled
-            else set()
-        )
-        for fold_index, fold in enumerate(folds):
-            if fold_index in triggers:
-                result.append(
-                    DevelopmentSession(
-                        meta_session_key(epoch_id, fold_index),
-                        "meta",
-                        epoch_id,
-                        fold,
-                        fold_index,
-                    )
-                )
-            result.append(
-                DevelopmentSession(
-                    fold_session_key(epoch_id, fold.fold_id),
-                    "fold",
-                    epoch_id,
-                    fold,
-                    fold_index,
-                    confirmation=(
-                        reserved > 0
-                        and epoch_id == all_epochs[-1]
-                        and fold_index >= len(folds) - reserved
-                    ),
-                )
-            )
-    return tuple(result)
+def planned_sessions(research_sessions: int) -> tuple[PlannedSession, ...]:
+    """The research sessions in order, then the forward replay."""
+
+    return (
+        *(
+            PlannedSession(research_session_key(index), "research", index)
+            for index in range(1, research_sessions + 1)
+        ),
+        PlannedSession(FORWARD_SESSION_KEY, "forward"),
+    )
 
 
 def build_session_plan(
-    epochs: int,
-    folds: list[FoldSpec],
-    heldout: list[Mapping[str, object]],
-    *,
-    meta_enabled: bool,
-    meta_learning_fold_interval: int = 0,
-    confirmation_folds: int = 0,
-    deployment: FoldSpec | None = None,
+    research_sessions: int, *, forward: Mapping[str, object]
 ) -> dict[str, object]:
-    sessions = iter_development_sessions(
-        epochs,
-        folds,
-        meta_enabled=meta_enabled,
-        meta_learning_fold_interval=meta_learning_fold_interval,
-        confirmation_folds=confirmation_folds,
-    )
+    """The plan of record (``schedule.json``): the research sessions and the
+    forward replay with its span (``forward`` as the pipeline states it)."""
+
     plan: list[dict[str, object]] = [
-        {
-            "session_key": session.session_key,
-            "kind": session.kind,
-            "epoch_id": session.epoch_id,
-            "fold_id": session.fold.fold_id if session.fold else None,
-            "fold_index": session.fold_index,
-            # Confirmation Fold: no new nomination is accepted here.
-            "confirmation": session.confirmation,
-        }
-        for session in sessions
+        {"session_key": session.session_key, "kind": session.kind, "index": session.index}
+        for session in planned_sessions(research_sessions)
     ]
-    plan.append(
-        {
-            "key": HELDOUT_SESSION_KEY,
-            "kind": "heldout",
-            "epoch_id": epoch_ids(epochs)[-1],
-            "periods": [
-                {
-                    "label": period["label"],
-                    "start": period["start"],
-                    "end": period["end"],
-                    "requested_end": period["requested_end"],
-                    "truncation_reason": period["truncation_reason"],
-                }
-                for period in heldout
-            ],
-        }
-    )
-    if deployment is not None:
-        # The one post-seal session: the mechanism-frozen deployment refit
-        # of the graduated artifact, run only when the experiment graduates.
-        plan.append(
-            {
-                "key": DEPLOYMENT_SESSION_KEY,
-                "kind": "deployment_adjustment",
-                "epoch_id": epoch_ids(epochs)[-1],
-                "fold_id": deployment.fold_id,
-                "period": {
-                    "start": deployment.validation_start,
-                    "end": deployment.validation_end,
-                },
-                "decision_time": deployment.valid_decision_time.isoformat(),
-            }
-        )
+    plan[-1] = {**plan[-1], "replay": dict(forward)}
     return {
         "schema_version": HITL_STATE_SCHEMA_VERSION,
         "sessions": plan,
@@ -582,36 +435,6 @@ def proc_start_ticks(pid: int) -> int | None:
         return int(stat.rpartition(")")[2].split()[19])
     except (OSError, IndexError, ValueError):
         return None
-
-
-def assert_node_not_from_later_fold(
-    node: dict[str, object],
-    session_key: str,
-    fold_keys: list[str],
-    *,
-    ref_store: AgentRefStore,
-) -> None:
-    """Reject a step-tree parent override recorded by a LATER fold session.
-
-    Shared by the console manager (at set time) and the worker (at consume
-    time): a node validated on a later period embodies future-fitted strategy
-    content, so both writers of the decision must enforce the same wall."""
-    try:
-        node_fold = ref_store.resolve("fold", str(node.get("fold_id") or ""))
-    except (KeyError, ValueError):
-        node_fold = None
-    node_key = f"{node.get('epoch_id')}/{node_fold}" if node_fold else None
-    if node_key not in fold_keys:
-        raise ValueError(
-            f"cannot locate the fold session of step node {node.get('node_id')!r}; refusing it as a parent"
-        )
-    if session_key not in fold_keys:
-        raise ValueError(f"{session_key!r} is not a fold session")
-    if fold_keys.index(node_key) > fold_keys.index(session_key):
-        raise ValueError(
-            "a node from a later Fold session cannot seed an earlier session "
-            "(future validation information would leak)"
-        )
 
 
 def assert_no_live_writer(experiment_dir: str | Path) -> None:

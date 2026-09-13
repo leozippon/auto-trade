@@ -28,7 +28,7 @@ SESSION_EXPIRED_EVENT = "session_expired"
 SESSION_OPENED_EVENT = "session_opened"
 CONSUMED = "consumed"
 ALREADY_CONSUMED = "already_consumed"
-_SUCCESS_RECORD_TYPES = frozenset({"fold", "meta_learning"})
+_SUCCESS_RECORD_TYPES = frozenset({"research_session"})
 
 
 class InboxError(ValueError):

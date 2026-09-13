@@ -312,11 +312,11 @@ def test_every_progress_stage_the_pipeline_publishes_has_a_console_label() -> No
             re.MULTILINE,
         )
     )
-    assert labels and "parent_control" in stages
+    assert labels and "forward_replay" in stages
     assert stages <= labels, sorted(stages - labels)
-    # The control runs before the Agent session opens.
+    # The forward replay runs with no Agent session at all.
     prep = _js_literal("const PREP_ENVIRONMENT_STAGES = new Set([", "\n]);")
-    assert '"parent_control"' in prep
+    assert '"forward_replay"' in prep and '"verdict"' in prep
 
 
 def test_the_parent_control_and_walk_forward_surfaces_are_mounted() -> None:
@@ -431,34 +431,6 @@ def test_the_parent_control_view_names_the_span_it_scored() -> None:
     for name in ("walkForwardPanel", "parentControlSection"):
         assert "controlSpanLabel(" in _js_function_body(name)
     assert "control.validation_result" in _js_function_body("parentControlSection")
-
-
-def test_the_walk_forward_counts_the_console_reads_are_served() -> None:
-    """Two producers, two shapes: the per-Epoch table reads the registry's
-    transition counts, the term beside the graduation badge reads the block
-    the acceptance rules stamp into every Held-out verdict."""
-
-    from autotrade.pipelines.config import AcceptanceRules
-    from autotrade.webui.registry import _walk_forward_view
-
-    counts = {"source": "parent_control", "transitions": 3, "positive_excess": 1}
-    epoch_served = set(
-        _walk_forward_view([], "epoch_001", test_stage=False, revealed=False)
-    )
-    verdict_served = set(AcceptanceRules.walk_forward_consistency(counts))
-    # The table below the fold and the strip above it read the same block.
-    epoch_read = set(
-        re.findall(
-            r"\bterm\.([a-z_]+)",
-            _js_function_body("walkForwardPanel") + _js_function_body("transitionsStrip"),
-        )
-    )
-    verdict_read = set(
-        re.findall(r"\bterm\.([a-z_]+)", _js_function_body("walkForwardTerm"))
-    )
-    assert epoch_read and verdict_read
-    assert epoch_read <= epoch_served, sorted(epoch_read - epoch_served)
-    assert verdict_read <= verdict_served, sorted(verdict_read - verdict_served)
 
 
 def test_the_benchmark_fields_the_fold_panel_reads_are_served() -> None:

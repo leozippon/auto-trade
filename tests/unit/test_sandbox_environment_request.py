@@ -178,25 +178,6 @@ class SandboxEnvironmentRequestTest(unittest.TestCase):
             self.assertNotIn("image_id", public)
             self.assertNotIn("image_repo_digests", public)
 
-    def test_the_knobs_that_drive_it_are_real_config_fields(self) -> None:
-        from autotrade.pipelines.config import RollingExperimentConfig
-
-        config = RollingExperimentConfig(
-            "exp", Path("/tmp/experiments"), "2022Q1", "2022Q1", "2023Q1", "2023Q1", fold_period="quarter"
-        )
-        self.assertTrue(config.meta_sandbox_rebuild_enabled)
-        self.assertEqual(config.meta_sandbox_rebuild_timeout_seconds, 1800)
-        self.assertEqual(config.meta_sandbox_image_keep, 3)
-        for field, value in (
-            ("meta_sandbox_rebuild_timeout_seconds", -1),
-            ("meta_sandbox_image_keep", -1),
-        ):
-            with self.subTest(field=field), self.assertRaisesRegex(ValueError, field):
-                RollingExperimentConfig(
-                    "exp", Path("/tmp/experiments"), "2022Q1", "2022Q1", "2023Q1", "2023Q1", fold_period="quarter",
-                    **{field: value},
-                )
-
     def test_the_meta_prompt_and_the_meta_tool_set_make_the_request_writable(self) -> None:
         from autotrade.agent.prompts import META_SYSTEM_PROMPT
         from autotrade.agent.runner import _META_TOOLS

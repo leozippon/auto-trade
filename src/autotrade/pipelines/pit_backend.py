@@ -41,10 +41,6 @@ from autotrade.environment.data.snapshot import (
     SnapshotConfig,
     load_snapshot_manifest,
 )
-from autotrade.environment.data.summary import (
-    write_agent_data_summary,
-    write_unit_reference,
-)
 from autotrade.environment.executor import (
     DockerStrategyExecutor,
     TrustedStrategyExecutor,
@@ -84,13 +80,9 @@ from .config import (
     StrategyExperimentConfig,
 )
 from .experiment import DailyStrategyPipeline
-from .pit_views_seed import (
-    pit_cache_provider_record,
-    seed_pit_view_slots,
-    seed_pit_views,
-)
+from .pit_views_seed import pit_cache_provider_record, seed_pit_views
 
-_PHASES = frozenset({"meta", "valid", "frozen_test", "heldout", "paper"})
+_PHASES = frozenset({"valid", "heldout", "paper"})
 # Manifest label of the unphased replay store. Never a phase, so a store can
 # never be handed to an evaluation as if it were a phase view.
 REPLAY_SOURCE_LABEL = "replay_source"
@@ -167,13 +159,11 @@ class ResearchPITSnapshotProvider:
     def prepare(
         self,
         *,
-        fold,
         phase: str,
         start: str,
         end: str,
         decision_time: datetime,
     ) -> SnapshotBundle:
-        del fold
         if phase not in _PHASES:
             raise ValueError(f"unsupported PIT snapshot phase: {phase}")
         decision = _cn_datetime(decision_time)
@@ -191,67 +181,31 @@ class ResearchPITSnapshotProvider:
         )
         decision_manifest = self._decision_view(decision_dir, decision)
         replay_dir = self._replay_view(replay_dir, start_key, end_key, decision, phase)
-        summary_dir = self.cache_root / "bundles" / phase / f"{start_key}_{end_key}_{decision_key}"
-        summary_path = summary_dir / "data_summary.json"
-        views = {"snapshot": (decision_dir, "/mnt/snapshot")}
-        with _exclusive_lock(summary_dir.with_suffix(".lock")):
-            if not summary_path.exists():
-                summary_dir.mkdir(parents=True, exist_ok=True)
-                write_agent_data_summary(
-                    summary_path,
-                    kind=phase,
-                    fold_id=None,
-                    views=views,
-                )
-            else:
-                # The bundle summary describes a frozen decision view, so it is
-                # cached for the life of the experiment. Its sibling unit
-                # reference is not: it is a pure function of the unit registry,
-                # and a Meta session mounts this copy verbatim while a Fold
-                # regenerates its own. Rebuild it on every take so both session
-                # kinds read the units the current registry defines (~0.05 s for
-                # a thousand-column view).
-                summary_dir.chmod(0o755)
-                staging = summary_dir / f".unit_reference.{uuid.uuid4().hex}.json"
-                try:
-                    write_unit_reference(staging, views)
-                    # Replace, never rewrite in place: this file is hardlinked to
-                    # the PIT view seed and to every experiment seeded from it,
-                    # and the provider must not write outside its own cache.
-                    staging.replace(summary_dir / "unit_reference.json")
-                finally:
-                    staging.unlink(missing_ok=True)
-            chmod_tree(summary_dir, file_mode=0o444, dir_mode=0o555)
         return SnapshotBundle(
             snapshot_id=str(decision_manifest.get("snapshot_id") or ""),
             decision_ref=str(decision_dir),
             replay_ref=str(replay_dir),
-            data_summary_ref=str(summary_path),
             generation_id=self.release.generation_id,
         )
 
-    def link_seed_slots(
-        self,
-        seed: str | Path,
-        *,
-        phase: str,
-        start: str,
-        end: str,
-        decision_time: datetime,
-    ) -> None:
-        """Hardlink one region's decision view and phase replay slot from a
-        seed into this cache root, under the slot names ``prepare`` will ask
-        for; fails explicitly when the seed cannot provide them."""
-        if phase not in _PHASES:
-            raise ValueError(f"unsupported PIT snapshot phase: {phase}")
-        decision_key = _cn_datetime(decision_time).strftime("%Y%m%dT%H%M%S%z")
-        seed_pit_view_slots(
-            self.cache_root,
-            Path(seed),
-            expected_provider=self._bind_cache_contract(),
-            decision_key=decision_key,
-            phase=phase,
-            replay_slot=f"{_date_key(start)}_{_date_key(end)}_{decision_key}",
+    def prepare_decision(self, *, decision_time: datetime) -> SnapshotBundle:
+        """The decision view at ``decision_time`` alone, with no replay slot.
+
+        A research session reads the view at research end and nothing else:
+        the slot that starts there is the forward period's, so preparing it
+        beside the view would build forward data for a research session.
+        """
+
+        decision = _cn_datetime(decision_time)
+        decision_dir = (
+            self.cache_root / "decision" / decision.strftime("%Y%m%dT%H%M%S%z")
+        )
+        manifest = self._decision_view(decision_dir, decision)
+        return SnapshotBundle(
+            snapshot_id=str(manifest.get("snapshot_id") or ""),
+            decision_ref=str(decision_dir),
+            replay_ref="",
+            generation_id=self.release.generation_id,
         )
 
     def _bind_cache_contract(self) -> dict[str, object]:
@@ -343,10 +297,8 @@ class ResearchPITSnapshotProvider:
     def _replay_source(self, start: str, end: str, decision: datetime) -> Path:
         """The single unphased store behind every phase view of one window.
 
-        Meta and Validation always replay the same region, and on a contiguous
-        calendar so does the previous fold's frozen test, so a phase-scoped
-        build would replay one region two or three times. The region is built
-        once here, under its own lock, and each phase view is a hardlink of it
+        The region is built once here, under its own lock, and each phase view
+        is a hardlink of it
         carrying its own immutable ``label``/``snapshot_id`` — which is also
         what makes publishing a phase view and hardlinking a seed cheap.
         """
@@ -793,7 +745,7 @@ class PITDailyEvaluationBackend:
         timer = PhaseTimer()
         if max_days is not None and max_days <= 0:
             raise ValueError("max_days must be a positive integer")
-        if request.mode not in {"valid", "frozen_test", "heldout"}:
+        if request.mode not in {"valid", "heldout"}:
             raise ValueError(f"unsupported PIT evaluation mode: {request.mode}")
         strategy_path = Path(request.revision.output_path) / "main.py"
         if not strategy_path.is_file():
@@ -1074,7 +1026,6 @@ class PaperPITData:
         prior_day = datetime.strptime(prior[-1], "%Y%m%d").replace(tzinfo=CN_TZ).date()
         decision_time = datetime.combine(prior_day, time(23, 59, 59), tzinfo=CN_TZ)
         self.bundle = provider.prepare(
-            fold=None,
             phase="paper",
             start=day,
             end=day,
@@ -1274,8 +1225,8 @@ def _asof_stash_dir(
 
     The phase is validated but is NOT part of the key: every phase view of one
     region is a hardlink of the single unphased store, so the as-of parts they
-    produce for a given decision snapshot and schedule are identical, and Meta
-    and Validation would otherwise encode the same region twice.
+    produce for a given decision snapshot and schedule are identical and are
+    encoded once.
     """
 
     snapshot = Path(snapshot_dir).resolve()

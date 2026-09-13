@@ -2,8 +2,8 @@
 """Prebuild the exploration PIT view seed (docs/data-documentation.md §3.4).
 
 Pins the current research generation, plans the seed of one research geometry
-(``pit_views_seed.plan_seed``) and writes the completed decision views, replay
-slots and bundles into ``data/pit_views_seed/explore/``. That tree is not a
+(``pit_views_seed.plan_seed``) and writes the completed decision views and
+replay slots into ``data/pit_views_seed/explore/``. That tree is not a
 live worker cache_root. New experiments hardlink it when ``provider.json``
 matches.
 
@@ -282,7 +282,6 @@ def main(argv: list[str] | None = None) -> int:
         prepared[slot.label] = (
             phase,
             provider.prepare(
-                fold=None,
                 phase=phase,
                 start=slot.start,
                 end=slot.end,

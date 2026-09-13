@@ -35,10 +35,11 @@ from autotrade.environment.tools import (
 )
 from autotrade.pipelines.config import (
     EvaluationResult,
-    FoldSessionRequest,
+    ReplaySpan,
+    ResearchSessionRequest,
     SnapshotBundle,
 )
-from autotrade.pipelines.folds import FoldSpec
+from autotrade.pipelines.ledger import ExperimentLedger
 from autotrade.pipelines.local_backend import (
     BatchValidateTool,
     FoldBacktestTool,
@@ -48,6 +49,7 @@ from autotrade.pipelines.local_backend import (
 )
 
 from .fixtures_sandbox import PassingModificationCheck
+from .test_batch_validate import _write_style_sidecar
 
 
 class FakeClock:
@@ -110,26 +112,20 @@ class ScheduledTimedLLM:
         return self.delegate.complete(*args, **kwargs)
 
 
-def _fold_request() -> FoldSessionRequest:
-    moment = datetime(2025, 12, 31, 23, 59, 59, tzinfo=UTC)
-    return FoldSessionRequest(
+def _research_request() -> ResearchSessionRequest:
+    moment = datetime(2025, 6, 30, 23, 59, 59, tzinfo=UTC)
+    snapshot = SnapshotBundle("snapshot", "decision", "replay")
+    return ResearchSessionRequest(
         experiment_id="exp",
-        epoch_id="epoch_001",
-        fold=FoldSpec(
-            fold_id="fold_2026Q1",
-            input_window_start="20240101",
-            input_window_end="20250930",
-            validation_start="20251001",
-            validation_end="20251231",
-            test_start="20260101",
-            test_end="20260331",
-            valid_decision_time=moment,
-            test_decision_time=moment,
-        ),
+        session_id="s1",
+        session_index=1,
+        sessions_total=4,
         run_id="run_budget",
-        parent=None,
-        prior="",
-        snapshot=SnapshotBundle("snapshot", "decision", "replay"),
+        start=None,
+        snapshot=snapshot,
+        decision_time=moment,
+        validation=ReplaySpan("full", "valid", "20220701", "20250630", snapshot),
+        input_window_start="20230701",
         max_steps=3,
         max_backtests=3,
         max_llm_calls=3,
@@ -143,7 +139,7 @@ def test_backtest_failure_past_wall_deadline_keeps_llm_repair_budget(
 ) -> None:
     clock = FakeClock()
     time_budget = InferenceTimeBudget(duration_seconds=2.0, clock=clock)
-    request = _fold_request()
+    request = _research_request()
     output = tmp_path / "output"
     models = tmp_path / "models"
     output.mkdir()
@@ -153,7 +149,7 @@ def test_backtest_failure_past_wall_deadline_keeps_llm_repair_budget(
     )
     tree = StepTree(tmp_path / "steps")
     ref_store = AgentRefStore(tmp_path / "experiment")
-    fold_ref = ref_store.get_or_create("fold", request.fold.fold_id)
+    fold_ref = ref_store.get_or_create("fold", request.session_id)
     run_ref = ref_store.get_or_create("run", request.run_id)
 
     class FailThenPassEvaluator:
@@ -166,6 +162,7 @@ def test_backtest_failure_past_wall_deadline_keeps_llm_repair_budget(
                 raise RuntimeError("repairable validation failure")
             result = tmp_path / "result.json"
             result.write_text("{}\n", encoding="utf-8")
+            _write_style_sidecar(tmp_path, alpha=0.001, seed=self.calls)
             return EvaluationResult(
                 summary={"total_return": 0.01}, result_ref=str(result)
             )
@@ -182,6 +179,7 @@ def test_backtest_failure_past_wall_deadline_keeps_llm_repair_budget(
         broker_profile=BrokerProfile(),
         time_budget=time_budget,
         ref_store=ref_store,
+        ledger=ExperimentLedger(tmp_path / "ledger.jsonl"),
     )
     working_copy = {
         "candidates": [{"name": "working_copy", "hypothesis": "h", "path": "output"}]
@@ -202,7 +200,7 @@ def test_backtest_failure_past_wall_deadline_keeps_llm_repair_budget(
                         "finish_fold",
                         {
                             "node_id": (
-                                "epoch_001__"
+                                "research__"
                                 f"{fold_ref}__"
                                 f"{run_ref}__valid_002"
                             )
@@ -273,7 +271,7 @@ def test_backtest_failure_past_wall_deadline_keeps_llm_repair_budget(
     assert successful["result"]["value"]["result_root"] == "steps"
     row = successful["result"]["value"]["candidates"][0]
     assert row["result_ref"] == (
-        f"epoch_001__{fold_ref}__{run_ref}__valid_002/validation/result.json"
+        f"research__{fold_ref}__{run_ref}__valid_002/validation/result.json"
     )
     assert (tree.root / row["result_ref"]).is_file()
 
@@ -714,7 +712,7 @@ def test_runner_rejects_mismatched_backtest_budget(tmp_path: Path) -> None:
             raise AssertionError("budget mismatch must fail before evaluation")
 
     backtest = FoldBacktestTool(
-        request=_fold_request(),
+        request=_research_request(),
         output_dir=output,
         models_dir=models,
         artifact_store=FilesystemArtifactStore(tmp_path / "artifacts"),
@@ -724,6 +722,7 @@ def test_runner_rejects_mismatched_backtest_budget(tmp_path: Path) -> None:
         broker_profile=BrokerProfile(),
         time_budget=backtest_budget,
         ref_store=AgentRefStore(tmp_path / "experiment"),
+        ledger=ExperimentLedger(tmp_path / "ledger.jsonl"),
     )
     main = SessionBudgetLLM(
         ScriptedLLM([]),

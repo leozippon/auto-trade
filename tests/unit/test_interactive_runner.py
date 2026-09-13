@@ -1,11 +1,10 @@
 """Orchestration contract of the HITL runner itself (docs/pipeline-design.md).
 
-`tests/unit/test_interactive_worker_local.py` drives the worker end to end, so
-the runner's own control-plane branches -- durable stop/pause at a session
-boundary, `skip_to_heldout`, the advisory post-fold
-hook, resume, and the re-run token -- were only ever exercised incidentally.
-These tests drive `InteractiveExperimentRunner` directly against a recording
-executor so each branch is observed, including the ones that must NOT fire.
+`tests/unit/test_research_arm_worker.py` drives the worker end to end, so the
+runner's own control-plane branches -- durable stop/pause at a session
+boundary, retries, resume, and which planned session is due -- are exercised
+here directly against a recording executor so each branch is observed,
+including the ones that must NOT fire.
 """
 
 from __future__ import annotations
@@ -17,16 +16,15 @@ import subprocess
 import sys
 import time
 import unittest
-from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from autotrade.pipelines import interactive
-from autotrade.pipelines.folds import FoldSpec
 from autotrade.pipelines.hitl_state import (
     ControlState,
-    DevelopmentSession,
+    PlannedSession,
+    planned_sessions,
     read_control,
     read_status,
     write_control,
@@ -35,58 +33,43 @@ from autotrade.pipelines.interactive import ExperimentStopped, InteractiveExperi
 from autotrade.pipelines.ledger import ExperimentLedger, FrozenArtifactMutated
 
 
-def fold_spec(fold_id: str) -> FoldSpec:
-    return FoldSpec(
-        fold_id=fold_id,
-        input_window_start="2020-01-01",
-        input_window_end="2021-12-31",
-        validation_start="2022-01-01",
-        validation_end="2022-03-31",
-        test_start="2022-04-01",
-        test_end="2022-06-30",
-        valid_decision_time=datetime(2022, 4, 1, tzinfo=UTC),
-        test_decision_time=datetime(2022, 7, 1, tzinfo=UTC),
-    )
-
-
-def sessions_for(*keys: str) -> tuple[DevelopmentSession, ...]:
-    """`meta:<n>` builds a meta session, anything else a fold session."""
-    built: list[DevelopmentSession] = []
-    for index, key in enumerate(keys):
-        if key.startswith("meta:"):
-            built.append(
-                DevelopmentSession(f"epoch_001/{key}", "meta", "epoch_001", fold_spec("fold_a"), index)
-            )
-        else:
-            built.append(
-                DevelopmentSession(f"epoch_001/{key}", "fold", "epoch_001", fold_spec(key), index)
-            )
-    return tuple(built)
+def sessions_for(count: int) -> tuple[PlannedSession, ...]:
+    return planned_sessions(count)
 
 
 class RecordingExecutor:
-    """Appends a canonical ledger record, like the real session executor."""
+    """Appends the session's canonical ledger record, like the real pipeline.
 
-    def __init__(self, ledger: ExperimentLedger, *, record: bool = True) -> None:
+    ``outcomes`` maps a session key to the research record's extra fields
+    (``frozen`` or ``arm_end``); a research session otherwise continues.
+    """
+
+    def __init__(self, ledger: ExperimentLedger, *, record: bool = True, outcomes=None) -> None:
         self.ledger = ledger
         self.record = record
+        self.outcomes = dict(outcomes or {})
         self.calls: list[tuple[str, dict[str, object]]] = []
         self.on_call = None
 
-    def __call__(self, session: DevelopmentSession, context: dict[str, object]):
+    def __call__(self, session: PlannedSession, context: dict[str, object]):
         self.calls.append((session.session_key, dict(context)))
         if self.on_call is not None:
             self.on_call(session, context)
         if self.record:
             self.ledger.append(
                 {
-                    "record_type": "meta_learning" if session.kind == "meta" else "fold",
+                    "record_type": "research_session" if session.kind == "research" else "forward",
                     "experiment_id": "exp",
-                    "epoch_id": session.epoch_id,
-                    "fold_id": session.fold.fold_id,
+                    "epoch_id": session.kind,
+                    "fold_id": session.session_key,
                     "run_id": f"run_{len(self.calls)}",
                     "session_key": session.session_key,
-                    "rerun_id": str(context.get("rerun_id") or ""),
+                    **(
+                        {"verdict": {"status": "discarded", "reasons": ["x"]}}
+                        if session.kind == "forward"
+                        else {}
+                    ),
+                    **self.outcomes.get(session.session_key, {}),
                 }
             )
         return None
@@ -132,19 +115,38 @@ class RunnerTestCase(unittest.TestCase):
         write_control(self.control, state)
 
 
+FROZEN = {"frozen": {"artifact_id": "strategy_s2_x", "output_path": "unused"}}
+NO_EDGE = {"arm_end": {"status": "no_deliverable", "reason": "no_edge: nothing"}}
+
+
 class InteractiveRunnerTest(RunnerTestCase):
-    def test_auto_mode_runs_every_session_in_order_and_reports_complete(self) -> None:
-        executor = RecordingExecutor(self.ledger)
-        result = self.runner(sessions_for("fold_a", "meta:1", "fold_b"), executor).run()
-        self.assertEqual(result, {"status": "complete", "sessions_run": 3, "reran_sessions": []})
-        self.assertEqual(
-            executor.keys, ["epoch_001/fold_a", "epoch_001/meta:1", "epoch_001/fold_b"]
-        )
+    def test_research_runs_in_order_and_the_forward_replay_follows_a_freeze(self) -> None:
+        executor = RecordingExecutor(self.ledger, outcomes={"s2": FROZEN})
+        result = self.runner(sessions_for(3), executor).run()
+        # s3 is never due: research ended with the freeze in s2.
+        self.assertEqual(result, {"status": "complete", "sessions_run": 3})
+        self.assertEqual(executor.keys, ["s1", "s2", "forward"])
         status = read_status(self.status)
-        self.assertEqual(status["state"], "development_complete")
         self.assertEqual(status["completed_sessions"], 3)
-        # total_sessions reserves the trailing held-out slot the worker runs.
         self.assertEqual(status["total_sessions"], 4)
+
+    def test_research_that_ends_without_a_freeze_runs_no_forward_replay(self) -> None:
+        executor = RecordingExecutor(self.ledger, outcomes={"s1": NO_EDGE})
+        result = self.runner(sessions_for(3), executor).run()
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual(executor.keys, ["s1"])
+
+    def test_resume_after_a_freeze_runs_only_the_forward_replay(self) -> None:
+        self.runner(sessions_for(2), RecordingExecutor(self.ledger, outcomes={"s1": FROZEN}, record=True)).run()
+        rows = self.ledger.read()
+        # Drop the forward record: the worker stopped between freeze and replay.
+        self.ledger.path.write_text(
+            "".join(json.dumps(row) + "\n" for row in rows if row["record_type"] != "forward"),
+            encoding="utf-8",
+        )
+        again = RecordingExecutor(self.ledger)
+        self.runner(sessions_for(2), again).run()
+        self.assertEqual(again.keys, ["forward"])
 
     def test_a_session_is_retried_after_a_transient_failure(self) -> None:
         class Flaky(RecordingExecutor):
@@ -156,11 +158,11 @@ class InteractiveRunnerTest(RunnerTestCase):
 
         executor = Flaky(self.ledger)
         result = self.runner(
-            sessions_for("fold_a"), executor, session_max_attempts=3
+            sessions_for(1), executor, session_max_attempts=3
         ).run()
         self.assertEqual(result["status"], "complete")
         self.assertEqual(len(executor.calls), 3)
-        self.assertEqual(read_status(self.status)["state"], "development_complete")
+        self.assertEqual(read_status(self.status)["state"], "running_session")
 
     def test_a_successful_retry_clears_the_recorded_attempt_error(self) -> None:
         seen: list[object] = []
@@ -175,11 +177,11 @@ class InteractiveRunnerTest(RunnerTestCase):
                 return super().__call__(session, context)
 
         result = self.runner(
-            sessions_for("fold_a", "fold_b"), Flaky(self.ledger), session_max_attempts=3
+            sessions_for(2), Flaky(self.ledger), session_max_attempts=3
         ).run()
         self.assertEqual(result["status"], "complete")
         # The failure stays visible while its retry runs; the next session
-        # starts without fold_a's stale attempt text.
+        # starts without s1's stale attempt text.
         self.assertEqual(seen, [None, "RuntimeError: boom (attempt 1/3)", None])
         self.assertIsNone(read_status(self.status)["error"])
 
@@ -207,7 +209,7 @@ class InteractiveRunnerTest(RunnerTestCase):
 
         executor = Flaky(self.ledger)
         self.runner(
-            sessions_for("fold_a"), executor, session_max_attempts=3
+            sessions_for(1), executor, session_max_attempts=3
         ).run()
         self.assertEqual(len(started), 2)
         self.assertTrue(started[0])
@@ -223,44 +225,44 @@ class InteractiveRunnerTest(RunnerTestCase):
                 self.calls.append((session.session_key, dict(context)))
                 self.ledger.append(
                     {
-                        "record_type": "fold",
+                        "record_type": "forward",
                         "experiment_id": "exp",
-                        "epoch_id": session.epoch_id,
-                        "fold_id": session.fold.fold_id,
+                        "epoch_id": "forward",
+                        "fold_id": "forward",
                         "run_id": f"run_{len(self.calls)}",
                         "session_key": session.session_key,
                         "state_changed_during_test": True,
                     }
                 )
                 raise FrozenArtifactMutated(
-                    "strategy or model artifacts changed during frozen test"
+                    "strategy or model artifacts changed during the forward replay"
                 )
 
         executor = Mutating(self.ledger, record=False)
         with self.assertRaises(FrozenArtifactMutated):
             self.runner(
-                sessions_for("fold_a"), executor, session_max_attempts=3
+                (PlannedSession("s1", "research", 1),), executor, session_max_attempts=3
             ).run()
         self.assertEqual(len(executor.calls), 1)
-        self.assertEqual(len(self.ledger.read("fold")), 1)
+        self.assertEqual(len(self.ledger.read("forward")), 1)
         self.assertEqual(read_status(self.status)["state"], "failed")
 
     def test_resume_refuses_a_flagged_integrity_record_without_new_rows(self) -> None:
         self.ledger.append(
             {
-                "record_type": "fold",
+                "record_type": "forward",
                 "experiment_id": "exp",
-                "epoch_id": "epoch_001",
-                "fold_id": "fold_a",
+                "epoch_id": "forward",
+                "fold_id": "forward",
                 "run_id": "run_flagged",
-                "session_key": "epoch_001/fold_a",
+                "session_key": "forward",
                 "state_changed_during_test": True,
             }
         )
         before = [row.get("run_id") for row in self.ledger.read()]
         executor = RecordingExecutor(self.ledger)
         with self.assertRaises(FrozenArtifactMutated):
-            self.runner(sessions_for("fold_a", "fold_b"), executor).run()
+            self.runner(sessions_for(2), executor).run()
         self.assertEqual(executor.keys, [])
         self.assertEqual([row.get("run_id") for row in self.ledger.read()], before)
         self.assertEqual(read_status(self.status)["state"], "failed")
@@ -274,7 +276,7 @@ class InteractiveRunnerTest(RunnerTestCase):
         executor = AlwaysFail(self.ledger)
         with self.assertRaisesRegex(RuntimeError, "still broken"):
             self.runner(
-                sessions_for("fold_a"), executor, session_max_attempts=3
+                sessions_for(1), executor, session_max_attempts=3
             ).run()
         self.assertEqual(len(executor.calls), 3)
         self.assertEqual(read_status(self.status)["state"], "failed")
@@ -284,21 +286,21 @@ class InteractiveRunnerTest(RunnerTestCase):
     def test_a_positive_poll_interval_is_required(self) -> None:
         for bad in (0, -1.0):
             with self.subTest(poll_seconds=bad), self.assertRaisesRegex(ValueError, "poll_seconds"):
-                self.runner(sessions_for("fold_a"), RecordingExecutor(self.ledger), poll_seconds=bad)
+                self.runner(sessions_for(1), RecordingExecutor(self.ledger), poll_seconds=bad)
 
     def test_stop_requested_during_a_session_halts_at_the_next_boundary(self) -> None:
         executor = RecordingExecutor(self.ledger)
         executor.on_call = lambda _session, _context: self.set_control(request="stop")
-        result = self.runner(sessions_for("fold_a", "fold_b"), executor).run()
+        result = self.runner(sessions_for(2), executor).run()
         # The session in flight finishes; the next one never starts.
-        self.assertEqual(result, {"status": "stop", "sessions_run": 1, "reran_sessions": []})
-        self.assertEqual(executor.keys, ["epoch_001/fold_a"])
+        self.assertEqual(result, {"status": "stop", "sessions_run": 1})
+        self.assertEqual(executor.keys, ["s1"])
         self.assertEqual(read_status(self.status)["state"], "stopped")
 
     def test_pause_requested_during_a_session_halts_and_reports_paused(self) -> None:
         executor = RecordingExecutor(self.ledger)
         executor.on_call = lambda _session, _context: self.set_control(request="pause")
-        result = self.runner(sessions_for("fold_a", "fold_b"), executor).run()
+        result = self.runner(sessions_for(2), executor).run()
         self.assertEqual(result["status"], "pause")
         self.assertEqual(result["sessions_run"], 1)
         self.assertEqual(read_status(self.status)["state"], "paused")
@@ -307,48 +309,23 @@ class InteractiveRunnerTest(RunnerTestCase):
         self.set_control(request="stop")
         executor = RecordingExecutor(self.ledger)
         with self.assertRaisesRegex(ExperimentStopped, "stop requested"):
-            self.runner(sessions_for("fold_a"), executor).run()
+            self.runner(sessions_for(1), executor).run()
         self.assertEqual(executor.keys, [])
         status = read_status(self.status)
         self.assertEqual(status["state"], "failed")
         self.assertIn("ExperimentStopped", status["error"])
 
-    def test_a_revealed_experiment_is_sealed_against_further_development(self) -> None:
-        self.set_control(test_revealed=True)
-        executor = RecordingExecutor(self.ledger)
-        with self.assertRaisesRegex(ExperimentStopped, "sealed"):
-            self.runner(sessions_for("fold_a"), executor).run()
-        self.assertEqual(executor.keys, [])
-
-    def test_skip_to_heldout_stops_after_the_current_fold_only(self) -> None:
-        executor = RecordingExecutor(self.ledger)
-        self.set_control(skip_to_heldout=True)
-        result = self.runner(sessions_for("fold_a", "fold_b", "fold_c"), executor).run()
-        self.assertEqual(executor.keys, ["epoch_001/fold_a"])
-        # Development is complete, not stopped: held-out still runs afterwards.
-        self.assertEqual(result["status"], "complete")
-        self.assertEqual(result["sessions_run"], 1)
-        self.assertEqual(read_status(self.status)["state"], "development_complete")
-
-    def test_skip_to_heldout_does_not_break_out_of_a_meta_session(self) -> None:
-        """The skip must land on a frozen fold artifact, never mid-epoch on a
-        Meta session whose fold has not run yet."""
-        executor = RecordingExecutor(self.ledger)
-        self.set_control(skip_to_heldout=True)
-        self.runner(sessions_for("meta:1", "fold_a", "fold_b"), executor).run()
-        self.assertEqual(executor.keys, ["epoch_001/meta:1", "epoch_001/fold_a"])
-
     def test_per_session_directives_and_overrides_reach_the_session_then_are_consumed(self) -> None:
         executor = RecordingExecutor(self.ledger)
         self.set_control(
-            directives={"epoch_001/fold_a": "try momentum"},
-            resource_overrides={"epoch_001/fold_a": {"max_steps": 2}},
+            directives={"s1": "try momentum"},
+            resource_overrides={"s1": {"max_steps": 2}},
         )
-        self.runner(sessions_for("fold_a"), executor).run()
+        self.runner(sessions_for(1), executor).run()
         _key, context = executor.calls[0]
         self.assertEqual(context["directive"], "try momentum")
         self.assertEqual(context["resource_override"], {"max_steps": 2})
-        self.assertEqual(context["session_key"], "epoch_001/fold_a")
+        self.assertEqual(context["session_key"], "s1")
         for hook in ("progress_hook", "session_timing"):
             self.assertTrue(callable(context[hook]), hook)
         control = read_control(self.control)
@@ -358,69 +335,32 @@ class InteractiveRunnerTest(RunnerTestCase):
         """`set_gpu_count` is a one-shot allocation, like an approval.
 
         The console writes it against one session key; the runner must hand it
-        to that session alone and clear it afterwards, or the next fold would
+        to that session alone and clear it afterwards, or the next session would
         silently inherit an allocation nobody asked for.
         """
         executor = RecordingExecutor(self.ledger)
-        self.set_control(gpu_counts={"epoch_001/fold_a": 3})
-        self.runner(sessions_for("fold_a", "fold_b"), executor).run()
+        self.set_control(gpu_counts={"s1": 3})
+        self.runner(sessions_for(2), executor).run()
         self.assertEqual(
             {key: context["sandbox_gpu_count"] for key, context in executor.calls},
-            {"epoch_001/fold_a": 3, "epoch_001/fold_b": None},
+            {"s1": 3, "s2": None},
         )
         self.assertEqual(read_control(self.control).gpu_counts, {})
 
     def test_a_session_that_records_nothing_durable_fails_fast(self) -> None:
         executor = RecordingExecutor(self.ledger, record=False)
         with self.assertRaisesRegex(RuntimeError, "without a durable success record"):
-            self.runner(sessions_for("fold_a"), executor).run()
+            self.runner(sessions_for(1), executor).run()
         self.assertEqual(read_status(self.status)["state"], "failed")
 
     def test_resume_skips_sessions_already_recorded_in_the_ledger(self) -> None:
         first = RecordingExecutor(self.ledger)
-        self.runner(sessions_for("fold_a", "fold_b"), first).run()
+        self.runner(sessions_for(2), first).run()
         second = RecordingExecutor(self.ledger)
-        result = self.runner(sessions_for("fold_a", "fold_b", "fold_c"), second).run()
-        self.assertEqual(second.keys, ["epoch_001/fold_c"])
+        result = self.runner(sessions_for(3), second).run()
+        self.assertEqual(second.keys, ["s3"])
         self.assertEqual(result["sessions_run"], 1)
         self.assertEqual(read_status(self.status)["completed_sessions"], 3)
-
-    def test_a_pending_rerun_token_reruns_a_completed_fold_and_is_recorded(self) -> None:
-        self.runner(sessions_for("fold_a", "fold_b"), RecordingExecutor(self.ledger)).run()
-        self.set_control(rerun_sessions={"epoch_001/fold_a": "rerun-7"})
-        executor = RecordingExecutor(self.ledger)
-        result = self.runner(sessions_for("fold_a", "fold_b"), executor).run()
-        self.assertEqual(executor.keys, ["epoch_001/fold_a"])
-        self.assertEqual(result["reran_sessions"], ["epoch_001/fold_a"])
-        self.assertEqual(executor.calls[0][1]["rerun_id"], "rerun-7")
-        rows = [row for row in self.ledger.read("fold") if row["session_key"] == "epoch_001/fold_a"]
-        self.assertEqual([row.get("rerun_id") for row in rows], ["", "rerun-7"])
-
-    def test_a_rerun_whose_record_omits_the_token_refuses_to_advance(self) -> None:
-        self.runner(sessions_for("fold_a"), RecordingExecutor(self.ledger)).run()
-        self.set_control(rerun_sessions={"epoch_001/fold_a": "rerun-7"})
-
-        class Forgetful(RecordingExecutor):
-            def __call__(self, session, context):
-                return super().__call__(session, {**context, "rerun_id": ""})
-
-        with self.assertRaisesRegex(RuntimeError, "did not record its rerun id"):
-            self.runner(sessions_for("fold_a"), Forgetful(self.ledger)).run()
-
-    def test_a_stale_rerun_token_already_absorbed_does_not_rerun(self) -> None:
-        self.set_control(rerun_sessions={"epoch_001/fold_a": "rerun-7"})
-        self.runner(sessions_for("fold_a"), RecordingExecutor(self.ledger)).run()
-        again = RecordingExecutor(self.ledger)
-        result = self.runner(sessions_for("fold_a"), again).run()
-        self.assertEqual(again.keys, [])
-        self.assertEqual(result["reran_sessions"], [])
-
-    def test_a_rerun_token_never_reruns_a_meta_session(self) -> None:
-        self.runner(sessions_for("meta:1"), RecordingExecutor(self.ledger)).run()
-        self.set_control(rerun_sessions={"epoch_001/meta:1": "rerun-7"})
-        again = RecordingExecutor(self.ledger)
-        self.assertEqual(self.runner(sessions_for("meta:1"), again).run()["sessions_run"], 0)
-        self.assertEqual(again.keys, [])
 
     def test_no_session_gate_holds_a_worker_the_researcher_started(self) -> None:
         """The session gate only checks stop/seal/restart; nothing blocks.
@@ -431,53 +371,7 @@ class InteractiveRunnerTest(RunnerTestCase):
         with patch.object(
             interactive.time, "sleep", side_effect=AssertionError("gate slept")
         ):
-            self.runner(sessions_for("fold_a"), RecordingExecutor(self.ledger)).run()
-
-class PostFoldHookTest(RunnerTestCase):
-    def test_the_hook_receives_the_folds_own_ledger_record(self) -> None:
-        seen: list[dict[str, object]] = []
-        executor = RecordingExecutor(self.ledger)
-        self.runner(
-            sessions_for("fold_a", "fold_b"), executor, post_fold_hook=seen.append
-        ).run()
-        self.assertEqual(
-            [row["session_key"] for row in seen], ["epoch_001/fold_a", "epoch_001/fold_b"]
-        )
-        self.assertEqual([row["run_id"] for row in seen], ["run_1", "run_2"])
-
-    def test_the_hook_never_runs_for_a_meta_session(self) -> None:
-        seen: list[dict[str, object]] = []
-        self.runner(
-            sessions_for("meta:1"), RecordingExecutor(self.ledger), post_fold_hook=seen.append
-        ).run()
-        self.assertEqual(seen, [])
-
-    def test_a_failing_hook_is_advisory_and_never_invalidates_the_fold(self) -> None:
-        def explode(_record: dict[str, object]) -> None:
-            raise RuntimeError("analysis model unavailable")
-
-        result = self.runner(
-            sessions_for("fold_a"), RecordingExecutor(self.ledger), post_fold_hook=explode
-        ).run()
-        self.assertEqual(result["status"], "complete")
-        status = read_status(self.status)
-        self.assertEqual(status["analysis_error"], "RuntimeError: analysis model unavailable")
-        self.assertEqual(len(self.ledger.read("fold")), 1)
-
-    def test_a_recovered_hook_clears_the_previous_analysis_error(self) -> None:
-        calls: list[str] = []
-
-        def flaky(record: dict[str, object]) -> None:
-            calls.append(str(record["session_key"]))
-            if len(calls) == 1:
-                raise RuntimeError("transient")
-
-        self.runner(
-            sessions_for("fold_a", "fold_b"), RecordingExecutor(self.ledger), post_fold_hook=flaky
-        ).run()
-        self.assertEqual(len(calls), 2)
-        self.assertIsNone(read_status(self.status)["analysis_error"])
-
+            self.runner(sessions_for(1), RecordingExecutor(self.ledger)).run()
 
 class WorkerEntrypointTest(unittest.TestCase):
     def test_the_worker_restores_child_reaping_the_console_disabled(self) -> None:
@@ -527,7 +421,7 @@ class WorkerEntrypointTest(unittest.TestCase):
                             "schema_version": 1,
                             "state": "running_session",
                             "pid": os.getpid(),
-                            "session_key": "epoch_003/fold_2022",
+                            "session_key": "s3",
                             "completed_sessions": 17,
                         }
                     ),
@@ -556,7 +450,7 @@ class WorkerEntrypointTest(unittest.TestCase):
             self.assertIsNone(status["error"])
             self.assertTrue(status["terminated_at"])
             # Where the run stopped survives, as on the escalated path.
-            self.assertEqual(status["session_key"], "epoch_003/fold_2022")
+            self.assertEqual(status["session_key"], "s3")
             self.assertEqual(status["completed_sessions"], 17)
 
     def test_the_entrypoint_persists_a_terminal_failure_status(self) -> None:

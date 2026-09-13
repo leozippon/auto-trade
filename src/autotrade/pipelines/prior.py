@@ -24,7 +24,7 @@ class PriorPublication:
 
 
 class ExperimentPriorStore:
-    """One immutable PRIOR file per Meta generation and one atomic current pointer."""
+    """One immutable PRIOR file per published generation and one atomic current pointer."""
 
     def __init__(self, experiment_dir: str | Path) -> None:
         self.experiment_dir = Path(experiment_dir).resolve()
@@ -127,35 +127,31 @@ class ExperimentPriorStore:
 
 
 def latest_prior_text(records: Sequence[Mapping[str, object]]) -> str:
-    """The PRIOR the last Meta row published; empty before the first Meta."""
-    metas = [record for record in records if record.get("record_type") == "meta_learning"]
-    if not metas:
+    """The PRIOR the last research session left; empty before the first."""
+    sessions = [
+        record for record in records if record.get("record_type") == "research_session"
+    ]
+    if not sessions:
         return ""
-    return str(metas[-1].get("prior") or "").strip()
+    return str(sessions[-1].get("prior") or "").strip()
 
 
 def restore_current_from_records(
-    experiment_dir: str | Path,
-    records: Sequence[Mapping[str, object]],
-    *,
-    fallback_generation_id: str = "",
+    experiment_dir: str | Path, records: Sequence[Mapping[str, object]]
 ) -> None:
-    """Align CURRENT with the last remaining Meta generation after resume/rollback.
+    """Align CURRENT with the generation the last research session recorded.
 
-    Before the first Meta row (or after a rollback past every one) CURRENT
-    points at ``fallback_generation_id`` when one is given -- the generation
-    seeded at creation from another experiment's memory -- and is dropped
-    otherwise.
+    Before the first session with a PRIOR the pointer is dropped: a
+    generation published by an attempt that never reached the ledger is not
+    in force.
     """
-    metas = [
-        record for record in records if record.get("record_type") == "meta_learning"
+    generations = [
+        str(record.get("prior_generation_id") or "").strip()
+        for record in records
+        if record.get("record_type") == "research_session"
     ]
+    generation = generations[-1] if generations else ""
     store = ExperimentPriorStore(experiment_dir)
-    generation = (
-        str(metas[-1].get("prior_generation_id") or "").strip()
-        if metas
-        else fallback_generation_id.strip()
-    )
     if not generation:
         store.clear_current()
         return

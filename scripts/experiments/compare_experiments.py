@@ -29,7 +29,6 @@ from autotrade.pipelines.ledger import (
     ExperimentLedger,
     experiment_verdict,
     latest_fold_records,
-    latest_heldout_records,
 )
 from autotrade.pipelines.reporting import walk_forward_report
 
@@ -85,9 +84,7 @@ def _rows(ledger_path: Path) -> list[list[str]]:
     ledger = ExperimentLedger(ledger_path)
     experiment_id = ledger_path.parents[1].name
     folds = list(latest_fold_records(ledger.read("fold")).values())
-    # strict=False: an experiment still running has periods without a verdict,
-    # which is a state to report, not a failure.
-    verdict = experiment_verdict(latest_heldout_records(ledger.read("heldout")), strict=False)
+    verdict = experiment_verdict(ledger.read())
     heldout = str((verdict or {}).get("status") or "not_reached")
     rows = []
     for epoch in walk_forward_report(folds):

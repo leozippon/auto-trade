@@ -54,7 +54,10 @@ from autotrade.environment.llm import (
 from autotrade.environment.tools import (
     CommandResult,
     EditFileTool,
+    GlobTool,
+    GrepTool,
     ModificationCheckTool,
+    ReadFileTool,
     SafeWorkspace,
     SandboxShellTool,
     SearchRoots,
@@ -68,10 +71,13 @@ from autotrade.pipelines.local_backend import (
     SessionBudgetLLM,
     SessionCallBudget,
     build_fold_subagent_tools,
-    build_meta_subagent_tools,
 )
 
 _STRATEGY = "def generate_orders(context):\n    return []\n"
+
+
+def _readonly_tools(roots: SearchRoots) -> list[object]:
+    return [ReadFileTool(roots), GrepTool(roots), GlobTool(roots)]
 
 
 def _fold_config(**kwargs: object) -> AgentSessionConfig:
@@ -818,7 +824,7 @@ def test_meta_subagent_is_readonly_and_cannot_nest(tmp_path: Path) -> None:
     workspace.mkdir()
     (workspace / "PRIOR.md").write_text("keep\n", encoding="utf-8")
     safe = SafeWorkspace(workspace)
-    tools = build_meta_subagent_tools(SearchRoots(safe))
+    tools = _readonly_tools(SearchRoots(safe))
     assert [tool.spec.name for tool in tools] == ["read_file", "grep", "glob"]
     engine = SubAgentEngine(
         llm=ScriptedLLM(
@@ -1036,7 +1042,7 @@ def test_role_tool_visibility_hides_writes_from_audits(tmp_path: Path) -> None:
     assert fold_general == impl
     meta_engine = SubAgentEngine(
         llm=ScriptedLLM([]),
-        tools=ToolRegistry(build_meta_subagent_tools(SearchRoots(safe))),
+        tools=ToolRegistry(_readonly_tools(SearchRoots(safe))),
         mode="meta",
     )
     meta_names = {
@@ -3198,7 +3204,6 @@ def test_child_compacts_at_the_shared_threshold_with_fresh_counters_per_launch()
         ContextCompactor,
         is_compaction_message,
     )
-    from autotrade.pipelines.local_backend import _safe_meta_trace_payload
 
     # Production shape: every model role shares one session budget, and the
     # engine refuses a compactor bound to another budget.
@@ -3256,10 +3261,6 @@ def test_child_compacts_at_the_shared_threshold_with_fresh_counters_per_launch()
     # ``max_calls=1`` per conversation: the second child compacted too, so
     # each launch ran a fresh compactor while the parent's stayed untouched.
     assert len(compact_llm.calls) == 2 and parent_compactor.compaction_count == 0
-    # A Meta trace keeps the shape of the compaction, never the summary text.
-    meta = _safe_meta_trace_payload("subagent_context_compaction", record)
-    assert meta["compaction"]["status"] == "ok" and meta["compaction"]["messages_before"] == 4
-    assert "summary" not in meta["compaction"] and meta["task_id"] == first["task_id"]
 
 
 def test_runner_hands_its_compactor_to_children_and_honours_max_turns() -> None:

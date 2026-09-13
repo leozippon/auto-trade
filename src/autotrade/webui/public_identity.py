@@ -78,6 +78,13 @@ _WINDOWS_PATH = re.compile(
 )
 
 
+# Planned session kinds: a research arm's (``research``, ``forward``) and the
+# Fold-era ones the console still lists.
+_SESSION_KINDS = frozenset(
+    {"research", "forward", "fold", "meta", "heldout", "deployment_adjustment"}
+)
+
+
 class PublicIdentity:
     """Validated modern-experiment public projection and host resolver."""
 
@@ -116,7 +123,7 @@ class PublicIdentity:
             kind = str(entry.get("kind") or "")
             if kind == "meta_learning":
                 kind = "meta"
-            if not raw_key or kind not in {"fold", "meta", "heldout", "deployment_adjustment"}:
+            if not raw_key or kind not in _SESSION_KINDS:
                 raise ValueError("experiment session plan contains an invalid session")
             public_key = self._project_session_key(entry, raw_key, kind)
             if raw_key in self._raw_to_public or public_key in self._public_to_raw:
@@ -224,6 +231,8 @@ class PublicIdentity:
             out["display_key"] = "heldout"
             if not heldout_revealed:
                 out["hidden"] = True
+        elif kind in {"research", "forward"}:
+            out["display_key"] = raw_key
         elif kind == "deployment_adjustment":
             # Runs after the Held-out sealed the experiment, so its window
             # (which includes the Held-out) is never hidden.
@@ -382,6 +391,9 @@ class PublicIdentity:
     ) -> str:
         if kind in {"heldout", "deployment_adjustment"}:
             return kind
+        if kind in {"research", "forward"}:
+            # ``s1``..``sN`` and ``forward`` name no hidden period.
+            return raw_key
         epoch_id = str(entry.get("epoch_id") or raw_key.partition("/")[0])
         if not epoch_id:
             raise ValueError("planned session has no epoch")

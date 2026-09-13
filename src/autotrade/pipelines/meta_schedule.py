@@ -1,48 +1,16 @@
-"""Pure helpers for deterministic within-Epoch meta-learning cadence."""
+"""Session keys of Fold-era Meta ledger records, for the console that still reads them."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping
 
 
-def meta_learning_trigger_counts(fold_count: int, interval: int) -> tuple[int, ...]:
-    """Completed-Fold counts that trigger Meta before the next Fold.
-
-    Zero is the mandatory Epoch-start session. A positive interval adds
-    periodic sessions, but never a useless session after the final Fold.
-    """
-
-    if fold_count <= 0:
-        return ()
-    periodic = range(interval, fold_count, interval) if interval > 0 else ()
-    return (0, *periodic)
-
-
-def meta_learning_id(epoch_id: str, trigger_after_folds: int = 0) -> str:
-    """Stable ledger/artifact identity; Epoch-start keeps the legacy name."""
-
-    if trigger_after_folds <= 0:
-        return epoch_id
-    return f"{epoch_id}_after_fold_{trigger_after_folds:03d}"
-
-
 def meta_session_key(epoch_id: str, trigger_after_folds: int = 0) -> str:
-    """Stable HITL session key; Epoch-start keeps the legacy key."""
+    """HITL session key of one Fold-era Meta session."""
 
     if trigger_after_folds <= 0:
         return f"{epoch_id}/meta_learning"
     return f"{epoch_id}/meta_learning_after_fold_{trigger_after_folds:03d}"
-
-
-def meta_record_id(record: Mapping[str, object]) -> str:
-    """Ledger/schedule identity of one meta-learning session record.
-
-    Every writer stamps ``meta_learning_id`` (epoch-start ids are normalized
-    via ``meta_learning_id(epoch, 0)``); dev-phase ruling 2026-08-02 dropped
-    the epoch-only fallback — no ledger without the field exists.
-    """
-
-    return str(record.get("meta_learning_id") or "")
 
 
 def meta_record_session_key(record: Mapping[str, object]) -> str:

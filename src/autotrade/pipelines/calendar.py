@@ -35,6 +35,9 @@ RESEARCH_ANCHOR_TIME = time(23, 59, 59)
 # A replay region needs at least two trading days: one day is a one-point
 # equity curve with no daily return series behind it.
 MIN_REGION_TRADE_DAYS = 2
+# The span label of a replay over the whole research period, Y1 through the
+# last research year.
+FULL_SPAN = "full"
 
 
 def yyyymmdd(value: object) -> str:
@@ -199,6 +202,7 @@ GEOMETRY_PARAMETERS: tuple[str, ...] = tuple(field.name for field in fields(Rese
 
 
 __all__ = [
+    "FULL_SPAN",
     "GEOMETRY_PARAMETERS",
     "MIN_REGION_TRADE_DAYS",
     "RESEARCH_ANCHOR_TIME",

@@ -1,4 +1,4 @@
-"""Rolling-experiment pipeline package (docs/pipeline-design.md).
+"""Research-arm pipeline package (docs/pipeline-design.md).
 
 The facade re-exports only what callers outside the package actually import
 through it; everything else is reached from its own module (``from
@@ -10,7 +10,6 @@ gateways and sandbox-image machinery into every reader of a ledger.
 from .config import (
     ArtifactRevision,
     EvaluationResult,
-    FoldSessionResult,
     FrozenArtifact,
     RollingExperimentConfig,
     StepResult,
@@ -20,7 +19,6 @@ from .experiment import (
     DailyStrategyPipeline,
     RollingExperimentPipeline,
 )
-from .folds import build_fold_schedule
 from .ledger import ExperimentLedger
 from .pit_backend import (
     PaperPITData,
@@ -32,7 +30,6 @@ __all__ = [
     "DailyStrategyPipeline",
     "EvaluationResult",
     "ExperimentLedger",
-    "FoldSessionResult",
     "FrozenArtifact",
     "PaperPITData",
     "ResearchPITSnapshotProvider",
@@ -40,5 +37,4 @@ __all__ = [
     "RollingExperimentPipeline",
     "StepResult",
     "StrategyExperimentConfig",
-    "build_fold_schedule",
 ]

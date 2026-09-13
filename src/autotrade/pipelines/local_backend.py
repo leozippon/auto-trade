@@ -63,11 +63,6 @@ from autotrade.environment.sandbox import (
     SandboxSpec,
     link_copytree,
 )
-from autotrade.environment.sandbox_images import (
-    SANDBOX_ENVIRONMENT_REQUEST_NAME,
-    maybe_rebuild_sandbox_image,
-    write_sandbox_environment_example,
-)
 from autotrade.environment.step_tree import StepTree
 from autotrade.environment.strategy_loader import validate_strategy_package
 from autotrade.environment.time_budget import (
@@ -105,36 +100,28 @@ from autotrade.environment.tools.shell import SandboxShellTool
 from autotrade.environment.tools.step_rollback import StepRollbackTool
 from autotrade.environment.tools.workspace import SafeWorkspace
 
-from .agent_views import (
-    NULL_CONTROL_KEYS,
-    allowed_keys,
-    fold_development_summary,
-    parent_control_error_text,
-    vs_parent_metrics,
-)
+from .agent_views import NULL_CONTROL_KEYS, allowed_keys
+from .calendar import yyyymmdd
 from .config import (
     AcceptanceRules,
     ArtifactRevision,
     EvaluationBackend,
     EvaluationRequest,
     EvaluationResult,
-    FoldSessionRequest,
-    FoldSessionResult,
     FrozenArtifact,
-    MetaSessionResult,
+    ResearchSessionRequest,
+    ResearchSessionResult,
     SnapshotBundle,
     StepResult,
     StrategyExperimentConfig,
 )
-from .experiment import DailyStrategyPipeline, null_control_seed
-from .folds import yyyymmdd
-from .inherited_memory import (
-    inherited_prior_header,
-    load_inherited_memory,
-    prior_provenance,
-    skills_provenance,
+from .experiment import (
+    DailyStrategyPipeline,
+    freeze_gate_for,
+    null_control_seed,
+    research_step_record,
 )
-from .ledger import ExperimentLedger, candidate_deflated_sharpe, latest_fold_records
+from .ledger import RESEARCH_STAGE, ExperimentLedger, research_records
 from .skills import (
     SKILLS_INDEX_PATH,
     DeleteSkillTool,
@@ -161,20 +148,26 @@ class LocalDailySnapshotProvider:
     def prepare(
         self,
         *,
-        fold,
         phase: str,
         start: str,
         end: str,
         decision_time: datetime,
     ) -> SnapshotBundle:
-        del fold
-        if phase not in {"meta", "valid", "frozen_test", "heldout"}:
+        del decision_time
+        if phase not in {"valid", "heldout"}:
             raise ValueError(f"unsupported local snapshot phase: {phase}")
         return SnapshotBundle(
             snapshot_id=f"local_daily_{phase}_{start}_{end}",
             decision_ref=str(self.daily_path),
             replay_ref=str(self.daily_path),
-            data_summary_ref="",
+            generation_id="local_daily",
+        )
+
+    def prepare_decision(self, *, decision_time: datetime) -> SnapshotBundle:
+        return SnapshotBundle(
+            snapshot_id=f"local_daily_decision_{decision_time:%Y%m%d}",
+            decision_ref=str(self.daily_path),
+            replay_ref="",
             generation_id="local_daily",
         )
 
@@ -225,7 +218,7 @@ class LocalDailyEvaluationBackend:
         """
         if max_days is not None and max_days <= 0:
             raise ValueError("max_days must be a positive integer")
-        if request.mode not in {"valid", "frozen_test", "heldout"}:
+        if request.mode not in {"valid", "heldout"}:
             raise ValueError(f"unsupported local evaluation mode: {request.mode}")
         strategy_path = Path(request.revision.output_path) / "main.py"
         if not strategy_path.is_file():
@@ -293,7 +286,12 @@ class LocalDailyEvaluationBackend:
 
 
 class DeterministicBaselineDeveloper:
-    """Create one Step by replaying the supplied baseline without modifying it."""
+    """Replay the session's start unchanged on the research span, once per session.
+
+    Nothing is modified and nothing is judged: every session but the last
+    continues from where it started, and the last nominates its replay for
+    the freeze gate.
+    """
 
     def __init__(
         self,
@@ -318,50 +316,41 @@ class DeterministicBaselineDeveloper:
         self.baseline_root.mkdir(parents=True, exist_ok=True)
         shutil.copy2(self.baseline_strategy, self.baseline_root / "main.py")
 
-    def __call__(self, request: FoldSessionRequest) -> FoldSessionResult:
-        source = (
-            request.parent.path if request.parent is not None else self.baseline_root
-        )
-        _assert_skills_absent_from_formal(
-            source,
-            request.parent.model_path if request.parent is not None else None,
-        )
-        revision = self.artifact_store.create_revision(
-            source,
-            models_path=request.parent.model_path
-            if request.parent is not None
-            else None,
-        )
+    def __call__(self, request: ResearchSessionRequest) -> ResearchSessionResult:
+        start = request.start
+        source = start.path if start is not None else self.baseline_root
+        models = start.model_path if start is not None else None
+        _assert_skills_absent_from_formal(source, models)
+        revision = self.artifact_store.create_revision(source, models_path=models)
         typed_revision = ArtifactRevision(
             str(revision.revision_id),
             Path(revision.output_path),
             Path(revision.models_path) if revision.models_path is not None else None,
         )
         validation = self.evaluator.evaluate(
-            EvaluationRequest(
-                revision=typed_revision,
-                snapshot=request.snapshot,
-                mode="valid",
-                start=request.fold.validation_start,
-                end=request.fold.validation_end,
-                schedule=self.schedule,
-                broker_profile=self.broker_profile,
+            request.validation.request(
+                typed_revision, schedule=self.schedule, broker_profile=self.broker_profile
             )
         )
-        # Step ids reach the Agent through the ledger's steps[] projection, so
-        # they carry the same opaque fold ref every agent-visible surface uses.
+        # Step ids reach the Agent-facing projections, so they carry the same
+        # opaque refs every agent-visible surface uses.
         step_id = (
-            f"baseline_{self.ref_store.get_or_create('fold', request.fold.fold_id)}__"
+            f"baseline_{self.ref_store.get_or_create('fold', request.session_id)}__"
             f"{self.ref_store.get_or_create('run', request.run_id)}"
         )
-        return FoldSessionResult(
-            conversation_id=f"deterministic_baseline_{request.run_id}",
-            steps=(
+        last = request.session_index == request.sessions_total
+        return ResearchSessionResult(
+            f"deterministic_baseline_{request.run_id}",
+            (
                 StepResult(
-                    step_id, typed_revision.revision_id, validation, selected=True
+                    step_id,
+                    typed_revision.revision_id,
+                    validation,
+                    span=request.validation.label,
                 ),
             ),
-            selected_step_id=step_id,
+            "freeze" if last else "continue",
+            node_id=step_id if last else None,
             finish_reason="deterministic_baseline_replay_no_agent_improvement",
         )
 
@@ -535,29 +524,14 @@ class SessionBudgetLLM(SessionTimeBudgetAware):
         return response
 
 
-def _public_error_text(exc: Exception, *, hidden: Sequence[str] = ()) -> str:
-    """The exact failure text, host paths and hidden calendar redacted."""
-    text = HOST_PATH_RE.sub("[host_path]", safe_error_summary(exc))
-    for value in sorted({item for item in hidden if item}, key=len, reverse=True):
-        text = text.replace(value, "[redacted]")
-    return text
+def _public_error_text(exc: Exception) -> str:
+    """The exact failure text with host paths redacted."""
+    return HOST_PATH_RE.sub("[host_path]", safe_error_summary(exc))
 
 
-def _public_validation_error(
-    exc: Exception, *, hidden: Sequence[str] = ()
-) -> str:
+def _public_validation_error(exc: Exception) -> str:
     """Agent-visible Validation failure: type, actionable reason, no host leaks."""
-    return f"daily Validation failed: {_public_error_text(exc, hidden=hidden)}"
-
-
-def _hidden_calendar(fold) -> tuple[str | None, ...]:
-    """Calendar values no Agent-visible failure text may contain.
-
-    Single source for every formal tool in this module. A Fold without a Test
-    stage simply has nothing to redact there; ``_public_error_text`` drops the
-    empty entries.
-    """
-    return (fold.fold_id, fold.test_start, fold.test_end)
+    return f"daily Validation failed: {_public_error_text(exc)}"
 
 
 SMOKE_BACKTEST_DEFAULT_DAYS = 3
@@ -627,7 +601,7 @@ class SmokeBacktestTool(SessionTimeBudgetAware):
     def __init__(
         self,
         *,
-        request: FoldSessionRequest,
+        request: ResearchSessionRequest,
         output_dir: Path,
         models_dir: Path,
         modification_check: ModificationCheckTool,
@@ -666,7 +640,6 @@ class SmokeBacktestTool(SessionTimeBudgetAware):
             # Same static gate as a Validation candidate, so a green smoke run
             # means the gate will not be what fails the official one.
             raise ToolError(f"smoke_backtest blocked by modification_check: {check.error}")
-        fold = self.request.fold
         # The rehearsal replays an immutable snapshot outside the Agent's mounts,
         # not the live tree: it can neither be frozen nor leave anything behind
         # in output/ (a trusted-mode run imports main.py and would drop
@@ -693,14 +666,8 @@ class SmokeBacktestTool(SessionTimeBudgetAware):
                 scratch / "models" if models_source is not None else None,
             )
             evaluation = self.evaluator.evaluate(
-                EvaluationRequest(
-                    revision=revision,
-                    snapshot=self.request.snapshot,
-                    mode="valid",
-                    start=fold.validation_start,
-                    end=fold.validation_end,
-                    schedule=self.schedule,
-                    broker_profile=self.broker_profile,
+                self.request.validation.request(
+                    revision, schedule=self.schedule, broker_profile=self.broker_profile
                 ),
                 max_days=days,
             )
@@ -714,7 +681,7 @@ class SmokeBacktestTool(SessionTimeBudgetAware):
                     "days_requested": days,
                     "official": False,
                     "counts_against_backtest_budget": False,
-                    "error": _public_error_text(exc, hidden=_hidden_calendar(fold)),
+                    "error": _public_error_text(exc),
                     "hint": _SMOKE_LAYOUT_HINT,
                 },
             )
@@ -795,36 +762,14 @@ def install_agent_data_contract(
     paths,
     *,
     kind: str,
-    fold_id: str | None = None,
-    views: Mapping[str, tuple[Path, str]] | None = None,
-    bundle_ref: str = "",
-) -> bool:
-    """Publish the data contract a session's run manifest advertises.
+    fold_id: str,
+    views: Mapping[str, tuple[Path, str]],
+) -> None:
+    """Publish the data contract a session's run manifest advertises: the
+    summary and unit reference of its own mounted views, the session id opaqued
+    so no calendar label leaks through them."""
 
-    A manifest that declares ``data_summary_ref`` must be backed by a file the
-    session can actually read. Meta declared it and never installed it, so a
-    Meta session read a missing path and published the false premise
-    "data_summary.json is not mounted" into the immutable PRIOR that every later
-    Fold reads. One installer for both session kinds, and the caller records the
-    ref only when this returns True.
-
-    A Fold builds the summary from its own mounted snapshot view (its fold id is
-    opaqued so the calendar period cannot leak). Meta has no mounted snapshot,
-    so it installs the prebuilt bundle summary its SnapshotBundle already names
-    — the same numbers, for the Meta window's decision snapshot.
-    """
-    if views:
-        write_agent_data_summary(
-            paths.data_summary, kind=kind, fold_id=fold_id, views=views
-        )
-    else:
-        source = Path(bundle_ref) if bundle_ref else None
-        if source is None or not source.is_file():
-            return False
-        for name in AGENT_DATA_CONTRACT_FILES:
-            candidate = source.parent / name
-            if candidate.is_file():
-                shutil.copy2(candidate, paths.artifacts / name)
+    write_agent_data_summary(paths.data_summary, kind=kind, fold_id=fold_id, views=views)
     for name in AGENT_DATA_CONTRACT_FILES:
         target = paths.artifacts / name
         if target.is_file():
@@ -837,7 +782,6 @@ def install_agent_data_contract(
                 encoding="utf-8",
             )
             target.chmod(0o444)
-    return paths.data_summary.is_file()
 
 
 def _smoke_asof_domains(result_dir: Path) -> list[str]:
@@ -894,91 +838,25 @@ def manifest_backtest_stats(summary: Mapping[str, object]) -> dict[str, object]:
     }
 
 
-PARENT_CONTROL_RESULT_NAME = "parent_control"
-# What a candidate row's provisional deflated Sharpe is, and is not.
+# What a candidate row's provisional selection block is, and is not.
 SELECTION_STATISTICS_NOTE = (
-    "provisional: the trial pool is every Validation this session has "
-    "completed so far (the parent control excluded); the ledger recomputes "
-    "the frozen node's deflated Sharpe with the final count"
+    "provisional: the freeze gate as it would read this node now, over every "
+    "revision the arm has validated so far; the freeze recomputes it"
 )
 
 
-def parent_control_facts(request: FoldSessionRequest) -> dict[str, object] | None:
-    """The host's parent control as the Fold session reads it in its run facts.
-
-    The inherited parent's completed Validation on this very window, replayed
-    by the host before the session: the Agent's baseline, already a Step node
-    in the tree and charged to no budget. Its random-portfolio null rides
-    along (``step`` inside it is the Fold's new period alone), so the
-    keep-parent decision sees whether the parent's names beat random ones on
-    the one span that is forward evidence. None without a parent control.
-    """
-
-    if request.parent_control is None:
-        return None
-    return {
-        **inline_backtest_stats(request.parent_control.summary),
-        "null_control": allowed_keys(request.parent_control_null, NULL_CONTROL_KEYS),
-    }
-
-
-def record_parent_control(
-    backtest: FoldBacktestTool,
-    control: EvaluationResult,
-    *,
-    output_dir: Path,
-    models_dir: Path,
-) -> StepResult:
-    """Record the host's parent control as this session's first Step node.
-
-    Called before the Agent's first call, while the working copy is still the
-    inherited parent byte for byte, so the revision taken from it is the tree
-    the host replayed. The node belongs to this session (``finish_fold`` may
-    nominate it as the explicit keep-parent once a different hypothesis has
-    been validated) and it charges no Validation slot and no Step: it is not
-    appended to ``backtest.steps``.
-    """
-
-    revision = backtest.artifact_store.create_revision(output_dir, models_path=models_dir)
-    typed = ArtifactRevision(
-        str(revision.revision_id),
-        Path(revision.output_path),
-        Path(revision.models_path) if revision.models_path is not None else None,
-    )
-    node_id = backtest.record_validation(
-        typed,
-        control,
-        result_name=PARENT_CONTROL_RESULT_NAME,
-        metadata={
-            "parent_control": True,
-            "hypothesis": "inherited parent replayed unchanged on this Fold's Validation window",
-        },
-    )
-    backtest.append_manifest_summary(
-        {
-            "result_name": PARENT_CONTROL_RESULT_NAME,
-            "mode": "valid",
-            "status": "ok",
-            "complete_validation": True,
-            "parent_control": True,
-            **manifest_backtest_stats(control.summary),
-        }
-    )
-    return StepResult(node_id, typed.revision_id, control, parent_control=True)
-
-
 class FoldBacktestTool:
-    """The Fold's Validation engine: one budget, one Step list, one tree.
+    """The research session's Validation engine: one budget, one Step list, one tree.
 
     Not an Agent tool: ``batch_validate`` commits and replays every candidate
-    through it, and the host records its parent control through it, so no
-    Validation can overspend or bypass the ledger behind another's back.
+    through it, so no Validation can overspend or bypass the ledger behind
+    another's back.
     """
 
     def __init__(
         self,
         *,
-        request: FoldSessionRequest,
+        request: ResearchSessionRequest,
         output_dir: Path,
         models_dir: Path,
         artifact_store: FilesystemArtifactStore,
@@ -988,6 +866,7 @@ class FoldBacktestTool:
         broker_profile,
         time_budget: InferenceTimeBudget,
         ref_store: AgentRefStore,
+        ledger: ExperimentLedger,
         manifest: RunManifest | None = None,
     ) -> None:
         self.request = request
@@ -1000,73 +879,38 @@ class FoldBacktestTool:
         self.broker_profile = broker_profile
         self.time_budget = time_budget
         self.ref_store = ref_store
+        self.ledger = ledger
         self.manifest = manifest
         self.backtests = 0
         self.steps: list[StepResult] = []
 
-    @property
-    def parent_control_summary(self) -> dict[str, object] | None:
-        """This Fold's own parent control summary, or None without a parent.
+    def selection_statistics(self, step: StepResult) -> dict[str, object]:
+        """The provisional freeze-gate reading one candidate row carries.
 
-        Every ``vs_parent`` block in the session reads the control from here,
-        so a candidate can never be compared against a neighbour's baseline.
-        """
-        control = self.request.parent_control
-        return control.summary if control is not None else None
-
-    def vs_parent_fields(self, evaluation: EvaluationResult) -> dict[str, object]:
-        """One candidate's ``vs_parent``, stated as absent -- not omitted --
-        when this Fold has no parent control to compare against.
-
-        ``vs_parent_note`` is the one row-level place a reason for the block is
-        stated: no control to compare against, or a block of exact zeros
-        because the candidate placed the parent's own order stream.
+        The Pipeline's own gate (``experiment.freeze_gate_for``) over the arm's
+        recorded Steps and this session's completed ones, so the Agent reads
+        the figure a freeze of this node would be judged on today.
         """
 
-        vs_parent = vs_parent_metrics(evaluation.summary, self.parent_control_summary)
-        if vs_parent is not None:
-            note = vs_parent.pop("vs_parent_note", None)
-            return {
-                "vs_parent": vs_parent,
-                **({"vs_parent_note": note} if note is not None else {}),
-            }
+        rows = [research_step_record(item) for item in self.steps]
+        nominee = next(row for row in rows if row["step_id"] == step.step_id)
+        gate = freeze_gate_for(self.ledger.read(), rows, nominee)
+        dsr = gate.get("deflated_sharpe")
         return {
-            "vs_parent": None,
-            "vs_parent_note": (
-                "first Fold: no parent control"
-                if self.request.parent is None
-                else "no parent control: the host's parent replay failed"
+            "freeze_gate_passed": gate["passed"],
+            "freeze_gate_reasons": gate["reasons"],
+            "deflated_sharpe_probability": (
+                dsr.get("deflated_sharpe_probability") if isinstance(dsr, Mapping) else None
             ),
-        }
-
-    def selection_statistics(self, evaluation: EvaluationResult) -> dict[str, object]:
-        """The provisional selection evidence one candidate row carries.
-
-        The deflated Sharpe is the ledger's own function over the trial pool
-        so far -- every completed Validation of this session, the parent
-        control excluded -- so the Agent reads the figure the freeze would
-        record for this node today; the ledger recomputes it with the final
-        trial count.
-        """
-
-        block = candidate_deflated_sharpe(
-            observed_sharpe=evaluation.summary.get("sharpe"),
-            trial_sharpes=[step.validation.summary.get("sharpe") for step in self.steps],
-            result_ref=evaluation.result_ref,
-        )
-        return {
-            "deflated_sharpe_probability": block["deflated_sharpe_probability"],
-            "trials_so_far": len(self.steps),
-            "unavailable_reason": block["unavailable_reason"],
+            "trials": dsr.get("trials") if isinstance(dsr, Mapping) else None,
+            "full_span_validations": gate.get("full_span_validations"),
             "note": SELECTION_STATISTICS_NOTE,
         }
 
     def append_manifest_summary(self, summary: dict[str, object]) -> None:
         """Every backtest attempt, successful or not, lands in the run manifest.
 
-        It is the only durable per-run record of what the session actually ran:
-        the ledger keeps one fold record, and ``compact_fold_history`` reads
-        these summaries back out for the next Meta session.
+        It is the only durable per-run record of what the session actually ran.
         """
         if self.manifest is not None:
             self.manifest.append_backtest_summary(summary)
@@ -1112,11 +956,9 @@ class FoldBacktestTool:
         its candidates are siblings of one parent."""
         return self.tree.record_step(
             revision.output_path,
-            epoch_id=self.request.epoch_id,
-            # Opaque the fold id so the step-tree node names the Agent
-            # reads (steps/tree.txt|tree.json) never leak the held-out
-            # calendar period.
-            fold_id=self.ref_store.get_or_create("fold", self.request.fold.fold_id),
+            epoch_id=RESEARCH_STAGE,
+            # The session id is opaqued like every other Agent-visible id.
+            fold_id=self.ref_store.get_or_create("fold", self.request.session_id),
             run_id=self.ref_store.get_or_create("run", self.request.run_id),
             result_name=result_name,
             revision_id=self.ref_store.get_or_create(
@@ -1134,15 +976,10 @@ class FoldBacktestTool:
     def validation_request(
         self, revision: ArtifactRevision
     ) -> EvaluationRequest:
-        """The Fold's own Validation replay, for any revision it accepted."""
-        return EvaluationRequest(
-            revision=revision,
-            snapshot=self.request.snapshot,
-            mode="valid",
-            start=self.request.fold.validation_start,
-            end=self.request.fold.validation_end,
-            schedule=self.schedule,
-            broker_profile=self.broker_profile,
+        """The session's Validation replay of the research span, for any
+        revision it accepted."""
+        return self.request.validation.request(
+            revision, schedule=self.schedule, broker_profile=self.broker_profile
         )
 
     def reserve_validations(self, count: int) -> list[str]:
@@ -1399,15 +1236,9 @@ class BatchValidateTool(SessionTimeBudgetAware):
         "that can write and is refused while one is still running; read-only "
         "audits keep running while the candidates replay concurrently on the same "
         "Validation window. Returns one row per candidate: node id, headline "
-        "metrics, the per-quarter return/excess/Sharpe of sub_windows, the "
-        "vs_parent deltas against this Fold's parent control (excess, "
-        "neutralized excess, drawdown, and beats_parent = both excess deltas "
-        "> 0; null with vs_parent_note when the Fold has no parent control, "
-        "and identical_to_parent with a vs_parent_note when the candidate "
-        "reproduced the parent's result exactly -- an overlay that never "
-        "fired, not a failed comparison), "
-        "the provisional selection_statistics (the deflated Sharpe over every "
-        "Validation completed so far, which the ledger recomputes at freeze), "
+        "metrics, the per-period return/excess/Sharpe of sub_windows, the "
+        "provisional selection_statistics (the freeze gate as it would read "
+        "this node now, which the freeze recomputes), "
         "and wall seconds; a failed candidate's row carries its exact failure text "
         "instead of those fields — one failure never hides the others. Each "
         "completed row's result_ref reads back that candidate's full replay "
@@ -1537,7 +1368,7 @@ class BatchValidateTool(SessionTimeBudgetAware):
         # because the clock ran out during them would destroy real evidence. The
         # session deadline is enforced at the next dispatch and LLM call.
         rows: list[dict[str, object]] = []
-        recorded: list[tuple[dict[str, object], EvaluationResult]] = []
+        recorded: list[tuple[dict[str, object], StepResult]] = []
         try:
             for candidate, revision, result_name, outcome in zip(
                 candidates, revisions, result_names, outcomes, strict=True
@@ -1567,7 +1398,7 @@ class BatchValidateTool(SessionTimeBudgetAware):
                             batch_id=batch_id,
                         )
                     )
-                    recorded.append((row, evaluation))
+                    recorded.append((row, self.backtest.steps[-1]))
                 rows.append(row)
         finally:
             # The batch never touched the working copy, so the tree position
@@ -1577,8 +1408,8 @@ class BatchValidateTool(SessionTimeBudgetAware):
             self.backtest.tree.set_position(parent_node_id)
         # Every row of the round deflates against the same trial pool: the
         # whole batch is complete by the time the table is returned.
-        for row, evaluation in recorded:
-            row["selection_statistics"] = self.backtest.selection_statistics(evaluation)
+        for row, step in recorded:
+            row["selection_statistics"] = self.backtest.selection_statistics(step)
         if not recorded:
             raise ToolError(
                 f"batch_validate: all {len(rows)} candidates failed their "
@@ -1875,8 +1706,7 @@ class BatchValidateTool(SessionTimeBudgetAware):
             for revision in revisions:
                 self.backtest.artifact_store.discard_revision(revision.revision_id)
             self.backtest.release_validations(count)
-            fold = self.backtest.request.fold
-            public_error = _public_error_text(exc, hidden=_hidden_calendar(fold))
+            public_error = _public_error_text(exc)
             # Recorded as what it was: every attempt reaches the run manifest.
             self.backtest.append_manifest_summary(
                 {
@@ -1962,11 +1792,6 @@ class BatchValidateTool(SessionTimeBudgetAware):
         result_name: str,
         batch_id: str,
     ) -> dict[str, object]:
-        # The screening decision is against the Fold's baseline, not against
-        # zero: ``vs_parent`` is this candidate minus the host's parent control
-        # on the same window (agent_views.vs_parent_metrics), stated as null
-        # when the Fold has no control.
-        vs_parent = self.backtest.vs_parent_fields(evaluation)
         node_id = self.backtest.record_validation(
             revision,
             evaluation,
@@ -1979,7 +1804,12 @@ class BatchValidateTool(SessionTimeBudgetAware):
             },
         )
         self.backtest.steps.append(
-            StepResult(node_id, revision.revision_id, evaluation)
+            StepResult(
+                node_id,
+                revision.revision_id,
+                evaluation,
+                span=self.backtest.request.validation.label,
+            )
         )
         self.backtest.append_manifest_summary(
             {
@@ -1991,11 +1821,6 @@ class BatchValidateTool(SessionTimeBudgetAware):
                 "candidate": candidate.name,
                 "hypothesis": candidate.hypothesis,
                 **manifest_backtest_stats(evaluation.summary),
-                **(
-                    {"vs_parent": vs_parent["vs_parent"]}
-                    if vs_parent["vs_parent"] is not None
-                    else {}
-                ),
             }
         )
         public_result_ref = f"{node_id}/{VALIDATION_RESULT_ATTACHMENT}"
@@ -2011,7 +1836,6 @@ class BatchValidateTool(SessionTimeBudgetAware):
                 "strategy", revision.revision_id
             ),
             "stats": batch_candidate_stats(evaluation.summary),
-            **vs_parent,
             "result_ref": public_result_ref,
         }
 
@@ -2022,19 +1846,17 @@ class BatchValidateTool(SessionTimeBudgetAware):
         error: Exception | None,
         batch_id: str,
     ) -> dict[str, object]:
-        fold = self.backtest.request.fold
         public_error = _public_validation_error(
-            error if error is not None else RuntimeError("unknown replay failure"),
-            hidden=_hidden_calendar(fold),
+            error if error is not None else RuntimeError("unknown replay failure")
         )
         request = self.backtest.request
         if request.record_failed_attempts:
             # record_failed_attempt leaves the tree position alone by design,
             # so a dead end never becomes anybody's parent.
             self.backtest.tree.record_failed_attempt(
-                epoch_id=request.epoch_id,
+                epoch_id=RESEARCH_STAGE,
                 fold_id=self.backtest.ref_store.get_or_create(
-                    "fold", request.fold.fold_id
+                    "fold", request.session_id
                 ),
                 run_id=self.backtest.ref_store.get_or_create("run", request.run_id),
                 result_name=result_name,
@@ -2061,68 +1883,49 @@ class BatchValidateTool(SessionTimeBudgetAware):
         return {"status": "failed", "error": public_error}
 
     def _select_hint(self, rows: Sequence[Mapping[str, object]]) -> str:
-        return batch_select_hint(
-            rows, versus_parent=self.backtest.parent_control_summary is not None
-        )
+        return batch_select_hint(rows)
 
-def batch_select_hint(
-    rows: Sequence[Mapping[str, object]], *, versus_parent: bool
-) -> str:
+
+def batch_select_hint(rows: Sequence[Mapping[str, object]]) -> str:
     """Name the row leading on the design's tie-breaker; select nothing.
 
-    The neutralized excess is the figure the Fold guidance ranks candidates
-    on — against the parent control when the Fold has one, absolute otherwise —
-    so the hint says which row leads on it and on nothing else. A winning
-    round is the starting point of the next pre-registered round, not the end
-    of the Fold: the hint never instructs ``finish_fold``, it states when
+    The neutralized excess is the figure the guidance ranks candidates on, so
+    the hint says which row leads on it and on nothing else. A winning round
+    is the starting point of the next pre-registered round, not the end of
+    the session: the hint never instructs ``finish_fold``, it states when
     finishing is warranted.
     """
 
-    label = (
-        "neutralized excess vs parent control"
-        if versus_parent
-        else "neutralized excess"
-    )
     ranked = [
-        (_batch_row_neutralized_excess(row, versus_parent=versus_parent), row)
+        (_batch_row_neutralized_excess(row), row)
         for row in rows
         if row.get("status") == "ok"
     ]
     leading = max(ranked, key=lambda item: item[0], default=(float("-inf"), None))
     lead = (
-        f"leading on {label}: {leading[1].get('name')} "
+        f"leading on neutralized excess: {leading[1].get('name')} "
         f"(node_id={leading[1].get('node_id')}); "
         if leading[1] is not None and math.isfinite(leading[0])
-        else f"no row carries a {label} figure; "
+        else "no row carries a neutralized excess figure; "
     )
     return (
-        f"{lead}read every row yourself (whole window AND sub_windows, "
-        "vs_parent) — nothing is selected for you. A winning round is the start "
-        "of the next pre-registered round: step_rollback(node_id=<chosen>) "
-        "restores it as the working copy; finish_fold is warranted only once "
-        "the pre-registered hypotheses are resolved or the remaining budget no "
-        "longer fits another round."
+        f"{lead}read every row yourself (whole window AND sub_windows) — nothing "
+        "is selected for you. A winning round is the start of the next "
+        "pre-registered round: step_rollback(node_id=<chosen>) restores it as "
+        "the working copy; finish_fold is warranted only once the pre-registered "
+        "hypotheses are resolved or the remaining budget no longer fits another "
+        "round."
     )
 
 
-def _batch_row_neutralized_excess(
-    row: Mapping[str, object], *, versus_parent: bool
-) -> float:
-    if versus_parent:
-        block = row.get("vs_parent")
-        value = (
-            block.get("neutralized_excess_return_delta")
-            if isinstance(block, Mapping)
-            else None
-        )
-    else:
-        stats = row.get("stats")
-        benchmark = stats.get("benchmark") if isinstance(stats, Mapping) else None
-        value = (
-            benchmark.get("neutralized_excess_return")
-            if isinstance(benchmark, Mapping)
-            else None
-        )
+def _batch_row_neutralized_excess(row: Mapping[str, object]) -> float:
+    stats = row.get("stats")
+    benchmark = stats.get("benchmark") if isinstance(stats, Mapping) else None
+    value = (
+        benchmark.get("neutralized_excess_return")
+        if isinstance(benchmark, Mapping)
+        else None
+    )
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return float("-inf")
     return float(value) if math.isfinite(value) else float("-inf")
@@ -2223,18 +2026,11 @@ class NullControlTool(SessionTimeBudgetAware):
         example={"node_id": "<complete Validation node_id>"},
     )
 
-    def __init__(
-        self,
-        backtest: FoldBacktestTool,
-        *,
-        max_calls: int,
-        control_step_id: str | None = None,
-    ) -> None:
+    def __init__(self, backtest: FoldBacktestTool, *, max_calls: int) -> None:
         if isinstance(max_calls, bool) or not isinstance(max_calls, int) or max_calls <= 0:
             raise ValueError("run_null_control max_calls must be a positive integer")
         self.backtest = backtest
         self.max_calls = max_calls
-        self.control_step_id = control_step_id
         self.used = 0
         # Successful blocks by node id, exactly as the ledger records them.
         self.blocks: dict[str, dict[str, object]] = {}
@@ -2252,8 +2048,7 @@ class NullControlTool(SessionTimeBudgetAware):
             "(max_null_controls_per_fold in the run facts; every result reports "
             "null_controls_remaining); a node's block is cached, and the frozen "
             "node's block is reused at freeze instead of being drawn again. Use it "
-            "on the finalists before finish_fold, not on every candidate; the "
-            "parent control's null is already in the run facts. Refused for a node "
+            "on the finalists before finish_fold, not on every candidate. Refused for a node "
             "that is not a complete Validation of this session, once the cap is "
             "spent, and while a background sub-agent that can write is still "
             "running; it is also unavailable once the session enters hard "
@@ -2272,12 +2067,6 @@ class NullControlTool(SessionTimeBudgetAware):
         self.backtest.check_deadline()
         step = next((item for item in self.backtest.steps if item.step_id == node_id), None)
         if step is None:
-            if self.control_step_id is not None and node_id == self.control_step_id:
-                raise ToolError(
-                    "run_null_control: the parent control's null already ran on "
-                    "the host before this session; read it in the run facts "
-                    "(parent_control.null_control)"
-                )
             raise ToolError(
                 "run_null_control requires the node_id of a complete Validation of "
                 f"this session; {node_id or '<empty>'} is not one",
@@ -2296,25 +2085,24 @@ class NullControlTool(SessionTimeBudgetAware):
         runner = getattr(self.backtest.evaluator, "null_control", None)
         if not callable(runner):
             raise ToolError("run_null_control is not available on this evaluation backend")
-        fold = self.backtest.request.fold
+        span = self.backtest.request.validation
         # The attempt is charged before it runs: the compute is spent either way.
         self.used += 1
         with self.backtest.time_budget.pause():
             try:
                 block = runner(
                     step.validation.result_ref,
-                    start=fold.validation_start,
-                    end=fold.validation_end,
+                    start=span.start,
+                    end=span.end,
                     profile=self.backtest.broker_profile,
                     schedule=self.backtest.schedule,
-                    seed=null_control_seed(fold.fold_id, "frozen"),
+                    seed=null_control_seed(self.backtest.request.session_id, "frozen"),
                 )
             except SessionInterrupt:
                 raise
             except Exception as exc:
                 raise ToolError(
-                    "run_null_control failed: "
-                    + _public_error_text(exc, hidden=_hidden_calendar(fold)),
+                    "run_null_control failed: " + _public_error_text(exc),
                     error_type="null_control_failed",
                     details={
                         "null_controls_used": self.used,
@@ -2409,15 +2197,6 @@ def build_fold_subagent_tools(
     ]
 
 
-def build_meta_subagent_tools(search_roots: SearchRoots) -> list[Tool]:
-    """Tools handed to Meta ``SubAgentEngine``: read-only audit."""
-    return [
-        ReadFileTool(search_roots),
-        GrepTool(search_roots),
-        GlobTool(search_roots),
-    ]
-
-
 class LLMFoldDeveloper:
     """Adapter from the native Agent loop to ``FoldDeveloper``."""
 
@@ -2504,43 +2283,34 @@ class LLMFoldDeveloper:
         limits = getattr(sandbox, "limits", None) or SandboxLimits()
         return int(limits.gpu_count)
 
-    def set_sandbox_spec(self, spec: SandboxSpec) -> None:
-        """Adopt the derived image a Meta session just built, for later Folds."""
-        self.sandbox_spec = spec
-
-    def __call__(self, request: FoldSessionRequest) -> FoldSessionResult:
+    def __call__(self, request: ResearchSessionRequest) -> ResearchSessionResult:
         from autotrade.agent.compact import ContextCompactor
+        from autotrade.agent.prompts import FOLD_DEFAULT_INSTRUCTION, build_system_prompt
+        from autotrade.agent.runner import (
+            AgentSessionConfig,
+            AgentSessionDeadlineExceeded,
+            AgentSessionRunner,
+        )
         from autotrade.agent.subagent import (
             SubAgentConfig,
             SubAgentEngine,
         )
-        from autotrade.agent.prompts import build_system_prompt
-        from autotrade.agent.runner import AgentSessionConfig, AgentSessionRunner
         from autotrade.pipelines.agent_inbox import bind_session_inbox
 
         root = self.runtime_root / request.run_id
         if root.exists():
-            raise FileExistsError(f"Fold runtime already exists: {request.run_id}")
-        kind = request.session_kind
-        if kind not in {"fold", "deployment_adjustment"}:
-            raise ValueError(f"unsupported Fold session kind: {kind}")
-        # The post-Held-out deployment adjustment runs on this very scaffold
-        # with the graduated mechanism frozen: the modification check and
-        # finish_fold compare against the parent's mechanism, no null control
-        # is offered, and the prompt carries the deployment contract.
-        deployment = kind == "deployment_adjustment"
-        if deployment and request.parent is None:
-            raise ValueError("a deployment adjustment needs the graduated parent")
-        fold_ref = self.ref_store.get_or_create("fold", request.fold.fold_id)
+            raise FileExistsError(f"session runtime already exists: {request.run_id}")
+        session_ref = self.ref_store.get_or_create("fold", request.session_id)
         run_ref = self.ref_store.get_or_create("run", request.run_id)
+        span = request.validation
         trace = AgentTraceWriter(
             agent_trace_path(self.artifact_store.root.parent, request.run_id),
             ids={
                 "experiment_id": request.experiment_id,
-                "epoch_id": request.epoch_id,
-                "fold_id": fold_ref,
+                "epoch_id": RESEARCH_STAGE,
+                "fold_id": session_ref,
                 "run_id": run_ref,
-                "session_kind": kind,
+                "session_kind": RESEARCH_STAGE,
             },
         )
         _environment_phase(request.progress_hook, "sandbox_layout", request.run_id)
@@ -2556,24 +2326,26 @@ class LLMFoldDeveloper:
             sandbox_spec = replace(
                 self.sandbox_spec, gpu_count=int(request.sandbox_gpu_count)
             )
+        start = request.start
         # RunManifest publishes two views of the same data: the host audit copy
         # under runtime/, and the allowlisted Agent-visible copy mounted at
         # /mnt/artifacts/run_manifest.json. It is also where every backtest
-        # summary accumulates, which is what the next Meta session reads back
-        # through compact_fold_history's run_manifest_ref.
+        # summary accumulates. Research dates only: the forward period is
+        # never known to a session.
         manifest = RunManifest.create(
             paths.run_manifest,
             {
                 "experiment_id": request.experiment_id,
-                "epoch_id": request.epoch_id,
+                "epoch_id": RESEARCH_STAGE,
                 # Raw on the host manifest; RunManifest's Agent-visible view and
                 # build_experiment_facts both project it through the experiment
-                # reference store; projecting here would lose the raw host audit
-                # identity and break correlation with the other host artifacts.
-                "fold_id": request.fold.fold_id,
+                # reference store.
+                "fold_id": request.session_id,
                 "run_id": request.run_id,
                 "session_key": request.session_key,
-                "kind": kind,
+                "kind": "fold",
+                "session_index": request.session_index,
+                "sessions_total": request.sessions_total,
                 "llm": {
                     "provider": str(getattr(self.llm, "provider", "")),
                     "model": str(getattr(self.llm, "model", "")),
@@ -2586,43 +2358,23 @@ class LLMFoldDeveloper:
                 "runtime_env_ref": "/mnt/artifacts/runtime_env.json",
                 "data_summary_ref": "/mnt/artifacts/data_summary.json",
                 "fold": {
-                    "fold_id": request.fold.fold_id,
-                    "input_window": f"{request.fold.input_window_start}..{request.fold.input_window_end}",
-                    "validation_period": f"{request.fold.validation_start}..{request.fold.validation_end}",
-                    "valid_decision_time": request.fold.valid_decision_time.isoformat(),
+                    "fold_id": request.session_id,
+                    "input_window": f"{request.input_window_start}..{span.end}",
+                    "validation_period": f"{span.start}..{span.end}",
+                    "valid_decision_time": request.decision_time.isoformat(),
                 },
-                "fold_period": request.fold_period,
-                "validation_periods": request.validation_periods,
-                "test_stage": request.test_stage,
                 "snapshot_config": dict(request.snapshot_config),
                 "snapshots": {
                     "valid_decision_input": {
                         "snapshot_id": request.snapshot.snapshot_id
                     }
                 },
-                "valid_decision_time": request.fold.valid_decision_time.isoformat(),
-                "is_initial_artifact": request.parent is None,
-                # Whether the host actually seeded the ``parent_control`` Step
-                # node below, which needs the pre-session parent replay to have
-                # produced a result: an inherited parent whose control replay
-                # failed leaves the Agent no baseline node. Recorded here so
-                # ``build_experiment_facts`` states the same thing the session
-                # can find, instead of inferring it from "a parent exists".
-                "parent_control_available": request.parent_control is not None,
-                # And why, when it failed (the parent's own exception): the
-                # prompt asks for a minimal repair of that error, so the reason
-                # travels with the absence instead of staying in the ledger
-                # alone. Bounded and host-path free here because this is the
-                # Agent-visible copy.
-                "parent_control_error": parent_control_error_text(
-                    request.parent_control_error
-                ),
+                "valid_decision_time": request.decision_time.isoformat(),
+                "is_initial_artifact": start is None,
                 "parent_strategy_artifact_id": (
-                    request.parent.artifact_id if request.parent is not None else None
+                    start.artifact_id if start is not None else None
                 ),
-                "template_ref": None
-                if request.parent is not None
-                else "agent_output_template",
+                "template_ref": None if start is not None else "agent_output_template",
                 "modification_constraints": request.modification_constraints.to_record(),
                 "acceptance_rules": dict(request.acceptance_rules),
                 "schedule": self.schedule.to_record(),
@@ -2630,9 +2382,6 @@ class LLMFoldDeveloper:
                 "nl_failure_policy": request.nl_failure_policy,
                 "step_tree_enabled": self.step_tree_enabled,
                 "record_failed_attempts": request.record_failed_attempts,
-                "epoch_index": request.epoch_index,
-                "phase": request.phase,
-                "confirmation_fold": request.confirmation_fold,
                 "max_steps": request.max_steps,
                 "max_backtests_per_fold": request.max_backtests,
                 "deadline_seconds": request.deadline_seconds,
@@ -2654,9 +2403,7 @@ class LLMFoldDeveloper:
                     "strategy_inference_timeout_seconds": self.decision_timeout_seconds,
                     "strategy_fit_timeout_seconds": self.fit_timeout_seconds,
                     # What ``fit`` may spend those wall clocks on: the formal
-                    # strategy container's own GPU allocation, published to
-                    # every session kind because both Fold and Meta write the
-                    # code that runs in it.
+                    # strategy container's own GPU allocation.
                     "strategy_gpu_count": self.strategy_gpu_count,
                 },
             },
@@ -2666,17 +2413,12 @@ class LLMFoldDeveloper:
         output_dir = workspace_root / "output"
         models_dir = workspace_root / "models"
         inputs_dir = workspace_root / "inputs"
-        source = (
-            request.parent.path
-            if request.parent is not None
-            else self.baseline_strategy.parent
-        )
-        source_models = (
-            request.parent.model_path if request.parent is not None else None
-        )
-        if request.parent is None and self.baseline_strategy.name != "main.py":
+        prior_path = workspace_root / PRIOR_WORKSPACE_NAME
+        source = start.path if start is not None else self.baseline_strategy.parent
+        source_models = start.model_path if start is not None else None
+        if start is None and self.baseline_strategy.name != "main.py":
             raise ValueError(
-                "baseline strategy file must be named main.py for Fold development"
+                "baseline strategy file must be named main.py for research sessions"
             )
         copy_artifact(source, output_dir)
         copy_model_artifacts(source_models, models_dir)
@@ -2703,17 +2445,6 @@ class LLMFoldDeveloper:
         manifest.update(
             operating_memory=_operating_memory_record(memory_snapshot, mounted_memory)
         )
-        # Memory this experiment was created from rather than earned: while the
-        # PRIOR and the skills are still that seed, every surface that shows
-        # them says so, because the foreign fold and artifact ids they cite are
-        # not in this experiment's ledger.
-        memory = load_inherited_memory(self.experiment_dir)
-        prior_origin = prior_provenance(
-            memory, request.prior, ref_store=self.ref_store
-        )
-        skills_origin = skills_provenance(
-            memory, request.skills_source_ref, ref_store=self.ref_store
-        )
         skills_stats = install_workspace_skills(
             request.skills_source_ref or None,
             workspace_root,
@@ -2732,29 +2463,20 @@ class LLMFoldDeveloper:
             self.workspace_reference,
             repo_root=self.repo_root,
         )
-        # Fold sessions never see frozen Test metrics: only the meta session is
-        # allowed that adaptive feedback (docs/pipeline-design.md §3.2). They
-        # get each completed Fold's verdict, not its per-candidate trial log:
-        # the system prompt carries this for the whole session and is never
-        # compacted, so its size must not grow with how many candidates a Fold
-        # ran (the trial log stays in the Step tree and the Meta history).
-        history = [
-            fold_development_summary(record, ref_store=self.ref_store)
-            for record in latest_fold_records(self.ledger.read()).values()
-        ]
+        history = research_history(self.ledger.read())
         _environment_phase(request.progress_hook, "pit_view", request.run_id)
         self._install_snapshot_view(
             local,
             request,
-            start=request.fold.input_window_start,
-            end=request.fold.validation_end,
+            start=request.input_window_start,
+            end=span.end,
         )
         safe = SafeWorkspace(workspace_root)
-        # Read-only exploration reaches the PIT views, the inherited parent
+        # Read-only exploration reaches the PIT view, the start node's
         # artifacts, the backtest results and the step lineage, not just the
         # writable workspace.
         search_roots = SearchRoots(safe, paths=paths)
-        tree = self._install_step_tree(paths, request.parent)
+        tree = self._install_step_tree(paths, start)
         sandbox: DockerSandbox | None = None
         try:
             if self.command_runner_factory is not None:
@@ -2773,32 +2495,17 @@ class LLMFoldDeveloper:
                 )
                 sandbox.start()
                 command_runner = PersistentCommandRunner(sandbox)
-            # Built once, after the runtime env and the data summary exist, so
-            # the prompt and the workspace copy state the same facts.
-            # One body for both surfaces the session reads the PRIOR through:
-            # the read-only mount and the system-prompt fence state the same
-            # provenance, and the inherited generation on disk is untouched.
+            # PRIOR.md is the session handoff: seeded with the PRIOR the last
+            # session left and writable, so this session ends by leaving its
+            # own for the next one. The system prompt carries the seed.
             prior_text = request.prior.strip()
-            if prior_text and prior_origin is not None:
-                prior_text = (
-                    inherited_prior_header(
-                        prior_origin, has_parent=request.parent is not None
-                    )
-                    + "\n\n"
-                    + prior_text
-                )
-            if prior_text:
-                (inputs_dir / "PRIOR.md").write_text(
-                    prior_text + "\n", encoding="utf-8"
-                )
+            prior_path.write_text(prior_text + ("\n" if prior_text else ""), encoding="utf-8")
             facts = self._fold_facts(
                 request,
                 history,
                 manifest=manifest,
                 paths=paths,
                 models_dir=models_dir,
-                prior_provenance=prior_origin,
-                skills_provenance=skills_origin,
             )
             write_json_atomic(inputs_dir / "fold_context.json", facts)
             chmod_tree(inputs_dir, file_mode=0o444, dir_mode=0o555)
@@ -2810,7 +2517,6 @@ class LLMFoldDeveloper:
                 parent_models_dir=source_models,
                 constraints=request.modification_constraints,
                 readonly_baseline=seeded_readonly,
-                mechanism_parent=source if deployment else None,
             )
             time_budget = InferenceTimeBudget(duration_seconds=request.deadline_seconds)
             shared_budget = SessionCallBudget(
@@ -2828,20 +2534,8 @@ class LLMFoldDeveloper:
                 broker_profile=self.broker_profile,
                 time_budget=time_budget,
                 ref_store=self.ref_store,
+                ledger=self.ledger,
                 manifest=manifest,
-            )
-            # The parent's Validation on this window becomes the lineage root
-            # of this session before the Agent is prompted; the Agent's own
-            # Steps branch from it.
-            control_step = (
-                record_parent_control(
-                    backtest,
-                    request.parent_control,
-                    output_dir=output_dir,
-                    models_dir=models_dir,
-                )
-                if request.parent_control is not None
-                else None
             )
             smoke = SmokeBacktestTool(
                 request=request,
@@ -2857,13 +2551,11 @@ class LLMFoldDeveloper:
                 scratch_root=paths.runtime / "smoke",
                 time_budget=time_budget,
             )
-            parent_main_py = (
-                (source / "main.py") if request.parent is not None else None
-            )
+            parent_main_py = (source / "main.py") if start is not None else None
             # One rule check for the session: ``finish_fold`` refuses or annotates
             # a nomination with it, and the Runner labels every hard-finalization
             # candidate with it, so the two never disagree about which node the
-            # Pipeline would freeze.
+            # Pipeline would accept.
             hard_rule_check = acceptance_hard_rule_check(request.acceptance_rules)
             tools: list[Tool] = [
                 ReadFileTool(search_roots),
@@ -2892,25 +2584,13 @@ class LLMFoldDeveloper:
                         parent_models_dir=source_models,
                         constraints=request.modification_constraints,
                         readonly_baseline=seeded_readonly,
-                        mechanism_parent=source if deployment else None,
                     ),
-                    # A deployment refit keeps the graduated mechanism by
-                    # design, so a models-only retrain has the parent's
-                    # executable structure; finish_fold's same-mechanism rule
-                    # governs that session instead.
-                    parent_main_py=None if deployment else parent_main_py,
+                    parent_main_py=parent_main_py,
                     trace_emit=trace.emit,
                 ),
             ]
-            # Fold sessions only: Meta, Test and Held-out never replay a null.
             null_control_tool = (
-                NullControlTool(
-                    backtest,
-                    max_calls=request.max_null_controls,
-                    control_step_id=(
-                        control_step.step_id if control_step is not None else None
-                    ),
-                )
+                NullControlTool(backtest, max_calls=request.max_null_controls)
                 if request.max_null_controls > 0
                 else None
             )
@@ -2919,15 +2599,15 @@ class LLMFoldDeveloper:
             if self.step_tree_enabled:
                 tools.append(
                     StepRollbackTool(
-                        tree, output_dir, models_dir, fold_id=fold_ref, run_id=run_ref
+                        tree, output_dir, models_dir, fold_id=session_ref, run_id=run_ref
                     )
                 )
-            # Matches the opaque fold ref the step tree stores, so the
+            # Matches the opaque session ref the step tree stores, so the
             # current-session check compares like with like.
             tools.append(
                 FinishFoldTool(
                     tree,
-                    fold_id=fold_ref,
+                    fold_id=session_ref,
                     run_id=run_ref,
                     parent_main_py=parent_main_py,
                     another_round_fits=lambda: another_batch_round_fits(backtest),
@@ -2938,7 +2618,6 @@ class LLMFoldDeveloper:
                         if null_control_tool is not None
                         else None
                     ),
-                    same_mechanism=deployment,
                 )
             )
             budgeted = SessionBudgetLLM(self.llm, budget=shared_budget, role="main")
@@ -2981,14 +2660,12 @@ class LLMFoldDeveloper:
                 tools=ToolRegistry(tools),
                 system_prompt=build_system_prompt(
                     self.schedule,
-                    mode=kind,
+                    mode="fold",
                     experiment_facts=facts,
-                    phase=request.phase,
                     step_tree_enabled=self.step_tree_enabled,
                     prior_prompt=prior_text,
                     fold_exploration_directive=self.fold_exploration_directive,
                     fold_directive=request.directive,
-                    confirmation_fold=request.confirmation_fold,
                 ),
                 config=AgentSessionConfig(
                     mode="fold",
@@ -3022,24 +2699,17 @@ class LLMFoldDeveloper:
                     session_key=request.session_key,
                     run_id=request.run_id,
                 ),
-                # Selecting it is how this Fold keeps the parent, so hard
-                # finalization must be able to offer it alongside the
-                # session's own Validations.
-                control_validation_node=(
-                    {
-                        "node_id": control_step.step_id,
-                        "revision_id": self.ref_store.get_or_create(
-                            "strategy", control_step.revision_id
-                        ),
-                        "result_name": PARENT_CONTROL_RESULT_NAME,
-                        "stats": inline_backtest_stats(control_step.validation.summary),
-                    }
-                    if control_step is not None
-                    else None
-                ),
                 hard_rule_check=hard_rule_check,
             )
-            result = runner.run(self._fold_instruction(request))
+            try:
+                result = runner.run(FOLD_DEFAULT_INSTRUCTION)
+                conversation_id = result.conversation_id
+                outcome, node_id, reason = _session_outcome(result.finish_value)
+            except AgentSessionDeadlineExceeded as exc:
+                # The session closed at its deadline after its wrap-up grace;
+                # the Validations it completed are still the arm's trials.
+                conversation_id = exc.conversation_id
+                outcome, node_id, reason = "deadline", None, ""
             chmod_tree(inputs_dir, file_mode=0o644, dir_mode=0o755)
             final_skills = write_skills_index(
                 workspace_root / "skills", inputs_dir / "skills_index.json"
@@ -3053,68 +2723,38 @@ class LLMFoldDeveloper:
                     "bytes": final_skills.bytes,
                 }
             )
-            finish = result.finish_value
-            # An explicit no-edge finish nominates nothing: the Pipeline keeps
-            # the parent (if any) as the lineage head and freezes no candidate;
-            # a terminating finish is one that also ends the arm.
-            outcome = str(finish.get("outcome") or "select")
-            abstained = outcome in ("no_edge", "terminate")
-            selected_node = "" if abstained else str(finish.get("node_id") or "")
-            selected_revision_ref = str(finish.get("revision_id") or "")
-            if not abstained and (not selected_node or not selected_revision_ref):
-                raise RuntimeError("Fold Agent did not select a validated revision")
-            steps = tuple(
-                StepResult(
-                    step.step_id,
-                    step.revision_id,
-                    step.validation,
-                    selected=bool(selected_node) and step.step_id == selected_node,
-                    parent_control=step.parent_control,
+            steps = tuple(backtest.steps)
+            if outcome == "freeze" and node_id not in {step.step_id for step in steps}:
+                raise RuntimeError(
+                    "finish_fold nominated a node absent from this session's Validations"
                 )
-                for step in (
-                    *((control_step,) if control_step is not None else ()),
-                    *backtest.steps,
-                )
-            )
-            if not abstained:
-                selected_revision = self.ref_store.resolve(
-                    "strategy", selected_revision_ref
-                )
-                if selected_revision not in {step.revision_id for step in steps}:
-                    raise RuntimeError(
-                        "finish_fold selected a revision absent from this Fold result"
-                    )
             manifest.update(
-                conversation_id=result.conversation_id,
-                selected_step_id=selected_node or None,
-                finish_outcome=outcome if abstained else "select",
+                conversation_id=conversation_id,
+                selected_step_id=node_id,
+                finish_outcome=outcome,
             )
             if self.step_tree_enabled and paths.steps.exists():
                 link_copytree(paths.steps, self.experiment_dir / "steps")
+            prior = prior_path.read_text(encoding="utf-8").strip() if prior_path.is_file() else ""
             collected = local.collect_artifacts(
                 self.artifact_store.root.parent / request.run_id
             )
-            return FoldSessionResult(
-                result.conversation_id,
+            return ResearchSessionResult(
+                conversation_id,
                 steps,
-                selected_node or None,
-                "llm_agent_finish_fold",
-                # One reason from the Agent, recorded under the ledger's two
-                # names by what it justifies: an abstention's evidence or a
-                # nomination's early finish.
-                early_stop_reason="" if abstained else str(finish.get("reason") or ""),
-                no_edge_reason=str(finish.get("reason") or "") if abstained else "",
-                baseline_anchor=not abstained and finish.get("baseline_anchor") is True,
-                terminate=outcome == "terminate",
+                outcome,
+                node_id=node_id,
+                reason=reason,
+                finish_reason="deadline_grace_exhausted" if outcome == "deadline" else "llm_agent_finish_fold",
+                prior=prior,
                 # The nulls the session already drew, for the freeze to reuse.
                 null_controls=(
                     dict(null_control_tool.blocks)
                     if null_control_tool is not None
                     else {}
                 ),
-                # The collected copy, not the live sandbox tree: the fold ledger
-                # record carries it so a later Meta session can still read this
-                # run's backtest summaries after the sandbox is cleaned up.
+                # The collected copy, not the live sandbox tree: it outlives
+                # the sandbox cleanup.
                 run_manifest_ref=str(collected / "run_manifest.json"),
                 skills_source_ref=str(collected / "workspace" / "skills"),
             )
@@ -3128,13 +2768,13 @@ class LLMFoldDeveloper:
             if sandbox is not None:
                 sandbox.stop()
 
-    def _install_step_tree(self, paths, parent) -> StepTree:
-        """Hand the experiment-level step tree to the fold and mark the start node.
+    def _install_step_tree(self, paths, start: FrozenArtifact | None) -> StepTree:
+        """Hand the experiment-level step tree to the session and mark the start node.
 
-        With the step tree disabled the fold still records its own run nodes —
-        ``finish_fold`` selects one of them — but the lineage is not inherited
-        from earlier folds and is not published back, so the ablation removes
-        the cross-fold memory the knob is about.
+        With the step tree disabled the session still records its own run
+        nodes -- ``finish_fold`` selects one of them -- but the lineage is not
+        inherited from earlier sessions and is not published back, so the
+        ablation removes the cross-session memory the knob is about.
         """
         experiment_tree = self.experiment_dir / "steps"
         if self.step_tree_enabled and experiment_tree.exists():
@@ -3142,14 +2782,14 @@ class LLMFoldDeveloper:
         tree = StepTree(paths.steps)
         if self.step_tree_enabled:
             tree.set_position(
-                tree.position_for_step(parent.source_step_id) if parent else None
+                tree.position_for_step(start.source_step_id) if start else None
             )
         return tree
 
     def _install_snapshot_view(
         self,
         local: LocalSandbox,
-        request: FoldSessionRequest,
+        request: ResearchSessionRequest,
         *,
         start: str,
         end: str,
@@ -3186,32 +2826,24 @@ class LLMFoldDeveloper:
         install_agent_data_contract(
             local.paths,
             kind="fold",
-            # Agent-visible: opaque the fold id so the calendar period (e.g.
-            # 2022Q1) cannot leak through data_summary.json. Host correlation
-            # uses run_id. Same projection as the ledger and step-tree views.
-            fold_id=self.ref_store.get_or_create("fold", request.fold.fold_id),
+            fold_id=self.ref_store.get_or_create("fold", request.session_id),
             views={"snapshot": (target, "/mnt/snapshot")},
         )
 
     def _fold_facts(
         self,
-        request: FoldSessionRequest,
+        request: ResearchSessionRequest,
         history: list[dict[str, object]],
         *,
         manifest: RunManifest,
         paths,
         models_dir: Path,
-        prior_provenance: Mapping[str, object] | None = None,
-        skills_provenance: Mapping[str, object] | None = None,
     ) -> dict[str, object]:
-        """The Agent-visible operational-facts block for this Fold session.
+        """The Agent-visible operational-facts block for this session.
 
         ``build_experiment_facts`` is the single visibility contract: it reads
         the run manifest, the runtime env and the data summary and projects the
-        raw fold id through the experiment reference store. The Fold-side
-        development history rides alongside it — one bounded verdict per
-        completed Fold (``fold_development_summary``), the only cross-fold
-        evidence a Fold session gets besides the step tree.
+        raw session id through the experiment reference store.
         """
         return {
             **build_experiment_facts(
@@ -3228,577 +2860,62 @@ class LLMFoldDeveloper:
                 model_artifacts_empty=(
                     not any(models_dir.iterdir()) if models_dir.exists() else True
                 ),
-                prior_provenance=prior_provenance,
-                skills_provenance=skills_provenance,
             ),
             "development_history": history,
-            "parent_control": parent_control_facts(request),
             "workspace": fold_workspace_map(paths.workspace),
-            "forbidden": fold_forbidden(request.session_kind),
+            "forbidden": FOLD_FORBIDDEN,
         }
 
-    @staticmethod
-    def _fold_instruction(request: FoldSessionRequest) -> str:
-        # The researcher's per-Fold directive is a system-prompt section
-        # (build_fold_directive_section), not an instruction suffix: it must
-        # carry the framing and precedence rules every session sees, and must
-        # not be re-stated in the user turn.
-        from autotrade.agent.prompts import (
-            DEPLOYMENT_DEFAULT_INSTRUCTION,
-            FOLD_DEFAULT_INSTRUCTION,
-        )
 
-        return (
-            DEPLOYMENT_DEFAULT_INSTRUCTION
-            if request.session_kind == "deployment_adjustment"
-            else FOLD_DEFAULT_INSTRUCTION
-        )
+def research_history(records: Sequence[Mapping[str, object]]) -> list[dict[str, object]]:
+    """The earlier research sessions' outcomes, one bounded row each.
 
+    The system prompt carries them for the whole session and is never
+    compacted, so a row does not grow with how many candidates a session ran.
+    """
 
-def fold_forbidden(session_kind: str) -> list[str]:
-    """The ``forbidden`` fact of a Fold-scaffold session. The deployment
-    adjustment replays a window that includes the Held-out, so it is the one
-    session whose facts do not list the Held-out as forbidden."""
     return [
-        "current_test",
-        "future_data",
-        *(() if session_kind == "deployment_adjustment" else ("heldout",)),
-        "external_network",
-        "host_control",
+        {
+            "session": record.get("session_id"),
+            "outcome": record.get("outcome"),
+            "reason": record.get("reason"),
+            "validations": len(record.get("steps") or ()),
+        }
+        for record in research_records(records)
     ]
 
 
-class LLMMetaLearner:
-    """Offline Meta adapter that delegates the session to ``MetaLearningAgent``."""
+# The session's writable handoff file, at the workspace root.
+PRIOR_WORKSPACE_NAME = "PRIOR.md"
 
-    def __init__(
-        self,
-        *,
-        llm: LLMProxy,
-        subagent_llm: LLMProxy | None = None,
-        compact_llm: LLMProxy | None = None,
-        context_compaction: ContextCompactionConfig | None = None,
-        # The children's compaction budget, derived from their own model's
-        # window; defaults to the parent's.
-        subagent_compaction: ContextCompactionConfig | None = None,
-        baseline_strategy: str | Path,
-        artifact_store: FilesystemArtifactStore,
-        experiment_dir: str | Path,
-        runtime_root: str | Path,
-        max_llm_calls: int,
-        deadline_seconds: float,
-        # The formal executor's strategy wall clocks and GPU allocation,
-        # published in the run manifest: a candidate the Meta writes into PRIOR
-        # has to fit them, and a Meta session has no container of its own to
-        # probe.
-        decision_timeout_seconds: float = SandboxLimits().timeout_seconds,
-        fit_timeout_seconds: float = SandboxLimits().fit_timeout_seconds,
-        strategy_gpu_count: int = SandboxLimits().gpu_count,
-        # One completion ceiling for the parent conversation and its children.
-        max_response_tokens: int = AGENT_MAX_OUTPUT_TOKENS,
-        meta_learning_directive: str = "",
-        fold_exploration_directive: str = "",
-        workspace_reference: str = "",
-        operating_memory: str = "none",
-        repo_root: str | Path | None = None,
-        sandbox_spec: SandboxSpec | None = None,
-        use_docker: bool = True,
-        rebuild_enabled: bool = True,
-        rebuild_timeout_seconds: int = 1800,
-        image_keep: int = 3,
-        sandbox_spec_sink: Callable[[SandboxSpec], None] | None = None,
-    ) -> None:
-        self.llm = llm
-        self.subagent_llm = subagent_llm or llm
-        self.compact_llm = compact_llm
-        self.context_compaction = context_compaction or ContextCompactionConfig()
-        self.subagent_compaction = subagent_compaction or self.context_compaction
-        self.baseline_strategy = Path(baseline_strategy).resolve(strict=True)
-        self.artifact_store = artifact_store
-        self.experiment_dir = Path(experiment_dir).resolve()
-        self.ref_store = AgentRefStore(self.experiment_dir)
-        self.runtime_root = Path(runtime_root).resolve()
-        self.max_llm_calls = max_llm_calls
-        self.deadline_seconds = deadline_seconds
-        self.decision_timeout_seconds = float(decision_timeout_seconds)
-        self.fit_timeout_seconds = float(fit_timeout_seconds)
-        self.strategy_gpu_count = int(strategy_gpu_count)
-        # Derived-image rebuild: a Meta session may declare stable dependencies
-        # that later ordinary Folds inherit. The new tag reaches those folds
-        # through ``sandbox_spec_sink``.
-        self.sandbox_spec = sandbox_spec or SandboxSpec()
-        self.use_docker = use_docker
-        self.rebuild_enabled = rebuild_enabled
-        self.rebuild_timeout_seconds = rebuild_timeout_seconds
-        self.image_keep = image_keep
-        self.sandbox_spec_sink = sandbox_spec_sink
-        self.max_response_tokens = max_response_tokens
-        self.meta_learning_directive = meta_learning_directive
-        self.fold_exploration_directive = fold_exploration_directive
-        self.workspace_reference = workspace_reference
-        self.operating_memory = str(operating_memory)
-        self.repo_root = Path(repo_root).resolve() if repo_root is not None else None
+# The ``forbidden`` fact of a research session.
+FOLD_FORBIDDEN = [
+    "current_test",
+    "future_data",
+    "heldout",
+    "external_network",
+    "host_control",
+]
 
-    def __call__(self, facts: dict[str, object]) -> MetaSessionResult:
-        from autotrade.agent.compact import ContextCompactor
-        from autotrade.agent.subagent import (
-            SubAgentConfig,
-            SubAgentEngine,
-        )
-        from autotrade.agent.prompts import (
-            build_meta_learning_prompt,
-            build_system_prompt,
-        )
-        from autotrade.agent.runner import (
-            AgentSessionConfig,
-            AgentSessionRunner,
-            MetaLearningAgent,
-        )
-        from autotrade.environment.tools.finish_meta import FinishMetaTool
-        from autotrade.environment.tools.prior_policy import visible_window_dates
-        from autotrade.pipelines.agent_inbox import bind_session_inbox
 
-        run_id = str(facts.get("run_id") or f"meta_{uuid.uuid4().hex}")
-        root = self.runtime_root / run_id
-        if root.exists():
-            raise FileExistsError(f"Meta runtime already exists: {run_id}")
-        experiment_id = str(facts.get("experiment_id") or "")
-        epoch_id = str(facts.get("epoch_id") or "")
-        session_id = str(facts.get("meta_learning_id") or "")
-        progress_hook = facts.get("progress_hook")
-        if progress_hook is not None and not callable(progress_hook):
-            raise TypeError("progress_hook must be callable")
-        meta_ref = self.ref_store.get_or_create("meta", session_id)
-        run_ref = self.ref_store.get_or_create("run", run_id)
-        trace = AgentTraceWriter(
-            agent_trace_path(self.artifact_store.root.parent, run_id),
-            ids={
-                "experiment_id": experiment_id,
-                "epoch_id": epoch_id,
-                "fold_id": meta_ref,
-                "run_id": run_ref,
-                "session_kind": "meta_learning",
-            },
-        )
-        _environment_phase(progress_hook, "sandbox_layout", run_id)
-        local = LocalSandbox(root)
-        paths = local.prepare_layout()
-        # Meta reasons about the data contract too, so it gets the same
-        # data_summary.json / unit_reference.json a Fold gets — from the Meta
-        # window's own bundle. The manifest records the ref only if this lands.
-        data_contract_installed = install_agent_data_contract(
-            paths,
-            kind="meta_learning",
-            bundle_ref=str(facts.get("data_summary_ref") or ""),
-        )
-        # Only a Meta session may declare new sandbox dependencies, so only a
-        # Meta workspace carries the request format example.
-        write_sandbox_environment_example(paths.workspace)
-        install_workspace_reference(
-            paths.workspace,
-            self.workspace_reference,
-            repo_root=self.repo_root,
-        )
-        memory_snapshot = ensure_operating_memory_snapshot(
-            self.experiment_dir,
-            mode=self.operating_memory,
-            repo_root=self.repo_root,
-            experiments_root=self.experiment_dir.parent,
-        )
-        mounted_memory = install_operating_memory(paths.workspace, self.experiment_dir)
-        safe = SafeWorkspace(paths.workspace)
-        search_roots = SearchRoots(safe, paths=paths)
-        inputs = paths.workspace / "inputs"
-        inputs.mkdir()
-        # The PRIOR's provenance rides on the review window the Pipeline built
-        # (``select_meta_review_folds``), which is also where it reaches
-        # meta_context.json; only the skills generation is resolved here.
-        skills_origin = skills_provenance(
-            load_inherited_memory(self.experiment_dir),
-            str(facts.get("skills_source_ref") or ""),
-            ref_store=self.ref_store,
-        )
-        skills_stats = install_workspace_skills(
-            str(facts.get("skills_source_ref") or "") or None,
-            paths.workspace,
-            index_path=inputs / "skills_index.json",
-        )
-        # The artifact record the Pipeline holds is the single source for where
-        # the parent lives: only a Fold's own freeze sits under ``frozen/``,
-        # while the console's inherited seed and a HITL step-node override live
-        # elsewhere in the experiment. Re-deriving the tree from the id would
-        # look for those two under ``frozen/`` and find nothing.
-        parent_artifact = facts.get("parent_artifact")
-        if parent_artifact is not None and not isinstance(
-            parent_artifact, FrozenArtifact
-        ):
-            raise TypeError("parent_artifact must be a FrozenArtifact")
-        if parent_artifact is not None:
-            parent_id = parent_artifact.artifact_id
-            parent = Path(parent_artifact.path).resolve(strict=True)
-            models = parent_artifact.model_path
-            parent_models = Path(models) if models is not None else None
-            parent_models = (
-                parent_models if parent_models and parent_models.is_dir() else None
-            )
-        else:
-            parent_id = ""
-            parent = self.baseline_strategy.parent
-            parent_models = None
-        # The parent is a read-only input: a Meta session writes PRIOR and
-        # skills, and a strategy change it wants is a PRIOR candidate the next
-        # Fold implements and validates (docs/pipeline-design.md 3.2).
-        output_dir = paths.workspace / "output"
-        models_dir = paths.workspace / "models"
-        copy_artifact(parent, output_dir)
-        copy_model_artifacts(parent_models, models_dir)
-        chmod_tree(output_dir, file_mode=0o444, dir_mode=0o555)
-        if models_dir.exists():
-            chmod_tree(models_dir, file_mode=0o444, dir_mode=0o555)
-        previous_prior = str(facts.get("previous_prior") or "").strip()
-        # PRIOR.md is the sole writable Meta direction/memory channel. Seed the
-        # current published body before the Agent starts; the first session gets
-        # an empty file and must make it non-empty before finish_meta succeeds.
-        (paths.workspace / "PRIOR.md").write_text(
-            previous_prior + ("\n" if previous_prior else ""), encoding="utf-8"
-        )
-        public = {
-            key: value
-            for key, value in facts.items()
-            if key
-            not in {
-                "progress_hook",
-                "meta_learning_memory",
-                "previous_prior",
-                "session_key",
-                "agent_trace_sidecars",
-                "skills_source_ref",
-                "host_visible_fold",
-                # The parent reaches meta_context.json only as the opaque
-                # strategy ref issued below, never as a raw id or host path.
-                "parent_artifact",
-                "parent_artifact_id",
-            }
-        }
-        public["run_id"] = run_ref
-        public["meta_learning_id"] = meta_ref
-        if parent_id:
-            public["parent_artifact_id"] = self.ref_store.get_or_create(
-                "strategy", parent_id
-            )
-        from autotrade.pipelines.meta_inputs import (
-            AgentTraceFullSidecar,
-            write_meta_agent_trace_sidecars,
-        )
+def _session_outcome(finish: Mapping[str, object]) -> tuple[str, str | None, str]:
+    """``finish_fold``'s finish as the research session's outcome.
 
-        # One review window for meta_context.json, the run facts and the audit
-        # manifest: it carries ``previous_meta_ref`` and, when this experiment's
-        # PRIOR is still the one it inherited, that PRIOR's provenance.
-        review_window = (
-            public["review_window"]
-            if isinstance(public.get("review_window"), dict)
-            else {"previous_meta_ref": None, "fold_run_refs": [], "fold_count": 0}
-        )
-        raw_sidecars = facts.get("agent_trace_sidecars") or ()
-        if not isinstance(raw_sidecars, (list, tuple)):
-            raise TypeError("agent_trace_sidecars must be a sequence")
-        sidecars: list[AgentTraceFullSidecar] = []
-        for item in raw_sidecars:
-            if not isinstance(item, AgentTraceFullSidecar):
-                raise TypeError(
-                    "agent_trace_sidecars must be AgentTraceFullSidecar values"
-                )
-            sidecars.append(item)
-        # Materialize and fsync the referenced sidecars before publishing the
-        # atomic context index, so a crash cannot leave metadata pointing at a
-        # missing or partially-written file.
-        write_meta_agent_trace_sidecars(paths.workspace, sidecars)
-        # sort_keys=False: this file is read in chunks and its builders order
-        # every ``fold_reviews`` / ``fold_validation_history`` entry identity
-        # first, statistics next, trace and summary bulk last. Sorting keys
-        # alphabetically puts ``agent_process_summary`` and ``agent_trace``
-        # hundreds of lines ahead of ``fold_id`` and pushes
-        # ``validation_period`` to the end of the entry, which is how two Meta
-        # sessions read a review against another Fold's window.
-        write_json_atomic(inputs / "meta_context.json", public, sort_keys=False)
-        # Raw prior Meta traces, bounded by meta_memory_max_epochs: a JSONL file
-        # rather than a prompt field, because it is line-oriented and can be
-        # long. Empty memory still writes the file so a first Epoch reads an
-        # empty one instead of guessing.
-        memory_path = inputs / "meta_learning_memory.jsonl"
-        memory_path.write_text(
-            str(facts.get("meta_learning_memory") or ""), encoding="utf-8"
-        )
-        chmod_tree(inputs, file_mode=0o444, dir_mode=0o555)
-        host_visible_fold = (
-            facts.get("host_visible_fold")
-            if isinstance(facts.get("host_visible_fold"), dict)
-            else {}
-        )
-        manifest = RunManifest.create(
-            paths.run_manifest,
-            {
-                "experiment_id": experiment_id,
-                "epoch_id": epoch_id,
-                "meta_learning_id": session_id,
-                "trigger_after_folds": facts.get("trigger_after_folds"),
-                # Raw on the host manifest; both Agent-visible projections use
-                # the experiment reference store themselves.
-                "fold_id": session_id,
-                "run_id": run_id,
-                "session_key": str(facts.get("session_key") or ""),
-                "kind": "meta_learning",
-                "llm": {
-                    "provider": str(getattr(self.llm, "provider", "")),
-                    "model": str(getattr(self.llm, "model", "")),
-                    "subagent": {
-                        "provider": str(getattr(self.subagent_llm, "provider", "")),
-                        "model": str(getattr(self.subagent_llm, "model", "")),
-                    },
-                },
-                "runtime_env_ref": "/mnt/artifacts/runtime_env.json",
-                # Never advertise a path the session cannot read: a Meta run
-                # that found this missing published the absence as a data fact
-                # into PRIOR.
-                **(
-                    {"data_summary_ref": "/mnt/artifacts/data_summary.json"}
-                    if data_contract_installed
-                    else {}
-                ),
-                "meta_learning_visible_fold": dict(host_visible_fold),
-                # Effective public geometry, cadence and Broker settings; the
-                # Meta run facts (fold_period, validation_periods, strategy
-                # cadence, snapshot windows, Broker profile) are read from here.
-                "experiment_parameters": dict(public.get("experiment_parameters") or {}),
-                "valid_decision_time": host_visible_fold.get("valid_decision_time"),
-                "snapshots": {
-                    "valid_decision_input": {"snapshot_id": facts.get("snapshot_id")},
-                },
-                "parent_strategy_artifact_id": parent_id or None,
-                "template_ref": None if parent_id else "agent_output_template",
-                "is_initial_artifact": not parent_id,
-                # Agent-facing manifest: sandbox mount paths, never host paths.
-                "development_inputs": {
-                    "meta_context": "/mnt/agent/workspace/inputs/meta_context.json",
-                    "meta_learning_memory": "/mnt/agent/workspace/inputs/meta_learning_memory.jsonl",
-                    "agent_traces": "/mnt/agent/workspace/inputs/agent_traces",
-                    "agent_trace_full": {
-                        "directory": "/mnt/agent/workspace/inputs/agent_traces",
-                        "available": sum(
-                            1 for item in sidecars if item.available
-                        ),
-                        "fold_count": len(sidecars),
-                        "refs": [
-                            {
-                                "path": item.relative_path,
-                                "available": item.available,
-                            }
-                            for item in sidecars
-                        ],
-                    },
-                    "parent_strategy": "/mnt/agent/workspace/output",
-                    "parent_models": "/mnt/agent/workspace/models",
-                    "previous_prior": bool(previous_prior),
-                },
-                "prior_output": "/mnt/agent/workspace/PRIOR.md",
-                "operating_memory": _operating_memory_record(
-                    memory_snapshot, mounted_memory
-                ),
-                "skills": {
-                    "index_path": SKILLS_INDEX_PATH,
-                    "count": skills_stats.count,
-                    "files": skills_stats.files,
-                    "bytes": skills_stats.bytes,
-                },
-                "meta_learning_directive": self.meta_learning_directive.strip(),
-                "fold_exploration_directive": self.fold_exploration_directive.strip(),
-                "review_window": dict(review_window),
-                # The candidates the Meta writes into PRIOR must fit the same
-                # strategy wall clocks and GPU allocation an ordinary Fold
-                # gets. A Meta session runs no container itself, so this
-                # manifest is its only source for the latter.
-                "budgets": {
-                    "max_llm_calls": self.max_llm_calls,
-                    "deadline_seconds": self.deadline_seconds,
-                    "strategy_inference_timeout_seconds": self.decision_timeout_seconds,
-                    "strategy_fit_timeout_seconds": self.fit_timeout_seconds,
-                    "strategy_gpu_count": self.strategy_gpu_count,
-                },
-            },
-            ref_store=self.ref_store,
-        )
-        time_budget = InferenceTimeBudget(duration_seconds=self.deadline_seconds)
-        shared_budget = SessionCallBudget(
-            max_calls=self.max_llm_calls,
-            time_budget=time_budget,
-        )
-        budgeted = SessionBudgetLLM(self.llm, budget=shared_budget, role="main")
-        compact_budgeted = (
-            SessionBudgetLLM(self.compact_llm, budget=shared_budget, role="compact")
-            if self.compact_llm is not None
-            else None
-        )
-        subagent_budgeted = SessionBudgetLLM(
-            self.subagent_llm, budget=shared_budget, role="subagent"
-        )
-        subagent = SubAgentEngine(
-            llm=subagent_budgeted,
-            tools=ToolRegistry(build_meta_subagent_tools(search_roots)),
-            config=SubAgentConfig(max_tokens=self.max_response_tokens),
-            time_budget=time_budget,
-            mode="meta",
-            # The parent's compaction gateway at the threshold the children's
-            # own model window allows; a Meta session archives nothing.
-            compactor=(
-                ContextCompactor(
-                    compact_budgeted,
-                    self.subagent_compaction,
-                    result_store=search_roots,
-                    archive_messages=False,
-                )
-                if compact_budgeted is not None
-                else None
-            ),
-        )
-        tools: list[Tool] = [
-            ReadFileTool(search_roots),
-            GrepTool(search_roots),
-            GlobTool(search_roots),
-            # The Meta session's writable surface: PRIOR.md, TODO.md and the
-            # optional sandbox dependency request (output/ and models/ are
-            # read-only on disk).
-            WriteFileTool(safe),
-            EditFileTool(safe),
-            WriteSkillTool(safe),
-            DeleteSkillTool(safe),
-            ReportIssueTool(issue_reports_path(self.experiment_dir), manifest),
-        ]
-        tools.append(
-            FinishMetaTool(
-                safe,
-                window_dates=visible_window_dates(manifest.data),
-            )
-        )
-        instruction = build_meta_learning_prompt(
-            public.get("development_history")
-            if isinstance(public.get("development_history"), dict)
-            else {},
-            experiment_directive=self.meta_learning_directive,
-            fold_exploration_directive=self.fold_exploration_directive,
-        )
-        directive = str(public.get("directive") or "").strip()
-        if directive:
-            instruction += f"\n\nSupervising user directive:\n{directive}"
-        runner = AgentSessionRunner(
-            llm=budgeted,
-            tools=ToolRegistry(tools),
-            system_prompt=build_system_prompt(
-                mode="meta",
-                # The same data contract a Fold's facts read: without the
-                # summary the execution policy reports every text/event
-                # domain as unavailable while data_summary.json lists them.
-                experiment_facts=build_experiment_facts(
-                    manifest=manifest.data,
-                    ref_store=self.ref_store,
-                    data_summary=_read_json_if_exists(paths.data_summary),
-                    prior_provenance=(
-                        review_window.get("prior_provenance")
-                        if isinstance(review_window, dict)
-                        else None
-                    ),
-                    skills_provenance=skills_origin,
-                ),
-            ),
-            config=AgentSessionConfig(
-                mode="meta",
-                max_llm_calls=self.max_llm_calls,
-                deadline_seconds=self.deadline_seconds,
-                max_response_tokens=self.max_response_tokens,
-            ),
-            compactor=(
-                ContextCompactor(
-                    compact_budgeted,
-                    self.context_compaction,
-                    # The session's own tool-result spill, already used by its
-                    # search tools; only the dropped-message archive is off.
-                    result_store=search_roots,
-                    # A Meta session elides message content from its trace
-                    # (below) and archives none of it either.
-                    archive_messages=False,
-                )
-                if compact_budgeted is not None
-                else None
-            ),
-            subagent=subagent,
-            time_budget=time_budget,
-            event_sink=_agent_event_sink(
-                trace,
-                progress_hook,
-                run_id,
-                include_content=False,
-            ),
-            inbox=bind_session_inbox(
-                self.experiment_dir,
-                session_key=str(facts.get("session_key") or ""),
-                run_id=run_id,
-            ),
-        )
-        try:
-            result = MetaLearningAgent(runner, paths.workspace).learn(instruction)
-            chmod_tree(inputs, file_mode=0o644, dir_mode=0o755)
-            final_skills = write_skills_index(
-                paths.workspace / "skills", inputs / "skills_index.json"
-            )
-            chmod_tree(inputs, file_mode=0o444, dir_mode=0o555)
-            manifest.update(
-                conversation_id=result.get("conversation_id"),
-                skills={
-                    "index_path": SKILLS_INDEX_PATH,
-                    "count": final_skills.count,
-                    "files": final_skills.files,
-                    "bytes": final_skills.bytes,
-                },
-            )
-            _environment_phase(progress_hook, "environment_update", run_id)
-            rebuild_error: RuntimeError | None = None
-            try:
-                _update, active_spec = maybe_rebuild_sandbox_image(
-                    paths.workspace / SANDBOX_ENVIRONMENT_REQUEST_NAME,
-                    base_spec=self.sandbox_spec,
-                    experiment_id=experiment_id,
-                    epoch_id=session_id or epoch_id,
-                    experiment_dir=self.experiment_dir,
-                    manifest=manifest,
-                    use_docker=self.use_docker,
-                    rebuild_enabled=self.rebuild_enabled,
-                    timeout_seconds=self.rebuild_timeout_seconds,
-                    image_keep=self.image_keep,
-                )
-            except RuntimeError as exc:
-                rebuild_error = exc
-            else:
-                if active_spec is not self.sandbox_spec:
-                    self.sandbox_spec = active_spec
-                    if self.sandbox_spec_sink is not None:
-                        self.sandbox_spec_sink(active_spec)
-            # Collect first, then fail: PRIOR and the rebuild record must
-            # survive a rebuild failure.
-            collected = local.collect_artifacts(
-                self.artifact_store.root.parent / run_id
-            )
-            if rebuild_error is not None:
-                raise rebuild_error
-            return MetaSessionResult(
-                prior=str(result["prior"]),
-                conversation_id=str(result.get("conversation_id") or ""),
-                skills_source_ref=str(collected / "workspace" / "skills"),
-            )
-        except Exception as exc:
-            trace.emit(
-                "session_error",
-                {"status": "error", "error": f"{type(exc).__name__}: {exc}"},
-            )
-            raise
+    A nomination asks for the freeze; ``no_edge`` nominates nothing and
+    research continues from where this session started; ``terminate`` ends the
+    arm without a deliverable.
+    """
+
+    outcome = str(finish.get("outcome") or "select")
+    reason = str(finish.get("reason") or "")
+    if outcome == "no_edge":
+        return "continue", None, reason
+    if outcome == "terminate":
+        return "no_edge", None, reason
+    node_id = str(finish.get("node_id") or "")
+    if not node_id:
+        raise RuntimeError("research session Agent did not nominate a validated node")
+    return "freeze", node_id, reason
 
 
 _WORKSPACE_REFS_DIR = "refs"
@@ -3814,11 +2931,10 @@ def fold_workspace_map(workspace: str | Path) -> dict[str, str]:
         "fold_context": "inputs/fold_context.json",
         "data_summary": "/mnt/artifacts/data_summary.json",
         "snapshot_in_sandbox": "/mnt/snapshot",
+        "prior": PRIOR_WORKSPACE_NAME,
     }
     if (Path(workspace) / _WORKSPACE_REFS_DIR).is_dir():
         mapping["refs"] = "refs/"
-    if (Path(workspace) / "inputs" / "PRIOR.md").is_file():
-        mapping["prior"] = "inputs/PRIOR.md"
     return mapping
 
 
@@ -3952,16 +3068,9 @@ def _agent_event_sink(
     trace: AgentTraceWriter,
     progress_hook,
     run_id: str,
-    *,
-    include_content: bool = True,
 ):
     def emit(event_type: str, payload: dict[str, object]) -> None:
-        trace.emit(
-            event_type,
-            payload
-            if include_content
-            else _safe_meta_trace_payload(event_type, payload),
-        )
+        trace.emit(event_type, payload)
         if progress_hook is None:
             return
         if event_type == "llm_call_started":
@@ -3994,191 +3103,6 @@ def _agent_event_sink(
     return emit
 
 
-def _safe_meta_trace_payload(
-    event_type: str,
-    payload: dict[str, object],
-) -> dict[str, object]:
-    """Keep Meta operations observable without exposing compact Test evidence.
-
-    Sub-agent events keep their identity, progress and usage fields (the
-    console cards, ``trace_stats`` and the Meta process summary need them) plus
-    the parent-written brief (``description``, ``task``) that delegation
-    quality is judged by, already clipped where it is emitted; the child's own
-    text (``content``, ``summary``, tool ``result`` bodies) is dropped like the
-    parent ``llm_call`` content. The session prompts are built before any Test
-    data is read, so ``session_start`` keeps them, and every tool call keeps
-    its ``ok``/``error_type``/``error`` status so a failing Meta session stays
-    auditable.
-    """
-
-    subagent_identity = {
-        "task_id",
-        "role",
-        "parent_call_id",
-        "status",
-        "mode",
-        "model",
-        "thinking",
-        "thinking_applied",
-        "rounds_limit",
-        "inherit_context",
-        "description",
-        "resumed_from",
-    }
-    allowed = {
-        "session_start": {"mode", "system_prompt", "instruction"},
-        "subagent_task": subagent_identity | {"task"},
-        "subagent_llm": {
-            "task_id",
-            "role",
-            "round",
-            "provider",
-            "model",
-            "usage",
-            "tool_names",
-            "parent_call_id",
-        },
-        "subagent_llm_error": {
-            "task_id",
-            "role",
-            "round",
-            "provider",
-            "model",
-            "llm_error",
-            "error_type",
-            "parent_call_id",
-        },
-        "subagent_tool": {"task_id", "role", "round", "tool", "parent_call_id", "result"},
-        "subagent_wrap_up": {"task_id", "role", "round", "rounds_limit", "parent_call_id"},
-        # A parent instruction is counted, never quoted.
-        "subagent_steer": {"task_id", "role", "round", "chars", "delivery", "parent_call_id"},
-        "subagent_context_compaction": {
-            "task_id",
-            "role",
-            "round",
-            "parent_call_id",
-            "compaction",
-        },
-        "subagent_context_edit": {
-            "task_id",
-            "role",
-            "round",
-            "parent_call_id",
-            "context_edit",
-        },
-        "subagent_output_truncated": {
-            "task_id",
-            "role",
-            "round",
-            "completion_tokens",
-            "max_tokens",
-            "continuation",
-            "parent_call_id",
-        },
-        "subagent": subagent_identity
-        | {
-            "rounds",
-            "tool_calls",
-            "llm_calls",
-            "provider",
-            "usage_totals",
-            "error",
-            "truncated",
-            "truncated_rounds",
-            "llm_errors",
-        },
-        "subagent_attempt": {
-            "attempt",
-            "role",
-            "ok",
-            "status",
-            "task_id",
-            "error",
-            # Report delivery is a count-and-reference record, not the child's
-            # own text: how much it wrote, how much the parent got, and where
-            # the rest was spilled.
-            "summary_chars",
-            "summary_delivered_chars",
-            "summary_lines",
-            "resume_line",
-            "summary_truncated",
-            "result_ref",
-        },
-        "delegation_reminder": {"own_work_calls", "running_children", "queued_children"},
-        "output_truncated": {"call_index", "completion_tokens", "max_tokens"},
-        "context_output_clamped": {
-            "estimated_prompt_tokens",
-            "context_window",
-            "requested_max_output_tokens",
-            "available_output_tokens",
-        },
-        "llm_call_started": {"call_index", "status"},
-        "llm_call": {
-            "call_index",
-            "status",
-            "model",
-            "usage",
-            "tool_names",
-            "error",
-            "error_type",
-        },
-        "tool_call_started": {"tool", "tool_call_id", "status"},
-        "tool_call": {"call_index", "tool_call_id", "tool", "result"},
-        "session_end": {"status", "llm_calls", "steps_used"},
-        "user_message": {
-            "message_id",
-            "interrupt",
-            "applied_at",
-            "safe_point",
-            "content",
-        },
-        "tool_skipped": {
-            "tool_call_id",
-            "tool",
-            "reason",
-            "message_id",
-            "safe_point",
-        },
-    }.get(event_type, {"status", "error"})
-    kept = {key: value for key, value in payload.items() if key in allowed}
-    result = kept.get("result")
-    if event_type in {"subagent_tool", "tool_call"} and isinstance(result, dict):
-        # Status only: a tool result body may carry compact Test evidence.
-        status = {key: result[key] for key in ("ok", "error") if key in result}
-        value = result.get("value")
-        if isinstance(value, dict) and "error_type" in value:
-            status["error_type"] = value["error_type"]
-        kept["result"] = status
-    compaction = kept.get("compaction")
-    if event_type == "subagent_context_compaction" and isinstance(compaction, dict):
-        # Shape only, like the parent's own compaction record in a Meta trace:
-        # the summary text is the child's compacted history.
-        kept["compaction"] = {
-            key: compaction[key]
-            for key in (
-                "status",
-                "error",
-                "skip_reason",
-                "estimated_tokens",
-                "messages_before",
-                "messages_after",
-                "summary_chars",
-            )
-            if key in compaction
-        }
-    # Bounded shape-only signals so a Meta child's usefulness stays auditable
-    # without any model text: how long its summary/content was and which
-    # argument keys the parent used.
-    if event_type == "subagent" and isinstance(payload.get("summary"), str):
-        kept["summary_chars"] = len(payload["summary"])
-    if event_type in {"llm_call", "subagent_llm"} and isinstance(payload.get("content"), str):
-        kept["content_chars"] = len(payload["content"])
-    arguments = payload.get("arguments")
-    if event_type in {"tool_call", "subagent_tool"} and isinstance(arguments, Mapping):
-        kept["argument_keys"] = sorted(str(key) for key in arguments)
-    return kept
-
-
 def _read_json_if_exists(path: Path) -> dict[str, object]:
     try:
         if not path.exists():
@@ -4194,7 +3118,6 @@ __all__ = [
     "FilesystemArtifactStore",
     "fold_workspace_map",
     "LLMFoldDeveloper",
-    "LLMMetaLearner",
     "LocalDailyEvaluationBackend",
     "LocalDailySnapshotProvider",
     "SessionBudgetLLM",

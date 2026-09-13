@@ -1,23 +1,16 @@
-"""Agent-visible projections of ledger, fold-history, and metric records.
+"""Agent-visible projections of host-computed metric blocks.
 
-The single test-leakage allowlist surface (docs/agent-design.md): everything an
-Agent or Meta session may read from experiment history passes through these
-whitelisting projections. ``metrics`` is also the host-side compact metric
-block written into ledger records; the ``agent_visible_*`` functions
-additionally opaque raw fold/strategy identifiers and strip Test/Held-out
-evidence except through the explicit frozen-test metric whitelist.
+``metrics`` is the host-side compact metric block written into ledger records;
+``agent_visible_metrics`` keeps only its numeric fields and the whitelisted
+benchmark and exposure fields. No forward or Held-out evidence passes through
+these projections.
 """
 
 from __future__ import annotations
 
-import json
 from collections.abc import Mapping, Sequence
-from pathlib import Path
 
 from autotrade.environment.data.summary import HOST_PATH_RE
-from autotrade.environment.identity import AgentRefStore
-
-from .ledger import finite_number
 
 
 def metrics(summary: dict[str, object] | None) -> dict[str, object] | None:
@@ -44,7 +37,7 @@ def metrics(summary: dict[str, object] | None) -> dict[str, object] | None:
             if key in exposure
         }
     # One scalar each from the cost-sensitivity and concentration blocks: this
-    # block rides in every ledger record and Meta view, so it keeps the two
+    # block rides in every ledger record, so it keeps the two
     # numbers that change a judgement — whether the excess survives twice the
     # modelled slippage, and how much of the gain one name produced — and
     # leaves the full blocks in the backtest summary.
@@ -60,10 +53,9 @@ def metrics(summary: dict[str, object] | None) -> dict[str, object] | None:
 
 # The benchmark fields one compact metric block keeps. Raw excess alone cannot
 # separate real edge from a small-cap or high-beta tilt, so the size/beta
-# neutralized excess -- the tie-breaker both the Fold and the Meta guidance name
+# neutralized excess -- the tie-breaker the research guidance names
 # -- and the caliber it was computed under ride beside it. Descriptive
-# attribution only: nothing here is Test or Held-out evidence, which the
-# ``include_frozen_test_metrics`` gate governs, not this whitelist.
+# attribution only: nothing here is forward or Held-out evidence.
 _BENCHMARK_TEXT_KEYS = frozenset({"label", "neutralized_excess_method"})
 _BENCHMARK_KEYS = (
     "label",
@@ -82,7 +74,7 @@ def _visible_metrics(value: object) -> dict[str, object] | None:
 
 
 def agent_visible_metrics(summary: dict[str, object] | None) -> dict[str, object] | None:
-    """Compact metric projection safe for Meta workspace history."""
+    """Compact metric projection safe for Agent-visible history."""
 
     compact = metrics(summary)
     if compact is None:
@@ -126,263 +118,7 @@ def agent_visible_metrics(summary: dict[str, object] | None) -> dict[str, object
     return compact
 
 
-# ``vs_parent``: one candidate's Validation minus the Fold's parent control.
-#
-# Every candidate of a Fold is quoted on the same Validation window as the
-# host's parent control, so the number that carries information is the
-# difference, not two absolute figures read side by side. ``beats_parent`` is
-# True only when BOTH excess deltas are > 0: the raw excess alone cannot
-# separate an edge from a small-cap or high-beta tilt, and the neutralized
-# excess alone cannot show what the tilt actually contributed.
-_VS_PARENT_KEYS = ("excess_return", "neutralized_excess_return")
-
-
-def vs_parent_metrics(
-    summary: Mapping[str, object] | None,
-    control_summary: Mapping[str, object] | None,
-) -> dict[str, object] | None:
-    """Candidate-minus-control deltas for one completed Validation.
-
-    ``None`` when the Fold has no parent control: a Fold that inherited
-    nothing has no baseline on this window, and borrowing another Fold's or
-    another candidate's numbers would invent one. Both excess figures come
-    from the summaries' own ``benchmark`` blocks (window excess return and the
-    annualized size/beta neutralized excess); ``max_drawdown_delta`` compares
-    magnitudes, so it is positive when the candidate drew down more than the
-    parent whichever sign convention the summary uses. ``beats_parent`` is
-    True only when both excess deltas are > 0, and ``None`` when either delta
-    could not be computed. ``identical_to_parent`` and its note are added only
-    when the candidate reproduced the parent control's result exactly.
-    """
-
-    if not isinstance(summary, Mapping) or not isinstance(control_summary, Mapping):
-        return None
-    deltas: dict[str, object] = {}
-    for key in _VS_PARENT_KEYS:
-        candidate = _benchmark_number(summary, key)
-        control = _benchmark_number(control_summary, key)
-        deltas[f"{key}_delta"] = (
-            candidate - control
-            if candidate is not None and control is not None
-            else None
-        )
-    candidate_drawdown = finite_number(summary.get("max_drawdown"))
-    control_drawdown = finite_number(control_summary.get("max_drawdown"))
-    deltas["max_drawdown_delta"] = (
-        abs(candidate_drawdown) - abs(control_drawdown)
-        if candidate_drawdown is not None and control_drawdown is not None
-        else None
-    )
-    excess = deltas["excess_return_delta"]
-    neutralized = deltas["neutralized_excess_return_delta"]
-    deltas["beats_parent"] = (
-        bool(excess > 0 and neutralized > 0)
-        if isinstance(excess, float) and isinstance(neutralized, float)
-        else None
-    )
-    if _same_result_as_parent(summary, control_summary, deltas):
-        deltas["identical_to_parent"] = True
-        deltas["vs_parent_note"] = (
-            "identical to the parent control: this candidate placed the same "
-            "order stream as the parent, so every delta is exactly zero. An "
-            "order-level no-op, not a failed or substituted comparison."
-        )
-    return deltas
-
-
-def _same_result_as_parent(
-    summary: Mapping[str, object],
-    control_summary: Mapping[str, object],
-    deltas: Mapping[str, object],
-) -> bool:
-    """Whether the candidate reproduced the parent control's result exactly.
-
-    An overlay that never fires -- an exclusion filter that excluded none of
-    the parent's buys, a threshold no day reached -- replays to the parent's
-    own order stream, and its ``vs_parent`` is then a row of exact zeros. Read
-    as deltas alone that is indistinguishable from a broken or substituted
-    comparison, and a session has already misread one as a silent host
-    fallback. So the deltas must all be exactly zero AND the two summaries must
-    agree on what was actually traded: without ``final_equity``, ``order_count``
-    and ``trade_count`` on both sides the claim is not proven and is not made.
-    """
-
-    for key in (
-        "excess_return_delta",
-        "neutralized_excess_return_delta",
-        "max_drawdown_delta",
-    ):
-        value = deltas.get(key)
-        if not isinstance(value, float) or value != 0.0:
-            return False
-    for key in ("final_equity", "order_count", "trade_count"):
-        candidate = summary.get(key)
-        if candidate is None or candidate != control_summary.get(key):
-            return False
-    return True
-
-
-def _benchmark_number(summary: Mapping[str, object], key: str) -> float | None:
-    benchmark = summary.get("benchmark")
-    return finite_number(benchmark.get(key)) if isinstance(benchmark, Mapping) else None
-
-
-# One completed Validation as a later Fold or the Meta session reads it back.
-# ``benchmark`` keeps its ``neutralized_excess_method``: the session facts state
-# the current caliber, but a historical number must carry the rule it was
-# actually scored with (the size-factor rule changed once mid-round).
-_SUMMARY_KEYS = (
-    "result_name",
-    "mode",
-    "status",
-    "complete_validation",
-    "total_return",
-    "long_return",
-    "sharpe",
-    "max_drawdown",
-    "order_count",
-    "trade_count",
-    # Exit health + benchmark-relative view: a lineage whose "gains" trail the
-    # index must stay visible to later epochs.
-    "strategy_exit_fill_count",
-    "benchmark",
-    # Overfitting tell (lzp-test21 post-mortem): turnover cost drove the
-    # held-out loss while the dev metrics looked healthy — meta-learning must
-    # see it, not just returns.
-    "turnover",
-    # The same tell priced out: what one more bp of slippage per side costs and
-    # what the excess is worth at twice it, beside how few trades and names
-    # produced the gains.
-    "cost_sensitivity",
-    "pnl_concentration",
-    # Cost of the Validation itself, so Meta can weigh a direction's replay and
-    # NL spend against its evidence.
-    "replay_wall_seconds",
-    "replayed_trade_days",
-    "nl_calls",
-    "nl_llm_calls",
-    "nl_wall_seconds",
-    # Selection evidence: this candidate against the Fold's own parent control
-    # on the same window.
-    "vs_parent",
-    "error",
-)
-_NL_SUMMARY_KEYS = frozenset({"nl_calls", "nl_llm_calls", "nl_wall_seconds"})
-
-
-def _nl_service_disabled(manifest: Mapping[str, object]) -> bool:
-    """True when this run mounted no text corpus for the NL sub-agent.
-
-    The NL service answers out of the replay slot's text domain. With that
-    domain switched off (``snapshot_config.replay.include_text``) every query
-    can only return ``no_evidence``, so the counters carry no information about
-    how the Fold spent its budget. A zero under a mounted corpus is a real
-    reading — the strategy never asked — and stays. An older manifest that does
-    not record the switch keeps the counters rather than hiding them.
-    """
-
-    snapshot_config = manifest.get("snapshot_config")
-    replay = (
-        snapshot_config.get("replay") if isinstance(snapshot_config, Mapping) else None
-    )
-    return isinstance(replay, Mapping) and replay.get("include_text") is False
-
-
-def hard_reject_reasons(record: Mapping[str, object]) -> object:
-    """The Fold record's hard-reject reasons; rows written before the field
-    was renamed carry them as ``accept_reasons``."""
-
-    return record.get("hard_reject_reasons", record.get("accept_reasons"))
-
-
-def freeze_flags(record: Mapping[str, object]) -> dict[str, bool]:
-    """The Fold record's freeze labels, present only when set, as the ledger
-    writes them: ``baseline_anchor`` (frozen with no parent to beat -- a weak
-    baseline in force, not an evidenced edge) and ``nominated_identical_to_parent``
-    (a passing nomination that was the parent's own content, so the parent's id
-    was retained)."""
-
-    return {
-        key: True
-        for key in ("baseline_anchor", "nominated_identical_to_parent")
-        if record.get(key) is True
-    }
-
-
-def compact_fold_history(
-    record: dict[str, object],
-    *,
-    ref_store: AgentRefStore,
-    include_frozen_test_metrics: bool = False,
-) -> dict[str, object]:
-    manifest, manifest_unavailable = _read_run_manifest(record.get("run_manifest_ref"))
-    keys = _SUMMARY_KEYS
-    if _nl_service_disabled(manifest):
-        keys = tuple(key for key in keys if key not in _NL_SUMMARY_KEYS)
-    backtests = []
-    raw_backtests = manifest.get("backtest_summaries")
-    if isinstance(raw_backtests, list):
-        for summary in raw_backtests:
-            if not isinstance(summary, dict):
-                continue
-            backtests.append({key: summary.get(key) for key in keys if key in summary})
-    compact = {
-        "epoch_id": record.get("epoch_id"),
-        "fold_id": ref_store.get_or_create("fold", str(record.get("fold_id"))),
-        # The window these results were replayed on. Without it a reader has to
-        # borrow the label of whatever neighbouring node names a period, and a
-        # benchmark figure gets attributed to the wrong year.
-        "validation_period": record.get("validation_period"),
-        "run_id": (
-            ref_store.get_or_create("run", str(record["run_id"]))
-            if record.get("run_id")
-            else None
-        ),
-        "fold_status": record.get("fold_status"),
-        "finish_reason": record.get("finish_reason"),
-        "finish_mode": record.get("finish_mode"),
-        "early_stop_reason": record.get("early_stop_reason"),
-        "no_edge_reason": record.get("no_edge_reason"),
-        **freeze_flags(record),
-        "validation_result": _visible_metrics(record.get("validation_result")),
-        "hard_reject_reasons": hard_reject_reasons(record),
-        "accept_warnings": record.get("accept_warnings"),
-        "backtest_summaries": backtests,
-    }
-    # An empty list means the Fold ran no backtest; it must not also mean its
-    # evidence could not be read. The Meta session is asked to reason over
-    # exactly these summaries, so an unreadable manifest states itself.
-    if manifest_unavailable:
-        compact["backtest_summaries_unavailable"] = manifest_unavailable
-    if include_frozen_test_metrics and record.get("record_type") == "fold":
-        compact["test_result"] = _visible_metrics(record.get("test_result"))
-    return compact
-
-
-# Host-computed selection evidence a later Fold or a Meta review reads verbatim
-# from the Fold record: how wide the search was and how much of the winner's
-# Sharpe that width alone explains (pipelines/ledger.deflated_sharpe), where
-# the observed excess sits inside random-name replays of the Fold's own trade
-# skeleton (environment/replay/null_control.py), and how the frozen candidate
-# stood against the Fold's parent control (``vs_parent_metrics``). Development
-# statistics only — no Test or Held-out evidence enters through these.
-SELECTION_STATISTICS_KEYS = (
-    "candidates_evaluated",
-    # Whether the deflated trial pool includes the parent control, which it
-    # does exactly when the Fold kept the parent: without it a kept-parent
-    # probability reads as if a challenger had won the search.
-    "parent_included",
-    "deflated_sharpe_probability",
-    "trials",
-    "sharpe_star",
-    "trial_sharpe_std",
-    "observed_sharpe",
-    "return_days",
-    "return_skew",
-    "return_kurtosis",
-    "unavailable_reason",
-)
-# ``rejects_mean`` rides along because a null whose orders are mostly rejected
+# The null-control fields a tool result carries. ``rejects_mean`` rides along because a null whose orders are mostly rejected
 # is a weaker comparison, ``status``/``reason`` because a failed or unavailable
 # null (a result with no filled trade) must not read as a missing one, and the
 # null's own centre and spread over its ``k`` draws because a percentile alone
@@ -401,15 +137,6 @@ NULL_CONTROL_KEYS = (
     "dropped_trips_mean",
     "step",
 )
-VS_PARENT_DELTA_KEYS = (
-    "excess_return_delta",
-    "neutralized_excess_return_delta",
-    "max_drawdown_delta",
-    "beats_parent",
-    # Present only on an order-level no-op: a later reader must not take that
-    # Fold's row of exact zeros for a missing comparison.
-    "identical_to_parent",
-)
 
 
 def allowed_keys(block: object, keys: Sequence[str]) -> dict[str, object] | None:
@@ -420,90 +147,15 @@ def allowed_keys(block: object, keys: Sequence[str]) -> dict[str, object] | None
     return {key: block.get(key) for key in keys if key in block}
 
 
-def fold_development_summary(
-    record: dict[str, object], *, ref_store: AgentRefStore
-) -> dict[str, object]:
-    """One completed Fold as a later Fold session reads it in its run facts.
-
-    The verdict rather than the trial log: the frozen node's metrics, how it
-    stood against the Fold's own parent control (``vs_parent``) and against
-    random-name replays of its trades (``null_control``), how wide the search
-    was that it won (``selection_statistics``), and how the inherited parent
-    itself fared on the Fold's new period (``parent_control.step_result``).
-    Per-candidate backtest summaries stay out: they are already in the Step
-    tree and in the Meta history (``compact_fold_history``), and a system
-    prompt that carried them grew by ~25k characters per completed Fold, so
-    this projection's size does not depend on how many candidates a Fold ran.
-    Test metrics never enter it. Each result keeps the ``neutralized_excess_method``
-    it was scored with: the caliber has changed once already, and a number
-    computed under the old rule must not read as if under the current one.
-    """
-
-    return {
-        "epoch_id": record.get("epoch_id"),
-        "fold_id": ref_store.get_or_create("fold", str(record.get("fold_id"))),
-        "validation_period": record.get("validation_period"),
-        "run_id": (
-            ref_store.get_or_create("run", str(record["run_id"]))
-            if record.get("run_id")
-            else None
-        ),
-        "fold_status": record.get("fold_status"),
-        "finish_reason": record.get("finish_reason"),
-        # How the status was reached: a nominated node, the Agent's explicit
-        # no-edge finish (with its evidence), or no nomination at all.
-        "finish_mode": record.get("finish_mode"),
-        "early_stop_reason": record.get("early_stop_reason"),
-        "no_edge_reason": record.get("no_edge_reason"),
-        **freeze_flags(record),
-        "hard_reject_reasons": hard_reject_reasons(record),
-        "accept_warnings": record.get("accept_warnings"),
-        "validation_result": _visible_metrics(record.get("validation_result")),
-        "vs_parent": allowed_keys(record.get("vs_parent"), VS_PARENT_DELTA_KEYS),
-        "selection_statistics": allowed_keys(
-            record.get("selection_statistics"), SELECTION_STATISTICS_KEYS
-        ),
-        "null_control": allowed_keys(record.get("null_control"), NULL_CONTROL_KEYS),
-        "parent_control": parent_control_summary(record.get("parent_control")),
-    }
-
-
-def parent_control_summary(control: object) -> dict[str, object] | None:
-    """The ledger's ``parent_control`` block as a later Fold or Meta reads it.
-
-    The inherited parent's fate on the Fold: its status, why it failed when it
-    did, its result on the Fold's new period alone (``step_result`` — the only
-    forward evidence a trailing window holds) and its null control.
-    Whole-window metrics stay out: on a trailing window they are mostly ground
-    the parent was developed on. None without a parent.
-    """
-
-    if not isinstance(control, Mapping):
-        return None
-    error = parent_control_error_text(control.get("error"))
-    return {
-        "status": control.get("status"),
-        **({"error": error} if error else {}),
-        "step_result": _visible_step_result(control.get("step_result")),
-        "null_control": allowed_keys(control.get("null_control"), NULL_CONTROL_KEYS),
-    }
-
-
 # One line of a failed control's reason is enough to decide what to do about
 # it, and the ledger keeps the full string either way.
 PARENT_CONTROL_ERROR_MAX_CHARS = 400
 
 
 def parent_control_error_text(value: object) -> str | None:
-    """Why the host's pre-session parent replay produced no result.
+    """A Fold-era parent control's failure reason as the console shows it.
 
-    Only the parent's own exception is recorded (any other failure fails the
-    attempt), and a session told only that the baseline is missing pays for
-    the missing reason in Validation slots — the confirm arm replayed its
-    parent three times. It is host-generated ``BacktestError`` text of the same
-    class the Agent already reads from its own replays; host paths are
-    redacted and the text is bounded, because it travels in every later Fold's
-    and every Meta session's system prompt.
+    Host paths are redacted and the text is bounded.
     """
 
     if not isinstance(value, str):
@@ -514,131 +166,3 @@ def parent_control_error_text(value: object) -> str | None:
     if len(text) > PARENT_CONTROL_ERROR_MAX_CHARS:
         text = text[: PARENT_CONTROL_ERROR_MAX_CHARS - 1] + "…"
     return text
-
-
-def _visible_step_result(value: object) -> dict[str, object] | None:
-    """The parent control's new-period row: its window labels plus the compact
-    metric block every other result is read through."""
-
-    if not isinstance(value, Mapping):
-        return None
-    labels = {
-        key: value.get(key) for key in ("label", "start", "end", "partial") if key in value
-    }
-    return {**labels, **(agent_visible_metrics(dict(value)) or {})}
-
-
-def agent_visible_ledger_record(
-    record: dict[str, object],
-    *,
-    ref_store: AgentRefStore,
-    include_frozen_test_metrics: bool = False,
-) -> dict[str, object]:
-    public = json.loads(json.dumps(record, ensure_ascii=False, default=str))
-    if not isinstance(public, dict):
-        return {}
-    allowed = {
-        "record_type",
-        "experiment_id",
-        "epoch_id",
-        "meta_learning_id",
-        "trigger_after_folds",
-        "run_id",
-        "parent_strategy_artifact_id",
-        "finish_reason",
-        "finish_mode",
-        "no_edge_reason",
-        "fold_status",
-        "hard_reject_reasons",
-        "accept_warnings",
-        "selected_step_id",
-        "steps",
-        "frozen_strategy_artifact_id",
-        "validation_result",
-        "state_changed_during_test",
-        "snapshot_ids",
-        "status",
-        "modification_check",
-        "prior_chars",
-        "prior_published",
-        "prior_generation_id",
-        "meta_learning_directive",
-        "fold_exploration_directive",
-        "input_window",
-        "validation_period",
-        "valid_decision_time",
-    }
-    public = {key: value for key, value in public.items() if key in allowed}
-    if "hard_reject_reasons" not in public and "accept_reasons" in record:
-        public["hard_reject_reasons"] = hard_reject_reasons(record)
-    if "validation_result" in public:
-        public["validation_result"] = _visible_metrics(public.get("validation_result"))
-    if include_frozen_test_metrics and record.get("record_type") == "fold":
-        public["test_result"] = _visible_metrics(record.get("test_result"))
-    if record.get("fold_id"):
-        namespace = "meta" if record.get("record_type") == "meta_learning" else "fold"
-        public["fold_id"] = ref_store.get_or_create(
-            namespace, str(record["fold_id"])
-        )
-    if public.get("run_id"):
-        public["run_id"] = ref_store.get_or_create("run", str(public["run_id"]))
-    if public.get("meta_learning_id"):
-        public["meta_learning_id"] = ref_store.get_or_create(
-            "meta", str(public["meta_learning_id"])
-        )
-    for key in ("parent_strategy_artifact_id", "frozen_strategy_artifact_id"):
-        if public.get(key):
-            public[key] = ref_store.get_or_create("strategy", str(public[key]))
-    steps = public.get("steps")
-    if isinstance(steps, list):
-        public["steps"] = [agent_visible_step_record(step) for step in steps if isinstance(step, dict)]
-    snapshot_ids = public.get("snapshot_ids")
-    if isinstance(snapshot_ids, dict):
-        public["snapshot_ids"] = {
-            key: value
-            for key, value in snapshot_ids.items()
-            if not str(key).startswith("test_") and not str(key).startswith("heldout_")
-        }
-    return public
-
-
-def agent_visible_step_record(record: dict[str, object]) -> dict[str, object]:
-    """One Step of a Fold as history: its id and its compact metrics.
-
-    ``experiment._step_record`` is the only producer, and its remaining fields
-    are host identity (revision id, result ref) or host bookkeeping the session
-    must not read back.
-    """
-
-    allowed = {"step_id", "summary"}
-    public = {key: value for key, value in record.items() if key in allowed}
-    if "summary" in public:
-        public["summary"] = _visible_metrics(public.get("summary"))
-    return public
-
-
-def _read_run_manifest(ref: object) -> tuple[dict[str, object], str]:
-    """One Fold's run manifest, and why it could not be read.
-
-    An empty ref is a Fold that never opened a run (the deadline path) and has
-    nothing to report. A ref that does not read back is missing evidence and
-    says so, because the caller's reader cannot otherwise tell it apart from a
-    Fold that ran no backtest.
-
-    Reported rather than raised: archived experiments carry absolute refs into
-    trees that have since moved, and one such row must not take down every
-    later Meta session, report and console preview. The reason names the
-    failure but never the path -- this is an Agent-visible projection, and the
-    entry already identifies its run through the reference store.
-    """
-
-    text = str(ref or "")
-    if not text:
-        return {}, ""
-    try:
-        payload = json.loads(Path(text).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        return {}, f"run manifest could not be read ({type(exc).__name__})"
-    if not isinstance(payload, dict):
-        return {}, "run manifest is not a JSON object"
-    return payload, ""

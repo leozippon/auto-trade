@@ -28,7 +28,6 @@ from autotrade.pipelines.agent_inbox import (
     enqueue_inbox_message,
 )
 from autotrade.pipelines.hitl_state import (
-    DEPLOYMENT_SESSION_KEY,
     LIVE_RUN_STATES,
     WEB_CLOSED_PARAMS,
     WEB_CREATE_DEFAULTS,
@@ -42,15 +41,10 @@ from autotrade.pipelines.hitl_state import (
     status_pid_alive,
     write_control,
 )
-from autotrade.pipelines.inherited_memory import (
-    INHERITED_MEMORY_PARAM,
-    import_inherited_memory,
-)
 from autotrade.pipelines.ledger import (
     ExperimentLedger,
     FrozenArtifactMutated,
     assert_no_frozen_artifact_mutation,
-    deployment_adjustment_due,
     is_frozen_artifact_mutation,
     latest_fold_records,
 )
@@ -59,7 +53,6 @@ from autotrade.pipelines.skills import create_operating_memory_snapshot
 from .public_identity import PublicIdentity
 from .registry import (
     experiment_state,
-    read_ledger_records,
     test_results_revealed,
     worker_log_ref,
 )
@@ -445,34 +438,9 @@ class ExperimentManager:
             _modern_ref_store(directory)
             hitl = directory / "hitl"
             hitl.mkdir(parents=True)
-            inherit_from = str(merged.get("inherit_from") or "").strip()
-            if inherit_from:
-                try:
-                    merged["_inherited_artifact"] = self._import_inherited_artifact(
-                        directory, inherit_from
-                    )
-                except Exception:
-                    self._discard_half_created(directory)
-                    raise
-            # Another experiment's PRIOR and skills, copied as this one's own
-            # read-only generations; a source that never published a PRIOR has
-            # no memory to inherit and the create is refused.
-            memory_source = str(merged.get("inherit_memory_from") or "").strip()
-            if memory_source:
-                try:
-                    merged[INHERITED_MEMORY_PARAM] = import_inherited_memory(
-                        directory,
-                        self._experiment_dir(memory_source),
-                        source_id=memory_source,
-                    )
-                except Exception as exc:
-                    self._discard_half_created(directory)
-                    if isinstance(exc, ValueError):
-                        raise ManagerError(str(exc)) from exc
-                    raise
-            # Operating memory is fixed for the life of the experiment, like the
-            # inherited parent above: resolve the library and the graduated tier
-            # once, here, and copy the result in read-only. Every session then
+            # Operating memory is fixed for the life of the experiment: resolve
+            # the library and the graduated tier once, here, and copy the result
+            # in read-only. Every session then
             # mounts that snapshot, so a library change reaches the next
             # experiment instead of the middle of this one.
             try:
@@ -504,8 +472,8 @@ class ExperimentManager:
     def _discard_half_created(self, directory: Path) -> None:
         """Leave no half-created experiment, and never mask why it failed.
 
-        The tree can already hold read-only copies (the inherited frozen parent,
-        the operating-memory snapshot), which a plain ``rmtree`` leaves behind.
+        The tree can already hold read-only copies (the operating-memory
+        snapshot), which a plain ``rmtree`` leaves behind.
         """
 
         try:
@@ -542,59 +510,6 @@ class ExperimentManager:
             select_gpus(sandbox.gpu_count, require_name=sandbox.gpu_name_filter)
         except GpuUnavailableError as exc:
             raise ManagerError(f"当前 GPU 无法满足实验默认分配：{exc}") from exc
-
-    def _import_inherited_artifact(
-        self, experiment_dir: Path, source_id: str
-    ) -> dict[str, object]:
-        """Copy the source experiment's LATEST frozen fold output (+models) into
-        the new experiment as a read-only snapshot, so the new experiment is
-        self-contained even if the source is later deleted."""
-        from autotrade.environment.artifacts import copy_artifact, copy_model_artifacts
-
-        source_dir = self._experiment_dir(source_id)
-        records = ExperimentLedger(
-            source_dir / "ledgers/experiment_ledger.jsonl"
-        ).read()
-        folds = list(latest_fold_records(records).values())
-        folds.sort(
-            key=lambda row: (
-                str(row.get("epoch_id")),
-                str(row.get("test_period") or row.get("fold_id")),
-            )
-        )
-        if not folds:
-            raise ManagerError(
-                f"源实验 {source_id!r} 没有已完成的 Fold，无法继承其 Agent Output"
-            )
-        record = folds[-1]
-        source = Path(str(record.get("frozen_strategy_artifact_path") or ""))
-        if not source.is_dir():
-            raise ManagerError(f"源实验 {source_id!r} 的冻结产物目录缺失：{source}")
-        artifact_id = f"strategy_inherited_{source_id}"
-        dest_root = experiment_dir / "artifacts/strategy/_inherited"
-        dest = dest_root / artifact_id
-        dest_root.mkdir(parents=True, exist_ok=True)
-        # copy_artifact validates the tree it copies (suffix allowlist, no
-        # hidden/runtime cache files) and locks the copy read-only, so the
-        # inherited parent cannot drift after creation.
-        copy_artifact(source, dest)
-        model_source = record.get("frozen_model_artifact_path")
-        model_dest: Path | None = None
-        if model_source and Path(str(model_source)).is_dir():
-            model_dest = dest_root / f"{artifact_id}.models"
-            copy_model_artifacts(Path(str(model_source)), model_dest)
-            chmod_tree(model_dest, file_mode=0o444, dir_mode=0o555)
-        chmod_tree(dest, file_mode=0o444, dir_mode=0o555)
-        return {
-            "artifact_id": artifact_id,
-            "path": str(dest),
-            "model_path": str(model_dest) if model_dest else None,
-            "revision_id": str(record.get("frozen_strategy_artifact_id") or ""),
-            "source_experiment_id": source_id,
-            "source_epoch_id": record.get("epoch_id"),
-            "source_fold_id": record.get("fold_id"),
-            "source_artifact_id": record.get("frozen_strategy_artifact_id"),
-        }
 
     def running_experiments(self) -> list[str]:
         if not self.experiments_root.is_dir():
@@ -761,9 +676,6 @@ class ExperimentManager:
             if (
                 action in _SEALED_BLOCKED_ACTIONS
                 and test_results_revealed(directory)
-                and not self._deployment_adjustment_exempt(
-                    action, raw_session_key, directory
-                )
             ):
                 raise ManagerError(
                     "测试结果已揭示，实验已封存：不能再进行影响后续学习的控制操作"
@@ -802,11 +714,7 @@ class ExperimentManager:
                 }
             if action in {"resume", "rollback_fold", "rerun_fold"}:
                 state = experiment_state(directory)
-                resumable = state.get("state") in _TERMINAL_RESUMABLE_STATES or (
-                    action == "resume"
-                    and state.get("state") == "completed"
-                    and self._deployment_adjustment_pending(directory)
-                )
+                resumable = state.get("state") in _TERMINAL_RESUMABLE_STATES
                 if (
                     not state.get("worker_alive")
                     and resumable
@@ -814,34 +722,6 @@ class ExperimentManager:
                 ):
                     return {**response, **self.start_worker(experiment_id)}
             return response
-
-    def _deployment_adjustment_exempt(
-        self, action: str, raw_session_key: str | None, directory: Path
-    ) -> bool:
-        """The one post-seal session (docs/pipeline-design.md §3.4): directing
-        it, and resuming a completed experiment that still owes it, are the
-        only learning controls the seal lets through."""
-        if action == "set_directive":
-            return raw_session_key == DEPLOYMENT_SESSION_KEY
-        if action == "resume":
-            return self._deployment_adjustment_pending(directory)
-        return False
-
-    @staticmethod
-    def _deployment_adjustment_pending(directory: Path) -> bool:
-        """Whether a graduated experiment still owes its configured deployment
-        adjustment (``ledger.deployment_adjustment_due``)."""
-        start = str(
-            read_json(directory / "hitl/params.json").get("deployment_adjustment_start")
-            or ""
-        )
-        if not start:
-            return False
-        try:
-            records = read_ledger_records(directory)
-        except Exception:  # noqa: BLE001 - an unreadable ledger owes nothing readable
-            return False
-        return deployment_adjustment_due(records, start=start)
 
     def _inject_message(
         self,

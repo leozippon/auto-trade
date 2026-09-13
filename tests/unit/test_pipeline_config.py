@@ -20,7 +20,13 @@ from unittest.mock import patch
 from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.llm import LOCAL_QWEN_MODEL
 from autotrade.environment.strategy import StrategySchedule
-from autotrade.pipelines.config import AcceptanceRules, RollingExperimentConfig
+from autotrade.pipelines import verdict
+from autotrade.pipelines.calendar import ResearchGeometry
+from autotrade.pipelines.config import (
+    DEFAULT_RESEARCH_GEOMETRY,
+    AcceptanceRules,
+    RollingExperimentConfig,
+)
 from autotrade.pipelines.hitl_state import WEB_CREATE_DEFAULTS
 
 #: The console create form is seeded from the pinned explore profile so a
@@ -32,45 +38,31 @@ _CONSOLE_CREATE_PRESET: dict[str, object] = {
     "compact_max_tokens": 10_000,
     # Empty: the worker derives it from the model window and output ceiling.
     "compact_token_threshold": None,
-    "epochs": 3,
-    "development_first_period": "2022",
-    "fold_period": "year",
+    # Four July-June research years, a forward year, a Held-out quarter.
+    "research_start": "20210701",
+    "research_end": "20250630",
+    "forward_end": "20260630",
+    "heldout_end": "20260930",
+    "research_sessions": 4,
     "gpu_count": 1,
-    "heldout_first_period": "20260101..20260630",
-    "heldout_last_period": "20260101..20260630",
     "include_events": True,
     "include_intraday": False,
     "include_text": True,
     "inference_time": "08:30",
     "initial_cash": 1_000_000.0,
     "initial_control_mode": "auto",
-    "analysis_enabled": False,
-    "development_last_period": "2025",
-    # Per-Fold budgets for a one-year Validation with batch_validate available.
+    # Per-session budgets for a research-period Validation with batch_validate.
     "max_backtests_per_fold": 30,
     "max_fold_minutes": 720,
     "max_llm_calls": 1600,
     "max_steps_per_fold": 30,
-    # Meta between every two consecutive Folds.
-    "meta_learning_fold_interval": 1,
-    "meta_model": LOCAL_QWEN_MODEL,
     "model": LOCAL_QWEN_MODEL,
     # The universe reaches the agent unfiltered; the strategy filters itself.
     "screen_boards": (),
     "screen_exclude_new_listed_days": 0,
     "screen_exclude_st": False,
     "strategy_period": "day",
-    # Regular yearly Folds, no Test stage: Held-out is the verdict.
-    "test_stage": False,
     "window_months": 24,
-}
-
-PERIODS = {
-    "fold_period": "quarter",
-    "development_first_period": "2022Q1",
-    "development_last_period": "2022Q2",
-    "heldout_first_period": "2023Q1",
-    "heldout_last_period": "2023Q1",
 }
 
 
@@ -78,7 +70,6 @@ def make_config(root: Path, **overrides: object) -> RollingExperimentConfig:
     values: dict[str, object] = {
         "experiment_id": "exp",
         "experiments_root": root / "experiments",
-        **PERIODS,
     }
     values.update(overrides)
     return RollingExperimentConfig(**values)
@@ -177,231 +168,9 @@ class AcceptanceRulesTest(unittest.TestCase):
             with self.subTest(**kwargs), self.assertRaises(ValueError):
                 AcceptanceRules(**kwargs)
 
-    def test_walk_forward_consistency_needs_two_thirds_rounded_up(self) -> None:
-        """Graduation term (b): positive excess in >= ceil(2/3) of the transitions."""
-        rules = AcceptanceRules()
-        for transitions, positive, status in (
-            (3, 2, "consistent"),
-            (3, 1, "inconsistent"),
-            (2, 2, "consistent"),
-            (2, 1, "inconsistent"),
-            (1, 1, "consistent"),
-            (1, 0, "inconsistent"),
-        ):
-            with self.subTest(transitions=transitions, positive=positive):
-                block = rules.walk_forward_consistency(
-                    {"source": "parent_control", "transitions": transitions, "positive_excess": positive}
-                )
-                self.assertEqual(block["status"], status)
-                self.assertEqual(block["required"], math.ceil(2 * transitions / 3))
-        self.assertEqual(rules.walk_forward_consistency(None), {"status": "not_applicable", "transitions": 0})
-        self.assertEqual(
-            rules.walk_forward_consistency({"transitions": 0})["status"], "not_applicable"
-        )
-
-    def test_held_out_verdict_names_the_walk_forward_term_when_it_fails(self) -> None:
-        rules = AcceptanceRules()
-        passing = {
-            "total_return": 0.10,
-            "sharpe": 1.0,
-            "max_drawdown": -0.05,
-            "benchmark": {"benchmark_return": 0.02, "neutralized_excess_return": 0.03},
-        }
-        # The shipped artifact's own forward record, so term (c) holds and
-        # these assertions stay about term (b).
-        own = {"transitions": 2, "positive_excess": 2, "failed": 0, "unmeasured": 0}
-        # Held-out passes but only 1 of 3 walk-forward transitions beat the
-        # benchmark: term (b) fails and the reason carries the counts.
-        verdict = rules.heldout_verdict(
-            passing,
-            {"source": "parent_control", "transitions": 3, "positive_excess": 1},
-            None,
-            own,
-        )
-        self.assertEqual(verdict["status"], "discarded")
-        self.assertEqual(verdict["reasons"], ["walkforward_excess_inconsistent(1/3<2)"])
-        self.assertEqual(verdict["walk_forward"]["status"], "inconsistent")
-        # 2 of 3 suffice; both terms then hold.
-        verdict = rules.heldout_verdict(
-            passing,
-            {"source": "parent_control", "transitions": 3, "positive_excess": 2},
-            None,
-            own,
-        )
-        self.assertEqual((verdict["status"], verdict["reasons"]), ("graduated", []))
-        self.assertEqual(verdict["walk_forward"]["status"], "consistent")
-        # No transitions: term (b) is not applicable and (a) alone decides.
-        verdict = rules.heldout_verdict(passing, {"source": "parent_control", "transitions": 0})
-        self.assertEqual(verdict["status"], "graduated")
-        self.assertEqual(verdict["walk_forward"], {"status": "not_applicable", "transitions": 0})
-        self.assertEqual(rules.heldout_verdict(passing)["walk_forward"]["status"], "not_applicable")
-        # Term (a) failures and term (b) failures are both listed.
-        verdict = rules.heldout_verdict(
-            {**passing, "sharpe": -0.1},
-            {"source": "frozen_test", "transitions": 2, "positive_excess": 1},
-            None,
-            own,
-        )
-        self.assertEqual(
-            verdict["reasons"],
-            ["sharpe_not_positive", "walkforward_excess_inconsistent(1/2<2)"],
-        )
-
-    def test_the_shipped_artifact_needs_forward_transitions_of_its_own(self) -> None:
-        """Graduation term (c): the chain's record is not this artifact's.
-
-        A mechanism first frozen in the Epoch's last Fold has zero transitions
-        that replayed it, however long and however positive the lineage's own
-        record is. That is exactly what a new mechanism shipped straight to
-        Held-out looks like, and it must not graduate on the parent's history.
-        """
-
-        rules = AcceptanceRules()
-        passing = {
-            "total_return": 0.10,
-            "sharpe": 1.0,
-            "max_drawdown": -0.05,
-            "benchmark": {"benchmark_return": 0.02, "neutralized_excess_return": 0.03},
-        }
-        chain = {"source": "parent_control", "transitions": 12, "positive_excess": 12}
-        self.assertEqual(rules.confirmation_folds, 2)
-        # Everything else passes; the artifact itself was never confirmed.
-        verdict = rules.heldout_verdict(
-            passing, chain, None, {"artifact_id": "strategy_x", "transitions": 0, "positive_excess": 0, "failed": 0, "unmeasured": 0}
-        )
-        self.assertEqual(verdict["status"], "discarded")
-        self.assertEqual(verdict["reasons"], ["final_artifact_unconfirmed(0/2)"])
-        self.assertEqual(verdict["confirmation_folds"], 2)
-        self.assertEqual(
-            (
-                verdict["diagnostics"]["final_artifact_forward_transitions"],
-                verdict["diagnostics"]["final_artifact_forward_positive"],
-            ),
-            (0, 0),
-        )
-        # As many confirming transitions as there are confirmation Folds, all
-        # positive: it graduates.
-        verdict = rules.heldout_verdict(
-            passing, chain, None, {"transitions": 2, "positive_excess": 2, "failed": 0, "unmeasured": 0}
-        )
-        self.assertEqual((verdict["status"], verdict["reasons"]), ("graduated", []))
-        # Confirmed but negative: the same two-thirds rule applies to its own.
-        verdict = rules.heldout_verdict(
-            passing, chain, None, {"transitions": 3, "positive_excess": 1, "failed": 0, "unmeasured": 0}
-        )
-        self.assertEqual(
-            verdict["reasons"], ["final_artifact_forward_excess_inconsistent(1/3<2)"]
-        )
-        # Counts that were never computed cannot prove the term.
-        self.assertEqual(
-            rules.heldout_verdict(passing, chain)["reasons"],
-            ["missing_final_artifact_transitions"],
-        )
-        # A schedule with no transitions confirms nothing about any artifact:
-        # term (b) is not applicable there and (c) follows it.
-        self.assertEqual(
-            rules.heldout_verdict(passing, {"transitions": 0})["reasons"], []
-        )
-        # A higher floor demands more confirming Folds; 0 drops the term.
-        strict = AcceptanceRules(confirmation_folds=3)
-        self.assertEqual(
-            strict.heldout_verdict(passing, chain, None, {"transitions": 2, "positive_excess": 2, "failed": 0, "unmeasured": 0})[
-                "reasons"
-            ],
-            ["final_artifact_unconfirmed(2/3)"],
-        )
-        # The floor counts completed transitions only: an unmeasured one (a
-        # timeout a ledger never classified) is its own reason and fills no
-        # floor, so 2 positives of 3 rows cannot pass a floor of 3.
-        self.assertEqual(
-            strict.heldout_verdict(
-                passing,
-                {**chain, "unmeasured": 1},
-                None,
-                {"transitions": 3, "positive_excess": 2, "failed": 0, "unmeasured": 1},
-            )["reasons"],
-            ["unmeasured_transitions(1/12)", "final_artifact_unconfirmed(2/3)"],
-        )
-        # The shipped artifact's own replay crashed in its strategy code: a
-        # completed, non-positive transition that fails the term by itself,
-        # even when the remaining ones clear two thirds.
-        self.assertEqual(
-            rules.heldout_verdict(
-                passing,
-                chain,
-                None,
-                {"transitions": 3, "positive_excess": 2, "failed": 1, "unmeasured": 0},
-            )["reasons"],
-            ["final_artifact_transition_failed(1)"],
-        )
-        off = AcceptanceRules(confirmation_folds=0)
-        self.assertEqual(off.heldout_verdict(passing, chain)["reasons"], [])
-        self.assertEqual(off.heldout_verdict(passing, chain)["confirmation_folds"], 0)
-
-    def test_the_verdict_carries_selection_diagnostics_without_gating_on_them(self) -> None:
-        """DSR, the frozen node's Validation null percentile and the mean null
-        percentile of the walk-forward transitions ride beside the gating
-        metrics; however weak they are, they never become a reason."""
-        rules = AcceptanceRules()
-        passing = {
-            "total_return": 0.10,
-            "sharpe": 1.0,
-            "max_drawdown": -0.05,
-            "benchmark": {"benchmark_return": 0.02, "neutralized_excess_return": 0.03},
-        }
-        verdict = rules.heldout_verdict(
-            passing,
-            {"source": "parent_control", "transitions": 3, "positive_excess": 3, "mean_excess_percentile": 0.42},
-            {
-                "fold_id": "fold_2025Q4",
-                "candidates_evaluated": 17,
-                "deflated_sharpe_probability": 0.004,
-                "deflated_sharpe_trials": 18,
-                "validation_excess_percentile": 0.11,
-            },
-            {"artifact_id": "strategy_x", "transitions": 2, "positive_excess": 2, "failed": 0, "unmeasured": 0},
-        )
-        self.assertEqual((verdict["status"], verdict["reasons"]), ("graduated", []))
-        self.assertEqual(
-            verdict["diagnostics"],
-            {
-                "frozen_fold_id": "fold_2025Q4",
-                "candidates_evaluated": 17,
-                "deflated_sharpe_probability": 0.004,
-                "deflated_sharpe_trials": 18,
-                "validation_excess_percentile": 0.11,
-                "walk_forward_mean_excess_percentile": 0.42,
-                "final_artifact_forward_transitions": 2,
-                "final_artifact_forward_positive": 2,
-                "effective_heldout_min_trades": None,
-            },
-        )
-        # The term (b) block keeps its shape: the console reads it as is.
-        self.assertNotIn("mean_excess_percentile", verdict["walk_forward"])
-        # Nothing computed: every field is None, never a fabricated number.
-        self.assertEqual(
-            rules.heldout_verdict(passing)["diagnostics"],
-            {
-                "frozen_fold_id": None,
-                "candidates_evaluated": None,
-                "deflated_sharpe_probability": None,
-                "deflated_sharpe_trials": None,
-                "validation_excess_percentile": None,
-                "walk_forward_mean_excess_percentile": None,
-                "final_artifact_forward_transitions": None,
-                "final_artifact_forward_positive": None,
-                "effective_heldout_min_trades": None,
-            },
-        )
-
     def test_record_round_trips_every_threshold(self) -> None:
         rules = AcceptanceRules(
-            min_return=0.01,
-            min_sharpe=0.2,
-            max_drawdown=0.3,
-            cost_stress_multiplier=2.0,
-            heldout_min_trades=20,
-            confirmation_folds=3,
+            min_return=0.01, min_sharpe=0.2, max_drawdown=0.3, cost_stress_multiplier=3.0
         )
         self.assertEqual(
             rules.to_record(),
@@ -409,226 +178,59 @@ class AcceptanceRulesTest(unittest.TestCase):
                 "min_return": 0.01,
                 "min_sharpe": 0.2,
                 "max_drawdown": 0.3,
-                "cost_stress_multiplier": 2.0,
-                "heldout_min_trades": 20,
-                "confirmation_folds": 3,
+                "cost_stress_multiplier": 3.0,
             },
         )
+        self.assertEqual(AcceptanceRules.from_record(rules.to_record()), rules)
 
+    def test_the_agent_facts_state_the_rules_from_their_single_sources(self) -> None:
+        """The ``acceptance_rules`` fact is derived, never retyped: the freeze
+        gate and verdict thresholds come from ``verdict`` and this experiment's
+        own rules, and no date of any period appears in it."""
 
-class HeldOutCostAndTradeGateTest(unittest.TestCase):
-    """The two optional graduation terms: cost stress and a trade floor.
-
-    Both are off by default, so a running experiment's verdict is unchanged;
-    switched on they must reject on the arithmetic, and must also reject when
-    the input they need is missing rather than passing something unproven.
-    """
-
-    # Excess 0.01 with turnover 30 (cost_per_bp_per_side = 30 x 1e-4 = 0.003)
-    # and 5 bp slippage: doubling the slippage costs 0.015, more than the edge.
-    SUMMARY = {
-        "total_return": 0.06,
-        "sharpe": 1.0,
-        "max_drawdown": -0.05,
-        "benchmark": {"benchmark_return": 0.05, "neutralized_excess_return": 0.02},
-        "trade_count": 40,
-        "cost_sensitivity": {
-            "slippage_bps": 5.0,
-            "cost_per_bp_per_side": 0.003,
-            "breakeven_extra_slippage_bps": 3.33,
-            "excess_at_2x_slippage": -0.005,
-        },
-    }
-
-    def test_the_defaults_leave_the_verdict_untouched(self) -> None:
-        verdict = AcceptanceRules().heldout_verdict({**self.SUMMARY, "trade_count": 1})
-        self.assertEqual((verdict["status"], verdict["reasons"]), ("graduated", []))
-        self.assertEqual(verdict["cost_stress_multiplier"], 1.0)
-        self.assertIsNone(verdict["excess_at_cost_stress"])
-        self.assertEqual(verdict["heldout_min_trades"], 0)
-
-    def test_an_edge_thinner_than_the_stressed_cost_does_not_graduate(self) -> None:
-        verdict = AcceptanceRules(cost_stress_multiplier=2.0).heldout_verdict(self.SUMMARY)
-        self.assertEqual(verdict["status"], "discarded")
-        self.assertEqual(verdict["reasons"], ["excess_not_positive_at_cost_stress"])
-        self.assertAlmostEqual(float(verdict["excess_at_cost_stress"]), -0.005)
-        self.assertEqual(verdict["cost_stress_multiplier"], 2.0)
-
-    def test_an_edge_that_survives_the_stress_still_graduates(self) -> None:
-        summary = {**self.SUMMARY, "total_return": 0.09}  # excess 0.04 > 0.015
-        verdict = AcceptanceRules(cost_stress_multiplier=2.0).heldout_verdict(summary)
-        self.assertEqual((verdict["status"], verdict["reasons"]), ("graduated", []))
-        self.assertAlmostEqual(float(verdict["excess_at_cost_stress"]), 0.025)
-
-    def test_a_summary_without_the_cost_block_cannot_prove_the_stress(self) -> None:
-        summary = {key: value for key, value in self.SUMMARY.items() if key != "cost_sensitivity"}
-        verdict = AcceptanceRules(cost_stress_multiplier=2.0).heldout_verdict(summary)
-        self.assertEqual(verdict["reasons"], ["missing_cost_sensitivity"])
-        self.assertIsNone(verdict["excess_at_cost_stress"])
-        # An old summary is only judged on the stress when it is switched on.
-        self.assertEqual(AcceptanceRules().heldout_verdict(summary)["reasons"], [])
-
-    def test_too_few_closed_round_trips_do_not_graduate(self) -> None:
-        rules = AcceptanceRules(heldout_min_trades=20)
-        verdict = rules.heldout_verdict({**self.SUMMARY, "trade_count": 10})
-        self.assertEqual(verdict["reasons"], ["insufficient_trades"])
-        self.assertEqual((verdict["trade_count"], verdict["heldout_min_trades"]), (10, 20))
-        self.assertEqual(rules.heldout_verdict(self.SUMMARY)["reasons"], [])
-        # The floor is only provable with a count: absent, it fails closed.
-        missing = {key: value for key, value in self.SUMMARY.items() if key != "trade_count"}
-        self.assertEqual(rules.heldout_verdict(missing)["reasons"], ["missing_trade_count"])
-        self.assertEqual(AcceptanceRules().heldout_verdict(missing)["reasons"], [])
-
-    def test_the_trade_floor_scales_to_a_release_clipped_window(self) -> None:
-        # The knob is per configured window. The confirm arm's 20260601..0930
-        # Held-out replayed to 0909: 101 of 122 calendar days -> ceil(16.56).
-        rules = AcceptanceRules(heldout_min_trades=20)
-        clipped = {
-            "replay_start": "20260601",
-            "replay_end": "20260909",
-            "requested_end": "20260930",
-            "truncation_reason": "release_ends_20260909",
-        }
-        verdict = rules.heldout_verdict({**self.SUMMARY, "trade_count": 17}, window=clipped)
-        self.assertEqual(verdict["reasons"], [])
-        self.assertEqual(verdict["heldout_min_trades"], 20)
-        self.assertEqual(verdict["diagnostics"]["effective_heldout_min_trades"], 17)
-        short = rules.heldout_verdict({**self.SUMMARY, "trade_count": 16}, window=clipped)
-        self.assertEqual(short["reasons"], ["insufficient_trades"])
-        # The full window keeps the configured floor exactly.
-        full = {**clipped, "replay_end": "20260930", "truncation_reason": None}
-        verdict = rules.heldout_verdict({**self.SUMMARY, "trade_count": 19}, window=full)
-        self.assertEqual(verdict["reasons"], ["insufficient_trades"])
-        self.assertEqual(verdict["diagnostics"]["effective_heldout_min_trades"], 20)
-        # Rounded up and never below one, however short the replay.
-        stub = {**clipped, "replay_end": "20260601"}
-        verdict = AcceptanceRules(heldout_min_trades=2).heldout_verdict(
-            {**self.SUMMARY, "trade_count": 0}, window=stub
-        )
-        self.assertEqual(verdict["reasons"], ["insufficient_trades"])
-        self.assertEqual(verdict["diagnostics"]["effective_heldout_min_trades"], 1)
-        # Off stays off.
-        self.assertIsNone(
-            AcceptanceRules().heldout_verdict(self.SUMMARY, window=clipped)["diagnostics"][
-                "effective_heldout_min_trades"
-            ]
-        )
-
-    def test_a_raw_excess_that_is_only_a_tilt_does_not_graduate(self) -> None:
-        """The neutralized excess is a criterion of its own.
-
-        A raw excess a size or beta exposure could have produced proves no
-        edge, and a replay whose neutralization could not be computed proves
-        nothing either — both are failing reasons, named alongside the rest.
-        """
-
-        rules = AcceptanceRules()
-        tilted = {
-            **self.SUMMARY,
-            "benchmark": {"benchmark_return": 0.05, "neutralized_excess_return": -0.01},
-        }
-        verdict = rules.heldout_verdict(tilted)
-        self.assertEqual(verdict["status"], "discarded")
-        self.assertEqual(verdict["reasons"], ["neutralized_excess_return_not_positive"])
-        self.assertAlmostEqual(float(verdict["neutralized_excess_return"]), -0.01)
-        # Zero is not positive either.
-        flat = {**self.SUMMARY, "benchmark": {**tilted["benchmark"], "neutralized_excess_return": 0.0}}
-        self.assertEqual(
-            rules.heldout_verdict(flat)["reasons"],
-            ["neutralized_excess_return_not_positive"],
-        )
-        # Missing (too few overlapping days to regress) fails closed, and every
-        # other failing criterion is still named beside it.
-        missing = {
-            **self.SUMMARY,
-            "sharpe": -0.1,
-            "benchmark": {"benchmark_return": 0.05},
-        }
-        self.assertEqual(
-            rules.heldout_verdict(missing)["reasons"],
-            ["missing_neutralized_excess_return", "sharpe_not_positive"],
-        )
-
-    def test_the_agent_facts_state_enforcement_and_the_configured_bar(self) -> None:
-        """The ``acceptance_rules`` fact is derived, never retyped: it marks
-        each freeze rule hard or warn and lists only the graduation criteria
-        this experiment actually switched on."""
-
-        default = AcceptanceRules().agent_facts()
-        freeze = default["fold_freeze"]
+        facts = AcceptanceRules(max_drawdown=0.2, cost_stress_multiplier=3.0).agent_facts()
+        freeze = facts["fold_freeze"]
         self.assertEqual(freeze["finite_metrics"]["enforcement"], "hard")
         self.assertEqual(
             {name: rule["enforcement"] for name, rule in freeze.items() if name != "finite_metrics"},
             {name: "warn" for name in ("max_drawdown", "min_return", "min_sharpe", "order_count")},
         )
-        self.assertEqual(freeze["max_drawdown"]["target"], 0.25)
-        # The absolute warn targets decided one bear-year Fold (a style overlay
-        # chosen for min_return>0 over a higher neutralized excess); the fact
-        # labels them as informational, not as selection criteria.
         for name in ("min_return", "min_sharpe"):
             self.assertEqual(
                 freeze[name]["role"],
                 "informational_absolute_target_not_a_selection_criterion",
             )
-        self.assertNotIn("role", freeze["max_drawdown"])
-        required = default["graduation"]["all_required"]
-        self.assertNotIn("excess_at_cost_stress", required)
-        self.assertNotIn("trade_count", required)
-        # Term (c) is on by default, so the session is told before it freezes
-        # anything that the artifact it ships needs a forward record of its own
-        # and that the last Folds refuse a new nomination for exactly that.
+        graduation = facts["graduation"]
+        self.assertIn(str(verdict.FREEZE_MIN_DSR_PROBABILITY), graduation["freeze_gate"]["deflated_sharpe_probability"])
         self.assertIn(
-            "refuse a new nomination", required["final_artifact_forward_transitions"]
+            str(verdict.FREEZE_MIN_FULL_SPAN_VALIDATIONS),
+            graduation["freeze_gate"]["full_span_validations"],
         )
-        self.assertNotIn(
-            "final_artifact_forward_transitions",
-            AcceptanceRules(confirmation_folds=0).agent_facts()[
-                "graduation"
-            ]["all_required"],
-        )
-
-        configured = AcceptanceRules(
-            max_drawdown=0.2, cost_stress_multiplier=2.0, heldout_min_trades=20
-        ).agent_facts()["graduation"]["all_required"]
-        self.assertEqual(
-            list(configured),
-            [
-                "excess_return",
-                "neutralized_excess_return",
-                "sharpe",
-                "max_drawdown",
-                "excess_at_cost_stress",
-                "trade_count",
-                "walk_forward_positive_excess",
-                "final_artifact_forward_transitions",
-            ],
-        )
-        self.assertIn("0.2", configured["max_drawdown"])
-        self.assertIn("2.0", configured["excess_at_cost_stress"])
-        self.assertIn("20", configured["trade_count"])
+        self.assertEqual(graduation["freeze_gate"]["freezes_per_arm"], 1)
+        self.assertEqual(graduation["forward"]["max_drawdown"], "<= 0.2")
+        self.assertIn("3.0", graduation["forward"]["excess_at_cost_stress"])
+        self.assertEqual(graduation["heldout"]["max_drawdown"], "<= 0.2")
+        rendered = json.dumps(facts)
+        self.assertIsNone(re.search(r"20\d{6}", rendered))
 
     def test_a_record_with_a_retired_key_still_rebuilds_the_rules(self) -> None:
         rules = AcceptanceRules.from_record(
-            {"max_drawdown": 0.2, "heldout_min_trades": 5, "max_diff_lines": 600}
+            {"max_drawdown": 0.2, "heldout_min_trades": 5, "confirmation_folds": 2}
         )
-        self.assertEqual((rules.max_drawdown, rules.heldout_min_trades), (0.2, 5))
+        self.assertEqual(rules, AcceptanceRules(max_drawdown=0.2))
 
-    def test_the_thresholds_are_refused_when_they_are_not_thresholds(self) -> None:
+    def test_the_cost_stress_multiplier_must_be_a_stress(self) -> None:
         with self.assertRaisesRegex(ValueError, "cost_stress_multiplier must be at least one"):
             AcceptanceRules(cost_stress_multiplier=0.5)
         with self.assertRaisesRegex(ValueError, "cost_stress_multiplier must be finite"):
             AcceptanceRules(cost_stress_multiplier=float("nan"))
-        with self.assertRaisesRegex(ValueError, "heldout_min_trades must be a non-negative integer"):
-            AcceptanceRules(heldout_min_trades=-1)
 
 
 class RollingExperimentConfigValidationTest(unittest.TestCase):
     def test_valid_defaults_pass(self) -> None:
         config = make_config(Path("/tmp"))
-        self.assertEqual(config.development_first_period, "2022Q1")
-        self.assertFalse(config.test_stage)
-        self.assertEqual(config.epochs, 3)
-        self.assertEqual(config.meta_learning_fold_interval, 1)
+        self.assertEqual(config.geometry, DEFAULT_RESEARCH_GEOMETRY)
+        self.assertEqual((config.research_sessions, config.session_max_attempts), (4, 3))
         self.assertEqual(config.fold_exploration_directive, "")
         self.assertEqual(config.max_fold_minutes, 720)
         self.assertEqual(
@@ -643,10 +245,9 @@ class RollingExperimentConfigValidationTest(unittest.TestCase):
 
     def test_positive_int_knobs_reject_zero_negatives_floats_and_booleans(self) -> None:
         for name in (
-            "epochs",
+            "research_sessions",
+            "session_max_attempts",
             "window_months",
-            "validation_periods",
-            "min_region_trade_days",
             "max_steps_per_fold",
             "max_backtests_per_fold",
             "max_llm_calls",
@@ -660,7 +261,11 @@ class RollingExperimentConfigValidationTest(unittest.TestCase):
                         make_config(Path("/tmp"), **{name: value})
 
     def test_non_negative_int_knobs_accept_zero_but_not_negatives(self) -> None:
-        for name in ("meta_learning_fold_interval", "meta_memory_max_epochs"):
+        for name in (
+            "max_null_controls_per_fold",
+            "deadline_grace_minutes",
+            "finalize_before_deadline_seconds",
+        ):
             self.assertEqual(getattr(make_config(Path("/tmp"), **{name: 0}), name), 0)
             for value in (-1, 1.5, True, math.inf):
                 with self.subTest(field=name, value=value):
@@ -675,16 +280,9 @@ class RollingExperimentConfigValidationTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "experiment_id"):
                     make_config(Path("/tmp"), experiment_id=experiment_id)
 
-    def test_development_and_heldout_windows_must_not_overlap(self) -> None:
-        # The held-out window is pre-registered and must stay strictly after the
-        # last development test period; an overlap silently trains on held-out.
-        with self.assertRaises(ValueError):
-            make_config(
-                Path("/tmp"),
-                development_last_period="2023Q1",
-                heldout_first_period="2023Q1",
-                heldout_last_period="2023Q2",
-            )
+    def test_the_geometry_must_be_a_research_geometry(self) -> None:
+        with self.assertRaisesRegex(TypeError, "geometry must be a ResearchGeometry"):
+            make_config(Path("/tmp"), geometry=DEFAULT_RESEARCH_GEOMETRY.to_record())
 
 
 class DefaultsDriftTest(unittest.TestCase):
@@ -711,9 +309,10 @@ class DefaultsDriftTest(unittest.TestCase):
             "min_sharpe",
             "max_drawdown",
             "cost_stress_multiplier",
-            "heldout_min_trades",
         ):
             self.assertEqual(WEB_CREATE_DEFAULTS[key], getattr(rules, key), key)
+        for key, value in DEFAULT_RESEARCH_GEOMETRY.to_record().items():
+            self.assertEqual(WEB_CREATE_DEFAULTS[key], value, key)
         schedule = StrategySchedule()
         self.assertEqual(WEB_CREATE_DEFAULTS["strategy_period"], schedule.period)
         self.assertEqual(WEB_CREATE_DEFAULTS["inference_time"], schedule.inference_time)
@@ -722,8 +321,8 @@ class DefaultsDriftTest(unittest.TestCase):
         """An absent knob in `params.json` resolves to the dataclass default.
 
         The loader used to carry its own fallbacks, so an experiment created
-        before a knob existed ran with a different cadence, budget or meta
-        interval than the console offered, and nothing reported the divergence.
+        before a knob existed ran with a different cadence or budget than the
+        console offered, and nothing reported the divergence.
         """
         import tempfile
 
@@ -735,10 +334,6 @@ class DefaultsDriftTest(unittest.TestCase):
             options = resolve_worker_options(
                 {
                     "experiment_id": "defaults_demo",
-                    "development_first_period": "2023",
-                    "development_last_period": "2025",
-                    "heldout_first_period": "20260101..20260630",
-                    "heldout_last_period": "20260101..20260630",
                     "strategy_path": "configs/agent_output_template/main.py",
                     "data_backend": "pit",
                     "raw_dir": "data/raw",
@@ -761,35 +356,28 @@ class DefaultsDriftTest(unittest.TestCase):
                     field_obj.name,
                 )
 
-    def test_the_new_schedule_and_gate_knobs_reach_the_configuration(self) -> None:
-        """A knob accepted and never forwarded is the defect class here.
-
-        `validation_periods` must reach the schedule and the two graduation
-        gates must reach `AcceptanceRules`, or a round created with them would
-        silently run the old design.
-        """
+    def test_the_geometry_and_gate_knobs_reach_the_configuration(self) -> None:
+        """A knob accepted and never forwarded is the defect class here."""
         import tempfile
 
-        import pandas as pd
-
-        from autotrade.pipelines.folds import build_fold_schedule
         from autotrade.pipelines.worker import resolve_worker_options
 
+        geometry = ResearchGeometry(
+            research_start="20210701",
+            research_end="20240630",
+            forward_end="20250630",
+            heldout_end="20260630",
+        )
         with tempfile.TemporaryDirectory() as tmp:
             repo_root = Path(tmp)
             (repo_root / "experiments").mkdir()
             options = resolve_worker_options(
                 {
-                    "experiment_id": "walk_forward_demo",
-                    "fold_period": "quarter",
-                    "validation_periods": 4,
-                    "development_first_period": "2022Q1",
-                    "development_last_period": "2025Q4",
-                    "heldout_first_period": "20260101..20260630",
-                    "heldout_last_period": "20260101..20260630",
-                    "cost_stress_multiplier": 2.0,
-                    "heldout_min_trades": 20,
-                    "confirmation_folds": 3,
+                    "experiment_id": "geometry_demo",
+                    **geometry.to_record(),
+                    "research_sessions": 3,
+                    "cost_stress_multiplier": 3.0,
+                    "max_drawdown": 0.2,
                     "strategy_path": "configs/agent_output_template/main.py",
                     "data_backend": "pit",
                     "raw_dir": "data/raw",
@@ -798,28 +386,16 @@ class DefaultsDriftTest(unittest.TestCase):
                         "results/data_quality/fundamental_events_status.json"
                     ),
                 },
-                experiment_dir=repo_root / "experiments/walk_forward_demo",
+                experiment_dir=repo_root / "experiments/geometry_demo",
                 repo_root=repo_root,
                 preflight=True,
             )
-        self.assertEqual(options.rolling.validation_periods, 4)
-        self.assertEqual(options.rolling.acceptance.cost_stress_multiplier, 2.0)
-        self.assertEqual(options.rolling.acceptance.heldout_min_trades, 20)
-        self.assertEqual(options.rolling.acceptance.confirmation_folds, 3)
-        # The schedule the worker would build from it: 13 quarterly steps.
-        days = [
-            stamp.strftime("%Y%m%d") for stamp in pd.bdate_range("2019-01-01", "2026-06-30")
-        ]
-        folds = build_fold_schedule(
-            options.rolling.development_first_period,
-            options.rolling.development_last_period,
-            days,
-            window_months=options.rolling.window_months,
-            period=options.rolling.fold_period,
-            validation_periods=options.rolling.validation_periods,
+        self.assertEqual(options.rolling.geometry, geometry)
+        self.assertEqual(options.rolling.research_sessions, 3)
+        self.assertEqual(
+            options.rolling.acceptance,
+            AcceptanceRules(max_drawdown=0.2, cost_stress_multiplier=3.0),
         )
-        self.assertEqual(len(folds), 13)
-        self.assertEqual(folds[0].fold_id, "fold_2022Q4")
 
     def test_the_console_create_form_is_seeded_with_the_research_preset(self) -> None:
         """The create defaults the owner set from a real launch.
@@ -865,14 +441,14 @@ class DefaultsDriftTest(unittest.TestCase):
             "model": "deepseek-v4-pro",
             "max_steps_per_fold": 7,
             "screen_boards": ("gem", "star"),
-            "development_first_period": "2019Q3",
+            "research_start": "20190701",
         }
         with patch.dict(WEB_CREATE_DEFAULTS, moved):
             after = rendered()
         self.assertEqual(after["model"], "deepseek-v4-pro")
         self.assertEqual(after["max_steps_per_fold"], 7)
         self.assertEqual(after["screen_boards"], ["gem", "star"])
-        self.assertEqual(after["development_first_period"], "2019Q3")
+        self.assertEqual(after["research_start"], "20190701")
         self.assertEqual(rendered(), baseline, "the schema retained a mutated default")
 
     def test_removed_minute_replay_knobs_are_absent_from_every_surface(self) -> None:
@@ -958,13 +534,9 @@ RESTORED_CONSOLE_PARAMETERS = (
     "per_call_timeout_seconds",
     "record_failed_attempts",
     "finalize_before_deadline_seconds",
-    "convergence_start_epoch",
     "disable_step_tree",
     "max_total_holdings",
     "max_single_name_weight",
-    "disable_meta_sandbox_rebuild",
-    "meta_sandbox_rebuild_timeout_seconds",
-    "meta_sandbox_image_keep",
 )
 
 
@@ -1003,7 +575,7 @@ class ConsoleParameterSurfaceTest(unittest.TestCase):
         fields = self._schema_fields()
         # Rendering a field the worker rejects is a control that 400s on submit.
         unaccepted = sorted(
-            set(fields) - set(_ALLOWED_PARAMS) - {"experiment_id", "inherit_from"}
+            set(fields) - set(_ALLOWED_PARAMS) - {"experiment_id"}
         )
         self.assertEqual(unaccepted, [])
         # And every rendered field has a default the form can seed from.
@@ -1026,10 +598,7 @@ class ConsoleParameterSurfaceTest(unittest.TestCase):
         )
         config = make_config(Path("/tmp"))
         for key in (
-            "convergence_start_epoch",
             "record_failed_attempts",
-            "meta_sandbox_rebuild_timeout_seconds",
-            "meta_sandbox_image_keep",
             "finalize_before_deadline_seconds",
             "per_call_timeout_seconds",
         ):
@@ -1053,13 +622,9 @@ class ConsoleParameterSurfaceTest(unittest.TestCase):
             "per_call_timeout_seconds": 120,
             "record_failed_attempts": False,
             "finalize_before_deadline_seconds": 60,
-            "convergence_start_epoch": 2,
             "disable_step_tree": True,
             "max_total_holdings": 12,
             "max_single_name_weight": 0.15,
-            "disable_meta_sandbox_rebuild": True,
-            "meta_sandbox_rebuild_timeout_seconds": 600,
-            "meta_sandbox_image_keep": 1,
         }
         self.assertEqual(sorted(overrides), sorted(RESTORED_CONSOLE_PARAMETERS))
         with tempfile.TemporaryDirectory() as tmp:
@@ -1072,11 +637,7 @@ class ConsoleParameterSurfaceTest(unittest.TestCase):
                     json={
                         "params": {
                             "experiment_id": "params_demo",
-                            "fold_period": "quarter",
-                            "development_first_period": "2024Q1",
-                            "development_last_period": "2024Q1",
-                            "heldout_first_period": "2024Q2",
-                            "heldout_last_period": "2024Q2",
+                            **DEFAULT_RESEARCH_GEOMETRY.to_record(),
                             **overrides,
                         }
                     },
@@ -1127,10 +688,6 @@ class WorkerEntryPointTest(unittest.TestCase):
 
 PIT_SEED_BASE_PARAMS = {
     "experiment_id": "seed_demo",
-    "development_first_period": "2023",
-    "development_last_period": "2025",
-    "heldout_first_period": "20260101..20260630",
-    "heldout_last_period": "20260101..20260630",
     "strategy_path": "configs/agent_output_template/main.py",
     "data_backend": "pit",
     "raw_dir": "data/raw",
@@ -1260,47 +817,3 @@ class PitViewsSeedParameterTest(unittest.TestCase):
             )
             self.assertIsNone(options.pit_views_seed)
             self.assertFalse(options.pit_views_seed_required)
-
-
-class WalkForwardApplicabilityTest(unittest.TestCase):
-    """Term (b) is only "not applicable" when the schedule produced nothing.
-
-    Excluding the anchors' transitions can empty the count, and reading that as
-    "not applicable" would take term (c) down with it and graduate an artifact
-    on Held-out alone. A schedule that produced transitions and confirmed none
-    of them is inconsistent, not inapplicable.
-    """
-
-    def test_an_empty_count_over_a_real_schedule_is_inconsistent(self) -> None:
-        rules = AcceptanceRules()
-        none_scheduled = rules.walk_forward_consistency(
-            {"source": "parent_control", "scheduled": 0, "transitions": 0}
-        )
-        self.assertEqual(none_scheduled["status"], "not_applicable")
-        all_anchors = rules.walk_forward_consistency(
-            {"source": "parent_control", "scheduled": 4, "transitions": 0}
-        )
-        self.assertEqual(
-            (all_anchors["status"], all_anchors["required"]), ("inconsistent", 1)
-        )
-        # And term (c) still applies, so the artifact cannot pass unconfirmed.
-        passing = {
-            "total_return": 0.10,
-            "sharpe": 1.0,
-            "max_drawdown": -0.05,
-            "benchmark": {"benchmark_return": 0.02, "neutralized_excess_return": 0.03},
-        }
-        reasons = rules.heldout_verdict(
-            passing,
-            {"source": "parent_control", "scheduled": 4, "transitions": 0},
-            None,
-            {"transitions": 0, "positive_excess": 0, "failed": 0, "unmeasured": 0},
-        )["reasons"]
-        self.assertIn("walkforward_excess_inconsistent(0/0<1)", reasons)
-        self.assertIn("final_artifact_unconfirmed(0/2)", reasons)
-        # A ledger written before the field exists reads its own count, as it
-        # always did: no transitions recorded, nothing to apply.
-        self.assertEqual(
-            rules.walk_forward_consistency({"transitions": 0})["status"],
-            "not_applicable",
-        )

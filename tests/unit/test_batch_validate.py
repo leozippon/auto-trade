@@ -23,6 +23,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+import numpy as np
+
 from autotrade.environment.artifacts import (
     FilesystemArtifactStore,
     ModificationConstraints,
@@ -41,12 +43,13 @@ from autotrade.environment.tools.workspace import SafeWorkspace
 from autotrade.pipelines.config import (
     BrokerProfile,
     EvaluationResult,
-    FoldSessionRequest,
-    FoldSpec,
+    ReplaySpan,
+    ResearchSessionRequest,
     SnapshotBundle,
     StrategySchedule,
 )
 from autotrade.pipelines.experiment import null_control_seed
+from autotrade.pipelines.ledger import ExperimentLedger
 from autotrade.pipelines.local_backend import (
     BATCH_REJECTION_CHARGE_AFTER,
     BATCH_REJECTION_ESCALATE_AT,
@@ -151,27 +154,35 @@ class _Evaluator:
                     raise TimeoutError(f"generate_orders exceeded 30s ({marker})")
             summary = _summary(0.01 * len(source))
             target = self.results_root / f"valid_{call_index:03d}" / "result.json"
-            # The equity curve the selection statistics read: 40 days of
-            # returns alternating around a positive mean (skew 0, kurtosis 1).
-            equity, curve = 1_000_000.0, []
-            for index in range(40):
-                equity *= 1.0 + (0.012 if index % 2 == 0 else -0.008)
-                curve.append(
-                    {
-                        "trade_date": f"2022{index + 1:04d}",
-                        "initial_equity": 1_000_000.0,
-                        "equity": equity,
-                    }
-                )
-            write_json_atomic(target, {"stats": summary, "equity_curve": curve})
+            write_json_atomic(target, {"stats": summary})
+            _write_style_sidecar(target.parent, alpha=0.0005 * len(source), seed=call_index)
             return EvaluationResult(summary=dict(summary), result_ref=str(target))
         finally:
             with self._lock:
                 self.active -= 1
 
 
+def _write_style_sidecar(directory: Path, *, alpha: float, seed: int) -> None:
+    """The daily series the freeze gate reads: 60 days of a return that is
+    ``alpha`` plus benchmark and size exposure plus noise."""
+
+    rng = np.random.default_rng(seed)
+    days = [f"2022{index // 20 + 1:02d}{index % 20 + 1:02d}" for index in range(60)]
+    benchmark = rng.normal(0.0003, 0.01, len(days))
+    size = rng.normal(0.0, 0.004, len(days))
+    strategy = alpha + 0.9 * benchmark + 0.2 * size + rng.normal(0.0, 0.004, len(days))
+    write_json_atomic(
+        directory / "style_analysis.json",
+        {
+            "strategy_daily": [[day, float(value)] for day, value in zip(days, strategy)],
+            "benchmark_daily": [[day, float(value)] for day, value in zip(days, benchmark)],
+            "size_factor_daily": [[day, float(value)] for day, value in zip(days, size)],
+        },
+    )
+
+
 class _Session:
-    """One Fold session's real tools over a temporary workspace."""
+    """One research session's real tools over a temporary workspace."""
 
     def __init__(
         self,
@@ -205,24 +216,18 @@ class _Session:
         # bytes the workspace received, not to whatever the parent holds later.
         self.seeded_readonly = readonly_baseline(self.output)
         moment = datetime(2021, 12, 31, 23, 59, 59, tzinfo=UTC)
-        request = FoldSessionRequest(
+        snapshot = SnapshotBundle("snapshot", "decision", "replay")
+        request = ResearchSessionRequest(
             experiment_id="exp",
-            epoch_id="epoch_001",
-            fold=FoldSpec(
-                fold_id="fold_2022Q1",
-                input_window_start="20200101",
-                input_window_end="20211231",
-                validation_start="20220101",
-                validation_end="20220331",
-                test_start="20220401",
-                test_end="20220630",
-                valid_decision_time=moment,
-                test_decision_time=moment,
-            ),
+            session_id="s1",
+            session_index=1,
+            sessions_total=4,
             run_id="run_batch",
-            parent=None,
-            prior="",
-            snapshot=SnapshotBundle("snapshot", "decision", "replay"),
+            start=None,
+            snapshot=snapshot,
+            decision_time=moment,
+            validation=ReplaySpan("full", "valid", "20220101", "20220331", snapshot),
+            input_window_start="20200101",
             max_steps=max_steps,
             max_backtests=max_backtests,
             max_llm_calls=10,
@@ -246,6 +251,7 @@ class _Session:
             broker_profile=BrokerProfile(),
             time_budget=InferenceTimeBudget(duration_seconds=deadline_seconds),
             ref_store=AgentRefStore(root / "experiment"),
+            ledger=ExperimentLedger(root / "ledger.jsonl"),
         )
         self.workspace = SafeWorkspace(self.workspace_root)
         self.batch = BatchValidateTool(
@@ -263,12 +269,12 @@ class _Session:
             self.tree,
             self.output,
             self.models,
-            fold_id=self.backtest.ref_store.get_or_create("fold", "fold_2022Q1"),
+            fold_id=self.backtest.ref_store.get_or_create("fold", "s1"),
             run_id=self.backtest.ref_store.get_or_create("run", "run_batch"),
         )
         self.finish = FinishFoldTool(
             self.tree,
-            fold_id=self.backtest.ref_store.get_or_create("fold", "fold_2022Q1"),
+            fold_id=self.backtest.ref_store.get_or_create("fold", "s1"),
             run_id=self.backtest.ref_store.get_or_create("run", "run_batch"),
             parent_main_py=self.parent / "main.py",
             another_round_fits=lambda: another_batch_round_fits(self.backtest),
@@ -621,34 +627,32 @@ class BatchValidateRunTest(unittest.TestCase):
                 record = json.loads(attachment.read_text(encoding="utf-8"))
                 self.assertIn("sub_windows", record["stats"])
 
-    def test_each_row_carries_provisional_selection_statistics_over_the_round(
+    def test_each_row_carries_the_provisional_freeze_gate_over_the_arm(
         self,
     ) -> None:
-        """Every completed Validation of the session so far is the trial pool,
-        the whole batch included, so the rows of one round deflate against the
-        same N and say how many that was; a Fold without a parent control
-        states the comparison absent instead of omitting it."""
+        """Every revision the arm has validated so far is the trial pool, the
+        whole batch included, so the rows of one round are gated against the
+        same N and say how many that was."""
         with TemporaryDirectory() as tmp:
             session = _Session(Path(tmp))
             first = session.validate_one("first", _strategy("333"))
             statistics = first["selection_statistics"]
-            self.assertEqual(statistics["trials_so_far"], 1)
-            # One trial has no dispersion to deflate against.
-            self.assertIsNone(statistics["deflated_sharpe_probability"])
-            self.assertEqual(statistics["unavailable_reason"], "fewer_than_two_trials")
-            self.assertIsNone(first["vs_parent"])
-            self.assertEqual(first["vs_parent_note"], "first Fold: no parent control")
+            self.assertEqual(statistics["trials"], 1)
+            self.assertEqual(statistics["full_span_validations"], 1)
+            self.assertFalse(statistics["freeze_gate_passed"])
+            self.assertIn(
+                "freeze_too_few_full_span_validations", statistics["freeze_gate_reasons"]
+            )
             session.candidate("a", _strategy("1"))
             session.candidate("b", _strategy("22"))
             value = session.call("a", "b").value
             for row in value["candidates"]:
                 statistics = row["selection_statistics"]
-                self.assertEqual(statistics["trials_so_far"], 3)
-                self.assertIsNone(statistics["unavailable_reason"])
-                self.assertTrue(0.0 < statistics["deflated_sharpe_probability"] <= 1.0)
-                self.assertIn("ledger recomputes", statistics["note"])
-                self.assertIsNone(row["vs_parent"])
-                self.assertIn("vs_parent_note", row)
+                self.assertEqual(statistics["trials"], 3)
+                self.assertEqual(statistics["full_span_validations"], 3)
+                self.assertTrue(0.0 <= statistics["deflated_sharpe_probability"] <= 1.0)
+                self.assertIn("the freeze recomputes it", statistics["note"])
+                self.assertNotIn("vs_parent", row)
 
     def test_a_batch_node_is_selected_without_restoring_the_working_copy(self) -> None:
         """The Pipeline freezes the nominated revision, not output/, so a
@@ -692,26 +696,9 @@ class BatchValidateRunTest(unittest.TestCase):
 
 
 class BatchSelectHintTest(unittest.TestCase):
-    """The hint names the row leading on the neutralized excess — against the
-    parent control when the Fold has one — and selects nothing."""
+    """The hint names the row leading on the neutralized excess and selects nothing."""
 
-    def test_names_the_leader_on_the_parent_delta_when_a_control_exists(self) -> None:
-        from autotrade.pipelines.local_backend import batch_select_hint
-
-        rows = [
-            {"name": "a", "node_id": "n_a", "status": "ok",
-             "vs_parent": {"neutralized_excess_return_delta": 0.01, "beats_parent": True}},
-            {"name": "b", "node_id": "n_b", "status": "ok",
-             "vs_parent": {"neutralized_excess_return_delta": 0.04, "beats_parent": True}},
-            {"name": "c", "node_id": "n_c", "status": "failed", "error": "boom"},
-        ]
-        hint = batch_select_hint(rows, versus_parent=True)
-        self.assertIn("leading on neutralized excess vs parent control: b (node_id=n_b)", hint)
-        self.assertIn("step_rollback(node_id=<chosen>)", hint)
-        self.assertNotIn("finish_fold(", hint)
-        self.assertIn("pre-registered hypotheses are resolved", hint)
-
-    def test_falls_back_to_the_absolute_figure_without_a_control(self) -> None:
+    def test_names_the_leader_on_the_neutralized_excess(self) -> None:
         from autotrade.pipelines.local_backend import batch_select_hint
 
         rows = [
@@ -719,16 +706,19 @@ class BatchSelectHintTest(unittest.TestCase):
              "stats": {"benchmark": {"neutralized_excess_return": 0.12}}},
             {"name": "b", "node_id": "n_b", "status": "ok",
              "stats": {"benchmark": {"neutralized_excess_return": float("nan")}}},
+            {"name": "c", "node_id": "n_c", "status": "failed", "error": "boom"},
         ]
-        hint = batch_select_hint(rows, versus_parent=False)
+        hint = batch_select_hint(rows)
         self.assertIn("leading on neutralized excess: a (node_id=n_a)", hint)
-        self.assertNotIn("vs parent control", hint)
+        self.assertIn("step_rollback(node_id=<chosen>)", hint)
+        self.assertNotIn("finish_fold(", hint)
+        self.assertIn("pre-registered hypotheses are resolved", hint)
 
     def test_names_nobody_when_no_row_carries_the_figure(self) -> None:
         from autotrade.pipelines.local_backend import batch_select_hint
 
         rows = [{"name": "a", "node_id": "n_a", "status": "ok", "stats": {"total_return": 0.2}}]
-        hint = batch_select_hint(rows, versus_parent=False)
+        hint = batch_select_hint(rows)
         self.assertIn("no row carries a neutralized excess figure", hint)
         self.assertNotIn("leading on", hint)
         self.assertNotIn("finish_fold(", hint)
@@ -969,7 +959,7 @@ def _canned_null(calls: list[dict[str, object]]):
 
 class NullControlToolTest(unittest.TestCase):
     """The session's null control is the freeze's null control: the same
-    backend call with the same seed, cached per node and capped per Fold."""
+    backend call with the same seed, cached per node and capped per session."""
 
     def test_a_validated_node_is_ranked_once_and_the_block_is_reused(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -986,7 +976,7 @@ class NullControlToolTest(unittest.TestCase):
             self.assertEqual((first["null_controls_used"], first["null_controls_remaining"]), (1, 1))
             # Drawn exactly as the freeze would draw it: whole window, frozen role.
             self.assertIsNone(calls[0]["step"])
-            self.assertEqual(calls[0]["seed"], null_control_seed("fold_2022Q1", "frozen"))
+            self.assertEqual(calls[0]["seed"], null_control_seed("s1", "frozen"))
             self.assertEqual((calls[0]["start"], calls[0]["end"]), ("20220101", "20220331"))
             self.assertEqual(calls[0]["result_ref"], session.backtest.steps[0].validation.result_ref)
             again = tool.invoke({"node_id": node}).value

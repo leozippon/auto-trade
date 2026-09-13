@@ -11,25 +11,15 @@ force-overwritten with manager-owned values on creation (ExperimentManager);
 form field, so it is set in ``params.json``; and ``WEB_INTERNAL_PARAMS``
 describe the only supported research environment — the console API rejects them
 outright, so they can only be set in a worker-side ``params.json``.
-
-Period labels are error-prone to type, so the four period fields render as
-dropdowns whenever the server can enumerate valid labels from the SSE trading
-calendar (``build_period_options``); without a calendar they degrade to plain
-text inputs.
 """
 
 from __future__ import annotations
 
-import bisect
 import json
-import re
 from pathlib import Path
-
-import pandas as pd
 
 from autotrade.environment.data.snapshot import DEFAULT_DATASETS, SELECTABLE_DATASETS
 from autotrade.environment.llm.model_profiles import MODEL_CHOICES
-from autotrade.pipelines.folds import MIN_REGION_TRADE_DAYS, period_bounds
 from autotrade.pipelines.hitl_state import WEB_CREATE_DEFAULTS
 from autotrade.pipelines.skills import (
     OPERATING_MEMORY_LIBRARY,
@@ -37,21 +27,6 @@ from autotrade.pipelines.skills import (
     build_skills_index,
 )
 
-# Suggested development length in cadence periods when the calendar picker seeds
-# a cadence other than the configured one: eight periods, so a one-period
-# development window (a single regime sample; lzp-test21 review: dev-fit
-# strategies inverted out-of-sample) is only reached by an explicit choice.
-DEV_DEFAULT_PERIODS = 8
-PERIOD_KEYS = (
-    "development_first_period",
-    "development_last_period",
-    "heldout_first_period",
-    "heldout_last_period",
-)
-# A period field also accepts an explicit calendar range instead of a cadence
-# label (``folds.period_bounds`` reads both), which is how a held-out window
-# that does not fill a whole cadence period is expressed.
-_EXPLICIT_RANGE = re.compile(r"^\d{8}\.\.\d{8}$")
 _SCHEDULE_REGISTRY = Path(__file__).resolve().parents[3] / "configs" / "tushare_update_schedule.json"
 _OPERATING_MEMORY_LIBRARY = Path(__file__).resolve().parents[3] / OPERATING_MEMORY_LIBRARY
 
@@ -107,86 +82,47 @@ _FIELDS: list[dict[str, object]] = [
         "help": "唯一实验标识，仅限字母、数字、下划线和连字符；对应 experiments/<id>/ 目录。",
     },
     {
-        "key": "fold_period",
+        "key": "research_start",
         "group": "基本与排程",
-        "label": "日历周期单位",
-        "type": "choice",
-        "choices": ["week", "month", "quarter", "year"],
-        "choice_labels": {"week": "周", "month": "月", "quarter": "季度", "year": "年"},
-        "help": "Development 与 Held-out 周期标签的单位；切换后下方周期选项随之变化。开启 Test 阶段时它也是 Fold 滚动的粒度。",
-    },
-    {
-        "key": "development_first_period",
-        "group": "基本与排程",
-        "label": "Development 起始周期",
-        "type": "period",
+        "label": "研究期起点",
+        "type": "string",
         "required": True,
-        "help": "Development 窗口的第一个周期。默认窗口内每个周期各是一个常规 Fold（验证区间即该周期），按时间顺序开发、Fold 之间插入元学习，最后冻结的策略直接进入 Held-out。",
+        "help": "YYYYMMDD，必须是 7 月 1 日。研究期按整年（7 月至次年 6 月）切块，研究会话只看研究期末的决策视图、只回放研究期。",
     },
     {
-        "key": "development_last_period",
+        "key": "research_end",
         "group": "基本与排程",
-        "label": "Development 结束周期",
-        "type": "period",
+        "label": "研究期终点",
+        "type": "string",
         "required": True,
-        "help": "Development 窗口的最后一个周期；Held-out 必须晚于它。",
+        "help": "YYYYMMDD，必须是某个 6 月 30 日，且晚于起点。",
     },
     {
-        "key": "test_stage",
+        "key": "forward_end",
         "group": "基本与排程",
-        "label": "启用 Test 阶段（滚动 Fold）",
-        "type": "bool",
-        "help": "关闭（默认）= 窗口内每个周期一个常规 Fold，没有冻结 Test，Held-out 就是裁决。开启 = 在窗口内按周期滚动：首个周期只做验证，之后每个周期作为一个 Fold 的测试区间、其前一周期为验证区间。",
-    },
-    {
-        "key": "heldout_first_period",
-        "group": "基本与排程",
-        "label": "Held-out 起始周期",
-        "type": "period",
+        "label": "前向测试终点",
+        "type": "string",
         "required": True,
-        "help": "最终冻结测试的起始周期；实验开始前冻结，必须晚于末个测试周期、不得重叠。",
+        "help": "YYYYMMDD，必须是研究期终点之后第 12 个月的 6 月 30 日。冻结产物从研究期终点次日起连续回放到这里，再接着回放 Held-out。",
     },
     {
-        "key": "heldout_last_period",
+        "key": "heldout_end",
         "group": "基本与排程",
-        "label": "Held-out 结束周期",
-        "type": "period",
+        "label": "Held-out 终点",
+        "type": "string",
         "required": True,
-        "help": "最终冻结测试的结束周期。",
+        "help": "YYYYMMDD，晚于前向测试终点；回放截到已固定发布的最后一个交易日，截断会记在前向记录里。",
     },
     {
-        "key": "validation_periods",
+        "key": "research_sessions",
         "group": "基本与排程",
-        "label": "验证窗口周期数",
+        "label": "研究会话数",
         "type": "int",
-        "help": "每个 Fold 验证区间包含的周期数：1 表示只验证该 Fold 自己的周期；N>1 表示验证截至该周期的连续 N 个周期（滚动前进，每步只有最后一个周期是新的），窗口最前面的 N-1 个周期只作历史。N>1 仅支持季度粒度，且不能与 Test 阶段同时启用。",
+        "help": "背靠背运行的研究会话数；每个会话以继续、冻结或无边际结束，任一会话可冻结，至多冻结一次。",
     },
-    {"key": "epochs", "group": "基本与排程", "label": "Epoch 数", "type": "int",
-     "help": "对 Development 窗口的完整遍历轮数，默认 3；每个 Epoch 开始前固定运行一次元学习，Fold 链与元学习节奏跨 Epoch 连续。"},
-    {
-        "key": "meta_learning_fold_interval",
-        "group": "基本与排程",
-        "label": "元学习 Fold 间隔",
-        "type": "int",
-        "min": 0,
-        "help": "0=仅每个 Epoch 开始运行一次；N>0=每完成 N 个 Fold 且仍有下一 Fold 时，再运行一次元学习并更新后续 PRIOR。按 Fold 计数：默认 1 表示每两个相邻 Fold 之间都有一次元学习，Epoch 开头那次覆盖 Epoch 边界。",
-    },
-    {"key": "inherit_from", "group": "基本与排程", "label": "继承已有实验的 Agent Output", "type": "choice",
-     "optional": True,
-     "choices": [],  # filled at request time with experiments that have >=1 recorded fold
-     "help": "留空=从空白模板开始。选择后，新实验的首个 Fold 以该实验最新冻结的策略产物（output+models）为父产物起步；创建时拷贝为只读快照，源实验之后删除也不受影响。"},
-    {"key": "inherit_memory_from", "group": "基本与排程", "label": "继承已有实验的 PRIOR 与 skills", "type": "choice",
-     "optional": True,
-     "choices": [],  # filled at request time with experiments whose ledger carries a published PRIOR
-     "help": "留空=从空记忆开始。与继承产物无关、可单独使用。选择后，新实验以该实验最新 Meta 记录的 PRIOR 与当前 skills 世代起步：创建时拷成本实验的只读世代，首次 Meta 把它当上一份 PRIOR，首个 Fold 与 Meta 挂载这份 skills；源实验没有发布过 PRIOR 则创建失败。"},
-    {"key": "meta_memory_max_epochs", "group": "基本与排程", "label": "元学习原始记忆 Epoch 数", "type": "int",
-     "advanced": True,
-     "help": "拼接给下一次元学习的最近 Epoch 完整对话数（0 关闭原始记忆）。"},
-    {"key": "fold_exploration_directive", "group": "基本与排程", "label": "默认 Fold 探索方向", "type": "text",
+    {"key": "fold_exploration_directive", "group": "基本与排程", "label": "默认探索方向", "type": "text",
      "optional": True, "wide": True,
-     "help": "可选。作为实验级待检验主线注入 Meta 与每个普通 Fold；Meta 据此维护 PRIOR，详情页仍可追加单会话假设。"},
-    # meta_learning_directive 有意不进创建表单：进入实验详情页后在元学习会话
-    # 的指令面板填写（逐 Epoch 可覆盖），避免创建时与详情页两处重复输入。
+     "help": "可选。作为实验级待检验主线注入每个研究会话，详情页仍可追加单会话假设。"},
     {
         "key": "strategy_period",
         "group": "基本与排程",
@@ -210,7 +146,7 @@ _FIELDS: list[dict[str, object]] = [
         "group": "数据窗口",
         "label": "基础历史窗口（月）",
         "type": "int",
-        "help": "决策输入快照与 Fold 输入窗口的默认历史月数；各数据域未单独覆盖时回退此值。",
+        "help": "决策输入快照的默认历史月数；各数据域未单独覆盖时回退此值。",
     },
     {
         "key": "daily_window_months",
@@ -456,10 +392,8 @@ _FIELDS: list[dict[str, object]] = [
         "help": "剔除锚点收盘价高于该值的股票；留空不限制。",
     },
     # 预算与验收
-    {"key": "max_fold_minutes", "group": "预算与验收", "label": "单 Fold 推理时长（分钟）", "type": "int",
-     "help": "每个 Fold 和元学习会话的推理墙钟上限；回测耗时独立计算并回补。默认按一年验证区间的常规 Fold 设定；会话开始前宿主跑的父本对照回测不计入。"},
-    {"key": "convergence_start_epoch", "group": "预算与验收", "label": "收敛起始 Epoch", "type": "int",
-     "help": "从该 Epoch（1 起）开始 Fold 提示词进入收敛阶段：优先更小更稳的策略。"},
+    {"key": "max_fold_minutes", "group": "预算与验收", "label": "单会话推理时长（分钟）", "type": "int",
+     "help": "每个研究会话的推理墙钟上限；回测耗时独立计算并回补。"},
     {"key": "min_return", "group": "预算与验收", "label": "验收目标验证收益", "type": "float",
      "help": "验证总收益目标值：低于只记警告，不阻止冻结（AcceptanceRules.min_return；冻结的硬校验只剩非有限指标与完整验证）。"},
     {"key": "min_sharpe", "group": "预算与验收", "label": "验收目标 Sharpe", "type": "float",
@@ -469,45 +403,23 @@ _FIELDS: list[dict[str, object]] = [
         "group": "预算与验收",
         "label": "验收最大回撤",
         "type": "float",
-        "help": "回撤上限（0.25 = 25%）：Validation 超限只记警告、不阻止冻结，毕业裁决要求 Held-out 回撤不超过它。",
+        "help": "回撤上限（0.25 = 25%）：研究期超限只记警告；毕业裁决要求前向与 Held-out 两段的回撤都不超过它。",
     },
     {
         "key": "cost_stress_multiplier",
         "group": "预算与验收",
         "label": "毕业成本压力倍数",
         "type": "float",
-        "help": "毕业裁决的成本压力：Held-out 超额收益需在滑点放大到该倍数后仍为正（按结果的 cost_sensitivity 逐基点定价）。1.0 关闭该项；结果缺 cost_sensitivity 且倍数 >1 时记未证明。",
+        "help": "毕业裁决的成本压力：前向段中性化超额在滑点放大到该倍数后仍须为正（按该段换手定价）。",
     },
-    {
-        "key": "heldout_min_trades",
-        "group": "预算与验收",
-        "label": "毕业最少完成交易数",
-        "type": "int",
-        "help": "毕业裁决要求 Held-out 完成的回合交易数下限（trade_count），按配置的整个 Held-out 窗口给出；回放被发布版本截短时按回放占窗口的日历天数比例折算（向上取整，至少 1）。低于则记 insufficient_trades。0 关闭该项。",
-    },
-    {
-        "key": "confirmation_folds",
-        "group": "预算与验收",
-        "label": "确认折数",
-        "type": "int",
-        "help": "Development 窗口末尾保留为确认折的 Fold 数，同时也是毕业裁决对交付产物「自有过渡」的下限。这些折的 Fold 提示说明这笔算术——在确认折里新冻的产物本轮攒不满该下限，必然无法毕业——因此它们用来确认在位产物；交付产物正好能攒够同样多的自有过渡，并须单独满足 ⌈2/3⌉ 正超额规则。0 同时关闭两者。",
-    },
-    {"key": "deployment_adjustment_start", "group": "预算与验收", "label": "部署调整窗口起点", "type": "string",
-     "optional": True,
-     "help": "YYYYMMDD。留空=不做部署调整。填写后，Held-out 裁决为 graduated 的实验在封存后再跑一次机制冻结的部署调整会话：从该日到已固定发布的最后一个交易日重拟合毕业产物（只允许改 models/、数值/布尔/None 字面量与模块级大写常量），产物由 ledger.paper_candidate 指定给 Paper。"},
-    {"key": "deployment_max_backtests", "group": "预算与验收", "label": "部署调整回测次数上限", "type": "int",
-     "help": "部署调整会话的完整回放次数（Step 数同值）；墙钟与 LLM 调用沿用 max_fold_minutes 与 max_llm_calls。"},
-    {"key": "deployment_pit_views_seed", "group": "预算与验收", "label": "部署调整 PIT 视图种子", "type": "string",
-     "optional": True,
-     "help": "仓库相对目录。部署调整会话的两个视图（决策视图与回放槽）从该种子硬链接进 experiments/<id>/pit_views/deployment/，种子缺少这两个槽则显式失败；留空则使用显式命名的 pit_views_seed，都没有时冷构建。"},
-    {"key": "max_steps_per_fold", "group": "预算与验收", "label": "单 Fold Step 数上限", "type": "int",
-     "help": "单 Fold 完整验证回测驱动的 Step 数上限。"},
-    {"key": "max_backtests_per_fold", "group": "预算与验收", "label": "单 Fold 回测次数上限", "type": "int",
+    {"key": "max_steps_per_fold", "group": "预算与验收", "label": "单会话 Step 数上限", "type": "int",
+     "help": "单个研究会话完整验证回测驱动的 Step 数上限。"},
+    {"key": "max_backtests_per_fold", "group": "预算与验收", "label": "单会话回测次数上限", "type": "int",
      "help": "回测独立计时（墙钟回补推理 deadline），该值限制其总次数。"},
-    {"key": "max_null_controls_per_fold", "group": "预算与验收", "label": "单 Fold 按需空对照次数上限", "type": "int",
-     "help": "Fold 会话内 run_null_control 工具的调用上限（每次约 3.5 分钟，冻结节点复用其结果）；0 表示不注册该工具。"},
-    {"key": "max_llm_calls", "group": "预算与验收", "label": "单 Fold 模型调用上限", "type": "int",
-     "help": "每个 Fold 和元学习会话的模型调用总次数上限；主循环、子代理与上下文压缩共享同一计数。"},
+    {"key": "max_null_controls_per_fold", "group": "预算与验收", "label": "单会话按需空对照次数上限", "type": "int",
+     "help": "研究会话内 run_null_control 工具的调用上限（冻结节点复用其结果）；0 表示不注册该工具。"},
+    {"key": "max_llm_calls", "group": "预算与验收", "label": "单会话模型调用上限", "type": "int",
+     "help": "每个研究会话的模型调用总次数上限；主循环、子代理与上下文压缩共享同一计数。"},
     {"key": "nl_failure_policy", "group": "预算与验收", "label": "NL 失败策略", "type": "choice",
      "choice_labels": {"return_error_with_audit": "返回可审计错误，策略自行降级（推荐）", "fail": "任一 NL 调用失败即终止回测"},
      "choices": ["return_error_with_audit", "fail"],
@@ -519,9 +431,9 @@ _FIELDS: list[dict[str, object]] = [
     {"key": "strategy_fit_timeout_seconds", "group": "预算与验收", "label": "单次策略 fit 超时（秒）", "type": "int", "advanced": True,
      "help": "正式策略可选 fit(context) 单次调用的墙钟上限：回放开始前先训练一次模型，之后按 REFIT_PERIOD 在新周期首个决策日重训；超时或异常即整场回测失败。generate_orders 的单日推断上限（`strategy_inference_timeout_seconds`，代码默认 360 秒）不受影响。"},
     {"key": "disable_step_tree", "group": "预算与验收", "label": "禁用 Step 产物树", "type": "bool", "advanced": True,
-     "help": "关闭跨 Fold 的 Step 谱系树（仅用于消融实验）。"},
+     "help": "关闭跨会话的 Step 谱系树（仅用于消融实验）。"},
     {"key": "record_failed_attempts", "group": "预算与验收", "label": "记录失败尝试节点", "type": "bool", "advanced": True,
-     "help": "Step 树中记录未通过验证的轻量 [failed] 节点，提示后续 Fold 避开死路。"},
+     "help": "Step 树中记录未通过验证的轻量 [failed] 节点，提示后续会话避开死路。"},
     # Broker 账户
     {"key": "initial_cash", "group": "Broker 账户", "label": "初始资金（元）", "type": "float",
      "help": "long-only 现金账户初始资金，也是组合的初始权益。"},
@@ -534,13 +446,6 @@ _FIELDS: list[dict[str, object]] = [
     {"key": "slippage_bps", "group": "Broker 账户", "label": "市价滑点（bp）", "type": "float", "advanced": True,
      "help": "市价 taker 成交滑点；限价/竞价成交不计滑点。"},
     # 运行控制
-    {"key": "analysis_model", "group": "运行控制", "label": "策略分析模型", "type": "choice",
-     "choices": list(MODEL_CHOICES),
-     "help": "生成 Fold 与 Step 策略分析所用的模型。"},
-    {"key": "analysis_max_tokens", "group": "运行控制", "label": "策略分析输出 token 上限", "type": "int",
-     "help": "单次分析调用的输出 token 配额（推理 token 计入）。"},
-    {"key": "analysis_enabled", "group": "运行控制", "label": "Fold 完成后自动生成策略分析", "type": "bool",
-     "help": "每个 Fold 结束后用预定义模板调用 LLM 生成自然语言策略分析（仅基于验证期证据）。"},
     {
         "key": "operating_memory",
         "group": "运行控制",
@@ -553,36 +458,22 @@ _FIELDS: list[dict[str, object]] = [
             "curated+graduated": "策展条目 + 毕业实验的 skills",
         },
         "help": (
-            "把跨实验知识只读挂载进每个 Fold 与元学习工作区："
+            "把跨实验知识只读挂载进每个研究会话工作区："
             f"策展层是仓库里人工维护的 {len(_OPERATING_MEMORY_ENTRIES)} 条运行经验；"
-            "毕业层是 Held-out 判定为 graduated 的历史实验自己写下的 skills，"
+            "毕业层是前向与 Held-out 判定为 graduated 的实验自己写下的 skills，"
             "带来源实验与判定标记，由 Agent 自行取舍。会话不能改写或删除挂载内容。"
         ),
     },
     {"key": "gpu_count", "group": "运行控制", "label": "默认 GPU 数量", "type": "int", "min": 0, "max": 4,
-     "help": "每个元学习、Fold 和 Held-out Sandbox 默认分配的 GPU 数量（0–4）；0 表示 CPU-only，不占用 L20。大于 0 时按空闲显存自动选择，逐 Fold 设置可覆盖此默认值。"},
-    {"key": "disable_meta_sandbox_rebuild", "group": "运行控制", "label": "禁用派生镜像构建", "type": "bool", "advanced": True,
-     "help": "忽略元学习写出的 sandbox_environment.json，不构建派生 Docker 镜像。"},
-    {"key": "meta_sandbox_rebuild_timeout_seconds", "group": "运行控制", "label": "派生镜像构建超时（秒）", "type": "int", "advanced": True,
-     "help": "元学习请求新依赖时 docker build 的超时上限。"},
-    {"key": "meta_sandbox_image_keep", "group": "运行控制", "label": "派生镜像保留数", "type": "int", "advanced": True,
-     "help": "本实验保留的派生沙箱镜像数，更旧的尽力 GC。"},
+     "help": "每个研究会话与正式回放 Sandbox 默认分配的 GPU 数量（0–4）；0 表示 CPU-only，不占用 L20。大于 0 时按空闲显存自动选择，逐会话设置可覆盖此默认值。"},
     # 模型与上下文
     {
         "key": "model",
         "group": "模型与上下文",
-        "label": "Fold Agent 主模型",
+        "label": "研究 Agent 主模型",
         "type": "choice",
         "choices": list(MODEL_CHOICES),
-        "help": "普通 Fold Agent 主对话模型。",
-    },
-    {
-        "key": "meta_model",
-        "group": "模型与上下文",
-        "label": "Meta Agent 主模型",
-        "type": "choice",
-        "choices": list(MODEL_CHOICES),
-        "help": "元学习阶段 Agent 主对话模型；可与普通 Fold 不同。",
+        "help": "研究会话 Agent 主对话模型。",
     },
     {
         "key": "subagent_model",
@@ -590,7 +481,7 @@ _FIELDS: list[dict[str, object]] = [
         "label": "子代理模型",
         "type": "choice",
         "choices": list(MODEL_CHOICES),
-        "help": "Fold 与元学习会话用 agent 工具启动的子代理所用模型；共享父会话的调用配额与时间预算，压缩阈值按该模型的上下文窗口推导。",
+        "help": "研究会话用 agent 工具启动的子代理所用模型；共享父会话的调用配额与时间预算，压缩阈值按该模型的上下文窗口推导。",
     },
     {
         "key": "nl_model",
@@ -680,97 +571,9 @@ _GROUP_ORDER = (
 )
 
 
-def build_period_options(trading_days: list[str]) -> dict[str, list[str]]:
-    """Enumerate complete, backtestable period labels per cadence.
+def parameter_schema() -> dict[str, object]:
+    """Grouped field schema with live defaults for the creation modal."""
 
-    A label qualifies when its calendar bounds are fully covered by the trading
-    calendar and it holds at least MIN_REGION_TRADE_DAYS trading days (the
-    replay reserves the final day for forced liquidation). Oldest -> newest.
-    """
-
-    days = sorted({str(day) for day in trading_days})
-    if not days:
-        return {}
-    first, last = days[0], days[-1]
-
-    def qualified(label: str, cadence: str) -> bool:
-        start, end = period_bounds(label, period=cadence)
-        if end > last or end < first:
-            return False
-        count = bisect.bisect_right(days, end) - bisect.bisect_left(days, start)
-        return count >= MIN_REGION_TRADE_DAYS
-
-    first_ts, last_ts = pd.Timestamp(first), pd.Timestamp(last)
-    candidates = {
-        "week": [stamp.strftime("%Y%m%d") for stamp in pd.date_range(first_ts, last_ts, freq="W-MON")],
-        "month": [period.strftime("%Y%m") for period in pd.period_range(first_ts, last_ts, freq="M")],
-        "quarter": [f"{period.year}Q{period.quarter}" for period in pd.period_range(first_ts, last_ts, freq="Q")],
-        "year": [period.strftime("%Y") for period in pd.period_range(first_ts, last_ts, freq="Y")],
-    }
-    return {
-        cadence: [label for label in labels if qualified(label, cadence)]
-        for cadence, labels in candidates.items()
-        if any(qualified(label, cadence) for label in labels)
-    }
-
-
-def suggest_period_defaults(options: dict[str, list[str]]) -> dict[str, dict[str, str]]:
-    """Safe defaults per cadence: recent development window + the latest complete
-    period as held-out (held-out must follow development without overlap)."""
-
-    defaults: dict[str, dict[str, str]] = {}
-    preferred = {key: str(WEB_CREATE_DEFAULTS[key]) for key in PERIOD_KEYS}
-    configured_cadence = str(WEB_CREATE_DEFAULTS["fold_period"])
-    for cadence, labels in options.items():
-        if len(labels) < 3:
-            continue
-        # The configured cadence keeps the configured window whenever every one
-        # of its labels is still selectable; other cadences derive a window from
-        # the calendar, so switching cadence never leaves an unusable default.
-        if cadence == configured_cadence and all(
-            label in labels or _EXPLICIT_RANGE.fullmatch(label)
-            for label in preferred.values()
-        ):
-            defaults[cadence] = dict(preferred)
-            continue
-        defaults[cadence] = {
-            "development_first_period": labels[max(0, len(labels) - 1 - DEV_DEFAULT_PERIODS)],
-            "development_last_period": labels[-2],
-            "heldout_first_period": labels[-1],
-            "heldout_last_period": labels[-1],
-        }
-    return defaults
-
-
-def parameter_schema(
-    trading_days: list[str] | None = None,
-    inherit_sources: list[str] | None = None,
-    memory_sources: list[str] | None = None,
-) -> dict[str, object]:
-    """Grouped field schema with live defaults for the creation modal.
-
-    With a trading calendar the four period fields become dependent dropdowns
-    (``type: period`` + top-level ``period_options``/``period_defaults``);
-    without one they degrade to required text inputs. ``inherit_sources``
-    fills the inherit_from dropdown (experiments with >=1 recorded fold) and
-    ``memory_sources`` the inherit_memory_from dropdown (experiments whose
-    ledger carries a published PRIOR).
-    """
-
-    period_options = build_period_options(trading_days or [])
-    period_defaults = suggest_period_defaults(period_options)
-    default_cadence = str(WEB_CREATE_DEFAULTS["fold_period"])
-    # A suggested explicit range is not a cadence label, so the enumeration
-    # cannot contain it; append it or the picker could not show its own default.
-    for cadence, suggested in period_defaults.items():
-        labels = period_options.get(cadence)
-        if labels is None:
-            continue
-        labels.extend(
-            label
-            for label in dict.fromkeys(suggested.values())
-            if label not in labels and _EXPLICIT_RANGE.fullmatch(label)
-        )
     groups: dict[str, list[dict[str, object]]] = {name: [] for name in _GROUP_ORDER}
     for field in _FIELDS:
         entry = dict(field)
@@ -784,20 +587,9 @@ def parameter_schema(
         default = WEB_CREATE_DEFAULTS[key]
         if isinstance(default, tuple):
             default = list(default)
-        if entry["type"] == "period":
-            if period_options:
-                default = period_defaults.get(default_cadence, {}).get(key)
-            else:
-                entry["type"] = "string"
-        if key == "inherit_from":
-            entry["choices"] = ["", *(inherit_sources or [])]
-        elif key == "inherit_memory_from":
-            entry["choices"] = ["", *(memory_sources or [])]
         entry["default"] = default
         groups[str(entry.pop("group"))].append(entry)
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "groups": [{"name": name, "fields": entries} for name, entries in groups.items() if entries],
-        "period_options": period_options,
-        "period_defaults": period_defaults,
     }

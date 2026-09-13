@@ -2,9 +2,9 @@
 
 The read view's invariants are what it refuses to show and what it refuses to
 invent: a malformed library reports an error rather than an empty shelf, an
-experiment that has not revealed its held-out results publishes no verdict here
-either, admission is never recomputed beside ``skills.graduated_memory_sources``,
-and nothing crosses the HTTP boundary carrying a host path or a raw run identity.
+arm without a forward verdict publishes none here, admission is never
+recomputed beside ``skills.graduated_memory_sources``, and nothing crosses the
+HTTP boundary carrying a host path or a raw run identity.
 
 The curated writes add three of their own: an entry a session would refuse never
 reaches the library, the library is never left half-written, and the writes are
@@ -12,7 +12,7 @@ accepted only from the local console — the public edge keeps the read-only pag
 
 Every fixture is synthesized in a tempfile repo root exactly as the pipeline
 writes it: a curated library under ``configs/operating_memory/``, experiment
-ledgers with per-period held-out verdicts, published skills generations, and a
+ledgers with a forward verdict, published skills generations, and a
 collected session's ``host_run_manifest.json``.
 """
 
@@ -25,7 +25,12 @@ import pytest
 from fastapi.testclient import TestClient
 
 from autotrade.environment.identity import AgentRefStore
-from autotrade.pipelines.hitl_state import ControlState, write_control
+from autotrade.pipelines.config import DEFAULT_RESEARCH_GEOMETRY
+from autotrade.pipelines.hitl_state import (
+    ControlState,
+    build_session_plan,
+    write_control,
+)
 from autotrade.pipelines.ledger import ExperimentLedger
 from autotrade.pipelines.skills import (
     MAX_SKILL_CHARS,
@@ -41,7 +46,7 @@ from autotrade.webui import memory
 from autotrade.webui.server import create_app
 
 HOST_PATH = "/Data2/lzp/ADMCubeQuant/experiments/adopted/artifacts"
-SESSION_KEY = "epoch_001/fold_2022Q1"
+SESSION_KEY = "s1"
 RUN_ID = "run_5b1d0a9c8e7f46329d1c4b7a2e6f8d03"
 
 
@@ -71,21 +76,20 @@ def _experiment(
     name: str,
     *,
     verdict: str | None = "graduated",
-    revealed: bool = True,
     skills: bool = True,
     reference: str = "",
 ) -> Path:
-    """One finished experiment: skills generation, ledger, reveal state."""
+    """One research arm: its skills generation and, once replayed, its verdict."""
 
     directory = experiments_root / name
     # Before any ledger or artifact exists: the store refuses to initialize
     # beside pre-random-ref artifacts, exactly as it does for a real experiment.
     AgentRefStore(directory)
     record: dict[str, object] = {
-        "record_type": "fold",
+        "record_type": "research_session",
         "experiment_id": name,
-        "epoch_id": "epoch_001",
-        "fold_id": "fold_2022Q1",
+        "epoch_id": "research",
+        "fold_id": "s1",
         "run_id": f"run_{name}",
     }
     if skills:
@@ -111,37 +115,23 @@ def _experiment(
     if verdict is not None:
         ledger.append(
             {
-                "record_type": "heldout",
+                "record_type": "forward",
                 "experiment_id": name,
-                "epoch_id": "epoch_001",
-                "fold_id": "heldout_1",
-                "run_id": f"run_{name}_heldout",
+                "epoch_id": "forward",
+                "fold_id": "forward",
+                "run_id": f"run_{name}_forward",
                 "verdict": {
                     "status": verdict,
-                    "reasons": [] if verdict == "graduated" else ["sharpe <= 0"],
+                    "reasons": [] if verdict == "graduated" else ["forward_lower_bound_not_positive"],
                 },
             }
         )
     hitl = directory / "hitl"
     hitl.mkdir(parents=True, exist_ok=True)
     (hitl / "schedule.json").write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "sessions": [
-                    {
-                        "kind": "fold",
-                        "session_key": SESSION_KEY,
-                        "epoch_id": "epoch_001",
-                        "fold_id": "fold_2022Q1",
-                    }
-                ],
-            }
-        ),
-        encoding="utf-8",
+        json.dumps(build_session_plan(1, forward={})), encoding="utf-8"
     )
-    if revealed:
-        write_control(hitl / "control.json", ControlState(test_revealed=True))
+    write_control(hitl / "control.json", ControlState())
     return directory
 
 
@@ -286,29 +276,23 @@ def test_the_tier_lists_every_experiment_and_admits_only_graduated_ones(
     assert rows["adopted_without_skills"]["entries"] == []
 
 
-def test_an_unrevealed_experiment_publishes_no_verdict_here_either(
+def test_an_arm_without_a_verdict_publishes_none_and_mounts_nothing(
     tmp_path: Path,
 ) -> None:
-    """The reveal gate is the console's, not one page's: a verdict shown before
-    its own experiment revealed would hand back the sealed held-out judgment."""
+    """Before its forward record exists an arm has no verdict to show, and the
+    mount agrees: nothing it wrote is admitted."""
 
     experiments = tmp_path / "experiments"
     experiments.mkdir()
-    _experiment(experiments, "mid_heldout", revealed=False)
+    _experiment(experiments, "mid_forward", verdict=None)
     row = memory.graduated_tier(experiments)["experiments"][0]
     assert row["revealed"] is False
     assert row["verdict"] is None
     assert row["admitted"] is False
     assert row["entries"] == []
-    # The mount itself is unaffected: this is a display gate only.
     from autotrade.pipelines.skills import graduated_memory_sources
 
-    assert [
-        source.source
-        for source in graduated_memory_sources(experiments)
-    ] == [
-        "mid_heldout"
-    ]
+    assert graduated_memory_sources(experiments) == ()
 
 
 def test_an_unreadable_ledger_becomes_a_row_and_suspends_admission(
@@ -415,11 +399,7 @@ def test_creating_an_experiment_freezes_its_operating_memory(tmp_path: Path) -> 
     manager = ExperimentManager(tmp_path, experiments)
     params = {
         "experiment_id": "exp_frozen",
-        "fold_period": "quarter",
-        "development_first_period": "2024Q1",
-        "development_last_period": "2024Q1",
-        "heldout_first_period": "2024Q2",
-        "heldout_last_period": "2024Q2",
+        **DEFAULT_RESEARCH_GEOMETRY.to_record(),
     }
     with (
         patch.object(manager, "_preflight"),
@@ -778,7 +758,7 @@ def test_a_candidate_body_is_readable_only_while_the_tier_admits_it(
     experiments = tmp_path / "experiments"
     experiments.mkdir()
     _experiment(experiments, "adopted")
-    _experiment(experiments, "mid_heldout", revealed=False)
+    _experiment(experiments, "mid_forward", verdict=None)
     entry = memory.graduated_entry(experiments, "adopted", "same-window-parent-control")
     assert entry["experiment_id"] == "adopted"
     assert entry["title"] == "同窗父本对照"
@@ -786,7 +766,7 @@ def test_a_candidate_body_is_readable_only_while_the_tier_admits_it(
     assert entry["files"] == 1 and entry["bytes"] > 0
     for experiment_id, skill in (
         ("adopted", "not-a-skill"),
-        ("mid_heldout", "same-window-parent-control"),
+        ("mid_forward", "same-window-parent-control"),
         ("unknown", "same-window-parent-control"),
     ):
         with pytest.raises(KeyError):
@@ -821,20 +801,19 @@ def test_a_promotion_copies_the_admitted_skill_verbatim(tmp_path: Path) -> None:
 def test_a_promotion_can_only_copy_from_a_candidate_the_page_offers(
     tmp_path: Path,
 ) -> None:
-    """One admission rule, and the console's reveal gate: an unrevealed or
-    discarded experiment is not a promotion source, or this route would answer a
-    held-out question the page refuses to answer."""
+    """One admission rule: an arm without a verdict or a discarded one is not a
+    promotion source, or this route would answer a question the page refuses."""
 
     _library(tmp_path)
     experiments = tmp_path / "experiments"
     experiments.mkdir()
     _experiment(experiments, "adopted")
     _experiment(experiments, "not_adopted", verdict="discarded")
-    _experiment(experiments, "mid_heldout", revealed=False)
+    _experiment(experiments, "mid_forward", verdict=None)
     for experiment_id, skill in (
         ("adopted", "no-such-skill"),
         ("not_adopted", "same-window-parent-control"),
-        ("mid_heldout", "same-window-parent-control"),
+        ("mid_forward", "same-window-parent-control"),
         ("unknown", "same-window-parent-control"),
     ):
         with pytest.raises(KeyError):

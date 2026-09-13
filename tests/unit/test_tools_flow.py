@@ -1822,12 +1822,15 @@ def _fold_backtest_tool(
     from autotrade.pipelines.config import (
         BrokerProfile,
         EvaluationResult,
-        FoldSessionRequest,
-        FoldSpec,
+        ReplaySpan,
+        ResearchSessionRequest,
         SnapshotBundle,
         StrategySchedule,
     )
+    from autotrade.pipelines.ledger import ExperimentLedger
     from autotrade.pipelines.local_backend import BatchValidateTool, FoldBacktestTool
+
+    from .test_batch_validate import _write_style_sidecar
 
     paths, _, _ = build_sandbox(tmp)
     output = paths.agent / "output"
@@ -1864,27 +1867,21 @@ def _fold_backtest_tool(
         def evaluate(self, _request, max_days=None):
             target = tmp / "host_results" / "valid_deadbeef" / "result.json"
             write_json_atomic(target, {"stats": summary})
+            _write_style_sidecar(target.parent, alpha=0.001, seed=1)
             return EvaluationResult(summary=dict(summary), result_ref=str(target))
 
-    moment = datetime(2021, 12, 31, 23, 59, 59, tzinfo=UTC)
-    request = FoldSessionRequest(
+    snapshot = SnapshotBundle("snapshot", "decision", "replay")
+    request = ResearchSessionRequest(
         experiment_id="exp",
-        epoch_id="epoch_001",
-        fold=FoldSpec(
-            fold_id="fold_2022Q1",
-            input_window_start="20200101",
-            input_window_end="20210930",
-            validation_start="20220101",
-            validation_end="20220331",
-            test_start="20220401",
-            test_end="20220630",
-            valid_decision_time=moment,
-            test_decision_time=moment,
-        ),
+        session_id="s1",
+        session_index=1,
+        sessions_total=4,
         run_id="run_budget",
-        parent=None,
-        prior="",
-        snapshot=SnapshotBundle("snapshot", "decision", "replay"),
+        start=None,
+        snapshot=snapshot,
+        decision_time=datetime(2021, 12, 31, 23, 59, 59, tzinfo=UTC),
+        validation=ReplaySpan("full", "valid", "20220101", "20220331", snapshot),
+        input_window_start="20200101",
         max_steps=3,
         max_backtests=3,
         max_llm_calls=3,
@@ -1901,6 +1898,7 @@ def _fold_backtest_tool(
         broker_profile=BrokerProfile(),
         time_budget=InferenceTimeBudget(duration_seconds=600.0),
         ref_store=AgentRefStore(tmp / "experiment"),
+        ledger=ExperimentLedger(tmp / "ledger.jsonl"),
         manifest=manifest,
     )
     tool = BatchValidateTool(

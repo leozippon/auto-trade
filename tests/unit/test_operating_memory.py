@@ -2,9 +2,9 @@
 
 Two tiers reach a session read-only. The curated tier is repository content a
 researcher promoted by hand, so it must satisfy the same format contract
-``write_skill`` enforces. The graduated tier is what other experiments' Meta
-sessions wrote, admitted only after the held-out verdict adopted that
-experiment. Neither tier may be rewritten by the session that reads it.
+``write_skill`` enforces. The graduated tier is what other experiments'
+research sessions wrote, admitted only after the forward verdict graduated
+that experiment. Neither tier may be rewritten by the session that reads it.
 """
 
 from __future__ import annotations
@@ -15,12 +15,9 @@ from pathlib import Path
 
 import pytest
 
-from autotrade.environment.artifacts import FilesystemArtifactStore
-from autotrade.environment.llm import ScriptedLLM, ToolCall
 from autotrade.environment.tools.base import ToolError
 from autotrade.environment.tools.workspace import SafeWorkspace
 from autotrade.pipelines.ledger import ExperimentLedger
-from autotrade.pipelines.local_backend import LLMMetaLearner
 from autotrade.pipelines.skills import (
     CURATED_MEMORY_SOURCE,
     DEFAULT_OPERATING_MEMORY,
@@ -43,7 +40,7 @@ from autotrade.pipelines.skills import (
 )
 from autotrade.pipelines.worker import load_worker_options
 
-from .test_interactive_worker_local import _agent_then, _experiment
+from .test_interactive_worker_local import _experiment
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 LIBRARY = REPO_ROOT / OPERATING_MEMORY_LIBRARY
@@ -63,10 +60,10 @@ def _experiment_with_skill(
 
     directory = root / name
     record: dict[str, object] = {
-        "record_type": "fold",
+        "record_type": "research_session",
         "experiment_id": name,
-        "epoch_id": "epoch_001",
-        "fold_id": "fold_a",
+        "epoch_id": "research",
+        "fold_id": "s1",
         "run_id": f"run_{name}",
     }
     if skills:
@@ -94,22 +91,21 @@ def _experiment_with_skill(
     ledger = ExperimentLedger(directory / "ledgers" / "experiment_ledger.jsonl")
     ledger.append(record)
     if graduated is not None:
-        heldout: dict[str, object] = {
-            "record_type": "heldout",
+        forward: dict[str, object] = {
+            "record_type": "forward",
             "experiment_id": name,
-            "epoch_id": "epoch_001",
-            "fold_id": "heldout_1",
-            "run_id": f"run_{name}_heldout",
-            # The per-period block the pipeline stamps on every held-out row.
+            "epoch_id": "forward",
+            "fold_id": "forward",
+            "run_id": f"run_{name}_forward",
             "verdict": (
                 {"status": "graduated", "reasons": []}
                 if graduated
-                else {"status": "discarded", "reasons": ["excess_return <= 0"]}
+                else {"status": "discarded", "reasons": ["forward_lower_bound_not_positive"]}
             ),
         }
         if mutated:
-            heldout["state_changed_during_test"] = True
-        ledger.append(heldout)
+            forward["state_changed_during_test"] = True
+        ledger.append(forward)
     return directory
 
 
@@ -212,39 +208,20 @@ def test_only_graduated_experiments_contribute_their_skills(tmp_path: Path) -> N
     assert sources[0].entries == (GRADUATED_SKILL,)
 
 
-def test_a_stray_graduated_key_is_not_a_verdict(tmp_path: Path) -> None:
-    """The verdict is ``verdict.status``; no writer emits a top-level flag."""
+def test_a_fold_era_graduated_row_is_not_a_verdict(tmp_path: Path) -> None:
+    """Only a forward record's verdict graduates an experiment."""
 
     experiments = tmp_path / "experiments"
     experiments.mkdir()
-    directory = _experiment_with_skill(experiments, "legacy_flag", graduated=None)
+    directory = _experiment_with_skill(experiments, "fold_era", graduated=None)
     ExperimentLedger(directory / "ledgers" / "experiment_ledger.jsonl").append(
         {
             "record_type": "heldout",
-            "experiment_id": "legacy_flag",
+            "experiment_id": "fold_era",
             "epoch_id": "epoch_001",
             "fold_id": "heldout_1",
-            "run_id": "run_legacy_flag_heldout",
-            "graduated": True,
-        }
-    )
-    assert graduated_memory_sources(experiments) == ()
-
-
-def test_every_heldout_period_must_graduate(tmp_path: Path) -> None:
-    """One discarded period keeps the whole experiment out, as the ledger says."""
-
-    experiments = tmp_path / "experiments"
-    experiments.mkdir()
-    directory = _experiment_with_skill(experiments, "split_verdict")
-    ExperimentLedger(directory / "ledgers" / "experiment_ledger.jsonl").append(
-        {
-            "record_type": "heldout",
-            "experiment_id": "split_verdict",
-            "epoch_id": "epoch_001",
-            "fold_id": "heldout_2",
-            "run_id": "run_split_verdict_heldout_2",
-            "verdict": {"status": "discarded", "reasons": ["sharpe <= 0"]},
+            "run_id": "run_fold_era_heldout",
+            "verdict": {"status": "graduated", "reasons": []},
         }
     )
     assert graduated_memory_sources(experiments) == ()
@@ -418,78 +395,6 @@ def test_a_session_can_neither_rewrite_nor_delete_mounted_memory(
     assert WriteSkillTool(safe).invoke(
         {"name": "own-skill", "path": "SKILL.md", "content": "# Own\n\nMine.\n"}
     ).ok
-
-
-def test_a_meta_session_mounts_memory_and_records_it_in_the_run_manifest(
-    tmp_path: Path,
-) -> None:
-    baseline = tmp_path / "baseline" / "main.py"
-    baseline.parent.mkdir()
-    baseline.write_text(
-        "def generate_orders(context):\n    return []\n", encoding="utf-8"
-    )
-    experiments = tmp_path / "experiments"
-    experiments.mkdir()
-    _experiment_with_skill(experiments, "adopted")
-    learner = LLMMetaLearner(
-        llm=ScriptedLLM(
-            [*_agent_then(ToolCall("finish_meta", "finish_meta", {}), roles=())]
-        ),
-        baseline_strategy=baseline,
-        artifact_store=FilesystemArtifactStore(tmp_path / "artifacts"),
-        experiment_dir=experiments / "current",
-        runtime_root=tmp_path / "runtime",
-        max_llm_calls=2,
-        deadline_seconds=30.0,
-        operating_memory="curated+graduated",
-        repo_root=REPO_ROOT,
-        use_docker=False,
-        rebuild_enabled=False,
-    )
-    learner(
-        {
-            "run_id": "run_memory",
-            "experiment_id": "current",
-            "epoch_id": "epoch_002",
-            "meta_learning_id": "epoch_002",
-            "previous_prior": "keep the current transferable direction",
-        }
-    )
-    collected = tmp_path / "run_memory" / "workspace"
-    assert (
-        collected / OPERATING_MEMORY_DIRNAME / "adopted" / GRADUATED_SKILL / "SKILL.md"
-    ).is_file()
-    assert (
-        collected
-        / OPERATING_MEMORY_DIRNAME
-        / CURATED_MEMORY_SOURCE
-        / "artifact-hygiene"
-        / "SKILL.md"
-    ).is_file()
-    index = json.loads(
-        (collected / "inputs" / "skills_index.json").read_text(encoding="utf-8")
-    )
-    assert {entry["source"] for entry in index["operating_memory"]} == {
-        CURATED_MEMORY_SOURCE,
-        "adopted",
-    }
-    assert index["skills"] == []
-    manifest = json.loads(
-        (tmp_path / "run_memory" / "run_manifest.json").read_text(encoding="utf-8")
-    )
-    assert manifest["operating_memory"]["mode"] == "curated+graduated"
-    assert [source["source"] for source in manifest["operating_memory"]["sources"]] == [
-        CURATED_MEMORY_SOURCE,
-        "adopted",
-    ]
-    assert manifest["operating_memory"]["sources"][1] == {
-        "source": "adopted",
-        "origin": "graduated",
-        "entries": [GRADUATED_SKILL],
-    }
-    # Mounted memory is not this experiment's knowledge, so it is never part of
-    # what the session publishes as its own skills generation.
-    assert not (collected / "skills" / GRADUATED_SKILL).exists()
 
 
 def test_the_run_config_carries_the_mode(tmp_path: Path) -> None:

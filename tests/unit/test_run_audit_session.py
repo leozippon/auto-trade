@@ -24,16 +24,12 @@ def _options(tmp_path: Path, **overrides: object) -> SimpleNamespace:
             broker_profile=object(),
             step_tree_enabled=True,
             fold_exploration_directive="directive",
-            meta_learning_directive="meta directive",
             max_llm_calls=800,
             max_fold_minutes=20,
             strategy_fit_timeout_seconds=1800,
             nl_failure_policy="fail",
             workspace_reference="configs/workspace_refs/pack",
             operating_memory="curated+graduated",
-            meta_sandbox_rebuild_enabled=False,
-            meta_sandbox_rebuild_timeout_seconds=900,
-            meta_sandbox_image_keep=2,
         ),
         experiment_dir=tmp_path / "experiments" / "audit",
         experiment_id="audit",
@@ -120,9 +116,6 @@ def test_the_compaction_gateway_is_built_without_provider_retries(
         worker_module, "LLMFoldDeveloper", lambda **kwargs: SimpleNamespace(**kwargs)
     )
     monkeypatch.setattr(
-        worker_module, "LLMMetaLearner", lambda **kwargs: SimpleNamespace(**kwargs)
-    )
-    monkeypatch.setattr(
         worker_module,
         "RollingExperimentPipeline",
         lambda *args, **kwargs: SimpleNamespace(**kwargs),
@@ -132,12 +125,10 @@ def test_the_compaction_gateway_is_built_without_provider_retries(
 
     build = _build(options)
 
-    assert build.meta_enabled is True
-    assert build.developer_label == "llm_fold_meta_agent"
+    assert build.developer_label == "llm_research_agent"
     assert dict(roles)["compact"] == {"max_retries": 0}
     assert [role for role, _kwargs in roles] == [
         "main",
-        "meta",
         "subagent",
         "nl",
         "compact",
@@ -147,9 +138,9 @@ def test_the_compaction_gateway_is_built_without_provider_retries(
 def test_the_assembled_session_mounts_the_image_refs_and_memory_it_was_given(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """--sandbox-image has to reach the Meta learner as well as the Fold
-    developer, and the strategy wall clocks the Agent is promised have to be the
-    ones the options carry rather than library defaults."""
+    """--sandbox-image has to reach the research developer, and the strategy
+    wall clock the Agent is promised has to be the one the options carry rather
+    than a library default."""
 
     captured: dict[str, dict[str, object]] = {}
 
@@ -171,7 +162,6 @@ def test_the_assembled_session_mounts_the_image_refs_and_memory_it_was_given(
         ),
     )
     monkeypatch.setattr(worker_module, "LLMFoldDeveloper", capture("developer"))
-    monkeypatch.setattr(worker_module, "LLMMetaLearner", capture("meta"))
     monkeypatch.setattr(
         worker_module,
         "RollingExperimentPipeline",
@@ -184,17 +174,12 @@ def test_the_assembled_session_mounts_the_image_refs_and_memory_it_was_given(
     assert build.trading_days == ["20240102"]
     assert build.pipeline.evaluator.sandbox.image == "audit-image:test"
     assert build.pipeline.evaluator.sandbox.limits.fit_timeout_seconds == 1800
-    developer, meta = captured["developer"], captured["meta"]
+    developer = captured["developer"]
     assert developer["sandbox_spec"] is options.agent_sandbox
-    # The regression the audit memo reported: the Meta session fell back to the
-    # default image while the Fold developer used the requested one.
-    assert meta["sandbox_spec"] is options.agent_sandbox
-    assert meta["fit_timeout_seconds"] == 1800
-    for session in (developer, meta):
-        assert session["workspace_reference"] == "configs/workspace_refs/pack"
-        assert session["operating_memory"] == "curated+graduated"
-        assert session["repo_root"] == tmp_path
-    assert meta["rebuild_enabled"] is False
+    assert developer["evaluator"] is build.pipeline.evaluator
+    assert developer["workspace_reference"] == "configs/workspace_refs/pack"
+    assert developer["operating_memory"] == "curated+graduated"
+    assert developer["repo_root"] == tmp_path
 
 
 def test_the_pipeline_uses_the_experiments_own_pit_view_seed(
@@ -235,53 +220,18 @@ def test_the_pipeline_uses_the_experiments_own_pit_view_seed(
     assert captured["pit_views_seed_required"] is True
 
 
-def test_the_default_cadence_fills_the_console_period_labels() -> None:
+def test_the_audit_calendar_defaults_are_the_console_geometry() -> None:
     """The audit CLI and the console must launch the same research calendar."""
     from argparse import ArgumentParser
 
+    from autotrade.pipelines.calendar import GEOMETRY_PARAMETERS
     from autotrade.pipelines.hitl_state import WEB_CREATE_DEFAULTS
-    from scripts.experiments._cli import DEFAULT_FOLD_PERIOD, resolve_period_args
+    from scripts.experiments._cli import add_calendar_arguments
 
-    args = SimpleNamespace(
-        fold_period=DEFAULT_FOLD_PERIOD,
-        development_first_period=None,
-        development_last_period=None,
-        heldout_first_period=None,
-        heldout_last_period=None,
-    )
-    resolve_period_args(ArgumentParser(), args)
-    assert (
-        args.development_first_period,
-        args.development_last_period,
-        args.heldout_first_period,
-        args.heldout_last_period,
-    ) == (
-        WEB_CREATE_DEFAULTS["development_first_period"],
-        WEB_CREATE_DEFAULTS["development_last_period"],
-        WEB_CREATE_DEFAULTS["heldout_first_period"],
-        WEB_CREATE_DEFAULTS["heldout_last_period"],
-    )
-
-
-def test_another_cadence_demands_every_period_label(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """A label written for one cadence mis-parses under another rather than
-    failing, so the CLI refuses to guess instead of defaulting."""
-    from argparse import ArgumentParser
-
-    from scripts.experiments._cli import resolve_period_args
-
-    args = SimpleNamespace(
-        fold_period="month",
-        development_first_period="202401",
-        development_last_period=None,
-        heldout_first_period=None,
-        heldout_last_period="202407",
-    )
-    with pytest.raises(SystemExit):
-        resolve_period_args(ArgumentParser(), args)
-    message = capsys.readouterr().err
-    assert "--development-last-period" in message
-    assert "--heldout-first-period" in message
-    assert "--development-first-period" not in message
+    parser = ArgumentParser()
+    add_calendar_arguments(parser)
+    args = parser.parse_args([])
+    assert {name: getattr(args, name) for name in GEOMETRY_PARAMETERS} == {
+        name: WEB_CREATE_DEFAULTS[name] for name in GEOMETRY_PARAMETERS
+    }
+    assert args.research_sessions == WEB_CREATE_DEFAULTS["research_sessions"]

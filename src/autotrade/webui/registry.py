@@ -487,7 +487,7 @@ def _public_verdict(
     which is the only thing that says whether term (b)'s chain-wide count is
     about this strategy or about the ones it replaced.
     """
-    verdict = experiment_verdict(records, strict=False)
+    verdict = experiment_verdict(records)
     if verdict is None:
         return None
     periods = [
@@ -514,22 +514,15 @@ def _paper_candidate_view(
     directory: Path, records: list[dict[str, object]]
 ) -> dict[str, object] | None:
     """The Paper candidate with the command that creates a book
-    (``scripts/paper/run_paper.py init``, run from the repository root).
-
-    The command pins the graduate that passed Held-out even when an adjusted
-    artifact exists: the adjustment's refit window includes the Held-out
-    months, so the adjusted artifact is only an alternative the page names.
-    """
+    (``scripts/paper/run_paper.py init``, run from the repository root)."""
     candidate = paper_candidate(records)
     if candidate is None:
         return None
     return {
         "artifact_id": candidate["artifact_id"],
-        "source": candidate["source"],
-        "graduated_artifact_id": candidate["graduated_artifact_id"],
         "command": (
             "python scripts/paper/run_paper.py init "
-            f"--experiment {directory.name} --artifact {candidate['graduated_artifact_id']}"
+            f"--experiment {directory.name} --artifact {candidate['artifact_id']}"
         ),
     }
 
@@ -583,8 +576,15 @@ def test_results_revealed(
     follow, so results auto-reveal (and the same seal applies). Partial
     held-out does not auto-reveal — the worker may still need resume to
     finish the remaining periods. A missing control.json (transient
-    mid-creation state) reads as an empty control plane: not revealed."""
+    mid-creation state) reads as an empty control plane: not revealed.
+
+    A research arm has nothing to reveal by hand: its verdict exists once the
+    forward record (or the end of research) does, and nothing learns after it."""
     if read_control(Path(experiment_dir) / HITL_DIR_NAME / CONTROL_NAME).test_revealed:
+        return True
+    if records is None:
+        records = read_ledger_records(experiment_dir)
+    if experiment_verdict(records) is not None:
         return True
     return heldout_complete(experiment_dir, records)
 

@@ -19,31 +19,34 @@ from autotrade.agent import prompts
 from autotrade.agent.experiment_facts import (
     BATCH_VALIDATE_FIT_TIMEOUT_NOTE,
     DEADLINE_SECONDS_NOTE,
-    build_experiment_facts,
 )
 from autotrade.agent.prompts import (
     FOLD_DEFAULT_INSTRUCTION,
     FOLD_DYNAMIC_CONTEXT_HEADER,
     FOLD_STATIC_SECTIONS,
-    META_STATIC_SECTIONS,
     STEP_TREE_SECTION,
 )
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.sandbox import SandboxLimits
 from autotrade.pipelines.config import (
     DEFAULT_DEADLINE_GRACE_MINUTES,
+    DEFAULT_RESEARCH_GEOMETRY,
     fold_session_deadline_seconds,
     rolling_default,
 )
+from autotrade.pipelines.hitl_state import build_session_plan
 from autotrade.pipelines.local_backend import BATCH_VALIDATE_MAX_CONCURRENCY
 from autotrade.webui.prompt_preview import RUNTIME_PLACEHOLDER, build_prompt_preview
 
-FOLD_KEY = "epoch_001/fold_2022"
-META_KEY = "epoch_001/meta_learning"
+FIRST_KEY = "s1"
+SECOND_KEY = "s2"
 
 # Wording retired from the prompts and the calendar. A preview that still shows
 # any of it is serving a stale copy rather than the current builder.
 RETIRED_WORDING = ("fold_period=quarter", "单文件", "30 秒", "first_test_period")
+
+
+GEOMETRY = DEFAULT_RESEARCH_GEOMETRY
 
 
 def _trading_days() -> list[str]:
@@ -85,9 +88,7 @@ def _repo(tmp_path: Path) -> Path:
     return repo
 
 
-def _experiment(
-    tmp_path: Path, *, fold_id: str = "fold_2022", **overrides: object
-) -> tuple[Path, Path]:
+def _experiment(tmp_path: Path, **overrides: object) -> tuple[Path, Path]:
     """One console-shaped experiment ready for a preview, minus the worker."""
     repo = _repo(tmp_path)
     experiment_id = "preview_exp"
@@ -106,11 +107,8 @@ def _experiment(
         "fundamental_events_status": "results/data_quality/fundamental_events_status.json",
         "execution_mode": "sandbox",
         "developer_mode": "llm",
-        "development_first_period": "2022",
-        "development_last_period": "2025",
-        "heldout_first_period": "20260101..20260630",
-        "heldout_last_period": "20260101..20260630",
-        "fold_period": "year",
+        **GEOMETRY.to_record(),
+        "research_sessions": 2,
         # Keeps the pinned release to the core datasets the fixture provides.
         "include_fundamentals": False,
         "include_macro": False,
@@ -122,34 +120,12 @@ def _experiment(
     params.update(overrides)
     (hitl / "params.json").write_text(json.dumps(params), encoding="utf-8")
     (hitl / "schedule.json").write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "sessions": [
-                    {
-                        "session_key": META_KEY,
-                        "kind": "meta",
-                        "epoch_id": "epoch_001",
-                        "fold_id": fold_id,
-                        "fold_index": 0,
-                    },
-                    {
-                        "session_key": f"epoch_001/{fold_id}",
-                        "kind": "fold",
-                        "epoch_id": "epoch_001",
-                        "fold_id": fold_id,
-                        "fold_index": 0,
-                    },
-                    {"key": "heldout", "kind": "heldout", "epoch_id": "epoch_001"},
-                ],
-            }
-        ),
-        encoding="utf-8",
+        json.dumps(build_session_plan(2, forward={})), encoding="utf-8"
     )
     return directory, repo
 
 
-def _preview(tmp_path: Path, session_key: str = FOLD_KEY, directive: str = "", **overrides):
+def _preview(tmp_path: Path, session_key: str = FIRST_KEY, directive: str = "", **overrides):
     directory, repo = _experiment(tmp_path, **overrides)
     return build_prompt_preview(directory, session_key, directive, repo_root=repo)
 
@@ -158,7 +134,7 @@ def _preview_of(directory: Path, repo: Path, session_key: str) -> str:
     return str(build_prompt_preview(directory, session_key, "", repo_root=repo)["prompt"])
 
 
-def test_fold_preview_carries_every_current_prompt_section(tmp_path: Path):
+def test_research_preview_carries_every_current_prompt_section(tmp_path: Path):
     prompt = str(_preview(tmp_path)["prompt"])
     for section in FOLD_STATIC_SECTIONS:
         assert section.strip() in prompt
@@ -181,7 +157,7 @@ def test_fold_preview_carries_every_current_prompt_section(tmp_path: Path):
         assert retired not in prompt
 
 
-def test_fold_preview_states_the_pipeline_budgets_and_scope(tmp_path: Path):
+def test_research_preview_states_the_pipeline_budgets_and_window(tmp_path: Path):
     prompt = str(_preview(tmp_path)["prompt"])
     facts = _facts(prompt)
     limits = SandboxLimits()
@@ -196,85 +172,55 @@ def test_fold_preview_states_the_pipeline_budgets_and_scope(tmp_path: Path):
             "finalize_before_deadline_seconds"
         ),
         "max_backtests_per_fold": rolling_default("max_backtests_per_fold"),
+        "max_null_controls_per_fold": rolling_default("max_null_controls_per_fold"),
         "max_llm_calls": rolling_default("max_llm_calls"),
         "max_steps": rolling_default("max_steps_per_fold"),
         "strategy_fit_timeout_seconds": float(
             rolling_default("strategy_fit_timeout_seconds")
         ),
         "strategy_inference_timeout_seconds": limits.timeout_seconds,
-        # The formal strategy container's GPU allocation; 0 is published as
-        # "every formal replay runs on CPU", not omitted.
         "strategy_gpu_count": limits.gpu_count,
-        # Its CPU quota, which is also the thread count its numeric libraries
-        # are pinned to, and how many replays one batch runs at once — plus the
-        # rule that the fit clock scales with that width.
         "strategy_cpus": limits.cpus,
         "batch_validate_max_concurrency": BATCH_VALIDATE_MAX_CONCURRENCY,
         "batch_validate_fit_timeout_note": BATCH_VALIDATE_FIT_TIMEOUT_NOTE,
     }
-    # The calendar the console configures: one yearly Fold, no frozen Test.
-    assert facts["visible_timeline"]["fold_period"] == "year"
-    assert facts["visible_timeline"]["visible_validation_replay_period"] == "20220101..20221231"
-    assert "one Fold per year" in facts["research_scope"]["development_window"]
-    assert facts["identity"]["phase"] == "exploration"
+    # The whole research period, read at research end.
+    assert facts["research_scope"]["development_window"].endswith(
+        f"{GEOMETRY.research_start}..{GEOMETRY.research_end}."
+    )
+    assert (
+        facts["visible_timeline"]["current_decision_time"]
+        == GEOMETRY.research_decision_time.isoformat()
+    )
     assert facts["artifact_contract"]["step_tree_enabled"] is True
     # Runtime-only facts are marked, never invented.
     assert facts["identity"]["run_id"] == RUNTIME_PLACEHOLDER
     assert facts["visible_timeline"]["execution_policy"]["text_available"] == RUNTIME_PLACEHOLDER
-    # deadline_seconds already contains the grace, so the two must differ by
-    # exactly the main deadline the directive and the wrap-up prompt name.
     assert (
         facts["budgets"]["deadline_seconds"] - facts["budgets"]["deadline_grace_seconds"]
         == rolling_default("max_fold_minutes") * 60.0
     )
-    # A first Fold inherits the template, so there is no parent and no parent
-    # control: the absence is stated, not left to be inferred from a missing
-    # block (four first-Fold sessions read that silence as a pipeline fault).
+    # The first session starts from the template.
     assert facts["artifact_contract"]["parent"]["kind"] == "initial_template"
-    assert facts["artifact_contract"]["parent"]["parent_control_available"] is False
-    assert "parent_control" not in facts
-
-
-def test_meta_preview_is_the_meta_session_prompt(tmp_path: Path):
-    preview = _preview(tmp_path, META_KEY)
-    prompt = str(preview["prompt"])
-    for section in META_STATIC_SECTIONS:
-        assert section.strip() in prompt
-    assert "`finish_meta`" in prompt
-    assert "`memory_feedback`" not in prompt
-    assert "`report_issue`" in prompt
-    # A Meta session runs no replay and is given no strategy schedule block.
-    assert "## 本轮调度" not in prompt
-    assert "## 当前实验事实" in prompt
-    assert "开始本轮 Meta。" in prompt
-    facts = _facts(prompt)
-    assert facts["identity"]["session_kind"] == "meta_learning"
-    assert facts["meta_learning"]["backtest_allowed"] is False
-    assert facts["budgets"]["max_llm_calls"] == rolling_default("max_llm_calls")
-    for retired in RETIRED_WORDING:
-        assert retired not in prompt
+    # No date after research end appears anywhere in the prompt.
+    for day in (GEOMETRY.forward_start, GEOMETRY.forward_end, GEOMETRY.heldout_start, GEOMETRY.heldout_end):
+        assert day not in prompt
+        assert f"{day[:4]}-{day[4:6]}-{day[6:]}" not in prompt
 
 
 @pytest.mark.parametrize(
-    ("section", "session_key"),
-    (
-        ("PROTOCOL_INSTRUCTION", FOLD_KEY),
-        ("STEP_TREE_SECTION", FOLD_KEY),
-        ("FOLD_DYNAMIC_CONTEXT_HEADER", FOLD_KEY),
-        ("EXPLORATION_PHASE_PROMPT", FOLD_KEY),
-        ("META_STATIC_SECTIONS", META_KEY),
-    ),
+    "section", ("PROTOCOL_INSTRUCTION", "STEP_TREE_SECTION", "FOLD_DYNAMIC_CONTEXT_HEADER")
 )
 def test_prompt_section_edits_reach_the_preview(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, section: str, session_key: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, section: str
 ):
     marker = "EDITED-PROMPT-SECTION-MARKER"
-    before = str(_preview(tmp_path, session_key)["prompt"])
+    before = str(_preview(tmp_path)["prompt"])
     assert marker not in before
     current = getattr(prompts, section)
     edited = (marker,) if isinstance(current, tuple) else marker
     monkeypatch.setattr(prompts, section, edited)
-    after = str(_preview(tmp_path / "edited", session_key)["prompt"])
+    after = str(_preview(tmp_path / "edited")["prompt"])
     assert marker in after
     assert after != before
 
@@ -284,14 +230,13 @@ def test_preview_follows_the_experiment_parameters(tmp_path: Path):
     prompt = str(
         _preview(
             tmp_path,
-            FOLD_KEY,
+            FIRST_KEY,
             directive,
             max_fold_minutes=90,
             max_steps_per_fold=7,
             max_backtests_per_fold=5,
             max_llm_calls=123,
             disable_step_tree=True,
-            convergence_start_epoch=1,
             fold_exploration_directive="以截面因子为主线",
         )["prompt"]
     )
@@ -302,224 +247,53 @@ def test_preview_follows_the_experiment_parameters(tmp_path: Path):
     assert facts["budgets"]["deadline_seconds"] == fold_session_deadline_seconds(
         90, DEFAULT_DEADLINE_GRACE_MINUTES
     )
-    assert facts["identity"]["phase"] == "convergence"
     assert STEP_TREE_SECTION.strip() not in prompt
-    assert "## 实验级默认 Fold 探索方向（用户注入）" in prompt
     assert "以截面因子为主线" in prompt
-    assert "## 研究者本 Fold 指令（用户注入）" in prompt
     assert directive in prompt
 
 
-def test_inherited_parent_is_stated_without_inventing_the_artifact(tmp_path: Path):
-    """A later Fold inherits a parent whose identity the preview cannot know:
-    which artifact it is depends on the sessions that still run before it."""
+def test_a_later_session_shows_the_handoff_without_inventing_its_start(tmp_path: Path):
+    """Before the first session is recorded, the second one's start node is a
+    runtime fact; once it is, the PRIOR that session left reaches the preview."""
     directory, repo = _experiment(tmp_path)
+    waiting = _facts(_preview_of(directory, repo, SECOND_KEY))
+    assert waiting["artifact_contract"]["parent"]["id"] == RUNTIME_PLACEHOLDER
+    handoff = "动量腿在研究期稳定，下一会话复核同一机制。"
     ledger = directory / "ledgers" / "experiment_ledger.jsonl"
     ledger.parent.mkdir(parents=True)
     ledger.write_text(
         json.dumps(
             {
                 "schema_version": 1,
-                "record_type": "fold",
+                "record_type": "research_session",
                 "experiment_id": "preview_exp",
-                "epoch_id": "epoch_001",
-                "fold_id": "fold_2022",
+                "epoch_id": "research",
+                "fold_id": "s1",
                 "run_id": "run_001",
-                "fold_status": "frozen",
-                "frozen_strategy_artifact_id": "strategy_epoch_001_fold_2022",
+                "session_id": "s1",
+                "outcome": "continue",
+                "reason": "",
+                "next_start_node_id": "research__fold_ref_x__run_ref_y__valid_001",
+                "steps": [],
+                "prior": handoff,
             }
         )
         + "\n",
         encoding="utf-8",
     )
-    prompt = str(build_prompt_preview(directory, FOLD_KEY, "", repo_root=repo)["prompt"])
+    prompt = _preview_of(directory, repo, SECOND_KEY)
+    assert handoff in prompt
     facts = _facts(prompt)
-    parent = facts["artifact_contract"]["parent"]
-    assert parent["kind"] == "frozen_artifact"
-    assert parent["parent_control_available"] is True
-    assert parent["id"] == RUNTIME_PLACEHOLDER
-    assert parent["model_artifacts_empty"] == RUNTIME_PLACEHOLDER
-    # The host replays the parent on this window before the session starts.
-    assert facts["parent_control"] == RUNTIME_PLACEHOLDER
-    assert "strategy_epoch_001_fold_2022" not in prompt
+    assert facts["artifact_contract"]["parent"]["id"] == RUNTIME_PLACEHOLDER
+    assert "research__fold_ref_x__run_ref_y__valid_001" not in prompt
 
 
-def test_preview_manifests_carry_the_session_s_own_experiment_parameters(tmp_path: Path):
-    """A preview that drops a parameter publishes a different fact, not a gap.
-
-    A Meta manifest has no Fold of its own, so the geometry, the universe
-    screen, the cadence and the broker profile ride in ``experiment_parameters``
-    (``pipelines/experiment.py``). Building the preview's manifest without that
-    block silently rendered the unscreened-universe sentence, an empty cadence
-    and a broker profile missing its costs, which is worse than the
-    ``RUNTIME_PLACEHOLDER`` the preview promises for facts it cannot know.
-    """
-    from autotrade.pipelines.meta_schedule import meta_learning_id
-    from autotrade.pipelines.worker import load_worker_options
-
-    screened_quarterly = {
-        "fold_period": "quarter",
-        "validation_periods": 4,
-        "development_first_period": "2022Q1",
-        "development_last_period": "2025Q4",
-        "screen_exclude_st": True,
-        "screen_exclude_new_listed_days": 60,
-    }
-    directory, repo = _experiment(tmp_path, fold_id="fold_2022Q4", **screened_quarterly)
-    options = load_worker_options(directory, repo_root=repo)
-    rolling = options.rolling
-    # The Meta manifest a session writes, assembled as the pipeline does.
-    session_facts = build_experiment_facts(
-        manifest={
-            "experiment_id": rolling.experiment_id,
-            "epoch_id": "epoch_001",
-            "run_id": "run_001",
-            "meta_learning_id": meta_learning_id("epoch_001", 0),
-            "trigger_after_folds": 0,
-            "kind": "meta_learning",
-            "experiment_parameters": {
-                "fold_period": rolling.fold_period,
-                "validation_periods": rolling.validation_periods,
-                "schedule": rolling.schedule.to_record(),
-                "broker_profile": rolling.broker_profile.to_record(),
-                "snapshot_config": options.snapshot_config.to_record(),
-            },
-            "is_initial_artifact": True,
-            "template_ref": "agent_output_template",
-            "budgets": {"max_llm_calls": rolling.max_llm_calls},
-        },
-        ref_store=AgentRefStore(directory),
-    )
-    meta = _facts(str(_preview_of(directory, repo, META_KEY)))
-    assert set(meta) == set(session_facts)
-    assert set(meta["visible_timeline"]) == set(session_facts["visible_timeline"])
-    assert set(meta["broker_replay"]) == set(session_facts["broker_replay"])
-    assert meta["research_scope"] == session_facts["research_scope"]
-    assert meta["broker_replay"]["profile_id"] == session_facts["broker_replay"]["profile_id"]
-    # The two facts the missing block used to invert: a screened universe read
-    # as unfiltered, and the geometry that separates this round from the
-    # console default.
-    assert "screened at the decision anchor" in meta["research_scope"]["universe"]
-    assert "exclude_st=True" in meta["research_scope"]["universe"]
-    assert meta["visible_timeline"]["fold_period"] == "quarter"
-    assert meta["visible_timeline"]["validation_periods"] == 4
-    # A Fold session carries the same geometry on the manifest itself.
-    fold = _facts(str(_preview_of(directory, repo, "epoch_001/fold_2022Q4")))
-    assert fold["visible_timeline"]["validation_periods"] == 4
-    assert fold["research_scope"]["universe"] == meta["research_scope"]["universe"]
-    assert fold["research_scope"]["strategy_cadence"] == meta["research_scope"]["strategy_cadence"]
-
-
-def test_inherited_prior_reaches_the_preview_before_the_first_meta(tmp_path: Path):
-    """An experiment created with ``inherit_memory_from`` starts from another
-    experiment's PRIOR; until its own first Meta row exists the preview shows
-    that PRIOR, exactly as the worker hands it to the first session."""
-    from autotrade.pipelines.inherited_memory import import_inherited_memory
-    from autotrade.pipelines.ledger import ExperimentLedger
-    from autotrade.pipelines.prior import ExperimentPriorStore
-
-    prior = "Closed: small-cap reversal (null percentile 0.5). Next: post-event drift."
-    source = tmp_path / "experiments" / "src"
-    ExperimentPriorStore(source).publish(prior, generation_id="gen_1")
-    ExperimentLedger(source / "ledgers" / "experiment_ledger.jsonl").append(
-        {
-            "record_type": "meta_learning",
-            "experiment_id": "src",
-            "epoch_id": "epoch_001",
-            "fold_id": "meta_001",
-            "run_id": "run_m",
-            "prior": prior,
-            "prior_generation_id": "gen_1",
-        }
-    )
+def test_unknown_and_forward_sessions_are_rejected(tmp_path: Path):
     directory, repo = _experiment(tmp_path)
-    params_path = directory / "hitl" / "params.json"
-    params = json.loads(params_path.read_text(encoding="utf-8"))
-    params["_inherited_memory"] = import_inherited_memory(directory, source, source_id="src")
-    params_path.write_text(json.dumps(params), encoding="utf-8")
-
-    # The Fold session reads the PRIOR in its prompt; the Meta session reads
-    # it from its workspace and is told only that a previous PRIOR exists.
-    assert prior in _preview_of(directory, repo, FOLD_KEY)
-    meta_facts = _facts(_preview_of(directory, repo, META_KEY))
-    assert meta_facts["meta_learning"]["previous_prior_available"] is True
-
-
-def test_deployment_adjustment_preview_is_the_deployment_prompt(tmp_path: Path):
-    """The post-Held-out session previews through the same chain: its window
-    runs from the configured start to the release's last trading day, the
-    facts say the Held-out is visible, and the deployment contract replaces
-    the research protocol."""
-    from autotrade.agent.prompts import (
-        DEPLOYMENT_DEFAULT_INSTRUCTION,
-        DEPLOYMENT_SECTION,
-        FOLD_PROTOCOL_SECTION,
-    )
-
-    directory, repo = _experiment(tmp_path, deployment_adjustment_start="20190301")
-    schedule_path = directory / "hitl" / "schedule.json"
-    schedule = json.loads(schedule_path.read_text(encoding="utf-8"))
-    schedule["sessions"].append(
-        {
-            "key": "deployment_adjustment",
-            "kind": "deployment_adjustment",
-            "epoch_id": "epoch_001",
-            "fold_id": "deployment_20190301..20191231",
-        }
-    )
-    schedule_path.write_text(json.dumps(schedule), encoding="utf-8")
-    preview = build_prompt_preview(directory, "deployment_adjustment", "", repo_root=repo)
-    prompt = str(preview["prompt"])
-    assert DEPLOYMENT_SECTION.strip() in prompt
-    assert FOLD_PROTOCOL_SECTION.strip() not in prompt
-    assert DEPLOYMENT_DEFAULT_INSTRUCTION.strip() in prompt
-    facts = _facts(prompt)
-    assert facts["identity"]["session_kind"] == "deployment_adjustment"
-    assert facts["visibility_policy"]["heldout_visible"] is True
-    assert "heldout" not in facts["forbidden"]
-    assert facts["budgets"]["max_backtests_per_fold"] == rolling_default("deployment_max_backtests")
-    assert facts["budgets"]["max_steps"] == rolling_default("deployment_max_backtests")
-    # From the configured start to the release's last trading day.
-    assert facts["research_scope"]["development_window"].startswith(
-        f"This Fold's validation period is 20190301..{_trading_days()[-1]}."
-    )
-
-
-def test_a_confirmation_fold_preview_states_the_rule_before_anything_else(tmp_path: Path):
-    """The plan of record decides which Folds are confirmation Folds, and the
-    preview shows exactly the prompt that session will get: the rule and its
-    reason open the dynamic context, ahead of the facts and the PRIOR."""
-
-    from autotrade.agent.prompts import (
-        CONFIRMATION_FOLD_SECTION,
-        FOLD_DYNAMIC_CONTEXT_HEADER,
-    )
-
-    directory, repo = _experiment(tmp_path)
-    ordinary = _preview_of(directory, repo, FOLD_KEY)
-    assert CONFIRMATION_FOLD_SECTION.strip() not in ordinary
-    # An ordinary Fold says so in its facts rather than by omission.
-    assert _facts(ordinary)["identity"]["confirmation_fold"] is False
-    schedule_path = directory / "hitl" / "schedule.json"
-    schedule = json.loads(schedule_path.read_text(encoding="utf-8"))
-    for session in schedule["sessions"]:
-        if session.get("kind") == "fold":
-            session["confirmation"] = True
-    schedule_path.write_text(json.dumps(schedule), encoding="utf-8")
-    prompt = _preview_of(directory, repo, FOLD_KEY)
-    assert CONFIRMATION_FOLD_SECTION.strip() in prompt
-    assert _facts(prompt)["identity"]["confirmation_fold"] is True
-    assert prompt.index(FOLD_DYNAMIC_CONTEXT_HEADER.strip()) < prompt.index(
-        CONFIRMATION_FOLD_SECTION.strip()
-    ) < prompt.index("## 当前实验事实")
-
-
-def test_unknown_and_heldout_sessions_are_rejected(tmp_path: Path):
-    directory, repo = _experiment(tmp_path)
-    with pytest.raises(ValueError, match="held-out"):
-        build_prompt_preview(directory, "heldout", "", repo_root=repo)
+    with pytest.raises(ValueError, match="forward replay"):
+        build_prompt_preview(directory, "forward", "", repo_root=repo)
     with pytest.raises(KeyError):
-        build_prompt_preview(directory, "epoch_009/fold_1999", "", repo_root=repo)
+        build_prompt_preview(directory, "s9", "", repo_root=repo)
 
 
 def _facts(prompt: str) -> dict:

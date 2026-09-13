@@ -744,14 +744,12 @@ def test_research_pit_provider_reuses_completed_semantic_views(tmp_path: Path) -
     provider.builder = fake  # type: ignore[assignment]
     decision = datetime.fromisoformat("2024-01-01T23:59:59+08:00")
     first = provider.prepare(
-        fold=None,
         phase="valid",
         start="20240102",
         end="20240103",
         decision_time=decision,
     )
     second = provider.prepare(
-        fold=None,
         phase="valid",
         start="20240102",
         end="20240103",
@@ -759,14 +757,12 @@ def test_research_pit_provider_reuses_completed_semantic_views(tmp_path: Path) -
     )
     assert first == second
     frozen = provider.prepare(
-        fold=None,
-        phase="frozen_test",
+        phase="paper",
         start="20240102",
         end="20240103",
         decision_time=decision,
     )
     heldout = provider.prepare(
-        fold=None,
         phase="heldout",
         start="20240102",
         end="20240103",
@@ -779,79 +775,13 @@ def test_research_pit_provider_reuses_completed_semantic_views(tmp_path: Path) -
     ] == "valid"
     assert json.loads(Path(frozen.replay_ref, "manifest.json").read_text(encoding="utf-8"))[
         "label"
-    ] == "frozen_test"
+    ] == "paper"
     assert json.loads(Path(heldout.replay_ref, "manifest.json").read_text(encoding="utf-8"))[
         "label"
     ] == "heldout"
     # One region, one build: the three phase views are hardlinks of the single
     # unphased store, each carrying its own immutable label.
     assert fake.calls == ["decision", "replay"]
-
-
-def test_cached_bundle_yields_the_current_unit_registry_on_the_next_take(
-    tmp_path: Path,
-) -> None:
-    """A Meta session mounts the bundle copy of ``unit_reference.json`` verbatim.
-
-    The bundle is cached for the life of the experiment, so a copy written under
-    an older unit registry kept telling Meta a column was ``percent``/official
-    while every Fold, which regenerates the file, read the corrected unit.
-    """
-    from autotrade.environment.data.snapshot import load_snapshot_manifest
-    from autotrade.environment.data.units import (
-        AGENT_UNIT_CONTRACT,
-        build_unit_reference,
-        snapshot_column_map,
-    )
-
-    provider, _fake = _provider_with_fake_builder(tmp_path)
-    decision = datetime.fromisoformat("2024-01-01T23:59:59+08:00")
-    first = provider.prepare(
-        fold=None,
-        phase="meta",
-        start="20240102",
-        end="20240103",
-        decision_time=decision,
-    )
-    bundle = Path(first.data_summary_ref).parent
-    unit_path = bundle / "unit_reference.json"
-    summary_before = (bundle / "data_summary.json").read_text(encoding="utf-8")
-
-    # What a bundle built under an older registry holds, published read-only in
-    # a read-only directory exactly as the provider publishes its own.
-    stale = {"generated_at": "2000-01-01T00:00:00Z", "records": [{"column": "close", "source_unit": "percent"}]}
-    unit_path.chmod(0o644)
-    unit_path.write_text(json.dumps(stale), encoding="utf-8")
-    unit_path.chmod(0o444)
-    # The seed hardlinks one file into every experiment that reused it.
-    seed_link = tmp_path / "seed_unit_reference.json"
-    os.link(unit_path, seed_link)
-
-    second = provider.prepare(
-        fold=None,
-        phase="meta",
-        start="20240102",
-        end="20240103",
-        decision_time=decision,
-    )
-
-    assert second.data_summary_ref == first.data_summary_ref
-    decision_dir = Path(first.decision_ref)
-    expected = build_unit_reference(
-        snapshot_column_map(decision_dir, load_snapshot_manifest(decision_dir))
-    )
-    refreshed = json.loads(unit_path.read_text(encoding="utf-8"))
-    assert refreshed["records"] == expected
-    assert refreshed["identity_rule"] == AGENT_UNIT_CONTRACT["identity_rule"]
-    # Only the registry-derived file is rebuilt; the summary stays cached.
-    assert (bundle / "data_summary.json").read_text(encoding="utf-8") == summary_before
-    # Replaced, not rewritten in place: the shared seed link keeps its own
-    # content, so the provider never writes outside this experiment's cache.
-    assert json.loads(seed_link.read_text(encoding="utf-8")) == stale
-    assert os.stat(unit_path).st_ino != os.stat(seed_link).st_ino
-    assert stat.S_IMODE(os.stat(unit_path).st_mode) == 0o444
-    assert stat.S_IMODE(os.stat(bundle).st_mode) == 0o555
-    assert not [child for child in bundle.iterdir() if child.name.startswith(".")]
 
 
 def test_unphased_meta_replay_is_cloned_into_valid_phase(tmp_path: Path) -> None:
@@ -868,7 +798,6 @@ def test_unphased_meta_replay_is_cloned_into_valid_phase(tmp_path: Path) -> None
         generation_id=provider.release.generation_id,
     )
     bundle = provider.prepare(
-        fold=None,
         phase="valid",
         start="20240102",
         end="20240103",
@@ -905,7 +834,6 @@ def test_unphased_meta_replay_is_cloned_into_valid_phase(tmp_path: Path) -> None
         "minute=30",
     )
     again = provider.prepare(
-        fold=None,
         phase="valid",
         start="20240102",
         end="20240103",
@@ -936,7 +864,6 @@ def test_concurrent_valid_prepare_from_unphased_is_phase_safe(tmp_path: Path) ->
         barrier.wait()
         try:
             bundle = provider.prepare(
-                fold=None,
                 phase="valid",
                 start="20240102",
                 end="20240103",
@@ -989,7 +916,6 @@ def test_failed_unphased_clone_leaves_no_phased_residue(
     monkeypatch.setattr(os, "link", boom)
     with pytest.raises(OSError, match="injected link failure"):
         provider.prepare(
-            fold=None,
             phase="valid",
             start="20240102",
             end="20240103",
@@ -1004,7 +930,6 @@ def test_failed_unphased_clone_leaves_no_phased_residue(
 
     monkeypatch.undo()
     bundle = provider.prepare(
-        fold=None,
         phase="valid",
         start="20240102",
         end="20240103",
@@ -1042,7 +967,6 @@ def test_replay_source_with_wrong_identity_is_refused(tmp_path: Path) -> None:
     )
     with pytest.raises(RuntimeError, match="conflicting cached replay source"):
         provider.prepare(
-            fold=None,
             phase="valid",
             start="20240102",
             end="20240103",
@@ -1053,31 +977,29 @@ def test_replay_source_with_wrong_identity_is_refused(tmp_path: Path) -> None:
 
 
 def test_one_region_is_built_once_and_shared_by_every_phase(tmp_path: Path) -> None:
-    """Meta, Validation and the previous fold's frozen test share one region.
+    """Every phase that asks for the same region shares one build.
 
-    On a contiguous calendar all three ask for the same (start, end, decision)
-    window, so the region must be replayed once and relabelled, not rebuilt per
-    phase.
+    The same (start, end, decision) window requested under several phases is
+    replayed once and relabelled, not rebuilt per phase.
     """
 
     provider, fake = _provider_with_fake_builder(tmp_path)
     decision = datetime.fromisoformat("2024-01-01T23:59:59+08:00")
     bundles = [
         provider.prepare(
-            fold=None,
             phase=phase,
             start="20240102",
             end="20240103",
             decision_time=decision,
         )
-        for phase in ("meta", "valid", "frozen_test")
+        for phase in ("valid", "heldout", "paper")
     ]
     assert fake.calls == ["decision", "replay"]
     source = provider.cache_root / "replay" / "20240102_20240103_20240101T235959+0800"
     source_manifest = json.loads((source / "manifest.json").read_text(encoding="utf-8"))
     assert source_manifest["label"] == REPLAY_SOURCE_LABEL
     assert len({bundle.replay_ref for bundle in bundles}) == 3
-    for phase, bundle in zip(("meta", "valid", "frozen_test"), bundles, strict=True):
+    for phase, bundle in zip(("valid", "heldout", "paper"), bundles, strict=True):
         replay = Path(bundle.replay_ref)
         assert replay == provider.cache_root / "replay" / phase / source.name
         manifest = json.loads((replay / "manifest.json").read_text(encoding="utf-8"))
@@ -1110,7 +1032,6 @@ def test_unphased_clone_refuses_cross_filesystem_copy(
     monkeypatch.setattr(os, "link", boom)
     with pytest.raises(RuntimeError, match="different filesystem"):
         provider.prepare(
-            fold=None,
             phase="valid",
             start="20240102",
             end="20240103",
@@ -1367,7 +1288,7 @@ def test_asof_stash_uses_complete_schedule_hierarchy(tmp_path: Path) -> None:
 
 
 def test_every_phase_of_one_region_shares_a_stash(tmp_path: Path) -> None:
-    """Meta and Validation replay one region, so they encode it once.
+    """Two phases replaying one region encode it once.
 
     Their replay views are hardlinks of one store, so the as-of parts are the
     same bytes; the stash contract states that data identity and never the
@@ -1381,7 +1302,7 @@ def test_every_phase_of_one_region_shares_a_stash(tmp_path: Path) -> None:
     slot = "20220101_20251231_20211231T235959+0800"
     schedule = StrategySchedule("day", "08:30")
     contracts: list[Path] = []
-    for phase in ("meta", "valid"):
+    for phase in ("valid", "heldout"):
         replay = cache_root / "replay" / phase / slot
         replay.mkdir(parents=True)
         decision_manifest, replay_manifest = _stash_manifests(

@@ -181,7 +181,7 @@ def _tier_row(
     row["revealed"] = revealed
     if not revealed:
         return row
-    verdict = experiment_verdict(records, strict=False)
+    verdict = experiment_verdict(records)
     row["verdict"] = str(verdict["status"]) if isinstance(verdict, Mapping) else None
     if admitted is None:
         row["admitted"] = None

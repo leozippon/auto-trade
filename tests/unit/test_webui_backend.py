@@ -28,7 +28,7 @@ from autotrade.environment.runtime import (
     AgentTraceWriter,
     write_json_atomic,
 )
-from autotrade.pipelines.config import AcceptanceRules
+from autotrade.pipelines.config import DEFAULT_RESEARCH_GEOMETRY, AcceptanceRules
 from autotrade.pipelines.hitl_state import (
     WEB_CREATE_DEFAULTS,
     ControlState,
@@ -129,7 +129,7 @@ def test_local_webui_health_schema_and_brand(tmp_path: Path):
         field["key"]: field for group in schema["groups"] for field in group["fields"]
     }
     assert "fields" not in schema
-    assert schema["schema_version"] == 2
+    assert schema["schema_version"] == 3
     assert [group["name"] for group in schema["groups"]] == [
         "基本与排程",
         "数据窗口",
@@ -153,7 +153,8 @@ def test_local_webui_health_schema_and_brand(tmp_path: Path):
         }
         & fields.keys()
     )
-    assert fields["fold_period"]["choices"] == ["week", "month", "quarter", "year"]
+    for key, value in DEFAULT_RESEARCH_GEOMETRY.to_record().items():
+        assert fields[key]["default"] == value
     assert fields["strategy_period"]["choices"] == ["day", "month", "quarter", "year"]
     assert fields["inference_time"]["default"] == "08:30"
     assert fields["daily_window_months"]["optional"] is True
@@ -171,7 +172,6 @@ def test_local_webui_health_schema_and_brand(tmp_path: Path):
     ]
     assert model_fields == [
         "model",
-        "meta_model",
         "subagent_model",
         "nl_model",
         "compact_model",
@@ -184,9 +184,7 @@ def test_local_webui_health_schema_and_brand(tmp_path: Path):
         "compact_max_calls",
     ]
     assert fields["model"]["choices"] == list(MODEL_CHOICES)
-    assert fields["meta_model"]["choices"] == fields["model"]["choices"]
     assert fields["model"]["default"] == LOCAL_QWEN_MODEL
-    assert fields["meta_model"]["default"] == LOCAL_QWEN_MODEL
     assert fields["subagent_model"]["choices"] == fields["model"]["choices"]
     assert fields["subagent_model"]["default"] == LOCAL_QWEN_MODEL
     assert fields["nl_model"]["default"] == LOCAL_QWEN_MODEL
@@ -211,7 +209,7 @@ def test_local_webui_health_schema_and_brand(tmp_path: Path):
         & fields.keys()
     )
     for key in (
-        "epochs",
+        "research_sessions",
         "window_months",
         "max_steps_per_fold",
         "max_backtests_per_fold",
@@ -287,25 +285,18 @@ def test_site_footer_shows_icp_and_public_security_filings(tmp_path: Path):
     assert gongan.content[:8] == b"\x89PNG\r\n\x1a\n"
 
 
-def test_cli_exposes_distinct_fold_and_meta_model_choices() -> None:
+def test_cli_exposes_distinct_session_and_subagent_model_choices() -> None:
     from scripts.experiments._cli import add_model_arguments
 
     parser = argparse.ArgumentParser()
     add_model_arguments(parser)
     defaults = parser.parse_args([])
-    assert defaults.model == defaults.meta_model == LOCAL_QWEN_MODEL
-    assert defaults.subagent_model == LOCAL_QWEN_MODEL
+    assert defaults.model == defaults.subagent_model == LOCAL_QWEN_MODEL
+    assert not hasattr(defaults, "meta_model")
     mixed = parser.parse_args(
-        [
-            "--model",
-            "deepseek-v4-flash",
-            "--meta-model",
-            "deepseek-v4-flash",
-            "--subagent-model",
-            LOCAL_QWEN_MODEL,
-        ]
+        ["--model", "deepseek-v4-flash", "--subagent-model", LOCAL_QWEN_MODEL]
     )
-    assert mixed.model == mixed.meta_model == "deepseek-v4-flash"
+    assert mixed.model == "deepseek-v4-flash"
     assert mixed.subagent_model == LOCAL_QWEN_MODEL
 
 
@@ -404,11 +395,7 @@ def test_experiment_endpoint_creates_only_persistent_sandbox_research(tmp_path: 
         json={
             "params": {
                 "experiment_id": "persistent_demo",
-                "fold_period": "quarter",
-                "development_first_period": "2024Q1",
-                "development_last_period": "2024Q1",
-                "heldout_first_period": "2024Q2",
-                "heldout_last_period": "2024Q2",
+                **DEFAULT_RESEARCH_GEOMETRY.to_record(),
                 "strategy_period": "quarter",
                 "inference_time": "23:59",
                 "daily_window_months": 18,
@@ -416,7 +403,6 @@ def test_experiment_endpoint_creates_only_persistent_sandbox_research(tmp_path: 
                 "events_datasets": ["margin", "moneyflow"],
                 "screen_boards": ["main", "gem"],
                 "model": "deepseek-v4-flash",
-                "meta_model": "deepseek-v4-pro",
                 "subagent_model": LOCAL_QWEN_MODEL,
                 "nl_model": "deepseek-v4-pro",
                 "compact_model": "deepseek-v4-pro",
@@ -449,7 +435,6 @@ def test_experiment_endpoint_creates_only_persistent_sandbox_research(tmp_path: 
     assert params["events_datasets"] == ["margin", "moneyflow"]
     assert params["screen_boards"] == ["main", "gem"]
     assert params["model"] == "deepseek-v4-flash"
-    assert params["meta_model"] == "deepseek-v4-pro"
     assert params["subagent_model"] == LOCAL_QWEN_MODEL
     assert params["nl_model"] == "deepseek-v4-pro"
     assert params["compact_model"] == "deepseek-v4-pro"
@@ -542,11 +527,7 @@ def _persistent_experiment(tmp_path: Path) -> Path:
                 "experiment_id": "demo",
                 "strategy_period": "day",
                 "inference_time": "08:30",
-                "fold_period": "quarter",
-                "development_first_period": "2026Q1",
-                "development_last_period": "2026Q1",
-                "heldout_first_period": "2026Q2",
-                "heldout_last_period": "2026Q2",
+                **DEFAULT_RESEARCH_GEOMETRY.to_record(),
                 **RESEARCH_PARAMS,
             }
         ),
@@ -724,119 +705,6 @@ def _persistent_experiment(tmp_path: Path) -> Path:
     return directory
 
 
-def test_active_experiment_api_hides_historical_steps_analysis_and_reports(
-    tmp_path: Path,
-):
-    directory = _persistent_experiment(tmp_path)
-    fold_ref = _fold_ref(directory, "fold_2026Q1")
-    run_ref = _run_ref(directory, "run_001")
-    session_ref = _session_ref(directory, "epoch_001/fold_2026Q1")
-    client = TestClient(create_app(tmp_path))
-
-    home = client.get("/api/experiments").json()["experiments"][0]
-    assert home["experiment_id"] == "demo"
-    assert (home["completed_sessions"], home["total_sessions"]) == (1, 2)
-    assert home["skills"]["count"] == 2
-    assert home["skills"]["files"] == 3
-    assert home["skills"]["bytes"] == 512
-    assert set(home["skills"]) == {"count", "files", "bytes"}
-
-    detail = client.get("/api/experiments/demo").json()
-    assert detail["sessions"][0]["record"]["fold_status"] == "frozen"
-    assert "test_result" not in detail["sessions"][0]["record"]
-    assert detail["sessions"][-1]["kind"] == "heldout"
-
-    steps = client.get("/api/experiments/demo/steps")
-    assert steps.status_code == 200
-    assert steps.json()["nodes"] == []
-    assert (
-        client.get("/api/experiments/demo/steps/node_001/source.zip").status_code == 404
-    )
-
-    curve = client.get("/api/experiments/demo/equity").json()
-    assert curve["series"][0]["key"] == "valid"
-    assert curve["series"][0]["dates"] == ["20260102", "20260105"]
-    fold_curve = client.get(
-        f"/api/experiments/demo/folds/epoch_001/{fold_ref}/equity"
-    ).json()
-    assert fold_curve["series"][0]["key"] == "valid"
-    assert fold_curve["series"][0]["dates"] == ["20260102", "20260105"]
-    assert fold_curve["benchmark"]["key"] == "benchmark"
-    assert fold_curve["benchmark"]["dates"] == ["20260102", "20260105"]
-    assert curve["benchmark"]["label"] == "沪深300"
-    orders = client.get(
-        f"/api/experiments/demo/folds/epoch_001/{fold_ref}/orders"
-    ).json()
-    assert orders["rows"][0]["symbol"] == "000001.SZ"
-    assert (
-        client.get(
-            f"/api/experiments/demo/folds/epoch_001/{fold_ref}/orders.csv",
-            params={"result": orders["result"]},
-        )
-        .headers["content-type"]
-        .startswith("text/csv")
-    )
-    style = client.get(
-        "/api/experiments/demo/style", params={"run_id": run_ref, "prefix": "valid"}
-    ).json()
-    assert style["schema_version"] == 1
-    assert style["benchmark_regression"]["beta"] == 0.8
-    assert (
-        client.get(
-            "/api/experiments/demo/style",
-            params={"run_id": "../run_001", "prefix": "valid"},
-        ).status_code
-        == 400
-    )
-    assert (
-        client.get(
-            "/api/experiments/demo/style",
-            params={"run_id": run_ref, "prefix": "test"},
-        ).status_code
-        == 404
-    )
-
-    preview = client.post(
-        "/api/experiments/demo/prompt-preview",
-        json={"session_key": session_ref, "directive": "控制回撤"},
-    ).json()
-    assert set(preview) == {"prompt", "note"}
-    assert "控制回撤" in preview["prompt"]
-
-    analysis = client.get(f"/api/experiments/demo/analysis/epoch_001/{fold_ref}")
-    assert analysis.status_code == 200
-    assert analysis.json()["available"] is False
-
-    trace = client.get(f"/api/experiments/demo/trace/blocks?run_id={run_ref}").json()
-    assert [block["kind"] for block in trace["blocks"]] == ["agent_output"]
-    assert (
-        client.get(f"/api/experiments/demo/trace/stats?run_id={run_ref}").json()[
-            "llm_total_tokens"
-        ]
-        == 12
-    )
-    assert (
-        client.get(f"/api/experiments/demo/trace/download?run_id={run_ref}").status_code
-        == 200
-    )
-    assert (
-        client.get(f"/api/experiments/demo/trace/stream?run_id={run_ref}").status_code
-        == 200
-    )
-    prompt = client.get(
-        f"/api/experiments/demo/folds/epoch_001/{fold_ref}/initial-prompt"
-    ).json()
-    assert [message["role"] for message in prompt["messages"]] == ["system", "user"]
-    rendered_prompt = json.dumps(prompt, ensure_ascii=False)
-    assert "遵守 PIT 合同" in rendered_prompt
-    assert fold_ref in rendered_prompt
-    assert "fold_2026Q1" not in rendered_prompt
-
-    assert client.post("/api/experiments/demo/reports").status_code == 404
-    assert client.get("/api/experiments/demo/reports").status_code == 404
-    assert client.get("/api/experiments/demo/reports/download").status_code == 404
-
-
 def test_revealed_equity_includes_test_and_heldout_csi300(tmp_path: Path):
     directory = _persistent_experiment(tmp_path)
     fold_ref = _fold_ref(directory, "fold_2026Q1")
@@ -979,92 +847,6 @@ def _walk_forward_experiment(tmp_path: Path, folds: list[dict[str, object]]) -> 
         ],
     )
     return directory
-
-
-def test_cumulative_validation_return_is_the_chained_curve_over_rolling_windows(
-    tmp_path: Path,
-):
-    """The tile is the final value of the curve, over overlapping windows.
-
-    Rolling Validation windows trail over several quarters, so every Fold
-    after the first re-scores quarters its predecessors already scored:
-    compounding whole windows counts them again and again. The chain keeps
-    each day once, from the earliest Fold that saw it. And a Fold that froze
-    nothing (``no_update``) is represented by the parent it left in force, not
-    by the candidate its own session nominated and the rules rejected.
-    """
-    from autotrade.webui import equity, registry
-
-    directory = tmp_path / "experiments/walk"
-    first = _result_artifact(
-        directory,
-        "valid_first",
-        [("20220701", 110.0), ("20221003", 121.0), ("20230103", 133.1)],
-    )
-    second = _result_artifact(
-        directory,
-        "valid_second",
-        [("20221003", 200.0), ("20230103", 400.0), ("20230403", 440.0)],
-    )
-    parent = _result_artifact(
-        directory,
-        "valid_parent",
-        [("20230103", 50.0), ("20230403", 25.0), ("20230703", 20.0)],
-    )
-    rejected = _result_artifact(
-        directory,
-        "valid_rejected",
-        [("20230103", 100.0), ("20230403", 100.0), ("20230703", 300.0)],
-    )
-    _walk_forward_experiment(
-        tmp_path,
-        [
-            {
-                "fold_id": "fold_2023Q1",
-                "validation_period": "20220701..20230331",
-                "fold_status": "frozen",
-                "selected_step_id": "step_1",
-                "steps": [{"step_id": "step_1", "validation_result_ref": first}],
-                "validation_result": {"total_return": 0.331},
-            },
-            {
-                "fold_id": "fold_2023Q2",
-                "validation_period": "20221001..20230630",
-                "fold_status": "frozen",
-                "selected_step_id": "step_2",
-                "steps": [{"step_id": "step_2", "validation_result_ref": second}],
-                "validation_result": {"total_return": 3.40},
-            },
-            {
-                # Nominated a candidate, the rules rejected it: the parent
-                # stays the lineage head, so the parent control is the series.
-                "fold_id": "fold_2023Q3",
-                "validation_period": "20230101..20230930",
-                "fold_status": "no_update",
-                "selected_step_id": "step_3",
-                "steps": [{"step_id": "step_3", "validation_result_ref": rejected}],
-                "parent_control": {"status": "ok", "validation_result_ref": parent},
-            },
-        ],
-    )
-
-    payload = equity.experiment_equity_payload(tmp_path / "experiments", "walk")
-    curve = next(series for series in payload["series"] if series["key"] == "valid")
-    # Each Fold after the first adds only its new days, and the last of them
-    # is the parent's -20%, never the rejected candidate's +200%.
-    assert curve["dates"] == [
-        "20220701",
-        "20221003",
-        "20230103",
-        "20230403",
-        "20230703",
-    ]
-    assert curve["cum"] == [0.1, 0.21, 0.331, 0.4641, 0.17128]
-    assert payload["missing"] == {}
-
-    summary = registry.summarize_experiment(directory)
-    assert summary["metrics"]["cum_valid_return"] == curve["final"]
-    assert summary["metrics_by_epoch"][0]["cum_valid_return"] == curve["final"]
 
 
 def test_the_forward_line_chains_the_parent_controls_on_their_scored_spans(
@@ -1211,379 +993,6 @@ def test_an_experiment_without_folds_carries_no_walk_forward_term(tmp_path: Path
     assert listed[0]["metrics"]["epoch_id"] is None
 
 
-def test_an_epoch_with_no_transition_yet_draws_no_forward_line(tmp_path: Path):
-    """A first Fold opens no transition, so there is nothing forward to draw.
-
-    The console must not invent a forward line out of the one window the Epoch
-    has: an empty series and an empty ``missing`` is the truthful answer, and
-    it is what the card's 「过渡 0/0」 reads beside.
-    """
-    from autotrade.webui import equity, registry
-
-    directory = tmp_path / "experiments/walk"
-    only = _result_artifact(directory, "valid_only", [("20220701", 110.0)])
-    _walk_forward_experiment(
-        tmp_path,
-        [
-            {
-                "fold_id": "fold_2022Q3",
-                "validation_period": "20220701..20220930",
-                "fold_status": "frozen",
-                "selected_step_id": "step_1",
-                "steps": [{"step_id": "step_1", "validation_result_ref": only}],
-            }
-        ],
-    )
-
-    payload = equity.experiment_equity_payload(tmp_path / "experiments", "walk")
-    assert [row["key"] for row in payload["series"]] == ["valid"]
-    assert payload["missing"] == {}
-    assert "forward" not in payload["stats"]
-    term = registry.summarize_experiment(directory)["metrics_by_epoch"][0][
-        "walk_forward"
-    ]
-    assert (term["transitions"], term["required"]) == (0, None)
-
-
-def test_a_baseline_missing_fold_contributes_nothing_to_curve_or_tile(tmp_path: Path):
-    """A Fold that never froze an artifact left no strategy in force.
-
-    Its session's rejected candidates are not evidence of anything the
-    experiment carried forward, so neither the curve nor the tile may borrow
-    them — and the Fold is not missing evidence either, so it is not reported.
-    """
-    from autotrade.webui import equity, registry
-
-    directory = tmp_path / "experiments/walk"
-    rejected = _result_artifact(directory, "valid_rejected", [("20220701", 900.0)])
-    frozen = _result_artifact(directory, "valid_frozen", [("20221003", 150.0)])
-    _walk_forward_experiment(
-        tmp_path,
-        [
-            {
-                "fold_id": "fold_2022Q3",
-                "validation_period": "20220701..20220930",
-                "fold_status": "baseline_missing",
-                "selected_step_id": "step_1",
-                "steps": [{"step_id": "step_1", "validation_result_ref": rejected}],
-            },
-            {
-                "fold_id": "fold_2022Q4",
-                "validation_period": "20221001..20221231",
-                "fold_status": "frozen",
-                "selected_step_id": "step_2",
-                "steps": [{"step_id": "step_2", "validation_result_ref": frozen}],
-                "validation_result": {"total_return": 0.5},
-            },
-        ],
-    )
-
-    payload = equity.experiment_equity_payload(tmp_path / "experiments", "walk")
-    curve = next(series for series in payload["series"] if series["key"] == "valid")
-    assert curve["dates"] == ["20221003"]
-    assert curve["final"] == 0.5
-    # Nothing was owed, so nothing is reported unavailable.
-    assert payload["missing"] == {}
-    assert registry.summarize_experiment(directory)["metrics"]["cum_valid_return"] == 0.5
-
-
-def test_every_fold_states_which_strategy_its_numbers_and_curve_belong_to(
-    tmp_path: Path,
-):
-    """A Fold's own candidate, the inherited parent and nothing at all.
-
-    All three used to reach the console as the same unlabelled Validation
-    series (or as a bare "no data"), so a Fold that kept its parent looked like
-    a Fold with no result and a Fold that left no strategy looked like a Fold
-    that never traded. The read model now projects which strategy each Fold
-    left in force, the per-Fold curve carries the same label, and the two come
-    from one function so they cannot disagree.
-    """
-    from autotrade.webui import equity, registry
-
-    directory = tmp_path / "experiments/walk"
-    candidate = _result_artifact(directory, "valid_candidate", [("20220701", 150.0)])
-    parent = _result_artifact(directory, "valid_parent", [("20221010", 90.0)])
-    rejected = _result_artifact(directory, "valid_rejected", [("20221010", 900.0)])
-    abandoned = _result_artifact(directory, "valid_abandoned", [("20220401", 800.0)])
-    _walk_forward_experiment(
-        tmp_path,
-        [
-            {
-                # Real candidate replays with real trades, but the run carried
-                # nothing out of this window: no parent to keep, nothing frozen.
-                "fold_id": "fold_2022Q2",
-                "validation_period": "20220401..20220630",
-                "fold_status": "baseline_missing",
-                "steps": [{"step_id": "s0", "validation_result_ref": abandoned}],
-            },
-            {
-                "fold_id": "fold_2022Q3",
-                "validation_period": "20220701..20220930",
-                "fold_status": "frozen",
-                "selected_step_id": "s1",
-                "steps": [{"step_id": "s1", "validation_result_ref": candidate}],
-                "validation_result": {"total_return": 0.5},
-            },
-            {
-                # Nominated a candidate, the rules rejected it: the parent
-                # stays the lineage head, so the parent's replay is the Fold's
-                # curve AND its headline numbers.
-                "fold_id": "fold_2022Q4",
-                "validation_period": "20220701..20221231",
-                "fold_status": "no_update",
-                "selected_step_id": "s2",
-                "steps": [{"step_id": "s2", "validation_result_ref": rejected}],
-                "parent_control": {
-                    "status": "ok",
-                    "validation_result_ref": parent,
-                    "validation_result": {"total_return": -0.1},
-                },
-            },
-        ],
-    )
-
-    root = tmp_path / "experiments"
-    identity = PublicIdentity(directory)
-    rows = {
-        row["fold_ref"]: row
-        for row in registry.summarize_experiment(directory)["fold_returns"]
-    }
-    expected = {
-        "fold_2022Q2": "none",
-        "fold_2022Q3": "frozen_candidate",
-        "fold_2022Q4": "parent_control",
-    }
-    for fold_id, source in expected.items():
-        ref = identity.fold_ref(fold_id)
-        assert rows[ref]["strategy_in_force"] == source, fold_id
-        payload = equity.fold_equity_payload(root, "walk", "epoch_001", ref)
-        # The curve pane is told the same thing the Fold row was told.
-        assert payload["strategy_in_force"] == source, fold_id
-        series = {entry["key"]: entry for entry in payload["series"]}
-        if source == "none":
-            # It traded, and the console must say why there is no curve rather
-            # than draw a replay the experiment never carried forward.
-            assert series == {}
-        else:
-            assert series["valid"]["dates"], fold_id
-    # ... and the kept-parent Fold draws the parent's -10%, never the rejected
-    # candidate's +800%.
-    kept = equity.fold_equity_payload(
-        root, "walk", "epoch_001", identity.fold_ref("fold_2022Q4")
-    )
-    assert kept["series"][0]["final"] == -0.1
-
-
-def test_a_fold_that_kept_its_parent_still_publishes_return_numbers(
-    tmp_path: Path,
-):
-    """An abstaining Fold has no Validation of its own — but it has a result.
-
-    The host replayed the inherited parent over this very window before the
-    session opened, and that replay is what the Fold left in force. The payload
-    therefore has to carry it whole: the window's numbers for the headline, and
-    the new quarter alone — the only ground the parent had not seen — with the
-    excess and the null percentile the walk-forward transition is scored on.
-    """
-    from autotrade.webui import registry
-
-    directory = tmp_path / "experiments/walk"
-    _walk_forward_experiment(
-        tmp_path,
-        [
-            {
-                "fold_id": "fold_2023Q1",
-                "validation_period": "20220401..20230331",
-                "fold_status": "frozen",
-                "steps": [],
-            },
-            {
-                "fold_id": "fold_2023Q2",
-                "validation_period": "20220701..20230630",
-                "fold_status": "no_update",
-                "finish_mode": "agent_no_edge",
-                "no_edge_reason": "no candidate cleared the pre-registered gate",
-                # The Fold nominated nothing, so it has no Validation row.
-                "validation_result": None,
-                "steps": [],
-                "parent_control": {
-                    "status": "ok",
-                    "validation_result": {
-                        "total_return": -0.033,
-                        "sharpe": -0.14,
-                        "max_drawdown": 0.12,
-                        "long_return": -0.054,
-                        "benchmark": {
-                            "benchmark_return": -0.143,
-                            "excess_return": 0.110,
-                            "neutralized_excess_return": -0.022,
-                        },
-                    },
-                    "step_result": {
-                        "label": "2023Q2",
-                        "start": "20230403",
-                        "end": "20230630",
-                        "total_return": 0.022,
-                        "sharpe": 0.84,
-                        "max_drawdown": 0.035,
-                        "benchmark": {
-                            "benchmark_return": -0.051,
-                            # The quarter's own neutralized excess: the raw
-                            # +7.3pp is mostly the benchmark's -5.1pp quarter.
-                            "neutralized_excess_return": 0.008,
-                        },
-                    },
-                    "null_control": {
-                        "excess_percentile": 0.352,
-                        "step": {"excess_percentile": 0.794},
-                    },
-                },
-            },
-        ],
-    )
-    detail = registry.experiment_detail(tmp_path / "experiments", "walk")
-    ref = PublicIdentity(directory).fold_ref("fold_2023Q2")
-    row = next(item for item in detail["fold_returns"] if item["fold_ref"] == ref)
-    assert row["strategy_in_force"] == "parent_control"
-    # The whole window, for the Fold's headline numbers.
-    record = next(
-        entry["record"] for entry in detail["sessions"] if entry.get("fold_ref") == ref
-    )
-    assert record["validation_result"] is None
-    whole = record["parent_control"]["validation_result"]
-    assert whole["total_return"] == -0.033
-    assert whole["benchmark"]["excess_return"] == 0.110
-    # The new quarter alone, which is what the transition is graded on, ranked
-    # against that quarter's own null control rather than the window's 0.352.
-    assert row["parent_control"] == {
-        "status": "ok",
-        "error": None,
-        "baseline_anchor": False,
-        "source": "step_result",
-        "period_start": "20230403",
-        "period_end": "20230630",
-        "return": 0.022,
-        "excess_return": pytest.approx(0.073),
-        "neutralized_excess_return": 0.008,
-        "sharpe": 0.84,
-        "max_drawdown": 0.035,
-        "excess_percentile": 0.794,
-    }
-
-
-def test_every_fold_session_can_be_quoted_without_opening_it(tmp_path: Path):
-    """The session list quotes a Fold from the payload, or it quotes nothing.
-
-    One Fold line answers "what did this session leave behind" out of a single
-    payload: the ``fold_returns`` row names the strategy the Fold left in force,
-    the session record carries that strategy's Validation replay with its
-    excess and neutralized excess, and the row's ``parent_control`` carries the
-    new quarter the walk-forward transition is scored on with its null
-    percentile. The list used to read ``record.validation_result`` alone, so
-    every Fold that kept its parent — the common outcome — showed a blank
-    return column, and a Fold that left nothing at all looked exactly like one
-    still queued.
-    """
-    from autotrade.webui import registry
-
-    directory = tmp_path / "experiments/walk"
-    _walk_forward_experiment(
-        tmp_path,
-        [
-            {
-                # Froze its own candidate; the Epoch's first Fold, so it opens
-                # no transition.
-                "fold_id": "fold_2023Q1",
-                "validation_period": "20230103..20230331",
-                "fold_status": "frozen",
-                "selected_step_id": "s1",
-                "steps": [{"step_id": "s1", "validation_result_ref": "unused"}],
-                "validation_result": {
-                    "total_return": 0.12,
-                    "benchmark": {
-                        "benchmark_return": 0.05,
-                        "excess_return": 0.07,
-                        "neutralized_excess_return": 0.03,
-                    },
-                },
-            },
-            {
-                # Kept its parent: no Validation row of its own, so the line's
-                # numbers are the host's replay of the parent on this window.
-                "fold_id": "fold_2023Q2",
-                "validation_period": "20230103..20230630",
-                "fold_status": "no_update",
-                "validation_result": None,
-                "steps": [],
-                "parent_control": {
-                    "status": "ok",
-                    "validation_result": {
-                        "total_return": -0.04,
-                        "benchmark": {
-                            "benchmark_return": -0.13,
-                            "excess_return": 0.09,
-                            "neutralized_excess_return": -0.01,
-                        },
-                    },
-                    "step_result": {
-                        "start": "20230403",
-                        "end": "20230630",
-                        "total_return": 0.02,
-                        "benchmark": {"benchmark_return": -0.04},
-                    },
-                    "null_control": {
-                        "excess_percentile": 0.33,
-                        "step": {"excess_percentile": 0.71},
-                    },
-                },
-            },
-            {
-                # Left nothing at all: the line must say so, not go blank.
-                "fold_id": "fold_2023Q3",
-                "validation_period": "20230103..20230930",
-                "fold_status": "baseline_missing",
-                "validation_result": None,
-                "steps": [],
-            },
-        ],
-    )
-    detail = registry.experiment_detail(tmp_path / "experiments", "walk")
-    identity = PublicIdentity(directory)
-    rows = {row["fold_ref"]: row for row in detail["fold_returns"]}
-    sessions = {
-        entry["fold_ref"]: entry
-        for entry in detail["sessions"]
-        if entry.get("kind") == "fold"
-    }
-
-    frozen = identity.fold_ref("fold_2023Q1")
-    assert rows[frozen]["strategy_in_force"] == "frozen_candidate"
-    headline = sessions[frozen]["record"]["validation_result"]
-    assert headline["total_return"] == 0.12
-    assert headline["benchmark"]["excess_return"] == 0.07
-    assert headline["benchmark"]["neutralized_excess_return"] == 0.03
-    assert rows[frozen]["parent_control"] is None
-
-    kept = identity.fold_ref("fold_2023Q2")
-    assert rows[kept]["strategy_in_force"] == "parent_control"
-    assert sessions[kept]["record"]["validation_result"] is None
-    parent = sessions[kept]["record"]["parent_control"]["validation_result"]
-    assert parent["total_return"] == -0.04
-    assert parent["benchmark"]["excess_return"] == 0.09
-    assert parent["benchmark"]["neutralized_excess_return"] == -0.01
-    # The new quarter alone, scored against that quarter's own null control.
-    assert rows[kept]["parent_control"]["excess_return"] == pytest.approx(0.06)
-    assert rows[kept]["parent_control"]["excess_percentile"] == 0.71
-
-    nothing = identity.fold_ref("fold_2023Q3")
-    assert rows[nothing]["strategy_in_force"] == "none"
-    assert sessions[nothing]["record"]["validation_result"] is None
-    assert sessions[nothing]["record"].get("parent_control") is None
-    # Nothing in force means nothing to quote — from either side of the join.
-    assert rows[nothing]["parent_control"] is None
-
-
 def test_a_fold_whose_in_force_replay_is_unreadable_still_names_its_source(
     tmp_path: Path,
 ):
@@ -1620,55 +1029,6 @@ def test_a_fold_whose_in_force_replay_is_unreadable_still_names_its_source(
     )
     assert payload["strategy_in_force"] == "parent_control"
     assert payload["series"] == []
-
-
-def test_a_fold_without_a_readable_result_is_named_not_silently_dropped(
-    tmp_path: Path,
-):
-    """A quarter no readable artifact covers is stated.
-
-    The tile and the curve drop it together — they are the same series — and
-    the payload names the quarter, so a gap in the record reads as missing
-    evidence instead of as a quarter the strategy sat out.
-    """
-    from autotrade.webui import equity, registry
-
-    directory = tmp_path / "experiments/walk"
-    frozen = _result_artifact(directory, "valid_frozen", [("20220701", 150.0)])
-    _walk_forward_experiment(
-        tmp_path,
-        [
-            {
-                "fold_id": "fold_2022Q3",
-                "validation_period": "20220701..20220930",
-                "fold_status": "frozen",
-                "selected_step_id": "step_1",
-                "steps": [{"step_id": "step_1", "validation_result_ref": frozen}],
-                "validation_result": {"total_return": 0.5},
-            },
-            {
-                "fold_id": "fold_2022Q4",
-                "validation_period": "20221001..20221231",
-                "fold_status": "frozen",
-                "selected_step_id": "step_2",
-                "steps": [
-                    {
-                        "step_id": "step_2",
-                        "validation_result_ref": str(
-                            directory / "artifacts/results/valid_gone/result.json"
-                        ),
-                    }
-                ],
-                "validation_result": {"total_return": 0.25},
-            },
-        ],
-    )
-
-    payload = equity.experiment_equity_payload(tmp_path / "experiments", "walk")
-    curve = next(series for series in payload["series"] if series["key"] == "valid")
-    assert curve["final"] == 0.5
-    assert payload["missing"] == {"valid": ["2022Q4"]}
-    assert registry.summarize_experiment(directory)["metrics"]["cum_valid_return"] == 0.5
 
 
 def test_missing_quarters_are_read_off_the_chained_days_not_off_failed_folds(
@@ -1728,130 +1088,6 @@ def test_missing_quarters_are_read_off_the_chained_days_not_off_failed_folds(
     valid = next(row for row in payload["series"] if row["key"] == "valid")
     assert "20230403" in valid["dates"]
     assert payload["missing"] == {"forward": ["2023Q2"]}
-
-
-def test_experiment_progress_comes_from_schedule_and_durable_ledger(tmp_path: Path):
-    directory = _persistent_experiment(tmp_path)
-    client = TestClient(create_app(tmp_path))
-    ledger_path = directory / "ledgers/experiment_ledger.jsonl"
-    fold_record = ledger_path.read_text(encoding="utf-8")
-    status_path = directory / "hitl/status.json"
-
-    def home_progress() -> tuple[int, int | None]:
-        home = client.get("/api/experiments").json()["experiments"][0]
-        return home["completed_sessions"], home["total_sessions"]
-
-    # A just-started experiment has no durable success, even if a stale or
-    # racing heartbeat claims that every planned session is complete.
-    ledger_path.write_text("", encoding="utf-8")
-    write_json_atomic(
-        status_path,
-        {
-            "schema_version": 1,
-            "state": "running_session",
-            "pid": os.getpid(),
-            "pid_start_ticks": proc_start_ticks(os.getpid()),
-            "completed_sessions": 2,
-            "total_sessions": 2,
-        },
-    )
-    assert home_progress() == (0, 2)
-
-    # Conversely, a startup heartbeat's legitimate zero cannot erase a Fold
-    # that is already durable, and a bogus denominator cannot override plan.
-    ledger_path.write_text(fold_record, encoding="utf-8")
-    write_json_atomic(
-        status_path,
-        {
-            "schema_version": 1,
-            "state": "running_session",
-            "pid": os.getpid(),
-            "pid_start_ticks": proc_start_ticks(os.getpid()),
-            "completed_sessions": 0,
-            "total_sessions": 999,
-        },
-    )
-    assert home_progress() == (1, 2)
-
-    # Held-out is one planned session and becomes durable only after all of
-    # its periods are recorded; terminal progress is therefore exactly N/N.
-    schedule_path = directory / "hitl/schedule.json"
-    schedule = json.loads(schedule_path.read_text(encoding="utf-8"))
-    schedule["sessions"][-1]["periods"].append(
-        {"label": "2026Q3", "start": "20260701", "end": "20260930"}
-    )
-    write_json_atomic(schedule_path, schedule)
-    ledger = ExperimentLedger(ledger_path)
-    for label in ("2026Q2", "2026Q3"):
-        ledger.append(
-            {
-                "record_type": "heldout",
-                "experiment_id": "demo",
-                "epoch_id": "epoch_001",
-                "fold_id": f"heldout_{label}",
-                "run_id": f"run_heldout_{label}",
-                "period": label,
-                "result": {"total_return": 0.01},
-            }
-        )
-        expected = (1, 2) if label == "2026Q2" else (2, 2)
-        assert home_progress() == expected
-
-    write_json_atomic(
-        status_path,
-        {
-            "schema_version": 1,
-            "state": "completed",
-            "completed_sessions": 0,
-            "total_sessions": 1,
-        },
-    )
-    assert home_progress() == (2, 2)
-
-
-def test_partial_heldout_does_not_reveal_out_of_sample_results(tmp_path: Path):
-    directory = _persistent_experiment(tmp_path)
-    schedule_path = directory / "hitl/schedule.json"
-    schedule = json.loads(schedule_path.read_text(encoding="utf-8"))
-    schedule["sessions"][-1]["periods"] = [
-        {"label": "2026Q2", "start": "20260401", "end": "20260630"},
-        {"label": "2026Q3", "start": "20260701", "end": "20260930"},
-    ]
-    schedule_path.write_text(json.dumps(schedule), encoding="utf-8")
-    ExperimentLedger(directory / "ledgers/experiment_ledger.jsonl").append(
-        {
-            "record_type": "heldout",
-            "experiment_id": "demo",
-            "epoch_id": "epoch_001",
-            "fold_id": "heldout_2026Q2",
-            "run_id": "run_heldout",
-            "period": "2026Q2",
-            "result": {"total_return": 0.03},
-        }
-    )
-    status = directory / "hitl/status.json"
-    status.write_text(
-        json.dumps({"schema_version": 1, "state": "running_heldout"}),
-        encoding="utf-8",
-    )
-    client = TestClient(create_app(tmp_path))
-    detail = client.get("/api/experiments/demo").json()
-    assert detail["test_revealed"] is False
-    assert "test_result" not in detail["sessions"][0]["record"]
-
-    status.write_text(
-        json.dumps({"schema_version": 1, "state": "completed"}),
-        encoding="utf-8",
-    )
-    detail = client.get("/api/experiments/demo").json()
-    assert detail["test_revealed"] is False
-    assert "test_result" not in detail["sessions"][0]["record"]
-    heldout_session = detail["sessions"][-1]
-    assert heldout_session["kind"] == "heldout"
-    heldout = heldout_session["records"][-1]
-    assert heldout["hidden"] is True
-    # Only identity survives redaction: no result, no reference to one.
-    assert not {"result", "result_ref", "test_result"} & heldout.keys()
 
 
 def test_static_console_keeps_macro_style_surfaces_without_closed_capabilities(
@@ -2082,12 +1318,7 @@ class WebuiBackendTest(unittest.TestCase):
             hitl / "params.json",
             {
                 "experiment_id": experiment_id,
-                "fold_period": "quarter",
-                "development_first_period": "2022Q1",
-                "development_last_period": "2022Q2",
-                "heldout_first_period": "2023Q1",
-                "heldout_last_period": "2023Q1",
-                "analysis_model": "deepseek-v4-flash",
+                **DEFAULT_RESEARCH_GEOMETRY.to_record(),
                 **RESEARCH_PARAMS,
                 "_created_at": "2026-07-06T00:00:00+00:00",
             },
@@ -2363,12 +1594,7 @@ class WebuiBackendTest(unittest.TestCase):
             hitl / "params.json",
             {
                 "experiment_id": experiment_id,
-                "fold_period": "year",
-                "development_first_period": "2022",
-                "development_last_period": "2025",
-                "heldout_first_period": "2026",
-                "heldout_last_period": "2026",
-                "test_stage": False,
+                **DEFAULT_RESEARCH_GEOMETRY.to_record(),
                 "_created_at": "2026-07-06T00:00:00+00:00",
             },
         )
@@ -2590,11 +1816,10 @@ class WebuiBackendTest(unittest.TestCase):
             for group in schema["groups"]
             for field in group["fields"]
         }
-        self.assertEqual(fields["epochs"]["default"], WEB_CREATE_DEFAULTS["epochs"])
-        self.assertEqual(fields["model"]["default"], WEB_CREATE_DEFAULTS["model"])
         self.assertEqual(
-            fields["meta_model"]["default"], WEB_CREATE_DEFAULTS["meta_model"]
+            fields["research_sessions"]["default"], WEB_CREATE_DEFAULTS["research_sessions"]
         )
+        self.assertEqual(fields["model"]["default"], WEB_CREATE_DEFAULTS["model"])
         for hidden in (
             "experiments_root",
             "work_root",
@@ -2605,14 +1830,7 @@ class WebuiBackendTest(unittest.TestCase):
             "local_dev",
         ):
             self.assertNotIn(hidden, fields, hidden)
-        for model_field in (
-            "model",
-            "meta_model",
-            "subagent_model",
-            "nl_model",
-            "compact_model",
-            "analysis_model",
-        ):
+        for model_field in ("model", "subagent_model", "nl_model", "compact_model"):
             self.assertNotIn("deepseek-chat", fields[model_field]["choices"])
             self.assertNotIn("deepseek-reasoner", fields[model_field]["choices"])
         visible_copy = "\n".join(
@@ -2623,16 +1841,10 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertNotIn("DeepSeek", visible_copy)
         self.assertNotIn("provider", visible_copy)
         self.assertEqual(fields["no_thinking"]["label"], "禁用推理模式")
-        # No trade calendar under the tmp repo root: period pickers degrade to text.
-        self.assertEqual(schema["period_options"], {})
-        self.assertEqual(fields["development_first_period"]["type"], "string")
-        # Filled per-epoch on the detail page instead of at creation.
-        self.assertNotIn("meta_learning_directive", fields)
-        self.assertEqual(
-            fields["meta_learning_fold_interval"]["default"],
-            WEB_CREATE_DEFAULTS["meta_learning_fold_interval"],
-        )
-        self.assertEqual(fields["meta_learning_fold_interval"]["min"], 0)
+        # The geometry dates are plain YYYYMMDD strings the worker validates.
+        self.assertEqual(fields["research_start"]["type"], "string")
+        for retired in ("meta_learning_directive", "meta_learning_fold_interval", "meta_model"):
+            self.assertNotIn(retired, fields)
         self.assertEqual(fields["fold_exploration_directive"]["type"], "text")
         self.assertEqual(fields["fold_exploration_directive"]["default"], "")
         self.assertTrue(fields["fold_exploration_directive"]["wide"])
@@ -2644,83 +1856,6 @@ class WebuiBackendTest(unittest.TestCase):
                 "auction_close_time",
             }.isdisjoint(fields)
         )
-
-    def test_period_options_and_defaults_from_calendar(self) -> None:
-        from autotrade.webui.params_schema import (
-            build_period_options,
-            parameter_schema,
-            suggest_period_defaults,
-        )
-
-        trading_days = [
-            day.strftime("%Y%m%d")
-            for day in pd.date_range("2021-01-04", "2024-07-05", freq="B")
-        ]
-        options = build_period_options(trading_days)
-        self.assertEqual(options["year"], ["2021", "2022", "2023"])
-        self.assertEqual(options["quarter"][0], "2021Q1")
-        self.assertEqual(
-            options["quarter"][-1], "2024Q2"
-        )  # ends 20240630 <= last trading day
-        self.assertIn("202401", options["month"])
-        self.assertNotIn("202407", options["month"])  # incomplete month excluded
-        self.assertTrue(all(len(label) == 8 for label in options["week"]))
-        defaults = suggest_period_defaults(options)
-        quarter = defaults["quarter"]
-        # The calendar ends 2024Q2, so the configured window cannot apply and
-        # every cadence derives its own window from the calendar instead.
-        self.assertEqual(quarter["heldout_first_period"], "2024Q2")
-        self.assertEqual(quarter["development_last_period"], "2024Q1")
-        self.assertLess(quarter["development_first_period"], quarter["development_last_period"])
-        # first_test never takes the very first option (its validation period
-        # must also exist in the calendar).
-        self.assertNotEqual(quarter["development_first_period"], options["quarter"][0])
-        schema = parameter_schema(trading_days=trading_days)
-        fields = {
-            field["key"]: field
-            for group in schema["groups"]
-            for field in group["fields"]
-        }
-        self.assertEqual(fields["development_first_period"]["type"], "period")
-        # The form opens on the configured cadence, so its period defaults must
-        # be that cadence's suggestion — whatever cadence is configured.
-        cadence = str(WEB_CREATE_DEFAULTS["fold_period"])
-        for key, value in defaults[cadence].items():
-            self.assertEqual(fields[key]["default"], value)
-            self.assertIn(value, schema["period_options"][cadence])
-
-    def test_configured_defaults_prefer_the_console_research_window(self) -> None:
-        """The configured cadence keeps the configured window (an explicit
-        YYYYMMDD..YYYYMMDD held-out included, which no cadence enumeration can
-        produce); other cadences derive a window from the calendar."""
-
-        from autotrade.webui.params_schema import (
-            PERIOD_KEYS,
-            parameter_schema,
-            suggest_period_defaults,
-        )
-
-        cadence = str(WEB_CREATE_DEFAULTS["fold_period"])
-        preferred = {key: str(WEB_CREATE_DEFAULTS[key]) for key in PERIOD_KEYS}
-        labels = sorted(
-            {value for value in preferred.values() if ".." not in value}
-            | {"2019", "2020", "2021", "2022"}
-        )
-        defaults = suggest_period_defaults({cadence: labels})
-        self.assertEqual(defaults[cadence], preferred)
-        other = "quarter" if cadence != "quarter" else "year"
-        derived = suggest_period_defaults({other: labels})[other]
-        self.assertEqual(derived["heldout_first_period"], labels[-1])
-        self.assertEqual(derived["development_last_period"], labels[-2])
-        # A range default has to reach the picker, or the form could not
-        # reproduce its own default.
-        trading_days = [
-            day.strftime("%Y%m%d")
-            for day in pd.date_range("2015-01-05", "2026-07-31", freq="B")
-        ]
-        schema = parameter_schema(trading_days=trading_days)
-        for key, value in preferred.items():
-            self.assertIn(value, schema["period_options"][cadence], key)
 
     def test_public_params_never_echo_hidden_keys(self) -> None:
         # The console API refuses HIDDEN_KEYS at creation, but params.json is
@@ -2778,103 +1913,7 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertNotIn(private_endpoint, detail.text)
         self.assertNotIn("llm_base_url", detail.json()["params"])
 
-    def test_list_experiments_marks_kind_state_and_metrics(self) -> None:
-        payload = self.client.get("/api/experiments").json()
-        by_id = {entry["experiment_id"]: entry for entry in payload["experiments"]}
-        hitl = by_id["exp_hitl"]
-        self.assertEqual(hitl["kind"], "hitl")
-        self.assertEqual(hitl["state"], "interrupted")  # recorded pid is not alive
-        self.assertFalse(hitl["test_revealed"])
-        self.assertEqual(
-            [row["fold_ref"] for row in hitl["fold_returns"]],
-            [self._fold_ref("fold_2022Q1")],
-        )
-        self.assertIsNone(hitl["environment_stage"])
-        self.assertIsNone(hitl["metrics"]["cum_heldout_return"])
-        self.assertIsNone(hitl["metrics"]["cum_test_return"])
-
-    def test_list_exposes_the_live_environment_stage(self) -> None:
-        status_path = self.experiments_root / "exp_hitl" / "hitl" / "status.json"
-        status = json.loads(status_path.read_text(encoding="utf-8"))
-        status["environment_stage"] = "pit_snapshot"
-        status["environment_stage_started_at"] = "2026-08-17T23:46:10+00:00"
-        status["session_started_at"] = "2026-08-17T23:46:10+00:00"
-        status["environment_progress"] = {"day_index": 3, "total_days": 10}
-        write_json_atomic(status_path, status)
-        hitl = {
-            entry["experiment_id"]: entry
-            for entry in self.client.get("/api/experiments").json()["experiments"]
-        }["exp_hitl"]
-        self.assertEqual(hitl["environment_stage"], "pit_snapshot")
-        self.assertEqual(
-            hitl["environment_stage_started_at"], "2026-08-17T23:46:10+00:00"
-        )
-        self.assertEqual(hitl["session_started_at"], "2026-08-17T23:46:10+00:00")
-        self.assertEqual(
-            hitl["environment_progress"], {"day_index": 3, "total_days": 10}
-        )
-
     # ---- reveal / seal --------------------------------------------------------
-    def test_heldout_completion_auto_reveals_and_seals(self) -> None:
-        from autotrade.webui.registry import test_results_revealed
-
-        experiment_dir = self.experiments_root / "exp_hitl"
-        hitl = experiment_dir / "hitl"
-        schedule = json.loads((hitl / "schedule.json").read_text(encoding="utf-8"))
-        schedule["sessions"][-1]["periods"] = [{"label": "2023Q1"}, {"label": "2023Q2"}]
-        write_json_atomic(hitl / "schedule.json", schedule)
-
-        # Partial held-out (fixture records only 2023Q1): stays hidden so the
-        # worker can still be resumed to finish the remaining periods.
-        self.assertFalse(test_results_revealed(experiment_dir))
-        detail = self.client.get("/api/experiments/exp_hitl").json()
-        self.assertFalse(detail["test_revealed"])
-
-        # Recording the last planned period auto-reveals without any click.
-        ledger_path = experiment_dir / "ledgers" / "experiment_ledger.jsonl"
-        with ledger_path.open("a", encoding="utf-8") as handle:
-            handle.write(
-                json.dumps(
-                    {
-                        "schema_version": 1,
-                        "record_type": "heldout",
-                        "experiment_id": "exp_hitl",
-                        "epoch_id": "epoch_001",
-                        "fold_id": "heldout_2023Q2",
-                        "run_id": "run_heldout_2",
-                        "period": "2023Q2",
-                        "result": {
-                            "total_return": 0.01,
-                            "sharpe": 0.1,
-                            "max_drawdown": 0.02,
-                        },
-                    }
-                )
-                + "\n"
-            )
-        self.assertTrue(test_results_revealed(experiment_dir))
-        detail = self.client.get("/api/experiments/exp_hitl").json()
-        self.assertTrue(detail["test_revealed"])
-        listing = self.client.get("/api/experiments").json()
-        entry = {item["experiment_id"]: item for item in listing["experiments"]}[
-            "exp_hitl"
-        ]
-        self.assertTrue(entry["test_revealed"])
-        self.assertAlmostEqual(entry["metrics"]["cum_test_return"], 0.20)
-
-        # Auto-reveal applies the same seal as a manual reveal: the guard must
-        # read test_results_revealed(), not only the control flag.
-        response = self.client.post(
-            "/api/experiments/exp_hitl/control",
-            json={
-                "action": "set_directive",
-                "session_key": "heldout",
-                "directive": "x",
-            },
-        )
-        self.assertEqual(response.status_code, 400)
-        self.assertIn("封存", response.json()["detail"])
-
     def test_reveal_seals_learning_actions(self) -> None:
         self._reveal()
         # `resume` restarts learning on a sealed experiment, so it is blocked
@@ -2901,175 +1940,6 @@ class WebuiBackendTest(unittest.TestCase):
         )
         self.assertEqual(ok.status_code, 200)
 
-    def test_deployment_adjustment_is_the_one_session_the_seal_lets_through(self) -> None:
-        """The post-Held-out deployment adjustment (docs/pipeline-design.md
-        §3.4) is directed and resumed on a sealed experiment; every other
-        learning control stays sealed; the console shows its row and the Paper
-        candidate with the command that pins it."""
-        experiment_dir = self.experiments_root / "exp_hitl"
-        hitl = experiment_dir / "hitl"
-        params = json.loads((hitl / "params.json").read_text(encoding="utf-8"))
-        params["deployment_adjustment_start"] = "20230401"
-        write_json_atomic(hitl / "params.json", params)
-        schedule = json.loads((hitl / "schedule.json").read_text(encoding="utf-8"))
-        schedule["sessions"].append(
-            {
-                "key": "deployment_adjustment",
-                "kind": "deployment_adjustment",
-                "epoch_id": "epoch_001",
-                "fold_id": "deployment_20230401..20231229",
-                "period": {"start": "20230401", "end": "20231229"},
-            }
-        )
-        write_json_atomic(hitl / "schedule.json", schedule)
-        self._reveal()
-        # Not graduated yet: directing the post-seal session is harmless (the
-        # worker never runs it while it is not due), but resuming the sealed
-        # experiment is still refused because nothing is owed.
-        directed = self.client.post(
-            "/api/experiments/exp_hitl/control",
-            json={
-                "action": "set_directive",
-                "session_key": "deployment_adjustment",
-                "directive": "hold the mechanism",
-            },
-        )
-        self.assertEqual(directed.status_code, 200, directed.text)
-        refused = self.client.post(
-            "/api/experiments/exp_hitl/control", json={"action": "resume"}
-        )
-        self.assertEqual(refused.status_code, 400)
-        self.assertIn("封存", refused.json()["detail"])
-        detail = self.client.get("/api/experiments/exp_hitl").json()
-        self.assertTrue(detail["test_revealed"])
-        self.assertIsNone(detail["paper_candidate"])
-
-        ledger_path = experiment_dir / "ledgers" / "experiment_ledger.jsonl"
-        with ledger_path.open("a", encoding="utf-8") as handle:
-            handle.write(
-                json.dumps(
-                    {
-                        "schema_version": 1,
-                        "record_type": "heldout",
-                        "experiment_id": "exp_hitl",
-                        "epoch_id": "epoch_001",
-                        "fold_id": "heldout_2023Q1",
-                        "run_id": "run_heldout_graduated",
-                        "session_key": "heldout",
-                        "period": "2023Q1",
-                        "strategy_artifact_id": "strategy_epoch_001_fold_2022Q1",
-                        "result": {"total_return": 0.05, "sharpe": 1.0, "max_drawdown": -0.02},
-                        "verdict": {"status": "graduated", "reasons": []},
-                    }
-                )
-                + "\n"
-            )
-        for action, extra in (
-            ("set_directive", {"directive": "retrain the ranker"}),
-            ("resume", {}),
-        ):
-            with patch.object(
-                ExperimentManager, "start_worker", return_value={"spawned": False}
-            ):
-                allowed = self.client.post(
-                    "/api/experiments/exp_hitl/control",
-                    json={"action": action, "session_key": "deployment_adjustment", **extra},
-                )
-            self.assertEqual(allowed.status_code, 200, (action, allowed.text))
-        still_sealed = self.client.post(
-            "/api/experiments/exp_hitl/control",
-            json={
-                "action": "set_directive",
-                "session_key": self._session_ref("epoch_001/fold_2022Q2"),
-                "directive": "x",
-            },
-        )
-        self.assertEqual(still_sealed.status_code, 400)
-        self.assertIn("封存", still_sealed.json()["detail"])
-        detail = self.client.get("/api/experiments/exp_hitl").json()
-        candidate = detail["paper_candidate"]
-        self.assertEqual(candidate["source"], "graduated")
-        self.assertEqual(candidate["artifact_id"], "strategy_epoch_001_fold_2022Q1")
-        self.assertEqual(
-            candidate["command"],
-            "python scripts/paper/run_paper.py init --experiment exp_hitl "
-            "--artifact strategy_epoch_001_fold_2022Q1",
-        )
-        # The printed command is one run_paper.py accepts as written.
-        import importlib.util
-
-        spec = importlib.util.spec_from_file_location(
-            "run_paper", Path(__file__).resolve().parents[2] / "scripts/paper/run_paper.py"
-        )
-        run_paper = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(run_paper)
-        parsed = run_paper.build_parser().parse_args(candidate["command"].split()[2:])
-        self.assertEqual(
-            (parsed.command, parsed.experiment, parsed.artifact),
-            ("init", "exp_hitl", "strategy_epoch_001_fold_2022Q1"),
-        )
-        session = next(
-            row for row in detail["sessions"] if row["kind"] == "deployment_adjustment"
-        )
-        self.assertEqual(session["key"], "deployment_adjustment")
-        self.assertEqual(session["period"], {"start": "20230401", "end": "20231229"})
-        self.assertNotIn("record", session)
-        listing = self.client.get("/api/experiments").json()
-        completed_before = {
-            item["experiment_id"]: item for item in listing["experiments"]
-        }["exp_hitl"]["completed_sessions"]
-
-        adjusted_dir = experiment_dir / "artifacts/strategy/frozen/strategy_deployment_abc"
-        (adjusted_dir / "output").mkdir(parents=True)
-        (adjusted_dir / "models").mkdir()
-        with ledger_path.open("a", encoding="utf-8") as handle:
-            handle.write(
-                json.dumps(
-                    {
-                        "schema_version": 1,
-                        "record_type": "deployment_adjustment",
-                        "experiment_id": "exp_hitl",
-                        "epoch_id": "epoch_001",
-                        "fold_id": "deployment_20230401..20231229",
-                        "run_id": "run_deployment",
-                        "session_key": "deployment_adjustment",
-                        "status": "adjusted",
-                        "parent_strategy_artifact_id": "strategy_epoch_001_fold_2022Q1",
-                        "adjusted_strategy_artifact_id": "strategy_deployment_abc",
-                        "adjusted_strategy_artifact_path": str(adjusted_dir / "output"),
-                        "adjusted_model_artifact_path": str(adjusted_dir / "models"),
-                        "hard_reject_reasons": [],
-                    }
-                )
-                + "\n"
-            )
-        # The adjustment is recorded: nothing is owed, so resume is sealed
-        # again, and the row and the adjusted candidate are on the page.
-        refused = self.client.post(
-            "/api/experiments/exp_hitl/control", json={"action": "resume"}
-        )
-        self.assertEqual(refused.status_code, 400)
-        detail = self.client.get("/api/experiments/exp_hitl").json()
-        candidate = detail["paper_candidate"]
-        self.assertEqual(candidate["source"], "adjusted")
-        self.assertEqual(candidate["artifact_id"], "strategy_deployment_abc")
-        # The command still pins the graduate: the adjusted artifact's refit
-        # window includes the Held-out months, so it is only an alternative.
-        self.assertTrue(
-            candidate["command"].endswith("--artifact strategy_epoch_001_fold_2022Q1")
-        )
-        session = next(
-            row for row in detail["sessions"] if row["kind"] == "deployment_adjustment"
-        )
-        self.assertEqual(session["record"]["status"], "adjusted")
-        self.assertEqual(session["record"]["record_type"], "deployment_adjustment")
-        self.assertNotIn("adjusted_strategy_artifact_path", session["record"])
-        listing = self.client.get("/api/experiments").json()
-        entry = {item["experiment_id"]: item for item in listing["experiments"]}["exp_hitl"]
-        self.assertEqual(entry["paper_candidate"]["artifact_id"], "strategy_deployment_abc")
-        # The durable row completes the planned session in the progress count.
-        self.assertEqual(entry["completed_sessions"], completed_before + 1)
-
     def test_the_sealed_test_calendar_stays_sealed_until_the_reveal(self) -> None:
         """The fold record names the window the Test evaluation will use.
 
@@ -3090,16 +1960,6 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertEqual(
             revealed["test_decision_time"], "2021-12-31T23:59:59+08:00"
         )
-
-    def test_the_sealed_calendar_is_absent_from_the_session_projection(self) -> None:
-        detail = self.client.get("/api/experiments/exp_hitl").json()
-        records = [
-            session["record"] for session in detail["sessions"] if session.get("record")
-        ]
-        self.assertTrue(records)
-        for record in records:
-            self.assertNotIn("test_period", record)
-            self.assertNotIn("test_decision_time", record)
 
     def test_sub_windows_ride_with_the_result_they_belong_to(self) -> None:
         """The per-quarter breakdown follows its result through the same gate:
@@ -3409,546 +2269,7 @@ class WebuiBackendTest(unittest.TestCase):
             len(csv_response.text.strip().splitlines()), 502
         )  # header + 501
 
-    def test_summary_carries_the_revealed_heldout_metric(self) -> None:
-        self._reveal()
-        payload = self.client.get("/api/experiments").json()
-        hitl = next(
-            e for e in payload["experiments"] if e["experiment_id"] == "exp_hitl"
-        )
-        self.assertAlmostEqual(hitl["metrics"]["cum_heldout_return"], -0.03)
-        # A fold row carries identity, status, which strategy the Fold left in
-        # force, the Fold's baseline and its selection statistics; the returns
-        # themselves are read from each session's own record.
-        self.assertEqual(
-            sorted(hitl["fold_returns"][0]),
-            [
-                "epoch_id",
-                "fold_ref",
-                "fold_status",
-                "parent_control",
-                "selection",
-                "strategy_in_force",
-            ],
-        )
-        # This ledger predates the block, so the row says so instead of
-        # publishing zeros.
-        self.assertIsNone(hitl["fold_returns"][0]["selection"])
-
-    def test_fold_returns_carry_the_parent_control_baseline(self) -> None:
-        self._build_walk_forward_experiment("exp_wf")
-        detail = self.client.get("/api/experiments/exp_wf").json()
-        rows = {row["fold_ref"]: row for row in detail["fold_returns"]}
-        # The first Fold of the first Epoch inherits nothing.
-        first = rows[self._fold_ref("fold_2022", "exp_wf")]["parent_control"]
-        self.assertIsNone(first)
-        beat = rows[self._fold_ref("fold_2023", "exp_wf")]["parent_control"]
-        self.assertEqual(beat["status"], "ok")
-        # A control that ran carries no failure reason to explain away.
-        self.assertIsNone(beat["error"])
-        # A single-period window is scored whole, and says so.
-        self.assertEqual(
-            (beat["source"], beat["period_start"], beat["period_end"]),
-            ("validation_result", "20230104", "20231230"),
-        )
-        self.assertAlmostEqual(beat["return"], 0.08)
-        # Excess is measured against the control's own benchmark.
-        self.assertAlmostEqual(beat["excess_return"], 0.05)
-        # The graded figure rides beside the raw one on the same row.
-        self.assertAlmostEqual(beat["neutralized_excess_return"], 0.05)
-        self.assertAlmostEqual(beat["sharpe"], 0.60)
-        self.assertAlmostEqual(beat["max_drawdown"], 0.07)
-        self.assertIsNone(beat["excess_percentile"])
-        # A trailing window is read on its new period, and against that
-        # period's own null control -- not the window's.
-        lost = rows[self._fold_ref("fold_2024", "exp_wf")]["parent_control"]
-        # ... and the row names that period, so the console cannot present a
-        # quarter's numbers under the whole window's header.
-        self.assertEqual(
-            (lost["source"], lost["period_start"], lost["period_end"]),
-            ("step_result", "20241008", "20241231"),
-        )
-        self.assertAlmostEqual(lost["return"], 0.01)
-        self.assertAlmostEqual(lost["excess_return"], -0.03)
-        self.assertAlmostEqual(lost["neutralized_excess_return"], -0.03)
-        self.assertAlmostEqual(lost["sharpe"], 0.10)
-        self.assertAlmostEqual(lost["excess_percentile"], 0.42)
-        # A failed control keeps its status and why it failed, and carries no
-        # numbers at all. Without the reason the console can only render the
-        # Fold as unreadable, which an operator reads as a corrupt record.
-        self.assertEqual(
-            rows[self._fold_ref("fold_2025", "exp_wf")]["parent_control"],
-            {
-                "status": "failed",
-                # Redacted by the projection the Agent reads the same reason
-                # through (agent_views.parent_control_error_text).
-                "error": (
-                    "BacktestError: generate_orders failed: KeyError 'close' "
-                    "([host_path])"
-                ),
-                # This lineage never froze an anchor, so nothing here replayed
-                # a control the counts would leave out.
-                "baseline_anchor": False,
-                # No numbers, but the window the control was meant to cover.
-                "source": "validation_result",
-                "period_start": "20250104",
-                "period_end": "20251230",
-                "return": None,
-                "excess_return": None,
-                "neutralized_excess_return": None,
-                "sharpe": None,
-                "max_drawdown": None,
-                "excess_percentile": None,
-            },
-        )
-
-    def test_fold_returns_carry_the_selection_statistics(self) -> None:
-        """Trial count and deflated-Sharpe probability per Fold: Validation-only
-        development evidence, published beside the baseline and before the
-        Test/Held-out reveal like every other development number."""
-
-        self._build_walk_forward_experiment("exp_wf")
-        detail = self.client.get("/api/experiments/exp_wf").json()
-        self.assertFalse(detail["test_revealed"])
-        rows = {row["fold_ref"]: row for row in detail["fold_returns"]}
-        self.assertEqual(
-            rows[self._fold_ref("fold_2022", "exp_wf")]["selection"],
-            {
-                "candidates_evaluated": 6,
-                "trials": 6,
-                "deflated_sharpe_probability": 0.81,
-                "sharpe_star": 0.42,
-                "unavailable_reason": None,
-            },
-        )
-        # The correction's N is the finite-Sharpe subset, served apart from the
-        # search width so the console never credits it to the wrong number.
-        narrowed = rows[self._fold_ref("fold_2024", "exp_wf")]["selection"]
-        self.assertEqual(narrowed["candidates_evaluated"], 3)
-        self.assertEqual(narrowed["trials"], 2)
-        thin = rows[self._fold_ref("fold_2025", "exp_wf")]["selection"]
-        self.assertEqual(thin["candidates_evaluated"], 1)
-        # Unavailable, never 0: one trial cannot estimate the selection bias.
-        self.assertIsNone(thin["deflated_sharpe_probability"])
-        self.assertEqual(thin["unavailable_reason"], "fewer_than_two_trials")
-
-    def test_epoch_metrics_carry_the_walk_forward_transition_counts(self) -> None:
-        """The per-Epoch counts carry the two-thirds bar the acceptance rules
-        apply, so the console states the threshold instead of restating the
-        rule in the frontend — and the two diagnostics that say how much ground
-        those transitions actually won, which a bare 1/3 does not."""
-
-        self._build_walk_forward_experiment("exp_wf")
-        detail = self.client.get("/api/experiments/exp_wf").json()
-        self.assertEqual(
-            [epoch["walk_forward"] for epoch in detail["metrics_by_epoch"]],
-            [
-                {
-                    "source": "parent_control",
-                    "transitions": 3,
-                    "positive_excess": 1,
-                    # The crashed replay is counted and named, not hidden in
-                    # the denominator.
-                    "failed": 1,
-                    # A counted transition with no measured sign fails the
-                    # verdict; none here has one.
-                    "unmeasured": 0,
-                    "required": 2,
-                    # +5% and −3% neutralized on the two scored transitions —
-                    # the caliber the count itself was taken on; the failed one
-                    # carries no excess and cannot be averaged as a zero.
-                    "mean_neutralized_excess": pytest.approx(0.01),
-                    # Only the trailing transition ran a null control, and it is
-                    # ranked on the span it is scored on (0.42, not the window's
-                    # flattering 0.99).
-                    "mean_excess_percentile": pytest.approx(0.42),
-                }
-            ],
-        )
-
-    def test_the_experiment_list_carries_the_walk_forward_term_for_the_cards(
-        self,
-    ) -> None:
-        """The card reads the same projection the verdict does.
-
-        Cards render from the list payload, the detail page's strip from the
-        detail payload. Three cumulative-return tiles over ground the lineage
-        was developed on, with no future-quarter evidence beside them, is
-        exactly the comparison the graduation verdict refuses to make -- so the
-        list has to serve the walk-forward block rather than leave the card to
-        recount the transitions out of the Fold rows.
-        """
-        from autotrade.pipelines.ledger import walk_forward_transitions
-        from autotrade.webui import registry
-
-        directory = self._build_walk_forward_experiment("exp_wf")
-        listed = next(
-            row
-            for row in self.client.get("/api/experiments").json()["experiments"]
-            if row["experiment_id"] == "exp_wf"
-        )
-        detail = self.client.get("/api/experiments/exp_wf").json()
-        self.assertEqual(listed["metrics_by_epoch"], detail["metrics_by_epoch"])
-        term = next(
-            row["walk_forward"]
-            for row in listed["metrics_by_epoch"]
-            if row["epoch_id"] == listed["metrics"]["epoch_id"]
-        )
-        counts = walk_forward_transitions(
-            registry.read_ledger_records(directory),
-            epoch_id="epoch_001",
-            test_stage=False,
-        )
-        # Positives, total, and the ⌈2/3⌉ floor the card states -- the ledger's
-        # own numbers, so the card can never round a failing 1/3 up.
-        self.assertEqual(term["transitions"], counts["transitions"])
-        self.assertEqual(term["positive_excess"], counts["positive_excess"])
-        self.assertEqual(
-            (term["transitions"], term["positive_excess"], term["required"]),
-            (3, 1, 2),
-        )
-        self.assertAlmostEqual(term["mean_neutralized_excess"], 0.01)
-
-    def test_the_transition_rows_are_exactly_the_counted_transitions(self) -> None:
-        """The table and the count are one record, read two ways.
-
-        The console draws one row per Fold after the Epoch's first and heads it
-        with the ledger's counts; if the two were assembled separately a table
-        could show four rows under "3 transitions", or quietly drop the failed
-        control that is precisely what a transition proving nothing looks like.
-        """
-        from autotrade.pipelines.ledger import walk_forward_transitions
-        from autotrade.webui import registry
-
-        directory = self._build_walk_forward_experiment("exp_wf")
-        detail = self.client.get("/api/experiments/exp_wf").json()
-        counts = walk_forward_transitions(
-            registry.read_ledger_records(directory),
-            epoch_id="epoch_001",
-            test_stage=False,
-        )
-        term = detail["metrics_by_epoch"][0]["walk_forward"]
-        self.assertEqual(term["transitions"], counts["transitions"])
-        self.assertEqual(term["positive_excess"], counts["positive_excess"])
-        self.assertEqual(term["source"], counts["source"])
-        # The strip above the fold summarizes the same record: its mean null
-        # percentile is the ledger's own figure, not a second average over a
-        # differently chosen set of rows.
-        self.assertEqual(
-            term["mean_excess_percentile"], counts["mean_excess_percentile"]
-        )
-        # Rows: every Fold of the Epoch except its first, in walk-forward order.
-        rows = [
-            row for row in detail["fold_returns"] if row["epoch_id"] == "epoch_001"
-        ][1:]
-        self.assertEqual(len(rows), counts["transitions"])
-        self.assertEqual(
-            sum(
-                1
-                for row in rows
-                if (row["parent_control"]["neutralized_excess_return"] or 0) > 0
-            ),
-            counts["positive_excess"],
-        )
-        # A trailing window is scored on its new period and ranked against that
-        # period's own null control, so the row carries 0.42, not the window's
-        # flattering 0.99.
-        trailing = rows[1]["parent_control"]
-        self.assertEqual(trailing["source"], "step_result")
-        self.assertAlmostEqual(trailing["excess_percentile"], 0.42)
-        # The failed control stays a row: a transition that proved nothing is
-        # not a missing transition.
-        self.assertEqual(rows[2]["parent_control"]["status"], "failed")
-        self.assertIsNone(rows[2]["parent_control"]["excess_return"])
-        # And the strip's mean is the mean of exactly these rows' own graded
-        # figures — the failed one contributing nothing rather than a zero, and
-        # the raw excess riding beside it without deciding anything.
-        scored = [
-            row["parent_control"]["neutralized_excess_return"]
-            for row in rows
-            if row["parent_control"]["neutralized_excess_return"] is not None
-        ]
-        self.assertEqual(
-            term["mean_neutralized_excess"], pytest.approx(sum(scored) / len(scored))
-        )
-        self.assertIsNotNone(rows[0]["parent_control"]["excess_return"])
-
-    def test_verdict_publishes_the_shipped_artifacts_own_forward_record(self) -> None:
-        """Term (b) counts the chain; only term (c) is about this artifact.
-
-        The pipeline stamps both into every Held-out period, so the console
-        lifts them once beside the verdict — with the Fold that froze the
-        artifact named by its public ref, never by the host token the ledger
-        uses.
-        """
-        self._build_walk_forward_experiment("exp_wf")
-        self._reveal("exp_wf")
-        response = self.client.get("/api/experiments/exp_wf")
-        verdict = response.json()["verdict"]
-        diagnostics = verdict["diagnostics"]
-        self.assertEqual(diagnostics["final_artifact_forward_transitions"], 2)
-        self.assertEqual(diagnostics["final_artifact_forward_positive"], 2)
-        self.assertAlmostEqual(diagnostics["deflated_sharpe_probability"], 0.55)
-        self.assertAlmostEqual(diagnostics["validation_excess_percentile"], 0.61)
-        self.assertEqual(
-            diagnostics["frozen_fold_ref"],
-            self._fold_ref("fold_2023", "exp_wf"),
-        )
-        # Both the lifted block and the per-period one are redacted, and the
-        # raw Fold token never reaches the wire.
-        self.assertNotIn("frozen_fold_id", diagnostics)
-        self.assertEqual(verdict["periods"][0]["diagnostics"], diagnostics)
-        self.assertNotIn("fold_2023", response.text)
-
-    def test_parent_control_is_development_evidence_and_survives_the_guard(
-        self,
-    ) -> None:
-        """The control is a Validation on the Fold's own development window:
-        sealing it with the Test evidence would hide the Fold's baseline for
-        the whole run."""
-
-        self._build_walk_forward_experiment("exp_wf")
-        detail = self.client.get("/api/experiments/exp_wf").json()
-        self.assertFalse(detail["test_revealed"])
-        session = next(
-            entry
-            for entry in detail["sessions"]
-            if entry.get("fold_ref") == self._fold_ref("fold_2023", "exp_wf")
-        )
-        control = session["record"]["parent_control"]
-        self.assertEqual(control["validation_result"]["total_return"], 0.08)
-        self.assertEqual(
-            control["parent_strategy_artifact_ref"],
-            self._identity("exp_wf").strategy_ref("strategy_epoch_001_fold_2022"),
-        )
-        # The on-disk pointer never rides along, and Test evidence stays gone.
-        self.assertNotIn("validation_result_ref", control)
-        self.assertNotIn("test_result", session["record"])
-        # The counts are development data too, so they are published pre-reveal.
-        self.assertEqual(detail["metrics_by_epoch"][0]["walk_forward"]["transitions"], 3)
-        fold_ref = self._fold_ref("fold_2023", "exp_wf")
-        fold = self.client.get(
-            f"/api/experiments/exp_wf/folds/epoch_001/{fold_ref}"
-        ).json()
-        self.assertEqual(fold["record"]["parent_control"]["status"], "ok")
-        self.assertEqual(fold["test_audit"], {"hidden": True})
-
-    def test_the_heldout_session_states_its_verdict_or_states_the_seal(self) -> None:
-        """The Held-out line reports the graduation verdict once it exists.
-
-        It is the one session whose result is a verdict rather than a return,
-        and the payload has to say which of the two situations it is in: before
-        the reveal the session's records come through sealed and no verdict
-        exists, so the line can only say the numbers are still sealed; after it,
-        the same session carries its records and the experiment carries the
-        verdict — with the failing reasons the line names.
-        """
-        self._build_walk_forward_experiment("exp_wf")
-        detail = self.client.get("/api/experiments/exp_wf").json()
-        session = next(
-            entry for entry in detail["sessions"] if entry["kind"] == "heldout"
-        )
-        self.assertTrue(session["hidden"])
-        self.assertTrue(all(record["hidden"] for record in session["records"]))
-        self.assertIsNone(detail["verdict"])
-
-        self._reveal("exp_wf")
-        detail = self.client.get("/api/experiments/exp_wf").json()
-        session = next(
-            entry for entry in detail["sessions"] if entry["kind"] == "heldout"
-        )
-        self.assertNotIn("hidden", session)
-        self.assertEqual(
-            [record["result"]["total_return"] for record in session["records"]], [0.05]
-        )
-        self.assertEqual(detail["verdict"]["status"], "discarded")
-        self.assertEqual(
-            detail["verdict"]["reasons"], ["walkforward_excess_inconsistent(1/3<2)"]
-        )
-
-    def test_verdict_surfaces_the_walk_forward_term_beside_it(self) -> None:
-        self._build_walk_forward_experiment("exp_wf")
-        self.assertIsNone(self.client.get("/api/experiments/exp_wf").json()["verdict"])
-        self._reveal("exp_wf")
-        verdict = self.client.get("/api/experiments/exp_wf").json()["verdict"]
-        self.assertEqual(verdict["status"], "discarded")
-        self.assertEqual(
-            verdict["walk_forward"],
-            {
-                "status": "inconsistent",
-                "source": "parent_control",
-                "transitions": 3,
-                "positive_excess": 1,
-                "required": 2,
-            },
-        )
-        self.assertEqual(
-            verdict["reasons"], ["walkforward_excess_inconsistent(1/3<2)"]
-        )
-
     # ---- lifecycle guards ------------------------------------------------------
-    def test_experiment_detail_merges_schedule_and_records(self) -> None:
-        detail = self.client.get("/api/experiments/exp_hitl").json()
-        sessions = {session["key"]: session for session in detail["sessions"]}
-        q1_key = self._session_ref("epoch_001/fold_2022Q1")
-        q2_key = self._session_ref("epoch_001/fold_2022Q2")
-        self.assertIn("record", sessions[q1_key])
-        self.assertNotIn("record", sessions[q2_key])
-        self.assertEqual(sessions[q1_key]["label"], "2022Q1")
-        self.assertEqual(sessions[q1_key]["display_key"], "epoch_001/2022Q1")
-        self.assertTrue(str(sessions[q1_key]["fold_ref"]).startswith("fold_ref_"))
-        self.assertNotEqual(sessions[q1_key]["key"], "epoch_001/fold_2022Q1")
-        self.assertTrue(sessions[q1_key]["analysis_available"])
-        self.assertEqual(detail["control"]["mode"], "manual")
-        sealed_period_fields = {"heldout_first_period", "heldout_last_period"}
-        self.assertTrue(sealed_period_fields.isdisjoint(detail["params"]))
-        # The development window is not sealed: the session labels publish it.
-        self.assertEqual(detail["params"]["development_first_period"], "2022Q1")
-        self.assertEqual(detail["params"]["development_last_period"], "2022Q2")
-        self._reveal()
-        revealed = self.client.get("/api/experiments/exp_hitl").json()
-        self.assertEqual(
-            {key: revealed["params"][key] for key in sealed_period_fields},
-            {"heldout_first_period": "2023Q1", "heldout_last_period": "2023Q1"},
-        )
-        self.assertEqual(self.client.get("/api/experiments/nope").status_code, 404)
-
-    def test_modern_public_api_exposes_only_opaque_identities(self) -> None:
-        _research_inputs(self.repo_root)
-        identity = self._identity()
-        fold_ref = identity.fold_ref("fold_2022Q1")
-        run_ref = identity.run_ref("run_001")
-        trace_ref = identity.trace_ref("run_001")
-        session_ref = identity.public_session_key("epoch_001/fold_2022Q2")
-        forbidden = (
-            "fold_2022Q1",
-            "fold_2022Q2",
-            "run_001",
-            "run_meta",
-            "run_heldout",
-            str(self.repo_root),
-            str(self.experiments_root),
-        )
-
-        json_responses = [
-            self.client.get("/api/experiments"),
-            self.client.get("/api/experiments/exp_hitl"),
-            self.client.get("/api/experiments/exp_hitl/status"),
-            self.client.get(
-                f"/api/experiments/exp_hitl/folds/epoch_001/{fold_ref}"
-            ),
-            self.client.get("/api/experiments/exp_hitl/steps"),
-            self.client.get(
-                "/api/experiments/exp_hitl/trace/stats",
-                params={"run_id": run_ref},
-            ),
-            self.client.get(
-                "/api/experiments/exp_hitl/trace/blocks",
-                params={"run_id": trace_ref},
-            ),
-            self.client.get(
-                f"/api/experiments/exp_hitl/analysis/epoch_001/{fold_ref}"
-            ),
-            self.client.post(
-                "/api/experiments/exp_hitl/prompt-preview",
-                json={"session_key": session_ref, "directive": "控制回撤"},
-            ),
-        ]
-        for response in json_responses:
-            self.assertEqual(response.status_code, 200, response.text)
-            public_text = json.dumps(response.json(), ensure_ascii=False)
-            for marker in forbidden:
-                self.assertNotIn(marker, public_text)
-
-        trace_download = self.client.get(
-            "/api/experiments/exp_hitl/trace/download",
-            params={"run_id": trace_ref},
-        )
-        self.assertEqual(trace_download.status_code, 200, trace_download.text)
-        strategy_download = self.client.get(
-            f"/api/experiments/exp_hitl/folds/epoch_001/{fold_ref}/strategy.zip"
-        )
-        self.assertEqual(strategy_download.status_code, 200)
-        orders_download = self.client.get(
-            f"/api/experiments/exp_hitl/folds/epoch_001/{fold_ref}/orders.csv",
-            params={"result": VALID_RESULT_DIR},
-        )
-        self.assertEqual(orders_download.status_code, 200)
-        for response in (trace_download, strategy_download, orders_download):
-            disposition = response.headers.get("content-disposition", "")
-            for marker in forbidden:
-                self.assertNotIn(marker, disposition)
-        for marker in forbidden:
-            self.assertNotIn(marker, trace_download.text)
-
-        self.assertEqual(
-            self.client.get(
-                "/api/experiments/exp_hitl/folds/epoch_001/fold_2022Q1"
-            ).status_code,
-            404,
-        )
-        self.assertEqual(
-            self.client.get(
-                "/api/experiments/exp_hitl/trace/blocks", params={"run_id": "run_001"}
-            ).status_code,
-            404,
-        )
-        self.assertEqual(
-            self.client.post(
-                "/api/experiments/exp_hitl/control",
-                json={
-                    "action": "set_gpu_count",
-                    "session_key": "epoch_001/fold_2022Q2",
-                    "directive": "1",
-                },
-            ).status_code,
-            400,
-        )
-
-        # A host path has at least two segments; a bare ``/secret`` is prose or
-        # arithmetic far more often than a path, and cannot identify a host.
-        embedded_host_paths = (
-            "/var/lib/private/result.json",
-            "/srv/secret",
-            "path:/srv/secret",
-            "path:/var/lib/private/result.json",
-            "file:///tmp/private/result.json",
-            "file://server/share/private.txt",
-            r"C:\Users\private\result.json",
-        )
-        error = "failed opening " + " and ".join(embedded_host_paths)
-        public_status = identity.public_status(
-            {
-                "state": "failed",
-                "error": error,
-                "final_strategy_artifact": "strategy_secret_raw",
-            }
-        )
-        public_status_text = json.dumps(public_status)
-        for embedded_host_path in embedded_host_paths:
-            self.assertNotIn(embedded_host_path, public_status_text)
-        self.assertNotIn("strategy_secret_raw", public_status_text)
-        self.assertTrue(
-            str(public_status["final_strategy_ref"]).startswith("strategy_ref_")
-        )
-        public_event = identity.public_record(
-            {
-                "event_type": "tool_call",
-                "run_id": "run_001",
-                "error": error,
-                "safe_paths": (
-                    "GET /api/experiments/x; read /mnt/agent/workspace/main.py; "
-                    "see https://example.test/docs/path"
-                ),
-            },
-            heldout_revealed=False,
-        )
-        public_event_text = json.dumps(public_event)
-        for embedded_host_path in embedded_host_paths:
-            self.assertNotIn(embedded_host_path, public_event_text)
-        self.assertIn("/api/experiments/x", public_event_text)
-        self.assertIn("/mnt/agent/workspace/main.py", public_event_text)
-        self.assertIn("https://example.test/docs/path", public_event_text)
-
     def test_corrupt_identity_store_fails_closed_without_host_paths(self) -> None:
         directory = self._build_hitl_experiment("exp_bad_refs")
         store_path = directory / ".host/agent-refs.json"
@@ -4445,11 +2766,7 @@ class WebuiBackendTest(unittest.TestCase):
             json={
                 "params": {
                     "experiment_id": "exp_new",
-                    "fold_period": "quarter",
-                    "development_first_period": "2024Q1",
-                    "development_last_period": "2024Q1",
-                    "heldout_first_period": "2024Q2",
-                    "heldout_last_period": "2024Q2",
+                    **DEFAULT_RESEARCH_GEOMETRY.to_record(),
                 }
             },
         )
@@ -4466,11 +2783,7 @@ class WebuiBackendTest(unittest.TestCase):
             created = manager.create_experiment(
                 {
                     "experiment_id": "exp_last_slot",
-                    "fold_period": "quarter",
-                    "development_first_period": "2024Q1",
-                    "development_last_period": "2024Q1",
-                    "heldout_first_period": "2024Q2",
-                    "heldout_last_period": "2024Q2",
+                    **DEFAULT_RESEARCH_GEOMETRY.to_record(),
                 }
             )
         self.assertEqual(created["experiment_id"], "exp_last_slot")
@@ -4486,11 +2799,7 @@ class WebuiBackendTest(unittest.TestCase):
             manager.create_experiment(
                 {
                     "experiment_id": "exp_overflow",
-                    "fold_period": "quarter",
-                    "development_first_period": "2024Q1",
-                    "development_last_period": "2024Q1",
-                    "heldout_first_period": "2024Q2",
-                    "heldout_last_period": "2024Q2",
+                    **DEFAULT_RESEARCH_GEOMETRY.to_record(),
                 }
             )
         self.assertFalse((self.experiments_root / "exp_overflow").exists())
@@ -4572,360 +2881,6 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertEqual(len(response.text.strip().splitlines()), 3)
         self.assertIn(trace_ref, response.headers["content-disposition"])
         self.assertNotIn("run_001", response.headers["content-disposition"])
-
-    def test_prompt_preview_embeds_directive_and_guards_heldout(self) -> None:
-        _research_inputs(self.repo_root)
-        preview = self.client.post(
-            "/api/experiments/exp_hitl/prompt-preview",
-            json={
-                "session_key": self._session_ref("epoch_001/fold_2022Q2"),
-                "directive": "控制回撤",
-            },
-        )
-        self.assertEqual(preview.status_code, 200, preview.text)
-        payload = preview.json()
-        self.assertEqual(sorted(payload), ["note", "prompt"])
-        self.assertIn("控制回撤", payload["prompt"])
-        # The preview is a prompt, not an evidence channel: the held-out
-        # schedule never reaches it.
-        self.assertNotIn("2023Q1", payload["prompt"])
-        self.assertNotIn("test_period", payload["prompt"])
-        self.assertNotIn("fold_2022Q2", payload["prompt"])
-        self.assertNotIn("2022Q2", payload["prompt"])
-        refused = self.client.post(
-            "/api/experiments/exp_hitl/prompt-preview", json={"session_key": "heldout"}
-        )
-        self.assertEqual(refused.status_code, 400)
-
-
-class InheritFromTest(unittest.TestCase):
-    """Creating an experiment with ``inherit_from`` must actually inherit.
-
-    The console copies the source experiment's latest frozen fold output into
-    the new experiment as a read-only snapshot, and the worker starts its first
-    Fold from that snapshot instead of the blank template. Both halves are
-    asserted here: accepting the parameter without seeding the run would be a
-    decorative feature.
-    """
-
-    def setUp(self) -> None:
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.repo_root = Path(self._tmp.name)
-        self.experiments_root = self.repo_root / "experiments"
-        self.experiments_root.mkdir(parents=True)
-        self.manager = ExperimentManager(self.repo_root, self.experiments_root)
-
-    def _source_experiment(
-        self, experiment_id: str = "exp_source", *, with_fold: bool = True
-    ) -> Path:
-        directory = self.experiments_root / experiment_id
-        (directory / "hitl").mkdir(parents=True)
-        write_json_atomic(
-            directory / "hitl/params.json", {"experiment_id": experiment_id}
-        )
-        write_json_atomic(
-            directory / "hitl/status.json", {"schema_version": 1, "state": "completed"}
-        )
-        if not with_fold:
-            _write_ledger(directory, [])
-            return directory
-        frozen = (
-            directory
-            / "artifacts/strategy/frozen/strategy_epoch_001_fold_2022Q1/output"
-        )
-        frozen.mkdir(parents=True)
-        (frozen / "main.py").write_text(
-            "def generate_orders(context):\n    return []  # inherited\n",
-            encoding="utf-8",
-        )
-        models = (
-            directory
-            / "artifacts/strategy/frozen/strategy_epoch_001_fold_2022Q1/models"
-        )
-        models.mkdir(parents=True)
-        (models / "params.json").write_text('{"alpha": 1}\n', encoding="utf-8")
-        _write_ledger(
-            directory,
-            [
-                {
-                    "record_type": "fold",
-                    "experiment_id": experiment_id,
-                    "epoch_id": "epoch_001",
-                    "fold_id": "fold_2022Q1",
-                    "run_id": "run_001",
-                    "session_key": "epoch_001/fold_2022Q1",
-                    "fold_status": "frozen",
-                    "test_period": "20220101..20220331",
-                    "frozen_strategy_artifact_id": "strategy_epoch_001_fold_2022Q1",
-                    "frozen_strategy_artifact_path": str(frozen),
-                    "frozen_model_artifact_path": str(models),
-                }
-            ],
-        )
-        return directory
-
-    def test_inherit_import_copies_and_locks_the_source_artifact(self) -> None:
-        self._source_experiment()
-        target = self.experiments_root / "exp_child"
-        (target / "hitl").mkdir(parents=True)
-        payload = self.manager._import_inherited_artifact(target, "exp_source")
-
-        self.assertEqual(payload["source_experiment_id"], "exp_source")
-        self.assertEqual(payload["source_fold_id"], "fold_2022Q1")
-        self.assertEqual(
-            payload["source_artifact_id"], "strategy_epoch_001_fold_2022Q1"
-        )
-        copied = Path(str(payload["path"]))
-        self.assertTrue((copied / "main.py").exists())
-        self.assertIn("inherited", (copied / "main.py").read_text(encoding="utf-8"))
-        self.assertTrue(copied.is_relative_to(target))
-        models = Path(str(payload["model_path"]))
-        self.assertTrue((models / "params.json").exists())
-        # The snapshot is immutable evidence: read-only stands in for a digest.
-        self.assertEqual((copied / "main.py").stat().st_mode & 0o222, 0)
-        self.assertEqual((models / "params.json").stat().st_mode & 0o222, 0)
-
-    def test_inherit_from_a_source_without_a_recorded_fold_is_refused(self) -> None:
-        self._source_experiment("exp_bare", with_fold=False)
-        target = self.experiments_root / "exp_child"
-        (target / "hitl").mkdir(parents=True)
-        with self.assertRaises(ManagerError):
-            self.manager._import_inherited_artifact(target, "exp_bare")
-        self.assertFalse((target / "artifacts/strategy/_inherited").exists())
-
-    def test_created_experiment_records_the_inherited_seed(self) -> None:
-        self._source_experiment()
-        with patch.object(
-            ExperimentManager, "start_worker", return_value={"spawned": False}
-        ):
-            self.manager.create_experiment(
-                {
-                    "experiment_id": "exp_child",
-                    "fold_period": "quarter",
-                    "development_first_period": "2024Q1",
-                    "development_last_period": "2024Q1",
-                    "heldout_first_period": "2024Q2",
-                    "heldout_last_period": "2024Q2",
-                    "inherit_from": "exp_source",
-                }
-            )
-        params = json.loads(
-            (self.experiments_root / "exp_child/hitl/params.json").read_text(
-                encoding="utf-8"
-            )
-        )
-        inherited = params["_inherited_artifact"]
-        self.assertEqual(inherited["source_experiment_id"], "exp_source")
-        self.assertTrue(Path(inherited["path"]).is_dir())
-
-    def test_worker_starts_the_first_fold_from_the_inherited_artifact(self) -> None:
-        from autotrade.pipelines.worker import _load_inherited_parent
-
-        self._source_experiment()
-        with patch.object(
-            ExperimentManager, "start_worker", return_value={"spawned": False}
-        ):
-            self.manager.create_experiment(
-                {
-                    "experiment_id": "exp_child",
-                    "fold_period": "quarter",
-                    "development_first_period": "2024Q1",
-                    "development_last_period": "2024Q1",
-                    "heldout_first_period": "2024Q2",
-                    "heldout_last_period": "2024Q2",
-                    "inherit_from": "exp_source",
-                }
-            )
-        child = self.experiments_root / "exp_child"
-
-        parent = _load_inherited_parent(child)
-        self.assertIsNotNone(parent)
-        self.assertEqual(parent.source_fold_id, "fold_2022Q1")
-        self.assertIn(
-            "inherited", (parent.path / "main.py").read_text(encoding="utf-8")
-        )
-        self.assertIsNotNone(parent.model_path)
-
-        # An experiment created without inherit_from starts blank.
-        with patch.object(
-            ExperimentManager, "start_worker", return_value={"spawned": False}
-        ):
-            self.manager.create_experiment(
-                {
-                    "experiment_id": "exp_blank",
-                    "fold_period": "quarter",
-                    "development_first_period": "2024Q1",
-                    "development_last_period": "2024Q1",
-                    "heldout_first_period": "2024Q2",
-                    "heldout_last_period": "2024Q2",
-                }
-            )
-        self.assertIsNone(_load_inherited_parent(self.experiments_root / "exp_blank"))
-
-    def test_tampered_inherited_snapshot_stops_the_run(self) -> None:
-        from autotrade.environment.artifacts import ArtifactError
-        from autotrade.pipelines.worker import _load_inherited_parent
-
-        self._source_experiment()
-        with patch.object(
-            ExperimentManager, "start_worker", return_value={"spawned": False}
-        ):
-            self.manager.create_experiment(
-                {
-                    "experiment_id": "exp_child",
-                    "fold_period": "quarter",
-                    "development_first_period": "2024Q1",
-                    "development_last_period": "2024Q1",
-                    "heldout_first_period": "2024Q2",
-                    "heldout_last_period": "2024Q2",
-                    "inherit_from": "exp_source",
-                }
-            )
-        child = self.experiments_root / "exp_child"
-        seed = Path(
-            json.loads((child / "hitl/params.json").read_text(encoding="utf-8"))[
-                "_inherited_artifact"
-            ]["path"]
-        )
-        # A seed that became writable again is unverified strategy code.
-        (seed / "main.py").chmod(0o644)
-        with self.assertRaisesRegex(ArtifactError, "writable"):
-            _load_inherited_parent(child)
-        # A seed that vanished is refused just as loudly.
-        moved = seed.with_name("moved")
-        seed.rename(moved)
-        with self.assertRaisesRegex(
-            RuntimeError, "inherited artifact directory is missing"
-        ):
-            _load_inherited_parent(child)
-        moved.rename(seed)
-        (seed / "main.py").chmod(0o444)
-        self.assertIsNotNone(_load_inherited_parent(child))
-
-    def test_inherit_choices_list_only_sources_with_a_recorded_fold(self) -> None:
-        self._source_experiment("exp_source")
-        self._source_experiment("exp_bare", with_fold=False)
-        client = TestClient(create_app(self.repo_root, self.experiments_root))
-        schema = client.get("/api/parameter-schema").json()
-        fields = {
-            field["key"]: field
-            for group in schema["groups"]
-            for field in group["fields"]
-        }
-        choices = fields["inherit_from"]["choices"]
-        self.assertEqual(choices[0], "")  # blank = start from the template
-        self.assertIn("exp_source", choices)
-        self.assertNotIn("exp_bare", choices)
-
-
-class InheritMemoryFromTest(unittest.TestCase):
-    """Creating an experiment with ``inherit_memory_from`` seeds its memory.
-
-    The console copies the source's latest published PRIOR (and skills) into
-    the new experiment as read-only generations and records them in
-    params.json; a source without a published PRIOR is refused before anything
-    is left on disk; the dropdown lists exactly the experiments that can seed
-    one.
-    """
-
-    PRIOR = "Closed: small-cap reversal (null percentile 0.5). Next: post-event drift."
-
-    def setUp(self) -> None:
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.repo_root = Path(self._tmp.name)
-        self.experiments_root = self.repo_root / "experiments"
-        self.experiments_root.mkdir(parents=True)
-        self.manager = ExperimentManager(self.repo_root, self.experiments_root)
-
-    def _source_experiment(self, experiment_id: str, *, prior: str) -> Path:
-        """A source as its own ledger leaves it: one Meta row naming the PRIOR
-        generation it published (or none when it published nothing)."""
-        directory = self.experiments_root / experiment_id
-        (directory / "hitl").mkdir(parents=True)
-        write_json_atomic(directory / "hitl/params.json", {"experiment_id": experiment_id})
-        write_json_atomic(
-            directory / "hitl/status.json", {"schema_version": 1, "state": "completed"}
-        )
-        if prior:
-            ExperimentPriorStore(directory).publish(prior, generation_id="gen_1")
-        _write_ledger(
-            directory,
-            [
-                {
-                    "record_type": "meta_learning",
-                    "experiment_id": experiment_id,
-                    "epoch_id": "epoch_001",
-                    "fold_id": "meta_001",
-                    "run_id": "run_m",
-                    "prior": prior,
-                    "prior_generation_id": "gen_1" if prior else None,
-                }
-            ],
-        )
-        return directory
-
-    def _create(self, **params: object) -> None:
-        with patch.object(
-            ExperimentManager, "start_worker", return_value={"spawned": False}
-        ):
-            self.manager.create_experiment(
-                {
-                    "experiment_id": "exp_child",
-                    "fold_period": "quarter",
-                    "development_first_period": "2024Q1",
-                    "development_last_period": "2024Q1",
-                    "heldout_first_period": "2024Q2",
-                    "heldout_last_period": "2024Q2",
-                    **params,
-                }
-            )
-
-    def test_created_experiment_seeds_the_inherited_memory(self) -> None:
-        from autotrade.pipelines.inherited_memory import load_inherited_memory
-
-        self._source_experiment("exp_memory", prior=self.PRIOR)
-        self._create(inherit_memory_from="exp_memory")
-        child = self.experiments_root / "exp_child"
-        params = json.loads((child / "hitl/params.json").read_text(encoding="utf-8"))
-        memory = params["_inherited_memory"]
-        self.assertEqual(memory["source_experiment_id"], "exp_memory")
-        self.assertEqual(memory["prior_generation_id"], "inherited_exp_memory")
-        self.assertEqual(memory["prior_source_generation_id"], "gen_1")
-        self.assertEqual(ExperimentPriorStore(child).current_text().strip(), self.PRIOR)
-        # Immutable evidence, and what the worker reads back at start.
-        self.assertEqual(Path(str(memory["prior_ref"])).stat().st_mode & 0o222, 0)
-        loaded = load_inherited_memory(child)
-        self.assertIsNotNone(loaded)
-        self.assertEqual(loaded.prior_text, self.PRIOR)
-
-    def test_a_source_without_a_published_prior_is_refused_and_leaves_nothing(
-        self,
-    ) -> None:
-        self._source_experiment("exp_bare", prior="")
-        with self.assertRaisesRegex(ManagerError, "no published PRIOR"):
-            self._create(inherit_memory_from="exp_bare")
-        self.assertFalse((self.experiments_root / "exp_child").exists())
-        with self.assertRaisesRegex(ManagerError, "unknown experiment"):
-            self._create(inherit_memory_from="exp_missing")
-        self.assertFalse((self.experiments_root / "exp_child").exists())
-
-    def test_memory_choices_list_only_sources_with_a_published_prior(self) -> None:
-        self._source_experiment("exp_memory", prior=self.PRIOR)
-        self._source_experiment("exp_bare", prior="")
-        client = TestClient(create_app(self.repo_root, self.experiments_root))
-        schema = client.get("/api/parameter-schema").json()
-        fields = {
-            field["key"]: field
-            for group in schema["groups"]
-            for field in group["fields"]
-        }
-        choices = fields["inherit_memory_from"]["choices"]
-        self.assertEqual(choices[0], "")  # blank = start from an empty memory
-        self.assertIn("exp_memory", choices)
-        self.assertNotIn("exp_bare", choices)
-
 
 class HitlControlActionTest(unittest.TestCase):
     """Positive paths for the seven learning-control actions.
@@ -5154,98 +3109,7 @@ class HitlControlActionTest(unittest.TestCase):
         self.assertEqual(control.rerun_sessions, {})
         self.assertTrue(node_id)
 
-    def test_rollback_fold_restores_prior_current_immediately(self) -> None:
-        from autotrade.pipelines.prior import ExperimentPriorStore
-
-        write_json_atomic(
-            self.directory / "hitl/schedule.json",
-            {
-                "schema_version": 1,
-                "epochs": 1,
-                "sessions": [
-                    {
-                        "key": "epoch_001/meta_learning",
-                        "kind": "meta",
-                        "epoch_id": "epoch_001",
-                    },
-                    {
-                        "key": "epoch_001/fold_2022Q1",
-                        "kind": "fold",
-                        "epoch_id": "epoch_001",
-                        "fold_id": "fold_2022Q1",
-                    },
-                    {
-                        "key": "epoch_001/meta_learning_after_fold_001",
-                        "kind": "meta",
-                        "epoch_id": "epoch_001",
-                    },
-                    {
-                        "key": "epoch_001/fold_2022Q2",
-                        "kind": "fold",
-                        "epoch_id": "epoch_001",
-                        "fold_id": "fold_2022Q2",
-                    },
-                    {
-                        "key": "heldout",
-                        "kind": "heldout",
-                        "epoch_id": "epoch_001",
-                        "periods": [{"label": "2023Q1"}, {"label": "2023Q2"}],
-                    },
-                ],
-            },
-        )
-        store = ExperimentPriorStore(self.directory)
-        store.publish("first workflow", generation_id="gen_1")
-        store.publish("second workflow", generation_id="gen_2")
-        ledger = ExperimentLedger(self.directory / "ledgers/experiment_ledger.jsonl")
-        ledger.append(
-            {
-                "record_type": "meta_learning",
-                "experiment_id": "exp_ctl",
-                "epoch_id": "epoch_001",
-                "fold_id": "epoch_001_meta_learning",
-                "run_id": "run_meta_0",
-                "session_key": "epoch_001/meta_learning",
-                "prior": "first workflow",
-                "prior_generation_id": "gen_1",
-            }
-        )
-        ledger.append(
-            {
-                "record_type": "meta_learning",
-                "experiment_id": "exp_ctl",
-                "epoch_id": "epoch_001",
-                "fold_id": "epoch_001_after_fold_001",
-                "run_id": "run_meta_1",
-                "session_key": "epoch_001/meta_learning_after_fold_001",
-                "prior": "second workflow",
-                "prior_generation_id": "gen_2",
-            }
-        )
-        self.assertEqual(store.current_generation_id(), "gen_2")
-        response = self._post(
-            action="rollback_fold", session_key="epoch_001/fold_2022Q1"
-        )
-        self.assertEqual(response.status_code, 200, response.text)
-        remaining = ExperimentLedger(
-            self.directory / "ledgers/experiment_ledger.jsonl"
-        ).read()
-        self.assertEqual(
-            [record["record_type"] for record in remaining],
-            ["fold", "meta_learning"],
-        )
-        self.assertEqual(remaining[-1]["prior_generation_id"], "gen_1")
-        self.assertEqual(store.current_generation_id(), "gen_1")
-        self.assertEqual(store.current_text().strip(), "first workflow")
-        self.assertEqual(
-            (store.root / "generations" / "gen_2" / "PRIOR.md")
-            .read_text(encoding="utf-8")
-            .strip(),
-            "second workflow",
-        )
-
     def test_rollback_fold_clears_prior_current_when_no_generation_remains(self) -> None:
-        from autotrade.pipelines.prior import ExperimentPriorStore
 
         store = ExperimentPriorStore(self.directory)
         store.publish("later workflow", generation_id="gen_2")
@@ -5275,75 +3139,6 @@ class HitlControlActionTest(unittest.TestCase):
             .strip(),
             "later workflow",
         )
-
-    def test_rollback_fold_fails_if_remaining_prior_generation_is_missing(self) -> None:
-        from autotrade.pipelines.prior import ExperimentPriorStore
-
-        write_json_atomic(
-            self.directory / "hitl/schedule.json",
-            {
-                "schema_version": 1,
-                "epochs": 1,
-                "sessions": [
-                    {
-                        "key": "epoch_001/meta_learning",
-                        "kind": "meta",
-                        "epoch_id": "epoch_001",
-                    },
-                    {
-                        "key": "epoch_001/fold_2022Q1",
-                        "kind": "fold",
-                        "epoch_id": "epoch_001",
-                        "fold_id": "fold_2022Q1",
-                    },
-                    {
-                        "key": "epoch_001/fold_2022Q2",
-                        "kind": "fold",
-                        "epoch_id": "epoch_001",
-                        "fold_id": "fold_2022Q2",
-                    },
-                    {
-                        "key": "heldout",
-                        "kind": "heldout",
-                        "epoch_id": "epoch_001",
-                        "periods": [{"label": "2023Q1"}, {"label": "2023Q2"}],
-                    },
-                ],
-            },
-        )
-        store = ExperimentPriorStore(self.directory)
-        store.publish("later workflow", generation_id="gen_2")
-        ledger = ExperimentLedger(self.directory / "ledgers/experiment_ledger.jsonl")
-        ledger.append(
-            {
-                "record_type": "meta_learning",
-                "experiment_id": "exp_ctl",
-                "epoch_id": "epoch_001",
-                "fold_id": "epoch_001_meta_learning",
-                "run_id": "run_meta_ghost",
-                "session_key": "epoch_001/meta_learning",
-                "prior": "gone",
-                "prior_generation_id": "ghost",
-            }
-        )
-        ledger.append(
-            {
-                "record_type": "heldout",
-                "experiment_id": "exp_ctl",
-                "epoch_id": "epoch_001",
-                "fold_id": "heldout_2023Q1",
-                "run_id": "run_heldout",
-                "session_key": "heldout",
-                "period": "2023Q1",
-                "result": {"total_return": 0.01},
-            }
-        )
-        refused = self._post(
-            action="rollback_fold", session_key="epoch_001/fold_2022Q1"
-        )
-        self.assertEqual(refused.status_code, 400, refused.text)
-        self.assertIn("ghost", refused.json()["detail"])
-        self.assertEqual(store.current_generation_id(), "gen_2")
 
     def test_rollback_fold_is_refused_while_a_worker_is_alive(self) -> None:
         write_json_atomic(

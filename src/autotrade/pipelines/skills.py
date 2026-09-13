@@ -408,18 +408,13 @@ def resolve_operating_memory(value: object) -> str:
 
 
 def experiment_graduated(records: Sequence[Mapping[str, object]]) -> bool:
-    """Whether the Pipeline's held-out verdict adopted this experiment.
+    """Whether this experiment's forward verdict graduated it.
 
-    ``ledger.experiment_verdict`` is the one aggregator: every latest held-out
-    period must be ``graduated``, so a single failed period keeps the whole
-    experiment out. Only durable successful held-out rows reach it, so a
-    running, failed or integrity-flagged experiment never qualifies. Read
-    non-strict on purpose — these are other experiments' ledgers, and one that
-    predates the verdict block must contribute nothing rather than break the
-    session that is mounting memory.
+    ``ledger.experiment_verdict`` is the one aggregator; a running, failed or
+    integrity-flagged experiment has no verdict and never qualifies.
     """
 
-    verdict = experiment_verdict([dict(record) for record in records], strict=False)
+    verdict = experiment_verdict(records)
     return verdict is not None and verdict.get("status") == "graduated"
 
 
@@ -842,21 +837,14 @@ def latest_skills_snapshot(
     records: Sequence[Mapping[str, object]],
     *,
     experiment_dir: str | Path,
-    inherited: SkillsSnapshot | None = None,
 ) -> SkillsSnapshot:
-    """Resolve skills from the final remaining successful Fold/Meta ledger row.
-
-    Before the first such row the head is ``inherited`` -- the generation
-    seeded at creation from another experiment's memory -- or empty.
-    """
+    """Resolve skills from the last research session's ledger row; empty before it."""
 
     successful = [
-        record
-        for record in records
-        if record.get("record_type") in {"fold", "meta_learning"}
+        record for record in records if record.get("record_type") == "research_session"
     ]
     if not successful:
-        return inherited or SkillsSnapshot()
+        return SkillsSnapshot()
     record = successful[-1]
     raw_ref = str(record.get("skills_ref") or "").strip()
     recorded_generation = str(record.get("skills_generation_id") or "").strip()
@@ -890,25 +878,6 @@ def latest_skills_snapshot(
         if recorded is not None and recorded != actual_counts[key]:
             raise ValueError(f"ledger {key} does not match the published skills tree")
     return snapshot
-
-
-def import_skills_generation(
-    experiment_dir: str | Path, source_root: str | Path, *, generation_id: str
-) -> SkillsPublication:
-    """Publish a copy of another experiment's read-only skills generation as
-    one immutable generation of this experiment's own store.
-
-    The publication path validates a writable working tree, so the source is
-    staged through one first; the staging copy never outlives the call.
-    """
-
-    store = ExperimentSkillsStore(experiment_dir)
-    staging = store.root / f".import.{os.getpid()}.{uuid.uuid4().hex[:8]}"
-    try:
-        _copy_skills_tree(Path(source_root).resolve(strict=True), staging / SKILLS_DIRNAME)
-        return store.publish(staging / SKILLS_DIRNAME, generation_id=generation_id)
-    finally:
-        shutil.rmtree(staging, ignore_errors=True)
 
 
 def resolve_collected_skills_source(
@@ -1093,7 +1062,6 @@ __all__ = [
     "ensure_operating_memory_snapshot",
     "experiment_graduated",
     "graduated_memory_sources",
-    "import_skills_generation",
     "install_operating_memory",
     "install_workspace_skills",
     "latest_skills_snapshot",

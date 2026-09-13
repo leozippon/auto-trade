@@ -36,7 +36,6 @@ from autotrade.pipelines.hitl_state import (
     read_status,
 )
 from autotrade.pipelines.ledger import latest_fold_records
-from autotrade.pipelines.prior import latest_prior_text
 
 from . import equity, issues, memory, registry, steps, traces, trading
 from .analysis import AnalysisService
@@ -130,7 +129,6 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
     app = FastAPI(
         title="ADM-Cube Console", docs_url=None, redoc_url=None, openapi_url=None
     )
-    trading_days_cache: dict[str, object] = {}
 
     @app.middleware("http")
     async def revalidate_frontend_assets(request: Request, call_next):
@@ -253,51 +251,9 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
             "raw_generation": raw_generation,
         }
 
-    def _trading_days() -> list[str]:
-        # Loaded once per process (registry.clamped_trading_days does the
-        # coverage clamping; None = no calendar, pickers degrade to text).
-        if "days" not in trading_days_cache:
-            trading_days_cache["days"] = registry.clamped_trading_days(root)
-        return trading_days_cache["days"] or []
-
-    def _inherit_sources() -> list[str]:
-        """Experiments with at least one recorded fold (inherit_from choices)."""
-        if not experiment_root.is_dir():
-            return []
-        sources = []
-        for entry in sorted(experiment_root.iterdir()):
-            if not entry.is_dir() or entry.name.startswith("."):
-                continue
-            try:
-                if latest_fold_records(registry.read_ledger_records(entry)):
-                    sources.append(entry.name)
-            except Exception:  # noqa: BLE001 - a broken experiment cannot seed a new one;
-                continue  # it stays visible (state=unreadable) in the list instead
-        return sources
-
-    def _memory_sources() -> list[str]:
-        """Experiments whose ledger carries a published PRIOR (inherit_memory_from
-        choices): the same reading the creation's import applies."""
-        if not experiment_root.is_dir():
-            return []
-        sources = []
-        for entry in sorted(experiment_root.iterdir()):
-            if not entry.is_dir() or entry.name.startswith("."):
-                continue
-            try:
-                if latest_prior_text(registry.read_ledger_records(entry)):
-                    sources.append(entry.name)
-            except Exception:  # noqa: BLE001 - a broken experiment cannot seed a new one
-                continue
-        return sources
-
     @app.get("/api/parameter-schema")
     def get_parameter_schema() -> dict[str, object]:
-        return parameter_schema(
-            trading_days=_trading_days(),
-            inherit_sources=_inherit_sources(),
-            memory_sources=_memory_sources(),
-        )
+        return parameter_schema()
 
     @app.get("/api/gpus")
     def get_gpus() -> dict[str, object]:

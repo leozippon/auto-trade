@@ -8,9 +8,9 @@ same validation. The provider and session wiring itself lives in
 ``worker.build_experiment_pipeline``.
 
 The other two scripts do not use these groups: ``run_experiment.py`` drives a
-single ``DailyStrategyPipeline`` strategy replay rather than a rolling
-Fold/Epoch experiment, and ``run_interactive_experiment.py`` only resumes an
-experiment whose parameters already exist.
+single ``DailyStrategyPipeline`` strategy replay rather than a research arm,
+and ``run_interactive_experiment.py`` only resumes an experiment whose
+parameters already exist.
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ from pathlib import Path
 
 from autotrade.environment.data.snapshot import SnapshotConfig
 from autotrade.environment.runtime import write_json_atomic
+from autotrade.pipelines.calendar import GEOMETRY_PARAMETERS
 from autotrade.pipelines.hitl_state import MODEL_CHOICES, WEB_CREATE_DEFAULTS
 from autotrade.pipelines.worker import (
     NON_PERSISTABLE_PARAMS,
@@ -28,32 +29,9 @@ from autotrade.pipelines.worker import (
 )
 
 DEFAULT_AGENT_MODEL = MODEL_CHOICES[0]
-DEFAULT_META_MODEL = DEFAULT_AGENT_MODEL
 DEFAULT_SUBAGENT_MODEL = DEFAULT_AGENT_MODEL
 DEFAULT_NL_MODEL = DEFAULT_AGENT_MODEL
 DEFAULT_COMPACT_MODEL = DEFAULT_AGENT_MODEL
-
-# The four period labels the console form is seeded with; only this cadence has
-# standing defaults (see resolve_period_args).
-DEFAULT_FOLD_PERIOD = str(WEB_CREATE_DEFAULTS["fold_period"])
-PERIOD_ARGS = (
-    "development_first_period",
-    "development_last_period",
-    "heldout_first_period",
-    "heldout_last_period",
-)
-
-
-def resolve_meta_learning_directive(
-    parser: argparse.ArgumentParser, args: argparse.Namespace
-) -> str:
-    if args.meta_learning_directive and args.meta_learning_directive_file:
-        parser.error(
-            "pass only one of --meta-learning-directive or --meta-learning-directive-file"
-        )
-    if args.meta_learning_directive_file:
-        return args.meta_learning_directive_file.read_text(encoding="utf-8")
-    return args.meta_learning_directive
 
 
 def resolve_fold_exploration_directive(
@@ -66,30 +44,6 @@ def resolve_fold_exploration_directive(
     if args.fold_exploration_directive_file:
         return args.fold_exploration_directive_file.read_text(encoding="utf-8")
     return args.fold_exploration_directive
-
-
-def resolve_period_args(
-    parser: argparse.ArgumentParser, args: argparse.Namespace
-) -> None:
-    """Fill the four period labels from the console defaults, or demand them.
-
-    Only the default cadence has standing labels. A label written for one
-    cadence silently mis-parses under another (``2022Q1`` is not a year, ``2023``
-    is not a quarter), so any other ``--fold-period`` must carry all four
-    explicitly and fail fast here rather than deep inside schedule building.
-    """
-    if args.fold_period == DEFAULT_FOLD_PERIOD:
-        for name in PERIOD_ARGS:
-            if not getattr(args, name):
-                setattr(args, name, str(WEB_CREATE_DEFAULTS[name]))
-        return
-    missing = [
-        f"--{name.replace('_', '-')}" for name in PERIOD_ARGS if not getattr(args, name)
-    ]
-    if missing:
-        parser.error(
-            f"--fold-period {args.fold_period} requires explicit period args: {', '.join(missing)}"
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -122,30 +76,17 @@ def add_path_arguments(parser: argparse.ArgumentParser, repo_root: Path) -> None
 
 
 def add_calendar_arguments(parser: argparse.ArgumentParser) -> None:
-    """Development window, optional Test stage and Held-out (worker-validated)."""
+    """Research, forward and Held-out dates (worker-validated), console defaults."""
+    for name in GEOMETRY_PARAMETERS:
+        parser.add_argument(
+            f"--{name.replace('_', '-')}",
+            default=str(WEB_CREATE_DEFAULTS[name]),
+            metavar="YYYYMMDD",
+        )
     parser.add_argument(
-        "--fold-period",
-        choices=("week", "month", "quarter", "year"),
-        default=DEFAULT_FOLD_PERIOD,
-        help="Cadence unit the development and held-out labels are written in.",
-    )
-    period_help = (
-        f"console default at --fold-period {DEFAULT_FOLD_PERIOD}; required for any other cadence"
-    )
-    parser.add_argument("--development-first-period", help=period_help)
-    parser.add_argument("--development-last-period", help=period_help)
-    parser.add_argument("--heldout-first-period", help=period_help)
-    parser.add_argument("--heldout-last-period", help=period_help)
-    parser.set_defaults(test_stage=bool(WEB_CREATE_DEFAULTS["test_stage"]))
-    parser.add_argument(
-        "--test-stage",
-        dest="test_stage",
-        action="store_true",
-        help=(
-            "Roll Folds inside the development window (first period validation only, "
-            "each later period a frozen Test) instead of one regular Fold per period "
-            "judged by Held-out alone."
-        ),
+        "--research-sessions",
+        type=int,
+        default=int(WEB_CREATE_DEFAULTS["research_sessions"]),
     )
 
 
@@ -173,7 +114,7 @@ def add_snapshot_window_arguments(parser: argparse.ArgumentParser) -> None:
         "--window-months",
         type=int,
         default=int(WEB_CREATE_DEFAULTS["window_months"]),
-        help="Default PIT history window in months for decision-input snapshots and Fold input windows.",
+        help="Default PIT history window in months for decision-input snapshots.",
     )
     parser.add_argument(
         "--daily-window-months",
@@ -272,19 +213,13 @@ def add_model_arguments(parser: argparse.ArgumentParser) -> None:
         "--model",
         default=DEFAULT_AGENT_MODEL,
         choices=MODEL_CHOICES,
-        help="Ordinary Fold Agent main-conversation model.",
-    )
-    parser.add_argument(
-        "--meta-model",
-        default=DEFAULT_META_MODEL,
-        choices=MODEL_CHOICES,
-        help="Meta-learning Agent main-conversation model.",
+        help="Research session Agent main-conversation model.",
     )
     parser.add_argument(
         "--subagent-model",
         default=DEFAULT_SUBAGENT_MODEL,
         choices=MODEL_CHOICES,
-        help="Model the Fold/Meta `agent` sub-agents run on (shared session quota).",
+        help="Model the session's `agent` sub-agents run on (shared session quota).",
     )
     parser.add_argument(
         "--nl-model",
@@ -343,29 +278,16 @@ def add_model_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def add_meta_directive_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument(
-        "--meta-learning-directive",
-        default="",
-        help="Optional experiment-level research direction injected into each meta-learning prompt.",
-    )
-    parser.add_argument(
-        "--meta-learning-directive-file",
-        type=Path,
-        help="Optional UTF-8 text file whose content is injected as the meta-learning research direction.",
-    )
-
-
 def add_fold_exploration_directive_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--fold-exploration-directive",
         default="",
-        help="Optional experiment-level exploration direction injected into every ordinary Fold prompt.",
+        help="Optional experiment-level exploration direction injected into every research session prompt.",
     )
     parser.add_argument(
         "--fold-exploration-directive-file",
         type=Path,
-        help="Optional UTF-8 text file whose content is injected into every ordinary Fold prompt.",
+        help="Optional UTF-8 text file whose content is injected into every research session prompt.",
     )
 
 
@@ -409,7 +331,6 @@ def _build_worker_params(
     args: argparse.Namespace,
     *,
     repo_root: Path,
-    meta_learning_directive: str = "",
     fold_exploration_directive: str = "",
     overrides: dict[str, object] | None = None,
 ) -> dict[str, object]:
@@ -437,12 +358,8 @@ def _build_worker_params(
         "fundamental_events_status": _relative(
             repo_root, args.fundamental_events_status
         ),
-        "fold_period": args.fold_period,
-        "development_first_period": args.development_first_period,
-        "development_last_period": args.development_last_period,
-        "test_stage": bool(args.test_stage),
-        "heldout_first_period": args.heldout_first_period,
-        "heldout_last_period": args.heldout_last_period,
+        **{name: getattr(args, name) for name in GEOMETRY_PARAMETERS},
+        "research_sessions": args.research_sessions,
         "strategy_period": args.strategy_period,
         "inference_time": args.inference_time,
         "max_fold_minutes": args.max_fold_minutes,
@@ -461,7 +378,6 @@ def _build_worker_params(
         "screen_max_price": args.screen_max_price,
         "screen_boards": list(args.screen_boards),
         "model": args.model,
-        "meta_model": args.meta_model,
         "subagent_model": args.subagent_model,
         "nl_model": args.nl_model,
         "compact_model": args.compact_model,
@@ -475,7 +391,6 @@ def _build_worker_params(
         "min_return": args.min_return,
         "min_sharpe": args.min_sharpe,
         "max_drawdown": args.max_drawdown,
-        "meta_learning_directive": meta_learning_directive,
         "fold_exploration_directive": fold_exploration_directive,
     }
     for window in ("daily", "fundamentals", "events", "macro", "text"):
@@ -490,22 +405,20 @@ def build_worker_options(
     args: argparse.Namespace,
     *,
     repo_root: Path,
-    meta_learning_directive: str = "",
     fold_exploration_directive: str = "",
     overrides: dict[str, object] | None = None,
 ) -> InteractiveWorkerOptions:
     """Persist the CLI parameters and load them back through the worker.
 
     Writing ``hitl/params.json`` first is deliberate: the worker's loader is the
-    single place that validates parameter names, path containment, period
-    labels and the release pin, and a resumed or console-inspected run must see
+    single place that validates parameter names, path containment, research
+    dates and the release pin, and a resumed or console-inspected run must see
     exactly the configuration this invocation used.
     """
     experiment_dir = Path(args.experiments_root).resolve() / args.experiment_id
     params = _build_worker_params(
         args,
         repo_root=repo_root,
-        meta_learning_directive=meta_learning_directive,
         fold_exploration_directive=fold_exploration_directive,
         overrides=overrides,
     )
