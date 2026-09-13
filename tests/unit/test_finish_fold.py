@@ -268,6 +268,44 @@ def test_finish_fold_succeeds_when_a_different_hyp_validation_exists(tmp_path: P
     assert kept.ok and kept.value["node_id"] == clone
 
 
+# The incident's line, before and after the byte-minimal repair: an operator
+# precedence defect that parses cleanly and crashes on the first decision day.
+BROKEN_PARENT = (
+    "def generate_orders(context):\n"
+    '    rows = context["rows"]\n'
+    '    keep = rows["listed"] == "1" & rows["tradable"]\n'
+    "    return [] if keep.any() else []\n"
+)
+REPAIRED_PARENT = BROKEN_PARENT.replace(
+    'rows["listed"] == "1" & rows["tradable"]',
+    '(rows["listed"] == "1") & rows["tradable"]',
+)
+
+
+def test_finish_fold_accepts_the_byte_minimal_repair_of_a_broken_parent(
+    tmp_path: Path,
+):
+    """A parent that fails its control replay can be repaired and nominated.
+
+    The repair is one pair of brackets, but it is a different executable
+    structure, so the different-hypothesis rule admits it: the Fold can put a
+    working artifact back into the lineage instead of only abstaining.
+    """
+    parent_main = tmp_path / "parent" / "main.py"
+    parent_main.parent.mkdir()
+    parent_main.write_text(BROKEN_PARENT, encoding="utf-8")
+    tree = StepTree(tmp_path / "steps")
+    repaired = _record(
+        tree, tmp_path / "repaired", source=REPAIRED_PARENT, result_name="valid_001"
+    )
+    finish = _tool(tree, parent_main)
+
+    selected = finish.invoke({"node_id": repaired})
+
+    assert selected.ok and selected.finish
+    assert selected.value["node_id"] == repaired
+
+
 def test_finish_fold_rejects_when_current_output_differs_from_selected_revision(
     tmp_path: Path,
 ):

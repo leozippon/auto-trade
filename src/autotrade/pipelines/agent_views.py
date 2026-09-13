@@ -298,13 +298,19 @@ def hard_reject_reasons(record: Mapping[str, object]) -> object:
 def freeze_flags(record: Mapping[str, object]) -> dict[str, bool]:
     """The Fold record's freeze labels, present only when set, as the ledger
     writes them: ``baseline_anchor`` (frozen with no parent to beat -- a weak
-    baseline in force, not an evidenced edge) and
-    ``nominated_identical_to_parent`` (a passing nomination that was the
-    parent's own content, so the parent's id was retained)."""
+    baseline in force, not an evidenced edge), ``nominated_identical_to_parent``
+    (a passing nomination that was the parent's own content, so the parent's id
+    was retained) and ``meta_regularization_rejected`` (the inherited
+    meta-regularized package was never validated here, so the lineage reverted
+    to the artifact it had edited)."""
 
     return {
         key: True
-        for key in ("baseline_anchor", "nominated_identical_to_parent")
+        for key in (
+            "baseline_anchor",
+            "nominated_identical_to_parent",
+            "meta_regularization_rejected",
+        )
         if record.get(key) is True
     }
 

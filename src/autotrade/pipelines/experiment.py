@@ -368,6 +368,7 @@ class RollingExperimentPipeline:
                     selected.validation.summary
                 )
             nominated_identical_to_parent = False
+            meta_regularization_rejected = False
             if selected is not None and not hard:
                 if parent is not None and self._matches_parent_content(
                     parent, selected.revision_id
@@ -400,12 +401,23 @@ class RollingExperimentPipeline:
                     status = "frozen"
                 validation = selected.validation.summary
             elif parent is not None:
-                if parent.requires_validation:
-                    self._assert_parent_validated_in_fold(
-                        parent, session.steps, control=control
-                    )
-                    parent = replace(parent, requires_validation=False)
+                # ``parent`` itself stays what this Fold inherited: the ledger
+                # row and the parent control name the artifact that was mounted,
+                # even when the lineage head below reverts to another one.
                 frozen = parent
+                if parent.requires_validation:
+                    if self._parent_validated_in_fold(
+                        parent, session.steps, control=control
+                    ):
+                        frozen = replace(parent, requires_validation=False)
+                    else:
+                        # The Meta's regularized package proved nothing here, so
+                        # the lineage goes back to the artifact it edited -- a
+                        # validated fallback, not an unvalidated one. Killing the
+                        # arm instead would discard every Fold behind it over one
+                        # Meta edit (docs/pipeline-design.md 3.2).
+                        frozen = self._revert_meta_regularization(parent)
+                        meta_regularization_rejected = True
                 status = (
                     "no_update"
                     if selected is not None or abstained
@@ -552,6 +564,15 @@ class RollingExperimentPipeline:
                 **(
                     {"nominated_identical_to_parent": True}
                     if nominated_identical_to_parent
+                    else {}
+                ),
+                # This Fold inherited a meta-regularized package and no complete
+                # Validation here accepted it, so the lineage reverted: the
+                # rejected package is parent_strategy_artifact_id, the validated
+                # artifact it reverted to is frozen_strategy_artifact_id.
+                **(
+                    {"meta_regularization_rejected": True}
+                    if meta_regularization_rejected
                     else {}
                 ),
                 # Frozen with no parent to beat: the lineage's baseline anchor,
@@ -1257,8 +1278,10 @@ class RollingExperimentPipeline:
                     run_id=run_id,
                     step_id="meta_learning",
                     # Never backtested: the next Fold may only fall back to it
-                    # after validating identical content itself.
+                    # after validating identical content itself, and reverts to
+                    # the artifact this one regularized when it cannot.
                     requires_validation=True,
+                    validated_predecessor=parent,
                 )
                 status = "meta_regularized"
             elif parent is not None and session.allowed:
@@ -1296,6 +1319,11 @@ class RollingExperimentPipeline:
                     "skills_published": skills.published,
                     "status": status,
                     "modification_check": dict(session.modification_check),
+                    # The artifact the session started from, and the one a
+                    # rejected regularization reverts the lineage to.
+                    "parent_strategy_artifact_id": (
+                        parent.artifact_id if parent is not None else None
+                    ),
                     "frozen_strategy_artifact_id": (
                         frozen.artifact_id
                         if status == "meta_regularized" and frozen
@@ -1441,6 +1469,7 @@ class RollingExperimentPipeline:
         run_id: str,
         step_id: str,
         requires_validation: bool = False,
+        validated_predecessor: FrozenArtifact | None = None,
     ) -> FrozenArtifact:
         """Freeze one Step revision and return the lineage's artifact record.
 
@@ -1470,6 +1499,7 @@ class RollingExperimentPipeline:
             step_id,
             revision_id,
             requires_validation=requires_validation,
+            validated_predecessor=validated_predecessor,
         )
 
     def _matches_parent_content(
@@ -1495,34 +1525,51 @@ class RollingExperimentPipeline:
             and model_artifact_delta(parent.model_path, models).changed_files
         )
 
-    def _assert_parent_validated_in_fold(
+    def _parent_validated_in_fold(
         self,
         parent: FrozenArtifact,
         steps: tuple[StepResult, ...],
         *,
         control: EvaluationResult | None = None,
-    ) -> None:
-        """Refuse to fall back to a meta-regularized parent this Fold never validated.
+    ) -> bool:
+        """Whether this Fold produced a complete Validation of its own parent.
 
-        A meta-regularized artifact enters the Fold without a backtest. Falling
-        back to it silently would ship an unvalidated strategy. The host's
-        parent control is that Validation when it completed and passed
+        A meta-regularized artifact enters the Fold without a backtest, so it
+        may stay the lineage head only once this Fold has validated it. The
+        host's parent control is that Validation when it completed and passed
         acceptance; otherwise identity is established by comparing the trees
         directly: a Step whose revision has no changed strategy or model file
         performed Validation on this parent.
         """
         if control is not None and not self.config.acceptance.evaluate(control.summary)[0]:
-            return
+            return True
         for step in steps:
             if not self._matches_parent_content(parent, step.revision_id):
                 continue
             hard, _ = self.config.acceptance.evaluate(step.validation.summary)
             if not hard:
-                return
-        raise RuntimeError(
-            "Meta-regularized parent has no acceptable complete Validation in this Fold; "
-            "refusing unvalidated fallback"
-        )
+                return True
+        return False
+
+    def _revert_meta_regularization(self, parent: FrozenArtifact) -> FrozenArtifact:
+        """The validated artifact a rejected meta-regularization replaced.
+
+        The Fold ended without validating the regularized package, so it must
+        not be carried forward -- but the artifact the Meta edited was validated
+        when its own Fold froze it, so reverting to it is a validated fallback
+        and the experiment continues with the lineage it had before the Meta.
+        Only a regularization whose predecessor is unknown leaves nothing
+        validated to fall back to; that case is still refused.
+        """
+
+        predecessor = parent.validated_predecessor
+        if predecessor is None:
+            raise RuntimeError(
+                "Meta-regularized parent has no acceptable complete Validation in "
+                "this Fold and no validated predecessor to revert to; refusing "
+                "unvalidated fallback"
+            )
+        return predecessor
 
     def _prior_meta_learning_logs(self, current_meta_learning_id: str) -> str:
         """Latest prior Meta trace from each of the most recent N Epochs.

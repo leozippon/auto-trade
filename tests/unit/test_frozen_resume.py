@@ -252,6 +252,52 @@ def test_latest_artifact_uses_meta_regularized_parent(tmp_path: Path) -> None:
     assert parent.source_step_id == meta.source_step_id
     assert parent.revision_id == meta.revision_id
     assert parent.requires_validation is True
+    # And it carries the artifact it regularized: the validated fallback the
+    # next Fold reverts to when it never validates the regularized package.
+    assert parent.validated_predecessor is not None
+    assert parent.validated_predecessor.artifact_id == previous.artifact_id
+    assert parent.validated_predecessor.path == Path(previous.path)
+    assert parent.validated_predecessor.requires_validation is False
+
+
+def test_latest_artifact_keeps_the_last_validated_fallback_across_a_meta_rerun(
+    tmp_path: Path,
+) -> None:
+    """A re-run Meta regularizes a head that is itself unvalidated.
+
+    The superseded regularization is not a fallback -- no Fold ever validated
+    it -- so the revert target stays the Fold artifact behind both of them.
+    """
+    store = FilesystemArtifactStore(tmp_path / "store")
+    ledger = ExperimentLedger(tmp_path / "ledger.jsonl")
+    previous = _freeze(store, "strategy_fold_001")
+    first = _freeze(store, "strategy_meta_first")
+    second = _freeze(store, "strategy_meta_second")
+    _append_fold(
+        ledger,
+        fold_id="fold_001",
+        artifact_id=previous.artifact_id,
+        path=str(previous.path),
+        run_id="run_fold_001",
+    )
+    for artifact, run_id in ((first, "run_meta_1"), (second, "run_meta_2")):
+        _append_meta(
+            ledger,
+            session_key="epoch_001/meta_learning_after_fold_001",
+            status="meta_regularized",
+            artifact_id=artifact.artifact_id,
+            path=str(artifact.path),
+            run_id=run_id,
+            fold_id="epoch_001_after_fold_001",
+        )
+
+    parent = _latest_artifact(ledger, store, tmp_path)
+
+    assert parent is not None
+    assert parent.artifact_id == second.artifact_id
+    assert parent.requires_validation is True
+    assert parent.validated_predecessor is not None
+    assert parent.validated_predecessor.artifact_id == previous.artifact_id
 
 
 def _install_inherited_seed(

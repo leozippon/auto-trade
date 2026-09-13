@@ -786,6 +786,11 @@ class FrozenArtifact:
     # backtested. The Fold may only fall back to it after validating identical
     # content in that Fold (experiment.run_fold), never silently.
     requires_validation: bool = False
+    # What that Fold reverts to when it ends without validating this artifact:
+    # the artifact the Meta regularized, validated when its own Fold froze it.
+    # It travels with ``requires_validation`` so the unvalidated head always
+    # names the validated one behind it, in-process and after a resume.
+    validated_predecessor: FrozenArtifact | None = None
 
 
 class ArtifactStore(Protocol):

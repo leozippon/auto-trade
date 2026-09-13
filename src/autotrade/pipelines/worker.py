@@ -1612,6 +1612,8 @@ def _latest_artifact(
     current_path = ""
     current_record: dict[str, object] | None = None
     requires_validation = False
+    # The last validated head, which is what an unvalidated one reverts to.
+    predecessor: tuple[str, str, dict[str, object]] | None = None
     for record in records:
         record_type = record.get("record_type")
         if record_type == "fold":
@@ -1630,6 +1632,13 @@ def _latest_artifact(
             artifact_id = str(record.get("frozen_strategy_artifact_id") or "")
             if not artifact_id:
                 continue
+            # The artifact this regularization edited: validated when its own
+            # Fold froze it, and the fallback run_fold reverts to when the next
+            # Fold never validates the regularized package. A superseding re-run
+            # of the same Meta session regularizes an already-unvalidated head,
+            # so the last validated one stays the fallback.
+            if current_record is not None and not requires_validation:
+                predecessor = (current_id, current_path, current_record)
             current_id = artifact_id
             current_path = str(record.get("frozen_strategy_artifact_path") or "")
             current_record = record
@@ -1644,11 +1653,26 @@ def _latest_artifact(
             store=store,
             experiment_dir=experiment_dir,
         )
+        fallback = (
+            _artifact_from_record(
+                predecessor[0],
+                predecessor[1],
+                predecessor[2],
+                store=store,
+                experiment_dir=experiment_dir,
+            )
+            if requires_validation and predecessor is not None
+            else None
+        )
     except Exception as exc:
         raise RuntimeError(
             f"ledger artifact failed validation: {current_id}: {exc}"
         ) from exc
-    return replace(artifact, requires_validation=requires_validation)
+    return replace(
+        artifact,
+        requires_validation=requires_validation,
+        validated_predecessor=fallback,
+    )
 
 
 def _terminal_status(

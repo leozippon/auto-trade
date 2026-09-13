@@ -43,7 +43,7 @@ FOLD_PROTOCOL_SECTION = """\
 FOLD_SUBMIT_CONTRACT = """\
 # 提交合同（finish_fold 前自检）
 - 被提名节点属于当前 Fold、当前 run，且已完成一次成功的完整 Validation（Probe、冒烟或失败回放不算）；当前 `output/` 和 `models/` 与它的快照逐字节一致，不一致先 `step_rollback`。
-- 父本对照是本 Fold 的基线：`artifact_contract.parent.parent_control_available` 为真时，宿主已在会话前把父本原样跑过一次本 Fold 的完整 Validation（Step 树里 `result_name=parent_control` 的节点，不占预算）；为假时没有这个节点——父产物是初始模板时，模板只是交付合同的可运行示例而不是研究基线，不要为它花回测，候选比的是基准、中性化超额与彼此；只有会话前的父本对照重放失败时才值得自己重放父本并计入预算，据 `artifact_contract.parent.parent_control_error` 判断是重放父本还是先修数据/环境假设。
+- 父本对照是本 Fold 的基线：`artifact_contract.parent.parent_control_available` 为真时，宿主已在会话前把父本原样跑过一次本 Fold 的完整 Validation（Step 树里 `result_name=parent_control` 的节点，不占预算）；为假时没有这个节点——父产物是初始模板时，模板只是交付合同的可运行示例而不是研究基线，不要为它花回测，候选比的是基准、中性化超额与彼此；只有会话前的父本对照重放失败时才值得自己重放父本并计入预算，据 `artifact_contract.parent.parent_control_error` 判断是重放父本还是先修数据/环境假设；父本对照是因父本自身的代码缺陷（而不是数据或环境）失败时，把只改致错那几行、并在本窗口跑通完整 Validation 的最小修复提名为本折产物——它在可执行逻辑上不同于父本，是合法提名，血缘也才带着一份能跑的产物继续。
 - 有父产物时，被提名节点必须在可执行策略逻辑上不同于父本（注释-only 不算）；本 Fold 已有一次不同假说的完整 Validation 后，才可显式提名 `parent_control` 保留父本——否则「父本最好」只是未检验的默认。保留父本（`parent_control` 或与父本逐字节相同的节点）是被接受的提名，宿主沿用父本产物 id，父本的前向记录因此连续；机制已冻结的部署调整会话不适用这条先验要求，提名条件以部署合同为准。
 - 冻结只看 `acceptance_rules.fold_freeze` 标 `hard` 的项，`warn` 只记警告；过硬门的提名一律被冻结，不想冻结的节点不要提名。
 - 没有候选证明边际时用 `finish_fold(outcome="no_edge", reason=<证据>)` 弃权，不提名最不差的节点；弃权同样要求本会话至少有一次完整 Validation。有父产物记 `no_update`（父本仍是血缘头），首个 Fold 记 `baseline_missing`。基线锚点：实验尚无血缘头（无冻结父产物）时，没有父本对照、没有 `vs_parent`、也没有任何前向过渡，后续 Fold 与 Meta 因此读不到前向证据；这时若手上有一个过硬门的完整 Validation（对照或可跑的骨架也算），提名它作基线锚点（账本记 `baseline_anchor=true`）就给后续 Fold 留下一个父本对照，通常取中性化超额最高者，警告照常接受。锚点是对照参考而不是已证明的边际，也永远不会被交付：它的前向过渡不计入毕业条件，Development 结束时若在位产物仍是锚点，实验按「没有可交付产物」显式失败而不跑 Held-out，必须由真实候选取代它。没有过硬门的候选时弃权照常。
@@ -247,7 +247,7 @@ META_SYSTEM_PROMPT = """\
 # 边界
 - 不得读取当前或未来 Test、Held-out 原始记录；紧凑 Test 诊断只用于识别跨 Fold 失效模式，不得凭 Test 水平或 Validation/Test 差距做选择、回滚、排名或调参。
 - 不得运行回测、自行批准 revision、修改宿主代码或使用外部资料。原始 sidecar 不改变 PIT/Test/Held-out 边界。历史分钟和竞价不是策略时钟。
-- 没有明确的简化或迁移理由不要改父策略。若改 `output/` 策略包，必须保持只读 `output/README.md` 规定的策略合同（入口、订单字段、PIT 输入面、允许的库与上限），改完调用 `modification_check`。
+- 没有明确的简化或迁移理由不要改父策略。若改 `output/` 策略包，必须保持只读 `output/README.md` 规定的策略合同（入口、订单字段、PIT 输入面、允许的库与上限），改完调用 `modification_check`。下一 Fold 无法验证正则化产物时，血缘会回退到被正则化的那份产物，本次正则化作废。
 
 # PRIOR
 - `PRIOR.md` 由你独占维护，Fold 只读。自由 Markdown，首轮必须非空。只写简洁的可证伪策略方向、样本局限、反证或降级条件、流程编排和 skill 路径；不写目录、单位表、how-to、实现模板、skill 正文或 raw trace。
