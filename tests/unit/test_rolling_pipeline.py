@@ -9,7 +9,9 @@ import pandas as pd
 import pytest
 
 from autotrade.agent.runner import AgentSessionDeadlineExceeded
+from autotrade.environment.executor import StrategyRaised
 from autotrade.environment.identity import AgentRefStore
+from autotrade.environment.replay.engine import BacktestError
 from autotrade.pipelines import (
     ArtifactRevision,
     EvaluationResult,
@@ -47,6 +49,7 @@ from autotrade.pipelines.ledger import (
     latest_fold_records,
     latest_heldout_records,
     paper_candidate,
+    walk_forward_transitions,
 )
 from autotrade.pipelines.meta_inputs import build_meta_fold_review_bundle
 from autotrade.pipelines.meta_schedule import meta_session_key
@@ -1057,11 +1060,16 @@ def _single_window_pipeline(tmp_path: Path, evaluator):
 
 
 class RecordingEvaluator:
-    """Benchmarked summaries keyed by the revision replayed; records every call."""
+    """Benchmarked summaries keyed by the revision replayed; records every call.
+
+    ``fail_on`` replays time out (an environment failure); ``crash_on`` replays
+    raise the way a strategy whose own code crashed does in the real engine.
+    """
 
     def __init__(self, returns: dict[str, float], *, fail_on: set[str] = frozenset()):
         self.returns = returns
         self.fail_on = set(fail_on)
+        self.crash_on: set[str] = set()
         self.calls: list[tuple[str, str, str, str]] = []
 
     def evaluate(self, request):
@@ -1069,6 +1077,10 @@ class RecordingEvaluator:
         self.calls.append((request.mode, revision_id, request.start, request.end))
         if revision_id in self.fail_on:
             raise TimeoutError(f"replay of {revision_id} exceeded its wall clock")
+        if revision_id in self.crash_on:
+            raise BacktestError(
+                "generate_orders failed at 2026-01-05T08:30:00+08:00: 'close'"
+            ) from StrategyRaised("'close'")
         return EvaluationResult(
             {
                 "total_return": self.returns[revision_id],
@@ -1196,7 +1208,9 @@ def _seed_artifact(pipeline, evaluator, revision_id: str = "revision_seed"):
         "# seed\ndef generate_orders(context):\n    return []\n", encoding="utf-8"
     )
     store.revisions[revision_id] = ArtifactRevision(revision_id, seed_dir)
-    evaluator.returns.setdefault(revision_id, 0.02)
+    # The first Fold replays the frozen seed, which the evaluator sees by its
+    # artifact id.
+    evaluator.returns.setdefault("strategy_seed", 0.02)
     return store.freeze_revision(
         revision_id,
         artifact_id="strategy_seed",
@@ -1314,6 +1328,7 @@ def test_a_frozen_fold_record_names_the_models_tree_beside_the_output(
 
     first = pipeline.run_fold("epoch_001", folds[0], parent=None)
     assert first.frozen is not None and first.frozen.model_path is not None
+    evaluator.returns[first.frozen.artifact_id] = 0.05
     record = ledger.read("fold")[0]
     assert record["frozen_strategy_artifact_path"] == str(first.frozen.path)
     recorded = Path(str(record["frozen_model_artifact_path"]))
@@ -1327,19 +1342,44 @@ def test_a_frozen_fold_record_names_the_models_tree_beside_the_output(
     assert ledger.read("fold")[1]["frozen_model_artifact_path"] is None
 
 
-def test_a_failed_parent_control_is_recorded_and_the_fold_proceeds(tmp_path: Path):
+def test_a_parent_control_timeout_fails_the_attempt_before_the_session(tmp_path: Path):
+    """A timeout measured the environment, not the parent: it must not become
+    the Fold's baseline evidence or a graded transition, so the attempt fails
+    (and is retried) before any session work is spent."""
     evaluator = RecordingEvaluator({"revision_1": 0.05})
     pipeline, folds, ledger, requests = _regular_fold_pipeline(tmp_path, evaluator)
     first = pipeline.run_fold("epoch_001", folds[0], parent=None)
     assert first.frozen is not None
     evaluator.fail_on.add(first.frozen.artifact_id)
+    with pytest.raises(TimeoutError, match="exceeded its wall clock"):
+        pipeline.run_fold("epoch_001", folds[1], parent=first.frozen)
+    assert len(requests) == 1
+    assert len(ledger.read("fold")) == 1
+    failed = ledger.read("attempt_failed")
+    assert len(failed) == 1 and failed[0]["fold_id"] == folds[1].fold_id
+    assert "TimeoutError" in failed[0]["error"]
+
+
+def test_a_parent_whose_own_code_crashes_is_recorded_and_the_fold_proceeds(tmp_path: Path):
+    """The parent's own exception is a measurement of it: recorded with its
+    failure class, handed to the session, and the Fold proceeds."""
+    evaluator = RecordingEvaluator({"revision_1": 0.05})
+    pipeline, folds, ledger, requests = _regular_fold_pipeline(tmp_path, evaluator)
+    first = pipeline.run_fold("epoch_001", folds[0], parent=_seed_artifact(pipeline, evaluator))
+    assert first.frozen is not None
+    evaluator.crash_on.add(first.frozen.artifact_id)
     second = pipeline.run_fold("epoch_001", folds[1], parent=first.frozen)
     assert second.fold_status == "frozen"
     assert requests[1].parent_control is None
+    assert "generate_orders failed" in requests[1].parent_control_error
     control = ledger.read("fold")[1]["parent_control"]
     assert control["status"] == "failed"
+    assert control["failure"] == "strategy_error"
     assert control["parent_strategy_artifact_id"] == first.frozen.artifact_id
-    assert "TimeoutError" in control["error"]
+    assert "BacktestError" in control["error"]
+    # A completed, non-positive transition of that parent.
+    counted = walk_forward_transitions(ledger.read("fold"), epoch_id="epoch_001", test_stage=False)
+    assert (counted["transitions"], counted["positive_excess"], counted["failed"], counted["unmeasured"]) == (1, 0, 1, 0)
 
 
 def test_the_agents_own_steps_still_count_against_the_step_budget(tmp_path: Path):
@@ -1533,11 +1573,18 @@ def test_a_test_stage_schedule_uses_the_frozen_tests_as_walk_forward_evidence(tm
 
     class FrozenTestEvaluator(RecordingEvaluator):
         def evaluate(self, request):
-            result = super().evaluate(request)
             if request.mode == "frozen_test":
                 # The frozen Test trails the benchmark; Held-out itself passes.
-                return EvaluationResult({**result.summary, "total_return": 0.01}, result.result_ref)
-            return result
+                return EvaluationResult(
+                    {
+                        "total_return": 0.01,
+                        "sharpe": 1.0,
+                        "max_drawdown": -0.05,
+                        "benchmark": {"benchmark_return": 0.02, "neutralized_excess_return": -0.01},
+                    },
+                    f"result/frozen_test/{request.revision.revision_id}",
+                )
+            return super().evaluate(request)
 
     evaluator = FrozenTestEvaluator({"revision_1": 0.05})
     pipeline, folds, ledger, _requests = _regular_fold_pipeline(tmp_path, evaluator, test_stage=True)
@@ -1560,6 +1607,35 @@ def test_a_test_stage_schedule_uses_the_frozen_tests_as_walk_forward_evidence(tm
     diagnostics = verdict["periods"][0]["diagnostics"]
     assert diagnostics["final_artifact_forward_transitions"] == 1
     assert diagnostics["final_artifact_forward_positive"] == 0
+
+
+def test_a_frozen_test_records_a_strategy_crash_and_fails_the_attempt_on_a_timeout(tmp_path: Path):
+    """With a Test stage the frozen Test is the transition, so it takes the same
+    split as a parent control: the strategy's own exception is a recorded Test
+    result, a timeout fails the attempt instead of scoring the Fold."""
+
+    class FailingTestEvaluator(RecordingEvaluator):
+        failure: type[BaseException] | None = None
+
+        def evaluate(self, request):
+            if request.mode == "frozen_test" and self.failure is TimeoutError:
+                raise TimeoutError("frozen test exceeded its wall clock")
+            if request.mode == "frozen_test":
+                raise BacktestError("generate_orders failed: 'close'") from StrategyRaised("'close'")
+            return super().evaluate(request)
+
+    evaluator = FailingTestEvaluator({"revision_1": 0.05})
+    pipeline, folds, ledger, _requests = _regular_fold_pipeline(tmp_path, evaluator, test_stage=True)
+    seed = _seed_artifact(pipeline, evaluator)
+    pipeline.run_fold("epoch_001", folds[0], parent=seed)
+    test_result = ledger.read("fold")[0]["test_result"]
+    assert (test_result["status"], test_result["failure"]) == ("failed", "strategy_error")
+
+    evaluator.failure = TimeoutError
+    with pytest.raises(TimeoutError, match="frozen test"):
+        pipeline.run_fold("epoch_001", folds[0], parent=seed)
+    assert len(ledger.read("fold")) == 1
+    assert "TimeoutError" in ledger.read("attempt_failed")[0]["error"]
 
 
 def test_single_window_fold_has_no_frozen_test_and_held_out_graduates(tmp_path: Path):
@@ -2397,6 +2473,17 @@ def test_the_null_control_of_the_parent_and_of_the_frozen_node_reach_the_ledger(
     calls: list[dict[str, object]] = []
     pipeline.evaluator.null_control = _canned_null(calls)
     stepped = replace(folds[1], step_start="20220401", step_end="20220630")
+    # A stepped control is graded on its own quarter, so its result carries it.
+    plain = pipeline.evaluator.evaluate
+
+    def with_step_row(request):
+        result = plain(request)
+        result.summary["sub_windows"] = [
+            {"label": "2022Q2", "start": "20220401", "end": "20220630", "return": 0.01}
+        ]
+        return result
+
+    pipeline.evaluator.evaluate = with_step_row
     pipeline.run_fold("epoch_001", stepped, parent=first.frozen)
 
     record = ledger.read("fold")[1]
@@ -2936,24 +3023,25 @@ def test_deployment_adjustment_keeps_the_graduate_on_no_edge_or_parent_nominatio
         assert paper_candidate(ledger.read())["source"] == "graduated"
 
 
-def test_deployment_adjustment_without_a_valid_replay_pins_the_graduate(tmp_path: Path):
-    """A failed parent replay is recorded and the session still runs; a session
-    that nominates nothing leaves no_valid_backtest, and the graduated tree is
-    untouched: only the ledger pointer decides what Paper pins."""
-    evaluator = RecordingEvaluator({}, fail_on={"strategy_epoch_001_fold_2026Q1_graduate"})
-    pipeline, fold, ledger, graduated, requests = _deployment_pipeline(
-        tmp_path, evaluator, candidate=None, nominate="none"
-    )
-    before = (graduated.path / "main.py").read_bytes()
-    record = pipeline.run_deployment_adjustment("epoch_001", fold, graduated=graduated)
-    assert requests[0].parent_control is None
-    assert record["parent_control"]["status"] == "failed"
-    assert "exceeded its wall clock" in record["parent_control"]["error"]
-    assert record["status"] == "no_valid_backtest"
-    assert record["finish_mode"] == "no_nomination"
-    assert record["hard_reject_reasons"] == ["no_complete_validation"]
-    assert (graduated.path / "main.py").read_bytes() == before
-    assert paper_candidate(ledger.read())["artifact_id"] == graduated.artifact_id
+def test_deployment_adjustment_without_a_valid_graduate_replay_fails_the_attempt(tmp_path: Path):
+    """The graduate's replay on the deployment window is what a Paper pin rests
+    on: whether it timed out or the strategy crashed, the attempt fails before
+    the session, writes no adjustment row, stays due, and nothing is pinned."""
+    for failure in ("fail_on", "crash_on"):
+        evaluator = RecordingEvaluator({})
+        getattr(evaluator, failure).add("strategy_epoch_001_fold_2026Q1_graduate")
+        pipeline, fold, ledger, graduated, requests = _deployment_pipeline(
+            tmp_path / failure, evaluator, candidate=None, nominate="none"
+        )
+        before = (graduated.path / "main.py").read_bytes()
+        with pytest.raises((TimeoutError, BacktestError)):
+            pipeline.run_deployment_adjustment("epoch_001", fold, graduated=graduated)
+        assert requests == []
+        assert ledger.read("deployment_adjustment") == []
+        assert len(ledger.read("attempt_failed")) == 1
+        assert deployment_adjustment_due(ledger.read(), start="20260401")
+        assert paper_candidate(ledger.read()) is None
+        assert (graduated.path / "main.py").read_bytes() == before
 
 
 def test_deployment_adjustment_crash_is_an_attempt_failed_and_stays_due(tmp_path: Path):
@@ -2970,7 +3058,8 @@ def test_deployment_adjustment_crash_is_an_attempt_failed_and_stays_due(tmp_path
     assert "sandbox died" in failed[0]["error"]
     assert sorted(RunMarkers(pipeline.config.experiment_dir).root.glob("*.json")) == []
     assert deployment_adjustment_due(ledger.read(), start="20260401")
-    assert paper_candidate(ledger.read())["source"] == "graduated"
+    # Nothing is pinned while the newest adjustment attempt has failed.
+    assert paper_candidate(ledger.read()) is None
 
 
 def test_paper_candidate_is_none_unless_the_experiment_graduated(tmp_path: Path):

@@ -209,7 +209,7 @@ class AcceptanceRulesTest(unittest.TestCase):
         }
         # The shipped artifact's own forward record, so term (c) holds and
         # these assertions stay about term (b).
-        own = {"transitions": 2, "positive_excess": 2}
+        own = {"transitions": 2, "positive_excess": 2, "failed": 0, "unmeasured": 0}
         # Held-out passes but only 1 of 3 walk-forward transitions beat the
         # benchmark: term (b) fails and the reason carries the counts.
         verdict = rules.heldout_verdict(
@@ -267,7 +267,7 @@ class AcceptanceRulesTest(unittest.TestCase):
         self.assertEqual(rules.confirmation_folds, 2)
         # Everything else passes; the artifact itself was never confirmed.
         verdict = rules.heldout_verdict(
-            passing, chain, None, {"artifact_id": "strategy_x", "transitions": 0, "positive_excess": 0}
+            passing, chain, None, {"artifact_id": "strategy_x", "transitions": 0, "positive_excess": 0, "failed": 0, "unmeasured": 0}
         )
         self.assertEqual(verdict["status"], "discarded")
         self.assertEqual(verdict["reasons"], ["final_artifact_unconfirmed(0/2)"])
@@ -282,12 +282,12 @@ class AcceptanceRulesTest(unittest.TestCase):
         # As many confirming transitions as there are confirmation Folds, all
         # positive: it graduates.
         verdict = rules.heldout_verdict(
-            passing, chain, None, {"transitions": 2, "positive_excess": 2}
+            passing, chain, None, {"transitions": 2, "positive_excess": 2, "failed": 0, "unmeasured": 0}
         )
         self.assertEqual((verdict["status"], verdict["reasons"]), ("graduated", []))
         # Confirmed but negative: the same two-thirds rule applies to its own.
         verdict = rules.heldout_verdict(
-            passing, chain, None, {"transitions": 3, "positive_excess": 1}
+            passing, chain, None, {"transitions": 3, "positive_excess": 1, "failed": 0, "unmeasured": 0}
         )
         self.assertEqual(
             verdict["reasons"], ["final_artifact_forward_excess_inconsistent(1/3<2)"]
@@ -305,10 +305,34 @@ class AcceptanceRulesTest(unittest.TestCase):
         # A higher floor demands more confirming Folds; 0 drops the term.
         strict = AcceptanceRules(confirmation_folds=3)
         self.assertEqual(
-            strict.heldout_verdict(passing, chain, None, {"transitions": 2, "positive_excess": 2})[
+            strict.heldout_verdict(passing, chain, None, {"transitions": 2, "positive_excess": 2, "failed": 0, "unmeasured": 0})[
                 "reasons"
             ],
             ["final_artifact_unconfirmed(2/3)"],
+        )
+        # The floor counts completed transitions only: an unmeasured one (a
+        # timeout a ledger never classified) is its own reason and fills no
+        # floor, so 2 positives of 3 rows cannot pass a floor of 3.
+        self.assertEqual(
+            strict.heldout_verdict(
+                passing,
+                {**chain, "unmeasured": 1},
+                None,
+                {"transitions": 3, "positive_excess": 2, "failed": 0, "unmeasured": 1},
+            )["reasons"],
+            ["unmeasured_transitions(1/12)", "final_artifact_unconfirmed(2/3)"],
+        )
+        # The shipped artifact's own replay crashed in its strategy code: a
+        # completed, non-positive transition that fails the term by itself,
+        # even when the remaining ones clear two thirds.
+        self.assertEqual(
+            rules.heldout_verdict(
+                passing,
+                chain,
+                None,
+                {"transitions": 3, "positive_excess": 2, "failed": 1, "unmeasured": 0},
+            )["reasons"],
+            ["final_artifact_transition_failed(1)"],
         )
         off = AcceptanceRules(confirmation_folds=0)
         self.assertEqual(off.heldout_verdict(passing, chain)["reasons"], [])
@@ -335,7 +359,7 @@ class AcceptanceRulesTest(unittest.TestCase):
                 "deflated_sharpe_trials": 18,
                 "validation_excess_percentile": 0.11,
             },
-            {"artifact_id": "strategy_x", "transitions": 2, "positive_excess": 2},
+            {"artifact_id": "strategy_x", "transitions": 2, "positive_excess": 2, "failed": 0, "unmeasured": 0},
         )
         self.assertEqual((verdict["status"], verdict["reasons"]), ("graduated", []))
         self.assertEqual(
@@ -1233,7 +1257,7 @@ class WalkForwardApplicabilityTest(unittest.TestCase):
             passing,
             {"source": "parent_control", "scheduled": 4, "transitions": 0},
             None,
-            {"transitions": 0, "positive_excess": 0},
+            {"transitions": 0, "positive_excess": 0, "failed": 0, "unmeasured": 0},
         )["reasons"]
         self.assertIn("walkforward_excess_inconsistent(0/0<1)", reasons)
         self.assertIn("final_artifact_unconfirmed(0/2)", reasons)

@@ -30,6 +30,7 @@ from autotrade.environment.executor import (
     DockerStrategyExecutor,
     StrategyExecutor,
     TrustedStrategyExecutor,
+    raised_by_strategy,
 )
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.replay import (
@@ -74,6 +75,7 @@ from .folds import FoldSpec, heldout_periods
 from .hitl_state import DEPLOYMENT_SESSION_KEY, fold_session_key
 from .inherited_memory import InheritedMemory, prior_provenance
 from .ledger import (
+    STRATEGY_ERROR,
     ExperimentLedger,
     FrozenArtifactMutated,
     FrozenArtifactRestoreFailed,
@@ -459,16 +461,29 @@ class RollingExperimentPipeline:
                 if test_result is not None:
                     test_summary = test_result.summary
                     test_result_ref = test_result.result_ref
+                elif (
+                    test_error is not None
+                    and not state_changed_during_test
+                    and not raised_by_strategy(test_error)
+                ):
+                    # A timeout or host failure measured nothing about the
+                    # frozen strategy: fail this attempt rather than record it
+                    # as the Fold's Test (with a Test stage, its transition).
+                    raise test_error
                 else:
-                    # Frozen Test is diagnostic only unless the frozen trees
-                    # themselves changed: then the ledger records the integrity
-                    # failure and the run terminates.
+                    # The strategy's own exception is a Test result; changed
+                    # frozen trees are recorded below and end the run.
                     test_summary = {
                         "status": "failed",
                         "error": (
                             f"{type(test_error).__name__}: {test_error}"
                             if test_error is not None
                             else "frozen_test_failed"
+                        ),
+                        **(
+                            {"failure": STRATEGY_ERROR}
+                            if test_error is not None and raised_by_strategy(test_error)
+                            else {}
                         ),
                     }
             _publish_progress(progress, "publishing", run_id=run_id)
@@ -907,8 +922,8 @@ class RollingExperimentPipeline:
                 end=fold.validation_end,
                 decision_time=fold.valid_decision_time,
             )
-            control, control_error, _ = self._parent_control(
-                graduated, fold, snapshot, progress=progress, run_id=run_id, null=False
+            control, _, _ = self._parent_control(
+                graduated, fold, snapshot, progress=progress, run_id=run_id, deployment=True
             )
             try:
                 session = self.developer(
@@ -932,7 +947,6 @@ class RollingExperimentPipeline:
                         fold_period=self.config.fold_period,
                         test_stage=False,
                         parent_control=control,
-                        parent_control_error=control_error,
                         epoch_index=_epoch_index(epoch_id),
                         phase="deployment",
                         session_kind="deployment_adjustment",
@@ -1017,7 +1031,7 @@ class RollingExperimentPipeline:
                 "parent_control": _parent_control_record(
                     graduated,
                     control,
-                    control_error,
+                    "",
                     session.steps,
                     fold=fold,
                     slippage_bps=self.config.broker_profile.slippage_bps,
@@ -1310,7 +1324,7 @@ class RollingExperimentPipeline:
         *,
         progress,
         run_id: str,
-        null: bool = True,
+        deployment: bool = False,
     ) -> tuple[EvaluationResult | None, str, dict[str, object] | None]:
         """Replay the inherited parent unchanged on this Fold's Validation window.
 
@@ -1318,9 +1332,16 @@ class RollingExperimentPipeline:
         replay bounds the session's own Validations use, and is charged to no
         session budget. The result is the walk-forward evidence for the
         previous Fold's frozen strategy and the parent's completed Validation
-        in this Fold; a failure is recorded explicitly and the Fold proceeds.
-        The random-portfolio null control of that same result is measured here
-        too, on the Fold's new period when the window trails over several.
+        in this Fold. Only the parent's own exception is recorded (it cannot
+        run on this window, which is a measurement of it) and the Fold
+        proceeds; any other failure -- a timeout, the sandbox, host IO, a result
+        without the Fold's own quarter -- measured nothing and fails this
+        attempt, before any session work is spent. The random-portfolio null
+        control of that same result is measured here too, on the Fold's new
+        period when the window trails over several.
+
+        ``deployment`` replays the graduate Paper would pin: no null control,
+        and a failure of any kind fails the attempt.
         """
         if parent is None:
             return None, "", None
@@ -1337,9 +1358,15 @@ class RollingExperimentPipeline:
                     broker_profile=self.config.broker_profile,
                 )
             )
-        except Exception as exc:  # noqa: BLE001 - recorded, the Fold still runs
+        except Exception as exc:
+            if deployment or not raised_by_strategy(exc):
+                raise
             return None, f"{type(exc).__name__}: {exc}", None
-        if not null:
+        # Refuses a stepped Fold's result that lacks its own quarter here, not
+        # after the session: grading it on the whole trailing window instead
+        # would score mostly in-sample ground.
+        _step_result(control.summary, fold, self.config.broker_profile.slippage_bps)
+        if deployment:
             return control, "", None
         return (
             control,
@@ -1740,8 +1767,10 @@ def _parent_control_record(
     if parent is None:
         return None
     if control is None:
+        # _parent_control returns no result only for the parent's own exception.
         return {
             "status": "failed",
+            "failure": STRATEGY_ERROR,
             "parent_strategy_artifact_id": parent.artifact_id,
             "error": error,
         }
@@ -1779,23 +1808,25 @@ def _step_result(
     ledger, the graduation term and the report read a transition the same way
     whether it is a step or a whole window -- and priced with the same
     cost-sensitivity function. None when the Fold has no separate step (a
-    single-period window) or the row is missing.
+    single-period window); a stepped Fold whose result lacks exactly one row
+    for its own period raises, because no other span may stand in for it.
     """
 
     if not fold.has_step:
         return None
     rows = summary.get("sub_windows")
-    if not isinstance(rows, list):
-        return None
     matched = [
         row
-        for row in rows
+        for row in (rows if isinstance(rows, list) else ())
         if isinstance(row, Mapping)
         and str(fold.step_start) <= str(row.get("start"))
         and str(row.get("end")) <= str(fold.step_end)
     ]
     if len(matched) != 1:
-        return None
+        raise RuntimeError(
+            f"parent control result has {len(matched)} sub-window rows inside the "
+            f"Fold's own period {fold.step_start}..{fold.step_end}; expected exactly one"
+        )
     row = matched[0]
     step = {
         "label": row.get("label"),

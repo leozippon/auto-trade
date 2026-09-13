@@ -2295,9 +2295,9 @@ class WebuiBackendTest(unittest.TestCase):
         The first Fold of the first Epoch inherits nothing and has no control;
         the three after it open with the previous Fold's frozen strategy
         replayed on their own Validation window (one beats its benchmark, one
-        does not, one failed outright), so the Epoch has three walk-forward
-        transitions of which one is positive — short of the two-thirds term (b)
-        requires.
+        does not, one crashed in the strategy's own code), so the Epoch has
+        three walk-forward transitions of which one is positive — short of the
+        two-thirds term (b) requires.
         """
         experiment_dir = self.experiments_root / experiment_id
         AgentRefStore(experiment_dir)
@@ -2397,14 +2397,15 @@ class WebuiBackendTest(unittest.TestCase):
                     "step": {"excess_percentile": 0.42},
                 },
             },
-            # Never completed: a transition that proved nothing.
+            # The parent's own code crashed: a completed, non-positive transition.
             "2025": {
                 "status": "failed",
+                "failure": "strategy_error",
                 "parent_strategy_artifact_id": "strategy_epoch_001_fold_2024",
                 # Host-generated text, host path and all: the console must
                 # publish it the way the Agent reads it, not verbatim.
                 "error": (
-                    "TimeoutError: parent control exceeded the deadline "
+                    "BacktestError: generate_orders failed: KeyError 'close' "
                     "(/srv/experiments/exp_wf/steps/step_control.log)"
                 ),
             },
@@ -2503,6 +2504,8 @@ class WebuiBackendTest(unittest.TestCase):
                         "epoch_id": "epoch_001",
                         "transitions": 2,
                         "positive_excess": 2,
+                        "failed": 0,
+                        "unmeasured": 0,
                     },
                 ),
             }
@@ -3407,7 +3410,7 @@ class WebuiBackendTest(unittest.TestCase):
                 # Redacted by the projection the Agent reads the same reason
                 # through (agent_views.parent_control_error_text).
                 "error": (
-                    "TimeoutError: parent control exceeded the deadline "
+                    "BacktestError: generate_orders failed: KeyError 'close' "
                     "([host_path])"
                 ),
                 # This lineage never froze an anchor, so nothing here replayed
@@ -3471,8 +3474,8 @@ class WebuiBackendTest(unittest.TestCase):
                     "source": "parent_control",
                     "transitions": 3,
                     "positive_excess": 1,
-                    # A counted transition whose neutralized excess cannot be
-                    # established at all fails the verdict; none here does.
+                    # A counted transition with no measured sign fails the
+                    # verdict; none here has one.
                     "unmeasured": 0,
                     "required": 2,
                     # +5% and −3% neutralized on the two scored transitions —

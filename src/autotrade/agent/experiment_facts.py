@@ -449,11 +449,11 @@ def _artifact_contract_facts(
         "parent_control_available": _parent_control_available(
             manifest, is_initial=is_initial
         ),
-        # And why, when the host's replay is what failed. The submit contract
-        # names a failed pre-session control as the one case worth re-replaying
-        # the parent on the session's own budget, so without the reason that
-        # decision is made blind and paid for in slots; the manifest already
-        # carries the bounded, host-path-free text.
+        # And why, when the host's replay is what failed -- always the
+        # parent's own exception, since any other failure fails the attempt
+        # before a session starts. The submit contract asks for a minimal
+        # repair of exactly that error; the manifest already carries the
+        # bounded, host-path-free text.
         **(
             {"parent_control_error": error}
             if (error := manifest.get("parent_control_error"))

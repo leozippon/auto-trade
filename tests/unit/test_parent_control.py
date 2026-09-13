@@ -31,6 +31,7 @@ from autotrade.environment.tools.finish_fold import FinishFoldTool
 from autotrade.environment.tools.modification_check import ModificationCheckTool
 from autotrade.pipelines.agent_views import compact_fold_history
 from autotrade.pipelines.config import (
+    AcceptanceRules,
     BrokerProfile,
     EvaluationResult,
     FoldSessionRequest,
@@ -340,7 +341,14 @@ def test_walk_forward_transitions_count_the_final_epochs_parent_controls():
         _fold("epoch_002", "fold_2022", "20220101..20221231", control=_ok(0.10)),
         _fold("epoch_002", "fold_2023", "20230101..20231231", control=_ok(0.05)),
         _fold("epoch_002", "fold_2024", "20240101..20241231", control=_ok(0.01)),
-        _fold("epoch_002", "fold_2025", "20250101..20251231", control={"status": "failed", "error": "x"}),
+        # The parent's own code crashed on this window: a measured,
+        # non-positive transition.
+        _fold(
+            "epoch_002",
+            "fold_2025",
+            "20250101..20251231",
+            control={"status": "failed", "failure": "strategy_error", "error": "KeyError: 'x'"},
+        ),
     ]
     assert walk_forward_transitions(records, epoch_id="epoch_002", test_stage=False) == {
         "source": "parent_control",
@@ -348,11 +356,25 @@ def test_walk_forward_transitions_count_the_final_epochs_parent_controls():
         "scheduled": 3,
         "transitions": 3,
         "positive_excess": 1,
-        # The failed control proved nothing; it is not an unmeasured grade.
+        "failed": 1,
         "unmeasured": 0,
         # No control here ran a null control.
         "mean_excess_percentile": None,
     }
+    # A failed row written before failures were classified may have been a
+    # timeout: it has no sign, and the verdict names it instead of grading it.
+    records[-1]["parent_control"] = {"status": "failed", "error": "strategy inference exceeded 180s"}
+    legacy = walk_forward_transitions(records, epoch_id="epoch_002", test_stage=False)
+    assert (legacy["positive_excess"], legacy["failed"], legacy["unmeasured"]) == (1, 0, 1)
+    passing = {
+        "total_return": 0.10,
+        "sharpe": 1.0,
+        "max_drawdown": -0.05,
+        "benchmark": {"benchmark_return": 0.02, "neutralized_excess_return": 0.03},
+    }
+    verdict = AcceptanceRules(confirmation_folds=0).heldout_verdict(passing, legacy)
+    assert verdict["status"] == "discarded"
+    assert "unmeasured_transitions(1/3)" in verdict["reasons"]
     # A rerun appends a superseding record; only the latest counts.
     records.append(_fold("epoch_002", "fold_2025", "20250101..20251231", control=_ok(0.09)))
     assert walk_forward_transitions(records, epoch_id="epoch_002", test_stage=False)["positive_excess"] == 2
@@ -365,7 +387,7 @@ def test_walk_forward_transitions_use_frozen_tests_with_a_test_stage():
     records = [
         _fold("epoch_001", "fold_2023", "20220101..20221231", test={"total_return": 0.05, "benchmark": {"benchmark_return": 0.02, "neutralized_excess_return": 0.03}}),
         _fold("epoch_001", "fold_2024", "20230101..20231231", test={"total_return": 0.01, "benchmark": {"benchmark_return": 0.02, "neutralized_excess_return": -0.01}}),
-        _fold("epoch_001", "fold_2025", "20240101..20241231", test={"status": "failed", "error": "boom"}),
+        _fold("epoch_001", "fold_2025", "20240101..20241231", test={"status": "failed", "failure": "strategy_error", "error": "boom"}),
     ]
     assert walk_forward_transitions(records, epoch_id="epoch_001", test_stage=True) == {
         "source": "frozen_test",
@@ -373,6 +395,7 @@ def test_walk_forward_transitions_use_frozen_tests_with_a_test_stage():
         "scheduled": 3,
         "transitions": 3,
         "positive_excess": 1,
+        "failed": 1,
         "unmeasured": 0,
         # A frozen Test is never ranked against a null control.
         "mean_excess_percentile": None,
@@ -411,6 +434,7 @@ def test_final_artifact_transitions_count_only_the_shipped_artifacts_own():
         "epoch_id": "epoch_001",
         "transitions": 0,
         "positive_excess": 0,
+        "failed": 0,
         "unmeasured": 0,
     }
     own = final_artifact_transitions(
@@ -509,9 +533,14 @@ def test_the_step_result_is_the_new_periods_sub_window_priced_like_a_result():
 def test_a_single_period_fold_has_no_separate_step():
     # Nothing to project: the whole window is the transition, exactly as before.
     assert _step_result(_TRAILING_SUMMARY, _rolling_fold(step=False), 5.0) is None
-    # A window whose sub-window table does not cover the step is not invented.
+
+def test_a_stepped_control_without_its_own_quarter_raises():
+    """The whole trailing window never stands in for the missing new quarter:
+    that would grade the transition mostly on ground the parent was developed
+    on, so the control is refused before anything records it."""
     narrowed = {**_TRAILING_SUMMARY, "sub_windows": _TRAILING_SUMMARY["sub_windows"][:3]}
-    assert _step_result(narrowed, _rolling_fold(step=True), 5.0) is None
+    with pytest.raises(RuntimeError, match="20230401..20230630"):
+        _step_result(narrowed, _rolling_fold(step=True), 5.0)
 
 
 def test_a_transition_is_graded_on_the_step_when_the_window_carries_one():
@@ -550,6 +579,7 @@ def test_a_transition_is_graded_on_the_step_when_the_window_carries_one():
         "scheduled": 1,
         "transitions": 1,
         "positive_excess": 0,
+        "failed": 0,
         "unmeasured": 0,
         "mean_excess_percentile": 0.31,
     }
@@ -604,7 +634,6 @@ def test_a_transition_without_a_recorded_neutralized_excess_is_derived_then_fail
     """
 
     from autotrade.environment.replay.style import STYLE_ARTIFACT_NAME
-    from autotrade.pipelines.config import AcceptanceRules
 
     result_dir = tmp_path / "valid_abc"
     result_dir.mkdir()
@@ -659,7 +688,7 @@ def test_a_transition_without_a_recorded_neutralized_excess_is_derived_then_fail
     reasons = AcceptanceRules(confirmation_folds=0).heldout_verdict(passing, unmeasured)[
         "reasons"
     ]
-    assert "missing_transition_neutralized_excess(1/1)" in reasons
+    assert "unmeasured_transitions(1/1)" in reasons
 
 
 def test_transitions_that_replayed_a_baseline_anchor_are_not_counted():
@@ -704,10 +733,9 @@ def test_transitions_that_replayed_a_baseline_anchor_are_not_counted():
 def test_a_failed_control_tells_the_sessions_why_it_failed(tmp_path: Path):
     """The absence of a baseline is not enough for the decision it drives.
 
-    ``FOLD_SUBMIT_CONTRACT`` names a failed pre-session control as the one case
-    worth re-replaying the parent on the session's own budget, so a session
-    that reads only ``parent_control_available: false`` makes that call blind:
-    the confirm arm replayed its parent three times. The reason therefore
+    ``FOLD_SUBMIT_CONTRACT`` asks for a minimal repair of the parent's own
+    error, so a session that reads only ``parent_control_available: false``
+    acts blind: the confirm arm replayed its parent three times. The reason therefore
     reaches both surfaces that publish the control -- a later Fold's run facts
     and Meta's fold history -- host paths redacted and length bounded, because
     it travels in a system prompt.

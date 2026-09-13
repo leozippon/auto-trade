@@ -200,16 +200,16 @@ def test_local_worker_regular_folds_go_straight_to_held_out(tmp_path: Path):
     # nor a style sidecar to derive one from, its grade is unmeasurable and the
     # verdict says so in its own reason rather than reading the raw excess
     # instead. That transition replayed the very artifact Held-out ships (the
-    # second Fold kept it), so term (c) has evidence to read and finds it
-    # unproven.
+    # second Fold kept it), but an unmeasured transition fills no floor, so
+    # term (c) finds the artifact unconfirmed.
     assert heldout["verdict"]["status"] == "discarded"
     assert heldout["verdict"]["reasons"] == [
         "missing_benchmark_return",
         "missing_neutralized_excess_return",
         "sharpe_not_positive",
         "walkforward_excess_inconsistent(0/1<1)",
-        "missing_transition_neutralized_excess(1/1)",
-        "final_artifact_forward_excess_inconsistent(0/1<1)",
+        "unmeasured_transitions(1/1)",
+        "final_artifact_unconfirmed(0/1)",
     ]
     assert result["verdict"]["status"] == "discarded"
     assert result["verdict"]["periods"][0]["period"] == "2026Q2"

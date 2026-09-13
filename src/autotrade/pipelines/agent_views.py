@@ -497,13 +497,13 @@ PARENT_CONTROL_ERROR_MAX_CHARS = 400
 def parent_control_error_text(value: object) -> str | None:
     """Why the host's pre-session parent replay produced no result.
 
-    The Fold prompt sanctions re-replaying the parent on the session's own
-    budget in exactly this case, so a session that is told only that the
-    baseline is missing pays for the missing reason in Validation slots — the
-    confirm arm replayed its parent three times. It is host-generated
-    ``BacktestError`` text of the same class the Agent already reads from its
-    own replays; host paths are redacted and the text is bounded, because it
-    travels in every later Fold's and every Meta session's system prompt.
+    Only the parent's own exception is recorded (any other failure fails the
+    attempt), and a session told only that the baseline is missing pays for
+    the missing reason in Validation slots — the confirm arm replayed its
+    parent three times. It is host-generated ``BacktestError`` text of the same
+    class the Agent already reads from its own replays; host paths are
+    redacted and the text is bounded, because it travels in every later Fold's
+    and every Meta session's system prompt.
     """
 
     if not isinstance(value, str):

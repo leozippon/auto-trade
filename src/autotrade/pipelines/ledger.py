@@ -49,6 +49,10 @@ RECORD_TYPES = (
     "attempt_failed",
 )
 LINK_KEYS = ("experiment_id", "epoch_id", "fold_id", "run_id")
+# The ``failure`` tag of a failed parent control or frozen Test whose strategy
+# code raised: the one replay failure that measures the strategy. Every other
+# failure fails the session attempt and never reaches a ledger row.
+STRATEGY_ERROR = "strategy_error"
 DURABLE_SUCCESS_TYPES = ("fold", "meta_learning", "heldout", "deployment_adjustment")
 _INTEGRITY_RECORD_TYPES = frozenset({"fold", "heldout"})
 
@@ -212,11 +216,15 @@ class Transition:
     ``result_ref`` points at the replay record the result was projected from,
     which is where the neutralized excess of a span is recomputed when the
     record itself does not carry one (:func:`transition_neutralized_excess`).
+    ``failure`` is empty unless the replay failed: then it is the row's
+    ``failure`` tag (``STRATEGY_ERROR``), or ``"unclassified"`` for a failed
+    row written before failures were classified.
     """
 
     artifact_id: str | None
     result: object
     result_ref: str
+    failure: str = ""
 
 
 def baseline_anchor_artifacts(fold_records: list[dict[str, object]]) -> frozenset[str]:
@@ -263,6 +271,7 @@ def _transition_rows(
                 _artifact_id(record.get("frozen_strategy_artifact_id")),
                 record.get("test_result"),
                 str(record.get("test_result_ref") or ""),
+                _failure(record.get("test_result")),
             )
             for record in folds
         ]
@@ -290,7 +299,16 @@ def _parent_control_transition(control: object) -> Transition:
         _artifact_id(control.get("parent_strategy_artifact_id")),
         transition_result(control),
         str(control.get("validation_result_ref") or ""),
+        _failure(control),
     )
+
+
+def _failure(block: object) -> str:
+    """How a parent control or frozen Test failed, when it did."""
+
+    if not isinstance(block, Mapping) or block.get("status") != "failed":
+        return ""
+    return str(block.get("failure") or "unclassified")
 
 
 def parent_control_excess(control: object) -> float | None:
@@ -330,10 +348,8 @@ def walk_forward_transitions(
     on this Fold's Validation window, scored on its new period alone when the
     window trails over several (``transition_result``). With a Test stage it is
     each Fold's frozen Test. A transition counts as positive only when its
-    size/beta-neutralized excess is > 0 (``transition_neutralized_excess``); a
-    failed or missing result is a transition that proved nothing, and one whose
-    neutralized excess cannot be established at all is reported as
-    ``unmeasured`` rather than graded on its raw excess.
+    size/beta-neutralized excess is > 0 (``transition_neutralized_excess``);
+    how the rest are counted is :func:`_counts`.
 
     This is the development *chain's* record: the transitions it counts mostly
     replay earlier artifacts of the lineage, not the one Held-out ships. What
@@ -460,8 +476,11 @@ def transition_result(control: object) -> Mapping[str, object] | None:
     all but its last one, so its ``parent_control`` records ``step_result`` --
     that last period alone -- and the transition is scored on it. A single-period
     window (and every ledger written before the rolling schedule) has none, and
-    the whole ``validation_result`` is the transition. The single source for
-    both the graduation term and the report, so the two can never disagree.
+    the whole ``validation_result`` is the transition. The whole window is never
+    a fallback for a missing step: a trailing window's control without its own
+    quarter is refused before it is recorded (``experiment._step_result``).
+    The single source for both the graduation term and the report, so the two
+    can never disagree.
     """
 
     if not isinstance(control, Mapping):
@@ -552,26 +571,36 @@ def _derived_excess(result_ref: str, start: str, end: str) -> float | None:
 
 
 def _counts(rows: Sequence[Transition]) -> dict[str, int]:
-    """How many transitions were counted, positive, and unmeasurable.
+    """How many transitions were counted, positive, failed, and unmeasured.
 
-    A failed or absent result proved nothing and is simply not positive, as it
-    always was. ``unmeasured`` is the narrower case this rule introduces: a
-    result that exists but whose neutralized excess could not be established
-    at all, which must fail the gate explicitly rather than be graded on the
-    raw excess instead.
+    Every row is a transition. Positive means a neutralized excess > 0.
+    ``failed`` rows are replays the strategy's own code crashed: a measurement
+    (the strategy cannot run forward there), so they stay completed,
+    non-positive transitions. ``unmeasured`` rows have no sign at all -- a
+    result whose neutralized excess could not be established, or a failed
+    replay the ledger never classified (rows written before failures were
+    typed, which may have been a timeout) -- and fail the verdict explicitly
+    instead of being graded as negatives. A Fold with no parent to replay
+    (after a ``baseline_missing`` one) proved nothing and is not positive.
     """
 
-    measured = [transition_neutralized_excess(row) for row in rows]
+    positive = failed = unmeasured = 0
+    for row in rows:
+        if row.failure == STRATEGY_ERROR:
+            failed += 1
+        elif row.failure:
+            unmeasured += 1
+        else:
+            value = transition_neutralized_excess(row)
+            if value is None:
+                unmeasured += isinstance(row.result, Mapping)
+            elif value > 0:
+                positive += 1
     return {
         "transitions": len(rows),
-        "positive_excess": sum(1 for value in measured if value is not None and value > 0),
-        "unmeasured": sum(
-            1
-            for row, value in zip(rows, measured, strict=True)
-            if value is None
-            and isinstance(row.result, Mapping)
-            and row.result.get("status") != "failed"
-        ),
+        "positive_excess": positive,
+        "failed": failed,
+        "unmeasured": unmeasured,
     }
 
 
@@ -823,13 +852,16 @@ def deployment_adjustment_due(records: list[dict[str, object]], *, start: str) -
 def paper_candidate(records: list[dict[str, object]]) -> dict[str, object] | None:
     """The one artifact Paper pins (docs/pipeline-design.md §3.4).
 
-    None unless the experiment graduated. The adjusted artifact when the
-    latest deployment adjustment recorded ``status="adjusted"`` and refit the
-    very artifact the latest Held-out rows scored; otherwise the graduated
-    artifact -- a failed or abstained adjustment, or one whose parent is not
-    the current graduate (a rollback moved the frontier), leaves the graduate
-    as the candidate. The single source for the terminal status, the console
-    and the report.
+    None unless the experiment graduated, and None while the newest deployment
+    adjustment attempt failed with no adjustment row after it: that attempt
+    starts by replaying the graduate on the deployment window, and a pin must
+    not rest on a replay that crashed or never finished. The adjusted artifact
+    when the latest deployment adjustment recorded ``status="adjusted"`` and
+    refit the very artifact the latest Held-out rows scored; otherwise the
+    graduated artifact -- an abstained adjustment, one whose parent is not the
+    current graduate (a rollback moved the frontier), or none configured --
+    leaves the graduate as the candidate. The single source for the terminal
+    status, the console and the report.
     """
     verdict = experiment_verdict(records, strict=False)
     if verdict is None or verdict.get("status") != "graduated":
@@ -837,6 +869,17 @@ def paper_candidate(records: list[dict[str, object]]) -> dict[str, object] | Non
     heldout = latest_heldout_records(records)
     graduated_id = str(heldout[-1].get("strategy_artifact_id") or "")
     if not graduated_id:
+        return None
+    last_failed = last_row = -1
+    for index, record in enumerate(records):
+        if (
+            record.get("record_type") == "attempt_failed"
+            and record.get("phase") == "deployment_adjustment"
+        ):
+            last_failed = index
+        elif is_durable_success_record(record, record_types=("deployment_adjustment",)):
+            last_row = index
+    if last_failed > last_row:
         return None
     adjustment = latest_deployment_record(records)
     if (

@@ -290,10 +290,13 @@ class AcceptanceRules:
         (rounded up), on the same caliber (a) applies to Held-out itself.
         Otherwise ``discarded`` with every failing reason. A missing or
         non-finite input is itself a failing reason: a replay that cannot
-        prove the conditions did not pass, and a transition whose neutralized
-        excess could not be established at all is named in its own reason
-        rather than graded on the raw number. Term (b) is ``not_applicable``
-        when the schedule has no transitions, and the verdict then rests on (a).
+        prove the conditions did not pass, and a transition with no measured
+        sign (``unmeasured``: no establishable neutralized excess, or a failed
+        replay the ledger never classified) is named in its own reason rather
+        than graded as a negative. A transition whose strategy code crashed
+        (``failed``) is a measured non-positive one. Term (b) is
+        ``not_applicable`` when the schedule has no transitions, and the
+        verdict then rests on (a).
 
         Term (b) scores the development chain, most of whose transitions
         replayed artifacts this one replaced. So whenever the schedule produced
@@ -393,16 +396,15 @@ class AcceptanceRules:
                 f"{consistency['positive_excess']}/{consistency['transitions']}"
                 f"<{consistency['required']})"
             )
-        # A transition whose neutralized excess could not be established at all
-        # has no sign, and the terms below count it as not positive. Say so as
-        # its own reason: the alternative readings are grading it on the raw
-        # excess, which this gate exists to stop, or letting an unknown sign
-        # pass as a measured negative.
+        # A transition with no measured sign fails the verdict as its own
+        # reason: the alternative readings are grading it on the raw excess,
+        # which this gate exists to stop, or letting an unknown sign -- a
+        # timeout in a ledger that never classified it, say -- pass as a
+        # measured negative.
         unmeasured = _count((walk_forward or {}).get("unmeasured")) or 0
         if unmeasured:
             reasons.append(
-                "missing_transition_neutralized_excess("
-                f"{unmeasured}/{consistency['transitions']})"
+                f"unmeasured_transitions({unmeasured}/{consistency['transitions']})"
             )
         reasons.extend(
             self._final_artifact_reasons(final_artifact, chain=consistency)
@@ -439,29 +441,38 @@ class AcceptanceRules:
         transitions at all — nothing in the run could have confirmed any
         artifact forward, which term (b) already reports as
         ``not_applicable``. Otherwise the counts must be there and must clear
-        both the floor and the same two-thirds rule; counts that were never
-        computed fail the term rather than pass it by default.
+        both the floor and the same two-thirds rule, on the completed
+        transitions only: an unmeasured one (already a reason of its own) can
+        neither fill the floor nor sit in the denominator. A completed one
+        whose strategy code crashed stays a non-positive transition and also
+        fails the term by itself: a shipped artifact that cannot run forward
+        does not graduate. Counts that were never computed fail the term
+        rather than pass it by default.
         """
 
         required = self.confirmation_folds
         if required <= 0 or chain.get("status") == "not_applicable":
             return []
         own = final_artifact if isinstance(final_artifact, Mapping) else {}
-        transitions = _count(own.get("transitions"))
-        positive = _count(own.get("positive_excess"))
-        if transitions is None or positive is None:
+        counts = [
+            _count(own.get(key))
+            for key in ("transitions", "positive_excess", "failed", "unmeasured")
+        ]
+        if any(value is None for value in counts):
             return ["missing_final_artifact_transitions"]
-        if transitions < required:
-            return [f"final_artifact_unconfirmed({transitions}/{required})"]
-        needed = math.ceil(2 * transitions / 3)
-        if positive < needed:
-            return [
-                (
-                    "final_artifact_forward_excess_inconsistent("
-                    f"{positive}/{transitions}<{needed})"
-                )
-            ]
-        return []
+        transitions, positive, failed, unmeasured = counts
+        completed = transitions - unmeasured
+        reasons: list[str] = []
+        if completed < required:
+            reasons.append(f"final_artifact_unconfirmed({completed}/{required})")
+        elif positive < (needed := math.ceil(2 * completed / 3)):
+            reasons.append(
+                "final_artifact_forward_excess_inconsistent("
+                f"{positive}/{completed}<{needed})"
+            )
+        if failed:
+            reasons.append(f"final_artifact_transition_failed({failed})")
+        return reasons
 
     @staticmethod
     def walk_forward_consistency(
@@ -889,10 +900,10 @@ class FoldSessionRequest:
     # That control's random-portfolio null, measured by the host beside the
     # replay (None when the backend runs none); forwarded, never recomputed.
     parent_control_null: Mapping[str, object] | None = None
-    # Why the pre-session control produced no result, when it failed. The
-    # prompt sanctions re-replaying the parent on the session's own budget in
-    # exactly this case, so the session has to be told what went wrong rather
-    # than only that nothing is there.
+    # Why the pre-session control produced no result, when it failed: the
+    # parent's own exception (any other failure fails the attempt). The prompt
+    # asks for a minimal repair of that error, so the session has to be told
+    # what went wrong rather than only that nothing is there.
     parent_control_error: str = ""
     epoch_index: int = 1
     phase: str = "exploration"
