@@ -9,6 +9,7 @@ strategy content; it only accepts, freezes, falls back, and records.
 from __future__ import annotations
 
 import hashlib
+import shutil
 import time
 import uuid
 from collections.abc import Callable, Mapping
@@ -39,7 +40,11 @@ from autotrade.environment.replay import (
     run_daily_replay,
 )
 from autotrade.environment.replay.stats import attach_cost_sensitivity
-from autotrade.environment.runtime import agent_trace_path, chmod_tree
+from autotrade.environment.runtime import (
+    agent_trace_path,
+    chmod_tree,
+    redact_host_paths,
+)
 from autotrade.environment.strategy import NLQuery
 from autotrade.environment.tools.finish_fold import mechanism_structure
 
@@ -116,6 +121,12 @@ from .skills import (
 # default Fold budget (config.max_fold_minutes), enough headroom for one slow
 # session without letting it run unattended for days.
 _MAX_DEADLINE_OVERRIDE_MINUTES = 1440
+
+# Trading days a meta-regularized package is replayed for before the Pipeline
+# freezes it. The same rehearsal length the Fold's smoke_backtest defaults to:
+# enough to pay for one ``fit`` and the first decision days, which is where a
+# package that cannot run says so.
+REGULARIZATION_SMOKE_DAYS = 3
 
 
 class DailyStrategyPipeline:
@@ -1267,23 +1278,34 @@ class RollingExperimentPipeline:
             # a meta-regularized artifact becomes the next Fold's parent.
             status = "prior_only"
             frozen = parent
+            smoke: dict[str, object] | None = None
             if deadline_exceeded:
                 status = "deadline_exceeded_kept_previous"
             elif parent is not None and session.allowed and session.revision_id:
-                frozen = self._freeze(
-                    session.revision_id,
-                    artifact_id=f"strategy_{session_id}_meta_learning",
-                    epoch_id=epoch_id,
-                    fold_id=session_id,
-                    run_id=run_id,
-                    step_id="meta_learning",
-                    # Never backtested: the next Fold may only fall back to it
-                    # after validating identical content itself, and reverts to
-                    # the artifact this one regularized when it cannot.
-                    requires_validation=True,
-                    validated_predecessor=parent,
+                # The Meta session cannot execute what it edits, so the freeze
+                # owner proves the package starts before adopting it.
+                _publish_progress(progress, "regularization_smoke", run_id=run_id)
+                smoke = self._regularization_smoke(
+                    session.revision_id, visible_fold, meta_snapshot
                 )
-                status = "meta_regularized"
+                if smoke["status"] == "ok":
+                    frozen = self._freeze(
+                        session.revision_id,
+                        artifact_id=f"strategy_{session_id}_meta_learning",
+                        epoch_id=epoch_id,
+                        fold_id=session_id,
+                        run_id=run_id,
+                        step_id="meta_learning",
+                        # Never fully backtested: the next Fold may only fall
+                        # back to it after validating identical content itself,
+                        # and reverts to the artifact this one regularized when
+                        # it cannot.
+                        requires_validation=True,
+                        validated_predecessor=parent,
+                    )
+                    status = "meta_regularized"
+                else:
+                    status = "rejected_kept_parent"
             elif parent is not None and session.allowed:
                 status = "prior_only_kept_parent"
             elif parent is not None:
@@ -1319,6 +1341,9 @@ class RollingExperimentPipeline:
                     "skills_published": skills.published,
                     "status": status,
                     "modification_check": dict(session.modification_check),
+                    # The rehearsal that decided whether the regularized package
+                    # could be frozen; absent when the session froze nothing.
+                    **({"regularization_smoke": smoke} if smoke is not None else {}),
                     # The artifact the session started from, and the one a
                     # rejected regularization reverts the lineage to.
                     "parent_strategy_artifact_id": (
@@ -1501,6 +1526,45 @@ class RollingExperimentPipeline:
             requires_validation=requires_validation,
             validated_predecessor=validated_predecessor,
         )
+
+    def _regularization_smoke(
+        self, revision_id: str, fold: FoldSpec, snapshot: SnapshotBundle
+    ) -> dict[str, object]:
+        """Replay a regularized package over the next Fold's first days.
+
+        The Meta session has no evaluator and no backtest tool: it cannot run
+        what it edits. A regularization that crashed on its first decision day
+        was therefore frozen, mounted as the next Fold's parent, and only found
+        when that Fold's control replay failed, with the Fold owing a
+        Validation nothing in it could pay (earnings_surprise_20260918). The
+        freeze belongs to the Pipeline, so does the run that proves the package
+        starts: same evaluator, snapshot and replay bounds the next Fold's
+        parent control will use, truncated to the first few trading days, and
+        the result is discarded -- it is a rehearsal, not a Validation, and
+        nothing may select or score it.
+        """
+
+        try:
+            evaluation = self.evaluator.evaluate(
+                EvaluationRequest(
+                    revision=self.artifacts.revision(revision_id),
+                    snapshot=snapshot,
+                    mode="valid",
+                    start=fold.validation_start,
+                    end=fold.validation_end,
+                    schedule=self.config.schedule,
+                    broker_profile=self.config.broker_profile,
+                ),
+                max_days=REGULARIZATION_SMOKE_DAYS,
+            )
+        except Exception as exc:  # noqa: BLE001 - the error text IS the verdict
+            return {
+                "status": "failed",
+                "days": REGULARIZATION_SMOKE_DAYS,
+                "error": redact_host_paths(f"{type(exc).__name__}: {exc}"),
+            }
+        shutil.rmtree(Path(evaluation.result_ref).parent, ignore_errors=True)
+        return {"status": "ok", "days": REGULARIZATION_SMOKE_DAYS}
 
     def _matches_parent_content(
         self, parent: FrozenArtifact, revision_id: str

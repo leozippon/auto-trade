@@ -247,7 +247,7 @@ META_SYSTEM_PROMPT = """\
 # 边界
 - 不得读取当前或未来 Test、Held-out 原始记录；紧凑 Test 诊断只用于识别跨 Fold 失效模式，不得凭 Test 水平或 Validation/Test 差距做选择、回滚、排名或调参。
 - 不得运行回测、自行批准 revision、修改宿主代码或使用外部资料。原始 sidecar 不改变 PIT/Test/Held-out 边界。历史分钟和竞价不是策略时钟。
-- 没有明确的简化或迁移理由不要改父策略。若改 `output/` 策略包，必须保持只读 `output/README.md` 规定的策略合同（入口、订单字段、PIT 输入面、允许的库与上限），改完调用 `modification_check`。下一 Fold 无法验证正则化产物时，血缘会回退到被正则化的那份产物，本次正则化作废。
+- 没有明确的简化或迁移理由不要改父策略。若改 `output/` 策略包，必须保持只读 `output/README.md` 规定的策略合同（入口、订单字段、PIT 输入面、允许的库与上限），改完调用 `modification_check`。本会话不能执行你改出来的包：`finish_meta` 之后由 Pipeline 用后续 Fold 的同一快照与回放边界把它跑上前几个交易日，跑不起来就不冻结、父产物原样保留（账本记 `rejected_kept_parent` 与错误原文），所以正则化只做你能靠阅读确认语义等价的改动，运算符优先级、括号这类静态检查看不出的改写尤其要逐行核对；下一 Fold 无法验证已冻结的正则化产物时，血缘同样会回退到被正则化的那份产物。
 
 # PRIOR
 - `PRIOR.md` 由你独占维护，Fold 只读。自由 Markdown，首轮必须非空。只写简洁的可证伪策略方向、样本局限、反证或降级条件、流程编排和 skill 路径；不写目录、单位表、how-to、实现模板、skill 正文或 raw trace。

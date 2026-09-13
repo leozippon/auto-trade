@@ -88,6 +88,7 @@ const ENVIRONMENT_STAGE_LABELS = {
   frozen_test: "执行冻结测试",
   publishing: "结果落盘",
   meta_finalize: "元学习结果校验",
+  regularization_smoke: "正则化产物冒烟回放",
   environment_update: "Sandbox 环境更新",
   analysis: "Fold 策略分析",
   heldout: "执行 Held-out",

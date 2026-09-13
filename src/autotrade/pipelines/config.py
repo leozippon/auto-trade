@@ -842,7 +842,13 @@ class EvaluationResult:
 
 
 class EvaluationBackend(Protocol):
-    def evaluate(self, request: EvaluationRequest) -> EvaluationResult: ...
+    # ``max_days`` truncates the replay to the first N trading days of the
+    # window -- a rehearsal that proves the package runs without paying for the
+    # whole replay (the Fold's smoke_backtest tool, and the Pipeline's check of
+    # a meta-regularized package before it freezes it).
+    def evaluate(
+        self, request: EvaluationRequest, *, max_days: int | None = None
+    ) -> EvaluationResult: ...
 
 
 @dataclass(frozen=True)

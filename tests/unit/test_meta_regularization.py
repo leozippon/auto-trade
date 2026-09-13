@@ -29,6 +29,7 @@ from autotrade.pipelines import (
 )
 from autotrade.pipelines.agent_views import freeze_flags
 from autotrade.pipelines.config import MetaSessionResult, SnapshotBundle
+from autotrade.pipelines.experiment import REGULARIZATION_SMOKE_DAYS
 from autotrade.pipelines.folds import build_fold_schedule
 from autotrade.pipelines.hitl_state import iter_development_sessions
 from autotrade.pipelines.ledger import ExperimentLedger
@@ -76,24 +77,24 @@ class Artifacts:
 
 
 class Evaluator:
-    def evaluate(self, request):
+    def evaluate(self, request, *, max_days: int | None = None):
         return EvaluationResult({"total_return": 0.02, "max_drawdown": 0.03}, f"result/{request.mode}")
 
 
 class CrashingEvaluator:
     """Replays everything but a package carrying ``marker``, which raises.
 
-    The incident's shape: a regularized parent that crashes on the first
-    decision day, so the host's parent control fails and the Fold owes a
-    Validation nothing in it can pay.
+    ``only_full_window`` makes it run the truncated rehearsal and fail the
+    whole replay -- what a few days of smoke cannot rule out.
     """
 
-    def __init__(self, marker: str) -> None:
+    def __init__(self, marker: str, *, only_full_window: bool = False) -> None:
         self.marker = marker
+        self.only_full_window = only_full_window
 
-    def evaluate(self, request):
+    def evaluate(self, request, *, max_days: int | None = None):
         source = (Path(request.revision.output_path) / "main.py").read_text(encoding="utf-8")
-        if self.marker in source:
+        if self.marker in source and not (self.only_full_window and max_days is not None):
             raise RuntimeError("TypeError: unsupported operand type(s) on day 1")
         return EvaluationResult(
             {"total_return": 0.02, "max_drawdown": 0.03}, f"result/{request.mode}"
@@ -335,7 +336,13 @@ class RejectedMetaRegularizationTest(unittest.TestCase):
                 prior="shrink it", revision_id="revision_meta", allowed=True
             ),
             developer=developer,
-            evaluator=CrashingEvaluator("broken on the first decision day"),
+            evaluator=CrashingEvaluator(
+                "broken on the first decision day",
+                # It survives the Pipeline's pre-freeze rehearsal and dies on
+                # the full window, so the regularization is frozen and the next
+                # Fold is where it fails.
+                only_full_window=True,
+            ),
         )
         artifacts.add_revision("revision_meta", BROKEN)
         fold = build_fold_schedule("2026Q1", "2026Q1", DAYS, window_months=24)[0]
@@ -403,6 +410,58 @@ class RejectedMetaRegularizationTest(unittest.TestCase):
             orphan = replace(meta_parent, validated_predecessor=None)
             with self.assertRaisesRegex(RuntimeError, "refusing unvalidated fallback"):
                 pipeline.run_fold("epoch_001", fold, parent=orphan)
+
+
+class RegularizationSmokeTest(unittest.TestCase):
+    """The Pipeline runs a regularized package before it freezes it.
+
+    The Meta session has no evaluator and no backtest tool: it cannot execute
+    what it edits, and a package that crashed on its first decision day was
+    frozen and mounted as the next Fold's parent. The freeze owner rehearses it
+    over that Fold's first trading days instead, and a package that cannot run
+    is not adopted.
+    """
+
+    def _run(self, root: Path, evaluator):
+        pipeline, artifacts, config = _pipeline(
+            root,
+            meta_learner=lambda facts: MetaSessionResult(
+                prior="shrink it", revision_id="revision_meta", allowed=True
+            ),
+            evaluator=evaluator,
+        )
+        artifacts.add_revision("revision_meta", BROKEN)
+        fold = build_fold_schedule("2026Q1", "2026Q1", DAYS, window_months=24)[0]
+        _prior, next_parent = pipeline.run_meta_session(
+            "epoch_001", 0, fold, parent=_parent(artifacts), previous_prior=""
+        )
+        record = ExperimentLedger(config.ledger_path).read("meta_learning")[-1]
+        return next_parent, record
+
+    def test_a_package_that_crashes_in_the_rehearsal_is_not_frozen(self) -> None:
+        with TemporaryDirectory() as tmp:
+            next_parent, record = self._run(
+                Path(tmp), CrashingEvaluator("broken on the first decision day")
+            )
+            self.assertEqual(record["status"], "rejected_kept_parent")
+            self.assertIsNone(record["frozen_strategy_artifact_id"])
+            # The lineage head is untouched and still validated.
+            self.assertEqual(next_parent.artifact_id, "strategy_parent")
+            self.assertFalse(next_parent.requires_validation)
+            self.assertEqual(record["regularization_smoke"]["status"], "failed")
+            self.assertIn("unsupported operand", record["regularization_smoke"]["error"])
+
+    def test_a_package_that_runs_is_frozen_and_the_row_records_the_rehearsal(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as tmp:
+            next_parent, record = self._run(Path(tmp), Evaluator())
+            self.assertEqual(record["status"], "meta_regularized")
+            self.assertTrue(next_parent.requires_validation)
+            self.assertEqual(
+                record["regularization_smoke"],
+                {"status": "ok", "days": REGULARIZATION_SMOKE_DAYS},
+            )
 
 
 class RegularizedParentKeepsItsIdentityTest(unittest.TestCase):
