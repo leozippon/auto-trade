@@ -17,6 +17,7 @@ import pytest
 
 from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.replay import DailyMarketData, run_daily_replay
+from autotrade.environment.replay.engine import StrategyDataView
 from autotrade.environment.replay.null_control import run_null_control
 from autotrade.environment.strategy import StrategySchedule
 from autotrade.paper import DailyPaperEngine
@@ -230,19 +231,44 @@ def test_paper_settles_the_ex_date_when_the_day_opens_and_journals_it(tmp_path: 
         def close(self) -> None:
             pass
 
+    class CommittedData:
+        """Bars and the ex-date table through the session before the decision."""
+
+        def __init__(self, release_end: str) -> None:
+            frame = _frame()
+            self.market = DailyMarketData(frame[frame["trade_date"] <= release_end], _actions())
+            self.sessions = ("20260102", *DAYS)
+            self.release_end = release_end
+            self.generation_id = release_end
+            self.nl_query = None
+
+        def context_data(self, inference_at):
+            return StrategyDataView()
+
+        def execution_price(self, symbol, when):
+            return None
+
+        def references(self, symbols, before):
+            return {}
+
+        def close(self) -> None:
+            pass
+
     strategy = tmp_path / "main.py"
     strategy.write_text("def generate_orders(context):\n    return []\n", encoding="utf-8")
     engine = DailyPaperEngine(
         strategy_path=strategy,
         strategy_revision="revision_1",
-        daily=_frame(),
-        corporate_actions=_actions(),
         state_root=tmp_path / "paper",
+        data_factory=lambda start, trade_date: CommittedData(
+            max(day for day in ("20260102", *DAYS) if day < trade_date)
+        ),
         profile=PROFILE,
         executor_factory=lambda *_mounts: BuyOnce(),
     )
-    engine.run_day(DAYS[0])
-    summary = engine.run_day(DAYS[1])
+    for day in DAYS:
+        summary = engine.run_day(day)
+    # Deciding DAYS[2] settled DAYS[1], the ex-date of the bonus and cash.
     assert summary["position_count"] == 1
     state = json.loads((tmp_path / "paper" / ".paper_state.json").read_text(encoding="utf-8"))
     [position] = state["account"]["positions"]
@@ -255,6 +281,6 @@ def test_paper_settles_the_ex_date_when_the_day_opens_and_journals_it(tmp_path: 
     assert entry["kind"] == "corporate_action"
     assert (entry["quantity_before"], entry["quantity_after"]) == (1000, 2000)
     assert entry["cash_credit"] == pytest.approx(500.0)
-    # Re-running the finished day is idempotent: no second settlement.
-    assert engine.run_day(DAYS[1]) == summary
+    # Re-running the decided session is idempotent: no second settlement.
+    assert engine.run_day(DAYS[2]) == summary
     assert len(journal.read_text(encoding="utf-8").splitlines()) == 1

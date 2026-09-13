@@ -1,11 +1,20 @@
 #!/usr/bin/env python3
-"""Advance the local ADM-Cube Paper account by one committed trading day."""
+"""ADM-Cube Paper book: create it once, then decide one session per run.
+
+``init`` pins one experiment's Paper candidate and its research environment
+into a new book. ``run`` settles every session whose data has landed and makes
+the pre-open decision for the target session (default: today, Asia/Shanghai),
+then writes the order sheet to ``<orders-dir>/<date>_orders.md`` and
+``latest_orders.md`` and prints it. A failed run writes the failure to the same
+two files and exits non-zero; nothing is skipped silently.
+"""
 
 from __future__ import annotations
 
 import argparse
-import json
+import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
 SCRIPTS_ROOT = Path(__file__).resolve().parents[1]
@@ -16,163 +25,122 @@ from _bootstrap import add_repo_src
 
 add_repo_src(__file__)
 
-from autotrade.environment.broker import BrokerProfile
-from autotrade.environment.data.snapshot import SnapshotConfig
-from autotrade.environment.llm import MODEL_CHOICES, build_model_gateway
-from autotrade.environment.nl import NLConfig
-from autotrade.environment.sandbox import DEFAULT_IMAGE, SandboxConfig, SandboxLimits
-from autotrade.environment.strategy import StrategySchedule
-from autotrade.paper import DailyPaperEngine
-from autotrade.pipelines import PaperPITData, ResearchPITSnapshotProvider
+from autotrade.environment.llm import build_model_gateway
+from autotrade.environment.strategy import CN_TZ
+from autotrade.paper.book import create_book, load_book
+from autotrade.paper.engine import DailyPaperEngine, PaperWriterBusy
+from autotrade.paper.orders import render_failure, render_orders, write_orders
+from autotrade.paper.pit import BookPITData
+from autotrade.pipelines.folds import load_sse_trading_days
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_STATE_ROOT = Path("data/trading/paper")
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--strategy", type=Path, required=True)
-    parser.add_argument(
-        "--models-dir",
-        type=Path,
-        help="The activated revision's models/ tree, if it has one.",
-    )
-    parser.add_argument(
-        "--strategy-revision",
-        required=True,
-        help="Operator-assigned immutable revision ID.",
-    )
-    parser.add_argument("--data-backend", choices=("pit", "daily"), default="pit")
-    parser.add_argument(
-        "--daily-path",
-        type=Path,
-        help="Required only for the compatibility daily backend.",
-    )
-    parser.add_argument("--raw-dir", type=Path, default=Path("data/raw"))
-    parser.add_argument(
-        "--fundamental-events-root",
-        type=Path,
-        default=Path("data/pit/fundamental_events"),
-    )
-    parser.add_argument(
-        "--fundamental-events-status",
-        type=Path,
-        default=Path("results/data_quality/fundamental_events_status.json"),
-    )
-    parser.add_argument("--pit-cache-root", type=Path)
-    parser.add_argument("--disable-historical-intraday", action="store_true")
-    parser.add_argument("--max-intraday-row-group-rows", type=int, default=2_000_000)
-    parser.add_argument(
-        "--trade-date",
-        required=True,
-        help="One local YYYYMMDD trading day; no realtime polling.",
-    )
-    parser.add_argument("--state-root", type=Path, default=Path("data/trading/paper"))
-    parser.add_argument(
-        "--strategy-period", choices=("day", "month", "quarter", "year"), default="day"
-    )
-    parser.add_argument("--inference-time", default="08:30")
-    parser.add_argument("--initial-cash", type=float, default=1_000_000.0)
-    parser.add_argument("--sandbox-image", default=DEFAULT_IMAGE)
-    parser.add_argument("--sandbox-cpus", type=float, default=SandboxLimits().cpus)
-    parser.add_argument("--sandbox-memory", default=SandboxLimits().memory)
-    parser.add_argument("--sandbox-pids", type=int, default=64)
-    parser.add_argument("--decision-timeout-seconds", type=float, default=SandboxLimits().timeout_seconds)
-    parser.add_argument(
-        "--nl-model",
-        choices=("", *MODEL_CHOICES),
-        default=MODEL_CHOICES[0],
-        help="Set to enable evidence-grounded NL answers; empty keeps local search only.",
-    )
-    parser.add_argument("--nl-env-file", type=Path, default=Path(".env"))
-    parser.add_argument("--nl-max-results", type=int, default=8)
-    parser.add_argument("--nl-max-calls-per-decision", type=int, default=10)
-    parser.add_argument(
-        "--nl-max-total-calls",
-        type=int,
-        default=None,
-        help="Hard NL ceiling for the day; unset derives it from the replay length.",
-    )
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    commands = parser.add_subparsers(dest="command", required=True)
+    init = commands.add_parser("init", help="Create a Paper book from one experiment's Paper candidate.")
+    init.add_argument("--experiment", required=True, help="Experiment id under experiments/.")
+    init.add_argument("--artifact", required=True, help="Frozen artifact id: the graduate, or its adjustment.")
+    init.add_argument("--initial-cash", type=float, help="Book capital in CNY; default: the experiment's initial_cash.")
+    init.add_argument("--note", default="", help="One-line status shown at the top of every order sheet.")
+    init.add_argument("--state-root", type=Path, default=DEFAULT_STATE_ROOT)
+    run = commands.add_parser("run", help="Settle landed sessions and decide one session.")
+    run.add_argument("--trade-date", help="YYYYMMDD session; default: today in Asia/Shanghai.")
+    run.add_argument("--state-root", type=Path, default=DEFAULT_STATE_ROOT)
+    run.add_argument("--orders-dir", type=Path, default=Path("logs/paper"))
     return parser
+
+
+def _resources(label: str) -> None:
+    """GPU and host memory readings around a run, into the run's log."""
+
+    print(f"--- resources ({label}) {datetime.now(CN_TZ).isoformat(timespec='seconds')} ---", file=sys.stderr)
+    for command in (
+        ["nvidia-smi", "--query-gpu=index,memory.used,memory.total", "--format=csv,noheader"],
+        ["free", "-h"],
+    ):
+        try:
+            output = subprocess.run(command, capture_output=True, text=True, timeout=30, check=False).stdout
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            output = f"{command[0]} unavailable: {exc}\n"
+        print(output.rstrip(), file=sys.stderr)
+
+
+def init(args: argparse.Namespace) -> int:
+    book = create_book(
+        args.state_root,
+        experiment_dir=REPO_ROOT / "experiments" / args.experiment,
+        artifact_id=args.artifact,
+        repo_root=REPO_ROOT,
+        initial_cash=args.initial_cash,
+        note=args.note,
+    )
+    print(
+        f"created Paper book at {book.root}: {book.experiment_id}/{book.artifact_id} ({book.candidate_source}), "
+        f"initial cash {book.profile.initial_cash:,.2f}, profile {book.profile.profile_id}, "
+        f"commission {book.profile.commission_bps} bps, slippage {book.profile.slippage_bps} bps, "
+        f"fit timeout {book.sandbox.limits.fit_timeout_seconds:g}s, image {book.sandbox.image}"
+    )
+    return 0
+
+
+def run(args: argparse.Namespace) -> int:
+    book = load_book(args.state_root)
+    trade_date = args.trade_date or datetime.now(CN_TZ).strftime("%Y%m%d")
+    if trade_date not in set(load_sse_trading_days(book.raw_dir)):
+        print(f"{trade_date} is not an SSE session; nothing to decide")
+        return 0
+
+    def data_factory(start: str, target: str) -> BookPITData:
+        return BookPITData(
+            state_root=book.root,
+            raw_dir=book.raw_dir,
+            fundamental_events_root=book.fundamental_events_root,
+            fundamental_events_status=book.fundamental_events_status,
+            snapshot_config=book.snapshot_config,
+            start=start,
+            trade_date=target,
+            nl_llm=build_model_gateway(**book.nl_gateway) if book.nl_gateway else None,
+            nl_config=book.nl_config,
+            nl_failure_policy=book.nl_failure_policy,
+            max_intraday_row_group_rows=book.max_intraday_row_group_rows,
+        )
+
+    engine = DailyPaperEngine(
+        strategy_path=book.strategy_path,
+        strategy_revision=book.artifact_id,
+        state_root=book.root,
+        data_factory=data_factory,
+        models_dir=book.models_dir,
+        schedule=book.schedule,
+        profile=book.profile,
+        sandbox=book.sandbox,
+    )
+    _resources("before")
+    try:
+        engine.run_day(trade_date)
+    except PaperWriterBusy:
+        raise  # the running writer owns the sheet
+    except Exception as exc:
+        text = render_failure(book, trade_date, exc)
+        path = write_orders(args.orders_dir, trade_date, text)
+        print(text, file=sys.stderr)
+        print(f"failure written to {path}", file=sys.stderr)
+        _resources("after")
+        raise
+    text = render_orders(book, trade_date)
+    path = write_orders(args.orders_dir, trade_date, text)
+    print(text)
+    print(f"orders written to {path}", file=sys.stderr)
+    _resources("after")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    pit: PaperPITData | None = None
-    corporate_actions = None
-    if args.data_backend == "daily":
-        if args.daily_path is None:
-            raise ValueError("--daily-path is required with --data-backend daily")
-        daily = args.daily_path
-        nl_query = None
-        context_data = None
-        execution_price = None
-    else:
-        nl_llm = None
-        if args.nl_model:
-            nl_llm = build_model_gateway(
-                args.nl_model,
-                env_file=args.nl_env_file,
-                thinking_enabled=False,
-            )
-        provider = ResearchPITSnapshotProvider(
-            experiment_dir=args.state_root / "research",
-            raw_dir=args.raw_dir,
-            fundamental_events_root=args.fundamental_events_root,
-            fundamental_events_status=args.fundamental_events_status,
-            config=SnapshotConfig(
-                include_intraday=not args.disable_historical_intraday,
-                replay_include_minutes=not args.disable_historical_intraday,
-            ),
-            cache_root=args.pit_cache_root,
-        )
-        pit = PaperPITData(
-            provider,
-            trade_date=args.trade_date,
-            runtime_root=args.state_root / ".pit_runtime",
-            nl_llm=nl_llm,
-            nl_config=NLConfig(
-                max_results=args.nl_max_results,
-                max_calls_per_decision=args.nl_max_calls_per_decision,
-                max_total_calls=args.nl_max_total_calls,
-            ),
-            max_intraday_row_group_rows=args.max_intraday_row_group_rows,
-        )
-        daily = pit.daily
-        corporate_actions = pit.corporate_actions
-        nl_query = pit.nl_service.query
-        context_data = pit.context_data
-        execution_price = pit.execution_price
-    engine = DailyPaperEngine(
-        strategy_path=args.strategy,
-        strategy_revision=args.strategy_revision,
-        daily=daily,
-        corporate_actions=corporate_actions,
-        state_root=args.state_root,
-        models_dir=args.models_dir,
-        schedule=StrategySchedule(
-            period=args.strategy_period,
-            inference_time=args.inference_time,
-        ),
-        profile=BrokerProfile(initial_cash=args.initial_cash),
-        sandbox=SandboxConfig(
-            image=args.sandbox_image,
-            limits=SandboxLimits(
-                cpus=args.sandbox_cpus,
-                memory=args.sandbox_memory,
-                pids=args.sandbox_pids,
-                timeout_seconds=args.decision_timeout_seconds,
-            ),
-        ),
-        nl_query=nl_query,
-        context_data=context_data,
-        execution_price=execution_price,
-    )
-    try:
-        result = engine.run_day(args.trade_date)
-    finally:
-        engine.close()
-        if pit is not None:
-            pit.close()
-    print(json.dumps(result, ensure_ascii=False, sort_keys=True))
-    return 0
+    return init(args) if args.command == "init" else run(args)
 
 
 if __name__ == "__main__":
