@@ -3276,7 +3276,10 @@ class LLMFoldDeveloper:
                 steps,
                 selected_node or None,
                 "llm_agent_finish_fold",
-                early_stop_reason=str(finish.get("early_stop_reason") or ""),
+                # One reason from the Agent, recorded under the ledger's two
+                # names by what it justifies: an abstention's evidence or a
+                # nomination's early finish.
+                early_stop_reason="" if abstained else str(finish.get("reason") or ""),
                 no_edge_reason=str(finish.get("reason") or "") if abstained else "",
                 baseline_anchor=not abstained and finish.get("baseline_anchor") is True,
                 terminate=outcome == "terminate",

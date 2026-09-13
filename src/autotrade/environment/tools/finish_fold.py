@@ -20,10 +20,11 @@ from .base import ToolError, ToolResult, ToolSpec
 # justification. It is a justification, not a block, and it lapses once another
 # round cannot fit.
 FINISH_FOLD_EARLY_STOP_BUDGET_FRACTION = 1 / 3
-EARLY_STOP_REASON_MAX_CHARS = 500
-# A finish that nominates nothing must cite the evidence that showed no edge;
-# a one-word reason is not evidence.
-NO_EDGE_REASON_MIN_CHARS = 40
+# One ``reason`` serves both justifications -- the evidence behind a no-edge
+# or terminating finish and the account of an early one -- and a one-word
+# reason is neither.
+REASON_MIN_CHARS = 40
+REASON_MAX_CHARS = 500
 
 # The Pipeline's hard acceptance rules, handed over as a callable that maps one
 # node's recorded metrics to its hard-reject reasons (empty = passes). The
@@ -257,11 +258,11 @@ class FinishFoldTool:
         "instead of nominating a node you do not want frozen: the Pipeline "
         "freezes every nomination whose metrics are finite. Outside the deadline "
         "window a voluntary finish that leaves more than a third of the backtest "
-        "budget unused must also carry early_stop_reason (which hypotheses stay "
-        "untested and why they are not worth the remaining budget). Both reasons "
-        f"are capped at {EARLY_STOP_REASON_MAX_CHARS} characters -- write them "
-        "compactly, an over-long one is refused -- and are recorded with the Fold "
-        "result for the Meta review. A nominated node "
+        "budget unused must carry reason too (which hypotheses stay untested and "
+        "why they are not worth the remaining budget). reason is one field of "
+        f"{REASON_MIN_CHARS}-{REASON_MAX_CHARS} characters -- write it compactly, "
+        "an over-long one is refused -- recorded with the Fold result for the "
+        "Meta review. A nominated node "
         "is checked against the Pipeline's hard acceptance rules (the "
         "acceptance_rules fact marks which rules are hard and which only warn): "
         "outside the deadline window a breaching node is refused while another "
@@ -287,14 +288,17 @@ class FinishFoldTool:
                 },
                 "reason": {
                     "type": "string",
-                    "minLength": NO_EDGE_REASON_MIN_CHARS,
-                    "maxLength": EARLY_STOP_REASON_MAX_CHARS,
+                    "minLength": REASON_MIN_CHARS,
+                    "maxLength": REASON_MAX_CHARS,
                     "description": (
-                        "outcome=\"no_edge\"/\"terminate\" only: the evidence that no candidate "
-                        "proved an edge (neutralized excess, vs_parent.beats_parent, "
+                        "Required for outcome=\"no_edge\"/\"terminate\": the evidence "
+                        "that no candidate proved an edge or that the termination "
+                        "rule is met (neutralized excess, vs_parent.beats_parent, "
                         "the new-quarter sub_window, any null_control or deflated "
-                        f"Sharpe figure read); {NO_EDGE_REASON_MIN_CHARS}-"
-                        f"{EARLY_STOP_REASON_MAX_CHARS} characters."
+                        "Sharpe figure read). Required for a nomination only when "
+                        "it leaves more than a third of the backtest budget: the "
+                        "untested hypotheses and why the rest is better left unused. "
+                        f"{REASON_MIN_CHARS}-{REASON_MAX_CHARS} characters."
                     ),
                 },
                 "baseline_anchor": {
@@ -303,17 +307,6 @@ class FinishFoldTool:
                         "select only: true when the nominated package is a control "
                         "rather than a candidate (e.g. a repaired or re-tuned "
                         "anchor), so the ledger records baseline_anchor=true."
-                    ),
-                },
-                "early_stop_reason": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": EARLY_STOP_REASON_MAX_CHARS,
-                    "description": (
-                        "Why this Fold stops while more than a third of its backtest "
-                        "budget remains: the untested hypotheses and why the remaining "
-                        "budget is better left unused. Required only in that case; at "
-                        f"most {EARLY_STOP_REASON_MAX_CHARS} characters."
                     ),
                 },
             },
@@ -372,15 +365,7 @@ class FinishFoldTool:
     def invoke(self, arguments: Mapping[str, object]) -> ToolResult:
         if str(arguments.get("outcome") or "select") in ("no_edge", "terminate"):
             return self._finish_no_edge(arguments)
-        if str(arguments.get("reason") or "").strip():
-            raise ToolError(
-                'finish_fold: reason belongs to outcome="no_edge"; a nomination '
-                "explains an early finish with early_stop_reason instead",
-                retry_hint=(
-                    'finish_fold({"node_id": ...}) or '
-                    'finish_fold({"outcome": "no_edge", "reason": "<evidence>"})'
-                ),
-            )
+        reason = str(arguments.get("reason") or "").strip()
         node_id = self._resolve_node_id(arguments)
         try:
             node = self.tree.get_node(node_id)
@@ -393,7 +378,7 @@ class FinishFoldTool:
         # The Pipeline freezes the nominated node's immutable revision, never
         # the working copy, so output/ need not be restored to it first.
         hard_reject_reasons = self._check_hard_acceptance(node_id, node)
-        early_stop = self._require_early_stop_reason(arguments)
+        budget = self._early_finish_budget(reason)
         nominated_structure = self._node_structure(node_id)
         if self.same_mechanism:
             self._require_same_mechanism(node_id)
@@ -416,7 +401,8 @@ class FinishFoldTool:
                 **({"baseline_anchor": True} if arguments.get("baseline_anchor") is True else {}),
                 # The Agent's own account of an early finish and the budget it
                 # left, for the fold ledger and the Meta review.
-                **early_stop,
+                **({"reason": reason} if reason else {}),
+                **budget,
                 # What the Pipeline will do with this nomination, in its words.
                 **self._nomination_verdict(node_id, node, hard_reject_reasons),
             },
@@ -452,10 +438,10 @@ class FinishFoldTool:
                 retry_hint='finish_fold({"outcome": "no_edge", "reason": "<evidence>"})',
             )
         reason = str(arguments.get("reason") or "").strip()
-        if len(reason) < NO_EDGE_REASON_MIN_CHARS:
+        if len(reason) < REASON_MIN_CHARS:
             raise ToolError(
                 'finish_fold: outcome="no_edge" requires reason (between '
-                f"{NO_EDGE_REASON_MIN_CHARS} and {EARLY_STOP_REASON_MAX_CHARS} chars) "
+                f"{REASON_MIN_CHARS} and {REASON_MAX_CHARS} chars) "
                 "citing the evidence that no candidate proved an edge: the "
                 "neutralized excess, vs_parent.beats_parent, the new-quarter "
                 "sub_window, and any null_control or deflated Sharpe figure read; "
@@ -469,10 +455,8 @@ class FinishFoldTool:
                 "Validation of this session to have found no edge in; run "
                 "daily_backtest or batch_validate first"
             )
-        # Terminating leaves the budget unused by design; its reason says why.
-        early_stop = (
-            {} if terminate else self._require_early_stop_reason(arguments)
-        )
+        # The required reason already accounts for any budget left unused.
+        budget = self._early_finish_budget(reason)
         return ToolResult(
             True,
             value={
@@ -482,7 +466,7 @@ class FinishFoldTool:
                 "fold_status": "pending_pipeline_review",
                 "write_locked": True,
                 "candidates_evaluated": len(candidates),
-                **early_stop,
+                **budget,
                 "pipeline_fold_status": self._fallback_status(),
                 "pipeline_will_freeze": False,
                 "pipeline_outcome": f"No candidate frozen; {self._fallback_sentence()}"
@@ -515,8 +499,8 @@ class FinishFoldTool:
         self, node_id: str, node: Mapping[str, object], reasons: list[str]
     ) -> dict[str, object]:
         """The fold status the Pipeline will record for this nomination, and
-        one line saying what it will freeze: the session's early_stop_reason
-        and the Meta review then read what the ledger reads."""
+        one line saying what it will freeze: the session's reason and the Meta
+        review then read what the ledger reads."""
 
         label = f"{node_id} ({node.get('result_name') or 'validation'})"
         if reasons:
@@ -712,26 +696,19 @@ class FinishFoldTool:
             )
         return rows
 
-    def _require_early_stop_reason(
-        self, arguments: Mapping[str, object]
-    ) -> dict[str, object]:
-        """The early-stop fields to record, refusing a voluntary early finish
-        that gives no reason.
+    def _early_finish_budget(self, reason: str) -> dict[str, object]:
+        """The budget left at finish, refusing a voluntary early finish that
+        gives no reason.
 
         Voluntary means another round still fits (the same waiver as the round
         floor); early means more than a third of the backtest budget is left.
-        Without a wired budget the tool cannot tell, so it only records a
-        reason the Agent chose to give.
+        Without a wired budget the tool cannot tell, so nothing is refused.
         """
 
-        reason = str(arguments.get("early_stop_reason") or "").strip()
         status = self._budget_status() if self._budget_status is not None else None
-        recorded: dict[str, object] = {}
-        if reason:
-            recorded["early_stop_reason"] = reason
         if status is None:
-            return recorded
-        recorded["budget_at_finish"] = status.to_record()
+            return {}
+        recorded: dict[str, object] = {"budget_at_finish": status.to_record()}
         if reason or not status.early_finish or not self._another_round_fits():
             return recorded
         minutes = max(status.inference_seconds_remaining, 0.0) / 60
@@ -741,12 +718,12 @@ class FinishFoldTool:
             f"{status.steps_remaining}/{status.steps_total} Steps and about "
             f"{minutes:.0f} min of inference time unused, more than a third of the "
             "backtest budget. Either pre-register another round and run "
-            "batch_validate, or call finish_fold again with early_stop_reason "
-            f"(<= {EARLY_STOP_REASON_MAX_CHARS} chars) naming the hypotheses that "
+            "batch_validate, or call finish_fold again with reason "
+            f"({REASON_MIN_CHARS}-{REASON_MAX_CHARS} chars) naming the hypotheses that "
             "stay untested and why the remaining budget is better left unused; "
             "the reason is recorded with the Fold result for the Meta review.",
             retry_hint=(
-                "finish_fold({\"node_id\": ..., \"early_stop_reason\": \"...\"}) "
+                "finish_fold({\"node_id\": ..., \"reason\": \"...\"}) "
                 "or run another batch_validate round"
             ),
             details=status.to_record(),
@@ -829,9 +806,9 @@ class FinishFoldTool:
 
 
 __all__ = [
-    "EARLY_STOP_REASON_MAX_CHARS",
     "FINISH_FOLD_EARLY_STOP_BUDGET_FRACTION",
-    "NO_EDGE_REASON_MIN_CHARS",
+    "REASON_MAX_CHARS",
+    "REASON_MIN_CHARS",
     "FinishFoldTool",
     "FoldBudgetStatus",
     "HardRuleCheck",

@@ -1602,7 +1602,7 @@ def test_a_voluntary_early_finish_must_justify_itself_and_reaches_the_ledger(
                     ToolCall(
                         "finish",
                         "finish_fold",
-                        {"early_stop_reason": _EARLY_STOP_REASON},
+                        {"reason": _EARLY_STOP_REASON},
                     ),
                 )
             ),
@@ -1617,7 +1617,10 @@ def test_a_voluntary_early_finish_must_justify_itself_and_reaches_the_ledger(
     records = ExperimentLedger(options.rolling.ledger_path).read()
     fold = next(record for record in records if record["record_type"] == "fold")
     assert fold["fold_status"] == "frozen"
+    # One reason argument; the ledger files a nomination's under
+    # early_stop_reason, the name every record and Meta projection reads.
     assert fold["early_stop_reason"] == _EARLY_STOP_REASON
+    assert fold["no_edge_reason"] is None
     # The Meta review reads the Agent's own account of the early finish.
     summary = compact_fold_history(fold, ref_store=AgentRefStore(experiment))
     assert summary["early_stop_reason"] == _EARLY_STOP_REASON

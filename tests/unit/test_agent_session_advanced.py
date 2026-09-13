@@ -471,7 +471,7 @@ def test_session_end_counts_the_parents_failed_tool_calls(tmp_path: Path):
                     ToolCall(
                         "f",
                         "finish_fold",
-                        {"node_id": node_id, "early_stop_reason": "H2 untestable here"},
+                        {"node_id": node_id, "reason": "H2 untestable here: the events domain is empty in this window"},
                     ),
                 )
             ),
@@ -487,7 +487,7 @@ def test_session_end_counts_the_parents_failed_tool_calls(tmp_path: Path):
     assert runner.run("finish").status == "finished"
     end = [payload for event, payload in events if event == "session_end"][-1]
     assert end["status"] == "finished" and end["tool_failures"] == 1
-    assert end["finish"]["early_stop_reason"] == "H2 untestable here"
+    assert end["finish"]["reason"] == "H2 untestable here: the events domain is empty in this window"
 
 
 def test_session_end_tool_failures_include_the_childrens(tmp_path: Path):

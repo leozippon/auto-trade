@@ -13,8 +13,8 @@ from autotrade.environment.artifacts import new_revision_id
 from autotrade.environment.step_tree import StepTree
 from autotrade.environment.tools.base import ToolError, ToolRegistry
 from autotrade.environment.tools.finish_fold import (
-    EARLY_STOP_REASON_MAX_CHARS,
-    NO_EDGE_REASON_MIN_CHARS,
+    REASON_MAX_CHARS,
+    REASON_MIN_CHARS,
     FinishFoldTool,
     FoldBudgetStatus,
     executable_source_structure,
@@ -364,16 +364,16 @@ def test_finish_fold_requires_a_reason_for_a_voluntary_early_finish(tmp_path: Pa
     finish = FinishFoldTool(
         tree, fold_id="fold_ref_ab", run_id="run_x", budget_status=lambda: _budget(20)
     )
-    with pytest.raises(ToolError, match="early_stop_reason") as refused:
+    with pytest.raises(ToolError, match="again with reason") as refused:
         finish.invoke({"node_id": node})
     message = str(refused.value)
     assert "20/30 backtests" in message and "20/30 Steps" in message and "90 min" in message
     assert refused.value.details["backtests_remaining"] == 20
     assert refused.value.retry_hint
     reason = "H3 (unlock-pressure overlay) untested: the events domain is empty this window"
-    finished = finish.invoke({"node_id": node, "early_stop_reason": reason})
+    finished = finish.invoke({"node_id": node, "reason": reason})
     assert finished.finish
-    assert finished.value["early_stop_reason"] == reason
+    assert finished.value["reason"] == reason
     assert finished.value["budget_at_finish"]["backtests_remaining"] == 20
     assert finished.value["budget_at_finish"]["inference_seconds_remaining"] == 5400.0
 
@@ -391,31 +391,39 @@ def test_finish_fold_early_stop_reason_lapses_with_the_waiver_or_a_spent_budget(
         another_round_fits=lambda: False,
     )
     result = waived.invoke({"node_id": node})
-    assert result.finish and "early_stop_reason" not in result.value
+    assert result.finish and "reason" not in result.value
     assert result.value["budget_at_finish"]["backtests_total"] == 30
     # Exactly a third left is not early; a reason given anyway is still recorded.
     spent = FinishFoldTool(
         tree, fold_id="fold_ref_ab", run_id="run_x", budget_status=lambda: _budget(10)
     )
-    assert "early_stop_reason" not in spent.invoke({"node_id": node}).value
-    explained = spent.invoke({"node_id": node, "early_stop_reason": "done"})
-    assert explained.value["early_stop_reason"] == "done"
+    assert "reason" not in spent.invoke({"node_id": node}).value
+    explained = spent.invoke({"node_id": node, "reason": "done"})
+    assert explained.value["reason"] == "done"
     # Without a wired budget the tool cannot judge an early finish, only record.
     unwired = FinishFoldTool(tree, fold_id="fold_ref_ab", run_id="run_x")
     plain = unwired.invoke({"node_id": node})
     assert plain.finish and "budget_at_finish" not in plain.value
 
 
-def test_finish_fold_bounds_the_early_stop_reason(tmp_path: Path):
+def test_finish_fold_takes_one_bounded_reason_field(tmp_path: Path):
+    """``reason`` is the only free-text field: a nomination may carry it, the
+    retired ``early_stop_reason`` argument is refused by the schema, and the
+    one cap applies whatever the outcome."""
     tree = StepTree(tmp_path / "steps")
     node = _record_round(tree, tmp_path, batch_id="b1", marker="1")
     registry = ToolRegistry([FinishFoldTool(tree, fold_id="fold_ref_ab", run_id="run_x")])
     overlong = registry.invoke(
-        "finish_fold",
-        {"node_id": node, "early_stop_reason": "x" * (EARLY_STOP_REASON_MAX_CHARS + 1)},
+        "finish_fold", {"node_id": node, "reason": "x" * (REASON_MAX_CHARS + 1)}
     )
-    assert overlong.ok is False and "early_stop_reason is too long" in overlong.error
-    assert registry.invoke("finish_fold", {"node_id": node, "early_stop_reason": "x"}).ok
+    assert overlong.ok is False and "reason is too long" in overlong.error
+    retired = registry.invoke(
+        "finish_fold", {"node_id": node, "early_stop_reason": "x" * REASON_MIN_CHARS}
+    )
+    assert retired.ok is False
+    assert registry.invoke(
+        "finish_fold", {"node_id": node, "reason": "x" * REASON_MIN_CHARS}
+    ).value["reason"] == "x" * REASON_MIN_CHARS
 
 
 def test_finish_fold_bare_call_is_refused_on_the_parent_of_a_batch_round(tmp_path: Path):
@@ -600,7 +608,7 @@ def test_finish_fold_accepts_a_hard_reject_and_states_what_the_pipeline_will_do(
 ):
     """Inside the deadline window, or with nothing recorded that passes, the
     nomination stands — but the result says the Pipeline will not freeze it, so
-    the session's own early_stop_reason and the Meta review read the truth."""
+    the session's own reason and the Meta review read the truth."""
 
     tree = StepTree(tmp_path / "steps")
     breaching = _record_round(
@@ -835,18 +843,15 @@ def test_finish_fold_no_edge_refuses_a_node_a_thin_reason_or_an_empty_session(
         finish.invoke({"outcome": "no_edge", "reason": "no edge"})
     with pytest.raises(ToolError, match="node_id must be absent"):
         finish.invoke({"outcome": "no_edge", "node_id": node, "reason": NO_EDGE_REASON})
-    # A nomination does not take the no-edge reason, and the schema refuses
-    # any other outcome before the tool runs.
-    with pytest.raises(ToolError, match='belongs to outcome="no_edge"'):
-        finish.invoke({"node_id": node, "reason": NO_EDGE_REASON})
+    # The schema refuses any other outcome before the tool runs.
     registry = ToolRegistry([finish])
     assert registry.invoke("finish_fold", {"outcome": "abstain"}).ok is False
     # The schema carries the same floor as the runtime check, so a thin reason
     # is refused with the field rule instead of reaching the tool.
     thin = registry.invoke("finish_fold", {"outcome": "no_edge", "reason": "no edge"})
     assert thin.ok is False
-    assert f"minimum {NO_EDGE_REASON_MIN_CHARS}" in thin.error
-    # The early-finish gate applies to an abstention exactly as to a nomination.
+    assert f"minimum {REASON_MIN_CHARS}" in thin.error
+    # An abstention's required reason also answers the early-finish gate.
     budgeted = FinishFoldTool(
         tree,
         fold_id="fold_ref_ab",
@@ -854,16 +859,8 @@ def test_finish_fold_no_edge_refuses_a_node_a_thin_reason_or_an_empty_session(
         parent_main_py=_written(tmp_path / "parent", PARENT) / "main.py",
         budget_status=lambda: _budget(20),
     )
-    with pytest.raises(ToolError, match="early_stop_reason"):
-        budgeted.invoke({"outcome": "no_edge", "reason": NO_EDGE_REASON})
-    finished = budgeted.invoke(
-        {
-            "outcome": "no_edge",
-            "reason": "x" * NO_EDGE_REASON_MIN_CHARS,
-            "early_stop_reason": "H3 untested: the events domain is empty this window",
-        }
-    )
-    assert finished.finish and finished.value["early_stop_reason"]
+    finished = budgeted.invoke({"outcome": "no_edge", "reason": NO_EDGE_REASON})
+    assert finished.finish and finished.value["reason"] == NO_EDGE_REASON
     assert finished.value["budget_at_finish"]["backtests_remaining"] == 20
 
 
