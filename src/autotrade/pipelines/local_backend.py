@@ -600,10 +600,10 @@ class SmokeBacktestTool(SessionTimeBudgetAware):
         "as-of view (each context.asof_dir/<domain>/ is a DIRECTORY of parquet "
         "parts, read it with pd.read_parquet(directory)), real AccountSnapshot "
         "object, same sandbox executor and per-decision timeout as "
-        "daily_backtest. Returns per-day strategy and as-of seconds, order "
+        "a Validation replay. Returns per-day strategy and as-of seconds, order "
         "counts, the as-of domain directory names, and the exact exception text "
         "on failure. It commits no revision, creates no Step, cannot be frozen, "
-        "and does not consume the backtest budget. Use it before daily_backtest "
+        "and does not consume the backtest budget. Use it before batch_validate "
         "instead of hand-writing a shell smoke test against /mnt/snapshot.",
         {
             "type": "object",
@@ -663,8 +663,8 @@ class SmokeBacktestTool(SessionTimeBudgetAware):
         self.runs += 1
         check = self.modification_check.invoke({})
         if not check.ok:
-            # Same static gate as daily_backtest, so a green smoke run means the
-            # gate will not be what fails the official one.
+            # Same static gate as a Validation candidate, so a green smoke run
+            # means the gate will not be what fails the official one.
             raise ToolError(f"smoke_backtest blocked by modification_check: {check.error}")
         fold = self.request.fold
         # The rehearsal replays an immutable snapshot outside the Agent's mounts,
@@ -967,20 +967,13 @@ def record_parent_control(
     return StepResult(node_id, typed.revision_id, control, parent_control=True)
 
 
-class FoldBacktestTool(SessionTimeBudgetAware):
-    """Commit and evaluate the current work copy as one immutable Step."""
+class FoldBacktestTool:
+    """The Fold's Validation engine: one budget, one Step list, one tree.
 
-    spec = ToolSpec(
-        "daily_backtest",
-        "Commit the current output as an immutable revision and run the Fold Validation replay.",
-        {
-            "type": "object",
-            "properties": {},
-            "required": [],
-            "additionalProperties": False,
-        },
-        mutating=True,
-    )
+    Not an Agent tool: ``batch_validate`` commits and replays every candidate
+    through it, and the host records its parent control through it, so no
+    Validation can overspend or bypass the ledger behind another's back.
+    """
 
     def __init__(
         self,
@@ -988,7 +981,6 @@ class FoldBacktestTool(SessionTimeBudgetAware):
         request: FoldSessionRequest,
         output_dir: Path,
         models_dir: Path,
-        modification_check: ModificationCheckTool,
         artifact_store: FilesystemArtifactStore,
         evaluator: EvaluationBackend,
         tree: StepTree,
@@ -997,26 +989,10 @@ class FoldBacktestTool(SessionTimeBudgetAware):
         time_budget: InferenceTimeBudget,
         ref_store: AgentRefStore,
         manifest: RunManifest | None = None,
-        decision_timeout_seconds: float = SandboxLimits().timeout_seconds,
     ) -> None:
-        # The executor's per-decision wall clock is the cap the Agent must
-        # design for, so it rides in the tool description under its number.
-        self.decision_timeout_seconds = float(decision_timeout_seconds)
-        self.spec = ToolSpec(
-            self.spec.name,
-            "Commit the current output as an immutable revision and run the Fold "
-            "Validation replay; the call waits briefly for background sub-agents "
-            "that can write and is refused while one is still running, while "
-            "read-only audits keep running. One trading day's generate_orders inference over "
-            f"{self.decision_timeout_seconds:g}s fails the whole backtest "
-            "(strategy_inference_timeout_seconds); smoke-test timing on a few days first.",
-            self.spec.input_schema,
-            mutating=True,
-        )
         self.request = request
         self.output_dir = output_dir
         self.models_dir = models_dir
-        self.modification_check = modification_check
         self.artifact_store = artifact_store
         self.evaluator = evaluator
         self.tree = tree
@@ -1027,10 +1003,6 @@ class FoldBacktestTool(SessionTimeBudgetAware):
         self.manifest = manifest
         self.backtests = 0
         self.steps: list[StepResult] = []
-
-    @property
-    def session_time_budget(self) -> InferenceTimeBudget:
-        return self.time_budget
 
     @property
     def parent_control_summary(self) -> dict[str, object] | None:
@@ -1099,12 +1071,6 @@ class FoldBacktestTool(SessionTimeBudgetAware):
         if self.manifest is not None:
             self.manifest.append_backtest_summary(summary)
 
-    def invoke(self, arguments: Mapping[str, object]) -> ToolResult:
-        del arguments
-        self.check_deadline()
-        with self.time_budget.pause():
-            return self._invoke_exempt()
-
     def commit_revision(
         self, source_output: Path, fingerprint: str, *, label: str
     ) -> ArtifactRevision:
@@ -1142,8 +1108,8 @@ class FoldBacktestTool(SessionTimeBudgetAware):
         metadata: Mapping[str, object] | None = None,
     ) -> str:
         """Append one completed Validation to the step tree under the current
-        position. ``batch_validate`` repositions the tree first so its
-        candidates become siblings rather than a chain."""
+        position; ``batch_validate`` repositions the tree before each record so
+        its candidates are siblings of one parent."""
         return self.tree.record_step(
             revision.output_path,
             epoch_id=self.request.epoch_id,
@@ -1182,12 +1148,9 @@ class FoldBacktestTool(SessionTimeBudgetAware):
     def reserve_validations(self, count: int) -> list[str]:
         """Claim ``count`` Validation slots and name their results.
 
-        One Fold session has one Validation budget and one Step list, whether
-        the calls arrive one at a time through ``daily_backtest`` or as a set
-        through ``batch_validate``; both go through here so neither can
-        overspend behind the other's back. A batch claims every slot before it
-        commits anything, so a batch that does not fit is refused whole instead
-        of half-run.
+        One Fold session has one Validation budget and one Step list. A batch
+        claims every slot before it commits anything, so a batch that does not
+        fit is refused whole instead of half-run.
         """
         remaining_backtests = self.request.max_backtests - self.backtests
         if count > remaining_backtests:
@@ -1230,152 +1193,6 @@ class FoldBacktestTool(SessionTimeBudgetAware):
         self.backtests += 1
         return True
 
-    def _invoke_exempt(self) -> ToolResult:
-        # The attempt begins here and costs one Validation slot; only a snapshot
-        # that never held is refunded below.
-        result_name = self.reserve_validations(1)[0]
-        revision_id = ""
-        node_id = None
-        evaluation = None
-        check: ToolResult | None = None
-        try:
-            check = self.modification_check.invoke({})
-            # The replay reads an immutable snapshot of the artifact, never the
-            # Agent's live tree, so the session keeps running while it does. The
-            # snapshot is verified to be the bytes the check just approved — a
-            # write that lands after this line belongs to the next attempt and
-            # cannot reach this one's result.
-            typed = self.commit_revision(
-                self.output_dir, str(check.value["fingerprint"]), label="output/"
-            )
-            revision_id = typed.revision_id
-            evaluation = self.evaluator.evaluate(self.validation_request(typed))
-            self.check_deadline()
-            node_id = self.record_validation(
-                typed, evaluation, result_name=result_name
-            )
-        except SessionInterrupt:
-            # The session is over: an environment failure must never be
-            # recorded, or reported to the Agent, as a strategy failure.
-            raise
-        except ArtifactSnapshotUnstable as exc:
-            # No snapshot was accepted and no replay ran, so this is
-            # infrastructure, not a Validation: it costs neither a backtest slot
-            # nor a Step.
-            self.release_validations(1)
-            fold = self.request.fold
-            public_error = _public_error_text(exc, hidden=_hidden_calendar(fold))
-            self.append_manifest_summary(
-                {
-                    "mode": "valid",
-                    "status": "infrastructure_error",
-                    "complete_validation": False,
-                    "error": public_error,
-                }
-            )
-            raise ToolError(
-                f"daily_backtest could not start: {public_error}",
-                error_type="infrastructure_error",
-                retry_hint=(
-                    "The strategy artifact was still being written when the "
-                    "Validation snapshot was taken and no backtest ran; no "
-                    "budget was consumed. Let any in-container job that writes "
-                    "output/ or models/ finish, then call daily_backtest again."
-                ),
-            ) from exc
-        except Exception as exc:
-            fold = self.request.fold
-            public_error = _public_validation_error(
-                exc, hidden=_hidden_calendar(fold)
-            )
-            if self.request.record_failed_attempts:
-                self.tree.record_failed_attempt(
-                    epoch_id=self.request.epoch_id,
-                    fold_id=self.ref_store.get_or_create(
-                        "fold", self.request.fold.fold_id
-                    ),
-                    run_id=self.ref_store.get_or_create("run", self.request.run_id),
-                    result_name=result_name,
-                    error=public_error,
-                    metrics=(
-                        {
-                            "revision_id": self.ref_store.get_or_create(
-                                "strategy", revision_id
-                            )
-                        }
-                        if revision_id
-                        else None
-                    ),
-                )
-            self.append_manifest_summary(
-                {
-                    "result_name": result_name,
-                    "mode": "valid",
-                    "status": "failed",
-                    "complete_validation": False,
-                    "error": public_error,
-                }
-            )
-            if isinstance(exc, TimeoutError):
-                raise TimeoutError(public_error) from exc
-            raise ToolError(public_error) from exc
-        assert node_id is not None and evaluation is not None and check is not None
-        step = StepResult(node_id, revision_id, evaluation)
-        self.steps.append(step)
-        vs_parent = self.vs_parent_fields(evaluation)
-        self.append_manifest_summary(
-            {
-                "result_name": result_name,
-                "mode": "valid",
-                "status": "ok",
-                "complete_validation": True,
-                **manifest_backtest_stats(evaluation.summary),
-                **(
-                    {"vs_parent": vs_parent["vs_parent"]}
-                    if vs_parent["vs_parent"] is not None
-                    else {}
-                ),
-            }
-        )
-        # A returned EvaluationResult is by construction a full-window replay;
-        # a partial one raises above and never reaches here, so a successful
-        # result with node_id and revision_id is the complete Validation.
-        summary = {
-            "run_id": self.ref_store.get_or_create("run", self.request.run_id),
-            "node_id": node_id,
-            "revision_id": self.ref_store.get_or_create("strategy", revision_id),
-            "stats": inline_backtest_stats(evaluation.summary),
-            **vs_parent,
-            # Selection evidence the Agent can read before it selects.
-            "selection_statistics": self.selection_statistics(evaluation),
-        }
-        # The full record — per-position rows, executions, equity curve — is the
-        # attachment ``record_step`` just wrote under the node tree, which the
-        # Agent reads through the ``steps`` root. A reference the Agent cannot
-        # resolve is worse than none: it costs a round of blind searching.
-        public_result_ref = f"{node_id}/{VALIDATION_RESULT_ATTACHMENT}"
-        if not (self.tree.root / public_result_ref).is_file():
-            raise ToolError(
-                "Validation result attachment is missing for the recorded step: "
-                f"{public_result_ref}"
-            )
-        return ToolResult(
-            True,
-            value={
-                **summary,
-                "result_root": STEP_TREE_SEARCH_ROOT,
-                "result_ref": public_result_ref,
-                "result_hint": (
-                    "full replay record (per_stock, executions, equity_curve); "
-                    f"read it with: read_file root='{STEP_TREE_SEARCH_ROOT}' "
-                    f"path='{public_result_ref}'"
-                ),
-                "modification_check": dict(check.value),
-                "backtests_used": self.backtests,
-                "backtests_remaining": self.request.max_backtests - self.backtests,
-            },
-        )
-
     def check_deadline(self) -> None:
         try:
             self.time_budget.check()
@@ -1389,8 +1206,9 @@ class FoldBacktestTool(SessionTimeBudgetAware):
 # could not separate a challenger from it — one candidate per serial step, each
 # branching off the last, is what made the evidence per decision too thin. A
 # batch fixes the parent for every candidate, so their numbers are comparable,
-# and pre-registers each hypothesis before any result exists.
-BATCH_VALIDATE_MIN_CANDIDATES = 2
+# and pre-registers each hypothesis before any result exists. One candidate is
+# a round too: the hypothesis is the same binding pre-registration at any width.
+BATCH_VALIDATE_MIN_CANDIDATES = 1
 # The Fold's own configured budget is the real limit and is checked per call;
 # this cap only bounds what one observation may carry, and six screening
 # candidates already make a wide round.
@@ -1407,11 +1225,12 @@ BATCH_VALIDATE_MAX_CONCURRENCY = 3
 BATCH_NAME_MAX_CHARS = 40
 BATCH_HYPOTHESIS_MAX_CHARS = 500
 BATCH_PATH_MAX_CHARS = 200
-# Workspace roots a candidate may not be or sit under: output/ and models/ are
-# the live working copy ``daily_backtest`` submits, and the rest are not
-# strategy trees. A candidate is a separate directory, so the bytes a batch
-# freezes cannot change while the Agent keeps editing the working copy.
+# Workspace roots a candidate may not sit under: they are the working copy's
+# own trees or not strategy trees at all. ``output`` itself is a valid path --
+# the working copy validated as it stands; every revision is a snapshot
+# verified against the bytes its check approved, so later edits cannot reach it.
 _BATCH_RESERVED_ROOTS = frozenset({"output", "models", "inputs", "skills", "refs"})
+_BATCH_WORKING_COPY = "output"
 # Repeated identical rejections. A refused batch is free by design — nothing is
 # committed and no slot is spent — which is also why nothing bounded the retry
 # loop: one audited Fold spent 3.89 h of a 10.17-h session on 128 consecutive
@@ -1423,10 +1242,9 @@ _BATCH_RESERVED_ROOTS = frozenset({"output", "models", "inputs", "skills", "refs
 # the loop is bounded by the Fold's backtest budget instead of by nothing.
 BATCH_REJECTION_ESCALATE_AT = 3
 BATCH_REJECTION_CHARGE_AFTER = 6
-# The per-candidate projection an observation carries. ``daily_backtest`` ships
-# the whole fixed-size summary for its single node; a batch multiplies that by
-# N, so a row keeps what a screening decision is actually made on and points at
-# the node's full record for everything else.
+# The per-candidate projection an observation carries: a batch multiplies the
+# fixed-size summary by N, so a row keeps what a screening decision is actually
+# made on and points at the node's full record for everything else.
 BATCH_CANDIDATE_SUMMARY_KEYS = (
     "total_return",
     "annualized_return",
@@ -1539,14 +1357,13 @@ class _BatchCandidate:
 
 
 class BatchValidateTool(SessionTimeBudgetAware):
-    """Commit and evaluate several pre-registered candidates as sibling Steps.
+    """The one Validation tool: pre-registered candidates as sibling Steps.
 
-    Every candidate goes through exactly what ``daily_backtest`` does — its own
-    ``modification_check``, its own immutable revision, one full Validation
-    replay, one Step node — and costs the same budget. What the batch adds is
-    that the candidates share one parent node and one call, so a screening
-    round is one formal step instead of N serial ones whose results are not
-    comparable because each branched off the previous winner.
+    Every candidate gets its own ``modification_check``, its own immutable
+    revision, one full replay over the session's Validation window and one
+    Step node, and costs one backtest slot. The candidates of a call share one
+    parent node, so a round's numbers are comparable and each hypothesis is
+    registered before any result exists, at every width from one to six.
 
     Selection is never automatic: the Agent reads the table and nominates a
     winner with ``finish_fold``.
@@ -1554,14 +1371,15 @@ class BatchValidateTool(SessionTimeBudgetAware):
 
     spec = ToolSpec(
         "batch_validate",
-        "Run the Fold Validation replay on "
+        "Run the Validation replay over this session's Validation window on "
         f"{BATCH_VALIDATE_MIN_CANDIDATES}-{BATCH_VALIDATE_MAX_CANDIDATES} "
-        "PRE-REGISTERED candidates in one call. Each candidate is {name, "
-        "hypothesis, path}: path is a workspace directory laid out like "
-        "output/ (main.py plus its sibling modules; the read-only template "
-        "files such as README.md are supplied for you; models/ is shared with "
-        "the working copy), and hypothesis is the falsifiable statement you "
-        "register BEFORE any result exists. Each candidate consumes one backtest "
+        "PRE-REGISTERED candidates in one call; this is the only way to create "
+        "a selectable node. Each candidate is {name, hypothesis, path}: path is "
+        "a workspace directory laid out like output/ (main.py plus its sibling "
+        "modules; the read-only template files such as README.md are supplied "
+        "for you; models/ is shared with the working copy), or output itself to "
+        "validate the working copy as it stands, and hypothesis is the "
+        "falsifiable statement you register BEFORE any result exists. Each candidate consumes one backtest "
         "of the Fold budget and, once its Validation completes, becomes its own "
         "immutable revision and Step node under the CURRENT node as shared "
         "parent, consuming one Step; a candidate whose replay fails consumes no "
@@ -1595,8 +1413,7 @@ class BatchValidateTool(SessionTimeBudgetAware):
         "completed row's result_ref reads back that candidate's full replay "
         "record. Selection stays yours: finish_fold(node_id) nominates a row "
         "as it is, and step_rollback(node_id) restores one as the working copy "
-        "to build on. Use "
-        "daily_backtest for a single candidate or the live output/.",
+        "to build on.",
         {
             "type": "object",
             "properties": {
@@ -1840,13 +1657,14 @@ class BatchValidateTool(SessionTimeBudgetAware):
                 )
             names.add(name)
             directory = self.workspace.resolve(path, must_exist=True, directory=True)
-            if directory == self.workspace.root or PurePosixPath(path).parts[
-                0
-            ] in _BATCH_RESERVED_ROOTS:
+            if directory == self.workspace.root or (
+                PurePosixPath(path).parts[0] in _BATCH_RESERVED_ROOTS
+                and directory != self.workspace.root / _BATCH_WORKING_COPY
+            ):
                 raise ToolError(
                     f"candidate {name} points at a reserved workspace root "
-                    f"({path}); copy the tree to its own directory, e.g. "
-                    "candidates/<name>/",
+                    f"({path}); pass output itself or copy the tree to its own "
+                    "directory, e.g. candidates/<name>/",
                     error_type="path_error",
                     blocked_target=path,
                 )
@@ -2058,9 +1876,18 @@ class BatchValidateTool(SessionTimeBudgetAware):
                 self.backtest.artifact_store.discard_revision(revision.revision_id)
             self.backtest.release_validations(count)
             fold = self.backtest.request.fold
+            public_error = _public_error_text(exc, hidden=_hidden_calendar(fold))
+            # Recorded as what it was: every attempt reaches the run manifest.
+            self.backtest.append_manifest_summary(
+                {
+                    "mode": "valid",
+                    "status": "infrastructure_error",
+                    "complete_validation": False,
+                    "error": public_error,
+                }
+            )
             raise ToolError(
-                "batch_validate could not start: "
-                + _public_error_text(exc, hidden=_hidden_calendar(fold)),
+                "batch_validate could not start: " + public_error,
                 error_type="infrastructure_error",
                 retry_hint=(
                     "A candidate directory was still being written when its "
@@ -2994,7 +2821,6 @@ class LLMFoldDeveloper:
                 request=request,
                 output_dir=output_dir,
                 models_dir=models_dir,
-                modification_check=modification,
                 artifact_store=self.artifact_store,
                 evaluator=self.evaluator,
                 tree=tree,
@@ -3003,7 +2829,6 @@ class LLMFoldDeveloper:
                 time_budget=time_budget,
                 ref_store=self.ref_store,
                 manifest=manifest,
-                decision_timeout_seconds=self.decision_timeout_seconds,
             )
             # The parent's Validation on this window becomes the lineage root
             # of this session before the Agent is prompted; the Agent's own
@@ -3054,7 +2879,6 @@ class LLMFoldDeveloper:
                 ReportIssueTool(issue_reports_path(self.experiment_dir), manifest),
                 modification,
                 smoke,
-                backtest,
                 BatchValidateTool(
                     backtest=backtest,
                     workspace=safe,
@@ -3070,7 +2894,11 @@ class LLMFoldDeveloper:
                         readonly_baseline=seeded_readonly,
                         mechanism_parent=source if deployment else None,
                     ),
-                    parent_main_py=parent_main_py,
+                    # A deployment refit keeps the graduated mechanism by
+                    # design, so a models-only retrain has the parent's
+                    # executable structure; finish_fold's same-mechanism rule
+                    # governs that session instead.
+                    parent_main_py=None if deployment else parent_main_py,
                     trace_emit=trace.emit,
                 ),
             ]
@@ -4141,7 +3969,7 @@ def _agent_event_sink(
         elif event_type == "tool_call_started":
             stage = (
                 "backtest"
-                if payload.get("tool") in ("daily_backtest", "smoke_backtest")
+                if payload.get("tool") in ("batch_validate", "smoke_backtest")
                 else "tool_call"
             )
         elif event_type == "subagent_wait_started":

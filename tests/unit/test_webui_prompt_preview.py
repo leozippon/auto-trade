@@ -172,7 +172,6 @@ def test_fold_preview_carries_every_current_prompt_section(tmp_path: Path):
         "report_issue",
         "modification_check",
         "smoke_backtest",
-        "daily_backtest",
         "step_rollback",
         "finish_fold",
         "write_skill",

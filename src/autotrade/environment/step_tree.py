@@ -11,10 +11,10 @@ where it stands in the search history and branch from any validated node via
 the ``step_rollback`` tool. The feature is toggleable for ablations
 (``step_tree_enabled``).
 
-One ``daily_backtest`` appends one node under the current position;
-``batch_validate`` repositions the tree between records so its candidates
-become siblings of one parent rather than a chain, which is what makes their
-numbers comparable.
+``batch_validate`` appends one node per finished candidate under the current
+position and repositions the tree between records, so a round's candidates are
+siblings of one parent rather than a chain, which is what makes their numbers
+comparable.
 """
 
 from __future__ import annotations

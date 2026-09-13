@@ -87,7 +87,7 @@ def _counted_trace(*, llm_calls: int, failures: int) -> bytes:
     events += [
         {
             "event_type": "tool_call",
-            "tool": "daily_backtest",
+            "tool": "batch_validate",
             "result": {"ok": False, "error": f"backtest failed {index}"},
         }
         for index in range(failures)
@@ -239,7 +239,7 @@ def test_process_summary_counts_the_whole_trace_not_the_bounded_view(
         },
         {
             "event_type": "tool_call",
-            "tool": "daily_backtest",
+            "tool": "batch_validate",
             "result": {"ok": False, "error": "replay failed"},
         },
     ]
@@ -273,7 +273,7 @@ def test_process_summary_counts_the_whole_trace_not_the_bounded_view(
     assert summary["llm_calls"] == 42
     # Both failures are outside the bounded view, and the host path is scrubbed.
     assert summary["tool_failures"] == 2
-    assert summary["daily_backtest"] == 1
+    assert summary["batch_validate"] == 1
     assert "/Data2/" not in json.dumps(summary, ensure_ascii=False)
 
 
@@ -762,9 +762,9 @@ def test_each_review_entry_carries_only_its_own_folds_evidence(tmp_path: Path) -
         assert summary["llm_calls"] == expected[index]["llm_calls"]
         assert summary["tool_failures"] == expected[index]["failures"]
         assert _as_map(summary["tool_failures_by_tool"]) == {
-            "daily_backtest": expected[index]["failures"]
+            "batch_validate": expected[index]["failures"]
         }
-        assert summary["daily_backtest"] == expected[index]["failures"]
+        assert summary["batch_validate"] == expected[index]["failures"]
         trace = cast(list[object], review["agent_trace"])
         assert len(trace) == expected[index]["llm_calls"] + expected[index]["failures"]
         assert sidecars[index].fold_ref == review["fold_id"]

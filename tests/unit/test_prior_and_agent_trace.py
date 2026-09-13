@@ -494,7 +494,7 @@ def test_meta_fold_reviews_include_strategy_and_agent_trace_not_heldout(tmp_path
     assert isinstance(summary, dict)
     assert summary["llm_calls"] == 1
     assert summary["subagent"] == {"attempts": 1, "completed": 1, "failed": 0}
-    assert summary["daily_backtest"] == 0
+    assert summary["batch_validate"] == 0
     assert "heldout" not in str(summary).lower()
     assert "0.4" not in str(summary)
     full = review["agent_trace_full"]
@@ -1067,7 +1067,7 @@ def test_agent_process_summary_counts_are_bounded_and_redacted() -> None:
         },
         {
             "event_type": "tool_call",
-            "tool": "daily_backtest",
+            "tool": "batch_validate",
             "ok": True,
         },
         {
@@ -1092,7 +1092,7 @@ def test_agent_process_summary_counts_are_bounded_and_redacted() -> None:
     summary = build_agent_process_summary(events)
     assert summary["llm_calls"] == 7
     assert summary["subagent"] == {"attempts": 2, "completed": 1, "failed": 1}
-    assert summary["daily_backtest"] == 1
+    assert summary["batch_validate"] == 1
     assert summary["tool_failures"] == 3
     # The by-tool tally is the complete breakdown and sums back to the total;
     # only the signature list drops the one-off read_file error.

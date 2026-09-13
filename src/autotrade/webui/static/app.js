@@ -3923,7 +3923,7 @@ async function openInitialPrompt(detail, session) {
    trace/stats. Compact uses compact_ops, not the event-type chip map. */
 const STAT_CHIPS = [
   ["llm_call", "🤖 LLM"],
-  ["daily_backtest", "📊 回测"],
+  ["batch_validate", "📊 验证"],
   ["shell", "🖥 Shell"],
   ["read_file", "📄 读取"],
 ];

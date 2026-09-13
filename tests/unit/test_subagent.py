@@ -211,7 +211,7 @@ def test_subagent_rejects_nested_agent_and_fold_control_specs() -> None:
 
     for name in (
         "agent",
-        "daily_backtest",
+        "batch_validate",
         "finish_fold",
         "step_rollback",
         "unknown_tool",
@@ -605,7 +605,7 @@ def test_subagent_unknown_tool_call_is_rejected_without_invoke() -> None:
     llm = ScriptedLLM(
         [
             ProviderResponse(
-                tool_calls=(ToolCall("b", "daily_backtest", {}),)
+                tool_calls=(ToolCall("b", "batch_validate", {}),)
             ),
             ProviderResponse(content="unknown tool blocked"),
         ]
@@ -1016,7 +1016,6 @@ def test_role_tool_visibility_hides_writes_from_audits(tmp_path: Path) -> None:
     assert impl == _FOLD_TOOLS - {
         "agent",
         "batch_validate",
-        "daily_backtest",
         "finish_fold",
         # Children report findings to the parent, the parent files defect
         # reports with the operators.
@@ -2253,7 +2252,7 @@ def test_subagent_launches_beyond_the_cap_queue_instead_of_failing() -> None:
 def test_backtest_gate_keeps_its_batch_in_order_regardless_of_spec() -> None:
     """A completed Validation may enter hard finalization; the remaining research
     calls of the same turn must then be refused, which needs an ordered batch."""
-    backtest = _NamedTool("daily_backtest")
+    backtest = _NamedTool("batch_validate")
     read = _NamedTool("read_file")
     runner = AgentSessionRunner(
         llm=ScriptedLLM([]),
@@ -2263,7 +2262,7 @@ def test_backtest_gate_keeps_its_batch_in_order_regardless_of_spec() -> None:
     )
     assert backtest.spec.mutating is False
     assert runner._is_parallel_batch(
-        (ToolCall("b", "daily_backtest", {}), ToolCall("r", "read_file", {}))
+        (ToolCall("b", "batch_validate", {}), ToolCall("r", "read_file", {}))
     ) is False
     assert runner._is_parallel_batch(
         (ToolCall("r1", "read_file", {}), ToolCall("r2", "read_file", {}))
@@ -2361,7 +2360,7 @@ def test_tool_exception_in_a_parallel_batch_keeps_sibling_results() -> None:
     assert results["g"]["value"]["error_type"] == "tool_exception"
 
 
-def test_daily_backtest_waits_for_running_subagent() -> None:
+def test_batch_validate_waits_for_running_subagent() -> None:
     class _SlowChild:
         model = "child"
         provider = "test"
@@ -2376,7 +2375,7 @@ def test_daily_backtest_waits_for_running_subagent() -> None:
 
     class _Backtest:
         spec = ToolSpec(
-            "daily_backtest", "gate", {"type": "object", "properties": {}, "required": []}
+            "batch_validate", "gate", {"type": "object", "properties": {}, "required": []}
         )
 
         def invoke(self, arguments: Mapping[str, object]) -> ToolResult:
@@ -2392,7 +2391,7 @@ def test_daily_backtest_waits_for_running_subagent() -> None:
             ProviderResponse(
                 tool_calls=(ToolCall("e1", "agent", {"agent": "general-purpose", "task": "slow"}),)
             ),
-            ProviderResponse(tool_calls=(ToolCall("b1", "daily_backtest", {}),)),
+            ProviderResponse(tool_calls=(ToolCall("b1", "batch_validate", {}),)),
             ProviderResponse(tool_calls=(ToolCall("f1", "finish_fold", {}),)),
         ]
     )
@@ -2484,7 +2483,7 @@ def test_a_backtest_refuses_a_writer_that_outlives_the_barrier(monkeypatch, role
     runner._subagent_jobs.append(writer)
     try:
         results, _ = runner._dispatch_tool_calls(
-            (ToolCall("b", "daily_backtest", {}),), InferenceTimeBudget(duration_seconds=100)
+            (ToolCall("b", "batch_validate", {}),), InferenceTimeBudget(duration_seconds=100)
         )
     finally:
         writer.future.cancel()
@@ -3871,7 +3870,7 @@ def test_time_budget_notice_states_remaining_minutes_and_backtests() -> None:
     assert [n["elapsed_fraction"] for n in notices] == [0.5, 0.75, 0.9]
     assert [n["remaining_minutes"] for n in notices] == [750.0, 333.3, 83.3]
     assert [n["smoke_backtests"] for n in notices] == [0, 1, 1]
-    assert all(n["daily_backtests"] == 0 and n["complete_validations"] == 0 for n in notices)
+    assert all(n["batch_validates"] == 0 and n["complete_validations"] == 0 for n in notices)
     delivered = [
         json.loads(str(message.content))
         for message in llm.calls[-1]["messages"]

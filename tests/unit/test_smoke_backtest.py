@@ -333,7 +333,7 @@ def test_smoke_backtest_is_registered_for_fold_sessions() -> None:
     description = SmokeBacktestTool.spec.description
     assert "UNOFFICIAL" in description
     assert "DIRECTORY of parquet parts" in description
-    assert "before daily_backtest" in description
+    assert "before batch_validate" in description
 
 
 def test_result_json_is_not_left_behind_for_a_ledger_to_find(tmp_path: Path) -> None:

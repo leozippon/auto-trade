@@ -455,7 +455,7 @@ def build_agent_process_summary(
     subagent_attempts = 0
     subagent_completed = 0
     subagent_failed = 0
-    daily_backtest = 0
+    batch_validate = 0
     tool_failures = 0
     failures_by_tool: dict[str, int] = {}
     failure_counts: dict[tuple[str, str], int] = {}
@@ -500,8 +500,8 @@ def build_agent_process_summary(
             tool = str(event.get("tool") or "")
             if tool == "agent":
                 tool_agent += 1
-            elif tool == "daily_backtest":
-                daily_backtest += 1
+            elif tool == "batch_validate":
+                batch_validate += 1
             if _event_ok(event) is False:
                 add_failure(tool, _event_error(event))
         elif event_type == "subagent_tool" and _event_ok(event) is False:
@@ -535,7 +535,7 @@ def build_agent_process_summary(
         "tool_failures_by_tool": dict(
             sorted(failures_by_tool.items(), key=lambda item: (-item[1], item[0]))
         ),
-        "daily_backtest": daily_backtest,
+        "batch_validate": batch_validate,
         "repeated_failure_signatures": repeated,
     }
 

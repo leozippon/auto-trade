@@ -237,11 +237,10 @@ class FinishFoldTool:
     spec = ToolSpec(
         "finish_fold",
         "Finish this Fold. outcome=\"select\" (the default) nominates one complete "
-        "Validation node of the current run by node_id (from daily_backtest or a "
-        "batch_validate row); pass node_id explicitly: after a batch_validate round "
-        "the tree position is the round's parent, so a bare call there is refused "
-        "instead of silently keeping the parent, and keeping the parent is done by "
-        "nominating the parent_control node. outcome=\"no_edge\" nominates nothing "
+        "Validation node of the current run by node_id (a batch_validate row); "
+        "node_id may be omitted only while this session has exactly one complete "
+        "Validation of its own, and keeping the parent is done by nominating the "
+        "parent_control node. outcome=\"no_edge\" nominates nothing "
         "(node_id must be absent) and requires reason, citing the evidence that no "
         "candidate proved an edge; the Fold then records no_update with a parent "
         "(the parent stays the lineage head) or baseline_missing without one. "
@@ -453,7 +452,7 @@ class FinishFoldTool:
             raise ToolError(
                 'finish_fold: outcome="no_edge" needs at least one complete '
                 "Validation of this session to have found no edge in; run "
-                "daily_backtest or batch_validate first"
+                "batch_validate first"
             )
         # The required reason already accounts for any budget left unused.
         budget = self._early_finish_budget(reason)
@@ -637,64 +636,25 @@ class FinishFoldTool:
         return rows
 
     def _resolve_node_id(self, arguments: Mapping[str, object]) -> str:
-        """The nominated node: the argument, or the tree position when no
-        batch round hangs below it.
-
-        ``batch_validate`` leaves the position on the round's parent, so a
-        bare call there would freeze the parent even when a candidate won;
-        that call is refused with the candidates listed instead.
-        """
+        """The nominated node: the argument, or the session's only own complete
+        Validation. A round leaves the tree position on its parent, so the
+        cursor is never read; with several candidates the call must name one."""
 
         explicit = str(arguments.get("node_id") or "")
         if explicit:
             return explicit
-        cursor = self.tree.current_node_id
-        if not cursor:
-            raise ToolError("finish_fold requires a fully evaluated Step")
-        candidates = self._batch_candidates_under(cursor)
-        if not candidates:
-            return cursor
-        listed = "; ".join(
-            f"{row['node_id']} ({row['candidate']}: {row['result']})" for row in candidates
-        )
+        candidates = self._session_candidates()
+        if len(candidates) == 1:
+            return candidates[0]
         raise ToolError(
-            "finish_fold requires an explicit node_id here: the tree position is "
-            f"the parent of a batch_validate round ({cursor}), so a bare call "
-            "would select the parent, not a candidate. Candidates under it: "
-            f"{listed}. Pass the winner's node_id, or the parent's own node_id "
-            "to keep it deliberately.",
-            details={"tree_position": cursor, "candidates": candidates},
+            f"finish_fold requires node_id: this session has {len(candidates)} "
+            "complete Validations of its own"
+            + (f" ({', '.join(candidates)})" if candidates else "")
+            + '; nominate one, or parent_control to keep the parent, or finish '
+            'with outcome="no_edge" and a reason',
+            retry_hint='finish_fold({"node_id": "<complete Validation node_id>"})',
+            details={"candidates": candidates},
         )
-
-    def _batch_candidates_under(self, parent_id: str) -> list[dict[str, object]]:
-        rows: list[dict[str, object]] = []
-        for node in self.tree.nodes():
-            metadata = node.get("metadata")
-            if (
-                node.get("parent_node_id") != parent_id
-                or not node_in_session(node, fold_id=self.fold_id, run_id=self.run_id)
-                or not isinstance(metadata, Mapping)
-                or not metadata.get("batch_id")
-            ):
-                continue
-            metrics = node.get("metrics") if isinstance(node.get("metrics"), Mapping) else {}
-            if node.get("status") == "failed":
-                result = "failed"
-            else:
-                parts = [
-                    f"{key}={metrics[key]:.4f}"
-                    for key in ("total_return", "sharpe")
-                    if isinstance(metrics.get(key), (int, float))
-                ]
-                result = " ".join(parts) or "complete"
-            rows.append(
-                {
-                    "node_id": str(node["node_id"]),
-                    "candidate": str(metadata.get("candidate") or node.get("result_name")),
-                    "result": result,
-                }
-            )
-        return rows
 
     def _early_finish_budget(self, reason: str) -> dict[str, object]:
         """The budget left at finish, refusing a voluntary early finish that

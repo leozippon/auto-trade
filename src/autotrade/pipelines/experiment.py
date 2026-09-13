@@ -1722,8 +1722,8 @@ def _selection_statistics(
     """How wide this Fold's search was, and how much of the winner it explains.
 
     ``candidates_evaluated`` counts every candidate the session replayed to a
-    complete Validation on this Fold's window: one per ``daily_backtest`` call
-    and one per ``batch_validate`` candidate that finished. A failed replay
+    complete Validation on this Fold's window: one per ``batch_validate``
+    candidate that finished. A failed replay
     never becomes a Step and never counts, and the host's parent control is
     not a candidate — it is the baseline the search is measured against, not a
     trial in it.

@@ -29,6 +29,7 @@ from autotrade.environment.time_budget import InferenceTimeBudget
 from autotrade.environment.tools.base import ToolError
 from autotrade.environment.tools.finish_fold import FinishFoldTool
 from autotrade.environment.tools.modification_check import ModificationCheckTool
+from autotrade.environment.tools.workspace import SafeWorkspace
 from autotrade.pipelines.agent_views import compact_fold_history
 from autotrade.pipelines.config import (
     AcceptanceRules,
@@ -47,6 +48,7 @@ from autotrade.pipelines.ledger import (
 )
 from autotrade.pipelines.local_backend import (
     PARENT_CONTROL_RESULT_NAME,
+    BatchValidateTool,
     FoldBacktestTool,
     record_parent_control,
 )
@@ -129,9 +131,6 @@ def _session(root: Path, *, max_backtests: int = 2, max_steps: int = 2):
         request=request,
         output_dir=output,
         models_dir=models,
-        modification_check=ModificationCheckTool(
-            output, parent_dir=parent, models_dir=models, constraints=ModificationConstraints()
-        ),
         artifact_store=FilesystemArtifactStore(root / "revisions"),
         evaluator=_Evaluator(root / "results"),
         tree=tree,
@@ -148,6 +147,24 @@ def _session(root: Path, *, max_backtests: int = 2, max_steps: int = 2):
         parent_main_py=parent / "main.py",
     )
     return backtest, tree, finish, manifest, output
+
+
+def _validate_working_copy(backtest: FoldBacktestTool, output: Path, parent: Path):
+    """The working copy as a one-candidate batch_validate round."""
+
+    return BatchValidateTool(
+        backtest=backtest,
+        workspace=SafeWorkspace(output.parent),
+        modification_check_factory=lambda directory: ModificationCheckTool(
+            directory,
+            parent_dir=parent,
+            models_dir=output.parent / "models",
+            constraints=ModificationConstraints(),
+        ),
+        parent_main_py=parent / "main.py",
+    ).invoke(
+        {"candidates": [{"name": "challenger", "hypothesis": "h", "path": "output"}]}
+    )
 
 
 def _control_result(root: Path) -> EvaluationResult:
@@ -206,13 +223,17 @@ def test_the_control_row_is_projected_into_the_manifest_like_any_candidate(tmp_p
         backtest, _control_result(tmp_path), output_dir=output, models_dir=output.parent / "models"
     )
     (output / "main.py").write_text(CHALLENGER_SOURCE, encoding="utf-8")
-    assert backtest.invoke({}).ok
+    assert _validate_working_copy(backtest, output, tmp_path / "parent").ok
     control_row, candidate_row = manifest.summaries
     assert control_row["result_name"] == PARENT_CONTROL_RESULT_NAME
     # Its own block, never the candidate's, and the same fields as a candidate.
     assert control_row["benchmark"] == {"beta": 0.645, "neutralized_excess_return": -0.2975}
     assert candidate_row["benchmark"] == {"beta": 0.664, "neutralized_excess_return": -0.1815}
-    assert set(control_row) - {"parent_control"} == set(candidate_row)
+    assert set(control_row) - {"parent_control"} == set(candidate_row) - {
+        "batch_id",
+        "candidate",
+        "hypothesis",
+    }
     # Replay-scaled series stay in the referenced result.json for both.
     assert "per_stock" not in control_row and "per_stock" not in candidate_row
 
@@ -279,7 +300,7 @@ def test_the_control_node_is_the_explicit_keep_parent_after_a_different_hypothes
     with pytest.raises(ToolError, match="differs from the parent"):
         finish.invoke({"node_id": control.step_id})
     (output / "main.py").write_text(CHALLENGER_SOURCE, encoding="utf-8")
-    challenger = backtest.invoke({})
+    challenger = _validate_working_copy(backtest, output, tmp_path / "parent")
     assert challenger.ok
     assert backtest.backtests == 1 and len(backtest.steps) == 1
     # Now the control node is selectable as the explicit keep-parent, with the

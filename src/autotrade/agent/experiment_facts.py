@@ -21,7 +21,7 @@ EXPERIMENT_FACTS_SCHEMA_VERSION = 1
 # while shell and sub-agent waits do not and must not be named here.
 DEADLINE_SECONDS_NOTE = (
     "`deadline_seconds` 统计可暂停的有效推理时间；"
-    "`smoke_backtest`、`daily_backtest`、`batch_validate` 和 `run_null_control` "
+    "`smoke_backtest`、`batch_validate` 和 `run_null_control` "
     "调用期间暂停计时，"
     "因此会话总墙钟可能更长。"
 )
@@ -32,7 +32,7 @@ DEADLINE_SECONDS_NOTE = (
 BATCH_VALIDATE_FIT_TIMEOUT_NOTE = (
     "`batch_validate` 并发回放期间，`strategy_fit_timeout_seconds` 与单次推断上限"
     "`strategy_inference_timeout_seconds` 都按本批实际并发路数成倍放大（并发 3 路即 3 倍），"
-    "因为并发是环境引入的、不该记到策略头上；串行的 `daily_backtest` 两者都用基准值。"
+    "因为并发是环境引入的、不该记到策略头上；单个候选的调用两者都用基准值。"
 )
 
 

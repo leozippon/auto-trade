@@ -38,6 +38,7 @@ from autotrade.pipelines.worker import load_worker_options, run_local_interactiv
 
 from .test_interactive_worker_local import (
     _FOLD_DELEGATION_ROLES,
+    VALIDATE_WORKING_COPY,
     _NoShellRunner,
     _agent_then,
     _experiment,
@@ -143,7 +144,7 @@ def fold_session(tmp_path_factory, provider_key):
             ),
             *_agent_then(
                 ToolCall("check", "modification_check", {}),
-                ToolCall("valid", "daily_backtest", {}),
+                VALIDATE_WORKING_COPY,
                 ToolCall("finish", "finish_fold", {}),
                 roles=_FOLD_DELEGATION_ROLES,
                 implement={"path": "output/main.py", "content": SOURCE},

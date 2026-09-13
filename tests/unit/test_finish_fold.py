@@ -426,61 +426,26 @@ def test_finish_fold_takes_one_bounded_reason_field(tmp_path: Path):
     ).value["reason"] == "x" * REASON_MIN_CHARS
 
 
-def test_finish_fold_bare_call_is_refused_on_the_parent_of_a_batch_round(tmp_path: Path):
-    """``batch_validate`` leaves the position on the round's parent; a bare
-    call there must not freeze the parent silently."""
-    tree = StepTree(tmp_path / "steps")
-    parent = _record(tree, tmp_path / "parent_node", source=LOGIC, result_name="valid_000")
-    winner_dir = tmp_path / "cand_win"
-    winner_dir.mkdir()
-    (winner_dir / "main.py").write_text(
-        "def generate_orders(context):\n    _ = 'win'\n    return []\n", encoding="utf-8"
-    )
-    winner = tree.record_step(
-        winner_dir,
-        epoch_id="epoch_001",
-        fold_id="fold_ref_ab",
-        run_id="run_x",
-        result_name="valid_001",
-        revision_id=new_revision_id("revision"),
-        metrics={"total_return": 0.12, "sharpe": 1.5},
-        metadata={"batch_id": "b1", "candidate": "win", "hypothesis": "h"},
-    )
-    tree.set_position(parent)  # every candidate of a batch branches off the parent
-    loser = _record_round(tree, tmp_path, batch_id="b1", marker="2")
-    tree.set_position(parent)
-    tree.record_failed_attempt(
-        epoch_id="epoch_001",
-        fold_id="fold_ref_ab",
-        run_id="run_x",
-        result_name="valid_b1_dead",
-        error="generate_orders exceeded the per-decision timeout",
-        metadata={"batch_id": "b1", "candidate": "dead", "hypothesis": "h"},
-    )
-    finish = FinishFoldTool(tree, fold_id="fold_ref_ab", run_id="run_x")
-    with pytest.raises(ToolError, match="explicit node_id") as refused:
-        finish.invoke({})
-    message = str(refused.value)
-    assert f"{winner} (win: total_return=0.1200 sharpe=1.5000)" in message
-    assert f"{loser} (2: complete)" in message and "(dead: failed)" in message
-    assert refused.value.details["tree_position"] == parent
-    assert [row["candidate"] for row in refused.value.details["candidates"]] == [
-        "win",
-        "2",
-        "dead",
-    ]
-    # Explicit choices, the parent included, go through.
-    assert finish.invoke({"node_id": winner}).value["node_id"] == winner
-    assert finish.invoke({"node_id": parent}).value["node_id"] == parent
-
-
-def test_finish_fold_bare_call_takes_the_position_when_no_batch_hangs_below(
+def test_finish_fold_names_its_node_unless_the_session_has_one_candidate(
     tmp_path: Path,
 ):
+    """A round leaves the tree position on its parent, so a nomination never
+    rides the cursor: a bare call takes the session's only own complete
+    Validation, and with several it is refused and lists them."""
     tree = StepTree(tmp_path / "steps")
-    node = _record(tree, tmp_path / "node", source=LOGIC, result_name="valid_000")
+    parent = _record(tree, tmp_path / "parent_node", source=LOGIC, result_name="valid_000")
+    tree.set_position(parent)
     finish = FinishFoldTool(tree, fold_id="fold_ref_ab", run_id="run_x")
-    assert finish.invoke({}).value["node_id"] == node
+    assert finish.invoke({}).value["node_id"] == parent
+    winner = _record_round(tree, tmp_path, batch_id="b1", marker="2")
+    tree.set_position(parent)
+    with pytest.raises(ToolError, match="requires node_id") as refused:
+        finish.invoke({})
+    assert refused.value.details["candidates"] == [parent, winner]
+    assert "parent_control" in str(refused.value)
+    # Explicit choices, the round's parent included, go through.
+    assert finish.invoke({"node_id": winner}).value["node_id"] == winner
+    assert finish.invoke({"node_id": parent}).value["node_id"] == parent
 
 
 def test_finish_fold_rejects_an_absent_or_snapshotless_node(tmp_path: Path):

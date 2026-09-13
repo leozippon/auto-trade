@@ -94,9 +94,13 @@ class RecordFailedAttemptsTest(unittest.TestCase):
         from autotrade.environment.broker import BrokerProfile
         from autotrade.environment.strategy import StrategySchedule
         from autotrade.environment.time_budget import InferenceTimeBudget
+        from autotrade.environment.tools import SafeWorkspace
         from autotrade.pipelines.config import FoldSessionRequest, SnapshotBundle
         from autotrade.pipelines.folds import FoldSpec
-        from autotrade.pipelines.local_backend import FoldBacktestTool
+        from autotrade.pipelines.local_backend import (
+            BatchValidateTool,
+            FoldBacktestTool,
+        )
 
         output = _artifact(root / "output")
         models = root / "models"
@@ -137,19 +141,28 @@ class RecordFailedAttemptsTest(unittest.TestCase):
             def evaluate(self, _request):
                 raise raised
 
+        backtest = FoldBacktestTool(
+            request=request,
+            output_dir=output,
+            models_dir=models,
+            artifact_store=FilesystemArtifactStore(root / "artifacts"),
+            evaluator=ExplodingEvaluator(),
+            tree=tree,
+            schedule=StrategySchedule(),
+            broker_profile=BrokerProfile(),
+            time_budget=InferenceTimeBudget(duration_seconds=300),
+            ref_store=AgentRefStore(root / "experiment"),
+        )
+        batch = BatchValidateTool(
+            backtest=backtest,
+            workspace=SafeWorkspace(root),
+            modification_check_factory=lambda directory: PassingModificationCheck(
+                directory, models
+            ),
+        )
         return (
-            FoldBacktestTool(
-                request=request,
-                output_dir=output,
-                models_dir=models,
-                modification_check=PassingModificationCheck(output, models),
-                artifact_store=FilesystemArtifactStore(root / "artifacts"),
-                evaluator=ExplodingEvaluator(),
-                tree=tree,
-                schedule=StrategySchedule(),
-                broker_profile=BrokerProfile(),
-                time_budget=InferenceTimeBudget(duration_seconds=300),
-                ref_store=AgentRefStore(root / "experiment"),
+            lambda: batch.invoke(
+                {"candidates": [{"name": "wc", "hypothesis": "h", "path": "output"}]}
             ),
             tree,
         )
@@ -159,12 +172,12 @@ class RecordFailedAttemptsTest(unittest.TestCase):
             root = Path(tmp)
             off_tool, off_tree = self._tool(root / "off", record_failed_attempts=False)
             with self.assertRaises(Exception):
-                off_tool.invoke({})
+                off_tool()
             self.assertEqual(off_tree.nodes(), [])
 
             on_tool, on_tree = self._tool(root / "on", record_failed_attempts=True)
             with self.assertRaises(Exception):
-                on_tool.invoke({})
+                on_tool()
             nodes = on_tree.nodes()
             self.assertEqual([node["status"] for node in nodes], ["failed"])
             self.assertEqual(
@@ -188,8 +201,8 @@ class RecordFailedAttemptsTest(unittest.TestCase):
                 error=StrategyLoadError("strategy imports unsupported module: os"),
             )
             with self.assertRaises(ToolError) as caught:
-                tool.invoke({})
-            message = str(caught.exception)
+                tool()
+            message = str(caught.exception.details["candidates"][0]["error"])
             self.assertEqual(
                 message,
                 "daily Validation failed: StrategyLoadError: strategy imports unsupported module: os",
@@ -211,8 +224,8 @@ class RecordFailedAttemptsTest(unittest.TestCase):
                 ),
             )
             with self.assertRaises(ToolError) as caught:
-                tool.invoke({})
-            message = str(caught.exception)
+                tool()
+            message = str(caught.exception.details["candidates"][0]["error"])
             self.assertEqual(
                 message,
                 "daily Validation failed: ValueError: EvaluationRequest mode does not match its immutable replay slot",
@@ -239,8 +252,8 @@ class RecordFailedAttemptsTest(unittest.TestCase):
                 ),
             )
             with self.assertRaises(ToolError) as caught:
-                tool.invoke({})
-            message = str(caught.exception)
+                tool()
+            message = str(caught.exception.details["candidates"][0]["error"])
             recorded = str(tree.nodes()[0]["error"])
             self.assertTrue(message.startswith("daily Validation failed: RuntimeError:"))
             self.assertEqual(message, recorded)

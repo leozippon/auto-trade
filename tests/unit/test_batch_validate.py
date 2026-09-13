@@ -4,10 +4,10 @@ The audited folds reached at most two formal Validations each and carried the
 parent forward whenever a single quarter could not separate a challenger from
 it — one candidate per serial step, each branching off the previous one, made
 the evidence per decision both thin and path-dependent. This tool fans a
-pre-registered set out under one shared parent so the numbers are comparable,
-while keeping every guarantee ``daily_backtest`` gives: same static gate, same
-immutable revision, same budget, same selection path through ``step_rollback``
-plus ``finish_fold``.
+pre-registered set out under one shared parent so the numbers are comparable;
+it is the only Validation tool, so one candidate is a round too: same static
+gate, same immutable revision, same budget, same selection path through
+``step_rollback`` plus ``finish_fold`` at every width.
 
 These tests cover the refusals that must happen before anything runs, the
 per-candidate isolation of a failure, the lineage the tree ends up with, and
@@ -239,7 +239,6 @@ class _Session:
             request=request,
             output_dir=self.output,
             models_dir=self.models,
-            modification_check=self._check(self.output),
             artifact_store=FilesystemArtifactStore(root / "revisions"),
             evaluator=self.evaluator,
             tree=self.tree,
@@ -289,6 +288,14 @@ class _Session:
         directory.mkdir(parents=True, exist_ok=True)
         (directory / "main.py").write_text(source, encoding="utf-8")
 
+    def validate_one(self, name: str, source: str) -> dict[str, object]:
+        """One candidate as its own round; returns its row."""
+
+        self.candidate(name, source)
+        result = self.call(name)
+        assert result.ok, result.error
+        return result.value["candidates"][0]
+
     def call(self, *names: str) -> object:
         return self.batch.invoke(
             {
@@ -335,7 +342,7 @@ class BatchValidateRefusalTest(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             session = _Session(Path(tmp))
             session.candidate("a", _strategy("3"))
-            # No main.py: the same static gate daily_backtest runs.
+            # No main.py: the static gate every candidate runs.
             (session.workspace_root / "candidates" / "b").mkdir(parents=True)
             (session.workspace_root / "candidates" / "b" / "notes.py").write_text(
                 "x = 1\n", encoding="utf-8"
@@ -366,18 +373,22 @@ class BatchValidateRefusalTest(unittest.TestCase):
             self.assertIn("Step budget", str(caught.exception))
             self.assertEqual(session.backtest.backtests, 0)
 
-    def test_the_live_working_copy_is_not_a_candidate(self) -> None:
+    def test_the_working_copy_is_a_candidate_but_other_reserved_roots_are_not(
+        self,
+    ) -> None:
         with TemporaryDirectory() as tmp:
             session = _Session(Path(tmp))
-            session.candidate("a", _strategy("4"))
+            (session.output / "main.py").write_text(_strategy("4"), encoding="utf-8")
+            result = session.batch.invoke(
+                {"candidates": [{"name": "live", "hypothesis": "h", "path": "output"}]}
+            )
+            self.assertTrue(result.ok, result.error)
+            row = result.value["candidates"][0]
+            node = session.tree.get_node(str(row["node_id"]))
+            self.assertEqual(node["metadata"]["source_path"], "output")
             with self.assertRaises(ToolError) as caught:
                 session.batch.invoke(
-                    {
-                        "candidates": [
-                            {"name": "a", "hypothesis": "h", "path": "candidates/a"},
-                            {"name": "live", "hypothesis": "h", "path": "output"},
-                        ]
-                    }
+                    {"candidates": [{"name": "m", "hypothesis": "h", "path": "models"}]}
                 )
             self.assertIn("reserved workspace root", str(caught.exception))
 
@@ -387,7 +398,7 @@ class BatchValidateRefusalTest(unittest.TestCase):
             for index in range(BATCH_VALIDATE_MAX_CANDIDATES + 1):
                 session.candidate(f"c{index}", _strategy(str(index)))
             with self.assertRaises(ToolError):
-                session.call("c0")
+                session.call()
             with self.assertRaises(ToolError):
                 session.call(*[f"c{index}" for index in range(BATCH_VALIDATE_MAX_CANDIDATES + 1)])
             self.assertEqual(session.backtest.backtests, 0)
@@ -414,7 +425,8 @@ class BatchValidateRunTest(unittest.TestCase):
             session = _Session(Path(tmp))
             # A batch branches off wherever the session stands, so start from a
             # real node rather than the empty root.
-            branch_point = session.backtest.invoke({}).value["node_id"]
+            branch_point = str(session.validate_one("start", _strategy("9"))["node_id"])
+            self.assertTrue(session.rollback.invoke({"node_id": branch_point}).ok)
             self.assertEqual(session.tree.current_node_id, branch_point)
             for index, name in enumerate(("alpha", "beta", "gamma")):
                 session.candidate(name, _strategy(str(index)))
@@ -488,8 +500,8 @@ class BatchValidateRunTest(unittest.TestCase):
         inference_base = limits.timeout_seconds
         with TemporaryDirectory() as tmp:
             session = _Session(Path(tmp), max_backtests=6, max_steps=6)
-            # One serial replay: nothing else is running, so nothing is scaled.
-            self.assertTrue(session.backtest.invoke({}).ok)
+            # A one-candidate round: nothing else is running, so nothing is scaled.
+            session.validate_one("s0", _strategy("50"))
             self.assertEqual(session.evaluator.fit_timeouts, [fit_base])
             self.assertEqual(session.evaluator.inference_timeouts, [inference_base])
 
@@ -527,7 +539,7 @@ class BatchValidateRunTest(unittest.TestCase):
             self.assertEqual(value["backtests_used"], 2)
             self.assertEqual(value["backtests_remaining"], 2)
             self.assertEqual(value["steps_used"], 2)
-            # The next daily_backtest continues the same numbering.
+            # The next round continues the same numbering.
             self.assertEqual(
                 sorted(row["result_name"] for row in value["candidates"]),
                 ["valid_001", "valid_002"],
@@ -601,7 +613,7 @@ class BatchValidateRunTest(unittest.TestCase):
                 self.assertEqual(stats["sub_windows"][0]["label"], "2022Q1")
                 self.assertIn("total_return", stats)
                 # The blocks that scale with the replay stay behind the
-                # reference, exactly as daily_backtest keeps them.
+                # reference, like every Validation keeps them.
                 self.assertNotIn("per_stock", stats)
                 self.assertNotIn("weekly_returns", stats)
                 attachment = session.tree.root / row["result_ref"]
@@ -618,7 +630,7 @@ class BatchValidateRunTest(unittest.TestCase):
         states the comparison absent instead of omitting it."""
         with TemporaryDirectory() as tmp:
             session = _Session(Path(tmp))
-            first = session.backtest.invoke({}).value
+            first = session.validate_one("first", _strategy("333"))
             statistics = first["selection_statistics"]
             self.assertEqual(statistics["trials_so_far"], 1)
             # One trial has no dispersion to deflate against.
@@ -773,14 +785,6 @@ class BatchValidateContractTest(unittest.TestCase):
             [item["node_id"] for item in runner._complete_validation_nodes],
             ["n1", "n2"],
         )
-        # A daily_backtest result still registers its single node.
-        runner._record_complete_validations(
-            {"ok": True, "value": {"node_id": "n3", "revision_id": "r3"}}
-        )
-        self.assertEqual(
-            [item["node_id"] for item in runner._complete_validation_nodes],
-            ["n1", "n2", "n3"],
-        )
 
 
 class BatchTemplateFilesTest(unittest.TestCase):
@@ -925,7 +929,7 @@ class RepeatedRejectionTest(unittest.TestCase):
             reserved = {
                 "candidates": [
                     {"name": "a", "hypothesis": "h", "path": "candidates/a"},
-                    {"name": "live", "hypothesis": "h", "path": "output"},
+                    {"name": "live", "hypothesis": "h", "path": "models"},
                 ]
             }
             for _ in range(BATCH_REJECTION_ESCALATE_AT - 1):
@@ -972,7 +976,7 @@ class NullControlToolTest(unittest.TestCase):
             session = _Session(Path(tmp))
             calls: list[dict[str, object]] = []
             session.evaluator.null_control = _canned_null(calls)
-            node = session.backtest.invoke({}).value["node_id"]
+            node = session.validate_one("n", _strategy("7"))["node_id"]
             tool = NullControlTool(session.backtest, max_calls=2)
             first = tool.invoke({"node_id": node}).value
             self.assertFalse(first["cached"])
@@ -995,9 +999,8 @@ class NullControlToolTest(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             session = _Session(Path(tmp))
             session.evaluator.null_control = _canned_null([])
-            first = session.backtest.invoke({}).value["node_id"]
-            (session.output / "main.py").write_text(_strategy("2"), encoding="utf-8")
-            second = session.backtest.invoke({}).value["node_id"]
+            first = session.validate_one("n1", _strategy("7"))["node_id"]
+            second = session.validate_one("n2", _strategy("2"))["node_id"]
             tool = NullControlTool(session.backtest, max_calls=1)
             with self.assertRaises(ToolError) as refused:
                 tool.invoke({"node_id": "not_a_node"})
@@ -1022,7 +1025,7 @@ class NullControlToolTest(unittest.TestCase):
                 raise RuntimeError("no replacement name for 000001.SZ entered 20220104")
 
             session.evaluator.null_control = boom
-            node = session.backtest.invoke({}).value["node_id"]
+            node = session.validate_one("n", _strategy("7"))["node_id"]
             tool = NullControlTool(session.backtest, max_calls=1)
             with self.assertRaises(ToolError) as failed:
                 tool.invoke({"node_id": node})
@@ -1071,9 +1074,9 @@ class AnotherRoundFitsTest(unittest.TestCase):
 
     def test_no_round_fits_when_the_budget_cannot_hold_another(self) -> None:
         with TemporaryDirectory() as tmp:
-            # Three backtests: one two-candidate round leaves a single slot,
-            # fewer than the smallest batch.
-            session = _Session(Path(tmp), max_backtests=3, max_steps=6)
+            # Two backtests: one two-candidate round leaves no slot for even a
+            # one-candidate round.
+            session = _Session(Path(tmp), max_backtests=2, max_steps=6)
             session.candidate("a", _strategy("1"))
             session.candidate("b", _strategy("22"))
             value = session.call("a", "b").value

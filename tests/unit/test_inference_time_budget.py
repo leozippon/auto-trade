@@ -27,6 +27,7 @@ from autotrade.environment.strategy import StrategySchedule
 from autotrade.environment.time_budget import InferenceTimeBudget
 from autotrade.environment.tools import (
     FinishFoldTool,
+    SafeWorkspace,
     StepRollbackTool,
     ToolRegistry,
     ToolResult,
@@ -39,6 +40,7 @@ from autotrade.pipelines.config import (
 )
 from autotrade.pipelines.folds import FoldSpec
 from autotrade.pipelines.local_backend import (
+    BatchValidateTool,
     FoldBacktestTool,
     SessionBudgetLLM,
     SessionCallBudget,
@@ -173,7 +175,6 @@ def test_backtest_failure_past_wall_deadline_keeps_llm_repair_budget(
         request=request,
         output_dir=output,
         models_dir=models,
-        modification_check=PassingCheck(output, models),
         artifact_store=FilesystemArtifactStore(tmp_path / "artifacts"),
         evaluator=evaluator,
         tree=tree,
@@ -182,10 +183,18 @@ def test_backtest_failure_past_wall_deadline_keeps_llm_repair_budget(
         time_budget=time_budget,
         ref_store=ref_store,
     )
+    working_copy = {
+        "candidates": [{"name": "working_copy", "hypothesis": "h", "path": "output"}]
+    }
+    batch = BatchValidateTool(
+        backtest=backtest,
+        workspace=SafeWorkspace(tmp_path),
+        modification_check_factory=lambda directory: PassingCheck(directory, models),
+    )
     scripted = ScriptedLLM(
         [
-            ProviderResponse(tool_calls=(ToolCall("bad", "daily_backtest", {}),)),
-            ProviderResponse(tool_calls=(ToolCall("fixed", "daily_backtest", {}),)),
+            ProviderResponse(tool_calls=(ToolCall("bad", "batch_validate", working_copy),)),
+            ProviderResponse(tool_calls=(ToolCall("fixed", "batch_validate", working_copy),)),
             ProviderResponse(
                 tool_calls=(
                     ToolCall(
@@ -210,7 +219,7 @@ def test_backtest_failure_past_wall_deadline_keeps_llm_repair_budget(
         llm=llm,
         tools=ToolRegistry(
             [
-                backtest,
+                batch,
                 FinishFoldTool(
                     tree,
                     fold_id=fold_ref,
@@ -229,7 +238,7 @@ def test_backtest_failure_past_wall_deadline_keeps_llm_repair_budget(
             trace_path, ids={"run_ref": run_ref, "fold_ref": fold_ref}
         ).emit,
     )
-    assert runner.time_budget is backtest.time_budget is llm.time_budget is time_budget
+    assert runner.time_budget is batch.session_time_budget is llm.time_budget is time_budget
 
     result = runner.run("validate")
 
@@ -256,16 +265,17 @@ def test_backtest_failure_past_wall_deadline_keeps_llm_repair_budget(
         event
         for event in events
         if event.get("event_type") == "tool_call"
-        and event.get("tool") == "daily_backtest"
+        and event.get("tool") == "batch_validate"
         and event["result"]["ok"]
     )
     # The reference names the step-tree attachment that actually holds the full
     # replay record, under the ``steps`` search root the Agent can read.
     assert successful["result"]["value"]["result_root"] == "steps"
-    assert successful["result"]["value"]["result_ref"] == (
+    row = successful["result"]["value"]["candidates"][0]
+    assert row["result_ref"] == (
         f"epoch_001__{fold_ref}__{run_ref}__valid_002/validation/result.json"
     )
-    assert (tree.root / successful["result"]["value"]["result_ref"]).is_file()
+    assert (tree.root / row["result_ref"]).is_file()
 
 
 def test_complete_node_enters_hard_finalization_without_compaction_or_research(
@@ -298,7 +308,7 @@ def test_complete_node_enters_hard_finalization_without_compaction_or_research(
 
     class ExistingValidation:
         spec = ToolSpec(
-            "daily_backtest",
+            "batch_validate",
             "return one completed current-run validation",
             {"type": "object", "properties": {}, "required": []},
         )
@@ -307,11 +317,11 @@ def test_complete_node_enters_hard_finalization_without_compaction_or_research(
             (output / "main.py").write_text("workspace drift\n", encoding="utf-8")
             return ToolResult(
                 True,
-                value={
+                value={"candidates": [{
                     "node_id": node_id,
                     "revision_id": "revision_current",
                     "stats": {"total_return": 0.03, "max_drawdown": 0.12},
-                },
+                }]},
             )
 
     shell = RecordingShell()
@@ -319,7 +329,7 @@ def test_complete_node_enters_hard_finalization_without_compaction_or_research(
         [
             ProviderResponse(
                 tool_calls=(
-                    ToolCall("valid", "daily_backtest", {}),
+                    ToolCall("valid", "batch_validate", {}),
                     ToolCall("research", "shell", {}),
                 )
             ),
@@ -439,7 +449,7 @@ def test_a_validation_completing_inside_the_grace_keeps_the_conversation(
 
     class SlowValidation:
         spec = ToolSpec(
-            "daily_backtest",
+            "batch_validate",
             "complete Validation",
             {"type": "object", "properties": {}, "additionalProperties": False},
             mutating=True,
@@ -451,16 +461,16 @@ def test_a_validation_completing_inside_the_grace_keeps_the_conversation(
             clock.advance(150.0)
             return ToolResult(
                 True,
-                value={
+                value={"candidates": [{
                     "node_id": node_id,
                     "revision_id": "revision_grace",
                     "stats": {"total_return": 0.01},
-                },
+                }]},
             )
 
     scripted = ScriptedLLM(
         [
-            ProviderResponse(tool_calls=(ToolCall("b1", "daily_backtest", {}),)),
+            ProviderResponse(tool_calls=(ToolCall("b1", "batch_validate", {}),)),
             ProviderResponse(tool_calls=(ToolCall("f1", "finish_fold", {"node_id": node_id}),)),
         ],
         context_window_tokens=128_000,
@@ -707,7 +717,6 @@ def test_runner_rejects_mismatched_backtest_budget(tmp_path: Path) -> None:
         request=_fold_request(),
         output_dir=output,
         models_dir=models,
-        modification_check=PassingCheck(output, models),
         artifact_store=FilesystemArtifactStore(tmp_path / "artifacts"),
         evaluator=UnusedEvaluator(),
         tree=StepTree(tmp_path / "steps"),
@@ -721,12 +730,17 @@ def test_runner_rejects_mismatched_backtest_budget(tmp_path: Path) -> None:
         budget=SessionCallBudget(max_calls=2, time_budget=main_budget),
     )
 
+    batch = BatchValidateTool(
+        backtest=backtest,
+        workspace=SafeWorkspace(tmp_path),
+        modification_check_factory=lambda directory: PassingCheck(directory, models),
+    )
     with pytest.raises(
-        ValueError, match="tool:daily_backtest is bound to another budget"
+        ValueError, match="tool:batch_validate is bound to another budget"
     ):
         AgentSessionRunner(
             llm=main,
-            tools=ToolRegistry([backtest]),
+            tools=ToolRegistry([batch]),
             system_prompt="mismatch",
             time_budget=main_budget,
         )
@@ -879,7 +893,7 @@ def test_hard_finalization_offers_parent_control_with_its_acceptance_verdict(
 
     class BreachingValidation:
         spec = ToolSpec(
-            "daily_backtest",
+            "batch_validate",
             "return one completed current-run validation",
             {"type": "object", "properties": {}, "required": []},
         )
@@ -887,7 +901,7 @@ def test_hard_finalization_offers_parent_control_with_its_acceptance_verdict(
         def invoke(self, _arguments):
             return ToolResult(
                 True,
-                value={
+                value={"candidates": [{
                     "node_id": challenger_id,
                     "revision_id": "revision_challenger",
                     "stats": {
@@ -895,12 +909,12 @@ def test_hard_finalization_offers_parent_control_with_its_acceptance_verdict(
                         "max_drawdown": 0.41,
                         "sharpe": 0.2,
                     },
-                },
+                }]},
             )
 
     scripted = ScriptedLLM(
         [
-            ProviderResponse(tool_calls=(ToolCall("valid", "daily_backtest", {}),)),
+            ProviderResponse(tool_calls=(ToolCall("valid", "batch_validate", {}),)),
             ProviderResponse(
                 tool_calls=(
                     ToolCall("finish", "finish_fold", {"node_id": control_id}),
@@ -1111,7 +1125,7 @@ def test_the_parent_stops_waiting_for_a_child_at_the_finalization_boundary(
 
     class ExistingValidation:
         spec = ToolSpec(
-            "daily_backtest",
+            "batch_validate",
             "return one completed current-run validation",
             {"type": "object", "properties": {}, "required": []},
         )
@@ -1119,11 +1133,11 @@ def test_the_parent_stops_waiting_for_a_child_at_the_finalization_boundary(
         def invoke(self, _arguments):
             return ToolResult(
                 True,
-                value={
+                value={"candidates": [{
                     "node_id": node_id,
                     "revision_id": "revision_current",
                     "stats": {"total_return": 0.03, "max_drawdown": 0.12},
-                },
+                }]},
             )
 
     release = threading.Event()
@@ -1142,7 +1156,7 @@ def test_the_parent_stops_waiting_for_a_child_at_the_finalization_boundary(
 
     scripted = ScriptedLLM(
         [
-            ProviderResponse(tool_calls=(ToolCall("valid", "daily_backtest", {}),)),
+            ProviderResponse(tool_calls=(ToolCall("valid", "batch_validate", {}),)),
             ProviderResponse(
                 tool_calls=(
                     ToolCall("spawn", "agent", {"agent": "general-purpose", "task": "slow"}),

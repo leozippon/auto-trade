@@ -113,9 +113,8 @@ class AgentSessionDeadlineExceeded(SessionInterrupt):
 
 _TERMINAL_TOOLS = frozenset({"finish_fold", "finish_meta"})
 _FOLD_FINALIZATION_TOOLS = frozenset({"finish_fold"})
-# Tools that produce complete Validation nodes: one node for daily_backtest,
-# one per candidate for batch_validate.
-_VALIDATION_TOOLS = frozenset({"daily_backtest", "batch_validate"})
+# The tool that produces complete Validation nodes: one per finished candidate.
+_VALIDATION_TOOLS = frozenset({"batch_validate"})
 # A completed Validation can switch the session into hard finalization, and
 # the documented contract is that the remaining research calls of that same
 # turn are then refused. That only holds when the batch runs in order, so the
@@ -128,7 +127,6 @@ _WRITER_BARRIER_TOOLS = _PHASE_GATE_TOOLS | frozenset({"run_null_control"})
 _FOLD_TOOLS = frozenset(
     {
         "batch_validate",
-        "daily_backtest",
         "run_null_control",
         "agent",
         "finish_fold",
@@ -179,7 +177,7 @@ _OWN_WORK_TOOLS = frozenset(
 # ``time_budget_notice`` observation states the remaining minutes and, for a
 # Fold, how many backtests have run so far.
 TIME_BUDGET_NOTICE_FRACTIONS = (0.5, 0.75, 0.9)
-_BACKTEST_TOOLS = ("smoke_backtest", "daily_backtest", "batch_validate")
+_BACKTEST_TOOLS = ("smoke_backtest", "batch_validate")
 # The trace events that carry one tool outcome. The session_end tool_failures
 # scalar and the Agent Trace summary must count the same events, or an audit
 # that reads only the scalar undercounts a session whose children did the work.
@@ -829,14 +827,12 @@ class AgentSessionRunner:
             complete = len(self._complete_validation_nodes)
             payload.update(
                 smoke_backtests=backtests["smoke_backtest"],
-                daily_backtests=backtests["daily_backtest"],
                 batch_validates=backtests["batch_validate"],
                 complete_validations=complete,
             )
             payload["message"] = (
                 f"推理时间预算已用去 {crossed:.0%}，剩余约 {remaining_minutes:g} 分钟；"
                 f"至今 smoke_backtest {backtests['smoke_backtest']} 次、"
-                f"daily_backtest {backtests['daily_backtest']} 次、"
                 f"batch_validate {backtests['batch_validate']} 次、"
                 f"完整 Validation {complete} 个。"
                 "完整 Validation 的耗时随 Validation 区间的交易日数增长，为仍要跑的正式回测预留时间；"
@@ -923,21 +919,15 @@ class AgentSessionRunner:
     def _record_complete_validations(self, record: dict[str, object]) -> None:
         """Register every complete Validation node one tool result carries.
 
-        ``daily_backtest`` reports one node inline; ``batch_validate`` reports
-        one row per candidate and only the rows that finished are nodes. Both
-        feed the same candidate list the finalization phase draws its
-        ``node_id`` enum from.
+        ``batch_validate`` reports one row per candidate and only the rows that
+        finished are nodes; they feed the candidate list the finalization phase
+        draws its ``node_id`` enum from.
         """
         value = record.get("value")
-        if not isinstance(value, Mapping):
-            return
-        rows = value.get("candidates")
-        if isinstance(rows, list):
-            for row in rows:
-                if isinstance(row, Mapping):
-                    self._record_complete_validation(row)
-            return
-        self._record_complete_validation(value)
+        rows = value.get("candidates") if isinstance(value, Mapping) else None
+        for row in rows if isinstance(rows, list) else ():
+            if isinstance(row, Mapping):
+                self._record_complete_validation(row)
 
     def _record_complete_validation(self, value: Mapping[str, object]) -> None:
         node_id = value.get("node_id")

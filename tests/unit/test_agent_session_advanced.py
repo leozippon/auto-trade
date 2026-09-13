@@ -1147,7 +1147,7 @@ def test_sessions_reject_tools_outside_their_positive_contracts():
         def invoke(self, arguments):
             return ToolResult(True)
 
-    for name in ("daily_backtest", "external_lookup"):
+    for name in ("batch_validate", "external_lookup"):
         with pytest.raises(ValueError):
             AgentSessionRunner(
                 llm=ScriptedLLM([]),
@@ -1156,10 +1156,10 @@ def test_sessions_reject_tools_outside_their_positive_contracts():
                 config=AgentSessionConfig(mode="meta"),
             )
 
-    with pytest.raises(ValueError, match="daily_backtest requires finish_fold"):
+    with pytest.raises(ValueError, match="batch_validate requires finish_fold"):
         AgentSessionRunner(
             llm=ScriptedLLM([]),
-            tools=ToolRegistry([StubTool("daily_backtest")]),
+            tools=ToolRegistry([StubTool("batch_validate")]),
             system_prompt="formal fold",
             config=AgentSessionConfig(mode="fold"),
         )
@@ -1299,7 +1299,6 @@ def _all_registrable_tool_names() -> set[str]:
     from autotrade.environment.tools.search import GlobTool, GrepTool, ReadFileTool
     from autotrade.pipelines.local_backend import (
         BatchValidateTool,
-        FoldBacktestTool,
         NullControlTool,
         SmokeBacktestTool,
     )
@@ -1310,7 +1309,6 @@ def _all_registrable_tool_names() -> set[str]:
     names = {
         TEXT_RETRIEVE_TOOL,
         BatchValidateTool.spec.name,
-        FoldBacktestTool.spec.name,
         NullControlTool.spec.name,
         SmokeBacktestTool.spec.name,
     }

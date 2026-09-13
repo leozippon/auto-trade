@@ -1351,20 +1351,20 @@ class StrategyOrderContractTest(unittest.TestCase):
 class SequentialDispatchClassificationTest(unittest.TestCase):
     """A batch runs concurrently only when no call in it must be ordered.
 
-    ``daily_backtest`` commits a Step, so it declares ``mutating`` on its own
+    ``batch_validate`` commits Steps, so it declares ``mutating`` on its own
     spec rather than relying on the name list; the list is left holding only
     the tools that genuinely have no flag."""
 
-    def test_daily_backtest_is_sequential_through_its_spec_flag(self) -> None:
+    def test_batch_validate_is_sequential_through_its_spec_flag(self) -> None:
         from autotrade.environment.tools import (
             SEQUENTIAL_TOOL_NAMES,
             is_sequential_tool,
         )
-        from autotrade.pipelines.local_backend import FoldBacktestTool
+        from autotrade.pipelines.local_backend import BatchValidateTool
 
-        self.assertTrue(FoldBacktestTool.spec.mutating)
-        self.assertTrue(is_sequential_tool(FoldBacktestTool.spec))
-        self.assertNotIn("daily_backtest", SEQUENTIAL_TOOL_NAMES)
+        self.assertTrue(BatchValidateTool.spec.mutating)
+        self.assertTrue(is_sequential_tool(BatchValidateTool.spec))
+        self.assertNotIn("batch_validate", SEQUENTIAL_TOOL_NAMES)
 
     def test_read_only_specs_are_concurrent_and_unknown_names_are_not(self) -> None:
         from autotrade.environment.tools import (
@@ -1810,7 +1810,8 @@ class SpillAndRootContractTest(unittest.TestCase):
 def _fold_backtest_tool(
     tmp: Path, trades: int, *, tree=None, evaluator=None, manifest=None
 ):
-    """A FoldBacktestTool over a fake evaluator, with its host paths."""
+    """A batch_validate tool over a fake evaluator, with its host paths; the
+    working copy is its one candidate (``WORKING_COPY``)."""
     from datetime import UTC
 
     from autotrade.environment.artifacts import FilesystemArtifactStore
@@ -1826,7 +1827,7 @@ def _fold_backtest_tool(
         SnapshotBundle,
         StrategySchedule,
     )
-    from autotrade.pipelines.local_backend import FoldBacktestTool
+    from autotrade.pipelines.local_backend import BatchValidateTool, FoldBacktestTool
 
     paths, _, _ = build_sandbox(tmp)
     output = paths.agent / "output"
@@ -1889,13 +1890,10 @@ def _fold_backtest_tool(
         max_llm_calls=3,
         deadline_seconds=600.0,
     )
-    tool = FoldBacktestTool(
+    backtest = FoldBacktestTool(
         request=request,
         output_dir=output,
         models_dir=models,
-        modification_check=PassingModificationCheck(
-            output, models, check_index=1, changed_lines=3
-        ),
         artifact_store=FilesystemArtifactStore(tmp / "revisions"),
         evaluator=evaluator or Evaluator(),
         tree=tree(paths.steps) if tree is not None else StepTree(paths.steps),
@@ -1905,11 +1903,23 @@ def _fold_backtest_tool(
         ref_store=AgentRefStore(tmp / "experiment"),
         manifest=manifest,
     )
+    tool = BatchValidateTool(
+        backtest=backtest,
+        workspace=SafeWorkspace(paths.agent),
+        modification_check_factory=lambda directory: PassingModificationCheck(
+            directory, models, check_index=1, changed_lines=3
+        ),
+    )
     return paths, tool, summary
 
 
+WORKING_COPY = {
+    "candidates": [{"name": "working_copy", "hypothesis": "h", "path": "output"}]
+}
+
+
 class FoldBacktestResultBudgetTest(unittest.TestCase):
-    """``daily_backtest`` is the one tool whose payload scales with the replay.
+    """A Validation row is the one payload that scales with the replay.
 
     The observation the model keeps for the rest of the session must stay a
     fixed-cost summary, and the reference it hands back for the full record
@@ -1922,19 +1932,19 @@ class FoldBacktestResultBudgetTest(unittest.TestCase):
     def test_inline_result_stays_in_budget_and_the_reference_reads_back(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             paths, tool, summary = _fold_backtest_tool(Path(tmp), 5000)
-            result = ToolRegistry([tool]).invoke("daily_backtest", {})
+            result = ToolRegistry([tool]).invoke("batch_validate", WORKING_COPY)
             self.assertTrue(result.ok, result.error)
             rendered = json.dumps(result.value, ensure_ascii=False, default=str)
             self.assertLessEqual(len(rendered), search_module.MAX_RESULT_CHARS, len(rendered))
             # The blocks that scale with the replay are the ones left out; every
             # metric the accept/reject decision needs still rides inline.
-            stats = result.value["stats"]
+            row = result.value["candidates"][0]
+            stats = row["stats"]
             self.assertNotIn("per_stock", stats)
             self.assertNotIn("weekly_returns", stats)
-            for key in ("total_return", "sharpe", "max_drawdown", "trade_count", "phase_seconds"):
+            for key in ("total_return", "sharpe", "max_drawdown", "trade_count"):
                 self.assertIn(key, stats)
             self.assertEqual(result.value["result_root"], "steps")
-            self.assertIn(result.value["result_ref"], result.value["result_hint"])
             # The reference resolves through the Agent's own read path and the
             # file behind it holds the full record.
             roots = SearchRoots(SafeWorkspace(paths.workspace), paths=paths)
@@ -1942,10 +1952,10 @@ class FoldBacktestResultBudgetTest(unittest.TestCase):
             registry = ToolRegistry([ReadFileTool(roots)])
             read = registry.invoke(
                 "read_file",
-                {"root": result.value["result_root"], "path": result.value["result_ref"]},
+                {"root": result.value["result_root"], "path": row["result_ref"]},
             )
             self.assertTrue(read.ok, read.error)
-            target, _ = roots.resolve("steps", result.value["result_ref"])
+            target, _ = roots.resolve("steps", row["result_ref"])
             record = json.loads(target.read_text(encoding="utf-8"))
             self.assertEqual(len(record["stats"]["per_stock"]), len(summary["per_stock"]))
 
@@ -1959,7 +1969,7 @@ class FoldBacktestResultBudgetTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             _, tool, _ = _fold_backtest_tool(Path(tmp), 5, tree=TreeWithoutAttachments)
-            result = ToolRegistry([tool]).invoke("daily_backtest", {})
+            result = ToolRegistry([tool]).invoke("batch_validate", WORKING_COPY)
             self.assertFalse(result.ok)
             self.assertIn("attachment is missing", result.error)
 
@@ -1987,7 +1997,7 @@ class FoldBacktestSnapshotAccountingTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             manifest = self._Manifest()
             _, tool, _ = _fold_backtest_tool(Path(tmp), 5, manifest=manifest)
-            approved = tool.modification_check
+            approved = tool.modification_check_factory(tool.backtest.output_dir)
 
             class DriftingCheck:
                 """A write lands between the approval and the snapshot."""
@@ -2005,17 +2015,17 @@ class FoldBacktestSnapshotAccountingTest(unittest.TestCase):
                     return result
 
             drifting = DriftingCheck()
-            tool.modification_check = drifting
+            tool.modification_check_factory = lambda _directory: drifting
             registry = ToolRegistry([tool])
-            result = registry.invoke("daily_backtest", {})
+            result = registry.invoke("batch_validate", WORKING_COPY)
             self.assertFalse(result.ok)
             self.assertEqual(result.value["error_type"], "infrastructure_error")
             self.assertIn("could not start", result.error)
             self.assertIn("changed", result.error)
             # Nothing was evaluated: no slot, no Step, no dead-end node.
-            self.assertEqual(tool.backtests, 0)
-            self.assertEqual(tool.steps, [])
-            self.assertEqual(tool.tree.nodes(), [])
+            self.assertEqual(tool.backtest.backtests, 0)
+            self.assertEqual(tool.backtest.steps, [])
+            self.assertEqual(tool.backtest.tree.nodes(), [])
             # The manifest still records the attempt, as what it was.
             self.assertEqual(
                 [(item["status"], "result_name" in item) for item in manifest.summaries],
@@ -2023,9 +2033,9 @@ class FoldBacktestSnapshotAccountingTest(unittest.TestCase):
             )
             # The slot survives for the retry, which numbers itself 001.
             drifting.drift = False
-            retried = registry.invoke("daily_backtest", {})
+            retried = registry.invoke("batch_validate", WORKING_COPY)
             self.assertTrue(retried.ok, retried.error)
-            self.assertEqual(tool.backtests, 1)
+            self.assertEqual(tool.backtest.backtests, 1)
             self.assertEqual(retried.value["backtests_used"], 1)
             self.assertEqual(manifest.summaries[-1]["result_name"], "valid_001")
 
@@ -2052,15 +2062,16 @@ class FoldBacktestSnapshotAccountingTest(unittest.TestCase):
 
             paths, tool, _ = _fold_backtest_tool(root, 5)
             approved = (paths.agent / "output" / "main.py").read_text(encoding="utf-8")
-            tool.evaluator = WritingEvaluator(
-                tool.evaluator, paths.agent / "output" / "main.py"
+            tool.backtest.evaluator = WritingEvaluator(
+                tool.backtest.evaluator, paths.agent / "output" / "main.py"
             )
-            result = ToolRegistry([tool]).invoke("daily_backtest", {})
+            result = ToolRegistry([tool]).invoke("batch_validate", WORKING_COPY)
             self.assertTrue(result.ok, result.error)
             # The replay read the approved bytes...
             self.assertEqual(replayed, [approved])
             # ...the Step node kept them...
-            node = tool.tree.root / result.value["node_id"] / "output" / "main.py"
+            node_id = result.value["candidates"][0]["node_id"]
+            node = tool.backtest.tree.root / node_id / "output" / "main.py"
             self.assertEqual(node.read_text(encoding="utf-8"), approved)
             # ...and the working copy really did move on underneath it.
             self.assertEqual(
@@ -2085,7 +2096,7 @@ class FoldBacktestSnapshotAccountingTest(unittest.TestCase):
             # The registry re-raises a session interrupt instead of turning it
             # into an observation the Agent would answer with another attempt.
             with self.assertRaises(SessionInterrupt):
-                ToolRegistry([tool]).invoke("daily_backtest", {})
-            self.assertEqual(tool.steps, [])
-            self.assertEqual(tool.tree.nodes(), [])
+                ToolRegistry([tool]).invoke("batch_validate", WORKING_COPY)
+            self.assertEqual(tool.backtest.steps, [])
+            self.assertEqual(tool.backtest.tree.nodes(), [])
             self.assertEqual(manifest.summaries, [])

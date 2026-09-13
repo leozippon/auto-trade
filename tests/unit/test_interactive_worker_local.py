@@ -93,7 +93,7 @@ def _experiment(
                 "initial_cash": 100_000,
                 "epochs": 1,
                 # One Validation is the whole Fold budget by default: these
-                # sessions script a single daily_backtest, and finish_fold
+                # sessions script a single one-candidate batch_validate, and finish_fold
                 # waives its batch-round floor only when no round fits. A test
                 # that exercises the floor or the early-stop gate raises it.
                 "max_backtests_per_fold": max_backtests,
@@ -829,6 +829,51 @@ class _NoShellRunner:
         return CommandResult(126, stderr="shell is disabled in this test")
 
 
+# The working copy as a one-candidate batch_validate round: the scripted
+# sessions write output/ through a child and validate it as it stands.
+VALIDATE_WORKING_COPY = ToolCall(
+    "valid",
+    "batch_validate",
+    {
+        "candidates": [
+            {
+                "name": "working_copy",
+                "hypothesis": "the implemented working copy beats its baseline",
+                "path": "output",
+            }
+        ]
+    },
+)
+
+
+# A scripted finish that names the working-copy row it has just read: node ids
+# carry the session's opaque run ref, which a script cannot know in advance.
+LAST_WORKING_COPY_NODE = "<working copy node>"
+
+
+class _NominatingLLM(ScriptedLLM):
+    def complete(self, messages, **kwargs):
+        response = super().complete(messages, **kwargs)
+        if not any(
+            call.arguments.get("node_id") == LAST_WORKING_COPY_NODE
+            for call in response.tool_calls
+        ):
+            return response
+        rows = re.findall(
+            r'"name":\s*"working_copy".*?"node_id":\s*"([^"]+)"',
+            "\n".join(message.content or "" for message in messages),
+            flags=re.DOTALL,
+        )
+        return ProviderResponse(
+            tool_calls=tuple(
+                ToolCall(call.id, call.name, {**call.arguments, "node_id": rows[-1]})
+                if call.arguments.get("node_id") == LAST_WORKING_COPY_NODE
+                else call
+                for call in response.tool_calls
+            )
+        )
+
+
 def _agent_then(
     *tool_calls: ToolCall,
     roles: tuple[str, ...] = ("Explore",),
@@ -886,7 +931,7 @@ def test_llm_worker_runs_real_meta_fold_validation_and_heldout(
             ),
             *_agent_then(
                 ToolCall("check", "modification_check", {}),
-                ToolCall("valid", "daily_backtest", {}),
+                VALIDATE_WORKING_COPY,
                 ToolCall("finish_fold", "finish_fold", {}),
                 roles=_FOLD_DELEGATION_ROLES,
                 implement={"path": "output/main.py", "content": source},
@@ -1057,13 +1102,13 @@ def test_llm_worker_runs_real_meta_fold_validation_and_heldout(
     assert {
         "shell",
         "modification_check",
-        "daily_backtest",
+        "batch_validate",
         "step_rollback",
     }.isdisjoint(meta_tool_names)
     fold_tool_names = {item["function"]["name"] for item in llm.calls[2]["tools"]}
     # Fold parent holds typed writers; shell is debug-only and must not edit strategy.
     assert {
-        "daily_backtest",
+        "batch_validate",
         "edit_file",
         "agent",
         "finish_fold",
@@ -1270,7 +1315,7 @@ def test_llm_worker_starts_from_inherited_memory(tmp_path: Path, monkeypatch):
             *_agent_then(ToolCall("finish_meta", "finish_meta", {})),
             *_agent_then(
                 ToolCall("check", "modification_check", {}),
-                ToolCall("valid", "daily_backtest", {}),
+                VALIDATE_WORKING_COPY,
                 ToolCall("finish_fold", "finish_fold", {}),
                 roles=_FOLD_DELEGATION_ROLES,
                 implement={
@@ -1366,7 +1411,7 @@ def _inherited_artifact_llm() -> ScriptedLLM:
             ),
             *_agent_then(
                 ToolCall("check", "modification_check", {}),
-                ToolCall("valid", "daily_backtest", {}),
+                VALIDATE_WORKING_COPY,
                 ToolCall("finish_fold", "finish_fold", {}),
                 roles=_FOLD_DELEGATION_ROLES,
                 implement={
@@ -1570,7 +1615,7 @@ def test_a_voluntary_early_finish_must_justify_itself_and_reaches_the_ledger(
     monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
     _seed_parent(experiment)
     options = load_worker_options(experiment, repo_root=repo)
-    llm = ScriptedLLM(
+    llm = _NominatingLLM(
         [
             *_agent_then(
                 ToolCall(
@@ -1592,17 +1637,21 @@ def test_a_voluntary_early_finish_must_justify_itself_and_reaches_the_ledger(
             ProviderResponse(
                 tool_calls=(
                     ToolCall("check", "modification_check", {}),
-                    ToolCall("valid", "daily_backtest", {}),
+                    VALIDATE_WORKING_COPY,
                 )
             ),
             # 5 of 9 backtests spent and another round still fits: refused.
-            ProviderResponse(tool_calls=(ToolCall("early", "finish_fold", {}),)),
+            ProviderResponse(
+                tool_calls=(
+                    ToolCall("early", "finish_fold", {"node_id": LAST_WORKING_COPY_NODE}),
+                )
+            ),
             ProviderResponse(
                 tool_calls=(
                     ToolCall(
                         "finish",
                         "finish_fold",
-                        {"reason": _EARLY_STOP_REASON},
+                        {"node_id": LAST_WORKING_COPY_NODE, "reason": _EARLY_STOP_REASON},
                     ),
                 )
             ),
@@ -1676,7 +1725,7 @@ def test_second_llm_fold_prompt_excludes_prior_test_diagnostic(
     def _fold_script(source: str) -> tuple[ProviderResponse, ...]:
         return _agent_then(
             ToolCall("check", "modification_check", {}),
-            ToolCall("valid", "daily_backtest", {}),
+            VALIDATE_WORKING_COPY,
             ToolCall("finish_fold", "finish_fold", {}),
             roles=_FOLD_DELEGATION_ROLES,
             implement={"path": "output/main.py", "content": source},
@@ -1776,7 +1825,7 @@ def test_the_meta_after_an_anchor_fold_opens_the_anchor_as_its_parent(
     def _fold_script(source: str) -> tuple[ProviderResponse, ...]:
         return _agent_then(
             ToolCall("check", "modification_check", {}),
-            ToolCall("valid", "daily_backtest", {}),
+            VALIDATE_WORKING_COPY,
             ToolCall("finish_fold", "finish_fold", {}),
             roles=_FOLD_DELEGATION_ROLES,
             implement={"path": "output/main.py", "content": source},
@@ -1874,7 +1923,7 @@ def test_a_control_repaired_under_a_new_id_stays_an_anchor(tmp_path: Path, monke
     def _fold_script(source: str, **finish: object) -> tuple[ProviderResponse, ...]:
         return _agent_then(
             ToolCall("check", "modification_check", {}),
-            ToolCall("valid", "daily_backtest", {}),
+            VALIDATE_WORKING_COPY,
             ToolCall("finish_fold", "finish_fold", dict(finish)),
             roles=_FOLD_DELEGATION_ROLES,
             implement={"path": "output/main.py", "content": source},
@@ -1935,7 +1984,7 @@ def test_the_nominated_revision_freezes_whatever_the_working_copy_holds(
             ),
             *_agent_then(
                 ToolCall("check", "modification_check", {}),
-                ToolCall("valid", "daily_backtest", {}),
+                VALIDATE_WORKING_COPY,
                 ToolCall("drift", "write_file", {"path": "output/main.py", "content": drift}),
                 ToolCall("finish_fold", "finish_fold", {}),
                 roles=_FOLD_DELEGATION_ROLES,
@@ -1992,7 +2041,7 @@ def test_a_fold_that_terminates_the_arm_ends_the_experiment(tmp_path: Path, monk
             ),
             *_agent_then(
                 ToolCall("check", "modification_check", {}),
-                ToolCall("valid", "daily_backtest", {}),
+                VALIDATE_WORKING_COPY,
                 ToolCall(
                     "finish_fold",
                     "finish_fold",
@@ -2575,7 +2624,7 @@ def test_console_gpu_allocation_reaches_the_run_manifests_sandbox_spec(
             ),
             *_agent_then(
                 ToolCall("check", "modification_check", {}),
-                ToolCall("valid", "daily_backtest", {}),
+                VALIDATE_WORKING_COPY,
                 ToolCall("finish_fold", "finish_fold", {}),
                 roles=_FOLD_DELEGATION_ROLES,
                 implement={"path": "output/main.py", "content": source},

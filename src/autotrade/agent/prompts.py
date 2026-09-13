@@ -79,7 +79,7 @@ FOLD_WORKFLOW_SECTION = """\
 # 工具与工作方式
 - 工具用原生 function calling 调用，参数、限制与返回形状以各自的描述和 schema 为准；未注册的工具不存在。纯文本回复不结束会话，只有 `finish_fold` 结束。同一轮的多个调用并发执行，含写入、shell、回测、回滚或结束的批次按顺序执行；有因果关系的步骤分轮调用。
 - `read_file`/`grep`/`glob` 在授权根内有界读取与搜索；`write_file`/`edit_file` 写工作区文本——正式代码写 `output/`，跨 Fold 继承的静态资产写 `models/`，草稿与笔记写工作区根；`shell` 是一次有界前台命令，用于 debug 与数据验收，不得用它修改策略产物、启动后台任务、sleep/等待包装或轮询状态。
-- `modification_check` 是每次回放前都会自动运行的静态产物检查，单独调用不花回放；`smoke_backtest` 在真实回放路径上短回放，确认 ABI、订单合同和单日耗时，不产生节点；`daily_backtest`/`batch_validate` 是完整 Validation，只有它们产生可选择的节点，正式回测不能由自建回放替代，`batch_validate` 一次调用就是一轮且不做任何选择；`run_null_control` 对本 run 一个完整节点跑随机组合零假设（暂停时钟，次数见 `budgets`）；`step_rollback` 恢复到本 run 一个完整节点并从它分支；`write_skill`/`delete_skill` 维护共享 skills；`finish_fold` 见提交合同。
+- `modification_check` 是每次回放前都会自动运行的静态产物检查，单独调用不花回放；`smoke_backtest` 在真实回放路径上短回放，确认 ABI、订单合同和单日耗时，不产生节点；`batch_validate` 是唯一的完整 Validation，只有它产生可选择的节点，一次调用（1–6 个候选，`output` 本身也可以作候选路径）就是一轮且不做任何选择，正式回测不能由自建回放替代；`run_null_control` 对本 run 一个完整节点跑随机组合零假设（暂停时钟，次数见 `budgets`）；`step_rollback` 恢复到本 run 一个完整节点并从它分支；`write_skill`/`delete_skill` 维护共享 skills；`finish_fold` 见提交合同。
 - `agent` 启动一层后台子代理，完成后结果以 `subagent_completed` 消息送回，不要用工具轮询：等待期间做互不冲突的工作，没有时以文本回复结束本轮。你自己的上下文和串行轮次最稀缺：把工作拆成能独立完成的块（数据与单位核查、特征与统计、实现、审计）在同一轮并行启动，它们运行时你继续设计与启动下一块；几个并行的有界子代理仍好过一个很长的串行子代理，任务很简单时也可以自己做。task 写进路径、约束与期望返回格式，构建或评估某个候选时再写进它的假设与证伪条件——子代理只看到 task；`thinking` 与 `max_turns` 由你按次决定，只在确实需要其已有上下文时 `resume`，改范围或提前收尾用 `action=message`。并行子代理范围互斥：一轮预登记的候选就在同一轮各起一个可写子代理，各自只写自己的 `candidates/<name>/`，由你整合与验收——子代理的汇报描述意图而非结果，验收其写入后再依赖。只读审计不在 Validation 的关键路径上：冒烟过关的一轮候选立即提交 `batch_validate`（正式回测只等仍在写入的子代理），结论不影响本轮决策的审计给有界的 `max_turns` 并降低 `thinking`。
 - 上下文达到阈值时较早消息会被压缩成摘要，子代理同样如此。计划记在工作区根的 `TODO.md`（用 `write_file`/`edit_file` 维护）：每个任务一行，写明负责方、状态和一句话结果，规划完成后建立，每个子代理完成后更新，`finish_fold` 前核对全部条目；上下文被压缩后它是恢复计划的依据。从 `inputs/skills_index.json` 起步按需读取 skill 正文、事实、数据摘要与单位引用；skill 脚本不会自动执行。\
 """
@@ -164,13 +164,13 @@ DEPLOYMENT_SECTION = """\
 # 部署调整：机制冻结的重拟合
 - 本会话不是开发 Fold：实验已完成 Held-out 并毕业，本会话在封存之后对毕业产物做一次部署前的重拟合。回放窗口从部署起点到已固定发布的最后一个交易日，整个 Held-out 都在其中，因此窗口上不再有任何无偏证据；毕业裁决由冻结的机制继承，不在这里重新建立，调整后产物唯一的无偏检验是 Paper。
 - 机制冻结。允许改的只有：`models/`（重新训练的参数）、任意位置的数值/布尔/`None` 字面量（阈值、持有期、top-N、市值截断、用数字表示的重拟合节奏；带符号的数也算一个字面量）、以及模块级 `UPPER_CASE = <字面量>` 声明常量的值（`REFIT_PERIOD`、`HOLD`、`TOP_N`、写成常量的板块或列名列表等，值可以是任意形状的字面量）。其余一律视为机制变更并被拒绝：增删改名任何 `.py` 文件；新增或删除函数、类、分支、循环、调用、比较、import、装饰器或参数；把常量从字面量改成表达式；逻辑内联的字符串字面量（列名、数据集名、板块代码）——毕业代码没有声明为模块常量的过滤条件或特征名在本轮不能调，这是已接受的限制。
-- 执行合同：`modification_check`、`daily_backtest` 与 `batch_validate` 在任何回放之前就按上述规则比对毕业产物，机制变更不会花掉一次回放；`finish_fold` 拒绝机制变更的提名，提名 `parent_control` 节点（毕业产物本身）是正常的「不调整」结果；Pipeline 在冻结时再次比对，不一致记 `mechanism_changed` 并保持毕业产物不变。本会话没有空对照工具。
+- 执行合同：`modification_check` 与 `batch_validate` 在任何回放之前就按上述规则比对毕业产物，机制变更不会花掉一次回放；`finish_fold` 拒绝机制变更的提名，提名 `parent_control` 节点（毕业产物本身）是正常的「不调整」结果；Pipeline 在冻结时再次比对，不一致记 `mechanism_changed` 并保持毕业产物不变。本会话没有空对照工具。
 - 取舍：运行事实 `parent_control` 是毕业产物在同一窗口的整窗与逐季记录。除非重拟合在中性化超额上更好、并且在最新的季度（`sub_windows` 末尾几行）也更好，否则提名 `parent_control`。窗口上的数字是含 Held-out 的样本内选择，`vs_parent`、`selection_statistics` 与逐季行只说明重拟合改变了多少、其中多少是搜索本身，不是检验；候选越多，胜者越可能只是噪声。
 - 机制含 `fit(context)` 与 `models/` 时优先重新训练而不是手调；Paper 每天从空状态重新 `fit`，按周期重拟合的常量在 Paper 里不起作用，本轮真正决定部署行为的是 `models/` 与阈值类常量。\
 """
 
 DEPLOYMENT_DEFAULT_INSTRUCTION = """\
-开始部署调整。先（经子代理）读毕业策略、其 `models/`、运行事实 `parent_control`（整窗与 `sub_windows`）与 PRIOR，返回机制里声明了哪些常量、`fit` 训练什么、父本在最新季度的表现。据此决定是否重训 `models/` 或调整已声明常量；每个候选先 `smoke_backtest`，再 `daily_backtest` 或成轮 `batch_validate`；只有在中性化超额与最新季度都更好时才提名该节点，否则提名 `parent_control`，最后 `finish_fold`。\
+开始部署调整。先（经子代理）读毕业策略、其 `models/`、运行事实 `parent_control`（整窗与 `sub_windows`）与 PRIOR，返回机制里声明了哪些常量、`fit` 训练什么、父本在最新季度的表现。据此决定是否重训 `models/` 或调整已声明常量；每个候选先 `smoke_backtest`，再用 `batch_validate` 验证；只有在中性化超额与最新季度都更好时才提名该节点，否则提名 `parent_control`，最后 `finish_fold`。\
 """
 
 FOLD_STATIC_SECTIONS = (
@@ -208,7 +208,7 @@ FOLD_DYNAMIC_CONTEXT_HEADER = """\
 
 STEP_TREE_SECTION = """\
 # Step 产物树
-搜索根 `steps` 挂载实验级 Step 产物树（`tree.json`、`tree.txt`）：它在 Fold 开始时播种、`finish_fold` 后发布回实验，累积跨 Fold 已验证节点的血缘。本 run 每次完整 Validation 都在当前节点下新增一个带快照与结果的节点；`batch_validate` 的候选并列挂在同一个父节点下，整批结束后当前位置仍停在该父节点。`step_rollback` 与 `finish_fold` 只接受当前 Fold、当前 run 的完整节点；其他 Fold 的节点只是证据。\
+搜索根 `steps` 挂载实验级 Step 产物树（`tree.json`、`tree.txt`）：它在 Fold 开始时播种、`finish_fold` 后发布回实验，累积跨 Fold 已验证节点的血缘。`batch_validate` 每个完成的候选都在当前节点下新增一个带快照与结果的节点，同批候选并列，整批结束后当前位置不变。`step_rollback` 与 `finish_fold` 只接受当前 Fold、当前 run 的完整节点；其他 Fold 的节点只是证据。\
 """
 
 STEP_WRAP_UP_PROMPT = """\
