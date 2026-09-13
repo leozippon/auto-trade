@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 from collections.abc import Mapping
+from itertools import pairwise
 from pathlib import Path
 from typing import NamedTuple
 
@@ -236,6 +237,29 @@ def _chain(parts: list[list[tuple[str, float]]]) -> list[tuple[str, float]]:
     return sorted(by_day.items())
 
 
+def _quarter(day: str) -> tuple[int, int]:
+    return int(day[:4]), (int(day[4:6]) - 1) // 3 + 1
+
+
+def _period_quarters(period: object) -> set[str]:
+    """Calendar quarters a ``YYYYMMDD..YYYYMMDD`` ledger period touches."""
+    start, separator, end = str(period or "").partition("..")
+    if not separator:
+        return set()
+    (year, quarter), last = _quarter(start), _quarter(end)
+    labels: set[str] = set()
+    while (year, quarter) <= last:
+        labels.add(f"{year}Q{quarter}")
+        year, quarter = (year + 1, 1) if quarter == 4 else (year, quarter + 1)
+    return labels
+
+
+def _uncovered(owed: set[str], rows: list[tuple[str, float]]) -> list[str]:
+    """The owed quarters in which the chained line has not a single day."""
+    covered = {"{}Q{}".format(*_quarter(day)) for day, _value in rows}
+    return sorted(owed - covered)
+
+
 def _curve_entry(key: str, rows: list[tuple[str, float]]) -> dict[str, object]:
     dates: list[str] = []
     cumulative: list[float] = []
@@ -263,8 +287,10 @@ class WalkForward(NamedTuple):
     ``references`` are the contributing result artifacts in walk-forward
     order, ``rows`` their daily returns chained with each overlapping day kept
     once, ``curve`` the compounded series the console draws (None when nothing
-    contributed) and ``missing`` the Folds that owed a series but whose result
-    artifact could not be read.
+    contributed) and ``missing`` the calendar quarters the line owed but has
+    no day in. It is read off the chained days, not off which Folds lacked a
+    readable replay: a later Fold's trailing window covers the quarters of an
+    earlier Fold that has none, and those are not missing from the line.
     """
 
     references: list[object]
@@ -295,16 +321,16 @@ def walk_forward_curve(
     when the key is ``test`` — a schedule without a Test stage gives every
     Fold ``test_period: None``, and a series that was never scheduled is not
     a series that went missing. A Fold whose artifact cannot be read is
-    dropped from the chain and named in ``missing``, so the curve and the tile
-    computed from it omit exactly the same Folds instead of quietly
-    disagreeing.
+    dropped from the chain; the quarters of its window that no other Fold's
+    replay covers are named in ``missing``, so the curve and the tile computed
+    from it omit exactly the same days and the omission is stated.
     """
     ordered = registry.walk_forward_folds(list(latest_fold_records(records).values()))
     order = _result_order(records) if key == "test" else []
     local_refs = _local_result_refs(experiment_dir, "test") if key == "test" else []
     references: list[object] = []
     parts: list[list[tuple[str, float]]] = []
-    missing: list[str] = []
+    owed: set[str] = set()
     for record in ordered:
         if str(record.get("epoch_id")) != epoch_id:
             continue
@@ -312,6 +338,9 @@ def walk_forward_curve(
             continue
         if key == "test" and not record.get("test_period"):
             continue
+        owed |= _period_quarters(
+            record.get("test_period" if key == "test" else "validation_period")
+        )
         reference = (
             registry.strategy_in_force(record).reference
             if key == "valid"
@@ -319,13 +348,15 @@ def walk_forward_curve(
         )
         rows = _returns(experiment_dir, reference)
         if not rows:
-            missing.append(str(record.get("fold_id") or ""))
             continue
         references.append(reference)
         parts.append(rows)
     chained = _chain(parts)
     return WalkForward(
-        references, chained, _curve_entry(key, chained) if chained else None, missing
+        references,
+        chained,
+        _curve_entry(key, chained) if chained else None,
+        _uncovered(owed, chained),
     )
 
 
@@ -352,20 +383,24 @@ def parent_control_forward(
     actual returns of every span, including the benchmark move inside them.
 
     A Fold that inherited no parent had nothing to replay and owes nothing. A
-    Fold that did but whose replay yields no days -- a control that failed
-    outright, or a result artifact that cannot be read -- is dropped and named
-    in ``missing``, so the line states which transitions it is not drawing
-    instead of leaving the shortfall to be read out of where it stops.
+    Fold that did owes the quarters its window adds to the previous Fold's;
+    when its replay yields no days -- a control that failed outright, or a
+    result artifact that cannot be read -- it is dropped, and those quarters
+    are named in ``missing``, so the line states which ground it is not
+    drawing instead of leaving the shortfall to be read out of where it stops.
     """
     ordered = registry.walk_forward_folds(list(latest_fold_records(records).values()))
     epoch = [row for row in ordered if str(row.get("epoch_id")) == epoch_id]
     references: list[object] = []
     parts: list[list[tuple[str, float]]] = []
-    missing: list[str] = []
-    for record in epoch[1:]:
+    owed: set[str] = set()
+    for previous, record in pairwise(epoch):
         control = record.get("parent_control")
         if not isinstance(control, Mapping):
             continue
+        owed |= _period_quarters(record.get("validation_period")) - _period_quarters(
+            previous.get("validation_period")
+        )
         reference = control.get("validation_result_ref")
         rows = _returns(experiment_dir, reference)
         # The branch ``ledger.transition_result`` took, read from it rather
@@ -383,13 +418,15 @@ def parent_control_forward(
                 else []
             )
         if not rows:
-            missing.append(str(record.get("fold_id") or ""))
             continue
         references.append(reference)
         parts.append(rows)
     chained = _chain(parts)
     return WalkForward(
-        references, chained, _curve_entry("forward", chained) if chained else None, missing
+        references,
+        chained,
+        _curve_entry("forward", chained) if chained else None,
+        _uncovered(owed, chained),
     )
 
 
@@ -574,19 +611,18 @@ def experiment_equity_payload(root: Path, experiment_id: str, *, epoch_id: str |
         if heldout_rows:
             series.append(_curve_entry("heldout", heldout_rows))
     benchmark = _chain(bench_parts)
-    identity = registry.PublicIdentity(experiment_dir)
     return {
         "experiment_id": experiment_id,
         "epoch_id": selected_epoch,
         "epochs": epochs,
         "series": series,
         "benchmark": _curve_entry("benchmark", benchmark) if benchmark else None,
-        # Folds of this Epoch that owed a series but whose result artifact is
-        # unreadable: the curve and, for the chained keys, the cumulative-return
-        # tile computed from it drop exactly these, so the omission is stated
-        # rather than inferred from a gap.
+        # Calendar quarters (e.g. "2025Q2") a chained line owed but has no day
+        # in: the curve and, for the chained keys, the cumulative-return tile
+        # computed from it lack exactly these, so the omission is stated rather
+        # than inferred from the axis.
         "missing": {
-            key: [identity.fold_ref(fold_id) for fold_id in chain.missing]
+            key: chain.missing
             for key, chain in {**chains, "forward": forward}.items()
             if chain.missing
         },

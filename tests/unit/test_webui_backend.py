@@ -1188,10 +1188,9 @@ def test_the_forward_line_chains_the_parent_controls_on_their_scored_spans(
     valid = next(row for row in payload["series"] if row["key"] == "valid")
     assert valid["dates"][-1] == "20231229"
     assert valid["final"] != forward["final"]
-    # The Fold whose control failed is named, so the line's early stop is
-    # stated rather than left to be read off the axis.
-    identity = registry.PublicIdentity(directory)
-    assert payload["missing"] == {"forward": [identity.fold_ref("fold_2023Q4")]}
+    # The quarter the failed control owed is named, so the line's early stop
+    # is stated rather than left to be read off the axis.
+    assert payload["missing"] == {"forward": ["2023Q4"]}
     # Full-cycle statistics are served for it like every other chained series.
     assert payload["stats"]["forward"]["n_days"] == 4
 
@@ -1626,11 +1625,11 @@ def test_a_fold_whose_in_force_replay_is_unreadable_still_names_its_source(
 def test_a_fold_without_a_readable_result_is_named_not_silently_dropped(
     tmp_path: Path,
 ):
-    """A Fold that owed a series but has no readable artifact is stated.
+    """A quarter no readable artifact covers is stated.
 
     The tile and the curve drop it together — they are the same series — and
-    the payload names it, so a gap in the record reads as missing evidence
-    instead of as a quarter the strategy sat out.
+    the payload names the quarter, so a gap in the record reads as missing
+    evidence instead of as a quarter the strategy sat out.
     """
     from autotrade.webui import equity, registry
 
@@ -1668,10 +1667,67 @@ def test_a_fold_without_a_readable_result_is_named_not_silently_dropped(
     payload = equity.experiment_equity_payload(tmp_path / "experiments", "walk")
     curve = next(series for series in payload["series"] if series["key"] == "valid")
     assert curve["final"] == 0.5
-    assert payload["missing"] == {
-        "valid": [PublicIdentity(directory).fold_ref("fold_2022Q4")]
-    }
+    assert payload["missing"] == {"valid": ["2022Q4"]}
     assert registry.summarize_experiment(directory)["metrics"]["cum_valid_return"] == 0.5
+
+
+def test_missing_quarters_are_read_off_the_chained_days_not_off_failed_folds(
+    tmp_path: Path,
+):
+    """Only quarters a line truly has no day in are reported missing.
+
+    Trailing windows overlap, so when a Fold has no replay a later Fold's
+    window still fills its quarters on the Validation line: naming that Fold
+    told the operator 2023Q2 was absent from a curve visibly drawn over it.
+    The forward line takes only each Fold's new quarter, so the same failed
+    control leaves 2023Q2 truly uncovered there, and that is reported.
+    """
+    from autotrade.webui import equity
+
+    directory = tmp_path / "experiments/walk"
+    first = _result_artifact(
+        directory,
+        "valid_first",
+        [("20220701", 110.0), ("20221003", 121.0), ("20230103", 133.1)],
+    )
+    third = _result_artifact(
+        directory,
+        "control_third",
+        [("20221003", 100.0), ("20230103", 101.0), ("20230403", 102.0), ("20230703", 103.0)],
+    )
+    _walk_forward_experiment(
+        tmp_path,
+        [
+            {
+                "fold_id": "fold_2023Q1",
+                "validation_period": "20220701..20230331",
+                "fold_status": "frozen",
+                "selected_step_id": "step_1",
+                "steps": [{"step_id": "step_1", "validation_result_ref": first}],
+            },
+            {
+                "fold_id": "fold_2023Q2",
+                "validation_period": "20221001..20230630",
+                "fold_status": "no_update",
+                "parent_control": {"status": "failed", "error": "TimeoutError: deadline"},
+            },
+            {
+                "fold_id": "fold_2023Q3",
+                "validation_period": "20230101..20230930",
+                "fold_status": "no_update",
+                "parent_control": {
+                    "status": "ok",
+                    "validation_result_ref": third,
+                    "step_result": {"start": "20230701", "end": "20230930"},
+                },
+            },
+        ],
+    )
+
+    payload = equity.experiment_equity_payload(tmp_path / "experiments", "walk")
+    valid = next(row for row in payload["series"] if row["key"] == "valid")
+    assert "20230403" in valid["dates"]
+    assert payload["missing"] == {"forward": ["2023Q2"]}
 
 
 def test_experiment_progress_comes_from_schedule_and_durable_ledger(tmp_path: Path):

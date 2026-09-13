@@ -751,19 +751,17 @@ function cycleStatsTable(payload) {
   return el("table", { class: "data cycle-stats" }, head, ...rows);
 }
 
-/* Folds a chained line owed a series but could not read (walk_forward_curve
-   and parent_control_forward report them in `missing`), named by period. The
-   line and the cumulative tile above it drop exactly these together. */
-function missingFoldsNote(payload, detail) {
+/* Calendar quarters a chained line owed but has no day in (walk_forward_curve
+   and parent_control_forward report them in `missing`); the line and the
+   cumulative tile above it lack exactly these. A muted caption under the
+   chart, and nothing at all when no quarter is missing. */
+function missingQuartersNote(payload) {
   const groups = Object.entries(payload.missing || {});
   if (!groups.length) return null;
   const text = groups
-    .map(
-      ([key, refs]) =>
-        `${CYCLE_SERIES_SHORT[key] || key} ${refs.map((ref) => foldPeriodLabel(detail, ref)).join("、")}`,
-    )
+    .map(([key, quarters]) => `${CYCLE_SERIES_SHORT[key] || key} ${quarters.join("、")}`)
     .join("；");
-  return el("div", { class: "meta-line" }, `曲线略过无回放结果的 Fold：${text}`);
+  return el("div", { class: "hint" }, `无回放覆盖的季度：${text}`);
 }
 
 /* How the chained lines are built, folded behind a small 口径 disclosure on
@@ -829,9 +827,9 @@ function equityHost(expId, fp, opts) {
         }
         host.append(equityChart(payload, opts));
         if (!opts?.mini) {
-          // Only the experiment page names dropped Folds and the curve's
+          // Only the experiment page names missing quarters and the curve's
           // method; the homepage card shows the chart and its numbers alone.
-          const dropped = opts?.detail && missingFoldsNote(payload, opts.detail);
+          const dropped = opts?.detail && missingQuartersNote(payload);
           if (dropped) host.append(dropped);
           const statsTable = cycleStatsTable(payload);
           if (statsTable) host.append(statsTable);
