@@ -4,7 +4,7 @@ ADMCubeQuant is a research system in which an LLM agent designs and tests A-shar
 
 The agent works inside a networkless Docker sandbox. Everything it can read is a point-in-time snapshot built from a local TuShare data lake: every row carries the timestamp at which it actually became available, so a strategy can never see a number that did not exist yet at the moment it claims to decide. The agent writes a strategy package exposing `generate_orders(context)` (and optionally `fit(context)`), backtests it against a simulated A-share broker (price limits, suspensions, lot sizes, stamp duty), and iterates.
 
-Research runs as one experiment over a fixed development window, 2022 to 2025 by default. A Fold is one development session, an Epoch is a sweep of folds, and a Meta session reviews the completed folds and rewrites the standing research direction the next ones start from. The console defaults to one Fold per calendar year and three sweeps of the window; the round running now instead uses quarterly Folds, each validated on the four quarters ending at it, in a single Epoch. The optional Test stage instead cuts the window into rolling folds, each validated on the period before the one it is scored on. Every fold either freezes a new strategy or keeps the previous one, and the strategy frozen at the end is replayed once over a held-out period it never saw. Graduating the experiment takes both halves of the verdict: that held-out replay must beat the benchmark with a positive Sharpe and a drawdown inside the limit, and at least two thirds of the final epoch's out-of-sample transitions must have earned a positive excess return. A local web console drives all of this, with optional human gating between sessions.
+An experiment is one research arm on fixed dates. The agent works through a few research sessions, four by default, all on the same research period of whole July-to-June years (2021-07 to 2025-06 by default); sessions hand over through a written research direction, shared skills and the tree of validated candidates. Any session may nominate one validated candidate for freezing, and the freeze is accepted only if its research-period result clears a deflated-Sharpe gate that charges every revision the arm tried. The frozen strategy is then replayed once, without the agent, as one continuous book over the twelve months after research and the Held-out quarter after those. It graduates only if the forward slice holds up statistically (a positive bootstrap lower bound on its neutralized excess return, a non-negative last six months, positive excess under doubled slippage, enough trading and exposure, drawdown inside the limit) and the Held-out slice shows no catastrophic failure. A graduate is the candidate for paper trading, which the operator starts by hand. A local web console drives all of this.
 
 Live trading is deliberately not implemented. The console has a live-trading page, but it is an empty frontend placeholder: no backend, no broker connection, no order path.
 
@@ -14,7 +14,7 @@ Live trading is deliberately not implemented. The console has a live-trading pag
 | --- | --- |
 | `src/autotrade/agent/` | Agent session runner, prompts, sub-agent and context-compaction machinery |
 | `src/autotrade/environment/` | PIT snapshot building, unit registry, sandbox, trusted tools, broker and replay engine, LLM gateway |
-| `src/autotrade/pipelines/` | Fold/Epoch/Meta/Held-out orchestration, ledger, interactive worker, reporting |
+| `src/autotrade/pipelines/` | Research calendar, research sessions, freeze, forward replay and verdict, ledger, interactive worker |
 | `src/autotrade/data_sources/tushare/` | TuShare download, audit and scheduled-update logic |
 | `src/autotrade/webui/` | Console backend and static frontend |
 | `src/autotrade/paper/` | Paper-trading engine |
@@ -52,9 +52,15 @@ Start the console on the machine that holds the data, the Docker daemon and the 
 python scripts/webui/run_webui.py
 ```
 
-It listens on `127.0.0.1:38888` and refuses any non-loopback bind. Create an experiment from the homepage: choose the development window, the held-out period, the models and the run mode (`auto` runs straight through, `manual` waits for approval before each session, `step` also pauses after each validation backtest). The console then spawns a detached worker process, and the experiment detail page shows live status, agent traces, backtest results and the controls for pausing, injecting a message, re-running a fold or rolling back.
+It listens on `127.0.0.1:38888` and refuses any non-loopback bind. Create an experiment from the homepage: its research, forward and Held-out dates, the models and the budgets. The console then spawns a detached worker process, and the experiment detail page shows live status, agent traces and validation results, the forward verdict once the replay has run, and the controls for pausing, stopping, restarting and injecting a message into the running session.
 
-The same worker can be launched by hand for a headless run, and two smaller entry points exist for narrower work — replaying a single strategy against a daily parquet, and running exactly one Fold or Meta session in isolation to inspect its prompts, traces and artifacts:
+Arms that belong together are created from a checked-in round file, which fixes their shared dates, dataset selection and prebuilt view seed; `--dry-run` validates all of it offline before anything is sent to the console:
+
+```bash
+python scripts/experiments/create_round_20260920.py 38888 --dry-run
+```
+
+The same worker can be launched by hand for a headless run, and two smaller entry points exist for narrower work — replaying a single strategy against a daily parquet, and running exactly one research session in isolation to inspect its prompts, traces and artifacts:
 
 ```bash
 python scripts/experiments/run_interactive_experiment.py --help
@@ -70,6 +76,6 @@ python -m pytest -q tests/unit
 
 ## Documentation
 
-`AGENTS.md` is the tracked contract for anyone — human or agent — working in this repository: development principles, documentation rules, resource checks and the Fold/Meta session rules.
+`AGENTS.md` is the tracked contract for anyone — human or agent — working in this repository: development principles, documentation rules, resource checks and the rules for multi-agent work.
 
-The design documentation lives in `docs/` and the logbooks in `LOGBOOK.md` and `docs/logbook/`. Both are deliberately kept local and are excluded from version control, so a fresh clone will not contain them. Five documents are authoritative, each owning one area: data sources and PIT rules, agent-visible inputs and protocol, the environment and broker, the rolling pipeline, and deployment. The rest are derived: a quick reference for parameter defaults, and a unit table generated from the code.
+The design documentation lives in `docs/` and the logbooks in `LOGBOOK.md` and `docs/logbook/`. Both are deliberately kept local and are excluded from version control, so a fresh clone will not contain them. Five documents are authoritative, each owning one area: data sources and PIT rules, agent-visible inputs and protocol, the environment and broker, the research pipeline, and deployment. The rest are derived: a quick reference for parameter defaults, and a unit table generated from the code.
