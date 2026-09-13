@@ -2668,7 +2668,6 @@ class LLMFoldDeveloper:
                     fold_directive=request.directive,
                 ),
                 config=AgentSessionConfig(
-                    mode="fold",
                     finalize_before_deadline_seconds=(
                         request.finalize_before_deadline_seconds
                     ),

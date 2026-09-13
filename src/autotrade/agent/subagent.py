@@ -1,4 +1,4 @@
-"""One-level Sub Agent for a regular Fold or Meta session (tool name ``agent``).
+"""One-level Sub Agent of a research session (tool name ``agent``).
 
 Parents call ``agent(agent=<role>, task=...)`` like any other registered tool:
 the registry validates the arguments, :class:`AgentTool` hands them to the
@@ -66,7 +66,6 @@ from .prompts import (
     TOOL_WRITE_CHEAT_SHEET,
 )
 
-SUBAGENT_MODES = frozenset({"fold", "meta"})
 SUBAGENT_THINKING_LEVELS = ("off", "low", "medium", "xhigh")
 # Read-compatible aliases from older traces and prompts; on the wire they were
 # never distinct from xhigh.
@@ -156,14 +155,12 @@ _FOLD_WRITE_TOOLS = frozenset(
         "delete_skill",
     }
 )
-# Every role is read-only in a Meta session.
-_META_ROLE_TOOLS = frozenset({"glob", "grep", "read_file"})
 
 
 @dataclass(frozen=True)
 class SubAgentRole:
-    """One row of the role table: a role's identity, Fold tool set, missions
-    and launch defaults, the way a Pi agent-definition file carries them.
+    """One row of the role table: a role's identity, tool set, mission and
+    launch defaults, the way a Pi agent-definition file carries them.
 
     ``thinking`` and ``max_turns`` are the role tier of the launch precedence
     (call argument > role default > global default); ``None`` defers to the
@@ -172,9 +169,8 @@ class SubAgentRole:
 
     name: str
     description: str
-    fold_tools: frozenset[str]
-    fold_mission: str
-    meta_mission: str
+    tools: frozenset[str]
+    mission: str
     thinking: str | None = None
     max_turns: int | None = None
 
@@ -186,7 +182,7 @@ class SubAgentRole:
 
     @property
     def shell(self) -> bool:
-        return "shell" in self.fold_tools
+        return "shell" in self.tools
 
     @property
     def default_thinking(self) -> str:
@@ -204,15 +200,13 @@ SUBAGENT_ROLE_TABLE: tuple[SubAgentRole, ...] = (
         "general-purpose",
         "读写执行：跑 Python、实现、计算与写策略、模型和 skills",
         _FOLD_WRITE_TOOLS,
-        fold_mission="完成一个有界的实现、计算或检查任务",
-        meta_mission="只读处理一个有界问题",
+        mission="完成一个有界的实现、计算或检查任务",
     ),
     SubAgentRole(
         "Explore",
         "只读调查：定位与核对文件、数据、单位、代码和证据",
         _FOLD_READ_TOOLS,
-        fold_mission="调查委托问题并核对它的证据边界",
-        meta_mission="只读调查委托问题",
+        mission="调查委托问题并核对它的证据边界",
     ),
 )
 _ROLES_BY_NAME = {role.name: role for role in SUBAGENT_ROLE_TABLE}
@@ -243,7 +237,7 @@ def _role_schema_text() -> str:
             f"{role.name}：{role.description}（{tools}；默认 thinking {role.default_thinking}、"
             f"max_turns {role.default_max_turns(DEFAULT_SUBAGENT_MAX_ROUNDS)}）"
         )
-    return "；".join(lines) + "。Meta 会话中全部角色只读。"
+    return "；".join(lines) + "。"
 
 _FOLD_WRITE_PROMPT = """\
 # 身份
@@ -274,19 +268,6 @@ _FOLD_READ_PROMPT = """\
 
 # 返回
 用简洁中文说明结论、关键证据、限制和建议，然后停止。\
-"""
-
-META_SUBAGENT_SYSTEM_PROMPT = """\
-# 身份
-你是 Meta 的一级只读 sub-agent。只完成父任务并提出有证据的候选；不能写策略、models、skills 或 PRIOR，也不能验收或结束会话。
-
-# 边界
-- 先读 `inputs/skills_index.json`，再从 `inputs/meta_context.json` 及其挂载引用中自主发现任务所需证据；skill 脚本不自动执行。
-- 工具 schema 决定实际能力；同一轮的多个只读调用并发执行。不得再委托子代理、读取 Test/Held-out 原始记录、改变 PIT/隐藏阶段边界、访问外部资料、修改宿主代码或伪造结果。
-- 运行中收到以 `[父代理指令]` 开头的消息时，它是父 Agent 的补充要求，优先于原 task。
-
-# 返回
-用简洁中文说明结论、关键证据、限制和建议；不要复制 raw traces 或写逐 Fold Test 数字。\
 """
 
 # The single place the sub-agent mechanism is explained to the model; the
@@ -473,44 +454,24 @@ class AgentTool:
         return ToolResult(True, value=dict(self._launch(arguments)))
 
 
-def _subagent_mode(mode: str) -> str:
-    if mode in {"meta", "meta_learning"}:
-        return "meta"
-    if mode == "fold":
-        return "fold"
-    raise ValueError("Sub-agent mode must be fold or meta")
+def allowed_subagent_tools(role: str | None = None) -> frozenset[str]:
+    if role is None:
+        return frozenset().union(*(item.tools for item in SUBAGENT_ROLE_TABLE))
+    return subagent_role(role).tools
 
 
-def allowed_subagent_tools(mode: str, role: str | None = None) -> frozenset[str]:
-    resolved = _subagent_mode(mode)
-    spec = subagent_role(role) if role is not None else None
-    if resolved == "meta":
-        return _META_ROLE_TOOLS
-    if spec is None:
-        return frozenset().union(*(item.fold_tools for item in SUBAGENT_ROLE_TABLE))
-    return spec.fold_tools
-
-
-def subagent_system_prompt(mode: str, role: str) -> str:
-    resolved = _subagent_mode(mode)
+def subagent_system_prompt(role: str) -> str:
     spec = subagent_role(role)
-    if resolved == "fold":
-        # The example-based tool-calling cheat sheet has one source
-        # (prompts.py); a read-only role sees the path lines and who runs the
-        # screen script, a writing role the write and shell lines as well.
-        if spec.shell:
-            template = _FOLD_WRITE_PROMPT
-            tool_calls = f"{TOOL_PATH_CHEAT_SHEET}\n{TOOL_WRITE_CHEAT_SHEET}"
-        else:
-            template = _FOLD_READ_PROMPT
-            tool_calls = f"{TOOL_PATH_CHEAT_SHEET}\n{TOOL_READ_ONLY_SCREEN_NOTE}"
-        return template.format(
-            role=role, mission=spec.fold_mission, tool_calls=tool_calls
-        )
-    return (
-        f"# 本任务角色\n你的角色是 `{role}`：{spec.meta_mission}。\n\n"
-        + META_SUBAGENT_SYSTEM_PROMPT
-    )
+    # The example-based tool-calling cheat sheet has one source (prompts.py); a
+    # read-only role sees the path lines and who runs the screen script, a
+    # writing role the write and shell lines as well.
+    if spec.shell:
+        template = _FOLD_WRITE_PROMPT
+        tool_calls = f"{TOOL_PATH_CHEAT_SHEET}\n{TOOL_WRITE_CHEAT_SHEET}"
+    else:
+        template = _FOLD_READ_PROMPT
+        tool_calls = f"{TOOL_PATH_CHEAT_SHEET}\n{TOOL_READ_ONLY_SCREEN_NOTE}"
+    return template.format(role=role, mission=spec.mission, tool_calls=tool_calls)
 
 
 def normalize_subagent_thinking(value: object, role: str | None = None) -> str:
@@ -663,13 +624,9 @@ class SubAgentEngine(SessionTimeBudgetAware):
         deadline_at: datetime | None = None,
         time_budget: InferenceTimeBudget | None = None,
         event_sink: Callable[[str, dict[str, object]], None] | None = None,
-        mode: str = "fold",
         cancel_event: threading.Event | None = None,
         compactor: ContextCompactor | None = None,
     ) -> None:
-        if mode not in SUBAGENT_MODES:
-            raise ValueError("Sub-agent mode must be fold or meta")
-        self.mode = mode
         self.llm = llm
         self.tools = tools
         self.config = config or SubAgentConfig()
@@ -744,7 +701,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
 
         if not task.strip():
             raise ValueError("Sub-agent task cannot be empty")
-        allowed = allowed_subagent_tools(self.mode, role)
+        allowed = allowed_subagent_tools(role)
         self._validate_tools()
         # Launch precedence (Pi's): call argument > role default > global.
         rounds_limit = resolve_subagent_max_turns(max_rounds, role, self.config.max_rounds)
@@ -764,7 +721,6 @@ class SubAgentEngine(SessionTimeBudgetAware):
             "role": role,
             "parent_call_id": parent_call_id,
             "status": "started",
-            "mode": self.mode,
             "model": getattr(llm, "model", "") or getattr(self.llm, "model", ""),
             # The effective launch values, whichever tier they came from.
             "thinking": thinking,
@@ -791,7 +747,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
                 [_copy_chat_message(message) for message in transcript]
             )
         else:
-            messages = [ChatMessage("system", subagent_system_prompt(self.mode, role))]
+            messages = [ChatMessage("system", subagent_system_prompt(role))]
             if inherit_context and parent_messages:
                 # The parent snapshot is taken mid-batch: its last assistant
                 # turn may carry tool calls (this launch among them) with no
@@ -1177,7 +1133,6 @@ class SubAgentEngine(SessionTimeBudgetAware):
             "model": getattr(llm, "model", "") or getattr(self.llm, "model", ""),
             "usage_totals": usage,
             "summary": summary,
-            "mode": self.mode,
             "role": role,
             "thinking": thinking,
             "thinking_applied": thinking_applied,
@@ -1434,7 +1389,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
     def _validate_tools(self) -> None:
         # The role tables are the single allowlist: nesting, backtest, finish
         # and rollback are absent from every role by construction.
-        allowed = allowed_subagent_tools(self.mode)
+        allowed = allowed_subagent_tools()
         for spec in self.tools.specs():
             if spec.name not in allowed:
                 raise ValueError(f"Sub-agent tool is not allowed: {spec.name}")

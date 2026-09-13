@@ -23,7 +23,6 @@ from autotrade.agent.subagent import (
     SUBAGENT_ROLES,
     SUBAGENT_STEER_MAX_CHARS,
     SUBAGENT_THINKING_LEVELS,
-    META_SUBAGENT_SYSTEM_PROMPT,
     SubAgentConfig,
     allowed_subagent_tools,
     SubAgentEngine,
@@ -81,11 +80,7 @@ def _readonly_tools(roots: SearchRoots) -> list[object]:
 
 
 def _fold_config(**kwargs: object) -> AgentSessionConfig:
-    return AgentSessionConfig(mode="fold", **kwargs)  # type: ignore[arg-type]
-
-
-def _meta_config(**kwargs: object) -> AgentSessionConfig:
-    return AgentSessionConfig(mode="meta", **kwargs)  # type: ignore[arg-type]
+    return AgentSessionConfig(**kwargs)  # type: ignore[arg-type]
 
 
 def _function_name(record: object) -> str:
@@ -548,22 +543,6 @@ def test_subagent_and_main_share_one_session_call_budget() -> None:
     assert len(scripted.calls) == 1
 
 
-def test_meta_runner_rejects_fold_mode_subagent() -> None:
-    subagent = SubAgentEngine(
-        llm=ScriptedLLM([]),
-        tools=ToolRegistry([DeclaredReadOnlyShell()]),
-        mode="fold",
-    )
-    with pytest.raises(ValueError, match="mode='meta'"):
-        AgentSessionRunner(
-            llm=ScriptedLLM([]),
-            tools=ToolRegistry(),
-            system_prompt="meta",
-            config=_meta_config(),
-            subagent=subagent,
-        )
-
-
 def test_runner_attaches_subagent_events_to_its_sink() -> None:
     events: list[str] = []
     subagent = SubAgentEngine(
@@ -819,86 +798,15 @@ def test_sessions_without_subagent_still_finish() -> None:
     assert finish.invoked == 1
 
 
-def test_meta_subagent_is_readonly_and_cannot_nest(tmp_path: Path) -> None:
-    workspace = tmp_path / "agent"
-    workspace.mkdir()
-    (workspace / "PRIOR.md").write_text("keep\n", encoding="utf-8")
-    safe = SafeWorkspace(workspace)
-    tools = _readonly_tools(SearchRoots(safe))
-    assert [tool.spec.name for tool in tools] == ["read_file", "grep", "glob"]
-    engine = SubAgentEngine(
-        llm=ScriptedLLM(
-            [
-                ProviderResponse(
-                    tool_calls=(
-                        ToolCall(
-                            "w",
-                            "write_file",
-                            {"path": "PRIOR.md", "content": "tamper"},
-                        ),
-                    )
-                ),
-                ProviderResponse(content="写入被拒绝。"),
-            ]
-        ),
-        tools=ToolRegistry(tools),
-        mode="meta",
-    )
-    result = engine.run("do not write prior", role="Explore")
-    assert result["status"] == "completed"
-    assert (workspace / "PRIOR.md").read_text(encoding="utf-8") == "keep\n"
-    assert "sub-agent" in META_SUBAGENT_SYSTEM_PROMPT
-    assert "pyright" not in META_SUBAGENT_SYSTEM_PROMPT
-    with pytest.raises(ValueError, match="not allowed"):
-        SubAgentEngine(
-            llm=ScriptedLLM([]),
-            tools=ToolRegistry([WriteFileTool(safe)]),
-            mode="meta",
-        )
-    with pytest.raises(ValueError, match="not allowed"):
-        SubAgentEngine(
-            llm=ScriptedLLM([]),
-            tools=ToolRegistry([_NamedTool("agent")]),
-            mode="meta",
-        )
-
-
-def test_meta_runner_allows_finish_without_subagent_attempt() -> None:
-    finish = _FinishStub("finish_meta")
-    subagent = SubAgentEngine(
-        llm=ScriptedLLM([ProviderResponse(content="trace reviewed")]),
-        tools=ToolRegistry([_NamedTool("read_file")]),
-        mode="meta",
-    )
-    runner = AgentSessionRunner(
-        llm=ScriptedLLM(
-            [ProviderResponse(tool_calls=(ToolCall("f1", "finish_meta", {}),))]
-        ),
-        tools=ToolRegistry([finish]),
-        system_prompt="meta",
-        config=_meta_config(),
-        subagent=subagent,
-    )
-    result = runner.run("meta can finish directly")
-    assert result.status == "finished"
-    assert finish.invoked == 1
-    assert runner._subagent_attempts == 0
-    assert runner._subagent_roles == set()
-
-
 def test_fold_and_subagent_prompts_keep_roles() -> None:
     # The pyright how-to assertion lives in test_sandbox_pyright.py.
     fold = build_system_prompt(mode="fold", experiment_facts={})
-    meta = build_system_prompt(mode="meta", experiment_facts={})
-    for role in ("`Explore`", "`general-purpose`", "`general-purpose`", "`Explore`"):
+    for role in ("`Explore`", "`general-purpose`"):
         assert role in fold
-        assert role in meta
     assert "保持自己的上下文精简" in fold
     assert "`write_file`" in fold
     assert "`finish_fold`" in fold
-    assert "`finish_meta`" in meta
     assert "通常优先" not in fold
-    assert "逐个读取" not in meta
     for stale in (
         "data_audit",
         "strategy_audit",
@@ -907,7 +815,6 @@ def test_fold_and_subagent_prompts_keep_roles() -> None:
         "context_audit",
     ):
         assert stale not in fold
-        assert stale not in meta
 
 
 def test_subagent_schema_uses_session_role_enum() -> None:
@@ -947,33 +854,10 @@ def test_subagent_schema_uses_session_role_enum() -> None:
     assert properties["max_turns"]["type"] == "integer"
     assert "maximum" not in properties["max_turns"]
     assert "maxLength" not in properties["task"]
-    meta_runner = AgentSessionRunner(
-        llm=ScriptedLLM([]),
-        tools=ToolRegistry(),
-        system_prompt="meta",
-        config=_meta_config(),
-        subagent=SubAgentEngine(
-            llm=ScriptedLLM([]),
-            tools=ToolRegistry([_NamedTool("read_file")]),
-            mode="meta",
-        ),
-    )
-    meta_schema = next(
-        _function_payload(tool)
-        for tool in meta_runner._provider_tools()
-        if _function_name(tool) == "agent"
-    )
-    meta_parameters = meta_schema["parameters"]
-    assert isinstance(meta_parameters, dict)
-    meta_properties = meta_parameters["properties"]
-    assert isinstance(meta_properties, dict)
-    meta_role = meta_properties["agent"]
-    assert isinstance(meta_role, dict)
-    assert meta_role["enum"] == list(SUBAGENT_ROLES)
 
 
 def test_session_config_has_no_required_subagent_role_gate() -> None:
-    config = AgentSessionConfig(mode="fold")
+    config = AgentSessionConfig()
     assert not hasattr(config, "required_subagent_roles")
     assert "required_subagent_roles" not in AgentSessionConfig.__dataclass_fields__
 
@@ -997,11 +881,11 @@ def test_role_tool_visibility_hides_writes_from_audits(tmp_path: Path) -> None:
     engine = SubAgentEngine(llm=ScriptedLLM([]), tools=ToolRegistry(tools))
     impl = {
         _function_name(record)
-        for record in engine._provider_tools(allowed_subagent_tools("fold", "general-purpose"))
+        for record in engine._provider_tools(allowed_subagent_tools("general-purpose"))
     }
     audit = {
         _function_name(record)
-        for record in engine._provider_tools(allowed_subagent_tools("fold", "Explore"))
+        for record in engine._provider_tools(allowed_subagent_tools("Explore"))
     }
     # The parent's Fold surface minus what it keeps by design (both formal
     # validation tools, finish, rollback, agent): the unofficial
@@ -1035,53 +919,18 @@ def test_role_tool_visibility_hides_writes_from_audits(tmp_path: Path) -> None:
     fold_general = {
         _function_name(record)
         for record in engine._provider_tools(
-            allowed_subagent_tools("fold", "general-purpose")
+            allowed_subagent_tools("general-purpose")
         )
     }
     assert {"write_file", "edit_file"} <= fold_general
     assert fold_general == impl
-    meta_engine = SubAgentEngine(
-        llm=ScriptedLLM([]),
-        tools=ToolRegistry(_readonly_tools(SearchRoots(safe))),
-        mode="meta",
-    )
-    meta_names = {
-        _function_name(record)
-        for record in meta_engine._provider_tools(
-            allowed_subagent_tools("meta", "Explore")
-        )
-    }
-    meta_general = {
-        _function_name(record)
-        for record in meta_engine._provider_tools(
-            allowed_subagent_tools("meta", "general-purpose")
-        )
-    }
     fold_explore_role = {
         _function_name(record)
-        for record in engine._provider_tools(allowed_subagent_tools("fold", "Explore"))
+        for record in engine._provider_tools(allowed_subagent_tools("Explore"))
     }
     assert fold_explore_role == {"read_file", "grep", "glob"}
     assert "shell" not in fold_explore_role
     assert "write_file" not in fold_explore_role
-    meta_developer = {
-        _function_name(record)
-        for record in meta_engine._provider_tools(
-            allowed_subagent_tools("meta", "general-purpose")
-        )
-    }
-    meta_explore_role = {
-        _function_name(record)
-        for record in meta_engine._provider_tools(
-            allowed_subagent_tools("meta", "Explore")
-        )
-    }
-    assert meta_names == {"read_file", "grep", "glob"}
-    assert meta_general == meta_names
-    assert meta_developer == meta_names
-    assert meta_explore_role == meta_names
-    assert "write_file" not in meta_general
-    assert "edit_file" not in meta_general
 
 
 def test_subagent_calls_still_track_attempts_and_roles() -> None:
@@ -1184,9 +1033,8 @@ def test_single_subagent_role_can_finish() -> None:
     assert runner._subagent_roles == {"Explore"}
 
 
-def test_general_prompts_explain_mode_and_role() -> None:
-    fold = subagent_system_prompt("fold", "general-purpose")
-    meta = subagent_system_prompt("meta", "general-purpose")
+def test_general_prompts_explain_the_role() -> None:
+    fold = subagent_system_prompt("general-purpose")
     assert "一级 `general-purpose`" in fold
     assert "修改共享策略、模型或 skills" in fold
     assert "有界的实现、计算或检查任务" in fold
@@ -1198,10 +1046,7 @@ def test_general_prompts_explain_mode_and_role() -> None:
         "在汇报里写明删了什么",
     ):
         assert clause in fold
-        assert clause not in subagent_system_prompt("fold", "Explore")
-    assert "`general-purpose`" in meta
-    assert "只读" in meta
-    assert "不能写策略、models、skills 或 PRIOR" in meta
+        assert clause not in subagent_system_prompt("Explore")
 
 
 def test_fold_subagent_prompts_carry_the_path_and_argv_contract() -> None:
@@ -1211,8 +1056,8 @@ def test_fold_subagent_prompts_carry_the_path_and_argv_contract() -> None:
     role prompt carries an example-based cheat sheet with one source in
     prompts.py, whatever the task says."""
 
-    writer = subagent_system_prompt("fold", "general-purpose")
-    reader = subagent_system_prompt("fold", "Explore")
+    writer = subagent_system_prompt("general-purpose")
+    reader = subagent_system_prompt("Explore")
     for prompt in (writer, reader):
         assert TOOL_PATH_CHEAT_SHEET in prompt
         assert '{"root": "artifacts", "path": "data_summary.json"}' in prompt
@@ -1235,7 +1080,6 @@ def test_fold_subagent_prompts_carry_the_path_and_argv_contract() -> None:
     # A read-only role has no shell, so it is told who runs the screen instead.
     assert "argv" not in reader
     assert "只能由父 Agent 或可执行子代理经 `shell` 运行" in reader
-    assert "argv" not in META_SUBAGENT_SYSTEM_PROMPT
 
 
 def test_normalize_subagent_thinking_resolves_the_launch_precedence() -> None:
@@ -1972,13 +1816,11 @@ def test_runner_close_cancels_subagent_without_infinite_wait(
     assert shell.calls == []
 
 
-def test_meta_terminal_tool_stops_refusing_once_the_deadline_is_at_hand() -> None:
-    """A Meta session has neither hard finalization nor a wrap-up grace.
-
-    Refusing `finish_meta` for as long as a child runs would therefore hold the
-    session to its deadline and silently keep the previous PRIOR, so the
-    refusal lifts once the remaining time is inside the teardown barrier's own
-    window — there is no longer time to wait for that child anyway.
+def test_terminal_tool_stops_refusing_once_the_deadline_is_at_hand() -> None:
+    """Refusing the finish for as long as a child runs would hold the session
+    to its deadline, so the refusal lifts once the remaining time is inside
+    the teardown barrier's own window — there is no longer time to wait for
+    that child anyway.
     """
 
     release = threading.Event()
@@ -1995,21 +1837,23 @@ def test_meta_terminal_tool_stops_refusing_once_the_deadline_is_at_hand() -> Non
             release.wait(10)
             return ProviderResponse(content="late")
 
-    def meta_runner(duration: float) -> AgentSessionRunner:
+    def session_runner(duration: float) -> AgentSessionRunner:
         return AgentSessionRunner(
             llm=ScriptedLLM([]),
-            tools=ToolRegistry([_FinishStub("finish_meta")]),
-            system_prompt="meta",
-            config=_meta_config(),
+            tools=ToolRegistry([_FinishStub("finish_fold")]),
+            system_prompt="session",
+            config=_fold_config(),
             subagent=SubAgentEngine(
                 llm=BlockingChild(),
                 tools=ToolRegistry([_NamedTool("read_file")]),
-                mode="meta",
             ),
             time_budget=InferenceTimeBudget(duration_seconds=duration),
         )
 
-    runners = [meta_runner(600.0), meta_runner(SUBAGENT_TEARDOWN_WAIT_SECONDS / 2)]
+    runners = [
+        session_runner(600.0),
+        session_runner(SUBAGENT_TEARDOWN_WAIT_SECONDS / 2),
+    ]
     try:
         for runner in runners:
             assert runner.tools.invoke(
@@ -2021,7 +1865,7 @@ def test_meta_terminal_tool_stops_refusing_once_the_deadline_is_at_hand() -> Non
         assert refused is not None
         assert refused["error_type"] == "subagents_in_flight"
         assert [child["role"] for child in refused["running_children"]] == ["Explore"]
-        # Inside the teardown window: waiting on would only lose the PRIOR.
+        # Inside the teardown window: waiting on would only lose the finish.
         assert runners[1]._in_flight_subagent_error() is None
     finally:
         release.set()
@@ -2034,8 +1878,8 @@ def test_terminal_tool_is_refused_while_a_launched_child_still_runs(
 ) -> None:
     """finish_fold must not discard the children of its own turn.
 
-    A Meta session launched three sub-agents and called ``finish_meta`` in the
-    same turn; all three were cancelled and the artifact was left unchanged.
+    A session launched three sub-agents and finished in the same turn; all
+    three were cancelled and their reports were lost.
     The barrier waits, then the terminal call is refused with the live picture
     so the session can wait for or steer the children instead.
     """
@@ -2769,7 +2613,7 @@ def test_agent_description_states_role_capabilities_and_thinking_tiers() -> None
     thinking_field = AGENT_TOOL_SPEC.input_schema["properties"]["thinking"]["description"]
     assert "均为 xhigh" in thinking_field and continuations in thinking_field
     assert "显式给 low/medium" in thinking_field
-    for prompt in (FOLD_WORKFLOW_SECTION, build_system_prompt(mode="meta", experiment_facts={})):
+    for prompt in (FOLD_WORKFLOW_SECTION,):
         assert "action=message" in prompt
         assert "xhigh 只给纯文本" not in prompt
         assert "优先 `resume`" not in prompt
@@ -2777,7 +2621,7 @@ def test_agent_description_states_role_capabilities_and_thinking_tiers() -> None
     # SUBAGENT_ROLE_TABLE on the ``agent`` property. A second hand-written copy
     # in the description could only drift from the table.
     agent_field = AGENT_TOOL_SPEC.input_schema["properties"]["agent"]
-    for phrase in ("Sandbox shell", "smoke_backtest", "不能执行", "Meta 会话中全部角色只读"):
+    for phrase in ("Sandbox shell", "smoke_backtest", "不能执行"):
         assert phrase in agent_field["description"]
         assert phrase not in AGENT_TOOL_DESCRIPTION
     for role in SUBAGENT_ROLES:
@@ -3128,9 +2972,6 @@ def test_child_turns_default_to_48_with_grace_wrap_up() -> None:
     assert "自己模型的完整上下文窗口" in AGENT_TOOL_DESCRIPTION
     assert "并行的有界子代理仍好过一个很长的串行子代理" in AGENT_TOOL_DESCRIPTION
     assert "并行的有界子代理仍好过一个很长的串行子代理" in FOLD_WORKFLOW_SECTION
-    assert "并行的有界子代理仍好过一个很长的串行子代理" in build_system_prompt(
-        mode="meta", experiment_facts={}
-    )
 
     busy = ScriptedLLM(
         [
@@ -3248,7 +3089,7 @@ def test_child_compacts_at_the_shared_threshold_with_fresh_counters_per_launch()
     assert not any(is_compaction_message(m) for m in child_llm.calls[0]["messages"])
     # Compaction rewrites the child's history, never its role prompt: the
     # system message stays byte-identical across the boundary.
-    role_prompt = subagent_system_prompt("fold", "Explore")
+    role_prompt = subagent_system_prompt("Explore")
     for call in child_llm.calls:
         head = call["messages"][0]
         assert head.role == "system" and head.content == role_prompt
@@ -3884,14 +3725,13 @@ def test_time_budget_notice_states_remaining_minutes_and_backtests() -> None:
     assert all("finish_fold" not in item["message"] for item in delivered)
     assert all("收尾提示" in item["message"] for item in delivered)
 
-    # Crossing several fractions at once yields one notice, and Meta has no
-    # backtests to report.
+    # Crossing several fractions at once yields one notice.
     clock = _Clock()
     budget = InferenceTimeBudget(duration_seconds=100_000.0, clock=clock)
     llm = _ClockedLLM(
         [
             ProviderResponse(tool_calls=(ToolCall("r1", "read_file", {}),)),
-            ProviderResponse(tool_calls=(ToolCall("f1", "finish_meta", {}),)),
+            ProviderResponse(tool_calls=(ToolCall("f1", "finish_fold", {}),)),
         ],
         clock,
         [80_000.0],
@@ -3899,21 +3739,17 @@ def test_time_budget_notice_states_remaining_minutes_and_backtests() -> None:
     events = []
     runner = AgentSessionRunner(
         llm=llm,
-        tools=ToolRegistry([_NamedTool("read_file"), _FinishStub("finish_meta")]),
-        system_prompt="meta",
-        config=_meta_config(),
+        tools=ToolRegistry([_NamedTool("read_file"), _FinishStub("finish_fold")]),
+        system_prompt="session",
+        config=_fold_config(),
         time_budget=budget,
         event_sink=lambda event, payload: events.append((event, payload)),
     )
     assert runner.run("go").status == "finished"
     notices = [payload for event, payload in events if event == "time_budget_notice"]
-    assert notices == [{"elapsed_fraction": 0.75, "remaining_minutes": 333.3}]
-    message = next(
-        json.loads(str(m.content))["message"]
-        for m in llm.calls[-1]["messages"]
-        if '"time_budget_notice"' in str(m.content or "")
-    )
-    assert "finish_meta" in message
+    assert [
+        (notice["elapsed_fraction"], notice["remaining_minutes"]) for notice in notices
+    ] == [(0.75, 333.3)]
 
 
 def test_role_table_is_the_single_source_for_roles_and_launch_defaults() -> None:
@@ -3927,8 +3763,8 @@ def test_role_table_is_the_single_source_for_roles_and_launch_defaults() -> None
 
     assert tuple(role.name for role in SUBAGENT_ROLE_TABLE) == SUBAGENT_ROLES
     for role in SUBAGENT_ROLE_TABLE:
-        assert allowed_subagent_tools("fold", role.name) == role.fold_tools
-        assert role.shell == ("shell" in role.fold_tools)
+        assert allowed_subagent_tools(role.name) == role.tools
+        assert role.shell == ("shell" in role.tools)
         # No shipped role pins a level or a budget: both defer to the globals.
         assert role.thinking is None and role.max_turns is None
         assert role.default_thinking == DEFAULT_SUBAGENT_THINKING
@@ -3944,12 +3780,12 @@ def test_role_table_is_the_single_source_for_roles_and_launch_defaults() -> None
     with pytest.raises(ValueError, match="valid roles: general-purpose, Explore"):
         subagent_role("auditor")
     with pytest.raises(ValueError, match="thinking"):
-        SubAgentRole("x", "d", frozenset(), fold_mission="m", meta_mission="m", thinking="turbo")
+        SubAgentRole("x", "d", frozenset(), mission="m", thinking="turbo")
     with pytest.raises(ValueError, match="max_turns"):
-        SubAgentRole("x", "d", frozenset(), fold_mission="m", meta_mission="m", max_turns=0)
+        SubAgentRole("x", "d", frozenset(), mission="m", max_turns=0)
 
     # Precedence: call argument > role default > global default.
-    pinned = SubAgentRole("x", "d", frozenset(), fold_mission="m", meta_mission="m", thinking="low", max_turns=12)
+    pinned = SubAgentRole("x", "d", frozenset(), mission="m", thinking="low", max_turns=12)
     assert pinned.default_thinking == "low" and pinned.default_max_turns(48) == 12
     assert resolve_subagent_max_turns(None, "Explore", 48) == 48
     assert resolve_subagent_max_turns(None, "Explore", None) is None
@@ -4130,8 +3966,7 @@ def test_short_child_report_is_delivered_whole_and_no_store_is_explicit() -> Non
 
 def test_prompts_carry_the_todo_convention_and_per_launch_knobs() -> None:
     fold = build_system_prompt(mode="fold", experiment_facts={})
-    meta = build_system_prompt(mode="meta", experiment_facts={})
-    for prompt, finish in ((fold, "finish_fold"), (meta, "finish_meta")):
+    for prompt, finish in ((fold, "finish_fold"),):
         assert "`TODO.md`（用 `write_file`/`edit_file` 维护）" in prompt
         assert "每个任务一行，写明负责方、状态和一句话结果" in prompt
         assert "上下文被压缩后它是恢复计划的依据" in prompt

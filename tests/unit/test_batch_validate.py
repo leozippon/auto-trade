@@ -728,7 +728,6 @@ class BatchValidateContractTest(unittest.TestCase):
     def test_the_tool_is_sequential_phase_gated_and_fold_only(self) -> None:
         from autotrade.agent.runner import (
             _FOLD_TOOLS,
-            _META_TOOLS,
             _PHASE_GATE_TOOLS,
         )
         from autotrade.environment.tools.base import is_sequential_tool
@@ -738,7 +737,6 @@ class BatchValidateContractTest(unittest.TestCase):
         self.assertTrue(is_sequential_tool(BatchValidateTool.spec))
         self.assertIn(name, _PHASE_GATE_TOOLS)
         self.assertIn(name, _FOLD_TOOLS)
-        self.assertNotIn(name, _META_TOOLS)
 
     def test_the_description_states_the_selection_path(self) -> None:
         description = BatchValidateTool.spec.description
@@ -1027,7 +1025,6 @@ class NullControlToolTest(unittest.TestCase):
     def test_the_tool_is_fold_only_sequential_and_behind_the_writer_barrier(self) -> None:
         from autotrade.agent.runner import (
             _FOLD_TOOLS,
-            _META_TOOLS,
             _VALIDATION_TOOLS,
             _WRITER_BARRIER_TOOLS,
         )
@@ -1036,7 +1033,6 @@ class NullControlToolTest(unittest.TestCase):
         name = NullControlTool.spec.name
         self.assertTrue(is_sequential_tool(NullControlTool.spec))
         self.assertIn(name, _FOLD_TOOLS)
-        self.assertNotIn(name, _META_TOOLS)
         self.assertIn(name, _WRITER_BARRIER_TOOLS)
         # It is not a Validation: its result never registers a candidate node.
         self.assertNotIn(name, _VALIDATION_TOOLS)

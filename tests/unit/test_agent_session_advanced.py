@@ -20,7 +20,6 @@ from autotrade.agent.compact import (
 from autotrade.agent.experiment_facts import build_experiment_facts
 from autotrade.agent.prompts import (
     FOLD_STATIC_SECTIONS,
-    META_SYSTEM_PROMPT,
     build_system_prompt,
 )
 from autotrade.environment.artifacts import new_revision_id
@@ -272,33 +271,6 @@ def test_compaction_archives_dropped_messages_and_the_agent_can_read_them_back(
     assert any(
         record["content"] == "later 0" for record in _read_archive(roots, trail[1])
     )
-
-
-def test_compaction_archives_nothing_when_the_session_elides_message_content(
-    tmp_path: Path,
-):
-    """A Meta session traces no message content and archives none either."""
-
-    roots = _spill_roots(tmp_path)
-    compactor = ContextCompactor(
-        ScriptedLLM([ProviderResponse(content="## 目标\nmeta")]),
-        ContextCompactionConfig(
-            token_threshold=1, min_messages=5, keep_recent_messages=2
-        ),
-        result_store=roots,
-        archive_messages=False,
-    )
-    messages = [ChatMessage("system", "system")]
-    messages.extend(ChatMessage("user", f"secret {index}") for index in range(6))
-
-    result = compactor.compact(messages)
-
-    assert result is not None and result.event["status"] == "ok"
-    payload = json.loads(result.messages[1].content or "{}")
-    assert "archives" not in payload
-    assert "not archived in this session" in payload["archive_hint"]
-    assert result.event["archive_skipped"] == "content_elided"
-    assert not list((tmp_path / "workspace" / "logs").rglob("*.txt"))
 
 
 def test_compaction_archive_size_cap_keeps_the_newest_dropped_messages(
@@ -1147,25 +1119,25 @@ def test_sessions_reject_tools_outside_their_positive_contracts():
         def invoke(self, arguments):
             return ToolResult(True)
 
-    for name in ("batch_validate", "external_lookup"):
-        with pytest.raises(ValueError):
+    for name in ("external_lookup", "finish_meta"):
+        with pytest.raises(ValueError, match="unsupported tools"):
             AgentSessionRunner(
                 llm=ScriptedLLM([]),
                 tools=ToolRegistry([StubTool(name)]),
-                system_prompt="offline meta",
-                config=AgentSessionConfig(mode="meta"),
+                system_prompt="session",
+                config=AgentSessionConfig(),
             )
 
     with pytest.raises(ValueError, match="batch_validate requires finish_fold"):
         AgentSessionRunner(
             llm=ScriptedLLM([]),
             tools=ToolRegistry([StubTool("batch_validate")]),
-            system_prompt="formal fold",
-            config=AgentSessionConfig(mode="fold"),
+            system_prompt="session",
+            config=AgentSessionConfig(),
         )
 
 
-def test_prompt_and_facts_encode_daily_json_and_offline_meta_boundaries(
+def test_prompt_and_facts_encode_daily_json_and_hidden_stage_boundaries(
     tmp_path: Path,
 ):
     prompt = build_system_prompt(mode="fold", experiment_facts={"fold": "visible"})
@@ -1184,32 +1156,13 @@ def test_prompt_and_facts_encode_daily_json_and_offline_meta_boundaries(
         "伪造工具结果",
     ):
         assert rule in prohibitions
-    meta_prompt = build_system_prompt(mode="meta", experiment_facts={})
-    assert "离线 Meta 主协调者" in META_SYSTEM_PROMPT
-    assert "# 执行合同与边界" not in meta_prompt
-    # The Meta session is offline and evidence-bounded, reads the parent
-    # without writing it (a strategy change is a PRIOR candidate for the next
-    # Fold), and may declare its own image dependencies.
-    for rule in (
-        "不得读取当前或未来 Test、Held-out 原始记录",
-        "不得运行回测",
-        "`inputs/meta_context.json`",
-        "父产物 `output/` 与 `models/` 只读",
-        "sandbox_environment.json",
-        "日历日期",
-    ):
-        assert rule in META_SYSTEM_PROMPT
-
     facts = build_experiment_facts(
-        manifest={"kind": "meta_learning", "experiment_id": "exp"},
+        manifest={"kind": "fold", "experiment_id": "exp"},
         ref_store=AgentRefStore(tmp_path / "experiment"),
         runtime_env={"sandbox_spec": {"network": "none"}},
     )
     assert facts["visibility_policy"]["test_visible"] is False
     assert facts["visibility_policy"]["heldout_visible"] is False
-    assert facts["meta_learning"]["backtest_allowed"] is False
-    assert facts["meta_learning"]["sample_window_only"] is True
-    assert facts["meta_learning"]["prior_output_path"].endswith("PRIOR.md")
 
 
 def test_fold_prompt_keeps_hard_boundaries_and_leaves_how_tos_mounted():
@@ -1330,7 +1283,7 @@ def test_every_tool_named_in_a_prompt_is_registrable_in_that_session():
     This is the class of defect that left the Fold prompt pointing at
     `nl_query` / `finish` after the authoring stack was deleted: the prompt and
     the registry drifted apart with nothing comparing them."""
-    from autotrade.agent.runner import _FOLD_TOOLS, _META_TOOLS
+    from autotrade.agent.runner import _FOLD_TOOLS
     from autotrade.environment.nl.engine import (
         SUB_AGENT_SYSTEM_PROMPT,
         TEXT_RETRIEVE_TOOL,
@@ -1338,11 +1291,10 @@ def test_every_tool_named_in_a_prompt_is_registrable_in_that_session():
 
     registrable = _all_registrable_tool_names()
     # Every allowlisted name must correspond to a tool that exists.
-    assert (_FOLD_TOOLS | _META_TOOLS) <= registrable
+    assert _FOLD_TOOLS <= registrable
 
     sessions = (
         ("fold", build_system_prompt(mode="fold", experiment_facts={}), _FOLD_TOOLS),
-        ("meta", build_system_prompt(mode="meta", experiment_facts={}), _META_TOOLS),
         ("nl_sub_agent", SUB_AGENT_SYSTEM_PROMPT, {TEXT_RETRIEVE_TOOL}),
     )
     for name, prompt, allowed in sessions:
@@ -1359,14 +1311,14 @@ def test_the_prompt_tool_check_fails_on_a_tool_the_session_cannot_register():
     from autotrade.agent.runner import _FOLD_TOOLS
 
     registrable = _all_registrable_tool_names()
-    # `finish_meta` exists, but only a Meta session may register it.
-    assert "finish_meta" in registrable
+    # `text_retrieve` exists, but only the NL sub-agent may register it.
+    assert "text_retrieve" in registrable
     mutated = (
         build_system_prompt(mode="fold", experiment_facts={})
-        + "\n- 用 `finish_meta` 结束本 Fold。"
+        + "\n- 用 `text_retrieve` 检索证据。"
     )
     referenced = _prompt_tool_tokens(mutated) & registrable
-    assert sorted(referenced - set(_FOLD_TOOLS)) == ["finish_meta"]
+    assert sorted(referenced - set(_FOLD_TOOLS)) == ["text_retrieve"]
 
 
 def _context_runner(llm: ScriptedLLM, **config) -> AgentSessionRunner:

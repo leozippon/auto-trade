@@ -148,7 +148,6 @@ class ContextCompactor(SessionTimeBudgetAware):
         config: ContextCompactionConfig | None = None,
         *,
         result_store: ToolResultStore | None = None,
-        archive_messages: bool = True,
     ) -> None:
         self.llm = llm
         self.config = config or ContextCompactionConfig()
@@ -156,10 +155,6 @@ class ContextCompactor(SessionTimeBudgetAware):
         # can read them back: the search tools' spill store, the one place a
         # payload too large for the conversation already lands.
         self.result_store = result_store
-        # The session's content-elision mode. A Meta session traces no message
-        # content (``include_content=False``), so it archives none either: its
-        # summary is then the only record of what was dropped.
-        self.archive_messages = archive_messages
         self._consecutive_failures = 0
         self.compaction_count = 0
         self.compaction_attempts = 0
@@ -182,7 +177,6 @@ class ContextCompactor(SessionTimeBudgetAware):
             self.llm,
             self.config,
             result_store=self.result_store,
-            archive_messages=self.archive_messages,
         )
 
     def should_compact(
@@ -363,8 +357,6 @@ class ContextCompactor(SessionTimeBudgetAware):
         root and path. Returns the reference, or the reason there is none.
         """
 
-        if not self.archive_messages:
-            return {}, "content_elided"
         if self.result_store is None:
             return {}, "store_unavailable"
         dropped = [

@@ -1,4 +1,4 @@
-"""Agent session runner: the main conversation loop for one Fold or meta-learning run.
+"""Agent session runner: the main conversation loop for one research session.
 
 docs/agent-design.md plus docs/environment-design.md §2.2 define the Agent
 session and tool-entrypoint contract: one Agent session per Fold (one
@@ -26,7 +26,6 @@ from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Protocol
 
 from autotrade.environment.llm import (
@@ -94,7 +93,7 @@ class AgentSessionDeadlineExceeded(SessionInterrupt):
 
     Control flow, not an error: the session has already emitted
     ``session_end{status: deadline_exceeded}``; the Pipeline converts this into
-    a recorded no-candidate Fold/Meta outcome and continues the experiment
+    a recorded no-candidate session outcome and continues the experiment
     instead of failing the run. A SessionInterrupt subclass so it re-raises
     through tool dispatch instead of being swallowed into an error observation.
     """
@@ -111,7 +110,7 @@ class AgentSessionDeadlineExceeded(SessionInterrupt):
         self.llm_calls = llm_calls
 
 
-_TERMINAL_TOOLS = frozenset({"finish_fold", "finish_meta"})
+_TERMINAL_TOOLS = frozenset({"finish_fold"})
 _FOLD_FINALIZATION_TOOLS = frozenset({"finish_fold"})
 # The tool that produces complete Validation nodes: one per finished candidate.
 _VALIDATION_TOOLS = frozenset({"batch_validate"})
@@ -139,20 +138,6 @@ _FOLD_TOOLS = frozenset(
         "step_rollback",
         "write_file",
         "edit_file",
-        "write_skill",
-        "delete_skill",
-        "report_issue",
-    }
-)
-_META_TOOLS = frozenset(
-    {
-        "edit_file",
-        "agent",
-        "finish_meta",
-        "glob",
-        "grep",
-        "read_file",
-        "write_file",
         "write_skill",
         "delete_skill",
         "report_issue",
@@ -248,7 +233,6 @@ def _inbox_trace_text(text: str) -> str:
 
 @dataclass(frozen=True)
 class AgentSessionConfig:
-    mode: str = "fold"
     finalize_before_deadline_seconds: float = 300.0
     # Trailing wrap-up grace reserved from the end of the handed session
     # budget. The main deadline sits grace seconds before the budget end:
@@ -262,8 +246,6 @@ class AgentSessionConfig:
     max_response_tokens: int = AGENT_MAX_OUTPUT_TOKENS
 
     def __post_init__(self) -> None:
-        if self.mode not in ("fold", "meta", "meta_learning"):
-            raise ValueError("Agent session mode must be fold, meta, or meta_learning")
         for name in (
             "max_llm_calls",
             "max_steps",
@@ -314,7 +296,7 @@ class AgentSessionResult:
 
 
 class AgentSessionRunner:
-    """Drive one persistent native-tool Fold or Meta conversation."""
+    """Drive one persistent native-tool research-session conversation."""
 
     def __init__(
         self,
@@ -338,13 +320,6 @@ class AgentSessionRunner:
         self.config = config or AgentSessionConfig()
         self.compactor = compactor
         self.subagent = subagent
-        if self.subagent is not None:
-            subagent_mode = getattr(self.subagent, "mode", "fold")
-            if self.config.mode in {"meta", "meta_learning"}:
-                if subagent_mode != "meta":
-                    raise ValueError("Meta session sub-agent must use mode='meta'")
-            elif subagent_mode != "fold":
-                raise ValueError("Fold session sub-agent must use mode='fold'")
         self._event_lock = threading.Lock()
         self._subagent_lock = threading.Lock()
         # The tool call id of the invocation running on the current thread;
@@ -451,7 +426,6 @@ class AgentSessionRunner:
         self._emit(
             "session_start",
             {
-                "mode": self.config.mode,
                 "system_prompt": self.system_prompt,
                 "instruction": instruction.strip(),
             },
@@ -473,8 +447,7 @@ class AgentSessionRunner:
                     messages = self._hard_finalization_messages(remaining)
             else:
                 if (
-                    self.config.mode == "fold"
-                    and not self._wrap_up_sent
+                    not self._wrap_up_sent
                     and remaining <= self.config.deadline_grace_seconds
                 ):
                     messages.append(ChatMessage("user", WRAP_UP_PROMPT))
@@ -780,11 +753,7 @@ class AgentSessionRunner:
                     steps_used=accepted_steps,
                 )
             messages = self._apply_inbox(messages, safe_point=apply_point)
-            if (
-                self.config.mode == "fold"
-                and accepted_steps >= self.config.max_steps
-                and not step_wrap_up_sent
-            ):
+            if accepted_steps >= self.config.max_steps and not step_wrap_up_sent:
                 messages.append(ChatMessage("user", STEP_WRAP_UP_PROMPT))
                 step_wrap_up_sent = True
 
@@ -823,26 +792,20 @@ class AgentSessionRunner:
             "elapsed_fraction": crossed,
             "remaining_minutes": remaining_minutes,
         }
-        if self.config.mode == "fold":
-            complete = len(self._complete_validation_nodes)
-            payload.update(
-                smoke_backtests=backtests["smoke_backtest"],
-                batch_validates=backtests["batch_validate"],
-                complete_validations=complete,
-            )
-            payload["message"] = (
-                f"推理时间预算已用去 {crossed:.0%}，剩余约 {remaining_minutes:g} 分钟；"
-                f"至今 smoke_backtest {backtests['smoke_backtest']} 次、"
-                f"batch_validate {backtests['batch_validate']} 次、"
-                f"完整 Validation {complete} 个。"
-                "完整 Validation 的耗时随 Validation 区间的交易日数增长，为仍要跑的正式回测预留时间；"
-                "到达主截止时宿主另行注入收尾提示。"
-            )
-        else:
-            payload["message"] = (
-                f"推理时间预算已用去 {crossed:.0%}，剩余约 {remaining_minutes:g} 分钟；"
-                "请在剩余时间内完成 PRIOR 并 finish_meta。"
-            )
+        complete = len(self._complete_validation_nodes)
+        payload.update(
+            smoke_backtests=backtests["smoke_backtest"],
+            batch_validates=backtests["batch_validate"],
+            complete_validations=complete,
+        )
+        payload["message"] = (
+            f"推理时间预算已用去 {crossed:.0%}，剩余约 {remaining_minutes:g} 分钟；"
+            f"至今 smoke_backtest {backtests['smoke_backtest']} 次、"
+            f"batch_validate {backtests['batch_validate']} 次、"
+            f"完整 Validation {complete} 个。"
+            "完整 Validation 的耗时随 Validation 区间的交易日数增长，为仍要跑的正式回测预留时间；"
+            "到达主截止时宿主另行注入收尾提示。"
+        )
         messages.append(ChatMessage("user", json.dumps(payload, ensure_ascii=False)))
         self._emit(
             "time_budget_notice",
@@ -991,7 +954,6 @@ class AgentSessionRunner:
         """
         if (
             self._hard_finalization
-            or self.config.mode != "fold"
             or self._wrap_up_sent
             or not self._complete_validation_nodes
         ):
@@ -1175,18 +1137,16 @@ class AgentSessionRunner:
 
         The barrier before this already waited ``SUBAGENT_TEARDOWN_WAIT_SECONDS``
         for the children to return. Whatever is still running would be cancelled
-        by the session close that a successful finish triggers: a Meta session
-        launched three sub-agents and called ``finish_meta`` in the same turn,
-        and all three were discarded with PRIOR left unchanged.
+        by the session close that a successful finish triggers: a session that
+        launched three sub-agents and finished in the same turn discarded all
+        three reports.
 
         Two exemptions, because a refusal that cannot be satisfied loses more
         than the reports it protects. The session's own tail (hard finalization,
         or the wrap-up grace, which hard finalization never enters) is where
         finishing is the only remaining move. And whatever the phase, a child
         that outlives the teardown barrier's own window is one the session no
-        longer has time to wait for — a Meta session has neither tail and would
-        otherwise refuse every ``finish_meta`` until its deadline and silently
-        keep the previous PRIOR.
+        longer has time to wait for.
         """
 
         if self._subagent_wait_floor() is None:
@@ -1546,12 +1506,9 @@ class AgentSessionRunner:
         parent has to enter hard finalization, pick a node and call
         finish_fold. Nothing else may consume it — neither the parent's own
         wait for a child nor the child's own loop, which the engine bounds with
-        the same figure. Meta sessions have neither window and keep the plain
-        session deadline as their only bound.
+        the same figure.
         """
 
-        if self.config.mode != "fold":
-            return 0.0
         return (
             self.config.finalize_before_deadline_seconds
             + self.config.deadline_grace_seconds
@@ -1641,7 +1598,7 @@ class AgentSessionRunner:
         """Whether the child's role holds a tool that mutates the workspace."""
 
         return bool(
-            allowed_subagent_tools(self.config.mode, job.role)
+            allowed_subagent_tools(job.role)
             & {"write_file", "edit_file", "shell", "write_skill", "delete_skill"}
         )
 
@@ -1938,23 +1895,12 @@ class AgentSessionRunner:
         """Fail closed on any tool outside the session's documented set."""
 
         names = {spec.name for spec in self.tools.specs()}
-        if self.config.mode in {"meta", "meta_learning"}:
-            unsupported = sorted(names - _META_TOOLS)
-            if unsupported:
-                raise ValueError(
-                    f"offline Meta session received unsupported tools: {unsupported}"
-                )
-        else:
-            unsupported = sorted(names - _FOLD_TOOLS)
-            if unsupported:
-                raise ValueError(
-                    f"Agent session received unsupported tools: {unsupported}"
-                )
-            producing = sorted(names & _VALIDATION_TOOLS)
-            if producing and "finish_fold" not in names:
-                raise ValueError(
-                    f"Fold session with {producing[0]} requires finish_fold"
-                )
+        unsupported = sorted(names - _FOLD_TOOLS)
+        if unsupported:
+            raise ValueError(f"Agent session received unsupported tools: {unsupported}")
+        producing = sorted(names & _VALIDATION_TOOLS)
+        if producing and "finish_fold" not in names:
+            raise ValueError(f"a session with {producing[0]} requires finish_fold")
 
     def _locked_event_sink(self, event: str, payload: dict[str, object]) -> None:
         with self._event_lock:
@@ -1969,33 +1915,6 @@ class AgentSessionRunner:
             record["subagent_attempts"] = self._subagent_attempts
             record["subagent_roles"] = sorted(self._subagent_roles)
         self._locked_event_sink(event, record)
-
-
-class MetaLearningAgent:
-    """Validate the fixed, local-only PRIOR.md output contract of a Meta session."""
-
-    def __init__(self, runner: AgentSessionRunner, workspace: str | Path) -> None:
-        if runner.config.mode not in {"meta", "meta_learning"}:
-            raise ValueError("MetaLearningAgent requires a meta session runner")
-        self.runner = runner
-        self.workspace = Path(workspace).resolve()
-
-    def learn(self, instruction: str) -> dict[str, object]:
-        result = self.runner.run(instruction)
-        if result.finish_value.get("status") != "meta_learning_done":
-            raise RuntimeError(
-                f"meta-learning did not finish with done: {result.finish_value.get('status')}"
-            )
-        prior_path = self.workspace / "PRIOR.md"
-        if not prior_path.is_file():
-            raise RuntimeError("Meta Agent did not produce PRIOR.md")
-        prior = prior_path.read_text(encoding="utf-8").strip()
-        if not prior:
-            raise RuntimeError("PRIOR.md cannot be empty")
-        return {
-            "prior": prior,
-            "conversation_id": result.conversation_id,
-        }
 
 
 def _new_token_totals() -> dict[str, int]:

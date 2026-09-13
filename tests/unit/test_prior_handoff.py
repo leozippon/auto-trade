@@ -7,18 +7,9 @@ from pathlib import Path
 
 import pytest
 
-from autotrade.agent.prompts import build_meta_learning_prompt, build_system_prompt
-from autotrade.environment.tools import (
-    FinishMetaTool,
-    SafeWorkspace,
-    ToolRegistry,
-    WriteFileTool,
-)
-from autotrade.environment.tools.prior_policy import (
-    PRIOR_MAX_CHARS,
-    prior_content_violation,
-    prior_policy_violation,
-)
+from autotrade.agent.prompts import build_system_prompt
+from autotrade.environment.tools import SafeWorkspace, WriteFileTool
+from autotrade.environment.tools.prior_policy import PRIOR_MAX_CHARS
 from autotrade.pipelines.ledger import ExperimentLedger
 from autotrade.pipelines.prior import (
     ExperimentPriorStore,
@@ -36,9 +27,6 @@ def test_fold_system_prompt_injects_prior_full_text(tmp_path: Path) -> None:
     assert prior in prompt
     assert "权威 PRIOR 不在本 Fold 可写树中" in prompt
     assert "策略方向" in prompt
-    meta = build_system_prompt(mode="meta")
-    assert prior not in meta
-    assert "工作区根的 `PRIOR.md`" in meta
 
 
 def test_prompts_define_no_edge_pre_registration_and_meta_fold_labels() -> None:
@@ -104,33 +92,6 @@ def test_prompts_define_no_edge_pre_registration_and_meta_fold_labels() -> None:
     # Delegating a candidate carries its hypothesis and falsification rule.
     assert "再写进它的假设与证伪条件" in fold
 
-    meta = build_system_prompt(mode="meta")
-    assert "目标是真实、可部署的边际" in meta
-    assert "子区间一致性" not in meta
-    # The upcoming-vs-reviewed window note lives beside the field it explains
-    # (meta_context.json's visible_fold_note), not in the prompt.
-    assert "两者窗口不同不是数据缺陷" not in meta
-    prior_rules = meta[meta.index("# PRIOR") : meta.index("# 守则")]
-    # Every history entry carries the host statistics: earlier Folds are
-    # verifiable and their figures are carried forward or corrected, never
-    # dropped as outside the review window.
-    assert "`fold_validation_history[]`" in prior_rules
-    assert "只能沿用或按账本更正" in prior_rules
-    for clause in (
-        # What each reviewed Fold froze is read from the ledger, never from the
-        # Fold session's own narrative (a Meta once asserted "nothing frozen"
-        # while the ledger said frozen).
-        "`fold_reviews[]` 的 `fold_status`、`finish_mode`",
-        "`hard_reject_reasons`",
-        "`null_control.excess_percentile`",
-        "`selection_statistics.deflated_sharpe_probability`",
-        "PRIOR 逐 Fold 引用这些数值",
-        "只能写成待检验，不能写成主线",
-        "`no_update` 与 `baseline_missing` 是正当结果",
-    ):
-        assert clause in prior_rules, clause
-    assert "`fold_status` 与 `finish_mode`" in build_meta_learning_prompt()
-
 
 def test_fold_write_tools_cannot_overwrite_authoritative_prior(tmp_path: Path) -> None:
     experiment = tmp_path / "experiment"
@@ -188,9 +149,6 @@ def test_a_session_publishes_keeps_and_rejects_an_overlong_prior(tmp_path: Path)
         "prior_chars": 0,
     }
 
-    overlong = tmp_path / "PRIOR.md"
-    overlong.write_text("x" * (PRIOR_MAX_CHARS + 1), encoding="utf-8")
-    assert "characters" in prior_policy_violation(overlong)
     with pytest.raises(ValueError, match="characters"):
         pipeline._publish_or_keep_prior(
             "x" * (PRIOR_MAX_CHARS + 1),
@@ -201,29 +159,6 @@ def test_a_session_publishes_keeps_and_rejects_an_overlong_prior(tmp_path: Path)
         pipeline._publish_or_keep_prior(
             "collision", previous="updated workflow notes", generation_id="gen_2"
         )
-
-
-def test_finish_meta_requires_a_bounded_nonempty_prior(tmp_path: Path) -> None:
-    registry = ToolRegistry([FinishMetaTool(SafeWorkspace(tmp_path))])
-    missing = registry.invoke("finish_meta", {})
-    assert missing.ok is False
-    assert missing.value["error_type"] == "prior_policy"
-    (tmp_path / "PRIOR.md").write_text("y" * (PRIOR_MAX_CHARS + 8), encoding="utf-8")
-    overlong = registry.invoke("finish_meta", {})
-    assert overlong.ok is False
-    assert overlong.value["error_type"] == "prior_policy"
-    # A content redline names the line and says the check is a line pattern,
-    # not a semantic review; the description lists the redlines up front.
-    (tmp_path / "PRIOR.md").write_text("方向\nheld-out 表现 0.9\n", encoding="utf-8")
-    leaked = registry.invoke("finish_meta", {})
-    assert leaked.ok is False and "line 2 leaks Held-out" in leaked.error
-    assert "line-level patterns" in leaked.value["retry_hint"]
-    for redline in ("held-out/holdout/持有期外/隐藏区间", "YYYYMMDD", "Test/测试", "line-level"):
-        assert redline in FinishMetaTool.spec.description
-    (tmp_path / "PRIOR.md").write_text("keep grep first\n", encoding="utf-8")
-    accepted = registry.invoke("finish_meta", {})
-    assert accepted.ok is True
-    assert accepted.value["status"] == "meta_learning_done"
 
 
 def test_latest_prior_reads_the_last_research_session_record() -> None:
@@ -349,16 +284,3 @@ def test_restore_prior_store_fails_if_generation_is_missing(tmp_path: Path) -> N
     _append_session(ledger, run_id="run_ghost", generation_id="ghost", prior="gone")
     with pytest.raises(FileNotFoundError, match="ghost"):
         restore_current_from_records(experiment, ledger.read())
-
-
-def test_prior_content_allows_boundary_sentences_and_rejects_leaks() -> None:
-    assert prior_content_violation("不得使用 Test/Held-out。\n") == ""
-    assert prior_content_violation("Test 与 Held-out 不可见。\n") == ""
-    assert prior_content_violation("不要用 Test 水平做选择。\n") == ""
-    assert prior_content_violation("审查窗口排除 Held-out。\n") == ""
-    assert "Held-out" in prior_content_violation("Held-out sharpe 1.2\n")
-    assert "Test figure" in prior_content_violation("Fold1 Test 收益 0.31\n")
-    assert "choose a strategy" in prior_content_violation("根据Test选择动量因子\n")
-    assert "choose a strategy" in prior_content_violation(
-        "Test上动量更稳所以保留该方向\n"
-    )

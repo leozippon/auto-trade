@@ -292,33 +292,14 @@ class PhasePromptTest(unittest.TestCase):
             ref_store=self.ref_store,
             data_summary={"unit_contract": unit_contract},
         )
-        meta_facts = build_experiment_facts(
-            ref_store=self.ref_store,
-            manifest={
-                "kind": "meta_learning",
-                "epoch_id": "epoch_001",
-                "meta_learning_id": "epoch_001_after_fold_003",
-                "trigger_after_folds": 3,
-                "fold_exploration_directive": "event graph",
-            },
-            data_summary={"unit_contract": unit_contract},
-        )
 
         # The facts builder no longer produces the always-dropped data-profile
         # / paths sections (the unit contract reaches the Agent via
         # data_summary.json, not via prompt facts).
         self.assertNotIn("data_profile", fold_facts)
         self.assertNotIn("paths", fold_facts)
-        self.assertFalse(fold_facts["visibility_policy"]["historical_frozen_test_metrics_visible"])
-        self.assertTrue(meta_facts["visibility_policy"]["historical_frozen_test_metrics_visible"])
-        self.assertFalse(meta_facts["visibility_policy"]["test_visible"])
-        self.assertFalse(meta_facts["visibility_policy"]["heldout_visible"])
-        self.assertEqual(
-            meta_facts["identity"]["meta_learning_id"],
-            self.ref_store.get_or_create("meta", "epoch_001_after_fold_003"),
-        )
-        self.assertEqual(meta_facts["identity"]["trigger_after_folds"], 3)
-        self.assertTrue(meta_facts["meta_learning"]["fold_exploration_directive_present"])
+        self.assertFalse(fold_facts["visibility_policy"]["test_visible"])
+        self.assertFalse(fold_facts["visibility_policy"]["heldout_visible"])
 
     def test_fold_facts_opaque_parent_artifact_id(self):
         # Frozen artifact ids embed the raw fold label of the fold that produced
@@ -340,50 +321,6 @@ class PhasePromptTest(unittest.TestCase):
         self.assertTrue(str(parent["id"]).startswith("strategy_ref_"))
         self.assertNotIn("fold_2022Q1", rendered)
         self.assertNotIn("fold_2022Q2", rendered)
-
-    def test_meta_experiment_facts_do_not_inline_sample_dates(self):
-        manifest = {
-            "experiment_id": "exp",
-            "run_id": "run_meta",
-            "epoch_id": "epoch_001",
-            "fold_id": "epoch_001_meta_learning",
-            "kind": "meta_learning",
-            "valid_decision_time": "2021-10-08T09:25:00+08:00",
-            "experiment_parameters": {
-                "fold_period": "quarter",
-                "snapshot_config": {"decision_windows": {"daily_months": 21, "intraday_trade_days": 21}},
-            },
-            "development_inputs": {"development_history": "/mnt/agent/workspace/development_history.json"},
-        }
-        data_summary = {
-            "views": {
-                "snapshot": {
-                    "mount_path": "/mnt/snapshot",
-                    "decision_time": "2021-10-08T09:25:00+08:00",
-                    "period_start": "20200101",
-                    "period_end": "20210930",
-                    "files": [
-                        {
-                            "path": "daily.parquet",
-                            "mount_path": "/mnt/snapshot/daily.parquet",
-                            "rows": 10,
-                            "date_ranges": {"trade_date": {"min": "20200101", "max": "20210930"}},
-                        }
-                    ],
-                }
-            }
-        }
-
-        facts = build_experiment_facts(
-            manifest=manifest, ref_store=self.ref_store, data_summary=data_summary
-        )
-        rendered = json.dumps(facts, ensure_ascii=False, sort_keys=True)
-
-        self.assertIn("sample_window_only", rendered)
-        self.assertNotIn("2021-10-08", rendered)
-        self.assertNotIn("20200101", rendered)
-        self.assertNotIn("20210930", rendered)
-
 
     def test_run_manifest_public_view_redacts_test_schedule(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -432,12 +369,8 @@ class PhasePromptTest(unittest.TestCase):
             self.assertEqual([item["mode"] for item in public["backtest_summaries"]], ["valid"])
             # The raw fold label never crosses either, only its opaque ref.
             self.assertNotIn("fold_2022Q1", json.dumps(public, ensure_ascii=False))
-            # experiment_parameters must be projected with the same test/held-out
-            # stripping as snapshots: any test_* or heldout_* key is a schedule leak.
-            self.assertNotIn("periods", public["experiment_parameters"])
-            self.assertNotIn("test_first_period", public["experiment_parameters"])
-            self.assertNotIn("heldout_periods", public["experiment_parameters"])
-            self.assertEqual(public["experiment_parameters"]["fold_period"], "quarter")
+            # The experiment parameters are not an Agent-visible manifest key.
+            self.assertNotIn("experiment_parameters", public)
             self.assertEqual(host["experiment_parameters"]["test_first_period"], "2022Q1")
             self.assertEqual(host["fold"]["test_period"], "20220101..20220331")
             self.assertIn("test_replay", host["snapshots"])
@@ -552,5 +485,5 @@ class PromptCompositionTest(unittest.TestCase):
         self.assertNotIn("偏好小步修改", prompt.split("# 本 Fold 动态上下文", 1)[0])
 
     def test_an_unknown_mode_is_refused(self) -> None:
-        with self.assertRaisesRegex(ValueError, "mode must be fold, deployment_adjustment, meta, or meta_learning"):
+        with self.assertRaisesRegex(ValueError, "mode must be fold or deployment_adjustment"):
             build_system_prompt(mode="authoring")

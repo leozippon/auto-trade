@@ -180,9 +180,9 @@ class Tool(Protocol):
     def invoke(self, arguments: Mapping[str, object]) -> ToolResult: ...
 
 
-# Tools whose calls must run in order even though their spec is not mutating:
-# they finish the session.
-SEQUENTIAL_TOOL_NAMES = frozenset({"finish_fold", "finish_meta"})
+# The tool whose calls must run in order even though its spec is not mutating:
+# it finishes the session.
+SEQUENTIAL_TOOL_NAMES = frozenset({"finish_fold"})
 
 
 def is_sequential_tool(spec: ToolSpec | None) -> bool:

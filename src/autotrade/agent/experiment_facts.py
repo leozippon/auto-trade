@@ -1,8 +1,8 @@
 """Agent-visible experiment facts: the manifest/runtime_env/data_summary projection.
 
-``build_experiment_facts`` is the visibility contract for what a Fold or
-meta-learning session may know about its own run (budgets, snapshot windows,
-broker replay policy, artifact contract, runtime tools). Pure data shaping —
+``build_experiment_facts`` is the visibility contract for what a research
+session may know about its own run (budgets, snapshot windows, broker replay
+policy, artifact contract, runtime tools). Pure data shaping —
 the prompt text that wraps it lives in ``prompts.py``.
 """
 
@@ -16,8 +16,8 @@ from autotrade.environment.sandbox import SCREENING_TOOL_MOUNT, SandboxLimits
 
 EXPERIMENT_FACTS_SCHEMA_VERSION = 1
 
-# Agent-visible clock contract for ``budgets.deadline_seconds``. Fold and Meta
-# both read this from the injected facts; every replay tool pauses the clock,
+# Agent-visible clock contract for ``budgets.deadline_seconds``, read from the
+# injected facts; every replay tool pauses the clock,
 # while shell and sub-agent waits do not and must not be named here.
 DEADLINE_SECONDS_NOTE = (
     "`deadline_seconds` 统计可暂停的有效推理时间；"
@@ -45,8 +45,6 @@ def build_experiment_facts(
     max_llm_calls: int | None = None,
     context_compaction: Mapping[str, object] | None = None,
     model_artifacts_empty: bool | None = None,
-    prior_provenance: Mapping[str, object] | None = None,
-    skills_provenance: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """Build the short Agent-visible operational-facts projection.
 
@@ -58,14 +56,8 @@ def build_experiment_facts(
     runtime_env = runtime_env or {}
     data_summary = data_summary or {}
     kind = str(manifest.get("kind") or "fold")
-    is_meta = kind == "meta_learning"
     snapshot_config = _as_mapping(manifest.get("snapshot_config"))
-    if is_meta:
-        experiment_parameters = _as_mapping(manifest.get("experiment_parameters"))
-        snapshot_config = _as_mapping(experiment_parameters.get("snapshot_config")) or snapshot_config
-        fold_period = experiment_parameters.get("fold_period")
-    else:
-        fold_period = manifest.get("fold_period")
+    fold_period = manifest.get("fold_period")
 
     facts: dict[str, object] = {
         "identity": compact_mapping(
@@ -78,17 +70,11 @@ def build_experiment_facts(
                     else None
                 ),
                 "epoch_id": manifest.get("epoch_id"),
-                "meta_learning_id": (
-                    ref_store.get_or_create("meta", str(manifest["meta_learning_id"]))
-                    if is_meta and manifest.get("meta_learning_id")
-                    else None
-                ),
-                "trigger_after_folds": manifest.get("trigger_after_folds") if is_meta else None,
                 "session_kind": kind,
                 "fold_sequence_or_opaque_id": _opaque_fold_ref(
-                    manifest.get("fold_id"), ref_store=ref_store, is_meta=is_meta
+                    manifest.get("fold_id"), ref_store=ref_store
                 ),
-                "phase": None if is_meta else manifest.get("phase"),
+                "phase": manifest.get("phase"),
                 # Stated on every Fold, false included: an absent flag was
                 # read as "this is a confirmation Fold" (XR1 A6).
                 "confirmation_fold": (
@@ -117,17 +103,14 @@ def build_experiment_facts(
                         "not under any read_file/grep/glob root"
                     ),
                 }
-                if not is_meta and runtime_env.get("mode") == "docker"
+                if runtime_env.get("mode") == "docker"
                 else None
             ),
         },
         "visibility_policy": {
             "train_visible": True,
             "valid_visible": True,
-            # Raw Test data remains unmounted. Meta alone receives compact
-            # metrics from already-completed frozen Fold tests via workspace.
             "test_visible": False,
-            "historical_frozen_test_metrics_visible": is_meta,
             # Only the post-Held-out deployment adjustment replays a window
             # that includes the Held-out; every development session never does.
             "heldout_visible": kind == "deployment_adjustment",
@@ -139,19 +122,16 @@ def build_experiment_facts(
             data_summary=data_summary,
             snapshot_config=snapshot_config,
             fold_period=fold_period,
-            is_meta=is_meta,
         ),
         "research_scope": _research_scope(
             manifest=manifest,
             snapshot_config=snapshot_config,
             fold_period=fold_period,
-            is_meta=is_meta,
         ),
         "budgets": _budget_facts(
             manifest,
             max_llm_calls=max_llm_calls,
             context_compaction=context_compaction,
-            is_meta=is_meta,
         ),
         # No "paths" table and no per-file "data_profile": every production
         # consumer of this object is the prompt renderer, which dropped both
@@ -162,24 +142,14 @@ def build_experiment_facts(
             manifest,
             ref_store=ref_store,
             model_artifacts_empty=model_artifacts_empty,
-            is_meta=is_meta,
         ),
-        # Present only while the PRIOR or the mounted skills are still the ones
-        # this experiment was seeded with from another experiment's memory
-        # (``inherit_memory_from``). Without it a session reads the foreign fold
-        # and artifact ids the inherited PRIOR cites as an inconsistency against
-        # its own ledger, which is how one Meta filed the seed as a data defect.
-        "prior_provenance": prior_provenance,
-        "skills_provenance": skills_provenance,
         "broker_replay": _broker_replay_facts(manifest),
         # The caliber every ``neutralized_excess_return`` in this session was
         # computed under. One constant sentence: stating it here keeps it out
         # of every backtest summary of every fold in development_history.
         "neutralized_excess_method": NEUTRALIZATION_METHOD,
-        "runtime_tools": _runtime_tool_facts(runtime_env, manifest=manifest, is_meta=is_meta),
+        "runtime_tools": _runtime_tool_facts(runtime_env, manifest=manifest),
     }
-    if is_meta:
-        facts["meta_learning"] = _meta_learning_facts(manifest)
     return compact_mapping(facts)
 
 
@@ -189,13 +159,10 @@ def _visible_timeline(
     data_summary: Mapping[str, object],
     snapshot_config: Mapping[str, object],
     fold_period: object,
-    is_meta: bool,
 ) -> dict[str, object]:
     execution_policy = _execution_policy(data_summary)
     snapshot_windows = _snapshot_windows(snapshot_config)
-    # A Fold manifest carries the geometry itself; a Meta manifest carries it
-    # in ``experiment_parameters`` (it has no Fold of its own).
-    parameters = _as_mapping(manifest.get("experiment_parameters")) if is_meta else manifest
+    parameters = manifest
     timeline = {
         "fold_period": fold_period,
         # Cadence periods per Validation window: 1 is the Fold's own period,
@@ -206,19 +173,15 @@ def _visible_timeline(
         "validation_intraday_scope": "historical_pit_features_and_exact_execution_prices",
         "execution_policy": execution_policy,
     }
-    if is_meta:
-        timeline["sample_window_only"] = True
-        timeline["exact_sample_coverage_ref"] = "/mnt/artifacts/data_summary.json"
-    else:
-        fold = _as_mapping(manifest.get("fold"))
-        timeline.update(
-            {
-                "current_decision_time": manifest.get("valid_decision_time")
-                or fold.get("valid_decision_time"),
-                "visible_input_window": fold.get("input_window"),
-                "visible_validation_replay_period": fold.get("validation_period"),
-            }
-        )
+    fold = _as_mapping(manifest.get("fold"))
+    timeline.update(
+        {
+            "current_decision_time": manifest.get("valid_decision_time")
+            or fold.get("valid_decision_time"),
+            "visible_input_window": fold.get("input_window"),
+            "visible_validation_replay_period": fold.get("validation_period"),
+        }
+    )
     return compact_mapping(timeline)
 
 
@@ -227,7 +190,6 @@ def _research_scope(
     manifest: Mapping[str, object],
     snapshot_config: Mapping[str, object],
     fold_period: object,
-    is_meta: bool,
 ) -> dict[str, object]:
     """One sentence each on the development window, the universe and the cadence."""
     fold = _as_mapping(manifest.get("fold"))
@@ -266,8 +228,6 @@ def _research_scope(
             "own universe filters."
         )
     schedule = _as_mapping(manifest.get("schedule"))
-    if not schedule:
-        schedule = _as_mapping(_as_mapping(manifest.get("experiment_parameters")).get("schedule"))
     period = str(schedule.get("period") or "day")
     inference_time = schedule.get("inference_time")
     when = (
@@ -282,7 +242,7 @@ def _research_scope(
     )
     return compact_mapping(
         {
-            "development_window": None if is_meta else development,
+            "development_window": development,
             "universe": universe,
             "strategy_cadence": cadence,
         }
@@ -335,7 +295,6 @@ def _budget_facts(
     *,
     max_llm_calls: int | None,
     context_compaction: Mapping[str, object] | None,
-    is_meta: bool,
 ) -> dict[str, object]:
     # Local import: the pipelines package imports this module, so binding the
     # batch cap at module scope would close an import cycle.
@@ -344,12 +303,11 @@ def _budget_facts(
     budgets = _as_mapping(manifest.get("budgets"))
     return compact_mapping(
         {
-            # Pausable effective reasoning time. For a Fold this is the main
-            # deadline PLUS the trailing wrap-up grace, so the grace rides
-            # beside it: without the split a session plans against a
-            # deadline that is already ``deadline_grace_seconds`` later
-            # than the one its directive and wrap-up prompt talk about.
-            # Meta has no wrap-up window and carries no grace.
+            # Pausable effective reasoning time: the main deadline PLUS the
+            # trailing wrap-up grace, so the grace rides beside it: without
+            # the split a session plans against a deadline that is already
+            # ``deadline_grace_seconds`` later than the one its directive and
+            # wrap-up prompt talk about.
             "deadline_seconds": manifest.get("deadline_seconds") or budgets.get("deadline_seconds"),
             "deadline_seconds_note": DEADLINE_SECONDS_NOTE,
             "deadline_grace_seconds": budgets.get("deadline_grace_seconds"),
@@ -375,10 +333,8 @@ def _budget_facts(
             ),
             # GPUs the formal strategy container (fit worker included) is
             # started with; 0 means every formal replay runs on CPU. This is
-            # the authoritative device fact for every session kind — a Meta
-            # session has no container of its own, so runtime_env.json's
-            # sandbox_spec is null there, and a per-Fold GPU override moves
-            # only that session's container, never this number.
+            # the authoritative device fact: a per-session GPU override moves
+            # only the session's own container, never this number.
             "strategy_gpu_count": budgets.get("strategy_gpu_count"),
             # CPU quota that same container is started with, and therefore the
             # value its OMP/MKL/OPENBLAS/NUMEXPR thread variables carry. Read
@@ -395,12 +351,8 @@ def _budget_facts(
             # measured on the strategy's own call and start only once the
             # worker holds the decision inputs, so neither bills container
             # scheduling or host contention to the strategy.
-            "batch_validate_max_concurrency": (
-                None if is_meta else BATCH_VALIDATE_MAX_CONCURRENCY
-            ),
-            "batch_validate_fit_timeout_note": (
-                None if is_meta else BATCH_VALIDATE_FIT_TIMEOUT_NOTE
-            ),
+            "batch_validate_max_concurrency": BATCH_VALIDATE_MAX_CONCURRENCY,
+            "batch_validate_fit_timeout_note": BATCH_VALIDATE_FIT_TIMEOUT_NOTE,
             "context_compaction": context_compaction,
         }
     )
@@ -428,7 +380,6 @@ def _artifact_contract_facts(
     *,
     ref_store: AgentRefStore,
     model_artifacts_empty: bool | None,
-    is_meta: bool,
 ) -> dict[str, object]:
     # Local import: the pipelines package imports this module, so binding the
     # acceptance rules at module scope would close an import cycle.
@@ -469,7 +420,7 @@ def _artifact_contract_facts(
     # What freezes this Fold and what graduates the experiment, both derived
     # from the run's own rules: the freeze block marks every rule hard or warn,
     # and the graduation block names the Held-out bar the session is really
-    # optimizing toward. Meta sees neither — it does not freeze or graduate.
+    # optimizing toward.
     acceptance = _as_mapping(manifest.get("acceptance_rules"))
     return compact_mapping(
         {
@@ -482,7 +433,7 @@ def _artifact_contract_facts(
             "modification_constraints": manifest.get("modification_constraints"),
             "acceptance_rules": (
                 None
-                if is_meta or not acceptance
+                if not acceptance
                 else AcceptanceRules.from_record(acceptance).agent_facts()
             ),
             "step_tree_enabled": manifest.get("step_tree_enabled"),
@@ -494,9 +445,6 @@ def _artifact_contract_facts(
 
 def _broker_replay_facts(manifest: Mapping[str, object]) -> dict[str, object]:
     profile = _as_mapping(manifest.get("broker_profile"))
-    if not profile:
-        experiment_parameters = _as_mapping(manifest.get("experiment_parameters"))
-        profile = _as_mapping(experiment_parameters.get("broker_profile"))
     schedule = _as_mapping(manifest.get("schedule"))
     return compact_mapping(
         {
@@ -528,7 +476,6 @@ def _runtime_tool_facts(
     runtime_env: Mapping[str, object],
     *,
     manifest: Mapping[str, object],
-    is_meta: bool,
 ) -> dict[str, object]:
     tools = _as_mapping(runtime_env.get("tools"))
     available = sorted(name for name, record in tools.items() if _as_mapping(record).get("available") is True)
@@ -556,44 +503,8 @@ def _runtime_tool_facts(
             "credential_env_names_active": active_env_passthrough,
             "proxy_alias_names_active": proxy_aliases,
             "network_install_policy": {
-                "ordinary_fold": "no_network_prebuilt_dependencies_only",
-                "meta_learning": (
-                    "workspace_only_if_network_enabled"
-                    if is_meta and str(network or "none") != "none"
-                    else "blocked_unless_runtime_env_enables_network"
-                ),
-                "sandbox_environment_scope": "python_npm_apt_packages_only_no_weights_data_or_repositories",
+                "session": "no_network_prebuilt_dependencies_only",
             },
-        }
-    )
-
-
-def _meta_learning_facts(manifest: Mapping[str, object]) -> dict[str, object]:
-    development_inputs = _as_mapping(manifest.get("development_inputs"))
-    return compact_mapping(
-        {
-            "prior_output_path": manifest.get("prior_output") or "/mnt/agent/workspace/PRIOR.md",
-            "prior_injected_scope": "subsequent_fold_prompts_until_next_meta_trigger",
-            "development_inputs": {
-                key: value
-                for key, value in development_inputs.items()
-                if key
-                in {
-                    "agent_trace_full",
-                    "agent_traces",
-                    "development_history",
-                    "experiment_ledger_full",
-                    "meta_learning_memory",
-                }
-            },
-            "previous_prior_available": bool(development_inputs.get("previous_prior")),
-            "history_available": bool(development_inputs),
-            "sample_window_only": True,
-            "backtest_allowed": False,
-            "meta_learning_directive_present": bool(str(manifest.get("meta_learning_directive") or "").strip()),
-            "fold_exploration_directive_present": bool(
-                str(manifest.get("fold_exploration_directive") or "").strip()
-            ),
         }
     )
 
@@ -621,13 +532,10 @@ def _populated_file_names(data_summary: Mapping[str, object]) -> set[str]:
     return names
 
 
-def _opaque_fold_ref(
-    value: object, *, ref_store: AgentRefStore, is_meta: bool
-) -> str | None:
+def _opaque_fold_ref(value: object, *, ref_store: AgentRefStore) -> str | None:
     if value is None or str(value) == "":
         return None
-    namespace = "meta" if is_meta else "fold"
-    return ref_store.get_or_create(namespace, str(value))
+    return ref_store.get_or_create("fold", str(value))
 
 
 def _as_mapping(value: object) -> dict[str, object]:

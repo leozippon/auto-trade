@@ -22,7 +22,6 @@ from .base import (
 )
 from .files import EditFileTool, WriteFileTool
 from .finish_fold import FinishFoldTool
-from .finish_meta import FinishMetaTool
 from .modification_check import ModificationCheckTool
 from .report_issue import ReportIssueTool
 from .search import SEARCH_ROOTS, GlobTool, GrepTool, ReadFileTool, SearchRoots
@@ -35,7 +34,6 @@ __all__ = [
     "CommandRunner",
     "EditFileTool",
     "FinishFoldTool",
-    "FinishMetaTool",
     "GlobTool",
     "GrepTool",
     "ModificationCheckTool",

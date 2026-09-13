@@ -484,7 +484,6 @@ def test_a_validation_completing_inside_the_grace_keeps_the_conversation(
         ),
         system_prompt="fold system prompt",
         config=AgentSessionConfig(
-            mode="fold",
             max_llm_calls=4,
             deadline_seconds=budget_seconds,
             deadline_grace_seconds=grace_seconds,
@@ -1016,7 +1015,6 @@ def _reserved_fold_config() -> AgentSessionConfig:
     """A session whose finalization tail is 200s of a 1000s budget."""
 
     return AgentSessionConfig(
-        mode="fold",
         deadline_seconds=1000.0,
         finalize_before_deadline_seconds=100.0,
         deadline_grace_seconds=100.0,

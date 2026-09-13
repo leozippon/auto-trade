@@ -464,10 +464,9 @@ def _agent_visible_manifest(
 ) -> dict[str, object]:
     """Return the public manifest view mounted at /mnt/artifacts.
 
-    The in-memory and host audit manifest keep the full schedule and frozen
-    Test details for orchestration. Agent-visible manifests carry no raw Test
-    schedule or result; Meta receives separately whitelisted historical metrics
-    from completed Folds through its workspace projection.
+    The in-memory and host audit manifest keep host paths and raw identities
+    for orchestration; the Agent-visible manifest carries allowlisted keys with
+    every identity projected through the experiment reference store.
     """
 
     record = json.loads(json.dumps(sanitize_for_log(data), ensure_ascii=False, default=str))
@@ -478,8 +477,6 @@ def _agent_visible_manifest(
         for key in (
             "experiment_id",
             "epoch_id",
-            "meta_learning_id",
-            "trigger_after_folds",
             "run_id",
             "kind",
             "runtime_env_ref",
@@ -512,29 +509,15 @@ def _agent_visible_manifest(
             "prior_prompt",
             "operating_memory",
             "skills",
-            "development_inputs",
-            "prior_output",
-            "meta_learning_directive",
             "fold_exploration_directive",
-            "review_window",
             "created_at",
         )
         if key in record
     }
-    if isinstance(record.get("sandbox_image_update"), dict):
-        public["sandbox_image_update"] = _agent_visible_sandbox_image_update(
-            record["sandbox_image_update"]
-        )
-    kind = str(record.get("kind") or "fold")
     if record.get("run_id"):
         public["run_id"] = ref_store.get_or_create("run", str(record["run_id"]))
-    if record.get("meta_learning_id"):
-        public["meta_learning_id"] = ref_store.get_or_create(
-            "meta", str(record["meta_learning_id"])
-        )
     if record.get("fold_id"):
-        namespace = "meta" if kind == "meta_learning" else "fold"
-        public["fold_id"] = ref_store.get_or_create(namespace, str(record["fold_id"]))
+        public["fold_id"] = ref_store.get_or_create("fold", str(record["fold_id"]))
     # Artifact ids embed the raw fold label (strategy_<epoch>_fold_<period>), so they
     # must be projected exactly like the ledger view does.
     if public.get("parent_strategy_artifact_id"):
@@ -543,16 +526,8 @@ def _agent_visible_manifest(
         )
     if isinstance(record.get("fold"), dict):
         public["fold"] = _agent_visible_fold_record(record["fold"], ref_store)
-    if isinstance(record.get("meta_learning_visible_fold"), dict):
-        public["meta_learning_visible_fold"] = _agent_visible_fold_record(
-            record["meta_learning_visible_fold"], ref_store
-        )
     if isinstance(record.get("snapshots"), dict):
         public["snapshots"] = _agent_visible_snapshots(record["snapshots"])
-    if isinstance(record.get("experiment_parameters"), dict):
-        public["experiment_parameters"] = _agent_visible_experiment_parameters(
-            record["experiment_parameters"]
-        )
     if isinstance(record.get("backtest_summaries"), list):
         public["backtest_summaries"] = [
             _agent_visible_backtest_summary(item)
@@ -560,28 +535,6 @@ def _agent_visible_manifest(
             if isinstance(item, dict) and item.get("mode") == "valid"
         ]
     return public
-
-
-def _agent_visible_sandbox_image_update(record: dict[str, object]) -> dict[str, object]:
-    """Keep rebuild outcome facts while withholding host build coordinates."""
-    return {
-        key: record[key]
-        for key in (
-            "status",
-            "reason",
-            "request_ref",
-            "base_image_ref",
-            "image_ref",
-            "build_generation_id",
-            "runtime",
-            "pruned_image_refs",
-            "started_at",
-            "finished_at",
-            "timeout_seconds",
-            "returncode",
-        )
-        if key in record
-    }
 
 
 def _agent_visible_fold_record(
@@ -604,16 +557,6 @@ def _agent_visible_snapshots(record: dict[str, object]) -> dict[str, object]:
         key: value
         for key, value in record.items()
         if key not in {"test_decision_input", "test_replay", "heldout_decision_input", "heldout_replay"}
-        and not str(key).startswith("test_")
-        and not str(key).startswith("heldout_")
-    }
-
-
-def _agent_visible_experiment_parameters(record: dict[str, object]) -> dict[str, object]:
-    return {
-        key: value
-        for key, value in record.items()
-        if key != "periods"
         and not str(key).startswith("test_")
         and not str(key).startswith("heldout_")
     }

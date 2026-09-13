@@ -12,10 +12,7 @@ from autotrade.agent.experiment_facts import (
     BATCH_VALIDATE_FIT_TIMEOUT_NOTE,
     build_experiment_facts,
 )
-from autotrade.agent.prompts import (
-    build_meta_learning_prompt,
-    build_system_prompt,
-)
+from autotrade.agent.prompts import build_system_prompt
 from autotrade.environment.data.snapshot import SnapshotConfig
 from autotrade.environment.identity import AgentRefStore
 
@@ -73,8 +70,7 @@ def test_every_fold_states_whether_it_is_a_confirmation_fold() -> None:
     assert _facts()["identity"]["confirmation_fold"] is False
     assert _facts(confirmation_fold=True)["identity"]["confirmation_fold"] is True
     # The flag belongs to development Folds only.
-    for kind in ("deployment_adjustment", "meta_learning"):
-        assert "confirmation_fold" not in _facts(kind=kind)["identity"]
+    assert "confirmation_fold" not in _facts(kind="deployment_adjustment")["identity"]
 
 
 def test_regular_fold_facts_name_the_yearly_folds_and_the_meta_between_them() -> None:
@@ -113,11 +109,6 @@ def test_the_signal_screen_path_is_a_fact_only_where_the_mount_exists() -> None:
             ref_store=store,
             runtime_env={"mode": "local"},
         )
-        meta = build_experiment_facts(
-            manifest={"kind": "meta_learning", "experiment_id": "exp"},
-            ref_store=store,
-            runtime_env={"mode": "docker"},
-        )
     screen = docker_fold["source_refs"]["signal_screen_ref"]
     assert screen["path"] == "/mnt/tools/screen.py"
     # Sub-agents kept handing the bare path to read_file; the fact now carries
@@ -126,7 +117,6 @@ def test_the_signal_screen_path_is_a_fact_only_where_the_mount_exists() -> None:
     assert "shell only" in screen["usage"]
     assert "read_file" in screen["usage"]
     assert "signal_screen_ref" not in local_fold["source_refs"]
-    assert "signal_screen_ref" not in meta["source_refs"]
 
 
 def test_rolling_facts_keep_the_cadence_and_a_screened_universe_is_described() -> None:
@@ -150,30 +140,6 @@ def test_rolling_facts_keep_the_cadence_and_a_screened_universe_is_described() -
     assert "exclude_st=True" in scope["universe"]
     assert "boards=['main']" in scope["universe"]
     assert "first available trading day of each month at 09:00" in scope["strategy_cadence"]
-
-
-def test_meta_facts_carry_universe_and_cadence_but_no_fold_window() -> None:
-    facts = _facts(
-        kind="meta_learning",
-        meta_learning_id="epoch_001",
-        experiment_parameters={
-            "fold_period": "quarter",
-            "validation_periods": 4,
-            "schedule": {"period": "day", "inference_time": "08:30"},
-            "snapshot_config": SnapshotConfig().to_record(),
-        },
-        fold={},
-        schedule={},
-    )
-    scope = facts["research_scope"]
-    assert "development_window" not in scope
-    assert scope["universe"].startswith("The universe is unfiltered")
-    assert "every trading day at 08:30" in scope["strategy_cadence"]
-    # The geometry a Meta reviews Folds against comes from the same block; a
-    # live Meta once read "every trading day at None" and no fold_period at all
-    # because the pipeline never wrote it.
-    assert facts["visible_timeline"]["fold_period"] == "quarter"
-    assert facts["visible_timeline"]["validation_periods"] == 4
 
 
 def test_the_validation_window_length_is_a_fold_fact() -> None:
@@ -200,8 +166,7 @@ def test_the_session_deadline_names_the_wrap_up_grace_inside_it() -> None:
     """``deadline_seconds`` is main deadline PLUS grace.
 
     Without the split the session plans against a wall clock ten minutes later
-    than the one its directive names and the one hard finalization uses. Meta
-    has no wrap-up window, so it must not be told it has one.
+    than the one its directive names and the one hard finalization uses.
     """
 
     fold = _facts(
@@ -210,13 +175,9 @@ def test_the_session_deadline_names_the_wrap_up_grace_inside_it() -> None:
     assert fold["deadline_seconds"] == 43800.0
     assert fold["deadline_grace_seconds"] == 600.0
 
-    meta = _facts(kind="meta_learning", budgets={"deadline_seconds": 43200.0})["budgets"]
-    assert meta["deadline_seconds"] == 43200.0
-    assert "deadline_grace_seconds" not in meta
 
-
-def test_fold_and_meta_are_told_deadline_seconds_is_pausable_effective_time() -> None:
-    """Both sessions must see the pause clock next to ``deadline_seconds``.
+def test_the_session_is_told_deadline_seconds_is_pausable_effective_time() -> None:
+    """The session must see the pause clock next to ``deadline_seconds``.
 
     Every replay tool -- ``smoke_backtest`` and ``run_null_control`` included
     -- pauses the budget; shell and sub-agent waits do not, and must not be
@@ -232,14 +193,10 @@ def test_fold_and_meta_are_told_deadline_seconds_is_pausable_effective_time() ->
     fold = _facts(
         budgets={"deadline_seconds": 43800.0, "deadline_grace_seconds": 600.0}
     )
-    meta = _facts(kind="meta_learning", budgets={"deadline_seconds": 43200.0})
     assert fold["budgets"]["deadline_seconds_note"] == expected
-    assert meta["budgets"]["deadline_seconds_note"] == expected
     for name in ("shell", "subagent", "sub-agent", "子代理"):
         assert name not in fold["budgets"]["deadline_seconds_note"]
     assert expected in build_system_prompt(mode="fold", experiment_facts=fold)
-    assert expected in build_system_prompt(mode="meta", experiment_facts=meta)
-    assert expected in build_meta_learning_prompt(experiment_facts=meta)
 
 
 def test_the_facts_say_whether_a_parent_control_baseline_exists() -> None:
@@ -291,8 +248,8 @@ def test_the_facts_say_whether_a_parent_control_baseline_exists() -> None:
     # Nothing failed, nothing to explain.
     assert "parent_control_error" not in inherited
 
-    # Manifests written before the field, and Meta sessions, fall back to
-    # "an inherited parent exists".
+    # Manifests written before the field fall back to "an inherited parent
+    # exists".
     legacy = _facts(is_initial_artifact=False)["artifact_contract"]["parent"]
     assert legacy["parent_control_available"] is True
 
@@ -381,9 +338,3 @@ def test_the_facts_publish_the_strategy_containers_cpu_quota_and_batch_width() -
     # scales with it, so the rule travels with the number.
     assert fold["batch_validate_fit_timeout_note"] == BATCH_VALIDATE_FIT_TIMEOUT_NOTE
     assert "strategy_cpus" in build_system_prompt(mode="fold", experiment_facts=_facts())
-    # Meta runs no replay of its own, so the batch width is not its fact; the
-    # container quota still is, because fit(context) runs in that container.
-    meta = _facts(kind="meta_learning")["budgets"]
-    assert meta["strategy_cpus"] == SandboxLimits().cpus
-    assert "batch_validate_max_concurrency" not in meta
-    assert "batch_validate_fit_timeout_note" not in meta
