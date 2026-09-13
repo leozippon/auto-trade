@@ -351,6 +351,17 @@ STK_MINS_FIELDS = "ts_code,trade_time,open,high,low,close,vol,amount"
 
 STK_MINS_PAGE_LIMIT = 8000
 
+# stk_mins carries a per-token daily request quota (first hit 2026-09-14 CST
+# after ~17.5k single-code requests); the vendor's own answer asks callers to
+# put several codes in one request. A request ends at 15:00, so a code has at
+# most 241 bars a session and 25 codes (6,025 rows) stay inside one 8,000-row
+# page.
+STK_MINS_BATCH_CODES = 25
+
+# The quota answer is permanent until the vendor's next day: retrying it only
+# burns the run, so the minute loop stops on it.
+STK_MINS_QUOTA_MARKER = "额定额度已用完"
+
 STK_MINS_REQUIRED_COLUMNS = ["ts_code", "trade_time", "open", "high", "low", "close", "vol", "amount", "trade_date", "available_at", "available_at_rule"]
 
 NEWS_SOURCES = [

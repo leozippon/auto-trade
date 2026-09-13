@@ -45,7 +45,7 @@ DEFAULT_LOCK_WAIT_SECONDS = 900
 # generation on success; audit-only jobs must not churn snapshot cache keys.
 # The generation schema/state contract itself is owned by
 # autotrade.environment.data.contracts so writer and PIT consumers cannot drift.
-MUTATING_OPERATIONS = {"update", "download_tier", "download_event_flow", "pit_event_pipeline", "auction_capture", "auction_recheck", "commit_identity_migration"}
+MUTATING_OPERATIONS = {"update", "download_tier", "download_event_flow", "intraday_by_date", "pit_event_pipeline", "auction_capture", "auction_recheck", "commit_identity_migration"}
 
 
 @dataclass
@@ -324,6 +324,23 @@ def build_job_commands(ctx: RunContext) -> list[list[str]]:
         command.extend(ctx.config.get("default_update_args", []))
         command.extend(ctx.job.get("extra_args", []))
         return [command]
+    if operation == "intraday_by_date":
+        # The minute layer on its own: its vendor quota must not be able to
+        # fail the evening update that Paper's morning release depends on.
+        command = [
+            ctx.python,
+            "scripts/data/tushare_download.py",
+            "update-intraday-by-date",
+            "--start-date",
+            ctx.start_date,
+            "--end-date",
+            ctx.end_date,
+            "--raw-dir",
+            raw_dir,
+        ]
+        command.extend(ctx.config.get("default_update_args", []))
+        command.extend(ctx.job.get("extra_args", []))
+        return [command]
     if operation == "auction_capture":
         command = [
             ctx.python,
@@ -519,6 +536,7 @@ def job_config_identity(ctx: RunContext) -> dict:
         "update",
         "download_tier",
         "download_event_flow",
+        "intraday_by_date",
         "auction_capture",
         "auction_recheck",
         "revision_sentinel",
@@ -944,7 +962,7 @@ def _run(args: argparse.Namespace) -> int:
         # should_skip_completed from suppressing the next attempt.
         mutated_not_ready = bool(
             returncode == MUTATED_NOT_READY_RETRY_EXIT_CODE
-            and ctx.job.get("operation") == "download_event_flow"
+            and ctx.job.get("operation") in {"download_event_flow", "intraday_by_date"}
             and len(commands) == 1
         )
         if transaction is not None:

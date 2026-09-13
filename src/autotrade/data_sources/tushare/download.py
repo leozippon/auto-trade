@@ -43,6 +43,7 @@ from .common import (
     SHARE_FLOAT_UNLOCK_TITLE_PATTERN,
     STK_AUCTION_PRICE_ABS_TOLERANCE,
     STK_MINS_API_NAME,
+    STK_MINS_BATCH_CODES,
     STK_MINS_BY_DATE_DATASET,
     STK_MINS_DATASET,
     STK_MINS_FIELDS,
@@ -50,6 +51,7 @@ from .common import (
     REFERENCE_PAGE_LIMIT,
     committed_partition_intact,
     STK_MINS_PAGE_LIMIT,
+    STK_MINS_QUOTA_MARKER,
     STK_MINS_REQUIRED_COLUMNS,
     TEXT_FETCHABLE_DATASETS,
     TEXT_SPECS,
@@ -3069,34 +3071,60 @@ def update_intraday_by_date(args: argparse.Namespace) -> int:
             continue
         collected: dict[str, pd.DataFrame] = {}
         pending = sorted(expected_codes)
-        pages_by_code: dict[str, int] = {}
+        pages_total = 0
+        quota_error = ""
         for attempt in range(1, args.max_retries + 1):
             if not pending:
                 break
             failed: list[str] = []
-            for index, ts_code in enumerate(pending, start=1):
+            for offset in range(0, len(pending), STK_MINS_BATCH_CODES):
+                batch = pending[offset : offset + STK_MINS_BATCH_CODES]
                 params = {
-                    "ts_code": ts_code,
+                    "ts_code": ",".join(batch),
                     "freq": STK_MINS_FREQ,
                     "start_date": minute_datetime(trade_date),
                     "end_date": minute_datetime(trade_date, end=True),
                 }
                 try:
                     result, pages = query_paged(client, STK_MINS_API_NAME, params, STK_MINS_FIELDS, page_limit)
-                    df = augment_stk_mins_frame(frame(result))
-                    df = df[df["trade_date"].astype(str) == trade_date].copy()
-                    if df.empty:
-                        failed.append(ts_code)
+                except Exception as exc:
+                    if STK_MINS_QUOTA_MARKER in str(exc):
+                        quota_error = str(exc)
+                        break
+                    failed.extend(batch)
+                    continue
+                pages_total += pages
+                df = augment_stk_mins_frame(frame(result))
+                df = df[df["trade_date"].astype(str) == trade_date]
+                # A code the batch answered nothing for is retried like a failed
+                # request; the batch's other codes are kept.
+                by_code = {str(code): rows for code, rows in df.groupby("ts_code", sort=False)}
+                for ts_code in batch:
+                    if ts_code in by_code:
+                        collected[ts_code] = by_code[ts_code].copy()
                     else:
-                        collected[ts_code] = df
-                        pages_by_code[ts_code] = pages
-                except Exception:
-                    failed.append(ts_code)
-                if index % 500 == 0:
-                    print(f"{trade_date} attempt={attempt}/{args.max_retries} codes={index}/{len(pending)} collected={len(collected)} failed_current={len(failed)}")
+                        failed.append(ts_code)
+                done = offset + len(batch)
+                if done // 500 > offset // 500:
+                    print(f"{trade_date} attempt={attempt}/{args.max_retries} codes={done}/{len(pending)} collected={len(collected)} failed_current={len(failed)}")
+            if quota_error:
+                break
             pending = failed
             if pending and attempt < args.max_retries:
                 time.sleep(args.retry_delay_seconds)
+        if quota_error:
+            # The quota holds until the vendor's next day, so the run stops
+            # here: every day already written stays committed (76 = mutated,
+            # not ready) and the next run resumes at this day. A dirty lake
+            # would instead refuse every other writer until then.
+            print(json.dumps({
+                "status": "not_ready_after_mutation",
+                "note": "stk_mins_daily_quota_exhausted",
+                "trade_date": trade_date,
+                "days_written": written,
+                "error": quota_error[:300],
+            }, ensure_ascii=False, sort_keys=True))
+            return MUTATED_NOT_READY_RETRY_EXIT_CODE
         if len(pending) > args.allow_missing_codes:
             raise RuntimeError(f"{trade_date}: {len(pending)} minute codes still missing after retries; sample={pending[:20]}")
         combined = concat_rows(list(collected.values())) if collected else pd.DataFrame(columns=STK_MINS_REQUIRED_COLUMNS)
@@ -3123,7 +3151,7 @@ def update_intraday_by_date(args: argparse.Namespace) -> int:
             "missing_code_sample": pending[:20],
             "normalize": normalize_details,
             "validation": details,
-            "pagination": {"page_limit": page_limit, "pages_total": int(sum(pages_by_code.values()))},
+            "pagination": {"page_limit": page_limit, "pages_total": pages_total, "batch_codes": STK_MINS_BATCH_CODES},
             "max_retries": args.max_retries,
         }
         write_stk_mins_by_date(

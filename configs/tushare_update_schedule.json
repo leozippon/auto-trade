@@ -29,7 +29,7 @@
   },
   "jobs": {
     "cn_evening_full": {
-      "description": "Run one rolling-window retained-domain update after normal A-share, minute, flow, block-trade and macro same-day releases should be available. Self-healing families are excluded like the natural-day tiers: stk_auction lands via cn_open_auction_capture_0927 + cn_evening_auction_backfill, the margin family via its pre-open jobs + cn_evening_margin_backfill, text via cn_nightly_text_full, the global tier via cn_nightly_global_full, and ann-date disclosure tables via cn_nightly_disclosure_full.",
+      "description": "Run one rolling-window retained-domain update after normal A-share, flow, block-trade and macro same-day releases should be available. Self-healing families are excluded like the natural-day tiers: stk_auction lands via cn_open_auction_capture_0927 + cn_evening_auction_backfill, the margin family via its pre-open jobs + cn_evening_margin_backfill, text via cn_nightly_text_full, the global tier via cn_nightly_global_full, and ann-date disclosure tables via cn_nightly_disclosure_full. The 1-minute layer is excluded too and lands via manual_intraday_minutes: stk_mins has a per-token daily request quota, and a minute backlog inside this job would fail the update that the morning Paper release depends on.",
       "end_date_offset_days": 0,
       "end_date_mode": "sse_open_on_or_before",
       "start_date_lookback_days": 30,
@@ -39,8 +39,7 @@
         "--refresh-open-window",
         "--no-include-text",
         "--no-include-global",
-        "--intraday-refresh-lookback-days",
-        "1",
+        "--no-include-intraday",
         "--daily-datasets",
         "daily",
         "adj_factor",
@@ -374,6 +373,15 @@
       "end_date_mode": "sse_open_on_or_before",
       "lock_wait_seconds": 1800,
       "skip_if_already_ok": false
+    },
+    "manual_intraday_minutes": {
+      "description": "Manual (not scheduled): land the 1-minute by-date layer on its own, for every trading day in the window whose partition is missing or invalid. stk_mins enforces a per-token daily request quota (answer: '您今日stk_min额定额度已用完，请明日再试'), so the downloader asks for STK_MINS_BATCH_CODES codes per request and stops on the quota answer instead of retrying it; a stopped run keeps every day it wrote and the next run resumes. Run scripts/data/build_intraday_flow.py after it.",
+      "operation": "intraday_by_date",
+      "end_date_offset_days": 1,
+      "end_date_mode": "sse_open_on_or_before",
+      "start_date_lookback_days": 30,
+      "lock_wait_seconds": 900,
+      "skip_if_already_ok": true
     },
     "manual_macro_schema_repair": {
       "description": "Manual (not scheduled): forced full-window re-request of cn_pmi after the vendor answered its declared lowercase field list with its own database schema (uppercase MONTH/PMI... plus ID/CREATE_*/UPDATE_* bookkeeping, first seen 2026-08-13 and flapping since), which left every row without a month key and therefore unstamped. The download now normalizes any response onto the declared contract, so this job republishes the table with its key and availability rule restored.",
@@ -745,7 +753,7 @@
       "domain": "intraday_minutes",
       "frequency": "trade_date",
       "official_update": "历史分钟数据每天收盘后处理更新，17:00-21:00之间完成。",
-      "cron_policy": "evening_update_plus_1d_force_refresh_with_revision_ledger",
+      "cron_policy": "manual_job_batched_codes_under_daily_request_quota",
       "doc_ref": "https://tushare.pro/document/2?doc_id=370"
     },
     {
@@ -952,8 +960,8 @@
       "builder": "scripts/data/build_intraday_flow.py",
       "domain": "event_flow",
       "frequency": "trade_date",
-      "official_update": "日频订单流（派生）；本地派生表，没有供应商接口和官方入库时刻；构建在晚间分钟数据落地之后运行。",
-      "cron_policy": "derived_build_after_evening_minute_update"
+      "official_update": "日频订单流（派生）；本地派生表，没有供应商接口和官方入库时刻；构建在分钟数据落地之后运行。",
+      "cron_policy": "derived_build_after_manual_minute_job"
     },
     {
       "dataset": "kpl_list",

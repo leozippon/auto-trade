@@ -425,6 +425,94 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                 download.update_intraday_by_date(args)
         self.assertFalse(output.exists())
 
+    def _minute_update_args(self, start_date, end_date, max_retries=2):
+        return argparse.Namespace(
+            raw_dir=str(self.raw_dir),
+            start_date=start_date,
+            end_date=end_date,
+            output_dataset=common.STK_MINS_BY_DATE_DATASET,
+            expected_codes_source="daily",
+            codes=None,
+            max_codes=None,
+            min_rows_per_day=0,
+            allow_missing_codes=0,
+            allow_validation_warnings=True,
+            max_retries=max_retries,
+            retry_delay_seconds=0,
+            page_limit=None,
+            min_interval_seconds=0,
+            timeout_seconds=1,
+            force=False,
+        )
+
+    def _write_minute_calendar_and_universe(self, trade_dates, codes):
+        path = self.raw_dir / "trade_cal" / "exchange=SSE" / "year=2020.parquet"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame([{"cal_date": day, "is_open": "1"} for day in trade_dates]).to_parquet(path, index=False)
+        for day in trade_dates:
+            daily = self.raw_dir / "daily" / f"trade_date={day}.parquet"
+            daily.parent.mkdir(parents=True, exist_ok=True)
+            pd.DataFrame([{"trade_date": day, "ts_code": code} for code in codes]).to_parquet(daily, index=False)
+
+    def test_update_intraday_by_date_batches_codes_and_retries_unanswered_ones(self):
+        """The vendor's daily stk_mins quota counts requests, so one request
+        carries a batch of codes; a code the batch did not answer is retried
+        without refetching the rest of its batch."""
+        codes = [f"{number:06d}.SZ" for number in range(1, 31)]
+        self._write_minute_calendar_and_universe(["20200102"], codes)
+        silent_once = {"000030.SZ"}
+        requests: list[list[str]] = []
+
+        class BatchMinuteClient:
+            def query(self, api_name, params=None, fields="", retries=5):
+                requested = str(params["ts_code"]).split(",")
+                requests.append(requested)
+                items = []
+                for code in requested:
+                    if code in silent_once:
+                        silent_once.discard(code)
+                        continue
+                    for bar in ("2020-01-02 09:30:00", "2020-01-02 15:00:00"):
+                        items.append([code, bar, 1.0, 1.0, 1.0, 1.0, 100.0, 100.0])
+                return common.ApiResult(fields.split(","), items)
+
+        with patch.object(download, "load_token", return_value="token"), patch.object(download, "TuShareClient", return_value=BatchMinuteClient()):
+            self.assertEqual(download.update_intraday_by_date(self._minute_update_args("20200102", "20200102")), 0)
+
+        self.assertEqual([len(batch) for batch in requests], [common.STK_MINS_BATCH_CODES, 5, 1])
+        self.assertEqual(requests[-1], ["000030.SZ"])
+        written = pd.read_parquet(self.raw_dir / common.STK_MINS_BY_DATE_DATASET / "trade_date=20200102.parquet")
+        self.assertEqual(sorted(written["ts_code"].unique()), codes)
+        self.assertEqual(len(written), 60)
+
+    def test_update_intraday_by_date_commits_written_days_when_the_quota_runs_out(self):
+        """The quota answer holds until the vendor's next day: the run stops on
+        it at once with the not-ready exit, keeping the days already written
+        and discarding the half-collected day."""
+        codes = ["000001.SZ", "000002.SZ"]
+        self._write_minute_calendar_and_universe(["20200102", "20200103"], codes)
+        calls: list[str] = []
+
+        class QuotaMinuteClient:
+            def query(self, api_name, params=None, fields="", retries=5):
+                day = str(params["start_date"])[:10]
+                calls.append(day)
+                if day == "2020-01-03":
+                    raise RuntimeError("stk_mins failed after 5 attempts: 您今日stk_min额定额度已用完，请明日再试。")
+                items = [[code, f"{day} 09:30:00", 1.0, 1.0, 1.0, 1.0, 100.0, 100.0] for code in str(params["ts_code"]).split(",")]
+                return common.ApiResult(fields.split(","), items)
+
+        output = io.StringIO()
+        with patch.object(download, "load_token", return_value="token"), patch.object(download, "TuShareClient", return_value=QuotaMinuteClient()), redirect_stdout(output):
+            code = download.update_intraday_by_date(self._minute_update_args("20200102", "20200103", max_retries=3))
+
+        self.assertEqual(code, common.MUTATED_NOT_READY_RETRY_EXIT_CODE)
+        self.assertEqual(calls, ["2020-01-02", "2020-01-03"])
+        minute_dir = self.raw_dir / common.STK_MINS_BY_DATE_DATASET
+        self.assertTrue((minute_dir / "trade_date=20200102.parquet").exists())
+        self.assertFalse((minute_dir / "trade_date=20200103.parquet").exists())
+        self.assertIn("stk_mins_daily_quota_exhausted", output.getvalue())
+
     def test_minute_expected_universe_uses_existing_minute_store_when_present(self):
         self._write_daily_universe()
         minute_path = self.raw_dir / common.STK_MINS_BY_DATE_DATASET / "trade_date=20200102.parquet"
@@ -2773,6 +2861,23 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         )
         self.assertFalse(runner.called)
         self.assertIn("skipped_already_ok", output)
+
+    def test_minute_quota_stop_commits_the_days_it_wrote(self):
+        # A quota stop of the minute job keeps what it wrote committed; a dirty
+        # lake would refuse the evening update Paper's release depends on.
+        self._write_trade_cal("20260807", is_open="1")
+        config_path = self._write_event_flow_schedule("minutes", operation="intraday_by_date")
+        generation = self.raw_dir / ".raw_generation.json"
+        cron_update.write_raw_generation(self.raw_dir)
+        jobs_root = self.root / "runtime" / "jobs"
+
+        result, _, _ = self._run_job_once(
+            config_path, "minutes", "20260807", common.MUTATED_NOT_READY_RETRY_EXIT_CODE, jobs_root
+        )
+        self.assertEqual(result, common.MUTATED_NOT_READY_RETRY_EXIT_CODE)
+        self.assertEqual(json.loads(generation.read_text(encoding="utf-8"))["state"], "committed")
+        record = json.loads((jobs_root / "minutes.json").read_text(encoding="utf-8"))
+        self.assertEqual(record["status"], "not_ready")
 
     def test_mutated_not_ready_from_unexpected_operation_is_an_error(self):
         # Exit 76 only carries the commit-and-retry contract for the download
@@ -6418,8 +6523,11 @@ class FullPortContractTest(unittest.TestCase):
     def test_schedule_retains_full_job_set_and_uuid_migration(self) -> None:
         root = Path(__file__).resolve().parents[2]
         config = json.loads((root / "configs/tushare_update_schedule.json").read_text(encoding="utf-8"))
-        # 29 since cn_preopen_text_backfill_0855 was retired (2026-09-10).
-        self.assertEqual(len(config["jobs"]), 29)
+        # 29 since cn_preopen_text_backfill_0855 was retired (2026-09-10); 30
+        # since the minute layer left cn_evening_full for its own manual job.
+        self.assertEqual(len(config["jobs"]), 30)
+        self.assertIn("--no-include-intraday", config["jobs"]["cn_evening_full"]["extra_args"])
+        self.assertEqual(config["jobs"]["manual_intraday_minutes"]["operation"], "intraday_by_date")
         self.assertEqual(
             config["jobs"]["manual_commit_identity_migration"]["operation"],
             "commit_identity_migration",
@@ -6440,6 +6548,27 @@ class FullPortContractTest(unittest.TestCase):
             cron_update.build_job_commands(context),
             [["python", "scripts/data/migrate_commit_identity.py", "--raw-dir", "raw"]],
         )
+
+    def test_minute_job_runs_the_by_date_updater_as_a_mutating_job(self) -> None:
+        context = cron_update.RunContext(
+            config={"default_raw_dir": "raw", "default_update_args": ["--min-interval-seconds", "0.80"]},
+            repo_root=Path("."),
+            python="python",
+            job_name="manual_intraday_minutes",
+            job={"operation": "intraday_by_date"},
+            start_date="20260819",
+            end_date="20260911",
+            timezone_name="Asia/Shanghai",
+        )
+        self.assertEqual(
+            cron_update.build_job_commands(context),
+            [[
+                "python", "scripts/data/tushare_download.py", "update-intraday-by-date",
+                "--start-date", "20260819", "--end-date", "20260911", "--raw-dir", "raw",
+                "--min-interval-seconds", "0.80",
+            ]],
+        )
+        self.assertIn("intraday_by_date", cron_update.MUTATING_OPERATIONS)
 
     def test_generation_resume_uses_explicit_command_identity(self) -> None:
         transaction = {

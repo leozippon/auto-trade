@@ -39,7 +39,10 @@ QUANT_PYTHON=/home/lzp/miniconda3/envs/quant/bin/python
 # recent window with open-window refreshes plus selected reference/daily
 # refreshes, not a full-history re-scan from the research lower bound. T+1
 # margin sources are handled by the pre-open jobs below. stk_auction recheck
-# is cn_evening_auction_backfill, not this job.
+# is cn_evening_auction_backfill, not this job. The 1-minute layer is not
+# landed here either: stk_mins carries a per-token daily request quota, so the
+# minutes land through the manual runner job manual_intraday_minutes, where a
+# quota stop cannot fail the update the morning Paper release depends on.
 35 23 * * * cd $REPO_ROOT && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_evening_full
 
 # Refresh the six data-quality status files over the full retained window
@@ -49,13 +52,11 @@ QUANT_PYTHON=/home/lzp/miniconda3/envs/quant/bin/python
 # domains clamp their expectations internally, so weekend runs stay honest.
 30 2 * * * cd $REPO_ROOT && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_nightly_full_audit
 
-# Reduce the minute partitions the evening job just landed to the derived
-# daily order-flow table (data/raw/intraday_flow). Not a TuShare job: it
-# fetches nothing and only reads the lake, so it is a plain line rather than a
-# runner job. It is incremental (one trade date per night, seconds) and must
-# finish before the evening node's conservative 03:05 completion boundary,
-# which is when the Timeview exposes that trade date's events rows. A night
-# the evening job overruns simply leaves the day to the next run.
+# Reduce whatever minute partitions have landed (manual_intraday_minutes) to
+# the derived daily order-flow table (data/raw/intraday_flow). Not a TuShare
+# job: it fetches nothing and only reads the lake, so it is a plain line rather
+# than a runner job. It is incremental (existing trade dates are skipped, a new
+# one costs about a second), so a night without new minutes is a no-op.
 45 2 * * * cd $REPO_ROOT && $QUANT_PYTHON scripts/data/build_intraday_flow.py
 
 # Rebuild and audit ALL PIT-ready financial event availability partitions
