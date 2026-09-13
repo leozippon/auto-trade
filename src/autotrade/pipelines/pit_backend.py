@@ -15,8 +15,10 @@ import math
 import os
 import shutil
 import stat
+import threading
 import uuid
-from collections.abc import Iterator, Mapping
+from collections import OrderedDict
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, time
@@ -143,7 +145,7 @@ class ResearchPITSnapshotProvider:
         )
         self.cache_root = Path(cache_root).resolve() if cache_root is not None else self.experiment_dir / "pit_views"
         self.cache_root.mkdir(parents=True, exist_ok=True)
-        self._replay_frame_cache: _ReplayFrameCache = {}
+        self._replay_frame_cache = _ReplayFrameCache()
         record = self._bind_cache_contract()
         if pit_views_seed is not None:
             seed_pit_views(
@@ -552,7 +554,7 @@ class PITDailyEvaluationBackend:
         self.nl_config = nl_config or NLConfig()
         self.nl_failure_policy = nl_failure_policy
         self.max_intraday_row_group_rows = int(max_intraday_row_group_rows)
-        self._replay_frame_cache: _ReplayFrameCache = {}
+        self._replay_frame_cache = _ReplayFrameCache()
         # Host-side slot of each completed result, by ``result.json`` path. The
         # Agent-readable record names its slots opaquely, so the null control
         # takes the replay directory from the bundle this backend evaluated
@@ -1072,9 +1074,6 @@ class _AsOfReadOnlyView:
 _STASH_CONTRACT_SCHEMA_VERSION = 2
 # What a finished offline prebuild leaves inside the stash it filled.
 _STASH_PREBUILD_RECORD = "prebuild.json"
-_ReplayFrameCache = dict[
-    str, tuple[dict[str, object], dict[str, pd.DataFrame]]
-]
 
 
 def _asof_stash_dir(
@@ -1279,12 +1278,7 @@ def prebuild_asof_stash(
             "seconds": round(perf_counter() - started, 1),
             "reused": True,
         }
-    frames = _load_replay_frames(
-        replay,
-        generation_id=generation_id,
-        replay_manifest=replay_manifest,
-        cache={},
-    )
+    frames = _decode_replay_frames(replay)
     daily = frames["daily"]
     daily = daily[
         (daily["trade_date"].map(_date_key) >= _date_key(start))
@@ -1414,6 +1408,71 @@ def _require_record_shape(
             raise TypeError(f"{label}.{key} must be an array")
 
 
+# Decoded replay slots one cache keeps. A decoded full-year slot holds about
+# 16 GiB, most of it ``events``, and a worker does not go back to a slot it has
+# left: a Fold's parent control, smoke, candidate and null-control replays all
+# run on the Fold's own slot, and the next Fold, Held-out or deployment replay
+# moves on to a new one (167 replays over 72 h: 28 slot changes, no return).
+_REPLAY_FRAME_CACHE_SLOTS = 1
+
+
+class _ReplayFrameCache:
+    """The most recently used decoded replay slots of one backend or provider.
+
+    Unbounded, it grew a long-lived worker by one slot per Fold (one worker held
+    69 GiB with four slots). A miss drops the least recently used slots BEFORE
+    it decodes, so once no replay still holds them their pages are reused for
+    the new slot instead of the process holding both at the decode peak. The decode runs under the lock:
+    ``batch_validate`` replays that miss together decode the slot once and
+    share its frames, which every caller treats as read-only.
+    """
+
+    def __init__(self, max_slots: int = _REPLAY_FRAME_CACHE_SLOTS) -> None:
+        self._max_slots = max_slots
+        self._slots: OrderedDict[
+            str, tuple[dict[str, object], dict[str, pd.DataFrame]]
+        ] = OrderedDict()
+        self._lock = threading.Lock()
+
+    def load(
+        self,
+        key: str,
+        identity: dict[str, object],
+        decode: Callable[[], dict[str, pd.DataFrame]],
+    ) -> dict[str, pd.DataFrame]:
+        with self._lock:
+            if key in self._slots and self._slots[key][0] == identity:
+                self._slots.move_to_end(key)
+                return self._slots[key][1]
+            # A rebuilt path under a new generation replaces its stale entry.
+            self._slots.pop(key, None)
+            while len(self._slots) >= self._max_slots:
+                self._slots.popitem(last=False)
+            frames = decode()
+            self._slots[key] = (identity, frames)
+            return frames
+
+
+def _decode_replay_frames(replay_dir: Path) -> dict[str, pd.DataFrame]:
+    frames: dict[str, pd.DataFrame] = {}
+    for name, filename in (
+        ("daily", "daily.parquet"),
+        ("events", "events.parquet"),
+        ("macro", "macro.parquet"),
+        ("fundamentals", "fundamentals.parquet"),
+        ("auction", "auction.parquet"),
+        ("text_index", "text_index.parquet"),
+    ):
+        path = replay_dir / filename
+        if path.exists():
+            frames[name] = pd.read_parquet(path)
+        elif name == "daily":
+            raise FileNotFoundError(f"replay slot has no daily.parquet: {replay_dir}")
+        else:
+            frames[name] = pd.DataFrame()
+    return frames
+
+
 def _load_replay_frames(
     replay_dir: Path,
     *,
@@ -1421,33 +1480,15 @@ def _load_replay_frames(
     replay_manifest: dict[str, object],
     cache: _ReplayFrameCache,
 ) -> dict[str, pd.DataFrame]:
-    key = str(replay_dir.resolve())
     identity: dict[str, object] = {
         "generation_id": generation_id,
         "replay_manifest": replay_manifest,
     }
-    entry = cache.get(key)
-    cached = entry[1] if entry is not None and entry[0] == identity else None
-    if cached is None:
-        frames: dict[str, pd.DataFrame] = {}
-        for name, filename in (
-            ("daily", "daily.parquet"),
-            ("events", "events.parquet"),
-            ("macro", "macro.parquet"),
-            ("fundamentals", "fundamentals.parquet"),
-            ("auction", "auction.parquet"),
-            ("text_index", "text_index.parquet"),
-        ):
-            path = replay_dir / filename
-            if path.exists():
-                frames[name] = pd.read_parquet(path)
-            elif name == "daily":
-                raise FileNotFoundError(f"replay slot has no daily.parquet: {replay_dir}")
-            else:
-                frames[name] = pd.DataFrame()
-        cache[key] = (identity, frames)
-        cached = frames
+    cached = cache.load(
+        str(replay_dir.resolve()), identity, lambda: _decode_replay_frames(replay_dir)
+    )
     frames = dict(cached)
+    # The one frame every replay filters and hands on; the others are shared.
     frames["daily"] = cached["daily"].copy()
     return frames
 

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import errno
+import gc
 import json
 import os
 import shutil
 import stat
 import threading
+import time
+import weakref
 from datetime import datetime
 from pathlib import Path
 
@@ -42,6 +45,7 @@ from autotrade.pipelines.pit_backend import (
     _asof_stash_dir,
     _bind_asof_stash_contract,
     _load_replay_frames,
+    _ReplayFrameCache,
 )
 
 
@@ -1209,7 +1213,7 @@ def test_load_replay_frames_reuses_cached_parquets(
         "kind": "replay_slot",
         "raw_generation": {"generation_id": "generation_one"},
     }
-    cache = {}
+    cache = _ReplayFrameCache()
     calls = {"n": 0}
     real_read = pd.read_parquet
 
@@ -1245,7 +1249,7 @@ def test_replay_frame_cache_reloads_rebuilt_path_for_new_generation(tmp_path: Pa
     pd.DataFrame({"trade_date": ["20240102"], "close": [1.0]}).to_parquet(
         replay / "daily.parquet", index=False
     )
-    cache = {}
+    cache = _ReplayFrameCache()
     first = _load_replay_frames(
         replay,
         generation_id="generation_one",
@@ -1266,6 +1270,72 @@ def test_replay_frame_cache_reloads_rebuilt_path_for_new_generation(tmp_path: Pa
         cache=cache,
     )
     assert second["daily"]["close"].tolist() == [2.0]
+
+
+def test_replay_frame_cache_keeps_the_most_recent_slots_and_frees_before_decoding() -> None:
+    decoded: list[str] = []
+    alive_at_decode: dict[str, list[str]] = {}
+    alive: dict[str, weakref.ref] = {}
+
+    def decoder(key: str):
+        def decode() -> dict[str, pd.DataFrame]:
+            gc.collect()
+            # Every slot the bound pushed out is already gone when the next
+            # decode starts, so a worker never holds both at the decode peak.
+            alive_at_decode[key] = [name for name, ref in alive.items() if ref() is not None]
+            decoded.append(key)
+            frame = pd.DataFrame({"slot": [key]})
+            alive[key] = weakref.ref(frame)
+            return {"daily": frame}
+
+        return decode
+
+    identity = {"generation_id": "g"}
+    single = _ReplayFrameCache()
+    single.load("a", identity, decoder("a"))
+    single.load("a", identity, decoder("a"))
+    single.load("b", identity, decoder("b"))
+    assert decoded == ["a", "b"]
+    assert alive_at_decode["b"] == []  # "a" was dropped before "b" decoded
+
+    decoded.clear()
+    alive.clear()
+    pair = _ReplayFrameCache(max_slots=2)
+    for key in ("a", "b", "a", "c", "a", "b"):
+        pair.load(key, identity, decoder(key))
+    # "a" was touched after "b", so "c" pushes out "b" and "b" pushes out "c".
+    assert decoded == ["a", "b", "c", "b"]
+    assert alive_at_decode["c"] == ["a"] and alive_at_decode["b"] == ["a"]
+
+    # A rebuilt path under a new generation is decoded again, not reused, and
+    # its stale frames are gone before the decode starts.
+    pair.load("a", {"generation_id": "g2"}, decoder("a"))
+    assert decoded[-1] == "a" and alive_at_decode["a"] == ["b"]
+
+
+def test_replay_frame_cache_decodes_a_concurrent_miss_once() -> None:
+    calls = {"n": 0}
+    start = threading.Barrier(3)
+
+    def decode() -> dict[str, pd.DataFrame]:
+        calls["n"] += 1
+        time.sleep(0.2)  # long enough for the other requests to arrive mid-decode
+        return {"daily": pd.DataFrame({"close": [1.0]})}
+
+    cache = _ReplayFrameCache()
+    results: list[dict[str, pd.DataFrame]] = []
+
+    def request() -> None:
+        start.wait()
+        results.append(cache.load("slot", {"generation_id": "g"}, decode))
+
+    threads = [threading.Thread(target=request) for _ in range(3)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert calls["n"] == 1
+    assert len(results) == 3 and all(result is results[0] for result in results)
 
 
 def test_asof_stash_uses_complete_schedule_hierarchy(tmp_path: Path) -> None:

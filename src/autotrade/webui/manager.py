@@ -71,10 +71,12 @@ from .registry import (
 # into swap and stayed there. That is not a slowdown the experiments absorb
 # quietly -- 28 slot-bearing backtest calls across five arms died at the fit
 # or inference cap in one day, so host contention was being billed to the
-# strategies as Validation verdicts. Four parent conversations plus their
-# sub-agent fan-out (at most 4 concurrent each) also sit inside the gateway's
-# measured 16-20 concurrent-stream throughput plateau, so the gateway was
-# never the reason for a higher number. The operator holds concurrency at four;
+# strategies as Validation verdicts. Four arms also fit the model service: in
+# production its aggregate generation throughput levels off at about 8
+# concurrent requests (~150 tok/s), while four parent conversations with their
+# sub-agent fan-out (at most 4 concurrent each) run 3-5 requests at a time
+# (p50/p90) and use about half of that throughput, so the gateway is not what
+# binds at four. The operator holds concurrency at four;
 # a new direction therefore replaces the weakest running arm rather than adding one.
 MAX_RUNNING_EXPERIMENTS = 4
 # SIGTERM graces before the worker's process group is SIGKILLed. Terminate is
