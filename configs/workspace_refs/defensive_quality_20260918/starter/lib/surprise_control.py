@@ -14,7 +14,7 @@ so that `c_es` scores exactly what that arm trades:
 
 Reads the `fundamentals` and `events` as-of domains with column projection and
 date windows; a round whose events selection lacks `report_rc` gets the
-quarterly leg only, and the fold record must say so.
+quarterly leg only, and the result notes must say so.
 """
 
 from datetime import timedelta

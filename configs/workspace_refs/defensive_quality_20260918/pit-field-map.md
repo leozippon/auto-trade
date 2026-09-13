@@ -1,6 +1,6 @@
 # 08:30 字段图
 
-先核对本轮 `data_summary.json`、snapshot manifest 与 `unit_reference.json`：`fundamentals.datasets` 必须列出 `income_vip`、`cashflow_vip`、`balancesheet_vip`（缺任一，质量腿整块不可构造，本臂只剩低波腿）；`macro.datasets` 应列出 `index_daily`（缺它时低波腿按变体 c 用总波动，买单元数据 `vol_basis` 写 `total`，折内记录必须写明）；`events.datasets` 列出 `report_rc` 时 `c_es` 才有年度腿（缺它只剩季度腿，同样写明）。本文是本包可见时点、单位、去重规则与陷阱的**唯一权威表述**。
+先核对本轮 `data_summary.json`、snapshot manifest 与 `unit_reference.json`：`fundamentals.datasets` 必须列出 `income_vip`、`cashflow_vip`、`balancesheet_vip`（缺任一，质量腿整块不可构造，本臂只剩低波腿）；`macro.datasets` 应列出 `index_daily`（缺它时低波腿按变体 c 用总波动，买单元数据 `vol_basis` 写 `total`，结果笔记必须写明）；`events.datasets` 列出 `report_rc` 时 `c_es` 才有年度腿（缺它只剩季度腿，同样写明）。本文是本包可见时点、单位、去重规则与陷阱的**唯一权威表述**。
 
 ## 读法
 
@@ -56,4 +56,3 @@ universe = pd.read_parquet(context.asof_dir + "/universe")   # ts_code、name、
 - **整手与价格上限**：100 股整手，T-1 收盘价 ≤ 30 元使一手 ≤ 3,000 元；科创板 200 股起，本包剔除。
 - **对照不得对自己的面中性化**：`c_vol20` 的中性化集去掉 `vol_20` 与 `max_20`，`c_growth` 去掉 `yoy_np`；候选与消融腿用完整集。
 - **`c_es` 的陷阱全部继承盈利意外包**：`quarter` 是财年不是季度、`np` 与 `n_income_attr_p` 差一万倍、一致预期窗口结束于公告日 00:00、单季差分按同财年累计值。
-- **盘后定价成交**（本轮 Held-out 内的制度变化）改变日线量额而不改变收益，本包的两腿只用收益与报表，不受影响。
