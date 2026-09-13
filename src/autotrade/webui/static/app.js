@@ -422,8 +422,7 @@ function fmtSharpe(value) {
 // The cumulative validation tile is the final value of the curve below it,
 // never a product of per-Fold window returns: rolling Validation windows
 // overlap, so compounding whole windows counts the shared quarters again.
-const CUM_VALID_HINT =
-  "按各 Fold 实际沿用的策略日收益前向串联（重叠日只计最早的 Fold），与曲线终值同源";
+const CUM_VALID_HINT = "即下方验证曲线的终值";
 
 function sealedMetricTile(revealed, label, value, format = fmtPct) {
   if (!revealed) return { label, value: "未揭示", cls: "" };
@@ -1419,16 +1418,7 @@ async function renderHomePage() {
   if (best)
     container.append(heroPanel(best), el("div", { class: "section-gap" }));
   container.append(
-    el(
-      "div",
-      { class: "page-head" },
-      el("h2", {}, "实验列表"),
-      el(
-        "span",
-        { class: "sub" },
-        "点击实验卡片查看 Epoch/Fold 结果、运行状态与 Agent Trace",
-      ),
-    ),
+    el("div", { class: "page-head" }, el("h2", {}, "实验列表")),
   );
   if (payload.experiments.length) {
     const grid = el("div", { class: "grid" });
@@ -1536,45 +1526,28 @@ function transitionGaps(term) {
   return gaps.length ? `（${gaps.join("，")}）` : "";
 }
 
-/* The graduation terms behind the badge, in the order the rules apply them.
-
-   Term (b) counts the whole development chain, and most of its transitions
-   replayed artifacts the shipped one replaced — so term (c), the shipped
-   artifact's own share of those transitions, has to be read beside it or a
-   consistent chain gets credited to a strategy that never went forward once.
-   The diagnostics after them decide nothing and say so. */
+/* The verdict diagnostics the badge and its 前向一致 term do not show: the
+   shipped artifact's own forward record (the chain's other transitions
+   replayed artifacts it replaced) and the reference-only selection figures. */
 function verdictTerms(verdict) {
   if (!verdict) return null;
-  const term = verdict.walk_forward || {};
   const diag = verdict.diagnostics || {};
   const number = (value, digits) =>
     value === null || value === undefined ? null : Number(value).toFixed(digits);
   const parts = [];
-  if (term.transitions !== null && term.transitions !== undefined)
-    parts.push(
-      `前向一致性（末个 Epoch 整条链）${term.positive_excess}/${term.transitions} 超额为正，需 ≥ ${term.required ?? "—"}`,
-    );
   const own = diag.final_artifact_forward_transitions;
   if (own !== null && own !== undefined)
-    parts.push(
-      own === 0
-        ? "本次交付产物自身的前向过渡 0 次：链上其余过渡跑的都是它替换掉的上游产物"
-        : `本次交付产物自身的前向过渡 ${diag.final_artifact_forward_positive}/${own} 超额为正`,
-    );
+    parts.push(`交付产物自身过渡 ${diag.final_artifact_forward_positive ?? "—"}/${own} 超额为正`);
   const mean = number(diag.walk_forward_mean_excess_percentile, 3);
-  if (mean) parts.push(`链上过渡平均 null 分位 ${mean}`);
+  if (mean) parts.push(`过渡平均 null 分位 ${mean}`);
   const deflated = number(diag.deflated_sharpe_probability, 2);
   const frozenPercentile = number(diag.validation_excess_percentile, 3);
   if (deflated || frozenPercentile)
     parts.push(
-      `冻结该产物的 Fold：候选 ${diag.candidates_evaluated ?? "—"} 个 · 去偏 Sharpe 概率 ${deflated || "—"} · 验证 null 分位 ${frozenPercentile || "—"}`,
+      `冻结 Fold 候选 ${diag.candidates_evaluated ?? "—"} 个 · 去偏 Sharpe 概率 ${deflated || "—"} · 验证 null 分位 ${frozenPercentile || "—"}`,
     );
   if (!parts.length) return null;
-  return el(
-    "div",
-    { class: "meta-line" },
-    `毕业条件：Held-out 门（超额 > 0、Sharpe > 0、回撤在限内）· ${parts.join(" · ")}`,
-  );
+  return el("div", { class: "meta-line" }, parts.join(" · "));
 }
 
 /* The span a parent control is actually scored on. Once a Fold's Validation
@@ -1623,18 +1596,13 @@ function transitionsStrip(detail) {
   // sealed tiles beside this strip already say so.
   if (!term) return null;
   const strip = el("div", { class: "strip" });
-  strip.append(el("span", { class: "strip-title" }, "未来季度证据 · 样本外过渡"));
+  strip.append(el("span", { class: "strip-title" }, "样本外过渡"));
   if (!term.transitions) {
     strip.append(
-      el(
-        "span",
-        { class: "mode-note" },
-        "本 Epoch 还没有样本外过渡：每个 Epoch 的首个 Fold 不开启过渡，从第二个 Fold 起才有。",
-      ),
+      el("span", { class: "mode-note" }, "本 Epoch 暂无（从第二个 Fold 起才有）"),
     );
     return strip;
   }
-  const source = WALK_FORWARD_SOURCES[term.source] || term.source || "—";
   const required = term.required ?? null;
   const percentile =
     term.mean_excess_percentile === null ||
@@ -1648,21 +1616,19 @@ function transitionsStrip(detail) {
       label: `超额为正（${epochShort(epochId)}）`,
       value: `${term.positive_excess}/${term.transitions}${required === null ? "" : `　需 ≥${required}`}${transitionGaps(term)}`,
       cls: required === null ? "" : term.positive_excess >= required ? "pos" : "neg",
-      title: `末个 Epoch 计入的 ${term.transitions} 次样本外过渡（取自各 Fold 的${source}，回放基线锚点的不计）里，${term.positive_excess} 次的中性化超额为正。毕业按 ⌈2/3⌉ 需 ${required ?? "—"} 次；原始超额只作展示，不参与计数。${term.failed ? `其中 ${term.failed} 次回放因策略代码报错失败，按非正计。` : ""}${term.unmeasured ? `其中 ${term.unmeasured} 次未测得正负（算不出中性化超额，或旧账本里未分类的失败），毕业因此不通过。` : ""}`,
+      title: `中性化超额为正的过渡次数；毕业需 ≥ ${required ?? "—"}${term.failed ? "；报错按非正计" : ""}${term.unmeasured ? "；未测得则毕业不通过" : ""}`,
     },
     {
       label: "平均新季中性化超额",
       value: fmtPct(term.mean_neutralized_excess),
       cls: signCls(term.mean_neutralized_excess),
-      title:
-        "这些过渡在各自计分区间（验证窗口跨多个季度时只算本 Fold 的新季度）中性化后的平均超额：与计数同口径。只作阅读参考，不参与毕业判定。",
+      title: "不参与毕业判定",
     },
     {
       label: "平均 null 分位",
       value: percentile || "—",
       cls: "",
-      title:
-        "这些过渡的超额在同规模随机换名重放里的平均分位：接近 0.5 表示与随机组合无法区分。只作阅读参考，不参与毕业判定。",
+      title: "随机换名重放中的分位，≈0.5 即与随机组合无异；不参与毕业判定",
     },
     own === null || own === undefined
       ? null
@@ -1670,9 +1636,7 @@ function transitionsStrip(detail) {
           label: "交付产物自身过渡",
           value: `${diagnostics.final_artifact_forward_positive ?? "—"}/${own}`,
           cls: own ? "" : "neg",
-          title: own
-            ? "本次 Held-out 交付的那一份产物自己走过的前向过渡，以及其中超额为正的次数；链上其余过渡跑的是它替换掉的上游产物。"
-            : "本次 Held-out 交付的产物自己一次前向过渡都没走过：链上的过渡跑的全是它替换掉的上游产物。",
+          title: "交付产物自己走过的过渡；链上其余过渡跑的是它替换掉的上游产物",
         },
   ].filter(Boolean);
   for (const item of items)
@@ -1704,19 +1668,11 @@ function walkForwardPanel(detail) {
   const panel = el(
     "div",
     { class: "panel section-gap" },
-    el(
-      "h4",
-      { class: "subsection-title" },
-      "样本外过渡：父本策略在下一个窗口的表现",
-    ),
+    el("h4", { class: "subsection-title" }, "样本外过渡"),
     el(
       "div",
       { class: "hint" },
-      "每个 Fold 开始前，宿主把上一 Fold 冻结的策略原样放进本 Fold 的验证区间重跑一次（父本对照），这一次重放就是一次样本外过渡。" +
-        "下表给的全是这个父本策略在新窗口的成绩，不是本 Fold 新策略的成绩。" +
-        "验证区间跨多个周期时，本 Fold 只有新的那个周期是没见过的地面，过渡就只按它计分（计分区间列）。" +
-        "毕业裁决只看末个 Epoch：超额为正的过渡至少要占 ⌈2/3⌉。" +
-        "首个 Epoch 的过渡是真正的前向样本外证据，之后的 Epoch 重访血缘已经见过的年份。",
+      "上一 Fold 冻结的策略原样重跑下一 Fold 的计分区间；表中是父本成绩，不是新策略的。",
     ),
   );
   for (const epoch of epochs) {
@@ -1725,8 +1681,8 @@ function walkForwardPanel(detail) {
       el(
         "div",
         { class: "meta-line" },
-        `${epochShort(epoch.epoch_id)}：${term.transitions} 次过渡，其中 ${term.positive_excess} 次父本超额为正`,
-        term.required ? `（按 ⌈2/3⌉ 需 ${term.required} 次）` : null,
+        `${epochShort(epoch.epoch_id)}：${term.positive_excess}/${term.transitions} 超额为正`,
+        term.required ? `，需 ≥${term.required}` : null,
       ),
     );
     if (term.source !== "parent_control") {
@@ -1734,7 +1690,7 @@ function walkForwardPanel(detail) {
         el(
           "div",
           { class: "mode-note" },
-          `本排程的过渡取自各 Fold 的${WALK_FORWARD_SOURCES[term.source] || term.source || "—"}，明细在对应 Fold 面板`,
+          `取自各 Fold 的${WALK_FORWARD_SOURCES[term.source] || term.source || "—"}，明细见 Fold 面板`,
         ),
       );
       continue;
@@ -1752,44 +1708,24 @@ function walkForwardPanel(detail) {
         el(
           "tr",
           {},
+          el("th", {}, "过渡"),
           el(
             "th",
-            { title: "上一 Fold 冻结的策略，被原样放进下一个 Fold 的验证区间重跑" },
-            "过渡",
-          ),
-          el(
-            "th",
-            {
-              title:
-                "这次过渡实际计分的区间：验证区间跨多个周期时只算本 Fold 的新周期，否则就是整个验证区间",
-            },
+            { title: "验证区间跨多个周期时只算本 Fold 的新周期" },
             "计分区间",
           ),
-          el("th", { title: "父本策略在计分区间的区间收益" }, "父本收益"),
+          el("th", {}, "父本收益"),
+          el("th", { title: "相对沪深300，只作展示" }, "父本超额"),
           el(
             "th",
-            {
-              title:
-                "父本在计分区间相对沪深300的原始超额收益，只作展示：沪深300 自身的涨跌会直接进入这个数",
-            },
-            "父本超额",
-          ),
-          el(
-            "th",
-            {
-              title:
-                "父本在计分区间中性化（基准 + 规模）后的超额，> 0 才算这次过渡通过；算不出来时按未证明计，不退回原始超额",
-            },
+            { title: "> 0 才算通过；算不出时记为未证明" },
             "中性化超额",
           ),
-          el("th", { title: "父本在计分区间日收益的年化 Sharpe" }, "父本 Sharpe"),
-          el("th", { title: "父本在计分区间的峰谷回撤" }, "父本回撤"),
+          el("th", {}, "父本 Sharpe"),
+          el("th", {}, "父本回撤"),
           el(
             "th",
-            {
-              title:
-                "这次过渡的超额在同规模随机换名重放里的分位（与计分区间同一段）：接近 0.5 表示与随机组合无法区分。只作阅读参考，不参与毕业判定",
-            },
+            { title: "随机换名重放中的分位，≈0.5 即与随机组合无异；不参与毕业判定" },
             "null 分位",
           ),
         ),
@@ -1804,18 +1740,10 @@ function walkForwardPanel(detail) {
               {},
               `${foldPeriodLabel(detail, folds[index].fold_ref)} 冻结的策略 → ${foldPeriodLabel(detail, row.fold_ref)} 窗口`,
               failed
-                ? el(
-                    "span",
-                    { class: "mode-note" },
-                    "（对照未完成，这次过渡不算通过）",
-                  )
+                ? el("span", { class: "mode-note" }, "（对照未完成，不算通过）")
                 : null,
               control.baseline_anchor
-                ? el(
-                    "span",
-                    { class: "mode-note" },
-                    "（回放的是基线锚点，对照参考而非交付产物：这次过渡不计入毕业条件）",
-                  )
+                ? el("span", { class: "mode-note" }, "（基线锚点，不计入毕业）")
                 : null,
             ),
             el("td", { class: "mode-note" }, controlSpanLabel(control)),
@@ -2078,53 +2006,22 @@ function pickBestExperiment(list) {
   return ranked[0];
 }
 
-/* Cache key: equity only changes when new records land (or a rerun replaces
-   results — caught by the cumulative-return components). */
-/* The walk-forward evidence, in one line on the experiment card.
-
-   The three tiles beside it are cumulative returns over ground the lineage was
-   largely developed on; the only future-quarter evidence a card carries is the
-   transition count the graduation verdict reads, so a card that shows the
-   returns without it invites exactly the comparison the verdict refuses to
-   make. Same projection as the detail page's strip and the verdict itself
-   (registry._walk_forward_view over ledger.walk_forward_transitions, and
-   ledger.final_artifact_transitions through the verdict diagnostics); nothing
-   is counted or averaged here. */
+/* The walk-forward evidence, in one line on the experiment card beside its
+   cumulative in-sample returns. Same projection as the detail page's strip
+   (registry._walk_forward_view, verdict diagnostics); nothing is recomputed. */
 function transitionCardLine(item) {
   const epochId = (item.metrics || {}).epoch_id;
   const row = (item.metrics_by_epoch || []).find((r) => r.epoch_id === epochId);
-  if (!row)
-    return el(
-      "div",
-      {
-        class: "meta-line",
-        title: "本实验还没有记录 Fold，也就没有任何过渡。",
-      },
-      "尚无过渡",
-    );
+  if (!row) return el("div", { class: "meta-line" }, "尚无过渡");
   const term = row.walk_forward;
   // Null only where the transitions are Test-stage evidence still under seal;
   // the sealed tiles beside this line already say so.
-  if (!term)
-    return el(
-      "div",
-      {
-        class: "meta-line",
-        title:
-          "本排程的过渡取自各 Fold 的冻结 Test 结果，揭示前与其他 Test 数字一同封存。",
-      },
-      "过渡未揭示",
-    );
+  if (!term) return el("div", { class: "meta-line" }, "过渡未揭示");
   const required = term.required ?? null;
-  const source = WALK_FORWARD_SOURCES[term.source] || term.source || "—";
   if (!term.transitions)
     return el(
       "div",
-      {
-        class: "meta-line",
-        title:
-          "每个 Epoch 的首个 Fold 不开启过渡，从第二个 Fold 起才有，因此本 Epoch 目前一次都还没有。",
-      },
+      { class: "meta-line" },
       `过渡 0/0（${epochShort(epochId)}）`,
     );
   const own = ((item.verdict || {}).diagnostics || {})
@@ -2158,24 +2055,11 @@ function transitionCardLine(item) {
         `${(item.verdict || {}).diagnostics.final_artifact_forward_positive ?? "—"}/${own}`,
       ),
     );
-  return el(
-    "div",
-    {
-      class: "meta-line",
-      title:
-        `末个 Epoch 的 ${term.transitions} 次样本外过渡（取自各 Fold 的${source}）里，` +
-        `${term.positive_excess} 次相对沪深300的超额为正，毕业按 ⌈2/3⌉ 需 ${required ?? "—"} 次；` +
-        "「新季均」是这些过渡在各自计分区间上的平均超额，只作阅读参考。" +
-        (own === null || own === undefined
-          ? ""
-          : own
-            ? "「交付产物自身」是本次交付的那一份产物自己走过的前向过渡。"
-            : "本次交付的产物自己一次前向过渡都没走过：链上的过渡跑的全是它替换掉的上游产物。"),
-    },
-    ...parts,
-  );
+  return el("div", { class: "meta-line" }, ...parts);
 }
 
+/* Cache key: equity only changes when new records land (or a rerun replaces
+   results — caught by the cumulative-return components). */
 function equityFingerprint(item) {
   const metrics = item.metrics || {};
   return `${item.folds_recorded}|${item.heldout_recorded}|${metrics.cum_test_return}|${metrics.cum_valid_return}|${metrics.cum_heldout_return}`;
@@ -2244,17 +2128,8 @@ function confirmRevealTests(experimentId) {
     el(
       "div",
       {},
-      el(
-        "p",
-        {},
-        "Fold Test 在各 Fold 冻结时是样本外评估，之后仅通过受控的 compact 指标投影成为 Meta-development 反馈；Held-out 才是唯一最终未触碰评估。",
-      ),
-      el(
-        "p",
-        {},
-        "人工揭示会打开不受控的明细反馈通道，因此揭示后本实验封存：不能再重跑、回滚或注入任何指令。",
-      ),
-      el("p", {}, "查看/停止/删除仍然可用。此操作不可撤销。"),
+      el("p", {}, "揭示后实验封存：不能再重跑、回滚或注入指令，查看、停止和删除仍可用。"),
+      el("p", {}, "此操作不可撤销。"),
     ),
     [
       el("button", { class: "btn", onclick: closeModal }, "取消"),
@@ -2346,10 +2221,8 @@ async function openCreateModal() {
       "p",
       { class: "hint" },
       hasPeriodOptions
-        ? "所有参数均有默认值。周期从交易日历自动生成，仅列出数据完整、可回测的周期；切换 Fold 周期后选项与推荐值随之更新。任一周期字段也接受显式区间 20220101..20251231。"
-        : "所有参数均有默认值；仅实验名与周期标签必填。周期标签格式随 Fold 周期而定：quarter → 2024Q1，month → 202401，" +
-            "week → 周一日期 20240108，year → 2024；任一周期字段也接受显式区间 20260101..20260630。" +
-            "策略按固定周期在固定推理时间运行；推理时间使用 Asia/Shanghai 24 小时制，并始终遵守 PIT 可见性。",
+        ? "周期选项只列出数据完整的周期。"
+        : "周期标签：quarter 2024Q1，month 202401，week 周一日期 20240108，year 2024；也可填区间 20260101..20260630。",
     ),
   );
   for (const group of schema.groups) {
@@ -2675,13 +2548,13 @@ function updateValidationHint(inputs) {
   if (!rolling) {
     const last = options.indexOf(end);
     const folds = index >= 0 && last >= index ? last - index + 1 : 0;
-    const count = folds ? `${folds} 个常规 Fold` : "每个周期一个常规 Fold";
-    first.__hint.textContent = `↳ ${fmtPeriodRange(start)} ～ ${fmtPeriodRange(end)} 按周期切成 ${count}：每个 Fold 只验证本周期、没有测试区间，每个 Fold 前先做一次元学习；末个 Fold 冻结后进入 Held-out 裁决`;
+    const count = folds ? `${folds} 个 Fold` : "每个周期一个 Fold";
+    first.__hint.textContent = `↳ ${count}，每个前做一次元学习，之后进入 Held-out`;
     return;
   }
   first.__hint.textContent =
     index >= 0 && index + 1 < options.length
-      ? `↳ 首个 Fold：验证区间 ${fmtPeriodRange(options[index])} → 测试区间 ${fmtPeriodRange(options[index + 1])}（首个周期只做验证，之后逐周期滚动）`
+      ? `↳ 首个 Fold：验证 ${fmtPeriodRange(options[index])} → 测试 ${fmtPeriodRange(options[index + 1])}，之后逐周期滚动`
       : "↳ Test 阶段需要至少两个 Development 周期";
 }
 
@@ -3010,11 +2883,7 @@ async function openParamsModal(detail) {
   const body = el(
     "div",
     { class: "params-modal-body" },
-    el(
-      "p",
-      { class: "hint" },
-      "创建时显式设置的参数在前；其余按创建表单默认生效（灰色）。运行期实际生效值以 run manifest / snapshot manifest 为准。",
-    ),
+    el("p", { class: "hint" }, "实际生效值以 run manifest 为准。"),
     explicitRows.length
       ? el("h4", {}, `显式设置（${explicitRows.length}）`)
       : null,
@@ -3089,7 +2958,7 @@ function controlBar(detail) {
                 el(
                   "p",
                   {},
-                  "跳过剩余全部 Fold（及后续元学习），直接以最新冻结策略进入 Held-out 冻结测试。已完成的 Fold 不受影响；人工控制模式下 Held-out 会话仍需批准。确定？",
+                  "跳过剩余 Fold 与元学习，用最新冻结策略直接进入 Held-out；已完成的 Fold 不受影响。",
                 ),
                 [
                   el("button", { class: "btn", onclick: closeModal }, "取消"),
@@ -3174,7 +3043,7 @@ function controlBar(detail) {
               el(
                 "p",
                 {},
-                "立即向 worker 发送 SIGTERM。未落账的当前会话会被中断并撤销批准；恢复后先回到待批准状态，可重新编辑、预览并批准 Prompt。确定？",
+                "立即终止 worker（SIGTERM，10 秒后 SIGKILL）；未落账的当前会话在恢复后整体重跑。",
               ),
               [
                 el("button", { class: "btn", onclick: closeModal }, "取消"),
@@ -3221,12 +3090,12 @@ function controlBar(detail) {
                 el(
                   "p",
                   {},
-                  "立即重启：终止当前 worker 并按账本恢复运行，已完成会话保留，被中断的会话整体重跑。宽限内没有退出的 worker 会被强制终止。",
+                  "立即重启：终止 worker 并按账本恢复，被中断的会话整体重跑。",
                 ),
                 el(
                   "p",
                   {},
-                  "会话边界重启：worker 先把当前会话跑完记账，再在原地换用新代码继续，不丢进行中的 Fold。",
+                  "会话边界重启：当前会话落账后再换用新代码继续。",
                 ),
               ),
               [
@@ -3311,13 +3180,7 @@ function sessionListLine(detail, session, pending) {
     return { text: pending, cls: "", note: null };
   const inForce = foldInForce(detail, session);
   if (inForce.source === "none")
-    return {
-      text: "无产物",
-      cls: "",
-      note: "没有冻结新产物，也没有父产物可沿用",
-      noteTitle:
-        "本 Fold 没有给实验留下任何策略，下一 Fold 从模板重新开始，因此没有沿用中的验证数字",
-    };
+    return { text: "无产物", cls: "", note: "未冻结新产物，也无父产物可沿用" };
   const transition = inForce.transition || {};
   if (!inForce.result) {
     // A failed host parent control is the usual reason an inherited replay is
@@ -3349,9 +3212,7 @@ function sessionListLine(detail, session, pending) {
       .filter(Boolean)
       .join(" · "),
     noteTitle:
-      `${inForce.label("验证区间收益")}相对沪深300的超额，以及规模/β 中性化后的年化超额。` +
-      "过渡 = 上一 Fold 冻结的策略被原样放进本 Fold 新季度重跑的超额（父本对照），括号内是它在同规模随机换名重放里的分位；" +
-      "这一项计的是走查一致性，不是本行策略的成绩。",
+      "中性 = 规模/β 中性化年化超额；过渡 = 上一 Fold 策略在本 Fold 新季度的超额（括号内为 null 分位），不是本行策略的成绩",
   };
 }
 
@@ -3408,11 +3269,7 @@ function heldoutSessionLine(detail, session, pending) {
   }
   const ran = (session.records || []).length > 0;
   if (!detail.test_revealed)
-    return {
-      text: ran ? "未揭示" : pending,
-      cls: "",
-      note: "测试与 Held-out 尚未揭示，揭示后才会显示样本外数字与毕业裁决",
-    };
+    return { text: ran ? "未揭示" : pending, cls: "", note: null };
   return {
     text: ran ? "无裁决" : pending,
     cls: "",
@@ -3424,7 +3281,7 @@ function sessionListPanel(detail, selectedKey) {
   const panel = el(
     "div",
     { class: "panel" },
-    el("h4", {}, "会话（元学习 / Fold / Held-out）"),
+    el("h4", {}, "会话"),
   );
   const list = el("div", { class: "session-list" });
   const status = detail.status || {};
@@ -3713,11 +3570,7 @@ function directivePanel(detail, session) {
   if (session.kind !== "heldout") {
     if (isMeta && inherited && !existing) {
       panel.append(
-        el(
-          "div",
-          { class: "hint" },
-          "已预填实验级元学习探索方向；不修改则按原方向执行，可编辑覆盖当前元学习阶段。",
-        ),
+        el("div", { class: "hint" }, "已预填实验级元学习方向，可编辑覆盖。"),
       );
     }
     if (foldDefault) {
@@ -3725,11 +3578,7 @@ function directivePanel(detail, session) {
         el(
           "details",
           { class: "section-gap" },
-          el(
-            "summary",
-            { class: "hint" },
-            "已自动注入实验级默认 Fold 探索方向（Meta 与 Fold 共用）",
-          ),
+          el("summary", { class: "hint" }, "实验级 Fold 探索方向（已自动注入）"),
           el(
             "div",
             { class: "markdown section-gap", style: "white-space:pre-wrap" },
@@ -3743,14 +3592,7 @@ function directivePanel(detail, session) {
       el(
         "div",
         { class: "hint warn" },
-        "指令会注入系统提示词并记入账本。已完成 Fold 的 Test 只由系统向 Meta 投影 compact 指标；请勿人工写入 Test/Held-out 明细或具体日历日期，以免绕过受控反馈边界。",
-      ),
-    );
-    panel.append(
-      el(
-        "div",
-        { class: "hint" },
-        "会话不会等待批准。点「保存指令」才会写入本会话，须在该会话启动前保存。",
+        "须在会话启动前保存。不要写入 Test/Held-out 明细或具体日历日期。",
       ),
     );
   }
@@ -3806,11 +3648,7 @@ function gpuAllocationRow(detail, session, send) {
     "div",
     { class: "panel section-gap" },
     el("h4", { class: "subsection-title" }, "本 Fold GPU 分配"),
-    el(
-      "div",
-      { class: "hint" },
-      "会话启动前可查看实时资源并为本 Fold 沙箱设定 GPU 数；具体设备仍按空闲显存自动挑选，蓝条越长表示剩余显存越多。",
-    ),
+    el("div", { class: "hint" }, "设备按空闲显存自动挑选；条越长剩余显存越多。"),
   );
   const statusHost = el(
     "div",
@@ -4041,11 +3879,7 @@ async function openPromptPreview(detail, session, directive) {
         },
         data.prompt,
       ),
-      el(
-        "div",
-        { class: "hint" },
-        `共 ${data.prompt.length} 字符。修改指令请关闭后在指令框编辑，再重新预览。`,
-      ),
+      el("div", { class: "hint" }, `共 ${data.prompt.length} 字符`),
     ),
     footer,
   );
@@ -4080,16 +3914,7 @@ async function openInitialPrompt(detail, session) {
   );
   showModal(
     `初始 Prompt（实际运行）— ${sessionDisplayKey(session)}`,
-    el(
-      "div",
-      {},
-      el(
-        "div",
-        { class: "hint" },
-        `来自本 Fold 运行 trace 的会话起始事件 ｜ run ${data.run_ref || "?"}`,
-      ),
-      ...blocks,
-    ),
+    el("div", {}, ...blocks),
     [el("button", { class: "btn", onclick: closeModal }, "关闭")],
     "prompt-modal",
   );
@@ -4344,7 +4169,7 @@ function injectMessagePanel(detail, session) {
       "div",
       { class: enabled ? "hint" : "hint warn" },
       enabled
-        ? "消息在 Agent 下一安全点生效。「发送并打断」只请求跳过尚未开跑的工具，不会取消已在途的模型调用或已开始的工具。"
+        ? "「发送并打断」只跳过尚未开始的工具，不会取消已在途的模型调用或已开始的工具。"
         : reason,
     ),
     el("div", { class: "inject-queue" }, queueLine),
@@ -4814,7 +4639,7 @@ function subagentTraceHead(payload, detail) {
       el(
         "div",
         { class: "hint warn" },
-        "Meta 会话的子代理记录按设计只保留形状：轮次、工具、用量与字符数可见，模型正文与工具结果正文不写入 Trace。",
+        "Meta 会话的子代理只记录轮次、工具、用量与字符数，不含正文。",
       ),
     );
   if (payload.truncated_window)
@@ -5172,7 +4997,7 @@ function subagentDetailNode(block) {
 
 function analysisPanel(experimentId, epochId, foldId) {
   const base = `/api/experiments/${encodeURIComponent(experimentId)}/analysis/${encodeURIComponent(epochId)}/${encodeURIComponent(foldId)}`;
-  return analysisNode(base, "Fold 策略分析（可选，仅基于验证期证据）");
+  return analysisNode(base, "Fold 策略分析");
 }
 
 function analysisNode(base, title, { standalone = true } = {}) {
@@ -5241,7 +5066,7 @@ function analysisNode(base, title, { standalone = true } = {}) {
       body.append(renderMarkdown(payload.content));
     } else {
       body.append(
-        el("div", { class: "hint" }, "尚未生成分析——点击右上角「生成分析」。"),
+        el("div", { class: "hint" }, "尚未生成分析"),
       );
     }
   }
@@ -5258,7 +5083,7 @@ function rerunPanel(detail, session) {
     el(
       "div",
       { class: "hint" },
-      "追加一次全新的 Fold 会话：账本新增记录（旧记录保留供审计），冻结产物以重跑标签另存，已有 Held-out 结果将在重跑后自动重放。启动后在本会话的指令面板修改指令或额外用户指令，再批准运行。",
+      "追加一次新的 Fold 会话，旧记录保留；已有 Held-out 结果在重跑后自动重放。",
     ),
   );
   const bar = el("div", { class: "control-bar section-gap" });
@@ -5280,18 +5105,9 @@ function rerunPanel(detail, session) {
             showModal(
               "确认重跑该 Fold？",
               el(
-                "div",
+                "p",
                 {},
-                el(
-                  "p",
-                  {},
-                  `将重跑 ${sessionDisplayKey(session)}，并使现有 Held-out 结果过期（重跑完成后自动重放 Held-out）。`,
-                ),
-                el(
-                  "p",
-                  { class: "hint" },
-                  "重跑会话默认等待批准：批准前可修改本 Fold 指令或额外用户指令。",
-                ),
+                `将重跑 ${sessionDisplayKey(session)}；现有 Held-out 结果过期，重跑后自动重放。`,
               ),
               [
                 el("button", { class: "btn", onclick: closeModal }, "取消"),
@@ -5312,7 +5128,7 @@ function rerunPanel(detail, session) {
                             }),
                           },
                         );
-                        toast("重跑已启动，等待批准");
+                        toast("重跑已启动");
                         route(true);
                       } catch (error) {
                         toast(error.message, true);
@@ -5325,7 +5141,7 @@ function rerunPanel(detail, session) {
             );
           },
         },
-        "修改提示词并重跑",
+        "重跑本 Fold",
       ),
     );
   }
@@ -5345,7 +5161,7 @@ function rollbackPanel(detail, session) {
     el(
       "div",
       { class: "hint" },
-      "把实验进度回退到本 Fold 刚完成时：其后所有 Fold、元学习会话与全部 Held-out 账本记录将被移除（原账本自动备份、冻结产物归档到 _archive，可人工找回），随后从下一个会话继续（人工控制模式下等待批准，可先修改指令/提示词）。",
+      "移除本 Fold 之后的全部 Fold、元学习与 Held-out 记录（账本先备份，产物归档），再从下一个会话继续。",
     ),
   );
   const bar = el("div", { class: "control-bar section-gap" });
@@ -5372,13 +5188,9 @@ function rollbackPanel(detail, session) {
                 el(
                   "p",
                   {},
-                  `将把实验回退到 ${sessionDisplayKey(session)} 完成时点，丢弃其后全部账本记录（含 Held-out）。`,
+                  `将回退到 ${sessionDisplayKey(session)} 完成时，丢弃其后全部账本记录（含 Held-out）。`,
                 ),
-                el(
-                  "p",
-                  { class: "hint" },
-                  "账本会先备份（experiment_ledger.rollback_*.jsonl），被丢弃的冻结产物移入 artifacts/strategy/_archive/。此操作不可从界面撤销。",
-                ),
+                el("p", { class: "hint" }, "此操作不可从界面撤销。"),
               ),
               [
                 el("button", { class: "btn", onclick: closeModal }, "取消"),
@@ -5602,11 +5414,7 @@ function stepTreeSection(detail, payload) {
     "div",
     { class: "panel section-gap" },
     el("h4", {}, "Step 产物树"),
-    el(
-      "div",
-      { class: "hint" },
-      "跨 Fold 的已验证策略谱系：每个节点保存该版本完整源代码与验证明细。悬停看指标详情，点行看完整信息，行内直接下载；HITL 实验可从节点回滚。",
-    ),
+    el("div", { class: "hint" }, "跨 Fold 的已验证策略谱系"),
     toolbar,
     rows,
   );
@@ -5793,16 +5601,8 @@ function openStepNodeModal(detail, payload, node) {
       kvRow("revision", el("code", {}, String(node.strategy_ref || "—"))),
     ),
     node.has_snapshot
-      ? el(
-          "p",
-          { class: "hint" },
-          "「下载源码 + 结果」包含该版本完整 output/ 源代码、models/ 参数与该次验证的明细结果文件。",
-        )
-      : el(
-          "p",
-          { class: "hint" },
-          "失败尝试不保存产物快照，仅记录失败原因供避坑。",
-        ),
+      ? null
+      : el("p", { class: "hint" }, "失败尝试不保存产物快照。"),
   );
   const buttons = [el("button", { class: "btn", onclick: closeModal }, "关闭")];
   if (node.has_snapshot)
@@ -5820,12 +5620,9 @@ function openStepNodeModal(detail, payload, node) {
    (registry.strategy_in_force, projected once per Fold into fold_returns), so
    the panel and the chart can never disagree about which strategy they show. */
 const IN_FORCE_NOTES = {
-  frozen_candidate:
-    "本 Fold 冻结了新产物：下面的验证数字与收益曲线，都是这个新候选在本 Fold 验证区间的回放。",
-  parent_control:
-    "本 Fold 没有冻结新产物，继续沿用继承的父产物：下面的验证数字与收益曲线，都是宿主把这个父产物原样放进本 Fold 验证区间重跑的结果，不是本 Fold 的新候选。",
-  none:
-    "本 Fold 没有留下任何策略，也没有父产物可沿用：实验没有从这个窗口带走任何东西，因此没有沿用中的验证数字与收益曲线。本 Fold 自己评估过的候选只是证据，另见下方。",
+  frozen_candidate: "以下数字与曲线：本 Fold 冻结候选的验证回放。",
+  parent_control: "以下数字与曲线：父产物在本 Fold 验证区间的原样重跑，不是新候选。",
+  none: "本 Fold 没有留下策略，也无父产物可沿用，因此没有验证数字与曲线。",
 };
 
 function foldResultPanel(detail, session) {
@@ -6080,9 +5877,13 @@ function selectionSection(detail, session) {
   const probability = stats.deflated_sharpe_probability;
   const counted =
     candidates === null || candidates === undefined ? "—" : candidates;
-  const line = el(
+  return el(
     "div",
-    { class: "meta-line" },
+    {
+      class: "meta-line section-gap",
+      title:
+        "按参与去偏的候选数校正选择偏差（Bailey & López de Prado 2014）；不参与验收与毕业判定",
+    },
     trials !== null && trials !== undefined && trials !== candidates
       ? `本 Fold 评估候选 ${counted} 个，其中 ${trials} 个有有效 Sharpe 参与去偏`
       : `本 Fold 评估候选数 ${counted}`,
@@ -6092,16 +5893,6 @@ function selectionSection(detail, session) {
       probability === null || probability === undefined
         ? ` · 去偏 Sharpe 概率 —（${SELECTION_UNAVAILABLE[stats.unavailable_reason] || "无法计算"}）`
         : ` · 去偏 Sharpe 概率 ${probability.toFixed(2)} · 选择阈值 Sharpe* ${fmtSharpe(stats.sharpe_star)}`,
-    ),
-  );
-  return el(
-    "div",
-    { class: "section-gap" },
-    line,
-    el(
-      "div",
-      { class: "meta-line" },
-      "去偏 Sharpe 概率按参与去偏的候选数校正选择偏差（Bailey & López de Prado 2014）：概率越低，冻结候选的 Sharpe 越可能只是多次尝试里运气最好的一次；它只作阅读参考，不参与验收与毕业判定。",
     ),
   );
 }
@@ -6124,11 +5915,7 @@ function parentControlSection(detail, session, validation) {
   const record = session.record || {};
   const control = record.parent_control;
   if (!control)
-    return el(
-      "div",
-      { class: "meta-line" },
-      "父本对照：本 Fold 没有继承父产物，因此没有基线",
-    );
+    return el("div", { class: "meta-line" }, "父本对照：无（未继承父产物）");
   const metrics = (foldReturnsRow(detail, session) || {}).parent_control || {};
   const wholeWindow = control.validation_result || {};
   const failed = control.status !== "ok";
@@ -6168,17 +5955,14 @@ function parentControlSection(detail, session, validation) {
         "tr",
         {},
         el("th", {}, "对照"),
-        el("th", { title: "该行数字所覆盖的区间" }, "区间"),
-        el("th", { title: "该行区间的区间收益" }, "收益"),
-        el("th", { title: "该行区间相对沪深300的超额收益" }, "超额"),
-        el("th", { title: "该行区间日收益的年化 Sharpe" }, "Sharpe"),
-        el("th", { title: "该行区间的峰谷回撤" }, "回撤"),
+        el("th", {}, "区间"),
+        el("th", {}, "收益"),
+        el("th", { title: "相对沪深300" }, "超额"),
+        el("th", {}, "Sharpe"),
+        el("th", {}, "回撤"),
         el(
           "th",
-          {
-            title:
-              "该行超额在同规模随机换名重放里的分位：接近 0.5 表示与随机组合无法区分",
-          },
+          { title: "随机换名重放中的分位，≈0.5 即与随机组合无异" },
           "null 分位",
         ),
       ),
@@ -6209,13 +5993,8 @@ function parentControlSection(detail, session, validation) {
       metricRow(
         el(
           "span",
-          {},
+          { title: control.parent_strategy_artifact_ref || null },
           "父本原样重跑",
-          el(
-            "span",
-            { class: "mode-note" },
-            ` ${control.parent_strategy_artifact_ref || "—"}`,
-          ),
         ),
         period,
         {
@@ -6232,11 +6011,7 @@ function parentControlSection(detail, session, validation) {
               "span",
               {},
               "父本原样重跑",
-              el(
-                "span",
-                { class: "mode-note" },
-                " 走查过渡按这一行计分",
-              ),
+              el("span", { class: "mode-note" }, " 过渡按此行计分"),
             ),
             controlSpanLabel(metrics),
             {
@@ -6470,23 +6245,12 @@ function styleCard(expId, runId, prefix) {
   return host;
 }
 
-/* Which curve the Validation pane is showing, and — when it shows none — why.
-
-   The Fold's own candidate and the inherited parent are drawn identically, and
-   a Fold that left no strategy still ran candidate replays with real trades.
-   Both cases used to render as one unlabelled line or as a bare "暂无日度收益
-   数据", so the pane now states its own provenance from the server's
-   strategy_in_force label instead of leaving it to be inferred. */
+/* Why the Validation pane has no curve; null when it has one, whose strategy
+   the panel's in-force note above already names (strategy_in_force). */
 function foldCurveCaption(source, drawn) {
-  if (source === "none")
-    return "本 Fold 没有留下任何策略（未冻结新产物，也没有父产物可沿用），因此没有曲线。本 Fold 评估过的候选回放不是实验带走的东西，不画在这里，也不进入累计验证收益。";
-  if (!drawn)
-    return source === "parent_control"
-      ? "沿用中的父本重跑结果读不出来，因此没有曲线；累计验证收益同样略过本 Fold。"
-      : "本 Fold 冻结候选的回放结果读不出来，因此没有曲线；累计验证收益同样略过本 Fold。";
-  return source === "parent_control"
-    ? "曲线：继承的父产物在本 Fold 验证区间的原样重跑（本 Fold 未冻结新产物），不是本 Fold 的新候选。"
-    : "曲线：本 Fold 冻结候选在验证区间的回放。";
+  if (drawn) return null;
+  if (source === "none") return "本 Fold 没有留下策略，无曲线。";
+  return "回放结果读不出来，无曲线；累计验证收益同样略过本 Fold。";
 }
 
 /* Per-fold daily equity (validation and guarded test parts share one fetch). */
@@ -6510,17 +6274,13 @@ function foldEquityHost(expId, epochId, foldId, runId, part, opts) {
       );
       // Only the Validation pane draws "whichever strategy this Fold left in
       // force"; the guarded Test pane is always the frozen artifact's own.
-      if (part === "valid")
-        host.append(
-          el(
-            "div",
-            { class: "meta-line" },
-            foldCurveCaption(
-              payload.strategy_in_force,
-              selected.some((series) => (series.dates || []).length),
-            ),
-          ),
-        );
+      const drawn = selected.some((series) => (series.dates || []).length);
+      const caption =
+        part === "valid" && foldCurveCaption(payload.strategy_in_force, drawn);
+      if (caption) {
+        host.append(el("div", { class: "meta-line" }, caption));
+        return;
+      }
       host.append(equityChart({ ...payload, series: selected }, opts));
     })
     .catch((error) => {
@@ -6563,7 +6323,6 @@ function loadFoldExtras(experimentId, epochId, foldId) {
         "div",
         { class: "control-bar" },
         el("h4", { class: "subsection-title" }, "冻结策略产物"),
-        el("span", { class: "mode-note" }, "打包 output 与 models 全部文件"),
         el("span", { class: "spacer" }),
         el(
           "a",
@@ -6585,11 +6344,11 @@ function loadFoldExtras(experimentId, epochId, foldId) {
         el(
           "details",
           { class: "test-audit section-gap" },
-          el("summary", {}, "测试期结果（Meta-development 审计 — 谨慎查看）"),
+          el("summary", {}, "测试期结果（审计）"),
           el(
             "div",
             { class: "hint warn" },
-            "本结果在该 Fold 冻结时是样本外评估，之后其 compact 指标可由系统提供给 Meta，因而属于自适应开发证据而非最终未触碰估计。人工明细只在实验封存后揭示；Held-out 才是最终未触碰评估。",
+            "其 compact 指标已反馈给 Meta，属开发证据；最终评估看 Held-out。",
           ),
           el(
             "table",
@@ -6906,7 +6665,7 @@ function metaResultPanel(detail, session) {
   );
   if (record.prior) {
     panel.append(
-      el("h4", { class: "section-gap" }, "PRIOR（后续 Fold 的方向与经验）"),
+      el("h4", { class: "section-gap" }, "PRIOR"),
       renderMarkdown(record.prior),
     );
   }
@@ -6943,7 +6702,7 @@ function deploymentPanel(detail, session) {
     el(
       "div",
       { class: "meta-line" },
-      `窗口 ${record.validation_period || record.period || "—"}（含 Held-out，窗口数字是样本内选择，不是检验）`,
+      `窗口 ${record.validation_period || record.period || "—"}（含 Held-out，样本内选择）`,
     ),
   );
   if ((record.hard_reject_reasons || []).length)
@@ -6976,11 +6735,7 @@ function deploymentPanel(detail, session) {
     panel.append(
       el("h5", { class: "section-gap" }, `Paper 候选：${candidate.source === "adjusted" ? "调整后产物" : "毕业产物"} ${candidate.artifact_id}`),
       el("pre", { class: "code-block", style: "white-space:pre-wrap" }, candidate.command),
-      el(
-        "div",
-        { class: "hint" },
-        "Paper 不自动启动：在仓库根目录运行上面的命令，首日即把该产物冻结进 .paper_state.json；调整后产物唯一的无偏检验是 Paper。",
-      ),
+      el("div", { class: "hint" }, "在仓库根目录运行以建簿；Paper 不会自动启动。"),
     );
   }
   return panel;
@@ -7003,9 +6758,7 @@ function heldoutPanel(detail, session) {
       el(
         "div",
         { class: "empty" },
-        detail.test_revealed
-          ? "Held-out 结果尚未写入。"
-          : "测试与 Held-out 尚未揭示。揭示后才会显示样本外数字。",
+        detail.test_revealed ? "Held-out 结果尚未写入。" : "测试与 Held-out 尚未揭示。",
       ),
     );
   }
@@ -7174,10 +6927,9 @@ function heldoutPanel(detail, session) {
    so selecting anything swaps only what those three hosts contain: the page
    header, the notice and both pane widths never move.
 
-   The library is a tracked repository directory that every session copies
-   read-only into its workspace at session start, so a write here reaches
-   sessions started afterwards and never the ones already running, and the
-   researcher still commits it. Who may write is settled by how the console is
+   The library is a tracked repository directory that an experiment snapshots
+   when it is created, so a write here reaches experiments created afterwards,
+   and the researcher still commits it. Who may write is settled by how the console is
    reached (loopback bind, or the edge's login gate), not by this page.
 
    Inside an experiment, 已挂载记忆 stays a projection of THAT experiment's run
@@ -7251,14 +7003,13 @@ async function renderMemoryPage() {
         el(
           "div",
           { class: "sub" },
-          `每个 Fold 与元学习会话按来源只读挂载到 memory/<来源>/ ｜ 默认模式 ${payload.default_mode || "—"}`,
+          `默认挂载模式 ${payload.default_mode || "—"} ｜ 改动作用于此后创建的实验，由研究者提交`,
         ),
       ),
-      memoryNotice(),
       memorySection(
         null,
         "记忆条目",
-        "左栏是完整目录，右栏是唯一的查看与编辑面：精选库条目可改写，毕业层候选只读。",
+        null,
         el(
           "div",
           { class: "detail" },
@@ -7275,7 +7026,7 @@ async function renderMemoryPage() {
       memorySection(
         "memory-issues",
         "问题反馈",
-        "Fold 与元学习父会话用 report_issue 报告的环境、工具输出、数据与文档缺陷，跨实验按时间倒序。默认只列未处置的；已处置的用 resolve_issue.py 记回同一账本，勾选后才显示。会话读不回报告，也读不回处置。",
+        "会话报告的缺陷；处置用 scripts/experiments/resolve_issue.py 记录",
         el("div", { class: "panel" }, issueFilterBar(), memoryView.issuesHost),
       ),
     ),
@@ -7286,8 +7037,8 @@ async function renderMemoryPage() {
   renderIssueReports();
 }
 
-/* One pattern for every section on this page: a heading carrying the single
-   line that says what the section answers, then the panels that answer it. */
+/* One pattern for every section on this page: a heading with an optional
+   one-line note, then the panels. */
 function memorySection(id, title, note, ...panels) {
   return el(
     "section",
@@ -7296,7 +7047,7 @@ function memorySection(id, title, note, ...panels) {
       "div",
       { class: "memory-section-head" },
       el("h3", {}, title),
-      el("div", { class: "sub" }, note),
+      note ? el("div", { class: "sub" }, note) : null,
     ),
     ...panels,
   );
@@ -7474,20 +7225,6 @@ async function renderIssueReports() {
   host.replaceChildren(...nodes);
 }
 
-/* Persistent, not a toast: when a change takes effect and where it lives are
-   the two facts the entry list itself cannot show. */
-function memoryNotice() {
-  return el(
-    "div",
-    { class: "panel memory-notice" },
-    el(
-      "div",
-      { class: "hint" },
-      `精选库是仓库目录 ${memoryLibraryPath()}/，纳入版本控制，改动由研究者自行提交。挂载发生在会话启动时，因此新增、修改和删除只对此后启动的会话生效；运行中的会话保留启动时挂载的只读副本。会话只能引用和质疑挂载内容、用 memory_feedback 记录判断，不能改写它；条目上的徽标就是这些判断的汇总。`,
-    ),
-  );
-}
-
 function memoryNavPanel() {
   const curated = memoryView.payload.curated || {};
   memoryView.countHost.textContent = String((curated.entries || []).length);
@@ -7516,11 +7253,6 @@ function memoryNavPanel() {
     ),
     memoryView.listHost,
     el("h4", { class: "section-gap" }, "毕业层候选"),
-    el(
-      "div",
-      { class: "hint" },
-      "Held-out 判定全部 graduated 且已发布 skills 世代的历史实验自动准入，本实验自己始终排除在外。点选候选先看原文，再晋升到精选库。",
-    ),
     memoryView.candidateHost,
   );
 }
@@ -7982,7 +7714,7 @@ function curatedEditorBody(entry) {
     el(
       "div",
       { class: "hint" },
-      `保存后写回 ${memoryLibraryPath()}/${entry.name}/SKILL.md，此后启动的会话挂载新正文。`,
+      `保存到 ${memoryLibraryPath()}/${entry.name}/SKILL.md`,
     ),
     editor,
   ];
@@ -8000,15 +7732,15 @@ function curatedFormView() {
   });
   nameInput.value = memoryView.draftName || "";
   const body = [
-    el(
-      "div",
-      { class: "hint" },
-      promoting
-        ? `来源：实验 ${memoryView.source.experiment_id} 的 skill ${memoryView.source.skill}，整项原样复制（含 scripts/ 与 references/），复制后可在此就地删改。`
-        : `新建 ${memoryLibraryPath()}/<条目名>/SKILL.md。条目名为小写 kebab-case，正文按共享 skill 格式校验后才写入。`,
-    ),
+    promoting
+      ? el(
+          "div",
+          { class: "hint" },
+          `整项复制实验 ${memoryView.source.experiment_id} 的 skill ${memoryView.source.skill}（含 scripts/ 与 references/）`,
+        )
+      : null,
     el("div", { class: "field" }, el("label", {}, "条目名"), nameInput),
-  ];
+  ].filter(Boolean);
   if (!promoting) {
     const editor = el("textarea", {
       class: "directive skill-editor",
@@ -8122,12 +7854,8 @@ function confirmDeleteCuratedEntry(name) {
     el(
       "div",
       {},
-      el("p", {}, `将从仓库目录 ${memoryLibraryPath()}/ 删除 ${name}/ 整项。`),
-      el(
-        "p",
-        { class: "hint" },
-        "运行中的会话持有启动时挂载的只读副本，不受影响；此后启动的会话不再挂载它。这是一次仓库改动，由研究者提交。",
-      ),
+      el("p", {}, `将从 ${memoryLibraryPath()}/ 删除 ${name}/ 整项。`),
+      el("p", { class: "hint" }, "已创建的实验不受影响；仓库改动由研究者提交。"),
     ),
     [
       el("button", { class: "btn", onclick: closeModal }, "取消"),
@@ -8166,12 +7894,8 @@ function confirmExcludeGraduated(experimentId, skill) {
     el(
       "div",
       {},
-      el("p", {}, `实验 ${experimentId} 的 skill ${skill} 将不再进入此后启动的会话。`),
-      el(
-        "p",
-        { class: "hint" },
-        "毕业实验的 skill 是它自己的不可变产物，这里不会改动它，只是记下不再挂载；已经跑过的会话不受影响。排除记录写在仓库文件里，由研究者提交，随时可以恢复。",
-      ),
+      el("p", {}, `实验 ${experimentId} 的 skill ${skill} 将不再挂载到此后创建的实验。`),
+      el("p", { class: "hint" }, "原 skill 不变，可随时恢复；排除记录由研究者提交。"),
       el("div", { class: "field" }, el("label", {}, "原因"), reason),
     ),
     [
@@ -8310,7 +8034,7 @@ async function openMountedSkill(experimentId, source, name) {
       el(
         "div",
         { class: "hint" },
-        `${name} ｜ ${fmtBytes(entry.bytes)} ｜ ${mountedSourceLabel(source)} ｜ 本实验创建时的快照副本，只读`,
+        `${name} ｜ ${fmtBytes(entry.bytes)} ｜ ${mountedSourceLabel(source)} ｜ 快照副本`,
       ),
       el("pre", { class: "code-view skill-body section-gap" }, entry.content || ""),
     ),
@@ -8358,7 +8082,7 @@ function mountedMemorySection(detail, payload) {
     el(
       "div",
       { class: "hint" },
-      "本实验创建时快照；库的后续改动作用于之后创建的实验。每个 Fold 与元学习会话都挂载这同一份只读副本，因此本实验各次会话看到的运行记忆完全一致。",
+      "本实验创建时快照；库的后续改动作用于之后创建的实验。",
     ),
   );
   if (payload.error) {
@@ -8389,11 +8113,7 @@ function mountedMemorySection(detail, payload) {
   );
   if (snapshot.created_from === "first_session")
     panel.append(
-      el(
-        "div",
-        { class: "hint" },
-        "本实验创建于快照机制之前，快照由它的第一个会话补建。",
-      ),
+      el("div", { class: "hint" }, "快照由首个会话补建。"),
     );
   if (!entryCount) {
     panel.append(
@@ -8457,7 +8177,7 @@ function paperBanners(summary) {
       el(
         "div",
         { class: "banner bad" },
-        `快照无法解析：${summary.error || "未知错误"}（成交/委托面板仍尝试读取各自文件）`,
+        `快照无法解析：${summary.error || "未知错误"}`,
       ),
     );
   }
@@ -8654,12 +8374,14 @@ function paperPageHead(summary, dateSelect) {
   );
 }
 
+const PAPER_PHASE_LABELS = { decided: "已决策", not_started: "未开始" };
+
 function paperSchedulePanel(account) {
   const status =
     account.day_complete === true
       ? "当日处理完成"
       : account.phase
-        ? `当前阶段：${account.phase}`
+        ? PAPER_PHASE_LABELS[account.phase] || account.phase
         : "等待首次日级运行";
   return el(
     "div",
@@ -8667,15 +8389,10 @@ function paperSchedulePanel(account) {
     el(
       "div",
       { class: "control-bar" },
-      el("span", { class: "mode-note" }, "策略调度"),
-      el("strong", {}, "固定周期 / 固定推理时间"),
+      el("span", { class: "mode-note" }, "策略"),
+      el("strong", {}, account.strategy_revision || "—"),
       el("span", { class: "spacer" }),
       el("span", { class: "mode-note" }, status),
-    ),
-    el(
-      "div",
-      { class: "hint" },
-      "Agent 产出股票代码、操作时间、操作与数量等 JSON 订单；环境在每笔 execute_at 到达时读取对应价格并撮合。",
     ),
   );
 }
@@ -8979,13 +8696,7 @@ function renderQmtPage() {
   const page = el(
     "div",
     { id: "trading-page" },
-    el(
-      "div",
-      { class: "page-head" },
-      el("h2", {}, "实盘交易", unavailable),
-      el("span", { class: "sub" }, "后端未连接"),
-    ),
-    el("div", { class: "banner warn" }, "后端未连接"),
+    el("div", { class: "page-head" }, el("h2", {}, "实盘交易", unavailable)),
     el(
       "div",
       { class: "panel" },
@@ -8994,11 +8705,7 @@ function renderQmtPage() {
         { class: "control-bar" },
         el("span", { class: "mode-note" }, "连接状态"),
         el("strong", {}, "后端未连接"),
-        el("span", { class: "spacer" }),
-        el("button", { class: "btn small", disabled: "" }, "后端未连接"),
-        el("button", { class: "btn small", disabled: "" }, "后端未连接"),
       ),
-      el("div", { class: "hint" }, "后端未连接"),
     ),
     el(
       "div",

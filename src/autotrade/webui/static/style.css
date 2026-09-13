@@ -1962,8 +1962,8 @@ details.advanced .form-grid {
 }
 
 /* ---------------- 运行记忆 ----------------
-   One pattern for every section: a heading carrying the line that says what the
-   section answers, then the panels that answer it. Inside 记忆条目 those panels
+   One pattern for every section: a heading with an optional one-line note,
+   then the panels. Inside 记忆条目 those panels
    are the shared .detail grid — the catalogue scrolls inside the left pane, and
    the right pane keeps a fixed head / toolbar / body so a selection never moves
    the grid, the page header or the toolbar buttons. */
@@ -1984,9 +1984,6 @@ details.advanced .form-grid {
  color: var(--muted);
  font-size: 0.875rem;
  line-height: 1.55;
-}
-.memory-notice .hint:first-child {
- margin-top: 0;
 }
 .memory-filter {
  flex: 1;
