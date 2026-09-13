@@ -31,6 +31,7 @@ extend-exclude = ["external_references"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+tmp_path_retention_count = 1
 filterwarnings = [
   # Dependency-owned deprecation emitted at fastapi/testclient import time; revisit when fastapi/starlette are next bumped.
   "ignore:Using `httpx` with `starlette\\.testclient` is deprecated:starlette.exceptions.StarletteDeprecationWarning",
