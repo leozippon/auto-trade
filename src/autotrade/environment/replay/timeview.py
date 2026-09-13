@@ -25,6 +25,11 @@ are hardlinked at start; replay body shards are copied only for newly visible
 Durable part reuse is enabled only after the PIT backend directly validates the
 stash contract for the exact release, snapshot, replay slot, configuration, and
 schedule. Each part is then published under its own process lock.
+
+One view can run on across consecutive replay slots (``continue_into``): each
+domain keeps one segment per slot, and a part that lands after a slot boundary
+lists the earlier slot's rows first. Slots partition rows by ``available_at``,
+so the parts are those one long slot laid out in slot order would write.
 """
 
 from __future__ import annotations
@@ -107,6 +112,63 @@ class _SortedCursor:
     def next_key(self) -> np.datetime64 | None:
         return self.keys[self.pos] if self.has_pending() else None
 
+    def pending_indices(self) -> np.ndarray:
+        return self.indices[self.pos:]
+
+    def remapped(self, kept_rows: np.ndarray) -> _SortedCursor:
+        """This cursor's pending rows, renumbered into ``frame.iloc[kept_rows]``."""
+        return _SortedCursor(np.searchsorted(kept_rows, self.pending_indices()), self.keys[self.pos:])
+
+
+@dataclass
+class _ReplaySegment:
+    """One replay slot's rows of a domain and the cursors that roll them.
+
+    ``cursor`` gates the whole domain (or each row); ``cursors`` gate it
+    dataset by dataset. Exactly one of the two is in use. ``library_dir`` is
+    the slot's text body library (text index segments only).
+    """
+
+    frame: pd.DataFrame
+    cursor: _SortedCursor | None
+    cursors: dict[str, _SortedCursor]
+    library_dir: Path | None = None
+
+    def pending_only(self) -> _ReplaySegment | None:
+        """The rows no refresh has published yet, copied out of ``frame``.
+
+        None when every row is out, so the segment can be dropped. Row order
+        and each cursor's order are kept, so the rest of the roll is unchanged.
+        """
+        live = [self.cursor] if self.cursor is not None else list(self.cursors.values())
+        waiting = [cursor.pending_indices() for cursor in live if cursor.has_pending()]
+        if not waiting:
+            return None
+        kept = np.sort(np.concatenate(waiting))
+        return _ReplaySegment(
+            frame=self.frame.iloc[kept].reset_index(drop=True),
+            cursor=self.cursor.remapped(kept) if self.cursor is not None else None,
+            cursors={
+                name: cursor.remapped(kept)
+                for name, cursor in self.cursors.items()
+                if cursor.has_pending()
+            },
+            library_dir=self.library_dir,
+        )
+
+
+def _range_indexed(frame: pd.DataFrame) -> pd.DataFrame:
+    # Parquet-loaded frames already carry a clean RangeIndex, and reset_index
+    # would copy the whole frame (a multi-million-row object union costs tens
+    # of minutes to copy).
+    if isinstance(frame.index, pd.RangeIndex) and frame.index.start == 0 and frame.index.step == 1:
+        return frame
+    return frame.reset_index(drop=True)
+
+
+def _concat_slices(slices: list[pd.DataFrame]) -> pd.DataFrame:
+    return slices[0] if len(slices) == 1 else pd.concat(slices, ignore_index=True)
+
 
 def _dataset_cursors(datasets: np.ndarray, valid_indices: np.ndarray, keys_all: np.ndarray) -> dict[str, _SortedCursor]:
     cursors: dict[str, _SortedCursor] = {}
@@ -180,11 +242,7 @@ class Timeview:
         self._boundary_gate_ready = False
         self._next_boundary: np.datetime64 | None = None
         self._domains: dict[str, _DomainView] = {}
-        stash_root = Path(stash_dir) if stash_dir is not None else None
-        if stash_root is not None and not (stash_root / "contract.json").is_file():
-            raise RuntimeError(
-                f"Timeview stash has no validated semantic contract: {stash_root}"
-            )
+        stash_root = _validated_stash_root(stash_dir)
         incremental = frozenset(incremental_domains or ())
         for name, filename, cutoff_key in _DOMAINS:
             replay = replay_frames.get(name)
@@ -224,6 +282,41 @@ class Timeview:
         view.append_replay_partition(replay)
         # A newly added partition may already be visible at the current node;
         # force one domain traversal on the next refresh before restoring O(1).
+        self._boundary_gate_ready = False
+
+    def continue_into(
+        self,
+        load_frames: Callable[[], dict[str, pd.DataFrame]],
+        *,
+        replay_text_library_dir: Path | None,
+        stash_dir: Path | None,
+    ) -> None:
+        """Run this view on into the next consecutive replay slot.
+
+        The caller guarantees the slot continues the earlier ones: every row it
+        holds becomes available after every row they hold. First every domain
+        drops what it has already published and copies out only the rows still
+        waiting for their refresh node; only then does ``load_frames`` decode
+        the next slot, so a span holds one decoded slot plus those waiting rows
+        rather than every slot it has passed. Parts keep their numbering and
+        from here on publish under the next slot's ``stash_dir``.
+        """
+        stash_root = _validated_stash_root(stash_dir)
+        for view in self._domains.values():
+            view.release_published()
+        self._text.release_published()
+        frames = load_frames()
+        for name, _filename, _key in _DOMAINS:
+            self._domains[name].continue_slot(
+                frames.get(name, pd.DataFrame()),
+                stash_dir=(stash_root / name) if stash_root is not None else None,
+            )
+        self._text.continue_slot(
+            frames.get("text_index", pd.DataFrame()),
+            library_dir=Path(replay_text_library_dir) if replay_text_library_dir is not None else None,
+            stash_index_dir=(stash_root / "text_index") if stash_root is not None else None,
+            stash_library_dir=(stash_root / "text_library") if stash_root is not None else None,
+        )
         self._boundary_gate_ready = False
 
     def refresh(self, when: pd.Timestamp) -> tuple[str, str]:
@@ -271,52 +364,61 @@ class _DomainView:
         self.incremental = bool(incremental)
         self._stash_dir = stash_dir
         self._pending: list[_PendingReplayPartition] = []
-        # Same guard as append_replay_partition: parquet-loaded frames already
-        # carry a clean RangeIndex, and reset_index would copy the whole frame
-        # (a multi-million-row object union costs tens of minutes to copy).
-        if not (
-            isinstance(replay.index, pd.RangeIndex)
-            and replay.index.start == 0
-            and replay.index.step == 1
-        ):
-            replay = replay.reset_index(drop=True)
+        # One segment per replay slot a non-incremental domain has been given.
+        self._segments: list[_ReplaySegment] = []
+        self._dataset_names: list[str] = []
+        self._part_seq = 0
+        self._last_signature: object = object()  # sentinel: force the first roll
+        self._frozen_schema: pa.Schema | None = None
+        self._columns = self._init_frozen_part(frozen_file)
+        self.continue_slot(replay, stash_dir=stash_dir)
+
+    def continue_slot(self, replay: pd.DataFrame, *, stash_dir: Path | None) -> None:
+        """Add one replay slot's rows; parts from here on publish under ``stash_dir``."""
+        self._stash_dir = stash_dir
+        if self.incremental:
+            self.append_replay_partition(replay)
+            return
+        replay = _range_indexed(replay)
         # A replay frame can only roll if it carries the row-level available_at the
         # node gate needs; without it the domain stays frozen-only (conservative).
         if replay.empty or "available_at" not in replay.columns:
-            replay = pd.DataFrame()
-        self.replay = pd.DataFrame() if self.incremental else replay
-        self._part_seq = 0
-        self._last_signature: object = object()  # sentinel: force the first roll
-        self._cursor: _SortedCursor | None = None
-        self._cursors: dict[str, _SortedCursor] = {}
-        if not self.incremental and not replay.empty:
-            available_at = to_cn_timestamps(replay["available_at"])
-            valid = np.flatnonzero(available_at.notna().to_numpy())  # NaT rows never become visible
-            keys = _utc_ns(available_at)
-            if cutoff_key is not None:
-                self._cursor = _SortedCursor(valid, keys[valid])
-            elif "dataset" in replay.columns:
-                self._cursors = _dataset_cursors(replay["dataset"].astype(str).to_numpy(), valid, keys)
-        self._dataset_names: list[str] = sorted(self._cursors)
-        self._frozen_schema: pa.Schema | None = None
-        self._columns = self._init_frozen_part(frozen_file)
-        if not self.incremental:
-            self._require_schema_covers(self.replay)
-        if self.incremental and not replay.empty:
-            self.append_replay_partition(replay)
+            return
+        # The agent-facing schema drops the gating-only available_at unless the
+        # frozen domain already carries it (events/macro/fundamentals do; daily
+        # does not).
+        if not self._columns:
+            self._columns = [column for column in replay.columns if column != "available_at"]
+        self._require_schema_covers(replay)
+        available_at = to_cn_timestamps(replay["available_at"])
+        valid = np.flatnonzero(available_at.notna().to_numpy())  # NaT rows never become visible
+        keys = _utc_ns(available_at)
+        if self.cutoff_key is not None:
+            self._segments.append(_ReplaySegment(replay, _SortedCursor(valid, keys[valid]), {}))
+        elif "dataset" in replay.columns:
+            cursors = _dataset_cursors(replay["dataset"].astype(str).to_numpy(), valid, keys)
+            self._segments.append(_ReplaySegment(replay, None, cursors))
+        self._segments_changed()
+
+    def release_published(self) -> None:
+        """Keep only the replay rows no refresh has published yet."""
+        self._segments = [
+            kept for segment in self._segments if (kept := segment.pending_only()) is not None
+        ]
+        self._segments_changed()
+
+    def _segments_changed(self) -> None:
+        self._dataset_names = sorted(
+            {name for segment in self._segments for name in segment.cursors}
+        )
+        self._last_signature = object()
 
     def append_replay_partition(self, replay: pd.DataFrame) -> None:
         if not self.incremental:
             raise ValueError(f"Timeview domain {self.name} is not incremental")
         if replay.empty or "available_at" not in replay.columns:
             return
-        frame = replay
-        if not (
-            isinstance(frame.index, pd.RangeIndex)
-            and frame.index.start == 0
-            and frame.index.step == 1
-        ):
-            frame = frame.reset_index(drop=True)
+        frame = _range_indexed(replay)
         available_at = to_cn_timestamps(frame["available_at"])
         valid = np.flatnonzero(available_at.notna().to_numpy())
         if valid.size == 0:
@@ -390,29 +492,31 @@ class _DomainView:
                 # Types for canonical columns a replay frame does not carry:
                 # every part in the directory has to unify with part 0.
                 self._frozen_schema = schema
-                return frozen_columns
-        # The agent-facing schema drops the gating-only available_at unless the frozen
-        # domain already carries it (events/macro/fundamentals do; daily does not).
-        columns = frozen_columns or list(self.replay.columns)
-        if "available_at" not in frozen_columns and "available_at" in columns:
-            columns = [c for c in columns if c != "available_at"]
-        return columns
+        # Without frozen columns the first replay rows fix the schema (continue_slot).
+        return frozen_columns
 
     def roll(self, when: pd.Timestamp) -> bool:
         """Append a part for rows newly visible at ``when``; return True if written."""
         if self.incremental:
             return self._roll_incremental(when)
-        if self.replay.empty:
+        if not self._segments:
             return False
         signature = self._signature(when)
         if signature == self._last_signature:
             return False  # this domain's covering node(s) have not advanced
         self._last_signature = signature
-        newly = self._newly_visible(when)
-        if newly.size == 0:
+        slices: list[pd.DataFrame] = []
+        for segment in self._segments:
+            newly = self._newly_visible(segment, when)
+            if newly.size:
+                newly.sort()  # original frame order: parts read back exactly as the frame slice
+                slices.append(segment.frame.iloc[newly])
+        if not slices:
             return False
-        newly.sort()  # original frame order: parts read back exactly as the frame slice
-        self._write_part(int(newly.size), lambda: self._project(self.replay.iloc[newly]))
+        self._write_part(
+            sum(len(rows) for rows in slices),
+            lambda: self._project(_concat_slices(slices)),
+        )
         return True
 
     def _roll_incremental(self, when: pd.Timestamp) -> bool:
@@ -511,18 +615,18 @@ class _DomainView:
                 )
         self._part_seq += 1
 
-    def _newly_visible(self, when: pd.Timestamp) -> np.ndarray:
-        if self._cursor is not None:
+    def _newly_visible(self, segment: _ReplaySegment, when: pd.Timestamp) -> np.ndarray:
+        if segment.cursor is not None:
             if self.cutoff_key == _ROW_AVAILABLE_AT:
-                return self._cursor.advance(_cutoff_ns(when))
+                return segment.cursor.advance(_cutoff_ns(when))
             cutoff = domain_visible_cutoff(self.cutoff_key, when)
-            return self._cursor.advance(_cutoff_ns(cutoff)) if cutoff is not None else _EMPTY_INDICES
-        if not self._cursors:
+            return segment.cursor.advance(_cutoff_ns(cutoff)) if cutoff is not None else _EMPTY_INDICES
+        if not segment.cursors:
             return _EMPTY_INDICES
         dataset_cutoff, _ = _DATASET_CUTOFFS[self.name]
         parts = [
             indices
-            for name, cursor in self._cursors.items()
+            for name, cursor in segment.cursors.items()
             if (cutoff := dataset_cutoff(name, when)) is not None
             and (indices := cursor.advance(_cutoff_ns(cutoff))).size
         ]
@@ -535,19 +639,27 @@ class _DomainView:
                 return None
             boundary = domain_next_visible_boundary(str(self.cutoff_key), when)
             return _cutoff_ns(boundary) if boundary is not None else None
-        if self._cursor is not None:
-            if not self._cursor.has_pending():
+        boundaries = [
+            boundary
+            for segment in self._segments
+            if (boundary := self._segment_boundary(segment, when)) is not None
+        ]
+        return min(boundaries) if boundaries else None
+
+    def _segment_boundary(self, segment: _ReplaySegment, when: pd.Timestamp) -> np.datetime64 | None:
+        if segment.cursor is not None:
+            if not segment.cursor.has_pending():
                 return None
             if self.cutoff_key == _ROW_AVAILABLE_AT:
-                return self._cursor.next_key()
+                return segment.cursor.next_key()
             boundary = domain_next_visible_boundary(self.cutoff_key, when)
             return _cutoff_ns(boundary) if boundary is not None else None
-        if not self._cursors:
+        if not segment.cursors:
             return None
         _, dataset_boundary = _DATASET_CUTOFFS[self.name]
         boundaries = [
             boundary
-            for name, cursor in self._cursors.items()
+            for name, cursor in segment.cursors.items()
             if cursor.has_pending()
             and (boundary := dataset_boundary(name, when)) is not None
         ]
@@ -593,26 +705,53 @@ class _TextView:
         self.out_library_dir = out_library_dir
         self.out_index_dir.mkdir(parents=True, exist_ok=True)
         self.out_library_dir.mkdir(parents=True, exist_ok=True)
+        # One segment per replay slot; each reads bodies from its own library.
+        self._segments: list[_ReplaySegment] = []
+        self._dataset_names: list[str] = []
+        self._part_seq = 0
+        self._last_signature: object = object()
+        self._init_frozen(frozen_index_file, frozen_library_dir)
+        self.continue_slot(
+            replay_index,
+            library_dir=replay_library_dir,
+            stash_index_dir=stash_index_dir,
+            stash_library_dir=stash_library_dir,
+        )
+
+    def continue_slot(
+        self,
+        replay_index: pd.DataFrame | None,
+        *,
+        library_dir: Path | None,
+        stash_index_dir: Path | None,
+        stash_library_dir: Path | None,
+    ) -> None:
+        """Add one replay slot's text index; parts from here on publish under its stash."""
         # Own stash names, so a stash written by an earlier code version holds
         # only the numeric domains and is neither read nor invalidated here.
         self._stash_index_dir = stash_index_dir
         self._stash_library_dir = stash_library_dir
-        self.replay_index = replay_index.reset_index(drop=True) if replay_index is not None else pd.DataFrame()
-        self.replay_library_dir = replay_library_dir
-        self._part_seq = 0
-        self._last_signature: object = object()
         required = {"available_at", "dataset", "text_id"}
-        if self.replay_index.empty or not required.issubset(self.replay_index.columns):
-            self.replay_index = pd.DataFrame()
-        self._cursors: dict[str, _SortedCursor] = {}
-        if not self.replay_index.empty:
-            available_at = to_cn_timestamps(self.replay_index["available_at"])
+        if replay_index is not None and not replay_index.empty and required.issubset(replay_index.columns):
+            index = _range_indexed(replay_index)
+            available_at = to_cn_timestamps(index["available_at"])
             valid = np.flatnonzero(available_at.notna().to_numpy())
-            self._cursors = _dataset_cursors(
-                self.replay_index["dataset"].astype(str).to_numpy(), valid, _utc_ns(available_at)
-            )
-        self._dataset_names = sorted(self._cursors)
-        self._init_frozen(frozen_index_file, frozen_library_dir)
+            cursors = _dataset_cursors(index["dataset"].astype(str).to_numpy(), valid, _utc_ns(available_at))
+            self._segments.append(_ReplaySegment(index, None, cursors, library_dir))
+        self._segments_changed()
+
+    def release_published(self) -> None:
+        """Keep only the index rows no refresh has published yet."""
+        self._segments = [
+            kept for segment in self._segments if (kept := segment.pending_only()) is not None
+        ]
+        self._segments_changed()
+
+    def _segments_changed(self) -> None:
+        self._dataset_names = sorted(
+            {name for segment in self._segments for name in segment.cursors}
+        )
+        self._last_signature = object()
 
     def _init_frozen(self, frozen_index_file: Path, frozen_library_dir: Path) -> None:
         if frozen_index_file.exists():
@@ -623,23 +762,27 @@ class _TextView:
                 _link_or_copy(src, self.out_library_dir / src.name)
 
     def roll(self, when: pd.Timestamp) -> bool:
-        if self.replay_index.empty:
+        if not self._segments:
             return False
         signature = tuple((d, str(text_dataset_visible_cutoff(d, when))) for d in self._dataset_names)
         if signature == self._last_signature:
             return False
         self._last_signature = signature
-        parts = [
-            indices
-            for name, cursor in self._cursors.items()
-            if (cutoff := text_dataset_visible_cutoff(name, when)) is not None
-            and (indices := cursor.advance(_cutoff_ns(cutoff))).size
-        ]
-        if not parts:
+        visible: list[tuple[_ReplaySegment, pd.DataFrame]] = []
+        for segment in self._segments:
+            parts = [
+                indices
+                for name, cursor in segment.cursors.items()
+                if (cutoff := text_dataset_visible_cutoff(name, when)) is not None
+                and (indices := cursor.advance(_cutoff_ns(cutoff))).size
+            ]
+            if parts:
+                newly = np.concatenate(parts)
+                newly.sort()  # original frame order: parts read back exactly as the frame slice
+                visible.append((segment, segment.frame.iloc[newly]))
+        if not visible:
             return False
-        newly = np.concatenate(parts)
-        newly.sort()  # original frame order: parts read back exactly as the frame slice
-        rows = self.replay_index.iloc[newly].copy()
+        rows = _concat_slices([index_rows for _segment, index_rows in visible]).copy()
         datasets = rows["dataset"].astype(str)
         # Every row this roll makes visible is relabelled onto the body part
         # this roll writes for its dataset, so the whole column is one string
@@ -647,8 +790,24 @@ class _TextView:
         # real slot, ~73 s per replay).
         suffix = f"__part_{self._part_seq:04d}.parquet"
         rows["library_file"] = datasets + suffix
+        # A dataset's body part is cut from the library of each slot whose
+        # index rows it makes visible, in slot order.
         groups = [
-            (str(dataset), group) for dataset, group in rows.groupby(datasets, sort=True)
+            (
+                dataset,
+                [
+                    (segment.library_dir, text_ids)
+                    for segment, index_rows in visible
+                    if (
+                        text_ids := set(
+                            index_rows.loc[
+                                index_rows["dataset"].astype(str) == dataset, "text_id"
+                            ].astype(str)
+                        )
+                    )
+                ],
+            )
+            for dataset in sorted(set(datasets))
         ]
         index_name = f"part_{self._part_seq:04d}.parquet"
         if self._stash_index_dir is None or self._stash_library_dir is None:
@@ -669,7 +828,7 @@ class _TextView:
     def _publish_roll(
         self,
         rows: pd.DataFrame,
-        groups: list[tuple[str, pd.DataFrame]],
+        groups: list[tuple[str, list[tuple[Path | None, set[str]]]]],
         *,
         index_name: str,
         suffix: str,
@@ -709,24 +868,35 @@ class _TextView:
         """Earliest pending text refresh-node boundary after ``when``."""
         boundaries = [
             boundary
-            for name, cursor in self._cursors.items()
+            for segment in self._segments
+            for name, cursor in segment.cursors.items()
             if cursor.has_pending()
             and (boundary := text_dataset_next_visible_boundary(name, when)) is not None
         ]
         return min(map(_cutoff_ns, boundaries)) if boundaries else None
 
-    def _body_table(self, dataset: str, group: pd.DataFrame) -> pa.Table:
+    def _body_table(
+        self, dataset: str, sources: list[tuple[Path | None, set[str]]]
+    ) -> pa.Table:
         """The visible body rows one dataset contributes to one roll."""
 
-        body = self._read_body_rows(dataset, set(group["text_id"].astype(str)))
+        bodies = [
+            rows
+            for library_dir, text_ids in sources
+            if not (rows := self._read_body_rows(library_dir, dataset, text_ids)).empty
+        ]
+        body = _concat_slices(bodies) if bodies else pd.DataFrame()
         if body.empty or "text_id" not in body.columns:
             body = pd.DataFrame(columns=["text_id", "body"])
         else:
             body = body[[c for c in ("text_id", "body") if c in body.columns]]
         return pa.Table.from_pandas(body, preserve_index=False)
 
-    def _read_body_rows(self, dataset: str, text_ids: set[str]) -> pd.DataFrame:
-        path = self.replay_library_dir / f"{dataset}.parquet" if self.replay_library_dir is not None else None
+    @staticmethod
+    def _read_body_rows(
+        library_dir: Path | None, dataset: str, text_ids: set[str]
+    ) -> pd.DataFrame:
+        path = library_dir / f"{dataset}.parquet" if library_dir is not None else None
         if path is None or not path.exists() or not text_ids:
             return pd.DataFrame(columns=["text_id", "body"])
         try:
@@ -794,6 +964,15 @@ def _exclusive_part_lock(path: Path) -> Iterator[None]:
             yield
         finally:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _validated_stash_root(stash_dir: Path | None) -> Path | None:
+    stash_root = Path(stash_dir) if stash_dir is not None else None
+    if stash_root is not None and not (stash_root / "contract.json").is_file():
+        raise RuntimeError(
+            f"Timeview stash has no validated semantic contract: {stash_root}"
+        )
+    return stash_root
 
 
 def _link_or_copy(src: Path, dst: Path) -> None:

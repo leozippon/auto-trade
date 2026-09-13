@@ -18,10 +18,11 @@ import stat
 import threading
 import uuid
 from collections import OrderedDict
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
+from functools import partial
 from pathlib import Path
 from time import perf_counter
 
@@ -531,6 +532,215 @@ class HistoricalMinuteSource:
         return self._quote_group
 
 
+@dataclass(frozen=True)
+class _SpanSlot:
+    """One replay slot of a span: its directory, manifest and bound as-of stash."""
+
+    replay_dir: Path
+    manifest: dict[str, object]
+    stash_dir: Path
+
+
+class _ReplaySpanView:
+    """The rolling as-of view and exact minute prices of a span of replay slots.
+
+    A span is one book, so one Timeview tree runs across all of its slots. Every
+    row of a slot becomes available only after the slot's anchor, so the next
+    slot is decoded at the first decision later than that anchor -- no earlier
+    decision could see any of it -- and only after the view has let go of what
+    the slots before it already published (``Timeview.continue_into``). Minute
+    prices come from each slot's own file, row group by row group.
+    """
+
+    def __init__(
+        self,
+        *,
+        host_dir: Path,
+        snapshot_dir: Path,
+        slots: Sequence[_SpanSlot],
+        load_frames: Callable[[_SpanSlot], dict[str, pd.DataFrame]],
+        max_intraday_row_group_rows: int,
+        timer: PhaseTimer,
+    ) -> None:
+        self._slots = tuple(slots)
+        self._load_frames = load_frames
+        self._timer = timer
+        with timer.phase("replay_frames"):
+            frames = load_frames(self._slots[0])
+        with timer.phase("timeview_init"):
+            self.minute_sources = tuple(
+                HistoricalMinuteSource(path, max_row_group_rows=max_intraday_row_group_rows)
+                for slot in self._slots
+                if (path := slot.replay_dir / "intraday_1min.parquet").exists()
+                and pq.ParquetFile(path).metadata.num_rows
+            )
+            self.timeview = Timeview(
+                host_dir=host_dir,
+                snapshot_dir=snapshot_dir,
+                replay_frames=frames,
+                replay_text_library_dir=self._slots[0].replay_dir / "text_library",
+                incremental_domains={"intraday_1min"} if self.minute_sources else None,
+                stash_dir=self._slots[0].stash_dir,
+            )
+        self._next_slot = 1
+
+    def refresh(self, inference_at: datetime) -> tuple[str, str]:
+        while self._next_slot < len(self._slots):
+            slot = self._slots[self._next_slot]
+            if inference_at <= _slot_anchor(slot.manifest):
+                break
+            with self._timer.phase("replay_frames"):
+                self.timeview.continue_into(
+                    partial(self._load_frames, slot),
+                    replay_text_library_dir=slot.replay_dir / "text_library",
+                    stash_dir=slot.stash_dir,
+                )
+            self._next_slot += 1
+        if self.minute_sources:
+            with self._timer.phase("minute_append"):
+                for source in self.minute_sources:
+                    source.append_visible(self.timeview, inference_at)
+        with self._timer.phase("timeview_refresh"):
+            return self.timeview.refresh(pd.Timestamp(inference_at))
+
+    def price_at(self, symbol: str, when: datetime) -> float | None:
+        # Slots partition minutes by trade date, so at most one file holds it.
+        for source in self.minute_sources:
+            price = source.price_at(symbol, when)
+            if price is not None:
+                return price
+        return None
+
+    def minute_record(self) -> dict[str, int]:
+        sources = self.minute_sources
+        return {
+            "minute_row_groups_loaded": sum(source.loaded_groups for source in sources),
+            "minute_rows_loaded": sum(source.loaded_rows for source in sources),
+            "minute_max_loaded_partition_rows": max(
+                (source.max_loaded_partition_rows for source in sources), default=0
+            ),
+            "minute_total_rows": sum(source.total_rows for source in sources),
+        }
+
+
+def _slot_anchor(manifest: Mapping[str, object]) -> datetime:
+    anchor = _optional_cn_datetime(manifest.get("available_from"))
+    if anchor is None:
+        raise RuntimeError("replay slot manifest has no available_from anchor")
+    return anchor
+
+
+def _require_continuous_slots(
+    replay_dirs: Sequence[Path], manifests: Sequence[Mapping[str, object]]
+) -> None:
+    """Refuse a span whose slots do not read what one long slot would.
+
+    A slot holds the daily rows of its calendar days and the rows that became
+    available after its anchor and by the end of its last day. Consecutive
+    slots partition those rows only when each starts the day after the previous
+    one ends and is anchored at 23:59:59 of that day: a gap would drop rows and
+    an overlap would publish them twice. A screened universe is fixed at each
+    slot's own anchor, so a name the book holds could vanish from a later slot;
+    a span refuses it.
+    """
+
+    for index in range(1, len(manifests)):
+        previous, current = manifests[index - 1], manifests[index]
+        last_day = datetime.strptime(str(previous.get("period_end")), "%Y%m%d").replace(tzinfo=CN_TZ)
+        start = (last_day + timedelta(days=1)).strftime("%Y%m%d")
+        anchor = last_day.replace(hour=23, minute=59, second=59)
+        if (
+            str(current.get("period_start")) != start
+            or _optional_cn_datetime(current.get("available_from")) != anchor
+        ):
+            raise ValueError(
+                f"replay slot {replay_dirs[index].name} does not continue "
+                f"{replay_dirs[index - 1].name}: it must start on {start} and be "
+                f"anchored at {anchor.isoformat()}"
+            )
+    if len(manifests) > 1 and any(_universe_screened(manifest) for manifest in manifests):
+        raise ValueError(
+            "a replay span needs an unscreened universe: each slot screens at its own anchor"
+        )
+
+
+def _universe_screened(manifest: Mapping[str, object]) -> bool:
+    domains = manifest.get("domains")
+    screen = domains.get("universe_screen") if isinstance(domains, Mapping) else None
+    return isinstance(screen, Mapping) and bool(screen.get("active"))
+
+
+def _bind_span_stashes(
+    *,
+    snapshot_dir: Path,
+    replay_dirs: Sequence[Path],
+    replay_manifests: Sequence[dict[str, object]],
+    schedule: StrategySchedule,
+    phase: str,
+    generation_id: str,
+    decision_manifest: dict[str, object],
+) -> tuple[_SpanSlot, ...]:
+    """Bind every slot's as-of stash; a later slot's parts depend on the slots before it."""
+
+    return tuple(
+        _SpanSlot(
+            replay_dir,
+            manifest,
+            _bind_asof_stash_contract(
+                snapshot_dir=snapshot_dir,
+                replay_dir=replay_dir,
+                schedule=schedule,
+                phase=phase,
+                generation_id=generation_id,
+                decision_manifest=decision_manifest,
+                replay_manifest=manifest,
+                preceding_replay_slots=tuple(path.name for path in replay_dirs[:index]),
+            ),
+        )
+        for index, (replay_dir, manifest) in enumerate(
+            zip(replay_dirs, replay_manifests, strict=True)
+        )
+    )
+
+
+def _span_daily(replay_dirs: Sequence[Path], start: str, end: str) -> pd.DataFrame:
+    """The bars of ``start..end`` across a span, read from each slot's ``daily.parquet``.
+
+    The Broker and ``context.bars`` need the whole span's bars from the first
+    day; only this file is read for that, so no other slot is decoded early.
+    """
+
+    frames: list[pd.DataFrame] = []
+    for replay_dir in replay_dirs:
+        path = replay_dir / "daily.parquet"
+        if not path.is_file():
+            raise FileNotFoundError(f"replay slot has no daily.parquet: {replay_dir}")
+        frames.append(pd.read_parquet(path))
+    daily = frames[0] if len(frames) == 1 else pd.concat(frames, ignore_index=True)
+    days = _trade_date_keys(daily)
+    return daily[(days >= _date_key(start)) & (days <= _date_key(end))].copy()
+
+
+def _span_corporate_actions(
+    replay_dirs: Sequence[Path], manifests: Sequence[Mapping[str, object]]
+) -> pd.DataFrame:
+    tables = [
+        load_slot_corporate_actions(replay_dir, manifest)
+        for replay_dir, manifest in zip(replay_dirs, manifests, strict=True)
+    ]
+    filled = [table for table in tables if not table.empty]
+    if len(filled) <= 1:
+        return filled[0] if filled else tables[0]
+    return pd.concat(filled, ignore_index=True)
+
+
+def _trade_date_keys(frame: pd.DataFrame) -> pd.Series:
+    """``YYYYMMDD`` of every row's ``trade_date``, parsed once per distinct value."""
+
+    column = frame["trade_date"]
+    return column.map({value: _date_key(value) for value in column.unique()})
+
+
 class PITDailyEvaluationBackend:
     """Evaluate one daily strategy only against its supplied PIT bundle."""
 
@@ -555,16 +765,23 @@ class PITDailyEvaluationBackend:
         self.nl_failure_policy = nl_failure_policy
         self.max_intraday_row_group_rows = int(max_intraday_row_group_rows)
         self._replay_frame_cache = _ReplayFrameCache()
-        # Host-side slot of each completed result, by ``result.json`` path. The
+        # Host-side slots of each completed result, by ``result.json`` path. The
         # Agent-readable record names its slots opaquely, so the null control
-        # takes the replay directory from the bundle this backend evaluated
+        # takes the replay directories from the bundle this backend evaluated
         # rather than reading a host path back out of an Agent-visible file.
-        self._result_replay_dirs: dict[str, Path] = {}
+        self._result_replay_dirs: dict[str, tuple[Path, ...]] = {}
 
     def evaluate(
         self, request: EvaluationRequest, *, max_days: int | None = None
     ) -> EvaluationResult:
-        """Replay one revision over its slot.
+        """Replay one revision over its slot, or over a span of slots.
+
+        ``request.continuation`` names the replay slots that follow
+        ``request.snapshot.replay_ref``. The whole span is one book: one
+        Broker, one strategy process with one ``state_dir`` and fit schedule,
+        and one as-of tree run from ``request.start`` (the first slot's start)
+        to ``request.end`` (the last slot's end), and a slot is decoded only
+        once the replay reaches it.
 
         ``max_days`` truncates the replay to the first N trading days of the
         window AFTER the slot identity check, so an unofficial smoke run gets
@@ -583,19 +800,22 @@ class PITDailyEvaluationBackend:
             raise FileNotFoundError(f"strategy revision has no main.py: {strategy_path}")
         validate_strategy_package(strategy_path)
         snapshot_dir = Path(request.snapshot.decision_ref).resolve(strict=True)
-        replay_dir = Path(request.snapshot.replay_ref).resolve(strict=True)
-        decision_manifest, replay_manifest = self._validate_bundle(
-            request, snapshot_dir, replay_dir
+        replay_dirs = tuple(
+            Path(ref).resolve(strict=True)
+            for ref in (request.snapshot.replay_ref, *request.continuation)
+        )
+        decision_manifest, replay_manifests = self._validate_bundle(
+            request, snapshot_dir, replay_dirs
         )
         _require_read_only_tree(snapshot_dir)
-        stash_dir = _bind_asof_stash_contract(
+        slots = _bind_span_stashes(
             snapshot_dir=snapshot_dir,
-            replay_dir=replay_dir,
+            replay_dirs=replay_dirs,
+            replay_manifests=replay_manifests,
             schedule=request.schedule,
             phase=request.mode,
             generation_id=request.snapshot.generation_id,
             decision_manifest=decision_manifest,
-            replay_manifest=replay_manifest,
         )
 
         result_id = f"{request.mode}_{uuid.uuid4().hex}"
@@ -612,47 +832,33 @@ class PITDailyEvaluationBackend:
         models_dir = _revision_models_dir(request.revision.models_path)
         keep_result_dir = False
         with timer.phase("replay_frames"):
-            frames = _load_replay_frames(
-                replay_dir,
-                generation_id=request.snapshot.generation_id,
-                replay_manifest=replay_manifest,
-                cache=self._replay_frame_cache,
-            )
-            daily = frames["daily"]
-            daily = daily[
-                (daily["trade_date"].map(_date_key) >= _date_key(request.start))
-                & (daily["trade_date"].map(_date_key) <= _date_key(request.end))
-            ].copy()
+            daily = _span_daily(replay_dirs, request.start, request.end)
             # Broker-side ex-date truth only: it is not a Timeview domain and
             # never reaches the strategy.
-            corporate_actions = load_slot_corporate_actions(replay_dir, replay_manifest)
+            corporate_actions = _span_corporate_actions(replay_dirs, replay_manifests)
             replay_end = _date_key(request.end)
+            trade_days = sorted(set(_trade_date_keys(daily)))
             if max_days is not None:
-                kept = sorted({_date_key(value) for value in daily["trade_date"]})[:max_days]
-                daily = daily[daily["trade_date"].map(_date_key).isin(set(kept))].copy()
+                trade_days = trade_days[:max_days]
+                daily = daily[_trade_date_keys(daily).isin(set(trade_days))].copy()
                 # A truncated replay must not claim it covered the last quarter.
-                replay_end = kept[-1] if kept else replay_end
+                replay_end = trade_days[-1] if trade_days else replay_end
         if daily.empty:
             raise ValueError(f"PIT daily replay is empty for {request.start}..{request.end}")
 
-        with timer.phase("timeview_init"):
-            minute_path = replay_dir / "intraday_1min.parquet"
-            minute_source = (
-                HistoricalMinuteSource(
-                    minute_path,
-                    max_row_group_rows=self.max_intraday_row_group_rows,
-                )
-                if minute_path.exists() and pq.ParquetFile(minute_path).metadata.num_rows
-                else None
-            )
-            timeview = Timeview(
-                host_dir=asof_dir,
-                snapshot_dir=snapshot_dir,
-                replay_frames={key: value for key, value in frames.items() if key != "daily"} | {"daily": daily},
-                replay_text_library_dir=(replay_dir / "text_library"),
-                incremental_domains={"intraday_1min"} if minute_source is not None else None,
-                stash_dir=stash_dir,
-            )
+        span = _ReplaySpanView(
+            host_dir=asof_dir,
+            snapshot_dir=snapshot_dir,
+            slots=slots,
+            load_frames=lambda slot: _load_replay_frames(
+                slot.replay_dir,
+                generation_id=request.snapshot.generation_id,
+                replay_manifest=slot.manifest,
+                cache=self._replay_frame_cache,
+            ),
+            max_intraday_row_group_rows=self.max_intraday_row_group_rows,
+            timer=timer,
+        )
         lock = _AsOfReadOnlyView(asof_dir)
         lock.lock()
         nl_service = NLService.from_snapshot(
@@ -660,9 +866,7 @@ class PITDailyEvaluationBackend:
             llm=self.nl_llm,
             # The NL total budget belongs to this replay, not to a calendar: it
             # scales with the trading days actually being replayed.
-            config=self.nl_config.for_replay(
-                len({_date_key(value) for value in daily["trade_date"]})
-            ),
+            config=self.nl_config.for_replay(len(trade_days)),
             failure_policy=self.nl_failure_policy,
         )
         refreshed: set[str] = set()
@@ -673,15 +877,12 @@ class PITDailyEvaluationBackend:
                 raise RuntimeError(f"Timeview refresh was requested twice for one daily inference: {key}")
             refreshed.add(key)
             # Sub-phases of data_view: the as-of build dominated replay wall on
-            # real runs, and "which of the three" is the whole diagnosis.
+            # real runs, and "which of the three" is the whole diagnosis. A
+            # later slot's decode lands in replay_frames, inside data_view.
             with timer.phase("asof_unlock"):
                 lock.unlock_directories()
             try:
-                if minute_source is not None:
-                    with timer.phase("minute_append"):
-                        minute_source.append_visible(timeview, inference_at)
-                with timer.phase("timeview_refresh"):
-                    path, version = timeview.refresh(pd.Timestamp(inference_at))
+                path, version = span.refresh(inference_at)
             finally:
                 with timer.phase("asof_lock"):
                     lock.lock()
@@ -717,7 +918,7 @@ class PITDailyEvaluationBackend:
                     config,
                     nl_query=nl_service.query,
                     context_data=context_data,
-                    execution_price=minute_source.price_at if minute_source is not None else None,
+                    execution_price=span.price_at if span.minute_sources else None,
                     executor_factory=executor_factory,
                 ).run(daily, corporate_actions=corporate_actions)
                 record = replay.to_record(
@@ -733,14 +934,9 @@ class PITDailyEvaluationBackend:
                 # into the Agent-readable Step attachment, and the decision
                 # anchor and replay window are already known to the session.
                 "decision_slot": snapshot_dir.name,
-                "replay_slot": replay_dir.name,
+                "replay_slots": [path.name for path in replay_dirs],
                 "refresh_calls": len(refreshed),
-                "minute_row_groups_loaded": minute_source.loaded_groups if minute_source is not None else 0,
-                "minute_rows_loaded": minute_source.loaded_rows if minute_source is not None else 0,
-                "minute_max_loaded_partition_rows": (
-                    minute_source.max_loaded_partition_rows if minute_source is not None else 0
-                ),
-                "minute_total_rows": minute_source.total_rows if minute_source is not None else 0,
+                **span.minute_record(),
                 # The layout a strategy actually reads: every domain is a
                 # DIRECTORY of parquet parts under asof_dir, never a flat
                 # <domain>.parquet like the frozen decision snapshot.
@@ -754,7 +950,7 @@ class PITDailyEvaluationBackend:
                 style = replay_style_analysis(
                     replay,
                     daily,
-                    replay_dir=replay_dir,
+                    replay_dir=replay_dirs,
                     snapshot_dir=snapshot_dir,
                     mode=request.mode,
                 )
@@ -774,7 +970,7 @@ class PITDailyEvaluationBackend:
             )
             target = result_dir / "result.json"
             write_json_atomic(target, record)
-            self._result_replay_dirs[str(target)] = replay_dir
+            self._result_replay_dirs[str(target)] = replay_dirs
             write_style_rollup(result_dir, style)
             keep_result_dir = True
             return EvaluationResult(dict(summary), str(target))
@@ -799,33 +995,21 @@ class PITDailyEvaluationBackend:
         """Random-portfolio null control for one completed evaluation.
 
         Replays ``k`` random-name copies of the result's own trade skeleton
-        through the same slot, Broker and window, and ranks the observed excess
+        through the same slots, Broker and window, and ranks the observed excess
         inside them (``replay/null_control.py``). Host-side and read-only: the
-        slot is the one THIS backend evaluated the result against, so the frame
-        comes from the same cache the evaluation filled and no snapshot is
-        rebuilt. Informational — nothing gates on it.
+        slots are the ones THIS backend evaluated the result against, and only
+        their bars, benchmark and ex-date tables are read, so no snapshot is
+        rebuilt or decoded. Informational — nothing gates on it.
         """
 
         result_json = _result_json(result_path)
-        replay_dir = self._result_replay_dirs.get(str(result_json))
-        if replay_dir is None:
+        replay_dirs = self._result_replay_dirs.get(str(result_json))
+        if replay_dirs is None:
             raise ValueError(
                 f"result was not evaluated by this backend, so its PIT replay "
                 f"slot is unknown: {result_path}"
             )
         record = _read_json(result_json)
-        pit = record.get("pit")
-        if not isinstance(pit, Mapping):
-            raise TypeError(f"result has no PIT block: {result_path}")
-        replay_manifest = load_snapshot_manifest(replay_dir)
-        daily = _load_replay_frames(
-            replay_dir,
-            generation_id=str(pit.get("generation_id") or ""),
-            replay_manifest=replay_manifest,
-            cache=self._replay_frame_cache,
-        )["daily"]
-        window = daily["trade_date"].map(_date_key)
-        daily = daily[(window >= _date_key(start)) & (window <= _date_key(end))].copy()
         return run_null_control(
             ReplayResult(
                 equity_curve=tuple(record.get("equity_curve") or ()),
@@ -833,36 +1017,40 @@ class PITDailyEvaluationBackend:
                 inference_dates=(),
                 pending_orders=(),
             ),
-            daily,
-            _slot_benchmark(replay_dir),
+            _span_daily(replay_dirs, start, end),
+            _slot_benchmark(replay_dirs),
             profile,
             schedule,
             k=k,
             seed=seed,
             step=step,
-            corporate_actions=load_slot_corporate_actions(replay_dir, replay_manifest),
+            corporate_actions=_span_corporate_actions(
+                replay_dirs, [load_snapshot_manifest(path) for path in replay_dirs]
+            ),
         )
 
     @staticmethod
     def _validate_bundle(
-        request: EvaluationRequest, snapshot_dir: Path, replay_dir: Path
-    ) -> tuple[dict[str, object], dict[str, object]]:
+        request: EvaluationRequest, snapshot_dir: Path, replay_dirs: Sequence[Path]
+    ) -> tuple[dict[str, object], list[dict[str, object]]]:
         decision = load_snapshot_manifest(snapshot_dir)
-        replay = load_snapshot_manifest(replay_dir)
+        replays = [load_snapshot_manifest(replay_dir) for replay_dir in replay_dirs]
         if decision.get("kind") != "decision_input":
             raise ValueError("EvaluationRequest decision_ref is not a decision snapshot")
-        if replay.get("kind") != "replay_slot":
-            raise ValueError("EvaluationRequest replay_ref is not a replay slot")
-        if str(replay.get("period_start")) != _date_key(request.start) or str(
-            replay.get("period_end")
+        for replay in replays:
+            if replay.get("kind") != "replay_slot":
+                raise ValueError("EvaluationRequest replay_ref is not a replay slot")
+            if str(replay.get("label") or "") != request.mode:
+                raise ValueError("EvaluationRequest mode does not match its immutable replay slot")
+        if str(replays[0].get("period_start")) != _date_key(request.start) or str(
+            replays[-1].get("period_end")
         ) != _date_key(request.end):
             raise ValueError("EvaluationRequest range does not match its immutable replay slot")
-        if str(replay.get("label") or "") != request.mode:
-            raise ValueError("EvaluationRequest mode does not match its immutable replay slot")
+        _require_continuous_slots(replay_dirs, replays)
         snapshot_id = str(decision.get("snapshot_id") or "")
         if snapshot_id != request.snapshot.snapshot_id:
             raise ValueError("EvaluationRequest snapshot_id does not match decision manifest")
-        return decision, replay
+        return decision, replays
 
 
 class PaperPITData:
@@ -1142,6 +1330,7 @@ def _bind_asof_stash_contract(
     generation_id: str,
     decision_manifest: dict[str, object],
     replay_manifest: dict[str, object],
+    preceding_replay_slots: Sequence[str] = (),
 ) -> Path:
     """Bind a part stash to complete, directly-comparable PIT semantics.
 
@@ -1152,6 +1341,9 @@ def _bind_asof_stash_contract(
     function of those inputs, so an identical contract means identical parts
     whether they were encoded by this experiment, by a sibling phase of the
     same region, or by the offline seed prebuild that experiments hardlink.
+    A slot replayed after others in one span continues their as-of tree, so
+    its parts also depend on those slots, which its contract names
+    (``preceding_replay_slots``, absent for a span's first slot).
     The manifests are still verified against the requested release here; a part
     is additionally row-count checked against a fresh slice before it is
     reused.
@@ -1209,6 +1401,8 @@ def _bind_asof_stash_contract(
         "decision_slot": Path(snapshot_dir).resolve().name,
         "replay_slot": Path(replay_dir).resolve().name,
     }
+    if preceding_replay_slots:
+        contract["preceding_replay_slots"] = list(preceding_replay_slots)
     contract_path = stash_dir / "contract.json"
     lock_path = stash_dir.parent / f".{stash_dir.name}.contract.lock"
     with _exclusive_lock(lock_path):
@@ -1236,6 +1430,7 @@ def prebuild_asof_stash(
     start: str,
     end: str,
     host_dir: str | Path,
+    continuation: Sequence[str | Path] = (),
 ) -> dict[str, object]:
     """Encode one replay's as-of parts into its stash without a strategy.
 
@@ -1245,94 +1440,100 @@ def prebuild_asof_stash(
     would reach — is read through the same functions the evaluation uses, and
     the parts are published through the same stash contract, so a later
     backtest hardlinks them instead of re-encoding. ``host_dir`` receives the
-    throwaway as-of tree and is removed afterwards.
+    throwaway as-of tree and is removed afterwards. ``continuation`` names the
+    slots that continue ``replay_dir`` in one span, exactly as
+    ``EvaluationRequest.continuation`` does: each slot's parts land in its own
+    stash, and ``stash_dir`` names the first.
 
     Idempotent: a prebuild that already finished this region under the same
-    contract left ``prebuild.json`` naming the region and the parts, so a rerun
-    returns that record (``reused``) without replaying the window. Reuse is the
-    only work skipped — a hardlinked part is still row-count checked against a
-    fresh slice when an evaluation actually reads it.
+    contract left ``prebuild.json`` in each slot's stash naming the slot's part
+    of the region and its parts, so a rerun returns those records (``reused``)
+    without replaying the window. Reuse is the only work skipped — a hardlinked
+    part is still row-count checked against a fresh slice when an evaluation
+    actually reads it.
     """
 
     snapshot = Path(snapshot_dir).resolve(strict=True)
-    replay = Path(replay_dir).resolve(strict=True)
+    replay_dirs = tuple(
+        Path(path).resolve(strict=True) for path in (replay_dir, *continuation)
+    )
     host = Path(host_dir)
     decision_manifest = load_snapshot_manifest(snapshot)
-    replay_manifest = load_snapshot_manifest(replay)
-    stash_dir = _bind_asof_stash_contract(
+    replay_manifests = [load_snapshot_manifest(path) for path in replay_dirs]
+    _require_continuous_slots(replay_dirs, replay_manifests)
+    slots = _bind_span_stashes(
         snapshot_dir=snapshot,
-        replay_dir=replay,
+        replay_dirs=replay_dirs,
+        replay_manifests=replay_manifests,
         schedule=schedule,
         phase=phase,
         generation_id=generation_id,
         decision_manifest=decision_manifest,
-        replay_manifest=replay_manifest,
     )
+    # Each slot's part of start..end: the span's own ends, the slot boundaries inside.
+    windows = [
+        (
+            start if index == 0 else str(manifest.get("period_start")),
+            end if index == len(slots) - 1 else str(manifest.get("period_end")),
+        )
+        for index, manifest in enumerate(replay_manifests)
+    ]
     started = perf_counter()
-    finished = _finished_stash_prebuild(stash_dir, start=start, end=end)
-    if finished is not None:
+    finished = [
+        _finished_stash_prebuild(slot.stash_dir, start=slot_start, end=slot_end)
+        for slot, (slot_start, slot_end) in zip(slots, windows, strict=True)
+    ]
+    if all(record is not None for record in finished):
         return {
-            "stash_dir": str(stash_dir),
-            "trade_days": int(finished["trade_days"]),  # type: ignore[arg-type]
+            "stash_dir": str(slots[0].stash_dir),
+            "trade_days": sum(int(record["trade_days"]) for record in finished),  # type: ignore[arg-type,index]
             "refresh_calls": 0,
             "seconds": round(perf_counter() - started, 1),
             "reused": True,
         }
-    frames = _decode_replay_frames(replay)
-    daily = frames["daily"]
-    daily = daily[
-        (daily["trade_date"].map(_date_key) >= _date_key(start))
-        & (daily["trade_date"].map(_date_key) <= _date_key(end))
-    ].copy()
+    daily = _span_daily(replay_dirs, start, end)
     if daily.empty:
         raise ValueError(f"PIT daily replay is empty for {start}..{end}")
-    minute_path = replay / "intraday_1min.parquet"
-    minute_source = (
-        HistoricalMinuteSource(minute_path)
-        if minute_path.exists() and pq.ParquetFile(minute_path).metadata.num_rows
-        else None
-    )
+    # The replay engine's own decision points: one per trading day of the
+    # window on which the schedule is due, at its fixed inference time.
+    trade_dates = sorted(set(_trade_date_keys(daily)))
+    del daily
+    refresh_dates: list[str] = []
     try:
-        timeview = Timeview(
+        span = _ReplaySpanView(
             host_dir=host,
             snapshot_dir=snapshot,
-            replay_frames={key: value for key, value in frames.items() if key != "daily"}
-            | {"daily": daily},
-            replay_text_library_dir=(replay / "text_library"),
-            incremental_domains={"intraday_1min"} if minute_source is not None else None,
-            stash_dir=stash_dir,
+            slots=slots,
+            load_frames=lambda slot: _decode_replay_frames(slot.replay_dir),
+            max_intraday_row_group_rows=2_000_000,
+            timer=PhaseTimer(),
         )
-        # The replay engine's own decision points: one per trading day of the
-        # window on which the schedule is due, at its fixed inference time.
-        trade_dates = sorted({_date_key(value) for value in daily["trade_date"]})
         previous: str | None = None
-        refreshes = 0
         for trade_date in trade_dates:
             if schedule.is_due(trade_date, previous):
-                inference_at = schedule.at(trade_date)
-                if minute_source is not None:
-                    minute_source.append_visible(timeview, inference_at)
-                timeview.refresh(pd.Timestamp(inference_at))
-                refreshes += 1
+                span.refresh(schedule.at(trade_date))
+                refresh_dates.append(trade_date)
             previous = trade_date
     finally:
         shutil.rmtree(host, ignore_errors=True)
     # Written only once the whole window has been replayed, so a prebuild
     # killed mid-window leaves no record and the next one resumes the build.
-    write_json_atomic(
-        stash_dir / _STASH_PREBUILD_RECORD,
-        {
-            "start": start,
-            "end": end,
-            "trade_days": len(trade_dates),
-            "refresh_calls": refreshes,
-            "parts": _stash_part_counts(stash_dir),
-        },
-    )
+    for slot, (slot_start, slot_end) in zip(slots, windows, strict=True):
+        first, last = _date_key(slot_start), _date_key(slot_end)
+        write_json_atomic(
+            slot.stash_dir / _STASH_PREBUILD_RECORD,
+            {
+                "start": slot_start,
+                "end": slot_end,
+                "trade_days": sum(1 for day in trade_dates if first <= day <= last),
+                "refresh_calls": sum(1 for day in refresh_dates if first <= day <= last),
+                "parts": _stash_part_counts(slot.stash_dir),
+            },
+        )
     return {
-        "stash_dir": str(stash_dir),
+        "stash_dir": str(slots[0].stash_dir),
         "trade_days": len(trade_dates),
-        "refresh_calls": refreshes,
+        "refresh_calls": len(refresh_dates),
         "seconds": round(perf_counter() - started, 1),
         "reused": False,
     }

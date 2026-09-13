@@ -64,9 +64,15 @@ def _date_text(value: object) -> str:
         return str(value)
 
 
-def _slot_benchmark(replay_dir: Path | None) -> dict[str, float]:
+def _slot_benchmark(replay_dir: Path | Sequence[Path] | None) -> dict[str, float]:
+    """CSI 300 daily returns of one replay slot, or of every slot of a span.
+
+    Consecutive slots partition their rows, so a span's series is the union.
+    """
     if replay_dir is None:
         return {}
+    if not isinstance(replay_dir, (str, Path)):
+        return {day: value for slot in replay_dir for day, value in _slot_benchmark(slot).items()}
     path = Path(replay_dir) / "macro.parquet"
     if not path.is_file():
         return {}
@@ -431,11 +437,14 @@ def replay_style_analysis(
     replay: ReplayResult,
     replay_daily: pd.DataFrame,
     *,
-    replay_dir: Path | None,
+    replay_dir: Path | Sequence[Path] | None,
     snapshot_dir: Path | None,
     mode: str,
 ) -> dict[str, object]:
-    """Compute one result sidecar from the just-finished daily replay."""
+    """Compute one result sidecar from the just-finished daily replay.
+
+    ``replay_dir`` is the replay's slot, or the slots of a span in order.
+    """
 
     strategy = daily_returns_from_curve(replay.equity_curve)
     benchmark = _slot_benchmark(replay_dir)

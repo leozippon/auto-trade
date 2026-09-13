@@ -870,6 +870,10 @@ class EvaluationRequest:
     end: str
     schedule: StrategySchedule
     broker_profile: BrokerProfile
+    # Replay slots that continue the book after ``snapshot.replay_ref``, in
+    # order: the span runs as one replay from ``start`` (the first slot's
+    # start) to ``end`` (the last slot's end).
+    continuation: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

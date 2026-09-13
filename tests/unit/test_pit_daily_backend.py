@@ -19,8 +19,10 @@ import pytest
 
 from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.data.snapshot import SnapshotConfig
-from autotrade.environment.executor import docker_available
+from autotrade.environment.executor import docker_available, raised_by_strategy
 from autotrade.environment.nl import NLConfig
+from autotrade.environment.replay.engine import BacktestError
+from autotrade.environment.replay.timeview import Timeview
 from autotrade.environment.runtime import (
     AGENT_VISIBLE_BACKTEST_SUMMARY_KEYS,
     HOST_PATH_RE,
@@ -28,6 +30,7 @@ from autotrade.environment.runtime import (
     chmod_tree,
 )
 from autotrade.environment.strategy import StrategySchedule
+from autotrade.pipelines import pit_backend
 from autotrade.pipelines.config import (
     SNAPSHOT_CACHE_FORMAT_VERSION,
     ArtifactRevision,
@@ -37,13 +40,14 @@ from autotrade.pipelines.config import (
 from autotrade.pipelines.pit_backend import (
     REPLAY_SOURCE_LABEL,
     HistoricalMinuteSource,
-    _AsOfReadOnlyView,
     PITDailyEvaluationBackend,
     ResearchPITSnapshotProvider,
     _asof_stash_dir,
+    _AsOfReadOnlyView,
     _bind_asof_stash_contract,
     _load_replay_frames,
     _ReplayFrameCache,
+    prebuild_asof_stash,
 )
 
 
@@ -506,7 +510,7 @@ def test_evaluation_summary_carries_the_whole_agent_visible_field_set(
     assert HOST_PATH_RE.search(attachment) is None, attachment
     assert str(tmp_path) not in attachment
     assert record["pit"]["decision_slot"] == snapshot.name
-    assert record["pit"]["replay_slot"] == replay.name
+    assert record["pit"]["replay_slots"] == [replay.name]
     assert not {"decision_ref", "replay_ref"} & set(record["pit"])
     assert set(_agent_visible_backtest_summary(dict(summary))) == expected
 
@@ -1151,7 +1155,7 @@ def test_evaluation_rejects_replay_from_another_phase(tmp_path: Path) -> None:
         BrokerProfile(initial_cash=100_000),
     )
     with pytest.raises(ValueError, match="mode does not match"):
-        PITDailyEvaluationBackend._validate_bundle(request, snapshot, replay)
+        PITDailyEvaluationBackend._validate_bundle(request, snapshot, (replay,))
     with pytest.raises(RuntimeError, match="phase"):
         _bind_asof_stash_contract(
             snapshot_dir=snapshot,
@@ -1975,3 +1979,438 @@ def test_incremental_asof_lock_matches_a_full_chmod_tree(tmp_path: Path) -> None
     )
     chmod_tree(incremental, file_mode=0o644, dir_mode=0o755)
     chmod_tree(reference, file_mode=0o644, dir_mode=0o755)
+
+
+# A span of consecutive replay slots runs as one book. The synthetic release has
+# slot A (2024-01-02/03), slot B (2024-01-04/05) continuing it, and the long
+# slot AB whose every file holds A's rows then B's, as one slot over both would.
+_SPAN_DECISION = "20231231T235959+0800"
+_SPAN_GENERATION = "generation_span"
+_SPAN_SCHEDULE = StrategySchedule("day", "09:28")
+_SPAN_SLOTS = {
+    "a": ("20240101", "20240103", "20231231T235959+0800", ("20240102", "20240103")),
+    "b": ("20240104", "20240105", "20240103T235959+0800", ("20240104", "20240105")),
+    "ab": (
+        "20240101",
+        "20240105",
+        "20231231T235959+0800",
+        ("20240102", "20240103", "20240104", "20240105"),
+    ),
+}
+# (pre_close, open, close); 000001.SZ goes ex a 0.2 cash dividend on 2024-01-05.
+_SPAN_PRICES = {
+    "000001.SZ": {
+        "20231229": (10.0, 10.0, 10.0),
+        "20240102": (10.0, 10.0, 10.5),
+        "20240103": (10.5, 10.5, 11.0),
+        "20240104": (11.0, 11.0, 11.2),
+        "20240105": (11.0, 11.0, 11.5),
+    },
+    "000002.SZ": {
+        "20231229": (5.0, 5.0, 5.0),
+        "20240102": (5.0, 5.0, 5.1),
+        "20240103": (5.1, 5.1, 5.2),
+        "20240104": (5.2, 5.2, 5.0),
+        "20240105": (5.0, 5.0, 5.3),
+    },
+}
+_SPAN_STRATEGY = '''import numpy as np
+import pandas as pd
+
+REFIT_PERIOD = "month"
+DOMAINS = ("daily", "intraday_1min", "auction", "events", "macro", "fundamentals", "text_index")
+TRADES = {
+    "20240102": ("000001.SZ", "buy", 1000, 15),
+    "20240103": ("000002.SZ", "buy", 1000, 10),
+    "20240104": ("000001.SZ", "sell", 500, 10),
+    "20240105": ("000002.SZ", "sell", 1000, 15),
+}
+
+
+def fit(context):
+    try:
+        fits = np.load(context.state_dir + "/fits.npy")
+    except FileNotFoundError:
+        fits = np.zeros(0)
+    np.save(context.state_dir + "/fits.npy", np.append(fits, 1.0))
+
+
+def generate_orders(context):
+    now = pd.Timestamp(context.inference_at)
+    seen = {}
+    for name in DOMAINS:
+        frame = pd.read_parquet(context.asof_dir + "/" + name)
+        if len(frame) and pd.to_datetime(frame["available_at"], format="ISO8601").max() > now:
+            raise RuntimeError("a future row is visible in " + name)
+        seen[name] = len(frame)
+    if any(pd.Timestamp(bar["available_at"]) > now for bar in context.bars):
+        raise RuntimeError("a future bar is visible")
+    day = context.inference_at.strftime("%Y%m%d")
+    symbol, action, quantity, hour = TRADES[day]
+    return [
+        {
+            "symbol": symbol,
+            "action": action,
+            "quantity": quantity,
+            "execute_at": context.inference_at.replace(hour=hour, minute=0).isoformat(),
+        },
+        {
+            "symbol": "000001.SZ",
+            "action": "buy",
+            "quantity": 100,
+            "execute_at": "2099-01-01T09:30:00+08:00",
+            "seen": seen,
+            "bars": len(context.bars),
+            "fits": int(len(np.load(context.state_dir + "/fits.npy"))),
+            "cash": context.account.cash,
+            "positions": dict(context.account.positions),
+            "asof_version": context.asof_version,
+        },
+    ]
+'''
+
+
+def _stamp(day: str, clock: str) -> str:
+    return f"{day[:4]}-{day[4:6]}-{day[6:]}T{clock}+08:00"
+
+
+def _span_frames(days: tuple[str, ...]) -> dict[str, pd.DataFrame]:
+    """Every domain of the synthetic release over ``days``, day by day."""
+
+    rows: dict[str, list[dict[str, object]]] = {
+        name: []
+        for name in ("daily", "intraday_1min", "auction", "events", "fundamentals", "macro", "text_index", "news")
+    }
+    for day in days:
+        for symbol, prices in _SPAN_PRICES.items():
+            pre_close, open_, close = prices[day]
+            rows["daily"].append(
+                {
+                    "trade_date": day, "ts_code": symbol, "open": open_, "close": close,
+                    "pre_close": pre_close, "pct_chg": round(close / pre_close - 1.0, 6),
+                    "circ_mv": 1e6, "up_limit": round(pre_close * 1.1, 2),
+                    "down_limit": round(pre_close * 0.9, 2), "available_at": _stamp(day, "17:30:00"),
+                }
+            )
+            rows["intraday_1min"].append(
+                {
+                    "trade_date": day, "ts_code": symbol, "trade_time": _stamp(day, "10:00:00"),
+                    "close": round(open_ + 0.05, 2), "available_at": _stamp(day, "10:00:00"),
+                }
+            )
+            rows["auction"].append(
+                {"ts_code": symbol, "trade_date": day, "price": open_, "available_at": _stamp(day, "09:29:00")}
+            )
+            # Two datasets on their own nodes: margin_secs lands before the
+            # morning decision, moneyflow only after the evening one, so a slot's
+            # last moneyflow rows first show in the next slot.
+            for dataset, clock in (("margin_secs", "09:00:00"), ("moneyflow", "19:00:00")):
+                rows["events"].append(
+                    {
+                        "dataset": dataset, "ts_code": symbol, "trade_date": day,
+                        "value": close, "available_at": _stamp(day, clock),
+                    }
+                )
+            rows["fundamentals"].append(
+                {"dataset": "income_vip", "ts_code": symbol, "value": pre_close, "available_at": _stamp(day, "18:00:00")}
+            )
+        # Stamped at the end of its day: the last one of a slot sits exactly on
+        # the next slot's anchor and belongs to the earlier slot.
+        rows["macro"].append(
+            {
+                "dataset": "index_daily", "ts_code": "000300.SH", "trade_date": day,
+                "pct_chg": 0.5, "available_at": _stamp(day, "23:59:59"),
+            }
+        )
+        rows["text_index"].append(
+            {
+                "text_id": f"news_{day}", "dataset": "news", "ts_codes": "000001.SZ",
+                "title": f"title {day}", "available_at": _stamp(day, "22:00:00"),
+                "library_file": "news.parquet",
+            }
+        )
+        rows["news"].append({"text_id": f"news_{day}", "body": f"body {day}"})
+    return {name: pd.DataFrame(items) for name, items in rows.items()}
+
+
+def _write_span_release(root: Path) -> tuple[Path, dict[str, Path]]:
+    cache_root = root / "pit_views"
+    snapshot = cache_root / "decision" / _SPAN_DECISION
+    (snapshot / "text_library").mkdir(parents=True)
+    _write_provider_contract(cache_root, generation_id=_SPAN_GENERATION)
+    raw_generation = {"generation_id": _SPAN_GENERATION}
+
+    def write_frames(target: Path, frames: dict[str, pd.DataFrame], *, minute_groups: int | None) -> None:
+        for name, frame in frames.items():
+            if name == "news":
+                frame.to_parquet(target / "text_library" / "news.parquet", index=False)
+            elif name == "intraday_1min":
+                pq.write_table(
+                    pa.Table.from_pandas(frame, preserve_index=False),
+                    target / "intraday_1min.parquet",
+                    row_group_size=minute_groups,
+                )
+            else:
+                frame.to_parquet(target / f"{name}.parquet", index=False)
+
+    write_frames(snapshot, _span_frames(("20231229",)), minute_groups=None)
+    pd.DataFrame({"ts_code": list(_SPAN_PRICES)}).to_parquet(snapshot / "universe.parquet", index=False)
+    (snapshot / "manifest.json").write_text(
+        json.dumps(
+            {
+                "snapshot_id": "snap_span",
+                "kind": "decision_input",
+                "decision_time": "2023-12-31T23:59:59+08:00",
+                "raw_generation": raw_generation,
+            }
+        ),
+        encoding="utf-8",
+    )
+    chmod_tree(snapshot, file_mode=0o444, dir_mode=0o555)
+    slots: dict[str, Path] = {}
+    for key, (start, end, anchor, days) in _SPAN_SLOTS.items():
+        slot = cache_root / "replay" / "valid" / f"{start}_{end}_{anchor}"
+        (slot / "text_library").mkdir(parents=True)
+        write_frames(slot, _span_frames(days), minute_groups=1)
+        dividends = (
+            [{"ts_code": "000001.SZ", "ex_date": "20240105", "record_date": "20240104",
+              "pay_date": "20240105", "div_listdate": "", "cash_per_share": 0.2, "stock_per_share": 0.0}]
+            if "20240105" in days
+            else []
+        )
+        _write_corporate_actions(slot, dividends)
+        (slot / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "snapshot_id": f"replay_span_{key}",
+                    "kind": "replay_slot",
+                    "label": "valid",
+                    "period_start": start,
+                    "period_end": end,
+                    "available_from": datetime.strptime(anchor, "%Y%m%dT%H%M%S%z").isoformat(),
+                    "raw_generation": raw_generation,
+                    "domains": {"corporate_actions": {"rows": len(dividends)}},
+                }
+            ),
+            encoding="utf-8",
+        )
+        slots[key] = slot
+    return snapshot, slots
+
+
+def _span_revision(root: Path, source: str = _SPAN_STRATEGY) -> Path:
+    revision = root / "revision"
+    revision.mkdir(parents=True)
+    (revision / "main.py").write_text(source, encoding="utf-8")
+    return revision
+
+
+def _span_request(snapshot: Path, *replay_dirs: Path, revision: Path) -> EvaluationRequest:
+    first, *rest = replay_dirs
+    manifests = [json.loads((path / "manifest.json").read_text(encoding="utf-8")) for path in replay_dirs]
+    return EvaluationRequest(
+        ArtifactRevision("revision_span", revision),
+        SnapshotBundle("snap_span", str(snapshot), str(first), generation_id=_SPAN_GENERATION),
+        "valid",
+        manifests[0]["period_start"],
+        manifests[-1]["period_end"],
+        _SPAN_SCHEDULE,
+        BrokerProfile(initial_cash=1_000_000),
+        continuation=tuple(str(path) for path in rest),
+    )
+
+
+def _span_stash_parts(snapshot: Path, *replay_dirs: Path) -> dict[str, bytes]:
+    """Every as-of part a replay published, by domain and part name, over its slots' stashes."""
+
+    parts: dict[str, bytes] = {}
+    for replay_dir in replay_dirs:
+        stash = _asof_stash_dir(snapshot, replay_dir, _SPAN_SCHEDULE, "valid")
+        for path in sorted(stash.rglob("*.parquet")):
+            key = str(path.relative_to(stash))
+            assert key not in parts, key
+            parts[key] = path.read_bytes()
+    return parts
+
+
+def test_a_span_of_slots_is_one_book_equal_to_one_long_slot(tmp_path: Path) -> None:
+    """Account, positions, fit state and the as-of view carry across a slot boundary.
+
+    The chain A→B and the long slot AB must replay identically: the same fills
+    (one of them priced from each slot's minute file), the same dividend on a
+    position bought in A, one fit under a monthly refit, and byte-equal as-of
+    parts, including the part that lands after the boundary and carries A's
+    evening rows. The strategy itself fails on any row or bar later than its
+    decision, in both replays.
+    """
+
+    snapshot, slots = _write_span_release(tmp_path)
+    revision = _span_revision(tmp_path)
+    chain = PITDailyEvaluationBackend(tmp_path / "results_chain", execution_mode="trusted").evaluate(
+        _span_request(snapshot, slots["a"], slots["b"], revision=revision)
+    )
+    single = PITDailyEvaluationBackend(tmp_path / "results_single", execution_mode="trusted").evaluate(
+        _span_request(snapshot, slots["ab"], revision=revision)
+    )
+    chain_record, single_record = (
+        json.loads(Path(result.result_ref).read_text(encoding="utf-8")) for result in (chain, single)
+    )
+    for key in ("equity_curve", "executions", "corporate_actions", "inference_dates", "pending_orders"):
+        assert chain_record[key] == single_record[key], key
+    for key in ("total_return", "max_drawdown", "turnover", "trade_count", "sub_windows", "benchmark"):
+        assert chain.summary[key] == single.summary[key], key
+    assert chain_record["pit"]["replay_slots"] == [slots["a"].name, slots["b"].name]
+    assert [row["status"] for row in chain_record["executions"]] == ["filled"] * 4
+    # Priced off B's own minute file (10:00 close 11.05, less sell slippage).
+    assert chain_record["executions"][2]["price"] == pytest.approx(11.05, abs=0.01)
+    [dividend] = chain_record["corporate_actions"]
+    assert (dividend["trade_date"], dividend["quantity_before"]) == ("20240105", 500)
+
+    observations = [row for row in chain_record["pending_orders"] if "seen" in row]
+    assert [row["fits"] for row in observations] == [1, 1, 1, 1]
+    # The first decision of slot B holds what slot A bought.
+    assert observations[2]["positions"] == {"000001.SZ": 1000, "000002.SZ": 1000}
+    assert observations[2]["bars"] == 4
+    # A's evening moneyflow rows first show at B's first decision.
+    assert observations[2]["seen"]["events"] - observations[1]["seen"]["events"] == 4
+
+    parts = _span_stash_parts(snapshot, slots["a"], slots["b"])
+    assert parts == _span_stash_parts(snapshot, slots["ab"])
+    assert {key.split("/")[0] for key in parts} == {
+        "daily", "intraday_1min", "auction", "events", "macro", "fundamentals", "text_index", "text_library",
+    }
+    boundary = pd.read_parquet(_asof_stash_dir(snapshot, slots["b"], _SPAN_SCHEDULE, "valid") / "events")
+    assert "20240103" in set(boundary["trade_date"])
+    contracts = [
+        json.loads((_asof_stash_dir(snapshot, slot, _SPAN_SCHEDULE, "valid") / "contract.json").read_text())
+        for slot in (slots["a"], slots["b"])
+    ]
+    assert "preceding_replay_slots" not in contracts[0]
+    assert contracts[1]["preceding_replay_slots"] == [slots["a"].name]
+
+    style = [
+        json.loads((Path(result.result_ref).parent / "style_analysis.json").read_text(encoding="utf-8"))
+        for result in (chain, single)
+    ]
+    assert style[0]["benchmark_daily"] == style[1]["benchmark_daily"]
+    assert len(style[0]["benchmark_daily"]) == 4
+
+
+def test_a_span_holds_one_decoded_slot_at_a_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Slot B is decoded at its first decision, after slot A's frames are let go.
+
+    A's two decisions have refreshed the view by then, so what A still holds is
+    only the rows that had not become visible, copied out of its frames.
+    """
+
+    snapshot, slots = _write_span_release(tmp_path)
+    revision = _span_revision(tmp_path)
+    real_decode = pit_backend._decode_replay_frames
+    real_refresh = Timeview.refresh
+    refreshes: list[pd.Timestamp] = []
+    alive: dict[str, weakref.ref] = {}
+    at_decode: dict[str, tuple[int, list[str]]] = {}
+
+    def counting_refresh(self: Timeview, when: pd.Timestamp) -> tuple[str, str]:
+        refreshes.append(when)
+        return real_refresh(self, when)
+
+    def tracking_decode(replay_dir: Path) -> dict[str, pd.DataFrame]:
+        gc.collect()
+        at_decode[replay_dir.name] = (
+            len(refreshes),
+            [name for name, ref in alive.items() if ref() is not None],
+        )
+        frames = real_decode(replay_dir)
+        alive[replay_dir.name] = weakref.ref(frames["events"])
+        return frames
+
+    monkeypatch.setattr(Timeview, "refresh", counting_refresh)
+    monkeypatch.setattr(pit_backend, "_decode_replay_frames", tracking_decode)
+    PITDailyEvaluationBackend(tmp_path / "results", execution_mode="trusted").evaluate(
+        _span_request(snapshot, slots["a"], slots["b"], revision=revision)
+    )
+    assert at_decode == {slots["a"].name: (0, []), slots["b"].name: (2, [])}
+
+
+def test_a_strategy_exception_in_a_later_slot_is_the_strategys_own(tmp_path: Path) -> None:
+    snapshot, slots = _write_span_release(tmp_path)
+    source = _SPAN_STRATEGY.replace(
+        '    day = context.inference_at.strftime("%Y%m%d")\n',
+        '    day = context.inference_at.strftime("%Y%m%d")\n'
+        '    if day >= "20240104":\n'
+        '        raise ValueError("no edge in slot two")\n',
+    )
+    revision = _span_revision(tmp_path, source)
+    results = tmp_path / "results"
+    with pytest.raises(BacktestError, match="no edge in slot two") as raised:
+        PITDailyEvaluationBackend(results, execution_mode="trusted").evaluate(
+            _span_request(snapshot, slots["a"], slots["b"], revision=revision)
+        )
+    assert raised_by_strategy(raised.value)
+    assert list(results.iterdir()) == []
+
+
+def test_a_span_refuses_slots_that_do_not_partition_its_rows(tmp_path: Path) -> None:
+    snapshot, slots = _write_span_release(tmp_path)
+    revision = _span_revision(tmp_path)
+    backend = PITDailyEvaluationBackend(tmp_path / "results", execution_mode="trusted")
+    manifest_path = slots["b"] / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    # Overlap: AB already holds B's days and rows.
+    with pytest.raises(ValueError, match="does not continue"):
+        backend.evaluate(_span_request(snapshot, slots["ab"], slots["b"], revision=revision))
+    # Anchored a day early: 2024-01-03's evening rows would be published twice.
+    manifest_path.write_text(
+        json.dumps({**manifest, "available_from": "2024-01-02T23:59:59+08:00"}), encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="does not continue"):
+        backend.evaluate(_span_request(snapshot, slots["a"], slots["b"], revision=revision))
+    # Screened per slot: a held name could vanish from the next slot.
+    manifest_path.write_text(
+        json.dumps({**manifest, "domains": {**manifest["domains"], "universe_screen": {"active": True}}}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="unscreened universe"):
+        backend.evaluate(_span_request(snapshot, slots["a"], slots["b"], revision=revision))
+
+
+def test_a_span_prebuild_encodes_the_parts_its_replay_publishes(tmp_path: Path) -> None:
+    snapshot, slots = _write_span_release(tmp_path / "prebuilt")
+    replayed_snapshot, replayed_slots = _write_span_release(tmp_path / "replayed")
+    PITDailyEvaluationBackend(tmp_path / "results", execution_mode="trusted").evaluate(
+        _span_request(
+            replayed_snapshot, replayed_slots["a"], replayed_slots["b"], revision=_span_revision(tmp_path)
+        )
+    )
+
+    def prebuild(host: str) -> dict[str, object]:
+        return prebuild_asof_stash(
+            snapshot_dir=snapshot,
+            replay_dir=slots["a"],
+            continuation=[slots["b"]],
+            schedule=_SPAN_SCHEDULE,
+            phase="valid",
+            generation_id=_SPAN_GENERATION,
+            start="20240101",
+            end="20240105",
+            host_dir=tmp_path / "host" / host,
+        )
+
+    built = prebuild("first")
+    assert (built["reused"], built["trade_days"], built["refresh_calls"]) == (False, 4, 4)
+    assert _span_stash_parts(snapshot, slots["a"], slots["b"]) == _span_stash_parts(
+        replayed_snapshot, replayed_slots["a"], replayed_slots["b"]
+    )
+    records = [
+        json.loads((_asof_stash_dir(snapshot, slot, _SPAN_SCHEDULE, "valid") / "prebuild.json").read_text())
+        for slot in (slots["a"], slots["b"])
+    ]
+    assert [(record["start"], record["end"], record["trade_days"]) for record in records] == [
+        ("20240101", "20240103", 2),
+        ("20240104", "20240105", 2),
+    ]
+    assert prebuild("second")["reused"] is True
