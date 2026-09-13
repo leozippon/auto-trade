@@ -912,6 +912,12 @@ class FoldSessionRequest:
     # exactly this case, so the session has to be told what went wrong rather
     # than only that nothing is there.
     parent_control_error: str = ""
+    # What the Meta session immediately before this Fold left behind, when
+    # there was one (``ledger.preceding_meta_regularization``): its status and,
+    # for a refused regularization, why. The Fold reads that Meta's PRIOR, so a
+    # cleanup claimed there but never frozen has to be checkable against the
+    # parent it actually mounted.
+    meta_regularization: Mapping[str, object] | None = None
     epoch_index: int = 1
     phase: str = "exploration"
     # ``fold`` for a development Fold; ``deployment_adjustment`` for the

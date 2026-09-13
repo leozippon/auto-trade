@@ -353,6 +353,39 @@ def test_the_facts_say_whether_a_parent_control_baseline_exists() -> None:
     assert legacy["parent_control_available"] is True
 
 
+def test_the_facts_carry_the_preceding_meta_regularization_verdict() -> None:
+    """A cleanup a PRIOR claims but the Pipeline refused is not in this parent.
+
+    The Fold reads the preceding Meta's PRIOR in full, so it has to be able to
+    check that PRIOR's claims against the artifact it actually mounted.
+    """
+
+    refused = _facts(
+        is_initial_artifact=False,
+        parent_strategy_artifact_id="strategy_epoch_001_fold_2022",
+        meta_regularization={
+            "status": "rejected_kept_parent",
+            "reason": "regularization_smoke: TypeError: unsupported operand type(s)",
+        },
+    )["artifact_contract"]["parent"]
+    assert refused["meta_regularization"]["status"] == "rejected_kept_parent"
+    assert "TypeError" in refused["meta_regularization"]["reason"]
+
+    frozen = _facts(
+        is_initial_artifact=False,
+        parent_strategy_artifact_id="strategy_meta_learning",
+        meta_regularization={"status": "meta_regularized"},
+    )["artifact_contract"]["parent"]
+    assert frozen["meta_regularization"] == {"status": "meta_regularized"}
+
+    # No Meta ran before this Fold: nothing to say, nothing published.
+    plain = _facts(
+        is_initial_artifact=False,
+        parent_strategy_artifact_id="strategy_epoch_001_fold_2022",
+    )["artifact_contract"]["parent"]
+    assert "meta_regularization" not in plain
+
+
 def test_the_compact_history_carries_turnover_and_the_parent_delta(
     tmp_path: Path,
 ) -> None:

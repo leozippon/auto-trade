@@ -91,6 +91,7 @@ from .ledger import (
     is_frozen_artifact_mutation,
     latest_fold_records,
     latest_meta_records,
+    preceding_meta_regularization,
     walk_forward_transitions,
 )
 from .ledger import (
@@ -323,6 +324,11 @@ class RollingExperimentPipeline:
                         parent_control=control,
                         parent_control_null=control_null,
                         parent_control_error=control_error,
+                        # The Fold reads the preceding Meta's PRIOR, so it also
+                        # reads what the Pipeline did with that Meta's edit.
+                        meta_regularization=preceding_meta_regularization(
+                            self.ledger.read()
+                        ),
                         epoch_index=_epoch_index(epoch_id),
                         phase=(
                             "convergence"

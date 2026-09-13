@@ -2798,6 +2798,14 @@ class LLMFoldDeveloper:
                 "parent_strategy_artifact_id": (
                     request.parent.artifact_id if request.parent is not None else None
                 ),
+                # The verdict on the preceding Meta's regularization, when one
+                # ran: the Agent reads that Meta's PRIOR, and a cleanup it
+                # claims but the Pipeline refused is not in this parent.
+                "meta_regularization": (
+                    dict(request.meta_regularization)
+                    if request.meta_regularization
+                    else None
+                ),
                 "template_ref": None
                 if request.parent is not None
                 else "agent_output_template",

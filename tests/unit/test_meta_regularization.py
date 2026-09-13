@@ -32,7 +32,10 @@ from autotrade.pipelines.config import MetaSessionResult, SnapshotBundle
 from autotrade.pipelines.experiment import REGULARIZATION_SMOKE_DAYS
 from autotrade.pipelines.folds import build_fold_schedule
 from autotrade.pipelines.hitl_state import iter_development_sessions
-from autotrade.pipelines.ledger import ExperimentLedger
+from autotrade.pipelines.ledger import (
+    ExperimentLedger,
+    preceding_meta_regularization,
+)
 
 MAIN = "def generate_orders(context):\n    return []\n"
 DAYS = [stamp.strftime("%Y%m%d") for stamp in pd.bdate_range("2025-09-29", "2026-06-30")]
@@ -462,6 +465,98 @@ class RegularizationSmokeTest(unittest.TestCase):
                 record["regularization_smoke"],
                 {"status": "ok", "days": REGULARIZATION_SMOKE_DAYS},
             )
+
+
+class PrecedingMetaRegularizationTest(unittest.TestCase):
+    """What the next Fold is told about the Meta that ran right before it.
+
+    The Fold reads that Meta's PRIOR in full. A PRIOR that claims a cleanup the
+    Pipeline then refused would otherwise describe an artifact the Fold never
+    mounted, with nothing in the session to check it against.
+    """
+
+    def test_a_refused_regularization_reaches_the_next_fold_with_its_reason(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as tmp:
+            seen: list[object] = []
+
+            def developer(request):
+                seen.append(request.meta_regularization)
+                return FoldSessionResult(
+                    "conversation",
+                    (),
+                    None,
+                    no_edge_reason=(
+                        "no candidate proved an edge on this window and the "
+                        "parent stays the lineage head"
+                    ),
+                )
+
+            pipeline, artifacts, config = _pipeline(
+                Path(tmp),
+                meta_learner=lambda facts: MetaSessionResult(
+                    prior="shrink it", revision_id="revision_meta", allowed=True
+                ),
+                developer=developer,
+                # The regularized package cannot run, so it is never frozen.
+                evaluator=CrashingEvaluator("broken on the first decision day"),
+            )
+            artifacts.add_revision("revision_meta", BROKEN)
+            fold = build_fold_schedule("2026Q1", "2026Q1", DAYS, window_months=24)[0]
+            _prior, parent = pipeline.run_meta_session(
+                "epoch_001", 0, fold, parent=_parent(artifacts), previous_prior=""
+            )
+
+            pipeline.run_fold("epoch_001", fold, parent=parent)
+
+            self.assertEqual(seen[0]["status"], "rejected_kept_parent")
+            self.assertIn("regularization_smoke", seen[0]["reason"])
+            # And once this Fold has its own record, the Meta is no longer the
+            # session that ran immediately before.
+            records = ExperimentLedger(config.ledger_path).read()
+            self.assertIsNone(preceding_meta_regularization(records))
+
+    def test_a_frozen_regularization_is_reported_without_a_reason(self) -> None:
+        records = [
+            {
+                "record_type": "meta_learning",
+                "status": "meta_regularized",
+                "frozen_strategy_artifact_id": "strategy_meta",
+                "modification_check": {"allowed_to_backtest": True},
+                "regularization_smoke": {"status": "ok", "days": 3},
+            }
+        ]
+        self.assertEqual(
+            preceding_meta_regularization(records), {"status": "meta_regularized"}
+        )
+
+    def test_a_check_refusal_carries_its_own_reasons(self) -> None:
+        records = [
+            {
+                "record_type": "meta_learning",
+                "status": "rejected_kept_parent",
+                "modification_check": {
+                    "allowed_to_backtest": False,
+                    "reasons": ["unsupported models file type: deadcode_backup/old.py"],
+                },
+            }
+        ]
+        verdict = preceding_meta_regularization(records)
+        assert verdict is not None
+        self.assertEqual(verdict["status"], "rejected_kept_parent")
+        self.assertIn("unsupported models file type", verdict["reason"])
+
+    def test_an_empty_or_fold_led_ledger_says_nothing(self) -> None:
+        self.assertIsNone(preceding_meta_regularization([]))
+        self.assertIsNone(
+            preceding_meta_regularization(
+                [
+                    {"record_type": "meta_learning", "status": "rejected_kept_parent"},
+                    {"record_type": "fold", "fold_status": "frozen"},
+                ]
+            )
+        )
 
 
 class RegularizedParentKeepsItsIdentityTest(unittest.TestCase):

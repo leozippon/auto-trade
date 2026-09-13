@@ -459,6 +459,18 @@ def _artifact_contract_facts(
             if (error := manifest.get("parent_control_error"))
             else {}
         ),
+        # What the Meta session right before this one left behind, when there
+        # was one: `meta_regularized` means this parent IS its edit, any other
+        # status means the parent is unchanged whatever that Meta's PRIOR says
+        # it cleaned up, and `reason` says why the Pipeline refused it.
+        **(
+            {"meta_regularization": dict(regularization)}
+            if isinstance(
+                regularization := manifest.get("meta_regularization"), Mapping
+            )
+            and regularization
+            else {}
+        ),
         "model_artifacts_empty": model_artifacts_empty,
     }
     # What freezes this Fold and what graduates the experiment, both derived
