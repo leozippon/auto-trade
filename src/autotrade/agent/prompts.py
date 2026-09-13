@@ -95,10 +95,10 @@ ROLE_MATRIX_SECTION = """\
 | 角色 | 策略与模型 | PRIOR | 共享 skills | 正式回测与结束 |
 | --- | --- | --- | --- | --- |
 | Fold 父 Agent | 可写；设计、实现、协调、验收 | 只读 | 可写 | 可回测、可结束 Fold |
-| Fold `developer` / `general-purpose` | 可写；有 Sandbox shell | 不可 | 可写 | 否 |
-| Fold `auditor` / `Explore` | 只读文本与代码；不能执行 | 不可 | 只读 | 否 |
+| Fold `general-purpose` | 可写；有 Sandbox shell | 不可 | 可写 | 否 |
+| Fold `Explore` | 只读文本与代码；不能执行 | 不可 | 只读 | 否 |
 | Meta 父 Agent | 只读 | 唯一可写 | 可写 | 不可回测；可结束 Meta |
-| Meta 任一子角色 | 只读提议 | 不可 | 只读 | 否 |
+| Meta 子代理（两种角色） | 只读提议 | 不可 | 只读 | 否 |
 
 子代理不得嵌套、正式回测、结束会话、修改 PRIOR 或自行验收；由父 Agent 验收。\
 """
@@ -240,7 +240,7 @@ META_SYSTEM_PROMPT = """\
 # 工具与工作方式
 - 工具用原生 function calling 调用，参数、限制与返回形状以各自的描述和 schema 为准。同一轮的多个调用并发执行，批次里含写入或结束时按顺序执行；纯文本回复不结束会话。
 - `read_file`/`grep`/`glob` 在授权根内有界读取与搜索。`write_file`/`edit_file` 写 `PRIOR.md`，或按只读示例 `sandbox_environment.example.json` 写 `sandbox_environment.json`，为后续 Fold 声明包依赖（不能下载权重、数据或仓库，也不能让 PRIOR 依赖后续自行安装）。`write_skill`/`delete_skill` 维护共享 skills。`report_issue` 向运营者报告环境、工具、数据或挂载文档的缺陷。`finish_meta` 无参数结束；发布受长度与可迁移内容门约束，红线见它的描述。
-- `agent` 启动一层只读后台子代理，完成后结果以 `subagent_completed` 消息送回，不要轮询：等待期间做其他工作，没有时以文本回复结束本轮。你自己的上下文和串行轮次最稀缺：把阅读拆成能独立完成的块（review window 与 Fold 摘要、冻结策略与 skills、上一份 PRIOR、原始 Trace sidecar 的失效模式）在同一轮并行启动，它们运行时你继续梳理判断框架；几个并行的有界子代理仍好过一个很长的串行子代理，任务很简单时也可以自己读。task 写清路径与期望返回格式；`auditor` / `developer` / `general-purpose` / `Explore` 在 Meta 中都只读，只能提出有证据的候选。只在需要子代理已有上下文时 `resume` 它，改范围或提前收尾用 `action=message`。已定结论带入后续，不做迭代式反复审计。
+- `agent` 启动一层只读后台子代理，完成后结果以 `subagent_completed` 消息送回，不要轮询：等待期间做其他工作，没有时以文本回复结束本轮。你自己的上下文和串行轮次最稀缺：把阅读拆成能独立完成的块（review window 与 Fold 摘要、冻结策略与 skills、上一份 PRIOR、原始 Trace sidecar 的失效模式）在同一轮并行启动，它们运行时你继续梳理判断框架；几个并行的有界子代理仍好过一个很长的串行子代理，任务很简单时也可以自己读。task 写清路径与期望返回格式，子代理只能提出有证据的候选。只在需要子代理已有上下文时 `resume` 它，改范围或提前收尾用 `action=message`。已定结论带入后续，不做迭代式反复审计。
 - 上下文达到阈值时较早消息会被压缩成摘要，子代理同样如此。计划记在工作区根的 `TODO.md`（用 `write_file`/`edit_file` 维护）：每个任务一行，写明负责方、状态和一句话结果，规划完成后建立，每个子代理完成后更新，`finish_meta` 前核对全部条目；上下文被压缩后它是恢复计划的依据。
 - 从 `inputs/skills_index.json` 和 `inputs/meta_context.json` 起步，自主选择足以支持判断的证据：skill 正文、冻结策略、摘要和原始 Trace sidecar，不受固定读取顺序约束。索引里的运行记忆是别的实验或研究者留下的只读建议，不是规则：依赖之前先对照当前数据合同与本窗口证据核实，冲突时以证据为准，条目本身有误时用 `report_issue(category="docs")` 报告。sidecar 用来提炼经验，不要把原始 trace 写入 PRIOR。
 
@@ -475,10 +475,10 @@ def build_meta_learning_prompt(
     sections = [
         (
             "开始本轮 Meta。适合并行委托的开局工作，例如："
-            "`auditor` 读 `inputs/meta_context.json` 的 review window 与各 Fold 的 Validation/紧凑 Test 摘要，"
+            "`Explore` 读 `inputs/meta_context.json` 的 review window 与各 Fold 的 Validation/紧凑 Test 摘要，"
             "返回各 Fold 的 `fold_status` 与 `finish_mode`、跨 Fold 反复出现的失效模式、稳定的方向，以及每个 Fold 实际完成了几轮 `batch_validate`；"
             "`Explore` 读冻结策略、相关 skill 与上一份 PRIOR，返回现有机制、哪些参数是拟合的、已沉淀知识与过时条目；"
-            "`auditor` 抽读原始 Trace sidecar 中失败、超时或早早收工的会话，返回流程层面的根因。"
+            "`Explore` 抽读原始 Trace sidecar 中失败、超时或早早收工的会话，返回流程层面的根因。"
             "怎样拆分由你按证据决定。"
             "结果送回后自主选择足以支持判断的本地 development 证据，维护工作区根的 `PRIOR.md`、"
             "按需维护共享 skills。不要把 catalogs、how-tos、skill 正文或 raw traces 复制进 PRIOR；"

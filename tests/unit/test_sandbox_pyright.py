@@ -73,7 +73,7 @@ def test_agent_prompts_leave_pyright_how_to_out_of_system_text() -> None:
     fold = build_system_prompt(mode="fold", experiment_facts={})
     meta = build_system_prompt(mode="meta", experiment_facts={})
     # The writing child is the one that would be tempted to type-check.
-    child = subagent_system_prompt("fold", "developer")
+    child = subagent_system_prompt("fold", "general-purpose")
     assert COMMAND not in fold
     assert COMMAND not in child
     assert COMMAND not in meta

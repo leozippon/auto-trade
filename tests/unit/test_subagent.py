@@ -174,7 +174,7 @@ def test_subagent_events_land_on_the_parent_fold_trace() -> None:
         event_sink=lambda event, payload: events.append((event, payload)),
     ).run(
         "inspect snapshot schema",
-        role="developer",
+        role="general-purpose",
         parent_call_id="call_parent",
     )
     types = [event for event, _payload in events]
@@ -183,13 +183,13 @@ def test_subagent_events_land_on_the_parent_fold_trace() -> None:
     assert "subagent_tool" in types
     assert types[-1] == "subagent"
     assert events[0][1]["parent_call_id"] == "call_parent"
-    assert events[0][1]["role"] == "developer"
+    assert events[0][1]["role"] == "general-purpose"
     # The brief is traced (clipped like tool arguments); a scripted double
     # cannot carry a thinking level, and the trace says so.
     assert events[0][1]["task"] == "inspect snapshot schema"
     assert events[0][1]["thinking_applied"] is False
     assert events[0][1]["task_id"] == result["task_id"]
-    assert result["role"] == "developer"
+    assert result["role"] == "general-purpose"
     tool_event = next(payload for event, payload in events if event == "subagent_tool")
     assert tool_event["tool"] == "shell"
     assert tool_event["parent_call_id"] == "call_parent"
@@ -270,7 +270,7 @@ def test_subagent_write_edit_shell_and_checks_persist(tmp_path: Path) -> None:
                 ModificationCheckTool(workspace / "output"),
             ]
         ),
-    ).run("write and check the strategy", role="developer")
+    ).run("write and check the strategy", role="general-purpose")
     assert result["status"] == "completed"
     written = (workspace / "output" / "main.py").read_text(encoding="utf-8")
     assert "return []  # ok" in written
@@ -358,7 +358,7 @@ def test_concurrent_subagents_do_not_drop_each_others_workspace_writes(
     def run(name: str) -> None:
         results[name] = SubAgentEngine(
             llm=_candidate_writer(name, barrier), tools=tools
-        ).run(f"实现候选 {name}", role="developer")
+        ).run(f"实现候选 {name}", role="general-purpose")
 
     threads = [threading.Thread(target=run, args=(name,)) for name in ("g20", "h1")]
     for thread in threads:
@@ -430,7 +430,7 @@ def test_later_subagent_write_to_one_path_wins_and_leaves_the_rest(
                 ]
             ),
             tools=tools,
-        ).run(f"写入 {name}", role="developer")
+        ).run(f"写入 {name}", role="general-purpose")
         assert result["status"] == "completed"
     candidates = workspace / "candidates"
     assert candidates.joinpath("shared.py").read_text(encoding="utf-8") == (
@@ -471,7 +471,7 @@ def test_subagent_write_failure_does_not_finish_parent(tmp_path: Path) -> None:
         subagent=subagent,
     )
     dispatched = runner.tools.invoke(
-        "agent", {"agent": "developer", "task": "write then fail"}
+        "agent", {"agent": "general-purpose", "task": "write then fail"}
     )
     assert dispatched.ok and dispatched.value["status"] == "started"
     finished = runner._wait_subagent_jobs()
@@ -517,7 +517,7 @@ def test_subagent_readonly_write_failure_stays_an_observation(tmp_path: Path) ->
     result = SubAgentEngine(
         llm=llm,
         tools=ToolRegistry([WriteFileTool(SafeWorkspace(workspace))]),
-    ).run("overwrite readme", role="developer")
+    ).run("overwrite readme", role="general-purpose")
     assert result["status"] == "completed"
     assert (workspace / "output" / "README.md").read_text(encoding="utf-8") == "keep\n"
 
@@ -535,7 +535,7 @@ def test_subagent_and_main_share_one_session_call_budget() -> None:
     result = SubAgentEngine(
         llm=budgeted,
         tools=ToolRegistry([DeclaredReadOnlyShell()]),
-    ).run("count rows", role="auditor")
+    ).run("count rows", role="Explore")
     assert result["status"] == "completed"
     with pytest.raises(RuntimeError, match="budget exhausted"):
         budgeted.complete([])
@@ -573,7 +573,7 @@ def test_runner_attaches_subagent_events_to_its_sink() -> None:
         event_sink=lambda event, _payload: events.append(event),
     )
     dispatched = runner.tools.invoke(
-        "agent", {"agent": "auditor", "task": "read schema"}
+        "agent", {"agent": "Explore", "task": "read schema"}
     )
     assert dispatched.ok and dispatched.value["status"] == "started"
     finished = runner._wait_subagent_jobs()
@@ -593,7 +593,7 @@ def test_fold_auditor_cannot_invoke_the_registered_shell() -> None:
     result = SubAgentEngine(
         llm=llm,
         tools=ToolRegistry([shell]),
-    ).run("inspect without shell", role="auditor")
+    ).run("inspect without shell", role="Explore")
     assert result["status"] == "completed"
     assert result["summary"] == "shell blocked"
     assert shell.calls == []
@@ -613,7 +613,7 @@ def test_subagent_unknown_tool_call_is_rejected_without_invoke() -> None:
     result = SubAgentEngine(
         llm=llm,
         tools=ToolRegistry([shell]),
-    ).run("do not backtest", role="auditor")
+    ).run("do not backtest", role="Explore")
     assert result["status"] == "completed"
     assert result["summary"] == "unknown tool blocked"
     assert shell.calls == []
@@ -736,7 +736,7 @@ def test_failed_subagent_attempt_counts_for_its_role() -> None:
                         ToolCall(
                             "e1",
                             "agent",
-                            {"agent": "developer", "task": "write then fail"},
+                            {"agent": "general-purpose", "task": "write then fail"},
                         ),
                     )
                 ),
@@ -750,7 +750,7 @@ def test_failed_subagent_attempt_counts_for_its_role() -> None:
     )
     assert runner.run("failed subagent is still traced").status == "finished"
     assert runner._subagent_attempts == 1
-    assert runner._subagent_roles == {"developer"}
+    assert runner._subagent_roles == {"general-purpose"}
     assert finish.invoked == 1
 
 
@@ -770,7 +770,7 @@ def test_subagent_attempt_counter_resets_on_new_run() -> None:
         subagent=subagent,
     )
     runner._subagent_attempts = 4
-    runner._subagent_roles = {"auditor"}
+    runner._subagent_roles = {"Explore"}
     assert runner.run("new session without subagent").status == "finished"
     assert finish.invoked == 1
     assert runner._subagent_attempts == 0
@@ -838,7 +838,7 @@ def test_meta_subagent_is_readonly_and_cannot_nest(tmp_path: Path) -> None:
         tools=ToolRegistry(tools),
         mode="meta",
     )
-    result = engine.run("do not write prior", role="auditor")
+    result = engine.run("do not write prior", role="Explore")
     assert result["status"] == "completed"
     assert (workspace / "PRIOR.md").read_text(encoding="utf-8") == "keep\n"
     assert "sub-agent" in META_SUBAGENT_SYSTEM_PROMPT
@@ -884,7 +884,7 @@ def test_fold_and_subagent_prompts_keep_roles() -> None:
     # The pyright how-to assertion lives in test_sandbox_pyright.py.
     fold = build_system_prompt(mode="fold", experiment_facts={})
     meta = build_system_prompt(mode="meta", experiment_facts={})
-    for role in ("`auditor`", "`developer`", "`general-purpose`", "`Explore`"):
+    for role in ("`Explore`", "`general-purpose`", "`general-purpose`", "`Explore`"):
         assert role in fold
         assert role in meta
     assert "保持自己的上下文精简" in fold
@@ -933,7 +933,7 @@ def test_subagent_schema_uses_session_role_enum() -> None:
     role_schema = properties["agent"]
     assert isinstance(role_schema, dict)
     assert role_schema["enum"] == list(SUBAGENT_ROLES)
-    assert role_schema["enum"] == ["auditor", "developer", "general-purpose", "Explore"]
+    assert role_schema["enum"] == ["general-purpose", "Explore"]
     thinking_schema = properties["thinking"]
     assert isinstance(thinking_schema, dict)
     assert thinking_schema["enum"] == list(SUBAGENT_THINKING_LEVELS)
@@ -991,11 +991,11 @@ def test_role_tool_visibility_hides_writes_from_audits(tmp_path: Path) -> None:
     engine = SubAgentEngine(llm=ScriptedLLM([]), tools=ToolRegistry(tools))
     impl = {
         _function_name(record)
-        for record in engine._provider_tools(allowed_subagent_tools("fold", "developer"))
+        for record in engine._provider_tools(allowed_subagent_tools("fold", "general-purpose"))
     }
     audit = {
         _function_name(record)
-        for record in engine._provider_tools(allowed_subagent_tools("fold", "auditor"))
+        for record in engine._provider_tools(allowed_subagent_tools("fold", "Explore"))
     }
     # The parent's Fold surface minus what it keeps by design (both formal
     # validation tools, finish, rollback, agent): the unofficial
@@ -1043,7 +1043,7 @@ def test_role_tool_visibility_hides_writes_from_audits(tmp_path: Path) -> None:
     meta_names = {
         _function_name(record)
         for record in meta_engine._provider_tools(
-            allowed_subagent_tools("meta", "auditor")
+            allowed_subagent_tools("meta", "Explore")
         )
     }
     meta_general = {
@@ -1062,7 +1062,7 @@ def test_role_tool_visibility_hides_writes_from_audits(tmp_path: Path) -> None:
     meta_developer = {
         _function_name(record)
         for record in meta_engine._provider_tools(
-            allowed_subagent_tools("meta", "developer")
+            allowed_subagent_tools("meta", "general-purpose")
         )
     }
     meta_explore_role = {
@@ -1106,12 +1106,12 @@ def test_subagent_calls_still_track_attempts_and_roles() -> None:
                         ToolCall(
                             "e1",
                             "agent",
-                            {"agent": "auditor", "task": "check data"},
+                            {"agent": "Explore", "task": "check data"},
                         ),
                         ToolCall(
                             "e2",
                             "agent",
-                            {"agent": "developer", "task": "check strategy"},
+                            {"agent": "general-purpose", "task": "check strategy"},
                         ),
                     )
                 ),
@@ -1130,26 +1130,18 @@ def test_subagent_calls_still_track_attempts_and_roles() -> None:
     assert result.status == "finished"
     assert finish.invoked == 1
     assert runner._subagent_attempts == 3
-    assert runner._subagent_roles == {
-        "general-purpose",
-        "auditor",
-        "developer",
-    }
+    assert runner._subagent_roles == {"general-purpose", "Explore"}
     attempt_events = [payload for event, payload in events if event == "subagent_attempt"]
     # The three launches ran concurrently, so completion order is not fixed.
     assert sorted(payload["role"] for payload in attempt_events) == [
-        "auditor",
-        "developer",
+        "Explore",
+        "general-purpose",
         "general-purpose",
     ]
     assert all("task" not in payload for payload in attempt_events)
     ended = next(payload for event, payload in events if event == "session_end")
     assert ended["subagent_attempts"] == 3
-    assert ended["subagent_roles"] == [
-        "auditor",
-        "developer",
-        "general-purpose",
-    ]
+    assert ended["subagent_roles"] == ["Explore", "general-purpose"]
     assert "task" not in ended
     # In-flight children collected at finish still bill the session.
     assert ended["token_usage"]["subagent"]["llm_calls"] == 3
@@ -1170,7 +1162,7 @@ def test_single_subagent_role_can_finish() -> None:
                         ToolCall(
                             "e1",
                             "agent",
-                            {"agent": "auditor", "task": "check data"},
+                            {"agent": "Explore", "task": "check data"},
                         ),
                     )
                 ),
@@ -1184,7 +1176,7 @@ def test_single_subagent_role_can_finish() -> None:
     )
     assert runner.run("one delegated review is enough").status == "finished"
     assert finish.invoked == 1
-    assert runner._subagent_roles == {"auditor"}
+    assert runner._subagent_roles == {"Explore"}
 
 
 def test_general_prompts_explain_mode_and_role() -> None:
@@ -1192,7 +1184,7 @@ def test_general_prompts_explain_mode_and_role() -> None:
     meta = subagent_system_prompt("meta", "general-purpose")
     assert "一级 `general-purpose`" in fold
     assert "修改共享策略、模型或 skills" in fold
-    assert "有界的跨域实现任务" in fold
+    assert "有界的实现、计算或检查任务" in fold
     # Writers share one live tree with the parent and sibling children: no
     # private copy, no merge-back, so writes stay inside the task's paths.
     for clause in (
@@ -1201,7 +1193,7 @@ def test_general_prompts_explain_mode_and_role() -> None:
         "在汇报里写明删了什么",
     ):
         assert clause in fold
-        assert clause not in subagent_system_prompt("fold", "auditor")
+        assert clause not in subagent_system_prompt("fold", "Explore")
     assert "`general-purpose`" in meta
     assert "只读" in meta
     assert "不能写策略、models、skills 或 PRIOR" in meta
@@ -1214,8 +1206,8 @@ def test_fold_subagent_prompts_carry_the_path_and_argv_contract() -> None:
     role prompt carries an example-based cheat sheet with one source in
     prompts.py, whatever the task says."""
 
-    writer = subagent_system_prompt("fold", "developer")
-    reader = subagent_system_prompt("fold", "auditor")
+    writer = subagent_system_prompt("fold", "general-purpose")
+    reader = subagent_system_prompt("fold", "Explore")
     for prompt in (writer, reader):
         assert TOOL_PATH_CHEAT_SHEET in prompt
         assert '{"root": "artifacts", "path": "data_summary.json"}' in prompt
@@ -1267,12 +1259,12 @@ def test_subagent_defaults_are_xhigh_thinking_and_six_concurrent() -> None:
     result = SubAgentEngine(
         llm=ScriptedLLM([ProviderResponse(content="ok")]),
         tools=ToolRegistry([DeclaredReadOnlyShell()]),
-    ).run("summarize", role="auditor")
+    ).run("summarize", role="Explore")
     assert result["thinking"] == "xhigh"
     lowered = SubAgentEngine(
         llm=ScriptedLLM([ProviderResponse(content="ok")]),
         tools=ToolRegistry([DeclaredReadOnlyShell()]),
-    ).run("quote the config lines", role="developer", thinking="medium")
+    ).run("quote the config lines", role="general-purpose", thinking="medium")
     assert lowered["thinking"] == "medium"
     assert (
         f"默认同时运行 {DEFAULT_SUBAGENT_MAX_CONCURRENT} 个，超出排队"
@@ -1291,7 +1283,7 @@ def test_subagent_inherit_context_prepends_parent_digest() -> None:
         tools=ToolRegistry([DeclaredReadOnlyShell()]),
     ).run(
         "summarize",
-        role="auditor",
+        role="Explore",
         inherit_context=True,
         parent_messages=[
             ChatMessage("system", "secret"),
@@ -1332,21 +1324,27 @@ def test_subagent_arguments_are_validated_by_the_registry() -> None:
         _function_name(tool) for tool in runner._provider_tools()
     }
     bad_thinking = runner.tools.invoke(
-        "agent", {"agent": "auditor", "task": "x", "thinking": "turbo"}
+        "agent", {"agent": "Explore", "task": "x", "thinking": "turbo"}
     )
     assert bad_thinking.ok is False
     assert "thinking" in bad_thinking.error
     assert bad_thinking.value["error_type"] == "schema_error"
     bad_role = runner.tools.invoke("agent", {"agent": "reader", "task": "x"})
     assert bad_role.ok is False and "agent must be one of" in bad_role.error
+    # The retired role names (still in archived PRIOR and skills text) fail the
+    # same way, naming the two roles that exist.
+    for legacy in ("auditor", "developer"):
+        refused = runner.tools.invoke("agent", {"agent": legacy, "task": "x"})
+        assert refused.ok is False
+        assert "['general-purpose', 'Explore']" in refused.error
     unknown = runner.tools.invoke(
-        "agent", {"agent": "auditor", "task": "x", "max_rounds": 3}
+        "agent", {"agent": "Explore", "task": "x", "max_rounds": 3}
     )
     assert unknown.ok is False and "max_rounds" in unknown.error
     too_long = runner.tools.invoke(
         "agent",
         {
-            "agent": "auditor",
+            "agent": "Explore",
             "task": "x",
             "description": "d" * (SUBAGENT_DESCRIPTION_MAX_CHARS + 1),
         },
@@ -1355,7 +1353,7 @@ def test_subagent_arguments_are_validated_by_the_registry() -> None:
     assert runner._subagent_attempts == 0
     # An integral JSON number is accepted as max_turns and the launch starts.
     started = runner.tools.invoke(
-        "agent", {"agent": "auditor", "task": "x", "max_turns": 2.0}
+        "agent", {"agent": "Explore", "task": "x", "max_turns": 2.0}
     )
     assert started.ok and started.value["status"] == "started"
     assert runner._wait_subagent_jobs()[-1]["ok"] is True
@@ -1381,7 +1379,7 @@ def test_legacy_thinking_values_launch_at_xhigh_through_the_registry() -> None:
     )
     for legacy in ("high", "max"):
         started = runner.tools.invoke(
-            "agent", {"agent": "auditor", "task": "x", "thinking": legacy}
+            "agent", {"agent": "Explore", "task": "x", "thinking": legacy}
         )
         assert started.ok and started.value["status"] == "started"
         record = runner._wait_subagent_jobs()[-1]
@@ -1389,7 +1387,7 @@ def test_legacy_thinking_values_launch_at_xhigh_through_the_registry() -> None:
         child = record["value"]
         assert isinstance(child, dict) and child["thinking"] == "xhigh"
     unknown = runner.tools.invoke(
-        "agent", {"agent": "auditor", "task": "x", "thinking": "turbo"}
+        "agent", {"agent": "Explore", "task": "x", "thinking": "turbo"}
     )
     assert unknown.ok is False
     assert unknown.value["error_type"] == "schema_error"
@@ -1413,13 +1411,13 @@ def test_agent_action_resume_is_told_the_resume_parameter() -> None:
     )
     rejected = runner.tools.invoke(
         "agent",
-        {"action": "resume", "agent": "auditor", "task": "x", "task_id": "agent_1"},
+        {"action": "resume", "agent": "Explore", "task": "x", "task_id": "agent_1"},
     )
     assert rejected.ok is False
     assert rejected.value["error_type"] == "schema_error"
     assert "resume is not an action" in rejected.error
     assert "resume=<task_id>" in rejected.error
-    assert '"agent": "auditor"' in rejected.error
+    assert '"agent": "Explore"' in rejected.error
     assert runner._subagent_attempts == 0
     # Any other unknown action still gets the plain enum rejection.
     other = runner.tools.invoke("agent", {"action": "steer", "task_id": "agent_1"})
@@ -1436,7 +1434,7 @@ def test_subagent_thinking_only_reply_does_not_finish_the_child() -> None:
     result = SubAgentEngine(
         llm=llm,
         tools=ToolRegistry([DeclaredReadOnlyShell()]),
-    ).run("summarize", role="auditor")
+    ).run("summarize", role="Explore")
     assert result["status"] == "completed"
     assert result["summary"] == "done after thinking"
     assert result["llm_calls"] == 2
@@ -1492,7 +1490,7 @@ def test_parent_session_continues_before_subagent_finishes() -> None:
                     ToolCall(
                         "e1",
                         "agent",
-                        {"agent": "auditor", "task": "slow look"},
+                        {"agent": "Explore", "task": "slow look"},
                     ),
                 )
             ),
@@ -1542,7 +1540,7 @@ def test_parent_text_only_waits_for_pending_subagent_then_resumes() -> None:
                     ToolCall(
                         "e1",
                         "agent",
-                        {"agent": "auditor", "task": "slow look"},
+                        {"agent": "Explore", "task": "slow look"},
                     ),
                 )
             ),
@@ -1641,12 +1639,12 @@ def test_parent_text_only_wakes_on_first_completed_subagent() -> None:
                     ToolCall(
                         "e1",
                         "agent",
-                        {"agent": "auditor", "task": "fast-task"},
+                        {"agent": "Explore", "task": "fast-task"},
                     ),
                     ToolCall(
                         "e2",
                         "agent",
-                        {"agent": "developer", "task": "slow-task"},
+                        {"agent": "general-purpose", "task": "slow-task"},
                     ),
                 )
             ),
@@ -1726,7 +1724,7 @@ def test_parent_text_only_pending_subagent_deadline_does_not_deadlock(
                     ToolCall(
                         "e1",
                         "agent",
-                        {"agent": "auditor", "task": "hang"},
+                        {"agent": "Explore", "task": "hang"},
                     ),
                 )
             ),
@@ -1785,7 +1783,7 @@ def test_wait_first_pending_subagent_returns_on_cancel() -> None:
         ),
     )
     dispatched = runner.tools.invoke(
-        "agent", {"agent": "auditor", "task": "hang"}
+        "agent", {"agent": "Explore", "task": "hang"}
     )
     assert dispatched.ok and dispatched.value["status"] == "started"
     assert started.wait(3)
@@ -1817,7 +1815,7 @@ def test_subagent_stops_retry_on_call_budget_and_interrupt() -> None:
         llm=exhausted,
         tools=ToolRegistry([DeclaredReadOnlyShell()]),
         config=SubAgentConfig(max_rounds=5),
-    ).run("look", role="auditor")
+    ).run("look", role="Explore")
     assert result["status"] == "error"
     assert result["llm_calls"] == 1
     assert exhausted.calls == 1
@@ -1840,7 +1838,7 @@ def test_subagent_stops_retry_on_call_budget_and_interrupt() -> None:
         llm=interrupted,
         tools=ToolRegistry([DeclaredReadOnlyShell()]),
         config=SubAgentConfig(max_rounds=5),
-    ).run("look", role="auditor")
+    ).run("look", role="Explore")
     assert result["status"] == "error"
     assert interrupted.calls == 1
 
@@ -1872,7 +1870,7 @@ def test_subagent_skips_tools_when_cancelled_after_llm() -> None:
     outcome: dict[str, object] = {}
 
     def run() -> None:
-        outcome.update(engine.run("look", role="developer"))
+        outcome.update(engine.run("look", role="general-purpose"))
 
     worker = threading.Thread(target=run)
     worker.start()
@@ -1919,7 +1917,7 @@ def test_runner_close_cancels_subagent_without_infinite_wait(
                     ToolCall(
                         "e1",
                         "agent",
-                        {"agent": "developer", "task": "slow"},
+                        {"agent": "general-purpose", "task": "slow"},
                     ),
                 )
             ),
@@ -2010,14 +2008,14 @@ def test_meta_terminal_tool_stops_refusing_once_the_deadline_is_at_hand() -> Non
     try:
         for runner in runners:
             assert runner.tools.invoke(
-                "agent", {"agent": "auditor", "task": "read"}
+                "agent", {"agent": "Explore", "task": "read"}
             ).ok
         assert started.wait(3)
         # Time to spare: the child's report is worth more than finishing now.
         refused = runners[0]._in_flight_subagent_error()
         assert refused is not None
         assert refused["error_type"] == "subagents_in_flight"
-        assert [child["role"] for child in refused["running_children"]] == ["auditor"]
+        assert [child["role"] for child in refused["running_children"]] == ["Explore"]
         # Inside the teardown window: waiting on would only lose the PRIOR.
         assert runners[1]._in_flight_subagent_error() is None
     finally:
@@ -2069,7 +2067,7 @@ def test_terminal_tool_is_refused_while_a_launched_child_still_runs(
     try:
         results, _ = runner._dispatch_tool_calls(
             (
-                ToolCall("e1", "agent", {"agent": "developer", "task": "slow"}),
+                ToolCall("e1", "agent", {"agent": "general-purpose", "task": "slow"}),
                 ToolCall("f1", "finish_fold", {}),
             ),
             InferenceTimeBudget(duration_seconds=600),
@@ -2078,7 +2076,7 @@ def test_terminal_tool_is_refused_while_a_launched_child_still_runs(
         record = results[-1][1]
         assert record["ok"] is False
         assert record["error_type"] == "subagents_in_flight"
-        assert [child["role"] for child in record["running_children"]] == ["developer"]
+        assert [child["role"] for child in record["running_children"]] == ["general-purpose"]
         # Refused, not silently swallowed: the session is not finished.
         assert runner.tools.finished is False
     finally:
@@ -2195,7 +2193,7 @@ def test_subagent_launches_beyond_the_cap_queue_instead_of_failing() -> None:
         [
             ProviderResponse(
                 tool_calls=tuple(
-                    ToolCall(f"e{index}", "agent", {"agent": "auditor", "task": needle})
+                    ToolCall(f"e{index}", "agent", {"agent": "Explore", "task": needle})
                     for index, needle in enumerate(gates)
                 )
             ),
@@ -2309,11 +2307,11 @@ def test_inherit_context_fork_drops_the_unanswered_tool_calls() -> None:
         ChatMessage(
             "assistant",
             None,
-            (ToolCall("e1", "agent", {"agent": "auditor", "task": "fork"}),),
+            (ToolCall("e1", "agent", {"agent": "Explore", "task": "fork"}),),
         ),
     ]
     started = runner.tools.invoke(
-        "agent", {"agent": "auditor", "task": "fork", "inherit_context": True}
+        "agent", {"agent": "Explore", "task": "fork", "inherit_context": True}
     )
     assert started.ok
     assert runner._wait_subagent_jobs()[-1]["ok"] is True
@@ -2392,7 +2390,7 @@ def test_daily_backtest_waits_for_running_subagent() -> None:
     llm = ScriptedLLM(
         [
             ProviderResponse(
-                tool_calls=(ToolCall("e1", "agent", {"agent": "developer", "task": "slow"}),)
+                tool_calls=(ToolCall("e1", "agent", {"agent": "general-purpose", "task": "slow"}),)
             ),
             ProviderResponse(tool_calls=(ToolCall("b1", "daily_backtest", {}),)),
             ProviderResponse(tool_calls=(ToolCall("f1", "finish_fold", {}),)),
@@ -2414,7 +2412,7 @@ def test_daily_backtest_waits_for_running_subagent() -> None:
     assert any('"observation": "subagent_completed"' in (m.content or "") for m in third)
 
 
-@pytest.mark.parametrize("role", ["auditor", "Explore"])
+@pytest.mark.parametrize("role", ["Explore"])
 def test_a_backtest_does_not_wait_for_a_read_only_child(role: str) -> None:
     """A read-only audit is off the Validation critical path: the backtest
     barrier waits only for children whose role can write the workspace."""
@@ -2469,7 +2467,7 @@ def test_a_backtest_does_not_wait_for_a_read_only_child(role: str) -> None:
     assert seen == [False]
 
 
-@pytest.mark.parametrize("role", ["developer", "general-purpose"])
+@pytest.mark.parametrize("role", ["general-purpose"])
 def test_a_backtest_refuses_a_writer_that_outlives_the_barrier(monkeypatch, role: str) -> None:
     """After the brief wait a child that can still write the workspace makes
     the backtest refuse instead of snapshotting candidates it may be changing."""
@@ -2519,10 +2517,10 @@ def test_agent_tool_schema_through_the_registry() -> None:
     # table; the description does not carry a second, hand-written copy.
     assert "不能执行" in schema["properties"]["agent"]["description"]
     # The old parameter name is a schema error, not a silent fallback.
-    stale = runner.tools.invoke("agent", {"role": "auditor", "task": "x"})
+    stale = runner.tools.invoke("agent", {"role": "Explore", "task": "x"})
     assert stale.ok is False and "role" in stale.error
     # Each action still fails fast on its own required pair.
-    for arguments in ({"task": "x"}, {"agent": "auditor"}, {"action": "launch"}):
+    for arguments in ({"task": "x"}, {"agent": "Explore"}, {"action": "launch"}):
         bare = runner.tools.invoke("agent", arguments)
         assert bare.ok is False and bare.value["error_type"] == "schema_error"
         assert "launch requires agent and task" in bare.error
@@ -2546,13 +2544,13 @@ def test_resume_continues_a_finished_child_transcript() -> None:
         subagent=SubAgentEngine(llm=child, tools=ToolRegistry([DeclaredReadOnlyShell()])),
         event_sink=lambda event, payload: events.append((event, payload)),
     )
-    first = runner.tools.invoke("agent", {"agent": "auditor", "task": "look at daily"})
+    first = runner.tools.invoke("agent", {"agent": "Explore", "task": "look at daily"})
     assert first.ok
     first_id = str(first.value["task_id"])
     assert first_id.startswith("agent_")
     assert runner._wait_subagent_jobs()[-1]["ok"] is True
     follow = runner.tools.invoke(
-        "agent", {"agent": "auditor", "task": "now check minutes", "resume": first_id}
+        "agent", {"agent": "Explore", "task": "now check minutes", "resume": first_id}
     )
     assert follow.ok and follow.value["resumed_from"] == first_id
     assert follow.value["task_id"] != first_id
@@ -2583,17 +2581,17 @@ def test_resume_refuses_unknown_running_or_mismatched_children() -> None:
         ),
     )
     unknown = runner.tools.invoke(
-        "agent", {"agent": "auditor", "task": "x", "resume": "agent_nope"}
+        "agent", {"agent": "Explore", "task": "x", "resume": "agent_nope"}
     )
     assert unknown.ok is False and "unknown" in unknown.error
     assert unknown.value["error_type"] == "unknown_subagent"
-    launched = runner.tools.invoke("agent", {"agent": "auditor", "task": "hang"})
+    launched = runner.tools.invoke("agent", {"agent": "Explore", "task": "hang"})
     assert launched.ok
     task_id = str(launched.value["task_id"])
     assert started.wait(3)
     try:
         running = runner.tools.invoke(
-            "agent", {"agent": "auditor", "task": "more", "resume": task_id}
+            "agent", {"agent": "Explore", "task": "more", "resume": task_id}
         )
         assert running.ok is False and "still running" in running.error
         assert running.value["error_type"] == "subagent_running"
@@ -2601,9 +2599,9 @@ def test_resume_refuses_unknown_running_or_mismatched_children() -> None:
         release.set()
     assert runner._wait_subagent_jobs()[-1]["ok"] is True
     mismatch = runner.tools.invoke(
-        "agent", {"agent": "developer", "task": "more", "resume": task_id}
+        "agent", {"agent": "general-purpose", "task": "more", "resume": task_id}
     )
-    assert mismatch.ok is False and "auditor" in mismatch.error
+    assert mismatch.ok is False and "Explore" in mismatch.error
     assert mismatch.value["error_type"] == "subagent_role_mismatch"
     assert runner._subagent_attempts == 1
 
@@ -2650,7 +2648,7 @@ def test_delegation_reminder_rearms_per_streak_and_counts_writes() -> None:
     llm = ScriptedLLM(
         [
             ProviderResponse(
-                tool_calls=(ToolCall("a1", "agent", {"agent": "auditor", "task": "look"}),)
+                tool_calls=(ToolCall("a1", "agent", {"agent": "Explore", "task": "look"}),)
             ),
             # Text only while the child runs: the parent yields until it ends.
             ProviderResponse(content="waiting"),
@@ -2660,7 +2658,7 @@ def test_delegation_reminder_rearms_per_streak_and_counts_writes() -> None:
                 for index in range(18)
             ),
             ProviderResponse(
-                tool_calls=(ToolCall("a2", "agent", {"agent": "auditor", "task": "again"}),)
+                tool_calls=(ToolCall("a2", "agent", {"agent": "Explore", "task": "again"}),)
             ),
             ProviderResponse(content="waiting"),
             # Streak three: self-implementation counts as own work too.
@@ -2715,7 +2713,7 @@ def test_delegation_reminder_waits_for_a_running_child_to_finish() -> None:
     llm = ScriptedLLM(
         [
             ProviderResponse(
-                tool_calls=(ToolCall("a1", "agent", {"agent": "auditor", "task": "slow look"}),)
+                tool_calls=(ToolCall("a1", "agent", {"agent": "Explore", "task": "slow look"}),)
             ),
             *(
                 ProviderResponse(tool_calls=(ToolCall(f"r{index}", "read_file", {}),))
@@ -2816,13 +2814,13 @@ def test_agent_result_echoes_running_and_queued_children_with_descriptions() -> 
     try:
         first = runner.tools.invoke(
             "agent",
-            {"agent": "auditor", "task": "scope-alpha", "description": "read data summary"},
+            {"agent": "Explore", "task": "scope-alpha", "description": "read data summary"},
         )
         assert first.ok
         assert first.value["running_children"] == [
             {
                 "task_id": first.value["task_id"],
-                "role": "auditor",
+                "role": "Explore",
                 "description": "read data summary",
             }
         ]
@@ -2856,7 +2854,7 @@ def test_agent_result_echoes_running_and_queued_children_with_descriptions() -> 
 
 def test_a_full_round_of_writable_children_runs_concurrently() -> None:
     """Nothing serialises write-capable children: a whole round of
-    ``DEFAULT_SUBAGENT_MAX_CONCURRENT`` ``developer`` launches is accepted, all
+    ``DEFAULT_SUBAGENT_MAX_CONCURRENT`` ``general-purpose`` launches is accepted, all
     of them reach the model before any returns, and none is queued. Path
     confinement (one candidate directory each) is the correctness guard, not a
     limit on how many may run."""
@@ -2880,7 +2878,7 @@ def test_a_full_round_of_writable_children_runs_concurrently() -> None:
             runner.tools.invoke(
                 "agent",
                 {
-                    "agent": "developer",
+                    "agent": "general-purpose",
                     "task": f"build {scope} under candidates/{scope}/",
                     "description": scope,
                 },
@@ -2967,7 +2965,7 @@ def test_child_output_truncation_is_marked_and_never_silent() -> None:
         llm=cut,
         tools=ToolRegistry([DeclaredReadOnlyShell()]),
         config=SubAgentConfig(max_tokens=500),
-    ).run("audit", role="auditor")
+    ).run("audit", role="Explore")
     assert result["status"] == "completed" and result["truncated"] is True
     assert result["summary"].endswith(OUTPUT_TRUNCATED_MARKER.format(limit=500))
     assert result["summary"].startswith("结论：因子 A 在 2019 年后")
@@ -2995,7 +2993,7 @@ def test_child_output_truncation_is_marked_and_never_silent() -> None:
         tools=ToolRegistry([DeclaredReadOnlyShell()]),
         config=SubAgentConfig(max_tokens=500),
         event_sink=lambda event, payload: events.append((event, payload)),
-    ).run("audit", role="developer")
+    ).run("audit", role="general-purpose")
     assert result["status"] == "completed" and result["llm_calls"] == 3
     assert result["summary"] == "简洁结论" and result["tool_calls"] == 1
     assert result["truncated"] is True and result["truncated_rounds"] == 1
@@ -3018,7 +3016,7 @@ def test_child_output_truncation_is_marked_and_never_silent() -> None:
         llm=exhausted,
         tools=ToolRegistry([DeclaredReadOnlyShell()]),
         config=SubAgentConfig(max_tokens=500),
-    ).run("audit", role="auditor")
+    ).run("audit", role="Explore")
     assert result["status"] == "error" and result["summary"] == ""
     assert result["llm_calls"] == SUBAGENT_MAX_TRUNCATION_CONTINUATIONS + 1
     assert result["truncated_rounds"] == SUBAGENT_MAX_TRUNCATION_CONTINUATIONS + 1
@@ -3080,7 +3078,7 @@ def test_child_gets_the_parents_single_post_provider_overflow_recovery() -> None
         llm=llm,  # type: ignore[arg-type]
         tools=ToolRegistry([_LongResultTool()]),
         event_sink=lambda event, payload: events.append((event, payload)),
-    ).run("dig", role="auditor")
+    ).run("dig", role="Explore")
     assert result["status"] == "completed" and result["summary"] == "recovered report"
     assert result["llm_errors"] == 1 and result["llm_calls"] == 3
     edits = [payload for event, payload in events if event == "subagent_context_edit"]
@@ -3106,7 +3104,7 @@ def test_child_gets_the_parents_single_post_provider_overflow_recovery() -> None
     result = SubAgentEngine(
         llm=twice,  # type: ignore[arg-type]
         tools=ToolRegistry([_LongResultTool()]),
-    ).run("dig", role="auditor")
+    ).run("dig", role="Explore")
     assert result["status"] == "error" and result["summary"] == ""
     assert result["llm_errors"] == 2 and len(twice.items) == 1
     assert "maximum context length" in result["error"]
@@ -3146,7 +3144,7 @@ def test_child_turns_default_to_48_with_grace_wrap_up() -> None:
         config=SubAgentConfig(max_rounds=4),
         event_sink=lambda event, payload: events.append((event, payload)),
     )
-    result = engine.run("dig", role="auditor")
+    result = engine.run("dig", role="Explore")
     assert result["rounds"] == 4 and result["summary"] == "final"
     # Round 2 of 4 opens with the wrap-up notice; rounds 1 and 3 do not.
     second = busy.calls[1]["messages"]
@@ -3157,14 +3155,14 @@ def test_child_turns_default_to_48_with_grace_wrap_up() -> None:
     assert wrap == [
         {
             "task_id": result["task_id"],
-            "role": "auditor",
+            "role": "Explore",
             "round": 2,
             "rounds_limit": 4,
             "parent_call_id": None,
         }
     ]
     assert all(
-        payload["role"] == "auditor"
+        payload["role"] == "Explore"
         for event, payload in events
         if event in {"subagent_llm", "subagent_tool"}
     )
@@ -3182,7 +3180,7 @@ def test_child_turns_default_to_48_with_grace_wrap_up() -> None:
     )
     result = SubAgentEngine(
         llm=short, tools=ToolRegistry([DeclaredReadOnlyShell()])
-    ).run("dig", role="auditor", max_rounds=2)
+    ).run("dig", role="Explore", max_rounds=2)
     assert result["rounds"] == 2 and result["summary"] == "done"
     assert not any("还剩" in str(m.content) for call in short.calls for m in call["messages"])
 
@@ -3236,8 +3234,8 @@ def test_child_compacts_at_the_shared_threshold_with_fresh_counters_per_launch()
         event_sink=lambda event, payload: events.append((event, payload)),
     )
     assert engine.time_budget is shared.time_budget
-    first = engine.run("dig", role="auditor")
-    second = engine.run("dig again", role="auditor")
+    first = engine.run("dig", role="Explore")
+    second = engine.run("dig again", role="Explore")
     assert first["summary"] == "first" and second["summary"] == "second"
     # Round 2 crossed the threshold: the request the model saw carries the
     # compaction summary in place of the older turns.
@@ -3246,14 +3244,14 @@ def test_child_compacts_at_the_shared_threshold_with_fresh_counters_per_launch()
     assert not any(is_compaction_message(m) for m in child_llm.calls[0]["messages"])
     # Compaction rewrites the child's history, never its role prompt: the
     # system message stays byte-identical across the boundary.
-    role_prompt = subagent_system_prompt("fold", "auditor")
+    role_prompt = subagent_system_prompt("fold", "Explore")
     for call in child_llm.calls:
         head = call["messages"][0]
         assert head.role == "system" and head.content == role_prompt
     compactions = [payload for event, payload in events if event == "subagent_context_compaction"]
     assert [payload["task_id"] for payload in compactions] == [first["task_id"], second["task_id"]]
     record = compactions[0]
-    assert record["role"] == "auditor" and record["round"] == 2
+    assert record["role"] == "Explore" and record["round"] == 2
     assert record["compaction"]["status"] == "ok" and record["compaction"]["messages_before"] == 4
     assert "status" not in record and "summary" not in record
     # ``max_calls=1`` per conversation: the second child compacted too, so
@@ -3297,7 +3295,7 @@ def test_runner_hands_its_compactor_to_children_and_honours_max_turns() -> None:
         event_sink=lambda event, payload: events.append((event, payload)),
     )
     assert engine.compactor is parent_compactor
-    started = runner.tools.invoke("agent", {"agent": "auditor", "task": "dig", "max_turns": 3})
+    started = runner.tools.invoke("agent", {"agent": "Explore", "task": "dig", "max_turns": 3})
     assert started.ok is True
     assert runner._wait_subagent_jobs()[-1]["ok"] is True
     wrap = [payload for event, payload in events if event == "subagent_wrap_up"]
@@ -3329,7 +3327,7 @@ def test_child_ends_on_context_overflow_instead_of_retrying() -> None:
         llm=llm,
         tools=ToolRegistry([DeclaredReadOnlyShell()]),
         config=SubAgentConfig(max_rounds=5),
-    ).run("look", role="auditor")
+    ).run("look", role="Explore")
     assert result["status"] == "error" and llm.calls == 1
     assert "context window" in result["error"] and result["llm_errors"] == 1
 
@@ -3380,7 +3378,7 @@ def test_subagent_completed_surfaces_truncation_and_rounds() -> None:
     )
     llm = ScriptedLLM(
         [
-            ProviderResponse(tool_calls=(ToolCall("a1", "agent", {"agent": "auditor", "task": "audit"}),)),
+            ProviderResponse(tool_calls=(ToolCall("a1", "agent", {"agent": "Explore", "task": "audit"}),)),
             ProviderResponse(content="waiting"),
             ProviderResponse(tool_calls=(ToolCall("f1", "finish_fold", {}),)),
         ]
@@ -3442,7 +3440,7 @@ def test_child_malformed_tool_call_keeps_its_analysis_and_re_issues_once() -> No
         llm=child,
         tools=ToolRegistry([DeclaredReadOnlyShell()]),
         event_sink=lambda event, payload: events.append((event, payload)),
-    ).run("look", role="auditor")
+    ).run("look", role="Explore")
 
     assert result["status"] == "completed" and result["summary"] == "recovered report"
     assert result["llm_errors"] == 2
@@ -3485,7 +3483,7 @@ def test_child_llm_error_is_traced_and_a_recovered_child_is_not_an_error() -> No
         llm=Flaky(),
         tools=ToolRegistry([DeclaredReadOnlyShell()]),
         event_sink=lambda event, payload: events.append((event, payload)),
-    ).run("look", role="auditor", parent_call_id="call_p")
+    ).run("look", role="Explore", parent_call_id="call_p")
     assert result["status"] == "completed" and result["summary"] == "recovered report"
     assert result["llm_errors"] == 1 and result["llm_calls"] == 2 and "error" not in result
     traced = [payload for event, payload in events if event == "subagent_llm_error"]
@@ -3497,7 +3495,7 @@ def test_child_llm_error_is_traced_and_a_recovered_child_is_not_an_error() -> No
     finish = _FinishStub("finish_fold")
     llm = ScriptedLLM(
         [
-            ProviderResponse(tool_calls=(ToolCall("a1", "agent", {"agent": "auditor", "task": "look"}),)),
+            ProviderResponse(tool_calls=(ToolCall("a1", "agent", {"agent": "Explore", "task": "look"}),)),
             ProviderResponse(content="waiting"),
             ProviderResponse(tool_calls=(ToolCall("f1", "finish_fold", {}),)),
         ]
@@ -3560,7 +3558,7 @@ def test_child_cut_short_by_worker_shutdown_is_cancelled_not_failed(monkeypatch)
         llm=child,
         tools=ToolRegistry([_NamedTool("grep"), _NamedTool("read_file")]),
         event_sink=lambda event, payload: events.append((event, payload)),
-    ).run("look", role="auditor")
+    ).run("look", role="Explore")
 
     assert result["status"] == "cancelled"
     assert result["error"] == "Sub-agent cancelled by worker shutdown"
@@ -3573,7 +3571,7 @@ def test_child_cut_short_by_worker_shutdown_is_cancelled_not_failed(monkeypatch)
         [
             ProviderResponse(
                 tool_calls=(
-                    ToolCall("a1", "agent", {"agent": "auditor", "task": "look"}),
+                    ToolCall("a1", "agent", {"agent": "Explore", "task": "look"}),
                 )
             ),
             ProviderResponse(content="waiting"),
@@ -3632,7 +3630,7 @@ def test_child_without_a_report_is_not_completed() -> None:
         llm=silent,
         tools=ToolRegistry([DeclaredReadOnlyShell()]),
         config=SubAgentConfig(max_rounds=1),
-    ).run("dig", role="developer")
+    ).run("dig", role="general-purpose")
     assert result["status"] == "error" and result["summary"] == ""
     assert result["error"] == "Sub-agent ended without a report"
     assert result["tool_calls"] == 1 and result["llm_calls"] == 2
@@ -3663,7 +3661,7 @@ def test_exhausted_child_reports_what_the_empty_finalize_left_behind() -> None:
         tools=ToolRegistry([DeclaredReadOnlyShell()]),
         config=SubAgentConfig(max_rounds=1),
         event_sink=lambda event, payload: events.append((event, payload)),
-    ).run("dig", role="developer")
+    ).run("dig", role="general-purpose")
 
     assert result["status"] == "exhausted"
     assert result["error"] == SUBAGENT_DEGRADED_SUMMARY_ERROR
@@ -3700,7 +3698,7 @@ def test_exhausted_child_reports_what_the_empty_finalize_left_behind() -> None:
         llm=quiet,
         tools=ToolRegistry([DeclaredReadOnlyShell()]),
         config=SubAgentConfig(max_rounds=1),
-    ).run("dig", role="developer")
+    ).run("dig", role="general-purpose")
     assert fallback["status"] == "exhausted"
     assert str(fallback["summary"]) == (
         f"{SUBAGENT_DEGRADED_SUMMARY_MARKER.format(source='最后一条助手正文')}\n"
@@ -3713,7 +3711,7 @@ def test_exhausted_child_reports_what_the_empty_finalize_left_behind() -> None:
         [
             ProviderResponse(
                 tool_calls=(
-                    ToolCall("a1", "agent", {"agent": "developer", "task": "dig"}),
+                    ToolCall("a1", "agent", {"agent": "general-purpose", "task": "dig"}),
                 )
             ),
             ProviderResponse(content="waiting"),
@@ -3811,7 +3809,7 @@ def test_child_thinking_level_reaches_the_budget_wrapped_gateway() -> None:
         ("low", {"enable_thinking": True, "reasoning_effort": "low"}),
         ("off", {"enable_thinking": False}),
     ):
-        result = engine.run("look", role="auditor", thinking=level)
+        result = engine.run("look", role="Explore", thinking=level)
         assert result["status"] == "completed" and result["thinking_applied"] is True
         assert transport.bodies[-1]["chat_template_kwargs"] == expected
     # The session's own gateway and call budget are untouched by the clones.
@@ -3942,9 +3940,9 @@ def test_role_table_is_the_single_source_for_roles_and_launch_defaults() -> None
             f"默认 thinking {DEFAULT_SUBAGENT_THINKING}、max_turns {DEFAULT_SUBAGENT_MAX_ROUNDS}）"
         )
         assert line in AGENT_TOOL_SPEC.input_schema["properties"]["agent"]["description"]
-    assert {role.name for role in SUBAGENT_ROLE_TABLE if role.shell} == {"developer", "general-purpose"}
-    with pytest.raises(ValueError, match="not allowed"):
-        subagent_role("reader")
+    assert {role.name for role in SUBAGENT_ROLE_TABLE if role.shell} == {"general-purpose"}
+    with pytest.raises(ValueError, match="valid roles: general-purpose, Explore"):
+        subagent_role("auditor")
     with pytest.raises(ValueError, match="thinking"):
         SubAgentRole("x", "d", frozenset(), fold_mission="m", meta_mission="m", thinking="turbo")
     with pytest.raises(ValueError, match="max_turns"):
@@ -3953,14 +3951,14 @@ def test_role_table_is_the_single_source_for_roles_and_launch_defaults() -> None
     # Precedence: call argument > role default > global default.
     pinned = SubAgentRole("x", "d", frozenset(), fold_mission="m", meta_mission="m", thinking="low", max_turns=12)
     assert pinned.default_thinking == "low" and pinned.default_max_turns(48) == 12
-    assert resolve_subagent_max_turns(None, "auditor", 48) == 48
-    assert resolve_subagent_max_turns(None, "auditor", None) is None
-    assert resolve_subagent_max_turns(7, "auditor", 48) == 7
-    assert normalize_subagent_thinking(None, "auditor") == DEFAULT_SUBAGENT_THINKING
-    assert normalize_subagent_thinking("xhigh", "auditor") == "xhigh"
+    assert resolve_subagent_max_turns(None, "Explore", 48) == 48
+    assert resolve_subagent_max_turns(None, "Explore", None) is None
+    assert resolve_subagent_max_turns(7, "Explore", 48) == 7
+    assert normalize_subagent_thinking(None, "Explore") == DEFAULT_SUBAGENT_THINKING
+    assert normalize_subagent_thinking("xhigh", "Explore") == "xhigh"
     for bad in (0, -1, True, "3"):
         with pytest.raises(ValueError, match="max_turns"):
-            resolve_subagent_max_turns(bad, "auditor", 48)
+            resolve_subagent_max_turns(bad, "Explore", 48)
     # The tool text states the precedence and the ranges.
     assert "本次调用参数 > 角色默认" in AGENT_TOOL_DESCRIPTION
     max_turns_field = AGENT_TOOL_SPEC.input_schema["properties"]["max_turns"]
@@ -3976,8 +3974,8 @@ def test_launch_precedence_reaches_the_child_and_its_trace(monkeypatch: pytest.M
 
     from autotrade.agent import subagent as module
 
-    pinned = dataclasses.replace(module.subagent_role("auditor"), thinking="low", max_turns=3)
-    monkeypatch.setitem(module._ROLES_BY_NAME, "auditor", pinned)
+    pinned = dataclasses.replace(module.subagent_role("Explore"), thinking="low", max_turns=3)
+    monkeypatch.setitem(module._ROLES_BY_NAME, "Explore", pinned)
 
     def _run(arguments: dict[str, object]) -> tuple[dict[str, object], dict[str, object]]:
         child = ScriptedLLM([ProviderResponse(content="report")], context_window_tokens=128_000)
@@ -3990,7 +3988,7 @@ def test_launch_precedence_reaches_the_child_and_its_trace(monkeypatch: pytest.M
             subagent=SubAgentEngine(llm=child, tools=ToolRegistry([DeclaredReadOnlyShell()])),
             event_sink=lambda event, payload: events.append((event, payload)),
         )
-        assert runner.tools.invoke("agent", {"agent": "auditor", "task": "dig", **arguments}).ok
+        assert runner.tools.invoke("agent", {"agent": "Explore", "task": "dig", **arguments}).ok
         assert runner._wait_subagent_jobs()[-1]["ok"] is True
         started = next(payload for event, payload in events if event == "subagent_task")
         ended = next(payload for event, payload in events if event == "subagent")
@@ -4025,7 +4023,7 @@ def test_long_child_report_is_clipped_inline_and_spilled_for_read_back(tmp_path:
     finish = _FinishStub("finish_fold")
     llm = ScriptedLLM(
         [
-            ProviderResponse(tool_calls=(ToolCall("a1", "agent", {"agent": "auditor", "task": "audit"}),)),
+            ProviderResponse(tool_calls=(ToolCall("a1", "agent", {"agent": "Explore", "task": "audit"}),)),
             ProviderResponse(content="waiting"),
             ProviderResponse(tool_calls=(ToolCall("f1", "finish_fold", {}),)),
         ]
@@ -4105,7 +4103,7 @@ def test_short_child_report_is_delivered_whole_and_no_store_is_explicit() -> Non
     finish = _FinishStub("finish_fold")
     llm = ScriptedLLM(
         [
-            ProviderResponse(tool_calls=(ToolCall("a1", "agent", {"agent": "auditor", "task": "audit"}),)),
+            ProviderResponse(tool_calls=(ToolCall("a1", "agent", {"agent": "Explore", "task": "audit"}),)),
             ProviderResponse(content="waiting"),
             ProviderResponse(tool_calls=(ToolCall("f1", "finish_fold", {}),)),
         ]
@@ -4179,7 +4177,7 @@ def test_steer_is_delivered_before_the_childs_next_round() -> None:
         llm=llm,
         tools=ToolRegistry([_SteeringShell()]),
         event_sink=lambda event, payload: events.append((event, payload)),
-    ).run_with_transcript("look", role="developer", parent_call_id="call_p", steer_queue=steer)
+    ).run_with_transcript("look", role="general-purpose", parent_call_id="call_p", steer_queue=steer)
     assert result["status"] == "completed" and result["steers"] == 1 and not steer
     # Round 1 never saw it; round 2 got it after the tool result, before the model call.
     assert not any(
@@ -4190,7 +4188,7 @@ def test_steer_is_delivered_before_the_childs_next_round() -> None:
     assert [payload for event, payload in events if event == "subagent_steer"] == [
         {
             "task_id": result["task_id"],
-            "role": "developer",
+            "role": "general-purpose",
             "round": 2,
             "chars": len(text),
             "delivery": "delivered",
@@ -4201,14 +4199,14 @@ def test_steer_is_delivered_before_the_childs_next_round() -> None:
     # A queued child (instruction sent before its first round) reads it right after the task.
     early = _RecordingLLM([ProviderResponse(content="ok")])
     result = SubAgentEngine(llm=early, tools=ToolRegistry([DeclaredReadOnlyShell()])).run(
-        "queued task", role="auditor", steer_queue=deque(["先看 README"])
+        "queued task", role="Explore", steer_queue=deque(["先看 README"])
     )
     assert result["steers"] == 1
     assert early.seen[0][-2:] == [("user", "queued task"), ("user", f"{STEER_MESSAGE_LABEL} 先看 README")]
     # No instruction: no message, no counter.
     plain = SubAgentEngine(
         llm=ScriptedLLM([ProviderResponse(content="ok")]), tools=ToolRegistry([DeclaredReadOnlyShell()])
-    ).run("plain", role="auditor")
+    ).run("plain", role="Explore")
     assert "steers" not in plain
 
 
@@ -4255,8 +4253,8 @@ def test_agent_message_action_steers_running_and_queued_children() -> None:
         ),
         event_sink=lambda event, payload: events.append((event, payload)),
     )
-    slow = runner.tools.invoke("agent", {"agent": "developer", "task": "slow task"})
-    queued = runner.tools.invoke("agent", {"agent": "auditor", "task": "queued task"})
+    slow = runner.tools.invoke("agent", {"agent": "general-purpose", "task": "slow task"})
+    queued = runner.tools.invoke("agent", {"agent": "Explore", "task": "queued task"})
     assert slow.ok and queued.ok and queued.value["queued"] is True
     slow_id, queued_id = slow.value["task_id"], queued.value["task_id"]
     assert started.wait(3)
@@ -4320,7 +4318,7 @@ def test_steer_the_child_never_read_is_reported_undelivered() -> None:
             llm=_GateLLM(started, release), tools=ToolRegistry([DeclaredReadOnlyShell()])
         ),
     )
-    launched = runner.tools.invoke("agent", {"agent": "auditor", "task": "one round"})
+    launched = runner.tools.invoke("agent", {"agent": "Explore", "task": "one round"})
     assert launched.ok and started.wait(3)
     # The child is inside its only model call; it reports without another round.
     assert runner.tools.invoke(
@@ -4367,7 +4365,7 @@ def test_children_run_on_their_own_gateway_inside_the_shared_session_quota() -> 
         "qwen-3.8-27b-fp8",
         262_144,
     )
-    result = engine.run("dig", role="auditor")
+    result = engine.run("dig", role="Explore")
     assert result["status"] == "completed" and result["summary"] == "done"
     assert (result["provider"], result["model"]) == ("vllm", "qwen-3.8-27b-fp8")
     started = next(payload for event, payload in events if event == "subagent_task")
@@ -4434,7 +4432,7 @@ def test_children_compact_at_their_own_models_threshold_not_the_parents() -> Non
     )
     assert engine.compactor is child_compactor
     assert runner.compactor is parent_compactor
-    started = runner.tools.invoke("agent", {"agent": "auditor", "task": "dig"})
+    started = runner.tools.invoke("agent", {"agent": "Explore", "task": "dig"})
     assert started.ok is True
     assert runner._wait_subagent_jobs()[-1]["ok"] is True
     compactions = [

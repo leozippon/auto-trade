@@ -346,7 +346,7 @@ def test_subagent_does_not_consume_inbox_until_parent_returns(tmp_path: Path) ->
                     ToolCall(
                         "e",
                         "agent",
-                        {"agent": "auditor", "task": "inspect workspace"},
+                        {"agent": "Explore", "task": "inspect workspace"},
                     ),
                 )
             ),

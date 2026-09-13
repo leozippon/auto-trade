@@ -400,7 +400,7 @@ def test_meta_fold_reviews_include_strategy_and_agent_trace_not_heldout(tmp_path
             "event_type": "subagent_task",
             "task_id": "agent_abc",
             "parent_call_id": "call_1",
-            "role": "auditor",
+            "role": "Explore",
             "task": "inspect daily schema",
             "status": "started",
         },
@@ -424,7 +424,7 @@ def test_meta_fold_reviews_include_strategy_and_agent_trace_not_heldout(tmp_path
             "task_id": "agent_abc",
             "parent_call_id": "call_1",
             "status": "completed",
-            "role": "auditor",
+            "role": "Explore",
             "task": "inspect daily schema",
             "summary": "daily has trade_date",
         },
@@ -438,7 +438,7 @@ def test_meta_fold_reviews_include_strategy_and_agent_trace_not_heldout(tmp_path
         "subagent",
         "llm_call",
     ]
-    assert compact[0]["role"] == "auditor"
+    assert compact[0]["role"] == "Explore"
     assert "task" not in compact[0]
     assert compact[2]["ok"] is True
     assert compact[-1]["content"] == "planning the next edit"
@@ -479,7 +479,7 @@ def test_meta_fold_reviews_include_strategy_and_agent_trace_not_heldout(tmp_path
     assert strategy_files[0]["path"] == "main.py"
     assert "generate_orders" in str(strategy_files[0]["content"])
     assert isinstance(agent_trace, list)
-    assert agent_trace[0]["role"] == "auditor"
+    assert agent_trace[0]["role"] == "Explore"
     assert "task" not in agent_trace[0]
     assert isinstance(validation, dict)
     assert validation["total_return"] == 0.02
@@ -517,7 +517,7 @@ def test_meta_fold_reviews_without_trace_ref_are_explicitly_unavailable(
     trace.parent.mkdir(parents=True)
     trace.write_text(
         '{"event_type": "subagent_task", "task_id": "agent_xyz", '
-        '"parent_call_id": "call_9", "role": "auditor", "task": "count rows", "status": "started"}\n',
+        '"parent_call_id": "call_9", "role": "Explore", "task": "count rows", "status": "started"}\n',
         encoding="utf-8",
     )
     reviews, _sidecars = build_meta_fold_review_bundle(
@@ -549,7 +549,7 @@ def test_meta_fold_reviews_resolve_relative_trace_ref(tmp_path: Path) -> None:
     trace.parent.mkdir(parents=True)
     trace.write_text(
         '{"event_type": "subagent_task", "task_id": "agent_xyz", '
-        '"parent_call_id": "call_9", "role": "auditor", "task": "count rows", "status": "started"}\n',
+        '"parent_call_id": "call_9", "role": "Explore", "task": "count rows", "status": "started"}\n',
         encoding="utf-8",
     )
     reviews, _sidecars = build_meta_fold_review_bundle(
@@ -568,7 +568,7 @@ def test_meta_fold_reviews_resolve_relative_trace_ref(tmp_path: Path) -> None:
     )
     agent_trace = reviews[0]["agent_trace"]
     assert isinstance(agent_trace, list)
-    assert agent_trace[0]["role"] == "auditor"
+    assert agent_trace[0]["role"] == "Explore"
     assert "task" not in agent_trace[0]
     assert agent_trace[0]["parent_call_id"] == "call_9"
     full = reviews[0]["agent_trace_full"]

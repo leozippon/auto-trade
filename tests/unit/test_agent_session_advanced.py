@@ -529,7 +529,7 @@ def test_session_end_tool_failures_include_the_childrens(tmp_path: Path):
                         ToolCall(
                             "e1",
                             "agent",
-                            {"agent": "developer", "task": "rewrite the contract"},
+                            {"agent": "general-purpose", "task": "rewrite the contract"},
                         ),
                     )
                 ),
@@ -1082,7 +1082,7 @@ def test_subagent_dispatches_full_shell_commands():
     result = SubAgentEngine(
         llm=llm,
         tools=ToolRegistry([shell]),
-    ).run("inspect", role="developer")
+    ).run("inspect", role="general-purpose")
     assert result["summary"] == "ran full shell"
     assert shell.calls == [
         {"argv": ["python", "-V"]},

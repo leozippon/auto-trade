@@ -51,7 +51,7 @@ from autotrade.pipelines.worker import (
 from autotrade.webui.manager import ExperimentManager
 from autotrade.webui.server import create_app
 
-_FOLD_DELEGATION_ROLES = ("auditor", "developer")
+_FOLD_DELEGATION_ROLES = ("Explore", "general-purpose")
 
 
 def _experiment(
@@ -831,7 +831,7 @@ class _NoShellRunner:
 
 def _agent_then(
     *tool_calls: ToolCall,
-    roles: tuple[str, ...] = ("auditor",),
+    roles: tuple[str, ...] = ("Explore",),
     summary: str = "委托完成",
     implement: dict[str, object] | None = None,
 ) -> tuple[ProviderResponse, ...]:
@@ -843,7 +843,7 @@ def _agent_then(
         ProviderResponse(tool_calls=(*launches, *tool_calls))
     ]
     for role in roles:
-        if implement is not None and role == "developer":
+        if implement is not None and role == "general-purpose":
             responses.append(
                 ProviderResponse(
                     tool_calls=(
@@ -1012,7 +1012,7 @@ def test_llm_worker_runs_real_meta_fold_validation_and_heldout(
         by_type.setdefault(str(event["event_type"]), []).append(event)
     started = by_type["subagent_task"]
     assert started and all(
-        event["task_id"].startswith("agent_") and event["role"] == "auditor"
+        event["task_id"].startswith("agent_") and event["role"] == "Explore"
         and event["status"] == "started" and event["mode"] == "meta"
         and "thinking" in event
         for event in started
@@ -1041,7 +1041,7 @@ def test_llm_worker_runs_real_meta_fold_validation_and_heldout(
     assert stats["subagent_total_tokens"] == 57 * len(started)
     cards = [block for block in project_trace_blocks(meta_events) if block.get("kind") == "subagent"]
     assert len(cards) == len(started)
-    assert cards[0]["status"] == "completed" and cards[0]["role"] == "auditor"
+    assert cards[0]["status"] == "completed" and cards[0]["role"] == "Explore"
     assert cards[0]["usage"]["total_tokens"] == 57
     # Completion prunes nothing: the run evidence a later audit reads stays on disk.
     assert (options.work_root / options.experiment_id).is_dir()
@@ -2270,7 +2270,7 @@ def test_development_that_freezes_nothing_fails_and_stays_terminal(
         """A developer that finishes every Fold with an explicit no-edge."""
 
         def __init__(self, **_options: object) -> None:
-            assembled.append("developer")
+            assembled.append("general-purpose")
 
         def __call__(self, request):
             ran.append(request.fold.fold_id)
@@ -2300,7 +2300,7 @@ def test_development_that_freezes_nothing_fails_and_stays_terminal(
         run_local_interactive_worker(options)
     # Republished, not re-run: the second invocation never even assembled the
     # pipeline, so no session executed and no record was appended.
-    assert assembled == ["developer"]
+    assert assembled == ["general-purpose"]
     assert ran == ["fold_2025Q4", "fold_2026Q1"]
     assert ledger.read() == before
     republished = read_status(experiment / "hitl/status.json")
@@ -2891,18 +2891,18 @@ def test_meta_trace_payload_keeps_shape_only_usefulness_signals() -> None:
 
     ended = _safe_meta_trace_payload(
         "subagent",
-        {"task_id": "agent_1", "role": "auditor", "status": "completed", "summary": "十个字的总结文本啊", "truncated": True},
+        {"task_id": "agent_1", "role": "Explore", "status": "completed", "summary": "十个字的总结文本啊", "truncated": True},
     )
     assert ended["summary_chars"] == 9 and "summary" not in ended and ended["truncated"] is True
     call = _safe_meta_trace_payload("llm_call", {"call_index": 2, "content": "abc", "status": "ok"})
     assert call["content_chars"] == 3 and "content" not in call
     child_call = _safe_meta_trace_payload(
-        "subagent_llm", {"task_id": "agent_1", "role": "auditor", "round": 1, "content": "xy"}
+        "subagent_llm", {"task_id": "agent_1", "role": "Explore", "round": 1, "content": "xy"}
     )
-    assert child_call["content_chars"] == 2 and child_call["role"] == "auditor"
+    assert child_call["content_chars"] == 2 and child_call["role"] == "Explore"
     tool = _safe_meta_trace_payload(
         "tool_call",
-        {"tool": "agent", "arguments": {"agent": "auditor", "description": "d", "thinking": "medium"}, "result": {"ok": True, "value": {"task_id": "agent_2"}}},
+        {"tool": "agent", "arguments": {"agent": "Explore", "description": "d", "thinking": "medium"}, "result": {"ok": True, "value": {"task_id": "agent_2"}}},
     )
     assert tool["argument_keys"] == ["agent", "description", "thinking"] and "arguments" not in tool
     child_tool = _safe_meta_trace_payload(
@@ -2911,13 +2911,13 @@ def test_meta_trace_payload_keeps_shape_only_usefulness_signals() -> None:
     assert child_tool["role"] == "Explore" and child_tool["result"] == {"ok": True}
     reminder = _safe_meta_trace_payload(
         "delegation_reminder",
-        {"own_work_calls": 8, "running_children": [{"task_id": "agent_1", "role": "auditor", "description": "d"}], "queued_children": []},
+        {"own_work_calls": 8, "running_children": [{"task_id": "agent_1", "role": "Explore", "description": "d"}], "queued_children": []},
     )
     assert reminder["running_children"][0]["description"] == "d" and reminder["queued_children"] == []
     wrap = _safe_meta_trace_payload(
-        "subagent_wrap_up", {"task_id": "agent_1", "role": "auditor", "round": 22, "rounds_limit": 24, "parent_call_id": "c1"}
+        "subagent_wrap_up", {"task_id": "agent_1", "role": "Explore", "round": 22, "rounds_limit": 24, "parent_call_id": "c1"}
     )
-    assert wrap["rounds_limit"] == 24 and wrap["role"] == "auditor"
+    assert wrap["rounds_limit"] == 24 and wrap["role"] == "Explore"
 
 
 def test_meta_trace_payload_keeps_child_argument_keys_and_parent_truncation() -> None:
@@ -2940,7 +2940,7 @@ def test_meta_trace_payload_keeps_sub_agent_brief_thinking_and_failure_events() 
 
     started = _safe_meta_trace_payload(
         "subagent_task",
-        {"task_id": "agent_1", "role": "auditor", "parent_call_id": "call_p", "status": "started",
+        {"task_id": "agent_1", "role": "Explore", "parent_call_id": "call_p", "status": "started",
          "mode": "meta", "model": "local-model", "thinking": "medium", "thinking_applied": True,
          "rounds_limit": 12, "inherit_context": False, "description": "trace audit",
          "task": "读 inputs/agent_traces/x.jsonl，回答委托质量问题。"},
@@ -2950,26 +2950,26 @@ def test_meta_trace_payload_keeps_sub_agent_brief_thinking_and_failure_events() 
     assert started["task"] == "读 inputs/agent_traces/x.jsonl，回答委托质量问题。"
     child_cut = _safe_meta_trace_payload(
         "subagent_output_truncated",
-        {"task_id": "agent_1", "role": "auditor", "round": 3, "completion_tokens": 12000,
+        {"task_id": "agent_1", "role": "Explore", "round": 3, "completion_tokens": 12000,
          "max_tokens": 12000, "continuation": 1, "parent_call_id": "call_p", "content": "reasoning"},
     )
-    assert child_cut == {"task_id": "agent_1", "role": "auditor", "round": 3,
+    assert child_cut == {"task_id": "agent_1", "role": "Explore", "round": 3,
                          "completion_tokens": 12000, "max_tokens": 12000, "continuation": 1,
                          "parent_call_id": "call_p"}
     child_error = _safe_meta_trace_payload(
         "subagent_llm_error",
-        {"task_id": "agent_1", "role": "auditor", "round": 2, "provider": "vllm",
+        {"task_id": "agent_1", "role": "Explore", "round": 2, "provider": "vllm",
          "model": "local-model", "llm_error": "HTTP 503 from model service",
          "parent_call_id": "call_p"},
     )
-    assert child_error == {"task_id": "agent_1", "role": "auditor", "round": 2, "provider": "vllm",
+    assert child_error == {"task_id": "agent_1", "role": "Explore", "round": 2, "provider": "vllm",
                            "model": "local-model", "llm_error": "HTTP 503 from model service",
                            "parent_call_id": "call_p"}
     ended = _safe_meta_trace_payload(
         "subagent",
         {"task_id": "agent_1", "status": "error", "rounds": 4, "tool_calls": 2, "llm_calls": 5,
          "provider": "vllm", "model": "local-model", "usage_totals": {"total_tokens": 900},
-         "summary": "报告正文", "mode": "meta", "role": "auditor", "thinking": "medium",
+         "summary": "报告正文", "mode": "meta", "role": "Explore", "thinking": "medium",
          "thinking_applied": True, "rounds_limit": 12, "inherit_context": False, "truncated": True,
          "truncated_rounds": 3, "llm_errors": 1, "error": "output budget exhausted on reasoning"},
     )
@@ -2979,22 +2979,22 @@ def test_meta_trace_payload_keeps_sub_agent_brief_thinking_and_failure_events() 
     # Report delivery is counters and a spill reference, never the child's text.
     delivered = _safe_meta_trace_payload(
         "subagent_attempt",
-        {"attempt": 2, "role": "auditor", "ok": True, "status": "completed",
+        {"attempt": 2, "role": "Explore", "ok": True, "status": "completed",
          "task_id": "agent_1", "summary_chars": 9000, "summary_delivered_chars": 6000,
          "summary_truncated": True, "result_ref": "logs/tool_results/subagent_report_ab12/report.txt",
          "summary": "报告正文", "report": {"summary": "报告正文"}},
     )
-    assert delivered == {"attempt": 2, "role": "auditor", "ok": True, "status": "completed",
+    assert delivered == {"attempt": 2, "role": "Explore", "ok": True, "status": "completed",
                          "task_id": "agent_1", "summary_chars": 9000,
                          "summary_delivered_chars": 6000, "summary_truncated": True,
                          "result_ref": "logs/tool_results/subagent_report_ab12/report.txt"}
     # A parent instruction is counted and attributed, never quoted.
     steer = _safe_meta_trace_payload(
         "subagent_steer",
-        {"task_id": "agent_1", "role": "auditor", "round": 2, "chars": 40,
+        {"task_id": "agent_1", "role": "Explore", "round": 2, "chars": 40,
          "delivery": "delivered", "parent_call_id": "call_p", "text": "改范围"},
     )
-    assert steer == {"task_id": "agent_1", "role": "auditor", "round": 2, "chars": 40,
+    assert steer == {"task_id": "agent_1", "role": "Explore", "round": 2, "chars": 40,
                      "delivery": "delivered", "parent_call_id": "call_p"}
 
 

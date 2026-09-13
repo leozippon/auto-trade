@@ -1042,7 +1042,7 @@ def test_a_child_is_bounded_by_the_parents_finalization_tail(tmp_path: Path) -> 
 
     # Outside the tail the child runs normally.
     clock.advance(400.0)
-    assert runner.tools.invoke("agent", {"agent": "auditor", "task": "early"}).ok
+    assert runner.tools.invoke("agent", {"agent": "Explore", "task": "early"}).ok
     early = runner._wait_subagent_jobs()[-1]
     assert early["value"]["status"] == "completed" and child_llm.calls == 1
 
@@ -1050,7 +1050,7 @@ def test_a_child_is_bounded_by_the_parents_finalization_tail(tmp_path: Path) -> 
     # call, even though the session clock still shows time.
     clock.advance(450.0)
     assert time_budget.remaining() == 150.0
-    assert runner.tools.invoke("agent", {"agent": "auditor", "task": "late"}).ok
+    assert runner.tools.invoke("agent", {"agent": "Explore", "task": "late"}).ok
     late = runner._wait_subagent_jobs()[-1]
     assert late["value"]["status"] == "timeout"
     assert child_llm.calls == 1
@@ -1145,7 +1145,7 @@ def test_the_parent_stops_waiting_for_a_child_at_the_finalization_boundary(
             ProviderResponse(tool_calls=(ToolCall("valid", "daily_backtest", {}),)),
             ProviderResponse(
                 tool_calls=(
-                    ToolCall("spawn", "agent", {"agent": "developer", "task": "slow"}),
+                    ToolCall("spawn", "agent", {"agent": "general-purpose", "task": "slow"}),
                 )
             ),
             # A turn of pure text while the child is still running: the trap.

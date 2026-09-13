@@ -3,11 +3,11 @@
 Parents call ``agent(agent=<role>, task=...)`` like any other registered tool:
 the registry validates the arguments, :class:`AgentTool` hands them to the
 runner, and the runner starts the child in the background and returns at once.
-Roles are the unified set ``auditor``, ``developer``, ``general-purpose``,
-``Explore``; ``Explore`` is the optional read-only discovery role. Depth is
-one. The child shares the parent SafeWorkspace, SessionBudgetLLM calls,
-inference time budget, output ceiling, context window with its compaction
-gateway and thresholds, and Trace. A finished child keeps its transcript for
+Roles are two capability classes: ``general-purpose`` reads, writes and runs
+the sandbox shell and smoke replay; ``Explore`` is read-only. Depth is one.
+The child shares the parent SafeWorkspace, SessionBudgetLLM calls, inference
+time budget, output ceiling, context window with its compaction gateway and
+thresholds, and Trace. A finished child keeps its transcript for
 the session so ``resume=<task_id>`` can hand it a follow-up task. Failures
 return a structured observation; they do not finish the parent session.
 """
@@ -196,34 +196,23 @@ class SubAgentRole:
         return self.max_turns if self.max_turns is not None else global_default
 
 
+# Two capability classes, not missions: the task text carries the intent. The
+# names are Pi's own; a legacy name (auditor, developer) fails the ``agent``
+# schema enum, whose error lists these two.
 SUBAGENT_ROLE_TABLE: tuple[SubAgentRole, ...] = (
     SubAgentRole(
-        "auditor",
-        "只读审计：核对数据、单位、代码与证据边界",
-        _FOLD_READ_TOOLS,
-        fold_mission="审查委托问题及其证据边界",
-        meta_mission="独立审查委托问题",
-    ),
-    SubAgentRole(
-        "developer",
-        "读写实现：跑 Python、写策略、模型与 skills",
-        _FOLD_WRITE_TOOLS,
-        fold_mission="实现并检查委托的代码或知识任务",
-        meta_mission="只读分析候选策略改进",
-    ),
-    SubAgentRole(
         "general-purpose",
-        "读写通用：一个有界的跨域实现或计算任务",
+        "读写执行：跑 Python、实现、计算与写策略、模型和 skills",
         _FOLD_WRITE_TOOLS,
-        fold_mission="完成一个有界的跨域实现任务",
-        meta_mission="只读处理一个有界跨域问题",
+        fold_mission="完成一个有界的实现、计算或检查任务",
+        meta_mission="只读处理一个有界问题",
     ),
     SubAgentRole(
         "Explore",
-        "只读探索：定位文件、接口与材料",
+        "只读调查：定位与核对文件、数据、单位、代码和证据",
         _FOLD_READ_TOOLS,
-        fold_mission="定位未知位置、接口或材料",
-        meta_mission="只读定位未知位置、接口或材料",
+        fold_mission="调查委托问题并核对它的证据边界",
+        meta_mission="只读调查委托问题",
     ),
 )
 _ROLES_BY_NAME = {role.name: role for role in SUBAGENT_ROLE_TABLE}
@@ -233,7 +222,10 @@ SUBAGENT_ROLES = tuple(role.name for role in SUBAGENT_ROLE_TABLE)
 def subagent_role(name: object) -> SubAgentRole:
     role = _ROLES_BY_NAME.get(name)  # type: ignore[arg-type]
     if role is None:
-        raise ValueError(f"Sub-agent role is not allowed: {name}")
+        raise ValueError(
+            f"Sub-agent role is not allowed: {name}; valid roles: "
+            + ", ".join(SUBAGENT_ROLES)
+        )
     return role
 
 
@@ -422,7 +414,7 @@ AGENT_TOOL_SPEC = ToolSpec(
         "additionalProperties": False,
     },
     example={
-        "agent": "auditor",
+        "agent": "Explore",
         "task": "读 workspace 根下 inputs/data_summary.json，返回可用字段、单位与 available_at 规则。",
         "description": "数据摘要与单位",
         "thinking": "medium",
@@ -437,7 +429,7 @@ _RESUME_ACTION_HINT = (
     "agent: resume is not an action; continue a finished sub-agent with a launch "
     "that carries resume=<task_id>, e.g. "
     + json.dumps(
-        {"agent": "auditor", "task": "<follow-up task>", "resume": "<task_id>"},
+        {"agent": "Explore", "task": "<follow-up task>", "resume": "<task_id>"},
         ensure_ascii=False,
     )
 )
