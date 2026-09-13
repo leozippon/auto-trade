@@ -1533,6 +1533,16 @@ function walkForwardTerm(verdict) {
   );
 }
 
+/* The transitions a positive/total count does not describe: replays the
+   strategy's own code crashed (not positive) and ones with no measured sign
+   (they fail the verdict). Empty when there are none. */
+function transitionGaps(term) {
+  const gaps = [];
+  if (term.failed) gaps.push(`报错 ${term.failed}`);
+  if (term.unmeasured) gaps.push(`未测得 ${term.unmeasured}`);
+  return gaps.length ? `（${gaps.join("，")}）` : "";
+}
+
 /* The graduation terms behind the badge, in the order the rules apply them.
 
    Term (b) counts the whole development chain, and most of its transitions
@@ -1643,9 +1653,9 @@ function transitionsStrip(detail) {
   const items = [
     {
       label: `超额为正（${epochShort(epochId)}）`,
-      value: `${term.positive_excess}/${term.transitions}${required === null ? "" : `　需 ≥${required}`}`,
+      value: `${term.positive_excess}/${term.transitions}${required === null ? "" : `　需 ≥${required}`}${transitionGaps(term)}`,
       cls: required === null ? "" : term.positive_excess >= required ? "pos" : "neg",
-      title: `末个 Epoch 计入的 ${term.transitions} 次样本外过渡（取自各 Fold 的${source}，回放基线锚点的不计）里，${term.positive_excess} 次的中性化超额为正。毕业按 ⌈2/3⌉ 需 ${required ?? "—"} 次；原始超额只作展示，不参与计数。${term.unmeasured ? `其中 ${term.unmeasured} 次算不出中性化超额，按未证明计并使毕业不通过。` : ""}`,
+      title: `末个 Epoch 计入的 ${term.transitions} 次样本外过渡（取自各 Fold 的${source}，回放基线锚点的不计）里，${term.positive_excess} 次的中性化超额为正。毕业按 ⌈2/3⌉ 需 ${required ?? "—"} 次；原始超额只作展示，不参与计数。${term.failed ? `其中 ${term.failed} 次回放因策略代码报错失败，按非正计。` : ""}${term.unmeasured ? `其中 ${term.unmeasured} 次未测得正负（算不出中性化超额，或旧账本里未分类的失败），毕业因此不通过。` : ""}`,
     },
     {
       label: "平均新季中性化超额",
@@ -2106,7 +2116,7 @@ function transitionCardLine(item) {
       {
         class: `num ${required === null ? "" : term.positive_excess >= required ? "pos" : "neg"}`,
       },
-      ` ${term.positive_excess}/${term.transitions} 正`,
+      ` ${term.positive_excess}/${term.transitions} 正${transitionGaps(term)}`,
     ),
     el(
       "span",

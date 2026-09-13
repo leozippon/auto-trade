@@ -3474,6 +3474,9 @@ class WebuiBackendTest(unittest.TestCase):
                     "source": "parent_control",
                     "transitions": 3,
                     "positive_excess": 1,
+                    # The crashed replay is counted and named, not hidden in
+                    # the denominator.
+                    "failed": 1,
                     # A counted transition with no measured sign fails the
                     # verdict; none here has one.
                     "unmeasured": 0,

@@ -407,11 +407,13 @@ def _walk_forward_view(
     average of the very figures the count was taken on,
     ``mean_excess_percentile`` is where those transitions sat inside
     random-name replays of their own trade skeletons (the ledger's own figure,
-    the one the verdict diagnostics publish), and ``unmeasured`` is how many
-    counted transitions carry no establishable neutralized excess at all — the
-    one diagnostic here that does fail the verdict. None of the means gates
-    anything. Every figure comes from the ledger's own transition rows, so the
-    mean can never average a wider set than the count it sits next to.
+    the one the verdict diagnostics publish). ``failed`` (the replay crashed
+    in strategy code, counted as not positive) and ``unmeasured`` (no sign at
+    all: no establishable neutralized excess, or a failure the ledger never
+    classified, which fails the verdict) say what the count does not. None of
+    the means gates anything. Every figure comes from the ledger's own
+    transition rows, so the mean can never average a wider set than the count
+    it sits next to.
     """
     if test_stage and not revealed:
         return None
@@ -420,6 +422,7 @@ def _walk_forward_view(
         "source": counts["source"],
         "transitions": counts["transitions"],
         "positive_excess": counts["positive_excess"],
+        "failed": counts["failed"],
         "unmeasured": counts["unmeasured"],
         "required": AcceptanceRules.walk_forward_consistency(counts).get("required"),
         "mean_neutralized_excess": _mean(
