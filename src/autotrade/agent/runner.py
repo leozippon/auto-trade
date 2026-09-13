@@ -149,6 +149,7 @@ _FOLD_TOOLS = frozenset(
 )
 _META_TOOLS = frozenset(
     {
+        "delete_file",
         "edit_file",
         "agent",
         "finish_meta",

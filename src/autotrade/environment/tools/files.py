@@ -219,4 +219,52 @@ class EditFileTool(_WorkspaceWriteTool):
         })
 
 
-__all__ = ["EditFileTool", "WriteFileTool"]
+class DeleteFileTool(_WorkspaceWriteTool):
+    """Remove one workspace file through the same write boundary as the writers.
+
+    A session without ``shell`` could create a file but never remove one, so a
+    regularization that had to drop dead code could only empty the file: a Meta
+    left ``models/deadcode_backup/*.py`` in place and its whole regularization
+    was refused for an unsupported models file type. Deleting is the same write
+    boundary as writing -- read-only contract files, ``skills/`` and anything
+    outside the workspace are refused by ``_resolve`` -- so it reuses it rather
+    than adding a second notion of what is writable.
+    """
+
+    spec = ToolSpec(
+        "delete_file",
+        "Delete ONE file from the strategy workspace (formal code under output/, "
+        "model files under models/, drafts elsewhere). `path` is relative to the "
+        "workspace root, or to the optional writable `root`. Directories, globs and "
+        "the read-only contract files are refused; skills/ is maintained with "
+        "write_skill / delete_skill. " + ROOT_RELATIVE_PATH_RULE,
+        {
+            "type": "object",
+            "properties": {"path": _PATH, "root": _ROOT},
+            "required": ["path"],
+            "additionalProperties": False,
+        },
+        mutating=True,
+        example={"path": "models/deadcode_backup/old_helper.py"},
+    )
+
+    def invoke(self, arguments: Mapping[str, object]) -> ToolResult:
+        target = self._resolve(
+            str(arguments["path"]), root=arguments.get("root"), must_exist=True
+        )
+        relative = self.workspace.relative(target)
+        try:
+            target.unlink()
+        except PermissionError as exc:
+            # Same story as a refused write: the path came out of a locked Step
+            # snapshot or frozen artifact and carries 0o444/0o555.
+            raise ToolError(
+                f"{relative} is not writable",
+                error_type="readonly",
+                blocked_target=relative,
+                retry_hint=readonly_copy_hint(relative.split("/", 1)[0]),
+            ) from exc
+        return ToolResult(True, value={"path": relative, "deleted": True})
+
+
+__all__ = ["DeleteFileTool", "EditFileTool", "WriteFileTool"]

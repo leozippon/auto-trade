@@ -20,7 +20,7 @@ from .base import (
     ToolSpec,
     is_sequential_tool,
 )
-from .files import EditFileTool, WriteFileTool
+from .files import DeleteFileTool, EditFileTool, WriteFileTool
 from .finish_fold import FinishFoldTool
 from .finish_meta import FinishMetaTool
 from .memory_feedback import (
@@ -38,6 +38,7 @@ from .workspace import SafeWorkspace
 __all__ = [
     "CommandResult",
     "CommandRunner",
+    "DeleteFileTool",
     "EditFileTool",
     "FinishFoldTool",
     "FinishMetaTool",

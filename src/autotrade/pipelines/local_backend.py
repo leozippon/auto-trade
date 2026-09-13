@@ -84,7 +84,11 @@ from autotrade.environment.tools.base import (
     ToolResult,
     ToolSpec,
 )
-from autotrade.environment.tools.files import EditFileTool, WriteFileTool
+from autotrade.environment.tools.files import (
+    DeleteFileTool,
+    EditFileTool,
+    WriteFileTool,
+)
 from autotrade.environment.tools.finish_fold import (
     FinishFoldTool,
     FoldBudgetStatus,
@@ -3855,6 +3859,9 @@ class LLMMetaLearner:
             # copy it may regularize, and the optional sandbox dependency request.
             WriteFileTool(safe),
             EditFileTool(safe),
+            # No shell in a Meta session: without this, a regularization could
+            # empty a dead file but never remove it.
+            DeleteFileTool(safe),
             WriteSkillTool(safe),
             DeleteSkillTool(safe),
             *([MemoryFeedbackTool(safe, manifest)] if mounted_memory else []),

@@ -30,6 +30,7 @@ from autotrade.environment.tools import (
     SearchRoots,
     ToolError,
     ToolRegistry,
+    DeleteFileTool,
     WriteFileTool,
 )
 from autotrade.environment.tools.shell import (
@@ -873,7 +874,54 @@ class StructuredSearchToolTest(unittest.TestCase):
 class ArtifactIOToolTest(unittest.TestCase):
     def _registry(self, root: Path):
         paths, _, workspace = build_sandbox(root)
-        return paths, ToolRegistry([WriteFileTool(workspace), EditFileTool(workspace)])
+        return paths, ToolRegistry(
+            [WriteFileTool(workspace), EditFileTool(workspace), DeleteFileTool(workspace)]
+        )
+
+    def test_delete_file_removes_one_file_inside_the_write_boundary(self) -> None:
+        """A session without shell must be able to drop a file, not only empty it.
+
+        The boundary is the writers' own: the read-only contract files, skills/
+        and anything outside the workspace stay refused, and a directory is a
+        typed path error rather than a recursive removal.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            paths, registry = self._registry(Path(tmp))
+            registry.invoke(
+                "write_file", {"path": "models/dead/old.py", "content": "x = 1\n"}
+            )
+            deleted = registry.invoke("delete_file", {"path": "models/dead/old.py"})
+            self.assertTrue(deleted.ok, deleted.error)
+            self.assertEqual(deleted.value, {"path": "models/dead/old.py", "deleted": True})
+            self.assertFalse((paths.agent / "models" / "dead" / "old.py").exists())
+            # The directory it lived in is untouched: one file per call.
+            self.assertTrue((paths.agent / "models" / "dead").is_dir())
+
+            missing = registry.invoke("delete_file", {"path": "models/dead/old.py"})
+            self.assertFalse(missing.ok)
+            self.assertEqual(missing.value["error_type"], "not_found")
+
+            directory = registry.invoke("delete_file", {"path": "models/dead"})
+            self.assertFalse(directory.ok)
+            self.assertEqual(directory.value["error_type"], "path_error")
+
+            readonly = registry.invoke("delete_file", {"path": "output/README.md"})
+            self.assertFalse(readonly.ok)
+            self.assertEqual(readonly.value["error_type"], "readonly")
+
+            # skills/ has its own pair of tools, so it is refused even when the
+            # file is really there.
+            skill = paths.agent / "skills" / "kept.md"
+            skill.parent.mkdir(parents=True, exist_ok=True)
+            skill.write_text("keep me\n", encoding="utf-8")
+            skills = registry.invoke("delete_file", {"path": "skills/kept.md"})
+            self.assertFalse(skills.ok)
+            self.assertEqual(skills.value["error_type"], "readonly")
+            self.assertTrue(skill.exists())
+
+            escape = registry.invoke("delete_file", {"path": "../outside.txt"})
+            self.assertFalse(escape.ok)
+            self.assertEqual(escape.value["error_type"], "path_error")
 
     def test_write_then_edit_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
