@@ -30,6 +30,7 @@ from autotrade.environment.executor import (
     StrategyExecutionError,
     TrustedStrategyExecutor,
     docker_available,
+    raised_by_strategy,
 )
 from autotrade.environment.replay import BacktestError, run_daily_replay
 from autotrade.environment.runtime import chmod_tree
@@ -235,10 +236,13 @@ def test_state_is_read_only_during_generate_orders_in_host(tmp_path: Path):
 def test_a_fit_exception_fails_the_backtest_explicitly(tmp_path: Path):
     source = FIT_STRATEGY.replace("    np.save(", "    raise ValueError('singular')\n    np.save(")
     executor, _state = _trusted(tmp_path, source)
-    with pytest.raises(BacktestError, match="fit failed at 2024-03-28T18:00:00\\+08:00: singular"):
+    with pytest.raises(BacktestError, match="fit failed at 2024-03-28T18:00:00\\+08:00: singular") as raised:
         run_daily_replay(
             daily=_daily(["20240328"]), strategy=executor, schedule=StrategySchedule("day", "18:00")
         )
+    # In process, the exception is the strategy's own: a measurement of it,
+    # classified the same way a sandbox worker's error reply is.
+    assert raised_by_strategy(raised.value)
 
 
 def test_a_fit_strategy_cannot_run_without_a_state_dir(tmp_path: Path):

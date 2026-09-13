@@ -8,7 +8,12 @@ from datetime import date, datetime, time
 from time import perf_counter
 
 from autotrade.environment.broker import BrokerProfile, DailyBroker
-from autotrade.environment.executor import FittableStrategyExecutor, StrategyExecutor
+from autotrade.environment.executor import (
+    FittableStrategyExecutor,
+    StrategyExecutionError,
+    StrategyExecutor,
+    StrategyRaised,
+)
 from autotrade.environment.strategy import (
     CN_TZ,
     AccountSnapshot,
@@ -28,6 +33,23 @@ MARKET_CLOSE = time(15, 0)
 
 class BacktestError(RuntimeError):
     """A strategy cannot produce a truthful replay result."""
+
+
+def _call_failure(exc: Exception) -> StrategyExecutionError:
+    """What one failed strategy call measured.
+
+    An executor types its own failures (``StrategyRaised`` when the strategy's
+    code raised in the worker, a plain ``StrategyExecutionError`` for timeouts
+    and protocol faults). Anything else raised inside the call came from
+    strategy code running in this process, or from the orders it returned, so
+    it is the strategy's own error.
+    """
+
+    if isinstance(exc, StrategyExecutionError):
+        return exc
+    raised = StrategyRaised(str(exc))
+    raised.__cause__ = exc
+    return raised
 
 
 @dataclass(frozen=True)
@@ -185,8 +207,10 @@ class DailyReplayEngine:
             try:
                 with self.timer.phase("fit"):
                     fittable.fit(context)
-            except Exception as exc:
-                raise BacktestError(f"fit failed at {inference_at.isoformat()}: {exc}") from exc
+            except Exception as exc:  # noqa: BLE001 - typed by _call_failure
+                raise BacktestError(
+                    f"fit failed at {inference_at.isoformat()}: {exc}"
+                ) from _call_failure(exc)
             self._last_fit_date = trade_date
         try:
             # Includes the host NL wait: ctx.nl() blocks inside the strategy
@@ -197,8 +221,10 @@ class DailyReplayEngine:
                 else:
                     payload = self.strategy(context)
             self.inbox.submit(payload, inference_at=inference_at)
-        except Exception as exc:
-            raise BacktestError(f"generate_orders failed at {inference_at.isoformat()}: {exc}") from exc
+        except Exception as exc:  # noqa: BLE001 - typed by _call_failure
+            raise BacktestError(
+                f"generate_orders failed at {inference_at.isoformat()}: {exc}"
+            ) from _call_failure(exc)
 
     def _match_due(
         self,

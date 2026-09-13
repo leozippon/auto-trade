@@ -54,6 +54,33 @@ class StrategyExecutionError(RuntimeError):
     """A strategy executor cannot return a truthful order payload."""
 
 
+class StrategyRaised(StrategyExecutionError):
+    """The strategy's own code raised inside a ``fit`` or ``generate_orders`` call.
+
+    That is a measurement of the strategy -- it cannot run on this data -- and
+    the only executor failure that is: a timeout, a broken pipe, a worker that
+    never started or broke protocol stays a plain ``StrategyExecutionError``,
+    because it measured the environment, not the strategy.
+    """
+
+
+def raised_by_strategy(exc: BaseException) -> bool:
+    """Whether ``exc``, or anything it was raised from, is ``StrategyRaised``.
+
+    Replay layers wrap an executor failure (``BacktestError`` and the
+    evaluator above it), so the classification is read off the whole chain.
+    """
+
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        if isinstance(current, StrategyRaised):
+            return True
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+    return False
+
+
 @runtime_checkable
 class StrategyExecutor(Protocol):
     def execute(self, context: StrategyContext) -> object: ...
@@ -384,7 +411,8 @@ class DockerStrategyExecutor:
                     self._transport_last_available_at = last_available_at
                     return message.get("orders")
                 if message_type == "error":
-                    raise StrategyExecutionError(str(message.get("error") or "strategy worker failed"))
+                    # The worker's reply to a call whose strategy code raised.
+                    raise StrategyRaised(str(message.get("error") or "strategy worker failed"))
                 raise StrategyExecutionError(f"unexpected strategy worker message: {message_type!r}")
         except (TimeoutError, BrokenPipeError, OSError, ValueError, json.JSONDecodeError) as exc:
             self._abort()
@@ -993,6 +1021,8 @@ __all__ = [
     "PersistentCommandRunner",
     "StrategyExecutionError",
     "StrategyExecutor",
+    "StrategyRaised",
     "TrustedStrategyExecutor",
     "docker_available",
+    "raised_by_strategy",
 ]

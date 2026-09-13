@@ -31,8 +31,10 @@ from autotrade.environment.executor import (
     ExecResult,
     PersistentCommandRunner,
     StrategyExecutionError,
+    StrategyRaised,
     _run_limited_capture,
     docker_available,
+    raised_by_strategy,
 )
 from autotrade.environment.gpu import GpuUnavailableError
 from autotrade.environment.replay import DailyMarketData
@@ -1681,9 +1683,11 @@ def test_inference_timeout_aborts_and_closes_worker():
     pipes = (process.stdin, process.stdout, process.stderr)
     with (
         patch.object(executor, "_remove_container") as remove,
-        pytest.raises(StrategyExecutionError, match="exceeded"),
+        pytest.raises(StrategyExecutionError, match="exceeded") as timed_out,
     ):
         executor.execute(_context())
+    # A deadline miss measured the environment, not the strategy.
+    assert not raised_by_strategy(timed_out.value)
     assert process.poll() is not None
     assert executor._closed is True
     assert executor._process is None
@@ -1693,6 +1697,35 @@ def test_inference_timeout_aborts_and_closes_worker():
     executor.close()
     executor.close()
     remove.assert_called_once()
+
+
+def test_a_worker_error_reply_is_the_strategys_own_exception():
+    """The worker answers a call whose strategy code raised with ``error``:
+    the one executor failure that is a measurement of the strategy."""
+    reply = {"type": "error", "sequence": 0, "error": "KeyError: 'close'"}
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import json,sys,time; sys.stdin.readline(); "
+                f"print(json.dumps({reply!r}), flush=True); time.sleep(60)"
+            ),
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    executor = _executor_for_process(process, drain_stderr=True)
+    try:
+        with (
+            patch.object(executor, "_remove_container"),
+            pytest.raises(StrategyRaised, match="KeyError: 'close'") as raised,
+        ):
+            executor.execute(_context())
+        assert raised_by_strategy(raised.value)
+    finally:
+        executor.close()
 
 
 def test_request_write_timeout_aborts_worker_that_does_not_read_stdin():
