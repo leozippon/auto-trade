@@ -2805,6 +2805,7 @@ class LLMFoldDeveloper:
                 "record_failed_attempts": request.record_failed_attempts,
                 "epoch_index": request.epoch_index,
                 "phase": request.phase,
+                "confirmation_fold": request.confirmation_fold,
                 "max_steps": request.max_steps,
                 "max_backtests_per_fold": request.max_backtests,
                 "deadline_seconds": request.deadline_seconds,

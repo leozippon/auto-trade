@@ -214,6 +214,7 @@ def _fold_prompt(
             if deployment
             else _phase(epoch_index, rolling.convergence_start_epoch)
         ),
+        "confirmation_fold": confirmation_fold,
         "is_initial_artifact": context.is_initial,
         "template_ref": "agent_output_template" if context.is_initial else None,
         "modification_constraints": rolling.step_constraints.to_record(),

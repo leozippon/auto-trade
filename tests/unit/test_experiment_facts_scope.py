@@ -75,6 +75,17 @@ def _data_summary(rows: dict[str, int]) -> dict[str, object]:
     }
 
 
+def test_every_fold_states_whether_it_is_a_confirmation_fold() -> None:
+    """False is stated, not implied by absence: an Agent read a missing flag as
+    a confirmation Fold and left most of its budget unspent (XR1 A6)."""
+
+    assert _facts()["identity"]["confirmation_fold"] is False
+    assert _facts(confirmation_fold=True)["identity"]["confirmation_fold"] is True
+    # The flag belongs to development Folds only.
+    for kind in ("deployment_adjustment", "meta_learning"):
+        assert "confirmation_fold" not in _facts(kind=kind)["identity"]
+
+
 def test_deployment_adjustment_facts_say_the_held_out_is_visible() -> None:
     """The post-Held-out deployment adjustment is the one session kind that
     replays a window including the Held-out, and its facts and prompt say so

@@ -89,6 +89,11 @@ def build_experiment_facts(
                     manifest.get("fold_id"), ref_store=ref_store, is_meta=is_meta
                 ),
                 "phase": None if is_meta else manifest.get("phase"),
+                # Stated on every Fold, false included: an absent flag was
+                # read as "this is a confirmation Fold" (XR1 A6).
+                "confirmation_fold": (
+                    bool(manifest.get("confirmation_fold")) if kind == "fold" else None
+                ),
             }
         ),
         "source_refs": {

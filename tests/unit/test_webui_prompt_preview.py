@@ -498,7 +498,10 @@ def test_a_confirmation_fold_preview_states_the_rule_before_anything_else(tmp_pa
     )
 
     directory, repo = _experiment(tmp_path)
-    assert CONFIRMATION_FOLD_SECTION.strip() not in _preview_of(directory, repo, FOLD_KEY)
+    ordinary = _preview_of(directory, repo, FOLD_KEY)
+    assert CONFIRMATION_FOLD_SECTION.strip() not in ordinary
+    # An ordinary Fold says so in its facts rather than by omission.
+    assert _facts(ordinary)["identity"]["confirmation_fold"] is False
     schedule_path = directory / "hitl" / "schedule.json"
     schedule = json.loads(schedule_path.read_text(encoding="utf-8"))
     for session in schedule["sessions"]:
@@ -507,6 +510,7 @@ def test_a_confirmation_fold_preview_states_the_rule_before_anything_else(tmp_pa
     schedule_path.write_text(json.dumps(schedule), encoding="utf-8")
     prompt = _preview_of(directory, repo, FOLD_KEY)
     assert CONFIRMATION_FOLD_SECTION.strip() in prompt
+    assert _facts(prompt)["identity"]["confirmation_fold"] is True
     assert prompt.index(FOLD_DYNAMIC_CONTEXT_HEADER.strip()) < prompt.index(
         CONFIRMATION_FOLD_SECTION.strip()
     ) < prompt.index("## 当前实验事实")
