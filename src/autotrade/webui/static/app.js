@@ -1,4 +1,4 @@
-/* ADM-Cube HITL console SPA — no build step, no dependencies. */
+/* ADM-Cube research console SPA — no build step, no dependencies. */
 
 const $main = document.getElementById("main");
 const $topbarRight = document.getElementById("topbar-right");
@@ -9,7 +9,6 @@ const STATE_LABELS = {
   launching: "启动中",
   initializing: "初始化中",
   running_session: "运行中",
-  running_heldout: "Held-out 运行中",
   paused: "已暂停",
   completed: "已完成",
   stopped: "已停止",
@@ -17,115 +16,74 @@ const STATE_LABELS = {
   interrupted: "已中断",
   terminated: "已强制终止",
   created: "未启动",
-  development_complete: "开发完成",
   unreadable: "不可解析",
   unknown: "未知",
 };
-const KIND_LABELS = {
-  fold: "Fold",
-  meta_learning: "元学习",
-  heldout: "Held-out",
-  deployment_adjustment: "部署调整",
+// How a research session ended (pipelines/config.py SESSION_OUTCOMES).
+const OUTCOME_LABELS = {
+  continue: "继续",
+  freeze: "提名冻结",
+  no_edge: "无边际",
+  deadline: "到时",
 };
-// The two post-development sessions: rendered under the last Epoch as phase
-// heads rather than as Epoch members.
-function isPhaseHead(session) {
-  return session.kind === "heldout" || session.kind === "deployment_adjustment";
+const VERDICT_LABELS = {
+  graduated: "graduated",
+  discarded: "discarded",
+  no_deliverable: "无交付",
+};
+// Failed conditions of the freeze gate and of the forward and Held-out verdict
+// (pipelines/verdict.py). A reason not listed renders as written.
+const REASON_LABELS = {
+  freeze_needs_full_span_validation: "提名节点不是全区间验证",
+  freeze_too_few_full_span_validations: "全区间验证不足 2 次",
+  freeze_deflated_sharpe_unavailable: "去偏 Sharpe 概率算不出",
+  freeze_deflated_sharpe_below_threshold: "去偏 Sharpe 概率低于 0.5",
+  freeze_unmeasurable: "研究期统计无法计算",
+  forward_strategy_error: "前推期策略报错",
+  heldout_strategy_error: "Held-out 期策略报错",
+  forward_lower_bound_not_positive: "前推中性化超额 80% 下界不为正",
+  forward_recency_negative: "前推最近 6 个月中性化超额为负",
+  forward_max_drawdown_exceeded: "前推回撤超限",
+  forward_not_positive_at_cost_stress: "加倍滑点后前推超额不为正",
+  forward_too_few_round_trips: "前推平仓次数不足",
+  forward_exposure_below_floor: "前推平均仓位不足 0.5",
+  heldout_excess_below_tolerance: "Held-out 中性化超额低于容忍线",
+  heldout_max_drawdown_exceeded: "Held-out 回撤超限",
+  heldout_exposure_below_floor: "Held-out 平均仓位不足 0.5",
+};
+
+function reasonLabel(reason) {
+  return REASON_LABELS[reason] || String(reason);
 }
 
-function sessionDisplayKey(session) {
-  if (!session) return "";
-  if (session.kind === "fold") {
-    const period = String(session.label || "").trim();
-    const epoch = String(session.epoch_id || "");
-    if (period && epoch) return `${epoch}/${period}`;
-    if (period) return period;
-    const display = String(session.display_key || "");
-    if (display && !display.includes("fold_ref_")) return display;
-    return "Fold";
-  }
-  if (session.kind === "meta_learning") {
-    const epoch = String(session.epoch_id || "");
-    return epoch ? `${epoch}/元学习` : "元学习";
-  }
-  if (session.kind === "heldout") return "Held-out";
-  if (session.kind === "deployment_adjustment") return "部署调整";
-  const display = String(session.display_key || session.label || "");
-  return display.includes("fold_ref_") || display.includes("meta_ref_")
-    ? ""
-    : display;
-}
-
-function sessionListLabel(session) {
-  if (session.kind === "fold")
-    return String(session.label || "Fold");
-  if (
-    session.kind === "meta_learning" &&
-    Number(session.trigger_after_folds || 0) > 0
-  )
-    return `元学习（${session.trigger_after_folds} Fold 后）`;
-  return KIND_LABELS[session.kind] || session.kind;
-}
-
-function foldPeriodLabel(detail, foldRef) {
-  const hit = ((detail && detail.sessions) || []).find(
-    (session) => session.fold_ref === foldRef,
-  );
-  return (hit && hit.label) || "—";
-}
 const ENVIRONMENT_STAGE_LABELS = {
   preparing_session: "准备会话",
   pit_snapshot: "准备 PIT 快照",
   sandbox_layout: "准备 Sandbox 工作区",
   pit_view: "装载 PIT 可见视图",
   sandbox_start: "启动 Sandbox",
-  parent_control: "父本对照回测",
   llm_call: "Agent 推理",
   tool_call: "执行工具",
   subagent_wait: "等待子代理",
   backtest: "执行验证回测",
   agent_complete: "Agent 推理完成",
   freezing: "冻结策略",
-  forward_replay: "执行前推与 Held-out 连续回放",
-  verdict: "判定前推结论",
-  frozen_test: "执行冻结测试",
+  forward_replay: "前推与 Held-out 连续回放",
+  verdict: "判定毕业",
   publishing: "结果落盘",
-  meta_finalize: "元学习结果校验",
-  environment_update: "Sandbox 环境更新",
-  analysis: "Fold 策略分析",
-  heldout: "执行 Held-out",
   session_retry: "会话失败重试",
 };
-// How a walk-forward transition was measured: without a Test stage it is the
-// host's parent control of every Fold after the Epoch's first, with one it is
-// each Fold's frozen Test (pipelines/ledger.py::walk_forward_transitions).
-const WALK_FORWARD_SOURCES = {
-  parent_control: "父本对照",
-  frozen_test: "冻结测试",
-};
-// Why a Fold has no deflated-Sharpe probability; mirrors the reasons
-// pipelines/ledger.py::deflated_sharpe records. Never rendered as 0.
-const SELECTION_UNAVAILABLE = {
-  no_nominated_candidate: "本 Fold 未从候选中选出新策略",
-  no_observed_sharpe: "冻结候选没有有效 Sharpe",
-  fewer_than_two_trials: "参与去偏的候选少于 2，无法估计选择偏差",
-  return_series_missing: "读不到冻结候选的回放结果，没有权益曲线",
-  return_series_too_short: "日收益样本过短",
-  zero_return_variance: "日收益无波动",
-  undefined_sharpe_variance: "该分布下 Sharpe 方差无定义",
-};
+// Stages with no Agent session to watch: the session panel shows the stage
+// instead of a live Trace. The forward replay runs with no Agent at all.
 const PREP_ENVIRONMENT_STAGES = new Set([
   "preparing_session",
   "pit_snapshot",
   "sandbox_layout",
   "pit_view",
   "sandbox_start",
-  "parent_control",
   "forward_replay",
   "verdict",
-  "heldout",
   "session_retry",
-  "environment_update",
 ]);
 // Dead-worker states the backend can relaunch from a ledger resume; mirrors
 // manager.py _TERMINAL_RESUMABLE_STATES. Keep in sync or the resume button
@@ -150,7 +108,6 @@ const TERMINAL_INJECT_STATES = new Set([
   "failed",
   "interrupted",
   "terminated",
-  "development_complete",
 ]);
 
 let pollTimer = null;
@@ -243,14 +200,17 @@ function refreshCharts() {
   new ResizeObserver(sync).observe(bar);
 })();
 
-/* Session keys contain "/" (epoch_001/fold_2022Q1); in the hash they travel as
-   "~" so URLs stay readable (no %2F). Old encoded links still parse. */
+/* Session keys (s1, s2, …, forward) travel in the hash as they are. */
 function sessionKeyToUrl(key) {
-  return encodeURIComponent(String(key).replaceAll("/", "~"));
+  return encodeURIComponent(String(key));
 }
 
 function sessionKeyFromUrl(segment) {
-  return decodeURIComponent(segment).replaceAll("~", "/");
+  return decodeURIComponent(segment);
+}
+
+function sessionLabel(key) {
+  return key === "forward" ? "前推回放" : `研究 ${key}`;
 }
 
 /* Ledger period ranges are serialized as "YYYYMMDD..YYYYMMDD"; render them
@@ -266,21 +226,6 @@ function fmtPeriodRange(value) {
 function fmtDate(value) {
   const match = /^(\d{4})(\d{2})(\d{2})$/.exec(String(value || ""));
   return match ? `${match[1]}-${match[2]}-${match[3]}` : String(value || "—");
-}
-
-/* Acceptance warnings are durable ledger text. Keep old records readable while
-   new records already arrive pre-formatted from the pipeline. */
-function fmtAcceptanceWarning(value) {
-  const text = String(value || "");
-  let match = /^validation return\s+([-+0-9.eE]+)\s+<\s+([-+0-9.eE]+)$/.exec(
-    text,
-  );
-  if (match)
-    return `validation return ${fmtPct(Number(match[1]))} < ${fmtPct(Number(match[2]))}`;
-  match = /^sharpe\s+([-+0-9.eE]+)\s+<\s+([-+0-9.eE]+)$/.exec(text);
-  if (match)
-    return `sharpe ${Number(match[1]).toFixed(2)} < ${Number(match[2]).toFixed(2)}`;
-  return text;
 }
 
 /* All backend timestamps are ISO-UTC; the console displays UTC+8 (Asia/Shanghai)
@@ -326,7 +271,7 @@ function fmtDuration(totalSeconds) {
   return h > 0 ? `${h}:${mm}:${ss}` : `${m}:${ss}`;
 }
 
-function foldDurationNode(detail, session, prefix = "", className = "") {
+function sessionDurationNode(detail, session, prefix = "", className = "") {
   const node = el("span", { class: className });
   const fixedValue = (session.record || {}).run_wall_seconds;
   const fixed = Number(fixedValue);
@@ -424,16 +369,6 @@ function fmtSharpe(value) {
     : Number(value).toFixed(2);
 }
 
-// The cumulative validation tile is the final value of the curve below it,
-// never a product of per-Fold window returns: rolling Validation windows
-// overlap, so compounding whole windows counts the shared quarters again.
-const CUM_VALID_HINT = "即下方验证曲线的终值";
-
-function sealedMetricTile(revealed, label, value, format = fmtPct) {
-  if (!revealed) return { label, value: "未揭示", cls: "" };
-  return { label, value: format(value), cls: signCls(value) };
-}
-
 function formatStageLine(status, { elapsed = true } = {}) {
   const stage = status && status.environment_stage;
   if (!stage) return "";
@@ -461,7 +396,6 @@ function formatStageLine(status, { elapsed = true } = {}) {
 }
 
 function isPrepEnvironment(status, state) {
-  if (state === "running_heldout") return true;
   const stage = (status && status.environment_stage) || "";
   if (PREP_ENVIRONMENT_STAGES.has(stage)) return true;
   return (
@@ -500,98 +434,26 @@ function escapeHtml(text) {
   );
 }
 
-/* Minimal markdown renderer for the analysis panel (headings, lists, code,
-   bold, inline code). Input is escaped first, so no raw HTML passes through. */
-function renderMarkdown(text) {
-  const lines = escapeHtml(text).split("\n");
-  const out = [];
-  let inCode = false,
-    inList = false;
-  for (const line of lines) {
-    if (line.startsWith("```")) {
-      if (inList) {
-        out.push("</ul>");
-        inList = false;
-      }
-      out.push(inCode ? "</pre>" : "<pre>");
-      inCode = !inCode;
-      continue;
-    }
-    if (inCode) {
-      out.push(line);
-      continue;
-    }
-    const html = line
-      .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
-      .replace(/`([^`]+)`/g, "<code>$1</code>");
-    const heading = html.match(/^(#{1,4})\s+(.*)$/);
-    const listItem = html.match(/^\s*[-*]\s+(.*)$/);
-    if (listItem && !heading) {
-      if (!inList) {
-        out.push("<ul>");
-        inList = true;
-      }
-      out.push(`<li>${listItem[1]}</li>`);
-      continue;
-    }
-    if (inList) {
-      out.push("</ul>");
-      inList = false;
-    }
-    if (heading)
-      out.push(
-        `<h${heading[1].length + 1}>${heading[2]}</h${heading[1].length + 1}>`,
-      );
-    else if (html.trim() === "") out.push("");
-    else out.push(`<p>${html}</p>`);
-  }
-  if (inList) out.push("</ul>");
-  if (inCode) out.push("</pre>");
-  const div = el("div", { class: "markdown" });
-  div.innerHTML = out.join("\n");
-  return div;
-}
-
 /* ---------------- charts ----------------
    Specs: thin marks (bars ≤24px, 2px surface gap, 4px rounded data-end,
    square baseline; 2px lines; ≥8px markers with 2px surface ring), hairline
-   solid gridlines, muted-ink labels, legend for 2 series, hover tooltips.
-   Palette: categorical slots 1-2 (blue/aqua), CVD+contrast validated on white;
-   aqua's sub-3:1 relief is carried by the result tables and tooltips. */
-
-/* Both palettes validated (dataviz validator): light pair on white, dark pair
-   (#3987e5/#199e70, the palette's dark steps) on the dark panel — all checks pass. */
+   solid gridlines, muted-ink labels, legend, hover tooltips. One categorical
+   slot (blue) against a neutral dashed 沪深300, validated on both panels. */
 function themeInk() {
   if (currentTheme() === "dark") {
     return {
-      // Categorical slots 1-4 (dark steps; validated with the dataviz checker
-      // on the dark panel #1b1f28 — all pass incl. contrast).
-      validColor: "#3987e5",
-      testColor: "#199e70",
-      heldoutColor: "#c98500",
-      forwardColor: "#9b76e8",
-      validLight: "#7fb2ef",
-      testLight: "#5ec49a",
+      strategyColor: "#3987e5",
       grid: "#2b303c",
       baseline: "#4a5163",
       muted: "#98a0af",
-      faint: "#6f7787",
       ring: "#1b1f28",
     };
   }
   return {
-    // Light slots 1-4 validated on white; aqua/yellow sit in the sub-3:1
-    // relief band — carried by the result tables and rich tooltips.
-    validColor: "#2a78d6",
-    testColor: "#1baf7a",
-    heldoutColor: "#eda100",
-    forwardColor: "#7a54c7",
-    validLight: "#86b6ef",
-    testLight: "#66cfa4",
+    strategyColor: "#2a78d6",
     grid: "#e9ebf1",
     baseline: "#c2c7d2",
     muted: "#68717f",
-    faint: "#a5abb8",
     ring: "#ffffff",
   };
 }
@@ -650,205 +512,31 @@ function chartLegend(seriesList) {
   );
 }
 
-/* ---- daily equity lines + drawdown subplot (vs 沪深300 benchmark) ----
-   Series = daily simple returns [[YYYYMMDD, r], ...]; the client compounds
-   into cumulative curves and running drawdowns. Benchmark is drawn dashed in
-   neutral ink (a reference, not a categorical slot). */
-const EQUITY_CACHE = new Map(); // `${experiment_id}::${epoch_id}` -> { fp, payload }
+/* ---- daily equity line + drawdown and position panes (vs 沪深300) ----
+   One ledger-named replay result per chart (equity.result_equity_payload),
+   compounded on the server; 沪深300 is served on the strategy's own days, so
+   both lines start at 0 together. A marker is a dashed vertical line, e.g.
+   the forward/Held-out boundary of the continuous replay. */
+const RESULT_EQUITY_CACHE = new Map(); // `${experiment_id}/${result}` -> promise
 
-function fetchExperimentEquity(expId, fp, epochId = null) {
-  const cacheKey = `${expId}::${epochId || ""}`;
-  const hit = EQUITY_CACHE.get(cacheKey);
-  if (hit && hit.fp === fp) return hit.ready;
-  const query = epochId ? `?epoch_id=${encodeURIComponent(epochId)}` : "";
-  const ready = api(
-    `/api/experiments/${encodeURIComponent(expId)}/equity${query}`,
-  );
-  EQUITY_CACHE.set(cacheKey, { fp, ready });
-  return ready;
-}
-
-function epochShort(epochId) {
-  const m = /^epoch_0*(\d+)$/.exec(String(epochId || ""));
-  return m ? `E${m[1]}` : String(epochId || "");
-}
-
-/* Full-cycle statistics (server-computed in equity.py::_cycle_stats), rendered
-   as ONE compact row per chained series (metrics as columns) so the block adds
-   a few text lines under the chart instead of a screen-tall table. Cumulative
-   return is omitted — the chart legend already shows each series' final. */
-const CYCLE_STAT_COLUMNS = [
-  ["annualized_return", "年化", "年化收益", (v) => fmtPct(v), true],
-  ["annualized_vol", "波动", "年化波动", (v) => fmtPct(v), false],
-  ["sharpe", "Sharpe", "年化 Sharpe", (v) => Number(v).toFixed(2), true],
-  ["max_drawdown", "回撤", "最大回撤", (v) => fmtPct(v), false],
-  ["daily_win_rate", "日胜率", "日度胜率", (v) => fmtPct(v), false],
-  [
-    "benchmark_return",
-    "基准",
-    "沪深300 同期收益（按日期配对）",
-    (v) => fmtPct(v),
-    false,
-  ],
-  ["excess_return", "超额", "相对沪深300 的超额收益", (v) => fmtPct(v), true],
-  ["beta", "β", "对沪深300 的日收益 β", (v) => Number(v).toFixed(2), false],
-  ["tracking_error", "跟踪误差", "年化跟踪误差", (v) => fmtPct(v), false],
-  [
-    "information_ratio",
-    "IR",
-    "信息比率（年化）",
-    (v) => Number(v).toFixed(2),
-    true,
-  ],
-  ["n_days", "天数", "交易日数", (v) => String(v), false],
-];
-const CYCLE_SERIES_SHORT = {
-  valid: "验证",
-  forward: "父本前向",
-  test: "测试",
-  heldout: "Held-out",
-};
-
-function cycleStatsTable(payload) {
-  const stats = payload.stats || {};
-  const keys = ["valid", "forward", "test", "heldout"].filter((k) => stats[k]);
-  if (!keys.length) return null;
-  const INK = themeInk();
-  const seriesColor = {
-    valid: INK.validColor,
-    forward: INK.forwardColor,
-    test: INK.testColor,
-    heldout: INK.heldoutColor,
-  };
-  const columns = CYCLE_STAT_COLUMNS.filter(([field]) =>
-    keys.some((k) => stats[k][field] !== null && stats[k][field] !== undefined),
-  );
-  const head = el(
-    "tr",
-    {},
-    el("th", {}, `全周期（${epochShort(payload.epoch_id)}）`),
-    ...columns.map(([, label, full]) => el("th", { title: full }, label)),
-  );
-  // Identity rides a colored swatch matching the chart line, never colored text.
-  const rows = keys.map((k) =>
-    el(
-      "tr",
-      {},
-      el(
-        "td",
-        {},
-        el("span", {
-          class: "legend-swatch",
-          style: `background:${seriesColor[k]}`,
-        }),
-        CYCLE_SERIES_SHORT[k] || k,
+function resultEquityHost(expId, result, opts = {}) {
+  const key = `${expId}/${result}`;
+  if (!RESULT_EQUITY_CACHE.has(key))
+    RESULT_EQUITY_CACHE.set(
+      key,
+      api(
+        `/api/experiments/${encodeURIComponent(expId)}/results/${encodeURIComponent(result)}/equity`,
       ),
-      ...columns.map(([field, , , fmt, signed]) => {
-        const v = stats[k][field];
-        return el(
-          "td",
-          { class: signed ? signCls(v) : "" },
-          v === null || v === undefined ? "—" : fmt(v),
-        );
-      }),
-    ),
-  );
-  return el("table", { class: "data cycle-stats" }, head, ...rows);
-}
-
-/* Calendar quarters a chained line owed but has no day in (walk_forward_curve
-   and parent_control_forward report them in `missing`); the line and the
-   cumulative tile above it lack exactly these. A muted caption under the
-   chart, and nothing at all when no quarter is missing. */
-function missingQuartersNote(payload) {
-  const groups = Object.entries(payload.missing || {});
-  if (!groups.length) return null;
-  const text = groups
-    .map(([key, quarters]) => `${CYCLE_SERIES_SHORT[key] || key} ${quarters.join("、")}`)
-    .join("；");
-  return el("div", { class: "hint" }, `无回放覆盖的季度：${text}`);
-}
-
-/* How the chained lines are built, folded behind a small 口径 disclosure on
-   the experiment page: which Fold a day comes from decides whether it is
-   out-of-sample at all (equity.walk_forward_curve, parent_control_forward). */
-const CHAIN_RULE_NOTE =
-  "实线「策略（验证）」按 Fold 前向串联：重叠交易日只记最早覆盖它的 Fold，首个 Fold 出整个验证窗口，其后每个 Fold 只补自己的新季度。" +
-  "冻结新产物的 Fold 补的是刚在该季度上选中的候选（对这次选择并非样本外），未更新的 Fold 补的是原样重跑的父本（对父本是样本外）。";
-const FORWARD_SERIES_NOTE =
-  "虚线「父本对照前向」串联各 Fold 新季度上的父本对照重放，即过渡计分的区间，是这条日历上纯样本外的前向权益（从第二个 Fold 起算，起点归零）。";
-
-function chainingCaption(payload, opts) {
-  const keys = opts?.keys || null;
-  const shown = (payload.series || []).filter(
-    (s) => (s.dates || []).length && (!keys || keys.includes(s.key)),
-  );
-  if (!shown.some((s) => s.key === "valid")) return null;
-  return el(
-    "details",
-    { class: "caliber" },
-    el("summary", {}, "口径"),
-    el(
-      "div",
-      { class: "mode-note" },
-      CHAIN_RULE_NOTE,
-      shown.some((s) => s.key === "forward") ? FORWARD_SERIES_NOTE : null,
-    ),
-  );
-}
-
-/* Async host: renders the chart (plus, on full-size charts, the epoch switcher
-   and the full-cycle stats table) when the series payload arrives. Each epoch
-   is charted alone — epochs re-run the same fold calendar and must not blend. */
-function equityHost(expId, fp, opts) {
+    );
   const host = el("div", {}, el("div", { class: "hint" }, "收益曲线加载中…"));
-  const render = (epochId) =>
-    fetchExperimentEquity(expId, fp, epochId)
-      .then((payload) => {
-        host.innerHTML = "";
-        if (!opts?.mini && (payload.epochs || []).length > 1) {
-          host.append(
-            el(
-              "div",
-              { class: "epoch-switch" },
-              ...payload.epochs.map((e) =>
-                el(
-                  "button",
-                  {
-                    class: `btn small${e === payload.epoch_id ? " primary" : ""}`,
-                    onclick: () => {
-                      host.innerHTML = "";
-                      host.append(
-                        el("div", { class: "hint" }, "收益曲线加载中…"),
-                      );
-                      render(e);
-                    },
-                  },
-                  epochShort(e),
-                ),
-              ),
-            ),
-          );
-        }
-        host.append(equityChart(payload, opts));
-        if (!opts?.mini) {
-          // Only the experiment page names missing quarters and the curve's
-          // method; the homepage card shows the chart and its numbers alone.
-          const dropped = opts?.detail && missingQuartersNote(payload);
-          if (dropped) host.append(dropped);
-          const statsTable = cycleStatsTable(payload);
-          if (statsTable) host.append(statsTable);
-          const caliber = opts?.detail && chainingCaption(payload, opts);
-          if (caliber) host.append(caliber);
-        }
-      })
-      .catch((error) => {
-        host.innerHTML = "";
-        host.append(
-          el("div", { class: "hint" }, `收益曲线加载失败：${error.message}`),
-        );
-      });
-  render(null);
+  RESULT_EQUITY_CACHE.get(key)
+    .then((payload) => host.replaceChildren(equityChart(payload, opts)))
+    .catch((error) => {
+      RESULT_EQUITY_CACHE.delete(key);
+      host.replaceChildren(
+        el("div", { class: "hint" }, `收益曲线加载失败：${error.message}`),
+      );
+    });
   return host;
 }
 
@@ -858,90 +546,25 @@ function fmtDateTick(date, withYear) {
     : `${date.slice(4, 6)}-${date.slice(6, 8)}`;
 }
 
-function rebaseBenchmarkToStrategyWindows(seriesList) {
-  const bench = seriesList.find((s) => s.key === "benchmark");
-  const drawn = seriesList.filter((s) => s.key !== "benchmark");
-  // The forward line runs inside the Validation chain's own window and is read
-  // against it, so it gets no second rebased 沪深300 of its own: one grey
-  // dashed reference per chart stays readable, and the forward line's excess
-  // over the index is served as a number in the full-cycle table instead.
-  const strategies = drawn.filter((s) => s.key !== "forward");
-  if (!bench || !strategies.length) return seriesList;
-  const benchDates = [...bench.cum.keys()].sort();
-  const segments = [];
-  for (const strategy of strategies) {
-    const pts = strategy.dates.filter((day) => bench.cum.has(day));
-    if (!pts.length) continue;
-    const first = pts[0];
-    const prior = benchDates.indexOf(first);
-    const origin = prior > 0 ? 1 + bench.cum.get(benchDates[prior - 1]) : 1;
-    const cum = new Map();
-    const dd = new Map();
-    let peak = 0;
-    for (const day of pts) {
-      const value = (1 + bench.cum.get(day)) / origin - 1;
-      cum.set(day, value);
-      peak = Math.max(peak, 1 + value);
-      dd.set(day, (1 + value) / peak - 1);
-    }
-    const tag = CYCLE_SERIES_SHORT[strategy.key] || strategy.label;
-    segments.push({
-      ...bench,
-      key: `benchmark:${strategy.key}`,
-      label: strategies.length > 1 ? `沪深300（${tag}）` : bench.label,
-      dates: pts,
-      cum,
-      dd,
-      final: cum.get(pts[pts.length - 1]),
-      dash: "6 4",
-    });
-  }
-  return segments.length ? [...segments, ...drawn] : seriesList;
-}
-
-/* Server series are already compounded. The CSI 300 overlay is rebased to each
-   strategy window so a Held-out line that starts at 0 is compared with a 300
-   that also starts at 0 in that window. */
-function equityChart(
-  payload,
-  { width = 680, height = 240, ddH = 90, mini = false, keys = null } = {},
-) {
+function equityChart(payload, opts = {}) {
+  const { width = 680, height = 240, mini = false, markers = [] } = opts;
+  let { ddH = 90 } = opts;
   const INK = themeInk();
-  const colorOf = {
-    valid: INK.validColor,
-    forward: INK.forwardColor,
-    test: INK.testColor,
-    heldout: INK.heldoutColor,
-    benchmark: INK.muted,
-  };
-  const wanted = (payload.series || []).filter(
-    (s) => (s.dates || []).length && (!keys || keys.includes(s.key)),
-  );
-  if (!wanted.length) return el("div", { class: "hint" }, "暂无日度收益数据");
-  const wantedDates = new Set(wanted.flatMap((s) => s.dates));
-  const shown = [...wanted];
+  const colorOf = { strategy: INK.strategyColor, benchmark: INK.muted };
+  const shown = (payload.series || []).filter((s) => (s.dates || []).length);
+  if (!shown.length) return el("div", { class: "hint" }, "暂无日度收益数据");
   const bench = payload.benchmark;
-  if (
-    bench &&
-    (bench.dates || []).length &&
-    bench.dates.some((d) => wantedDates.has(d))
-  ) {
-    shown.push(bench);
-  }
-  const mapped = shown.map((s) => ({
+  if (bench && (bench.dates || []).length) shown.push(bench);
+  const seriesList = shown.map((s) => ({
     key: s.key,
     label: s.label,
     final: s.final,
     dates: s.dates,
     cum: new Map(s.dates.map((d, i) => [d, s.cum[i]])),
     dd: new Map(s.dates.map((d, i) => [d, s.drawdown[i]])),
-    color: colorOf[s.key] || INK.validColor,
-    // The forward line is dashed like the benchmark because it is a reference
-    // against the solid chained series, not a fourth strategy: same calendar,
-    // different basis (equity.parent_control_forward).
-    dash: s.key === "benchmark" ? "6 4" : s.key === "forward" ? "5 3" : null,
+    color: colorOf[s.key] || INK.strategyColor,
+    dash: s.key === "benchmark" ? "6 4" : null,
   }));
-  const seriesList = rebaseBenchmarkToStrategyWindows(mapped);
   const dates = [...new Set(seriesList.flatMap((s) => s.dates))].sort();
   // Position-weight pane (EOD gross market value / equity), keyed like the
   // return series so identity carries across the linked panes.
@@ -951,7 +574,7 @@ function equityChart(
     : seriesList
         .filter(
           (s) =>
-            !String(s.key).startsWith("benchmark") &&
+            s.key !== "benchmark" &&
             exposureBy[s.key] &&
             (exposureBy[s.key].dates || []).length,
         )
@@ -961,8 +584,6 @@ function equityChart(
             key: s.key,
             color: s.color,
             long: new Map(e.dates.map((d, i) => [d, e.long[i]])),
-            short: new Map(e.dates.map((d, i) => [d, (e.short || [])[i] || 0])),
-            hasShort: (e.short || []).some((v) => v > 0.005),
           };
         });
   if (mini) ddH = 0;
@@ -1031,15 +652,27 @@ function equityChart(
       `<text x="${xOf(i)}" y="${tickY}" text-anchor="${anchor}" font-size="${mini ? 10 : 11}" fill="${INK.muted}">${fmtDateTick(d, withYear)}</text>`,
     );
   });
+  // markers: a dashed vertical line through every pane at the first day on or
+  // after the marker date
+  for (const marker of markers) {
+    const index = dates.findIndex((d) => d >= String(marker.date));
+    if (index < 0) continue;
+    const x = xOf(index).toFixed(1);
+    svg.push(
+      `<line x1="${x}" y1="${padT}" x2="${x}" y2="${hasPanes ? panesBottom : padT + mainH}" stroke="${INK.baseline}" stroke-width="1" stroke-dasharray="3 3"/>`,
+    );
+    svg.push(
+      `<text x="${Number(x) + 4}" y="${padT + 11}" font-size="11" fill="${INK.muted}">${escapeHtml(marker.label)}</text>`,
+    );
+  }
   // drawdown subplot
-  let ddY = null;
   if (showDD) {
     const ddTop = height + gap;
     const ddLo = Math.min(
       -0.001,
       ...seriesList.flatMap((s) => [...s.dd.values()]),
     );
-    ddY = (v) => ddTop + (v / ddLo) * (ddH - 14);
+    const ddY = (v) => ddTop + (v / ddLo) * (ddH - 14);
     svg.push(
       `<line x1="${padL}" y1="${ddY(0)}" x2="${width - padR}" y2="${ddY(0)}" stroke="${INK.baseline}" stroke-width="1"/>`,
     );
@@ -1061,7 +694,7 @@ function equityChart(
             `${j ? "L" : "M"}${xOf(dates.indexOf(d)).toFixed(1)},${ddY(s.dd.get(d)).toFixed(1)}`,
         )
         .join(" ");
-      if (!String(s.key).startsWith("benchmark")) {
+      if (s.key !== "benchmark") {
         const first = xOf(dates.indexOf(pts[0])).toFixed(1);
         const last = xOf(dates.indexOf(pts[pts.length - 1])).toFixed(1);
         svg.push(
@@ -1076,10 +709,7 @@ function equityChart(
   // position-weight subplot: 0..max(100%, observed) with 100% as reference line
   if (showExp) {
     const expTop = height + (showDD ? gap + ddH : 0) + gap;
-    const expMax = Math.max(
-      1,
-      ...expList.flatMap((s) => [...s.long.values(), ...s.short.values()]),
-    );
+    const expMax = Math.max(1, ...expList.flatMap((s) => [...s.long.values()]));
     const yExp = (v) => expTop + (1 - v / expMax) * (expH - 14);
     svg.push(
       `<line x1="${padL}" y1="${yExp(0)}" x2="${width - padR}" y2="${yExp(0)}" stroke="${INK.baseline}" stroke-width="1"/>`,
@@ -1108,25 +738,10 @@ function equityChart(
       svg.push(
         `<path d="${line}" fill="none" stroke="${s.color}" stroke-width="1.5"/>`,
       );
-      if (s.hasShort) {
-        const shortLine = pts
-          .filter((d) => s.short.has(d))
-          .map(
-            (d, j) =>
-              `${j ? "L" : "M"}${xOf(dates.indexOf(d)).toFixed(1)},${yExp(s.short.get(d)).toFixed(1)}`,
-          )
-          .join(" ");
-        svg.push(
-          `<path d="${shortLine}" fill="none" stroke="${s.color}" stroke-width="1.5" stroke-dasharray="4 3"/>`,
-        );
-      }
     }
   }
-  // main lines (benchmark first so strategy lines sit on top) + endpoint dots
-  for (const s of [...seriesList].sort(
-    (a, b) =>
-      (a.key === "benchmark" ? -1 : 0) - (b.key === "benchmark" ? -1 : 0),
-  )) {
+  // main lines (benchmark first so the strategy line sits on top) + endpoint dot
+  for (const s of [...seriesList].reverse()) {
     const pts = dates.filter((d) => s.cum.has(d));
     if (!pts.length) continue;
     const line = pts
@@ -1138,14 +753,14 @@ function equityChart(
     svg.push(
       `<path d="${line}" fill="none" stroke="${s.color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"${s.dash ? ` stroke-dasharray="${s.dash}"` : ""}/>`,
     );
-    if (!String(s.key).startsWith("benchmark")) {
+    if (s.key !== "benchmark") {
       const lastDate = pts[pts.length - 1];
       svg.push(
         `<circle cx="${xOf(dates.indexOf(lastDate)).toFixed(1)}" cy="${yOf(s.cum.get(lastDate)).toFixed(1)}" r="3.5" fill="${s.color}" stroke="${INK.ring}" stroke-width="2"/>`,
       );
     }
   }
-  // hover columns: one hit target per date spanning both plots, rich tooltip
+  // hover columns: one hit target per date spanning every pane, rich tooltip
   const step = dates.length > 1 ? plotW / (dates.length - 1) : plotW;
   dates.forEach((d, i) => {
     const lines = [fmtDate(d)];
@@ -1154,7 +769,7 @@ function equityChart(
       const exposure = expList.find((entry) => entry.key === s.key);
       const expText =
         exposure && exposure.long.has(d)
-          ? ` ｜ 仓位 ${(exposure.long.get(d) * 100).toFixed(1)}%${exposure.hasShort ? `（空 ${(exposure.short.get(d) * 100).toFixed(1)}%）` : ""}`
+          ? ` ｜ 仓位 ${(exposure.long.get(d) * 100).toFixed(1)}%`
           : "";
       lines.push(
         `${s.label} 累计 ${(s.cum.get(d) * 100).toFixed(2)}% ｜ 回撤 ${(s.dd.get(d) * 100).toFixed(2)}%${expText}`,
@@ -1170,22 +785,16 @@ function equityChart(
     "div",
     { class: "svg-chart" },
     chartLegend(
-      (mini
-        ? seriesList.filter((s) => !String(s.key).startsWith("benchmark"))
-        : seriesList
-      ).map((s) => ({
+      seriesList.map((s) => ({
         color: s.color,
-        label: mini
-          ? `${CYCLE_SERIES_SHORT[s.key] || s.label} ${fmtPct(s.final)}`
-          : `${s.label}: ${fmtPct(s.final)}`,
+        label: `${s.label} ${fmtPct(s.final)}`,
       })),
     ),
   );
   const svgHost = el("div", {});
   svgHost.innerHTML = `<svg viewBox="0 0 ${width} ${totalH}" xmlns="http://www.w3.org/2000/svg">${svg.join("")}</svg>`;
   wrap.append(svgHost);
-  wrap.__rerender = () =>
-    equityChart(payload, { width, height, ddH, mini, keys });
+  wrap.__rerender = () => equityChart(payload, opts);
   return bindChartTips(wrap);
 }
 
@@ -1224,7 +833,7 @@ function singleSeriesBarChart(
   { width = 640, height = 200, fmt = fmtPct } = {},
 ) {
   const INK = themeInk();
-  const color = INK.validColor; // categorical slot 1
+  const color = INK.strategyColor; // categorical slot 1
   const values = rows
     .map((row) => row.value)
     .filter((v) => v !== null && v !== undefined);
@@ -1403,384 +1012,100 @@ async function renderHomePage() {
     return;
   }
   $topbarRight.append(
-    ...[
-      el(
-        "span",
-        { class: "mode-note" },
-        `并行运行 ${payload.running.length}/${payload.max_running_experiments}`,
-      ),
-      el(
-        "button",
-        { class: "btn primary", onclick: openCreateModal },
-        "＋ 新建实验",
-      ),
-    ].filter(Boolean),
+    el(
+      "span",
+      { class: "mode-note" },
+      `并行运行 ${payload.running.length}/${payload.max_running_experiments}`,
+    ),
+    el(
+      "button",
+      { class: "btn primary", onclick: openCreateModal },
+      "＋ 新建实验",
+    ),
   );
-  const container = el("div", {});
-  const best = pickBestExperiment(payload.experiments);
-  if (best)
-    container.append(heroPanel(best), el("div", { class: "section-gap" }));
-  container.append(
-    el("div", { class: "page-head" }, el("h2", {}, "实验列表")),
-  );
-  if (payload.experiments.length) {
-    const grid = el("div", { class: "grid" });
-    for (const item of payload.experiments) grid.append(experimentCard(item));
-    container.append(grid);
-  } else {
-    container.append(
-      el("div", { class: "empty" }, "还没有实验 —— 点右上角「新建实验」开始。"),
-    );
-  }
-  $main.innerHTML = "";
-  $main.append(container);
+  $main.replaceChildren(homeView(payload));
   pollTimer = setInterval(async () => {
     if (location.hash && location.hash !== "#/" && location.hash !== "#")
       return;
     try {
-      await renderHomePageSilent();
+      await refreshHomePage();
     } catch {
       /* keep last view */
     }
   }, 5000);
 }
 
-async function renderHomePageSilent() {
-  const payload = await api("/api/experiments");
-  const grid = document.querySelector(".grid");
-  if (!grid) return;
-  const fresh = el("div", { class: "grid" });
-  for (const item of payload.experiments) fresh.append(experimentCard(item));
-  grid.replaceWith(fresh);
-  const hero = document.getElementById("hero-panel");
-  const best = pickBestExperiment(payload.experiments);
-  // Only rebuild the hero when its content actually changed. Replacing it every
-  // poll re-creates the equity host, whose epoch switcher would reset to the
-  // default (latest) epoch and clobber the user's E1/E2 selection.
-  if (hero && best && hero.__heroSig !== heroSignature(best.item, best.basis))
-    hero.replaceWith(heroPanel(best));
+function bestRow(payload) {
+  const best = payload.best;
+  const item =
+    best &&
+    (payload.experiments || []).find(
+      (row) => row.experiment_id === best.experiment_id,
+    );
+  return item ? { item, basis: best.basis } : null;
 }
 
-/* Everything heroPanel renders that can change between polls; when unchanged the
-   panel (and its selected epoch) is left in place. */
+function homeView(payload) {
+  const container = el("div", { id: "home" });
+  const best = bestRow(payload);
+  if (best)
+    container.append(
+      heroPanel(best.item, best.basis),
+      el("div", { class: "section-gap" }),
+    );
+  const rows = payload.experiments || [];
+  container.append(
+    el("div", { class: "page-head" }, el("h2", {}, "实验列表")),
+    rows.length
+      ? experimentGrid(rows)
+      : el("div", { class: "empty" }, "还没有实验 —— 点右上角「新建实验」开始。"),
+  );
+  return container;
+}
+
+/* The grid is rebuilt on every poll; the hero only when what it shows
+   changed, so its curve is not re-fetched and redrawn every five seconds. */
+async function refreshHomePage() {
+  const payload = await api("/api/experiments");
+  const home = document.getElementById("home");
+  const grid = home && home.querySelector(".grid");
+  const hero = document.getElementById("hero-panel");
+  const best = bestRow(payload);
+  const signature = best ? heroSignature(best.item, best.basis) : "";
+  if (!home || !grid || (hero ? hero.__signature : "") !== signature) {
+    if (home) home.replaceWith(homeView(payload));
+    return;
+  }
+  grid.replaceWith(experimentGrid(payload.experiments || []));
+}
+
 function heroSignature(item, basis) {
-  const term = latestWalkForward(item) || {};
   return [
     item.experiment_id,
     basis,
     item.state,
-    item.test_revealed,
+    item.stage,
+    item.research_recorded,
     (item.verdict || {}).status,
-    heldoutNeutralizedExcess(item.verdict),
-    term.positive_excess,
-    term.transitions,
-    equityFingerprint(item),
-    (item.metrics || {}).epoch_id,
+    (item.forward || {}).result,
   ].join("|");
 }
 
-/* Held-out graduation verdict (sealed until the reveal). */
+function experimentGrid(rows) {
+  return el("div", { class: "grid" }, ...rows.map(experimentCard));
+}
+
 function verdictBadge(verdict) {
   if (!verdict || !verdict.status) return null;
   const graduated = verdict.status === "graduated";
-  const reasons = (verdict.reasons || []).join("、");
   return el(
     "span",
     {
       class: `badge state-${graduated ? "completed" : "failed"}`,
-      title: graduated
-        ? "Held-out 通过：超额收益 > 0、Sharpe > 0、回撤在限内"
-        : `Held-out 未通过：${reasons || "见账本"}`,
+      title: (verdict.reasons || []).map(reasonLabel).join("；") || null,
     },
-    graduated ? "graduated" : "discarded",
+    VERDICT_LABELS[verdict.status] || verdict.status,
   );
-}
-
-/* Graduation term (b) beside the verdict badge: how many of the final Epoch's
-   out-of-sample transitions kept a positive excess return, and the count they
-   had to reach. The failing reason itself rides in verdict.reasons. */
-function walkForwardTerm(verdict) {
-  const term = (verdict || {}).walk_forward;
-  if (!term || !term.status) return null;
-  if (term.status === "not_applicable")
-    return el(
-      "span",
-      { class: "mode-note" },
-      "本排程没有样本外过渡，裁决只看 Held-out",
-    );
-  const consistent = term.status === "consistent";
-  return el(
-    "span",
-    {
-      class: `badge state-${consistent ? "completed" : "failed"}`,
-      title: `前向一致性：末个 Epoch 的 ${term.transitions} 次样本外过渡（${WALK_FORWARD_SOURCES[term.source] || term.source || "—"}）里 ${term.positive_excess} 次超额为正，毕业需 ≥ ${term.required} 次`,
-    },
-    `前向一致 ${term.positive_excess}/${term.transitions}`,
-  );
-}
-
-/* The transitions a positive/total count does not describe: replays the
-   strategy's own code crashed (not positive) and ones with no measured sign
-   (they fail the verdict). Empty when there are none. */
-function transitionGaps(term) {
-  const gaps = [];
-  if (term.failed) gaps.push(`报错 ${term.failed}`);
-  if (term.unmeasured) gaps.push(`未测得 ${term.unmeasured}`);
-  return gaps.length ? `（${gaps.join("，")}）` : "";
-}
-
-/* The verdict diagnostics the badge and its 前向一致 term do not show: the
-   shipped artifact's own forward record (the chain's other transitions
-   replayed artifacts it replaced) and the reference-only selection figures. */
-function verdictTerms(verdict) {
-  if (!verdict) return null;
-  const diag = verdict.diagnostics || {};
-  const number = (value, digits) =>
-    value === null || value === undefined ? null : Number(value).toFixed(digits);
-  const parts = [];
-  const own = diag.final_artifact_forward_transitions;
-  if (own !== null && own !== undefined)
-    parts.push(`交付产物自身过渡 ${diag.final_artifact_forward_positive ?? "—"}/${own} 超额为正`);
-  const mean = number(diag.walk_forward_mean_excess_percentile, 3);
-  if (mean) parts.push(`过渡平均 null 分位 ${mean}`);
-  const deflated = number(diag.deflated_sharpe_probability, 2);
-  const frozenPercentile = number(diag.validation_excess_percentile, 3);
-  if (deflated || frozenPercentile)
-    parts.push(
-      `冻结 Fold 候选 ${diag.candidates_evaluated ?? "—"} 个 · 去偏 Sharpe 概率 ${deflated || "—"} · 验证 null 分位 ${frozenPercentile || "—"}`,
-    );
-  if (!parts.length) return null;
-  return el("div", { class: "meta-line" }, parts.join(" · "));
-}
-
-/* The span a parent control is actually scored on. Once a Fold's Validation
-   window trails over several periods the control is graded on the Fold's new
-   period alone (registry._parent_control_view serves that span beside the
-   numbers), so the label has to travel with them: numbers from two different
-   spans must never sit under one header. */
-const CONTROL_SPAN_LABELS = {
-  step_result: "新季度",
-  validation_result: "整个验证区间",
-};
-
-function controlSpanLabel(control) {
-  const span = CONTROL_SPAN_LABELS[control.source] || null;
-  const dates =
-    control.period_start && control.period_end
-      ? `${fmtDate(control.period_start)} ～ ${fmtDate(control.period_end)}`
-      : null;
-  if (!span) return dates || "—";
-  return dates ? `${span} ${dates}` : span;
-}
-
-/* The walk-forward record, read above the fold.
-
-   A future quarter is the only thing this pipeline can be judged on, and a
-   transition is the only place the console sees one: the previous Fold's
-   frozen strategy replayed unchanged on ground it had never seen. Graduation
-   term (b) counts exactly those, so the numbers the verdict reads sit beside
-   the cumulative-validation tile instead of only under the table far below —
-   how many transitions kept a positive excess and how many they had to,
-   how much excess they carried on average, and where those excesses sat inside
-   random-name replays of their own trade skeletons. The shipped artifact's own
-   share rides beside the chain's, because most of a chain's transitions
-   replayed artifacts that one replaced.
-
-   Every figure is the ledger's own (registry._walk_forward_view over
-   ledger.walk_forward_transitions, and ledger.final_artifact_transitions
-   through the verdict diagnostics); nothing is recomputed here. The 样本外过渡
-   table lists the transitions these four numbers summarize. */
-function transitionsStrip(detail) {
-  const epochId = (detail.metrics || {}).epoch_id;
-  const term = (
-    (detail.metrics_by_epoch || []).find((row) => row.epoch_id === epochId) || {}
-  ).walk_forward;
-  // Null only where the counts are Test-stage evidence still under seal; the
-  // sealed tiles beside this strip already say so.
-  if (!term) return null;
-  const strip = el("div", { class: "strip" });
-  strip.append(el("span", { class: "strip-title" }, "样本外过渡"));
-  if (!term.transitions) {
-    strip.append(
-      el("span", { class: "mode-note" }, "本 Epoch 暂无（从第二个 Fold 起才有）"),
-    );
-    return strip;
-  }
-  const required = term.required ?? null;
-  const percentile =
-    term.mean_excess_percentile === null ||
-    term.mean_excess_percentile === undefined
-      ? null
-      : Number(term.mean_excess_percentile).toFixed(3);
-  const diagnostics = (detail.verdict || {}).diagnostics || {};
-  const own = diagnostics.final_artifact_forward_transitions;
-  const items = [
-    {
-      label: `超额为正（${epochShort(epochId)}）`,
-      value: `${term.positive_excess}/${term.transitions}${required === null ? "" : `　需 ≥${required}`}${transitionGaps(term)}`,
-      cls: required === null ? "" : term.positive_excess >= required ? "pos" : "neg",
-      title: `中性化超额为正的过渡次数；毕业需 ≥ ${required ?? "—"}${term.failed ? "；报错按非正计" : ""}${term.unmeasured ? "；未测得则毕业不通过" : ""}`,
-    },
-    {
-      label: "平均新季中性化超额",
-      value: fmtPct(term.mean_neutralized_excess),
-      cls: signCls(term.mean_neutralized_excess),
-      title: "不参与毕业判定",
-    },
-    {
-      label: "平均 null 分位",
-      value: percentile || "—",
-      cls: "",
-      title: "随机换名重放中的分位，≈0.5 即与随机组合无异；不参与毕业判定",
-    },
-    own === null || own === undefined
-      ? null
-      : {
-          label: "交付产物自身过渡",
-          value: `${diagnostics.final_artifact_forward_positive ?? "—"}/${own}`,
-          cls: own ? "" : "neg",
-          title: "交付产物自己走过的过渡；链上其余过渡跑的是它替换掉的上游产物",
-        },
-  ].filter(Boolean);
-  for (const item of items)
-    strip.append(
-      el(
-        "span",
-        { class: "strip-item", title: item.title },
-        el("span", { class: "strip-label" }, item.label),
-        el("span", { class: `strip-value ${item.cls}` }, item.value),
-      ),
-    );
-  return strip;
-}
-
-/* Out-of-sample transitions per Epoch. Without a Test stage every Fold after
-   the Epoch's first opens with the previous Fold's frozen strategy replayed
-   unchanged on this Fold's Validation window (the host's parent control), and
-   graduation term (b) counts how many of those replays kept a positive excess
-   return. The counts come from the ledger, the rows from the same
-   parent-control metrics the fold panel reads: the Epoch's first Fold opens no
-   transition, so its row is dropped here and the table lists exactly what the
-   count counts — including a control that failed, which is a transition that
-   proved nothing rather than a missing row. */
-function walkForwardPanel(detail) {
-  const epochs = (detail.metrics_by_epoch || []).filter(
-    (epoch) => (epoch.walk_forward || {}).transitions > 0,
-  );
-  if (!epochs.length) return null;
-  const panel = el(
-    "div",
-    { class: "panel section-gap" },
-    el("h4", { class: "subsection-title" }, "样本外过渡"),
-    el(
-      "div",
-      { class: "hint" },
-      "上一 Fold 冻结的策略原样重跑下一 Fold 的计分区间；表中是父本成绩，不是新策略的。",
-    ),
-  );
-  for (const epoch of epochs) {
-    const term = epoch.walk_forward || {};
-    panel.append(
-      el(
-        "div",
-        { class: "meta-line" },
-        `${epochShort(epoch.epoch_id)}：${term.positive_excess}/${term.transitions} 超额为正`,
-        term.required ? `，需 ≥${term.required}` : null,
-      ),
-    );
-    if (term.source !== "parent_control") {
-      panel.append(
-        el(
-          "div",
-          { class: "mode-note" },
-          `取自各 Fold 的${WALK_FORWARD_SOURCES[term.source] || term.source || "—"}，明细见 Fold 面板`,
-        ),
-      );
-      continue;
-    }
-    // Same Fold order the ledger counts in; the first Fold inherits from the
-    // previous Epoch and is not one of this Epoch's transitions.
-    const folds = (detail.fold_returns || []).filter(
-      (row) => row.epoch_id === epoch.epoch_id,
-    );
-    if (folds.length < 2) continue;
-    panel.append(
-      el(
-        "table",
-        { class: "data" },
-        el(
-          "tr",
-          {},
-          el("th", {}, "过渡"),
-          el(
-            "th",
-            { title: "验证区间跨多个周期时只算本 Fold 的新周期" },
-            "计分区间",
-          ),
-          el("th", {}, "父本收益"),
-          el("th", { title: "相对沪深300，只作展示" }, "父本超额"),
-          el(
-            "th",
-            { title: "> 0 才算通过；算不出时记为未证明" },
-            "中性化超额",
-          ),
-          el("th", {}, "父本 Sharpe"),
-          el("th", {}, "父本回撤"),
-          el(
-            "th",
-            { title: "随机换名重放中的分位，≈0.5 即与随机组合无异；不参与毕业判定" },
-            "null 分位",
-          ),
-        ),
-        ...folds.slice(1).map((row, index) => {
-          const control = row.parent_control || {};
-          const failed = control.status !== "ok";
-          return el(
-            "tr",
-            {},
-            el(
-              "td",
-              {},
-              `${foldPeriodLabel(detail, folds[index].fold_ref)} 冻结的策略 → ${foldPeriodLabel(detail, row.fold_ref)} 窗口`,
-              failed
-                ? el("span", { class: "mode-note" }, "（对照未完成，不算通过）")
-                : null,
-              control.baseline_anchor
-                ? el("span", { class: "mode-note" }, "（基线锚点，不计入毕业）")
-                : null,
-            ),
-            el("td", { class: "mode-note" }, controlSpanLabel(control)),
-            el("td", { class: signCls(control.return) }, fmtPct(control.return)),
-            el(
-              "td",
-              { class: "mode-note" },
-              fmtPct(control.excess_return),
-            ),
-            el(
-              "td",
-              { class: signCls(control.neutralized_excess_return) },
-              control.status === "ok" &&
-                (control.neutralized_excess_return === null ||
-                  control.neutralized_excess_return === undefined)
-                ? "未证明"
-                : fmtPct(control.neutralized_excess_return),
-            ),
-            el("td", { class: signCls(control.sharpe) }, fmtSharpe(control.sharpe)),
-            el("td", {}, fmtPct(control.max_drawdown)),
-            el(
-              "td",
-              { class: "mode-note" },
-              control.excess_percentile === null ||
-                control.excess_percentile === undefined
-                ? "—"
-                : Number(control.excess_percentile).toFixed(3),
-            ),
-          );
-        }),
-      ),
-    );
-  }
-  return panel;
 }
 
 /* A long experiment id must not reflow the heading: the name takes one
@@ -1797,12 +1122,55 @@ function experimentBadges(...badges) {
   return el("span", { class: "exp-badges" }, ...badges.filter(Boolean));
 }
 
+/* Where the arm is, from the ledger: research sessions recorded, the sealed
+   forward replay, or the verdict. Never a research-period number. */
+function stageText(item) {
+  const research = `研究 ${item.research_recorded ?? 0}/${item.research_total ?? "?"}`;
+  if (item.stage === "verdict")
+    return (item.verdict || {}).status === "no_deliverable"
+      ? `${research} · 未冻结`
+      : `${research} · 已判定`;
+  if (item.stage === "forward") return `${research} · 已冻结 · 前推回放封存中`;
+  return item.worker_alive && item.current_session
+    ? `${research} · 当前 ${sessionLabel(item.current_session)}`
+    : research;
+}
+
+/* The forward and Held-out slices the verdict read; absent until it exists,
+   and absent for a replay the strategy's own error stopped. */
+function forwardTiles(item) {
+  const slices = (item.forward || {}).slices || {};
+  const forward = slices.forward;
+  const heldout = slices.heldout;
+  if (!forward && !heldout) return null;
+  const f = forward || {};
+  const h = heldout || {};
+  return statTilesRow([
+    {
+      label: "前推超额 80% 下界",
+      value: fmtPct(f.lower_bound),
+      cls: signCls(f.lower_bound),
+    },
+    {
+      label: "前推中性化超额",
+      value: fmtPct(f.neutralized_excess),
+      cls: signCls(f.neutralized_excess),
+    },
+    {
+      label: "Held-out 中性化超额",
+      value: fmtPct(h.neutralized_excess),
+      cls: signCls(h.neutralized_excess),
+    },
+    { label: "前推回撤", value: fmtPct(f.max_drawdown) },
+  ]);
+}
+
+function forwardMarkers(forward) {
+  const start = ((forward || {}).replay || {}).heldout_start;
+  return start ? [{ date: start, label: "Held-out" }] : [];
+}
+
 function experimentCard(item) {
-  const metrics = item.metrics || {};
-  const total = item.total_sessions,
-    done = item.completed_sessions ?? 0;
-  const numericTotal = Number(total),
-    numericDone = Number(done);
   const card = el("div", {
     class: "card clickable",
     onclick: () => {
@@ -1820,12 +1188,11 @@ function experimentCard(item) {
       "div",
       { class: "meta-line" },
       `创建 ${fmtTs(item.created_at)}`,
-      item.current_session_label || item.current_session
-        ? ` ｜ 当前 ${item.current_session_label || item.current_session}`
-        : "",
       item.error ? ` ｜ ${item.error}` : "",
     ),
   );
+  if (item.state !== "unreadable")
+    card.append(el("div", { class: "meta-line" }, stageText(item)));
   if (item.worker_alive && item.environment_stage) {
     card.append(
       el(
@@ -1840,82 +1207,8 @@ function experimentCard(item) {
       ),
     );
   }
-  if (Number.isFinite(numericTotal) && numericTotal > 0) {
-    const progressValue = Number.isFinite(numericDone)
-      ? Math.min(numericTotal, Math.max(0, numericDone))
-      : 0;
-    const progressText = `${done}/${total}`;
-    const complete =
-      Number.isFinite(numericDone) && numericDone >= numericTotal;
-    card.append(
-      el(
-        "progress",
-        {
-          class: `progress${complete ? " done" : ""}`,
-          value: progressValue,
-          max: numericTotal,
-          "aria-label": `${item.experiment_id} 会话进度`,
-          "aria-valuetext": `${progressText} 个会话`,
-        },
-        progressText,
-      ),
-      el("div", { class: "meta-line" }, `进度 ${done}/${total} 个会话`),
-    );
-  } else if (item.folds_recorded) {
-    card.append(
-      el(
-        "div",
-        { class: "meta-line" },
-        `账本记录：${item.folds_recorded} 个 Fold ｜ ${item.heldout_recorded || 0} 个 held-out`,
-      ),
-    );
-  }
-  // Same component + order as the hero and detail pages (Held-out first).
-  // Cumulative valid/test metrics are per-epoch (latest) — never mixed across
-  // epochs, which re-run the same fold calendar.
-  const epochTag = metrics.epoch_id
-    ? `（${epochShort(metrics.epoch_id)}）`
-    : "";
-  card.append(
-    statTilesRow([
-      sealedMetricTile(
-        item.test_revealed,
-        "Held-out 收益",
-        metrics.cum_heldout_return,
-      ),
-      sealedMetricTile(
-        item.test_revealed,
-        `累计测试收益${epochTag}`,
-        metrics.cum_test_return,
-      ),
-      {
-        label: `累计验证收益${epochTag}`,
-        value: fmtPct(metrics.cum_valid_return),
-        cls: signCls(metrics.cum_valid_return),
-        title: CUM_VALID_HINT,
-      },
-    ]),
-    // The tiles above are development ground; this is the future-quarter
-    // record the verdict actually reads, and it belongs on the same card.
-    transitionCardLine(item),
-  );
-  if ((item.fold_returns || []).length) {
-    const fingerprint = equityFingerprint(item);
-    const keepId = `equity-card-${item.experiment_id}`;
-    const existing = document.getElementById(keepId);
-    if (existing && existing.dataset.fp === fingerprint) {
-      card.append(existing);
-    } else {
-      const host = equityHost(item.experiment_id, fingerprint, {
-        width: 400,
-        height: 130,
-        mini: true,
-      });
-      host.id = keepId;
-      host.dataset.fp = fingerprint;
-      card.append(host);
-    }
-  }
+  const tiles = forwardTiles(item);
+  if (tiles) card.append(tiles);
   const actions = el("div", { class: "actions" });
   if (item.kind === "hitl" && RESUMABLE_STATES.includes(item.state)) {
     actions.append(
@@ -1931,7 +1224,7 @@ function experimentCard(item) {
                 { method: "POST", body: JSON.stringify({ action: "resume" }) },
               );
               toast("已请求恢复运行");
-              renderHomePageSilent();
+              refreshHomePage();
             } catch (error) {
               toast(`恢复失败：${error.message}`, true);
             }
@@ -1960,198 +1253,51 @@ function experimentCard(item) {
   return card;
 }
 
-/* Held-out neutralized excess of a verdict: the mean over its periods, null
-   unless every period carries the figure. */
-function heldoutNeutralizedExcess(verdict) {
-  const values = ((verdict || {}).periods || []).map(
-    (period) => period.neutralized_excess_return,
-  );
-  if (!values.length || values.some((value) => typeof value !== "number"))
-    return null;
-  return values.reduce((total, value) => total + value, 0) / values.length;
-}
+const BEST_BASIS_LABELS = {
+  forward_lower_bound: "按前推超额 80% 下界",
+  stage: "按运行阶段",
+};
 
-/* The latest Epoch's walk-forward counts; null while they are sealed. */
-function latestWalkForward(item) {
-  const epochId = (item.metrics || {}).epoch_id;
-  const row = (item.metrics_by_epoch || []).find((r) => r.epoch_id === epochId);
-  return (row || {}).walk_forward || null;
-}
-
-/* Out-of-sample evidence only, never an in-sample cumulative return:
-   graduated experiments, then the other experiments with a Held-out verdict,
-   both by Held-out neutralized excess; then running experiments by their
-   share of positive forward transitions among the completed ones. */
-function bestExperimentRank(item) {
-  const verdict = item.verdict;
-  if (verdict && verdict.status)
-    return {
-      tier: verdict.status === "graduated" ? 0 : 1,
-      score: heldoutNeutralizedExcess(verdict),
-      basis: "按 Held-out 超额",
-    };
-  const term = latestWalkForward(item);
-  if (!item.worker_alive || !term || !term.transitions) return null;
-  return {
-    tier: 2,
-    score: term.positive_excess / term.transitions,
-    basis: "按前向胜率",
-  };
-}
-
-function pickBestExperiment(list) {
-  const ranked = list
-    .map((item) => ({ item, ...bestExperimentRank(item) }))
-    .filter((entry) => entry.basis);
-  if (!ranked.length) return null;
-  const score = (entry) => (entry.score === null ? -Infinity : entry.score);
-  ranked.sort((a, b) => a.tier - b.tier || score(b) - score(a));
-  return ranked[0];
-}
-
-/* The walk-forward evidence, in one line on the experiment card beside its
-   cumulative in-sample returns. Same projection as the detail page's strip
-   (registry._walk_forward_view, verdict diagnostics); nothing is recomputed. */
-function transitionCardLine(item) {
-  const epochId = (item.metrics || {}).epoch_id;
-  const row = (item.metrics_by_epoch || []).find((r) => r.epoch_id === epochId);
-  if (!row) return el("div", { class: "meta-line" }, "尚无过渡");
-  const term = row.walk_forward;
-  // Null only where the transitions are Test-stage evidence still under seal;
-  // the sealed tiles beside this line already say so.
-  if (!term) return el("div", { class: "meta-line" }, "过渡未揭示");
-  const required = term.required ?? null;
-  if (!term.transitions)
-    return el(
-      "div",
-      { class: "meta-line" },
-      `过渡 0/0（${epochShort(epochId)}）`,
-    );
-  const own = ((item.verdict || {}).diagnostics || {})
-    .final_artifact_forward_transitions;
-  const parts = [
-    el("span", {}, `过渡（${epochShort(epochId)}）`),
-    el(
-      "span",
-      {
-        class: `num ${required === null ? "" : term.positive_excess >= required ? "pos" : "neg"}`,
-      },
-      ` ${term.positive_excess}/${term.transitions} 正${transitionGaps(term)}`,
-    ),
-    el(
-      "span",
-      {},
-      `${required === null ? "" : ` · 需 ≥${required}`} · 新季中性化均 `,
-    ),
-    el(
-      "span",
-      { class: `num ${signCls(term.mean_neutralized_excess)}` },
-      fmtPct(term.mean_neutralized_excess),
-    ),
-  ];
-  if (own !== null && own !== undefined)
-    parts.push(
-      el("span", {}, " · 交付产物自身 "),
-      el(
-        "span",
-        { class: own ? "" : "num neg" },
-        `${(item.verdict || {}).diagnostics.final_artifact_forward_positive ?? "—"}/${own}`,
-      ),
-    );
-  return el("div", { class: "meta-line" }, ...parts);
-}
-
-/* Cache key: equity only changes when new records land (or a rerun replaces
-   results — caught by the cumulative-return components). */
-function equityFingerprint(item) {
-  const metrics = item.metrics || {};
-  return `${item.folds_recorded}|${item.heldout_recorded}|${metrics.cum_test_return}|${metrics.cum_valid_return}|${metrics.cum_heldout_return}`;
-}
-
-function heroPanel({ item, basis }) {
-  const metrics = item.metrics || {};
-  const excess = heldoutNeutralizedExcess(item.verdict);
-  const term = latestWalkForward(item);
-  const epochTag = metrics.epoch_id ? `（${epochShort(metrics.epoch_id)}）` : "";
+function heroPanel(item, basis) {
   const panel = el("div", { class: "panel hero", id: "hero-panel" });
-  panel.__heroSig = heroSignature(item, basis);
+  panel.__signature = heroSignature(item, basis);
   panel.append(
     el(
       "div",
       { class: "control-bar" },
       el("span", { class: "hero-crown" }, "🏆"),
-      el("h3", { style: "margin:0" }, experimentName(item.experiment_id)),
+      el("h3", { class: "hero-title" }, experimentName(item.experiment_id)),
       stateBadge(item.state),
       verdictBadge(item.verdict),
-      el("span", { class: "mode-note" }, `最佳实验 · ${basis}`),
-    ),
-    el(
-      "div",
-      { class: "section-gap" },
-      statTilesRow([
-        {
-          ...sealedMetricTile(item.test_revealed, "Held-out 中性化超额", excess),
-          cls: item.test_revealed ? `hero-key ${signCls(excess)}` : "",
-        },
-        sealedMetricTile(
-          item.test_revealed,
-          "Held-out 收益",
-          metrics.cum_heldout_return,
-        ),
-        {
-          label: `前向过渡超额为正${epochTag}`,
-          value: term ? `${term.positive_excess}/${term.transitions}` : "未揭示",
-        },
-        {
-          label: `累计验证收益${epochTag}`,
-          value: fmtPct(metrics.cum_valid_return),
-          cls: signCls(metrics.cum_valid_return),
-          title: CUM_VALID_HINT,
-        },
-        { label: "已完成 Fold", value: String(item.folds_recorded ?? 0) },
-      ]),
-    ),
-    el(
-      "div",
-      { class: "section-gap" },
-      el("h4", {}, "日度累计收益 vs 沪深300（含回撤）"),
-      equityHost(item.experiment_id, equityFingerprint(item), {
-        width: 980,
-        height: 240,
-        ddH: 90,
-      }),
-    ),
-  );
-  return panel;
-}
-
-function confirmRevealTests(experimentId) {
-  showModal(
-    "揭示测试结果",
-    el(
-      "div",
-      {},
-      el("p", {}, "揭示后实验封存：不能再重跑、回滚或注入指令，查看、停止和删除仍可用。"),
-      el("p", {}, "此操作不可撤销。"),
-    ),
-    [
-      el("button", { class: "btn", onclick: closeModal }, "取消"),
       el(
-        "button",
-        {
-          class: "btn danger",
-          onclick: () =>
-            sendControlAction(
-              experimentId,
-              { action: "reveal_test_results" },
-              "测试结果已揭示，实验已封存",
-              { modal: true, reload: true },
-            ),
-        },
-        "揭示并封存",
+        "span",
+        { class: "mode-note" },
+        `最佳实验 · ${BEST_BASIS_LABELS[basis] || basis}`,
       ),
-    ],
+    ),
   );
+  const tiles = forwardTiles(item);
+  panel.append(
+    tiles
+      ? el("div", { class: "section-gap" }, tiles)
+      : el("div", { class: "meta-line section-gap" }, stageText(item)),
+  );
+  const result = (item.forward || {}).result;
+  if (result)
+    panel.append(
+      el(
+        "div",
+        { class: "section-gap" },
+        el("h4", {}, "前推与 Held-out 连续回放 vs 沪深300"),
+        resultEquityHost(item.experiment_id, result, {
+          width: 980,
+          height: 240,
+          ddH: 90,
+          markers: forwardMarkers(item.forward),
+        }),
+      ),
+    );
+  return panel;
 }
 
 function confirmDeleteExperiment(experimentId) {
@@ -2202,8 +1348,6 @@ function confirmDeleteExperiment(experimentId) {
 
 /* ---------------- create modal ---------------- */
 
-let createSchema = null;
-
 async function openCreateModal() {
   let schema;
   try {
@@ -2212,22 +1356,11 @@ async function openCreateModal() {
     toast(error.message, true);
     return;
   }
-  createSchema = schema;
-  const hasPeriodOptions = Object.keys(schema.period_options || {}).length > 0;
   const inputs = new Map();
   const body = el("div", {});
   // Validation errors surface at the TOP of the (scrollable) modal body.
   const errorBox = el("div", {});
   body.append(errorBox);
-  body.append(
-    el(
-      "p",
-      { class: "hint" },
-      hasPeriodOptions
-        ? "周期选项只列出数据完整的周期。"
-        : "周期标签：quarter 2024Q1，month 202401，week 周一日期 20240108，year 2024；也可填区间 20260101..20260630。",
-    ),
-  );
   for (const group of schema.groups) {
     const basic = group.fields.filter((field) => !field.advanced);
     const advanced = group.fields.filter((field) => field.advanced);
@@ -2249,15 +1382,6 @@ async function openCreateModal() {
       );
     }
     body.append(section);
-  }
-  // Period selects depend on the fold cadence: repopulate options + suggested
-  // defaults whenever fold_period changes.
-  const cadenceEntry = inputs.get("fold_period");
-  if (cadenceEntry && hasPeriodOptions) {
-    repopulatePeriodSelects(inputs);
-    cadenceEntry.input.addEventListener("change", () =>
-      repopulatePeriodSelects(inputs),
-    );
   }
   showModal("新建实验", body, [
     el("button", { class: "btn", onclick: closeModal }, "取消"),
@@ -2494,73 +1618,6 @@ function fieldNode(field, inputs) {
   return wrap;
 }
 
-const PERIOD_FIELD_KEYS = [
-  "development_first_period",
-  "development_last_period",
-  "heldout_first_period",
-  "heldout_last_period",
-];
-
-function repopulatePeriodSelects(inputs) {
-  const cadence = inputs.get("fold_period").input.value;
-  const options = (createSchema.period_options || {})[cadence] || [];
-  const defaults = (createSchema.period_defaults || {})[cadence] || {};
-  for (const key of PERIOD_FIELD_KEYS) {
-    const entry = inputs.get(key);
-    if (!entry || entry.field.type !== "period" || !entry.input) continue;
-    const previous = entry.input.value;
-    entry.input.innerHTML = "";
-    for (const label of options) {
-      // Cadence labels (2024Q1 / 2024 / 202401) render as-is; an explicit
-      // YYYYMMDD..YYYYMMDD range renders as dates, value stays the raw label.
-      const option = el("option", { value: label }, fmtPeriodRange(label));
-      entry.input.append(option);
-    }
-    const wanted = options.includes(previous) ? previous : defaults[key];
-    if (wanted && options.includes(wanted)) entry.input.value = wanted;
-  }
-  updateValidationHint(inputs);
-}
-
-/* Spell out what the development window becomes: one regular Fold per period
-   of the window with a 元学习 before each of them by default, or rolling
-   Fold → Test pairs once the Test stage is switched on. */
-function updateValidationHint(inputs) {
-  const first = inputs.get("development_first_period");
-  const last = inputs.get("development_last_period");
-  if (!first || first.field.type !== "period" || !first.input) return;
-  const cadence = inputs.get("fold_period").input.value;
-  const options = (createSchema.period_options || {})[cadence] || [];
-  const stage = inputs.get("test_stage");
-  if (!first.__hint) {
-    first.__hint = el("div", { class: "help derived-hint" });
-    first.input.parentElement.append(first.__hint);
-    const refresh = () => updateValidationHint(inputs);
-    first.input.addEventListener("change", refresh);
-    if (last && last.input) last.input.addEventListener("change", refresh);
-    if (stage && stage.input) stage.input.addEventListener("change", refresh);
-  }
-  const start = first.input.value;
-  const end = last && last.input ? last.input.value : "";
-  const rolling = Boolean(stage && stage.input && stage.input.checked);
-  if (!start || !end) {
-    first.__hint.textContent = "";
-    return;
-  }
-  const index = options.indexOf(start);
-  if (!rolling) {
-    const last = options.indexOf(end);
-    const folds = index >= 0 && last >= index ? last - index + 1 : 0;
-    const count = folds ? `${folds} 个 Fold` : "每个周期一个 Fold";
-    first.__hint.textContent = `↳ ${count}，每个前做一次元学习，之后进入 Held-out`;
-    return;
-  }
-  first.__hint.textContent =
-    index >= 0 && index + 1 < options.length
-      ? `↳ 首个 Fold：验证 ${fmtPeriodRange(options[index])} → 测试 ${fmtPeriodRange(options[index + 1])}，之后逐周期滚动`
-      : "↳ Test 阶段需要至少两个 Development 周期";
-}
-
 function collectParams(inputs) {
   const params = {};
   for (const [key, entry] of inputs.entries()) {
@@ -2625,7 +1682,14 @@ function closeModal() {
 
 /* ---------------- detail page ---------------- */
 
-let detailView = null; // {experimentId, detail, listHost, rightHost, selectedKey}
+let detailView = null; // {experimentId, detail, listHost, rightHost, barHost, selectedKey}
+
+function isSessionDone(detail, session) {
+  return session.kind === "forward"
+    ? Boolean(detail.forward)
+    : Boolean(session.record);
+}
+
 async function renderDetailPage(experimentId, selectedKey) {
   $main.innerHTML = '<div class="loading">加载中…</div>';
   $topbarRight.innerHTML = "";
@@ -2638,14 +1702,17 @@ async function renderDetailPage(experimentId, selectedKey) {
   }
   const status = detail.status || {};
   const sessions = detail.sessions || [];
+  // Default to where the arm is: the running session, the next research
+  // session, the sealed replay, or the last session that ran.
   if (!selectedKey) {
+    const recorded = sessions.filter((session) => isSessionDone(detail, session));
     selectedKey =
       status.session_key ||
-      (
-        sessions.find((session) => !session.record && !session.records) ||
-        sessions[sessions.length - 1] ||
-        {}
-      ).key;
+      (detail.stage === "research"
+        ? (sessions.find((session) => !isSessionDone(detail, session)) || {}).key
+        : detail.stage === "forward"
+          ? "forward"
+          : (recorded[recorded.length - 1] || sessions[0] || {}).key);
   }
   const head = el(
     "div",
@@ -2655,35 +1722,16 @@ async function renderDetailPage(experimentId, selectedKey) {
       {},
       el("a", { class: "exp-back", href: "#/" }, "← 实验"),
       experimentName(detail.experiment_id, { link: false }),
-      experimentBadges(
-        stateBadge(detail.state),
-        detail.kind === "hitl" && detail.test_revealed
-          ? el(
-              "span",
-              {
-                class: "badge state-waiting_user",
-                title:
-                  "测试/Held-out 结果已揭示：实验已封存，不能再重跑、回滚或注入指令",
-              },
-              "已揭示测试（封存）",
-            )
-          : null,
-      ),
+      experimentBadges(stateBadge(detail.state), verdictBadge(detail.verdict)),
     ),
   );
   // Progress and the current stage ride on the control row; the head keeps
-  // only errors. A worker-recorded analysis error is only current while that
-  // worker lives; stale failures are visible per fold in the analysis section.
+  // only errors.
   const errors = [
     detail.state === "unreadable" && detail.error ? detail.error : null,
     status.error ? `错误：${status.error}` : null,
-    detail.worker_alive && status.analysis_error
-      ? `分析：${status.analysis_error}`
-      : null,
   ].filter(Boolean);
   if (errors.length) head.append(el("div", { class: "sub" }, errors.join(" ｜ ")));
-  const container = el("div", {});
-  let barHost = null;
   if (detail.params && Object.keys(detail.params).length) {
     head.querySelector("h2").append(
       el(
@@ -2697,130 +1745,325 @@ async function renderDetailPage(experimentId, selectedKey) {
       ),
     );
   }
-  if (detail.kind === "hitl" && detail.control && !detail.test_revealed) {
-    head.querySelector("h2").append(
-      el(
-        "button",
-        {
-          class: "btn small",
-          style: "margin-left:0.4rem",
-          onclick: () => confirmRevealTests(detail.experiment_id),
-        },
-        "揭示测试结果",
-      ),
-    );
-  }
-  container.append(head);
+  const container = el("div", {}, head);
+  let barHost = null;
   if (detail.kind === "hitl") {
     barHost = controlBar(detail);
-    container.append(barHost);
+    container.append(barHost, stageStrip(detail));
   }
-  if ((detail.fold_returns || []).length) {
-    const metrics = detail.metrics || {};
-    const sharpe = metrics.mean_test_sharpe;
-    const charts = el(
-      "div",
-      { class: "section-gap" },
-      el("h4", {}, "日度累计收益 vs 沪深300（含回撤）"),
-      equityHost(detail.experiment_id, equityFingerprint(detail), {
-        width: 980,
-        height: 240,
-        ddH: 90,
-        // Names dropped Folds by period and adds the curve's 口径 disclosure.
-        detail,
-      }),
-    );
-    // Tile order standardized with the homepage hero: Held-out → test → valid.
-    const epochTag = metrics.epoch_id
-      ? `（${epochShort(metrics.epoch_id)}）`
-      : "";
-    container.append(
-      el(
-        "div",
-        { class: "panel section-gap" },
-        statTilesRow([
-          sealedMetricTile(
-            detail.test_revealed,
-            "Held-out 收益（最终样本外）",
-            metrics.cum_heldout_return,
-          ),
-          sealedMetricTile(
-            detail.test_revealed,
-            `累计测试收益${epochTag}`,
-            metrics.cum_test_return,
-          ),
-          {
-            label: `累计验证收益${epochTag}`,
-            value: fmtPct(metrics.cum_valid_return),
-            cls: signCls(metrics.cum_valid_return),
-            title: CUM_VALID_HINT,
-          },
-          sealedMetricTile(
-            detail.test_revealed,
-            "平均测试 Sharpe",
-            sharpe,
-            fmtSharpe,
-          ),
-        ]),
-        transitionsStrip(detail),
-        charts,
-      ),
-    );
-  }
-  const walkForward = walkForwardPanel(detail);
-  if (walkForward) container.append(walkForward);
-  container.append(stepTreePanel(detail));
-  container.append(mountedMemoryPanel(detail));
+  const verdict = verdictPanel(detail);
+  if (verdict) container.append(verdict);
+  const frozen = frozenPanel(detail);
+  if (frozen) container.append(frozen);
   const layout = el("div", { class: "detail section-gap" });
-  // Panels read the global detailView (held-out equity/style card): set it
-  // BEFORE building them, or the first render of a detail page silently
-  // skips those blocks (and could chart the previous experiment's data).
   detailView = {
     experimentId,
     detail,
     listHost: null,
     rightHost: null,
-    barHost: null,
+    barHost,
     selectedKey,
   };
   const listHost = sessionListPanel(detail, selectedKey);
   const rightHost = sessionDetailPanel(detail, selectedKey);
   detailView.listHost = listHost;
   detailView.rightHost = rightHost;
-  detailView.barHost = barHost;
   layout.append(listHost, rightHost);
-  container.append(layout);
-  $main.innerHTML = "";
-  $main.append(container);
+  container.append(layout, stepTreePanel(detail), mountedMemoryPanel(detail));
+  $main.replaceChildren(container);
   pollTimer = setInterval(async () => {
     try {
       const fresh = await api(
         `/api/experiments/${encodeURIComponent(experimentId)}/status`,
       );
-      const freshState = fresh.state;
       const raw = fresh.status || {};
-      const badge = document.querySelector(".page-head .badge");
-      if (badge && !badge.className.includes(`state-${freshState}`))
-        route(true); // fetch fresh detail on state change
-      else if (
-        raw.session_key &&
-        raw.session_key !== (status.session_key || null)
+      // A state change, a new session or a new run rebuilds the page; stage
+      // flips inside one run do not (the live panels poll status themselves).
+      if (
+        fresh.state !== detail.state ||
+        String(raw.session_key || "") !== String(status.session_key || "") ||
+        String(raw.run_ref || "") !== String(status.run_ref || "")
       )
         route(true);
-      else if (String(raw.run_ref || "") !== String(status.run_ref || ""))
-        route(true);
-      else if (
-        String(raw.question_key || "") !== String(status.question_key || "")
-      )
-        route(true);
-      else if (String(raw.step_index || "") !== String(status.step_index || ""))
-        route(true);
-      // llm_call ↔ tool_call stage flips must not rebuild the page: the live
-      // Trace panel already polls status, and route(true) flashes "加载中…".
     } catch {
       /* transient */
     }
   }, 4000);
+}
+
+/* Research s1..sN → 冻结 → 前推 → Held-out → 裁决, read off the ledger
+   projection. One continuous replay covers 前推 and Held-out; both stay
+   封存中 until the verdict is recorded. */
+function stageStrip(detail) {
+  const status = detail.status || {};
+  const running = (key) => detail.worker_alive && status.session_key === key;
+  const researchOver = detail.stage !== "research";
+  const research = (detail.sessions || []).filter((s) => s.kind === "research");
+  const chips = research.map((session) => {
+    const record = session.record;
+    if (record)
+      return stageChip(
+        session.key,
+        OUTCOME_LABELS[record.outcome] || record.outcome,
+        "done",
+      );
+    if (running(session.key)) return stageChip(session.key, "运行中", "running");
+    return researchOver
+      ? stageChip(session.key, "未运行", "skipped")
+      : stageChip(session.key, "待运行", "pending");
+  });
+  if (!research.length) chips.push(stageChip("研究", "未启动", "pending"));
+  const verdict = detail.verdict || {};
+  const replay = detail.forward
+    ? ["已回放", "done"]
+    : detail.frozen
+      ? ["封存中", running("forward") ? "running" : "sealed"]
+      : researchOver
+        ? ["不回放", "skipped"]
+        : ["待冻结", "pending"];
+  chips.push(
+    detail.frozen
+      ? stageChip("冻结", detail.frozen.session_key, "done")
+      : stageChip("冻结", researchOver ? "未冻结" : "待定", researchOver ? "skipped" : "pending"),
+    stageChip("前推", replay[0], replay[1]),
+    stageChip("Held-out", replay[0], replay[1]),
+    verdict.status
+      ? stageChip(
+          "裁决",
+          VERDICT_LABELS[verdict.status] || verdict.status,
+          verdict.status === "graduated" ? "pass" : "fail",
+        )
+      : stageChip("裁决", "待定", "pending"),
+  );
+  return el("div", { class: "panel stage-strip section-gap" }, ...chips);
+}
+
+function stageChip(name, note, state) {
+  return el(
+    "span",
+    { class: `stage-chip ${state}` },
+    el("span", { class: "stage-name" }, name),
+    el("span", { class: "stage-note" }, note),
+  );
+}
+
+function fmtProb(value) {
+  return value === null || value === undefined ? "—" : Number(value).toFixed(2);
+}
+
+// One row per statistic of the forward and Held-out slices (verdict.py).
+const SLICE_ROWS = [
+  ["days", "交易日", String],
+  ["neutralized_excess", "中性化超额（年化）", fmtPct, true],
+  ["lower_bound", "80% 下界", fmtPct, true],
+  ["recency_neutralized_excess", "最近 6 个月中性化超额", fmtPct, true],
+  ["tolerance", "容忍线", fmtPct],
+  ["tracking_error", "残差跟踪误差", fmtPct],
+  ["information_ratio", "IR", fmtSharpe, true],
+  ["max_drawdown", "最大回撤", fmtPct],
+  ["excess_at_cost_stress", "加倍滑点后超额", fmtPct, true],
+  ["round_trips", "平仓次数", String],
+  ["mean_gross", "平均仓位", fmtPct],
+];
+
+function sliceTable(forward) {
+  const slices = forward.slices || {};
+  const columns = [
+    ["forward", "前推"],
+    ["heldout", "Held-out"],
+  ].filter(([key]) => slices[key]);
+  if (!columns.length) return null;
+  const present = (value) => value !== null && value !== undefined;
+  const rows = SLICE_ROWS.filter(([field]) =>
+    columns.some(([key]) => present(slices[key][field])),
+  );
+  return el(
+    "table",
+    { class: "data section-gap" },
+    el("tr", {}, el("th", {}, ""), ...columns.map(([, label]) => el("th", {}, label))),
+    ...rows.map(([field, label, fmt, signed]) =>
+      el(
+        "tr",
+        {},
+        el("td", {}, label),
+        ...columns.map(([key]) => {
+          const value = slices[key][field];
+          return el(
+            "td",
+            { class: signed ? signCls(value) : "" },
+            present(value) ? fmt(value) : "—",
+          );
+        }),
+      ),
+    ),
+  );
+}
+
+/* The forward and Held-out replay of the frozen artifact: 封存中 until the
+   forward record exists, then the verdict with every failed condition, the
+   slice statistics, the one continuous curve with the Held-out boundary
+   marked, and the Paper command for a graduate. A research that froze nothing
+   has only its verdict. */
+function verdictPanel(detail) {
+  const verdict = detail.verdict || {};
+  const forward = detail.forward;
+  if (!detail.frozen && !verdict.status) return null;
+  const reasons = (verdict.reasons || []).map(reasonLabel);
+  const head = el(
+    "div",
+    { class: "control-bar" },
+    el("h4", { style: "margin:0" }, "前推与 Held-out"),
+    verdictBadge(detail.verdict),
+  );
+  const panel = el("div", { class: "panel section-gap" }, head);
+  if (!forward) {
+    if (verdict.status) {
+      panel.append(el("div", { class: "meta-line" }, reasons.join("；") || "—"));
+      return panel;
+    }
+    const status = detail.status || {};
+    const replaying = detail.worker_alive && status.session_key === "forward";
+    panel.append(
+      el(
+        "div",
+        { class: "prep-indicator" },
+        replaying ? el("span", { class: "spinner" }) : null,
+        el(
+          "span",
+          {},
+          replaying
+            ? `封存中 · ${formatStageLine(status) || "回放中"}`
+            : "封存中 · 回放尚未运行",
+        ),
+      ),
+    );
+    return panel;
+  }
+  const replay = forward.replay || {};
+  panel.append(
+    el(
+      "div",
+      { class: "meta-line" },
+      reasons.length ? `未通过：${reasons.join("；")}` : "全部条件通过",
+    ),
+    el(
+      "div",
+      { class: "meta-line" },
+      `前推 ${fmtDate(replay.start)} ～ ${fmtDate(replay.forward_end)} · Held-out ${fmtDate(replay.heldout_start)} ～ ${fmtDate(replay.replay_end)}`,
+      replay.truncation_reason ? `（请求至 ${fmtDate(replay.requested_end)}，截至发布末日）` : "",
+    ),
+  );
+  if (forward.error)
+    panel.append(el("div", { class: "hint warn" }, `策略报错：${forward.error}`));
+  const table = sliceTable(forward);
+  if (table) panel.append(table);
+  const refits = forward.refits_executed || {};
+  if (forward.result)
+    panel.append(
+      el(
+        "div",
+        { class: "meta-line" },
+        `重训 前推 ${refits.forward ?? "—"} 次 · Held-out ${refits.heldout ?? "—"} 次 · 前推 null 分位 ${fmtProb(forward.null_percentile)}`,
+      ),
+      el(
+        "div",
+        { class: "section-gap" },
+        el("h4", { class: "subsection-title" }, "日度累计收益 vs 沪深300"),
+        resultEquityHost(detail.experiment_id, forward.result, {
+          width: 980,
+          height: 240,
+          ddH: 90,
+          markers: forwardMarkers(forward),
+        }),
+      ),
+      styleCard(detail.experiment_id, forward.result),
+      lazyDetails("交易明细", () => ordersNode(detail.experiment_id, forward.result)),
+    );
+  if (detail.paper_candidate)
+    panel.append(
+      el("h4", { class: "subsection-title section-gap" }, "Paper 建簿"),
+      el("pre", { class: "code-view" }, detail.paper_candidate.command),
+      el("div", { class: "hint" }, "在仓库根目录运行；Paper 不会自动启动。"),
+    );
+  return panel;
+}
+
+/* The frozen artifact and the research statistics it was frozen on. */
+function frozenPanel(detail) {
+  const frozen = detail.frozen;
+  if (!frozen) return null;
+  const panel = el(
+    "div",
+    { class: "panel section-gap" },
+    el(
+      "div",
+      { class: "control-bar" },
+      el("h4", { style: "margin:0" }, `冻结产物 · ${sessionLabel(frozen.session_key)}`),
+      el("span", { class: "spacer" }),
+      el(
+        "a",
+        {
+          class: "btn small",
+          href: `/api/experiments/${encodeURIComponent(detail.experiment_id)}/frozen/strategy.zip`,
+        },
+        "⬇ 下载 ZIP",
+      ),
+    ),
+    el(
+      "div",
+      { class: "section-gap" },
+      statTilesRow([
+        {
+          label: "研究期中性化超额（年化）",
+          value: fmtPct(frozen.neutralized_excess),
+          cls: signCls(frozen.neutralized_excess),
+        },
+        { label: "残差跟踪误差", value: fmtPct(frozen.tracking_error) },
+        {
+          label: "IR",
+          value: fmtSharpe(frozen.information_ratio),
+          cls: signCls(frozen.information_ratio),
+        },
+        {
+          label: "去偏 Sharpe 概率",
+          value: fmtProb(frozen.deflated_sharpe_probability),
+          title: `试验 ${frozen.trials ?? "—"} 个 · SR* ${fmtSharpe(frozen.sharpe_star)}`,
+        },
+        {
+          label: "前推可检出超额",
+          value: fmtPct(frozen.forward_mde),
+          title: "前推检验以 80% 功效能检出的最小年化中性化超额",
+        },
+      ]),
+    ),
+    el(
+      "div",
+      { class: "meta-line" },
+      [
+        `全区间验证 ${frozen.full_span_validations ?? "—"} 次`,
+        `null 分位 ${fmtProb(frozen.null_percentile)}`,
+        frozen.fit ? `fit，重训周期 ${frozen.refit_period || "—"}` : "无 fit",
+        `来源节点 ${frozen.source_step_id || "—"}`,
+      ].join(" · "),
+    ),
+  );
+  const blocks = subWindowSection("研究期分年度表现", frozen.blocks);
+  if (blocks) panel.append(blocks);
+  if (frozen.result)
+    panel.append(
+      el(
+        "div",
+        { class: "section-gap" },
+        el("h4", { class: "subsection-title" }, "研究期日度累计收益 vs 沪深300"),
+        resultEquityHost(detail.experiment_id, frozen.result, {
+          width: 860,
+          height: 210,
+          ddH: 76,
+        }),
+      ),
+      styleCard(detail.experiment_id, frozen.result),
+    );
+  return panel;
 }
 
 /* Full creation-parameter record (params.json), grouped: explicit settings
@@ -2901,19 +2144,15 @@ async function openParamsModal(detail) {
   ]);
 }
 
-/* The control row's left side: session progress, the current session and its
-   stage while a worker runs, and the mounted skills count. */
+/* The control row's left side: where the arm is, the current stage while a
+   worker runs, and the mounted skills count. */
 function runStatusLine(detail) {
   const status = detail.status || {};
-  const current =
-    detail.worker_alive &&
-    (detail.sessions || []).find((session) => session.key === status.session_key);
   return el(
     "span",
     { class: "mode-note" },
     [
-      `会话 ${detail.completed_sessions ?? 0}/${detail.total_sessions ?? "?"}`,
-      current ? `当前 ${sessionDisplayKey(current)}` : null,
+      stageText(detail),
       detail.worker_alive ? formatStageLine(status, { elapsed: false }) : null,
       `Skills ${Number(detail.skills && detail.skills.count) || 0} 项`,
     ]
@@ -2937,69 +2176,11 @@ function controlBar(detail) {
     bar.append(el("span", { class: "badge state-paused" }, "已请求暂停"));
   if (control.request === "stop")
     bar.append(el("span", { class: "badge state-stopped" }, "已请求停止"));
-  if (control.skip_to_heldout)
-    bar.append(
-      el("span", { class: "badge state-waiting_user" }, "已请求提前收官"),
-    );
   if (control.restart_pending)
     bar.append(
       el("span", { class: "badge state-waiting_user" }, "已请求会话边界重启"),
     );
   bar.append(el("span", { class: "spacer" }));
-  // Early finish: skip the remaining folds and jump straight to Held-out with
-  // the latest frozen artifact (needs at least one recorded fold).
-  if (detail.state !== "completed") {
-    if (!control.skip_to_heldout && (detail.folds_recorded || 0) > 0) {
-      bar.append(
-        el(
-          "button",
-          {
-            class: "btn",
-            onclick: () => {
-              showModal(
-                "提前进入 Held-out",
-                el(
-                  "p",
-                  {},
-                  "跳过剩余 Fold 与元学习，用最新冻结策略直接进入 Held-out；已完成的 Fold 不受影响。",
-                ),
-                [
-                  el("button", { class: "btn", onclick: closeModal }, "取消"),
-                  el(
-                    "button",
-                    {
-                      class: "btn primary",
-                      onclick: () => {
-                        closeModal();
-                        send(
-                          { action: "skip_to_heldout" },
-                          "已请求提前进入 Held-out",
-                        );
-                      },
-                    },
-                    "确认提前收官",
-                  ),
-                ],
-              );
-            },
-          },
-          "提前收官 → Held-out",
-        ),
-      );
-    } else if (control.skip_to_heldout) {
-      bar.append(
-        el(
-          "button",
-          {
-            class: "btn",
-            onclick: () =>
-              send({ action: "cancel_skip_to_heldout" }, "已取消提前收官"),
-          },
-          "取消提前收官",
-        ),
-      );
-    }
-  }
   if (alive) {
     if (control.request === "pause") {
       bar.append(
@@ -3019,7 +2200,7 @@ function controlBar(detail) {
           {
             class: "btn",
             onclick: () =>
-              send({ action: "pause" }, "将在当前 Fold 结束后暂停"),
+              send({ action: "pause" }, "将在当前会话结束后暂停"),
           },
           "暂停",
         ),
@@ -3159,199 +2340,80 @@ function controlBar(detail) {
   return bar;
 }
 
-/* What one session line reports, and the second line under it.
-
-   A Fold line has to answer "what did this session leave behind" without
-   opening it. That is the return of the strategy the Fold left in force — its
-   own frozen candidate, or the inherited parent under the same 父本 prefix the
-   Fold panel uses — with that replay's excess over 沪深300 and its size/β
-   neutralized excess, and the walk-forward transition's new-quarter excess
-   beside its null percentile. The transition belongs to the PREVIOUS Fold's
-   strategy, so it is labelled 过渡 and never folded into this line's own
-   numbers. A Held-out line carries the graduation verdict.
-
-   Everything here is read off the payload the Fold panel reads
-   (foldInForce → registry.strategy_in_force and the fold_returns projection),
-   so a Fold quoted in the list and the same Fold opened on the right can never
-   show different numbers. A session with no result names which nothing it is —
-   not yet run, running, unreadable, or a Fold that left no strategy at all. */
+/* One line per planned session: a research session's outcome and its best
+   full-span candidate, or where the forward replay stands. */
 function sessionListLine(detail, session, pending) {
-  if (session.kind === "heldout") return heldoutSessionLine(detail, session, pending);
-  if (session.kind === "deployment_adjustment")
-    return deploymentSessionLine(detail, session, pending);
-  if (session.kind !== "fold" || !session.record)
-    return { text: pending, cls: "", note: null };
-  const inForce = foldInForce(detail, session);
-  if (inForce.source === "none")
-    return { text: "无产物", cls: "", note: "未冻结新产物，也无父产物可沿用" };
-  const transition = inForce.transition || {};
-  if (!inForce.result) {
-    // A failed host parent control is the usual reason an inherited replay is
-    // missing, and the row's own reason is the difference between "this Fold's
-    // baseline errored" and "this Fold's record is corrupt". The note line is
-    // clipped to one row, so the full text rides in its tooltip.
-    const why = inForce.inherited ? transition.error : null;
-    const note = `沿用中的${inForce.inherited ? "父产物" : "冻结候选"}回放结果读不到${why ? `：${why}` : ""}`;
-    return { text: "读不到", cls: "", note, noteTitle: why ? note : null };
+  if (session.kind === "forward") {
+    const text = detail.forward
+      ? "已判定"
+      : detail.frozen
+        ? "封存中"
+        : detail.stage === "research"
+          ? pending
+          : "不回放";
+    return { text, cls: "", note: null };
   }
-  const benchmark = inForce.result.benchmark || {};
-  const percentile =
-    transition.excess_percentile === null ||
-    transition.excess_percentile === undefined
-      ? null
-      : Number(transition.excess_percentile).toFixed(2);
-  const hasTransition =
-    transition.excess_return !== null && transition.excess_return !== undefined;
-  return {
-    text: `${inForce.inherited ? "父本 " : ""}${fmtPct(inForce.result.total_return)}`,
-    cls: numClass(inForce.result.total_return),
-    note: [
-      `超额 ${fmtPct(benchmark.excess_return)}`,
-      `中性 ${fmtPct(benchmark.neutralized_excess_return)}`,
-      hasTransition
-        ? `过渡 ${fmtPct(transition.excess_return)}${percentile ? `(${percentile})` : ""}`
-        : null,
-    ]
-      .filter(Boolean)
-      .join(" · "),
-    noteTitle:
-      "中性 = 规模/β 中性化年化超额；过渡 = 上一 Fold 策略在本 Fold 新季度的超额（括号内为 null 分位），不是本行策略的成绩",
-  };
-}
-
-/* The deployment adjustment line: what the refit left behind and which
-   artifact Paper pins (registry.paper_candidate, from ledger.paper_candidate). */
-const DEPLOYMENT_STATUS_LABELS = {
-  adjusted: "已调整",
-  no_update: "沿用毕业产物",
-  no_valid_backtest: "无有效回放",
-};
-function deploymentSessionLine(detail, session, pending) {
   const record = session.record;
-  if (!record) {
-    const verdict = detail.verdict || {};
-    return {
-      text: pending,
-      cls: "",
-      note:
-        verdict.status === "graduated"
-          ? "毕业后运行的部署前重拟合"
-          : verdict.status
-            ? "只有毕业的实验才做部署调整"
-            : "待 Held-out 裁决",
-    };
-  }
-  const status = String(record.status || "");
-  const candidate = detail.paper_candidate || {};
-  const reasons = record.hard_reject_reasons || [];
+  if (!record) return { text: pending, cls: "", note: null };
+  const best = record.best;
   return {
-    text: DEPLOYMENT_STATUS_LABELS[status] || status,
-    cls: status === "adjusted" ? "num pos" : "",
-    note: candidate.artifact_id
-      ? `Paper 用毕业产物${candidate.source === "adjusted" ? "，可选调整后产物" : ""}`
-      : reasons.length
-        ? `未采用：${reasons.join("、")}`
-        : null,
-    noteTitle: candidate.graduated_artifact_id || null,
-  };
-}
-
-function heldoutSessionLine(detail, session, pending) {
-  const verdict = detail.verdict;
-  if (verdict && verdict.status) {
-    const graduated = verdict.status === "graduated";
-    const reasons = verdict.reasons || [];
-    return {
-      text: verdict.status,
-      cls: graduated ? "num pos" : "num neg",
-      note: graduated
-        ? "Held-out 门全部通过"
-        : `未通过 ${reasons.length} 项：${reasons[0] || "见账本"}`,
-      noteTitle: reasons.join("、") || null,
-    };
-  }
-  const ran = (session.records || []).length > 0;
-  if (!detail.test_revealed)
-    return { text: ran ? "未揭示" : pending, cls: "", note: null };
-  return {
-    text: ran ? "无裁决" : pending,
-    cls: "",
-    note: ran ? "账本没有记录毕业裁决" : null,
+    text: OUTCOME_LABELS[record.outcome] || record.outcome,
+    cls: record.froze ? "num pos" : "",
+    note: best
+      ? `最佳候选 中性化 ${fmtPct(best.neutralized_excess)} · DSR ${fmtProb(best.deflated_sharpe_probability)}`
+      : `验证 ${record.validations.length} 次，无全区间`,
+    noteTitle: best
+      ? "本会话 IR 最高的全区间验证：研究期中性化超额与去偏 Sharpe 概率"
+      : null,
   };
 }
 
 function sessionListPanel(detail, selectedKey) {
-  const panel = el(
-    "div",
-    { class: "panel" },
-    el("h4", {}, "会话"),
-  );
+  const panel = el("div", { class: "panel" }, el("h4", {}, "会话"));
   const list = el("div", { class: "session-list" });
   const status = detail.status || {};
-  let currentEpoch = null;
   for (const session of detail.sessions || []) {
-    if (session.epoch_id !== currentEpoch && !isPhaseHead(session)) {
-      currentEpoch = session.epoch_id;
-      list.append(
-        el(
-          "div",
-          { class: "epoch-head" },
-          `Epoch ${String(currentEpoch).replace("epoch_", "")}`,
-        ),
-      );
-    }
-    const isDone = Boolean(session.record || (session.records || []).length);
+    const isDone = isSessionDone(detail, session);
     const isCurrent = status.session_key === session.key && detail.worker_alive;
     const dotClass = isDone ? "done" : isCurrent ? "running" : "pending";
     const stateText =
       isCurrent && detail.state === "paused"
         ? "已暂停"
-        : isCurrent &&
-            (detail.state === "failed" ||
-              detail.state === "interrupted" ||
-              detail.state === "terminated" ||
-              detail.state === "stopped")
-          ? STATE_LABELS[detail.state] || detail.state
-          : isCurrent
-            ? formatStageLine(status, { elapsed: false }) || "运行中"
-            : "";
-    // A session that has not produced a result says which nothing it is
-    // rather than leaving the column blank; a finished one has its own line.
+        : isCurrent
+          ? formatStageLine(status, { elapsed: false }) || "运行中"
+          : "";
     const line = sessionListLine(
       detail,
       session,
       stateText || (isDone ? "" : "未运行"),
     );
     const ret =
-      isPhaseHead(session)
-        ? el("span", { class: line.cls }, line.text)
-        : foldDurationNode(detail, session, line.text, line.cls);
+      session.kind === "research"
+        ? sessionDurationNode(detail, session, line.text, line.cls)
+        : el("span", { class: line.cls }, line.text);
     ret.classList.add("ret");
-    const item = el(
-      "div",
-      {
-        class: `session-item${isPhaseHead(session) ? " phase-head" : ""}${session.key === selectedKey ? " selected" : ""}`,
-        "data-key": session.key,
-        onclick: () => {
-          location.hash = `#/exp/${encodeURIComponent(detail.experiment_id)}/${sessionKeyToUrl(session.key)}`;
-        },
-      },
-      el("span", { class: `dot ${dotClass}` }),
+    list.append(
       el(
-        "span",
-        { class: "label" },
-        sessionListLabel(session),
+        "div",
+        {
+          class: `session-item${session.key === selectedKey ? " selected" : ""}`,
+          "data-key": session.key,
+          onclick: () => {
+            location.hash = `#/exp/${encodeURIComponent(detail.experiment_id)}/${sessionKeyToUrl(session.key)}`;
+          },
+        },
+        el("span", { class: `dot ${dotClass}` }),
+        el("span", { class: "label" }, sessionLabel(session.key)),
+        ret,
+        line.note
+          ? el(
+              "span",
+              { class: "session-note", title: line.noteTitle || null },
+              line.note,
+            )
+          : null,
       ),
-      ret,
-      line.note
-        ? el(
-            "span",
-            { class: "session-note", title: line.noteTitle || null },
-            line.note,
-          )
-        : null,
     );
-    list.append(item);
   }
   panel.append(list);
   return panel;
@@ -3375,125 +2437,213 @@ function sessionDetailPanel(detail, selectedKey) {
     return panel;
   }
   const status = detail.status || {};
-  const isCurrent = status.session_key === session.key;
-  const running =
-    isCurrent && detail.worker_alive && ACTIVE_SESSION_STATES.has(detail.state);
-  const runningEnvironment =
-    isCurrent && detail.worker_alive && detail.state === "running_heldout";
-  const done = Boolean(session.record || (session.records || []).length);
-
-  // Directive editor for sessions that have not run yet.
-  if (detail.kind === "hitl" && !done && !running) {
-    panel.append(directivePanel(detail, session));
-  }
+  const isCurrent = status.session_key === session.key && detail.worker_alive;
+  const running = isCurrent && ACTIVE_SESSION_STATES.has(detail.state);
   const preparing = isPrepEnvironment(status, detail.state);
-  if (
-    (running && preparing) ||
-    runningEnvironment ||
-    (isCurrent && detail.worker_alive && preparing && !done)
-  )
-    panel.append(environmentStagePanel(detail));
-  if (running && !preparing)
-    panel.append(
-      liveTracePanel(detail, session),
-    );
-  if (
-    session.kind === "fold" ||
-    session.kind === "meta_learning" ||
-    session.kind === "heldout" ||
-    session.kind === "deployment_adjustment"
-  )
-    panel.append(injectMessagePanel(detail, session));
-  if (session.kind === "fold" && done) {
-    const resultPanel = foldResultPanel(detail, session);
-    // The ledger can appear while post-Fold analysis is still running, briefly
-    // leaving the live Trace card above the result card. Space that transition
-    // exactly like the settled layout.
-    if (panel.children.length) resultPanel.classList.add("section-gap");
-    panel.append(resultPanel);
-    // The LLM strategy review gets its own card, peer to the fold result.
-    panel.append(
-      analysisPanel(
-        detail.experiment_id,
-        session.epoch_id,
-        session.fold_ref || (session.record || {}).fold_ref,
-      ),
-    );
-    const recordedFolds = (detail.sessions || []).filter(
-      (s) => s.kind === "fold" && s.record,
-    );
-    if (
-      detail.kind === "hitl" &&
-      recordedFolds.length &&
-      recordedFolds[recordedFolds.length - 1].key === session.key
-    ) {
-      panel.append(rerunPanel(detail, session));
-    } else if (
-      detail.kind === "hitl" &&
-      recordedFolds.some((s) => s.key === session.key)
-    ) {
-      // Any earlier recorded fold can become the frontier again via rollback.
-      panel.append(rollbackPanel(detail, session));
-    }
+  const done = isSessionDone(detail, session);
+  if (session.kind === "forward") {
+    if (isCurrent && !done) panel.append(environmentStagePanel(detail));
+    panel.append(forwardSessionPanel(detail, session));
+    return panel;
   }
-  if (session.kind === "meta_learning" && done)
-    panel.append(metaResultPanel(detail, session));
-  if (session.kind === "heldout" && done)
-    panel.append(heldoutPanel(detail, session));
-  if (session.kind === "deployment_adjustment" && done)
-    panel.append(deploymentPanel(detail, session));
-  if (done && session.record && session.record.run_ref) {
-    const statsHost = el("div", {});
+  if (done) {
+    panel.append(researchSessionPanel(detail, session));
+    return panel;
+  }
+  if (isCurrent) {
+    if (preparing) panel.append(environmentStagePanel(detail));
+    else if (running) panel.append(liveTracePanel(detail, session));
+    panel.append(injectMessagePanel(detail, session));
+  } else {
+    if (detail.kind === "hitl" && detail.stage === "research")
+      panel.append(directivePanel(detail, session));
     panel.append(
       el(
         "div",
         { class: "panel section-gap" },
-        session.kind === "fold"
-          ? el(
-              "div",
-              { class: "section-gap" },
-              el(
-                "button",
-                {
-                  class: "btn",
-                  onclick: () => openInitialPrompt(detail, session),
-                },
-                "查看初始 Prompt（实际运行）",
-              ),
-            )
-          : null,
-        statsHost,
-        traceReplayNode(detail.experiment_id, session.record.run_ref, detail),
-      ),
-    );
-    (async () => {
-      try {
-        const stats = await api(
-          `/api/experiments/${encodeURIComponent(detail.experiment_id)}/trace/stats?run_id=${encodeURIComponent(session.record.run_ref)}`,
-        );
-        statsHost.append(statsChipsRow(stats));
-      } catch {
-        /* trace may be absent for legacy runs */
-      }
-    })();
-  }
-  if (!done && !running && !runningEnvironment) {
-    const idleLabel =
-      isCurrent && detail.worker_alive
-        ? STATE_LABELS[detail.state] || detail.state
-        : isCurrent
-          ? STATE_LABELS[detail.state] || "该会话已中断。"
-          : "该会话尚未开始。";
-    if (!preparing || !isCurrent || !detail.worker_alive) {
-      panel.append(
         el(
           "div",
-          { class: "panel section-gap" },
-          el("div", { class: "empty" }, idleLabel),
+          { class: "empty" },
+          detail.stage === "research" ? "该会话尚未开始。" : "研究已结束，该会话不再运行。",
         ),
-      );
-    }
+      ),
+    );
   }
+  return panel;
+}
+
+function forwardSessionPanel(detail, session) {
+  const replay = session.replay || {};
+  const note = detail.forward
+    ? "已判定，结果见上方。"
+    : detail.frozen
+      ? "封存中：回放结束并判定后才显示结果。"
+      : detail.stage === "research"
+        ? "研究冻结产物后运行。"
+        : "研究未冻结产物，不回放。";
+  return el(
+    "div",
+    { class: "panel section-gap" },
+    el("h4", {}, "前推回放"),
+    el(
+      "table",
+      { class: "kv" },
+      kvRow(
+        "前推",
+        replay.start ? `${fmtDate(replay.start)} ～ ${fmtDate(replay.forward_end)}` : "—",
+      ),
+      kvRow(
+        "Held-out",
+        replay.heldout_start
+          ? `${fmtDate(replay.heldout_start)} ～ ${fmtDate(replay.replay_end)}`
+          : "—",
+      ),
+    ),
+    el("div", { class: "meta-line" }, note),
+  );
+}
+
+/* One recorded research session: how it ended, its best full-span candidate
+   with the deflated Sharpe the freeze gate would give it, the freeze gate it
+   met when it nominated, every Validation it ran, and its Trace. */
+function researchSessionPanel(detail, session) {
+  const record = session.record;
+  const best = record.best || {};
+  const gate = record.freeze_gate;
+  const panel = el(
+    "div",
+    { class: "panel" },
+    el(
+      "div",
+      { class: "control-bar" },
+      el("h4", { style: "margin:0" }, sessionLabel(session.key)),
+      el(
+        "span",
+        { class: `badge ${record.froze ? "state-completed" : "state-stopped"}` },
+        OUTCOME_LABELS[record.outcome] || record.outcome,
+      ),
+      record.finish_reason
+        ? el("span", { class: "mode-note" }, `结束原因 ${record.finish_reason}`)
+        : null,
+    ),
+    el(
+      "div",
+      { class: "section-gap" },
+      statTilesRow([
+        {
+          label: "最佳候选中性化超额",
+          value: fmtPct(best.neutralized_excess),
+          cls: signCls(best.neutralized_excess),
+          title: "本会话 IR 最高的全区间验证，研究期年化",
+        },
+        {
+          label: "IR",
+          value: fmtSharpe(best.information_ratio),
+          cls: signCls(best.information_ratio),
+        },
+        {
+          label: "去偏 Sharpe 概率",
+          value: fmtProb(best.deflated_sharpe_probability),
+        },
+        {
+          label: "验证 / 累计试验",
+          value: `${record.validations.length} / ${record.trials_to_date ?? "—"}`,
+        },
+      ]),
+    ),
+    el(
+      "table",
+      { class: "kv section-gap" },
+      record.reason ? kvRow("理由", record.reason) : null,
+      gate
+        ? kvRow(
+            "冻结门",
+            gate.passed
+              ? `通过（去偏 Sharpe 概率 ${fmtProb(gate.deflated_sharpe_probability)}）`
+              : `未通过：${gate.reasons.map(reasonLabel).join("；")}`,
+          )
+        : null,
+      record.arm_end ? kvRow("结束实验", record.arm_end.reason || "—") : null,
+      record.run_wall_seconds
+        ? kvRow("耗时", fmtDuration(record.run_wall_seconds))
+        : null,
+      record.next_start_node_id
+        ? kvRow("下一会话起点", record.next_start_node_id)
+        : null,
+    ),
+  );
+  if (record.validations.length)
+    panel.append(
+      el(
+        "table",
+        { class: "data section-gap" },
+        el(
+          "tr",
+          {},
+          ...["节点", "区间", "收益", "Sharpe", "回撤", "中性化超额", "IR"].map(
+            (label) => el("th", {}, label),
+          ),
+        ),
+        ...record.validations.map((row) =>
+          el(
+            "tr",
+            {},
+            el(
+              "td",
+              { title: row.step_id },
+              String(row.step_id || "").split("__").pop(),
+              row.step_id === record.nominated_step_id
+                ? el("span", { class: "mode-note" }, " 提名")
+                : null,
+            ),
+            el("td", {}, row.span || "—"),
+            el("td", { class: signCls(row.total_return) }, fmtPct(row.total_return)),
+            el("td", { class: signCls(row.sharpe) }, fmtSharpe(row.sharpe)),
+            el("td", {}, fmtPct(row.max_drawdown)),
+            el(
+              "td",
+              { class: signCls(row.neutralized_excess) },
+              fmtPct(row.neutralized_excess),
+            ),
+            el(
+              "td",
+              { class: signCls(row.information_ratio) },
+              fmtSharpe(row.information_ratio),
+            ),
+          ),
+        ),
+      ),
+    );
+  if (record.prior_published && record.prior)
+    panel.append(
+      el(
+        "details",
+        { class: "section-gap" },
+        el("summary", {}, "本会话发布的 PRIOR"),
+        el("pre", { class: "code-view" }, record.prior),
+      ),
+    );
+  const statsHost = el("div", {});
+  panel.append(
+    el(
+      "div",
+      { class: "section-gap" },
+      el(
+        "button",
+        { class: "btn", onclick: () => openInitialPrompt(detail, session) },
+        "查看初始 Prompt（实际运行）",
+      ),
+    ),
+    statsHost,
+    traceReplayNode(detail.experiment_id, record.run_ref, detail),
+  );
+  api(
+    `/api/experiments/${encodeURIComponent(detail.experiment_id)}/trace/stats?run_id=${encodeURIComponent(record.run_ref)}`,
+  )
+    .then((stats) => statsHost.append(statsChipsRow(stats)))
+    .catch(() => {
+      /* a session that crashed before its trace has none */
+    });
   return panel;
 }
 
@@ -3539,71 +2689,43 @@ function environmentStagePanel(detail) {
 
 function directivePanel(detail, session) {
   const control = detail.control || { directives: {} };
-  const isMeta = session.kind === "meta_learning";
-  // A meta session with no per-session override inherits the experiment-level
-  // directive from creation; prefill it so it never needs retyping.
-  const inherited = isMeta
-    ? String((detail.params || {}).meta_learning_directive || "")
-    : "";
-  const foldDefault =
-    session.kind === "fold" || isMeta
-      ? String((detail.params || {}).fold_exploration_directive || "").trim()
-      : "";
-  const existing = (control.directives || {})[session.key] ?? "";
+  const experimentDirective = String(
+    (detail.params || {}).fold_exploration_directive || "",
+  ).trim();
   const textarea = el("textarea", {
     class: "directive",
-    placeholder: foldDefault
-      ? "可选：仅为本 Fold 追加更具体的局部假设……"
-      : "可选：为该会话注入研究方向 / 优化假设……",
+    placeholder: "可选：为本会话追加研究方向……",
   });
-  textarea.value = existing || inherited;
+  textarea.value = (control.directives || {})[session.key] ?? "";
   const panel = el(
     "div",
     { class: "panel" },
-    el(
-      "h4",
-      {},
-      isMeta
-        ? "元学习指令（当前阶段）"
-        : session.kind === "heldout"
-          ? "Held-out 启动"
-          : "本 Fold 研究者指令",
-    ),
+    el("h4", {}, `${sessionLabel(session.key)} 研究者指令`),
   );
-  if (session.kind !== "heldout") {
-    if (isMeta && inherited && !existing) {
-      panel.append(
-        el("div", { class: "hint" }, "已预填实验级元学习方向，可编辑覆盖。"),
-      );
-    }
-    if (foldDefault) {
-      panel.append(
-        el(
-          "details",
-          { class: "section-gap" },
-          el("summary", { class: "hint" }, "实验级 Fold 探索方向（已自动注入）"),
-          el(
-            "div",
-            { class: "markdown section-gap", style: "white-space:pre-wrap" },
-            foldDefault,
-          ),
-        ),
-      );
-    }
+  if (experimentDirective) {
     panel.append(
-      textarea,
       el(
-        "div",
-        { class: "hint warn" },
-        "须在会话启动前保存。不要写入 Test/Held-out 明细或具体日历日期。",
+        "details",
+        { class: "section-gap" },
+        el("summary", { class: "hint" }, "实验级探索方向（已自动注入）"),
+        el(
+          "div",
+          { class: "markdown section-gap", style: "white-space:pre-wrap" },
+          experimentDirective,
+        ),
       ),
     );
   }
-  const buttons = el("div", { class: "control-bar section-gap" });
+  panel.append(
+    textarea,
+    el("div", { class: "hint warn" }, "须在会话启动前保存；不要写入日历日期。"),
+  );
   const send = (payload, note) =>
     sendControlAction(detail.experiment_id, payload, note);
-  if (session.kind !== "heldout") {
-    buttons.append(
+  panel.append(
+    el(
+      "div",
+      { class: "control-bar section-gap" },
       el(
         "button",
         {
@@ -3612,8 +2734,6 @@ function directivePanel(detail, session) {
         },
         "预览完整系统提示词",
       ),
-    );
-    buttons.append(
       el(
         "button",
         {
@@ -3630,16 +2750,13 @@ function directivePanel(detail, session) {
         },
         "保存指令",
       ),
-    );
-  }
-  panel.append(buttons);
-  // Pre-fold GPU allocation: live nvidia-smi inventory + per-session count.
-  if (session.kind === "fold" && !session.record)
-    panel.append(gpuAllocationRow(detail, session, send));
+    ),
+    gpuAllocationRow(detail, session, send),
+  );
   return panel;
 }
 
-/* GPU status + per-fold allocation picker, shown before the fold starts.
+/* GPU status + per-session allocation picker, shown before the session starts.
    The chosen count rides in control.gpu_counts[session_key]; the sandbox's
    "auto" selector then picks that many GPUs by free memory at start, so rows
    are ranked by free memory, the top N are marked as the likely allocation,
@@ -3650,7 +2767,7 @@ function gpuAllocationRow(detail, session, send) {
   const wrap = el(
     "div",
     { class: "panel section-gap" },
-    el("h4", { class: "subsection-title" }, "本 Fold GPU 分配"),
+    el("h4", { class: "subsection-title" }, "本会话 GPU 分配"),
     el("div", { class: "hint" }, "设备按空闲显存自动挑选；条越长剩余显存越多。"),
   );
   const statusHost = el(
@@ -3692,7 +2809,7 @@ function gpuAllocationRow(detail, session, send) {
               directive: select.value,
             },
             select.value
-              ? `本 Fold 将分配 ${select.value} 块 GPU`
+              ? `本会话将分配 ${select.value} 块 GPU`
               : "已恢复默认 GPU 分配",
           ),
       },
@@ -3797,12 +2914,7 @@ function gpuAllocationRow(detail, session, send) {
 
 /* POST one control action, then refresh the detail page in place (a full
    route() rebuild flashes the page). Shared by every control-sending panel. */
-async function sendControlAction(
-  experimentId,
-  payload,
-  note,
-  { modal = false, reload = false } = {},
-) {
+async function sendControlAction(experimentId, payload, note) {
   try {
     const result = await api(
       `/api/experiments/${encodeURIComponent(experimentId)}/control`,
@@ -3812,12 +2924,7 @@ async function sendControlAction(
       },
     );
     if (note) toast(typeof note === "function" ? note(result) : note);
-    if (modal) closeModal();
-    // Actions that change the whole page structure (e.g. sealing) need a full
-    // re-render: refreshDetail() only swaps the control bar and session list,
-    // leaving the page head (seal badge) and other panels stale.
-    if (reload) route();
-    else refreshDetail();
+    refreshDetail();
     return true;
   } catch (error) {
     toast(error.message, true);
@@ -3869,7 +2976,7 @@ async function openPromptPreview(detail, session, directive) {
   }
   const footer = [el("button", { class: "btn", onclick: closeModal }, "关闭")];
   showModal(
-    `系统提示词预览 — ${sessionDisplayKey(session)}`,
+    `系统提示词预览 — ${sessionLabel(session.key)}`,
     el(
       "div",
       {},
@@ -3888,15 +2995,13 @@ async function openPromptPreview(detail, session, directive) {
   );
 }
 
-/* The prompt a completed fold session ACTUALLY started with: the session_start
-   event recorded in its trace (ground truth, unlike the pre-session assembled
-   preview, and unaffected by later code changes). */
+/* The prompt a recorded session ACTUALLY started with: the session_start
+   event of its trace (ground truth, unlike the pre-session preview). */
 async function openInitialPrompt(detail, session) {
   let data;
   try {
     data = await api(
-      `/api/experiments/${encodeURIComponent(detail.experiment_id)}` +
-        `/folds/${encodeURIComponent(session.epoch_id)}/${encodeURIComponent(session.fold_ref)}/initial-prompt`,
+      `/api/experiments/${encodeURIComponent(detail.experiment_id)}/trace/initial-prompt?run_id=${encodeURIComponent(session.record.run_ref)}`,
     );
   } catch (error) {
     toast(`加载失败：${error.message}`, true);
@@ -3916,7 +3021,7 @@ async function openInitialPrompt(detail, session) {
     ),
   );
   showModal(
-    `初始 Prompt（实际运行）— ${sessionDisplayKey(session)}`,
+    `初始 Prompt（实际运行）— ${sessionLabel(session.key)}`,
     el("div", {}, ...blocks),
     [el("button", { class: "btn", onclick: closeModal }, "关闭")],
     "prompt-modal",
@@ -4052,7 +3157,7 @@ function injectMessageEnabled(detail, session) {
   const kind = session && session.kind;
   const sessionKey = session && session.key;
   return Boolean(
-    (kind === "fold" || kind === "meta_learning") &&
+    kind === "research" &&
       LIVE_RUN_STATES.has(detail && detail.state) &&
       sessionKey &&
       status.session_key === sessionKey &&
@@ -4186,7 +3291,7 @@ function liveTracePanel(detail, session) {
   const panel = el(
     "div",
     { class: "panel section-gap" },
-    el("h4", {}, `实时 Agent Trace — ${sessionDisplayKey(session)}`),
+    el("h4", {}, `实时 Agent Trace — ${sessionLabel(session.key)}`),
   );
   const statusLine = el(
     "div",
@@ -4637,14 +3742,6 @@ function subagentTraceHead(payload, detail) {
     );
   if (header.error)
     wrap.append(el("div", { class: "hint warn" }, `错误：${header.error}`));
-  if (payload.reduced)
-    wrap.append(
-      el(
-        "div",
-        { class: "hint warn" },
-        "Meta 会话的子代理只记录轮次、工具、用量与字符数，不含正文。",
-      ),
-    );
   if (payload.truncated_window)
     wrap.append(el("div", { class: "hint" }, "仅显示当前读取窗口内的记录。"));
   return wrap;
@@ -4998,248 +4095,11 @@ function subagentDetailNode(block) {
   return body;
 }
 
-function analysisPanel(experimentId, epochId, foldId) {
-  const base = `/api/experiments/${encodeURIComponent(experimentId)}/analysis/${encodeURIComponent(epochId)}/${encodeURIComponent(foldId)}`;
-  return analysisNode(base, "Fold 策略分析");
-}
-
-function analysisNode(base, title, { standalone = true } = {}) {
-  const panel = el("div", {
-    class: standalone ? "panel section-gap" : "section-gap",
-  });
-  const regenButton = el("button", { class: "btn small" }, "生成分析");
-  const head = el(
-    "div",
-    { class: "control-bar" },
-    el("h4", { class: "subsection-title" }, title),
-    el("span", { class: "spacer" }),
-    regenButton,
-  );
-  const body = el(
-    "div",
-    { class: "section-gap" },
-    el("div", { class: "loading" }, "加载分析…"),
-  );
-  panel.append(head, body);
-  regenButton.addEventListener("click", async () => {
-    try {
-      await api(base, { method: "POST" });
-      toast("分析已开始生成，稍后自动刷新");
-      regenButton.disabled = true;
-      liveTimers.push(setTimeout(load, 20_000));
-    } catch (error) {
-      toast(error.message, true);
-    }
-  });
-  async function load() {
-    let payload;
-    try {
-      payload = await api(base);
-    } catch (error) {
-      body.innerHTML = "";
-      body.append(
-        el("div", { class: "hint" }, `分析加载失败：${error.message}`),
-      );
-      return;
-    }
-    body.innerHTML = "";
-    regenButton.disabled = Boolean(payload.pending);
-    regenButton.textContent = payload.available ? "重新生成" : "生成分析";
-    if (payload.pending) {
-      body.append(
-        el(
-          "div",
-          { class: "prep-indicator" },
-          el("span", { class: "spinner" }),
-          el("span", {}, "分析生成中…"),
-        ),
-      );
-      liveTimers.push(setTimeout(load, 8000));
-    } else if (payload.content) {
-      const meta = payload.meta || {};
-      if (meta.model) {
-        body.append(
-          el(
-            "div",
-            { class: "hint", style: "margin-top:0" },
-            `模型 ${meta.model} ｜ 生成于 ${fmtTs(meta.created_at)}`,
-          ),
-        );
-      }
-      body.append(renderMarkdown(payload.content));
-    } else {
-      body.append(
-        el("div", { class: "hint" }, "尚未生成分析"),
-      );
-    }
-  }
-  load();
-  return panel;
-}
-
-function rerunPanel(detail, session) {
-  const alive = detail.worker_alive || detail.state === "launching";
-  const panel = el(
-    "div",
-    { class: "panel section-gap" },
-    el("h4", { class: "subsection-title" }, "重跑本 Fold（最新完成）"),
-    el(
-      "div",
-      { class: "hint" },
-      "追加一次新的 Fold 会话，旧记录保留；已有 Held-out 结果在重跑后自动重放。",
-    ),
-  );
-  const bar = el("div", { class: "control-bar section-gap" });
-  if (alive) {
-    bar.append(
-      el(
-        "span",
-        { class: "hint warn", style: "margin:0" },
-        "worker 运行中——先「停止」或「强制终止」后方可重跑。",
-      ),
-    );
-  } else {
-    bar.append(
-      el(
-        "button",
-        {
-          class: "btn primary",
-          onclick: () => {
-            showModal(
-              "确认重跑该 Fold？",
-              el(
-                "p",
-                {},
-                `将重跑 ${sessionDisplayKey(session)}；现有 Held-out 结果过期，重跑后自动重放。`,
-              ),
-              [
-                el("button", { class: "btn", onclick: closeModal }, "取消"),
-                el(
-                  "button",
-                  {
-                    class: "btn primary",
-                    onclick: async () => {
-                      closeModal();
-                      try {
-                        await api(
-                          `/api/experiments/${encodeURIComponent(detail.experiment_id)}/control`,
-                          {
-                            method: "POST",
-                            body: JSON.stringify({
-                              action: "rerun_fold",
-                              session_key: session.key,
-                            }),
-                          },
-                        );
-                        toast("重跑已启动");
-                        route(true);
-                      } catch (error) {
-                        toast(error.message, true);
-                      }
-                    },
-                  },
-                  "确认重跑",
-                ),
-              ],
-            );
-          },
-        },
-        "重跑本 Fold",
-      ),
-    );
-  }
-  panel.append(bar);
-  return panel;
-}
-
-/* Roll the experiment back so this (earlier) fold becomes the frontier:
-   every later ledger record is dropped (frozen dirs archived, ledger backed
-   up server-side) and the run resumes from the next fold. */
-function rollbackPanel(detail, session) {
-  const alive = detail.worker_alive || detail.state === "launching";
-  const panel = el(
-    "div",
-    { class: "panel section-gap" },
-    el("h4", { class: "subsection-title" }, "回滚到此 Fold"),
-    el(
-      "div",
-      { class: "hint" },
-      "移除本 Fold 之后的全部 Fold、元学习与 Held-out 记录（账本先备份，产物归档），再从下一个会话继续。",
-    ),
-  );
-  const bar = el("div", { class: "control-bar section-gap" });
-  if (alive) {
-    bar.append(
-      el(
-        "span",
-        { class: "hint warn", style: "margin:0" },
-        "worker 运行中——先「停止」或「强制终止」后方可回滚。",
-      ),
-    );
-  } else {
-    bar.append(
-      el(
-        "button",
-        {
-          class: "btn danger",
-          onclick: () => {
-            showModal(
-              "确认回滚？",
-              el(
-                "div",
-                {},
-                el(
-                  "p",
-                  {},
-                  `将回退到 ${sessionDisplayKey(session)} 完成时，丢弃其后全部账本记录（含 Held-out）。`,
-                ),
-                el("p", { class: "hint" }, "此操作不可从界面撤销。"),
-              ),
-              [
-                el("button", { class: "btn", onclick: closeModal }, "取消"),
-                el(
-                  "button",
-                  {
-                    class: "btn danger",
-                    onclick: async () => {
-                      closeModal();
-                      try {
-                        await api(
-                          `/api/experiments/${encodeURIComponent(detail.experiment_id)}/control`,
-                          {
-                            method: "POST",
-                            body: JSON.stringify({
-                              action: "rollback_fold",
-                              session_key: session.key,
-                            }),
-                          },
-                        );
-                        toast("已回滚并重启 worker");
-                        route(true);
-                      } catch (error) {
-                        toast(error.message, true);
-                      }
-                    },
-                  },
-                  "确认回滚",
-                ),
-              ],
-            );
-          },
-        },
-        "回滚到此 Fold",
-      ),
-    );
-  }
-  panel.append(bar);
-  return panel;
-}
-
 /* ---------------- Step 产物树 ---------------- */
 
-/* Cross-fold lineage of validated step artifacts. Branches appear when the
-   Agent used step_rollback, or a fold session restarted from a user-set
-   parent override. Built for large trees: collapsible subtrees, text filter,
+/* Lineage of validated step artifacts across the arm's research sessions.
+   Branches appear when the Agent used step_rollback or batch_validate, or a
+   session started from the node its predecessor handed on. Built for large trees: collapsible subtrees, text filter,
    one shared viewport-clamped tooltip (never clipped by the scroll box),
    inline download on every node with a snapshot. */
 function stepTreePanel(detail) {
@@ -5275,10 +4135,8 @@ function stepTreeSection(detail, payload) {
   const haystack = (node) =>
     [
       node.node_id,
-      node.fold_ref,
+      node.session_key,
       node.result_name,
-      node.epoch_id,
-      ...(node.frozen_for || []),
     ]
       .filter(Boolean)
       .join(" ")
@@ -5374,7 +4232,7 @@ function stepTreeSection(detail, payload) {
   const filterInput = el("input", {
     class: "input step-filter",
     type: "search",
-    placeholder: "筛选 Fold / 节点 / 结果名…",
+    placeholder: "筛选会话 / 节点 / 结果名…",
     oninput: (event) => {
       state.filter = event.target.value;
       render();
@@ -5417,7 +4275,6 @@ function stepTreeSection(detail, payload) {
     "div",
     { class: "panel section-gap" },
     el("h4", {}, "Step 产物树"),
-    el("div", { class: "hint" }, "跨 Fold 的已验证策略谱系"),
     toolbar,
     rows,
   );
@@ -5437,8 +4294,8 @@ function stepTreeRow(
     badges.push(
       el("span", { class: "badge state-running_session" }, "当前位置"),
     );
-  for (const key of node.frozen_for || [])
-    badges.push(el("span", { class: "badge state-completed" }, `冻结 ${key}`));
+  if (node.frozen)
+    badges.push(el("span", { class: "badge state-completed" }, "已冻结"));
   if (failed) badges.push(el("span", { class: "badge state-failed" }, "失败"));
   const actions = el("span", { class: "step-actions" });
   if (node.has_snapshot) {
@@ -5490,7 +4347,7 @@ function stepTreeRow(
     el(
       "span",
       { class: "step-label" },
-      `${foldPeriodLabel(detail, node.fold_ref)} · ${node.result_name || node.node_id}`,
+      `${node.session_key || "—"} · ${node.result_name || node.node_id}`,
     ),
     collapsed ? el("span", { class: "step-chip" }, `+${childCount}`) : null,
     Number.isFinite(metrics.total_return)
@@ -5534,10 +4391,7 @@ function showStepTip(detail, node, row) {
   tip.innerHTML = "";
   tip.append(
     el("div", { class: "step-tip-title" }, node.node_id),
-    line(
-      "Fold",
-      `${node.epoch_id || "—"} / ${foldPeriodLabel(detail, node.fold_ref)}`,
-    ),
+    line("会话", node.session_key || "—"),
     line("验证收益", fmtPct(m.total_return)),
     line("多头收益", fmtPct(m.long_return)),
     line(
@@ -5548,9 +4402,7 @@ function showStepTip(detail, node, row) {
     ),
     line("最大回撤", fmtPct(m.max_drawdown)),
     line("记录于", fmtTs(node.created_at)),
-    (node.frozen_for || []).length
-      ? line("冻结用于", node.frozen_for.join("、"))
-      : null,
+    node.frozen ? line("冻结", "本节点是冻结产物") : null,
     node.status === "failed" ? line("失败原因", node.error || "—") : null,
     node.has_snapshot ? null : line("快照", "无（失败尝试不留产物）"),
   );
@@ -5579,10 +4431,7 @@ function openStepNodeModal(detail, payload, node) {
       "table",
       { class: "kv" },
       kvRow("节点", node.node_id),
-      kvRow(
-        "Fold",
-        `${node.epoch_id || "—"} / ${foldPeriodLabel(detail, node.fold_ref)}`,
-      ),
+      kvRow("会话", node.session_key || "—"),
       kvRow(
         "验证收益",
         el("span", { class: numClass(m.total_return) }, fmtPct(m.total_return)),
@@ -5596,9 +4445,7 @@ function openStepNodeModal(detail, payload, node) {
       ),
       kvRow("最大回撤", fmtPct(m.max_drawdown)),
       kvRow("记录时间", fmtTs(node.created_at)),
-      (node.frozen_for || []).length
-        ? kvRow("冻结用于", node.frozen_for.join("、"))
-        : null,
+      node.frozen ? kvRow("冻结", "本节点是冻结产物") : null,
       node.status === "failed" ? kvRow("失败原因", node.error || "—") : null,
       kvRow("附件", (node.attachments || []).join("、") || "—"),
       kvRow("revision", el("code", {}, String(node.strategy_ref || "—"))),
@@ -5613,453 +4460,23 @@ function openStepNodeModal(detail, payload, node) {
   showModal("Step 节点详情", body, buttons);
 }
 
-/* What a Fold left in force decides whose numbers its headline carries.
-
-   A Fold that froze nothing is NOT a Fold without a Validation record: before
-   the session started the host replayed the inherited parent over this very
-   window, and that replay is both the strategy the experiment carried forward
-   and the curve drawn below. So the tiles show it — labelled as the parent,
-   never as a new candidate. The label comes from the server
-   (registry.strategy_in_force, projected once per Fold into fold_returns), so
-   the panel and the chart can never disagree about which strategy they show. */
-const IN_FORCE_NOTES = {
-  frozen_candidate: "以下数字与曲线：本 Fold 冻结候选的验证回放。",
-  parent_control: "以下数字与曲线：父产物在本 Fold 验证区间的原样重跑，不是新候选。",
-  none: "本 Fold 没有留下策略，也无父产物可沿用，因此没有验证数字与曲线。",
-};
-
-function foldResultPanel(detail, session) {
-  const record = session.record || {};
-  const validation = record.validation_result || {};
-  // The strategy in force on this window: the Fold's own frozen candidate, or
-  // the inherited parent exactly as the host replayed it over the same window.
-  // Read through foldInForce, the one place the branch is taken.
-  const {
-    source: inForce,
-    inherited,
-    label: headLabel,
-    result: inForceResult,
-  } = foldInForce(detail, session);
-  const headline = inForceResult || {};
-  const statusLabels = {
-    frozen: "已冻结新产物",
-    no_update: "沿用父产物（有验证未获接受）",
-    no_valid_backtest: "沿用父产物（无完整验证）",
-    baseline_missing: "无产物可沿用（下一 Fold 从模板开始）",
-  };
-  // `agent_no_edge` is a deliberate abstention, not a validation that failed
-  // acceptance, so it gets its own label and shows the Agent's evidence below.
-  const abstained = record.finish_mode === "agent_no_edge";
-  const statusLabel = abstained
-    ? record.fold_status === "baseline_missing"
-      ? "弃权（无边际），无产物可沿用"
-      : "弃权（无边际），沿用父产物"
-    : statusLabels[record.fold_status] || record.fold_status || "—";
-  // Records written before the rename carry `accept_reasons`.
-  const rejectReasons =
-    record.hard_reject_reasons || record.accept_reasons || [];
-  const panel = el(
-    "div",
-    { class: "panel" },
-    el(
-      "div",
-      { class: "control-bar" },
-      el(
-        "h4",
-        { style: "margin:0" },
-        `Fold 结果 — ${sessionDisplayKey(session)}`,
-      ),
-      el(
-        "span",
-        {
-          class: `badge state-${
-            record.fold_status === "frozen"
-              ? (record.accept_warnings || []).length
-                ? "waiting_user"
-                : "completed"
-              : "stopped"
-          }`,
-        },
-        record.fold_status === "frozen" && (record.accept_warnings || []).length
-          ? "已冻结（有验收警告）"
-          : statusLabel,
-      ),
-      record.finish_reason
-        ? el("span", { class: "mode-note" }, `结束原因 ${record.finish_reason}`)
-        : null,
-    ),
-  );
-  // Which strategy the numbers below belong to, stated before they are read.
-  if (IN_FORCE_NOTES[inForce])
-    panel.append(el("div", { class: "meta-line" }, IN_FORCE_NOTES[inForce]));
-  // Headline metrics of the strategy in force, metadata as a compact kv block.
-  const inForceTitle = inherited
-    ? "继承的父产物在本 Fold 验证区间的原样重跑（不是本 Fold 的新候选）"
-    : "本 Fold 冻结候选在验证区间的回放";
-  panel.append(
-    el(
-      "div",
-      { class: "section-gap" },
-      statTilesRow([
-        {
-          label: headLabel("验证收益"),
-          title: inForceTitle,
-          value: fmtPct(headline.total_return),
-          cls: signCls(headline.total_return),
-        },
-        {
-          label: headLabel("验证 Sharpe"),
-          title: inForceTitle,
-          value: fmtSharpe(headline.sharpe),
-          cls: signCls(headline.sharpe),
-        },
-        {
-          label: headLabel("验证回撤"),
-          title: inForceTitle,
-          value: fmtPct(headline.max_drawdown),
-        },
-        {
-          label: headLabel("多头收益"),
-          title: inForceTitle,
-          value: fmtPct(headline.long_return),
-          cls: signCls(headline.long_return),
-        },
-      ]),
-    ),
-  );
-  const selection = selectionSection(detail, session);
-  if (selection) panel.append(selection);
-  panel.append(parentControlSection(detail, session, validation));
-  const benchmark = headline.benchmark || {};
-  panel.append(
-    el(
-      "table",
-      { class: "kv section-gap" },
-      kvRow(
-        "验证区间",
-        fmtPeriodRange(record.validation_period || session.validation_period),
-      ),
-      // The raw excess cannot separate an edge from a small-cap or high-beta
-      // tilt, so the neutralized figure is read beside it, never alone.
-      kvRow(
-        headLabel("超额收益（vs 沪深300）"),
-        el(
-          "span",
-          { class: numClass(benchmark.excess_return) },
-          fmtPct(benchmark.excess_return),
-        ),
-      ),
-      kvRow(
-        el(
-          "span",
-          { title: benchmark.neutralized_excess_method || "" },
-          headLabel("规模/β 中性化超额（年化）"),
-        ),
-        el(
-          "span",
-          { class: numClass(benchmark.neutralized_excess_return) },
-          fmtPct(benchmark.neutralized_excess_return),
-        ),
-      ),
-      record.run_wall_seconds
-        ? kvRow("总耗时", fmtDuration(record.run_wall_seconds))
-        : null,
-      kvRow("冻结产物", record.frozen_strategy_artifact_ref || "—"),
-      rejectReasons.length
-        ? kvRow("未接受原因", rejectReasons.join("；"))
-        : null,
-      record.no_edge_reason
-        ? kvRow("弃权理由", record.no_edge_reason)
-        : null,
-      (record.accept_warnings || []).length
-        ? kvRow(
-            "验收警告",
-            el(
-              "span",
-              { class: "num neg" },
-              record.accept_warnings.map(fmtAcceptanceWarning).join("；"),
-            ),
-          )
-        : null,
-    ),
-  );
-  const validationSubWindows = subWindowSection(
-    headLabel("验证期分季度表现"),
-    headline.sub_windows,
-  );
-  if (validationSubWindows) panel.append(validationSubWindows);
-  if (record.run_ref) {
-    panel.append(
-      el(
-        "div",
-        { class: "section-gap" },
-        el(
-          "h4",
-          { class: "subsection-title" },
-          "验证期日度累计收益 vs 沪深300（含回撤）",
-        ),
-        foldEquityHost(
-          detail.experiment_id,
-          session.epoch_id,
-          session.fold_ref || record.fold_ref,
-          record.run_ref,
-          "valid",
-          { width: 860, height: 210, ddH: 76 },
-        ),
-      ),
-    );
-    panel.append(styleCard(detail.experiment_id, record.run_ref, "valid"));
-  }
-  // Guarded test audit block (collapsed, clearly labelled).
-  panel.append(
-    loadFoldExtras(
-      detail.experiment_id,
-      session.epoch_id,
-      session.fold_ref || record.fold_ref,
-    ),
-  );
-  return panel;
-}
-
-/* The Fold's own fold_returns row: the console computes the parent-control and
-   selection figures once per Fold there, so the panel reads them instead of
-   recomputing anything from the raw record. */
-function foldReturnsRow(detail, session) {
-  const record = session.record || {};
-  return (detail.fold_returns || []).find(
-    (item) =>
-      item.epoch_id === session.epoch_id &&
-      item.fold_ref === (session.fold_ref || record.fold_ref),
-  );
-}
-
-/* The strategy one Fold left in force, and the replay that records it.
-
-   Which strategy that is gets decided once on the server
-   (registry.strategy_in_force) and projected into the Fold's fold_returns row,
-   so every surface quoting a Fold — the session line, the result panel, the
-   curve — asks this one function and none of them re-derives the branch from
-   fold_status. `result` is that strategy's Validation replay, null when the
-   Fold left no strategy at all or when the record names a replay the console
-   cannot read; `transition` is the parent-control row on the span the
-   walk-forward term is scored on, which belongs to the PREVIOUS Fold's
-   strategy and is labelled as such wherever it is shown. `label` prefixes a
-   metric name with 父本 exactly when the numbers are the inherited parent's. */
-function foldInForce(detail, session) {
-  const record = session.record || {};
-  const row = foldReturnsRow(detail, session) || {};
-  const source = row.strategy_in_force || null;
-  const result =
-    source === "frozen_candidate"
-      ? record.validation_result
-      : source === "parent_control"
-        ? (record.parent_control || {}).validation_result
-        : null;
-  return {
-    source,
-    inherited: source === "parent_control",
-    result: result || null,
-    transition: row.parent_control || null,
-    label: (name) => (source === "parent_control" ? `父本${name}` : name),
-  };
-}
-
-/* Selection bias: the Fold picks its winner among candidates all quoted on the
-   very window their returns come from, so the winner's Sharpe is the maximum
-   of a search rather than a single draw. The deflated-Sharpe probability
-   (Bailey & López de Prado 2014) says how much of it the search width alone
-   explains. Informational — no acceptance rule reads it. */
-function selectionSection(detail, session) {
-  const stats = (foldReturnsRow(detail, session) || {}).selection;
-  if (!stats) return null;
-  const candidates = stats.candidates_evaluated;
-  // The correction's N is the finite-Sharpe subset, not the raw candidate
-  // count: where they differ, both are shown so the formula's N is never read
-  // off the wrong number.
-  const trials = stats.trials;
-  const probability = stats.deflated_sharpe_probability;
-  const counted =
-    candidates === null || candidates === undefined ? "—" : candidates;
-  return el(
-    "div",
-    {
-      class: "meta-line section-gap",
-      title:
-        "按参与去偏的候选数校正选择偏差（Bailey & López de Prado 2014）；不参与验收与毕业判定",
-    },
-    trials !== null && trials !== undefined && trials !== candidates
-      ? `本 Fold 评估候选 ${counted} 个，其中 ${trials} 个有有效 Sharpe 参与去偏`
-      : `本 Fold 评估候选数 ${counted}`,
-    el(
-      "span",
-      { class: "mode-note" },
-      probability === null || probability === undefined
-        ? ` · 去偏 Sharpe 概率 —（${SELECTION_UNAVAILABLE[stats.unavailable_reason] || "无法计算"}）`
-        : ` · 去偏 Sharpe 概率 ${probability.toFixed(2)} · 选择阈值 Sharpe* ${fmtSharpe(stats.sharpe_star)}`,
-    ),
-  );
-}
-
-/* This Fold's baseline: before the session starts the host replays the
-   inherited parent unchanged over this Fold's Validation window, so the Fold's
-   own Validation is read against it rather than on its own. The first Fold of
-   the first Epoch inherits nothing and has no control. The baseline rows are
-   the whole window on both sides — the only like-for-like reading against the
-   Fold's own Validation row. The walk-forward transition is graded on the
-   narrower span registry._parent_control_view names (the Fold's new period
-   once the window trails over several), so it gets its own labelled row rather
-   than being read as the window. Every row carries the null percentile of its
-   OWN span (the projection already picked the right null block for the scored
-   row), and the Fold's row carries the ledger's `vs_parent.beats_parent`, so
-   "did the candidate beat this baseline" is read off the record rather than
-   subtracted by eye. A failed control's full reason is read off the ledger
-   record here; the session line quotes the row's bounded copy of it. */
-function parentControlSection(detail, session, validation) {
-  const record = session.record || {};
-  const control = record.parent_control;
-  if (!control)
-    return el("div", { class: "meta-line" }, "父本对照：无（未继承父产物）");
-  const metrics = (foldReturnsRow(detail, session) || {}).parent_control || {};
-  const wholeWindow = control.validation_result || {};
-  const failed = control.status !== "ok";
-  const period = fmtPeriodRange(
-    record.validation_period || session.validation_period,
-  );
-  const percentile = (block) => {
-    const value = (block || {}).excess_percentile;
-    return value === null || value === undefined ? "—" : Number(value).toFixed(3);
-  };
-  const beatsParent = (record.vs_parent || {}).beats_parent;
-  const metricRow = (label, span, values) =>
-    el(
-      "tr",
-      {},
-      el("td", {}, label),
-      el("td", { class: "mode-note" }, span),
-      el("td", { class: signCls(values.total) }, fmtPct(values.total)),
-      el("td", { class: signCls(values.excess) }, fmtPct(values.excess)),
-      el("td", { class: signCls(values.sharpe) }, fmtSharpe(values.sharpe)),
-      el("td", {}, fmtPct(values.drawdown)),
-      el("td", { class: "mode-note" }, values.percentile),
-    );
-  const section = el(
-    "div",
-    { class: "section-gap" },
-    el(
-      "h4",
-      { class: "subsection-title" },
-      "父本对照（本 Fold 基线）",
-      failed ? el("span", { class: "badge state-failed" }, "对照失败") : null,
-    ),
-    el(
-      "table",
-      { class: "data" },
-      el(
-        "tr",
-        {},
-        el("th", {}, "对照"),
-        el("th", {}, "区间"),
-        el("th", {}, "收益"),
-        el("th", { title: "相对沪深300" }, "超额"),
-        el("th", {}, "Sharpe"),
-        el("th", {}, "回撤"),
-        el(
-          "th",
-          { title: "随机换名重放中的分位，≈0.5 即与随机组合无异" },
-          "null 分位",
-        ),
-      ),
-      metricRow(
-        el(
-          "span",
-          {},
-          "本 Fold 验证",
-          // The frozen candidate's whole-window verdict against this very
-          // baseline, as the ledger recorded it — not re-derived here.
-          beatsParent === true || beatsParent === false
-            ? el(
-                "span",
-                { class: "mode-note" },
-                beatsParent ? " vs 父本：胜" : " vs 父本：负",
-              )
-            : null,
-        ),
-        period,
-        {
-          total: validation.total_return,
-          excess: (validation.benchmark || {}).excess_return,
-          sharpe: validation.sharpe,
-          drawdown: validation.max_drawdown,
-          percentile: percentile(record.null_control),
-        },
-      ),
-      metricRow(
-        el(
-          "span",
-          { title: control.parent_strategy_artifact_ref || null },
-          "父本原样重跑",
-        ),
-        period,
-        {
-          total: wholeWindow.total_return,
-          excess: (wholeWindow.benchmark || {}).excess_return,
-          sharpe: wholeWindow.sharpe,
-          drawdown: wholeWindow.max_drawdown,
-          percentile: percentile(control.null_control),
-        },
-      ),
-      metrics.source === "step_result"
-        ? metricRow(
-            el(
-              "span",
-              {},
-              "父本原样重跑",
-              el("span", { class: "mode-note" }, " 过渡按此行计分"),
-            ),
-            controlSpanLabel(metrics),
-            {
-              total: metrics.return,
-              excess: metrics.excess_return,
-              sharpe: metrics.sharpe,
-              drawdown: metrics.max_drawdown,
-              // The projection already picked the null block of the span this
-              // row is scored on (ledger.transition_null_control).
-              percentile: percentile(metrics),
-            },
-          )
-        : null,
-    ),
-  );
-  if (failed)
-    section.append(
-      el(
-        "div",
-        { class: "meta-line" },
-        `对照未完成：${control.error || "见账本"}`,
-      ),
-    );
-  return section;
-}
-
 function kvRow(key, value) {
   return el("tr", {}, el("td", {}, key), el("td", {}, value));
 }
 
-/* Per-calendar-quarter breakdown of one replay window (stats.sub_windows):
-   the same figures as the headline tiles, one row per quarter, so a whole-
-   window number can be read against its sub-periods instead of on its own.
-   "部分" marks a quarter the window does not span end to end. 超额 is against
-   沪深300 and stays blank when the slot had no usable benchmark. */
+/* Per July-June year breakdown of one replay (stats.sub_windows): the same
+   figures as the whole window, one row per year. "部分" marks a year the
+   window does not span end to end; 超额 is against 沪深300. */
 function subWindowSection(title, rows) {
   if (!Array.isArray(rows) || !rows.length) return null;
   const head = el(
     "tr",
     {},
-    el("th", {}, "分季度"),
-    el("th", { title: "季度开盘权益起算的区间收益" }, "收益"),
+    el("th", {}, "年度"),
+    el("th", { title: "年度开盘权益起算的区间收益" }, "收益"),
     el("th", { title: "相对沪深300的超额收益" }, "超额"),
-    el("th", { title: "季度内日收益的年化 Sharpe" }, "Sharpe"),
-    el("th", { title: "季度内峰谷回撤" }, "回撤"),
+    el("th", { title: "年度内日收益的年化 Sharpe" }, "Sharpe"),
+    el("th", { title: "年度内峰谷回撤" }, "回撤"),
     el("th", { title: "成交名义额 / 初始资金" }, "换手"),
     el("th", { title: "已实现平仓笔数" }, "笔数"),
     el("th", {}, "交易日"),
@@ -6113,7 +4530,7 @@ function subWindowSection(title, rows) {
 
 /* Barra-lite style validation card: CSI300 alpha/beta regression + holdings
    style tilts (signed percentile deviation, [-1,1]) + SW industry weights. */
-function styleCard(expId, runId, prefix) {
+function styleCard(expId, result) {
   const host = el(
     "div",
     { class: "section-gap" },
@@ -6121,7 +4538,7 @@ function styleCard(expId, runId, prefix) {
     el("div", { class: "hint" }, "加载中…"),
   );
   api(
-    `/api/experiments/${encodeURIComponent(expId)}/style?run_id=${encodeURIComponent(runId)}&prefix=${encodeURIComponent(prefix)}`,
+    `/api/experiments/${encodeURIComponent(expId)}/results/${encodeURIComponent(result)}/style`,
   )
     .then((payload) => {
       host.querySelector(".hint").remove();
@@ -6153,7 +4570,7 @@ function styleCard(expId, runId, prefix) {
       );
       const regressionReasons = {
         benchmark_unavailable:
-          "冻结回放槽中没有可用的沪深300同窗数据，基准回归为空。",
+          "回放槽中没有可用的沪深300同窗数据，基准回归为空。",
         insufficient_overlapping_days:
           "与沪深300重叠的交易日不足 8 天，β、α 与 R² 不计算。",
         benchmark_variance_zero:
@@ -6219,16 +4636,16 @@ function styleCard(expId, runId, prefix) {
       } else {
         const styleReasons = {
           style_columns_unavailable:
-            "冻结回放槽缺少市值、PB 或换手截面，风格暴露为空。",
-          no_holdings: "该 Validation 窗口没有持仓，风格暴露为空。",
+            "回放槽缺少市值、PB 或换手截面，风格暴露为空。",
+          no_holdings: "该回放没有持仓，风格暴露为空。",
           no_valued_holdings:
-            "该 Validation 窗口的持仓没有可用收盘价，风格暴露为空。",
+            "该回放的持仓没有可用收盘价，风格暴露为空。",
         };
         host.append(
           el(
             "div",
             { class: "hint" },
-            styleReasons[style.reason] || "该窗口没有可计算的风格暴露。",
+            styleReasons[style.reason] || "该回放没有可计算的风格暴露。",
           ),
         );
       }
@@ -6246,181 +4663,6 @@ function styleCard(expId, runId, prefix) {
       );
     });
   return host;
-}
-
-/* Why the Validation pane has no curve; null when it has one, whose strategy
-   the panel's in-force note above already names (strategy_in_force). */
-function foldCurveCaption(source, drawn) {
-  if (drawn) return null;
-  if (source === "none") return "本 Fold 没有留下策略，无曲线。";
-  return "回放结果读不出来，无曲线；累计验证收益同样略过本 Fold。";
-}
-
-/* Per-fold daily equity (validation and guarded test parts share one fetch). */
-const FOLD_EQUITY_CACHE = new Map(); // `${exp}/${epoch}/${fold}/${run}` -> promise
-function foldEquityHost(expId, epochId, foldId, runId, part, opts) {
-  const key = `${expId}/${epochId}/${foldId}/${runId || ""}`;
-  if (!FOLD_EQUITY_CACHE.has(key)) {
-    FOLD_EQUITY_CACHE.set(
-      key,
-      api(
-        `/api/experiments/${encodeURIComponent(expId)}/folds/${encodeURIComponent(epochId)}/${encodeURIComponent(foldId)}/equity`,
-      ),
-    );
-  }
-  const host = el("div", {}, el("div", { class: "hint" }, "收益曲线加载中…"));
-  FOLD_EQUITY_CACHE.get(key)
-    .then((payload) => {
-      host.innerHTML = "";
-      const selected = (payload.series || []).filter(
-        (series) => series.key === part,
-      );
-      // Only the Validation pane draws "whichever strategy this Fold left in
-      // force"; the guarded Test pane is always the frozen artifact's own.
-      const drawn = selected.some((series) => (series.dates || []).length);
-      const caption =
-        part === "valid" && foldCurveCaption(payload.strategy_in_force, drawn);
-      if (caption) {
-        host.append(el("div", { class: "meta-line" }, caption));
-        return;
-      }
-      host.append(equityChart({ ...payload, series: selected }, opts));
-    })
-    .catch((error) => {
-      FOLD_EQUITY_CACHE.delete(key);
-      host.innerHTML = "";
-      host.append(
-        el("div", { class: "hint" }, `收益曲线加载失败：${error.message}`),
-      );
-    });
-  return host;
-}
-
-function loadFoldExtras(experimentId, epochId, foldId) {
-  const wrap = el(
-    "div",
-    { class: "section-gap" },
-    el("div", { class: "loading" }, "加载策略与分析…"),
-  );
-  (async () => {
-    let fold;
-    try {
-      fold = await api(
-        `/api/experiments/${encodeURIComponent(experimentId)}/folds/${encodeURIComponent(epochId)}/${encodeURIComponent(foldId)}`,
-      );
-    } catch (error) {
-      wrap.innerHTML = "";
-      wrap.append(
-        el(
-          "div",
-          { class: "hint" },
-          `无法加载 Fold 附加信息：${error.message}`,
-        ),
-      );
-      return;
-    }
-    wrap.innerHTML = "";
-    // Frozen strategy: one ZIP package (output + models), no per-file listing.
-    wrap.append(
-      el(
-        "div",
-        { class: "control-bar" },
-        el("h4", { class: "subsection-title" }, "冻结策略产物"),
-        el("span", { class: "spacer" }),
-        el(
-          "a",
-          {
-            class: "btn small",
-            href: `/api/experiments/${encodeURIComponent(experimentId)}/folds/${encodeURIComponent(epochId)}/${encodeURIComponent(foldId)}/strategy.zip`,
-          },
-          "⬇ 下载 ZIP 包",
-        ),
-      ),
-    );
-    // Validation-backtest order stream: stats, charts, table, CSV export.
-    wrap.append(ordersNode(experimentId, epochId, foldId));
-    // Test audit, collapsed with warning.
-    const audit = fold.test_audit || {};
-    if (audit.test_result) {
-      const test = audit.test_result;
-      wrap.append(
-        el(
-          "details",
-          { class: "test-audit section-gap" },
-          el("summary", {}, "测试期结果（审计）"),
-          el(
-            "div",
-            { class: "hint warn" },
-            "其 compact 指标已反馈给 Meta，属开发证据；最终评估看 Held-out。",
-          ),
-          el(
-            "table",
-            { class: "kv" },
-            kvRow(
-              "测试收益",
-              el(
-                "span",
-                { class: numClass(test.total_return) },
-                fmtPct(test.total_return),
-              ),
-            ),
-            kvRow(
-              "测试 Sharpe",
-              test.sharpe !== undefined && test.sharpe !== null
-                ? Number(test.sharpe).toFixed(2)
-                : "—",
-            ),
-            kvRow("测试回撤", fmtPct(test.max_drawdown)),
-          ),
-          // Sealed with the rest of this block: fold_detail returns
-          // {hidden:true} until the reveal, so no sub-window row exists here
-          // before then.
-          subWindowSection("测试期分季度表现", test.sub_windows),
-          el(
-            "div",
-            { class: "section-gap" },
-            el(
-              "h4",
-              { class: "subsection-title" },
-              "测试期日度累计收益 vs 沪深300（含回撤）",
-            ),
-            foldEquityHost(
-              experimentId,
-              epochId,
-              foldId,
-              (fold.record || {}).run_ref,
-              "test",
-              { width: 760, height: 190, ddH: 64 },
-            ),
-          ),
-          (fold.record || {}).run_ref
-            ? styleCard(experimentId, fold.record.run_ref, "test")
-            : null,
-          // The result id comes from the read-model: result directories are
-          // named frozen_test_<uuid>, so a guessed name would only ever 404.
-          audit.result
-            ? el(
-                "div",
-                { class: "section-gap" },
-                el(
-                  "a",
-                  {
-                    class: "btn small",
-                    href: `/api/experiments/${encodeURIComponent(experimentId)}/folds/${encodeURIComponent(epochId)}/${encodeURIComponent(foldId)}/orders.csv?result=${encodeURIComponent(audit.result)}`,
-                  },
-                  "⬇ 测试期交易明细 CSV",
-                ),
-              )
-            : el(
-                "div",
-                { class: "hint section-gap" },
-                "该测试评估没有可导出的交易明细。",
-              ),
-        ),
-      );
-    }
-  })();
-  return wrap;
 }
 
 /* Render scheduled and matched ISO timestamps in Asia/Shanghai. */
@@ -6446,488 +4688,107 @@ const ORDER_TABLE_COLUMNS = [
   ["reason", "拒单原因"],
 ];
 
-/* Validation-backtest transaction details: stats tiles, per-day amount chart,
-   order table, CSV export. Result switcher covers the fold's valid_* runs. */
-function ordersNode(experimentId, epochId, foldId) {
-  const base = `/api/experiments/${encodeURIComponent(experimentId)}/folds/${encodeURIComponent(epochId)}/${encodeURIComponent(foldId)}`;
-  const body = el("div", {});
-  const wrap = el(
-    "div",
-    { class: "section-gap" },
-    el(
-      "h4",
-      { class: "subsection-title", style: "margin-bottom:0.4rem" },
-      "交易明细（验证回测）",
-    ),
-    body,
-  );
-  let loading = false;
-  async function load(result) {
-    // No flash: keep the current content (dimmed) until the new data arrives.
-    if (loading) return;
-    loading = true;
-    body.style.opacity = body.children.length ? "0.55" : "";
-    if (!body.children.length)
-      body.append(el("div", { class: "loading" }, "加载交易明细…"));
-    let data;
-    try {
-      data = await api(
-        `${base}/orders${result ? `?result=${encodeURIComponent(result)}` : ""}`,
-      );
-    } catch (error) {
-      body.innerHTML = "";
-      body.style.opacity = "";
-      loading = false;
-      body.append(el("div", { class: "hint" }, `无交易明细：${error.message}`));
-      return;
-    }
-    body.innerHTML = "";
-    body.style.opacity = "";
-    loading = false;
-    const bar = el("div", { class: "control-bar" });
-    const available = data.available || [];
-    if (available.length > 1) {
-      for (const name of available) {
-        bar.append(
-          el(
-            "span",
+/* Transaction details of one ledger-named replay result: stats tiles, per-day
+   amount chart, order table and CSV export. */
+function ordersNode(experimentId, result) {
+  const base = `/api/experiments/${encodeURIComponent(experimentId)}/results/${encodeURIComponent(result)}`;
+  const body = el("div", {}, el("div", { class: "loading" }, "加载交易明细…"));
+  api(`${base}/orders`)
+    .then((data) => {
+      const rows = data.rows || [];
+      const stats = data.stats || {};
+      const byAction = stats.by_action || {};
+      body.replaceChildren(
+        el(
+          "div",
+          { class: "control-bar" },
+          el("span", { class: "mode-note" }, data.result),
+          el("span", { class: "spacer" }),
+          el("a", { class: "btn small", href: `${base}/orders.csv` }, "⬇ 导出 CSV"),
+        ),
+        el(
+          "div",
+          { class: "section-gap" },
+          statTilesRow([
             {
-              class: `file-chip${name === data.result ? " active" : ""}`,
-              onclick: () => load(name),
+              label: "订单 / 成交 / 拒单",
+              value: `${stats.orders} / ${stats.filled} / ${stats.rejected}`,
             },
-            name,
+            { label: "成交额", value: fmtAmount(stats.turnover) },
+            {
+              label: "买 / 卖",
+              value: `${byAction.buy || 0} / ${byAction.sell || 0}`,
+            },
+          ]),
+        ),
+      );
+      const daily = (stats.daily || []).map((d) => ({
+        label: String(d.trade_date).slice(4),
+        value: d.amount,
+      }));
+      if (daily.length)
+        body.append(
+          el("h4", { class: "section-gap" }, "逐日成交金额"),
+          singleSeriesBarChart(daily, { fmt: fmtAmount, height: 180 }),
+        );
+      if (Object.keys(stats.reject_reasons || {}).length)
+        body.append(
+          el(
+            "div",
+            { class: "stats-chips section-gap" },
+            ...Object.entries(stats.reject_reasons).map(([reason, count]) =>
+              el("span", { class: "stat-chip" }, `拒单 ${reason} ×${count}`),
+            ),
           ),
         );
-      }
-    } else {
-      bar.append(el("span", { class: "mode-note" }, data.result));
-    }
-    bar.append(
-      el("span", { class: "spacer" }),
-      el(
-        "a",
-        {
-          class: "btn small",
-          href: `${base}/orders.csv?result=${encodeURIComponent(data.result)}`,
-        },
-        "⬇ 导出 CSV",
-      ),
-    );
-    const rows = data.rows || [];
-    const stats = data.stats || {};
-    const byAction = stats.by_action || {};
-    body.append(
-      bar,
-      el(
-        "div",
-        { class: "section-gap" },
-        statTilesRow([
-          {
-            label: "订单 / 成交 / 拒单",
-            value: `${stats.orders} / ${stats.filled} / ${stats.rejected}`,
-          },
-          { label: "成交额", value: fmtAmount(stats.turnover) },
-          {
-            label: "买 / 卖",
-            value: `${byAction.buy || 0} / ${byAction.sell || 0}`,
-          },
-        ]),
-      ),
-    );
-    const daily = (stats.daily || []).map((d) => ({
-      label: String(d.trade_date).slice(4),
-      value: d.amount,
-    }));
-    if (daily.length) {
-      body.append(
-        el("h4", { class: "section-gap" }, "逐日成交金额"),
-        singleSeriesBarChart(daily, { fmt: fmtAmount, height: 180 }),
-      );
-    }
-    if (Object.keys(stats.reject_reasons || {}).length) {
+      if (!rows.length) return;
+      const shown = rows.slice(0, 80);
       body.append(
         el(
           "div",
-          { class: "stats-chips section-gap" },
-          ...Object.entries(stats.reject_reasons).map(([reason, count]) =>
-            el("span", { class: "stat-chip" }, `拒单 ${reason} ×${count}`),
-          ),
-        ),
-      );
-    }
-    if (rows.length) {
-      const table = el(
-        "table",
-        { class: "data section-gap" },
-        el(
-          "tr",
-          {},
-          ...ORDER_TABLE_COLUMNS.map(([, label]) => el("th", {}, label)),
-        ),
-        ...rows.slice(0, 80).map((row) =>
+          { class: "orders-table-box" },
           el(
-            "tr",
-            {},
-            ...ORDER_TABLE_COLUMNS.map(([key]) => {
-              let value = fmtOrderCell(key, row[key]);
-              if (key === "price" && value !== null && value !== undefined)
-                value = Number(value).toFixed(3);
-              return el(
-                "td",
+            "table",
+            { class: "data section-gap" },
+            el(
+              "tr",
+              {},
+              ...ORDER_TABLE_COLUMNS.map(([, label]) => el("th", {}, label)),
+            ),
+            ...shown.map((row) =>
+              el(
+                "tr",
                 {},
-                value === null || value === undefined ? "—" : String(value),
-              );
-            }),
+                ...ORDER_TABLE_COLUMNS.map(([key]) => {
+                  let value = fmtOrderCell(key, row[key]);
+                  if (key === "price" && value !== null && value !== undefined)
+                    value = Number(value).toFixed(3);
+                  return el(
+                    "td",
+                    {},
+                    value === null || value === undefined ? "—" : String(value),
+                  );
+                }),
+              ),
+            ),
           ),
         ),
       );
-      const box = el("div", { class: "orders-table-box" }, table);
-      body.append(box);
-      if (data.row_count > Math.min(rows.length, 80)) {
+      if (data.row_count > shown.length)
         body.append(
           el(
             "div",
             { class: "hint" },
-            `表格显示前 ${Math.min(rows.length, 80)} 条，共 ${data.row_count} 条 —— 完整明细请导出 CSV。`,
+            `表格显示前 ${shown.length} 条，共 ${data.row_count} 条 —— 完整明细请导出 CSV。`,
           ),
         );
-      }
-    }
-  }
-  load(null);
-  return wrap;
-}
-
-/* Summarize the bounded derived-image build result without retaining process output. */
-function sandboxImageNode(update) {
-  const status = String(update.status || "unknown");
-  if (status === "ok") {
-    const secs =
-      (Date.parse(update.finished_at || "") -
-        Date.parse(update.started_at || "")) /
-      1000;
-    const pruned = Array.isArray(update.pruned_image_refs)
-      ? update.pruned_image_refs.length
-      : 0;
-    return [
-      "构建成功",
-      update.image_ref,
-      Number.isFinite(secs) ? `${secs.toFixed(1)}s` : null,
-      pruned ? `清理旧镜像 ${pruned} 个` : null,
-    ]
-      .filter(Boolean)
-      .join(" ｜ ");
-  }
-  const notes = {
-    skipped_empty: "请求为空，未构建（沿用基础镜像）",
-    skipped_local_dev: "local_dev 运行，未构建（沿用基础镜像）",
-    disabled: "派生镜像构建已禁用（沿用基础镜像）",
-  };
-  if (notes[status]) return notes[status];
-  const tail = String(update.reason || "").trim();
-  return el(
-    "div",
-    {},
-    el(
-      "div",
-      { class: "form-error" },
-      `构建未成功（${status}）${update.image_ref ? `：${update.image_ref}` : ""}`,
-    ),
-    tail ? el("pre", { class: "code-view" }, tail.slice(-2000)) : null,
-  );
-}
-
-function metaResultPanel(detail, session) {
-  const record = session.record || {};
-  const trigger = Number(
-    session.trigger_after_folds || record.trigger_after_folds || 0,
-  );
-  const label =
-    trigger > 0 ? `${session.epoch_id} / ${trigger} Fold 后` : session.epoch_id;
-  const panel = el(
-    "div",
-    { class: "panel section-gap" },
-    el("h4", {}, `元学习结果 — ${label}`),
-  );
-  panel.append(
-    el(
-      "table",
-      { class: "kv" },
-      kvRow("状态", record.status || "—"),
-      kvRow("总耗时", foldDurationNode(detail, session)),
-      record.meta_learning_directive
-        ? kvRow("注入指令", record.meta_learning_directive)
-        : null,
-      record.fold_exploration_directive
-        ? kvRow("实验探索主线", record.fold_exploration_directive)
-        : null,
-      record.sandbox_image_update
-        ? kvRow("沙箱镜像", sandboxImageNode(record.sandbox_image_update))
-        : null,
-    ),
-  );
-  if (record.prior) {
-    panel.append(
-      el("h4", { class: "section-gap" }, "PRIOR"),
-      renderMarkdown(record.prior),
-    );
-  }
-  return panel;
-}
-
-/* The deployment adjustment panel (docs/pipeline-design.md §3.4): what the
-   mechanism-frozen refit changed on the window, whether the mechanism stayed
-   the graduate's, how wide the search was, and the artifact Paper pins with
-   the exact command. Window figures include the Held-out and are in-sample
-   selections, never a test. */
-function deploymentPanel(detail, session) {
-  const record = session.record || {};
-  const validation = record.validation_result || {};
-  const control = (record.parent_control || {}).validation_result || {};
-  const vs = record.vs_parent || {};
-  const selection = record.selection_statistics || {};
-  const mechanism = record.mechanism_check;
-  const candidate = detail.paper_candidate;
-  const status = String(record.status || "");
-  const panel = el(
-    "div",
-    { class: "panel section-gap" },
-    el(
-      "h4",
-      { class: "subsection-title" },
-      "部署调整（机制冻结的重拟合）",
-      el(
-        "span",
-        { class: `badge ${status === "adjusted" ? "pos" : ""}` },
-        DEPLOYMENT_STATUS_LABELS[status] || status,
-      ),
-    ),
-    el(
-      "div",
-      { class: "meta-line" },
-      `窗口 ${record.validation_period || record.period || "—"}（含 Held-out，样本内选择）`,
-    ),
-  );
-  if ((record.hard_reject_reasons || []).length)
-    panel.append(el("div", { class: "meta-line" }, `未采用：${record.hard_reject_reasons.join("、")}`));
-  if (record.no_edge_reason)
-    panel.append(el("div", { class: "meta-line" }, `弃权理由：${record.no_edge_reason}`));
-  const pct = (value) => (value === null || value === undefined ? "—" : fmtPct(value));
-  panel.append(
-    el(
-      "div",
-      { class: "section-gap" },
-      statTilesRow([
-        { label: "毕业产物 整窗收益", value: pct(control.total_return), cls: signCls(control.total_return) },
-        { label: "调整候选 整窗收益", value: pct(validation.total_return), cls: signCls(validation.total_return) },
-        { label: "中性化超额 差值", value: pct(vs.neutralized_excess_return_delta), cls: signCls(vs.neutralized_excess_return_delta) },
-        { label: "回撤 差值", value: pct(vs.max_drawdown_delta), cls: "" },
-      ]),
-    ),
-    el(
-      "div",
-      { class: "meta-line" },
-      `机制比对：${mechanism ? (mechanism.equal ? "与毕业产物一致" : "已改变（拒绝冻结）") : "未提名新节点"} ｜ 候选 ${selection.candidates_evaluated ?? "—"} 个 ｜ 去偏 Sharpe 概率 ${
-        selection.deflated_sharpe_probability === null || selection.deflated_sharpe_probability === undefined
-          ? "—"
-          : Number(selection.deflated_sharpe_probability).toFixed(2)
-      }`,
-    ),
-  );
-  if (candidate) {
-    panel.append(
-      el("h5", { class: "section-gap" }, `Paper 建簿：毕业产物 ${candidate.graduated_artifact_id}`),
-      el("pre", { class: "code-block", style: "white-space:pre-wrap" }, candidate.command),
-      el(
-        "div",
-        { class: "hint" },
-        "在仓库根目录运行；Paper 不会自动启动。",
-        candidate.source === "adjusted"
-          ? `可改用调整后产物 ${candidate.artifact_id}（--artifact），但其调整窗口含 Held-out 月份。`
-          : null,
-      ),
-    );
-  }
-  return panel;
-}
-
-function heldoutPanel(detail, session) {
-  const records = session.records || [];
-  const plannedPeriods = new Map(
-    (session.periods || [])
-      .filter((item) => item && item.label)
-      .map((item) => [String(item.label), item]),
-  );
-  const hidden =
-    !detail.test_revealed || records.some((record) => record.hidden);
-  if (hidden) {
-    return el(
-      "div",
-      { class: "panel section-gap" },
-      el("h4", { class: "subsection-title" }, "Held-out 冻结测试（最终样本外）"),
-      el(
-        "div",
-        { class: "empty" },
-        detail.test_revealed ? "Held-out 结果尚未写入。" : "测试与 Held-out 尚未揭示。",
-      ),
-    );
-  }
-  const results = records.map((record) => record.result || {});
-  const returns = results
-    .map((result) => result.total_return)
-    .filter((value) => value !== null && value !== undefined);
-  const sharpes = results
-    .map((result) => result.sharpe)
-    .filter((value) => value !== null && value !== undefined);
-  const drawdowns = results
-    .map((result) => result.max_drawdown)
-    .filter((value) => value !== null && value !== undefined);
-  const longs = results
-    .map((result) => result.long_return)
-    .filter((value) => value !== null && value !== undefined);
-  const cumulative = returns.length
-    ? returns.reduce((total, value) => total * (1 + value), 1) - 1
-    : null;
-  const wins = returns.filter((value) => value > 0).length;
-  const panel = el(
-    "div",
-    { class: "panel section-gap" },
-    el(
-      "h4",
-      { class: "subsection-title" },
-      "Held-out 冻结测试（最终样本外）",
-      verdictBadge(detail.verdict),
-      walkForwardTerm(detail.verdict),
-    ),
-  );
-  if (detail.verdict && (detail.verdict.reasons || []).length)
-    panel.append(
-      el(
-        "div",
-        { class: "meta-line" },
-        `未达标：${detail.verdict.reasons.join("、")}`,
-      ),
-    );
-  const terms = verdictTerms(detail.verdict);
-  if (terms) panel.append(terms);
-  panel.append(
-    el(
-      "div",
-      { class: "section-gap" },
-      statTilesRow([
-        {
-          label: "累计收益",
-          value: fmtPct(cumulative),
-          cls: signCls(cumulative),
-        },
-        {
-          label: "平均 Sharpe",
-          value: sharpes.length
-            ? (sharpes.reduce((a, b) => a + b, 0) / sharpes.length).toFixed(2)
-            : "—",
-        },
-        {
-          label: "最差单期回撤",
-          value: drawdowns.length ? fmtPct(Math.max(...drawdowns)) : "—",
-        },
-        {
-          label: "正收益期数",
-          value: returns.length ? `${wins} / ${returns.length}` : "—",
-        },
-        {
-          label: "多头贡献（累计）",
-          value: longs.length ? fmtPct(longs.reduce((a, b) => a + b, 0)) : "—",
-        },
-      ]),
-    ),
-  );
-  if (returns.length && detailView) {
-    panel.append(
-      el(
-        "div",
-        { class: "section-gap" },
-        el("h4", {}, "日度累计收益 vs 沪深300（含回撤）"),
-        equityHost(
-          detailView.experimentId,
-          equityFingerprint(detailView.detail),
-          { width: 860, height: 220, ddH: 80, keys: ["heldout"] },
-        ),
-      ),
-    );
-    const lastRun =
-      records[records.length - 1] && records[records.length - 1].run_ref;
-    if (lastRun)
-      panel.append(
-        styleCard(detailView.experimentId, String(lastRun), "heldout"),
+    })
+    .catch((error) => {
+      body.replaceChildren(
+        el("div", { class: "hint" }, `无交易明细：${error.message}`),
       );
-  }
-  panel.append(
-    el(
-      "table",
-      { class: "data section-gap" },
-      el(
-        "tr",
-        {},
-        el("th", {}, "区间"),
-        el("th", {}, "起止"),
-        el("th", {}, "收益"),
-        el("th", {}, "多头"),
-        el("th", {}, "Sharpe"),
-        el("th", {}, "回撤"),
-        el("th", {}, "订单"),
-      ),
-      ...records.map((record) => {
-        const result = record.result || {};
-        // The ledger carries the period LABEL; its calendar bounds live on the
-        // planned held-out session (revealed alongside these records).
-        const label = String(record.period || "");
-        const period = plannedPeriods.get(label) || {};
-        return el(
-          "tr",
-          {},
-          el("td", {}, label ? fmtPeriodRange(label) : "—"),
-          el(
-            "td",
-            {},
-            period.start && period.end
-              ? `${fmtDate(period.start)} ～ ${fmtDate(period.end)}`
-              : "—",
-          ),
-          el(
-            "td",
-            { class: numClass(result.total_return) },
-            fmtPct(result.total_return),
-          ),
-          el(
-            "td",
-            { class: numClass(result.long_return) },
-            fmtPct(result.long_return),
-          ),
-          el(
-            "td",
-            {},
-            result.sharpe !== undefined && result.sharpe !== null
-              ? Number(result.sharpe).toFixed(2)
-              : "—",
-          ),
-          el("td", {}, fmtPct(result.max_drawdown)),
-          el("td", {}, result.order_count ?? "—"),
-        );
-      }),
-    ),
-  );
-  // Held-out is the final untouched estimate; its per-quarter rows are what
-  // say whether one stretch of market carried the whole span.
-  for (const record of records) {
-    const result = record.result || {};
-    const label = String(record.period || "");
-    const section = subWindowSection(
-      label ? `Held-out ${label} 分季度表现` : "Held-out 分季度表现",
-      result.sub_windows,
-    );
-    if (section) panel.append(section);
-  }
-  return panel;
+    });
+  return body;
 }
 
 /* ---------------- 运行记忆 ----------------
@@ -7378,8 +5239,7 @@ function candidateAsideReason(row) {
   if (row.error) return el("span", { class: "hint warn" }, row.error);
   if (row.admitted === null || row.admitted === undefined)
     return el("span", { class: "hint warn" }, "无法解析");
-  if (!row.revealed) return el("span", { class: "hint" }, "未揭示");
-  if (!row.verdict) return el("span", { class: "hint" }, "无 Held-out 记录");
+  if (!row.verdict) return el("span", { class: "hint" }, "无裁决");
   if (row.verdict !== "graduated") return verdictBadge({ status: row.verdict });
   return el("span", { class: "hint" }, "无已发布 skill 条目");
 }

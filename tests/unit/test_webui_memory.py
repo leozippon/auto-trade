@@ -286,7 +286,7 @@ def test_an_arm_without_a_verdict_publishes_none_and_mounts_nothing(
     experiments.mkdir()
     _experiment(experiments, "mid_forward", verdict=None)
     row = memory.graduated_tier(experiments)["experiments"][0]
-    assert row["revealed"] is False
+    assert "revealed" not in row
     assert row["verdict"] is None
     assert row["admitted"] is False
     assert row["entries"] == []
@@ -575,7 +575,6 @@ def test_the_console_routes_serve_the_keys_the_page_reads(tmp_path: Path) -> Non
     assert {
         "experiment_id",
         "verdict",
-        "revealed",
         "admitted",
         "entries",
     } <= body["graduated"]["experiments"][0].keys()

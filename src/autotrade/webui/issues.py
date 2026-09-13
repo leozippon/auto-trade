@@ -54,10 +54,9 @@ def _experiment_reports(directory: Path) -> list[dict[str, object]]:
         raw_session = str(record.get("session_key") or "")
         if raw_session:
             try:
-                label = identity.session_display_key(raw_session)
+                label = identity.public_session_key(raw_session)
             except (KeyError, ValueError):
-                # A rerun can orphan a session key the current plan no longer
-                # names; the report still counts, it just has no label.
+                # A key the plan does not name still counts, just unlabelled.
                 label = ""
         rows.append(
             {

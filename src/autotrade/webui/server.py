@@ -1,4 +1,4 @@
-"""FastAPI application for the ADM-Cube research, HITL, and Paper console.
+"""FastAPI application for the ADM-Cube research and Paper console.
 
 JSON API + static SPA. The server is a thin control plane: pipeline execution
 happens in detached worker processes; state flows through the hitl/ files and
@@ -27,18 +27,14 @@ from starlette.background import BackgroundTask
 
 from autotrade.environment.data.contracts import RAW_GENERATION_FILENAME
 from autotrade.environment.llm.model_profiles import model_profile
-from autotrade.pipelines.fold_analysis import analysis_paths
 from autotrade.pipelines.hitl_state import (
-    ANALYSIS_DIR_NAME,
     HITL_DIR_NAME,
     PARAMS_NAME,
     read_json,
     read_status,
 )
-from autotrade.pipelines.ledger import latest_fold_records
 
 from . import equity, issues, memory, registry, steps, traces, trading
-from .analysis import AnalysisService
 from .manager import (
     MAX_RUNNING_EXPERIMENTS,
     ExperimentManager,
@@ -119,13 +115,7 @@ def _health_unreadable_experiments(
 def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI:
     root = Path(repo_root).resolve()
     experiment_root = Path(experiments_root or root / "experiments").resolve()
-    analysis_service = AnalysisService(root)
-    # The manager must see the analysis service's pending work: its background
-    # threads write into experiments/<id>/hitl/analysis/, so deletion is
-    # refused (409) while an analysis for that experiment is still running.
-    manager = ExperimentManager(
-        root, experiment_root, analysis_pending=analysis_service.pending_for_experiment
-    )
+    manager = ExperimentManager(root, experiment_root)
     app = FastAPI(
         title="ADM-Cube Console", docs_url=None, redoc_url=None, openapi_url=None
     )
@@ -185,13 +175,11 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         blocks = public.get("blocks")
         if isinstance(blocks, list):
             public["blocks"] = [
-                identity.public_record(block, heldout_revealed=False)
-                for block in blocks
-                if isinstance(block, dict)
+                identity.public_record(block) for block in blocks if isinstance(block, dict)
             ]
         header = public.get("header")
         if isinstance(header, dict):
-            public["header"] = identity.public_record(header, heldout_revealed=False)
+            public["header"] = identity.public_record(header)
         return public
 
     def _public_trace_download(path: Path, identity: PublicIdentity) -> Path:
@@ -224,9 +212,7 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
                                 + "\n"
                             )
                             continue
-                        public = identity.public_record(
-                            event, heldout_revealed=False
-                        )
+                        public = identity.public_record(event)
                         handle.write(
                             json.dumps(public, ensure_ascii=False, default=str) + "\n"
                         )
@@ -266,8 +252,10 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
 
     @app.get("/api/experiments")
     def get_experiments() -> dict[str, object]:
+        rows = registry.list_experiments(experiment_root)
         return {
-            "experiments": registry.list_experiments(experiment_root),
+            "experiments": rows,
+            "best": registry.best_experiment(rows),
             "running": manager.running_experiments(),
             "max_running_experiments": MAX_RUNNING_EXPERIMENTS,
         }
@@ -296,8 +284,7 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         state = registry.experiment_state(directory)
         raw_status = state.get("status")
         public = identity.public_record(
-            {key: value for key, value in state.items() if key != "status"},
-            heldout_revealed=False,
+            {key: value for key, value in state.items() if key != "status"}
         )
         if isinstance(raw_status, dict):
             public["status"] = identity.public_status(raw_status)
@@ -353,6 +340,23 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         if not projected.get("found"):
             raise HTTPException(status_code=404, detail="unknown sub-agent task")
         return _public_trace_blocks(projected, identity)
+
+    @app.get("/api/experiments/{experiment_id}/trace/initial-prompt")
+    def get_initial_prompt(
+        experiment_id: str,
+        run_id: str = Query(...),
+    ) -> dict[str, object]:
+        """The system prompt and opening message a session actually started with."""
+
+        path, _raw_run_id, _trace_ref, identity = _trace_target(experiment_id, run_id)
+        try:
+            prompt = traces.read_initial_prompt(path)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc
+        public = identity.public_record(prompt)
+        public.pop("run_ref", None)
+        public.pop("trace_ref", None)
+        return public
 
     @app.get("/api/experiments/{experiment_id}/trace/stream")
     def get_trace_stream(
@@ -449,64 +453,14 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
 
         return _zip_response(members(), filename)
 
-    @app.get("/api/experiments/{experiment_id}/folds/{epoch_id}/{fold_id}")
-    def get_fold(experiment_id: str, epoch_id: str, fold_id: str) -> dict[str, object]:
+    @app.get("/api/experiments/{experiment_id}/frozen/strategy.zip")
+    def get_frozen_strategy(experiment_id: str) -> FileResponse:
         _experiment_dir(experiment_id)
         try:
-            detail = registry.fold_detail(experiment_root, experiment_id, epoch_id, fold_id)
+            strategy_dir = registry.frozen_strategy_dir(experiment_root, experiment_id)
         except (KeyError, ValueError) as exc:
-            raise HTTPException(status_code=404, detail="unknown fold reference") from exc
-        analysis = detail.get("analysis")
-        if isinstance(analysis, dict):
-            analysis["pending"] = analysis_service.pending(
-                experiment_id, epoch_id, fold_id
-            )
-        return detail
-
-    @app.get("/api/experiments/{experiment_id}/folds/{epoch_id}/{fold_id}/initial-prompt")
-    def get_fold_initial_prompt(
-        experiment_id: str,
-        epoch_id: str,
-        fold_id: str,
-    ) -> dict[str, object]:
-        directory, identity = _public_identity(experiment_id)
-        try:
-            raw_run_id = registry.fold_run_id(
-                experiment_root,
-                experiment_id,
-                epoch_id,
-                fold_id,
-            )
-            path = traces.resolve_trace_path(directory, raw_run_id)
-            if path is None:
-                raise KeyError("no agent trace recorded for this fold")
-            prompt = traces.read_initial_prompt(path)
-        except (KeyError, ValueError) as exc:
-            raise HTTPException(status_code=404, detail="unknown fold reference") from exc
-        public_prompt = identity.public_record(
-            prompt, heldout_revealed=False
-        )
-        public_prompt.pop("run_ref", None)
-        return {
-            "experiment_id": experiment_id,
-            "epoch_id": epoch_id,
-            "fold_ref": fold_id,
-            "run_ref": identity.run_ref(raw_run_id),
-            "trace_ref": identity.trace_ref(raw_run_id),
-            **public_prompt,
-        }
-
-    @app.get("/api/experiments/{experiment_id}/folds/{epoch_id}/{fold_id}/strategy.zip")
-    def get_fold_strategy(experiment_id: str, epoch_id: str, fold_id: str) -> FileResponse:
-        try:
-            strategy_dir = registry.fold_strategy_dir(
-                experiment_root, experiment_id, epoch_id, fold_id
-            )
-        except (KeyError, ValueError) as exc:
-            raise HTTPException(status_code=404, detail="unknown fold reference") from exc
-        return _strategy_zip_response(
-            strategy_dir, f"{experiment_id}__{epoch_id}__{fold_id}.zip"
-        )
+            raise HTTPException(status_code=404, detail="the experiment has no frozen artifact") from exc
+        return _strategy_zip_response(strategy_dir, f"{experiment_id}__frozen.zip")
 
     # ---- step tree ---------------------------------------------------------------
     @app.get("/api/experiments/{experiment_id}/steps")
@@ -534,109 +488,52 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
             f"{experiment_id}__{node_id}.zip",
         )
 
-    @app.get("/api/experiments/{experiment_id}/equity")
-    def get_equity(experiment_id: str, epoch_id: str | None = Query(None)) -> dict[str, object]:
+    # ---- replay results named by the ledger -----------------------------------------
+    # A result no ledger record names answers 404 exactly like a missing one, so
+    # the forward replay stays unreadable until its verdict is recorded.
+    def _ledger_result(read, experiment_id: str, name: str):
         _experiment_dir(experiment_id)
         try:
-            return equity.experiment_equity_payload(experiment_root, experiment_id, epoch_id=epoch_id)
-        except KeyError as exc:
-            raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc
-
-    @app.get("/api/experiments/{experiment_id}/folds/{epoch_id}/{fold_id}/equity")
-    def get_fold_equity(experiment_id: str, epoch_id: str, fold_id: str) -> dict[str, object]:
-        _experiment_dir(experiment_id)
-        try:
-            return equity.fold_equity_payload(experiment_root, experiment_id, epoch_id, fold_id)
+            return read()
         except (KeyError, ValueError) as exc:
-            raise HTTPException(status_code=404, detail="unknown fold reference") from exc
+            raise HTTPException(status_code=404, detail=f"unknown result: {name}") from exc
 
-    @app.get("/api/experiments/{experiment_id}/style")
-    def get_style(experiment_id: str, run_id: str = Query(...), prefix: str = Query(...)) -> dict[str, object]:
-        _experiment_dir(experiment_id)
-        try:
-            return registry.style_payload(
-                experiment_root,
-                experiment_id,
-                run_ref=run_id,
-                prefix=prefix,
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        except KeyError as exc:
-            raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc
+    @app.get("/api/experiments/{experiment_id}/results/{name}/equity")
+    def get_result_equity(experiment_id: str, name: str) -> dict[str, object]:
+        return _ledger_result(
+            lambda: equity.result_equity_payload(experiment_root, experiment_id, name),
+            experiment_id,
+            name,
+        )
 
-    @app.get("/api/experiments/{experiment_id}/folds/{epoch_id}/{fold_id}/orders")
-    def get_fold_orders(
-        experiment_id: str,
-        epoch_id: str,
-        fold_id: str,
-        result: str | None = Query(None),
-    ) -> dict[str, object]:
-        _experiment_dir(experiment_id)
-        try:
-            return registry.fold_orders(experiment_root, experiment_id, epoch_id, fold_id, result=result)
-        except (KeyError, ValueError) as exc:
-            raise HTTPException(status_code=404, detail="unknown fold reference") from exc
+    @app.get("/api/experiments/{experiment_id}/results/{name}/style")
+    def get_result_style(experiment_id: str, name: str) -> dict[str, object]:
+        return _ledger_result(
+            lambda: registry.result_style(experiment_root, experiment_id, name),
+            experiment_id,
+            name,
+        )
 
-    @app.get("/api/experiments/{experiment_id}/folds/{epoch_id}/{fold_id}/orders.csv")
-    def get_fold_orders_csv(
-        experiment_id: str,
-        epoch_id: str,
-        fold_id: str,
-        result: str = Query(...),
-    ) -> PlainTextResponse:
-        _experiment_dir(experiment_id)
-        try:
-            filename, content = registry.fold_orders_csv(
-                experiment_root,
-                experiment_id,
-                epoch_id,
-                fold_id,
-                result=result,
-            )
-        except (KeyError, ValueError) as exc:
-            raise HTTPException(status_code=404, detail="unknown fold reference") from exc
+    @app.get("/api/experiments/{experiment_id}/results/{name}/orders")
+    def get_result_orders(experiment_id: str, name: str) -> dict[str, object]:
+        return _ledger_result(
+            lambda: registry.result_orders(experiment_root, experiment_id, name),
+            experiment_id,
+            name,
+        )
+
+    @app.get("/api/experiments/{experiment_id}/results/{name}/orders.csv")
+    def get_result_orders_csv(experiment_id: str, name: str) -> PlainTextResponse:
+        filename, content = _ledger_result(
+            lambda: registry.result_orders_csv(experiment_root, experiment_id, name),
+            experiment_id,
+            name,
+        )
         return PlainTextResponse(
             content,
             media_type="text/csv; charset=utf-8",
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
-
-    # ---- analysis -----------------------------------------------------------------
-    @app.get("/api/experiments/{experiment_id}/analysis/{epoch_id}/{fold_id}")
-    def get_analysis(experiment_id: str, epoch_id: str, fold_id: str) -> dict[str, object]:
-        # Resolve first so an arbitrary UUID-shaped token cannot probe sidecar names.
-        directory, identity = _public_identity(experiment_id)
-        try:
-            raw_fold_id = identity.raw_fold_id(epoch_id, fold_id)
-        except (KeyError, ValueError) as exc:
-            raise HTTPException(status_code=404, detail="unknown fold reference") from exc
-        record = latest_fold_records(registry.read_ledger_records(directory)).get(
-            (epoch_id, raw_fold_id)
-        )
-        if record is not None:
-            identity.public_record(record, heldout_revealed=False)
-        md_path, meta_path = analysis_paths(
-            directory / HITL_DIR_NAME / ANALYSIS_DIR_NAME, epoch_id, fold_id
-        )
-        meta = read_json(meta_path) if meta_path.exists() else None
-        return {
-            "available": md_path.exists(),
-            "pending": analysis_service.pending(experiment_id, epoch_id, fold_id),
-            "content": identity.public_text(md_path.read_text(encoding="utf-8"))
-            if md_path.exists()
-            else None,
-            "meta": identity.public_analysis_meta(meta) if isinstance(meta, dict) else None,
-        }
-
-    @app.post("/api/experiments/{experiment_id}/analysis/{epoch_id}/{fold_id}")
-    def post_analysis(experiment_id: str, epoch_id: str, fold_id: str) -> dict[str, object]:
-        _experiment_dir(experiment_id)
-        try:
-            analysis_service.regenerate(manager.experiments_root, experiment_id, epoch_id, fold_id)
-        except (ManagerError, KeyError, ValueError) as exc:
-            raise HTTPException(status_code=409, detail="analysis request was rejected") from exc
-        return {"status": "started"}
 
     # ---- operating memory ---------------------------------------------------------
     # The curated library is a tracked repository directory, so editing it is

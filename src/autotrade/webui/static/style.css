@@ -33,8 +33,6 @@
  --code-ink: #333a46;
  --mask: rgba(20, 26, 40, 0.45);
  --danger-border: #e5b8b8;
- --audit-border: #d8b96a;
- --audit-bg: #fffdf4;
  --mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
  --radius: 12px;
  --shadow: 0 1px 3px rgba(24, 34, 56, 0.08);
@@ -68,8 +66,6 @@
  --code-ink: #c6cdd9;
  --mask: rgba(0, 0, 0, 0.62);
  --danger-border: #6d3a3a;
- --audit-border: #8a6f2f;
- --audit-bg: #26200f;
  --shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
  --shadow-lift: 0 4px 16px rgba(0, 0, 0, 0.5);
 }
@@ -495,45 +491,49 @@ progress.progress.done::-moz-progress-bar {
 .tile-value.neg {
  color: var(--loss);
 }
-.tile-value.hero-key {
- font-size: 1.7rem;
-}
 
-/* Walk-forward strip under the tiles: the tiles are what the account is worth,
-   these are the future quarters behind it. Inline label:value chips rather than
-   a second row of tiles, so the count reads as one line and wraps on narrow
-   screens instead of stealing the tiles' weight. */
-.strip {
+/* Stage strip: research sessions, freeze, forward, Held-out and verdict as one
+   wrapping row of chips; state colors the top rule, the note says it in words. */
+.stage-strip {
  display: flex;
  flex-wrap: wrap;
- align-items: baseline;
- gap: 0.45rem 1.15rem;
- margin-top: 0.85rem;
- padding-top: 0.75rem;
- border-top: 1px solid var(--row-border);
+ gap: 0.5rem;
 }
-.strip-title {
- font-size: 0.875rem;
- font-weight: 650;
-}
-.strip-item {
+.stage-chip {
  display: flex;
- align-items: baseline;
- gap: 0.35rem;
+ flex-direction: column;
+ min-width: 5.5rem;
+ padding: 0.35rem 0.6rem;
+ border: 1px solid var(--border);
+ border-top: 3px solid var(--chip-bg);
+ border-radius: 6px;
  font-size: 0.875rem;
 }
-.strip-label {
- color: var(--muted);
-}
-.strip-value {
+.stage-chip .stage-name {
  font-weight: 650;
- font-variant-numeric: tabular-nums;
 }
-.strip-value.pos {
- color: var(--gain);
+.stage-chip .stage-note {
+ color: var(--muted);
+ font-size: 0.8rem;
 }
-.strip-value.neg {
- color: var(--loss);
+.stage-chip.done,
+.stage-chip.pass {
+ border-top-color: var(--ok);
+}
+.stage-chip.running {
+ border-top-color: var(--run);
+}
+.stage-chip.sealed {
+ border-top-color: var(--warn);
+}
+.stage-chip.fail {
+ border-top-color: var(--bad);
+}
+.stage-chip.skipped {
+ opacity: 0.6;
+}
+.hero-title {
+ margin: 0;
 }
 .orders-table-box {
  max-height: 24rem;
@@ -674,10 +674,8 @@ h4.subsection-title,
  overflow: auto;
 }
 /* The list scrolls, so a row never trades its own height for the container's:
-   flex: none keeps every row at its content height. Without it a row that sets
-   its own min-height (.phase-head) loses the automatic minimum size and is
-   shrunk to one line inside the max-height list, spilling its second line
-   below its own box. */
+   flex: none keeps every row at its content height, so a row with a second
+   line never spills it below its own box inside the max-height list. */
 .session-item {
  display: flex;
  flex: none;
@@ -729,12 +727,8 @@ h4.subsection-title,
  white-space: nowrap;
 }
 /* Second line of a session row: what the session left behind, under the label
-   it belongs to. It wraps onto its own line (order puts it last in both the
-   ordinary and the phase-head order) and starts at the label's left edge, so
-   the dot/label/return line above it is untouched. The indent clears the
-   status dot, which only precedes the label in the ordinary order — a
-   phase-head row moves the dot to the far right and drops it. Weight is fixed
-   here so every note reads the same, whatever the row above it weighs. */
+   it belongs to. It wraps onto its own line and starts at the label's left
+   edge, so the dot/label/return line above it is untouched. */
 .session-item .session-note {
  order: 9;
  flex-basis: 100%;
@@ -752,45 +746,6 @@ h4.subsection-title,
  font-size: 0.845rem;
  color: var(--muted);
  font-weight: 600;
-}
-.session-item.phase-head {
- width: 100%;
- min-height: 2.35rem;
- box-sizing: border-box;
- margin: 0.75rem 0 0;
- padding: 0.5rem 0.7rem;
- border: 1px solid var(--border);
- border-radius: 6px;
- background: var(--input-bg);
- color: var(--text);
- font-size: 0.875rem;
- font-weight: 650;
-}
-.session-item.phase-head:hover {
- background: var(--hover-bg);
-}
-.session-item.phase-head.selected {
- border-color: var(--accent);
- background: var(--accent-soft);
-}
-.session-item.phase-head .label {
- order: 1;
-}
-.session-item.phase-head .dot {
- order: 2;
- margin-left: auto;
-}
-.session-item.phase-head .ret {
- order: 3;
-}
-.session-item.phase-head .session-note {
- padding-left: 0;
-}
-/* The phase heads are one post-development block: the 0.75rem break belongs
-   between them and the Epoch above, not between the heads, which keep the
-   list's own row gap. */
-.session-item.phase-head + .session-item.phase-head {
- margin-top: 0;
 }
 
 .control-bar {
@@ -861,55 +816,6 @@ table.data th {
 table.data th:first-child,
 table.data td:first-child {
  text-align: left;
-}
-/* full-cycle stats strip: one row per series under the equity chart, spanning
-   the card width. Muted headers, hairline separators, tabular figures; series
-   identity comes from a chart-colored swatch beside the label. */
-table.cycle-stats {
- width: 100%;
- font-size: 0.875rem;
- margin-top: 0.6rem;
-}
-table.cycle-stats th,
-table.cycle-stats td {
- padding: 0.34rem 0.65rem;
- border-bottom: 1px solid var(--row-border);
-}
-table.cycle-stats th:first-child,
-table.cycle-stats td:first-child {
- width: 1%;
- padding-right: 1.2rem;
- white-space: nowrap;
-}
-table.cycle-stats th {
- font-weight: 500;
- white-space: nowrap;
-}
-table.cycle-stats td {
- white-space: nowrap;
-}
-table.cycle-stats tr:last-child td,
-table.cycle-stats tr:last-child th {
- border-bottom: none;
-}
-table.cycle-stats th[title] {
- cursor: help;
- text-decoration: underline dotted var(--border);
- text-underline-offset: 3px;
-}
-table.cycle-stats .legend-swatch {
- width: 0.6rem;
- height: 0.6rem;
- border-radius: 2px;
- margin-right: 0.5rem;
- vertical-align: -1px;
-}
-/* epoch switcher row above the equity chart */
-.epoch-switch {
- display: flex;
- gap: 0.5rem;
- flex-wrap: wrap;
- margin: 0 0 0.65rem;
 }
 .num.pos {
  color: var(--gain);
@@ -1404,19 +1310,6 @@ pre.code-view {
  color: var(--code-ink);
 }
 
-/* guarded test audit */
-details.test-audit {
- border: 1px dashed var(--audit-border);
- background: var(--audit-bg);
- border-radius: 10px;
- padding: 0.6rem 0.9rem;
-}
-details.test-audit summary {
- cursor: pointer;
- color: var(--warn);
- font-weight: 600;
-}
-
 /* modal */
 .modal-mask {
  position: fixed;
@@ -1507,9 +1400,6 @@ details.test-audit summary {
  color: var(--muted);
  margin-top: 3px;
  line-height: 1.45;
-}
-.help.derived-hint {
- color: var(--accent);
 }
 .field input[type="text"],
 .field input[type="time"],
@@ -1694,18 +1584,13 @@ label.check-item {
  margin: 0;
  flex: none;
 }
-details.advanced,
-details.caliber {
+details.advanced {
  margin-top: 0.55rem;
 }
-details.advanced summary,
-details.caliber summary {
+details.advanced summary {
  cursor: pointer;
  color: var(--muted);
  font-size: 0.875rem;
-}
-details.caliber .mode-note {
- margin-top: 0.35rem;
 }
 details.advanced .form-grid {
  margin-top: 0.55rem;
@@ -2340,8 +2225,7 @@ details.issue-evidence > summary:hover {
     panel: from here down a wide table no longer fits, and the page clips
     horizontal overflow rather than scrolling to it. */
  table.data,
- table.kv,
- table.cycle-stats {
+ table.kv {
   display: block;
   overflow-x: auto;
   max-width: 100%;

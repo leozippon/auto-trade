@@ -1,266 +1,86 @@
-"""Equity series assembled only from immutable experiment result artifacts."""
+"""Daily equity series of one ledger-named replay result.
+
+The curve is read from the result's own ``result.json`` and the CSI 300
+benchmark from its style sidecar; nothing is chained or recomputed across
+results. Which results exist at all is ``registry.ledger_result``'s answer, so
+the forward replay has no curve until its verdict is recorded.
+"""
 
 from __future__ import annotations
 
 import json
 import math
-from collections.abc import Mapping
-from itertools import pairwise
 from pathlib import Path
-from typing import NamedTuple
 
-from autotrade.environment.replay.stats import TRADING_DAYS_PER_YEAR
-from autotrade.environment.replay.style import (
-    BENCHMARK_LABEL,
-    STYLE_ARTIFACT_NAME,
-    STYLE_SCHEMA_VERSION,
-    _slot_benchmark,
-)
-from autotrade.pipelines.ledger import (
-    latest_fold_records,
-    latest_heldout_records,
-    transition_result,
-)
+from autotrade.environment.replay.style import BENCHMARK_LABEL, STYLE_ARTIFACT_NAME
 
 from . import registry
 
-SERIES_LABELS = {
-    "valid": "策略（验证）",
-    "test": "策略（测试）",
-    "heldout": "策略（Held-out）",
-    "forward": "父本对照前向（样本外过渡）",
-}
-_LABELS = {"benchmark": BENCHMARK_LABEL, **SERIES_LABELS}
 
-
-def _result_file(experiment_dir: Path, reference: object) -> Path | None:
-    if not isinstance(reference, str) or not reference:
+def _finite(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    raw = Path(reference)
-    candidate = raw.resolve() if raw.is_absolute() else (experiment_dir / raw).resolve()
-    if not candidate.is_relative_to(experiment_dir.resolve()):
-        return None
-    if candidate.is_dir():
-        candidate = candidate / "result.json"
-    return candidate if candidate.is_file() else None
+    number = float(value)
+    return number if math.isfinite(number) else None
 
 
-def _equities(experiment_dir: Path, reference: object) -> list[tuple[str, float, float]]:
-    path = _result_file(experiment_dir, reference)
-    if path is None:
-        return []
+def _read(path: Path) -> dict[str, object]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return []
-    if not isinstance(payload, dict):
-        return []
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _curve_rows(payload: dict[str, object]) -> list[dict[str, object]]:
     curve = payload.get("equity_curve")
-    initial = _finite(payload.get("initial_cash"))
-    rows: list[tuple[str, float]] = []
-    if isinstance(curve, dict):
-        rows = [(str(day), value) for day, raw in curve.items() if (value := _finite(raw)) is not None]
-    elif isinstance(curve, list):
-        for item in curve:
-            if not isinstance(item, dict):
-                continue
-            day = item.get("trade_date") or item.get("date")
-            value = _finite(item.get("equity"))
-            if day and value is not None:
-                rows.append((str(day), value))
-                if initial is None:
-                    initial = _finite(item.get("initial_equity"))
-    rows.sort()
+    rows = [
+        row
+        for row in (curve if isinstance(curve, list) else ())
+        if isinstance(row, dict) and row.get("trade_date") and _finite(row.get("equity"))
+    ]
+    return sorted(rows, key=lambda row: str(row["trade_date"]))
+
+
+def _returns(payload: dict[str, object]) -> list[tuple[str, float]]:
+    rows = _curve_rows(payload)
     if not rows:
         return []
-    initial = initial if initial is not None and initial > 0 else rows[0][1]
-    return [(day, value, initial) for day, value in rows if value > 0]
-
-
-def _returns(experiment_dir: Path, reference: object) -> list[tuple[str, float]]:
-    rows = _equities(experiment_dir, reference)
+    initial = _finite(payload.get("initial_cash")) or _finite(rows[0].get("initial_equity"))
+    previous = initial if initial and initial > 0 else float(rows[0]["equity"])  # type: ignore[arg-type]
     result: list[tuple[str, float]] = []
-    previous = rows[0][2] if rows else 0.0
-    for day, value, _initial in rows:
+    for row in rows:
+        equity = float(row["equity"])  # type: ignore[arg-type]
         if previous > 0:
-            result.append((day, value / previous - 1.0))
-        previous = value
+            result.append((str(row["trade_date"]), equity / previous - 1.0))
+        previous = equity
     return result
 
 
-def _exposures(experiment_dir: Path, reference: object) -> list[tuple[str, float]]:
-    """Daily position weight (EOD gross market value / equity) from the replay
-    curve. The long-only book carries no short leg, so the pane renders one
-    series per return curve."""
-    path = _result_file(experiment_dir, reference)
-    if path is None:
-        return []
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return []
-    curve = payload.get("equity_curve") if isinstance(payload, dict) else None
-    if not isinstance(curve, list):
-        return []
+def _exposures(payload: dict[str, object]) -> list[tuple[str, float]]:
+    """Daily position weight (EOD gross market value / equity); the long-only
+    book carries no short leg."""
     rows: list[tuple[str, float]] = []
-    for item in curve:
-        if not isinstance(item, dict):
-            continue
-        day = item.get("trade_date") or item.get("date")
-        equity = _finite(item.get("equity"))
-        cash = _finite(item.get("cash"))
-        if not day or equity is None or cash is None or equity <= 0:
-            continue
-        rows.append((str(day), round((equity - cash) / equity, 4)))
-    rows.sort()
+    for row in _curve_rows(payload):
+        equity = float(row["equity"])  # type: ignore[arg-type]
+        cash = _finite(row.get("cash"))
+        if cash is not None and equity > 0:
+            rows.append((str(row["trade_date"]), round((equity - cash) / equity, 4)))
     return rows
 
 
-def _exposure_entry(rows: list[tuple[str, float]]) -> dict[str, object]:
-    return {"dates": [row[0] for row in rows], "long": [row[1] for row in rows]}
+def _benchmark_returns(result_file: Path) -> list[tuple[str, float]]:
+    sidecar = _read(result_file.parent / STYLE_ARTIFACT_NAME)
+    rows: dict[str, float] = {}
+    for item in sidecar.get("benchmark_daily") or ():
+        if isinstance(item, list) and len(item) == 2 and item[0]:
+            value = _finite(item[1])
+            if value is not None:
+                rows.setdefault(str(item[0]), value)
+    return sorted(rows.items())
 
 
-_STYLE_MODES = frozenset(registry.RESULT_MODES.values())
-
-
-def _benchmark_returns(experiment_dir: Path, reference: object) -> list[tuple[str, float]]:
-    result_file = _result_file(experiment_dir, reference)
-    if result_file is None:
-        return []
-    sidecar = (result_file.parent / STYLE_ARTIFACT_NAME).resolve()
-    if sidecar.is_relative_to(experiment_dir.resolve()) and sidecar.is_file():
-        try:
-            payload = json.loads(sidecar.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            payload = None
-        if (
-            isinstance(payload, Mapping)
-            and payload.get("schema_version") == STYLE_SCHEMA_VERSION
-            and payload.get("mode") in _STYLE_MODES
-        ):
-            rows = payload.get("benchmark_daily")
-            result: dict[str, float] = {}
-            if isinstance(rows, list):
-                for item in rows:
-                    if not isinstance(item, list) or len(item) != 2:
-                        continue
-                    value = _finite(item[1])
-                    if item[0] and value is not None:
-                        result.setdefault(str(item[0]), value)
-            if result:
-                return sorted(result.items())
-    return _benchmark_from_replay_slot(experiment_dir, result_file)
-
-
-def _benchmark_from_replay_slot(
-    experiment_dir: Path, result_file: Path
-) -> list[tuple[str, float]]:
-    """Older frozen-test / Held-out dirs have no style sidecar; recover CSI 300
-    from the replay slot named in the result PIT block."""
-    try:
-        payload = json.loads(result_file.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return []
-    replay_ref = payload.get("pit") if isinstance(payload, Mapping) else None
-    replay_dir = replay_ref.get("replay_ref") if isinstance(replay_ref, Mapping) else None
-    if not isinstance(replay_dir, str) or not replay_dir:
-        return []
-    raw = Path(replay_dir)
-    slot = raw.resolve() if raw.is_absolute() else (experiment_dir / raw).resolve()
-    if not slot.is_relative_to(experiment_dir.resolve()):
-        return []
-    bench = _slot_benchmark(slot)
-    if not bench:
-        return []
-    days = [day for day, _value, _initial in _equities(experiment_dir, str(result_file))]
-    wanted = days or sorted(bench)
-    return [(day, bench[day]) for day in wanted if day in bench]
-
-
-def _run_result_ref(experiment_dir: Path, record: Mapping[str, object], prefix: str) -> object:
-    explicit = record.get(f"{prefix}_result_ref")
-    if explicit:
-        return explicit
-    run_id = str(record.get("run_id") or "")
-    if run_id and Path(run_id).name == run_id:
-        results = experiment_dir / "artifacts" / run_id / "results"
-        pattern = f"{registry.result_dir_prefixes((prefix,))[0]}*"
-        candidates = sorted(path for path in results.glob(pattern) if path.is_dir()) if results.is_dir() else []
-        if candidates:
-            return str(candidates[-1])
-    return None
-
-
-def _local_result_refs(experiment_dir: Path, prefix: str) -> list[str]:
-    root = experiment_dir / "artifacts/results"
-    if not root.is_dir():
-        return []
-    pattern = f"{registry.result_dir_prefixes((prefix,))[0]}*"
-    paths = [path for path in root.glob(pattern) if path.is_dir()]
-    paths.sort(key=lambda path: (path.stat().st_mtime_ns, path.name))
-    return [str(path) for path in paths]
-
-
-def _result_order(records: list[dict[str, object]]) -> list[dict[str, object]]:
-    """Folds in the order their results were written.
-
-    Only used to pair a Fold with the on-disk result directories, which
-    ``_local_result_refs`` returns oldest first, when the ledger names none.
-    """
-    return sorted(
-        latest_fold_records(records).values(),
-        key=lambda row: str(row.get("recorded_at") or ""),
-    )
-
-
-def _test_result_ref(
-    experiment_dir: Path,
-    record: Mapping[str, object],
-    order: list[dict[str, object]],
-    local_refs: list[str],
-) -> object:
-    reference = _run_result_ref(experiment_dir, record, "test")
-    if reference:
-        return reference
-    try:
-        index = order.index(record)
-    except ValueError:
-        return None
-    return local_refs[index] if index < len(local_refs) else None
-
-
-def _chain(parts: list[list[tuple[str, float]]]) -> list[tuple[str, float]]:
-    by_day: dict[str, float] = {}
-    for part in parts:
-        for day, value in part:
-            by_day.setdefault(day, value)
-    return sorted(by_day.items())
-
-
-def _quarter(day: str) -> tuple[int, int]:
-    return int(day[:4]), (int(day[4:6]) - 1) // 3 + 1
-
-
-def _period_quarters(period: object) -> set[str]:
-    """Calendar quarters a ``YYYYMMDD..YYYYMMDD`` ledger period touches."""
-    start, separator, end = str(period or "").partition("..")
-    if not separator:
-        return set()
-    (year, quarter), last = _quarter(start), _quarter(end)
-    labels: set[str] = set()
-    while (year, quarter) <= last:
-        labels.add(f"{year}Q{quarter}")
-        year, quarter = (year + 1, 1) if quarter == 4 else (year, quarter + 1)
-    return labels
-
-
-def _uncovered(owed: set[str], rows: list[tuple[str, float]]) -> list[str]:
-    """The owed quarters in which the chained line has not a single day."""
-    covered = {"{}Q{}".format(*_quarter(day)) for day, _value in rows}
-    return sorted(owed - covered)
-
-
-def _curve_entry(key: str, rows: list[tuple[str, float]]) -> dict[str, object]:
+def _curve_entry(key: str, label: str, rows: list[tuple[str, float]]) -> dict[str, object]:
     dates: list[str] = []
     cumulative: list[float] = []
     drawdown: list[float] = []
@@ -273,7 +93,7 @@ def _curve_entry(key: str, rows: list[tuple[str, float]]) -> dict[str, object]:
         drawdown.append(round(equity / peak - 1.0, 6))
     return {
         "key": key,
-        "label": _LABELS[key],
+        "label": label,
         "dates": dates,
         "cum": cumulative,
         "drawdown": drawdown,
@@ -281,363 +101,24 @@ def _curve_entry(key: str, rows: list[tuple[str, float]]) -> dict[str, object]:
     }
 
 
-class WalkForward(NamedTuple):
-    """One Epoch's walk-forward record for one result key.
-
-    ``references`` are the contributing result artifacts in walk-forward
-    order, ``rows`` their daily returns chained with each overlapping day kept
-    once, ``curve`` the compounded series the console draws (None when nothing
-    contributed) and ``missing`` the calendar quarters the line owed but has
-    no day in. It is read off the chained days, not off which Folds lacked a
-    readable replay: a later Fold's trailing window covers the quarters of an
-    earlier Fold that has none, and those are not missing from the line.
-    """
-
-    references: list[object]
-    rows: list[tuple[str, float]]
-    curve: dict[str, object] | None
-    missing: list[str]
-
-
-def walk_forward_curve(
-    experiment_dir: Path,
-    records: list[dict[str, object]],
-    *,
-    epoch_id: str | None,
-    key: str,
-) -> WalkForward:
-    """Chain one Epoch's Folds into the record of the strategy in force.
-
-    Each Fold contributes the replay of the strategy it left in force — its
-    frozen node's Validation result, or the host's parent control when the
-    Fold kept its parent (``registry.strategy_in_force``) — and for
-    ``test`` its frozen Test result. A rolling Validation window trails over
-    several quarters, so an overlapping day is kept from the earliest Fold
-    that saw it: every Fold after the first adds only its new days, the span
-    ``ledger.transition_result`` grades, and no quarter is counted twice.
-
-    A Fold that left no strategy (``baseline_missing``) contributes nothing
-    and owes nothing, and neither does a Fold with no Test window of its own
-    when the key is ``test`` — a schedule without a Test stage gives every
-    Fold ``test_period: None``, and a series that was never scheduled is not
-    a series that went missing. A Fold whose artifact cannot be read is
-    dropped from the chain; the quarters of its window that no other Fold's
-    replay covers are named in ``missing``, so the curve and the tile computed
-    from it omit exactly the same days and the omission is stated.
-    """
-    ordered = registry.walk_forward_folds(list(latest_fold_records(records).values()))
-    order = _result_order(records) if key == "test" else []
-    local_refs = _local_result_refs(experiment_dir, "test") if key == "test" else []
-    references: list[object] = []
-    parts: list[list[tuple[str, float]]] = []
-    owed: set[str] = set()
-    for record in ordered:
-        if str(record.get("epoch_id")) != epoch_id:
-            continue
-        if str(record.get("fold_status") or "") == "baseline_missing":
-            continue
-        if key == "test" and not record.get("test_period"):
-            continue
-        owed |= _period_quarters(
-            record.get("test_period" if key == "test" else "validation_period")
-        )
-        reference = (
-            registry.strategy_in_force(record).reference
-            if key == "valid"
-            else _test_result_ref(experiment_dir, record, order, local_refs)
-        )
-        rows = _returns(experiment_dir, reference)
-        if not rows:
-            continue
-        references.append(reference)
-        parts.append(rows)
-    chained = _chain(parts)
-    return WalkForward(
-        references,
-        chained,
-        _curve_entry(key, chained) if chained else None,
-        _uncovered(owed, chained),
-    )
-
-
-def parent_control_forward(
-    experiment_dir: Path,
-    records: list[dict[str, object]],
-    *,
-    epoch_id: str | None,
-) -> WalkForward:
-    """The Epoch's purely out-of-sample forward record, day by day.
-
-    ``walk_forward_curve`` chains the strategy each Fold left in force, so a
-    Fold that froze a new candidate contributes a quarter that candidate was
-    *selected* on -- in-sample with respect to the choice. This chains the
-    other leg instead: every Fold after the Epoch's first opens with the
-    inherited parent replayed unchanged, and the span that replay is graded on
-    (``ledger.transition_result``: the Fold's new quarter when the Validation
-    window trails over several, the whole window otherwise) is ground no one
-    chose the parent on. Those spans are exactly the walk-forward transitions
-    ``ledger.walk_forward_transitions`` counts and they do not overlap, so
-    chaining them compounds the forward record and nothing else. It is a P&L
-    record, not the graduation term: the term counts a transition only when its
-    size/beta-neutralized excess is positive, while this line compounds the
-    actual returns of every span, including the benchmark move inside them.
-
-    A Fold that inherited no parent had nothing to replay and owes nothing. A
-    Fold that did owes the quarters its window adds to the previous Fold's;
-    when its replay yields no days -- a control that failed outright, or a
-    result artifact that cannot be read -- it is dropped, and those quarters
-    are named in ``missing``, so the line states which ground it is not
-    drawing instead of leaving the shortfall to be read out of where it stops.
-    """
-    ordered = registry.walk_forward_folds(list(latest_fold_records(records).values()))
-    epoch = [row for row in ordered if str(row.get("epoch_id")) == epoch_id]
-    references: list[object] = []
-    parts: list[list[tuple[str, float]]] = []
-    owed: set[str] = set()
-    for previous, record in pairwise(epoch):
-        control = record.get("parent_control")
-        if not isinstance(control, Mapping):
-            continue
-        owed |= _period_quarters(record.get("validation_period")) - _period_quarters(
-            previous.get("validation_period")
-        )
-        reference = control.get("validation_result_ref")
-        rows = _returns(experiment_dir, reference)
-        # The branch ``ledger.transition_result`` took, read from it rather
-        # than re-decided here: a stepped control is graded on its new quarter
-        # alone, so only that slice of its daily replay is the transition; an
-        # unstepped one is graded on the whole window, which is the whole
-        # replay.
-        if isinstance(control.get("step_result"), Mapping):
-            scored = transition_result(control) or {}
-            start = str(scored.get("start") or "")
-            end = str(scored.get("end") or "")
-            rows = (
-                [(day, value) for day, value in rows if start <= day <= end]
-                if start and end
-                else []
-            )
-        if not rows:
-            continue
-        references.append(reference)
-        parts.append(rows)
-    chained = _chain(parts)
-    return WalkForward(
-        references,
-        chained,
-        _curve_entry("forward", chained) if chained else None,
-        _uncovered(owed, chained),
-    )
-
-
-def walk_forward_final(
-    experiment_dir: Path,
-    records: list[dict[str, object]],
-    *,
-    epoch_id: str | None,
-    key: str,
-) -> float | None:
-    """Compounded final value of ``walk_forward_curve`` — the console's tile."""
-    curve = walk_forward_curve(
-        experiment_dir, records, epoch_id=epoch_id, key=key
-    ).curve
-    return curve["final"] if curve else None
-
-
-def _cycle_stats(
-    series: list[tuple[str, float]], bench: dict[str, float]
-) -> dict[str, object] | None:
-    """Full-cycle statistics over one chained daily-return series.
-
-    Computed server-side like the curves. Return/vol/Sharpe/drawdown/win-rate
-    use every strategy day; the benchmark-relative block (β, excess, tracking
-    error, information ratio) uses date-matched days only, and both legs of the
-    excess are compounded over that same matched set so they stay comparable.
-    """
-    if not series:
-        return None
-    values = [value for _day, value in series]
-    n = len(values)
-    equity = 1.0
-    peak = 1.0
-    max_drawdown = 0.0
-    for value in values:
-        equity *= 1.0 + value
-        peak = max(peak, equity)
-        max_drawdown = max(max_drawdown, 1.0 - equity / peak)
-    cum = equity - 1.0
-    mean = sum(values) / n
-    variance = sum((value - mean) ** 2 for value in values) / (n - 1) if n > 1 else 0.0
-    vol = math.sqrt(variance)
-    stats: dict[str, object] = {
-        "n_days": n,
-        "annualized_return": round((1.0 + cum) ** (TRADING_DAYS_PER_YEAR / n) - 1.0, 6) if cum > -1.0 else -1.0,
-        "annualized_vol": round(vol * math.sqrt(TRADING_DAYS_PER_YEAR), 6),
-        "sharpe": round(mean / vol * math.sqrt(TRADING_DAYS_PER_YEAR), 4) if vol > 0 else 0.0,
-        "max_drawdown": round(max_drawdown, 6),
-        "daily_win_rate": round(sum(1 for value in values if value > 0) / n, 4),
-    }
-    paired = [(value, bench[day]) for day, value in series if day in bench]
-    if len(paired) >= 2:
-        strategy_leg = [a for a, _ in paired]
-        bench_leg = [b for _, b in paired]
-        strategy_cum = math.prod(1.0 + value for value in strategy_leg) - 1.0
-        bench_cum = math.prod(1.0 + value for value in bench_leg) - 1.0
-        bench_mean = sum(bench_leg) / len(bench_leg)
-        strategy_mean = sum(strategy_leg) / len(strategy_leg)
-        bench_var = sum((b - bench_mean) ** 2 for b in bench_leg)
-        active = [a - b for a, b in paired]
-        active_mean = sum(active) / len(active)
-        active_var = sum((x - active_mean) ** 2 for x in active) / (len(active) - 1)
-        stats.update(
-            {
-                "benchmark_return": round(bench_cum, 6),
-                "excess_return": round(strategy_cum - bench_cum, 6),
-                "beta": (
-                    round(sum((a - strategy_mean) * (b - bench_mean) for a, b in paired) / bench_var, 4)
-                    if bench_var > 0
-                    else None
-                ),
-                "tracking_error": round(math.sqrt(active_var * TRADING_DAYS_PER_YEAR), 6),
-                "information_ratio": (
-                    round(active_mean / math.sqrt(active_var) * math.sqrt(TRADING_DAYS_PER_YEAR), 4)
-                    if active_var > 0
-                    else None
-                ),
-            }
-        )
-    return stats
-
-
-def _finite(value: object) -> float | None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    number = float(value)
-    return number if math.isfinite(number) else None
-
-
-def fold_equity_payload(root: Path, experiment_id: str, epoch_id: str, fold_ref: str) -> dict[str, object]:
-    experiment_dir, _identity, records, record = registry.resolve_fold_record(
-        root, experiment_id, epoch_id, fold_ref
-    )
-    in_force = registry.strategy_in_force(record)
-    validation_ref = in_force.reference
-    valid_rows = _returns(experiment_dir, validation_ref)
-    bench_parts = [_benchmark_returns(experiment_dir, validation_ref)]
-    series = [_curve_entry("valid", valid_rows)] if valid_rows else []
-    exposure_rows: dict[str, list[tuple[str, float]]] = {}
-    if valid_rows:
-        exposure_rows["valid"] = _exposures(experiment_dir, validation_ref)
-    # P1-7: test curves stay hidden until the researcher reveals (seals) the
-    # experiment; the UI's collapsed test section never renders without them.
-    if registry.test_results_revealed(experiment_dir, records):
-        test_reference = _test_result_ref(
-            experiment_dir,
-            record,
-            _result_order(records),
-            _local_result_refs(experiment_dir, "test"),
-        )
-        test_rows = _returns(experiment_dir, test_reference)
-        if test_rows:
-            series.append(_curve_entry("test", test_rows))
-            exposure_rows["test"] = _exposures(experiment_dir, test_reference)
-            bench_parts.append(_benchmark_returns(experiment_dir, test_reference))
-    benchmark = _chain(bench_parts)
+def result_equity_payload(root: Path, experiment_id: str, name: str) -> dict[str, object]:
+    result_file = registry.ledger_result(root, experiment_id, name)
+    payload = _read(result_file)
+    returns = _returns(payload)
+    days = {day for day, _value in returns}
+    benchmark = [(day, value) for day, value in _benchmark_returns(result_file) if day in days]
+    exposure = _exposures(payload)
     return {
         "experiment_id": experiment_id,
-        "epoch_id": epoch_id,
-        "fold_ref": fold_ref,
-        # Whose replay the ``valid`` series is (``registry.strategy_in_force``).
-        # A Fold's candidate curve and the inherited parent's curve are drawn
-        # the same way, so the console has to be told which one it received;
-        # ``none`` is a Fold that left no strategy, whose own rejected
-        # candidates are deliberately not drawn here or chained into the tile.
-        "strategy_in_force": in_force.source,
-        "series": series,
-        "benchmark": _curve_entry("benchmark", benchmark) if benchmark else None,
-        # Daily position weight (EOD gross market value / equity) per series,
-        # rendered as a linked pane under the return curves.
-        "exposure": {key: _exposure_entry(rows) for key, rows in exposure_rows.items() if rows},
-    }
-
-
-def experiment_equity_payload(root: Path, experiment_id: str, *, epoch_id: str | None = None) -> dict[str, object]:
-    experiment_dir = registry.resolve_experiment_dir(root, experiment_id)
-    records = registry.read_ledger_records(experiment_dir)
-    folds = list(latest_fold_records(records).values())
-    epochs = sorted({str(record.get("epoch_id")) for record in folds if record.get("epoch_id")})
-    selected_epoch = epoch_id or (epochs[-1] if epochs else None)
-    if selected_epoch is not None and selected_epoch not in epochs:
-        raise KeyError(f"unknown epoch: {selected_epoch}")
-    revealed = registry.test_results_revealed(experiment_dir, records)
-    # The Epoch's walk-forward record per key. These are the very curves whose
-    # final value the console's cumulative-return tiles report
-    # (registry.summarize_experiment), so the two cannot drift apart.
-    chains = {
-        key: walk_forward_curve(
-            experiment_dir, records, epoch_id=selected_epoch, key=key
-        )
-        for key in ("valid", *(("test",) if revealed else ()))
-    }
-    rows_by_key = {key: chain.rows for key, chain in chains.items()}
-    exposure_by_key = {
-        key: _chain(
-            [_exposures(experiment_dir, reference) for reference in chain.references]
-        )
-        for key, chain in chains.items()
-    }
-    bench_parts = [
-        _benchmark_returns(experiment_dir, reference)
-        for chain in chains.values()
-        for reference in chain.references
-    ]
-    # The same Epoch read the other way: the inherited parent replayed on each
-    # Fold's new ground. Development evidence like every parent control, so it
-    # is drawn before the reveal exactly like the Validation chain, and it is
-    # drawn beside it -- the two answer the same question on the same calendar.
-    forward = parent_control_forward(experiment_dir, records, epoch_id=selected_epoch)
-    rows_by_key["forward"] = forward.rows
-    curves = {key: chain.curve for key, chain in chains.items()} | {"forward": forward.curve}
-    series = [curve for key in ("valid", "forward", "test") if (curve := curves.get(key))]
-    if revealed:
-        heldout_refs = [record.get("result_ref") for record in latest_heldout_records(records)]
-        heldout_rows = _chain([_returns(experiment_dir, reference) for reference in heldout_refs])
-        rows_by_key["heldout"] = heldout_rows
-        exposure_by_key["heldout"] = _chain(
-            [_exposures(experiment_dir, reference) for reference in heldout_refs]
-        )
-        for reference in heldout_refs:
-            bench_parts.append(_benchmark_returns(experiment_dir, reference))
-        if heldout_rows:
-            series.append(_curve_entry("heldout", heldout_rows))
-    benchmark = _chain(bench_parts)
-    return {
-        "experiment_id": experiment_id,
-        "epoch_id": selected_epoch,
-        "epochs": epochs,
-        "series": series,
-        "benchmark": _curve_entry("benchmark", benchmark) if benchmark else None,
-        # Calendar quarters (e.g. "2025Q2") a chained line owed but has no day
-        # in: the curve and, for the chained keys, the cumulative-return tile
-        # computed from it lack exactly these, so the omission is stated rather
-        # than inferred from the axis.
-        "missing": {
-            key: chain.missing
-            for key, chain in {**chains, "forward": forward}.items()
-            if chain.missing
-        },
-        # Daily position weight (EOD gross market value / equity) per series,
-        # rendered as a linked pane under the return curves.
+        "result": name,
+        "series": [_curve_entry("strategy", "策略", returns)] if returns else [],
+        "benchmark": _curve_entry("benchmark", BENCHMARK_LABEL, benchmark) if benchmark else None,
         "exposure": {
-            key: _exposure_entry(rows)
-            for key, rows in exposure_by_key.items()
-            if rows and rows_by_key.get(key)
-        },
-        # Full-cycle statistics per chained series (Barra-lite regression core
-        # plus risk/consistency metrics); fold-level tilts stay on the fold view.
-        "stats": {
-            key: value
-            for key, rows in rows_by_key.items()
-            if (value := _cycle_stats(rows, dict(benchmark))) is not None
-        },
+            "strategy": {
+                "dates": [day for day, _value in exposure],
+                "long": [value for _day, value in exposure],
+            }
+        }
+        if exposure
+        else {},
     }

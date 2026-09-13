@@ -40,8 +40,8 @@ from autotrade.pipelines.hitl_state import (
 from autotrade.webui.public_identity import PublicIdentity
 from autotrade.webui.server import create_app
 
-SESSION_A = "epoch_001/fold_2022Q2"
-SESSION_B = "epoch_001/fold_2022Q1"
+SESSION_A = "s2"
+SESSION_B = "s1"
 
 
 def _write_inbox_experiment(root: Path, experiment_id: str = "exp_in") -> Path:
@@ -59,18 +59,8 @@ def _write_inbox_experiment(root: Path, experiment_id: str = "exp_in") -> Path:
         {
             "schema_version": 1,
             "sessions": [
-                {
-                    "session_key": SESSION_B,
-                    "kind": "fold",
-                    "epoch_id": "epoch_001",
-                    "fold_id": "fold_2022Q1",
-                },
-                {
-                    "session_key": SESSION_A,
-                    "kind": "fold",
-                    "epoch_id": "epoch_001",
-                    "fold_id": "fold_2022Q2",
-                },
+                {"session_key": SESSION_B, "kind": "research", "index": 1},
+                {"session_key": SESSION_A, "kind": "research", "index": 2},
             ],
         },
     )

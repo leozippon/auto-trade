@@ -48,7 +48,7 @@ from .test_operating_memory import (
     _workspace,
 )
 
-SESSION_KEY = "epoch_001/fold_2022Q1"
+SESSION_KEY = "s1"
 
 
 def _session(tmp_path: Path) -> tuple[ReportIssueTool, RunManifest, Path]:
@@ -259,12 +259,7 @@ def _console_experiment(experiments_root: Path, name: str) -> Path:
             {
                 "schema_version": 1,
                 "sessions": [
-                    {
-                        "kind": "fold",
-                        "session_key": SESSION_KEY,
-                        "epoch_id": "epoch_001",
-                        "fold_id": "fold_2022Q1",
-                    }
+                    {"kind": "research", "session_key": SESSION_KEY, "index": 1}
                 ],
             }
         ),
@@ -293,7 +288,7 @@ def test_the_listing_projects_labels_and_scrubs_host_paths(tmp_path: Path) -> No
     first = _console_experiment(experiments, "expA")
     second = _console_experiment(experiments, "expB")
     _file_report(first, summary="读 /Data2/lzp/ADMCubeQuant/experiments/expA/artifacts 出错。")
-    _file_report(second, category="docs", session_key="epoch_009/fold_ghost")
+    _file_report(second, category="docs", session_key="s9")
     payload = issues.issue_reports(experiments)
     assert payload["total"] == 2
     assert payload["unreadable"] == []
@@ -303,7 +298,7 @@ def test_the_listing_projects_labels_and_scrubs_host_paths(tmp_path: Path) -> No
     assert stamps == sorted(stamps, reverse=True)
     by_experiment = {str(item["experiment_id"]): item for item in reports}
     labelled = by_experiment["expA"]
-    assert labelled["session_label"] == "epoch_001/2022Q1"
+    assert labelled["session_label"] == "s1"
     assert "/Data2" not in str(labelled["summary"])
     assert "[host path omitted]" in str(labelled["summary"])
     # A session key the plan no longer names still lists, just unlabelled.

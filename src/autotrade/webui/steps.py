@@ -1,11 +1,9 @@
-"""Step-tree console view: de-opaqued lineage, node metrics, and source export.
+"""Step-tree console view: lineage, node metrics, and source export.
 
-The agent-visible tree stores fold ids as opaque ``fold_ref_*`` tokens (the raw
-label encodes the calendar period). The console is the researcher's trusted
-surface, so this module recomputes the ref for every known fold id (schedule +
-ledger) and maps the tokens back for display. Frozen markers come from the
-ledger's fold records: the node a fold selected is the artifact that fold
-shipped.
+The Agent-visible tree stores the session as an opaque ``fold_ref_*`` token.
+The console is the researcher's trusted surface, so it resolves the token back
+to the plan key (``s1``, ``s2``, ...) for display, and marks the node the arm
+froze from the ledger's frozen record.
 """
 
 from __future__ import annotations
@@ -14,9 +12,10 @@ from pathlib import Path
 
 from autotrade.environment.identity import LegacyExperimentError
 from autotrade.environment.step_tree import NODE_OUTPUT_DIR, StepTree
+from autotrade.pipelines.ledger import frozen_record
 
-from .public_identity import PublicIdentity, schedule_period_label
-from .registry import latest_fold_records, read_ledger_records
+from .public_identity import PublicIdentity
+from .registry import read_ledger_records
 
 
 def _has_snapshot(steps_root: Path, node_id: str) -> bool:
@@ -25,23 +24,13 @@ def _has_snapshot(steps_root: Path, node_id: str) -> bool:
     return (steps_root / node_id / NODE_OUTPUT_DIR).is_dir()
 
 
-def fold_sessions(identity: PublicIdentity) -> list[dict[str, object]]:
-    """Ordered public Fold sessions from the validated experiment plan."""
-
-    return [
-        identity.public_session(session, heldout_revealed=False)
-        for session in identity.sessions
-        if session.get("kind") == "fold"
-    ]
-
-
 def public_step_node(
     node: dict[str, object], *, identity: PublicIdentity | None = None
 ) -> dict[str, object]:
     """Project one Step node; modern identities use the central boundary."""
 
     if identity is not None:
-        return identity.public_record(node, heldout_revealed=False)
+        return identity.public_record(node)
     public = dict(node)
     fold_ref = public.pop("fold_id", None)
     run_ref = public.pop("run_id", None)
@@ -58,69 +47,56 @@ def public_step_node(
 def step_tree_view(experiment_dir: Path) -> dict[str, object]:
     experiment_dir = Path(experiment_dir)
     tree = StepTree(experiment_dir / "steps")
-    records = read_ledger_records(experiment_dir)
-    tree_nodes = tree.nodes()
     try:
         identity: PublicIdentity | None = PublicIdentity(experiment_dir)
     except LegacyExperimentError:
         identity = None
-    # The selected Step of a fold record IS the node that fold froze. Legacy
-    # trees remain auditable but never guess a raw schedule identity.
-    frozen_for: dict[str, list[str]] = {}
+    frozen_step = None
     if identity is not None:
-        for (epoch_id, fold_id), record in latest_fold_records(records).items():
-            selected = record.get("selected_step_id")
-            if selected:
-                frozen_for.setdefault(str(selected), []).append(
-                    f"{epoch_id}/{schedule_period_label(fold_id)}"
-                )
+        frozen = frozen_record(read_ledger_records(experiment_dir))
+        if frozen is not None:
+            frozen_step = frozen["frozen"].get("source_step_id")  # type: ignore[union-attr]
 
     nodes: list[dict[str, object]] = []
-    for node in tree_nodes:
+    for node in tree.nodes():
         node_id = str(node["node_id"])
         fold_ref = str(node.get("fold_id") or "")
         raw_metrics = node.get("metrics")
         raw_attachments = node.get("attachments")
-        nodes.append(
-            public_step_node(
-                {
-                    "node_id": node_id,
-                    "parent_node_id": node.get("parent_node_id"),
-                    "epoch_id": node.get("epoch_id"),
-                    "fold_id": fold_ref,
-                    "run_id": node.get("run_id"),
-                    "result_name": node.get("result_name"),
-                    "complete_validation": bool(node.get("complete_validation")),
-                    "status": node.get("status"),
-                    "error": node.get("error"),
-                    "metrics": dict(raw_metrics) if isinstance(raw_metrics, dict) else {},
-                    "revision_id": node.get("revision_id"),
-                    "created_at": node.get("created_at"),
-                    "attachments": (
-                        sorted(raw_attachments) if isinstance(raw_attachments, dict) else []
-                    ),
-                    "has_snapshot": _has_snapshot(tree.root, node_id),
-                    "frozen_for": sorted(frozen_for.get(node_id, [])),
-                    "is_current": node_id == tree.current_node_id,
-                },
-                identity=identity,
-            )
+        public = public_step_node(
+            {
+                "node_id": node_id,
+                "parent_node_id": node.get("parent_node_id"),
+                "fold_id": fold_ref,
+                "run_id": node.get("run_id"),
+                "result_name": node.get("result_name"),
+                "complete_validation": bool(node.get("complete_validation")),
+                "status": node.get("status"),
+                "error": node.get("error"),
+                "metrics": dict(raw_metrics) if isinstance(raw_metrics, dict) else {},
+                "revision_id": node.get("revision_id"),
+                "created_at": node.get("created_at"),
+                "attachments": (
+                    sorted(raw_attachments) if isinstance(raw_attachments, dict) else []
+                ),
+                "has_snapshot": _has_snapshot(tree.root, node_id),
+                "frozen": node_id == frozen_step,
+                "is_current": node_id == tree.current_node_id,
+            },
+            identity=identity,
         )
-    return {
-        "current_node_id": tree.current_node_id,
-        "nodes": nodes,
-        "fold_sessions": fold_sessions(identity) if identity is not None else [],
-    }
+        if identity is not None and fold_ref:
+            try:
+                public["session_key"] = identity.store.resolve("fold", fold_ref)
+            except (KeyError, ValueError):
+                public["session_key"] = None
+        nodes.append(public)
+    return {"current_node_id": tree.current_node_id, "nodes": nodes}
 
 
 def node_export_dir(experiment_dir: Path, node_id: str) -> Path:
     """Validated node directory for the source.zip download (never a raw path join)."""
-    return node_export_dir_from_root(Path(experiment_dir) / "steps", node_id)
-
-
-def node_export_dir_from_root(steps_root: Path, node_id: str) -> Path:
-    """Validated export directory for either a collected or live step tree."""
-    tree = StepTree(steps_root)
+    tree = StepTree(Path(experiment_dir) / "steps")
     node = tree.get_node(node_id)  # raises ValueError for unknown ids
     if node.get("status") == "failed" or not node.get("complete_validation"):
         raise ValueError(f"step node {node_id} is a failed attempt without a snapshot")
@@ -128,11 +104,3 @@ def node_export_dir_from_root(steps_root: Path, node_id: str) -> Path:
         raise ValueError(f"step node snapshot is missing on disk: {node_id}")
     return tree.root / str(node["node_id"])
 
-
-def current_node_export_dir(steps_root: Path) -> tuple[str, Path]:
-    """Return the current validated Step snapshot from a live tree."""
-    tree = StepTree(steps_root)
-    node_id = tree.current_node_id
-    if not node_id:
-        raise ValueError("live fold has no current validated step snapshot")
-    return node_id, node_export_dir_from_root(tree.root, node_id)

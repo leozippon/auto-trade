@@ -123,21 +123,16 @@ def test_inject_message_js_contract_via_node() -> None:
 const live = {
   state: "running_session",
   worker_alive: true,
-  status: { session_key: "epoch_001/fold_2022Q1" },
+  status: { session_key: "s1" },
 };
-const fold = { key: "epoch_001/fold_2022Q1", kind: "fold" };
-const meta = { key: "epoch_001/meta_learning", kind: "meta_learning" };
+const fold = { key: "s1", kind: "research" };
 const cases = [];
 function check(name, got, want) {
   const a = JSON.stringify(got);
   const b = JSON.stringify(want);
   if (a !== b) cases.push({ name, got, want });
 }
-check("live fold", injectMessageEnabled(live, fold), true);
-check("live meta", injectMessageEnabled({
-  ...live,
-  status: { session_key: "epoch_001/meta_learning" },
-}, meta), true);
+check("live research session", injectMessageEnabled(live, fold), true);
 check("paused", injectMessageEnabled({ ...live, state: "paused" }, fold), false);
 check("paused reason", injectMessageDisableReason({ ...live, state: "paused" }, fold),
   "实验已暂停。请先恢复运行后再发送。");
@@ -147,16 +142,18 @@ for (const state of ["completed", "stopped", "failed", "interrupted", "terminate
     injectMessageDisableReason({ ...live, state }, fold),
     "会话已结束，无法发送。");
 }
-check("heldout", injectMessageEnabled(live, { key: fold.key, kind: "heldout" }), false);
+check("forward replay", injectMessageEnabled({
+  ...live, status: { session_key: "forward" },
+}, { key: "forward", kind: "forward" }), false);
 check("other session", injectMessageEnabled(live, {
-  key: "epoch_001/fold_2022Q2", kind: "fold",
+  key: "s2", kind: "research",
 }), false);
 check("dead worker", injectMessageEnabled({ ...live, worker_alive: false }, fold), false);
 check("no session_key", injectMessageEnabled({
   ...live, status: {},
 }, fold), false);
 check("no-agent reason", injectMessageDisableReason(live, {
-  key: fold.key, kind: "heldout",
+  key: fold.key, kind: "forward",
 }), "当前没有可接收消息的 Agent 会话。");
 check("payload false", buildInjectMessagePayload(fold.key, "继续验证", false), {
   action: "inject_message",

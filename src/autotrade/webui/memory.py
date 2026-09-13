@@ -46,7 +46,7 @@ from autotrade.pipelines.skills import (
     validate_skills_tree,
 )
 
-from .registry import read_ledger_records, resolve_experiment_dir, test_results_revealed
+from .registry import read_ledger_records, resolve_experiment_dir
 
 # The sandbox writes the full host-side manifest beside the Agent-visible one
 # when a run's artifacts are collected (environment/runtime.py,
@@ -130,12 +130,10 @@ def curated_entry(repo_root: Path, name: str) -> dict[str, object]:
 
 
 def graduated_tier(experiments_root: Path) -> dict[str, object]:
-    """Every experiment's held-out verdict, and what the tier would admit now.
+    """Every experiment's verdict, and what the tier would admit now.
 
-    The verdict follows the console's own reveal gate: an experiment that has
-    not revealed its held-out results publishes none here either, or this page
-    would hand back exactly the evidence the gate seals. Admission is whatever
-    ``skills.graduated_memory_sources`` returns, never a second rule.
+    Admission is whatever ``skills.graduated_memory_sources`` returns, never a
+    second rule.
     """
 
     root = Path(experiments_root)
@@ -167,21 +165,15 @@ def _tier_row(
 ) -> dict[str, object]:
     row: dict[str, object] = {
         "experiment_id": directory.name,
-        "revealed": False,
         "verdict": None,
         "admitted": False,
         "entries": [],
     }
     try:
-        records = read_ledger_records(directory)
-        revealed = test_results_revealed(directory, records)
+        verdict = experiment_verdict(read_ledger_records(directory))
     except (OSError, TypeError, ValueError) as exc:
         row["error"] = _error(exc, _UNREADABLE_EXPERIMENT)
         return row
-    row["revealed"] = revealed
-    if not revealed:
-        return row
-    verdict = experiment_verdict(records)
     row["verdict"] = str(verdict["status"]) if isinstance(verdict, Mapping) else None
     if admitted is None:
         row["admitted"] = None
@@ -463,16 +455,13 @@ def delete_curated_entry(repo_root: Path, name: str) -> dict[str, object]:
 def _admitted_skill_dir(experiments_root: Path, experiment_id: str, skill: str) -> Path:
     """The only place a promotion may copy from: an admitted graduated skill.
 
-    Admission is ``skills.graduated_memory_sources`` and the reveal gate is the
-    console's own, exactly as :func:`graduated_tier` shows them, so the console
-    cannot promote from a candidate the page does not offer — nor turn this
-    route into a side channel on a held-out verdict that is still sealed.
+    Admission is ``skills.graduated_memory_sources``, exactly as
+    :func:`graduated_tier` shows it, so the console cannot promote from a
+    candidate the page does not offer.
     """
 
     root = Path(experiments_root)
-    directory = resolve_experiment_dir(root, experiment_id)
-    if not test_results_revealed(directory, read_ledger_records(directory)):
-        raise KeyError(f"{experiment_id} has not revealed its held-out results")
+    resolve_experiment_dir(root, experiment_id)
     source = next(
         (
             item
@@ -491,7 +480,7 @@ def graduated_entry(
 ) -> dict[str, object]:
     """One admitted graduated skill's body, read where it already lives.
 
-    The same admission and reveal gate as the promotion it precedes, so the
+    The same admission gate as the promotion it precedes, so the
     console can never show a candidate it could not copy — and a skill whose
     experiment is no longer admitted reads as unknown rather than as a body the
     tier would not mount.

@@ -1214,7 +1214,7 @@ def test_trace_stream_nudges_with_offsets_and_no_event_payload(
 def test_trace_replay_threads_detail_and_clamps_the_block_window() -> None:
     script = APP_JS.read_text(encoding="utf-8")
     assert (
-        "traceReplayNode(detail.experiment_id, session.record.run_ref, detail)"
+        "traceReplayNode(detail.experiment_id, record.run_ref, detail)"
         in script
     )
     assert "function traceReplayNode(experimentId, runId, detail) {" in script
@@ -1356,7 +1356,6 @@ def _child_events(*, terminal: bool = True, legacy: bool = False) -> list[dict[s
 def test_project_subagent_trace_orders_rounds_tools_and_summary() -> None:
     projected = traces.project_subagent_trace(_child_events(), "agent_1")
     assert projected["found"] is True
-    assert projected["reduced"] is False
     # Four markers: the wrap-up prompt, the parent's steer, the child's own
     # context compaction, then the output-truncation notice.
     assert [block["kind"] for block in projected["blocks"]] == [
@@ -1424,49 +1423,6 @@ def test_project_subagent_trace_running_child_has_no_report_yet() -> None:
     ]
 
 
-def test_project_subagent_trace_states_the_meta_reduction() -> None:
-    projected = traces.project_subagent_trace(
-        [
-            {
-                "event_type": "subagent_task",
-                "task_id": "agent_m",
-                "status": "started",
-                "role": "auditor",
-                "thinking": "medium",
-            },
-            {
-                "event_type": "subagent_llm",
-                "task_id": "agent_m",
-                "round": 1,
-                "content_chars": 812,
-                "usage": {"prompt_tokens": 5, "completion_tokens": 1, "total_tokens": 6},
-            },
-            {
-                "event_type": "subagent_tool",
-                "task_id": "agent_m",
-                "round": 1,
-                "tool": "read_file",
-                "result": {"ok": True},
-            },
-            {
-                "event_type": "subagent",
-                "task_id": "agent_m",
-                "status": "completed",
-                "summary_chars": 4521,
-                "usage_totals": {"total_tokens": 6},
-            },
-        ],
-        "agent_m",
-    )
-    assert projected["reduced"] is True
-    round_block = projected["blocks"][0]
-    assert round_block["text"] == "" and round_block["content_chars"] == 812
-    summary = projected["blocks"][-1]
-    assert summary["kind"] == "summary"
-    assert summary["text"] == "" and summary["text_chars"] == 4521
-    assert "value" not in str(projected["blocks"][1]["calls"][0].get("result"))
-
-
 def test_subagent_trace_route_projects_redacts_and_guards(tmp_path: Path) -> None:
     events = _child_events()
     events[3]["arguments"] = {  # type: ignore[index]
@@ -1531,7 +1487,6 @@ def test_subagent_drawer_is_wired_to_the_card_and_the_dock_chip() -> None:
     assert "isRunningSubagent(payload.header || block)" in opener
     assert "clearInterval(poll)" in opener
     head = script.split("function subagentTraceHead(", 1)[1].split("\nfunction ", 1)[0]
-    assert "payload.reduced" in head
     assert "subagentHeadMetaNode" in head
     # An inherited level is reported as the effective parent level.
     thinking = script.split("function subagentThinkingLabel(", 1)[1].split(

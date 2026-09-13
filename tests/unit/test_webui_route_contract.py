@@ -142,8 +142,10 @@ def test_the_extractor_finds_the_routes_the_console_really_calls():
         "/api/trading/{}/deals",
         "/api/parameter-schema",
         # Assembled from a local `const base`, not written inline.
-        "/api/experiments/{}/analysis/{}/{}",
-        "/api/experiments/{}/folds/{}/{}/orders",
+        "/api/experiments/{}/results/{}/orders",
+        "/api/experiments/{}/results/{}/equity",
+        "/api/experiments/{}/results/{}/style",
+        "/api/experiments/{}/trace/initial-prompt",
         # 运行记忆: the page bundle, one entry's body, one experiment's mounts,
         # and the curated writes the page issues (create, edit, delete, promote).
         "/api/memory",
@@ -319,142 +321,62 @@ def test_every_progress_stage_the_pipeline_publishes_has_a_console_label() -> No
     assert '"forward_replay"' in prep and '"verdict"' in prep
 
 
-def test_the_parent_control_and_walk_forward_surfaces_are_mounted() -> None:
-    """A rendered-but-never-called panel is invisible and wholly green."""
+def test_every_reason_the_pipeline_records_has_a_console_label() -> None:
+    """A failed freeze-gate or verdict condition renders as its raw token when
+    the console has no label for it, so the label map is checked against the
+    tokens pipelines/verdict.py can emit, and every session outcome too."""
 
-    source = APP_JS.read_text(encoding="utf-8")
-    assert "parentControlSection(" in _js_function_body("foldResultPanel")
-    for name in ("walkForwardPanel", "walkForwardTerm"):
-        assert source.count(f"{name}(") > 1, f"{name} is never called"
+    from autotrade.pipelines.config import SESSION_OUTCOMES
 
-
-def test_the_parent_control_fields_the_console_reads_are_served() -> None:
-    """The fold panel's baseline row and the walk-forward table read the
-    registry's parent-control view by name; a renamed field would render an
-    empty column instead of failing."""
-
-    from autotrade.webui.registry import _parent_control_view
-
-    served = set(
-        _parent_control_view(
-            {
-                "parent_control": {
-                    "status": "ok",
-                    "validation_result": {
-                        "total_return": 0.08,
-                        "sharpe": 0.6,
-                        "max_drawdown": 0.07,
-                        "benchmark": {"benchmark_return": 0.03},
-                    },
-                }
-            },
-            frozenset(),
+    verdict = (
+        Path(__file__).resolve().parents[2] / "src/autotrade/pipelines/verdict.py"
+    ).read_text(encoding="utf-8")
+    emitted = set(re.findall(r'reasons\.append\("([a-z_]+)"\)', verdict))
+    emitted |= {f"{where}_strategy_error" for where in ("forward", "heldout")}
+    assert "forward_lower_bound_not_positive" in emitted
+    labels = set(
+        re.findall(
+            r"^  ([a-z_]+): \"",
+            _js_literal("const REASON_LABELS = {", "\n};"),
+            re.MULTILINE,
         )
     )
-    read = set(
-        re.findall(r"\bmetrics\.([a-z_]+)", _js_function_body("parentControlSection"))
-    )
-    read |= set(
-        re.findall(r"\bcontrol\.([a-z_]+)", _js_function_body("walkForwardPanel"))
-    )
-    # The session line reads the same view through foldInForce.transition --
-    # including the reason a failed control left the Fold without numbers, so a
-    # dropped field would silently render the Fold as unreadable again.
-    read |= set(
-        re.findall(r"\btransition\.([a-z_]+)", _js_function_body("sessionListLine"))
-    )
-    assert "error" in read, "the session line never names why a control failed"
-    assert read, "the console reads no parent-control field"
-    assert read <= served, sorted(read - served)
-
-
-def test_the_parent_control_view_names_the_span_it_scored() -> None:
-    """A Validation window that trails over several periods grades the control
-    on the Fold's new period alone. The console must be able to say which span
-    a number covers, or it reads a quarter as the whole window and the baseline
-    comparison beside the Fold's own Validation row becomes meaningless."""
-
-    from autotrade.webui.registry import _parent_control_view
-
-    whole_window = {
-        "total_return": 0.08,
-        "sharpe": 0.6,
-        "max_drawdown": 0.07,
-        "benchmark": {"benchmark_return": 0.03},
-    }
-    step = {
-        "start": "20231001",
-        "end": "20231231",
-        "total_return": 0.02,
-        "sharpe": 0.2,
-        "max_drawdown": 0.03,
-        "benchmark": {"benchmark_return": 0.01},
-    }
-    single = _parent_control_view(
-        {
-            "validation_period": "20230101..20231231",
-            "parent_control": {"status": "ok", "validation_result": whole_window},
-        },
-        frozenset(),
-    )
-    assert single["source"] == "validation_result"
-    assert (single["period_start"], single["period_end"]) == ("20230101", "20231231")
-    assert single["return"] == 0.08
-
-    trailing = _parent_control_view(
-        {
-            "validation_period": "20230101..20231231",
-            "parent_control": {
-                "status": "ok",
-                "validation_result": whole_window,
-                "step_result": step,
-            },
-        },
-        frozenset(),
-    )
-    assert trailing["source"] == "step_result"
-    assert (trailing["period_start"], trailing["period_end"]) == (
-        "20231001",
-        "20231231",
-    )
-    # The numbers are the step's, so the served span must be the step's too.
-    assert trailing["return"] == 0.02
-
-    # Both tables label the span from those fields, and the baseline row keeps
-    # the parent's whole-window numbers to read against the Fold's own row.
-    label = _js_function_body("controlSpanLabel")
-    assert set(re.findall(r"\bcontrol\.([a-z_]+)", label)) == {
-        "source",
-        "period_start",
-        "period_end",
-    }
-    for name in ("walkForwardPanel", "parentControlSection"):
-        assert "controlSpanLabel(" in _js_function_body(name)
-    assert "control.validation_result" in _js_function_body("parentControlSection")
-
-
-def test_the_benchmark_fields_the_fold_panel_reads_are_served() -> None:
-    """The raw and the size/beta-neutralized excess are read side by side, so
-    both must exist in the block the evaluation summary actually carries."""
-
-    from autotrade.environment.replay.style import benchmark_summary_block
-
-    body = _js_function_body("foldResultPanel")
-    read = set(re.findall(r"\bbenchmark\.([a-z_]+)", body))
-    served = set(
-        benchmark_summary_block(
-            {
-                "compact": {
-                    "benchmark_return": 0.01,
-                    "excess_return": 0.02,
-                    "neutralized_excess_return": 0.03,
-                    "neutralized_excess_method": "…",
-                    "beta": 0.9,
-                    "n_days": 60,
-                    "size_tilt": -0.2,
-                }
-            }
+    assert emitted <= labels, sorted(emitted - labels)
+    outcomes = set(
+        re.findall(
+            r"^  ([a-z_]+): \"",
+            _js_literal("const OUTCOME_LABELS = {", "\n};"),
+            re.MULTILINE,
         )
     )
-    assert read, "the fold panel reads no benchmark field"
-    assert read <= served, sorted(read - served)
+    assert set(SESSION_OUTCOMES) <= outcomes, sorted(set(SESSION_OUTCOMES) - outcomes)
+
+
+def test_the_research_arm_fields_the_console_reads_are_served(tmp_path: Path) -> None:
+    """The panels read the registry's arm projections by field name; a renamed
+    field would render an empty cell instead of failing. Checked against a
+    projection of a synthetic arm that carries its verdict."""
+
+    from autotrade.webui.registry import experiment_detail
+    from tests.unit.webui_research_arm import build_arm
+
+    build_arm(tmp_path, "arm", "graduated")
+    detail = experiment_detail(tmp_path, "arm")
+    frozen = set(detail["frozen"])
+    record = set(detail["sessions"][1]["record"])
+    best = set(detail["sessions"][1]["record"]["best"])
+    validation = set(detail["sessions"][1]["record"]["validations"][0])
+    forward = set(detail["forward"])
+    for name, read, served in (
+        ("frozenPanel", set(re.findall(r"\bfrozen\.([a-z_]+)", _js_function_body("frozenPanel"))), frozen),
+        ("researchSessionPanel", set(re.findall(r"\brecord\.([a-z_]+)", _js_function_body("researchSessionPanel"))), record),
+        ("researchSessionPanel", set(re.findall(r"\bbest\.([a-z_]+)", _js_function_body("researchSessionPanel"))), best),
+        ("researchSessionPanel", set(re.findall(r"\brow\.([a-z_]+)", _js_function_body("researchSessionPanel"))), validation),
+        ("verdictPanel", set(re.findall(r"\bforward\.([a-z_]+)", _js_function_body("verdictPanel"))), forward),
+    ):
+        assert read, name
+        assert read <= served, (name, sorted(read - served))
+    # The slice table's rows are statistics the verdict slices carry.
+    slice_fields = set(re.findall(r'^  \["([a-z_]+)",', _js_literal("const SLICE_ROWS = [", "\n];"), re.MULTILINE))
+    slices = detail["forward"]["slices"]
+    assert slice_fields <= set(slices["forward"]) | set(slices["heldout"])

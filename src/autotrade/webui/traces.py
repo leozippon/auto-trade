@@ -46,7 +46,7 @@ def resolve_trace_path(experiment_dir: Path, run_id: str | None) -> Path | None:
 
 
 def read_initial_prompt(path: Path) -> dict[str, object]:
-    """Return the redacted system/user messages recorded at Fold session start."""
+    """Return the redacted system/user messages recorded at session start."""
 
     with Path(path).open("rb") as handle:
         for raw in handle:
@@ -64,7 +64,7 @@ def read_initial_prompt(path: Path) -> dict[str, object]:
                     {"role": "user", "content": instruction},
                 ],
             }
-    raise KeyError("trace contains no Fold initial prompt")
+    raise KeyError("trace contains no initial prompt")
 
 
 def read_trace_page(
@@ -258,8 +258,7 @@ def project_subagent_trace(events: object, task_id: str) -> dict[str, object]:
 
     ``agent_output`` per model round and ``tool_group`` per batch of tool calls
     reuse the parent renderers; ``marker`` and ``summary`` carry the wrap-up,
-    truncation and final report. Meta traces arrive already reduced to counts,
-    which the ``reduced`` flag reports rather than silently showing nothing.
+    truncation and final report.
     """
 
     if not isinstance(events, list):
@@ -270,7 +269,6 @@ def project_subagent_trace(events: object, task_id: str) -> dict[str, object]:
     tools = _ToolAcc()
     calls: list[dict[str, object]] = []
     matched = 0
-    reduced = False
     seq = 0
 
     def flush_tools() -> None:
@@ -297,7 +295,6 @@ def project_subagent_trace(events: object, task_id: str) -> dict[str, object]:
         if kind == "subagent_llm":
             flush_tools()
             blocks.append(_subagent_round_block(event))
-            reduced = reduced or _is_reduced_round(event)
         elif kind == "subagent_wrap_up":
             flush_tools()
             blocks.append(
@@ -352,14 +349,12 @@ def project_subagent_trace(events: object, task_id: str) -> dict[str, object]:
                         "text_chars": len(summary) if summary else summary_chars,
                     }
                 )
-            reduced = reduced or (summary_chars > 0 and not summary)
     flush_tools()
     return {
         "task_id": task_id,
         "found": matched > 0,
         "header": state.block,
         "blocks": blocks,
-        "reduced": reduced,
     }
 
 
@@ -378,12 +373,6 @@ def _subagent_round_block(event: dict[str, object]) -> dict[str, object]:
     if model:
         block["model"] = model
     return block
-
-
-def _is_reduced_round(event: dict[str, object]) -> bool:
-    """Meta payloads keep the round's shape but drop its text."""
-
-    return "content" not in event and _as_int(event.get("content_chars")) > 0
 
 
 def _marker_block(event: dict[str, object], label: str, text: str) -> dict[str, object]:

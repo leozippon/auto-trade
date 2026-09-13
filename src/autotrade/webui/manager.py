@@ -12,8 +12,7 @@ import subprocess
 import sys
 import threading
 import time
-import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from pathlib import Path
 
 from autotrade.environment.identity import (
@@ -21,7 +20,7 @@ from autotrade.environment.identity import (
     AgentRefStore,
     LegacyExperimentError,
 )
-from autotrade.environment.runtime import chmod_tree, utc_now_iso, write_json_atomic
+from autotrade.environment.runtime import utc_now_iso, write_json_atomic
 from autotrade.pipelines.agent_inbox import (
     INBOX_NAME,
     InboxError,
@@ -37,25 +36,14 @@ from autotrade.pipelines.hitl_state import (
     control_lock,
     proc_start_ticks,
     read_control,
-    read_json,
     status_pid_alive,
     write_control,
 )
-from autotrade.pipelines.ledger import (
-    ExperimentLedger,
-    FrozenArtifactMutated,
-    assert_no_frozen_artifact_mutation,
-    is_frozen_artifact_mutation,
-    latest_fold_records,
-)
+from autotrade.pipelines.ledger import research_over
 from autotrade.pipelines.skills import create_operating_memory_snapshot
 
 from .public_identity import PublicIdentity
-from .registry import (
-    experiment_state,
-    test_results_revealed,
-    worker_log_ref,
-)
+from .registry import experiment_state, read_ledger_records, worker_log_ref
 
 # Parallel-run ceiling for the console: a create or a resume past this is
 # refused. Host memory is what binds, not the model gateway: six arms held
@@ -92,33 +80,10 @@ _ACTIONS = {
     "stop",
     "set_directive",
     "set_gpu_count",
-    "skip_to_heldout",
-    "cancel_skip_to_heldout",
-    "rollback_fold",
-    "rerun_fold",
-    "reveal_test_results",
     "restart",
     "terminate",
     "inject_message",
 }
-# Every control operation that could restart or steer learning after the
-# Test/Held-out numbers are on screen. `resume` and `restart` belong here:
-# putting the worker back on a sealed experiment continues development against
-# results the researcher has already seen. Lifecycle-only controls
-# (pause/stop/terminate), the per-session GPU allocation and the reveal itself
-# stay available.
-_SEALED_BLOCKED_ACTIONS = frozenset(
-    {
-        "resume",
-        "restart",
-        "set_directive",
-        "skip_to_heldout",
-        "cancel_skip_to_heldout",
-        "rollback_fold",
-        "rerun_fold",
-        "inject_message",
-    }
-)
 
 
 def _remove_sandbox_tree(path: Path) -> bool:
@@ -312,16 +277,6 @@ def _signal_worker_group(pid: int, sig: signal.Signals) -> None:
         os.kill(pid, sig)
 
 
-def _ledger_frozen_ids(records: list[dict[str, object]]) -> set[str]:
-    ids: set[str] = set()
-    for record in records:
-        for key in ("frozen_strategy_artifact_id", "strategy_artifact_id"):
-            value = str(record.get(key) or "")
-            if value:
-                ids.add(value)
-    return ids
-
-
 class ManagerError(RuntimeError):
     pass
 
@@ -344,8 +299,6 @@ class ExperimentManager:
         self,
         repo_root: Path,
         experiments_root: Path | None = None,
-        *,
-        analysis_pending: Callable[[str], bool] | None = None,
     ) -> None:
         self.repo_root = Path(repo_root).resolve()
         self.experiments_root = Path(
@@ -354,25 +307,20 @@ class ExperimentManager:
         self.worker_script = (
             self.repo_root / "scripts/experiments/run_interactive_experiment.py"
         )
-        # AnalysisService worker threads write into <experiment>/hitl/analysis/;
-        # the server wires in the service's pending view so delete can refuse
-        # while such a write may still be in flight. Standalone managers (tests,
-        # scripts) have no background analyses to guard against.
-        self._analysis_pending = analysis_pending
         # One mutation lock per experiment, not one for the console. Mutating
         # calls that touch the SAME experiment's worker, control state or
         # directory still serialize, but terminate and restart wait out a
         # SIGTERM grace (10 s / 35 s) and delete can spend minutes escalating a
         # stuck rmtree through docker; under a console-wide lock every one of
         # those waits blocked every other experiment's create, start, pause,
-        # resume, set_directive and approve.
+        # resume and set_directive.
         self._experiment_locks: dict[str, threading.RLock] = {}
         self._locks_guard = threading.Lock()
         # The one genuinely console-wide invariant left: MAX_RUNNING_EXPERIMENTS.
         # A holder keeps it from the running-slot count through the spawn that
         # consumes the slot, so two callers can never claim the same one:
-        # create_experiment holds it across its pre-flight, the inherited
-        # artifact copy and the operating-memory snapshot as well, and restart
+        # create_experiment holds it across its pre-flight and the
+        # operating-memory snapshot as well, and restart
         # holds it across the terminate that frees the slot it is about to
         # retake. Creates and starts therefore wait for each other, and for a
         # restart's SIGTERM grace; control actions on other experiments never
@@ -670,16 +618,6 @@ class ExperimentManager:
             except (KeyError, ValueError) as exc:
                 raise ManagerError(str(exc)) from exc
             path = directory / "hitl/control.json"
-            # Effective seal: manual reveal OR held-out completed
-            # (auto-reveal). Reading only the control flag left every
-            # auto-revealed experiment unsealed.
-            if (
-                action in _SEALED_BLOCKED_ACTIONS
-                and test_results_revealed(directory)
-            ):
-                raise ManagerError(
-                    "测试结果已揭示，实验已封存：不能再进行影响后续学习的控制操作"
-                )
             # The two worker-signalling actions wait out a SIGTERM grace, so
             # they must not hold control_lock: an exiting worker still consumes
             # its own session controls under that lock, and blocking it there
@@ -691,6 +629,7 @@ class ExperimentManager:
             if action == "inject_message":
                 receipt = self._inject_message(
                     directory,
+                    identity,
                     session_key=raw_session_key,
                     text=text,
                     interrupt=interrupt,
@@ -703,6 +642,7 @@ class ExperimentManager:
                 control = read_control(path)
                 self._apply_control_action(
                     directory,
+                    identity,
                     control,
                     action=action,
                     session_key=raw_session_key,
@@ -712,7 +652,7 @@ class ExperimentManager:
                 response: dict[str, object] = {
                     "control": identity.public_control(control.to_record())
                 }
-            if action in {"resume", "rollback_fold", "rerun_fold"}:
+            if action == "resume":
                 state = experiment_state(directory)
                 resumable = state.get("state") in _TERMINAL_RESUMABLE_STATES
                 if (
@@ -726,6 +666,7 @@ class ExperimentManager:
     def _inject_message(
         self,
         directory: Path,
+        identity: PublicIdentity,
         *,
         session_key: str | None,
         text: object,
@@ -751,7 +692,7 @@ class ExperimentManager:
             raise ManagerError(
                 "cannot inject_message into a finished or failed session"
             )
-        if current != session_key:
+        if current != session_key or identity.session(current)["kind"] != "research":
             raise ManagerError(
                 "inject_message session_key must match the current Agent session"
             )
@@ -777,6 +718,7 @@ class ExperimentManager:
     def _apply_control_action(
         self,
         directory: Path,
+        identity: PublicIdentity,
         control: ControlState,
         *,
         action: str,
@@ -789,12 +731,8 @@ class ExperimentManager:
             control.request = None
         elif action == "stop":
             control.request = "stop"
-        elif action == "reveal_test_results":
-            control.test_revealed = True
         elif action == "set_gpu_count":
-            if not session_key:
-                raise ManagerError("set_gpu_count requires session_key")
-            self._require_planned_session(directory, session_key)
+            self._require_pending_research_session(directory, identity, action, session_key)
             raw = str(directive or "").strip()
             if raw:
                 try:
@@ -803,381 +741,34 @@ class ExperimentManager:
                     raise ManagerError("GPU 数量必须是整数") from exc
                 if not 0 <= count <= 4:
                     raise ManagerError("GPU 数量须在 0..4 之间")
-                control.gpu_counts[session_key] = count
+                control.gpu_counts[session_key] = count  # type: ignore[index]
             else:
-                control.gpu_counts.pop(session_key, None)
+                control.gpu_counts.pop(session_key, None)  # type: ignore[arg-type]
         elif action == "set_directive":
-            if not session_key:
-                raise ManagerError("set_directive requires session_key")
-            self._require_planned_session(directory, session_key)
+            self._require_pending_research_session(directory, identity, action, session_key)
             if directive in {None, ""}:
-                control.directives.pop(session_key, None)
+                control.directives.pop(session_key, None)  # type: ignore[arg-type]
             else:
-                control.directives[session_key] = str(directive)
-        elif action == "skip_to_heldout":
-            if not latest_fold_records(
-                ExperimentLedger(directory / "ledgers/experiment_ledger.jsonl").read()
-            ):
-                raise ManagerError("尚无已完成的 Fold，无法提前进入 Held-out")
-            control.skip_to_heldout = True
-            control.request = None
-        elif action == "cancel_skip_to_heldout":
-            control.skip_to_heldout = False
-        elif action == "rollback_fold":
-            if not session_key:
-                raise ManagerError("rollback_fold requires session_key")
-            state = experiment_state(directory)
-            if state.get("worker_alive") or state.get("state") == "launching":
-                raise ManagerError("先停止运行中的 worker（停止/强制终止）再回滚")
-            self._rollback_to_fold(directory, session_key, control)
-            control.request = None
-            control.skip_to_heldout = False
-        elif action == "rerun_fold":
-            if not session_key:
-                raise ManagerError("rerun_fold requires session_key")
-            self._validate_rerun_target(directory, session_key)
-            state = experiment_state(directory)
-            if state.get("worker_alive") or state.get("state") == "launching":
-                raise ManagerError(
-                    "先停止运行中的 worker（停止/强制终止）再重跑该 Fold"
-                )
-            control.rerun_sessions[session_key] = uuid.uuid4().hex[:12]
-            control.request = None
+                control.directives[session_key] = str(directive)  # type: ignore[index]
         else:
             raise ManagerError(f"unknown control action: {action!r}")
 
-    def _rollback_to_fold(
-        self, directory: Path, session_key: str, control: ControlState
-    ) -> None:
-        """Make ``session_key`` the experiment's frontier again.
-
-        Drops every ledger record AFTER the target fold (later folds, later
-        meta-learning sessions, and ALL held-out records — they reflect the
-        discarded frontier). Integrity-flagged rows of the target itself are
-        also dropped, including a flagged first Fold or Held-out: this is the
-        only unlock. Successful records of the target fold, including earlier
-        re-runs, stay verbatim. Frozen trees still named by kept records, or
-        used as the restored parent, are not archived.
-        """
-        sessions = self._planned_sessions(directory)
-        fold_keys = [key for key, kind in sessions if kind == "fold"]
-        if session_key not in fold_keys and session_key != "heldout":
-            raise ManagerError(f"{session_key!r} is not a fold or held-out session")
-        ledger = ExperimentLedger(directory / "ledgers/experiment_ledger.jsonl")
-        records = ledger.read()
-        dropped_fold_keys: set[str] = set()
-        dropped_meta_keys: set[str] = set()
-        if session_key != "heldout":
-            target_epoch, _, target_fold = session_key.partition("/")
-            has_success = (target_epoch, target_fold) in latest_fold_records(records)
-            has_flagged = any(
-                is_frozen_artifact_mutation(record)
-                and record.get("record_type") == "fold"
-                and str(record.get("epoch_id")) == target_epoch
-                and str(record.get("fold_id")) == target_fold
-                for record in records
-            )
-            if not has_success and not has_flagged:
-                raise ManagerError("目标 Fold 还没有账本记录，无法回滚到它")
-            target_position = next(
-                index
-                for index, (key, _kind) in enumerate(sessions)
-                if key == session_key
-            )
-            dropped_planned = sessions[target_position + 1 :]
-            dropped_fold_keys = {
-                key for key, kind in dropped_planned if kind == "fold"
-            }
-            dropped_meta_keys = {
-                key for key, kind in dropped_planned if kind == "meta"
-            }
-
-        def _dropped(record: dict[str, object]) -> bool:
-            kind = record.get("record_type")
-            if session_key == "heldout":
-                return kind == "heldout"
-            # A termination belongs to the Fold that ended the arm and goes
-            # with it, so a rollback past that Fold resumes the arm.
-            if kind in ("fold", "terminated"):
-                key = f"{record.get('epoch_id')}/{record.get('fold_id')}"
-                if key in dropped_fold_keys:
-                    return True
-                return key == session_key and is_frozen_artifact_mutation(record)
-            if kind == "meta_learning":
-                return str(record.get("session_key") or "") in dropped_meta_keys
-            return kind == "heldout"
-
-        kept_records = [record for record in records if not _dropped(record)]
-        dropped_records = [record for record in records if _dropped(record)]
-        if not dropped_records:
-            raise ManagerError(
-                "该 Fold 之后没有任何账本记录（Fold/元学习/Held-out），无需回滚"
-            )
-        try:
-            assert_no_frozen_artifact_mutation(kept_records)
-        except FrozenArtifactMutated as exc:
-            raise ManagerError(
-                "回滚后仍有完整性失败记录，拒绝落账"
-            ) from exc
-
-        stamp = (
-            utc_now_iso().replace("-", "").replace(":", "")[:15]
-            + f"_{uuid.uuid4().hex[:8]}"
-        )
-        archive_root = directory / "artifacts/strategy/_archive" / f"rollback_{stamp}"
-        backup = ledger.path.with_name(f"experiment_ledger.rollback_{stamp}.jsonl")
-        shutil.copy2(ledger.path, backup)
-
-        from autotrade.pipelines.prior import restore_current_from_records
-
-        try:
-            restore_current_from_records(directory, kept_records)
-        except (FileNotFoundError, ValueError) as exc:
-            raise ManagerError(str(exc)) from exc
-        ledger.rewrite(kept_records)
-
-        step_prune_keys = set(dropped_fold_keys)
-        if session_key != "heldout":
-            target_epoch, _, target_fold = session_key.partition("/")
-            if (target_epoch, target_fold) not in latest_fold_records(kept_records):
-                step_prune_keys.add(session_key)
-        self._archive_unreferenced_frozen(
-            directory, dropped_records, kept_records, archive_root
-        )
-        self._prune_step_tree(directory, step_prune_keys, archive_root)
-
-        dropped_session_keys = (
-            {"heldout"}
-            if session_key == "heldout"
-            else dropped_fold_keys | dropped_meta_keys | {"heldout"}
-        )
-        # Session-scoped inputs of dropped sessions are stale by definition:
-        # they describe runs that no longer exist.
-        for mapping in (
-            control.directives,
-            control.rerun_sessions,
-            control.resource_overrides,
-            control.gpu_counts,
-        ):
-            for key in list(mapping):
-                if key in dropped_session_keys:
-                    mapping.pop(key, None)
-
-    def _archive_unreferenced_frozen(
-        self,
-        directory: Path,
-        dropped_records: list[dict[str, object]],
-        kept_records: list[dict[str, object]],
-        archive_root: Path,
-    ) -> None:
-        """Move dropped frozen trees nothing still needs.
-
-        Spared: a tree a kept record still names, and the experiment's
-        inherited seed, which the console installed at creation and a resume
-        falls back to."""
-        artifact_root = (directory / "artifacts").resolve()
-        kept_ids = _ledger_frozen_ids(kept_records)
-        kept_dirs = []
-        for artifact_id in kept_ids:
-            frozen_dir = artifact_root / "strategy" / "frozen" / artifact_id
-            if frozen_dir.is_dir():
-                kept_dirs.append(frozen_dir.resolve())
-        # A Fold that kept its parent records the seed's own ``_inherited/``
-        # path, so the seed is among the dropped records' trees -- and no
-        # ``frozen/<id>`` ever matches it back. It is creation state rather
-        # than rollback output: it stays whether or not a record still names
-        # it, because the resume falls back to it once the ledger has no
-        # artifact of this experiment's own left.
-        inherited = _read_json(directory / "hitl/params.json").get(
-            "_inherited_artifact"
-        )
-        if isinstance(inherited, dict):
-            for key in ("path", "model_path"):
-                raw = inherited.get(key)
-                if raw and Path(str(raw)).is_dir():
-                    kept_dirs.append(Path(str(raw)).resolve())
-
-        def _referenced(path: Path) -> bool:
-            resolved = path.resolve()
-            for kept in kept_dirs:
-                if resolved == kept or resolved.is_relative_to(kept) or kept.is_relative_to(resolved):
-                    return True
-            return False
-
-        candidates: list[Path] = []
-        for record in dropped_records:
-            for artifact_id in _ledger_frozen_ids([record]):
-                if artifact_id in kept_ids:
-                    continue
-                frozen_dir = artifact_root / "strategy" / "frozen" / artifact_id
-                if frozen_dir.is_dir():
-                    candidates.append(frozen_dir)
-            for field_name in (
-                "frozen_strategy_artifact_path",
-                "frozen_model_artifact_path",
-            ):
-                raw = record.get(field_name)
-                if not raw:
-                    continue
-                path = Path(str(raw))
-                if path.is_dir():
-                    candidates.append(path)
-        roots: list[Path] = []
-        seen: set[Path] = set()
-        for path in candidates:
-            if not path.is_dir():
-                continue
-            resolved = path.resolve()
-            if resolved in seen:
-                continue
-            if resolved == artifact_root or not resolved.is_relative_to(artifact_root):
-                raise ManagerError(
-                    f"账本中的冻结产物路径越出当前实验目录，拒绝回滚：{path}"
-                )
-            if _referenced(resolved):
-                continue
-            seen.add(resolved)
-            roots.append(resolved)
-        roots = [
-            path
-            for path in roots
-            if not any(
-                path != other and path.is_relative_to(other) for other in roots
-            )
-        ]
-        for path in roots:
-            archive_root.mkdir(parents=True, exist_ok=True)
-            dest = archive_root / path.name
-            suffix = 1
-            while dest.exists():
-                dest = archive_root / f"{path.name}.{suffix}"
-                suffix += 1
-            chmod_tree(path, file_mode=0o600, dir_mode=0o700)
-            shutil.move(str(path), str(dest))
-
-    def _prune_step_tree(
-        self, directory: Path, dropped_fold_keys: set[str], archive_root: Path
-    ) -> int:
-        """Step-tree symmetry for fold rollback.
-
-        Nodes recorded by the dropped fold sessions carry validation metrics and
-        full strategy snapshots from periods that are FUTURE relative to the new
-        frontier; the next fold's sandbox receives the experiment tree verbatim,
-        so leaving them in place would hand the re-run Agent future-validated
-        strategies. Dropped nodes (plus descendants) move into the rollback
-        archive next to the frozen artifacts; tree.json is backed up there too."""
-        from autotrade.environment.step_tree import TREE_FILE, StepTree
-
-        steps_root = directory / "steps"
-        if not (steps_root / TREE_FILE).exists():
-            return 0
-        ref_store = _modern_ref_store(directory)
-        tree = StepTree(steps_root)
-        dropped_ids: set[str] = set()
-        for node in tree.nodes():
-            fold_ref = str(node.get("fold_id") or "")
-            try:
-                raw_fold = ref_store.resolve("fold", fold_ref)
-            except KeyError as exc:
-                raise ManagerError("step tree contains an unknown fold reference") from exc
-            if f"{node.get('epoch_id')}/{raw_fold}" in dropped_fold_keys:
-                dropped_ids.add(str(node["node_id"]))
-        if not dropped_ids:
-            return 0
-        changed = True
-        while changed:  # descendants of a dropped node are dropped too
-            changed = False
-            for node in tree.nodes():
-                if (
-                    node["node_id"] not in dropped_ids
-                    and node.get("parent_node_id") in dropped_ids
-                ):
-                    dropped_ids.add(str(node["node_id"]))
-                    changed = True
-        archive_steps = archive_root / "steps"
-        archive_steps.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(steps_root / TREE_FILE, archive_steps / TREE_FILE)
-        for node_id in sorted(dropped_ids):
-            node_dir = steps_root / node_id
-            if node_dir.is_dir():
-                chmod_tree(node_dir, file_mode=0o600, dir_mode=0o700)
-                shutil.move(str(node_dir), str(archive_steps / node_id))
-        tree.data["nodes"] = [
-            node for node in tree.nodes() if str(node["node_id"]) not in dropped_ids
-        ]
-        if tree.data.get("current_node_id") in dropped_ids:
-            tree.data["current_node_id"] = None
-        tree.save()
-        return len(dropped_ids)
-
-    def _validate_rerun_target(self, directory: Path, session_key: str) -> None:
-        """Only the LATEST recorded fold may be re-run: earlier folds already
-        fed their frozen artifacts into successors, so re-running them would
-        break the parent chain the later records were built on."""
-        sessions = self._planned_sessions(directory)
-        fold_keys = [key for key, kind in sessions if kind == "fold"]
-        if session_key not in fold_keys:
-            raise ManagerError(f"{session_key!r} is not a fold session")
-        records = ExperimentLedger(directory / "ledgers/experiment_ledger.jsonl").read()
-        recorded = latest_fold_records(records)
-        recorded_keys = [
-            key for key in fold_keys if tuple(key.split("/", 1)) in recorded
-        ]
-        if not recorded_keys:
-            raise ManagerError("该实验还没有已完成的 Fold 可重跑")
-        if session_key != recorded_keys[-1]:
-            raise ManagerError(
-                f"只能重跑最新完成的 Fold（{recorded_keys[-1]}）——更早的 Fold 已被后续继承"
-            )
-        target_position = next(
-            index for index, (key, _kind) in enumerate(sessions) if key == session_key
-        )
-        recorded_meta_keys = {
-            str(record.get("session_key") or "")
-            for record in records
-            if record.get("record_type") == "meta_learning"
-        }
-        later_meta = next(
-            (
-                key
-                for key, kind in sessions[target_position + 1 :]
-                if kind == "meta" and key in recorded_meta_keys
-            ),
-            None,
-        )
-        if later_meta is not None:
-            raise ManagerError(
-                f"后续元学习会话 {later_meta} 已继承该 Fold；请先回滚到目标 Fold 再重跑"
-            )
-
     @staticmethod
-    def _planned_sessions(directory: Path) -> list[tuple[str, str]]:
-        schedule = read_json(directory / "hitl/schedule.json")
-        raw = schedule.get("sessions")
-        if not isinstance(raw, list):
-            raise ManagerError("experiment session plan is missing")
-        sessions: list[tuple[str, str]] = []
-        for item in raw:
-            if not isinstance(item, dict):
-                raise ManagerError("experiment session plan is invalid")
-            key = str(item.get("session_key") or item.get("key") or "")
-            kind = str(item.get("kind") or "")
-            if kind == "meta_learning":
-                kind = "meta"
-            if not key or kind not in {"fold", "meta", "heldout", "deployment_adjustment"}:
-                raise ManagerError(
-                    "experiment session plan contains an invalid session"
-                )
-            sessions.append((key, kind))
-        if len({key for key, _kind in sessions}) != len(sessions):
-            raise ManagerError("experiment session plan contains duplicate keys")
-        return sessions
-
-    def _require_planned_session(self, directory: Path, session_key: str) -> None:
-        if session_key == "heldout":
-            return
-        if session_key not in {key for key, _kind in self._planned_sessions(directory)}:
-            raise ManagerError(f"unknown session: {session_key}")
+    def _require_pending_research_session(
+        directory: Path,
+        identity: PublicIdentity,
+        action: str,
+        session_key: str | None,
+    ) -> None:
+        """A per-session setting targets a planned research session, and only
+        while research lasts: after the freeze no Agent session remains to read
+        it."""
+        if not session_key:
+            raise ManagerError(f"{action} requires session_key")
+        if identity.session(session_key)["kind"] != "research":
+            raise ManagerError(f"{action} applies to research sessions only")
+        if research_over(read_ledger_records(directory)):
+            raise ManagerError("research is over; no research session remains")
 
     def _terminate(self, experiment_id: str, directory: Path) -> dict[str, object]:
         """Graceful first, then guaranteed: the worker's SIGTERM handler unwinds
@@ -1221,7 +812,7 @@ class ExperimentManager:
 
         ``at="session_boundary"`` defers instead: the request is recorded in
         the control state and the live worker re-executes itself once the
-        session it is running has been recorded, so a code swap costs no Fold.
+        session it is running has been recorded, so a code swap costs no session.
 
         Escalating rather than refusing: a worker that ignores SIGTERM is
         almost always inside a model call, which routinely outlasts any grace
@@ -1291,15 +882,6 @@ class ExperimentManager:
             if state.get("worker_alive") or state.get("state") == "launching":
                 raise ManagerError(
                     f"experiment {experiment_id!r} has a live worker; stop or terminate it before deleting"
-                )
-            # AnalysisService background threads write into hitl/analysis/ after
-            # the HTTP request returns; rmtree under a live writer would race it.
-            if self._analysis_pending is not None and self._analysis_pending(
-                experiment_id
-            ):
-                raise ManagerError(
-                    f"experiment {experiment_id!r} has a strategy analysis in progress; "
-                    "wait for it to finish before deleting"
                 )
             removed_work_root: str | None = None
             # Deletion does not depend on params.json being readable: a failed
