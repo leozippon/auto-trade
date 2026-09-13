@@ -3287,14 +3287,17 @@ function sessionListLine(detail, session, pending) {
       noteTitle:
         "本 Fold 没有给实验留下任何策略，下一 Fold 从模板重新开始，因此没有沿用中的验证数字",
     };
-  if (!inForce.result)
-    return {
-      text: "读不到",
-      cls: "",
-      note: `沿用中的${inForce.inherited ? "父产物" : "冻结候选"}回放结果读不到`,
-    };
-  const benchmark = inForce.result.benchmark || {};
   const transition = inForce.transition || {};
+  if (!inForce.result) {
+    // A failed host parent control is the usual reason an inherited replay is
+    // missing, and the row's own reason is the difference between "this Fold's
+    // baseline errored" and "this Fold's record is corrupt". The note line is
+    // clipped to one row, so the full text rides in its tooltip.
+    const why = inForce.inherited ? transition.error : null;
+    const note = `沿用中的${inForce.inherited ? "父产物" : "冻结候选"}回放结果读不到${why ? `：${why}` : ""}`;
+    return { text: "读不到", cls: "", note, noteTitle: why ? note : null };
+  }
+  const benchmark = inForce.result.benchmark || {};
   const percentile =
     transition.excess_percentile === null ||
     transition.excess_percentile === undefined
@@ -6084,7 +6087,8 @@ function selectionSection(detail, session) {
    OWN span (the projection already picked the right null block for the scored
    row), and the Fold's row carries the ledger's `vs_parent.beats_parent`, so
    "did the candidate beat this baseline" is read off the record rather than
-   subtracted by eye. The failure text only exists on the ledger record. */
+   subtracted by eye. A failed control's full reason is read off the ledger
+   record here; the session line quotes the row's bounded copy of it. */
 function parentControlSection(detail, session, validation) {
   const record = session.record || {};
   const control = record.parent_control;

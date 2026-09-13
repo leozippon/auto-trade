@@ -20,6 +20,7 @@ from typing import NamedTuple
 
 from autotrade.environment.replay.style import STYLE_ARTIFACT_NAME, STYLE_SCHEMA_VERSION
 from autotrade.pipelines.agent_inbox import INBOX_NAME, inbox_public_view
+from autotrade.pipelines.agent_views import parent_control_error_text
 from autotrade.pipelines.config import AcceptanceRules
 from autotrade.pipelines.fold_analysis import analysis_paths
 from autotrade.pipelines.hitl_state import (
@@ -312,8 +313,8 @@ def _parent_control_view(
     ``reporting.walk_forward_report`` publishes), because a trailing window
     scores the control on less ground than the Fold's own Validation row covers
     and the console must not present the two as one span. ``None`` for a Fold
-    that inherited no parent; a failed control keeps its status and carries no
-    numbers.
+    that inherited no parent; a failed control keeps its status and the reason
+    it failed, and carries no numbers.
     """
     control = record.get("parent_control")
     if not isinstance(control, Mapping):
@@ -327,6 +328,13 @@ def _parent_control_view(
     scored_end = result.get("end") if stepped else window_end
     return {
         "status": control.get("status"),
+        # Why a failed control produced no numbers. Without it the row renders
+        # as a Fold whose figures cannot be read, which reads as a corrupt
+        # record rather than as a replay that errored. Bounded and host-path
+        # redacted through the same projection the Agent reads the reason
+        # through (agent_views.parent_control_error_text); None when the
+        # control did not fail or the record kept no reason.
+        "error": parent_control_error_text(control.get("error")),
         # This transition replayed a baseline anchor: a control the experiment
         # never delivers, so the counts above the table leave it out entirely
         # and the row has to say why it is not among them.

@@ -358,6 +358,13 @@ def test_the_parent_control_fields_the_console_reads_are_served() -> None:
     read |= set(
         re.findall(r"\bcontrol\.([a-z_]+)", _js_function_body("walkForwardPanel"))
     )
+    # The session line reads the same view through foldInForce.transition --
+    # including the reason a failed control left the Fold without numbers, so a
+    # dropped field would silently render the Fold as unreadable again.
+    read |= set(
+        re.findall(r"\btransition\.([a-z_]+)", _js_function_body("sessionListLine"))
+    )
+    assert "error" in read, "the session line never names why a control failed"
     assert read, "the console reads no parent-control field"
     assert read <= served, sorted(read - served)
 

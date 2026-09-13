@@ -1459,6 +1459,7 @@ def test_a_fold_that_kept_its_parent_still_publishes_return_numbers(
     # against that quarter's own null control rather than the window's 0.352.
     assert row["parent_control"] == {
         "status": "ok",
+        "error": None,
         "baseline_anchor": False,
         "source": "step_result",
         "period_start": "20230403",
@@ -2400,7 +2401,12 @@ class WebuiBackendTest(unittest.TestCase):
             "2025": {
                 "status": "failed",
                 "parent_strategy_artifact_id": "strategy_epoch_001_fold_2024",
-                "error": "TimeoutError: parent control exceeded the deadline",
+                # Host-generated text, host path and all: the console must
+                # publish it the way the Agent reads it, not verbatim.
+                "error": (
+                    "TimeoutError: parent control exceeded the deadline "
+                    "(/srv/experiments/exp_wf/steps/step_control.log)"
+                ),
             },
         }
         # How wide each Fold's search was and how much of the frozen
@@ -3362,6 +3368,8 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertIsNone(first)
         beat = rows[self._fold_ref("fold_2023", "exp_wf")]["parent_control"]
         self.assertEqual(beat["status"], "ok")
+        # A control that ran carries no failure reason to explain away.
+        self.assertIsNone(beat["error"])
         # A single-period window is scored whole, and says so.
         self.assertEqual(
             (beat["source"], beat["period_start"], beat["period_end"]),
@@ -3389,11 +3397,19 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertAlmostEqual(lost["neutralized_excess_return"], -0.03)
         self.assertAlmostEqual(lost["sharpe"], 0.10)
         self.assertAlmostEqual(lost["excess_percentile"], 0.42)
-        # A failed control keeps its status and carries no numbers at all.
+        # A failed control keeps its status and why it failed, and carries no
+        # numbers at all. Without the reason the console can only render the
+        # Fold as unreadable, which an operator reads as a corrupt record.
         self.assertEqual(
             rows[self._fold_ref("fold_2025", "exp_wf")]["parent_control"],
             {
                 "status": "failed",
+                # Redacted by the projection the Agent reads the same reason
+                # through (agent_views.parent_control_error_text).
+                "error": (
+                    "TimeoutError: parent control exceeded the deadline "
+                    "([host_path])"
+                ),
                 # This lineage never froze an anchor, so nothing here replayed
                 # a control the counts would leave out.
                 "baseline_anchor": False,
