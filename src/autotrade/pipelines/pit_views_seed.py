@@ -8,7 +8,8 @@ when ``provider.json`` matches the contract this experiment would write.
 Which tree an experiment reads is its ``pit_views_seed`` parameter: the default
 one carries the default dataset selection, and an arm that selects other
 datasets points at a tree prebuilt for exactly its own selection
-(``scripts/data/prebuild_pit_views_seed.py``).
+(``scripts/data/prebuild_pit_views_seed.py``). What a tree carries is the
+``SeedPlan`` of one research geometry (docs/data-documentation.md §3.4).
 """
 
 from __future__ import annotations
@@ -19,68 +20,89 @@ import os
 import shutil
 import stat
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
 from autotrade.environment.data.snapshot import SnapshotConfig
 from autotrade.environment.runtime import chmod_tree
+from autotrade.pipelines.calendar import ResearchGeometry, Slot
 from autotrade.pipelines.config import SNAPSHOT_CACHE_FORMAT_VERSION
-from autotrade.pipelines.folds import (
-    build_fold_schedule,
-    deployment_fold,
-    heldout_periods,
-)
-from autotrade.pipelines.hitl_state import WEB_CREATE_DEFAULTS
 
 # What a finished view carries: a snapshot restates its manifest and a bundle
 # its data summary. Any other directory in the layout is a level the provider
 # still writes into, so it is descended, never published as a view.
 _VIEW_MARKERS = ("manifest.json", "data_summary.json")
 
-# The calendar a seed is planned over. One source: the console creation
-# defaults an experiment is actually created with, so a seed prebuilt without
-# overrides matches what the next experiment asks the provider to build.
-PLAN_PARAMETERS: tuple[str, ...] = (
-    "fold_period",
-    "development_first_period",
-    "development_last_period",
-    "test_stage",
-    "heldout_first_period",
-    "heldout_last_period",
-    "window_months",
-    "validation_periods",
-    "min_region_trade_days",
-    "deployment_adjustment_start",
-)
-_INT_PLAN_PARAMETERS = frozenset(
-    {"window_months", "validation_periods", "min_region_trade_days"}
-)
-_BOOL_PLAN_PARAMETERS = frozenset({"test_stage"})
+# The provider phase each stage's slots are published under: research years
+# are validation replays, and the forward replay reads F and H as held-out data.
+RESEARCH_PHASE = "valid"
+FORWARD_PHASE = "heldout"
 
 
-def plan_parameters(params: Mapping[str, object] | None = None) -> dict[str, object]:
-    """Calendar keywords for ``iter_plan_pit_jobs`` from creation parameters.
+@dataclass(frozen=True)
+class SeedPlan:
+    """The views a seed carries for one research geometry and one release.
 
-    Defaults to the console creation defaults, so a seed prebuilt without
-    overrides plans exactly the calendar the next experiment is created with.
+    Research reads the decision views at each research year's anchor and at
+    research end -- the latter is the Agent's only data mount and the data
+    summary bundle describes it -- plus the research-year slots. The forward
+    and Held-out slots belong to the pipeline's forward replay alone, so no
+    research item is stamped after research end. The as-of stash follows the
+    two continuous replays: the full research chain from the first year's
+    anchor, and the forward chain from research end.
     """
 
-    source = WEB_CREATE_DEFAULTS if params is None else params
-    plan: dict[str, object] = {}
-    for name in PLAN_PARAMETERS:
-        value = source[name]
-        if name in _INT_PLAN_PARAMETERS:
-            if type(value) is not int:
-                raise TypeError(f"calendar default {name} must be an int")
-            plan[name] = value
-        elif name in _BOOL_PLAN_PARAMETERS:
-            if type(value) is not bool:
-                raise TypeError(f"calendar default {name} must be a bool")
-            plan[name] = value
-        else:
-            plan[name] = str(value)
-    return plan
+    geometry: ResearchGeometry
+    research_slots: tuple[Slot, ...]
+    forward_slots: tuple[Slot, ...]
+
+    @property
+    def decision_times(self) -> tuple[datetime, ...]:
+        return (
+            *(slot.anchor for slot in self.research_slots),
+            self.geometry.research_decision_time,
+        )
+
+    @property
+    def stash_chains(self) -> tuple[tuple[datetime, tuple[Slot, ...]], ...]:
+        return (
+            (self.research_slots[0].anchor, self.research_slots),
+            (self.geometry.research_decision_time, self.forward_slots),
+        )
+
+    @property
+    def jobs(self) -> tuple[tuple[str, Slot], ...]:
+        """``(phase, slot)`` prepare jobs in anchor order."""
+
+        return (
+            *((RESEARCH_PHASE, slot) for slot in self.research_slots),
+            *((FORWARD_PHASE, slot) for slot in self.forward_slots),
+        )
+
+    def to_record(self) -> dict[str, object]:
+        return {
+            "geometry": self.geometry.to_record(),
+            "decision_views": [value.isoformat() for value in self.decision_times],
+            "research_slots": [slot.to_record() for slot in self.research_slots],
+            "forward_slots": [slot.to_record() for slot in self.forward_slots],
+            "bundle": self.geometry.research_decision_time.isoformat(),
+            "asof_stash_chains": [
+                {"decision": decision.isoformat(), "slots": [slot.label for slot in chain]}
+                for decision, chain in self.stash_chains
+            ],
+        }
+
+
+def plan_seed(geometry: ResearchGeometry, trading_days: Sequence[str]) -> SeedPlan:
+    """The seed plan of ``geometry`` over a release's daily trading dates."""
+
+    return SeedPlan(
+        geometry=geometry,
+        research_slots=geometry.research_years,
+        forward_slots=(geometry.forward, geometry.heldout(trading_days)),
+    )
 
 
 def pit_cache_provider_record(
@@ -287,97 +309,6 @@ def _publish_seed_entry(
             shutil.rmtree(staging)
 
 
-def iter_plan_pit_jobs(
-    trading_days: list[str],
-    *,
-    development_first_period: str,
-    development_last_period: str,
-    heldout_first_period: str,
-    heldout_last_period: str,
-    fold_period: str,
-    window_months: int,
-    min_region_trade_days: int,
-    test_stage: bool,
-    validation_periods: int = 1,
-    deployment_adjustment_start: str = "",
-) -> tuple[tuple[str, str, str, datetime], ...]:
-    """Unique Meta/Fold/frozen_test/held-out prepare jobs for one fold plan.
-
-    The plan comes from the schedule API, never from a second calendar: the
-    regions and decision anchors are exactly the ``FoldSpec`` and held-out
-    periods the pipeline will ask the provider to prepare. A fold without a
-    test region (the default regular Fold) contributes no frozen_test job.
-
-    Epoch count does not multiply the set: later epochs reuse the same decision
-    times and replay windows. Several phases routinely share one region — meta
-    and valid always do, and on a contiguous calendar the previous fold's test
-    does too — so the returned tuples repeat a region once per phase while the
-    provider builds it once. Jobs are sorted by decision time, then region and
-    phase, so the plan and a prebuild's progress log are the same on every run.
-
-    With ``deployment_adjustment_start`` set, the deployment adjustment's
-    Validation slot (that start through the release's last trading day,
-    ``folds.deployment_fold``) is planned too.
-    """
-
-    folds = build_fold_schedule(
-        development_first_period,
-        development_last_period,
-        trading_days,
-        window_months=window_months,
-        period=fold_period,
-        min_region_trade_days=min_region_trade_days,
-        test_stage=test_stage,
-        validation_periods=validation_periods,
-    )
-    jobs: list[tuple[str, str, str, datetime]] = []
-    for fold in folds:
-        jobs.append(
-            ("meta", fold.validation_start, fold.validation_end, fold.valid_decision_time)
-        )
-        jobs.append(
-            ("valid", fold.validation_start, fold.validation_end, fold.valid_decision_time)
-        )
-        if fold.has_test:
-            assert fold.test_start is not None and fold.test_end is not None
-            assert fold.test_decision_time is not None
-            jobs.append(
-                ("frozen_test", fold.test_start, fold.test_end, fold.test_decision_time)
-            )
-    for period in heldout_periods(
-        heldout_first_period,
-        heldout_last_period,
-        trading_days,
-        period=fold_period,
-        min_region_trade_days=min_region_trade_days,
-    ):
-        jobs.append(
-            (
-                "heldout",
-                str(period["start"]),
-                str(period["end"]),
-                period["decision_time"],  # type: ignore[arg-type]
-            )
-        )
-    if deployment_adjustment_start:
-        deployment = deployment_fold(
-            deployment_adjustment_start,
-            trading_days,
-            window_months=window_months,
-            min_region_trade_days=min_region_trade_days,
-        )
-        jobs.append(
-            (
-                "valid",
-                deployment.validation_start,
-                deployment.validation_end,
-                deployment.valid_decision_time,
-            )
-        )
-    jobs.sort(key=lambda job: (job[3], job[1], job[0]))
-    return tuple(jobs)
-
-
 def _completed_seed_views(seed: Path) -> list[Path]:
     """Every completed view in the seed, wherever the layout puts it.
 
@@ -510,11 +441,12 @@ def _load_json(path: Path) -> dict[str, object]:
 
 
 __all__ = [
-    "PLAN_PARAMETERS",
+    "FORWARD_PHASE",
+    "RESEARCH_PHASE",
+    "SeedPlan",
     "assert_seed_snapshot_config",
-    "iter_plan_pit_jobs",
     "pit_cache_provider_record",
-    "plan_parameters",
+    "plan_seed",
     "seed_pit_view_slots",
     "seed_pit_views",
 ]

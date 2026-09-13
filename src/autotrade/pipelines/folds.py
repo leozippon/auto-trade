@@ -27,23 +27,16 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import datetime, time
-from pathlib import Path
+from datetime import datetime
 
 import pandas as pd
 
 from autotrade.environment.data.contracts import CN_TZ
 
+from .calendar import MIN_REGION_TRADE_DAYS, RESEARCH_ANCHOR_TIME, yyyymmdd
+
 QUARTER_PATTERN = re.compile(r"^(\d{4})Q([1-4])$")
-# Research-snapshot anchor: end of the prior trading day (close of business),
-# not an intraday moment. The decision-input view is frozen as of this time.
-RESEARCH_ANCHOR_TIME = time(23, 59, 59)
 PERIOD_UNITS = ("week", "month", "quarter", "year")
-# Every validation/test/held-out region needs at least two trading days to be
-# backtestable at all: a single-day region yields a one-point equity curve with
-# no daily return series behind it. Guarded here at schedule build time so a
-# fold can never reach the (expensive) sandbox + LLM session doomed.
-MIN_REGION_TRADE_DAYS = 2
 
 
 @dataclass(frozen=True)
@@ -413,18 +406,6 @@ def assert_no_overlap(development_last_period: str, heldout_first_period: str, *
         )
 
 
-def load_sse_trading_days(raw_dir: str | Path) -> list[str]:
-    calendar_dir = Path(raw_dir) / "trade_cal" / "exchange=SSE"
-    if not calendar_dir.exists():
-        raise FileNotFoundError(f"missing SSE trade calendar: {calendar_dir}")
-    frames = [pd.read_parquet(path, columns=["cal_date", "is_open"]) for path in sorted(calendar_dir.glob("year=*.parquet"))]
-    if not frames:
-        raise FileNotFoundError(f"no trade calendar partitions under {calendar_dir}")
-    calendar = pd.concat(frames, ignore_index=True)
-    open_days = calendar[calendar["is_open"].astype(str) == "1"]["cal_date"].astype(str)
-    return sorted(set(open_days))
-
-
 def _require_min_trade_days(
     region: str, start: str, end: str, trading_days: list[str], minimum: int = MIN_REGION_TRADE_DAYS
 ) -> None:
@@ -503,9 +484,3 @@ def _period_label(start: pd.Timestamp, period: str) -> str:
     if period == "year":
         return start.strftime("%Y")
     return start.strftime("%Y%m%d")
-
-
-def yyyymmdd(value: object) -> str:
-    """One calendar date as the ``YYYYMMDD`` key every layer stores it under."""
-
-    return pd.Timestamp(str(value).strip()).strftime("%Y%m%d")

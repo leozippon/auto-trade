@@ -30,7 +30,7 @@ from autotrade.environment.replay.market import DailyMarketData
 from autotrade.environment.replay.timeview import Timeview
 from autotrade.environment.strategy import CN_TZ
 from autotrade.paper.engine import PaperDataNotReady
-from autotrade.pipelines.folds import load_sse_trading_days
+from autotrade.pipelines.calendar import load_sse_trading_days
 from autotrade.pipelines.pit_backend import (
     HistoricalMinuteSource,
     ResearchPITSnapshotProvider,

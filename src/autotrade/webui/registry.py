@@ -85,7 +85,7 @@ def clamped_trading_days(repo_root: Path) -> list[str] | None:
     the period pickers cannot offer periods without downloaded data. None when
     no calendar is available (dev/test roots): the pickers degrade to text."""
     try:
-        from autotrade.pipelines.folds import load_sse_trading_days
+        from autotrade.pipelines.calendar import load_sse_trading_days
 
         raw_dir = repo_root / "data" / "raw"
         days = load_sse_trading_days(raw_dir)

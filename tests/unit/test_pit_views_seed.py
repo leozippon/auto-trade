@@ -7,6 +7,7 @@ import shutil
 import stat
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -15,11 +16,18 @@ from autotrade.environment.data.snapshot import SnapshotConfig
 from autotrade.environment.runtime import chmod_tree
 from autotrade.environment.strategy import StrategySchedule
 from autotrade.pipelines import pit_backend
-from autotrade.pipelines.config import SNAPSHOT_CACHE_FORMAT_VERSION
+from autotrade.pipelines.calendar import ResearchGeometry
+from autotrade.pipelines.config import (
+    DEFAULT_RESEARCH_GEOMETRY,
+    SNAPSHOT_CACHE_FORMAT_VERSION,
+    SnapshotBundle,
+)
 from autotrade.pipelines.pit_backend import prebuild_asof_stash
 from autotrade.pipelines.pit_views_seed import (
-    iter_plan_pit_jobs,
+    FORWARD_PHASE,
+    RESEARCH_PHASE,
     pit_cache_provider_record,
+    plan_seed,
     seed_pit_views,
 )
 
@@ -523,181 +531,181 @@ def test_incomplete_stash_is_never_taken_for_a_finished_one(tmp_path: Path) -> N
     assert missing.is_file()
 
 
-def _business_days() -> list[str]:
-    return [
-        day.strftime("%Y%m%d")
-        for day in pd.date_range("2021-01-04", "2026-06-30", freq="B")
+def _release_days(end: str = "20260911") -> list[str]:
+    """Weekday daily dates of a release ending ``end``."""
+
+    return [day.strftime("%Y%m%d") for day in pd.bdate_range("2019-01-02", end)]
+
+
+def _cn(day: str) -> str:
+    return f"{day[:4]}-{day[4:6]}-{day[6:]}T23:59:59+08:00"
+
+
+def test_the_seed_plan_is_exactly_the_research_forward_and_heldout_views() -> None:
+    """Five decision views, four research years, the forward and the clipped
+    Held-out slot, one bundle at research end and two as-of chains."""
+
+    plan = plan_seed(DEFAULT_RESEARCH_GEOMETRY, _release_days())
+    assert [value.isoformat() for value in plan.decision_times] == [
+        _cn(day) for day in ("20210630", "20220630", "20230630", "20240630", "20250630")
+    ]
+    assert [(slot.label, slot.start, slot.end) for slot in plan.research_slots] == [
+        ("Y1", "20210701", "20220630"),
+        ("Y2", "20220701", "20230630"),
+        ("Y3", "20230701", "20240630"),
+        ("Y4", "20240701", "20250630"),
+    ]
+    assert [
+        (slot.label, slot.start, slot.end, slot.requested_end, slot.truncation_reason)
+        for slot in plan.forward_slots
+    ] == [
+        ("F", "20250701", "20260630", "20260630", None),
+        ("H", "20260701", "20260911", "20260930", "release_ends_20260911"),
+    ]
+    # Every slot is prepared at its own anchor, research years as validations
+    # and the forward replay's two slots as held-out data.
+    assert [(phase, slot.label, slot.anchor.isoformat()) for phase, slot in plan.jobs] == [
+        (RESEARCH_PHASE, "Y1", _cn("20210630")),
+        (RESEARCH_PHASE, "Y2", _cn("20220630")),
+        (RESEARCH_PHASE, "Y3", _cn("20230630")),
+        (RESEARCH_PHASE, "Y4", _cn("20240630")),
+        (FORWARD_PHASE, "F", _cn("20250630")),
+        (FORWARD_PHASE, "H", _cn("20260630")),
+    ]
+    record = json.loads(json.dumps(plan.to_record()))
+    assert record["bundle"] == _cn("20250630")
+    assert record["asof_stash_chains"] == [
+        {"decision": _cn("20210630"), "slots": ["Y1", "Y2", "Y3", "Y4"]},
+        {"decision": _cn("20250630"), "slots": ["F", "H"]},
     ]
 
 
-def test_rolling_test_stage_plan_covers_every_region_and_heldout() -> None:
-    jobs = iter_plan_pit_jobs(
-        _business_days(),
-        development_first_period="2021Q4",
-        development_last_period="2025Q4",
-        heldout_first_period="2026Q1",
-        heldout_last_period="2026Q2",
-        fold_period="quarter",
-        window_months=21,
-        min_region_trade_days=2,
-        test_stage=True,
+@pytest.mark.parametrize(
+    ("geometry", "release_end"),
+    [
+        (DEFAULT_RESEARCH_GEOMETRY, "20260911"),
+        (
+            ResearchGeometry("20200701", "20220630", "20230630", "20231231"),
+            "20260911",
+        ),
+    ],
+)
+def test_nothing_planned_for_research_is_stamped_after_research_end(
+    geometry: ResearchGeometry, release_end: str
+) -> None:
+    """Research reads the decision views, their bundle and the research-year
+    slots. A decision view holds rows up to its anchor and a slot rows up to its
+    last day, so all of them end by research end; the forward and Held-out slots
+    start after it and are planned only for the forward replay."""
+
+    plan = plan_seed(geometry, _release_days(release_end))
+    research_end = geometry.research_decision_time
+    assert research_end.isoformat() == _cn(geometry.research_end)
+    assert max(plan.decision_times) == research_end
+    assert plan.research_slots == geometry.research_years
+    assert all(slot.end <= geometry.research_end for slot in plan.research_slots)
+    assert [slot for phase, slot in plan.jobs if phase == RESEARCH_PHASE] == list(
+        plan.research_slots
     )
-    phases = {phase for phase, _start, _end, _decision in jobs}
-    assert phases == {"meta", "valid", "frozen_test", "heldout"}
-    assert any(
-        phase == "valid" and start == "20211001" and end == "20211231"
-        for phase, start, end, _decision in jobs
+    assert all(
+        slot.start > geometry.research_end and slot.anchor >= research_end
+        for slot in plan.forward_slots
     )
-    assert any(
-        phase == "heldout" and start == "20260401"
-        for phase, start, _end, _decision in jobs
-    )
-    # 17 quarter labels -> 16 rolling folds, three phases each, plus 2 held-out.
-    assert len(jobs) == 16 * 3 + 2
-    # Consecutive folds share a region: one fold's test is the next one's
-    # validation, so the plan asks for far fewer regions than jobs.
-    regions = {(start, end, decision) for _phase, start, end, decision in jobs}
-    assert len(regions) == 17 + 2
+    assert [slot.label for slot in plan.forward_slots] == ["F", "H"]
+    assert not {slot.label for slot in plan.research_slots} & {"F", "H"}
 
 
-def test_default_plan_is_the_console_calendar_and_shares_regions() -> None:
-    """The seed plan follows whatever calendar the console creates today.
+class _FakeProvider:
+    """The provider surface the prebuild reads, recording what it is asked."""
 
-    Calendar-independent invariants only: what must hold for the prebuild to
-    match a new experiment and for the provider to reuse regions across phases.
-    """
+    calls: list[tuple[str, str, str, str]] = []
 
-    from autotrade.pipelines.pit_views_seed import plan_parameters
+    def __init__(self, **_kwargs: object) -> None:
+        self.trading_days = _release_days()
+        self.release = SimpleNamespace(generation_id="generation_test", raw_dir=Path("raw"))
 
-    plan = plan_parameters()
-    jobs = iter_plan_pit_jobs(_business_days(), **plan)
-    assert jobs
-    assert {phase for phase, *_rest in jobs} <= {"meta", "valid", "frozen_test", "heldout"}
-    # Decision-time order lets later jobs reuse published decision views.
-    # Events snapshots are always cold-built from the pinned release.
-    decisions = [decision for *_rest, decision in jobs]
-    assert decisions == sorted(decisions)
-    # Meta and Validation always name the same region, so the plan always has
-    # strictly fewer distinct regions to build than jobs to prepare.
-    regions = {(start, end, decision) for _phase, start, end, decision in jobs}
-    assert len(regions) < len(jobs)
-    meta = {(start, end, d) for phase, start, end, d in jobs if phase == "meta"}
-    valid = {(start, end, d) for phase, start, end, d in jobs if phase == "valid"}
-    assert meta == valid
-    heldout = [job for job in jobs if job[0] == "heldout"]
-    assert len(heldout) == 1
-    assert heldout[0][1], heldout[0][2]
+    def prepare(self, *, fold, phase, start, end, decision_time):  # noqa: ANN001
+        assert fold is None
+        self.calls.append((phase, start, end, decision_time.isoformat()))
+        return SnapshotBundle(
+            snapshot_id="snapshot",
+            decision_ref=f"decision/{decision_time:%Y%m%d}",
+            replay_ref=f"replay/{phase}/{start}_{end}",
+            generation_id="generation_test",
+        )
 
 
-def test_the_deployment_adjustment_slot_is_planned_with_the_knob() -> None:
-    """With ``deployment_adjustment_start`` set the seed also carries the
-    deployment session's Validation slot: that day through the release's
-    last trading day, decided the trading day before; without it, nothing."""
-    from autotrade.pipelines.pit_views_seed import plan_parameters
+def _run_prebuild(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, argv: list[str]
+) -> list[dict[str, object]]:
+    from scripts.data import prebuild_pit_views_seed as prebuild
 
-    plan = plan_parameters()
-    assert plan["deployment_adjustment_start"] == ""
-    without = iter_plan_pit_jobs(_business_days(), **plan)
-    with_slot = iter_plan_pit_jobs(
-        _business_days(), **{**plan, "deployment_adjustment_start": "20250901"}
-    )
-    added = set(with_slot) - set(without)
-    assert len(added) == 1
-    phase, start, end, decision = next(iter(added))
-    assert (phase, start, end) == ("valid", "20250901", "20260630")
-    assert decision.strftime("%Y%m%d") == "20250829"
+    stashed: list[dict[str, object]] = []
+
+    def fake_stash(**kwargs: object) -> dict[str, object]:
+        stashed.append(kwargs)
+        return {"reused": False, "trade_days": 1}
+
+    _FakeProvider.calls = []
+    monkeypatch.setattr(prebuild, "ResearchPITSnapshotProvider", _FakeProvider)
+    monkeypatch.setattr(prebuild, "prebuild_asof_stash", fake_stash)
+    assert prebuild.main(["--repo-root", str(tmp_path), *argv]) == 0
+    return stashed
 
 
-def test_yearly_regular_folds_plan_one_shared_region_per_year_and_no_frozen_test() -> None:
-    """One regular Fold per year, judged by Held-out alone.
-
-    Five regions and five decision anchors: each year's validation region
-    (shared by Meta and Validation) plus the explicit held-out range; no
-    frozen_test job anywhere.
-    """
-
-    jobs = iter_plan_pit_jobs(
-        _business_days(),
-        development_first_period="2022",
-        development_last_period="2025",
-        heldout_first_period="20260101..20260630",
-        heldout_last_period="20260101..20260630",
-        fold_period="year",
-        window_months=24,
-        min_region_trade_days=2,
-        test_stage=False,
-    )
-    assert [phase for phase, *_rest in jobs] == ["meta", "valid"] * 4 + ["heldout"]
-    assert [(start, end) for _phase, start, end, _d in jobs][::2] == [
-        ("20220101", "20221231"),
-        ("20230101", "20231231"),
-        ("20240101", "20241231"),
-        ("20250101", "20251231"),
-        ("20260101", "20260630"),
+def test_the_prebuild_prepares_every_planned_slot_and_stashes_each_chain_head(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    stashed = _run_prebuild(monkeypatch, tmp_path, ["--heldout-end", "20260831"])
+    assert _FakeProvider.calls == [
+        ("valid", "20210701", "20220630", _cn("20210630")),
+        ("valid", "20220701", "20230630", _cn("20220630")),
+        ("valid", "20230701", "20240630", _cn("20230630")),
+        ("valid", "20240701", "20250630", _cn("20240630")),
+        ("heldout", "20250701", "20260630", _cn("20250630")),
+        ("heldout", "20260701", "20260831", _cn("20260630")),
     ]
-    assert [decision.isoformat() for *_rest, decision in jobs][::2] == [
-        "2021-12-31T23:59:59+08:00",
-        "2022-12-30T23:59:59+08:00",
-        "2023-12-29T23:59:59+08:00",
-        "2024-12-31T23:59:59+08:00",
-        "2025-12-31T23:59:59+08:00",
+    # Only the first slot of each chain continues nothing, so only those two
+    # are encoded offline; the rest is named as built on first use.
+    assert [
+        (call["snapshot_dir"], call["replay_dir"], call["phase"], call["start"], call["end"])
+        for call in stashed
+    ] == [
+        ("decision/20210630", "replay/valid/20210701_20220630", "valid", "20210701", "20220630"),
+        ("decision/20250630", "replay/heldout/20250701_20260630", "heldout", "20250701", "20260630"),
     ]
-    regions = {(start, end, decision) for _phase, start, end, decision in jobs}
-    assert len(regions) == 5
+    out = capsys.readouterr().out
+    assert "on first use: Y2,Y3,Y4" in out and "on first use: H" in out
+    assert json.loads(out.strip().splitlines()[-1])["status"] == "ok"
 
 
-def test_quarterly_trailing_windows_plan_one_shared_region_per_step() -> None:
-    """Walk-forward steps: 13 Folds over 2022Q1..2025Q4, one region each.
-
-    The seed must plan the same regions the pipeline will ask for, so a
-    schedule knob that the plan ignored would leave the experiment cold-building
-    every window it was supposed to hardlink.
-    """
-
-    jobs = iter_plan_pit_jobs(
-        _business_days(),
-        development_first_period="2022Q1",
-        development_last_period="2025Q4",
-        heldout_first_period="20260101..20260630",
-        heldout_last_period="20260101..20260630",
-        fold_period="quarter",
-        window_months=24,
-        min_region_trade_days=2,
-        test_stage=False,
-        validation_periods=4,
+def test_the_dry_run_prints_the_plan_and_builds_nothing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    stashed = _run_prebuild(monkeypatch, tmp_path, ["--dry-run"])
+    assert _FakeProvider.calls == [] and stashed == []
+    lines = capsys.readouterr().out.strip().splitlines()
+    header = json.loads(lines[0])
+    assert header["jobs"] == 6
+    assert header["plan"] == json.loads(
+        json.dumps(plan_seed(DEFAULT_RESEARCH_GEOMETRY, _release_days()).to_record())
     )
-    assert [phase for phase, *_rest in jobs] == ["meta", "valid"] * 13 + ["heldout"]
-    windows = [(start, end) for _phase, start, end, _d in jobs][::2]
-    assert windows[:2] == [("20220101", "20221231"), ("20220401", "20230331")]
-    assert windows[-2:] == [("20250101", "20251231"), ("20260101", "20260630")]
-    regions = {(start, end, decision) for _phase, start, end, decision in jobs}
-    assert len(regions) == 14
-    # The four year-end steps repeat the yearly schedule's regions and anchors,
-    # so an existing seed carries them over instead of rebuilding them.
-    anchors = {
-        (start, end, decision.isoformat())
-        for _phase, start, end, decision in jobs
-    }
-    assert ("20250101", "20251231", "2024-12-31T23:59:59+08:00") in anchors
+    assert lines[1].startswith("[1/6] Y1 valid 20210701..20220630")
+    assert json.loads(lines[-1])["status"] == "planned"
+    assert not (tmp_path / "data/pit_views_seed/explore").exists()
 
 
-def test_an_explicit_range_window_plans_a_single_development_region() -> None:
-    jobs = iter_plan_pit_jobs(
-        _business_days(),
-        development_first_period="20220101..20251231",
-        development_last_period="20220101..20251231",
-        heldout_first_period="20260101..20260630",
-        heldout_last_period="20260101..20260630",
-        fold_period="year",
-        window_months=24,
-        min_region_trade_days=2,
-        test_stage=False,
-    )
-    assert [phase for phase, *_rest in jobs] == ["meta", "valid", "heldout"]
-    assert jobs[0][1:3] == ("20220101", "20251231")
-    assert jobs[2][1:3] == ("20260101", "20260630")
-    assert jobs[2][3].isoformat() == "2025-12-31T23:59:59+08:00"
-    assert len({(start, end, decision) for _p, start, end, decision in jobs}) == 2
+def test_the_prebuild_refuses_a_misaligned_geometry_before_pinning(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from scripts.data import prebuild_pit_views_seed as prebuild
+
+    def refuse(**_kwargs: object) -> None:
+        raise AssertionError("no release may be pinned for a refused geometry")
+
+    monkeypatch.setattr(prebuild, "ResearchPITSnapshotProvider", refuse)
+    with pytest.raises(ValueError, match="twelve months after research"):
+        prebuild.main(["--repo-root", str(tmp_path), "--forward-end", "20261231", "--dry-run"])
 
 
 def test_replay_manifest_matches_requires_phase_label():

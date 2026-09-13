@@ -15,6 +15,7 @@ from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.sandbox import SandboxConfig, SandboxLimits
 from autotrade.environment.strategy import StrategySchedule
 
+from .calendar import ResearchGeometry
 from .skills import DEFAULT_OPERATING_MEMORY
 from .folds import FoldSpec, assert_no_overlap, normalize_period
 
@@ -45,6 +46,16 @@ DEFAULT_DEADLINE_GRACE_MINUTES = 10
 # written in. The default development window is whole years, long enough to
 # contain more than one market state.
 DEFAULT_FOLD_PERIOD = "year"
+
+# Research on four July-June years, a twelve-month forward test after them,
+# and a Held-out quarter the replay clips to the release end
+# (docs/pipeline-design.md). The PIT view seed is planned over it.
+DEFAULT_RESEARCH_GEOMETRY = ResearchGeometry(
+    research_start="20210701",
+    research_end="20250630",
+    forward_end="20260630",
+    heldout_end="20260930",
+)
 
 # The exploration PIT view seed an experiment hardlinks completed views from
 # unless its ``pit_views_seed`` parameter names another tree, and the scratch
@@ -1034,6 +1045,7 @@ class FoldOutcome:
 __all__ = [
     "DEFAULT_DEADLINE_GRACE_MINUTES",
     "DEFAULT_FOLD_PERIOD",
+    "DEFAULT_RESEARCH_GEOMETRY",
     "AcceptanceRules",
     "ArtifactRevision",
     "ArtifactStore",

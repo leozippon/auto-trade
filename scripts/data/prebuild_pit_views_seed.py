@@ -1,21 +1,30 @@
 #!/usr/bin/env python3
-"""Prebuild the exploration PIT view seed (docs/environment-design.md).
+"""Prebuild the exploration PIT view seed (docs/data-documentation.md §3.4).
 
-Pins the current research generation, walks the console research calendar, and
-writes completed decision/replay views into ``data/pit_views_seed/explore/``.
-That tree is not a live worker cache_root. New experiments hardlink it when
-``provider.json`` matches.
+Pins the current research generation, plans the seed of one research geometry
+(``pit_views_seed.plan_seed``) and writes the completed decision views, replay
+slots and bundles into ``data/pit_views_seed/explore/``. That tree is not a
+live worker cache_root. New experiments hardlink it when ``provider.json``
+matches.
 
-The calendar and the snapshot configuration both come from the console creation
-defaults (one source); every field of either can be overridden so a seed can be
-prebuilt for a plan before it becomes the default. The calendar decides which
-views a seed carries; the snapshot configuration decides what is inside them,
-and therefore which experiments may reuse the seed at all — an experiment
-selecting datasets the seed was not built for finds no matching contract and
-cold-builds every view. A seed for another snapshot configuration therefore
-needs its own ``--seed``/``--workspace`` directory: one tree binds one
-contract. ``--dry-run`` prints the plan and exits without building anything,
-using a scratch cache root so it never touches the seed.
+The geometry defaults to ``DEFAULT_RESEARCH_GEOMETRY`` and the snapshot
+configuration to the console creation defaults; every field of either can be
+overridden. The geometry decides which views a seed carries; the snapshot
+configuration decides what is inside them, and therefore which experiments may
+reuse the seed at all — an experiment selecting datasets the seed was not built
+for finds no matching contract and cold-builds every view. A seed for another
+snapshot configuration therefore needs its own ``--seed``/``--workspace``
+directory: one tree binds one contract. ``--dry-run`` prints the plan and exits
+without building anything, using a scratch cache root so it never touches the
+seed; it still pins the release into the workspace, which the build then
+reuses.
+
+Each slot is prepared at its own anchor, which also builds the decision view at
+that anchor, so the Held-out slot leaves one decision view (at forward end)
+that no stage reads. The as-of stash is encoded for the first slot of each
+chain; a later slot of a chain continues the as-of tree of the slots before
+it, which this backend cannot encode offline, so those parts are built on
+first use.
 
 Reuses ``ResearchPITSnapshotProvider`` / ``SnapshotBuilder`` and the worker's
 own ``_snapshot_config``; does not fork a second builder or a second reading of
@@ -24,6 +33,7 @@ the experiment parameters.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import shutil
 import sys
@@ -41,20 +51,19 @@ REPO_ROOT = add_repo_src(__file__)
 
 from autotrade.environment.data.snapshot import DEFAULT_DATASETS
 from autotrade.environment.strategy import StrategySchedule
+from autotrade.pipelines.calendar import GEOMETRY_PARAMETERS
 from autotrade.pipelines.config import (
     DEFAULT_PIT_VIEWS_SEED,
     DEFAULT_PIT_VIEWS_SEED_WORKSPACE,
+    DEFAULT_RESEARCH_GEOMETRY,
+    SnapshotBundle,
 )
 from autotrade.pipelines.hitl_state import WEB_CREATE_DEFAULTS
 from autotrade.pipelines.pit_backend import (
     ResearchPITSnapshotProvider,
     prebuild_asof_stash,
 )
-from autotrade.pipelines.pit_views_seed import (
-    PLAN_PARAMETERS,
-    iter_plan_pit_jobs,
-    plan_parameters,
-)
+from autotrade.pipelines.pit_views_seed import plan_seed
 from autotrade.pipelines.worker import _snapshot_config
 
 # Scratch cache_root for --dry-run: planning must not bind or create views in
@@ -65,7 +74,6 @@ DRY_RUN_CACHE_NAME = "dry_run_cache"
 # their override takes on the command line. Names, types and semantics are the
 # experiment parameters' own: `_snapshot_config` reads both, so a seed built
 # with these overrides carries exactly the contract that experiment writes.
-# `window_months` is already a calendar override and feeds both.
 DATASET_DOMAINS = {
     "fundamental_datasets": "fundamentals",
     "macro_datasets": "macro",
@@ -80,6 +88,7 @@ DOMAIN_TOGGLES = (
     "include_intraday",
 )
 WINDOW_PARAMETERS = (
+    "window_months",
     "daily_window_months",
     "fundamentals_window_months",
     "events_window_months",
@@ -123,35 +132,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--raw-dir", type=Path, default=None)
     parser.add_argument("--fundamental-events-root", type=Path, default=None)
     parser.add_argument("--fundamental-events-status", type=Path, default=None)
-    calendar = parser.add_argument_group(
-        "calendar overrides", "default: the console creation defaults"
+    geometry = parser.add_argument_group(
+        "research geometry overrides",
+        "YYYYMMDD; default: "
+        + ", ".join(
+            f"{name}={value}" for name, value in DEFAULT_RESEARCH_GEOMETRY.to_record().items()
+        ),
     )
-    calendar.add_argument("--fold-period", default=None)
-    calendar.add_argument("--development-first-period", default=None)
-    calendar.add_argument("--development-last-period", default=None)
-    calendar.add_argument("--heldout-first-period", default=None)
-    calendar.add_argument("--heldout-last-period", default=None)
-    calendar.add_argument("--window-months", type=int, default=None)
-    calendar.add_argument(
-        "--validation-periods",
-        type=int,
-        default=None,
-        help="periods in each Fold's trailing validation window (1 = the Fold's own period)",
-    )
-    calendar.add_argument("--min-region-trade-days", type=int, default=None)
-    calendar.add_argument(
-        "--deployment-adjustment-start",
-        default=None,
-        help="YYYYMMDD; also plan the deployment adjustment's Validation slot "
-        "(that day through the release's last trading day)",
-    )
-    calendar.add_argument(
-        "--test-stage",
-        dest="test_stage",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-        help="cut the development window into rolling Folds with a test region",
-    )
+    for name in GEOMETRY_PARAMETERS:
+        geometry.add_argument(_flag(name), default=None)
     snapshot = parser.add_argument_group(
         "snapshot overrides",
         "default: the console creation defaults. These decide the seed's "
@@ -185,8 +174,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--asof-stash",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="also encode each region's rolling as-of parts, so the first "
-        "backtest of an experiment hardlinks them instead of building them",
+        help="also encode the rolling as-of parts of each chain's first slot, so "
+        "the first replay of an experiment hardlinks them instead of building them",
     )
     parser.add_argument(
         "--dry-run",
@@ -197,17 +186,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def create_parameters(args: argparse.Namespace) -> dict[str, object]:
-    """Console creation defaults with the command-line overrides applied.
+    """Console creation defaults with the snapshot overrides applied.
 
-    One parameter set feeds both the snapshot configuration and the calendar,
-    exactly as creating an experiment does: ``window_months``, for instance, is
-    the data window AND the Fold input window. The result is a creation
-    parameter mapping, not a second dialect, so the seed identity it produces
-    is byte-for-byte the one an experiment created with these values writes.
+    The result is a creation parameter mapping, not a second dialect, so the
+    seed identity it produces is byte-for-byte the one an experiment created
+    with these values writes.
     """
 
     params = dict(WEB_CREATE_DEFAULTS)
-    for name in (*PLAN_PARAMETERS, *SNAPSHOT_PARAMETERS):
+    for name in SNAPSHOT_PARAMETERS:
         override = getattr(args, name, None)
         if override is not None:
             params[name] = override
@@ -216,6 +203,15 @@ def create_parameters(args: argparse.Namespace) -> dict[str, object]:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    # Refused before anything is pinned: a malformed geometry has no plan.
+    geometry = dataclasses.replace(
+        DEFAULT_RESEARCH_GEOMETRY,
+        **{
+            name: getattr(args, name)
+            for name in GEOMETRY_PARAMETERS
+            if getattr(args, name) is not None
+        },
+    )
     repo_root = args.repo_root.resolve()
     seed = (args.seed or repo_root / DEFAULT_PIT_VIEWS_SEED).resolve()
     workspace = (args.workspace or repo_root / DEFAULT_PIT_VIEWS_SEED_WORKSPACE).resolve()
@@ -234,7 +230,6 @@ def main(argv: list[str] | None = None) -> int:
         str(params["strategy_period"]),  # type: ignore[arg-type]
         str(params["inference_time"]),
     )
-    plan = plan_parameters(params)
     workspace.mkdir(parents=True, exist_ok=True)
     if args.dry_run:
         cache_root = workspace / DRY_RUN_CACHE_NAME
@@ -250,8 +245,8 @@ def main(argv: list[str] | None = None) -> int:
         config=config,
         cache_root=cache_root,
     )
-    jobs = iter_plan_pit_jobs(provider.trading_days, **plan)  # type: ignore[arg-type]
-    windows = {(start, end, decision) for _phase, start, end, decision in jobs}
+    plan = plan_seed(geometry, provider.trading_days)
+    jobs = plan.jobs
     print(
         json.dumps(
             {
@@ -261,13 +256,9 @@ def main(argv: list[str] | None = None) -> int:
                 "release_raw_dir": str(provider.release.raw_dir),
                 "dry_run": bool(args.dry_run),
                 "jobs": len(jobs),
-                "decision_snapshots": len({decision for *_rest, decision in jobs}),
-                "replay_sources": len(windows),
                 "asof_stash": bool(args.asof_stash),
                 "schedule": schedule.to_record(),
-                "calendar": {
-                    name: str(value) for name, value in sorted(plan.items())
-                },
+                "plan": plan.to_record(),
                 # The contract an experiment has to match to reuse this tree;
                 # logging it makes the run self-describing next to the
                 # provider.json the build writes.
@@ -278,45 +269,49 @@ def main(argv: list[str] | None = None) -> int:
         ),
         flush=True,
     )
-    stashed: set[tuple[str, str]] = set()
-    for index, (phase, start, end, decision) in enumerate(jobs, start=1):
+    prepared: dict[str, tuple[str, SnapshotBundle]] = {}
+    for index, (phase, slot) in enumerate(jobs, start=1):
         print(
-            f"[{index}/{len(jobs)}] {phase} {start}..{end} decision={decision.isoformat()}",
+            f"[{index}/{len(jobs)}] {slot.label} {phase} {slot.start}..{slot.end} "
+            f"decision={slot.anchor.isoformat()}",
             flush=True,
         )
         if args.dry_run:
             continue
         started = perf_counter()
-        bundle = provider.prepare(
-            fold=None,
-            phase=phase,
-            start=start,
-            end=end,
-            decision_time=decision,
+        prepared[slot.label] = (
+            phase,
+            provider.prepare(
+                fold=None,
+                phase=phase,
+                start=slot.start,
+                end=slot.end,
+                decision_time=slot.anchor,
+            ),
         )
         print(f"    prepared in {perf_counter() - started:.1f}s", flush=True)
-        if not args.asof_stash:
-            continue
-        # One stash per region and schedule: the phases of a region share it.
-        key = (Path(bundle.decision_ref).name, Path(bundle.replay_ref).name)
-        if key in stashed:
-            continue
-        stashed.add(key)
-        report = prebuild_asof_stash(
-            snapshot_dir=bundle.decision_ref,
-            replay_dir=bundle.replay_ref,
-            schedule=schedule,
-            phase=phase,
-            generation_id=bundle.generation_id,
-            start=start,
-            end=end,
-            host_dir=workspace / "asof_stash_build" / uuid.uuid4().hex,
-        )
-        status = "reused" if report.pop("reused") else "built"
-        print(
-            f"    asof stash {status} {json.dumps(report, sort_keys=True)}",
-            flush=True,
-        )
+    if args.asof_stash:
+        for decision, (head, *rest) in plan.stash_chains:
+            print(
+                f"asof stash decision={decision.isoformat()} {head.label}"
+                + (f"; on first use: {','.join(slot.label for slot in rest)}" if rest else ""),
+                flush=True,
+            )
+            if args.dry_run:
+                continue
+            phase, bundle = prepared[head.label]
+            report = prebuild_asof_stash(
+                snapshot_dir=bundle.decision_ref,
+                replay_dir=bundle.replay_ref,
+                schedule=schedule,
+                phase=phase,
+                generation_id=bundle.generation_id,
+                start=head.start,
+                end=head.end,
+                host_dir=workspace / "asof_stash_build" / uuid.uuid4().hex,
+            )
+            status = "reused" if report.pop("reused") else "built"
+            print(f"    {status} {json.dumps(report, sort_keys=True)}", flush=True)
     print(
         json.dumps(
             {

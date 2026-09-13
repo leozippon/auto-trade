@@ -31,7 +31,7 @@ from autotrade.paper.book import create_book, load_book
 from autotrade.paper.engine import DailyPaperEngine, PaperWriterBusy
 from autotrade.paper.orders import render_failure, render_orders, write_orders
 from autotrade.paper.pit import BookPITData
-from autotrade.pipelines.folds import load_sse_trading_days
+from autotrade.pipelines.calendar import load_sse_trading_days
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_STATE_ROOT = Path("data/trading/paper")
