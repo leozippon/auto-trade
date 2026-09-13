@@ -7264,102 +7264,12 @@ function memoryNavPanel() {
   );
 }
 
-/* Sessions may doubt, ignore and report mounted memory; they never rewrite it.
-   `memory_feedback` verdicts reach the console through the run manifests, so an
-   entry carries what other experiments concluded about it. */
-const MEMORY_VERDICTS = [
-  ["confirmed", "确认", "completed"],
-  ["outdated", "过时", "paused"],
-  ["wrong", "有误", "failed"],
-];
-
-function memoryFeedbackFor(key) {
-  const feedback = (memoryView && memoryView.payload.feedback) || {};
-  return (feedback.entries || {})[key] || null;
-}
-
-/* Small enough for a list row: one badge per verdict that was actually used,
-   plus the dispute badge when two experiments called the entry wrong. */
-function feedbackBadges(record) {
-  if (!record) return [];
-  const counts = record.counts || {};
-  const badges = MEMORY_VERDICTS.filter(([verdict]) => counts[verdict]).map(
-    ([verdict, label, state]) =>
-      el(
-        "span",
-        { class: `badge mini state-${state}`, title: `${label} ${counts[verdict]} 次` },
-        `${label}${counts[verdict]}`,
-      ),
-  );
-  if (record.disputed)
-    badges.push(
-      el(
-        "span",
-        {
-          class: "badge mini state-failed",
-          title: "至少两个实验判定这条有误",
-        },
-        "有争议",
-      ),
-    );
-  return badges;
-}
-
-/* The right pane's half: who said what, and what they saw. */
-function feedbackSection(record) {
-  if (!record || !(record.reports || []).length) return null;
-  const head = el(
-    "div",
-    { class: "control-bar" },
-    el(
-      "h4",
-      {},
-      `会话反馈 ${(record.reports || []).length} 条，来自 ${record.experiments || 0} 个实验`,
-    ),
-    ...feedbackBadges(record),
-  );
-  return el(
-    "div",
-    { class: "feedback-block" },
-    head,
-    el(
-      "table",
-      { class: "data text" },
-      el(
-        "tr",
-        {},
-        el("th", { class: "nowrap" }, "实验"),
-        el("th", { class: "nowrap" }, "会话"),
-        el("th", { class: "nowrap" }, "判断"),
-        el("th", {}, "说明"),
-      ),
-      ...(record.reports || []).map((report) =>
-        el(
-          "tr",
-          {},
-          el("td", { class: "nowrap" }, report.experiment_id || "—"),
-          el("td", { class: "nowrap" }, report.session_label || "—"),
-          el(
-            "td",
-            { class: "nowrap" },
-            (MEMORY_VERDICTS.find(([verdict]) => verdict === report.verdict) || [
-              "",
-              report.verdict || "—",
-            ])[1],
-          ),
-          el("td", {}, report.note || "—"),
-        ),
-      ),
-    ),
-  );
-}
-
 function memoryFilterHit(...parts) {
   const needle = memoryView.filter.trim().toLowerCase();
   return !needle || parts.join(" ").toLowerCase().includes(needle);
 }
 
-function memoryNavItem(label, note, selection, feedbackKey) {
+function memoryNavItem(label, note, selection) {
   return el(
     "div",
     {
@@ -7368,7 +7278,6 @@ function memoryNavItem(label, note, selection, feedbackKey) {
       onclick: () => selectMemoryItem(selection),
     },
     el("span", { class: "label" }, label),
-    ...feedbackBadges(memoryFeedbackFor(feedbackKey)),
     el("span", { class: "ret" }, note),
   );
 }
@@ -7384,7 +7293,6 @@ function renderMemoryList() {
       entry.name,
       fmtBytes(entry.bytes),
       { kind: "curated", name: entry.name },
-      `curated/${entry.name}`,
     ),
   );
   if (curated.error)
@@ -7437,7 +7345,6 @@ function renderMemoryCandidates() {
           skill,
           "候选",
           { kind: "candidate", experiment_id: row.experiment_id, skill },
-          `${row.experiment_id}/${skill}`,
         ),
       );
     for (const item of withdrawn)
@@ -7668,7 +7575,6 @@ function curatedEntryView(entry) {
     ],
     body: [
       entry.summary ? el("div", { class: "hint" }, entry.summary) : null,
-      feedbackSection(entry.feedback),
       el("pre", { class: "code-view skill-body" }, entry.content || ""),
     ].filter(Boolean),
   };
@@ -7702,7 +7608,6 @@ function candidateEntryView(selection, entry) {
     ],
     body: [
       entry.summary ? el("div", { class: "hint" }, entry.summary) : null,
-      feedbackSection(entry.feedback),
       el("pre", { class: "code-view skill-body" }, entry.content || ""),
     ].filter(Boolean),
   };

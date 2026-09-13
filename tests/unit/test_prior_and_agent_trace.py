@@ -101,7 +101,7 @@ def test_prompts_define_no_edge_pre_registration_and_meta_fold_labels() -> None:
     # Enforced limits sit in the tool schema, not in the prompt.
     assert "500 字符" not in fold
     assert "弃权同样要求本会话至少有一次完整 Validation" in contract
-    assert "本实验自己的 skills 不是目标" in fold
+    assert "`report_issue(category=\"docs\")`" in fold
     # Each shared rule has one home: the tie-break, the one-third threshold
     # and the warn-is-not-selection sentence each appear exactly once.
     assert fold.count("子区间一致性") == 1

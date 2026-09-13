@@ -1018,11 +1018,8 @@ def test_role_tool_visibility_hides_writes_from_audits(tmp_path: Path) -> None:
         "batch_validate",
         "daily_backtest",
         "finish_fold",
-        # A child gathers evidence; the parent session is what concludes that a
-        # mounted memory entry held up or did not, so the verdict is its call.
-        "memory_feedback",
-        # Same shape for defect reports: children report findings to the
-        # parent, the parent files them with the operators.
+        # Children report findings to the parent, the parent files defect
+        # reports with the operators.
         "report_issue",
         # A capped, minutes-long host job on a recorded Validation: the parent
         # spends that budget, like the formal backtests.

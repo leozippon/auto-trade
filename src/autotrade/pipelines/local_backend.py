@@ -90,7 +90,6 @@ from autotrade.environment.tools.finish_fold import (
     HardRuleCheck,
     executable_output_structure,
 )
-from autotrade.environment.tools.memory_feedback import MemoryFeedbackTool
 from autotrade.environment.tools.modification_check import ModificationCheckTool
 from autotrade.environment.tools.report_issue import (
     ReportIssueTool,
@@ -3050,12 +3049,8 @@ class LLMFoldDeveloper:
                 SandboxShellTool(safe, command_runner, result_store=search_roots),
                 WriteSkillTool(safe),
                 DeleteSkillTool(safe),
-                # Offered only where something is mounted to report on, and only
-                # to the parent: a sub-agent gathers evidence, the session draws
-                # the conclusion this records.
-                *([MemoryFeedbackTool(safe, manifest)] if mounted_memory else []),
-                # Parent-only like memory_feedback: sub-agents report findings
-                # to their parent, the parent files the report.
+                # Parent-only: sub-agents report findings to their parent, the
+                # parent files the report (a wrong mounted memory entry too).
                 ReportIssueTool(issue_reports_path(self.experiment_dir), manifest),
                 modification,
                 smoke,
@@ -3848,7 +3843,6 @@ class LLMMetaLearner:
             EditFileTool(safe),
             WriteSkillTool(safe),
             DeleteSkillTool(safe),
-            *([MemoryFeedbackTool(safe, manifest)] if mounted_memory else []),
             ReportIssueTool(issue_reports_path(self.experiment_dir), manifest),
         ]
         tools.append(

@@ -5019,7 +5019,7 @@ class HitlControlActionTest(unittest.TestCase):
         # The operator defines the PIT policy, so a directive that names a date
         # is stored as written: the rule against it is written guidance (see
         # docs/agent-design.md), not a server-side refusal. The calendar gate
-        # stays on Agent-authored memory (PRIOR, skills, memory_feedback).
+        # stays on Agent-authored memory (PRIOR, skills).
         dated = self._post(
             action="set_directive",
             session_key="epoch_001/fold_2022Q2",

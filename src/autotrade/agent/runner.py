@@ -143,7 +143,6 @@ _FOLD_TOOLS = frozenset(
         "edit_file",
         "write_skill",
         "delete_skill",
-        "memory_feedback",
         "report_issue",
     }
 )
@@ -158,7 +157,6 @@ _META_TOOLS = frozenset(
         "write_file",
         "write_skill",
         "delete_skill",
-        "memory_feedback",
         "report_issue",
     }
 )
