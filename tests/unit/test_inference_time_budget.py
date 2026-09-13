@@ -324,11 +324,6 @@ def test_complete_node_enters_hard_finalization_without_compaction_or_research(
                 )
             ),
             ProviderResponse(
-                tool_calls=(
-                    ToolCall("rollback", "step_rollback", {"node_id": node_id}),
-                )
-            ),
-            ProviderResponse(
                 tool_calls=(ToolCall("finish", "finish_fold", {"node_id": node_id}),)
             ),
         ]
@@ -389,9 +384,11 @@ def test_complete_node_enters_hard_finalization_without_compaction_or_research(
     assert result.finish_value["node_id"] == node_id
     assert shell.calls == 0
     assert compact_scripted.calls == []
-    assert "generate_orders" in (output / "main.py").read_text(encoding="utf-8")
+    # The working copy drifted after the Validation and is not restored: the
+    # nomination names the node's revision, which is what freezes.
+    assert (output / "main.py").read_text(encoding="utf-8") == "workspace drift\n"
     final_tools = {item["function"]["name"] for item in scripted.calls[1]["tools"]}
-    assert final_tools == {"step_rollback", "finish_fold"}
+    assert final_tools == {"finish_fold"}
     assert len(scripted.calls[1]["messages"]) == 2
     final_payload = json.loads(scripted.calls[1]["messages"][1].content or "{}")
     assert final_payload["complete_validation_candidates"][0]["node_id"] == node_id

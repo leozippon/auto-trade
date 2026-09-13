@@ -216,16 +216,6 @@ def _node_metrics(node: Mapping[str, object]) -> Mapping[str, object]:
     return metrics if isinstance(metrics, Mapping) else {}
 
 
-def _tree_bytes(root: Path | None) -> dict[str, bytes]:
-    if root is None or not root.is_dir():
-        return {}
-    files: dict[str, bytes] = {}
-    for path in sorted(root.rglob("*")):
-        if path.is_file():
-            files[path.relative_to(root).as_posix()] = path.read_bytes()
-    return files
-
-
 def _strip_docstrings(tree: ast.AST) -> None:
     for node in ast.walk(tree):
         if not isinstance(
@@ -340,8 +330,6 @@ class FinishFoldTool:
         fold_id: str,
         run_id: str,
         parent_main_py: str | Path | None = None,
-        current_output: str | Path | None = None,
-        current_models: str | Path | None = None,
         another_round_fits: Callable[[], bool] | None = None,
         budget_status: Callable[[], FoldBudgetStatus] | None = None,
         hard_rule_check: HardRuleCheck | None = None,
@@ -356,8 +344,6 @@ class FinishFoldTool:
         # nominating the parent itself is the normal no-adjustment outcome, so
         # the different-hypothesis rule does not apply.
         self.same_mechanism = same_mechanism
-        self._current_output = Path(current_output) if current_output is not None else None
-        self._current_models = Path(current_models) if current_models is not None else None
         # The early-stop justification and the hard-rule refusal apply only
         # while the session could still run a round; the caller says whether
         # time and budget allow one, and (when wired) what is left of each
@@ -404,13 +390,9 @@ class FinishFoldTool:
             raise ToolError("finish_fold can select only a Step from the current Fold session")
         if not node.get("complete_validation") or not node.get("revision_id"):
             raise ToolError("finish_fold requires successful complete validation")
-        # Ahead of the working-copy check: a node the Pipeline would reject has
-        # to be replaced rather than restored, so the refusal that names the
-        # passing nodes must not cost a step_rollback to the wrong one first.
+        # The Pipeline freezes the nominated node's immutable revision, never
+        # the working copy, so output/ need not be restored to it first.
         hard_reject_reasons = self._check_hard_acceptance(node_id, node)
-        # The working-copy check comes before the budget gates so a winner
-        # nominated without step_rollback costs one refusal, not two.
-        self._require_current_matches_revision(node_id)
         early_stop = self._require_early_stop_reason(arguments)
         nominated_structure = self._node_structure(node_id)
         if self.same_mechanism:
@@ -608,13 +590,10 @@ class FinishFoldTool:
                 f"finish_fold refused: {node_id} fails the Pipeline's hard "
                 f"acceptance rules ({', '.join(reasons)}), so the Fold would "
                 "freeze nothing. These recorded nodes pass them: "
-                f"{listed}. Select one of those (step_rollback to it first), or "
+                f"{listed}. Select one of those, or "
                 "pre-register a risk-reduced round and run batch_validate.",
                 error_type="acceptance_hard_reject",
-                retry_hint=(
-                    "step_rollback(<passing node_id>) then "
-                    "finish_fold({\"node_id\": <passing node_id>})"
-                ),
+                retry_hint='finish_fold({"node_id": <passing node_id>})',
                 details={
                     "hard_reject_reasons": reasons,
                     "candidates": candidates,
@@ -698,9 +677,8 @@ class FinishFoldTool:
             "finish_fold requires an explicit node_id here: the tree position is "
             f"the parent of a batch_validate round ({cursor}), so a bare call "
             "would select the parent, not a candidate. Candidates under it: "
-            f"{listed}. Pass the winner's node_id (step_rollback to it first so "
-            "the working copy matches), or the parent's own node_id to keep it "
-            "deliberately.",
+            f"{listed}. Pass the winner's node_id, or the parent's own node_id "
+            "to keep it deliberately.",
             details={"tree_position": cursor, "candidates": candidates},
         )
 
@@ -835,25 +813,6 @@ class FinishFoldTool:
             except (OSError, SyntaxError):
                 continue
         return found
-
-    def _require_current_matches_revision(self, node_id: str) -> None:
-        if self._current_output is None:
-            return
-        nominated = self.tree.node_output_dir(node_id)
-        if _tree_bytes(nominated) != _tree_bytes(self._current_output):
-            raise ToolError(
-                "finish_fold requires the current output to match the selected "
-                "Validation revision; restore that Step or run a new complete "
-                "daily_backtest"
-            )
-        nominated_models = self.tree.node_models_dir(node_id)
-        current_models = self._current_models
-        if _tree_bytes(nominated_models) != _tree_bytes(current_models):
-            raise ToolError(
-                "finish_fold requires the current models to match the selected "
-                "Validation revision; restore that Step or run a new complete "
-                "daily_backtest"
-            )
 
     def _node_structure(self, node_id: str) -> str:
         output_dir = self.tree.node_output_dir(node_id)

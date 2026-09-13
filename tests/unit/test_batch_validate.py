@@ -272,8 +272,6 @@ class _Session:
             fold_id=self.backtest.ref_store.get_or_create("fold", "fold_2022Q1"),
             run_id=self.backtest.ref_store.get_or_create("run", "run_batch"),
             parent_main_py=self.parent / "main.py",
-            current_output=self.output,
-            current_models=self.models,
             another_round_fits=lambda: another_batch_round_fits(self.backtest),
         )
 
@@ -640,23 +638,27 @@ class BatchValidateRunTest(unittest.TestCase):
                 self.assertIsNone(row["vs_parent"])
                 self.assertIn("vs_parent_note", row)
 
-    def test_a_batch_node_can_be_restored_and_selected(self) -> None:
+    def test_a_batch_node_is_selected_without_restoring_the_working_copy(self) -> None:
+        """The Pipeline freezes the nominated revision, not output/, so a
+        winner is nominated as it is: the working copy still holds the parent
+        and no step_rollback comes first."""
         with TemporaryDirectory() as tmp:
             session = _Session(Path(tmp))
             session.candidate("a", _strategy("1"))
             session.candidate("b", _strategy("22"))
             value = session.call("a", "b").value
             winner = value["candidates"][1]["node_id"]
-            # finish_fold refuses while the working copy is still the parent.
-            with self.assertRaises(ToolError) as caught:
-                session.finish.invoke({"node_id": winner})
-            self.assertIn("match the selected", str(caught.exception))
-            restored = session.rollback.invoke({"node_id": winner})
-            self.assertTrue(restored.ok)
-            self.assertEqual(session.tree.current_node_id, winner)
             finished = session.finish.invoke({"node_id": winner})
             self.assertTrue(finished.finish)
             self.assertEqual(finished.value["node_id"], winner)
+            self.assertEqual(
+                finished.value["revision_id"],
+                str(session.tree.get_node(winner)["revision_id"]),
+            )
+            self.assertEqual(
+                (session.output / "main.py").read_text(encoding="utf-8"),
+                PARENT_SOURCE,
+            )
 
     def test_nothing_selects_a_winner_on_the_agent_s_behalf(self) -> None:
         with TemporaryDirectory() as tmp:

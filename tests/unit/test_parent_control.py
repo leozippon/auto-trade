@@ -146,8 +146,6 @@ def _session(root: Path, *, max_backtests: int = 2, max_steps: int = 2):
         fold_id=ref_store.get_or_create("fold", "fold_2023"),
         run_id=ref_store.get_or_create("run", "run_control"),
         parent_main_py=parent / "main.py",
-        current_output=output,
-        current_models=models,
     )
     return backtest, tree, finish, manifest, output
 
@@ -284,9 +282,8 @@ def test_the_control_node_is_the_explicit_keep_parent_after_a_different_hypothes
     challenger = backtest.invoke({})
     assert challenger.ok
     assert backtest.backtests == 1 and len(backtest.steps) == 1
-    # Now the control node is selectable as the explicit keep-parent once the
-    # working copy matches it again, without a second backtest of the parent.
-    (output / "main.py").write_text(PARENT_SOURCE, encoding="utf-8")
+    # Now the control node is selectable as the explicit keep-parent, with the
+    # challenger still in the working copy and no second backtest of the parent.
     result = finish.invoke({"node_id": control.step_id})
     assert result.finish is True
     assert result.value["node_id"] == control.step_id

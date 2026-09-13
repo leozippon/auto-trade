@@ -112,7 +112,7 @@ class AgentSessionDeadlineExceeded(SessionInterrupt):
 
 
 _TERMINAL_TOOLS = frozenset({"finish_fold", "finish_meta"})
-_FOLD_FINALIZATION_TOOLS = frozenset({"finish_fold", "step_rollback"})
+_FOLD_FINALIZATION_TOOLS = frozenset({"finish_fold"})
 # Tools that produce complete Validation nodes: one node for daily_backtest,
 # one per candidate for batch_validate.
 _VALIDATION_TOOLS = frozenset({"daily_backtest", "batch_validate"})
@@ -875,13 +875,10 @@ class AgentSessionRunner:
                 for candidate in self._finalization_candidates()
             ]
             for record in records:
-                function = record["function"]
-                parameters = function["parameters"]
-                node_schema = parameters["properties"]["node_id"]
-                node_schema["enum"] = candidate_ids
-                if function["name"] != "finish_fold":
-                    # finish_fold may also abstain (outcome="no_edge") here.
-                    parameters["required"] = ["node_id"]
+                # node_id stays optional: finish_fold may also abstain here.
+                record["function"]["parameters"]["properties"]["node_id"]["enum"] = (
+                    candidate_ids
+                )
             return tuple(records)
         return self.tools.provider_tools()
 
@@ -1046,8 +1043,7 @@ class AgentSessionRunner:
                 'with outcome="no_edge" and a reason when no listed node proved '
                 "an edge (nothing is frozen; the parent, when there is one, stays "
                 "the lineage head). The Runner does not rank or auto-submit "
-                "candidates. Call finish_fold with its node_id; step_rollback is "
-                "optional when the workspace should be restored first. "
+                "candidates. Call finish_fold with its node_id. "
                 "passes_hard_rules=false means the Pipeline will not freeze that "
                 "node; the parent_control entry, when listed, is how this Fold "
                 "keeps the parent."

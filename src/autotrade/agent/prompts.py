@@ -42,7 +42,7 @@ FOLD_PROTOCOL_SECTION = """\
 
 FOLD_SUBMIT_CONTRACT = """\
 # 提交合同（finish_fold 前自检）
-- 被提名节点属于当前 Fold、当前 run，且已完成一次成功的完整 Validation（Probe、冒烟或失败回放不算）；当前 `output/` 和 `models/` 与它的快照逐字节一致，不一致先 `step_rollback`。
+- 被提名节点属于当前 Fold、当前 run，且已完成一次成功的完整 Validation（Probe、冒烟或失败回放不算）；冻结的是该节点的不可变快照，工作副本不必先恢复到它。
 - 父本对照是本 Fold 的基线：`artifact_contract.parent.parent_control_available` 为真时，宿主已在会话前把父本原样跑过一次本 Fold 的完整 Validation（Step 树里 `result_name=parent_control` 的节点，不占预算）；为假时没有这个节点——父产物是初始模板时，模板只是交付合同的可运行示例而不是研究基线，不要为它花回测，候选比的是基准、中性化超额与彼此；会话前的父本对照只会因父本自身代码在本窗口抛错而失败（超时与环境故障让本次尝试整体重跑，不进入会话），报错原文在 `artifact_contract.parent.parent_control_error`：再重放父本只会复现同一错误，把只改致错那几行、并在本窗口跑通完整 Validation 的最小修复提名为本折产物——它在可执行逻辑上不同于父本，是合法提名，血缘也才带着一份能跑的产物继续。
 - 有父产物时，被提名节点必须在可执行策略逻辑上不同于父本（注释-only 不算）；本 Fold 已有一次不同假说的完整 Validation 后，才可显式提名 `parent_control` 保留父本——否则「父本最好」只是未检验的默认。保留父本（`parent_control` 或与父本逐字节相同的节点）是被接受的提名，宿主沿用父本产物 id，父本的前向记录因此连续；机制已冻结的部署调整会话不适用这条先验要求，提名条件以部署合同为准。
 - 冻结只看 `acceptance_rules.fold_freeze` 标 `hard` 的项，`warn` 只记警告；过硬门的提名一律被冻结，不想冻结的节点不要提名。
@@ -205,15 +205,15 @@ STEP_TREE_SECTION = """\
 """
 
 STEP_WRAP_UP_PROMPT = """\
-正式 Step 预算已用完。请立即读取当前 Step 树，确认本 run 最佳完整 Validation 节点；必要时用 step_rollback 恢复它，运行 modification_check，然后调用 finish_fold。不要再修改策略或开始新方向。没有候选证明边际时，以 outcome="no_edge" 弃权也是合法结果。\
+正式 Step 预算已用完。请立即读取当前 Step 树，确认本 run 最佳完整 Validation 节点，运行 modification_check，然后以它的 node_id 调用 finish_fold。不要再修改策略或开始新方向。没有候选证明边际时，以 outcome="no_edge" 弃权也是合法结果。\
 """
 
 WRAP_UP_PROMPT = """\
-本 Fold 主时间已用完，现已进入收尾宽限窗口。宽限内你仍保有全部工具与自主行动权，可以补跑 modification_check 或最后一次完整 Validation，但请尽快收尾：读取当前 Step 树与本 run 的 Validation 记录，恢复最佳完整节点，运行 modification_check，然后调用 finish_fold。不要再开启新的探索方向。没有候选证明边际时，以 outcome="no_edge" 弃权也是合法结果。\
+本 Fold 主时间已用完，现已进入收尾宽限窗口。宽限内你仍保有全部工具与自主行动权，可以补跑 modification_check 或最后一次完整 Validation，但请尽快收尾：读取当前 Step 树与本 run 的 Validation 记录，确认最佳完整节点，运行 modification_check，然后以它的 node_id 调用 finish_fold。不要再开启新的探索方向。没有候选证明边际时，以 outcome="no_edge" 弃权也是合法结果。\
 """
 
 HARD_FINALIZATION_SYSTEM_PROMPT = """\
-你处于 Fold 硬收尾阶段。只依据用户消息中列出的本 run 完整 Validation 候选自行决定；不得虚构、自动重跑或请求更多研究。以 node_id 调用 finish_fold 提名一个节点（需要时先 step_rollback 到它），或在没有候选证明边际时以 outcome="no_edge" 附证据 reason 弃权。只能使用当前注入的工具。\
+你处于 Fold 硬收尾阶段。只依据用户消息中列出的本 run 完整 Validation 候选自行决定；不得虚构、自动重跑或请求更多研究。以 node_id 调用 finish_fold 提名一个节点，或在没有候选证明边际时以 outcome="no_edge" 附证据 reason 弃权。只能使用当前注入的工具。\
 """
 
 DEFAULT_ANTI_OVERFIT_PROMPT = """\

@@ -1893,6 +1893,50 @@ def test_a_control_repaired_under_a_new_id_stays_an_anchor(tmp_path: Path, monke
     assert status["state"] == "failed" and repair_id in status["error"]
 
 
+def test_the_nominated_revision_freezes_whatever_the_working_copy_holds(
+    tmp_path: Path, monkeypatch
+):
+    """``finish_fold`` no longer asks for output/ to match the nominated node:
+    the Pipeline freezes that node's immutable revision. A session that edits
+    the working copy after its Validation and then nominates the node freezes
+    the validated bytes, not the edit."""
+
+    repo, experiment = _experiment(tmp_path, developer_mode="llm")
+    monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
+    _seed_parent(experiment)
+    validated = "def generate_orders(context):\n    if context is None:\n        return []\n    return []\n"
+    drift = "def generate_orders(context):\n    _ = 'drift'\n    return []\n"
+    llm = ScriptedLLM(
+        [
+            *_agent_then(
+                ToolCall("prior", "write_file", {"path": "PRIOR.md", "content": "p"}),
+                ToolCall("finish_meta", "finish_meta", {}),
+            ),
+            *_agent_then(
+                ToolCall("check", "modification_check", {}),
+                ToolCall("valid", "daily_backtest", {}),
+                ToolCall("drift", "write_file", {"path": "output/main.py", "content": drift}),
+                ToolCall("finish_fold", "finish_fold", {}),
+                roles=_FOLD_DELEGATION_ROLES,
+                implement={"path": "output/main.py", "content": validated},
+            ),
+        ]
+    )
+    options = load_worker_options(experiment, repo_root=repo)
+    result = run_local_interactive_worker(
+        options,
+        llm=llm,
+        command_runner_factory=lambda _workspace: _NoShellRunner(),
+    )
+    assert result["state"] == "completed"
+    fold = ExperimentLedger(options.rolling.ledger_path).read("fold")[-1]
+    assert fold["fold_status"] == "frozen"
+    frozen = Path(str(fold["frozen_strategy_artifact_path"]))
+    assert (frozen / "main.py").read_text(encoding="utf-8") == validated
+    workspace = Path(fold["run_manifest_ref"]).parent / "workspace" / "output" / "main.py"
+    assert workspace.read_text(encoding="utf-8") == drift
+
+
 def test_a_fold_that_terminates_the_arm_ends_the_experiment(tmp_path: Path, monkeypatch):
     """``finish_fold(outcome="terminate")`` ends a fixed-direction arm whose
     pack's termination rule fired, instead of letting it carry a control

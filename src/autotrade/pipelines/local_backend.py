@@ -1550,7 +1550,7 @@ class BatchValidateTool(SessionTimeBudgetAware):
     comparable because each branched off the previous winner.
 
     Selection is never automatic: the Agent reads the table and nominates a
-    winner with ``step_rollback`` then ``finish_fold``.
+    winner with ``finish_fold``.
     """
 
     spec = ToolSpec(
@@ -1594,8 +1594,9 @@ class BatchValidateTool(SessionTimeBudgetAware):
         "and wall seconds; a failed candidate's row carries its exact failure text "
         "instead of those fields — one failure never hides the others. Each "
         "completed row's result_ref reads back that candidate's full replay "
-        "record. Selection stays yours: "
-        "step_rollback(node_id) the winner, then finish_fold(node_id). Use "
+        "record. Selection stays yours: finish_fold(node_id) nominates a row "
+        "as it is, and step_rollback(node_id) restores one as the working copy "
+        "to build on. Use "
         "daily_backtest for a single candidate or the live output/.",
         {
             "type": "object",
@@ -3106,8 +3107,6 @@ class LLMFoldDeveloper:
                     fold_id=fold_ref,
                     run_id=run_ref,
                     parent_main_py=parent_main_py,
-                    current_output=output_dir,
-                    current_models=models_dir,
                     another_round_fits=lambda: another_batch_round_fits(backtest),
                     budget_status=lambda: fold_budget_status(backtest),
                     hard_rule_check=hard_rule_check,

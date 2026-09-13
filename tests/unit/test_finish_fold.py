@@ -306,31 +306,6 @@ def test_finish_fold_accepts_the_byte_minimal_repair_of_a_broken_parent(
     assert selected.value["node_id"] == repaired
 
 
-def test_finish_fold_rejects_when_current_output_differs_from_selected_revision(
-    tmp_path: Path,
-):
-    parent_main = tmp_path / "parent" / "main.py"
-    parent_main.parent.mkdir()
-    parent_main.write_text(PARENT, encoding="utf-8")
-    tree = StepTree(tmp_path / "steps")
-    changed = _record(tree, tmp_path / "changed", source=LOGIC, result_name="valid_001")
-    working = tmp_path / "working"
-    working.mkdir()
-    (working / "main.py").write_text(PARENT, encoding="utf-8")
-    finish = FinishFoldTool(
-        tree,
-        fold_id="fold_ref_ab",
-        run_id="run_x",
-        parent_main_py=parent_main,
-        current_output=working,
-    )
-    with pytest.raises(ToolError, match="current output to match"):
-        finish.invoke({"node_id": changed})
-    (working / "main.py").write_text(LOGIC, encoding="utf-8")
-    selected = finish.invoke({"node_id": changed})
-    assert selected.ok and selected.value["node_id"] == changed
-
-
 def _record_round(
     tree: StepTree,
     root: Path,
