@@ -3277,6 +3277,7 @@ class LLMFoldDeveloper:
                 "llm_agent_finish_fold",
                 early_stop_reason=str(finish.get("early_stop_reason") or ""),
                 no_edge_reason=str(finish.get("reason") or "") if abstained else "",
+                baseline_anchor=not abstained and finish.get("baseline_anchor") is True,
                 # The nulls the session already drew, for the freeze to reuse.
                 null_controls=(
                     dict(null_control_tool.blocks)

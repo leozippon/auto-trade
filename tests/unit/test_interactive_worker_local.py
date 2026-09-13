@@ -1817,6 +1817,82 @@ def test_the_meta_after_an_anchor_fold_opens_the_anchor_as_its_parent(
     assert "baseline_anchor" not in second_fold
 
 
+def test_a_control_repaired_under_a_new_id_stays_an_anchor(tmp_path: Path, monkeypatch):
+    """A repaired or re-tuned control is still a control (XR1 E4).
+
+    The repair has the anchor as its parent and a new artifact id, so "frozen
+    with no parent" no longer recognises it; the retired earnings arm carried
+    such a repair in force. The nominating Fold declares it with
+    ``baseline_anchor=true``, and the label then does everything the
+    parentless one does: the repair's transitions leave graduation and the
+    run refuses to deliver it. The unflagged case is the test above."""
+    from autotrade.pipelines.ledger import (
+        baseline_anchor_artifacts,
+        final_artifact_transitions,
+    )
+
+    repo, experiment = _experiment(tmp_path, developer_mode="llm")
+    _update_params(
+        experiment,
+        {
+            "development_first_period": "2025Q4",
+            "development_last_period": "2026Q2",
+            "test_stage": True,
+            "heldout_first_period": "2026Q3",
+            "heldout_last_period": "2026Q3",
+        },
+    )
+    monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
+
+    def _meta_script(prior: str) -> tuple[ProviderResponse, ...]:
+        return _agent_then(
+            ToolCall("prior", "write_file", {"path": "PRIOR.md", "content": prior}),
+            ToolCall("finish_meta", "finish_meta", {}),
+        )
+
+    def _fold_script(source: str, **finish: object) -> tuple[ProviderResponse, ...]:
+        return _agent_then(
+            ToolCall("check", "modification_check", {}),
+            ToolCall("valid", "daily_backtest", {}),
+            ToolCall("finish_fold", "finish_fold", dict(finish)),
+            roles=_FOLD_DELEGATION_ROLES,
+            implement={"path": "output/main.py", "content": source},
+        )
+
+    llm = ScriptedLLM(
+        [
+            *_meta_script("prefer simple signals"),
+            *_fold_script("def generate_orders(context):\n    return []\n"),
+            *_meta_script("repair the control"),
+            *_fold_script(
+                "def generate_orders(context):\n    _ = context.inference_at\n    return []\n",
+                baseline_anchor=True,
+            ),
+        ]
+    )
+    options = load_worker_options(experiment, repo_root=repo)
+    with pytest.raises(RuntimeError, match="baseline anchor in force"):
+        run_local_interactive_worker(
+            options,
+            llm=llm,
+            command_runner_factory=lambda _workspace: _NoShellRunner(),
+        )
+    records = ExperimentLedger(options.rolling.ledger_path).read("fold")
+    anchor, repair = records
+    assert repair["parent_strategy_artifact_id"] == anchor["frozen_strategy_artifact_id"]
+    assert repair["fold_status"] == "frozen" and repair["baseline_anchor"] is True
+    repair_id = str(repair["frozen_strategy_artifact_id"])
+    assert repair_id != anchor["frozen_strategy_artifact_id"]
+    assert repair_id in baseline_anchor_artifacts(records)
+    unlabelled = [{**anchor}, {k: v for k, v in repair.items() if k != "baseline_anchor"}]
+    for rows, expected in ((records, 0), (unlabelled, 1)):
+        assert final_artifact_transitions(
+            rows, epoch_id="epoch_001", test_stage=True, artifact_id=repair_id
+        )["transitions"] == expected
+    status = read_status(experiment / "hitl/status.json")
+    assert status["state"] == "failed" and repair_id in status["error"]
+
+
 def test_early_finish_grades_the_epoch_that_actually_ran(tmp_path: Path):
     """Skip-to-Held-out ends development inside Epoch 1 of a three-Epoch
     schedule. Graduation term (b) must be scored on the Epoch that produced the

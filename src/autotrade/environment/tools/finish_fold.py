@@ -257,7 +257,9 @@ class FinishFoldTool:
         "A freeze without a frozen parent (parent_control_available=false, the "
         "parent is the template) is recorded baseline_anchor=true: the lineage "
         "gets a control the next Fold replays as its parent_control, but an "
-        "anchor is never delivered. Use no_edge "
+        "anchor is never delivered. Nominating a control with a parent (a "
+        "repaired or re-tuned anchor) takes baseline_anchor=true so it is "
+        "recorded and excluded the same way. Use no_edge "
         "instead of nominating a node you do not want frozen: the Pipeline "
         "freezes every nomination whose metrics are finite. Outside the deadline "
         "window a voluntary finish that leaves more than a third of the backtest "
@@ -298,6 +300,14 @@ class FinishFoldTool:
                         "the new-quarter sub_window, any null_control or deflated "
                         f"Sharpe figure read); {NO_EDGE_REASON_MIN_CHARS}-"
                         f"{EARLY_STOP_REASON_MAX_CHARS} characters."
+                    ),
+                },
+                "baseline_anchor": {
+                    "type": "boolean",
+                    "description": (
+                        "select only: true when the nominated package is a control "
+                        "rather than a candidate (e.g. a repaired or re-tuned "
+                        "anchor), so the ledger records baseline_anchor=true."
                     ),
                 },
                 "early_stop_reason": {
@@ -414,6 +424,9 @@ class FinishFoldTool:
                 # the Pipeline's, not the Agent's: finishing only nominates.
                 "fold_status": "pending_pipeline_review",
                 "write_locked": True,
+                # The Agent's declaration that it nominated a control: the
+                # ledger labels the freeze an anchor even though it has a parent.
+                **({"baseline_anchor": True} if arguments.get("baseline_anchor") is True else {}),
                 # The Agent's own account of an early finish and the budget it
                 # left, for the fold ledger and the Meta review.
                 **early_stop,

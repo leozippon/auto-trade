@@ -561,11 +561,16 @@ class RollingExperimentPipeline:
                     if nominated_identical_to_parent
                     else {}
                 ),
-                # Frozen with no parent to beat: the lineage's baseline anchor,
-                # a control in force until a later Fold replaces it, not an
-                # evidenced edge. It is the freeze that had no parent, so the
-                # label is read off that and nothing else (§2.2).
-                **({"baseline_anchor": True} if status == "frozen" and parent is None else {}),
+                # A control in force until a later Fold replaces it, not an
+                # evidenced edge: the freeze that had no parent to beat, or a
+                # nomination the Agent declared a control -- a repaired or
+                # re-tuned anchor gets a new id and a parent, and is still one
+                # (§2.2).
+                **(
+                    {"baseline_anchor": True}
+                    if status == "frozen" and (parent is None or session.baseline_anchor)
+                    else {}
+                ),
                 "hard_reject_reasons": hard,
                 "accept_warnings": warnings,
                 "selected_step_id": selected.step_id if selected is not None else None,

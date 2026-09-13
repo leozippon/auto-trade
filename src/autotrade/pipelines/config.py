@@ -989,6 +989,9 @@ class FoldSessionResult:
     # is nominated, the parent (if any) stays the lineage head. Empty when a
     # node was nominated or the session ended without a finish.
     no_edge_reason: str = ""
+    # The Agent declared the nominated package a control (``finish_fold``
+    # ``baseline_anchor=true``): a freeze with a parent is then an anchor too.
+    baseline_anchor: bool = False
     # Null-control blocks the session already computed, keyed by step id; the
     # Pipeline reuses the frozen node's block instead of drawing it again.
     null_controls: Mapping[str, Mapping[str, object]] = field(default_factory=dict)

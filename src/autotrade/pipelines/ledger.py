@@ -231,10 +231,12 @@ def baseline_anchor_artifacts(fold_records: list[dict[str, object]]) -> frozense
     """Every artifact frozen as a baseline anchor (docs/pipeline-design.md §2.2).
 
     An anchor is the lineage's control -- the weak baseline a parentless Fold
-    must freeze so the next Fold has something to beat -- not a candidate
-    anyone judged worth shipping. Its id is the single handle on that: the
-    transitions it replayed score a control and are excluded from graduation,
-    and the experiment refuses to deliver one to Held-out.
+    must freeze so the next Fold has something to beat, or a repair or re-tune
+    of it that the nominating Fold declared a control -- not a candidate
+    anyone judged worth shipping. The Fold record's ``baseline_anchor`` label
+    is the single handle on that: the transitions it replayed score a control
+    and are excluded from graduation, and the experiment refuses to deliver
+    one to Held-out.
     """
 
     return frozenset(
