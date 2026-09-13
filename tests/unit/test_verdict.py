@@ -341,11 +341,16 @@ def test_graduation_lists_every_failed_condition_and_a_strategy_error_discards()
         "thresholds": {},
     }
     late = verdict.graduation_verdict(
-        forward=forward, heldout=None, strategy_error="heldout"
+        forward=None, heldout=None, strategy_error="heldout"
     )
     assert late["status"] == "discarded" and late["reasons"] == [
         "heldout_strategy_error"
     ]
+    # A replay that raised produced no result: no slice rides with the error.
+    with pytest.raises(ValueError, match="do not match"):
+        verdict.graduation_verdict(
+            forward=forward, heldout=None, strategy_error="heldout"
+        )
     with pytest.raises(ValueError, match="do not match"):
         verdict.graduation_verdict(forward=forward, heldout=None)
 

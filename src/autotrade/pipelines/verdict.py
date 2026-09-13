@@ -503,33 +503,27 @@ def graduation_verdict(
 ) -> dict[str, object]:
     """``graduated`` iff F1–F6 and H1–H4 all hold, else ``discarded``.
 
-    ``strategy_error`` names the slice in which the strategy raised: the
-    replay stopped there, so a forward error comes with no slice at all and a
-    Held-out error with the forward slice only. ``reasons`` lists every failed
-    condition in F-then-H order; ``thresholds`` merges the slices' own.
+    ``strategy_error`` names the slice in which the strategy raised (F1/H1).
+    A replay that raised produced no result, so it comes with no slice at all.
+    ``reasons`` lists every failed condition in F-then-H order; ``thresholds``
+    merges the slices' own.
     """
 
-    expected = {
-        None: (True, True),
-        "forward": (False, False),
-        "heldout": (True, False),
-    }
-    if strategy_error not in expected:
+    if strategy_error not in (None, "forward", "heldout"):
         raise ValueError(
             f"strategy_error must be forward, heldout or None, got {strategy_error!r}"
         )
-    if (forward is not None, heldout is not None) != expected[strategy_error]:
+    measured = strategy_error is None
+    if (forward is not None, heldout is not None) != (measured, measured):
         raise ValueError(f"slices given do not match strategy_error={strategy_error!r}")
     reasons: list[str] = []
     thresholds: dict[str, object] = {}
-    if strategy_error == "forward":
-        reasons.append("forward_strategy_error")
+    if strategy_error is not None:
+        reasons.append(f"{strategy_error}_strategy_error")
     for block in (forward, heldout):
         if block is not None:
             reasons.extend(block["reasons"])
             thresholds.update(block["thresholds"])
-    if strategy_error == "heldout":
-        reasons.append("heldout_strategy_error")
     return {
         "status": "discarded" if reasons else "graduated",
         "reasons": reasons,

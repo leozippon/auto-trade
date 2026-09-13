@@ -32,7 +32,15 @@ MARKET_CLOSE = time(15, 0)
 
 
 class BacktestError(RuntimeError):
-    """A strategy cannot produce a truthful replay result."""
+    """A strategy cannot produce a truthful replay result.
+
+    ``inference_at`` is the decision whose strategy call failed, when the
+    failure came from ``fit`` or ``generate_orders``.
+    """
+
+    def __init__(self, message: str, *, inference_at: datetime | None = None) -> None:
+        super().__init__(message)
+        self.inference_at = inference_at
 
 
 def _call_failure(exc: Exception) -> StrategyExecutionError:
@@ -209,7 +217,8 @@ class DailyReplayEngine:
                     fittable.fit(context)
             except Exception as exc:  # noqa: BLE001 - typed by _call_failure
                 raise BacktestError(
-                    f"fit failed at {inference_at.isoformat()}: {exc}"
+                    f"fit failed at {inference_at.isoformat()}: {exc}",
+                    inference_at=inference_at,
                 ) from _call_failure(exc)
             self._last_fit_date = trade_date
         try:
@@ -223,7 +232,8 @@ class DailyReplayEngine:
             self.inbox.submit(payload, inference_at=inference_at)
         except Exception as exc:  # noqa: BLE001 - typed by _call_failure
             raise BacktestError(
-                f"generate_orders failed at {inference_at.isoformat()}: {exc}"
+                f"generate_orders failed at {inference_at.isoformat()}: {exc}",
+                inference_at=inference_at,
             ) from _call_failure(exc)
 
     def _match_due(

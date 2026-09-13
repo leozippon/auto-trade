@@ -243,6 +243,7 @@ def test_a_fit_exception_fails_the_backtest_explicitly(tmp_path: Path):
     # In process, the exception is the strategy's own: a measurement of it,
     # classified the same way a sandbox worker's error reply is.
     assert raised_by_strategy(raised.value)
+    assert raised.value.inference_at.isoformat() == "2024-03-28T18:00:00+08:00"
 
 
 def test_a_fit_strategy_cannot_run_without_a_state_dir(tmp_path: Path):

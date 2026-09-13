@@ -19,6 +19,7 @@ from autotrade.environment.replay.stats import (
     attach_sub_window_benchmark,
     compute_return_stats,
     sub_window_stats,
+    window_activity,
 )
 
 # Two calendar quarters, opened at 1000 and closed at 900. 2021Q4 round-trips
@@ -216,6 +217,43 @@ class SubWindowBenchmarkTest(unittest.TestCase):
             [row["label"] for row in record["stats"]["sub_windows"]],
             ["2021Q4", "2022Q1"],
         )
+
+
+class WindowActivityTest(unittest.TestCase):
+    """One slice of a continuous replay read on its own terms."""
+
+    CURVE = (
+        {"trade_date": "20250627", "initial_equity": 1000.0, "equity": 1000.0, "cash": 1000.0},
+        {"trade_date": "20250630", "initial_equity": 1000.0, "equity": 1200.0, "cash": 200.0},
+        {"trade_date": "20250701", "initial_equity": 1000.0, "equity": 1100.0, "cash": 100.0},
+        {"trade_date": "20250702", "initial_equity": 1000.0, "equity": 1150.0, "cash": 1150.0},
+    )
+    EXECUTIONS = (
+        {"status": "filled", "action": "buy", "price": 10.0, "quantity": 100,
+         "matched_at": "2025-06-30T09:30:00+08:00"},
+        {"status": "filled", "action": "sell", "price": 12.0, "quantity": 100, "realized_pnl": 200.0,
+         "matched_at": "2025-07-02T09:30:00+08:00"},
+        {"status": "rejected", "action": "buy", "price": 9.0, "quantity": 100,
+         "matched_at": "2025-07-02T09:30:00+08:00"},
+    )
+
+    def test_the_slice_is_measured_from_the_equity_it_opened_at(self) -> None:
+        later = window_activity(self.CURVE, self.EXECUTIONS, start="20250701", end="20250731")
+        # Opened at the previous day's close; only the fill inside the slice
+        # is traded notional, and it is the realised exit.
+        self.assertEqual(later["opening_equity"], 1200.0)
+        self.assertAlmostEqual(later["turnover"], 1200.0 / 1200.0)
+        self.assertEqual((later["trade_days"], later["round_trips"]), (2, 1))
+        self.assertAlmostEqual(later["mean_gross"], (1000.0 / 1100.0 + 0.0) / 2)
+        first = window_activity(self.CURVE, self.EXECUTIONS, start="20250601", end="20250630")
+        # A slice that opens the replay opens at the initial equity.
+        self.assertEqual(first["opening_equity"], 1000.0)
+        self.assertAlmostEqual(first["turnover"], 1.0)
+        self.assertEqual(first["round_trips"], 0)
+
+    def test_a_slice_without_a_replay_day_is_not_measured(self) -> None:
+        with self.assertRaisesRegex(ValueError, "no day in 20250801..20250831"):
+            window_activity(self.CURVE, self.EXECUTIONS, start="20250801", end="20250831")
 
 
 if __name__ == "__main__":

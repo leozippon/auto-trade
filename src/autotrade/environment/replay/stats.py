@@ -167,9 +167,7 @@ def compute_return_stats(
             bucket[status] += 1
         if status != "filled":
             continue
-        price = order.get("price")
-        if isinstance(price, (int, float)) and not isinstance(price, bool):
-            traded_notional += float(price) * int(order.get("quantity") or 0)
+        traded_notional += _filled_notional(order)
         fees_paid += float(order.get("commission") or 0.0)
         stamp_duty_paid += float(order.get("stamp_duty") or 0.0)
 
@@ -180,13 +178,7 @@ def compute_return_stats(
     # held cash; the agent combines these with the benchmark block itself. Days
     # whose curve row carries no cash split are not measurable and are excluded
     # rather than reported as zero exposure.
-    measured = [row for row in curve if isinstance(row.get("cash"), (int, float))]
-    exposure_series = [
-        (float(row["equity"]) - float(row["cash"])) / float(row["equity"])
-        if float(row["equity"]) > 0
-        else 0.0
-        for row in measured
-    ]
+    exposure_series = _gross_exposures(curve)
     exposure = {
         "avg_gross": float(sum(exposure_series) / len(exposure_series)) if exposure_series else 0.0,
         "max_gross": float(max(exposure_series)) if exposure_series else 0.0,
@@ -227,6 +219,78 @@ def compute_return_stats(
         "replayed_trade_days": len(curve),
         "phase_seconds": dict(result.phase_seconds),
     }
+
+
+def window_activity(
+    curve: Sequence[Mapping[str, object]],
+    executions: Sequence[Mapping[str, object]],
+    *,
+    start: str,
+    end: str,
+) -> dict[str, object]:
+    """Turnover, round trips and mean gross exposure of ``start..end``.
+
+    The slice's own figures, for reading one continuous replay in parts.
+    ``turnover`` is the filled notional over the equity the slice opened at
+    (the close of the last replay day before ``start``, or the initial equity
+    when the slice opens the replay); ``round_trips`` counts the realised exits
+    filled inside the slice, the ``trade_count`` definition; ``mean_gross`` is
+    the ``exposure.avg_gross`` definition over the slice's days. A slice that
+    holds no replay day raises ``ValueError``.
+    """
+
+    start = _window_bound(start, "start")
+    end = _window_bound(end, "end")
+    rows = [row for row in curve if start <= str(row.get("trade_date")) <= end]
+    if not rows:
+        raise ValueError(f"the replay holds no day in {start}..{end}")
+    before = [row for row in curve if str(row.get("trade_date")) < start]
+    opening = (
+        float(before[-1]["equity"]) if before else float(curve[0]["initial_equity"])
+    )
+    filled = [
+        order
+        for order in executions
+        if str(order.get("status") or "") == "filled"
+        and start <= _fill_date(order) <= end
+    ]
+    exposures = _gross_exposures(rows)
+    return {
+        "start": start,
+        "end": end,
+        "trade_days": len(rows),
+        "opening_equity": opening,
+        "turnover": (
+            sum(_filled_notional(order) for order in filled) / opening
+            if opening > 0
+            else 0.0
+        ),
+        "round_trips": sum(1 for order in filled if order.get("realized_pnl") is not None),
+        "mean_gross": sum(exposures) / len(exposures) if exposures else 0.0,
+    }
+
+
+def _filled_notional(order: Mapping[str, object]) -> float:
+    price = order.get("price")
+    if not isinstance(price, (int, float)) or isinstance(price, bool):
+        return 0.0
+    return float(price) * int(order.get("quantity") or 0)
+
+
+def _gross_exposures(curve: Sequence[Mapping[str, object]]) -> list[float]:
+    """Daily gross exposure: end-of-day market value over same-day equity.
+
+    Days whose curve row carries no cash split are not measurable and are
+    excluded rather than reported as zero exposure.
+    """
+
+    return [
+        (float(row["equity"]) - float(row["cash"])) / float(row["equity"])
+        if float(row["equity"]) > 0
+        else 0.0
+        for row in curve
+        if isinstance(row.get("cash"), (int, float))
+    ]
 
 
 def _pnl_concentration(realized: Sequence[Mapping[str, object]]) -> dict[str, object]:
@@ -493,11 +557,7 @@ def _quarter_order_totals(
         if not day:
             continue
         key = _quarter_key(day)
-        price = order.get("price")
-        if isinstance(price, (int, float)) and not isinstance(price, bool):
-            traded[key] = traded.get(key, 0.0) + float(price) * int(
-                order.get("quantity") or 0
-            )
+        traded[key] = traded.get(key, 0.0) + _filled_notional(order)
         if order.get("realized_pnl") is not None:
             exits[key] = exits.get(key, 0) + 1
     return traded, exits

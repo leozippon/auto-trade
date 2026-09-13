@@ -2350,6 +2350,9 @@ def test_a_strategy_exception_in_a_later_slot_is_the_strategys_own(tmp_path: Pat
             _span_request(snapshot, slots["a"], slots["b"], revision=revision)
         )
     assert raised_by_strategy(raised.value)
+    # The failing decision rides on the error, so a continuous replay can say
+    # which of its slices the strategy raised in.
+    assert raised.value.inference_at.strftime("%Y%m%d") == "20240104"
     assert list(results.iterdir()) == []
 
 
