@@ -561,16 +561,33 @@ def _auction_capture_min_rows(
 
     Percentage-only by design: an absolute max-drop bound (previously
     prev-10 rows) dominated the ratio for full-market partitions and
-    rejected legitimate provider-side coverage narrowing (2026-07:
-    ~1,100 fund/ETF rows removed retroactively). The stability double-read
-    still guards same-day flapping; the ratio guards truncation."""
+    rejected legitimate provider-side coverage narrowing. The ratio is taken
+    over stock rows only (``_auction_stock_rows``), so a vendor dropping its
+    fund rows cannot read as truncation. The stability double-read still
+    guards same-day flapping; the ratio guards truncation."""
     previous = sorted(
         path
         for path in (raw_dir / "stk_auction").glob("trade_date=*.parquet")
         if path.stem.split("=", 1)[-1] < trade_date
     )
-    previous_rows = pq.ParquetFile(previous[-1]).metadata.num_rows if previous else 0
+    previous_rows = (
+        _auction_stock_rows(pd.read_parquet(previous[-1], columns=["ts_code"])["ts_code"])
+        if previous
+        else 0
+    )
     return max(int(floor), math.floor(int(previous_rows) * float(ratio)))
+
+
+# The auction frame also carries funds, ETFs, LOFs and convertibles, whose
+# coverage the vendor narrows on its own schedule: about 1,100 rows went in
+# 2026-07, and from 20260911 all 1,879 at once while every A-share code stayed.
+# Completeness is therefore measured on A-share rows: Shanghai 6xxxxx,
+# Shenzhen 0xxxxx/3xxxxx and Beijing, which lists no funds.
+_AUCTION_STOCK_CODE = r"6\d{5}\.SH|[03]\d{5}\.SZ|\d{6}\.BJ"
+
+
+def _auction_stock_rows(codes: pd.Series) -> int:
+    return int(codes.astype(str).str.fullmatch(_AUCTION_STOCK_CODE).sum())
 
 
 def _validate_auction_capture(frame_: pd.DataFrame, trade_date: str, *, min_rows: int) -> list[str]:
@@ -590,8 +607,9 @@ def _validate_auction_capture(frame_: pd.DataFrame, trade_date: str, *, min_rows
         invalid_codes = int((~valid_codes).sum())
         if invalid_codes:
             errors.append(f"invalid_codes={invalid_codes}")
-    if len(frame_) < int(min_rows):
-        errors.append(f"rows={len(frame_)} below_min_rows={min_rows}")
+    stock_rows = _auction_stock_rows(frame_["ts_code"]) if "ts_code" in frame_.columns else 0
+    if stock_rows < int(min_rows):
+        errors.append(f"stock_rows={stock_rows} below_min_rows={min_rows}")
     if {"price", "vol", "amount"}.issubset(frame_.columns):
         price = pd.to_numeric(frame_["price"], errors="coerce")
         volume = pd.to_numeric(frame_["vol"], errors="coerce")

@@ -2173,7 +2173,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self._write_trade_cal("20260713")
         previous = self.raw_dir / "stk_auction" / "trade_date=20260710.parquet"
         previous.parent.mkdir(parents=True, exist_ok=True)
-        pd.DataFrame([{"x": 1}, {"x": 2}]).to_parquet(previous, index=False)
+        pd.DataFrame([{"ts_code": "000001.SZ"}, {"ts_code": "600000.SH"}]).to_parquet(previous, index=False)
         fields = common.DAILY_SPECS["stk_auction"].fields.split(",")
 
         def result(items):
@@ -2378,19 +2378,32 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self.assertIn("hidden_no_trade_price_rows=1", errors)
         self.assertIn("inconsistent_trade_price_rows=1", errors)
 
-    def test_auction_capture_row_floor_is_percentage_only(self):
+    def test_auction_capture_row_floor_is_percentage_of_stock_rows(self):
         # Percentage-only: an absolute prev-minus-N bound dominated the ratio
         # for full-market partitions and rejected legitimate provider-side
-        # coverage narrowing (2026-07: ~1,100 fund/ETF rows removed
-        # retroactively). 85% still blocks truncated captures.
-        previous = self.raw_dir / "stk_auction" / "trade_date=20260710.parquet"
+        # coverage narrowing. The ratio counts A-share rows only: from 20260911
+        # the vendor dropped all 1,879 fund/ETF/LOF/convertible rows at once
+        # (7,943 -> 6,065 rows) while every A-share code stayed, and a
+        # whole-frame ratio refused every capture from then on. 85% of the
+        # stock rows still blocks a truncated capture.
+        previous = self.raw_dir / "stk_auction" / "trade_date=20260910.parquet"
         previous.parent.mkdir(parents=True, exist_ok=True)
-        pd.DataFrame({"row": range(5519)}).to_parquet(previous, index=False)
+        stocks = [f"{600000 + index}.SH" for index in range(3000)] + [f"{index:06d}.SZ" for index in range(1, 2001)]
+        funds = [f"{510000 + index}.SH" for index in range(1000)] + [f"{150000 + index}.SZ" for index in range(900)]
+        pd.DataFrame({"ts_code": stocks + funds}).to_parquet(previous, index=False)
 
         minimum = download._auction_capture_min_rows(
-            self.raw_dir, "20260713", floor=1000, ratio=0.85,
+            self.raw_dir, "20260911", floor=1000, ratio=0.85,
         )
-        self.assertEqual(minimum, 4691)  # floor(5519 * 0.85)
+        self.assertEqual(minimum, 4250)  # floor(5000 stock rows * 0.85)
+        row = {"trade_date": "20260911", "vol": 0.0, "price": None, "amount": 0.0, "pre_close": 9.9, "turnover_rate": 0.0, "volume_ratio": 1.0, "float_share": 1.0}
+        without_funds = pd.DataFrame([{**row, "ts_code": code} for code in stocks])
+        self.assertEqual(download._validate_auction_capture(without_funds, "20260911", min_rows=minimum), [])
+        truncated = pd.DataFrame([{**row, "ts_code": code} for code in stocks[:4000] + funds])
+        self.assertIn(
+            "stock_rows=4000 below_min_rows=4250",
+            download._validate_auction_capture(truncated, "20260911", min_rows=minimum),
+        )
         # No previous partition: the absolute floor holds.
         self.assertEqual(
             download._auction_capture_min_rows(self.raw_dir, "20260701", floor=1000, ratio=0.85),
