@@ -71,7 +71,7 @@ def add_path_arguments(parser: argparse.ArgumentParser, repo_root: Path) -> None
         "--strategy-path",
         type=Path,
         default=repo_root / "configs/agent_output_template/main.py",
-        help="Baseline strategy seeded into the first Fold's working copy.",
+        help="Baseline strategy seeded into the first research session's working copy.",
     )
 
 

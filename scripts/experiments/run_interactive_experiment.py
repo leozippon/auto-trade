@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Interactive (HITL) experiment worker entrypoint (docs/pipeline-design.md).
 
-Runs or resumes one experiment's gated Fold/Held-out loop from the parameters in
+Runs or resumes one arm (research sessions, then the forward replay) from the parameters in
 ``experiments/<id>/hitl/params.json``, honouring ``control.json`` (pause / step
 approvals / per-session directives / stop) and reporting position and heartbeats
 to ``status.json``. Normally spawned detached by the web console

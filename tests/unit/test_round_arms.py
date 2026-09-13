@@ -1,54 +1,41 @@
-"""Every checked-in round, read through the one launcher that creates it.
+"""Every checked-in round and reference pack, read through the one launcher.
 
 The round files are data -- arms, seed, dataset selection, directives -- and
 `scripts/experiments/_round.py` is the behaviour, so these checks are written
-once and parametrised over whatever round files exist. A new round file is
-covered the moment it is added.
+once and parametrised over whatever round files exist. A new round file or arm
+is covered the moment it is added.
 """
 
 from __future__ import annotations
 
 import importlib
 import json
+from pathlib import Path
 
 import pytest
 
 from autotrade.environment.llm.model_profiles import LOCAL_QWEN_MODEL
+from autotrade.environment.strategy_loader import validate_strategy_package
 from autotrade.environment.tools.prior_policy import calendar_policy_violation
-from autotrade.pipelines.config import SNAPSHOT_CACHE_FORMAT_VERSION
+from autotrade.pipelines.config import (
+    DEFAULT_RESEARCH_GEOMETRY,
+    SNAPSHOT_CACHE_FORMAT_VERSION,
+)
+from autotrade.pipelines.pit_views_seed import pit_cache_provider_record
+from autotrade.pipelines.worker import _snapshot_config
 from scripts.experiments import _round
 from scripts.experiments._round import (
     BASE_EXPECTED_DEFAULTS,
-    EXPERIMENTS_ROOT,
-    INHERITANCE_KEYS,
-    PARENT_CONTROL_LINE,
+    BASE_OVERRIDES,
+    PROBE_ID,
     REPO_ROOT,
     RETIRED_IDS,
-    ROBUSTNESS_LINE,
     Round,
-    already_created,
     archived_ids,
-    quarter_shift,
-)
-from scripts.experiments.create_round_20260917 import (
-    DEVELOPMENT_LAST_PERIOD,
-    GITHUB_SOURCE,
-    MIN_REMAINING_FOLDS,
-    VALIDATION_PERIODS,
-    github_confirm_development_start,
 )
 
-# Every model role a create request carries.
-MODEL_ROLES = (
-    "model",
-    "meta_model",
-    "subagent_model",
-    "analysis_model",
-    "compact_model",
-    "nl_model",
-)
-# The one arm that really trains on a device.
-GPU_ARM = "ml_ranker_20260910"
+MODEL_ROLES = ("model", "subagent_model", "nl_model", "compact_model")
+PACKS = sorted(path for path in (REPO_ROOT / "configs" / "workspace_refs").iterdir() if path.is_dir())
 
 
 def _rounds() -> dict[str, Round]:
@@ -64,324 +51,167 @@ def _rounds() -> dict[str, Round]:
 ROUNDS = _rounds()
 ROUND_IDS = sorted(ROUNDS)
 ARMS = [(name, arm) for name, rnd in sorted(ROUNDS.items()) for arm in rnd.arms]
-# Any round object will do for the source-lifecycle checks: the rule is the
-# launcher's, not a particular round's data.
-ROUND_WITH_SOURCE = ROUNDS[ROUND_IDS[0]]
 
 
-def _seed_not_ready(rnd: Round) -> str:
-    """Why this round's seed cannot be read yet, or "" when it can.
+def _synthetic_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rnd: Round) -> Path:
+    """A repository root holding a finished seed prebuilt for ``rnd``'s selection.
 
-    Operator state only. A named seed tree is a gitignored artifact built by
-    scripts/data/prebuild_pit_views_seed.py, so a fresh checkout, an older
-    cache format and a prebuild still writing into the tree are all waits
-    rather than failures. A seed that exists and is finished but carries a
-    different selection is NOT a wait -- that is the drift these checks exist
-    to catch, so it is deliberately left to fail.
+    The contract is what the prebuild writes to ``provider.json``; the tree
+    needs nothing else for the create-time pre-flight to accept it.
     """
-    if not rnd.pit_views_seed:
-        return ""
-    seed = REPO_ROOT / rnd.pit_views_seed
-    if not seed.is_dir():
-        return f"prebuilt PIT view seed {rnd.pit_views_seed} is not present"
-    try:
-        recorded = json.loads((seed / "provider.json").read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return f"prebuilt PIT view seed {rnd.pit_views_seed} has no readable provider.json"
-    cache_format = recorded.get("schema_version")
-    if cache_format != SNAPSHOT_CACHE_FORMAT_VERSION:
-        return (
-            f"prebuilt PIT view seed {rnd.pit_views_seed} was built under snapshot cache "
-            f"format {cache_format}; this code writes {SNAPSHOT_CACHE_FORMAT_VERSION}"
-        )
-    _, reason = rnd.validated(next(iter(rnd.arms)))
-    # assert_seed_snapshot_config refuses a tree a prebuild is still staging
-    # views into, and names it in exactly these words.
-    if "unfinished build" in reason:
-        return f"prebuilt PIT view seed {rnd.pit_views_seed} has an unfinished build"
-    return ""
-
-
-@pytest.mark.parametrize(("round_name", "experiment_id"), ARMS)
-def test_every_arm_runs_every_role_on_the_local_model(round_name: str, experiment_id: str) -> None:
-    """Cost policy: no arm may open a hosted stream.
-
-    No round overrides a model role, so the guarantee rests entirely on the
-    console defaults -- which is why BASE_EXPECTED_DEFAULTS pins all six and
-    check_console_defaults refuses a drift.
-    """
-    rnd = ROUNDS[round_name]
-    assert LOCAL_QWEN_MODEL == "qwen-3.8-27b-fp8"
-    assert set(MODEL_ROLES).isdisjoint(rnd.common_overrides)
-    rnd.check_console_defaults()
-    params = rnd.request_params(experiment_id)
-    for role in MODEL_ROLES:
-        assert BASE_EXPECTED_DEFAULTS[role] == LOCAL_QWEN_MODEL, role
-        assert params[role] == LOCAL_QWEN_MODEL, (experiment_id, role)
-
-
-@pytest.mark.parametrize(("round_name", "experiment_id"), ARMS)
-def test_only_the_ml_ranker_arm_takes_a_gpu(round_name: str, experiment_id: str) -> None:
-    """The GPU request travels with the experiment to the Agent's session
-    sandbox and to the strategy container of every formal replay, so an
-    accidental card is a real cost on a shared machine."""
-    params = ROUNDS[round_name].request_params(experiment_id)
-    assert params["gpu_count"] == (1 if experiment_id == GPU_ARM else 0), experiment_id
-
-
-@pytest.mark.parametrize(("round_name", "experiment_id"), ARMS)
-def test_every_directive_is_usable_by_the_worker(round_name: str, experiment_id: str) -> None:
-    """A directive must be non-empty, carry the two shared readings, and hold
-    no literal calendar date.
-
-    The directive is copied verbatim into every Fold of the arm, whose visible
-    window advances one quarter at a time, so a date written into one is wrong
-    at all but one Fold. Nothing refuses it any more -- the operator defines
-    the PIT policy -- which is exactly why the round files, the only place an
-    arm's directive is authored, keep the rule: data windows that must be
-    excluded are named by their cause and defined in the reference pack.
-    """
-    directive = str(ROUNDS[round_name].request_params(experiment_id)["fold_exploration_directive"])
-    assert directive.strip(), experiment_id
-    assert calendar_policy_violation(directive) == "", experiment_id
-    assert PARENT_CONTROL_LINE in directive, experiment_id
-    assert ROBUSTNESS_LINE in directive, experiment_id
-
-
-@pytest.mark.parametrize(("round_name", "experiment_id"), ARMS)
-def test_an_inherited_source_exists_before_the_round_is_created(
-    round_name: str, experiment_id: str
-) -> None:
-    """``inherit_from`` and ``inherit_memory_from`` are resolved at create time
-    against the console's experiment root, so a source must already be there:
-    an arm of the same round is not created yet and a retired id is archived
-    away. Both stay empty by console default, which a round may rely on."""
-    rnd = ROUNDS[round_name]
-    params = rnd.request_params(experiment_id)
-    for key in ("inherit_from", "inherit_memory_from"):
-        assert BASE_EXPECTED_DEFAULTS[key] == ""
-        source = str(params.get(key) or "")
-        if not source:
-            continue
-        assert source not in rnd.arms, (experiment_id, key, source)
-        assert source not in RETIRED_IDS, (experiment_id, key, source)
-
-
-@pytest.mark.parametrize(("round_name", "experiment_id"), ARMS)
-def test_every_reference_pack_a_round_names_exists(round_name: str, experiment_id: str) -> None:
-    """A workspace_reference that does not exist fails the session at start.
-
-    An arm may name none -- open_mechanism starts from the empty template with
-    nothing mounted but the operating memory -- but one it names must be there.
-    """
-    reference = ROUNDS[round_name].request_params(experiment_id).get("workspace_reference")
-    if not reference:
-        return
-    assert (REPO_ROOT / str(reference)).is_dir(), reference
-    assert (REPO_ROOT / str(reference) / "README.md").is_file(), reference
-
-
-@pytest.mark.parametrize(("round_name", "experiment_id"), ARMS)
-def test_every_arm_passes_the_offline_create_validation(round_name: str, experiment_id: str) -> None:
-    """What `--dry-run` reports: the console's own create-time checks and the
-    worker pre-flight accept this arm as it stands."""
-    rnd = ROUNDS[round_name]
-    waiting = _seed_not_ready(rnd)
-    if waiting:
-        pytest.skip(waiting)
-    merged, reason = rnd.validated(experiment_id)
-    assert merged is not None, reason
-    for key in rnd.keys_reported:
-        assert key in merged, key
+    monkeypatch.setattr(_round, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(_round, "EXPERIMENTS_ROOT", tmp_path / "experiments")
+    seed = tmp_path / rnd.pit_views_seed
+    seed.mkdir(parents=True)
+    record = pit_cache_provider_record(
+        generation_id="synthetic",
+        release_raw_dir=tmp_path / "release" / "raw",
+        snapshot_config=_snapshot_config(rnd.request_params(PROBE_ID)),
+    )
+    (seed / "provider.json").write_text(json.dumps(record), encoding="utf-8")
+    return seed
 
 
 @pytest.mark.parametrize("round_name", ROUND_IDS)
-def test_a_round_that_names_a_seed_sends_one_selection_for_all_its_arms(round_name: str) -> None:
-    """A seed's identity is the whole snapshot configuration.
+def test_every_round_runs_every_model_role_on_the_local_model(round_name: str) -> None:
+    """Cost policy: no arm may open a hosted stream.
 
-    One differing dataset name, or a domain switch off (which drops the whole
-    selection in worker._snapshot_config), and that arm no longer matches the
-    prebuilt tree -- it would cold-build every view instead. Nothing an arm
-    states for itself may touch that selection.
+    No round overrides a model role, so the guarantee rests entirely on the
+    console defaults -- which is why BASE_EXPECTED_DEFAULTS pins every role and
+    check_console_defaults refuses a drift.
     """
     rnd = ROUNDS[round_name]
-    if not rnd.pit_views_seed:
-        return
-    selections = set()
-    for experiment_id in rnd.arms:
+    rnd.check_console_defaults()
+    for experiment_id in (PROBE_ID, *rnd.arms):
         params = rnd.request_params(experiment_id)
-        assert params["pit_views_seed"] == rnd.pit_views_seed, experiment_id
-        assert params["include_macro"] is True, experiment_id
-        assert params["include_events"] is True, experiment_id
-        selections.add((tuple(params["macro_datasets"]), tuple(params["events_datasets"])))
-    assert len(selections) == 1
+        for role in MODEL_ROLES:
+            assert BASE_EXPECTED_DEFAULTS[role] == LOCAL_QWEN_MODEL, role
+            assert params[role] == LOCAL_QWEN_MODEL, (experiment_id, role)
+
+
+def test_the_shared_geometry_is_the_one_seeds_are_planned_over() -> None:
+    """The prebuild plans a seed over DEFAULT_RESEARCH_GEOMETRY; a round on any
+    other geometry would cold-build every view its seed does not carry."""
+    assert {key: BASE_OVERRIDES[key] for key in DEFAULT_RESEARCH_GEOMETRY.to_record()} == (
+        DEFAULT_RESEARCH_GEOMETRY.to_record()
+    )
+
+
+@pytest.mark.parametrize("round_name", ROUND_IDS)
+def test_a_round_dry_runs_against_its_seed_contract(
+    round_name: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """What `--dry-run` reports on a finished seed for this round's selection:
+    the shared parameters pass the console's own pre-flight, geometry included,
+    and every arm passes after them."""
+    rnd = ROUNDS[round_name]
+    _synthetic_repo(tmp_path, monkeypatch, rnd)
+    for arm in rnd.arms.values():
+        reference = arm.get("workspace_reference")
+        if reference:
+            (tmp_path / str(reference)).mkdir(parents=True)
+    assert rnd.main(["launcher", "0", "--dry-run"]) == 0
+    report = json.loads(capsys.readouterr().out.splitlines()[1])
+    assert report["research_end"] == BASE_OVERRIDES["research_end"]
+    assert report["pit_views_seed"] == rnd.pit_views_seed
+
+
+def test_the_dry_run_refuses_a_seed_built_for_another_selection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    rnd = Round(pit_views_seed="data/seed_probe", overrides={"text_datasets": ["report_rc"]})
+    _synthetic_repo(tmp_path, monkeypatch, rnd)
+    other = Round(pit_views_seed=rnd.pit_views_seed, overrides={"text_datasets": ["anns_d"]})
+    assert other.main(["launcher", "0", "--dry-run"]) == 1
+    assert "different snapshot configuration" in capsys.readouterr().err
+
+
+def test_the_dry_run_refuses_a_seed_still_being_built(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    rnd = Round(pit_views_seed="data/seed_probe")
+    seed = _synthetic_repo(tmp_path, monkeypatch, rnd)
+    (seed / "decision" / ".20210630T235959+0800.0123abcd.tmp").mkdir(parents=True)
+    assert rnd.main(["launcher", "0", "--dry-run"]) == 1
+    assert "unfinished build" in capsys.readouterr().err
+
+
+def test_the_dry_run_refuses_a_research_period_that_is_not_whole_years(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    rnd = Round(pit_views_seed="data/seed_probe")
+    _synthetic_repo(tmp_path, monkeypatch, rnd)
+    shifted = Round(pit_views_seed=rnd.pit_views_seed, overrides={"research_end": "20250331"})
+    assert shifted.main(["launcher", "0", "--dry-run"]) == 1
+    assert "whole July-June years" in capsys.readouterr().err
+
+
+def test_a_round_without_arms_is_never_posted() -> None:
+    with pytest.raises(SystemExit, match="no arms to create"):
+        Round().main(["launcher", "0"])
+
+
+@pytest.mark.parametrize(("round_name", "experiment_id"), ARMS)
+def test_every_arm_directive_is_usable(round_name: str, experiment_id: str) -> None:
+    """A directive is copied into every research session of the arm and must
+    hold no literal calendar date: data windows that must be excluded are named
+    by their cause and defined in the reference pack, and no forward or
+    Held-out date may reach the Agent through it."""
+    directive = str(ROUNDS[round_name].request_params(experiment_id)["fold_exploration_directive"])
+    assert directive.strip(), experiment_id
+    assert calendar_policy_violation(directive) == "", experiment_id
 
 
 @pytest.mark.parametrize("round_name", ROUND_IDS)
 def test_the_selection_matches_the_prebuilt_seed(round_name: str) -> None:
-    """The round and the tree its arms hardlink from agree.
+    """The round and the real tree its arms hardlink from agree, byte for byte.
 
-    The pre-flight refuses a mismatch on its own; comparing here as well is
-    what says which half drifted when it does.
+    The pre-flight refuses a mismatch on its own; comparing the whole snapshot
+    configuration here says which half drifted when it does. The tree is
+    gitignored operator state, so its absence is a wait, not a failure.
     """
     rnd = ROUNDS[round_name]
-    if not rnd.pit_views_seed:
-        return
-    waiting = _seed_not_ready(rnd)
-    if waiting:
-        pytest.skip(waiting)
-    recorded = json.loads(
-        (REPO_ROOT / rnd.pit_views_seed / "provider.json").read_text(encoding="utf-8")
-    )["snapshot_config"]["datasets"]
-    params = rnd.request_params(next(iter(rnd.arms)))
-    assert recorded["macro"] == list(params["macro_datasets"])
-    assert recorded["events"] == list(params["events_datasets"])
+    provider = REPO_ROOT / rnd.pit_views_seed / "provider.json"
+    if not rnd.pit_views_seed or not provider.is_file():
+        pytest.skip(f"prebuilt PIT view seed {rnd.pit_views_seed or '(default)'} is not present")
+    recorded = json.loads(provider.read_text(encoding="utf-8"))
+    if recorded.get("schema_version") != SNAPSHOT_CACHE_FORMAT_VERSION:
+        pytest.skip(f"{rnd.pit_views_seed} was built under another snapshot cache format")
+    expected = _snapshot_config(rnd.request_params(PROBE_ID)).to_record()
+    assert recorded["snapshot_config"] == expected
 
 
 def test_no_round_reuses_an_experiment_id() -> None:
     """An id is never reused, by any round.
 
-    The console keys the experiment directory, the sandbox work root, the
-    Docker image tag and the archive path on the experiment id, so a second run
-    under an old name would be indistinguishable from the first in every record
-    that survives it. Three sources of "already used" are checked: the other
-    round files, the ids retired out of them, and -- where the operator's
-    archive exists -- what is actually archived on this machine.
+    Three sources of "already used" are checked: the other round files, the
+    retired ids, and -- where the operator's archive exists -- what is actually
+    archived on this machine.
     """
     seen: dict[str, str] = {}
     for round_name in ROUND_IDS:
         for experiment_id in ROUNDS[round_name].arms:
-            assert experiment_id not in seen, (
-                f"{experiment_id} is defined by both {seen.get(experiment_id)} and {round_name}"
-            )
-            assert experiment_id not in RETIRED_IDS, (
-                f"{round_name} reuses the retired id {experiment_id}"
-            )
+            assert experiment_id not in seen, (experiment_id, seen.get(experiment_id), round_name)
             seen[experiment_id] = round_name
-
+    with pytest.raises(ValueError, match="already used and archived"):
+        Round(arms={min(RETIRED_IDS): {}})
     archived = archived_ids()
     if not archived:
         pytest.skip("logs/archive/ is not present, so archived ids cannot be cross-checked")
-    # An arm archived from an earlier attempt of a round that still defines it
-    # is not retired; everything else that was archived is.
-    assert archived - set(seen) <= RETIRED_IDS, (
-        "these ids are archived but are neither in a round file nor in "
-        f"RETIRED_IDS, so a later round could silently reuse one: "
-        f"{sorted(archived - set(seen) - RETIRED_IDS)}"
-    )
+    assert archived - set(seen) <= RETIRED_IDS, sorted(archived - set(seen) - RETIRED_IDS)
 
 
-@pytest.mark.parametrize(("round_name", "experiment_id"), ARMS)
-def test_an_inheritance_source_must_exist_until_its_arm_is_created(
-    round_name: str, experiment_id: str
-) -> None:
-    """`inherit_from` and `inherit_memory_from` are copied once, at creation.
-
-    The source's frozen output/ and models/, or its PRIOR and skills, are read
-    out of its live directory while the console creates the arm, so a source
-    that is not there fails the create. Afterwards the copy is the arm's own
-    read-only tree, and the source may be retired -- which is how a round
-    succeeds its own predecessors: create the successors, archive the sources
-    after. So this is asserted only for an arm still to be created.
-    """
-    params = ROUNDS[round_name].request_params(experiment_id)
-    sources = [source for key in INHERITANCE_KEYS if (source := str(params.get(key) or "").strip())]
-    if not sources or not EXPERIMENTS_ROOT.is_dir() or already_created(experiment_id):
+@pytest.mark.parametrize("pack", PACKS, ids=lambda path: path.name)
+def test_every_reference_pack_is_readable_and_its_starter_loads(pack: Path) -> None:
+    """A pack mounts into every research session: it needs a README, and a
+    starter is a valid strategy package that neither hard-codes a host path nor
+    falls back to the frozen decision snapshot during a replay."""
+    assert (pack / "README.md").is_file()
+    starter = pack / "starter"
+    if not (starter / "main.py").is_file():
         return
-    for source in sources:
-        assert source not in RETIRED_IDS, (experiment_id, source)
-        assert (EXPERIMENTS_ROOT / source).is_dir(), (experiment_id, source)
-
-
-def test_a_missing_source_is_refused_only_for_an_arm_not_yet_created() -> None:
-    """The negative path of the lifecycle above, both ways round."""
-    probe = {"experiment_id": "not_created_yet", "inherit_memory_from": "gone_source"}
-    assert ROUND_WITH_SOURCE.missing_sources(probe) == ["gone_source"]
-    created = next(arm for arm in (a for _r, a in ARMS) if already_created(arm))
-    assert ROUND_WITH_SOURCE.missing_sources({**probe, "experiment_id": created}) == []
-
-
-def test_a_retired_experiment_cannot_be_an_inheritance_source() -> None:
-    """The negative path of the guard above: the archive is not a source.
-
-    A retired id names a tree that exists only under `logs/archive/` now, so
-    the console could not copy an artifact or a PRIOR out of it.
-    """
-    retired = min(RETIRED_IDS)
-    with pytest.raises(ValueError, match="retired and archived"):
-        Round(arms={"probe_arm": {"inherit_memory_from": retired}})
-
-
-def _fixture_ledger(root, experiment_id: str, fold_quarters: list[str]) -> None:
-    """A source experiment whose ledger records these Folds as completed."""
-    ledger = root / experiment_id / "ledgers"
-    ledger.mkdir(parents=True, exist_ok=True)
-    (ledger / "experiment_ledger.jsonl").write_text(
-        "\n".join(
-            json.dumps({"record_type": "fold", "epoch_id": "epoch_001", "fold_id": f"fold_{quarter}"})
-            for quarter in fold_quarters
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-
-
-def test_the_continuation_arm_starts_the_quarter_after_its_source_froze(tmp_path) -> None:
-    """github_confirm exists to record a forward transition on every quarter its
-    source has NOT already frozen, so its first Fold must be the one after the
-    source's latest freeze -- and a Development window starting at Q first
-    validates at Q + validation_periods - 1."""
-    _fixture_ledger(tmp_path, GITHUB_SOURCE, ["2023Q4", "2024Q1", "2024Q2", "2024Q3"])
-    start = github_confirm_development_start(tmp_path)
-    assert quarter_shift(start, VALIDATION_PERIODS - 1) == "2024Q4"
-    assert start == "2024Q1"
-
-
-def test_the_continuation_arm_reads_the_ledger_rather_than_a_typed_quarter(tmp_path) -> None:
-    """A source that has moved on moves the arm's Development start with it."""
-    _fixture_ledger(tmp_path, GITHUB_SOURCE, ["2024Q3", "2024Q4"])
-    assert github_confirm_development_start(tmp_path) == "2024Q2"
-
-
-def test_the_continuation_arm_refuses_when_too_few_folds_remain(tmp_path) -> None:
-    """A confirmation arm with almost no Folds left would ship an artifact with
-    too few forward transitions of its own to mean anything, which is the whole
-    failure it exists to fix."""
-    last = quarter_shift(DEVELOPMENT_LAST_PERIOD, -(MIN_REMAINING_FOLDS - 2))
-    _fixture_ledger(tmp_path, GITHUB_SOURCE, [last])
-    with pytest.raises(ValueError, match="needs at least"):
-        github_confirm_development_start(tmp_path)
-
-
-def test_the_continuation_arm_refuses_a_source_that_has_frozen_nothing(tmp_path) -> None:
-    """No completed Fold means there is nothing to continue from, and an empty
-    ledger must say that rather than resolving to some default quarter."""
-    _fixture_ledger(tmp_path, GITHUB_SOURCE, [])
-    with pytest.raises(ValueError, match="no ledger|completed no Fold"):
-        github_confirm_development_start(tmp_path)
-
-
-def test_a_created_arm_keeps_the_decision_it_was_created_with(tmp_path, monkeypatch) -> None:
-    """A live-state decision is taken once, while the console creates the arm.
-
-    The source keeps running afterwards, so re-deriving the decision later
-    answers for a source that has moved on -- and the create-time guard that
-    protects the NEXT arm would eventually refuse an arm that has been running
-    for days. The created params.json is what the arm is running on, and it is
-    what the round file reports; an arm still to be created is still decided,
-    and still refused, against live state.
-    """
-    monkeypatch.setattr(_round, "EXPERIMENTS_ROOT", tmp_path / "experiments")
-    created = tmp_path / "experiments" / "github_confirm_20260917" / "hitl"
-    created.mkdir(parents=True)
-    (created / "params.json").write_text(
-        json.dumps({"development_first_period": "2024Q2"}), encoding="utf-8"
-    )
-    params = ROUNDS["create_round_20260917"].request_params("github_confirm_20260917")
-    assert params["development_first_period"] == "2024Q2"
-
-    # Nothing created: the round file decides against live state again, and
-    # says why it cannot when the source is not there to read.
-    (created / "params.json").unlink()
-    with pytest.raises(ValueError, match="no ledger|completed no Fold|needs at least"):
-        ROUNDS["create_round_20260917"].request_params("github_confirm_20260917")
+    validate_strategy_package(starter / "main.py")
+    for path in starter.rglob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        assert not any(literal in text for literal in ("/mnt/", "/Data2", "/home/")), path
+        assert "snapshot_dir" not in text, path
