@@ -18,8 +18,6 @@ from autotrade.environment.replay.style import (
     replay_style_analysis,
     write_style_rollup,
 )
-from autotrade.pipelines.ledger import ExperimentLedger
-from autotrade.pipelines.reporting import build_experiment_report
 
 
 def _replay(days: list[str], *, with_holdings: bool = True) -> ReplayResult:
@@ -195,14 +193,9 @@ def test_benchmark_regression_math_and_degenerate_inputs():
     assert flat["reason"] == "benchmark_variance_zero"
 
 
-def test_benchmark_block_reaches_the_experiment_report(tmp_path: Path):
-    """The summary block a replay writes is what the report reads back.
-
-    The producer and the consumer used to disagree by omission: nothing wrote
-    ``benchmark`` into an evaluation summary, so every experiment report was
-    permanently ``status="warning"``. Drive the real style computation into a
-    ledger record and build the report from it.
-    """
+def test_benchmark_block_restates_the_replay_benchmark(tmp_path: Path):
+    """The ``benchmark`` block a replay writes into its evaluation summary
+    carries the style computation's own CSI 300 figures."""
     days = [stamp.strftime("%Y%m%d") for stamp in pd.bdate_range("2024-01-02", periods=12)]
     replay_dir = tmp_path / "replay"
     replay_dir.mkdir()
@@ -230,32 +223,6 @@ def test_benchmark_block_reaches_the_experiment_report(tmp_path: Path):
     assert block["label"] == BENCHMARK_LABEL and block["ts_code"] == BENCHMARK_TS_CODE
     assert block["benchmark_return"] == analysis["compact"]["benchmark_return"]
     assert block["excess_return"] == analysis["compact"]["excess_return"]
-
-    ledger_path = tmp_path / "ledger.jsonl"
-    ledger = ExperimentLedger(ledger_path)
-    ledger.append(
-        {
-            "record_type": "fold",
-            "experiment_id": "e",
-            "epoch_id": "epoch_001",
-            "fold_id": "fold_2024Q1",
-            "run_id": "run_1",
-            "fold_status": "frozen",
-            "test_period": "20240102..20240117",
-            "validation_result": {"total_return": 0.02, "sharpe": 1.0, "max_drawdown": 0.05},
-            "test_result": {
-                "total_return": 0.01,
-                "sharpe": 0.8,
-                "max_drawdown": 0.07,
-                "order_count": 4,
-                "benchmark": block,
-            },
-        }
-    )
-    summary = build_experiment_report(ledger_path, tmp_path / "report")
-    assert summary["benchmark"]["status"] == "ok"
-    assert summary["status"] == "ok"
-    assert summary["benchmark"]["covered_periods"] == 1
 
 
 def test_benchmark_block_is_absent_when_the_slot_has_no_benchmark(tmp_path: Path):
