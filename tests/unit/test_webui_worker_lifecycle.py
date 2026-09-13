@@ -458,6 +458,38 @@ class WorkerLifecycleTest(unittest.TestCase):
             control.directives, {"epoch_001/fold_2022Q2": "keep the turnover down"}
         )
 
+    def test_start_worker_keeps_worker_temp_files_off_the_shared_tmpfs(self) -> None:
+        """The worker's temp root is its experiment's own dir, emptied at start.
+
+        Every replay creates its strategy state dir through ``tempfile``; on
+        the host's shared /tmp tmpfs, which other tenants fill, that mkdir
+        failed with ENOSPC and took the replay with it. What a killed worker
+        left there (frozen trees are read-only) must not survive either.
+        """
+        script = self.repo_root / "scripts/experiments/run_interactive_experiment.py"
+        script.parent.mkdir(parents=True, exist_ok=True)
+        report = self.repo_root / "created_temp_dir"
+        script.write_text(
+            "import os, tempfile, time\n"
+            f"os.symlink(tempfile.mkdtemp(), {str(report)!r})\n"
+            "time.sleep(120)\n",
+            encoding="utf-8",
+        )
+        temp_root = self.repo_root.resolve() / ".runtime/tmp/exp_ctl"
+        stale = temp_root / "strategy_state_left_behind/output"
+        stale.mkdir(parents=True)
+        (stale / "main.py").write_text("x", encoding="utf-8")
+        stale.chmod(0o555)
+        spawned = manager_module.ExperimentManager(
+            self.repo_root, self.experiments_root
+        ).start_worker("exp_ctl")
+        self.addCleanup(self._kill_pid, int(spawned["spawned_pid"]))
+        deadline = time.monotonic() + 30
+        while not report.is_symlink() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertEqual(Path(os.readlink(report)).parent, temp_root)
+        self.assertFalse(stale.parent.exists())
+
     def test_deferred_restart_swaps_code_in_place_without_killing_the_session(
         self,
     ) -> None:

@@ -668,6 +668,17 @@ class ExperimentManager:
             log_ref = worker_log_ref(experiment_id)
             log_path = self.repo_root / log_ref
             log_path.parent.mkdir(parents=True, exist_ok=True)
+            # The worker's temporary files (every replay's strategy state dir,
+            # the frozen-tree copy around an official evaluation, library
+            # defaults) live on the repository volume, not the host's shared
+            # /tmp tmpfs: other tenants fill that one, and a replay then failed
+            # with ENOSPC creating its state dir. The directory is this
+            # experiment's alone and no worker of it is live, so whatever a
+            # killed worker left behind is removed here.
+            temp_dir = self.repo_root / ".runtime/tmp" / experiment_id
+            if temp_dir.exists():
+                _remove_readonly_tree(temp_dir)
+            temp_dir.mkdir(parents=True)
             with log_path.open("a", encoding="utf-8") as log:
                 log.write(f"\n===== worker start {utc_now_iso()} =====\n")
                 log.flush()
@@ -679,6 +690,7 @@ class ExperimentManager:
                         str(directory),
                     ],
                     cwd=str(self.repo_root),
+                    env={**os.environ, "TMPDIR": str(temp_dir)},
                     stdin=subprocess.DEVNULL,
                     stdout=log,
                     stderr=subprocess.STDOUT,
