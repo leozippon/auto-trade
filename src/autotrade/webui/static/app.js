@@ -2794,25 +2794,18 @@ async function renderDetailPage(experimentId, selectedKey) {
           : null,
       ),
     ),
-    el(
-      "div",
-      { class: "sub" },
-      `进度 ${detail.completed_sessions ?? 0}/${detail.total_sessions ?? "?"}`,
-      ` ｜ Skills ${Number(detail.skills && detail.skills.count) || 0} 项`,
-      detail.state === "unreadable" && detail.error
-        ? ` ｜ ${detail.error}`
-        : "",
-      status.error ? ` ｜ 错误：${status.error}` : "",
-      detail.worker_alive && status.environment_stage
-        ? ` ｜ ${formatStageLine(status, { elapsed: false })}`
-        : "",
-      // A worker-recorded analysis error is only current while that worker
-      // lives; stale failures are visible per fold in the analysis section.
-      detail.worker_alive && status.analysis_error
-        ? ` ｜ 分析：${status.analysis_error}`
-        : "",
-    ),
   );
+  // Progress and the current stage ride on the control row; the head keeps
+  // only errors. A worker-recorded analysis error is only current while that
+  // worker lives; stale failures are visible per fold in the analysis section.
+  const errors = [
+    detail.state === "unreadable" && detail.error ? detail.error : null,
+    status.error ? `错误：${status.error}` : null,
+    detail.worker_alive && status.analysis_error
+      ? `分析：${status.analysis_error}`
+      : null,
+  ].filter(Boolean);
+  if (errors.length) head.append(el("div", { class: "sub" }, errors.join(" ｜ ")));
   const container = el("div", {});
   let barHost = null;
   if (detail.params && Object.keys(detail.params).length) {
@@ -2892,10 +2885,6 @@ async function renderDetailPage(experimentId, selectedKey) {
             sharpe,
             fmtSharpe,
           ),
-          {
-            label: "会话进度",
-            value: `${detail.completed_sessions ?? 0} / ${detail.total_sessions ?? "?"}`,
-          },
         ]),
         transitionsStrip(detail),
         charts,
@@ -3040,13 +3029,38 @@ async function openParamsModal(detail) {
   ]);
 }
 
+/* The control row's left side: session progress, the current session and its
+   stage while a worker runs, and the mounted skills count. */
+function runStatusLine(detail) {
+  const status = detail.status || {};
+  const current =
+    detail.worker_alive &&
+    (detail.sessions || []).find((session) => session.key === status.session_key);
+  return el(
+    "span",
+    { class: "mode-note" },
+    [
+      `会话 ${detail.completed_sessions ?? 0}/${detail.total_sessions ?? "?"}`,
+      current ? `当前 ${sessionDisplayKey(current)}` : null,
+      detail.worker_alive ? formatStageLine(status, { elapsed: false }) : null,
+      `Skills ${Number(detail.skills && detail.skills.count) || 0} 项`,
+    ]
+      .filter(Boolean)
+      .join(" · "),
+  );
+}
+
 function controlBar(detail) {
   const id = detail.experiment_id;
   const control = detail.control || { request: null };
   const state = detail.state;
   const alive = detail.worker_alive;
   const send = (payload, note) => sendControlAction(id, payload, note);
-  const bar = el("div", { class: "panel control-bar section-gap" });
+  const bar = el(
+    "div",
+    { class: "panel control-bar section-gap" },
+    runStatusLine(detail),
+  );
   if (control.request === "pause")
     bar.append(el("span", { class: "badge state-paused" }, "已请求暂停"));
   if (control.request === "stop")
