@@ -1694,13 +1694,18 @@ label.check-item {
  margin: 0;
  flex: none;
 }
-details.advanced {
+details.advanced,
+details.caliber {
  margin-top: 0.55rem;
 }
-details.advanced summary {
+details.advanced summary,
+details.caliber summary {
  cursor: pointer;
  color: var(--muted);
  font-size: 0.875rem;
+}
+details.caliber .mode-note {
+ margin-top: 0.35rem;
 }
 details.advanced .form-grid {
  margin-top: 0.55rem;

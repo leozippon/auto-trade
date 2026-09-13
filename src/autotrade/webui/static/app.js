@@ -753,47 +753,28 @@ function cycleStatsTable(payload) {
 }
 
 /* Folds a chained line owed a series but could not read (walk_forward_curve
-   and parent_control_forward report them in `missing`). The line and, where
-   there is one, the cumulative tile above it drop exactly these together, so
-   the omission is stated here rather than left to be read out of a gap — or,
-   for the forward line, out of where it stops. */
+   and parent_control_forward report them in `missing`), named by period. The
+   line and the cumulative tile above it drop exactly these together. */
 function missingFoldsNote(payload, detail) {
   const groups = Object.entries(payload.missing || {});
   if (!groups.length) return null;
   const text = groups
-    .map(([key, refs]) => {
-      const names = refs.map((ref) =>
-        detail ? foldPeriodLabel(detail, ref) : ref,
-      );
-      return `${CYCLE_SERIES_SHORT[key] || key}：${names.join("、")}`;
-    })
+    .map(
+      ([key, refs]) =>
+        `${CYCLE_SERIES_SHORT[key] || key} ${refs.map((ref) => foldPeriodLabel(detail, ref)).join("、")}`,
+    )
     .join("；");
-  return el(
-    "div",
-    { class: "meta-line" },
-    `以下 Fold 没有可读的回放结果，对应曲线与同源的累计收益一并略过它们（${text}）。`,
-  );
+  return el("div", { class: "meta-line" }, `曲线略过无回放结果的 Fold：${text}`);
 }
 
-/* What the chained line on this chart actually is.
-
-   The solid Validation line is not one strategy's track record and not a
-   walk-forward equity curve: it is a chain, and which Fold a given day comes
-   from decides whether that day is out-of-sample at all. A reader who is not
-   told the rule will read the line as the second thing, so the rule is stated
-   under the chart rather than left to the tile's hover text.
-
-   The dashed forward line is the same calendar read out-of-sample end to end
-   (equity.parent_control_forward), so it is named here too; Folds it had to
-   drop are named separately by `missingFoldsNote`. */
+/* How the chained lines are built, folded behind a small 口径 disclosure on
+   the experiment page: which Fold a day comes from decides whether it is
+   out-of-sample at all (equity.walk_forward_curve, parent_control_forward). */
 const CHAIN_RULE_NOTE =
-  "实线「策略（验证）」按 Fold 前向串联：重叠的交易日只记最早覆盖它的 Fold，" +
-  "所以首个 Fold 出整个验证窗口、其后每个 Fold 只补自己的新季度，滚出窗口的日子不会再被后来的 Fold 改写；" +
-  "补进来的是该 Fold 实际沿用的策略——冻结了新产物的 Fold 补的是刚在这段新季度上被选中的候选（对这次选择并非样本外），" +
-  "未更新（no_update）的 Fold 补的是原样重跑的父本（对父本才是样本外）。";
+  "实线「策略（验证）」按 Fold 前向串联：重叠交易日只记最早覆盖它的 Fold，首个 Fold 出整个验证窗口，其后每个 Fold 只补自己的新季度。" +
+  "冻结新产物的 Fold 补的是刚在该季度上选中的候选（对这次选择并非样本外），未更新的 Fold 补的是原样重跑的父本（对父本是样本外）。";
 const FORWARD_SERIES_NOTE =
-  "虚线「父本对照前向（样本外过渡）」串联的是各 Fold 新季度上的父本对照重放，" +
-  "即走查过渡计分的那些区间，因此它是这条日历上纯样本外的前向权益（从第二个 Fold 起算，起点归零）。";
+  "虚线「父本对照前向」串联各 Fold 新季度上的父本对照重放，即过渡计分的区间，是这条日历上纯样本外的前向权益（从第二个 Fold 起算，起点归零）。";
 
 function chainingCaption(payload, opts) {
   const keys = opts?.keys || null;
@@ -801,10 +782,17 @@ function chainingCaption(payload, opts) {
     (s) => (s.dates || []).length && (!keys || keys.includes(s.key)),
   );
   if (!shown.some((s) => s.key === "valid")) return null;
-  const text = shown.some((s) => s.key === "forward")
-    ? `${CHAIN_RULE_NOTE}${FORWARD_SERIES_NOTE}`
-    : CHAIN_RULE_NOTE;
-  return el("div", { class: "mode-note section-gap" }, text);
+  return el(
+    "details",
+    { class: "caliber" },
+    el("summary", {}, "口径"),
+    el(
+      "div",
+      { class: "mode-note" },
+      CHAIN_RULE_NOTE,
+      shown.some((s) => s.key === "forward") ? FORWARD_SERIES_NOTE : null,
+    ),
+  );
 }
 
 /* Async host: renders the chart (plus, on full-size charts, the epoch switcher
@@ -842,12 +830,14 @@ function equityHost(expId, fp, opts) {
         }
         host.append(equityChart(payload, opts));
         if (!opts?.mini) {
-          const caption = chainingCaption(payload, opts);
-          if (caption) host.append(caption);
-          const dropped = missingFoldsNote(payload, opts?.detail);
+          // Only the experiment page names dropped Folds and the curve's
+          // method; the homepage card shows the chart and its numbers alone.
+          const dropped = opts?.detail && missingFoldsNote(payload, opts.detail);
           if (dropped) host.append(dropped);
           const statsTable = cycleStatsTable(payload);
           if (statsTable) host.append(statsTable);
+          const caliber = opts?.detail && chainingCaption(payload, opts);
+          if (caliber) host.append(caliber);
         }
       })
       .catch((error) => {
@@ -1474,22 +1464,25 @@ async function renderHomePageSilent() {
   // Only rebuild the hero when its content actually changed. Replacing it every
   // poll re-creates the equity host, whose epoch switcher would reset to the
   // default (latest) epoch and clobber the user's E1/E2 selection.
-  if (hero && best && hero.__heroSig !== heroSignature(best))
+  if (hero && best && hero.__heroSig !== heroSignature(best.item, best.basis))
     hero.replaceWith(heroPanel(best));
 }
 
 /* Everything heroPanel renders that can change between polls; when unchanged the
    panel (and its selected epoch) is left in place. */
-function heroSignature(item) {
-  const m = item.metrics || {};
+function heroSignature(item, basis) {
+  const term = latestWalkForward(item) || {};
   return [
     item.experiment_id,
+    basis,
     item.state,
-    item.worker_alive,
     item.test_revealed,
+    (item.verdict || {}).status,
+    heldoutNeutralizedExcess(item.verdict),
+    term.positive_excess,
+    term.transitions,
     equityFingerprint(item),
-    m.mean_test_sharpe,
-    m.epoch_id,
+    (item.metrics || {}).epoch_id,
   ].join("|");
 }
 
@@ -2036,26 +2029,53 @@ function experimentCard(item) {
   return card;
 }
 
-/* Best-performing experiment hero: revealed test Sharpe when present,
-   otherwise latest-epoch validation return. */
+/* Held-out neutralized excess of a verdict: the mean over its periods, null
+   unless every period carries the figure. */
+function heldoutNeutralizedExcess(verdict) {
+  const values = ((verdict || {}).periods || []).map(
+    (period) => period.neutralized_excess_return,
+  );
+  if (!values.length || values.some((value) => typeof value !== "number"))
+    return null;
+  return values.reduce((total, value) => total + value, 0) / values.length;
+}
+
+/* The latest Epoch's walk-forward counts; null while they are sealed. */
+function latestWalkForward(item) {
+  const epochId = (item.metrics || {}).epoch_id;
+  const row = (item.metrics_by_epoch || []).find((r) => r.epoch_id === epochId);
+  return (row || {}).walk_forward || null;
+}
+
+/* Out-of-sample evidence only, never an in-sample cumulative return:
+   graduated experiments, then the other experiments with a Held-out verdict,
+   both by Held-out neutralized excess; then running experiments by their
+   share of positive forward transitions among the completed ones. */
+function bestExperimentRank(item) {
+  const verdict = item.verdict;
+  if (verdict && verdict.status)
+    return {
+      tier: verdict.status === "graduated" ? 0 : 1,
+      score: heldoutNeutralizedExcess(verdict),
+      basis: "按 Held-out 超额",
+    };
+  const term = latestWalkForward(item);
+  if (!item.worker_alive || !term || !term.transitions) return null;
+  return {
+    tier: 2,
+    score: term.positive_excess / term.transitions,
+    basis: "按前向胜率",
+  };
+}
+
 function pickBestExperiment(list) {
-  const scored = list
-    .filter((item) => (item.fold_returns || []).length)
-    .map((item) => ({
-      item,
-      sharpe: item.metrics?.mean_test_sharpe ?? null,
-      ret:
-        item.metrics?.cum_test_return ?? item.metrics?.cum_valid_return ?? null,
-    }))
-    .filter((entry) => entry.sharpe !== null || entry.ret !== null);
-  if (!scored.length) return null;
-  scored.sort((a, b) => {
-    if (a.sharpe !== null && b.sharpe !== null) return b.sharpe - a.sharpe;
-    if (a.sharpe !== null) return -1;
-    if (b.sharpe !== null) return 1;
-    return b.ret - a.ret;
-  });
-  return scored[0].item;
+  const ranked = list
+    .map((item) => ({ item, ...bestExperimentRank(item) }))
+    .filter((entry) => entry.basis);
+  if (!ranked.length) return null;
+  const score = (entry) => (entry.score === null ? -Infinity : entry.score);
+  ranked.sort((a, b) => a.tier - b.tier || score(b) - score(a));
+  return ranked[0];
 }
 
 /* Cache key: equity only changes when new records land (or a rerun replaces
@@ -2161,20 +2181,13 @@ function equityFingerprint(item) {
   return `${item.folds_recorded}|${item.heldout_recorded}|${metrics.cum_test_return}|${metrics.cum_valid_return}|${metrics.cum_heldout_return}`;
 }
 
-function heroPanel(item) {
+function heroPanel({ item, basis }) {
   const metrics = item.metrics || {};
+  const excess = heldoutNeutralizedExcess(item.verdict);
+  const term = latestWalkForward(item);
+  const epochTag = metrics.epoch_id ? `（${epochShort(metrics.epoch_id)}）` : "";
   const panel = el("div", { class: "panel hero", id: "hero-panel" });
-  panel.__heroSig = heroSignature(item);
-  const charts = el(
-    "div",
-    { class: "section-gap" },
-    el("h4", {}, "日度累计收益 vs 沪深300（含回撤）"),
-    equityHost(item.experiment_id, equityFingerprint(item), {
-      width: 980,
-      height: 240,
-      ddH: 90,
-    }),
-  );
+  panel.__heroSig = heroSignature(item, basis);
   panel.append(
     el(
       "div",
@@ -2182,49 +2195,45 @@ function heroPanel(item) {
       el("span", { class: "hero-crown" }, "🏆"),
       el("h3", { style: "margin:0" }, experimentName(item.experiment_id)),
       stateBadge(item.state),
-      el(
-        "span",
-        { class: "mode-note" },
-        item.test_revealed
-          ? "当前最佳实验（按测试期平均 Sharpe）"
-          : "当前最佳实验（按验证期收益）",
-      ),
+      verdictBadge(item.verdict),
+      el("span", { class: "mode-note" }, `最佳实验 · ${basis}`),
     ),
     el(
       "div",
       { class: "section-gap" },
       statTilesRow([
         {
-          ...sealedMetricTile(
-            item.test_revealed,
-            "Held-out 收益（最终样本外）",
-            metrics.cum_heldout_return,
-          ),
-          cls: item.test_revealed
-            ? `hero-key ${signCls(metrics.cum_heldout_return)}`
-            : "",
+          ...sealedMetricTile(item.test_revealed, "Held-out 中性化超额", excess),
+          cls: item.test_revealed ? `hero-key ${signCls(excess)}` : "",
         },
         sealedMetricTile(
           item.test_revealed,
-          `累计测试收益${metrics.epoch_id ? `（${epochShort(metrics.epoch_id)}）` : ""}`,
-          metrics.cum_test_return,
+          "Held-out 收益",
+          metrics.cum_heldout_return,
         ),
         {
-          label: `累计验证收益${metrics.epoch_id ? `（${epochShort(metrics.epoch_id)}）` : ""}`,
+          label: `前向过渡超额为正${epochTag}`,
+          value: term ? `${term.positive_excess}/${term.transitions}` : "未揭示",
+        },
+        {
+          label: `累计验证收益${epochTag}`,
           value: fmtPct(metrics.cum_valid_return),
           cls: signCls(metrics.cum_valid_return),
           title: CUM_VALID_HINT,
         },
-        sealedMetricTile(
-          item.test_revealed,
-          "平均测试 Sharpe",
-          metrics.mean_test_sharpe,
-          fmtSharpe,
-        ),
         { label: "已完成 Fold", value: String(item.folds_recorded ?? 0) },
       ]),
     ),
-    charts,
+    el(
+      "div",
+      { class: "section-gap" },
+      el("h4", {}, "日度累计收益 vs 沪深300（含回撤）"),
+      equityHost(item.experiment_id, equityFingerprint(item), {
+        width: 980,
+        height: 240,
+        ddH: 90,
+      }),
+    ),
   );
   return panel;
 }
@@ -2848,8 +2857,7 @@ async function renderDetailPage(experimentId, selectedKey) {
         width: 980,
         height: 240,
         ddH: 90,
-        // Names the Folds the chain had to drop, in the period labels the rest
-        // of the page uses rather than in opaque refs.
+        // Names dropped Folds by period and adds the curve's 口径 disclosure.
         detail,
       }),
     );
