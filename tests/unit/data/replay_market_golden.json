@@ -593,8 +593,8 @@
   },
   "sub_windows": [
    {
-    "kind": "quarter",
-    "label": "2023Q3",
+    "kind": "july_june_year",
+    "label": "202307-202406",
     "start": "20230821",
     "end": "20230907",
     "trade_days": 14,

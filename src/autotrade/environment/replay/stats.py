@@ -23,11 +23,11 @@ TRADING_DAYS_PER_YEAR = 244
 # Position-reducing verbs; fills here are strategy-initiated exits.
 _EXIT_ACTIONS = frozenset({"sell"})
 
-# Sub-window granularity of every Validation / Test / Held-out result. One
-# whole-window number cannot separate a persistent edge from one good month,
-# and the audited folds reverse from quarter to quarter, so every result also
-# carries the same metrics per calendar quarter of its replay window.
-SUB_WINDOW_KIND = "quarter"
+# Sub-window granularity of every replay result: the July-June years research,
+# the forward period and Held-out are laid out in (pipelines/calendar.py). One
+# whole-window number cannot separate a persistent edge from one good year, so
+# every result also carries the same metrics per July-June year of its window.
+SUB_WINDOW_KIND = "july_june_year"
 # Sub-window figures are read as a table, not compounded further: six decimals
 # keep the block small enough to ride inline in an Agent observation.
 _SUB_WINDOW_DIGITS = 6
@@ -330,21 +330,22 @@ def sub_window_stats(
     start: str = "",
     end: str = "",
 ) -> list[dict[str, object]]:
-    """Per calendar quarter of the replay window, the same metrics as the whole.
+    """Per July-June year of the replay window, the same metrics as the whole.
 
-    Each row compounds from the equity the quarter opened at (the previous
-    quarter's close, or the initial equity), so the rows chain back to
-    ``total_return``; ``turnover`` and ``trade_count`` keep the whole-window
-    denominators and therefore sum to the whole-window figures.
+    A row is labelled by its calendar months (``202107-202206``). Each row
+    compounds from the equity the year opened at (the previous year's close,
+    or the initial equity), so the rows chain back to ``total_return``;
+    ``turnover`` and ``trade_count`` keep the whole-window denominators and
+    therefore sum to the whole-window figures.
 
-    ``partial`` marks a quarter the requested replay window ``start..end``
-    (``YYYYMMDD`` calendar dates) does not span end to end — interior quarters
+    ``partial`` marks a year the requested replay window ``start..end``
+    (``YYYYMMDD`` calendar dates) does not span end to end — interior years
     never are. It must be measured against those calendar bounds, not against
     the first and last trading day: a window opening on the first trading day
-    of a quarter covers that quarter completely even though that day is rarely
-    the first of the month. A caller that cannot state the requested window
-    leaves both empty and gets the replayed span instead, which reports the two
-    end quarters partial unless the replay itself reaches the calendar bounds.
+    of a year covers that year completely even though that day is rarely July
+    1. A caller that cannot state the requested window leaves both empty and
+    gets the replayed span instead, which reports the two end years partial
+    unless the replay itself reaches the calendar bounds.
 
     ``benchmark_return`` / ``excess_return`` / ``neutralized_excess_return``
     stay ``None`` until the evaluation backend joins the benchmark and size
@@ -358,32 +359,30 @@ def sub_window_stats(
     )
     if not rows:
         return []
-    buckets: dict[tuple[int, int], list[Mapping[str, object]]] = {}
+    buckets: dict[int, list[Mapping[str, object]]] = {}
     for row in rows:
-        buckets.setdefault(_quarter_key(str(row["trade_date"])), []).append(row)
-    traded, exits = _quarter_order_totals(executions)
+        buckets.setdefault(_block_key(str(row["trade_date"])), []).append(row)
+    traded, exits = _block_order_totals(executions)
     keys = sorted(buckets)
     window_start = _window_bound(start, "start") or str(rows[0]["trade_date"])
     window_end = _window_bound(end, "end") or str(rows[-1]["trade_date"])
     out: list[dict[str, object]] = []
     opening = initial
     for key in keys:
-        quarter_rows = buckets[key]
-        quarter_start = str(quarter_rows[0]["trade_date"])
-        quarter_end = str(quarter_rows[-1]["trade_date"])
-        equities = [float(row["equity"]) for row in quarter_rows]
+        block_rows = buckets[key]
+        equities = [float(row["equity"]) for row in block_rows]
         closing = equities[-1]
-        calendar_start, calendar_end = _quarter_bounds(*key)
-        # Every quarter is compared against the window itself; an interior one
-        # is inside both bounds and therefore never partial.
+        calendar_start, calendar_end = f"{key}0701", f"{key + 1}0630"
+        # Every year is compared against the window itself; an interior one is
+        # inside both bounds and therefore never partial.
         partial = window_start > calendar_start or window_end < calendar_end
         out.append(
             {
                 "kind": SUB_WINDOW_KIND,
-                "label": f"{key[0]}Q{key[1]}",
-                "start": quarter_start,
-                "end": quarter_end,
-                "trade_days": len(quarter_rows),
+                "label": f"{key}07-{key + 1}06",
+                "start": str(block_rows[0]["trade_date"]),
+                "end": str(block_rows[-1]["trade_date"]),
+                "trade_days": len(block_rows),
                 "partial": partial,
                 "return": _round(closing / opening - 1.0 if opening > 0 else 0.0),
                 "benchmark_return": None,
@@ -414,11 +413,10 @@ def attach_sub_window_benchmark(
     fabricated zero.
 
     The neutralized figure is the same two-regressor attribution the whole
-    window carries, re-run on the quarter's own days
-    (``style.window_neutralized_excess``). A walk-forward transition is graded
-    on one quarter and on that figure, so the quarter has to carry it: the raw
-    excess of a single quarter cannot separate an edge from a size or beta tilt
-    any better than a whole window's can.
+    window carries, re-run on the year's own days
+    (``style.window_neutralized_excess``): the raw excess of a single year
+    cannot separate an edge from a size or beta tilt any better than a whole
+    window's can.
     """
 
     # Deferred: ``style`` imports this module for the trading-day constant and
@@ -532,31 +530,27 @@ def _window_bound(value: str, name: str) -> str:
     return text
 
 
-def _quarter_key(trade_date: str) -> tuple[int, int]:
-    return int(trade_date[:4]), (int(trade_date[4:6]) - 1) // 3 + 1
+def _block_key(trade_date: str) -> int:
+    """The calendar year a July-June year starts in."""
+
+    year, month = int(trade_date[:4]), int(trade_date[4:6])
+    return year if month >= 7 else year - 1
 
 
-def _quarter_bounds(year: int, quarter: int) -> tuple[str, str]:
-    first_month = 3 * (quarter - 1) + 1
-    last_month = first_month + 2
-    last_day = 31 if last_month in (3, 12) else 30
-    return f"{year}{first_month:02d}01", f"{year}{last_month:02d}{last_day:02d}"
-
-
-def _quarter_order_totals(
+def _block_order_totals(
     executions: Sequence[Mapping[str, object]],
-) -> tuple[dict[tuple[int, int], float], dict[tuple[int, int], int]]:
-    """Filled notional and realized exits per quarter, keyed by the fill date."""
+) -> tuple[dict[int, float], dict[int, int]]:
+    """Filled notional and realized exits per July-June year, by fill date."""
 
-    traded: dict[tuple[int, int], float] = {}
-    exits: dict[tuple[int, int], int] = {}
+    traded: dict[int, float] = {}
+    exits: dict[int, int] = {}
     for order in executions:
         if str(order.get("status") or "") != "filled":
             continue
         day = _fill_date(order)
         if not day:
             continue
-        key = _quarter_key(day)
+        key = _block_key(day)
         traded[key] = traded.get(key, 0.0) + _filled_notional(order)
         if order.get("realized_pnl") is not None:
             exits[key] = exits.get(key, 0) + 1
