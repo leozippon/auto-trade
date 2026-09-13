@@ -25,7 +25,6 @@ from autotrade.environment.artifacts import (
     READONLY_FILES,
     ArtifactSnapshotUnstable,
     FilesystemArtifactStore,
-    ModificationConstraints,
     copy_artifact,
     copy_artifact_snapshot,
     copy_model_artifacts,
@@ -84,11 +83,7 @@ from autotrade.environment.tools.base import (
     ToolResult,
     ToolSpec,
 )
-from autotrade.environment.tools.files import (
-    DeleteFileTool,
-    EditFileTool,
-    WriteFileTool,
-)
+from autotrade.environment.tools.files import EditFileTool, WriteFileTool
 from autotrade.environment.tools.finish_fold import (
     FinishFoldTool,
     FoldBudgetStatus,
@@ -2798,14 +2793,6 @@ class LLMFoldDeveloper:
                 "parent_strategy_artifact_id": (
                     request.parent.artifact_id if request.parent is not None else None
                 ),
-                # The verdict on the preceding Meta's regularization, when one
-                # ran: the Agent reads that Meta's PRIOR, and a cleanup it
-                # claims but the Pipeline refused is not in this parent.
-                "meta_regularization": (
-                    dict(request.meta_regularization)
-                    if request.meta_regularization
-                    else None
-                ),
                 "template_ref": None
                 if request.parent is not None
                 else "agent_output_template",
@@ -3471,8 +3458,9 @@ class LLMMetaLearner:
         max_llm_calls: int,
         deadline_seconds: float,
         # The formal executor's strategy wall clocks and GPU allocation,
-        # published in the run manifest: Meta rewrites main.py, fit(context)
-        # included, and a Meta session has no container of its own to probe.
+        # published in the run manifest: a candidate the Meta writes into PRIOR
+        # has to fit them, and a Meta session has no container of its own to
+        # probe.
         decision_timeout_seconds: float = SandboxLimits().timeout_seconds,
         fit_timeout_seconds: float = SandboxLimits().fit_timeout_seconds,
         strategy_gpu_count: int = SandboxLimits().gpu_count,
@@ -3483,7 +3471,6 @@ class LLMMetaLearner:
         workspace_reference: str = "",
         operating_memory: str = "none",
         repo_root: str | Path | None = None,
-        regularization_constraints: ModificationConstraints | None = None,
         sandbox_spec: SandboxSpec | None = None,
         use_docker: bool = True,
         rebuild_enabled: bool = True,
@@ -3521,11 +3508,6 @@ class LLMMetaLearner:
         self.workspace_reference = workspace_reference
         self.operating_memory = str(operating_memory)
         self.repo_root = Path(repo_root).resolve() if repo_root is not None else None
-        # The limits a Meta regularization must satisfy before the Pipeline will
-        # freeze it; published in the run manifest and enforced by the check.
-        self.regularization_constraints = (
-            regularization_constraints or ModificationConstraints()
-        )
 
     def __call__(self, facts: dict[str, object]) -> MetaSessionResult:
         from autotrade.agent.compact import ContextCompactor
@@ -3633,17 +3615,16 @@ class LLMMetaLearner:
             parent_id = ""
             parent = self.baseline_strategy.parent
             parent_models = None
-        # The parent is the Meta session's WORKING copy, not a read-only input:
-        # a Meta session may regularize the strategy artifact within
-        # regularization_constraints, and the Pipeline freezes the result.
+        # The parent is a read-only input: a Meta session writes PRIOR and
+        # skills, and a strategy change it wants is a PRIOR candidate the next
+        # Fold implements and validates (docs/pipeline-design.md 3.2).
         output_dir = paths.workspace / "output"
         models_dir = paths.workspace / "models"
         copy_artifact(parent, output_dir)
         copy_model_artifacts(parent_models, models_dir)
-        restore_working_artifacts_writable(output_dir, models_dir)
-        # Same rule as a Fold session: the read-only contract files are judged
-        # against the bytes seeded here, never against a template edited since.
-        seeded_readonly = readonly_baseline(output_dir)
+        chmod_tree(output_dir, file_mode=0o444, dir_mode=0o555)
+        if models_dir.exists():
+            chmod_tree(models_dir, file_mode=0o444, dir_mode=0o555)
         previous_prior = str(facts.get("previous_prior") or "").strip()
         # PRIOR.md is the sole writable Meta direction/memory channel. Seed the
         # current published body before the Agent starts; the first session gets
@@ -3765,7 +3746,6 @@ class LLMMetaLearner:
                 },
                 "parent_strategy_artifact_id": parent_id or None,
                 "template_ref": None if parent_id else "agent_output_template",
-                "readonly_baseline": seeded_readonly,
                 "is_initial_artifact": not parent_id,
                 # Agent-facing manifest: sandbox mount paths, never host paths.
                 "development_inputs": {
@@ -3786,8 +3766,8 @@ class LLMMetaLearner:
                             for item in sidecars
                         ],
                     },
-                    "strategy_working_copy": "/mnt/agent/workspace/output",
-                    "model_working_copy": "/mnt/agent/workspace/models",
+                    "parent_strategy": "/mnt/agent/workspace/output",
+                    "parent_models": "/mnt/agent/workspace/models",
                     "previous_prior": bool(previous_prior),
                 },
                 "prior_output": "/mnt/agent/workspace/PRIOR.md",
@@ -3800,14 +3780,13 @@ class LLMMetaLearner:
                     "files": skills_stats.files,
                     "bytes": skills_stats.bytes,
                 },
-                "modification_constraints": self.regularization_constraints.to_record(),
                 "meta_learning_directive": self.meta_learning_directive.strip(),
                 "fold_exploration_directive": self.fold_exploration_directive.strip(),
                 "review_window": dict(review_window),
-                # Meta may rewrite main.py, fit(context) included, so it is
-                # told the same strategy wall clocks and GPU allocation an
-                # ordinary Fold gets. A Meta session runs no container itself,
-                # so this manifest is its only source for the latter.
+                # The candidates the Meta writes into PRIOR must fit the same
+                # strategy wall clocks and GPU allocation an ordinary Fold
+                # gets. A Meta session runs no container itself, so this
+                # manifest is its only source for the latter.
                 "budgets": {
                     "max_llm_calls": self.max_llm_calls,
                     "deadline_seconds": self.deadline_seconds,
@@ -3851,30 +3830,19 @@ class LLMMetaLearner:
                 else None
             ),
         )
-        modification = ModificationCheckTool(
-            output_dir,
-            parent_dir=parent,
-            models_dir=models_dir,
-            parent_models_dir=parent_models,
-            constraints=self.regularization_constraints,
-            readonly_baseline=seeded_readonly,
-        )
         tools: list[Tool] = [
             ReadFileTool(search_roots),
             GrepTool(search_roots),
             GlobTool(search_roots),
-            # The Meta session's writable surface: PRIOR.md, the strategy/model
-            # copy it may regularize, and the optional sandbox dependency request.
+            # The Meta session's writable surface: PRIOR.md, TODO.md and the
+            # optional sandbox dependency request (output/ and models/ are
+            # read-only on disk).
             WriteFileTool(safe),
             EditFileTool(safe),
-            # No shell in a Meta session: without this, a regularization could
-            # empty a dead file but never remove it.
-            DeleteFileTool(safe),
             WriteSkillTool(safe),
             DeleteSkillTool(safe),
             *([MemoryFeedbackTool(safe, manifest)] if mounted_memory else []),
             ReportIssueTool(issue_reports_path(self.experiment_dir), manifest),
-            modification,
         ]
         tools.append(
             FinishMetaTool(
@@ -3962,21 +3930,6 @@ class LLMMetaLearner:
                     "bytes": final_skills.bytes,
                 },
             )
-            # Runs after the session returns, so it is Pipeline finalization
-            # rather than an Agent action: whatever the Meta left in output/ and
-            # models/ must satisfy the regularization constraints before it can
-            # become the next Fold's parent.
-            _environment_phase(progress_hook, "meta_finalize", run_id)
-            check, allowed = _finalize_modification_check(modification)
-            manifest.update(last_modification_check=check)
-            revision_id = ""
-            if parent_id and allowed and _check_has_changes(check):
-                _assert_skills_absent_from_formal(output_dir, models_dir)
-                validate_strategy_package(output_dir / "main.py")
-                revision = self.artifact_store.create_revision(
-                    output_dir, models_path=models_dir
-                )
-                revision_id = str(revision.revision_id)
             _environment_phase(progress_hook, "environment_update", run_id)
             rebuild_error: RuntimeError | None = None
             try:
@@ -4009,9 +3962,6 @@ class LLMMetaLearner:
             return MetaSessionResult(
                 prior=str(result["prior"]),
                 conversation_id=str(result.get("conversation_id") or ""),
-                revision_id=revision_id,
-                modification_check=check,
-                allowed=allowed,
                 skills_source_ref=str(collected / "workspace" / "skills"),
             )
         except Exception as exc:
@@ -4398,39 +4348,6 @@ def _safe_meta_trace_payload(
     if event_type in {"tool_call", "subagent_tool"} and isinstance(arguments, Mapping):
         kept["argument_keys"] = sorted(str(key) for key in arguments)
     return kept
-
-
-def _finalize_modification_check(
-    tool: ModificationCheckTool,
-) -> tuple[dict[str, object], bool]:
-    """Run the post-session check, turning a refusal into an audited verdict.
-
-    A Meta session that leaves the artifact outside its constraints must not
-    fail the whole session — PRIOR is still valid — but its edits must be
-    rejected rather than frozen, so the refusal is recorded and reported.
-    """
-    try:
-        result = tool.invoke({})
-    except ToolError as exc:
-        return {"allowed_to_backtest": False, "reasons": [str(exc)]}, False
-    return {"allowed_to_backtest": True, **dict(result.value)}, True
-
-
-def _check_has_changes(check: Mapping[str, object]) -> bool:
-    delta = check.get("delta")
-    model_delta = check.get("model_delta")
-    if not isinstance(delta, Mapping):
-        delta = {}
-    if not isinstance(model_delta, Mapping):
-        model_delta = {}
-    return any(
-        [
-            int(delta.get("changed_file_count") or 0) > 0,
-            int(delta.get("diff_lines") or 0) > 0,
-            int(delta.get("code_diff_lines") or 0) > 0,
-            int(model_delta.get("changed_file_count") or 0) > 0,
-        ]
-    )
 
 
 def _read_json_if_exists(path: Path) -> dict[str, object]:

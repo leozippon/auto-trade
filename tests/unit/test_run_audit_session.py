@@ -8,7 +8,6 @@ import pytest
 from scripts.experiments import run_audit_session
 from autotrade.environment.sandbox import SandboxSpec
 from autotrade.pipelines import worker as worker_module
-from autotrade.pipelines.config import ModificationConstraints
 
 
 class _ProviderConstructed(RuntimeError):
@@ -32,7 +31,6 @@ def _options(tmp_path: Path, **overrides: object) -> SimpleNamespace:
             nl_failure_policy="fail",
             workspace_reference="configs/workspace_refs/pack",
             operating_memory="curated+graduated",
-            regularization_constraints=ModificationConstraints(),
             meta_sandbox_rebuild_enabled=False,
             meta_sandbox_rebuild_timeout_seconds=900,
             meta_sandbox_image_keep=2,
@@ -196,7 +194,6 @@ def test_the_assembled_session_mounts_the_image_refs_and_memory_it_was_given(
         assert session["workspace_reference"] == "configs/workspace_refs/pack"
         assert session["operating_memory"] == "curated+graduated"
         assert session["repo_root"] == tmp_path
-    assert meta["regularization_constraints"] is options.rolling.regularization_constraints
     assert meta["rebuild_enabled"] is False
 
 

@@ -1187,15 +1187,14 @@ def test_prompt_and_facts_encode_daily_json_and_offline_meta_boundaries(
     meta_prompt = build_system_prompt(mode="meta", experiment_facts={})
     assert "离线 Meta 主协调者" in META_SYSTEM_PROMPT
     assert "# 执行合同与边界" not in meta_prompt
-    # The strategy contract itself lives in the mounted README, not the prompt.
-    assert "`output/README.md` 规定的策略合同" in meta_prompt
-    # The Meta session is offline and evidence-bounded, may regularize under
-    # the modification constraints, and may declare its own image dependencies.
+    # The Meta session is offline and evidence-bounded, reads the parent
+    # without writing it (a strategy change is a PRIOR candidate for the next
+    # Fold), and may declare its own image dependencies.
     for rule in (
         "不得读取当前或未来 Test、Held-out 原始记录",
         "不得运行回测",
         "`inputs/meta_context.json`",
-        "`modification_check`",
+        "父产物 `output/` 与 `models/` 只读",
         "sandbox_environment.json",
         "日历日期",
     ):

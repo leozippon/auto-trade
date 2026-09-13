@@ -144,9 +144,9 @@ def test_rolling_pipeline_runs_meta_fold_test_and_heldout(tmp_path: Path):
         enqueue_inbox_message(inbox, session_key=key, text=f"{key} 未消费")
     # The same call order the interactive worker drives: epoch-start Meta, then
     # the Fold, then one Held-out pass over the resulting frontier.
-    prior, parent = pipeline.run_meta_session("epoch_001", 0, fold, parent=None)
+    prior = pipeline.run_meta_session("epoch_001", 0, fold, parent=None)
     assert prior == "prefer simple daily signals"
-    outcome = pipeline.run_fold("epoch_001", fold, parent=parent, prior=prior)
+    outcome = pipeline.run_fold("epoch_001", fold, parent=None, prior=prior)
     final = outcome.frozen
     assert final is not None
     heldout_runs = pipeline.run_heldout("epoch_001", final, days)
@@ -336,9 +336,7 @@ def test_meta_session_retains_only_the_authorized_test_diagnostic(tmp_path: Path
         },
     )
 
-    # run_meta_session returns (PRIOR, next_parent): a regularized artifact
-    # becomes the next Fold's parent, and a PRIOR-only session leaves it unchanged.
-    assert prior == ("prefer robust signals", None)
+    assert prior == "prefer robust signals"
     meta_record = ledger.read("meta_learning")[-1]
     assert meta_record["run_wall_seconds"] == 12.3
     history = captured["development_history"]

@@ -150,7 +150,8 @@ def latest_meta_records(
 ) -> dict[str, dict[str, object]]:
     """Latest successful meta-learning record per session key. A re-run appends
     a superseding record, so only the last one describes what that session
-    left behind -- its published PRIOR, and any artifact it regularized."""
+    left behind -- its published PRIOR, and, in ledgers written before a Meta
+    stopped freezing strategies, the artifact it regularized."""
     latest: dict[str, dict[str, object]] = {}
     for record in records:
         if not is_durable_success_record(record, record_types=("meta_learning",)):
@@ -159,46 +160,6 @@ def latest_meta_records(
         if session_key:
             latest[session_key] = record
     return latest
-
-
-def preceding_meta_regularization(
-    records: list[dict[str, object]],
-) -> dict[str, object] | None:
-    """The Meta outcome this Fold inherits, when a Meta ran right before it.
-
-    A Meta may claim a cleanup in its PRIOR that the Pipeline then refused --
-    the check rejected it, or the package would not run -- and the Fold mounts
-    the unchanged parent while reading a PRIOR that says otherwise. The ledger
-    is append-ordered and every Meta is followed by the Fold it prepares, so
-    the preceding session is the last durable record: a meta row means this
-    Fold inherits its verdict, anything else means no Meta ran in between.
-    ``reason`` is the refusal text when there is one, so a PRIOR claim about a
-    regularization can be checked against what was actually frozen.
-    """
-
-    for record in reversed(records):
-        if not is_durable_success_record(record):
-            continue
-        if record.get("record_type") != "meta_learning":
-            return None
-        status = str(record.get("status") or "")
-        smoke = record.get("regularization_smoke")
-        reasons: list[str] = []
-        if isinstance(smoke, Mapping) and smoke.get("status") == "failed":
-            reasons.append(f"regularization_smoke: {smoke.get('error')}")
-        check = record.get("modification_check")
-        if isinstance(check, Mapping) and check.get("allowed_to_backtest") is False:
-            listed = check.get("reasons")
-            reasons.extend(
-                str(item)
-                for item in (listed if isinstance(listed, Sequence) and not isinstance(listed, str) else [])
-            )
-        reason = "; ".join(item for item in reasons if item)
-        return {
-            "status": status,
-            **({"reason": reason[:_META_REGULARIZATION_REASON_MAX_CHARS]} if reason else {}),
-        }
-    return None
 
 
 def rerun_absorbed(
@@ -221,11 +182,6 @@ def rerun_absorbed(
         None,
     )
     return latest is not None and str(latest.get("rerun_id") or "") == token
-
-
-# Same bound and purpose as a failed control's reason: enough to act on, and
-# it travels in the next Fold's system prompt.
-_META_REGULARIZATION_REASON_MAX_CHARS = 400
 
 
 def _artifact_id(value: object) -> str | None:

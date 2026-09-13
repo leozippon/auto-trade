@@ -1057,7 +1057,6 @@ def build_experiment_pipeline(
             workspace_reference=options.rolling.workspace_reference,
             operating_memory=options.rolling.operating_memory,
             repo_root=options.repo_root,
-            regularization_constraints=options.rolling.regularization_constraints,
             sandbox_spec=options.agent_sandbox,
             # A sandboxless smoke run must not shell out to docker build.
             use_docker=command_runner_factory is None,
@@ -1244,9 +1243,7 @@ def run_local_interactive_worker(
         if session.fold is None:
             raise RuntimeError(f"unsupported local session kind: {session.kind}")
         if session.kind == "meta":
-            # A Meta session may regularize the artifact; the next Fold then
-            # starts from the regularized parent, not the pre-Meta one.
-            state["prior"], state["parent"] = pipeline.run_meta_session(
+            state["prior"] = pipeline.run_meta_session(
                 session.epoch_id,
                 session.fold_index,
                 session.fold,
@@ -1611,68 +1608,35 @@ def _latest_artifact(
     current_id = ""
     current_path = ""
     current_record: dict[str, object] | None = None
-    requires_validation = False
-    # The last validated head, which is what an unvalidated one reverts to.
-    predecessor: tuple[str, str, dict[str, object]] | None = None
     for record in records:
         record_type = record.get("record_type")
-        if record_type == "fold":
-            artifact_id = str(record.get("frozen_strategy_artifact_id") or "")
-            path = str(record.get("frozen_strategy_artifact_path") or "")
-            if not artifact_id:
-                continue
-            current_id = artifact_id
-            current_path = path
-            current_record = record
-            requires_validation = False
-        elif (
+        # A Fold's freeze, or -- in ledgers written before a Meta stopped
+        # freezing strategies -- a Meta-regularized artifact, which resolves as
+        # the ordinary frozen artifact it is.
+        if record_type == "fold" or (
             record_type == "meta_learning"
             and record.get("status") == "meta_regularized"
         ):
             artifact_id = str(record.get("frozen_strategy_artifact_id") or "")
             if not artifact_id:
                 continue
-            # The artifact this regularization edited: validated when its own
-            # Fold froze it, and the fallback run_fold reverts to when the next
-            # Fold never validates the regularized package. A superseding re-run
-            # of the same Meta session regularizes an already-unvalidated head,
-            # so the last validated one stays the fallback.
-            if current_record is not None and not requires_validation:
-                predecessor = (current_id, current_path, current_record)
             current_id = artifact_id
             current_path = str(record.get("frozen_strategy_artifact_path") or "")
             current_record = record
-            requires_validation = True
     if not current_id or current_record is None:
         return None
     try:
-        artifact = _artifact_from_record(
+        return _artifact_from_record(
             current_id,
             current_path,
             current_record,
             store=store,
             experiment_dir=experiment_dir,
         )
-        fallback = (
-            _artifact_from_record(
-                predecessor[0],
-                predecessor[1],
-                predecessor[2],
-                store=store,
-                experiment_dir=experiment_dir,
-            )
-            if requires_validation and predecessor is not None
-            else None
-        )
     except Exception as exc:
         raise RuntimeError(
             f"ledger artifact failed validation: {current_id}: {exc}"
         ) from exc
-    return replace(
-        artifact,
-        requires_validation=requires_validation,
-        validated_predecessor=fallback,
-    )
 
 
 def _terminal_status(

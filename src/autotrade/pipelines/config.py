@@ -648,9 +648,6 @@ class RollingExperimentConfig:
     step_constraints: ModificationConstraints = field(
         default_factory=ModificationConstraints
     )
-    regularization_constraints: ModificationConstraints = field(
-        default_factory=ModificationConstraints
-    )
 
     def __post_init__(self) -> None:
         if not re.fullmatch(r"[A-Za-z0-9_-]+", self.experiment_id):
@@ -782,15 +779,6 @@ class FrozenArtifact:
     source_fold_id: str
     source_step_id: str
     revision_id: str = ""
-    # A meta-regularized artifact enters the next Fold without ever having been
-    # backtested. The Fold may only fall back to it after validating identical
-    # content in that Fold (experiment.run_fold), never silently.
-    requires_validation: bool = False
-    # What that Fold reverts to when it ends without validating this artifact:
-    # the artifact the Meta regularized, validated when its own Fold froze it.
-    # It travels with ``requires_validation`` so the unvalidated head always
-    # names the validated one behind it, in-process and after a resume.
-    validated_predecessor: FrozenArtifact | None = None
 
 
 class ArtifactStore(Protocol):
@@ -842,13 +830,7 @@ class EvaluationResult:
 
 
 class EvaluationBackend(Protocol):
-    # ``max_days`` truncates the replay to the first N trading days of the
-    # window -- a rehearsal that proves the package runs without paying for the
-    # whole replay (the Fold's smoke_backtest tool, and the Pipeline's check of
-    # a meta-regularized package before it freezes it).
-    def evaluate(
-        self, request: EvaluationRequest, *, max_days: int | None = None
-    ) -> EvaluationResult: ...
+    def evaluate(self, request: EvaluationRequest) -> EvaluationResult: ...
 
 
 @dataclass(frozen=True)
@@ -912,12 +894,6 @@ class FoldSessionRequest:
     # exactly this case, so the session has to be told what went wrong rather
     # than only that nothing is there.
     parent_control_error: str = ""
-    # What the Meta session immediately before this Fold left behind, when
-    # there was one (``ledger.preceding_meta_regularization``): its status and,
-    # for a refused regularization, why. The Fold reads that Meta's PRIOR, so a
-    # cleanup claimed there but never frozen has to be checkable against the
-    # parent it actually mounted.
-    meta_regularization: Mapping[str, object] | None = None
     epoch_index: int = 1
     phase: str = "exploration"
     # ``fold`` for a development Fold; ``deployment_adjustment`` for the
@@ -976,18 +952,14 @@ class FoldSessionResult:
 
 @dataclass(frozen=True)
 class MetaSessionResult:
-    """What one Meta session produced.
+    """What one Meta session produced: PRIOR and skills, never a strategy.
 
-    ``revision_id`` is set only when the session regularized the strategy
-    artifact and the modification check allowed it; the Pipeline owns the
-    freeze, exactly as it does for a Fold's selected Step.
+    A strategy improvement the Meta finds is written into PRIOR as a candidate
+    for the next Fold, which validates it before it can be frozen.
     """
 
     prior: str
     conversation_id: str = ""
-    revision_id: str = ""
-    modification_check: Mapping[str, object] = field(default_factory=dict)
-    allowed: bool = True
     # Trusted host path to this run's collected workspace/skills audit copy.
     skills_source_ref: str = ""
 

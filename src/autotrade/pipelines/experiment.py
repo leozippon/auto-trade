@@ -9,7 +9,6 @@ strategy content; it only accepts, freezes, falls back, and records.
 from __future__ import annotations
 
 import hashlib
-import shutil
 import time
 import uuid
 from collections.abc import Callable, Mapping
@@ -40,11 +39,7 @@ from autotrade.environment.replay import (
     run_daily_replay,
 )
 from autotrade.environment.replay.stats import attach_cost_sensitivity
-from autotrade.environment.runtime import (
-    agent_trace_path,
-    chmod_tree,
-    redact_host_paths,
-)
+from autotrade.environment.runtime import agent_trace_path, chmod_tree
 from autotrade.environment.strategy import NLQuery
 from autotrade.environment.tools.finish_fold import mechanism_structure
 
@@ -91,7 +86,6 @@ from .ledger import (
     is_frozen_artifact_mutation,
     latest_fold_records,
     latest_meta_records,
-    preceding_meta_regularization,
     walk_forward_transitions,
 )
 from .ledger import (
@@ -122,12 +116,6 @@ from .skills import (
 # default Fold budget (config.max_fold_minutes), enough headroom for one slow
 # session without letting it run unattended for days.
 _MAX_DEADLINE_OVERRIDE_MINUTES = 1440
-
-# Trading days a meta-regularized package is replayed for before the Pipeline
-# freezes it. The same rehearsal length the Fold's smoke_backtest defaults to:
-# enough to pay for one ``fit`` and the first decision days, which is where a
-# package that cannot run says so.
-REGULARIZATION_SMOKE_DAYS = 3
 
 
 class DailyStrategyPipeline:
@@ -324,11 +312,6 @@ class RollingExperimentPipeline:
                         parent_control=control,
                         parent_control_null=control_null,
                         parent_control_error=control_error,
-                        # The Fold reads the preceding Meta's PRIOR, so it also
-                        # reads what the Pipeline did with that Meta's edit.
-                        meta_regularization=preceding_meta_regularization(
-                            self.ledger.read()
-                        ),
                         epoch_index=_epoch_index(epoch_id),
                         phase=(
                             "convergence"
@@ -385,7 +368,6 @@ class RollingExperimentPipeline:
                     selected.validation.summary
                 )
             nominated_identical_to_parent = False
-            meta_regularization_rejected = False
             if selected is not None and not hard:
                 if parent is not None and self._matches_parent_content(
                     parent, selected.revision_id
@@ -396,10 +378,7 @@ class RollingExperimentPipeline:
                     # restart that strategy's forward record at zero, and
                     # graduation term (c) reads it by id (§3.3): the lineage
                     # head stays, and this Fold records that its nomination
-                    # changed nothing. The complete Validation just accepted is
-                    # also the Validation a meta-regularized parent still owed.
-                    if parent.requires_validation:
-                        parent = replace(parent, requires_validation=False)
+                    # changed nothing.
                     frozen = parent
                     status = "no_update"
                     nominated_identical_to_parent = True
@@ -418,23 +397,7 @@ class RollingExperimentPipeline:
                     status = "frozen"
                 validation = selected.validation.summary
             elif parent is not None:
-                # ``parent`` itself stays what this Fold inherited: the ledger
-                # row and the parent control name the artifact that was mounted,
-                # even when the lineage head below reverts to another one.
                 frozen = parent
-                if parent.requires_validation:
-                    if self._parent_validated_in_fold(
-                        parent, session.steps, control=control
-                    ):
-                        frozen = replace(parent, requires_validation=False)
-                    else:
-                        # The Meta's regularized package proved nothing here, so
-                        # the lineage goes back to the artifact it edited -- a
-                        # validated fallback, not an unvalidated one. Killing the
-                        # arm instead would discard every Fold behind it over one
-                        # Meta edit (docs/pipeline-design.md 3.2).
-                        frozen = self._revert_meta_regularization(parent)
-                        meta_regularization_rejected = True
                 status = (
                     "no_update"
                     if selected is not None or abstained
@@ -581,15 +544,6 @@ class RollingExperimentPipeline:
                 **(
                     {"nominated_identical_to_parent": True}
                     if nominated_identical_to_parent
-                    else {}
-                ),
-                # This Fold inherited a meta-regularized package and no complete
-                # Validation here accepted it, so the lineage reverted: the
-                # rejected package is parent_strategy_artifact_id, the validated
-                # artifact it reverted to is frozen_strategy_artifact_id.
-                **(
-                    {"meta_regularization_rejected": True}
-                    if meta_regularization_rejected
                     else {}
                 ),
                 # Frozen with no parent to beat: the lineage's baseline anchor,
@@ -1153,14 +1107,14 @@ class RollingExperimentPipeline:
         parent: FrozenArtifact | None,
         session_context: dict[str, object] | None = None,
         previous_prior: str = "",
-    ) -> tuple[str, FrozenArtifact | None]:
+    ) -> str:
         # Same entry guard as run_fold/run_heldout: a Meta session reads the
-        # frozen lineage and may republish a regularized parent, so it must
-        # refuse to start while an unresolved integrity row remains. The check
-        # only reads the ledger, so a clean run's own publication is unaffected.
+        # frozen lineage, so it must refuse to start while an unresolved
+        # integrity row remains. The check only reads the ledger, so a clean
+        # run's own publication is unaffected.
         assert_no_frozen_artifact_mutation(self.ledger.read())
         if self.meta_learner is None:
-            return previous_prior, parent
+            return previous_prior
         run_started = time.monotonic()
         run_id = f"run_{uuid.uuid4().hex}"
         session_id = meta_learning_id(epoch_id, completed_folds)
@@ -1276,46 +1230,16 @@ class RollingExperimentPipeline:
                     deadline_exceeded=deadline_exceeded,
                 )
             )
-            # Candidate selection and the freeze are the Pipeline's, exactly as
-            # for a Fold's selected Step: the Meta session only nominates, and
-            # adoption is decided here on the modification check's own verdict
-            # (`session.allowed`), never on the nomination alone. A learner that
-            # offers a revision the check refused must not have it adopted --
-            # a meta-regularized artifact becomes the next Fold's parent.
-            status = "prior_only"
-            frozen = parent
-            smoke: dict[str, object] | None = None
+            # A Meta session writes PRIOR and skills only: every artifact in the
+            # lineage is one a Fold validated, so the parent stays the head.
+            # Ledgers written before this rule also carry `meta_regularized`
+            # (a frozen Meta edit) and `rejected_kept_parent` rows.
             if deadline_exceeded:
                 status = "deadline_exceeded_kept_previous"
-            elif parent is not None and session.allowed and session.revision_id:
-                # The Meta session cannot execute what it edits, so the freeze
-                # owner proves the package starts before adopting it.
-                _publish_progress(progress, "regularization_smoke", run_id=run_id)
-                smoke = self._regularization_smoke(
-                    session.revision_id, visible_fold, meta_snapshot
-                )
-                if smoke["status"] == "ok":
-                    frozen = self._freeze(
-                        session.revision_id,
-                        artifact_id=f"strategy_{session_id}_meta_learning",
-                        epoch_id=epoch_id,
-                        fold_id=session_id,
-                        run_id=run_id,
-                        step_id="meta_learning",
-                        # Never fully backtested: the next Fold may only fall
-                        # back to it after validating identical content itself,
-                        # and reverts to the artifact this one regularized when
-                        # it cannot.
-                        requires_validation=True,
-                        validated_predecessor=parent,
-                    )
-                    status = "meta_regularized"
-                else:
-                    status = "rejected_kept_parent"
-            elif parent is not None and session.allowed:
-                status = "prior_only_kept_parent"
             elif parent is not None:
-                status = "rejected_kept_parent"
+                status = "prior_only_kept_parent"
+            else:
+                status = "prior_only"
             _publish_progress(progress, "publishing", run_id=run_id)
             skills = self._publish_or_keep_skills(
                 session.skills_source_ref,
@@ -1346,32 +1270,6 @@ class RollingExperimentPipeline:
                     **skills.stats.ledger_fields(),
                     "skills_published": skills.published,
                     "status": status,
-                    "modification_check": dict(session.modification_check),
-                    # The rehearsal that decided whether the regularized package
-                    # could be frozen; absent when the session froze nothing.
-                    **({"regularization_smoke": smoke} if smoke is not None else {}),
-                    # The artifact the session started from, and the one a
-                    # rejected regularization reverts the lineage to.
-                    "parent_strategy_artifact_id": (
-                        parent.artifact_id if parent is not None else None
-                    ),
-                    "frozen_strategy_artifact_id": (
-                        frozen.artifact_id
-                        if status == "meta_regularized" and frozen
-                        else None
-                    ),
-                    "frozen_strategy_artifact_path": (
-                        str(frozen.path)
-                        if status == "meta_regularized" and frozen
-                        else None
-                    ),
-                    "frozen_model_artifact_path": (
-                        str(frozen.model_path)
-                        if status == "meta_regularized"
-                        and frozen
-                        and frozen.model_path is not None
-                        else None
-                    ),
                     "agent_trace_ref": str(trace_ref) if trace_ref.exists() else None,
                     "review_window": history.get("review_window"),
                     **_session_timing(context, run_started),
@@ -1383,7 +1281,7 @@ class RollingExperimentPipeline:
                 meta_session_key(epoch_id, completed_folds),
                 expired_by=run_id,
             )
-            return prior_text, frozen
+            return prior_text
         except BaseException as exc:
             # See run_fold: a terminated worker unwinds through SystemExit or
             # KeyboardInterrupt, which must be recorded like any other failure
@@ -1499,8 +1397,6 @@ class RollingExperimentPipeline:
         fold_id: str,
         run_id: str,
         step_id: str,
-        requires_validation: bool = False,
-        validated_predecessor: FrozenArtifact | None = None,
     ) -> FrozenArtifact:
         """Freeze one Step revision and return the lineage's artifact record.
 
@@ -1529,48 +1425,7 @@ class RollingExperimentPipeline:
             fold_id,
             step_id,
             revision_id,
-            requires_validation=requires_validation,
-            validated_predecessor=validated_predecessor,
         )
-
-    def _regularization_smoke(
-        self, revision_id: str, fold: FoldSpec, snapshot: SnapshotBundle
-    ) -> dict[str, object]:
-        """Replay a regularized package over the next Fold's first days.
-
-        The Meta session has no evaluator and no backtest tool: it cannot run
-        what it edits. A regularization that crashed on its first decision day
-        was therefore frozen, mounted as the next Fold's parent, and only found
-        when that Fold's control replay failed, with the Fold owing a
-        Validation nothing in it could pay (earnings_surprise_20260918). The
-        freeze belongs to the Pipeline, so does the run that proves the package
-        starts: same evaluator, snapshot and replay bounds the next Fold's
-        parent control will use, truncated to the first few trading days, and
-        the result is discarded -- it is a rehearsal, not a Validation, and
-        nothing may select or score it.
-        """
-
-        try:
-            evaluation = self.evaluator.evaluate(
-                EvaluationRequest(
-                    revision=self.artifacts.revision(revision_id),
-                    snapshot=snapshot,
-                    mode="valid",
-                    start=fold.validation_start,
-                    end=fold.validation_end,
-                    schedule=self.config.schedule,
-                    broker_profile=self.config.broker_profile,
-                ),
-                max_days=REGULARIZATION_SMOKE_DAYS,
-            )
-        except Exception as exc:  # noqa: BLE001 - the error text IS the verdict
-            return {
-                "status": "failed",
-                "days": REGULARIZATION_SMOKE_DAYS,
-                "error": redact_host_paths(f"{type(exc).__name__}: {exc}"),
-            }
-        shutil.rmtree(Path(evaluation.result_ref).parent, ignore_errors=True)
-        return {"status": "ok", "days": REGULARIZATION_SMOKE_DAYS}
 
     def _matches_parent_content(
         self, parent: FrozenArtifact, revision_id: str
@@ -1578,9 +1433,8 @@ class RollingExperimentPipeline:
         """Whether one Step revision holds exactly the parent artifact's content.
 
         Single source for "this node is the parent itself": the freeze site
-        keeps the lineage head instead of reissuing an id for the same bytes,
-        and the meta-regularized fallback proves the parent was validated in
-        this Fold. Compares the trees the artifact store actually carries --
+        keeps the lineage head instead of reissuing an id for the same bytes.
+        Compares the trees the artifact store actually carries --
         no digest is persisted, so a missing ``models/`` on either side is not
         a difference.
         """
@@ -1594,52 +1448,6 @@ class RollingExperimentPipeline:
             and parent.model_path is not None
             and model_artifact_delta(parent.model_path, models).changed_files
         )
-
-    def _parent_validated_in_fold(
-        self,
-        parent: FrozenArtifact,
-        steps: tuple[StepResult, ...],
-        *,
-        control: EvaluationResult | None = None,
-    ) -> bool:
-        """Whether this Fold produced a complete Validation of its own parent.
-
-        A meta-regularized artifact enters the Fold without a backtest, so it
-        may stay the lineage head only once this Fold has validated it. The
-        host's parent control is that Validation when it completed and passed
-        acceptance; otherwise identity is established by comparing the trees
-        directly: a Step whose revision has no changed strategy or model file
-        performed Validation on this parent.
-        """
-        if control is not None and not self.config.acceptance.evaluate(control.summary)[0]:
-            return True
-        for step in steps:
-            if not self._matches_parent_content(parent, step.revision_id):
-                continue
-            hard, _ = self.config.acceptance.evaluate(step.validation.summary)
-            if not hard:
-                return True
-        return False
-
-    def _revert_meta_regularization(self, parent: FrozenArtifact) -> FrozenArtifact:
-        """The validated artifact a rejected meta-regularization replaced.
-
-        The Fold ended without validating the regularized package, so it must
-        not be carried forward -- but the artifact the Meta edited was validated
-        when its own Fold froze it, so reverting to it is a validated fallback
-        and the experiment continues with the lineage it had before the Meta.
-        Only a regularization whose predecessor is unknown leaves nothing
-        validated to fall back to; that case is still refused.
-        """
-
-        predecessor = parent.validated_predecessor
-        if predecessor is None:
-            raise RuntimeError(
-                "Meta-regularized parent has no acceptable complete Validation in "
-                "this Fold and no validated predecessor to revert to; refusing "
-                "unvalidated fallback"
-            )
-        return predecessor
 
     def _prior_meta_learning_logs(self, current_meta_learning_id: str) -> str:
         """Latest prior Meta trace from each of the most recent N Epochs.
@@ -1690,10 +1498,11 @@ class RollingExperimentPipeline:
         parent: FrozenArtifact | None,
         previous_prior: str = "",
         session_context: dict[str, object] | None = None,
-    ) -> tuple[str, FrozenArtifact | None]:
+    ) -> str:
         """Run one scheduled Meta session through the canonical ledger path.
 
-        Returns the current PRIOR and the parent the next Fold must start from.
+        Returns the current PRIOR. ``parent`` is only read: the next Fold
+        starts from the same artifact.
         """
 
         return self._run_meta(
@@ -1780,6 +1589,8 @@ def _keep_frozen_artifact_ids(
             artifact_id = str(record.get(key) or "")
             if artifact_id:
                 keep.add(artifact_id)
+    # A Meta no longer freezes anything, but a ledger written before that rule
+    # may still name a Meta-frozen artifact as its head.
     for record in latest_meta_records(records).values():
         if record.get("status") != "meta_regularized":
             continue

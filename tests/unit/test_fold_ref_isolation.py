@@ -26,7 +26,7 @@ import pytest
 from autotrade.agent.experiment_facts import build_experiment_facts
 from autotrade.environment.artifacts import FilesystemArtifactStore
 from autotrade.environment.identity import AgentRefStore
-from autotrade.environment.llm import ScriptedLLM, ToolCall
+from autotrade.environment.llm import ProviderResponse, ScriptedLLM, ToolCall
 from autotrade.pipelines.agent_views import (
     agent_visible_ledger_record,
     compact_fold_history,
@@ -446,6 +446,61 @@ def test_meta_with_existing_prior_can_finish_without_rewriting_it(tmp_path: Path
         }
     )
     assert result.prior == "keep the current transferable direction"
+
+
+def test_a_meta_session_reads_the_parent_but_cannot_write_it(tmp_path: Path):
+    """A Meta writes PRIOR and skills; a strategy change is a PRIOR candidate.
+
+    The parent's ``output/`` is on disk read-only, so a write is refused and the
+    next Fold inherits exactly the artifact a Fold validated.
+    """
+    source = "def generate_orders(context):\n    return []\n"
+    baseline = tmp_path / "baseline" / "main.py"
+    baseline.parent.mkdir()
+    baseline.write_text(source, encoding="utf-8")
+    llm = ScriptedLLM(
+        [
+            ProviderResponse(
+                tool_calls=(
+                    ToolCall(
+                        "edit",
+                        "write_file",
+                        {"path": "output/main.py", "content": "def generate_orders(context):\n    return [1]\n"},
+                    ),
+                )
+            ),
+            ProviderResponse(tool_calls=(ToolCall("finish_meta", "finish_meta", {}),)),
+        ]
+    )
+    learner = LLMMetaLearner(
+        llm=llm,
+        baseline_strategy=baseline,
+        artifact_store=FilesystemArtifactStore(tmp_path / "artifacts"),
+        experiment_dir=tmp_path / "experiment",
+        runtime_root=tmp_path / "runtime",
+        max_llm_calls=3,
+        deadline_seconds=30.0,
+        use_docker=False,
+        rebuild_enabled=False,
+    )
+    learner(
+        {
+            "run_id": "run_read_only",
+            "experiment_id": "exp",
+            "epoch_id": "epoch_002",
+            "meta_learning_id": "epoch_002",
+            "previous_prior": "keep the current transferable direction",
+        }
+    )
+
+    observation = "\n".join(
+        message.content or ""
+        for message in llm.calls[1]["messages"]
+        if message.role == "tool"
+    )
+    assert "output/main.py is not writable" in observation
+    collected = tmp_path / "run_read_only" / "workspace" / "output" / "main.py"
+    assert collected.read_text(encoding="utf-8") == source
 
 
 def test_meta_installs_skills_without_exposing_the_host_source(tmp_path: Path):

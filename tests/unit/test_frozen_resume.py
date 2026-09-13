@@ -111,14 +111,6 @@ def _append_meta(
     )
 
 
-def test_freeze_revision_is_a_valid_fold_parent_without_validation_flag(tmp_path: Path) -> None:
-    store = FilesystemArtifactStore(tmp_path / "store")
-    frozen = _freeze(store, "strategy_fold_001")
-    assert frozen.requires_validation is False
-    reloaded = store.frozen(frozen.artifact_id, expected_path=frozen.path, experiment_id="exp")
-    assert reloaded.requires_validation is False
-
-
 def test_prune_keeps_prior_fold_and_meta_and_drops_superseded(tmp_path: Path) -> None:
     store = FilesystemArtifactStore(tmp_path / "store")
     ledger = ExperimentLedger(tmp_path / "ledger.jsonl")
@@ -207,10 +199,15 @@ def test_latest_artifact_walks_back_from_baseline_missing(tmp_path: Path) -> Non
     assert parent.source_fold_id == previous.source_fold_id
     assert parent.source_step_id == previous.source_step_id
     assert parent.revision_id == previous.revision_id
-    assert parent.requires_validation is False
 
 
-def test_latest_artifact_uses_meta_regularized_parent(tmp_path: Path) -> None:
+def test_latest_artifact_resolves_a_legacy_meta_regularized_head(tmp_path: Path) -> None:
+    """A Meta no longer freezes strategies, but older ledgers name one as head.
+
+    Such an artifact (the graduated github_confirm one among them) resumes as
+    the ordinary frozen artifact it is: the later Folds that replayed it are its
+    validation, and nothing about it is re-litigated at resume.
+    """
     store = FilesystemArtifactStore(tmp_path / "store")
     ledger = ExperimentLedger(tmp_path / "ledger.jsonl")
     previous = _freeze(store, "strategy_fold_001")
@@ -239,65 +236,25 @@ def test_latest_artifact_uses_meta_regularized_parent(tmp_path: Path) -> None:
         fold_id="epoch_001_after_fold_001",
     )
 
-    parent = _latest_artifact(ledger, store, tmp_path)
-
-    assert parent is not None
-    assert parent.artifact_id == meta.artifact_id
-    assert parent.path == Path(meta.path)
-    assert parent.model_path == (
-        Path(meta.model_path) if meta.model_path is not None else None
+    head = _latest_artifact(ledger, store, tmp_path)
+    assert head is not None
+    assert (head.artifact_id, head.path, head.revision_id) == (
+        meta.artifact_id,
+        Path(meta.path),
+        meta.revision_id,
     )
-    assert parent.source_run_id == meta.source_run_id
-    assert parent.source_fold_id == meta.source_fold_id
-    assert parent.source_step_id == meta.source_step_id
-    assert parent.revision_id == meta.revision_id
-    assert parent.requires_validation is True
-    # And it carries the artifact it regularized: the validated fallback the
-    # next Fold reverts to when it never validates the regularized package.
-    assert parent.validated_predecessor is not None
-    assert parent.validated_predecessor.artifact_id == previous.artifact_id
-    assert parent.validated_predecessor.path == Path(previous.path)
-    assert parent.validated_predecessor.requires_validation is False
 
-
-def test_latest_artifact_keeps_the_last_validated_fallback_across_a_meta_rerun(
-    tmp_path: Path,
-) -> None:
-    """A re-run Meta regularizes a head that is itself unvalidated.
-
-    The superseded regularization is not a fallback -- no Fold ever validated
-    it -- so the revert target stays the Fold artifact behind both of them.
-    """
-    store = FilesystemArtifactStore(tmp_path / "store")
-    ledger = ExperimentLedger(tmp_path / "ledger.jsonl")
-    previous = _freeze(store, "strategy_fold_001")
-    first = _freeze(store, "strategy_meta_first")
-    second = _freeze(store, "strategy_meta_second")
+    # A later Fold that kept it carries the same id, and resume reads that row.
     _append_fold(
         ledger,
-        fold_id="fold_001",
-        artifact_id=previous.artifact_id,
-        path=str(previous.path),
-        run_id="run_fold_001",
+        fold_id="fold_002",
+        artifact_id=meta.artifact_id,
+        path=str(meta.path),
+        run_id="run_fold_002",
+        status="no_update",
     )
-    for artifact, run_id in ((first, "run_meta_1"), (second, "run_meta_2")):
-        _append_meta(
-            ledger,
-            session_key="epoch_001/meta_learning_after_fold_001",
-            status="meta_regularized",
-            artifact_id=artifact.artifact_id,
-            path=str(artifact.path),
-            run_id=run_id,
-            fold_id="epoch_001_after_fold_001",
-        )
-
-    parent = _latest_artifact(ledger, store, tmp_path)
-
-    assert parent is not None
-    assert parent.artifact_id == second.artifact_id
-    assert parent.requires_validation is True
-    assert parent.validated_predecessor is not None
-    assert parent.validated_predecessor.artifact_id == previous.artifact_id
+    kept = _latest_artifact(ledger, store, tmp_path)
+    assert kept is not None and kept.artifact_id == meta.artifact_id
 
 
 def _install_inherited_seed(
@@ -354,7 +311,6 @@ def test_latest_artifact_takes_a_kept_parent_from_the_recorded_path(
     assert parent.artifact_id == "strategy_inherited_src"
     assert parent.path == seed
     assert parent.model_path is None
-    assert parent.requires_validation is False
     # Resolving the seed must not mint a copy of it in this experiment's store.
     assert not any(store.frozen_root.iterdir())
 

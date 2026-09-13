@@ -180,7 +180,7 @@ def main() -> int:
     parent = _parent_artifact(args, options)
 
     if args.mode == "meta-learning":
-        prior, meta_parent = pipeline.run_meta_session(
+        prior = pipeline.run_meta_session(
             args.epoch_id,
             args.fold_index,
             fold,
@@ -194,9 +194,6 @@ def main() -> int:
             "epoch_id": args.epoch_id,
             "visible_fold": fold.to_record(),
             "prior_chars": len(prior),
-            # The session may regularize the parent; report which artifact the
-            # next Fold would start from so an audit run shows the real handoff.
-            "next_parent_artifact_id": meta_parent.artifact_id if meta_parent else None,
             "experiment_dir": str(options.experiment_dir),
         }
     else:

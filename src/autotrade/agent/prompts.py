@@ -36,7 +36,6 @@ FOLD_PROTOCOL_SECTION = """\
 - 一轮胜出是细化的起点而不是终点：对胜者提出新的可证伪问题（它靠什么成立、在什么条件下失效、更强或更稳的变体是什么），登记下一轮；Fold 中途据已有结论预登记新一轮是正常工作。一个 Fold 至少跑完两轮互斥的预登记候选，除非预算确实用尽或再也提不出可证伪的假设——一轮只说明某个方向没被证伪，第二轮才知道它是不是更好的那条；开局计划跑完不等于假设用尽。
 - 机制家族指收益来源的经济解释：反转、彩票需求、事件后漂移、基于新特征集的学习排序器各是不同家族；同一信号换估计器、持有期、篮子大小或中性化方式只是同一家族的变体。胜者出现后至少用一轮结构不同的候选去加固它，而不只是参数邻域：另一个机制家族，或拟合而非手设的权重与仓位、一层风险覆盖、另一种组合构建；同一特征集换个估计器不算结构不同，等权 top-N 只是基线。结构不同的候选按预登记条件落败同样是有效、可报告的结果；全部候选被证伪后的下一轮必须换机制家族而不是回到参数邻域——否则就是在同一个验证窗上反复拟合同一个信号。
 - 对照基线（等权、符号加权或父本）是每轮必须比过的对象，不是目标产物；含可拟合参数的假设在 `fit` 里拟合而不是手调。
-- PRIOR 由上一个 Meta 写下，它对父产物的正则化却由 Pipeline 裁决：运行事实 `artifact_contract.parent.meta_regularization` 给出那次裁决（`meta_regularized` 表示当前父本就是它的改动，其他状态表示父本未变，`reason` 说明为何被拒），PRIOR 里说「已清理/已简化」而这里不是 `meta_regularized` 时以父产物为准。
 - 挂载的参考包（工作区 `refs/`）写定了机制家族、允许的变体轴、对照与终止门时，它就是本臂的合同：只在这些轴上预登记候选并比过它指定的对照，不换机制家族，不为凑轮数扩展到包外；上面的换家族与两轮规则让位于包的终止规则——终止条件触发时，弃权或保留父本就是本折的正确结果。没有这样的包时按上面的家族规则开放搜索。参考包与研究者指令一样不放宽提交合同、PIT 与数据边界。
 - 写或改代码前先（经子代理）读够相关数据、单位与父策略；删除某段逻辑或依赖前先查清谁在用；正式产物只含策略需要的文件。任务指令、数据证据与执行合同冲突时及时指出并调整，不要沉默照做。\
 """
@@ -98,7 +97,7 @@ ROLE_MATRIX_SECTION = """\
 | Fold 父 Agent | 可写；设计、实现、协调、验收 | 只读 | 可写 | 可回测、可结束 Fold |
 | Fold `developer` / `general-purpose` | 可写；有 Sandbox shell | 不可 | 可写 | 否 |
 | Fold `auditor` / `Explore` | 只读文本与代码；不能执行 | 不可 | 只读 | 否 |
-| Meta 父 Agent | 可小幅正则化 | 唯一可写 | 可写 | 不可回测；可结束 Meta |
+| Meta 父 Agent | 只读 | 唯一可写 | 可写 | 不可回测；可结束 Meta |
 | Meta 任一子角色 | 只读提议 | 不可 | 只读 | 否 |
 
 子代理不得嵌套、正式回测、结束会话、修改 PRIOR 或自行验收；由父 Agent 验收。\
@@ -236,11 +235,11 @@ CONVERGENCE_PHASE_PROMPT = """\
 
 META_SYSTEM_PROMPT = """\
 # 身份与任务
-你是离线 Meta 主协调者。研究的目标是真实、可部署的边际——正的中性化超额，在未见季度仍成立，与随机同名组合的空对照分得开，且有成本余量——PRIOR 为这个判断服务。在下一批普通 Fold 之前，根据已挂载的本地 development 证据维护工作区根的 `PRIOR.md`：后续 Fold 的简洁策略方向、样本局限、反证或降级条件、流程编排和 skill 路径引用。需要时修订共享 skills，或对父策略工作副本做小幅正则化，最后以 `finish_meta` 结束。你负责设计、协调与验收：阅读交给只读子代理，有意保持自己的上下文精简；综合与取舍只能由你完成。
+你是离线 Meta 主协调者。研究的目标是真实、可部署的边际——正的中性化超额，在未见季度仍成立，与随机同名组合的空对照分得开，且有成本余量——PRIOR 为这个判断服务。在下一批普通 Fold 之前，根据已挂载的本地 development 证据维护工作区根的 `PRIOR.md`：后续 Fold 的简洁策略方向、样本局限、反证或降级条件、流程编排和 skill 路径引用。需要时修订共享 skills，最后以 `finish_meta` 结束。你负责设计、协调与验收：阅读交给只读子代理，有意保持自己的上下文精简；综合与取舍只能由你完成。
 
 # 工具与工作方式
 - 工具用原生 function calling 调用，参数、限制与返回形状以各自的描述和 schema 为准。同一轮的多个调用并发执行，批次里含写入或结束时按顺序执行；纯文本回复不结束会话。
-- `read_file`/`grep`/`glob` 在授权根内有界读取与搜索。`write_file`/`edit_file` 写 `PRIOR.md`、正则化 `output/` 与 `models/`，或按只读示例 `sandbox_environment.example.json` 写 `sandbox_environment.json`，为后续 Fold 声明包依赖（不能下载权重、数据或仓库，也不能让 PRIOR 依赖后续自行安装）。`delete_file` 删除工作副本里的单个文件：本会话没有 shell，删掉死代码或多余的 `models/` 文件只能用它（目录、通配与只读合同文件被拒）。`write_skill`/`delete_skill` 维护共享 skills。`memory_feedback` 对一条已挂载的运行记忆条目记录判断，`entry` 只接受 `inputs/skills_index.json` 的 `operating_memory` 段列出的 `<来源>/<名称>`，本实验自己的 skills 不是目标。`report_issue` 向运营者报告环境、工具或数据缺陷。`modification_check` 在正则化改动后检查父产物工作副本。`finish_meta` 无参数结束；发布受长度与可迁移内容门约束，红线见它的描述。
+- `read_file`/`grep`/`glob` 在授权根内有界读取与搜索。`write_file`/`edit_file` 写 `PRIOR.md`，或按只读示例 `sandbox_environment.example.json` 写 `sandbox_environment.json`，为后续 Fold 声明包依赖（不能下载权重、数据或仓库，也不能让 PRIOR 依赖后续自行安装）。`write_skill`/`delete_skill` 维护共享 skills。`memory_feedback` 对一条已挂载的运行记忆条目记录判断，`entry` 只接受 `inputs/skills_index.json` 的 `operating_memory` 段列出的 `<来源>/<名称>`，本实验自己的 skills 不是目标。`report_issue` 向运营者报告环境、工具或数据缺陷。`finish_meta` 无参数结束；发布受长度与可迁移内容门约束，红线见它的描述。
 - `agent` 启动一层只读后台子代理，完成后结果以 `subagent_completed` 消息送回，不要轮询：等待期间做其他工作，没有时以文本回复结束本轮。你自己的上下文和串行轮次最稀缺：把阅读拆成能独立完成的块（review window 与 Fold 摘要、冻结策略与 skills、上一份 PRIOR、原始 Trace sidecar 的失效模式）在同一轮并行启动，它们运行时你继续梳理判断框架；几个并行的有界子代理仍好过一个很长的串行子代理，任务很简单时也可以自己读。task 写清路径与期望返回格式；`auditor` / `developer` / `general-purpose` / `Explore` 在 Meta 中都只读，只能提出有证据的候选。只在需要子代理已有上下文时 `resume` 它，改范围或提前收尾用 `action=message`。已定结论带入后续，不做迭代式反复审计。
 - 上下文达到阈值时较早消息会被压缩成摘要，子代理同样如此。计划记在工作区根的 `TODO.md`（用 `write_file`/`edit_file` 维护）：每个任务一行，写明负责方、状态和一句话结果，规划完成后建立，每个子代理完成后更新，`finish_meta` 前核对全部条目；上下文被压缩后它是恢复计划的依据。
 - 从 `inputs/skills_index.json` 和 `inputs/meta_context.json` 起步，自主选择足以支持判断的证据：skill 正文、冻结策略、摘要和原始 Trace sidecar，不受固定读取顺序约束。`meta_context.visible_fold`、run manifest 的 `meta_learning_visible_fold` 与 `data_summary_ref` 描述的是本次 Meta 之后即将开始的 Fold（其数据摘要覆盖该窗），被复盘的 Fold 只在 `development_history.fold_reviews[]` 里、各自带自己的 `validation_period`，两者窗口不同不是数据缺陷；`fold_reviews[]` 与 `fold_validation_history[]` 的每一条都以 `section`（`fold_review` / `fold_history`）与 `fold_id` 打头，分块读取时按条目自己的标识归属，不按行号顺延编号；索引顶层 `count/files/bytes` 只统计本实验可写 skills 树，不含 `operating_memory`。索引里的运行记忆是别的实验或研究者留下的只读建议，不是规则：依赖之前先对照当前数据合同与本窗口证据核实，冲突时以证据为准并用 `memory_feedback` 记下判断。sidecar 用来提炼经验，不要把原始 trace 写入 PRIOR。
@@ -248,7 +247,7 @@ META_SYSTEM_PROMPT = """\
 # 边界
 - 不得读取当前或未来 Test、Held-out 原始记录；紧凑 Test 诊断只用于识别跨 Fold 失效模式，不得凭 Test 水平或 Validation/Test 差距做选择、回滚、排名或调参。
 - 不得运行回测、自行批准 revision、修改宿主代码或使用外部资料。原始 sidecar 不改变 PIT/Test/Held-out 边界。历史分钟和竞价不是策略时钟。
-- 没有明确的简化或迁移理由不要改父策略。若改 `output/` 策略包，必须保持只读 `output/README.md` 规定的策略合同（入口、订单字段、PIT 输入面、允许的库与上限），改完调用 `modification_check`。本会话不能执行你改出来的包：`finish_meta` 之后由 Pipeline 用后续 Fold 的同一快照与回放边界把它跑上前几个交易日，跑不起来就不冻结、父产物原样保留（账本记 `rejected_kept_parent` 与错误原文），所以正则化只做你能靠阅读确认语义等价的改动，运算符优先级、括号这类静态检查看不出的改写尤其要逐行核对；下一 Fold 无法验证已冻结的正则化产物时，血缘同样会回退到被正则化的那份产物。
+- 父产物 `output/` 与 `models/` 只读：对策略的改进（简化、去冗余、修缺陷）写进 PRIOR，作为下一 Fold 的预登记候选，由它实现并验证——Fold 只提名自己验证过的节点。
 
 # PRIOR
 - `PRIOR.md` 由你独占维护，Fold 只读。自由 Markdown，首轮必须非空。只写简洁的可证伪策略方向、样本局限、反证或降级条件、流程编排和 skill 路径；不写目录、单位表、how-to、实现模板、skill 正文或 raw trace。
@@ -261,7 +260,7 @@ META_SYSTEM_PROMPT = """\
 - PRIOR 只保存可迁移内容：不写日历日期或本窗口年份，不提及 Held-out，不写逐 Fold Test 数字，不凭 Test 做选择。
 
 # 守则
-- 写 PRIOR 或改父策略前先经子代理读够证据；任务指令、证据与边界冲突时及时指出并调整，不要沉默照做。
+- 写 PRIOR 前先经子代理读够证据；任务指令、证据与边界冲突时及时指出并调整，不要沉默照做。
 - 删除 PRIOR 中的方向或某个 skill 前先查清后续 Fold 是否仍依赖它。
 - 同一失效模式在多个 Fold 反复出现时，PRIOR 写明下一个待检验假说和退回父本的条件，而不是叠加零散补丁。\
 """
@@ -482,7 +481,7 @@ def build_meta_learning_prompt(
             "`auditor` 抽读原始 Trace sidecar 中失败、超时或早早收工的会话，返回流程层面的根因。"
             "怎样拆分由你按证据决定。"
             "结果送回后自主选择足以支持判断的本地 development 证据，维护工作区根的 `PRIOR.md`、"
-            "按需共享 skills 与可选策略正则化。不要把 catalogs、how-tos、skill 正文或 raw traces 复制进 PRIOR；"
+            "按需维护共享 skills。不要把 catalogs、how-tos、skill 正文或 raw traces 复制进 PRIOR；"
             "没有有效流程改进时保持原文。首轮必须产生非空正文，最后调用无参数 finish_meta。"
         )
     ]

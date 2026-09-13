@@ -1051,12 +1051,15 @@ def test_llm_worker_runs_real_meta_fold_validation_and_heldout(
     assert len(llm.calls) == 6
     meta_tool_names = {item["function"]["name"] for item in llm.calls[0]["tools"]}
     assert {"write_file", "finish_meta", "agent"}.issubset(meta_tool_names)
-    # The Meta session may regularize the working copy, so it holds the typed
-    # writers and modification_check — but it stays offline and never backtests.
-    assert {"write_file", "edit_file", "modification_check"}.issubset(
-        meta_tool_names
-    )
-    assert {"shell", "daily_backtest", "step_rollback"}.isdisjoint(meta_tool_names)
+    # The Meta writes PRIOR, TODO.md and skills; it neither checks nor replays
+    # a strategy package, and it stays offline.
+    assert {"write_file", "edit_file"}.issubset(meta_tool_names)
+    assert {
+        "shell",
+        "modification_check",
+        "daily_backtest",
+        "step_rollback",
+    }.isdisjoint(meta_tool_names)
     fold_tool_names = {item["function"]["name"] for item in llm.calls[2]["tools"]}
     # Fold parent holds typed writers; shell is debug-only and must not edit strategy.
     assert {
@@ -1400,8 +1403,8 @@ def test_llm_worker_starts_from_the_inherited_artifact(tmp_path: Path, monkeypat
     assert result["state"] == "completed"
     meta, fold, _heldout = ExperimentLedger(options.rolling.ledger_path).read()
 
-    # The Meta session took the inherited seed as its working copy instead of
-    # the blank template, and its host manifest names the inherited artifact.
+    # The Meta session read the inherited seed instead of the blank template,
+    # and its host manifest names the inherited artifact.
     meta_run = experiment / "artifacts" / str(meta["run_id"])
     assert (meta_run / "workspace/output/main.py").read_text(
         encoding="utf-8"
@@ -1412,7 +1415,7 @@ def test_llm_worker_starts_from_the_inherited_artifact(tmp_path: Path, monkeypat
     assert meta_manifest["parent_strategy_artifact_id"] == payload["artifact_id"]
     assert meta_manifest["is_initial_artifact"] is False
     assert meta_manifest["template_ref"] is None
-    # The Meta only published a PRIOR, so the seed is still the Fold's parent.
+    # A Meta only publishes PRIOR and skills, so the seed is still the Fold's parent.
     assert meta["status"] == "prior_only_kept_parent"
 
     # The Fold's host parent control replayed the seed on this Fold's window,

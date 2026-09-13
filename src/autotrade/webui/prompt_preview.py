@@ -329,7 +329,6 @@ def _meta_prompt(
         "prior_output": "/mnt/agent/workspace/PRIOR.md",
         "is_initial_artifact": context.is_initial,
         "template_ref": "agent_output_template" if context.is_initial else None,
-        "modification_constraints": rolling.regularization_constraints.to_record(),
         "meta_learning_directive": rolling.meta_learning_directive,
         "fold_exploration_directive": rolling.fold_exploration_directive,
         "budgets": {
