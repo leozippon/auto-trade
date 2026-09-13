@@ -264,7 +264,7 @@ def test_the_tier_lists_every_experiment_and_admits_only_graduated_ones(
     _experiment(experiments, "still_running", verdict=None)
     _experiment(experiments, "adopted_without_skills", skills=False)
 
-    rows = {row["experiment_id"]: row for row in memory.graduated_tier(tmp_path, experiments)["experiments"]}
+    rows = {row["experiment_id"]: row for row in memory.graduated_tier(experiments)["experiments"]}
     assert set(rows) == {
         "adopted",
         "not_adopted",
@@ -295,7 +295,7 @@ def test_an_unrevealed_experiment_publishes_no_verdict_here_either(
     experiments = tmp_path / "experiments"
     experiments.mkdir()
     _experiment(experiments, "mid_heldout", revealed=False)
-    row = memory.graduated_tier(tmp_path, experiments)["experiments"][0]
+    row = memory.graduated_tier(experiments)["experiments"][0]
     assert row["revealed"] is False
     assert row["verdict"] is None
     assert row["admitted"] is False
@@ -305,7 +305,7 @@ def test_an_unrevealed_experiment_publishes_no_verdict_here_either(
 
     assert [
         source.source
-        for source in graduated_memory_sources(experiments, repo_root=tmp_path)
+        for source in graduated_memory_sources(experiments)
     ] == [
         "mid_heldout"
     ]
@@ -324,7 +324,7 @@ def test_an_unreadable_ledger_becomes_a_row_and_suspends_admission(
     broken = experiments / "broken" / "ledgers"
     broken.mkdir(parents=True)
     (broken / "experiment_ledger.jsonl").write_text("{not json\n", encoding="utf-8")
-    payload = memory.graduated_tier(tmp_path, experiments)
+    payload = memory.graduated_tier(experiments)
     rows = {row["experiment_id"]: row for row in payload["experiments"]}
     assert payload["error"].endswith("graduated memory cannot be resolved")
     assert rows["broken"]["error"].endswith("experiment state is unreadable")
@@ -341,7 +341,7 @@ def test_a_tier_that_cannot_be_resolved_is_reported_not_hidden(tmp_path: Path) -
     experiments = tmp_path / "experiments"
     experiments.mkdir()
     _experiment(experiments, "curated")
-    payload = memory.graduated_tier(tmp_path, experiments)
+    payload = memory.graduated_tier(experiments)
     assert payload["error"].endswith("graduated memory cannot be resolved")
     assert str(tmp_path) not in payload["error"]
     assert [row["experiment_id"] for row in payload["experiments"]] == ["curated"]
@@ -588,8 +588,6 @@ def test_the_console_routes_serve_the_keys_the_page_reads(tmp_path: Path) -> Non
     assert overview.status_code == 200
     body = overview.json()
     assert {"default_mode", "curated", "graduated"} <= body.keys()
-    # The exclusion file is a repository path the page never renders.
-    assert "exclusions" not in body["graduated"]
     assert {"source", "library", "entries"} <= body["curated"].keys()
     assert {"name", "title", "summary", "bytes", "files"} <= body["curated"][
         "entries"
@@ -600,7 +598,6 @@ def test_the_console_routes_serve_the_keys_the_page_reads(tmp_path: Path) -> Non
         "revealed",
         "admitted",
         "entries",
-        "excluded",
     } <= body["graduated"]["experiments"][0].keys()
 
     entry = client.get("/api/memory/curated/pit-read-budget")
@@ -771,35 +768,6 @@ def test_a_library_the_mount_refuses_blocks_new_entries_but_can_be_repaired(
     ] == "created"
 
 
-def test_a_name_a_running_experiment_still_maintains_is_refused(
-    tmp_path: Path,
-) -> None:
-    """Mounted memory is read-only and a session may not shadow it under its own
-    name, so this entry would stop that experiment's next session from
-    maintaining its own skill."""
-
-    _library(tmp_path)
-    experiments = tmp_path / "experiments"
-    experiments.mkdir()
-    _experiment(experiments, "adopted")
-    with pytest.raises(ValueError, match="adopted"):
-        memory.create_curated_entry(
-            tmp_path,
-            "same-window-parent-control",
-            "# 同窗父本对照\n",
-            experiments_root=experiments,
-            live_experiments=["adopted"],
-        )
-    # Nothing is running: the same name is then just a normal promotion target.
-    assert memory.create_curated_entry(
-        tmp_path,
-        "same-window-parent-control",
-        "# 同窗父本对照\n",
-        experiments_root=experiments,
-        live_experiments=[],
-    )["action"] == "created"
-
-
 def test_a_candidate_body_is_readable_only_while_the_tier_admits_it(
     tmp_path: Path,
 ) -> None:
@@ -811,7 +779,7 @@ def test_a_candidate_body_is_readable_only_while_the_tier_admits_it(
     experiments.mkdir()
     _experiment(experiments, "adopted")
     _experiment(experiments, "mid_heldout", revealed=False)
-    entry = memory.graduated_entry(tmp_path, experiments, "adopted", "same-window-parent-control")
+    entry = memory.graduated_entry(experiments, "adopted", "same-window-parent-control")
     assert entry["experiment_id"] == "adopted"
     assert entry["title"] == "同窗父本对照"
     assert entry["content"].startswith("# 同窗父本对照")
@@ -822,9 +790,9 @@ def test_a_candidate_body_is_readable_only_while_the_tier_admits_it(
         ("unknown", "same-window-parent-control"),
     ):
         with pytest.raises(KeyError):
-            memory.graduated_entry(tmp_path, experiments, experiment_id, skill)
+            memory.graduated_entry(experiments, experiment_id, skill)
     with pytest.raises(ValueError):
-        memory.graduated_entry(tmp_path, experiments, "adopted", "Not_Kebab")
+        memory.graduated_entry(experiments, "adopted", "Not_Kebab")
 
 
 def test_a_promotion_copies_the_admitted_skill_verbatim(tmp_path: Path) -> None:
@@ -881,100 +849,6 @@ def test_a_promotion_can_only_copy_from_a_candidate_the_page_offers(
     assert _staging_leftovers(tmp_path) == []
 
 
-def test_withdrawing_a_graduated_skill_takes_it_out_of_the_tier_and_back(
-    tmp_path: Path,
-) -> None:
-    """Graduated skills are another experiment's immutable artifacts, so the
-    console never edits one: it records that future sessions stop mounting it,
-    and the row keeps the withdrawal visible so it can be undone."""
-
-    _library(tmp_path)
-    experiments = tmp_path / "experiments"
-    experiments.mkdir()
-    _experiment(experiments, "adopted")
-
-    result = memory.exclude_graduated_skill(
-        tmp_path,
-        experiments,
-        experiment_id="adopted",
-        skill="same-window-parent-control",
-        reason="已被更好的做法取代",
-    )
-    assert result["action"] == "excluded"
-    assert "sessions started afterwards" in str(result["note"])
-    row = next(
-        item
-        for item in result["graduated"]["experiments"]
-        if item["experiment_id"] == "adopted"
-    )
-    assert row["admitted"] is False and row["entries"] == []
-    assert row["excluded"] == [
-        {
-            "skill": "same-window-parent-control",
-            "reason": "已被更好的做法取代",
-            "excluded_at": row["excluded"][0]["excluded_at"],
-        }
-    ]
-    # A withdrawn skill is no longer a candidate the console can read or copy.
-    with pytest.raises(KeyError):
-        memory.graduated_entry(
-            tmp_path, experiments, "adopted", "same-window-parent-control"
-        )
-    with pytest.raises(KeyError):
-        memory.promote_curated_entry(
-            tmp_path,
-            experiments,
-            name="parent-control-reading",
-            experiment_id="adopted",
-            skill="same-window-parent-control",
-        )
-
-    restored = memory.restore_graduated_skill(
-        tmp_path, experiments, experiment_id="adopted", skill="same-window-parent-control"
-    )
-    assert restored["action"] == "restored"
-    row = next(
-        item
-        for item in restored["graduated"]["experiments"]
-        if item["experiment_id"] == "adopted"
-    )
-    assert row["admitted"] is True
-    assert row["entries"] == ["same-window-parent-control"] and row["excluded"] == []
-
-
-def test_only_an_admitted_skill_can_be_withdrawn_and_only_once(
-    tmp_path: Path,
-) -> None:
-    _library(tmp_path)
-    experiments = tmp_path / "experiments"
-    experiments.mkdir()
-    _experiment(experiments, "adopted")
-    _experiment(experiments, "mid_heldout", revealed=False)
-    for experiment_id, skill in (
-        ("adopted", "not-a-skill"),
-        ("mid_heldout", "same-window-parent-control"),
-        ("unknown", "same-window-parent-control"),
-    ):
-        with pytest.raises(KeyError):
-            memory.exclude_graduated_skill(
-                tmp_path, experiments, experiment_id=experiment_id, skill=skill
-            )
-    memory.exclude_graduated_skill(
-        tmp_path, experiments, experiment_id="adopted", skill="same-window-parent-control"
-    )
-    with pytest.raises(FileExistsError):
-        memory.exclude_graduated_skill(
-            tmp_path,
-            experiments,
-            experiment_id="adopted",
-            skill="same-window-parent-control",
-        )
-    with pytest.raises(KeyError):
-        memory.restore_graduated_skill(
-            tmp_path, experiments, experiment_id="adopted", skill="never-excluded"
-        )
-
-
 # ---- write routes ---------------------------------------------------------
 
 
@@ -1020,55 +894,6 @@ def test_the_curated_write_routes_carry_one_crud_cycle(tmp_path: Path) -> None:
     deleted = client.delete("/api/memory/curated/cash-buffer-rule")
     assert deleted.status_code == 200
     assert "cash-buffer-rule" not in _entry_names(deleted.json())
-
-
-def test_the_exclusion_routes_carry_the_withdraw_and_restore_cycle(
-    tmp_path: Path,
-) -> None:
-    _library(tmp_path)
-    experiments = tmp_path / "experiments"
-    experiments.mkdir()
-    _experiment(experiments, "adopted")
-    client = TestClient(create_app(tmp_path, experiments))
-    skill = "same-window-parent-control"
-
-    excluded = client.post(
-        f"/api/memory/graduated/adopted/{skill}/exclude", json={"reason": "过期"}
-    )
-    assert excluded.status_code == 200
-    assert {"experiment_id", "skill", "action", "note", "graduated"} <= (
-        excluded.json().keys()
-    )
-    row = next(
-        item
-        for item in excluded.json()["graduated"]["experiments"]
-        if item["experiment_id"] == "adopted"
-    )
-    assert row["entries"] == [] and row["excluded"][0]["skill"] == skill
-    assert client.get(f"/api/memory/graduated/adopted/{skill}").status_code == 404
-    assert (
-        client.post(
-            f"/api/memory/graduated/adopted/{skill}/exclude", json={}
-        ).status_code
-        == 409
-    )
-
-    restored = client.delete(f"/api/memory/graduated/adopted/{skill}/exclude")
-    assert restored.status_code == 200
-    assert client.get(f"/api/memory/graduated/adopted/{skill}").status_code == 200
-    assert client.delete(f"/api/memory/graduated/adopted/{skill}/exclude").status_code == 404
-    assert (
-        client.post(
-            "/api/memory/graduated/adopted/no-such-skill/exclude", json={}
-        ).status_code
-        == 404
-    )
-    assert (
-        client.post(
-            f"/api/memory/graduated/adopted/Not_Kebab/exclude", json={}
-        ).status_code
-        == 400
-    )
 
 
 def test_the_write_routes_map_each_refusal_to_its_own_status(tmp_path: Path) -> None:

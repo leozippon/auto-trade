@@ -124,43 +124,23 @@ def test_write_skill_rejects_invalid_names_and_paths(
     assert result.value["error_type"] == "skill_policy"
 
 
-def test_write_skill_states_and_enforces_the_front_matter_contract(
-    tmp_path: Path,
-) -> None:
-    """The one recognized key is in the tool's own description and in the
-    refusal, so a SKILL.md does not have to be written twice to discover it."""
+def test_the_index_titles_a_skill_from_its_heading(tmp_path: Path) -> None:
+    """SKILL.md carries no front-matter contract: the index reads the first
+    heading as the title and the first paragraph as the summary."""
 
-    description = WriteSkillTool.spec.description
-    assert "supersedes: <source>/<name>" in description
-    assert "no front matter" in description
+    assert "# Title" in WriteSkillTool.spec.description
+    assert "front matter" not in WriteSkillTool.spec.description
     workspace = _workspace(tmp_path)
     registry = ToolRegistry([WriteSkillTool(SafeWorkspace(workspace))])
-    refused = registry.invoke(
+    written = registry.invoke(
         "write_skill",
-        {
-            "name": "schema-notes",
-            "path": "SKILL.md",
-            "content": "---\nname: schema-notes\ndescription: x\n---\n# Schema Notes\n",
-        },
+        {"name": "schema-notes", "path": "SKILL.md", "content": "# Schema Notes\n\n正文一句。\n"},
     )
-    assert not refused.ok
-    assert refused.value["error_type"] == "skill_policy"
-    assert "supersedes" in refused.error
-    unclosed = registry.invoke(
-        "write_skill",
-        {
-            "name": "schema-notes",
-            "path": "SKILL.md",
-            "content": "---\nsupersedes: curated/pit-read-budget\n",
-        },
-    )
-    assert not unclosed.ok
-    assert "not closed" in unclosed.error
-    plain = registry.invoke(
-        "write_skill",
-        {"name": "schema-notes", "path": "SKILL.md", "content": "# Schema Notes\n\n正文\n"},
-    )
-    assert plain.ok, plain.error
+    assert written.ok, written.error
+    index = build_skills_index(workspace / "skills")
+    assert [(entry["title"], entry["summary"]) for entry in index["skills"]] == [
+        ("Schema Notes", "正文一句。")
+    ]
 
 
 def test_write_skill_declares_its_size_caps_and_refuses_with_the_measured_length(

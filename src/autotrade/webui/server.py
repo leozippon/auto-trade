@@ -683,12 +683,11 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         return {"status": "started"}
 
     # ---- operating memory ---------------------------------------------------------
-    # The curated library and the graduated exclusion list are tracked
-    # repository files, so editing either is a repository write. Who may issue
-    # one is decided where every other mutating console route decides it — the
-    # loopback/Unix-socket bind and, for the proxied surface, the edge's login
-    # gate — so these routes carry no gate of their own beyond the validation
-    # each write performs.
+    # The curated library is a tracked repository directory, so editing it is
+    # a repository write. Who may issue one is decided where every other
+    # mutating console route decides it — the loopback/Unix-socket bind and,
+    # for the proxied surface, the edge's login gate — so these routes carry no
+    # gate of their own beyond the validation each write performs.
     def _memory_write(action) -> dict[str, object]:
         """One HTTP mapping for every memory write; messages carry no host path."""
 
@@ -732,43 +731,13 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         """One graduated candidate's body, behind the same gate as its promotion."""
 
         try:
-            return memory.graduated_entry(root, experiment_root, experiment_id, skill)
+            return memory.graduated_entry(experiment_root, experiment_id, skill)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail="invalid memory entry name") from exc
         except (KeyError, OSError) as exc:
             raise HTTPException(
                 status_code=404, detail="unknown graduated memory entry"
             ) from exc
-
-    @app.post("/api/memory/graduated/{experiment_id}/{skill}/exclude")
-    def post_graduated_exclusion(
-        experiment_id: str, skill: str, payload: dict = Body(default={})
-    ) -> dict[str, object]:
-        """Withdraw one graduated skill from every future mount.
-
-        A graduated skill is another experiment's immutable artifact, so the
-        console never edits it; this records that sessions must stop mounting it.
-        """
-
-        return _memory_write(
-            lambda: memory.exclude_graduated_skill(
-                root,
-                experiment_root,
-                experiment_id=experiment_id,
-                skill=skill,
-                reason=str(payload.get("reason") or ""),
-            )
-        )
-
-    @app.delete("/api/memory/graduated/{experiment_id}/{skill}/exclude")
-    def delete_graduated_exclusion(
-        experiment_id: str, skill: str
-    ) -> dict[str, object]:
-        return _memory_write(
-            lambda: memory.restore_graduated_skill(
-                root, experiment_root, experiment_id=experiment_id, skill=skill
-            )
-        )
 
     @app.post("/api/memory/curated")
     def post_curated_memory(payload: dict = Body(...)) -> dict[str, object]:
@@ -777,8 +746,6 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
                 root,
                 str(payload.get("name") or ""),
                 str(payload.get("content") or ""),
-                experiments_root=experiment_root,
-                live_experiments=manager.running_experiments(),
             )
         )
 
@@ -807,7 +774,6 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
                 name=name,
                 experiment_id=str(payload.get("experiment_id") or ""),
                 skill=str(payload.get("skill") or ""),
-                live_experiments=manager.running_experiments(),
             )
         )
 

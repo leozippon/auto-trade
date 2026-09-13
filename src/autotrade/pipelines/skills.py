@@ -40,19 +40,12 @@ OPERATING_MEMORY_LIBRARY = "configs/operating_memory"
 # Reserved mount name of the curated tier; every other mounted source directory
 # is named after the graduated experiment its skills came from.
 CURATED_MEMORY_SOURCE = "curated"
-# Skills of graduated experiments the researcher has taken back out of the tier.
-# A sibling of the library, never inside it: the library root is validated as a
-# skills tree, which admits directories only, so a file there breaks every mount.
-GRADUATED_EXCLUSIONS_PATH = "configs/graduated_exclusions.json"
 # One experiment's frozen operating memory, resolved once when the experiment is
 # created and mounted unchanged by every session it runs. The library keeps
 # moving; an experiment does not, so its sessions are comparable to each other.
 OPERATING_MEMORY_SNAPSHOT_DIRNAME = "memory"
 OPERATING_MEMORY_SNAPSHOT_NAME = "memory_snapshot.json"
 OPERATING_MEMORY_SNAPSHOT_SCHEMA = 1
-GRADUATED_EXCLUSION_KEYS = frozenset(
-    {"experiment_id", "skill", "reason", "excluded_at"}
-)
 OPERATING_MEMORY_MODES = ("none", "curated", "curated+graduated")
 DEFAULT_OPERATING_MEMORY = "curated+graduated"
 SKILL_FILENAME = "SKILL.md"
@@ -68,11 +61,6 @@ ALLOWED_SKILL_SUFFIXES = frozenset(
 )
 _SKILL_NAME_RE = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
 _HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$")
-# Optional `---` front matter at the top of SKILL.md. One field, because the
-# format only needs to say one thing a heading cannot: which mounted entry this
-# skill is written to replace. Unknown fields are refused rather than ignored.
-FRONT_MATTER_FENCE = "---"
-SKILL_FRONT_MATTER_KEYS = frozenset({"supersedes"})
 
 
 @dataclass(frozen=True)
@@ -122,9 +110,8 @@ def validate_memory_entry_ref(value: str) -> tuple[str, str]:
     """Split ``<source>/<name>`` — one mount source and one entry inside it.
 
     ``source`` is the mount directory name: the reserved curated tier, or the id
-    of the graduated experiment the entry came from. This is the same string the
-    skills index publishes, so a reference the Agent writes back always names
-    something the index listed.
+    of the graduated experiment the entry came from -- the same string the
+    skills index publishes.
     """
 
     text = str(value).strip()
@@ -138,54 +125,6 @@ def validate_memory_entry_ref(value: str) -> tuple[str, str]:
             f"memory entry source must be {CURATED_MEMORY_SOURCE!r} or an experiment id"
         )
     return source, validate_skill_name(name)
-
-
-def parse_skill_front_matter(text: str) -> tuple[dict[str, str], str]:
-    """Split an optional ``---`` front-matter block off one ``SKILL.md`` body.
-
-    A skill without front matter is the normal case and parses to no fields, so
-    every existing entry stays valid. A malformed or unknown-keyed block is an
-    error: the field changes how the index relates two entries, and a silently
-    dropped one would leave the reader with the wrong relation.
-    """
-
-    lines = text.splitlines(keepends=True)
-    if not lines or lines[0].strip() != FRONT_MATTER_FENCE:
-        return {}, text
-    fields: dict[str, str] = {}
-    for index in range(1, len(lines)):
-        stripped = lines[index].strip()
-        if stripped == FRONT_MATTER_FENCE:
-            return fields, "".join(lines[index + 1 :])
-        if not stripped:
-            continue
-        key, separator, value = stripped.partition(":")
-        key = key.strip()
-        if not separator or not key:
-            raise ValueError(
-                f"skill front matter must be 'key: value' lines: {stripped[:40]!r}"
-            )
-        if key not in SKILL_FRONT_MATTER_KEYS:
-            allowed = ", ".join(sorted(SKILL_FRONT_MATTER_KEYS))
-            raise ValueError(
-                f"unknown skill front-matter field: {key}; the only recognized "
-                f"front-matter field is {allowed} (<source>/<name>), so drop the "
-                f"'{FRONT_MATTER_FENCE}' block entirely unless this skill "
-                "supersedes a mounted memory entry"
-            )
-        if key in fields:
-            raise ValueError(f"duplicate skill front-matter field: {key}")
-        fields[key] = value.strip()
-    raise ValueError(f"skill front matter is not closed by {FRONT_MATTER_FENCE}")
-
-
-def skill_front_matter(text: str) -> tuple[dict[str, str], str]:
-    """Front matter with every field validated in its own format."""
-
-    fields, body = parse_skill_front_matter(text)
-    if fields.get("supersedes"):
-        validate_memory_entry_ref(fields["supersedes"])
-    return fields, body
 
 
 def validate_skill_path(path: str) -> PurePosixPath:
@@ -283,10 +222,6 @@ def validate_skills_tree(
                     raise ValueError(
                         f"{item.name}/{SKILL_FILENAME} exceeds {MAX_SKILL_CHARS} characters"
                     )
-                try:
-                    skill_front_matter(text)
-                except ValueError as exc:
-                    raise ValueError(f"{item.name}/{SKILL_FILENAME}: {exc}") from exc
             file_count += 1
             total_bytes += len(payload)
             if file_count > MAX_SKILLS_FILES:
@@ -346,10 +281,9 @@ def _index_entries(tree: Path, *, directory: str, origin: str) -> list[dict[str,
                     "bytes": size,
                 }
             )
-        fields, body = skill_front_matter(
+        title, summary = _skill_title_summary(
             (item / SKILL_FILENAME).read_text(encoding="utf-8")
         )
-        title, summary = _skill_title_summary(body)
         entry: dict[str, object] = {
             "name": item.name,
             "title": title,
@@ -359,8 +293,6 @@ def _index_entries(tree: Path, *, directory: str, origin: str) -> list[dict[str,
             "bytes": item_bytes,
             "origin": origin,
         }
-        if fields.get("supersedes"):
-            entry["supersedes"] = fields["supersedes"]
         entries.append(entry)
     return entries
 
@@ -392,39 +324,13 @@ def build_skills_index(root: str | Path) -> dict[str, object]:
             ):
                 entry["source"] = source.name
                 memory.append(entry)
-    skills = _index_entries(tree, directory=SKILLS_DIRNAME, origin="session")
-    _mark_superseded(skills, memory)
     return {
-        "skills": skills,
+        "skills": _index_entries(tree, directory=SKILLS_DIRNAME, origin="session"),
         "operating_memory": memory,
         "count": stats.count,
         "files": stats.files,
         "bytes": stats.bytes,
     }
-
-
-def _mark_superseded(
-    skills: list[dict[str, object]], memory: list[dict[str, object]]
-) -> None:
-    """Show the relation without acting on it.
-
-    A skill that declares ``supersedes`` does not remove the entry it replaces:
-    both stay mounted, and the older one is marked so the session can see that a
-    successor exists and decide for itself. Withdrawing the original is the
-    researcher's call, made in the repository.
-    """
-
-    successors: dict[str, list[str]] = {}
-    for entry in (*skills, *memory):
-        target = str(entry.get("supersedes") or "")
-        if not target:
-            continue
-        reference = f"{entry.get('source') or 'session'}/{entry['name']}"
-        successors.setdefault(target, []).append(reference)
-    for entry in memory:
-        found = successors.get(f"{entry['source']}/{entry['name']}")
-        if found:
-            entry["superseded_by"] = sorted(found)
 
 
 def write_skills_index(root: str | Path, index_path: str | Path) -> SkillsStats:
@@ -517,111 +423,6 @@ def experiment_graduated(records: Sequence[Mapping[str, object]]) -> bool:
     return verdict is not None and verdict.get("status") == "graduated"
 
 
-@dataclass(frozen=True)
-class GraduatedExclusion:
-    """One graduated skill the researcher keeps out of every future mount.
-
-    Graduated skills are another experiment's immutable artifacts, so they are
-    never edited in place; withdrawing one is this record, kept in the
-    repository beside the curated library and committed with it.
-    """
-
-    experiment_id: str
-    skill: str
-    reason: str = ""
-    excluded_at: str = ""
-
-    @property
-    def key(self) -> tuple[str, str]:
-        return (self.experiment_id, self.skill)
-
-    def to_record(self) -> dict[str, str]:
-        return {
-            "experiment_id": self.experiment_id,
-            "skill": self.skill,
-            "reason": self.reason,
-            "excluded_at": self.excluded_at,
-        }
-
-
-def _graduated_exclusion(record: object) -> GraduatedExclusion:
-    if not isinstance(record, Mapping):
-        raise ValueError("graduated exclusion must be a JSON object")
-    unknown = sorted(set(map(str, record)) - GRADUATED_EXCLUSION_KEYS)
-    if unknown:
-        raise ValueError("unknown graduated exclusion keys: " + ", ".join(unknown))
-    experiment_id = str(record.get("experiment_id") or "")
-    if (
-        not experiment_id
-        or Path(experiment_id).name != experiment_id
-        or experiment_id.startswith(".")
-    ):
-        raise ValueError(
-            "graduated exclusion experiment_id must be one non-hidden path component"
-        )
-    return GraduatedExclusion(
-        experiment_id,
-        validate_skill_name(str(record.get("skill") or "")),
-        str(record.get("reason") or ""),
-        str(record.get("excluded_at") or ""),
-    )
-
-
-def read_graduated_exclusions(
-    repo_root: str | Path | None,
-) -> tuple[GraduatedExclusion, ...]:
-    """The deny list as written, or empty when this checkout has none.
-
-    A list that cannot be read is never treated as an empty one: it may be the
-    only thing keeping a withdrawn skill out of the next session.
-    """
-
-    if repo_root is None:
-        return ()
-    path = Path(repo_root) / GRADUATED_EXCLUSIONS_PATH
-    if not path.is_file():
-        return ()
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(payload, list):
-        raise ValueError("graduated exclusions must be a JSON list")
-    exclusions = tuple(_graduated_exclusion(record) for record in payload)
-    keys = [item.key for item in exclusions]
-    if len(set(keys)) != len(keys):
-        raise ValueError("graduated exclusions contain a duplicate skill")
-    return exclusions
-
-
-def write_graduated_exclusions(
-    repo_root: str | Path, exclusions: Sequence[GraduatedExclusion]
-) -> tuple[GraduatedExclusion, ...]:
-    """Replace the deny list atomically, revalidating what is about to be written."""
-
-    records = [item.to_record() for item in exclusions]
-    validated = tuple(_graduated_exclusion(record) for record in records)
-    keys = [item.key for item in validated]
-    if len(set(keys)) != len(keys):
-        raise ValueError("graduated exclusions contain a duplicate skill")
-    path = Path(repo_root) / GRADUATED_EXCLUSIONS_PATH
-    path.parent.mkdir(parents=True, exist_ok=True)
-    write_json_atomic(path, [item.to_record() for item in validated])
-    return validated
-
-
-def graduated_exclusion_record(
-    experiment_id: str, skill: str, reason: str = ""
-) -> GraduatedExclusion:
-    """One new exclusion, stamped now and validated like a stored one."""
-
-    return _graduated_exclusion(
-        {
-            "experiment_id": experiment_id,
-            "skill": skill,
-            "reason": reason,
-            "excluded_at": utc_now_iso(),
-        }
-    )
-
-
 def curated_memory_source(repo_root: str | Path | None) -> MemorySource | None:
     """The human-curated library, or ``None`` when this checkout has none."""
 
@@ -637,25 +438,21 @@ def curated_memory_source(repo_root: str | Path | None) -> MemorySource | None:
 
 
 def graduated_memory_sources(
-    experiments_root: str | Path, *, repo_root: str | Path | None, exclude: str = ""
+    experiments_root: str | Path, *, exclude: str = ""
 ) -> tuple[MemorySource, ...]:
     """Skills of every graduated experiment, read from the experiments on disk.
 
     The ledgers are the single source of both the verdict and the current skills
     generation, so there is no second registry to keep in sync. An experiment
     without a ledger, without a graduated held-out row, or without a published
-    skills generation contributes nothing.
-
-    ``repo_root`` carries the one thing the experiments cannot answer: the
-    researcher's deny list. It is required rather than optional so a caller
-    cannot silently mount a skill that was withdrawn; pass ``None`` only where
-    there is no repository to read it from.
+    skills generation contributes nothing. A researcher who wants an experiment
+    without the graduated tier creates it with ``operating_memory="curated"``
+    (promoting the graduated skills worth keeping into the curated library).
     """
 
     root = Path(experiments_root)
     if not root.is_dir():
         return ()
-    withdrawn = {item.key for item in read_graduated_exclusions(repo_root)}
     sources: list[MemorySource] = []
     for directory in sorted(root.iterdir(), key=lambda path: path.name):
         if not directory.is_dir() or directory.name == exclude:
@@ -674,13 +471,7 @@ def graduated_memory_sources(
         snapshot = latest_skills_snapshot(records, experiment_dir=directory)
         if snapshot.root is None or not snapshot.stats.count:
             continue
-        entries = tuple(
-            name
-            for name in sorted(item.name for item in snapshot.root.iterdir())
-            if (directory.name, name) not in withdrawn
-        )
-        if not entries:
-            continue  # every skill of this experiment has been withdrawn
+        entries = tuple(sorted(item.name for item in snapshot.root.iterdir()))
         sources.append(
             MemorySource(directory.name, "graduated", snapshot.root, entries)
         )
@@ -718,18 +509,6 @@ def _tree_digest(root: Path) -> str:
     return digest.hexdigest()
 
 
-def _exclusions_digest(repo_root: str | Path | None) -> str:
-    """Version of the deny list as the snapshot resolved it."""
-
-    exclusions = read_graduated_exclusions(repo_root)
-    if not exclusions:
-        return ""
-    payload = json.dumps(
-        [item.to_record() for item in exclusions], ensure_ascii=False, sort_keys=True
-    )
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
-
-
 def _resolve_memory_sources(
     *,
     mode: str,
@@ -749,9 +528,7 @@ def _resolve_memory_sources(
         sources.append(curated)
     if mode == "curated+graduated" and experiments_root is not None:
         sources.extend(
-            graduated_memory_sources(
-                experiments_root, repo_root=repo_root, exclude=experiment_id
-            )
+            graduated_memory_sources(experiments_root, exclude=experiment_id)
         )
     return tuple(sources)
 
@@ -796,8 +573,6 @@ def create_operating_memory_snapshot(
     try:
         staging.mkdir()
         for source in sources:
-            # Entry by entry: a source's admitted set is what this experiment
-            # may see, and a withdrawn graduated skill is not in it.
             target = staging / source.source
             target.mkdir()
             for entry in source.entries:
@@ -821,7 +596,6 @@ def create_operating_memory_snapshot(
         "curated_digest": _tree_digest(Path(repo_root) / OPERATING_MEMORY_LIBRARY)
         if repo_root is not None
         else "",
-        "exclusions_digest": _exclusions_digest(repo_root),
         "entries": [
             {"origin": source.origin, "source": source.source, "name": name}
             for source in sources
@@ -937,16 +711,6 @@ def install_operating_memory(
     for source in sources:
         validate_skills_tree(destination / source.source, require_writable=False)
     return sources
-
-
-def _require_mounted_memory_entry(workspace_root: Path, reference: str) -> None:
-    """``supersedes`` may only name an entry this session actually mounted."""
-
-    source, name = validate_memory_entry_ref(reference)
-    if not (workspace_root / OPERATING_MEMORY_DIRNAME / source / name).is_dir():
-        raise ValueError(
-            f"supersedes must name a mounted operating-memory entry: {reference}"
-        )
 
 
 def _reject_operating_memory_name(workspace_root: Path, name: str) -> None:
@@ -1168,11 +932,8 @@ class WriteSkillTool:
         "write_skill",
         "Atomically create or replace one UTF-8 file under skills/<name>/ using "
         "the bounded shared-skill contract. path is item-relative (SKILL.md, "
-        "scripts/..., or references/...). SKILL.md normally opens with a plain "
-        "'# Title' and no front matter; the only front matter accepted is a "
-        "'---' block whose single key is 'supersedes: <source>/<name>' naming a "
-        "mounted memory entry — any other key (name, description, version, ...) "
-        "or a block left unclosed is rejected. "
+        "scripts/..., or references/...). SKILL.md opens with a '# Title' line; "
+        "the skills index shows that title and the first paragraph. "
         f"SKILL.md holds at most {MAX_SKILL_CHARS} characters (characters, not "
         f"bytes) and every other item file at most {MAX_SKILL_FILE_BYTES} bytes; "
         "a write over its limit is refused with the measured length, so compress "
@@ -1218,11 +979,6 @@ class WriteSkillTool:
                     raise ValueError(
                         f"SKILL.md is {len(content)} characters; "
                         f"keep it to {MAX_SKILL_CHARS}"
-                    )
-                fields, _body = skill_front_matter(content)
-                if fields.get("supersedes"):
-                    _require_mounted_memory_entry(
-                        self.workspace.root, fields["supersedes"]
                     )
             before = validate_skills_tree(self.root, require_writable=True)
             item = self.root / name
@@ -1321,15 +1077,12 @@ __all__ = [
     "MAX_SKILLS_FILES",
     "CURATED_MEMORY_SOURCE",
     "DEFAULT_OPERATING_MEMORY",
-    "GRADUATED_EXCLUSIONS_PATH",
-    "GraduatedExclusion",
     "OPERATING_MEMORY_DIRNAME",
     "OPERATING_MEMORY_LIBRARY",
     "OPERATING_MEMORY_SNAPSHOT_NAME",
     "OPERATING_MEMORY_MODES",
     "MemorySource",
     "SKILLS_INDEX_PATH",
-    "SKILL_FRONT_MATTER_KEYS",
     "SkillsPublication",
     "SkillsSnapshot",
     "SkillsStats",
@@ -1339,7 +1092,6 @@ __all__ = [
     "curated_memory_source",
     "ensure_operating_memory_snapshot",
     "experiment_graduated",
-    "graduated_exclusion_record",
     "graduated_memory_sources",
     "import_skills_generation",
     "install_operating_memory",
@@ -1348,12 +1100,9 @@ __all__ = [
     "operating_memory_entries",
     "operating_memory_snapshot_path",
     "operating_memory_snapshot_root",
-    "parse_skill_front_matter",
-    "read_graduated_exclusions",
     "read_operating_memory_snapshot",
     "resolve_operating_memory",
     "resolve_collected_skills_source",
-    "skill_front_matter",
     "skills_snapshot_from_ref",
     "skills_trees_equal",
     "snapshot_memory_sources",
@@ -1361,6 +1110,5 @@ __all__ = [
     "validate_skill_name",
     "validate_skill_path",
     "validate_skills_tree",
-    "write_graduated_exclusions",
     "write_skills_index",
 ]

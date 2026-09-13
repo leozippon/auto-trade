@@ -7310,17 +7310,14 @@ function renderMemoryList() {
   memoryView.listHost.replaceChildren(...nodes);
 }
 
-/* Admitted candidates are selectable, withdrawn ones stay listed under their
-   experiment so the withdrawal can be undone, and every other experiment stays
-   visible in one collapsed muted block — because "not offered", "taken out" and
-   "not there" are three different answers. */
+/* Admitted candidates are selectable, and every other experiment stays visible
+   in one collapsed muted block — because "not offered" and "not there" are
+   different answers. */
 function renderMemoryCandidates() {
   const tier = memoryView.payload.graduated || {};
   const rows = tier.experiments || [];
   const listed = rows.filter(
-    (row) =>
-      (row.admitted === true && (row.entries || []).length) ||
-      (row.excluded || []).length,
+    (row) => row.admitted === true && (row.entries || []).length,
   );
   const aside = rows.filter((row) => !listed.includes(row));
   const nodes = [];
@@ -7333,11 +7330,8 @@ function renderMemoryCandidates() {
     const skills = (row.entries || []).filter((skill) =>
       memoryFilterHit(skill, row.experiment_id),
     );
-    const withdrawn = (row.excluded || []).filter((item) =>
-      memoryFilterHit(item.skill, row.experiment_id),
-    );
-    if (!skills.length && !withdrawn.length) continue;
-    shown += skills.length + withdrawn.length;
+    if (!skills.length) continue;
+    shown += skills.length;
     nodes.push(el("div", { class: "epoch-head" }, row.experiment_id));
     for (const skill of skills)
       nodes.push(
@@ -7347,8 +7341,6 @@ function renderMemoryCandidates() {
           { kind: "candidate", experiment_id: row.experiment_id, skill },
         ),
       );
-    for (const item of withdrawn)
-      nodes.push(withdrawnCandidateRow(row.experiment_id, item));
   }
   if (!shown)
     nodes.push(
@@ -7375,30 +7367,6 @@ function renderMemoryCandidates() {
       ),
     );
   memoryView.candidateHost.replaceChildren(...nodes);
-}
-
-/* Withdrawn: still named, never mounted, one click from coming back. */
-function withdrawnCandidateRow(experimentId, item) {
-  const reason = String(item.reason || "");
-  return el(
-    "div",
-    {
-      class: "session-item withdrawn",
-      title: reason ? `已排除：${reason}` : "已排除，不再进入新会话",
-    },
-    el("span", { class: "label" }, item.skill),
-    el(
-      "button",
-      {
-        class: "btn small",
-        onclick: (event) => {
-          event.stopPropagation();
-          restoreGraduatedSkill(experimentId, item.skill);
-        },
-      },
-      "恢复",
-    ),
-  );
 }
 
 /* `admitted === null` means the tier itself could not be resolved, which is
@@ -7594,17 +7562,6 @@ function candidateEntryView(selection, entry) {
         },
         "晋升到精选库",
       ),
-      el("span", { class: "spacer" }),
-      el(
-        "button",
-        {
-          class: "btn small danger",
-          title: "不再让新会话挂载这条 skill",
-          onclick: () =>
-            confirmExcludeGraduated(selection.experiment_id, selection.skill),
-        },
-        "排除",
-      ),
     ],
     body: [
       entry.summary ? el("div", { class: "hint" }, entry.summary) : null,
@@ -7792,84 +7749,6 @@ function confirmDeleteCuratedEntry(name) {
       ),
     ],
   );
-}
-
-/* A graduated skill is another experiment's immutable artifact: the console
-   never rewrites one, it only records that sessions stop mounting it. */
-function confirmExcludeGraduated(experimentId, skill) {
-  const reason = el("input", {
-    type: "text",
-    placeholder: "可选，例如：已被更好的做法取代",
-  });
-  showModal(
-    "从毕业层排除",
-    el(
-      "div",
-      {},
-      el("p", {}, `实验 ${experimentId} 的 skill ${skill} 将不再挂载到此后创建的实验。`),
-      el("p", { class: "hint" }, "原 skill 不变，可随时恢复；排除记录由研究者提交。"),
-      el("div", { class: "field" }, el("label", {}, "原因"), reason),
-    ),
-    [
-      el("button", { class: "btn", onclick: closeModal }, "取消"),
-      el(
-        "button",
-        {
-          class: "btn danger",
-          onclick: async () => {
-            try {
-              const result = await api(
-                `/api/memory/graduated/${encodeURIComponent(experimentId)}/${encodeURIComponent(skill)}/exclude`,
-                {
-                  method: "POST",
-                  body: JSON.stringify({ reason: reason.value }),
-                },
-              );
-              closeModal();
-              applyTierResult(result);
-            } catch (error) {
-              toast(`排除失败：${error.message}`, true);
-            }
-          },
-        },
-        "确认排除",
-      ),
-    ],
-  );
-}
-
-async function restoreGraduatedSkill(experimentId, skill) {
-  try {
-    applyTierResult(
-      await api(
-        `/api/memory/graduated/${encodeURIComponent(experimentId)}/${encodeURIComponent(skill)}/exclude`,
-        { method: "DELETE" },
-      ),
-    );
-  } catch (error) {
-    toast(`恢复失败：${error.message}`, true);
-  }
-}
-
-/* The refreshed tier comes back with the write, so the pane never guesses. A
-   withdrawn skill also stops being readable, so a selection on it is dropped. */
-function applyTierResult(result) {
-  if (!memoryView) return;
-  memoryView.payload.graduated = result.graduated || memoryView.payload.graduated;
-  toast(`${result.action === "excluded" ? "已排除" : "已恢复"} ${result.skill}`);
-  const selection = memoryView.selection;
-  if (
-    result.action === "excluded" &&
-    selection &&
-    selection.kind === "candidate" &&
-    selection.experiment_id === result.experiment_id &&
-    selection.skill === result.skill
-  ) {
-    memoryView.selection = null;
-    memoryView.entry = null;
-    renderMemoryPane();
-  }
-  renderMemoryCandidates();
 }
 
 const MEMORY_ACTION_LABELS = {

@@ -2122,20 +2122,6 @@ table.data.text td {
  vertical-align: top;
 }
 
-/* Withdrawn graduated candidate: still named under its experiment, never
-   mounted again, one click from coming back. */
-.session-item.withdrawn {
- cursor: default;
- color: var(--muted);
- text-decoration: line-through;
-}
-.session-item.withdrawn:hover {
- background: transparent;
-}
-.session-item.withdrawn .btn {
- text-decoration: none;
-}
-
 /* 已挂载记忆: every entry once above, one row per session below. */
 .mounted-entries .file-list {
  margin-top: 0.4rem;

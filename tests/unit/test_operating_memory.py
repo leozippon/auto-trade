@@ -24,30 +24,22 @@ from autotrade.pipelines.local_backend import LLMMetaLearner
 from autotrade.pipelines.skills import (
     CURATED_MEMORY_SOURCE,
     DEFAULT_OPERATING_MEMORY,
-    GRADUATED_EXCLUSIONS_PATH,
     OPERATING_MEMORY_DIRNAME,
     OPERATING_MEMORY_LIBRARY,
-    SKILLS_DIRNAME,
     DeleteSkillTool,
     ExperimentSkillsStore,
     WriteSkillTool,
     build_skills_index,
     create_operating_memory_snapshot,
     ensure_operating_memory_snapshot,
-    graduated_exclusion_record,
     graduated_memory_sources,
     install_operating_memory,
     install_workspace_skills,
     operating_memory_entries,
     operating_memory_snapshot_path,
-    parse_skill_front_matter,
-    read_graduated_exclusions,
     read_operating_memory_snapshot,
     resolve_operating_memory,
-    skill_front_matter,
-    validate_memory_entry_ref,
     validate_skills_tree,
-    write_graduated_exclusions,
 )
 from autotrade.pipelines.worker import load_worker_options
 
@@ -214,7 +206,7 @@ def test_only_graduated_experiments_contribute_their_skills(tmp_path: Path) -> N
     _experiment_with_skill(experiments, "current")
     (experiments / "not_an_experiment").mkdir()
 
-    sources = graduated_memory_sources(experiments, repo_root=None, exclude="current")
+    sources = graduated_memory_sources(experiments, exclude="current")
     assert [source.source for source in sources] == ["adopted"]
     assert sources[0].origin == "graduated"
     assert sources[0].entries == (GRADUATED_SKILL,)
@@ -236,7 +228,7 @@ def test_a_stray_graduated_key_is_not_a_verdict(tmp_path: Path) -> None:
             "graduated": True,
         }
     )
-    assert graduated_memory_sources(experiments, repo_root=None) == ()
+    assert graduated_memory_sources(experiments) == ()
 
 
 def test_every_heldout_period_must_graduate(tmp_path: Path) -> None:
@@ -255,7 +247,7 @@ def test_every_heldout_period_must_graduate(tmp_path: Path) -> None:
             "verdict": {"status": "discarded", "reasons": ["sharpe <= 0"]},
         }
     )
-    assert graduated_memory_sources(experiments, repo_root=None) == ()
+    assert graduated_memory_sources(experiments) == ()
 
 
 def test_both_tiers_mount_read_only_with_their_provenance(tmp_path: Path) -> None:
@@ -351,7 +343,7 @@ def test_an_experiment_may_not_take_the_reserved_curated_name(tmp_path: Path) ->
     experiments.mkdir()
     _experiment_with_skill(experiments, CURATED_MEMORY_SOURCE)
     with pytest.raises(ValueError, match="reserved"):
-        graduated_memory_sources(experiments, repo_root=None)
+        graduated_memory_sources(experiments)
 
 
 def test_the_index_lists_every_source_tagged_by_origin(tmp_path: Path) -> None:
@@ -523,9 +515,6 @@ def test_the_run_config_carries_the_mode(tmp_path: Path) -> None:
         load_worker_options(experiment, repo_root=repo)
 
 
-# ---- withdrawing a graduated skill ----------------------------------------
-
-
 def _repo_with_library(root: Path) -> Path:
     """A checkout with one curated entry, so the curated tier still mounts."""
 
@@ -534,264 +523,6 @@ def _repo_with_library(root: Path) -> Path:
     item.mkdir(parents=True)
     (item / "SKILL.md").write_text("# PIT 读取预算\n\n先读摘要。\n", encoding="utf-8")
     return repo
-
-
-def test_the_exclusion_list_lives_outside_the_library_the_mount_validates() -> None:
-    """``validate_skills_tree`` admits directories only, so a file inside
-    ``configs/operating_memory/`` would break every mount. The deny list is a
-    sibling of the library, and it is tracked with it."""
-
-    assert not GRADUATED_EXCLUSIONS_PATH.startswith(f"{OPERATING_MEMORY_LIBRARY}/")
-    assert (REPO_ROOT / GRADUATED_EXCLUSIONS_PATH).is_file()
-    assert isinstance(read_graduated_exclusions(REPO_ROOT), tuple)
-
-
-def test_an_excluded_graduated_skill_is_never_mounted_again(tmp_path: Path) -> None:
-    """A graduated skill is another experiment's immutable artifact, so it is
-    withdrawn rather than rewritten. The deny list is read where admission is
-    decided, so no caller downstream can mount it anyway — and restoring the
-    entry puts the skill straight back."""
-
-    experiments = tmp_path / "experiments"
-    experiments.mkdir()
-    _experiment_with_skill(experiments, "adopted")
-    repo = _repo_with_library(tmp_path)
-    mount = {
-        "mode": "curated+graduated",
-        "repo_root": repo,
-        "experiments_root": experiments,
-    }
-
-    before = tmp_path / "before"
-    before.mkdir()
-    _workspace(before, experiment_id="before", **mount)
-    assert (before / "workspace" / OPERATING_MEMORY_DIRNAME / "adopted").is_dir()
-
-    write_graduated_exclusions(
-        repo,
-        [graduated_exclusion_record("adopted", GRADUATED_SKILL, "已被更好的做法取代")],
-    )
-    assert graduated_memory_sources(experiments, repo_root=repo) == ()
-    # The exclusion reaches the next experiment to snapshot, not the one that
-    # already froze its memory.
-    after = tmp_path / "after"
-    after.mkdir()
-    workspace, mounted = _workspace(after, experiment_id="after", **mount)
-    assert [source.source for source in mounted] == [CURATED_MEMORY_SOURCE]
-    assert not (workspace / OPERATING_MEMORY_DIRNAME / "adopted").exists()
-    index = json.loads(
-        (workspace / "inputs" / "skills_index.json").read_text(encoding="utf-8")
-    )
-    assert GRADUATED_SKILL not in {entry["name"] for entry in index["operating_memory"]}
-
-    write_graduated_exclusions(repo, [])
-    restored = tmp_path / "restored"
-    restored.mkdir()
-    _, remounted = _workspace(restored, experiment_id="restored", **mount)
-    assert [source.source for source in remounted] == [CURATED_MEMORY_SOURCE, "adopted"]
-
-
-def test_withdrawing_one_skill_leaves_the_experiment_s_others_mounted(
-    tmp_path: Path,
-) -> None:
-    """The unit is the skill, not the experiment: the mount copies the admitted
-    entries rather than the whole published tree."""
-
-    experiments = tmp_path / "experiments"
-    experiments.mkdir()
-    _experiment_with_skill(experiments, "adopted", extra_skill="pit-read-budget")
-    repo = _repo_with_library(tmp_path)
-    write_graduated_exclusions(
-        repo, [graduated_exclusion_record("adopted", GRADUATED_SKILL)]
-    )
-    sources = graduated_memory_sources(experiments, repo_root=repo)
-    assert [source.entries for source in sources] == [("pit-read-budget",)]
-    root = tmp_path / "session"
-    root.mkdir()
-    workspace, _mounted = _workspace(
-        root,
-        mode="curated+graduated",
-        repo_root=repo,
-        experiments_root=experiments,
-        experiment_id="partial",
-    )
-    mounted = workspace / OPERATING_MEMORY_DIRNAME / "adopted"
-    assert sorted(item.name for item in mounted.iterdir()) == ["pit-read-budget"]
-    validate_skills_tree(mounted, require_writable=False)
-
-
-@pytest.mark.parametrize(
-    "record",
-    [
-        {"experiment_id": "adopted", "skill": GRADUATED_SKILL, "note": "x"},
-        {"experiment_id": "adopted"},
-        {"experiment_id": "", "skill": GRADUATED_SKILL},
-        {"experiment_id": "../escape", "skill": GRADUATED_SKILL},
-        {"experiment_id": ".hidden", "skill": GRADUATED_SKILL},
-        {"experiment_id": "adopted", "skill": "Not_Kebab"},
-    ],
-)
-def test_a_malformed_exclusion_is_refused_not_treated_as_an_empty_list(
-    tmp_path: Path, record: dict[str, object]
-) -> None:
-    """The deny list may be the only thing keeping a withdrawn skill out, so an
-    unreadable one fails the mount instead of admitting everything."""
-
-    experiments = tmp_path / "experiments"
-    experiments.mkdir()
-    _experiment_with_skill(experiments, "adopted")
-    repo = _repo_with_library(tmp_path)
-    path = repo / GRADUATED_EXCLUSIONS_PATH
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps([record]), encoding="utf-8")
-    with pytest.raises(ValueError):
-        read_graduated_exclusions(repo)
-    with pytest.raises(ValueError):
-        graduated_memory_sources(experiments, repo_root=repo)
-
-
-def test_a_duplicate_or_non_list_exclusion_file_is_refused(tmp_path: Path) -> None:
-    repo = _repo_with_library(tmp_path)
-    path = repo / GRADUATED_EXCLUSIONS_PATH
-    path.parent.mkdir(parents=True, exist_ok=True)
-    duplicate = {"experiment_id": "adopted", "skill": GRADUATED_SKILL}
-    path.write_text(json.dumps([duplicate, duplicate]), encoding="utf-8")
-    with pytest.raises(ValueError):
-        read_graduated_exclusions(repo)
-    path.write_text(json.dumps({"experiment_id": "adopted"}), encoding="utf-8")
-    with pytest.raises(ValueError):
-        read_graduated_exclusions(repo)
-
-
-def test_the_written_list_round_trips_through_its_own_validation(
-    tmp_path: Path,
-) -> None:
-    repo = _repo_with_library(tmp_path)
-    entry = graduated_exclusion_record("adopted", GRADUATED_SKILL, "过期的做法")
-    write_graduated_exclusions(repo, [entry])
-    stored = read_graduated_exclusions(repo)
-    assert [item.to_record() for item in stored] == [entry.to_record()]
-    assert stored[0].excluded_at and stored[0].reason == "过期的做法"
-    with pytest.raises(ValueError):
-        write_graduated_exclusions(repo, [entry, entry])
-    # The refused write left the stored list alone.
-    assert read_graduated_exclusions(repo) == stored
-
-
-# ---- writing a replacement instead of an edit ------------------------------
-#
-# A session may doubt mounted memory, ignore it, and report a wrong entry with
-# report_issue; it may never rewrite it. `supersedes` is how a session writes a
-# replacement without touching the original.
-
-
-def _mounted_workspace(tmp_path: Path) -> Path:
-    """One session workspace with both memory tiers mounted."""
-
-    experiments = tmp_path / "experiments"
-    experiments.mkdir()
-    _experiment_with_skill(experiments, "adopted")
-    repo = _repo_with_library(tmp_path)
-    root = tmp_path / "session"
-    root.mkdir()
-    workspace, _mounted = _workspace(
-        root, mode="curated+graduated", repo_root=repo, experiments_root=experiments
-    )
-    return workspace
-
-
-def test_front_matter_is_optional_and_only_supersedes_is_known() -> None:
-    assert parse_skill_front_matter("# 标题\n\n正文\n") == ({}, "# 标题\n\n正文\n")
-    fields, body = skill_front_matter(
-        "---\nsupersedes: curated/pit-read-budget\n---\n# 标题\n\n正文\n"
-    )
-    assert fields == {"supersedes": "curated/pit-read-budget"}
-    assert body == "# 标题\n\n正文\n"
-    for bad in (
-        "---\nunknown: x\n---\n# 标题\n",
-        "---\nsupersedes\n---\n# 标题\n",
-        "---\nsupersedes: curated/pit-read-budget\n# 标题\n",
-        "---\nsupersedes: curated/Not_Kebab\n---\n# 标题\n",
-        "---\nsupersedes: pit-read-budget\n---\n# 标题\n",
-    ):
-        with pytest.raises(ValueError):
-            skill_front_matter(bad)
-    assert validate_memory_entry_ref("adopted/same-window-parent-control") == (
-        "adopted",
-        "same-window-parent-control",
-    )
-
-
-def test_a_superseding_skill_marks_the_original_without_removing_it(
-    tmp_path: Path,
-) -> None:
-    """Both stay mounted and the relation is visible; withdrawing the original
-    is the researcher's decision, made in the repository."""
-
-    workspace = _mounted_workspace(tmp_path)
-    write_skill = WriteSkillTool(SafeWorkspace(workspace))
-    result = write_skill.invoke(
-        {
-            "name": "pit-read-budget-v2",
-            "path": "SKILL.md",
-            "content": (
-                "---\nsupersedes: curated/pit-read-budget\n---\n"
-                "# PIT 读取预算（修订）\n\n按域读摘要，再按需取明细。\n"
-            ),
-        }
-    )
-    assert result.ok
-    index = build_skills_index(workspace / SKILLS_DIRNAME)
-    written = next(
-        entry for entry in index["skills"] if entry["name"] == "pit-read-budget-v2"
-    )
-    assert written["supersedes"] == "curated/pit-read-budget"
-    assert written["title"] == "PIT 读取预算（修订）"
-    original = next(
-        entry
-        for entry in index["operating_memory"]
-        if entry["name"] == "pit-read-budget"
-    )
-    assert original["superseded_by"] == ["session/pit-read-budget-v2"]
-    # The mounted entry itself is untouched and still readable.
-    assert (
-        workspace / OPERATING_MEMORY_DIRNAME / CURATED_MEMORY_SOURCE / "pit-read-budget"
-    ).is_dir()
-
-
-def test_supersedes_must_name_something_this_session_actually_mounted(
-    tmp_path: Path,
-) -> None:
-    workspace = _mounted_workspace(tmp_path)
-    write_skill = WriteSkillTool(SafeWorkspace(workspace))
-    with pytest.raises(ToolError):
-        write_skill.invoke(
-            {
-                "name": "invented-successor",
-                "path": "SKILL.md",
-                "content": "---\nsupersedes: curated/never-mounted\n---\n# x\n\n正文\n",
-            }
-        )
-    assert not (workspace / SKILLS_DIRNAME / "invented-successor").exists()
-
-
-def test_a_published_generation_keeps_its_front_matter_valid(tmp_path: Path) -> None:
-    """The tree validator checks the format, never the reference: a generation
-    is validated far from the workspace that mounted the entry it names."""
-
-    tree = tmp_path / "skills"
-    item = tree / "successor"
-    item.mkdir(parents=True)
-    (item / "SKILL.md").write_text(
-        "---\nsupersedes: adopted/same-window-parent-control\n---\n# 后继\n\n正文\n",
-        encoding="utf-8",
-    )
-    assert validate_skills_tree(tree, require_writable=True).count == 1
-    (item / "SKILL.md").write_text(
-        "---\nsupersedes: adopted/Not_Kebab\n---\n# 后继\n\n正文\n", encoding="utf-8"
-    )
-    with pytest.raises(ValueError, match="successor/SKILL.md"):
-        validate_skills_tree(tree, require_writable=True)
 
 
 # ---- the snapshot is the experiment's own copy ----------------------------
