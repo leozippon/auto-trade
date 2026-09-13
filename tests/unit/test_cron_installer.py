@@ -42,6 +42,24 @@ class CronInstallerTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "differs from requested content"):
             installer.verify_installed_crontab(expected, expected.replace("unrelated", "changed"))
 
+    def test_the_paper_block_installs_beside_the_tushare_block(self) -> None:
+        template, begin, end = installer.BLOCKS["paper"]
+        tushare = installer.build_managed_block()
+        paper = installer.build_managed_block(template, begin, end)
+        current = f"0 1 * * * unrelated\n\n{tushare}"
+        once = installer.replace_managed_block(current, paper, begin=begin, end=end)
+        twice = installer.replace_managed_block(once, paper, begin=begin, end=end)
+        self.assertEqual(once, twice)
+        self.assertIn(tushare, twice)
+        self.assertEqual(twice.count(begin), 1)
+        jobs = [line for line in template.read_text(encoding="utf-8").splitlines() if line[:1].isdigit()]
+        self.assertTrue(jobs)
+        for job in jobs:
+            # Weekdays only, never overlapping, logged under logs/paper/.
+            self.assertEqual(job.split()[4], "1-5")
+            self.assertIn("flock -n .runtime/paper/cron.lock", job)
+            self.assertIn("scripts/paper/run_paper.py run >> logs/paper/cron.log 2>&1", job)
+
     def test_backup_permissions_are_private(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "cron_backups" / "crontab.bak"
