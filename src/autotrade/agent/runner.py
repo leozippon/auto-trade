@@ -904,11 +904,11 @@ class AgentSessionRunner:
         node_id = call.arguments.get("node_id")
         if (
             call.name == "finish_fold"
-            and call.arguments.get("outcome") == "no_edge"
+            and call.arguments.get("outcome") in ("no_edge", "terminate")
             and not node_id
         ):
-            # Abstaining is a legal finish in the finalize window too: the
-            # tool itself records why nothing is frozen.
+            # Abstaining (or terminating the arm) is a legal finish in the
+            # finalize window too: the tool itself records why nothing is frozen.
             return ""
         candidates = {
             str(candidate["node_id"]) for candidate in self._finalization_candidates()

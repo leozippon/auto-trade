@@ -3233,8 +3233,10 @@ class LLMFoldDeveloper:
             )
             finish = result.finish_value
             # An explicit no-edge finish nominates nothing: the Pipeline keeps
-            # the parent (if any) as the lineage head and freezes no candidate.
-            abstained = str(finish.get("outcome") or "select") == "no_edge"
+            # the parent (if any) as the lineage head and freezes no candidate;
+            # a terminating finish is one that also ends the arm.
+            outcome = str(finish.get("outcome") or "select")
+            abstained = outcome in ("no_edge", "terminate")
             selected_node = "" if abstained else str(finish.get("node_id") or "")
             selected_revision_ref = str(finish.get("revision_id") or "")
             if not abstained and (not selected_node or not selected_revision_ref):
@@ -3263,7 +3265,7 @@ class LLMFoldDeveloper:
             manifest.update(
                 conversation_id=result.conversation_id,
                 selected_step_id=selected_node or None,
-                finish_outcome="no_edge" if abstained else "select",
+                finish_outcome=outcome if abstained else "select",
             )
             if self.step_tree_enabled and paths.steps.exists():
                 link_copytree(paths.steps, self.experiment_dir / "steps")
@@ -3278,6 +3280,7 @@ class LLMFoldDeveloper:
                 early_stop_reason=str(finish.get("early_stop_reason") or ""),
                 no_edge_reason=str(finish.get("reason") or "") if abstained else "",
                 baseline_anchor=not abstained and finish.get("baseline_anchor") is True,
+                terminate=outcome == "terminate",
                 # The nulls the session already drew, for the freeze to reuse.
                 null_controls=(
                     dict(null_control_tool.blocks)

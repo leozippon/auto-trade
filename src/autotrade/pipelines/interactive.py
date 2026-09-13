@@ -49,6 +49,7 @@ from .ledger import (
     assert_no_frozen_artifact_mutation,
     is_durable_success_record,
     rerun_absorbed,
+    terminated_record,
 )
 from .meta_schedule import meta_learning_id
 
@@ -121,6 +122,10 @@ class InteractiveExperimentRunner:
                     if not self._needs_rerun(session, rerun_id):
                         continue
                     reran.append(session.session_key)
+                if terminated_record(self.ledger.read()) is not None:
+                    # A Fold ended the arm (finish_fold outcome="terminate"):
+                    # no later session runs, on this start or any resume.
+                    break
                 if self._gate():
                     return self._restart_result(ran, reran)
                 control = read_control(self.control_path)

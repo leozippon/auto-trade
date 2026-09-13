@@ -1893,6 +1893,88 @@ def test_a_control_repaired_under_a_new_id_stays_an_anchor(tmp_path: Path, monke
     assert status["state"] == "failed" and repair_id in status["error"]
 
 
+def test_a_fold_that_terminates_the_arm_ends_the_experiment(tmp_path: Path, monkeypatch):
+    """``finish_fold(outcome="terminate")`` ends a fixed-direction arm whose
+    pack's termination rule fired, instead of letting it carry a control
+    through every remaining session (the earnings arm ran ~20 more, XR1 E5).
+
+    The Fold reads like a no-edge finish with the parent kept, one
+    ``terminated`` row follows it, the remaining Meta and Fold never start
+    (the scripted model has no turns for them), there is no Held-out, and the
+    experiment is ``completed`` with a ``terminated`` verdict and no Paper
+    candidate. A resume republishes that and runs nothing."""
+    from autotrade.webui.registry import summarize_experiment
+
+    repo, experiment = _experiment(tmp_path, developer_mode="llm")
+    _update_params(
+        experiment,
+        {
+            "development_first_period": "2025Q4",
+            "development_last_period": "2026Q2",
+            "test_stage": True,
+            "heldout_first_period": "2026Q3",
+            "heldout_last_period": "2026Q3",
+        },
+    )
+    _seed_parent(experiment)
+    monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
+    reason = "gate 1 failed in fold 1 and again here: the pack's two-fold rule closes the arm"
+    llm = ScriptedLLM(
+        [
+            *_agent_then(
+                ToolCall("prior", "write_file", {"path": "PRIOR.md", "content": "gate 1 open"}),
+                ToolCall("finish_meta", "finish_meta", {}),
+            ),
+            *_agent_then(
+                ToolCall("check", "modification_check", {}),
+                ToolCall("valid", "daily_backtest", {}),
+                ToolCall(
+                    "finish_fold",
+                    "finish_fold",
+                    {"outcome": "terminate", "reason": reason},
+                ),
+                roles=_FOLD_DELEGATION_ROLES,
+                implement={
+                    "path": "output/main.py",
+                    "content": "def generate_orders(context):\n    _ = context\n    return []\n",
+                },
+            ),
+        ]
+    )
+    options = load_worker_options(experiment, repo_root=repo)
+    result = run_local_interactive_worker(
+        options,
+        llm=llm,
+        command_runner_factory=lambda _workspace: _NoShellRunner(),
+    )
+
+    assert result["state"] == "completed"
+    assert result["verdict"] == {"status": "terminated", "reasons": [reason], "periods": []}
+    assert result["paper_candidate"] is None and result["heldout_runs"] == 0
+    ledger = ExperimentLedger(options.rolling.ledger_path)
+    records = ledger.read()
+    assert [record["record_type"] for record in records] == [
+        "meta_learning",
+        "fold",
+        "terminated",
+    ]
+    _meta, fold, terminated = records
+    assert (fold["fold_status"], fold["finish_mode"]) == ("no_update", "agent_no_edge")
+    assert terminated["fold_id"] == fold["fold_id"] and terminated["reason"] == reason
+    assert read_status(experiment / "hitl/status.json")["verdict"]["status"] == "terminated"
+    assert summarize_experiment(experiment)["terminated"]["reason"] == reason
+
+    calls = len(llm.calls)
+    again = run_local_interactive_worker(
+        load_worker_options(experiment, repo_root=repo),
+        llm=llm,
+        command_runner_factory=lambda _workspace: _NoShellRunner(),
+    )
+    assert again["state"] == "completed" and again["verdict"]["status"] == "terminated"
+    assert len(llm.calls) == calls
+    assert ledger.read() == records
+
+
 def test_early_finish_grades_the_epoch_that_actually_ran(tmp_path: Path):
     """Skip-to-Held-out ends development inside Epoch 1 of a three-Epoch
     schedule. Graduation term (b) must be scored on the Epoch that produced the

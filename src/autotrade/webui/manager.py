@@ -1004,7 +1004,9 @@ class ExperimentManager:
             kind = record.get("record_type")
             if session_key == "heldout":
                 return kind == "heldout"
-            if kind == "fold":
+            # A termination belongs to the Fold that ended the arm and goes
+            # with it, so a rollback past that Fold resumes the arm.
+            if kind in ("fold", "terminated"):
                 key = f"{record.get('epoch_id')}/{record.get('fold_id')}"
                 if key in dropped_fold_keys:
                     return True

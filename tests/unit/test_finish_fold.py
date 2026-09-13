@@ -892,6 +892,38 @@ def test_finish_fold_no_edge_refuses_a_node_a_thin_reason_or_an_empty_session(
     assert finished.value["budget_at_finish"]["backtests_remaining"] == 20
 
 
+def test_finish_fold_terminate_is_a_no_edge_finish_that_ends_the_arm(tmp_path: Path):
+    """Terminating takes the no-edge requirements (a reason, no node, one
+    Validation) and says the arm ends; it is not an early finish to justify
+    twice, and a deployment adjustment cannot end a development arm."""
+
+    tree = StepTree(tmp_path / "steps")
+    _record_round(tree, tmp_path, batch_id="b1", marker="1", metrics=_metrics(0.1))
+    parent_main = _written(tmp_path / "parent", PARENT) / "main.py"
+    finish = FinishFoldTool(
+        tree,
+        fold_id="fold_ref_ab",
+        run_id="run_x",
+        parent_main_py=parent_main,
+        budget_status=lambda: _budget(20),
+    )
+    with pytest.raises(ToolError, match="requires reason"):
+        finish.invoke({"outcome": "terminate"})
+    ended = finish.invoke({"outcome": "terminate", "reason": NO_EDGE_REASON})
+    assert ended.finish and ended.value["outcome"] == "terminate"
+    assert ended.value["pipeline_fold_status"] == "no_update"
+    assert ended.value["pipeline_outcome"].endswith("no further session and no Held-out")
+    deployment = FinishFoldTool(
+        tree,
+        fold_id="fold_ref_ab",
+        run_id="run_x",
+        parent_main_py=parent_main,
+        same_mechanism=True,
+    )
+    with pytest.raises(ToolError, match="ends a development arm"):
+        deployment.invoke({"outcome": "terminate", "reason": NO_EDGE_REASON})
+
+
 def test_a_confirmation_fold_is_guided_by_the_prompt_not_refused_by_the_tool(
     tmp_path: Path,
 ):

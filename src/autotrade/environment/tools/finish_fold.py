@@ -254,6 +254,10 @@ class FinishFoldTool:
         "(node_id must be absent) and requires reason, citing the evidence that no "
         "candidate proved an edge; the Fold then records no_update with a parent "
         "(the parent stays the lineage head) or baseline_missing without one. "
+        "outcome=\"terminate\" ends the whole arm when its reference pack's "
+        "termination rule is met: it records the Fold like no_edge (reason cites "
+        "the rule and the readings that met it), then no further session runs "
+        "and there is no Held-out. "
         "A freeze without a frozen parent (parent_control_available=false, the "
         "parent is the template) is recorded baseline_anchor=true: the lineage "
         "gets a control the next Fold replays as its parent_control, but an "
@@ -284,10 +288,11 @@ class FinishFoldTool:
                 "node_id": {"type": "string", "minLength": 1, "maxLength": 500},
                 "outcome": {
                     "type": "string",
-                    "enum": ["select", "no_edge"],
+                    "enum": ["select", "no_edge", "terminate"],
                     "description": (
                         "select (default): freeze node_id. no_edge: nominate "
-                        "nothing; requires reason and no node_id."
+                        "nothing; requires reason and no node_id. terminate: "
+                        "no_edge that also ends the arm."
                     ),
                 },
                 "reason": {
@@ -295,7 +300,7 @@ class FinishFoldTool:
                     "minLength": NO_EDGE_REASON_MIN_CHARS,
                     "maxLength": EARLY_STOP_REASON_MAX_CHARS,
                     "description": (
-                        "outcome=\"no_edge\" only: the evidence that no candidate "
+                        "outcome=\"no_edge\"/\"terminate\" only: the evidence that no candidate "
                         "proved an edge (neutralized excess, vs_parent.beats_parent, "
                         "the new-quarter sub_window, any null_control or deflated "
                         f"Sharpe figure read); {NO_EDGE_REASON_MIN_CHARS}-"
@@ -379,7 +384,7 @@ class FinishFoldTool:
             raise ValueError("same_mechanism needs the parent package to compare against")
 
     def invoke(self, arguments: Mapping[str, object]) -> ToolResult:
-        if str(arguments.get("outcome") or "select") == "no_edge":
+        if str(arguments.get("outcome") or "select") in ("no_edge", "terminate"):
             return self._finish_no_edge(arguments)
         if str(arguments.get("reason") or "").strip():
             raise ToolError(
@@ -444,8 +449,19 @@ class FinishFoldTool:
         of nominating "the least bad node"; the reason is recorded with the
         Fold result so the Meta review reads the evidence, not a guess. The
         inherited parent, when there is one, stays the lineage head.
+
+        ``outcome="terminate"`` is the same finish for an arm whose reference
+        pack's termination rule has fired: the Pipeline records the Fold the
+        same way and then ends the experiment, so no later session carries a
+        control forward. It is a development decision, never an adjustment's.
         """
 
+        terminate = arguments.get("outcome") == "terminate"
+        if terminate and self.same_mechanism:
+            raise ToolError(
+                'finish_fold: outcome="terminate" ends a development arm; a '
+                "deployment adjustment nominates a node or finishes no_edge"
+            )
         if str(arguments.get("node_id") or ""):
             raise ToolError(
                 'finish_fold: outcome="no_edge" nominates nothing, so node_id must be '
@@ -471,12 +487,15 @@ class FinishFoldTool:
                 "Validation of this session to have found no edge in; run "
                 "daily_backtest or batch_validate first"
             )
-        early_stop = self._require_early_stop_reason(arguments)
+        # Terminating leaves the budget unused by design; its reason says why.
+        early_stop = (
+            {} if terminate else self._require_early_stop_reason(arguments)
+        )
         return ToolResult(
             True,
             value={
                 "status": "fold_finished",
-                "outcome": "no_edge",
+                "outcome": "terminate" if terminate else "no_edge",
                 "reason": reason,
                 "fold_status": "pending_pipeline_review",
                 "write_locked": True,
@@ -484,7 +503,12 @@ class FinishFoldTool:
                 **early_stop,
                 "pipeline_fold_status": self._fallback_status(),
                 "pipeline_will_freeze": False,
-                "pipeline_outcome": f"No candidate frozen; {self._fallback_sentence()}",
+                "pipeline_outcome": f"No candidate frozen; {self._fallback_sentence()}"
+                + (
+                    "; the arm terminates: no further session and no Held-out"
+                    if terminate
+                    else ""
+                ),
             },
             finish=True,
         )

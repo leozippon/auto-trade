@@ -75,6 +75,7 @@ from .folds import FoldSpec, heldout_periods
 from .hitl_state import DEPLOYMENT_SESSION_KEY, fold_session_key
 from .inherited_memory import InheritedMemory, prior_provenance
 from .ledger import (
+    LINK_KEYS,
     STRATEGY_ERROR,
     ExperimentLedger,
     FrozenArtifactMutated,
@@ -647,6 +648,19 @@ class RollingExperimentPipeline:
                     ) from restore_error
                 raise FrozenArtifactMutated(
                     "strategy or model artifacts changed during frozen test"
+                )
+            if session.terminate:
+                # The arm's own termination rule fired (finish_fold
+                # outcome="terminate"): the Fold row above reads like a no-edge
+                # finish, and this row ends the experiment -- no later session
+                # runs and there is no Held-out (docs/pipeline-design.md §3.3).
+                self.ledger.append(
+                    {
+                        **{key: record[key] for key in LINK_KEYS},
+                        "record_type": "terminated",
+                        "session_key": record["session_key"],
+                        "reason": session.no_edge_reason,
+                    }
                 )
             return FoldOutcome(
                 fold.fold_id, run_id, status, frozen, validation, test_summary

@@ -47,6 +47,9 @@ RECORD_TYPES = (
     "heldout",
     "deployment_adjustment",
     "attempt_failed",
+    # A Fold ended the arm (finish_fold outcome="terminate"); see
+    # ``terminated_record``.
+    "terminated",
 )
 LINK_KEYS = ("experiment_id", "epoch_id", "fold_id", "run_id")
 # The ``failure`` tag of a failed parent control or frozen Test whose strategy
@@ -786,6 +789,19 @@ def _count(value: object) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
+def terminated_record(records: list[dict[str, object]]) -> dict[str, object] | None:
+    """The ``terminated`` row of an arm that ended itself, or None.
+
+    Single source for "this experiment is over before Held-out": the runner
+    stops scheduling sessions, the worker skips Held-out and the verdict reads
+    ``terminated`` off the same row.
+    """
+    return next(
+        (record for record in records if record.get("record_type") == "terminated"),
+        None,
+    )
+
+
 def experiment_verdict(
     records: list[dict[str, object]], *, strict: bool = True
 ) -> dict[str, object] | None:
@@ -797,7 +813,18 @@ def experiment_verdict(
     without a verdict block is not the current ledger format: ``strict``
     callers (report, terminal status) refuse it, the console read model
     (``strict=False``) shows no verdict rather than inventing one.
+
+    An arm that ended itself (a ``terminated`` row, written when a Fold
+    finished with ``outcome="terminate"``) never reaches Held-out: its verdict
+    is ``terminated`` with that Fold's reason, and nothing graduates.
     """
+    terminated = terminated_record(records)
+    if terminated is not None:
+        return {
+            "status": "terminated",
+            "reasons": [str(terminated.get("reason") or "")],
+            "periods": [],
+        }
     latest = latest_heldout_records(records)
     if not latest:
         return None

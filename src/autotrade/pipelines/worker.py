@@ -97,6 +97,7 @@ from .ledger import (
     latest_heldout_records,
     paper_candidate,
     rerun_absorbed,
+    terminated_record,
 )
 from .local_backend import (
     DeterministicBaselineDeveloper,
@@ -1280,6 +1281,29 @@ def run_local_interactive_worker(
     result = interactive.run()
     if result["status"] != "complete":
         return result
+    completed_development = len(
+        {
+            str(row.get("session_key") or row.get("run_id"))
+            for row in ledger.read()
+            if row.get("record_type") in {"fold", "meta_learning"}
+        }
+    )
+    if terminated_record(ledger.read()) is not None:
+        # The arm ended itself: the experiment is complete without a Held-out
+        # and without a deliverable, whatever is in force (§3.3).
+        records = ledger.read()
+        payload = _terminal_status(
+            {
+                "completed_at": utc_now_iso(),
+                "completed_sessions": completed_development,
+                "total_sessions": len(plan["sessions"]),
+            },
+            developer_mode=developer_label,
+            verdict=experiment_verdict(records),
+            paper_candidate=paper_candidate(records),
+        )
+        write_json_atomic(hitl / "status.json", payload)
+        return payload
     final = state["parent"] or _latest_artifact(ledger, store, options.experiment_dir)
     # A baseline anchor is the lineage's control, never the deliverable: an
     # experiment whose last word is the placebo it was forced to freeze takes
@@ -1289,13 +1313,6 @@ def run_local_interactive_worker(
         _fail_without_frozen_artifact(hitl, ledger, artifact=final)
     final_status = StatusReporter(hitl / "status.json")
     final_status.start()
-    completed_development = len(
-        {
-            str(row.get("session_key") or row.get("run_id"))
-            for row in ledger.read()
-            if row.get("record_type") in {"fold", "meta_learning"}
-        }
-    )
     final_status.set(
         state="running_heldout",
         developer_mode=developer_label,
@@ -1680,7 +1697,9 @@ def _has_outstanding_work(
     instead of republishing the terminal status, or the console operation
     would look accepted and silently do nothing."""
     records = ledger.read()
-    if not any(record.get("record_type") == "heldout" for record in records):
+    if terminated_record(records) is None and not any(
+        record.get("record_type") == "heldout" for record in records
+    ):
         return True
     if deployment_adjustment_due(records, start=rolling.deployment_adjustment_start):
         return True

@@ -47,6 +47,7 @@ from autotrade.pipelines.ledger import (
     latest_heldout_records,
     paper_candidate,
     parent_control_excess,
+    terminated_record,
     transition_neutralized_excess,
     transition_null_control,
     transition_result,
@@ -460,6 +461,19 @@ def _public_diagnostics(
     }
 
 
+def _terminated_view(
+    records: list[dict[str, object]], identity: PublicIdentity
+) -> dict[str, object] | None:
+    """``ledger.terminated_record`` with the Fold token swapped for its ref."""
+    record = terminated_record(records)
+    if record is None:
+        return None
+    return {
+        "fold_ref": identity.fold_ref(str(record.get("fold_id") or "")),
+        "reason": record.get("reason"),
+    }
+
+
 def _public_verdict(
     records: list[dict[str, object]], identity: PublicIdentity
 ) -> dict[str, object] | None:
@@ -815,6 +829,9 @@ def summarize_experiment(directory: Path) -> dict[str, object]:
                 # The artifact Paper pins and the command that pins it
                 # (ledger.paper_candidate); None unless graduated.
                 "paper_candidate": _paper_candidate_view(directory, records) if revealed else None,
+                # The Fold that ended the arm and its reason; not sealed, an
+                # arm that terminated has no Held-out to hide.
+                "terminated": _terminated_view(records, identity),
                 "metrics": {
                     "epoch_id": latest_epoch,
                     "cum_valid_return": cumulative.get(latest_epoch, {}).get("valid"),
