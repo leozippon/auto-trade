@@ -513,39 +513,24 @@ def _public_verdict(
 def _paper_candidate_view(
     directory: Path, records: list[dict[str, object]]
 ) -> dict[str, object] | None:
-    """The Paper candidate with the launch command that pins it.
+    """The Paper candidate with the command that creates a book
+    (``scripts/paper/run_paper.py init``, run from the repository root).
 
-    Paths are written relative to the repository root the console serves
-    (``experiments/<id>/...``), which is where ``run_paper.py`` is run from;
-    an experiment tree outside it keeps absolute paths.
+    The command pins the graduate that passed Held-out even when an adjusted
+    artifact exists: the adjustment's refit window includes the Held-out
+    months, so the adjusted artifact is only an alternative the page names.
     """
     candidate = paper_candidate(records)
     if candidate is None:
         return None
-    repo_root = directory.parent.parent
-
-    def relative(value: object) -> str | None:
-        if not value:
-            return None
-        path = Path(str(value))
-        return str(path.relative_to(repo_root)) if path.is_relative_to(repo_root) else str(path)
-
-    strategy = relative(candidate["output_path"])
-    models = relative(candidate["models_path"])
-    models_dir = models if models and Path(str(candidate["models_path"])).is_dir() else None
-    command = [
-        "python scripts/paper/run_paper.py",
-        f"--strategy {strategy}/main.py" if strategy else "--strategy <missing>",
-        f"--strategy-revision {candidate['artifact_id']}",
-        *([f"--models-dir {models_dir}"] if models_dir else []),
-    ]
     return {
         "artifact_id": candidate["artifact_id"],
         "source": candidate["source"],
         "graduated_artifact_id": candidate["graduated_artifact_id"],
-        "strategy_path": f"{strategy}/main.py" if strategy else None,
-        "models_dir": models_dir,
-        "command": " ".join(command),
+        "command": (
+            "python scripts/paper/run_paper.py init "
+            f"--experiment {directory.name} --artifact {candidate['graduated_artifact_id']}"
+        ),
     }
 
 

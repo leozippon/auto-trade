@@ -335,12 +335,20 @@ def test_writer_error_without_a_message_still_reports_the_state(tmp_path: Path):
     assert payload["error"] == "writer reported ok=false"
 
 
+def test_a_weekend_between_daily_runs_is_not_stale(tmp_path: Path):
+    """The book writes once per weekday before the open: Friday's snapshot read
+    on Monday before that day's run is the normal cadence, not a stale book."""
+    _write_snapshot(tmp_path, age_seconds=75 * 3600.0)
+    assert trading.snapshot_payload(tmp_path)["state"] == "ok"
+
+
 def test_a_stale_snapshot_is_served_and_flagged_against_the_exported_threshold(tmp_path: Path):
-    _write_snapshot(tmp_path, age_seconds=600.0)
+    age = trading.STALE_SNAPSHOT_ALERT_SECONDS + 600.0
+    _write_snapshot(tmp_path, age_seconds=age)
     payload = trading.snapshot_payload(tmp_path)
     assert payload["state"] == "stale"
-    assert payload["stale_threshold_seconds"] == trading.STALE_SNAPSHOT_ALERT_SECONDS == 180.0
-    assert 590.0 <= payload["age_seconds"] <= 630.0
+    assert payload["stale_threshold_seconds"] == trading.STALE_SNAPSHOT_ALERT_SECONDS
+    assert age - 10.0 <= payload["age_seconds"] <= age + 30.0
     # Stale-but-visible: the last written account data still reaches the page.
     assert payload["snapshot"]["equity"] == 1_000_000.0
     summary = trading.environment_summary(tmp_path)
@@ -434,7 +442,7 @@ def test_non_finite_snapshot_numbers_degrade_to_null(tmp_path: Path):
 def test_environment_state_precedence_puts_the_worst_reader_first(tmp_path: Path):
     root = tmp_path / "data/trading/paper"
     # A stale snapshot beats a healthy journal.
-    _write_snapshot(tmp_path, age_seconds=600.0)
+    _write_snapshot(tmp_path, age_seconds=trading.STALE_SNAPSHOT_ALERT_SECONDS + 600.0)
     _jsonl(root / "orders_20260102.jsonl", _order())
     assert trading.environment_summary(tmp_path)["state"] == "stale"
     # A damaged journal line does NOT reach the ladder; stale still wins.
@@ -454,7 +462,7 @@ def test_the_roster_and_health_carry_the_snapshot_block(tmp_path: Path):
     assert entry["state"] == "ok"
     assert entry["snapshot"]["equity"] == 1_000_000.0
     assert entry["generated_at"].endswith("Z")
-    assert entry["stale_threshold_seconds"] == 180.0
+    assert entry["stale_threshold_seconds"] == trading.STALE_SNAPSHOT_ALERT_SECONDS
     health = trading.health_payload(tmp_path)
     assert health["ok"] is True and health["state"] == "ok"
 

@@ -2936,9 +2936,21 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertEqual(candidate["artifact_id"], "strategy_epoch_001_fold_2022Q1")
         self.assertEqual(
             candidate["command"],
-            "python scripts/paper/run_paper.py --strategy experiments/exp_hitl/artifacts/"
-            "strategy/frozen/strategy_epoch_001_fold_2022Q1/output/main.py "
-            "--strategy-revision strategy_epoch_001_fold_2022Q1",
+            "python scripts/paper/run_paper.py init --experiment exp_hitl "
+            "--artifact strategy_epoch_001_fold_2022Q1",
+        )
+        # The printed command is one run_paper.py accepts as written.
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "run_paper", Path(__file__).resolve().parents[2] / "scripts/paper/run_paper.py"
+        )
+        run_paper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(run_paper)
+        parsed = run_paper.build_parser().parse_args(candidate["command"].split()[2:])
+        self.assertEqual(
+            (parsed.command, parsed.experiment, parsed.artifact),
+            ("init", "exp_hitl", "strategy_epoch_001_fold_2022Q1"),
         )
         session = next(
             row for row in detail["sessions"] if row["kind"] == "deployment_adjustment"
@@ -2985,7 +2997,11 @@ class WebuiBackendTest(unittest.TestCase):
         candidate = detail["paper_candidate"]
         self.assertEqual(candidate["source"], "adjusted")
         self.assertEqual(candidate["artifact_id"], "strategy_deployment_abc")
-        self.assertIn("--models-dir experiments/exp_hitl/artifacts/strategy/frozen/strategy_deployment_abc/models", candidate["command"])
+        # The command still pins the graduate: the adjusted artifact's refit
+        # window includes the Held-out months, so it is only an alternative.
+        self.assertTrue(
+            candidate["command"].endswith("--artifact strategy_epoch_001_fold_2022Q1")
+        )
         session = next(
             row for row in detail["sessions"] if row["kind"] == "deployment_adjustment"
         )

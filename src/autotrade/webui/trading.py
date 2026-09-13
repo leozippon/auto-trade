@@ -26,8 +26,10 @@ from autotrade.paper.storage import read_jsonl
 TRADING_ENVS = ("paper",)
 ENV_LABELS = {"paper": "Paper 模拟"}
 # A snapshot older than this is served but flagged: the account data is the
-# last one the engine wrote, not the current one.
-STALE_SNAPSHOT_ALERT_SECONDS = 180.0
+# last one the engine wrote, not the current one. The book writes once per
+# weekday before the open, so a weekend gap (~72 h) is normal and four days
+# means a scheduled run did not happen (a failed run shows export_error).
+STALE_SNAPSHOT_ALERT_SECONDS = 4 * 24 * 3600.0
 
 
 def env_dir(repo_root: Path, env: str) -> Path:

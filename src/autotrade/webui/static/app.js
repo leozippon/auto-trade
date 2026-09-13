@@ -3245,11 +3245,11 @@ function deploymentSessionLine(detail, session, pending) {
     text: DEPLOYMENT_STATUS_LABELS[status] || status,
     cls: status === "adjusted" ? "num pos" : "",
     note: candidate.artifact_id
-      ? `Paper 候选：${candidate.source === "adjusted" ? "调整后产物" : "毕业产物"}`
+      ? `Paper 用毕业产物${candidate.source === "adjusted" ? "，可选调整后产物" : ""}`
       : reasons.length
         ? `未采用：${reasons.join("、")}`
         : null,
-    noteTitle: candidate.artifact_id || null,
+    noteTitle: candidate.graduated_artifact_id || null,
   };
 }
 
@@ -6733,9 +6733,16 @@ function deploymentPanel(detail, session) {
   );
   if (candidate) {
     panel.append(
-      el("h5", { class: "section-gap" }, `Paper 候选：${candidate.source === "adjusted" ? "调整后产物" : "毕业产物"} ${candidate.artifact_id}`),
+      el("h5", { class: "section-gap" }, `Paper 建簿：毕业产物 ${candidate.graduated_artifact_id}`),
       el("pre", { class: "code-block", style: "white-space:pre-wrap" }, candidate.command),
-      el("div", { class: "hint" }, "在仓库根目录运行以建簿；Paper 不会自动启动。"),
+      el(
+        "div",
+        { class: "hint" },
+        "在仓库根目录运行；Paper 不会自动启动。",
+        candidate.source === "adjusted"
+          ? `可改用调整后产物 ${candidate.artifact_id}（--artifact），但其调整窗口含 Held-out 月份。`
+          : null,
+      ),
     );
   }
   return panel;
@@ -8159,7 +8166,7 @@ function paperBanners(summary) {
       el(
         "div",
         { class: "banner warn" },
-        `快照已 ${Math.round(summary.age_seconds)} 秒未更新（阈值 ${Math.round(summary.stale_threshold_seconds)} 秒），以下显示最后一次写入的数据。`,
+        `快照已 ${Math.round(summary.age_seconds / 3600)} 小时未更新（阈值 ${Math.round(summary.stale_threshold_seconds / 3600)} 小时），显示的是最后一次写入的数据。`,
       ),
     );
   }
