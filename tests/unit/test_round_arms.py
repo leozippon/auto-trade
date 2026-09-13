@@ -10,13 +10,13 @@ from __future__ import annotations
 
 import importlib
 import json
+import re
 from pathlib import Path
 
 import pytest
 
 from autotrade.environment.llm.model_profiles import LOCAL_QWEN_MODEL
 from autotrade.environment.strategy_loader import validate_strategy_package
-from autotrade.environment.tools.prior_policy import calendar_policy_violation
 from autotrade.pipelines.config import (
     DEFAULT_RESEARCH_GEOMETRY,
     SNAPSHOT_CACHE_FORMAT_VERSION,
@@ -35,6 +35,8 @@ from scripts.experiments._round import (
 )
 
 MODEL_ROLES = ("model", "subagent_model", "nl_model", "compact_model")
+# A four-digit calendar year, the shape every literal date in a directive takes.
+CALENDAR_YEAR = re.compile(r"(?<!\d)(?:19|20)\d{2}(?:\d{4})?(?!\d)")
 PACKS = sorted(path for path in (REPO_ROOT / "configs" / "workspace_refs").iterdir() if path.is_dir())
 
 
@@ -154,12 +156,12 @@ def test_a_round_without_arms_is_never_posted() -> None:
 @pytest.mark.parametrize(("round_name", "experiment_id"), ARMS)
 def test_every_arm_directive_is_usable(round_name: str, experiment_id: str) -> None:
     """A directive is copied into every research session of the arm and must
-    hold no literal calendar date: data windows that must be excluded are named
-    by their cause and defined in the reference pack, and no forward or
-    Held-out date may reach the Agent through it."""
+    hold no calendar year: data windows that must be excluded are named by
+    their cause and defined in the reference pack, and no forward or Held-out
+    date may reach the Agent through it."""
     directive = str(ROUNDS[round_name].request_params(experiment_id)["fold_exploration_directive"])
     assert directive.strip(), experiment_id
-    assert calendar_policy_violation(directive) == "", experiment_id
+    assert not CALENDAR_YEAR.search(directive), (experiment_id, CALENDAR_YEAR.findall(directive))
 
 
 @pytest.mark.parametrize("round_name", ROUND_IDS)
