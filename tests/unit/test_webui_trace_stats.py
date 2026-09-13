@@ -358,12 +358,9 @@ def test_detail_poll_does_not_rebuild_on_environment_stage() -> None:
 
 def test_experiment_detail_skills_title_omits_generation_id() -> None:
     script = APP_JS.read_text(encoding="utf-8")
-    source = script.split("async function renderDetailPage(", 1)[1]
-    head = source.split('const container = el("div", {});', 1)[0]
-    assert (
-        "` ｜ Skills ${Number(detail.skills && detail.skills.count) || 0} 项`"
-        in head
-    )
+    source = script.split("function runStatusLine(", 1)[1]
+    head = source.split("\nfunction ", 1)[0]
+    assert "`Skills ${Number(detail.skills && detail.skills.count) || 0} 项`" in head
     assert "generation_id" not in head
     assert "（${detail.skills.count} 项）" not in head
 
