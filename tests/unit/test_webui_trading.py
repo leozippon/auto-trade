@@ -85,11 +85,23 @@ def test_order_projection_is_a_whitelist_and_never_echoes_extra_fields(tmp_path:
         _order(internal_note="must not surface", account_id="ACCT-PRIVATE"),
     )
     row = trading.orders_payload(tmp_path)["orders"][0]
-    assert set(row) == {"symbol", "action", "quantity", "execute_at"}
+    assert set(row) == {"symbol", "action", "quantity", "execute_at", "name", "reference_price"}
     # Strategy-authored order metadata is writer content, not a projected
     # scalar: it never reaches the payload either.
     assert "rebalance" not in json.dumps(trading.orders_payload(tmp_path))
     assert "ACCT-PRIVATE" not in json.dumps(trading.orders_payload(tmp_path))
+
+
+def test_an_order_carries_the_engine_reference_quote_and_nothing_else_of_it(tmp_path: Path):
+    _jsonl(
+        tmp_path / "data/trading/paper/orders_20260102.jsonl",
+        _order(paper_reference={"name": "平安银行", "close": 10.5, "close_date": "20251231", "secret": "x"}),
+        _order(event_id="o2", paper_reference="not a mapping"),
+    )
+    first, second = trading.orders_payload(tmp_path)["orders"]
+    assert (first["name"], first["reference_price"]) == ("平安银行", 10.5)
+    assert (second["name"], second["reference_price"]) == (None, None)
+    assert "secret" not in json.dumps(first)
 
 
 def test_latest_date_is_selected_and_available_dates_are_listed(tmp_path: Path):

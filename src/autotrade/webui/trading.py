@@ -20,7 +20,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from autotrade.environment.strategy import CN_TZ
-from autotrade.paper.engine import SNAPSHOT_NAME
+from autotrade.paper.engine import REFERENCE_KEY, SNAPSHOT_NAME
 from autotrade.paper.storage import read_jsonl
 
 TRADING_ENVS = ("paper",)
@@ -111,6 +111,10 @@ def _payload(repo_root: Path, env: str, kind: str, date: str | None) -> dict[str
             "symbol": _text(row.get("symbol")), "action": _text(row.get("action")),
             "quantity": _quantity(row.get("quantity")), "execute_at": _text(row.get("execute_at")),
         }
+        if kind == "orders":
+            # The engine's display quote of the order: name and previous close.
+            reference = row.get(REFERENCE_KEY) if isinstance(row.get(REFERENCE_KEY), dict) else {}
+            item.update({"name": _text(reference.get("name")), "reference_price": _number(reference.get("close"))})
         if kind == "deals":
             item.update({
                 "matched_at": _text(row.get("matched_at")), "status": _text(row.get("status")),

@@ -8865,9 +8865,10 @@ function paperDealsPanel(payload) {
 function paperOrdersPanel(payload) {
   const rows = payload.orders || [];
   const panel = el("div", { class: "panel section-gap" });
+  // Open by default: the latest session's orders are what the page is for.
   const details = el(
     "details",
-    {},
+    { open: "" },
     el(
       "summary",
       { style: "cursor:pointer;font-weight:700;font-size:1.02rem" },
@@ -8894,8 +8895,11 @@ function paperOrdersPanel(payload) {
             {},
             el("th", {}, "计划时间"),
             el("th", {}, "代码"),
+            el("th", {}, "名称"),
             el("th", {}, "方向"),
             el("th", {}, "数量"),
+            el("th", {}, "参考价（前收）"),
+            el("th", {}, "约计金额"),
           ),
           ...rows.map((row) =>
             el(
@@ -8903,8 +8907,25 @@ function paperOrdersPanel(payload) {
               {},
               el("td", {}, fmtPaperTime(row.execute_at)),
               el("td", {}, row.symbol || "—"),
+              el("td", {}, row.name || "—"),
               actionCell(row.action),
               el("td", {}, String(row.quantity ?? "—")),
+              el(
+                "td",
+                {},
+                row.reference_price == null
+                  ? "—"
+                  : Number(row.reference_price).toFixed(2),
+              ),
+              el(
+                "td",
+                {},
+                fmtAmountOpt(
+                  row.reference_price == null || row.quantity == null
+                    ? null
+                    : row.reference_price * row.quantity,
+                ),
+              ),
             ),
           ),
         ),
