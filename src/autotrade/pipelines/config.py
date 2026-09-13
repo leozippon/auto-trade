@@ -6,7 +6,7 @@ import math
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import MISSING, KW_ONLY, dataclass, field, fields
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Literal, Protocol
 
@@ -105,6 +105,7 @@ def _verdict_diagnostics(
     selection: Mapping[str, object] | None,
     walk_forward: Mapping[str, object] | None,
     final_artifact: Mapping[str, object] | None,
+    trade_floor: int | None,
 ) -> dict[str, object]:
     """The evidence a Held-out verdict carries beside its gating metrics.
 
@@ -112,7 +113,9 @@ def _verdict_diagnostics(
     ``final_artifact_forward_*`` counts also feed a graduation term — they are
     reported here because they are what tells a reader that
     ``walk_forward_mean_excess_percentile`` describes the development chain and
-    not the artifact Held-out just replayed.
+    not the artifact Held-out just replayed. ``effective_heldout_min_trades``
+    is the trade floor this period was actually held to (``None`` while the
+    knob is off).
     """
 
     source = selection if isinstance(selection, Mapping) else {}
@@ -138,6 +141,7 @@ def _verdict_diagnostics(
         # The shipped artifact's own share of those transitions.
         "final_artifact_forward_transitions": _count(own.get("transitions")),
         "final_artifact_forward_positive": _count(own.get("positive_excess")),
+        "effective_heldout_min_trades": trade_floor,
     }
 
 
@@ -156,7 +160,8 @@ class AcceptanceRules:
     # the profile's slippage. 1.0 (the default) leaves the verdict unchanged.
     cost_stress_multiplier: float = 1.0
     # Graduation-only floor on closed round trips: a Held-out result carried by
-    # a handful of trades proves nothing. 0 disables the check.
+    # a handful of trades proves nothing. Set per configured Held-out window; a
+    # release-clipped replay is held to its share. 0 disables the check.
     heldout_min_trades: int = 0
     # Confirmation folds: the tail of the development window reserved for
     # confirming the artifact already in force. One knob, two consumers --
@@ -226,7 +231,10 @@ class AcceptanceRules:
                 f"> 0 with slippage multiplied by {self.cost_stress_multiplier}"
             )
         if self.heldout_min_trades > 0:
-            required["trade_count"] = f">= {self.heldout_min_trades}"
+            required["trade_count"] = (
+                f">= {self.heldout_min_trades} per configured Held-out window, "
+                "scaled to the replayed share when the release ends first"
+            )
         required["walk_forward_positive_excess"] = (
             ">= ceil(2/3) of the final Epoch's out-of-sample transitions"
         )
@@ -314,8 +322,9 @@ class AcceptanceRules:
         paying that multiple of the profile's slippage (the summary's
         ``cost_sensitivity`` block prices one basis point per side); with
         ``heldout_min_trades > 0`` the replay must have closed at least that
-        many round trips. Both fail closed when the input they need is absent,
-        and the thresholds used are recorded in the verdict.
+        many round trips per configured window (``_heldout_trade_floor``). Both
+        fail closed when the input they need is absent, and the thresholds used
+        are recorded in the verdict.
 
         ``diagnostics`` rides beside the gating metrics: the deflated-Sharpe
         probability, the trial count behind it and the Validation null
@@ -384,10 +393,11 @@ class AcceptanceRules:
         trade_count = (
             trades if isinstance(trades, int) and not isinstance(trades, bool) else None
         )
-        if self.heldout_min_trades > 0:
+        trade_floor = self._heldout_trade_floor(window)
+        if trade_floor is not None:
             if trade_count is None:
                 reasons.append("missing_trade_count")
-            elif trade_count < self.heldout_min_trades:
+            elif trade_count < trade_floor:
                 reasons.append("insufficient_trades")
         consistency = self.walk_forward_consistency(walk_forward)
         if consistency["status"] == "inconsistent":
@@ -424,10 +434,33 @@ class AcceptanceRules:
             "walk_forward": consistency,
             "confirmation_folds": self.confirmation_folds,
             "diagnostics": _verdict_diagnostics(
-                selection, walk_forward, final_artifact
+                selection, walk_forward, final_artifact, trade_floor
             ),
             "window": dict(window) if window is not None else None,
         }
+
+    def _heldout_trade_floor(self, window: Mapping[str, object] | None) -> int | None:
+        """The closed-round-trip floor one Held-out replay is held to.
+
+        ``heldout_min_trades`` is set for the configured Held-out window. When
+        the release ends before that window does, the replay had
+        proportionally fewer days to trade, so the floor scales by the
+        replayed share of the window's calendar span, rounded up and never
+        below one. ``None`` while the knob is 0; a replay with no stated
+        window (or an untruncated one) keeps the full floor.
+        """
+
+        if self.heldout_min_trades <= 0:
+            return None
+        if window is None:
+            return self.heldout_min_trades
+        start, end, requested_end = (
+            date.fromisoformat(str(window[key]))
+            for key in ("replay_start", "replay_end", "requested_end")
+        )
+        replayed = (end - start).days + 1
+        configured = (requested_end - start).days + 1
+        return max(1, -(-self.heldout_min_trades * replayed // configured))
 
     def _final_artifact_reasons(
         self,

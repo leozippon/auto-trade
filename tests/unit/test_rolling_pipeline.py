@@ -1693,6 +1693,7 @@ def test_single_window_fold_has_no_frozen_test_and_held_out_graduates(tmp_path: 
             "walk_forward_mean_excess_percentile": None,
             "final_artifact_forward_transitions": 0,
             "final_artifact_forward_positive": 0,
+            "effective_heldout_min_trades": None,
         },
         # The window the figures were measured on: the whole configured
         # quarter, which the release covers, so nothing was truncated.

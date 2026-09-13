@@ -483,7 +483,7 @@ _FIELDS: list[dict[str, object]] = [
         "group": "预算与验收",
         "label": "毕业最少完成交易数",
         "type": "int",
-        "help": "毕业裁决要求 Held-out 完成的回合交易数下限（trade_count），低于则记 insufficient_trades。0 关闭该项。",
+        "help": "毕业裁决要求 Held-out 完成的回合交易数下限（trade_count），按配置的整个 Held-out 窗口给出；回放被发布版本截短时按回放占窗口的日历天数比例折算（向上取整，至少 1）。低于则记 insufficient_trades。0 关闭该项。",
     },
     {
         "key": "confirmation_folds",

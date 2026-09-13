@@ -373,6 +373,7 @@ class AcceptanceRulesTest(unittest.TestCase):
                 "walk_forward_mean_excess_percentile": 0.42,
                 "final_artifact_forward_transitions": 2,
                 "final_artifact_forward_positive": 2,
+                "effective_heldout_min_trades": None,
             },
         )
         # The term (b) block keeps its shape: the console reads it as is.
@@ -389,6 +390,7 @@ class AcceptanceRulesTest(unittest.TestCase):
                 "walk_forward_mean_excess_percentile": None,
                 "final_artifact_forward_transitions": None,
                 "final_artifact_forward_positive": None,
+                "effective_heldout_min_trades": None,
             },
         )
 
@@ -476,6 +478,41 @@ class HeldOutCostAndTradeGateTest(unittest.TestCase):
         missing = {key: value for key, value in self.SUMMARY.items() if key != "trade_count"}
         self.assertEqual(rules.heldout_verdict(missing)["reasons"], ["missing_trade_count"])
         self.assertEqual(AcceptanceRules().heldout_verdict(missing)["reasons"], [])
+
+    def test_the_trade_floor_scales_to_a_release_clipped_window(self) -> None:
+        # The knob is per configured window. The confirm arm's 20260601..0930
+        # Held-out replayed to 0909: 101 of 122 calendar days -> ceil(16.56).
+        rules = AcceptanceRules(heldout_min_trades=20)
+        clipped = {
+            "replay_start": "20260601",
+            "replay_end": "20260909",
+            "requested_end": "20260930",
+            "truncation_reason": "release_ends_20260909",
+        }
+        verdict = rules.heldout_verdict({**self.SUMMARY, "trade_count": 17}, window=clipped)
+        self.assertEqual(verdict["reasons"], [])
+        self.assertEqual(verdict["heldout_min_trades"], 20)
+        self.assertEqual(verdict["diagnostics"]["effective_heldout_min_trades"], 17)
+        short = rules.heldout_verdict({**self.SUMMARY, "trade_count": 16}, window=clipped)
+        self.assertEqual(short["reasons"], ["insufficient_trades"])
+        # The full window keeps the configured floor exactly.
+        full = {**clipped, "replay_end": "20260930", "truncation_reason": None}
+        verdict = rules.heldout_verdict({**self.SUMMARY, "trade_count": 19}, window=full)
+        self.assertEqual(verdict["reasons"], ["insufficient_trades"])
+        self.assertEqual(verdict["diagnostics"]["effective_heldout_min_trades"], 20)
+        # Rounded up and never below one, however short the replay.
+        stub = {**clipped, "replay_end": "20260601"}
+        verdict = AcceptanceRules(heldout_min_trades=2).heldout_verdict(
+            {**self.SUMMARY, "trade_count": 0}, window=stub
+        )
+        self.assertEqual(verdict["reasons"], ["insufficient_trades"])
+        self.assertEqual(verdict["diagnostics"]["effective_heldout_min_trades"], 1)
+        # Off stays off.
+        self.assertIsNone(
+            AcceptanceRules().heldout_verdict(self.SUMMARY, window=clipped)["diagnostics"][
+                "effective_heldout_min_trades"
+            ]
+        )
 
     def test_a_raw_excess_that_is_only_a_tilt_does_not_graduate(self) -> None:
         """The neutralized excess is a criterion of its own.
