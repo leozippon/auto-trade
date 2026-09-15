@@ -58,21 +58,17 @@
 - 快照 `daily` 已归一化（`amount`、`circ_mv` 元；`turnover_rate`、`pct_chg` 小数）；原始湖 `amount` 千元、`circ_mv` 万元。
 - 本包不读 `fina_indicator_vip`：`grossprofit_margin`、`q_roe` 等只在变体 d 的六腿 `QC` 里用到。
 
-## starter 冒烟（真实路径）
+## starter 冒烟（真实路径，研究种子）
 
-命令（仓库根，`logs/notes/review_20260912/tools/dir4_smoke.py`）：把种子 `data/pit_views_seed_ext_20260917` 的决策视图、`valid` 回放槽、bundle 与 as-of 部件用 `seed_pit_view_slots` 硬链到临时缓存根，然后以 `PITDailyEvaluationBackend(execution_mode="sandbox", image="autotrade-sandbox:latest").evaluate(request, max_days=3)` 重放——与 `smoke_backtest` 同一条路径（滚动 as-of 视图、真实 `AccountSnapshot`、`DockerStrategyExecutor`、单次决策超时），`BrokerProfile(initial_cash=100000)`、`StrategySchedule("day","08:30")`：
+命令（仓库根，脚本全文在 `logs/notes/review_20260915/ARMS2_build.md`）：`smoke.py defensive_quality_20260920 configs/workspace_refs/defensive_quality_20260918 Y1 <天数> <CANDIDATE>`。脚本把本臂的 arm 参数送进控制台同一个创建前检查（`_round.normalize`）与 `resolve_worker_options`，用 `worker._strategy_sandbox_from_spec` 得到策略容器的边界（16 核、`gpu_count=0`、单次决策 360 秒、`fit` 3,600 秒）；视图经 `ResearchPITSnapshotProvider` 从研究种子 `data/pit_views_seed_research_20260920` 硬链接进临时缓存，再由 `PITDailyEvaluationBackend.evaluate(request, max_days=N)` 在沙箱镜像里回放第一个研究年的开头——与 `smoke_backtest` 同一条路径（滚动 as-of 视图、真实账户快照、`DockerStrategyExecutor`、单次决策超时）。容器内存每 2 秒采样一次。
 
-```bash
-PYTHONPATH=src ~/miniconda3/envs/quant/bin/python logs/notes/review_20260912/tools/dir4_smoke.py 20230401_20240331_20230331T235959+0800 3 s1   # 年报季起点
-PYTHONPATH=src ~/miniconda3/envs/quant/bin/python logs/notes/review_20260912/tools/dir4_smoke.py 20230701_20240630_20230630T235959+0800 3 s1   # 盛夏起点
-```
+| `CANDIDATE` | 决策日 | 订单（成交 / 拒单） | 策略段秒数 | 每次决策 | 容器内存峰值 | 整体墙钟 |
+|---|---|---|---|---|---|---|
+| `s1` | 23（七月首个交易日起，含八月首个决策日的复核） | 31（30 / 1）：首日 15 买；八月复核 8 卖、8 买，1 买因涨跌停拒单 | 96.5 | 4.2 秒 | 1.14 GiB | 129.5 秒 |
+| `s1` | 3 | 15（15 / 0） | 13.0 | 4.3 秒 | 0.83 GiB | 46.2 秒（回放帧 11.4 秒、Timeview 初始化 18.3 秒） |
+| `s_cfq` / `s_lowvol` / `c_vol20` / `c_growth` / `c_es` | 各 1 | 各 15（`s_cfq`、`c_es` 各 1 笔涨跌停拒单，其余全成） | 4.2–4.6 | 4.2–4.6 秒 | 0.42–0.53 GiB | 36–39 秒 |
 
-| 窗口 | 决策日 | 订单 | 成交 | 拒单 | 策略段耗时（3 次决策） | 峰值容器内存 | 仓位 | 整体墙钟 |
-|---|---|---|---|---|---|---|---|---|
-| 年报季（四月首个交易日起） | 3 | 15 买单（`s1_entry`，15:00，`vol_basis=residual`） | 15 | 0 | 36.8 秒 ≈ 12.3 秒/次（与另一场回放的启动和本地核对并发，有争用） | 0.87 GiB | gross 0.985 | 227.7 秒（含 118 秒回放帧加载、71 秒 Timeview 初始化，同为争用读数） |
-| 盛夏（七月首个交易日起） | 3 | 15 买单（`s1_entry`，`vol_basis=residual`） | 15 | 0 | 14.7 秒 ≈ 4.9 秒/次 | 0.88 GiB | gross 0.977 | 73.3 秒（含 35 秒回放帧加载、22 秒 Timeview 初始化） |
-
-两窗口都满仓，费用 76 元；3 天内无复核日因此无卖单，第二、三个决策日各返回 `[]`。本地信任模式核对（`dir4_local_check.py`，决策快照直接硬链成 as-of 布局）：春季截面池 2,905（最新报表年龄中位 104 个交易日，`c_es` 2,838——与修正后的盈利意外包同一决策日的读数一致），六条腿各 8.4–10.6 秒/次、RSS 0.94–1.50 GB；盛夏池 2,870（年龄中位 40，`c_es` 2,855）。`validate_strategy_package` 返回 `None`（无 `fit`）。
+八月复核的换名数正好是 `MAX_REPLACE`（8），23 天费用合计 152 元、平均仓位 0.93；第一个研究年开头的报表与一致预期都来自 2020 年起的数据下限，六条腿都有足够的可选名字出满 15 只。`validate_strategy_package` 返回 `None`（无 `fit`）。
 
 ## 为什么对照门要两份独立证据才关闭
 
