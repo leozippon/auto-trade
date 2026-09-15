@@ -1,6 +1,10 @@
 #!/usr/bin/env python
 """The 2026-09-20 round: the first research-forward arms, on one seed.
 
+The arms carry 20260921 ids: the first launch of these four directions was
+retired on 2026-09-15, when research became one session per arm, and an id is
+never reused. The reference packs keep their own directory names.
+
 Four arms share the research geometry and budgets of `_round.BASE_OVERRIDES`
 and the dataset selection the seed below was prebuilt for. A dataset whose rows
 do not span 2020-07 through the Held-out replay end is left out of it:
@@ -18,17 +22,17 @@ Contamination, per arm. Operator-side only: the packs themselves carry no
 reading from after research end, so none of this reaches the Agent, but it
 decides how much each forward verdict is worth.
 
-- gru_ranker_20260920: forward unseen. Its direction probes
+- gru_ranker_20260921: forward unseen. Its direction probes
   (logs/notes/review_20260915/NA1_next_arm_research.md) read no row after
   research end.
-- open_research_20260920: forward unseen for its direction, which nobody has
+- open_research_20260921: forward unseen for its direction, which nobody has
   chosen yet. Its controls come from the same research-only NA1 study; some of
   its lessons and closed families were drawn from Fold-era probes that read
   later rows, and the pack keeps them only as prohibitions, without readings.
-- alpha158_lgbm_20260920: the graduate lineage (github_confirm_20260917). Its
+- alpha158_lgbm_20260921: the graduate lineage (github_confirm_20260917). Its
   selection used rows after research end and the operator has seen its forward
   behaviour, so its forward verdict is a pipeline baseline, not evidence.
-- defensive_quality_20260920 (pack carried over from the Fold-era arm
+- defensive_quality_20260921 (pack carried over from the Fold-era arm
   defensive_quality_20260918): its direction probes
   (logs/notes/review_20260912/DIR4_more_arms.md, DIR6) read rows through
   mid-2026, the whole forward period. The pack keeps only calendar-year readings
@@ -116,7 +120,7 @@ TEXT_DATASETS = ["report_rc"]
 ARMS: dict[str, dict[str, object]] = {
     # The one GPU arm; the pack discloses that its research-period evidence sits
     # below the Alpha158 + LightGBM ranker.
-    "gru_ranker_20260920": {
+    "gru_ranker_20260921": {
         "workspace_reference": "configs/workspace_refs/gru_ranker_20260920",
         # fit trains on a card in every replay: the starter has no CPU path.
         "gpu_count": 1,
@@ -131,7 +135,7 @@ ARMS: dict[str, dict[str, object]] = {
         ),
     },
     # The reference arm: its forward verdict calibrates the pipeline.
-    "alpha158_lgbm_20260920": {
+    "alpha158_lgbm_20260921": {
         "workspace_reference": "configs/workspace_refs/alpha158_lgbm_20260920",
         "research_directive": (
             "本臂是参考臂：旧流程一个冻结产物里的 Alpha158 + LightGBM 截面排序器，放到研究会话流程里。"
@@ -142,7 +146,7 @@ ARMS: dict[str, dict[str, object]] = {
             "打分器；一轮只改一个常量。没有候选满足提名条件时按 families.md 以 no_edge 结束，不换家族。"
         ),
     },
-    "open_research_20260920": {
+    "open_research_20260921": {
         "workspace_reference": "configs/workspace_refs/open_research_20260920",
         "research_directive": (
             "本臂是开放方向的臂：不指定机制家族，在研究期上找一个只做多、15–30 只、有经济解释并在书本"
@@ -153,7 +157,7 @@ ARMS: dict[str, dict[str, object]] = {
             "预算用尽前仍没有候选满足提名条件时以 no_edge 结束。"
         ),
     },
-    "defensive_quality_20260920": {
+    "defensive_quality_20260921": {
         "workspace_reference": "configs/workspace_refs/defensive_quality_20260918",
         "research_directive": (
             "本臂是固定方向的臂：防御型质量——现金流盈利质量（低应计、高经营现金流/资产，取首版报表）"

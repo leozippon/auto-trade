@@ -187,6 +187,7 @@ ROUND_REPORT_KEYS: tuple[str, ...] = (
 # be indistinguishable from the first in every record that survives it.
 RETIRED_IDS: frozenset[str] = frozenset(
     {
+        "alpha158_lgbm_20260920",
         "alt_events_ranker_20260916",
         "alt_events_ranker_20260917",
         "analyst_revision_20260916",
@@ -195,16 +196,19 @@ RETIRED_IDS: frozenset[str] = frozenset(
         "corner_cases_20260907",
         "corner_cases_20260910",
         "defensive_quality_20260918",
+        "defensive_quality_20260920",
         "earnings_surprise_20260918",
         "explore_github_strategies_20260910",
         "explore_platform_strategies_20260910",
         "factor_cs_20260910",
         "factor_cs_allflash_20260910",
         "github_confirm_20260917",
+        "gru_ranker_20260920",
         "margin_flow_20260916",
         "margin_flow_20260917",
         "ml_ranker_20260910",
         "open_mechanism_20260910",
+        "open_research_20260920",
         "order_flow_ranker_20260917",
         "site_visits_20260914",
         "value_regime_20260914",
