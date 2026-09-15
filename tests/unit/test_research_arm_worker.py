@@ -568,6 +568,69 @@ def test_an_interrupted_llm_session_resumes_with_its_summary_budget_and_nodes(
     assert list((experiment / "artifacts" / "strategy" / "revisions").iterdir()) == []
 
 
+def test_an_interrupted_session_without_a_checkpoint_resumes_from_the_note_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, synthetic_provider
+):
+    """The first attempt loses its model before it validated or compacted
+    anything. The resumed attempt has no summary to start from: it opens with
+    the note alone (which says so), continues the call budget, and ends the
+    arm honestly."""
+
+    from autotrade.environment.llm import ProviderResponse, ToolCall
+    from tests.unit.test_interactive_worker_local import (
+        VALIDATE_WORKING_COPY,
+        _NominatingLLM,
+        _NoShellRunner,
+    )
+
+    repo, experiment = make_arm(
+        tmp_path, developer_mode="llm", max_replay_years=2, session_max_attempts=1, max_llm_calls=40
+    )
+    monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
+    options = load_worker_options(experiment, repo_root=repo)
+    with pytest.raises(RuntimeError, match="language model unavailable"):
+        run_local_interactive_worker(
+            options, llm=_NominatingLLM([]), command_runner_factory=lambda _workspace: _NoShellRunner()
+        )
+    ledger = ExperimentLedger(options.rolling.ledger_path)
+    [failed] = ledger.read()
+    assert failed["record_type"] == "attempt_failed"
+    assert not (experiment / "steps" / "tree.json").is_file()
+
+    reason = "neutralized excess is negative in three of four research years; the null percentile is 0.48"
+    second_llm = _NominatingLLM(
+        [
+            ProviderResponse(tool_calls=(VALIDATE_WORKING_COPY,)),
+            ProviderResponse(
+                tool_calls=(ToolCall("finish", "finish_session", {"outcome": "no_edge", "reason": reason}),)
+            ),
+        ]
+    )
+    result = run_local_interactive_worker(
+        load_worker_options(experiment, repo_root=repo),
+        llm=second_llm,
+        command_runner_factory=lambda _workspace: _NoShellRunner(),
+    )
+
+    records = ledger.read()
+    assert [row["record_type"] for row in records] == ["attempt_failed", "research_session"]
+    record = records[1]
+    assert record["attempts"] == 2 and record["outcome"] == "no_edge"
+    assert record["arm_end"] == {"status": "no_deliverable", "reason": f"no_edge: {reason}"}
+    assert record["trials_to_date"] == 1
+    # Three failed calls of the first attempt, then this attempt's.
+    assert record["budget_used"]["llm_calls"] == 3 + len(second_llm.calls)
+    assert result["verdict"]["status"] == "no_deliverable"
+    opening = second_llm.calls[0]["messages"]
+    assert [message.role for message in opening] == ["system", "user"]
+    note = opening[1].content
+    assert "第 2 次尝试" in note and "language model unavailable" in note
+    assert "中断前没有压缩摘要" in note and "模型调用 3/40" in note
+    facts = json.loads(opening[0].content.split("```json\n", 1)[1].split("\n```", 1)[0])
+    assert facts["budgets"]["used_before_this_attempt"]["llm_calls"] == 3
+    assert facts["arm"]["trials_to_date"] == 0
+
+
 def test_a_resume_without_the_interrupted_workspace_fails_the_attempt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, synthetic_provider
 ):

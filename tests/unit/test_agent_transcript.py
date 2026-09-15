@@ -136,3 +136,38 @@ def test_a_transcript_needs_the_runs_opaque_ref(tmp_path: Path):
             ids={"experiment_id": "exp"},
             transcript_dir=tmp_path / "transcripts",
         )
+
+
+def test_host_paths_never_reach_the_transcript_and_its_files_stay_private(tmp_path: Path):
+    """The transcript is the Agent-visible boundary of the trace: an exception
+    or a result that names an absolute host path is redacted there while the
+    host JSONL keeps it, sandbox mounts under /mnt stay, and the directory and
+    its parts are private like the JSONL beside them."""
+
+    import stat
+
+    writer = _writer(tmp_path)
+    host_path = f"{tmp_path}/experiments/exp/artifacts/run_raw/result.json"
+    writer.emit(
+        "session_error",
+        {"status": "error", "error": f"FileNotFoundError: [Errno 2] No such file or directory: '{host_path}'"},
+    )
+    writer.emit(
+        "tool_call",
+        {
+            "call_index": 2,
+            "tool_call_id": "call_2",
+            "tool": "read_file",
+            "arguments": {"root": "output", "path": "main.py"},
+            "result": {"ok": False, "error": f"host says {host_path}", "hint": "/mnt/agent/workspace/output/main.py"},
+        },
+    )
+    transcript = tmp_path / "artifacts" / "transcripts" / "run_ref_x.txt"
+    text = transcript.read_text(encoding="utf-8")
+    assert str(tmp_path) not in text
+    assert "[host_path]" in text
+    assert "/mnt/agent/workspace/output/main.py" in text
+    # The host trace is untouched evidence.
+    assert host_path in (tmp_path / "artifacts" / "traces" / "run_raw.jsonl").read_text(encoding="utf-8")
+    assert stat.S_IMODE(transcript.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(transcript.stat().st_mode) == 0o600

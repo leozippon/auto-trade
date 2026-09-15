@@ -15,7 +15,11 @@ import json
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from autotrade.environment.runtime import agent_trace_path, write_json_atomic
+from autotrade.environment.runtime import (
+    agent_trace_path,
+    redact_host_paths,
+    write_json_atomic,
+)
 from autotrade.environment.step_tree import StepTree
 
 from .config import BudgetUsed, EvaluationResult, SessionResume, StepResult
@@ -126,7 +130,8 @@ def resume_state(
     return SessionResume(
         attempt=len(attempts) + 1,
         interrupted_at=interrupted_at or str(last.get("recorded_at") or ""),
-        error=str(last.get("error") or ""),
+        # The note this becomes is Agent-visible; the ledger keeps the raw text.
+        error=redact_host_paths(str(last.get("error") or "")),
         compaction_summary=summary,
         budget_used=budget,
         transcripts=tuple(transcripts),

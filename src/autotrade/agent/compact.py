@@ -302,7 +302,6 @@ class ContextCompactor(SessionTimeBudgetAware):
             "summary_chars": len(summary_text),
             "summary": summary_text,
             "files": files,
-            "compaction_index": self.compaction_count,
         }
         if request_context_edit:
             event["request_context_edit"] = request_context_edit

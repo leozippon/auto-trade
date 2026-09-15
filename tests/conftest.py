@@ -6,11 +6,9 @@ its .pth entry before ours, so bare `pytest` imported the sibling's
 against the tree they live in.
 """
 
-import getpass
 import os
 import stat
 import sys
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -57,6 +55,12 @@ def _restore_tmp_path_writable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 
 def pytest_sessionfinish(session, exitstatus):
-    root = Path(tempfile.gettempdir()) / f"pytest-of-{getpass.getuser()}"
+    # Only this session's basetemp: the retained ``pytest-of-<user>`` root is
+    # shared with every other pytest process of the same user, and walking it
+    # would lift the 0600/0444 modes a concurrent session is asserting on.
+    factory = getattr(session.config, "_tmp_path_factory", None)
+    if factory is None:
+        return
+    root = Path(factory.getbasetemp())
     if root.is_dir():
         _restore_writable_tree(root)

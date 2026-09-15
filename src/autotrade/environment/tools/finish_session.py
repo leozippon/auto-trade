@@ -9,7 +9,9 @@ from autotrade.environment.step_tree import StepTree, node_in_session
 
 from .base import ToolError, ToolResult, ToolSpec
 
-SESSION_OUTCOMES = ("freeze", "no_edge")
+# The outcomes the Agent may state; the Pipeline's SESSION_OUTCOMES adds the
+# host-recorded ``deadline``.
+FINISH_OUTCOMES = ("freeze", "no_edge")
 # A voluntary freeze that leaves more than this share of the replay-year budget
 # unused must say why. It is a justification, not a block, and it lapses once
 # another batch cannot fit.
@@ -84,7 +86,7 @@ class FinishSessionTool:
             "properties": {
                 "outcome": {
                     "type": "string",
-                    "enum": list(SESSION_OUTCOMES),
+                    "enum": list(FINISH_OUTCOMES),
                     "description": (
                         "freeze: nominate node_id for the freeze gate. no_edge: end "
                         "the arm without a deliverable."
@@ -327,9 +329,9 @@ def _gate_numbers(gate: Mapping[str, object]) -> str:
 
 __all__ = [
     "EARLY_FINISH_BUDGET_FRACTION",
+    "FINISH_OUTCOMES",
     "REASON_MAX_CHARS",
     "REASON_MIN_CHARS",
-    "SESSION_OUTCOMES",
     "FinishSessionTool",
     "FreezeGate",
     "SessionBudgetStatus",

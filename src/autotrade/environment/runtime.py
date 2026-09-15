@@ -584,7 +584,9 @@ def render_transcript_block(record: Mapping[str, object], *, omit: Collection[st
     Text fields are printed verbatim, structured fields as indented JSON so
     ``read_file``'s line paging and ``grep -C`` land on individual values, and
     whatever is left travels on one ``meta`` line. Every field is clipped at
-    the trace's content preview size.
+    the trace's content preview size, and the block is the Agent-visible
+    boundary: absolute host paths (an exception text, a host-side result
+    reference) are redacted here, while the host JSONL keeps them.
     """
 
     header = f"=== {record.get('ts', '')} {record.get('event_type', '')}"
@@ -613,7 +615,7 @@ def render_transcript_block(record: Mapping[str, object], *, omit: Collection[st
                 json.dumps(meta, ensure_ascii=False, sort_keys=True, default=str)
             )
         )
-    return "\n".join(lines) + "\n\n"
+    return redact_host_paths("\n".join(lines)) + "\n\n"
 
 
 def _trace_payload_head(payload: dict[str, object]) -> str | None:
@@ -733,9 +735,13 @@ class AgentTraceWriter:
     def _append_transcript(self, record: dict[str, object]) -> None:
         if self.transcript_dir is None:
             return
-        self.transcript_dir.mkdir(parents=True, exist_ok=True)
+        # Private like the JSONL beside it: the session reads it host-side
+        # through the ``trace`` root, nothing else needs to.
+        self.transcript_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.transcript_dir.chmod(0o700)
         target = _transcript_target(self.transcript_dir, str(self.ids["run_id"]))
         block = render_transcript_block(record, omit=self.ids)
         with target.open("a", encoding="utf-8") as handle:
             handle.write(block)
+        target.chmod(0o600)
 
