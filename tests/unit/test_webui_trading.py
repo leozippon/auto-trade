@@ -25,9 +25,11 @@ from fastapi.testclient import TestClient
 from autotrade.paper.orders import order_sheet
 from autotrade.webui import trading
 from autotrade.webui.server import create_app
-from tests.unit.test_paper_trading import COUNTER_STRATEGY, SESSIONS, _Book
+from tests.unit.paper_book_fixture import engine_book, paper_root, write_book_record
 
-DETAIL_ROUTES = ("book", "signal", "history", "performance", "snapshot", "health")
+BOOK = "exp"
+# The panels one book's page reads, each under /api/trading/<env>/books/<book>/.
+BOOK_ROUTES = ("status", "book", "signal", "history", "performance", "snapshot")
 
 
 def _jsonl(path: Path, *payloads: object) -> None:
@@ -67,24 +69,6 @@ def _execution(**overrides: object) -> dict[str, object]:
     return row
 
 
-def _engine_book(tmp_path: Path, *days: str) -> Path:
-    """A book the real engine wrote (trusted executor, synthetic bars): the
-    counter strategy buys on its first decision and sells on its third. A later
-    call continues the same book with further days."""
-    book = _Book(tmp_path / "data/trading", COUNTER_STRATEGY, sessions=("20260102", *SESSIONS))
-    for day in days:
-        book.run(day)
-    (book.root / "book.json").write_text(
-        json.dumps({
-            "experiment_id": "exp", "artifact_id": "art", "candidate_source": "graduated",
-            "note": "参考簿（观察中）", "profile": {"initial_cash": 100_000.0},
-            "schedule": {"inference_time": "08:30"}, "raw_dir": "/private/lake",
-        }),
-        encoding="utf-8",
-    )
-    return book.root
-
-
 def _csi300_slot(root: Path, name: str, pct_chg: dict[str, float]) -> None:
     """One replay slot of the book's PIT cache carrying CSI 300 (and another index)."""
     slot = root / "pit/gen/pit_views/replay/paper" / name
@@ -98,8 +82,8 @@ def _csi300_slot(root: Path, name: str, pct_chg: dict[str, float]) -> None:
 
 
 def test_the_book_panel_is_a_whitelist_of_the_frozen_identity(tmp_path: Path):
-    _engine_book(tmp_path, "20260105", "20260106")
-    payload = trading.book_payload(tmp_path)
+    engine_book(tmp_path, "20260105", "20260106")
+    payload = trading.book_payload(tmp_path, BOOK)
     assert payload["state"] == "ok"
     assert payload["book"] == {
         "experiment_id": "exp", "artifact_id": "art", "candidate_source": "graduated",
@@ -110,8 +94,8 @@ def test_the_book_panel_is_a_whitelist_of_the_frozen_identity(tmp_path: Path):
 
 
 def test_the_signal_is_the_latest_order_sheet_and_history_keeps_every_earlier_day(tmp_path: Path):
-    _engine_book(tmp_path, "20260105")
-    signal = trading.signal_payload(tmp_path)["signal"]
+    engine_book(tmp_path, "20260105")
+    signal = trading.signal_payload(tmp_path, BOOK)["signal"]
     # The first morning buys 100 at the 10.50 reference; the post-trade account
     # is that holding plus the cash left, so the weights sum to one.
     [target] = signal["target"]
@@ -123,10 +107,10 @@ def test_the_signal_is_the_latest_order_sheet_and_history_keeps_every_earlier_da
     }
     # The strategy's own order metadata ("call") is writer content, never served.
     assert '"call"' not in json.dumps(signal)
-    assert trading.history_payload(tmp_path) == {"env": "paper", "state": "absent", "error": None, "days": []}
+    assert trading.history_payload(tmp_path, BOOK) == {"env": "paper", "state": "absent", "error": None, "days": []}
 
-    root = _engine_book(tmp_path, "20260106", "20260107")
-    signal = trading.signal_payload(tmp_path)["signal"]
+    root = engine_book(tmp_path, "20260106", "20260107")
+    signal = trading.signal_payload(tmp_path, BOOK)["signal"]
     assert (signal["trade_date"], signal["data_through"]) == ("20260107", "20260106")
     assert [(row["action"], row["quantity"], row["reference_price"], row["notional"]) for row in signal["orders"]] == [
         ("sell", 100, 12.5, 1250.0)
@@ -134,7 +118,7 @@ def test_the_signal_is_the_latest_order_sheet_and_history_keeps_every_earlier_da
     assert signal["target"] == [] and signal["cash_after"] == order_sheet(root, "20260107")["cash_after"]
     # Every earlier day, newest first, its orders and fills under one session
     # key; the latest decision stays the signal's until its fills exist.
-    days = trading.history_payload(tmp_path)["days"]
+    days = trading.history_payload(tmp_path, BOOK)["days"]
     assert [day["trade_date"] for day in days] == ["20260106", "20260105"]
     assert days[0]["orders"] == [] and days[0]["fills"] == []
     assert [row["action"] for row in days[1]["orders"]] == ["buy"]
@@ -143,7 +127,7 @@ def test_the_signal_is_the_latest_order_sheet_and_history_keeps_every_earlier_da
 
 
 def test_performance_keys_return_equity_cash_and_csi300_by_the_same_settled_days(tmp_path: Path):
-    root = _engine_book(tmp_path, "20260105", "20260106", "20260107", "20260108")
+    root = engine_book(tmp_path, "20260105", "20260106", "20260107", "20260108")
     journal = [json.loads(line) for line in (root / "equity_daily.jsonl").read_text(encoding="utf-8").splitlines()]
     settled = [row["trade_date"] for row in journal]
     assert settled == ["20260105", "20260106", "20260107"]
@@ -154,7 +138,7 @@ def test_performance_keys_return_equity_cash_and_csi300_by_the_same_settled_days
         "20260102_20260108_20251231T235959+0800",
         {"20260102": 5.0, "20260105": 1.0, "20260106": -0.5, "20260107": 0.2},
     )
-    payload = trading.performance_payload(tmp_path)
+    payload = trading.performance_payload(tmp_path, BOOK)
     chart, stats = payload["chart"], payload["statistics"]
     assert chart["series"][0]["dates"] == chart["account"]["dates"] == chart["benchmark"]["dates"] == settled
     assert chart["account"]["equity"] == [row["equity"] for row in journal]
@@ -172,39 +156,44 @@ def test_performance_keys_return_equity_cash_and_csi300_by_the_same_settled_days
     # CSI 300 missing one settled day: its curve keeps the days it has, the
     # excess is not computed over a different window.
     _csi300_slot(root, "20260102_20260108_20251231T235959+0800", {"20260105": 1.0, "20260106": -0.5})
-    partial = trading.performance_payload(tmp_path)
+    partial = trading.performance_payload(tmp_path, BOOK)
     assert partial["benchmark_days"] == 2 and partial["chart"]["benchmark"]["dates"] == settled[:2]
     assert partial["statistics"]["benchmark_return"] is None and partial["statistics"]["excess_return"] is None
 
 
 def test_annualised_statistics_appear_once_the_book_has_enough_days(tmp_path: Path, monkeypatch):
-    _engine_book(tmp_path, "20260105", "20260106", "20260107", "20260108")
+    engine_book(tmp_path, "20260105", "20260106", "20260107", "20260108")
     monkeypatch.setattr(trading, "MIN_STATISTICS_DAYS", 3)
-    stats = trading.performance_payload(tmp_path)["statistics"]
+    stats = trading.performance_payload(tmp_path, BOOK)["statistics"]
     assert None not in (stats["annualized_return"], stats["sharpe"], stats["max_drawdown"])
 
 
 def test_missing_and_damaged_book_files_degrade_per_panel(tmp_path: Path):
-    for projection in (trading.book_payload, trading.signal_payload, trading.history_payload, trading.performance_payload):
-        assert projection(tmp_path)["state"] == "absent", projection.__name__
-    assert trading.environment_summary(tmp_path)["state"] == "absent"
-    root = _engine_book(tmp_path, "20260105", "20260106")
+    assert trading.books_payload(tmp_path)["state"] == "absent"
+    with pytest.raises(KeyError):
+        trading.signal_payload(tmp_path, BOOK)  # not a book under the root
+    write_book_record(paper_root(tmp_path) / BOOK)  # created, never run
+    for projection in (trading.signal_payload, trading.history_payload, trading.performance_payload):
+        assert projection(tmp_path, BOOK)["state"] == "absent", projection.__name__
+    assert trading.book_status(tmp_path, BOOK)["state"] == "no_snapshot"
+    root = engine_book(tmp_path, "20260105", "20260106")
     (root / ".paper_state.json").write_text("{broken", encoding="utf-8")
     for projection in (trading.book_payload, trading.signal_payload, trading.history_payload):
-        payload = projection(tmp_path)
+        payload = projection(tmp_path, BOOK)
         assert payload["state"] == "unreadable" and payload["error"], projection.__name__
-    assert trading.environment_summary(tmp_path)["state"] == "unreadable"
+    assert trading.book_status(tmp_path, BOOK)["state"] == "unreadable"
     assert trading.health_payload(tmp_path)["ok"] is False
     client = TestClient(create_app(tmp_path))
-    for route in DETAIL_ROUTES:
-        assert client.get(f"/api/trading/paper/{route}").status_code == 200, route
+    for route in BOOK_ROUTES:
+        assert client.get(f"/api/trading/paper/books/{BOOK}/{route}").status_code == 200, route
+        assert client.get(f"/api/trading/paper/books/nobook/{route}").status_code == 404, route
 
 
 def test_damaged_fill_and_equity_lines_are_counted_and_projected_to_null(tmp_path: Path):
     """A journal is an append-only stream a crash can truncate: the good rows
     around a damaged line are served and the line is counted, and json.loads'
     NaN/Infinity tokens project to null instead of failing the serializer."""
-    root = _engine_book(tmp_path, "20260105", "20260106")
+    root = engine_book(tmp_path, "20260105", "20260106")
     _jsonl(
         root / "executions_20260106.jsonl",
         _execution(event_id="a", matched_at="2026-01-06T09:30:00+08:00"),
@@ -214,39 +203,60 @@ def test_damaged_fill_and_equity_lines_are_counted_and_projected_to_null(tmp_pat
     )
     with (root / "equity_daily.jsonl").open("a", encoding="utf-8") as stream:
         stream.write('{"trade_date": "20260106", "equity": NaN, "cash": 1.0}\n[]\n')
-    [day] = [day for day in trading.history_payload(tmp_path)["days"] if day["trade_date"] == "20260106"]
+    [day] = [day for day in trading.history_payload(tmp_path, BOOK)["days"] if day["trade_date"] == "20260106"]
     assert day["skipped_lines"] == 1
     good, bad = day["fills"]
     assert (good["status"], good["price"], good["cost"]) == ("filled", 10.25, 5.0)
     assert (bad["symbol"], bad["quantity"], bad["price"], bad["cost"]) == (None, None, None, None)
-    performance = trading.performance_payload(tmp_path)
+    performance = trading.performance_payload(tmp_path, BOOK)
     assert performance["skipped_lines"] == 1
     assert performance["chart"]["account"]["dates"] == ["20260105"]
     client = TestClient(create_app(tmp_path))
     for route in ("history", "performance"):
-        assert client.get(f"/api/trading/paper/{route}").status_code == 200, route
+        assert client.get(f"/api/trading/paper/books/{BOOK}/{route}").status_code == 200, route
 
 
-def test_env_whitelist_rejects_everything_else(tmp_path: Path):
+def test_env_and_book_whitelists_reject_everything_else(tmp_path: Path):
+    engine_book(tmp_path)
     client = TestClient(create_app(tmp_path))
     for env in ("live", "sim", "prod", "%2E%2E%2Fpaper", "%2E"):
-        for route in DETAIL_ROUTES:
-            assert client.get(f"/api/trading/{env}/{route}").status_code == 404, (env, route)
+        assert client.get(f"/api/trading/{env}/books").status_code == 404, env
+        assert client.get(f"/api/trading/{env}/health").status_code == 404, env
+        for route in BOOK_ROUTES:
+            assert client.get(f"/api/trading/{env}/books/{BOOK}/{route}").status_code == 404, (env, route)
+    for book in ("..", "%2E%2E", ".hidden", "not-a-book"):
+        assert client.get(f"/api/trading/paper/books/{book}/signal").status_code == 404, book
     # Defense in depth below the routes: no path is built from bad input.
     for env in ("live", "sim", "prod", "../paper", ".", ""):
         with pytest.raises(KeyError):
             trading.env_dir(tmp_path, env)
-    assert trading.env_dir(tmp_path, "paper") == tmp_path / "data/trading/paper"
+    for book in ("..", "../exp", "", "exp/..", "missing"):
+        with pytest.raises(KeyError):
+            trading.book_dir(tmp_path, book)
+    assert trading.book_dir(tmp_path, BOOK) == tmp_path / "data/trading/paper" / BOOK
 
 
-def test_trading_api_exposes_only_paper(tmp_path: Path):
-    client = TestClient(create_app(tmp_path))
-    roster = client.get("/api/trading/environments").json()["environments"]
-    assert [entry["env"] for entry in roster] == ["paper"]
-    for route in DETAIL_ROUTES:
-        response = client.get(f"/api/trading/paper/{route}")
-        assert response.status_code == 200
-        assert response.json()["env"] == "paper"
+def test_the_overview_has_one_row_per_book_read_off_its_panels(tmp_path: Path):
+    engine_book(tmp_path, "20260105", "20260106", "20260107", book="alpha")
+    engine_book(tmp_path, "20260105", book="beta")
+    overview = trading.books_payload(tmp_path)
+    assert overview["state"] == "ok"
+    alpha, beta = overview["books"]
+    assert (alpha["book_id"], beta["book_id"]) == ("alpha", "beta")
+    performance = trading.performance_payload(tmp_path, "alpha")["statistics"]
+    snapshot = trading.snapshot_payload(tmp_path, "alpha")["snapshot"]
+    assert alpha["total_return"] == performance["total_return"]
+    assert alpha["equity"] == snapshot["equity"]
+    assert (alpha["signal_date"], alpha["order_count"]) == ("20260107", 1)
+    assert (alpha["start_date"], alpha["initial_cash"], alpha["state"]) == ("20260105", 100_000.0, "ok")
+    # A book whose first decision has not settled yet has no return to show.
+    assert (beta["total_return"], beta["order_count"]) == (None, 1)
+    health = trading.health_payload(tmp_path)
+    assert health["ok"] is True and [row["book_id"] for row in health["books"]] == ["alpha", "beta"]
+    # A root still in the single-book layout is reported, not read as a book.
+    write_book_record(paper_root(tmp_path))
+    assert trading.books_payload(tmp_path)["state"] == "unreadable"
+    assert trading.health_payload(tmp_path)["ok"] is False
 
 
 # ---- the snapshot state machine ---------------------------------------------
@@ -270,8 +280,8 @@ def _write_snapshot(
     positions: list[dict] | None = None,
     **extra: object,
 ) -> Path:
-    root = tmp_path / "data/trading/paper"
-    root.mkdir(parents=True, exist_ok=True)
+    root = paper_root(tmp_path) / BOOK
+    write_book_record(root)
     payload = {
         "generated_at": generated_at if generated_at is not None else _cn_iso(age_seconds),
         "ok": ok,
@@ -299,22 +309,14 @@ def _write_snapshot(
     return root
 
 
-def test_absent_and_no_snapshot_are_distinguishable(tmp_path: Path):
-    # No env directory at all.
-    assert trading.snapshot_payload(tmp_path)["state"] == "absent"
-    assert trading.environment_summary(tmp_path)["state"] == "absent"
-    # Directory created by a deployment, engine never run.
-    (tmp_path / "data/trading/paper").mkdir(parents=True)
-    assert trading.snapshot_payload(tmp_path)["state"] == "no_snapshot"
-    assert trading.environment_summary(tmp_path)["state"] == "no_snapshot"
-
-
-def test_corrupt_and_non_object_snapshots_are_unreadable(tmp_path: Path):
-    root = tmp_path / "data/trading/paper"
-    root.mkdir(parents=True)
+def test_no_snapshot_and_unreadable_snapshots_are_distinguishable(tmp_path: Path):
+    root = paper_root(tmp_path) / BOOK
+    write_book_record(root)  # created, engine never run
+    assert trading.snapshot_payload(tmp_path, BOOK)["state"] == "no_snapshot"
+    assert trading.book_status(tmp_path, BOOK)["state"] == "no_snapshot"
     for content in ("{not json", "[1, 2, 3]"):
         (root / SNAPSHOT_NAME).write_text(content, encoding="utf-8")
-        payload = trading.snapshot_payload(tmp_path)
+        payload = trading.snapshot_payload(tmp_path, BOOK)
         assert payload["state"] == "unreadable", content
         assert payload["snapshot"] is None
         assert payload["error"]
@@ -327,16 +329,16 @@ def test_writer_error_surfaces_only_its_first_line(tmp_path: Path):
         ok=False,
         error="RuntimeError: writer down\nTraceback (most recent call last):\n  secret payload",
     )
-    payload = trading.snapshot_payload(tmp_path)
+    payload = trading.snapshot_payload(tmp_path, BOOK)
     assert payload["state"] == "export_error"
     assert payload["error"] == "RuntimeError: writer down"
     assert "secret payload" not in json.dumps(payload)
-    assert trading.environment_summary(tmp_path)["state"] == "export_error"
+    assert trading.book_status(tmp_path, BOOK)["state"] == "export_error"
 
 
 def test_writer_error_without_a_message_still_reports_the_state(tmp_path: Path):
     _write_snapshot(tmp_path, ok=False, error=None)
-    payload = trading.snapshot_payload(tmp_path)
+    payload = trading.snapshot_payload(tmp_path, BOOK)
     assert payload["state"] == "export_error"
     assert payload["error"] == "writer reported ok=false"
 
@@ -345,26 +347,26 @@ def test_a_weekend_between_daily_runs_is_not_stale(tmp_path: Path):
     """The book writes once per weekday before the open: Friday's snapshot read
     on Monday before that day's run is the normal cadence, not a stale book."""
     _write_snapshot(tmp_path, age_seconds=75 * 3600.0)
-    assert trading.snapshot_payload(tmp_path)["state"] == "ok"
+    assert trading.snapshot_payload(tmp_path, BOOK)["state"] == "ok"
 
 
 def test_a_stale_snapshot_is_served_and_flagged_against_the_exported_threshold(tmp_path: Path):
     age = trading.STALE_SNAPSHOT_ALERT_SECONDS + 600.0
     _write_snapshot(tmp_path, age_seconds=age)
-    payload = trading.snapshot_payload(tmp_path)
+    payload = trading.snapshot_payload(tmp_path, BOOK)
     assert payload["state"] == "stale"
     assert payload["stale_threshold_seconds"] == trading.STALE_SNAPSHOT_ALERT_SECONDS
     assert age - 10.0 <= payload["age_seconds"] <= age + 30.0
     # Stale-but-visible: the last written account data still reaches the page.
     assert payload["snapshot"]["equity"] == 1_000_000.0
-    summary = trading.environment_summary(tmp_path)
+    summary = trading.book_status(tmp_path, BOOK)
     assert summary["state"] == "stale"
     assert trading.health_payload(tmp_path)["ok"] is True  # degraded, not broken
 
 
 def test_a_fresh_snapshot_is_ok(tmp_path: Path):
     _write_snapshot(tmp_path, age_seconds=1.0)
-    payload = trading.snapshot_payload(tmp_path)
+    payload = trading.snapshot_payload(tmp_path, BOOK)
     assert payload["state"] == "ok"
     assert payload["age_seconds"] < trading.STALE_SNAPSHOT_ALERT_SECONDS
 
@@ -372,7 +374,7 @@ def test_a_fresh_snapshot_is_ok(tmp_path: Path):
 def test_a_missing_or_unparseable_generated_at_is_unreadable_not_a_crash(tmp_path: Path):
     for stamp in ("not-a-timestamp", ""):
         _write_snapshot(tmp_path, generated_at=stamp)
-        payload = trading.snapshot_payload(tmp_path)
+        payload = trading.snapshot_payload(tmp_path, BOOK)
         assert payload["state"] == "unreadable", stamp
         assert "generated_at" in payload["error"]
 
@@ -384,23 +386,23 @@ def test_naive_china_local_stamps_normalize_to_utc(tmp_path: Path):
     written now reports a negative age, and one 8 hours old reads as fresh, so
     STALE_SNAPSHOT_ALERT_SECONDS never fires."""
     _write_snapshot(tmp_path, generated_at="2026-07-30T14:01:26")
-    payload = trading.snapshot_payload(tmp_path)
+    payload = trading.snapshot_payload(tmp_path, BOOK)
     assert payload["generated_at"] == "2026-07-30T06:01:26Z"
 
     fresh = datetime.now(ZoneInfo("Asia/Shanghai")).replace(microsecond=0, tzinfo=None)
     _write_snapshot(tmp_path, generated_at=fresh.isoformat())
-    age = trading.snapshot_payload(tmp_path)["age_seconds"]
+    age = trading.snapshot_payload(tmp_path, BOOK)["age_seconds"]
     assert 0.0 <= age < 60.0, f"a snapshot written now reports age {age}"
 
 
 def test_an_offset_aware_stamp_is_converted_not_relabelled(tmp_path: Path):
     _write_snapshot(tmp_path, generated_at="2026-07-30T14:01:26+08:00")
-    assert trading.snapshot_payload(tmp_path)["generated_at"] == "2026-07-30T06:01:26Z"
+    assert trading.snapshot_payload(tmp_path, BOOK)["generated_at"] == "2026-07-30T06:01:26Z"
 
 
 def test_snapshot_is_whitelist_projected_and_never_echoes_the_raw_dict(tmp_path: Path):
     _write_snapshot(tmp_path, secret="LEAK", account_id="ACCT-PRIVATE")
-    payload = trading.snapshot_payload(tmp_path)
+    payload = trading.snapshot_payload(tmp_path, BOOK)
     assert payload["state"] == "ok"
     assert set(payload["snapshot"]) == {
         "source", "trade_date", "settled_through", "phase", "strategy_revision",
@@ -412,7 +414,7 @@ def test_snapshot_is_whitelist_projected_and_never_echoes_the_raw_dict(tmp_path:
 
 def test_a_fully_locked_position_keeps_its_zero_counters(tmp_path: Path):
     _write_snapshot(tmp_path)
-    row = trading.snapshot_payload(tmp_path)["snapshot"]["positions"][0]
+    row = trading.snapshot_payload(tmp_path, BOOK)["snapshot"]["positions"][0]
     # A T+1-locked line has available_quantity 0. Projecting it as None would
     # read as "unknown" and make the row look unmappable.
     assert row["available_quantity"] == 0
@@ -426,15 +428,15 @@ def test_a_fully_locked_position_keeps_its_zero_counters(tmp_path: Path):
 
 def test_an_unmappable_position_row_is_flagged_never_dropped(tmp_path: Path):
     _write_snapshot(tmp_path, positions=[{"m_unknownField": 1, "raw": {"blob": "x"}}])
-    positions = trading.snapshot_payload(tmp_path)["snapshot"]["positions"]
+    positions = trading.snapshot_payload(tmp_path, BOOK)["snapshot"]["positions"]
     assert len(positions) == 1
     assert positions[0]["unmapped"] is True
     assert all(positions[0][key] is None for key in ("symbol", "quantity", "last_price"))
 
 
 def test_non_finite_snapshot_numbers_degrade_to_null(tmp_path: Path):
-    root = tmp_path / "data/trading/paper"
-    root.mkdir(parents=True)
+    root = paper_root(tmp_path) / BOOK
+    write_book_record(root)
     (root / SNAPSHOT_NAME).write_text(
         '{"generated_at": "' + _cn_iso() + '", "ok": true, "cash": NaN,'
         ' "equity": Infinity, "pending_order_count": 0,'
@@ -442,38 +444,35 @@ def test_non_finite_snapshot_numbers_degrade_to_null(tmp_path: Path):
         '                "available_quantity": 0, "last_price": NaN}]}',
         encoding="utf-8",
     )
-    snapshot = trading.snapshot_payload(tmp_path)["snapshot"]
+    snapshot = trading.snapshot_payload(tmp_path, BOOK)["snapshot"]
     assert snapshot["cash"] is None and snapshot["equity"] is None
     assert snapshot["positions"][0]["last_price"] is None
     assert snapshot["positions"][0]["unmapped"] is False  # symbol still mapped
-    assert TestClient(create_app(tmp_path)).get("/api/trading/paper/snapshot").status_code == 200
+    assert TestClient(create_app(tmp_path)).get(f"/api/trading/paper/books/{BOOK}/snapshot").status_code == 200
 
 
 def test_environment_state_precedence_puts_the_worst_reader_first(tmp_path: Path):
-    root = tmp_path / "data/trading/paper"
+    root = paper_root(tmp_path) / BOOK
     # A stale snapshot beats a healthy journal.
     _write_snapshot(tmp_path, age_seconds=trading.STALE_SNAPSHOT_ALERT_SECONDS + 600.0)
     _jsonl(root / "orders_20260102.jsonl", _order())
-    assert trading.environment_summary(tmp_path)["state"] == "stale"
+    assert trading.book_status(tmp_path, BOOK)["state"] == "stale"
     # A damaged journal line does NOT reach the ladder; stale still wins.
     _jsonl(root / "orders_20260102.jsonl", _order(), "broken")
-    assert trading.environment_summary(tmp_path)["state"] == "stale"
+    assert trading.book_status(tmp_path, BOOK)["state"] == "stale"
     # An unreadable snapshot outranks everything.
     (root / SNAPSHOT_NAME).write_text("{broken", encoding="utf-8")
-    assert trading.environment_summary(tmp_path)["state"] == "unreadable"
+    assert trading.book_status(tmp_path, BOOK)["state"] == "unreadable"
 
 
-def test_the_roster_and_health_carry_the_status_ladder(tmp_path: Path):
+def test_the_status_and_health_carry_the_status_ladder(tmp_path: Path):
     _write_snapshot(tmp_path, age_seconds=1.0)
-    entry = trading.environments_payload(tmp_path)["environments"][0]
-    assert entry["env"] == "paper" and entry["label"] == "Paper 模拟"
-    assert entry["state"] == "ok"
-    # The page reads the account from its own panel; the roster is status only.
-    assert "snapshot" not in entry
-    assert entry["generated_at"].endswith("Z")
-    assert entry["stale_threshold_seconds"] == trading.STALE_SNAPSHOT_ALERT_SECONDS
+    status = trading.book_status(tmp_path, BOOK)
+    assert (status["env"], status["book_id"], status["state"]) == ("paper", BOOK, "ok")
+    assert status["generated_at"].endswith("Z")
+    assert status["stale_threshold_seconds"] == trading.STALE_SNAPSHOT_ALERT_SECONDS
     health = trading.health_payload(tmp_path)
-    assert health["ok"] is True and health["state"] == "ok"
+    assert health["ok"] is True and [(row["book_id"], row["state"]) for row in health["books"]] == [(BOOK, "ok")]
 
 
 # ---- the client renders the states the server emits -------------------------

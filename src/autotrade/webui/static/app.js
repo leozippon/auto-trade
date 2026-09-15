@@ -1084,7 +1084,7 @@ function route(forceRefresh = false) {
   const force = forceRefresh === true; // hashchange passes an Event, not a force flag.
   const hash = location.hash || "#/";
   // Trading console pages are matched BEFORE the #/exp/... regex.
-  const tradingMatch = hash.match(/^#\/trading\/(paper)$/);
+  const tradingMatch = hash.match(/^#\/trading\/(paper)(?:\/([^/]+))?$/);
   const qmtMatch = hash === "#/qmt";
   const memoryMatch = hash === "#/memory";
   const expMatch =
@@ -1127,7 +1127,10 @@ function route(forceRefresh = false) {
   if (!tradingMatch) tradingView = null;
   if (tradingMatch) {
     detailView = null;
-    renderTradingPage(tradingMatch[1]);
+    renderTradingPage(
+      tradingMatch[1],
+      tradingMatch[2] ? decodeURIComponent(tradingMatch[2]) : null,
+    );
   } else if (qmtMatch) {
     detailView = null;
     renderQmtPage();
@@ -5888,40 +5891,20 @@ const TRADING_STATE = {
 
 /* Banner zone (only when degraded). Data below still renders from the last
    written files — stale-but-visible, never blank. */
-function paperBanners(summary) {
-  const banners = [];
-  if (
-    summary.state === "stale" &&
-    summary.age_seconds !== null &&
-    summary.age_seconds !== undefined
-  ) {
-    banners.push(
+function paperBanners(status) {
+  if (status.state === "stale" && Number.isFinite(status.age_seconds))
+    return [
       el(
         "div",
         { class: "banner warn" },
-        `快照已 ${Math.round(summary.age_seconds / 3600)} 小时未更新（阈值 ${Math.round(summary.stale_threshold_seconds / 3600)} 小时），显示的是最后一次写入的数据。`,
+        `快照 ${Math.round(status.age_seconds / 3600)} 小时未更新（阈值 ${Math.round(status.stale_threshold_seconds / 3600)} 小时）`,
       ),
-    );
-  }
-  if (summary.state === "export_error") {
-    banners.push(
-      el(
-        "div",
-        { class: "banner bad" },
-        `写入错误：${summary.error || "writer reported ok=false"}`,
-      ),
-    );
-  }
-  if (summary.state === "unreadable") {
-    banners.push(
-      el(
-        "div",
-        { class: "banner bad" },
-        `账簿数据无法解析：${summary.error || "未知错误"}`,
-      ),
-    );
-  }
-  return banners;
+    ];
+  if (status.state === "export_error")
+    return [el("div", { class: "banner bad" }, `写入错误：${status.error || "ok=false"}`)];
+  if (status.state === "unreadable")
+    return [el("div", { class: "banner bad" }, `数据无法解析：${status.error || "—"}`)];
+  return [];
 }
 
 function tradingBadge(state) {
@@ -5962,48 +5945,37 @@ function actionCell(action) {
 
 /* A damaged journal line is counted by the reader, not fatal; surface the count
    so a truncated journal is visible rather than a silently shorter table. */
-function skippedChip(label, skipped) {
+function skippedChip(skipped) {
   if (!skipped) return null;
   return el(
     "div",
     { class: "stats-chips" },
-    el("span", { class: "stat-chip warn" }, `${label}有 ${skipped} 行无法解析`),
+    el("span", { class: "stat-chip warn" }, `${skipped} 行无法解析`),
   );
 }
 
-/* The page's reads, one per panel, issued together: api() throws inside
-   Promise.all, so one missing route blanks the page. */
-async function fetchTradingBundle(env) {
-  const [roster, book, signal, history, performance, snapshot] =
-    await Promise.all([
-      api("/api/trading/environments"),
-      api(`/api/trading/${env}/book`),
-      api(`/api/trading/${env}/signal`),
-      api(`/api/trading/${env}/history`),
-      api(`/api/trading/${env}/performance`),
-      api(`/api/trading/${env}/snapshot`),
-    ]);
-  return { roster, book, signal, history, performance, snapshot };
+function bookHash(env, book) {
+  return `#/trading/${env}/${encodeURIComponent(book)}`;
 }
 
-async function renderTradingPage(env) {
+/* #/trading/paper is the books overview; #/trading/paper/<book> one book. */
+async function renderTradingPage(env, book) {
   $main.innerHTML = '<div class="loading">加载模拟交易…</div>';
   $topbarRight.replaceChildren();
-  tradingView = { env, signature: "", openDays: new Set() };
-  let bundle;
+  tradingView = { env, book, signature: "", openDays: new Set() };
+  const hash = book ? bookHash(env, book) : `#/trading/${env}`;
+  const load = book ? () => fetchBookBundle(env, book) : () => api(`/api/trading/${env}/books`);
+  const render = book ? renderBookBundle : renderBooksOverview;
   try {
-    bundle = await fetchTradingBundle(env);
+    render(await load());
   } catch (error) {
-    $main.replaceChildren(
-      el("div", { class: "empty" }, `加载失败：${error.message}`),
-    );
+    $main.replaceChildren(el("div", { class: "empty" }, `加载失败：${error.message}`));
     return;
   }
-  renderTradingBundle(env, bundle);
   pollTimer = setInterval(async () => {
-    if (!tradingView || location.hash !== `#/trading/${env}`) return;
+    if (!tradingView || location.hash !== hash) return;
     try {
-      renderTradingBundle(env, await fetchTradingBundle(env));
+      render(await load());
     } catch {
       /* keep last view */
     }
@@ -6011,76 +5983,127 @@ async function renderTradingPage(env) {
 }
 
 /* Rebuilt only when what it shows changed, so a poll never closes the history
-   day being read; the snapshot age enters by the hour its banner quotes. */
-function renderTradingBundle(env, bundle) {
-  if (!tradingView || tradingView.env !== env) return;
-  const summary = (bundle.roster.environments || []).find(
-    (item) => item.env === env,
-  ) || { state: "absent" };
-  const signature = JSON.stringify([
-    summary.state,
-    summary.error,
-    Math.round((summary.age_seconds || 0) / 3600),
-    bundle.book,
-    bundle.signal,
-    bundle.history,
-    bundle.performance,
-    bundle.snapshot.snapshot,
-  ]);
-  if (signature === tradingView.signature) return;
+   day being read or moves the page. */
+function redrawTrading(payload, build) {
+  const signature = JSON.stringify(payload);
+  if (!tradingView || signature === tradingView.signature) return;
   tradingView.signature = signature;
-  $main.replaceChildren(
+  $main.replaceChildren(build());
+}
+
+function renderBooksOverview(payload) {
+  const books = payload.books || [];
+  redrawTrading(payload, () =>
     el(
       "div",
       { id: "trading-page" },
-      paperHead(summary, bundle.book),
-      ...paperBanners(summary),
-      paperSignalPanel(bundle.signal, bundle.book),
-      paperHistoryPanel(bundle.history),
-      paperPerformancePanel(bundle.performance),
-      paperPositionsPanel(bundle.snapshot),
+      el(
+        "div",
+        { class: "page-head" },
+        el("h2", {}, "Paper 模拟交易", el("span", { class: "mode-note" }, `${books.length} 本账簿`)),
+      ),
+      payload.state === "unreadable"
+        ? el("div", { class: "banner bad" }, payload.error)
+        : null,
+      el(
+        "div",
+        { class: "panel" },
+        books.length
+          ? dataTable(
+              [
+                { label: "账簿" },
+                { label: "起始" },
+                { label: "初始资金", num: true },
+                { label: "总资产", num: true },
+                { label: "累计收益", num: true },
+                { label: "超额", num: true },
+                { label: "今日订单", num: true },
+                { label: "状态" },
+              ],
+              books.map((row) => [
+                {
+                  value: el("a", { href: bookHash(tradingView.env, row.book_id) }, row.book_id),
+                  title: `${row.experiment_id || "—"} / ${row.artifact_id || "—"}`,
+                },
+                row.start_date ? fmtDate(row.start_date) : "—",
+                fmtAmountOpt(row.initial_cash),
+                fmtAmountOpt(row.equity),
+                { value: fmtPct(row.total_return), cls: signCls(row.total_return) },
+                { value: fmtPct(row.excess_return), cls: signCls(row.excess_return) },
+                row.order_count ?? "—",
+                { value: tradingBadge(row.state), title: row.error || null },
+              ]),
+            )
+          : el("div", { class: "empty" }, "暂无账簿"),
+      ),
     ),
   );
 }
 
-/* The book's identity and the one-line observation note it was created with. */
-function paperHead(summary, payload) {
-  const book = payload.book;
+/* One book's reads, one per panel, issued together: api() throws inside
+   Promise.all, so one missing route blanks the page. */
+async function fetchBookBundle(env, book) {
+  const base = `/api/trading/${env}/books/${encodeURIComponent(book)}`;
+  const [status, identity, signal, history, performance, snapshot] = await Promise.all([
+    api(`${base}/status`),
+    api(`${base}/book`),
+    api(`${base}/signal`),
+    api(`${base}/history`),
+    api(`${base}/performance`),
+    api(`${base}/snapshot`),
+  ]);
+  return { status, identity, signal, history, performance, snapshot };
+}
+
+/* The snapshot age enters by the hour its banner quotes. */
+function renderBookBundle(bundle) {
+  const { status } = bundle;
+  redrawTrading(
+    { ...bundle, status: { ...status, generated_at: null, age_seconds: Math.round((status.age_seconds || 0) / 3600) } },
+    () =>
+      el(
+        "div",
+        { id: "trading-page" },
+        paperHead(status, bundle.identity),
+        ...paperBanners(status),
+        paperSignalPanel(bundle.signal, bundle.identity),
+        paperHistoryPanel(bundle.history),
+        paperPerformancePanel(bundle.performance),
+        paperPositionsPanel(bundle.snapshot),
+      ),
+  );
+}
+
+function paperHead(status, payload) {
+  const book = payload.book || {};
   const head = el(
     "div",
     { class: "page-head" },
-    el("h2", {}, "Paper 模拟交易", tradingBadge(summary.state)),
-  );
-  if (!book) {
-    head.append(
-      el(
-        "div",
-        { class: "sub" },
-        payload.state === "unreadable"
-          ? `账簿不可读：${payload.error}`
-          : "还没有 Paper 账簿（先运行 run_paper.py init）",
-      ),
-    );
-    return head;
-  }
-  head.append(
+    el(
+      "h2",
+      {},
+      el("a", { class: "exp-back", href: `#/trading/${tradingView.env}` }, "← 账簿"),
+      el("span", { class: "exp-name" }, status.book_id),
+      tradingBadge(status.state),
+    ),
     el(
       "div",
       { class: "sub" },
       [
-        `${book.experiment_id || "—"} / ${book.artifact_id || "—"}（${book.candidate_source || "—"}）`,
-        payload.start_date ? `${fmtDate(payload.start_date)} 起` : "尚未决策",
+        // The book is named after its experiment unless init said otherwise.
+        book.experiment_id === status.book_id
+          ? book.artifact_id || "—"
+          : `${book.experiment_id || "—"} / ${book.artifact_id || "—"}`,
+        payload.start_date ? `${fmtDate(payload.start_date)} 起` : null,
         `初始资金 ${fmtAmountOpt(book.initial_cash)}`,
-        book.inference_time ? `每日 ${book.inference_time} 决策` : null,
-        payload.settled_through
-          ? `已结算至 ${fmtDate(payload.settled_through)}`
-          : null,
+        payload.settled_through ? `结算至 ${fmtDate(payload.settled_through)}` : null,
       ]
         .filter(Boolean)
         .join(" · "),
     ),
   );
-  if (book.note) head.append(el("div", { class: "sub" }, book.note));
+  // The observation note on one line; the full text stays in book.json.
+  if (book.note) head.append(el("div", { class: "sub one-line", title: book.note }, book.note));
   return head;
 }
 
@@ -6092,8 +6115,8 @@ function paperOrdersTable(orders) {
       { label: "名称" },
       { label: "方向" },
       { label: "股数", num: true },
-      { label: "参考价（前收）", num: true },
-      { label: "约计金额", num: true },
+      { label: "参考价", num: true, title: "前一交易日收盘价" },
+      { label: "金额", num: true, title: "参考价 × 股数，未计费用" },
     ],
     orders.map((row) => [
       fmtClock(row.execute_at),
@@ -6109,53 +6132,43 @@ function paperOrdersTable(orders) {
 
 /* Today's signal: the latest decision's orders and the holdings, weights and
    cash once they fill, all from the same order sheet the book prints. */
-function paperSignalPanel(payload, bookPayload) {
+function paperSignalPanel(payload, identity) {
   const signal = payload.signal;
   const panel = el("div", { class: "panel section-gap" });
   if (!signal) {
     panel.append(
       panelHead("今日信号"),
       payload.state === "unreadable"
-        ? el("div", { class: "hint warn" }, `信号不可读：${payload.error}`)
-        : el("div", { class: "empty" }, "账簿还没有决策"),
+        ? el("div", { class: "hint warn" }, payload.error)
+        : el("div", { class: "empty" }, "暂无决策"),
     );
     return panel;
   }
-  const lastFit = bookPayload.last_fit_date;
+  const lastFit = identity.last_fit_date;
   const body = [
     panelHead(
       `今日信号 · ${fmtDate(signal.trade_date)}`,
-      signal.fitted
-        ? el("span", { class: "badge state-waiting_user" }, "本次重新拟合")
-        : null,
+      signal.fitted ? el("span", { class: "badge state-waiting_user" }, "重新拟合") : null,
     ),
     el(
       "div",
       { class: "meta-line" },
       [
         `决策 ${fmtTs(signal.inference_at)}`,
-        `数据截至 ${fmtDate(signal.data_through)} 收盘`,
-        signal.generation_id ? `发布 ${signal.generation_id.slice(0, 12)}` : null,
-        !signal.fitted && lastFit ? `沿用 ${fmtDate(lastFit)} 的拟合` : null,
-        `重放一致 ${signal.replayed_matching_journal ?? "—"}/${signal.replayed_calls ?? "—"}`,
+        `数据截至 ${fmtDate(signal.data_through)}`,
+        signal.generation_id ? `发布 ${signal.generation_id.slice(0, 8)}` : null,
+        !signal.fitted && lastFit ? `拟合于 ${fmtDate(lastFit)}` : null,
+        `重放 ${signal.replayed_matching_journal ?? "—"}/${signal.replayed_calls ?? "—"}`,
       ]
         .filter(Boolean)
         .join(" · "),
     ),
-    el(
-      "h4",
-      { class: "subsection-title section-gap" },
-      `订单（${signal.orders.length} 笔）`,
-    ),
+    el("h4", { class: "subsection-title section-gap" }, `订单 ${signal.orders.length}`),
     signal.orders.length
       ? paperOrdersTable(signal.orders)
-      : el("div", { class: "meta-line" }, "今日无订单，持仓不变。"),
-    skippedChip("订单 journal ", signal.skipped_lines),
-    el(
-      "h4",
-      { class: "subsection-title section-gap" },
-      `成交后目标持仓（${signal.target.length} 只）`,
-    ),
+      : el("div", { class: "meta-line" }, "无订单"),
+    skippedChip(signal.skipped_lines),
+    el("h4", { class: "subsection-title section-gap" }, `成交后持仓 ${signal.target.length}`),
     signal.target.length
       ? dataTable(
           [
@@ -6163,29 +6176,22 @@ function paperSignalPanel(payload, bookPayload) {
             { label: "名称" },
             { label: "股数", num: true },
             { label: "参考价", num: true },
-            { label: "参考市值", num: true },
+            { label: "市值", num: true },
             { label: "权重", num: true },
           ],
-          signal.target.map((row) => [
-            row.symbol,
-            row.name,
-            fmtShares(row.quantity),
-            fmtPrice(row.reference_price),
-            fmtAmountOpt(row.value),
-            fmtPct(row.weight, 1),
-          ]),
+          [
+            ...signal.target.map((row) => [
+              row.symbol,
+              row.name,
+              fmtShares(row.quantity),
+              fmtPrice(row.reference_price),
+              fmtAmountOpt(row.value),
+              fmtPct(row.weight, 1),
+            ]),
+            ["现金", "", "", "", fmtAmountOpt(signal.cash_after), fmtPct(signal.cash_weight, 1)],
+          ],
         )
-      : el("div", { class: "meta-line" }, "成交后空仓。"),
-    el(
-      "div",
-      { class: "meta-line section-gap" },
-      `成交后现金约 ${fmtAmountOpt(signal.cash_after)}（${fmtPct(signal.cash_weight, 1)}）· 参考市值合计 ${fmtAmountOpt(signal.target_value)} · 决策前总资产 ${fmtAmountOpt(signal.equity)}`,
-    ),
-    el(
-      "div",
-      { class: "hint" },
-      "参考价为前一交易日收盘价；账簿按当日开盘价撮合，金额、现金与权重均为未计费用的估算。",
-    ),
+      : el("div", { class: "meta-line" }, `空仓 · 现金 ${fmtAmountOpt(signal.cash_after)}`),
   ];
   panel.append(...body.filter(Boolean));
   return panel;
@@ -6194,13 +6200,13 @@ function paperSignalPanel(payload, bookPayload) {
 const FILL_STATUS_LABELS = { filled: "成交", rejected: "拒单" };
 
 function paperHistoryDay(day) {
-  const body = el(
+  return el(
     "div",
     { class: "history-day-body" },
     el("h4", { class: "subsection-title" }, "订单"),
     day.orders.length
       ? paperOrdersTable(day.orders)
-      : el("div", { class: "meta-line" }, "无订单"),
+      : el("div", { class: "meta-line" }, "无"),
     el("h4", { class: "subsection-title section-gap" }, "成交"),
     day.fills.length
       ? dataTable(
@@ -6230,10 +6236,9 @@ function paperHistoryDay(day) {
             row.reason,
           ]),
         )
-      : el("div", { class: "meta-line" }, "无成交"),
-    skippedChip("该日 journal ", day.skipped_lines),
+      : el("div", { class: "meta-line" }, "无"),
+    skippedChip(day.skipped_lines),
   );
-  return body;
 }
 
 /* Every earlier trading day, newest first and folded: what the book decided
@@ -6245,19 +6250,15 @@ function paperHistoryPanel(payload) {
     { class: "panel section-gap" },
     panelHead(
       "历史信号",
-      days.length
-        ? el("span", { class: "mode-note" }, `${days.length} 个交易日`)
-        : null,
+      days.length ? el("span", { class: "mode-note" }, `${days.length} 日`) : null,
     ),
   );
   if (payload.state === "unreadable") {
-    panel.append(
-      el("div", { class: "hint warn" }, `历史不可读：${payload.error}`),
-    );
+    panel.append(el("div", { class: "hint warn" }, payload.error));
     return panel;
   }
   if (!days.length) {
-    panel.append(el("div", { class: "empty" }, "还没有已成交或已过去的交易日"));
+    panel.append(el("div", { class: "empty" }, "暂无"));
     return panel;
   }
   const list = el("div", { class: "history-list" });
@@ -6292,131 +6293,115 @@ function paperHistoryPanel(payload) {
 /* The research return chart, fed the book's own days: cumulative return
    against CSI 300, drawdown, and end-of-day equity and cash on the same axis. */
 function paperPerformancePanel(payload) {
-  const panel = el("div", { class: "panel section-gap" }, panelHead("收益表现"));
+  const stats = payload.statistics;
+  const panel = el(
+    "div",
+    { class: "panel section-gap" },
+    panelHead(
+      "收益表现",
+      stats ? el("span", { class: "mode-note" }, `${stats.days} 个交易日`) : null,
+    ),
+  );
   if (payload.state !== "ok") {
     panel.append(
       payload.state === "unreadable"
-        ? el("div", { class: "hint warn" }, `收益数据不可读：${payload.error}`)
-        : el("div", { class: "empty" }, "还没有已结算的交易日"),
+        ? el("div", { class: "hint warn" }, payload.error)
+        : el("div", { class: "empty" }, "暂无"),
     );
     return panel;
   }
-  const stats = payload.statistics;
   const early = stats.days < payload.min_days;
-  const waiting = {
-    value: "—",
-    title: `满 ${payload.min_days} 个交易日后计算，当前 ${stats.days} 日`,
-  };
+  const waiting = { value: "—", title: `满 ${payload.min_days} 个交易日后计算` };
   const chart = payload.chart;
   const benchmarkNote = payload.benchmark_error
-    ? `沪深300 读取失败（${payload.benchmark_error}），超额不计算。`
+    ? `沪深300 读取失败：${payload.benchmark_error}`
     : !chart.benchmark
-      ? "账簿的发布视图里没有沪深300 同窗数据，超额不计算。"
+      ? "无沪深300 数据"
       : payload.benchmark_days < stats.days
-        ? `沪深300 只覆盖 ${payload.benchmark_days}/${stats.days} 个交易日，超额不计算。`
+        ? `沪深300 覆盖 ${payload.benchmark_days}/${stats.days} 日`
         : null;
   panel.append(
-    statTilesRow([
-      { label: "累计收益", value: fmtPct(stats.total_return), cls: signCls(stats.total_return) },
-      { label: "沪深300 同期", value: fmtPct(stats.benchmark_return), cls: signCls(stats.benchmark_return) },
-      { label: "超额", value: fmtPct(stats.excess_return), cls: signCls(stats.excess_return) },
-      early
-        ? { label: "年化收益", ...waiting }
-        : { label: "年化收益", value: fmtPct(stats.annualized_return), cls: signCls(stats.annualized_return) },
-      early ? { label: "Sharpe", ...waiting } : { label: "Sharpe", value: fmtSharpe(stats.sharpe) },
-      early ? { label: "最大回撤", ...waiting } : { label: "最大回撤", value: fmtPct(stats.max_drawdown) },
-      { label: "换手", value: fmtSharpe(stats.turnover), title: "成交名义额 / 初始资金" },
-      { label: "佣金", value: fmtAmountOpt(stats.fees) },
-      { label: "印花税", value: fmtAmountOpt(stats.stamp_duty) },
-      { label: "成交笔数", value: String(stats.fills) },
-    ]),
-    el(
-      "div",
-      { class: "meta-line section-gap" },
-      [
-        `已结算 ${stats.days} 个交易日`,
+    ...[
+      statTilesRow([
+        { label: "累计收益", value: fmtPct(stats.total_return), cls: signCls(stats.total_return) },
+        { label: "沪深300", value: fmtPct(stats.benchmark_return), cls: signCls(stats.benchmark_return) },
+        { label: "超额", value: fmtPct(stats.excess_return), cls: signCls(stats.excess_return) },
         early
-          ? `年化收益、Sharpe 与最大回撤满 ${payload.min_days} 个交易日后计算`
-          : null,
-        benchmarkNote,
-      ]
-        .filter(Boolean)
-        .join(" · "),
-    ),
-    el(
-      "div",
-      { class: "section-gap" },
-      el("h4", { class: "subsection-title" }, "日度累计收益 vs 沪深300"),
-      equityChart(chart, { width: 980, height: 240, ddH: 80 }),
-    ),
+          ? { label: "年化", ...waiting }
+          : { label: "年化", value: fmtPct(stats.annualized_return), cls: signCls(stats.annualized_return) },
+        early ? { label: "Sharpe", ...waiting } : { label: "Sharpe", value: fmtSharpe(stats.sharpe) },
+        early ? { label: "最大回撤", ...waiting } : { label: "最大回撤", value: fmtPct(stats.max_drawdown) },
+        { label: "换手", value: fmtSharpe(stats.turnover), title: "成交名义额 / 初始资金" },
+        { label: "佣金", value: fmtAmountOpt(stats.fees) },
+        { label: "印花税", value: fmtAmountOpt(stats.stamp_duty) },
+        { label: "成交笔数", value: String(stats.fills) },
+      ]),
+      benchmarkNote ? el("div", { class: "meta-line section-gap" }, benchmarkNote) : null,
+      el("div", { class: "section-gap" }, equityChart(chart, { width: 980, height: 240, ddH: 80 })),
+    ].filter(Boolean),
   );
   return panel;
 }
 
 function paperPositionsPanel(payload) {
   const account = payload.snapshot;
-  const panel = el("div", { class: "panel section-gap" }, panelHead("当前持仓"));
+  const panel = el(
+    "div",
+    { class: "panel section-gap" },
+    panelHead(
+      "当前持仓",
+      account && account.settled_through
+        ? el("span", { class: "mode-note" }, `${fmtDate(account.settled_through)} 收盘`)
+        : null,
+    ),
+  );
   if (!account) {
-    panel.append(el("div", { class: "empty" }, "暂无账户快照"));
+    panel.append(el("div", { class: "empty" }, "暂无快照"));
     return panel;
   }
   const positions = account.positions || [];
-  panel.append(
-    el(
-      "div",
-      { class: "meta-line" },
-      [
-        account.settled_through
-          ? `${fmtDate(account.settled_through)} 收盘估值`
-          : null,
-        `总资产 ${fmtAmountOpt(account.equity)}`,
-        `现金 ${fmtAmountOpt(account.cash)}`,
-        `持仓市值 ${fmtAmountOpt(account.market_value)}`,
-        account.pending_order_count
-          ? `待成交订单 ${account.pending_order_count} 笔`
-          : null,
-      ]
-        .filter(Boolean)
-        .join(" · "),
-    ),
-  );
-  if (!positions.length) {
-    panel.append(el("div", { class: "empty" }, "当前无持仓"));
-    return panel;
-  }
   const unmapped = positions.filter((row) => row.unmapped).length;
-  if (unmapped)
-    panel.append(
+  panel.append(
+    ...[
       el(
         "div",
-        { class: "hint warn" },
-        `有 ${unmapped} 行持仓无法映射，已按原样计入行数。`,
+        { class: "meta-line" },
+        [
+          `总资产 ${fmtAmountOpt(account.equity)}`,
+          `现金 ${fmtAmountOpt(account.cash)}`,
+          `持仓市值 ${fmtAmountOpt(account.market_value)}`,
+          account.pending_order_count ? `待成交 ${account.pending_order_count} 笔` : null,
+        ]
+          .filter(Boolean)
+          .join(" · "),
       ),
-    );
-  panel.append(
-    dataTable(
-      [
-        { label: "代码" },
-        { label: "股数", num: true },
-        { label: "可用", num: true },
-        { label: "成本", num: true },
-        { label: "最新价", num: true },
-        { label: "市值", num: true },
-        { label: "浮动盈亏", num: true },
-        { label: "权重", num: true },
-      ],
-      positions.map((row) => [
-        row.symbol,
-        fmtShares(row.quantity),
-        fmtShares(row.available_quantity),
-        fmtPrice(row.average_cost),
-        fmtPrice(row.last_price),
-        fmtAmountOpt(row.market_value),
-        { value: fmtAmountOpt(row.pnl), cls: signCls(row.pnl) },
-        fmtPct(row.weight, 1),
-      ]),
-      { box: "limit section-gap" },
-    ),
+      unmapped ? el("div", { class: "hint warn" }, `${unmapped} 行无法映射`) : null,
+      positions.length
+        ? dataTable(
+            [
+              { label: "代码" },
+              { label: "股数", num: true },
+              { label: "可用", num: true },
+              { label: "成本", num: true },
+              { label: "最新价", num: true },
+              { label: "市值", num: true },
+              { label: "浮动盈亏", num: true },
+              { label: "权重", num: true },
+            ],
+            positions.map((row) => [
+              row.symbol,
+              fmtShares(row.quantity),
+              fmtShares(row.available_quantity),
+              fmtPrice(row.average_cost),
+              fmtPrice(row.last_price),
+              fmtAmountOpt(row.market_value),
+              { value: fmtAmountOpt(row.pnl), cls: signCls(row.pnl) },
+              fmtPct(row.weight, 1),
+            ]),
+            { box: "limit section-gap" },
+          )
+        : el("div", { class: "empty" }, "无持仓"),
+    ].filter(Boolean),
   );
   return panel;
 }

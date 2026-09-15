@@ -1,11 +1,13 @@
-"""Read-only projection of the local daily Paper book, one function per page panel.
+"""Read-only projection of the local daily Paper books, one function per page panel.
 
-The Paper page reads the book through five projections, each from the book's
-own files: ``book_payload`` (identity, ``book.json``), ``signal_payload`` (the
-latest decision's order sheet), ``history_payload`` (every earlier day's orders
-and fills), ``performance_payload`` (return against CSI 300, equity and cash
-tracks, statistics) and ``snapshot_payload`` (account and positions).
-``environment_summary`` is the page's status ladder and the health probe.
+Books sit side by side under the Paper state root, one directory each
+(``paper.books``). ``books_payload`` is the overview, one row per book. A book's
+page reads it through six projections, each from the book's own files:
+``book_status`` (the status ladder), ``book_payload`` (identity, ``book.json``),
+``signal_payload`` (the latest decision's order sheet), ``history_payload``
+(every earlier day's orders and fills), ``performance_payload`` (return against
+CSI 300, equity and cash tracks, statistics) and ``snapshot_payload`` (account
+and positions). ``health_payload`` is the external probe over every book.
 
 Every function is total: degradation is a structured payload state
 (absent / no_snapshot / unreadable / export_error / stale / ok), never a 500.
@@ -39,6 +41,7 @@ from autotrade.environment.replay.style import (
 )
 from autotrade.environment.strategy import CN_TZ
 from autotrade.paper.book import BOOK_NAME
+from autotrade.paper.books import BOOK_ID_PATTERN, list_books
 from autotrade.paper.engine import PAPER_STATE_NAME, SNAPSHOT_NAME
 from autotrade.paper.orders import order_sheet
 from autotrade.paper.pit import newest_replay_slot
@@ -62,6 +65,14 @@ EQUITY_JOURNAL_NAME = "equity_daily.jsonl"
 def env_dir(repo_root: Path, env: str) -> Path:
     if env not in TRADING_ENVS: raise KeyError(f"unknown trading environment: {env}")
     return Path(repo_root) / "data/trading/paper"
+
+
+def book_dir(repo_root: Path, book: str, env: str = "paper") -> Path:
+    """One book's directory; anything that is not a book under the root is unknown."""
+    root = env_dir(repo_root, env)
+    if not BOOK_ID_PATTERN.fullmatch(book) or ".." in book or not (root / book / BOOK_NAME).is_file():
+        raise KeyError(f"unknown Paper book: {book}")
+    return root / book
 
 
 def _valid_date(value: str) -> bool:
@@ -141,15 +152,15 @@ def _decision_dates(state: dict[str, object] | None) -> list[str]:
 
 # ---------------------------------------------------------------- book
 
-def book_payload(repo_root: Path, env: str = "paper") -> dict[str, object]:
+def book_payload(repo_root: Path, book: str, env: str = "paper") -> dict[str, object]:
     """The book's frozen identity and where its calendar stands."""
-    root = env_dir(repo_root, env)
+    root = book_dir(repo_root, book, env)
     record, error = _read_json(root / BOOK_NAME)
     state, state_error = _read_json(root / PAPER_STATE_NAME)
     status = "unreadable" if error or state_error else "ok" if record else "absent"
-    book = None
+    identity = None
     if record:
-        book = {
+        identity = {
             "experiment_id": _text(record.get("experiment_id")),
             "artifact_id": _text(record.get("artifact_id")),
             "candidate_source": _text(record.get("candidate_source")),
@@ -163,7 +174,7 @@ def book_payload(repo_root: Path, env: str = "paper") -> dict[str, object]:
         "env": env,
         "state": status,
         "error": error or state_error,
-        "book": book,
+        "book": identity,
         "start_date": _text(state.get("start_date")),
         "settled_through": _text(state.get("settled_through")),
         "last_fit_date": _text(state.get("last_fit_date")),
@@ -216,9 +227,9 @@ def _sheet(root: Path, state: dict[str, object], trade_date: str) -> dict[str, o
     }
 
 
-def signal_payload(repo_root: Path, env: str = "paper") -> dict[str, object]:
+def signal_payload(repo_root: Path, book: str, env: str = "paper") -> dict[str, object]:
     """The latest decision: its orders and the holdings once they fill."""
-    root = env_dir(repo_root, env)
+    root = book_dir(repo_root, book, env)
     state, error = _read_json(root / PAPER_STATE_NAME)
     decided = _decision_dates(state)
     if error or not decided:
@@ -246,11 +257,11 @@ def _fill(row: dict[str, object], names: dict[str, str | None]) -> dict[str, obj
     }
 
 
-def history_payload(repo_root: Path, env: str = "paper") -> dict[str, object]:
+def history_payload(repo_root: Path, book: str, env: str = "paper") -> dict[str, object]:
     """Every trading day the book has acted on, newest first: the orders decided
     that morning and the fills they settled into (both keyed by the session).
     The latest decision is the signal panel's until its fills exist."""
-    root = env_dir(repo_root, env)
+    root = book_dir(repo_root, book, env)
     state, error = _read_json(root / PAPER_STATE_NAME)
     if error:
         return {"env": env, "state": "unreadable", "error": error, "days": []}
@@ -288,10 +299,10 @@ def _benchmark(root: Path) -> tuple[dict[str, float], str | None]:
         return {}, f"{type(exc).__name__}: {exc}"
 
 
-def performance_payload(repo_root: Path, env: str = "paper") -> dict[str, object]:
+def performance_payload(repo_root: Path, book: str, env: str = "paper") -> dict[str, object]:
     """The book's return against CSI 300 over the same settled days, its
     end-of-day equity and cash on those days, and the replay statistics."""
-    root = env_dir(repo_root, env)
+    root = book_dir(repo_root, book, env)
     record, error = _read_json(root / BOOK_NAME)
     initial = _number(_mapping(_mapping(record).get("profile")).get("initial_cash"))
     rows, skipped = read_jsonl(root / EQUITY_JOURNAL_NAME)
@@ -426,8 +437,8 @@ def _snapshot_status(directory: Path) -> dict[str, object]:
     return {"state": "ok", "error": None, **base}
 
 
-def snapshot_payload(repo_root: Path, env: str = "paper") -> dict[str, object]:
-    status = _snapshot_status(env_dir(repo_root, env))
+def snapshot_payload(repo_root: Path, book: str, env: str = "paper") -> dict[str, object]:
+    status = _snapshot_status(book_dir(repo_root, book, env))
     raw = status["raw"]
     return {
         "env": env,
@@ -459,14 +470,14 @@ def _environment_state(snapshot: str, state_error: str | None, latest: str | Non
     return "no_snapshot" if snapshot == "no_snapshot" else "absent"
 
 
-def environment_summary(repo_root: Path, env: str = "paper") -> dict[str, object]:
-    root = env_dir(repo_root, env)
-    snapshot = snapshot_payload(repo_root, env)
+def book_status(repo_root: Path, book: str, env: str = "paper") -> dict[str, object]:
+    root = book_dir(repo_root, book, env)
+    snapshot = snapshot_payload(repo_root, book, env)
     _state, state_error = _read_json(root / PAPER_STATE_NAME)
     latest = max([*_dates(root, "orders_")[-1:], *_dates(root, "executions_")[-1:]], default=None)
     return {
         "env": env,
-        "label": ENV_LABELS[env],
+        "book_id": book,
         "state": _environment_state(str(snapshot["state"]), state_error, latest),
         "error": snapshot["error"] or state_error,
         "generated_at": snapshot["generated_at"],
@@ -478,10 +489,40 @@ def environment_summary(repo_root: Path, env: str = "paper") -> dict[str, object
     }
 
 
-def environments_payload(repo_root: Path) -> dict[str, object]:
-    return {"environments": [environment_summary(repo_root, "paper")]}
+def books_payload(repo_root: Path, env: str = "paper") -> dict[str, object]:
+    """The overview: one row per book, each figure read off that book's panels."""
+    try:
+        books = list_books(env_dir(repo_root, env))
+    except RuntimeError as exc:  # a root still in the single-book layout
+        return {"env": env, "label": ENV_LABELS[env], "state": "unreadable", "error": str(exc), "books": []}
+    rows = []
+    for book in books:
+        identity = book_payload(repo_root, book, env)
+        signal = signal_payload(repo_root, book, env)["signal"]
+        statistics = performance_payload(repo_root, book, env)["statistics"] or {}
+        account = snapshot_payload(repo_root, book, env)["snapshot"] or {}
+        status = book_status(repo_root, book, env)
+        rows.append({
+            "book_id": book,
+            "experiment_id": (identity["book"] or {}).get("experiment_id"),
+            "artifact_id": (identity["book"] or {}).get("artifact_id"),
+            "start_date": identity["start_date"],
+            "initial_cash": (identity["book"] or {}).get("initial_cash"),
+            "equity": account.get("equity"),
+            "total_return": statistics.get("total_return"),
+            "excess_return": statistics.get("excess_return"),
+            "signal_date": signal["trade_date"] if signal else None,
+            "order_count": len(signal["orders"]) if signal else None,
+            "state": status["state"],
+            "error": status["error"],
+        })
+    return {"env": env, "label": ENV_LABELS[env], "state": "ok" if rows else "absent", "error": None, "books": rows}
 
 
 def health_payload(repo_root: Path, env: str = "paper") -> dict[str, object]:
-    summary = environment_summary(repo_root, env)
-    return {"ok": summary["state"] != "unreadable", **summary}
+    """For external monitors: every book's status, ``ok`` unless one is unreadable."""
+    try:
+        books = [book_status(repo_root, book, env) for book in list_books(env_dir(repo_root, env))]
+    except RuntimeError as exc:
+        return {"ok": False, "env": env, "error": str(exc), "books": []}
+    return {"ok": all(row["state"] != "unreadable" for row in books), "env": env, "error": None, "books": books}

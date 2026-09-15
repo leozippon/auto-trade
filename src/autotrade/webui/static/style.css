@@ -585,6 +585,14 @@ progress.progress.done::-moz-progress-bar {
 .page-head > .sub {
  flex-basis: 100%;
 }
+.page-head > .sub.one-line {
+ min-width: 0;
+ max-width: 100%;
+ align-self: stretch;
+ white-space: nowrap;
+ overflow: hidden;
+ text-overflow: ellipsis;
+}
 
 /* detail layout */
 .detail {

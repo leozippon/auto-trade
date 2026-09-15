@@ -139,7 +139,8 @@ def test_the_extractor_finds_the_routes_the_console_really_calls():
         "/api/experiments/{}",
         "/api/experiments/{}/control",
         "/api/experiments/{}/trace/stream",
-        "/api/trading/{}/signal",
+        "/api/trading/{}/books",
+        "/api/trading/{}/books/{}/signal",
         "/api/parameter-schema",
         # Assembled from a local `const base`, not written inline.
         "/api/experiments/{}/results/{}/orders",
@@ -170,19 +171,20 @@ def test_the_route_check_fails_on_a_renamed_route():
     """The mutation: the exact C1 defect must be detectable."""
     server = server_api_paths()
     # Fills were once requested as `/executions` on the client only.
-    assert "/api/trading/{}/history" in server
+    assert "/api/trading/{}/books/{}/history" in server
     assert "/api/trading/{}/executions" not in server
     assert sorted({"/api/trading/{}/executions"} - server) == ["/api/trading/{}/executions"]
 
 
-PAPER_PANEL_ROUTES = ("book", "signal", "history", "performance", "snapshot")
+PAPER_PANEL_ROUTES = ("status", "book", "signal", "history", "performance", "snapshot")
 
 
 def test_paper_bundle_serves_the_key_names_the_console_reads(tmp_path: Path):
     """A status-only smoke test would have missed `payload.executions`: the
     SPA reads named keys, so the contract is the key names."""
-    root = tmp_path / "data/trading/paper"
+    root = tmp_path / "data/trading/paper/exp"
     root.mkdir(parents=True)
+    (root / "book.json").write_text(json.dumps({"experiment_id": "exp", "artifact_id": "art"}), encoding="utf-8")
     (root / "executions_20260102.jsonl").write_text(
         json.dumps(
             {
@@ -201,36 +203,42 @@ def test_paper_bundle_serves_the_key_names_the_console_reads(tmp_path: Path):
     )
     client = TestClient(create_app(tmp_path))
 
-    # The requests the Paper page issues together; api() throws inside
+    # The requests a book's page issues together; api() throws inside
     # Promise.all, so ONE 404 blanks the whole route.
     for route in PAPER_PANEL_ROUTES:
-        response = client.get(f"/api/trading/paper/{route}")
+        response = client.get(f"/api/trading/paper/books/exp/{route}")
         assert response.status_code == 200, route
     assert client.get("/api/trading/paper/health").status_code == 200
 
-    history = client.get("/api/trading/paper/history").json()
+    history = client.get("/api/trading/paper/books/exp/history").json()
     assert history["days"][0]["fills"][0]["status"] == "filled"
     assert {"state", "error"} <= history.keys()
     day = history["days"][0]
     assert {"trade_date", "orders", "fills", "skipped_lines"} <= day.keys()
     assert "executions" not in day, "the SPA reads day.fills"
-    assert {"state", "error", "signal"} <= client.get("/api/trading/paper/signal").json().keys()
+    assert {"state", "error", "signal"} <= client.get("/api/trading/paper/books/exp/signal").json().keys()
     assert {"state", "error", "book", "start_date", "settled_through", "last_fit_date"} <= (
-        client.get("/api/trading/paper/book").json().keys()
+        client.get("/api/trading/paper/books/exp/book").json().keys()
     )
-    performance = client.get("/api/trading/paper/performance").json()
+    performance = client.get("/api/trading/paper/books/exp/performance").json()
     assert {"state", "error", "chart", "statistics", "min_days", "benchmark_error"} <= performance.keys()
-    assert "snapshot" in client.get("/api/trading/paper/snapshot").json()
+    assert "snapshot" in client.get("/api/trading/paper/books/exp/snapshot").json()
+    status = client.get("/api/trading/paper/books/exp/status").json()
+    for key in ("book_id", "state", "error", "age_seconds", "stale_threshold_seconds"):
+        assert key in status, key
 
-    roster = client.get("/api/trading/environments").json()["environments"][0]
-    for key in ("env", "label", "state", "error", "trade_date", "age_seconds", "stale_threshold_seconds"):
-        assert key in roster, key
+    [row] = client.get("/api/trading/paper/books").json()["books"]
+    for key in (
+        "book_id", "experiment_id", "artifact_id", "start_date", "initial_cash", "equity",
+        "total_return", "excess_return", "order_count", "state", "error",
+    ):
+        assert key in row, key
 
 
 @pytest.mark.parametrize("route", PAPER_PANEL_ROUTES)
 def test_the_paper_routes_the_console_reads_are_named_on_both_sides(route: str):
-    assert f"/api/trading/{{}}/{route}" in client_api_paths()
-    assert f"/api/trading/{{}}/{route}" in server_api_paths()
+    assert f"/api/trading/{{}}/books/{{}}/{route}" in client_api_paths()
+    assert f"/api/trading/{{}}/books/{{}}/{route}" in server_api_paths()
 
 
 def test_the_paper_health_route_is_an_external_probe_only() -> None:

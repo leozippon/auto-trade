@@ -708,29 +708,39 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
             raise HTTPException(status_code=404, detail=f"unknown trading environment: {env}")
         return env
 
-    @app.get("/api/trading/environments")
-    def trading_environments():
-        return trading.environments_payload(root)
+    def _trading_book(env: str, book: str, panel):
+        try:
+            return panel(root, book, _trading_env(env))
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc
 
-    @app.get("/api/trading/{env}/snapshot")
-    def trading_snapshot(env: str):
-        return trading.snapshot_payload(root, _trading_env(env))
+    @app.get("/api/trading/{env}/books")
+    def trading_books(env: str):
+        return trading.books_payload(root, _trading_env(env))
 
-    @app.get("/api/trading/{env}/book")
-    def trading_book(env: str):
-        return trading.book_payload(root, _trading_env(env))
+    @app.get("/api/trading/{env}/books/{book}/status")
+    def trading_book_status(env: str, book: str):
+        return _trading_book(env, book, trading.book_status)
 
-    @app.get("/api/trading/{env}/signal")
-    def trading_signal(env: str):
-        return trading.signal_payload(root, _trading_env(env))
+    @app.get("/api/trading/{env}/books/{book}/book")
+    def trading_book_identity(env: str, book: str):
+        return _trading_book(env, book, trading.book_payload)
 
-    @app.get("/api/trading/{env}/history")
-    def trading_history(env: str):
-        return trading.history_payload(root, _trading_env(env))
+    @app.get("/api/trading/{env}/books/{book}/signal")
+    def trading_signal(env: str, book: str):
+        return _trading_book(env, book, trading.signal_payload)
 
-    @app.get("/api/trading/{env}/performance")
-    def trading_performance(env: str):
-        return trading.performance_payload(root, _trading_env(env))
+    @app.get("/api/trading/{env}/books/{book}/history")
+    def trading_history(env: str, book: str):
+        return _trading_book(env, book, trading.history_payload)
+
+    @app.get("/api/trading/{env}/books/{book}/performance")
+    def trading_performance(env: str, book: str):
+        return _trading_book(env, book, trading.performance_payload)
+
+    @app.get("/api/trading/{env}/books/{book}/snapshot")
+    def trading_snapshot(env: str, book: str):
+        return _trading_book(env, book, trading.snapshot_payload)
 
     @app.get("/api/trading/{env}/health")
     def trading_health(env: str):
