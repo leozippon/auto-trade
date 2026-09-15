@@ -617,8 +617,14 @@ class ConsoleParameterSurfaceTest(unittest.TestCase):
         self.assertEqual(sorted(overrides), sorted(RESTORED_CONSOLE_PARAMETERS))
         with tempfile.TemporaryDirectory() as tmp:
             repo_root = Path(tmp)
-            with patch.object(
-                ExperimentManager, "start_worker", return_value={"spawned": False}
+            # The create pre-flight admits the GPU request against the live
+            # host (the manager imports select_gpus lazily from
+            # autotrade.environment.gpu); stub it so the test never depends on
+            # what is free on this machine. The probe itself is covered in
+            # test_sandbox_runtime.
+            with (
+                patch.object(ExperimentManager, "start_worker", return_value={"spawned": False}),
+                patch("autotrade.environment.gpu.select_gpus", return_value=[0, 1]),
             ):
                 response = TestClient(create_app(repo_root)).post(
                     "/api/experiments",
@@ -639,6 +645,40 @@ class ConsoleParameterSurfaceTest(unittest.TestCase):
         for key, value in overrides.items():
             with self.subTest(key=key):
                 self.assertEqual(params[key], value, key)
+
+    def test_a_create_request_the_host_gpus_cannot_serve_is_refused(self) -> None:
+        import tempfile
+        from unittest.mock import patch
+
+        from fastapi.testclient import TestClient
+
+        from autotrade.environment.gpu import GpuUnavailableError
+        from autotrade.webui.manager import ExperimentManager
+        from autotrade.webui.server import create_app
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            with (
+                patch.object(ExperimentManager, "start_worker", return_value={"spawned": False}),
+                patch(
+                    "autotrade.environment.gpu.select_gpus",
+                    side_effect=GpuUnavailableError("requested 2 GPU(s), 1 qualify"),
+                ),
+            ):
+                response = TestClient(create_app(repo_root)).post(
+                    "/api/experiments",
+                    json={
+                        "params": {
+                            "experiment_id": "params_gpu",
+                            **DEFAULT_RESEARCH_GEOMETRY.to_record(),
+                            "gpu_count": 2,
+                        }
+                    },
+                )
+            self.assertEqual(response.status_code, 400, response.text)
+            self.assertIn("当前 GPU 无法满足实验默认分配", response.json()["detail"])
+            self.assertIn("1 qualify", response.json()["detail"])
+            self.assertFalse((repo_root / "experiments/params_gpu").exists())
 
 
 class WorkerEntryPointTest(unittest.TestCase):
