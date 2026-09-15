@@ -46,6 +46,7 @@ from autotrade.webui.manager import (
 )
 from autotrade.webui.public_identity import PublicIdentity
 from autotrade.webui.server import create_app, is_loopback_host
+from tests.unit.gpu_probe import stubbed_gpu_probe
 from tests.unit.webui_research_arm import build_arm
 
 
@@ -341,32 +342,33 @@ def test_experiment_endpoint_rejects_console_managed_unknown_and_missing_paramet
 
 def test_experiment_endpoint_creates_only_persistent_sandbox_research(tmp_path: Path):
     client = TestClient(create_app(tmp_path))
-    response = client.post(
-        "/api/experiments",
-        json={
-            "params": {
-                "experiment_id": "persistent_demo",
-                **DEFAULT_RESEARCH_GEOMETRY.to_record(),
-                "strategy_period": "quarter",
-                "inference_time": "23:59",
-                "daily_window_months": 18,
-                "include_macro": False,
-                "events_datasets": ["margin", "moneyflow"],
-                "screen_boards": ["main", "gem"],
-                "model": "deepseek-v4-flash",
-                "subagent_model": LOCAL_QWEN_MODEL,
-                "nl_model": "deepseek-v4-pro",
-                "compact_model": "deepseek-v4-pro",
-                "reasoning_effort": "high",
-                "no_thinking": True,
-                "disable_context_compact": False,
-                "compact_token_threshold": 90_000,
-                "compact_keep_recent_messages": 10,
-                "compact_max_tokens": 1_200,
-                "compact_max_calls": 4,
-            }
-        },
-    )
+    with stubbed_gpu_probe():
+        response = client.post(
+            "/api/experiments",
+            json={
+                "params": {
+                    "experiment_id": "persistent_demo",
+                    **DEFAULT_RESEARCH_GEOMETRY.to_record(),
+                    "strategy_period": "quarter",
+                    "inference_time": "23:59",
+                    "daily_window_months": 18,
+                    "include_macro": False,
+                    "events_datasets": ["margin", "moneyflow"],
+                    "screen_boards": ["main", "gem"],
+                    "model": "deepseek-v4-flash",
+                    "subagent_model": LOCAL_QWEN_MODEL,
+                    "nl_model": "deepseek-v4-pro",
+                    "compact_model": "deepseek-v4-pro",
+                    "reasoning_effort": "high",
+                    "no_thinking": True,
+                    "disable_context_compact": False,
+                    "compact_token_threshold": 90_000,
+                    "compact_keep_recent_messages": 10,
+                    "compact_max_tokens": 1_200,
+                    "compact_max_calls": 4,
+                }
+            },
+        )
     assert response.status_code == 200
     assert response.json()["experiment_id"] == "persistent_demo"
     assert response.json()["spawned"] is False
@@ -1253,15 +1255,16 @@ class WebuiBackendTest(unittest.TestCase):
         )
         self.assertEqual(health["status"], "degraded")
         # A broken neighbour must never block creating a new experiment.
-        created = self.client.post(
-            "/api/experiments",
-            json={
-                "params": {
-                    "experiment_id": "exp_new",
-                    **DEFAULT_RESEARCH_GEOMETRY.to_record(),
-                }
-            },
-        )
+        with stubbed_gpu_probe():
+            created = self.client.post(
+                "/api/experiments",
+                json={
+                    "params": {
+                        "experiment_id": "exp_new",
+                        **DEFAULT_RESEARCH_GEOMETRY.to_record(),
+                    }
+                },
+            )
         self.assertEqual(created.status_code, 200, created.text)
 
     def test_running_cap_allows_last_slot_and_blocks_overflow(self) -> None:

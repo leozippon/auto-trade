@@ -40,6 +40,7 @@ from autotrade.pipelines.worker import (
     load_worker_options,
 )
 from autotrade.webui.manager import ExperimentManager
+from tests.unit.gpu_probe import stubbed_gpu_probe
 
 _FOLD_DELEGATION_ROLES = ("Explore", "general-purpose")
 
@@ -889,9 +890,10 @@ def test_webui_persistent_create_uses_available_worker_entrypoint(
         "start_worker",
         lambda experiment_id: {"spawned": True, "worker": experiment_id},
     )
-    created = manager.create_experiment(
-        {"experiment_id": "worker_smoke", "initial_control_mode": "manual"}
-    )
+    with stubbed_gpu_probe():
+        created = manager.create_experiment(
+            {"experiment_id": "worker_smoke", "initial_control_mode": "manual"}
+        )
     assert created["spawned"] is True
     assert created["worker"] == "worker_smoke"
     params = json.loads(

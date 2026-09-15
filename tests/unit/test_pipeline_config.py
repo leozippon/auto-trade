@@ -28,6 +28,7 @@ from autotrade.pipelines.config import (
     RollingExperimentConfig,
 )
 from autotrade.pipelines.hitl_state import WEB_CREATE_DEFAULTS
+from tests.unit.gpu_probe import stubbed_gpu_probe
 
 #: The console create form is seeded from the pinned explore profile so a
 #: new experiment hardlinks the PIT view seed. Period, screen, compact, and
@@ -617,14 +618,9 @@ class ConsoleParameterSurfaceTest(unittest.TestCase):
         self.assertEqual(sorted(overrides), sorted(RESTORED_CONSOLE_PARAMETERS))
         with tempfile.TemporaryDirectory() as tmp:
             repo_root = Path(tmp)
-            # The create pre-flight admits the GPU request against the live
-            # host (the manager imports select_gpus lazily from
-            # autotrade.environment.gpu); stub it so the test never depends on
-            # what is free on this machine. The probe itself is covered in
-            # test_sandbox_runtime.
             with (
                 patch.object(ExperimentManager, "start_worker", return_value={"spawned": False}),
-                patch("autotrade.environment.gpu.select_gpus", return_value=[0, 1]),
+                stubbed_gpu_probe([0, 1]),
             ):
                 response = TestClient(create_app(repo_root)).post(
                     "/api/experiments",

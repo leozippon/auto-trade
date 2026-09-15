@@ -49,6 +49,7 @@ from autotrade.pipelines.hitl_state import (
 from autotrade.webui import manager as manager_module
 from autotrade.webui.manager import ManagerError
 from autotrade.webui.server import create_app
+from tests.unit.gpu_probe import stubbed_gpu_probe
 
 SRC_ROOT = str(Path(autotrade.__file__).resolve().parents[1])
 
@@ -628,6 +629,11 @@ class CreatePreflightTest(unittest.TestCase):
             encoding="utf-8",
         )
         self.client = TestClient(create_app(self.repo_root, self.experiments_root))
+        # GPU admission is stubbed for the class; the one test about it
+        # re-patches the probe with its own answers.
+        probe = stubbed_gpu_probe()
+        probe.start()
+        self.addCleanup(probe.stop)
 
     def _create(self, **overrides):
         payload = {
