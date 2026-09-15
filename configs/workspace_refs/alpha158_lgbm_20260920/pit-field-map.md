@@ -33,7 +33,7 @@ universe = pd.read_parquet(context.asof_dir + "/universe", columns=["ts_code","n
 
 ## 去重与版本规则
 
-- 同一 `(dataset, ts_code, end_date)` 的多个版本：在时点 t 生效的是 `available_at ≤ t` 的最新一版；`available_at` 完全相同的重复行取文件顺序的最后一行（稳定排序）。这与防御型包「只取首版」不同，是毕业产物的口径，逐字沿用。
+- 同一 `(dataset, ts_code, end_date)` 的多个版本：在时点 t 生效的是 `available_at ≤ t` 的最新一版；`available_at` 完全相同的重复行取文件顺序的最后一行（稳定排序）。这与防御型包「只取首版」不同，是冻结产物的口径，逐字沿用。
 - 增速列取 t 时点**最新可见报告期**（首次可见时刻最晚的那一期）的生效版本；没有可见报告期即 NaN，z 分数后记 0。
 - 预告方向取 t 时点最新可见的一条预告；快报方向把最新可见快报与**同一报告期**的预告配对，比较快报增速与预告中值增速。
 - `moneyflow` 同一 `(ts_code, trade_date)` 多行时取 `available_at` 最大的一行；窗口按自然日计（5 日 = T-5..T-1），窗口内无行即 NaN。

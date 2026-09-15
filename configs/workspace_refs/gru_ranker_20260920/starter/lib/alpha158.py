@@ -1,7 +1,7 @@
-"""Alpha158 feature block (158 operators), verbatim from the graduated github_confirm artifact's lib/features.py.
+"""Alpha158 feature block (158 operators), verbatim from the frozen github_confirm artifact's lib/features.py.
 
 Kept byte-for-byte below this docstring so the reported control `c_lgbm` is the
-graduate's feature code, not a re-implementation. Layout: every series is an
+artifact's feature code, not a re-implementation. Layout: every series is an
 (S, T) wide matrix (S symbols x T bars, trade_date ascending); outputs are (S, T)
 matrices where out[:, b] uses bars b-d+1..b. Bars without enough history are
 NaN; the per-date cross-section fill is done by robust_zscore (missing -> 0).

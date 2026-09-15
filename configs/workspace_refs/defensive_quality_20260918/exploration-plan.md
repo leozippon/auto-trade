@@ -9,7 +9,7 @@
 1. **四张表是否真的选进来了**：`data_summary.json` 的 `fundamentals.datasets` 列出 `income_vip`、`cashflow_vip`、`balancesheet_vip`，`macro.datasets` 列出 `index_daily`；分别报 `snapshot` view 与 `valid` view 的行数与日期覆盖（**不得由前者推断后者**）。沪深 300 缺失即声明本臂按变体 c 用总波动。
 2. **单位核对**：`unit_reference.json` 里 `fundamentals.income_vip.n_income_attr_p`、`fundamentals.cashflow_vip.n_cashflow_act`、`fundamentals.balancesheet_vip.total_assets`（元）、`daily.circ_mv`（元）、`macro.index_daily.pct_chg`（百分数）。实测 `accr` 的中位数应在 0 附近、1%/99% 分位在 ±0.2 量级；`ivol60` 中位数应在 0.015–0.025；量级不对就是单位错了。
 3. **版本与去重**：抽 20 个 `(ts_code, end_date)` 核对三张表各自只取到了最早版本、事件时点是三者中最晚的 `available_at`；抽 20 个名字核对年龄按可见交易日历计。
-4. **可选池与覆盖**：在每个研究年的四个季度各取一个月度复核日，上报可选池大小、两腿各自的非空率、波动窗口日数 ≥ 40 的比例、最新报表年龄的分布。参照实测（一个春季决策日）：池 2,907；一个盛夏决策日：池 2,873。
+4. **可选池与覆盖**：在每个研究年的四个季度各取一个月度复核日，上报可选池大小、两腿各自的非空率、波动窗口日数 ≥ 40 的比例、最新报表年龄的分布。
 5. **一次决策的实测墙钟与内存**：参照 `sources.md`（沙箱实测）。
 
 ## 第 1 轮：低波腿与它的对照，一次完整研究期 `batch_validate`

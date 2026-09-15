@@ -1,6 +1,6 @@
-"""Reported control `c_lgbm`: the graduate's Alpha158 + LightGBM ranker on the same panels and schedule.
+"""Reported control `c_lgbm`: the frozen artifact's Alpha158 + LightGBM ranker on the same panels and schedule.
 
-Faithful to the graduated artifact where it matters: its Alpha158 code
+Faithful to the frozen artifact where it matters: its Alpha158 code
 (`lib/alpha158.py`) and per-date robust z-score, its 10-day open-to-open rank
 label, objective and fixed parameters, 600 rounds with early stopping 50 on the
 last VALID_DAYS training dates after an EMBARGO_DAYS gap, training on every name

@@ -1,6 +1,6 @@
-"""LightGBM cross-sectional ranker: the graduate's grid, trained in fit, scored on a review day.
+"""LightGBM cross-sectional ranker: the frozen artifact's grid, trained in fit, scored on a review day.
 
-Mechanism (the graduate's scorer): pre-registered 4-point grid num_leaves {31, 63} x
+Mechanism (the frozen artifact's scorer): pre-registered 4-point grid num_leaves {31, 63} x
 learning_rate {0.05, 0.1}; objective=regression on the per-bar label rank - 0.5,
 feature_fraction=0.8, bagging_fraction=0.8, bagging_freq=1, min_data_in_leaf=200,
 lambda_l2=10, num_threads=8; validation = the last VALID_DAYS training bars after an

@@ -2,7 +2,7 @@
 LightGBM cross-sectional ranker, refit every quarter on the trailing three years, held as a
 weekly-reviewed top-15 book.
 
-`fit` builds the trailing-window panel (lib/data.py), trains the graduate's 4-point grid and
+`fit` builds the trailing-window panel (lib/data.py), trains the frozen artifact's 4-point grid and
 saves the selected booster under context.state_dir (lib/score_lgbm.py). `generate_orders`
 reviews the book on the first decision of each ISO week: it scores the newest cross-section
 with the same feature builder and swaps at most two names (lib/trade.py).

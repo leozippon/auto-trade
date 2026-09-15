@@ -4,7 +4,7 @@
 
     "g1"      -> three fixed-seed GRUs over 60-day daily price-volume sequences,
                  trained on a CUDA device (lib/model.py)            (main candidate)
-    "c_lgbm"  -> the graduate's Alpha158 + LightGBM ranker (lib/tree.py)
+    "c_lgbm"  -> the frozen artifact's Alpha158 + LightGBM ranker (lib/tree.py)
                                                                      (reported control, never nominated)
     "v_ens"   -> the mean of the g1 and c_lgbm ranks                (registered variant)
 

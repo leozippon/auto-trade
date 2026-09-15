@@ -177,7 +177,7 @@ def build_fit_samples(context, block_days=120, overlap_days=60, hold=HOLD_DAYS):
         ctx_start = max(0, start - overlap_days)
         # The block COMPUTES up to 180 bars (60 leading context + 120 target) but only
         # KEEPS the first `step` bars (the stride) so every (bar, symbol) sample is stored
-        # exactly once; the final block keeps the tail and ends the loop (the graduate
+        # exactly once; the final block keeps the tail and ends the loop (the frozen artifact
         # kept looping and stored the last partial block twice).
         is_last = start + block_days >= T
         keep_end = seg_end if is_last else min(start + overlap_days, seg_end)
