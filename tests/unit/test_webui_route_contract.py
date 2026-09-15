@@ -214,7 +214,9 @@ def test_paper_bundle_serves_the_key_names_the_console_reads(tmp_path: Path):
     assert history["days"][0]["fills"][0]["status"] == "filled"
     assert {"state", "error"} <= history.keys()
     day = history["days"][0]
-    assert {"trade_date", "orders", "fills", "skipped_lines"} <= day.keys()
+    assert {
+        "trade_date", "orders", "target", "cash_after", "cash_weight", "fills", "skipped_lines",
+    } <= day.keys(), "a past day renders through the same order-sheet renderer as today"
     assert "executions" not in day, "the SPA reads day.fills"
     assert {"state", "error", "signal"} <= client.get("/api/trading/paper/books/exp/signal").json().keys()
     assert {"state", "error", "book", "start_date", "settled_through", "last_fit_date"} <= (
@@ -229,8 +231,9 @@ def test_paper_bundle_serves_the_key_names_the_console_reads(tmp_path: Path):
 
     [row] = client.get("/api/trading/paper/books").json()["books"]
     for key in (
-        "book_id", "experiment_id", "artifact_id", "start_date", "initial_cash", "equity",
-        "total_return", "excess_return", "order_count", "state", "error",
+        "book_id", "experiment_id", "artifact_id", "candidate_source", "start_date",
+        "initial_cash", "equity", "total_return", "excess_return", "max_drawdown",
+        "curve", "signal_date", "order_count", "state", "error",
     ):
         assert key in row, key
 

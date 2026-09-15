@@ -5,7 +5,7 @@ Books sit side by side under the Paper state root, one directory each
 page reads it through six projections, each from the book's own files:
 ``book_status`` (the status ladder), ``book_payload`` (identity, ``book.json``),
 ``signal_payload`` (the latest decision's order sheet), ``history_payload``
-(every earlier day's orders and fills), ``performance_payload`` (return against
+(every earlier day's order sheet and fills), ``performance_payload`` (return against
 CSI 300, equity and cash tracks, statistics) and ``snapshot_payload`` (account
 and positions). ``health_payload`` is the external probe over every book.
 
@@ -258,9 +258,10 @@ def _fill(row: dict[str, object], names: dict[str, str | None]) -> dict[str, obj
 
 
 def history_payload(repo_root: Path, book: str, env: str = "paper") -> dict[str, object]:
-    """Every trading day the book has acted on, newest first: the orders decided
-    that morning and the fills they settled into (both keyed by the session).
-    The latest decision is the signal panel's until its fills exist."""
+    """Every trading day the book has acted on, newest first: that morning's
+    order sheet — its orders and the holdings they fill into — and the fills it
+    settled into (both keyed by the session). The latest decision is the signal
+    panel's until its fills exist."""
     root = book_dir(repo_root, book, env)
     state, error = _read_json(root / PAPER_STATE_NAME)
     if error:
@@ -279,6 +280,12 @@ def history_payload(repo_root: Path, book: str, env: str = "paper") -> dict[str,
         rows.append({
             "trade_date": day,
             "orders": orders,
+            # The same post-trade block the signal panel carries for today, so
+            # a past day reads at the same level of detail. A day the book only
+            # settled has no order sheet, and says so with null.
+            "target": sheet["target"] if sheet else None,
+            "cash_after": sheet["cash_after"] if sheet else None,
+            "cash_weight": sheet["cash_weight"] if sheet else None,
             "fills": [_fill(row, names) for row in fills],
             "skipped_lines": skipped + (sheet["skipped_lines"] if sheet else 0),
         })
@@ -334,6 +341,8 @@ def performance_payload(repo_root: Path, book: str, env: str = "paper") -> dict[
         **base,
         "state": "ok",
         "error": None,
+        # A curve needs two points: one settled day is served as its statistics
+        # alone, so no surface has to decide whether one dot is a chart.
         "chart": {
             "series": [curve_entry("strategy", "账簿", returns)],
             "benchmark": benchmark,
@@ -342,7 +351,9 @@ def performance_payload(repo_root: Path, book: str, env: str = "paper") -> dict[
                 "equity": [row["equity"] for row in curve],
                 "cash": [row["cash"] for row in curve],
             },
-        },
+        }
+        if len(curve) >= 2
+        else None,
         "benchmark_days": len(benchmark_rows),
         "benchmark_error": benchmark_error,
         "statistics": {
@@ -499,18 +510,25 @@ def books_payload(repo_root: Path, env: str = "paper") -> dict[str, object]:
     for book in books:
         identity = book_payload(repo_root, book, env)
         signal = signal_payload(repo_root, book, env)["signal"]
-        statistics = performance_payload(repo_root, book, env)["statistics"] or {}
+        performance = performance_payload(repo_root, book, env)
+        statistics = performance["statistics"] or {}
+        chart = performance["chart"]
         account = snapshot_payload(repo_root, book, env)["snapshot"] or {}
         status = book_status(repo_root, book, env)
         rows.append({
             "book_id": book,
             "experiment_id": (identity["book"] or {}).get("experiment_id"),
             "artifact_id": (identity["book"] or {}).get("artifact_id"),
+            "candidate_source": (identity["book"] or {}).get("candidate_source"),
             "start_date": identity["start_date"],
             "initial_cash": (identity["book"] or {}).get("initial_cash"),
             "equity": account.get("equity"),
             "total_return": statistics.get("total_return"),
             "excess_return": statistics.get("excess_return"),
+            "max_drawdown": statistics.get("max_drawdown"),
+            # The card's miniature of the book's own return curve, the same
+            # series its performance panel draws and absent on the same rule.
+            "curve": {"series": chart["series"], "benchmark": chart["benchmark"]} if chart else None,
             "signal_date": signal["trade_date"] if signal else None,
             "order_count": len(signal["orders"]) if signal else None,
             "state": status["state"],

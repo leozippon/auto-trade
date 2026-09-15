@@ -20,9 +20,11 @@ QUANT_PYTHON=/home/lzp/miniconda3/envs/quant/bin/python
 # the PIT event build (03:35, about 30 min), the revision sentinel (04:00) and
 # the text audit (05:00). Each book takes its PIT build (about 10 min), the
 # replay of its earlier decisions and one decision; on a refit day the fit adds
-# 10-40 min and is capped at 7200 s. Books run one after another, so a few
-# books still end before 08:30. 07:40 is the retry for a morning whose data
-# landed late: flock skips it while the first run is still working, and it is
-# a no-op re-render for every book whose session is already decided.
+# 10-40 min, capped at the fit timeout init froze into that book's book.json
+# from its experiment's strategy_fit_timeout_seconds (7200 s for the book in
+# place today). Books run one after another, so a few books still end before
+# 08:30. 07:40 is the retry for a morning whose data landed late: flock skips
+# it while the first run is still working, and it is a no-op re-render for
+# every book whose session is already decided.
 40 5 * * 1-5 cd $REPO_ROOT && mkdir -p logs/paper .runtime/paper && flock -n .runtime/paper/cron.lock $QUANT_PYTHON scripts/paper/run_paper.py run >> logs/paper/cron.log 2>&1
 40 7 * * 1-5 cd $REPO_ROOT && mkdir -p logs/paper .runtime/paper && flock -n .runtime/paper/cron.lock $QUANT_PYTHON scripts/paper/run_paper.py run >> logs/paper/cron.log 2>&1

@@ -504,6 +504,13 @@ progress.progress.done::-moz-progress-bar {
  border-radius: var(--radius-sm);
  padding: var(--space-2) var(--space-3);
 }
+/* A Paper book measures its figures one by one as days settle, so early on it
+   fills two of seven tiles. Keeping the empty tracks holds every tile to the
+   width it will have when the rest arrive, instead of stretching two of them
+   across the panel. */
+#trading-page .tiles {
+ grid-template-columns: repeat(auto-fill, minmax(10rem, 1fr));
+}
 .tile-label {
  font-size: 0.8rem;
  color: var(--muted);
@@ -575,13 +582,16 @@ progress.progress.done::-moz-progress-bar {
 .page-head > .sub {
  flex-basis: 100%;
 }
-.page-head > .sub.one-line {
- min-width: 0;
- max-width: 100%;
- align-self: stretch;
- white-space: nowrap;
- overflow: hidden;
- text-overflow: ellipsis;
+/* The Paper book's identity block: labels stay muted through table.kv, values
+   read in the text ink, and the 建簿 note wraps in a measured column instead
+   of being cut off at the end of one line. The block keeps the full basis of
+   its row — capping the flex item itself would let it ride up beside the
+   heading — so the measure is the table's. */
+.page-head > .sub.book-facts {
+ color: var(--text);
+}
+.book-facts table.kv {
+ max-width: 62rem;
 }
 
 /* detail layout */
@@ -683,8 +693,11 @@ details.fold.history-day.idle > summary {
  color: var(--muted);
  font-weight: 500;
 }
-/* A year of trading days scrolls inside the panel instead of stretching it. */
-.history-list {
+/* A year of trading days scrolls inside the panel instead of stretching it —
+   until one is opened: that day carries the same order sheet, fills and
+   post-fill holdings today's panel does, and reading them through a short box
+   of their own is worse than a longer page. */
+.history-list:not(:has(details[open])) {
  max-height: 32rem;
  overflow-y: auto;
  overscroll-behavior: contain;
@@ -2360,7 +2373,8 @@ details.issue-evidence > summary:hover {
   flex-direction: column;
   align-items: flex-start;
  }
- .tiles {
+ .tiles,
+ #trading-page .tiles {
   grid-template-columns: repeat(2, 1fr);
  }
  .trace-box {

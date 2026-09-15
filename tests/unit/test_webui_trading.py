@@ -124,6 +124,24 @@ def test_the_signal_is_the_latest_order_sheet_and_history_keeps_every_earlier_da
     assert [row["action"] for row in days[1]["orders"]] == ["buy"]
     [fill] = days[1]["fills"]
     assert (fill["status"], fill["name"], fill["quantity"], fill["price"]) == ("filled", "平安银行", 100, 11.0)
+    # A past day carries the same post-trade block the signal panel shows for
+    # today; dropping it server-side left the two panels at different detail.
+    sheet = order_sheet(root, "20260105")
+    assert [(row["symbol"], row["quantity"], row["value"]) for row in days[1]["target"]] == [
+        (row["symbol"], row["quantity"], row["value"]) for row in sheet["target"]
+    ]
+    assert (days[1]["cash_after"], days[1]["cash_weight"]) == (sheet["cash_after"], sheet["cash_weight"])
+
+
+def test_a_settlement_only_day_says_it_has_no_order_sheet(tmp_path: Path):
+    """A day with fills but no decision of its own has no post-trade holdings
+    to show: null says so, where an empty list would read as a flat book."""
+    root = engine_book(tmp_path, "20260105", "20260106")
+    _jsonl(root / "executions_20260107.jsonl", _execution(matched_at="2026-01-07T09:30:00+08:00"))
+    [extra] = [day for day in trading.history_payload(tmp_path, BOOK)["days"] if day["trade_date"] == "20260107"]
+    assert extra["orders"] == [] and extra["target"] is None
+    assert extra["cash_after"] is None and extra["cash_weight"] is None
+    assert len(extra["fills"]) == 1
 
 
 def test_performance_keys_return_equity_cash_and_csi300_by_the_same_settled_days(tmp_path: Path):
@@ -161,6 +179,28 @@ def test_performance_keys_return_equity_cash_and_csi300_by_the_same_settled_days
     assert partial["statistics"]["benchmark_return"] is None and partial["statistics"]["excess_return"] is None
 
 
+def test_one_settled_day_has_statistics_but_no_curve(tmp_path: Path):
+    """A curve needs two points. Served as a chart, one settled day drew a lone
+    dot under an empty drawdown band; the day's statistics still stand, so the
+    rule lives here and every surface reads the same absent chart."""
+    engine_book(tmp_path, "20260105", "20260106")
+    payload = trading.performance_payload(tmp_path, BOOK)
+    assert payload["state"] == "ok" and payload["chart"] is None
+    assert payload["statistics"]["days"] == 1
+    assert payload["statistics"]["total_return"] is not None
+    assert trading.books_payload(tmp_path)["books"][0]["curve"] is None
+
+    engine_book(tmp_path, "20260107")
+    payload = trading.performance_payload(tmp_path, BOOK)
+    chart = payload["chart"]
+    assert payload["statistics"]["days"] == 2
+    assert chart["series"][0]["dates"] == chart["account"]["dates"] == ["20260105", "20260106"]
+    assert len(chart["account"]["equity"]) == len(chart["account"]["cash"]) == 2
+    # The overview card draws the same curve, and only the return series of it.
+    curve = trading.books_payload(tmp_path)["books"][0]["curve"]
+    assert curve == {"series": chart["series"], "benchmark": chart["benchmark"]}
+
+
 def test_annualised_statistics_appear_once_the_book_has_enough_days(tmp_path: Path, monkeypatch):
     engine_book(tmp_path, "20260105", "20260106", "20260107", "20260108")
     monkeypatch.setattr(trading, "MIN_STATISTICS_DAYS", 3)
@@ -193,7 +233,7 @@ def test_damaged_fill_and_equity_lines_are_counted_and_projected_to_null(tmp_pat
     """A journal is an append-only stream a crash can truncate: the good rows
     around a damaged line are served and the line is counted, and json.loads'
     NaN/Infinity tokens project to null instead of failing the serializer."""
-    root = engine_book(tmp_path, "20260105", "20260106")
+    root = engine_book(tmp_path, "20260105", "20260106", "20260107")
     _jsonl(
         root / "executions_20260106.jsonl",
         _execution(event_id="a", matched_at="2026-01-06T09:30:00+08:00"),
@@ -210,7 +250,7 @@ def test_damaged_fill_and_equity_lines_are_counted_and_projected_to_null(tmp_pat
     assert (bad["symbol"], bad["quantity"], bad["price"], bad["cost"]) == (None, None, None, None)
     performance = trading.performance_payload(tmp_path, BOOK)
     assert performance["skipped_lines"] == 1
-    assert performance["chart"]["account"]["dates"] == ["20260105"]
+    assert performance["chart"]["account"]["dates"] == ["20260105", "20260106"]
     client = TestClient(create_app(tmp_path))
     for route in ("history", "performance"):
         assert client.get(f"/api/trading/paper/books/{BOOK}/{route}").status_code == 200, route
@@ -244,13 +284,19 @@ def test_the_overview_has_one_row_per_book_read_off_its_panels(tmp_path: Path):
     alpha, beta = overview["books"]
     assert (alpha["book_id"], beta["book_id"]) == ("alpha", "beta")
     performance = trading.performance_payload(tmp_path, "alpha")["statistics"]
+    performance_chart = trading.performance_payload(tmp_path, "alpha")["chart"]
     snapshot = trading.snapshot_payload(tmp_path, "alpha")["snapshot"]
     assert alpha["total_return"] == performance["total_return"]
     assert alpha["equity"] == snapshot["equity"]
     assert (alpha["signal_date"], alpha["order_count"]) == ("20260107", 1)
     assert (alpha["start_date"], alpha["initial_cash"], alpha["state"]) == ("20260105", 100_000.0, "ok")
+    # The card names where the candidate came from and draws the book's own
+    # curve; the drawdown the day count still gates has no tile.
+    assert (alpha["candidate_source"], alpha["max_drawdown"]) == ("graduated", None)
+    assert alpha["curve"]["series"][0]["dates"] == performance_chart["account"]["dates"]
     # A book whose first decision has not settled yet has no return to show.
     assert (beta["total_return"], beta["order_count"]) == (None, 1)
+    assert beta["curve"] is None
     health = trading.health_payload(tmp_path)
     assert health["ok"] is True and [row["book_id"] for row in health["books"]] == ["alpha", "beta"]
     # A root still in the single-book layout is reported, not read as a book.
@@ -551,7 +597,7 @@ def test_prices_keep_their_cents_and_only_large_amounts_abbreviate():
         "¥5,922.00", "¥43.50", "¥-881.40", "¥14.6万", "¥2.50亿", "—",
     ]
     # Every price column goes through the price formatter.
-    for name in ("paperPositionsPanel", "paperSignalPanel", "paperOrdersTable", "paperHistoryDay", "ordersNode"):
+    for name in ("paperPositionsPanel", "paperSheetBody", "paperOrdersTable", "paperHistoryDay", "ordersNode"):
         assert "fmtPrice(" in _js_top_level(script, f"function {name}("), name
     assert not re.search(r"fmtAmount(Opt)?\(row\.(price|average_cost|last_price|reference_price)\)", script)
 
@@ -563,7 +609,38 @@ def test_the_paper_performance_chart_is_the_research_chart_on_one_date_axis():
     and draws no second chart implementation of its own."""
     script = _app_js()
     panel = _js_top_level(script, "function paperPerformancePanel(")
-    assert "equityChart(chart" in panel
+    assert "equityChart(payload.chart" in panel
     trading_section = script.split("let tradingView = null;", 1)[1].split("function renderQmtPage(", 1)[0]
     assert "singleSeriesBarChart" not in trading_section
     assert "payload.account" in _js_top_level(script, "function equityChart(")
+
+
+def test_the_account_pane_names_itself_in_the_legend_not_inside_the_plot():
+    """「权益（线）· 现金（柱）」 was drawn at the pane's top-left corner, where
+    it ran into the ¥ ceiling tick the same pane labels three pixels below it.
+    The legend row is the one place a chart names what it draws."""
+    chart = _js_top_level(_app_js(), "function equityChart(")
+    named = [line for line in chart.splitlines() if "权益（线）" in line]
+    assert len(named) == 1 and "legend.push" in named[0], named
+
+
+def test_the_page_draws_a_figure_only_where_the_book_measured_one():
+    """The panel printed 「—」 for every statistic the day count still gates and
+    for a CSI 300 the book has no data for. Tiles now come from presentTiles,
+    which drops an absent figure, and the reason moves into the caption."""
+    script = _app_js()
+    for name in ("paperPerformancePanel", "bookCard"):
+        body = _js_top_level(script, f"function {name}(")
+        assert "presentTiles(" in body, name
+        assert "—" not in body, name
+    panel = _js_top_level(script, "function paperPerformancePanel(")
+    assert "min_days" in panel and "benchmark_days" in panel
+
+
+def test_today_and_every_past_day_render_through_one_order_sheet_renderer():
+    """The signal panel showed the post-trade holdings and a history day could
+    not, because the payload dropped them. One renderer now draws both, so the
+    two levels of detail cannot drift apart again."""
+    script = _app_js()
+    for name in ("paperSignalPanel", "paperHistoryDay"):
+        assert "paperSheetBody(" in _js_top_level(script, f"function {name}("), name

@@ -400,7 +400,7 @@ def test_static_console_keeps_macro_style_surfaces_without_closed_capabilities(
     page = client.get("/").text
     script = client.get("/static/app.js").text
     assert "ADM-Cube" in page and "/static/logo.png" in page
-    for label in ("系统提示词预览", "Paper 模拟交易"):
+    for label in ("系统提示词预览", "模拟交易"):
         assert label in script
     for label in (
         "研究期日度累计收益 vs 沪深300",
