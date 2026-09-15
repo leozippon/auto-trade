@@ -144,6 +144,7 @@ def test_research_preview_carries_every_current_prompt_section(tmp_path: Path):
     for tool in (
         "batch_validate",
         "report_issue",
+        "skill_feedback",
         "modification_check",
         "smoke_backtest",
         "step_rollback",

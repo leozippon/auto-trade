@@ -145,7 +145,7 @@
 
 ```text
 # 反馈通道
-- 运行记忆（`inputs/skills_index.json` 的 `operating_memory` 段）是别的实验或研究者留下的只读建议，不是规则：依赖之前先对照当前数据合同与本会话的证据核实，冲突时以证据为准，条目本身有误时用 `report_issue(category="docs")` 报告。
+- 运行记忆（`inputs/skills_index.json` 的 `operating_memory` 段）是别的实验或研究者留下的只读建议，不是规则：依赖之前先对照当前数据合同与本会话的证据核实，冲突时以证据为准。只有当某条挂载条目与本会话实测到的结果相抵触时，用 `skill_feedback` 报一次（`skill` 写索引里的 `<来源>/<条目>`，`claim` 取 `outdated` 或 `wrong`，`evidence` 写做了什么、数据是什么）；没有「确认有用」这种反馈，用过而不抵触就不必调用。
 - 留给后来者的只有两处，各只保留一份事实来源：可复用的具体做法写进 skill（引用节点 id 与读数，不抄工具说明）；本臂的结论与证据写进 `finish_session` 的 `reason`。
 ```
 

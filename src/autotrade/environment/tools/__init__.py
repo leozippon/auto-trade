@@ -35,6 +35,7 @@ from .search import (
     trace_read_stub,
 )
 from .shell import SandboxShellTool
+from .skill_feedback import SkillFeedbackTool
 from .step_rollback import StepRollbackTool
 from .workspace import SafeWorkspace
 
@@ -56,6 +57,7 @@ __all__ = [
     "SandboxShellTool",
     "SearchRoots",
     "SessionInterrupt",
+    "SkillFeedbackTool",
     "StepRollbackTool",
     "Tool",
     "ToolError",

@@ -25,13 +25,13 @@ from fastapi.testclient import TestClient
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.runtime import RunManifest
 from autotrade.environment.tools.base import ToolError, ToolRegistry
+from autotrade.environment.tools.feedback_log import MAX_RESOLUTION_NOTE_CHARS
 from autotrade.environment.tools.report_issue import (
     ISSUE_CATEGORIES,
     ISSUE_REPORT_SCHEMA_VERSION,
     ISSUE_REPORTS_NAME,
     MAX_ISSUE_EVIDENCE_CHARS,
     MAX_ISSUE_REPORTS_PER_SESSION,
-    MAX_ISSUE_RESOLUTION_NOTE_CHARS,
     MAX_ISSUE_SUMMARY_CHARS,
     ReportIssueTool,
     append_issue_report,
@@ -383,7 +383,7 @@ def test_a_resolution_is_a_second_line_and_the_report_stays_as_filed(
         ({"report_id": "issue_ghost"}, "unknown issue report"),
         ({"outcome": "wontfix"}, "outcome must be one of"),
         ({"note": "   "}, "note must say"),
-        ({"note": "长" * (MAX_ISSUE_RESOLUTION_NOTE_CHARS + 1)}, "exceeds"),
+        ({"note": "长" * (MAX_RESOLUTION_NOTE_CHARS + 1)}, "exceeds"),
     ],
 )
 def test_a_resolution_that_cannot_be_trusted_is_refused_and_nothing_is_written(

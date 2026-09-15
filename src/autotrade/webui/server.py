@@ -34,7 +34,7 @@ from autotrade.pipelines.hitl_state import (
     read_status,
 )
 
-from . import equity, issues, memory, registry, steps, traces, trading
+from . import equity, issues, memory, registry, skill_feedback, steps, traces, trading
 from .manager import (
     MAX_RUNNING_EXPERIMENTS,
     ExperimentManager,
@@ -661,7 +661,7 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
                 status_code=404, detail="unknown mounted memory entry"
             ) from exc
 
-    # ---- issue reports ------------------------------------------------------------
+    # ---- Agent feedback channels --------------------------------------------------
     @app.get("/api/issue-reports")
     def get_issue_reports(
         experiment_id: str | None = Query(None),
@@ -678,6 +678,32 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         if experiment_id is not None:
             _experiment_dir(experiment_id)
         return issues.issue_reports(
+            experiment_root,
+            experiment_id=experiment_id,
+            include_resolved=include_resolved,
+            limit=limit,
+        )
+
+    @app.get("/api/skill-feedback")
+    def get_skill_feedback(
+        experiment_id: str | None = Query(None),
+        include_resolved: bool = Query(False),
+        limit: int = Query(
+            skill_feedback.MAX_SKILL_FEEDBACK_PAGE,
+            ge=1,
+            le=skill_feedback.MAX_SKILL_FEEDBACK_PAGE,
+        ),
+    ) -> dict[str, object]:
+        """Agent-filed skill feedback across experiments, newest first, resolved
+        ones only when asked for. Read-only on the same terms as the issue
+        reports: the report and its resolution are append-only operator
+        telemetry, and the resolution is recorded from the shell
+        (``scripts/experiments/resolve_skill_feedback.py``), never from a
+        browser."""
+
+        if experiment_id is not None:
+            _experiment_dir(experiment_id)
+        return skill_feedback.skill_feedback(
             experiment_root,
             experiment_id=experiment_id,
             include_resolved=include_resolved,

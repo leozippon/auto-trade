@@ -162,6 +162,7 @@ _SESSION_TOOLS = frozenset(
         "write_skill",
         "delete_skill",
         "report_issue",
+        "skill_feedback",
     }
 )
 INBOX_SAFE_BEFORE_LLM = "before_llm"

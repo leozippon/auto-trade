@@ -98,6 +98,10 @@ from autotrade.environment.tools.search import (
     SearchRoots,
 )
 from autotrade.environment.tools.shell import SandboxShellTool
+from autotrade.environment.tools.skill_feedback import (
+    SkillFeedbackTool,
+    skill_feedback_path,
+)
 from autotrade.environment.tools.step_rollback import StepRollbackTool
 from autotrade.environment.tools.workspace import SafeWorkspace
 
@@ -136,6 +140,7 @@ from .skills import (
     ensure_operating_memory_snapshot,
     install_operating_memory,
     install_workspace_skills,
+    mounted_skill_refs,
     write_skills_index,
 )
 
@@ -2635,8 +2640,15 @@ class LLMResearchDeveloper:
                 WriteSkillTool(safe),
                 DeleteSkillTool(safe),
                 # Parent-only: sub-agents report findings to their parent, the
-                # parent files the report (a wrong mounted memory entry too).
+                # parent files the report.
                 ReportIssueTool(issue_reports_path(self.experiment_dir), manifest),
+                # Parent-only, and negative only: one mounted memory entry this
+                # session's own measurements contradict.
+                SkillFeedbackTool(
+                    skill_feedback_path(self.experiment_dir),
+                    manifest,
+                    mounted_skill_refs(mounted_memory),
+                ),
                 # Parent-only: the Agent's own context compaction.
                 CompactTool(),
                 modification,

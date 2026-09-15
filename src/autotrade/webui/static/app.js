@@ -5436,16 +5436,13 @@ async function renderMemoryPage() {
     draftName: "",
     source: null,
     dirty: false,
-    issueExperiment: "",
-    issueResolved: false,
+    feedback: { issue: feedbackState(), skill: feedbackState() },
     countHost: el("span", {}, ""),
     listHost: el("div", { class: "session-list" }),
     candidateHost: el("div", { class: "session-list" }),
     headHost: el("div", { class: "memory-pane-head" }),
     toolbarHost: el("div", { class: "control-bar memory-toolbar" }),
     bodyHost: el("div", { class: "memory-pane-body" }),
-    issueCountHost: el("span", { class: "issue-count" }, ""),
-    issuesHost: el("div", { class: "issue-list" }),
   };
   $main.replaceChildren(
     el(
@@ -5477,17 +5474,15 @@ async function renderMemoryPage() {
           ),
         ),
       ),
-      memorySection(
-        "问题反馈",
-        "处置：scripts/experiments/resolve_issue.py",
-        el("div", { class: "panel" }, issueFilterBar(), memoryView.issuesHost),
-      ),
+      feedbackSection("issue"),
+      feedbackSection("skill"),
     ),
   );
   renderMemoryList();
   renderMemoryCandidates();
   renderMemoryPane();
-  renderIssueReports();
+  renderFeedback("issue");
+  renderFeedback("skill");
 }
 
 /* One pattern for every section on this page: a heading, a tooltip for its
@@ -5501,8 +5496,30 @@ function memorySection(title, note, ...panels) {
   );
 }
 
-/* Operators' inbox for defects the sessions themselves noticed: `report_issue`
-   lines from every experiment's ledgers, listed read-only, evidence folded. */
+/* Two operator inboxes, same shape: every experiment's ledger lines for one
+   Agent→operator channel, listed read-only with the evidence folded. Reports
+   are answered from the shell, so neither section writes anything. */
+const FEEDBACK_CHANNELS = {
+  issue: {
+    title: "问题反馈",
+    note: "处置：scripts/experiments/resolve_issue.py",
+    path: "/api/issue-reports",
+    loading: "加载问题反馈…",
+    empty: "会话没有报告过问题",
+    row: issueReportRow,
+  },
+  skill: {
+    title: "技能反馈",
+    note: "处置：scripts/experiments/resolve_skill_feedback.py",
+    path: "/api/skill-feedback",
+    loading: "加载技能反馈…",
+    empty: "会话没有反驳过挂载条目",
+    row: skillFeedbackRow,
+  },
+};
+
+/* `report_issue` categories, and the researcher's verdict recorded from the
+   shell into the same log. */
 const ISSUE_CATEGORY_LABELS = {
   tool_output: "工具输出",
   environment: "环境",
@@ -5510,26 +5527,57 @@ const ISSUE_CATEGORY_LABELS = {
   docs: "文档",
   other: "其他",
 };
-
-/* The researcher's verdict, recorded from the shell into the same log. */
 const ISSUE_OUTCOME_LABELS = {
   fixed: "已修复",
   not_a_defect: "非缺陷",
   accepted_limitation: "接受的限制",
 };
 
+/* `skill_feedback` is negative only: there is no "confirmed" badge to render
+   because no session can file one. */
+const SKILL_CLAIM_LABELS = { outdated: "过时", wrong: "错误" };
+const SKILL_OUTCOME_LABELS = {
+  skill_updated: "已更新条目",
+  not_a_defect: "非缺陷",
+  accepted_limitation: "接受的限制",
+};
+
+function feedbackState() {
+  return {
+    experiment: "",
+    resolved: false,
+    countHost: el("span", { class: "issue-count" }, ""),
+    listHost: el("div", { class: "issue-list" }),
+  };
+}
+
+function feedbackSection(kind) {
+  const channel = FEEDBACK_CHANNELS[kind];
+  return memorySection(
+    channel.title,
+    channel.note,
+    el(
+      "div",
+      { class: "panel" },
+      feedbackFilterBar(kind),
+      memoryView.feedback[kind].listHost,
+    ),
+  );
+}
+
 /* The list is one bounded newest-first page across every experiment, so
    narrowing to a single experiment is how an older report is reached at all.
    The options are the experiment directories the memory bundle already listed
    — the same set the reports themselves are read from. */
-function issueFilterBar() {
+function feedbackFilterBar(kind) {
+  const state = memoryView.feedback[kind];
   const rows = (memoryView.payload.graduated || {}).experiments || [];
   const select = el(
     "select",
     {
       onchange: (event) => {
-        memoryView.issueExperiment = event.target.value;
-        renderIssueReports();
+        state.experiment = event.target.value;
+        renderFeedback(kind);
       },
     },
     el("option", { value: "" }, "全部实验"),
@@ -5538,10 +5586,10 @@ function issueFilterBar() {
     ),
   );
   const resolved = el("input", { type: "checkbox" });
-  if (memoryView.issueResolved) resolved.checked = true;
+  if (state.resolved) resolved.checked = true;
   resolved.addEventListener("change", (event) => {
-    memoryView.issueResolved = event.target.checked;
-    renderIssueReports();
+    state.resolved = event.target.checked;
+    renderFeedback(kind);
   });
   return el(
     "div",
@@ -5549,38 +5597,22 @@ function issueFilterBar() {
     el("label", { class: "issue-filter" }, el("span", {}, "实验"), select),
     el("label", { class: "issue-filter" }, resolved, el("span", {}, "显示已处置")),
     el("span", { class: "spacer" }),
-    memoryView.issueCountHost,
+    state.countHost,
   );
 }
 
-/* One card per report, read top to bottom: the category badge opens the
-   summary line so every card's prose keeps the same left edge, the attribution
-   follows as one quiet line, and the raw evidence stays folded behind its own
-   small disclosure instead of making the whole card a click target. A resolved
+/* One card per report, read top to bottom: the badge opens the first line so
+   every card's prose keeps the same left edge, the attribution follows as one
+   quiet line, and the raw evidence stays folded behind its own small
+   disclosure instead of making the whole card a click target. A resolved
    report keeps its own text untouched and gains the outcome badge plus the
    researcher's note — the two are read together or the card lies. */
-function issueReportRow(report) {
+function feedbackCard(report, ...lead) {
   const resolved = Boolean(report.outcome);
   return el(
     "article",
     { class: resolved ? "issue-report resolved" : "issue-report" },
-    el(
-      "p",
-      { class: "issue-line" },
-      resolved
-        ? el(
-            "span",
-            { class: "badge state-completed" },
-            ISSUE_OUTCOME_LABELS[report.outcome] || report.outcome,
-          )
-        : null,
-      el(
-        "span",
-        { class: "badge kind" },
-        ISSUE_CATEGORY_LABELS[report.category] || report.category || "—",
-      ),
-      report.summary || "—",
-    ),
+    el("p", { class: "issue-line" }, ...lead),
     el(
       "div",
       { class: "issue-meta" },
@@ -5608,6 +5640,62 @@ function issueReportRow(report) {
   );
 }
 
+function outcomeBadge(report, labels) {
+  return report.outcome
+    ? el(
+        "span",
+        { class: "badge state-completed" },
+        labels[report.outcome] || report.outcome,
+      )
+    : null;
+}
+
+function issueReportRow(report) {
+  return feedbackCard(
+    report,
+    outcomeBadge(report, ISSUE_OUTCOME_LABELS),
+    el(
+      "span",
+      { class: "badge kind" },
+      ISSUE_CATEGORY_LABELS[report.category] || report.category || "—",
+    ),
+    report.summary || "—",
+  );
+}
+
+function skillFeedbackRow(report) {
+  return feedbackCard(
+    report,
+    outcomeBadge(report, SKILL_OUTCOME_LABELS),
+    el(
+      "span",
+      { class: "badge kind" },
+      SKILL_CLAIM_LABELS[report.claim] || report.claim || "—",
+    ),
+    skillEntryName(report),
+  );
+}
+
+/* A curated entry is editable on this page, so its name opens it in the pane
+   above; a graduated one lives in the frozen generation of the experiment that
+   published it and is named, not linked. */
+function skillEntryName(report) {
+  const reference = report.skill || "—";
+  if (report.origin !== "curated" || !report.name) return reference;
+  return el(
+    "a",
+    {
+      href: "#/memory",
+      title: `在精选库中打开 ${report.name}`,
+      onclick: (event) => {
+        event.preventDefault();
+        selectMemoryItem({ kind: "curated", name: report.name });
+      },
+    },
+    reference,
+  );
+}
+
 /* Label and value are one unbreakable run: the metadata line wraps between
    pairs, never inside one, and a pathological value ends in an ellipsis with
    the full text still on the element. */
@@ -5620,25 +5708,27 @@ function issueMetaItem(label, value) {
   );
 }
 
-async function renderIssueReports() {
-  const host = memoryView.issuesHost;
-  const experiment = memoryView.issueExperiment;
-  const withResolved = memoryView.issueResolved;
+async function renderFeedback(kind) {
+  const channel = FEEDBACK_CHANNELS[kind];
+  const state = memoryView.feedback[kind];
+  const host = state.listHost;
+  const experiment = state.experiment;
+  const withResolved = state.resolved;
   // A filter change and a page leave both land here while a fetch is open.
   const stale = () =>
     !memoryView ||
-    memoryView.issuesHost !== host ||
-    memoryView.issueExperiment !== experiment ||
-    memoryView.issueResolved !== withResolved;
-  host.replaceChildren(el("div", { class: "loading" }, "加载问题反馈…"));
-  memoryView.issueCountHost.textContent = "";
+    memoryView.feedback[kind] !== state ||
+    state.experiment !== experiment ||
+    state.resolved !== withResolved;
+  host.replaceChildren(el("div", { class: "loading" }, channel.loading));
+  state.countHost.textContent = "";
   let payload;
   try {
     const params = new URLSearchParams();
     if (experiment) params.set("experiment_id", experiment);
     if (withResolved) params.set("include_resolved", "true");
     const query = params.toString() ? `?${params}` : "";
-    payload = await api(`/api/issue-reports${query}`);
+    payload = await api(`${channel.path}${query}`);
   } catch (error) {
     if (stale()) return;
     host.replaceChildren(
@@ -5656,13 +5746,13 @@ async function renderIssueReports() {
     total > reports.length
       ? `最近 ${reports.length} 条，共 ${total} 条`
       : `${total} 条`;
-  memoryView.issueCountHost.textContent = withResolved
+  state.countHost.textContent = withResolved
     ? `共 ${listed}，其中已处置 ${resolved} 条`
     : `未处置 ${listed}，已处置 ${resolved} 条`;
   const nodes = (payload.unreadable || []).map((item) =>
     el("div", { class: "hint warn" }, `${item.experiment_id}：${item.error}`),
   );
-  if (reports.length) nodes.push(...reports.map(issueReportRow));
+  if (reports.length) nodes.push(...reports.map(channel.row));
   else
     nodes.push(
       el(
@@ -5670,7 +5760,7 @@ async function renderIssueReports() {
         { class: "empty compact" },
         resolved && !withResolved
           ? `无未处置报告 · 已处置 ${resolved} 条`
-          : "会话没有报告过问题",
+          : channel.empty,
       ),
     );
   host.replaceChildren(...nodes);

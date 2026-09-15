@@ -100,6 +100,7 @@ def _tool_descriptions() -> dict[str, str]:
         SafeWorkspace,
         SandboxShellTool,
         SearchRoots,
+        SkillFeedbackTool,
         StepRollbackTool,
         WriteFileTool,
     )
@@ -123,6 +124,7 @@ def _tool_descriptions() -> dict[str, str]:
             ModificationCheckTool,
             StepRollbackTool,
             ReportIssueTool,
+            SkillFeedbackTool,
             FinishSessionTool,
             BatchValidateTool,
             SmokeBacktestTool,

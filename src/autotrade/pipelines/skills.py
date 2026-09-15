@@ -386,6 +386,23 @@ class MemorySource:
         }
 
 
+def mounted_skill_refs(
+    sources: Sequence[MemorySource],
+) -> dict[str, str]:
+    """Every mounted entry as ``<source>/<name>`` -> origin.
+
+    The same reference the skills index publishes and ``validate_memory_entry_ref``
+    parses, so the Agent, the mount and ``skill_feedback`` name one entry the
+    same way.
+    """
+
+    return {
+        f"{source.source}/{name}": source.origin
+        for source in sources
+        for name in source.entries
+    }
+
+
 def operating_memory_entries(library: str | Path) -> tuple[str, ...]:
     """Entry names of one memory tree, validated in the shared skill format."""
 
@@ -1065,6 +1082,7 @@ __all__ = [
     "install_operating_memory",
     "install_workspace_skills",
     "latest_skills_snapshot",
+    "mounted_skill_refs",
     "operating_memory_entries",
     "operating_memory_snapshot_path",
     "operating_memory_snapshot_root",

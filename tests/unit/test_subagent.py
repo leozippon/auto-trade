@@ -910,8 +910,9 @@ def test_role_tool_visibility_hides_writes_from_audits(tmp_path: Path) -> None:
         "compact",
         "finish_session",
         # Children report findings to the parent, the parent files defect
-        # reports with the operators.
+        # reports and mounted-skill contradictions with the operators.
         "report_issue",
+        "skill_feedback",
         # A capped, minutes-long host job on a recorded Validation: the parent
         # spends that budget, like the formal backtests.
         "run_null_control",
