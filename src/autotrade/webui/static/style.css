@@ -34,7 +34,16 @@
  --mask: rgba(20, 26, 40, 0.45);
  --danger-border: #e5b8b8;
  --mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+ /* One spacing scale and two radii for every layout rule: panels and cards
+    take --radius, anything nested inside them --radius-sm. */
+ --space-1: 0.25rem;
+ --space-2: 0.5rem;
+ --space-3: 0.75rem;
+ --space-4: 1rem;
+ --space-5: 1.25rem;
+ --space-6: 1.75rem;
  --radius: 12px;
+ --radius-sm: 8px;
  --shadow: 0 1px 3px rgba(24, 34, 56, 0.08);
  --shadow-lift: 0 4px 14px rgba(24, 34, 56, 0.12);
 }
@@ -71,6 +80,10 @@
 }
 * {
  box-sizing: border-box;
+}
+/* `hidden` must beat component display rules (.btn is inline-flex). */
+[hidden] {
+ display: none !important;
 }
 html {
  --ui-zoom: 1;
@@ -325,13 +338,17 @@ main {
  line-height: 1;
 }
 
-/* badges */
-.badge {
- display: inline-block;
+/* badges — one size everywhere, centered on the line they sit in */
+.badge,
+.gpu-pick-badge {
+ display: inline-flex;
+ align-items: center;
+ flex: none;
  border-radius: 999px;
- padding: 0.14rem 0.7rem;
- font-size: 0.84rem;
+ padding: 0.1rem 0.6rem;
+ font-size: 0.8rem;
  font-weight: 600;
+ line-height: 1.5;
  white-space: nowrap;
 }
 .badge.state-running_session,
@@ -377,54 +394,65 @@ main {
  font-weight: 500;
 }
 
-/* cards grid (homepage) */
-.grid {
- display: grid;
- grid-template-columns: repeat(auto-fill, minmax(min(27rem, 100%), 1fr));
- gap: 1.1rem;
-}
+/* Panels and cards: one surface. A card is a panel that stacks its lines on
+   the scale and, when clickable, lifts on hover. */
+.panel,
 .card {
+ min-width: 0;
  background: var(--panel);
  border: 1px solid var(--border);
  border-radius: var(--radius);
  box-shadow: var(--shadow);
- padding: 1.05rem 1.2rem;
+ padding: var(--space-4) var(--space-5);
+}
+.panel > :last-child {
+ margin-bottom: 0;
+}
+.grid {
+ display: grid;
+ grid-template-columns: repeat(auto-fill, minmax(min(27rem, 100%), 1fr));
+ gap: var(--space-4);
+}
+.card {
  display: flex;
  flex-direction: column;
- gap: 0.65rem;
+ gap: var(--space-2);
+}
+.card.clickable {
+ cursor: pointer;
  transition:
   box-shadow 0.18s,
   transform 0.18s;
 }
-.card:hover {
+.card.clickable:hover {
  box-shadow: var(--shadow-lift);
  transform: translateY(-1px);
-}
-.card.clickable {
- cursor: pointer;
-}
-.card.clickable h3 a:hover {
- text-decoration: none;
 }
 .card h3 {
  margin: 0;
  font-size: 1.03rem;
  display: flex;
  align-items: center;
- gap: 0.55rem;
- flex-wrap: wrap;
+ gap: var(--space-2);
 }
-.card h3 a {
+a.exp-name,
+a.exp-name:hover {
  color: var(--text);
+ text-decoration: none;
 }
-.card .meta-line {
- color: var(--muted);
- font-size: 0.875rem;
-}
+/* Pinned to the card's bottom edge, so the action rows of one grid row line up
+   however many lines each card carries above them. */
 .card .actions {
  display: flex;
- gap: 0.55rem;
- margin-top: 2px;
+ flex-wrap: wrap;
+ gap: var(--space-2);
+ margin-top: auto;
+ padding-top: var(--space-1);
+}
+.meta-line {
+ color: var(--muted);
+ font-size: 0.875rem;
+ line-height: 1.55;
 }
 
 progress.progress {
@@ -468,16 +496,16 @@ progress.progress.done::-moz-progress-bar {
 .tiles {
  display: grid;
  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
- gap: 0.8rem;
+ gap: var(--space-3);
 }
 .tile {
  background: var(--panel-2);
  border: 1px solid var(--row-border);
- border-radius: 10px;
- padding: 0.6rem 0.85rem;
+ border-radius: var(--radius-sm);
+ padding: var(--space-2) var(--space-3);
 }
 .tile-label {
- font-size: 0.81rem;
+ font-size: 0.8rem;
  color: var(--muted);
 }
 .tile-value {
@@ -485,10 +513,11 @@ progress.progress.done::-moz-progress-bar {
  font-weight: 650;
  margin-top: 2px;
 }
-.tile-value.pos {
+/* P&L sign colors, wherever a signed figure sits (tile, table cell, list). */
+.pos {
  color: var(--gain);
 }
-.tile-value.neg {
+.neg {
  color: var(--loss);
 }
 
@@ -497,7 +526,7 @@ progress.progress.done::-moz-progress-bar {
 .stage-strip {
  display: flex;
  flex-wrap: wrap;
- gap: 0.5rem;
+ gap: var(--space-2);
 }
 .stage-chip {
  display: flex;
@@ -506,7 +535,7 @@ progress.progress.done::-moz-progress-bar {
  padding: 0.35rem 0.6rem;
  border: 1px solid var(--border);
  border-top: 3px solid var(--chip-bg);
- border-radius: 6px;
+ border-radius: var(--radius-sm);
  font-size: 0.875rem;
 }
 .stage-chip .stage-name {
@@ -532,46 +561,39 @@ progress.progress.done::-moz-progress-bar {
 .stage-chip.skipped {
  opacity: 0.6;
 }
-.hero-title {
- margin: 0;
-}
-.orders-table-box {
- max-height: 24rem;
- overflow: auto;
- background: var(--panel);
-}
-
 .page-head {
  display: flex;
  align-items: center;
  justify-content: space-between;
- margin-bottom: 1.1rem;
- gap: 0.75rem;
+ margin-bottom: var(--space-4);
+ gap: var(--space-2) var(--space-3);
  flex-wrap: wrap;
 }
 .page-head h2 {
  margin: 0;
+ min-width: 0;
+ max-width: 100%;
  font-size: 1.19rem;
  display: flex;
- gap: 0.7rem;
+ gap: var(--space-3);
  align-items: center;
- flex-wrap: wrap;
 }
 .page-head .sub {
  color: var(--muted);
  font-size: 0.875rem;
+}
+.page-head > .sub {
+ flex-basis: 100%;
 }
 
 /* detail layout */
 .detail {
  display: grid;
  grid-template-columns: 22.5rem minmax(0, 1fr);
- gap: 1.1rem;
+ gap: var(--space-4);
  align-items: start;
  min-width: 0;
 }
-.panel,
-.card,
 .session-detail {
  min-width: 0;
 }
@@ -583,7 +605,7 @@ progress.progress.done::-moz-progress-bar {
 .session-detail {
  display: flex;
  flex-direction: column;
- gap: 1rem;
+ gap: var(--space-4);
 }
 .session-detail > .section-gap {
  margin-top: 0;
@@ -591,32 +613,58 @@ progress.progress.done::-moz-progress-bar {
 .session-detail > span:empty {
  display: none;
 }
-.panel {
- background: var(--panel);
- border: 1px solid var(--border);
- border-radius: var(--radius);
- box-shadow: var(--shadow);
- padding: 0.95rem 1.1rem;
-}
+/* Heading ladder: page h2, section h3, panel title, subsection title. A panel
+   title is a panel's first h4 (or its .panel-head row); a subsection title
+   opens a block inside the panel and ranks just below it. */
 .panel h4 {
- margin: 0 0 0.6rem;
- font-size: 0.875rem;
- color: var(--muted);
- font-weight: 600;
- letter-spacing: 0.02em;
-}
-/* Inside a panel, .section-gap on a heading must still win the top margin. */
-.panel h4.section-gap {
- margin-top: 1rem;
-}
-/* Sub-section headings that must outrank their body text. */
-h4.subsection-title,
-.panel h4.subsection-title {
- margin: 0;
- font-size: 1.02rem;
+ margin: 0 0 var(--space-3);
+ font-size: 1rem;
  font-weight: 700;
  color: var(--text);
- letter-spacing: 0;
+}
+h4.subsection-title,
+.panel h4.subsection-title {
+ margin: 0 0 var(--space-2);
+ font-size: 0.9rem;
+ font-weight: 650;
+ color: var(--text);
+}
+.panel-head {
+ display: flex;
+ flex-wrap: wrap;
+ align-items: center;
+ gap: var(--space-2) var(--space-3);
+ margin-bottom: var(--space-3);
+}
+.panel .panel-head h4,
+.panel-head h3 {
+ margin: 0;
+}
+.panel-head .spacer {
+ flex: 1;
+}
+/* A panel disclosure reads as a quiet subsection label; the one that folds a
+   whole panel carries the panel title's weight instead. */
+details.fold {
+ margin-bottom: var(--space-2);
+}
+details.fold > summary {
+ width: fit-content;
+ cursor: pointer;
+ font-size: 0.875rem;
+ font-weight: 600;
+ color: var(--muted);
+}
+details.fold > summary:hover {
+ color: var(--accent);
+}
+details.fold[open] > summary {
+ margin-bottom: var(--space-2);
+}
+details.fold > summary.panel-summary {
+ font-size: 1rem;
+ font-weight: 700;
+ color: var(--text);
 }
 .modal.subagent-modal {
  width: min(1180px, 96vw);
@@ -662,8 +710,13 @@ h4.subsection-title,
   0 0 0 1px var(--accent-soft),
   var(--shadow-lift);
 }
-.hero-crown {
- font-size: 1.2rem;
+.hero-title {
+ display: flex;
+ align-items: center;
+ gap: var(--space-2);
+ min-width: 0;
+ margin: 0;
+ font-size: 1.03rem;
 }
 
 .session-list {
@@ -750,18 +803,24 @@ h4.subsection-title,
 
 .control-bar {
  display: flex;
- gap: 0.7rem;
- row-gap: 0.5rem;
+ gap: var(--space-2) var(--space-3);
  flex-wrap: wrap;
  align-items: center;
- margin-top: 0.55rem;
+ margin-top: var(--space-2);
 }
-.panel > .control-bar:first-child,
 .control-bar:first-child {
  margin-top: 0;
 }
 .control-bar .spacer {
  flex: 1;
+}
+/* A control row's buttons wrap as one group at the row's right end, so a
+   narrow row breaks between the status and the buttons, never among them. */
+.control-actions {
+ display: flex;
+ flex-wrap: wrap;
+ gap: var(--space-2);
+ margin-left: auto;
 }
 .mode-note {
  font-size: 0.875rem;
@@ -785,17 +844,28 @@ h4.subsection-title,
  background-position: right 0.6rem center;
 }
 
-/* tables */
+/* tables — labels read left, figures right in tabular digits (a .num column,
+   set once per column by dataTable). A data table never wraps a cell: its box
+   scrolls sideways instead, so a phone gets whole values, not one glyph a line. */
+.table-box {
+ max-width: 100%;
+ overflow-x: auto;
+}
+.table-box.limit {
+ max-height: 24rem;
+ overflow-y: auto;
+}
 table.kv,
 table.data {
  border-collapse: collapse;
  width: 100%;
- font-size: 0.94rem;
+ font-size: 0.9rem;
 }
 table.kv td {
- padding: 0.38rem 0.55rem;
+ padding: 0.4rem 0.6rem;
  border-bottom: 1px solid var(--row-border);
  vertical-align: top;
+ overflow-wrap: anywhere;
 }
 table.kv td:first-child {
  color: var(--muted);
@@ -804,24 +874,26 @@ table.kv td:first-child {
 }
 table.data th,
 table.data td {
- padding: 0.42rem 0.6rem;
+ padding: 0.45rem 0.6rem;
  border-bottom: 1px solid var(--row-border);
- text-align: right;
- font-variant-numeric: tabular-nums;
+ text-align: left;
+ white-space: nowrap;
 }
 table.data th {
  color: var(--muted);
  font-weight: 600;
 }
-table.data th:first-child,
-table.data td:first-child {
- text-align: left;
+table.data .num {
+ text-align: right;
+ font-variant-numeric: tabular-nums;
 }
-.num.pos {
- color: var(--gain);
+/* A short statistics table sized to its columns rather than stretched. */
+table.data.fit {
+ width: auto;
+ min-width: min(100%, 32rem);
 }
-.num.neg {
- color: var(--loss);
+table.data td .badge {
+ margin-left: var(--space-2);
 }
 
 /* directive editor */
@@ -829,7 +901,7 @@ textarea.directive {
  width: 100%;
  min-height: 8rem;
  border: 1px solid var(--input-border);
- border-radius: 10px;
+ border-radius: var(--radius-sm);
  padding: 0.7rem 0.8rem;
  font: 0.94rem / 1.55 var(--mono);
  resize: vertical;
@@ -852,7 +924,7 @@ textarea.directive.inject-input {
  word-break: break-all;
 }
 .inject-queue {
- margin-top: 0.45rem;
+ margin: var(--space-2) 0;
 }
 .modal.prompt-modal textarea.prompt-editor {
  height: 70vh;
@@ -868,15 +940,27 @@ textarea.directive.inject-input {
 .hint.warn {
  color: var(--warn);
 }
+/* A hint sharing a line or a cell with other content. */
+.hint.flush {
+ margin-top: 0;
+}
+.push-right {
+ margin-left: auto;
+}
+.pre-wrap,
+pre.code-view.pre-wrap {
+ white-space: pre-wrap;
+ overflow-wrap: anywhere;
+}
 
 /* live prep indicator */
 .prep-indicator {
  display: flex;
  align-items: center;
- gap: 0.7rem;
- margin: 4px 0 0.6rem;
+ gap: var(--space-3);
+ margin: var(--space-2) 0;
  background: var(--accent-soft);
- border-radius: 10px;
+ border-radius: var(--radius-sm);
  padding: 0.65rem 0.9rem;
  font-size: 0.905rem;
  color: var(--text);
@@ -953,10 +1037,7 @@ textarea.directive.inject-input {
 .charts-row {
  display: grid;
  grid-template-columns: repeat(auto-fit, minmax(min(29rem, 100%), 1fr));
- gap: 1.35rem;
-}
-.chart-cell h4 {
- margin-bottom: 0.4rem;
+ gap: var(--space-5);
 }
 .chart-legend {
  display: flex;
@@ -1009,16 +1090,16 @@ textarea.directive.inject-input {
 /* stats chips */
 .stats-chips {
  display: flex;
- gap: 0.55rem;
+ gap: var(--space-2);
  flex-wrap: wrap;
- margin: 4px 0 0.6rem;
+ margin: var(--space-2) 0;
 }
 .stat-chip {
  background: var(--panel-2);
  border: 1px solid var(--row-border);
  border-radius: 999px;
- padding: 0.2rem 0.8rem;
- font-size: 0.845rem;
+ padding: 0.15rem 0.7rem;
+ font-size: 0.84rem;
  color: var(--text);
  white-space: nowrap;
  font-variant-numeric: tabular-nums;
@@ -1035,7 +1116,7 @@ textarea.directive.inject-input {
 
 /* trading console degraded-state banners (stale / export_error / unreadable) */
 .banner {
- border-radius: 10px;
+ border-radius: var(--radius-sm);
  padding: 0.6rem 0.9rem;
  margin-bottom: 0.8rem;
  font-size: 0.94rem;
@@ -1049,6 +1130,9 @@ textarea.directive.inject-input {
  color: var(--bad);
 }
 
+.trace-replay {
+ margin-top: var(--space-4);
+}
 .trace-replay-toggle {
  appearance: none;
  -webkit-appearance: none;
@@ -1106,7 +1190,7 @@ textarea.directive.inject-input {
 }
 .trace-block {
  border: 1px solid var(--border);
- border-radius: 10px;
+ border-radius: var(--radius-sm);
  padding: 0.5rem 0.75rem;
  background: var(--panel-2);
  font-size: 0.905rem;
@@ -1159,7 +1243,7 @@ textarea.directive.inject-input {
  width: 100%;
  margin: 0;
  border: 1px solid var(--border);
- border-radius: 10px;
+ border-radius: var(--radius-sm);
  background: var(--panel);
  color: var(--text);
  font: inherit;
@@ -1261,7 +1345,7 @@ textarea.directive.inject-input {
 .markdown pre {
  background: var(--code-bg);
  border: 1px solid var(--border);
- border-radius: 10px;
+ border-radius: var(--radius-sm);
  padding: 0.75rem;
  overflow: auto;
  font: 0.875rem / 1.5 var(--mono);
@@ -1301,7 +1385,7 @@ textarea.directive.inject-input {
 pre.code-view {
  background: var(--code-bg);
  border: 1px solid var(--border);
- border-radius: 10px;
+ border-radius: var(--radius-sm);
  padding: 0.9rem;
  overflow: auto;
  max-height: 56vh;
@@ -1598,7 +1682,7 @@ details.advanced .form-grid {
 .form-error {
  color: var(--bad);
  background: var(--bad-soft);
- border-radius: 10px;
+ border-radius: var(--radius-sm);
  padding: 0.6rem 0.9rem;
  margin-top: 0.7rem;
  font-size: 0.94rem;
@@ -1618,7 +1702,7 @@ details.advanced .form-grid {
 .toast {
  background: #232a3a;
  color: #fff;
- border-radius: 10px;
+ border-radius: var(--radius-sm);
  padding: 0.7rem 1.1rem;
  font-size: 0.94rem;
  box-shadow: var(--shadow-lift);
@@ -1633,8 +1717,13 @@ details.advanced .form-grid {
  text-align: center;
  padding: 2.8rem 0;
 }
-.section-gap {
- margin-top: 1rem;
+.panel .empty {
+ padding: var(--space-5) 0;
+}
+/* After every heading rule, so a heading that opens a later block keeps it. */
+.section-gap,
+.panel h4.section-gap {
+ margin-top: var(--space-4);
 }
 .loading {
  color: var(--muted);
@@ -1676,13 +1765,8 @@ details.advanced .form-grid {
  opacity: 0.55;
 }
 .gpu-pick-badge {
- flex: none;
- border-radius: 999px;
- padding: 0.08rem 0.55rem;
  background: var(--accent);
  color: var(--panel);
- font-size: 0.74rem;
- font-weight: 600;
 }
 .gpu-row .gpu-name {
  flex: 0 0 11rem;
@@ -1982,7 +2066,7 @@ h4.memory-pane-title {
  color: var(--muted);
  background: var(--code-bg);
  border: 1px dashed var(--border);
- border-radius: 10px;
+ border-radius: var(--radius-sm);
 }
 /* The skill body is prose, not code: it wraps instead of scrolling sideways,
    and long paths break rather than widening the pane on a phone. */
@@ -1997,17 +2081,7 @@ textarea.directive.skill-editor {
  min-height: 20rem;
  font-size: 0.86rem;
 }
-/* Prose table: every column is text, so nothing is right-aligned. */
-table.data.text th,
-table.data.text td {
- text-align: left;
- font-variant-numeric: normal;
-}
-table.data.text td {
- vertical-align: top;
-}
-
-/* 已挂载记忆: every entry once above, one row per session below. */
+/* 已挂载记忆: the snapshot's entries, grouped by source. */
 .mounted-entries .file-list {
  margin-top: 0.4rem;
 }
@@ -2017,13 +2091,6 @@ table.data.text td {
  font-weight: 600;
  color: var(--muted);
  white-space: nowrap;
-}
-/* Session and status never wrap, and claim only the width they need, so the
-   two count columns absorb the rest instead of squeezing the labels. */
-table.data.text th.nowrap,
-table.data.text td.nowrap {
- white-space: nowrap;
- width: 1%;
 }
 
 /* Agent-filed issue reports: one card per report, read top to bottom — a
@@ -2056,7 +2123,7 @@ table.data.text td.nowrap {
 }
 .issue-report {
  border: 1px solid var(--row-border);
- border-radius: 10px;
+ border-radius: var(--radius-sm);
  background: var(--panel-2);
  padding: 0.7rem 0.85rem;
 }
@@ -2190,12 +2257,8 @@ details.issue-evidence > summary:hover {
 .exp-back {
  flex: none;
  white-space: nowrap;
-}
-/* The hero heading is a plain block inside the control bar; it must be allowed
-   to shrink there before its name can ellipsize. */
-.control-bar h3 {
- min-width: 0;
- overflow: hidden;
+ font-size: 0.94rem;
+ font-weight: 600;
 }
 
 /* ---------------- responsive breakpoints ----------------
@@ -2221,39 +2284,28 @@ details.issue-evidence > summary:hover {
   max-height: none;
   overflow-y: visible;
  }
- /* Tables scroll sideways inside their own box instead of overflowing the
-    panel: from here down a wide table no longer fits, and the page clips
-    horizontal overflow rather than scrolling to it. */
- table.data,
- table.kv {
-  display: block;
-  overflow-x: auto;
-  max-width: 100%;
- }
  table.kv td:first-child {
   width: auto;
  }
 }
 @media (max-width: 760px) {
- .topbar-left,
+ /* Two topbar rows: the brand and the page's controls, then the navigation. */
+ .topbar {
+  gap: var(--space-2) var(--space-3);
+ }
+ .topbar-left {
+  display: contents;
+ }
+ .brand {
+  margin-right: auto;
+ }
  .topbar-side,
  .topbar-right {
-  flex: 1 1 100%;
-  flex-wrap: wrap;
-  min-width: 0;
-  max-width: 100%;
- }
- .topbar-side {
-  justify-content: flex-end;
- }
- .topbar-right {
-  flex: 1 1 auto;
- }
- .topbar-right .btn {
-  flex: 1 1 auto;
-  min-width: 0;
+  gap: var(--space-2);
  }
  .topnav {
+  order: 1;
+  flex: 1 1 100%;
   flex-wrap: wrap;
  }
  .topbar .mode-note {
@@ -2326,7 +2378,7 @@ details.issue-evidence > summary:hover {
  }
  .panel,
  .card {
-  padding: 0.85rem 0.9rem;
+  padding: var(--space-3);
  }
  /* comfortable touch targets */
  .btn {

@@ -406,11 +406,6 @@ function isPrepEnvironment(status, state) {
   );
 }
 
-function numClass(value) {
-  if (value === null || value === undefined) return "num";
-  return value >= 0 ? "num pos" : "num neg";
-}
-
 function signCls(value) {
   if (value === null || value === undefined) return "";
   return value >= 0 ? "pos" : "neg";
@@ -933,6 +928,62 @@ function statTilesRow(tiles) {
   );
 }
 
+/* A panel's title row: the title, then its badges, notes and actions. */
+function panelHead(title, ...extras) {
+  return el("div", { class: "panel-head" }, el("h4", {}, title), ...extras);
+}
+
+/* Every data table. A column marked `num` aligns its header and cells right in
+   tabular digits and every other column reads left, so alignment is decided
+   once per column. The box scrolls sideways instead of the page; `box` adds
+   classes to it ("limit" caps a long list's height). A cell is a value, a node
+   or an array of them, or {value, cls, title} to add a class or a tooltip. */
+function dataTable(columns, rows, { fit = false, box = "" } = {}) {
+  const align = (column) => (column.num ? "num" : "");
+  return el(
+    "div",
+    { class: `table-box ${box}`.trim() },
+    el(
+      "table",
+      { class: fit ? "data fit" : "data" },
+      el(
+        "tr",
+        {},
+        ...columns.map((column) =>
+          el(
+            "th",
+            { class: align(column), title: column.title || null },
+            column.label,
+          ),
+        ),
+      ),
+      ...rows.map((cells) =>
+        el(
+          "tr",
+          {},
+          ...cells.map((cell, index) => {
+            const spec =
+              cell !== null &&
+              typeof cell === "object" &&
+              !cell.nodeType &&
+              !Array.isArray(cell)
+                ? cell
+                : { value: cell };
+            return el(
+              "td",
+              {
+                class: `${align(columns[index])} ${spec.cls || ""}`.trim(),
+                title: spec.title || null,
+              },
+              spec.value ?? "—",
+            );
+          }),
+        ),
+      ),
+    ),
+  );
+}
+
 /* ---------------- router ---------------- */
 
 window.addEventListener("hashchange", route);
@@ -1310,7 +1361,7 @@ function heroPanel(item, basis) {
       el(
         "div",
         { class: "section-gap" },
-        el("h4", {}, "前推与 Held-out 连续回放 vs 沪深300"),
+        el("h4", { class: "subsection-title" }, "前推与 Held-out 连续回放 vs 沪深300"),
         resultEquityHost(item.experiment_id, result, {
           width: 980,
           height: 240,
@@ -1899,25 +1950,19 @@ function sliceTable(forward) {
   const rows = SLICE_ROWS.filter(([field]) =>
     columns.some(([key]) => present(slices[key][field])),
   );
-  return el(
-    "table",
-    { class: "data section-gap" },
-    el("tr", {}, el("th", {}, ""), ...columns.map(([, label]) => el("th", {}, label))),
-    ...rows.map(([field, label, fmt, signed]) =>
-      el(
-        "tr",
-        {},
-        el("td", {}, label),
-        ...columns.map(([key]) => {
-          const value = slices[key][field];
-          return el(
-            "td",
-            { class: signed ? signCls(value) : "" },
-            present(value) ? fmt(value) : "—",
-          );
-        }),
-      ),
-    ),
+  return dataTable(
+    [{ label: "" }, ...columns.map(([, label]) => ({ label, num: true }))],
+    rows.map(([field, label, fmt, signed]) => [
+      label,
+      ...columns.map(([key]) => {
+        const value = slices[key][field];
+        return {
+          value: present(value) ? fmt(value) : "—",
+          cls: signed ? signCls(value) : "",
+        };
+      }),
+    ]),
+    { fit: true, box: "section-gap" },
   );
 }
 
@@ -1931,16 +1976,14 @@ function verdictPanel(detail) {
   const forward = detail.forward;
   if (!detail.frozen && !verdict.status) return null;
   const reasons = (verdict.reasons || []).map(reasonLabel);
-  const head = el(
+  const panel = el(
     "div",
-    { class: "control-bar" },
-    el("h4", { style: "margin:0" }, "前推与 Held-out"),
-    verdictBadge(detail.verdict),
+    { class: "panel section-gap" },
+    panelHead("前推与 Held-out", verdictBadge(detail.verdict)),
   );
-  const panel = el("div", { class: "panel section-gap" }, head);
   if (!forward) {
     if (verdict.status) {
-      panel.append(el("div", { class: "meta-line" }, reasons.join("；") || "—"));
+      panel.append(el("div", {}, reasons.join("；") || "—"));
       return panel;
     }
     const status = detail.status || {};
@@ -1965,7 +2008,7 @@ function verdictPanel(detail) {
   panel.append(
     el(
       "div",
-      { class: "meta-line" },
+      {},
       reasons.length ? `未通过：${reasons.join("；")}` : "全部条件通过",
     ),
     el(
@@ -1984,7 +2027,7 @@ function verdictPanel(detail) {
     panel.append(
       el(
         "div",
-        { class: "meta-line" },
+        { class: "meta-line section-gap" },
         `重训 前推 ${refits.forward ?? "—"} 次 · Held-out ${refits.heldout ?? "—"} 次 · 前推 null 分位 ${fmtProb(forward.null_percentile)}`,
       ),
       el(
@@ -1999,7 +2042,12 @@ function verdictPanel(detail) {
         }),
       ),
       styleCard(detail.experiment_id, forward.result),
-      lazyDetails("交易明细", () => ordersNode(detail.experiment_id, forward.result)),
+      Object.assign(
+        lazyDetails("交易明细", () =>
+          ordersNode(detail.experiment_id, forward.result),
+        ),
+        { className: "fold section-gap" },
+      ),
     );
   if (detail.paper_candidate)
     panel.append(
@@ -2017,10 +2065,8 @@ function frozenPanel(detail) {
   const panel = el(
     "div",
     { class: "panel section-gap" },
-    el(
-      "div",
-      { class: "control-bar" },
-      el("h4", { style: "margin:0" }, `冻结产物 · ${sessionLabel(frozen.session_key)}`),
+    panelHead(
+      `冻结产物 · ${sessionLabel(frozen.session_key)}`,
       el("span", { class: "spacer" }),
       el(
         "a",
@@ -2031,36 +2077,32 @@ function frozenPanel(detail) {
         "⬇ 下载 ZIP",
       ),
     ),
+    statTilesRow([
+      {
+        label: "研究期中性化超额（年化）",
+        value: fmtPct(frozen.neutralized_excess),
+        cls: signCls(frozen.neutralized_excess),
+      },
+      { label: "残差跟踪误差", value: fmtPct(frozen.tracking_error) },
+      {
+        label: "IR",
+        value: fmtSharpe(frozen.information_ratio),
+        cls: signCls(frozen.information_ratio),
+      },
+      {
+        label: "去偏 Sharpe 概率",
+        value: fmtProb(frozen.deflated_sharpe_probability),
+        title: `试验 ${frozen.trials ?? "—"} 个 · SR* ${fmtSharpe(frozen.sharpe_star)}`,
+      },
+      {
+        label: "前推可检出超额",
+        value: fmtPct(frozen.forward_mde),
+        title: "前推检验以 80% 功效能检出的最小年化中性化超额",
+      },
+    ]),
     el(
       "div",
-      { class: "section-gap" },
-      statTilesRow([
-        {
-          label: "研究期中性化超额（年化）",
-          value: fmtPct(frozen.neutralized_excess),
-          cls: signCls(frozen.neutralized_excess),
-        },
-        { label: "残差跟踪误差", value: fmtPct(frozen.tracking_error) },
-        {
-          label: "IR",
-          value: fmtSharpe(frozen.information_ratio),
-          cls: signCls(frozen.information_ratio),
-        },
-        {
-          label: "去偏 Sharpe 概率",
-          value: fmtProb(frozen.deflated_sharpe_probability),
-          title: `试验 ${frozen.trials ?? "—"} 个 · SR* ${fmtSharpe(frozen.sharpe_star)}`,
-        },
-        {
-          label: "前推可检出超额",
-          value: fmtPct(frozen.forward_mde),
-          title: "前推检验以 80% 功效能检出的最小年化中性化超额",
-        },
-      ]),
-    ),
-    el(
-      "div",
-      { class: "meta-line" },
+      { class: "meta-line section-gap" },
       [
         `全区间验证 ${frozen.full_span_validations ?? "—"} 次`,
         `null 分位 ${fmtProb(frozen.null_percentile)}`,
@@ -2120,7 +2162,7 @@ async function openParamsModal(detail) {
             "span",
             {},
             field.label,
-            el("div", { class: "hint", style: "margin:0" }, field.key),
+            el("div", { class: "hint flush" }, field.key),
           ),
           render(params[field.key]),
         ),
@@ -2132,7 +2174,7 @@ async function openParamsModal(detail) {
             "span",
             {},
             field.label,
-            el("div", { class: "hint", style: "margin:0" }, field.key),
+            el("div", { class: "hint flush" }, field.key),
           ),
           el(
             "span",
@@ -2380,7 +2422,7 @@ function sessionListLine(detail, session, pending) {
   const best = record.best;
   return {
     text: OUTCOME_LABELS[record.outcome] || record.outcome,
-    cls: record.froze ? "num pos" : "",
+    cls: record.froze ? "pos" : "",
     note: best
       ? `最佳候选 中性化 ${fmtPct(best.neutralized_excess)} · DSR ${fmtProb(best.deflated_sharpe_probability)}`
       : `验证 ${record.validations.length} 次，无全区间`,
@@ -2535,10 +2577,8 @@ function researchSessionPanel(detail, session) {
   const panel = el(
     "div",
     { class: "panel" },
-    el(
-      "div",
-      { class: "control-bar" },
-      el("h4", { style: "margin:0" }, sessionLabel(session.key)),
+    panelHead(
+      sessionLabel(session.key),
       el(
         "span",
         { class: `badge ${record.froze ? "state-completed" : "state-stopped"}` },
@@ -2548,31 +2588,27 @@ function researchSessionPanel(detail, session) {
         ? el("span", { class: "mode-note" }, `结束原因 ${record.finish_reason}`)
         : null,
     ),
-    el(
-      "div",
-      { class: "section-gap" },
-      statTilesRow([
-        {
-          label: "最佳候选中性化超额",
-          value: fmtPct(best.neutralized_excess),
-          cls: signCls(best.neutralized_excess),
-          title: "本会话 IR 最高的全区间验证，研究期年化",
-        },
-        {
-          label: "IR",
-          value: fmtSharpe(best.information_ratio),
-          cls: signCls(best.information_ratio),
-        },
-        {
-          label: "去偏 Sharpe 概率",
-          value: fmtProb(best.deflated_sharpe_probability),
-        },
-        {
-          label: "验证 / 累计试验",
-          value: `${record.validations.length} / ${record.trials_to_date ?? "—"}`,
-        },
-      ]),
-    ),
+    statTilesRow([
+      {
+        label: "最佳候选中性化超额",
+        value: fmtPct(best.neutralized_excess),
+        cls: signCls(best.neutralized_excess),
+        title: "本会话 IR 最高的全区间验证，研究期年化",
+      },
+      {
+        label: "IR",
+        value: fmtSharpe(best.information_ratio),
+        cls: signCls(best.information_ratio),
+      },
+      {
+        label: "去偏 Sharpe 概率",
+        value: fmtProb(best.deflated_sharpe_probability),
+      },
+      {
+        label: "验证 / 累计试验",
+        value: `${record.validations.length} / ${record.trials_to_date ?? "—"}`,
+      },
+    ]),
     el(
       "table",
       { class: "kv section-gap" },
@@ -2596,51 +2632,47 @@ function researchSessionPanel(detail, session) {
   );
   if (record.validations.length)
     panel.append(
-      el(
-        "table",
-        { class: "data section-gap" },
-        el(
-          "tr",
-          {},
-          ...["节点", "区间", "收益", "Sharpe", "回撤", "中性化超额", "IR"].map(
-            (label) => el("th", {}, label),
-          ),
-        ),
-        ...record.validations.map((row) =>
-          el(
-            "tr",
-            {},
-            el(
-              "td",
-              { title: row.step_id },
+      dataTable(
+        [
+          { label: "节点" },
+          { label: "区间" },
+          { label: "收益", num: true },
+          { label: "Sharpe", num: true },
+          { label: "回撤", num: true },
+          { label: "中性化超额", num: true },
+          { label: "IR", num: true },
+        ],
+        record.validations.map((row) => [
+          {
+            value: [
               String(row.step_id || "").split("__").pop(),
               row.step_id === record.nominated_step_id
-                ? el("span", { class: "mode-note" }, " 提名")
+                ? el("span", { class: "badge kind" }, "提名")
                 : null,
-            ),
-            el("td", {}, row.span || "—"),
-            el("td", { class: signCls(row.total_return) }, fmtPct(row.total_return)),
-            el("td", { class: signCls(row.sharpe) }, fmtSharpe(row.sharpe)),
-            el("td", {}, fmtPct(row.max_drawdown)),
-            el(
-              "td",
-              { class: signCls(row.neutralized_excess) },
-              fmtPct(row.neutralized_excess),
-            ),
-            el(
-              "td",
-              { class: signCls(row.information_ratio) },
-              fmtSharpe(row.information_ratio),
-            ),
-          ),
-        ),
+            ],
+            title: row.step_id,
+          },
+          row.span || "—",
+          { value: fmtPct(row.total_return), cls: signCls(row.total_return) },
+          { value: fmtSharpe(row.sharpe), cls: signCls(row.sharpe) },
+          fmtPct(row.max_drawdown),
+          {
+            value: fmtPct(row.neutralized_excess),
+            cls: signCls(row.neutralized_excess),
+          },
+          {
+            value: fmtSharpe(row.information_ratio),
+            cls: signCls(row.information_ratio),
+          },
+        ]),
+        { box: "section-gap" },
       ),
     );
   if (record.prior_published && record.prior)
     panel.append(
       el(
         "details",
-        { class: "section-gap" },
+        { class: "fold section-gap" },
         el("summary", {}, "本会话发布的 PRIOR"),
         el("pre", { class: "code-view" }, record.prior),
       ),
@@ -2728,13 +2760,9 @@ function directivePanel(detail, session) {
     panel.append(
       el(
         "details",
-        { class: "section-gap" },
-        el("summary", { class: "hint" }, "实验级探索方向（已自动注入）"),
-        el(
-          "div",
-          { class: "markdown section-gap", style: "white-space:pre-wrap" },
-          experimentDirective,
-        ),
+        { class: "fold" },
+        el("summary", {}, "实验级探索方向（已自动注入）"),
+        el("div", { class: "markdown pre-wrap" }, experimentDirective),
       ),
     );
   }
@@ -2797,7 +2825,7 @@ function gpuAllocationRow(detail, session, send) {
     {},
     el("div", { class: "hint" }, "GPU 状态加载中…"),
   );
-  const stamp = el("span", { class: "hint", style: "margin-left:auto" });
+  const stamp = el("span", { class: "hint flush push-right" });
   const select = el("select", {
     class: "input",
     // Re-mark the likely allocation instantly on count change; the cached
@@ -3005,10 +3033,7 @@ async function openPromptPreview(detail, session, directive) {
       el("div", { class: "hint" }, data.note),
       el(
         "pre",
-        {
-          class: "code-view section-gap",
-          style: "white-space:pre-wrap; max-height:58vh",
-        },
+        { class: "code-view pre-wrap section-gap" },
         data.prompt,
       ),
       el("div", { class: "hint" }, `共 ${data.prompt.length} 字符`),
@@ -3037,7 +3062,7 @@ async function openInitialPrompt(detail, session) {
       el("h4", {}, roleLabel[message.role] || message.role),
       el(
         "pre",
-        { class: "code-view", style: "white-space:pre-wrap; max-height:46vh" },
+        { class: "code-view pre-wrap" },
         message.content || "",
       ),
     ),
@@ -3448,10 +3473,10 @@ const MAX_TRACE_BLOCK_BYTES = 32 * 1024 * 1024;
 /* Replay loader: one backend projection, plus raw .jsonl download. */
 function traceReplayNode(experimentId, runId, detail) {
   const box = el("div", { class: "trace-box" });
-  const info = el("span", { class: "hint", style: "margin:0" }, "");
+  const info = el("span", { class: "hint flush" }, "");
   const moreButton = el(
     "button",
-    { type: "button", class: "btn small", style: "display:none" },
+    { type: "button", class: "btn small", hidden: "" },
     "继续加载",
   );
   let loadedBlocks = 0,
@@ -3460,7 +3485,7 @@ function traceReplayNode(experimentId, runId, detail) {
     windowBytes = 0;
   function syncMore() {
     moreButton.disabled = loading;
-    moreButton.style.display = eof || !loadedBlocks ? "none" : "";
+    moreButton.hidden = eof || !loadedBlocks;
   }
   async function loadBatch() {
     if (loading || eof) return;
@@ -4151,7 +4176,7 @@ function stepTreeSection(detail, payload) {
   }
   const state = { collapsed: new Set(), filter: "" };
   const rows = el("div", { class: "step-tree", onscroll: hideStepTip });
-  const summary = el("span", { class: "hint", style: "margin-left:auto" });
+  const summary = el("span", { class: "hint flush push-right" });
   const validated = nodes.filter((node) => node.complete_validation).length;
 
   const haystack = (node) =>
@@ -4375,7 +4400,7 @@ function stepTreeRow(
     Number.isFinite(metrics.total_return)
       ? el(
           "span",
-          { class: `step-chip ${numClass(metrics.total_return)}` },
+          { class: `step-chip ${signCls(metrics.total_return)}` },
           fmtPct(metrics.total_return),
         )
       : null,
@@ -4456,7 +4481,7 @@ function openStepNodeModal(detail, payload, node) {
       kvRow("会话", node.session_key || "—"),
       kvRow(
         "验证收益",
-        el("span", { class: numClass(m.total_return) }, fmtPct(m.total_return)),
+        el("span", { class: signCls(m.total_return) }, fmtPct(m.total_return)),
       ),
       kvRow("多头收益", fmtPct(m.long_return)),
       kvRow(
@@ -4491,62 +4516,39 @@ function kvRow(key, value) {
    window does not span end to end; 超额 is against 沪深300. */
 function subWindowSection(title, rows) {
   if (!Array.isArray(rows) || !rows.length) return null;
-  const head = el(
-    "tr",
-    {},
-    el("th", {}, "年度"),
-    el("th", { title: "年度开盘权益起算的区间收益" }, "收益"),
-    el("th", { title: "相对沪深300的超额收益" }, "超额"),
-    el("th", { title: "年度内日收益的年化 Sharpe" }, "Sharpe"),
-    el("th", { title: "年度内峰谷回撤" }, "回撤"),
-    el("th", { title: "成交名义额 / 初始资金" }, "换手"),
-    el("th", { title: "已实现平仓笔数" }, "笔数"),
-    el("th", {}, "交易日"),
-  );
-  const body = rows.map((row) =>
-    el(
-      "tr",
-      {},
-      el(
-        "td",
-        {},
-        `${row.label || "—"}${row.partial ? " ·部分" : ""}`,
-        el(
-          "span",
-          { class: "mode-note" },
-          ` ${fmtPeriodRange(`${row.start}..${row.end}`)}`,
-        ),
-      ),
-      el("td", { class: signCls(row.return) }, fmtPct(row.return)),
-      el(
-        "td",
-        { class: signCls(row.excess_return) },
-        fmtPct(row.excess_return),
-      ),
-      el("td", { class: signCls(row.sharpe) }, fmtSharpe(row.sharpe)),
-      el("td", {}, fmtPct(row.max_drawdown)),
-      el("td", {}, fmtSharpe(row.turnover)),
-      el(
-        "td",
-        {},
-        row.trade_count === null || row.trade_count === undefined
-          ? "—"
-          : String(row.trade_count),
-      ),
-      el(
-        "td",
-        {},
-        row.trade_days === null || row.trade_days === undefined
-          ? "—"
-          : String(row.trade_days),
-      ),
-    ),
-  );
   return el(
     "div",
     { class: "section-gap" },
     el("h4", { class: "subsection-title" }, title),
-    el("table", { class: "data" }, head, ...body),
+    dataTable(
+      [
+        { label: "年度" },
+        { label: "收益", num: true, title: "年度开盘权益起算的区间收益" },
+        { label: "超额", num: true, title: "相对沪深300的超额收益" },
+        { label: "Sharpe", num: true, title: "年度内日收益的年化 Sharpe" },
+        { label: "回撤", num: true, title: "年度内峰谷回撤" },
+        { label: "换手", num: true, title: "成交名义额 / 初始资金" },
+        { label: "笔数", num: true, title: "已实现平仓笔数" },
+        { label: "交易日", num: true },
+      ],
+      rows.map((row) => [
+        [
+          `${row.label || "—"}${row.partial ? " ·部分" : ""}`,
+          el(
+            "span",
+            { class: "mode-note" },
+            ` ${fmtPeriodRange(`${row.start}..${row.end}`)}`,
+          ),
+        ],
+        { value: fmtPct(row.return), cls: signCls(row.return) },
+        { value: fmtPct(row.excess_return), cls: signCls(row.excess_return) },
+        { value: fmtSharpe(row.sharpe), cls: signCls(row.sharpe) },
+        fmtPct(row.max_drawdown),
+        fmtSharpe(row.turnover),
+        row.trade_count,
+        row.trade_days,
+      ]),
+    ),
   );
 }
 
@@ -4699,13 +4701,14 @@ function fmtOrderCell(key, value) {
   return value;
 }
 
+// [field, header, numeric column]
 const ORDER_TABLE_COLUMNS = [
   ["matched_at", "成交时间"],
   ["execute_at", "计划时间"],
   ["symbol", "代码"],
   ["action", "动作"],
-  ["quantity", "数量"],
-  ["price", "价格"],
+  ["quantity", "数量", true],
+  ["price", "价格", true],
   ["status", "状态"],
   ["reason", "拒单原因"],
 ];
@@ -4750,8 +4753,8 @@ function ordersNode(experimentId, result) {
       }));
       if (daily.length)
         body.append(
-          el("h4", { class: "section-gap" }, "逐日成交金额"),
-          singleSeriesBarChart(daily, { fmt: fmtAmount, height: 180 }),
+          el("h4", { class: "subsection-title section-gap" }, "逐日成交金额"),
+          singleSeriesBarChart(daily, { fmt: fmtAmount, width: 980, height: 200 }),
         );
       if (Object.keys(stats.reject_reasons || {}).length)
         body.append(
@@ -4766,35 +4769,14 @@ function ordersNode(experimentId, result) {
       if (!rows.length) return;
       const shown = rows.slice(0, 80);
       body.append(
-        el(
-          "div",
-          { class: "orders-table-box" },
-          el(
-            "table",
-            { class: "data section-gap" },
-            el(
-              "tr",
-              {},
-              ...ORDER_TABLE_COLUMNS.map(([, label]) => el("th", {}, label)),
-            ),
-            ...shown.map((row) =>
-              el(
-                "tr",
-                {},
-                ...ORDER_TABLE_COLUMNS.map(([key]) => {
-                  const value =
-                    key === "price"
-                      ? fmtPrice(row[key])
-                      : fmtOrderCell(key, row[key]);
-                  return el(
-                    "td",
-                    {},
-                    value === null || value === undefined ? "—" : String(value),
-                  );
-                }),
-              ),
+        dataTable(
+          ORDER_TABLE_COLUMNS.map(([, label, num]) => ({ label, num })),
+          shown.map((row) =>
+            ORDER_TABLE_COLUMNS.map(([key]) =>
+              key === "price" ? fmtPrice(row[key]) : fmtOrderCell(key, row[key]),
             ),
           ),
+          { box: "limit section-gap" },
         ),
       );
       if (data.row_count > shown.length)
@@ -5911,26 +5893,12 @@ function paperCurve(points) {
   };
 }
 
+/* An order direction as a dataTable cell, in the P&L colors. */
 function actionCell(action) {
   const normalized = String(action || "").toLowerCase();
-  const label =
-    normalized === "buy"
-      ? "买入"
-      : normalized === "sell"
-        ? "卖出"
-        : action || "—";
-  return el(
-    "td",
-    {
-      class:
-        normalized === "buy"
-          ? "num pos"
-          : normalized === "sell"
-            ? "num neg"
-            : "",
-    },
-    label,
-  );
+  if (normalized === "buy") return { value: "买入", cls: "pos" };
+  if (normalized === "sell") return { value: "卖出", cls: "neg" };
+  return action || "—";
 }
 
 async function fetchTradingBundle(env, date) {
@@ -6099,7 +6067,7 @@ function paperChartsRow(points) {
   const equityCell = el(
     "div",
     { class: "chart-cell" },
-    el("h4", {}, "账户权益曲线"),
+    el("h4", { class: "subsection-title" }, "账户权益曲线"),
   );
   const curve = paperCurve(points);
   equityCell.append(
@@ -6116,7 +6084,7 @@ function paperChartsRow(points) {
   const cashCell = el(
     "div",
     { class: "chart-cell" },
-    el("h4", {}, "每日现金余额"),
+    el("h4", { class: "subsection-title" }, "每日现金余额"),
     cashRows.length
       ? singleSeriesBarChart(cashRows, {
           width: 640,
@@ -6130,11 +6098,7 @@ function paperChartsRow(points) {
 
 function paperPositionsPanel(account) {
   const positions = Array.isArray(account.positions) ? account.positions : [];
-  const panel = el(
-    "div",
-    { class: "panel section-gap" },
-    el("h4", { class: "subsection-title" }, "持仓"),
-  );
+  const panel = el("div", { class: "panel section-gap" }, el("h4", {}, "持仓"));
   if (!positions.length) {
     panel.append(el("div", { class: "empty" }, "当前无持仓"));
     return panel;
@@ -6150,42 +6114,33 @@ function paperPositionsPanel(account) {
     );
   }
   panel.append(
-    el(
-      "div",
-      { class: "orders-table-box" },
-      el(
-        "table",
-        { class: "data" },
-        el(
-          "tr",
-          {},
-          el("th", {}, "代码"),
-          el("th", {}, "数量"),
-          el("th", {}, "可用"),
-          el("th", {}, "成本"),
-          el("th", {}, "最新价"),
-          el("th", {}, "市值"),
-          el("th", {}, "浮动盈亏"),
-        ),
-        ...positions.map((row) => {
-          const quantity = Number(row.quantity) || 0;
-          const marketValue = quantity * (Number(row.last_price) || 0);
-          const pnl =
-            quantity *
-            ((Number(row.last_price) || 0) - (Number(row.average_cost) || 0));
-          return el(
-            "tr",
-            {},
-            el("td", {}, row.symbol || "—"),
-            el("td", {}, String(row.quantity ?? "—")),
-            el("td", {}, String(row.available_quantity ?? "—")),
-            el("td", {}, fmtPrice(row.average_cost)),
-            el("td", {}, fmtPrice(row.last_price)),
-            el("td", {}, fmtAmountOpt(marketValue)),
-            el("td", { class: numClass(pnl) }, fmtAmountOpt(pnl)),
-          );
-        }),
-      ),
+    dataTable(
+      [
+        { label: "代码" },
+        { label: "数量", num: true },
+        { label: "可用", num: true },
+        { label: "成本", num: true },
+        { label: "最新价", num: true },
+        { label: "市值", num: true },
+        { label: "浮动盈亏", num: true },
+      ],
+      positions.map((row) => {
+        const quantity = Number(row.quantity) || 0;
+        const marketValue = quantity * (Number(row.last_price) || 0);
+        const pnl =
+          quantity *
+          ((Number(row.last_price) || 0) - (Number(row.average_cost) || 0));
+        return [
+          row.symbol || "—",
+          row.quantity,
+          row.available_quantity,
+          fmtPrice(row.average_cost),
+          fmtPrice(row.last_price),
+          fmtAmountOpt(marketValue),
+          { value: fmtAmountOpt(pnl), cls: signCls(pnl) },
+        ];
+      }),
+      { box: "limit" },
     ),
   );
   return panel;
@@ -6216,13 +6171,13 @@ function paperDealsPanel(payload) {
     { class: "panel section-gap" },
     el(
       "h4",
-      { class: "subsection-title" },
+      {},
       `成交${payload.trade_date ? ` — ${fmtDate(payload.trade_date)}` : ""}`,
     ),
   );
   const chips = el(
     "div",
-    { class: "stats-chips section-gap" },
+    { class: "stats-chips" },
     el("span", { class: "stat-chip" }, `成交 ${filled.length} 笔`),
     el("span", { class: "stat-chip" }, `拒单 ${rejected.length} 笔`),
     el("span", { class: "stat-chip" }, `交易费用 ${fmtAmountOpt(costs)}`),
@@ -6240,39 +6195,28 @@ function paperDealsPanel(payload) {
     return panel;
   }
   panel.append(
-    el(
-      "div",
-      { class: "orders-table-box" },
-      el(
-        "table",
-        { class: "data" },
-        el(
-          "tr",
-          {},
-          el("th", {}, "成交时间"),
-          el("th", {}, "计划时间"),
-          el("th", {}, "代码"),
-          el("th", {}, "方向"),
-          el("th", {}, "数量"),
-          el("th", {}, "价格"),
-          el("th", {}, "状态"),
-          el("th", {}, "说明"),
-        ),
-        ...rows.map((row) =>
-          el(
-            "tr",
-            {},
-            el("td", {}, fmtPaperTime(row.matched_at)),
-            el("td", {}, fmtPaperTime(row.execute_at)),
-            el("td", {}, row.symbol || "—"),
-            actionCell(row.action),
-            el("td", {}, String(row.quantity ?? "—")),
-            el("td", {}, fmtPrice(row.price)),
-            el("td", {}, row.status || "—"),
-            el("td", {}, row.reason || "—"),
-          ),
-        ),
-      ),
+    dataTable(
+      [
+        { label: "成交时间" },
+        { label: "计划时间" },
+        { label: "代码" },
+        { label: "方向" },
+        { label: "数量", num: true },
+        { label: "价格", num: true },
+        { label: "状态" },
+        { label: "说明" },
+      ],
+      rows.map((row) => [
+        fmtPaperTime(row.matched_at),
+        fmtPaperTime(row.execute_at),
+        row.symbol || "—",
+        actionCell(row.action),
+        row.quantity,
+        fmtPrice(row.price),
+        row.status || "—",
+        row.reason || "—",
+      ]),
+      { box: "limit" },
     ),
   );
   return panel;
@@ -6284,10 +6228,10 @@ function paperOrdersPanel(payload) {
   // Open by default: the latest session's orders are what the page is for.
   const details = el(
     "details",
-    { open: "" },
+    { class: "fold", open: "" },
     el(
       "summary",
-      { style: "cursor:pointer;font-weight:700;font-size:1.02rem" },
+      { class: "panel-summary" },
       `委托（${payload.trade_date ? fmtDate(payload.trade_date) : "未选择交易日"}，共 ${rows.length} 条）`,
     ),
   );
@@ -6296,49 +6240,33 @@ function paperOrdersPanel(payload) {
     payload.trade_date,
     payload.skipped_lines,
   );
-  if (skipped)
-    details.append(el("div", { class: "stats-chips section-gap" }, skipped));
+  if (skipped) details.append(el("div", { class: "stats-chips" }, skipped));
   if (rows.length) {
     details.append(
-      el(
-        "div",
-        { class: "orders-table-box section-gap" },
-        el(
-          "table",
-          { class: "data" },
-          el(
-            "tr",
-            {},
-            el("th", {}, "计划时间"),
-            el("th", {}, "代码"),
-            el("th", {}, "名称"),
-            el("th", {}, "方向"),
-            el("th", {}, "数量"),
-            el("th", {}, "参考价（前收）"),
-            el("th", {}, "约计金额"),
+      dataTable(
+        [
+          { label: "计划时间" },
+          { label: "代码" },
+          { label: "名称" },
+          { label: "方向" },
+          { label: "数量", num: true },
+          { label: "参考价（前收）", num: true },
+          { label: "约计金额", num: true },
+        ],
+        rows.map((row) => [
+          fmtPaperTime(row.execute_at),
+          row.symbol || "—",
+          row.name || "—",
+          actionCell(row.action),
+          row.quantity,
+          fmtPrice(row.reference_price),
+          fmtAmountOpt(
+            row.reference_price == null || row.quantity == null
+              ? null
+              : row.reference_price * row.quantity,
           ),
-          ...rows.map((row) =>
-            el(
-              "tr",
-              {},
-              el("td", {}, fmtPaperTime(row.execute_at)),
-              el("td", {}, row.symbol || "—"),
-              el("td", {}, row.name || "—"),
-              actionCell(row.action),
-              el("td", {}, String(row.quantity ?? "—")),
-              el("td", {}, fmtPrice(row.reference_price)),
-              el(
-                "td",
-                {},
-                fmtAmountOpt(
-                  row.reference_price == null || row.quantity == null
-                    ? null
-                    : row.reference_price * row.quantity,
-                ),
-              ),
-            ),
-          ),
-        ),
+        ]),
+        { box: "limit" },
       ),
     );
   } else {
@@ -6408,13 +6336,13 @@ function qmtChartsPanel() {
       el(
         "div",
         { class: "chart-cell" },
-        el("h4", {}, "账户权益曲线"),
+        el("h4", { class: "subsection-title" }, "账户权益曲线"),
         el("div", { class: "empty" }, "后端未连接"),
       ),
       el(
         "div",
         { class: "chart-cell" },
-        el("h4", {}, "日成交额"),
+        el("h4", { class: "subsection-title" }, "日成交额"),
         el("div", { class: "empty" }, "后端未连接"),
       ),
     ),
@@ -6425,7 +6353,7 @@ function qmtEmptyPanel(title) {
   return el(
     "div",
     { class: "panel section-gap" },
-    el("h4", { class: "subsection-title" }, title),
+    el("h4", {}, title),
     el("div", { class: "empty" }, "后端未连接"),
   );
 }
@@ -6436,12 +6364,8 @@ function qmtOrdersPanel() {
     { class: "panel section-gap" },
     el(
       "details",
-      {},
-      el(
-        "summary",
-        { style: "cursor:pointer;font-weight:700;font-size:1.02rem" },
-        "委托",
-      ),
+      { class: "fold" },
+      el("summary", { class: "panel-summary" }, "委托"),
       el("div", { class: "empty" }, "后端未连接"),
     ),
   );
