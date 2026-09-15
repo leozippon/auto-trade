@@ -6637,9 +6637,9 @@ function paperHead(status, payload) {
           book.artifact_id,
         )
       : null,
-    book.candidate_source
-      ? el("span", { class: "badge kind" }, book.candidate_source)
-      : null,
+    // One vocabulary for the row: the status badge lives in the title, every
+    // fact under it is the same labelled chip.
+    book.candidate_source ? chip(`候选来源 ${book.candidate_source}`) : null,
     payload.start_date ? chip(`起始 ${fmtDate(payload.start_date)}`) : null,
     book.initial_cash === null || book.initial_cash === undefined
       ? null
