@@ -460,7 +460,7 @@ def test_a_resumed_attempt_continues_from_the_trace_and_the_recorded_node(tmp_pa
     assert record["attempts"] == 2 and record["trials_to_date"] == 2
     assert record["freeze_gate"]["passed"] is True and record["frozen"] is not None
     assert [row["record_type"] for row in ledger.read()] == ["attempt_failed", "research_session"]
-    assert list(revisions.iterdir()) == [], "the recorded session prunes its revisions"
+    assert len(list(revisions.iterdir())) == 2, "recording the session keeps every validated revision"
 
 
 def test_a_resumed_attempt_without_a_summary_starts_from_the_note_alone(tmp_path: Path):

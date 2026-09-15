@@ -27,6 +27,7 @@ from autotrade.pipelines.ledger import (
     paper_candidate,
     research_records,
 )
+from autotrade.pipelines.revision_history import revision_history
 from autotrade.pipelines.worker import load_worker_options, run_local_interactive_worker
 from tests.unit.synthetic_arm import (
     GEOMETRY,
@@ -563,9 +564,13 @@ def test_an_interrupted_llm_session_resumes_with_its_summary_budget_and_nodes(
     assert facts["arm"] == {"frozen": False, "freezes_per_arm": 1, "trials_to_date": 1, "full_span_validations_to_date": 1}
     assert facts["budgets"]["used_before_this_attempt"]["replay_years"] == 1
     assert facts["budgets"]["used_before_this_attempt"]["llm_calls"] == 5
-    # One session root, two transcripts, and the revisions pruned once recorded.
+    # One session root, two transcripts, and both attempts' revisions kept as
+    # the arm's artifact history: the resumed attempt's revision descends from
+    # the node it continued out of, and each is joined to the Step it validated.
     assert sorted(path.name for path in (experiment / "artifacts" / "transcripts").glob("run_ref_*.txt")) != [transcripts[0].name]
-    assert list((experiment / "artifacts" / "strategy" / "revisions").iterdir()) == []
+    history = revision_history(experiment)["revisions"]
+    assert [row["parent_revision_id"] for row in history] == [None, history[0]["revision_id"]]
+    assert [row["node_id"] for row in history] == [node["node_id"], record["steps"][1]["step_id"]]
 
 
 def test_an_interrupted_session_without_a_checkpoint_resumes_from_the_note_alone(

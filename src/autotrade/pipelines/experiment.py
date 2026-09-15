@@ -427,10 +427,10 @@ class RollingExperimentPipeline:
             expire_experiment_session_inbox(
                 self.config.experiment_dir, RESEARCH_SESSION_KEY, expired_by=run_id
             )
-            # Candidate revisions are discarded only once the session is
-            # recorded: a failed attempt's revisions are what its resumed
-            # attempt freezes.
-            prune = getattr(self.artifacts, "prune_transient", None)
+            # Every revision a Validation recorded stays: it is the arm's
+            # artifact history, and the store shares the bytes between
+            # revisions. Only frozen artifacts no record still references go.
+            prune = getattr(self.artifacts, "prune_superseded_frozen", None)
             if callable(prune):
                 prune(
                     keep_frozen_ids=_keep_frozen_artifact_ids(

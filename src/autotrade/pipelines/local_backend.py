@@ -986,9 +986,14 @@ class SessionValidations:
         The revision is verified to be the bytes ``modification_check`` just
         approved, so an approval can never be transferred to a tree that was
         still being written; a mismatch discards the revision and raises.
+
+        It also records the artifact it descends from, so the revisions the arm
+        keeps form the same lineage the Step tree draws.
         """
         revision = self.artifact_store.create_revision(
-            source_output, models_path=self.models_dir
+            source_output,
+            models_path=self.models_dir,
+            parent_revision_id=self._parent_revision_id(),
         )
         if revision.fingerprint != fingerprint:
             self.artifact_store.discard_revision(str(revision.revision_id))
@@ -1005,6 +1010,27 @@ class SessionValidations:
         )
         _assert_skills_absent_from_formal(typed.output_path, typed.models_path)
         return typed
+
+    def _parent_revision_id(self) -> str | None:
+        """The revision the working artifact descends from.
+
+        A tree position the Agent set with ``step_rollback`` is the deliberate
+        branch point and wins; otherwise the working copy descends from the last
+        Validation the arm recorded, across attempts. ``batch_validate`` commits
+        a whole round before it records any of it, so a round's revisions all
+        resolve to the same parent and stay siblings. ``None`` before the arm's
+        first Validation, and at a position the arm's own Validations do not
+        account for (an inherited seed node), which starts a new lineage root
+        rather than inventing a parent.
+        """
+
+        node_id = self.tree.current_node_id
+        if node_id is None:
+            return self.steps[-1].revision_id if self.steps else None
+        for step in reversed(self.steps):
+            if step.step_id == node_id:
+                return step.revision_id
+        return None
 
     def record_validation(
         self,

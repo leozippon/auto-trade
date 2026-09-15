@@ -5,6 +5,12 @@ root is the only required entrypoint; helper modules and subpackages are
 ordinary Agent-editable code, not separate artifact classes. Inherited model
 parameters live in the sibling ``models/`` directory so binary state is
 validated and frozen separately from strategy code.
+
+Every revision a Validation recorded is kept for the life of the experiment, so
+the store is the arm's artifact history rather than a working set. Keeping it
+is affordable because it is content-addressed: one object per distinct file
+(SHA-256 of its bytes), and each revision a hard-linked tree plus a manifest
+naming its parent, so a candidate that changed one file costs one file.
 """
 
 from __future__ import annotations
@@ -13,6 +19,7 @@ import ast
 import difflib
 import hashlib
 import json
+import os
 import shutil
 import stat
 import uuid
@@ -21,10 +28,26 @@ from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 
-from .runtime import RUNTIME_CACHE_DIR_NAMES, RUNTIME_CACHE_SUFFIXES, chmod_tree
+from .runtime import (
+    RUNTIME_CACHE_DIR_NAMES,
+    RUNTIME_CACHE_SUFFIXES,
+    chmod_tree,
+    utc_now_iso,
+    write_json_atomic,
+)
 
 REQUIRED_FILES = ("main.py",)
 ARTIFACT_METADATA_FILES = frozenset({"manifest.json"})
+# Revision store layout: content objects live beside ``revisions/`` so the
+# revision-id namespace stays a pure namespace, and each revision directory
+# carries its manifest next to the ``output``/``models`` trees it materialises.
+OBJECTS_DIR = "objects"
+REVISION_MANIFEST_FILE = "manifest.json"
+# Caps for the host-side revision diff. A side larger than the byte cap is
+# reported as changed without a body instead of being loaded; a longer diff is
+# truncated, because the console shows a diff, not a file dump.
+REVISION_DIFF_MAX_FILE_BYTES = 1024 * 1024
+REVISION_DIFF_MAX_LINES = 2000
 READONLY_FILES = frozenset({"README.md"})
 ALLOWED_SUFFIXES = frozenset({".py", ".json", ".md", ".txt", ".toml", ".yaml", ".yml"})
 # Deny-by-default allowlist for the frozen, inheritable ``models/`` directory.
@@ -121,15 +144,19 @@ class FilesystemArtifactStore:
     """Revision/Freeze backend for ``pipelines.config.ArtifactStore``.
 
     Revisions and frozen artifacts are immutable directories addressed by
-    explicit IDs.
+    explicit IDs. A revision's files are hard links into the store's
+    content-addressed ``objects/`` directory, so the whole retained history
+    costs the distinct bytes it invented, not one copy per Validation.
     """
 
     def __init__(self, root: str | Path) -> None:
         self.root = Path(root).resolve()
         self.revisions_root = self.root / "revisions"
         self.frozen_root = self.root / "frozen"
+        self.objects_root = self.root / OBJECTS_DIR
         self.revisions_root.mkdir(parents=True, exist_ok=True)
         self.frozen_root.mkdir(parents=True, exist_ok=True)
+        self.objects_root.mkdir(parents=True, exist_ok=True)
 
     def create_revision(
         self,
@@ -137,6 +164,7 @@ class FilesystemArtifactStore:
         *,
         models_path: str | Path | None = None,
         revision_id: str | None = None,
+        parent_revision_id: str | None = None,
     ):
         """Snapshot a working artifact into a new immutable revision.
 
@@ -144,6 +172,11 @@ class FilesystemArtifactStore:
         evaluated bytes are addressed by content, not by the directory they
         were copied from, so a caller can prove the revision it replays is the
         one it approved.
+
+        The snapshot is then interned into ``objects/`` and its manifest
+        written beside the trees, naming ``parent_revision_id`` — the artifact
+        this one descends from, which is what makes the retained revisions a
+        lineage instead of a pile of snapshots.
         """
         revision_id = revision_id or new_revision_id("revision")
         directory = self._id_path(self.revisions_root, revision_id)
@@ -156,6 +189,16 @@ class FilesystemArtifactStore:
                 dest_output=directory / "output",
                 dest_models=directory / "models",
             )
+            write_json_atomic(
+                directory / REVISION_MANIFEST_FILE,
+                {
+                    "revision_id": revision_id,
+                    "parent_revision_id": parent_revision_id,
+                    "created_at": utc_now_iso(),
+                    "fingerprint": fingerprint,
+                    "files": self._intern(directory),
+                },
+            )
         except Exception:
             self.discard_revision(revision_id)
             raise
@@ -165,7 +208,12 @@ class FilesystemArtifactStore:
         return record
 
     def discard_revision(self, revision_id: str) -> None:
-        """Drop a candidate revision that was never accepted."""
+        """Drop a candidate revision that was never recorded as a Validation.
+
+        The only callers are the commit failures: a snapshot that never
+        settled, and one whose fingerprint did not match the check it was
+        approved under. A revision a Validation recorded is never dropped.
+        """
         directory = self._id_path(self.revisions_root, revision_id)
         if directory.is_dir():
             self._discard_directory(directory)
@@ -177,6 +225,118 @@ class FilesystemArtifactStore:
             raise KeyError(f"unknown artifact revision: {revision_id}")
         models = directory / "models"
         return SimpleNamespace(revision_id=revision_id, output_path=output, models_path=models if models.is_dir() else None)
+
+    def revision_ids(self) -> list[str]:
+        """Every revision the store holds, in id order."""
+
+        return sorted(
+            directory.name
+            for directory in self.revisions_root.iterdir()
+            if (directory / "output").is_dir()
+        )
+
+    def revision_manifest(self, revision_id: str) -> dict[str, object]:
+        """One revision's lineage, creation time and per-file digests.
+
+        A revision written before the store was content-addressed has no
+        manifest on disk; it is rebuilt from that revision's materialised tree
+        on read and marked ``legacy`` (no parent, no creation time), so an
+        arm's earlier history stays readable without rewriting it.
+        """
+
+        directory = self._id_path(self.revisions_root, revision_id)
+        if not (directory / "output").is_dir():
+            raise KeyError(f"unknown artifact revision: {revision_id}")
+        path = directory / REVISION_MANIFEST_FILE
+        if path.is_file():
+            return {**json.loads(path.read_text(encoding="utf-8")), "layout": "objects"}
+        return {
+            "revision_id": revision_id,
+            "parent_revision_id": None,
+            "created_at": None,
+            "fingerprint": artifact_fingerprint(
+                directory / "output", directory / "models"
+            ),
+            "files": [
+                {
+                    "path": relpath,
+                    "sha256": _file_digest(directory / relpath),
+                    "size": (directory / relpath).stat().st_size,
+                }
+                for relpath in _revision_relpaths(directory)
+            ],
+            "layout": "legacy",
+        }
+
+    def diff_revisions(self, revision_a: str, revision_b: str) -> dict[str, object]:
+        """What changed between two revisions: paths plus unified diffs.
+
+        Sameness is decided on the manifests' digests, so an unchanged file is
+        never read. A changed text file gets a unified diff under the module's
+        caps; a side that is binary or over the byte cap is reported as changed
+        with no body rather than dumped into the response.
+        """
+
+        before = {
+            str(entry["path"]): entry
+            for entry in self.revision_manifest(revision_a)["files"]  # type: ignore[union-attr]
+        }
+        after = {
+            str(entry["path"]): entry
+            for entry in self.revision_manifest(revision_b)["files"]  # type: ignore[union-attr]
+        }
+        root_a = self._id_path(self.revisions_root, revision_a)
+        root_b = self._id_path(self.revisions_root, revision_b)
+        files: list[dict[str, object]] = []
+        for relpath in sorted(set(before) | set(after)):
+            left, right = before.get(relpath), after.get(relpath)
+            if left is not None and right is not None and left["sha256"] == right["sha256"]:
+                continue
+            files.append(
+                {
+                    "path": relpath,
+                    "change": "added" if left is None else "removed" if right is None else "modified",
+                    "size_before": left["size"] if left is not None else None,
+                    "size_after": right["size"] if right is not None else None,
+                    **_revision_diff_body(
+                        root_a / relpath if left is not None else None,
+                        root_b / relpath if right is not None else None,
+                        relpath,
+                    ),
+                }
+            )
+        return {
+            "revision_a": revision_a,
+            "revision_b": revision_b,
+            "added": sum(1 for item in files if item["change"] == "added"),
+            "removed": sum(1 for item in files if item["change"] == "removed"),
+            "modified": sum(1 for item in files if item["change"] == "modified"),
+            "files": files,
+        }
+
+    def _intern(self, directory: Path) -> list[dict[str, object]]:
+        """Store the revision's files by content hash and link the tree to them.
+
+        A file whose bytes are new becomes the object; a file whose bytes are
+        already stored is replaced by a hard link to that object. An object is
+        only ever created by linking a file the snapshot already verified, so a
+        half-written object cannot exist and no object needs re-reading.
+        """
+
+        entries: list[dict[str, object]] = []
+        for relpath in _revision_relpaths(directory):
+            path = directory / relpath
+            digest = _file_digest(path)
+            try:
+                os.link(path, self.objects_root / digest)
+            except FileExistsError:
+                staging = path.with_name(f".{path.name}.link.{uuid.uuid4().hex[:8]}")
+                os.link(self.objects_root / digest, staging)
+                os.replace(staging, path)
+            entries.append(
+                {"path": relpath, "sha256": digest, "size": path.stat().st_size}
+            )
+        return entries
 
     def freeze_revision(
         self,
@@ -210,12 +370,15 @@ class FilesystemArtifactStore:
             revision_id=revision_id,
         )
 
-    def prune_transient(self, *, keep_frozen_ids: tuple[str, ...] = ()) -> None:
-        """Discard candidate revisions and superseded frozen artifacts."""
+    def prune_superseded_frozen(self, *, keep_frozen_ids: tuple[str, ...] = ()) -> None:
+        """Discard frozen artifacts no ledger record still references.
+
+        Revisions are deliberately not pruned here: every revision a Validation
+        recorded is the arm's artifact history, and content addressing is what
+        makes keeping all of it affordable.
+        """
 
         keep = set(keep_frozen_ids)
-        for directory in list(self.revisions_root.iterdir()):
-            self._discard_directory(directory)
         for directory in list(self.frozen_root.iterdir()):
             if directory.name not in keep:
                 self._discard_directory(directory)
@@ -271,7 +434,11 @@ class FilesystemArtifactStore:
     def _discard_directory(path: Path) -> None:
         if path.is_symlink() or not path.is_dir():
             raise ArtifactError(f"artifact store contains an invalid entry: {path}")
-        chmod_tree(path, file_mode=0o600, dir_mode=0o700)
+        # Only the directories are unlocked. Unlinking a file needs write access
+        # to its directory, not to the file, and a revision file is a hard link
+        # into the shared object store: chmod'ing it writable would unlock the
+        # same bytes inside every other revision that shares them.
+        chmod_tree(path, file_mode=0o444, dir_mode=0o700)
         shutil.rmtree(path)
 
     @staticmethod
@@ -741,6 +908,64 @@ def _collect_artifact_files(
             raise ArtifactError(f"unsupported {label} file type: {relpath}")
         files.add(relpath)
     return files
+
+
+def _revision_relpaths(directory: Path) -> list[str]:
+    """Every file one revision carries, as ``output/...``/``models/...`` paths.
+
+    Exactly the files ``copy_artifact``/``copy_model_artifacts`` wrote into the
+    revision, in one flat order, so the manifest, the object store and the diff
+    all agree on what a revision contains.
+    """
+
+    relpaths = [
+        f"output/{relpath}"
+        for relpath in sorted(_artifact_files(directory / "output", reject_runtime_cache=False))
+    ]
+    models = directory / "models"
+    if models.is_dir():
+        relpaths.extend(
+            f"models/{relpath}"
+            for relpath in sorted(_model_artifact_files(models, missing_ok=True))
+        )
+    return relpaths
+
+
+def _revision_diff_body(
+    before: Path | None, after: Path | None, relpath: str
+) -> dict[str, object]:
+    """The unified diff of one changed path, or a stated reason there is none."""
+
+    left, right = _diff_text(before), _diff_text(after)
+    if left is None or right is None:
+        return {"diff": None, "diff_omitted": "binary_or_too_large"}
+    lines = list(
+        difflib.unified_diff(
+            left.splitlines(),
+            right.splitlines(),
+            fromfile=f"a/{relpath}",
+            tofile=f"b/{relpath}",
+            lineterm="",
+        )
+    )
+    truncated = len(lines) > REVISION_DIFF_MAX_LINES
+    return {
+        "diff": "\n".join(lines[:REVISION_DIFF_MAX_LINES]),
+        "diff_truncated": truncated,
+    }
+
+
+def _diff_text(path: Path | None) -> str | None:
+    """One side's text: empty for an absent side, None when it cannot be shown."""
+
+    if path is None:
+        return ""
+    if path.stat().st_size > REVISION_DIFF_MAX_FILE_BYTES:
+        return None
+    try:
+        return path.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError):
+        return None
 
 
 def _replace_artifact_root(dest_root: Path) -> None:
