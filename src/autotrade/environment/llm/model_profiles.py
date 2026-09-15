@@ -76,11 +76,11 @@ MIN_CONTEXT_WINDOW_TOKENS = min(
 DEFAULT_LLM_MAX_RETRIES = 3
 DEFAULT_LLM_RETRY_BACKOFF_SECONDS = 2.0
 
-# Completion-token ceiling for the Fold/Meta parent conversation and its
+# Completion-token ceiling for the research-session parent conversation and its
 # sub-agents (thinking tokens included): the single default for both; the
 # console-managed ``llm_max_response_tokens`` is the only override. Observed
 # calls pool around 1.4k tokens with p90 ≈ 4k, and the earlier 12k cap still cut
-# 1-3 rounds per Fold; a truncated thinking block loses the whole answer, so
+# 1-3 rounds per session; a truncated thinking block loses the whole answer, so
 # the ceiling is the practical per-round maximum the window leaves next to
 # the compaction threshold. A round that spends it all on reasoning costs
 # ~15 min at 25-40 tok/s — the accepted price of not cutting a long answer.

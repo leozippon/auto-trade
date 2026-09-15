@@ -784,14 +784,14 @@ def test_research_pit_provider_reuses_completed_semantic_views(tmp_path: Path) -
     assert fake.calls == ["decision", "replay"]
 
 
-def test_unphased_meta_replay_is_cloned_into_valid_phase(tmp_path: Path) -> None:
+def test_unphased_forward_replay_is_cloned_into_valid_phase(tmp_path: Path) -> None:
     provider, fake = _provider_with_fake_builder(tmp_path)
     decision = datetime.fromisoformat("2024-01-01T23:59:59+08:00")
     slot = "20240102_20240103_20240101T235959+0800"
     unphased = provider.cache_root / "replay" / slot
     _write_unphased_replay(
         unphased,
-        label="meta",
+        label="forward",
         start="20240102",
         end="20240103",
         available_from=decision,
@@ -817,7 +817,7 @@ def test_unphased_meta_replay_is_cloned_into_valid_phase(tmp_path: Path) -> None
     assert os.stat(replay / "daily.parquet").st_ino == os.stat(
         unphased / "daily.parquet"
     ).st_ino
-    assert source_manifest["label"] == "meta"
+    assert source_manifest["label"] == "forward"
     assert fake.calls == ["decision"]
     snapshot = Path(bundle.decision_ref)
     stash = _asof_stash_dir(
@@ -849,7 +849,7 @@ def test_concurrent_valid_prepare_from_unphased_is_phase_safe(tmp_path: Path) ->
     slot = "20240102_20240103_20240101T235959+0800"
     _write_unphased_replay(
         provider.cache_root / "replay" / slot,
-        label="frozen_test",
+        label="forward",
         start="20240102",
         end="20240103",
         available_from=decision,
@@ -903,7 +903,7 @@ def test_failed_unphased_clone_leaves_no_phased_residue(
     unphased = provider.cache_root / "replay" / slot
     _write_unphased_replay(
         unphased,
-        label="meta",
+        label="forward",
         start="20240102",
         end="20240103",
         available_from=decision,
@@ -959,7 +959,7 @@ def test_replay_source_with_wrong_identity_is_refused(tmp_path: Path) -> None:
     unphased = provider.cache_root / "replay" / slot
     _write_unphased_replay(
         unphased,
-        label="meta",
+        label="forward",
         start="19990101",
         end="19990102",
         available_from=decision,
@@ -1019,7 +1019,7 @@ def test_unphased_clone_refuses_cross_filesystem_copy(
     slot = "20240102_20240103_20240101T235959+0800"
     _write_unphased_replay(
         provider.cache_root / "replay" / slot,
-        label="meta",
+        label="forward",
         start="20240102",
         end="20240103",
         available_from=decision,

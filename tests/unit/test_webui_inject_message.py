@@ -125,21 +125,21 @@ const live = {
   worker_alive: true,
   status: { session_key: "s1" },
 };
-const fold = { key: "s1", kind: "research" };
+const session = { key: "s1", kind: "research" };
 const cases = [];
 function check(name, got, want) {
   const a = JSON.stringify(got);
   const b = JSON.stringify(want);
   if (a !== b) cases.push({ name, got, want });
 }
-check("live research session", injectMessageEnabled(live, fold), true);
-check("paused", injectMessageEnabled({ ...live, state: "paused" }, fold), false);
-check("paused reason", injectMessageDisableReason({ ...live, state: "paused" }, fold),
+check("live research session", injectMessageEnabled(live, session), true);
+check("paused", injectMessageEnabled({ ...live, state: "paused" }, session), false);
+check("paused reason", injectMessageDisableReason({ ...live, state: "paused" }, session),
   "实验已暂停。请先恢复运行后再发送。");
 for (const state of ["completed", "stopped", "failed", "interrupted", "terminated"]) {
-  check("terminal " + state, injectMessageEnabled({ ...live, state }, fold), false);
+  check("terminal " + state, injectMessageEnabled({ ...live, state }, session), false);
   check("terminal reason " + state,
-    injectMessageDisableReason({ ...live, state }, fold),
+    injectMessageDisableReason({ ...live, state }, session),
     "会话已结束，无法发送。");
 }
 check("forward replay", injectMessageEnabled({
@@ -148,22 +148,22 @@ check("forward replay", injectMessageEnabled({
 check("other session", injectMessageEnabled(live, {
   key: "s2", kind: "research",
 }), false);
-check("dead worker", injectMessageEnabled({ ...live, worker_alive: false }, fold), false);
+check("dead worker", injectMessageEnabled({ ...live, worker_alive: false }, session), false);
 check("no session_key", injectMessageEnabled({
   ...live, status: {},
-}, fold), false);
+}, session), false);
 check("no-agent reason", injectMessageDisableReason(live, {
-  key: fold.key, kind: "forward",
+  key: session.key, kind: "forward",
 }), "当前没有可接收消息的 Agent 会话。");
-check("payload false", buildInjectMessagePayload(fold.key, "继续验证", false), {
+check("payload false", buildInjectMessagePayload(session.key, "继续验证", false), {
   action: "inject_message",
-  session_key: fold.key,
+  session_key: session.key,
   text: "继续验证",
   interrupt: false,
 });
-check("payload true", buildInjectMessagePayload(fold.key, "停一下", true), {
+check("payload true", buildInjectMessagePayload(session.key, "停一下", true), {
   action: "inject_message",
-  session_key: fold.key,
+  session_key: session.key,
   text: "停一下",
   interrupt: true,
 });

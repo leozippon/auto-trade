@@ -174,15 +174,15 @@ class ControlState:
     request: str | None = None
     # One-shot: the console asked for a code swap at the next session
     # boundary. The worker consumes it and re-executes itself in place, so an
-    # in-flight Fold is finished instead of replayed.
+    # in-flight session is finished instead of replayed.
     restart_pending: bool = False
     directives: dict[str, str] = field(default_factory=dict)
     skip_to_heldout: bool = False
     resource_overrides: dict[str, dict[str, object]] = field(default_factory=dict)
-    # Per-fold sandbox GPU allocation set before the fold starts; the
+    # Per-session sandbox GPU allocation set before the session starts; the
     # sandbox's "auto" selector still picks which devices by free memory.
     gpu_counts: dict[str, int] = field(default_factory=dict)
-    # A pending re-run token per fold session: the worker re-runs the session
+    # A pending re-run token per session: the worker re-runs the session
     # whose latest ledger record has not absorbed this id yet.
     rerun_sessions: dict[str, str] = field(default_factory=dict)
     test_revealed: bool = False
@@ -516,7 +516,7 @@ def _string_map(value: object) -> dict[str, str]:
 def _int_map(value: object) -> dict[str, int]:
     """Non-negative integer control map (the per-session GPU count).
 
-    A GPU count of 0 is a real request -- the CPU-only fold the console offers
+    A GPU count of 0 is a real request -- the CPU-only session the console offers
     -- and must survive the round trip, or the worker silently runs the
     session on the experiment default.
     """

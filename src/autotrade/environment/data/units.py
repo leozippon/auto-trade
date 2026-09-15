@@ -262,7 +262,7 @@ AGENT_UNIT_CONTRACT: dict[str, str] = {
         "records carrying a factor show the applied source->normalized conversion"
     ),
     # Scope clause. The table enumerates snapshot-file columns; data_summary.json
-    # separately names each domain's vendor source datasets. A Fold read the two as
+    # separately names each domain's vendor source datasets. A session read the two as
     # one namespace, looked up a source dataset (suspend_d) that contributes only a
     # derived column, found no record, and filed the missing entry as a broken
     # contract. Stating the scope is the only thing that separates "not a snapshot

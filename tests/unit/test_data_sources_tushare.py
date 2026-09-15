@@ -22,10 +22,7 @@ from pyarrow.lib import ArrowInvalid
 
 from autotrade.data_sources.tushare import audit, common, cron_update, download
 from autotrade.data_sources.tushare import io as tushare_io
-from autotrade.environment.data.snapshot import (
-    SELECTABLE_DATASETS,
-    SnapshotConfig,
-)
+from autotrade.environment.data.snapshot import SELECTABLE_DATASETS
 
 
 class EmptyMinuteClient:
@@ -4408,7 +4405,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         )
         # A covering non-force run must not skip the committed partial day.
         client = EmptyTradeDateClient()
-        written, zero_skipped, blocked = download.download_event_trade_date_dataset(
+        written, zero_skipped, _blocked = download.download_event_trade_date_dataset(
             client, self.raw_dir, common.EVENT_FLOW_SPECS["margin"], ["20260529"], False, None
         )
         self.assertEqual((written, zero_skipped), (0, 1))

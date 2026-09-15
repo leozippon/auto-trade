@@ -2,7 +2,7 @@
 
 ``skills/`` is writable session knowledge, not a formal strategy artifact.  The
 ledger is the only current-pointer mechanism: immutable generations without a
-remaining successful Fold/Meta row are deliberately unreachable orphans.
+remaining successful research-session row are deliberately unreachable orphans.
 
 ``memory/`` is the second source of session knowledge: entries the researcher
 curated into ``configs/operating_memory/`` and mounted read-only for this run.
@@ -539,7 +539,7 @@ def create_operating_memory_snapshot(
     """Freeze what this experiment will mount, once, and record what that was.
 
     The curated library and the graduated tier keep moving; an experiment does
-    not. Resolving them once at creation is what makes an experiment's own Folds
+    not. Resolving them once at creation is what makes an experiment's own sessions
     comparable to each other, and what makes a library change something that
     reaches the *next* experiment rather than the middle of this one.
 

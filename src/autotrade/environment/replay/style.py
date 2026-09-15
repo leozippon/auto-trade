@@ -13,11 +13,10 @@ Agent actually saw):
 - SW L1 industry: the decision snapshot's ``universe.parquet`` (as-of the
   decision day — membership drift within a replay window is negligible).
 
-The backtest tool writes one ``style_analysis.json`` per result window (valid,
-test and held-out alike; test/held-out replays run after the Agent session).
-The pipeline then writes one ``style_<prefix>.json`` rollup per window chain
-under ``results/``, which is what the console serves — the web layer performs
-no attribution computation and touches no raw data.
+Every replay writes one ``style_analysis.json`` beside its result
+(validation and forward replays alike; the forward replay runs after research
+ends), which is what the console serves — the web layer performs no
+attribution computation and touches no raw data.
 
 Everything degrades to None/empty blocks when inputs are missing —
 attribution is advisory and must never fail a backtest.
@@ -548,7 +547,7 @@ def benchmark_summary_block(analysis: Mapping[str, object]) -> dict[str, object]
     """The compact benchmark projection an evaluation summary carries.
 
     The sidecar is the single computation point; this is the same numbers in the
-    shape the ledger, the experiment report and the Meta metric projection read
+    shape the ledger and the Agent-visible metric projection read
     (``label`` + ``benchmark_return`` at minimum). Returns None when the slot had
     no usable benchmark, so a missing block stays a truthful "not measured"
     instead of a fabricated zero.

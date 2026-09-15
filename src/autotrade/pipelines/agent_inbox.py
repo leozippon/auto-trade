@@ -1,7 +1,7 @@
 """Append-only HITL agent inbox sidecar.
 
 Users enqueue messages to the current Agent session through the Python
-control plane. Fold and Meta runners consume them at documented safe points.
+control plane. The research-session runner consumes them at documented safe points.
 """
 
 from __future__ import annotations
@@ -271,7 +271,7 @@ def reopen_uncommitted_inbox(
 def committed_session_run_ids(
     experiment_dir: str | Path, session_key: str
 ) -> frozenset[str]:
-    """Successful Fold/Meta run_ids recorded for this session_key."""
+    """Successful research-session run_ids recorded for this session_key."""
 
     from autotrade.pipelines.ledger import ExperimentLedger
 

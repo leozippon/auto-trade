@@ -401,8 +401,8 @@ class SnapshotConfig:
     events_window_months: int | None = None
     macro_window_months: int | None = None
     text_window_months: int | None = None
-    # One trading month of decision-input minute bars; valid/test replay minute
-    # windows are sized by the fold periods, not this field.
+    # One trading month of decision-input minute bars; replay minute windows
+    # are sized by their replay slots, not this field.
     intraday_trade_days: int = 21
     events_datasets: tuple[str, ...] = DEFAULT_DATASETS["events"]
     macro_datasets: tuple[str, ...] = DEFAULT_DATASETS["macro"]
@@ -967,8 +967,9 @@ class SnapshotBuilder:
         ``available_at`` so the per-inference PIT view can expose each dataset at its
         refresh node. Read only by backtest_tool; never PIT-filtered up front.
 
-        ``available_from`` is the fold's decision anchor (last trading day before
-        the period, 23:59:59). Rows published between that anchor and calendar
+        ``available_from`` is the slot's anchor, 23:59:59 before the period (the
+        prior calendar day for a research slot, the prior session for a Paper
+        window). Rows published between that anchor and calendar
         midnight of the period start — weekend/holiday news, events, macro —
         belong to the replay's first pre-open refresh, so the availability floor
         is the instant after the anchor, not period-start midnight. Rows stamped

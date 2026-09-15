@@ -298,11 +298,10 @@ def load_strategy_artifact(root: str | Path, *, revision_id: str | None = None) 
 def reject_forbidden_code_references(paths: Iterable[Path]) -> None:
     """Reject formal strategy code that names a stage or host-only mount path.
 
-    ``modification_check`` runs this before any formal replay, and loading a
-    frozen artifact runs it again when that artifact is reloaded as a later
-    Fold's parent. A path that only ever appears as a string constant is
-    therefore refused while the Agent can still fix it, instead of failing a
-    later Fold's startup.
+    ``modification_check`` runs this before any formal replay, and loading the
+    frozen artifact for the forward replay runs it again. A path that only ever
+    appears as a string constant is therefore refused while the Agent can still
+    fix it, instead of failing the forward replay's startup.
     """
     for path in paths:
         if path.suffix != ".py":
@@ -464,7 +463,7 @@ def restore_working_artifacts_writable(
     output_root: str | Path,
     models_root: str | Path | None = None,
 ) -> None:
-    """Normalize copied Fold artifacts for the unprivileged Agent workspace."""
+    """Normalize copied session artifacts for the unprivileged Agent workspace."""
 
     output = Path(output_root)
     models = Path(models_root) if models_root is not None else None

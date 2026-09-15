@@ -776,7 +776,7 @@ class PITDailyEvaluationBackend:
         result_dir.mkdir(parents=True, exist_ok=False)
         asof_dir = result_dir / "asof"
         # Fresh and empty for every replay: fit(context) recomputes it from PIT
-        # data in Validation, frozen Test and Held-out alike, and nothing from
+        # data in validation and forward replays alike, and nothing from
         # an earlier run or the revision can reach it. World-writable so the
         # sandbox's non-root fit worker can create files in it.
         state_dir = result_dir / "state"
@@ -1285,7 +1285,7 @@ def prebuild_asof_stash(
     """Encode one replay's as-of parts into its stash without a strategy.
 
     The first backtest over a slot otherwise pays the whole per-day encode
-    inside a Fold session. Everything that decides a part — the frozen
+    inside a research session. Everything that decides a part — the frozen
     snapshot, the replay frames, and the refresh instants the replay engine
     would reach — is read through the same functions the evaluation uses, and
     the parts are published through the same stash contract, so a later
@@ -1460,17 +1460,17 @@ def _require_record_shape(
 
 
 # Decoded replay slots one cache keeps. A decoded full-year slot holds about
-# 16 GiB, most of it ``events``, and a worker does not go back to a slot it has
-# left: a Fold's parent control, smoke, candidate and null-control replays all
-# run on the Fold's own slot, and the next Fold, Held-out or deployment replay
-# moves on to a new one (167 replays over 72 h: 28 slot changes, no return).
+# 16 GiB, most of it ``events``, and a replay that spans several slots moves
+# through them in order and does not go back to one it has left (measured under
+# the earlier one-slot-per-stage layout: 167 replays over 72 h, 28 slot changes,
+# no return).
 _REPLAY_FRAME_CACHE_SLOTS = 1
 
 
 class _ReplayFrameCache:
     """The most recently used decoded replay slots of one backend or provider.
 
-    Unbounded, it grew a long-lived worker by one slot per Fold (one worker held
+    Unbounded, it grew a long-lived worker by one slot per stage (one worker held
     69 GiB with four slots). A miss drops the least recently used slots BEFORE
     it decodes, so once no replay still holds them their pages are reused for
     the new slot instead of the process holding both at the decode peak. The decode runs under the lock:

@@ -87,24 +87,24 @@ def test_the_session_facts_state_the_research_period_and_the_session_place() -> 
 def test_the_signal_screen_path_is_a_fact_only_where_the_mount_exists() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         store = AgentRefStore(Path(tmp) / "experiment")
-        docker_fold = build_experiment_facts(
-            manifest={"kind": "fold", "experiment_id": "exp", "run_id": "run_x"},
+        docker_facts = build_experiment_facts(
+            manifest={"kind": "research", "experiment_id": "exp", "run_id": "run_x"},
             ref_store=store,
             runtime_env={"mode": "docker"},
         )
-        local_fold = build_experiment_facts(
-            manifest={"kind": "fold", "experiment_id": "exp", "run_id": "run_x"},
+        local_facts = build_experiment_facts(
+            manifest={"kind": "research", "experiment_id": "exp", "run_id": "run_x"},
             ref_store=store,
             runtime_env={"mode": "local"},
         )
-    screen = docker_fold["source_refs"]["signal_screen_ref"]
+    screen = docker_facts["source_refs"]["signal_screen_ref"]
     assert screen["path"] == "/mnt/tools/screen.py"
     # Sub-agents kept handing the bare path to read_file; the fact now carries
     # the argv contract and says which tools cannot open it.
     assert '["python", "/mnt/tools/screen.py", "--help"]' in screen["usage"]
     assert "shell only" in screen["usage"]
     assert "read_file" in screen["usage"]
-    assert "signal_screen_ref" not in local_fold["source_refs"]
+    assert "signal_screen_ref" not in local_facts["source_refs"]
 
 
 def test_a_screened_universe_and_a_monthly_cadence_are_described() -> None:
@@ -144,11 +144,11 @@ def test_the_session_deadline_names_the_wrap_up_grace_inside_it() -> None:
     than the one its directive names and the one hard finalization uses.
     """
 
-    fold = _facts(
+    budgets = _facts(
         budgets={"deadline_seconds": 43800.0, "deadline_grace_seconds": 600.0}
     )["budgets"]
-    assert fold["deadline_seconds"] == 43800.0
-    assert fold["deadline_grace_seconds"] == 600.0
+    assert budgets["deadline_seconds"] == 43800.0
+    assert budgets["deadline_grace_seconds"] == 600.0
 
 
 def test_the_session_is_told_deadline_seconds_is_pausable_effective_time() -> None:
@@ -165,13 +165,13 @@ def test_the_session_is_told_deadline_seconds_is_pausable_effective_time() -> No
         "调用期间暂停计时，"
         "因此会话总墙钟可能更长。"
     )
-    fold = _facts(
+    facts = _facts(
         budgets={"deadline_seconds": 43800.0, "deadline_grace_seconds": 600.0}
     )
-    assert fold["budgets"]["deadline_seconds_note"] == expected
+    assert facts["budgets"]["deadline_seconds_note"] == expected
     for name in ("shell", "subagent", "sub-agent", "子代理"):
-        assert name not in fold["budgets"]["deadline_seconds_note"]
-    assert expected in build_system_prompt(experiment_facts=fold)
+        assert name not in facts["budgets"]["deadline_seconds_note"]
+    assert expected in build_system_prompt(experiment_facts=facts)
 
 
 def test_the_facts_say_where_the_session_started() -> None:
@@ -274,10 +274,10 @@ def test_the_facts_publish_the_strategy_containers_cpu_quota_and_batch_width() -
     from autotrade.environment.sandbox import SandboxLimits
     from autotrade.pipelines.local_backend import BATCH_VALIDATE_MAX_CONCURRENCY
 
-    fold = _facts()["budgets"]
-    assert fold["strategy_cpus"] == SandboxLimits().cpus
-    assert fold["batch_validate_max_concurrency"] == BATCH_VALIDATE_MAX_CONCURRENCY
+    budgets = _facts()["budgets"]
+    assert budgets["strategy_cpus"] == SandboxLimits().cpus
+    assert budgets["batch_validate_max_concurrency"] == BATCH_VALIDATE_MAX_CONCURRENCY
     # The width alone would mislead: the fit clock the batch is judged against
     # scales with it, so the rule travels with the number.
-    assert fold["batch_validate_fit_timeout_note"] == BATCH_VALIDATE_FIT_TIMEOUT_NOTE
+    assert budgets["batch_validate_fit_timeout_note"] == BATCH_VALIDATE_FIT_TIMEOUT_NOTE
     assert "strategy_cpus" in build_system_prompt(experiment_facts=_facts())

@@ -79,7 +79,7 @@ def _readonly_tools(roots: SearchRoots) -> list[object]:
     return [ReadFileTool(roots), GrepTool(roots), GlobTool(roots)]
 
 
-def _fold_config(**kwargs: object) -> AgentSessionConfig:
+def _session_config(**kwargs: object) -> AgentSessionConfig:
     return AgentSessionConfig(**kwargs)  # type: ignore[arg-type]
 
 
@@ -158,7 +158,7 @@ class BoomWrite:
         raise RuntimeError("disk exploded")
 
 
-def test_subagent_events_land_on_the_parent_fold_trace() -> None:
+def test_subagent_events_land_on_the_parent_session_trace() -> None:
     events: list[tuple[str, dict[str, object]]] = []
     shell = DeclaredReadOnlyShell()
     llm = ScriptedLLM(
@@ -197,7 +197,7 @@ def test_subagent_events_land_on_the_parent_fold_trace() -> None:
     assert result["status"] == "completed"
 
 
-def test_subagent_rejects_nested_agent_and_fold_control_specs() -> None:
+def test_subagent_rejects_nested_agent_and_session_control_specs() -> None:
     class NamedReadOnly:
         def __init__(self, name: str) -> None:
             self.spec = ToolSpec(
@@ -350,7 +350,7 @@ def test_concurrent_subagents_do_not_drop_each_others_workspace_writes(
     workspace = tmp_path / "agent"
     workspace.mkdir()
     safe = SafeWorkspace(workspace)
-    # One registry over one SafeWorkspace serves every child, as the Fold
+    # One registry over one SafeWorkspace serves every child, as the research
     # session builds it.
     tools = ToolRegistry([WriteFileTool(safe), EditFileTool(safe)])
     barrier = threading.Barrier(2)
@@ -467,8 +467,8 @@ def test_subagent_write_failure_does_not_finish_parent(tmp_path: Path) -> None:
     runner = AgentSessionRunner(
         llm=ScriptedLLM([]),
         tools=ToolRegistry(),
-        system_prompt="fold",
-        config=_fold_config(),
+        system_prompt="research",
+        config=_session_config(),
         subagent=subagent,
     )
     dispatched = runner.tools.invoke(
@@ -552,8 +552,8 @@ def test_runner_attaches_subagent_events_to_its_sink() -> None:
     runner = AgentSessionRunner(
         llm=ScriptedLLM([]),
         tools=ToolRegistry(),
-        system_prompt="fold",
-        config=_fold_config(),
+        system_prompt="research",
+        config=_session_config(),
         subagent=subagent,
         event_sink=lambda event, _payload: events.append(event),
     )
@@ -567,7 +567,7 @@ def test_runner_attaches_subagent_events_to_its_sink() -> None:
     assert "subagent" in events
 
 
-def test_fold_auditor_cannot_invoke_the_registered_shell() -> None:
+def test_explore_child_cannot_invoke_the_registered_shell() -> None:
     shell = DeclaredReadOnlyShell()
     llm = ScriptedLLM(
         [
@@ -610,7 +610,7 @@ class _UnusedRunner:
         raise AssertionError("runner is unused")
 
 
-def test_fold_subagent_tools_are_writable_shell_contract(tmp_path: Path) -> None:
+def test_session_subagent_tools_are_writable_shell_contract(tmp_path: Path) -> None:
     workspace = tmp_path / "agent"
     workspace.mkdir()
     (workspace / "output").mkdir()
@@ -674,8 +674,8 @@ def test_finish_session_allows_zero_subagent_and_emits_empty_trace_stats() -> No
             [ProviderResponse(tool_calls=(ToolCall("f1", "finish_session", {}),))]
         ),
         tools=ToolRegistry([finish]),
-        system_prompt="fold",
-        config=_fold_config(),
+        system_prompt="research",
+        config=_session_config(),
         subagent=SubAgentEngine(
             llm=ScriptedLLM([]),
             tools=ToolRegistry([DeclaredReadOnlyShell()]),
@@ -729,8 +729,8 @@ def test_failed_subagent_attempt_counts_for_its_role() -> None:
             ]
         ),
         tools=ToolRegistry([finish]),
-        system_prompt="fold",
-        config=_fold_config(),
+        system_prompt="research",
+        config=_session_config(),
         subagent=subagent,
     )
     assert runner.run("failed subagent is still traced").status == "finished"
@@ -750,8 +750,8 @@ def test_subagent_attempt_counter_resets_on_new_run() -> None:
             [ProviderResponse(tool_calls=(ToolCall("f1", "finish_session", {}),))]
         ),
         tools=ToolRegistry([finish]),
-        system_prompt="fold",
-        config=_fold_config(max_llm_calls=2),
+        system_prompt="research",
+        config=_session_config(max_llm_calls=2),
         subagent=subagent,
     )
     runner._subagent_attempts = 4
@@ -770,8 +770,8 @@ def test_zero_subagent_enters_hard_finalization() -> None:
     runner = AgentSessionRunner(
         llm=ScriptedLLM([]),
         tools=ToolRegistry([_FinishStub("finish_session")]),
-        system_prompt="fold",
-        config=_fold_config(
+        system_prompt="research",
+        config=_session_config(
             finalize_before_deadline_seconds=300.0,
             deadline_grace_seconds=0.0,
         ),
@@ -792,21 +792,21 @@ def test_sessions_without_subagent_still_finish() -> None:
             [ProviderResponse(tool_calls=(ToolCall("f1", "finish_session", {}),))]
         ),
         tools=ToolRegistry([finish]),
-        system_prompt="fold",
+        system_prompt="research",
     )
     assert runner.run("no subagent configured").status == "finished"
     assert finish.invoked == 1
 
 
-def test_fold_and_subagent_prompts_keep_roles() -> None:
+def test_session_and_subagent_prompts_keep_roles() -> None:
     # The pyright how-to assertion lives in test_sandbox_pyright.py.
-    fold = build_system_prompt(experiment_facts={})
+    parent = build_system_prompt(experiment_facts={})
     for role in ("`Explore`", "`general-purpose`"):
-        assert role in fold
-    assert "保持自己的上下文精简" in fold
-    assert "`write_file`" in fold
-    assert "`finish_session`" in fold
-    assert "通常优先" not in fold
+        assert role in parent
+    assert "保持自己的上下文精简" in parent
+    assert "`write_file`" in parent
+    assert "`finish_session`" in parent
+    assert "通常优先" not in parent
     for stale in (
         "data_audit",
         "strategy_audit",
@@ -814,7 +814,7 @@ def test_fold_and_subagent_prompts_keep_roles() -> None:
         "strategy_performance_audit",
         "context_audit",
     ):
-        assert stale not in fold
+        assert stale not in parent
 
 
 def test_subagent_schema_uses_session_role_enum() -> None:
@@ -825,8 +825,8 @@ def test_subagent_schema_uses_session_role_enum() -> None:
     runner = AgentSessionRunner(
         llm=ScriptedLLM([]),
         tools=ToolRegistry(),
-        system_prompt="fold",
-        config=_fold_config(),
+        system_prompt="research",
+        config=_session_config(),
         subagent=subagent,
     )
     schema = next(
@@ -887,7 +887,7 @@ def test_role_tool_visibility_hides_writes_from_audits(tmp_path: Path) -> None:
         _function_name(record)
         for record in engine._provider_tools(allowed_subagent_tools("Explore"))
     }
-    # The parent's Fold surface minus what it keeps by design (both formal
+    # The parent's session surface minus what it keeps by design (both formal
     # validation tools, finish, rollback, agent): the unofficial
     # smoke run is a child's tool too, so it verifies its own implementation
     # on the real replay path instead of hand-rolling a shell smoke test.
@@ -916,21 +916,21 @@ def test_role_tool_visibility_hides_writes_from_audits(tmp_path: Path) -> None:
         "step_rollback",
     }
     assert audit == {"glob", "grep", "read_file"}
-    fold_general = {
+    general_role = {
         _function_name(record)
         for record in engine._provider_tools(
             allowed_subagent_tools("general-purpose")
         )
     }
-    assert {"write_file", "edit_file"} <= fold_general
-    assert fold_general == impl
-    fold_explore_role = {
+    assert {"write_file", "edit_file"} <= general_role
+    assert general_role == impl
+    explore_role = {
         _function_name(record)
         for record in engine._provider_tools(allowed_subagent_tools("Explore"))
     }
-    assert fold_explore_role == {"read_file", "grep", "glob"}
-    assert "shell" not in fold_explore_role
-    assert "write_file" not in fold_explore_role
+    assert explore_role == {"read_file", "grep", "glob"}
+    assert "shell" not in explore_role
+    assert "write_file" not in explore_role
 
 
 def test_subagent_calls_still_track_attempts_and_roles() -> None:
@@ -973,8 +973,8 @@ def test_subagent_calls_still_track_attempts_and_roles() -> None:
             ]
         ),
         tools=ToolRegistry([finish]),
-        system_prompt="fold",
-        config=_fold_config(),
+        system_prompt="research",
+        config=_session_config(),
         subagent=subagent,
         event_sink=lambda event, payload: events.append((event, payload)),
     )
@@ -1024,8 +1024,8 @@ def test_single_subagent_role_can_finish() -> None:
             ]
         ),
         tools=ToolRegistry([finish]),
-        system_prompt="fold",
-        config=_fold_config(),
+        system_prompt="research",
+        config=_session_config(),
         subagent=subagent,
     )
     assert runner.run("one delegated review is enough").status == "finished"
@@ -1034,10 +1034,10 @@ def test_single_subagent_role_can_finish() -> None:
 
 
 def test_general_prompts_explain_the_role() -> None:
-    fold = subagent_system_prompt("general-purpose")
-    assert "一级 `general-purpose`" in fold
-    assert "修改共享策略、模型或 skills" in fold
-    assert "有界的实现、计算或检查任务" in fold
+    writer = subagent_system_prompt("general-purpose")
+    assert "一级 `general-purpose`" in writer
+    assert "修改共享策略、模型或 skills" in writer
+    assert "有界的实现、计算或检查任务" in writer
     # Writers share one live tree with the parent and sibling children: no
     # private copy, no merge-back, so writes stay inside the task's paths.
     for clause in (
@@ -1045,14 +1045,14 @@ def test_general_prompts_explain_the_role() -> None:
         "只在 task 给定的路径下创建、修改与删除",
         "在汇报里写明删了什么",
     ):
-        assert clause in fold
+        assert clause in writer
         assert clause not in subagent_system_prompt("Explore")
 
 
-def test_fold_subagent_prompts_carry_the_path_and_argv_contract() -> None:
+def test_subagent_prompts_carry_the_path_and_argv_contract() -> None:
     """Both sub-agent models failed the same two tool contracts in ~3% of
     calls (absolute /mnt paths to read_file, argv as one string, stale
-    edit_file old_text), 6-12 times per Fold despite the curated skills: the
+    edit_file old_text), 6-12 times per session despite the curated skills: the
     role prompt carries an example-based cheat sheet with one source in
     prompts.py, whatever the task says."""
 
@@ -1163,8 +1163,8 @@ def test_subagent_arguments_are_validated_by_the_registry() -> None:
     runner = AgentSessionRunner(
         llm=ScriptedLLM([]),
         tools=ToolRegistry(),
-        system_prompt="fold",
-        config=_fold_config(),
+        system_prompt="research",
+        config=_session_config(),
         subagent=subagent,
     )
     # The runner registered subagent like any other tool.
@@ -1217,8 +1217,8 @@ def test_legacy_thinking_values_launch_at_xhigh_through_the_registry() -> None:
     runner = AgentSessionRunner(
         llm=ScriptedLLM([]),
         tools=ToolRegistry(),
-        system_prompt="fold",
-        config=_fold_config(),
+        system_prompt="research",
+        config=_session_config(),
         subagent=SubAgentEngine(
             llm=ScriptedLLM(
                 [ProviderResponse(content="ok"), ProviderResponse(content="ok")]
@@ -1252,8 +1252,8 @@ def test_agent_action_resume_is_told_the_resume_parameter() -> None:
     runner = AgentSessionRunner(
         llm=ScriptedLLM([]),
         tools=ToolRegistry(),
-        system_prompt="fold",
-        config=_fold_config(),
+        system_prompt="research",
+        config=_session_config(),
         subagent=SubAgentEngine(
             llm=ScriptedLLM([]), tools=ToolRegistry([DeclaredReadOnlyShell()])
         ),
@@ -1364,8 +1364,8 @@ def test_parent_session_continues_before_subagent_finishes() -> None:
     runner = AgentSessionRunner(
         llm=_ParentLLM(),
         tools=ToolRegistry([finish]),
-        system_prompt="fold",
-        config=_fold_config(),
+        system_prompt="research",
+        config=_session_config(),
         subagent=SubAgentEngine(
             llm=_GateLLM(started, release),
             tools=ToolRegistry([DeclaredReadOnlyShell()]),
@@ -1432,8 +1432,8 @@ def test_parent_text_only_waits_for_pending_subagent_then_resumes() -> None:
     runner = AgentSessionRunner(
         llm=_ParentLLM(),
         tools=ToolRegistry([finish]),
-        system_prompt="fold",
-        config=_fold_config(),
+        system_prompt="research",
+        config=_session_config(),
         subagent=SubAgentEngine(
             llm=_GateLLM(started, release),
             tools=ToolRegistry([DeclaredReadOnlyShell()]),
@@ -1457,8 +1457,8 @@ def test_parent_text_only_without_pending_subagent_still_nudges() -> None:
     runner = AgentSessionRunner(
         llm=llm,
         tools=ToolRegistry([finish]),
-        system_prompt="fold",
-        config=_fold_config(),
+        system_prompt="research",
+        config=_session_config(),
         subagent=SubAgentEngine(
             llm=ScriptedLLM([ProviderResponse(content="unused")]),
             tools=ToolRegistry([DeclaredReadOnlyShell()]),
@@ -1538,8 +1538,8 @@ def test_parent_text_only_wakes_on_first_completed_subagent() -> None:
     runner = AgentSessionRunner(
         llm=_ParentLLM(),
         tools=ToolRegistry([finish]),
-        system_prompt="fold",
-        config=_fold_config(),
+        system_prompt="research",
+        config=_session_config(),
         subagent=SubAgentEngine(
             llm=_TaskGatedLLM(
                 {
@@ -1599,8 +1599,8 @@ def test_parent_text_only_pending_subagent_deadline_does_not_deadlock(
             AgentSessionRunner(
                 llm=_ParentLLM(),
                 tools=ToolRegistry([finish]),
-                system_prompt="fold",
-                config=_fold_config(
+                system_prompt="research",
+                config=_session_config(
                     deadline_seconds=0.4,
                     deadline_grace_seconds=0.0,
                     finalize_before_deadline_seconds=0.0,
@@ -1624,8 +1624,8 @@ def test_wait_first_pending_subagent_returns_on_cancel() -> None:
     runner = AgentSessionRunner(
         llm=ScriptedLLM([]),
         tools=ToolRegistry(),
-        system_prompt="fold",
-        config=_fold_config(),
+        system_prompt="research",
+        config=_session_config(),
         subagent=SubAgentEngine(
             llm=_GateLLM(started, release),
             tools=ToolRegistry([DeclaredReadOnlyShell()]),
@@ -1789,11 +1789,11 @@ def test_runner_close_cancels_subagent_without_infinite_wait(
     result = AgentSessionRunner(
         llm=Parent(),
         tools=ToolRegistry([finish]),
-        system_prompt="fold",
+        system_prompt="research",
         # The whole budget is wrap-up grace, so the session is past its main
         # deadline from the first turn: finishing is the only move left and the
         # in-flight-child refusal is exempt there.
-        config=_fold_config(deadline_seconds=600.0, deadline_grace_seconds=600.0),
+        config=_session_config(deadline_seconds=600.0, deadline_grace_seconds=600.0),
         subagent=SubAgentEngine(
             llm=BlockingChild(),
             tools=ToolRegistry([shell]),
@@ -1842,7 +1842,7 @@ def test_terminal_tool_stops_refusing_once_the_deadline_is_at_hand() -> None:
             llm=ScriptedLLM([]),
             tools=ToolRegistry([_FinishStub("finish_session")]),
             system_prompt="session",
-            config=_fold_config(),
+            config=_session_config(),
             subagent=SubAgentEngine(
                 llm=BlockingChild(),
                 tools=ToolRegistry([_NamedTool("read_file")]),
@@ -1906,8 +1906,8 @@ def test_terminal_tool_is_refused_while_a_launched_child_still_runs(
     runner = AgentSessionRunner(
         llm=ScriptedLLM([]),
         tools=ToolRegistry([finish]),
-        system_prompt="fold",
-        config=_fold_config(),
+        system_prompt="research",
+        config=_session_config(),
         subagent=SubAgentEngine(
             llm=BlockingChild(),
             tools=ToolRegistry([shell]),
@@ -2017,8 +2017,8 @@ def test_parallel_safe_batch_runs_concurrently_and_mutating_batch_in_order() -> 
     runner = AgentSessionRunner(
         llm=_TurnLLM(),
         tools=ToolRegistry([read, grep, write, finish]),
-        system_prompt="fold",
-        config=_fold_config(),
+        system_prompt="research",
+        config=_session_config(),
     )
     assert runner.run("go").status == "finished"
     # Turn 1: three parallel-safe calls overlapped.
@@ -2082,8 +2082,8 @@ def test_subagent_launches_beyond_the_cap_queue_instead_of_failing() -> None:
     runner = AgentSessionRunner(
         llm=_ParentLLM(),
         tools=ToolRegistry([finish]),
-        system_prompt="fold",
-        config=_fold_config(),
+        system_prompt="research",
+        config=_session_config(),
         subagent=SubAgentEngine(
             llm=_TaskGatedLLM(gates),
             tools=ToolRegistry([DeclaredReadOnlyShell()]),
@@ -2107,8 +2107,8 @@ def test_backtest_gate_keeps_its_batch_in_order_regardless_of_spec() -> None:
     runner = AgentSessionRunner(
         llm=ScriptedLLM([]),
         tools=ToolRegistry([backtest, read, _FinishStub("finish_session")]),
-        system_prompt="fold",
-        config=_fold_config(),
+        system_prompt="research",
+        config=_session_config(),
     )
     assert backtest.spec.mutating is False
     assert runner._is_parallel_batch(
@@ -2123,8 +2123,8 @@ def test_unfinished_session_end_still_reports_token_usage() -> None:
     runner = AgentSessionRunner(
         llm=ScriptedLLM([ProviderResponse(content="thinking aloud")]),
         tools=ToolRegistry([_FinishStub("finish_session")]),
-        system_prompt="fold",
-        config=_fold_config(max_llm_calls=1),
+        system_prompt="research",
+        config=_session_config(max_llm_calls=1),
     )
     events: list[tuple[str, dict[str, object]]] = []
     runner.event_sink = lambda event, payload: events.append((event, payload))
@@ -2140,8 +2140,8 @@ def test_inherit_context_fork_drops_the_unanswered_tool_calls() -> None:
     runner = AgentSessionRunner(
         llm=ScriptedLLM([]),
         tools=ToolRegistry(),
-        system_prompt="fold",
-        config=_fold_config(),
+        system_prompt="research",
+        config=_session_config(),
         subagent=SubAgentEngine(
             llm=child, tools=ToolRegistry([DeclaredReadOnlyShell()])
         ),
@@ -2198,8 +2198,8 @@ def test_tool_exception_in_a_parallel_batch_keeps_sibling_results() -> None:
     runner = AgentSessionRunner(
         llm=llm,
         tools=ToolRegistry([_BoomTool(), _NamedTool("read_file"), finish]),
-        system_prompt="fold",
-        config=_fold_config(),
+        system_prompt="research",
+        config=_session_config(),
     )
     assert runner.run("go").status == "finished"
     second = llm.calls[1]["messages"]
@@ -2248,8 +2248,8 @@ def test_batch_validate_waits_for_running_subagent() -> None:
     runner = AgentSessionRunner(
         llm=llm,
         tools=ToolRegistry([_Backtest(), finish]),
-        system_prompt="fold",
-        config=_fold_config(),
+        system_prompt="research",
+        config=_session_config(),
         subagent=SubAgentEngine(
             llm=_SlowChild(), tools=ToolRegistry([DeclaredReadOnlyShell()])
         ),
@@ -2303,8 +2303,8 @@ def test_a_backtest_does_not_wait_for_a_read_only_child(role: str) -> None:
     runner = AgentSessionRunner(
         llm=llm,
         tools=ToolRegistry([_Backtest(), _FinishStub("finish_session")]),
-        system_prompt="fold",
-        config=_fold_config(),
+        system_prompt="research",
+        config=_session_config(),
         subagent=SubAgentEngine(llm=_Child(), tools=ToolRegistry()),
     )
     try:
@@ -2327,7 +2327,7 @@ def test_a_backtest_refuses_a_writer_that_outlives_the_barrier(monkeypatch, role
 
     monkeypatch.setattr(runner_module, "SUBAGENT_TEARDOWN_WAIT_SECONDS", 0)
     runner = AgentSessionRunner(
-        llm=ScriptedLLM([]), tools=ToolRegistry(), system_prompt="fold", config=_fold_config()
+        llm=ScriptedLLM([]), tools=ToolRegistry(), system_prompt="research", config=_session_config()
     )
     writer = runner_module._SubAgentJob("pending", "call", role, 1, Future())
     runner._subagent_jobs.append(writer)
@@ -2345,8 +2345,8 @@ def test_agent_tool_schema_through_the_registry() -> None:
     runner = AgentSessionRunner(
         llm=ScriptedLLM([]),
         tools=ToolRegistry(),
-        system_prompt="fold",
-        config=_fold_config(),
+        system_prompt="research",
+        config=_session_config(),
         subagent=SubAgentEngine(
             llm=ScriptedLLM([]), tools=ToolRegistry([DeclaredReadOnlyShell()])
         ),
@@ -2388,8 +2388,8 @@ def test_resume_continues_a_finished_child_transcript() -> None:
     runner = AgentSessionRunner(
         llm=ScriptedLLM([]),
         tools=ToolRegistry(),
-        system_prompt="fold",
-        config=_fold_config(),
+        system_prompt="research",
+        config=_session_config(),
         subagent=SubAgentEngine(llm=child, tools=ToolRegistry([DeclaredReadOnlyShell()])),
         event_sink=lambda event, payload: events.append((event, payload)),
     )
@@ -2423,8 +2423,8 @@ def test_resume_refuses_unknown_running_or_mismatched_children() -> None:
     runner = AgentSessionRunner(
         llm=ScriptedLLM([]),
         tools=ToolRegistry(),
-        system_prompt="fold",
-        config=_fold_config(),
+        system_prompt="research",
+        config=_session_config(),
         subagent=SubAgentEngine(
             llm=_GateLLM(started, release), tools=ToolRegistry([DeclaredReadOnlyShell()])
         ),
@@ -2471,8 +2471,8 @@ def test_delegation_reminder_fires_once_after_eight_own_calls() -> None:
     runner = AgentSessionRunner(
         llm=llm,
         tools=ToolRegistry([read, finish]),
-        system_prompt="fold",
-        config=_fold_config(),
+        system_prompt="research",
+        config=_session_config(),
         subagent=SubAgentEngine(
             llm=ScriptedLLM([]), tools=ToolRegistry([DeclaredReadOnlyShell()])
         ),
@@ -2522,8 +2522,8 @@ def test_delegation_reminder_rearms_per_streak_and_counts_writes() -> None:
     runner = AgentSessionRunner(
         llm=llm,
         tools=ToolRegistry([read, write, finish]),
-        system_prompt="fold",
-        config=_fold_config(),
+        system_prompt="research",
+        config=_session_config(),
         subagent=SubAgentEngine(
             llm=ScriptedLLM([ProviderResponse(content="seen")] * 2),
             tools=ToolRegistry([DeclaredReadOnlyShell()]),
@@ -2577,8 +2577,8 @@ def test_delegation_reminder_waits_for_a_running_child_to_finish() -> None:
     runner = AgentSessionRunner(
         llm=llm,
         tools=ToolRegistry([read, finish]),
-        system_prompt="fold",
-        config=_fold_config(),
+        system_prompt="research",
+        config=_session_config(),
         subagent=SubAgentEngine(
             llm=_GateLLM(started, release),
             tools=ToolRegistry([DeclaredReadOnlyShell()]),
@@ -2652,8 +2652,8 @@ def test_agent_result_echoes_running_and_queued_children_with_descriptions() -> 
     runner = AgentSessionRunner(
         llm=ScriptedLLM([]),
         tools=ToolRegistry(),
-        system_prompt="fold",
-        config=_fold_config(),
+        system_prompt="research",
+        config=_session_config(),
         subagent=SubAgentEngine(
             llm=_TaskGatedLLM(gates),
             tools=ToolRegistry([DeclaredReadOnlyShell()]),
@@ -2715,8 +2715,8 @@ def test_a_full_round_of_writable_children_runs_concurrently() -> None:
     runner = AgentSessionRunner(
         llm=ScriptedLLM([]),
         tools=ToolRegistry(),
-        system_prompt="fold",
-        config=_fold_config(),
+        system_prompt="research",
+        config=_session_config(),
         subagent=SubAgentEngine(
             llm=_TaskGatedLLM(gates),
             tools=ToolRegistry([DeclaredReadOnlyShell()]),
@@ -2764,8 +2764,8 @@ def test_delegation_reminder_carries_the_live_picture() -> None:
     runner = AgentSessionRunner(
         llm=llm,
         tools=ToolRegistry([read, finish]),
-        system_prompt="fold",
-        config=_fold_config(),
+        system_prompt="research",
+        config=_session_config(),
         subagent=SubAgentEngine(
             llm=ScriptedLLM([]), tools=ToolRegistry([DeclaredReadOnlyShell()])
         ),
@@ -3129,8 +3129,8 @@ def test_runner_hands_its_compactor_to_children_and_honours_max_turns() -> None:
     runner = AgentSessionRunner(
         llm=SessionBudgetLLM(ScriptedLLM([]), budget=shared, role="main"),
         tools=ToolRegistry(),
-        system_prompt="fold",
-        config=_fold_config(),
+        system_prompt="research",
+        config=_session_config(),
         compactor=parent_compactor,
         subagent=engine,
         event_sink=lambda event, payload: events.append((event, payload)),
@@ -3189,8 +3189,8 @@ def test_parent_thinking_only_truncated_turn_gets_a_forced_continuation() -> Non
     runner = AgentSessionRunner(
         llm=llm,
         tools=ToolRegistry([finish]),
-        system_prompt="fold",
-        config=_fold_config(max_response_tokens=500),
+        system_prompt="research",
+        config=_session_config(max_response_tokens=500),
         event_sink=lambda event, payload: events.append((event, payload)),
     )
     assert runner.run("go").status == "finished"
@@ -3227,8 +3227,8 @@ def test_subagent_completed_surfaces_truncation_and_rounds() -> None:
     runner = AgentSessionRunner(
         llm=llm,
         tools=ToolRegistry([finish]),
-        system_prompt="fold",
-        config=_fold_config(),
+        system_prompt="research",
+        config=_session_config(),
         subagent=SubAgentEngine(
             llm=child,
             tools=ToolRegistry([DeclaredReadOnlyShell()]),
@@ -3344,8 +3344,8 @@ def test_child_llm_error_is_traced_and_a_recovered_child_is_not_an_error() -> No
     runner = AgentSessionRunner(
         llm=llm,
         tools=ToolRegistry([finish]),
-        system_prompt="fold",
-        config=_fold_config(),
+        system_prompt="research",
+        config=_session_config(),
         subagent=SubAgentEngine(llm=Flaky(), tools=ToolRegistry([DeclaredReadOnlyShell()])),
     )
     assert runner.run("go").status == "finished"
@@ -3423,8 +3423,8 @@ def test_child_cut_short_by_worker_shutdown_is_cancelled_not_failed(monkeypatch)
     runner = AgentSessionRunner(
         llm=llm,
         tools=ToolRegistry([finish]),
-        system_prompt="fold",
-        config=_fold_config(),
+        system_prompt="research",
+        config=_session_config(),
         subagent=SubAgentEngine(
             llm=ScriptedLLM(
                 [
@@ -3563,8 +3563,8 @@ def test_exhausted_child_reports_what_the_empty_finalize_left_behind() -> None:
     runner = AgentSessionRunner(
         llm=llm,
         tools=ToolRegistry([finish]),
-        system_prompt="fold",
-        config=_fold_config(),
+        system_prompt="research",
+        config=_session_config(),
         subagent=SubAgentEngine(
             llm=ScriptedLLM(
                 [
@@ -3702,8 +3702,8 @@ def test_time_budget_notice_states_remaining_minutes_and_backtests() -> None:
     runner = AgentSessionRunner(
         llm=llm,
         tools=ToolRegistry([_NamedTool("read_file"), _NamedTool("smoke_backtest"), _FinishStub("finish_session")]),
-        system_prompt="fold",
-        config=_fold_config(),
+        system_prompt="research",
+        config=_session_config(),
         time_budget=budget,
         event_sink=lambda event, payload: events.append((event, payload)),
     )
@@ -3720,7 +3720,7 @@ def test_time_budget_notice_states_remaining_minutes_and_backtests() -> None:
     ]
     assert len(delivered) == 3
     assert "smoke_backtest 1 次" in delivered[1]["message"]
-    # The notice reports the budget; it is not a wrap-up cue. A Fold that read
+    # The notice reports the budget; it is not a wrap-up cue. A session that read
     # "finish_session" at 50% finished with 280 minutes and 7 backtests unused.
     assert all("finish_session" not in item["message"] for item in delivered)
     assert all("收尾提示" in item["message"] for item in delivered)
@@ -3741,7 +3741,7 @@ def test_time_budget_notice_states_remaining_minutes_and_backtests() -> None:
         llm=llm,
         tools=ToolRegistry([_NamedTool("read_file"), _FinishStub("finish_session")]),
         system_prompt="session",
-        config=_fold_config(),
+        config=_session_config(),
         time_budget=budget,
         event_sink=lambda event, payload: events.append((event, payload)),
     )
@@ -3819,8 +3819,8 @@ def test_launch_precedence_reaches_the_child_and_its_trace(monkeypatch: pytest.M
         runner = AgentSessionRunner(
             llm=ScriptedLLM([]),
             tools=ToolRegistry(),
-            system_prompt="fold",
-            config=_fold_config(),
+            system_prompt="research",
+            config=_session_config(),
             subagent=SubAgentEngine(llm=child, tools=ToolRegistry([DeclaredReadOnlyShell()])),
             event_sink=lambda event, payload: events.append((event, payload)),
         )
@@ -3868,8 +3868,8 @@ def test_long_child_report_is_clipped_inline_and_spilled_for_read_back(tmp_path:
     runner = AgentSessionRunner(
         llm=llm,
         tools=ToolRegistry([ReadFileTool(roots), finish]),
-        system_prompt="fold",
-        config=_fold_config(),
+        system_prompt="research",
+        config=_session_config(),
         subagent=SubAgentEngine(
             llm=ScriptedLLM([ProviderResponse(content=report)], context_window_tokens=128_000),
             tools=ToolRegistry([DeclaredReadOnlyShell()]),
@@ -3947,8 +3947,8 @@ def test_short_child_report_is_delivered_whole_and_no_store_is_explicit() -> Non
     runner = AgentSessionRunner(
         llm=llm,
         tools=ToolRegistry([finish]),
-        system_prompt="fold",
-        config=_fold_config(),
+        system_prompt="research",
+        config=_session_config(),
         subagent=SubAgentEngine(
             llm=ScriptedLLM([ProviderResponse(content=long)], context_window_tokens=128_000),
             tools=ToolRegistry([DeclaredReadOnlyShell()]),
@@ -3965,8 +3965,8 @@ def test_short_child_report_is_delivered_whole_and_no_store_is_explicit() -> Non
 
 
 def test_prompts_carry_the_todo_convention_and_per_launch_knobs() -> None:
-    fold = build_system_prompt(experiment_facts={})
-    for prompt, finish in ((fold, "finish_session"),):
+    parent = build_system_prompt(experiment_facts={})
+    for prompt, finish in ((parent, "finish_session"),):
         assert "`TODO.md`（用 `write_file`/`edit_file` 维护）" in prompt
         assert "每个任务一行，写明负责方、状态和一句话结果" in prompt
         assert "上下文被压缩后它是恢复计划的依据" in prompt
@@ -4079,8 +4079,8 @@ def test_agent_message_action_steers_running_and_queued_children() -> None:
     runner = AgentSessionRunner(
         llm=ScriptedLLM([]),
         tools=ToolRegistry(),
-        system_prompt="fold",
-        config=_fold_config(),
+        system_prompt="research",
+        config=_session_config(),
         subagent=SubAgentEngine(
             llm=child,
             tools=ToolRegistry([DeclaredReadOnlyShell()]),
@@ -4147,8 +4147,8 @@ def test_steer_the_child_never_read_is_reported_undelivered() -> None:
     runner = AgentSessionRunner(
         llm=ScriptedLLM([]),
         tools=ToolRegistry(),
-        system_prompt="fold",
-        config=_fold_config(),
+        system_prompt="research",
+        config=_session_config(),
         subagent=SubAgentEngine(
             llm=_GateLLM(started, release), tools=ToolRegistry([DeclaredReadOnlyShell()])
         ),
@@ -4259,8 +4259,8 @@ def test_children_compact_at_their_own_models_threshold_not_the_parents() -> Non
     runner = AgentSessionRunner(
         llm=SessionBudgetLLM(ScriptedLLM([]), budget=shared, role="main"),
         tools=ToolRegistry(),
-        system_prompt="fold",
-        config=_fold_config(),
+        system_prompt="research",
+        config=_session_config(),
         compactor=parent_compactor,
         subagent=engine,
         event_sink=lambda event, payload: events.append((event, payload)),

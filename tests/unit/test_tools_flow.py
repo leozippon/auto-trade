@@ -481,12 +481,12 @@ class ShellToolTest(unittest.TestCase):
 @unittest.skipUnless(RG_AVAILABLE, "ripgrep is required for the structured search tools")
 class StructuredSearchToolTest(unittest.TestCase):
     def _tools(self, root: Path):
-        paths, roots, workspace = build_sandbox(root)
+        paths, roots, _workspace = build_sandbox(root)
         return paths, roots, ToolRegistry([GrepTool(roots), GlobTool(roots), ReadFileTool(roots)])
 
     def test_grep_and_glob_are_structured_and_read_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            paths, roots, registry = self._tools(Path(tmp))
+            paths, _roots, registry = self._tools(Path(tmp))
             (paths.workspace / "alpha.txt").write_text("alpha\nbeta\n", encoding="utf-8")
             (paths.workspace / "foo-bar.txt").write_text("alpha\n", encoding="utf-8")
             (paths.workspace / ".hidden.txt").write_text("alpha\n", encoding="utf-8")

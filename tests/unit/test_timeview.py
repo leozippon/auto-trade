@@ -132,7 +132,7 @@ class TimeviewTest(unittest.TestCase):
     def test_frozen_base_is_part_zero_and_today_is_hidden(self):
         with tempfile.TemporaryDirectory() as tmp:
             tv = self._build(Path(tmp))
-            asof, version = tv.refresh(_when("2022-01-04 09:10:00"))
+            asof, _version = tv.refresh(_when("2022-01-04 09:10:00"))
             # Intraday-session day: daily view is just the frozen history; today's bar
             # waits for that night's conservative evening boundary (~03:05 next day).
             self.assertEqual(self._dates(asof, "daily"), {"20211231"})
