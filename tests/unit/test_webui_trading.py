@@ -23,6 +23,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from autotrade.paper.orders import order_sheet
+from autotrade.paper.pit import newest_replay_slot
 from autotrade.webui import trading
 from autotrade.webui.server import create_app
 from tests.unit.paper_book_fixture import engine_book, paper_root, write_book_record
@@ -70,9 +71,15 @@ def _execution(**overrides: object) -> dict[str, object]:
 
 
 def _csi300_slot(root: Path, name: str, pct_chg: dict[str, float]) -> None:
-    """One replay slot of the book's PIT cache carrying CSI 300 (and another index)."""
+    """One replay slot of the book's PIT cache carrying CSI 300 (and another index).
+
+    The builder leaves a permanent ``<slot>.lock`` beside every slot, so the
+    fixture writes one too: a slot picker that does not skip it reads the lock
+    file and finds no index at all.
+    """
     slot = root / "pit/gen/pit_views/replay/paper" / name
     slot.mkdir(parents=True, exist_ok=True)
+    slot.with_suffix(".lock").touch()
     rows = [
         {"dataset": "index_daily", "ts_code": "000300.SH", "trade_date": day, "pct_chg": value}
         for day, value in pct_chg.items()
@@ -180,6 +187,30 @@ def test_performance_keys_return_equity_cash_and_csi300_by_the_same_settled_days
     partial = trading.performance_payload(tmp_path, BOOK)
     assert partial["benchmark_days"] == 2 and partial["chart"]["benchmark"]["dates"] == ["20260104", *settled[:2]]
     assert partial["statistics"]["benchmark_return"] is None and partial["statistics"]["excess_return"] is None
+
+
+def test_the_newest_replay_slot_is_a_directory_never_its_lock_sibling(tmp_path: Path):
+    """The builder leaves a permanent ``<slot>.lock`` beside every slot, and
+    that name sorts after the slot it guards. Picking it up left every reader
+    of the slot — the CSI 300 benchmark — reading a file that is not a view."""
+    root = tmp_path / BOOK
+    for name in ("20260102_20260107_20251231T235959+0800", "20260102_20260108_20251231T235959+0800"):
+        _csi300_slot(root, name, {"20260105": 1.0})
+    slot = newest_replay_slot(root)
+    assert slot is not None and slot.is_dir()
+    assert slot.name == "20260102_20260108_20251231T235959+0800"
+    assert newest_replay_slot(tmp_path / "never_run") is None
+
+
+def test_a_slot_without_csi300_rows_reports_the_read_instead_of_no_data(tmp_path: Path):
+    """Zero rows out of a slot that was selected is a broken read: the panel
+    says which slot, rather than claiming the index has no data."""
+    root = engine_book(tmp_path, "20260105", "20260106")
+    _csi300_slot(root, "20260102_20260107_20251231T235959+0800", {})
+    payload = trading.performance_payload(tmp_path, BOOK)
+    assert payload["benchmark_days"] == 0 and payload["chart"]["benchmark"] is None
+    assert "20260102_20260107" in payload["benchmark_error"]
+    assert "沪深300" in payload["benchmark_error"]
 
 
 def test_one_settled_day_is_already_a_curve_from_the_starting_point(tmp_path: Path):

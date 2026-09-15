@@ -55,10 +55,17 @@ def newest_replay_slot(state_root: str | Path) -> Path | None:
     per run named ``<start>_<end>_<decision>``. A run keeps only the newest
     generation, and the slot ending latest spans the whole book window through
     that run's session: every settled day of the book.
+
+    A slot is a directory: the builder leaves a permanent ``<slot>.lock`` file
+    beside each one, and that sibling sorts after the slot it guards.
     """
 
     slots = Path(state_root).glob(f"{PIT_CACHE_NAME}/*/pit_views/replay/{PAPER_PHASE}/*_*_*")
-    return max(slots, key=lambda path: (path.name.split("_")[1], path.name), default=None)
+    return max(
+        (slot for slot in slots if slot.is_dir()),
+        key=lambda path: (path.name.split("_")[1], path.name),
+        default=None,
+    )
 
 
 class BookPITData:

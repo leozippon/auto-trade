@@ -299,9 +299,14 @@ def _benchmark(root: Path) -> tuple[dict[str, float], str | None]:
     if slot is None:
         return {}, None
     try:
-        return _slot_benchmark(slot), None
+        daily = _slot_benchmark(slot)
     except (OSError, ValueError, pa.ArrowException) as exc:  # a damaged cache file degrades the benchmark only
         return {}, f"{type(exc).__name__}: {exc}"
+    # A slot that carries no index row at all is a broken read, not an empty
+    # book: say so instead of leaving the panel to guess "no data".
+    if not daily:
+        return {}, f"replay slot {slot.name} carries no {BENCHMARK_LABEL} rows"
+    return daily, None
 
 
 def performance_payload(repo_root: Path, book: str, env: str = "paper") -> dict[str, object]:
