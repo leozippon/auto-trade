@@ -216,7 +216,7 @@ def test_benchmark_block_restates_the_replay_benchmark(tmp_path: Path):
         _daily(days),
         replay_dir=replay_dir,
         snapshot_dir=None,
-        mode="frozen_test",
+        mode="heldout",
     )
     block = benchmark_summary_block(analysis)
     assert block is not None

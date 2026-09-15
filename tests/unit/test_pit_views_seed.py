@@ -638,14 +638,14 @@ def test_replay_manifest_matches_requires_phase_label():
         "period_start": "20220101",
         "period_end": "20220331",
         "available_from": decision.isoformat(),
-        "label": "frozen_test",
+        "label": "heldout",
     }
     assert _replay_manifest_matches(
         manifest,
         start="20220101",
         end="20220331",
         decision=decision,
-        phase="frozen_test",
+        phase="heldout",
     )
     assert not _replay_manifest_matches(
         manifest,
