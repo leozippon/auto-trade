@@ -2,9 +2,6 @@
 /logs/
 /data/
 /results/
-/wandb/
-/artifacts/
-/reports/
 /.runtime/
 /experiments/
 CLAUDE.md
@@ -43,10 +40,9 @@ Thumbs.db
 # Vendored references (not part of the repo)
 /external_references/
 
-# Local agent workspace, evaluations, and worktrees
+# Local agent workspace and evaluations
 /.pi/
 /agent_capability_eval/
-/.worktrees/
 
 # Docs and logbook stay local
 /docs/

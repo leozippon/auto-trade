@@ -5,7 +5,6 @@
 /data
 /results
 /logs
-/wandb
 /external_references
 /experiments
 /.pi

@@ -9,14 +9,12 @@ data has landed and makes the pre-open decision for the target session
 (default: today, Asia/Shanghai), then writes the book's order sheet to
 ``<orders-dir>/<book>/<date>_orders.md`` and ``latest_orders.md`` and prints it.
 A book that fails writes its failure to the same two files and the run goes on
-to the next book; the run exits non-zero if any book failed. ``migrate`` moves
-a single-book state root into its book directory.
+to the next book; the run exits non-zero if any book failed.
 """
 
 from __future__ import annotations
 
 import argparse
-import re
 import subprocess
 import sys
 from datetime import datetime
@@ -35,13 +33,11 @@ from autotrade.environment.strategy import CN_TZ
 from autotrade.paper.book import create_book, load_book
 from autotrade.paper.books import (
     list_books,
-    migrate_single_root,
     run_books,
     validate_book_id,
 )
 from autotrade.paper.engine import DailyPaperEngine, PaperWriterBusy
 from autotrade.paper.orders import (
-    LATEST_NAME,
     render_failure,
     render_orders,
     write_orders,
@@ -52,7 +48,6 @@ from autotrade.pipelines.calendar import load_sse_trading_days
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_STATE_ROOT = Path("data/trading/paper")
 DEFAULT_ORDERS_DIR = Path("logs/paper")
-SHEET_NAME = re.compile(r"\d{8}_orders\.md")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -70,10 +65,6 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--book", help="Run this book only; default: every book.")
     run.add_argument("--state-root", type=Path, default=DEFAULT_STATE_ROOT)
     run.add_argument("--orders-dir", type=Path, default=DEFAULT_ORDERS_DIR)
-    migrate = commands.add_parser("migrate", help="Move a single-book state root into its book directory.")
-    migrate.add_argument("--book", help="Book id; default: the experiment id.")
-    migrate.add_argument("--state-root", type=Path, default=DEFAULT_STATE_ROOT)
-    migrate.add_argument("--orders-dir", type=Path, default=DEFAULT_ORDERS_DIR)
     return parser
 
 
@@ -174,22 +165,9 @@ def run(args: argparse.Namespace) -> int:
     return 1 if failures else 0
 
 
-def migrate(args: argparse.Namespace) -> int:
-    target = migrate_single_root(args.state_root, args.book)
-    sheets = args.orders_dir / target.name
-    sheets.mkdir(parents=True, exist_ok=True)
-    moved = 0
-    for path in sorted(args.orders_dir.glob("*.md")):
-        if SHEET_NAME.fullmatch(path.name) or path.name == LATEST_NAME:
-            path.rename(sheets / path.name)
-            moved += 1
-    print(f"moved book {target.name} to {target}; {moved} order sheets to {sheets}")
-    return 0
-
-
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    return {"init": init, "run": run, "migrate": migrate}[args.command](args)
+    return {"init": init, "run": run}[args.command](args)
 
 
 if __name__ == "__main__":
