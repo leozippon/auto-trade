@@ -426,6 +426,11 @@ main {
  margin-top: 0;
  margin-bottom: 0;
 }
+/* The title row sits one step further from the content than the content's own
+   groups sit from each other. */
+.card > h3 {
+ margin-bottom: var(--space-1);
+}
 .card.clickable {
  cursor: pointer;
  transition:
@@ -787,34 +792,43 @@ progress.progress.done::-moz-progress-bar {
 .bar-fill.bad {
  background: var(--bad);
 }
-/* The research budgets under a control row: one grid, the same rhythm the
-   cards use between groups, and room inside a row between its label, its bar
-   and its percentage. */
+/* The research budgets: one block per limit — name and used percentage on one
+   line, the bar across the block below — laid out as a grid with the same room
+   between blocks that the cards keep between groups. `mini` is the card's two
+   by two at a smaller scale, so a card and the detail page read alike. */
 .budget-bars {
  display: grid;
- grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
- gap: var(--space-2) var(--space-5);
+ grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+ gap: var(--space-4) var(--space-5);
  margin-top: var(--space-4);
 }
 .budget-bars.mini {
- grid-template-columns: 1fr;
+ grid-template-columns: repeat(2, minmax(0, 1fr));
+ gap: var(--space-2) var(--space-3);
  margin: 0;
 }
 .budget-row {
- display: flex;
- align-items: center;
- gap: var(--space-3);
+ display: grid;
+ grid-template-columns: 1fr auto;
+ align-items: baseline;
+ column-gap: var(--space-2);
+ row-gap: var(--space-1);
  font-size: 0.8rem;
  color: var(--muted);
  font-variant-numeric: tabular-nums;
 }
-.budget-label {
- flex: none;
- width: 5.2em;
+.budget-bars.mini .budget-row {
+ font-size: 0.75rem;
+ row-gap: 2px;
+}
+.budget-row > .bar {
+ grid-column: 1 / -1;
+ width: 100%;
+}
+.budget-bars.mini .budget-row > .bar {
+ height: 0.3rem;
 }
 .budget-pct {
- flex: none;
- width: 2.6em;
  text-align: right;
  color: var(--text);
 }
@@ -2944,14 +2958,11 @@ details.issue-evidence > summary:hover {
  }
 }
 @media (max-width: 720px) {
- /* Two budgets per row rather than one long column; a row's bar shrinks to
-    its own minimum before the label or the percentage gives way. */
- .budget-bars {
+ /* Two budget blocks per row on a phone, cards included. */
+ .budget-bars,
+ .budget-bars.mini {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   column-gap: var(--space-3);
- }
- .budget-bars.mini {
-  grid-template-columns: 1fr;
  }
  .step-time {
   display: none;

@@ -22,11 +22,15 @@ import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
 
+from autotrade.paper.book import SOURCE_HISTORY_NAME, copy_source_history
 from autotrade.paper.orders import order_sheet
 from autotrade.paper.pit import newest_replay_slot
+from autotrade.pipelines.ledger import ExperimentLedger, forward_record
 from autotrade.webui import trading
+from autotrade.webui.equity import result_equity_payload
 from autotrade.webui.server import create_app
 from tests.unit.paper_book_fixture import engine_book, paper_root, write_book_record
+from tests.unit.webui_research_arm import REPLAY, build_arm
 
 BOOK = "exp"
 # The panels one book's page reads, each under /api/trading/<env>/books/<book>/.
@@ -187,6 +191,52 @@ def test_performance_keys_return_equity_cash_and_csi300_by_the_same_settled_days
     partial = trading.performance_payload(tmp_path, BOOK)
     assert partial["benchmark_days"] == 2 and partial["chart"]["benchmark"]["dates"] == ["20260104", *settled[:2]]
     assert partial["statistics"]["benchmark_return"] is None and partial["statistics"]["excess_return"] is None
+
+
+def _forward_result(experiment: Path) -> str:
+    record = forward_record(ExperimentLedger(experiment / "ledgers/experiment_ledger.jsonl").read())
+    return Path(str(record["result_ref"])).parent.name
+
+
+def test_a_book_carries_the_source_curve_the_console_projects_for_that_result(tmp_path: Path):
+    """The book's page continues the artifact's out-of-sample replay, and the
+    experiment is archived out of experiments/ once it retires. The curve is
+    therefore copied into the book when the book is created — projected by the
+    same code the console projects that very result with."""
+    experiments = tmp_path / "experiments"
+    arm = build_arm(experiments, "exp", "graduated")
+    root = engine_book(tmp_path, "20260105", "20260106")
+    copy_source_history(root, arm)
+    payload = trading.performance_payload(tmp_path, BOOK)
+    source, console = payload["source"], result_equity_payload(experiments, "exp", _forward_result(arm))
+    assert payload["source_error"] is None
+    assert source["experiment_id"] == "exp" and source["heldout_start"] == REPLAY["heldout_start"]
+    assert source["series"][0]["dates"] == console["series"][0]["dates"]
+    assert source["series"][0]["cum"] == console["series"][0]["cum"]
+    assert source["benchmark"]["final"] == console["benchmark"]["final"]
+    # The overview card draws the same chained line the page does.
+    assert trading.books_payload(tmp_path)["books"][0]["source"] == source
+    # A book created before the copy existed has no history, which is not an
+    # error: the page says so in one label instead of a red banner.
+    (root / SOURCE_HISTORY_NAME).unlink()
+    plain = trading.performance_payload(tmp_path, BOOK)
+    assert plain["source"] is None and plain["source_error"] is None
+    # A damaged or newer copy is reported rather than drawn.
+    (root / SOURCE_HISTORY_NAME).write_text('{"schema_version": 99}', encoding="utf-8")
+    assert trading.performance_payload(tmp_path, BOOK)["source_error"] == (
+        f"unsupported {SOURCE_HISTORY_NAME} schema: 99"
+    )
+
+
+def test_an_arm_without_a_forward_record_has_no_history_to_copy(tmp_path: Path):
+    """The forward record names the replay that carries the verdict's slices;
+    without it there is nothing to copy, and init must say so rather than
+    leaving a book that silently has no history."""
+    sealed = build_arm(tmp_path / "experiments", "sealed_arm", "sealed")
+    root = engine_book(tmp_path, "20260105")
+    with pytest.raises(ValueError, match="no forward verdict record"):
+        copy_source_history(root, sealed)
+    assert not (root / SOURCE_HISTORY_NAME).exists()
 
 
 def test_the_newest_replay_slot_is_a_directory_never_its_lock_sibling(tmp_path: Path):
@@ -654,19 +704,27 @@ def test_prices_keep_their_cents_and_only_large_amounts_abbreviate():
 
 def test_the_book_curve_continues_its_source_experiment_on_one_date_axis():
     """Equity and cash were once two charts with their own widths, pads and date
-    ticks, so one trading day sat at different x positions. The panel now feeds
-    the book's days to the research return chart, whose panes share one x-scale,
-    and chains the source experiment's forward/Held-out replay in front of them
-    through the same chainEquity the research pages use — degrading to the book's
-    own segment, with the reason, when that experiment is gone."""
+    ticks, so one trading day sat at different x positions. The book's days now
+    feed the research return chart, whose panes share one x-scale, with the
+    source experiment's out-of-sample replay — the book's own copy of it —
+    chained in front through the same chainEquity the research pages use. The
+    card's miniature and the page's chart go through that one builder, so the
+    two cannot drift apart."""
     script = _app_js()
-    assert "paperEquityHost(payload.chart" in _js_top_level(script, "function paperEquityPanel(")
-    host = _js_top_level(script, "function paperEquityHost(")
-    for piece in ("chainEquity(", "equityChart(", "Paper 起始", "只画 Paper 段", "chart.account"):
-        assert piece in host, piece
+    chart = _js_top_level(script, "function bookCurveChart(")
+    for piece in ("chainEquity(", "equityChart(", "Paper 起始", "source.heldout_start", "chart.account"):
+        assert piece in chart, piece
+    for name in ("paperEquityPanel", "bookCard"):
+        assert "bookCurveChart(" in _js_top_level(script, f"function {name}("), name
+    # The page reads the curve off the book's own payload; nothing on this page
+    # asks experiments/ for it.
+    assert "payload.source" in _js_top_level(script, "function paperEquityPanel(")
     trading_section = script.split("let tradingView = null;", 1)[1].split("function renderQmtPage(", 1)[0]
     assert "singleSeriesBarChart" not in trading_section
+    assert "/api/experiments/" not in trading_section
     assert "payload.account" in _js_top_level(script, "function equityChart(")
+    # A book with no copied history says so in one short label.
+    assert "无源实验历史" in _js_top_level(script, "function paperEquityPanel(")
 
 
 def test_the_page_draws_a_figure_only_where_the_book_measured_one():

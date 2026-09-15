@@ -2,8 +2,10 @@
 """ADM-Cube Paper books: create each once, then decide one session per run.
 
 Books live side by side under the state root, one directory per book id.
-``init`` pins one experiment's Paper candidate and its research environment
-into a new book (id: the experiment id, or ``--book``). ``run`` goes through
+``init`` pins one experiment's Paper candidate, its research environment and
+the artifact's out-of-sample curve into a new book (id: the experiment id, or
+``--book``); ``source-history`` backfills that curve into a book created before
+init copied it. ``run`` goes through
 every book (or ``--book`` alone) one at a time: it settles each session whose
 data has landed and makes the pre-open decision for the target session
 (default: today, Asia/Shanghai), then writes the book's order sheet to
@@ -30,7 +32,13 @@ add_repo_src(__file__)
 
 from autotrade.environment.llm import build_model_gateway
 from autotrade.environment.strategy import CN_TZ
-from autotrade.paper.book import create_book, load_book
+from autotrade.paper.book import (
+    SOURCE_HISTORY_NAME,
+    copy_source_history,
+    create_book,
+    load_book,
+    write_source_history,
+)
 from autotrade.paper.books import (
     list_books,
     run_books,
@@ -60,6 +68,22 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--note", default="", help="One-line status shown at the top of every order sheet.")
     init.add_argument("--book", help="Book id; default: the experiment id.")
     init.add_argument("--state-root", type=Path, default=DEFAULT_STATE_ROOT)
+    history = commands.add_parser(
+        "source-history",
+        help="Copy an out-of-sample replay curve into a book created before init copied one.",
+    )
+    history.add_argument("--book", required=True, help="Book id under the state root.")
+    picked = history.add_mutually_exclusive_group(required=True)
+    picked.add_argument(
+        "--experiment",
+        help="Source experiment directory, wherever it now lives; its forward record names the replay.",
+    )
+    picked.add_argument(
+        "--result",
+        help="Replay result directory, for a source experiment whose ledger predates the forward record.",
+    )
+    history.add_argument("--heldout-start", help="YYYYMMDD the Held-out slice of --result opens on, if any.")
+    history.add_argument("--state-root", type=Path, default=DEFAULT_STATE_ROOT)
     run = commands.add_parser("run", help="Settle landed sessions and decide one session, book by book.")
     run.add_argument("--trade-date", help="YYYYMMDD session; default: today in Asia/Shanghai.")
     run.add_argument("--book", help="Run this book only; default: every book.")
@@ -99,6 +123,36 @@ def init(args: argparse.Namespace) -> int:
         f"commission {book.profile.commission_bps} bps, slippage {book.profile.slippage_bps} bps, "
         f"fit timeout {book.sandbox.limits.fit_timeout_seconds:g}s, image {book.sandbox.image}"
     )
+    return 0
+
+
+def source_history(args: argparse.Namespace) -> int:
+    """Backfill one book created before init copied the curve.
+
+    A current experiment names its own replay through the forward record; an
+    arm retired under an older ledger has no such record, so the operator names
+    the replay result directory instead.
+    """
+
+    root = args.state_root / validate_book_id(args.book)
+    book = load_book(root)
+    if (root / SOURCE_HISTORY_NAME).exists():
+        raise FileExistsError(f"{book.root.name} already has {SOURCE_HISTORY_NAME}; a book copies it once")
+    if args.experiment:
+        experiment = Path(args.experiment).resolve(strict=True)
+        if experiment.name != book.experiment_id:
+            raise ValueError(
+                f"{experiment} is not the source of {book.root.name}: the book names {book.experiment_id}"
+            )
+        written = copy_source_history(root, experiment)
+    else:
+        written = write_source_history(
+            root,
+            experiment_id=book.experiment_id,
+            result_file=Path(args.result).resolve(strict=True),
+            heldout_start=args.heldout_start,
+        )
+    print(f"wrote {written}")
     return 0
 
 
@@ -167,7 +221,7 @@ def run(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    return {"init": init, "run": run}[args.command](args)
+    return {"init": init, "run": run, "source-history": source_history}[args.command](args)
 
 
 if __name__ == "__main__":

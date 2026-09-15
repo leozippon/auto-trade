@@ -223,7 +223,9 @@ def test_paper_bundle_serves_the_key_names_the_console_reads(tmp_path: Path):
         client.get("/api/trading/paper/books/exp/book").json().keys()
     )
     performance = client.get("/api/trading/paper/books/exp/performance").json()
-    assert {"state", "error", "chart", "statistics", "min_days", "benchmark_error"} <= performance.keys()
+    assert {
+        "state", "error", "chart", "statistics", "min_days", "benchmark_error", "source", "source_error",
+    } <= performance.keys()
     assert "snapshot" in client.get("/api/trading/paper/books/exp/snapshot").json()
     status = client.get("/api/trading/paper/books/exp/status").json()
     for key in ("book_id", "state", "error", "age_seconds", "stale_threshold_seconds"):
@@ -233,7 +235,7 @@ def test_paper_bundle_serves_the_key_names_the_console_reads(tmp_path: Path):
     for key in (
         "book_id", "experiment_id", "artifact_id", "candidate_source", "start_date",
         "initial_cash", "equity", "cash", "position_count", "total_return", "excess_return",
-        "curve", "signal_date", "order_count", "state", "error",
+        "curve", "source", "signal_date", "order_count", "state", "error",
     ):
         assert key in row, key
 

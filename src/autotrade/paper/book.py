@@ -5,8 +5,11 @@ afterwards. Creation copies the frozen artifact into the book and resolves the
 experiment's own parameters with the pipeline's resolver, so the book trades
 the snapshot configuration, Broker profile, schedule and strategy sandbox the
 research replays used; everything is then read from ``book.json``, never from
-the experiment again, and the experiment may be archived. A different capital,
-artifact or environment is a new book in a new state root.
+the experiment again, and the experiment may be archived. Creation also copies
+the artifact's out-of-sample curve (the forward and Held-out replay its verdict
+named) into ``source_history.json``, so the book keeps the history its own days
+continue. A different capital, artifact or environment is a new book in a new
+state root.
 """
 
 from __future__ import annotations
@@ -21,10 +24,11 @@ from pathlib import Path
 from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.data.snapshot import SnapshotConfig
 from autotrade.environment.nl import NLConfig
+from autotrade.environment.replay.curve import result_curve
 from autotrade.environment.sandbox import SandboxConfig, SandboxLimits
 from autotrade.environment.strategy import CN_TZ, StrategySchedule
 from autotrade.environment.strategy_loader import validate_strategy_package
-from autotrade.pipelines.ledger import ExperimentLedger, paper_candidate
+from autotrade.pipelines.ledger import ExperimentLedger, forward_record, paper_candidate
 from autotrade.pipelines.worker import (
     _strategy_sandbox_from_spec,
     resolve_worker_options,
@@ -35,6 +39,11 @@ from .storage import read_json, write_json_atomic
 BOOK_NAME = "book.json"
 BOOK_SCHEMA_VERSION = 1
 STRATEGY_COPY_NAME = "strategy"
+# The out-of-sample history the book continues: the forward and Held-out
+# replay of the very artifact it trades, copied out of the experiment at
+# creation so the book keeps it after the experiment is archived.
+SOURCE_HISTORY_NAME = "source_history.json"
+SOURCE_HISTORY_SCHEMA_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -157,7 +166,80 @@ def create_book(
         "fundamental_events_status": str(options.fundamental_events_status),
     }
     write_json_atomic(root / BOOK_NAME, record)
+    copy_source_history(root, experiment)
     return load_book(root)
+
+
+def write_source_history(
+    state_root: str | Path,
+    *,
+    experiment_id: str,
+    result_file: str | Path,
+    heldout_start: str | None = None,
+) -> Path:
+    """Copy one out-of-sample replay curve into the book.
+
+    The curve is projected exactly as the console projects a result of that
+    experiment, so the book's copy and the console's read the same numbers.
+    Copying frees the book from ``experiments/``: its page keeps drawing the
+    artifact's history after the experiment is archived.
+    """
+
+    root = Path(state_root).resolve(strict=True)
+    path = Path(result_file).resolve(strict=True)
+    if path.is_dir():
+        path = path / "result.json"
+    if not path.is_file():
+        raise FileNotFoundError(f"replay result is missing: {path}")
+    curve = result_curve(path)
+    if not curve["series"]:
+        raise ValueError(f"replay result has no daily returns: {path}")
+    target = root / SOURCE_HISTORY_NAME
+    write_json_atomic(
+        target,
+        {
+            "schema_version": SOURCE_HISTORY_SCHEMA_VERSION,
+            "copied_at": datetime.now(CN_TZ).isoformat(),
+            "experiment_id": experiment_id,
+            "result": path.parent.name,
+            # The session the Held-out slice opens on, drawn as a divider; a
+            # replay that is Held-out end to end has none.
+            "heldout_start": heldout_start,
+            "series": curve["series"],
+            "benchmark": curve["benchmark"],
+        },
+    )
+    return target
+
+
+def copy_source_history(state_root: str | Path, experiment_dir: str | Path) -> Path:
+    """The book's copy of its source experiment's out-of-sample curve.
+
+    The forward record names the one replay carrying the arm's forward and
+    Held-out slices — the curve the console draws for that verdict — so an arm
+    without one has no history to copy and says so.
+    """
+
+    experiment = Path(experiment_dir).resolve(strict=True)
+    record = forward_record(ExperimentLedger(experiment / "ledgers" / "experiment_ledger.jsonl").read())
+    if record is None:
+        raise ValueError(
+            f"{experiment.name} has no forward verdict record: there is no out-of-sample history to copy"
+        )
+    reference = record.get("result_ref")
+    if not isinstance(reference, str) or not reference:
+        raise ValueError(f"{experiment.name}'s forward record names no replay result")
+    result_file = (experiment / reference).resolve()
+    if not result_file.is_relative_to(experiment):
+        raise ValueError(f"{experiment.name}'s forward result is outside the experiment: {result_file}")
+    replay = record.get("replay") if isinstance(record.get("replay"), dict) else {}
+    heldout_start = replay.get("heldout_start")
+    return write_source_history(
+        state_root,
+        experiment_id=experiment.name,
+        result_file=result_file,
+        heldout_start=str(heldout_start) if heldout_start else None,
+    )
 
 
 def load_book(state_root: str | Path) -> Book:
@@ -212,4 +294,12 @@ def _tree_fingerprint(root: Path, names: tuple[str, ...]) -> str:
     return digest.hexdigest()
 
 
-__all__ = ["BOOK_NAME", "Book", "create_book", "load_book"]
+__all__ = [
+    "BOOK_NAME",
+    "SOURCE_HISTORY_NAME",
+    "Book",
+    "copy_source_history",
+    "create_book",
+    "load_book",
+    "write_source_history",
+]

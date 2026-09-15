@@ -6,8 +6,9 @@ page reads it through six projections, each from the book's own files:
 ``book_status`` (the status ladder), ``book_payload`` (identity, ``book.json``),
 ``signal_payload`` (the latest decision's order sheet), ``history_payload``
 (every earlier day's order sheet and fills), ``performance_payload`` (return against
-CSI 300, equity and cash tracks, statistics) and ``snapshot_payload`` (account
-and positions). ``health_payload`` is the external probe over every book.
+CSI 300, equity and cash tracks, statistics, and the source experiment's
+out-of-sample curve the book copied at creation) and ``snapshot_payload``
+(account and positions). ``health_payload`` is the external probe over every book.
 
 Every function is total: degradation is a structured payload state
 (absent / no_snapshot / unreadable / export_error / stale / ok), never a 500.
@@ -33,6 +34,7 @@ from pathlib import Path
 
 import pyarrow as pa
 
+from autotrade.environment.replay.curve import curve_entry
 from autotrade.environment.replay.stats import ReplayResult, compute_return_stats
 from autotrade.environment.replay.style import (
     BENCHMARK_LABEL,
@@ -40,14 +42,16 @@ from autotrade.environment.replay.style import (
     daily_returns_from_curve,
 )
 from autotrade.environment.strategy import CN_TZ
-from autotrade.paper.book import BOOK_NAME
+from autotrade.paper.book import (
+    BOOK_NAME,
+    SOURCE_HISTORY_NAME,
+    SOURCE_HISTORY_SCHEMA_VERSION,
+)
 from autotrade.paper.books import BOOK_ID_PATTERN, list_books
 from autotrade.paper.engine import PAPER_STATE_NAME, SNAPSHOT_NAME
 from autotrade.paper.orders import order_sheet
 from autotrade.paper.pit import newest_replay_slot
 from autotrade.paper.storage import read_jsonl
-
-from .equity import curve_entry
 
 TRADING_ENVS = ("paper",)
 # A snapshot older than this is served but flagged: the account data is the
@@ -309,9 +313,51 @@ def _benchmark(root: Path) -> tuple[dict[str, float], str | None]:
     return daily, None
 
 
+def _curve_entry(value: object) -> dict[str, object] | None:
+    """One compounded curve of the book's source history, whitelisted."""
+    row = _mapping(value)
+    dates = [day for day in row.get("dates") or () if isinstance(day, str) and _valid_date(day)]
+    cumulative = [_number(item) for item in row.get("cum") or ()]
+    drawdown = [_number(item) for item in row.get("drawdown") or ()]
+    if not dates or len(cumulative) != len(dates) or len(drawdown) != len(dates):
+        return None
+    if any(item is None for item in (*cumulative, *drawdown)):
+        return None
+    return {
+        "key": _text(row.get("key")),
+        "label": _text(row.get("label")),
+        "dates": dates,
+        "cum": cumulative,
+        "drawdown": drawdown,
+        "final": _number(row.get("final")),
+    }
+
+
+def _source_history(root: Path) -> tuple[dict[str, object] | None, str | None]:
+    """The out-of-sample curve the book copied out of its source experiment at
+    creation. Absent for a book created before the copy existed, which is a
+    missing history and not an error; anything else is reported."""
+    record, error = _read_json(root / SOURCE_HISTORY_NAME)
+    if record is None:
+        return None, error
+    if record.get("schema_version") != SOURCE_HISTORY_SCHEMA_VERSION:
+        return None, f"unsupported {SOURCE_HISTORY_NAME} schema: {record.get('schema_version')}"
+    series = [entry for value in record.get("series") or () if (entry := _curve_entry(value))]
+    if not series:
+        return None, f"{SOURCE_HISTORY_NAME} carries no daily returns"
+    return {
+        "experiment_id": _text(record.get("experiment_id")),
+        "result": _text(record.get("result")),
+        "heldout_start": _text(record.get("heldout_start")),
+        "series": series,
+        "benchmark": _curve_entry(record.get("benchmark")),
+    }, None
+
+
 def performance_payload(repo_root: Path, book: str, env: str = "paper") -> dict[str, object]:
     """The book's return against CSI 300 over the same settled days, its
-    end-of-day equity and cash on those days, and the replay statistics."""
+    end-of-day equity and cash on those days, the replay statistics, and the
+    source experiment's out-of-sample curve the book's own days continue."""
     root = book_dir(repo_root, book, env)
     record, error = _read_json(root / BOOK_NAME)
     initial = _number(_mapping(_mapping(record).get("profile")).get("initial_cash"))
@@ -325,9 +371,13 @@ def performance_payload(repo_root: Path, book: str, env: str = "paper") -> dict[
         and (equity := _number(row.get("equity"))) is not None
     ]
     base = {"env": env, "min_days": MIN_STATISTICS_DAYS}
+    source, source_error = _source_history(root)
     if error or initial is None or initial <= 0 or not curve:
         state = "unreadable" if error else "absent"
-        return {**base, "state": state, "error": error, "chart": None, "statistics": None, "benchmark_error": None}
+        return {
+            **base, "state": state, "error": error, "chart": None, "statistics": None,
+            "benchmark_error": None, "source": source, "source_error": source_error,
+        }
     returns = daily_returns_from_curve(curve)
     daily, benchmark_error = _benchmark(root)
     benchmark_rows = [(day, daily[day]) for day, _value in returns if day in daily]
@@ -363,6 +413,10 @@ def performance_payload(repo_root: Path, book: str, env: str = "paper") -> dict[
         },
         "benchmark_days": len(benchmark_rows),
         "benchmark_error": benchmark_error,
+        # The artifact's forward and Held-out replay, copied into the book when
+        # it was created: the history its own days continue.
+        "source": source,
+        "source_error": source_error,
         "statistics": {
             "days": len(curve),
             "total_return": total_return,
@@ -535,6 +589,8 @@ def books_payload(repo_root: Path, env: str = "paper") -> dict[str, object]:
             # The card's miniature of the book's own return curve, the same
             # series its performance panel draws and absent on the same rule.
             "curve": {"series": chart["series"], "benchmark": chart["benchmark"]} if chart else None,
+            # The card draws the same chained line the page does.
+            "source": performance["source"],
             "signal_date": signal["trade_date"] if signal else None,
             "order_count": len(signal["orders"]) if signal else None,
             "state": status["state"],

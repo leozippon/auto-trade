@@ -1179,8 +1179,10 @@ const BUDGET_ROWS = [
   ["null_controls", "空对照", String],
 ];
 
-/* The research budget as one labelled bar per limit; `mini` keeps only the
-   most consumed one. Null while nothing was spent or no limit is known. */
+/* The research budget as one block per limit — its name and used percentage on
+   one line, its bar across the block underneath — so four budgets read as four
+   figures instead of one run-on line. `mini` is the same block at card scale,
+   two by two. Null while nothing was spent or no limit is known. */
 function budgetBars(used, total, { mini = false } = {}) {
   if (!used || !total) return null;
   const rows = BUDGET_ROWS.map(([key, label, fmt]) => {
@@ -1190,17 +1192,16 @@ function budgetBars(used, total, { mini = false } = {}) {
     return { key, label, ratio: spent / limit, text: `${fmt(spent)} / ${fmt(limit)}` };
   }).filter(Boolean);
   if (!rows.length) return null;
-  const shown = mini ? [rows.reduce((top, row) => (row.ratio > top.ratio ? row : top))] : rows;
   return el(
     "div",
     { class: `budget-bars${mini ? " mini" : ""}` },
-    ...shown.map((row) =>
+    ...rows.map((row) =>
       el(
         "div",
         { class: "budget-row", title: `${row.label} ${row.text}` },
         el("span", { class: "budget-label" }, row.label),
-        ratioBar(row.ratio),
         el("span", { class: `budget-pct ${ratioClass(row.ratio)}`.trim() }, `${Math.round(row.ratio * 100)}%`),
+        ratioBar(row.ratio),
       ),
     ),
   );
@@ -6556,7 +6557,7 @@ function bookCard(row) {
   );
   if (tiles.length) card.append(statTilesRow(tiles));
   if (row.curve)
-    card.append(equityChart(row.curve, { width: 420, height: 130, mini: true }));
+    card.append(bookCurveChart(row.curve, row.source, { width: 420, height: 130, mini: true }));
   return card;
 }
 
@@ -6608,7 +6609,7 @@ function renderBookBundle(bundle) {
         paperHead(status, bundle.identity),
         ...paperBanners(status),
         paperSignalPanel(bundle.signal, bundle.identity),
-        paperEquityPanel(bundle.performance, bundle.identity),
+        paperEquityPanel(bundle.performance),
         paperPositionsPanel(bundle.snapshot),
         paperHistoryPanel(bundle.history),
       ),
@@ -6951,91 +6952,40 @@ function paperHistoryPanel(payload) {
   return panel;
 }
 
-/* The source experiment's out-of-sample replay, cached per experiment: the
-   forward and Held-out slices of the very artifact this book trades, named by
-   that experiment's ledger. Null once the ledger names no replay. */
-const BOOK_SOURCE_CACHE = new Map(); // experiment_id -> promise
-
-function bookSource(experimentId) {
-  if (!BOOK_SOURCE_CACHE.has(experimentId))
-    BOOK_SOURCE_CACHE.set(
-      experimentId,
-      api(`/api/experiments/${encodeURIComponent(experimentId)}`)
-        .then(async (detail) => {
-          const forward = detail.forward || {};
-          if (!forward.result) return null;
-          return {
-            equity: await resultEquity(experimentId, forward.result),
-            replay: forward.replay || {},
-          };
-        })
-        .catch((error) => {
-          BOOK_SOURCE_CACHE.delete(experimentId);
-          throw error;
-        }),
-    );
-  return BOOK_SOURCE_CACHE.get(experimentId);
-}
-
-/* One line from the source experiment into the book: the frozen artifact's
-   forward and Held-out replay under a band that says it is the experiment's,
-   the Held-out divider where that slice begins, then a 「Paper 起始」 divider
-   and the book's own days compounded on. A retired experiment is moved out of
-   experiments/ and its curve is gone with it; the book's own segment is then
-   all there is, and the label says why. */
-function paperEquityHost(chart, identity) {
-  const opts = { width: 980, height: 240, ddH: 80 };
-  const host = el("div", {}, el("div", { class: "hint" }, "收益曲线加载中…"));
+/* The book's curve: the out-of-sample replay of the artifact it trades, copied
+   into the book when the book was created, chained into the book's own days
+   over a 「Paper 起始」 divider — a band says which half belongs to the source
+   experiment, and a divider marks where its Held-out slice opens when the
+   replay has one. The card's miniature and the page's chart draw this one
+   payload; a book with no copied history draws its own segment alone. */
+function bookCurveChart(chart, source, opts) {
+  const line = ((source || {}).series || [])[0];
+  if (!line || !(line.dates || []).length) return equityChart(chart, opts);
+  const joined = chainEquity(source, chart);
   const paperStart = ((chart.series || [])[0] || {}).dates || [];
-  const alone = (note) =>
-    host.replaceChildren(
-      ...[note ? el("div", { class: "meta-line" }, note) : null, equityChart(chart, opts)].filter(
-        Boolean,
-      ),
-    );
-  const chained = (source) => {
-    const line = (source.equity.series || [])[0] || { dates: [] };
-    if (!line.dates.length) return alone("只画 Paper 段：源实验的回放没有日度收益");
-    const joined = chainEquity(source.equity, chart);
-    host.replaceChildren(
-      equityChart(
+  return equityChart(
+    {
+      // One strategy across two regimes: the legend says so, and the account
+      // pane stays the book's own (the experiment has no account).
+      series: joined.series.map((entry) => ({ ...entry, label: "源实验 → 账簿" })),
+      benchmark: joined.benchmark,
+      account: chart.account,
+    },
+    {
+      ...opts,
+      bands: [
         {
-          // One strategy across two regimes: the legend says so, and the
-          // account pane stays the book's own (the experiment has no account).
-          series: joined.series.map((entry) => ({ ...entry, label: "源实验 → 账簿" })),
-          benchmark: joined.benchmark,
-          account: chart.account,
+          from: line.dates[0],
+          to: line.dates[line.dates.length - 1],
+          label: "源实验 · 样本外回放",
         },
-        {
-          ...opts,
-          bands: [
-            {
-              from: line.dates[0],
-              to: line.dates[line.dates.length - 1],
-              label: "源实验 · 前推与 Held-out",
-            },
-          ],
-          markers: [
-            source.replay.heldout_start
-              ? { date: source.replay.heldout_start, label: "Held-out" }
-              : null,
-            paperStart.length ? { date: paperStart[0], label: "Paper 起始" } : null,
-          ].filter(Boolean),
-        },
-      ),
-    );
-  };
-  const experimentId = (identity.book || {}).experiment_id;
-  if (!experimentId) {
-    alone(null);
-    return host;
-  }
-  bookSource(experimentId)
-    .then((source) =>
-      source ? chained(source) : alone(`只画 Paper 段：源实验 ${experimentId} 没有已落账的前推回放`),
-    )
-    .catch((error) => alone(`只画 Paper 段：源实验的前推曲线读不到（${error.message}）`));
-  return host;
+      ],
+      markers: [
+        source.heldout_start ? { date: source.heldout_start, label: "Held-out" } : null,
+        paperStart.length ? { date: paperStart[0], label: "Paper 起始" } : null,
+      ].filter(Boolean),
+    },
+  );
 }
 
 /* The book's return: the tiles it has measured, one chart continuing the
@@ -7043,7 +6993,7 @@ function paperEquityHost(chart, identity) {
    the trading cost. The statistics the day count still gates, and a CSI 300
    that does not cover the book, say so in one caption instead of leaving a
    dash behind. */
-function paperEquityPanel(payload, identity) {
+function paperEquityPanel(payload) {
   const stats = payload.statistics;
   const head = panelHead(
     "收益曲线",
@@ -7069,6 +7019,11 @@ function paperEquityPanel(payload, identity) {
         : payload.benchmark_days < stats.days
           ? `沪深300 覆盖 ${payload.benchmark_days}/${stats.days} 日`
           : null,
+    payload.source_error
+      ? `源实验历史读取失败：${payload.source_error}`
+      : payload.source
+        ? null
+        : "无源实验历史",
   ].filter(Boolean);
   const cost = [
     stats.fees === null ? null : `佣金 ${fmtAmount(stats.fees)}`,
@@ -7096,7 +7051,11 @@ function paperEquityPanel(payload, identity) {
     tiles.length ? statTilesRow(tiles) : null,
     notes.length ? el("div", { class: "meta-line section-gap" }, notes.join(" · ")) : null,
     payload.chart
-      ? el("div", { class: "section-gap" }, paperEquityHost(payload.chart, identity))
+      ? el(
+          "div",
+          { class: "section-gap" },
+          bookCurveChart(payload.chart, payload.source, { width: 980, height: 240, ddH: 80 }),
+        )
       : null,
     el("div", { class: "meta-line section-gap" }, cost.join(" · ")),
   );
