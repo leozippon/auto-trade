@@ -528,10 +528,10 @@ def books_payload(repo_root: Path, env: str = "paper") -> dict[str, object]:
             "start_date": identity["start_date"],
             "initial_cash": (identity["book"] or {}).get("initial_cash"),
             "equity": account.get("equity"),
+            "cash": account.get("cash"),
             "position_count": len(positions) if positions is not None else None,
             "total_return": statistics.get("total_return"),
             "excess_return": statistics.get("excess_return"),
-            "max_drawdown": statistics.get("max_drawdown"),
             # The card's miniature of the book's own return curve, the same
             # series its performance panel draws and absent on the same rule.
             "curve": {"series": chart["series"], "benchmark": chart["benchmark"]} if chart else None,

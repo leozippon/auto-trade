@@ -406,7 +406,7 @@ def test_static_console_keeps_macro_style_surfaces_without_closed_capabilities(
     for label in ("系统提示词预览", "模拟交易"):
         assert label in script
     for label in (
-        "研究流程",
+        "实验流程",
         "Step 产物树",
         "冻结产物",
         "Paper 建簿",

@@ -413,10 +413,18 @@ main {
  grid-template-columns: repeat(auto-fill, minmax(min(27rem, 100%), 1fr));
  gap: var(--space-4);
 }
+/* One vertical rhythm for every card, research arm and Paper book alike: the
+   flex gap is the only spacing between groups (title row, stepper, activity,
+   budget bar, tiles, chart), so a group that carries its own margin would read
+   as a different card. Inside a group the scale steps down one. */
 .card {
  display: flex;
  flex-direction: column;
- gap: var(--space-2);
+ gap: var(--space-4);
+}
+.card > * {
+ margin-top: 0;
+ margin-bottom: 0;
 }
 .card.clickable {
  cursor: pointer;
@@ -511,6 +519,11 @@ progress.progress.done::-moz-progress-bar {
 #trading-page .tiles {
  grid-template-columns: repeat(auto-fill, minmax(10rem, 1fr));
 }
+/* A book card's six figures are one block, three across and two down: the
+   card is too narrow for the panel's tile measure. */
+#trading-page .card .tiles {
+ grid-template-columns: repeat(3, minmax(0, 1fr));
+}
 .tile-label {
  font-size: 0.8rem;
  color: var(--muted);
@@ -526,6 +539,35 @@ progress.progress.done::-moz-progress-bar {
 }
 .neg {
  color: var(--loss);
+}
+/* An order's direction as a badge — the first thing an operator reads off the
+   sheet — in the same inks as every signed figure. */
+.order-side {
+ display: inline-block;
+ border-radius: 999px;
+ padding: 0.05rem 0.55rem;
+ font-size: 0.82rem;
+ font-weight: 650;
+ white-space: nowrap;
+}
+.order-side.pos {
+ background: var(--bad-soft);
+ color: var(--gain);
+}
+.order-side.neg {
+ background: var(--ok-soft);
+ color: var(--loss);
+}
+/* The clipboard fallback's textarea: selectable, never seen. */
+.copy-fallback {
+ position: fixed;
+ top: 0;
+ left: 0;
+ width: 1px;
+ height: 1px;
+ padding: 0;
+ border: 0;
+ opacity: 0;
 }
 
 /* ---- graphical primitives ----
@@ -599,7 +641,6 @@ progress.progress.done::-moz-progress-bar {
  gap: 0;
  font-size: 0.78rem;
  color: var(--muted);
- margin: var(--space-1) 0;
 }
 .stepper.mini .stepper-node {
  position: relative;
@@ -746,11 +787,14 @@ progress.progress.done::-moz-progress-bar {
 .bar-fill.bad {
  background: var(--bad);
 }
+/* The research budgets under a control row: one grid, the same rhythm the
+   cards use between groups, and room inside a row between its label, its bar
+   and its percentage. */
 .budget-bars {
  display: grid;
  grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
- gap: 0.25rem var(--space-5);
- margin-top: var(--space-2);
+ gap: var(--space-2) var(--space-5);
+ margin-top: var(--space-4);
 }
 .budget-bars.mini {
  grid-template-columns: 1fr;
@@ -759,14 +803,14 @@ progress.progress.done::-moz-progress-bar {
 .budget-row {
  display: flex;
  align-items: center;
- gap: 0.6rem;
+ gap: var(--space-3);
  font-size: 0.8rem;
  color: var(--muted);
  font-variant-numeric: tabular-nums;
 }
 .budget-label {
  flex: none;
- width: 4em;
+ width: 5.2em;
 }
 .budget-pct {
  flex: none;
@@ -1019,16 +1063,23 @@ blockquote.quote {
 .page-head > .sub {
  flex-basis: 100%;
 }
-/* The Paper book's identity block: labels stay muted through table.kv, values
-   read in the text ink, and the 建簿 note wraps in a measured column instead
-   of being cut off at the end of one line. The block keeps the full basis of
-   its row — capping the flex item itself would let it ride up beside the
-   heading — so the measure is the table's. */
+/* The Paper book's identity: one wrapping line of chips under the title, and
+   the 建簿 note behind a quiet fold — prose that belongs on the page whole,
+   not above the day's orders and not cut off mid-sentence. Both keep the full
+   basis of their row, so neither rides up beside the heading. */
 .page-head > .sub.book-facts {
+ display: flex;
+ flex-wrap: wrap;
+ align-items: center;
+ gap: var(--space-2);
  color: var(--text);
 }
-.book-facts table.kv {
+.page-head > .sub.book-note {
+ margin: 0;
+}
+.book-note > .meta-line {
  max-width: 62rem;
+ margin-top: var(--space-1);
 }
 
 /* detail layout */
@@ -1548,6 +1599,13 @@ pre.code-view.pre-wrap {
  color: var(--warn);
  border-color: var(--warn);
  background: var(--warn-soft);
+}
+/* An identifier as a chip: long ids break inside it instead of pushing the
+   line off a narrow screen. */
+.stat-chip.mono {
+ font-family: var(--mono, ui-monospace, monospace);
+ white-space: normal;
+ word-break: break-all;
 }
 
 /* trading console degraded-state banners (stale / export_error / unreadable) */
@@ -2821,7 +2879,8 @@ details.issue-evidence > summary:hover {
   align-items: flex-start;
  }
  .tiles,
- #trading-page .tiles {
+ #trading-page .tiles,
+ #trading-page .card .tiles {
   grid-template-columns: repeat(2, 1fr);
  }
  .trace-box {
@@ -2850,6 +2909,15 @@ details.issue-evidence > summary:hover {
  }
 }
 @media (max-width: 720px) {
+ /* Two budgets per row rather than one long column; a row's bar shrinks to
+    its own minimum before the label or the percentage gives way. */
+ .budget-bars {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  column-gap: var(--space-3);
+ }
+ .budget-bars.mini {
+  grid-template-columns: 1fr;
+ }
  .step-time {
   display: none;
  }

@@ -801,8 +801,11 @@ function equityChart(payload, opts = {}) {
     svg.push(
       `<line x1="${x}" y1="${padT}" x2="${x}" y2="${hasPanes ? panesBottom : padT + mainH}" stroke="${INK.baseline}" stroke-width="1" stroke-dasharray="3 3"/>`,
     );
+    // A divider close to the right edge carries its label on its left, where
+    // the plot still has room: at the edge it was cut off mid-word.
+    const nearEnd = Number(x) > width - padR - 72;
     svg.push(
-      `<text x="${Number(x) + 4}" y="${padT + 11}" font-size="11" fill="${INK.muted}">${escapeHtml(marker.label)}</text>`,
+      `<text x="${Number(x) + (nearEnd ? -4 : 4)}" y="${padT + 11}"${nearEnd ? ' text-anchor="end"' : ""} font-size="11" fill="${INK.muted}">${escapeHtml(marker.label)}</text>`,
     );
   }
   // drawdown subplot
@@ -1172,7 +1175,7 @@ function ratioBar(ratio, { cls = "", tone = true } = {}) {
 const BUDGET_ROWS = [
   ["inference_seconds", "时间", fmtDuration],
   ["llm_calls", "模型调用", String],
-  ["replay_years", "回放年", String],
+  ["replay_years", "回测（年）", String],
   ["null_controls", "空对照", String],
 ];
 
@@ -2454,7 +2457,7 @@ function processListPanel(detail, selectedKey) {
   return el(
     "div",
     { class: "panel" },
-    el("h4", {}, "研究流程"),
+    el("h4", {}, "实验流程"),
     el("div", { class: "stepper vertical" }, ...rows),
   );
 }
@@ -6415,12 +6418,22 @@ function fmtClock(iso) {
   return text === "—" ? text : text.slice(-5);
 }
 
-/* An order direction as a dataTable cell, in the P&L colors. */
+const ACTION_LABELS = { buy: "买入", sell: "卖出" };
+
+function actionLabel(action) {
+  return ACTION_LABELS[String(action || "").toLowerCase()] || action || "—";
+}
+
+/* An order direction as a badge, in the A-share P&L colors: the first thing
+   an operator reads off a row. */
 function actionCell(action) {
   const normalized = String(action || "").toLowerCase();
-  if (normalized === "buy") return { value: "买入", cls: "pos" };
-  if (normalized === "sell") return { value: "卖出", cls: "neg" };
-  return action || "—";
+  if (!ACTION_LABELS[normalized]) return action || "—";
+  return el(
+    "span",
+    { class: `order-side ${normalized === "buy" ? "pos" : "neg"}` },
+    ACTION_LABELS[normalized],
+  );
 }
 
 /* A damaged journal line is counted by the reader, not fatal; surface the count
@@ -6488,24 +6501,35 @@ function bookCard(row) {
       location.hash = href;
     },
   });
-  const tiles = presentTiles([
-    { label: "总资产", value: row.equity, fmt: fmtAmount },
-    { label: "累计收益", value: row.total_return, fmt: fmtPct, signed: true },
-    {
-      label: "持仓",
-      value: row.position_count,
-      fmt: (count) => `${count} 只`,
-      title: "最近一次结算收盘时的持仓只数",
-    },
-    { label: "超额 vs 沪深300", value: row.excess_return, fmt: fmtPct, signed: true },
-    { label: "最大回撤", value: row.max_drawdown, fmt: fmtPct },
-    {
-      label: "今日订单",
-      value: row.order_count,
-      fmt: String,
-      title: row.signal_date ? `${fmtDate(row.signal_date)} 的决策` : null,
-    },
-  ]);
+  // The card's figures are one set of six, measured from the first settled
+  // day: before that day a book would fill a partial row, so it fills none.
+  const settled = row.total_return !== null && row.total_return !== undefined;
+  const tiles = settled
+    ? presentTiles([
+        { label: "总资产", value: row.equity, fmt: fmtAmount },
+        { label: "累计收益", value: row.total_return, fmt: fmtPct, signed: true },
+        {
+          label: "超额",
+          value: row.excess_return,
+          fmt: fmtPct,
+          signed: true,
+          title: "同一批已结算交易日上对沪深300 的超额",
+        },
+        { label: "现金", value: row.cash, fmt: fmtAmount, title: "最近一次结算收盘时的现金" },
+        {
+          label: "持仓",
+          value: row.position_count,
+          fmt: (count) => `${count} 只`,
+          title: "最近一次结算收盘时的持仓只数",
+        },
+        {
+          label: "今日订单",
+          value: row.order_count,
+          fmt: String,
+          title: row.signal_date ? `${fmtDate(row.signal_date)} 的决策` : null,
+        },
+      ])
+    : [];
   card.append(
     el(
       "h3",
@@ -6583,44 +6607,42 @@ function renderBookBundle(bundle) {
         paperHead(status, bundle.identity),
         ...paperBanners(status),
         paperSignalPanel(bundle.signal, bundle.identity),
-        paperHistoryPanel(bundle.history),
-        paperPerformancePanel(bundle.performance),
+        paperEquityPanel(bundle.performance, bundle.identity),
         paperPositionsPanel(bundle.snapshot),
+        paperHistoryPanel(bundle.history),
       ),
   );
 }
 
-/* The book's frozen identity, one value per row: what it trades, where the
-   candidate came from — with the whole 建簿 note, which a one-line subtitle
-   used to cut off mid-sentence — and where its calendar stands. */
+/* The book's frozen identity as one wrapping line of chips: what it trades,
+   where the candidate came from, and where its calendar stands. The 建簿 note
+   is prose the reader rarely needs, so it waits whole behind a fold instead of
+   pushing the day's orders down the page. */
 function paperHead(status, payload) {
   const book = payload.book || {};
-  const rows = [
+  const facts = [
     // The book is named after its experiment unless init said otherwise.
     book.artifact_id
-      ? kvRow(
-          "产物",
-          book.experiment_id && book.experiment_id !== status.book_id
-            ? `${book.experiment_id} / ${book.artifact_id}`
-            : book.artifact_id,
+      ? el(
+          "span",
+          {
+            class: "stat-chip mono",
+            title:
+              book.experiment_id && book.experiment_id !== status.book_id
+                ? `实验 ${book.experiment_id}`
+                : null,
+          },
+          book.artifact_id,
         )
       : null,
-    book.candidate_source || book.note
-      ? kvRow(
-          "候选来源",
-          el(
-            "div",
-            {},
-            book.candidate_source,
-            book.note ? el("div", { class: "hint" }, book.note) : null,
-          ),
-        )
+    book.candidate_source
+      ? el("span", { class: "badge kind" }, book.candidate_source)
       : null,
-    payload.start_date ? kvRow("起始", fmtDate(payload.start_date)) : null,
+    payload.start_date ? chip(`起始 ${fmtDate(payload.start_date)}`) : null,
     book.initial_cash === null || book.initial_cash === undefined
       ? null
-      : kvRow("初始资金", fmtAmount(book.initial_cash)),
-    payload.settled_through ? kvRow("结算至", fmtDate(payload.settled_through)) : null,
+      : chip(`初始资金 ${fmtAmount(book.initial_cash)}`),
+    payload.settled_through ? chip(`结算至 ${fmtDate(payload.settled_through)}`) : null,
   ].filter(Boolean);
   return el(
     "div",
@@ -6632,8 +6654,14 @@ function paperHead(status, payload) {
       el("span", { class: "exp-name" }, status.book_id),
       tradingBadge(status.state),
     ),
-    rows.length
-      ? el("div", { class: "sub book-facts" }, el("table", { class: "kv" }, ...rows))
+    facts.length ? el("div", { class: "sub book-facts" }, ...facts) : null,
+    book.note
+      ? el(
+          "details",
+          { class: "sub fold book-note" },
+          el("summary", {}, "备注"),
+          el("div", { class: "meta-line" }, book.note),
+        )
       : null,
   );
 }
@@ -6643,37 +6671,54 @@ function largestWeight(rows) {
   return Math.max(0, ...rows.map((row) => Number(row.weight) || 0));
 }
 
-function paperOrdersTable(orders) {
+/* The rows an operator executes by hand: what to do, on what, how much, and
+   the weight the line is meant to carry once it fills. The sheet ends on the
+   cash the fills leave behind. */
+function paperOrdersTable(sheet) {
+  const weights = new Map(sheet.target.map((row) => [row.symbol, row.weight]));
+  const largest = largestWeight([...sheet.target, { weight: sheet.cash_weight }]);
   return dataTable(
     [
-      { label: "时间" },
+      { label: "方向" },
       { label: "代码" },
       { label: "名称" },
-      { label: "方向" },
       { label: "股数", num: true },
       { label: "参考价", num: true, title: "前一交易日收盘价" },
       { label: "金额", num: true, title: "参考价 × 股数，未计费用" },
+      { label: "目标权重", num: true, title: "成交后这只证券占总资产的权重" },
     ],
-    orders.map((row) => [
-      fmtClock(row.execute_at),
-      row.symbol,
-      row.name,
-      actionCell(row.action),
-      fmtShares(row.quantity),
-      fmtPrice(row.reference_price),
-      fmtAmountOpt(row.notional),
-    ]),
+    [
+      ...sheet.orders.map((row) => [
+        actionCell(row.action),
+        row.symbol,
+        row.name,
+        fmtShares(row.quantity),
+        fmtPrice(row.reference_price),
+        fmtAmountOpt(row.notional),
+        weightCell(weights.has(row.symbol) ? weights.get(row.symbol) : 0, largest),
+      ]),
+      ["", "现金", "", "", "", fmtAmountOpt(sheet.cash_after), weightCell(sheet.cash_weight, largest)],
+    ],
   );
 }
 
 /* One decision's order sheet, for today's panel and for any past day: the
-   orders it placed and, when it placed any, the holdings and cash they fill
-   into. No orders is no change, so the holdings stay in 当前持仓 alone. */
+   orders it placed and, when it placed any, the holdings they fill into. No
+   orders is no change, so the holdings stay in 当前持仓 alone. */
 function paperSheetBody(sheet) {
-  if (!sheet.orders.length) return [el("div", { class: "meta-line" }, "无订单 · 持仓不变")];
+  if (!sheet.orders.length) return [el("div", { class: "empty" }, "无订单 · 持仓不变")];
+  // Every order of a decision normally executes at the same minute; the times
+  // belong in the heading, not in a column repeating one value per row.
+  const times = [...new Set(sheet.orders.map((row) => fmtClock(row.execute_at)))].filter(
+    (time) => time !== "—",
+  );
   return [
-    el("h4", { class: "subsection-title" }, `订单 ${sheet.orders.length}`),
-    paperOrdersTable(sheet.orders),
+    el(
+      "h4",
+      { class: "subsection-title" },
+      `订单 ${sheet.orders.length}${times.length ? ` · ${times.join(" / ")} 执行` : ""}`,
+    ),
+    paperOrdersTable(sheet),
     el("h4", { class: "subsection-title section-gap" }, `成交后持仓 ${sheet.target.length}`),
     sheet.target.length
       ? dataTable(
@@ -6685,27 +6730,80 @@ function paperSheetBody(sheet) {
             { label: "市值", num: true },
             { label: "权重", num: true },
           ],
-          [
-            ...sheet.target.map((row) => [
-              row.symbol,
-              row.name,
-              fmtShares(row.quantity),
-              fmtPrice(row.reference_price),
-              fmtAmountOpt(row.value),
-              weightCell(row.weight, largestWeight(sheet.target)),
-            ]),
-            [
-              "现金",
-              "",
-              "",
-              "",
-              fmtAmountOpt(sheet.cash_after),
-              weightCell(sheet.cash_weight, largestWeight(sheet.target)),
-            ],
-          ],
+          sheet.target.map((row) => [
+            row.symbol,
+            row.name,
+            fmtShares(row.quantity),
+            fmtPrice(row.reference_price),
+            fmtAmountOpt(row.value),
+            weightCell(row.weight, largestWeight(sheet.target)),
+          ]),
         )
       : el("div", { class: "meta-line" }, `空仓 · 现金 ${fmtAmountOpt(sheet.cash_after)}`),
   ];
+}
+
+/* The order rows as plain text, one line per order, tab separated: what a
+   manual execution needs and nothing else. */
+function orderClipboardText(orders) {
+  return orders
+    .map((row) =>
+      [
+        row.symbol,
+        row.name,
+        actionLabel(row.action),
+        fmtShares(row.quantity),
+        fmtPrice(row.reference_price),
+      ].join("\t"),
+    )
+    .join("\n");
+}
+
+/* The async clipboard is unavailable on an insecure origin and can be refused
+   by permission; a selected off-screen textarea is the fallback that works
+   wherever a copy command does. */
+async function copyToClipboard(text) {
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    /* fall through to the selection fallback */
+  }
+  const area = el("textarea", { class: "copy-fallback", readonly: "readonly" }, text);
+  document.body.append(area);
+  area.select();
+  let copied = false;
+  try {
+    copied = document.execCommand("copy");
+  } catch {
+    copied = false;
+  }
+  area.remove();
+  return copied;
+}
+
+function copyOrdersButton(orders) {
+  return el(
+    "button",
+    {
+      class: "btn small",
+      title: "代码、名称、方向、股数、参考价，一行一笔",
+      onclick: async (event) => {
+        const button = event.currentTarget;
+        if (!(await copyToClipboard(orderClipboardText(orders)))) {
+          toast("复制失败，请手动选择订单表", true);
+          return;
+        }
+        button.textContent = `已复制 ${orders.length} 笔`;
+        setTimeout(() => {
+          button.textContent = "复制订单";
+        }, 2000);
+      },
+    },
+    "复制订单",
+  );
 }
 
 /* Today's signal: the decision that produced it in one caption, then its
@@ -6728,6 +6826,8 @@ function paperSignalPanel(payload, identity) {
     panelHead(
       `今日信号 · ${fmtDate(signal.trade_date)}`,
       signal.fitted ? el("span", { class: "badge state-waiting_user" }, "重新拟合") : null,
+      el("span", { class: "spacer" }),
+      signal.orders.length ? copyOrdersButton(signal.orders) : null,
     ),
     el(
       "div",
@@ -6850,16 +6950,103 @@ function paperHistoryPanel(payload) {
   return panel;
 }
 
-/* The research return chart, fed the book's own days: cumulative return
-   against CSI 300, drawdown, and end-of-day equity and cash on the same axis.
-   Tiles only for the figures the book has measured; the statistics the day
-   count still gates, and a CSI 300 that does not cover the book, say so in
-   one caption instead of leaving a dash behind. */
-function paperPerformancePanel(payload) {
+/* The source experiment's out-of-sample replay, cached per experiment: the
+   forward and Held-out slices of the very artifact this book trades, named by
+   that experiment's ledger. Null once the ledger names no replay. */
+const BOOK_SOURCE_CACHE = new Map(); // experiment_id -> promise
+
+function bookSource(experimentId) {
+  if (!BOOK_SOURCE_CACHE.has(experimentId))
+    BOOK_SOURCE_CACHE.set(
+      experimentId,
+      api(`/api/experiments/${encodeURIComponent(experimentId)}`)
+        .then(async (detail) => {
+          const forward = detail.forward || {};
+          if (!forward.result) return null;
+          return {
+            equity: await resultEquity(experimentId, forward.result),
+            replay: forward.replay || {},
+          };
+        })
+        .catch((error) => {
+          BOOK_SOURCE_CACHE.delete(experimentId);
+          throw error;
+        }),
+    );
+  return BOOK_SOURCE_CACHE.get(experimentId);
+}
+
+/* One line from the source experiment into the book: the frozen artifact's
+   forward and Held-out replay under a band that says it is the experiment's,
+   the Held-out divider where that slice begins, then a 「Paper 起始」 divider
+   and the book's own days compounded on. A retired experiment is moved out of
+   experiments/ and its curve is gone with it; the book's own segment is then
+   all there is, and the label says why. */
+function paperEquityHost(chart, identity) {
+  const opts = { width: 980, height: 240, ddH: 80 };
+  const host = el("div", {}, el("div", { class: "hint" }, "收益曲线加载中…"));
+  const paperStart = ((chart.series || [])[0] || {}).dates || [];
+  const alone = (note) =>
+    host.replaceChildren(
+      ...[note ? el("div", { class: "meta-line" }, note) : null, equityChart(chart, opts)].filter(
+        Boolean,
+      ),
+    );
+  const chained = (source) => {
+    const line = (source.equity.series || [])[0] || { dates: [] };
+    if (!line.dates.length) return alone("只画 Paper 段：源实验的回放没有日度收益");
+    const joined = chainEquity(source.equity, chart);
+    host.replaceChildren(
+      equityChart(
+        {
+          // One strategy across two regimes: the legend says so, and the
+          // account pane stays the book's own (the experiment has no account).
+          series: joined.series.map((entry) => ({ ...entry, label: "源实验 → 账簿" })),
+          benchmark: joined.benchmark,
+          account: chart.account,
+        },
+        {
+          ...opts,
+          bands: [
+            {
+              from: line.dates[0],
+              to: line.dates[line.dates.length - 1],
+              label: "源实验 · 前推与 Held-out",
+            },
+          ],
+          markers: [
+            source.replay.heldout_start
+              ? { date: source.replay.heldout_start, label: "Held-out" }
+              : null,
+            paperStart.length ? { date: paperStart[0], label: "Paper 起始" } : null,
+          ].filter(Boolean),
+        },
+      ),
+    );
+  };
+  const experimentId = (identity.book || {}).experiment_id;
+  if (!experimentId) {
+    alone(null);
+    return host;
+  }
+  bookSource(experimentId)
+    .then((source) =>
+      source ? chained(source) : alone(`只画 Paper 段：源实验 ${experimentId} 没有已落账的前推回放`),
+    )
+    .catch((error) => alone(`只画 Paper 段：源实验的前推曲线读不到（${error.message}）`));
+  return host;
+}
+
+/* The book's return: the tiles it has measured, one chart continuing the
+   source experiment's out-of-sample replay into the book's own days, and what
+   the trading cost. The statistics the day count still gates, and a CSI 300
+   that does not cover the book, say so in one caption instead of leaving a
+   dash behind. */
+function paperEquityPanel(payload, identity) {
   const stats = payload.statistics;
   const head = panelHead(
-    "收益表现",
-    stats ? el("span", { class: "mode-note" }, `${stats.days} 个交易日`) : null,
+    "收益曲线",
+    stats ? el("span", { class: "mode-note" }, `账簿 ${stats.days} 个交易日`) : null,
   );
   if (payload.state !== "ok")
     return el(
@@ -6908,11 +7095,7 @@ function paperPerformancePanel(payload) {
     tiles.length ? statTilesRow(tiles) : null,
     notes.length ? el("div", { class: "meta-line section-gap" }, notes.join(" · ")) : null,
     payload.chart
-      ? el(
-          "div",
-          { class: "section-gap" },
-          equityChart(payload.chart, { width: 980, height: 240, ddH: 80 }),
-        )
+      ? el("div", { class: "section-gap" }, paperEquityHost(payload.chart, identity))
       : null,
     el("div", { class: "meta-line section-gap" }, cost.join(" · ")),
   );

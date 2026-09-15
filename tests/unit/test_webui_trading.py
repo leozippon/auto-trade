@@ -324,8 +324,8 @@ def test_the_overview_has_one_row_per_book_read_off_its_panels(tmp_path: Path):
     assert (alpha["signal_date"], alpha["order_count"]) == ("20260107", 1)
     assert (alpha["start_date"], alpha["initial_cash"], alpha["state"]) == ("20260105", 100_000.0, "ok")
     # The card names where the candidate came from and draws the book's own
-    # curve; the drawdown the day count still gates has no tile.
-    assert (alpha["candidate_source"], alpha["max_drawdown"]) == ("graduated", None)
+    # curve; the maximum drawdown the day count gates belongs to the book page.
+    assert alpha["candidate_source"] == "graduated" and "max_drawdown" not in alpha
     # 持仓 is the one figure every settled book has: the lines its own 当前持仓
     # panel lists, absent rather than zero before the first snapshot.
     assert alpha["position_count"] == len(snapshot["positions"])
@@ -338,6 +338,20 @@ def test_the_overview_has_one_row_per_book_read_off_its_panels(tmp_path: Path):
     assert beta["curve"] is None
     health = trading.health_payload(tmp_path)
     assert health["ok"] is True and [row["book_id"] for row in health["books"]] == ["alpha", "beta"]
+    # The card's six figures are one set: they arrive together with the first
+    # settled day, so the card never draws a half-filled row of tiles.
+    _csi300_slot(
+        paper_root(tmp_path) / "alpha",
+        "20260102_20260107_20251231T235959+0800",
+        {"20260105": 1.0, "20260106": -0.5},
+    )
+    alpha, beta = trading.books_payload(tmp_path)["books"]
+    card = ("equity", "total_return", "excess_return", "cash", "position_count", "order_count")
+    assert [name for name in card if alpha[name] is None] == []
+    assert alpha["cash"] == snapshot["cash"]
+    # beta has not settled a day: the figure the card gates on is absent, and
+    # with it every tile.
+    assert beta["total_return"] is None
     # A root still in the single-book layout is reported, not read as a book.
     write_book_record(paper_root(tmp_path))
     assert trading.books_payload(tmp_path)["state"] == "unreadable"
@@ -638,14 +652,18 @@ def test_prices_keep_their_cents_and_only_large_amounts_abbreviate():
     assert not re.search(r"fmtAmount(Opt)?\(row\.(price|average_cost|last_price|reference_price)\)", script)
 
 
-def test_the_paper_performance_chart_is_the_research_chart_on_one_date_axis():
+def test_the_book_curve_continues_its_source_experiment_on_one_date_axis():
     """Equity and cash were once two charts with their own widths, pads and date
-    ticks, so one trading day sat at different x positions. The page now feeds
+    ticks, so one trading day sat at different x positions. The panel now feeds
     the book's days to the research return chart, whose panes share one x-scale,
-    and draws no second chart implementation of its own."""
+    and chains the source experiment's forward/Held-out replay in front of them
+    through the same chainEquity the research pages use — degrading to the book's
+    own segment, with the reason, when that experiment is gone."""
     script = _app_js()
-    panel = _js_top_level(script, "function paperPerformancePanel(")
-    assert "equityChart(payload.chart" in panel
+    assert "paperEquityHost(payload.chart" in _js_top_level(script, "function paperEquityPanel(")
+    host = _js_top_level(script, "function paperEquityHost(")
+    for piece in ("chainEquity(", "equityChart(", "Paper 起始", "只画 Paper 段", "chart.account"):
+        assert piece in host, piece
     trading_section = script.split("let tradingView = null;", 1)[1].split("function renderQmtPage(", 1)[0]
     assert "singleSeriesBarChart" not in trading_section
     assert "payload.account" in _js_top_level(script, "function equityChart(")
@@ -656,12 +674,28 @@ def test_the_page_draws_a_figure_only_where_the_book_measured_one():
     for a CSI 300 the book has no data for. Tiles now come from presentTiles,
     which drops an absent figure, and the reason moves into the caption."""
     script = _app_js()
-    for name in ("paperPerformancePanel", "bookCard"):
+    for name in ("paperEquityPanel", "bookCard"):
         body = _js_top_level(script, f"function {name}(")
         assert "presentTiles(" in body, name
         assert "—" not in body, name
-    panel = _js_top_level(script, "function paperPerformancePanel(")
+    panel = _js_top_level(script, "function paperEquityPanel(")
     assert "min_days" in panel and "benchmark_days" in panel
+
+
+def test_the_book_page_leads_with_what_the_operator_acts_on():
+    """The operator executes the day's orders by hand, so the page is ordered by
+    use: today's order sheet, then where the book stands, then what it holds
+    now, and only then the history."""
+    script = _app_js()
+    panels = _js_top_level(script, "function renderBookBundle(")
+    order = [
+        panels.index(f"{name}(bundle.")
+        for name in ("paperSignalPanel", "paperEquityPanel", "paperPositionsPanel", "paperHistoryPanel")
+    ]
+    assert order == sorted(order)
+    # The sheet is copyable as plain text, for a manual order entry screen.
+    assert "复制订单" in _js_top_level(script, "function copyOrdersButton(")
+    assert "navigator.clipboard" in _js_top_level(script, "async function copyToClipboard(")
 
 
 def test_today_and_every_past_day_render_through_one_order_sheet_renderer():

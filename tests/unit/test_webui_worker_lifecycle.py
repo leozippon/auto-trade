@@ -827,6 +827,11 @@ class RestartSlotRaceTest(unittest.TestCase):
             encoding="utf-8",
         )
         self.client = TestClient(create_app(self.repo_root, self.experiments_root))
+        # This test is about the slot, not about admission: stub the live GPU
+        # probe, which otherwise refuses every create while the host is busy.
+        probe = stubbed_gpu_probe()
+        probe.start()
+        self.addCleanup(probe.stop)
 
     def _create(self, experiment_id: str, client: TestClient | None = None):
         response = (client or self.client).post(

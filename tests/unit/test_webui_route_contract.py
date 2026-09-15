@@ -232,8 +232,8 @@ def test_paper_bundle_serves_the_key_names_the_console_reads(tmp_path: Path):
     [row] = client.get("/api/trading/paper/books").json()["books"]
     for key in (
         "book_id", "experiment_id", "artifact_id", "candidate_source", "start_date",
-        "initial_cash", "equity", "position_count", "total_return", "excess_return",
-        "max_drawdown", "curve", "signal_date", "order_count", "state", "error",
+        "initial_cash", "equity", "cash", "position_count", "total_return", "excess_return",
+        "curve", "signal_date", "order_count", "state", "error",
     ):
         assert key in row, key
 
