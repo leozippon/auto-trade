@@ -1,11 +1,13 @@
-# ADM-Cube Paper book: the pre-open order sheet of every SSE session.
+# ADM-Cube Paper books: the pre-open order sheet of every SSE session, per book.
 # Install or refresh with: /home/lzp/miniconda3/envs/quant/bin/python ops/cron/install_tushare_cron.py --block paper
 #
-# The book in data/trading/paper must already exist (run_paper.py init). Each
-# run settles the sessions whose data has been committed, decides today's
-# session at its 08:30 inference time and writes logs/paper/<date>_orders.md
-# plus logs/paper/latest_orders.md; a run that cannot decide writes the reason
-# to the same files and exits non-zero. Weekday holidays exit at once.
+# Books live in data/trading/paper/<book>/ (run_paper.py init). Each run goes
+# through every book in turn: it settles the sessions whose data has been
+# committed, decides today's session at its 08:30 inference time and writes
+# logs/paper/<book>/<date>_orders.md plus that book's latest_orders.md. A book
+# that cannot decide writes the reason to the same files and the run continues
+# with the next book, exiting non-zero if any book failed. Weekday holidays
+# exit at once.
 
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -16,11 +18,11 @@ QUANT_PYTHON=/home/lzp/miniconda3/envs/quant/bin/python
 # 05:40, after the nightly chain has committed the previous session: the
 # evening update (23:35, visible from 03:05), the intraday-flow build (02:45),
 # the PIT event build (03:35, about 30 min), the revision sentinel (04:00) and
-# the text audit (05:00). A run takes the PIT build (about 10 min), the replay
-# of the book's earlier decisions and one decision; on a refit day the fit
-# adds 10-40 min and is capped at 7200 s, so even a capped fit ends before
-# 08:30. 07:40 is the retry for a morning whose data landed late: flock skips
-# it while the first run is still working, and it is a no-op re-render when
-# the session is already decided.
+# the text audit (05:00). Each book takes its PIT build (about 10 min), the
+# replay of its earlier decisions and one decision; on a refit day the fit adds
+# 10-40 min and is capped at 7200 s. Books run one after another, so a few
+# books still end before 08:30. 07:40 is the retry for a morning whose data
+# landed late: flock skips it while the first run is still working, and it is
+# a no-op re-render for every book whose session is already decided.
 40 5 * * 1-5 cd $REPO_ROOT && mkdir -p logs/paper .runtime/paper && flock -n .runtime/paper/cron.lock $QUANT_PYTHON scripts/paper/run_paper.py run >> logs/paper/cron.log 2>&1
 40 7 * * 1-5 cd $REPO_ROOT && mkdir -p logs/paper .runtime/paper && flock -n .runtime/paper/cron.lock $QUANT_PYTHON scripts/paper/run_paper.py run >> logs/paper/cron.log 2>&1
