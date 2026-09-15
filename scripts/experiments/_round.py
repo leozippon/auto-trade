@@ -297,7 +297,7 @@ class Round:
     """One round definition: its arms and what it decides differently.
 
     ``arms`` maps experiment id to the per-arm part of the create request --
-    normally ``workspace_reference`` and ``fold_exploration_directive``, plus
+    normally ``workspace_reference`` and ``research_directive``, plus
     any parameter that arm alone changes. ``overrides`` is what the whole round
     decides on top of BASE_OVERRIDES -- normally its dataset selection -- and
     ``pit_views_seed`` the prebuilt view tree every arm hardlinks from.
@@ -472,9 +472,9 @@ class Round:
                 own = {
                     key: value
                     for key, value in merged.items()
-                    if key != "fold_exploration_directive" and value != shared.get(key)
+                    if key != "research_directive" and value != shared.get(key)
                 }
-                directive = str(merged["fold_exploration_directive"])
+                directive = str(merged["research_directive"])
                 print(json.dumps(own, ensure_ascii=False))
                 print(f"  directive: {len(directive.splitlines())} lines, {len(directive)} chars")
                 for line in directive.splitlines():

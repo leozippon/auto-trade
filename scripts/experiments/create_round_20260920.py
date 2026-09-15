@@ -12,7 +12,7 @@ An arm is one entry of ARMS:
 
     "<direction>_<yyyymmdd>": {
         "workspace_reference": "configs/workspace_refs/<pack>",
-        "fold_exploration_directive": "<the direction, with no calendar date>",
+        "research_directive": "<the direction, with no calendar date>",
     },
 
 A reference pack carried over from a Fold-era arm must state its contamination

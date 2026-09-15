@@ -223,7 +223,7 @@ class RollingExperimentConfigValidationTest(unittest.TestCase):
         config = make_config(Path("/tmp"))
         self.assertEqual(config.geometry, DEFAULT_RESEARCH_GEOMETRY)
         self.assertEqual((config.research_sessions, config.session_max_attempts), (4, 3))
-        self.assertEqual(config.fold_exploration_directive, "")
+        self.assertEqual(config.research_directive, "")
         self.assertEqual(config.max_session_minutes, 720)
         self.assertEqual(
             (config.max_replay_years_per_session, config.max_llm_calls),

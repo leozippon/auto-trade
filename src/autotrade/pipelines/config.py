@@ -286,7 +286,7 @@ class RollingExperimentConfig:
     nl_failure_policy: str = "return_error_with_audit"
     # Optional experiment-level exploration direction injected into every
     # research session prompt. Per-session directives are additive.
-    fold_exploration_directive: str = ""
+    research_directive: str = ""
     # Optional repo-relative directory of Agent-readable notes copied into each
     # session's workspace/refs/. Empty copies nothing; a set path must exist and
     # be a directory.

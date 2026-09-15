@@ -34,16 +34,16 @@ DEFAULT_NL_MODEL = DEFAULT_AGENT_MODEL
 DEFAULT_COMPACT_MODEL = DEFAULT_AGENT_MODEL
 
 
-def resolve_fold_exploration_directive(
+def resolve_research_directive(
     parser: argparse.ArgumentParser, args: argparse.Namespace
 ) -> str:
-    if args.fold_exploration_directive and args.fold_exploration_directive_file:
+    if args.research_directive and args.research_directive_file:
         parser.error(
-            "pass only one of --fold-exploration-directive or --fold-exploration-directive-file"
+            "pass only one of --research-directive or --research-directive-file"
         )
-    if args.fold_exploration_directive_file:
-        return args.fold_exploration_directive_file.read_text(encoding="utf-8")
-    return args.fold_exploration_directive
+    if args.research_directive_file:
+        return args.research_directive_file.read_text(encoding="utf-8")
+    return args.research_directive
 
 
 # ---------------------------------------------------------------------------
@@ -278,14 +278,14 @@ def add_model_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def add_fold_exploration_directive_arguments(parser: argparse.ArgumentParser) -> None:
+def add_research_directive_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
-        "--fold-exploration-directive",
+        "--research-directive",
         default="",
         help="Optional experiment-level exploration direction injected into every research session prompt.",
     )
     parser.add_argument(
-        "--fold-exploration-directive-file",
+        "--research-directive-file",
         type=Path,
         help="Optional UTF-8 text file whose content is injected into every research session prompt.",
     )
@@ -331,7 +331,7 @@ def _build_worker_params(
     args: argparse.Namespace,
     *,
     repo_root: Path,
-    fold_exploration_directive: str = "",
+    research_directive: str = "",
     overrides: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """Render the argparse namespace as the worker's validated parameter file.
@@ -391,7 +391,7 @@ def _build_worker_params(
         "min_return": args.min_return,
         "min_sharpe": args.min_sharpe,
         "max_drawdown": args.max_drawdown,
-        "fold_exploration_directive": fold_exploration_directive,
+        "research_directive": research_directive,
     }
     for window in ("daily", "fundamentals", "events", "macro", "text"):
         value = getattr(args, f"{window}_window_months", None)
@@ -405,7 +405,7 @@ def build_worker_options(
     args: argparse.Namespace,
     *,
     repo_root: Path,
-    fold_exploration_directive: str = "",
+    research_directive: str = "",
     overrides: dict[str, object] | None = None,
 ) -> InteractiveWorkerOptions:
     """Persist the CLI parameters and load them back through the worker.
@@ -419,7 +419,7 @@ def build_worker_options(
     params = _build_worker_params(
         args,
         repo_root=repo_root,
-        fold_exploration_directive=fold_exploration_directive,
+        research_directive=research_directive,
         overrides=overrides,
     )
     (experiment_dir / "hitl").mkdir(parents=True, exist_ok=True)

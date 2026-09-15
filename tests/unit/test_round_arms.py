@@ -159,7 +159,7 @@ def test_every_arm_directive_is_usable(round_name: str, experiment_id: str) -> N
     hold no calendar year: data windows that must be excluded are named by
     their cause and defined in the reference pack, and no forward or Held-out
     date may reach the Agent through it."""
-    directive = str(ROUNDS[round_name].request_params(experiment_id)["fold_exploration_directive"])
+    directive = str(ROUNDS[round_name].request_params(experiment_id)["research_directive"])
     assert directive.strip(), experiment_id
     assert not CALENDAR_YEAR.search(directive), (experiment_id, CALENDAR_YEAR.findall(directive))
 

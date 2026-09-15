@@ -120,7 +120,7 @@ _FIELDS: list[dict[str, object]] = [
         "type": "int",
         "help": "背靠背运行的研究会话数；每个会话以继续、冻结或无边际结束，任一会话可冻结，至多冻结一次。",
     },
-    {"key": "fold_exploration_directive", "group": "基本与排程", "label": "默认探索方向", "type": "text",
+    {"key": "research_directive", "group": "基本与排程", "label": "默认探索方向", "type": "text",
      "optional": True, "wide": True,
      "help": "可选。作为实验级待检验主线注入每个研究会话，详情页仍可追加单会话假设。"},
     {

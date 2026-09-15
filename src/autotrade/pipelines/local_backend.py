@@ -2210,7 +2210,7 @@ class LLMResearchDeveloper:
         # One completion ceiling for the parent conversation and its children.
         max_response_tokens: int = AGENT_MAX_OUTPUT_TOKENS,
         step_tree_enabled: bool = True,
-        fold_exploration_directive: str = "",
+        research_directive: str = "",
         workspace_reference: str = "",
         operating_memory: str = "none",
         repo_root: str | Path | None = None,
@@ -2233,7 +2233,7 @@ class LLMResearchDeveloper:
         self.command_runner_factory = command_runner_factory
         self.max_response_tokens = max_response_tokens
         self.step_tree_enabled = step_tree_enabled
-        self.fold_exploration_directive = fold_exploration_directive
+        self.research_directive = research_directive
         self.workspace_reference = workspace_reference
         self.operating_memory = str(operating_memory)
         self.repo_root = Path(repo_root).resolve() if repo_root is not None else None
@@ -2366,7 +2366,7 @@ class LLMResearchDeveloper:
                 "finalize_before_deadline_seconds": request.finalize_before_deadline_seconds,
                 "sandbox_spec": sandbox_spec.to_record(),
                 "prior_prompt": request.prior,
-                "exploration_directive": self.fold_exploration_directive.strip(),
+                "exploration_directive": self.research_directive.strip(),
                 "budgets": {
                     "max_replay_years": request.max_replay_years,
                     "max_null_controls": request.max_null_controls,
@@ -2629,7 +2629,7 @@ class LLMResearchDeveloper:
                     experiment_facts=facts,
                     step_tree_enabled=self.step_tree_enabled,
                     prior_prompt=prior_text,
-                    exploration_directive=self.fold_exploration_directive,
+                    exploration_directive=self.research_directive,
                     session_directive=request.directive,
                 ),
                 config=AgentSessionConfig(

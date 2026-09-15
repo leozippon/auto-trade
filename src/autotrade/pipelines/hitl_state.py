@@ -49,7 +49,7 @@ WEB_CREATE_DEFAULTS: dict[str, object] = {
     # Research, forward and Held-out dates (pipelines/calendar.ResearchGeometry).
     **DEFAULT_RESEARCH_GEOMETRY.to_record(),
     "research_sessions": rolling_default("research_sessions"),
-    "fold_exploration_directive": rolling_default("fold_exploration_directive"),
+    "research_directive": rolling_default("research_directive"),
     "workspace_reference": rolling_default("workspace_reference"),
     "operating_memory": rolling_default("operating_memory"),
     "strategy_period": "day",

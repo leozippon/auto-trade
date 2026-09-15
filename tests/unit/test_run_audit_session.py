@@ -23,7 +23,7 @@ def _options(tmp_path: Path, **overrides: object) -> SimpleNamespace:
             schedule=object(),
             broker_profile=object(),
             step_tree_enabled=True,
-            fold_exploration_directive="directive",
+            research_directive="directive",
             max_llm_calls=800,
             max_session_minutes=20,
             strategy_fit_timeout_seconds=1800,

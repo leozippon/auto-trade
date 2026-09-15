@@ -153,7 +153,7 @@ _ALLOWED_PARAMS = {
     "min_sharpe",
     "max_drawdown",
     "cost_stress_multiplier",
-    "fold_exploration_directive",
+    "research_directive",
     "workspace_reference",
     "operating_memory",
     "disable_step_tree",
@@ -602,8 +602,8 @@ def resolve_worker_options(
         max_session_minutes=_positive_int(
             knob("max_session_minutes"), "max_session_minutes"
         ),
-        fold_exploration_directive=str(
-            params.get("fold_exploration_directive") or ""
+        research_directive=str(
+            params.get("research_directive") or ""
         ),
         workspace_reference=_optional_workspace_reference(
             params.get("workspace_reference"), repository
@@ -858,7 +858,7 @@ def build_experiment_pipeline(
             # One ceiling for the parent conversation and its children.
             max_response_tokens=options.llm.max_tokens_for("main"),
             step_tree_enabled=options.rolling.step_tree_enabled,
-            fold_exploration_directive=options.rolling.fold_exploration_directive,
+            research_directive=options.rolling.research_directive,
             workspace_reference=options.rolling.workspace_reference,
             operating_memory=options.rolling.operating_memory,
             repo_root=options.repo_root,

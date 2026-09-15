@@ -662,9 +662,9 @@ class WebuiBackendTest(unittest.TestCase):
         from autotrade.pipelines.worker import _ALLOWED_PARAMS
 
         self.assertLessEqual(set(fields), _ALLOWED_PARAMS)
-        self.assertEqual(fields["fold_exploration_directive"]["type"], "text")
-        self.assertEqual(fields["fold_exploration_directive"]["default"], "")
-        self.assertTrue(fields["fold_exploration_directive"]["wide"])
+        self.assertEqual(fields["research_directive"]["type"], "text")
+        self.assertEqual(fields["research_directive"]["default"], "")
+        self.assertTrue(fields["research_directive"]["wide"])
 
     def test_public_params_never_echo_hidden_keys(self) -> None:
         # params.json is also a worker-side ops channel where operator-only keys

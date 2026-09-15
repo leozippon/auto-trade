@@ -33,13 +33,13 @@ add_repo_src(__file__)
 from _cli import (
     add_acceptance_arguments,
     add_calendar_arguments,
-    add_fold_exploration_directive_arguments,
     add_model_arguments,
     add_path_arguments,
+    add_research_directive_arguments,
     add_schedule_arguments,
     add_snapshot_window_arguments,
     build_worker_options,
-    resolve_fold_exploration_directive,
+    resolve_research_directive,
 )
 
 from autotrade.environment.artifacts import FilesystemArtifactStore
@@ -69,7 +69,7 @@ def main() -> int:
     parser.add_argument("--local-dev", action="store_true", help="Use the trusted executor; audit default is real Docker.")
     parser.add_argument("--sandbox-image", help="Optional Docker image override for this audit session.")
     parser.add_argument("--no-thinking", action="store_true")
-    add_fold_exploration_directive_arguments(parser)
+    add_research_directive_arguments(parser)
     parser.add_argument(
         "--workspace-reference",
         help=(
@@ -98,7 +98,7 @@ def main() -> int:
     if not args.local_dev and not args.skip_image_check:
         _require_docker_image(image)
 
-    fold_exploration_directive = resolve_fold_exploration_directive(parser, args)
+    research_directive = resolve_research_directive(parser, args)
     directive = args.directive_file.read_text(encoding="utf-8") if args.directive_file else ""
 
     overrides: dict[str, object] = {}
@@ -113,7 +113,7 @@ def main() -> int:
     options = build_worker_options(
         args,
         repo_root=repo_root,
-        fold_exploration_directive=fold_exploration_directive,
+        research_directive=research_directive,
         overrides=overrides,
     )
 

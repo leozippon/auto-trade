@@ -235,7 +235,7 @@ def test_preview_follows_the_experiment_parameters(tmp_path: Path):
             max_replay_years_per_session=7,
             max_llm_calls=123,
             disable_step_tree=True,
-            fold_exploration_directive="以截面因子为主线",
+            research_directive="以截面因子为主线",
         )["prompt"]
     )
     facts = _facts(prompt)

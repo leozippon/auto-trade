@@ -225,7 +225,7 @@ def _research_prompt(
         experiment_facts=facts,
         step_tree_enabled=rolling.step_tree_enabled,
         prior_prompt=context.prior,
-        exploration_directive=rolling.fold_exploration_directive,
+        exploration_directive=rolling.research_directive,
         session_directive=directive,
     )
 
