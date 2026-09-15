@@ -21,7 +21,7 @@ from collections import OrderedDict
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, time, timedelta
+from datetime import datetime, timedelta
 from functools import partial
 from pathlib import Path
 from time import perf_counter
@@ -72,6 +72,7 @@ from autotrade.environment.sandbox import SandboxConfig
 from autotrade.environment.strategy import CN_TZ, StrategySchedule
 from autotrade.environment.strategy_loader import validate_strategy_package
 
+from .calendar import yyyymmdd
 from .config import (
     SNAPSHOT_CACHE_FORMAT_VERSION,
     EvaluationRequest,
@@ -167,8 +168,8 @@ class ResearchPITSnapshotProvider:
         if phase not in _PHASES:
             raise ValueError(f"unsupported PIT snapshot phase: {phase}")
         decision = _cn_datetime(decision_time)
-        start_key = _date_key(start)
-        end_key = _date_key(end)
+        start_key = yyyymmdd(start)
+        end_key = yyyymmdd(end)
         if start_key > end_key:
             raise ValueError("PIT snapshot phase start cannot be after end")
         decision_key = decision.strftime("%Y%m%dT%H%M%S%z")
@@ -670,7 +671,7 @@ def _span_daily(replay_dirs: Sequence[Path], start: str, end: str) -> pd.DataFra
         frames.append(pd.read_parquet(path))
     daily = frames[0] if len(frames) == 1 else pd.concat(frames, ignore_index=True)
     days = _trade_date_keys(daily)
-    return daily[(days >= _date_key(start)) & (days <= _date_key(end))].copy()
+    return daily[(days >= yyyymmdd(start)) & (days <= yyyymmdd(end))].copy()
 
 
 def _span_corporate_actions(
@@ -690,7 +691,7 @@ def _trade_date_keys(frame: pd.DataFrame) -> pd.Series:
     """``YYYYMMDD`` of every row's ``trade_date``, parsed once per distinct value."""
 
     column = frame["trade_date"]
-    return column.map({value: _date_key(value) for value in column.unique()})
+    return column.map({value: yyyymmdd(value) for value in column.unique()})
 
 
 class PITDailyEvaluationBackend:
@@ -788,7 +789,7 @@ class PITDailyEvaluationBackend:
             # Broker-side ex-date truth only: it is not a Timeview domain and
             # never reaches the strategy.
             corporate_actions = _span_corporate_actions(replay_dirs, replay_manifests)
-            replay_end = _date_key(request.end)
+            replay_end = yyyymmdd(request.end)
             trade_days = sorted(set(_trade_date_keys(daily)))
             if max_days is not None:
                 trade_days = trade_days[:max_days]
@@ -874,7 +875,7 @@ class PITDailyEvaluationBackend:
                     executor_factory=executor_factory,
                 ).run(daily, corporate_actions=corporate_actions)
                 record = replay.to_record(
-                    start=_date_key(request.start), end=replay_end
+                    start=yyyymmdd(request.start), end=replay_end
                 )
             finally:
                 nl_service.close()
@@ -994,117 +995,15 @@ class PITDailyEvaluationBackend:
                 raise ValueError("EvaluationRequest replay_ref is not a replay slot")
             if str(replay.get("label") or "") != request.mode:
                 raise ValueError("EvaluationRequest mode does not match its immutable replay slot")
-        if str(replays[0].get("period_start")) != _date_key(request.start) or str(
+        if str(replays[0].get("period_start")) != yyyymmdd(request.start) or str(
             replays[-1].get("period_end")
-        ) != _date_key(request.end):
+        ) != yyyymmdd(request.end):
             raise ValueError("EvaluationRequest range does not match its immutable replay slot")
         _require_continuous_slots(replay_dirs, replays)
         snapshot_id = str(decision.get("snapshot_id") or "")
         if snapshot_id != request.snapshot.snapshot_id:
             raise ValueError("EvaluationRequest snapshot_id does not match decision manifest")
         return decision, replays
-
-
-class PaperPITData:
-    """One-day Paper adapter over the same pinned release and Timeview contract."""
-
-    def __init__(
-        self,
-        provider: ResearchPITSnapshotProvider,
-        *,
-        trade_date: str,
-        runtime_root: str | Path,
-        nl_llm=None,
-        nl_config: NLConfig | None = None,
-        nl_failure_policy: str = "return_error_with_audit",
-        max_intraday_row_group_rows: int = 2_000_000,
-    ) -> None:
-        day = _date_key(trade_date)
-        prior = [value for value in provider.trading_days if value < day]
-        if not prior:
-            raise RuntimeError(f"Paper PIT requires a prior trading day before {day}")
-        prior_day = datetime.strptime(prior[-1], "%Y%m%d").replace(tzinfo=CN_TZ).date()
-        decision_time = datetime.combine(prior_day, time(23, 59, 59), tzinfo=CN_TZ)
-        self.bundle = provider.prepare(
-            phase="paper",
-            start=day,
-            end=day,
-            decision_time=decision_time,
-        )
-        self.snapshot_dir = Path(self.bundle.decision_ref).resolve(strict=True)
-        self.replay_dir = Path(self.bundle.replay_ref).resolve(strict=True)
-        _require_read_only_tree(self.snapshot_dir)
-        replay_manifest = load_snapshot_manifest(self.replay_dir)
-        frames = _load_replay_frames(
-            self.replay_dir,
-            generation_id=self.bundle.generation_id,
-            replay_manifest=replay_manifest,
-            cache=provider._replay_frame_cache,
-        )
-        self.daily = frames["daily"]
-        self.daily = self.daily[self.daily["trade_date"].map(_date_key) == day].copy()
-        if self.daily.empty:
-            raise RuntimeError(f"Paper PIT replay slot has no daily market rows for {day}")
-        # The slot's ex-date truth for the Paper Broker, refused for a slot that
-        # predates ex-date settlement exactly as a formal replay refuses it.
-        self.corporate_actions = load_slot_corporate_actions(self.replay_dir, replay_manifest)
-        runtime = Path(runtime_root).resolve() / day
-        runtime.mkdir(parents=True, exist_ok=True)
-        self.asof_dir = runtime / "asof"
-        minute_path = self.replay_dir / "intraday_1min.parquet"
-        self.minute_source = (
-            HistoricalMinuteSource(
-                minute_path,
-                max_row_group_rows=max_intraday_row_group_rows,
-            )
-            if minute_path.exists() and pq.ParquetFile(minute_path).metadata.num_rows
-            else None
-        )
-        self.timeview = Timeview(
-            host_dir=self.asof_dir,
-            snapshot_dir=self.snapshot_dir,
-            replay_frames={key: value for key, value in frames.items() if key != "daily"}
-            | {"daily": self.daily},
-            replay_text_library_dir=self.replay_dir / "text_library",
-            incremental_domains={"intraday_1min"} if self.minute_source is not None else None,
-            # Paper inference timestamps are supplied by the live caller rather
-            # than one frozen StrategySchedule, so no schedule-bound part stash
-            # can be reused safely here.
-            stash_dir=None,
-        )
-        self._lock = _AsOfReadOnlyView(self.asof_dir)
-        self._lock.lock()
-        self.nl_service = NLService.from_snapshot(
-            self.asof_dir,
-            llm=nl_llm,
-            # Paper replays exactly one trade date.
-            config=(nl_config or NLConfig()).for_replay(1),
-            failure_policy=nl_failure_policy,
-        )
-        self._refreshed: set[str] = set()
-
-    def context_data(self, inference_at: datetime) -> StrategyDataView:
-        key = inference_at.isoformat()
-        if key in self._refreshed:
-            raise RuntimeError(f"Paper Timeview refresh was requested twice: {key}")
-        self._refreshed.add(key)
-        self._lock.unlock_directories()
-        try:
-            if self.minute_source is not None:
-                self.minute_source.append_visible(self.timeview, inference_at)
-            path, version = self.timeview.refresh(pd.Timestamp(inference_at))
-        finally:
-            self._lock.lock()
-        return StrategyDataView(str(self.snapshot_dir), path, version)
-
-    def execution_price(self, symbol: str, when: datetime) -> float | None:
-        if self.minute_source is None:
-            return None
-        return self.minute_source.price_at(symbol, when)
-
-    def close(self) -> None:
-        self.nl_service.close()
-        self._lock.lock()
 
 
 def _revision_models_dir(models_path: Path | None) -> Path | None:
@@ -1470,7 +1369,7 @@ def prebuild_asof_stash(
     # Written only once the whole window has been replayed, so a prebuild
     # killed mid-window leaves no record and the next one resumes the build.
     for slot, (slot_start, slot_end) in zip(slots, windows, strict=True):
-        first, last = _date_key(slot_start), _date_key(slot_end)
+        first, last = yyyymmdd(slot_start), yyyymmdd(slot_end)
         write_json_atomic(
             slot.stash_dir / _STASH_PREBUILD_RECORD,
             {
@@ -1810,10 +1709,6 @@ def _cn_timestamp(value: object) -> pd.Timestamp:
     return stamp.tz_convert(CN_TZ)
 
 
-def _date_key(value: object) -> str:
-    return pd.Timestamp(str(value)).strftime("%Y%m%d")
-
-
 def _result_json(result_ref: str | Path) -> Path:
     """The ``result.json`` a result reference names, directory or file."""
 
@@ -1846,7 +1741,6 @@ __all__ = [
     "REPLAY_SOURCE_LABEL",
     "HistoricalMinuteSource",
     "PITDailyEvaluationBackend",
-    "PaperPITData",
     "ResearchPITSnapshotProvider",
     "prebuild_asof_stash",
     "required_release_raw_datasets",

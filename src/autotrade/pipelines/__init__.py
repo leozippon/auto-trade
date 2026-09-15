@@ -21,7 +21,6 @@ from .experiment import (
 )
 from .ledger import ExperimentLedger
 from .pit_backend import (
-    PaperPITData,
     ResearchPITSnapshotProvider,
 )
 
@@ -31,7 +30,6 @@ __all__ = [
     "EvaluationResult",
     "ExperimentLedger",
     "FrozenArtifact",
-    "PaperPITData",
     "ResearchPITSnapshotProvider",
     "RollingExperimentConfig",
     "RollingExperimentPipeline",

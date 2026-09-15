@@ -58,7 +58,6 @@ HOST_RUN_MANIFEST_NAME = "host_run_manifest.json"
 _UNREADABLE_LIBRARY = "curated memory library is unreadable"
 _UNREADABLE_TIER = "graduated memory cannot be resolved"
 _UNREADABLE_EXPERIMENT = "experiment state is unreadable"
-_UNREADABLE_MANIFEST = "run manifest is unreadable"
 _UNREADABLE_SNAPSHOT = "operating memory snapshot is unreadable"
 
 

@@ -10,8 +10,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 
-from autotrade.environment.data.summary import HOST_PATH_RE
-
 
 def metrics(summary: dict[str, object] | None) -> dict[str, object] | None:
     if not summary:
@@ -67,10 +65,6 @@ _BENCHMARK_KEYS = (
     "neutralized_excess_return",
     "neutralized_excess_method",
 )
-
-
-def _visible_metrics(value: object) -> dict[str, object] | None:
-    return agent_visible_metrics(value if isinstance(value, dict) else None)
 
 
 def agent_visible_metrics(summary: dict[str, object] | None) -> dict[str, object] | None:
@@ -145,24 +139,3 @@ def allowed_keys(block: object, keys: Sequence[str]) -> dict[str, object] | None
     if not isinstance(block, Mapping):
         return None
     return {key: block.get(key) for key in keys if key in block}
-
-
-# One line of a failed control's reason is enough to decide what to do about
-# it, and the ledger keeps the full string either way.
-PARENT_CONTROL_ERROR_MAX_CHARS = 400
-
-
-def parent_control_error_text(value: object) -> str | None:
-    """A Fold-era parent control's failure reason as the console shows it.
-
-    Host paths are redacted and the text is bounded.
-    """
-
-    if not isinstance(value, str):
-        return None
-    text = HOST_PATH_RE.sub("[host_path]", value).strip()
-    if not text:
-        return None
-    if len(text) > PARENT_CONTROL_ERROR_MAX_CHARS:
-        text = text[: PARENT_CONTROL_ERROR_MAX_CHARS - 1] + "…"
-    return text

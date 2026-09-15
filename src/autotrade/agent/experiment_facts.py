@@ -412,17 +412,6 @@ def _runtime_tool_facts(
     available = sorted(name for name, record in tools.items() if _as_mapping(record).get("available") is True)
     missing = sorted(name for name, record in tools.items() if _as_mapping(record).get("available") is False)
     sandbox_spec = _as_mapping(runtime_env.get("sandbox_spec")) or _as_mapping(manifest.get("sandbox_spec"))
-    sandbox_runtime = _as_mapping(manifest.get("sandbox_runtime"))
-    proxy_aliases = [
-        str(item.get("container_env"))
-        for item in _as_list(sandbox_runtime.get("active_env_aliases"))
-        if isinstance(item, Mapping) and str(item.get("container_env", "")).startswith("AT_PROXY_")
-    ]
-    active_env_passthrough = [
-        str(name)
-        for name in _as_list(sandbox_runtime.get("active_env_passthrough"))
-        if str(name).strip()
-    ]
     network = runtime_env.get("network") or sandbox_spec.get("network")
     return compact_mapping(
         {
@@ -431,8 +420,6 @@ def _runtime_tool_facts(
             "cli_tools_available": available,
             "cli_tools_missing": missing,
             "network_mode": network,
-            "credential_env_names_active": active_env_passthrough,
-            "proxy_alias_names_active": proxy_aliases,
             "network_install_policy": {
                 "session": "no_network_prebuilt_dependencies_only",
             },

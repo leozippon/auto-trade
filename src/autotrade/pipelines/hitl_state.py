@@ -34,7 +34,6 @@ PARAMS_NAME = "params.json"
 CONTROL_NAME = "control.json"
 STATUS_NAME = "status.json"
 SCHEDULE_NAME = "schedule.json"
-ANALYSIS_DIR_NAME = "analysis"
 LIVE_RUN_STATES = {"running_session"}
 
 # The persistent WebUI creation contract.  The form and manager both read
