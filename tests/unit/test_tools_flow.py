@@ -64,8 +64,6 @@ def build_sandbox(root: Path) -> tuple[SandboxPaths, SearchRoots, SafeWorkspace]
         paths.agent / "output",
         paths.agent / "models",
         paths.current_snapshot,
-        paths.train,
-        paths.valid,
         paths.artifacts,
         paths.parent_output,
         paths.parent_model_artifacts,
@@ -75,11 +73,9 @@ def build_sandbox(root: Path) -> tuple[SandboxPaths, SearchRoots, SafeWorkspace]
         directory.mkdir(parents=True, exist_ok=True)
     (paths.agent / "output" / "README.md").write_text("readonly\n", encoding="utf-8")
     # Mounted read-only roots are offered only when populated, as they are
-    # in a real Fold; a hidden marker keeps them non-empty without showing
+    # in a real session; a hidden marker keeps them non-empty without showing
     # up in glob/grep results.
-    for mounted in (
-        paths.current_snapshot, paths.train, paths.valid, paths.parent_output, paths.parent_model_artifacts
-    ):
+    for mounted in (paths.current_snapshot, paths.parent_output, paths.parent_model_artifacts):
         (mounted / ".mounted").write_text("", encoding="utf-8")
     workspace = SafeWorkspace(paths.agent)
     return paths, SearchRoots(workspace, paths=paths), workspace

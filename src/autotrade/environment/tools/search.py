@@ -61,8 +61,6 @@ SEARCH_ROOTS = (
     "output",
     "models",
     "snapshot",
-    "train",
-    "valid",
     "artifacts",
     "parent_output",
     "parent_models",
@@ -72,14 +70,12 @@ GREP_OUTPUT_MODES = ("content", "files", "count")
 # Read-only mounts populated before the session starts: offered only when
 # non-empty (a local session may mount no snapshot). ``artifacts``/``steps`` fill
 # during the session and are offered whenever they exist.
-_MOUNTED_ROOTS = frozenset({"snapshot", "train", "valid", "parent_output", "parent_models"})
+_MOUNTED_ROOTS = frozenset({"snapshot", "parent_output", "parent_models"})
 # Roots that live outside the writable workspace tree; resolved from the
 # sandbox layout when one is available.
 _LAYOUT_ROOTS = {
     # The decision view bound into the container as /mnt/snapshot.
     "snapshot": "current_snapshot",
-    "train": "train",
-    "valid": "valid",
     "artifacts": "artifacts",
     "parent_output": "parent_output",
     "parent_models": "parent_model_artifacts",

@@ -87,8 +87,8 @@ RUNTIME_CACHE_SUFFIXES = (".pyc", ".pyo")
 # outcome, ``compute_return_stats`` writes the return/order/timing block, and
 # ``NLService.counters`` writes the ``nl_*`` block. A key that nothing populates
 # does not belong in this tuple — it would advertise telemetry that never
-# arrives. The Fold tool layer also uses it to decide which structured (dict)
-# summary values are worth carrying into the run manifest at all.
+# arrives. The run manifest also uses it to decide which structured (dict)
+# summary values of a completed Validation are worth carrying at all.
 AGENT_VISIBLE_BACKTEST_SUMMARY_KEYS = (
     "result_name",
     "mode",
@@ -161,22 +161,6 @@ class SandboxPaths:
     """
 
     root: Path
-
-    @property
-    def snapshots(self) -> Path:
-        return self.root / "snapshots"
-
-    @property
-    def train(self) -> Path:
-        return self.snapshots / "train"
-
-    @property
-    def valid(self) -> Path:
-        return self.snapshots / "valid"
-
-    @property
-    def test(self) -> Path:
-        return self.snapshots / "test"
 
     @property
     def snapshot(self) -> Path:

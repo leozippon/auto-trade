@@ -247,8 +247,8 @@ class LocalSandbox:
 
     def prepare_layout(self) -> SandboxPaths:
         for path in (
-            self.paths.train, self.paths.valid, self.paths.test, self.paths.snapshot_views,
-            self.paths.current_snapshot, self.paths.parent_output, self.paths.parent_model_artifacts,
+            self.paths.snapshot_views, self.paths.current_snapshot,
+            self.paths.parent_output, self.paths.parent_model_artifacts,
             self.paths.steps, self.paths.workspace,
             self.paths.runtime,
         ):
@@ -256,7 +256,6 @@ class LocalSandbox:
         self.paths.agent.chmod(0o555)
         self.paths.artifacts.chmod(0o755)
         self.paths.runtime.chmod(0o700)
-        self.paths.test.chmod(0o700)
         self.paths.workspace.chmod(0o777)
         self.write_runtime_env(mode="local")
         return self.paths
@@ -385,8 +384,6 @@ class DockerSandbox:
         ):
             command.extend(["--env", f"{key}={value}"])
         command.extend([
-            "--mount", f"type=bind,src={paths.train},dst=/mnt/snapshots/train,readonly",
-            "--mount", f"type=bind,src={paths.valid},dst=/mnt/snapshots/valid,readonly",
             "--mount", f"type=bind,src={paths.current_snapshot},dst=/mnt/snapshot,readonly",
             "--mount", f"type=bind,src={paths.artifacts},dst=/mnt/artifacts,readonly",
             "--mount", f"type=bind,src={SCREENING_TOOL_SOURCE},dst={SCREENING_TOOL_MOUNT},readonly",

@@ -26,10 +26,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_CACHE_DIR=/tmp/cache/pip \
     MPLCONFIGDIR=/tmp/cache/mpl
 
-# Pre-bake the C/C++/Fortran build toolchain so a fold that pins a source-only
-# wheel (e.g. torch_scatter/torch_sparse) builds without declaring apt_packages.
-# Without this, the base python:3.11-slim has no compiler and such installs fail
-# at build time (the root cause of an early GNN-transfer run's image-build error).
+# Pre-bake the C/C++/Fortran build toolchain so source-only wheels (e.g.
+# torch_scatter/torch_sparse) build in this image. Without this, the base
+# python:3.11-slim has no compiler and such installs fail at build time (the
+# root cause of an early GNN-transfer run's image-build error).
 # No Debian python3-dev: source builds compile against the base image's own
 # /usr/local/include/python3.11 headers; the distro package would only drag in
 # an unusable second interpreter's (3.13) headers and runtime.
@@ -89,7 +89,7 @@ RUN curl -fL --retry 8 --retry-all-errors --retry-delay 3 --connect-timeout 30 -
 
 # CUDA build toolchain (nvcc + headers/dev libs), completing the pre-baked
 # compiler policy above for CUDA-extension source builds (torch_scatter,
-# torch_sparse, pyg_lib, ...) declared via sandbox_environment.json. Version
+# torch_sparse, pyg_lib, ...). Version
 # matches the torch==2.10.0 wheel's CUDA 12.8. Installed from the fixed-version
 # TLS runfile because the NVIDIA apt repo key is rejected by Debian trixie's
 # Sequoia apt policy. Nsight profilers are dropped to keep the layer lean. Placed
@@ -183,18 +183,19 @@ RUN useradd --create-home --uid 61000 agent
 
 # Fixed mount points (populated by docker run -v / --mount). /strategy receives
 # the read-only bind of the frozen strategy package (the directory holding
-# main.py and its sibling modules); /opt/autotrade_runtime receives trusted
-# host modules for the Agent session.
-RUN mkdir -p /mnt/snapshots/train /mnt/snapshots/valid /mnt/snapshot \
+# main.py and its sibling modules); the Agent session binds its decision view
+# at /mnt/snapshot.
+RUN mkdir -p /mnt/snapshot \
         /mnt/artifacts /mnt/agent/workspace \
-        /mnt/runtime /opt/autotrade_runtime /strategy /strategy-data \
+        /mnt/runtime /strategy /strategy-data \
     && chown root:root /mnt
 
 # Image default user stays root (the build never switches away); the executor
 # selects the non-root agent user per-process at docker run time.
 WORKDIR /mnt/agent
 
-# Fold/Explore static-check advisor. Runtime is offline, so pin globally here.
+# Static-check advisor for the Agent session. Runtime is offline, so pin
+# globally here.
 # Same layer verifies the binary; do not install via pip or at session start.
 RUN npm install -g --prefix /usr/local --no-fund --no-audit --registry "${NPM_CONFIG_REGISTRY}" pyright@1.1.411 \
     && /usr/local/bin/pyright --version

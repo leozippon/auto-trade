@@ -457,8 +457,7 @@ def test_llm_research_sessions_mount_only_the_research_end_view_and_hand_off_pri
         root = options.work_root / options.experiment_id / str(record["run_id"])
         view = json.loads((root / "runtime" / "current_snapshot" / "manifest.json").read_text(encoding="utf-8"))
         assert (view["kind"], view["decision_time"]) == ("decision_input", research_anchor)
-        assert not any((root / "snapshots" / "train").iterdir())
-        assert not any((root / "snapshots" / "valid").iterdir())
+        assert not (root / "snapshots").exists()
         manifests = [
             json.loads(path.read_text(encoding="utf-8"))
             for path in root.rglob("manifest.json")

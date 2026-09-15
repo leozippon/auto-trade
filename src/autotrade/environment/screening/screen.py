@@ -212,8 +212,7 @@ def open_view(snapshot_dir: Path) -> dict[str, object]:
     manifest_path = Path(snapshot_dir) / "manifest.json"
     if not manifest_path.is_file():
         raise ScreenError(
-            f"{snapshot_dir} has no manifest.json, so it is not a snapshot view (the empty "
-            f"/mnt/snapshots/train and /mnt/snapshots/valid slots are not evaluable); "
+            f"{snapshot_dir} has no manifest.json, so it is not a snapshot view; "
             f"use the decision view at {DEFAULT_SNAPSHOT}"
         )
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
