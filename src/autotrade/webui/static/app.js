@@ -86,8 +86,8 @@ const ENVIRONMENT_STAGE_ICONS = {
   verdict: "⚖",
   publishing: "💾",
 };
-// Stages with no Agent session to watch: the session panel shows the stage
-// instead of a live Trace. The forward replay runs with no Agent at all.
+// Stages with no Agent session to watch: no live Trace is offered for them.
+// The forward replay runs with no Agent at all.
 const PREP_ENVIRONMENT_STAGES = new Set([
   "preparing_session",
   "pit_snapshot",
@@ -112,7 +112,6 @@ const RESUMABLE_STATES = [
 // hitl_state.LIVE_RUN_STATES. Keep in sync or the console offers message
 // injection on a session the backend will refuse.
 const LIVE_RUN_STATES = new Set(["running_session"]);
-const ACTIVE_SESSION_STATES = LIVE_RUN_STATES;
 const INJECT_MESSAGE_MAX_CHARS = 8192;
 const INJECT_MESSAGE_QUEUED_NOTE = "已排队，将在 Agent 下一安全点生效";
 const TERMINAL_INJECT_STATES = new Set([
@@ -313,7 +312,7 @@ function sessionDurationNode(detail, session, prefix = "", className = "") {
   const isLive =
     !isFixed &&
     detail.worker_alive &&
-    ACTIVE_SESSION_STATES.has(status.state) &&
+    LIVE_RUN_STATES.has(status.state) &&
     Number.isFinite(startedAt);
   const update = () => {
     const seconds = isFixed
@@ -388,6 +387,7 @@ function fmtPct(value, digits = 2) {
   return `${(value * 100).toFixed(digits)}%`;
 }
 
+/* Any two-decimal figure: a Sharpe, an IR, a probability, a beta. */
 function fmtSharpe(value) {
   return value === null || value === undefined || Number.isNaN(value)
     ? "—"
@@ -1155,14 +1155,14 @@ function fmtMonth(yyyymmdd) {
 
 /* A calendar range as a bar, with segments filled inside it and tick labels
    under it. Null when the range has no two dates. */
-function spanBar(start, end, segments, ticks, { mini = false } = {}) {
+function spanBar(start, end, segments, ticks, { mini = false, pending = false } = {}) {
   const from = dayIndex(start),
     to = dayIndex(end);
   if (!Number.isFinite(from) || !Number.isFinite(to) || to <= from) return null;
   const at = (date) => Math.max(0, Math.min(100, ((dayIndex(date) - from) / (to - from)) * 100));
   return el(
     "span",
-    { class: `span-bar${mini ? " mini" : ""}` },
+    { class: `span-bar${mini ? " mini" : ""}${pending ? " pending" : ""}` },
     el(
       "span",
       { class: "span-track" },
@@ -1189,7 +1189,8 @@ function spanBar(start, end, segments, ticks, { mini = false } = {}) {
 }
 
 /* The one continuous replay: the forward slice, then Held-out. `focus` fills
-   only that slice, for the process row that stands for it. */
+   only that slice, for the process row that stands for it; `pending` draws
+   the slices as outlines until the replay has actually run. */
 function replaySpanBar(replay, focus, opts) {
   if (!replay || !replay.start || !replay.replay_end) return null;
   const segments = [
@@ -1206,6 +1207,17 @@ function replaySpanBar(replay, focus, opts) {
   return spanBar(replay.start, replay.replay_end, segments, ticks, opts);
 }
 
+/* A labelled fact as a chip, and a row of the chips that exist: a figure the
+   record does not carry is not a chip at all. */
+function chip(text, title) {
+  return el("span", { class: "stat-chip", title: title || null }, text);
+}
+
+function chipsRow(chips) {
+  const present = chips.filter(Boolean);
+  return present.length ? el("div", { class: "stats-chips section-gap" }, ...present) : null;
+}
+
 /* Criteria as one line each: a pass or fail mark, the criterion, the measured
    value and the threshold it is held to. `ok: null` is an unmeasured one. */
 function checklist(items) {
@@ -1215,7 +1227,7 @@ function checklist(items) {
     ...items.map((item) =>
       el(
         "div",
-        { class: `check-item ${item.ok === null ? "na" : item.ok ? "ok" : "fail"}` },
+        { class: `check-row ${item.ok === null ? "na" : item.ok ? "ok" : "fail"}` },
         el("span", { class: "check-mark", "aria-hidden": "true" }, item.ok === null ? "–" : item.ok ? "✓" : "✕"),
         el("span", { class: "check-label" }, item.label),
         el("span", { class: "check-value" }, item.value ?? "—"),
@@ -1495,16 +1507,27 @@ function pipelineStepper(item) {
 
 /* ---------------- home page ---------------- */
 
+/* A page render that outlives the reader's stay on that page must not
+   write $main or install its poll: by then the newer page owns both. Every
+   render captures the hash it was started for and stops after its fetch when
+   the hash has moved. */
+function navigatedAway(hash) {
+  return location.hash !== hash;
+}
+
 async function renderHomePage() {
+  const hash = location.hash;
   $main.innerHTML = '<div class="loading">加载中…</div>';
   $topbarRight.innerHTML = "";
   let payload;
   try {
     payload = await api("/api/experiments");
   } catch (error) {
+    if (navigatedAway(hash)) return;
     $main.innerHTML = `<div class="empty">加载失败：${escapeHtml(error.message)}</div>`;
     return;
   }
+  if (navigatedAway(hash)) return;
   $topbarRight.append(
     el(
       "span",
@@ -1651,7 +1674,7 @@ function evidenceTiles(item) {
     {
       label: "冻结门 去偏 Sharpe 概率",
       value: best.deflated_sharpe_probability,
-      fmt: fmtProb,
+      fmt: fmtSharpe,
       title: `试验 ${best.trials ?? "—"} 个`,
     },
   ]);
@@ -2184,6 +2207,13 @@ function isSessionDone(detail, session) {
     : Boolean(session.record);
 }
 
+/* The experiment the hash names, if it names one: a step switch inside the
+   experiment keeps it, so a render or poll of that experiment goes on. */
+function hashExperimentId() {
+  const match = location.hash.match(/^#\/exp\/([^/]+)/);
+  return match ? decodeURIComponent(match[1]) : null;
+}
+
 async function renderDetailPage(experimentId, selectedKey) {
   $main.innerHTML = '<div class="loading">加载中…</div>';
   $topbarRight.innerHTML = "";
@@ -2191,9 +2221,11 @@ async function renderDetailPage(experimentId, selectedKey) {
   try {
     detail = await api(`/api/experiments/${encodeURIComponent(experimentId)}`);
   } catch (error) {
+    if (hashExperimentId() !== experimentId) return;
     $main.innerHTML = `<div class="empty">加载失败：${escapeHtml(error.message)}</div>`;
     return;
   }
+  if (hashExperimentId() !== experimentId) return;
   const status = detail.status || {};
   const rows = processRows(detail);
   if (!selectedKey || !rows.some((row) => row.key === selectedKey))
@@ -2254,10 +2286,12 @@ async function renderDetailPage(experimentId, selectedKey) {
   if (barHost)
     liveTimers.push(setInterval(() => tickElapsedClocks(barHost), 1000));
   pollTimer = setInterval(async () => {
+    if (hashExperimentId() !== experimentId) return;
     try {
       const fresh = await api(
         `/api/experiments/${encodeURIComponent(experimentId)}/status`,
       );
+      if (hashExperimentId() !== experimentId) return;
       const raw = fresh.status || {};
       // A state change, a new session or a new run rebuilds the page; stage
       // flips inside one run update the control panel in place (the live
@@ -2281,7 +2315,6 @@ async function renderDetailPage(experimentId, selectedKey) {
    a figure, a date span or a live stage. `filled` says whether the step has a
    right-pane detail yet. */
 function processRows(detail) {
-  const status = detail.status || {};
   const session = (detail.sessions || []).find((entry) => entry.kind === "research");
   const record = (session || {}).record;
   const research = researchStep(detail);
@@ -2297,17 +2330,15 @@ function processRows(detail) {
         ? el(
             "span",
             { title: "IR 最高的全区间验证：研究期中性化超额与去偏 Sharpe 概率" },
-            `最佳候选 ${fmtPct(best.neutralized_excess)} · DSR ${fmtProb(best.deflated_sharpe_probability)}`,
+            `最佳候选 ${fmtPct(best.neutralized_excess)} · DSR ${fmtSharpe(best.deflated_sharpe_probability)}`,
           )
         : `验证 ${record.validations.length} 次 · 无全区间`
-      : live
-        ? activityNode(status, { elapsed: false, className: "activity" })
-        : null,
-    frozen: frozen
-      ? `${fmtPct(frozen.neutralized_excess)} · DSR ${fmtProb(frozen.deflated_sharpe_probability)}`
       : null,
-    forward: replaySpanBar(replay, "forward", { mini: true }),
-    heldout: replaySpanBar(replay, "heldout", { mini: true }),
+    frozen: frozen
+      ? `${fmtPct(frozen.neutralized_excess)} · DSR ${fmtSharpe(frozen.deflated_sharpe_probability)}`
+      : null,
+    forward: replaySpanBar(replay, "forward", { mini: true, pending: !detail.forward }),
+    heldout: replaySpanBar(replay, "heldout", { mini: true, pending: !detail.forward }),
     verdict: null,
   };
   const filled = {
@@ -2367,10 +2398,6 @@ function processListPanel(detail, selectedKey) {
     el("h4", {}, "研究流程"),
     el("div", { class: "stepper vertical" }, ...rows),
   );
-}
-
-function fmtProb(value) {
-  return value === null || value === undefined ? "—" : Number(value).toFixed(2);
 }
 
 // One row per statistic of the forward and Held-out slices (verdict.py).
@@ -2478,18 +2505,17 @@ function verdictPanel(detail) {
       "div",
       { class: "panel section-gap" },
       head,
+      // The replay's own stage is the control panel's line.
       el(
         "div",
         { class: "prep-indicator" },
         replaying ? el("span", { class: "spinner" }) : null,
         el("span", {}, STEP_STATUS_LABELS.sealed),
-        replaying ? activityNode(status, { elapsed: false }) : null,
       ),
     );
   }
   const replay = forward.replay || {};
   const refits = forward.refits_executed || {};
-  const chip = (text, title) => el("span", { class: "stat-chip", title: title || null }, text);
   return el(
     "div",
     { class: "panel section-gap" },
@@ -2505,14 +2531,14 @@ function verdictPanel(detail) {
     ),
     forward.error ? el("div", { class: "hint warn" }, `策略报错：${forward.error}`) : null,
     sliceTable(forward),
-    forward.result
-      ? el(
-          "div",
-          { class: "stats-chips section-gap" },
-          chip(`重训 前推 ${refits.forward ?? "—"} · Held-out ${refits.heldout ?? "—"}`),
-          chip(`前推 null 分位 ${fmtProb(forward.null_percentile)}`, "前推期超额在随机名单回放中的分位"),
-        )
-      : null,
+    chipsRow([
+      Number.isFinite(refits.forward) && Number.isFinite(refits.heldout)
+        ? chip(`重训 前推 ${refits.forward} · Held-out ${refits.heldout}`)
+        : null,
+      forward.null_percentile === null || forward.null_percentile === undefined
+        ? null
+        : chip(`前推 null 分位 ${fmtSharpe(forward.null_percentile)}`, "前推期超额在随机名单回放中的分位"),
+    ]),
     forward.result
       ? el(
           "div",
@@ -2547,7 +2573,6 @@ function verdictPanel(detail) {
 function frozenPanel(detail) {
   const frozen = detail.frozen;
   if (!frozen) return null;
-  const chip = (text, title) => el("span", { class: "stat-chip", title: title || null }, text);
   const panel = el(
     "div",
     { class: "panel section-gap" },
@@ -2563,37 +2588,45 @@ function frozenPanel(detail) {
         "⬇ 下载 ZIP",
       ),
     ),
-    statTilesRow([
-      {
-        label: "研究期中性化超额（年化）",
-        value: fmtPct(frozen.neutralized_excess),
-        cls: signCls(frozen.neutralized_excess),
-      },
-      { label: "残差跟踪误差", value: fmtPct(frozen.tracking_error) },
-      {
-        label: "IR",
-        value: fmtSharpe(frozen.information_ratio),
-        cls: signCls(frozen.information_ratio),
-      },
-      {
-        label: "去偏 Sharpe 概率",
-        value: fmtProb(frozen.deflated_sharpe_probability),
-        title: `试验 ${frozen.trials ?? "—"} 个 · SR* ${fmtSharpe(frozen.sharpe_star)}`,
-      },
-      {
-        label: "前推可检出超额",
-        value: fmtPct(frozen.forward_mde),
-        title: "前推检验以 80% 功效能检出的最小年化中性化超额",
-      },
-    ]),
-    el(
-      "div",
-      { class: "stats-chips section-gap" },
-      chip(`全区间验证 ${frozen.full_span_validations ?? "—"}`),
-      chip(`null 分位 ${fmtProb(frozen.null_percentile)}`, "前推期超额在随机名单回放中的分位"),
-      chip(frozen.fit ? `fit · 重训 ${frozen.refit_period || "—"}` : "无 fit"),
-      chip(`节点 ${String(frozen.source_step_id || "—").split("__").pop()}`, frozen.source_step_id || null),
+    statTilesRow(
+      presentTiles([
+        { label: "研究期中性化超额（年化）", value: frozen.neutralized_excess, fmt: fmtPct, signed: true },
+        { label: "残差跟踪误差", value: frozen.tracking_error, fmt: fmtPct },
+        { label: "IR", value: frozen.information_ratio, fmt: fmtSharpe, signed: true },
+        {
+          label: "去偏 Sharpe 概率",
+          value: frozen.deflated_sharpe_probability,
+          fmt: fmtSharpe,
+          title:
+            [
+              frozen.trials === null || frozen.trials === undefined ? null : `试验 ${frozen.trials} 个`,
+              frozen.sharpe_star === null || frozen.sharpe_star === undefined
+                ? null
+                : `SR* ${fmtSharpe(frozen.sharpe_star)}`,
+            ]
+              .filter(Boolean)
+              .join(" · ") || null,
+        },
+        {
+          label: "前推可检出超额",
+          value: frozen.forward_mde,
+          fmt: fmtPct,
+          title: "前推检验以 80% 功效能检出的最小年化中性化超额",
+        },
+      ]),
     ),
+    chipsRow([
+      frozen.full_span_validations === null || frozen.full_span_validations === undefined
+        ? null
+        : chip(`全区间验证 ${frozen.full_span_validations}`),
+      frozen.null_percentile === null || frozen.null_percentile === undefined
+        ? null
+        : chip(`null 分位 ${fmtSharpe(frozen.null_percentile)}`, "前推期超额在随机名单回放中的分位"),
+      chip(frozen.fit ? ["fit", frozen.refit_period ? `重训 ${frozen.refit_period}` : null].filter(Boolean).join(" · ") : "无 fit"),
+      frozen.source_step_id
+        ? chip(`节点 ${String(frozen.source_step_id).split("__").pop()}`, frozen.source_step_id)
+        : null,
+    ]),
     subWindowSection("研究期分年度表现", frozen.blocks),
     frozen.result
       ? el(
@@ -2898,12 +2931,12 @@ function controlBar(detail, ...lead) {
 /* A step with nothing recorded yet says only where the pipeline stands on it,
    in the process list's own words. */
 function stepPlaceholder(detail, key, title) {
-  const step = pipelineTailSteps(detail).find((row) => row.key === key);
+  const step = pipelineSteps(detail).find((row) => row.key === key);
   return el(
     "div",
     { class: "panel" },
     el("h4", {}, title),
-    el("div", { class: "empty" }, (step || {}).status || "—"),
+    el("div", { class: "empty" }, step.status),
   );
 }
 
@@ -2928,30 +2961,25 @@ function sessionDetailPanel(detail, selectedKey) {
   const session = (detail.sessions || []).find(
     (entry) => entry.key === selectedKey,
   );
+  // An arm with no plan yet (never started) serves no sessions at all.
   if (!session) {
-    panel.append(
-      el(
-        "div",
-        { class: "panel" },
-        el("div", { class: "empty" }, "请选择左侧的流程步骤"),
-      ),
-    );
+    panel.append(stepPlaceholder(detail, selectedKey, sessionLabel(selectedKey)));
     return panel;
   }
   const status = detail.status || {};
   const isCurrent = status.session_key === session.key && detail.worker_alive;
-  const running = isCurrent && ACTIVE_SESSION_STATES.has(detail.state);
-  const preparing = isPrepEnvironment(status, detail.state);
+  const running = isCurrent && LIVE_RUN_STATES.has(detail.state);
   const done = isSessionDone(detail, session);
   if (session.kind === "forward") {
-    if (isCurrent && !done) panel.append(environmentStagePanel(detail));
     panel.append(forwardSessionPanel(detail, session));
     return panel;
   }
   if (done) panel.append(researchSessionPanel(detail, session));
   else if (isCurrent) {
-    if (preparing) panel.append(environmentStagePanel(detail));
-    else if (running) panel.append(liveTracePanel(detail, session));
+    // Before the Agent speaks (PIT, Sandbox) there is no trace to follow;
+    // the control panel already says which preparation stage the worker is in.
+    if (running && !isPrepEnvironment(status, detail.state))
+      panel.append(liveTracePanel(detail, session));
     panel.append(injectMessagePanel(detail, session));
   } else {
     if (detail.kind === "hitl" && detail.stage === "research")
@@ -2978,7 +3006,7 @@ function forwardSessionPanel(detail, session) {
     "div",
     { class: "panel section-gap" },
     panelHead(STEP_LABELS.forward, el("span", { class: "badge kind" }, step.status)),
-    replaySpanBar(session.replay) || el("div", { class: "empty" }, "—"),
+    replaySpanBar(session.replay, null, { pending: !detail.forward }),
   );
 }
 
@@ -3004,7 +3032,7 @@ function freezeGateChecklist(gate) {
         ? null
         : !failed.has("freeze_deflated_sharpe_below_threshold"),
       label: reasonLabel("freeze_deflated_sharpe_below_threshold"),
-      value: fmtProb(gate.deflated_sharpe_probability),
+      value: fmtSharpe(gate.deflated_sharpe_probability),
       threshold: "≥ 0.5",
     },
   ]);
@@ -3038,24 +3066,20 @@ function researchSessionPanel(detail, session) {
         : null,
     ),
     statTilesRow([
-      {
-        label: "最佳候选中性化超额",
-        value: fmtPct(best.neutralized_excess),
-        cls: signCls(best.neutralized_excess),
-        title: "本会话 IR 最高的全区间验证，研究期年化",
-      },
-      {
-        label: "IR",
-        value: fmtSharpe(best.information_ratio),
-        cls: signCls(best.information_ratio),
-      },
-      {
-        label: "去偏 Sharpe 概率",
-        value: fmtProb(best.deflated_sharpe_probability),
-      },
+      ...presentTiles([
+        {
+          label: "最佳候选中性化超额",
+          value: best.neutralized_excess,
+          fmt: fmtPct,
+          signed: true,
+          title: "本会话 IR 最高的全区间验证，研究期年化",
+        },
+        { label: "IR", value: best.information_ratio, fmt: fmtSharpe, signed: true },
+        { label: "去偏 Sharpe 概率", value: best.deflated_sharpe_probability, fmt: fmtSharpe },
+      ]),
       {
         label: "验证 / 累计试验",
-        value: `${record.validations.length} / ${record.trials_to_date ?? "—"}`,
+        value: `${record.validations.length} / ${record.trials_to_date}`,
       },
     ]),
     gate
@@ -3129,55 +3153,17 @@ function researchSessionPanel(detail, session) {
       ),
     ),
     statsHost,
-    traceReplayNode(detail.experiment_id, record.run_ref, detail),
   );
+  // A session whose trace file is gone has neither a replay nor counters.
+  if (!record.trace) return panel;
+  panel.append(traceReplayNode(detail.experiment_id, record.run_ref, detail));
   api(
     `/api/experiments/${encodeURIComponent(detail.experiment_id)}/trace/stats?run_id=${encodeURIComponent(record.run_ref)}`,
   )
     .then((stats) => statsHost.append(statsChipsRow(stats)))
     .catch(() => {
-      /* a session that crashed before its trace has none */
+      /* the trace vanished between the listing and this read */
     });
-  return panel;
-}
-
-function environmentStagePanel(detail) {
-  const value = el(
-    "div",
-    { class: "prep-indicator" },
-    el("span", { class: "spinner" }),
-    el("span", {}),
-  );
-  const panel = el(
-    "div",
-    { class: "panel" },
-    el("h4", {}, "Environment 运行状态"),
-    value,
-  );
-  let status = detail.status || {};
-  const update = () => {
-    const stage = status.environment_stage;
-    const started = Date.parse(
-      status.environment_stage_started_at || status.session_started_at || "",
-    );
-    const elapsed = Number.isFinite(started)
-      ? ` · ${fmtDuration((Date.now() - started) / 1000)}`
-      : "";
-    value.lastChild.textContent = `${ENVIRONMENT_STAGE_LABELS[stage] || stage || "处理中"}${elapsed}`;
-  };
-  update();
-  const timer = setInterval(async () => {
-    try {
-      const fresh = await api(
-        `/api/experiments/${encodeURIComponent(detail.experiment_id)}/status`,
-      );
-      status = fresh.status || status;
-      if (value.isConnected) update();
-    } catch {
-      /* preserve last confirmed phase */
-    }
-  }, 2500);
-  liveTimers.push(timer);
   return panel;
 }
 
@@ -3779,12 +3765,6 @@ function liveTracePanel(detail, session) {
     { class: "panel section-gap" },
     el("h4", {}, `实时 Agent Trace · ${sessionLabel(session.key)}`),
   );
-  const statusLine = el(
-    "div",
-    { class: "prep-indicator" },
-    el("span", { class: "spinner" }),
-    el("span", {}, "准备运行状态…"),
-  );
   const statsHost = el("div", {});
   const box = el("div", { class: "trace-box" });
   const auto = el("input", { type: "checkbox", checked: "checked" });
@@ -3795,7 +3775,6 @@ function liveTracePanel(detail, session) {
       el("span", { class: "badge state-running_session" }, "实时"),
       el("label", {}, auto, " 自动滚动"),
     ),
-    statusLine,
     statsHost,
     box,
   );
@@ -3816,6 +3795,9 @@ function liveTracePanel(detail, session) {
       const page = await api(
         `/api/experiments/${experimentId}/trace/blocks${query}`,
       );
+      // The panel may have been replaced while the request was in flight;
+      // a stream opened now would outlive the page that owns liveSources.
+      if (!box.isConnected) return;
       lastBlocks = renderTraceBlocks(box, page.blocks || [], {
         truncated: Boolean(page.history_truncated),
         eof: streamDone,
@@ -3829,7 +3811,7 @@ function liveTracePanel(detail, session) {
       }
       if (claimStream) openStream(Number(page.next_offset) || 0);
     } catch {
-      if (claimStream) openStream(0);
+      if (claimStream && box.isConnected) openStream(0);
     }
   };
   const scheduleRefresh = () => {
@@ -3854,41 +3836,9 @@ function liveTracePanel(detail, session) {
   };
   refreshBlocks();
 
-  let currentStatus = detail.status || {};
-  const update = () => {
-    const stage = currentStatus.environment_stage;
-    const started = Date.parse(
-      currentStatus.environment_stage_started_at ||
-        currentStatus.session_started_at ||
-        "",
-    );
-    const elapsed = Number.isFinite(started)
-      ? ` · ${fmtDuration((Date.now() - started) / 1000)}`
-      : "";
-    const progress = currentStatus.environment_progress || {};
-    const done = Number(progress.completed ?? progress.day_index);
-    const total = Number(progress.total ?? progress.total_days);
-    const measured =
-      Number.isFinite(done) && Number.isFinite(total) && total > 0
-        ? ` · ${done}/${total}`
-        : "";
-    const action = progress.tool
-      ? ` · ${progress.tool}`
-      : progress.call_index
-        ? ` · 第 ${progress.call_index} 次调用`
-        : "";
-    statusLine.lastChild.textContent = `${ENVIRONMENT_STAGE_LABELS[stage] || stage || "准备 AgentTrace"}${measured}${action}${elapsed}`;
-    tickElapsedClocks(box);
-  };
-  update();
+  // What the worker is doing is the control panel's line; the trace keeps
+  // its own clocks ticking and its counters fresh.
   const pollStats = async () => {
-    try {
-      const fresh = await api(`/api/experiments/${experimentId}/status`);
-      currentStatus = fresh.status || currentStatus;
-      update();
-    } catch {
-      /* preserve the last truthful state */
-    }
     try {
       const stats = await api(
         `/api/experiments/${experimentId}/trace/stats${query}`,
@@ -3899,9 +3849,10 @@ function liveTracePanel(detail, session) {
     }
     await refreshBlocks();
   };
-  // Two cadences, as the console has always had: the elapsed readout ticks
-  // every second, the network polls stay at five.
-  liveTimers.push(setInterval(update, 1000), setInterval(pollStats, 5000));
+  liveTimers.push(
+    setInterval(() => tickElapsedClocks(box), 1000),
+    setInterval(pollStats, 5000),
+  );
   pollStats();
   return panel;
 }
@@ -4870,7 +4821,9 @@ function stepTreeRow(
     el(
       "span",
       { class: "step-label" },
-      `${node.session_key || "—"} · ${node.result_name || node.node_id}`,
+      [node.session_key ? sessionLabel(node.session_key) : null, node.result_name || node.node_id]
+        .filter(Boolean)
+        .join(" · "),
     ),
     collapsed ? el("span", { class: "step-chip" }, `+${childCount}`) : null,
     Number.isFinite(metrics.total_return)
@@ -4914,7 +4867,7 @@ function showStepTip(detail, node, row) {
   tip.innerHTML = "";
   tip.append(
     el("div", { class: "step-tip-title" }, node.node_id),
-    line("会话", node.session_key || "—"),
+    node.session_key ? line("会话", sessionLabel(node.session_key)) : null,
     line("验证收益", fmtPct(m.total_return)),
     line("多头收益", fmtPct(m.long_return)),
     line(
@@ -4954,7 +4907,7 @@ function openStepNodeModal(detail, payload, node) {
       "table",
       { class: "kv" },
       kvRow("节点", node.node_id),
-      kvRow("会话", node.session_key || "—"),
+      node.session_key ? kvRow("会话", sessionLabel(node.session_key)) : null,
       kvRow(
         "验证收益",
         el("span", { class: signCls(m.total_return) }, fmtPct(m.total_return)),
@@ -5044,43 +4997,22 @@ function styleCard(expId, result) {
       host.querySelector(".hint").remove();
       const reg = payload.benchmark_regression || {};
       const style = payload.style || {};
-      host.append(
-        statTilesRow([
-          {
-            label: "β（vs 沪深300）",
-            value:
-              reg.beta === null || reg.beta === undefined
-                ? "—"
-                : Number(reg.beta).toFixed(2),
-          },
-          {
-            label: "年化 α",
-            value: fmtPct(reg.alpha_annualized),
-            cls: signCls(reg.alpha_annualized),
-          },
-          {
-            label: "R²",
-            value:
-              reg.r2 === null || reg.r2 === undefined
-                ? "—"
-                : Number(reg.r2).toFixed(2),
-          },
-          { label: "样本天数", value: String(reg.n_days ?? "—") },
-        ]),
-      );
-      const regressionReasons = {
-        benchmark_unavailable:
-          "回放槽中没有可用的沪深300同窗数据，基准回归为空。",
-        insufficient_overlapping_days:
-          "与沪深300重叠的交易日不足 8 天，β、α 与 R² 不计算。",
-        benchmark_variance_zero:
-          "同窗沪深300收益没有可回归的波动，β、α 与 R² 不计算。",
-      };
-      if (!reg.available && regressionReasons[reg.reason]) {
+      const tiles = presentTiles([
+        { label: "β（vs 沪深300）", value: reg.beta, fmt: fmtSharpe },
+        { label: "年化 α", value: reg.alpha_annualized, fmt: fmtPct, signed: true },
+        { label: "R²", value: reg.r2, fmt: fmtSharpe },
+        { label: "样本天数", value: reg.n_days, fmt: String },
+      ]);
+      if (tiles.length) host.append(statTilesRow(tiles));
+      if (!reg.available)
         host.append(
-          el("div", { class: "hint" }, regressionReasons[reg.reason]),
+          chipsRow([
+            chip(
+              `基准回归 · ${STYLE_REASON_LABELS[reg.reason] || "不可算"}`,
+              STYLE_REASON_TITLES[reg.reason] || null,
+            ),
+          ]),
         );
-      }
       const tilts = style.tilts;
       if (style.available && tilts) {
         const rows = [
@@ -5113,57 +5045,55 @@ function styleCard(expId, result) {
             ),
           );
         }
-        host.append(list);
         host.append(
-          el(
-            "div",
-            { class: "hint" },
-            `持仓覆盖 ${style.days} 个交易日 ｜ 日均 ${style.avg_names} 只 ｜ 日均多头 ${fmtAmount(style.avg_long_gross)}`,
-          ),
-        );
-        if ((style.industries || []).length) {
-          host.append(
-            el(
-              "div",
-              { class: "hint" },
-              "行业净权重（申万一级）：" +
-                style.industries
-                  .map((i) => `${i.name} ${(i.weight * 100).toFixed(0)}%`)
-                  .join(" ｜ "),
+          list,
+          chipsRow([
+            chip(`持仓 ${style.days} 日`, "有持仓的交易日数"),
+            chip(`日均 ${style.avg_names} 只`),
+            chip(`日均多头 ${fmtAmount(style.avg_long_gross)}`),
+            ...(style.industries || []).map((row) =>
+              chip(`${row.name} ${(row.weight * 100).toFixed(0)}%`, "行业净权重（申万一级）"),
             ),
-          );
-        }
+          ]),
+        );
       } else {
-        const styleReasons = {
-          style_columns_unavailable:
-            "回放槽缺少市值、PB 或换手截面，风格暴露为空。",
-          no_holdings: "该回放没有持仓，风格暴露为空。",
-          no_valued_holdings:
-            "该回放的持仓没有可用收盘价，风格暴露为空。",
-        };
         host.append(
-          el(
-            "div",
-            { class: "hint" },
-            styleReasons[style.reason] || "该回放没有可计算的风格暴露。",
-          ),
+          chipsRow([
+            chip(
+              `风格暴露 · ${STYLE_REASON_LABELS[style.reason] || "不可算"}`,
+              STYLE_REASON_TITLES[style.reason] || null,
+            ),
+          ]),
         );
       }
     })
     .catch((error) => {
       const missing = /没有已落盘|404/.test(error.message);
       host.append(
-        el(
-          "div",
-          { class: "hint" },
-          missing
-            ? "该运行未落盘风格归因数据，无风格分析可展示。"
-            : `风格分析加载失败：${error.message}`,
-        ),
+        el("div", { class: "hint" }, missing ? "无风格归因数据" : `加载失败：${error.message}`),
       );
     });
   return host;
 }
+
+/* Why a style figure is absent, as a label on the chip and the full reason
+   in its tooltip (environment/replay/style.py). */
+const STYLE_REASON_LABELS = {
+  benchmark_unavailable: "无同窗沪深300",
+  insufficient_overlapping_days: "重叠交易日不足 8 天",
+  benchmark_variance_zero: "沪深300 无波动",
+  style_columns_unavailable: "缺市值 / PB / 换手截面",
+  no_holdings: "无持仓",
+  no_valued_holdings: "持仓无收盘价",
+};
+const STYLE_REASON_TITLES = {
+  benchmark_unavailable: "回放槽中没有可用的沪深300同窗数据，基准回归为空",
+  insufficient_overlapping_days: "与沪深300重叠的交易日不足 8 天，β、α 与 R² 不计算",
+  benchmark_variance_zero: "同窗沪深300收益没有可回归的波动，β、α 与 R² 不计算",
+  style_columns_unavailable: "回放槽缺少市值、PB 或换手截面，风格暴露为空",
+  no_holdings: "该回放没有持仓，风格暴露为空",
+  no_valued_holdings: "该回放的持仓没有可用收盘价，风格暴露为空",
+};
 
 /* Render scheduled and matched ISO timestamps in Asia/Shanghai. */
 function fmtOrderCell(key, value) {
@@ -5199,12 +5129,20 @@ function ordersNode(experimentId, result) {
       const rows = data.rows || [];
       const stats = data.stats || {};
       const byAction = stats.by_action || {};
+      const shown = rows.slice(0, 80);
       body.replaceChildren(
         el(
           "div",
           { class: "control-bar" },
           el("span", { class: "mode-note" }, data.result),
           el("span", { class: "spacer" }),
+          data.row_count > shown.length
+            ? el(
+                "span",
+                { class: "mode-note", title: "表格只列出前几条，完整明细请导出 CSV" },
+                `前 ${shown.length} / ${data.row_count} 条`,
+              )
+            : null,
           el("a", { class: "btn small", href: `${base}/orders.csv` }, "⬇ 导出 CSV"),
         ),
         el(
@@ -5243,7 +5181,6 @@ function ordersNode(experimentId, result) {
           ),
         );
       if (!rows.length) return;
-      const shown = rows.slice(0, 80);
       body.append(
         dataTable(
           ORDER_TABLE_COLUMNS.map(([, label, num]) => ({ label, num })),
@@ -5255,14 +5192,6 @@ function ordersNode(experimentId, result) {
           { box: "limit section-gap" },
         ),
       );
-      if (data.row_count > shown.length)
-        body.append(
-          el(
-            "div",
-            { class: "hint" },
-            `表格显示前 ${shown.length} 条，共 ${data.row_count} 条 —— 完整明细请导出 CSV。`,
-          ),
-        );
     })
     .catch((error) => {
       body.replaceChildren(
@@ -5308,6 +5237,7 @@ function sameSelection(left, right) {
 }
 
 async function renderMemoryPage() {
+  const hash = location.hash;
   memoryView = null;
   $main.innerHTML = '<div class="loading">加载运行记忆…</div>';
   $topbarRight.replaceChildren();
@@ -5315,11 +5245,13 @@ async function renderMemoryPage() {
   try {
     payload = await api("/api/memory");
   } catch (error) {
+    if (navigatedAway(hash)) return;
     $main.replaceChildren(
       el("div", { class: "empty" }, `加载失败：${error.message}`),
     );
     return;
   }
+  if (navigatedAway(hash)) return;
   memoryView = {
     payload,
     filter: "",
@@ -5357,7 +5289,6 @@ async function renderMemoryPage() {
         ),
       ),
       memorySection(
-        null,
         "记忆条目",
         null,
         el(
@@ -5374,7 +5305,6 @@ async function renderMemoryPage() {
         ),
       ),
       memorySection(
-        "memory-issues",
         "问题反馈",
         "处置：scripts/experiments/resolve_issue.py",
         el("div", { class: "panel" }, issueFilterBar(), memoryView.issuesHost),
@@ -5389,10 +5319,10 @@ async function renderMemoryPage() {
 
 /* One pattern for every section on this page: a heading, a tooltip for its
    one operational note, then the panels. */
-function memorySection(id, title, note, ...panels) {
+function memorySection(title, note, ...panels) {
   return el(
     "section",
-    { class: "memory-section", id },
+    { class: "memory-section" },
     el("div", { class: "memory-section-head" }, el("h3", { title: note || null }, title)),
     ...panels,
   );
@@ -5566,7 +5496,7 @@ async function renderIssueReports() {
         "div",
         { class: "empty compact" },
         resolved && !withResolved
-          ? `没有未处置的报告（已处置 ${resolved} 条，勾选上方可显示）`
+          ? `无未处置报告 · 已处置 ${resolved} 条`
           : "会话没有报告过问题",
       ),
     );
@@ -6348,16 +6278,22 @@ async function renderTradingPage(env, book) {
   const hash = book ? bookHash(env, book) : `#/trading/${env}`;
   const load = book ? () => fetchBookBundle(env, book) : () => api(`/api/trading/${env}/books`);
   const render = book ? renderBookBundle : renderBooksOverview;
+  let bundle;
   try {
-    render(await load());
+    bundle = await load();
   } catch (error) {
+    if (navigatedAway(hash)) return;
     $main.replaceChildren(el("div", { class: "empty" }, `加载失败：${error.message}`));
     return;
   }
+  if (navigatedAway(hash)) return;
+  render(bundle);
   pollTimer = setInterval(async () => {
-    if (!tradingView || location.hash !== hash) return;
+    if (!tradingView || navigatedAway(hash)) return;
     try {
-      render(await load());
+      const fresh = await load();
+      if (!tradingView || navigatedAway(hash)) return;
+      render(fresh);
     } catch {
       /* keep last view */
     }
@@ -6633,7 +6569,9 @@ function paperSignalPanel(payload, identity) {
         `数据截至 ${fmtDate(signal.data_through)}`,
         signal.generation_id ? `发布 ${signal.generation_id.slice(0, 8)}` : null,
         !signal.fitted && lastFit ? `拟合于 ${fmtDate(lastFit)}` : null,
-        `重放 ${signal.replayed_matching_journal ?? "—"}/${signal.replayed_calls ?? "—"}`,
+        Number.isFinite(signal.replayed_calls) && Number.isFinite(signal.replayed_matching_journal)
+          ? `重放 ${signal.replayed_matching_journal}/${signal.replayed_calls}`
+          : null,
       ]
         .filter(Boolean)
         .join(" · "),

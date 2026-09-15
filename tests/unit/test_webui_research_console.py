@@ -45,7 +45,7 @@ def test_a_researching_arm_shows_its_plan_and_nothing_frozen(tmp_path: Path) -> 
     build_arm(tmp_path, "arm", "research")
     detail = experiment_detail(tmp_path, "arm")
     assert detail["stage"] == "research"
-    assert (detail["research_recorded"], detail["research_total"]) == (0, 1)
+    assert detail["research_outcome"] is None
     assert detail["verdict"] is None
     assert detail["forward"] is None
     assert detail["frozen"] is None
@@ -73,8 +73,10 @@ def test_the_best_candidate_carries_the_deflated_sharpe_the_gate_gave_the_nomine
     assert record["best"]["trials"] == 3
     # Research results are development evidence: readable as they land.
     client = TestClient(create_app(tmp_path, tmp_path))
-    name = record["validations"][0]["result"]
+    name = Path(str(_records(tmp_path / "arm")[0]["steps"][0]["validation_result_ref"])).parent.name
     assert client.get(f"/api/experiments/arm/results/{name}/equity").status_code == 200
+    # The record says whether its trace is on disk; this synthetic arm has none.
+    assert record["trace"] is False
     ledger_gate = _records(tmp_path / "arm")[0]["freeze_gate"]
     assert record["best"]["deflated_sharpe_probability"] == pytest.approx(
         ledger_gate["deflated_sharpe"]["deflated_sharpe_probability"]
@@ -90,7 +92,7 @@ def test_a_frozen_arm_is_sealed_until_its_verdict_exists(tmp_path: Path) -> None
     directory = build_arm(tmp_path, "arm", "sealed", alive=True)
     detail = experiment_detail(tmp_path, "arm")
     assert detail["stage"] == "forward"
-    assert detail["current_session"] == "forward"
+    assert detail["status"]["session_key"] == "forward"
     assert detail["verdict"] is None
     assert detail["forward"] is None
     assert detail["paper_candidate"] is None
@@ -200,6 +202,10 @@ def test_the_listing_carries_the_budget_and_the_research_outcome(tmp_path: Path)
         + "\n",
         encoding="utf-8",
     )
+    judged_traces = tmp_path / "judged/artifacts/traces"
+    judged_traces.mkdir(parents=True)
+    (judged_traces / "run_research.jsonl").write_text('{"event_type": "session_start"}\n', encoding="utf-8")
+    assert experiment_detail(tmp_path, "judged")["sessions"][0]["record"]["trace"] is True
     rows = {row["experiment_id"]: row for row in list_experiments(tmp_path)}
     assert rows["live"]["budget"] == {"inference_seconds": 3600.0, "llm_calls": 6400.0, "replay_years": 96.0, "null_controls": 12.0}
     assert rows["live"]["budget_used"] == {"inference_seconds": 900.0, "llm_calls": 7, "replay_years": 4, "null_controls": 0}
@@ -216,7 +222,7 @@ def test_an_arm_with_no_plan_yet_lists_as_created(tmp_path: Path) -> None:
     row = summarize_experiment(tmp_path / "arm")
     assert row["state"] == "created"
     assert row["stage"] == "research"
-    assert (row["research_recorded"], row["research_total"]) == (0, None)
+    assert row["research_outcome"] is None
     assert experiment_detail(tmp_path, "arm")["sessions"] == []
 
 

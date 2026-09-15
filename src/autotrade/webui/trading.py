@@ -50,7 +50,6 @@ from autotrade.paper.storage import read_jsonl
 from .equity import curve_entry
 
 TRADING_ENVS = ("paper",)
-ENV_LABELS = {"paper": "Paper 模拟"}
 # A snapshot older than this is served but flagged: the account data is the
 # last one the engine wrote, not the current one. The book writes once per
 # weekday before the open, so a weekend gap (~72 h) is normal and four days
@@ -165,9 +164,7 @@ def book_payload(repo_root: Path, book: str, env: str = "paper") -> dict[str, ob
             "artifact_id": _text(record.get("artifact_id")),
             "candidate_source": _text(record.get("candidate_source")),
             "note": _text(record.get("note")),
-            "created_at": _utc_iso(_to_utc(record.get("created_at"))),
             "initial_cash": _number(_mapping(record.get("profile")).get("initial_cash")),
-            "inference_time": _text(_mapping(record.get("schedule")).get("inference_time")),
         }
     state = state or {}
     return {
@@ -195,8 +192,6 @@ def _sheet(root: Path, state: dict[str, object], trade_date: str) -> dict[str, o
         "fitted": decision.get("fitted") is True,
         "replayed_calls": _count(decision.get("replayed_calls")),
         "replayed_matching_journal": _count(decision.get("replayed_matching_journal")),
-        "equity": _number(sheet["equity"]),
-        "cash": _number(sheet["cash"]),
         "orders": [
             {
                 "execute_at": _text(row["execute_at"]),
@@ -220,7 +215,6 @@ def _sheet(root: Path, state: dict[str, object], trade_date: str) -> dict[str, o
             }
             for row in sheet["target"]
         ],
-        "target_value": _number(sheet["target_value"]),
         "cash_after": _number(sheet["cash_after"]),
         "cash_weight": _number(sheet["cash_weight"]),
         "skipped_lines": int(sheet["skipped_lines"]),
@@ -312,7 +306,7 @@ def performance_payload(repo_root: Path, book: str, env: str = "paper") -> dict[
     root = book_dir(repo_root, book, env)
     record, error = _read_json(root / BOOK_NAME)
     initial = _number(_mapping(_mapping(record).get("profile")).get("initial_cash"))
-    rows, skipped = read_jsonl(root / EQUITY_JOURNAL_NAME)
+    rows, _skipped = read_jsonl(root / EQUITY_JOURNAL_NAME)
     # One row per settled day: equity marked at that day's close and the cash
     # after that day's fills, as the engine journals them together.
     curve = [
@@ -321,7 +315,7 @@ def performance_payload(repo_root: Path, book: str, env: str = "paper") -> dict[
         if (day := _text(row.get("trade_date"))) and _valid_date(day)
         and (equity := _number(row.get("equity"))) is not None
     ]
-    base = {"env": env, "skipped_lines": skipped, "min_days": MIN_STATISTICS_DAYS}
+    base = {"env": env, "min_days": MIN_STATISTICS_DAYS}
     if error or initial is None or initial <= 0 or not curve:
         state = "unreadable" if error else "absent"
         return {**base, "state": state, "error": error, "chart": None, "statistics": None, "benchmark_error": None}
@@ -403,11 +397,7 @@ def _project_snapshot(raw: dict[str, object]) -> dict[str, object]:
     equity = _number(raw.get("equity"))
     rows = [_project_position(row, equity) for row in positions if isinstance(row, dict)]
     return {
-        "source": _text(raw.get("source")),
-        "trade_date": _text(raw.get("trade_date")),
         "settled_through": _text(raw.get("settled_through")),
-        "phase": _text(raw.get("phase")),
-        "strategy_revision": _text(raw.get("strategy_revision")),
         "cash": _number(raw.get("cash")),
         "equity": equity,
         "market_value": sum(row["market_value"] or 0.0 for row in rows),
@@ -496,7 +486,6 @@ def book_status(repo_root: Path, book: str, env: str = "paper") -> dict[str, obj
         # Exported so the SPA can quote the alert threshold without
         # duplicating the constant client-side.
         "stale_threshold_seconds": STALE_SNAPSHOT_ALERT_SECONDS,
-        "trade_date": latest,
     }
 
 
@@ -505,7 +494,7 @@ def books_payload(repo_root: Path, env: str = "paper") -> dict[str, object]:
     try:
         books = list_books(env_dir(repo_root, env))
     except RuntimeError as exc:  # a root still in the single-book layout
-        return {"env": env, "label": ENV_LABELS[env], "state": "unreadable", "error": str(exc), "books": []}
+        return {"env": env, "state": "unreadable", "error": str(exc), "books": []}
     rows = []
     for book in books:
         identity = book_payload(repo_root, book, env)
@@ -538,7 +527,7 @@ def books_payload(repo_root: Path, env: str = "paper") -> dict[str, object]:
             "state": status["state"],
             "error": status["error"],
         })
-    return {"env": env, "label": ENV_LABELS[env], "state": "ok" if rows else "absent", "error": None, "books": rows}
+    return {"env": env, "state": "ok" if rows else "absent", "error": None, "books": rows}
 
 
 def health_payload(repo_root: Path, env: str = "paper") -> dict[str, object]:

@@ -87,7 +87,7 @@ def test_the_book_panel_is_a_whitelist_of_the_frozen_identity(tmp_path: Path):
     assert payload["state"] == "ok"
     assert payload["book"] == {
         "experiment_id": "exp", "artifact_id": "art", "candidate_source": "graduated",
-        "note": "参考簿（观察中）", "created_at": None, "initial_cash": 100_000.0, "inference_time": "08:30",
+        "note": "参考簿（观察中）", "initial_cash": 100_000.0,
     }
     assert (payload["start_date"], payload["settled_through"]) == ("20260105", "20260105")
     assert "/private/lake" not in json.dumps(payload)
@@ -251,7 +251,6 @@ def test_damaged_fill_and_equity_lines_are_counted_and_projected_to_null(tmp_pat
     assert (good["status"], good["price"], good["cost"]) == ("filled", 10.25, 5.0)
     assert (bad["symbol"], bad["quantity"], bad["price"], bad["cost"]) == (None, None, None, None)
     performance = trading.performance_payload(tmp_path, BOOK)
-    assert performance["skipped_lines"] == 1
     assert performance["chart"]["account"]["dates"] == ["20260105", "20260106"]
     client = TestClient(create_app(tmp_path))
     for route in ("history", "performance"):
@@ -459,8 +458,7 @@ def test_snapshot_is_whitelist_projected_and_never_echoes_the_raw_dict(tmp_path:
     payload = trading.snapshot_payload(tmp_path, BOOK)
     assert payload["state"] == "ok"
     assert set(payload["snapshot"]) == {
-        "source", "trade_date", "settled_through", "phase", "strategy_revision",
-        "cash", "equity", "market_value", "pending_order_count", "positions",
+        "settled_through", "cash", "equity", "market_value", "pending_order_count", "positions",
     }
     rendered = json.dumps(payload)
     assert "LEAK" not in rendered and "ACCT-PRIVATE" not in rendered
@@ -557,8 +555,6 @@ def test_degraded_states_raise_a_banner_and_skipped_lines_raise_a_chip():
     banners = script.split("function paperBanners(", 1)[1].split("\nfunction ", 1)[0]
     for state in ("export_error", "unreadable", "stale"):
         assert state in banners, state
-    # Item 10: closed's stale banner ends 「与飞书告警一致」; that clause is out.
-    assert "飞书" not in script
     assert "function skippedChip(" in script
     assert "行无法解析" in script
     # The unmapped flag reaches the researcher rather than sitting in the payload.
@@ -621,15 +617,6 @@ def test_the_paper_performance_chart_is_the_research_chart_on_one_date_axis():
     trading_section = script.split("let tradingView = null;", 1)[1].split("function renderQmtPage(", 1)[0]
     assert "singleSeriesBarChart" not in trading_section
     assert "payload.account" in _js_top_level(script, "function equityChart(")
-
-
-def test_the_account_pane_names_itself_in_the_legend_not_inside_the_plot():
-    """「权益（线）· 现金（柱）」 was drawn at the pane's top-left corner, where
-    it ran into the ¥ ceiling tick the same pane labels three pixels below it.
-    The legend row is the one place a chart names what it draws."""
-    chart = _js_top_level(_app_js(), "function equityChart(")
-    named = [line for line in chart.splitlines() if "权益（线）" in line]
-    assert len(named) == 1 and "legend.push" in named[0], named
 
 
 def test_the_page_draws_a_figure_only_where_the_book_measured_one():

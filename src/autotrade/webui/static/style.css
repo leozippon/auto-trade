@@ -871,6 +871,18 @@ progress.progress.done::-moz-progress-bar {
 .span-tick:last-child {
  transform: translateX(-100%);
 }
+/* A replay that has not run yet: the slices as outlines, not as progress. */
+.span-bar.pending .span-fill {
+ box-sizing: border-box;
+ background: transparent;
+ border: 1.5px dashed var(--accent);
+}
+.span-bar.pending .span-fill.alt {
+ border-color: color-mix(in srgb, var(--accent) 55%, var(--panel));
+}
+.span-bar.pending .span-fill.dim {
+ border-color: var(--input-border);
+}
 .span-bar.mini {
  display: inline-block;
  width: 10rem;
@@ -892,7 +904,7 @@ progress.progress.done::-moz-progress-bar {
  max-width: 44rem;
  font-size: 0.875rem;
 }
-.check-item {
+.check-row {
  display: flex;
  align-items: baseline;
  gap: 0.5rem;
@@ -904,20 +916,20 @@ progress.progress.done::-moz-progress-bar {
  text-align: center;
  font-weight: 700;
 }
-.check-item.ok .check-mark {
+.check-row.ok .check-mark {
  color: var(--ok);
 }
-.check-item.fail .check-mark {
+.check-row.fail .check-mark {
  color: var(--bad);
 }
-.check-item.na {
+.check-row.na {
  color: var(--muted);
 }
 .check-label {
  flex: 1 1 auto;
  min-width: 0;
 }
-.check-item.fail .check-label {
+.check-row.fail .check-label {
  color: var(--bad);
 }
 .check-value {
@@ -2885,7 +2897,7 @@ details.issue-evidence > summary:hover {
   grid-column: 1 / -1;
  }
  /* A checklist line breaks after the criterion, keeping the figures together. */
- .check-item {
+ .check-row {
   flex-wrap: wrap;
  }
  .check-label {

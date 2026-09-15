@@ -344,7 +344,9 @@ def test_live_trace_panel_claims_stream_before_await() -> None:
     claim_at = refresh.find("streamOpening = true")
     await_at = refresh.find("await ")
     assert 0 <= claim_at < await_at
-    assert refresh.count("if (claimStream) openStream") == 2
+    assert refresh.count("openStream(") == 2
+    # A panel replaced during the fetch opens no stream.
+    assert refresh.count("box.isConnected") == 2
     assert source.count("new EventSource") == 1
     assert "refreshBlocks();" in source
     assert "await refreshBlocks();" in source
@@ -369,8 +371,9 @@ def test_control_panel_shows_skills_only_once_published_and_no_stage_prose() -> 
     # The stepper says where the arm is; the panel carries the badge, the
     # activity and the budget bars, never a session count.
     assert "研究会话" not in script
-    assert "budgetBars(fresh.budget_used, detail.budget)" in head
-    assert "activityNode(fresh.status)" in head
+    # One activity renderer, drawn here and nowhere else on the page.
+    assert "activityNode(" in head
+    assert script.count("activityNode(") == 3, "definition, control panel, card"
 
 
 def test_index_html_loads_app_js_without_inlining_trace_chips() -> None:

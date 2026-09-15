@@ -242,7 +242,6 @@ def _forward_view(
         return None
     null = _mapping(record.get("null_control"))
     return {
-        "status": record.get("status"),
         "error": identity.public_text(str(record.get("error") or "")) or None,
         "replay": dict(_mapping(record.get("replay"))),
         "result": _result_name(record.get("result_ref")),
@@ -295,11 +294,6 @@ def summarize_experiment(directory: Path) -> dict[str, object]:
         summary.update(
             {
                 "created_at": _created_at(directory, params),
-                "current_session": status.get("session_key"),
-                "session_started_at": status.get("session_started_at"),
-                "environment_stage": status.get("environment_stage"),
-                "environment_stage_started_at": status.get("environment_stage_started_at"),
-                "environment_progress": status.get("environment_progress"),
                 "skills": {"count": skills.count, "files": skills.files, "bytes": skills.bytes},
                 "stage": arm_stage(records),
                 "frozen_session": _frozen_session(records),
@@ -307,11 +301,6 @@ def summarize_experiment(directory: Path) -> dict[str, object]:
                 "research_outcome": next(
                     (row.get("outcome") for row in research_records(records)), None
                 ),
-                "research_recorded": len(research_records(records)),
-                "research_total": sum(
-                    1 for session in identity.sessions if session["kind"] == "research"
-                )
-                or None,
                 "budget": _budget_totals(params),
                 "budget_used": _budget_used(directory, records, raw_status),
                 "verdict": experiment_verdict(records),
@@ -441,12 +430,10 @@ def _step_view(row: Mapping[str, object]) -> dict[str, object]:
     return {
         "step_id": row.get("step_id"),
         "span": row.get("span"),
-        "result": _result_name(row.get("validation_result_ref")),
         "total_return": _number(summary.get("total_return")),
         "sharpe": _number(summary.get("sharpe")),
         "max_drawdown": _number(summary.get("max_drawdown")),
         "neutralized_excess": _number(neutral.get("neutralized_excess")),
-        "tracking_error": _number(neutral.get("tracking_error")),
         "information_ratio": _number(neutral.get("information_ratio")),
     }
 
@@ -515,6 +502,7 @@ def _research_best(records: Sequence[Mapping[str, object]]) -> dict[str, object]
 
 
 def _research_session_view(
+    directory: Path,
     identity: PublicIdentity,
     earlier: Sequence[Mapping[str, object]],
     record: Mapping[str, object],
@@ -528,7 +516,9 @@ def _research_session_view(
         "reason": identity.public_text(str(record.get("reason") or "")) or None,
         "finish_reason": record.get("finish_reason"),
         "run_ref": identity.run_ref(run_id),
-        "trace_ref": identity.trace_ref(run_id),
+        # Whether the last attempt's trace is on disk: the page asks for its
+        # counters and replay only then.
+        "trace": resolve_trace_path(directory, run_id) is not None,
         "run_wall_seconds": _number(record.get("run_wall_seconds")),
         "trials_to_date": record.get("trials_to_date"),
         "nominated_step_id": record.get("nominated_step_id"),
@@ -613,7 +603,7 @@ def experiment_detail(root: Path, experiment_id: str) -> dict[str, object]:
         )
         if position is not None:
             entry["record"] = _research_session_view(
-                identity, research[:position], research[position]
+                directory, identity, research[:position], research[position]
             )
         if planned["kind"] == "forward":
             entry["replay"] = dict(_mapping(planned.get("replay")))

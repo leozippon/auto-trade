@@ -2,8 +2,8 @@
 
 The Agent-visible tree stores the session as an opaque ``session_ref_*`` token.
 The console is the researcher's trusted surface, so it resolves the token back
-to the plan key (``s1``, ``s2``, ...) for display, and marks the node the arm
-froze from the ledger's frozen record.
+to the plan key (``research``) for display, and marks the node the arm froze
+from the ledger's frozen record.
 """
 
 from __future__ import annotations
