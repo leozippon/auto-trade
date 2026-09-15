@@ -26,7 +26,7 @@ from pathlib import Path
 from autotrade.environment.replay.style import STYLE_ARTIFACT_NAME, STYLE_SCHEMA_VERSION
 from autotrade.pipelines.agent_inbox import INBOX_NAME, inbox_public_view
 from autotrade.pipelines.calendar import FULL_SPAN
-from autotrade.pipelines.experiment import freeze_gate_for
+from autotrade.pipelines.experiment import _neutralized, freeze_gate_for
 from autotrade.pipelines.hitl_state import (
     CONTROL_NAME,
     HITL_DIR_NAME,
@@ -48,6 +48,7 @@ from autotrade.pipelines.ledger import (
     research_records,
 )
 from autotrade.pipelines.pit_views_seed import FORWARD_PHASE, RESEARCH_PHASE
+from autotrade.pipelines.session_resume import STEP_SIDECAR_DIR
 from autotrade.pipelines.skills import latest_skills_snapshot
 from autotrade.pipelines.verdict import (
     FORWARD_CONFIDENCE,
@@ -298,7 +299,7 @@ def summarize_experiment(directory: Path) -> dict[str, object]:
         )
         if raw_status is not None:
             summary["status"] = status
-        best = _research_best(records)
+        best = _research_best(directory, records)
         summary.update(
             {
                 "created_at": _created_at(directory, params),
@@ -493,13 +494,18 @@ def _frozen_session(records: Sequence[Mapping[str, object]]) -> str | None:
     return str(row["session_key"]) if row is not None else None
 
 
-def _research_best(records: Sequence[Mapping[str, object]]) -> dict[str, object] | None:
+def _research_best(
+    directory: Path, records: Sequence[Mapping[str, object]]
+) -> dict[str, object] | None:
     """The arm's best full-span candidate so far, for the listing.
 
-    The most recent research session that measured one, through the same
-    :func:`_best_candidate` the experiment page reads, so both surfaces name one
-    number. ``None`` while no recorded session ran a measurable full-span
-    Validation — the card then shows no research evidence rather than a dash.
+    The recorded research session's, through the same :func:`_best_candidate`
+    the experiment page reads, so both surfaces name one number; while the
+    session still runs, the same rule over the Validations it has recorded so
+    far (:func:`_live_steps`), so the card, the tiles and the curve follow the
+    research as it happens and agree with the record once it lands. ``None``
+    while no measurable full-span Validation exists — the card then shows no
+    research evidence rather than a dash.
     """
 
     research = research_records(records)
@@ -508,7 +514,62 @@ def _research_best(records: Sequence[Mapping[str, object]]) -> dict[str, object]
         best = _best_candidate(research[:position], steps)
         if best is not None:
             return {"session_key": research[position].get("session_key"), **best}
-    return None
+    if research:
+        return None
+    best = _live_best(directory)
+    return {"session_key": RESEARCH_SESSION_KEY, **best} if best is not None else None
+
+
+# A recorded Validation is immutable: its sidecar and its result's style file
+# are read once per node and kept for the process lifetime, and the best
+# candidate (with the freeze gate the Pipeline computes for it) is kept per
+# node set, so a listing poll of a running arm re-reads nothing until the
+# session records another node.
+_LIVE_STEP_CACHE: dict[tuple[str, str], dict[str, object]] = {}
+_LIVE_BEST_CACHE: dict[tuple[str, tuple[str, ...]], dict[str, object] | None] = {}
+
+
+def _live_steps(directory: Path) -> list[dict[str, object]]:
+    """The research session's Validations recorded so far, from the host
+    sidecars ``session_resume.record_step_sidecar`` writes, shaped like the
+    ledger's step rows with the neutralised figures the Pipeline records
+    (``experiment._neutralized``), so the same selection applies to both."""
+
+    root = directory / STEP_SIDECAR_DIR
+    if not root.is_dir():
+        return []
+    rows: list[dict[str, object]] = []
+    for path in sorted(root.glob("*.json")):
+        key = (str(directory), path.stem)
+        row = _LIVE_STEP_CACHE.get(key)
+        if row is None:
+            record = read_json(path)
+            reference = str(record.get("result_ref") or "")
+            try:
+                neutralized = _neutralized(reference)
+            except OSError:
+                # The replay's style file is written before its sidecar; a
+                # node whose files are not readable yet is read next time.
+                continue
+            row = {
+                "step_id": record.get("step_id"),
+                "revision_id": record.get("revision_id"),
+                "span": record.get("span"),
+                "summary": dict(_mapping(record.get("summary"))),
+                "validation_result_ref": reference,
+                "neutralized": neutralized,
+            }
+            _LIVE_STEP_CACHE[key] = row
+        rows.append(row)
+    return rows
+
+
+def _live_best(directory: Path) -> dict[str, object] | None:
+    steps = _live_steps(directory)
+    key = (str(directory), tuple(sorted(str(row.get("step_id")) for row in steps)))
+    if key not in _LIVE_BEST_CACHE:
+        _LIVE_BEST_CACHE[key] = _best_candidate([], steps)
+    return _LIVE_BEST_CACHE[key]
 
 
 def _research_result(
@@ -693,14 +754,20 @@ def frozen_strategy_dir(root: Path, experiment_id: str) -> Path:
     return strategy_dir
 
 
-def _ledger_result_refs(records: Sequence[Mapping[str, object]]) -> Iterator[object]:
-    """Every replay result a ledger record names: the research sessions'
-    Validations and, once it is recorded with its verdict, the forward replay."""
+def _ledger_result_refs(
+    directory: Path, records: Sequence[Mapping[str, object]]
+) -> Iterator[object]:
+    """Every replay result the arm has recorded: the research session's
+    Validations — from the ledger once the session is recorded, from the host
+    sidecars while it runs — and, once it is recorded with its verdict, the
+    forward replay. The replay itself has no sidecar, so it stays sealed."""
 
     for record in research_records(records):
         for row in record.get("steps") or ():
             if isinstance(row, Mapping):
                 yield row.get("validation_result_ref")
+    for row in _live_steps(directory):
+        yield row.get("validation_result_ref")
     forward = forward_record(records)
     if forward is not None:
         yield forward.get("result_ref")
@@ -714,7 +781,7 @@ def ledger_result(root: Path, experiment_id: str, name: str) -> Path:
     """
 
     directory = resolve_experiment_dir(root, experiment_id)
-    for reference in _ledger_result_refs(read_ledger_records(directory)):
+    for reference in _ledger_result_refs(directory, read_ledger_records(directory)):
         if _result_name(reference) != name:
             continue
         path = (directory / str(reference)).resolve()

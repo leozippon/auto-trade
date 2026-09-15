@@ -27,7 +27,7 @@ from autotrade.webui.registry import (
 )
 from autotrade.webui.server import create_app
 from autotrade.webui.steps import step_tree_view
-from tests.unit.webui_research_arm import REPLAY, build_arm
+from tests.unit.webui_research_arm import REPLAY, _session_record, _step, build_arm
 
 
 def _records(directory: Path) -> list[dict[str, object]]:
@@ -246,6 +246,82 @@ def test_the_listing_names_the_research_curve_and_the_replay_its_thresholds(tmp_
     assert set(preview) <= set(recorded)
     for key in ("forward_confidence", "recency_months", "min_round_trips", "min_mean_gross", "heldout_tolerance_z"):
         assert recorded[key] == pytest.approx(preview[key]), key
+
+
+def _sidecar(directory: Path, row: dict[str, object]) -> Path:
+    """The host sidecar the session writes for one recorded Validation."""
+
+    path = directory / ".host/steps" / f"{row['step_id']}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "step_id": row["step_id"],
+                "revision_id": row["revision_id"],
+                "span": row["span"],
+                "summary": row["summary"],
+                "result_ref": row["validation_result_ref"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_a_running_session_serves_its_best_candidate_as_the_record_will(tmp_path: Path) -> None:
+    """While the one research session runs, the listing reads the Validations
+    it has recorded so far from the host sidecars and names the best
+    full-span candidate, its curve and its result by the rule the recorded
+    session is read with, so nothing changes when the record lands."""
+
+    directory = build_arm(tmp_path, "arm", "research", alive=True)
+    steps = [
+        _step(directory, "research", 0, edge=0.0005, seed=1),
+        _step(directory, "research", 1, edge=0.002, seed=3),
+        _step(directory, "research", 2, edge=0.001, seed=4, span="Y3"),
+    ]
+    for row in steps:
+        _sidecar(directory, row)
+    live = summarize_experiment(directory)
+    assert live["research_best"]["step_id"] == steps[1]["step_id"]
+    assert live["research_best"]["session_key"] == "research"
+    assert live["research_best"]["trials"] == 3
+    assert live["research_result"] == Path(str(steps[1]["validation_result_ref"])).parent.name
+    client = TestClient(create_app(tmp_path, tmp_path))
+    assert client.get(f"/api/experiments/arm/results/{live['research_result']}/equity").status_code == 200
+    # The replay stays sealed: a result no record or sidecar names is absent.
+    assert client.get("/api/experiments/arm/results/heldout_nope/equity").status_code == 404
+
+    ExperimentLedger(directory / "ledgers/experiment_ledger.jsonl").append(
+        _session_record(
+            "arm",
+            outcome="no_edge",
+            steps=steps,
+            trials_to_date=3,
+            arm_end={"status": "no_deliverable", "reason": "no_edge: nothing survived"},
+        )
+    )
+    recorded = summarize_experiment(directory)
+    assert recorded["research_best"] == live["research_best"]
+    assert recorded["research_result"] == live["research_result"]
+
+
+def test_a_recorded_node_is_read_once_across_listings(tmp_path: Path) -> None:
+    """A Validation is immutable once recorded: its sidecar and style file are
+    read on the first listing and never again, and the best candidate is kept
+    per node set, so a poll re-reads nothing until another node is recorded."""
+
+    directory = build_arm(tmp_path, "arm", "research", alive=True)
+    first = _step(directory, "research", 0, edge=0.002, seed=3)
+    _sidecar(directory, first)
+    before = summarize_experiment(directory)["research_best"]
+    assert before["step_id"] == first["step_id"]
+    (Path(str(first["validation_result_ref"])).parent / "style_analysis.json").unlink()
+    assert summarize_experiment(directory)["research_best"] == before
+    # A newly recorded node is read, and the best is chosen over the new set.
+    second = _step(directory, "research", 1, edge=0.004, seed=5)
+    _sidecar(directory, second)
+    assert summarize_experiment(directory)["research_best"]["step_id"] == second["step_id"]
 
 
 def test_an_arm_with_no_plan_yet_lists_as_created(tmp_path: Path) -> None:
