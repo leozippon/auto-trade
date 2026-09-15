@@ -1476,9 +1476,9 @@ function pipelineSteps(item) {
 function stepNode(step, ...children) {
   return el(
     "span",
-    { class: `step ${step.state}`, title: `${step.label} · ${step.status}` },
-    el("span", { class: "step-dot", "aria-hidden": "true" }),
-    el("span", { class: "step-label" }, step.label),
+    { class: `stepper-node ${step.state}`, title: `${step.label} · ${step.status}` },
+    el("span", { class: "stepper-dot", "aria-hidden": "true" }),
+    el("span", { class: "stepper-label" }, step.label),
     ...children,
   );
 }
@@ -2343,22 +2343,22 @@ function defaultStepKey(detail, rows) {
 function processListPanel(detail, selectedKey) {
   const rows = processRows(detail).map((row) => {
     const status = row.session
-      ? sessionDurationNode(detail, row.session, row.status, "step-status")
-      : el("span", { class: "step-status" }, row.status);
+      ? sessionDurationNode(detail, row.session, row.status, "stepper-status")
+      : el("span", { class: "stepper-status" }, row.status);
     return el(
       "div",
       {
-        class: `step-row ${row.state}${row.key === selectedKey ? " selected" : ""}`,
+        class: `stepper-row ${row.state}${row.key === selectedKey ? " selected" : ""}`,
         "data-key": row.key,
         onclick: () => {
           location.hash = `#/exp/${encodeURIComponent(detail.experiment_id)}/${stepKeyToUrl(row.key)}`;
         },
       },
       el("span", { class: "stepper-rail", "aria-hidden": "true" }),
-      el("span", { class: "step-dot", "aria-hidden": "true" }),
-      el("span", { class: "step-label" }, row.label),
+      el("span", { class: "stepper-dot", "aria-hidden": "true" }),
+      el("span", { class: "stepper-label" }, row.label),
       status,
-      row.note ? el("span", { class: "step-note" }, row.note) : null,
+      row.note ? el("span", { class: "stepper-note" }, row.note) : null,
     );
   });
   return el(

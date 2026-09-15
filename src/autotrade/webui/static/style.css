@@ -537,55 +537,55 @@ progress.progress.done::-moz-progress-bar {
    running, a hollow ring while pending — and a rail joins the nodes. The
    miniature runs across a card, the full one down the process panel. */
 .stepper {
- --step-dot: 0.95rem;
+ --stepper-dot: 0.95rem;
  display: flex;
  min-width: 0;
 }
-.step-dot {
+.stepper-dot {
  position: relative;
  z-index: 1;
  flex: none;
- width: var(--step-dot);
- height: var(--step-dot);
+ width: var(--stepper-dot);
+ height: var(--stepper-dot);
  border-radius: 50%;
  box-shadow: inset 0 0 0 1.5px var(--input-border);
  background: var(--panel);
  color: #fff;
- font-size: calc(var(--step-dot) * 0.7);
+ font-size: calc(var(--stepper-dot) * 0.7);
  font-weight: 700;
- line-height: var(--step-dot);
+ line-height: var(--stepper-dot);
  text-align: center;
 }
-.step-dot::after {
+.stepper-dot::after {
  display: block;
 }
-.done > .step-dot {
+.done > .stepper-dot {
  background: var(--ok);
  box-shadow: none;
 }
-.done > .step-dot::after {
+.done > .stepper-dot::after {
  content: "✓";
 }
-.failed > .step-dot {
+.failed > .stepper-dot {
  background: var(--bad);
  box-shadow: none;
 }
-.failed > .step-dot::after {
+.failed > .stepper-dot::after {
  content: "✕";
 }
-.skipped > .step-dot {
+.skipped > .stepper-dot {
  box-shadow: inset 0 0 0 1.5px var(--input-border);
  color: var(--muted);
 }
-.skipped > .step-dot::after {
+.skipped > .stepper-dot::after {
  content: "–";
 }
-.running > .step-dot {
+.running > .stepper-dot {
  background: var(--run);
  box-shadow: 0 0 0 3px var(--accent-soft);
  animation: step-pulse 1.4s ease-in-out infinite;
 }
-.waiting > .step-dot {
+.waiting > .stepper-dot {
  background: var(--warn);
  box-shadow: 0 0 0 3px var(--warn-soft);
 }
@@ -601,7 +601,7 @@ progress.progress.done::-moz-progress-bar {
  color: var(--muted);
  margin: var(--space-1) 0;
 }
-.stepper.mini .step {
+.stepper.mini .stepper-node {
  position: relative;
  flex: 1 1 0;
  min-width: 0;
@@ -613,41 +613,41 @@ progress.progress.done::-moz-progress-bar {
 }
 /* The rail: a hairline from each node to the next, drawn from the node's
    center to the row's right edge and coloured by the node it leaves. */
-.stepper.mini .step:not(:last-child)::before {
+.stepper.mini .stepper-node:not(:last-child)::before {
  content: "";
  position: absolute;
- top: calc(var(--step-dot) / 2 - 1px);
+ top: calc(var(--stepper-dot) / 2 - 1px);
  left: 50%;
  right: -50%;
  height: 2px;
  background: var(--row-border);
 }
-.stepper.mini .step.done:not(:last-child)::before {
+.stepper.mini .stepper-node.done:not(:last-child)::before {
  background: var(--ok);
 }
-.stepper.mini .step-label {
+.stepper.mini .stepper-label {
  max-width: 100%;
  overflow: hidden;
  text-overflow: ellipsis;
  white-space: nowrap;
 }
-.stepper.mini .step.running .step-label,
-.stepper.mini .step.waiting .step-label {
+.stepper.mini .stepper-node.running .stepper-label,
+.stepper.mini .stepper-node.waiting .stepper-label {
  color: var(--text);
  font-weight: 650;
 }
-.stepper.mini .step.skipped {
+.stepper.mini .stepper-node.skipped {
  opacity: 0.55;
 }
 /* The full stepper: rows on one vertical rail. A row opens its step. */
 .stepper.vertical {
  flex-direction: column;
- --step-dot: 1.05rem;
+ --stepper-dot: 1.05rem;
 }
-.step-row {
+.stepper-row {
  position: relative;
  display: grid;
- grid-template-columns: var(--step-dot) minmax(6rem, 1fr) auto;
+ grid-template-columns: var(--stepper-dot) minmax(6rem, 1fr) auto;
  column-gap: 0.6rem;
  align-items: center;
  padding: 0.5rem 0.7rem;
@@ -656,61 +656,61 @@ progress.progress.done::-moz-progress-bar {
  cursor: pointer;
  font-size: 0.94rem;
 }
-.step-row:hover {
+.stepper-row:hover {
  background: var(--hover-bg);
 }
-.step-row.selected {
+.stepper-row.selected {
  background: var(--accent-soft);
  border-color: var(--accent);
 }
-.step-row.skipped .step-label,
-.step-row.skipped .step-status {
+.stepper-row.skipped .stepper-label,
+.stepper-row.skipped .stepper-status {
  opacity: 0.6;
 }
 .stepper-rail {
  position: absolute;
- left: calc(0.7rem + var(--step-dot) / 2 - 1px);
+ left: calc(0.7rem + var(--stepper-dot) / 2 - 1px);
  top: 0;
  bottom: 0;
  width: 2px;
  background: var(--row-border);
 }
-.step-row:first-child .stepper-rail {
+.stepper-row:first-child .stepper-rail {
  top: 50%;
 }
-.step-row:last-child .stepper-rail {
+.stepper-row:last-child .stepper-rail {
  bottom: 50%;
 }
 /* The rail below a done node is green up to the next node. */
-.step-row.done .stepper-rail {
+.stepper-row.done .stepper-rail {
  background: linear-gradient(var(--row-border) 50%, var(--ok) 50%);
 }
-.step-row.done:last-child .stepper-rail {
+.stepper-row.done:last-child .stepper-rail {
  background: var(--row-border);
 }
-.step-row .step-label {
+.stepper-row .stepper-label {
  overflow: hidden;
  text-overflow: ellipsis;
  white-space: nowrap;
 }
-.step-row .step-status {
+.stepper-row .stepper-status {
  font-size: 0.875rem;
  font-variant-numeric: tabular-nums;
  white-space: nowrap;
  color: var(--muted);
 }
-.step-row.done .step-status {
+.stepper-row.done .stepper-status {
  color: var(--ok);
 }
-.step-row.failed .step-status {
+.stepper-row.failed .stepper-status {
  color: var(--bad);
 }
-.step-row.running .step-status,
-.step-row.waiting .step-status {
+.stepper-row.running .stepper-status,
+.stepper-row.waiting .stepper-status {
  color: var(--text);
 }
 /* The row's note sits under the label, in its column. */
-.step-row .step-note {
+.stepper-row .stepper-note {
  grid-column: 2 / -1;
  min-width: 0;
  font-size: 0.78rem;
@@ -2894,7 +2894,7 @@ details.issue-evidence > summary:hover {
  .check-value {
   margin-left: 1.6rem;
  }
- .step-row .step-note .span-bar.mini {
+ .stepper-row .stepper-note .span-bar.mini {
   width: 7rem;
  }
  /* A phone-wide bar has room for its two end dates; the boundary is still
