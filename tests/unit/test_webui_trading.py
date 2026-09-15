@@ -1,10 +1,11 @@
 """Trading console read-model + route tests (negative paths first).
 
 Every fixture is synthesized in a tempfile repo root under
-``data/trading/paper/`` exactly as the Paper engine writes it. Invariants under
-test: whitelist projection, structured degradation (never 500), the environment
-whitelist, date validation, and non-finite numbers degrading to null instead of
-exploding at the serializer.
+``data/trading/paper/`` exactly as the Paper engine writes it — the book panels
+read a book the real engine ran over synthetic bars. Invariants under test: each
+panel's figures are the ones the book's own code defines, whitelist projection,
+structured degradation (never 500), the environment whitelist, and non-finite
+numbers degrading to null instead of exploding at the serializer.
 """
 
 from __future__ import annotations
@@ -17,13 +18,16 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
 
+from autotrade.paper.orders import order_sheet
 from autotrade.webui import trading
 from autotrade.webui.server import create_app
+from tests.unit.test_paper_trading import COUNTER_STRATEGY, SESSIONS, _Book
 
-DETAIL_ROUTES = ("snapshot", "orders", "deals", "series", "health")
+DETAIL_ROUTES = ("book", "signal", "history", "performance", "snapshot", "health")
 
 
 def _jsonl(path: Path, *payloads: object) -> None:
@@ -63,161 +67,164 @@ def _execution(**overrides: object) -> dict[str, object]:
     return row
 
 
-def test_daily_paper_projection(tmp_path: Path):
-    root = tmp_path / "data/trading/paper"
-    _jsonl(root / "orders_20260102.jsonl", _order())
-    _jsonl(root / "executions_20260102.jsonl", _execution())
-    orders = trading.orders_payload(tmp_path)
-    assert orders["orders"][0]["symbol"] == "000001.SZ"
-    # The engine journals matched fills as executions_<date>.jsonl; the console
-    # serves them under the deals contract.
-    deals = trading.deals_payload(tmp_path)
-    assert deals["deals"][0]["status"] == "filled"
-    assert deals["deals"][0]["price"] == 10.25
-    summary = trading.environment_summary(tmp_path)
-    assert summary["deal_count"] == 1
-    assert summary["order_count"] == 1
-    assert summary["trade_date"] == "20260102"
-    assert summary["label"] == "Paper 模拟"
-    assert trading.health_payload(tmp_path)["ok"] is True
-
-
-def test_order_projection_is_a_whitelist_and_never_echoes_extra_fields(tmp_path: Path):
-    _jsonl(
-        tmp_path / "data/trading/paper/orders_20260102.jsonl",
-        _order(internal_note="must not surface", account_id="ACCT-PRIVATE"),
+def _engine_book(tmp_path: Path, *days: str) -> Path:
+    """A book the real engine wrote (trusted executor, synthetic bars): the
+    counter strategy buys on its first decision and sells on its third. A later
+    call continues the same book with further days."""
+    book = _Book(tmp_path / "data/trading", COUNTER_STRATEGY, sessions=("20260102", *SESSIONS))
+    for day in days:
+        book.run(day)
+    (book.root / "book.json").write_text(
+        json.dumps({
+            "experiment_id": "exp", "artifact_id": "art", "candidate_source": "graduated",
+            "note": "参考簿（观察中）", "profile": {"initial_cash": 100_000.0},
+            "schedule": {"inference_time": "08:30"}, "raw_dir": "/private/lake",
+        }),
+        encoding="utf-8",
     )
-    row = trading.orders_payload(tmp_path)["orders"][0]
-    assert set(row) == {"symbol", "action", "quantity", "execute_at", "name", "reference_price"}
-    # Strategy-authored order metadata is writer content, not a projected
-    # scalar: it never reaches the payload either.
-    assert "rebalance" not in json.dumps(trading.orders_payload(tmp_path))
-    assert "ACCT-PRIVATE" not in json.dumps(trading.orders_payload(tmp_path))
+    return book.root
 
 
-def test_an_order_carries_the_engine_reference_quote_and_nothing_else_of_it(tmp_path: Path):
-    _jsonl(
-        tmp_path / "data/trading/paper/orders_20260102.jsonl",
-        _order(paper_reference={"name": "平安银行", "close": 10.5, "close_date": "20251231", "secret": "x"}),
-        _order(event_id="o2", paper_reference="not a mapping"),
-    )
-    first, second = trading.orders_payload(tmp_path)["orders"]
-    assert (first["name"], first["reference_price"]) == ("平安银行", 10.5)
-    assert (second["name"], second["reference_price"]) == (None, None)
-    assert "secret" not in json.dumps(first)
+def _csi300_slot(root: Path, name: str, pct_chg: dict[str, float]) -> None:
+    """One replay slot of the book's PIT cache carrying CSI 300 (and another index)."""
+    slot = root / "pit/gen/pit_views/replay/paper" / name
+    slot.mkdir(parents=True, exist_ok=True)
+    rows = [
+        {"dataset": "index_daily", "ts_code": "000300.SH", "trade_date": day, "pct_chg": value}
+        for day, value in pct_chg.items()
+    ]
+    rows.append({"dataset": "index_daily", "ts_code": "000905.SH", "trade_date": "20260105", "pct_chg": 9.0})
+    pd.DataFrame(rows).to_parquet(slot / "macro.parquet")
 
 
-def test_latest_date_is_selected_and_available_dates_are_listed(tmp_path: Path):
-    root = tmp_path / "data/trading/paper"
-    _jsonl(root / "orders_20260102.jsonl", _order(event_id="a"))
-    _jsonl(root / "orders_20260105.jsonl", _order(event_id="b"), _order(event_id="c"))
-    payload = trading.orders_payload(tmp_path)
-    assert payload["available_dates"] == ["20260102", "20260105"]
-    assert payload["trade_date"] == "20260105"
-    assert payload["count"] == 2
-    assert trading.orders_payload(tmp_path, date="20260102")["count"] == 1
-
-
-def test_missing_and_invalid_paper_files_degrade(tmp_path: Path):
-    assert trading.orders_payload(tmp_path)["state"] == "absent"
-    assert trading.series_payload(tmp_path)["state"] == "absent"
-    assert trading.snapshot_payload(tmp_path)["state"] == "absent"
-    assert trading.environment_summary(tmp_path)["state"] == "absent"
-    path = tmp_path / "data/trading/paper/orders_20260102.jsonl"
-    path.parent.mkdir(parents=True)
-    path.write_text("not-json\n", encoding="utf-8")
-    payload = trading.orders_payload(tmp_path)
-    # A journal is an append-only stream a crash can truncate: damaged lines
-    # are counted and the good records around them are still served, so a
-    # skipped line is reported rather than promoted to an environment state.
+def test_the_book_panel_is_a_whitelist_of_the_frozen_identity(tmp_path: Path):
+    _engine_book(tmp_path, "20260105", "20260106")
+    payload = trading.book_payload(tmp_path)
     assert payload["state"] == "ok"
-    assert payload["orders"] == []
-    assert payload["skipped_lines"] == 1
-    assert "error" not in payload
-    assert trading.environment_summary(tmp_path)["state"] == "ok"
-    assert trading.environment_summary(tmp_path)["skipped_lines"] == 1
-    assert trading.health_payload(tmp_path)["ok"] is True
-    snapshot = tmp_path / "data/trading/paper/account_snapshot.json"
-    snapshot.write_text("[]\n", encoding="utf-8")
-    snapshot_payload = trading.snapshot_payload(tmp_path)
-    assert snapshot_payload["state"] == "unreadable"
-    assert snapshot_payload["snapshot"] is None
-    snapshot.write_text("{broken", encoding="utf-8")
-    assert trading.snapshot_payload(tmp_path)["state"] == "unreadable"
-    # The snapshot's unreadable rung is untouched and still degrades health.
+    assert payload["book"] == {
+        "experiment_id": "exp", "artifact_id": "art", "candidate_source": "graduated",
+        "note": "参考簿（观察中）", "created_at": None, "initial_cash": 100_000.0, "inference_time": "08:30",
+    }
+    assert (payload["start_date"], payload["settled_through"]) == ("20260105", "20260105")
+    assert "/private/lake" not in json.dumps(payload)
+
+
+def test_the_signal_is_the_latest_order_sheet_and_history_keeps_every_earlier_day(tmp_path: Path):
+    _engine_book(tmp_path, "20260105")
+    signal = trading.signal_payload(tmp_path)["signal"]
+    # The first morning buys 100 at the 10.50 reference; the post-trade account
+    # is that holding plus the cash left, so the weights sum to one.
+    [target] = signal["target"]
+    assert (target["quantity"], target["value"]) == (100, 1050.0)
+    assert signal["cash_after"] == 100_000.0 - 1050.0
+    assert target["weight"] + signal["cash_weight"] == pytest.approx(1.0)
+    assert set(signal["orders"][0]) == {
+        "execute_at", "symbol", "name", "action", "quantity", "reference_price", "notional",
+    }
+    # The strategy's own order metadata ("call") is writer content, never served.
+    assert '"call"' not in json.dumps(signal)
+    assert trading.history_payload(tmp_path) == {"env": "paper", "state": "absent", "error": None, "days": []}
+
+    root = _engine_book(tmp_path, "20260106", "20260107")
+    signal = trading.signal_payload(tmp_path)["signal"]
+    assert (signal["trade_date"], signal["data_through"]) == ("20260107", "20260106")
+    assert [(row["action"], row["quantity"], row["reference_price"], row["notional"]) for row in signal["orders"]] == [
+        ("sell", 100, 12.5, 1250.0)
+    ]
+    assert signal["target"] == [] and signal["cash_after"] == order_sheet(root, "20260107")["cash_after"]
+    # Every earlier day, newest first, its orders and fills under one session
+    # key; the latest decision stays the signal's until its fills exist.
+    days = trading.history_payload(tmp_path)["days"]
+    assert [day["trade_date"] for day in days] == ["20260106", "20260105"]
+    assert days[0]["orders"] == [] and days[0]["fills"] == []
+    assert [row["action"] for row in days[1]["orders"]] == ["buy"]
+    [fill] = days[1]["fills"]
+    assert (fill["status"], fill["name"], fill["quantity"], fill["price"]) == ("filled", "平安银行", 100, 11.0)
+
+
+def test_performance_keys_return_equity_cash_and_csi300_by_the_same_settled_days(tmp_path: Path):
+    root = _engine_book(tmp_path, "20260105", "20260106", "20260107", "20260108")
+    journal = [json.loads(line) for line in (root / "equity_daily.jsonl").read_text(encoding="utf-8").splitlines()]
+    settled = [row["trade_date"] for row in journal]
+    assert settled == ["20260105", "20260106", "20260107"]
+    # An older, narrower slot of an earlier run must not be the one read.
+    _csi300_slot(root, "20260102_20260107_20251231T235959+0800", {"20260105": 50.0})
+    _csi300_slot(
+        root,
+        "20260102_20260108_20251231T235959+0800",
+        {"20260102": 5.0, "20260105": 1.0, "20260106": -0.5, "20260107": 0.2},
+    )
+    payload = trading.performance_payload(tmp_path)
+    chart, stats = payload["chart"], payload["statistics"]
+    assert chart["series"][0]["dates"] == chart["account"]["dates"] == chart["benchmark"]["dates"] == settled
+    assert chart["account"]["equity"] == [row["equity"] for row in journal]
+    assert chart["account"]["cash"] == [row["cash"] for row in journal]
+    # Day-0 baseline: the first day's return is measured from the initial cash.
+    assert chart["series"][0]["cum"][0] == round(journal[0]["equity"] / 100_000.0 - 1.0, 6)
+    assert stats["total_return"] == pytest.approx(journal[-1]["equity"] / 100_000.0 - 1.0)
+    assert stats["benchmark_return"] == pytest.approx(1.01 * 0.995 * 1.002 - 1.0, abs=1e-6)
+    assert stats["excess_return"] == pytest.approx(stats["total_return"] - stats["benchmark_return"])
+    assert (stats["fills"], stats["days"], payload["min_days"]) == (2, 3, trading.MIN_STATISTICS_DAYS)
+    assert stats["turnover"] == pytest.approx((1100.0 + 1300.0) / 100_000.0)
+    # Too few settled days for annualised figures: "—", never a number.
+    assert stats["annualized_return"] is None and stats["sharpe"] is None and stats["max_drawdown"] is None
+
+    # CSI 300 missing one settled day: its curve keeps the days it has, the
+    # excess is not computed over a different window.
+    _csi300_slot(root, "20260102_20260108_20251231T235959+0800", {"20260105": 1.0, "20260106": -0.5})
+    partial = trading.performance_payload(tmp_path)
+    assert partial["benchmark_days"] == 2 and partial["chart"]["benchmark"]["dates"] == settled[:2]
+    assert partial["statistics"]["benchmark_return"] is None and partial["statistics"]["excess_return"] is None
+
+
+def test_annualised_statistics_appear_once_the_book_has_enough_days(tmp_path: Path, monkeypatch):
+    _engine_book(tmp_path, "20260105", "20260106", "20260107", "20260108")
+    monkeypatch.setattr(trading, "MIN_STATISTICS_DAYS", 3)
+    stats = trading.performance_payload(tmp_path)["statistics"]
+    assert None not in (stats["annualized_return"], stats["sharpe"], stats["max_drawdown"])
+
+
+def test_missing_and_damaged_book_files_degrade_per_panel(tmp_path: Path):
+    for projection in (trading.book_payload, trading.signal_payload, trading.history_payload, trading.performance_payload):
+        assert projection(tmp_path)["state"] == "absent", projection.__name__
+    assert trading.environment_summary(tmp_path)["state"] == "absent"
+    root = _engine_book(tmp_path, "20260105", "20260106")
+    (root / ".paper_state.json").write_text("{broken", encoding="utf-8")
+    for projection in (trading.book_payload, trading.signal_payload, trading.history_payload):
+        payload = projection(tmp_path)
+        assert payload["state"] == "unreadable" and payload["error"], projection.__name__
     assert trading.environment_summary(tmp_path)["state"] == "unreadable"
     assert trading.health_payload(tmp_path)["ok"] is False
-
-
-def test_good_rows_around_a_damaged_line_are_all_served(tmp_path: Path):
-    """The regression the counting revert is about: a fail-fast reader returned
-    only the rows BEFORE the break and called the environment unreadable."""
-    root = tmp_path / "data/trading/paper"
-    _jsonl(
-        root / "orders_20260102.jsonl",
-        _order(event_id="a", symbol="000001.SZ"),
-        "{ truncated",
-        _order(event_id="b", symbol="600000.SH"),
-        "[]",
-    )
-    payload = trading.orders_payload(tmp_path)
-    assert payload["state"] == "ok"
-    assert payload["count"] == 2
-    assert [row["symbol"] for row in payload["orders"]] == ["000001.SZ", "600000.SH"]
-    assert payload["skipped_lines"] == 2
-    summary = trading.environment_summary(tmp_path)
-    assert summary["state"] == "ok"
-    assert summary["skipped_lines"] == 2
-    assert summary["order_count"] == 2
-
-
-def test_non_finite_numbers_degrade_to_null_instead_of_failing_the_serializer(tmp_path: Path):
-    # json.loads accepts NaN/Infinity tokens; starlette's serializer does not
-    # (allow_nan=False) — the read model must project them to null.
-    root = tmp_path / "data/trading/paper"
-    _jsonl(
-        root / "executions_20260102.jsonl",
-        '{"symbol": "000001.SZ", "action": "buy", "quantity": 100,'
-        ' "execute_at": "2026-01-02T09:30:00+08:00", "matched_at": null,'
-        ' "status": "filled", "price": NaN, "commission": Infinity, "stamp_duty": -Infinity}',
-    )
-    _jsonl(
-        root / "equity_daily.jsonl",
-        '{"trade_date": "20260102", "equity": NaN, "cash": Infinity}',
-    )
-    row = trading.deals_payload(tmp_path)["deals"][0]
-    assert row["price"] is None
-    assert row["commission"] is None
-    assert row["stamp_duty"] is None
-    assert row["matched_at"] is None
-    point = trading.series_payload(tmp_path)["series"][0]
-    assert point["equity"] is None and point["cash"] is None
     client = TestClient(create_app(tmp_path))
-    for route in ("deals", "series"):
-        assert client.get(f"/api/trading/paper/{route}").status_code == 200
+    for route in DETAIL_ROUTES:
+        assert client.get(f"/api/trading/paper/{route}").status_code == 200, route
 
 
-def test_invalid_quantity_and_blank_text_project_to_null(tmp_path: Path):
+def test_damaged_fill_and_equity_lines_are_counted_and_projected_to_null(tmp_path: Path):
+    """A journal is an append-only stream a crash can truncate: the good rows
+    around a damaged line are served and the line is counted, and json.loads'
+    NaN/Infinity tokens project to null instead of failing the serializer."""
+    root = _engine_book(tmp_path, "20260105", "20260106")
     _jsonl(
-        tmp_path / "data/trading/paper/orders_20260102.jsonl",
-        _order(quantity=True, symbol=""),
-        _order(quantity=-5),
+        root / "executions_20260106.jsonl",
+        _execution(event_id="a", matched_at="2026-01-06T09:30:00+08:00"),
+        "{ truncated",
+        '{"symbol": "", "action": "buy", "quantity": true, "status": "rejected",'
+        ' "price": NaN, "commission": Infinity, "reason": "limit_up"}',
     )
-    rows = trading.orders_payload(tmp_path)["orders"]
-    assert rows[0]["quantity"] is None and rows[0]["symbol"] is None
-    assert rows[1]["quantity"] is None
-
-
-def test_equity_series_projection(tmp_path: Path):
-    _jsonl(
-        tmp_path / "data/trading/paper/equity_daily.jsonl",
-        {"trade_date": "20260102", "equity": 100_000.0, "cash": 40_000.0},
-        {"trade_date": "20260105", "equity": 101_000.0, "cash": 39_000.0},
-    )
-    payload = trading.series_payload(tmp_path)
-    assert payload["state"] == "ok"
-    assert [row["trade_date"] for row in payload["series"]] == ["20260102", "20260105"]
-    assert payload["series"][1]["equity"] == 101_000.0
+    with (root / "equity_daily.jsonl").open("a", encoding="utf-8") as stream:
+        stream.write('{"trade_date": "20260106", "equity": NaN, "cash": 1.0}\n[]\n')
+    [day] = [day for day in trading.history_payload(tmp_path)["days"] if day["trade_date"] == "20260106"]
+    assert day["skipped_lines"] == 1
+    good, bad = day["fills"]
+    assert (good["status"], good["price"], good["cost"]) == ("filled", 10.25, 5.0)
+    assert (bad["symbol"], bad["quantity"], bad["price"], bad["cost"]) == (None, None, None, None)
+    performance = trading.performance_payload(tmp_path)
+    assert performance["skipped_lines"] == 1
+    assert performance["chart"]["account"]["dates"] == ["20260105"]
+    client = TestClient(create_app(tmp_path))
+    for route in ("history", "performance"):
+        assert client.get(f"/api/trading/paper/{route}").status_code == 200, route
 
 
 def test_env_whitelist_rejects_everything_else(tmp_path: Path):
@@ -232,14 +239,10 @@ def test_env_whitelist_rejects_everything_else(tmp_path: Path):
     assert trading.env_dir(tmp_path, "paper") == tmp_path / "data/trading/paper"
 
 
-def test_trading_api_exposes_only_paper_and_validates_date(tmp_path: Path):
+def test_trading_api_exposes_only_paper(tmp_path: Path):
     client = TestClient(create_app(tmp_path))
     roster = client.get("/api/trading/environments").json()["environments"]
     assert [entry["env"] for entry in roster] == ["paper"]
-    assert client.get("/api/trading/live/orders").status_code == 404
-    for bad in ("2026-01-02", "abc", "202601021", "2026010"):
-        for route in ("orders", "deals"):
-            assert client.get(f"/api/trading/paper/{route}?date={bad}").status_code == 400, (route, bad)
     for route in DETAIL_ROUTES:
         response = client.get(f"/api/trading/paper/{route}")
         assert response.status_code == 200
@@ -400,8 +403,8 @@ def test_snapshot_is_whitelist_projected_and_never_echoes_the_raw_dict(tmp_path:
     payload = trading.snapshot_payload(tmp_path)
     assert payload["state"] == "ok"
     assert set(payload["snapshot"]) == {
-        "source", "trade_date", "day_complete", "phase", "strategy_revision",
-        "cash", "equity", "pending_order_count", "positions",
+        "source", "trade_date", "settled_through", "phase", "strategy_revision",
+        "cash", "equity", "market_value", "pending_order_count", "positions",
     }
     rendered = json.dumps(payload)
     assert "LEAK" not in rendered and "ACCT-PRIVATE" not in rendered
@@ -415,6 +418,10 @@ def test_a_fully_locked_position_keeps_its_zero_counters(tmp_path: Path):
     assert row["available_quantity"] == 0
     assert row["quantity"] == 100
     assert row["unmapped"] is False
+    # Value, P&L and weight are served, computed once from the projected figures.
+    assert row["market_value"] == pytest.approx(1050.0)
+    assert row["pnl"] == pytest.approx(100 * (10.5 - 10.1))
+    assert row["weight"] == pytest.approx(1050.0 / 1_000_000.0)
 
 
 def test_an_unmappable_position_row_is_flagged_never_dropped(tmp_path: Path):
@@ -450,20 +457,19 @@ def test_environment_state_precedence_puts_the_worst_reader_first(tmp_path: Path
     assert trading.environment_summary(tmp_path)["state"] == "stale"
     # A damaged journal line does NOT reach the ladder; stale still wins.
     _jsonl(root / "orders_20260102.jsonl", _order(), "broken")
-    summary = trading.environment_summary(tmp_path)
-    assert summary["state"] == "stale"
-    assert summary["skipped_lines"] == 1
+    assert trading.environment_summary(tmp_path)["state"] == "stale"
     # An unreadable snapshot outranks everything.
     (root / SNAPSHOT_NAME).write_text("{broken", encoding="utf-8")
     assert trading.environment_summary(tmp_path)["state"] == "unreadable"
 
 
-def test_the_roster_and_health_carry_the_snapshot_block(tmp_path: Path):
+def test_the_roster_and_health_carry_the_status_ladder(tmp_path: Path):
     _write_snapshot(tmp_path, age_seconds=1.0)
     entry = trading.environments_payload(tmp_path)["environments"][0]
     assert entry["env"] == "paper" and entry["label"] == "Paper 模拟"
     assert entry["state"] == "ok"
-    assert entry["snapshot"]["equity"] == 1_000_000.0
+    # The page reads the account from its own panel; the roster is status only.
+    assert "snapshot" not in entry
     assert entry["generated_at"].endswith("Z")
     assert entry["stale_threshold_seconds"] == trading.STALE_SNAPSHOT_ALERT_SECONDS
     health = trading.health_payload(tmp_path)
@@ -529,10 +535,12 @@ def test_prices_keep_their_cents_and_only_large_amounts_abbreviate():
             _js_top_level(script, "function fmtAmount("),
             _js_top_level(script, "function fmtPrice("),
             _js_top_level(script, "function fmtAmountOpt("),
-            "console.log(JSON.stringify(["
-            "fmtPrice(38.389185), fmtPrice(1450.123456), fmtPrice(0), fmtPrice(null),"
-            " fmtPrice(undefined), fmtPrice('n/a'), fmtAmount(5922), fmtAmount(43.5),"
-            " fmtAmount(-881.4), fmtAmount(146250), fmtAmount(2.5e8), fmtAmountOpt(null)]));",
+            (
+                "console.log(JSON.stringify(["
+                "fmtPrice(38.389185), fmtPrice(1450.123456), fmtPrice(0), fmtPrice(null),"
+                " fmtPrice(undefined), fmtPrice('n/a'), fmtAmount(5922), fmtAmount(43.5),"
+                " fmtAmount(-881.4), fmtAmount(146250), fmtAmount(2.5e8), fmtAmountOpt(null)]));"
+            ),
         ]
     )
     result = subprocess.run(
@@ -544,6 +552,19 @@ def test_prices_keep_their_cents_and_only_large_amounts_abbreviate():
         "¥5,922.00", "¥43.50", "¥-881.40", "¥14.6万", "¥2.50亿", "—",
     ]
     # Every price column goes through the price formatter.
-    for name in ("paperPositionsPanel", "paperDealsPanel", "paperOrdersPanel", "ordersNode"):
+    for name in ("paperPositionsPanel", "paperSignalPanel", "paperOrdersTable", "paperHistoryDay", "ordersNode"):
         assert "fmtPrice(" in _js_top_level(script, f"function {name}("), name
     assert not re.search(r"fmtAmount(Opt)?\(row\.(price|average_cost|last_price|reference_price)\)", script)
+
+
+def test_the_paper_performance_chart_is_the_research_chart_on_one_date_axis():
+    """Equity and cash were once two charts with their own widths, pads and date
+    ticks, so one trading day sat at different x positions. The page now feeds
+    the book's days to the research return chart, whose panes share one x-scale,
+    and draws no second chart implementation of its own."""
+    script = _app_js()
+    panel = _js_top_level(script, "function paperPerformancePanel(")
+    assert "equityChart(chart" in panel
+    trading_section = script.split("let tradingView = null;", 1)[1].split("function renderQmtPage(", 1)[0]
+    assert "singleSeriesBarChart" not in trading_section
+    assert "payload.account" in _js_top_level(script, "function equityChart(")

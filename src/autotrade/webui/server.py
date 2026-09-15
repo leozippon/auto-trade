@@ -708,11 +708,6 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
             raise HTTPException(status_code=404, detail=f"unknown trading environment: {env}")
         return env
 
-    def _trading_date(value: str | None) -> str | None:
-        if value is not None and not (len(value) == 8 and value.isdigit()):
-            raise HTTPException(status_code=400, detail="date must be YYYYMMDD")
-        return value
-
     @app.get("/api/trading/environments")
     def trading_environments():
         return trading.environments_payload(root)
@@ -721,17 +716,21 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
     def trading_snapshot(env: str):
         return trading.snapshot_payload(root, _trading_env(env))
 
-    @app.get("/api/trading/{env}/orders")
-    def trading_orders(env: str, date: str | None = Query(None)):
-        return trading.orders_payload(root, _trading_env(env), _trading_date(date))
+    @app.get("/api/trading/{env}/book")
+    def trading_book(env: str):
+        return trading.book_payload(root, _trading_env(env))
 
-    @app.get("/api/trading/{env}/deals")
-    def trading_deals(env: str, date: str | None = Query(None)):
-        return trading.deals_payload(root, _trading_env(env), _trading_date(date))
+    @app.get("/api/trading/{env}/signal")
+    def trading_signal(env: str):
+        return trading.signal_payload(root, _trading_env(env))
 
-    @app.get("/api/trading/{env}/series")
-    def trading_series(env: str):
-        return trading.series_payload(root, _trading_env(env))
+    @app.get("/api/trading/{env}/history")
+    def trading_history(env: str):
+        return trading.history_payload(root, _trading_env(env))
+
+    @app.get("/api/trading/{env}/performance")
+    def trading_performance(env: str):
+        return trading.performance_payload(root, _trading_env(env))
 
     @app.get("/api/trading/{env}/health")
     def trading_health(env: str):

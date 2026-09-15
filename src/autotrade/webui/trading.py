@@ -1,9 +1,19 @@
-"""Read-only projection of the local daily Paper account.
+"""Read-only projection of the local daily Paper book, one function per page panel.
+
+The Paper page reads the book through five projections, each from the book's
+own files: ``book_payload`` (identity, ``book.json``), ``signal_payload`` (the
+latest decision's order sheet), ``history_payload`` (every earlier day's orders
+and fills), ``performance_payload`` (return against CSI 300, equity and cash
+tracks, statistics) and ``snapshot_payload`` (account and positions).
+``environment_summary`` is the page's status ladder and the health probe.
 
 Every function is total: degradation is a structured payload state
 (absent / no_snapshot / unreadable / export_error / stale / ok), never a 500.
 Redaction is whitelist projection — payloads are assembled from named scalar
-fields only, so nothing the writer happens to add can leak through.
+fields only, so nothing the writer happens to add can leak through. Each
+figure is computed once, by the code that already defines it: the order sheet
+by ``paper.orders.order_sheet``, returns and statistics by the replay reducer,
+the CSI 300 series by the style sidecar's slot reader.
 
 Timestamps: the Paper engine persists Asia/Shanghai stamps (frozen contract).
 This module is the single normalization boundary for the snapshot clock — a
@@ -19,9 +29,22 @@ import math
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pyarrow as pa
+
+from autotrade.environment.replay.stats import ReplayResult, compute_return_stats
+from autotrade.environment.replay.style import (
+    BENCHMARK_LABEL,
+    _slot_benchmark,
+    daily_returns_from_curve,
+)
 from autotrade.environment.strategy import CN_TZ
-from autotrade.paper.engine import REFERENCE_KEY, SNAPSHOT_NAME
+from autotrade.paper.book import BOOK_NAME
+from autotrade.paper.engine import PAPER_STATE_NAME, SNAPSHOT_NAME
+from autotrade.paper.orders import order_sheet
+from autotrade.paper.pit import newest_replay_slot
 from autotrade.paper.storage import read_jsonl
+
+from .equity import curve_entry
 
 TRADING_ENVS = ("paper",)
 ENV_LABELS = {"paper": "Paper 模拟"}
@@ -30,6 +53,10 @@ ENV_LABELS = {"paper": "Paper 模拟"}
 # weekday before the open, so a weekend gap (~72 h) is normal and four days
 # means a scheduled run did not happen (a failed run shows export_error).
 STALE_SNAPSHOT_ALERT_SECONDS = 4 * 24 * 3600.0
+# Annualised return, Sharpe and maximum drawdown are served from this many
+# settled days; a shorter book reads "—" with its day count instead.
+MIN_STATISTICS_DAYS = 20
+EQUITY_JOURNAL_NAME = "equity_daily.jsonl"
 
 
 def env_dir(repo_root: Path, env: str) -> Path:
@@ -95,48 +122,237 @@ def _read_json(path: Path) -> tuple[dict[str, object] | None, str | None]:
     except (OSError, json.JSONDecodeError) as exc:
         return None, str(exc)
     if not isinstance(value, dict):
-        return None, "account snapshot must be a JSON object"
+        return None, f"{path.name} must be a JSON object"
     return value, None
 
 
-def _payload(repo_root: Path, env: str, kind: str, date: str | None) -> dict[str, object]:
+def _mapping(value: object) -> dict[str, object]:
+    return value if isinstance(value, dict) else {}
+
+
+def _decision_dates(state: dict[str, object] | None) -> list[str]:
+    decisions = (state or {}).get("decisions")
+    return [
+        str(row["trade_date"])
+        for row in (decisions if isinstance(decisions, list) else ())
+        if isinstance(row, dict) and isinstance(row.get("trade_date"), str)
+    ]
+
+
+# ---------------------------------------------------------------- book
+
+def book_payload(repo_root: Path, env: str = "paper") -> dict[str, object]:
+    """The book's frozen identity and where its calendar stands."""
     root = env_dir(repo_root, env)
-    # The Paper engine journals matched fills as executions_<date>.jsonl;
-    # the console serves them under the deals contract.
-    prefix = "orders_" if kind == "orders" else "executions_"
-    dates = _dates(root, prefix)
-    selected = date or (dates[-1] if dates else None)
-    rows, skipped = read_jsonl(root / f"{prefix}{selected}.jsonl") if selected else ([], 0)
-    projected = []
-    for row in rows:
-        item = {
-            "symbol": _text(row.get("symbol")), "action": _text(row.get("action")),
-            "quantity": _quantity(row.get("quantity")), "execute_at": _text(row.get("execute_at")),
+    record, error = _read_json(root / BOOK_NAME)
+    state, state_error = _read_json(root / PAPER_STATE_NAME)
+    status = "unreadable" if error or state_error else "ok" if record else "absent"
+    book = None
+    if record:
+        book = {
+            "experiment_id": _text(record.get("experiment_id")),
+            "artifact_id": _text(record.get("artifact_id")),
+            "candidate_source": _text(record.get("candidate_source")),
+            "note": _text(record.get("note")),
+            "created_at": _utc_iso(_to_utc(record.get("created_at"))),
+            "initial_cash": _number(_mapping(record.get("profile")).get("initial_cash")),
+            "inference_time": _text(_mapping(record.get("schedule")).get("inference_time")),
         }
-        if kind == "orders":
-            # The engine's display quote of the order: name and previous close.
-            reference = row.get(REFERENCE_KEY) if isinstance(row.get(REFERENCE_KEY), dict) else {}
-            item.update({"name": _text(reference.get("name")), "reference_price": _number(reference.get("close"))})
-        if kind == "deals":
-            item.update({
-                "matched_at": _text(row.get("matched_at")), "status": _text(row.get("status")),
-                "price": _number(row.get("price")), "commission": _number(row.get("commission")),
-                "stamp_duty": _number(row.get("stamp_duty")), "reason": _text(row.get("reason")),
-            })
-        projected.append(item)
-    # A journal is an append-only stream a crash can truncate mid-line: the
-    # damaged lines are counted and the good records before them still served,
-    # so a skipped line is never a state.
-    return {"env": env, "trade_date": selected, "available_dates": dates, "state": "ok" if selected else "absent", "skipped_lines": skipped, kind: projected, "count": len(projected)}
+    state = state or {}
+    return {
+        "env": env,
+        "state": status,
+        "error": error or state_error,
+        "book": book,
+        "start_date": _text(state.get("start_date")),
+        "settled_through": _text(state.get("settled_through")),
+        "last_fit_date": _text(state.get("last_fit_date")),
+    }
 
 
-def orders_payload(repo_root: Path, env: str = "paper", date: str | None = None) -> dict[str, object]:
-    return _payload(repo_root, env, "orders", date)
+# ------------------------------------------------------- signal, history
+
+def _sheet(root: Path, state: dict[str, object], trade_date: str) -> dict[str, object]:
+    """One decision's order sheet, whitelisted."""
+    sheet = order_sheet(root, trade_date, state=state)
+    decision = sheet["decision"]
+    return {
+        "trade_date": trade_date,
+        "inference_at": _text(decision.get("inference_at")),
+        "data_through": _text(decision.get("data_through")),
+        "generation_id": _text(decision.get("generation_id")),
+        "fitted": decision.get("fitted") is True,
+        "replayed_calls": _count(decision.get("replayed_calls")),
+        "replayed_matching_journal": _count(decision.get("replayed_matching_journal")),
+        "equity": _number(sheet["equity"]),
+        "cash": _number(sheet["cash"]),
+        "orders": [
+            {
+                "execute_at": _text(row["execute_at"]),
+                "symbol": _text(row["symbol"]),
+                "name": _text(row["name"]),
+                "action": _text(row["action"]),
+                "quantity": _quantity(row["quantity"]),
+                "reference_price": _number(row["reference_price"]),
+                "notional": _number(row["notional"]),
+            }
+            for row in sheet["orders"]
+        ],
+        "target": [
+            {
+                "symbol": _text(row["symbol"]),
+                "name": _text(row["name"]),
+                "quantity": _quantity(row["quantity"]),
+                "reference_price": _number(row["reference_price"]),
+                "value": _number(row["value"]),
+                "weight": _number(row["weight"]),
+            }
+            for row in sheet["target"]
+        ],
+        "target_value": _number(sheet["target_value"]),
+        "cash_after": _number(sheet["cash_after"]),
+        "cash_weight": _number(sheet["cash_weight"]),
+        "skipped_lines": int(sheet["skipped_lines"]),
+    }
 
 
-def deals_payload(repo_root: Path, env: str = "paper", date: str | None = None) -> dict[str, object]:
-    return _payload(repo_root, env, "deals", date)
+def signal_payload(repo_root: Path, env: str = "paper") -> dict[str, object]:
+    """The latest decision: its orders and the holdings once they fill."""
+    root = env_dir(repo_root, env)
+    state, error = _read_json(root / PAPER_STATE_NAME)
+    decided = _decision_dates(state)
+    if error or not decided:
+        return {"env": env, "state": "unreadable" if error else "absent", "error": error, "signal": None}
+    try:
+        signal = _sheet(root, state, decided[-1])
+    except (KeyError, TypeError, ValueError) as exc:
+        return {"env": env, "state": "unreadable", "error": f"decision {decided[-1]}: {exc}", "signal": None}
+    return {"env": env, "state": "ok", "error": None, "signal": signal}
 
+
+def _fill(row: dict[str, object], names: dict[str, str | None]) -> dict[str, object]:
+    symbol = _text(row.get("symbol"))
+    commission, stamp_duty = _number(row.get("commission")), _number(row.get("stamp_duty"))
+    return {
+        "symbol": symbol,
+        "name": names.get(symbol or ""),
+        "action": _text(row.get("action")),
+        "quantity": _quantity(row.get("quantity")),
+        "matched_at": _text(row.get("matched_at")),
+        "status": _text(row.get("status")),
+        "price": _number(row.get("price")),
+        "cost": None if commission is None and stamp_duty is None else (commission or 0.0) + (stamp_duty or 0.0),
+        "reason": _text(row.get("reason")),
+    }
+
+
+def history_payload(repo_root: Path, env: str = "paper") -> dict[str, object]:
+    """Every trading day the book has acted on, newest first: the orders decided
+    that morning and the fills they settled into (both keyed by the session).
+    The latest decision is the signal panel's until its fills exist."""
+    root = env_dir(repo_root, env)
+    state, error = _read_json(root / PAPER_STATE_NAME)
+    if error:
+        return {"env": env, "state": "unreadable", "error": error, "days": []}
+    decided = _decision_dates(state)
+    days = sorted(set(decided[:-1]) | set(_dates(root, "executions_")), reverse=True)
+    rows = []
+    for day in days:
+        try:
+            sheet = _sheet(root, state, day) if day in decided else None
+        except (KeyError, TypeError, ValueError) as exc:
+            return {"env": env, "state": "unreadable", "error": f"decision {day}: {exc}", "days": []}
+        orders = sheet["orders"] if sheet else []
+        names = {row["symbol"]: row["name"] for row in orders if row["symbol"]}
+        fills, skipped = read_jsonl(root / f"executions_{day}.jsonl")
+        rows.append({
+            "trade_date": day,
+            "orders": orders,
+            "fills": [_fill(row, names) for row in fills],
+            "skipped_lines": skipped + (sheet["skipped_lines"] if sheet else 0),
+        })
+    return {"env": env, "state": "ok" if rows else "absent", "error": None, "days": rows}
+
+
+# ---------------------------------------------------------- performance
+
+def _benchmark(root: Path) -> tuple[dict[str, float], str | None]:
+    """CSI 300 daily returns from the release the book's latest run pinned:
+    the replay slot of that run, read as the research style sidecar reads it."""
+    slot = newest_replay_slot(root)
+    if slot is None:
+        return {}, None
+    try:
+        return _slot_benchmark(slot), None
+    except (OSError, ValueError, pa.ArrowException) as exc:  # a damaged cache file degrades the benchmark only
+        return {}, f"{type(exc).__name__}: {exc}"
+
+
+def performance_payload(repo_root: Path, env: str = "paper") -> dict[str, object]:
+    """The book's return against CSI 300 over the same settled days, its
+    end-of-day equity and cash on those days, and the replay statistics."""
+    root = env_dir(repo_root, env)
+    record, error = _read_json(root / BOOK_NAME)
+    initial = _number(_mapping(_mapping(record).get("profile")).get("initial_cash"))
+    rows, skipped = read_jsonl(root / EQUITY_JOURNAL_NAME)
+    # One row per settled day: equity marked at that day's close and the cash
+    # after that day's fills, as the engine journals them together.
+    curve = [
+        {"trade_date": day, "equity": equity, "cash": _number(row.get("cash")), "initial_equity": initial}
+        for row in rows
+        if (day := _text(row.get("trade_date"))) and _valid_date(day)
+        and (equity := _number(row.get("equity"))) is not None
+    ]
+    base = {"env": env, "skipped_lines": skipped, "min_days": MIN_STATISTICS_DAYS}
+    if error or initial is None or initial <= 0 or not curve:
+        state = "unreadable" if error else "absent"
+        return {**base, "state": state, "error": error, "chart": None, "statistics": None, "benchmark_error": None}
+    returns = daily_returns_from_curve(curve)
+    daily, benchmark_error = _benchmark(root)
+    benchmark_rows = [(day, daily[day]) for day, _value in returns if day in daily]
+    benchmark = curve_entry("benchmark", BENCHMARK_LABEL, benchmark_rows) if benchmark_rows else None
+    executions = [row for day in _dates(root, "executions_") for row in read_jsonl(root / f"executions_{day}.jsonl")[0]]
+    stats = compute_return_stats(
+        ReplayResult(equity_curve=tuple(curve), executions=tuple(executions), inference_dates=(), pending_orders=())
+    )
+    covered = benchmark is not None and len(benchmark_rows) == len(returns)
+    enough = len(curve) >= MIN_STATISTICS_DAYS
+    total_return = _number(stats["total_return"])
+    benchmark_return = _number(benchmark["final"]) if covered else None
+    return {
+        **base,
+        "state": "ok",
+        "error": None,
+        "chart": {
+            "series": [curve_entry("strategy", "账簿", returns)],
+            "benchmark": benchmark,
+            "account": {
+                "dates": [row["trade_date"] for row in curve],
+                "equity": [row["equity"] for row in curve],
+                "cash": [row["cash"] for row in curve],
+            },
+        },
+        "benchmark_days": len(benchmark_rows),
+        "benchmark_error": benchmark_error,
+        "statistics": {
+            "days": len(curve),
+            "total_return": total_return,
+            "benchmark_return": benchmark_return,
+            "excess_return": total_return - benchmark_return
+            if total_return is not None and benchmark_return is not None
+            else None,
+            "annualized_return": _number(stats["annualized_return"]) if enough else None,
+            "sharpe": _number(stats["sharpe"]) if enough else None,
+            "max_drawdown": _number(stats["max_drawdown"]) if enough else None,
+            "turnover": _number(stats["turnover"]),
+            "fees": _number(stats["fees_paid"]),
+            "stamp_duty": _number(stats["stamp_duty_paid"]),
+            "fills": int(_mapping(stats["order_status_counts"]).get("filled", 0)),
+        },
+    }
+
+
+# ------------------------------------------------------------- snapshot
 
 # Position rows are projected through one candidate list; a row where nothing
 # maps is served as {"unmapped": true}, visible and never silently dropped.
@@ -149,24 +365,32 @@ _POSITION_FIELDS = (
 )
 
 
-def _project_position(record: dict[str, object]) -> dict[str, object]:
+def _project_position(record: dict[str, object], equity: float | None) -> dict[str, object]:
     row: dict[str, object] = {name: cast(record.get(key)) for name, key, cast in _POSITION_FIELDS}
     row["unmapped"] = all(value is None for value in row.values())
+    quantity, cost, last = row["quantity"], row["average_cost"], row["last_price"]
+    value = quantity * last if quantity is not None and last is not None else None
+    row["market_value"] = value
+    row["pnl"] = quantity * (last - cost) if value is not None and cost is not None else None
+    row["weight"] = value / equity if value is not None and equity else None
     return row
 
 
 def _project_snapshot(raw: dict[str, object]) -> dict[str, object]:
     positions = raw.get("positions") if isinstance(raw.get("positions"), list) else []
+    equity = _number(raw.get("equity"))
+    rows = [_project_position(row, equity) for row in positions if isinstance(row, dict)]
     return {
         "source": _text(raw.get("source")),
         "trade_date": _text(raw.get("trade_date")),
-        "day_complete": raw.get("day_complete") if isinstance(raw.get("day_complete"), bool) else None,
+        "settled_through": _text(raw.get("settled_through")),
         "phase": _text(raw.get("phase")),
         "strategy_revision": _text(raw.get("strategy_revision")),
         "cash": _number(raw.get("cash")),
-        "equity": _number(raw.get("equity")),
+        "equity": equity,
+        "market_value": sum(row["market_value"] or 0.0 for row in rows),
         "pending_order_count": _count(raw.get("pending_order_count")),
-        "positions": [_project_position(row) for row in positions if isinstance(row, dict)],
+        "positions": rows,
     }
 
 
@@ -216,49 +440,41 @@ def snapshot_payload(repo_root: Path, env: str = "paper") -> dict[str, object]:
     }
 
 
-def series_payload(repo_root: Path, env: str = "paper") -> dict[str, object]:
-    rows, skipped = read_jsonl(env_dir(repo_root, env) / "equity_daily.jsonl")
-    points = [{"trade_date": row.get("trade_date"), "equity": _number(row.get("equity")), "cash": _number(row.get("cash"))} for row in rows]
-    return {"env": env, "state": "ok" if points else "absent", "skipped_lines": skipped, "series": points}
+# --------------------------------------------------------------- status
 
-
-def _environment_state(orders: dict[str, object], deals: dict[str, object], snapshot: dict[str, object], latest: str | None) -> str:
-    """Snapshot precedence, widened to any degraded reader rather than the
-    snapshot alone, so nothing hides behind a healthy snapshot.
+def _environment_state(snapshot: str, state_error: str | None, latest: str | None) -> str:
+    """Snapshot precedence, widened to the book state the signal panels read,
+    so nothing hides behind a healthy snapshot.
 
     Damaged journal lines are counted (``skipped_lines``) and the good records
     around them are still served, so they never reach this ladder: a truncated
     append is a report, not an unreadable environment."""
-    if "unreadable" in {orders["state"], deals["state"], snapshot["state"]}:
+    if state_error or snapshot == "unreadable":
         return "unreadable"
-    if snapshot["state"] in {"export_error", "stale"}:
-        return str(snapshot["state"])
-    if latest or snapshot["state"] == "ok":
+    if snapshot in {"export_error", "stale"}:
+        return snapshot
+    if latest or snapshot == "ok":
         return "ok"
     # Initialized but never run: the directory exists, nothing has been written.
-    return "no_snapshot" if snapshot["state"] == "no_snapshot" else "absent"
+    return "no_snapshot" if snapshot == "no_snapshot" else "absent"
 
 
 def environment_summary(repo_root: Path, env: str = "paper") -> dict[str, object]:
-    orders, deals = orders_payload(repo_root, env), deals_payload(repo_root, env)
-    latest = max([date for date in (orders.get("trade_date"), deals.get("trade_date")) if isinstance(date, str)], default=None)
+    root = env_dir(repo_root, env)
     snapshot = snapshot_payload(repo_root, env)
+    _state, state_error = _read_json(root / PAPER_STATE_NAME)
+    latest = max([*_dates(root, "orders_")[-1:], *_dates(root, "executions_")[-1:]], default=None)
     return {
         "env": env,
         "label": ENV_LABELS[env],
-        "state": _environment_state(orders, deals, snapshot, latest),
-        "error": snapshot["error"],
+        "state": _environment_state(str(snapshot["state"]), state_error, latest),
+        "error": snapshot["error"] or state_error,
         "generated_at": snapshot["generated_at"],
         "age_seconds": snapshot["age_seconds"],
         # Exported so the SPA can quote the alert threshold without
         # duplicating the constant client-side.
         "stale_threshold_seconds": STALE_SNAPSHOT_ALERT_SECONDS,
-        "snapshot": snapshot["snapshot"],
         "trade_date": latest,
-        "order_count": orders["count"],
-        "deal_count": deals["count"],
-        # Damaged journal lines are reported, not promoted to a state.
-        "skipped_lines": int(orders["skipped_lines"]) + int(deals["skipped_lines"]),
     }
 
 

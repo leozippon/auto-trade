@@ -666,6 +666,33 @@ details.fold > summary.panel-summary {
  font-weight: 700;
  color: var(--text);
 }
+/* Paper signal history: one folded row per trading day, ruled like a table. */
+details.fold.history-day {
+ margin: 0;
+ padding: var(--space-2) 0;
+ border-bottom: 1px solid var(--row-border);
+}
+details.fold.history-day > summary {
+ color: var(--text);
+ font-variant-numeric: tabular-nums;
+}
+details.fold.history-day[open] > summary {
+ margin-bottom: 0;
+}
+/* A day the book decided nothing on and nothing filled reads quieter. */
+details.fold.history-day.idle > summary {
+ color: var(--muted);
+ font-weight: 500;
+}
+/* A year of trading days scrolls inside the panel instead of stretching it. */
+.history-list {
+ max-height: 32rem;
+ overflow-y: auto;
+ overscroll-behavior: contain;
+}
+.history-day-body {
+ padding: var(--space-3) 0 var(--space-2);
+}
 .modal.subagent-modal {
  width: min(1180px, 96vw);
  max-height: 94vh;

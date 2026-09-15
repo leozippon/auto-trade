@@ -44,6 +44,21 @@ from autotrade.pipelines.pit_backend import (
 
 PIT_CACHE_NAME = "pit"
 LIVE_GENERATION = "live"
+PAPER_PHASE = "paper"
+
+
+def newest_replay_slot(state_root: str | Path) -> Path | None:
+    """The replay slot of the book's latest run, or None before the first run.
+
+    Each generation directory is the provider's experiment directory, so its
+    views sit under the provider's default ``pit_views`` cache root, one slot
+    per run named ``<start>_<end>_<decision>``. A run keeps only the newest
+    generation, and the slot ending latest spans the whole book window through
+    that run's session: every settled day of the book.
+    """
+
+    slots = Path(state_root).glob(f"{PIT_CACHE_NAME}/*/pit_views/replay/{PAPER_PHASE}/*_*_*")
+    return max(slots, key=lambda path: (path.name.split("_")[1], path.name), default=None)
 
 
 class BookPITData:
@@ -103,7 +118,7 @@ class BookPITData:
             raise RuntimeError(f"the exchange calendar has fewer than two sessions before {start}")
         window_start, anchor = earlier[-1], earlier[-2]
         bundle = provider.prepare(
-            phase="paper",
+            phase=PAPER_PHASE,
             start=window_start,
             end=trade_date,
             decision_time=datetime.combine(pd.Timestamp(anchor).date(), time(23, 59, 59), tzinfo=CN_TZ),
@@ -249,4 +264,4 @@ def _remove_tree(root: Path) -> None:
     shutil.rmtree(root)
 
 
-__all__ = ["PIT_CACHE_NAME", "BookPITData"]
+__all__ = ["PIT_CACHE_NAME", "BookPITData", "newest_replay_slot"]

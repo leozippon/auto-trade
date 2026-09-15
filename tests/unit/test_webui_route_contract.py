@@ -139,7 +139,7 @@ def test_the_extractor_finds_the_routes_the_console_really_calls():
         "/api/experiments/{}",
         "/api/experiments/{}/control",
         "/api/experiments/{}/trace/stream",
-        "/api/trading/{}/deals",
+        "/api/trading/{}/signal",
         "/api/parameter-schema",
         # Assembled from a local `const base`, not written inline.
         "/api/experiments/{}/results/{}/orders",
@@ -169,10 +169,13 @@ def test_every_api_path_the_console_calls_is_a_registered_route():
 def test_the_route_check_fails_on_a_renamed_route():
     """The mutation: the exact C1 defect must be detectable."""
     server = server_api_paths()
-    # `/deals` was once called `/executions` on the client only.
-    assert "/api/trading/{}/deals" in server
+    # Fills were once requested as `/executions` on the client only.
+    assert "/api/trading/{}/history" in server
     assert "/api/trading/{}/executions" not in server
     assert sorted({"/api/trading/{}/executions"} - server) == ["/api/trading/{}/executions"]
+
+
+PAPER_PANEL_ROUTES = ("book", "signal", "history", "performance", "snapshot")
 
 
 def test_paper_bundle_serves_the_key_names_the_console_reads(tmp_path: Path):
@@ -180,19 +183,6 @@ def test_paper_bundle_serves_the_key_names_the_console_reads(tmp_path: Path):
     SPA reads named keys, so the contract is the key names."""
     root = tmp_path / "data/trading/paper"
     root.mkdir(parents=True)
-    (root / "orders_20260102.jsonl").write_text(
-        json.dumps(
-            {
-                "event_id": "o1",
-                "symbol": "000001.SZ",
-                "action": "buy",
-                "quantity": 100,
-                "execute_at": "2026-01-02T09:30:00+08:00",
-            }
-        )
-        + "\n",
-        encoding="utf-8",
-    )
     (root / "executions_20260102.jsonl").write_text(
         json.dumps(
             {
@@ -211,33 +201,33 @@ def test_paper_bundle_serves_the_key_names_the_console_reads(tmp_path: Path):
     )
     client = TestClient(create_app(tmp_path))
 
-    # The four requests the Paper page issues together; api() throws inside
+    # The requests the Paper page issues together; api() throws inside
     # Promise.all, so ONE 404 blanks the whole route.
-    for route in ("snapshot", "orders", "deals", "series"):
+    for route in PAPER_PANEL_ROUTES:
         response = client.get(f"/api/trading/paper/{route}")
         assert response.status_code == 200, route
     assert client.get("/api/trading/paper/health").status_code == 200
 
-    orders = client.get("/api/trading/paper/orders").json()
-    assert "orders" in orders and orders["count"] == 1
-    assert {"env", "trade_date", "available_dates", "state", "skipped_lines"} <= orders.keys()
-
-    deals = client.get("/api/trading/paper/deals").json()
-    assert "deals" in deals, "the SPA reads payload.deals, not payload.executions"
-    assert "executions" not in deals
-    assert deals["deals"][0]["status"] == "filled"
+    history = client.get("/api/trading/paper/history").json()
+    assert history["days"][0]["fills"][0]["status"] == "filled"
+    assert {"state", "error"} <= history.keys()
+    day = history["days"][0]
+    assert {"trade_date", "orders", "fills", "skipped_lines"} <= day.keys()
+    assert "executions" not in day, "the SPA reads day.fills"
+    assert {"state", "error", "signal"} <= client.get("/api/trading/paper/signal").json().keys()
+    assert {"state", "error", "book", "start_date", "settled_through", "last_fit_date"} <= (
+        client.get("/api/trading/paper/book").json().keys()
+    )
+    performance = client.get("/api/trading/paper/performance").json()
+    assert {"state", "error", "chart", "statistics", "min_days", "benchmark_error"} <= performance.keys()
+    assert "snapshot" in client.get("/api/trading/paper/snapshot").json()
 
     roster = client.get("/api/trading/environments").json()["environments"][0]
-    for key in ("env", "label", "state", "trade_date", "order_count", "deal_count",
-                "skipped_lines", "stale_threshold_seconds", "snapshot"):
+    for key in ("env", "label", "state", "error", "trade_date", "age_seconds", "stale_threshold_seconds"):
         assert key in roster, key
-    assert "execution_count" not in roster, "the SPA reads summary.deal_count"
-
-    series = client.get("/api/trading/paper/series").json()
-    assert "series" in series and "state" in series
 
 
-@pytest.mark.parametrize("route", ["orders", "deals", "series", "snapshot"])
+@pytest.mark.parametrize("route", PAPER_PANEL_ROUTES)
 def test_the_paper_routes_the_console_reads_are_named_on_both_sides(route: str):
     assert f"/api/trading/{{}}/{route}" in client_api_paths()
     assert f"/api/trading/{{}}/{route}" in server_api_paths()

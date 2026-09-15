@@ -80,7 +80,7 @@ def _benchmark_returns(result_file: Path) -> list[tuple[str, float]]:
     return sorted(rows.items())
 
 
-def _curve_entry(key: str, label: str, rows: list[tuple[str, float]]) -> dict[str, object]:
+def curve_entry(key: str, label: str, rows: list[tuple[str, float]]) -> dict[str, object]:
     dates: list[str] = []
     cumulative: list[float] = []
     drawdown: list[float] = []
@@ -111,8 +111,8 @@ def result_equity_payload(root: Path, experiment_id: str, name: str) -> dict[str
     return {
         "experiment_id": experiment_id,
         "result": name,
-        "series": [_curve_entry("strategy", "策略", returns)] if returns else [],
-        "benchmark": _curve_entry("benchmark", BENCHMARK_LABEL, benchmark) if benchmark else None,
+        "series": [curve_entry("strategy", "策略", returns)] if returns else [],
+        "benchmark": curve_entry("benchmark", BENCHMARK_LABEL, benchmark) if benchmark else None,
         "exposure": {
             "strategy": {
                 "dates": [day for day, _value in exposure],
