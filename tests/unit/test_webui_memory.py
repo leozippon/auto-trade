@@ -274,6 +274,12 @@ def test_the_tier_lists_every_experiment_and_admits_only_graduated_ones(
     assert rows["adopted_without_skills"]["verdict"] == "graduated"
     assert rows["adopted_without_skills"]["admitted"] is False
     assert rows["adopted_without_skills"]["entries"] == []
+    # ``published`` is the second question the page asks of every row: an
+    # experiment the tier declines to offer may still hold a generation worth
+    # browsing, and one that holds nothing has nothing to list.
+    assert rows["not_adopted"]["published"] == 1
+    assert rows["still_running"]["published"] == 1
+    assert rows["adopted_without_skills"]["published"] == 0
 
 
 def test_an_arm_without_a_verdict_publishes_none_and_mounts_nothing(
@@ -295,6 +301,25 @@ def test_an_arm_without_a_verdict_publishes_none_and_mounts_nothing(
     assert graduated_memory_sources(experiments) == ()
 
 
+def test_an_arm_before_its_first_session_holds_nothing_to_browse(
+    tmp_path: Path,
+) -> None:
+    """A running arm with no ledger yet publishes nothing and admits nothing.
+
+    This is what every arm of a fresh round looks like, and it is why the page
+    omits such rows instead of listing them as unopenable: neither question the
+    catalogue asks has an answer yet."""
+
+    experiments = tmp_path / "experiments"
+    (experiments / "fresh_arm").mkdir(parents=True)
+    row = memory.graduated_tier(experiments)["experiments"][0]
+    assert row["experiment_id"] == "fresh_arm"
+    assert row["verdict"] is None
+    assert row["admitted"] is False
+    assert row["published"] == 0
+    assert row["entries"] == []
+
+
 def test_an_unreadable_ledger_becomes_a_row_and_suspends_admission(
     tmp_path: Path,
 ) -> None:
@@ -313,6 +338,8 @@ def test_an_unreadable_ledger_becomes_a_row_and_suspends_admission(
     assert payload["error"].endswith("graduated memory cannot be resolved")
     assert rows["broken"]["error"].endswith("experiment state is unreadable")
     assert str(tmp_path) not in rows["broken"]["error"]
+    # Unknown, not zero: the page must keep listing a row it cannot read.
+    assert rows["broken"]["published"] is None
     assert rows["adopted"]["verdict"] == "graduated"
     assert rows["adopted"]["admitted"] is None
     assert rows["adopted"]["entries"] == []

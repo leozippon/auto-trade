@@ -5754,16 +5754,21 @@ function renderMemoryList() {
   memoryView.listHost.replaceChildren(...nodes);
 }
 
-/* Admitted candidates are selectable, and every other experiment stays visible
-   in one collapsed muted block — because "not offered" and "not there" are
-   different answers. */
+/* This catalogue is for browsing skills: admitted candidates are selectable
+   here, and the collapsed block below them answers "not offered" for the
+   experiments that do hold a published generation the tier declines — plus any
+   whose state cannot be read at all. An experiment with nothing published has
+   nothing to browse either way, so it is counted in one caption rather than
+   listed as a row that opens nothing. */
 function renderMemoryCandidates() {
   const tier = memoryView.payload.graduated || {};
   const rows = tier.experiments || [];
   const listed = rows.filter(
     (row) => row.admitted === true && (row.entries || []).length,
   );
-  const aside = rows.filter((row) => !listed.includes(row));
+  const rest = rows.filter((row) => !listed.includes(row));
+  const aside = rest.filter((row) => row.error || row.published > 0);
+  const nothingPublished = rest.length - aside.length;
   const nodes = [];
   if (tier.error)
     nodes.push(
@@ -5810,11 +5815,17 @@ function renderMemoryCandidates() {
         ),
       ),
     );
+  if (nothingPublished)
+    nodes.push(
+      el("div", { class: "hint" }, `另有 ${nothingPublished} 个实验尚无已发布 skill 代次`),
+    );
   memoryView.candidateHost.replaceChildren(...nodes);
 }
 
-/* `admitted === null` means the tier itself could not be resolved, which is
-   not the same answer as "contributes nothing". */
+/* Every row here holds a published generation (or could not be read at all),
+   so the reason answers why the tier does not offer it. `admitted === null`
+   means the tier itself could not be resolved, which is not the same answer as
+   "contributes nothing". */
 function candidateAsideReason(row) {
   if (row.error) return el("span", { class: "hint warn" }, row.error);
   if (row.admitted === null || row.admitted === undefined)

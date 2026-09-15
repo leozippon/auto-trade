@@ -36,6 +36,7 @@ from autotrade.pipelines.skills import (
     SkillsStats,
     build_skills_index,
     graduated_memory_sources,
+    latest_skills_snapshot,
     operating_memory_snapshot_root,
     read_operating_memory_snapshot,
     resolve_operating_memory,
@@ -129,10 +130,12 @@ def curated_entry(repo_root: Path, name: str) -> dict[str, object]:
 
 
 def graduated_tier(experiments_root: Path) -> dict[str, object]:
-    """Every experiment's verdict, and what the tier would admit now.
+    """Every experiment's verdict, what the tier admits now, and what it holds.
 
     Admission is whatever ``skills.graduated_memory_sources`` returns, never a
-    second rule.
+    second rule. ``published`` is the size of the experiment's current skills
+    generation — the page needs it to tell an experiment the tier declines to
+    offer from one that has nothing to offer yet.
     """
 
     root = Path(experiments_root)
@@ -166,14 +169,20 @@ def _tier_row(
         "experiment_id": directory.name,
         "verdict": None,
         "admitted": False,
+        "published": 0,
         "entries": [],
     }
     try:
-        verdict = experiment_verdict(read_ledger_records(directory))
+        records = read_ledger_records(directory)
+        verdict = experiment_verdict(records)
+        published = latest_skills_snapshot(records, experiment_dir=directory)
     except (OSError, TypeError, ValueError) as exc:
         row["error"] = _error(exc, _UNREADABLE_EXPERIMENT)
+        # Unknown, not zero: an unreadable ledger answers neither question.
+        row["published"] = None
         return row
     row["verdict"] = str(verdict["status"]) if isinstance(verdict, Mapping) else None
+    row["published"] = published.stats.count
     if admitted is None:
         row["admitted"] = None
         return row
