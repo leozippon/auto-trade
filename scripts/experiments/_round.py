@@ -24,7 +24,9 @@ default.
 required and id rules, then the worker's own resolve_worker_options pre-flight,
 which type-checks every knob, refuses a malformed research geometry and, for a
 named PIT view seed, refuses a tree whose cache format or snapshot
-configuration is not this round's or whose prebuild is still staging views).
+configuration is not this round's or whose prebuild is still staging views,
+and reads the research release the seed was built from -- the release every
+arm will pin -- refusing it unless it is published here and reaches Held-out).
 The console's deployment-state checks -- an experiment directory that already
 exists and a free running slot -- can only be decided against the live server
 and stay at POST time.
@@ -394,8 +396,9 @@ class Round:
         """One line on the shared seed, printed before anything is validated.
 
         Says whether the tree's contract can be read at all and which release
-        it pins; whether it matches this round's selection, and whether its
-        build finished, is the pre-flight's own verdict below.
+        every arm will pin; whether it matches this round's selection, whether
+        its build finished and whether that release is published and reaches
+        Held-out is the pre-flight's own verdict below.
         """
         if not self.pit_views_seed:
             return (
@@ -421,8 +424,9 @@ class Round:
             )
         return (
             f"seed {self.pit_views_seed}: contract present (snapshot cache format {version},"
-            f" release {record.get('generation_id')}); the pre-flight below compares this"
-            " round's selection against it and refuses a tree a prebuild is still staging."
+            f" release {record.get('generation_id')}, which every arm pins); the pre-flight"
+            " below compares this round's selection against it, refuses a tree a prebuild is"
+            " still staging and checks that release is published and reaches Held-out."
         )
 
     def main(self, argv: list[str], usage: str | None = None) -> int:

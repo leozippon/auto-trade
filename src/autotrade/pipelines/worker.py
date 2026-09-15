@@ -17,7 +17,10 @@ from autotrade.environment.artifacts import (
     FilesystemArtifactStore,
 )
 from autotrade.environment.broker import BrokerProfile
-from autotrade.environment.data.research_release import pin_research_release
+from autotrade.environment.data.research_release import (
+    pin_research_release,
+    published_research_release,
+)
 from autotrade.environment.data.snapshot import (
     DEFAULT_DATASETS,
     SELECTABLE_DATASETS,
@@ -403,10 +406,12 @@ def resolve_worker_options(
     ``preflight`` validates parameters against an experiment directory that
     does not exist yet, so it checks the request rather than the deployment:
     input paths are checked for repository containment but not for existence,
-    and the two steps that consume the durable data inputs are skipped — the
-    immutable research-release pin (which materialises state inside the
-    experiment directory) and the check that the release reaches into
-    Held-out. Every parameter check runs either way.
+    and the immutable research-release pin (which materialises state inside the
+    experiment directory) is skipped. An experiment naming a PIT view seed pins
+    the release that seed was built from, which is already published, so the
+    pre-flight still reads that release and checks it reaches into Held-out;
+    without a named seed the release is not known until the pin, and that
+    check waits for it. Every parameter check runs either way.
     """
     params = {
         key: value for key, value in params.items() if key not in NON_PERSISTABLE_PARAMS
@@ -535,33 +540,47 @@ def resolve_worker_options(
         pit_cache_root == directory or pit_cache_root.is_relative_to(directory)
     ):
         raise ValueError("pit_cache_root must stay inside the experiment directory")
-    pit_views_seed, pit_views_seed_required = (
+    pit_views_seed, seed_release = (
         _pit_views_seed(params.get("pit_views_seed"), repository, snapshot_config)
         if data_backend == "pit"
-        else (None, False)
+        else (None, None)
     )
-    trading_days: list[str] = []
-    if preflight:
-        pass  # the release pin writes into the experiment dir; see the docstring
-    elif data_backend == "daily":
-        assert daily is not None
-        frame = pd.read_parquet(daily, columns=["trade_date"])
-        trading_days = sorted(set(frame["trade_date"].map(yyyymmdd).tolist()))
+    # None: a pre-flight without a named seed reads no data (see the docstring).
+    trading_days: list[str] | None = None
+    if data_backend == "daily":
+        if not preflight:
+            assert daily is not None
+            frame = pd.read_parquet(daily, columns=["trade_date"])
+            trading_days = sorted(set(frame["trade_date"].map(yyyymmdd).tolist()))
     else:
         assert (
             raw_dir is not None
             and events_root is not None
             and events_status is not None
         )
-        release = pin_research_release(
-            experiment_dir=directory,
-            raw_dir=raw_dir,
-            fundamental_events_root=events_root,
-            fundamental_events_status=events_status,
-            required_raw_datasets=required_release_raw_datasets(snapshot_config),
-        )
-        trading_days = load_sse_trading_days(release.raw_dir)
-    if not trading_days and not preflight:
+        required_raw_datasets = required_release_raw_datasets(snapshot_config)
+        if seed_release is not None:
+            assert pit_views_seed is not None
+            trading_days = _seed_release_trading_days(
+                pit_views_seed,
+                seed_release,
+                experiment_dir=directory,
+                raw_dir=raw_dir,
+                fundamental_events_root=events_root,
+                fundamental_events_status=events_status,
+                required_raw_datasets=required_raw_datasets,
+                preflight=preflight,
+            )
+        elif not preflight:
+            release = pin_research_release(
+                experiment_dir=directory,
+                raw_dir=raw_dir,
+                fundamental_events_root=events_root,
+                fundamental_events_status=events_status,
+                required_raw_datasets=required_raw_datasets,
+            )
+            trading_days = load_sse_trading_days(release.raw_dir)
+    if trading_days is not None and not trading_days:
         raise ValueError("daily Parquet has no trading days")
     default_geometry = rolling_default("geometry")
     geometry = ResearchGeometry(
@@ -570,7 +589,7 @@ def resolve_worker_options(
             for name in GEOMETRY_PARAMETERS
         }
     )
-    if not preflight:
+    if trading_days is not None:
         # The release must reach into Held-out; the forward replay clips the
         # Held-out slot to its last trading day.
         geometry.heldout(trading_days)
@@ -680,7 +699,7 @@ def resolve_worker_options(
         fundamental_events_status=events_status,
         pit_cache_root=pit_cache_root,
         pit_views_seed=pit_views_seed,
-        pit_views_seed_required=pit_views_seed_required,
+        pit_views_seed_required=seed_release is not None,
         snapshot_config=snapshot_config,
         # NLConfig owns the NL budget defaults; an absent parameter keeps the
         # shipped default rather than a second copy of it living here.
@@ -1331,8 +1350,8 @@ COMPACTION_SAFETY_MARGIN_TOKENS = 8_192
 
 def _pit_views_seed(
     value: object, repo_root: Path, snapshot_config: SnapshotConfig
-) -> tuple[Path, bool]:
-    """The PIT view seed this experiment hardlinks from, and whether it must apply.
+) -> tuple[Path, tuple[str, str] | None]:
+    """The PIT view seed this experiment hardlinks from, and the release it binds.
 
     The default seed is an optimisation over cold-building: it carries the
     default dataset selection, and an experiment that asks for anything else
@@ -1341,21 +1360,76 @@ def _pit_views_seed(
     the default gets prebuilt views at all — so it is checked here, at create
     time: the tree must exist and must already carry exactly this snapshot
     configuration. Silently cold-building instead would cost hours and look
-    like a slow experiment rather than a wrong parameter.
+    like a slow experiment rather than a wrong parameter. A named seed also
+    binds the experiment's research release: the ``(generation_id,
+    release_raw_dir)`` it was built from is returned, and None means the seed
+    is the optional default, which binds nothing and need not apply.
     """
 
     default = repo_root / DEFAULT_PIT_VIEWS_SEED
     if value in (None, ""):
-        return default, False
+        return default, None
     if not isinstance(value, str):
         raise ValueError("pit_views_seed must be a string")  # noqa: TRY004
     seed = _repo_path(repo_root, value.strip(), "pit_views_seed")
     if seed == default:
-        return default, False
+        return default, None
     if not seed.is_dir() or seed.is_symlink():
         raise ValueError(f"pit_views_seed must be an existing directory: {seed}")
-    assert_seed_snapshot_config(seed, snapshot_config)
-    return seed, True
+    return seed, assert_seed_snapshot_config(seed, snapshot_config)
+
+
+def _seed_release_trading_days(
+    seed: Path,
+    seed_release: tuple[str, str],
+    *,
+    experiment_dir: Path,
+    raw_dir: Path,
+    fundamental_events_root: Path,
+    fundamental_events_status: Path,
+    required_raw_datasets: tuple[str, ...],
+    preflight: bool,
+) -> list[str]:
+    """Bind a named seed's research release and return its trading days.
+
+    The seed's views were built from one release, so that release is this
+    experiment's: the worker pins it rather than the newest generation, and a
+    pre-flight, which must not write, reads the same published release. Either
+    way a seed whose release this deployment cannot provide is a wrong
+    parameter, refused before any view is linked.
+    """
+
+    generation_id, seed_raw_dir = seed_release
+    try:
+        if preflight:
+            release = published_research_release(
+                generation_id=generation_id,
+                raw_dir=raw_dir,
+                fundamental_events_root=fundamental_events_root,
+                fundamental_events_status=fundamental_events_status,
+                required_raw_datasets=required_raw_datasets,
+            )
+        else:
+            release = pin_research_release(
+                experiment_dir=experiment_dir,
+                generation_id=generation_id,
+                raw_dir=raw_dir,
+                fundamental_events_root=fundamental_events_root,
+                fundamental_events_status=fundamental_events_status,
+                required_raw_datasets=required_raw_datasets,
+            )
+        trading_days = load_sse_trading_days(release.raw_dir)
+    except (OSError, RuntimeError) as exc:
+        raise ValueError(
+            f"pit_views_seed {seed} was built from research release {generation_id!r}, "
+            f"which this experiment cannot pin: {exc}"
+        ) from exc
+    if str(release.raw_dir) != seed_raw_dir:
+        raise ValueError(
+            f"pit_views_seed {seed} records release raw dir {seed_raw_dir}, but research "
+            f"release {generation_id} is at {release.raw_dir} in this repository"
+        )
+    return trading_days
 
 
 def _optional_workspace_reference(value: object, repo_root: Path) -> str:

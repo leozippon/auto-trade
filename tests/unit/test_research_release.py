@@ -16,6 +16,7 @@ from autotrade.environment.data.research_release import (
     DOMAIN_REPORT_TYPES,
     DOMAIN_STATUS_FILES,
     pin_research_release,
+    published_research_release,
 )
 
 
@@ -156,6 +157,39 @@ class ResearchReleaseTest(unittest.TestCase):
         self.assertEqual(resumed, first)
         self.assertEqual(resumed.generation_id, "gen1")
         self.assertIn('"status": "ok"', resumed.fundamental_events_status.read_text(encoding="utf-8"))
+
+    def test_a_named_generation_pins_that_release_not_the_newest(self) -> None:
+        # A PIT view seed built from gen1 must stay usable after the nightly
+        # chain commits gen2: the experiment pins gen1 and its own baseline
+        # quality, never the newest generation or the live status files.
+        seed_release = self._pin("seed")
+        self._write_generation("gen2", state="committed")
+        self._pin("newest")
+        self.status.write_text('{"status":"error"}\n', encoding="utf-8")
+        inputs = {
+            "raw_dir": self.raw,
+            "fundamental_events_root": self.pit,
+            "fundamental_events_status": self.status,
+        }
+
+        read = published_research_release(generation_id="gen1", **inputs)
+        experiment = self.root / "experiments" / "on-seed"
+        pinned = pin_research_release(experiment_dir=experiment, generation_id="gen1", **inputs)
+
+        self.assertEqual((read.generation_id, read.raw_dir), ("gen1", seed_release.raw_dir))
+        self.assertEqual((pinned.generation_id, pinned.raw_dir), ("gen1", seed_release.raw_dir))
+        self.assertIn('"status": "ok"', pinned.fundamental_events_status.read_text(encoding="utf-8"))
+        with self.assertRaisesRegex(RuntimeError, "pinned to research release gen1, not the requested release gen2"):
+            pin_research_release(experiment_dir=experiment, generation_id="gen2", **inputs)
+
+        missing = self.root / "experiments" / "missing"
+        for attempt in (
+            lambda: published_research_release(generation_id="gen9", **inputs),
+            lambda: pin_research_release(experiment_dir=missing, generation_id="gen9", **inputs),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "research release gen9 is missing or incomplete"):
+                attempt()
+        self.assertFalse((missing / "research_release").exists())
 
     def test_same_generation_rejects_a_different_source_contract(self) -> None:
         self._pin("seed")

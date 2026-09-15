@@ -8,7 +8,10 @@ when ``provider.json`` matches the contract this experiment would write.
 Which tree an experiment reads is its ``pit_views_seed`` parameter: the default
 one carries the default dataset selection, and an arm that selects other
 datasets points at a tree prebuilt for exactly its own selection
-(``scripts/data/prebuild_pit_views_seed.py``). What a tree carries is the
+(``scripts/data/prebuild_pit_views_seed.py``). An experiment that names a tree
+pins the research release that tree was built from rather than the newest one,
+so a seed stays usable while the nightly chain commits new generations. What a
+tree carries is the
 ``SeedPlan`` of one research geometry (docs/data-documentation.md §3.4).
 """
 
@@ -121,16 +124,19 @@ def pit_cache_provider_record(
     }
 
 
-def assert_seed_snapshot_config(seed: Path, snapshot_config: SnapshotConfig) -> None:
+def assert_seed_snapshot_config(
+    seed: Path, snapshot_config: SnapshotConfig
+) -> tuple[str, str]:
     """Refuse a seed prebuilt for a different snapshot configuration or cache format.
 
-    The create-time half of the contract check. Two of the four fields of
-    ``pit_cache_provider_record`` — the pinned generation and its release
-    path — exist only once the experiment runs, so what a create request can be
-    judged against is the part the seed was prebuilt for: the cache format and
-    the snapshot configuration, which is exactly what decides whether a dataset
-    selection has views here at all. ``seed_pit_views`` still compares the
-    whole record before it links anything.
+    The create-time half of the contract check: the cache format and the
+    snapshot configuration, which is exactly what decides whether a dataset
+    selection has views here at all. The other two fields of
+    ``pit_cache_provider_record`` — the generation and release path the seed
+    was built from — are returned rather than judged: an experiment that names
+    this seed pins that very release, so it is the caller that checks the
+    release is published and reaches Held-out. ``seed_pit_views`` still
+    compares the whole record before it links anything.
     """
 
     provider_path = Path(seed) / "provider.json"
@@ -167,6 +173,7 @@ def assert_seed_snapshot_config(seed: Path, snapshot_config: SnapshotConfig) -> 
             "scripts/data/prebuild_pit_views_seed.py to report status ok for "
             "this seed, or remove the staged slots a killed build left behind"
         )
+    return str(record.get("generation_id") or ""), str(record.get("release_raw_dir") or "")
 
 
 def seed_pit_views(

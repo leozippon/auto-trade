@@ -696,34 +696,54 @@ class PitViewsSeedParameterTest(unittest.TestCase):
     into hours of silent cold building.
     """
 
-    def _resolve(self, repo_root: Path, params: dict):
+    def _resolve(self, repo_root: Path, params: dict, *, preflight: bool = True):
         from autotrade.pipelines.worker import resolve_worker_options
 
+        merged = {**PIT_SEED_BASE_PARAMS, **params}
         return resolve_worker_options(
-            {**PIT_SEED_BASE_PARAMS, **params},
-            experiment_dir=repo_root / "experiments/seed_demo",
+            merged,
+            experiment_dir=repo_root / "experiments" / str(merged["experiment_id"]),
             repo_root=repo_root,
-            preflight=True,
+            preflight=preflight,
         )
 
-    def _seed(self, repo_root: Path, name: str, params: dict) -> Path:
+    def _seed(
+        self,
+        repo_root: Path,
+        name: str,
+        params: dict,
+        *,
+        generation_id: str = "gen_seed",
+        **release: object,
+    ) -> Path:
         """A prebuilt seed tree carrying the contract `params` resolve to.
 
-        Built through the same `_snapshot_config` the prebuild script calls, so
-        the tree here is the one that script would leave behind.
+        Built through the same `_snapshot_config` the prebuild script calls,
+        over a release published first (``release`` forwards to
+        ``publish_release``), so the tree here is the one that script would
+        leave behind.
         """
 
+        from autotrade.pipelines.pit_backend import required_release_raw_datasets
         from autotrade.pipelines.pit_views_seed import pit_cache_provider_record
         from autotrade.pipelines.worker import _snapshot_config
+        from tests.unit.research_release_fixture import publish_release
 
+        config = _snapshot_config({**PIT_SEED_BASE_PARAMS, **params})
+        built_from = publish_release(
+            repo_root,
+            generation_id,
+            datasets=required_release_raw_datasets(config),
+            **release,
+        )
         seed = repo_root / "data" / name
         seed.mkdir(parents=True)
         (seed / "provider.json").write_text(
             json.dumps(
                 pit_cache_provider_record(
-                    generation_id="generation_test",
-                    release_raw_dir=repo_root / "raw",
-                    snapshot_config=_snapshot_config({**PIT_SEED_BASE_PARAMS, **params}),
+                    generation_id=built_from.generation_id,
+                    release_raw_dir=built_from.raw_dir,
+                    snapshot_config=config,
                 )
             ),
             encoding="utf-8",
@@ -786,6 +806,92 @@ class PitViewsSeedParameterTest(unittest.TestCase):
             message = str(caught.exception)
             self.assertIn("fut_daily", message)
             self.assertIn("sw_daily", message)
+
+    def test_a_named_seed_binds_the_release_it_was_built_from(self) -> None:
+        """The nightly chain commits a new generation every night. An experiment
+        naming a seed pins the release that seed was built from, so the worker
+        still accepts the seed's views once the lake has moved on; an
+        experiment naming none still pins the newest release."""
+        import tempfile
+
+        from autotrade.pipelines.pit_backend import (
+            ResearchPITSnapshotProvider,
+            required_release_raw_datasets,
+        )
+        from autotrade.pipelines.worker import _snapshot_config
+        from tests.unit.research_release_fixture import publish_release
+
+        selection = {"macro_datasets": ["cn_gdp", "fut_daily"]}
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            template = repo_root / "configs/agent_output_template/main.py"
+            template.parent.mkdir(parents=True)
+            template.write_text("def generate_orders(context):\n    return []\n", encoding="utf-8")
+            seed = self._seed(repo_root, "pit_views_seed_ext", selection)
+            view = seed / "decision" / "20250630T235959+0800"
+            view.mkdir(parents=True)
+            (view / "manifest.json").write_text("{}", encoding="utf-8")
+            config = _snapshot_config({**PIT_SEED_BASE_PARAMS, **selection})
+            publish_release(
+                repo_root, "gen_newer", datasets=required_release_raw_datasets(config)
+            )
+            params = {**selection, "pit_views_seed": "data/pit_views_seed_ext"}
+
+            self._resolve(repo_root, params)  # the console's create pre-flight
+            options = self._resolve(repo_root, params, preflight=False)  # worker start
+            snapshots = ResearchPITSnapshotProvider(
+                experiment_dir=options.experiment_dir,
+                raw_dir=options.raw_dir,
+                fundamental_events_root=options.fundamental_events_root,
+                fundamental_events_status=options.fundamental_events_status,
+                config=options.snapshot_config,
+                cache_root=options.pit_cache_root,
+                pit_views_seed=options.pit_views_seed,
+                pit_views_seed_required=options.pit_views_seed_required,
+            )
+            self.assertEqual(snapshots.release.generation_id, "gen_seed")
+            self.assertTrue(
+                (options.pit_cache_root / "decision" / view.name / "manifest.json").is_file()
+            )
+
+            unseeded = self._resolve(
+                repo_root, {**selection, "experiment_id": "no_seed"}, preflight=False
+            )
+            pin = json.loads(
+                (unseeded.experiment_dir / "research_release" / "manifest.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(pin["generation_id"], "gen_newer")
+
+    def test_a_named_seed_whose_release_cannot_serve_fails_the_create(self) -> None:
+        import shutil
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            template = repo_root / "configs/agent_output_template/main.py"
+            template.parent.mkdir(parents=True)
+            template.write_text("def generate_orders(context):\n    return []\n", encoding="utf-8")
+            # The release the seed was built from is gone: refused by the
+            # pre-flight and by the worker, which pins nothing else instead.
+            self._seed(repo_root, "seed_gone", {})
+            shutil.rmtree(repo_root / "data" / "research_releases" / "gen_seed")
+            params = {"pit_views_seed": "data/seed_gone"}
+            for preflight in (True, False):
+                with self.assertRaisesRegex(ValueError, r"gen_seed.*missing or incomplete"):
+                    self._resolve(repo_root, params, preflight=preflight)
+            self.assertFalse((repo_root / "experiments/seed_demo/research_release").exists())
+            # The release ends before Held-out: refused at create, not at start.
+            self._seed(
+                repo_root,
+                "seed_short",
+                {},
+                generation_id="gen_short",
+                trading_days=("20250630", "20260630"),
+            )
+            with self.assertRaisesRegex(ValueError, "Held-out"):
+                self._resolve(repo_root, {"pit_views_seed": "data/seed_short"})
 
     def test_the_daily_backend_needs_no_pit_seed(self) -> None:
         import tempfile

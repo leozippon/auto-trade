@@ -4,6 +4,8 @@ The cron writer keeps ``data/raw`` as its live tree.  An experiment pins a
 committed generation into a shared hardlink checkpoint, then stores a durable
 experiment-local manifest.  Resume always reuses that manifest; a new
 experiment started during ``updating``/``dirty`` uses the last complete release.
+An experiment that names the release it must read (the one its PIT view seed
+was built from) pins exactly that already-published release instead.
 """
 
 from __future__ import annotations
@@ -85,6 +87,7 @@ def pin_research_release(
     fundamental_events_root: str | Path,
     fundamental_events_status: str | Path,
     required_raw_datasets: tuple[str, ...] = (),
+    generation_id: str | None = None,
 ) -> ResearchRelease:
     """Pin immutable data inputs for one experiment.
 
@@ -92,6 +95,12 @@ def pin_research_release(
     roots without that pair retain live-path behavior for local/synthetic tests.
     ``required_raw_datasets`` are dataset directory names the experiment's
     snapshot config will read: every returned release must contain them.
+
+    ``generation_id`` names the release to pin instead of the newest committed
+    one. That release must already be published under ``research_releases/``
+    (a release directory is immutable, so neither the updater lock nor the live
+    generation is consulted), and an experiment already pinned to another
+    generation is refused.
     """
 
     experiment_dir = Path(experiment_dir).resolve()
@@ -111,12 +120,32 @@ def pin_research_release(
                 fundamental_events_root=fundamental_events_root,
                 fundamental_events_status=fundamental_events_status,
             )
+            if generation_id is not None and release.generation_id != generation_id:
+                raise RuntimeError(
+                    f"experiment is pinned to research release {release.generation_id or release.raw_dir}, "
+                    f"not the requested release {generation_id}"
+                )
             _require_raw_datasets(
                 release.raw_dir,
                 required_raw_datasets,
                 context=f"pinned research release {release.generation_id or release.raw_dir}",
             )
             return release
+
+        if generation_id is not None:
+            _reject_unpinned_legacy_experiment(experiment_dir)
+            shared = _named_release(
+                generation_id,
+                raw_dir=raw_dir,
+                fundamental_events_root=fundamental_events_root,
+                fundamental_events_status=fundamental_events_status,
+                required_raw_datasets=required_raw_datasets,
+            )
+            # The live quality files describe the newest generation, so the
+            # named release's own baseline copy is the one that belongs to it.
+            return _publish_experiment_pin(
+                experiment_dir, shared, quality_source=shared.baseline_quality_dir
+            )
 
         update_lock = raw_dir.parent.parent / ".runtime" / "tushare" / "locks" / "tushare_update.lock"
         generation_path = raw_dir / RAW_GENERATION_FILENAME
@@ -197,6 +226,87 @@ def pin_research_release(
         return _publish_experiment_pin(
             experiment_dir, shared, quality_source=shared.baseline_quality_dir
         )
+
+
+def published_research_release(
+    *,
+    generation_id: str,
+    raw_dir: str | Path,
+    fundamental_events_root: str | Path,
+    fundamental_events_status: str | Path,
+    required_raw_datasets: tuple[str, ...] = (),
+) -> ResearchRelease:
+    """Read one already-published release without pinning it.
+
+    Verifies exactly what ``pin_research_release(generation_id=...)`` verifies
+    before it pins, and writes nothing, so a create request can be judged
+    before its experiment directory exists. The status path is the release's
+    baseline quality copy, which is what that pin copies in.
+    """
+
+    shared = _named_release(
+        generation_id,
+        raw_dir=Path(raw_dir).resolve(),
+        fundamental_events_root=Path(fundamental_events_root).resolve(),
+        fundamental_events_status=Path(fundamental_events_status).resolve(),
+        required_raw_datasets=required_raw_datasets,
+    )
+    return ResearchRelease(
+        raw_dir=shared.raw_dir,
+        fundamental_events_root=shared.fundamental_events_root,
+        fundamental_events_status=shared.baseline_quality_dir / shared.fundamental_status_name,
+        generation_id=shared.generation_id,
+    )
+
+
+def _named_release(
+    generation_id: str,
+    *,
+    raw_dir: Path,
+    fundamental_events_root: Path,
+    fundamental_events_status: Path,
+    required_raw_datasets: tuple[str, ...],
+) -> _GlobalRelease:
+    shared = _published_release(
+        raw_dir.parent / "research_releases",
+        generation_id,
+        raw_dir=raw_dir,
+        fundamental_events_root=fundamental_events_root,
+        fundamental_events_status=fundamental_events_status,
+        description=f"research release {generation_id}",
+    )
+    _require_raw_datasets(
+        shared.raw_dir, required_raw_datasets, context=f"research release {generation_id}"
+    )
+    return shared
+
+
+def _published_release(
+    release_root: Path,
+    generation_id: str,
+    *,
+    raw_dir: Path,
+    fundamental_events_root: Path,
+    fundamental_events_status: Path,
+    description: str,
+) -> _GlobalRelease:
+    """The complete global release ``generation_id`` for this source contract."""
+
+    _validate_generation_text(generation_id)
+    expected_global = (release_root / generation_id / _MANIFEST_NAME).resolve()
+    try:
+        shared = _load_global_release(expected_global.parent, strict=True)
+    except (OSError, RuntimeError, ValueError, TypeError) as exc:
+        raise RuntimeError(f"{description} is corrupt: {expected_global.parent}: {exc}") from exc
+    if shared is None:
+        raise RuntimeError(f"{description} is missing or incomplete: {expected_global.parent}")
+    _assert_source_contract(
+        shared,
+        raw_dir,
+        fundamental_events_root,
+        fundamental_events_status,
+    )
+    return shared
 
 
 def _reject_unpinned_legacy_experiment(experiment_dir: Path) -> None:
@@ -325,21 +435,13 @@ def _load_experiment_pin(
     ):
         raise RuntimeError(f"invalid research-release pin kind: {manifest_path}")
     generation_id = str(payload.get("generation_id") or "")
-    _validate_generation_text(generation_id)
-    expected_global = (release_root / generation_id / _MANIFEST_NAME).resolve()
-    try:
-        shared = _load_global_release(expected_global.parent, strict=True)
-    except (OSError, RuntimeError, ValueError, TypeError) as exc:
-        raise RuntimeError(
-            f"pinned global research release is corrupt: {expected_global.parent}: {exc}"
-        ) from exc
-    if shared is None:
-        raise RuntimeError(f"pinned global research release is missing or incomplete: {expected_global.parent}")
-    _assert_source_contract(
-        shared,
-        raw_dir,
-        fundamental_events_root,
-        fundamental_events_status,
+    shared = _published_release(
+        release_root,
+        generation_id,
+        raw_dir=raw_dir,
+        fundamental_events_root=fundamental_events_root,
+        fundamental_events_status=fundamental_events_status,
+        description="pinned global research release",
     )
 
     quality_dir = manifest_path.parent / "quality"

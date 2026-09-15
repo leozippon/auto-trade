@@ -796,10 +796,12 @@ def test_a_seed_built_for_another_selection_is_refused_by_name(tmp_path: Path) -
         ),
         encoding="utf-8",
     )
-    # Only the snapshot configuration is decidable before the release is
-    # pinned; generation and release path are checked when views are linked,
-    # so a seed pinned to another generation still passes here.
-    assert_seed_snapshot_config(seed, wanted)
+    # Generation and release path are not judged here: they name the release
+    # an experiment on this seed pins, handed back for the caller to check.
+    assert assert_seed_snapshot_config(seed, wanted) == (
+        "other_generation",
+        str(tmp_path / "elsewhere"),
+    )
 
 
 def test_a_seed_from_an_older_cache_format_is_refused_at_create_time(tmp_path: Path) -> None:

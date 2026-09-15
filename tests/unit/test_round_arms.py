@@ -11,6 +11,7 @@ from __future__ import annotations
 import importlib
 import json
 import re
+import shutil
 from pathlib import Path
 
 import pytest
@@ -21,6 +22,7 @@ from autotrade.pipelines.config import (
     DEFAULT_RESEARCH_GEOMETRY,
     SNAPSHOT_CACHE_FORMAT_VERSION,
 )
+from autotrade.pipelines.pit_backend import required_release_raw_datasets
 from autotrade.pipelines.pit_views_seed import pit_cache_provider_record
 from autotrade.pipelines.worker import _snapshot_config
 from scripts.experiments import _round
@@ -33,6 +35,7 @@ from scripts.experiments._round import (
     Round,
     archived_ids,
 )
+from tests.unit.research_release_fixture import publish_release
 
 MODEL_ROLES = ("model", "subagent_model", "nl_model", "compact_model")
 # A four-digit calendar year, the shape every literal date in a directive takes.
@@ -58,17 +61,22 @@ ARMS = [(name, arm) for name, rnd in sorted(ROUNDS.items()) for arm in rnd.arms]
 def _synthetic_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rnd: Round) -> Path:
     """A repository root holding a finished seed prebuilt for ``rnd``'s selection.
 
-    The contract is what the prebuild writes to ``provider.json``; the tree
+    The contract is what the prebuild writes to ``provider.json``, over the
+    published release it names, which reaches the round's Held-out; the tree
     needs nothing else for the create-time pre-flight to accept it.
     """
     monkeypatch.setattr(_round, "REPO_ROOT", tmp_path)
     monkeypatch.setattr(_round, "EXPERIMENTS_ROOT", tmp_path / "experiments")
+    config = _snapshot_config(rnd.request_params(PROBE_ID))
+    release = publish_release(
+        tmp_path, "synthetic", datasets=required_release_raw_datasets(config)
+    )
     seed = tmp_path / rnd.pit_views_seed
     seed.mkdir(parents=True)
     record = pit_cache_provider_record(
-        generation_id="synthetic",
-        release_raw_dir=tmp_path / "release" / "raw",
-        snapshot_config=_snapshot_config(rnd.request_params(PROBE_ID)),
+        generation_id=release.generation_id,
+        release_raw_dir=release.raw_dir,
+        snapshot_config=config,
     )
     (seed / "provider.json").write_text(json.dumps(record), encoding="utf-8")
     return seed
@@ -113,7 +121,9 @@ def test_a_round_dry_runs_against_its_seed_contract(
         if reference:
             (tmp_path / str(reference)).mkdir(parents=True)
     assert rnd.main(["launcher", "0", "--dry-run"]) == 0
-    report = json.loads(capsys.readouterr().out.splitlines()[1])
+    out = capsys.readouterr().out.splitlines()
+    assert "release synthetic, which every arm pins" in out[0]
+    report = json.loads(out[1])
     assert report["research_end"] == BASE_OVERRIDES["research_end"]
     assert report["pit_views_seed"] == rnd.pit_views_seed
 
@@ -126,6 +136,18 @@ def test_the_dry_run_refuses_a_seed_built_for_another_selection(
     other = Round(pit_views_seed=rnd.pit_views_seed, overrides={"text_datasets": ["anns_d"]})
     assert other.main(["launcher", "0", "--dry-run"]) == 1
     assert "different snapshot configuration" in capsys.readouterr().err
+
+
+def test_the_dry_run_refuses_a_seed_whose_release_is_not_published(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Every arm pins the release its seed was built from, so a release this
+    repository does not hold is refused before anything is POSTed."""
+    rnd = Round(pit_views_seed="data/seed_probe")
+    _synthetic_repo(tmp_path, monkeypatch, rnd)
+    shutil.rmtree(tmp_path / "data" / "research_releases" / "synthetic")
+    assert rnd.main(["launcher", "0", "--dry-run"]) == 1
+    assert "research release synthetic is missing or incomplete" in capsys.readouterr().err
 
 
 def test_the_dry_run_refuses_a_seed_still_being_built(
