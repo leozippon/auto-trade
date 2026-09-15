@@ -62,6 +62,7 @@ from autotrade.environment.sandbox import (
     LocalSandbox,
     SandboxConfig,
     SandboxSpec,
+    experiment_container_labels,
     link_copytree,
 )
 from autotrade.environment.step_tree import StepTree
@@ -2537,10 +2538,9 @@ class LLMResearchDeveloper:
                 sandbox = DockerSandbox(
                     local,
                     sandbox_spec,
-                    labels={
-                        "adm.experiment": request.experiment_id,
-                        "adm.run": request.run_id,
-                    },
+                    labels=experiment_container_labels(
+                        request.experiment_id, run_id=request.run_id
+                    ),
                 )
                 sandbox.start()
                 command_runner = PersistentCommandRunner(sandbox)

@@ -40,6 +40,7 @@ from autotrade.environment.executor import (
 from autotrade.environment.gpu import GpuUnavailableError
 from autotrade.environment.replay import DailyMarketData
 from autotrade.environment.sandbox import (
+    EXPERIMENT_LABEL,
     SCREENING_TOOL_MOUNT,
     SCREENING_TOOL_SOURCE,
     DockerSandbox,
@@ -47,6 +48,7 @@ from autotrade.environment.sandbox import (
     SandboxConfig,
     SandboxLimits,
     SandboxSpec,
+    experiment_container_labels,
 )
 from autotrade.environment.sandbox_images import (
     prepare_experiment_sandbox_image,
@@ -481,6 +483,35 @@ def test_experiment_gpu_request_reaches_the_formal_strategy_container() -> None:
     assert (
         _strategy_sandbox_from_spec(None, fit_timeout_seconds=3600).limits.gpu_count == 0
     )
+
+
+def test_every_container_of_an_experiment_carries_its_label(tmp_path: Path):
+    """The console reclaims an experiment's containers by one label; the
+    session container and the strategy container of every replay carry it
+    from the same helper, so neither can be left behind on terminate."""
+
+    labels = experiment_container_labels("exp_x", run_id="run_1")
+    assert labels == {EXPERIMENT_LABEL: "exp_x", "adm.run": "run_1"}
+    local = LocalSandbox(tmp_path / "session")
+    local.prepare_layout()
+    session = DockerSandbox(local, SandboxSpec(gpu=None), labels=labels).docker_command()
+    assert "adm.experiment=exp_x" in session and "adm.run=run_1" in session
+
+    config = _strategy_sandbox_from_spec(
+        SandboxSpec(gpu=None, gpu_count=0), fit_timeout_seconds=60, experiment_id="exp_x"
+    )
+    assert dict(config.labels) == {EXPERIMENT_LABEL: "exp_x"}
+    package = tmp_path / "output"
+    package.mkdir()
+    with patch.object(DockerStrategyExecutor, "_start"):
+        executor = DockerStrategyExecutor(_strategy(package), config)
+    command = executor.docker_command()
+    assert command[command.index("--label") + 1] == "adm.experiment=exp_x"
+    # Without an experiment (a Paper book, the console preview) no label.
+    assert not _strategy_sandbox_from_spec(None, fit_timeout_seconds=60).labels
+    with patch.object(DockerStrategyExecutor, "_start"):
+        unlabelled = DockerStrategyExecutor(_strategy(package)).docker_command()
+    assert "--label" not in unlabelled
 
 
 def test_filesystem_artifact_store_freezes_explicit_revision_identity(tmp_path: Path):

@@ -9,7 +9,7 @@ import re
 import shutil
 import subprocess
 import uuid
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -158,6 +158,23 @@ class SandboxLimits:
             raise ValueError("sandbox gpu_devices must pin exactly gpu_count devices")
 
 
+# The label every container an experiment starts carries, so the console can
+# list and reclaim them by experiment: the session container and the strategy
+# container of every replay alike.
+EXPERIMENT_LABEL = "adm.experiment"
+
+
+def experiment_container_labels(
+    experiment_id: str, *, run_id: str | None = None
+) -> dict[str, str]:
+    """Docker labels that tie a container to its experiment (and run)."""
+
+    labels = {EXPERIMENT_LABEL: experiment_id}
+    if run_id:
+        labels["adm.run"] = run_id
+    return labels
+
+
 @dataclass(frozen=True)
 class SandboxConfig:
     """Fail-closed Docker strategy execution configuration."""
@@ -165,6 +182,9 @@ class SandboxConfig:
     image: str = DEFAULT_IMAGE
     limits: SandboxLimits = field(default_factory=SandboxLimits)
     docker_executable: str = "docker"
+    # Rendered as ``--label`` on the strategy container; the experiment's
+    # labels from ``experiment_container_labels``.
+    labels: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         _validate_explicit_image_tag(self.image)
@@ -590,7 +610,8 @@ def _validate_explicit_image_tag(image: str) -> None:
 
 
 __all__ = [
-    "DEFAULT_IMAGE", "MAX_CONTAINER_THREADS", "SCREENING_TOOL_MOUNT", "SCREENING_TOOL_SOURCE",
-    "DockerSandbox", "LocalSandbox", "SandboxConfig", "SandboxLimits", "SandboxSpec",
-    "container_thread_env", "link_copytree", "probe_image_runtime",
+    "DEFAULT_IMAGE", "EXPERIMENT_LABEL", "MAX_CONTAINER_THREADS", "SCREENING_TOOL_MOUNT",
+    "SCREENING_TOOL_SOURCE", "DockerSandbox", "LocalSandbox", "SandboxConfig", "SandboxLimits",
+    "SandboxSpec", "container_thread_env", "experiment_container_labels", "link_copytree",
+    "probe_image_runtime",
 ]

@@ -864,6 +864,49 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertEqual(gone.status_code, 200)
         self.assertFalse((self.experiments_root / "exp_hitl").exists())
 
+    def test_delete_reclaims_the_experiments_own_image_tags(self) -> None:
+        """The tags the experiment's image state lists as owned go with it;
+        one already removed by hand is not an error."""
+
+        import subprocess
+
+        owned = [
+            "autotrade-sandbox:exp_hitl-base-11111111-1111-4111-8111-111111111111",
+            "autotrade-sandbox:exp_hitl-base-22222222-2222-4222-8222-222222222222",
+        ]
+        write_json_atomic(
+            self.experiments_root / "exp_hitl" / "hitl" / "sandbox_image.json",
+            {
+                "experiment_id": "exp_hitl",
+                "image_ref": owned[1],
+                "owned_image_refs": owned,
+                "kind": "base_clone",
+            },
+        )
+        write_json_atomic(
+            self.experiments_root / "exp_hitl" / "hitl" / "status.json",
+            {"schema_version": 1, "pid": 999_999_999, "state": "stopped"},
+        )
+        removals: list[list[str]] = []
+
+        def fake_run(argv, **kwargs):
+            argv = list(argv)
+            if argv[1:3] == ["image", "rm"]:
+                removals.append(argv)
+                # The first tag is gone already: docker reports it, delete goes on.
+                return subprocess.CompletedProcess(argv, 1 if argv[-1] == owned[0] else 0, "", "")
+            # Every other docker call here (the container listing) finds nothing.
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        with patch("subprocess.run", side_effect=fake_run):
+            response = self.client.delete(
+                "/api/experiments/exp_hitl", params={"confirm": "exp_hitl"}
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["removed_image_refs"], owned)
+        self.assertEqual(removals, [["docker", "image", "rm", ref] for ref in owned])
+        self.assertFalse((self.experiments_root / "exp_hitl").exists())
+
     def test_failed_experiment_with_readonly_hardlinked_artifacts_can_be_deleted(
         self,
     ) -> None:

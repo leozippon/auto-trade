@@ -160,6 +160,27 @@ def _remove_image_ref(image_ref: str, *, docker_executable: str) -> None:
     )
 
 
+def reclaim_experiment_sandbox_images(
+    experiment_dir: Path, *, docker_executable: str = "docker"
+) -> list[str]:
+    """Remove the image tags the experiment owns, as its state file lists them.
+
+    Called when the experiment is deleted. A missing or unreadable state file
+    owns nothing; a tag already gone is not an error (``docker image rm`` of
+    an absent ref is ignored). Returns the refs whose removal was requested.
+    """
+
+    try:
+        payload = json.loads(_image_state_path(experiment_dir).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    owned = payload.get("owned_image_refs") if isinstance(payload, dict) else None
+    refs = [ref for ref in (owned or []) if isinstance(ref, str) and ref.strip()]
+    for ref in refs:
+        _remove_image_ref(ref, docker_executable=docker_executable)
+    return refs
+
+
 def prepare_experiment_sandbox_image(
     base_spec: SandboxSpec,
     *,
@@ -233,4 +254,5 @@ def _docker_tag_component(value: str) -> str:
 __all__ = [
     "SANDBOX_IMAGE_STATE_NAME",
     "prepare_experiment_sandbox_image",
+    "reclaim_experiment_sandbox_images",
 ]

@@ -21,6 +21,8 @@ from autotrade.environment.identity import (
     LegacyExperimentError,
 )
 from autotrade.environment.runtime import utc_now_iso, write_json_atomic
+from autotrade.environment.sandbox import EXPERIMENT_LABEL
+from autotrade.environment.sandbox_images import reclaim_experiment_sandbox_images
 from autotrade.pipelines.agent_inbox import (
     INBOX_NAME,
     InboxError,
@@ -229,12 +231,13 @@ def _derived_sandbox_tree(repo_root: Path, experiment_id: str) -> Path | None:
 def _reclaim_sandbox_containers(experiment_id: str) -> list[str]:
     """Force-remove sandbox containers labelled for this experiment.
 
-    A SIGKILLed worker skips its finally-block docker.stop(); the labels are
-    set at container start (DockerSandbox). Best-effort: no docker on PATH or
-    an empty listing simply reclaims nothing."""
+    A SIGKILLed worker skips its finally-block docker.stop(); the label is
+    set at container start on the session container and on every strategy
+    container (``experiment_container_labels``). Best-effort: no docker on
+    PATH or an empty listing simply reclaims nothing."""
     try:
         listing = subprocess.run(
-            ["docker", "ps", "-aq", "--filter", f"label=adm.experiment={experiment_id}"],
+            ["docker", "ps", "-aq", "--filter", f"label={EXPERIMENT_LABEL}={experiment_id}"],
             capture_output=True,
             text=True,
             timeout=30,
@@ -908,6 +911,9 @@ class ExperimentManager:
                             f"sandbox 目录未能完全删除：{expected}"
                         )
                     removed_work_root = str(expected)
+            # The experiment's own image tags, before the state file naming
+            # them goes with the directory.
+            removed_image_refs = reclaim_experiment_sandbox_images(directory)
             try:
                 _remove_readonly_tree(directory)
             except OSError as exc:
@@ -916,7 +922,11 @@ class ExperimentManager:
                     f"{type(exc).__name__}: {exc}"
                 ) from exc
             _reclaim_sandbox_containers(experiment_id)
-            return {"deleted": experiment_id, "removed_work_root": removed_work_root}
+            return {
+                "deleted": experiment_id,
+                "removed_work_root": removed_work_root,
+                "removed_image_refs": removed_image_refs,
+            }
 
     def _experiment_dir(self, experiment_id: str) -> Path:
         if not _ID.fullmatch(experiment_id):

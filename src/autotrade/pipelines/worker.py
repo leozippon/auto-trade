@@ -45,6 +45,7 @@ from autotrade.environment.sandbox import (
     SandboxConfig,
     SandboxLimits,
     SandboxSpec,
+    experiment_container_labels,
 )
 from autotrade.environment.sandbox_images import prepare_experiment_sandbox_image
 from autotrade.environment.strategy import StrategySchedule
@@ -722,9 +723,15 @@ def resolve_worker_options(
 
 
 def _strategy_sandbox_from_spec(
-    spec: SandboxSpec | None, *, fit_timeout_seconds: float
+    spec: SandboxSpec | None,
+    *,
+    fit_timeout_seconds: float,
+    experiment_id: str | None = None,
 ) -> SandboxConfig:
     """The strategy container's boundary, derived from the Agent session's spec.
+
+    ``experiment_id`` labels every strategy container the experiment starts
+    like its session container, so the console reclaims them together.
 
     The experiment's GPU request travels with it: ``fit(context)`` is where a
     model is trained, and it runs in the strategy container of every formal
@@ -735,10 +742,12 @@ def _strategy_sandbox_from_spec(
     exact devices.
     """
 
+    labels = experiment_container_labels(experiment_id) if experiment_id else {}
     if spec is None:
         return SandboxConfig(
             image=DEFAULT_IMAGE,
             limits=SandboxLimits(fit_timeout_seconds=float(fit_timeout_seconds)),
+            labels=labels,
         )
     return SandboxConfig(
         image=spec.image,
@@ -748,6 +757,7 @@ def _strategy_sandbox_from_spec(
             gpu_name_filter=spec.gpu_name_filter,
         ),
         docker_executable=spec.docker_executable,
+        labels=labels,
     )
 
 
@@ -800,6 +810,7 @@ def build_experiment_pipeline(
     strategy_sandbox = _strategy_sandbox_from_spec(
         options.agent_sandbox,
         fit_timeout_seconds=options.rolling.strategy_fit_timeout_seconds,
+        experiment_id=options.experiment_id,
     )
     if options.data_backend == "pit":
         if (

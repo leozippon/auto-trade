@@ -289,6 +289,8 @@ class DockerStrategyExecutor:
             "--security-opt",
             "no-new-privileges",
         ]
+        for key, value in sorted(self.config.labels.items()):
+            command.extend(["--label", f"{key}={value}"])
         if self.gpu_indices:
             command.extend(["--gpus", device_request(self.gpu_indices)])
         for key, value in sorted(container_thread_env(limits.cpus).items()):
