@@ -254,10 +254,20 @@ def test_the_paper_health_route_is_an_external_probe_only() -> None:
 
 
 def _js_function_body(name: str) -> str:
-    """Source of one top-level ``function name(...) { … }`` in app.js."""
+    """Source of one top-level ``function name(...) { … }`` in app.js. The
+    parameter list is skipped whole, so a destructured option object in it is
+    not mistaken for the body."""
     source = APP_JS.read_text(encoding="utf-8")
     start = source.index(f"function {name}(")
-    index = source.index("{", start)
+    parens = 0
+    for close in range(start, len(source)):
+        if source[close] == "(":
+            parens += 1
+        elif source[close] == ")":
+            parens -= 1
+            if not parens:
+                break
+    index = source.index("{", close)
     depth = 0
     for end in range(index, len(source)):
         if source[end] == "{":
@@ -332,6 +342,10 @@ def test_no_page_appends_a_renderer_that_can_return_nothing() -> None:
         "elapsedClockNode",
         "subagentClockNode",
         "skippedChip",
+        "activityNode",
+        "budgetBars",
+        "spanBar",
+        "replaySpanBar",
     )
     # The list cannot quietly become a no-op: each name must still answer
     # nothing itself, or hand the answer on to another renderer that does.
@@ -417,13 +431,7 @@ def test_every_reason_the_pipeline_records_has_a_console_label() -> None:
     emitted = set(re.findall(r'reasons\.append\("([a-z_]+)"\)', verdict))
     emitted |= {f"{where}_strategy_error" for where in ("forward", "heldout")}
     assert "forward_lower_bound_not_positive" in emitted
-    labels = set(
-        re.findall(
-            r"^  ([a-z_]+): \"",
-            _js_literal("const REASON_LABELS = {", "\n};"),
-            re.MULTILINE,
-        )
-    )
+    labels = _reason_tokens()
     assert emitted <= labels, sorted(emitted - labels)
     outcomes = set(
         re.findall(
@@ -445,21 +453,47 @@ def test_the_research_arm_fields_the_console_reads_are_served(tmp_path: Path) ->
 
     build_arm(tmp_path, "arm", "graduated")
     detail = experiment_detail(tmp_path, "arm")
+    [research, replay] = detail["sessions"]
+    assert (research["kind"], replay["kind"]) == ("research", "forward")
     frozen = set(detail["frozen"])
-    record = set(detail["sessions"][1]["record"])
-    best = set(detail["sessions"][1]["record"]["best"])
-    validation = set(detail["sessions"][1]["record"]["validations"][0])
+    record = set(research["record"])
+    best = set(research["record"]["best"])
+    validation = set(research["record"]["validations"][0])
+    gate = set(research["record"]["freeze_gate"])
     forward = set(detail["forward"])
+    slices = detail["forward"]["slices"]
+    slice_fields = set(slices["forward"]) | set(slices["heldout"])
+    budget = set(detail["budget"]) & set(detail["budget_used"])
+    def reads(name: str, var: str) -> set[str]:
+        return set(re.findall(rf"\b{var}\.([a-z_]+)", _js_function_body(name)))
+
     for name, read, served in (
-        ("frozenPanel", set(re.findall(r"\bfrozen\.([a-z_]+)", _js_function_body("frozenPanel"))), frozen),
-        ("researchSessionPanel", set(re.findall(r"\brecord\.([a-z_]+)", _js_function_body("researchSessionPanel"))), record),
-        ("researchSessionPanel", set(re.findall(r"\bbest\.([a-z_]+)", _js_function_body("researchSessionPanel"))), best),
-        ("researchSessionPanel", set(re.findall(r"\brow\.([a-z_]+)", _js_function_body("researchSessionPanel"))), validation),
-        ("verdictPanel", set(re.findall(r"\bforward\.([a-z_]+)", _js_function_body("verdictPanel"))), forward),
+        ("frozenPanel", reads("frozenPanel", "frozen"), frozen),
+        ("researchSessionPanel", reads("researchSessionPanel", "record"), record),
+        ("researchSessionPanel", reads("researchSessionPanel", "best"), best),
+        ("researchSessionPanel", reads("researchSessionPanel", "row"), validation),
+        ("freezeGateChecklist", reads("freezeGateChecklist", "gate"), gate),
+        ("verdictPanel", reads("verdictPanel", "forward"), forward),
+        ("verdictChecklist", reads("verdictChecklist", "forward"), forward),
+        ("verdictChecklist", reads("verdictChecklist", "f") | reads("verdictChecklist", "h"), slice_fields),
+        ("verdictChecklist", reads("verdictChecklist", "t"), set(detail["forward"]["verdict"]["thresholds"])),
+        ("replaySpanBar", reads("replaySpanBar", "replay"), set(replay["replay"])),
+        ("stepper", {step for step in re.findall(r'^  (\w+): "', _js_literal("const STEP_LABELS = {", "\n};"), re.MULTILINE)}, {"research", "frozen", "forward", "heldout", "verdict"}),
     ):
         assert read, name
         assert read <= served, (name, sorted(read - served))
     # The slice table's rows are statistics the verdict slices carry.
-    slice_fields = set(re.findall(r'^  \["([a-z_]+)",', _js_literal("const SLICE_ROWS = [", "\n];"), re.MULTILINE))
-    slices = detail["forward"]["slices"]
-    assert slice_fields <= set(slices["forward"]) | set(slices["heldout"])
+    assert set(re.findall(r'^  \["([a-z_]+)",', _js_literal("const SLICE_ROWS = [", "\n];"), re.MULTILINE)) <= slice_fields
+    # Every criterion the pipeline can fail is a line of the checklist.
+    checked = set(re.findall(r'"((?:forward|heldout)_[a-z_]+)"', _js_function_body("verdictChecklist")))
+    checked |= {f"{where}_strategy_error" for where in ("forward", "heldout")}
+    assert {token for token in _reason_tokens() if not token.startswith("freeze_")} <= checked
+    # The budget bars read the keys both the totals and the usage block carry.
+    bars = set(re.findall(r'^  \["([a-z_]+)",', _js_literal("const BUDGET_ROWS = [", "\n];"), re.MULTILINE))
+    assert bars and bars <= budget, sorted(bars - budget)
+
+
+def _reason_tokens() -> set[str]:
+    return set(
+        re.findall(r'^  ([a-z_]+): "', _js_literal("const REASON_LABELS = {", "\n};"), re.MULTILINE)
+    )

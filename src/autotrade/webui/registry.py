@@ -32,12 +32,14 @@ from autotrade.pipelines.hitl_state import (
     HITL_DIR_NAME,
     PARAMS_NAME,
     STATUS_NAME,
+    WEB_CREATE_DEFAULTS,
     read_control,
     read_json,
     read_status,
     status_pid_alive,
 )
 from autotrade.pipelines.ledger import (
+    RESEARCH_SESSION_KEY,
     ExperimentLedger,
     experiment_verdict,
     forward_record,
@@ -50,6 +52,7 @@ from autotrade.pipelines.skills import latest_skills_snapshot
 from autotrade.pipelines.worker import _ALLOWED_PARAMS
 
 from .public_identity import PublicIdentity
+from .traces import resolve_trace_path, trace_stats
 
 _ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$")
 ACTIVE_STATES = ("launching", "initializing", "running_session", "paused")
@@ -301,11 +304,16 @@ def summarize_experiment(directory: Path) -> dict[str, object]:
                 "stage": arm_stage(records),
                 "frozen_session": _frozen_session(records),
                 "research_best": _research_best(records),
+                "research_outcome": next(
+                    (row.get("outcome") for row in research_records(records)), None
+                ),
                 "research_recorded": len(research_records(records)),
                 "research_total": sum(
                     1 for session in identity.sessions if session["kind"] == "research"
                 )
                 or None,
+                "budget": _budget_totals(params),
+                "budget_used": _budget_used(directory, records, raw_status),
                 "verdict": experiment_verdict(records),
                 "forward": _forward_view(identity, forward_record(records)),
                 "paper_candidate": _paper_candidate_view(directory, records),
@@ -320,6 +328,58 @@ def summarize_experiment(directory: Path) -> dict[str, object]:
             }
         )
     return summary
+
+
+def _budget_totals(params: Mapping[str, object]) -> dict[str, object]:
+    """The arm's research budget, keyed like the trace's ``budget_used`` block.
+
+    The create form persists only what differs from the defaults, so the
+    effective ceilings are the worker defaults overlaid with ``params.json``.
+    """
+
+    effective = {**WEB_CREATE_DEFAULTS, **params}
+    minutes = _number(effective.get("max_research_minutes"))
+    return {
+        "inference_seconds": minutes * 60.0 if minutes is not None else None,
+        "llm_calls": _number(effective.get("max_llm_calls")),
+        "replay_years": _number(effective.get("max_replay_years")),
+        "null_controls": _number(effective.get("max_null_controls")),
+    }
+
+
+def _budget_used(
+    directory: Path,
+    records: Sequence[Mapping[str, object]],
+    raw_status: object,
+) -> dict[str, object] | None:
+    """What the research session has spent: the ledger's block once it is
+    recorded, else the last block its live trace carries, else nothing."""
+
+    for record in research_records(records):
+        block = record.get("budget_used")
+        if isinstance(block, Mapping):
+            return dict(block)
+    status = _mapping(raw_status)
+    if status.get("session_key") != RESEARCH_SESSION_KEY or not status_pid_alive(status):
+        return None
+    run_id = status.get("run_id")
+    path = resolve_trace_path(directory, str(run_id)) if isinstance(run_id, str) else None
+    if path is None:
+        return None
+    block = trace_stats(path).get("budget_used")
+    return dict(block) if isinstance(block, Mapping) else None
+
+
+def research_budget_used(directory: Path) -> dict[str, object] | None:
+    """:func:`_budget_used` for the status poll, which reads no summary. An
+    unreadable ledger answers nothing here; the listing already flags it."""
+
+    directory = Path(directory)
+    try:
+        records = read_ledger_records(directory)
+    except (OSError, ValueError):
+        return None
+    return _budget_used(directory, records, experiment_state(directory).get("status"))
 
 
 def list_experiments(root: Path) -> list[dict[str, object]]:
@@ -479,6 +539,7 @@ def _research_session_view(
                 "deflated_sharpe_probability": _number(
                     _mapping(gate.get("deflated_sharpe")).get("deflated_sharpe_probability")
                 ),
+                "full_span_validations": _number(gate.get("full_span_validations")),
             }
             if gate
             else None

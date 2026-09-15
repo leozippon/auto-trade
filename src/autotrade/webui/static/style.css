@@ -528,35 +528,452 @@ progress.progress.done::-moz-progress-bar {
  color: var(--loss);
 }
 
-/* The experiment card's miniature of the process list: the same status dots in
-   one wrapping row, the step the arm is on carried in full weight. */
-.pipeline-strip {
+/* ---- graphical primitives ----
+   The stepper, the ratio bar, the ring, the date-span bar, the checklist and
+   the weight cell: small drawings the pages use where a sentence stood. */
+
+/* The pipeline stepper. One node per step; the dot's drawing is the state —
+   a tick when done, a cross when failed, a dash when skipped, a pulse while
+   running, a hollow ring while pending — and a rail joins the nodes. The
+   miniature runs across a card, the full one down the process panel. */
+.stepper {
+ --step-dot: 0.95rem;
  display: flex;
- flex-wrap: wrap;
- align-items: center;
- gap: var(--space-1) var(--space-3);
- font-size: 0.82rem;
+ min-width: 0;
+}
+.step-dot {
+ position: relative;
+ z-index: 1;
+ flex: none;
+ width: var(--step-dot);
+ height: var(--step-dot);
+ border-radius: 50%;
+ box-shadow: inset 0 0 0 1.5px var(--input-border);
+ background: var(--panel);
+ color: #fff;
+ font-size: calc(var(--step-dot) * 0.7);
+ font-weight: 700;
+ line-height: var(--step-dot);
+ text-align: center;
+}
+.step-dot::after {
+ display: block;
+}
+.done > .step-dot {
+ background: var(--ok);
+ box-shadow: none;
+}
+.done > .step-dot::after {
+ content: "✓";
+}
+.failed > .step-dot {
+ background: var(--bad);
+ box-shadow: none;
+}
+.failed > .step-dot::after {
+ content: "✕";
+}
+.skipped > .step-dot {
+ box-shadow: inset 0 0 0 1.5px var(--input-border);
  color: var(--muted);
 }
-.pipeline-step {
- display: inline-flex;
+.skipped > .step-dot::after {
+ content: "–";
+}
+.running > .step-dot {
+ background: var(--run);
+ box-shadow: 0 0 0 3px var(--accent-soft);
+ animation: step-pulse 1.4s ease-in-out infinite;
+}
+.waiting > .step-dot {
+ background: var(--warn);
+ box-shadow: 0 0 0 3px var(--warn-soft);
+}
+@keyframes step-pulse {
+ 50% {
+  box-shadow: 0 0 0 5px var(--accent-soft);
+ }
+}
+.stepper.mini {
+ align-items: flex-start;
+ gap: 0;
+ font-size: 0.78rem;
+ color: var(--muted);
+ margin: var(--space-1) 0;
+}
+.stepper.mini .step {
+ position: relative;
+ flex: 1 1 0;
+ min-width: 0;
+ display: flex;
+ flex-direction: column;
  align-items: center;
- gap: 0.35rem;
+ gap: 0.2rem;
+ text-align: center;
+}
+/* The rail: a hairline from each node to the next, drawn from the node's
+   center to the row's right edge and coloured by the node it leaves. */
+.stepper.mini .step:not(:last-child)::before {
+ content: "";
+ position: absolute;
+ top: calc(var(--step-dot) / 2 - 1px);
+ left: 50%;
+ right: -50%;
+ height: 2px;
+ background: var(--row-border);
+}
+.stepper.mini .step.done:not(:last-child)::before {
+ background: var(--ok);
+}
+.stepper.mini .step-label {
+ max-width: 100%;
+ overflow: hidden;
+ text-overflow: ellipsis;
  white-space: nowrap;
 }
-.pipeline-step .dot {
- width: 0.5rem;
- height: 0.5rem;
- border-radius: 50%;
- flex: none;
-}
-.pipeline-step.running,
-.pipeline-step.waiting {
+.stepper.mini .step.running .step-label,
+.stepper.mini .step.waiting .step-label {
  color: var(--text);
  font-weight: 650;
 }
-.pipeline-step.skipped {
+.stepper.mini .step.skipped {
  opacity: 0.55;
+}
+/* The full stepper: rows on one vertical rail. A row opens its step. */
+.stepper.vertical {
+ flex-direction: column;
+ --step-dot: 1.05rem;
+}
+.step-row {
+ position: relative;
+ display: grid;
+ grid-template-columns: var(--step-dot) minmax(6rem, 1fr) auto;
+ column-gap: 0.6rem;
+ align-items: center;
+ padding: 0.5rem 0.7rem;
+ border-radius: 9px;
+ border: 1px solid transparent;
+ cursor: pointer;
+ font-size: 0.94rem;
+}
+.step-row:hover {
+ background: var(--hover-bg);
+}
+.step-row.selected {
+ background: var(--accent-soft);
+ border-color: var(--accent);
+}
+.step-row.skipped .step-label,
+.step-row.skipped .step-status {
+ opacity: 0.6;
+}
+.stepper-rail {
+ position: absolute;
+ left: calc(0.7rem + var(--step-dot) / 2 - 1px);
+ top: 0;
+ bottom: 0;
+ width: 2px;
+ background: var(--row-border);
+}
+.step-row:first-child .stepper-rail {
+ top: 50%;
+}
+.step-row:last-child .stepper-rail {
+ bottom: 50%;
+}
+/* The rail below a done node is green up to the next node. */
+.step-row.done .stepper-rail {
+ background: linear-gradient(var(--row-border) 50%, var(--ok) 50%);
+}
+.step-row.done:last-child .stepper-rail {
+ background: var(--row-border);
+}
+.step-row .step-label {
+ overflow: hidden;
+ text-overflow: ellipsis;
+ white-space: nowrap;
+}
+.step-row .step-status {
+ font-size: 0.875rem;
+ font-variant-numeric: tabular-nums;
+ white-space: nowrap;
+ color: var(--muted);
+}
+.step-row.done .step-status {
+ color: var(--ok);
+}
+.step-row.failed .step-status {
+ color: var(--bad);
+}
+.step-row.running .step-status,
+.step-row.waiting .step-status {
+ color: var(--text);
+}
+/* The row's note sits under the label, in its column. */
+.step-row .step-note {
+ grid-column: 2 / -1;
+ min-width: 0;
+ font-size: 0.78rem;
+ color: var(--muted);
+ font-variant-numeric: tabular-nums;
+ white-space: nowrap;
+ overflow: hidden;
+ text-overflow: ellipsis;
+}
+
+/* A ratio as a thin bar. The fill turns amber past three quarters and red
+   past nine tenths where the ratio is a budget. */
+.bar {
+ display: inline-block;
+ flex: 1 1 auto;
+ min-width: 2rem;
+ height: 0.42rem;
+ border-radius: 999px;
+ background: var(--chip-bg);
+ overflow: hidden;
+ vertical-align: middle;
+}
+.bar-fill {
+ display: block;
+ height: 100%;
+ border-radius: 999px;
+ background: var(--accent);
+ transition: width 0.3s;
+}
+.bar-fill.warn {
+ background: var(--warn);
+}
+.bar-fill.bad {
+ background: var(--bad);
+}
+.budget-bars {
+ display: grid;
+ grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+ gap: 0.25rem var(--space-5);
+ margin-top: var(--space-2);
+}
+.budget-bars.mini {
+ grid-template-columns: 1fr;
+ margin: 0;
+}
+.budget-row {
+ display: flex;
+ align-items: center;
+ gap: 0.6rem;
+ font-size: 0.8rem;
+ color: var(--muted);
+ font-variant-numeric: tabular-nums;
+}
+.budget-label {
+ flex: none;
+ width: 4em;
+}
+.budget-pct {
+ flex: none;
+ width: 2.6em;
+ text-align: right;
+ color: var(--text);
+}
+.budget-pct.warn {
+ color: var(--warn);
+}
+.budget-pct.bad {
+ color: var(--bad);
+}
+
+/* A ratio as a ring: the track in the chip tone, the value in the accent. */
+.gauge {
+ display: inline-flex;
+ align-items: center;
+ gap: 0.35rem;
+ font-size: 0.84rem;
+ font-variant-numeric: tabular-nums;
+}
+.ring {
+ display: inline-block;
+ width: 1.5rem;
+ height: 1.5rem;
+ color: var(--accent);
+}
+.ring.warn {
+ color: var(--warn);
+}
+.ring.bad {
+ color: var(--bad);
+}
+.ring svg {
+ display: block;
+ width: 100%;
+ height: 100%;
+ transform: rotate(-90deg);
+}
+.ring circle {
+ fill: none;
+ stroke-width: 3;
+}
+.ring-track {
+ stroke: var(--chip-bg);
+}
+.ring-value {
+ stroke: currentColor;
+ stroke-linecap: round;
+}
+.gauge-value {
+ font-weight: 650;
+}
+.gauge-label {
+ color: var(--muted);
+}
+
+/* A date span as a bar: the track is the whole range, a fill is one slice,
+   the ticks name the dates under it. */
+.span-bar {
+ display: block;
+ min-width: 0;
+ font-size: 0.75rem;
+ color: var(--muted);
+ font-variant-numeric: tabular-nums;
+}
+.span-track {
+ position: relative;
+ display: block;
+ height: 0.5rem;
+ border-radius: 999px;
+ background: var(--chip-bg);
+ overflow: hidden;
+}
+.span-fill {
+ position: absolute;
+ top: 0;
+ bottom: 0;
+ background: var(--accent);
+}
+.span-fill.alt {
+ background: color-mix(in srgb, var(--accent) 55%, var(--panel));
+}
+.span-fill.dim {
+ background: var(--input-border);
+}
+.span-ticks {
+ position: relative;
+ display: block;
+ height: 1.2rem;
+}
+.span-tick {
+ position: absolute;
+ top: 0.15rem;
+ transform: translateX(-50%);
+ white-space: nowrap;
+}
+.span-tick:first-child {
+ transform: none;
+}
+.span-tick:last-child {
+ transform: translateX(-100%);
+}
+.span-bar.mini {
+ display: inline-block;
+ width: 10rem;
+ max-width: 100%;
+ vertical-align: middle;
+}
+.span-bar.mini .span-track {
+ height: 0.38rem;
+}
+.span-bar.mini .span-ticks {
+ display: none;
+}
+
+/* Criteria, one per line: mark, criterion, measured figure, threshold. */
+.checklist {
+ display: flex;
+ flex-direction: column;
+ gap: 0.15rem;
+ max-width: 44rem;
+ font-size: 0.875rem;
+}
+.check-item {
+ display: flex;
+ align-items: baseline;
+ gap: 0.5rem;
+ min-width: 0;
+}
+.check-mark {
+ flex: none;
+ width: 1.1rem;
+ text-align: center;
+ font-weight: 700;
+}
+.check-item.ok .check-mark {
+ color: var(--ok);
+}
+.check-item.fail .check-mark {
+ color: var(--bad);
+}
+.check-item.na {
+ color: var(--muted);
+}
+.check-label {
+ flex: 1 1 auto;
+ min-width: 0;
+}
+.check-item.fail .check-label {
+ color: var(--bad);
+}
+.check-value {
+ flex: none;
+ font-weight: 650;
+ font-variant-numeric: tabular-nums;
+}
+.check-threshold {
+ flex: none;
+ min-width: 4.5rem;
+ color: var(--muted);
+ font-variant-numeric: tabular-nums;
+}
+
+/* A weight in a table cell: a short bar in front of the figure. */
+.wcell {
+ display: inline-flex;
+ align-items: center;
+ gap: 0.5rem;
+}
+.wcell .bar {
+ width: 3.5rem;
+ flex: none;
+ height: 0.36rem;
+}
+.wcell .bar-fill {
+ background: color-mix(in srgb, var(--accent) 60%, var(--panel));
+}
+
+/* What the worker is doing: a glyph, the stage and a clock. */
+.activity {
+ display: inline-flex;
+ align-items: center;
+ gap: 0.35rem;
+ min-width: 0;
+ font-variant-numeric: tabular-nums;
+}
+.activity-icon {
+ flex: none;
+}
+.activity-clock {
+ color: var(--muted);
+}
+.control-activity {
+ font-size: 0.9rem;
+ color: var(--text);
+}
+/* The Agent's own words for how the session ended. */
+blockquote.quote {
+ margin: var(--space-3) 0 0;
+ padding: 0.1rem 0 0.1rem 0.8rem;
+ border-left: 3px solid var(--border);
+ color: var(--muted);
+ font-size: 0.9rem;
+ white-space: pre-wrap;
+ overflow-wrap: anywhere;
 }
 .page-head {
  display: flex;
@@ -787,31 +1204,6 @@ details.fold.history-day.idle > summary {
  background: var(--accent-soft);
  border-color: var(--accent);
 }
-.session-item .dot {
- width: 0.62rem;
- height: 0.62rem;
- border-radius: 50%;
- flex: none;
-}
-.dot.done {
- background: var(--ok);
-}
-.dot.running {
- background: var(--run);
- box-shadow: 0 0 0 3px var(--accent-soft);
-}
-.dot.waiting {
- background: var(--warn);
- box-shadow: 0 0 0 3px var(--warn-soft);
-}
-.dot.failed {
- background: var(--bad);
-}
-/* A hollow ring, visible on the selected row's tint as well as on the panel. */
-.dot.pending,
-.dot.skipped {
- box-shadow: inset 0 0 0 1.5px var(--input-border);
-}
 /* The name holds its own width: a long status wraps to the next line of the
    row instead of squeezing the label down to an ellipsis. */
 .session-item .label {
@@ -825,27 +1217,6 @@ details.fold.history-day.idle > summary {
  font-variant-numeric: tabular-nums;
  font-size: 0.875rem;
  white-space: nowrap;
-}
-/* A step the arm passed by without running reads quieter than a pending one. */
-.session-item.muted .label,
-.session-item.muted .ret {
- opacity: 0.6;
-}
-/* Second line of a session row: what the session left behind, under the label
-   it belongs to. It wraps onto its own line and starts at the label's left
-   edge, so the dot/label/return line above it is untouched. */
-.session-item .session-note {
- order: 9;
- flex-basis: 100%;
- min-width: 0;
- padding-left: 1.22rem;
- font-size: 0.78rem;
- font-weight: 400;
- color: var(--muted);
- font-variant-numeric: tabular-nums;
- white-space: nowrap;
- overflow: hidden;
- text-overflow: ellipsis;
 }
 .epoch-head {
  margin: 0.7rem 4px 4px;
@@ -1333,6 +1704,47 @@ pre.code-view.pre-wrap {
  outline: none;
 }
 .trace-block .type.marker {
+ color: var(--warn);
+}
+/* A compaction is a rule across the trace, not a card: what it replaced on
+   the line, the summary behind the fold. A notice is one quiet marker. */
+.trace-block.compaction,
+.trace-block.notice {
+ display: flex;
+ align-items: baseline;
+ gap: 0.6rem;
+ padding: 0.25rem 0.75rem;
+ border: 0;
+ border-top: 1px dashed var(--border);
+ border-radius: 0;
+ background: none;
+ font-size: 0.845rem;
+ color: var(--muted);
+}
+.trace-block.compaction.failed {
+ color: var(--warn);
+}
+.compaction-fold {
+ flex: 1 1 auto;
+ min-width: 0;
+}
+.compaction-fold > summary {
+ cursor: pointer;
+ font-weight: 600;
+}
+.compaction-fold > summary.bare {
+ list-style: none;
+ cursor: default;
+}
+.compaction-fold > summary.bare::-webkit-details-marker {
+ display: none;
+}
+.compaction-fold .llm-content {
+ font-size: 0.845rem;
+ max-height: 24rem;
+ overflow: auto;
+}
+.notice-mark {
  color: var(--warn);
 }
 .trace-block .type.raw {
@@ -2325,6 +2737,9 @@ details.issue-evidence > summary:hover {
  .session-list {
   max-height: 38vh;
  }
+ .budget-bars {
+  grid-template-columns: 1fr;
+ }
  /* One column: the 运行记忆 catalogue sits directly above the pane it
     navigates, so its own scroller would trap a touch drag in a small box. */
  .memory-nav .session-list {
@@ -2468,6 +2883,24 @@ details.issue-evidence > summary:hover {
  }
  .tilt-label {
   grid-column: 1 / -1;
+ }
+ /* A checklist line breaks after the criterion, keeping the figures together. */
+ .check-item {
+  flex-wrap: wrap;
+ }
+ .check-label {
+  flex-basis: calc(100% - 1.6rem);
+ }
+ .check-value {
+  margin-left: 1.6rem;
+ }
+ .step-row .step-note .span-bar.mini {
+  width: 7rem;
+ }
+ /* A phone-wide bar has room for its two end dates; the boundary is still
+    drawn by the two segments and named in their tooltips. */
+ .span-tick.mid {
+  display: none;
  }
  .memory-section {
   margin-top: 1.2rem;

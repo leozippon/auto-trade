@@ -160,9 +160,10 @@ def test_local_webui_health_schema_and_brand(tmp_path: Path):
         & fields.keys()
     )
     for key in (
-        "research_sessions",
+        "max_research_minutes",
         "window_months",
-        "max_replay_years_per_session",
+        "max_replay_years",
+        "max_null_controls",
         "max_llm_calls",
     ):
         assert not fields[key].get("advanced", False)
@@ -403,7 +404,7 @@ def test_static_console_keeps_macro_style_surfaces_without_closed_capabilities(
     for label in ("系统提示词预览", "模拟交易"):
         assert label in script
     for label in (
-        "研究期日度累计收益 vs 沪深300",
+        "研究流程",
         "Step 产物树",
         "冻结产物",
         "Paper 建簿",
@@ -569,7 +570,7 @@ class WebuiBackendTest(unittest.TestCase):
                 "schema_version": 1,
                 "pid": 999_999_999,
                 "state": "running_session",
-                "session_key": "s2",
+                "session_key": "research",
             },
         )
         trace_dir = experiment_dir / "artifacts" / "traces"
@@ -603,8 +604,9 @@ class WebuiBackendTest(unittest.TestCase):
         )
         return experiment_dir
 
-    def _validation_result(self, experiment_id: str = "exp_hitl") -> Path:
-        """The first research Validation the ledger names."""
+    def _validation_result(self, experiment_id: str) -> Path:
+        """The first research Validation the ledger names, which a recorded
+        session (a sealed or judged arm) has and a running one does not."""
         records = ExperimentLedger(
             self.experiments_root / experiment_id / "ledgers/experiment_ledger.jsonl"
         ).read()
@@ -625,7 +627,8 @@ class WebuiBackendTest(unittest.TestCase):
             for field in group["fields"]
         }
         self.assertEqual(
-            fields["research_sessions"]["default"], WEB_CREATE_DEFAULTS["research_sessions"]
+            fields["max_research_minutes"]["default"],
+            WEB_CREATE_DEFAULTS["max_research_minutes"],
         )
         self.assertEqual(fields["model"]["default"], WEB_CREATE_DEFAULTS["model"])
         for hidden in (
@@ -710,9 +713,10 @@ class WebuiBackendTest(unittest.TestCase):
 
     # ---- result routes ---------------------------------------------------------
     def test_result_orders_rows_and_csv_export(self) -> None:
-        result = self._validation_result()
+        self._build_hitl_experiment("exp_sealed", "sealed")
+        result = self._validation_result("exp_sealed")
         name = result.parent.name
-        base = f"/api/experiments/exp_hitl/results/{name}"
+        base = f"/api/experiments/exp_sealed/results/{name}"
         data = self.client.get(f"{base}/orders").json()
         self.assertEqual(sorted(data), ["result", "row_count", "rows", "stats"])
         self.assertEqual(data["result"], name)
@@ -723,7 +727,7 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertEqual(csv_response.status_code, 200)
         self.assertIn("attachment", csv_response.headers.get("content-disposition", ""))
         self.assertEqual(len(csv_response.text.strip().splitlines()), 3)  # header + 2
-        missing = self.client.get("/api/experiments/exp_hitl/results/valid_nope/orders.csv")
+        missing = self.client.get("/api/experiments/exp_sealed/results/valid_nope/orders.csv")
         self.assertEqual(missing.status_code, 404)
 
     def test_result_orders_cap_the_table_at_five_hundred_rows_but_not_the_export(
@@ -735,7 +739,8 @@ class WebuiBackendTest(unittest.TestCase):
         the count would report a lie; and the CSV is the escape hatch from the
         cap, so it must stay uncapped.
         """
-        result = self._validation_result()
+        self._build_hitl_experiment("exp_sealed", "sealed")
+        result = self._validation_result("exp_sealed")
         payload = json.loads(result.read_text(encoding="utf-8"))
         payload["executions"] = [
             {
@@ -749,7 +754,7 @@ class WebuiBackendTest(unittest.TestCase):
             for _ in range(501)
         ]
         result.write_text(json.dumps(payload), encoding="utf-8")
-        base = f"/api/experiments/exp_hitl/results/{result.parent.name}"
+        base = f"/api/experiments/exp_sealed/results/{result.parent.name}"
         data = self.client.get(f"{base}/orders").json()
         self.assertEqual(len(data["rows"]), 500)
         self.assertEqual(data["row_count"], 501)
@@ -760,8 +765,9 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertEqual(len(csv_response.text.strip().splitlines()), 502)
 
     def test_a_result_the_ledger_names_outside_the_experiment_is_not_served(self) -> None:
+        self._build_hitl_experiment("exp_sealed", "sealed")
         ledger = ExperimentLedger(
-            self.experiments_root / "exp_hitl/ledgers/experiment_ledger.jsonl"
+            self.experiments_root / "exp_sealed/ledgers/experiment_ledger.jsonl"
         )
         records = ledger.read()
         outside = self.repo_root / "outside/valid_outside/result.json"
@@ -774,7 +780,7 @@ class WebuiBackendTest(unittest.TestCase):
         ledger.rewrite(records)
         for route in ("equity", "style", "orders", "orders.csv"):
             response = self.client.get(
-                f"/api/experiments/exp_hitl/results/valid_outside/{route}"
+                f"/api/experiments/exp_sealed/results/valid_outside/{route}"
             )
             self.assertEqual(response.status_code, 404, route)
 
@@ -815,7 +821,9 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertEqual(status["state"], "interrupted")
         self.assertFalse(status["worker_alive"])
         self.assertEqual(status["status"]["state"], "running_session")
-        self.assertEqual(status["status"]["session_key"], "s2")
+        self.assertEqual(status["status"]["session_key"], "research")
+        # The status poll also carries the research budget block (none yet).
+        self.assertIn("budget_used", status)
 
     def test_frozen_strategy_zip_contains_output_tree(self) -> None:
         self.assertEqual(
@@ -1367,18 +1375,18 @@ class HitlControlActionTest(unittest.TestCase):
         return self.client.post(f"/api/experiments/{experiment_id}/control", json=payload)
 
     def test_set_directive_stores_and_clears_a_per_session_directive(self) -> None:
-        response = self._post(action="set_directive", session_key="s2", directive="控制回撤")
+        response = self._post(action="set_directive", session_key="research", directive="控制回撤")
         self.assertEqual(response.status_code, 200, response.text)
-        self.assertEqual(self._control().directives["s2"], "控制回撤")
+        self.assertEqual(self._control().directives["research"], "控制回撤")
         # An empty directive clears it rather than storing a blank.
-        self._post(action="set_directive", session_key="s2", directive="")
-        self.assertNotIn("s2", self._control().directives)
+        self._post(action="set_directive", session_key="research", directive="")
+        self.assertNotIn("research", self._control().directives)
         # The operator defines the PIT policy, so a directive that names a date
         # is stored as written: the rule against it is written guidance (see
         # docs/agent-design.md), not a server-side refusal.
-        dated = self._post(action="set_directive", session_key="s2", directive="在 2022Q1 减仓")
+        dated = self._post(action="set_directive", session_key="research", directive="在 2022Q1 减仓")
         self.assertEqual(dated.status_code, 200, dated.text)
-        self.assertEqual(self._control().directives["s2"], "在 2022Q1 减仓")
+        self.assertEqual(self._control().directives["research"], "在 2022Q1 减仓")
 
     def test_per_session_settings_target_research_sessions_while_research_lasts(
         self,
@@ -1391,7 +1399,7 @@ class HitlControlActionTest(unittest.TestCase):
         # Once an artifact froze, no Agent session remains to read a setting.
         frozen = build_arm(self.experiments_root, "exp_frozen", "sealed")
         refused = self._post(
-            "exp_frozen", action="set_directive", session_key="s3", directive="x"
+            "exp_frozen", action="set_directive", session_key="research", directive="x"
         )
         self.assertEqual(refused.status_code, 400)
         self.assertIn("research is over", refused.json()["detail"])
@@ -1410,29 +1418,29 @@ class HitlControlActionTest(unittest.TestCase):
         refused = self._post(action="inject_message", session_key="forward", text="停")
         self.assertEqual(refused.status_code, 400)
         self.assertFalse((self.directory / "hitl/agent_inbox.jsonl").exists())
-        write_json_atomic(self.directory / "hitl/status.json", {**live, "session_key": "s2"})
-        queued = self._post(action="inject_message", session_key="s2", text="先看回撤")
+        write_json_atomic(self.directory / "hitl/status.json", {**live, "session_key": "research"})
+        queued = self._post(action="inject_message", session_key="research", text="先看回撤")
         self.assertEqual(queued.status_code, 200, queued.text)
-        self.assertEqual(queued.json()["session_key"], "s2")
+        self.assertEqual(queued.json()["session_key"], "research")
 
     def test_set_gpu_count_round_trips_and_refuses_everything_else(self) -> None:
-        allocated = self._post(action="set_gpu_count", session_key="s2", directive="2")
+        allocated = self._post(action="set_gpu_count", session_key="research", directive="2")
         self.assertEqual(allocated.status_code, 200, allocated.text)
-        self.assertEqual(allocated.json()["control"]["gpu_counts"], {"s2": 2})
-        self.assertEqual(self._control().gpu_counts, {"s2": 2})
-        cleared = self._post(action="set_gpu_count", session_key="s2", directive="")
+        self.assertEqual(allocated.json()["control"]["gpu_counts"], {"research": 2})
+        self.assertEqual(self._control().gpu_counts, {"research": 2})
+        cleared = self._post(action="set_gpu_count", session_key="research", directive="")
         self.assertEqual(cleared.json()["control"]["gpu_counts"], {})
-        zero = self._post(action="set_gpu_count", session_key="s2", directive="0")
+        zero = self._post(action="set_gpu_count", session_key="research", directive="0")
         self.assertEqual(zero.status_code, 200, zero.text)
         # 0 is a CPU-only allocation, not an absent one: it must survive the
         # write/read round trip through control.json, or the session silently
         # falls back to the experiment default the researcher just overrode.
-        self.assertEqual(self._control().gpu_counts, {"s2": 0})
-        self._post(action="set_gpu_count", session_key="s2", directive="")
+        self.assertEqual(self._control().gpu_counts, {"research": 0})
+        self._post(action="set_gpu_count", session_key="research", directive="")
         for directive, fragment in (("5", "0..4"), ("abc", "整数")):
             with self.subTest(directive=directive):
                 refused = self._post(
-                    action="set_gpu_count", session_key="s2", directive=directive
+                    action="set_gpu_count", session_key="research", directive=directive
                 )
                 self.assertEqual(refused.status_code, 400, refused.text)
                 self.assertIn(fragment, refused.json()["detail"])
@@ -1471,7 +1479,7 @@ class HitlControlActionTest(unittest.TestCase):
             "not_a_real_action",
         ):
             with self.subTest(action=retired):
-                refused = self._post(action=retired, session_key="s1")
+                refused = self._post(action=retired, session_key="research")
                 self.assertEqual(refused.status_code, 400)
                 self.assertIn("unknown control action", refused.json()["detail"])
 

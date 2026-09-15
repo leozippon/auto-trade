@@ -288,6 +288,9 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         )
         if isinstance(raw_status, dict):
             public["status"] = identity.public_status(raw_status)
+        # The experiment page polls this route, so the budget bars follow the
+        # live session without a rebuild.
+        public["budget_used"] = registry.research_budget_used(directory)
         return public
 
     @app.get("/api/experiments/{experiment_id}/trace/stats")

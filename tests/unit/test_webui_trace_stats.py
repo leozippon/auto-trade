@@ -309,14 +309,18 @@ def test_stats_chips_show_subagent_near_llm_only_when_positive() -> None:
     assert "Number(stats.subagent_running) || 0" in source
     assert "🧩 子代理 ${subagentRunning} 运行 / ${subagentTasks} 累计" in source
     assert 'key === "llm_call" && subagentTasks' in source
-    assert "主 Agent 上下文" in source
-    assert "主 Agent 累计输入" in source
-    assert "主 Agent 累计输出" in source
+    # The main Agent's context is a ring against its model window, the
+    # compaction count beside it; the token totals keep their meaning in
+    # tooltips rather than in prose.
+    assert "ringGauge(" in source
+    assert "context_window_tokens" in source
+    assert "主 Agent 累计输入 tokens" in source
+    assert "主 Agent 累计输出 tokens" in source
     # Child spend is shown beside the parent totals, never folded into them.
     assert "🧩 子代理 Σ ${fmtTokens(subagentTokens)}" in source
     assert "subagent_prompt_tokens" in source
     assert "subagent_completion_tokens" in source
-    assert "`Compact ${Number(stats.compact_ops) || 0}`" in source
+    assert "`⟲ 压缩 ${Number(stats.compact_ops) || 0}`" in source
     assert "compact_ops" in source
     assert "trim_ops" not in source
     assert "clear_ops" not in source
@@ -356,13 +360,17 @@ def test_detail_poll_does_not_rebuild_on_environment_stage() -> None:
     assert "run_ref" in poll
 
 
-def test_experiment_detail_skills_title_omits_generation_id() -> None:
+def test_control_panel_shows_skills_only_once_published_and_no_stage_prose() -> None:
     script = APP_JS.read_text(encoding="utf-8")
-    source = script.split("function runStatusLine(", 1)[1]
+    source = script.split("function controlPanel(", 1)[1]
     head = source.split("\nfunction ", 1)[0]
-    assert "`Skills ${Number(detail.skills && detail.skills.count) || 0} 项`" in head
+    assert "skills ? el(" in head and "`📚 Skills ${skills}`" in head
     assert "generation_id" not in head
-    assert "（${detail.skills.count} 项）" not in head
+    # The stepper says where the arm is; the panel carries the badge, the
+    # activity and the budget bars, never a session count.
+    assert "研究会话" not in script
+    assert "budgetBars(fresh.budget_used, detail.budget)" in head
+    assert "activityNode(fresh.status)" in head
 
 
 def test_index_html_loads_app_js_without_inlining_trace_chips() -> None:
@@ -841,13 +849,79 @@ def test_project_internal_events_emit_no_blocks() -> None:
                 },
                 {"event_type": "system_prompt", "content": "sys"},
                 {"event_type": "instruction", "content": "do work"},
-                {"event_type": "context_compaction", "summary": "compacted"},
                 {"event_type": "llm_call", "usage": {"total_tokens": 3}},
                 {"event_type": "budget", "remaining": 1},
             ]
         )
         == []
     )
+
+
+def test_project_compaction_and_notice_blocks() -> None:
+    """The parent's compactions and the advisory before them are their own
+    quiet blocks: who triggered it, which calls it replaced, the summary that
+    now stands for them; a compaction that failed says why."""
+
+    blocks = project_trace_blocks(
+        [
+            {"event_type": "context_notice", "ts": "t1", "estimated_tokens": 150_000, "token_threshold": 200_000},
+            {"event_type": "llm_call", "content": "plan"},
+            {
+                "event_type": "context_compaction",
+                "ts": "t2",
+                "trigger": "agent",
+                "status": "ok",
+                "call_index": 12,
+                "replaced_call_range": [1, 12],
+                "dropped_messages": 40,
+                "summary_chars": 900,
+                "summary": "strategy state and open threads",
+            },
+            {"event_type": "context_compaction", "ts": "t3", "status": "error", "error": "provider timeout"},
+            # A child's compaction stays on its own card, not in the parent's flow.
+            {"event_type": "subagent_context_compaction", "task_id": "agent_a", "round": 3, "compaction": {"status": "ok"}},
+        ]
+    )
+    assert [block["kind"] for block in blocks] == ["notice", "agent_output", "compaction", "compaction", "subagent"]
+    assert blocks[0] == {"kind": "notice", "ts": "t1", "estimated_tokens": 150_000, "token_threshold": 200_000}
+    assert blocks[2] == {
+        "kind": "compaction",
+        "ts": "t2",
+        "trigger": "agent",
+        "status": "ok",
+        "replaced_call_range": [1, 12],
+        "dropped_messages": 40,
+        "summary": "strategy state and open threads",
+        "summary_chars": 900,
+        "error": "",
+    }
+    assert (blocks[3]["trigger"], blocks[3]["status"], blocks[3]["error"]) == ("runtime", "error", "provider timeout")
+    assert blocks[3]["replaced_call_range"] is None
+    # The console renders both kinds, as a fold on a rule and as a marker.
+    script = APP_JS.read_text(encoding="utf-8")
+    assert 'kind === "compaction") renderCompactionBlock(' in script
+    assert 'kind === "notice") renderNoticeBlock(' in script
+
+
+def test_trace_stats_carries_the_last_budget_block(tmp_path: Path) -> None:
+    """Every budgeted event carries the session's cumulative spend; the stats
+    projection hands the newest block on, across appends, so the console's
+    budget bars follow a live session."""
+
+    path = _write_trace(
+        tmp_path / "run.jsonl",
+        [
+            {"event_type": "session_start"},
+            {"event_type": "llm_call", "budget_used": {"inference_seconds": 10.0, "llm_calls": 1, "replay_years": 0, "null_controls": 0}},
+            {"event_type": "tool_call", "tool": "shell", "budget_used": {"inference_seconds": 25.5, "llm_calls": 2, "replay_years": 4, "null_controls": 0}},
+        ],
+    )
+    first = trace_stats(path)
+    assert first["budget_used"] == {"inference_seconds": 25.5, "llm_calls": 2, "replay_years": 4, "null_controls": 0}
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"event_type": "llm_call", "budget_used": {"inference_seconds": 30.0, "llm_calls": 3, "replay_years": 4, "null_controls": 1}}) + "\n")
+    assert trace_stats(path)["budget_used"]["llm_calls"] == 3
+    assert trace_stats(_write_trace(tmp_path / "bare.jsonl", [{"event_type": "session_start"}]))["budget_used"] is None
 
 
 def test_trace_blocks_api_projects_whole_trace_without_paging_groups(
@@ -861,12 +935,19 @@ def test_trace_blocks_api_projects_whole_trace_without_paging_groups(
             "tool": "read_file",
             "tool_call_id": "c1",
         },
-        {"event_type": "context_compaction", "blob": "x" * (DEFAULT_PAGE_BYTES + 2048)},
         {
             "event_type": "tool_call",
             "tool": "read_file",
             "tool_call_id": "c1",
             "result": {"ok": True},
+        },
+        {
+            "event_type": "context_compaction",
+            "trigger": "agent",
+            "status": "ok",
+            "replaced_call_range": [1, 1],
+            "dropped_messages": 3,
+            "summary": "x" * (DEFAULT_PAGE_BYTES + 2048),
         },
         {"event_type": "user_message", "content": "ok?"},
         {"event_type": "llm_call", "content": "done"},
@@ -885,6 +966,7 @@ def test_trace_blocks_api_projects_whole_trace_without_paging_groups(
     assert [block["kind"] for block in payload["blocks"]] == [
         "agent_output",
         "tool_group",
+        "compaction",
         "user",
         "agent_output",
     ]

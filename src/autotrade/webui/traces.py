@@ -213,6 +213,21 @@ def project_trace_blocks(events: object) -> list[dict[str, object]]:
                 }
             )
             continue
+        if kind == "context_compaction":
+            blocks.extend(interval.flush())
+            blocks.append(_compaction_block(event))
+            continue
+        if kind == "context_notice":
+            blocks.extend(interval.flush())
+            blocks.append(
+                {
+                    "kind": "notice",
+                    "ts": _event_ts(event),
+                    "estimated_tokens": _as_int(event.get("estimated_tokens")),
+                    "token_threshold": _as_int(event.get("token_threshold")),
+                }
+            )
+            continue
         output = _agent_output_text(event)
         if output is not None:
             blocks.extend(interval.flush())
@@ -379,6 +394,29 @@ def _marker_block(event: dict[str, object], label: str, text: str) -> dict[str, 
     return {"kind": "marker", "ts": _event_ts(event), "label": label, "text": text}
 
 
+def _compaction_block(event: dict[str, object]) -> dict[str, object]:
+    """The parent's ``context_compaction`` event, Agent- or runtime-triggered:
+    which calls it replaced and the summary that now stands for them."""
+
+    calls = event.get("replaced_call_range")
+    replaced = (
+        [_as_int(calls[0]), _as_int(calls[1])]
+        if isinstance(calls, (list, tuple)) and len(calls) == 2
+        else None
+    )
+    return {
+        "kind": "compaction",
+        "ts": _event_ts(event),
+        "trigger": str(event.get("trigger") or "runtime"),
+        "status": str(event.get("status") or "unknown"),
+        "replaced_call_range": replaced,
+        "dropped_messages": _as_int(event.get("dropped_messages")),
+        "summary": _clip(event.get("summary"), _BLOCK_TEXT_CHARS),
+        "summary_chars": _as_int(event.get("summary_chars")),
+        "error": _clip(event.get("error"), _BLOCK_ERROR_CHARS),
+    }
+
+
 def _subagent_call_row(event: dict[str, object]) -> dict[str, object]:
     row: dict[str, object] = {
         "name": _tool_name(event),
@@ -426,6 +464,7 @@ def trace_stats(path: Path) -> dict[str, object]:
             or "subagent_ended_ids" not in cached
             or "subagent_usage" not in cached
             or "last_main_prompt_tokens" not in cached
+            or "budget_used" not in cached
         ):
             cached = {
                 "offset": 0,
@@ -438,6 +477,7 @@ def trace_stats(path: Path) -> dict[str, object]:
                 "subagent_task_ids": set(),
                 "subagent_ended_ids": set(),
                 "subagent_usage": {},
+                "budget_used": None,
             }
         offset = _as_int(cached.get("offset"))
         with path.open("rb") as handle:
@@ -456,10 +496,15 @@ def trace_stats(path: Path) -> dict[str, object]:
             task: _usage_row(_as_mapping(row))
             for task, row in _as_mapping(cached.get("subagent_usage")).items()
         }
+        # The session's cumulative spend rides on every budgeted event; the
+        # last block seen is the arm's usage so far, earlier attempts included.
+        budget_used = cached.get("budget_used")
         for raw in blob[:tail].splitlines():
             event = _decode_event(raw)
             kind = str(event.get("event_type") or "event")
             counts[kind] = _as_int(counts.get(kind)) + 1
+            if isinstance(event.get("budget_used"), Mapping):
+                budget_used = _as_mapping(event["budget_used"])
             task_id = _subagent_event_task_id(event)
             if task_id is not None:
                 task_ids.add(task_id)
@@ -497,11 +542,13 @@ def trace_stats(path: Path) -> dict[str, object]:
             "subagent_task_ids": task_ids,
             "subagent_ended_ids": ended_ids,
             "subagent_usage": subagent_usage,
+            "budget_used": budget_used,
         }
         if len(_STATS_CACHE) >= 32 and key not in _STATS_CACHE:
             _STATS_CACHE.pop(next(iter(_STATS_CACHE)))
         _STATS_CACHE[key] = cached
         return {
+            "budget_used": dict(budget_used) if isinstance(budget_used, Mapping) else None,
             "counts": counts,
             "tool_counts": tool_counts,
             "llm_total_tokens": total,

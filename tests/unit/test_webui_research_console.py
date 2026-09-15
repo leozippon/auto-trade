@@ -177,6 +177,40 @@ def test_a_research_that_froze_nothing_has_a_verdict_and_no_replay(tmp_path: Pat
     assert detail["sessions"][0]["record"]["best"] is None
 
 
+def test_the_listing_carries_the_budget_and_the_research_outcome(tmp_path: Path) -> None:
+    """The budget bars read the arm's ceilings (worker defaults under the
+    params) and what the session spent: the ledger's block once recorded,
+    else the last block of the live session's trace, else nothing."""
+
+    live = build_arm(tmp_path, "live", "research", alive=True)
+    build_arm(tmp_path, "idle", "research")
+    build_arm(tmp_path, "judged", "graduated")
+    params = json.loads((live / "hitl/params.json").read_text(encoding="utf-8"))
+    (live / "hitl/params.json").write_text(json.dumps({**params, "max_research_minutes": 60}), encoding="utf-8")
+    traces = live / "artifacts/traces"
+    traces.mkdir(parents=True)
+    (traces / "run_research_live.jsonl").write_text(
+        "\n".join(
+            json.dumps(event)
+            for event in (
+                {"event_type": "session_start"},
+                {"event_type": "llm_call", "budget_used": {"inference_seconds": 900.0, "llm_calls": 7, "replay_years": 4, "null_controls": 0}},
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    rows = {row["experiment_id"]: row for row in list_experiments(tmp_path)}
+    assert rows["live"]["budget"] == {"inference_seconds": 3600.0, "llm_calls": 6400.0, "replay_years": 96.0, "null_controls": 12.0}
+    assert rows["live"]["budget_used"] == {"inference_seconds": 900.0, "llm_calls": 7, "replay_years": 4, "null_controls": 0}
+    assert rows["idle"]["budget_used"] is None
+    assert rows["judged"]["budget_used"]["replay_years"] == 8
+    assert (rows["live"]["research_outcome"], rows["judged"]["research_outcome"]) == (None, "freeze")
+    client = TestClient(create_app(tmp_path.parent, tmp_path))
+    assert client.get("/api/experiments/live/status").json()["budget_used"]["llm_calls"] == 7
+    assert client.get("/api/experiments/idle/status").json()["budget_used"] is None
+
+
 def test_an_arm_with_no_plan_yet_lists_as_created(tmp_path: Path) -> None:
     build_arm(tmp_path, "arm", "created")
     row = summarize_experiment(tmp_path / "arm")

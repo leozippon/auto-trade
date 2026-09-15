@@ -19,9 +19,8 @@ const STATE_LABELS = {
   unreadable: "不可解析",
   unknown: "未知",
 };
-// How a research session ended (pipelines/config.py SESSION_OUTCOMES).
+// How the research session ended (pipelines/config.py SESSION_OUTCOMES).
 const OUTCOME_LABELS = {
-  continue: "继续",
   freeze: "提名冻结",
   no_edge: "无边际",
   deadline: "到时",
@@ -31,25 +30,27 @@ const VERDICT_LABELS = {
   discarded: "discarded",
   no_deliverable: "无交付",
 };
-// Failed conditions of the freeze gate and of the forward and Held-out verdict
-// (pipelines/verdict.py). A reason not listed renders as written.
+// The conditions of the freeze gate and of the forward and Held-out verdict
+// (pipelines/verdict.py), keyed by the token the pipeline records when one
+// fails, worded as the criterion so a checklist reads them with a pass or fail
+// mark. A token not listed renders as written.
 const REASON_LABELS = {
-  freeze_needs_full_span_validation: "提名节点不是全区间验证",
-  freeze_too_few_full_span_validations: "全区间验证不足 2 次",
-  freeze_deflated_sharpe_unavailable: "去偏 Sharpe 概率算不出",
-  freeze_deflated_sharpe_below_threshold: "去偏 Sharpe 概率低于 0.5",
-  freeze_unmeasurable: "研究期统计无法计算",
-  forward_strategy_error: "前推期策略报错",
-  heldout_strategy_error: "Held-out 期策略报错",
-  forward_lower_bound_not_positive: "前推中性化超额 80% 下界不为正",
-  forward_recency_negative: "前推最近 6 个月中性化超额为负",
-  forward_max_drawdown_exceeded: "前推回撤超限",
-  forward_not_positive_at_cost_stress: "加倍滑点后前推超额不为正",
-  forward_too_few_round_trips: "前推平仓次数不足",
-  forward_exposure_below_floor: "前推平均仓位不足 0.5",
-  heldout_excess_below_tolerance: "Held-out 中性化超额低于容忍线",
-  heldout_max_drawdown_exceeded: "Held-out 回撤超限",
-  heldout_exposure_below_floor: "Held-out 平均仓位不足 0.5",
+  freeze_needs_full_span_validation: "提名节点为全区间验证",
+  freeze_too_few_full_span_validations: "全区间验证次数",
+  freeze_deflated_sharpe_unavailable: "去偏 Sharpe 概率可算",
+  freeze_deflated_sharpe_below_threshold: "去偏 Sharpe 概率",
+  freeze_unmeasurable: "研究期统计可算",
+  forward_strategy_error: "前推期策略无报错",
+  heldout_strategy_error: "Held-out 期策略无报错",
+  forward_lower_bound_not_positive: "前推超额 80% 下界",
+  forward_recency_negative: "前推最近 6 个月超额",
+  forward_max_drawdown_exceeded: "前推回撤",
+  forward_not_positive_at_cost_stress: "前推加倍滑点后超额",
+  forward_too_few_round_trips: "前推平仓次数",
+  forward_exposure_below_floor: "前推平均仓位",
+  heldout_excess_below_tolerance: "Held-out 超额",
+  heldout_max_drawdown_exceeded: "Held-out 回撤",
+  heldout_exposure_below_floor: "Held-out 平均仓位",
 };
 
 function reasonLabel(reason) {
@@ -72,6 +73,18 @@ const ENVIRONMENT_STAGE_LABELS = {
   verdict: "判定毕业",
   publishing: "结果落盘",
   session_retry: "会话失败重试",
+};
+// One glyph per stage family, so a card's activity line reads at a glance.
+const ENVIRONMENT_STAGE_ICONS = {
+  llm_call: "🤖",
+  tool_call: "🛠",
+  subagent_wait: "🧩",
+  backtest: "📊",
+  agent_complete: "🤖",
+  freezing: "❄",
+  forward_replay: "▶",
+  verdict: "⚖",
+  publishing: "💾",
 };
 // Stages with no Agent session to watch: the session panel shows the stage
 // instead of a live Trace. The forward replay runs with no Agent at all.
@@ -200,7 +213,7 @@ function refreshCharts() {
   new ResizeObserver(sync).observe(bar);
 })();
 
-/* Pipeline step keys (s1, s2, …, forward, frozen, heldout, verdict) travel in
+/* Pipeline step keys (research, frozen, forward, heldout, verdict) travel in
    the hash as they are. */
 function stepKeyToUrl(key) {
   return encodeURIComponent(String(key));
@@ -210,13 +223,19 @@ function stepKeyFromUrl(segment) {
   return decodeURIComponent(segment);
 }
 
-/* Display names for the pipeline's own session keys. The keys themselves, the
+/* Display names of the pipeline's steps. The session keys themselves, the
    ledgers, the trace files and every Agent-facing label stay as written; this
-   map is the console's vocabulary only, so `s1` never reaches a reader. */
+   map is the console's vocabulary only. */
+const STEP_LABELS = {
+  research: "研究",
+  frozen: "冻结",
+  forward: "前推回放",
+  heldout: "Held-out",
+  verdict: "裁决",
+};
+
 function sessionLabel(key) {
-  const research = /^s(\d+)$/.exec(String(key));
-  if (research) return `研究会话 ${Number(research[1])}`;
-  return key === "forward" ? "前推回放" : String(key);
+  return STEP_LABELS[key] || String(key);
 }
 
 /* Ledger period ranges are serialized as "YYYYMMDD..YYYYMMDD"; render them
@@ -375,10 +394,14 @@ function fmtSharpe(value) {
     : Number(value).toFixed(2);
 }
 
-function formatStageLine(status, { elapsed = true } = {}) {
+/* What the worker is doing right now: a stage glyph, the stage, its progress
+   and the tool or call it is on, then a clock since the stage began. The clock
+   is an elapsed node, so whoever holds the line ticks it with
+   tickElapsedClocks; a caller that has its own duration passes elapsed: false.
+   Null when the status carries no stage. */
+function activityNode(status, { elapsed = true, className = "activity" } = {}) {
   const stage = status && status.environment_stage;
-  if (!stage) return "";
-  const label = ENVIRONMENT_STAGE_LABELS[stage] || stage;
+  if (!stage) return null;
   const progress = (status && status.environment_progress) || {};
   const done = Number(progress.completed ?? progress.day_index);
   const total = Number(progress.total ?? progress.total_days);
@@ -391,14 +414,21 @@ function formatStageLine(status, { elapsed = true } = {}) {
     : progress.call_index
       ? ` · 第 ${progress.call_index} 次调用`
       : "";
-  if (!elapsed) return `${label}${measured}${action}`;
-  const started = Date.parse(
-    status.environment_stage_started_at || status.session_started_at || "",
+  const node = el(
+    "span",
+    { class: className },
+    el("span", { class: "activity-icon", "aria-hidden": "true" }, ENVIRONMENT_STAGE_ICONS[stage] || "⏳"),
+    `${ENVIRONMENT_STAGE_LABELS[stage] || stage}${measured}${action}`,
   );
-  const wait = Number.isFinite(started)
-    ? ` · ${fmtDuration((Date.now() - started) / 1000)}`
-    : "";
-  return `${label}${measured}${action}${wait}`;
+  if (elapsed) {
+    const clock = elapsedClockNode(
+      status.environment_stage_started_at || status.session_started_at,
+      "",
+      "activity-clock",
+    );
+    if (clock) node.append(" ", clock);
+  }
+  return node;
 }
 
 function isPrepEnvironment(status, state) {
@@ -1035,6 +1065,180 @@ function panelHead(title, ...extras) {
   return el("div", { class: "panel-head" }, el("h4", {}, title), ...extras);
 }
 
+/* ---------------- graphical primitives ----------------
+   Small, shared drawings the pages use instead of sentences: a ratio as a
+   thin bar, a ratio as a ring, a date span as a bar, criteria as a checklist,
+   a weight as a bar in its table cell. Each takes the numbers a page already
+   has and answers nothing when it has none, so el() drops it. */
+
+/* A ratio as a thin bar with its percentage: attention past three quarters,
+   alarm past nine tenths. */
+function ratioClass(ratio) {
+  return ratio >= 0.9 ? "bad" : ratio >= 0.75 ? "warn" : "";
+}
+
+function ratioBar(ratio, { cls = "", tone = true } = {}) {
+  const pct = Math.max(0, Math.min(100, Math.round(ratio * 100)));
+  return el(
+    "span",
+    { class: `bar ${cls}`.trim() },
+    el("span", {
+      class: `bar-fill ${tone ? ratioClass(ratio) : ""}`.trim(),
+      style: `width:${pct}%`,
+    }),
+  );
+}
+
+// The research budgets, keyed as the trace's budget_used block and the
+// listing's budget totals carry them.
+const BUDGET_ROWS = [
+  ["inference_seconds", "时间", fmtDuration],
+  ["llm_calls", "模型调用", String],
+  ["replay_years", "回放年", String],
+  ["null_controls", "空对照", String],
+];
+
+/* The research budget as one labelled bar per limit; `mini` keeps only the
+   most consumed one. Null while nothing was spent or no limit is known. */
+function budgetBars(used, total, { mini = false } = {}) {
+  if (!used || !total) return null;
+  const rows = BUDGET_ROWS.map(([key, label, fmt]) => {
+    const limit = Number(total[key]);
+    const spent = Number(used[key]);
+    if (!(limit > 0) || !Number.isFinite(spent)) return null;
+    return { key, label, ratio: spent / limit, text: `${fmt(spent)} / ${fmt(limit)}` };
+  }).filter(Boolean);
+  if (!rows.length) return null;
+  const shown = mini ? [rows.reduce((top, row) => (row.ratio > top.ratio ? row : top))] : rows;
+  return el(
+    "div",
+    { class: `budget-bars${mini ? " mini" : ""}` },
+    ...shown.map((row) =>
+      el(
+        "div",
+        { class: "budget-row", title: `${row.label} ${row.text}` },
+        el("span", { class: "budget-label" }, row.label),
+        ratioBar(row.ratio),
+        el("span", { class: `budget-pct ${ratioClass(row.ratio)}`.trim() }, `${Math.round(row.ratio * 100)}%`),
+      ),
+    ),
+  );
+}
+
+/* A ratio as a ring, the percentage beside it. */
+function ringGauge(ratio, label, title) {
+  const r = 8,
+    c = 2 * Math.PI * r;
+  const clamped = Math.max(0, Math.min(1, ratio));
+  const svg = el("span", { class: `ring ${ratioClass(ratio)}`.trim(), "aria-hidden": "true" });
+  svg.innerHTML =
+    `<svg viewBox="0 0 22 22"><circle class="ring-track" cx="11" cy="11" r="${r}"/>` +
+    `<circle class="ring-value" cx="11" cy="11" r="${r}" stroke-dasharray="${c.toFixed(2)}" stroke-dashoffset="${(c * (1 - clamped)).toFixed(2)}"/></svg>`;
+  return el(
+    "span",
+    { class: "gauge", title: title || null },
+    svg,
+    el("span", { class: "gauge-value" }, `${Math.round(ratio * 100)}%`),
+    label ? el("span", { class: "gauge-label" }, label) : null,
+  );
+}
+
+function dayIndex(yyyymmdd) {
+  const match = /^(\d{4})(\d{2})(\d{2})$/.exec(String(yyyymmdd || ""));
+  return match ? Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])) / 86_400_000 : NaN;
+}
+
+function fmtMonth(yyyymmdd) {
+  const text = String(yyyymmdd || "");
+  return text.length >= 6 ? `${text.slice(0, 4)}-${text.slice(4, 6)}` : text;
+}
+
+/* A calendar range as a bar, with segments filled inside it and tick labels
+   under it. Null when the range has no two dates. */
+function spanBar(start, end, segments, ticks, { mini = false } = {}) {
+  const from = dayIndex(start),
+    to = dayIndex(end);
+  if (!Number.isFinite(from) || !Number.isFinite(to) || to <= from) return null;
+  const at = (date) => Math.max(0, Math.min(100, ((dayIndex(date) - from) / (to - from)) * 100));
+  return el(
+    "span",
+    { class: `span-bar${mini ? " mini" : ""}` },
+    el(
+      "span",
+      { class: "span-track" },
+      ...segments.map((segment) =>
+        el("span", {
+          class: `span-fill ${segment.cls || ""}`.trim(),
+          style: `left:${at(segment.from).toFixed(1)}%;width:${(at(segment.to) - at(segment.from)).toFixed(1)}%`,
+          title: segment.title || null,
+        }),
+      ),
+    ),
+    el(
+      "span",
+      { class: "span-ticks" },
+      ...ticks.map((tick) =>
+        el(
+          "span",
+          { class: `span-tick${tick.mid ? " mid" : ""}`, style: `left:${at(tick.at).toFixed(1)}%` },
+          tick.label,
+        ),
+      ),
+    ),
+  );
+}
+
+/* The one continuous replay: the forward slice, then Held-out. `focus` fills
+   only that slice, for the process row that stands for it. */
+function replaySpanBar(replay, focus, opts) {
+  if (!replay || !replay.start || !replay.replay_end) return null;
+  const segments = [
+    { from: replay.start, to: replay.forward_end, cls: focus === "heldout" ? "dim" : "", title: `前推 ${fmtDate(replay.start)} ～ ${fmtDate(replay.forward_end)}` },
+    { from: replay.heldout_start, to: replay.replay_end, cls: focus === "forward" ? "dim" : "alt", title: `Held-out ${fmtDate(replay.heldout_start)} ～ ${fmtDate(replay.replay_end)}` },
+  ].filter((segment) => segment.from && segment.to);
+  const ticks = focus
+    ? []
+    : [
+        { at: replay.start, label: fmtMonth(replay.start) },
+        { at: replay.heldout_start, label: `Held-out ${fmtMonth(replay.heldout_start)}`, mid: true },
+        { at: replay.replay_end, label: fmtMonth(replay.replay_end) },
+      ].filter((tick) => tick.at);
+  return spanBar(replay.start, replay.replay_end, segments, ticks, opts);
+}
+
+/* Criteria as one line each: a pass or fail mark, the criterion, the measured
+   value and the threshold it is held to. `ok: null` is an unmeasured one. */
+function checklist(items) {
+  return el(
+    "div",
+    { class: "checklist" },
+    ...items.map((item) =>
+      el(
+        "div",
+        { class: `check-item ${item.ok === null ? "na" : item.ok ? "ok" : "fail"}` },
+        el("span", { class: "check-mark", "aria-hidden": "true" }, item.ok === null ? "–" : item.ok ? "✓" : "✕"),
+        el("span", { class: "check-label" }, item.label),
+        el("span", { class: "check-value" }, item.value ?? "—"),
+        item.threshold ? el("span", { class: "check-threshold" }, item.threshold) : null,
+      ),
+    ),
+  );
+}
+
+/* A portfolio weight as a bar behind its figure, scaled to the table's
+   largest weight so the holdings compare at a glance. */
+function weightCell(weight, largest) {
+  if (weight === null || weight === undefined || !Number.isFinite(Number(weight))) return "—";
+  return {
+    value: el(
+      "span",
+      { class: "wcell" },
+      ratioBar(largest > 0 ? Number(weight) / largest : 0, { cls: "wbar", tone: false }),
+      fmtPct(weight, 1),
+    ),
+  };
+}
+
 /* Every data table. A column marked `num` aligns its header and cells right in
    tabular digits and every other column reads left, so alignment is decided
    once per column. The box scrolls sideways instead of the page; `box` adds
@@ -1176,22 +1380,24 @@ function selectStep(key) {
   const fresh = sessionDetailPanel(detailView.detail, key);
   detailView.rightHost.replaceWith(fresh);
   detailView.rightHost = fresh;
+  // The control panel is not rebuilt here, so its activity clock is re-armed.
+  if (detailView.barHost)
+    liveTimers.push(setInterval(() => tickElapsedClocks(detailView.barHost), 1000));
 }
 
 /* ---------------- the arm's pipeline, as one list of steps ----------------
 
-   Research sessions, the freeze, the one continuous forward/Held-out replay
-   and the verdict, in the order the pipeline runs them. The listing summary
-   and the experiment detail both carry the fields read here, so the experiment
-   card's miniature strip and the experiment page's process list are one list
-   at two densities, and the console answers "where are we" in one vocabulary:
-   `state` colors the dot, `status` says it in words. */
+   The research session, the freeze, the one continuous forward/Held-out
+   replay and the verdict, in the order the pipeline runs them. The listing
+   summary and the experiment detail both carry the fields read here, so the
+   experiment card's miniature stepper and the experiment page's process list
+   are one list at two densities, and the console answers "where are we" in
+   one vocabulary: `state` draws the node, `status` says it in words. */
 const STEP_STATUS_LABELS = {
   pending: "待运行",
   running: "运行中",
   paused: "已暂停",
   skipped: "未运行",
-  ended: "已结束",
   // The freeze has not been decided yet; the replay waits on that decision.
   awaiting_nomination: "待定",
   awaiting_freeze: "待冻结",
@@ -1202,6 +1408,24 @@ const STEP_STATUS_LABELS = {
   not_replayed: "不回放",
   undecided: "待判定",
 };
+
+/* The research step: its recorded outcome once the session ended — a freeze
+   is the step done, anything else ended the arm — else where the worker is. */
+function researchStep(item) {
+  const status = item.status || {};
+  const step = { key: "research", label: STEP_LABELS.research };
+  if (item.research_outcome)
+    return {
+      ...step,
+      state: item.frozen_session ? "done" : "failed",
+      status: OUTCOME_LABELS[item.research_outcome] || item.research_outcome,
+    };
+  if (item.worker_alive && status.session_key === "research")
+    return item.state === "paused"
+      ? { ...step, state: "waiting", status: STEP_STATUS_LABELS.paused }
+      : { ...step, state: "running", status: STEP_STATUS_LABELS.running };
+  return { ...step, state: "pending", status: STEP_STATUS_LABELS.pending };
+}
 
 /* The freeze, the continuous replay and the verdict. `frozen_session` is the
    listing's own fact, so neither page infers a freeze from stage and verdict. */
@@ -1235,70 +1459,37 @@ function pipelineTailSteps(item) {
       }
     : { state: "pending", status: STEP_STATUS_LABELS.undecided };
   return [
-    { key: "frozen", label: "冻结", ...freeze },
-    { key: "forward", label: "前推回放", ...replay },
-    { key: "heldout", label: "Held-out", ...replay },
-    { key: "verdict", label: "裁决", ...decided },
+    { key: "frozen", label: STEP_LABELS.frozen, ...freeze },
+    { key: "forward", label: STEP_LABELS.forward, ...replay },
+    { key: "heldout", label: STEP_LABELS.heldout, ...replay },
+    { key: "verdict", label: STEP_LABELS.verdict, ...decided },
   ];
 }
 
-/* One step per planned research session, from the detail's session plan. */
-function researchSteps(detail) {
-  const status = detail.status || {};
-  const researchOver = detail.stage !== "research";
-  return (detail.sessions || [])
-    .filter((session) => session.kind === "research")
-    .map((session) => {
-      const step = { key: session.key, label: sessionLabel(session.key), session };
-      const record = session.record;
-      if (record)
-        return {
-          ...step,
-          state: "done",
-          status: OUTCOME_LABELS[record.outcome] || record.outcome,
-        };
-      if (detail.worker_alive && status.session_key === session.key)
-        return detail.state === "paused"
-          ? { ...step, state: "waiting", status: STEP_STATUS_LABELS.paused }
-          : { ...step, state: "running", status: STEP_STATUS_LABELS.running };
-      return researchOver
-        ? { ...step, state: "skipped", status: STEP_STATUS_LABELS.skipped }
-        : { ...step, state: "pending", status: STEP_STATUS_LABELS.pending };
-    });
+function pipelineSteps(item) {
+  return [researchStep(item), ...pipelineTailSteps(item)];
 }
 
-/* The listing carries no session plan, only how many sessions ran of how many,
-   so the card folds every research session into the one step its strip draws. */
-function researchSummaryStep(item) {
-  const total = Number(item.research_total) || 0;
-  const recorded = Number(item.research_recorded) || 0;
-  const step = { key: "research", label: total ? `研究会话 ${recorded}/${total}` : "研究会话" };
-  if (item.stage !== "research")
-    return { ...step, state: "done", status: STEP_STATUS_LABELS.ended };
-  if (!item.worker_alive || !item.current_session)
-    return { ...step, state: "pending", status: STEP_STATUS_LABELS.pending };
-  return item.state === "paused"
-    ? { ...step, state: "waiting", status: STEP_STATUS_LABELS.paused }
-    : { ...step, state: "running", status: STEP_STATUS_LABELS.running };
+/* One stepper node: the dot whose drawing is the state (a tick when done, a
+   cross when failed, a dash when skipped, a pulse while running) and its
+   label. The word for the state rides in the tooltip. */
+function stepNode(step, ...children) {
+  return el(
+    "span",
+    { class: `step ${step.state}`, title: `${step.label} · ${step.status}` },
+    el("span", { class: "step-dot", "aria-hidden": "true" }),
+    el("span", { class: "step-label" }, step.label),
+    ...children,
+  );
 }
 
-/* The experiment card's miniature of the process list: the same dots in one
-   wrapping row, the step the arm is on in full weight, status in the tooltip. */
-function pipelineStrip(item) {
+/* The experiment card's miniature stepper: five nodes on one rail, the step
+   the arm is on in full weight. */
+function pipelineStepper(item) {
   return el(
     "div",
-    { class: "pipeline-strip" },
-    ...[researchSummaryStep(item), ...pipelineTailSteps(item)].map((step) =>
-      el(
-        "span",
-        {
-          class: `pipeline-step ${step.state}`,
-          title: `${step.label} · ${step.status}`,
-        },
-        el("span", { class: `dot ${step.state}` }),
-        step.label,
-      ),
-    ),
+    { class: "stepper mini" },
+    ...pipelineSteps(item).map((step) => stepNode(step)),
   );
 }
 
@@ -1421,20 +1612,6 @@ function experimentBadges(...badges) {
   return el("span", { class: "exp-badges" }, ...badges.filter(Boolean));
 }
 
-/* Where the arm is, from the ledger: research sessions recorded, the sealed
-   forward replay, or the verdict. Never a research-period number. */
-function stageText(item) {
-  const research = `研究会话 ${item.research_recorded ?? 0}/${item.research_total ?? "?"}`;
-  if (item.stage === "verdict")
-    return (item.verdict || {}).status === "no_deliverable"
-      ? `${research} · 未冻结`
-      : `${research} · 已判定`;
-  if (item.stage === "forward") return `${research} · 已冻结 · 前推回放封存中`;
-  return item.worker_alive && item.current_session
-    ? `${research} · 当前 ${sessionLabel(item.current_session)}`
-    : research;
-}
-
 /* The forward and Held-out slices the verdict read; absent until it exists,
    and absent for a replay the strategy's own error stopped. */
 function forwardTiles(item) {
@@ -1506,47 +1683,34 @@ function forwardMarkers(forward) {
   return start ? [{ date: start, label: "Held-out" }] : [];
 }
 
+/* Name and badges, then the stepper, the live activity, the budget, the
+   evidence and the curve — each only when the arm has it. The grid is rebuilt
+   every poll, so the activity clock needs no ticker. */
 function experimentCard(item) {
-  const card = el("div", {
-    class: "card clickable",
-    onclick: () => {
-      location.hash = `#/exp/${encodeURIComponent(item.experiment_id)}`;
+  const readable = item.state !== "unreadable";
+  const card = el(
+    "div",
+    {
+      class: "card clickable",
+      onclick: () => {
+        location.hash = `#/exp/${encodeURIComponent(item.experiment_id)}`;
+      },
     },
-  });
-  card.append(
     el(
       "h3",
-      {},
+      { title: `创建 ${fmtTs(item.created_at)}` },
       experimentName(item.experiment_id),
       experimentBadges(stateBadge(item.state), verdictBadge(item.verdict)),
     ),
-    el(
-      "div",
-      { class: "meta-line" },
-      `创建 ${fmtTs(item.created_at)}`,
-      item.error ? ` ｜ ${item.error}` : "",
-    ),
+    item.error ? el("div", { class: "meta-line" }, item.error) : null,
+    readable ? pipelineStepper(item) : null,
+    readable && item.worker_alive
+      ? activityNode(item.status, { className: "activity meta-line" })
+      : null,
+    readable ? budgetBars(item.budget_used, item.budget, { mini: true }) : null,
+    readable ? evidenceTiles(item) : null,
+    readable ? cardEquityNode(item) : null,
   );
-  if (item.state !== "unreadable") {
-    card.append(pipelineStrip(item));
-    const activity = item.worker_alive
-      ? formatStageLine(item.status || {})
-      : "";
-    if (activity)
-      card.append(
-        el(
-          "div",
-          { class: "meta-line" },
-          [item.current_session ? sessionLabel(item.current_session) : null, activity]
-            .filter(Boolean)
-            .join(" · "),
-        ),
-      );
-    const tiles = evidenceTiles(item);
-    if (tiles) card.append(tiles);
-    const curve = cardEquityNode(item);
-    if (curve) card.append(curve);
-  }
   const actions = el("div", { class: "actions" });
   if (item.kind === "hitl" && RESUMABLE_STATES.includes(item.state)) {
     actions.append(
@@ -1604,12 +1768,11 @@ function heroPanel(item) {
       el(
         "h3",
         { class: "hero-title" },
-        el("span", { "aria-hidden": "true" }, "🏆"),
+        el("span", { "aria-hidden": "true", title: "最佳实验：按前推超额 80% 下界" }, "🏆"),
         experimentName(item.experiment_id),
       ),
       stateBadge(item.state),
       verdictBadge(item.verdict),
-      el("span", { class: "mode-note" }, "最佳实验 · 按前推超额 80% 下界"),
     ),
     forwardTiles(item),
   );
@@ -1620,7 +1783,6 @@ function heroPanel(item) {
       el(
         "div",
         { class: "section-gap" },
-        el("h4", { class: "subsection-title" }, "前推与 Held-out 连续回放 vs 沪深300"),
         resultEquityHost(item.experiment_id, result, {
           width: 980,
           height: 240,
@@ -2065,10 +2227,10 @@ async function renderDetailPage(experimentId, selectedKey) {
   const container = el("div", {}, head);
   let barHost = null;
   if (detail.kind === "hitl") {
-    // One status line and the controls that act on it; where the arm is, step
-    // by step, is the process list's job alone.
-    barHost = controlBar(detail);
-    container.append(el("div", { class: "panel section-gap" }, barHost));
+    // The state, what the worker is doing, the budget and the controls that
+    // act on it; where the arm is, step by step, is the process list's job.
+    barHost = controlPanel(detail);
+    container.append(barHost);
   }
   // Creation-time context, one line high: it frames what follows without
   // pushing the live content down.
@@ -2089,6 +2251,8 @@ async function renderDetailPage(experimentId, selectedKey) {
   layout.append(listHost, rightHost);
   container.append(layout);
   $main.replaceChildren(container);
+  if (barHost)
+    liveTimers.push(setInterval(() => tickElapsedClocks(barHost), 1000));
   pollTimer = setInterval(async () => {
     try {
       const fresh = await api(
@@ -2096,80 +2260,69 @@ async function renderDetailPage(experimentId, selectedKey) {
       );
       const raw = fresh.status || {};
       // A state change, a new session or a new run rebuilds the page; stage
-      // flips inside one run do not (the live panels poll status themselves).
+      // flips inside one run update the control panel in place (the live
+      // panels poll status themselves).
       if (
         fresh.state !== detail.state ||
         String(raw.session_key || "") !== String(status.session_key || "") ||
         String(raw.run_ref || "") !== String(status.run_ref || "")
       )
         route(true);
+      else if (detailView && detailView.barHost)
+        detailView.barHost.__follow(fresh);
     } catch {
       /* transient */
     }
   }, 4000);
 }
 
-/* The experiment page's process list: every planned research session, then the
-   freeze, the continuous replay and the verdict, each carrying what it left
-   behind. `filled` says whether the step has a right-pane detail yet. */
+/* The experiment page's process list: the research session, then the freeze,
+   the continuous replay and the verdict, each carrying what it left behind —
+   a figure, a date span or a live stage. `filled` says whether the step has a
+   right-pane detail yet. */
 function processRows(detail) {
   const status = detail.status || {};
-  const sessions = researchSteps(detail).map((step) => {
-    const record = (step.session || {}).record;
-    if (record) {
-      const best = record.best;
-      return {
-        ...step,
-        filled: true,
-        cls: record.froze ? "pos" : "",
-        note: best
-          ? `最佳候选 中性化 ${fmtPct(best.neutralized_excess)} · DSR ${fmtProb(best.deflated_sharpe_probability)}`
-          : `验证 ${record.validations.length} 次，无全区间`,
-        noteTitle: best
-          ? "本会话 IR 最高的全区间验证：研究期中性化超额与去偏 Sharpe 概率"
-          : null,
-      };
-    }
-    const live = step.state === "running" || step.state === "waiting";
-    return {
-      ...step,
-      filled: live,
-      note: live ? formatStageLine(status, { elapsed: false }) : null,
-    };
-  });
-  const frozen = detail.frozen;
+  const session = (detail.sessions || []).find((entry) => entry.kind === "research");
+  const record = (session || {}).record;
+  const research = researchStep(detail);
+  const live = research.state === "running" || research.state === "waiting";
+  const best = record && record.best;
   const replay =
     ((detail.sessions || []).find((entry) => entry.kind === "forward") || {})
       .replay || {};
+  const frozen = detail.frozen;
   const note = {
+    research: record
+      ? best
+        ? el(
+            "span",
+            { title: "IR 最高的全区间验证：研究期中性化超额与去偏 Sharpe 概率" },
+            `最佳候选 ${fmtPct(best.neutralized_excess)} · DSR ${fmtProb(best.deflated_sharpe_probability)}`,
+          )
+        : `验证 ${record.validations.length} 次 · 无全区间`
+      : live
+        ? activityNode(status, { elapsed: false, className: "activity" })
+        : null,
     frozen: frozen
-      ? `${sessionLabel(frozen.session_key)} · 中性化 ${fmtPct(frozen.neutralized_excess)} · DSR ${fmtProb(frozen.deflated_sharpe_probability)}`
+      ? `${fmtPct(frozen.neutralized_excess)} · DSR ${fmtProb(frozen.deflated_sharpe_probability)}`
       : null,
-    forward: replay.start
-      ? `${fmtDate(replay.start)} ～ ${fmtDate(replay.forward_end)}`
-      : null,
-    heldout: replay.heldout_start
-      ? `${fmtDate(replay.heldout_start)} ～ ${fmtDate(replay.replay_end)}`
-      : null,
-    verdict: detail.forward
-      ? ((detail.verdict || {}).reasons || []).map(reasonLabel).join("；") ||
-        "全部条件通过"
-      : null,
+    forward: replaySpanBar(replay, "forward", { mini: true }),
+    heldout: replaySpanBar(replay, "heldout", { mini: true }),
+    verdict: null,
   };
   const filled = {
+    research: Boolean(record) || live,
     frozen: Boolean(frozen),
     forward: Boolean(detail.frozen || detail.forward),
     heldout: Boolean(detail.forward),
     verdict: Boolean((detail.verdict || {}).status),
   };
-  return [
-    ...sessions,
-    ...pipelineTailSteps(detail).map((step) => ({
-      ...step,
-      note: note[step.key],
-      filled: filled[step.key],
-    })),
-  ];
+  return pipelineSteps(detail).map((step) => ({
+    ...step,
+    session: step.key === "research" ? session : null,
+    note: step.state === "skipped" ? null : note[step.key],
+    filled: filled[step.key],
+  }));
 }
 
 /* Where the reader lands: the session running right now, else the last step of
@@ -2184,40 +2337,36 @@ function defaultStepKey(detail, rows) {
   return (filled[filled.length - 1] || rows[0] || {}).key;
 }
 
+/* The stepper at full size: one row per step on a vertical rail, the state
+   drawn on the node, the status word beside the label and the step's own
+   note under them. A row opens its step in the right pane. */
 function processListPanel(detail, selectedKey) {
-  const list = el("div", { class: "session-list" });
-  for (const row of processRows(detail)) {
-    const status =
-      row.session && row.session.kind === "research"
-        ? sessionDurationNode(detail, row.session, row.status, row.cls || "")
-        : el("span", { class: row.cls || "" }, row.status);
-    status.classList.add("ret");
-    list.append(
-      el(
-        "div",
-        {
-          class: `session-item${row.key === selectedKey ? " selected" : ""}${
-            row.state === "skipped" ? " muted" : ""
-          }`,
-          "data-key": row.key,
-          onclick: () => {
-            location.hash = `#/exp/${encodeURIComponent(detail.experiment_id)}/${stepKeyToUrl(row.key)}`;
-          },
+  const rows = processRows(detail).map((row) => {
+    const status = row.session
+      ? sessionDurationNode(detail, row.session, row.status, "step-status")
+      : el("span", { class: "step-status" }, row.status);
+    return el(
+      "div",
+      {
+        class: `step-row ${row.state}${row.key === selectedKey ? " selected" : ""}`,
+        "data-key": row.key,
+        onclick: () => {
+          location.hash = `#/exp/${encodeURIComponent(detail.experiment_id)}/${stepKeyToUrl(row.key)}`;
         },
-        el("span", { class: `dot ${row.state}` }),
-        el("span", { class: "label" }, row.label),
-        status,
-        row.note
-          ? el(
-              "span",
-              { class: "session-note", title: row.noteTitle || null },
-              row.note,
-            )
-          : null,
-      ),
+      },
+      el("span", { class: "stepper-rail", "aria-hidden": "true" }),
+      el("span", { class: "step-dot", "aria-hidden": "true" }),
+      el("span", { class: "step-label" }, row.label),
+      status,
+      row.note ? el("span", { class: "step-note" }, row.note) : null,
     );
-  }
-  return el("div", { class: "panel" }, el("h4", {}, "研究流程"), list);
+  });
+  return el(
+    "div",
+    { class: "panel" },
+    el("h4", {}, "研究流程"),
+    el("div", { class: "stepper vertical" }, ...rows),
+  );
 }
 
 function fmtProb(value) {
@@ -2266,107 +2415,144 @@ function sliceTable(forward) {
   );
 }
 
+/* The graduation criteria (pipelines/verdict.py F1–F6, H1–H4) as a
+   checklist: the measured figure of each slice against the threshold the
+   record carries. A slice the strategy's error left unmeasured shows its
+   criteria unmarked; the error itself is the failed one. */
+function verdictChecklist(forward, verdict) {
+  const failed = new Set(verdict.reasons || []);
+  const t = ((forward.verdict || {}).thresholds) || {};
+  const slices = forward.slices || {};
+  const f = slices.forward,
+    h = slices.heldout;
+  const item = (token, slice, value, threshold) => ({
+    ok: slice ? !failed.has(token) : null,
+    label: reasonLabel(token),
+    value: slice ? value : "—",
+    threshold,
+  });
+  const drawdown = t.max_drawdown === undefined ? "" : `≤ ${fmtPct(t.max_drawdown)}`;
+  const exposure = t.min_mean_gross === undefined ? "" : `≥ ${fmtPct(t.min_mean_gross)}`;
+  return checklist([
+    ...["forward", "heldout"]
+      .filter((where) => failed.has(`${where}_strategy_error`))
+      .map((where) => ({ ok: false, label: reasonLabel(`${where}_strategy_error`), value: forward.error })),
+    item("forward_lower_bound_not_positive", f, fmtPct(f && f.lower_bound), "> 0"),
+    item("forward_recency_negative", f, fmtPct(f && f.recency_neutralized_excess), "≥ 0"),
+    item("forward_max_drawdown_exceeded", f, fmtPct(f && f.max_drawdown), drawdown),
+    item(
+      "forward_not_positive_at_cost_stress",
+      f,
+      fmtPct(f && f.excess_at_cost_stress),
+      t.cost_stress_multiplier ? `> 0（滑点 ×${t.cost_stress_multiplier}）` : "> 0",
+    ),
+    item("forward_too_few_round_trips", f, f && f.round_trips, t.min_round_trips === undefined ? "" : `≥ ${t.min_round_trips}`),
+    item("forward_exposure_below_floor", f, fmtPct(f && f.mean_gross), exposure),
+    item("heldout_excess_below_tolerance", h, fmtPct(h && h.neutralized_excess), h ? `≥ ${fmtPct(h.tolerance)}` : ""),
+    item("heldout_max_drawdown_exceeded", h, fmtPct(h && h.max_drawdown), drawdown),
+    item("heldout_exposure_below_floor", h, fmtPct(h && h.mean_gross), exposure),
+  ]);
+}
+
 /* The forward and Held-out replay of the frozen artifact: 封存中 until the
-   forward record exists, then the verdict with every failed condition, the
-   slice statistics, the one continuous curve with the Held-out boundary
+   forward record exists, then the verdict as a checklist, the replay span,
+   the slice statistics, the one continuous curve with the Held-out boundary
    marked, and the Paper command for a graduate. A research that froze nothing
    has only its verdict. */
 function verdictPanel(detail) {
   const verdict = detail.verdict || {};
   const forward = detail.forward;
   if (!detail.frozen && !verdict.status) return null;
-  const reasons = (verdict.reasons || []).map(reasonLabel);
-  const panel = el(
-    "div",
-    { class: "panel section-gap" },
-    panelHead("前推与 Held-out", verdictBadge(detail.verdict)),
-  );
+  const head = panelHead("前推与 Held-out", verdictBadge(detail.verdict));
   if (!forward) {
-    if (verdict.status) {
-      panel.append(el("div", {}, reasons.join("；") || "—"));
-      return panel;
-    }
+    if (verdict.status)
+      return el(
+        "div",
+        { class: "panel section-gap" },
+        head,
+        el("div", { class: "meta-line" }, (verdict.reasons || []).map(reasonLabel).join("；") || "—"),
+      );
     const status = detail.status || {};
     const replaying = detail.worker_alive && status.session_key === "forward";
-    panel.append(
+    return el(
+      "div",
+      { class: "panel section-gap" },
+      head,
       el(
         "div",
         { class: "prep-indicator" },
         replaying ? el("span", { class: "spinner" }) : null,
-        el(
-          "span",
-          {},
-          replaying
-            ? `封存中 · ${formatStageLine(status) || "回放中"}`
-            : "封存中 · 回放尚未运行",
-        ),
+        el("span", {}, STEP_STATUS_LABELS.sealed),
+        replaying ? activityNode(status, { elapsed: false }) : null,
       ),
     );
-    return panel;
   }
   const replay = forward.replay || {};
-  panel.append(
-    el(
-      "div",
-      {},
-      reasons.length ? `未通过：${reasons.join("；")}` : "全部条件通过",
-    ),
-    el(
-      "div",
-      { class: "meta-line" },
-      `前推 ${fmtDate(replay.start)} ～ ${fmtDate(replay.forward_end)} · Held-out ${fmtDate(replay.heldout_start)} ～ ${fmtDate(replay.replay_end)}`,
-      replay.truncation_reason ? `（请求至 ${fmtDate(replay.requested_end)}，截至发布末日）` : "",
-    ),
-  );
-  if (forward.error)
-    panel.append(el("div", { class: "hint warn" }, `策略报错：${forward.error}`));
-  const table = sliceTable(forward);
-  if (table) panel.append(table);
   const refits = forward.refits_executed || {};
-  if (forward.result)
-    panel.append(
-      el(
-        "div",
-        { class: "meta-line section-gap" },
-        `重训 前推 ${refits.forward ?? "—"} 次 · Held-out ${refits.heldout ?? "—"} 次 · 前推 null 分位 ${fmtProb(forward.null_percentile)}`,
-      ),
-      el(
-        "div",
-        { class: "section-gap" },
-        el("h4", { class: "subsection-title" }, "日度累计收益 vs 沪深300"),
-        resultEquityHost(detail.experiment_id, forward.result, {
-          width: 980,
-          height: 240,
-          ddH: 90,
-          markers: forwardMarkers(forward),
-        }),
-      ),
-      styleCard(detail.experiment_id, forward.result),
-      Object.assign(
-        lazyDetails("交易明细", () =>
-          ordersNode(detail.experiment_id, forward.result),
-        ),
-        { className: "fold section-gap" },
-      ),
-    );
-  if (detail.paper_candidate)
-    panel.append(
-      el("h4", { class: "subsection-title section-gap" }, "Paper 建簿"),
-      el("pre", { class: "code-view" }, detail.paper_candidate.command),
-      el("div", { class: "hint" }, "在仓库根目录运行；Paper 不会自动启动。"),
-    );
-  return panel;
+  const chip = (text, title) => el("span", { class: "stat-chip", title: title || null }, text);
+  return el(
+    "div",
+    { class: "panel section-gap" },
+    head,
+    verdictChecklist(forward, verdict),
+    el(
+      "div",
+      { class: "section-gap" },
+      replaySpanBar(replay),
+      replay.truncation_reason
+        ? el("div", { class: "meta-line" }, `请求至 ${fmtDate(replay.requested_end)} · 截至发布末日`)
+        : null,
+    ),
+    forward.error ? el("div", { class: "hint warn" }, `策略报错：${forward.error}`) : null,
+    sliceTable(forward),
+    forward.result
+      ? el(
+          "div",
+          { class: "stats-chips section-gap" },
+          chip(`重训 前推 ${refits.forward ?? "—"} · Held-out ${refits.heldout ?? "—"}`),
+          chip(`前推 null 分位 ${fmtProb(forward.null_percentile)}`, "前推期超额在随机名单回放中的分位"),
+        )
+      : null,
+    forward.result
+      ? el(
+          "div",
+          { class: "section-gap" },
+          resultEquityHost(detail.experiment_id, forward.result, {
+            width: 980,
+            height: 240,
+            ddH: 90,
+            markers: forwardMarkers(forward),
+          }),
+        )
+      : null,
+    forward.result ? styleCard(detail.experiment_id, forward.result) : null,
+    forward.result
+      ? Object.assign(
+          lazyDetails("交易明细", () => ordersNode(detail.experiment_id, forward.result)),
+          { className: "fold section-gap" },
+        )
+      : null,
+    detail.paper_candidate
+      ? el(
+          "h4",
+          { class: "subsection-title section-gap", title: "在仓库根目录运行；Paper 不会自动启动" },
+          "Paper 建簿",
+        )
+      : null,
+    detail.paper_candidate ? el("pre", { class: "code-view" }, detail.paper_candidate.command) : null,
+  );
 }
 
 /* The frozen artifact and the research statistics it was frozen on. */
 function frozenPanel(detail) {
   const frozen = detail.frozen;
   if (!frozen) return null;
+  const chip = (text, title) => el("span", { class: "stat-chip", title: title || null }, text);
   const panel = el(
     "div",
     { class: "panel section-gap" },
     panelHead(
-      `冻结产物 · ${sessionLabel(frozen.session_key)}`,
+      "冻结产物",
       el("span", { class: "spacer" }),
       el(
         "a",
@@ -2402,31 +2588,26 @@ function frozenPanel(detail) {
     ]),
     el(
       "div",
-      { class: "meta-line section-gap" },
-      [
-        `全区间验证 ${frozen.full_span_validations ?? "—"} 次`,
-        `null 分位 ${fmtProb(frozen.null_percentile)}`,
-        frozen.fit ? `fit，重训周期 ${frozen.refit_period || "—"}` : "无 fit",
-        `来源节点 ${frozen.source_step_id || "—"}`,
-      ].join(" · "),
+      { class: "stats-chips section-gap" },
+      chip(`全区间验证 ${frozen.full_span_validations ?? "—"}`),
+      chip(`null 分位 ${fmtProb(frozen.null_percentile)}`, "前推期超额在随机名单回放中的分位"),
+      chip(frozen.fit ? `fit · 重训 ${frozen.refit_period || "—"}` : "无 fit"),
+      chip(`节点 ${String(frozen.source_step_id || "—").split("__").pop()}`, frozen.source_step_id || null),
     ),
+    subWindowSection("研究期分年度表现", frozen.blocks),
+    frozen.result
+      ? el(
+          "div",
+          { class: "section-gap" },
+          resultEquityHost(detail.experiment_id, frozen.result, {
+            width: 860,
+            height: 210,
+            ddH: 76,
+          }),
+        )
+      : null,
+    frozen.result ? styleCard(detail.experiment_id, frozen.result) : null,
   );
-  const blocks = subWindowSection("研究期分年度表现", frozen.blocks);
-  if (blocks) panel.append(blocks);
-  if (frozen.result)
-    panel.append(
-      el(
-        "div",
-        { class: "section-gap" },
-        el("h4", { class: "subsection-title" }, "研究期日度累计收益 vs 沪深300"),
-        resultEquityHost(detail.experiment_id, frozen.result, {
-          width: 860,
-          height: 210,
-          ddH: 76,
-        }),
-      ),
-      styleCard(detail.experiment_id, frozen.result),
-    );
   return panel;
 }
 
@@ -2508,31 +2689,44 @@ async function openParamsModal(detail) {
   ]);
 }
 
-/* The control row's left side: where the arm is, the current stage while a
-   worker runs, and the mounted skills count. */
-function runStatusLine(detail) {
-  const status = detail.status || {};
-  return el(
-    "span",
-    { class: "mode-note" },
-    [
-      stageText(detail),
-      detail.worker_alive ? formatStageLine(status, { elapsed: false }) : null,
-      `Skills ${Number(detail.skills && detail.skills.count) || 0} 项`,
-    ]
-      .filter(Boolean)
-      .join(" · "),
+/* The control panel: the state badge, what the worker is doing, the skills it
+   published (only once there are any), any pending request, the controls,
+   and the research budget as bars. `__follow(status payload)` redraws the
+   activity and the budget in place between page rebuilds. */
+function controlPanel(detail) {
+  const activityHost = el("span", { class: "control-activity" });
+  const budgetHost = el("div", {});
+  const skills = Number(detail.skills && detail.skills.count) || 0;
+  const panel = el(
+    "div",
+    { class: "panel section-gap" },
+    controlBar(
+      detail,
+      stateBadge(detail.state),
+      activityHost,
+      skills ? el("span", { class: "stat-chip", title: "本实验发布的 skills" }, `📚 Skills ${skills}`) : null,
+    ),
+    budgetHost,
   );
+  const follow = (fresh) => {
+    const activity = fresh.worker_alive ? activityNode(fresh.status) : null;
+    activityHost.replaceChildren(...(activity ? [activity] : []));
+    const bars = budgetBars(fresh.budget_used, detail.budget);
+    budgetHost.replaceChildren(...(bars ? [bars] : []));
+  };
+  follow(detail);
+  panel.__follow = follow;
+  return panel;
 }
 
-function controlBar(detail) {
+function controlBar(detail, ...lead) {
   const id = detail.experiment_id;
   const control = detail.control || { request: null };
   const state = detail.state;
   const alive = detail.worker_alive;
   const send = (payload, note) => sendControlAction(id, payload, note);
   const actions = el("div", { class: "control-actions" });
-  const bar = el("div", { class: "control-bar" }, runStatusLine(detail));
+  const bar = el("div", { class: "control-bar" }, ...lead);
   if (control.request === "pause")
     bar.append(el("span", { class: "badge state-paused" }, "已请求暂停"));
   if (control.request === "stop")
@@ -2766,11 +2960,7 @@ function sessionDetailPanel(detail, selectedKey) {
       el(
         "div",
         { class: "panel section-gap" },
-        el(
-          "div",
-          { class: "empty" },
-          detail.stage === "research" ? "该会话尚未开始。" : "研究已结束，该会话不再运行。",
-        ),
+        el("div", { class: "empty" }, researchStep(detail).status),
       ),
     );
   }
@@ -2780,56 +2970,71 @@ function sessionDetailPanel(detail, selectedKey) {
   return panel;
 }
 
+/* The continuous replay's step: where the pipeline stands on it and the span
+   it covers, the forward slice then Held-out. */
 function forwardSessionPanel(detail, session) {
-  const replay = session.replay || {};
-  const note = detail.forward
-    ? "已判定，结果见「裁决」。"
-    : detail.frozen
-      ? "封存中：回放结束并判定后才显示结果。"
-      : detail.stage === "research"
-        ? "研究冻结产物后运行。"
-        : "研究未冻结产物，不回放。";
+  const step = pipelineTailSteps(detail).find((row) => row.key === "forward");
   return el(
     "div",
     { class: "panel section-gap" },
-    el("h4", {}, "前推回放"),
-    el(
-      "table",
-      { class: "kv" },
-      kvRow(
-        "前推",
-        replay.start ? `${fmtDate(replay.start)} ～ ${fmtDate(replay.forward_end)}` : "—",
-      ),
-      kvRow(
-        "Held-out",
-        replay.heldout_start
-          ? `${fmtDate(replay.heldout_start)} ～ ${fmtDate(replay.replay_end)}`
-          : "—",
-      ),
-    ),
-    el("div", { class: "meta-line" }, note),
+    panelHead(STEP_LABELS.forward, el("span", { class: "badge kind" }, step.status)),
+    replaySpanBar(session.replay) || el("div", { class: "empty" }, "—"),
   );
 }
 
-/* One recorded research session: how it ended, its best full-span candidate
-   with the deflated Sharpe the freeze gate would give it, the freeze gate it
-   met when it nominated, every Validation it ran, and its Trace. */
+/* The freeze gate as the pipeline judged the nomination: the two measured
+   criteria always, a failed precondition only when it failed. */
+function freezeGateChecklist(gate) {
+  const failed = new Set(gate.reasons || []);
+  const preconditions = [
+    "freeze_needs_full_span_validation",
+    "freeze_unmeasurable",
+    "freeze_deflated_sharpe_unavailable",
+  ].filter((token) => failed.has(token));
+  return checklist([
+    ...preconditions.map((token) => ({ ok: false, label: reasonLabel(token) })),
+    {
+      ok: !failed.has("freeze_too_few_full_span_validations"),
+      label: reasonLabel("freeze_too_few_full_span_validations"),
+      value: gate.full_span_validations ?? "—",
+      threshold: "≥ 2",
+    },
+    {
+      ok: failed.has("freeze_deflated_sharpe_unavailable")
+        ? null
+        : !failed.has("freeze_deflated_sharpe_below_threshold"),
+      label: reasonLabel("freeze_deflated_sharpe_below_threshold"),
+      value: fmtProb(gate.deflated_sharpe_probability),
+      threshold: "≥ 0.5",
+    },
+  ]);
+}
+
+/* The recorded research session: how it ended, its best full-span candidate
+   with the deflated Sharpe the freeze gate would give it, the gate it met
+   when it nominated, the budget it spent, every Validation it ran, and its
+   Trace. */
 function researchSessionPanel(detail, session) {
   const record = session.record;
   const best = record.best || {};
   const gate = record.freeze_gate;
+  const attempts = Number(record.attempts) || 0;
+  const budget = budgetBars(record.budget_used, detail.budget);
   const panel = el(
     "div",
     { class: "panel" },
     panelHead(
-      sessionLabel(session.key),
+      STEP_LABELS.research,
       el(
         "span",
-        { class: `badge ${record.froze ? "state-completed" : "state-stopped"}` },
+        {
+          class: `badge ${record.froze ? "state-completed" : "state-stopped"}`,
+          title: record.finish_reason || null,
+        },
         OUTCOME_LABELS[record.outcome] || record.outcome,
       ),
-      record.finish_reason
-        ? el("span", { class: "mode-note" }, `结束原因 ${record.finish_reason}`)
+      attempts > 1
+        ? el("span", { class: "badge kind", title: "失败后原地续跑的尝试数" }, `${attempts} 次尝试`)
         : null,
     ),
     statTilesRow([
@@ -2853,26 +3058,26 @@ function researchSessionPanel(detail, session) {
         value: `${record.validations.length} / ${record.trials_to_date ?? "—"}`,
       },
     ]),
-    el(
-      "table",
-      { class: "kv section-gap" },
-      record.reason ? kvRow("理由", record.reason) : null,
-      gate
-        ? kvRow(
-            "冻结门",
-            gate.passed
-              ? `通过（去偏 Sharpe 概率 ${fmtProb(gate.deflated_sharpe_probability)}）`
-              : `未通过：${gate.reasons.map(reasonLabel).join("；")}`,
-          )
-        : null,
-      record.arm_end ? kvRow("结束实验", record.arm_end.reason || "—") : null,
-      record.run_wall_seconds
-        ? kvRow("耗时", fmtDuration(record.run_wall_seconds))
-        : null,
-      record.next_start_node_id
-        ? kvRow("下一会话起点", record.next_start_node_id)
-        : null,
-    ),
+    gate
+      ? el(
+          "div",
+          { class: "section-gap" },
+          el("h4", { class: "subsection-title" }, "冻结门"),
+          freezeGateChecklist(gate),
+        )
+      : null,
+    budget
+      ? el(
+          "div",
+          { class: "section-gap" },
+          el("h4", { class: "subsection-title" }, "预算用量"),
+          budget,
+        )
+      : null,
+    record.reason ? el("blockquote", { class: "quote section-gap" }, record.reason) : null,
+    record.arm_end
+      ? el("div", { class: "meta-line" }, `结束实验 · ${record.arm_end.reason || "—"}`)
+      : null,
   );
   if (record.validations.length)
     panel.append(
@@ -2910,15 +3115,6 @@ function researchSessionPanel(detail, session) {
           },
         ]),
         { box: "section-gap" },
-      ),
-    );
-  if (record.prior_published && record.prior)
-    panel.append(
-      el(
-        "details",
-        { class: "fold section-gap" },
-        el("summary", {}, "本会话发布的 PRIOR"),
-        el("pre", { class: "code-view" }, record.prior),
       ),
     );
   const statsHost = el("div", {});
@@ -3010,10 +3206,7 @@ function directivePanel(detail, session) {
       ),
     );
   }
-  panel.append(
-    textarea,
-    el("div", { class: "hint warn" }, "须在会话启动前保存；不要写入日历日期。"),
-  );
+  panel.append(textarea);
   const send = (payload, note) =>
     sendControlAction(detail.experiment_id, payload, note);
   panel.append(
@@ -3032,6 +3225,7 @@ function directivePanel(detail, session) {
         "button",
         {
           class: "btn primary",
+          title: "须在会话启动前保存；不要写入日历日期",
           onclick: () =>
             send(
               {
@@ -3061,8 +3255,11 @@ function gpuAllocationRow(detail, session, send) {
   const wrap = el(
     "div",
     { class: "section-gap" },
-    el("h4", { class: "subsection-title" }, "本会话 GPU 分配"),
-    el("div", { class: "hint" }, "设备按空闲显存自动挑选；条越长剩余显存越多。"),
+    el(
+      "h4",
+      { class: "subsection-title", title: "设备按空闲显存自动挑选；条越长剩余显存越多" },
+      "本会话 GPU 分配",
+    ),
   );
   const statusHost = el(
     "div",
@@ -3240,7 +3437,7 @@ async function refreshDetail() {
     );
     detailView.detail = detail;
     if (detailView.barHost) {
-      const bar = controlBar(detail);
+      const bar = controlPanel(detail);
       detailView.barHost.replaceWith(bar);
       detailView.barHost = bar;
     }
@@ -3337,12 +3534,33 @@ function fmtTokens(count) {
   return `${n} tokens`;
 }
 
+/* The main Agent's context as a ring against its model's window, the
+   compaction count beside it, then the operation counters as chips. The
+   context figure is the last request's prompt tokens: what the window held
+   when the Agent last spoke. */
 function statsChipsRow(stats) {
   const counts = { ...(stats.counts || {}), ...(stats.tool_counts || {}) };
   const chips = el("div", { class: "stats-chips" });
   const labelled = new Set();
   const subagentTasks = Number(stats.subagent_tasks) || 0;
   const subagentRunning = Number(stats.subagent_running) || 0;
+  const used = Number(stats.last_llm_prompt_tokens) || 0;
+  const window = Number(stats.context_window_tokens) || 0;
+  if (window > 0)
+    chips.append(
+      ringGauge(
+        used / window,
+        "上下文",
+        `主 Agent 上下文 ${fmtTokens(used)} / ${fmtTokens(window)}`,
+      ),
+    );
+  chips.append(
+    el(
+      "span",
+      { class: "stat-chip", title: "上下文压缩次数（Agent 自行压缩与宿主兜底压缩）" },
+      `⟲ 压缩 ${Number(stats.compact_ops) || 0}`,
+    ),
+  );
   for (const [key, label] of STAT_CHIPS) {
     labelled.add(key);
     if (counts[key])
@@ -3375,32 +3593,25 @@ function statsChipsRow(stats) {
         ),
       );
   }
-  chips.append(
-    el(
-      "span",
-      { class: "stat-chip", title: "语义压缩次数" },
-      `Compact ${Number(stats.compact_ops) || 0}`,
-    ),
-  );
   if (stats.llm_prompt_tokens || stats.llm_completion_tokens) {
     chips.append(
       el(
         "span",
-        { class: "stat-chip" },
-        `主 Agent 累计输入 ${fmtTokens(stats.llm_prompt_tokens)}`,
+        { class: "stat-chip", title: "主 Agent 累计输入 tokens" },
+        `↑ ${fmtTokens(stats.llm_prompt_tokens)}`,
       ),
       el(
         "span",
-        { class: "stat-chip" },
-        `主 Agent 累计输出 ${fmtTokens(stats.llm_completion_tokens)}`,
+        { class: "stat-chip", title: "主 Agent 累计输出 tokens" },
+        `↓ ${fmtTokens(stats.llm_completion_tokens)}`,
       ),
     );
   } else if (stats.llm_total_tokens) {
     chips.append(
       el(
         "span",
-        { class: "stat-chip" },
-        `主 Agent Σ ${fmtTokens(stats.llm_total_tokens)}`,
+        { class: "stat-chip", title: "主 Agent 累计 tokens" },
+        `Σ ${fmtTokens(stats.llm_total_tokens)}`,
       ),
     );
   }
@@ -3416,21 +3627,6 @@ function statsChipsRow(stats) {
           title: `${fmtTokens(stats.subagent_prompt_tokens)} 输入 · ${fmtTokens(stats.subagent_completion_tokens)} 输出，不计入主 Agent 累计`,
         },
         `🧩 子代理 Σ ${fmtTokens(subagentTokens)}`,
-      ),
-    );
-  }
-  const used = Number(stats.last_llm_prompt_tokens) || 0;
-  const window = Number(stats.context_window_tokens) || 0;
-  if (used > 0 && window > 0) {
-    const pct = Math.min(100, Math.round((100 * used) / window));
-    chips.append(
-      el(
-        "span",
-        {
-          class: "stat-chip",
-          title: `${fmtTokens(used)} / ${fmtTokens(window)}`,
-        },
-        `主 Agent 上下文 ${pct}%`,
       ),
     );
   }
@@ -4054,15 +4250,10 @@ function renderTraceBlocks(box, blocks, { truncated, eof, previous, detail, runR
       .filter(Boolean),
   );
   const fragment = document.createDocumentFragment();
-  if (truncated) {
+  if (truncated)
     fragment.append(
-      el(
-        "div",
-        { class: "hint" },
-        "仅显示当前窗口的展示投影；完整记录请下载原始 JSONL。",
-      ),
+      el("div", { class: "hint", title: "完整记录请下载原始 JSONL" }, "仅显示当前窗口"),
     );
-  }
   const scroll = el("div", { class: "trace-box-scroll" });
   const appendNode = (host, block, index) => {
     const node = traceBlockNode(block, index, detail, runRef);
@@ -4101,6 +4292,8 @@ function traceBlockNode(block, index, detail, runRef) {
     else if (kind === "raw") renderRawBlock(node, block);
     else if (kind === "marker") renderMarkerBlock(node, block);
     else if (kind === "summary") renderSummaryBlock(node, block);
+    else if (kind === "compaction") renderCompactionBlock(node, block, index);
+    else if (kind === "notice") renderNoticeBlock(node, block);
     else node.append(el("div", { class: "hint" }, "未知展示块"));
   } catch {
     node.append(el("div", { class: "hint" }, "该展示块无法渲染"));
@@ -4284,6 +4477,46 @@ function renderMarkerBlock(node, block) {
   );
   const text = String(block.text || "");
   if (text) node.append(el("div", { class: "hint" }, text));
+}
+
+/* A context compaction, drawn as a rule across the trace: who triggered it
+   and what it replaced on the line, the summary that now stands for those
+   calls behind a fold. A compaction that did not go through says why. */
+function renderCompactionBlock(node, block, index) {
+  const range = block.replaced_call_range;
+  const trigger = block.trigger === "agent" ? "Agent" : "宿主";
+  const ok = String(block.status || "") === "ok";
+  const parts = [`上下文压缩 · ${trigger}`];
+  if (ok && range) parts.push(`替换第 ${range[0]}–${range[1]} 次调用 · ${block.dropped_messages} 条`);
+  if (!ok) parts.push(block.error || String(block.status || "未完成"));
+  const summary = String(block.summary || "");
+  const details = lazyDetails(
+    parts.join(" · "),
+    () => el("div", { class: "llm-content" }, summary),
+    `compact:${index}`,
+  );
+  details.className = "compaction-fold";
+  if (!summary) details.querySelector("summary").classList.add("bare");
+  node.classList.toggle("failed", !ok);
+  node.append(details);
+  if (block.ts) node.append(el("span", { class: "hint flush" }, fmtTsTime(block.ts)));
+}
+
+/* The runtime's advisory at three quarters of the compaction threshold. */
+function renderNoticeBlock(node, block) {
+  const estimated = Number(block.estimated_tokens) || 0;
+  const threshold = Number(block.token_threshold) || 0;
+  node.append(
+    el("span", { class: "notice-mark", "aria-hidden": "true" }, "◔"),
+    el(
+      "span",
+      {},
+      threshold
+        ? `上下文 ${Math.round((100 * estimated) / threshold)}% · ${fmtTokens(estimated)} / ${fmtTokens(threshold)}`
+        : "上下文压缩提示",
+    ),
+  );
+  if (block.ts) node.append(el("span", { class: "hint flush" }, fmtTsTime(block.ts)));
 }
 
 function renderSummaryBlock(node, block) {
@@ -5119,8 +5352,8 @@ async function renderMemoryPage() {
         el("h2", {}, "运行记忆"),
         el(
           "div",
-          { class: "sub" },
-          `默认挂载模式 ${payload.default_mode || "—"} ｜ 改动作用于此后创建的实验`,
+          { class: "sub", title: "改动作用于此后创建的实验" },
+          `默认挂载 ${payload.default_mode || "—"}`,
         ),
       ),
       memorySection(
@@ -5143,7 +5376,7 @@ async function renderMemoryPage() {
       memorySection(
         "memory-issues",
         "问题反馈",
-        "处置用 scripts/experiments/resolve_issue.py 记录",
+        "处置：scripts/experiments/resolve_issue.py",
         el("div", { class: "panel" }, issueFilterBar(), memoryView.issuesHost),
       ),
     ),
@@ -5154,18 +5387,13 @@ async function renderMemoryPage() {
   renderIssueReports();
 }
 
-/* One pattern for every section on this page: a heading with an optional
-   one-line note, then the panels. */
+/* One pattern for every section on this page: a heading, a tooltip for its
+   one operational note, then the panels. */
 function memorySection(id, title, note, ...panels) {
   return el(
     "section",
     { class: "memory-section", id },
-    el(
-      "div",
-      { class: "memory-section-head" },
-      el("h3", {}, title),
-      note ? el("div", { class: "sub" }, note) : null,
-    ),
+    el("div", { class: "memory-section-head" }, el("h3", { title: note || null }, title)),
     ...panels,
   );
 }
@@ -5712,8 +5940,8 @@ function curatedFormView() {
     promoting
       ? el(
           "div",
-          { class: "hint" },
-          `整项复制实验 ${memoryView.source.experiment_id} 的 skill ${memoryView.source.skill}（含 scripts/ 与 references/）`,
+          { class: "hint", title: "整项复制，含 scripts/ 与 references/" },
+          `来源 ${memoryView.source.experiment_id} / ${memoryView.source.skill}`,
         )
       : null,
     el("div", { class: "field" }, el("label", {}, "条目名"), nameInput),
@@ -6306,6 +6534,11 @@ function paperHead(status, payload) {
   );
 }
 
+/* The scale of a holdings table's weight bars: its largest weight. */
+function largestWeight(rows) {
+  return Math.max(0, ...rows.map((row) => Number(row.weight) || 0));
+}
+
 function paperOrdersTable(orders) {
   return dataTable(
     [
@@ -6355,9 +6588,16 @@ function paperSheetBody(sheet) {
               fmtShares(row.quantity),
               fmtPrice(row.reference_price),
               fmtAmountOpt(row.value),
-              fmtPct(row.weight, 1),
+              weightCell(row.weight, largestWeight(sheet.target)),
             ]),
-            ["现金", "", "", "", fmtAmountOpt(sheet.cash_after), fmtPct(sheet.cash_weight, 1)],
+            [
+              "现金",
+              "",
+              "",
+              "",
+              fmtAmountOpt(sheet.cash_after),
+              weightCell(sheet.cash_weight, largestWeight(sheet.target)),
+            ],
           ],
         )
       : el("div", { class: "meta-line" }, `空仓 · 现金 ${fmtAmountOpt(sheet.cash_after)}`),
@@ -6524,10 +6764,10 @@ function paperPerformancePanel(payload) {
         ? el("div", { class: "hint warn" }, payload.error)
         : el("div", { class: "empty" }, "暂无"),
     );
+  if (stats.days < payload.min_days)
+    head.querySelector(".mode-note").title =
+      `年化、Sharpe 与最大回撤自第 ${payload.min_days} 个交易日起给出`;
   const notes = [
-    stats.days < payload.min_days
-      ? `年化、Sharpe 与最大回撤自第 ${payload.min_days} 个交易日起给出`
-      : null,
     payload.benchmark_error
       ? `沪深300 读取失败：${payload.benchmark_error}`
       : !payload.benchmark_days
@@ -6561,14 +6801,14 @@ function paperPerformancePanel(payload) {
     head,
     tiles.length ? statTilesRow(tiles) : null,
     notes.length ? el("div", { class: "meta-line section-gap" }, notes.join(" · ")) : null,
-    el(
-      "div",
-      { class: "section-gap" },
-      payload.chart
-        ? equityChart(payload.chart, { width: 980, height: 240, ddH: 80 })
-        : el("div", { class: "meta-line" }, "收益曲线自第二个交易日起绘制"),
-    ),
-    el("div", { class: "meta-line" }, cost.join(" · ")),
+    payload.chart
+      ? el(
+          "div",
+          { class: "section-gap" },
+          equityChart(payload.chart, { width: 980, height: 240, ddH: 80 }),
+        )
+      : null,
+    el("div", { class: "meta-line section-gap" }, cost.join(" · ")),
   );
 }
 
@@ -6625,7 +6865,7 @@ function paperPositionsPanel(payload) {
               fmtPrice(row.last_price),
               fmtAmountOpt(row.market_value),
               { value: fmtAmountOpt(row.pnl), cls: signCls(row.pnl) },
-              fmtPct(row.weight, 1),
+              weightCell(row.weight, largestWeight(positions)),
             ]),
             { box: "limit section-gap" },
           )
