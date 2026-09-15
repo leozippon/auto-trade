@@ -1653,37 +1653,6 @@ pre.code-view.pre-wrap {
 .trace-block .type.subagent.error {
  color: var(--bad);
 }
-.trace-subagent-dock {
- flex: 0 0 auto;
- display: flex;
- flex-direction: column;
- gap: 0.35rem;
- max-height: 28vh;
- overflow: auto;
- padding: 0.4rem 0.15rem 0.15rem;
- border-top: 1px solid var(--border);
- background: var(--panel);
-}
-.trace-subagent-chip {
- appearance: none;
- -webkit-appearance: none;
- display: flex;
- flex-direction: column;
- align-items: flex-start;
- gap: 0.12rem;
- width: 100%;
- margin: 0;
- border: 1px solid var(--border);
- border-radius: var(--radius-sm);
- background: var(--panel);
- color: var(--text);
- font: inherit;
- font-size: 0.82rem;
- line-height: 1.35;
- padding: 0.4rem 0.65rem;
- text-align: left;
- cursor: pointer;
-}
 .trace-block .head.subagent-open {
  cursor: pointer;
 }
@@ -1694,26 +1663,6 @@ pre.code-view.pre-wrap {
 .subagent-open-hint {
  color: var(--accent);
  font-size: 0.8rem;
-}
-.trace-subagent-chip-title {
- display: flex;
- gap: 0.4rem;
- align-items: baseline;
- flex-wrap: wrap;
- color: var(--run);
- font-weight: 650;
-}
-.trace-subagent-chip-task {
- color: var(--muted);
- display: -webkit-box;
- -webkit-line-clamp: 2;
- -webkit-box-orient: vertical;
- overflow: hidden;
-}
-.trace-subagent-chip:hover,
-.trace-subagent-chip:focus-visible {
- border-color: var(--accent);
- outline: none;
 }
 .trace-block .type.marker {
  color: var(--warn);

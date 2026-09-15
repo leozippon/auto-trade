@@ -253,11 +253,11 @@ def test_subagent_trace_card_shows_model_thinking_and_context() -> None:
     # The dead `task` field is gone from both the projection and the UI.
     assert "if (block.task)" not in script
     assert "block.task ||" not in script
-    assert "runningSubagentBlocks" in script
-    assert "trace-subagent-dock" in script
     assert "trace-box-scroll" in script
-    assert "trace-subagent-chip" in script
-    assert "runningSubagentChip" in script
+    # A running child is its one card at the call position, never a second
+    # card docked at the bottom of the trace.
+    assert "trace-subagent-dock" not in script
+    assert "runningSubagentChip" not in script
     # Launch metadata is spelled out once, in subagentMetaLine.
     meta = script.split("function subagentMetaLine(", 1)[1].split("\nfunction ", 1)[0]
     assert "block.model" in meta
@@ -904,6 +904,25 @@ def test_project_compaction_and_notice_blocks() -> None:
     script = APP_JS.read_text(encoding="utf-8")
     assert 'kind === "compaction") renderCompactionBlock(' in script
     assert 'kind === "notice") renderNoticeBlock(' in script
+
+
+def test_project_subagent_finishing_after_a_compaction_keeps_its_one_card() -> None:
+    """The card is created where the child was launched and updated in place
+    by every later event of its task id, a compaction of the parent's
+    context in between notwithstanding: one card, its terminal status on it."""
+
+    blocks = project_trace_blocks(
+        [
+            {"event_type": "subagent_task_started", "task_id": "agent_a", "ts": "t1", "role": "explore"},
+            {"event_type": "subagent_llm", "task_id": "agent_a", "round": 1, "usage": {"prompt_tokens": 10, "completion_tokens": 2}},
+            {"event_type": "context_compaction", "ts": "t2", "trigger": "agent", "status": "ok"},
+            {"event_type": "subagent", "task_id": "agent_a", "ts": "t3", "status": "completed", "rounds": 3, "llm_calls": 3, "tool_calls": 5, "summary": "done"},
+        ]
+    )
+    assert [block["kind"] for block in blocks] == ["subagent", "compaction"]
+    card = blocks[0]
+    assert (card["task_id"], card["status"], card["phase"]) == ("agent_a", "completed", "ended")
+    assert (card["rounds"], card["tool_calls"], card["summary"]) == (3, 5, "done")
 
 
 def test_trace_stats_carries_the_last_budget_block(tmp_path: Path) -> None:
@@ -1554,14 +1573,12 @@ def test_subagent_trace_route_projects_redacts_and_guards(tmp_path: Path) -> Non
     assert "etc" not in bad.text
 
 
-def test_subagent_drawer_is_wired_to_the_card_and_the_dock_chip() -> None:
+def test_subagent_drawer_is_wired_to_the_card() -> None:
     script = APP_JS.read_text(encoding="utf-8")
     assert "async function openSubagentTrace(detail, runRef, block)" in script
     assert "/trace/subagents/${encodeURIComponent(taskId)}" in script
     card = script.split("function renderSubagentBlock(", 1)[1].split("\nfunction ", 1)[0]
     assert "openSubagentTrace(detail, runRef, block)" in card
-    chip = script.split("function runningSubagentChip(", 1)[1].split("\nfunction ", 1)[0]
-    assert "openSubagentTrace(detail, runRef, block)" in chip
     opener = script.split("async function openSubagentTrace(", 1)[1].split(
         "\nfunction ", 1
     )[0]
@@ -1639,16 +1656,11 @@ const tickAll = (node) => {
     return result.stdout.strip()
 
 
-def test_dock_card_renders_the_same_meta_line_as_the_inline_card(
+def test_the_running_card_renders_meta_progress_and_last_tool(
     tmp_path: Path,
 ) -> None:
-    """The pinned card must carry model · 推理 · 上下文 · ⏱ · 启动时间, one node type."""
-
-    chip = APP_JS.read_text(encoding="utf-8").split(
-        "function runningSubagentChip(", 1
-    )[1].split("\nfunction ", 1)[0]
-    assert "subagentHeadMetaNode(block, detail)" in chip
-    assert "openSubagentTrace(detail, runRef, block)" in chip
+    """The card's three lines while the child runs: model · 推理 · 上下文 · ⏱ ·
+    启动时间, the round/call/token progress, and the latest tool."""
 
     body = """
 const detail = { params: { reasoning_effort: "xhigh" } };
@@ -1661,9 +1673,11 @@ const block = {
   usage: { prompt_tokens: 16414, completion_tokens: 444, total_tokens: 16858 },
   last_tool: { name: "shell", status: "running" },
 };
-const chip = runningSubagentChip(block, detail, "run_ref_1");
-tickAll(chip);
-console.log(chip.children.map(nodeText).join("\\n"));
+const head = subagentHeadMetaNode(block, detail);
+tickAll(head);
+console.log(nodeText(head));
+console.log(subagentProgressParts(block).join(" · "));
+console.log(subagentLastToolLabel(block));
 """
     lines = _run_app_js_snippet(
         tmp_path,
@@ -1684,14 +1698,11 @@ console.log(chip.children.map(nodeText).join("\\n"));
             "function subagentProgressParts(",
             "function subagentUsageTitle(",
             "function subagentLastToolLabel(",
-            "function runningSubagentChip(",
         ),
     ).splitlines()
-    assert lines[0] == "🧩 developer · 进行中"
-    assert lines[1] == "因子实现"
     assert re.fullmatch(
         r"qwen-3\.8-27b-fp8 · 推理 medium · 独立上下文 ⏱ 3:08 · \d\d-\d\d \d\d:\d\d:\d\d",
-        lines[2],
-    ), lines[2]
-    assert lines[3] == "4 轮 · 模型 4 次 · 工具 6 次 · Σ 17 k tokens"
-    assert lines[4] == "最近工具 shell · 进行中"
+        lines[0],
+    ), lines[0]
+    assert lines[1] == "4 轮 · 模型 4 次 · 工具 6 次 · Σ 17 k tokens"
+    assert lines[2] == "最近工具 shell · 进行中"

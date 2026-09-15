@@ -4052,42 +4052,7 @@ function subagentLastToolLabel(block) {
   return `最近工具 ${name}${status ? ` · ${status}` : ""}`;
 }
 
-function runningSubagentChip(block, detail, runRef) {
-  const role = String(block.role || "子代理");
-  const status = String(block.status || "running");
-  const statusLabel = SUBAGENT_STATUS_LABELS.get(status) || "进行中";
-  const task = String(block.description || "");
-  const progress = subagentProgressParts(block);
-  const lastTool = subagentLastToolLabel(block);
-  const chip = el("button", {
-    type: "button",
-    class: "trace-subagent-chip",
-    title: "查看该子代理的详细 Trace",
-    onclick: () => openSubagentTrace(detail, runRef, block),
-  });
-  chip.append(
-    el(
-      "span",
-      { class: "trace-subagent-chip-title" },
-      `🧩 ${role} · ${statusLabel}`,
-    ),
-  );
-  if (task) chip.append(el("span", { class: "trace-subagent-chip-task" }, task));
-  // The same launch/elapsed line the inline card and the drawer head render.
-  chip.append(subagentHeadMetaNode(block, detail));
-  if (progress.length)
-    chip.append(
-      el(
-        "span",
-        { class: "hint", title: subagentUsageTitle(block) || null },
-        progress.join(" · "),
-      ),
-    );
-  if (lastTool) chip.append(el("span", { class: "hint" }, lastTool));
-  return chip;
-}
-
-/* The child's own Trace, opened from its card or from the running dock chip.
+/* The child's own Trace, opened from its card.
    It is an overlay: the parent trace, its scroll position and its open folds
    stay exactly as they were, and closing returns to them. */
 async function openSubagentTrace(detail, runRef, block) {
@@ -4184,10 +4149,10 @@ function subagentTraceHead(payload, detail) {
   return wrap;
 }
 
-function runningSubagentBlocks(blocks) {
-  return (blocks || []).filter(isRunningSubagent);
-}
-
+/* The trace, one node per block. A running sub-agent is its one card at the
+   call that launched it: the projection updates that block in place as the
+   child's events arrive, so a re-render draws it once, with its latest
+   counters and tool, wherever it stands. */
 function renderTraceBlocks(box, blocks, { truncated, eof, previous, detail, runRef } = {}) {
   const serialized = JSON.stringify({
     blocks: blocks || [],
@@ -4216,14 +4181,6 @@ function renderTraceBlocks(box, blocks, { truncated, eof, previous, detail, runR
   (blocks || []).forEach((block, index) => appendNode(scroll, block, index));
   if (eof) scroll.append(el("div", { class: "hint" }, "—— trace 结束 ——"));
   fragment.append(scroll);
-  const running = runningSubagentBlocks(blocks);
-  if (running.length) {
-    const dock = el("div", { class: "trace-subagent-dock" });
-    running.forEach((block) =>
-      dock.append(runningSubagentChip(block, detail, runRef)),
-    );
-    fragment.append(dock);
-  }
   box.replaceChildren(fragment);
   tickElapsedClocks(box);
   return serialized;
