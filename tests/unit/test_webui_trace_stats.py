@@ -278,10 +278,10 @@ def test_subagent_trace_card_shows_model_thinking_and_context() -> None:
     assert 'line.append(" ")' in head_meta
     assert "` · ${launched}`" in head_meta
     assert "fmtTsTime(block.ts)" in head_meta
-    detail_node = script.split("function subagentDetailNode(", 1)[1].split(
-        "\nfunction ", 1
-    )[0]
-    assert "subagentMetaLine" not in detail_node
+    # The fold under the card is the child's own trace, not a second copy of
+    # the head's launch metadata.
+    inline = script.split("function subagentInlineTrace(", 1)[1].split("\nfunction ", 1)[0]
+    assert "subagentMetaLine" not in inline and "subagentTraceHead(payload, detail)" in inline
     # Clipping is the backend's job; the console renders what it receives.
     assert ".slice(0, 400)" not in script
     assert ".slice(0, 240)" not in script
@@ -1580,7 +1580,7 @@ def test_the_running_strip_is_pinned_under_the_trace_and_targets_the_card() -> N
     script = APP_JS.read_text(encoding="utf-8")
     strip = script.split("function runningStrip(", 1)[1].split("\nfunction ", 1)[0]
     assert "filter(isRunningSubagent)" in strip
-    assert "subagentClockNode(block" in strip and "block.last_tool" in strip
+    assert "subagentClockNode(block" in strip and '"live-dot"' in strip
     assert "revealSubagentCard(box, block.task_id)" in strip
     reveal = script.split("function revealSubagentCard(", 1)[1].split("\nfunction ", 1)[0]
     assert "data-task-id" in reveal and "scrollIntoView" in reveal and '"flash"' in reveal
@@ -1590,21 +1590,23 @@ def test_the_running_strip_is_pinned_under_the_trace_and_targets_the_card() -> N
     assert "node.dataset.taskId = String(block.task_id);" in script
 
 
-def test_subagent_drawer_is_wired_to_the_card() -> None:
+def test_subagent_drawer_opens_the_child_trace_inline_and_follows_it() -> None:
     script = APP_JS.read_text(encoding="utf-8")
-    assert "async function openSubagentTrace(detail, runRef, block)" in script
     assert "/trace/subagents/${encodeURIComponent(taskId)}" in script
     card = script.split("function renderSubagentBlock(", 1)[1].split("\nfunction ", 1)[0]
-    assert "openSubagentTrace(detail, runRef, block)" in card
-    opener = script.split("async function openSubagentTrace(", 1)[1].split(
-        "\nfunction ", 1
-    )[0]
-    # One box for the drawer's lifetime: a live refresh must not collapse the
+    assert 'lazyDetails("详细 Trace", () => subagentInlineTrace(detail, runRef, block), key)' in card
+    # A running child's card carries the accent and the live dot; a finished
+    # one is the compact card.
+    assert 'node.classList.toggle("running", running)' in card
+    assert 'running ? el("span", { class: "live-dot"' in card
+    opener = script.split("function subagentInlineTrace(", 1)[1].split("\nfunction ", 1)[0]
+    # One box for the fold's lifetime: a live refresh must not collapse the
     # folds the reader opened, and it must stop when the child ends.
     assert "renderTraceBlocks(box" in opener
     assert "previous: previousBlocks" in opener
     assert "isRunningSubagent(payload.header || block)" in opener
     assert "clearInterval(poll)" in opener
+    assert "subagent-modal" not in script
     head = script.split("function subagentTraceHead(", 1)[1].split("\nfunction ", 1)[0]
     assert "subagentHeadMetaNode" in head
     # An inherited level is reported as the effective parent level.

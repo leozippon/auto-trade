@@ -4224,22 +4224,21 @@ function runningStrip(box, blocks) {
   return el(
     "div",
     { class: "trace-running" },
-    ...running.map((block) => {
-      const tool = block.last_tool && block.last_tool.name ? String(block.last_tool.name) : "";
-      return el(
+    ...running.map((block) =>
+      el(
         "button",
         {
           type: "button",
-          class: "trace-running-line",
+          class: "trace-running-chip",
           title: "定位到该子代理的卡片",
           onclick: () => revealSubagentCard(box, block.task_id),
         },
+        el("span", { class: "live-dot", "aria-hidden": "true" }),
         el("span", { class: "trace-running-role" }, `🧩 ${block.role || "子代理"}`),
         block.description ? el("span", { class: "trace-running-task" }, String(block.description)) : null,
         subagentClockNode(block, "trace-running-clock"),
-        tool ? el("span", { class: "trace-running-tool" }, tool) : null,
-      );
-    }),
+      ),
+    ),
   );
 }
 
@@ -4251,24 +4250,17 @@ function revealSubagentCard(box, taskId) {
   setTimeout(() => card.classList.remove("flash"), 1600);
 }
 
-/* The child's own Trace, opened from its card.
-   It is an overlay: the parent trace, its scroll position and its open folds
-   stay exactly as they were, and closing returns to them. */
-async function openSubagentTrace(detail, runRef, block) {
+/* The child's own Trace under its card, opened by the card's fold: its
+   rounds, tool calls, wrap-up and final report in the block model the parent
+   renders. One box for the fold's lifetime, so a refresh keeps the folds the
+   reader opened; while the child runs the records refresh every five seconds
+   and the clocks every second, and both stop when it ends or the fold goes. */
+function subagentInlineTrace(detail, runRef, block) {
   const taskId = String((block && block.task_id) || "");
-  if (!taskId || !detail || !detail.experiment_id) return;
   const query = runRef ? `?run_id=${encodeURIComponent(runRef)}` : "";
   const head = el("div", {}, el("div", { class: "loading" }, "加载子代理 Trace…"));
-  // One box for the lifetime of the drawer, so a refresh keeps the folds the
-  // reader opened instead of collapsing them every five seconds.
-  const box = el("div", { class: "trace-box subagent-trace-box" });
+  const box = el("div", { class: "trace-box subagent-inline" });
   const body = el("div", { class: "subagent-trace" }, head, box);
-  showModal(
-    `🧩 子代理 Trace · ${String(block.role || "子代理")}`,
-    body,
-    [el("button", { class: "btn", onclick: closeModal }, "关闭")],
-    "subagent-modal",
-  );
   let previousBlocks = "";
   const load = async () => {
     if (!body.isConnected) return false;
@@ -4278,9 +4270,7 @@ async function openSubagentTrace(detail, runRef, block) {
         `/api/experiments/${encodeURIComponent(detail.experiment_id)}/trace/subagents/${encodeURIComponent(taskId)}${query}`,
       );
     } catch (error) {
-      head.replaceChildren(
-        el("div", { class: "empty" }, `加载失败：${error.message}`),
-      );
+      head.replaceChildren(el("div", { class: "empty" }, `加载失败：${error.message}`));
       return false;
     }
     head.replaceChildren(subagentTraceHead(payload, detail));
@@ -4289,29 +4279,28 @@ async function openSubagentTrace(detail, runRef, block) {
       previous: previousBlocks,
     });
     if (!(payload.blocks || []).length)
-      box.replaceChildren(
-        el("div", { class: "empty" }, "该子代理尚未产生可展示的轮次。"),
-      );
+      box.replaceChildren(el("div", { class: "empty" }, "该子代理尚未产生可展示的轮次。"));
     return isRunningSubagent(payload.header || block);
   };
-  if (!(await load())) return;
-  // Follow a child that is still working: the clock ticks every second, the
-  // records refresh every five, and both stop when it ends or the drawer goes.
-  const clock = setInterval(() => {
-    if (body.isConnected) tickElapsedClocks(body);
-    else clearInterval(clock);
-  }, 1000);
-  const poll = setInterval(async () => {
-    if (!body.isConnected) {
-      clearInterval(poll);
-      return;
-    }
-    if (!(await load())) {
-      clearInterval(poll);
-      clearInterval(clock);
-    }
-  }, 5000);
-  liveTimers.push(clock, poll);
+  // The fold appends this body right after building it, so the first load
+  // waits one tick for the body to be in the document.
+  Promise.resolve()
+    .then(load)
+    .then((running) => {
+      if (!running) return;
+      const clock = setInterval(() => {
+        if (body.isConnected) tickElapsedClocks(body);
+        else clearInterval(clock);
+      }, 1000);
+      const poll = setInterval(async () => {
+        if (!body.isConnected || !(await load())) {
+          clearInterval(poll);
+          clearInterval(clock);
+        }
+      }, 5000);
+      liveTimers.push(clock, poll);
+    });
+  return body;
 }
 
 function subagentTraceHead(payload, detail) {
@@ -4519,9 +4508,15 @@ function subagentHeadMetaNode(block, detail) {
   return line.childNodes.length ? line : null;
 }
 
+/* A child's one card at the call that launched it. While it runs the card
+   carries the accent, a live dot and its progress (rounds, calls, tokens,
+   latest tool, elapsed), redrawn in place as the projection updates the
+   block; finished, it drops the accent and keeps the compact card. The fold
+   opens the child's own Trace inline. */
 function renderSubagentBlock(node, block, detail, runRef) {
   const status = String(block.status || block.phase || "started");
   const phase = String(block.phase || "");
+  const running = isRunningSubagent(block);
   const statusLabel =
     phase === "ended" || TERMINAL_SUBAGENT_STATUS.has(status)
       ? SUBAGENT_STATUS_LABELS.get(status) || status
@@ -4530,14 +4525,12 @@ function renderSubagentBlock(node, block, detail, runRef) {
   const key = `sub:${block.task_id || ""}`;
   const progress = subagentProgressParts(block);
   const lastTool = subagentLastToolLabel(block);
+  node.classList.toggle("running", running);
   node.append(
     el(
       "div",
-      {
-        class: "head subagent-open",
-        title: "查看该子代理的详细 Trace",
-        onclick: () => openSubagentTrace(detail, runRef, block),
-      },
+      { class: "head" },
+      running ? el("span", { class: "live-dot", "aria-hidden": "true" }) : null,
       el(
         "span",
         { class: `type subagent ${status}` },
@@ -4545,18 +4538,18 @@ function renderSubagentBlock(node, block, detail, runRef) {
       ),
       block.description ? el("span", {}, String(block.description)) : null,
       subagentHeadMetaNode(block, detail),
-      el("span", { class: "subagent-open-hint" }, "详细 Trace ↗"),
     ),
   );
   if (progress.length || lastTool)
     node.append(
       el(
         "div",
-        { class: "hint", title: subagentUsageTitle(block) || null },
+        { class: `hint${running ? " subagent-progress" : ""}`, title: subagentUsageTitle(block) || null },
         [...progress, lastTool].filter(Boolean).join(" · "),
       ),
     );
-  node.append(lazyDetails("详情", () => subagentDetailNode(block), key));
+  if (block.error) node.append(el("div", { class: "hint warn" }, `错误：${block.error}`));
+  node.append(lazyDetails("详细 Trace", () => subagentInlineTrace(detail, runRef, block), key));
 }
 
 /* A line the trace writer could not encode, or one that exceeded the
@@ -4714,17 +4707,6 @@ function toolRowsNode(tools) {
   }
   if (!list.childNodes.length) list.append(el("div", { class: "hint" }, "无工具"));
   return list;
-}
-
-function subagentDetailNode(block) {
-  const body = el("div", { class: "trace-subagent-detail" });
-  if (block.summary) body.append(el("div", {}, `摘要：${block.summary}`));
-  if (block.error)
-    body.append(el("div", { class: "hint warn" }, `错误：${block.error}`));
-  if (Array.isArray(block.tools) && block.tools.length)
-    body.append(toolRowsNode(block.tools));
-  if (!body.childNodes.length) body.append(el("div", { class: "hint" }, "无更多详情"));
-  return body;
 }
 
 /* ---------------- Step 产物树 ---------------- */
