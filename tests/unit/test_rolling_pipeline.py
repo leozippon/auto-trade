@@ -19,8 +19,9 @@ import pytest
 from autotrade.environment.artifacts import FilesystemArtifactStore
 from autotrade.environment.executor import StrategyRaised
 from autotrade.environment.replay.engine import BacktestError
+from autotrade.environment.replay.style import STYLE_ARTIFACT_NAME
 from autotrade.environment.strategy import CN_TZ
-from autotrade.pipelines.calendar import ResearchGeometry
+from autotrade.pipelines.calendar import FULL_SPAN, ResearchGeometry
 from autotrade.pipelines.config import (
     ArtifactRevision,
     EvaluationRequest,
@@ -35,6 +36,7 @@ from autotrade.pipelines.experiment import (
     RollingExperimentPipeline,
     _session_budgets,
     null_control_seed,
+    research_step_record,
 )
 from autotrade.pipelines.ledger import (
     INTERRUPTED_RUN_ERROR,
@@ -649,3 +651,15 @@ def test_the_null_control_seed_is_stable_per_key_and_role():
     assert null_control_seed("s1", "frozen") == null_control_seed("s1", "frozen")
     assert null_control_seed("s1", "frozen") != null_control_seed("s2", "frozen")
     assert null_control_seed("strategy_x", "forward") != null_control_seed("strategy_x", "frozen")
+
+
+def test_a_step_row_refuses_a_missing_style_sidecar(tmp_path: Path):
+    """A missing sidecar is a broken replay, not an unmeasurable span: dropping
+    the row would silently narrow the freeze gate's IR dispersion."""
+
+    result = EvaluationResult({}, str(tmp_path / "result.json"))
+    step = StepResult("s1_step_1", "rev_1", result, span=FULL_SPAN)
+    with pytest.raises(FileNotFoundError):
+        research_step_record(step)
+    (tmp_path / STYLE_ARTIFACT_NAME).write_text("{}", encoding="utf-8")
+    assert research_step_record(step)["neutralized"] is None
