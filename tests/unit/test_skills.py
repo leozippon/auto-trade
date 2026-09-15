@@ -222,7 +222,7 @@ def test_skill_content_uses_prior_boundary_but_allows_dates_and_security_knowled
         {
             "name": "market-conventions",
             "path": "SKILL.md",
-            "content": "# leak\n\n根据 Test 选择动量因子。\n",
+            "content": "# leak\n\n根据前推期选择动量因子。\n",
         },
     )
     assert not selection.ok
@@ -232,7 +232,7 @@ def test_skill_content_uses_prior_boundary_but_allows_dates_and_security_knowled
         {
             "name": "visibility-boundary",
             "path": "SKILL.md",
-            "content": "# Boundary\n\n不得使用 Test/Held-out。\n",
+            "content": "# Boundary\n\n不得使用前推期/Held-out。\n",
         },
     )
     assert pure_boundary.ok, pure_boundary.error
@@ -243,7 +243,7 @@ def test_skill_content_uses_prior_boundary_but_allows_dates_and_security_knowled
             "path": "SKILL.md",
             "content": (
                 "# Leak\n\n不要忽略 Held-out sharpe 1.2，"
-                "根据 Test 选择动量。\n"
+                "根据前推期选择动量。\n"
             ),
         },
     )

@@ -30,22 +30,22 @@ _YYYYMMDD = re.compile(r"^\d{8}$")
 
 HELP = """\
 Screen one cross-sectional, long-only signal on the visible decision view in
-under a minute, before spending a full Validation replay on it. Measured on a
+under a minute, before spending a validation replay on it. Measured on a
 two-year view (about 490 days x 5,000 names, four horizons): 10-45 s of wall
 time depending on host load, peak memory under 1 GB — roughly 100x cheaper
 than one replay.
 
 DATA SCOPE
-  Reads only the decision view (default /mnt/snapshot): the history visible
-  before this Fold's decision time, which ends before the Validation window.
+  Reads only the decision view (default /mnt/snapshot): the history visible at
+  the research session's decision time, the end of the research period. The
+  forward period and Held-out lie after it and are in no view a session sees.
   Any view whose manifest kind is not "decision_input" is refused (a replay
-  slot would contain the Validation window itself; the empty
-  /mnt/snapshots/train and /mnt/snapshots/valid slots have no manifest), so
-  Validation replays remain the selection instrument and Test/Held-out stay
-  untouched. Forward returns come from the same visible daily bars: adjusted
-  open of t+1 to adjusted open of t+1+h (a score dated t is executable at the
-  next open; the Broker fills at the 09:30 open or 15:00 close). The last h+1
-  days of the history therefore carry no return for horizon h.
+  slot holds only its own rows, and a directory without a manifest is not a
+  view), so validation replays remain the selection instrument. Forward
+  returns come from the same visible daily bars: adjusted open of t+1 to
+  adjusted open of t+1+h (a score dated t is executable at the next open; the
+  Broker fills at the 09:30 open or 15:00 close). The last h+1 days of the
+  history therefore carry no return for horizon h.
 
 SIGNAL CONTRACT
   --signal is a Python file defining compute_signal(frames) that returns either
@@ -221,8 +221,8 @@ def open_view(snapshot_dir: Path) -> dict[str, object]:
     if kind != "decision_input":
         raise ScreenError(
             f"refusing to evaluate on {snapshot_dir}: manifest kind is {kind!r}, not 'decision_input'. "
-            "The screen only runs on the decision view (history visible before the decision time); "
-            "a replay slot contains the Validation window, which stays reserved for formal Validation."
+            "The screen only runs on the decision view (history visible at the decision time); "
+            "a replay slot holds only its own rows and is evaluated by a validation replay."
         )
     return manifest
 
