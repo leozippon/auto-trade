@@ -765,8 +765,9 @@ details.fold > summary.panel-summary {
  background: var(--warn);
  box-shadow: 0 0 0 3px var(--warn-soft);
 }
+/* A hollow ring, visible on the selected row's tint as well as on the panel. */
 .dot.pending {
- background: var(--chip-bg);
+ box-shadow: inset 0 0 0 1.5px var(--input-border);
 }
 .session-item .label {
  flex: 1;
@@ -1744,17 +1745,20 @@ details.advanced .form-grid {
 .gpu-grid {
  display: flex;
  flex-direction: column;
- gap: 0.45rem;
- margin: 0.5rem 0;
+ gap: var(--space-1);
+ margin: var(--space-2) 0;
 }
+/* Fixed columns (name, bar, badge slot, figures), so every row's bar starts
+   and ends on the same edges whatever its name, badge or figures. */
 .gpu-row {
- display: flex;
+ display: grid;
+ grid-template-columns: 10rem minmax(0, 1fr) 4.5rem 18rem;
  align-items: center;
- gap: 0.7rem;
+ gap: var(--space-3);
  font-size: 0.85rem;
  padding: 0.26rem 0.4rem;
  border: 1px solid transparent;
- border-radius: 6px;
+ border-radius: var(--radius-sm);
 }
 /* rows the current count would allocate (free-memory ranking, top N) */
 .gpu-row.gpu-pick {
@@ -1769,19 +1773,18 @@ details.advanced .form-grid {
  color: var(--panel);
 }
 .gpu-row .gpu-name {
- flex: 0 0 11rem;
  overflow: hidden;
  text-overflow: ellipsis;
  white-space: nowrap;
 }
-.gpu-bar {
- flex: 1;
- width: auto;
+.gpu-row .gpu-pick-badge {
+ justify-self: center;
 }
 .gpu-row .gpu-meta {
- flex: none;
  color: var(--muted);
  font-variant-numeric: tabular-nums;
+ text-align: right;
+ white-space: nowrap;
 }
 
 /* ---- step tree ---- */
@@ -2406,12 +2409,16 @@ details.issue-evidence > summary:hover {
  .page-head h2 .exp-badges {
   flex: 1 0 100%;
  }
- /* The GPU name takes the row to itself so the bar keeps a usable width. */
+ /* The GPU name and its figures take rows of their own around the bar and
+    badge, so the bar keeps a usable width. */
  .gpu-row {
-  flex-wrap: wrap;
+  grid-template-columns: minmax(0, 1fr) 4.5rem;
+  gap: var(--space-1) var(--space-3);
  }
- .gpu-row .gpu-name {
-  flex: 1 1 100%;
+ .gpu-row .gpu-name,
+ .gpu-row .gpu-meta {
+  grid-column: 1 / -1;
+  text-align: left;
  }
  /* Same for a style-tilt label: an 11rem minimum next to a fixed value column
     leaves the bar almost nothing on a phone. */

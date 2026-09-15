@@ -541,8 +541,16 @@ function fmtDateTick(date, withYear) {
     : `${date.slice(4, 6)}-${date.slice(6, 8)}`;
 }
 
+/* A chart draws into a fixed viewBox that scales to its box, so a viewBox far
+   wider than a phone shrinks its text below legibility; on a narrow viewport
+   the chart is drawn about as wide as the screen instead. */
+function fitChartWidth(width) {
+  return Math.min(width, Math.max(360, window.innerWidth));
+}
+
 function equityChart(payload, opts = {}) {
-  const { width = 680, height = 240, mini = false, markers = [] } = opts;
+  const { height = 240, mini = false, markers = [] } = opts;
+  const width = fitChartWidth(opts.width || 680);
   let { ddH = 90 } = opts;
   const INK = themeInk();
   const colorOf = { strategy: INK.strategyColor, benchmark: INK.muted };
@@ -624,8 +632,10 @@ function equityChart(payload, opts = {}) {
       `<line x1="${padL}" y1="${yOf(0)}" x2="${width - padR}" y2="${yOf(0)}" stroke="${INK.baseline}" stroke-width="1"/>`,
     );
   }
-  // x ticks (≤7), year shown on the first tick and on year changes
-  const tickEvery = Math.max(1, Math.ceil(dates.length / (mini ? 4 : 7)));
+  // x ticks: at most 7 (4 when mini) and no more than fit at about 80 units a
+  // label; year shown on the first tick and on year changes
+  const tickSlots = Math.max(2, Math.min(mini ? 4 : 7, Math.floor(plotW / 80)));
+  const tickEvery = Math.max(1, Math.ceil(dates.length / tickSlots));
   let prevYear = null;
   // Date labels: below the lowest subplot when present (shared axis at the
   // figure bottom), otherwise a clear step below the main axis line.
@@ -635,8 +645,11 @@ function equityChart(payload, opts = {}) {
   const lastTick = dates.length - 1;
   dates.forEach((d, i) => {
     // Render modulo ticks plus the final date; drop a modulo tick that would
-    // crowd the end-anchored final label.
-    if (i !== lastTick && (i % tickEvery !== 0 || lastTick - i < tickEvery / 2))
+    // overlap the end-anchored final label.
+    if (
+      i !== lastTick &&
+      (i % tickEvery !== 0 || xOf(lastTick) - xOf(i) < 80)
+    )
       return;
     const withYear = prevYear !== d.slice(0, 4);
     prevYear = d.slice(0, 4);
@@ -842,8 +855,9 @@ function fmtPrice(value) {
    labels when the set is small, tooltips always. */
 function singleSeriesBarChart(
   rows,
-  { width = 640, height = 200, fmt = fmtPct } = {},
+  { width: requestedWidth = 640, height = 200, fmt = fmtPct } = {},
 ) {
+  const width = fitChartWidth(requestedWidth);
   const INK = themeInk();
   const color = INK.strategyColor; // categorical slot 1
   const values = rows
@@ -883,7 +897,13 @@ function singleSeriesBarChart(
   const groupW = plotW / rows.length;
   const barW = Math.max(4, Math.min(24, groupW - 6));
   const showTipLabels = rows.length <= 8;
-  const labelEvery = Math.max(1, Math.ceil(rows.length / 12));
+  // No more x labels than fit side by side (11px text, about 6.5px a glyph).
+  const labelChars = Math.max(...rows.map((row) => String(row.label).length));
+  const labelSlots = Math.max(1, Math.floor(plotW / (6.5 * labelChars + 12)));
+  const labelEvery = Math.max(
+    1,
+    Math.ceil(rows.length / Math.min(12, labelSlots)),
+  );
   rows.forEach((row, index) => {
     const cx = padL + groupW * index + groupW / 2;
     const value = row.value;
@@ -908,7 +928,8 @@ function singleSeriesBarChart(
   const svgHost = el("div", {});
   svgHost.innerHTML = `<svg viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg">${svg.join("")}</svg>`;
   wrap.append(svgHost);
-  wrap.__rerender = () => singleSeriesBarChart(rows, { width, height, fmt });
+  wrap.__rerender = () =>
+    singleSeriesBarChart(rows, { width: requestedWidth, height, fmt });
   return bindChartTips(wrap);
 }
 
@@ -1337,9 +1358,13 @@ function heroPanel(item, basis) {
   panel.append(
     el(
       "div",
-      { class: "control-bar" },
-      el("span", { class: "hero-crown" }, "🏆"),
-      el("h3", { class: "hero-title" }, experimentName(item.experiment_id)),
+      { class: "panel-head" },
+      el(
+        "h3",
+        { class: "hero-title" },
+        el("span", { "aria-hidden": "true" }, "🏆"),
+        experimentName(item.experiment_id),
+      ),
       stateBadge(item.state),
       verdictBadge(item.verdict),
       el(
@@ -1349,11 +1374,8 @@ function heroPanel(item, basis) {
       ),
     ),
   );
-  const tiles = forwardTiles(item);
   panel.append(
-    tiles
-      ? el("div", { class: "section-gap" }, tiles)
-      : el("div", { class: "meta-line section-gap" }, stageText(item)),
+    forwardTiles(item) || el("div", { class: "meta-line" }, stageText(item)),
   );
   const result = (item.forward || {}).result;
   if (result)
@@ -1804,25 +1826,24 @@ async function renderDetailPage(experimentId, selectedKey) {
     detail.state === "unreadable" && detail.error ? detail.error : null,
     status.error ? `错误：${status.error}` : null,
   ].filter(Boolean);
-  if (errors.length) head.append(el("div", { class: "sub" }, errors.join(" ｜ ")));
-  if (detail.params && Object.keys(detail.params).length) {
-    head.querySelector("h2").append(
+  if (detail.params && Object.keys(detail.params).length)
+    head.append(
       el(
         "button",
-        {
-          class: "btn small",
-          style: "margin-left:0.4rem",
-          onclick: () => openParamsModal(detail),
-        },
+        { class: "btn small", onclick: () => openParamsModal(detail) },
         "创建参数",
       ),
     );
-  }
+  if (errors.length) head.append(el("div", { class: "sub" }, errors.join(" ｜ ")));
   const container = el("div", {}, head);
   let barHost = null;
   if (detail.kind === "hitl") {
+    // The control row and the stage strip are one panel: where the arm is, in
+    // words and buttons above, stage by stage below.
     barHost = controlBar(detail);
-    container.append(barHost, stageStrip(detail));
+    container.append(
+      el("div", { class: "panel section-gap" }, barHost, stageStrip(detail)),
+    );
   }
   const verdict = verdictPanel(detail);
   if (verdict) container.append(verdict);
@@ -1908,7 +1929,7 @@ function stageStrip(detail) {
         )
       : stageChip("裁决", "待定", "pending"),
   );
-  return el("div", { class: "panel stage-strip section-gap" }, ...chips);
+  return el("div", { class: "stage-strip section-gap" }, ...chips);
 }
 
 function stageChip(name, note, state) {
@@ -2231,11 +2252,8 @@ function controlBar(detail) {
   const state = detail.state;
   const alive = detail.worker_alive;
   const send = (payload, note) => sendControlAction(id, payload, note);
-  const bar = el(
-    "div",
-    { class: "panel control-bar section-gap" },
-    runStatusLine(detail),
-  );
+  const actions = el("div", { class: "control-actions" });
+  const bar = el("div", { class: "control-bar" }, runStatusLine(detail));
   if (control.request === "pause")
     bar.append(el("span", { class: "badge state-paused" }, "已请求暂停"));
   if (control.request === "stop")
@@ -2244,10 +2262,9 @@ function controlBar(detail) {
     bar.append(
       el("span", { class: "badge state-waiting_user" }, "已请求会话边界重启"),
     );
-  bar.append(el("span", { class: "spacer" }));
   if (alive) {
     if (control.request === "pause") {
-      bar.append(
+      actions.append(
         el(
           "button",
           {
@@ -2258,7 +2275,7 @@ function controlBar(detail) {
         ),
       );
     } else {
-      bar.append(
+      actions.append(
         el(
           "button",
           {
@@ -2270,7 +2287,7 @@ function controlBar(detail) {
         ),
       );
     }
-    bar.append(
+    actions.append(
       el(
         "button",
         {
@@ -2280,7 +2297,7 @@ function controlBar(detail) {
         "停止",
       ),
     );
-    bar.append(
+    actions.append(
       el(
         "button",
         {
@@ -2324,7 +2341,7 @@ function controlBar(detail) {
         "强制终止",
       ),
     );
-    bar.append(
+    actions.append(
       el(
         "button",
         {
@@ -2390,7 +2407,7 @@ function controlBar(detail) {
       ),
     );
   } else if (RESUMABLE_STATES.includes(state)) {
-    bar.append(
+    actions.append(
       el(
         "button",
         {
@@ -2401,6 +2418,7 @@ function controlBar(detail) {
       ),
     );
   }
+  if (actions.children.length) bar.append(actions);
   return bar;
 }
 
@@ -2816,7 +2834,7 @@ function gpuAllocationRow(detail, session, send) {
   const experimentDefault = Number((detail.params || {}).gpu_count || 1);
   const wrap = el(
     "div",
-    { class: "panel section-gap" },
+    { class: "section-gap" },
     el("h4", { class: "subsection-title" }, "本会话 GPU 分配"),
     el("div", { class: "hint" }, "设备按空闲显存自动挑选；条越长剩余显存越多。"),
   );
@@ -2914,7 +2932,8 @@ function gpuAllocationRow(detail, session, send) {
               max: gpu.memory_total_mib,
               title: `显存剩余 ${freePct}%（${freeGib}G / ${totalGib}G）`,
             }),
-            picked ? el("span", { class: "gpu-pick-badge" }, "将分配") : null,
+            // An empty slot on unpicked rows keeps every bar the same length.
+            picked ? el("span", { class: "gpu-pick-badge" }, "将分配") : el("span"),
             el(
               "span",
               { class: "gpu-meta" },
@@ -4834,9 +4853,7 @@ function sameSelection(left, right) {
 async function renderMemoryPage() {
   memoryView = null;
   $main.innerHTML = '<div class="loading">加载运行记忆…</div>';
-  $topbarRight.replaceChildren(
-    el("span", { class: "mode-note" }, "跨实验知识"),
-  );
+  $topbarRight.replaceChildren();
   let payload;
   try {
     payload = await api("/api/memory");
@@ -5917,9 +5934,7 @@ async function fetchTradingBundle(env, date) {
 
 async function renderTradingPage(env) {
   $main.innerHTML = '<div class="loading">加载模拟交易…</div>';
-  $topbarRight.replaceChildren(
-    el("span", { class: "mode-note" }, "本地日级 Paper 账户"),
-  );
+  $topbarRight.replaceChildren();
   tradingView = { env, date: null };
   let bundle;
   try {
@@ -6284,9 +6299,7 @@ function paperOrdersPanel(payload) {
 
 function renderQmtPage() {
   tradingView = null;
-  $topbarRight.replaceChildren(
-    el("span", { class: "mode-note" }, "后端未连接"),
-  );
+  $topbarRight.replaceChildren();
   const unavailable = el(
     "span",
     { class: "badge state-stopped" },
@@ -6296,28 +6309,14 @@ function renderQmtPage() {
     "div",
     { id: "trading-page" },
     el("div", { class: "page-head" }, el("h2", {}, "实盘交易", unavailable)),
-    el(
-      "div",
-      { class: "panel" },
-      el(
-        "div",
-        { class: "control-bar" },
-        el("span", { class: "mode-note" }, "连接状态"),
-        el("strong", {}, "后端未连接"),
-      ),
-    ),
-    el(
-      "div",
-      { class: "section-gap" },
-      statTilesRow([
-        { label: "总资产", value: "—" },
-        { label: "可用资金", value: "—" },
-        { label: "持仓市值", value: "—" },
-        { label: "持仓数", value: "—" },
-        { label: "今日成交笔数", value: "—" },
-        { label: "今日成交额", value: "—" },
-      ]),
-    ),
+    statTilesRow([
+      { label: "总资产", value: "—" },
+      { label: "可用资金", value: "—" },
+      { label: "持仓市值", value: "—" },
+      { label: "持仓数", value: "—" },
+      { label: "今日成交笔数", value: "—" },
+      { label: "今日成交额", value: "—" },
+    ]),
     qmtChartsPanel(),
     qmtEmptyPanel("持仓"),
     qmtEmptyPanel("成交"),
