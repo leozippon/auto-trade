@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import json
 import math
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import pyarrow as pa
@@ -288,6 +288,10 @@ def history_payload(repo_root: Path, book: str, env: str = "paper") -> dict[str,
 
 # ---------------------------------------------------------- performance
 
+def _day_before(yyyymmdd: str) -> str:
+    return (date(int(yyyymmdd[:4]), int(yyyymmdd[4:6]), int(yyyymmdd[6:8])) - timedelta(days=1)).strftime("%Y%m%d")
+
+
 def _benchmark(root: Path) -> tuple[dict[str, float], str | None]:
     """CSI 300 daily returns from the release the book's latest run pinned:
     the replay slot of that run, read as the research style sidecar reads it."""
@@ -322,7 +326,15 @@ def performance_payload(repo_root: Path, book: str, env: str = "paper") -> dict[
     returns = daily_returns_from_curve(curve)
     daily, benchmark_error = _benchmark(root)
     benchmark_rows = [(day, daily[day]) for day, _value in returns if day in daily]
-    benchmark = curve_entry("benchmark", BENCHMARK_LABEL, benchmark_rows) if benchmark_rows else None
+    # The book's starting point — initial cash, no return, the calendar day
+    # before its first settled day — opens the curve, so one settled day is
+    # already a segment and the benchmark starts at zero beside it.
+    anchor = _day_before(str(curve[0]["trade_date"]))
+    benchmark = (
+        curve_entry("benchmark", BENCHMARK_LABEL, [(anchor, 0.0), *benchmark_rows])
+        if benchmark_rows
+        else None
+    )
     executions = [row for day in _dates(root, "executions_") for row in read_jsonl(root / f"executions_{day}.jsonl")[0]]
     stats = compute_return_stats(
         ReplayResult(equity_curve=tuple(curve), executions=tuple(executions), inference_dates=(), pending_orders=())
@@ -335,19 +347,15 @@ def performance_payload(repo_root: Path, book: str, env: str = "paper") -> dict[
         **base,
         "state": "ok",
         "error": None,
-        # A curve needs two points: one settled day is served as its statistics
-        # alone, so no surface has to decide whether one dot is a chart.
         "chart": {
-            "series": [curve_entry("strategy", "账簿", returns)],
+            "series": [curve_entry("strategy", "账簿", [(anchor, 0.0), *returns])],
             "benchmark": benchmark,
             "account": {
-                "dates": [row["trade_date"] for row in curve],
-                "equity": [row["equity"] for row in curve],
-                "cash": [row["cash"] for row in curve],
+                "dates": [anchor, *(row["trade_date"] for row in curve)],
+                "equity": [initial, *(row["equity"] for row in curve)],
+                "cash": [initial, *(row["cash"] for row in curve)],
             },
-        }
-        if len(curve) >= 2
-        else None,
+        },
         "benchmark_days": len(benchmark_rows),
         "benchmark_error": benchmark_error,
         "statistics": {

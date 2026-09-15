@@ -158,11 +158,14 @@ def test_performance_keys_return_equity_cash_and_csi300_by_the_same_settled_days
     )
     payload = trading.performance_payload(tmp_path, BOOK)
     chart, stats = payload["chart"], payload["statistics"]
-    assert chart["series"][0]["dates"] == chart["account"]["dates"] == chart["benchmark"]["dates"] == settled
-    assert chart["account"]["equity"] == [row["equity"] for row in journal]
-    assert chart["account"]["cash"] == [row["cash"] for row in journal]
+    # The curve opens at the book's starting point — initial cash, no return,
+    # the calendar day before its first settled day — and the benchmark with it.
+    assert chart["series"][0]["dates"] == chart["account"]["dates"] == chart["benchmark"]["dates"] == ["20260104", *settled]
+    assert chart["account"]["equity"] == [100_000.0, *(row["equity"] for row in journal)]
+    assert chart["account"]["cash"] == [100_000.0, *(row["cash"] for row in journal)]
+    assert chart["series"][0]["cum"][0] == 0.0 and chart["benchmark"]["cum"][0] == 0.0
     # Day-0 baseline: the first day's return is measured from the initial cash.
-    assert chart["series"][0]["cum"][0] == round(journal[0]["equity"] / 100_000.0 - 1.0, 6)
+    assert chart["series"][0]["cum"][1] == round(journal[0]["equity"] / 100_000.0 - 1.0, 6)
     assert stats["total_return"] == pytest.approx(journal[-1]["equity"] / 100_000.0 - 1.0)
     assert stats["benchmark_return"] == pytest.approx(1.01 * 0.995 * 1.002 - 1.0, abs=1e-6)
     assert stats["excess_return"] == pytest.approx(stats["total_return"] - stats["benchmark_return"])
@@ -175,30 +178,28 @@ def test_performance_keys_return_equity_cash_and_csi300_by_the_same_settled_days
     # excess is not computed over a different window.
     _csi300_slot(root, "20260102_20260108_20251231T235959+0800", {"20260105": 1.0, "20260106": -0.5})
     partial = trading.performance_payload(tmp_path, BOOK)
-    assert partial["benchmark_days"] == 2 and partial["chart"]["benchmark"]["dates"] == settled[:2]
+    assert partial["benchmark_days"] == 2 and partial["chart"]["benchmark"]["dates"] == ["20260104", *settled[:2]]
     assert partial["statistics"]["benchmark_return"] is None and partial["statistics"]["excess_return"] is None
 
 
-def test_one_settled_day_has_statistics_but_no_curve(tmp_path: Path):
-    """A curve needs two points. Served as a chart, one settled day drew a lone
-    dot under an empty drawdown band; the day's statistics still stand, so the
-    rule lives here and every surface reads the same absent chart."""
+def test_one_settled_day_is_already_a_curve_from_the_starting_point(tmp_path: Path):
+    """The book's starting point opens the curve, so the first settled day is
+    a segment, not a lone dot; a book with no settled day has no curve, and
+    every surface reads the same rule."""
     engine_book(tmp_path, "20260105", "20260106")
     payload = trading.performance_payload(tmp_path, BOOK)
-    assert payload["state"] == "ok" and payload["chart"] is None
-    assert payload["statistics"]["days"] == 1
-    assert payload["statistics"]["total_return"] is not None
-    assert trading.books_payload(tmp_path)["books"][0]["curve"] is None
-
-    engine_book(tmp_path, "20260107")
-    payload = trading.performance_payload(tmp_path, BOOK)
     chart = payload["chart"]
-    assert payload["statistics"]["days"] == 2
-    assert chart["series"][0]["dates"] == chart["account"]["dates"] == ["20260105", "20260106"]
-    assert len(chart["account"]["equity"]) == len(chart["account"]["cash"]) == 2
+    assert payload["state"] == "ok" and payload["statistics"]["days"] == 1
+    assert chart["series"][0]["dates"] == chart["account"]["dates"] == ["20260104", "20260105"]
+    assert chart["series"][0]["cum"][0] == 0.0 and chart["series"][0]["drawdown"][0] == 0.0
+    assert chart["account"]["equity"][0] == chart["account"]["cash"][0] == 100_000.0
     # The overview card draws the same curve, and only the return series of it.
     curve = trading.books_payload(tmp_path)["books"][0]["curve"]
     assert curve == {"series": chart["series"], "benchmark": chart["benchmark"]}
+
+    engine_book(tmp_path, "20260107")
+    chart = trading.performance_payload(tmp_path, BOOK)["chart"]
+    assert chart["series"][0]["dates"] == chart["account"]["dates"] == ["20260104", "20260105", "20260106"]
 
 
 def test_annualised_statistics_appear_once_the_book_has_enough_days(tmp_path: Path, monkeypatch):
@@ -251,7 +252,7 @@ def test_damaged_fill_and_equity_lines_are_counted_and_projected_to_null(tmp_pat
     assert (good["status"], good["price"], good["cost"]) == ("filled", 10.25, 5.0)
     assert (bad["symbol"], bad["quantity"], bad["price"], bad["cost"]) == (None, None, None, None)
     performance = trading.performance_payload(tmp_path, BOOK)
-    assert performance["chart"]["account"]["dates"] == ["20260105", "20260106"]
+    assert performance["chart"]["account"]["dates"] == ["20260104", "20260105", "20260106"]
     client = TestClient(create_app(tmp_path))
     for route in ("history", "performance"):
         assert client.get(f"/api/trading/paper/books/{BOOK}/{route}").status_code == 200, route
