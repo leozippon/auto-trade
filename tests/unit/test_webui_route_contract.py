@@ -266,6 +266,88 @@ def _js_function_body(name: str) -> str:
     raise AssertionError(f"unbalanced braces in {name}")
 
 
+def _dom_append_arguments(source: str) -> list[str]:
+    """Every top-level argument of every DOM append/prepend/replaceChildren call.
+
+    Scanned with balanced brackets and quotes, because an argument routinely
+    holds nested calls, template literals and commas of its own.
+    """
+
+    arguments: list[str] = []
+    for match in re.finditer(r"\.(?:append|prepend|replaceChildren)\(", source):
+        index = match.end()
+        depth = 0
+        quote = ""
+        current: list[str] = []
+        while index < len(source):
+            char = source[index]
+            if quote:
+                if char == "\\":
+                    current.append(source[index : index + 2])
+                    index += 2
+                    continue
+                if char == quote:
+                    quote = ""
+            elif char in "\"'`":
+                quote = char
+            elif char in "([{":
+                depth += 1
+            elif char in ")]}":
+                if depth == 0:
+                    arguments.append("".join(current))
+                    break
+                depth -= 1
+            elif char == "," and depth == 0:
+                arguments.append("".join(current))
+                current = []
+                index += 1
+                continue
+            current.append(char)
+            index += 1
+    return [argument.strip() for argument in arguments if argument.strip()]
+
+
+def test_no_page_appends_a_renderer_that_can_return_nothing() -> None:
+    """DOM append() stringifies null, el() drops it.
+
+    The homepage hero once printed the literal "null" under its title because
+    the tiles renderer — which answers "no out-of-sample figures" with null —
+    was passed straight to panel.append(). A renderer that can answer nothing
+    reaches the page through el(), a `||` fallback or an explicit guard.
+    """
+
+    source = APP_JS.read_text(encoding="utf-8")
+    nullable = (
+        "forwardTiles",
+        "evidenceTiles",
+        "cardEquityNode",
+        "verdictBadge",
+        "verdictPanel",
+        "frozenPanel",
+        "sliceTable",
+        "subWindowSection",
+        "elapsedClockNode",
+        "subagentClockNode",
+        "skippedChip",
+    )
+    # The list cannot quietly become a no-op: each name must still answer
+    # nothing itself, or hand the answer on to another renderer that does.
+    for name in nullable:
+        body = _js_function_body(name)
+        assert re.search(r"\bnull\b", body) or any(
+            other != name and f"{other}(" in body for other in nullable
+        ), name
+    offenders = [
+        argument
+        for argument in _dom_append_arguments(source)
+        if (match := re.match(r"(\w+)\(", argument))
+        and match.group(1) in nullable
+        and "||" not in argument
+        and "??" not in argument
+    ]
+    assert offenders == [], offenders
+
+
 def test_the_sub_window_columns_the_console_reads_are_the_ones_produced() -> None:
     """Same class of defect as the renamed route, one level down: the fold
     panel renders per-quarter rows the replay reducer writes, and a renamed or

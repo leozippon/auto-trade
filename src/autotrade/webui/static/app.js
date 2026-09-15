@@ -200,17 +200,23 @@ function refreshCharts() {
   new ResizeObserver(sync).observe(bar);
 })();
 
-/* Session keys (s1, s2, …, forward) travel in the hash as they are. */
-function sessionKeyToUrl(key) {
+/* Pipeline step keys (s1, s2, …, forward, frozen, heldout, verdict) travel in
+   the hash as they are. */
+function stepKeyToUrl(key) {
   return encodeURIComponent(String(key));
 }
 
-function sessionKeyFromUrl(segment) {
+function stepKeyFromUrl(segment) {
   return decodeURIComponent(segment);
 }
 
+/* Display names for the pipeline's own session keys. The keys themselves, the
+   ledgers, the trace files and every Agent-facing label stay as written; this
+   map is the console's vocabulary only, so `s1` never reaches a reader. */
 function sessionLabel(key) {
-  return key === "forward" ? "前推回放" : `研究 ${key}`;
+  const research = /^s(\d+)$/.exec(String(key));
+  if (research) return `研究会话 ${Number(research[1])}`;
+  return key === "forward" ? "前推回放" : String(key);
 }
 
 /* Ledger period ranges are serialized as "YYYYMMDD..YYYYMMDD"; render them
@@ -997,6 +1003,19 @@ function singleSeriesBarChart(
   return bindChartTips(wrap);
 }
 
+/* Tiles for the figures that exist. A figure the ledger does not carry has no
+   tile at all, so a card never draws a dash where no measurement was made. */
+function presentTiles(specs) {
+  return specs
+    .filter((spec) => spec.value !== null && spec.value !== undefined)
+    .map((spec) => ({
+      label: spec.label,
+      value: spec.fmt(spec.value),
+      cls: spec.signed ? signCls(spec.value) : "",
+      title: spec.title || null,
+    }));
+}
+
 /* Stat tiles: label + semibold value (proportional figures). */
 function statTilesRow(tiles) {
   return el(
@@ -1092,9 +1111,9 @@ function route(forceRefresh = false) {
       ? null
       : hash.match(/^#\/exp\/([^/]+)(?:\/(.*))?$/);
   const expId = expMatch ? decodeURIComponent(expMatch[1]) : null;
-  const key = expMatch && expMatch[2] ? sessionKeyFromUrl(expMatch[2]) : null;
-  // Session switch within an already-rendered experiment swaps only the right
-  // panel: no page rebuild, no scroll jump, live stream and timers untouched.
+  const key = expMatch && expMatch[2] ? stepKeyFromUrl(expMatch[2]) : null;
+  // A step switch within an already-rendered experiment swaps the two panes of
+  // the process grid only: no page rebuild, no scroll jump, no refetch.
   if (
     !force &&
     expMatch &&
@@ -1103,7 +1122,7 @@ function route(forceRefresh = false) {
     detailView.experimentId === expId &&
     document.body.contains(detailView.listHost)
   ) {
-    selectSession(key);
+    selectStep(key);
     return;
   }
   if (pollTimer) {
@@ -1144,20 +1163,145 @@ function route(forceRefresh = false) {
   }
 }
 
-function selectSession(key) {
-  // In-experiment switches bypass route(): stop the previous session's live
-  // timers (GPU refresh, analysis re-polls) or they accumulate per visit.
+function selectStep(key) {
+  // In-experiment switches bypass route(): stop the previous step's live timers
+  // (GPU refresh, elapsed clocks) or they accumulate per visit. The process
+  // list is rebuilt with them, so its own clocks keep running.
   for (const timer of liveTimers) clearInterval(timer);
   liveTimers = [];
   for (const source of liveSources) source.close();
   liveSources = [];
   detailView.selectedKey = key;
+  const list = processListPanel(detailView.detail, key);
+  detailView.listHost.replaceWith(list);
+  detailView.listHost = list;
   const fresh = sessionDetailPanel(detailView.detail, key);
   detailView.rightHost.replaceWith(fresh);
   detailView.rightHost = fresh;
-  detailView.listHost.querySelectorAll(".session-item").forEach((node) => {
-    node.classList.toggle("selected", node.dataset.key === key);
-  });
+}
+
+/* ---------------- the arm's pipeline, as one list of steps ----------------
+
+   Research sessions, the freeze, the one continuous forward/Held-out replay
+   and the verdict, in the order the pipeline runs them. The listing summary
+   and the experiment detail both carry the fields read here, so the experiment
+   card's miniature strip and the experiment page's process list are one list
+   at two densities, and the console answers "where are we" in one vocabulary:
+   `state` colors the dot, `status` says it in words. */
+const STEP_STATUS_LABELS = {
+  pending: "待运行",
+  running: "运行中",
+  paused: "已暂停",
+  skipped: "未运行",
+  ended: "已结束",
+  // The freeze has not been decided yet; the replay waits on that decision.
+  awaiting_nomination: "待定",
+  awaiting_freeze: "待冻结",
+  frozen: "已冻结",
+  not_frozen: "未冻结",
+  sealed: "封存中",
+  replayed: "已回放",
+  not_replayed: "不回放",
+  undecided: "待判定",
+};
+
+/* The freeze, the continuous replay and the verdict. `frozen_session` is the
+   listing's own fact, so neither page infers a freeze from stage and verdict. */
+function pipelineTailSteps(item) {
+  const status = item.status || {};
+  const researchOver = item.stage !== "research";
+  const frozen = item.frozen_session;
+  const verdict = item.verdict || {};
+  const freeze = frozen
+    ? { state: "done", status: STEP_STATUS_LABELS.frozen }
+    : researchOver
+      ? { state: "skipped", status: STEP_STATUS_LABELS.not_frozen }
+      : { state: "pending", status: STEP_STATUS_LABELS.awaiting_nomination };
+  const replay = item.forward
+    ? { state: "done", status: STEP_STATUS_LABELS.replayed }
+    : frozen
+      ? {
+          state:
+            item.worker_alive && status.session_key === "forward"
+              ? "running"
+              : "pending",
+          status: STEP_STATUS_LABELS.sealed,
+        }
+      : researchOver
+        ? { state: "skipped", status: STEP_STATUS_LABELS.not_replayed }
+        : { state: "pending", status: STEP_STATUS_LABELS.awaiting_freeze };
+  const decided = verdict.status
+    ? {
+        state: verdict.status === "graduated" ? "done" : "failed",
+        status: VERDICT_LABELS[verdict.status] || verdict.status,
+      }
+    : { state: "pending", status: STEP_STATUS_LABELS.undecided };
+  return [
+    { key: "frozen", label: "冻结", ...freeze },
+    { key: "forward", label: "前推回放", ...replay },
+    { key: "heldout", label: "Held-out", ...replay },
+    { key: "verdict", label: "裁决", ...decided },
+  ];
+}
+
+/* One step per planned research session, from the detail's session plan. */
+function researchSteps(detail) {
+  const status = detail.status || {};
+  const researchOver = detail.stage !== "research";
+  return (detail.sessions || [])
+    .filter((session) => session.kind === "research")
+    .map((session) => {
+      const step = { key: session.key, label: sessionLabel(session.key), session };
+      const record = session.record;
+      if (record)
+        return {
+          ...step,
+          state: "done",
+          status: OUTCOME_LABELS[record.outcome] || record.outcome,
+        };
+      if (detail.worker_alive && status.session_key === session.key)
+        return detail.state === "paused"
+          ? { ...step, state: "waiting", status: STEP_STATUS_LABELS.paused }
+          : { ...step, state: "running", status: STEP_STATUS_LABELS.running };
+      return researchOver
+        ? { ...step, state: "skipped", status: STEP_STATUS_LABELS.skipped }
+        : { ...step, state: "pending", status: STEP_STATUS_LABELS.pending };
+    });
+}
+
+/* The listing carries no session plan, only how many sessions ran of how many,
+   so the card folds every research session into the one step its strip draws. */
+function researchSummaryStep(item) {
+  const total = Number(item.research_total) || 0;
+  const recorded = Number(item.research_recorded) || 0;
+  const step = { key: "research", label: total ? `研究会话 ${recorded}/${total}` : "研究会话" };
+  if (item.stage !== "research")
+    return { ...step, state: "done", status: STEP_STATUS_LABELS.ended };
+  if (!item.worker_alive || !item.current_session)
+    return { ...step, state: "pending", status: STEP_STATUS_LABELS.pending };
+  return item.state === "paused"
+    ? { ...step, state: "waiting", status: STEP_STATUS_LABELS.paused }
+    : { ...step, state: "running", status: STEP_STATUS_LABELS.running };
+}
+
+/* The experiment card's miniature of the process list: the same dots in one
+   wrapping row, the step the arm is on in full weight, status in the tooltip. */
+function pipelineStrip(item) {
+  return el(
+    "div",
+    { class: "pipeline-strip" },
+    ...[researchSummaryStep(item), ...pipelineTailSteps(item)].map((step) =>
+      el(
+        "span",
+        {
+          class: `pipeline-step ${step.state}`,
+          title: `${step.label} · ${step.status}`,
+        },
+        el("span", { class: `dot ${step.state}` }),
+        step.label,
+      ),
+    ),
+  );
 }
 
 /* ---------------- home page ---------------- */
@@ -1196,24 +1340,23 @@ async function renderHomePage() {
   }, 5000);
 }
 
+/* The server names a best experiment only when one has out-of-sample
+   evidence, so the hero is absent while every arm is still researching. */
 function bestRow(payload) {
   const best = payload.best;
-  const item =
-    best &&
+  if (!best) return null;
+  return (
     (payload.experiments || []).find(
       (row) => row.experiment_id === best.experiment_id,
-    );
-  return item ? { item, basis: best.basis } : null;
+    ) || null
+  );
 }
 
 function homeView(payload) {
   const container = el("div", { id: "home" });
   const best = bestRow(payload);
   if (best)
-    container.append(
-      heroPanel(best.item, best.basis),
-      el("div", { class: "section-gap" }),
-    );
+    container.append(heroPanel(best), el("div", { class: "section-gap" }));
   const rows = payload.experiments || [];
   container.append(
     el("div", { class: "page-head" }, el("h2", {}, "实验列表")),
@@ -1232,7 +1375,7 @@ async function refreshHomePage() {
   const grid = home && home.querySelector(".grid");
   const hero = document.getElementById("hero-panel");
   const best = bestRow(payload);
-  const signature = best ? heroSignature(best.item, best.basis) : "";
+  const signature = best ? heroSignature(best) : "";
   if (!home || !grid || (hero ? hero.__signature : "") !== signature) {
     if (home) home.replaceWith(homeView(payload));
     return;
@@ -1240,13 +1383,10 @@ async function refreshHomePage() {
   grid.replaceWith(experimentGrid(payload.experiments || []));
 }
 
-function heroSignature(item, basis) {
+function heroSignature(item) {
   return [
     item.experiment_id,
-    basis,
     item.state,
-    item.stage,
-    item.research_recorded,
     (item.verdict || {}).status,
     (item.forward || {}).result,
   ].join("|");
@@ -1286,7 +1426,7 @@ function experimentBadges(...badges) {
 /* Where the arm is, from the ledger: research sessions recorded, the sealed
    forward replay, or the verdict. Never a research-period number. */
 function stageText(item) {
-  const research = `研究 ${item.research_recorded ?? 0}/${item.research_total ?? "?"}`;
+  const research = `研究会话 ${item.research_recorded ?? 0}/${item.research_total ?? "?"}`;
   if (item.stage === "verdict")
     return (item.verdict || {}).status === "no_deliverable"
       ? `${research} · 未冻结`
@@ -1301,29 +1441,66 @@ function stageText(item) {
    and absent for a replay the strategy's own error stopped. */
 function forwardTiles(item) {
   const slices = (item.forward || {}).slices || {};
-  const forward = slices.forward;
-  const heldout = slices.heldout;
-  if (!forward && !heldout) return null;
-  const f = forward || {};
-  const h = heldout || {};
-  return statTilesRow([
-    {
-      label: "前推超额 80% 下界",
-      value: fmtPct(f.lower_bound),
-      cls: signCls(f.lower_bound),
-    },
-    {
-      label: "前推中性化超额",
-      value: fmtPct(f.neutralized_excess),
-      cls: signCls(f.neutralized_excess),
-    },
+  const f = slices.forward || {};
+  const h = slices.heldout || {};
+  const tiles = presentTiles([
+    { label: "前推超额 80% 下界", value: f.lower_bound, fmt: fmtPct, signed: true },
+    { label: "前推中性化超额", value: f.neutralized_excess, fmt: fmtPct, signed: true },
     {
       label: "Held-out 中性化超额",
-      value: fmtPct(h.neutralized_excess),
-      cls: signCls(h.neutralized_excess),
+      value: h.neutralized_excess,
+      fmt: fmtPct,
+      signed: true,
     },
-    { label: "前推回撤", value: fmtPct(f.max_drawdown) },
+    { label: "前推回撤", value: f.max_drawdown, fmt: fmtPct },
   ]);
+  return tiles.length ? statTilesRow(tiles) : null;
+}
+
+/* Whatever evidence the arm already has: the judged forward slices once they
+   exist, else the best full-span candidate research has measured so far. */
+function evidenceTiles(item) {
+  const forward = forwardTiles(item);
+  if (forward) return forward;
+  const best = item.research_best;
+  if (!best) return null;
+  const tiles = presentTiles([
+    {
+      label: "最佳候选中性化超额",
+      value: best.neutralized_excess,
+      fmt: fmtPct,
+      signed: true,
+      title: `${sessionLabel(best.session_key)} 中 IR 最高的全区间验证，研究期年化`,
+    },
+    { label: "IR", value: best.information_ratio, fmt: fmtSharpe, signed: true },
+    {
+      label: "冻结门 去偏 Sharpe 概率",
+      value: best.deflated_sharpe_probability,
+      fmt: fmtProb,
+      title: `试验 ${best.trials ?? "—"} 个`,
+    },
+  ]);
+  return tiles.length ? statTilesRow(tiles) : null;
+}
+
+/* The continuous forward/Held-out curve, drawn only once the ledger names the
+   replay's result. The node is kept by id across the five-second grid rebuild,
+   so the curve is neither refetched nor redrawn while the page sits open. */
+function cardEquityNode(item) {
+  const result = (item.forward || {}).result;
+  if (!result) return null;
+  const id = `equity-card-${item.experiment_id}`;
+  const existing = document.getElementById(id);
+  if (existing && existing.dataset.result === result) return existing;
+  const host = resultEquityHost(item.experiment_id, result, {
+    width: 420,
+    height: 130,
+    mini: true,
+    markers: forwardMarkers(item.forward),
+  });
+  host.id = id;
+  host.dataset.result = result;
+  return host;
 }
 
 function forwardMarkers(forward) {
@@ -1352,24 +1529,26 @@ function experimentCard(item) {
       item.error ? ` ｜ ${item.error}` : "",
     ),
   );
-  if (item.state !== "unreadable")
-    card.append(el("div", { class: "meta-line" }, stageText(item)));
-  if (item.worker_alive && item.environment_stage) {
-    card.append(
-      el(
-        "div",
-        { class: "meta-line" },
-        formatStageLine({
-          environment_stage: item.environment_stage,
-          environment_stage_started_at: item.environment_stage_started_at,
-          environment_progress: item.environment_progress,
-          session_started_at: item.session_started_at,
-        }),
-      ),
-    );
+  if (item.state !== "unreadable") {
+    card.append(pipelineStrip(item));
+    const activity = item.worker_alive
+      ? formatStageLine(item.status || {})
+      : "";
+    if (activity)
+      card.append(
+        el(
+          "div",
+          { class: "meta-line" },
+          [item.current_session ? sessionLabel(item.current_session) : null, activity]
+            .filter(Boolean)
+            .join(" · "),
+        ),
+      );
+    const tiles = evidenceTiles(item);
+    if (tiles) card.append(tiles);
+    const curve = cardEquityNode(item);
+    if (curve) card.append(curve);
   }
-  const tiles = forwardTiles(item);
-  if (tiles) card.append(tiles);
   const actions = el("div", { class: "actions" });
   if (item.kind === "hitl" && RESUMABLE_STATES.includes(item.state)) {
     actions.append(
@@ -1414,15 +1593,13 @@ function experimentCard(item) {
   return card;
 }
 
-const BEST_BASIS_LABELS = {
-  forward_lower_bound: "按前推超额 80% 下界",
-  stage: "按运行阶段",
-};
-
-function heroPanel(item, basis) {
-  const panel = el("div", { class: "panel hero", id: "hero-panel" });
-  panel.__signature = heroSignature(item, basis);
-  panel.append(
+/* Only an arm the server ranked on out-of-sample evidence reaches here, so the
+   tiles exist; they still go through el(), which drops an absent child instead
+   of printing it. */
+function heroPanel(item) {
+  const panel = el(
+    "div",
+    { class: "panel hero", id: "hero-panel" },
     el(
       "div",
       { class: "panel-head" },
@@ -1434,16 +1611,11 @@ function heroPanel(item, basis) {
       ),
       stateBadge(item.state),
       verdictBadge(item.verdict),
-      el(
-        "span",
-        { class: "mode-note" },
-        `最佳实验 · ${BEST_BASIS_LABELS[basis] || basis}`,
-      ),
+      el("span", { class: "mode-note" }, "最佳实验 · 按前推超额 80% 下界"),
     ),
+    forwardTiles(item),
   );
-  panel.append(
-    forwardTiles(item) || el("div", { class: "meta-line" }, stageText(item)),
-  );
+  panel.__signature = heroSignature(item);
   const result = (item.forward || {}).result;
   if (result)
     panel.append(
@@ -1863,19 +2035,9 @@ async function renderDetailPage(experimentId, selectedKey) {
     return;
   }
   const status = detail.status || {};
-  const sessions = detail.sessions || [];
-  // Default to where the arm is: the running session, the next research
-  // session, the sealed replay, or the last session that ran.
-  if (!selectedKey) {
-    const recorded = sessions.filter((session) => isSessionDone(detail, session));
-    selectedKey =
-      status.session_key ||
-      (detail.stage === "research"
-        ? (sessions.find((session) => !isSessionDone(detail, session)) || {}).key
-        : detail.stage === "forward"
-          ? "forward"
-          : (recorded[recorded.length - 1] || sessions[0] || {}).key);
-  }
+  const rows = processRows(detail);
+  if (!selectedKey || !rows.some((row) => row.key === selectedKey))
+    selectedKey = defaultStepKey(detail, rows);
   const head = el(
     "div",
     { class: "page-head" },
@@ -1905,17 +2067,14 @@ async function renderDetailPage(experimentId, selectedKey) {
   const container = el("div", {}, head);
   let barHost = null;
   if (detail.kind === "hitl") {
-    // The control row and the stage strip are one panel: where the arm is, in
-    // words and buttons above, stage by stage below.
+    // One status line and the controls that act on it; where the arm is, step
+    // by step, is the process list's job alone.
     barHost = controlBar(detail);
-    container.append(
-      el("div", { class: "panel section-gap" }, barHost, stageStrip(detail)),
-    );
+    container.append(el("div", { class: "panel section-gap" }, barHost));
   }
-  const verdict = verdictPanel(detail);
-  if (verdict) container.append(verdict);
-  const frozen = frozenPanel(detail);
-  if (frozen) container.append(frozen);
+  // Creation-time context, one line high: it frames what follows without
+  // pushing the live content down.
+  container.append(mountedMemoryPanel(detail));
   const layout = el("div", { class: "detail section-gap" });
   detailView = {
     experimentId,
@@ -1925,12 +2084,12 @@ async function renderDetailPage(experimentId, selectedKey) {
     barHost,
     selectedKey,
   };
-  const listHost = sessionListPanel(detail, selectedKey);
+  const listHost = processListPanel(detail, selectedKey);
   const rightHost = sessionDetailPanel(detail, selectedKey);
   detailView.listHost = listHost;
   detailView.rightHost = rightHost;
   layout.append(listHost, rightHost);
-  container.append(layout, stepTreePanel(detail), mountedMemoryPanel(detail));
+  container.append(layout);
   $main.replaceChildren(container);
   pollTimer = setInterval(async () => {
     try {
@@ -1952,60 +2111,115 @@ async function renderDetailPage(experimentId, selectedKey) {
   }, 4000);
 }
 
-/* Research s1..sN → 冻结 → 前推 → Held-out → 裁决, read off the ledger
-   projection. One continuous replay covers 前推 and Held-out; both stay
-   封存中 until the verdict is recorded. */
-function stageStrip(detail) {
+/* The experiment page's process list: every planned research session, then the
+   freeze, the continuous replay and the verdict, each carrying what it left
+   behind. `filled` says whether the step has a right-pane detail yet. */
+function processRows(detail) {
   const status = detail.status || {};
-  const running = (key) => detail.worker_alive && status.session_key === key;
-  const researchOver = detail.stage !== "research";
-  const research = (detail.sessions || []).filter((s) => s.kind === "research");
-  const chips = research.map((session) => {
-    const record = session.record;
-    if (record)
-      return stageChip(
-        session.key,
-        OUTCOME_LABELS[record.outcome] || record.outcome,
-        "done",
-      );
-    if (running(session.key)) return stageChip(session.key, "运行中", "running");
-    return researchOver
-      ? stageChip(session.key, "未运行", "skipped")
-      : stageChip(session.key, "待运行", "pending");
+  const sessions = researchSteps(detail).map((step) => {
+    const record = (step.session || {}).record;
+    if (record) {
+      const best = record.best;
+      return {
+        ...step,
+        filled: true,
+        cls: record.froze ? "pos" : "",
+        note: best
+          ? `最佳候选 中性化 ${fmtPct(best.neutralized_excess)} · DSR ${fmtProb(best.deflated_sharpe_probability)}`
+          : `验证 ${record.validations.length} 次，无全区间`,
+        noteTitle: best
+          ? "本会话 IR 最高的全区间验证：研究期中性化超额与去偏 Sharpe 概率"
+          : null,
+      };
+    }
+    const live = step.state === "running" || step.state === "waiting";
+    return {
+      ...step,
+      filled: live,
+      note: live ? formatStageLine(status, { elapsed: false }) : null,
+    };
   });
-  if (!research.length) chips.push(stageChip("研究", "未启动", "pending"));
-  const verdict = detail.verdict || {};
-  const replay = detail.forward
-    ? ["已回放", "done"]
-    : detail.frozen
-      ? ["封存中", running("forward") ? "running" : "sealed"]
-      : researchOver
-        ? ["不回放", "skipped"]
-        : ["待冻结", "pending"];
-  chips.push(
-    detail.frozen
-      ? stageChip("冻结", detail.frozen.session_key, "done")
-      : stageChip("冻结", researchOver ? "未冻结" : "待定", researchOver ? "skipped" : "pending"),
-    stageChip("前推", replay[0], replay[1]),
-    stageChip("Held-out", replay[0], replay[1]),
-    verdict.status
-      ? stageChip(
-          "裁决",
-          VERDICT_LABELS[verdict.status] || verdict.status,
-          verdict.status === "graduated" ? "pass" : "fail",
-        )
-      : stageChip("裁决", "待定", "pending"),
-  );
-  return el("div", { class: "stage-strip section-gap" }, ...chips);
+  const frozen = detail.frozen;
+  const replay =
+    ((detail.sessions || []).find((entry) => entry.kind === "forward") || {})
+      .replay || {};
+  const note = {
+    frozen: frozen
+      ? `${sessionLabel(frozen.session_key)} · 中性化 ${fmtPct(frozen.neutralized_excess)} · DSR ${fmtProb(frozen.deflated_sharpe_probability)}`
+      : null,
+    forward: replay.start
+      ? `${fmtDate(replay.start)} ～ ${fmtDate(replay.forward_end)}`
+      : null,
+    heldout: replay.heldout_start
+      ? `${fmtDate(replay.heldout_start)} ～ ${fmtDate(replay.replay_end)}`
+      : null,
+    verdict: detail.forward
+      ? ((detail.verdict || {}).reasons || []).map(reasonLabel).join("；") ||
+        "全部条件通过"
+      : null,
+  };
+  const filled = {
+    frozen: Boolean(frozen),
+    forward: Boolean(detail.frozen || detail.forward),
+    heldout: Boolean(detail.forward),
+    verdict: Boolean((detail.verdict || {}).status),
+  };
+  return [
+    ...sessions,
+    ...pipelineTailSteps(detail).map((step) => ({
+      ...step,
+      note: note[step.key],
+      filled: filled[step.key],
+    })),
+  ];
 }
 
-function stageChip(name, note, state) {
-  return el(
-    "span",
-    { class: `stage-chip ${state}` },
-    el("span", { class: "stage-name" }, name),
-    el("span", { class: "stage-note" }, note),
-  );
+/* Where the reader lands: the session running right now, else the last step of
+   the pipeline that has something to show. */
+function defaultStepKey(detail, rows) {
+  const status = detail.status || {};
+  if (detail.worker_alive && status.session_key) {
+    const live = rows.find((row) => row.key === status.session_key);
+    if (live) return live.key;
+  }
+  const filled = rows.filter((row) => row.filled);
+  return (filled[filled.length - 1] || rows[0] || {}).key;
+}
+
+function processListPanel(detail, selectedKey) {
+  const list = el("div", { class: "session-list" });
+  for (const row of processRows(detail)) {
+    const status =
+      row.session && row.session.kind === "research"
+        ? sessionDurationNode(detail, row.session, row.status, row.cls || "")
+        : el("span", { class: row.cls || "" }, row.status);
+    status.classList.add("ret");
+    list.append(
+      el(
+        "div",
+        {
+          class: `session-item${row.key === selectedKey ? " selected" : ""}${
+            row.state === "skipped" ? " muted" : ""
+          }`,
+          "data-key": row.key,
+          onclick: () => {
+            location.hash = `#/exp/${encodeURIComponent(detail.experiment_id)}/${stepKeyToUrl(row.key)}`;
+          },
+        },
+        el("span", { class: `dot ${row.state}` }),
+        el("span", { class: "label" }, row.label),
+        status,
+        row.note
+          ? el(
+              "span",
+              { class: "session-note", title: row.noteTitle || null },
+              row.note,
+            )
+          : null,
+      ),
+    );
+  }
+  return el("div", { class: "panel" }, el("h4", {}, "研究流程"), list);
 }
 
 function fmtProb(value) {
@@ -2489,98 +2703,45 @@ function controlBar(detail) {
   return bar;
 }
 
-/* One line per planned session: a research session's outcome and its best
-   full-span candidate, or where the forward replay stands. */
-function sessionListLine(detail, session, pending) {
-  if (session.kind === "forward") {
-    const text = detail.forward
-      ? "已判定"
-      : detail.frozen
-        ? "封存中"
-        : detail.stage === "research"
-          ? pending
-          : "不回放";
-    return { text, cls: "", note: null };
-  }
-  const record = session.record;
-  if (!record) return { text: pending, cls: "", note: null };
-  const best = record.best;
-  return {
-    text: OUTCOME_LABELS[record.outcome] || record.outcome,
-    cls: record.froze ? "pos" : "",
-    note: best
-      ? `最佳候选 中性化 ${fmtPct(best.neutralized_excess)} · DSR ${fmtProb(best.deflated_sharpe_probability)}`
-      : `验证 ${record.validations.length} 次，无全区间`,
-    noteTitle: best
-      ? "本会话 IR 最高的全区间验证：研究期中性化超额与去偏 Sharpe 概率"
-      : null,
-  };
+/* A step with nothing recorded yet says only where the pipeline stands on it,
+   in the process list's own words. */
+function stepPlaceholder(detail, key, title) {
+  const step = pipelineTailSteps(detail).find((row) => row.key === key);
+  return el(
+    "div",
+    { class: "panel" },
+    el("h4", {}, title),
+    el("div", { class: "empty" }, (step || {}).status || "—"),
+  );
 }
 
-function sessionListPanel(detail, selectedKey) {
-  const panel = el("div", { class: "panel" }, el("h4", {}, "会话"));
-  const list = el("div", { class: "session-list" });
-  const status = detail.status || {};
-  for (const session of detail.sessions || []) {
-    const isDone = isSessionDone(detail, session);
-    const isCurrent = status.session_key === session.key && detail.worker_alive;
-    const dotClass = isDone ? "done" : isCurrent ? "running" : "pending";
-    const stateText =
-      isCurrent && detail.state === "paused"
-        ? "已暂停"
-        : isCurrent
-          ? formatStageLine(status, { elapsed: false }) || "运行中"
-          : "";
-    const line = sessionListLine(
-      detail,
-      session,
-      stateText || (isDone ? "" : "未运行"),
-    );
-    const ret =
-      session.kind === "research"
-        ? sessionDurationNode(detail, session, line.text, line.cls)
-        : el("span", { class: line.cls }, line.text);
-    ret.classList.add("ret");
-    list.append(
-      el(
-        "div",
-        {
-          class: `session-item${session.key === selectedKey ? " selected" : ""}`,
-          "data-key": session.key,
-          onclick: () => {
-            location.hash = `#/exp/${encodeURIComponent(detail.experiment_id)}/${sessionKeyToUrl(session.key)}`;
-          },
-        },
-        el("span", { class: `dot ${dotClass}` }),
-        el("span", { class: "label" }, sessionLabel(session.key)),
-        ret,
-        line.note
-          ? el(
-              "span",
-              { class: "session-note", title: line.noteTitle || null },
-              line.note,
-            )
-          : null,
-      ),
-    );
-  }
-  panel.append(list);
-  return panel;
-}
-
+/* The right pane of the process grid: whichever step the reader selected. The
+   research sessions and the replay keep their own panels; the freeze opens the
+   frozen artifact, Held-out and 裁决 the judgement that reads both slices. */
 function sessionDetailPanel(detail, selectedKey) {
+  // Flex column with a uniform card gap: whichever cards are present, the
+  // first one's top aligns with the process list in the left grid column.
+  const panel = el("div", { class: "session-detail" });
+  if (selectedKey === "frozen") {
+    panel.append(frozenPanel(detail) || stepPlaceholder(detail, "frozen", "冻结产物"));
+    return panel;
+  }
+  if (selectedKey === "heldout" || selectedKey === "verdict") {
+    panel.append(
+      verdictPanel(detail) ||
+        stepPlaceholder(detail, selectedKey, "前推与 Held-out"),
+    );
+    return panel;
+  }
   const session = (detail.sessions || []).find(
     (entry) => entry.key === selectedKey,
   );
-  // Flex column with a uniform card gap: whichever cards are present, the
-  // first one's top aligns with the session list in the left grid column.
-  const panel = el("div", { class: "session-detail" });
   if (!session) {
     panel.append(
       el(
         "div",
         { class: "panel" },
-        el("div", { class: "empty" }, "请选择左侧的会话"),
+        el("div", { class: "empty" }, "请选择左侧的流程步骤"),
       ),
     );
     return panel;
@@ -2595,11 +2756,8 @@ function sessionDetailPanel(detail, selectedKey) {
     panel.append(forwardSessionPanel(detail, session));
     return panel;
   }
-  if (done) {
-    panel.append(researchSessionPanel(detail, session));
-    return panel;
-  }
-  if (isCurrent) {
+  if (done) panel.append(researchSessionPanel(detail, session));
+  else if (isCurrent) {
     if (preparing) panel.append(environmentStagePanel(detail));
     else if (running) panel.append(liveTracePanel(detail, session));
     panel.append(injectMessagePanel(detail, session));
@@ -2618,13 +2776,16 @@ function sessionDetailPanel(detail, selectedKey) {
       ),
     );
   }
+  // The Step tree is what the research sessions built, so it reads under them
+  // rather than as a loose panel at the foot of the page.
+  panel.append(stepTreePanel(detail));
   return panel;
 }
 
 function forwardSessionPanel(detail, session) {
   const replay = session.replay || {};
   const note = detail.forward
-    ? "已判定，结果见上方。"
+    ? "已判定，结果见「裁决」。"
     : detail.frozen
       ? "封存中：回放结束并判定后才显示结果。"
       : detail.stage === "research"
@@ -3085,10 +3246,7 @@ async function refreshDetail() {
       detailView.barHost.replaceWith(bar);
       detailView.barHost = bar;
     }
-    const list = sessionListPanel(detail, detailView.selectedKey);
-    detailView.listHost.replaceWith(list);
-    detailView.listHost = list;
-    if (detailView.selectedKey) selectSession(detailView.selectedKey);
+    selectStep(detailView.selectedKey);
   } catch {
     route();
   }
@@ -3361,7 +3519,12 @@ function injectMessagePanel(detail, session) {
   );
   const interruptBtn = el(
     "button",
-    { type: "button", class: "btn" },
+    {
+      type: "button",
+      class: "btn",
+      title:
+        "只跳过尚未开始的工具，不会取消已在途的模型调用或已开始的工具。",
+    },
     "发送并打断",
   );
   const setBusy = (busy) => {
@@ -3396,24 +3559,20 @@ function injectMessagePanel(detail, session) {
   };
   sendBtn.addEventListener("click", () => submit(false));
   interruptBtn.addEventListener("click", () => submit(true));
-  const queueLine =
-    queue.pending_count > 0
-      ? `排队 ${queue.pending_count} 条${
-          queue.queued_ids.length ? `：${queue.queued_ids.join(", ")}` : ""
-        }`
-      : "当前没有排队消息";
   return el(
     "div",
     { class: "panel inject-message section-gap" },
     el("h4", {}, "发给当前 Agent"),
-    el(
-      "div",
-      { class: enabled ? "hint" : "hint warn" },
-      enabled
-        ? "「发送并打断」只跳过尚未开始的工具，不会取消已在途的模型调用或已开始的工具。"
-        : reason,
-    ),
-    el("div", { class: "inject-queue" }, queueLine),
+    enabled ? null : el("div", { class: "hint warn" }, reason),
+    queue.pending_count > 0
+      ? el(
+          "div",
+          { class: "inject-queue" },
+          `排队 ${queue.pending_count} 条${
+            queue.queued_ids.length ? `：${queue.queued_ids.join(", ")}` : ""
+          }`,
+        )
+      : null,
     textarea,
     el("div", { class: "inject-meta" }, count),
     el("div", { class: "control-bar" }, sendBtn, interruptBtn),
@@ -3424,7 +3583,7 @@ function liveTracePanel(detail, session) {
   const panel = el(
     "div",
     { class: "panel section-gap" },
-    el("h4", {}, `实时 Agent Trace — ${sessionLabel(session.key)}`),
+    el("h4", {}, `实时 Agent Trace · ${sessionLabel(session.key)}`),
   );
   const statusLine = el(
     "div",
@@ -4963,7 +5122,7 @@ async function renderMemoryPage() {
         el(
           "div",
           { class: "sub" },
-          `默认挂载模式 ${payload.default_mode || "—"} ｜ 改动作用于此后创建的实验，由研究者提交`,
+          `默认挂载模式 ${payload.default_mode || "—"} ｜ 改动作用于此后创建的实验`,
         ),
       ),
       memorySection(
@@ -4986,7 +5145,7 @@ async function renderMemoryPage() {
       memorySection(
         "memory-issues",
         "问题反馈",
-        "会话报告的缺陷；处置用 scripts/experiments/resolve_issue.py 记录",
+        "处置用 scripts/experiments/resolve_issue.py 记录",
         el("div", { class: "panel" }, issueFilterBar(), memoryView.issuesHost),
       ),
     ),
@@ -5098,7 +5257,10 @@ function issueReportRow(report) {
       { class: "issue-meta" },
       issueMetaItem("时间", fmtTs(report.recorded_at)),
       issueMetaItem("实验", report.experiment_id || "—"),
-      issueMetaItem("会话", report.session_label || "—"),
+      issueMetaItem(
+        "会话",
+        report.session_label ? sessionLabel(report.session_label) : "—",
+      ),
     ),
     resolved
       ? el(
@@ -5421,11 +5583,7 @@ function memoryPaneView() {
       meta: "",
       buttons: [],
       body: [
-        el(
-          "div",
-          { class: "empty" },
-          "从左侧选择精选库条目或毕业层候选，查看 SKILL.md 原文",
-        ),
+        el("div", { class: "empty compact" }, "从左侧选择一个条目"),
       ],
     };
   const label = selection.kind === "curated" ? selection.name : selection.skill;
@@ -5742,12 +5900,18 @@ function applyCuratedResult(result) {
    between sessions here — only what this experiment holds, and when it froze. */
 
 function mountedMemoryPanel(detail) {
-  const host = el("div", {});
+  const host = el(
+    "div",
+    { class: "panel section-gap mounted-memory" },
+    el("div", { class: "hint" }, "读取已挂载记忆…"),
+  );
   api(`/api/experiments/${encodeURIComponent(detail.experiment_id)}/memory`)
-    .then((payload) => host.append(mountedMemorySection(detail, payload)))
-    .catch(() => {
-      /* no readable memory state for this experiment */
-    });
+    .then((payload) => host.replaceChildren(mountedMemorySection(detail, payload)))
+    .catch((error) =>
+      host.replaceChildren(
+        el("div", { class: "hint warn" }, `读不到已挂载记忆：${error.message}`),
+      ),
+    );
   return host;
 }
 
@@ -5811,65 +5975,64 @@ function mountedEntriesList(experimentId, sources) {
   return host;
 }
 
+/* One line of creation-time context, opened only when the reader wants the
+   snapshot itself. An unreadable or missing snapshot says so on that line
+   rather than leaving the strip looking empty. */
 function mountedMemorySection(detail, payload) {
+  if (payload.error)
+    return el(
+      "div",
+      { class: "hint warn" },
+      `运行记忆快照不可读：${payload.error}`,
+    );
   const snapshot = payload.snapshot;
-  const sources = (snapshot && snapshot.sources) || [];
-  const entryCount = sources.reduce(
-    (total, source) => total + (source.entries || []).length,
-    0,
-  );
-  const panel = el(
-    "div",
-    { class: "panel section-gap" },
-    el("h4", {}, "已挂载记忆"),
-    el(
+  if (!snapshot)
+    return el(
       "div",
       { class: "hint" },
-      "本实验创建时快照；库的后续改动作用于之后创建的实验。",
-    ),
-  );
-  if (payload.error) {
-    panel.append(
-      el("div", { class: "hint warn" }, `快照不可读：${payload.error}`),
+      `已挂载记忆 · 挂载模式 ${payload.mode || "—"} · 还没有快照，下一次会话启动时补建`,
     );
-    return panel;
-  }
-  if (!snapshot) {
-    panel.append(
-      el(
-        "div",
-        { class: "empty" },
-        `还没有运行记忆快照（挂载模式 ${payload.mode || "—"}），下一次会话启动时补建`,
-      ),
-    );
-    return panel;
-  }
-  panel.append(
+  const sources = snapshot.sources || [];
+  const count = (origin) =>
+    sources
+      .filter((source) =>
+        origin === "curated"
+          ? source.origin === "curated"
+          : source.origin !== "curated",
+      )
+      .reduce((total, source) => total + (source.entries || []).length, 0);
+  const curated = count("curated");
+  const graduated = count("graduated");
+  const summary = [
+    "已挂载记忆",
+    `挂载模式 ${snapshot.mode || payload.mode || "—"}`,
+    `快照 ${fmtTs(snapshot.created_at)}`,
+    `精选 ${curated} 条 · 毕业 ${graduated} 条`,
+  ].join(" · ");
+  const fold = el(
+    "details",
+    { class: "fold" },
+    el("summary", { class: "panel-summary" }, summary),
     el(
       "table",
       { class: "kv section-gap" },
       kvRow("快照时间", fmtTs(snapshot.created_at)),
       kvRow("挂载模式", snapshot.mode || payload.mode || "—"),
-      kvRow("挂载条目", `${entryCount} 条`),
       kvRow("已运行会话", `${payload.sessions_seen ?? 0} 个`),
+      snapshot.created_from === "first_session"
+        ? kvRow("快照来源", "由首个会话补建")
+        : null,
     ),
+    el(
+      "div",
+      { class: "hint" },
+      "本实验创建时的快照；库的后续改动作用于之后创建的实验。",
+    ),
+    curated + graduated
+      ? mountedEntriesList(detail.experiment_id, sources)
+      : el("div", { class: "empty compact" }, "本实验没有挂载运行记忆"),
   );
-  if (snapshot.created_from === "first_session")
-    panel.append(
-      el("div", { class: "hint" }, "快照由首个会话补建。"),
-    );
-  if (!entryCount) {
-    panel.append(
-      el(
-        "div",
-        { class: "empty" },
-        `本实验没有挂载运行记忆（挂载模式 ${snapshot.mode || payload.mode || "—"}）`,
-      ),
-    );
-    return panel;
-  }
-  panel.append(mountedEntriesList(detail.experiment_id, sources));
-  return panel;
+  return fold;
 }
 
 /* ---------------- ADM-Cube trading console ----------------

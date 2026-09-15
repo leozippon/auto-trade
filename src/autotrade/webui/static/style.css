@@ -521,45 +521,35 @@ progress.progress.done::-moz-progress-bar {
  color: var(--loss);
 }
 
-/* Stage strip: research sessions, freeze, forward, Held-out and verdict as one
-   wrapping row of chips; state colors the top rule, the note says it in words. */
-.stage-strip {
+/* The experiment card's miniature of the process list: the same status dots in
+   one wrapping row, the step the arm is on carried in full weight. */
+.pipeline-strip {
  display: flex;
  flex-wrap: wrap;
- gap: var(--space-2);
+ align-items: center;
+ gap: var(--space-1) var(--space-3);
+ font-size: 0.82rem;
+ color: var(--muted);
 }
-.stage-chip {
- display: flex;
- flex-direction: column;
- min-width: 5.5rem;
- padding: 0.35rem 0.6rem;
- border: 1px solid var(--border);
- border-top: 3px solid var(--chip-bg);
- border-radius: var(--radius-sm);
- font-size: 0.875rem;
+.pipeline-step {
+ display: inline-flex;
+ align-items: center;
+ gap: 0.35rem;
+ white-space: nowrap;
 }
-.stage-chip .stage-name {
+.pipeline-step .dot {
+ width: 0.5rem;
+ height: 0.5rem;
+ border-radius: 50%;
+ flex: none;
+}
+.pipeline-step.running,
+.pipeline-step.waiting {
+ color: var(--text);
  font-weight: 650;
 }
-.stage-chip .stage-note {
- color: var(--muted);
- font-size: 0.8rem;
-}
-.stage-chip.done,
-.stage-chip.pass {
- border-top-color: var(--ok);
-}
-.stage-chip.running {
- border-top-color: var(--run);
-}
-.stage-chip.sealed {
- border-top-color: var(--warn);
-}
-.stage-chip.fail {
- border-top-color: var(--bad);
-}
-.stage-chip.skipped {
- opacity: 0.6;
+.pipeline-step.skipped {
+ opacity: 0.55;
 }
 .page-head {
  display: flex;
@@ -618,7 +608,8 @@ progress.progress.done::-moz-progress-bar {
 .session-detail > .section-gap {
  margin-top: 0;
 }
-.session-detail > span:empty {
+.session-detail > span:empty,
+.session-detail > div:empty {
  display: none;
 }
 /* Heading ladder: page h2, section h3, panel title, subsection title. A panel
@@ -800,12 +791,19 @@ details.fold.history-day.idle > summary {
  background: var(--warn);
  box-shadow: 0 0 0 3px var(--warn-soft);
 }
+.dot.failed {
+ background: var(--bad);
+}
 /* A hollow ring, visible on the selected row's tint as well as on the panel. */
-.dot.pending {
+.dot.pending,
+.dot.skipped {
  box-shadow: inset 0 0 0 1.5px var(--input-border);
 }
+/* The name holds its own width: a long status wraps to the next line of the
+   row instead of squeezing the label down to an ellipsis. */
 .session-item .label {
- flex: 1;
+ flex: 1 1 auto;
+ min-width: 6rem;
  overflow: hidden;
  text-overflow: ellipsis;
  white-space: nowrap;
@@ -815,12 +813,18 @@ details.fold.history-day.idle > summary {
  font-size: 0.875rem;
  white-space: nowrap;
 }
+/* A step the arm passed by without running reads quieter than a pending one. */
+.session-item.muted .label,
+.session-item.muted .ret {
+ opacity: 0.6;
+}
 /* Second line of a session row: what the session left behind, under the label
    it belongs to. It wraps onto its own line and starts at the label's left
    edge, so the dot/label/return line above it is untouched. */
 .session-item .session-note {
  order: 9;
  flex-basis: 100%;
+ min-width: 0;
  padding-left: 1.22rem;
  font-size: 0.78rem;
  font-weight: 400;
@@ -1990,15 +1994,6 @@ details.advanced .form-grid {
 .memory-filter {
  flex: 1;
 }
-/* Sticky catalogue: both sections scroll together inside the pane, so the
-   nested list must not open a second scroller of its own. */
-.memory-nav {
- position: sticky;
- /* clears the fixed topbar, so the catalogue never slides under it */
- top: calc(var(--topbar-h) + 0.8rem);
- max-height: calc(100vh - var(--topbar-h) - 1.6rem);
- overflow-y: auto;
-}
 /* One rhythm for both catalogue sections: the heading owns the gap down to its
    toolbar or hint, and every list starts one step below that. */
 .memory-nav h4 {
@@ -2014,9 +2009,12 @@ details.advanced .form-grid {
 .memory-nav .hint {
  margin-top: 0.5rem;
 }
+/* Each catalogue section caps itself and scrolls, the way every other list in
+   the console does. The pane itself sizes to content and scrolls with the
+   page, so the sections below it are never fenced off by a viewport-tall
+   sidebar competing for the wheel. */
 .memory-nav .session-list {
- max-height: none;
- overflow: visible;
+ max-height: 20rem;
  margin-top: 0.85rem;
 }
 .memory-nav .epoch-head {
@@ -2053,12 +2051,12 @@ details.memory-aside summary {
  margin-top: 0;
  white-space: nowrap;
 }
-/* The right pane reserves its space up front: a load or an empty selection
-   must not collapse it, and the toolbar row exists even with no buttons. */
+/* The right pane keeps its three rows in place — the toolbar exists even with
+   no buttons — but takes its height from what it holds: with nothing selected
+   it is a short empty state, not a tall blank box. */
 .memory-pane {
  display: flex;
  flex-direction: column;
- min-height: 34rem;
 }
 /* The entry title is the leaf of the page's heading tree: a real <h4> under
    its section's <h3>, quieter than that heading and louder than the catalogue's
@@ -2087,8 +2085,8 @@ h4.memory-pane-title {
  margin-top: 0.8rem;
  min-height: 0;
 }
-.memory-pane-body > .empty {
- margin: auto 0;
+.memory-pane-body > .empty.compact {
+ padding: 1.5rem 0;
 }
 .memory-skeleton {
  flex: 1;
@@ -2113,6 +2111,11 @@ pre.code-view.skill-body {
 textarea.directive.skill-editor {
  min-height: 20rem;
  font-size: 0.86rem;
+}
+/* 已挂载记忆 on the experiment page: creation-time context, one line high, so
+   it frames the live content below without pushing it down. */
+.panel.mounted-memory {
+ padding: var(--space-3) var(--space-5);
 }
 /* 已挂载记忆: the snapshot's entries, grouped by source. */
 .mounted-entries .file-list {
@@ -2309,13 +2312,10 @@ details.issue-evidence > summary:hover {
  .session-list {
   max-height: 38vh;
  }
- /* One column: the 运行记忆 catalogue becomes an ordinary block in the page
-    flow. Keeping its own short scroller here would trap a touch drag in a
-    small box sitting directly above the pane it navigates. */
- .memory-nav {
-  position: static;
+ /* One column: the 运行记忆 catalogue sits directly above the pane it
+    navigates, so its own scroller would trap a touch drag in a small box. */
+ .memory-nav .session-list {
   max-height: none;
-  overflow-y: visible;
  }
  table.kv td:first-child {
   width: auto;
@@ -2377,9 +2377,6 @@ details.issue-evidence > summary:hover {
  }
  .charts-row {
   grid-template-columns: 1fr;
- }
- .memory-pane {
-  min-height: 26rem;
  }
  textarea.directive.skill-editor {
   min-height: 14rem;

@@ -233,10 +233,7 @@ def test_the_best_experiment_is_ranked_on_the_forward_verdict_only(tmp_path: Pat
     ):
         build_arm(tmp_path, experiment_id, stage)
     rows = list_experiments(tmp_path)
-    assert best_experiment(rows) == {
-        "experiment_id": "graduated",
-        "basis": "forward_lower_bound",
-    }
+    assert best_experiment(rows) == {"experiment_id": "graduated"}
     # Without a graduate, another verdict-bearing arm ranks by the same number;
     # an arm whose verdict carries none has nothing to rank by.
     without_graduate = [row for row in rows if row["experiment_id"] != "graduated"]
@@ -256,13 +253,48 @@ def test_the_best_experiment_is_ranked_on_the_forward_verdict_only(tmp_path: Pat
     assert best_experiment(researching) is None
 
 
-def test_running_arms_rank_by_stage_when_no_verdict_exists(tmp_path: Path) -> None:
+def test_a_running_arm_is_never_the_best_experiment(tmp_path: Path) -> None:
+    """Ranking running arms by how far they had got crowned one of a field that
+    had produced no out-of-sample evidence at all. With nothing judged the
+    homepage names no best experiment."""
+
     build_arm(tmp_path, "early", "research", alive=True)
     build_arm(tmp_path, "sealed", "sealed", alive=True)
     rows = list_experiments(tmp_path)
-    assert best_experiment(rows) == {"experiment_id": "sealed", "basis": "stage"}
+    assert best_experiment(rows) is None
     listed = TestClient(create_app(tmp_path, tmp_path)).get("/api/experiments").json()
-    assert listed["best"] == {"experiment_id": "sealed", "basis": "stage"}
+    assert listed["best"] is None
+    # …and the homepage draws no hero for a null answer, rather than an empty
+    # crowned panel above the listing.
+    script = (
+        Path(__file__).resolve().parents[2] / "src/autotrade/webui/static/app.js"
+    ).read_text(encoding="utf-8")
+    assert "if (!best) return null;" in script.split("function bestRow(", 1)[1]
+    home = script.split("function homeView(", 1)[1].split("\nfunction ", 1)[0]
+    assert "if (best)" in home and "heroPanel(best)" in home
+
+
+def test_the_listing_carries_the_freeze_and_the_best_candidate_so_far(
+    tmp_path: Path,
+) -> None:
+    """The experiment card draws its freeze step and its research evidence from
+    the listing alone, and must read the same numbers the experiment page does."""
+
+    build_arm(tmp_path, "researching", "research")
+    build_arm(tmp_path, "frozen", "sealed")
+    build_arm(tmp_path, "fresh", "created")
+    rows = {row["experiment_id"]: row for row in list_experiments(tmp_path)}
+    assert rows["researching"]["frozen_session"] is None
+    assert rows["frozen"]["frozen_session"] == "s2"
+    # A never-started arm has no record to read a candidate off.
+    assert rows["fresh"]["research_best"] is None
+    best = rows["researching"]["research_best"]
+    assert best["session_key"] == "s1"
+    session_best = experiment_detail(tmp_path, "researching")["sessions"][0]["record"]["best"]
+    for field in ("neutralized_excess", "information_ratio", "deflated_sharpe_probability"):
+        assert best[field] == session_best[field], field
+    # The most recent session that measured one, not the first.
+    assert rows["frozen"]["research_best"]["session_key"] == "s2"
 
 
 @pytest.mark.parametrize(

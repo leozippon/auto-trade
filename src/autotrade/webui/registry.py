@@ -299,6 +299,8 @@ def summarize_experiment(directory: Path) -> dict[str, object]:
                 "environment_progress": status.get("environment_progress"),
                 "skills": {"count": skills.count, "files": skills.files, "bytes": skills.bytes},
                 "stage": arm_stage(records),
+                "frozen_session": _frozen_session(records),
+                "research_best": _research_best(records),
                 "research_recorded": len(research_records(records)),
                 "research_total": sum(
                     1 for session in identity.sessions if session["kind"] == "research"
@@ -336,28 +338,26 @@ def best_experiment(rows: Sequence[Mapping[str, object]]) -> dict[str, object] |
     """The homepage's best experiment, on out-of-sample evidence only.
 
     Graduated arms first, then the other arms with a verdict, both by the
-    forward slice's bootstrap lower bound (an arm whose verdict carries none —
-    no freeze, or a strategy error — has nothing to rank by). Without either,
-    a running arm by how far it has got; research-period numbers never rank.
-    Ties keep the listing order.
+    forward slice's bootstrap lower bound. An arm whose verdict carries none —
+    no freeze, or a strategy error — has nothing to rank by, and an arm still
+    researching has no out-of-sample evidence at all, so with nothing ranked
+    the homepage names no best experiment rather than crowning a running arm on
+    how far it has got. Research-period numbers never rank. Ties keep the
+    listing order.
     """
 
-    ranked: list[tuple[tuple[float, ...], int, Mapping[str, object], str]] = []
+    ranked: list[tuple[tuple[float, float], int, Mapping[str, object]]] = []
     for position, row in enumerate(rows):
         verdict = _mapping(row.get("verdict"))
         forward = _mapping(_mapping(_mapping(row.get("forward")).get("slices")).get("forward"))
         bound = _number(forward.get("lower_bound"))
         if verdict and bound is not None:
             tier = 0.0 if verdict.get("status") == "graduated" else 1.0
-            ranked.append(((tier, -bound), position, row, "forward_lower_bound"))
-        elif not verdict and row.get("worker_alive"):
-            progress = float(STAGES.index(str(row.get("stage") or "research")))
-            recorded = float(_number(row.get("research_recorded")) or 0)
-            ranked.append(((2.0, -progress, -recorded), position, row, "stage"))
+            ranked.append(((tier, -bound), position, row))
     if not ranked:
         return None
-    _rank, _position, row, basis = min(ranked, key=lambda item: (item[0], item[1]))
-    return {"experiment_id": row["experiment_id"], "basis": basis}
+    _rank, _position, row = min(ranked, key=lambda item: (item[0], item[1]))
+    return {"experiment_id": row["experiment_id"]}
 
 
 def resolve_experiment_dir(root: Path, experiment_id: str) -> Path:
@@ -422,6 +422,36 @@ def _best_candidate(
         "deflated_sharpe_probability": _number(dsr.get("deflated_sharpe_probability")),
         "trials": dsr.get("trials"),
     }
+
+
+def _frozen_session(records: Sequence[Mapping[str, object]]) -> str | None:
+    """The research session that froze the arm's artifact, or ``None``.
+
+    The listing's one fact about the freeze: the experiment card draws the
+    freeze step from it instead of inferring a freeze from the stage and the
+    verdict.
+    """
+
+    row = frozen_record(records)
+    return str(row["session_key"]) if row is not None else None
+
+
+def _research_best(records: Sequence[Mapping[str, object]]) -> dict[str, object] | None:
+    """The arm's best full-span candidate so far, for the listing.
+
+    The most recent research session that measured one, through the same
+    :func:`_best_candidate` the experiment page reads, so both surfaces name one
+    number. ``None`` while no recorded session ran a measurable full-span
+    Validation — the card then shows no research evidence rather than a dash.
+    """
+
+    research = research_records(records)
+    for position in reversed(range(len(research))):
+        steps = [row for row in research[position].get("steps") or () if isinstance(row, Mapping)]
+        best = _best_candidate(research[:position], steps)
+        if best is not None:
+            return {"session_key": research[position].get("session_key"), **best}
+    return None
 
 
 def _research_session_view(
