@@ -335,7 +335,7 @@ def test_no_page_appends_a_renderer_that_can_return_nothing() -> None:
         "evidenceTiles",
         "cardEquityNode",
         "verdictBadge",
-        "verdictPanel",
+        "armEquityHost",
         "frozenPanel",
         "sliceTable",
         "subWindowSection",
@@ -473,11 +473,14 @@ def test_the_research_arm_fields_the_console_reads_are_served(tmp_path: Path) ->
         ("researchSessionPanel", reads("researchSessionPanel", "best"), best),
         ("researchSessionPanel", reads("researchSessionPanel", "row"), validation),
         ("freezeGateChecklist", reads("freezeGateChecklist", "gate"), gate),
-        ("verdictPanel", reads("verdictPanel", "forward"), forward),
-        ("verdictChecklist", reads("verdictChecklist", "forward"), forward),
-        ("verdictChecklist", reads("verdictChecklist", "f") | reads("verdictChecklist", "h"), slice_fields),
-        ("verdictChecklist", reads("verdictChecklist", "t"), set(detail["forward"]["verdict"]["thresholds"])),
+        ("replayPanel", reads("replayPanel", "forward"), forward),
+        ("graduationChecklist", reads("graduationChecklist", "forward"), forward),
+        ("graduationChecklist", reads("graduationChecklist", "f") | reads("graduationChecklist", "h"), slice_fields),
+        ("graduationChecklist", reads("graduationChecklist", "t"), set(detail["forward"]["verdict"]["thresholds"])),
+        # The same threshold keys are served before the replay, from the plan.
+        ("graduationChecklist", reads("graduationChecklist", "t"), set(replay["thresholds"])),
         ("replaySpanBar", reads("replaySpanBar", "replay"), set(replay["replay"])),
+        ("armEquityHost", reads("armEquityHost", "item"), set(detail)),
         ("stepper", {step for step in re.findall(r'^  (\w+): "', _js_literal("const STEP_LABELS = {", "\n};"), re.MULTILINE)}, {"research", "frozen", "forward", "heldout", "verdict"}),
     ):
         assert read, name
@@ -485,7 +488,7 @@ def test_the_research_arm_fields_the_console_reads_are_served(tmp_path: Path) ->
     # The slice table's rows are statistics the verdict slices carry.
     assert set(re.findall(r'^  \["([a-z_]+)",', _js_literal("const SLICE_ROWS = [", "\n];"), re.MULTILINE)) <= slice_fields
     # Every criterion the pipeline can fail is a line of the checklist.
-    checked = set(re.findall(r'"((?:forward|heldout)_[a-z_]+)"', _js_function_body("verdictChecklist")))
+    checked = set(re.findall(r'"((?:forward|heldout)_[a-z_]+)"', _js_function_body("graduationChecklist")))
     checked |= {f"{where}_strategy_error" for where in ("forward", "heldout")}
     assert {token for token in _reason_tokens() if not token.startswith("freeze_")} <= checked
     # The budget bars read the keys both the totals and the usage block carry.

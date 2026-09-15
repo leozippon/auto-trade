@@ -49,6 +49,13 @@ from autotrade.pipelines.ledger import (
 )
 from autotrade.pipelines.pit_views_seed import FORWARD_PHASE, RESEARCH_PHASE
 from autotrade.pipelines.skills import latest_skills_snapshot
+from autotrade.pipelines.verdict import (
+    FORWARD_CONFIDENCE,
+    HELDOUT_TOLERANCE_Z,
+    MIN_MEAN_GROSS,
+    MIN_ROUND_TRIPS_PER_MONTH,
+    RECENCY_MONTHS,
+)
 from autotrade.pipelines.worker import _ALLOWED_PARAMS
 
 from .public_identity import PublicIdentity
@@ -291,13 +298,15 @@ def summarize_experiment(directory: Path) -> dict[str, object]:
         )
         if raw_status is not None:
             summary["status"] = status
+        best = _research_best(records)
         summary.update(
             {
                 "created_at": _created_at(directory, params),
                 "skills": {"count": skills.count, "files": skills.files, "bytes": skills.bytes},
                 "stage": arm_stage(records),
                 "frozen_session": _frozen_session(records),
-                "research_best": _research_best(records),
+                "research_best": best,
+                "research_result": _research_result(records, best),
                 "research_outcome": next(
                     (row.get("outcome") for row in research_records(records)), None
                 ),
@@ -466,6 +475,7 @@ def _best_candidate(
     dsr = _mapping(gate.get("deflated_sharpe"))
     return {
         **_step_view(best),
+        "result": _result_name(best.get("validation_result_ref")),
         "deflated_sharpe_probability": _number(dsr.get("deflated_sharpe_probability")),
         "trials": dsr.get("trials"),
     }
@@ -499,6 +509,49 @@ def _research_best(records: Sequence[Mapping[str, object]]) -> dict[str, object]
         if best is not None:
             return {"session_key": research[position].get("session_key"), **best}
     return None
+
+
+def _research_result(
+    records: Sequence[Mapping[str, object]], best: Mapping[str, object] | None
+) -> str | None:
+    """The research-period result the console draws: the frozen artifact's own
+    validation once the arm froze, else the best full-span candidate's."""
+
+    row = frozen_record(records)
+    if row is not None:
+        return _result_name(_mapping(row.get("frozen")).get("research_result_ref"))
+    return str(best["result"]) if best and best.get("result") else None
+
+
+def _months_between(start: object, end: object) -> int | None:
+    """Calendar months from ``start``'s month through ``end``'s, YYYYMMDD."""
+
+    try:
+        first, last = str(start), str(end)
+        return (int(last[:4]) * 12 + int(last[4:6])) - (int(first[:4]) * 12 + int(first[4:6])) + 1
+    except ValueError:
+        return None
+
+
+def _verdict_thresholds(
+    params: Mapping[str, object], replay: Mapping[str, object]
+) -> dict[str, object]:
+    """The graduation thresholds the replay will be held to, from the arm's
+    effective parameters and the verdict's constants, so the console lists
+    the criteria before the replay has run. The forward record's own block
+    replaces them once it exists."""
+
+    effective = {**WEB_CREATE_DEFAULTS, **params}
+    months = _months_between(replay.get("start"), replay.get("forward_end"))
+    return {
+        "forward_confidence": FORWARD_CONFIDENCE,
+        "recency_months": RECENCY_MONTHS,
+        "max_drawdown": _number(effective.get("max_drawdown")),
+        "cost_stress_multiplier": _number(effective.get("cost_stress_multiplier")),
+        "min_round_trips": MIN_ROUND_TRIPS_PER_MONTH * months if months else None,
+        "min_mean_gross": MIN_MEAN_GROSS,
+        "heldout_tolerance_z": HELDOUT_TOLERANCE_Z,
+    }
 
 
 def _research_session_view(
@@ -593,6 +646,7 @@ def experiment_detail(root: Path, experiment_id: str) -> dict[str, object]:
     records = read_ledger_records(directory)
     research = research_records(records)
     hitl = directory / HITL_DIR_NAME
+    params = read_json(hitl / PARAMS_NAME)
     sessions: list[dict[str, object]] = []
     for planned in identity.sessions:
         key = str(planned["session_key"])
@@ -606,13 +660,15 @@ def experiment_detail(root: Path, experiment_id: str) -> dict[str, object]:
                 directory, identity, research[:position], research[position]
             )
         if planned["kind"] == "forward":
-            entry["replay"] = dict(_mapping(planned.get("replay")))
+            replay = dict(_mapping(planned.get("replay")))
+            entry["replay"] = replay
+            entry["thresholds"] = _verdict_thresholds(params, replay)
         sessions.append(entry)
     raw_status = _mapping(experiment_state(directory).get("status"))
     current = raw_status.get("session_key")
     return {
         **detail,
-        "params": _public_params(read_json(hitl / PARAMS_NAME)),
+        "params": _public_params(params),
         "control": identity.public_control(read_control(hitl / CONTROL_NAME).to_record()),
         "inbox": inbox_public_view(
             hitl / INBOX_NAME,

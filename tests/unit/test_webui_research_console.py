@@ -217,6 +217,37 @@ def test_the_listing_carries_the_budget_and_the_research_outcome(tmp_path: Path)
     assert client.get("/api/experiments/idle/status").json()["budget_used"] is None
 
 
+def test_the_listing_names_the_research_curve_and_the_replay_its_thresholds(tmp_path: Path) -> None:
+    """The one curve per arm starts from the research-period validation of the
+    candidate the tiles name — the frozen artifact's own once the arm froze —
+    and the replay's step lists the thresholds the verdict will hold it to
+    before the record exists, from the arm's parameters and the pipeline's
+    constants; the record's own block carries the same keys afterwards."""
+
+    from autotrade.pipelines.hitl_state import WEB_CREATE_DEFAULTS
+
+    build_arm(tmp_path, "researching", "research")
+    build_arm(tmp_path, "frozen", "sealed")
+    build_arm(tmp_path, "judged", "graduated")
+    rows = {row["experiment_id"]: row for row in list_experiments(tmp_path)}
+    assert rows["researching"]["research_result"] is None
+    frozen_ref = _records(tmp_path / "frozen")[0]["frozen"]["research_result_ref"]
+    assert rows["frozen"]["research_result"] == Path(str(frozen_ref)).parent.name
+    # This arm nominated its best candidate, so both names agree.
+    assert rows["frozen"]["research_best"]["result"] == rows["frozen"]["research_result"]
+
+    preview = experiment_detail(tmp_path, "researching")["sessions"][1]["thresholds"]
+    assert preview["max_drawdown"] == pytest.approx(WEB_CREATE_DEFAULTS["max_drawdown"])
+    assert preview["cost_stress_multiplier"] == pytest.approx(WEB_CREATE_DEFAULTS["cost_stress_multiplier"])
+    assert (preview["min_round_trips"], preview["min_mean_gross"], preview["recency_months"]) == (12, 0.5, 6)
+    # The record's own block carries the same keys; its parameter-derived
+    # values are the arm's (the synthetic arm was judged at a 90% drawdown cap).
+    recorded = experiment_detail(tmp_path, "judged")["forward"]["verdict"]["thresholds"]
+    assert set(preview) <= set(recorded)
+    for key in ("forward_confidence", "recency_months", "min_round_trips", "min_mean_gross", "heldout_tolerance_z"):
+        assert recorded[key] == pytest.approx(preview[key]), key
+
+
 def test_an_arm_with_no_plan_yet_lists_as_created(tmp_path: Path) -> None:
     build_arm(tmp_path, "arm", "created")
     row = summarize_experiment(tmp_path / "arm")

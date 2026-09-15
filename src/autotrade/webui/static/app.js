@@ -548,29 +548,91 @@ function chartLegend(items) {
 }
 
 /* ---- daily equity line + drawdown and position panes (vs 沪深300) ----
-   One ledger-named replay result per chart (equity.result_equity_payload),
+   One ledger-named replay result per payload (equity.result_equity_payload),
    compounded on the server; 沪深300 is served on the strategy's own days, so
-   both lines start at 0 together. A marker is a dashed vertical line, e.g.
-   the forward/Held-out boundary of the continuous replay. */
+   both lines start at 0 together. A marker is a dashed vertical line, a band
+   a labelled wash over a date range. */
 const RESULT_EQUITY_CACHE = new Map(); // `${experiment_id}/${result}` -> promise
 
-function resultEquityHost(expId, result, opts = {}) {
+function resultEquity(expId, result) {
   const key = `${expId}/${result}`;
   if (!RESULT_EQUITY_CACHE.has(key))
     RESULT_EQUITY_CACHE.set(
       key,
       api(
         `/api/experiments/${encodeURIComponent(expId)}/results/${encodeURIComponent(result)}/equity`,
-      ),
+      ).catch((error) => {
+        RESULT_EQUITY_CACHE.delete(key);
+        throw error;
+      }),
     );
+  return RESULT_EQUITY_CACHE.get(key);
+}
+
+/* Two consecutive periods of one strategy as one line: the second period's
+   returns compound onto the first's final wealth, the drawdown is re-measured
+   over the joined line. A missing half leaves the other as it is. */
+function chainSeries(first, second) {
+  if (!first || !(first.dates || []).length) return second || null;
+  if (!second || !(second.dates || []).length) return first;
+  const base = 1 + first.cum[first.cum.length - 1];
+  const cum = [...first.cum, ...second.cum.map((value) => base * (1 + value) - 1)];
+  let peak = 1;
+  const drawdown = cum.map((value) => {
+    peak = Math.max(peak, 1 + value);
+    return (1 + value) / peak - 1;
+  });
+  return { ...first, dates: [...first.dates, ...second.dates], cum, drawdown, final: cum[cum.length - 1] };
+}
+
+function chainEquity(research, forward) {
+  if (!research) return forward;
+  if (!forward) return research;
+  const after = (key) => (forward.series || []).find((entry) => entry.key === key);
+  const exposure = [research, forward].map((payload) => (payload.exposure || {}).strategy);
+  return {
+    series: (research.series || []).map((entry) => chainSeries(entry, after(entry.key))),
+    benchmark: chainSeries(research.benchmark, forward.benchmark),
+    exposure:
+      exposure[0] && exposure[1]
+        ? {
+            strategy: {
+              dates: [...exposure[0].dates, ...exposure[1].dates],
+              long: [...exposure[0].long, ...exposure[1].long],
+            },
+          }
+        : research.exposure || forward.exposure || {},
+  };
+}
+
+/* One curve per arm: the research-period validation of the candidate the
+   tiles name, in-sample and drawn under a band that says so, and once the
+   ledger names the replay the forward and Held-out slices compounded on after
+   a 冻结 divider, the Held-out divider where that slice begins. Null until the
+   arm has a curve at all. */
+function armEquityHost(item, opts = {}) {
+  const research = item.research_result || null;
+  const forward = (item.forward || {}).result || null;
+  if (!research && !forward) return null;
+  const replay = (item.forward || {}).replay || {};
   const host = el("div", {}, el("div", { class: "hint" }, "收益曲线加载中…"));
-  RESULT_EQUITY_CACHE.get(key)
-    .then((payload) => host.replaceChildren(equityChart(payload, opts)))
+  Promise.all([
+    research ? resultEquity(item.experiment_id, research) : null,
+    forward ? resultEquity(item.experiment_id, forward) : null,
+  ])
+    .then(([before, after]) => {
+      const strategy = before && (before.series || [])[0];
+      const bands =
+        strategy && strategy.dates.length
+          ? [{ from: strategy.dates[0], to: strategy.dates[strategy.dates.length - 1], label: "研究期 · 样本内" }]
+          : [];
+      const markers = [];
+      if (after && before && replay.start) markers.push({ date: replay.start, label: "冻结" });
+      if (after && replay.heldout_start) markers.push({ date: replay.heldout_start, label: "Held-out" });
+      host.replaceChildren(equityChart(chainEquity(before, after), { ...opts, markers, bands }));
+    })
     .catch((error) => {
-      RESULT_EQUITY_CACHE.delete(key);
-      host.replaceChildren(
-        el("div", { class: "hint" }, `收益曲线加载失败：${error.message}`),
-      );
+      host.replaceChildren(el("div", { class: "hint" }, `收益曲线加载失败：${error.message}`));
     });
   return host;
 }
@@ -589,7 +651,7 @@ function fitChartWidth(width) {
 }
 
 function equityChart(payload, opts = {}) {
-  const { height = 240, mini = false, markers = [] } = opts;
+  const { height = 240, mini = false, markers = [], bands = [] } = opts;
   const width = fitChartWidth(opts.width || 680);
   let { ddH = 90 } = opts;
   const INK = themeInk();
@@ -672,6 +734,22 @@ function equityChart(payload, opts = {}) {
   hi += pad;
   const yOf = (v) => padT + ((hi - v) / (hi - lo)) * mainH;
   const svg = [];
+  // bands: a labelled wash over a date range, under everything else — the
+  // research period, which is in-sample and must read as such
+  for (const band of bands) {
+    const first = dates.findIndex((d) => d >= String(band.from));
+    let last = dates.length - 1;
+    while (last > 0 && dates[last] > String(band.to)) last -= 1;
+    if (first < 0 || last < first) continue;
+    const x1 = xOf(first).toFixed(1);
+    const x2 = xOf(last).toFixed(1);
+    svg.push(
+      `<rect x="${x1}" y="${padT}" width="${(Number(x2) - Number(x1)).toFixed(1)}" height="${(hasPanes ? panesBottom : padT + mainH) - padT}" fill="${INK.grid}" fill-opacity="0.45"/>`,
+    );
+    svg.push(
+      `<text x="${Number(x1) + 4}" y="${padT + 11}" font-size="${mini ? 10 : 11}" fill="${INK.muted}">${escapeHtml(band.label)}</text>`,
+    );
+  }
   // main gridlines: 4 evenly spaced levels + emphasized zero line
   for (let t = 0; t <= 4; t += 1) {
     const v = lo + ((hi - lo) * t) / 4;
@@ -1197,13 +1275,11 @@ function replaySpanBar(replay, focus, opts) {
     { from: replay.start, to: replay.forward_end, cls: focus === "heldout" ? "dim" : "", title: `前推 ${fmtDate(replay.start)} ～ ${fmtDate(replay.forward_end)}` },
     { from: replay.heldout_start, to: replay.replay_end, cls: focus === "forward" ? "dim" : "alt", title: `Held-out ${fmtDate(replay.heldout_start)} ～ ${fmtDate(replay.replay_end)}` },
   ].filter((segment) => segment.from && segment.to);
-  const ticks = focus
-    ? []
-    : [
-        { at: replay.start, label: fmtMonth(replay.start) },
-        { at: replay.heldout_start, label: `Held-out ${fmtMonth(replay.heldout_start)}`, mid: true },
-        { at: replay.replay_end, label: fmtMonth(replay.replay_end) },
-      ].filter((tick) => tick.at);
+  const ticks = [
+    { at: replay.start, label: fmtMonth(replay.start) },
+    { at: replay.heldout_start, label: `Held-out ${fmtMonth(replay.heldout_start)}`, mid: true },
+    { at: replay.replay_end, label: fmtMonth(replay.replay_end) },
+  ].filter((tick) => tick.at);
   return spanBar(replay.start, replay.replay_end, segments, ticks, opts);
 }
 
@@ -1230,7 +1306,9 @@ function checklist(items) {
         { class: `check-row ${item.ok === null ? "na" : item.ok ? "ok" : "fail"}` },
         el("span", { class: "check-mark", "aria-hidden": "true" }, item.ok === null ? "–" : item.ok ? "✓" : "✕"),
         el("span", { class: "check-label" }, item.label),
-        el("span", { class: "check-value" }, item.value ?? "—"),
+        item.value === null || item.value === undefined
+          ? null
+          : el("span", { class: "check-value" }, item.value),
         item.threshold ? el("span", { class: "check-threshold" }, item.threshold) : null,
       ),
     ),
@@ -1600,6 +1678,7 @@ function heroSignature(item) {
     item.experiment_id,
     item.state,
     (item.verdict || {}).status,
+    item.research_result,
     (item.forward || {}).result,
   ].join("|");
 }
@@ -1681,29 +1760,19 @@ function evidenceTiles(item) {
   return tiles.length ? statTilesRow(tiles) : null;
 }
 
-/* The continuous forward/Held-out curve, drawn only once the ledger names the
-   replay's result. The node is kept by id across the five-second grid rebuild,
-   so the curve is neither refetched nor redrawn while the page sits open. */
+/* The arm's curve on its card. The node is kept by id across the five-second
+   grid rebuild, so the curve is neither refetched nor redrawn while the page
+   sits open; it is rebuilt when the results it joins change. */
 function cardEquityNode(item) {
-  const result = (item.forward || {}).result;
-  if (!result) return null;
+  const key = [item.research_result, (item.forward || {}).result].filter(Boolean).join("|");
+  if (!key) return null;
   const id = `equity-card-${item.experiment_id}`;
   const existing = document.getElementById(id);
-  if (existing && existing.dataset.result === result) return existing;
-  const host = resultEquityHost(item.experiment_id, result, {
-    width: 420,
-    height: 130,
-    mini: true,
-    markers: forwardMarkers(item.forward),
-  });
+  if (existing && existing.dataset.result === key) return existing;
+  const host = armEquityHost(item, { width: 420, height: 130, mini: true });
   host.id = id;
-  host.dataset.result = result;
+  host.dataset.result = key;
   return host;
-}
-
-function forwardMarkers(forward) {
-  const start = ((forward || {}).replay || {}).heldout_start;
-  return start ? [{ date: start, label: "Held-out" }] : [];
 }
 
 /* Name and badges, then the stepper, the live activity, the budget, the
@@ -1800,20 +1869,8 @@ function heroPanel(item) {
     forwardTiles(item),
   );
   panel.__signature = heroSignature(item);
-  const result = (item.forward || {}).result;
-  if (result)
-    panel.append(
-      el(
-        "div",
-        { class: "section-gap" },
-        resultEquityHost(item.experiment_id, result, {
-          width: 980,
-          height: 240,
-          ddH: 90,
-          markers: forwardMarkers(item.forward),
-        }),
-      ),
-    );
+  const curve = armEquityHost(item, { width: 980, height: 240, ddH: 90 });
+  if (curve) panel.append(el("div", { class: "section-gap" }, curve));
   return panel;
 }
 
@@ -2201,12 +2258,6 @@ function closeModal() {
 
 let detailView = null; // {experimentId, detail, listHost, rightHost, barHost, selectedKey}
 
-function isSessionDone(detail, session) {
-  return session.kind === "forward"
-    ? Boolean(detail.forward)
-    : Boolean(session.record);
-}
-
 /* The experiment the hash names, if it names one: a step switch inside the
    experiment keeps it, so a render or poll of that experiment goes on. */
 function hashExperimentId() {
@@ -2443,22 +2494,24 @@ function sliceTable(forward) {
 }
 
 /* The graduation criteria (pipelines/verdict.py F1–F6, H1–H4) as a
-   checklist: the measured figure of each slice against the threshold the
-   record carries. A slice the strategy's error left unmeasured shows its
-   criteria unmarked; the error itself is the failed one. */
-function verdictChecklist(forward, verdict) {
-  const failed = new Set(verdict.reasons || []);
-  const t = ((forward.verdict || {}).thresholds) || {};
-  const slices = forward.slices || {};
+   checklist. Before the replay: the criteria and the thresholds they will be
+   held to, unmarked. After it: the measured figure of each slice against the
+   threshold the record carries, with its pass or fail mark; a slice the
+   strategy's error left unmeasured shows its criteria unmarked and the error
+   itself as the failed one. */
+function graduationChecklist(forward, verdict, thresholds) {
+  const failed = new Set((verdict || {}).reasons || []);
+  const t = thresholds || {};
+  const slices = (forward || {}).slices || {};
   const f = slices.forward,
     h = slices.heldout;
   const item = (token, slice, value, threshold) => ({
     ok: slice ? !failed.has(token) : null,
     label: reasonLabel(token),
-    value: slice ? value : "—",
+    value: slice ? value : null,
     threshold,
   });
-  const drawdown = t.max_drawdown === undefined ? "" : `≤ ${fmtPct(t.max_drawdown)}`;
+  const drawdown = t.max_drawdown === undefined || t.max_drawdown === null ? "" : `≤ ${fmtPct(t.max_drawdown)}`;
   const exposure = t.min_mean_gross === undefined ? "" : `≥ ${fmtPct(t.min_mean_gross)}`;
   return checklist([
     ...["forward", "heldout"]
@@ -2473,88 +2526,80 @@ function verdictChecklist(forward, verdict) {
       fmtPct(f && f.excess_at_cost_stress),
       t.cost_stress_multiplier ? `> 0（滑点 ×${t.cost_stress_multiplier}）` : "> 0",
     ),
-    item("forward_too_few_round_trips", f, f && f.round_trips, t.min_round_trips === undefined ? "" : `≥ ${t.min_round_trips}`),
+    item(
+      "forward_too_few_round_trips",
+      f,
+      f && f.round_trips,
+      t.min_round_trips === undefined || t.min_round_trips === null ? "" : `≥ ${t.min_round_trips}`,
+    ),
     item("forward_exposure_below_floor", f, fmtPct(f && f.mean_gross), exposure),
-    item("heldout_excess_below_tolerance", h, fmtPct(h && h.neutralized_excess), h ? `≥ ${fmtPct(h.tolerance)}` : ""),
+    item(
+      "heldout_excess_below_tolerance",
+      h,
+      fmtPct(h && h.neutralized_excess),
+      h ? `≥ ${fmtPct(h.tolerance)}` : t.heldout_tolerance_z ? `≥ −${t.heldout_tolerance_z} × 前推跟踪误差 / √年` : "",
+    ),
     item("heldout_max_drawdown_exceeded", h, fmtPct(h && h.max_drawdown), drawdown),
     item("heldout_exposure_below_floor", h, fmtPct(h && h.mean_gross), exposure),
   ]);
 }
 
-/* The forward and Held-out replay of the frozen artifact: 封存中 until the
-   forward record exists, then the verdict as a checklist, the replay span,
-   the slice statistics, the one continuous curve with the Held-out boundary
-   marked, and the Paper command for a graduate. A research that froze nothing
-   has only its verdict. */
-function verdictPanel(detail) {
+/* The one continuous replay and its verdict, opened by the 前推回放, Held-out
+   and 裁决 rows alike with the selected slice lit on the span. Before the
+   replay ran: the span as outlines and the criteria with their thresholds.
+   After the record: the checklist with measured values, the slice statistics,
+   the style attribution, the trades, and the Paper command for a graduate. A
+   research that froze nothing has only its verdict. */
+function replayPanel(detail, focus) {
   const verdict = detail.verdict || {};
   const forward = detail.forward;
-  if (!detail.frozen && !verdict.status) return null;
-  const head = panelHead("前推与 Held-out", verdictBadge(detail.verdict));
-  if (!forward) {
-    if (verdict.status)
-      return el(
-        "div",
-        { class: "panel section-gap" },
-        head,
-        el("div", { class: "meta-line" }, (verdict.reasons || []).map(reasonLabel).join("；") || "—"),
-      );
-    const status = detail.status || {};
-    const replaying = detail.worker_alive && status.session_key === "forward";
+  const session = (detail.sessions || []).find((entry) => entry.kind === "forward") || {};
+  const replay = (forward || {}).replay || session.replay || {};
+  const step = pipelineTailSteps(detail).find(
+    (row) => row.key === (focus === "verdict" ? "verdict" : "forward"),
+  );
+  const head = panelHead(
+    "前推与 Held-out",
+    verdict.status ? verdictBadge(verdict) : el("span", { class: "badge kind" }, step.status),
+  );
+  if (verdict.status === "no_deliverable")
     return el(
       "div",
       { class: "panel section-gap" },
       head,
-      // The replay's own stage is the control panel's line.
-      el(
-        "div",
-        { class: "prep-indicator" },
-        replaying ? el("span", { class: "spinner" }) : null,
-        el("span", {}, STEP_STATUS_LABELS.sealed),
-      ),
+      el("div", { class: "meta-line" }, (verdict.reasons || []).map(reasonLabel).join("；")),
     );
-  }
-  const replay = forward.replay || {};
-  const refits = forward.refits_executed || {};
+  const thresholds = forward ? (forward.verdict || {}).thresholds : session.thresholds;
+  const refits = (forward || {}).refits_executed || {};
+  const result = (forward || {}).result;
   return el(
     "div",
     { class: "panel section-gap" },
     head,
-    verdictChecklist(forward, verdict),
+    replaySpanBar(replay, focus === "verdict" ? null : focus, { pending: !forward }),
+    forward && replay.truncation_reason
+      ? el("div", { class: "meta-line" }, `请求至 ${fmtDate(replay.requested_end)} · 截至发布末日`)
+      : null,
     el(
       "div",
       { class: "section-gap" },
-      replaySpanBar(replay),
-      replay.truncation_reason
-        ? el("div", { class: "meta-line" }, `请求至 ${fmtDate(replay.requested_end)} · 截至发布末日`)
-        : null,
+      el("h4", { class: "subsection-title" }, forward ? "毕业条件" : "毕业条件 · 阈值"),
+      graduationChecklist(forward, verdict, thresholds),
     ),
-    forward.error ? el("div", { class: "hint warn" }, `策略报错：${forward.error}`) : null,
-    sliceTable(forward),
+    forward && forward.error ? el("div", { class: "hint warn" }, `策略报错：${forward.error}`) : null,
+    forward ? sliceTable(forward) : null,
     chipsRow([
       Number.isFinite(refits.forward) && Number.isFinite(refits.heldout)
         ? chip(`重训 前推 ${refits.forward} · Held-out ${refits.heldout}`)
         : null,
-      forward.null_percentile === null || forward.null_percentile === undefined
+      !forward || forward.null_percentile === null || forward.null_percentile === undefined
         ? null
         : chip(`前推 null 分位 ${fmtSharpe(forward.null_percentile)}`, "前推期超额在随机名单回放中的分位"),
     ]),
-    forward.result
-      ? el(
-          "div",
-          { class: "section-gap" },
-          resultEquityHost(detail.experiment_id, forward.result, {
-            width: 980,
-            height: 240,
-            ddH: 90,
-            markers: forwardMarkers(forward),
-          }),
-        )
-      : null,
-    forward.result ? styleCard(detail.experiment_id, forward.result) : null,
-    forward.result
+    result ? styleCard(detail.experiment_id, result) : null,
+    result
       ? Object.assign(
-          lazyDetails("交易明细", () => ordersNode(detail.experiment_id, forward.result)),
+          lazyDetails("交易明细", () => ordersNode(detail.experiment_id, result)),
           { className: "fold section-gap" },
         )
       : null,
@@ -2628,17 +2673,6 @@ function frozenPanel(detail) {
         : null,
     ]),
     subWindowSection("研究期分年度表现", frozen.blocks),
-    frozen.result
-      ? el(
-          "div",
-          { class: "section-gap" },
-          resultEquityHost(detail.experiment_id, frozen.result, {
-            width: 860,
-            height: 210,
-            ddH: 76,
-          }),
-        )
-      : null,
     frozen.result ? styleCard(detail.experiment_id, frozen.result) : null,
   );
   return panel;
@@ -2730,6 +2764,8 @@ function controlPanel(detail) {
   const activityHost = el("span", { class: "control-activity" });
   const budgetHost = el("div", {});
   const skills = Number(detail.skills && detail.skills.count) || 0;
+  // The arm's one curve lives here, under the budget, not in any step's pane.
+  const curve = armEquityHost(detail, { width: 980, height: 240, ddH: 90 });
   const panel = el(
     "div",
     { class: "panel section-gap" },
@@ -2740,6 +2776,7 @@ function controlPanel(detail) {
       skills ? el("span", { class: "stat-chip", title: "本实验发布的 skills" }, `📚 Skills ${skills}`) : null,
     ),
     budgetHost,
+    curve ? el("div", { class: "section-gap" }, curve) : null,
   );
   const follow = (fresh) => {
     const activity = fresh.worker_alive ? activityNode(fresh.status) : null;
@@ -2941,40 +2978,31 @@ function stepPlaceholder(detail, key, title) {
 }
 
 /* The right pane of the process grid: whichever step the reader selected. The
-   research sessions and the replay keep their own panels; the freeze opens the
-   frozen artifact, Held-out and 裁决 the judgement that reads both slices. */
+   research session has its own panel, the freeze opens the frozen artifact,
+   and 前推回放, Held-out and 裁决 open the one replay panel. */
 function sessionDetailPanel(detail, selectedKey) {
   // Flex column with a uniform card gap: whichever cards are present, the
   // first one's top aligns with the process list in the left grid column.
   const panel = el("div", { class: "session-detail" });
+  const session = (detail.sessions || []).find((entry) => entry.key === selectedKey);
+  // An arm with no plan yet (never started) serves no sessions at all: every
+  // step answers with its status word.
+  if (!(detail.sessions || []).length) {
+    panel.append(stepPlaceholder(detail, selectedKey, sessionLabel(selectedKey)));
+    return panel;
+  }
   if (selectedKey === "frozen") {
     panel.append(frozenPanel(detail) || stepPlaceholder(detail, "frozen", "冻结产物"));
     return panel;
   }
-  if (selectedKey === "heldout" || selectedKey === "verdict") {
-    panel.append(
-      verdictPanel(detail) ||
-        stepPlaceholder(detail, selectedKey, "前推与 Held-out"),
-    );
-    return panel;
-  }
-  const session = (detail.sessions || []).find(
-    (entry) => entry.key === selectedKey,
-  );
-  // An arm with no plan yet (never started) serves no sessions at all.
-  if (!session) {
-    panel.append(stepPlaceholder(detail, selectedKey, sessionLabel(selectedKey)));
+  if (selectedKey !== "research") {
+    panel.append(replayPanel(detail, selectedKey));
     return panel;
   }
   const status = detail.status || {};
   const isCurrent = status.session_key === session.key && detail.worker_alive;
   const running = isCurrent && LIVE_RUN_STATES.has(detail.state);
-  const done = isSessionDone(detail, session);
-  if (session.kind === "forward") {
-    panel.append(forwardSessionPanel(detail, session));
-    return panel;
-  }
-  if (done) panel.append(researchSessionPanel(detail, session));
+  if (session.record) panel.append(researchSessionPanel(detail, session));
   else if (isCurrent) {
     // Before the Agent speaks (PIT, Sandbox) there is no trace to follow;
     // the control panel already says which preparation stage the worker is in.
@@ -2996,18 +3024,6 @@ function sessionDetailPanel(detail, selectedKey) {
   // rather than as a loose panel at the foot of the page.
   panel.append(stepTreePanel(detail));
   return panel;
-}
-
-/* The continuous replay's step: where the pipeline stands on it and the span
-   it covers, the forward slice then Held-out. */
-function forwardSessionPanel(detail, session) {
-  const step = pipelineTailSteps(detail).find((row) => row.key === "forward");
-  return el(
-    "div",
-    { class: "panel section-gap" },
-    panelHead(STEP_LABELS.forward, el("span", { class: "badge kind" }, step.status)),
-    replaySpanBar(session.replay, null, { pending: !detail.forward }),
-  );
 }
 
 /* The freeze gate as the pipeline judged the nomination: the two measured
