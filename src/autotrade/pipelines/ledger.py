@@ -16,16 +16,17 @@ One JSONL file per experiment. The pipeline writes three record types:
 
 Every record carries the link keys ``experiment_id``, ``epoch_id``, ``fold_id``
 and ``run_id``: ``epoch_id`` names the stage (``research`` or ``forward``) and
-``fold_id`` the session (``s1``, ``s2``, ... or ``forward``).
+``fold_id`` the session (``s1``, ``s2``, ... or ``forward``). Both keep their
+Fold-era names because renaming a persisted link key needs a schema bump.
 
 A ``forward`` row with ``state_changed_during_test=true`` is an integrity
 failure, not a verdict: it is persisted before fail-fast so the corruption is
 auditable, then every resume and retry must refuse until a human rolls the
 dirty frozen trees back.
 
-The Fold-era record types (``FOLD_ERA_RECORD_TYPES``) are still recognised so
-an archived ledger reads as one: the pipeline never writes them and the worker
-refuses a ledger that holds one.
+``FOLD_ERA_RECORD_TYPES`` names the record types of archived Fold-era
+ledgers only so the worker can refuse such a ledger; ``append`` accepts none of
+them.
 """
 
 from __future__ import annotations
@@ -56,21 +57,13 @@ FOLD_ERA_RECORD_TYPES = (
     "deployment_adjustment",
     "terminated",
 )
-RECORD_TYPES = (*PIPELINE_RECORD_TYPES, *FOLD_ERA_RECORD_TYPES)
 LINK_KEYS = ("experiment_id", "epoch_id", "fold_id", "run_id")
 # The ``status`` of a forward record whose replay stopped at the strategy's own
 # exception: the one replay failure that measures the strategy. Every other
 # failure fails the attempt and never reaches a business record.
 STRATEGY_ERROR = "strategy_error"
-DURABLE_SUCCESS_TYPES = (
-    "research_session",
-    "forward",
-    "fold",
-    "meta_learning",
-    "heldout",
-    "deployment_adjustment",
-)
-_INTEGRITY_RECORD_TYPES = frozenset({"forward", "fold", "heldout"})
+DURABLE_SUCCESS_TYPES = ("research_session", "forward")
+_INTEGRITY_RECORD_TYPES = frozenset({"forward"})
 
 # Host-only, never mounted into a sandbox and never Agent-visible.
 RUN_MARKER_DIR = ".host/runs"
@@ -236,7 +229,7 @@ class ExperimentLedger:
 
     def append(self, record: dict[str, object]) -> None:
         record_type = record.get("record_type")
-        if record_type not in RECORD_TYPES:
+        if record_type not in PIPELINE_RECORD_TYPES:
             raise ValueError(f"unsupported record_type: {record_type!r}")
         missing = [key for key in LINK_KEYS if not record.get(key)]
         if missing:

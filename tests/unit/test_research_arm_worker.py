@@ -14,10 +14,12 @@ from pathlib import Path
 
 import pytest
 
+from autotrade.environment.runtime import append_versioned_jsonl
 from autotrade.pipelines import experiment as experiment_module
 from autotrade.pipelines import worker
 from autotrade.pipelines.hitl_state import read_status
 from autotrade.pipelines.ledger import (
+    LEDGER_RECORD_SCHEMA_VERSION,
     ExperimentLedger,
     experiment_verdict,
     forward_record,
@@ -315,15 +317,16 @@ def test_a_fold_era_ledger_is_refused(tmp_path: Path):
     repo, experiment = make_arm(tmp_path)
     AgentRefStore(experiment)
     ledger = ExperimentLedger(experiment / "ledgers" / "experiment_ledger.jsonl")
-    ledger.append(
-        {
-            "record_type": "fold",
-            "experiment_id": "arm",
-            "epoch_id": "epoch_001",
-            "fold_id": "fold_2024",
-            "run_id": "run_old",
-        }
-    )
+    archived = {
+        "record_type": "fold",
+        "experiment_id": "arm",
+        "epoch_id": "epoch_001",
+        "fold_id": "fold_2024",
+        "run_id": "run_old",
+    }
+    with pytest.raises(ValueError, match="unsupported record_type"):
+        ledger.append(archived)
+    append_versioned_jsonl(ledger.path, archived, schema_version=LEDGER_RECORD_SCHEMA_VERSION)
     with pytest.raises(ValueError, match="Fold-era ledger"):
         run_local_interactive_worker(load_worker_options(experiment, repo_root=repo))
 

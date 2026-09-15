@@ -15,9 +15,10 @@ from pathlib import Path
 
 import pytest
 
+from autotrade.environment.runtime import append_versioned_jsonl
 from autotrade.environment.tools.base import ToolError
 from autotrade.environment.tools.workspace import SafeWorkspace
-from autotrade.pipelines.ledger import ExperimentLedger
+from autotrade.pipelines.ledger import LEDGER_RECORD_SCHEMA_VERSION, ExperimentLedger
 from autotrade.pipelines.skills import (
     CURATED_MEMORY_SOURCE,
     DEFAULT_OPERATING_MEMORY,
@@ -214,7 +215,9 @@ def test_a_fold_era_graduated_row_is_not_a_verdict(tmp_path: Path) -> None:
     experiments = tmp_path / "experiments"
     experiments.mkdir()
     directory = _experiment_with_skill(experiments, "fold_era", graduated=None)
-    ExperimentLedger(directory / "ledgers" / "experiment_ledger.jsonl").append(
+    # The pipeline cannot append a Fold-era row; an archived ledger holds it raw.
+    append_versioned_jsonl(
+        directory / "ledgers" / "experiment_ledger.jsonl",
         {
             "record_type": "heldout",
             "experiment_id": "fold_era",
@@ -222,7 +225,8 @@ def test_a_fold_era_graduated_row_is_not_a_verdict(tmp_path: Path) -> None:
             "fold_id": "heldout_1",
             "run_id": "run_fold_era_heldout",
             "verdict": {"status": "graduated", "reasons": []},
-        }
+        },
+        schema_version=LEDGER_RECORD_SCHEMA_VERSION,
     )
     assert graduated_memory_sources(experiments) == ()
 
