@@ -27,23 +27,31 @@ def orders_file_name(trade_date: str) -> str:
     return f"{trade_date}_orders.md"
 
 
-def render_orders(book: Book, trade_date: str) -> str:
-    state = read_json(book.root / PAPER_STATE_NAME)
+def order_sheet(
+    root: str | Path, trade_date: str, *, state: Mapping[str, object] | None = None
+) -> dict[str, object]:
+    """One decision's order sheet as data: the decision record, its orders at
+    their reference quotes, and the holdings and cash once every order fills.
+
+    The one computation behind the Markdown sheet and the console's signal
+    panels. Everything comes from the decision's own record and its order
+    journal, so an old sheet reads exactly as it did on its morning. ``state``
+    is the book's parsed state when the caller already holds it.
+    """
+
+    root = Path(root)
+    state = read_json(root / PAPER_STATE_NAME) if state is None else state
     decision = next(
         (row for row in state.get("decisions") or () if row.get("trade_date") == trade_date), None
     )
     if decision is None:
         raise ValueError(f"the book has no decision for {trade_date}")
-    rows, skipped = read_jsonl(book.root / f"orders_{trade_date}.jsonl")
+    rows, skipped = read_jsonl(root / f"orders_{trade_date}.jsonl")
     held = {str(symbol): int(quantity) for symbol, quantity in dict(decision["positions"]).items()}
-    # Everything below is the decision's own record, so an old sheet renders
-    # exactly as it did on its morning.
     quotes = {
         **{str(row["symbol"]): dict(row.get(REFERENCE_KEY) or {}) for row in rows},
         **dict(decision.get("quotes") or {}),
     }
-    cash = float(decision["cash"])
-    equity = float(decision["equity"])
 
     def name(symbol: str) -> str:
         return str(quotes.get(symbol, {}).get("name") or "")
@@ -51,6 +59,53 @@ def render_orders(book: Book, trade_date: str) -> str:
     def price(symbol: str) -> float | None:
         value = quotes.get(symbol, {}).get("close")
         return float(value) if isinstance(value, (int, float)) else None
+
+    orders = []
+    flows = {"buy": 0.0, "sell": 0.0}
+    for row in rows:
+        symbol, quantity, action = str(row["symbol"]), int(row["quantity"]), str(row["action"])
+        quote = price(symbol)
+        notional = quote * quantity if quote is not None else None
+        if notional is not None:
+            flows[action] += notional
+        orders.append({
+            "execute_at": str(row["execute_at"]), "symbol": symbol, "name": name(symbol), "action": action,
+            "quantity": quantity, "reference_price": quote, "notional": notional,
+        })
+    target = []
+    for symbol, quantity in _positions_after(held, rows).items():
+        quote = price(symbol)
+        target.append({
+            "symbol": symbol, "name": name(symbol), "quantity": quantity, "reference_price": quote,
+            "value": quote * quantity if quote is not None else None,
+        })
+    cash = float(decision["cash"])
+    target_value = sum(row["value"] or 0.0 for row in target)
+    cash_after = cash + flows["sell"] - flows["buy"]
+    # Weights of the estimated post-trade account: holdings at reference prices plus cash.
+    total = target_value + cash_after
+    for row in target:
+        row["weight"] = row["value"] / total if row["value"] is not None and total > 0 else None
+    return {
+        "decision": decision,
+        "cash": cash,
+        "equity": float(decision["equity"]),
+        "held_count": len(held),
+        "orders": orders,
+        "skipped_lines": skipped,
+        "flows": flows,
+        "target": target,
+        "target_value": target_value,
+        "cash_after": cash_after,
+        "cash_weight": cash_after / total if total > 0 else None,
+    }
+
+
+def render_orders(book: Book, trade_date: str) -> str:
+    state = read_json(book.root / PAPER_STATE_NAME)
+    sheet = order_sheet(book.root, trade_date, state=state)
+    decision = sheet["decision"]
+    cash, equity, rows = sheet["cash"], sheet["equity"], sheet["orders"]
 
     lines = [f"# Paper 订单 · {_day(trade_date)}", ""]
     if book.note:
@@ -68,7 +123,7 @@ def render_orders(book: Book, trade_date: str) -> str:
         f"- 重放此前决策 {decision['replayed_calls']} 次，其中 {decision['replayed_matching_journal']} 次与账簿记录的订单一致",
         (
             f"- 账户（{_day(str(state.get('settled_through') or decision['data_through']))} 收盘估值）："
-            f"总资产 {_money(equity)}，现金 {_money(cash)}，持仓 {len(held)} 只"
+            f"总资产 {_money(equity)}，现金 {_money(cash)}，持仓 {sheet['held_count']} 只"
         ),
         "",
     ]
@@ -79,40 +134,34 @@ def render_orders(book: Book, trade_date: str) -> str:
             "| 时间 | 代码 | 名称 | 方向 | 股数 | 参考价 | 约计金额 |",
             "| --- | --- | --- | --- | ---: | ---: | ---: |",
         ]
-        flows = {"buy": 0.0, "sell": 0.0}
         for row in rows:
-            symbol, quantity, action = str(row["symbol"]), int(row["quantity"]), str(row["action"])
-            quote = price(symbol)
-            notional = quote * quantity if quote is not None else None
-            if notional is not None:
-                flows[action] += notional
             lines.append(
-                f"| {datetime.fromisoformat(str(row['execute_at'])).strftime('%H:%M')} | {symbol} | {name(symbol)} "
-                f"| {'买入' if action == 'buy' else '卖出'} | {quantity:,} | {_price(quote)} | {_money(notional)} |"
+                f"| {datetime.fromisoformat(row['execute_at']).strftime('%H:%M')} | {row['symbol']} | {row['name']} "
+                f"| {'买入' if row['action'] == 'buy' else '卖出'} | {row['quantity']:,} | {_price(row['reference_price'])} "
+                f"| {_money(row['notional'])} |"
             )
+        flows = sheet["flows"]
         lines += ["", f"卖出合计约 {_money(flows['sell'])}，买入合计约 {_money(flows['buy'])}。", ""]
-        if skipped:
-            lines += [f"订单日志有 {skipped} 行无法解析，已跳过；请检查 orders_{trade_date}.jsonl。", ""]
+        if sheet["skipped_lines"]:
+            lines += [f"订单日志有 {sheet['skipped_lines']} 行无法解析，已跳过；请检查 orders_{trade_date}.jsonl。", ""]
     else:
         lines += ["## 订单", "", "今日无订单，持仓不变。", ""]
-        flows = {"buy": 0.0, "sell": 0.0}
-    target = _positions_after(held, rows)
     lines += [
-        f"## 成交后目标持仓（{len(target)} 只）",
+        f"## 成交后目标持仓（{len(sheet['target'])} 只）",
         "",
         "| 代码 | 名称 | 股数 | 参考价 | 参考市值 |",
         "| --- | --- | ---: | ---: | ---: |",
     ]
-    value = 0.0
-    for symbol, quantity in target.items():
-        quote = price(symbol)
-        value += quote * quantity if quote is not None else 0.0
+    for row in sheet["target"]:
         lines.append(
-            f"| {symbol} | {name(symbol)} | {quantity:,} | {_price(quote)} "
-            f"| {_money(quote * quantity if quote is not None else None)} |"
+            f"| {row['symbol']} | {row['name']} | {row['quantity']:,} | {_price(row['reference_price'])} "
+            f"| {_money(row['value'])} |"
         )
-    remaining = cash + flows["sell"] - flows["buy"]
-    lines += ["", f"成交后现金约 {_money(remaining)}，参考市值合计 {_money(value)}。", ""]
+    lines += [
+        "",
+        f"成交后现金约 {_money(sheet['cash_after'])}，参考市值合计 {_money(sheet['target_value'])}。",
+        "",
+    ]
     for warning in state.get("warnings") or ():
         lines += [f"注意：{warning}", ""]
     lines += [DISCLAIMER, ""]
@@ -178,4 +227,4 @@ def _price(value: float | None) -> str:
     return "—" if value is None else f"{value:.2f}"
 
 
-__all__ = ["LATEST_NAME", "orders_file_name", "render_failure", "render_orders", "write_orders"]
+__all__ = ["LATEST_NAME", "order_sheet", "orders_file_name", "render_failure", "render_orders", "write_orders"]
