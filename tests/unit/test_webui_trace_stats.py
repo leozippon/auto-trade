@@ -1573,6 +1573,23 @@ def test_subagent_trace_route_projects_redacts_and_guards(tmp_path: Path) -> Non
     assert "etc" not in bad.text
 
 
+def test_the_running_strip_is_pinned_under_the_trace_and_targets_the_card() -> None:
+    """A running child is its one card at the call position; the strip under
+    the scroll lists it from the same block, and a click scrolls to the card."""
+
+    script = APP_JS.read_text(encoding="utf-8")
+    strip = script.split("function runningStrip(", 1)[1].split("\nfunction ", 1)[0]
+    assert "filter(isRunningSubagent)" in strip
+    assert "subagentClockNode(block" in strip and "block.last_tool" in strip
+    assert "revealSubagentCard(box, block.task_id)" in strip
+    reveal = script.split("function revealSubagentCard(", 1)[1].split("\nfunction ", 1)[0]
+    assert "data-task-id" in reveal and "scrollIntoView" in reveal and '"flash"' in reveal
+    render = script.split("function renderTraceBlocks(", 1)[1].split("\nfunction ", 1)[0]
+    assert "fragment.append(scroll)" in render and "runningStrip(box, blocks)" in render
+    # The card carries the id the strip targets.
+    assert "node.dataset.taskId = String(block.task_id);" in script
+
+
 def test_subagent_drawer_is_wired_to_the_card() -> None:
     script = APP_JS.read_text(encoding="utf-8")
     assert "async function openSubagentTrace(detail, runRef, block)" in script

@@ -1656,6 +1656,65 @@ pre.code-view.pre-wrap {
 .trace-block .head.subagent-open {
  cursor: pointer;
 }
+/* Running children, one line each, pinned under the scroll: the scroll
+   shrinks above it, so the latest block is never hidden. */
+.trace-running {
+ flex: none;
+ display: flex;
+ flex-direction: column;
+ gap: 0.15rem;
+ padding: 0.35rem 0.15rem 0;
+ border-top: 1px solid var(--border);
+ background: var(--panel);
+}
+.trace-running-line {
+ appearance: none;
+ -webkit-appearance: none;
+ display: flex;
+ align-items: baseline;
+ gap: 0.5rem;
+ width: 100%;
+ min-width: 0;
+ margin: 0;
+ padding: 0.2rem 0.4rem;
+ border: 0;
+ border-radius: var(--radius-sm);
+ background: none;
+ color: var(--text);
+ font: inherit;
+ font-size: 0.82rem;
+ text-align: left;
+ cursor: pointer;
+}
+.trace-running-line:hover,
+.trace-running-line:focus-visible {
+ background: var(--hover-bg);
+ outline: none;
+}
+.trace-running-role {
+ flex: none;
+ color: var(--run);
+ font-weight: 650;
+}
+.trace-running-task {
+ flex: 1 1 auto;
+ min-width: 0;
+ overflow: hidden;
+ text-overflow: ellipsis;
+ white-space: nowrap;
+ color: var(--muted);
+}
+.trace-running-clock,
+.trace-running-tool {
+ flex: none;
+ color: var(--muted);
+ font-variant-numeric: tabular-nums;
+}
+/* The card a strip line scrolled to, lit for a moment. */
+.trace-block.flash {
+ box-shadow: 0 0 0 2px var(--accent);
+ transition: box-shadow 0.6s;
+}
 .subagent-meta,
 .subagent-clock {
  font-variant-numeric: tabular-nums;

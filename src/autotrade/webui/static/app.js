@@ -4068,6 +4068,44 @@ function subagentLastToolLabel(block) {
   return `最近工具 ${name}${status ? ` · ${status}` : ""}`;
 }
 
+/* One line per running child, pinned under the trace's scroll so the
+   header's count has a visible counterpart while the card that owns the
+   child sits far above the auto-scrolled tail. It is built from the same
+   per-task block the card is drawn from, so the two never disagree, and it
+   goes when no child runs. A click scrolls to the child's card. */
+function runningStrip(box, blocks) {
+  const running = (blocks || []).filter(isRunningSubagent);
+  if (!running.length) return null;
+  return el(
+    "div",
+    { class: "trace-running" },
+    ...running.map((block) => {
+      const tool = block.last_tool && block.last_tool.name ? String(block.last_tool.name) : "";
+      return el(
+        "button",
+        {
+          type: "button",
+          class: "trace-running-line",
+          title: "定位到该子代理的卡片",
+          onclick: () => revealSubagentCard(box, block.task_id),
+        },
+        el("span", { class: "trace-running-role" }, `🧩 ${block.role || "子代理"}`),
+        block.description ? el("span", { class: "trace-running-task" }, String(block.description)) : null,
+        subagentClockNode(block, "trace-running-clock"),
+        tool ? el("span", { class: "trace-running-tool" }, tool) : null,
+      );
+    }),
+  );
+}
+
+function revealSubagentCard(box, taskId) {
+  const card = box.querySelector(`.trace-block.subagent[data-task-id="${CSS.escape(String(taskId))}"]`);
+  if (!card) return;
+  card.scrollIntoView({ block: "center", behavior: "smooth" });
+  card.classList.add("flash");
+  setTimeout(() => card.classList.remove("flash"), 1600);
+}
+
 /* The child's own Trace, opened from its card.
    It is an overlay: the parent trace, its scroll position and its open folds
    stay exactly as they were, and closing returns to them. */
@@ -4197,6 +4235,8 @@ function renderTraceBlocks(box, blocks, { truncated, eof, previous, detail, runR
   (blocks || []).forEach((block, index) => appendNode(scroll, block, index));
   if (eof) scroll.append(el("div", { class: "hint" }, "—— trace 结束 ——"));
   fragment.append(scroll);
+  const strip = runningStrip(box, blocks);
+  if (strip) fragment.append(strip);
   box.replaceChildren(fragment);
   tickElapsedClocks(box);
   return serialized;
