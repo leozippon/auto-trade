@@ -33,6 +33,7 @@ from tests.unit.synthetic_arm import (
     decision_anchor,
     make_arm,
 )
+from tests.unit.test_research_session_prompt import retired_vocabulary
 
 
 @pytest.fixture(autouse=True)
@@ -467,3 +468,132 @@ def test_llm_research_sessions_mount_only_the_research_end_view_and_hand_off_pri
             name.split("_")[1] <= GEOMETRY["research_end"]
             for name in replayed["pit"]["replay_slots"]
         )
+    # Everything the model read, tool schemas included, is research-session
+    # vocabulary and names no date after research end.
+    read = _model_input(llm)
+    assert retired_vocabulary(read) == []
+    for later in ("20240701", "2024-07-01", GEOMETRY["forward_end"], GEOMETRY["heldout_end"], RELEASE_END):
+        assert later not in read
+
+
+def _model_input(llm) -> str:
+    """Every message and tool schema a scripted model was sent, as one text."""
+
+    return "\n".join(
+        [message.content or "" for call in llm.calls for message in call["messages"]]
+        + [json.dumps(call["tools"], ensure_ascii=False) for call in llm.calls]
+    )
+
+
+def test_llm_sessions_validate_a_multi_year_span_meet_the_gate_continue_and_end_the_arm(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, synthetic_provider
+):
+    """Every finish outcome except a freeze, through the real worker.
+
+    On a two-year research period, s1 validates its working copy on Y2 and on
+    the full span, which replays both research years as one book; a freeze of
+    the full-span node is refused by the Pipeline's own gate with its named
+    reason, so s1 continues from that node. s2 starts from the node s1 handed
+    on, validates it again and ends the arm with no_edge: the arm has no
+    deliverable and nothing is replayed after research end.
+    """
+
+    from autotrade.environment.llm import ProviderResponse, ToolCall
+    from tests.unit.test_interactive_worker_local import (
+        LAST_WORKING_COPY_NODE,
+        _NominatingLLM,
+        _NoShellRunner,
+    )
+
+    def validate(span: str) -> ToolCall:
+        return ToolCall(
+            f"valid_{span}",
+            "batch_validate",
+            {
+                "span": span,
+                "candidates": [
+                    {
+                        "name": "working_copy",
+                        "hypothesis": f"the working copy earns a positive neutralized excess over {span}",
+                        "path": "output",
+                    }
+                ],
+            },
+        )
+
+    def finish(**arguments: object) -> ProviderResponse:
+        return ProviderResponse(tool_calls=(ToolCall("finish", "finish_session", dict(arguments)),))
+
+    reason = "两个研究年里只有一次完整研究期验证，冻结门要求至少两次，交给下一会话在同一机制上补足对照后再判断。"
+    repo, experiment = make_arm(
+        tmp_path,
+        developer_mode="llm",
+        research_start="20220701",
+        max_replay_years_per_session=6,
+    )
+    monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
+    options = load_worker_options(experiment, repo_root=repo)
+    llm = _NominatingLLM(
+        [
+            ProviderResponse(tool_calls=(validate("Y2"), validate("full"))),
+            finish(outcome="freeze", node_id=LAST_WORKING_COPY_NODE),
+            finish(outcome="continue", node_id=LAST_WORKING_COPY_NODE, reason=reason),
+            ProviderResponse(tool_calls=(validate("full"),)),
+            finish(outcome="no_edge", reason="完整研究期上复核后，本机制没有稳定的中性化超额，参考包的终止条件已满足，结束本臂。"),
+        ]
+    )
+    result = run_local_interactive_worker(
+        options, llm=llm, command_runner_factory=lambda _workspace: _NoShellRunner()
+    )
+
+    records = ExperimentLedger(options.rolling.ledger_path).read()
+    assert [row["record_type"] for row in records] == ["research_session", "research_session"]
+    first, second = records
+    assert [step["span"] for step in first["steps"]] == ["Y2", "full"]
+    full_node = first["steps"][1]["step_id"]
+    assert (first["outcome"], first["next_start_node_id"], first["frozen"]) == ("continue", full_node, None)
+    assert (second["start_node_id"], second["outcome"]) == (full_node, "no_edge")
+    assert result["verdict"] == {"status": "no_deliverable", "reasons": [f"no_edge: {second['reason']}"]}
+    assert all(item[0] != "heldout" for item in synthetic_provider.requests)
+
+    # The refusal the model read names the gate's reason and its numbers.
+    refusal = next(
+        message.content
+        for call in llm.calls
+        for message in call["messages"]
+        if "freeze_gate_refused" in (message.content or "")
+    )
+    assert "freeze_too_few_full_span_validations" in refusal and "full_span_validations=1" in refusal
+
+    # Y2 replayed one slot; the full span replayed Y1 and then Y2 as one book.
+    year, full = (
+        json.loads(Path(step["validation_result_ref"]).read_text(encoding="utf-8")) for step in first["steps"]
+    )
+    assert [name.split("_")[:2] for name in year["pit"]["replay_slots"]] == [["20230701", "20240630"]]
+    assert [name.split("_")[:2] for name in full["pit"]["replay_slots"]] == [
+        ["20220701", "20230630"],
+        ["20230701", "20240630"],
+    ]
+    assert full["equity_curve"][0]["trade_date"] == "20220701"
+    assert full["equity_curve"][-1]["trade_date"] <= GEOMETRY["research_end"]
+    assert [row["label"] for row in full["stats"]["sub_windows"]] == ["202207-202306", "202307-202406"]
+
+    # s2's facts: the last of two sessions, started from s1's node, with s1's outcome.
+    s2_system = next(
+        message.content
+        for call in reversed(llm.calls)
+        for message in call["messages"]
+        if message.role == "system" and "earlier_sessions" in (message.content or "")
+    )
+    facts = json.loads(s2_system.split("```json\n", 1)[1].split("\n```", 1)[0])
+    assert facts["identity"]["session"] == {"index": 2, "of": 2, "last": True}
+    assert facts["artifact_contract"]["start"]["node_id"] == full_node
+    assert [year["label"] for year in facts["research_geometry"]["years"]] == ["Y1", "Y2"]
+    assert facts["research_geometry"]["research_period"] == "20220701..20240630"
+    assert facts["arm"]["trials_to_date"] == 2 and facts["arm"]["full_span_validations_to_date"] == 1
+    assert [row["outcome"] for row in facts["earlier_sessions"]] == ["continue"]
+
+    read = _model_input(llm)
+    assert retired_vocabulary(read) == []
+    for later in ("20240701", "2024-07-01", GEOMETRY["forward_end"], GEOMETRY["heldout_end"], RELEASE_END):
+        assert later not in read

@@ -37,7 +37,9 @@ GEOMETRY = {
 }
 # The release ends inside Held-out.
 RELEASE_END = "20250912"
-FIRST_DAY = date(2023, 5, 2)
+# History starts two months before a two-year research period (20220701) so
+# an arm may also research Y1..Y2 of the same market.
+FIRST_DAY = date(2022, 5, 2)
 SYMBOLS = [f"{number:06d}.SZ" for number in range(1, 31)]
 EDGE_SYMBOL = SYMBOLS[0]
 
