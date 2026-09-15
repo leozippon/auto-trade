@@ -2829,7 +2829,7 @@ function environmentStagePanel(detail) {
 function directivePanel(detail, session) {
   const control = detail.control || { directives: {} };
   const experimentDirective = String(
-    (detail.params || {}).fold_exploration_directive || "",
+    (detail.params || {}).research_directive || "",
   ).trim();
   const textarea = el("textarea", {
     class: "directive",

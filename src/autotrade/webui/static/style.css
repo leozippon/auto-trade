@@ -962,11 +962,6 @@ textarea.directive.inject-input {
 .inject-queue {
  margin: var(--space-2) 0;
 }
-.modal.prompt-modal textarea.prompt-editor {
- height: 70vh;
- min-height: 70vh;
- font-size: 0.845rem;
-}
 .hint {
  font-size: 0.875rem;
  color: var(--muted);
