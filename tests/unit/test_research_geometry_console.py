@@ -39,7 +39,7 @@ def _experiment(root: Path, experiment_id: str, params: dict[str, object]) -> Pa
     return directory
 
 
-_CURRENT = {**DEFAULT_RESEARCH_GEOMETRY.to_record(), "research_sessions": 1}
+_CURRENT = {**DEFAULT_RESEARCH_GEOMETRY.to_record()}
 _FOLD_ERA = {
     "fold_period": "year",
     "development_first_period": "2022",
@@ -71,21 +71,20 @@ def test_a_fold_era_params_file_is_flagged_unreadable_and_the_rest_still_list(tm
 def test_the_verdict_reaches_the_listing_once_the_forward_record_exists(tmp_path: Path):
     root = tmp_path / "experiments"
     directory = _experiment(root, "graduate", _CURRENT)
-    write_json_atomic(directory / "hitl/schedule.json", build_session_plan(1, forward={}))
+    write_json_atomic(directory / "hitl/schedule.json", build_session_plan(forward={}))
     ledger = ExperimentLedger(directory / "ledgers/experiment_ledger.jsonl")
-    frozen = directory / "artifacts/strategy/frozen/strategy_s1_abc/output"
+    frozen = directory / "artifacts/strategy/frozen/strategy_research_abc/output"
     ledger.append(
         {
             "record_type": "research_session",
             "experiment_id": "graduate",
             "epoch_id": "research",
-            "fold_id": "s1",
-            "run_id": "run_s1",
-            "session_key": "s1",
-            "session_id": "s1",
+            "fold_id": "research",
+            "run_id": "run_research",
+            "session_key": "research",
             "outcome": "freeze",
             "steps": [],
-            "frozen": {"artifact_id": "strategy_s1_abc", "output_path": str(frozen)},
+            "frozen": {"artifact_id": "strategy_research_abc", "output_path": str(frozen)},
         }
     )
     # Frozen, forward still running: no verdict and no Paper candidate.
@@ -100,7 +99,7 @@ def test_the_verdict_reaches_the_listing_once_the_forward_record_exists(tmp_path
             "fold_id": "forward",
             "run_id": "run_forward",
             "session_key": "forward",
-            "artifact_id": "strategy_s1_abc",
+            "artifact_id": "strategy_research_abc",
             "status": "ok",
             "verdict": {"status": "graduated", "reasons": []},
         }
@@ -108,7 +107,7 @@ def test_the_verdict_reaches_the_listing_once_the_forward_record_exists(tmp_path
     summary = summarize_experiment(directory)
     assert summary["verdict"]["status"] == "graduated"
     assert summary["verdict"]["reasons"] == []
-    assert summary["paper_candidate"]["artifact_id"] == "strategy_s1_abc"
+    assert summary["paper_candidate"]["artifact_id"] == "strategy_research_abc"
     detail = TestClient(create_app(tmp_path)).get("/api/experiments/graduate").json()
     assert detail["verdict"]["status"] == "graduated"
 
@@ -122,11 +121,10 @@ def test_the_create_form_is_seeded_with_the_research_geometry(tmp_path: Path):
     for retired in ("test_stage", "epochs", "fold_period", "development_first_period"):
         assert retired not in fields
     for key, value in (
-        ("research_sessions", 4),
         ("window_months", 24),
-        ("max_session_minutes", 720),
-        ("max_replay_years_per_session", 24),
-        ("max_llm_calls", 1600),
+        ("max_research_minutes", 2400),
+        ("max_replay_years", 96),
+        ("max_llm_calls", 6400),
         ("screen_exclude_st", False),
         ("screen_exclude_new_listed_days", 0),
         ("screen_boards", []),

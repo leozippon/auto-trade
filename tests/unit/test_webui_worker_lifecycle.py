@@ -46,7 +46,6 @@ from autotrade.pipelines.hitl_state import (
     read_control,
     write_control,
 )
-from autotrade.pipelines.ledger import ExperimentLedger
 from autotrade.webui import manager as manager_module
 from autotrade.webui.manager import ManagerError
 from autotrade.webui.server import create_app
@@ -116,7 +115,7 @@ write_json_atomic(
         state="running_session",
         pid=pid,
         pid_start_ticks=proc_start_ticks(pid),
-        session_key="s2",
+        session_key="research",
     ),
 )
 open("__READY__", "w").close()
@@ -147,17 +146,9 @@ class WorkerLifecycleTest(unittest.TestCase):
         )
         write_json_atomic(
             self.hitl / "schedule.json",
-            build_session_plan(2, forward={}),
+            build_session_plan(forward={}),
         )
-        # s1 is settled (it has a durable record); s2 is not.
-        ExperimentLedger(self.directory / "ledgers/experiment_ledger.jsonl").append(
-            {
-                "record_type": "research_session", "experiment_id": "exp_ctl",
-                "epoch_id": "research", "fold_id": "s1", "run_id": "run_001",
-                "session_key": "s1", "session_id": "s1", "outcome": "continue",
-                "steps": [],
-            }
-        )
+        # The research session is not settled: no durable record yet.
         self.client = TestClient(create_app(self.repo_root, self.experiments_root))
 
     # ---- helpers ---------------------------------------------------------
@@ -166,7 +157,7 @@ class WorkerLifecycleTest(unittest.TestCase):
         process = subprocess.Popen(
             [sys.executable, "-c", textwrap.dedent(source).format(
                 ready=str(ready), src=SRC_ROOT,
-                control=str(self.control_path), session="s2",
+                control=str(self.control_path), session="research",
             )],
             start_new_session=True, stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -236,7 +227,7 @@ class WorkerLifecycleTest(unittest.TestCase):
     # ---- terminate -------------------------------------------------------
     def test_terminate_signals_the_worker_group_and_reports_a_graceful_exit(self) -> None:
         process = self._spawn(_COOPERATIVE)
-        self._publish(process, session_key="s2")
+        self._publish(process, session_key="research")
         started = time.monotonic()
         response = self._post(action="terminate")
         elapsed = time.monotonic() - started
@@ -260,11 +251,11 @@ class WorkerLifecycleTest(unittest.TestCase):
         write_control(
             self.control_path,
             ControlState(
-                directives={"s2": "keep the turnover down"},
+                directives={"research": "keep the turnover down"},
             ),
         )
         process = self._spawn(_CONSUMES_CONTROLS)
-        self._publish(process, session_key="s2")
+        self._publish(process, session_key="research")
         started = time.monotonic()
         body = self._post(action="terminate").json()
         elapsed = time.monotonic() - started
@@ -299,7 +290,7 @@ class WorkerLifecycleTest(unittest.TestCase):
             {"schema_version": 1, "pid": 999_999_999, "state": "stopped"},
         )
         process = self._spawn(_STUBBORN)
-        self._publish(process, session_key="s2")
+        self._publish(process, session_key="research")
 
         waiting = threading.Event()
         real_await = manager_module._await_worker_exit
@@ -349,7 +340,7 @@ class WorkerLifecycleTest(unittest.TestCase):
         would not prove the process ever dies.
         """
         process = self._spawn(_STUBBORN)
-        self._publish(process, session_key="s2")
+        self._publish(process, session_key="research")
         started = time.monotonic()
         body = self._post(action="terminate").json()
         elapsed = time.monotonic() - started
@@ -378,7 +369,7 @@ class WorkerLifecycleTest(unittest.TestCase):
             ControlState(mode="manual", request="stop", restart_pending=True),
         )
         process = self._spawn(_COOPERATIVE)
-        self._publish(process, session_key="s2")
+        self._publish(process, session_key="research")
         response = self._post(action="restart")
         self.assertEqual(response.status_code, 200, response.text)
         body = response.json()
@@ -413,11 +404,11 @@ class WorkerLifecycleTest(unittest.TestCase):
             ControlState(
                 mode="manual",
                 request="stop",
-                directives={"s2": "keep the turnover down"},
+                directives={"research": "keep the turnover down"},
             ),
         )
         process = self._spawn(_CONSUMES_CONTROLS)
-        self._publish(process, session_key="s2")
+        self._publish(process, session_key="research")
         started = time.monotonic()
         response = self._post(action="restart")
         elapsed = time.monotonic() - started
@@ -436,7 +427,7 @@ class WorkerLifecycleTest(unittest.TestCase):
             self.control_path,
             ControlState(
                 request="stop",
-                directives={"s2": "keep the turnover down"},
+                directives={"research": "keep the turnover down"},
             ),
         )
         spawned = manager_module.ExperimentManager(
@@ -446,7 +437,7 @@ class WorkerLifecycleTest(unittest.TestCase):
         control = read_control(self.control_path)
         self.assertIsNone(control.request)
         self.assertEqual(
-            control.directives, {"s2": "keep the turnover down"}
+            control.directives, {"research": "keep the turnover down"}
         )
 
     def test_start_worker_keeps_worker_temp_files_off_the_shared_tmpfs(self) -> None:
@@ -555,7 +546,7 @@ class WorkerLifecycleTest(unittest.TestCase):
         """
         self._install_worker_script()
         process = self._spawn(_STUBBORN)
-        self._publish(process, session_key="s2")
+        self._publish(process, session_key="research")
         with patch.object(manager_module, "_RESTART_GRACE_SECONDS", 1.0):
             response = self._post(action="restart")
         self.assertEqual(response.status_code, 200, response.text)
@@ -594,8 +585,8 @@ if __name__ == "__main__":
 #: entry is a value that used to reach `params.json` and kill the worker a
 #: second later; the pre-flight turns each into an actionable HTTP 400.
 _REJECTED_CREATES = (
-    ({"research_sessions": 0}, "research_sessions must be a positive integer"),
-    ({"max_replay_years_per_session": 0}, "max_replay_years_per_session must be a positive integer"),
+    ({"max_research_minutes": 0}, "max_research_minutes must be a positive integer"),
+    ({"max_replay_years": 0}, "max_replay_years must be a positive integer"),
     ({"initial_cash": 0}, "initial_cash must be a positive finite number"),
     ({"max_drawdown": 1.5}, "max_drawdown must be between 0.0 and 1.0"),
     ({"compact_max_calls": -1}, "compact_max_calls must be a non-negative integer"),
@@ -668,7 +659,7 @@ class CreatePreflightTest(unittest.TestCase):
 
     def test_a_refused_create_never_spawns_a_worker(self) -> None:
         """Spawn is not patched: the entrypoint records that it ran."""
-        response = self._create(research_sessions=0)
+        response = self._create(max_research_minutes=0)
         self.assertEqual(response.status_code, 400)
         self._assert_nothing_was_created()
         # A worker that DID start records itself in ~0.04 s on this host under
@@ -747,14 +738,14 @@ class CreatePreflightTest(unittest.TestCase):
         original = worker_module._positive_int
 
         def stricter(value: object, name: str) -> int:
-            if name == "research_sessions" and value == WEB_CREATE_DEFAULTS["research_sessions"]:
-                raise ValueError("research_sessions is temporarily unavailable")
+            if name == "max_research_minutes" and value == WEB_CREATE_DEFAULTS["max_research_minutes"]:
+                raise ValueError("max_research_minutes is temporarily unavailable")
             return original(value, name)
 
         with patch.object(worker_module, "_positive_int", stricter):
-            with self.assertRaisesRegex(ValueError, "research_sessions is temporarily unavailable"):
+            with self.assertRaisesRegex(ValueError, "max_research_minutes is temporarily unavailable"):
                 worker_module.load_worker_options(directory, repo_root=repository)
-            with self.assertRaisesRegex(ManagerError, "research_sessions is temporarily unavailable"):
+            with self.assertRaisesRegex(ManagerError, "max_research_minutes is temporarily unavailable"):
                 with patch.object(manager, "start_worker", lambda experiment_id: {"spawned": False}):
                     manager.create_experiment({**payload, "experiment_id": "shared_body_2"})
         self.assertFalse((self.experiments_root / "shared_body_2").exists())

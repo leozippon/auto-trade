@@ -204,7 +204,6 @@ class _Session:
         deadline_seconds: float = 600.0,
         readonly_template: bool = False,
         trace: list[tuple[str, dict[str, object]]] | None = None,
-        last_session: bool = False,
     ) -> None:
         self.root = root
         self.trace_events = trace
@@ -227,11 +226,7 @@ class _Session:
         snapshot = SnapshotBundle("snapshot", "decision", "")
         request = ResearchSessionRequest(
             experiment_id="exp",
-            session_id="s1",
-            session_index=1,
-            sessions_total=4,
             run_id="run_batch",
-            start=None,
             snapshot=snapshot,
             decision_time=moment,
             research_years=tuple(
@@ -285,15 +280,14 @@ class _Session:
             self.tree,
             self.output,
             self.models,
-            session_ref=self.backtest.ref_store.get_or_create("session", "s1"),
+            session_ref=self.backtest.ref_store.get_or_create("session", "research"),
             run_id=self.backtest.ref_store.get_or_create("run", "run_batch"),
         )
         self.finish = FinishSessionTool(
             self.tree,
-            session_ref=self.backtest.ref_store.get_or_create("session", "s1"),
+            session_ref=self.backtest.ref_store.get_or_create("session", "research"),
             run_ref=self.backtest.ref_store.get_or_create("run", "run_batch"),
             freeze_gate=self.backtest.freeze_gate,
-            last_session=last_session,
             another_round_fits=lambda: another_batch_round_fits(self.backtest),
             budget_status=lambda: session_budget_status(self.backtest),
         )
@@ -829,7 +823,7 @@ class BatchSelectHintTest(unittest.TestCase):
         rows = [{"name": "a", "node_id": "n_a", "status": "ok", "stats": {}}]
         hint = batch_select_hint(rows, replay_years_remaining=0)
         self.assertIn("replay-year budget is spent", hint)
-        self.assertIn("PRIOR.md and finish_session", hint)
+        self.assertIn("write any skills and finish_session", hint)
 
 
 class BatchValidateContractTest(unittest.TestCase):
@@ -1086,7 +1080,7 @@ class NullControlToolTest(unittest.TestCase):
             self.assertEqual((first["null_controls_used"], first["null_controls_remaining"]), (1, 1))
             # Drawn exactly as the freeze would draw it: whole period, frozen role.
             self.assertIsNone(calls[0]["step"])
-            self.assertEqual(calls[0]["seed"], null_control_seed("s1", "frozen"))
+            self.assertEqual(calls[0]["seed"], null_control_seed("research", "frozen"))
             self.assertEqual((calls[0]["start"], calls[0]["end"]), ("20210701", "20250630"))
             self.assertEqual(calls[0]["result_ref"], session.backtest.steps[0].validation.result_ref)
             again = tool.invoke({"node_id": node}).value
@@ -1155,10 +1149,10 @@ class AnotherRoundFitsTest(unittest.TestCase):
     the session could still run one more round, false once the replay-year
     budget or the deadline window rules one out."""
 
-    def _continue(self, session: _Session) -> object:
+    def _no_edge(self, session: _Session) -> object:
         return session.finish.invoke(
             {
-                "outcome": "continue",
+                "outcome": "no_edge",
                 "reason": "one round resolved the pre-registered hypotheses of this session",
             }
         )
@@ -1171,7 +1165,7 @@ class AnotherRoundFitsTest(unittest.TestCase):
             session.call("a", "b")
             self.assertTrue(another_batch_round_fits(session.backtest))
             # One completed round is a legal finish: no round floor remains.
-            self.assertTrue(self._continue(session).finish)
+            self.assertTrue(self._no_edge(session).finish)
 
     def test_no_round_fits_when_the_budget_cannot_hold_another(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -1182,7 +1176,7 @@ class AnotherRoundFitsTest(unittest.TestCase):
             session.candidate("b", _strategy("22"))
             session.call("a", "b")
             self.assertFalse(another_batch_round_fits(session.backtest))
-            self.assertTrue(self._continue(session).finish)
+            self.assertTrue(self._no_edge(session).finish)
 
     def test_no_round_fits_inside_the_deadline_window(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -1193,7 +1187,7 @@ class AnotherRoundFitsTest(unittest.TestCase):
             session.candidate("b", _strategy("22"))
             session.call("a", "b")
             self.assertFalse(another_batch_round_fits(session.backtest))
-            self.assertTrue(self._continue(session).finish)
+            self.assertTrue(self._no_edge(session).finish)
 
 
 if __name__ == "__main__":

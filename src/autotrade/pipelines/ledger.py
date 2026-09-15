@@ -2,9 +2,9 @@
 
 One JSONL file per experiment. The pipeline writes three record types:
 
-- ``research_session``: one research session's outcome and Steps; the one
-  that passed the freeze gate also carries the arm's ``frozen`` block, and the
-  one that ended research without a freeze carries ``arm_end``;
+- ``research_session``: the arm's one research session, its outcome and the
+  Steps of every attempt; it carries the arm's ``frozen`` block when the
+  nominee passed the freeze gate, otherwise ``arm_end``;
 - ``forward``: the continuous forward and Held-out replay of the frozen
   artifact, its two slices and the graduation verdict;
 - ``attempt_failed``: a session or replay that raised before its business
@@ -16,7 +16,7 @@ One JSONL file per experiment. The pipeline writes three record types:
 
 Every record carries the link keys ``experiment_id``, ``epoch_id``, ``fold_id``
 and ``run_id``: ``epoch_id`` names the stage (``research`` or ``forward``) and
-``fold_id`` the session (``s1``, ``s2``, ... or ``forward``). Both keep their
+``fold_id`` the session key (``research`` or ``forward``). Both keep their
 Fold-era names because renaming a persisted link key needs a schema bump.
 
 A ``forward`` row with ``state_changed_during_test=true`` is an integrity
@@ -47,7 +47,9 @@ LEDGER_RECORD_SCHEMA_VERSION = 1
 # The stage names the link key ``epoch_id`` carries.
 RESEARCH_STAGE = "research"
 FORWARD_STAGE = "forward"
-# The forward replay's session key and ``fold_id``.
+# The two planned sessions' keys, also their ``fold_id``: the arm's one
+# research session and the forward replay.
+RESEARCH_SESSION_KEY = "research"
 FORWARD_SESSION_KEY = "forward"
 PIPELINE_RECORD_TYPES = ("research_session", "forward", "attempt_failed")
 FOLD_ERA_RECORD_TYPES = (

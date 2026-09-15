@@ -246,7 +246,6 @@ def make_arm(tmp_path: Path, **params: object) -> tuple[Path, Path]:
                 "execution_mode": "trusted",
                 "developer_mode": "baseline",
                 "initial_cash": 1_000_000,
-                "research_sessions": 2,
                 "include_fundamentals": False,
                 "include_macro": False,
                 "include_events": False,

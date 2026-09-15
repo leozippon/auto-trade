@@ -40,7 +40,7 @@ from autotrade.environment.tools.base import SessionInterrupt
 from autotrade.agent.runner import (
     SUBAGENT_TEARDOWN_WAIT_SECONDS,
     AgentSessionConfig,
-    AgentSessionDeadlineExceeded,
+    AgentSessionBudgetExhausted,
     AgentSessionRunner,
 )
 from autotrade.environment.llm import (
@@ -1595,7 +1595,7 @@ def test_parent_text_only_pending_subagent_deadline_does_not_deadlock(
 
     t0 = time.monotonic()
     try:
-        with pytest.raises(AgentSessionDeadlineExceeded):
+        with pytest.raises(AgentSessionBudgetExhausted):
             AgentSessionRunner(
                 llm=_ParentLLM(),
                 tools=ToolRegistry([finish]),
@@ -2128,7 +2128,7 @@ def test_unfinished_session_end_still_reports_token_usage() -> None:
     )
     events: list[tuple[str, dict[str, object]]] = []
     runner.event_sink = lambda event, payload: events.append((event, payload))
-    with pytest.raises(RuntimeError, match="call budget"):
+    with pytest.raises(AgentSessionBudgetExhausted, match="call budget"):
         runner.run("go")
     ended = next(payload for event, payload in events if event == "session_end")
     assert ended["status"] == "call_budget_exhausted"

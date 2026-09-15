@@ -29,7 +29,6 @@ def _facts(
         "epoch_id": "research",
         "fold_id": "s4",
         "kind": "research",
-        "session": {"index": 4, "of": 4, "last": True},
         "research": {
             "decision_time": "2025-06-30T23:59:59+08:00",
             "input_window": "20230701..20250630",
@@ -67,15 +66,14 @@ def _data_summary(rows: dict[str, int]) -> dict[str, object]:
 def test_the_session_facts_state_the_research_period_and_the_session_place() -> None:
     facts = _facts()
     scope = facts["research_scope"]
-    assert "same period 20210701..20250630" in scope["research"]
-    assert "session 4 of 4" in scope["research"]
+    assert "one research session researches the period 20210701..20250630" in scope["research"]
+    assert "no other session follows" in scope["research"]
     assert "sealed data" in scope["research"]
     assert scope["universe"].startswith("The universe is unfiltered")
     assert "ST names included" in scope["universe"]
     assert "every trading day at 08:30" in scope["strategy_cadence"]
     assert "own rebalance cadence" in scope["strategy_cadence"]
-    # The last session is stated as such: continue is not an outcome there.
-    assert facts["identity"]["session"] == {"index": 4, "of": 4, "last": True}
+    assert "session" not in facts["identity"]
     assert facts["visibility_policy"]["research_period_visible"] is True
     assert "不进入任何会话" in facts["visibility_policy"]["after_research_end"]
     rendered = json.dumps(facts, ensure_ascii=False)

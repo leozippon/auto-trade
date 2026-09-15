@@ -472,7 +472,6 @@ def _research_session_view(
         "run_wall_seconds": _number(record.get("run_wall_seconds")),
         "trials_to_date": record.get("trials_to_date"),
         "nominated_step_id": record.get("nominated_step_id"),
-        "next_start_node_id": record.get("next_start_node_id"),
         "freeze_gate": (
             {
                 "passed": bool(gate.get("passed")),
@@ -490,11 +489,8 @@ def _research_session_view(
         else None,
         "validations": [_step_view(row) for row in steps],
         "best": _best_candidate(earlier, steps),
-        # The PRIOR.md this session handed on, when it published a new one.
-        "prior_published": bool(record.get("prior_published")),
-        "prior": identity.public_text(str(record.get("prior") or ""))
-        if record.get("prior_published")
-        else None,
+        "attempts": record.get("attempts"),
+        "budget_used": _mapping(record.get("budget_used")) or None,
     }
 
 

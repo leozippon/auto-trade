@@ -39,8 +39,7 @@ from autotrade.pipelines.hitl_state import build_session_plan
 from autotrade.pipelines.local_backend import BATCH_VALIDATE_MAX_CONCURRENCY
 from autotrade.webui.prompt_preview import RUNTIME_PLACEHOLDER, build_prompt_preview
 
-FIRST_KEY = "s1"
-SECOND_KEY = "s2"
+SESSION_KEY = "research"
 
 # Wording retired from the prompts and the calendar. A preview that still shows
 # any of it is serving a stale copy rather than the current builder.
@@ -109,7 +108,6 @@ def _experiment(tmp_path: Path, **overrides: object) -> tuple[Path, Path]:
         "execution_mode": "sandbox",
         "developer_mode": "llm",
         **GEOMETRY.to_record(),
-        "research_sessions": 2,
         # Keeps the pinned release to the core datasets the fixture provides.
         "include_fundamentals": False,
         "include_macro": False,
@@ -121,12 +119,12 @@ def _experiment(tmp_path: Path, **overrides: object) -> tuple[Path, Path]:
     params.update(overrides)
     (hitl / "params.json").write_text(json.dumps(params), encoding="utf-8")
     (hitl / "schedule.json").write_text(
-        json.dumps(build_session_plan(2, forward={})), encoding="utf-8"
+        json.dumps(build_session_plan(forward={})), encoding="utf-8"
     )
     return directory, repo
 
 
-def _preview(tmp_path: Path, session_key: str = FIRST_KEY, directive: str = "", **overrides):
+def _preview(tmp_path: Path, session_key: str = SESSION_KEY, directive: str = "", **overrides):
     directory, repo = _experiment(tmp_path, **overrides)
     return build_prompt_preview(directory, session_key, directive, repo_root=repo)
 
@@ -165,16 +163,16 @@ def test_research_preview_states_the_pipeline_budgets_and_window(tmp_path: Path)
     assert facts["budgets"] == {
         "context_compaction": facts["budgets"]["context_compaction"],
         "deadline_seconds": session_deadline_seconds(
-            rolling_default("max_session_minutes"), DEFAULT_DEADLINE_GRACE_MINUTES
+            rolling_default("max_research_minutes"), DEFAULT_DEADLINE_GRACE_MINUTES
         ),
         "deadline_seconds_note": DEADLINE_SECONDS_NOTE,
         "deadline_grace_seconds": DEFAULT_DEADLINE_GRACE_MINUTES * 60.0,
         "finalize_before_deadline_seconds": rolling_default(
             "finalize_before_deadline_seconds"
         ),
-        "max_replay_years": rolling_default("max_replay_years_per_session"),
+        "max_replay_years": rolling_default("max_replay_years"),
         "max_replay_years_note": REPLAY_YEARS_NOTE,
-        "max_null_controls": rolling_default("max_null_controls_per_session"),
+        "max_null_controls": rolling_default("max_null_controls"),
         "max_llm_calls": rolling_default("max_llm_calls"),
         "strategy_fit_timeout_seconds": float(
             rolling_default("strategy_fit_timeout_seconds")
@@ -190,16 +188,16 @@ def test_research_preview_states_the_pipeline_budgets_and_window(tmp_path: Path)
     assert geometry["research_period"] == f"{GEOMETRY.research_start}..{GEOMETRY.research_end}"
     assert geometry["decision_time"] == GEOMETRY.research_decision_time.isoformat()
     assert [year["label"] for year in geometry["years"]] == ["Y1", "Y2", "Y3", "Y4"]
-    assert facts["identity"]["session"] == {"index": 1, "of": 2, "last": False}
+    assert "session" not in facts["identity"]
     assert facts["artifact_contract"]["step_tree_enabled"] is True
     # Runtime-only facts are marked, never invented.
     assert facts["identity"]["run_id"] == RUNTIME_PLACEHOLDER
     assert facts["visible_timeline"]["execution_policy"]["text_available"] == RUNTIME_PLACEHOLDER
     assert (
         facts["budgets"]["deadline_seconds"] - facts["budgets"]["deadline_grace_seconds"]
-        == rolling_default("max_session_minutes") * 60.0
+        == rolling_default("max_research_minutes") * 60.0
     )
-    # The first session starts from the template.
+    # The session starts from the template.
     assert facts["artifact_contract"]["start"]["kind"] == "template"
     # No date after research end appears anywhere in the prompt.
     for day in (GEOMETRY.forward_start, GEOMETRY.forward_end, GEOMETRY.heldout_start, GEOMETRY.heldout_end):
@@ -229,10 +227,10 @@ def test_preview_follows_the_experiment_parameters(tmp_path: Path):
     prompt = str(
         _preview(
             tmp_path,
-            FIRST_KEY,
+            SESSION_KEY,
             directive,
-            max_session_minutes=90,
-            max_replay_years_per_session=7,
+            max_research_minutes=90,
+            max_replay_years=7,
             max_llm_calls=123,
             disable_step_tree=True,
             research_directive="以截面因子为主线",
@@ -249,54 +247,12 @@ def test_preview_follows_the_experiment_parameters(tmp_path: Path):
     assert directive in prompt
 
 
-def test_a_later_session_shows_the_handoff_without_inventing_its_start(tmp_path: Path):
-    """Before the first session is recorded, the second one's start node is a
-    runtime fact; once it is, the node and the PRIOR that session left reach
-    the preview."""
-    directory, repo = _experiment(tmp_path)
-    waiting = _facts(_preview_of(directory, repo, SECOND_KEY))
-    assert waiting["artifact_contract"]["start"]["node_id"] == RUNTIME_PLACEHOLDER
-    handoff = "动量腿在研究期稳定，下一会话复核同一机制。"
-    ledger = directory / "ledgers" / "experiment_ledger.jsonl"
-    ledger.parent.mkdir(parents=True)
-    ledger.write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "record_type": "research_session",
-                "experiment_id": "preview_exp",
-                "epoch_id": "research",
-                "fold_id": "s1",
-                "run_id": "run_001",
-                "session_id": "s1",
-                "outcome": "continue",
-                "reason": "",
-                "next_start_node_id": "research__session_ref_x__run_ref_y__valid_001",
-                "steps": [],
-                "prior": handoff,
-            }
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    prompt = _preview_of(directory, repo, SECOND_KEY)
-    assert handoff in prompt
-    facts = _facts(prompt)
-    start = facts["artifact_contract"]["start"]
-    assert start == {
-        "kind": "step_node",
-        "node_id": "research__session_ref_x__run_ref_y__valid_001",
-        "model_artifacts_empty": RUNTIME_PLACEHOLDER,
-    }
-    assert facts["earlier_sessions"][0]["outcome"] == "continue"
-
-
 def test_unknown_and_forward_sessions_are_rejected(tmp_path: Path):
     directory, repo = _experiment(tmp_path)
     with pytest.raises(ValueError, match="forward replay"):
         build_prompt_preview(directory, "forward", "", repo_root=repo)
     with pytest.raises(KeyError):
-        build_prompt_preview(directory, "s9", "", repo_root=repo)
+        build_prompt_preview(directory, "s1", "", repo_root=repo)
 
 
 def _facts(prompt: str) -> dict:

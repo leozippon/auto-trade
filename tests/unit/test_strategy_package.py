@@ -309,25 +309,26 @@ def test_budgets_come_from_one_source_each():
         None, fit_timeout_seconds=rolling_default("strategy_fit_timeout_seconds")
     )
     assert strategy_config.limits == limits
-    for name in ("max_session_minutes", "max_replay_years_per_session", "max_llm_calls"):
+    for name in ("max_research_minutes", "max_replay_years", "max_llm_calls", "max_null_controls"):
         assert WEB_CREATE_DEFAULTS[name] == rolling_default(name)
     assert (
-        rolling_default("max_session_minutes"),
-        rolling_default("max_replay_years_per_session"),
+        rolling_default("max_research_minutes"),
+        rolling_default("max_replay_years"),
         rolling_default("max_llm_calls"),
-    ) == (720, 24, 1600)
-    assert _MAX_DEADLINE_OVERRIDE_MINUTES == 2 * rolling_default("max_session_minutes") == 1440
+        rolling_default("max_null_controls"),
+    ) == (2400, 96, 6400, 12)
+    assert _MAX_DEADLINE_OVERRIDE_MINUTES == 2 * rolling_default("max_research_minutes") == 4800
 
     config = SimpleNamespace(
-        max_replay_years_per_session=rolling_default("max_replay_years_per_session"),
+        max_replay_years=rolling_default("max_replay_years"),
         max_llm_calls=rolling_default("max_llm_calls"),
-        max_session_minutes=rolling_default("max_session_minutes"),
+        max_research_minutes=rolling_default("max_research_minutes"),
         deadline_grace_minutes=rolling_default("deadline_grace_minutes"),
     )
     budgets = _session_budgets(config, {"deadline_seconds": _MAX_DEADLINE_OVERRIDE_MINUTES * 60})
     grace = rolling_default("deadline_grace_minutes") * 60.0
-    assert budgets["deadline_seconds"] == 1440 * 60.0 + grace
-    with pytest.raises(ValueError, match="cannot exceed 1440 minutes"):
+    assert budgets["deadline_seconds"] == 4800 * 60.0 + grace
+    with pytest.raises(ValueError, match="cannot exceed 4800 minutes"):
         _session_budgets(config, {"deadline_seconds": _MAX_DEADLINE_OVERRIDE_MINUTES * 60 + 1})
 
 

@@ -25,7 +25,7 @@ from .config import (
     AcceptanceRules,
     rolling_default,
 )
-from .ledger import FORWARD_SESSION_KEY
+from .ledger import FORWARD_SESSION_KEY, RESEARCH_SESSION_KEY
 
 HITL_STATE_SCHEMA_VERSION = 1
 CONTROL_MODES = ("auto", "manual")
@@ -47,7 +47,6 @@ WEB_CREATE_DEFAULTS: dict[str, object] = {
     "experiment_id": None,
     # Research, forward and Held-out dates (pipelines/calendar.ResearchGeometry).
     **DEFAULT_RESEARCH_GEOMETRY.to_record(),
-    "research_sessions": rolling_default("research_sessions"),
     "research_directive": rolling_default("research_directive"),
     "workspace_reference": rolling_default("workspace_reference"),
     "operating_memory": rolling_default("operating_memory"),
@@ -84,11 +83,11 @@ WEB_CREATE_DEFAULTS: dict[str, object] = {
     "screen_min_price": None,
     "screen_max_price": None,
     "screen_boards": (),
-    "max_replay_years_per_session": rolling_default("max_replay_years_per_session"),
-    "max_null_controls_per_session": rolling_default("max_null_controls_per_session"),
+    "max_replay_years": rolling_default("max_replay_years"),
+    "max_null_controls": rolling_default("max_null_controls"),
     "max_llm_calls": rolling_default("max_llm_calls"),
     "session_max_attempts": rolling_default("session_max_attempts"),
-    "max_session_minutes": rolling_default("max_session_minutes"),
+    "max_research_minutes": rolling_default("max_research_minutes"),
     "nl_failure_policy": rolling_default("nl_failure_policy"),
     "finalize_before_deadline_seconds": rolling_default("finalize_before_deadline_seconds"),
     "per_call_timeout_seconds": rolling_default("per_call_timeout_seconds"),
@@ -380,40 +379,29 @@ class StatusReporter:
 
 @dataclass(frozen=True)
 class PlannedSession:
-    """One entry of the plan of record: a research session or the forward replay."""
+    """One entry of the plan of record: the research session or the forward replay."""
 
     session_key: str
     # ``research`` or ``forward``.
     kind: str
-    # 1-based position of a research session; 0 for the forward replay.
-    index: int = 0
 
 
-def research_session_key(index: int) -> str:
-    return f"s{index}"
-
-
-def planned_sessions(research_sessions: int) -> tuple[PlannedSession, ...]:
-    """The research sessions in order, then the forward replay."""
+def planned_sessions() -> tuple[PlannedSession, ...]:
+    """The arm's plan: its one research session, then the forward replay."""
 
     return (
-        *(
-            PlannedSession(research_session_key(index), "research", index)
-            for index in range(1, research_sessions + 1)
-        ),
+        PlannedSession(RESEARCH_SESSION_KEY, "research"),
         PlannedSession(FORWARD_SESSION_KEY, "forward"),
     )
 
 
-def build_session_plan(
-    research_sessions: int, *, forward: Mapping[str, object]
-) -> dict[str, object]:
-    """The plan of record (``schedule.json``): the research sessions and the
+def build_session_plan(*, forward: Mapping[str, object]) -> dict[str, object]:
+    """The plan of record (``schedule.json``): the research session and the
     forward replay with its span (``forward`` as the pipeline states it)."""
 
     plan: list[dict[str, object]] = [
-        {"session_key": session.session_key, "kind": session.kind, "index": session.index}
-        for session in planned_sessions(research_sessions)
+        {"session_key": session.session_key, "kind": session.kind}
+        for session in planned_sessions()
     ]
     plan[-1] = {**plan[-1], "replay": dict(forward)}
     return {

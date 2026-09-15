@@ -93,11 +93,11 @@ BASE_EXPECTED_DEFAULTS: dict[str, object] = {
     "screen_min_circ_mv_yi": None,
     "screen_max_circ_mv_yi": None,
     # Both the packs and the directives promise the Agent this many host null
-    # controls per research session.
-    "max_null_controls_per_session": 3,
-    # Replay-years one research session may spend on validations; the packs
+    # controls over the research session.
+    "max_null_controls": 12,
+    # Replay-years the research session may spend on validations; the packs
     # size their rounds against it.
-    "max_replay_years_per_session": 24,
+    "max_replay_years": 96,
     # Derived from SandboxLimits.fit_timeout_seconds; packs promise the Agent a
     # fit budget of this size.
     "strategy_fit_timeout_seconds": 3600,
@@ -125,7 +125,6 @@ BASE_OVERRIDES: dict[str, object] = {
     "research_end": "20250630",
     "forward_end": "20260630",
     "heldout_end": "20260930",
-    "research_sessions": 4,
     # Sixty months behind the research-end decision view reach 2020-07, just
     # inside the 2020 floor of fundamentals and macro; part of every seed's
     # snapshot configuration.
@@ -140,9 +139,9 @@ BASE_OVERRIDES: dict[str, object] = {
     # The forward verdict's drawdown limit and cost stress.
     "max_drawdown": 0.25,
     "cost_stress_multiplier": 2.0,
-    # Per research session.
-    "max_session_minutes": 600,
-    "max_llm_calls": 1600,
+    # The one research session's budgets, spent across every attempt.
+    "max_research_minutes": 2400,
+    "max_llm_calls": 6400,
 }
 
 # Reported once per round on --dry-run: what every arm shares.
@@ -151,7 +150,6 @@ ROUND_REPORT_KEYS: tuple[str, ...] = (
     "research_end",
     "forward_end",
     "heldout_end",
-    "research_sessions",
     "pit_views_seed",
     "window_months",
     "include_fundamentals",
@@ -164,10 +162,10 @@ ROUND_REPORT_KEYS: tuple[str, ...] = (
     "text_datasets",
     "include_intraday",
     "operating_memory",
-    "max_session_minutes",
-    "max_replay_years_per_session",
+    "max_research_minutes",
+    "max_replay_years",
     "max_llm_calls",
-    "max_null_controls_per_session",
+    "max_null_controls",
     "strategy_fit_timeout_seconds",
     "initial_cash",
     "max_drawdown",

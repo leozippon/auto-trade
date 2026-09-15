@@ -1,17 +1,13 @@
-"""The PRIOR length bound and the sealed-stage content check for shared skills.
+"""The sealed-stage content check for shared skills.
 
-PRIOR.md is a research session's handoff to the next session and gets only a
-length bound. Shared skills can reach other experiments through the graduated
-memory layer, so every skill write refuses Held-out mentions, forward-period
-figures and forward-period-based selection.
+Shared skills can reach other experiments through the graduated memory layer,
+so every skill write refuses Held-out mentions, forward-period figures and
+forward-period-based selection.
 """
 
 from __future__ import annotations
 
 import re
-
-# PRIOR is free-format handoff text. This is a resource bound, not a schema.
-PRIOR_MAX_CHARS = 16_000
 
 _HELDOUT_MENTION_RE = re.compile(r"held-?out|holdout|持有期外|隐藏区间", re.I)
 # What a leaked forward result actually looks like: a performance word next to
@@ -93,7 +89,4 @@ def strict_transferable_content_violation(text: str) -> str:
     return ""
 
 
-__all__ = [
-    "PRIOR_MAX_CHARS",
-    "strict_transferable_content_violation",
-]
+__all__ = ["strict_transferable_content_violation"]

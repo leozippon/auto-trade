@@ -1,6 +1,6 @@
-"""Pre-session Prompt preview for research sessions.
+"""Pre-session Prompt preview for the research session.
 
-The console shows this text before a session starts, so it has to be the
+The console shows this text before the session starts, so it has to be the
 prompt the session will actually receive rather than a second description of
 it. Nothing here restates prompt text, budgets or contract wording: the
 experiment is resolved by the worker's own ``load_worker_options`` over the
@@ -12,10 +12,8 @@ to ``prompts.py``, to a budget default or to the facts projection therefore
 reaches this preview with no edit here.
 
 Only what comes into existence when the session starts is unavailable: the run
-id, the sandbox runtime environment, which PIT files the session's snapshot
-will carry, and the node the session starts from when an earlier session has
-not recorded it yet. Those render as ``RUNTIME_PLACEHOLDER`` instead of being
-invented.
+id, the sandbox runtime environment and which PIT files the session's snapshot
+will carry. Those render as ``RUNTIME_PLACEHOLDER`` instead of being invented.
 """
 
 from __future__ import annotations
@@ -34,8 +32,6 @@ from autotrade.pipelines.hitl_state import (
     read_control,
     read_json,
 )
-from autotrade.pipelines.ledger import research_records
-from autotrade.pipelines.prior import latest_prior_text
 
 from .registry import read_ledger_records
 
@@ -49,9 +45,9 @@ RUNTIME_PLACEHOLDER = "<runtime>"
 
 PREVIEW_NOTE = (
     "预览走 worker 同一条装配链：hitl/params.json → load_worker_options → "
-    "build_experiment_facts → build_system_prompt，此前会话的结果与当前 PRIOR 一并注入。"
-    "只有会话启动时才产生的事实（run id、沙箱 runtime env、快照实际挂载的数据、"
-    f"尚未由前一会话记下的起点节点）显示为 {RUNTIME_PLACEHOLDER}。"
+    "build_experiment_facts → build_system_prompt。"
+    "只有会话启动时才产生的事实（run id、沙箱 runtime env、快照实际挂载的数据）"
+    f"显示为 {RUNTIME_PLACEHOLDER}。"
 )
 
 _SYSTEM_BANNER = "======== 系统提示词（build_system_prompt）========"
@@ -71,29 +67,14 @@ def build_prompt_preview(
     # before anything else so a legacy experiment fails here exactly as a real
     # session would.
     ref_store = AgentRefStore(directory)
-    entry = _session_entry(directory, session_key)
+    _require_research_session(directory, session_key)
     options = load_worker_options(directory, repo_root=repo_root)
     control = read_control(directory / HITL_DIR_NAME / CONTROL_NAME)
-    index = int(entry.get("index") or 0)
-    records = _ledger_before_session(read_ledger_records(directory), index)
-    done = research_records(records)
-    # The node this session starts from: the template for the first session,
-    # the node its predecessor handed on once that one is recorded.
-    if index == 1:
-        start: object = None
-    elif len(done) >= index - 1:
-        start = done[index - 2].get("next_start_node_id")
-    else:
-        start = RUNTIME_PLACEHOLDER
     context = _SessionContext(
         options=options,
         ref_store=ref_store,
-        records=records,
-        prior=latest_prior_text(records),
+        records=read_ledger_records(directory),
         session_key=session_key,
-        index=index,
-        is_initial=start is None,
-        start=start,
     )
     system = _research_prompt(
         context,
@@ -109,11 +90,7 @@ class _SessionContext:
     options: InteractiveWorkerOptions
     ref_store: AgentRefStore
     records: list[dict[str, object]]
-    prior: str
     session_key: str
-    index: int
-    is_initial: bool
-    start: object
 
     @property
     def rolling(self):
@@ -153,7 +130,6 @@ def _research_prompt(
         arm_record,
         research_geometry_record,
         session_fact_blocks,
-        session_position_record,
         start_record,
     )
 
@@ -166,14 +142,13 @@ def _research_prompt(
         "epoch_id": "research",
         "fold_id": context.session_key,
         "kind": "research",
-        "session": session_position_record(context.index, rolling.research_sessions),
         "research": research_geometry_record(
             geometry.research_years,
             input_window_start=_months_before(geometry.research_end, rolling.window_months),
             decision_time=geometry.research_decision_time.isoformat(),
         ),
         "snapshot_config": context.options.snapshot_config.to_record(),
-        "start": start_record(None if context.is_initial else str(context.start)),
+        "start": start_record(),
         "arm": arm_record(context.records),
         "modification_constraints": rolling.step_constraints.to_record(),
         "acceptance_rules": rolling.acceptance.to_record(),
@@ -190,7 +165,7 @@ def _research_prompt(
         ),
         "budgets": {
             "max_replay_years": budgets["max_replay_years"],
-            "max_null_controls": rolling.max_null_controls_per_session,
+            "max_null_controls": rolling.max_null_controls,
             "max_llm_calls": budgets["max_llm_calls"],
             "deadline_seconds": budgets["deadline_seconds"],
             "deadline_grace_seconds": budgets["deadline_grace_seconds"],
@@ -200,11 +175,8 @@ def _research_prompt(
         },
     }
     # The blocks LLMResearchDeveloper._session_facts adds beside the shared
-    # projection: the earlier sessions' outcomes and the fixed
-    # workspace/boundary index.
-    blocks = session_fact_blocks(
-        context.records, Path("/nonexistent/prompt-preview-workspace")
-    )
+    # projection: the fixed workspace/boundary index.
+    blocks = session_fact_blocks(Path("/nonexistent/prompt-preview-workspace"))
     if rolling.workspace_reference:
         blocks["workspace"]["refs"] = "refs/"  # type: ignore[index]
     facts: dict[str, object] = {
@@ -213,41 +185,21 @@ def _research_prompt(
             ref_store=context.ref_store,
             max_llm_calls=int(budgets["max_llm_calls"]),
             context_compaction=context.context_compaction,
-            model_artifacts_empty=True if context.is_initial else None,
+            model_artifacts_empty=True,
         ),
         **blocks,
     }
     _mark_runtime_only(facts)
-    if not context.is_initial:
-        _mark_runtime_start(facts)
     return build_system_prompt(
         rolling.schedule,
         experiment_facts=facts,
         step_tree_enabled=rolling.step_tree_enabled,
-        prior_prompt=context.prior,
         exploration_directive=rolling.research_directive,
         session_directive=directive,
     )
 
 
-def _ledger_before_session(
-    records: list[dict[str, object]], index: int
-) -> list[dict[str, object]]:
-    """The ledger as session ``index`` found it when it started: everything
-    before the first record of that session or a later one, so a preview of a
-    session that already ran shows the PRIOR, arm state and earlier sessions it
-    read, not its own outcome."""
-
-    for position, record in enumerate(records):
-        if (
-            record.get("record_type") == "research_session"
-            and int(record.get("session_index") or 0) >= index
-        ):
-            return records[:position]
-    return records
-
-
-def _session_entry(experiment_dir: Path, session_key: str) -> dict[str, object]:
+def _require_research_session(experiment_dir: Path, session_key: str) -> None:
     schedule_plan = read_json(experiment_dir / HITL_DIR_NAME / SCHEDULE_NAME)
     raw_sessions = schedule_plan.get("sessions")
     sessions: list[object] = raw_sessions if isinstance(raw_sessions, list) else []
@@ -256,7 +208,7 @@ def _session_entry(experiment_dir: Path, session_key: str) -> dict[str, object]:
             continue
         if str(item.get("kind") or "") != "research":
             raise ValueError("the forward replay has no agent session or system prompt")
-        return item
+        return
     raise KeyError(f"unknown session: {session_key}")
 
 
@@ -276,12 +228,3 @@ def _mark_runtime_only(facts: dict[str, object]) -> None:
             "text_available",
         ):
             policy[key] = RUNTIME_PLACEHOLDER
-
-
-def _mark_runtime_start(facts: dict[str, object]) -> None:
-    """Whether the start node carries model artifacts is known only once the
-    session copies it, so only that fact is left to the session."""
-    contract = facts.get("artifact_contract")
-    start = contract.get("start") if isinstance(contract, dict) else None
-    if isinstance(start, dict):
-        start["model_artifacts_empty"] = RUNTIME_PLACEHOLDER

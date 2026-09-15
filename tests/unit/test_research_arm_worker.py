@@ -89,10 +89,10 @@ def test_an_arm_runs_research_freezes_once_and_replays_forward_and_heldout_in_on
         experiment_module.RollingExperimentPipeline.run_forward,
     )
 
-    def research(self, index, **kwargs):
+    def research(self, **kwargs):
         with _PeakRss() as peak:
-            record = real_research(self, index, **kwargs)
-        measured[f"s{index}"] = peak.growth
+            record = real_research(self, **kwargs)
+        measured["research"] = peak.growth
         return record
 
     def forward(self, **kwargs):
@@ -107,14 +107,11 @@ def test_an_arm_runs_research_freezes_once_and_replays_forward_and_heldout_in_on
     result = run_local_interactive_worker(options)
 
     records = ExperimentLedger(options.rolling.ledger_path).read()
-    assert [row["record_type"] for row in records] == [
-        "research_session",
-        "research_session",
-        "forward",
-    ]
-    first, second, replay = records
-    assert (first["outcome"], second["outcome"]) == ("continue", "freeze")
-    assert first["frozen"] is None and second["freeze_gate"]["passed"] is True
+    assert [row["record_type"] for row in records] == ["research_session", "forward"]
+    research_row, replay = records
+    assert research_row["outcome"] == "freeze"
+    assert research_row["freeze_gate"]["passed"] is True
+    assert [step["span"] for step in research_row["steps"]] == ["full", "full"]
     frozen = frozen_record(records)["frozen"]
     assert Path(frozen["output_path"], "main.py").is_file()
 
@@ -155,12 +152,12 @@ def test_an_arm_runs_research_freezes_once_and_replays_forward_and_heldout_in_on
     assert result["final_strategy_artifact"] == frozen["artifact_id"]
     assert read_status(experiment / "hitl" / "status.json")["verdict"] == verdict
     plan = json.loads((experiment / "hitl" / "schedule.json").read_text(encoding="utf-8"))
-    assert [row["session_key"] for row in plan["sessions"]] == ["s1", "s2", "forward"]
+    assert [row["session_key"] for row in plan["sessions"]] == ["research", "forward"]
     assert plan["sessions"][-1]["replay"]["replay_end"] == RELEASE_END
 
-    # Replay memory by stage: a research-year replay and the forward span.
+    # Replay memory by stage: the research replays and the forward span.
     print(json.dumps({"peak_rss_growth_mib": measured}))
-    assert set(measured) == {"s1", "s2", "forward"}
+    assert set(measured) == {"research", "forward"}
 
     # A resume after the verdict republishes the terminal status and runs nothing.
     before = ExperimentLedger(options.rolling.ledger_path).read()
@@ -171,28 +168,28 @@ def test_an_arm_runs_research_freezes_once_and_replays_forward_and_heldout_in_on
     assert synthetic_provider.requests == []
 
 
-def test_a_session_that_crashes_is_resumed_without_rerunning_the_recorded_one(
+def test_a_crashed_research_attempt_is_run_again_by_the_next_worker_start(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     repo, experiment = make_arm(tmp_path, session_max_attempts=1)
     real = experiment_module.RollingExperimentPipeline.run_research_session
     calls: list[int] = []
 
-    def crash_in_s2(self, index, **kwargs):
-        calls.append(index)
-        if index == 2 and calls.count(2) == 1:
+    def crash_once(self, **kwargs):
+        calls.append(len(calls) + 1)
+        if len(calls) == 1:
             raise RuntimeError("session container died")
-        return real(self, index, **kwargs)
+        return real(self, **kwargs)
 
-    monkeypatch.setattr(experiment_module.RollingExperimentPipeline, "run_research_session", crash_in_s2)
+    monkeypatch.setattr(experiment_module.RollingExperimentPipeline, "run_research_session", crash_once)
     with pytest.raises(RuntimeError, match="session container died"):
         run_local_interactive_worker(load_worker_options(experiment, repo_root=repo))
     ledger = ExperimentLedger(experiment / "ledgers" / "experiment_ledger.jsonl")
-    assert [row["session_key"] for row in research_records(ledger.read())] == ["s1"]
+    assert research_records(ledger.read()) == []
 
     result = run_local_interactive_worker(load_worker_options(experiment, repo_root=repo))
-    assert calls == [1, 2, 2]
-    assert [row["session_key"] for row in research_records(ledger.read())] == ["s1", "s2"]
+    assert calls == [1, 2]
+    assert [row["session_key"] for row in research_records(ledger.read())] == ["research"]
     assert result["verdict"]["status"] == "graduated"
 
 
@@ -218,8 +215,8 @@ def test_a_worker_stopped_after_the_freeze_resumes_with_the_forward_replay_only(
 
     research = experiment_module.RollingExperimentPipeline.run_research_session
 
-    def no_more_research(self, index, **kwargs):
-        raise AssertionError(f"research session {index} re-ran after the freeze")
+    def no_more_research(self, **kwargs):
+        raise AssertionError("the research session re-ran after the freeze")
 
     monkeypatch.setattr(experiment_module.RollingExperimentPipeline, "run_research_session", no_more_research)
     result = run_local_interactive_worker(load_worker_options(experiment, repo_root=repo))
@@ -286,7 +283,7 @@ def test_a_forward_replay_that_keeps_failing_fails_the_experiment(
 def test_an_arm_whose_research_ends_without_a_freeze_runs_no_replay(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, synthetic_provider
 ):
-    repo, experiment = make_arm(tmp_path, research_sessions=1)
+    repo, experiment = make_arm(tmp_path)
     from autotrade.pipelines import local_backend
 
     real_call = local_backend.DeterministicBaselineDeveloper.__call__
@@ -341,18 +338,18 @@ def test_the_worker_refuses_a_release_that_does_not_reach_heldout(tmp_path: Path
         load_worker_options(experiment, repo_root=repo)
 
 
-def test_llm_research_sessions_mount_only_the_research_end_view_and_hand_off_prior(
+def test_the_llm_research_session_mounts_only_the_research_end_view_and_freezes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, synthetic_provider
 ):
-    """Two scripted Agent sessions through the real Agent adapter.
+    """One scripted Agent session through the real Agent adapter.
 
-    The first validates the working copy, leaves a PRIOR.md and continues;
-    the second reads that PRIOR, validates again and freezes its node through
-    the gate, which then runs forward. Each session's
-    ``/mnt/snapshot`` is the decision view at research end, the two snapshot
-    slot mounts stay empty, and no replay slot appears anywhere in the
-    session's runtime tree. A graduated sibling experiment's skills are
-    mounted as operating memory and named in the run manifest.
+    It validates the working copy twice (the gate needs two full-span
+    validations) and freezes the second node through the gate, which then
+    runs forward. The session's ``/mnt/snapshot`` is the decision view at
+    research end, the two snapshot slot mounts stay empty, and no replay slot
+    appears anywhere in the session's runtime tree. A graduated sibling
+    experiment's skills are mounted as operating memory and named in the run
+    manifest.
     """
 
     from autotrade.environment.llm import ProviderResponse, ToolCall
@@ -366,29 +363,16 @@ def test_llm_research_sessions_mount_only_the_research_end_view_and_hand_off_pri
     )
     from tests.unit.test_operating_memory import GRADUATED_SKILL, _experiment_with_skill
 
-    repo, experiment = make_arm(tmp_path, developer_mode="llm", max_replay_years_per_session=1)
+    repo, experiment = make_arm(tmp_path, developer_mode="llm", max_replay_years=2)
     _experiment_with_skill(repo / "experiments", "adopted")
     monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
-    # The console's per-session GPU allocation, one-shot, for s1 only.
-    write_control(experiment / "hitl" / "control.json", ControlState(mode="auto", gpu_counts={"s1": 3}))
+    # The console's GPU allocation for the research session, one-shot.
+    write_control(experiment / "hitl" / "control.json", ControlState(mode="auto", gpu_counts={"research": 3}))
     options = load_worker_options(experiment, repo_root=repo)
-    handoff = "动量腿在研究期稳定，下一会话复核同一机制并决定是否冻结。"
     llm = _NominatingLLM(
         [
-            *_agent_then(
-                ToolCall("prior", "write_file", {"path": "PRIOR.md", "content": handoff}),
-                VALIDATE_WORKING_COPY,
-                ToolCall(
-                    "finish",
-                    "finish_session",
-                    {
-                        "outcome": "continue",
-                        "reason": "本会话只完成了一次整个研究期的验证，边际是否稳定还需要下一会话独立复核同一机制后再判断，因此不在本会话冻结。",
-                    },
-                ),
-                roles=(),
-            ),
             *_agent_then(VALIDATE_WORKING_COPY, roles=()),
+            ProviderResponse(tool_calls=(VALIDATE_WORKING_COPY,)),
             ProviderResponse(
                 tool_calls=(
                     ToolCall(
@@ -405,66 +389,60 @@ def test_llm_research_sessions_mount_only_the_research_end_view_and_hand_off_pri
     )
 
     records = ExperimentLedger(options.rolling.ledger_path).read()
-    first, second, replay = records
-    assert (first["outcome"], second["outcome"]) == ("continue", "freeze")
-    assert first["prior"] == handoff and first["prior_published"] is True
-    assert second["frozen"] is not None
+    research_row, replay = records
+    assert research_row["outcome"] == "freeze"
+    assert research_row["frozen"] is not None
+    assert research_row["finish_reason"] == "llm_agent_finish_session"
     assert replay["record_type"] == "forward"
     assert result["verdict"]["status"] == "graduated"
-    second_prompts = [
+    system_prompts = [
         message.content or ""
         for call in llm.calls
         for message in call["messages"]
         if message.role == "system"
     ]
-    assert any(handoff in prompt for prompt in second_prompts)
-    # The console preview of s2 is the prompt s2 received, runtime facts aside.
+    # The console preview is the prompt the session received, runtime facts aside.
     from autotrade.webui.prompt_preview import RUNTIME_PLACEHOLDER, build_prompt_preview
     from tests.unit.test_webui_prompt_preview import _facts
 
-    received = _facts(next(prompt for prompt in reversed(second_prompts) if handoff in prompt))
-    previewed = _facts(str(build_prompt_preview(experiment, "s2", "", repo_root=repo)["prompt"]))
+    received = _facts(system_prompts[0])
+    previewed = _facts(str(build_prompt_preview(experiment, "research", "", repo_root=repo)["prompt"]))
     assert set(previewed) == set(received)
     for block in ("budgets", "research_scope", "visibility_policy", "broker_replay", "arm"):
         assert set(previewed[block]) == set(received[block]), block
     assert previewed["research_scope"] == received["research_scope"]
     assert previewed["research_geometry"] == received["research_geometry"]
-    assert previewed["identity"]["session"] == received["identity"]["session"]
-    # s1 continued without naming a node, so s2 starts from the template too.
-    assert {key: value for key, value in previewed["artifact_contract"]["start"].items() if key != "model_artifacts_empty"} == {
-        key: value for key, value in received["artifact_contract"]["start"].items() if key != "model_artifacts_empty"
-    } == {"kind": "template", "template_ref": "agent_output_template"}
-    assert previewed["earlier_sessions"] == received["earlier_sessions"]
+    assert "session" not in received["identity"]
+    assert previewed["artifact_contract"]["start"] == received["artifact_contract"]["start"] == {
+        "kind": "template",
+        "template_ref": "agent_output_template",
+        "model_artifacts_empty": True,
+    }
     assert {key: value for key, value in previewed["budgets"].items() if key != "context_compaction"} == {
         key: value for key, value in received["budgets"].items() if key != "context_compaction"
     }
     assert previewed["identity"]["run_id"] == RUNTIME_PLACEHOLDER
 
-    specs = [
-        json.loads(
-            (Path(record["run_manifest_ref"]).parent / "host_run_manifest.json").read_text(encoding="utf-8")
-        )["sandbox_spec"]
-        for record in (first, second)
-    ]
-    assert (specs[0]["gpu_count"], specs[0]["gpu"], specs[0]["gpu_name_filter"]) == (3, "auto", "L20")
-    assert specs[1]["gpu_count"] == options.agent_sandbox.gpu_count
-    memory = json.loads(Path(first["run_manifest_ref"]).read_text(encoding="utf-8"))["operating_memory"]
+    spec = json.loads(
+        (Path(research_row["run_manifest_ref"]).parent / "host_run_manifest.json").read_text(encoding="utf-8")
+    )["sandbox_spec"]
+    assert (spec["gpu_count"], spec["gpu"], spec["gpu_name_filter"]) == (3, "auto", "L20")
+    memory = json.loads(Path(research_row["run_manifest_ref"]).read_text(encoding="utf-8"))["operating_memory"]
     assert {"source": "adopted", "origin": "graduated", "entries": [GRADUATED_SKILL]} in memory["sources"]
     assert read_control(experiment / "hitl" / "control.json").gpu_counts == {}
 
     research_anchor = decision_anchor(GEOMETRY["research_end"]).isoformat()
-    for record in (first, second):
-        root = options.work_root / options.experiment_id / str(record["run_id"])
-        view = json.loads((root / "runtime" / "current_snapshot" / "manifest.json").read_text(encoding="utf-8"))
-        assert (view["kind"], view["decision_time"]) == ("decision_input", research_anchor)
-        assert not (root / "snapshots").exists()
-        manifests = [
-            json.loads(path.read_text(encoding="utf-8"))
-            for path in root.rglob("manifest.json")
-            if path.is_file()
-        ]
-        assert all(item.get("kind") != "replay_slot" for item in manifests)
-    for step in first["steps"] + second["steps"]:
+    root = options.work_root / options.experiment_id / str(research_row["run_id"])
+    view = json.loads((root / "runtime" / "current_snapshot" / "manifest.json").read_text(encoding="utf-8"))
+    assert (view["kind"], view["decision_time"]) == ("decision_input", research_anchor)
+    assert not (root / "snapshots").exists()
+    manifests = [
+        json.loads(path.read_text(encoding="utf-8"))
+        for path in root.rglob("manifest.json")
+        if path.is_file()
+    ]
+    assert all(item.get("kind") != "replay_slot" for item in manifests)
+    for step in research_row["steps"]:
         replayed = json.loads(Path(step["validation_result_ref"]).read_text(encoding="utf-8"))
         assert all(
             name.split("_")[1] <= GEOMETRY["research_end"]
@@ -487,17 +465,17 @@ def _model_input(llm) -> str:
     )
 
 
-def test_llm_sessions_validate_a_multi_year_span_meet_the_gate_continue_and_end_the_arm(
+def test_the_llm_session_validates_a_multi_year_span_is_refused_by_the_gate_and_ends_the_arm(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, synthetic_provider
 ):
-    """Every finish outcome except a freeze, through the real worker.
+    """The no_edge outcome through the real worker.
 
-    On a two-year research period, s1 validates its working copy on Y2 and on
-    the full span, which replays both research years as one book; a freeze of
-    the full-span node is refused by the Pipeline's own gate with its named
-    reason, so s1 continues from that node. s2 starts from the node s1 handed
-    on, validates it again and ends the arm with no_edge: the arm has no
-    deliverable and nothing is replayed after research end.
+    On a two-year research period the session validates its working copy on
+    Y2 and on the full span, which replays both research years as one book; a
+    freeze of the full-span node is refused by the Pipeline's own gate with
+    its named reason (one full-span validation), the session validates the
+    full span again and ends the arm with no_edge: the arm has no deliverable
+    and nothing is replayed after research end.
     """
 
     from autotrade.environment.llm import ProviderResponse, ToolCall
@@ -526,12 +504,11 @@ def test_llm_sessions_validate_a_multi_year_span_meet_the_gate_continue_and_end_
     def finish(**arguments: object) -> ProviderResponse:
         return ProviderResponse(tool_calls=(ToolCall("finish", "finish_session", dict(arguments)),))
 
-    reason = "两个研究年里只有一次完整研究期验证，冻结门要求至少两次，交给下一会话在同一机制上补足对照后再判断。"
     repo, experiment = make_arm(
         tmp_path,
         developer_mode="llm",
         research_start="20220701",
-        max_replay_years_per_session=6,
+        max_replay_years=6,
     )
     monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
     options = load_worker_options(experiment, repo_root=repo)
@@ -539,7 +516,6 @@ def test_llm_sessions_validate_a_multi_year_span_meet_the_gate_continue_and_end_
         [
             ProviderResponse(tool_calls=(validate("Y2"), validate("full"))),
             finish(outcome="freeze", node_id=LAST_WORKING_COPY_NODE),
-            finish(outcome="continue", node_id=LAST_WORKING_COPY_NODE, reason=reason),
             ProviderResponse(tool_calls=(validate("full"),)),
             finish(outcome="no_edge", reason="完整研究期上复核后，本机制没有稳定的中性化超额，参考包的终止条件已满足，结束本臂。"),
         ]
@@ -549,13 +525,11 @@ def test_llm_sessions_validate_a_multi_year_span_meet_the_gate_continue_and_end_
     )
 
     records = ExperimentLedger(options.rolling.ledger_path).read()
-    assert [row["record_type"] for row in records] == ["research_session", "research_session"]
-    first, second = records
-    assert [step["span"] for step in first["steps"]] == ["Y2", "full"]
-    full_node = first["steps"][1]["step_id"]
-    assert (first["outcome"], first["next_start_node_id"], first["frozen"]) == ("continue", full_node, None)
-    assert (second["start_node_id"], second["outcome"]) == (full_node, "no_edge")
-    assert result["verdict"] == {"status": "no_deliverable", "reasons": [f"no_edge: {second['reason']}"]}
+    assert [row["record_type"] for row in records] == ["research_session"]
+    [record] = records
+    assert [step["span"] for step in record["steps"]] == ["Y2", "full", "full"]
+    assert (record["outcome"], record["frozen"], record["trials_to_date"]) == ("no_edge", None, 3)
+    assert result["verdict"] == {"status": "no_deliverable", "reasons": [f"no_edge: {record['reason']}"]}
     assert all(item[0] != "heldout" for item in synthetic_provider.requests)
 
     # The refusal the model read names the gate's reason and its numbers.
@@ -566,10 +540,11 @@ def test_llm_sessions_validate_a_multi_year_span_meet_the_gate_continue_and_end_
         if "freeze_gate_refused" in (message.content or "")
     )
     assert "freeze_too_few_full_span_validations" in refusal and "full_span_validations=1" in refusal
+    assert "no_edge" in refusal and "continue" not in refusal
 
     # Y2 replayed one slot; the full span replayed Y1 and then Y2 as one book.
-    year, full = (
-        json.loads(Path(step["validation_result_ref"]).read_text(encoding="utf-8")) for step in first["steps"]
+    year, full, _again = (
+        json.loads(Path(step["validation_result_ref"]).read_text(encoding="utf-8")) for step in record["steps"]
     )
     assert [name.split("_")[:2] for name in year["pit"]["replay_slots"]] == [["20230701", "20240630"]]
     assert [name.split("_")[:2] for name in full["pit"]["replay_slots"]] == [
@@ -580,20 +555,19 @@ def test_llm_sessions_validate_a_multi_year_span_meet_the_gate_continue_and_end_
     assert full["equity_curve"][-1]["trade_date"] <= GEOMETRY["research_end"]
     assert [row["label"] for row in full["stats"]["sub_windows"]] == ["202207-202306", "202307-202406"]
 
-    # s2's facts: the last of two sessions, started from s1's node, with s1's outcome.
-    s2_system = next(
+    # The session's facts: one session, started from the template, no trials yet.
+    system = next(
         message.content
-        for call in reversed(llm.calls)
+        for call in llm.calls
         for message in call["messages"]
-        if message.role == "system" and "earlier_sessions" in (message.content or "")
+        if message.role == "system" and "research_geometry" in (message.content or "")
     )
-    facts = json.loads(s2_system.split("```json\n", 1)[1].split("\n```", 1)[0])
-    assert facts["identity"]["session"] == {"index": 2, "of": 2, "last": True}
-    assert facts["artifact_contract"]["start"]["node_id"] == full_node
+    facts = json.loads(system.split("```json\n", 1)[1].split("\n```", 1)[0])
+    assert "session" not in facts["identity"] and "earlier_sessions" not in facts
+    assert facts["artifact_contract"]["start"]["kind"] == "template"
     assert [year["label"] for year in facts["research_geometry"]["years"]] == ["Y1", "Y2"]
     assert facts["research_geometry"]["research_period"] == "20220701..20240630"
-    assert facts["arm"]["trials_to_date"] == 2 and facts["arm"]["full_span_validations_to_date"] == 1
-    assert [row["outcome"] for row in facts["earlier_sessions"]] == ["continue"]
+    assert facts["arm"]["trials_to_date"] == 0 and facts["arm"]["full_span_validations_to_date"] == 0
 
     read = _model_input(llm)
     assert retired_vocabulary(read) == []

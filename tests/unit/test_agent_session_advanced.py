@@ -917,7 +917,6 @@ def test_compaction_keeps_the_session_system_prompt_byte_identical(tmp_path: Pat
     system_prompt = build_system_prompt(
         experiment_facts={"experiment_id": "exp_x", "session_ref": "session_ref_ab"},
         step_tree_enabled=True,
-        prior_prompt="# PRIOR\n- keep the momentum direction",
         session_directive="check the volume filter",
     )
     compact_llm = ScriptedLLM(
@@ -1173,7 +1172,7 @@ def test_prompt_and_facts_encode_daily_json_and_hidden_stage_boundaries(
 def test_session_prompt_keeps_hard_boundaries_and_leaves_how_tos_mounted():
     prompt = build_system_prompt(experiment_facts={})
     for rule in (
-        "已挂载的事实、数据、起点产物、参考材料与 PRIOR 都是待检验输入",
+        "已挂载的事实、数据、起点产物与参考材料都是待检验输入",
         "从日期、路径、元数据和模型常识推断它们的行情",
         "正式回测不能由自建回放替代",
         "不得用它修改策略产物、启动后台任务、sleep/等待包装或轮询状态",

@@ -43,7 +43,6 @@ _CONSOLE_CREATE_PRESET: dict[str, object] = {
     "research_end": "20250630",
     "forward_end": "20260630",
     "heldout_end": "20260930",
-    "research_sessions": 4,
     "gpu_count": 1,
     "include_events": True,
     "include_intraday": False,
@@ -51,10 +50,11 @@ _CONSOLE_CREATE_PRESET: dict[str, object] = {
     "inference_time": "08:30",
     "initial_cash": 1_000_000.0,
     "initial_control_mode": "auto",
-    # Per-session budgets: replay-years of batch_validate, minutes and calls.
-    "max_replay_years_per_session": 24,
-    "max_session_minutes": 720,
-    "max_llm_calls": 1600,
+    # The research session's budgets: replay-years of batch_validate, minutes
+    # and calls, spent across every attempt of the arm's one session.
+    "max_replay_years": 96,
+    "max_research_minutes": 2400,
+    "max_llm_calls": 6400,
     "model": LOCAL_QWEN_MODEL,
     # The universe reaches the agent unfiltered; the strategy filters itself.
     "screen_boards": (),
@@ -222,12 +222,12 @@ class RollingExperimentConfigValidationTest(unittest.TestCase):
     def test_valid_defaults_pass(self) -> None:
         config = make_config(Path("/tmp"))
         self.assertEqual(config.geometry, DEFAULT_RESEARCH_GEOMETRY)
-        self.assertEqual((config.research_sessions, config.session_max_attempts), (4, 3))
+        self.assertEqual(config.session_max_attempts, 3)
         self.assertEqual(config.research_directive, "")
-        self.assertEqual(config.max_session_minutes, 720)
+        self.assertEqual(config.max_research_minutes, 2400)
         self.assertEqual(
-            (config.max_replay_years_per_session, config.max_llm_calls),
-            (24, 1600),
+            (config.max_replay_years, config.max_llm_calls, config.max_null_controls),
+            (96, 6400, 12),
         )
         self.assertEqual(config.experiment_dir, Path("/tmp/experiments/exp"))
         self.assertEqual(
@@ -237,12 +237,11 @@ class RollingExperimentConfigValidationTest(unittest.TestCase):
 
     def test_positive_int_knobs_reject_zero_negatives_floats_and_booleans(self) -> None:
         for name in (
-            "research_sessions",
             "session_max_attempts",
             "window_months",
-            "max_replay_years_per_session",
+            "max_replay_years",
             "max_llm_calls",
-            "max_session_minutes",
+            "max_research_minutes",
         ):
             for value in (0, -1, 1.5, True, math.nan):
                 with self.subTest(field=name, value=value):
@@ -253,7 +252,7 @@ class RollingExperimentConfigValidationTest(unittest.TestCase):
 
     def test_non_negative_int_knobs_accept_zero_but_not_negatives(self) -> None:
         for name in (
-            "max_null_controls_per_session",
+            "max_null_controls",
             "deadline_grace_minutes",
             "finalize_before_deadline_seconds",
         ):
@@ -366,7 +365,7 @@ class DefaultsDriftTest(unittest.TestCase):
                 {
                     "experiment_id": "geometry_demo",
                     **geometry.to_record(),
-                    "research_sessions": 3,
+                    "max_research_minutes": 300,
                     "cost_stress_multiplier": 3.0,
                     "max_drawdown": 0.2,
                     "strategy_path": "configs/agent_output_template/main.py",
@@ -382,7 +381,7 @@ class DefaultsDriftTest(unittest.TestCase):
                 preflight=True,
             )
         self.assertEqual(options.rolling.geometry, geometry)
-        self.assertEqual(options.rolling.research_sessions, 3)
+        self.assertEqual(options.rolling.max_research_minutes, 300)
         self.assertEqual(
             options.rolling.acceptance,
             AcceptanceRules(max_drawdown=0.2, cost_stress_multiplier=3.0),
@@ -430,14 +429,14 @@ class DefaultsDriftTest(unittest.TestCase):
         )
         moved = {
             "model": "deepseek-v4-pro",
-            "max_replay_years_per_session": 7,
+            "max_replay_years": 7,
             "screen_boards": ("gem", "star"),
             "research_start": "20190701",
         }
         with patch.dict(WEB_CREATE_DEFAULTS, moved):
             after = rendered()
         self.assertEqual(after["model"], "deepseek-v4-pro")
-        self.assertEqual(after["max_replay_years_per_session"], 7)
+        self.assertEqual(after["max_replay_years"], 7)
         self.assertEqual(after["screen_boards"], ["gem", "star"])
         self.assertEqual(after["research_start"], "20190701")
         self.assertEqual(rendered(), baseline, "the schema retained a mutated default")

@@ -17,6 +17,7 @@ from autotrade.environment.strategy import StrategySchedule
 
 from . import verdict
 from .calendar import FULL_SPAN, ResearchGeometry
+from .ledger import RESEARCH_SESSION_KEY
 from .skills import DEFAULT_OPERATING_MEMORY
 
 ExecutionMode = Literal["sandbox", "trusted"]
@@ -41,6 +42,12 @@ SNAPSHOT_CACHE_FORMAT_VERSION = 11
 # Trailing wrap-up grace added to the research session budget. Not a console or
 # worker knob; ResearchSessionRequest carries the seconds to the Agent runner.
 DEFAULT_DEADLINE_GRACE_MINUTES = 10
+# A research session's time, replay-year, null-control and model-call budgets
+# are arm-level: one session per arm spends them across every attempt.
+DEFAULT_MAX_RESEARCH_MINUTES = 2400
+DEFAULT_MAX_REPLAY_YEARS = 96
+DEFAULT_MAX_NULL_CONTROLS = 12
+DEFAULT_MAX_LLM_CALLS = 6400
 
 # Research on four July-June years, a twelve-month forward test after them,
 # and a Held-out quarter the replay clips to the release end
@@ -253,26 +260,25 @@ class RollingExperimentConfig:
     experiments_root: Path
     # Research, forward and Held-out dates of the arm (pipelines/calendar.py).
     geometry: ResearchGeometry = DEFAULT_RESEARCH_GEOMETRY
-    # Agent sessions on the research period, run back to back; each ends by
-    # continuing, freezing its nominee or ending the arm without an edge.
-    research_sessions: int = 4
     # The macro data floor is 2020-01, so 24 months before a July 2022
     # decision view is the most history every domain carries.
     window_months: int = 24
-    # Per-session budgets. The host's forward replay is charged to none of them.
-    # One replay-year is one research year replayed for one candidate: a batch
-    # of three candidates on a two-year span costs six, and a full-period
+    # The research session's budgets, spent across every attempt of the arm's
+    # one session. The host's forward replay is charged to none of them. One
+    # replay-year is one research year replayed for one candidate: a batch of
+    # three candidates on a two-year span costs six, and a full-period
     # validation costs as many as the research period has years.
-    max_replay_years_per_session: int = 24
+    max_replay_years: int = DEFAULT_MAX_REPLAY_YEARS
     # Host-side random-portfolio null controls (K=500 replays, minutes each)
-    # a research session may request through ``run_null_control``; the frozen
-    # node's block is reused at freeze. 0 leaves the tool out.
-    max_null_controls_per_session: int = 3
-    max_llm_calls: int = 1600
-    # Attempts of one session or of the forward replay before the experiment
-    # fails with the last error.
+    # the session may request through ``run_null_control``; the frozen node's
+    # block is reused at freeze. 0 leaves the tool out.
+    max_null_controls: int = DEFAULT_MAX_NULL_CONTROLS
+    max_llm_calls: int = DEFAULT_MAX_LLM_CALLS
+    # Attempts of the research session or of the forward replay before the
+    # experiment fails with the last error.
     session_max_attempts: int = 3
-    max_session_minutes: int = 720
+    # Pausable effective inference minutes of the research session.
+    max_research_minutes: int = DEFAULT_MAX_RESEARCH_MINUTES
     # Trailing wrap-up grace added to the session budget and forwarded on
     # ResearchSessionRequest.deadline_grace_seconds. Implementation default only.
     deadline_grace_minutes: int = DEFAULT_DEADLINE_GRACE_MINUTES
@@ -315,12 +321,11 @@ class RollingExperimentConfig:
         if not isinstance(self.geometry, ResearchGeometry):
             raise TypeError("geometry must be a ResearchGeometry")
         for name in (
-            "research_sessions",
             "window_months",
-            "max_replay_years_per_session",
+            "max_replay_years",
             "max_llm_calls",
             "session_max_attempts",
-            "max_session_minutes",
+            "max_research_minutes",
             "per_call_timeout_seconds",
             "strategy_fit_timeout_seconds",
         ):
@@ -328,7 +333,7 @@ class RollingExperimentConfig:
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 raise ValueError(f"{name} must be a positive integer")
         for name in (
-            "max_null_controls_per_session",
+            "max_null_controls",
             "deadline_grace_minutes",
             "finalize_before_deadline_seconds",
         ):
@@ -363,11 +368,11 @@ def rolling_default(name: str) -> object:
 
 
 def session_deadline_seconds(
-    max_session_minutes: float,
+    max_research_minutes: float,
     deadline_grace_minutes: float = DEFAULT_DEADLINE_GRACE_MINUTES,
 ) -> float:
     """Total session budget: main deadline plus trailing wrap-up grace."""
-    return float(max_session_minutes) * 60.0 + float(deadline_grace_minutes) * 60.0
+    return float(max_research_minutes) * 60.0 + float(deadline_grace_minutes) * 60.0
 
 
 @dataclass(frozen=True)
@@ -567,24 +572,17 @@ class StepResult:
     span: str
 
 
-# How a research session ended. ``continue`` hands the next session a start
-# node, ``freeze`` nominates a node for the freeze gate, ``no_edge`` ends the
-# arm without a deliverable, and ``deadline`` is a session whose wrap-up grace
-# ran out before it finished.
-SESSION_OUTCOMES = ("continue", "freeze", "no_edge", "deadline")
+# How the research session ended. ``freeze`` nominates a node for the freeze
+# gate, ``no_edge`` ends the arm without a deliverable, and ``deadline`` is a
+# session whose budget (the wrap-up grace or the model-call budget) ran out
+# before it finished.
+SESSION_OUTCOMES = ("freeze", "no_edge", "deadline")
 
 
 @dataclass(frozen=True)
 class ResearchSessionRequest:
     experiment_id: str
-    session_id: str
-    # 1-based position among ``sessions_total`` research sessions.
-    session_index: int
-    sessions_total: int
     run_id: str
-    # The start node's snapshot the working copy is seeded from; None seeds
-    # the blank template.
-    start: FrozenArtifact | None
     # The Agent's only data view: the decision view at research end, anchored
     # at ``decision_time``.
     snapshot: SnapshotBundle
@@ -597,14 +595,13 @@ class ResearchSessionRequest:
     # before research end), the Agent-visible input window.
     input_window_start: str
     # Replay-years the session may spend on Validations (see
-    # ``RollingExperimentConfig.max_replay_years_per_session``).
+    # ``RollingExperimentConfig.max_replay_years``).
     max_replay_years: int
     max_llm_calls: int
     deadline_seconds: float
     # Trailing wrap-up grace reserved from deadline_seconds.
     deadline_grace_seconds: float = DEFAULT_DEADLINE_GRACE_MINUTES * 60.0
     directive: str = ""
-    prior: str = ""
     # Per-session HITL override of the experiment's default sandbox GPU count;
     # None keeps the experiment default. The "auto" selector still picks which
     # devices by free memory at container start.
@@ -618,14 +615,14 @@ class ResearchSessionRequest:
     nl_failure_policy: str = "return_error_with_audit"
     finalize_before_deadline_seconds: int = 300
     # Cap on the session's own ``run_null_control`` calls; the experiment default
-    # is the single source (RollingExperimentConfig.max_null_controls_per_session).
-    max_null_controls: int = RollingExperimentConfig.max_null_controls_per_session
+    # is the single source (RollingExperimentConfig.max_null_controls).
+    max_null_controls: int = RollingExperimentConfig.max_null_controls
     progress_hook: Callable[[str, dict[str, object] | None], None] | None = field(
         default=None,
         repr=False,
         compare=False,
     )
-    session_key: str = ""
+    session_key: str = RESEARCH_SESSION_KEY
     # Trusted host source for the current experiment-level skills snapshot.
     # The sandbox adapter copies it to workspace/skills but never exposes this
     # host path through Agent-visible facts or manifests.
@@ -647,8 +644,7 @@ class ResearchSessionResult:
     # Keyword-only from here: independent optional fields, so a new one can
     # never land in an older field's positional slot.
     _: KW_ONLY
-    # ``freeze``: the nominated Step; ``continue``: the node the next session
-    # starts from. None starts the next session where this one started.
+    # ``freeze``: the nominated Step.
     node_id: str | None = None
     # The Agent's own account of its outcome.
     reason: str = ""
@@ -657,9 +653,6 @@ class ResearchSessionResult:
     run_manifest_ref: str = ""
     # Trusted host path to this run's collected workspace/skills audit copy.
     skills_source_ref: str = ""
-    # The session's workspace PRIOR.md at its end: the handoff the next session
-    # reads. Empty when the session left none.
-    prior: str = ""
     # Null-control blocks the session already computed, keyed by step id; the
     # Pipeline reuses the frozen node's block instead of drawing it again.
     null_controls: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
@@ -674,6 +667,10 @@ ResearchDeveloper = Callable[[ResearchSessionRequest], ResearchSessionResult]
 
 __all__ = [
     "DEFAULT_DEADLINE_GRACE_MINUTES",
+    "DEFAULT_MAX_LLM_CALLS",
+    "DEFAULT_MAX_NULL_CONTROLS",
+    "DEFAULT_MAX_REPLAY_YEARS",
+    "DEFAULT_MAX_RESEARCH_MINUTES",
     "DEFAULT_RESEARCH_GEOMETRY",
     "SESSION_OUTCOMES",
     "AcceptanceRules",

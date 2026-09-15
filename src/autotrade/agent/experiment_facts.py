@@ -85,9 +85,6 @@ def build_experiment_facts(
                     if manifest.get("fold_id")
                     else None
                 ),
-                # Stated on every session, last included: whether a session
-                # follows decides whether ``continue`` is an outcome at all.
-                "session": _as_mapping(manifest.get("session")) or None,
             }
         ),
         "source_refs": {
@@ -179,14 +176,13 @@ def _research_scope(
 ) -> dict[str, object]:
     """One sentence each on the research period, the universe and the cadence."""
     research = _as_mapping(manifest.get("research"))
-    session = _as_mapping(manifest.get("session"))
     period = research.get("research_period")
     research_sentence = (
-        f"Every session of this arm researches the same period {period}, one "
-        "July-June year per label; this is session "
-        f"{session.get('index')} of {session.get('of')}. A session ends by "
-        "continuing, freezing one full-period node through the freeze gate, or "
-        "ending the arm; the frozen artifact is judged only on later, sealed data."
+        f"The arm's one research session researches the period {period}, one "
+        "July-June year per label, and ends by freezing one full-period node "
+        "through the freeze gate or by ending the arm without a deliverable; no "
+        "other session follows, and the frozen artifact is judged only on later, "
+        "sealed data."
         if period
         else None
     )

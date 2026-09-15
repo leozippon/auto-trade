@@ -41,7 +41,6 @@ from autotrade.agent.prompts import (
     SESSION_WORKFLOW_SECTION,
     STEP_TREE_SECTION,
     WRAP_UP_PROMPT,
-    build_prior_section,
 )
 from autotrade.agent.subagent import AGENT_TOOL_DESCRIPTION, subagent_system_prompt
 from autotrade.environment.nl.engine import (
@@ -226,7 +225,6 @@ def render() -> str:
             "{experiment_facts JSON，含 inputs/skills_index.json 引用}\n\n"
             "## 日级策略调度\n"
             '{"period": "day|month|quarter|year", "inference_time": "HH:MM"}\n\n'
-            f"{build_prior_section('{PRIOR.md 全文}')}\n\n"
             "## 实验级默认探索方向（用户注入）\n"
             "[存在时注入]\n\n"
             "## 研究者本会话指令（用户注入）\n"
@@ -237,18 +235,17 @@ def render() -> str:
         "",
         "| 分区 | 内容 |",
         "| --- | --- |",
-        "| `identity` | experiment、run、会话引用，以及本会话是第几个、共几个、是否最后一个 |",
+        "| `identity` | experiment、run 与会话引用 |",
         "| `source_refs` | 运行 manifest、runtime environment、data summary、skills 索引与信号筛选脚本的受信引用 |",
         "| `visibility_policy` | 研究期可见、研究期末之后封存，以及正式策略读取根 |",
         "| `research_geometry` | 决策时点、输入窗口、研究期、各研究年份与 span 写法；只有研究期日期 |",
         "| `visible_timeline` | 快照窗口、日级时钟与历史研究域可用性 |",
-        "| `research_scope` | 研究期与会话位置、股票池和调用节奏各一句 |",
+        "| `research_scope` | 研究期与会话结局、股票池和调用节奏各一句 |",
         "| `arm` | 本臂尚未冻结、至多冻结一次，以及至今的试验数与完整研究期验证数 |",
         "| `budgets` | deadline、replay-year、空对照、模型调用、策略容器超时与资源、压缩预算 |",
         "| `artifact_contract` | 必需入口、订单返回合同、起点、修改约束、冻结门与毕业条件 |",
         "| `broker_replay` | 资金、费用、手数、T+1、调度与精确执行价格来源 |",
         "| `runtime_tools` | Python、已装依赖、可用本地工具、网络模式和安装策略 |",
-        "| `earlier_sessions` | 此前各会话的结局、理由、验证数、交接节点与冻结门读数 |",
         "| `workspace` / `forbidden` | 工作区索引与禁止访问的范围 |",
         "",
         "动态事实只作为常用索引。Agent 不能把其中的日期、period、会话标识或资源元数据用作交易信号，也不能据此推断研究期末之后的行情。",

@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
-"""Run one research session of an experiment for a process audit.
+"""Run an experiment's research session for a process audit.
 
 This is intentionally narrower than the interactive worker. It is for manual
-process audits where running the whole arm would hide the single session being
-inspected: the Prompt, Trace, Sandbox and artifact handoff of exactly one
-session.
+process audits where running the whole arm would hide the session being
+inspected: the Prompt, Trace, Sandbox and artifact handoff of the research
+session alone, with a short budget.
 
 It builds the experiment through the same validated worker configuration the
-console uses, then drives one session directly instead of the session loop.
-The session reads its start node and PRIOR from the experiment's own ledger,
-so ``--session-index`` must be the next session the ledger is waiting for.
+console uses, then drives the research session directly instead of the
+session loop; the forward replay never runs here.
 """
 
 from __future__ import annotations
@@ -54,17 +53,11 @@ def main() -> int:
     repo_root = Path(__file__).resolve().parents[2]
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--experiment-id", required=True)
-    parser.add_argument(
-        "--session-index",
-        type=int,
-        default=1,
-        help="1-based research session to run; the next one the ledger expects.",
-    )
     add_path_arguments(parser, repo_root)
     add_calendar_arguments(parser)
     add_schedule_arguments(parser)
     add_snapshot_window_arguments(parser)
-    parser.add_argument("--max-session-minutes", type=int, default=20)
+    parser.add_argument("--max-research-minutes", type=int, default=20)
     add_model_arguments(parser)
     parser.add_argument("--local-dev", action="store_true", help="Use the trusted executor; audit default is real Docker.")
     parser.add_argument("--sandbox-image", help="Optional Docker image override for this audit session.")
@@ -129,14 +122,13 @@ def main() -> int:
         ref_store=AgentRefStore(options.experiment_dir),
     )
     record = pipeline.run_research_session(
-        args.session_index,
         session_context={"directive": directive} if directive else None,
     )
     frozen = record.get("frozen")
     result = {
         "status": "ok",
         "experiment_id": args.experiment_id,
-        "session_id": record["session_id"],
+        "session_key": record["session_key"],
         "run_id": record["run_id"],
         "outcome": record["outcome"],
         "validations": len(record.get("steps") or ()),

@@ -97,13 +97,11 @@ from .pit_backend import (
     required_release_raw_datasets,
 )
 from .pit_views_seed import assert_seed_snapshot_config
-from .prior import restore_current_from_records
 from .skills import latest_skills_snapshot, resolve_operating_memory
 
 _ALLOWED_PARAMS = {
     "experiment_id",
     *GEOMETRY_PARAMETERS,
-    "research_sessions",
     "strategy_path",
     "baseline_strategy_path",
     "daily_path",
@@ -147,11 +145,11 @@ _ALLOWED_PARAMS = {
     "max_intraday_row_group_rows",
     "developer_mode",
     "window_months",
-    "max_replay_years_per_session",
-    "max_null_controls_per_session",
+    "max_replay_years",
+    "max_null_controls",
     "max_llm_calls",
     "session_max_attempts",
-    "max_session_minutes",
+    "max_research_minutes",
     "min_return",
     "min_sharpe",
     "max_drawdown",
@@ -604,22 +602,17 @@ def resolve_worker_options(
         experiment_id=experiment_id,
         experiments_root=directory.parent,
         geometry=geometry,
-        research_sessions=_positive_int(
-            knob("research_sessions"), "research_sessions"
-        ),
         window_months=_positive_int(knob("window_months"), "window_months"),
-        max_replay_years_per_session=_positive_int(
-            knob("max_replay_years_per_session"), "max_replay_years_per_session"
-        ),
-        max_null_controls_per_session=_nonnegative_int(
-            knob("max_null_controls_per_session"), "max_null_controls_per_session"
+        max_replay_years=_positive_int(knob("max_replay_years"), "max_replay_years"),
+        max_null_controls=_nonnegative_int(
+            knob("max_null_controls"), "max_null_controls"
         ),
         max_llm_calls=_positive_int(knob("max_llm_calls"), "max_llm_calls"),
         session_max_attempts=_positive_int(
             knob("session_max_attempts"), "session_max_attempts"
         ),
-        max_session_minutes=_positive_int(
-            knob("max_session_minutes"), "max_session_minutes"
+        max_research_minutes=_positive_int(
+            knob("max_research_minutes"), "max_research_minutes"
         ),
         research_directive=str(
             params.get("research_directive") or ""
@@ -915,8 +908,8 @@ def run_local_interactive_worker(
     command_runner_factory: Callable[[Path], CommandRunner] | None = None,
     poll_seconds: float = 2.0,
 ) -> dict[str, object]:
-    """Run the arm from wherever its ledger ends: research sessions, then the
-    forward replay once an artifact froze, then the terminal status."""
+    """Run the arm from wherever its ledger ends: the research session, then
+    the forward replay once an artifact froze, then the terminal status."""
 
     ref_store = AgentRefStore(options.experiment_dir)
     hitl = options.experiment_dir / "hitl"
@@ -978,15 +971,13 @@ def run_local_interactive_worker(
         command_runner_factory=command_runner_factory,
     )
     sessions = _write_session_plan(options, hitl, trading_days)
-    # PRIOR has one mutable pointer; skills have none, and validating the last
-    # session's generation is their whole restore step.
-    records = ledger.read()
-    restore_current_from_records(options.experiment_dir, records)
-    latest_skills_snapshot(records, experiment_dir=options.experiment_dir)
+    # Skills have no mutable pointer: validating the recorded generation is
+    # their whole restore step.
+    latest_skills_snapshot(ledger.read(), experiment_dir=options.experiment_dir)
 
     def execute(session: PlannedSession, context: dict[str, object]) -> None:
         if session.kind == "research":
-            pipeline.run_research_session(session.index, session_context=context)
+            pipeline.run_research_session(session_context=context)
         else:
             pipeline.run_forward(session_context=context)
 
@@ -1023,7 +1014,6 @@ def _write_session_plan(
     geometry = options.rolling.geometry
     heldout = geometry.heldout(trading_days)
     plan = build_session_plan(
-        options.rolling.research_sessions,
         forward={
             "start": geometry.forward_start,
             "forward_end": geometry.forward_end,
@@ -1034,7 +1024,7 @@ def _write_session_plan(
         },
     )
     write_json_atomic(hitl / SCHEDULE_NAME, plan)
-    return planned_sessions(options.rolling.research_sessions)
+    return planned_sessions()
 
 
 def _terminal_status(

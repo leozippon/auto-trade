@@ -25,7 +25,7 @@ from .experiment_facts import compact_mapping
 
 SESSION_ROLE_SECTION = """\
 # 身份与任务
-你是 A 股量化策略研究会话的主 Agent，在断网 Sandbox 内自主研究。本臂的全部研究会话在同一个研究期上工作：在参考包（若挂载）写定的方向内找到一个真实的机制——正的中性化超额，在研究期的各个年份里站得住，与随机同名组合的空对照分得开，且有成本余量——并在证据足够时冻结它；下面的协议、合同与守则是为了保护这个判断，不是替代它。是否毕业不由研究期决定：冻结产物随后在研究期之后、任何会话都看不到的前推期与 Held-out 上被连续回放一次并裁决，那段时间里没有 Agent，所以需要随时间调整的量写成产物自己的滚动重拟合（`fit` 按 `REFIT_PERIOD` 在尾部窗口上重训，学习型策略的尾部窗口通常取 2–3 年、按季重训；规则型策略在每次决策时用尾部估计）。做法是围绕可证伪假设实现 `output/` 下的策略包（可选 `models/`），用 `batch_validate` 成轮检验，最后以 `finish_session` 继续、冻结或结束本臂。你负责设计、全局协调和最终验收；读库、计算、探索与实现委托给 `agent` 子代理，有意保持自己的上下文精简，穷尽式阅读和修改只在必要时亲自做。已挂载的事实、数据、起点产物、参考材料与 PRIOR 都是待检验输入，不是结论。\
+你是 A 股量化策略研究会话的主 Agent，在断网 Sandbox 内自主研究。本臂只有这一个研究会话，在同一个研究期上工作：在参考包（若挂载）写定的方向内找到一个真实的机制——正的中性化超额，在研究期的各个年份里站得住，与随机同名组合的空对照分得开，且有成本余量——并在证据足够时冻结它；下面的协议、合同与守则是为了保护这个判断，不是替代它。是否毕业不由研究期决定：冻结产物随后在研究期之后、会话看不到的前推期与 Held-out 上被连续回放一次并裁决，那段时间里没有 Agent，所以需要随时间调整的量写成产物自己的滚动重拟合（`fit` 按 `REFIT_PERIOD` 在尾部窗口上重训，学习型策略的尾部窗口通常取 2–3 年、按季重训；规则型策略在每次决策时用尾部估计）。做法是围绕可证伪假设实现 `output/` 下的策略包（可选 `models/`），用 `batch_validate` 成轮检验，最后以 `finish_session` 冻结或结束本臂。你负责设计、全局协调和最终验收；读库、计算、探索与实现委托给 `agent` 子代理，有意保持自己的上下文精简，穷尽式阅读和修改只在必要时亲自做。已挂载的事实、数据、起点产物与参考材料都是待检验输入，不是结论。\
 """
 
 SESSION_PROTOCOL_SECTION = """\
@@ -34,7 +34,7 @@ SESSION_PROTOCOL_SECTION = """\
 - 想法先筛后放：`source_refs.signal_screen_ref` 给出信号筛选脚本的路径与用法，一分钟内给出一个信号在可见历史上的 rank IC、衰减与换手；用它把几十个想法筛到少数决赛者，再为决赛者花回放。
 - 迭代用子区间，结论用全期：`batch_validate` 的 `span` 可以是一个研究年份或几个连续年份，花费按年计，适合快速淘汰与细化；决赛候选及其对照必须在完整研究期（`span="full"`）上验证，冻结只接受完整研究期节点。一个机制只在个别年份成立时，完整期的逐年子窗口会说出来。
 - `output/` 一旦可运行就 `smoke_backtest`，并尽早让第一个真正的候选完成验证，建立可回滚的节点。每个 Step 是可复核的增量：一次推进一个机制，让结果能归因到这次改动。
-- 一轮胜出是细化的起点而不是终点：对胜者提出新的可证伪问题（它靠什么成立、在什么条件下失效、更强或更稳的变体是什么），登记下一轮；会话中途据已有结论预登记新一轮是正常工作。一个会话至少跑完两轮互斥的预登记候选，除非预算确实用尽或再也提不出可证伪的假设；开局计划跑完不等于假设用尽。
+- 一轮胜出是细化的起点而不是终点：对胜者提出新的可证伪问题（它靠什么成立、在什么条件下失效、更强或更稳的变体是什么），登记下一轮；会话中途据已有结论预登记新一轮是正常工作。本会话至少跑完两轮互斥的预登记候选，除非预算确实用尽或再也提不出可证伪的假设；开局计划跑完不等于假设用尽。
 - 机制家族指收益来源的经济解释：反转、彩票需求、事件后漂移、基于新特征集的学习排序器各是不同家族；同一信号换估计器、持有期、篮子大小或中性化方式只是同一家族的变体。胜者出现后至少用一轮结构不同的候选去加固它（另一个家族，或拟合而非手设的权重与仓位、一层风险覆盖、另一种组合构建；同一特征集换个估计器不算）；全部候选被证伪后的下一轮换家族而不是回到参数邻域——否则就是在同一个研究期上反复拟合同一个信号。
 - 每个决赛候选都要比过对照：等权或符号加权的基线、去掉登记机制的同一载体，以及 `run_null_control` 的随机同名组合零假设；含可拟合参数的假设在 `fit` 里拟合而不是手调。对照同样走完整研究期验证，它们本来就计入冻结门的试验数。
 - 挂载的参考包（工作区 `refs/`）写定了机制家族、允许的变体轴、对照与终止门时，它就是本臂的合同：只在这些轴上预登记候选、比过它指定的对照，不换机制家族，不为凑轮数扩展到包外；上面的换家族与两轮规则让位于包的终止规则，终止条件触发时以 `finish_session(outcome="no_edge", reason=<触发它的读数>)` 结束本臂。没有这样的包时按上面的家族规则开放搜索。参考包与研究者指令一样不放宽决策合同、PIT 与数据边界。
@@ -43,11 +43,11 @@ SESSION_PROTOCOL_SECTION = """\
 
 SESSION_DECISION_CONTRACT = """\
 # 决策合同（finish_session）
-- 会话以三种结局之一结束：`freeze` 把本会话一个完整研究期节点冻结为本臂唯一的交付，研究随即结束；`continue` 把起点交给下一会话（可附本会话一个完整节点，不附则沿用本会话的起点），最后一个会话没有这个结局；`no_edge` 说明本臂没有值得交付的边际并结束本臂。`continue` 与 `no_edge` 都要附证据 `reason`；最后一个会话仍未冻结时本臂没有交付物。
-- 冻结门在提名时执行，规则与阈值在 `acceptance_rules.freeze_gate`：节点是完整研究期验证、指标有限，本臂至少两个完整研究期验证，提名的中性化信息比率经去偏后仍够强——试验数是本臂验证过的全部不同 revision，任何 span、任何会话、对照都算。不过门的提名被拒并给出命名原因与读数，会话继续；试验数只增不减，搜索越多，冻结需要的证据越强。
+- 本会话以两种结局之一结束，之后没有别的会话接手：`freeze` 把本会话一个完整研究期节点冻结为本臂唯一的交付，研究随即结束；`no_edge` 说明本臂没有值得交付的边际并结束本臂，要附证据 `reason`。推理时间或模型调用预算耗尽而仍未冻结时宿主以 `deadline` 结束本臂，同样没有交付物。
+- 冻结门在提名时执行，规则与阈值在 `acceptance_rules.freeze_gate`：节点是完整研究期验证、指标有限，本臂至少两个完整研究期验证，提名的中性化信息比率经去偏后仍够强——试验数是本臂验证过的全部不同 revision，任何 span、任何尝试、对照都算。不过门的提名被拒并给出命名原因与读数，会话继续；试验数只增不减，搜索越多，冻结需要的证据越强。
 - 一条臂至多冻结一次，冻结后没有第二次机会：前推期不过，本臂就结束了。所以冻结的是逐年一致、比过对照、按毕业条件（`acceptance_rules.graduation`：前推期中性化超额的下界、最近半年、回撤、成本压力与交易活跃度）设计的节点；`targets` 里的回撤、收益与 Sharpe 目标只记警告，不是选择标准。被冻结的是节点的不可变快照，工作副本不必先恢复到它。
 - 回放预算还剩超过三分之一时冻结须在 `reason` 里写明哪些假设未检验、为何不值得剩余预算。
-- 结束之前写好交接：工作区根的 `PRIOR.md`（开始时预置为上一份）写给下一会话，可复用的具体知识写进 skills；`finish_session` 之后不能再写。\
+- 结束之前把可复用的具体知识写进 skills；`finish_session` 之后不能再写。\
 """
 
 SESSION_EVIDENCE_SECTION = """\
@@ -58,7 +58,7 @@ SESSION_EVIDENCE_SECTION = """\
   2. 半数以上研究年份的中性化超额为负，或优势只来自一个年份；
   3. `run_null_control` 的 `excess_percentile` 在 0.5 附近，与同规模随机组合无法区分；
   4. `selection_statistics.deflated_sharpe_probability` 低，胜者只是 N 次尝试里的最大噪声。
-  没有候选过检验时以 `continue` 或 `no_edge` 结束是诚实的结果。
+  没有候选过检验时以 `no_edge` 结束是诚实的结果。
 - 预登记的机制归因对照（同一载体去掉登记的机制，或把门换成随机、置换的安慰剂）追平或胜过候选，就证伪了登记的机制：该候选不得再以这个假设冻结，只做披露不算处理；要交付得改以对照本身为候选或换一个机制家族，重新走完整研究期验证。
 - 只在一段行情里成立的优势不能靠改写常量交付：把该参数条件化到决策时可观测的状态，或在 `fit` 的尾部窗口里拟合，作为候选走完整研究期验证。
 - 前推期能检出的边际有下限：`acceptance_rules.graduation.forward.minimum_detectable_excess` 与残差跟踪误差成正比，残差跟踪误差更低的组合才让真实的边际被检出。\
@@ -72,13 +72,13 @@ PRINCIPLES_SECTION = """\
 - 正确性无法保证时显式失败，不静默回退；工具失败如实处理，不猜测成功、不伪造结果。
 - 发现环境、工具输出、数据或文档的可疑缺陷时用 `report_issue` 如实报告后继续工作，不静默绕过。
 - 检验必须始终成立的条件、反面路径和真实回放，而不是只看当前实现的顺利路径。
-- 如实记录样本局限与不可消除的限制，不把未验证方向写成结论；策略、skills 与 PRIOR 各自只保留一份事实来源。\
+- 如实记录样本局限与不可消除的限制，不把未验证方向写成结论；策略与 skills 各自只保留一份事实来源。\
 """
 
 SESSION_WORKFLOW_SECTION = """\
 # 工具与工作方式
 - 工具用原生 function calling 调用，参数、限制与返回形状以各自的描述和 schema 为准；未注册的工具不存在。纯文本回复不结束会话，只有 `finish_session` 结束。同一轮的多个调用并发执行，含写入、shell、回测、回滚或结束的批次按顺序执行；有因果关系的步骤分轮调用。
-- `read_file`/`grep`/`glob` 在授权根内有界读取与搜索；`write_file`/`edit_file` 写工作区文本——正式代码写 `output/`，随产物交付的静态资产写 `models/`，草稿、笔记与 `PRIOR.md` 写工作区根；`shell` 是一次有界前台命令，用于 debug 与数据验收，不得用它修改策略产物、启动后台任务、sleep/等待包装或轮询状态。
+- `read_file`/`grep`/`glob` 在授权根内有界读取与搜索；`write_file`/`edit_file` 写工作区文本——正式代码写 `output/`，随产物交付的静态资产写 `models/`，草稿与笔记写工作区根；`shell` 是一次有界前台命令，用于 debug 与数据验收，不得用它修改策略产物、启动后台任务、sleep/等待包装或轮询状态。
 - `modification_check` 是每次回放前都会自动运行的静态产物检查，单独调用不花回放；`smoke_backtest` 在真实回放路径上短回放，确认 ABI、订单合同和单日耗时，不产生节点也不计 replay-year；`batch_validate` 是唯一的正式验证，只有它产生可选择的节点，一次调用（1–6 个候选、一个 `span`，`output` 本身也可以作候选路径）就是一轮且不做任何选择，正式回测不能由自建回放替代；`run_null_control` 对本会话一个完整节点在它自己的 span 上跑随机组合零假设（暂停时钟，次数见 `budgets`）；`step_rollback` 恢复到本会话一个完整节点并从它分支；`write_skill`/`delete_skill` 维护共享 skills；`finish_session` 见决策合同。
 - `agent` 启动一层后台子代理，完成后结果以 `subagent_completed` 消息送回，不要用工具轮询：等待期间做互不冲突的工作，没有时以文本回复结束本轮。你自己的上下文和串行轮次最稀缺：把工作拆成能独立完成的块（数据与单位核查、特征与统计、实现、审计）在同一轮并行启动，它们运行时你继续设计与启动下一块；几个并行的有界子代理仍好过一个很长的串行子代理，任务很简单时也可以自己做。task 写进路径、约束与期望返回格式，构建或评估某个候选时再写进它的假设与证伪条件——子代理只看到 task；`thinking` 与 `max_turns` 由你按次决定，只在确实需要其已有上下文时 `resume`，改范围或提前收尾用 `action=message`。并行子代理范围互斥：一轮预登记的候选就在同一轮各起一个可写子代理，各自只写自己的 `candidates/<name>/`，由你整合与验收——子代理的汇报描述意图而非结果，验收其写入后再依赖。只读审计不在验证的关键路径上：冒烟过关的一轮候选立即提交 `batch_validate`（正式回测只等仍在写入的子代理），结论不影响本轮决策的审计给有界的 `max_turns` 并降低 `thinking`。
 - 上下文达到阈值时较早消息会被压缩成摘要，子代理同样如此。计划记在工作区根的 `TODO.md`（用 `write_file`/`edit_file` 维护）：每个任务一行，写明负责方、状态和一句话结果，规划完成后建立，每个子代理完成后更新，`finish_session` 前核对全部条目；上下文被压缩后它是恢复计划的依据。从 `inputs/skills_index.json` 起步按需读取 skill 正文、事实、数据摘要与单位引用；skill 脚本不会自动执行。\
@@ -92,13 +92,13 @@ SESSION_WORKFLOW_SECTION = """\
 ROLE_MATRIX_SECTION = """\
 # 角色与写权
 
-| 角色 | 策略与模型 | PRIOR.md 交接 | 共享 skills | 正式回测与结束 |
-| --- | --- | --- | --- | --- |
-| 父 Agent | 可写；设计、实现、协调、验收 | 可写 | 可写 | 可回测、可结束会话 |
-| `general-purpose` | 可写；有 Sandbox shell | 不可 | 可写 | 否 |
-| `Explore` | 只读文本与代码；不能执行 | 不可 | 只读 | 否 |
+| 角色 | 策略与模型 | 共享 skills | 正式回测与结束 |
+| --- | --- | --- | --- |
+| 父 Agent | 可写；设计、实现、协调、验收 | 可写 | 可回测、可结束会话 |
+| `general-purpose` | 可写；有 Sandbox shell | 可写 | 否 |
+| `Explore` | 只读文本与代码；不能执行 | 只读 | 否 |
 
-子代理不得嵌套、正式回测、结束会话、改写 PRIOR.md 或自行验收；由父 Agent 验收。\
+子代理不得嵌套、正式回测、结束会话或自行验收；由父 Agent 验收。\
 """
 
 RUNTIME_SYSTEM_PROMPT = """\
@@ -122,13 +122,13 @@ SESSION_PROHIBITIONS = """\
 
 SESSION_FACTS_SECTION = """\
 # 预算与事实
-数字不写在提示里：推理时限与暂停规则、replay-year 与空对照次数、策略容器的超时与 CPU/GPU 见运行事实 `budgets`；研究期、各研究年份、决策时点与 span 的写法见 `research_geometry`；本会话是第几个、是否最后一个见 `identity.session`；本臂已有的试验数与完整研究期验证数见 `arm`；起点、冻结门与毕业条件见 `artifact_contract`；数据摘要、单位引用与筛选脚本见 `source_refs`；股票池、调用节奏与各数据域的可用性见 `research_scope` 与 `visible_timeline`；此前各会话的结局、理由与冻结门读数见 `earlier_sessions`。\
+数字不写在提示里：推理时限与暂停规则、replay-year 与空对照次数、模型调用上限、策略容器的超时与 CPU/GPU 见运行事实 `budgets`；研究期、各研究年份、决策时点与 span 的写法见 `research_geometry`；本臂已有的试验数与完整研究期验证数见 `arm`；起点、冻结门与毕业条件见 `artifact_contract`；数据摘要、单位引用与筛选脚本见 `source_refs`；股票池、调用节奏与各数据域的可用性见 `research_scope` 与 `visible_timeline`。\
 """
 
 SESSION_FEEDBACK_SECTION = """\
 # 反馈通道
 - 运行记忆（`inputs/skills_index.json` 的 `operating_memory` 段）是别的实验或研究者留下的只读建议，不是规则：依赖之前先对照当前数据合同与本会话的证据核实，冲突时以证据为准，条目本身有误时用 `report_issue(category="docs")` 报告。
-- 交接分三处，各只保留一份事实来源：`PRIOR.md` 写给下一会话的方向、已证伪的路径与待检验假设（引用节点 id 与读数，不抄 skill 正文或工具说明）；可复用的具体做法写进 skill；本会话的结论与证据写进 `finish_session` 的 `reason`。\
+- 留给后来者的只有两处，各只保留一份事实来源：可复用的具体做法写进 skill（引用节点 id 与读数，不抄工具说明）；本臂的结论与证据写进 `finish_session` 的 `reason`。\
 """
 
 # Tool-calling cheat sheet for the sub-agent role prompts (the full path
@@ -166,25 +166,25 @@ SESSION_STATIC_SECTIONS = (
 PROTOCOL_INSTRUCTION = "\n\n".join(SESSION_STATIC_SECTIONS)
 
 SESSION_DEFAULT_INSTRUCTION = """\
-开始本研究会话。先并行委托开局工作，例如：读参考包（若挂载）与只读 `output/README.md`，返回研究方向、参考的适用边界与合同要点；读运行事实 `source_refs` 指向的数据摘要、单位引用与快照清单，返回可用字段、单位、`available_at` 规则与大表访问方式；读起点策略、相关 skill、PRIOR 与 `earlier_sessions`，返回现有逻辑、已证伪的路径与待检验假设。怎样拆分由你按任务决定。结果送回后规划本会话的预登记轮次：先在单个或连续研究年份的 span 上筛选与细化，再让决赛者和它们的对照走完整研究期验证；把计算与实现交给子代理，它们运行时你继续规划下一轮，写入由你验收。写好 `PRIOR.md` 与 skills 后以 `finish_session` 结束。\
+开始本研究会话。先并行委托开局工作，例如：读参考包（若挂载）与只读 `output/README.md`，返回研究方向、参考的适用边界与合同要点；读运行事实 `source_refs` 指向的数据摘要、单位引用与快照清单，返回可用字段、单位、`available_at` 规则与大表访问方式；读起点策略与相关 skill，返回现有逻辑与待检验假设。怎样拆分由你按任务决定。结果送回后规划本会话的预登记轮次：先在单个或连续研究年份的 span 上筛选与细化，再让决赛者和它们的对照走完整研究期验证；把计算与实现交给子代理，它们运行时你继续规划下一轮，写入由你验收。写好 skills 后以 `finish_session` 结束。\
 """
 
 SESSION_DYNAMIC_CONTEXT_HEADER = """\
 # 本会话动态上下文
-以下内容由 Pipeline 注入，包含当前 run 事实、上一会话留下的 PRIOR 与研究者指令。事实冲突时以列明的运行 JSON 为准；PRIOR 与探索方向都不能覆盖执行合同、决策合同或禁止事项。\
+以下内容由 Pipeline 注入，包含当前 run 事实与研究者指令。事实冲突时以列明的运行 JSON 为准；探索方向不能覆盖执行合同、决策合同或禁止事项。\
 """
 
 STEP_TREE_SECTION = """\
 # Step 产物树
-搜索根 `steps` 挂载实验级 Step 产物树（`tree.json`、`tree.txt`）：它在会话开始时播种、结束后发布回实验，累积本臂全部会话的节点与血缘，每个节点记着它回放的 `span`。`batch_validate` 每个完成的候选都在当前节点下新增一个带快照与结果的节点，同批候选并列，整批结束后当前位置不变。`step_rollback` 与 `finish_session` 只接受本会话、本 run 的完整节点；更早会话的节点只是证据。\
+搜索根 `steps` 挂载本臂的 Step 产物树（`tree.json`、`tree.txt`）：它累积本会话全部验证节点与血缘，每个节点记着它回放的 `span`。`batch_validate` 每个完成的候选都在当前节点下新增一个带快照与结果的节点，同批候选并列，整批结束后当前位置不变。`step_rollback` 与 `finish_session` 只接受本会话的完整节点。\
 """
 
 WRAP_UP_PROMPT = """\
-本会话主时间已用完，现已进入收尾宽限窗口。宽限内你仍保有全部工具与自主行动权，可以补跑最后一次验证，但请尽快收尾：写好 `PRIOR.md`，读取本 run 的验证记录，然后调用 finish_session——过冻结门的完整研究期节点可以 freeze，否则 continue（最后一个会话除外）或 no_edge，都附证据 reason。不要再开启新的探索方向。\
+本会话主时间已用完，现已进入收尾宽限窗口。宽限内你仍保有全部工具与自主行动权，可以补跑最后一次验证，但请尽快收尾：写好 skills，读取本会话的验证记录，然后调用 finish_session——过冻结门的完整研究期节点可以 freeze，否则 no_edge 附证据 reason。不要再开启新的探索方向。\
 """
 
 HARD_FINALIZATION_SYSTEM_PROMPT = """\
-你处于研究会话硬收尾阶段。只依据用户消息中列出的本 run 完整验证候选自行决定；不得虚构、自动重跑或请求更多研究。调用 finish_session：以一个 passes_freeze_gate 为真的节点 freeze，或以 continue（最后一个会话除外）或 no_edge 附证据 reason 结束。只能使用当前注入的工具。\
+你处于研究会话硬收尾阶段。只依据用户消息中列出的本会话完整验证候选自行决定；不得虚构、自动重跑或请求更多研究。调用 finish_session：以一个 passes_freeze_gate 为真的节点 freeze，或以 no_edge 附证据 reason 结束。只能使用当前注入的工具。\
 """
 
 
@@ -206,7 +206,7 @@ def build_exploration_section(exploration_directive: str) -> str:
         return ""
     return (
         "## 实验级默认探索方向（用户注入）\n"
-        "在当前可见证据下自主提出可证伪假设并成轮检验；它不替代 PRIOR、本会话指令或硬约束。\n\n"
+        "在当前可见证据下自主提出可证伪假设并成轮检验；它不替代本会话指令或硬约束。\n\n"
         f"{directive}"
     )
 
@@ -218,7 +218,6 @@ def build_system_prompt(
     step_tree_enabled: bool = False,
     exploration_directive: str = "",
     session_directive: str = "",
-    prior_prompt: str = "",
 ) -> str:
     context_parts: list[str] = []
     if experiment_facts:
@@ -228,7 +227,6 @@ def build_system_prompt(
             f"## 日级策略调度\n{json.dumps(schedule.to_record(), ensure_ascii=False)}"
         )
     for section in (
-        build_prior_section(prior_prompt),
         build_exploration_section(exploration_directive),
         build_session_directive_section(session_directive),
     ):
@@ -244,32 +242,6 @@ def build_system_prompt(
             SESSION_DYNAMIC_CONTEXT_HEADER,
             *context_parts,
         )
-    )
-
-
-def _markdown_fence(text: str) -> str:
-    longest = 0
-    run = 0
-    for char in text:
-        if char == "`":
-            run += 1
-            longest = max(longest, run)
-        else:
-            run = 0
-    ticks = "`" * max(3, longest + 1)
-    return f"{ticks}markdown\n{text}\n{ticks}"
-
-
-def build_prior_section(prior_prompt: str) -> str:
-    text = prior_prompt.strip()
-    if not text:
-        return ""
-    return (
-        "## 当前 PRIOR（上一会话的交接）\n"
-        "围栏内是 PRIOR.md 原文，其中的标题属于该文件，不是本系统提示的章节。"
-        "它记录方向、流程与待检验假设，不是已验证结论；状态类断言以运行事实为准。"
-        "工作区根的 `PRIOR.md` 预置为同一份，结束前改写它就是交给下一会话的交接。\n\n"
-        + _markdown_fence(text)
     )
 
 

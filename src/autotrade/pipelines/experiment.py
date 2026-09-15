@@ -1,4 +1,4 @@
-"""Experiment pipeline: research sessions, one freeze, one forward replay.
+"""Experiment pipeline: one research session, one freeze, one forward replay.
 
 docs/pipeline-design.md. The Pipeline schedules Data, Environment and Agent in
 time order, freezes inputs and outputs at each boundary and writes the single
@@ -65,10 +65,10 @@ from .config import (
     research_span,
     session_deadline_seconds,
 )
-from .hitl_state import research_session_key
 from .ledger import (
     FORWARD_SESSION_KEY,
     FORWARD_STAGE,
+    RESEARCH_SESSION_KEY,
     RESEARCH_STAGE,
     STRATEGY_ERROR,
     ExperimentLedger,
@@ -83,12 +83,6 @@ from .ledger import (
     research_records,
 )
 from .pit_views_seed import FORWARD_PHASE, RESEARCH_PHASE
-from .prior import (
-    PRIOR_MAX_CHARS,
-    ExperimentPriorStore,
-    latest_prior_text,
-    restore_current_from_records,
-)
 from .skills import (
     ExperimentSkillsStore,
     SkillsPublication,
@@ -105,11 +99,11 @@ from .verdict import (
     neutralized_statistics,
 )
 
-# A per-session deadline override may raise the session deadline above the
+# A session deadline override may raise the research deadline above the
 # configured maximum, bounded by this absolute ceiling in minutes: twice the
-# default session budget (config.max_session_minutes), enough headroom for one
-# slow session without letting it run unattended for days.
-_MAX_DEADLINE_OVERRIDE_MINUTES = 1440
+# default research budget (config.max_research_minutes), enough headroom for
+# one slow session without letting it run unattended for weeks.
+_MAX_DEADLINE_OVERRIDE_MINUTES = 4800
 
 
 class DailyStrategyPipeline:
@@ -189,7 +183,7 @@ class DailyStrategyPipeline:
 
 
 class RollingExperimentPipeline:
-    """Research sessions → freeze → one continuous forward replay → verdict.
+    """One research session → freeze → one continuous forward replay → verdict.
 
     Every stage reads what came before it from the ledger, so a resumed worker
     continues wherever the durable records end.
@@ -264,40 +258,23 @@ class RollingExperimentPipeline:
         )
 
     def run_research_session(
-        self, index: int, *, session_context: dict[str, object] | None = None
+        self, *, session_context: dict[str, object] | None = None
     ) -> dict[str, object]:
-        """Run research session ``index`` and record its outcome.
+        """Run the arm's one research session and record its outcome.
 
-        The session starts from the node the previous session handed on (the
-        template for the first), reads the PRIOR the last session published,
-        and ends by continuing, freezing its nominee or ending the arm. A
-        freeze passes only the freeze gate; otherwise it is recorded and
-        research continues from this session's own start. The last session
-        that does not freeze ends the arm without a deliverable.
+        The session starts from the template and ends by freezing its nominee
+        or ending the arm. A freeze passes only the freeze gate; a nomination
+        the gate refuses, ``no_edge`` and an exhausted budget all end the arm
+        without a deliverable, so the record always carries ``frozen`` or
+        ``arm_end`` and research is over once it is written.
         """
 
         records = self.ledger.read()
         assert_no_frozen_artifact_mutation(records)
         if research_over(records):
             raise RuntimeError("research is over; no further research session runs")
-        done = research_records(records)
-        if len(done) != index - 1 or not 1 <= index <= self.config.research_sessions:
-            raise RuntimeError(
-                f"research session {index} of {self.config.research_sessions} cannot "
-                f"run after {len(done)} recorded session(s)"
-            )
-        session_id = research_session_key(index)
-        start_node_id = done[-1]["next_start_node_id"] if done else None
-        start = (
-            artifact_from_step_node(self.config.experiment_dir, str(start_node_id))
-            if start_node_id
-            else None
-        )
-        # A generation an earlier attempt published without reaching the ledger
-        # is not in force: CURRENT follows the ledger before this attempt reads
-        # or keeps it.
-        restore_current_from_records(self.config.experiment_dir, records)
-        previous_prior = latest_prior_text(records)
+        if research_records(records):
+            raise RuntimeError("the arm's research session is already recorded")
         run_started = time.monotonic()
         run_id = f"run_{uuid.uuid4().hex}"
         context = dict(session_context or {})
@@ -309,9 +286,9 @@ class RollingExperimentPipeline:
         attempt = {
             "experiment_id": self.config.experiment_id,
             "epoch_id": RESEARCH_STAGE,
-            "fold_id": session_id,
+            "fold_id": RESEARCH_SESSION_KEY,
             "run_id": run_id,
-            "session_key": session_id,
+            "session_key": RESEARCH_SESSION_KEY,
             "phase": RESEARCH_STAGE,
         }
         # Evidence for a run that never gets to run its own except branch.
@@ -322,18 +299,13 @@ class RollingExperimentPipeline:
             session = self.developer(
                 ResearchSessionRequest(
                     experiment_id=self.config.experiment_id,
-                    session_id=session_id,
-                    session_index=index,
-                    sessions_total=self.config.research_sessions,
                     run_id=run_id,
-                    start=start,
                     snapshot=decision,
                     decision_time=self.config.geometry.research_decision_time,
                     research_years=years,
                     input_window_start=_months_before(
                         self.config.geometry.research_end, self.config.window_months
                     ),
-                    prior=previous_prior,
                     max_replay_years=int(budgets["max_replay_years"]),
                     max_llm_calls=int(budgets["max_llm_calls"]),
                     deadline_seconds=budgets["deadline_seconds"],
@@ -346,9 +318,8 @@ class RollingExperimentPipeline:
                     record_failed_attempts=self.config.record_failed_attempts,
                     nl_failure_policy=self.config.nl_failure_policy,
                     finalize_before_deadline_seconds=self.config.finalize_before_deadline_seconds,
-                    max_null_controls=self.config.max_null_controls_per_session,
+                    max_null_controls=self.config.max_null_controls,
                     progress_hook=progress,
-                    session_key=session_id,
                     skills_source_ref=(
                         str(current_skills.root) if current_skills.root is not None else ""
                     ),
@@ -361,8 +332,6 @@ class RollingExperimentPipeline:
                     f"of {budgets['max_replay_years']}"
                 )
             step_rows = [research_step_record(step) for step in session.steps]
-            last = index == self.config.research_sessions
-            next_start = start_node_id
             gate: dict[str, object] | None = None
             frozen: dict[str, object] | None = None
             arm_end: dict[str, object] | None = None
@@ -387,56 +356,48 @@ class RollingExperimentPipeline:
                     frozen = self._freeze(
                         next(step for step in session.steps if step.step_id == nominee["step_id"]),
                         gate=gate,
-                        session_id=session_id,
                         run_id=run_id,
                         null_controls=session.null_controls,
                     )
                     frozen_id = str(frozen["artifact_id"])
-            elif session.outcome == "continue":
-                next_start = session.node_id or start_node_id
+                else:
+                    reasons = ", ".join(str(reason) for reason in gate["reasons"])
+                    arm_end = {
+                        "status": "no_deliverable",
+                        "reason": f"freeze refused by the gate ({reasons})",
+                    }
             elif session.outcome == "no_edge":
                 arm_end = {"status": "no_deliverable", "reason": f"no_edge: {session.reason}"}
-            if frozen is None and arm_end is None and last:
-                reasons = (
-                    ", ".join(str(reason) for reason in gate["reasons"])  # type: ignore[union-attr]
-                    if gate is not None
-                    else session.outcome
-                )
+            else:
                 arm_end = {
                     "status": "no_deliverable",
-                    "reason": f"last research session ended without a freeze ({reasons})",
+                    "reason": (
+                        "research budget exhausted without a freeze "
+                        f"({session.finish_reason})"
+                    ),
                 }
             _publish_progress(progress, "publishing", run_id=run_id)
-            prior = self._publish_or_keep_prior(
-                session.prior, previous=previous_prior, generation_id=f"{session_id}_{run_id}"
-            )
             skills = self._publish_or_keep_skills(
                 session.skills_source_ref,
                 current=current_skills,
-                generation_id=f"{session_id}_{run_id}",
+                generation_id=f"{RESEARCH_SESSION_KEY}_{run_id}",
                 run_id=run_id,
             )
             trace = agent_trace_path(self.config.experiment_dir / "artifacts", run_id)
             record = {
                 "record_type": "research_session",
                 **{key: attempt[key] for key in ("experiment_id", "epoch_id", "fold_id", "run_id")},
-                "session_key": session_id,
-                "session_id": session_id,
-                "session_index": index,
-                "sessions_total": self.config.research_sessions,
-                "start_node_id": start_node_id,
+                "session_key": RESEARCH_SESSION_KEY,
                 "conversation_id": session.conversation_id,
                 "finish_reason": session.finish_reason,
                 "outcome": session.outcome,
                 "reason": session.reason or None,
                 "nominated_step_id": session.node_id if session.outcome == "freeze" else None,
-                "next_start_node_id": next_start,
                 "steps": step_rows,
                 "trials_to_date": len(_arm_revisions(records, step_rows)),
                 "freeze_gate": gate,
                 "frozen": frozen,
                 "arm_end": arm_end,
-                **prior,
                 "skills_ref": skills.skills_ref or None,
                 "skills_generation_id": skills.generation_id or None,
                 **skills.stats.ledger_fields(),
@@ -452,7 +413,7 @@ class RollingExperimentPipeline:
             self.ledger.append(record)
             wrote_ledger_record = True
             expire_experiment_session_inbox(
-                self.config.experiment_dir, session_id, expired_by=run_id
+                self.config.experiment_dir, RESEARCH_SESSION_KEY, expired_by=run_id
             )
             return record
         except BaseException as exc:
@@ -489,19 +450,18 @@ class RollingExperimentPipeline:
         nominee: StepResult,
         *,
         gate: Mapping[str, object],
-        session_id: str,
         run_id: str,
         null_controls: Mapping[str, Mapping[str, object]],
     ) -> dict[str, object]:
         """Freeze the nominee's immutable revision and state what it was frozen on."""
 
-        artifact_id = f"strategy_{session_id}_{uuid.uuid4().hex[:12]}"
+        artifact_id = f"strategy_{RESEARCH_SESSION_KEY}_{uuid.uuid4().hex[:12]}"
         stored = self.artifacts.freeze_revision(
             nominee.revision_id,
             artifact_id=artifact_id,
             experiment_id=self.config.experiment_id,
             epoch_id=RESEARCH_STAGE,
-            fold_id=session_id,
+            fold_id=RESEARCH_SESSION_KEY,
             run_id=run_id,
             step_id=nominee.step_id,
         )
@@ -517,7 +477,7 @@ class RollingExperimentPipeline:
                 nominee.validation.result_ref,
                 start=self.config.geometry.research_start,
                 end=self.config.geometry.research_end,
-                seed=null_control_seed(session_id, "frozen"),
+                seed=null_control_seed(RESEARCH_SESSION_KEY, "frozen"),
             )
         )
         return {
@@ -857,35 +817,6 @@ class RollingExperimentPipeline:
             previous=current,
         )
 
-    def _publish_or_keep_prior(
-        self, candidate: str, *, previous: str, generation_id: str
-    ) -> dict[str, object]:
-        """Publish the session's PRIOR.md when it differs, else keep the previous one."""
-
-        store = ExperimentPriorStore(self.config.experiment_dir)
-        text = str(candidate or "").strip()
-        if len(text) > PRIOR_MAX_CHARS:
-            raise ValueError(
-                f"PRIOR.md is {len(text)} characters; keep it to {PRIOR_MAX_CHARS}"
-            )
-        if text and text != previous.strip():
-            published = store.publish(text, generation_id=generation_id)
-            return {
-                "prior": published.text,
-                "prior_published": True,
-                "prior_ref": published.prior_ref,
-                "prior_generation_id": published.generation_id,
-                "prior_chars": published.chars,
-            }
-        kept = previous.strip()
-        return {
-            "prior": kept,
-            "prior_published": False,
-            "prior_ref": store.current_ref() or None,
-            "prior_generation_id": store.current_generation_id() or None,
-            "prior_chars": len(kept),
-        }
-
 
 def research_step_record(step: StepResult) -> dict[str, object]:
     """One completed Validation as the ledger's ``steps[]`` row.
@@ -942,34 +873,6 @@ def freeze_gate_for(
         )
     except ValueError as exc:
         return {"passed": False, "reasons": ["freeze_unmeasurable"], "error": str(exc)}
-
-
-def artifact_from_step_node(experiment_dir: Path, node_id: str) -> FrozenArtifact:
-    """The snapshot of one validated Step-tree node, as a session's start."""
-
-    from autotrade.environment.step_tree import (
-        NODE_MODELS_DIR,
-        NODE_OUTPUT_DIR,
-        StepTree,
-    )
-
-    steps_root = Path(experiment_dir) / "steps"
-    node = StepTree(steps_root).get_node(node_id)  # ValueError on unknown ids
-    if node.get("status") == "failed" or not node.get("complete_validation"):
-        raise RuntimeError(f"step node {node_id} is not a validated node with a snapshot")
-    output_dir = steps_root / node_id / NODE_OUTPUT_DIR
-    if not output_dir.is_dir():
-        raise RuntimeError(f"step node {node_id} has no strategy snapshot on disk")
-    models_dir = steps_root / node_id / NODE_MODELS_DIR
-    return FrozenArtifact(
-        artifact_id=f"stepnode_{node_id}",
-        path=output_dir,
-        model_path=models_dir if models_dir.is_dir() else None,
-        source_run_id=str(node.get("run_id") or ""),
-        source_fold_id=str(node.get("session_ref") or ""),
-        source_step_id=node_id,
-        revision_id=str(node.get("revision_id") or ""),
-    )
 
 
 def null_control_seed(key: str, role: str) -> int:
@@ -1192,9 +1095,9 @@ def _session_budgets(
     config: RollingExperimentConfig, override: object
 ) -> dict[str, int | float]:
     limits: dict[str, int | float] = {
-        "max_replay_years": config.max_replay_years_per_session,
+        "max_replay_years": config.max_replay_years,
         "max_llm_calls": config.max_llm_calls,
-        "deadline_seconds": config.max_session_minutes * 60,
+        "deadline_seconds": config.max_research_minutes * 60,
     }
     if override not in (None, {}):
         if not isinstance(override, dict):
@@ -1235,7 +1138,6 @@ def _session_budgets(
 __all__ = [
     "DailyStrategyPipeline",
     "RollingExperimentPipeline",
-    "artifact_from_step_node",
     "freeze_gate_for",
     "null_control_seed",
     "research_step_record",

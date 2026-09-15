@@ -33,15 +33,16 @@ from autotrade.pipelines.interactive import ExperimentStopped, InteractiveExperi
 from autotrade.pipelines.ledger import ExperimentLedger, FrozenArtifactMutated
 
 
-def sessions_for(count: int) -> tuple[PlannedSession, ...]:
-    return planned_sessions(count)
+# The plan of record of every arm: the research session, then the forward replay.
+PLAN = planned_sessions()
 
 
 class RecordingExecutor:
     """Appends the session's canonical ledger record, like the real pipeline.
 
     ``outcomes`` maps a session key to the research record's extra fields
-    (``frozen`` or ``arm_end``); a research session otherwise continues.
+    (``frozen`` or ``arm_end``); without them the research record ends nothing,
+    which the real pipeline never writes, so most tests name one.
     """
 
     def __init__(self, ledger: ExperimentLedger, *, record: bool = True, outcomes=None) -> None:
@@ -115,29 +116,28 @@ class RunnerTestCase(unittest.TestCase):
         write_control(self.control, state)
 
 
-FROZEN = {"frozen": {"artifact_id": "strategy_s2_x", "output_path": "unused"}}
+FROZEN = {"frozen": {"artifact_id": "strategy_research_x", "output_path": "unused"}}
 NO_EDGE = {"arm_end": {"status": "no_deliverable", "reason": "no_edge: nothing"}}
 
 
 class InteractiveRunnerTest(RunnerTestCase):
-    def test_research_runs_in_order_and_the_forward_replay_follows_a_freeze(self) -> None:
-        executor = RecordingExecutor(self.ledger, outcomes={"s2": FROZEN})
-        result = self.runner(sessions_for(3), executor).run()
-        # s3 is never due: research ended with the freeze in s2.
-        self.assertEqual(result, {"status": "complete", "sessions_run": 3})
-        self.assertEqual(executor.keys, ["s1", "s2", "forward"])
+    def test_the_research_session_runs_once_and_the_forward_replay_follows_a_freeze(self) -> None:
+        executor = RecordingExecutor(self.ledger, outcomes={"research": FROZEN})
+        result = self.runner(PLAN, executor).run()
+        self.assertEqual(result, {"status": "complete", "sessions_run": 2})
+        self.assertEqual(executor.keys, ["research", "forward"])
         status = read_status(self.status)
-        self.assertEqual(status["completed_sessions"], 3)
-        self.assertEqual(status["total_sessions"], 4)
+        self.assertEqual(status["completed_sessions"], 2)
+        self.assertEqual(status["total_sessions"], 2)
 
     def test_research_that_ends_without_a_freeze_runs_no_forward_replay(self) -> None:
-        executor = RecordingExecutor(self.ledger, outcomes={"s1": NO_EDGE})
-        result = self.runner(sessions_for(3), executor).run()
+        executor = RecordingExecutor(self.ledger, outcomes={"research": NO_EDGE})
+        result = self.runner(PLAN, executor).run()
         self.assertEqual(result["status"], "complete")
-        self.assertEqual(executor.keys, ["s1"])
+        self.assertEqual(executor.keys, ["research"])
 
     def test_resume_after_a_freeze_runs_only_the_forward_replay(self) -> None:
-        self.runner(sessions_for(2), RecordingExecutor(self.ledger, outcomes={"s1": FROZEN}, record=True)).run()
+        self.runner(PLAN, RecordingExecutor(self.ledger, outcomes={"research": FROZEN}, record=True)).run()
         rows = self.ledger.read()
         # Drop the forward record: the worker stopped between freeze and replay.
         self.ledger.path.write_text(
@@ -145,7 +145,7 @@ class InteractiveRunnerTest(RunnerTestCase):
             encoding="utf-8",
         )
         again = RecordingExecutor(self.ledger)
-        self.runner(sessions_for(2), again).run()
+        self.runner(PLAN, again).run()
         self.assertEqual(again.keys, ["forward"])
 
     def test_a_session_is_retried_after_a_transient_failure(self) -> None:
@@ -156,10 +156,8 @@ class InteractiveRunnerTest(RunnerTestCase):
                     raise RuntimeError(f"boom{len(self.calls)}")
                 return super().__call__(session, context)
 
-        executor = Flaky(self.ledger)
-        result = self.runner(
-            sessions_for(1), executor, session_max_attempts=3
-        ).run()
+        executor = Flaky(self.ledger, outcomes={"research": NO_EDGE})
+        result = self.runner(PLAN, executor, session_max_attempts=3).run()
         self.assertEqual(result["status"], "complete")
         self.assertEqual(len(executor.calls), 3)
         self.assertEqual(read_status(self.status)["state"], "running_session")
@@ -177,11 +175,11 @@ class InteractiveRunnerTest(RunnerTestCase):
                 return super().__call__(session, context)
 
         result = self.runner(
-            sessions_for(2), Flaky(self.ledger), session_max_attempts=3
+            PLAN, Flaky(self.ledger, outcomes={"research": FROZEN}), session_max_attempts=3
         ).run()
         self.assertEqual(result["status"], "complete")
-        # The failure stays visible while its retry runs; the next session
-        # starts without s1's stale attempt text.
+        # The failure stays visible while its retry runs; the forward replay
+        # starts without the research attempt's stale text.
         self.assertEqual(seen, [None, "RuntimeError: boom (attempt 1/3)", None])
         self.assertIsNone(read_status(self.status)["error"])
 
@@ -207,10 +205,8 @@ class InteractiveRunnerTest(RunnerTestCase):
                     raise RuntimeError("boom")
                 return super().__call__(session, context)
 
-        executor = Flaky(self.ledger)
-        self.runner(
-            sessions_for(1), executor, session_max_attempts=3
-        ).run()
+        executor = Flaky(self.ledger, outcomes={"research": NO_EDGE})
+        self.runner(PLAN, executor, session_max_attempts=3).run()
         self.assertEqual(len(started), 2)
         self.assertTrue(started[0])
         self.assertTrue(started[1])
@@ -240,9 +236,7 @@ class InteractiveRunnerTest(RunnerTestCase):
 
         executor = Mutating(self.ledger, record=False)
         with self.assertRaises(FrozenArtifactMutated):
-            self.runner(
-                (PlannedSession("s1", "research", 1),), executor, session_max_attempts=3
-            ).run()
+            self.runner(PLAN[:1], executor, session_max_attempts=3).run()
         self.assertEqual(len(executor.calls), 1)
         self.assertEqual(len(self.ledger.read("forward")), 1)
         self.assertEqual(read_status(self.status)["state"], "failed")
@@ -262,7 +256,7 @@ class InteractiveRunnerTest(RunnerTestCase):
         before = [row.get("run_id") for row in self.ledger.read()]
         executor = RecordingExecutor(self.ledger)
         with self.assertRaises(FrozenArtifactMutated):
-            self.runner(sessions_for(2), executor).run()
+            self.runner(PLAN, executor).run()
         self.assertEqual(executor.keys, [])
         self.assertEqual([row.get("run_id") for row in self.ledger.read()], before)
         self.assertEqual(read_status(self.status)["state"], "failed")
@@ -275,9 +269,7 @@ class InteractiveRunnerTest(RunnerTestCase):
 
         executor = AlwaysFail(self.ledger)
         with self.assertRaisesRegex(RuntimeError, "still broken"):
-            self.runner(
-                sessions_for(1), executor, session_max_attempts=3
-            ).run()
+            self.runner(PLAN, executor, session_max_attempts=3).run()
         self.assertEqual(len(executor.calls), 3)
         self.assertEqual(read_status(self.status)["state"], "failed")
         # The final failure keeps its text, without an attempt suffix.
@@ -286,21 +278,21 @@ class InteractiveRunnerTest(RunnerTestCase):
     def test_a_positive_poll_interval_is_required(self) -> None:
         for bad in (0, -1.0):
             with self.subTest(poll_seconds=bad), self.assertRaisesRegex(ValueError, "poll_seconds"):
-                self.runner(sessions_for(1), RecordingExecutor(self.ledger), poll_seconds=bad)
+                self.runner(PLAN, RecordingExecutor(self.ledger), poll_seconds=bad)
 
     def test_stop_requested_during_a_session_halts_at_the_next_boundary(self) -> None:
-        executor = RecordingExecutor(self.ledger)
+        executor = RecordingExecutor(self.ledger, outcomes={"research": FROZEN})
         executor.on_call = lambda _session, _context: self.set_control(request="stop")
-        result = self.runner(sessions_for(2), executor).run()
-        # The session in flight finishes; the next one never starts.
+        result = self.runner(PLAN, executor).run()
+        # The session in flight finishes; the forward replay never starts.
         self.assertEqual(result, {"status": "stop", "sessions_run": 1})
-        self.assertEqual(executor.keys, ["s1"])
+        self.assertEqual(executor.keys, ["research"])
         self.assertEqual(read_status(self.status)["state"], "stopped")
 
     def test_pause_requested_during_a_session_halts_and_reports_paused(self) -> None:
-        executor = RecordingExecutor(self.ledger)
+        executor = RecordingExecutor(self.ledger, outcomes={"research": FROZEN})
         executor.on_call = lambda _session, _context: self.set_control(request="pause")
-        result = self.runner(sessions_for(2), executor).run()
+        result = self.runner(PLAN, executor).run()
         self.assertEqual(result["status"], "pause")
         self.assertEqual(result["sessions_run"], 1)
         self.assertEqual(read_status(self.status)["state"], "paused")
@@ -309,58 +301,63 @@ class InteractiveRunnerTest(RunnerTestCase):
         self.set_control(request="stop")
         executor = RecordingExecutor(self.ledger)
         with self.assertRaisesRegex(ExperimentStopped, "stop requested"):
-            self.runner(sessions_for(1), executor).run()
+            self.runner(PLAN, executor).run()
         self.assertEqual(executor.keys, [])
         status = read_status(self.status)
         self.assertEqual(status["state"], "failed")
         self.assertIn("ExperimentStopped", status["error"])
 
-    def test_per_session_directives_and_overrides_reach_the_session_then_are_consumed(self) -> None:
-        executor = RecordingExecutor(self.ledger)
+    def test_session_directives_and_overrides_reach_the_session_then_are_consumed(self) -> None:
+        executor = RecordingExecutor(self.ledger, outcomes={"research": NO_EDGE})
         self.set_control(
-            directives={"s1": "try momentum"},
-            resource_overrides={"s1": {"max_replay_years": 2}},
+            directives={"research": "try momentum"},
+            resource_overrides={"research": {"max_replay_years": 2}},
         )
-        self.runner(sessions_for(1), executor).run()
+        self.runner(PLAN, executor).run()
         _key, context = executor.calls[0]
         self.assertEqual(context["directive"], "try momentum")
         self.assertEqual(context["resource_override"], {"max_replay_years": 2})
-        self.assertEqual(context["session_key"], "s1")
+        self.assertEqual(context["session_key"], "research")
         for hook in ("progress_hook", "session_timing"):
             self.assertTrue(callable(context[hook]), hook)
         control = read_control(self.control)
         self.assertEqual((control.directives, control.resource_overrides), ({}, {}))
 
-    def test_a_per_session_gpu_count_reaches_only_its_own_session_and_is_consumed(self) -> None:
+    def test_a_session_gpu_count_reaches_only_its_own_session_and_is_consumed(self) -> None:
         """`set_gpu_count` is a one-shot allocation, like an approval.
 
         The console writes it against one session key; the runner must hand it
-        to that session alone and clear it afterwards, or the next session would
-        silently inherit an allocation nobody asked for.
+        to that session alone and clear it afterwards, or the forward replay
+        would silently inherit an allocation nobody asked for.
         """
-        executor = RecordingExecutor(self.ledger)
-        self.set_control(gpu_counts={"s1": 3})
-        self.runner(sessions_for(2), executor).run()
+        executor = RecordingExecutor(self.ledger, outcomes={"research": FROZEN})
+        self.set_control(gpu_counts={"research": 3})
+        self.runner(PLAN, executor).run()
         self.assertEqual(
             {key: context["sandbox_gpu_count"] for key, context in executor.calls},
-            {"s1": 3, "s2": None},
+            {"research": 3, "forward": None},
         )
         self.assertEqual(read_control(self.control).gpu_counts, {})
 
     def test_a_session_that_records_nothing_durable_fails_fast(self) -> None:
         executor = RecordingExecutor(self.ledger, record=False)
         with self.assertRaisesRegex(RuntimeError, "without a durable success record"):
-            self.runner(sessions_for(1), executor).run()
+            self.runner(PLAN, executor).run()
         self.assertEqual(read_status(self.status)["state"], "failed")
 
-    def test_resume_skips_sessions_already_recorded_in_the_ledger(self) -> None:
-        first = RecordingExecutor(self.ledger)
-        self.runner(sessions_for(2), first).run()
+    def test_resume_skips_the_session_already_recorded_in_the_ledger(self) -> None:
+        first = RecordingExecutor(self.ledger, outcomes={"research": FROZEN})
+        first.on_call = lambda session, _context: (
+            self.set_control(request="stop") if session.session_key == "research" else None
+        )
+        self.runner(PLAN, first).run()
+        self.assertEqual(first.keys, ["research"])
+        self.set_control(request=None)
         second = RecordingExecutor(self.ledger)
-        result = self.runner(sessions_for(3), second).run()
-        self.assertEqual(second.keys, ["s3"])
+        result = self.runner(PLAN, second).run()
+        self.assertEqual(second.keys, ["forward"])
         self.assertEqual(result["sessions_run"], 1)
-        self.assertEqual(read_status(self.status)["completed_sessions"], 3)
+        self.assertEqual(read_status(self.status)["completed_sessions"], 2)
 
     def test_no_session_gate_holds_a_worker_the_researcher_started(self) -> None:
         """The session gate only checks stop/seal/restart; nothing blocks.
@@ -371,7 +368,7 @@ class InteractiveRunnerTest(RunnerTestCase):
         with patch.object(
             interactive.time, "sleep", side_effect=AssertionError("gate slept")
         ):
-            self.runner(sessions_for(1), RecordingExecutor(self.ledger)).run()
+            self.runner(PLAN, RecordingExecutor(self.ledger, outcomes={"research": NO_EDGE})).run()
 
 class WorkerEntrypointTest(unittest.TestCase):
     def test_the_worker_restores_child_reaping_the_console_disabled(self) -> None:
@@ -421,7 +418,7 @@ class WorkerEntrypointTest(unittest.TestCase):
                             "schema_version": 1,
                             "state": "running_session",
                             "pid": os.getpid(),
-                            "session_key": "s3",
+                            "session_key": "research",
                             "completed_sessions": 17,
                         }
                     ),
@@ -450,7 +447,7 @@ class WorkerEntrypointTest(unittest.TestCase):
             self.assertIsNone(status["error"])
             self.assertTrue(status["terminated_at"])
             # Where the run stopped survives, as on the escalated path.
-            self.assertEqual(status["session_key"], "s3")
+            self.assertEqual(status["session_key"], "research")
             self.assertEqual(status["completed_sessions"], 17)
 
     def test_the_entrypoint_persists_a_terminal_failure_status(self) -> None:

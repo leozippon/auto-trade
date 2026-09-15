@@ -25,7 +25,7 @@ def _options(tmp_path: Path, **overrides: object) -> SimpleNamespace:
             step_tree_enabled=True,
             research_directive="directive",
             max_llm_calls=800,
-            max_session_minutes=20,
+            max_research_minutes=20,
             strategy_fit_timeout_seconds=1800,
             nl_failure_policy="fail",
             workspace_reference="configs/workspace_refs/pack",
@@ -234,4 +234,3 @@ def test_the_audit_calendar_defaults_are_the_console_geometry() -> None:
     assert {name: getattr(args, name) for name in GEOMETRY_PARAMETERS} == {
         name: WEB_CREATE_DEFAULTS[name] for name in GEOMETRY_PARAMETERS
     }
-    assert args.research_sessions == WEB_CREATE_DEFAULTS["research_sessions"]

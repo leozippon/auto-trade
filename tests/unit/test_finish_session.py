@@ -1,9 +1,8 @@
-"""``finish_session``: the three ways a research session ends.
+"""``finish_session``: the two ways the research session ends.
 
 The tool decides nothing about the market: it refuses a freeze the gate
-rejects, a continue in the last session, and an unexplained decision, and it
-hands the Pipeline an outcome the pipeline records as ``freeze``, ``continue``
-or ``no_edge``.
+rejects and an unexplained decision, and it hands the Pipeline an outcome the
+pipeline records as ``freeze`` or ``no_edge``.
 """
 
 from __future__ import annotations
@@ -81,26 +80,24 @@ def test_every_outcome_maps_to_the_pipeline_outcome_it_names(tmp_path: Path):
     registry = ToolRegistry([_tool(tree, _Gate({winner}))])
     results = {
         "freeze": registry.invoke("finish_session", {"outcome": "freeze", "node_id": winner}),
-        "continue": registry.invoke(
-            "finish_session", {"outcome": "continue", "node_id": winner, "reason": REASON}
-        ),
         "no_edge": registry.invoke("finish_session", {"outcome": "no_edge", "reason": REASON}),
     }
     assert set(results) == set(SESSION_OUTCOMES) - {"deadline"}
     mapped = {name: _session_outcome(result.value) for name, result in results.items()}
     assert mapped == {
         "freeze": ("freeze", winner, ""),
-        "continue": ("continue", winner, REASON),
         "no_edge": ("no_edge", None, REASON),
     }
     assert all(result.ok and result.finish for result in results.values())
     assert results["freeze"].value["freeze_gate"]["deflated_sharpe_probability"] == 0.71
-    # A continue without a node hands on this session's own start.
-    bare = registry.invoke("finish_session", {"outcome": "continue", "reason": REASON})
-    assert _session_outcome(bare.value) == ("continue", None, REASON)
-    assert "where this session started" in bare.value["pipeline_outcome"]
-    # The outcome is required; the retired Fold outcomes are not in the enum.
-    for arguments in ({}, {"outcome": "terminate", "reason": REASON}, {"outcome": "select"}):
+    # The outcome is required; the retired outcomes (the multi-session
+    # ``continue`` among them) are not in the enum.
+    for arguments in (
+        {},
+        {"outcome": "continue", "node_id": winner, "reason": REASON},
+        {"outcome": "terminate", "reason": REASON},
+        {"outcome": "select"},
+    ):
         assert registry.invoke("finish_session", arguments).ok is False
 
 
@@ -124,22 +121,7 @@ def test_a_nomination_the_gate_rejects_is_refused_with_its_reasons_and_numbers(t
     assert finish.invoke({"outcome": "freeze", "node_id": strong}).finish
 
 
-def test_continue_is_refused_in_the_last_session_and_needs_a_reason(tmp_path: Path):
-    tree = StepTree(tmp_path / "steps")
-    node = _node(tree, tmp_path, "a")
-    with pytest.raises(ToolError, match="last research session") as last:
-        _tool(tree, _Gate(set()), last_session=True).invoke(
-            {"outcome": "continue", "reason": REASON}
-        )
-    assert last.value.error_type == "last_session"
-    session = _tool(tree, _Gate(set()))
-    with pytest.raises(ToolError, match="requires reason"):
-        session.invoke({"outcome": "continue", "node_id": node})
-    with pytest.raises(ToolError, match="requires reason"):
-        session.invoke({"outcome": "no_edge", "reason": "x" * (REASON_MIN_CHARS - 1)})
-
-
-def test_no_edge_names_no_node_and_needs_a_validation_of_this_session(tmp_path: Path):
+def test_no_edge_names_no_node_and_needs_a_reason_and_a_validation(tmp_path: Path):
     tree = StepTree(tmp_path / "steps")
     empty = _tool(tree, _Gate(set()))
     with pytest.raises(ToolError, match="at least one complete"):
@@ -147,6 +129,8 @@ def test_no_edge_names_no_node_and_needs_a_validation_of_this_session(tmp_path: 
     node = _node(tree, tmp_path, "a")
     with pytest.raises(ToolError, match="node_id must be absent"):
         empty.invoke({"outcome": "no_edge", "node_id": node, "reason": REASON})
+    with pytest.raises(ToolError, match="requires reason"):
+        empty.invoke({"outcome": "no_edge", "reason": "x" * (REASON_MIN_CHARS - 1)})
     result = empty.invoke({"outcome": "no_edge", "reason": REASON})
     assert result.value["candidates_evaluated"] == 1
     assert "no forward test" in result.value["pipeline_outcome"]
@@ -157,9 +141,8 @@ def test_only_a_complete_node_of_this_session_can_be_named(tmp_path: Path):
     earlier = _node(tree, tmp_path, "earlier", session="session_ref_older")
     mine = _node(tree, tmp_path, "mine")
     finish = _tool(tree, _Gate({earlier, mine}))
-    for outcome, extra in (("freeze", {}), ("continue", {"reason": REASON})):
-        with pytest.raises(ToolError, match="not a Step of this session"):
-            finish.invoke({"outcome": outcome, "node_id": earlier, **extra})
+    with pytest.raises(ToolError, match="not a Step of this session"):
+        finish.invoke({"outcome": "freeze", "node_id": earlier})
     with pytest.raises(ToolError, match="not a Step node"):
         finish.invoke({"outcome": "freeze", "node_id": "missing"})
     # One own node: a freeze may omit node_id; with two it must name one.

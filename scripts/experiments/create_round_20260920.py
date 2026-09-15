@@ -150,7 +150,7 @@ ARMS: dict[str, dict[str, object]] = {
             "对照、提名条件与收尾规则只以 standards.md 为准。refs/starter 的 o1 只是能跑的基线，不是推荐"
             "的机制：先 smoke_backtest；方向筛选在离线做（refs/exploration-plan.md），回放只用来确认。"
             "不重开 standards.md 列出的已关闭家族，不以 Alpha158 + LightGBM 排序器或序列网络作候选。"
-            "到最后一个会话仍没有候选满足提名条件时以 no_edge 结束。"
+            "预算用尽前仍没有候选满足提名条件时以 no_edge 结束。"
         ),
     },
     "defensive_quality_20260920": {

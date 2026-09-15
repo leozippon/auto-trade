@@ -83,11 +83,6 @@ def add_calendar_arguments(parser: argparse.ArgumentParser) -> None:
             default=str(WEB_CREATE_DEFAULTS[name]),
             metavar="YYYYMMDD",
         )
-    parser.add_argument(
-        "--research-sessions",
-        type=int,
-        default=int(WEB_CREATE_DEFAULTS["research_sessions"]),
-    )
 
 
 def add_schedule_arguments(parser: argparse.ArgumentParser) -> None:
@@ -359,10 +354,9 @@ def _build_worker_params(
             repo_root, args.fundamental_events_status
         ),
         **{name: getattr(args, name) for name in GEOMETRY_PARAMETERS},
-        "research_sessions": args.research_sessions,
         "strategy_period": args.strategy_period,
         "inference_time": args.inference_time,
-        "max_session_minutes": args.max_session_minutes,
+        "max_research_minutes": args.max_research_minutes,
         "window_months": args.window_months,
         "intraday_trade_days": args.intraday_trade_days,
         "include_events": args.include_events,

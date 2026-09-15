@@ -46,7 +46,7 @@ from autotrade.webui import memory
 from autotrade.webui.server import create_app
 
 HOST_PATH = "/Data2/lzp/ADMCubeQuant/experiments/adopted/artifacts"
-SESSION_KEY = "s1"
+SESSION_KEY = "research"
 RUN_ID = "run_5b1d0a9c8e7f46329d1c4b7a2e6f8d03"
 
 
@@ -129,7 +129,7 @@ def _experiment(
     hitl = directory / "hitl"
     hitl.mkdir(parents=True, exist_ok=True)
     (hitl / "schedule.json").write_text(
-        json.dumps(build_session_plan(1, forward={})), encoding="utf-8"
+        json.dumps(build_session_plan(forward={})), encoding="utf-8"
     )
     write_control(hitl / "control.json", ControlState())
     return directory

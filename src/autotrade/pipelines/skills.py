@@ -25,7 +25,7 @@ from pathlib import Path, PurePosixPath
 
 from autotrade.environment.runtime import chmod_tree, utc_now_iso, write_json_atomic
 from autotrade.environment.tools.base import ToolError, ToolResult, ToolSpec
-from autotrade.environment.tools.prior_policy import (
+from autotrade.environment.tools.skills_policy import (
     strict_transferable_content_violation,
 )
 from autotrade.environment.tools.workspace import SafeWorkspace

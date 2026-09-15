@@ -41,12 +41,10 @@ from autotrade.pipelines.verdict import (
 )
 
 STAGES = ("created", "research", "sealed", "graduated", "discarded", "no_deliverable")
-SESSIONS = 3
 GEOMETRY = DEFAULT_RESEARCH_GEOMETRY
 # Worker-accepted parameters of a console-created arm.
 PARAMS: dict[str, object] = {
     **GEOMETRY.to_record(),
-    "research_sessions": SESSIONS,
     "strategy_path": "configs/agent_output_template/main.py",
     "data_backend": "pit",
     "execution_mode": "sandbox",
@@ -151,27 +149,22 @@ def _step(experiment_dir: Path, session: str, index: int, *, edge: float, seed: 
     }
 
 
-def _session_record(experiment_id: str, index: int, **fields: object) -> dict[str, object]:
-    key = f"s{index}"
+def _session_record(experiment_id: str, **fields: object) -> dict[str, object]:
     return {
         "record_type": "research_session",
         "experiment_id": experiment_id,
         "epoch_id": "research",
-        "fold_id": key,
-        "run_id": f"run_{key}",
-        "session_key": key,
-        "session_id": key,
-        "session_index": index,
-        "sessions_total": SESSIONS,
-        "finish_reason": "finished",
-        "reason": f"session {key} reason",
+        "fold_id": "research",
+        "run_id": "run_research",
+        "session_key": "research",
+        "finish_reason": "llm_agent_finish_session",
+        "reason": "the session's reason",
         "nominated_step_id": None,
-        "next_start_node_id": None,
         "freeze_gate": None,
         "frozen": None,
         "arm_end": None,
-        "prior": f"PRIOR after {key}",
-        "prior_published": True,
+        "attempts": 1,
+        "budget_used": {"inference_seconds": 600.0, "llm_calls": 40, "replay_years": 8, "null_controls": 0},
         "run_wall_seconds": 600.0,
         **fields,
     }
@@ -194,33 +187,25 @@ def build_arm(root: Path, experiment_id: str, stage: str, *, alive: bool = False
     if stage == "created":
         write_json_atomic(hitl / "status.json", {"schema_version": 1, "state": "created"})
         return directory
-    write_json_atomic(hitl / "schedule.json", build_session_plan(SESSIONS, forward=REPLAY))
+    write_json_atomic(hitl / "schedule.json", build_session_plan(forward=REPLAY))
     ledger = ExperimentLedger(directory / "ledgers/experiment_ledger.jsonl")
     records: list[dict[str, object]] = []
-
-    s1_steps = [_step(directory, "s1", 0, edge=0.0005, seed=1), _step(directory, "s1", 1, edge=0.0015, seed=2)]
-    s1 = _session_record(
-        experiment_id,
-        1,
-        outcome="continue",
-        steps=s1_steps,
-        trials_to_date=2,
-        next_start_node_id=s1_steps[1]["step_id"],
-    )
-    records.append(s1)
-    current = "s2"
+    # The one research session is in flight while the arm researches: it has
+    # no ledger record until it ends.
+    current = "research"
     if stage in ("sealed", "graduated", "discarded"):
-        s2_steps = [
-            _step(directory, "s2", 0, edge=0.002, seed=3),
-            _step(directory, "s2", 1, edge=0.001, seed=4, span="Y3"),
+        steps = [
+            _step(directory, "research", 0, edge=0.0005, seed=1),
+            _step(directory, "research", 1, edge=0.002, seed=3),
+            _step(directory, "research", 2, edge=0.001, seed=4, span="Y3"),
         ]
-        nominee = s2_steps[0]
-        gate = freeze_gate_for(records, s2_steps, nominee)
-        output = directory / "artifacts/strategy/frozen/strategy_s2_abc/output"
+        nominee = steps[1]
+        gate = freeze_gate_for([], steps, nominee)
+        output = directory / "artifacts/strategy/frozen/strategy_research_abc/output"
         output.mkdir(parents=True)
         (output / "main.py").write_text("def generate_orders(context):\n    return []\n", encoding="utf-8")
         frozen = {
-            "artifact_id": "strategy_s2_abc",
+            "artifact_id": "strategy_research_abc",
             "output_path": str(output),
             "models_path": None,
             "source_step_id": nominee["step_id"],
@@ -242,12 +227,10 @@ def build_arm(root: Path, experiment_id: str, stage: str, *, alive: bool = False
         records.append(
             _session_record(
                 experiment_id,
-                2,
                 outcome="freeze",
-                steps=s2_steps,
-                trials_to_date=4,
+                steps=steps,
+                trials_to_date=3,
                 nominated_step_id=nominee["step_id"],
-                next_start_node_id=s1_steps[1]["step_id"],
                 freeze_gate=gate,
                 frozen=frozen,
             )
@@ -257,10 +240,9 @@ def build_arm(root: Path, experiment_id: str, stage: str, *, alive: bool = False
         records.append(
             _session_record(
                 experiment_id,
-                2,
                 outcome="no_edge",
                 steps=[],
-                trials_to_date=2,
+                trials_to_date=0,
                 arm_end={"status": "no_deliverable", "reason": "no_edge: nothing survived"},
             )
         )
@@ -279,7 +261,7 @@ def build_arm(root: Path, experiment_id: str, stage: str, *, alive: bool = False
             analysis,
             start=REPLAY["start"],
             end=REPLAY["forward_end"],
-            seed_key="strategy_s2_abc",
+            seed_key="strategy_research_abc",
             max_drawdown=0.9,
             cost_stress_multiplier=2.0,
             slippage_bps=5.0,
@@ -303,7 +285,7 @@ def build_arm(root: Path, experiment_id: str, stage: str, *, alive: bool = False
                 "fold_id": "forward",
                 "run_id": "run_forward",
                 "session_key": "forward",
-                "artifact_id": "strategy_s2_abc",
+                "artifact_id": "strategy_research_abc",
                 "replay": REPLAY,
                 "status": "ok",
                 "error": None,

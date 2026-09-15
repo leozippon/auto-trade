@@ -1,19 +1,19 @@
-"""Agent session runner: the main conversation loop for one research session.
+"""Agent session runner: the main conversation loop of the research session.
 
 docs/agent-design.md plus docs/environment-design.md §2.2 define the Agent
-session and tool-entrypoint contract: one Agent session per research session
-(one conversation_id), Steps share the session, only documented tools are
-callable, and the session deadline is the master constraint. The session budget
-the pipeline hands over includes a trailing wrap-up grace window
-(``deadline_grace_seconds``): reaching the main deadline never interrupts the
-model — with no complete Validation a single wrap-up prompt is injected and the
-session keeps its full autonomy through the grace window; when the grace window
-is exhausted the session closes gracefully (``session_end`` with status
-``deadline_exceeded``) and the Pipeline records a ``deadline`` session instead
-of failing the run. Inside the finalize window a current-run complete Validation
-instead switches to the restricted hard-finalization capability view. Main
-conversation calls and semantic compactions are logged in agent_trace.jsonl
-(docs/environment-design.md §2.4 and §4.2).
+session and tool-entrypoint contract: one conversation per session attempt,
+Steps share the session, only documented tools are callable, and the session
+budget is the master constraint. The budget the pipeline hands over includes
+a trailing wrap-up grace window (``deadline_grace_seconds``): reaching the
+main deadline never interrupts the model — with no complete Validation a
+single wrap-up prompt is injected and the session keeps its full autonomy
+through the grace window; when the grace window or the model-call budget is
+exhausted the session closes gracefully (``session_end`` with status
+``deadline_exceeded`` or ``call_budget_exhausted``) and the Pipeline records
+a ``deadline`` outcome instead of failing the run. Inside the finalize window
+a complete Validation instead switches to the restricted hard-finalization
+capability view. Main conversation calls and compactions are logged in the
+Agent trace (docs/environment-design.md §2.4 and §4.2).
 """
 
 from __future__ import annotations
@@ -87,24 +87,33 @@ SUBAGENT_TEARDOWN_WAIT_SECONDS = 30.0
 DEFAULT_DEADLINE_GRACE_SECONDS = 600.0
 
 
-class AgentSessionDeadlineExceeded(SessionInterrupt):
-    """The session deadline and its wrap-up grace window were both exhausted.
+# ``finish_reason`` values of a session that ended because a budget ran out.
+DEADLINE_GRACE_EXHAUSTED = "deadline_grace_exhausted"
+LLM_CALL_BUDGET_EXHAUSTED = "llm_call_budget_exhausted"
+
+
+class AgentSessionBudgetExhausted(SessionInterrupt):
+    """A session budget ran out: the deadline with its wrap-up grace, or the
+    model-call budget.
 
     Control flow, not an error: the session has already emitted
-    ``session_end{status: deadline_exceeded}``; the Pipeline converts this into
-    a recorded no-candidate session outcome and continues the experiment
-    instead of failing the run. A SessionInterrupt subclass so it re-raises
-    through tool dispatch instead of being swallowed into an error observation.
+    ``session_end`` (status ``deadline_exceeded`` or ``call_budget_exhausted``);
+    the Pipeline records the ``deadline`` outcome with ``finish_reason`` and
+    ends the arm instead of failing the run. A SessionInterrupt subclass so it
+    re-raises through tool dispatch instead of being swallowed into an error
+    observation.
     """
 
     def __init__(
         self,
-        message: str = "Agent session deadline and wrap-up grace exhausted",
+        message: str = "Agent session budget exhausted",
         *,
+        finish_reason: str = DEADLINE_GRACE_EXHAUSTED,
         conversation_id: str = "",
         llm_calls: int = 0,
     ) -> None:
         super().__init__(message)
+        self.finish_reason = finish_reason
         self.conversation_id = conversation_id
         self.llm_calls = llm_calls
 
@@ -420,8 +429,10 @@ class AgentSessionRunner:
                 self._close_session(
                     {"status": "deadline_exceeded", "llm_calls": llm_calls}
                 )
-                raise AgentSessionDeadlineExceeded(
-                    conversation_id=self.conversation_id, llm_calls=llm_calls
+                raise AgentSessionBudgetExhausted(
+                    "Agent session deadline and wrap-up grace exhausted",
+                    conversation_id=self.conversation_id,
+                    llm_calls=llm_calls,
                 )
             self._activate_hard_finalization_if_ready(remaining)
             provider_tools = self._provider_tools()
@@ -518,8 +529,10 @@ class AgentSessionRunner:
                     self._close_session(
                         {"status": "deadline_exceeded", "llm_calls": llm_calls}
                     )
-                    raise AgentSessionDeadlineExceeded(
-                        conversation_id=self.conversation_id, llm_calls=llm_calls
+                    raise AgentSessionBudgetExhausted(
+                        "Agent session deadline and wrap-up grace exhausted",
+                        conversation_id=self.conversation_id,
+                        llm_calls=llm_calls,
                     ) from exc
                 if "LLM call budget exhausted" in error:
                     self._close_session(
@@ -528,8 +541,11 @@ class AgentSessionRunner:
                             "llm_calls": llm_calls,
                         }
                     )
-                    raise RuntimeError(
-                        "Agent exceeded the session call budget"
+                    raise AgentSessionBudgetExhausted(
+                        "Agent session LLM call budget exhausted",
+                        finish_reason=LLM_CALL_BUDGET_EXHAUSTED,
+                        conversation_id=self.conversation_id,
+                        llm_calls=llm_calls,
                     ) from exc
                 if llm_failure_streak >= _LLM_FAILURE_CIRCUIT:
                     self._close_session(
@@ -744,7 +760,12 @@ class AgentSessionRunner:
                 "steps_used": accepted_steps,
             }
         )
-        raise RuntimeError("Agent exceeded the session call budget")
+        raise AgentSessionBudgetExhausted(
+            "Agent session LLM call budget exhausted",
+            finish_reason=LLM_CALL_BUDGET_EXHAUSTED,
+            conversation_id=self.conversation_id,
+            llm_calls=self.config.max_llm_calls,
+        )
 
     def _time_budget_notice(
         self,
@@ -836,17 +857,17 @@ class AgentSessionRunner:
         if call.name not in self._active_tool_names():
             return f"tool is unavailable at this point of the session: {call.name}"
         node_id = call.arguments.get("node_id")
-        if call.arguments.get("outcome") in ("continue", "no_edge") and not node_id:
-            # Continuing or ending the arm names no node, and is a legal
-            # finish in the finalize window too.
+        if call.arguments.get("outcome") == "no_edge" and not node_id:
+            # Ending the arm names no node, and is a legal finish in the
+            # finalize window too.
             return ""
         candidates = {
             str(candidate["node_id"]) for candidate in self._finalization_candidates()
         }
         if not isinstance(node_id, str) or node_id not in candidates:
             return (
-                f"{call.name} requires one node_id from the current run's complete "
-                'Validation candidates (or outcome="continue"/"no_edge" with a reason)'
+                f"{call.name} requires one node_id from the session's complete "
+                'Validation candidates (or outcome="no_edge" with a reason)'
             )
         return ""
 
@@ -957,11 +978,10 @@ class AgentSessionRunner:
             "remaining_inference_seconds": round(max(remaining, 0.0), 6),
             "selection_contract": (
                 "Decide yourself: finish_session with outcome=\"freeze\" and a "
-                "listed node_id whose passes_freeze_gate is true, outcome="
-                "\"continue\" (optionally with a listed node_id as the next "
-                "session's start; not in the last session) or outcome=\"no_edge\", "
-                "both with a reason. The Runner does not rank or auto-submit "
-                "candidates; a node with passes_freeze_gate=false cannot be frozen."
+                "listed node_id whose passes_freeze_gate is true, or outcome="
+                "\"no_edge\" with a reason. The Runner does not rank or "
+                "auto-submit candidates; a node with passes_freeze_gate=false "
+                "cannot be frozen."
             ),
             "complete_validation_candidates": self._finalization_candidates(),
             "available_tools": sorted(self._finalization_tool_names()),

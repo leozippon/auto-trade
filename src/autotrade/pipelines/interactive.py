@@ -4,8 +4,8 @@ Drives the pipeline's ``run_research_session`` and ``run_forward`` primitives in
 plan order with durable pause/stop, session-boundary restart, per-session
 directives and ledger-based resume. This is the only orchestration entry point;
 there is no unattended batch driver. The append-only ledger is the source of
-truth: a session with a durable record is complete, research sessions stop
-once research is over, and the forward replay runs only after a freeze.
+truth: a session with a durable record is complete, the research session is
+due until research is over, and the forward replay runs only after a freeze.
 Integrity-flagged rows are not successes: resume refuses them.
 
 All control state lives under ``experiments/<id>/hitl/`` as single-writer JSON
@@ -15,7 +15,7 @@ files (atomic replace, no locking needed):
                  RollingExperimentConfig + backends deterministically on every start)
   control.json   written by the controller (web backend / researcher)
   status.json    written only by the worker (heartbeat, position, live trace)
-  schedule.json  written by the worker at startup (planned sessions)
+  schedule.json  written by the worker at startup (the research session and the forward replay)
 
 Pausing always lands at a session boundary: the worker finishes the session in
 flight, then blocks at the next gate. A deferred restart lands at the same
@@ -31,7 +31,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
-from autotrade.agent.runner import AgentSessionDeadlineExceeded
+from autotrade.agent.runner import AgentSessionBudgetExhausted
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.runtime import AgentTraceWriter
 from autotrade.environment.tools.base import SessionInterrupt
@@ -134,10 +134,10 @@ class InteractiveExperimentRunner:
                 ):
                     return self._restart_result(ran)
             return {"status": "complete", "sessions_run": ran}
-        except AgentSessionDeadlineExceeded:
-            # Expected control flow: the session already closed gracefully at
-            # its deadline and the pipeline recorded it. Never mark the run
-            # failed for it; only real errors take the failed state below.
+        except AgentSessionBudgetExhausted:
+            # Expected control flow: the session already closed gracefully on
+            # an exhausted budget and the pipeline recorded it. Never mark the
+            # run failed for it; only real errors take the failed state below.
             raise
         except Exception as exc:
             self.status.set(state="failed", error=f"{type(exc).__name__}: {exc}")
@@ -146,7 +146,7 @@ class InteractiveExperimentRunner:
             self.status.stop()
 
     def _due(self, session: PlannedSession) -> bool:
-        """Research sessions run until research is over; the forward replay
+        """The research session runs until research is over; the forward replay
         runs once an artifact froze."""
 
         records = self.ledger.read()
@@ -164,7 +164,7 @@ class InteractiveExperimentRunner:
             self._begin_session(session)
             try:
                 self.execute_session(session, context)
-            except (ExperimentStopped, AgentSessionDeadlineExceeded, FrozenArtifactMutated):
+            except (ExperimentStopped, AgentSessionBudgetExhausted, FrozenArtifactMutated):
                 raise
             except Exception as exc:
                 last_error = exc

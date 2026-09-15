@@ -83,7 +83,6 @@ def _full_prompt() -> str:
     return prompts.build_system_prompt(
         experiment_facts={"identity": {"session_kind": "research"}},
         step_tree_enabled=True,
-        prior_prompt="上一会话的方向",
         exploration_directive="长期方向",
         session_directive="本会话指令",
     )
@@ -195,7 +194,7 @@ def test_the_prompt_states_the_research_session_contract() -> None:
     # Purpose: one mechanism on the research period; graduation is decided on
     # later sealed data; adaptation lives inside the artifact.
     for clause in (
-        "在同一个研究期上工作",
+        "本臂只有这一个研究会话",
         "前推期与 Held-out 上被连续回放一次并裁决",
         "滚动重拟合",
         "尾部窗口通常取 2–3 年、按季重训",
@@ -220,17 +219,17 @@ def test_the_prompt_states_the_research_session_contract() -> None:
     contract = prompt[prompt.index("# 决策合同") : prompt.index("# 证据标准")]
     for clause in (
         "`freeze`",
-        "`continue`",
         "`no_edge`",
-        "最后一个会话没有这个结局",
+        "之后没有别的会话接手",
+        "`deadline`",
         "`acceptance_rules.freeze_gate`",
         "本臂至少两个完整研究期验证",
-        "任何 span、任何会话、对照都算",
+        "任何 span、任何尝试、对照都算",
         "一条臂至多冻结一次",
-        "`PRIOR.md`",
         "`finish_session` 之后不能再写",
     ):
         assert clause in contract, clause
+    assert "`continue`" not in contract and "PRIOR" not in prompt
     evidence = prompt[prompt.index("# 证据标准") : prompt.index("# 原则")]
     for clause in (
         "中性化超额约为 0",
@@ -241,10 +240,10 @@ def test_the_prompt_states_the_research_session_contract() -> None:
     ):
         assert clause in evidence, clause
     facts = prompt[prompt.index("# 预算与事实") : prompt.index("# 反馈通道")]
-    for fact in ("`budgets`", "`research_geometry`", "`identity.session`", "`arm`", "`earlier_sessions`"):
+    for fact in ("`budgets`", "`research_geometry`", "`arm`", "`artifact_contract`"):
         assert fact in facts, fact
     feedback = prompt[prompt.index("# 反馈通道") :]
-    assert "交接分三处" in feedback
+    assert "留给后来者的只有两处" in feedback
     # Each shared rule has one home.
     assert prompt.count("三分之一") == 1
     assert prompt.count("不是选择标准") == 1

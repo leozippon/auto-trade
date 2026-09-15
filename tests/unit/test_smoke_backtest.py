@@ -82,11 +82,7 @@ def _tool(
     snapshot = SnapshotBundle("snap", str(daily), str(daily))
     request = ResearchSessionRequest(
         experiment_id="exp",
-        session_id="s1",
-        session_index=1,
-        sessions_total=4,
         run_id="run_x",
-        start=None,
         snapshot=snapshot,
         decision_time=datetime(2025, 9, 30, 23, 59, 59, tzinfo=UTC),
         research_years=(ReplaySpan("Y1", "valid", DAYS[0], DAYS[-1], snapshot),),

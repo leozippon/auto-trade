@@ -111,11 +111,7 @@ class RecordFailedAttemptsTest(unittest.TestCase):
         snapshot = SnapshotBundle("snap", "decision", "replay")
         request = ResearchSessionRequest(
             experiment_id="exp",
-            session_id="s1",
-            session_index=1,
-            sessions_total=4,
             run_id="run_x",
-            start=None,
             snapshot=snapshot,
             decision_time=datetime(2025, 6, 30, 23, 59, 59, tzinfo=UTC),
             research_years=(ReplaySpan("Y1", "valid", "20210701", "20220630", snapshot),),

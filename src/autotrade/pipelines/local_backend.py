@@ -286,11 +286,12 @@ class LocalDailyEvaluationBackend:
 
 
 class DeterministicBaselineDeveloper:
-    """Replay the session's start unchanged on the research span, once per session.
+    """Replay the template unchanged on the research span and nominate it.
 
-    Nothing is modified and nothing is judged: every session but the last
-    continues from where it started, and the last nominates its replay for
-    the freeze gate.
+    Nothing is modified and nothing is judged: the arm's one session validates
+    the template twice on the full span (the freeze gate counts full-span
+    validations, the nominee included, and needs two) and nominates the
+    second replay for the gate.
     """
 
     def __init__(
@@ -317,40 +318,40 @@ class DeterministicBaselineDeveloper:
         shutil.copy2(self.baseline_strategy, self.baseline_root / "main.py")
 
     def __call__(self, request: ResearchSessionRequest) -> ResearchSessionResult:
-        start = request.start
-        source = start.path if start is not None else self.baseline_root
-        models = start.model_path if start is not None else None
-        _assert_skills_absent_from_formal(source, models)
-        revision = self.artifact_store.create_revision(source, models_path=models)
-        typed_revision = ArtifactRevision(
-            str(revision.revision_id),
-            Path(revision.output_path),
-            Path(revision.models_path) if revision.models_path is not None else None,
-        )
-        validation = self.evaluator.evaluate(
-            request.validation.request(
-                typed_revision, schedule=self.schedule, broker_profile=self.broker_profile
-            )
-        )
+        source = self.baseline_root
+        _assert_skills_absent_from_formal(source, None)
         # Step ids reach the Agent-facing projections, so they carry the same
         # opaque refs every agent-visible surface uses.
-        step_id = (
-            f"baseline_{self.ref_store.get_or_create('session', request.session_id)}__"
+        prefix = (
+            f"baseline_{self.ref_store.get_or_create('session', request.session_key)}__"
             f"{self.ref_store.get_or_create('run', request.run_id)}"
         )
-        last = request.session_index == request.sessions_total
-        return ResearchSessionResult(
-            f"deterministic_baseline_{request.run_id}",
-            (
+        steps: list[StepResult] = []
+        for index in (1, 2):
+            revision = self.artifact_store.create_revision(source, models_path=None)
+            typed_revision = ArtifactRevision(
+                str(revision.revision_id),
+                Path(revision.output_path),
+                Path(revision.models_path) if revision.models_path is not None else None,
+            )
+            validation = self.evaluator.evaluate(
+                request.validation.request(
+                    typed_revision, schedule=self.schedule, broker_profile=self.broker_profile
+                )
+            )
+            steps.append(
                 StepResult(
-                    step_id,
+                    f"{prefix}__valid_{index:03d}",
                     typed_revision.revision_id,
                     validation,
                     span=request.validation.label,
-                ),
-            ),
-            "freeze" if last else "continue",
-            node_id=step_id if last else None,
+                )
+            )
+        return ResearchSessionResult(
+            f"deterministic_baseline_{request.run_id}",
+            tuple(steps),
+            "freeze",
+            node_id=steps[-1].step_id,
             finish_reason="deterministic_baseline_replay_no_agent_improvement",
         )
 
@@ -990,7 +991,7 @@ class SessionValidations:
             revision.output_path,
             epoch_id=RESEARCH_STAGE,
             # The session id is opaqued like every other Agent-visible id.
-            session_ref=self.ref_store.get_or_create("session", self.request.session_id),
+            session_ref=self.ref_store.get_or_create("session", self.request.session_key),
             run_id=self.ref_store.get_or_create("run", self.request.run_id),
             result_name=result_name,
             revision_id=self.ref_store.get_or_create(
@@ -1867,7 +1868,7 @@ class BatchValidateTool(SessionTimeBudgetAware):
             self.backtest.tree.record_failed_attempt(
                 epoch_id=RESEARCH_STAGE,
                 session_ref=self.backtest.ref_store.get_or_create(
-                    "session", request.session_id
+                    "session", request.session_key
                 ),
                 run_id=self.backtest.ref_store.get_or_create("run", request.run_id),
                 result_name=result_name,
@@ -1915,7 +1916,7 @@ def batch_select_hint(
         return (
             f"{lead}read every row yourself (whole span AND sub_windows) — nothing "
             "is selected for you. The replay-year budget is spent, so no further "
-            "batch can run: write PRIOR.md and finish_session."
+            "batch can run: write any skills and finish_session."
         )
     return (
         f"{lead}read every row yourself (whole span AND sub_windows) — nothing "
@@ -2083,7 +2084,7 @@ class NullControlTool(SessionTimeBudgetAware):
                     end=span.end,
                     profile=self.backtest.broker_profile,
                     schedule=self.backtest.schedule,
-                    seed=null_control_seed(self.backtest.request.session_id, "frozen"),
+                    seed=null_control_seed(self.backtest.request.session_key, "frozen"),
                 )
             except SessionInterrupt:
                 raise
@@ -2274,8 +2275,8 @@ class LLMResearchDeveloper:
         from autotrade.agent.compact import ContextCompactor
         from autotrade.agent.prompts import SESSION_DEFAULT_INSTRUCTION, build_system_prompt
         from autotrade.agent.runner import (
+            AgentSessionBudgetExhausted,
             AgentSessionConfig,
-            AgentSessionDeadlineExceeded,
             AgentSessionRunner,
         )
         from autotrade.agent.subagent import (
@@ -2287,7 +2288,7 @@ class LLMResearchDeveloper:
         root = self.runtime_root / request.run_id
         if root.exists():
             raise FileExistsError(f"session runtime already exists: {request.run_id}")
-        session_ref = self.ref_store.get_or_create("session", request.session_id)
+        session_ref = self.ref_store.get_or_create("session", request.session_key)
         run_ref = self.ref_store.get_or_create("run", request.run_id)
         trace = AgentTraceWriter(
             agent_trace_path(self.artifact_store.root.parent, request.run_id),
@@ -2312,7 +2313,6 @@ class LLMResearchDeveloper:
             sandbox_spec = replace(
                 self.sandbox_spec, gpu_count=int(request.sandbox_gpu_count)
             )
-        start = request.start
         # RunManifest publishes two views of the same data: the host audit copy
         # under runtime/, and the allowlisted Agent-visible copy mounted at
         # /mnt/artifacts/run_manifest.json. It is also where every backtest
@@ -2327,13 +2327,10 @@ class LLMResearchDeveloper:
                 # Raw on the host manifest (issue reports link on it);
                 # RunManifest's Agent-visible view and build_experiment_facts
                 # both project it through the experiment reference store.
-                "fold_id": request.session_id,
+                "fold_id": request.session_key,
                 "run_id": request.run_id,
                 "session_key": request.session_key,
                 "kind": RESEARCH_STAGE,
-                "session": session_position_record(
-                    request.session_index, request.sessions_total
-                ),
                 "llm": {
                     "provider": str(getattr(self.llm, "provider", "")),
                     "model": str(getattr(self.llm, "model", "")),
@@ -2354,7 +2351,7 @@ class LLMResearchDeveloper:
                 "snapshots": {
                     "decision_input": {"snapshot_id": request.snapshot.snapshot_id}
                 },
-                "start": start_record(start.source_step_id if start is not None else None),
+                "start": start_record(),
                 "arm": arm_record(records),
                 "modification_constraints": request.modification_constraints.to_record(),
                 "acceptance_rules": dict(request.acceptance_rules),
@@ -2365,7 +2362,6 @@ class LLMResearchDeveloper:
                 "record_failed_attempts": request.record_failed_attempts,
                 "finalize_before_deadline_seconds": request.finalize_before_deadline_seconds,
                 "sandbox_spec": sandbox_spec.to_record(),
-                "prior_prompt": request.prior,
                 "exploration_directive": self.research_directive.strip(),
                 "budgets": {
                     "max_replay_years": request.max_replay_years,
@@ -2390,10 +2386,9 @@ class LLMResearchDeveloper:
         output_dir = workspace_root / "output"
         models_dir = workspace_root / "models"
         inputs_dir = workspace_root / "inputs"
-        prior_path = workspace_root / PRIOR_WORKSPACE_NAME
-        source = start.path if start is not None else self.baseline_strategy.parent
-        source_models = start.model_path if start is not None else None
-        if start is None and self.baseline_strategy.name != "main.py":
+        source = self.baseline_strategy.parent
+        source_models = None
+        if self.baseline_strategy.name != "main.py":
             raise ValueError(
                 "baseline strategy file must be named main.py for research sessions"
             )
@@ -2452,7 +2447,7 @@ class LLMResearchDeveloper:
         # artifacts, the backtest results and the step lineage, not just the
         # writable workspace.
         search_roots = SearchRoots(safe, paths=paths)
-        tree = self._install_step_tree(paths, start)
+        tree = self._install_step_tree(paths)
         sandbox: DockerSandbox | None = None
         try:
             if self.command_runner_factory is not None:
@@ -2471,11 +2466,6 @@ class LLMResearchDeveloper:
                 )
                 sandbox.start()
                 command_runner = PersistentCommandRunner(sandbox)
-            # PRIOR.md is the session handoff: seeded with the PRIOR the last
-            # session left and writable, so this session ends by leaving its
-            # own for the next one. The system prompt carries the seed.
-            prior_text = request.prior.strip()
-            prior_path.write_text(prior_text + ("\n" if prior_text else ""), encoding="utf-8")
             facts = self._session_facts(
                 request,
                 records,
@@ -2581,7 +2571,6 @@ class LLMResearchDeveloper:
                     session_ref=session_ref,
                     run_ref=run_ref,
                     freeze_gate=backtest.freeze_gate,
-                    last_session=request.session_index == request.sessions_total,
                     another_round_fits=lambda: another_batch_round_fits(backtest),
                     budget_status=lambda: session_budget_status(backtest),
                 )
@@ -2628,7 +2617,6 @@ class LLMResearchDeveloper:
                     self.schedule,
                     experiment_facts=facts,
                     step_tree_enabled=self.step_tree_enabled,
-                    prior_prompt=prior_text,
                     exploration_directive=self.research_directive,
                     session_directive=request.directive,
                 ),
@@ -2668,11 +2656,14 @@ class LLMResearchDeveloper:
                 result = runner.run(SESSION_DEFAULT_INSTRUCTION)
                 conversation_id = result.conversation_id
                 outcome, node_id, reason = _session_outcome(result.finish_value)
-            except AgentSessionDeadlineExceeded as exc:
-                # The session closed at its deadline after its wrap-up grace;
-                # the Validations it completed are still the arm's trials.
+                finish_reason = "llm_agent_finish_session"
+            except AgentSessionBudgetExhausted as exc:
+                # The session closed on an exhausted budget (its wrap-up grace
+                # or its model calls); the Validations it completed are still
+                # the arm's trials.
                 conversation_id = exc.conversation_id
                 outcome, node_id, reason = "deadline", None, ""
+                finish_reason = exc.finish_reason
             chmod_tree(inputs_dir, file_mode=0o644, dir_mode=0o755)
             final_skills = write_skills_index(
                 workspace_root / "skills", inputs_dir / "skills_index.json"
@@ -2698,7 +2689,6 @@ class LLMResearchDeveloper:
             )
             if self.step_tree_enabled and paths.steps.exists():
                 link_copytree(paths.steps, self.experiment_dir / "steps")
-            prior = prior_path.read_text(encoding="utf-8").strip() if prior_path.is_file() else ""
             collected = local.collect_artifacts(
                 self.artifact_store.root.parent / request.run_id
             )
@@ -2708,10 +2698,7 @@ class LLMResearchDeveloper:
                 outcome,
                 node_id=node_id,
                 reason=reason,
-                finish_reason=(
-                    "deadline_grace_exhausted" if outcome == "deadline" else "llm_agent_finish_session"
-                ),
-                prior=prior,
+                finish_reason=finish_reason,
                 # The nulls the session already drew, for the freeze to reuse.
                 null_controls=(
                     dict(null_control_tool.blocks)
@@ -2733,23 +2720,18 @@ class LLMResearchDeveloper:
             if sandbox is not None:
                 sandbox.stop()
 
-    def _install_step_tree(self, paths, start: FrozenArtifact | None) -> StepTree:
-        """Hand the experiment-level step tree to the session and mark the start node.
+    def _install_step_tree(self, paths) -> StepTree:
+        """Hand the experiment-level step tree to the session.
 
         With the step tree disabled the session still records its own run
-        nodes -- ``finish_session`` selects one of them -- but the lineage is not
-        inherited from earlier sessions and is not published back, so the
-        ablation removes the cross-session memory the knob is about.
+        nodes -- ``finish_session`` selects one of them -- but the lineage is
+        not published back, so the ablation removes the memory the knob is
+        about.
         """
         experiment_tree = self.experiment_dir / "steps"
         if self.step_tree_enabled and experiment_tree.exists():
             link_copytree(experiment_tree, paths.steps)
-        tree = StepTree(paths.steps)
-        if self.step_tree_enabled:
-            tree.set_position(
-                tree.position_for_step(start.source_step_id) if start else None
-            )
-        return tree
+        return StepTree(paths.steps)
 
     def _install_snapshot_view(
         self,
@@ -2791,7 +2773,7 @@ class LLMResearchDeveloper:
         install_agent_data_contract(
             local.paths,
             kind=RESEARCH_STAGE,
-            session_ref=self.ref_store.get_or_create("session", request.session_id),
+            session_ref=self.ref_store.get_or_create("session", request.session_key),
             views={"snapshot": (target, "/mnt/snapshot")},
         )
 
@@ -2826,64 +2808,18 @@ class LLMResearchDeveloper:
                     not any(models_dir.iterdir()) if models_dir.exists() else True
                 ),
             ),
-            **session_fact_blocks(records, paths.workspace),
+            **session_fact_blocks(paths.workspace),
         }
 
 
-def session_fact_blocks(
-    records: Sequence[Mapping[str, object]], workspace: str | Path
-) -> dict[str, object]:
-    """The facts a session gets beside the manifest projection: the earlier
-    sessions' outcomes, the workspace index and the forbidden list."""
+def session_fact_blocks(workspace: str | Path) -> dict[str, object]:
+    """The facts a session gets beside the manifest projection: the workspace
+    index and the forbidden list."""
 
     return {
-        "earlier_sessions": research_history(records),
         "workspace": session_workspace_map(workspace),
         "forbidden": SESSION_FORBIDDEN,
     }
-
-
-def research_history(records: Sequence[Mapping[str, object]]) -> list[dict[str, object]]:
-    """The earlier research sessions' outcomes, one bounded row each.
-
-    The system prompt carries them for the whole session and is never
-    compacted, so a row does not grow with how many candidates a session ran.
-    """
-
-    rows: list[dict[str, object]] = []
-    for record in research_records(records):
-        gate = record.get("freeze_gate")
-        dsr = gate.get("deflated_sharpe") if isinstance(gate, Mapping) else None
-        rows.append(
-            {
-                "session": record.get("session_id"),
-                "outcome": record.get("outcome"),
-                "reason": record.get("reason"),
-                "validations": len(record.get("steps") or ()),
-                "next_start_node_id": record.get("next_start_node_id"),
-                "freeze_gate": (
-                    {
-                        "nominated_step_id": record.get("nominated_step_id"),
-                        "passed": gate.get("passed"),
-                        "reasons": gate.get("reasons"),
-                        "deflated_sharpe_probability": (
-                            dsr.get("deflated_sharpe_probability")
-                            if isinstance(dsr, Mapping)
-                            else None
-                        ),
-                    }
-                    if isinstance(gate, Mapping)
-                    else None
-                ),
-            }
-        )
-    return rows
-
-
-def session_position_record(index: int, total: int) -> dict[str, object]:
-    """Which research session this is, and whether another follows it."""
-
-    return {"index": index, "of": total, "last": index == total}
 
 
 def research_geometry_record(
@@ -2913,20 +2849,17 @@ def research_geometry_record(
     }
 
 
-def start_record(node_id: str | None) -> dict[str, object]:
-    """Where the session's working copy was seeded from."""
+def start_record() -> dict[str, object]:
+    """Where the session's working copy was seeded from: the template."""
 
-    if node_id is None:
-        return {"kind": "template", "template_ref": "agent_output_template"}
-    return {"kind": "step_node", "node_id": node_id}
+    return {"kind": "template", "template_ref": "agent_output_template"}
 
 
 def arm_record(records: Sequence[Mapping[str, object]]) -> dict[str, object]:
-    """The arm's selection state when a session starts.
+    """The arm's selection state when the session starts.
 
-    Trials are the distinct revisions validated in earlier sessions, the pool
-    the freeze gate deflates over before this session adds its own; a session
-    only runs while nothing is frozen.
+    Trials are the distinct revisions the arm has validated, the pool the
+    freeze gate deflates over; a session only runs while nothing is frozen.
     """
 
     rows = [
@@ -2945,8 +2878,6 @@ def arm_record(records: Sequence[Mapping[str, object]]) -> dict[str, object]:
     }
 
 
-# The session's writable handoff file, at the workspace root.
-PRIOR_WORKSPACE_NAME = "PRIOR.md"
 # The read-only facts file of a session, under ``workspace/inputs``.
 SESSION_CONTEXT_NAME = "session_context.json"
 
@@ -2968,9 +2899,9 @@ def _session_outcome(finish: Mapping[str, object]) -> tuple[str, str | None, str
     node_id = str(finish.get("node_id") or "") or None
     if outcome == "freeze" and node_id is None:
         raise RuntimeError("research session Agent froze without naming a node")
-    if outcome not in ("continue", "freeze", "no_edge"):
+    if outcome not in ("freeze", "no_edge"):
         raise RuntimeError(f"research session Agent finished with {outcome!r}")
-    return outcome, node_id if outcome != "no_edge" else None, reason
+    return outcome, node_id if outcome == "freeze" else None, reason
 
 
 _WORKSPACE_REFS_DIR = "refs"
@@ -2986,7 +2917,6 @@ def session_workspace_map(workspace: str | Path) -> dict[str, str]:
         "session_context": f"inputs/{SESSION_CONTEXT_NAME}",
         "data_summary": "/mnt/artifacts/data_summary.json",
         "snapshot_in_sandbox": "/mnt/snapshot",
-        "prior": PRIOR_WORKSPACE_NAME,
     }
     if (Path(workspace) / _WORKSPACE_REFS_DIR).is_dir():
         mapping["refs"] = "refs/"

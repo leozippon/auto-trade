@@ -1,4 +1,4 @@
-"""End a research session: continue, freeze a nominee, or end the arm."""
+"""End the research session: freeze a nominee, or end the arm without one."""
 
 from __future__ import annotations
 
@@ -9,14 +9,14 @@ from autotrade.environment.step_tree import StepTree, node_in_session
 
 from .base import ToolError, ToolResult, ToolSpec
 
-SESSION_OUTCOMES = ("continue", "freeze", "no_edge")
+SESSION_OUTCOMES = ("freeze", "no_edge")
 # A voluntary freeze that leaves more than this share of the replay-year budget
 # unused must say why. It is a justification, not a block, and it lapses once
 # another batch cannot fit.
 EARLY_FINISH_BUDGET_FRACTION = 1 / 3
-# One ``reason`` serves every justification -- the evidence behind continuing
-# or ending the arm, and the account of an early freeze -- and a one-word
-# reason is none of them.
+# One ``reason`` serves every justification -- the evidence behind ending the
+# arm, and the account of an early freeze -- and a one-word reason is none of
+# them.
 REASON_MIN_CHARS = 40
 REASON_MAX_CHARS = 500
 
@@ -52,7 +52,7 @@ class SessionBudgetStatus:
 
 
 _DESCRIPTION = (
-    "End this research session with one outcome. "
+    "End the arm's research session with one outcome; no other session follows. "
     'outcome="freeze" nominates node_id, a complete Validation of this session '
     "that replayed the whole research period (span=full), and passes only the "
     "freeze gate the acceptance_rules fact states: at least two full-span "
@@ -63,19 +63,15 @@ _DESCRIPTION = (
     "freeze ends research for the whole arm, and the frozen artifact is then "
     "tested once on later data no session sees. node_id may be omitted only while "
     "this session has exactly one complete Validation. "
-    'outcome="continue" hands the next session its start: node_id, when given, '
-    "is a complete Validation of this session its working copy is seeded from; "
-    "without it the next session starts where this one started. It is refused in "
-    'the last session. outcome="no_edge" ends the arm without a deliverable and '
-    "takes no node_id; it needs at least one complete Validation of this session. "
-    f"continue and no_edge require reason ({REASON_MIN_CHARS}-{REASON_MAX_CHARS} "
-    "chars), the evidence behind the decision; a freeze needs it only when it "
-    "leaves more than a third of the replay-year budget while another batch still "
-    "fits. The reason is recorded on the session record the next session reads; "
-    "write PRIOR.md and any skills before this call. The call starts only after "
-    "every background sub-agent has finished, is refused while one is still "
-    "running, and once it succeeds the remaining tool calls of the turn are "
-    "cancelled."
+    'outcome="no_edge" ends the arm without a deliverable and takes no node_id; '
+    "it needs at least one complete Validation of this session and a reason "
+    f"({REASON_MIN_CHARS}-{REASON_MAX_CHARS} chars), the evidence behind the "
+    "decision; a freeze needs a reason only when it leaves more than a third of "
+    "the replay-year budget while another batch still fits. The reason is "
+    "recorded on the arm's session record; write any skills before this call. "
+    "The call starts only after every background sub-agent has finished, is "
+    "refused while one is still running, and once it succeeds the remaining tool "
+    "calls of the turn are cancelled."
 )
 
 
@@ -90,8 +86,8 @@ class FinishSessionTool:
                     "type": "string",
                     "enum": list(SESSION_OUTCOMES),
                     "description": (
-                        "freeze: nominate node_id for the freeze gate. continue: hand "
-                        "the next session a start. no_edge: end the arm."
+                        "freeze: nominate node_id for the freeze gate. no_edge: end "
+                        "the arm without a deliverable."
                     ),
                 },
                 "node_id": {"type": "string", "minLength": 1, "maxLength": 500},
@@ -100,9 +96,9 @@ class FinishSessionTool:
                     "minLength": REASON_MIN_CHARS,
                     "maxLength": REASON_MAX_CHARS,
                     "description": (
-                        "Required for continue and no_edge: the evidence read "
-                        "(neutralized excess and its yearly blocks, null percentile, "
-                        "deflated Sharpe with its trials) and what stays untested. "
+                        "Required for no_edge: the evidence read (neutralized excess "
+                        "and its yearly blocks, null percentile, deflated Sharpe with "
+                        "its trials) and what stays untested. "
                         "Required for a freeze only when it leaves more than a third "
                         f"of the replay-year budget. {REASON_MIN_CHARS}-"
                         f"{REASON_MAX_CHARS} characters."
@@ -122,7 +118,6 @@ class FinishSessionTool:
         session_ref: str,
         run_ref: str,
         freeze_gate: FreezeGate,
-        last_session: bool = False,
         another_round_fits: Callable[[], bool] | None = None,
         budget_status: Callable[[], SessionBudgetStatus] | None = None,
     ) -> None:
@@ -130,7 +125,6 @@ class FinishSessionTool:
         self.session_ref = session_ref
         self.run_ref = run_ref
         self._freeze_gate = freeze_gate
-        self.last_session = last_session
         self._another_round_fits = another_round_fits or (lambda: True)
         self._budget_status = budget_status
 
@@ -140,8 +134,6 @@ class FinishSessionTool:
         node_id = str(arguments.get("node_id") or "")
         if outcome == "freeze":
             return self._freeze(node_id, reason)
-        if outcome == "continue":
-            return self._continue(node_id, reason)
         return self._no_edge(node_id, reason)
 
     # ---- outcomes ----
@@ -167,13 +159,9 @@ class FinishSessionTool:
                     else "No node of this session passes it now. "
                 )
                 + "Nominate a passing node, validate what the gate lacks (a "
-                "full-span validation, a control), or finish with continue or no_edge.",
+                "full-span validation, a control), or finish with no_edge.",
                 error_type="freeze_gate_refused",
-                retry_hint=(
-                    'finish_session({"outcome": "continue", "reason": "<evidence>"})'
-                    if not self.last_session
-                    else 'finish_session({"outcome": "no_edge", "reason": "<evidence>"})'
-                ),
+                retry_hint='finish_session({"outcome": "no_edge", "reason": "<evidence>"})',
                 details={"freeze_gate": _gate_record(gate), "passing_nodes": passing},
             )
         budget = self._early_finish_budget(reason)
@@ -191,34 +179,6 @@ class FinishSessionTool:
                 "pipeline_outcome": (
                     f"The Pipeline freezes {node_id} as the arm's artifact; research "
                     "ends and no further session runs."
-                ),
-            },
-            finish=True,
-        )
-
-    def _continue(self, node_id: str, reason: str) -> ToolResult:
-        if self.last_session:
-            raise ToolError(
-                'finish_session: outcome="continue" hands the next session its start, '
-                "and this is the last research session; finish with freeze or no_edge",
-                error_type="last_session",
-                retry_hint='finish_session({"outcome": "no_edge", "reason": "<evidence>"})',
-            )
-        self._require_reason("continue", reason)
-        if node_id:
-            self._complete_node(node_id)
-        return ToolResult(
-            True,
-            value={
-                "status": "session_finished",
-                "outcome": "continue",
-                **({"node_id": node_id} if node_id else {}),
-                "reason": reason,
-                **self._budget_record(),
-                "pipeline_outcome": (
-                    f"The next session starts from {node_id}."
-                    if node_id
-                    else "The next session starts where this session started."
                 ),
             },
             finish=True,
@@ -248,8 +208,7 @@ class FinishSessionTool:
                 "candidates_evaluated": len(candidates),
                 **self._budget_record(),
                 "pipeline_outcome": (
-                    "The arm ends without a deliverable: no further session and no "
-                    "forward test."
+                    "The arm ends without a deliverable: no forward test."
                 ),
             },
             finish=True,
@@ -262,8 +221,7 @@ class FinishSessionTool:
             raise ToolError(
                 f'finish_session: outcome="{outcome}" requires reason (between '
                 f"{REASON_MIN_CHARS} and {REASON_MAX_CHARS} chars) citing the "
-                "evidence behind it; it is recorded on the session record the next "
-                "session reads",
+                "evidence behind it; it is recorded on the arm's session record",
                 retry_hint=f'finish_session({{"outcome": "{outcome}", "reason": "<evidence>"}})',
             )
 
@@ -294,10 +252,7 @@ class FinishSessionTool:
         except ValueError as exc:
             raise ToolError(f"finish_session: {node_id} is not a Step node") from exc
         if not node_in_session(node, session_ref=self.session_ref, run_id=self.run_ref):
-            raise ToolError(
-                f"finish_session: {node_id} is not a Step of this session; nodes of "
-                "earlier sessions are evidence only"
-            )
+            raise ToolError(f"finish_session: {node_id} is not a Step of this session")
         if not node.get("complete_validation") or not node.get("revision_id"):
             raise ToolError(f"finish_session: {node_id} is not a complete Validation")
         if not (self.tree.node_output_dir(node_id) / "main.py").is_file():

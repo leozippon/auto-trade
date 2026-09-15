@@ -11,7 +11,11 @@ import pytest
 from autotrade.agent.compact import ContextCompactionConfig, ContextCompactor
 from autotrade.agent.prompts import WRAP_UP_PROMPT
 from autotrade.agent.subagent import SubAgentEngine
-from autotrade.agent.runner import AgentSessionConfig, AgentSessionRunner
+from autotrade.agent.runner import (
+    AgentSessionBudgetExhausted,
+    AgentSessionConfig,
+    AgentSessionRunner,
+)
 from autotrade.environment.artifacts import FilesystemArtifactStore
 from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.identity import AgentRefStore
@@ -122,11 +126,7 @@ def _research_request() -> ResearchSessionRequest:
     snapshot = SnapshotBundle("snapshot", "decision", "replay")
     return ResearchSessionRequest(
         experiment_id="exp",
-        session_id="s1",
-        session_index=1,
-        sessions_total=4,
         run_id="run_budget",
-        start=None,
         snapshot=snapshot,
         decision_time=moment,
         research_years=(ReplaySpan("Y1", "valid", "20240701", "20250630", snapshot),),
@@ -153,7 +153,7 @@ def test_backtest_failure_past_wall_deadline_keeps_llm_repair_budget(
     )
     tree = StepTree(tmp_path / "steps")
     ref_store = AgentRefStore(tmp_path / "experiment")
-    fold_ref = ref_store.get_or_create("session", request.session_id)
+    fold_ref = ref_store.get_or_create("session", request.session_key)
     run_ref = ref_store.get_or_create("run", request.run_id)
 
     class FailThenPassEvaluator:
@@ -553,7 +553,7 @@ def test_reserve_without_complete_node_keeps_research_and_compaction_available()
         time_budget=time_budget,
     )
 
-    with pytest.raises(RuntimeError, match="call budget"):
+    with pytest.raises(AgentSessionBudgetExhausted, match="call budget"):
         runner.run("research")
 
     assert shell.calls == 2

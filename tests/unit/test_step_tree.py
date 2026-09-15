@@ -225,9 +225,8 @@ RESEARCH_MANIFEST = {
     "experiment_id": "exp",
     "run_id": "run_x",
     "epoch_id": "research",
-    "fold_id": "s2",
+    "fold_id": "research",
     "kind": "research",
-    "session": {"index": 2, "of": 4, "last": False},
     "research": {
         "decision_time": "2025-06-30T23:59:59+08:00",
         "input_window": "20230701..20250630",
@@ -277,9 +276,8 @@ class SessionFactsTest(unittest.TestCase):
 
         self.assertIn("当前实验事实", prompt)
         self.assertEqual(facts["research_geometry"], RESEARCH_MANIFEST["research"])
-        self.assertEqual(facts["identity"]["session"], {"index": 2, "of": 4, "last": False})
+        self.assertNotIn("session", facts["identity"])
         self.assertTrue(facts["identity"]["session_ref"].startswith("session_ref_"))
-        self.assertNotIn('"s2"', prompt)
         self.assertEqual(facts["arm"]["trials_to_date"], 5)
         self.assertIs(facts["arm"]["frozen"], False)
         self.assertEqual(facts["budgets"]["max_replay_years"], 24)
@@ -294,7 +292,7 @@ class SessionFactsTest(unittest.TestCase):
         )
         self.assertIn("freeze_gate", facts["artifact_contract"]["acceptance_rules"])
         self.assertIn("20210701..20250630", facts["research_scope"]["research"])
-        self.assertIn("session 2 of 4", facts["research_scope"]["research"])
+        self.assertIn("one research session", facts["research_scope"]["research"])
         # The periods after research end exist and are sealed: no date of them.
         for later in ("2025-07", "202507", "2026", "20260630", "20260930"):
             self.assertNotIn(later, prompt)
@@ -361,11 +359,11 @@ class SessionFactsTest(unittest.TestCase):
             self.assertNotIn("experiment_parameters", public)
             self.assertNotIn("heldout_replay", public["snapshots"])
             self.assertEqual(public["backtest_summaries"], [{"mode": "valid", "span": "Y2", "total_return": 0.1}])
-            for key in ("research", "session", "start", "arm", "budgets"):
+            for key in ("research", "start", "arm", "budgets"):
                 self.assertEqual(public[key], RESEARCH_MANIFEST[key], key)
             # The raw session id never crosses, only its opaque ref.
             self.assertTrue(str(public["session_ref"]).startswith("session_ref_"))
-            self.assertEqual(host["fold_id"], "s2")
+            self.assertEqual(host["fold_id"], "research")
             self.assertEqual(host["experiment_parameters"]["heldout_end"], "20260930")
 
 
@@ -413,13 +411,11 @@ class PromptCompositionTest(unittest.TestCase):
     def test_the_static_contract_is_byte_identical_across_two_different_sessions(self) -> None:
         first = build_system_prompt(
             experiment_facts={"identity": {"run_id": "run_1"}},
-            prior_prompt="方向 A",
             exploration_directive="长期假设 A",
             session_directive="当前假设 A",
         )
         second = build_system_prompt(
             experiment_facts={"identity": {"run_id": "run_2"}},
-            prior_prompt="方向 B",
             exploration_directive="长期假设 B",
             session_directive="当前假设 B",
         )
@@ -444,10 +440,3 @@ class PromptCompositionTest(unittest.TestCase):
             first.index(self.MARKER),
         ]
         self.assertEqual(order, sorted(order))
-
-    def test_the_prior_rides_in_its_own_section_not_in_the_facts_blob(self) -> None:
-        prompt = build_system_prompt(prior_prompt="偏好小步修改")
-        prefix, dynamic = prompt.split(self.MARKER, 1)
-        self.assertIn("偏好小步修改", dynamic)
-        self.assertNotIn("偏好小步修改", prefix)
-        self.assertIn("上一会话的交接", dynamic)

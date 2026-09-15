@@ -82,7 +82,7 @@ def _experiment(
                 "strategy_period": "day",
                 "inference_time": "08:30",
                 "initial_cash": 100_000,
-                "max_replay_years_per_session": max_replay_years,
+                "max_replay_years": max_replay_years,
             }
         ),
         encoding="utf-8",
@@ -472,7 +472,7 @@ def test_model_roles_share_one_session_call_budget():
 
 
 def test_interactive_runner_publishes_current_session_timing(tmp_path: Path):
-    session_key = "s1"
+    session_key = "research"
     control_path = tmp_path / "control.json"
     status_path = tmp_path / "status.json"
     ledger = ExperimentLedger(tmp_path / "ledger.jsonl")
@@ -503,7 +503,7 @@ def test_interactive_runner_publishes_current_session_timing(tmp_path: Path):
 
     runner = InteractiveExperimentRunner(
         experiment_id="demo",
-        sessions=(PlannedSession(session_key, "research", 1),),
+        sessions=(PlannedSession(session_key, "research"),),
         execute_session=execute,
         ledger=ledger,
         control_path=control_path,
@@ -528,7 +528,7 @@ def test_session_boundary_restart_keeps_the_finished_session_and_stops_the_next(
     tmp_path: Path,
 ):
     """A deferred restart costs no work: the session in flight is recorded,
-    the next one is not started, and the entrypoint is told to re-exec."""
+    the forward replay is not started, and the entrypoint is told to re-exec."""
 
     control_path = tmp_path / "control.json"
     status_path = tmp_path / "status.json"
@@ -557,8 +557,8 @@ def test_session_boundary_restart_keeps_the_finished_session_and_stops_the_next(
     runner = InteractiveExperimentRunner(
         experiment_id="demo",
         sessions=(
-            PlannedSession("s1", "research", 1),
-            PlannedSession("s2", "research", 2),
+            PlannedSession("research", "research"),
+            PlannedSession("forward", "forward"),
         ),
         execute_session=execute,
         ledger=ledger,
@@ -571,8 +571,8 @@ def test_session_boundary_restart_keeps_the_finished_session_and_stops_the_next(
     result = runner.run()
 
     assert result == {"status": "restart", "sessions_run": 1}
-    assert ran == ["s1"]
-    assert [row["session_key"] for row in ledger.read()] == ["s1"]
+    assert ran == ["research"]
+    assert [row["session_key"] for row in ledger.read()] == ["research"]
     # One-shot, and the console sees one worker coming up rather than a stop.
     assert read_control(control_path).restart_pending is False
     assert read_status(status_path)["state"] == "launching"
@@ -595,7 +595,7 @@ def test_session_boundary_restart_is_taken_before_the_next_session_starts(
 
     runner = InteractiveExperimentRunner(
         experiment_id="demo",
-        sessions=(PlannedSession("s1", "research", 1),),
+        sessions=(PlannedSession("research", "research"),),
         execute_session=execute,
         ledger=ExperimentLedger(tmp_path / "ledger.jsonl"),
         control_path=control_path,
@@ -789,7 +789,7 @@ def test_worker_params_reject_unknown_keys_fold_era_keys_and_a_bad_geometry(tmp_
     params = json.loads(path.read_text(encoding="utf-8"))
     options = load_worker_options(experiment, repo_root=repo)
     assert options.rolling.geometry.research_end == "20250630"
-    assert options.rolling.research_sessions == 4
+    assert options.rolling.max_research_minutes == 2400
     for key, value in (
         ("typo_budget", 3),
         ("development_first_period", "2022"),
@@ -804,7 +804,7 @@ def test_worker_params_reject_unknown_keys_fold_era_keys_and_a_bad_geometry(tmp_
         ("research_start", "20210101", "July 1"),
         ("forward_end", "20261231", "twelve months after research"),
         ("research_end", 20250630, "YYYYMMDD string"),
-        ("research_sessions", 0, "research_sessions must be a positive integer"),
+        ("max_research_minutes", 0, "max_research_minutes must be a positive integer"),
     ):
         path.write_text(json.dumps({**params, key: value}), encoding="utf-8")
         with pytest.raises(ValueError, match=message):
@@ -920,11 +920,11 @@ def test_a_cpu_only_allocation_survives_the_control_round_trip(tmp_path: Path) -
         control,
         ControlState(
             mode="auto",
-            gpu_counts={"s1": 0, "s2": 2},
+            gpu_counts={"research": 0},
         ),
     )
     state = read_control(control)
-    assert state.gpu_counts == {"s1": 0, "s2": 2}
+    assert state.gpu_counts == {"research": 0}
 
 
 
@@ -934,7 +934,6 @@ def test_a_cpu_only_allocation_survives_the_control_round_trip(tmp_path: Path) -
 #: the guard that actually protects the run lives in the worker, and this is
 #: where it is proved to still be there.
 _REMOVED_BROWSER_BOUNDS = (
-    ("research_sessions", 0, "research_sessions must be a positive integer"),
     ("window_months", 0, "window_months must be a positive integer"),
     ("daily_window_months", 0, "daily_window_months must be a positive integer"),
     (
@@ -963,10 +962,10 @@ _REMOVED_BROWSER_BOUNDS = (
     ),
     ("screen_min_price", -1.0, "screen_min_price must be a non-negative finite number"),
     ("screen_max_price", -1.0, "screen_max_price must be a non-negative finite number"),
-    ("max_session_minutes", 0, "max_session_minutes must be a positive integer"),
+    ("max_research_minutes", 0, "max_research_minutes must be a positive integer"),
     ("max_drawdown", 1.5, "max_drawdown must be between 0.0 and 1.0"),
     ("max_drawdown", -0.5, "max_drawdown must be a non-negative finite number"),
-    ("max_replay_years_per_session", 0, "max_replay_years_per_session must be a positive integer"),
+    ("max_replay_years", 0, "max_replay_years must be a positive integer"),
     ("max_llm_calls", 0, "max_llm_calls must be a positive integer"),
     ("initial_cash", 0.0, "initial_cash must be a positive finite number"),
     (
@@ -1110,8 +1109,8 @@ def test_preflight_narrows_exactly_three_things_and_nothing_else(
     # And every parameter check still runs in pre-flight mode.
     with pytest.raises(ValueError, match="gpu_count must be between 0 and 4"):
         resolve(True, gpu_count=9)
-    with pytest.raises(ValueError, match="research_sessions must be a positive integer"):
-        resolve(True, research_sessions=-1)
+    with pytest.raises(ValueError, match="max_research_minutes must be a positive integer"):
+        resolve(True, max_research_minutes=-1)
 
 
 
