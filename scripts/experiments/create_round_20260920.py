@@ -97,7 +97,26 @@ EVENTS_DATASETS = [
 ]
 TEXT_DATASETS = ["report_rc"]
 
-ARMS: dict[str, dict[str, object]] = {}
+ARMS: dict[str, dict[str, object]] = {
+    # The one GPU arm. Its pack was written from probes that read no row after
+    # research end (logs/notes/review_20260915/NA1_next_arm_research.md), so the
+    # forward period is unseen for this direction; the pack discloses that its
+    # research-period evidence sits below the Alpha158 + LightGBM ranker.
+    "gru_ranker_20260920": {
+        "workspace_reference": "configs/workspace_refs/gru_ranker_20260920",
+        # fit trains on a card in every replay: the starter has no CPU path.
+        "gpu_count": 1,
+        "research_directive": (
+            "本臂是固定方向的臂：在 GPU 上训练的 GRU 日频量价序列排序器。先读 refs/README.md 与 "
+            "refs/families.md——主候选、允许的变体轴、报告用对照与本臂终止规则只以 families.md 为准。"
+            "从 refs/starter 起步（fit 内按季度在滚动的最近三年上重训、固定种子、每周复核 15 只、"
+            "每次最多换 2 只），先 smoke_backtest，再做完整研究期验证。策略必须在 CUDA 上训练和打分，"
+            "不写 CPU 路径。Alpha158 + LightGBM 排序器是必须同批汇报的对照，不是冻结门槛；方向研究里"
+            "本家族的研究期读数低于它，这是已披露的起点。没有候选证明边际时按 families.md 以 "
+            "no_edge 结束，不换家族。"
+        ),
+    },
+}
 
 ROUND = Round(
     arms=ARMS,

@@ -164,6 +164,21 @@ def test_every_arm_directive_is_usable(round_name: str, experiment_id: str) -> N
     assert not CALENDAR_YEAR.search(directive), (experiment_id, CALENDAR_YEAR.findall(directive))
 
 
+@pytest.mark.parametrize(("round_name", "experiment_id"), ARMS)
+def test_an_arm_requests_a_gpu_exactly_when_its_starter_needs_cuda(
+    round_name: str, experiment_id: str
+) -> None:
+    """A starter with no CPU path fails every replay of an arm created without
+    a card, and a card requested for a starter that never touches CUDA is taken
+    from the shared pool for nothing."""
+    params = ROUNDS[round_name].request_params(experiment_id)
+    starter = REPO_ROOT / str(params.get("workspace_reference") or "") / "starter"
+    needs_cuda = starter.is_dir() and any(
+        "torch.cuda" in path.read_text(encoding="utf-8") for path in starter.rglob("*.py")
+    )
+    assert (int(params["gpu_count"]) >= 1) is needs_cuda, (experiment_id, params["gpu_count"])
+
+
 @pytest.mark.parametrize("round_name", ROUND_IDS)
 def test_the_selection_matches_the_prebuilt_seed(round_name: str) -> None:
     """The round and the real tree its arms hardlink from agree, byte for byte.
